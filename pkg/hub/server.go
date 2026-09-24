@@ -2604,12 +2604,17 @@ func (s *Server) ExternalBearerSnapshotMetrics() *ExternalBearerSnapshotMetrics 
 	return s.externalBearerSnapshot
 }
 
-// SetGEExchangeMetrics wires the GE exchange outcome counter (design §4.7:
-// scion_hub_ge_exchange_requests_total). Unlike ExternalBearerMetrics above,
-// handleGEGoogleExchange reads this directly off *Server (it is a Server
-// method, not a captured-by-value closure), so a plain field set here — the
-// same convention SetDBMetrics/SetDispatchMetrics/SetGCPTokenMetrics use —
-// is read correctly regardless of when this is called relative to New().
+// SetGEExchangeMetrics wires the GE exchange outcome counter (the
+// ge_exchange.requests counter; see external_bearer_metrics.go for the
+// closed label set and the real exported metric name). Unlike
+// ExternalBearerMetrics above, handleGEGoogleExchange reads this directly
+// off *Server (it is a Server method, not a captured-by-value closure), so a
+// plain field set here — the same convention SetDBMetrics/SetDispatchMetrics/
+// SetGCPTokenMetrics use — needs no atomic indirection. It is still read
+// without a lock while this setter writes under s.mu, so — like
+// gcpTokenMetrics — callers must call this before Start, not concurrently
+// with request handling; cmd/server_foreground.go does this before
+// hubSrv.Start.
 func (s *Server) SetGEExchangeMetrics(m GEExchangeMetricsRecorder) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

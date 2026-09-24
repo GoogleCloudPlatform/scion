@@ -19,6 +19,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -89,9 +91,10 @@ func withCacheNowFunc(now func() time.Time) CacheOption {
 	return func(c *cachingGoogleCredentialValidator) { c.now = now }
 }
 
-// WithCacheMetrics wires the cache-outcome counter (design §4.7:
-// scion_hub_google_validator_cache_total). nil (the default) disables
-// recording. See SetMetrics for wiring this after construction, which
+// WithCacheMetrics wires the cache-outcome counter (the google_validator_cache
+// counter; see external_bearer_metrics.go for the closed label set and the
+// real exported metric name). nil (the default) disables recording. See
+// SetMetrics for wiring this after construction, which
 // production needs: server.go's New() builds this decorator before an OTel
 // MeterProvider exists (cmd/server_foreground.go builds one only once the
 // server's Hub ID is known).
@@ -137,10 +140,17 @@ func (c *cachingGoogleCredentialValidator) SetMetrics(m GoogleValidatorCacheMetr
 	c.metrics.Store(&m)
 }
 
-// recordCache is nil-safe: SetMetrics/WithCacheMetrics is never called (most
-// tests, and any production server before its OTel exporter is wired), or is
-// called with a nil recorder (defensive).
+// recordCache is nil-safe against SetMetrics/WithCacheMetrics never having
+// been called (true only for a decorator not wired by server.go's New(),
+// e.g. most hand-built decorators in tests) or having been called with a nil
+// recorder (defensive). It also enforces the closed label set at this
+// boundary: an invalid result is dropped (with a warning naming only the
+// label and its type, never the value) rather than reaching any recorder.
 func (c *cachingGoogleCredentialValidator) recordCache(result GoogleValidatorCacheResult) {
+	if !result.valid() {
+		slog.Warn("google credential cache: dropping metric record: invalid label", "label", "result", "type", fmt.Sprintf("%T", result))
+		return
+	}
 	rec := c.metrics.Load()
 	if rec == nil || *rec == nil {
 		return

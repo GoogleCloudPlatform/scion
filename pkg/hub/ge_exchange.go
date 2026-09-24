@@ -347,9 +347,18 @@ func (s *Server) handleGEGoogleExchange(w http.ResponseWriter, r *http.Request) 
 }
 
 // recordGEExchange records one exchange-endpoint outcome, nil-safe against
-// s.geExchangeMetrics never having been wired (most tests, and any
-// production server before its OTel exporter is set via SetGEExchangeMetrics).
+// s.geExchangeMetrics never having been wired — true only for a Server not
+// built through New() (most hand-built `&Server{}` tests in this package);
+// New() always wires the in-process default (design §4.7's snapshot),
+// optionally replaced later by SetGEExchangeMetrics with an OTel-backed one.
+// It also enforces the closed label set at this boundary: an invalid outcome
+// is dropped (with a warning naming only the label and its type, never the
+// value) rather than reaching any recorder.
 func (s *Server) recordGEExchange(outcome GEExchangeOutcome) {
+	if !outcome.valid() {
+		slog.Warn("ge exchange: dropping metric record: invalid label", "label", "outcome", "type", fmt.Sprintf("%T", outcome))
+		return
+	}
 	if s.geExchangeMetrics == nil {
 		return
 	}

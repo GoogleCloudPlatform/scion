@@ -158,7 +158,7 @@ func classifyExternalBearer(token string) externalBearerKind {
 }
 
 // metricLabel maps the internal classification enum to the closed-set label
-// value scion_hub_external_bearer_total's "kind" uses (design §4.7).
+// value the external_bearer counter's "kind" uses (external_bearer_metrics.go).
 // externalBearerNotApplicable maps to ExternalBearerKindUnknown: a request
 // that classifies as not-applicable never becomes a candidate id_token/
 // access_token as far as the metric is concerned.
@@ -191,8 +191,24 @@ type externalBearerAttempt struct {
 // recordExternalBearer records one external-bearer outcome, nil-safe against
 // every disabled state: cfg.ExternalBearerMetrics itself nil (never wired,
 // e.g. most hand-built AuthConfigs in tests), the pointer wired but never
-// Store()d, or Store()d with a nil interface (defensive).
+// Store()d, or Store()d with a nil interface (defensive). It also enforces
+// the closed label set at this single boundary: a label that fails its
+// valid() check is dropped (with a warning naming only the label and its
+// type, never the value) rather than reaching any recorder, so "no other
+// value can be emitted" holds even for a future call site that builds one
+// from an untyped string literal instead of a named constant.
 func recordExternalBearer(cfg AuthConfig, attempt externalBearerAttempt, outcome ExternalBearerOutcome) {
+	switch {
+	case !attempt.kind.valid():
+		slog.Warn("external bearer: dropping metric record: invalid label", "label", "kind", "type", fmt.Sprintf("%T", attempt.kind))
+		return
+	case !attempt.principal.valid():
+		slog.Warn("external bearer: dropping metric record: invalid label", "label", "principal", "type", fmt.Sprintf("%T", attempt.principal))
+		return
+	case !outcome.valid():
+		slog.Warn("external bearer: dropping metric record: invalid label", "label", "outcome", "type", fmt.Sprintf("%T", outcome))
+		return
+	}
 	if cfg.ExternalBearerMetrics == nil {
 		return
 	}

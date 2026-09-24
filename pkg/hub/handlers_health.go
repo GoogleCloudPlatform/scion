@@ -283,11 +283,11 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if s.gcpTokenMetrics != nil {
 		combined.GCP = s.gcpTokenMetrics.GetSnapshot()
 	}
-	// Unlike Broker/GCP above, externalBearerSnapshot is always constructed
-	// by New() regardless of feature configuration (design §4.7): the
-	// exchange-deletion soak gate must not depend on GCP export being
-	// configured, so this section is always present on a Server built
-	// through New().
+	// Like gcpTokenMetrics above (and unlike Broker, which only exists when
+	// broker auth is enabled), externalBearerSnapshot is always constructed
+	// by New() (design §4.7): the exchange-deletion soak gate must not
+	// depend on GCP export being configured, so this section is always
+	// present on a Server built through New().
 	if s.externalBearerSnapshot != nil {
 		combined.ExternalBearer = s.externalBearerSnapshot.GetSnapshot()
 	}

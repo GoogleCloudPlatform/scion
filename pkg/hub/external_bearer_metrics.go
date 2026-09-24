@@ -28,13 +28,14 @@ package hub
 // for the in-process /metrics section that exists regardless of GCP export
 // configuration.
 //
-// Recorders are wired into Server (see server.go's New, and the Set*Metrics
-// methods) the same way every other Hub OTel-backed recorder is: a plain,
-// nil-safe interface field or method, upgraded from "disabled" to a real
-// exporter once a MeterProvider exists (cmd/server_foreground.go). A nil
-// recorder — or a nil value inside one, where the field is an
-// *atomic.Pointer — only disables counting; it never changes what the
-// underlying path does.
+// Recorders are wired into Server (see server.go's New) with a default that
+// is never disabled: New unconditionally constructs an
+// ExternalBearerSnapshotMetrics and wires it into all three slots, so
+// counting works even with no GCP export configured. The Set*Metrics methods
+// later swap in an OTel-backed recorder (cmd/server_foreground.go) that
+// dual-writes into that same in-process instance. A nil recorder — or a nil
+// value inside one, where the field is an *atomic.Pointer — only disables
+// counting; it never changes what the underlying path does.
 
 // ExternalBearerKind is the "kind" label on the external_bearer counter: the
 // shape of the presented credential, as classified by classifyExternalBearer.
@@ -61,14 +62,16 @@ func externalBearerKinds() []ExternalBearerKind {
 }
 
 // valid reports whether k is one of the named constants above — the closed
-// set every ExternalBearerKind value must belong to.
+// set every ExternalBearerKind value must belong to. recordExternalBearer
+// checks this before handing k to any recorder (design §4.7): an invalid
+// value is dropped, not emitted.
 func (k ExternalBearerKind) valid() bool {
-	for _, v := range externalBearerKinds() {
-		if v == k {
-			return true
-		}
+	switch k {
+	case ExternalBearerKindIDToken, ExternalBearerKindAccessToken, ExternalBearerKindUnknown:
+		return true
+	default:
+		return false
 	}
-	return false
 }
 
 // ExternalBearerPrincipal is the "principal" label on the external_bearer
@@ -94,13 +97,14 @@ func externalBearerPrincipals() []ExternalBearerPrincipal {
 }
 
 // valid reports whether p is one of the named constants above.
+// recordExternalBearer checks this before handing p to any recorder.
 func (p ExternalBearerPrincipal) valid() bool {
-	for _, v := range externalBearerPrincipals() {
-		if v == p {
-			return true
-		}
+	switch p {
+	case ExternalBearerPrincipalUser, ExternalBearerPrincipalServiceAccount, ExternalBearerPrincipalUnknown:
+		return true
+	default:
+		return false
 	}
-	return false
 }
 
 // ExternalBearerOutcome is the "outcome" label on the external_bearer
@@ -159,13 +163,16 @@ func externalBearerOutcomes() []ExternalBearerOutcome {
 }
 
 // valid reports whether o is one of the named constants above.
+// recordExternalBearer checks this before handing o to any recorder.
 func (o ExternalBearerOutcome) valid() bool {
-	for _, v := range externalBearerOutcomes() {
-		if v == o {
-			return true
-		}
+	switch o {
+	case ExternalBearerOutcomeOK, ExternalBearerOutcomeNotApplicable, ExternalBearerOutcomeRejected,
+		ExternalBearerOutcomeRateLimited, ExternalBearerOutcomeUpstreamError, ExternalBearerOutcomeSuspended,
+		ExternalBearerOutcomeForbidden, ExternalBearerOutcomeStoreError:
+		return true
+	default:
+		return false
 	}
-	return false
 }
 
 // ExternalBearerMetricsRecorder records the outcome of every external-bearer
@@ -205,14 +212,15 @@ func googleValidatorCacheResults() []GoogleValidatorCacheResult {
 	}
 }
 
-// valid reports whether r is one of the named constants above.
+// valid reports whether r is one of the named constants above. recordCache
+// (google_credential_cache.go) checks this before handing r to any recorder.
 func (r GoogleValidatorCacheResult) valid() bool {
-	for _, v := range googleValidatorCacheResults() {
-		if v == r {
-			return true
-		}
+	switch r {
+	case GoogleValidatorCacheHit, GoogleValidatorCacheMiss, GoogleValidatorCacheNegativeHit:
+		return true
+	default:
+		return false
 	}
-	return false
 }
 
 // GoogleValidatorCacheMetricsRecorder records a single cache lookup outcome.
@@ -265,13 +273,17 @@ func geExchangeOutcomes() []GEExchangeOutcome {
 }
 
 // valid reports whether o is one of the named constants above.
+// recordGEExchange (ge_exchange.go) checks this before handing o to any
+// recorder.
 func (o GEExchangeOutcome) valid() bool {
-	for _, v := range geExchangeOutcomes() {
-		if v == o {
-			return true
-		}
+	switch o {
+	case GEExchangeOutcomeOK, GEExchangeOutcomeRateLimited, GEExchangeOutcomeNotConfigured,
+		GEExchangeOutcomeInvalidRequest, GEExchangeOutcomeBadRequest, GEExchangeOutcomeInvalidCredential,
+		GEExchangeOutcomeForbidden, GEExchangeOutcomeExchangeFailed:
+		return true
+	default:
+		return false
 	}
-	return false
 }
 
 // GEExchangeMetricsRecorder records a single exchange request's outcome.

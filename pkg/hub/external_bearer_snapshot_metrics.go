@@ -14,7 +14,10 @@
 
 package hub
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 // ExternalBearerSnapshotMetrics is a dependency-free, in-process recorder for
 // the three design §4.7 counters, following the same shape as
@@ -30,15 +33,22 @@ import "sync"
 // (cmd/server_foreground.go), so both write to the same counts: OTel export
 // is additive, never a replacement, for this snapshot.
 type ExternalBearerSnapshotMetrics struct {
+	// since is this recorder's construction time, reported on every snapshot
+	// so a reader can tell a low/zero count from a recent restart apart from
+	// genuinely low traffic (design §4.7: the snapshot is per-process and
+	// resets on restart).
+	since          time.Time
 	mu             sync.Mutex
 	externalBearer map[ExternalBearerOutcome]int64
 	cache          map[GoogleValidatorCacheResult]int64
 	exchange       map[GEExchangeOutcome]int64
 }
 
-// NewExternalBearerSnapshotMetrics creates an empty recorder.
+// NewExternalBearerSnapshotMetrics creates an empty recorder, recording its
+// construction time as Since.
 func NewExternalBearerSnapshotMetrics() *ExternalBearerSnapshotMetrics {
 	return &ExternalBearerSnapshotMetrics{
+		since:          time.Now().UTC(),
 		externalBearer: make(map[ExternalBearerOutcome]int64),
 		cache:          make(map[GoogleValidatorCacheResult]int64),
 		exchange:       make(map[GEExchangeOutcome]int64),
@@ -76,9 +86,13 @@ func (m *ExternalBearerSnapshotMetrics) RecordGEExchangeRequest(outcome GEExchan
 // Every key is the full closed label set (external_bearer_metrics.go),
 // present at zero if never recorded, so the JSON shape is deterministic and
 // never depends on which outcomes happened to occur. This snapshot is
-// per-process and resets on restart — a soak check must sample every
-// replica over the full window, not read a single sample once.
+// per-process and resets on restart — Since (RFC3339 UTC) is when this
+// process's counts started, so a soak check sampling multiple replicas over
+// a window can tell a genuine low count apart from one that just restarted;
+// a soak check must still sample every replica over the full window, not
+// read a single sample once.
 type ExternalBearerMetricsSnapshot struct {
+	Since                     string           `json:"since"`
 	ExternalBearerTotal       map[string]int64 `json:"externalBearerTotal"`
 	GoogleValidatorCacheTotal map[string]int64 `json:"googleValidatorCacheTotal"`
 	GEExchangeRequestsTotal   map[string]int64 `json:"geExchangeRequestsTotal"`
@@ -90,6 +104,7 @@ func (m *ExternalBearerSnapshotMetrics) GetSnapshot() *ExternalBearerMetricsSnap
 	defer m.mu.Unlock()
 
 	snap := &ExternalBearerMetricsSnapshot{
+		Since:                     m.since.Format(time.RFC3339),
 		ExternalBearerTotal:       make(map[string]int64, len(externalBearerOutcomes())),
 		GoogleValidatorCacheTotal: make(map[string]int64, len(googleValidatorCacheResults())),
 		GEExchangeRequestsTotal:   make(map[string]int64, len(geExchangeOutcomes())),
