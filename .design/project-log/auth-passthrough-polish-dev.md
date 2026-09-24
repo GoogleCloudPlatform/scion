@@ -202,4 +202,7 @@ be2721efd docs(hub): fix false statements and missed narration in external-beare
 3a39f2139 docs(hub): fix wrong cross-reference and status-mapping claim in metrics/rate-limit comments
 48e61ad23 docs(hub): remove remaining narration and reflow ragged comments in GE exchange and credential cache
 e501efc5a docs(project-log): fix a self-contradictory row and an inaccurate bare-ref claim
+6a6ad1f7d docs(project-log): record fix round 1 findings, changes and gate results
 ```
+
+**ap-em ruling (post fix round 1):** trailing-comment edits are allowed, provided the code before `//` stays byte-identical. `auth_external_bearer_sa_test.go:156`'s trailing comment (the one Known-limitation item above) was fixed under that ruling: `delete(claims, "azp") ` is identical on both sides of the diff, only the comment text changed from "the design's azp check" to "the azp/sub check".

@@ -153,7 +153,7 @@ func TestExternalBearer_ServiceAccountIDToken_EmptyAZP_ProjectListed_Authenticat
 	cfg := newExternalBearerConfigWithSA(t, newTestValidator(endpoints), resolver, []string{"my-a2a-project"})
 
 	claims := serviceAccountIDTokenClaims("worker@my-a2a-project.iam.gserviceaccount.com")
-	delete(claims, "azp") // azp == "" variant: the design's azp check only applies when azp is present.
+	delete(claims, "azp") // azp == "" variant: the azp/sub check only applies when azp is present.
 	token := signIDToken(kp, claims)
 
 	w, result := doExternalBearerRequest(cfg, token)
