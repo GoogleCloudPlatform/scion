@@ -389,3 +389,47 @@ full-run relay accuracy — all noted as fine as-is.
 - Full `pkg/hub` suite: not re-run this round (test-only changes; `ap-em`'s last relayed run at `882e13d4`
   stands, per the disk rules' "one full run per phase, ask first" — this round doesn't touch
   non-test production files, so no new full run was requested).
+
+## Follow-up (r3 optionals)
+
+Phase 2 is **APPROVED** (review `p2-r3-ap-p2-rev-3.md`, APPROVE at `86fba2eb5`). Two small Optional
+test fixes remained, per `briefs/ap-p2-dev-followup-r3.md`; the Nit (dedupe the counting-validator
+blocks) is assigned to `ap-p3-dev`, who now owns `auth_external_bearer_test.go`, and was not touched
+here. Only `external_bearer_ratelimit_test.go` and `google_credential_cache_test.go` were changed —
+no production code.
+
+**1 (Optional, resolved). The limiter's X-Forwarded-For spoof resistance was untested at its own
+wiring** (M29 — mutating the constructor to trust every proxy, `parseTrustedProxies([]string{"0.0.0.0/0",
+"::/0"})`, survived the whole targeted suite). The code was already correct by inspection (it reuses
+`geExchangeClientIP` and the same `cfg.TrustedProxies` list `UnifiedAuthMiddleware` uses), so this was a
+missing regression guard, not a bug. **Fix:** added
+`TestExternalBearerRateLimiter_HonoursXForwardedForOnlyFromTrustedProxy`: from an untrusted peer
+(`203.0.113.5:1`), `externalBearerBurst+1` requests each with a different `X-Forwarded-For` still get
+refused on the last one (XFF is ignored, so rotating it can't manufacture a fresh bucket); from a
+trusted peer (`10.0.0.1:1`), two distinct XFF clients each get their own full burst (XFF *is* honoured
+once the peer is trusted, keyed by the XFF value). Re-verified M29 by hand: reverting the constructor to
+trust `0.0.0.0/0`/`::/0` now fails this test (the trusted-peer loop's first request from the second XFF
+client is refused, because both XFF clients collapse to the same untrusted-peer-style bucket once every
+proxy is "trusted"). Reverted after confirming.
+
+**2 (Optional, resolved). `blockingValidator` panicked on a second upstream call instead of failing an
+assertion** — the same class of problem as r2 optional finding 3 and P1 r4 optional finding 1. Under the
+C2 "no store" mutant (M08), a follower that misses the singleflight flight (because the leader's flight
+already completed by the time the follower calls in) makes a genuine second call, and the unguarded
+`close(v.started)` panics on an already-closed channel, aborting the test binary. **Fix:** wrapped the
+close in a `sync.Once` (`v.startOnce.Do(func() { close(v.started) })`). Re-verified by hand: disabling
+`c.store(...)` in `google_credential_cache.go` (M08) and running
+`TestGoogleCredentialCache_LeaderCancellationDoesNotPoisonFollowers` 30 times with `-race` reproduces the
+race window on most runs, and every failure is now a clean assertion failure (`base validator called 2
+time(s), want 1`, and/or the not-cached assertion) with zero panics — where before the fix this would
+have panicked on some fraction of those runs. Reverted after confirming.
+
+### Gates (follow-up)
+
+- ✅ `go build -buildvcs=false ./...`
+- ✅ `go vet -buildvcs=false ./pkg/hub/...`
+- ✅ `gofmt -l pkg/hub` — clean
+- ✅ `GOGC=40 golangci-lint run --new-from-rev=upstream-main --concurrency=1 ./pkg/hub/...` — 0 issues
+- ✅ Targeted subset (`TestExternalBearer|TestGoogleTrust|TestGEExchange|TestProductionValidator|TestNoPackage|TestNoTokenInfo|TestGoogleIdentityResolver|TestGoogleCredential|TestFederation`, `-count=1`) — green
+- ✅ `-race` for the two touched files (`TestExternalBearerRateLimiter|TestServer_ExternalBearerRateLimiter|TestGoogleCredentialCache`, `-count=1`) — green, no data races (3.1s)
+- No full run (test-only, per the brief).

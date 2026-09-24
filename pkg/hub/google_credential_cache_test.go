@@ -506,8 +506,9 @@ type blockingValidator struct {
 	release chan struct{}
 	result  *ValidatedGoogleIdentity
 
-	mu    sync.Mutex
-	calls int
+	mu        sync.Mutex
+	calls     int
+	startOnce sync.Once
 }
 
 func (v *blockingValidator) ValidateIDToken(ctx context.Context, _ string, _ []string) (*ValidatedGoogleIdentity, error) {
@@ -518,11 +519,21 @@ func (v *blockingValidator) ValidateAccessToken(ctx context.Context, _ string, _
 	return v.validate(ctx)
 }
 
+// validate is meant to be called exactly once (singleflight should collapse
+// every concurrent caller into this one invocation). But under a mutation
+// that disables the cache/singleflight sharing (e.g. the C2 "no store"
+// mutant), a follower that misses the flight calls this a second time.
+// startOnce guards close(v.started) against that: without it, the second
+// call panics on close of an already-closed channel — a panic singleflight
+// recovers and re-raises, aborting the whole test binary — instead of
+// letting this test's own callCount() != 1 assertion report the regression
+// (review r3 optional finding 2; same class of problem as r2 optional
+// finding 3 and P1 r4 optional finding 1).
 func (v *blockingValidator) validate(ctx context.Context) (*ValidatedGoogleIdentity, error) {
 	v.mu.Lock()
 	v.calls++
 	v.mu.Unlock()
-	close(v.started)
+	v.startOnce.Do(func() { close(v.started) })
 	select {
 	case <-v.release:
 		return v.result, nil

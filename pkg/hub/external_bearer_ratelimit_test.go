@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -155,5 +156,54 @@ func TestExternalBearerRateLimiter_DefaultBurstExhaustion(t *testing.T) {
 	}
 	if allowed, _ := limiter.Allow(newTestBearerRequest("198.51.100.42:1")); allowed {
 		t.Errorf("request %d should be refused: the default burst (%d) is exhausted", externalBearerBurst+1, externalBearerBurst)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Review r3 optional finding 1 — the limiter's X-Forwarded-For spoof
+// resistance was correct by inspection (it reuses geExchangeClientIP, and
+// server.go passes the same cfg.TrustedProxies the middleware itself uses),
+// but untested at its own wiring. Mutating the constructor to trust every
+// proxy (parseTrustedProxies([]string{"0.0.0.0/0", "::/0"})) survived the
+// whole targeted suite (M29): with that mutant, any untrusted peer could
+// rotate X-Forwarded-For to get a fresh bucket per request and bypass C5
+// entirely, reviving the "make the Hub call Google for every random string"
+// amplification §4.4 exists to stop.
+// ---------------------------------------------------------------------------
+
+func TestExternalBearerRateLimiter_HonoursXForwardedForOnlyFromTrustedProxy(t *testing.T) {
+	limiter := newExternalBearerRateLimiter([]string{"10.0.0.0/8"})
+
+	// From an UNTRUSTED peer, X-Forwarded-For must be ignored — every
+	// request is keyed by the peer address itself, so a rotating XFF header
+	// cannot manufacture a fresh bucket per request.
+	for i := 0; i < externalBearerBurst; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
+		req.RemoteAddr = "203.0.113.5:1"
+		req.Header.Set("X-Forwarded-For", fmt.Sprintf("198.51.100.%d", i))
+		if allowed, _ := limiter.Allow(req); !allowed {
+			t.Fatalf("request %d (of %d burst) from the untrusted peer should be allowed", i+1, externalBearerBurst)
+		}
+	}
+	beyondBurst := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
+	beyondBurst.RemoteAddr = "203.0.113.5:1"
+	beyondBurst.Header.Set("X-Forwarded-For", "198.51.100.250")
+	if allowed, _ := limiter.Allow(beyondBurst); allowed {
+		t.Error("a request beyond the burst from the untrusted peer must be refused, even with a fresh X-Forwarded-For each time (spoof resistance)")
+	}
+
+	// From a TRUSTED peer, X-Forwarded-For IS honoured, and the bucket is
+	// keyed by the XFF client, not the shared trusted peer address: two
+	// distinct XFF clients behind the same trusted proxy each get their own
+	// full burst.
+	for _, client := range []string{"198.51.100.10", "198.51.100.20"} {
+		for i := 0; i < externalBearerBurst; i++ {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
+			req.RemoteAddr = "10.0.0.1:1"
+			req.Header.Set("X-Forwarded-For", client)
+			if allowed, _ := limiter.Allow(req); !allowed {
+				t.Fatalf("client %s: request %d (of %d burst) via the trusted proxy should be allowed", client, i+1, externalBearerBurst)
+			}
+		}
 	}
 }
