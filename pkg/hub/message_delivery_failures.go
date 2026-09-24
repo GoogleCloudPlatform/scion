@@ -20,6 +20,8 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -161,7 +163,7 @@ func (s *Server) applyBrokerMessageFailure(ctx context.Context, brokerID string,
 		return false
 	}
 
-	reason := f.Reason
+	reason := sanitizeFailureReason(f.Reason)
 	if reason == "" {
 		reason = "broker delivery failed after buffering"
 	}
@@ -189,4 +191,38 @@ func (s *Server) applyBrokerMessageFailure(ctx context.Context, brokerID string,
 		}, errors.New(reason))
 	}
 	return true
+}
+
+// maxFailureReasonBytes bounds the broker-supplied failure reason that is
+// stored on the message row and echoed to the sender.
+const maxFailureReasonBytes = 512
+
+// sanitizeFailureReason makes a broker-supplied reason safe to store and to
+// deliver into another agent's terminal: invalid UTF-8 is dropped, whitespace
+// control characters (LF, CR, TAB, ...) become spaces, all other control
+// characters (ESC, BEL, NUL, C1 controls, ...) are removed, and the result is
+// truncated to maxFailureReasonBytes on a rune boundary.
+func sanitizeFailureReason(reason string) string {
+	// Bound the work on arbitrarily large input before any allocation. 4x
+	// leaves room for dropped control/invalid bytes ahead of the rune-aware
+	// truncation below; a rune split by this cut is dropped as invalid UTF-8.
+	if len(reason) > maxFailureReasonBytes*4 {
+		reason = reason[:maxFailureReasonBytes*4]
+	}
+	reason = strings.ToValidUTF8(reason, "")
+	var b strings.Builder
+	b.Grow(min(len(reason), maxFailureReasonBytes))
+	for _, r := range reason {
+		if unicode.IsControl(r) {
+			if !unicode.IsSpace(r) {
+				continue
+			}
+			r = ' '
+		}
+		if b.Len()+utf8.RuneLen(r) > maxFailureReasonBytes {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return strings.TrimSpace(b.String())
 }

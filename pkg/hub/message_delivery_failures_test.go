@@ -26,8 +26,11 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
@@ -185,6 +188,88 @@ func TestBufferedFlushFailure_MarksAgentDMFailed(t *testing.T) {
 	require.NotNil(t, notice, "sending agent must be notified of the failure")
 	assert.Equal(t, "DELIVERY_FAILED", notice.StructuredMessage.Status)
 	assert.Empty(t, notice.MessageID, "the notice itself must not be reportable (no feedback loop)")
+}
+
+// A broker-supplied reason is untrusted: it is bounded in size and stripped
+// of terminal control sequences before being stored or echoed into the
+// sender's terminal (which may run on a different broker).
+func TestBufferedFlushFailure_SanitizesHostileReason(t *testing.T) {
+	srv, s, _, sender, target, _, dispatcher := deliverySetup(t)
+	ctx := context.Background()
+
+	result, dmErr := srv.ExecuteAgentDM(ctx, deliveryDMInput(sender, target, "hostile reason"))
+	require.Nil(t, dmErr)
+
+	b := eventbus.NewInProcessEventBus(slog.Default())
+	defer func() { _ = b.Close() }()
+	events := NewChannelEventPublisher()
+	defer events.Close()
+	srv.SetMessageBrokerProxy(NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return dispatcher }, slog.Default()))
+
+	hostile := "boom\x1b]0;pwned\x07\x1b[2J\x00\r\nnext" + strings.Repeat("A", 10*1024)
+	rr, resp := postMessageFailures(t, srv, target.RuntimeBrokerID, target.RuntimeBrokerID, messageDeliveryFailure{
+		MessageID: result.MessageID,
+		Reason:    hostile,
+	})
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.Equal(t, 1, resp.Marked)
+
+	row, err := s.GetMessage(ctx, result.MessageID)
+	require.NoError(t, err)
+	require.NotNil(t, row.DispatchFailureReason)
+	stored := *row.DispatchFailureReason
+	assert.LessOrEqual(t, len(stored), maxFailureReasonBytes)
+	assert.True(t, strings.HasPrefix(stored, "boom]0;pwned[2J  next"), "got %q", stored[:32])
+	assertNoControlChars(t, stored)
+
+	var notice *dispatchCall
+	for _, c := range dispatcher.getCalls() {
+		if c.Agent.ID == sender.ID {
+			c := c
+			notice = &c
+		}
+	}
+	require.NotNil(t, notice)
+	assert.Less(t, len(notice.StructuredMessage.Msg), 2*maxFailureReasonBytes)
+	assertNoControlChars(t, notice.StructuredMessage.Msg)
+}
+
+func assertNoControlChars(t *testing.T, s string) {
+	t.Helper()
+	for _, r := range s {
+		if r == '\n' {
+			continue // notice formatting may add its own line breaks
+		}
+		require.False(t, unicode.IsControl(r), "unexpected control character %U in %q", r, s)
+	}
+}
+
+func TestSanitizeFailureReason(t *testing.T) {
+	cases := map[string]string{
+		"":                       "",
+		"plain reason":           "plain reason",
+		"a\x1b[31mred\x1b[0m":    "a[31mred[0m",
+		"bell\x07nul\x00del\x7f": "bellnuldel",
+		"c1\u009bcsi":            "c1csi",
+		"line1\r\nline2\ttab":    "line1  line2 tab",
+		"  \n trimmed \r ":       "trimmed",
+		"bad\xffutf8":            "badutf8",
+	}
+	for in, want := range cases {
+		assert.Equal(t, want, sanitizeFailureReason(in), "input %q", in)
+	}
+
+	// Multi-megabyte input is bounded; a rune split by the pre-cut is dropped.
+	huge := "x" + strings.Repeat("é", 2<<20)
+	got := sanitizeFailureReason(huge)
+	assert.LessOrEqual(t, len(got), maxFailureReasonBytes)
+	assert.True(t, utf8.ValidString(got))
+	assert.True(t, strings.HasPrefix(got, "xé"))
+
+	long := strings.Repeat("é", maxFailureReasonBytes) // 2 bytes per rune
+	got = sanitizeFailureReason(long)
+	assert.LessOrEqual(t, len(got), maxFailureReasonBytes)
+	assert.True(t, utf8.ValidString(got), "truncation must respect rune boundaries")
 }
 
 func TestHandleBrokerMessageFailures_RejectsOtherIdentities(t *testing.T) {
