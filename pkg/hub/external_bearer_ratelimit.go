@@ -54,8 +54,8 @@ type externalBearerRateLimiter struct {
 	trustedNets []*net.IPNet
 }
 
-// newExternalBearerRateLimiter creates a rate limiter with the design's
-// defaults (5 rps / burst 20 per IP). trustedProxies is parsed once at
+// newExternalBearerRateLimiter creates a rate limiter with the default
+// budget (5 rps / burst 20 per IP). trustedProxies is parsed once at
 // construction, matching how UnifiedAuthMiddleware itself resolves
 // cfg.TrustedProxies (auth.go): trusted-proxy configuration is a startup-time
 // setting, not part of the request-time hot-reload surface (that is

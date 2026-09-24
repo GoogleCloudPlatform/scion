@@ -53,8 +53,8 @@ func TestExternalBearerRateLimiter_CleanupAdmitsNewIPAfterMaxAge(t *testing.T) {
 		t.Fatal("second IP should be allowed")
 	}
 	// The limiter is now full (maxEntries=2): a third, never-seen IP is
-	// refused outright, reproducing the "after 10000 distinct
-	// client IPs" scenario at a testable scale.
+	// refused outright, reproducing the full-limiter scenario at a testable
+	// scale.
 	if allowed, _ := limiter.Allow(newTestBearerRequest("198.51.100.3:1")); allowed {
 		t.Fatal("third IP should be refused: the limiter is at capacity")
 	}
@@ -118,31 +118,31 @@ func TestServer_ExternalBearerRateLimiter_CleanupRunsInBackground(t *testing.T) 
 }
 
 // ---------------------------------------------------------------------------
-// The limiter defaults (5 rps /
-// burst 20) were not pinned: both of the tests
-// in auth_external_bearer_access_token_test.go override rate/burst to small
-// test values, so a change to the production constants (e.g. 500 rps / burst
-// 200) would survive the whole suite.
+// Pin the limiter defaults (5 rps / burst 20): the access-token rate-limit
+// tests (auth_external_bearer_access_token_test.go) override burst to small
+// test values, so without this a change to the production constants (e.g.
+// 500 rps / burst 200) would survive the suite.
 // ---------------------------------------------------------------------------
 
-func TestExternalBearerRateLimiter_DefaultsMatchDesign(t *testing.T) {
+func TestExternalBearerRateLimiter_DefaultsPinned(t *testing.T) {
 	limiter := newExternalBearerRateLimiter(nil)
 	if limiter.buckets.rate != externalBearerRatePerSecond {
-		t.Errorf("rate = %v, want %v (design §4.4: 5 rps)", limiter.buckets.rate, externalBearerRatePerSecond)
+		t.Errorf("rate = %v, want %v (5 rps)", limiter.buckets.rate, externalBearerRatePerSecond)
 	}
 	if limiter.buckets.burst != externalBearerBurst {
-		t.Errorf("burst = %v, want %v (design §4.4: burst 20)", limiter.buckets.burst, externalBearerBurst)
+		t.Errorf("burst = %v, want %v (burst 20)", limiter.buckets.burst, externalBearerBurst)
 	}
 	if limiter.buckets.rate != 5.0 {
-		t.Errorf("rate = %v, want the literal design value 5.0", limiter.buckets.rate)
+		t.Errorf("rate = %v, want the literal default value 5.0", limiter.buckets.rate)
 	}
 	if limiter.buckets.burst != 20 {
-		t.Errorf("burst = %v, want the literal design value 20", limiter.buckets.burst)
+		t.Errorf("burst = %v, want the literal default value 20", limiter.buckets.burst)
 	}
 }
 
 // TestExternalBearerRateLimiter_DefaultBurstExhaustion exercises the
-// unmodified production defaults end to end (unlike the tests above, which
+// unmodified production defaults end to end (unlike the access-token
+// rate-limit tests in auth_external_bearer_access_token_test.go, which
 // shrink burst for speed): 20 requests from one IP succeed, the 21st is
 // refused. This fails if the burst constant is ever widened (e.g. to 200)
 // without a corresponding, deliberate test change.
@@ -160,14 +160,13 @@ func TestExternalBearerRateLimiter_DefaultBurstExhaustion(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// The limiter's X-Forwarded-For spoof
-// resistance depends on its own wiring: it reuses geExchangeClientIP, and
-// server.go passes the same cfg.TrustedProxies the middleware itself uses.
-// If the constructor were changed to trust every
-// proxy (parseTrustedProxies([]string{"0.0.0.0/0", "::/0"})), any untrusted
-// peer could
-// rotate X-Forwarded-For to get a fresh bucket per request and bypass the
-// rate limit entirely, reviving the "make the Hub call Google for every
+// The limiter's X-Forwarded-For spoof resistance depends on its own wiring:
+// it reuses geExchangeClientIP, and server.go passes the same
+// cfg.TrustedProxies the middleware itself uses. If the constructor were
+// changed to trust every proxy
+// (parseTrustedProxies([]string{"0.0.0.0/0", "::/0"})), any untrusted peer
+// could rotate X-Forwarded-For to get a fresh bucket per request and bypass
+// the rate limit entirely, reviving the "make the Hub call Google for every
 // random string" amplification the limiter exists to stop.
 // ---------------------------------------------------------------------------
 

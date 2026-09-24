@@ -40,8 +40,8 @@ package hub
 // ExternalBearerKind is the "kind" label on the external_bearer counter: the
 // shape of the presented credential, as classified by classifyExternalBearer.
 // ExternalBearerKindUnknown is used whenever a request is rejected before
-// classification succeeds (e.g. no Google trust configured), per the
-// design's closed-label-set rule.
+// classification succeeds (e.g. no Google trust configured), keeping the
+// label set closed.
 type ExternalBearerKind string
 
 const (
@@ -108,10 +108,10 @@ func (p ExternalBearerPrincipal) valid() bool {
 }
 
 // ExternalBearerOutcome is the "outcome" label on the external_bearer
-// counter. Each value maps 1:1 to the HTTP status serveExternalBearer
-// returns for that outcome; its outcome switch is the single place that performs
-// this mapping (see auth_external_bearer.go), so the metric can never
-// diverge from the HTTP status it accompanies.
+// counter. Each value corresponds to exactly one response (HTTP status plus
+// error code) that serveExternalBearer writes; its outcome switch is the
+// single place that performs this mapping (see auth_external_bearer.go), so
+// the metric can never diverge from the response it accompanies.
 type ExternalBearerOutcome string
 
 const (
