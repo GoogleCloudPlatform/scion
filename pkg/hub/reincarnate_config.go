@@ -91,11 +91,11 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 		// Kept verbatim: identity-adjacent fields the pipeline never touches,
 		// and (for Phase 1, which accepts no --harness/--reset-overrides/etc.
 		// request overrides) never overridden by the request either.
-		// WorkspaceStoragePath and AgentRoleGrandfathered were missing here
-		// (p1b-r1 R4): without the storage path a remote broker gets the
-		// hub-local path populateAgentConfig stamps for an empty Workspace
-		// instead of the GCS path it actually needs, and grandfathered-role
-		// provenance is audit data, not something to re-derive.
+		// WorkspaceStoragePath and AgentRoleGrandfathered are kept too:
+		// without the storage path a remote broker gets the hub-local path
+		// populateAgentConfig stamps for an empty Workspace instead of the
+		// GCS path it actually needs, and grandfathered-role provenance is
+		// audit data, not something to re-derive.
 		Attach:                 old.Attach,
 		CreatorName:            old.CreatorName,
 		AgentRole:              old.AgentRole,
@@ -151,8 +151,9 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 		fresh.Env = maps.Clone(fresh.InlineConfig.Env)
 	}
 
-	// p1b-r1 C1 (SECURITY): NoAuth must be re-derived from every source that
-	// can produce it at create time, not just an explicit HarnessAuth="none".
+	// SECURITY (design §3.4 Amendment A3.1): NoAuth must be re-derived from
+	// every source that can produce it at create time, not just an explicit
+	// HarnessAuth="none".
 	// createInputs.NoAuth carries an explicit --no-auth AND a role=none
 	// mapping (role is itself kept, so its NoAuth consequence must be too —
 	// see AgentCreateInputs.NoAuth's doc comment). Missing this let a
@@ -251,7 +252,8 @@ func legacyCreateInputsFromAppliedConfig(old *store.AgentAppliedConfig, template
 			var dropped, kept []string
 			for k := range inline.Env {
 				if newVal, definedByTemplate := templateEnv[k]; definedByTemplate {
-					// p1b-r1 N2: never surface the OLD value. It came from a
+					// Never surface the OLD value (design §3.4 Amendment
+					// A3.9). It came from a
 					// legacy agent's live InlineConfig.Env, which is
 					// indistinguishable-by-inspection from an explicit
 					// per-agent override — and that override could be a
@@ -284,7 +286,7 @@ func legacyCreateInputsFromAppliedConfig(old *store.AgentAppliedConfig, template
 		// NoAuth: carried forward only when already true. A legacy agent's
 		// live NoAuth cannot be told apart from an explicit request versus
 		// the auto-no-auth fallback (resolveDerivedConfig), so a true value
-		// is kept (the safe direction — see p1b-r1 C1) but a false value is
+		// is kept (the safe direction) but a false value is
 		// NOT trusted as "definitely never wanted no-auth"; fresh.AgentRole
 		// and buildFreshAppliedConfig's own HarnessAuth=="none" check still
 		// apply independently below.

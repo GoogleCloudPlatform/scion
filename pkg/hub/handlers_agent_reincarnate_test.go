@@ -518,30 +518,93 @@ func TestReincarnateAgent_AC9_NilCapabilities_Returns412(t *testing.T) {
 // shared-workspace) must be rejected before anything is persisted or
 // computed — including on a dry run, so --dry-run reports the restriction
 // instead of showing a plan a real request could not safely execute.
+// TestReincarnateAgent_NonCloneWorkspace_Returns400 is the p1a-r2 R1
+// regression test. The fabricated predecessor of this test set
+// AppliedConfig.GitClone = nil directly, which no real worktree-per-agent
+// agent ever has: populateAgentConfig sets GitClone for every git-remote
+// project that isn't shared-workspace, worktree-per-agent included. So a
+// worktree-per-agent agent's GitClone is non-nil and used to slip past a
+// gate that only checked for nil. Each case here derives GitClone (or its
+// absence) the same way populateAgentConfig actually would, for a project
+// carrying the real workspace-mode label.
 func TestReincarnateAgent_NonCloneWorkspace_Returns400(t *testing.T) {
-	disp := newReincarnateTestDispatcher()
-	srv, s, project, broker := setupReincarnateTestServer(t, disp)
-	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
-		a.AppliedConfig.GitClone = nil // worktree-per-agent / shared-workspace
-	})
-	beforeVersion := agent.StateVersion
-	self := agentIdentityFor(agent.ID, project.ID)
-
-	for _, dryRun := range []bool{true, false} {
-		req := reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h", DryRun: dryRun})
-		rec := httptest.NewRecorder()
-		srv.handleReincarnateAgent(rec, req, agent.ID)
-		assert.Equal(t, http.StatusBadRequest, rec.Code, "dryRun=%v: body: %s", dryRun, rec.Body.String())
+	cases := []struct {
+		name          string
+		workspaceMode string // "" = clone-per-agent (the default for a git-remote project)
+		wantRejected  bool
+	}{
+		{
+			name:          "worktree-per-agent: GitClone is set, but this is not clone-per-agent",
+			workspaceMode: store.WorkspaceModeWorktreePerAgent,
+			wantRejected:  true,
+		},
+		{
+			name:          "shared-workspace",
+			workspaceMode: store.WorkspaceModeShared,
+			wantRejected:  true,
+		},
+		{
+			name:          "clone-per-agent: the one mode Phase 1 supports",
+			workspaceMode: "",
+			wantRejected:  false,
+		},
 	}
 
-	after, err := s.GetAgent(context.Background(), agent.ID)
-	require.NoError(t, err)
-	assert.Equal(t, beforeVersion, after.StateVersion, "agent must be untouched")
-	assert.Equal(t, "", after.ReincarnationState)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			disp := newReincarnateTestDispatcher()
+			srv, s, project, broker := setupReincarnateTestServer(t, disp)
+			ctx := context.Background()
 
-	list, err := s.ListAgentReincarnations(context.Background(), agent.ID)
-	require.NoError(t, err)
-	assert.Empty(t, list, "no reincarnation record should be created")
+			project.GitRemote = "https://example.com/repo.git"
+			if tc.workspaceMode != "" {
+				project.Labels = map[string]string{store.LabelWorkspaceMode: tc.workspaceMode}
+			}
+			require.NoError(t, s.UpdateProject(ctx, project))
+
+			// What the create path actually produces for this project —
+			// not a hand-set field — so this test breaks if
+			// populateAgentConfig's GitClone condition ever changes shape
+			// again without a matching gate update.
+			probe := &store.Agent{AppliedConfig: &store.AgentAppliedConfig{}}
+			srv.populateAgentConfig(ctx, probe, project, nil)
+
+			agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+				a.AppliedConfig.GitClone = probe.AppliedConfig.GitClone
+				a.AppliedConfig.Workspace = ""
+				a.AppliedConfig.CreateInputs.Workspace = ""
+			})
+			beforeVersion := agent.StateVersion
+			self := agentIdentityFor(agent.ID, project.ID)
+
+			for _, dryRun := range []bool{true, false} {
+				wantCode := http.StatusOK
+				switch {
+				case tc.wantRejected:
+					wantCode = http.StatusBadRequest
+				case !dryRun:
+					wantCode = http.StatusAccepted
+				}
+				req := reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h", DryRun: dryRun})
+				rec := httptest.NewRecorder()
+				srv.handleReincarnateAgent(rec, req, agent.ID)
+				assert.Equal(t, wantCode, rec.Code, "dryRun=%v: body: %s", dryRun, rec.Body.String())
+			}
+
+			if !tc.wantRejected {
+				return
+			}
+
+			after, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, beforeVersion, after.StateVersion, "agent must be untouched")
+			assert.Equal(t, "", after.ReincarnationState)
+
+			list, err := s.ListAgentReincarnations(ctx, agent.ID)
+			require.NoError(t, err)
+			assert.Empty(t, list, "no reincarnation record should be created")
+		})
+	}
 }
 
 // =============================================================================
@@ -901,6 +964,121 @@ func TestReincarnateAgent_AC8_OrphanCannotWedgeAfterConflict(t *testing.T) {
 	assert.Equal(t, http.StatusAccepted, rec.Code, "retry after a transient conflict must succeed; got %d %s", rec.Code, rec.Body.String())
 }
 
+// conflictOnFailedWriteStore rejects the first UpdateAgent that sets
+// reincarnation_state=failed with a version conflict, simulating a
+// concurrent full-row write landing between failReincarnation's read and
+// write.
+type conflictOnFailedWriteStore struct {
+	store.Store
+	mu   sync.Mutex
+	done bool
+}
+
+func (f *conflictOnFailedWriteStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
+	f.mu.Lock()
+	if !f.done && a.ReincarnationState == store.ReincarnationStateFailed {
+		f.done = true
+		f.mu.Unlock()
+		return store.ErrVersionConflict
+	}
+	f.mu.Unlock()
+	return f.Store.UpdateAgent(ctx, a)
+}
+
+// TestReincarnateAgent_FailReincarnationConflictDoesNotWedgeAgent is the
+// design §3.4 Amendment A5.1 (F1) regression test: failReincarnation must
+// retry on a version conflict, the same as every other worker write. Before
+// the fix, a single conflict on the "failed" write left the agent row stuck
+// non-terminal (e.g. "starting") while the reincarnation record said
+// "failed" — a state the boot/periodic sweep cannot clear, since it keys off
+// non-terminal *records*, and this one is already terminal. Every later
+// request 409s forever.
+func TestReincarnateAgent_FailReincarnationConflictDoesNotWedgeAgent(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.startErr = fmt.Errorf("boom")
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	orig := srv.store
+	srv.store = &conflictOnFailedWriteStore{Store: orig}
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	waitForReincarnationSettled(t, s, agent.ID)
+	srv.store = orig
+
+	after, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ReincarnationStateFailed, after.ReincarnationState,
+		"the retry must land the agent's reincarnation_state at failed, not leave it stuck non-terminal")
+	assert.Equal(t, "error", after.Phase)
+
+	rec = httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h2"}), agent.ID)
+	assert.NotEqual(t, http.StatusConflict, rec.Code,
+		"agent must not be wedged after a failed reincarnation whose write hit one conflict; got %d %s", rec.Code, rec.Body.String())
+}
+
+// blockingStopDispatcher blocks the first Stop call until released, so a
+// test can pause a worker mid-flight and run a sweep concurrently.
+type blockingStopDispatcher struct {
+	*reincarnateTestDispatcher
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (d *blockingStopDispatcher) DispatchAgentStop(ctx context.Context, a *store.Agent) error {
+	first := false
+	d.once.Do(func() { first = true })
+	if first {
+		close(d.entered)
+		<-d.release
+	}
+	return d.reincarnateTestDispatcher.DispatchAgentStop(ctx, a)
+}
+
+// TestReincarnateAgent_BootSweepDoesNotAdmitSecondWorkerWhileFirstInFlight is
+// the design §3.4 Amendment A5.2 (F2) regression test: the replica-safe
+// sweep must not touch a genuinely in-flight reincarnation just because a
+// sweep happens to run concurrently (simulating another replica booting).
+// The staleness bound is what protects it — sweepStaleReincarnations (the
+// real 30-minute bound, not a test-only cutoff) must find the record and
+// agent state both far too fresh to touch, so a second reincarnate request
+// against the same agent still gets 409, and no second worker starts.
+func TestReincarnateAgent_BootSweepDoesNotAdmitSecondWorkerWhileFirstInFlight(t *testing.T) {
+	base := newReincarnateTestDispatcher()
+	disp := &blockingStopDispatcher{reincarnateTestDispatcher: base, entered: make(chan struct{}), release: make(chan struct{})}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h1"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	<-disp.entered // worker 1 is inside Stop
+
+	// "Replica B" boots and runs its sweep against the shared DB, using the
+	// real production bound (not sweepStaleReincarnationsOlderThan).
+	n, err := srv.sweepStaleReincarnations(context.Background())
+	require.NoError(t, err)
+	assert.Zero(t, n, "a worker that started milliseconds ago must not look stale")
+
+	rec = httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h2"}), agent.ID)
+	code2 := rec.Code
+	close(disp.release)
+
+	assert.Equal(t, http.StatusConflict, code2, "a second reincarnation must not be admitted while the first worker is still running")
+
+	waitForReincarnationSettled(t, s, agent.ID)
+	list, err := s.ListAgentReincarnations(context.Background(), agent.ID)
+	require.NoError(t, err)
+	require.Len(t, list, 1, "exactly one worker must have run against this agent")
+	assert.Equal(t, store.AgentReincarnationStateCompleted, list[0].State)
+}
+
 // phaseObservingDispatcher simulates the container reporting a status-only
 // phase update (as sciontool/the broker do via UpdateAgentStatus, which does
 // not bump state_version) during Stop, and records the persisted phase seen
@@ -1033,6 +1211,13 @@ func TestReincarnateAgent_AC6_StartFailureMarksFailed(t *testing.T) {
 	assert.Equal(t, store.ReincarnationStateFailed, final.ReincarnationState)
 	assert.Equal(t, 1, final.Generation, "generation must not increment on failure")
 	assert.Contains(t, final.Message, "no such image")
+	// Design §3.4 Amendment A4.3: a start failure happens after reprovision
+	// already succeeded (disk is gen N+1), so AppliedConfig must NOT be
+	// restored to `previous` — it must keep the freshly rendered config,
+	// identifiable by the reincarnation preamble this worker stamped onto
+	// Task right before dispatching reprovision.
+	assert.Contains(t, final.AppliedConfig.Task, "[SCION REINCARNATION]",
+		"a post-reprovision-success failure (start) must keep the fresh AppliedConfig, not restore `previous`")
 
 	list, err := s.ListAgentReincarnations(context.Background(), agent.ID)
 	require.NoError(t, err)
@@ -1041,6 +1226,51 @@ func TestReincarnateAgent_AC6_StartFailureMarksFailed(t *testing.T) {
 	assert.Contains(t, list[0].Error, "no such image")
 	require.NotNil(t, list[0].PreviousAppliedConfig, "previous config snapshot must remain retrievable")
 	assert.Equal(t, "old-image:v1", list[0].PreviousAppliedConfig.Image)
+}
+
+// TestReincarnateAgent_ReprovisionDispatchFailure_RestoresAppliedConfig is the
+// design §3.4 Amendment A4.3 regression test for the other half of the
+// restore decision: a reprovision *dispatch* failure happens after the
+// worker has already written the fresh AppliedConfig to the store (so a
+// concurrent reader would see gen N+1's config) but the broker never
+// actually re-rendered the disk. failReincarnation must restore `previous`
+// here, or the store would claim a generation that was never really
+// provisioned. Contrast with TestReincarnateAgent_AC6_StartFailureMarksFailed,
+// which fails one step later (after reprovision succeeded) and must NOT
+// restore.
+func TestReincarnateAgent_ReprovisionDispatchFailure_RestoresAppliedConfig(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.reprovisionErr = fmt.Errorf("broker refused: reprovision refused: container is still running")
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	req := reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"})
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, req, agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	waitForReincarnationSettled(t, s, agent.ID)
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "error", final.Phase)
+	assert.Equal(t, store.ReincarnationStateFailed, final.ReincarnationState)
+	assert.Equal(t, 1, final.Generation, "generation must not increment when reprovision dispatch fails")
+	assert.Contains(t, final.Message, "reprovision refused")
+	assert.Equal(t, "old-image:v1", final.AppliedConfig.Image,
+		"AppliedConfig must be restored to `previous` when reprovision dispatch fails")
+	assert.NotContains(t, final.AppliedConfig.Task, "[SCION REINCARNATION]",
+		"a pre-reprovision-success failure must restore `previous`, not keep the fresh, never-rendered config")
+
+	assert.Equal(t, 1, disp.reprovisionCalls)
+	assert.Zero(t, disp.startCalls, "start must not run when reprovision dispatch fails")
+
+	list, err := s.ListAgentReincarnations(context.Background(), agent.ID)
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.Equal(t, store.AgentReincarnationStateFailed, list[0].State)
+	assert.Contains(t, list[0].Error, "reprovision refused")
 }
 
 // TestReincarnateAgent_AC6_NonCreatorRequesterGetsNotifiedOnFailure is the
@@ -1105,6 +1335,55 @@ func TestReincarnateAgent_AC6_NonCreatorRequesterGetsNotifiedOnFailure(t *testin
 		"the non-creator requester must actually receive a failure notification")
 }
 
+// TestReincarnateAgent_AC6_NotifiesWithRealisticActivity is the design §3.4
+// Amendment A5.3 (F3) regression test. The notification dispatcher matches a
+// subscription on the status event's Activity when non-empty, falling back
+// to Phase only when Activity is empty. A real running agent almost always
+// has a non-empty Activity ("working", "idle", "waiting_for_input", …), and
+// the previous AC-6 notification test only passed because its fixture left
+// Activity empty. Without clearing Activity on failure, the ERROR
+// notification either never fires (Activity isn't a trigger) or a stale,
+// misleading one fires instead (Activity happens to be a trigger like
+// "waiting_for_input"). failReincarnation and the stopping step both clear
+// Activity, mirroring the synchronous stop handler.
+func TestReincarnateAgent_AC6_NotifiesWithRealisticActivity(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.startErr = fmt.Errorf("no such image: nonexistent:latest")
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+
+	pub := NewChannelEventPublisher()
+	srv.SetEventPublisher(pub)
+	t.Cleanup(pub.Close)
+	nd := NewNotificationDispatcher(s, pub, func() AgentDispatcher { return disp }, slog.Default())
+	nd.Start()
+	t.Cleanup(nd.Stop)
+
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Activity = "working" // realistic: a running agent almost always has one
+	})
+	coordinator := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.ID = tid("coord-" + t.Name())
+		a.Slug = "coord-" + tidSlugSafe(t.Name())
+	})
+	requester := agentIdentityFor(coordinator.ID, project.ID, ScopeAgentLifecycle)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, requester, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	waitForReincarnationSettled(t, s, agent.ID)
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "error", final.Phase)
+	assert.Equal(t, "", final.Activity, "Activity must be cleared on failure, mirroring the stop handler")
+
+	require.Eventually(t, func() bool {
+		notifs, notifErr := s.GetNotifications(context.Background(), store.SubscriberTypeAgent, coordinator.Slug, false)
+		return notifErr == nil && len(notifs) > 0
+	}, 2*time.Second, 50*time.Millisecond,
+		"requester must be notified of the failure even when the agent had a realistic non-empty Activity")
+}
+
 // TestReincarnateAgent_R3_StopFailureIsFatal is the p1b-r1 R3 regression
 // test: a DispatchAgentStop error must fail the reincarnation before any
 // config write, not be tolerated. Before the fix, a stop failure was logged
@@ -1164,7 +1443,10 @@ func TestSweepStaleReincarnations_MarksNonTerminalFailed(t *testing.T) {
 		State:          store.AgentReincarnationStatePending,
 	}))
 
-	n, err := srv.sweepStaleReincarnations(context.Background())
+	// A future cutoff treats every existing row as stale, without needing an
+	// actual 30-minute-old record (design §3.7's replica-safe staleness
+	// bound; see sweepStaleReincarnationsOlderThan).
+	n, err := srv.sweepStaleReincarnationsOlderThan(context.Background(), time.Now().Add(time.Hour))
 	require.NoError(t, err)
 	assert.Equal(t, 1, n)
 
@@ -1421,6 +1703,7 @@ func TestReincarnateAgent_AC2b_Matrix_CreateAndReincarnateAgree(t *testing.T) {
 		templateModel      string
 		explicit           CreateAgentRequest
 		autoNoAuthHC       bool // seed a harness config with no_auth.behavior=drop-to-shell and no satisfiable creds
+		gcpAdcHC           bool // seed a harness config whose auth type the assigned GCPIdentity satisfies
 	}{
 		{
 			name: "explicit beats everything",
@@ -1482,6 +1765,18 @@ func TestReincarnateAgent_AC2b_Matrix_CreateAndReincarnateAgree(t *testing.T) {
 			explicit:     CreateAgentRequest{HarnessConfig: "auto-noauth-hc"},
 			autoNoAuthHC: true,
 		},
+		{
+			// design §3.4 Amendment A5.4 (F4): the auto-no-auth check reads
+			// GCPIdentity (agentHasGCPIdentityAssigned), so a case where an
+			// assigned GCP identity SATISFIES the harness config's auth type
+			// must land on the same NoAuth=false on both sides. Every case in
+			// this matrix now assigns the same GCPIdentity via the real create
+			// request, but only this case's harness config makes that
+			// assignment actually matter to the auto-no-auth outcome.
+			name:     "auto-no-auth skipped when GCP identity satisfies the harness config's auth type",
+			explicit: CreateAgentRequest{HarnessConfig: "gcp-adc-hc"},
+			gcpAdcHC: true,
+		},
 	}
 
 	for _, tc := range cases {
@@ -1537,12 +1832,71 @@ func TestReincarnateAgent_AC2b_Matrix_CreateAndReincarnateAgree(t *testing.T) {
 				}
 				require.NoError(t, s.CreateHarnessConfig(ctx, hc))
 			}
+			if tc.gcpAdcHC {
+				hc := &store.HarnessConfig{
+					ID:          tid("hc-gcp-matrix-" + tc.name + "-" + t.Name()),
+					Name:        "gcp-adc-hc",
+					Slug:        "gcp-adc-hc",
+					Harness:     "claude",
+					ContentHash: "gcp-adc-hash",
+					Scope:       store.HarnessConfigScopeGlobal,
+					Status:      store.HarnessConfigStatusActive,
+					Config: &store.HarnessConfigData{
+						NoAuthBehavior: "drop-to-shell",
+						AuthMeta: &api.HarnessAuthMetadata{
+							Types: map[string]api.HarnessAuthTypeMetadata{
+								"vertex-ai": {
+									RequiredEnv: []api.HarnessAuthEnvRequirement{
+										{AnyOf: []string{"GOOGLE_CLOUD_PROJECT"}},
+									},
+									// SkippedWhenGCPServiceAccountAssigned is
+									// what actually makes isAuthTypeSatisfied
+									// skip the RequiredEnv check above when a
+									// GCP identity is assigned (it treats the
+									// whole auth type as "GCP-backed
+									// runtime-provided" — the env check alone
+									// is not itself GCP-aware).
+									RequiredFiles: []api.HarnessAuthFileRequirement{
+										{
+											Name:                                 "gcloud-adc",
+											Type:                                 "file",
+											Field:                                "GoogleAppCredentials",
+											AlternativeEnvKeys:                   []string{"GOOGLE_APPLICATION_CREDENTIALS"},
+											SkippedWhenGCPServiceAccountAssigned: true,
+											Required:                             true,
+										},
+									},
+								},
+							},
+						},
+					},
+				}
+				require.NoError(t, s.CreateHarnessConfig(ctx, hc))
+			}
+
+			// design §3.4 Amendment A5.4 (F4): assign the SAME GCPIdentity on
+			// both sides by giving the real create request one, rather than
+			// stamping it onto the row after the fact — create's auto-no-auth
+			// check runs with it in place exactly as reincarnate's does.
+			sa := &store.GCPServiceAccount{
+				ID:         tid("sa-matrix-" + tc.name + "-" + t.Name()),
+				Scope:      store.ScopeProject,
+				ScopeID:    project.ID,
+				Email:      "matrix-worker@example.iam.gserviceaccount.com",
+				ProjectID:  "matrix-gcp-project",
+				Verified:   true,
+				VerifiedAt: time.Now(),
+				CreatedBy:  tid("user-creator"),
+				CreatedAt:  time.Now(),
+			}
+			require.NoError(t, s.CreateGCPServiceAccount(ctx, sa))
 
 			// --- create: the real create HTTP path. ---
 			createReq := tc.explicit
 			createReq.Name = "matrix-create-" + tidSlugSafe(tc.name)
 			createReq.ProjectID = project.ID
 			createReq.Template = templateSlug
+			createReq.GCPIdentity = &GCPIdentityAssignment{MetadataMode: store.GCPMetadataModeAssign, ServiceAccountID: sa.ID}
 			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", createReq)
 			require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 			var createResp CreateAgentResponse
@@ -1551,15 +1905,9 @@ func TestReincarnateAgent_AC2b_Matrix_CreateAndReincarnateAgree(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, created.AppliedConfig)
 			require.NotNil(t, created.AppliedConfig.CreateInputs,
-				"create must always persist CreateInputs (p1b-r1 R6); a nil here would silently fall back to the legacy heuristic")
-
-			// GCPIdentity resolution/access-checking is out of scope for
-			// AC-2b (it happens in the create handler, not the derivation
-			// pipeline); stamp one directly to test the KEPT-field round
-			// trip in isolation.
-			gcpIdentity := &store.GCPIdentityConfig{MetadataMode: store.GCPMetadataModeAssign, ServiceAccountID: "kept-sa"}
-			created.AppliedConfig.GCPIdentity = gcpIdentity
-			require.NoError(t, s.UpdateAgent(ctx, created))
+				"create must always persist CreateInputs (design §3.4 Amendment A3.7); a nil here would silently fall back to the legacy heuristic")
+			require.NotNil(t, created.AppliedConfig.GCPIdentity, "precondition: create must have resolved the assigned GCPIdentity")
+			gcpIdentity := created.AppliedConfig.GCPIdentity
 
 			// --- snapshot what create actually produced, BEFORE staling the
 			// live row (p1b-r1 R5: round-trip the CREATED agent's own
@@ -1591,6 +1939,19 @@ func TestReincarnateAgent_AC2b_Matrix_CreateAndReincarnateAgree(t *testing.T) {
 			created.AppliedConfig.HarnessConfigHash = "stale-hash"
 			created.AppliedConfig.TemplateHash = "stale-template-hash"
 			created.AppliedConfig.HubAccessScopes = []string{"stale-scope"}
+			// design §3.4 Amendment A3.5 (R4) kept fields: stale them too, so
+			// the compare below can only pass if buildFreshAppliedConfig
+			// actually copies them from `old`, not merely leaves its own
+			// zero-value default sitting there by coincidence.
+			// Unlike the fields staled above, these two are KEPT fields
+			// (design §3.4 Amendment A3.5): the correct behavior is to carry
+			// forward whatever the CURRENT/live row says, not reset to
+			// create's original value — so the values set here are what
+			// fresh must reproduce, not `want`'s.
+			keptWorkspaceStoragePath := "gs://evolved-bucket/evolved-path"
+			keptAgentRoleGrandfathered := !want.AgentRoleGrandfathered
+			created.AppliedConfig.WorkspaceStoragePath = keptWorkspaceStoragePath
+			created.AppliedConfig.AgentRoleGrandfathered = keptAgentRoleGrandfathered
 			require.NoError(t, s.UpdateAgent(ctx, created))
 
 			fresh, _, err := srv.buildFreshAppliedConfig(ctx, created, project)
@@ -1611,6 +1972,8 @@ func TestReincarnateAgent_AC2b_Matrix_CreateAndReincarnateAgree(t *testing.T) {
 			assert.Equal(t, want.HarnessConfigHash, fresh.HarnessConfigHash, "HarnessConfigHash must match what create produced")
 			assert.Equal(t, want.TemplateHash, fresh.TemplateHash, "TemplateHash must match what create produced")
 			assert.Equal(t, wantHubAccessScopes, fresh.HubAccessScopes, "HubAccessScopes must match what create produced")
+			assert.Equal(t, keptWorkspaceStoragePath, fresh.WorkspaceStoragePath, "WorkspaceStoragePath must be kept from the live row, not reset")
+			assert.Equal(t, keptAgentRoleGrandfathered, fresh.AgentRoleGrandfathered, "AgentRoleGrandfathered must be kept from the live row, not reset")
 			var freshSkills []api.SkillReference
 			if fresh.InlineConfig != nil {
 				freshSkills = fresh.InlineConfig.Skills
@@ -1620,6 +1983,10 @@ func TestReincarnateAgent_AC2b_Matrix_CreateAndReincarnateAgree(t *testing.T) {
 
 			if tc.autoNoAuthHC {
 				require.True(t, want.NoAuth, "precondition: create must have taken the auto-no-auth fallback")
+			}
+			if tc.gcpAdcHC {
+				require.False(t, want.NoAuth,
+					"precondition: the assigned GCPIdentity must satisfy the harness config's auth type, so create must NOT have taken the auto-no-auth fallback")
 			}
 		})
 	}

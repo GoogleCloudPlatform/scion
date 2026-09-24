@@ -1208,7 +1208,7 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 				req.ResolvedEnv[k] = v
 			}
 			req.EnvSources = d.buildEnvSources(ctx, agent, req.ResolvedEnv)
-			// p1a-r1 R2: a fresh RequestID for the replay. Reusing the first
+			// Design §3.4 Amendment A2.3: a fresh RequestID for the replay. Reusing the first
 			// pass's ID would let the broker's attempt cache (keyed by
 			// RequestID) replay the stored 202 instead of reprocessing with
 			// the newly resolved env — silently defeating this whole retry.
@@ -1236,7 +1236,7 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 		}
 	}
 
-	// p1a-r1 R2: for a reprovision specifically, a final 202-with-Needs (env
+	// Design §3.4 Amendment A2.3: for a reprovision specifically, a final 202-with-Needs (env
 	// still missing) or a missing 201 response is a hard failure, never
 	// "warn and continue". DispatchAgentProvision's more forgiving behavior
 	// exists because a follow-up start re-gathers env on that path; the
@@ -1250,7 +1250,7 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 		if finalResp == nil {
 			return fmt.Errorf("%s: broker returned no confirmation for the reprovision request", callerName)
 		}
-		// p1a-r1 R1(a): mandatory echo. An old broker has no concept of
+		// Design §3.4 Amendment A2.2(a): mandatory echo. An old broker has no concept of
 		// Reprovision, so it silently ran a plain Provision and returned 201
 		// with Reprovisioned unset — the persisted config was NOT replaced,
 		// so this must fail exactly like any other reprovision failure.

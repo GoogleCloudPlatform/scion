@@ -746,7 +746,7 @@ type RemoteAgentResponse struct {
 
 	// Reprovisioned mirrors runtimebroker.CreateAgentResponse.Reprovisioned:
 	// set by the broker ONLY on the branch that actually ran
-	// Manager.Reprovision (p1a-r1 R1(a)). dispatchProvision treats a
+	// Manager.Reprovision (design §3.4 Amendment A2.2(a)). dispatchProvision treats a
 	// reprovision dispatch whose final response lacks this as a failure —
 	// an old broker has no such field and silently ran a plain Provision
 	// instead, which must not be reported as reincarnate success.
@@ -1590,12 +1590,14 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 			"runs", runs, "migrations", migrations)
 	}
 
-	// Same shape, for `scion reincarnate` (design §3.7 F4, p1b-r1): a
-	// reincarnation record and its agent's reincarnation_state left
-	// non-terminal can only mean the hub restarted mid-flight — R1's
-	// claim-then-create order means a failed request never leaves one
-	// behind. Without this sweep those agents would be stuck behind a
-	// permanent 409 forever (Phase 3 owns actually resuming them).
+	// Same shape, for `scion reincarnate` (design §3.7): a reincarnation
+	// record and its agent's reincarnation_state left non-terminal past the
+	// staleness bound can only mean the hub replica running it is gone —
+	// claim-then-create order means a failed request never leaves one behind
+	// otherwise. Without this sweep those agents would be stuck behind a
+	// permanent 409 forever (Phase 3 owns actually resuming them). Also
+	// registered as a recurring singleton job below, so a restart is not the
+	// only trigger.
 	if n, err := srv.sweepStaleReincarnations(ctx); err != nil {
 		slog.Warn("Failed to sweep stale reincarnations", "error", err)
 	} else if n > 0 {
@@ -3815,7 +3817,7 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		if payload.Branch != "" {
 			agent.AppliedConfig.Branch = payload.Branch
 		}
-		// CreateInputs (p1b-r1 R6): without this, every scheduled agent looks
+		// CreateInputs (design §3.4 Amendment A3.7): without this, every scheduled agent looks
 		// "legacy" to `scion reincarnate` forever — not just until its first
 		// reincarnation, since the legacy fallback pins whatever HarnessConfig/
 		// HarnessAuth/Profile/ThinkingLevel it resolved to into CreateInputs
@@ -4142,6 +4144,7 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// with released_at IS NULL by the pre-fix stop/suspend paths (or any
 	// future drift) without a separate one-shot migration.
 	s.scheduler.RegisterRecurringSingleton("broker-quota-reconcile", 60, store.LockBrokerQuotaReconcile, s.ReconcileStaleBrokerQuotaReservations)
+	s.scheduler.RegisterRecurringSingleton("reincarnation-sweep", 5, store.LockReincarnationSweep, s.reincarnationSweepHandler())
 
 	// A2A bridge sweep — conditional on the bridge being registered as a standalone plugin.
 	if a2aExternalURL := s.getA2ABridgeExternalURL(); a2aExternalURL != "" {

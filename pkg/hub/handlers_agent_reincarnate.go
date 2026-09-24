@@ -190,15 +190,26 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Amendment A2 / p1b-r1 R4: Phase 1 targets clone-per-agent workspaces
-	// only (design §7). GitClone is set exactly for that mode
-	// (populateAgentConfig) — nil covers both worktree-per-agent and
-	// shared-workspace. Checked here, before any plan is computed or
-	// anything persisted, as defense in depth alongside the broker's own
-	// refusal (Reprovision refuses to touch a non-clone workspace): this is
-	// what makes --dry-run report the restriction too, instead of a dry run
-	// showing a plan that a real request could not safely execute.
-	if agent.AppliedConfig == nil || agent.AppliedConfig.GitClone == nil {
+	project, err := s.store.GetProject(ctx, agent.ProjectID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Design §3.4 Amendments A2/A4: Phase 1 targets clone-per-agent
+	// workspaces only (design §7). GitClone alone does NOT
+	// identify that mode: populateAgentConfig
+	// (handlers_agent_create_helpers.go) sets GitClone for every git-remote
+	// project that is not shared-workspace, and that includes
+	// worktree-per-agent — so a worktree-per-agent agent has a non-nil
+	// GitClone and used to pass this gate. Checked here, before any plan is
+	// computed or anything persisted, as defense in depth alongside the
+	// broker's own refusal (Reprovision refuses to touch a non-clone
+	// workspace): this is what makes --dry-run report the restriction too,
+	// instead of a dry run showing a plan that a real request could not
+	// safely execute.
+	if agent.AppliedConfig == nil || agent.AppliedConfig.GitClone == nil ||
+		project.IsWorktreePerAgent() || project.IsSharedWorkspace() {
 		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
 			"reincarnate currently supports clone-per-agent workspaces only", nil)
 		return
@@ -232,12 +243,6 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	project, err := s.store.GetProject(ctx, agent.ProjectID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
-
 	// AC-2's "dry-run changed nothing" and the real path's plan are computed
 	// by the exact same call — buildFreshAppliedConfig only reads from the
 	// store (templates, harness configs, pre-start hooks, skills settings),
@@ -262,8 +267,9 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// AC-8 / p1b-r1 R1: claim the agent BEFORE creating the reincarnation
-	// record, guarded by the agent row's own optimistic lock (state_version).
+	// AC-8 / design §3.4 Amendment A3: claim the agent BEFORE creating the
+	// reincarnation record, guarded by the agent row's own optimistic lock
+	// (state_version).
 	// The previous order — create the record, then a guarded UpdateAgent —
 	// was check-then-act: a version conflict (or any error) on that second
 	// write left the just-created record stuck in "pending" forever, with no
@@ -293,15 +299,6 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		requestedBy = requesterIdentity.ID()
 	}
 
-	// design §3.4 Amendment A3.8 / p1b-r1 N1: the requester and the creator
-	// must both learn of a failure. The creator is already subscribed (from
-	// create); if the requester is a different principal than the agent
-	// itself and has no existing subscription, subscribe them now via the
-	// same mechanism create's --notify uses. failReincarnation's
-	// PublishAgentStatus on phase=error then reaches both through the
-	// ordinary subscription-dispatch path — no new delivery path needed.
-	s.ensureReincarnateRequesterSubscribed(ctx, agent, requesterIdentity, requestedBy)
-
 	rec := &store.AgentReincarnation{
 		AgentID:               agent.ID,
 		FromGeneration:        agent.Generation,
@@ -326,13 +323,25 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	// design §3.4 Amendment A3: the requester and the creator must both
+	// learn of a failure. The creator is already subscribed (from create);
+	// if the requester is a different principal than the agent itself and
+	// has no existing subscription, subscribe them now via the same
+	// mechanism create's --notify uses. failReincarnation's
+	// PublishAgentStatus on phase=error then reaches both through the
+	// ordinary subscription-dispatch path — no new delivery path needed.
+	// Deliberately after the record insert above: if that insert fails, the
+	// request errors out and there is no reincarnation to be notified about,
+	// so subscribing first would leave a subscription with nothing behind it.
+	s.ensureReincarnateRequesterSubscribed(ctx, agent, requesterIdentity, requestedBy)
+
 	// Detached background worker (design §3.1, §3.7): the request returns
 	// 202 before any teardown starts, and the worker runs on a context
 	// independent of this request's. A self-migration stops the calling
 	// container mid-flight, which would cancel r.Context() and abort the
 	// worker if it inherited it — exactly the self-deletion
 	// context-cancellation hazard §3.0 identifies for the rejected design.
-	go s.runReincarnationWorker(context.Background(), agent.ID, rec.ID, fresh, req.Handoff)
+	go s.runReincarnationWorker(context.Background(), agent.ID, rec.ID, rec.PreviousAppliedConfig, fresh, req.Handoff)
 
 	writeJSON(w, http.StatusAccepted, ReincarnateAgentResponse{
 		AgentID:    agent.ID,
@@ -343,7 +352,7 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 }
 
 // ensureReincarnateRequesterSubscribed implements design §3.4 Amendment
-// A3.8 (p1b-r1 N1): a reincarnate requester who is not the agent itself, and
+// A3.8: a reincarnate requester who is not the agent itself, and
 // who is not already subscribed to it, gets a notification subscription via
 // the same createNotifySubscription mechanism create's --notify flag uses.
 // The creator is already subscribed from create, so this closes the gap for

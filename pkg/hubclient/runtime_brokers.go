@@ -135,7 +135,7 @@ type BrokerHeartbeat struct {
 	Status   string             `json:"status"`
 	Projects []ProjectHeartbeat `json:"projects,omitempty"`
 	// Capabilities refreshes the broker's reported capabilities on every
-	// heartbeat (p1a-r1 R1(c)). Chosen over a hub->broker live /info query:
+	// heartbeat (design §3.4 Amendment A2.2(b)). Chosen over a hub->broker live /info query:
 	// no such query path exists today, and adding one would mean a new
 	// authenticated hub-initiated call plus endpoint resolution and timeout
 	// handling on the `scion reincarnate` pre-flight path, for a value that

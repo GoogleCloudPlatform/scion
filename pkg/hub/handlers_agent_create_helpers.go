@@ -201,8 +201,8 @@ func (s *Server) buildAppliedConfig(req CreateAgentRequest, creatorName string, 
 		// right. req.NoAuth already reflects the role=none mapping the
 		// caller applies before calling buildAppliedConfig (role is itself a
 		// kept field, so its NoAuth consequence must be captured as
-		// explicit too — see p1b-r1 C1 and AgentCreateInputs.NoAuth's doc
-		// comment).
+		// explicit too — see design §3.4 Amendment A3.1 and
+		// AgentCreateInputs.NoAuth's doc comment).
 		NoAuth:        req.NoAuth,
 		HarnessConfig: ac.HarnessConfig,
 		HarnessAuth:   ac.HarnessAuth,

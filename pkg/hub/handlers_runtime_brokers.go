@@ -565,8 +565,9 @@ type brokerHeartbeatRequest struct {
 	Status   string                   `json:"status"`
 	Projects []brokerProjectHeartbeat `json:"projects,omitempty"`
 	// Capabilities refreshes the broker's stored capabilities on every
-	// heartbeat (p1a-r1 R1(c) / hubclient.BrokerHeartbeat.Capabilities).
-	// Omitted by an old broker, in which case the store's capabilities are
+	// heartbeat (design §3.4 Amendment A2.2(b); see
+	// hubclient.BrokerHeartbeat.Capabilities). Omitted by an old broker, in
+	// which case the store's capabilities are
 	// left exactly as CompleteBrokerJoin last set them.
 	Capabilities *store.BrokerCapabilities `json:"capabilities,omitempty"`
 }
@@ -669,7 +670,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
-	// p1a-r1 R1(c): refresh stored capabilities from every heartbeat that
+	// Design §3.4 Amendment A2.2(b): refresh stored capabilities from every heartbeat that
 	// reports them, so an already-registered broker's capabilities are never
 	// stuck at whatever CompleteBrokerJoin saw once at join time — the false
 	// 412 case that otherwise blocks `scion reincarnate` until a manual
