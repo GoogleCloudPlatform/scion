@@ -343,9 +343,13 @@ func TestFederationConfig_Validate(t *testing.T) {
 				Enabled: true,
 				TrustedIssuers: []TrustedIssuerConfig{
 					{
-						IssuerURL:          "https://firebase.example.com",
-						IssuerType:         "user",
-						JWKSURL:            "https://firebase.example.com/jwks",
+						IssuerURL:  "https://firebase.example.com",
+						IssuerType: "user",
+						JWKSURL:    "https://firebase.example.com/jwks",
+						// Non-empty on purpose: isolates isActiveGoogleUserIssuer's
+						// Google-issuer-URL term from its expected_audience term,
+						// so this case can only trigger on the issuer not being Google.
+						ExpectedAudience:   "client-id",
 						AllowedGCPProjects: []string{"my-gcp-project"},
 					},
 				},
@@ -458,10 +462,14 @@ func TestFederationConfig_Validate(t *testing.T) {
 				Enabled: true,
 				TrustedIssuers: []TrustedIssuerConfig{
 					{
-						IssuerURL:      "https://firebase.example.com",
-						IssuerType:     "user",
-						JWKSURL:        "https://firebase.example.com/jwks",
-						AllowedDomains: []string{"example.com"},
+						IssuerURL:  "https://firebase.example.com",
+						IssuerType: "user",
+						JWKSURL:    "https://firebase.example.com/jwks",
+						// Non-empty on purpose: isolates isActiveGoogleUserIssuer's
+						// Google-issuer-URL term from its expected_audience term,
+						// so this case can only trigger on the issuer not being Google.
+						ExpectedAudience: "client-id",
+						AllowedDomains:   []string{"example.com"},
 					},
 				},
 			},
@@ -580,5 +588,67 @@ func TestFederationConfig_Validate(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestInvalidDomainEntryReason table-tests every shape Rule 11 rejects: an
+// allowed_domains entry that can never equal anything domainOf
+// (pkg/hub/auth_external_bearer.go) returns, so it would otherwise silently
+// lock out every user in the domain the operator meant to allow.
+func TestInvalidDomainEntryReason(t *testing.T) {
+	tests := []struct {
+		name        string
+		domain      string
+		wantInvalid bool
+	}{
+		{"valid domain", "example.com", false},
+		{"valid mixed-case domain", "Example.COM", false},
+		{"valid multi-label domain", "sub.example.com", false},
+		{"empty entry", "", true},
+		{"contains at sign (email address)", "user@example.com", true},
+		{"leading wildcard (allowed_emails idiom)", "*.example.com", true},
+		{"bare wildcard", "*", true},
+		{"contains whitespace", "exa mple.com", true},
+		{"leading and trailing whitespace", " example.com ", true},
+		{"leading dot", ".example.com", true},
+		{"trailing dot", "example.com.", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := invalidDomainEntryReason(tt.domain)
+			if (got != "") != tt.wantInvalid {
+				t.Errorf("invalidDomainEntryReason(%q) = %q, wantInvalid %v", tt.domain, got, tt.wantInvalid)
+			}
+		})
+	}
+}
+
+// TestFederationConfig_Validate_InvalidDomainEntryShape confirms Rule 11 is
+// actually wired into Validate() (not just the pure predicate above), with a
+// per-entry error message that names the offending entry.
+func TestFederationConfig_Validate_InvalidDomainEntryShape(t *testing.T) {
+	cfg := FederationConfig{
+		Enabled: true,
+		TrustedIssuers: []TrustedIssuerConfig{
+			{
+				IssuerURL:        "https://accounts.google.com",
+				IssuerType:       "user",
+				ExpectedAudience: "client-id.apps.googleusercontent.com",
+				AllowedDomains:   []string{"example.com", "user@example.com", ".leading-dot.com"},
+			},
+		},
+	}
+	errs := cfg.Validate()
+	if len(errs) != 2 {
+		t.Fatalf("Validate() returned %d errors, want 2 (one per malformed entry, the valid entry produces none): %v", len(errs), errs)
+	}
+	combined := ""
+	for _, e := range errs {
+		combined += e.Error() + " "
+	}
+	for _, want := range []string{`allowed_domains[1] "user@example.com"`, `allowed_domains[2] ".leading-dot.com"`} {
+		if !strings.Contains(combined, want) {
+			t.Errorf("expected error messages to contain %q, got: %s", want, combined)
+		}
 	}
 }

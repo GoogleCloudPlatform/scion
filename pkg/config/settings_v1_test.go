@@ -379,6 +379,46 @@ profiles:
 	assert.Equal(t, "gemini-custom", profile.DefaultHarnessConfig)
 }
 
+// TestLoadVersionedSettings_FederationGoogleIssuerFields loads
+// allowed_domains and allowed_gcp_projects from a settings.yaml file through
+// the real koanf decode path (LoadVersionedSettings), rather than
+// constructing a V1TrustedIssuerConfig struct literal directly. A koanf tag
+// typo on either field would silently drop it from the decoded settings
+// (failing open to "no domain/project constraint") without this test
+// noticing, since every other test for these fields builds the Go struct by
+// hand.
+func TestLoadVersionedSettings_FederationGoogleIssuerFields(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
+
+	projectSettings := `
+schema_version: "1"
+server:
+  federation:
+    enabled: true
+    trusted_issuers:
+      - issuer_url: "https://accounts.google.com"
+        issuer_type: "user"
+        expected_audience: "client-id.apps.googleusercontent.com"
+        allowed_domains: ["example.com", "other.example"]
+        allowed_gcp_projects: ["gcp-proj-1", "gcp-proj-2"]
+`
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(projectSettings), 0644))
+
+	vs, err := LoadVersionedSettings(projectDir)
+	require.NoError(t, err)
+
+	require.NotNil(t, vs.Server)
+	require.NotNil(t, vs.Server.Federation)
+	require.Len(t, vs.Server.Federation.TrustedIssuers, 1)
+	issuer := vs.Server.Federation.TrustedIssuers[0]
+	assert.Equal(t, []string{"example.com", "other.example"}, issuer.AllowedDomains)
+	assert.Equal(t, []string{"gcp-proj-1", "gcp-proj-2"}, issuer.AllowedGCPProjects)
+}
+
 // --- AdaptLegacySettings tests ---
 
 func TestAdaptLegacySettings_FullMapping(t *testing.T) {

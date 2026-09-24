@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // FederationConfig holds configuration for hub-hub federation authentication.
@@ -140,6 +141,30 @@ func appendGoogleUserOnlyFieldError(errs []error, i int, issuer TrustedIssuerCon
 	return append(errs, fmt.Errorf("trusted_issuers[%d]: %s requires issuer_type \"user\" and a non-empty expected_audience on the Google issuer; nothing would enforce it otherwise", i, fieldName))
 }
 
+// invalidDomainEntryReason reports why domain can never match domainOf's
+// parsed email domain (pkg/hub/auth_external_bearer.go: exact,
+// case-insensitive comparison, no wildcards, no subdomain matching), or ""
+// if the shape is fine. This does not check whether the domain is real or
+// reachable, only whether it is a shape that could ever compare equal to
+// something domainOf returns — an email address, a leading-wildcard pattern,
+// whitespace, or a leading/trailing dot never can, and each is a plausible
+// operator mistake worth catching at config-validation time instead of a
+// silent, permanent lockout.
+func invalidDomainEntryReason(domain string) string {
+	switch {
+	case domain == "":
+		return "must not be empty"
+	case strings.ContainsAny(domain, "@*"):
+		return `must be a bare domain, not an email address or wildcard pattern (no "@" or "*")`
+	case strings.IndexFunc(domain, unicode.IsSpace) >= 0:
+		return "must not contain whitespace"
+	case strings.HasPrefix(domain, ".") || strings.HasSuffix(domain, "."):
+		return "must not have a leading or trailing dot"
+	default:
+		return ""
+	}
+}
+
 // Validate checks FederationConfig for configuration errors.
 // It returns a slice of all errors found (not just the first).
 func (c *FederationConfig) Validate() []error {
@@ -235,6 +260,21 @@ func (c *FederationConfig) Validate() []error {
 		// above — it only does anything on an ACTIVE Google user issuer.
 		if len(issuer.AllowedDomains) > 0 && !isActiveGoogleUserIssuer(issuer) {
 			errs = appendGoogleUserOnlyFieldError(errs, i, issuer, "allowed_domains")
+		}
+
+		// Rule 11: each allowed_domains entry must be a shape that
+		// domainOf's parsed email domain (pkg/hub/auth_external_bearer.go)
+		// could ever equal. An email address, a leading-wildcard pattern (the
+		// allowed_emails idiom, which does not apply here), whitespace, or a
+		// leading/trailing dot can never match, so an entry in one of those
+		// shapes silently locks out every user in the domain the operator
+		// meant to allow. Checked regardless of isActiveGoogleUserIssuer: a
+		// malformed entry is a mistake in every position, not just the
+		// active one.
+		for j, domain := range issuer.AllowedDomains {
+			if reason := invalidDomainEntryReason(domain); reason != "" {
+				errs = append(errs, fmt.Errorf("trusted_issuers[%d]: allowed_domains[%d] %q: %s", i, j, domain, reason))
+			}
 		}
 	}
 
