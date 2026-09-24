@@ -383,7 +383,7 @@ func TestProductionValidator_IDToken_ServiceAccount(t *testing.T) {
 
 	// The validator classifies service accounts but does not reject them —
 	// rejection (or admission, under other policy) is the caller's
-	// responsibility (design §4.2(i)).
+	// responsibility.
 	identity, err := validator.ValidateIDToken(t.Context(), token,
 		[]string{"test-client-id.apps.googleusercontent.com"})
 	if err != nil {
@@ -396,12 +396,12 @@ func TestProductionValidator_IDToken_ServiceAccount(t *testing.T) {
 
 // gcvSANumericSub is a realistic Google service-account "sub"/"azp" value: a
 // large numeric unique ID, matching what the metadata server and
-// iamcredentials.generateIdToken actually issue for SA ID tokens (design
-// §4.2(ii)). Distinct from auth_external_bearer_sa_test.go's saNumericSub so
+// iamcredentials.generateIdToken actually issue for SA ID tokens.
+// Distinct from auth_external_bearer_sa_test.go's saNumericSub so
 // this file has no cross-file test dependency.
 const gcvSANumericSub = "999988887777666655554"
 
-// S1 (validator level) — an SA ID token whose azp equals sub (the SA-minted
+// At the validator level — an SA ID token whose azp equals sub (the SA-minted
 // shape) validates: aud is checked against allowedClientIDs exactly as for a
 // user token (isAllowedAudience, earlier in ValidateIDToken), and the azp/sub
 // rule does not additionally reject it.
@@ -667,7 +667,7 @@ func TestProductionValidator_IDToken_JWKSForceRefresh(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Review r1 finding 2 — error classification. Google's tokeninfo/userinfo
+// Error classification. Google's tokeninfo/userinfo
 // 400/401 (and a 200 body carrying an "error" field) must map to
 // ErrGoogleInvalidCredential (401, negatively cacheable); a failed JWKS
 // forceRefresh (network/5xx/cancelled) must map to ErrGoogleUpstreamError
@@ -702,7 +702,7 @@ func TestProductionValidator_AccessToken_TokenInfo400_InvalidCredential(t *testi
 }
 
 // TestProductionValidator_AccessToken_TokenInfo200WithErrorBody_InvalidCredential
-// covers review r2 optional finding 2: a 200 response can still carry a
+// covers the case where a 200 response can still carry a
 // body-level credential rejection via the tokeninfo response's
 // error_description field (googleTokenInfoResponse.Error's actual json tag —
 // not "error", which the 400-status test above uses only incidentally,
@@ -1153,7 +1153,7 @@ func TestProductionValidator_AccessToken_ServiceAccount(t *testing.T) {
 	validator := newTestValidator(endpoints)
 	// The validator classifies service accounts but does not reject them —
 	// rejection (or admission, under other policy) is the caller's
-	// responsibility (design §4.2(i)).
+	// responsibility.
 	identity, err := validator.ValidateAccessToken(t.Context(), "sa-token",
 		[]string{"test-client-id.apps.googleusercontent.com"})
 	if err != nil {

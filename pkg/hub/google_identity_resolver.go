@@ -30,7 +30,7 @@ import (
 // GoogleIdentityResolver — resolves a validated Google identity to a local Hub
 // user via the external identity binding system.
 //
-// Extracted from ge_exchange.go (design §4.3) so the GE credential-exchange
+// Extracted from ge_exchange.go so the GE credential-exchange
 // endpoint and the external-bearer authentication path (auth_external_bearer.go)
 // share exactly one resolution/provisioning/suspension code path. Both must
 // reach identical decisions for the same Google identity during the soak
@@ -172,7 +172,7 @@ func (r *GoogleIdentityResolver) Resolve(ctx context.Context, identity *Validate
 	// silently treated as "no binding": that would let a transient store
 	// error either provision a duplicate user or (for a non-authoritative
 	// email) surface as 403 instead of the store fault it actually is. Only
-	// store.ErrNotFound means "no binding exists yet" (F2, fix round 3).
+	// store.ErrNotFound means "no binding exists yet".
 	if !errors.Is(err, store.ErrNotFound) {
 		r.log.Error("google identity resolver: external identity lookup failed",
 			"sub", identity.Subject, "error", err)

@@ -17,10 +17,10 @@ package hub
 import "strings"
 
 // ---------------------------------------------------------------------------
-// Service-account project parsing (design §4.5).
+// Service-account project parsing.
 //
 // googleSAProject parses the GCP project ID out of a Google service-account
-// email, for the external-bearer path's allowed_gcp_projects check (design §4.4):
+// email, for the external-bearer path's allowed_gcp_projects check:
 // a service-account ID token is admitted only when its project is explicitly
 // listed. This is deliberately narrower than isGoogleServiceAccount
 // (google_credential_validator.go), which classifies IsServiceAccount for
@@ -76,8 +76,8 @@ func googleSAProject(email string) (projectID string, ok bool) {
 
 	case domain == "developer.gserviceaccount.com":
 		// N-compute@developer.gserviceaccount.com carries only the project
-		// NUMBER, not the project ID allowed_gcp_projects is configured with
-		// (design §2 non-goal: "Compute default SAs ... Reject them in v1").
+		// NUMBER, not the project ID allowed_gcp_projects is configured with.
+		// Compute default SAs are rejected rather than supported here.
 		return "", false
 
 	case domain == "system.gserviceaccount.com":

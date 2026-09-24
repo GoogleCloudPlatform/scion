@@ -31,7 +31,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Caching decorator for GoogleCredentialValidator (design §4.2(iii)).
+// Caching decorator for GoogleCredentialValidator.
 //
 // Wraps a base GoogleCredentialValidator (the shared instance also used by
 // GEExchangeService, see server.go) with a bounded, per-instance cache of
@@ -48,7 +48,7 @@ import (
 //
 // No package-level state: the cache lives entirely on the instance returned
 // by NewCachingGoogleCredentialValidator, which the caller (server.go) stores
-// on Server/AuthConfig (design §4.2(iii), I4).
+// on Server/AuthConfig.
 // ---------------------------------------------------------------------------
 
 const (
@@ -58,7 +58,7 @@ const (
 	defaultGoogleCredentialCacheMaxTTL = 5 * time.Minute
 	// defaultGoogleCredentialCacheNegTTL is how long a rejected credential's
 	// negative result is cached, to blunt repeated-garbage-token
-	// amplification (design §4.2(iii), C5).
+	// amplification.
 	defaultGoogleCredentialCacheNegTTL = 30 * time.Second
 	// defaultGoogleCredentialCacheMaxEntries bounds cache memory under
 	// hostile unique-token churn. When full, new keys are refused rather
@@ -84,8 +84,8 @@ func WithCacheMaxEntries(n int) CacheOption {
 	return func(c *cachingGoogleCredentialValidator) { c.maxEntries = n }
 }
 
-// withCacheNowFunc overrides the cache's clock. Test-only (unexported): C3
-// (TTL never outlives UpstreamExpiry) and C4/eviction tests need to advance
+// withCacheNowFunc overrides the cache's clock. Test-only (unexported): the
+// TTL-vs-UpstreamExpiry and eviction tests need to advance
 // time deterministically instead of sleeping.
 func withCacheNowFunc(now func() time.Time) CacheOption {
 	return func(c *cachingGoogleCredentialValidator) { c.now = now }
@@ -126,7 +126,7 @@ type cachingGoogleCredentialValidator struct {
 
 	group singleflight.Group
 
-	// metrics records hit/miss/negative_hit (design §4.7). A plain
+	// metrics records hit/miss/negative_hit. A plain
 	// atomic.Pointer, not a mutex-guarded field, so the hot Validate*
 	// path never contends with SetMetrics (called once, at startup, from a
 	// different goroutine — see server.go's SetGoogleValidatorCacheMetrics).
@@ -171,7 +171,7 @@ func cacheResultFor(err error) GoogleValidatorCacheResult {
 
 // NewCachingGoogleCredentialValidator wraps v with a bounded, per-instance
 // cache of successful and (selectively) failed validations. See the package
-// doc comment above for the caching policy; defaults match design §4.2(iii):
+// doc comment above for the caching policy; defaults:
 // maxTTL 5m, negTTL 30s, maxEntries 10000.
 func NewCachingGoogleCredentialValidator(v GoogleCredentialValidator, opts ...CacheOption) GoogleCredentialValidator {
 	c := &cachingGoogleCredentialValidator{
@@ -203,11 +203,11 @@ func cacheKey(token string, allowedClientIDs []string) string {
 }
 
 // negativelyCacheableGoogleError reports whether err is one of the four
-// errors design §4.2(iii) allows to be cached negatively. ErrGoogleUpstreamError
+// errors allowed to be cached negatively. ErrGoogleUpstreamError
 // is deliberately excluded — and so is every other error not on this list —
-// so a transient upstream blip, or any credential fault the design didn't
-// explicitly vet for negative caching, is never remembered against the
-// caller: the next request always retries upstream (C4).
+// so a transient upstream blip, or any credential fault not
+// explicitly vetted for negative caching, is never remembered against the
+// caller: the next request always retries upstream.
 func negativelyCacheableGoogleError(err error) bool {
 	return errors.Is(err, ErrGoogleInvalidCredential) ||
 		errors.Is(err, ErrGoogleExpiredCredential) ||
@@ -217,8 +217,8 @@ func negativelyCacheableGoogleError(err error) bool {
 
 // Cached reports whether a validation result for (token, allowedClientIDs) is
 // currently live in the cache. auth_external_bearer.go's rate limiter uses
-// this (via a type assertion) to skip rate-limiting on cache hits (design
-// §4.4: the limiter is consulted "only on cache misses").
+// this (via a type assertion) to skip rate-limiting on cache hits: the
+// limiter is consulted only on cache misses.
 func (c *cachingGoogleCredentialValidator) Cached(token string, allowedClientIDs []string) bool {
 	_, ok := c.lookup(cacheKey(token, allowedClientIDs))
 	return ok
@@ -241,7 +241,7 @@ func (c *cachingGoogleCredentialValidator) lookup(key string) (googleCredCacheEn
 // store inserts a completed result, subject to the negative-caching
 // allowlist and the maxEntries bound. It evicts expired entries once to try
 // to make room, and refuses the insert (rather than evicting a live entry)
-// if the cache is still full afterwards — there is no LRU (design §4.2(iii)).
+// if the cache is still full afterwards — there is no LRU.
 // A refused insert only means the next request re-validates; it never
 // changes the result returned to the current caller.
 func (c *cachingGoogleCredentialValidator) store(key string, identity *ValidatedGoogleIdentity, err error) {
@@ -251,7 +251,7 @@ func (c *cachingGoogleCredentialValidator) store(key string, identity *Validated
 		ttl = c.maxTTL
 		// Use c.now(), not the wall clock (time.Until), so tests that inject
 		// a fake clock exercise the real expiry arithmetic instead of
-		// silently mixing clocks (review r1 nit 7).
+		// silently mixing clocks.
 		if remaining := identity.UpstreamExpiry.Sub(c.now()); remaining < ttl {
 			ttl = remaining
 		}
@@ -298,8 +298,8 @@ const upstreamCallTimeout = 10 * time.Second
 // call. Every waiter on a given key — the leader that ran the callback and
 // every follower collapsed into it — receives the same value from Do, so
 // tagging viaUpstream here (rather than recomputing it per-caller) is what
-// lets every one of them record the correct cache-outcome metric (design
-// §4.7), not just the leader.
+// lets every one of them record the correct cache-outcome metric,
+// not just the leader.
 type googleCredValidateResult struct {
 	entry       googleCredCacheEntry
 	viaUpstream bool
@@ -321,7 +321,7 @@ func (c *cachingGoogleCredentialValidator) validate(
 	}
 
 	// singleflight collapses concurrent first requests for the same key into
-	// one upstream call (design §4.2(iii), C6).
+	// one upstream call.
 	v, _, _ := c.group.Do(key, func() (interface{}, error) {
 		// Re-check: a concurrent Do call for a *different* key that finished
 		// first, or a request that arrived just as the previous flight for
@@ -331,8 +331,8 @@ func (c *cachingGoogleCredentialValidator) validate(
 		}
 		// Detach from the leader's own request context: this call is shared
 		// by every waiter on this key, so the leader cancelling (or timing
-		// out) its own request must not fail every follower's request too
-		// (review r1 finding 4). Still bounded by upstreamCallTimeout so a
+		// out) its own request must not fail every follower's request too.
+		// Still bounded by upstreamCallTimeout so a
 		// leaderless call can't hang forever.
 		upstreamCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), upstreamCallTimeout)
 		defer cancel()

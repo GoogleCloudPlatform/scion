@@ -41,7 +41,7 @@ type countingBaseValidator struct {
 	accessTokenErr    error
 
 	// delay, if set, is slept before returning — used to widen the window
-	// for concurrent callers to race into the same singleflight key (C6).
+	// for concurrent callers to race into the same singleflight key.
 	delay time.Duration
 }
 
@@ -102,7 +102,7 @@ func TestGoogleCredentialCache_KeyIgnoresAudienceOrder(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// C2 — repeated validation of the same token within the TTL costs exactly one
+// Repeated validation of the same token within the TTL costs exactly one
 // upstream call.
 // ---------------------------------------------------------------------------
 
@@ -150,7 +150,7 @@ func TestGoogleCredentialCache_DifferentTokensDoNotShareEntry(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// C3 — a cache entry never outlives the credential's own UpstreamExpiry, even
+// A cache entry never outlives the credential's own UpstreamExpiry, even
 // when that is shorter than maxTTL.
 // ---------------------------------------------------------------------------
 
@@ -161,7 +161,7 @@ func TestGoogleCredentialCache_TTLCappedByUpstreamExpiry(t *testing.T) {
 	// instead of identity.UpstreamExpiry.Sub(c.now()) (the fake one) would
 	// compute a wildly wrong remaining lifetime here and fail loudly, instead
 	// of silently passing because the fake clock happened to start near the
-	// real one (review r1 nit 7).
+	// real one.
 	now := time.Now().AddDate(50, 0, 0)
 	clock := now
 	nowFunc := func() time.Time { return clock }
@@ -232,7 +232,7 @@ func TestGoogleCredentialCache_MaxTTLCapsLongLivedCredential(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// C4 — an upstream fault (ErrGoogleUpstreamError) is never negatively cached:
+// An upstream fault (ErrGoogleUpstreamError) is never negatively cached:
 // the next request must retry upstream, not replay the failure.
 // ---------------------------------------------------------------------------
 
@@ -256,7 +256,7 @@ func TestGoogleCredentialCache_UpstreamErrorNeverCached(t *testing.T) {
 // upstream call for repeated attempts within negTTL); everything else,
 // including errors that are neither on the allowlist nor ErrGoogleUpstreamError,
 // is never cached, matching the conservative "only for the four listed
-// errors" reading of design §4.2(iii).
+// errors" policy.
 func TestGoogleCredentialCache_NegativeCacheOnlyForFourListedErrors(t *testing.T) {
 	cacheableErrs := []error{
 		ErrGoogleInvalidCredential,
@@ -326,7 +326,7 @@ func TestGoogleCredentialCache_NegativeEntryExpiresAfterNegTTL(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// C6 — concurrent first requests for the same token collapse into one
+// Concurrent first requests for the same token collapse into one
 // upstream call (singleflight).
 // ---------------------------------------------------------------------------
 
@@ -490,7 +490,7 @@ func TestGoogleCredentialCache_EvictsExpiredBeforeRefusing(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Review r1 finding 4 — singleflight must not run the shared upstream call
+// singleflight must not run the shared upstream call
 // under the specific caller (the "leader") that happened to trigger it: that
 // caller cancelling its own request must not fail every other concurrent
 // waiter's request too.
@@ -521,14 +521,12 @@ func (v *blockingValidator) ValidateAccessToken(ctx context.Context, _ string, _
 
 // validate is meant to be called exactly once (singleflight should collapse
 // every concurrent caller into this one invocation). But under a mutation
-// that disables the cache/singleflight sharing (e.g. the C2 "no store"
-// mutant), a follower that misses the flight calls this a second time.
+// that disables the cache/singleflight sharing, a follower that misses the
+// flight calls this a second time.
 // startOnce guards close(v.started) against that: without it, the second
 // call panics on close of an already-closed channel — a panic singleflight
 // recovers and re-raises, aborting the whole test binary — instead of
-// letting this test's own callCount() != 1 assertion report the regression
-// (review r3 optional finding 2; same class of problem as r2 optional
-// finding 3 and P1 r4 optional finding 1).
+// letting this test's own callCount() != 1 assertion report the regression.
 func (v *blockingValidator) validate(ctx context.Context) (*ValidatedGoogleIdentity, error) {
 	v.mu.Lock()
 	v.calls++
@@ -595,8 +593,8 @@ func TestGoogleCredentialCache_LeaderCancellationDoesNotPoisonFollowers(t *testi
 }
 
 // ---------------------------------------------------------------------------
-// O1 — scion_hub_google_validator_cache_total{result=hit|miss|negative_hit},
-// design §4.7. Each result is proven through the decorator's public
+// scion_hub_google_validator_cache_total{result=hit|miss|negative_hit}.
+// Each result is proven through the decorator's public
 // ValidateIDToken/ValidateAccessToken methods, not by calling
 // RecordGoogleValidatorCache directly.
 // ---------------------------------------------------------------------------
@@ -673,7 +671,7 @@ func TestGoogleCredentialCache_MetricsRecordsNegativeHit(t *testing.T) {
 
 // TestGoogleCredentialCache_MetricsUpstreamErrorNeverCountsAsHitOrNegativeHit
 // proves ErrGoogleUpstreamError — never cached, positively or negatively
-// (C4) — is recorded as "miss" on every call, never "negative_hit": a
+// — is recorded as "miss" on every call, never "negative_hit": a
 // mutation that started treating it as cacheable would move this count.
 func TestGoogleCredentialCache_MetricsUpstreamErrorNeverCountsAsHitOrNegativeHit(t *testing.T) {
 	base := &countingBaseValidator{accessTokenErr: ErrGoogleUpstreamError}
@@ -737,7 +735,7 @@ func TestGoogleCredentialCache_MetricsNilRecorder_NoPanic(t *testing.T) {
 
 // TestGoogleCredentialCache_MetricsSingleflightFollowersRecordMiss uses the
 // same delay-widened-window technique as
-// TestGoogleCredentialCache_SingleflightCollapsesConcurrentMisses (C6) to
+// TestGoogleCredentialCache_SingleflightCollapsesConcurrentMisses to
 // collapse N concurrent callers into one singleflight leader, then proves
 // every one of them — not just the leader — records "miss": none was served
 // from cache, even though only the leader actually dials upstream.

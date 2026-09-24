@@ -126,7 +126,7 @@ var (
 	// the generic 401 a bare field-disagreement would give it there; it must
 	// be checked before ErrGoogleFieldDisagreement in any switch matching
 	// both. This does not reject service accounts anywhere else in the
-	// validator — SA ID tokens with azp == sub still validate (design §4.2(ii)).
+	// validator — SA ID tokens with azp == sub still validate.
 	ErrGoogleServiceAccount  = errors.New("service-account credential rejected")
 	ErrGoogleMissingField    = errors.New("required field missing from Google response")
 	ErrGoogleUpstreamError   = errors.New("google upstream validation failed")
@@ -213,7 +213,7 @@ func (v *googleCredentialValidator) ValidateIDToken(ctx context.Context, token s
 			// credential is invalid. Mislabeling it ErrGoogleInvalidCredential
 			// would make it negatively cacheable (google_credential_cache.go),
 			// refusing a validly-signed token for negTTL after a transient
-			// JWKS blip (review r1 finding 2).
+			// JWKS blip.
 			return nil, fmt.Errorf("%w: signature verification failed and JWKS refresh failed: %v",
 				ErrGoogleUpstreamError, err)
 		}
@@ -279,7 +279,7 @@ func (v *googleCredentialValidator) ValidateIDToken(ctx context.Context, token s
 	}
 
 	// Classify service accounts by the verified email claim. Rejection is the
-	// caller's responsibility (design §4.2(i)): GEExchangeService rejects SA
+	// caller's responsibility: GEExchangeService rejects SA
 	// identities immediately after validation to keep its behaviour unchanged,
 	// while other callers (e.g. the external-bearer path) may admit them under
 	// their own policy.
@@ -288,7 +288,7 @@ func (v *googleCredentialValidator) ValidateIDToken(ctx context.Context, token s
 	expiry := claims.Expiry.Time()
 
 	// Extract audience. Service-account and user ID tokens disagree on what
-	// azp means, so they get different rules (design §4.2(ii)):
+	// azp means, so they get different rules:
 	//
 	//   - User tokens (unchanged): azp, when present, is the authoritative
 	//     issued-to client, and aud must not disagree with it.
@@ -373,8 +373,7 @@ func (v *googleCredentialValidator) ValidateAccessToken(ctx context.Context, tok
 	// rejected, ErrGoogleUpstreamError for a network/5xx/decode fault) — do
 	// not re-wrap it as ErrGoogleUpstreamError here, or every tokeninfo 400
 	// (the most common real rejection: an expired or revoked access token)
-	// would be misreported as an upstream outage and never negatively cached
-	// (review r1 finding 2).
+	// would be misreported as an upstream outage and never negatively cached.
 	tokenInfo, err := v.getTokenInfo(ctx, token)
 	if err != nil {
 		return nil, fmt.Errorf("tokeninfo call failed: %w", err)
@@ -452,7 +451,7 @@ func (v *googleCredentialValidator) ValidateAccessToken(ctx context.Context, tok
 		UpstreamExpiry: upstreamExpiry,
 		HostedDomain:   userInfo.HD,
 		// Classify service accounts by the verified email claim. Rejection is
-		// the caller's responsibility (design §4.2(i)); see ValidateIDToken.
+		// the caller's responsibility; see ValidateIDToken.
 		IsServiceAccount: isGoogleServiceAccount(userInfo.Email),
 	}, nil
 }
@@ -555,7 +554,7 @@ type googleUserInfoResponse struct {
 // expired or revoked access token with tokeninfo 400 {"error":"invalid_token"};
 // 401 is included defensively for the same class of rejection. Everything
 // else non-2xx (5xx, unexpected 3xx/4xx) is treated as an upstream fault, not
-// a credential verdict (review r1 finding 2).
+// a credential verdict.
 func isGoogleClientErrorStatus(status int) bool {
 	return status == http.StatusBadRequest || status == http.StatusUnauthorized
 }
@@ -778,7 +777,7 @@ func isAllowedAudience(audiences jwt.Audience, allowed []string) bool {
 // matchedAudience returns the first entry of aud that appears in allowed.
 // Callers must have already confirmed a match exists (isAllowedAudience);
 // this only recovers which one, for SA ID tokens where azp is not the
-// audience (design §4.2(ii)). Returns "" if, contrary to that precondition,
+// audience. Returns "" if, contrary to that precondition,
 // no entry matches — callers must not treat that as a valid audience.
 func matchedAudience(aud jwt.Audience, allowed []string) string {
 	for _, a := range aud {

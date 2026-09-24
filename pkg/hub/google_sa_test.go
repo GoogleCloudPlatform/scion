@@ -16,7 +16,8 @@ package hub
 
 import "testing"
 
-// S5: googleSAProject table test — every row of design §4.5, plus
+// TestGoogleSAProject is a googleSAProject table test — every email shape
+// googleSAProject recognizes, plus
 // case-folding. Each case pins both the returned project ID and the ok
 // bool, so a mutation that silently returns ("", true) or drops a rejection
 // branch fails here rather than only at the (later) middleware level.
