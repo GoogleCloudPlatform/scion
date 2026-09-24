@@ -234,7 +234,7 @@ func TestDeleteAgentReincarnationsForAgent(t *testing.T) {
 	assert.Equal(t, "agent-2", stillThere.AgentID)
 }
 
-// TestTryAdvanceAgentReincarnation is the design §3.4 Amendment A7 (N2)
+// TestTryAdvanceAgentReincarnation is the design §3.4 Amendment A7
 // store-level table test pinning the contract every worker/sweep write in
 // pkg/hub rests on: TryAdvanceAgentReincarnation only applies when the
 // record's CURRENT State exactly equals expectState.
@@ -248,7 +248,7 @@ func TestTryAdvanceAgentReincarnation(t *testing.T) {
 
 		pinned := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
 		upd := &store.AgentReincarnation{ID: rec.ID, State: store.AgentReincarnationStateStopping, UpdatedAt: pinned}
-		ok, err := s.TryAdvanceAgentReincarnation(ctx, upd, store.AgentReincarnationStatePending)
+		ok, err := s.TryAdvanceAgentReincarnation(ctx, upd, store.AgentReincarnationStatePending, time.Time{})
 		require.NoError(t, err)
 		assert.True(t, ok)
 
@@ -266,7 +266,7 @@ func TestTryAdvanceAgentReincarnation(t *testing.T) {
 		require.NoError(t, err)
 
 		upd := &store.AgentReincarnation{ID: rec.ID, State: store.AgentReincarnationStateFailed, Error: "should not land", UpdatedAt: time.Now()}
-		ok, err := s.TryAdvanceAgentReincarnation(ctx, upd, store.AgentReincarnationStateStopping) // wrong expectState
+		ok, err := s.TryAdvanceAgentReincarnation(ctx, upd, store.AgentReincarnationStateStopping, time.Time{}) // wrong expectState
 		require.NoError(t, err)
 		assert.False(t, ok)
 
@@ -277,7 +277,7 @@ func TestTryAdvanceAgentReincarnation(t *testing.T) {
 		assert.WithinDuration(t, before.UpdatedAt, after.UpdatedAt, time.Second, "updated_at must be untouched")
 	})
 
-	t.Run("terminal state can never be advanced away from, even by matching it as expectState", func(t *testing.T) {
+	t.Run("store does plain equality; terminal-to-terminal rejection is the hub's job", func(t *testing.T) {
 		s := newTestAgentReincarnationStore(t)
 		rec := &store.AgentReincarnation{AgentID: "agent-1", FromGeneration: 1, ToGeneration: 2, State: store.AgentReincarnationStateFailed, Error: "first failure"}
 		require.NoError(t, s.CreateAgentReincarnation(ctx, rec))
@@ -289,7 +289,7 @@ func TestTryAdvanceAgentReincarnation(t *testing.T) {
 		// this lives in reincarnate_worker.go's tryAdvanceReincarnation
 		// (IsAgentReincarnationStateNonTerminal), not in the store.
 		upd := &store.AgentReincarnation{ID: rec.ID, State: store.AgentReincarnationStateFailed, Error: "second failure", UpdatedAt: time.Now()}
-		ok, err := s.TryAdvanceAgentReincarnation(ctx, upd, store.AgentReincarnationStateFailed)
+		ok, err := s.TryAdvanceAgentReincarnation(ctx, upd, store.AgentReincarnationStateFailed, time.Time{})
 		require.NoError(t, err)
 		assert.True(t, ok, "the store primitive itself does a plain state equality check; it is not what rejects terminal-to-terminal")
 	})
@@ -297,7 +297,7 @@ func TestTryAdvanceAgentReincarnation(t *testing.T) {
 	t.Run("missing id returns false with no error", func(t *testing.T) {
 		s := newTestAgentReincarnationStore(t)
 		upd := &store.AgentReincarnation{ID: "00000000-0000-0000-0000-000000000000", State: store.AgentReincarnationStateFailed, UpdatedAt: time.Now()}
-		ok, err := s.TryAdvanceAgentReincarnation(ctx, upd, store.AgentReincarnationStatePending)
+		ok, err := s.TryAdvanceAgentReincarnation(ctx, upd, store.AgentReincarnationStatePending, time.Time{})
 		require.NoError(t, err)
 		assert.False(t, ok)
 	})
@@ -324,7 +324,7 @@ func TestTryAdvanceAgentReincarnation(t *testing.T) {
 					target = store.AgentReincarnationStateCompleted
 				}
 				upd := &store.AgentReincarnation{ID: rec.ID, State: target, UpdatedAt: time.Now()}
-				ok, err := s.TryAdvanceAgentReincarnation(ctx, upd, store.AgentReincarnationStatePending)
+				ok, err := s.TryAdvanceAgentReincarnation(ctx, upd, store.AgentReincarnationStatePending, time.Time{})
 				assert.NoError(t, err)
 				if ok {
 					wins.Add(1)
@@ -338,5 +338,49 @@ func TestTryAdvanceAgentReincarnation(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, got.State == store.AgentReincarnationStateFailed || got.State == store.AgentReincarnationStateCompleted,
 			"the row must land on whichever target the sole winner wrote")
+	})
+
+	// design §3.4 Amendment A7.1/A9.2: olderThan adds `AND updated_at < ?`
+	// to the same conditional UPDATE, so the sweep's CAS can also enforce
+	// the staleness bound it used to select the record in the first place.
+	t.Run("olderThan rejects a record fresher than the cutoff", func(t *testing.T) {
+		s := newTestAgentReincarnationStore(t)
+		rec := &store.AgentReincarnation{AgentID: "agent-1", FromGeneration: 1, ToGeneration: 2, State: store.AgentReincarnationStateProvisioning}
+		require.NoError(t, s.CreateAgentReincarnation(ctx, rec))
+		before, err := s.GetAgentReincarnation(ctx, rec.ID)
+		require.NoError(t, err)
+
+		cutoff := before.UpdatedAt.Add(-time.Minute) // before is fresher than cutoff
+		upd := &store.AgentReincarnation{ID: rec.ID, State: store.AgentReincarnationStateFailed, UpdatedAt: time.Now()}
+		ok, err := s.TryAdvanceAgentReincarnation(ctx, upd, store.AgentReincarnationStateProvisioning, cutoff)
+		require.NoError(t, err)
+		assert.False(t, ok, "a record fresher than olderThan must not be advanced, even with a matching expectState")
+
+		after, err := s.GetAgentReincarnation(ctx, rec.ID)
+		require.NoError(t, err)
+		assert.Equal(t, before.State, after.State, "state must be untouched")
+	})
+
+	t.Run("olderThan allows a record older than the cutoff", func(t *testing.T) {
+		s := newTestAgentReincarnationStore(t)
+		rec := &store.AgentReincarnation{AgentID: "agent-1", FromGeneration: 1, ToGeneration: 2, State: store.AgentReincarnationStateProvisioning}
+		require.NoError(t, s.CreateAgentReincarnation(ctx, rec))
+
+		cutoff := time.Now().Add(time.Hour) // treat every existing row as stale
+		upd := &store.AgentReincarnation{ID: rec.ID, State: store.AgentReincarnationStateFailed, UpdatedAt: time.Now()}
+		ok, err := s.TryAdvanceAgentReincarnation(ctx, upd, store.AgentReincarnationStateProvisioning, cutoff)
+		require.NoError(t, err)
+		assert.True(t, ok)
+	})
+
+	t.Run("zero olderThan means no staleness guard", func(t *testing.T) {
+		s := newTestAgentReincarnationStore(t)
+		rec := &store.AgentReincarnation{AgentID: "agent-1", FromGeneration: 1, ToGeneration: 2, State: store.AgentReincarnationStateProvisioning}
+		require.NoError(t, s.CreateAgentReincarnation(ctx, rec))
+
+		upd := &store.AgentReincarnation{ID: rec.ID, State: store.AgentReincarnationStateFailed, UpdatedAt: time.Now()}
+		ok, err := s.TryAdvanceAgentReincarnation(ctx, upd, store.AgentReincarnationStateProvisioning, time.Time{})
+		require.NoError(t, err)
+		assert.True(t, ok, "a zero olderThan must not add any staleness constraint")
 	})
 }

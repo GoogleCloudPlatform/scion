@@ -1247,7 +1247,7 @@ func TestAgentStore_GenerationAndReincarnationState(t *testing.T) {
 }
 
 // TestListAgentsWithStaleNonTerminalReincarnationState_ExcludesAgentWithNonTerminalRecord
-// is the design §3.4 Amendment A6.6/A7 (N1) regression test for the
+// is the design §3.4 Amendment A6.6/A7 regression test for the
 // backstop's "no non-terminal record" condition: an agent that LOOKS
 // orphaned by its own stale clock must still be excluded if it has a fresh,
 // genuinely in-flight AgentReincarnation record — that agent belongs to the

@@ -141,28 +141,40 @@ type AgentReincarnationStore interface {
 	// TryAdvanceAgentReincarnation atomically writes r's mutable fields
 	// (State, Error, CompletedAt, PreviousAppliedConfig, NewAppliedConfig) to
 	// the record with ID r.ID, but ONLY if that record's CURRENT State
-	// exactly equals expectState — a compare-and-swap performed as a single
-	// conditional UPDATE (`WHERE id=? AND state=?`), analogous to
+	// exactly equals expectState AND (when olderThan is non-zero) its
+	// CURRENT UpdatedAt is strictly before olderThan — a compare-and-swap
+	// performed as a single conditional UPDATE
+	// (`WHERE id=? AND state=? [AND updated_at<?]`), analogous to
 	// UpdateAgent's state_version check. This is the only way the
 	// reincarnation worker, failReincarnation, and the replica-safe sweep may
 	// transition a record's state (design §3.4 Amendment A6/A7).
 	//
 	// expectState must be the exact state the caller is CASing away from, not
-	// merely "some non-terminal state": a coarser "still non-terminal" check
-	// (the round-3 shape of this method) let a stale caller — a sweep that
-	// listed a record as stale a moment before a live worker advanced it —
-	// still win the CAS, because the record's new state was non-terminal too.
-	// Pinning the exact expected state closes that gap: the worker always
-	// passes the value it just read (so its own check-and-write is atomic),
-	// and the replica-safe sweep passes the value it observed when it listed
-	// the record as stale, NOT a fresh read — a fresh read would defeat the
-	// whole point, since it would always match "the current state" trivially.
+	// merely "some non-terminal state" — a coarser "still non-terminal" check
+	// let a stale caller win the CAS as long as the record's CURRENT state
+	// happened to be non-terminal too, even if it was a different non-terminal
+	// state than the caller actually observed. The worker (reincarnate_worker.go's
+	// tryAdvanceReincarnation) always passes the literal step it KNOWS it is
+	// leaving — never a value read fresh off the record, which can already be
+	// terminal — so its own check-and-write is atomic. The replica-safe sweep
+	// (advanceListedRecord) passes the value it observed when it listed the
+	// record as stale, NOT a fresh read: a fresh read would defeat the whole
+	// point, since it would always match "the current state" trivially.
+	//
+	// olderThan, when non-zero, adds the same staleness bound the sweep used
+	// to select this record in the first place (design §3.4 Amendment A7.1):
+	// a record a live worker has since touched — bumping UpdatedAt, even
+	// while leaving State unchanged — no longer matches, so the sweep cannot
+	// act on a record that stopped being stale between its list query and
+	// this write. Worker callers always pass the zero value: they are not
+	// racing staleness, only ownership of the exact state transition.
 	//
 	// Returns (true, nil) if a row matched (and was updated). Returns
 	// (false, nil) — not an error — if none did: the record does not exist,
 	// or — the case this exists to catch — its State no longer equals
-	// expectState because something else already moved it. Callers MUST
-	// treat false as "this caller no longer owns the record as it observed
-	// it" and must not act further on it, including writing the agent row.
-	TryAdvanceAgentReincarnation(ctx context.Context, r *AgentReincarnation, expectState string) (bool, error)
+	// expectState (or, for the sweep, it is no longer stale) because
+	// something else already moved it. Callers MUST treat false as "this
+	// caller no longer owns the record as it observed it" and must not act
+	// further on it, including writing the agent row.
+	TryAdvanceAgentReincarnation(ctx context.Context, r *AgentReincarnation, expectState string, olderThan time.Time) (bool, error)
 }

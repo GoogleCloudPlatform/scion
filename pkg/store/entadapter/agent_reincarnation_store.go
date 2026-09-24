@@ -22,6 +22,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentreincarnation"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -235,17 +236,27 @@ func (s *AgentReincarnationStore) DeleteAgentReincarnationsForAgent(ctx context.
 }
 
 // TryAdvanceAgentReincarnation is the compare-and-swap write described on
-// store.AgentReincarnationStore: it only applies if the row currently has a
-// non-terminal State, checked and updated in the same conditional UPDATE
-// statement (design §3.4 Amendment A6).
-func (s *AgentReincarnationStore) TryAdvanceAgentReincarnation(ctx context.Context, r *store.AgentReincarnation, expectState string) (bool, error) {
+// store.AgentReincarnationStore: it only applies if the row's CURRENT State
+// exactly equals expectState (plain equality, not "any non-terminal state")
+// AND, when olderThan is non-zero, its CURRENT UpdatedAt is strictly before
+// olderThan — both checked and updated in the same conditional UPDATE
+// statement (design §3.4 Amendment A6/A7/A7.1).
+func (s *AgentReincarnationStore) TryAdvanceAgentReincarnation(ctx context.Context, r *store.AgentReincarnation, expectState string, olderThan time.Time) (bool, error) {
 	uid, err := parseGetID(r.ID)
 	if err != nil {
 		return false, err
 	}
 
+	preds := []predicate.AgentReincarnation{
+		agentreincarnation.IDEQ(uid),
+		agentreincarnation.StateEQ(agentreincarnation.State(expectState)),
+	}
+	if !olderThan.IsZero() {
+		preds = append(preds, agentreincarnation.UpdatedAtLT(olderThan))
+	}
+
 	builder := s.client.AgentReincarnation.Update().
-		Where(agentreincarnation.IDEQ(uid), agentreincarnation.StateEQ(agentreincarnation.State(expectState))).
+		Where(preds...).
 		SetState(agentreincarnation.State(r.State)).
 		SetError(r.Error)
 
@@ -279,7 +290,7 @@ func (s *AgentReincarnationStore) TryAdvanceAgentReincarnation(ctx context.Conte
 }
 
 // ListNonTerminalAgentReincarnations returns every non-terminal reincarnation
-// record across all agents, for the hub-restart boot sweep (design §3.7 F4).
+// record across all agents, for the hub-restart boot sweep (design §3.7).
 func (s *AgentReincarnationStore) ListStaleNonTerminalAgentReincarnations(ctx context.Context, olderThan time.Time) ([]*store.AgentReincarnation, error) {
 	states := make([]agentreincarnation.State, 0, len(store.AgentReincarnationNonTerminalStates))
 	for _, st := range store.AgentReincarnationNonTerminalStates {
