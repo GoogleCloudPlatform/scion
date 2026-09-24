@@ -41,7 +41,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Test harness for the external-bearer authentication path (Phase 1: Google
+// Test harness for the external-bearer authentication path (Google
 // user ID tokens only). Reuses the production-validator test seam from
 // google_credential_validator_test.go (real RS256 verification against a
 // pinned test JWKS, via *http.Client's RoundTripper) and the fake user/
@@ -64,7 +64,7 @@ func newGoogleTrustFederationAuth(t *testing.T, expectedAudience string) *Federa
 // newGoogleFederationAuthWithIssuerType is newGoogleTrustFederationAuth with a
 // configurable issuer_type, so tests can build a Google trust entry with the
 // "wrong" type (e.g. "service_account" or "hub") to prove googleTrust's
-// issuer_type: user guard actually matters (r2 finding 2).
+// issuer_type: user guard actually matters.
 func newGoogleFederationAuthWithIssuerType(t *testing.T, expectedAudience, issuerType string) *FederationAuthenticator {
 	t.Helper()
 	fedCfg := config.FederationConfig{
@@ -90,8 +90,7 @@ func newGoogleFederationAuthWithIssuerType(t *testing.T, expectedAudience, issue
 // additionally carries AllowedGCPProjects — the distinct field for
 // service-account project admission (not AllowedProjects, which is the
 // unrelated, longer-standing hub-federation Scion-project allowlist). Used
-// for testing the SA branch of authenticateExternalBearer (design §4.1,
-// §4.4, §4.5).
+// for testing the SA branch of authenticateExternalBearer.
 func newGoogleTrustFederationAuthWithSA(t *testing.T, expectedAudience string, allowedGCPProjects []string) *FederationAuthenticator {
 	t.Helper()
 	fedCfg := config.FederationConfig{
@@ -144,7 +143,7 @@ func probeHandler(result *probeResult) http.Handler {
 // built independently of the real response, so a mutation to the response
 // shape itself (e.g. adding a details map, or interpolating an error into a
 // message that must stay fixed) makes the comparison fail — this is the
-// "golden" property R6/R7 ask for, without pinning fragile go-jose library
+// "golden" property these tests need, without pinning fragile go-jose library
 // error-string wording as a literal.
 func wantErrorBody(t *testing.T, code, message string) []byte {
 	t.Helper()
@@ -155,7 +154,7 @@ func wantErrorBody(t *testing.T, code, message string) []byte {
 	return buf.Bytes()
 }
 
-// I2 reuses the existing countingGoogleValidator (ge_exchange_ratelimit_test.go),
+// Reuses the existing countingGoogleValidator (ge_exchange_ratelimit_test.go),
 // which tracks call counts for zero-call assertions, to prove that a valid Hub
 // credential never reaches the Google validator.
 
@@ -216,7 +215,7 @@ func doExternalBearerRequest(cfg AuthConfig, token string) (*httptest.ResponseRe
 }
 
 // ---------------------------------------------------------------------------
-// U1 — valid Google-signed user ID token authenticates; sub-bound; auth-type
+// A valid Google-signed user ID token authenticates; sub-bound; auth-type
 // in context is external-bearer.
 // ---------------------------------------------------------------------------
 
@@ -319,7 +318,7 @@ func TestExternalBearer_SubBound_EmailChangeKeepsSameUser(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// U3 — a non-authoritative email for an unbound sub is rejected (403); a
+// A non-authoritative email for an unbound sub is rejected (403); a
 // Gmail or matching-hd email is provisioned.
 // ---------------------------------------------------------------------------
 
@@ -424,7 +423,7 @@ func TestExternalBearer_UnverifiedEmail_Unauthorized(t *testing.T) {
 	if result.reached {
 		t.Fatal("handler must not be reached for an unverified email")
 	}
-	// R7: the reason (e.g. "google email not verified") must never leak into
+	// The reason (e.g. "google email not verified") must never leak into
 	// the response body — only the fixed message, logged reason aside.
 	wantBody := wantErrorBody(t, ErrCodeUnauthorized, "invalid external bearer token")
 	if !bytes.Equal(w.Body.Bytes(), wantBody) {
@@ -432,7 +431,7 @@ func TestExternalBearer_UnverifiedEmail_Unauthorized(t *testing.T) {
 	}
 }
 
-// R7 (wrong aud) — a valid Google-signed ID token whose aud does not match
+// A valid Google-signed ID token whose aud does not match
 // the configured expected_audience must be rejected with the same reason-free
 // 401 body as any other verification failure.
 func TestExternalBearer_WrongAudience_Unauthorized(t *testing.T) {
@@ -470,7 +469,7 @@ func TestExternalBearer_WrongAudience_Unauthorized(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// U4 — a suspended bound user is rejected with 403 user_suspended on the very
+// A suspended bound user is rejected with 403 user_suspended on the very
 // next request (no cache).
 // ---------------------------------------------------------------------------
 
@@ -529,7 +528,7 @@ func TestExternalBearer_SuspendedUser_ForbiddenOnNextRequest(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// U5 — a user whose email is in admin_emails is provisioned with the admin
+// A user whose email is in admin_emails is provisioned with the admin
 // role (roleFor honours admin_emails, replacing the hard-coded "member").
 // ---------------------------------------------------------------------------
 
@@ -571,15 +570,15 @@ func TestExternalBearer_AdminEmails_ProvisionsAdminRole(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// I1 — with no Google trust configured, the external-bearer hook is a true
+// With no Google trust configured, the external-bearer hook is a true
 // no-op: the response is byte-identical to the pre-existing rejection. This
 // used to be its own "_Golden401" test, but it over-claimed: it asserted only
 // a message prefix. It's superseded by golden case (a) in
 // TestExternalBearer_ConfiguredTrustInvariant_Golden below, which asserts the
-// exact bytes (r2 finding 9).
+// exact bytes.
 //
-// r2 finding 8: since O3, production always builds a non-nil GoogleValidator
-// (only trust gates the path now), so I1 must also be proven in that
+// Production always builds a non-nil GoogleValidator
+// (only trust gates the path now), so this must also be proven in that
 // "production shape" — GoogleValidator non-nil, FederationAuth pointer empty
 // — not just with GoogleValidator == nil like golden case (a). Otherwise the
 // nil-guard in authenticateExternalBearer could mask a bug in the googleTrust
@@ -593,7 +592,7 @@ func TestExternalBearer_NoTrustProductionShape_Golden401(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewUserTokenService: %v", err)
 	}
-	// A non-nil validator, as O3's unconditional construction guarantees in
+	// A non-nil validator, as production's unconditional construction guarantees in
 	// production — but it must never be called, so a fake (rather than a real
 	// validator pointed at a JWKS server) both proves and enforces that.
 	// A default error (rather than a zero-value fakeGoogleValidator, which
@@ -601,7 +600,7 @@ func TestExternalBearer_NoTrustProductionShape_Golden401(t *testing.T) {
 	// reach the validator" test actually reach it, the result is a real
 	// error, not a nil identity — so this test fails at its own
 	// counting.totalCalls() assertion instead of a nil-pointer-dereference
-	// panic that aborts the whole test binary (review r2 optional finding 3).
+	// panic that aborts the whole test binary.
 	counting := newRejectingCountingValidator()
 	userStore := newFakeUserStore()
 	extStore := newMemExtIDStore()
@@ -610,7 +609,7 @@ func TestExternalBearer_NoTrustProductionShape_Golden401(t *testing.T) {
 		Mode:         "production",
 		UserTokenSvc: userTokenSvc,
 		Logger:       slog.Default(),
-		// Production shape (O3): validator and resolver are always built,
+		// Production shape: validator and resolver are always built,
 		// even though no trust is configured (FederationAuth left nil here,
 		// matching a server with no server.federation.trusted_issuers at all).
 		GoogleValidator: counting,
@@ -625,7 +624,7 @@ func TestExternalBearer_NoTrustProductionShape_Golden401(t *testing.T) {
 	if result.reached {
 		t.Fatal("handler must not be reached: no trust is configured")
 	}
-	// Exact bytes (r3 review optional finding 3), the same way golden cases
+	// Exact bytes, the same way golden cases
 	// (a)/(b)/(c) pin this fallback.
 	_, verifyErr := userTokenSvc.ValidateUserToken(token)
 	if verifyErr == nil {
@@ -641,7 +640,7 @@ func TestExternalBearer_NoTrustProductionShape_Golden401(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// I2 — a valid Hub-issued user JWT never reaches the Google validator.
+// A valid Hub-issued user JWT never reaches the Google validator.
 // ---------------------------------------------------------------------------
 
 func TestExternalBearer_ValidHubJWT_NeverTouchesGoogleValidator(t *testing.T) {
@@ -664,7 +663,7 @@ func TestExternalBearer_ValidHubJWT_NeverTouchesGoogleValidator(t *testing.T) {
 	// reach the validator" test actually reach it, the result is a real
 	// error, not a nil identity — so this test fails at its own
 	// counting.totalCalls() assertion instead of a nil-pointer-dereference
-	// panic that aborts the whole test binary (review r2 optional finding 3).
+	// panic that aborts the whole test binary.
 	counting := newRejectingCountingValidator()
 
 	fa := newGoogleTrustFederationAuth(t, externalBearerTestAudience)
@@ -691,10 +690,10 @@ func TestExternalBearer_ValidHubJWT_NeverTouchesGoogleValidator(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// I3 — grep -rn tokeninfo pkg/hub --include='*.go' | grep -v _test must only
+// grep -rn tokeninfo pkg/hub --include='*.go' | grep -v _test must only
 // match google_credential_validator.go. This is a durable regression test:
-// the reuse map (design §7) explicitly drops the tokeninfo-based access-token
-// path from the external-bearer file, and Phase 2 must not silently
+// the tokeninfo-based access-token verification belongs solely in the
+// validator, and nothing should silently
 // reintroduce it outside the one file that legitimately owns it.
 // ---------------------------------------------------------------------------
 
@@ -741,17 +740,17 @@ func TestNoTokenInfoOutsideGoogleCredentialValidator(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// I4 — no package-level mutable state in the new files.
+// No package-level mutable state in the new files.
 // (Documented here; ensured by code review: auth_external_bearer.go and
 // google_identity_resolver.go declare only functions, types, and immutable
 // package-level values (error sentinels, constants) — no var with mutable
 // state such as a map, cache, or counter.)
 // ---------------------------------------------------------------------------
 
-// TestExternalBearer_ClassifyNonJWT_AccessToken pins the Phase 2 classifier
-// change (design §4.4): a non-JWT token is now a candidate access token, by
+// TestExternalBearer_ClassifyNonJWT_AccessToken pins the classifier
+// behaviour: a non-JWT token is a candidate access token, by
 // shape alone — classifyExternalBearer itself does not know whether Google
-// trust is configured. What keeps I1 intact is call order:
+// trust is configured. What keeps the no-Google-trust no-op intact is call order:
 // authenticateExternalBearer only reaches classifyExternalBearer after
 // googleTrust has already confirmed trust is configured (see
 // TestExternalBearer_ConfiguredTrustInvariant_Golden's case (d), which pins
@@ -785,11 +784,11 @@ func TestExternalBearer_ClassifyGoogleIDToken(t *testing.T) {
 }
 
 // TestExternalBearer_ClassifyBareGoogleIssuer_IDToken proves the classifier's
-// other Google issuer form (r2 finding 7): Google does issue some ID tokens
-// with the bare "accounts.google.com" iss (no scheme), and mutation M22
-// showed dropping that clause from the classifier passes silently (the
+// other Google issuer form: Google does issue some ID tokens
+// with the bare "accounts.google.com" iss (no scheme), and dropping that
+// clause from the classifier fails silently (the
 // request just falls through to the original 401 — fail closed, but a silent
-// feature loss). Pin it as a classification case and an end-to-end U1 variant.
+// feature loss). Pin it as a classification case and an end-to-end variant.
 func TestExternalBearer_ClassifyBareGoogleIssuer_IDToken(t *testing.T) {
 	kp := newGCVTestKeyPair("test-kid-1")
 	claims := validIDTokenClaims()
@@ -832,11 +831,11 @@ func TestExternalBearer_BareGoogleIssuer_Authenticates(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// R1 — an issuer configured with an empty expected_audience must disable the
+// An issuer configured with an empty expected_audience must disable the
 // external-bearer path for that issuer. NewFederationAuthenticator falls back
 // to the Hub's own OIDC issuer URL internally (for federation-token
 // Authenticate() calls), but that fallback must not leak into googleTrust's
-// view of "was an audience actually configured" (design §4.1, K2).
+// view of "was an audience actually configured".
 // ---------------------------------------------------------------------------
 
 func TestGoogleTrust_EmptyExpectedAudience_NotOK(t *testing.T) {
@@ -849,7 +848,7 @@ func TestGoogleTrust_EmptyExpectedAudience_NotOK(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// r2 finding 2 — googleTrust's issuer_type: user guard has real security
+// googleTrust's issuer_type: user guard has real security
 // weight: an operator who trusts accounts.google.com as issuer_type:
 // service_account (for GCP workload-identity federation via
 // X-Scion-Federation-Token) never opted a Google *user* ID token into the
@@ -880,7 +879,7 @@ func TestGoogleTrust_RequiresIssuerTypeUser(t *testing.T) {
 }
 
 // TestExternalBearer_ServiceAccountFederationIssuer_NotApplicable is the
-// middleware-level half of finding 2: a real Google-signed user ID token,
+// middleware-level half of the issuer_type guard: a real Google-signed user ID token,
 // valid in every other respect, must fall through unchanged when Google is
 // trusted only as a service_account federation issuer.
 func TestExternalBearer_ServiceAccountFederationIssuer_NotApplicable(t *testing.T) {
@@ -901,7 +900,7 @@ func TestExternalBearer_ServiceAccountFederationIssuer_NotApplicable(t *testing.
 	// reach the validator" test actually reach it, the result is a real
 	// error, not a nil identity — so this test fails at its own
 	// counting.totalCalls() assertion instead of a nil-pointer-dereference
-	// panic that aborts the whole test binary (review r2 optional finding 3).
+	// panic that aborts the whole test binary.
 	counting := newRejectingCountingValidator()
 	userStore := newFakeUserStore()
 	extStore := newMemExtIDStore()
@@ -928,7 +927,7 @@ func TestExternalBearer_ServiceAccountFederationIssuer_NotApplicable(t *testing.
 		t.Fatal("handler must not be reached: Google is trusted as issuer_type service_account, not user")
 	}
 	// Exact bytes, the same way golden cases (b)/(c) pin the tokenTypeUser
-	// fallback (r3 review optional finding 3): a valid Google-signed JWT is
+	// fallback: a valid Google-signed JWT is
 	// still not a valid Hub JWT, so it fails the same way any other JWT with
 	// an issuer google's classifier won't route would.
 	_, verifyErr := userTokenSvc.ValidateUserToken(token)
@@ -955,7 +954,7 @@ func TestExternalBearer_EmptyExpectedAudience_NotApplicable(t *testing.T) {
 	// reach the validator" test actually reach it, the result is a real
 	// error, not a nil identity — so this test fails at its own
 	// counting.totalCalls() assertion instead of a nil-pointer-dereference
-	// panic that aborts the whole test binary (review r2 optional finding 3).
+	// panic that aborts the whole test binary.
 	counting := newRejectingCountingValidator()
 	userStore := newFakeUserStore()
 	extStore := newMemExtIDStore()
@@ -974,8 +973,8 @@ func TestExternalBearer_EmptyExpectedAudience_NotApplicable(t *testing.T) {
 	}
 
 	// A validly-shaped Google ID token whose aud equals the fallback audience
-	// the (misused) resolved config would have produced. If the R1 bug were
-	// present, this token would be accepted.
+	// the (misused) resolved config would have produced. If the
+	// empty-expected_audience leak were present, this token would be accepted.
 	kp := newGCVTestKeyPair("test-kid-1")
 	claims := validIDTokenClaims()
 	claims["aud"] = "https://hub.example.com"
@@ -1001,12 +1000,9 @@ func TestExternalBearer_EmptyExpectedAudience_NotApplicable(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// S4 — an SA ID token whose azp disagrees with sub must be rejected, even
-// though its aud is on the allowed list. (Originally written in Phase 1/2,
-// when no SA branch existed at all and any SA identity was rejected outright
-// regardless of shape; Phase 3 gives SA ID tokens an admission policy, so
-// this now specifically exercises the azp/sub disagreement rule, design
-// §4.2(ii).)
+// An SA ID token whose azp disagrees with sub must be rejected, even
+// though its aud is on the allowed list. SA ID tokens have an admission
+// policy, so this specifically exercises the azp/sub disagreement rule.
 // ---------------------------------------------------------------------------
 
 func TestExternalBearer_ServiceAccountIDToken_AZPNotSub_Unauthorized(t *testing.T) {
@@ -1056,7 +1052,7 @@ func TestExternalBearer_ServiceAccountIDToken_AZPNotSub_Unauthorized(t *testing.
 }
 
 // ---------------------------------------------------------------------------
-// Item 6 (fix round 2, EM decision) — internal resolver errors are not
+// Internal resolver errors are not
 // credential rejections. A Resolve error wrapping store.ErrNotFound (the
 // bound user's record is gone) maps to 403 forbidden, the same body as any
 // other access denial. Any other Resolve error (a store fault, a failed
@@ -1160,12 +1156,11 @@ func TestExternalBearer_ResolveInternalError_ServiceUnavailable(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// F2 (fix round 3, now in scope per the issue owner: impl-design §4.3's 4th
-// allowed resolver delta). A GetExternalIdentity fault that is NOT
+// A GetExternalIdentity fault that is NOT
 // store.ErrNotFound must not be treated as "no binding" — that would let a
 // transient store error provision a duplicate user, or (for a
 // non-authoritative email) surface as 403 instead of the store fault it
-// actually is. It must be wrapped and reach the item-6 503 store_error arm,
+// actually is. It must be wrapped and reach the 503 store_error arm above,
 // the same as any other internal Resolve fault, having touched neither the
 // email lookup nor binding creation.
 // ---------------------------------------------------------------------------
@@ -1201,9 +1196,9 @@ func (s *trackingExtIDStore) GetExternalIdentitiesByUserID(_ context.Context, _ 
 // call panics loudly, which is exactly what we want: Resolve must not reach
 // any of them either when GetExternalIdentity faults. CreateUser is
 // overridden (rather than left to panic on the nil embed) so that a
-// regression which disables the F2 guard fails at this test's own
-// getByEmailCalled/createUserCalled assertions instead of a SIGSEGV that
-// aborts the whole test binary (review r4, optional finding 1).
+// regression which disables the GetExternalIdentity-fault guard fails at
+// this test's own getByEmailCalled/createUserCalled assertions instead of a
+// SIGSEGV that aborts the whole test binary.
 type trackingUserStore struct {
 	store.UserStore
 	getByEmailCalled bool
@@ -1264,9 +1259,9 @@ func TestExternalBearer_GetExternalIdentityFault_ServiceUnavailable(t *testing.T
 }
 
 // ---------------------------------------------------------------------------
-// R6 — the §3 invariant, proven byte-for-byte, including with Google trust
-// actually configured (not just absent), and at both hook sites in
-// UnifiedAuthMiddleware.
+// The never-changes-the-outcome invariant, proven byte-for-byte, including
+// with Google trust actually configured (not just absent), and at both hook
+// sites in UnifiedAuthMiddleware.
 // ---------------------------------------------------------------------------
 
 func TestExternalBearer_ConfiguredTrustInvariant_Golden(t *testing.T) {
@@ -1348,17 +1343,16 @@ func TestExternalBearer_ConfiguredTrustInvariant_Golden(t *testing.T) {
 		{
 			// (d) NO trust + an opaque token, exercising the
 			// UnifiedAuthMiddleware default: arm (the second hook site).
-			// Phase 2 changed the classifier so that, WITH trust configured,
+			// WITH trust configured,
 			// an opaque token is a candidate access token (see
 			// TestExternalBearer_ClassifyNonJWT_AccessToken and
 			// TestExternalBearer_TrustConfiguredOpaqueToken_AttemptsAccessTokenValidation
 			// below) — but the gate is googleTrust, checked in
 			// authenticateExternalBearer before classification ever runs, so
 			// absent trust this must still fall through byte-identical, with
-			// zero validator calls (I1). No library-dependent text here, so
+			// zero validator calls. No library-dependent text here, so
 			// this is hardened to a true byte literal rather than
-			// wantErrorBody's live reconstruction, per r2 finding 5's "cheap
-			// hardening" ask.
+			// wantErrorBody's live reconstruction.
 			name:       "d_no_trust_opaque_token_default_arm",
 			withTrust:  false,
 			token:      opaqueToken,
@@ -1402,13 +1396,12 @@ func TestExternalBearer_ConfiguredTrustInvariant_Golden(t *testing.T) {
 			// `id.IsServiceAccount` never even being reached, and this test
 			// fails at its own counting.totalCalls() assertion below instead
 			// of panicking (nil-pointer dereference) and aborting the whole
-			// test binary before the remaining golden cases run (review r2
-			// optional finding 3; the same class of problem P1 r4 optional
-			// finding 1 fixed for trackingUserStore).
+			// test binary before the remaining golden cases run (the same
+			// class of problem fixed for trackingUserStore).
 			counting := newRejectingCountingValidator()
 			// GoogleValidator/GoogleResolver are always wired, matching
-			// production shape (server.go's New builds them unconditionally,
-			// O3): only trust varies below. Review r1 finding 3: an earlier
+			// production shape (server.go's New builds them unconditionally):
+			// only trust varies below. An earlier
 			// version of this test left them nil in the no-trust cases, which
 			// meant authenticateExternalBearer's `cfg.GoogleValidator == nil`
 			// guard returned not-applicable regardless of whether the
@@ -1447,7 +1440,7 @@ func TestExternalBearer_ConfiguredTrustInvariant_Golden(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// O1 — PAT and agent tokens are structurally unreachable from either
+// PAT and agent tokens are structurally unreachable from either
 // external-bearer hook site (they are handled by earlier branches in
 // UnifiedAuthMiddleware), but pin that invariant against future reordering.
 // ---------------------------------------------------------------------------
@@ -1459,7 +1452,7 @@ func TestExternalBearer_PATShapedToken_NeverTouchesGoogleValidator(t *testing.T)
 	// exercise real UAT validation (UATSvc is nil here, so the request is
 	// rejected before reaching any hook) — it pins that the prefix routing
 	// itself never reaches the Google validator. It cannot distinguish hook
-	// *ordering* (judgement 1/O1): the case is decided by detectTokenType
+	// *ordering*: the case is decided by detectTokenType
 	// before either hook is even consulted, regardless of where the hooks
 	// are placed in the switch.
 	// A default error (rather than a zero-value fakeGoogleValidator, which
@@ -1467,7 +1460,7 @@ func TestExternalBearer_PATShapedToken_NeverTouchesGoogleValidator(t *testing.T)
 	// reach the validator" test actually reach it, the result is a real
 	// error, not a nil identity — so this test fails at its own
 	// counting.totalCalls() assertion instead of a nil-pointer-dereference
-	// panic that aborts the whole test binary (review r2 optional finding 3).
+	// panic that aborts the whole test binary.
 	counting := newRejectingCountingValidator()
 	userStore := newFakeUserStore()
 	extStore := newMemExtIDStore()
@@ -1502,7 +1495,7 @@ func TestExternalBearer_ValidAgentToken_NeverTouchesGoogleValidator(t *testing.T
 	// A valid agent token is fully handled in Step 1 of UnifiedAuthMiddleware
 	// (X-Scion-Agent-Token header) and returns unconditionally on success,
 	// before detectTokenType or either hook site runs. This case also cannot
-	// distinguish hook ordering (judgement 1/O1) — moving the hooks earlier in
+	// distinguish hook ordering — moving the hooks earlier in
 	// the tokenTypeUser/default switch would not change this outcome, since
 	// the agent-token branch is a separate, earlier step entirely.
 	agentTokenSvc, err := NewAgentTokenService(AgentTokenConfig{})
@@ -1519,7 +1512,7 @@ func TestExternalBearer_ValidAgentToken_NeverTouchesGoogleValidator(t *testing.T
 	// reach the validator" test actually reach it, the result is a real
 	// error, not a nil identity — so this test fails at its own
 	// counting.totalCalls() assertion instead of a nil-pointer-dereference
-	// panic that aborts the whole test binary (review r2 optional finding 3).
+	// panic that aborts the whole test binary.
 	counting := newRejectingCountingValidator()
 	userStore := newFakeUserStore()
 	extStore := newMemExtIDStore()
@@ -1559,9 +1552,9 @@ func TestExternalBearer_ValidAgentToken_NeverTouchesGoogleValidator(t *testing.T
 }
 
 // ---------------------------------------------------------------------------
-// O2 — a JWKS fetch failure with no cached keys maps to 503
+// A JWKS fetch failure with no cached keys maps to 503
 // upstream_unavailable, not 401 (an upstream blip must not look like an
-// invalid credential and must not be negatively cached in a later phase).
+// invalid credential and must not be negatively cached).
 // ---------------------------------------------------------------------------
 
 func TestExternalBearer_JWKSUpstreamFailure_ServiceUnavailable(t *testing.T) {
@@ -1601,7 +1594,7 @@ func TestExternalBearer_JWKSUpstreamFailure_ServiceUnavailable(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// O3 — Google trust added later via hot reload (no restart) takes effect on
+// Google trust added later via hot reload (no restart) takes effect on
 // the very next request. googleTrust reads through cfg.FederationAuth on
 // every call, and the validator/resolver are never gated on trust being
 // present — server.go's New now always constructs them.
@@ -1668,10 +1661,10 @@ func TestExternalBearer_HotReload_TrustAddedWithoutRestart(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// O4 — a durable structural check for I4: the new files declare no
+// A durable structural check: the external-bearer files declare no
 // package-level var other than error sentinels (errors.New(...)). Catches a
-// future package-level cache/global creeping in — design §7 explicitly drops
-// GoogleCloudPlatform/scion#1847's tokenInfoCache global, and Phase 2's
+// future package-level cache/global creeping in — this deliberately avoids
+// GoogleCloudPlatform/scion#1847's tokenInfoCache global, and
 // google_credential_cache.go must stay clean too.
 // ---------------------------------------------------------------------------
 

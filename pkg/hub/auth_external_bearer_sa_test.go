@@ -26,11 +26,11 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Phase 3 — the SA branch of authenticateExternalBearer (design §4.4, §5
-// Phase 3; §6 rows S1, S2, S3, S6). S4, S5 and S7 live alongside the
+// The SA branch of authenticateExternalBearer. Some related SA cases live
+// alongside the
 // validator/exchange code they exercise (google_credential_validator_test.go,
 // ge_exchange_test.go); TestExternalBearer_ServiceAccountIDToken_AZPNotSub_Unauthorized
-// (auth_external_bearer_test.go) is S4 at the middleware level.
+// (auth_external_bearer_test.go) exercises the azp/sub disagreement case at the middleware level.
 //
 // These tests use newExternalBearerConfigWithSA, which builds a real,
 // validated FederationAuthenticator with AllowedGCPProjects set on the
@@ -40,14 +40,13 @@ import (
 
 // neverAuthorized always denies. Used to prove that a service account
 // admitted via allowed_gcp_projects bypasses the Hub sign-in policy — the
-// project allowlist IS the authorization decision (design §4.3's
-// ResolvePolicy.PreAuthorized).
+// project allowlist IS the authorization decision (ResolvePolicy.PreAuthorized).
 func neverAuthorized(_ context.Context, _ string) bool { return false }
 
 // saNumericSub is a realistic Google service-account "sub"/"azp" value: a
 // large numeric unique ID, matching what the metadata server and
-// iamcredentials.generateIdToken actually issue (design §4.2(ii); Phase 1's
-// F1 finding flagged that fake sub-shaped strings can hide this).
+// iamcredentials.generateIdToken actually issue. Fake sub-shaped strings can
+// hide a real classification bug, so tests should use a realistic value.
 const saNumericSub = "111122223333444455556"
 
 // serviceAccountIDTokenClaims returns claims shaped like a real Google
@@ -79,7 +78,7 @@ func newSAJWKSEndpoints(kp *gcvTestKeyPair) *testEndpoints {
 }
 
 // ---------------------------------------------------------------------------
-// S1 — SA ID token, aud = expected, azp == sub, project listed -> 200,
+// SA ID token, aud = expected, azp == sub, project listed -> 200,
 // provisioned WITHOUT the Hub sign-in policy (authorize would have denied
 // it). Also an azp == "" variant.
 // ---------------------------------------------------------------------------
@@ -166,7 +165,7 @@ func TestExternalBearer_ServiceAccountIDToken_EmptyAZP_ProjectListed_Authenticat
 }
 
 // ---------------------------------------------------------------------------
-// S2 — project not listed -> 401; allowed_gcp_projects unset -> 401.
+// Project not listed -> 401; allowed_gcp_projects unset -> 401.
 // ---------------------------------------------------------------------------
 
 func TestExternalBearer_ServiceAccountIDToken_ProjectNotListed_Unauthorized(t *testing.T) {
@@ -206,7 +205,7 @@ func TestExternalBearer_ServiceAccountIDToken_AllowedGCPProjectsUnset_Unauthoriz
 	userStore := newFakeUserStore()
 	extStore := newMemExtIDStore()
 	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())
-	// allowed_gcp_projects unset entirely: design §4.1 says this admits NO
+	// allowed_gcp_projects unset entirely admits NO
 	// service accounts, not "any project".
 	cfg := newExternalBearerConfigWithSA(t, newTestValidator(endpoints), resolver, nil)
 
@@ -262,7 +261,7 @@ func TestExternalBearer_ServiceAccountIDToken_UnparseableProject_Unauthorized(t 
 }
 
 // ---------------------------------------------------------------------------
-// S3 — SA access token (listed project too) -> 401. The project is listed
+// SA access token (listed project too) -> 401. The project is listed
 // here specifically so that "reject access tokens" and "reject unlisted
 // projects" can't be conflated into a single accidentally-ANDed check (which
 // would admit a listed project's SA via an access token) — an empty
@@ -297,9 +296,9 @@ func TestExternalBearer_AccessToken_ServiceAccount_ProjectListed_StillRejected(t
 }
 
 // ---------------------------------------------------------------------------
-// S6 — a suspended SA user is refused on the next request (403 user_suspended),
+// A suspended SA user is refused on the next request (403 user_suspended),
 // with PreAuthorized still set: PreAuthorized bypasses the sign-in policy for
-// first-time provisioning ONLY, never the suspension check (design §4.3, §5).
+// first-time provisioning ONLY, never the suspension check.
 // ---------------------------------------------------------------------------
 
 func TestExternalBearer_ServiceAccountIDToken_Suspended_Forbidden(t *testing.T) {

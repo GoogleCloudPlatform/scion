@@ -25,9 +25,8 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Phase 2 — external-bearer Google OAuth2 access tokens, the caching
-// decorator wired into the middleware, and the per-IP rate limiter (design
-// §4.2(iii), §4.4; §6 rows C1-C6 and the access-token half of U2).
+// External-bearer Google OAuth2 access tokens, the caching
+// decorator wired into the middleware, and the per-IP rate limiter.
 // ---------------------------------------------------------------------------
 
 // validAccessTokenEndpoints returns tokeninfo/userinfo handlers describing a
@@ -51,7 +50,7 @@ func validAccessTokenEndpoints(azp, sub, email string, emailVerified bool) (http
 }
 
 // ---------------------------------------------------------------------------
-// C1 — valid user access token, azp = expected -> 200; wrong azp -> 401
+// A valid user access token, azp = expected -> 200; wrong azp -> 401
 // (exact body).
 // ---------------------------------------------------------------------------
 
@@ -131,9 +130,9 @@ func TestExternalBearer_AccessToken_UnverifiedEmail_Unauthorized(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// A service-account identity must never be admitted via an access token,
-// after this phase or any later one (Phase 3 owns the SA *ID-token* branch;
-// this keeps the existing SA rejection covering both credential kinds).
+// A service-account identity must never be admitted via an access token
+// (the SA *ID-token* branch is separate; this keeps the existing SA
+// rejection covering both credential kinds).
 // ---------------------------------------------------------------------------
 
 func TestExternalBearer_AccessToken_ServiceAccount_Rejected(t *testing.T) {
@@ -163,16 +162,16 @@ func TestExternalBearer_AccessToken_ServiceAccount_Rejected(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 2 classifier change, end to end: with Google trust configured, an
-// opaque token is now a candidate access token (unlike Phase 1, where it was
+// With Google trust configured, an
+// opaque token is a candidate access token (absent trust it is
 // unconditionally not-applicable). TestExternalBearer_ConfiguredTrustInvariant_Golden's
-// case (d) proves the complementary "no trust" half of I1.
+// case (d) proves the complementary "no trust" half of this invariant.
 // ---------------------------------------------------------------------------
 
 // TestExternalBearer_TrustConfiguredOpaqueToken_AttemptsAccessTokenValidation
 // uses the REAL validator against a tokeninfo-400 stub, not a fake configured
 // to return an error the real validator would never produce for this input.
-// Review r1 finding 2: an earlier version of this test used
+// An earlier version of this test used
 // fakeGoogleValidator{accessTokenErr: ErrGoogleInvalidCredential}, which
 // happened to assert the post-fix status/body/code but could not have caught
 // the pre-fix bug (real tokeninfo 400 -> ErrGoogleUpstreamError -> 503) at
@@ -204,7 +203,7 @@ func TestExternalBearer_TrustConfiguredOpaqueToken_AttemptsAccessTokenValidation
 	}
 	// The real validator's classification is what's under test: a tokeninfo
 	// 400 must be 401 "invalid external bearer token", not 503
-	// "upstream_unavailable" (review r1 finding 2).
+	// "upstream_unavailable".
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401: body=%s", w.Code, w.Body.String())
 	}
@@ -217,8 +216,8 @@ func TestExternalBearer_TrustConfiguredOpaqueToken_AttemptsAccessTokenValidation
 	}
 }
 
-// TestExternalBearer_AccessToken_TokenInfo400_NegativelyCached is the second
-// half of review r1 finding 2's ask: an invalid/expired/revoked access token
+// TestExternalBearer_AccessToken_TokenInfo400_NegativelyCached: an
+// invalid/expired/revoked access token
 // (tokeninfo 400) must be negatively cached, so repeated presentations of the
 // same garbage token within negTTL cost one upstream call, not one per
 // request.
@@ -264,7 +263,7 @@ func TestExternalBearer_AccessToken_TokenInfo400_NegativelyCached(t *testing.T) 
 }
 
 // ---------------------------------------------------------------------------
-// C2 — N requests with the same access token within the cache TTL cost
+// N requests with the same access token within the cache TTL cost
 // exactly one tokeninfo call and one userinfo call, proven through the real
 // middleware with the production caching decorator in front of the real
 // validator (not just the decorator's own unit tests in
@@ -314,7 +313,7 @@ func TestExternalBearer_AccessToken_RepeatedRequests_OneUpstreamRoundTrip(t *tes
 }
 
 // ---------------------------------------------------------------------------
-// C4 — an upstream 5xx maps to 503 and is never negatively cached: the next
+// An upstream 5xx maps to 503 and is never negatively cached: the next
 // request must retry upstream, not replay the failure.
 // ---------------------------------------------------------------------------
 
@@ -362,7 +361,7 @@ func TestExternalBearer_AccessToken_UpstreamFault_ServiceUnavailableNotCached(t 
 }
 
 // ---------------------------------------------------------------------------
-// C5 — random opaque tokens from one IP beyond the burst get 429 +
+// Random opaque tokens from one IP beyond the burst get 429 +
 // Retry-After; cache hits are not rate-limited.
 // ---------------------------------------------------------------------------
 
@@ -371,7 +370,7 @@ func TestExternalBearer_AccessToken_RateLimitedBeyondBurst(t *testing.T) {
 	limiter.buckets.burst = 3 // small burst, default 5rps refill (negligible within this test's runtime)
 
 	// Every request below uses a distinct token, so every one of them is a
-	// cache miss and must consult the rate limiter (design §4.4).
+	// cache miss and must consult the rate limiter.
 	counting := &countingGoogleValidator{fakeGoogleValidator: fakeGoogleValidator{accessTokenErr: ErrGoogleInvalidCredential}}
 	userStore := newFakeUserStore()
 	extStore := newMemExtIDStore()
@@ -393,7 +392,7 @@ func TestExternalBearer_AccessToken_RateLimitedBeyondBurst(t *testing.T) {
 	if w.Code != http.StatusTooManyRequests {
 		t.Fatalf("status = %d, want 429: body=%s", w.Code, w.Body.String())
 	}
-	// Pinned to the exact expected value (review r1 optional finding 9), not
+	// Pinned to the exact expected value, not
 	// just non-empty: with burst 3 exhausted and the default 5 rps refill,
 	// ceil(1/5) = 1 second is the only correct value. A units error (e.g.
 	// milliseconds, or a hardcoded 0) would pass a mere non-empty check.

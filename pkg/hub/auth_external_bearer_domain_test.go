@@ -25,8 +25,8 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// The user-domain constraint half of authenticateExternalBearer (design
-// §4.1, §4.4; §6 row U6): allowed_domains restricts USER principals to
+// The user-domain constraint half of authenticateExternalBearer:
+// allowed_domains restricts USER principals to
 // specific verified-email domains. A service account is never subject to
 // this check — its admission is governed by allowed_gcp_projects instead.
 //
@@ -84,7 +84,7 @@ func newExternalBearerConfigWithDomains(t *testing.T, validator GoogleCredential
 }
 
 // ---------------------------------------------------------------------------
-// U6 — a user ID token or access token whose verified email domain is not in
+// A user ID token or access token whose verified email domain is not in
 // allowed_domains -> 401, validator called, resolver (and thus the Hub
 // sign-in policy and provisioning) never reached.
 // ---------------------------------------------------------------------------
@@ -305,8 +305,8 @@ func TestExternalBearer_UserIDToken_ListedDomainSubdomain_Unauthorized(t *testin
 
 // TestExternalBearer_UserIDToken_ListedDomain_SignInPolicyDenies_Forbidden
 // proves the Hub sign-in policy still runs, and still governs the outcome,
-// after a listed-domain identity passes the issuer-level check (U6's last
-// clause): a domain constraint is not a substitute for the sign-in policy.
+// after a listed-domain identity passes the issuer-level check: a domain
+// constraint is not a substitute for the sign-in policy.
 func TestExternalBearer_UserIDToken_ListedDomain_SignInPolicyDenies_Forbidden(t *testing.T) {
 	kp := newGCVTestKeyPair("test-kid-1")
 	endpoints := newTestEndpoints(
