@@ -355,9 +355,9 @@ func TestGEExchange_Route_BodyLimitStillOperates(t *testing.T) {
 // during the exchange-to-external-bearer soak. This exercises the actual
 // production wiring in server.go's New, not a test double.
 //
-// For the validator half, the external-bearer path uses a caching
-// decorator (re-validates on
-// every request, unlike the exchange endpoint, so it benefits from a cache),
+// For the validator half, the external-bearer path uses a caching decorator
+// (re-validates on every request, unlike the exchange endpoint, so it
+// benefits from a cache),
 // but it wraps the *same base validator instance* the exchange uses, so the
 // exchange's own behaviour and latency are unaffected (server.go's New has
 // the full rationale). So the assertion here is: same base validator

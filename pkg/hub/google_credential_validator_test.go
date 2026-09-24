@@ -544,9 +544,9 @@ func TestProductionValidator_IDToken_ServiceAccountEmail_BadSignature_NeverReach
 // This is the mutation-killer for "the SA/user split uses the verified email,
 // not claim shape": a USER (non-SA) email with an SA-shaped azp==sub and an
 // aud that disagrees with azp must still be rejected under the user rule.
-// If the SA/user branches were ever selected by shape instead of
-// by isGoogleServiceAccount(email), this token would incorrectly validate
-// (the SA rule only checks azp==sub, and aud is separately allowed).
+// If the SA/user branches were ever selected by shape instead of by
+// isGoogleServiceAccount(email), this token would incorrectly validate (the
+// SA rule only checks azp==sub, and aud is separately allowed).
 func TestProductionValidator_IDToken_UserToken_SAShapedAzpSub_StillRejected(t *testing.T) {
 	kp := newGCVTestKeyPair("test-kid-1")
 	endpoints := newTestEndpoints(

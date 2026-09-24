@@ -765,7 +765,7 @@ func TestCallerHubClient_GEExchangeTokenType(t *testing.T) {
 
 // TestCallerHubClient_BearerTokenType proves callerHubClient's "bearer" case
 // (bridge.go) forwards the caller's original token verbatim, exactly like
-// "uat" does. If the "uat", "bearer" case were ever reverted to "uat" alone,
+// "uat" does. If the "uat", "bearer" case were ever changed to "uat" alone,
 // this call would fail with "unknown token type: bearer" instead of
 // succeeding — the same regression TestCallerHubClient_GEExchangeTokenType
 // guards for the "ge_exchange" type.
