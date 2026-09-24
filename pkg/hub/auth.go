@@ -84,6 +84,18 @@ type AuthConfig struct {
 	// IP, consulted only on a Google-credential-cache miss. nil disables
 	// rate limiting for that path (see authenticateExternalBearer).
 	ExternalBearerLimiter *externalBearerRateLimiter
+	// ExternalBearerMetrics records the outcome of every external-bearer
+	// authentication attempt (design §4.7: scion_hub_external_bearer_total).
+	// Held as *atomic.Pointer — the same indirection FederationAuth uses
+	// above, for the same structural reason: UnifiedAuthMiddleware captures
+	// this cfg by value exactly once, in registerRoutes (called at the end
+	// of New()), but the OTel-backed recorder can only be built once the
+	// server's Hub ID is known, which happens after that capture (see
+	// server.go's SetExternalBearerMetrics and cmd/server_foreground.go). A
+	// nil pointer, or one currently holding a nil interface, disables
+	// recording; it never changes the external-bearer path's authentication
+	// outcome.
+	ExternalBearerMetrics *atomic.Pointer[ExternalBearerMetricsRecorder]
 	// CredentialStore handles agent credential validation (Phase 1H).
 	// When non-nil, agent tokens are validated against persistent credential state.
 	CredentialStore store.AgentCredentialStore

@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -88,6 +89,16 @@ func withCacheNowFunc(now func() time.Time) CacheOption {
 	return func(c *cachingGoogleCredentialValidator) { c.now = now }
 }
 
+// WithCacheMetrics wires the cache-outcome counter (design §4.7:
+// scion_hub_google_validator_cache_total). nil (the default) disables
+// recording. See SetMetrics for wiring this after construction, which
+// production needs: server.go's New() builds this decorator before an OTel
+// MeterProvider exists (cmd/server_foreground.go builds one only once the
+// server's Hub ID is known).
+func WithCacheMetrics(m GoogleValidatorCacheMetricsRecorder) CacheOption {
+	return func(c *cachingGoogleCredentialValidator) { c.metrics.Store(&m) }
+}
+
 // googleCredCacheEntry is a completed validation result, positive or negative.
 type googleCredCacheEntry struct {
 	identity  *ValidatedGoogleIdentity // nil for a negative (error) entry
@@ -111,6 +122,41 @@ type cachingGoogleCredentialValidator struct {
 	entries map[string]googleCredCacheEntry
 
 	group singleflight.Group
+
+	// metrics records hit/miss/negative_hit (design §4.7). A plain
+	// atomic.Pointer, not a mutex-guarded field, so the hot Validate*
+	// path never contends with SetMetrics (called once, at startup, from a
+	// different goroutine — see server.go's SetGoogleValidatorCacheMetrics).
+	metrics atomic.Pointer[GoogleValidatorCacheMetricsRecorder]
+}
+
+// SetMetrics wires (or rewires) the cache-outcome counter after
+// construction. Safe for concurrent use with ValidateIDToken/
+// ValidateAccessToken.
+func (c *cachingGoogleCredentialValidator) SetMetrics(m GoogleValidatorCacheMetricsRecorder) {
+	c.metrics.Store(&m)
+}
+
+// recordCache is nil-safe: SetMetrics/WithCacheMetrics is never called (most
+// tests, and any production server before its OTel exporter is wired), or is
+// called with a nil recorder (defensive).
+func (c *cachingGoogleCredentialValidator) recordCache(result GoogleValidatorCacheResult) {
+	rec := c.metrics.Load()
+	if rec == nil || *rec == nil {
+		return
+	}
+	(*rec).RecordGoogleValidatorCache(result)
+}
+
+// cacheResultFor classifies a completed cache entry's error as a positive or
+// negative cache result for the metric above. It does not decide whether the
+// entry was actually served from cache — callers only invoke it once they
+// know that.
+func cacheResultFor(err error) GoogleValidatorCacheResult {
+	if err != nil {
+		return GoogleValidatorCacheNegativeHit
+	}
+	return GoogleValidatorCacheHit
 }
 
 // NewCachingGoogleCredentialValidator wraps v with a bounded, per-instance
@@ -242,12 +288,25 @@ const upstreamCallTimeout = 10 * time.Second
 // called with a context that is independent of any specific caller's ctx
 // (see the WithoutCancel comment below), even though it was built from the
 // ctx of whichever caller happens to become the singleflight leader.
+// googleCredValidateResult is validate's singleflight.Do return type: the
+// completed entry, plus whether producing it actually required an upstream
+// call. Every waiter on a given key — the leader that ran the callback and
+// every follower collapsed into it — receives the same value from Do, so
+// tagging viaUpstream here (rather than recomputing it per-caller) is what
+// lets every one of them record the correct cache-outcome metric (design
+// §4.7), not just the leader.
+type googleCredValidateResult struct {
+	entry       googleCredCacheEntry
+	viaUpstream bool
+}
+
 func (c *cachingGoogleCredentialValidator) validate(
 	ctx context.Context, token string, allowedClientIDs []string,
 	upstream func(context.Context) (*ValidatedGoogleIdentity, error),
 ) (*ValidatedGoogleIdentity, error) {
 	key := cacheKey(token, allowedClientIDs)
 	if e, ok := c.lookup(key); ok {
+		c.recordCache(cacheResultFor(e.err))
 		return e.identity, e.err
 	}
 
@@ -258,7 +317,7 @@ func (c *cachingGoogleCredentialValidator) validate(
 		// first, or a request that arrived just as the previous flight for
 		// this key completed, may already have populated the cache.
 		if e, ok := c.lookup(key); ok {
-			return e, nil
+			return googleCredValidateResult{entry: e}, nil
 		}
 		// Detach from the leader's own request context: this call is shared
 		// by every waiter on this key, so the leader cancelling (or timing
@@ -269,10 +328,15 @@ func (c *cachingGoogleCredentialValidator) validate(
 		defer cancel()
 		identity, err := upstream(upstreamCtx)
 		c.store(key, identity, err)
-		return googleCredCacheEntry{identity: identity, err: err}, nil
+		return googleCredValidateResult{entry: googleCredCacheEntry{identity: identity, err: err}, viaUpstream: true}, nil
 	})
-	entry := v.(googleCredCacheEntry)
-	return entry.identity, entry.err
+	result := v.(googleCredValidateResult)
+	if result.viaUpstream {
+		c.recordCache(GoogleValidatorCacheMiss)
+	} else {
+		c.recordCache(cacheResultFor(result.entry.err))
+	}
+	return result.entry.identity, result.entry.err
 }
 
 // ValidateIDToken implements GoogleCredentialValidator, serving from cache

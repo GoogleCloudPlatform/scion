@@ -293,6 +293,7 @@ func (s *Server) handleGEGoogleExchange(w http.ResponseWriter, r *http.Request) 
 		clientIP := geExchangeClientIP(r, trustedNets)
 		allowed, retryAfter := s.geExchangeRateLimiter.Allow(clientIP)
 		if !allowed {
+			s.recordGEExchange(GEExchangeOutcomeRateLimited)
 			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 			writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited,
 				fmt.Sprintf("rate limit exceeded; retry in %ds", retryAfter), nil)
@@ -301,6 +302,7 @@ func (s *Server) handleGEGoogleExchange(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if s.geExchangeService == nil {
+		s.recordGEExchange(GEExchangeOutcomeNotConfigured)
 		writeError(w, http.StatusUnauthorized, "not_configured",
 			"GE Google exchange is not configured", nil)
 		return
@@ -311,6 +313,7 @@ func (s *Server) handleGEGoogleExchange(w http.ResponseWriter, r *http.Request) 
 
 	var req ExchangeRequest
 	if err := readJSON(r, &req); err != nil {
+		s.recordGEExchange(GEExchangeOutcomeInvalidRequest)
 		if isMaxBytesError(err) {
 			writeError(w, http.StatusRequestEntityTooLarge, ErrCodeInvalidRequest,
 				"request body too large", nil)
@@ -323,21 +326,34 @@ func (s *Server) handleGEGoogleExchange(w http.ResponseWriter, r *http.Request) 
 	resp, statusCode, err := s.geExchangeService.Exchange(r.Context(), &req)
 	if err != nil {
 		code := "exchange_failed"
+		outcome := GEExchangeOutcomeExchangeFailed
 		switch statusCode {
 		case http.StatusBadRequest:
-			code = "bad_request"
+			code, outcome = "bad_request", GEExchangeOutcomeBadRequest
 		case http.StatusUnauthorized:
-			code = "invalid_credential"
+			code, outcome = "invalid_credential", GEExchangeOutcomeInvalidCredential
 		case http.StatusForbidden:
-			code = "forbidden"
+			code, outcome = "forbidden", GEExchangeOutcomeForbidden
 		case http.StatusTooManyRequests:
-			code = "rate_limited"
+			code, outcome = "rate_limited", GEExchangeOutcomeRateLimited
 		}
+		s.recordGEExchange(outcome)
 		writeError(w, statusCode, code, err.Error(), nil)
 		return
 	}
 
+	s.recordGEExchange(GEExchangeOutcomeOK)
 	writeJSON(w, statusCode, resp)
+}
+
+// recordGEExchange records one exchange-endpoint outcome, nil-safe against
+// s.geExchangeMetrics never having been wired (most tests, and any
+// production server before its OTel exporter is set via SetGEExchangeMetrics).
+func (s *Server) recordGEExchange(outcome GEExchangeOutcome) {
+	if s.geExchangeMetrics == nil {
+		return
+	}
+	s.geExchangeMetrics.RecordGEExchangeRequest(outcome)
 }
 
 // isMaxBytesError checks whether an error is an *http.MaxBytesError (body

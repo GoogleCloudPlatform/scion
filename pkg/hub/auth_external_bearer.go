@@ -157,6 +157,53 @@ func classifyExternalBearer(token string) externalBearerKind {
 	return externalBearerNotApplicable
 }
 
+// metricLabel maps the internal classification enum to the closed-set label
+// value scion_hub_external_bearer_total's "kind" uses (design §4.7).
+// externalBearerNotApplicable maps to ExternalBearerKindUnknown: a request
+// that classifies as not-applicable never becomes a candidate id_token/
+// access_token as far as the metric is concerned.
+func (k externalBearerKind) metricLabel() ExternalBearerKind {
+	switch k {
+	case externalBearerIDToken:
+		return ExternalBearerKindIDToken
+	case externalBearerAccessToken:
+		return ExternalBearerKindAccessToken
+	default:
+		return ExternalBearerKindUnknown
+	}
+}
+
+// externalBearerAttempt carries the kind/principal label values
+// authenticateExternalBearer has discovered so far, threaded alongside its
+// (UserIdentity, error) return so serveExternalBearer's outcome switch —
+// already the single source of truth for the HTTP status this path returns
+// — is also the single source of truth for the "outcome" label (design
+// §4.7): duplicating that switch's classification a second time, here, would
+// risk the metric and the HTTP response falling out of sync. Both labels
+// start unknown and are only ever set forward (never reset), matching the
+// lead's ruling that a rejection before classification, or before the
+// validated identity's IsServiceAccount is known, records unknown rather
+// than guessing.
+type externalBearerAttempt struct {
+	kind      ExternalBearerKind
+	principal ExternalBearerPrincipal
+}
+
+// recordExternalBearer records one external-bearer outcome, nil-safe against
+// every disabled state: cfg.ExternalBearerMetrics itself nil (never wired,
+// e.g. most hand-built AuthConfigs in tests), the pointer wired but never
+// Store()d, or Store()d with a nil interface (defensive).
+func recordExternalBearer(cfg AuthConfig, attempt externalBearerAttempt, outcome ExternalBearerOutcome) {
+	if cfg.ExternalBearerMetrics == nil {
+		return
+	}
+	rec := cfg.ExternalBearerMetrics.Load()
+	if rec == nil || *rec == nil {
+		return
+	}
+	(*rec).RecordExternalBearer(attempt.kind, attempt.principal, outcome)
+}
+
 // peekJWTIssuer extracts the iss claim from a JWT WITHOUT verifying its
 // signature. Used only to route the request to the right verifier; the
 // verifier itself always re-checks the issuer cryptographically.
@@ -237,22 +284,25 @@ func domainOf(email string) (domain string, ok bool) {
 func serveExternalBearer(w http.ResponseWriter, r *http.Request, next http.Handler,
 	ctx context.Context, token string, cfg AuthConfig, log *slog.Logger) bool {
 
-	user, err := authenticateExternalBearer(ctx, r, token, cfg)
+	user, attempt, err := authenticateExternalBearer(ctx, r, token, cfg)
 	if err != nil {
 		var rlErr *externalBearerRateLimitError
 		switch {
 		case errors.Is(err, errExternalBearerNotApplicable):
+			recordExternalBearer(cfg, attempt, ExternalBearerOutcomeNotApplicable)
 			if cfg.Debug {
 				log.Debug("External bearer not applicable", "error", err)
 			}
 			return false
 		case errors.As(err, &rlErr):
+			recordExternalBearer(cfg, attempt, ExternalBearerOutcomeRateLimited)
 			log.Info("External bearer rate limited", "retry_after_seconds", rlErr.retryAfterSeconds)
 			w.Header().Set("Retry-After", strconv.Itoa(rlErr.retryAfterSeconds))
 			writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited,
 				"rate limit exceeded", nil)
 			return true
 		case errors.Is(err, ErrUserSuspended):
+			recordExternalBearer(cfg, attempt, ExternalBearerOutcomeSuspended)
 			log.Warn("External bearer rejected: user is suspended", "error", err)
 			writeError(w, http.StatusForbidden, "user_suspended",
 				"access denied: user account is suspended", nil)
@@ -262,16 +312,19 @@ func serveExternalBearer(w http.ResponseWriter, r *http.Request, next http.Handl
 			errors.Is(err, errBindingConflict),
 			errors.Is(err, errAmbiguousLinkage),
 			errors.Is(err, store.ErrNotFound):
+			recordExternalBearer(cfg, attempt, ExternalBearerOutcomeForbidden)
 			log.Warn("External bearer rejected: forbidden", "error", err)
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
 				"access denied", nil)
 			return true
 		case errors.Is(err, ErrGoogleUpstreamError):
+			recordExternalBearer(cfg, attempt, ExternalBearerOutcomeUpstreamError)
 			log.Warn("External bearer: upstream verification unavailable", "error", err)
 			writeError(w, http.StatusServiceUnavailable, "upstream_unavailable",
 				"external identity provider unavailable", nil)
 			return true
 		case errors.Is(err, errExternalBearerResolveFailed):
+			recordExternalBearer(cfg, attempt, ExternalBearerOutcomeStoreError)
 			log.Error("External bearer: internal resolver error", "error", err)
 			writeError(w, http.StatusServiceUnavailable, "store_error",
 				"unable to verify user status", nil)
@@ -281,12 +334,14 @@ func serveExternalBearer(w http.ResponseWriter, r *http.Request, next http.Handl
 			// policy (bad signature, wrong audience, unverified email, service
 			// account in this phase, ...). Log the reason; the response never
 			// leaks which specific check failed.
+			recordExternalBearer(cfg, attempt, ExternalBearerOutcomeRejected)
 			log.Info("External bearer rejected", "error", err)
 			writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 				"invalid external bearer token", nil)
 			return true
 		}
 	}
+	recordExternalBearer(cfg, attempt, ExternalBearerOutcomeOK)
 
 	ctx = context.WithValue(ctx, userContextKey{}, user)
 	ctx = contextWithIdentity(ctx, user)
@@ -324,18 +379,21 @@ type externalBearerCacheProbe interface {
 // the issuer's allowed_domains is non-empty, the verified email's domain
 // must be listed there (design §4.1, §4.4) — a check that never applies to a
 // service account.
-func authenticateExternalBearer(ctx context.Context, r *http.Request, token string, cfg AuthConfig) (UserIdentity, error) {
+func authenticateExternalBearer(ctx context.Context, r *http.Request, token string, cfg AuthConfig) (UserIdentity, externalBearerAttempt, error) {
+	attempt := externalBearerAttempt{kind: ExternalBearerKindUnknown, principal: ExternalBearerPrincipalUnknown}
+
 	trust, ok := googleTrust(cfg)
 	if !ok {
-		return nil, errExternalBearerNotApplicable
+		return nil, attempt, errExternalBearerNotApplicable
 	}
 	kind := classifyExternalBearer(token)
 	if kind == externalBearerNotApplicable {
-		return nil, errExternalBearerNotApplicable
+		return nil, attempt, errExternalBearerNotApplicable
 	}
 	if cfg.GoogleValidator == nil || cfg.GoogleResolver == nil {
-		return nil, errExternalBearerNotApplicable
+		return nil, attempt, errExternalBearerNotApplicable
 	}
+	attempt.kind = kind.metricLabel()
 
 	aud := []string{trust.ExpectedAudience}
 
@@ -353,7 +411,7 @@ func authenticateExternalBearer(ctx context.Context, r *http.Request, token stri
 		}
 		if !cached {
 			if allowed, retryAfter := cfg.ExternalBearerLimiter.Allow(r); !allowed {
-				return nil, &externalBearerRateLimitError{retryAfterSeconds: retryAfter}
+				return nil, attempt, &externalBearerRateLimitError{retryAfterSeconds: retryAfter}
 			}
 		}
 	}
@@ -367,16 +425,22 @@ func authenticateExternalBearer(ctx context.Context, r *http.Request, token stri
 		id, err = cfg.GoogleValidator.ValidateAccessToken(ctx, token, aud)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("external bearer: %w", err)
+		return nil, attempt, fmt.Errorf("external bearer: %w", err)
 	}
+	if id.IsServiceAccount {
+		attempt.principal = ExternalBearerPrincipalServiceAccount
+	} else {
+		attempt.principal = ExternalBearerPrincipalUser
+	}
+
 	policy := ResolvePolicy{}
 	if id.IsServiceAccount {
 		if kind == externalBearerAccessToken {
-			return nil, errSAAccessTokenRejected
+			return nil, attempt, errSAAccessTokenRejected
 		}
 		proj, ok := googleSAProject(id.Email)
 		if !ok || !containsFold(trust.AllowedGCPProjects, proj) {
-			return nil, errSAProjectNotAllowed
+			return nil, attempt, errSAProjectNotAllowed
 		}
 		// The project allowlist IS the authorization decision for a
 		// first-time provision (design §4.3's ResolvePolicy.PreAuthorized):
@@ -391,15 +455,15 @@ func authenticateExternalBearer(ctx context.Context, r *http.Request, token stri
 		// only narrows which domains reach that policy at all.
 		domain, ok := domainOf(id.Email)
 		if !ok || !containsFold(trust.AllowedDomains, domain) {
-			return nil, errDomainNotAllowed
+			return nil, attempt, errDomainNotAllowed
 		}
 	}
 
 	u, err := cfg.GoogleResolver.Resolve(ctx, id, policy)
 	if err != nil {
-		return nil, classifyResolveError(err)
+		return nil, attempt, classifyResolveError(err)
 	}
-	return NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, string(ClientTypeWeb)), nil
+	return NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, string(ClientTypeWeb)), attempt, nil
 }
 
 // classifyResolveError always wraps a Resolve error with
