@@ -128,6 +128,23 @@ Traffic is cleartext inside the VPC. There is no encryption in transit beyond
 GCP's VPC-level protections, and no Kerberos / NFS-over-TLS on the target
 kernel/Ubuntu release.
 
+**Export the root of a filesystem, not a subdirectory of a larger one.** This
+tier's default export is a subdirectory on the boot disk, which is affected by
+the gap below; the fix is to export the root of its own filesystem instead.
+Exports use `no_subtree_check` (the nfs-utils default; `subtree_check` breaks
+file handles when files are renamed across directories), which comes with a
+specific cost: knfsd does not verify that the inode lies inside the exported
+subtree; any valid handle on the same filesystem is accepted. When the export
+path is a subdirectory of a larger filesystem, any host the export admits
+(see Network shape above) can construct a file handle for a different inode
+on that *same underlying filesystem* and reach it as the squashed NFS
+identity, even though that inode sits outside the exported subtree entirely.
+Exporting the root of its own dedicated filesystem removes this gap by
+construction: there is nothing else on that filesystem for a forged handle to
+reach (this assumes nothing else is bind- or sub-mounted beneath the export
+with `crossmnt`/`nohide`, which would extend the same guarantee across a mount
+boundary and needs the same treatment).
+
 ### E2 hardening: dedicated squash identity + default ACL
 
 Phase 1 squashes every NFS client to the **broker's own uid** (`all_squash,
@@ -372,9 +389,12 @@ database change.
 
 ## Boot-disk trade-offs
 
-The NFS export (`/srv/scion-shared`) is a plain directory on the VM's **boot
-disk**, not a separate mounted volume. This is by design; the trade-offs are
-real and should inform how you operate this tier:
+The NFS export (`/srv/scion-shared`) lives on the VM's **boot disk** rather
+than a separate persistent disk. The trade-offs below are real and should
+inform how you operate this tier, but "on the boot disk" does not mean "as a
+plain subdirectory of the boot disk's root filesystem" — see the Export
+layout row, and Security posture above, for why a plain subdirectory export
+is a real gap, not an accepted trade-off:
 
 | Concern | Consequence | Mitigation |
 |---|---|---|
@@ -383,6 +403,25 @@ real and should inform how you operate this tier:
 | **Lifecycle** | Tearing down the VM (and its boot disk) deletes all shared-dir data with it. Recreating the VM starts with an empty scratchpad. | Know this before tearing down a VM that has scratchpad data you care about. A dedicated persistent disk for the export is the upgrade path if this becomes unacceptable, but is not built in this phase. |
 | **I/O contention** | NFS clients, container overlay I/O, and SQLite all compete for the same disk. A low-baseline-IOPS boot disk (e.g. `pd-standard`) makes this worse. | Acceptable for scratch data; prefer `pd-balanced` or better for the boot disk if this tier sees heavy shared-dir traffic. The boot disk can be grown online (grow the PD, then `growpart` + `resize2fs`). |
 | **No mount boundary** | There's no separate mountpoint to fail to mount (a small upside), but also no size isolation between the export and everything else on `/`. | — |
+| **Export layout** | This tier's default export is a plain subdirectory of the boot disk's root filesystem, which accepts a forged file handle for any inode on that filesystem, not just the exported subtree (see Security posture above). | Export the root of a dedicated filesystem instead — a loop-file filesystem on the boot disk, or a separate disk. A subdirectory export is not recommended. |
+
+**Creating the export as a dedicated filesystem root**, the recommended
+approach: put the export on its own filesystem (a loop-mounted image file on
+the boot disk, or a separate disk) rather than a subdirectory of `/`.
+
+- Create the backing image/disk and format it **once**; never re-format one
+  that already exists (that would destroy its contents on every re-run of
+  any provisioning automation).
+- Mount it **before** the NFS server starts (order the mount ahead of
+  `nfs-server.service` — a systemd mount unit or an fstab entry with
+  `x-systemd.before=nfs-server.service` both work).
+- **Check it's actually mounted before exporting.** Fail closed
+  (`mountpoint -q <export path>`) rather than serving the export from
+  whatever filesystem happens to be under that path if the mount didn't
+  happen — that's exactly the subdirectory-on-`/` gap this section exists to
+  avoid.
+- The export path is the mounted filesystem's own root, not a subdirectory
+  under it.
 
 ## Reboot, stale-handle, and cross-runtime visibility caveats
 
@@ -471,6 +510,10 @@ running this tier:
 - **With `shared_dir_storage: nfs`, chat attachments aren't staged into
   NFS-backed shared dirs in this release.** Plan around this for projects on
   the NFS tier until a confined NFS attachment path is built.
+- **This tier's default export is a plain subdirectory of the boot disk's
+  root filesystem, not a dedicated filesystem's own root** (see Security
+  posture and Boot-disk trade-offs above for what that costs, and how to
+  export a dedicated filesystem root instead).
 
 **Open question, not built:** the auxiliary Kubernetes runtime's behavior when
 GKE credentials are broken or unreachable at hub startup (whether it degrades
