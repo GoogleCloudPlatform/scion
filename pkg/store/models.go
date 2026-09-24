@@ -104,6 +104,13 @@ type Agent struct {
 	// separate from Phase, so existing phase consumers are unaffected.
 	Generation         int    `json:"generation"`
 	ReincarnationState string `json:"reincarnationState,omitempty"`
+	// ReincarnationUpdatedAt is bumped ONLY by reincarnation-owned writes
+	// (the claim, each worker step, and every terminal write) — unlike
+	// Updated, which every broker heartbeat's UpdateAgentStatus also bumps.
+	// The replica-safe sweep's agent-state backstop (design §3.4 Amendment
+	// A6.6) keys on this instead of Updated. Nil means no reincarnation has
+	// ever touched this agent.
+	ReincarnationUpdatedAt *time.Time `json:"reincarnationUpdatedAt,omitempty"`
 }
 
 // ReincarnationState values for Agent.ReincarnationState.

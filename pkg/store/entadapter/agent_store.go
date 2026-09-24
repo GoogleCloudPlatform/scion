@@ -28,6 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentreincarnation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimebroker"
@@ -120,6 +121,10 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		StateVersion:        a.StateVersion,
 		Generation:          a.Generation,
 		ReincarnationState:  a.ReincarnationState,
+	}
+	if a.ReincarnationUpdatedAt != nil {
+		t := *a.ReincarnationUpdatedAt
+		sa.ReincarnationUpdatedAt = &t
 	}
 	if a.CreatedBy != nil {
 		sa.CreatedBy = a.CreatedBy.String()
@@ -400,6 +405,9 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 		SetStateVersion(newVersion).
 		SetGeneration(a.Generation).
 		SetReincarnationState(a.ReincarnationState)
+	if a.ReincarnationUpdatedAt != nil {
+		update.SetReincarnationUpdatedAt(*a.ReincarnationUpdatedAt)
+	}
 
 	if a.MessageMode != "" {
 		update.SetMessageMode(agent.MessageMode(a.MessageMode))
@@ -550,10 +558,29 @@ func (s *AgentStore) ListAgents(ctx context.Context, filter store.AgentFilter, o
 }
 
 // ListAgentsWithStaleNonTerminalReincarnationState is the agent-state
-// backstop for the replica-safe reincarnation sweep (design §3.7): an agent
-// left claimed with no matching non-terminal AgentReincarnation record (for
-// ListStaleNonTerminalAgentReincarnations to find) still gets reset once its
-// row has not been updated since before olderThan.
+// backstop for the replica-safe reincarnation sweep (design §3.4 Amendment
+// A6.6): an agent left claimed with no matching non-terminal
+// AgentReincarnation record (for ListStaleNonTerminalAgentReincarnations to
+// find — e.g. the claim landed but CreateAgentReincarnation never did, or the
+// record was deleted) still gets reset once it looks stale.
+//
+// Staleness is judged on reincarnation_updated_at, NOT `updated`: every
+// broker heartbeat's UpdateAgentStatus bumps `updated` for any agent whose
+// container the broker still reports (including a stopped one — heartbeat
+// lists via `docker ps -a`), which would otherwise keep an orphaned claim
+// looking fresh forever. reincarnation_updated_at is bumped only by
+// reincarnation-owned writes (the claim, each worker step, every terminal
+// write), so it is a clock only this feature moves. A nil
+// reincarnation_updated_at (a row from before this column existed, or one
+// set non-terminal by anything else) is treated as immediately eligible —
+// there is no better signal, and leaving it un-resettable would be worse.
+//
+// The "no non-terminal record" half of the backstop's contract is checked
+// here explicitly, per agent, rather than relied upon as an ordering
+// property of the caller's two loops: an agent that still has one is left
+// for the record-side sweep (ListStaleNonTerminalAgentReincarnations,
+// followed by sweepFailStaleRecord's agent-state-aware restore decision) to
+// own instead.
 func (s *AgentStore) ListAgentsWithStaleNonTerminalReincarnationState(ctx context.Context, olderThan time.Time) ([]*store.Agent, error) {
 	nonTerminal := []string{
 		store.ReincarnationStateStopping,
@@ -564,14 +591,35 @@ func (s *AgentStore) ListAgentsWithStaleNonTerminalReincarnationState(ctx contex
 	rows, err := s.client.Agent.Query().
 		Where(
 			agent.ReincarnationStateIn(nonTerminal...),
-			agent.UpdatedLT(olderThan),
+			agent.Or(
+				agent.ReincarnationUpdatedAtIsNil(),
+				agent.ReincarnationUpdatedAtLT(olderThan),
+			),
 		).
 		All(ctx)
 	if err != nil {
 		return nil, err
 	}
+
+	recNonTerminal := make([]agentreincarnation.State, 0, len(store.AgentReincarnationNonTerminalStates))
+	for _, st := range store.AgentReincarnationNonTerminalStates {
+		recNonTerminal = append(recNonTerminal, agentreincarnation.State(st))
+	}
+
 	out := make([]*store.Agent, 0, len(rows))
 	for _, a := range rows {
+		hasNonTerminalRecord, err := s.client.AgentReincarnation.Query().
+			Where(
+				agentreincarnation.AgentIDEQ(a.ID.String()),
+				agentreincarnation.StateIn(recNonTerminal...),
+			).
+			Exist(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if hasNonTerminalRecord {
+			continue
+		}
 		out = append(out, entAgentToStore(a))
 	}
 	return out, nil

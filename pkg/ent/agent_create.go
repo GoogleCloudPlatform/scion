@@ -546,6 +546,20 @@ func (_c *AgentCreate) SetNillableReincarnationState(v *string) *AgentCreate {
 	return _c
 }
 
+// SetReincarnationUpdatedAt sets the "reincarnation_updated_at" field.
+func (_c *AgentCreate) SetReincarnationUpdatedAt(v time.Time) *AgentCreate {
+	_c.mutation.SetReincarnationUpdatedAt(v)
+	return _c
+}
+
+// SetNillableReincarnationUpdatedAt sets the "reincarnation_updated_at" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableReincarnationUpdatedAt(v *time.Time) *AgentCreate {
+	if v != nil {
+		_c.SetReincarnationUpdatedAt(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *AgentCreate) SetID(v uuid.UUID) *AgentCreate {
 	_c.mutation.SetID(v)
@@ -946,6 +960,10 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.ReincarnationState(); ok {
 		_spec.SetField(agent.FieldReincarnationState, field.TypeString, value)
 		_node.ReincarnationState = value
+	}
+	if value, ok := _c.mutation.ReincarnationUpdatedAt(); ok {
+		_spec.SetField(agent.FieldReincarnationUpdatedAt, field.TypeTime, value)
+		_node.ReincarnationUpdatedAt = &value
 	}
 	if nodes := _c.mutation.ProjectIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
@@ -1717,6 +1735,24 @@ func (u *AgentUpsert) UpdateReincarnationState() *AgentUpsert {
 // ClearReincarnationState clears the value of the "reincarnation_state" field.
 func (u *AgentUpsert) ClearReincarnationState() *AgentUpsert {
 	u.SetNull(agent.FieldReincarnationState)
+	return u
+}
+
+// SetReincarnationUpdatedAt sets the "reincarnation_updated_at" field.
+func (u *AgentUpsert) SetReincarnationUpdatedAt(v time.Time) *AgentUpsert {
+	u.Set(agent.FieldReincarnationUpdatedAt, v)
+	return u
+}
+
+// UpdateReincarnationUpdatedAt sets the "reincarnation_updated_at" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateReincarnationUpdatedAt() *AgentUpsert {
+	u.SetExcluded(agent.FieldReincarnationUpdatedAt)
+	return u
+}
+
+// ClearReincarnationUpdatedAt clears the value of the "reincarnation_updated_at" field.
+func (u *AgentUpsert) ClearReincarnationUpdatedAt() *AgentUpsert {
+	u.SetNull(agent.FieldReincarnationUpdatedAt)
 	return u
 }
 
@@ -2552,6 +2588,27 @@ func (u *AgentUpsertOne) UpdateReincarnationState() *AgentUpsertOne {
 func (u *AgentUpsertOne) ClearReincarnationState() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearReincarnationState()
+	})
+}
+
+// SetReincarnationUpdatedAt sets the "reincarnation_updated_at" field.
+func (u *AgentUpsertOne) SetReincarnationUpdatedAt(v time.Time) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetReincarnationUpdatedAt(v)
+	})
+}
+
+// UpdateReincarnationUpdatedAt sets the "reincarnation_updated_at" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateReincarnationUpdatedAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateReincarnationUpdatedAt()
+	})
+}
+
+// ClearReincarnationUpdatedAt clears the value of the "reincarnation_updated_at" field.
+func (u *AgentUpsertOne) ClearReincarnationUpdatedAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearReincarnationUpdatedAt()
 	})
 }
 
@@ -3554,6 +3611,27 @@ func (u *AgentUpsertBulk) UpdateReincarnationState() *AgentUpsertBulk {
 func (u *AgentUpsertBulk) ClearReincarnationState() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearReincarnationState()
+	})
+}
+
+// SetReincarnationUpdatedAt sets the "reincarnation_updated_at" field.
+func (u *AgentUpsertBulk) SetReincarnationUpdatedAt(v time.Time) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetReincarnationUpdatedAt(v)
+	})
+}
+
+// UpdateReincarnationUpdatedAt sets the "reincarnation_updated_at" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateReincarnationUpdatedAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateReincarnationUpdatedAt()
+	})
+}
+
+// ClearReincarnationUpdatedAt clears the value of the "reincarnation_updated_at" field.
+func (u *AgentUpsertBulk) ClearReincarnationUpdatedAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearReincarnationUpdatedAt()
 	})
 }
 

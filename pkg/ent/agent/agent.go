@@ -98,6 +98,8 @@ const (
 	FieldGeneration = "generation"
 	// FieldReincarnationState holds the string denoting the reincarnation_state field in the database.
 	FieldReincarnationState = "reincarnation_state"
+	// FieldReincarnationUpdatedAt holds the string denoting the reincarnation_updated_at field in the database.
+	FieldReincarnationUpdatedAt = "reincarnation_updated_at"
 	// EdgeProject holds the string denoting the project edge name in mutations.
 	EdgeProject = "project"
 	// EdgeMemberships holds the string denoting the memberships edge name in mutations.
@@ -173,6 +175,7 @@ var Columns = []string{
 	FieldStateVersion,
 	FieldGeneration,
 	FieldReincarnationState,
+	FieldReincarnationUpdatedAt,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -469,6 +472,11 @@ func ByGeneration(opts ...sql.OrderTermOption) OrderOption {
 // ByReincarnationState orders the results by the reincarnation_state field.
 func ByReincarnationState(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldReincarnationState, opts...).ToFunc()
+}
+
+// ByReincarnationUpdatedAt orders the results by the reincarnation_updated_at field.
+func ByReincarnationUpdatedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldReincarnationUpdatedAt, opts...).ToFunc()
 }
 
 // ByProjectField orders the results by project field.

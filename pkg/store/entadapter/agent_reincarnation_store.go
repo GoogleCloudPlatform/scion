@@ -234,6 +234,54 @@ func (s *AgentReincarnationStore) DeleteAgentReincarnationsForAgent(ctx context.
 	return nil
 }
 
+// TryAdvanceAgentReincarnation is the compare-and-swap write described on
+// store.AgentReincarnationStore: it only applies if the row currently has a
+// non-terminal State, checked and updated in the same conditional UPDATE
+// statement (design §3.4 Amendment A6).
+func (s *AgentReincarnationStore) TryAdvanceAgentReincarnation(ctx context.Context, r *store.AgentReincarnation) (bool, error) {
+	uid, err := parseGetID(r.ID)
+	if err != nil {
+		return false, err
+	}
+	states := make([]agentreincarnation.State, 0, len(store.AgentReincarnationNonTerminalStates))
+	for _, st := range store.AgentReincarnationNonTerminalStates {
+		states = append(states, agentreincarnation.State(st))
+	}
+
+	builder := s.client.AgentReincarnation.Update().
+		Where(agentreincarnation.IDEQ(uid), agentreincarnation.StateIn(states...)).
+		SetState(agentreincarnation.State(r.State)).
+		SetError(r.Error)
+
+	// Explicit, not left to ent's UpdateDefault(time.Now): the caller
+	// (reincarnate_worker.go's tryAdvanceReincarnation) pins this to the same
+	// instant it uses for the corresponding agent-row write, so the two
+	// clocks the replica-safe sweep reads (design §3.4 Amendment A6.6) never
+	// appear out of order relative to each other for the same step, no
+	// matter which of the two writes physically lands on the wire first.
+	if !r.UpdatedAt.IsZero() {
+		builder.SetUpdatedAt(r.UpdatedAt)
+	}
+
+	if r.CompletedAt != nil {
+		builder.SetCompletedAt(*r.CompletedAt)
+	} else {
+		builder.ClearCompletedAt()
+	}
+	if cfg := marshalAppliedConfigSnapshot(r.NewAppliedConfig); cfg != "" {
+		builder.SetNewAppliedConfig(cfg)
+	}
+	if cfg := marshalAppliedConfigSnapshot(r.PreviousAppliedConfig); cfg != "" {
+		builder.SetPreviousAppliedConfig(cfg)
+	}
+
+	affected, err := builder.Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return affected > 0, nil
+}
+
 // ListNonTerminalAgentReincarnations returns every non-terminal reincarnation
 // record across all agents, for the hub-restart boot sweep (design §3.7 F4).
 func (s *AgentReincarnationStore) ListStaleNonTerminalAgentReincarnations(ctx context.Context, olderThan time.Time) ([]*store.AgentReincarnation, error) {

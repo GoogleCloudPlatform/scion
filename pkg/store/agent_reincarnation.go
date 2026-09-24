@@ -120,4 +120,25 @@ type AgentReincarnationStore interface {
 	// a healthy in-flight migration on one replica safe from a sweep running
 	// concurrently on another.
 	ListStaleNonTerminalAgentReincarnations(ctx context.Context, olderThan time.Time) ([]*AgentReincarnation, error)
+
+	// TryAdvanceAgentReincarnation atomically writes r's mutable fields
+	// (State, Error, CompletedAt, PreviousAppliedConfig, NewAppliedConfig) to
+	// the record with ID r.ID, but only if that record is CURRENTLY in a
+	// non-terminal state (AgentReincarnationNonTerminalStates) — a
+	// compare-and-swap performed as a single conditional UPDATE, analogous to
+	// UpdateAgent's state_version check. This is the only way the
+	// reincarnation worker, failReincarnation, and the replica-safe sweep may
+	// transition a record's state (design §3.4 Amendment A6): every prior
+	// "is this record still mine" read-then-check was not atomic with the
+	// write that acted on the answer, leaving a window for the sweep (or a
+	// second racing writer) to move the record between the check and the
+	// write.
+	//
+	// Returns (true, nil) if a row matched (and was updated). Returns
+	// (false, nil) — not an error — if none did: the record does not exist,
+	// or — the case this exists to catch — it was already moved out of a
+	// non-terminal state by something else. Callers MUST treat false as "this
+	// caller no longer owns the record" and must not act further on it,
+	// including writing the agent row.
+	TryAdvanceAgentReincarnation(ctx context.Context, r *AgentReincarnation) (bool, error)
 }

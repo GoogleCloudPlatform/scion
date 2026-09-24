@@ -177,6 +177,19 @@ func (Agent) Fields() []ent.Field {
 		field.String("reincarnation_state").
 			Optional().
 			Default(""),
+		// reincarnation_updated_at is bumped ONLY by reincarnation-owned
+		// writes (the claim, each worker step, and every terminal write) —
+		// unlike `updated`, which every broker heartbeat's UpdateAgentStatus
+		// also bumps (runtimebroker/heartbeat.go lists containers via `docker
+		// ps -a`, so a stopped-but-present container still heartbeats). The
+		// replica-safe sweep's agent-state backstop (design §3.4 Amendment
+		// A6.6) keys on this column instead of `updated`, so a heartbeat
+		// arriving for an orphaned claim can no longer keep it from ever
+		// looking stale. Nil means no reincarnation has ever touched this
+		// agent.
+		field.Time("reincarnation_updated_at").
+			Optional().
+			Nillable(),
 	}
 }
 

@@ -763,6 +763,26 @@ func (_u *AgentUpdate) ClearReincarnationState() *AgentUpdate {
 	return _u
 }
 
+// SetReincarnationUpdatedAt sets the "reincarnation_updated_at" field.
+func (_u *AgentUpdate) SetReincarnationUpdatedAt(v time.Time) *AgentUpdate {
+	_u.mutation.SetReincarnationUpdatedAt(v)
+	return _u
+}
+
+// SetNillableReincarnationUpdatedAt sets the "reincarnation_updated_at" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableReincarnationUpdatedAt(v *time.Time) *AgentUpdate {
+	if v != nil {
+		_u.SetReincarnationUpdatedAt(*v)
+	}
+	return _u
+}
+
+// ClearReincarnationUpdatedAt clears the value of the "reincarnation_updated_at" field.
+func (_u *AgentUpdate) ClearReincarnationUpdatedAt() *AgentUpdate {
+	_u.mutation.ClearReincarnationUpdatedAt()
+	return _u
+}
+
 // SetProject sets the "project" edge to the Project entity.
 func (_u *AgentUpdate) SetProject(v *Project) *AgentUpdate {
 	return _u.SetProjectID(v.ID)
@@ -1149,6 +1169,12 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.ReincarnationStateCleared() {
 		_spec.ClearField(agent.FieldReincarnationState, field.TypeString)
+	}
+	if value, ok := _u.mutation.ReincarnationUpdatedAt(); ok {
+		_spec.SetField(agent.FieldReincarnationUpdatedAt, field.TypeTime, value)
+	}
+	if _u.mutation.ReincarnationUpdatedAtCleared() {
+		_spec.ClearField(agent.FieldReincarnationUpdatedAt, field.TypeTime)
 	}
 	if _u.mutation.ProjectCleared() {
 		edge := &sqlgraph.EdgeSpec{
@@ -2018,6 +2044,26 @@ func (_u *AgentUpdateOne) ClearReincarnationState() *AgentUpdateOne {
 	return _u
 }
 
+// SetReincarnationUpdatedAt sets the "reincarnation_updated_at" field.
+func (_u *AgentUpdateOne) SetReincarnationUpdatedAt(v time.Time) *AgentUpdateOne {
+	_u.mutation.SetReincarnationUpdatedAt(v)
+	return _u
+}
+
+// SetNillableReincarnationUpdatedAt sets the "reincarnation_updated_at" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableReincarnationUpdatedAt(v *time.Time) *AgentUpdateOne {
+	if v != nil {
+		_u.SetReincarnationUpdatedAt(*v)
+	}
+	return _u
+}
+
+// ClearReincarnationUpdatedAt clears the value of the "reincarnation_updated_at" field.
+func (_u *AgentUpdateOne) ClearReincarnationUpdatedAt() *AgentUpdateOne {
+	_u.mutation.ClearReincarnationUpdatedAt()
+	return _u
+}
+
 // SetProject sets the "project" edge to the Project entity.
 func (_u *AgentUpdateOne) SetProject(v *Project) *AgentUpdateOne {
 	return _u.SetProjectID(v.ID)
@@ -2434,6 +2480,12 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	}
 	if _u.mutation.ReincarnationStateCleared() {
 		_spec.ClearField(agent.FieldReincarnationState, field.TypeString)
+	}
+	if value, ok := _u.mutation.ReincarnationUpdatedAt(); ok {
+		_spec.SetField(agent.FieldReincarnationUpdatedAt, field.TypeTime, value)
+	}
+	if _u.mutation.ReincarnationUpdatedAtCleared() {
+		_spec.ClearField(agent.FieldReincarnationUpdatedAt, field.TypeTime)
 	}
 	if _u.mutation.ProjectCleared() {
 		edge := &sqlgraph.EdgeSpec{

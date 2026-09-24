@@ -3033,68 +3033,69 @@ func (m *AccessPolicyMutation) ResetEdge(name string) error {
 // AgentMutation represents an operation that mutates the Agent nodes in the graph.
 type AgentMutation struct {
 	config
-	op                     Op
-	typ                    string
-	id                     *uuid.UUID
-	slug                   *string
-	name                   *string
-	template               *string
-	status                 *agent.Status
-	created_by             *uuid.UUID
-	owner_id               *uuid.UUID
-	delegation_enabled     *bool
-	message_mode           *agent.MessageMode
-	labels                 *map[string]string
-	annotations            *map[string]string
-	phase                  *string
-	activity               *string
-	tool_name              *string
-	connection_state       *string
-	container_status       *string
-	exit_code              *int
-	addexit_code           *int
-	exit_reason            *string
-	runtime_state          *string
-	stalled_from_activity  *string
-	current_turns          *int
-	addcurrent_turns       *int
-	current_model_calls    *int
-	addcurrent_model_calls *int
-	image                  *string
-	detached               *bool
-	runtime                *string
-	runtime_broker_id      *string
-	web_pty_enabled        *bool
-	exposed_ports          *[]store.ExposedPort
-	appendexposed_ports    []store.ExposedPort
-	task_summary           *string
-	message                *string
-	applied_config         *string
-	ancestry               *[]string
-	appendancestry         []string
-	created                *time.Time
-	updated                *time.Time
-	last_seen              *time.Time
-	last_activity_event    *time.Time
-	started_at             *time.Time
-	deleted_at             *time.Time
-	state_version          *int64
-	addstate_version       *int64
-	generation             *int
-	addgeneration          *int
-	reincarnation_state    *string
-	clearedFields          map[string]struct{}
-	project                *uuid.UUID
-	clearedproject         bool
-	memberships            map[uuid.UUID]struct{}
-	removedmemberships     map[uuid.UUID]struct{}
-	clearedmemberships     bool
-	policy_bindings        map[uuid.UUID]struct{}
-	removedpolicy_bindings map[uuid.UUID]struct{}
-	clearedpolicy_bindings bool
-	done                   bool
-	oldValue               func(context.Context) (*Agent, error)
-	predicates             []predicate.Agent
+	op                       Op
+	typ                      string
+	id                       *uuid.UUID
+	slug                     *string
+	name                     *string
+	template                 *string
+	status                   *agent.Status
+	created_by               *uuid.UUID
+	owner_id                 *uuid.UUID
+	delegation_enabled       *bool
+	message_mode             *agent.MessageMode
+	labels                   *map[string]string
+	annotations              *map[string]string
+	phase                    *string
+	activity                 *string
+	tool_name                *string
+	connection_state         *string
+	container_status         *string
+	exit_code                *int
+	addexit_code             *int
+	exit_reason              *string
+	runtime_state            *string
+	stalled_from_activity    *string
+	current_turns            *int
+	addcurrent_turns         *int
+	current_model_calls      *int
+	addcurrent_model_calls   *int
+	image                    *string
+	detached                 *bool
+	runtime                  *string
+	runtime_broker_id        *string
+	web_pty_enabled          *bool
+	exposed_ports            *[]store.ExposedPort
+	appendexposed_ports      []store.ExposedPort
+	task_summary             *string
+	message                  *string
+	applied_config           *string
+	ancestry                 *[]string
+	appendancestry           []string
+	created                  *time.Time
+	updated                  *time.Time
+	last_seen                *time.Time
+	last_activity_event      *time.Time
+	started_at               *time.Time
+	deleted_at               *time.Time
+	state_version            *int64
+	addstate_version         *int64
+	generation               *int
+	addgeneration            *int
+	reincarnation_state      *string
+	reincarnation_updated_at *time.Time
+	clearedFields            map[string]struct{}
+	project                  *uuid.UUID
+	clearedproject           bool
+	memberships              map[uuid.UUID]struct{}
+	removedmemberships       map[uuid.UUID]struct{}
+	clearedmemberships       bool
+	policy_bindings          map[uuid.UUID]struct{}
+	removedpolicy_bindings   map[uuid.UUID]struct{}
+	clearedpolicy_bindings   bool
+	done                     bool
+	oldValue                 func(context.Context) (*Agent, error)
+	predicates               []predicate.Agent
 }
 
 var _ ent.Mutation = (*AgentMutation)(nil)
@@ -5161,6 +5162,55 @@ func (m *AgentMutation) ResetReincarnationState() {
 	delete(m.clearedFields, agent.FieldReincarnationState)
 }
 
+// SetReincarnationUpdatedAt sets the "reincarnation_updated_at" field.
+func (m *AgentMutation) SetReincarnationUpdatedAt(t time.Time) {
+	m.reincarnation_updated_at = &t
+}
+
+// ReincarnationUpdatedAt returns the value of the "reincarnation_updated_at" field in the mutation.
+func (m *AgentMutation) ReincarnationUpdatedAt() (r time.Time, exists bool) {
+	v := m.reincarnation_updated_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldReincarnationUpdatedAt returns the old "reincarnation_updated_at" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldReincarnationUpdatedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldReincarnationUpdatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldReincarnationUpdatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldReincarnationUpdatedAt: %w", err)
+	}
+	return oldValue.ReincarnationUpdatedAt, nil
+}
+
+// ClearReincarnationUpdatedAt clears the value of the "reincarnation_updated_at" field.
+func (m *AgentMutation) ClearReincarnationUpdatedAt() {
+	m.reincarnation_updated_at = nil
+	m.clearedFields[agent.FieldReincarnationUpdatedAt] = struct{}{}
+}
+
+// ReincarnationUpdatedAtCleared returns if the "reincarnation_updated_at" field was cleared in this mutation.
+func (m *AgentMutation) ReincarnationUpdatedAtCleared() bool {
+	_, ok := m.clearedFields[agent.FieldReincarnationUpdatedAt]
+	return ok
+}
+
+// ResetReincarnationUpdatedAt resets all changes to the "reincarnation_updated_at" field.
+func (m *AgentMutation) ResetReincarnationUpdatedAt() {
+	m.reincarnation_updated_at = nil
+	delete(m.clearedFields, agent.FieldReincarnationUpdatedAt)
+}
+
 // ClearProject clears the "project" edge to the Project entity.
 func (m *AgentMutation) ClearProject() {
 	m.clearedproject = true
@@ -5330,7 +5380,7 @@ func (m *AgentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentMutation) Fields() []string {
-	fields := make([]string, 0, 41)
+	fields := make([]string, 0, 42)
 	if m.slug != nil {
 		fields = append(fields, agent.FieldSlug)
 	}
@@ -5454,6 +5504,9 @@ func (m *AgentMutation) Fields() []string {
 	if m.reincarnation_state != nil {
 		fields = append(fields, agent.FieldReincarnationState)
 	}
+	if m.reincarnation_updated_at != nil {
+		fields = append(fields, agent.FieldReincarnationUpdatedAt)
+	}
 	return fields
 }
 
@@ -5544,6 +5597,8 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.Generation()
 	case agent.FieldReincarnationState:
 		return m.ReincarnationState()
+	case agent.FieldReincarnationUpdatedAt:
+		return m.ReincarnationUpdatedAt()
 	}
 	return nil, false
 }
@@ -5635,6 +5690,8 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldGeneration(ctx)
 	case agent.FieldReincarnationState:
 		return m.OldReincarnationState(ctx)
+	case agent.FieldReincarnationUpdatedAt:
+		return m.OldReincarnationUpdatedAt(ctx)
 	}
 	return nil, fmt.Errorf("unknown Agent field %s", name)
 }
@@ -5931,6 +5988,13 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetReincarnationState(v)
 		return nil
+	case agent.FieldReincarnationUpdatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetReincarnationUpdatedAt(v)
+		return nil
 	}
 	return fmt.Errorf("unknown Agent field %s", name)
 }
@@ -6105,6 +6169,9 @@ func (m *AgentMutation) ClearedFields() []string {
 	if m.FieldCleared(agent.FieldReincarnationState) {
 		fields = append(fields, agent.FieldReincarnationState)
 	}
+	if m.FieldCleared(agent.FieldReincarnationUpdatedAt) {
+		fields = append(fields, agent.FieldReincarnationUpdatedAt)
+	}
 	return fields
 }
 
@@ -6199,6 +6266,9 @@ func (m *AgentMutation) ClearField(name string) error {
 		return nil
 	case agent.FieldReincarnationState:
 		m.ClearReincarnationState()
+		return nil
+	case agent.FieldReincarnationUpdatedAt:
+		m.ClearReincarnationUpdatedAt()
 		return nil
 	}
 	return fmt.Errorf("unknown Agent nullable field %s", name)
@@ -6330,6 +6400,9 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldReincarnationState:
 		m.ResetReincarnationState()
+		return nil
+	case agent.FieldReincarnationUpdatedAt:
+		m.ResetReincarnationUpdatedAt()
 		return nil
 	}
 	return fmt.Errorf("unknown Agent field %s", name)

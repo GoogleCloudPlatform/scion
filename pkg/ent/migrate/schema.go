@@ -140,6 +140,7 @@ var (
 		{Name: "state_version", Type: field.TypeInt64, Default: 1},
 		{Name: "generation", Type: field.TypeInt, Default: 1},
 		{Name: "reincarnation_state", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "reincarnation_updated_at", Type: field.TypeTime, Nullable: true},
 		{Name: "project_id", Type: field.TypeUUID},
 	}
 	// AgentsTable holds the schema information for the "agents" table.
@@ -150,7 +151,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "agents_projects_agents",
-				Columns:    []*schema.Column{AgentsColumns[41]},
+				Columns:    []*schema.Column{AgentsColumns[42]},
 				RefColumns: []*schema.Column{ProjectsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -159,7 +160,7 @@ var (
 			{
 				Name:    "agent_slug_project_id",
 				Unique:  true,
-				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[41]},
+				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[42]},
 			},
 		},
 	}
