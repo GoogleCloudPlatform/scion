@@ -244,7 +244,7 @@ version from `ap-em`, replacing an earlier equivalent draft from `auth-passthrou
 
 | File:line | Before | After |
 |---|---|---|
-| `pkg/hub/auth_external_bearer_test.go:571-580` | "This used to be its own `_Golden401` test, but it over-claimed… It's superseded by golden case (a)…" (sits directly above a test named `..._Golden401`) | "Golden case (a) in TestExternalBearer_ConfiguredTrustInvariant_Golden pins the exact bytes with GoogleValidator == nil. Production always builds a non-nil GoogleValidator (only trust gates the path), so this test proves the same no-op in that production shape…" |
+| `pkg/hub/auth_external_bearer_test.go:571-580` | "This used to be its own `_Golden401` test, but it over-claimed… It's superseded by golden case (a)…" (sits directly above a test named `..._Golden401`) | "Golden case (a) in TestExternalBearer_ConfiguredTrustInvariant_Golden pins the exact bytes with GoogleValidator == nil. Production always builds a non-nil GoogleValidator (only trust gates the path), so this test proves the same no-op in that production shape…" **(this rewrite was itself false — see the fix round 3 section: golden case (a) is also wired with a non-nil GoogleValidator; the two tests differ in the token, not in wiring)** |
 | `pkg/hub/auth_external_bearer_test.go:1598` | "server.go's New now always constructs them." | "server.go's New always constructs them." |
 | `pkg/hub/ge_exchange.go:196-200` (production) | "SA rejection moved out of the validator: the validator now only classifies IsServiceAccount… keeps its pre-existing behaviour… unchanged." | "The validator only classifies IsServiceAccount and each caller decides whether to admit it; the exchange endpoint rejects SA credentials outright." |
 | `pkg/hub/ge_exchange_test.go:494-496` | "SA rejection moved out of the validator: the real validator now classifies…" | "The real validator classifies IsServiceAccount rather than erroring…" |
@@ -261,7 +261,7 @@ version from `ap-em`, replacing an earlier equivalent draft from `auth-passthrou
 Every other hit in the 32 is a false positive, re-verified by reading in context:
 - `time.Now()` calls, the `now`/`clock` mock-clock variables and parameters (`google_credential_cache.go`, `google_credential_cache_test.go`, `external_bearer_ratelimit_test.go`, `google_identity_resolver.go`, `ge_exchange_ratelimit.go`, `ge_exchange_test.go`, `google_credential_validator_test.go`, `auth_external_bearer_sa_test.go`) — "now" as a variable/function name or `time.Now()`;
 - "now" in a present-tense, non-historical sense ("is now full", "should now be admitted", "must now succeed", "must now fit", "Only now, with every issuer… accepted, log…") — describes a runtime condition at a point in execution, not a change from before this PR;
-- "unchanged" describing an invariant (a token/response passed through without modification: `bridge.go:1362`, `auth.go:484`, `auth_external_bearer_test.go:869,1624`, `federation_config.go:230`) — not "unchanged relative to before this PR";
+- "unchanged" describing an invariant (a token/response passed through without modification: `bridge.go:1362`, `auth.go:487`, `auth_external_bearer_test.go:869,1624`, `federation_config.go:230`) — not "unchanged relative to before this PR"; **(round 3 found this occurrence's surrounding sentence was itself inaccurate — see the fix round 3 section)**
 - "earlier" describing code/loop position, not review history (`auth_external_bearer_test.go:1429,1483,1485`, `federation_auth.go:114`, `google_credential_validator_test.go:403`);
 - "moved" inside "no other outcome series moved" (a testing-invariant phrase) and inside "removed" (`main_test.go:117`, substring match);
 - `docs-site/.../a2a-bridge.md:358` "Deprecated, superseded by hubBearer" — a real, user-facing deprecation notice, not narration;
@@ -327,15 +327,153 @@ targeted-test gate has nothing new to target.
 - `go vet ./pkg/hub/... ./pkg/config/... ./cmd/...` — clean. `go vet ./...` (bridge module) — clean.
 - `GOGC=40 golangci-lint run --new-from-rev=a53175c23 --concurrency=1 ./pkg/hub/... ./pkg/config/... ./cmd/...` — `0 issues`. Same
   command with `./...` from `extras/scion-a2a-bridge/` — `0 issues`.
-- `go test ./pkg/config/...` (SCION_* unset, `GOTMPDIR` outside any checkout) — `pkg/config/opsettings` and
-  `pkg/config/templateimport` pass; `pkg/config` itself fails two tests unrelated to this change
-  (`TestLoadVersionedSettings_ProjectIDRemapping`, `TestLoadVersionedSettings_GroveIDBackwardCompat`, both a pre-existing
-  `auto_expose_ports` decode error in `v7_fixes_test.go`) — confirmed via `git stash` that these fail identically on unmodified
-  `88b0a1a32`. Ran `-run 'TestFederationConfig|TestInvalidDomainEntryReason'` explicitly: all pass.
+- `go test ./pkg/config/...` — environment-specific; passes with SCION_* unset. Root cause found in fix round 3: this container's
+  orchestration harness sets `SCION_AUTO_EXPOSE_PORTS=true` in the ambient environment, which koanf's env-var override binds onto
+  the settings schema's `auto_expose_ports` field (a map/struct), causing a decode error in `TestLoadVersionedSettings_*`
+  (`v7_fixes_test.go`) — confirmed by toggling just that one variable: `env -u SCION_AUTO_EXPOSE_PORTS go test ./pkg/config/...`
+  passes in full, as does unsetting every `SCION_*` variable. Not a fact about the code; not reproducible in an environment
+  without that specific variable set. Ran `-run 'TestFederationConfig|TestInvalidDomainEntryReason'` explicitly: all pass
+  regardless.
 - `go test ./...` from `extras/scion-a2a-bridge/` — all packages pass.
 - Bonus (not required this round, since no test name/message changed): a full `go test ./pkg/hub/...` run. It surfaced 4 pre-existing,
   unrelated failures (`TestDEF164_AtAgentSlug_DeliversToAgent`, `TestDEF164_AtAgentSlug_DMConversationCreated`,
   `TestDEF152_AgentToAgentDM_DeliversViaOutbound`, `TestCreateTemplateV2_ScopeIDInjectionBlocked`), all in files this branch never
   touches (`handlers_outbound_def142_test.go`, `handlers_outbound_def152_test.go`, `handlers_user_templates_test.go`).
+- Byte hazard (`perl -ne 'print "$ARGV:$.\n" if /\xC2\xA0/'` over every file changed since `a53175c23`) — empty.
+- Bare refs — both commands empty.
+
+## Fix round 3
+
+Review: `reviews/polish-r3-ap-polish-rev-3.md` (`ap-polish-rev-3`, REQUEST CHANGES on `ad4eda749`: 0C / 2R / 3O / 2N / 5FYI). Both
+Required findings were comments introduced in fix round 2 using wording the round-2 report itself suggested — neither the
+round-2 report author nor this agent checked that wording against the code before committing. Lead ruling (23:20, then
+`ap-em`'s addendum): subtest/table-case `name:`/`t.Run` renames are authorized when nothing references the name.
+
+**Main lesson applied this round:** every suggested wording below (the report's included) was verified against the actual code
+before being committed — the specific lines read are named in each row.
+
+### R1: false claim about golden case (a)'s wiring — fixed
+
+| File:line | Before (false) | After | Code lines verified |
+|---|---|---|---|
+| `pkg/hub/auth_external_bearer_test.go:571-580` | "Golden case (a) … pins the exact bytes with GoogleValidator == nil … not just with GoogleValidator == nil like golden case (a). Otherwise the nil-guard … could mask a bug in the googleTrust gate itself." | "…even for a validly signed Google ID token. Golden case (a) … pins the same fallback bytes for a malformed JWT; this test uses a real Google-signed token, in production shape (GoogleValidator and GoogleResolver wired, as New() always builds them; FederationAuth pointer empty), so a googleTrust gate that let a Google-shaped token through would reach the validator and fail the zero-calls assertion below." | `:1388-1407` (golden case (a)'s table entry: `withTrust: false`, token = `nonHubJWT = "not-a.valid-hub.jwt"`, and the shared `cfg` built with `GoogleValidator: counting, GoogleResolver: resolver` for every case including (a)); `:612-614` (this test's token: `signIDToken(kp, claims)` with `claims["iss"] = googleIssuerHTTPS` from `validIDTokenClaims()`, `google_credential_validator_test.go:109-122`); `:631-632` (the `counting.totalCalls() != 0` assertion); `server.go:1036` (`New`'s signature, confirming it is the constructor that always builds both) |
+
+Also updated the fix-round-2 table row above (this log, "R2: six … sites fixed" table) to flag that its "After" text was itself
+false, and corrected "`auth.go:484`" to "`auth.go:487`" in the fix-round-2 history-word survivor list (F5).
+
+### R2: `ge_exchange_metrics_test.go` file banner overclaimed byte-identity checking — fixed
+
+| File:line | Before (false) | After | Code lines verified |
+|---|---|---|---|
+| `pkg/hub/ge_exchange_metrics_test.go:33-36` | "…every test also checks the response bytes/status are byte-identical to the response without a metrics recorder…" | "…and checking the response status. TestGEExchangeMetrics_ResponseShapeUnaffected compares the success response with and without a recorder, and the TestGEExchange_*_ExactBytes tests pin the exact bytes: recording must never change the exchange response." | `:70-88` (`TestGEExchangeMetrics_OK`: asserts only `w.Code != http.StatusOK`, no second server, no byte comparison); `:292-308` (`_NilRecorder_NoPanic`: runs without a recorder only, status-only assertion); `:318-355` (`_ResponseShapeUnaffected`: the only with/without comparison, uses `reflect.DeepEqual` after masking `AccessToken`/`ExpiresAt`/`UpstreamExpiresAt` — not byte-identical); confirmed the other 8 status-only tests (`_NotConfigured`, `_InvalidRequest_*`, `_BadRequest_*`, `_InvalidCredential_*`, `_Forbidden_*`, `_ExchangeFailed_*`, `_RateLimited`) via `grep -n '^func Test'` |
+
+### O1: `auth_external_bearer.go:43-44` PR-relative "today" — fixed
+
+"…it never changes the outcome of a request that authenticates **today**…" → "…it never changes the outcome of a request this
+path cannot vouch for…" (dropped "today"; avoided the report's suggested wording's repeated "vouch for" clause). Verified against
+`errExternalBearerNotApplicable`'s existing, already-accurate doc a few lines below and the "original, byte-identical rejection"
+claim already established in earlier rounds.
+
+### O2: `pkg/hub/auth.go:485-487` hook-site comment — fixed (branch-level, outside the sweep delta, ships in the same PR)
+
+Before: "otherwise (or on failure) it returns false/an error and the original 'unrecognized token format' rejection below is
+unchanged." False on two counts: `serveExternalBearer` returns only a `bool`, never an error, and on verification *failure* it
+writes its own 401 and returns `true` — the "unrecognized token format" rejection is not reached in that case.
+
+After: "serveExternalBearer returns true whenever it has fully handled the request (Google trust configured, whether validation
+succeeds or fails), so this arm returns and the 'unrecognized token format' rejection below never runs. It returns false only
+when the token is not applicable to this path at all (e.g. no Google trust configured), in which case that rejection runs as
+usual." (Diverged from the report's suggested "writes its own response on success or failure" — on success `serveExternalBearer`
+calls `next.ServeHTTP` rather than writing a response itself, so the rewrite states the return-value contract instead.)
+
+Code lines verified: `auth_external_bearer.go:293-294` (`func serveExternalBearer(...) bool`), `:302-306` (only the
+`errExternalBearerNotApplicable` case returns `false`), `:343-352` (the default/failure case writes 401 and returns `true`),
+`:363-365` (the success case calls `next.ServeHTTP` and returns `true`).
+
+### O3: `pkg/config/federation_config.go:257-258` "fails at startup" — fixed to cover all three load paths
+
+After: "…so a misconfiguration is rejected when the config is loaded (startup fails; an admin save or hot reload is refused)
+instead of silently admitting nothing." Code lines verified: `server.go:1544-1552` (`New` returns an error when
+`NewFederationAuthenticator` fails — startup); `admin_settings_db.go:551-558` (`Validate()` failure → `writeError(...,
+http.StatusUnprocessableEntity, ...)` — admin save, 422); `operational_settings.go:1129-1132` (`Validate()` failure →
+`slog.Error(..., "keeping old config")`, no swap — hot reload refused, old config kept).
+
+### N1: three ragged wraps — fixed
+
+- `ge_exchange_route_test.go:358-360` ("decorator (re-validates on" breaking early) — reflowed.
+- `google_credential_validator_test.go:546-547` ("under the user rule." / "If the SA/user branches…" — short line mid-paragraph) — reflowed.
+- `auth_external_bearer.go:277-278` ("matching" / "containsFold's…" breaking early) — reflowed.
+
+### N2: "reverted" implying a prior state — fixed
+
+- `extras/scion-a2a-bridge/internal/bridge/uatvalidator_test.go:196`: "reverted to always" → "changed to always".
+- `extras/scion-a2a-bridge/internal/bridge/v0_compat_test.go:768`: "reverted to \"uat\" alone" → "changed to \"uat\" alone".
+
+### F1: subtest-name rename, authorized by lead ruling — fixed, plus a branch-wide sweep
+
+`pkg/config/federation_config_test.go:556`: renamed the `name:` field from `"allowed_projects (the OLD field) on the Google
+issuer still errors, and now names allowed_gcp_projects"` to `"allowed_projects on a Google issuer errors and names
+allowed_gcp_projects"`. Verified nothing references the old name: `grep -rn "OLD field"` and `grep -rn` for the exact old string
+across `.go`, `Makefile`, `.github`, `scripts`, `hack` — no hits outside this one test file (and this log's own historical
+record). Ran the renamed subtest: `TestFederationConfig_Validate/allowed_projects_on_a_Google_issuer_errors_and_names_allowed_gcp_projects`
+— PASS.
+
+**Branch-wide sweep** (per the lead/ap-em addendum): `git diff a53175c23 HEAD -- '*_test.go' | /usr/bin/grep -nE '^\+.*(name:|t\.Run\()'`
+— 75 hits. Triaged every one; only the `:556` row above narrates history (matched by a follow-up `grep -iE
+'old|now |review|round|phase|design|finding|previously|earlier|reverted|superseded|unchanged|no longer'` over the 75 hits, which
+also flagged two "folds to lower" table-case names as false positives — "fold" contains the substring "old"). Every other `name:`/
+`t.Run` string in the 75 is a plain behavioural description (e.g. `"allowed_gcp_projects on the Google issuer (https form) is
+valid"`, `"standard SA email"`, `"azp == sub (real metadata-server shape)"`) with no design ID, review reference, or history word.
+
+### F3: project-log gate claim corrected (this log, fix-round-2 section)
+
+The fix-round-2 gates section stated the `TestLoadVersionedSettings_*` `pkg/config` failures were confirmed via `git stash` to
+fail "identically on unmodified `88b0a1a32`", asserting environmental causation without identifying the actual cause. The
+fix-round-3 review ran the identical command at `ad4eda749` and got a full pass, contradicting that framing. **Root cause found
+this round:** this container's orchestration harness sets `SCION_AUTO_EXPOSE_PORTS=true` in the ambient environment, which
+collides with the settings schema's `auto_expose_ports` field name via koanf's env-var override, producing the `'auto_expose_ports'
+expected a map or struct, got "string"` decode error. Confirmed by toggling only that one variable
+(`env -u SCION_AUTO_EXPOSE_PORTS go test ./pkg/config/...` passes in full). The fix-round-2 log text is corrected in place (see
+above) rather than left as a now-known-wrong "confirmed via git stash" claim.
+
+### F5: log accuracy — fixed together with R1/O2
+
+- Fix-round-2 log table row for `auth_external_bearer_test.go:571-580` now flags that its "After" text was itself false (see R1
+  above), rather than presenting it as settled.
+- `auth.go:484` corrected to `auth.go:487` in the fix-round-2 history-word survivor list.
+
+### F2 and F4: no action (per the brief)
+
+F2 (commit-message squash-body concatenation) is being handled by `ap-em`/the lead directly with the person who merges upstream.
+F4 ("soak" vocabulary) was already confirmed to stay — it describes the operator-facing `geGoogle`-exchange deletion migration,
+not review process.
+
+### Comments-only proof (fix round 3)
+
+```
+$ git diff ad4eda749 -- '*.go' | /usr/bin/grep -E '^[+-][^+-]' | /usr/bin/grep -vE '^[+-]\s*(//|$)'
+```
+Prints exactly one −/+ pair, the authorized subtest-name rename:
+```
+-			name: "allowed_projects (the OLD field) on the Google issuer still errors, and now names allowed_gcp_projects",
++			name: "allowed_projects on a Google issuer errors and names allowed_gcp_projects",
+```
+No trailing-comment lines this round (nothing inside `/* */`, either). No other kind of line appears.
+
+### Gates (fix round 3)
+
+- `gofmt -l pkg cmd extras` — empty.
+- `go vet ./pkg/hub/... ./pkg/config/... ./cmd/...` — clean. `go vet ./...` (bridge module) — clean.
+- `GOGC=40 golangci-lint run --new-from-rev=a53175c23 --concurrency=1 ./pkg/hub/... ./pkg/config/... ./cmd/...` — `0 issues`. Same
+  command with `./...` from `extras/scion-a2a-bridge/` — `0 issues`.
+- `go test ./pkg/config/...` — passes in full once `SCION_AUTO_EXPOSE_PORTS` (or all `SCION_*`) is unset; see F3 above for the
+  root cause found this round. `-run 'TestFederationConfig_Validate'` explicitly, including the renamed subtest: all pass.
+- `go test ./...` from `extras/scion-a2a-bridge/` — all packages pass, including `TestUATValidator_TokenTypeClassification` and
+  `TestCallerHubClient_BearerTokenType` (N2) run explicitly.
+- Targeted `go test -count=1 -run` on every `pkg/hub` test touched this round (`TestExternalBearer_NoTrustProductionShape_Golden401`,
+  `TestExternalBearer_ConfiguredTrustInvariant_Golden`, `TestGEExchangeMetrics_OK`, `TestGEExchangeMetrics_ResponseShapeUnaffected`,
+  `TestGEExchangeMetrics_NilRecorder_NoPanic`, `TestExternalBearerRateLimiter_DefaultsPinned`,
+  `TestGEExchange_Route_SharesValidatorAndResolverWithExternalBearer`,
+  `TestProductionValidator_IDToken_UserToken_SAShapedAzpSub_StillRejected`) — all pass.
 - Byte hazard (`perl -ne 'print "$ARGV:$.\n" if /\xC2\xA0/'` over every file changed since `a53175c23`) — empty.
 - Bare refs — both commands empty.
