@@ -1274,7 +1274,9 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 	// projectPath is an optional hint from the hub (the provider's LocalPath
 	// for a linked project); resolveDeleteTarget verifies it belongs to
 	// projectID before using it.
-	target, err := s.resolveDeleteTarget(ctx, id, projectID, query.Get("projectPath"), deleteFiles)
+	// The project path is needed both to delete files and to mark
+	// agent-info.json deleted on a soft delete.
+	target, err := s.resolveDeleteTarget(ctx, id, projectID, query.Get("projectPath"), deleteFiles || softDelete)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		if errors.Is(err, errDeleteTargetNotFound) {
@@ -2917,7 +2919,7 @@ func agentHasNoProjectIdentity(a api.AgentInfo) bool {
 // hub-managed directory scan must find exactly one project.
 //
 // More than one distinct match is an error (fail closed) rather than a guess.
-func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, projectPathHint string, deleteFiles bool) (*deleteTarget, error) {
+func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, projectPathHint string, needProjectPath bool) (*deleteTarget, error) {
 	type candidate struct {
 		mgr   agent.Manager
 		entry api.AgentInfo
@@ -3012,7 +3014,7 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, project
 				"agent_id", id, "project_id", projectID, "path", t.projectPath)
 			t.projectPath = ""
 		}
-		if t.projectPath == "" && deleteFiles {
+		if t.projectPath == "" && needProjectPath {
 			// The runtime entry carries no project path (e.g. no
 			// annotation). Resolve it only from this project's own
 			// directory (hub-managed or linked), never by a project-blind
@@ -3219,7 +3221,9 @@ func trustedEntryProjectPath(path, projectID string) bool {
 func findAgentInHubManagedProjects(agentName, projectID string) (string, error) {
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
-		return "", nil
+		// Fail closed: without the global dir the agent's absence is not
+		// known, and a 404 would let the hub treat the delete as done.
+		return "", fmt.Errorf("%w: resolve global dir: %v", errDeleteTargetUnknown, err)
 	}
 	var found []string
 	for _, dirName := range []string{"projects", "groves"} {

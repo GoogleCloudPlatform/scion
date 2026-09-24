@@ -597,3 +597,52 @@ func TestDeleteAgent_ExternalConfigDirProjectPath(t *testing.T) {
 		t.Fatalf("expected 204 deleting cid-legacy, got %d / %q", rec.Code, mgr.lastDeleteContainerID)
 	}
 }
+
+// Upstream review (#1875): a soft delete without deleteFiles must still
+// resolve the project path so agent-info.json is marked deleted, while
+// leaving the files in place.
+func TestDeleteAgent_SoftDeleteWithoutFiles_MarksAgentInfo(t *testing.T) {
+	mgr := &filteringMockManager{}
+	srv, home := newScopeTestServer(t, mgr)
+	scionB, infoB := makeHubProject(t, home, "proj-b", scopeProjB, "dev")
+	// The runtime entry carries no project path.
+	mgr.agents = []api.AgentInfo{labelled("dev", "cid-b", scopeProjB, "")}
+
+	rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&softDelete=true&deletedAt=2026-01-01T00:00:00Z")
+	if rec.Code != http.StatusOK && rec.Code != http.StatusNoContent {
+		t.Fatalf("expected success, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if mgr.lastDeleteContainerID != "cid-b" || mgr.lastDeleteFiles {
+		t.Errorf("got container %q files=%v, want cid-b without file deletion", mgr.lastDeleteContainerID, mgr.lastDeleteFiles)
+	}
+	data, err := os.ReadFile(infoB)
+	if err != nil {
+		t.Fatalf("read agent-info.json: %v", err)
+	}
+	if !strings.Contains(string(data), `"deleted"`) {
+		t.Errorf("agent-info.json not marked deleted: %s", data)
+	}
+	if _, err := os.Stat(filepath.Join(scionB, "agents", "dev")); err != nil {
+		t.Errorf("agent dir must remain on soft delete without deleteFiles: %v", err)
+	}
+}
+
+// Upstream review (#1875): if the global dir cannot be resolved, the agent's
+// absence is unknown, so the delete must fail rather than return 404 (which
+// the hub treats as a completed delete).
+func TestDeleteAgent_GlobalDirUnresolvable_NotReportedAs404(t *testing.T) {
+	mgr := &filteringMockManager{}
+	srv, _ := newScopeTestServer(t, mgr)
+	t.Setenv("HOME", "") // os.UserHomeDir fails
+
+	if _, err := findAgentInHubManagedProjects("dev", scopeProjB); !errors.Is(err, errDeleteTargetUnknown) {
+		t.Fatalf("expected errDeleteTargetUnknown, got %v", err)
+	}
+	rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&deleteFiles=true")
+	if rec.Code == http.StatusNotFound || rec.Code < 400 {
+		t.Fatalf("expected a failure status other than 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if mgr.deleteCalls != 0 {
+		t.Fatalf("expected no delete calls, got %d", mgr.deleteCalls)
+	}
+}
