@@ -495,3 +495,89 @@ func TestGEExchange_Route_ProductionResolverHonoursAdminEmails(t *testing.T) {
 		t.Errorf("someone-else@gmail.com role = %q, want %q", memberUser.Role, "member")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// O1 — the three Set*Metrics setters (server.go) actually reach the running
+// request path they are meant to wire into. Every other metrics test in this
+// package builds its own AuthConfig by hand and calls attachExternalBearerMetrics/
+// WithCacheMetrics directly, bypassing New() -> Handler() entirely — this is
+// the only test that goes through that real wiring.
+//
+// Handler() is captured BEFORE the setters run, mirroring the one ordering
+// that actually exercises AuthConfig.ExternalBearerMetrics's *atomic.Pointer
+// design: cmd/server_foreground.go calls the setters after New() returns, and
+// nothing before this test enforces that Handler() (which the production
+// listener's http.Server.Handler is built from exactly once) is called only
+// afterward. If SetExternalBearerMetrics ever replaced the box instead of
+// storing into it, a handler captured first would keep observing the old,
+// empty box — this ordering is what would catch that.
+// ---------------------------------------------------------------------------
+
+func TestServer_MetricsSettersReachRunningHandler(t *testing.T) {
+	s, err := newTestStore(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+
+	cfg := DefaultServerConfig()
+	cfg.GEGoogleExchange = GEGoogleExchangeConfig{
+		Enabled:          true,
+		AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
+		TokenTTL:         DefaultGETokenTTL,
+	}
+	// Deliberately no Federation config: the external-bearer request below
+	// exercises the not_applicable outcome, which needs no Google trust and
+	// no network access — this test is about whether the setter wiring
+	// reaches the request path, not about a specific outcome.
+
+	srv, err := New(cfg, s)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+	srv.geExchangeService.validator = &fakeGoogleValidator{idTokenResult: validGmailIdentity()}
+
+	handler := srv.Handler()
+
+	extBearerFake := &fakeExternalBearerMetrics{}
+	cacheFake := &fakeCacheMetrics{}
+	exchangeFake := &fakeGEExchangeMetrics{}
+	srv.SetExternalBearerMetrics(extBearerFake)
+	srv.SetGoogleValidatorCacheMetrics(cacheFake)
+	srv.SetGEExchangeMetrics(exchangeFake)
+
+	// (a) an external-bearer request through the already-captured handler.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
+	req.Header.Set("Authorization", "Bearer not-a-hub-token")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if got := len(extBearerFake.allCalls()); got != 1 {
+		t.Errorf("external-bearer fake saw %d call(s), want 1 (SetExternalBearerMetrics must publish into the same box the already-built handler observes)", got)
+	}
+
+	// (b) a POST to the exchange endpoint through the same handler.
+	body := `{"credential":"test-token","credentialType":"id_token"}`
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/auth/integrations/google/exchange", bytes.NewBufferString(body))
+	req2.Header.Set("Content-Type", "application/json")
+	w2 := httptest.NewRecorder()
+	handler.ServeHTTP(w2, req2)
+
+	if got := len(exchangeFake.all()); got != 1 {
+		t.Errorf("exchange fake saw %d call(s), want 1", got)
+	}
+
+	// The cache setter's wiring is exercised directly against the caching
+	// decorator, without an HTTP round trip: proving a token was actually
+	// validated would need a real (or externally reachable) Google
+	// credential, which is unrelated to whether SetGoogleValidatorCacheMetrics
+	// reached the decorator's metrics field at all.
+	cachingValidator, ok := srv.authConfig.GoogleValidator.(*cachingGoogleCredentialValidator)
+	if !ok {
+		t.Fatalf("expected authConfig.GoogleValidator to be a *cachingGoogleCredentialValidator, got %T", srv.authConfig.GoogleValidator)
+	}
+	cachingValidator.recordCache(GoogleValidatorCacheHit)
+	if got := len(cacheFake.all()); got != 1 {
+		t.Errorf("cache fake saw %d call(s), want 1 (SetGoogleValidatorCacheMetrics must reach the decorator's metrics field)", got)
+	}
+}

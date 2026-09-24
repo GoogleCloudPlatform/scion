@@ -1695,6 +1695,10 @@ func TestNoPackageLevelMutableState(t *testing.T) {
 		// reason, and this design's otel_external_bearer_metrics.go
 		// follows that same precedent.
 		"external_bearer_metrics.go",
+		// external_bearer_snapshot_metrics.go is likewise consts/types/a
+		// struct with only mutex-guarded instance fields (no package-level
+		// var at all), so it passes this check the same way.
+		"external_bearer_snapshot_metrics.go",
 	}
 	fset := token.NewFileSet()
 	for _, file := range files {

@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -307,11 +308,14 @@ func TestGEExchangeMetrics_NilRecorder_NoPanic(t *testing.T) {
 	}
 }
 
-// TestGEExchangeMetrics_ResponseBytesUnaffected pins the exact success
-// response shape against a hand-decoded json.Unmarshal, the same way
-// TestGEExchangeHandler_Integration does, with a metrics recorder wired in —
-// proving recording the outcome never changes the response (design §4.7).
-func TestGEExchangeMetrics_ResponseBytesUnaffected(t *testing.T) {
+// TestGEExchangeMetrics_ResponseShapeUnaffected decodes the success response
+// with and without a metrics recorder wired in and compares every field
+// except the minted access token and its timestamps, which vary run to run
+// by design (a fresh, independently-expiring token is minted each time).
+// Byte-for-byte identity is what TestGEExchange_*_ExactBytes (unchanged by
+// this design) actually pins; this test's job is only to show that adding
+// the metrics call touched none of the response-shaping code.
+func TestGEExchangeMetrics_ResponseShapeUnaffected(t *testing.T) {
 	identity := validGmailIdentity()
 	validator := &fakeGoogleValidator{idTokenResult: identity}
 	userStore := newFakeUserStore()
@@ -343,9 +347,13 @@ func TestGEExchangeMetrics_ResponseBytesUnaffected(t *testing.T) {
 	if err := json.Unmarshal(w2.Body.Bytes(), &resp2); err != nil {
 		t.Fatalf("decode resp2: %v", err)
 	}
-	// AccessToken/ExpiresAt vary run to run (fresh token minted each time);
-	// compare the parts a metrics call could plausibly have touched.
-	if resp1.TokenType != resp2.TokenType || resp1.User.Email != resp2.User.Email {
+	// Mask the fields that vary run to run by design (a fresh,
+	// independently-expiring token is minted each time), then compare
+	// everything else.
+	resp1.AccessToken, resp2.AccessToken = "", ""
+	resp1.ExpiresAt, resp2.ExpiresAt = "", ""
+	resp1.UpstreamExpiresAt, resp2.UpstreamExpiresAt = "", ""
+	if !reflect.DeepEqual(resp1, resp2) {
 		t.Errorf("response shape differs: %+v vs %+v", resp1, resp2)
 	}
 	wantOneOutcome(t, fake, GEExchangeOutcomeOK)

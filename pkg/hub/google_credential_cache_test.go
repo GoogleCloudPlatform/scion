@@ -734,3 +734,44 @@ func TestGoogleCredentialCache_MetricsNilRecorder_NoPanic(t *testing.T) {
 		t.Fatalf("call: %v", err)
 	}
 }
+
+// TestGoogleCredentialCache_MetricsSingleflightFollowersRecordMiss uses the
+// same delay-widened-window technique as
+// TestGoogleCredentialCache_SingleflightCollapsesConcurrentMisses (C6) to
+// collapse N concurrent callers into one singleflight leader, then proves
+// every one of them — not just the leader — records "miss": none was served
+// from cache, even though only the leader actually dials upstream.
+func TestGoogleCredentialCache_MetricsSingleflightFollowersRecordMiss(t *testing.T) {
+	base := &countingBaseValidator{
+		delay: 20 * time.Millisecond,
+		accessTokenResult: &ValidatedGoogleIdentity{
+			Subject: "sub-1", Email: "user@gmail.com", EmailVerified: true,
+			UpstreamExpiry: time.Now().Add(10 * time.Minute),
+		},
+	}
+	fake := &fakeCacheMetrics{}
+	cache := NewCachingGoogleCredentialValidator(base, WithCacheMetrics(fake))
+
+	const n = 6
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			if _, err := cache.ValidateAccessToken(context.Background(), "same-token", []string{"aud"}); err != nil {
+				t.Errorf("call: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := base.totalAccessTokenCalls(); got != 1 {
+		t.Fatalf("base validator called %d time(s), want 1 (all %d concurrent callers must collapse into one upstream call)", got, n)
+	}
+	if got := fake.count(GoogleValidatorCacheMiss); got != n {
+		t.Errorf("miss count = %d, want %d (every collapsed caller — leader and followers alike — was not served from cache)", got, n)
+	}
+	if got := len(fake.all()); got != n {
+		t.Errorf("total recorded results = %d, want %d (no hit/negative_hit recorded for this key)", got, n)
+	}
+}

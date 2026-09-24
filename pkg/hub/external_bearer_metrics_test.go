@@ -167,7 +167,7 @@ func TestExternalBearerMetrics_OK_ServiceAccountIDToken(t *testing.T) {
 
 // TestExternalBearerMetrics_NotApplicable_NoTrust proves that a rejection
 // before classification (no Google trust configured) records kind=unknown,
-// principal=unknown, per the lead's ruling.
+// principal=unknown.
 func TestExternalBearerMetrics_NotApplicable_NoTrust(t *testing.T) {
 	kp := newGCVTestKeyPair("test-kid-1")
 
@@ -290,7 +290,7 @@ func TestExternalBearerMetrics_Rejected_ServiceAccountProjectNotAllowed(t *testi
 	wantOneCall(t, fake, externalBearerMetricCall{ExternalBearerKindIDToken, ExternalBearerPrincipalServiceAccount, ExternalBearerOutcomeRejected})
 }
 
-// TestExternalBearerMetrics_Rejected_DomainNotAllowed covers Phase 4's user
+// TestExternalBearerMetrics_Rejected_DomainNotAllowed covers the user
 // allowed_domains rejection: a user (not SA) principal, already known by the
 // time this check runs, is still "rejected" per the closed outcome set (no
 // separate "domain_not_allowed" outcome — design §4.4 groups it with SA
@@ -455,8 +455,8 @@ func TestExternalBearerMetrics_Suspended(t *testing.T) {
 
 // TestExternalBearerMetrics_Forbidden_ResolveErrNotFound covers the 403
 // forbidden outcome from a Resolve error wrapping store.ErrNotFound (a
-// binding pointing at a deleted user) — distinct from store_error per the
-// lead's ruling.
+// binding pointing at a deleted user) — distinct from store_error, since
+// this fault is permanent and must not invite a retry.
 func TestExternalBearerMetrics_Forbidden_ResolveErrNotFound(t *testing.T) {
 	kp := newGCVTestKeyPair("test-kid-1")
 	endpoints := newTestEndpoints(
@@ -595,10 +595,10 @@ func TestExternalBearerMetrics_NilAuthConfigField_NoPanic(t *testing.T) {
 }
 
 // TestExternalBearerMetrics_LabelTypesOnlyConstructedAsConstants is a durable
-// regression guard for the closed-label-set requirement (lead ruling, design
-// §4.7 r7: "all label values come from a closed set ... test that no other
-// value can be emitted"). Every label value used by this design is one of
-// the named constants declared in external_bearer_metrics.go; the only way
+// regression guard for the closed-label-set requirement: every label value
+// comes from a closed set, so no other value can ever be emitted. Every
+// label value used by this design is one of the named constants declared in
+// external_bearer_metrics.go; the only way
 // an arbitrary, non-constant string could reach a counter is a type
 // conversion like ExternalBearerOutcome(someVariable). Grepping every other
 // non-test source file in the package for that syntax catches such a
@@ -632,4 +632,75 @@ func TestExternalBearerMetrics_LabelTypesOnlyConstructedAsConstants(t *testing.T
 			}
 		}
 	}
+}
+
+// TestExternalBearerMetrics_LabelValidMethods complements the grep above: it
+// catches the case the grep cannot (an untyped string literal assigned
+// directly, e.g. externalBearerAttempt{kind: "x"}, which compiles without a
+// conversion). Each label type's valid() method is a closed switch over its
+// own constants; this table drives every declared constant through valid()
+// (must be true) and a handful of values outside the set (must be false),
+// so a constant added to one of the enumeration funcs without a matching
+// valid() case — or vice versa — fails here.
+func TestExternalBearerMetrics_LabelValidMethods(t *testing.T) {
+	t.Run("ExternalBearerKind", func(t *testing.T) {
+		for _, v := range externalBearerKinds() {
+			if !v.valid() {
+				t.Errorf("%q.valid() = false, want true", v)
+			}
+		}
+		for _, v := range []ExternalBearerKind{"", "ID_TOKEN", "oops"} {
+			if v.valid() {
+				t.Errorf("%q.valid() = true, want false", v)
+			}
+		}
+	})
+	t.Run("ExternalBearerPrincipal", func(t *testing.T) {
+		for _, v := range externalBearerPrincipals() {
+			if !v.valid() {
+				t.Errorf("%q.valid() = false, want true", v)
+			}
+		}
+		for _, v := range []ExternalBearerPrincipal{"", "USER", "oops"} {
+			if v.valid() {
+				t.Errorf("%q.valid() = true, want false", v)
+			}
+		}
+	})
+	t.Run("ExternalBearerOutcome", func(t *testing.T) {
+		for _, v := range externalBearerOutcomes() {
+			if !v.valid() {
+				t.Errorf("%q.valid() = false, want true", v)
+			}
+		}
+		for _, v := range []ExternalBearerOutcome{"", "OK", "oops"} {
+			if v.valid() {
+				t.Errorf("%q.valid() = true, want false", v)
+			}
+		}
+	})
+	t.Run("GoogleValidatorCacheResult", func(t *testing.T) {
+		for _, v := range googleValidatorCacheResults() {
+			if !v.valid() {
+				t.Errorf("%q.valid() = false, want true", v)
+			}
+		}
+		for _, v := range []GoogleValidatorCacheResult{"", "HIT", "oops"} {
+			if v.valid() {
+				t.Errorf("%q.valid() = true, want false", v)
+			}
+		}
+	})
+	t.Run("GEExchangeOutcome", func(t *testing.T) {
+		for _, v := range geExchangeOutcomes() {
+			if !v.valid() {
+				t.Errorf("%q.valid() = false, want true", v)
+			}
+		}
+		for _, v := range []GEExchangeOutcome{"", "OK", "oops"} {
+			if v.valid() {
+				t.Errorf("%q.valid() = true, want false", v)
+			}
+		}
+	})
 }
