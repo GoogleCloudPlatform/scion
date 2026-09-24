@@ -232,3 +232,40 @@ immediately before Phase 3's first commit) prints nothing after finding 3's fix 
   `pkg/config` (including `authzop`, `opsettings`) — all green.
 - Bare-issue-number greps and the full-run slot request: see the message to `ap-em` (this round's commit SHA
   wasn't final when this log entry was written; both are reported there).
+
+## Fix round 2 (review `p3-r2-ap-p3-rev-2.md`: REQUEST CHANGES at `8e596ccc5`; 0 Critical, 2 Required, 2 Optional,
+2 Nit, 4 FYI)
+
+Reviewer: `ap-p3-rev-2`. Fix brief: `briefs/ap-p3-dev-fix-r2.md`, plus a 12:30 O3 ruling from the lead (relayed by
+`ap-em`). All r1 findings independently re-verified resolved, including a 16-shape S7 differential against a
+`bdf5b6d13` worktree (byte-identical). Both Required findings are missing tests only — the reviewer confirmed
+the production code is already correct.
+
+| # | Finding | Change | Test(s) | Mutant |
+|---|---|---|---|---|
+| 1 (Required) | S6: `Resolve`'s BY-EMAIL suspension check (`google_identity_resolver.go:213`, the existing-user-found-by-email path, distinct from the bound-user path S6 already covered) has no test pinning that `PreAuthorized` doesn't exempt it. Reachable for SAs because `isGoogleServiceAccount` counts as authoritative for auto-linking: an admin can pre-create/import a suspended user at the SA's email before the SA's first token arrives. | No code change (already correct). Added a test that seeds a suspended pre-existing user at the SA's email, with no binding yet. | `TestExternalBearer_ServiceAccountIDToken_SuspendedExistingUserByEmail_Forbidden`: 403 `user_suspended` exact bytes, handler not reached, no binding created. | Added `&& !policy.PreAuthorized` to the by-email check → new test fails with 200 instead of 403 (binding gets created and the request succeeds). Reverted after confirming. |
+| 2 (Required) | K1: the `issuer_type` term of `isActiveGoogleUserIssuer` had no isolating test — the existing "service_account" fixture omitted `ExpectedAudience`, so the empty-audience term alone could explain the error. | No code change. Gave that fixture a non-empty `ExpectedAudience` so only `issuer_type` differs from a valid config; added a second `issuer_type: hub` variant for the same term. | Two `TestFederationConfig_Validate` cases, both asserting the message names `issuer_type`/`expected_audience`. | Dropped the `issuer.IssuerType == "user"` term from the predicate → both new cases fail (no error raised). Reverted after confirming. |
+| 3 (Optional; design call) | Design §4.1 still said "normalise both lists to lower case at load", contradicting O3's "delete the hunk, rely on containsFold" from fix round 1. | **No code change** — this was a design-doc-wording question, not a code question; the lead ruled at 12:30 (relayed by `ap-em`): lists are not rewritten at load, matching is case-insensitive at every comparison site (`containsFold`/`EqualFold`), `impl-design.md` §4.1 is amended accordingly. `googleSAProject` lower-casing its own input is parsing, not list normalisation, and stays as-is. Existing `TestExternalBearer_ServiceAccountIDToken_MixedCaseAllowedProject_Authenticates` already covers the requested behaviour, per the ruling. | — | — |
+| 4 (Optional) | Review-history narration ("P3 fix round 1", "Required N", "O2 amendment", "the lead", design-doc revision markers like "r7") in comments this code goes upstream with — meaningless to an upstream reader. Flagged in production files (`google_credential_validator.go`, `ge_exchange.go`, `federation_config.go`) and, per the brief's ask to grep the whole delta, found in several test comments too. | Reduced every flagged comment to its invariant, in both production and test files (`auth_external_bearer.go`, `auth_external_bearer_test.go`, `auth_external_bearer_sa_test.go`, `federation_config_test.go`, `settings_v1_test.go`, `google_sa_test.go`, `ge_exchange_test.go`, `ge_exchange_ratelimit_test.go`). Also removed the last "lower-cased/normalised at load" wording per the O3 ruling above. Pre-existing Phase 1/2 comments citing their own review rounds (e.g. `google_identity_resolver.go:175`, `auth_external_bearer_test.go:1059`) are untouched — confirmed via `git diff 0cae3b18b` that those lines aren't part of this delta, so cleaning them isn't this round's job. | N/A (comment-only). Re-ran the full targeted suite to confirm no behaviour change. | N/A. |
+| 5 (Nit) | `ge_exchange_test.go`'s S7 table carried a `bindingSub` field that was `saNumericSub` in every row. | Dropped the field; the one call site now uses the constant directly. | Same S7 table test, unchanged behaviour. | N/A. |
+| 6 (Nit) | `ErrGoogleServiceAccount`'s message, "service account credentials not accepted", echoed inside the external-bearer path's log line could read as "SA admission is disabled", which is no longer true after Phase 3. Not wire-visible on either path (the exchange constructs its own literal message; external-bearer uses a fixed 401 body). | Changed the sentinel's text to the neutral "service-account credential rejected". | Full S7 suite re-run to confirm the exchange's wire body is still byte-identical (it doesn't use `err.Error()`). | N/A (wording only; verified no test asserted the old string). |
+
+### Verification: comment cleanup did not change behaviour
+
+Full targeted suite (`TestExternalBearer|TestGoogleTrust|TestGEExchange|TestProductionValidator|TestNoPackage|
+TestNoTokenInfo|TestGoogleIdentityResolver|TestGoogleCredential|TestFederation|TestGoogleSAProject|
+TestServer_ExternalBearerRateLimiter|TestMutationClassification|TestExternalBearerRateLimiter|
+TestConvertV1FederationConfig|TestValidateIDToken|TestValidateAccessToken`, `-race -count=1`) is green across
+`pkg/hub` (incl. `authzop`) and `pkg/config` (incl. `opsettings`) after all comment/message changes.
+
+### Gates (fix round 2)
+
+- ✅ `gofmt -l pkg/hub pkg/config` — clean.
+- ✅ `go build -buildvcs=false ./pkg/hub/... ./pkg/config/...` — clean.
+- ✅ `go vet -buildvcs=false ./pkg/hub/... ./pkg/config/...` — clean.
+- ✅ `GOGC=40 golangci-lint run --new-from-rev=upstream-main --concurrency=1 ./pkg/hub/... ./pkg/config/...` —
+  `0 issues.`
+- ✅ Targeted `-race` subset (expanded per the brief with `TestValidateIDToken|TestValidateAccessToken`) — all
+  green, across `pkg/hub`+`authzop` and `pkg/config`+`opsettings`.
+- Per the brief, this round changes only comments, tests and one error string in production code — no full
+  `pkg/hub`/`authzop`/`pkg/config` run requested or needed this round.
