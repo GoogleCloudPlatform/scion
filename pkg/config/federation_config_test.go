@@ -610,8 +610,14 @@ func TestInvalidDomainEntryReason(t *testing.T) {
 		{"bare wildcard", "*", true},
 		{"contains whitespace", "exa mple.com", true},
 		{"leading and trailing whitespace", " example.com ", true},
+		{"contains a tab", "example.com\t", true},
+		{"contains a non-breaking space", "example.com\u00a0", true},
 		{"leading dot", ".example.com", true},
 		{"trailing dot", "example.com.", true},
+		{"double dot", "example..com", true},
+		{"pasted URL with scheme", "https://example.com", true},
+		{"trailing slash", "example.com/", true},
+		{"contains a colon (e.g. a port)", "example.com:443", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

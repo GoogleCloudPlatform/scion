@@ -147,19 +147,24 @@ func appendGoogleUserOnlyFieldError(errs []error, i int, issuer TrustedIssuerCon
 // if the shape is fine. This does not check whether the domain is real or
 // reachable, only whether it is a shape that could ever compare equal to
 // something domainOf returns — an email address, a leading-wildcard pattern,
-// whitespace, or a leading/trailing dot never can, and each is a plausible
-// operator mistake worth catching at config-validation time instead of a
-// silent, permanent lockout.
+// a URL or scheme/path fragment (e.g. a pasted "https://example.com" or
+// "example.com/"), whitespace, a leading/trailing dot, or a double dot never
+// can, and each is a plausible operator mistake worth catching at
+// config-validation time instead of a silent, permanent lockout.
 func invalidDomainEntryReason(domain string) string {
 	switch {
 	case domain == "":
 		return "must not be empty"
 	case strings.ContainsAny(domain, "@*"):
 		return `must be a bare domain, not an email address or wildcard pattern (no "@" or "*")`
+	case strings.ContainsAny(domain, "/:"):
+		return `must be a bare domain, not a URL or scheme/path fragment (no "/" or ":")`
 	case strings.IndexFunc(domain, unicode.IsSpace) >= 0:
 		return "must not contain whitespace"
 	case strings.HasPrefix(domain, ".") || strings.HasSuffix(domain, "."):
 		return "must not have a leading or trailing dot"
+	case strings.Contains(domain, ".."):
+		return "must not contain a double dot"
 	default:
 		return ""
 	}
