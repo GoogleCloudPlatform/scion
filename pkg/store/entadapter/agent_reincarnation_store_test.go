@@ -18,6 +18,8 @@ package entadapter
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -298,5 +300,43 @@ func TestTryAdvanceAgentReincarnation(t *testing.T) {
 		ok, err := s.TryAdvanceAgentReincarnation(ctx, upd, store.AgentReincarnationStatePending)
 		require.NoError(t, err)
 		assert.False(t, ok)
+	})
+
+	// design §3.4 Amendment A8.4: 16 goroutines race the same CAS
+	// (expectState="pending", half targeting "failed" and half "completed")
+	// against a single record. Exactly one must win, regardless of which
+	// target state it wrote — this is the primitive every A6/A7 worker-vs-
+	// sweep guarantee rests on.
+	t.Run("16-way contention has exactly one winner", func(t *testing.T) {
+		s := newTestAgentReincarnationStore(t)
+		rec := &store.AgentReincarnation{AgentID: "agent-1", FromGeneration: 1, ToGeneration: 2, State: store.AgentReincarnationStatePending}
+		require.NoError(t, s.CreateAgentReincarnation(ctx, rec))
+
+		const n = 16
+		var wins atomic.Int32
+		var wg sync.WaitGroup
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				target := store.AgentReincarnationStateFailed
+				if i%2 == 0 {
+					target = store.AgentReincarnationStateCompleted
+				}
+				upd := &store.AgentReincarnation{ID: rec.ID, State: target, UpdatedAt: time.Now()}
+				ok, err := s.TryAdvanceAgentReincarnation(ctx, upd, store.AgentReincarnationStatePending)
+				assert.NoError(t, err)
+				if ok {
+					wins.Add(1)
+				}
+			}(i)
+		}
+		wg.Wait()
+		assert.Equal(t, int32(1), wins.Load(), "exactly one of 16 concurrent CASes against the same expectState must win")
+
+		got, err := s.GetAgentReincarnation(ctx, rec.ID)
+		require.NoError(t, err)
+		assert.True(t, got.State == store.AgentReincarnationStateFailed || got.State == store.AgentReincarnationStateCompleted,
+			"the row must land on whichever target the sole winner wrote")
 	})
 }
