@@ -219,3 +219,43 @@ func TestNewFederationAuthenticator_ConstructionFails_NoWarning(t *testing.T) {
 		t.Errorf("warning count for an issuer whose construction failed = %d, want 0; log:\n%s", got, buf.String())
 	}
 }
+
+// TestNewFederationAuthenticator_MultiIssuer_MisconfiguredBeforeFailing_NoWarning
+// is the multi-issuer shape of the test above: the disabled-shaped Google
+// user issuer comes FIRST in the list, followed by a second issuer that
+// fails construction. Collecting warnings and only emitting them after the
+// whole loop succeeds (rather than per issuer, inline) is what makes this
+// case behave the same as the single-issuer one — logging the first
+// issuer's warning as soon as it is seen, before the second issuer's later
+// failure is known, would have logged a warning about a config that was
+// then rejected in full.
+func TestNewFederationAuthenticator_MultiIssuer_MisconfiguredBeforeFailing_NoWarning(t *testing.T) {
+	log, buf := federationAuthCaptureBuffer()
+	fedCfg := config.FederationConfig{
+		Enabled: true,
+		TrustedIssuers: []config.TrustedIssuerConfig{
+			{
+				IssuerURL:  googleIssuerHTTPS,
+				IssuerType: "user",
+				JWKSURL:    "http://unused.invalid/jwks",
+				// ExpectedAudience deliberately empty: this issuer alone
+				// would warn.
+			},
+			{
+				// issuer_type defaults to "hub"; an http issuer_url is
+				// rejected outright in "hosted" mode, before JWKS
+				// resolution, so no network call is needed to fail this
+				// issuer deterministically.
+				IssuerURL: "http://insecure.example.com",
+			},
+		},
+	}
+	_, err := NewFederationAuthenticator(fedCfg, "https://hub.example.com", http.DefaultClient, "hosted", log)
+	if err == nil {
+		t.Fatal("expected NewFederationAuthenticator to fail (second issuer uses http in hosted mode)")
+	}
+
+	if got := countWarnLines(t, buf, externalBearerDisabledWarningMsg); got != 0 {
+		t.Errorf("warning count when a later issuer fails construction = %d, want 0 (whole config rejected); log:\n%s", got, buf.String())
+	}
+}

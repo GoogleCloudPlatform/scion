@@ -74,25 +74,22 @@ type federationClaims struct {
 	Name          string   `json:"name,omitempty"`
 }
 
-// warnIfExternalBearerDisabled logs once, at config load (and again on every
-// hot reload, since NewFederationAuthenticator runs again then), when issuer
-// is the Google issuer configured as issuer_type "user" with an empty
-// expected_audience: the exact shape that leaves the external-bearer path
-// permanently disabled for it (googleTrust, auth_external_bearer.go). This
-// is a load-time diagnostic only — it must never run on the request path, so
-// it lives here and nowhere else. It checks issuer.ExpectedAudience as
-// configured (the loop's local variable, before the oidcIssuerURL fallback
-// below resolves it to something non-empty), matching what IssuerConfig
-// later reports and what googleTrust actually gates on.
-func warnIfExternalBearerDisabled(log *slog.Logger, issuer config.TrustedIssuerConfig, normalizedIssuerURL string) {
+// isGoogleUserIssuerMissingAudience reports whether issuer is the Google
+// issuer, configured as issuer_type "user", with an empty expected_audience:
+// the exact shape that leaves the external-bearer path permanently disabled
+// for it (googleTrust, auth_external_bearer.go). It checks
+// issuer.ExpectedAudience as configured (the caller's local variable, before
+// the oidcIssuerURL fallback below resolves it to something non-empty),
+// matching what IssuerConfig later reports and what googleTrust actually
+// gates on. Pure and side-effect-free by design: NewFederationAuthenticator
+// only turns a "true" result into a logged warning once the whole config has
+// been accepted, never per issuer inline, so a later issuer's failure can't
+// leave behind a warning about a config that never took effect.
+func isGoogleUserIssuerMissingAudience(issuer config.TrustedIssuerConfig, normalizedIssuerURL string) bool {
 	if normalizedIssuerURL != googleIssuerHTTPS && normalizedIssuerURL != googleIssuerBare {
-		return
+		return false
 	}
-	if IssuerType(issuer.IssuerType) != IssuerTypeUser || issuer.ExpectedAudience != "" {
-		return
-	}
-	log.Warn("external-bearer path disabled for this issuer: issuer_type is \"user\" but expected_audience is empty",
-		"issuer_url", issuer.IssuerURL)
+	return IssuerType(issuer.IssuerType) == IssuerTypeUser && issuer.ExpectedAudience == ""
 }
 
 // NewFederationAuthenticator creates a FederationAuthenticator from the given config.
@@ -115,9 +112,21 @@ func NewFederationAuthenticator(cfg config.FederationConfig, oidcIssuerURL strin
 
 	issuers := make(map[string]*issuerEntry, len(cfg.TrustedIssuers))
 
+	// Collected here and only logged once every issuer in cfg has been
+	// accepted (just before the final return): logging inline, issuer by
+	// issuer, would log a warning for an earlier, disabled-shaped issuer
+	// even when a later issuer in the same config fails and the whole
+	// rebuild is discarded (operational_settings.go keeps the old config on
+	// error) — a warning about a config that never took effect.
+	var disabledExternalBearerIssuerURLs []string
+
 	for _, issuer := range cfg.TrustedIssuers {
 		// Normalize issuer URL by trimming trailing slashes for consistent map lookup.
 		normalizedIssuer := strings.TrimRight(issuer.IssuerURL, "/")
+
+		if isGoogleUserIssuerMissingAudience(issuer, normalizedIssuer) {
+			disabledExternalBearerIssuerURLs = append(disabledExternalBearerIssuerURLs, issuer.IssuerURL)
+		}
 
 		// Fix 2: In hosted mode (not workstation, not dev), reject HTTP issuer URLs.
 		if mode != "workstation" && mode != "dev" {
@@ -177,13 +186,6 @@ func NewFederationAuthenticator(cfg config.FederationConfig, oidcIssuerURL strin
 			debounceInterval: cfg.Cache.DebounceInterval,
 		}
 
-		// Logged only once this issuer is actually going to be stored: an
-		// issuer that fails validation above (bad scheme, JWKS discovery
-		// failure, ...) never reaches here, so a rebuild that fails and
-		// keeps the old config (operational_settings.go) never logs a
-		// warning about a config that didn't take effect.
-		warnIfExternalBearerDisabled(log, issuer, normalizedIssuer)
-
 		issuers[normalizedIssuer] = &issuerEntry{
 			config:    resolvedCfg,
 			rawConfig: rawCfg,
@@ -200,6 +202,14 @@ func NewFederationAuthenticator(cfg config.FederationConfig, oidcIssuerURL strin
 		for i, alg := range cfg.Algorithms {
 			algorithms[i] = jose.SignatureAlgorithm(alg)
 		}
+	}
+
+	// Only now, with every issuer in cfg accepted, log the collected
+	// warnings: this whole config is what takes effect, so every warning
+	// logged here describes a state that is actually live.
+	for _, issuerURL := range disabledExternalBearerIssuerURLs {
+		log.Warn("external-bearer path disabled for this issuer: issuer_type is \"user\" but expected_audience is empty",
+			"issuer_url", issuerURL)
 	}
 
 	return &FederationAuthenticator{

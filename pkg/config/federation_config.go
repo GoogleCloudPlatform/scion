@@ -269,13 +269,11 @@ func (c *FederationConfig) Validate() []error {
 
 		// Rule 11: each allowed_domains entry must be a shape that
 		// domainOf's parsed email domain (pkg/hub/auth_external_bearer.go)
-		// could ever equal. An email address, a leading-wildcard pattern (the
-		// allowed_emails idiom, which does not apply here), whitespace, or a
-		// leading/trailing dot can never match, so an entry in one of those
-		// shapes silently locks out every user in the domain the operator
-		// meant to allow. Checked regardless of isActiveGoogleUserIssuer: a
-		// malformed entry is a mistake in every position, not just the
-		// active one.
+		// could ever equal — any shape invalidDomainEntryReason rejects can
+		// never match, so an entry in one of those shapes silently locks out
+		// every user in the domain the operator meant to allow. Checked
+		// regardless of isActiveGoogleUserIssuer: a malformed entry is a
+		// mistake in every position, not just the active one.
 		for j, domain := range issuer.AllowedDomains {
 			if reason := invalidDomainEntryReason(domain); reason != "" {
 				errs = append(errs, fmt.Errorf("trusted_issuers[%d]: allowed_domains[%d] %q: %s", i, j, domain, reason))
