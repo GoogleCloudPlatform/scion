@@ -285,11 +285,14 @@ server:
         jwks_url: "https://www.googleapis.com/oauth2/v3/certs"
         issuer_type: "user"
         # REQUIRED: the OAuth client ID whose tokens are accepted. Without
-        # this, the path stays disabled for this issuer (a startup warning
-        # is logged, not an error).
+        # this, the path is disabled for this issuer, and a warning is
+        # logged at startup and on reload.
         expected_audience: "1234567890-abc.apps.googleusercontent.com"
         # Optional: restrict USER principals to these email domains (exact,
-        # case-insensitive, no wildcards, no subdomain matching). Omit to
+        # case-insensitive, no wildcards, no subdomain matching). Each entry
+        # must be a bare domain: no "@" or "*" (this is not the allowed_emails
+        # pattern syntax), no whitespace, and no leading or trailing dot —
+        # config validation rejects any entry that could never match. Omit to
         # accept any verified Google account that passes the Hub sign-in
         # policy below.
         allowed_domains: ["example.com"]
@@ -301,7 +304,7 @@ server:
 
 A verified **user** identity is still resolved through the same sign-in policy as interactive login (`admin_emails`, `authorized_domains`, `user_access_mode`) after the `allowed_domains` check passes — a listed domain narrows *which* users reach that policy, it does not replace it. A verified **service account** identity skips the sign-in policy entirely: membership in `allowed_gcp_projects` **is** the authorization decision for first-time admission. A service account is never subject to `allowed_domains`, and a user is never subject to `allowed_gcp_projects`. Bypassing the sign-in policy does not extend to suspension: a service account that was already provisioned and is later suspended is refused on its next request exactly like a suspended user.
 
-The A2A bridge forwards Google credentials under the `hubBearer` auth scheme (`auth.scheme: hubBearer` in `scion-a2a-bridge.yaml`): it admits a caller by presenting the same token to the Hub's `GET /api/v1/auth/me`, then forwards that token verbatim on every downstream call. The Hub re-verifies the token on each request, so a suspended user or a revoked Google grant is refused on the next call regardless of the bridge's own admission cache.
+The A2A bridge forwards Google credentials under the `hubBearer` auth scheme (`auth.scheme: hubBearer` in `scion-a2a-bridge.yaml`): it admits a caller by presenting the same token to the Hub's `GET /api/v1/auth/me`, then forwards that token verbatim on every downstream call. The Hub re-verifies the token on each request: a suspended user is refused on the next call. A revoked Google credential stops being accepted once the Hub's verification cache entry expires (at most 5 minutes, and never beyond the credential's own expiry).
 
 **Response codes:**
 
