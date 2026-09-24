@@ -223,7 +223,7 @@ Each shared directory's mount location depends on its `in_workspace` setting:
 
 A shared directory is mounted at one of these locations, not both.
 
-By default, shared directories live on the host that runs the agent. In hosted deployments, an operator can set [`server.shared_dir_storage`](/scion/reference/server-config/#shared-directory-storage-servershared_dir_storage) to `nfs`. Every Runtime Broker then resolves a project's shared directories to the same NFS export, so agents on different brokers share the same files.
+By default, shared directories live on the host that runs the agent. In hosted deployments, an operator can set [`server.shared_dir_storage.backend`](/scion/reference/server-config/#shared-directory-storage-servershared_dir_storage) to `nfs`. Every Runtime Broker then resolves a project's shared directories to the same NFS export, so agents on different brokers share the same files.
 
 ### Common Patterns
 
