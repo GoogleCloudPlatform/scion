@@ -290,6 +290,45 @@ func TestExternalBearerMetrics_Rejected_ServiceAccountProjectNotAllowed(t *testi
 	wantOneCall(t, fake, externalBearerMetricCall{ExternalBearerKindIDToken, ExternalBearerPrincipalServiceAccount, ExternalBearerOutcomeRejected})
 }
 
+// TestExternalBearerMetrics_Rejected_DomainNotAllowed covers Phase 4's user
+// allowed_domains rejection: a user (not SA) principal, already known by the
+// time this check runs, is still "rejected" per the closed outcome set (no
+// separate "domain_not_allowed" outcome — design §4.4 groups it with SA
+// project rejection and verification failure).
+func TestExternalBearerMetrics_Rejected_DomainNotAllowed(t *testing.T) {
+	kp := newGCVTestKeyPair("test-kid-1")
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(gcvJWKSJSON(kp))
+		}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+	)
+	defer endpoints.close()
+
+	userStore := newFakeUserStore()
+	extStore := newMemExtIDStore()
+	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())
+	cfg := newExternalBearerConfigWithDomains(t, newTestValidator(endpoints), resolver, []string{"example.com"}, nil)
+	fake := attachExternalBearerMetrics(&cfg)
+
+	claims := validIDTokenClaims()
+	claims["aud"] = externalBearerTestAudience
+	claims["email"] = "user@not-listed.com"
+	claims["hd"] = "not-listed.com"
+	token := signIDToken(kp, claims)
+
+	w, result := doExternalBearerRequest(cfg, token)
+	if result.reached {
+		t.Fatal("handler must not be reached: email domain is not in allowed_domains")
+	}
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401: body=%s", w.Code, w.Body.String())
+	}
+	wantOneCall(t, fake, externalBearerMetricCall{ExternalBearerKindIDToken, ExternalBearerPrincipalUser, ExternalBearerOutcomeRejected})
+}
+
 // TestExternalBearerMetrics_RateLimited covers the 429 outcome: kind is
 // known (classification succeeded before the limiter is consulted),
 // principal is not (verification never ran).
