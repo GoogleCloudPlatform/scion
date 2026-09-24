@@ -903,7 +903,7 @@ func TestHTTPAgentDispatcher_DispatchAgentReprovision(t *testing.T) {
 }
 
 // TestHTTPAgentDispatcher_DispatchAgentReprovision_MissingEchoFails is the
-// p1a-r1 R1(a) regression test: a broker that returns 201 for a reprovision
+// design §3.4 Amendment A2 regression test: a broker that returns 201 for a reprovision
 // request WITHOUT echoing Reprovisioned=true must fail the dispatch — that
 // echo missing is exactly what an old broker (which has no concept of
 // Reprovision at all) looks like, and it silently ran a plain Provision
@@ -944,7 +944,7 @@ func TestHTTPAgentDispatcher_DispatchAgentReprovision_MissingEchoFails(t *testin
 }
 
 // TestHTTPAgentDispatcher_DispatchAgentReprovision_StillMissingEnvFails is
-// the p1a-r1 R2 regression test: a reprovision whose final response is still
+// the design §3.4 Amendment A2 regression test: a reprovision whose final response is still
 // 202-with-Needs (env gather never completed, including a broker whose
 // attempt cache replays the same 202 on the retried pass) must fail, not
 // "warn and continue" into DispatchAgentStart on an incomplete config.
@@ -978,7 +978,7 @@ func TestHTTPAgentDispatcher_DispatchAgentReprovision_StillMissingEnvFails(t *te
 		t.Fatalf("expected 2 CreateAgentWithGather calls (first pass + retry with resolved env), got %d", callCount)
 	}
 	if len(seenRequestIDs) != 2 {
-		t.Fatalf("expected each pass to use a distinct RequestID (p1a-r1 R2), got %d distinct IDs across %d calls", len(seenRequestIDs), callCount)
+		t.Fatalf("expected each pass to use a distinct RequestID, got %d distinct IDs across %d calls", len(seenRequestIDs), callCount)
 	}
 }
 

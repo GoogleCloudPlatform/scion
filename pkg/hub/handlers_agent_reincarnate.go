@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -283,7 +284,15 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	}
 
 	previousReincarnationState := agent.ReincarnationState
+	previousReincarnationUpdatedAt := agent.ReincarnationUpdatedAt
 	agent.ReincarnationState = store.ReincarnationStatePending
+	// Design §3.4 Amendment A6.6: ReincarnationUpdatedAt (not Updated) is
+	// what the replica-safe sweep's agent-state backstop keys its staleness
+	// check on, because Updated is also bumped by every broker heartbeat —
+	// which would keep a claim that never got a worker (see the revert
+	// below) looking fresh forever.
+	claimedAt := time.Now()
+	agent.ReincarnationUpdatedAt = &claimedAt
 	if err := s.store.UpdateAgent(ctx, agent); err != nil {
 		if errors.Is(err, store.ErrVersionConflict) {
 			Conflict(w, "agent was concurrently modified; retry")
@@ -315,6 +324,7 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		// operator can clear agents.reincarnation_state by hand, which is a
 		// far smaller recovery than an unrecoverable stuck claim.
 		agent.ReincarnationState = previousReincarnationState
+		agent.ReincarnationUpdatedAt = previousReincarnationUpdatedAt
 		if revertErr := s.store.UpdateAgent(ctx, agent); revertErr != nil {
 			s.agentLifecycleLog.Error("handleReincarnateAgent: failed to revert claimed reincarnation_state after record creation failure",
 				"agent_id", agent.ID, "revert_error", revertErr, "original_error", err)
