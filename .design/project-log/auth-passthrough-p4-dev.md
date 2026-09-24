@@ -137,12 +137,16 @@ All Phase 1-3 tests, `TestGEExchange*`, and the targeted bridge-adjacent suite s
   case-sensitive, apply it to SAs, apply subdomain/suffix matching in `containsFold`) — each mutant was
   introduced by hand, confirmed to fail the relevant new test(s), then reverted; the file was diffed against a
   saved-off original afterward to confirm the working tree matched exactly (no leftover mutant code).
-- **Not run this phase:** the full `pkg/hub` + `authzop` + `pkg/config` suite (`-timeout 40m`). Per the brief,
-  waiting on `ap-em`'s go-ahead for the full-run slot before spending it — requested in the completion message.
-  Known baseline failures carried over from Phase 3's log apply unchanged (pkg/hub: `TestDEF164_AtAgentSlug_*`
-  ×2, `TestDEF152_AgentToAgentDM_DeliversViaOutbound`, `TestCreateTemplateV2_ScopeIDInjectionBlocked`, flaky
-  `TestDEF162_AC8_Broker_MentionFires`; pkg/config: 21 pre-existing failures, 19 `auto_expose_ports` plus
-  `TestRequireImageRegistry_NotConfigured` and `TestDiscoverProjects_ShadowProjectNotOrphaned`) — none of them
-  touch code this phase changed.
+- ✅ **Full run**, granted by `ap-em` after the completion report: `go test ./pkg/hub/... ./pkg/config/...
+  -timeout 40m -count=1` at `90a4c2a6b`, own `GOTMPDIR` (deleted after the run). Results match the recorded
+  baseline exactly, with no new failures: `pkg/hub` — 4 failures (`TestDEF164_AtAgentSlug_DeliversToAgent`,
+  `TestDEF164_AtAgentSlug_DMConversationCreated`, `TestDEF152_AgentToAgentDM_DeliversViaOutbound`,
+  `TestCreateTemplateV2_ScopeIDInjectionBlocked`; the flaky `TestDEF162_AC8_Broker_MentionFires` didn't fire this
+  run), 566s runtime; `pkg/hub/authzop`, `pkg/hub/auth`, `pkg/hub/githubapp`, `pkg/hub/imagecheck` all green.
+  `pkg/config` — 21 failures, all pre-existing (19 `auto_expose_ports` decode errors, plus
+  `TestRequireImageRegistry_NotConfigured` and `TestDiscoverProjects_ShadowProjectNotOrphaned`);
+  `pkg/config/opsettings`, `pkg/config/templateimport` green. None of the 25 failures touch anything this phase
+  changed (`auth_external_bearer.go`, `federation_config.go`'s `AllowedDomains` path, `settings_v1.go`,
+  `opsettings/registry.go`'s federation schema). Slot released back to `ap-em` for `ap-p5o-dev`.
 - Docs changes have no automated build/lint gate in this repo's CLAUDE.md; verified instead by reading every
   config key, error code, and status against the source files named above.
