@@ -436,3 +436,117 @@ files change; ran the bare-`#NNN` greps only, from `/workspace`:
 
 None. No code changes to `adminoverlay.go`/`main.go`/UI this round either —
 F4/O2's code fix remains with `ptone`/`ap-em` to route.
+
+---
+
+## F4 (§4.6b): pinned YAML auth scheme
+
+**Agent:** ap-p5b-dev-2 · **Branch:** `scion/auth-passthrough` · **Date:** 2026-09-24
+
+Implements `impl-design.md` §4.6b: option (a) for the F4 fail-open bug
+(admin-pushed config could replace a YAML-only `auth.scheme` — `hubBearer`
+or `geGoogle` — with the admin dropdown's default, and the UI had no way to
+push it back). This closes the gap at the bridge, the enforcement point,
+rather than in the admin overlay's validation or the Hub-side storage —
+per the design, both of those are left untouched.
+
+### Design decisions
+
+- **Capture storage: `Config.Auth.YAMLScheme` (field on the struct), not a
+  parameter threaded through every caller.** The design offered either
+  choice. A field is simpler here because `Config` is already copied by
+  value at every merge point (`ApplyOverlay` takes `base Config` by value;
+  `applyRuntimeConfig` takes `*Config` but never replaces the struct), so
+  the captured value survives every copy automatically with no extra
+  plumbing. `yaml:"-"` keeps it non-configurable — it always mirrors
+  `Scheme` at the moment `loadConfig` parses the YAML file, before any
+  overlay or runtime config touches `cfg`.
+- **`ApplyOverlay` gained a `log *slog.Logger` parameter.** `EffectiveAuthScheme`
+  needs somewhere to log the warning, and using the bridge's own configured
+  logger (not a package-level default) keeps the warning attributable and
+  testable. All three production call sites already had a logger in scope
+  (`BrokerServer.b.log`, `main()`'s `log`), so this was a mechanical change;
+  the five existing unit-test call sites were updated to pass a test logger.
+- **`applyRuntimeConfig` also gained a `log *slog.Logger` parameter**, for
+  the same reason, on the same basis (the caller in `serveStandalone` and
+  the reconfigure callback both already have `log` in scope).
+
+### Row → test → mutant table
+
+| Row | Test(s) | Mutation → result |
+|---|---|---|
+| F4-1: YAML `hubBearer`, overlay `auth_scheme: none` → effective `hubBearer`, warning logged | `TestApplyOverlay_PinsYAMLOnlyScheme`, `TestEffectiveAuthScheme/pinned_scheme,_none_push_is_ignored_(F4-1_shape)` | Remove the `ApplyOverlay` call site (assign `overlay.AuthScheme` directly) → **failed** `TestApplyOverlay_PinsYAMLOnlyScheme`, `TestApplyOverlay_PinnedSchemeSurvivesBuildSnapshot`, `TestConfigure_PinsYAMLOnlyScheme` |
+| F4-2: YAML `hubBearer`, `applyRuntimeConfig{"auth_scheme":"none"}` → `hubBearer` | `TestApplyRuntimeConfig_PinsYAMLOnlyScheme` | Remove the `applyRuntimeConfig` call site → **failed** `TestApplyRuntimeConfig_PinsYAMLOnlyScheme`, `…GeGoogleSchemeAlsoPinned`, `…PinSurvivesReconnect`, `…UsesCapturedYAMLScheme_NotCurrent` |
+| F4-3: two successive `applyRuntimeConfig` calls (reconnect) → still `hubBearer` | `TestApplyRuntimeConfig_PinSurvivesReconnect` (second call passes an empty map — no `auth_scheme` key at all, the actual reconnect shape) | Covered by the same call-site-removal mutation above |
+| F4-4: YAML `geGoogle`, same as F4-1/F4-2 → `geGoogle` | `TestApplyOverlay_GeGoogleSchemeAlsoPinned`, `TestApplyRuntimeConfig_GeGoogleSchemeAlsoPinned`, `TestEffectiveAuthScheme/pinned_geGoogle_scheme,…` | Same call-site-removal mutations; also killed by the "pin everything" mutation below (proves geGoogle needs the `validAuthSchemes` gate too, not just hubBearer) |
+| F4-5: YAML `apiKey`, pushed `none` → `none` (guards over-pinning) | `TestApplyOverlay_DoesNotPinUIRepresentableScheme`, `TestApplyRuntimeConfig_DoesNotPinUIRepresentableScheme`, `TestEffectiveAuthScheme/UI-representable…` | Pin everything (drop the `!validAuthSchemes[yamlScheme]` check from `EffectiveAuthScheme`) → **failed** both `DoesNotPinUIRepresentableScheme` tests and the `TestEffectiveAuthScheme` subtest |
+| F4-6: snapshot/`BuildAuthValidators` after a pinned push yields the `hubBearer` validator (production wiring) | `TestApplyOverlay_PinnedSchemeSurvivesBuildSnapshot`, `TestConfigure_PinsYAMLOnlyScheme` (full `BrokerServer.Configure` → snapshot route) | Either call-site-removal mutation above fails these; also covered by the capture-drop mutation below (a wrong pin decision reaches `BuildSnapshot` the same way) |
+| Hub-driven Restart/`Configure` push through `ApplyOverlay` (p5b review r5, F2) | `TestConfigure_PinsYAMLOnlyScheme` — exercises `BrokerServer.Configure` end to end (this is the real route for both a non-HA admin-UI save and an HA Restart push that carries `auth_scheme`), and additionally re-applies the persisted overlay after the push to prove a "restart" can't unpin it either | Same mutations as F4-1/F4-6 |
+| Startup with a persisted overlay containing `auth_scheme: none` → still pinned | `TestApplyOverlay_PersistedOverlayCannotUnpinYAMLScheme` (round-trips `PersistOverlay`/`LoadPersistedOverlay`/`ApplyOverlay`, the exact sequence `main()` runs at boot) | Same call-site-removal mutation |
+| Capture correctness: must pin against the captured YAML value, not the live "current" scheme | `TestApplyOverlay_UsesCapturedYAMLScheme_NotCurrent`, `TestApplyRuntimeConfig_UsesCapturedYAMLScheme_NotCurrent` (both construct a `Config` where `Auth.Scheme` deliberately differs from `Auth.YAMLScheme`) | Drop the capture (pass `cfg.Auth.Scheme`/`base.Auth.Scheme` instead of `…YAMLScheme` as the first `EffectiveAuthScheme` argument) → **failed** both tests |
+| Empty pushed scheme keeps current, not cleared (behavior change from before this fix) | `TestEffectiveAuthScheme/pinned_scheme,_empty_push_keeps_current…`, `TestParseAdminOverlay_EmptyStringFieldsStillPresent` (updated — see below) | — |
+
+All four mutations the brief asked for were run by hand in the working
+tree (not a throwaway worktree — verified `git diff --stat` was empty after
+each revert): remove the `ApplyOverlay` call site, remove the
+`applyRuntimeConfig` call site, drop the capture, and pin everything. Each
+failed the tests listed above; all were reverted and the full suite re-run
+green before continuing.
+
+### Pre-existing test updated (behavior change, not a regression)
+
+`TestParseAdminOverlay_EmptyStringFieldsStillPresent` asserted that pushing
+`auth_scheme: ""` (present, but empty) cleared `Auth.Scheme` to `""`. §4.6b
+intentionally changes this: `EffectiveAuthScheme` treats an empty pushed
+scheme as "no scheme in this push" and keeps the current scheme, for every
+YAML scheme (pinned or not) — an admin clearing the field is not itself a
+downgrade request. Updated the assertion to expect the base value (`apiKey`)
+unchanged, with a comment explaining why, and cross-referenced from
+`TestEffectiveAuthScheme`.
+
+### FYI (not fixed, out of scope for this task)
+
+`BrokerServer.Configure` logs `"admin config applied", "auth_scheme",
+overlay.AuthScheme, …` at the end of a successful push — this is the raw
+pushed value, not the effective (possibly pinned) scheme, so a pinned push
+logs `auth_scheme=none` even though the effective scheme stayed `hubBearer`.
+This is pre-existing (the line logs the raw overlay for every field, not
+just auth_scheme) and not a secret leak or incorrect claim about what was
+*received*; flagging it here rather than changing it, since the brief scoped
+this task to `EffectiveAuthScheme`/its two call sites and didn't ask for
+changes to that log line.
+
+### README / docs-site
+
+Collapsed the multi-paragraph HA/non-HA recovery caution (added across
+fix rounds 2-4) to one line describing the new, permanent behavior, plus one
+line for bridges built before this protection existed (no version named),
+per the brief. `docs-site/src/content/docs/hosted/user/a2a-bridge.md` does
+not carry this caution (it only cross-references the Hub's external-bearer
+docs for `hubBearer` and marks `geGoogle` deprecated) — no edit needed there.
+
+### Gates (from `extras/scion-a2a-bridge/`, `GOTMPDIR` owned scratch dir,
+deleted after; `GOCACHE=/scion-volumes/gocache`)
+
+- `go build ./...` — clean.
+- `go vet ./...` — clean.
+- `gofmt -l .` — clean.
+- `go test ./...` (full module, includes the new `cmd/scion-a2a-bridge`
+  package tests) — all green.
+- `go build -buildvcs=false ./cmd/scion-a2a-bridge/...` — clean.
+- `GOGC=40 golangci-lint run --new-from-rev=a53175c23 --concurrency=1 ./...`
+  — 0 issues.
+- Did not run the `pkg/hub` suite (out of scope; nothing under `pkg/`
+  touched).
+
+### Bare-issue-number grep (base `a53175c23`, both must print nothing)
+
+- `git log a53175c23..HEAD --format=%B | /usr/bin/grep -nE '(^|[^/A-Za-z])#[0-9]+'` — empty.
+- `git diff a53175c23 HEAD | /usr/bin/grep -nE '^\+.*(^|[^/A-Za-z0-9])#[0-9]{3,}'` — empty.
+
+### Deviations / design questions
+
+None requiring `ap-em`'s input. The `ApplyOverlay`/`applyRuntimeConfig`
+logger-parameter addition was a mechanical consequence of the design's
+pseudocode (which logs from inside the merge), not a design choice on my
+part.
