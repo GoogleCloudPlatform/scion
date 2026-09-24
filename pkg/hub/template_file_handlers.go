@@ -133,7 +133,48 @@ func detectHarnessFromContent(data []byte, templateName string) templateConfigIn
 
 // handleTemplateFiles dispatches template file operations.
 // filePath is empty for listing, non-empty for single-file operations.
+//
+// Authorization is enforced here rather than in each leaf handler, which is a
+// deliberate departure from the sibling template actions. Those gate
+// per-handler, and the reason this route was reachable unauthenticated is that
+// the whole file was written without one: the /api/v1/templates/ route is
+// classified RoutePolicy, which passes through by design and delegates
+// enforcement to the handler, and that delegation was simply never honoured
+// here. Gating at the single dispatch point means a sub-handler added later
+// inherits the check instead of having to remember it.
+//
+// filePath is validated for the same reason it cannot be trusted downstream:
+// it is concatenated into a storage object path and, on write, recorded in the
+// template manifest. The Go mux cleans a literal "../" out of the request path
+// before routing, but r.URL.Path is already percent-decoded by then, so an
+// encoded "..%2f" arrives here intact.
 func (s *Server) handleTemplateFiles(w http.ResponseWriter, r *http.Request, templateID, filePath string) {
+	if filePath != "" {
+		if err := validateWorkspaceFilePath(filePath); err != nil {
+			BadRequest(w, "Invalid file path: "+err.Error())
+			return
+		}
+	}
+
+	template, err := s.store.GetTemplate(r.Context(), templateID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// SECURITY-GATE: authorize access to this specific template before any
+	// storage read, storage write or manifest change. Reads require read;
+	// everything that mutates template content requires update, matching the
+	// upload and finalize actions, which also mutate content rather than the
+	// template record itself.
+	action := ActionUpdate
+	if r.Method == http.MethodGet {
+		action = ActionRead
+	}
+	if !s.authorize(w, r, templateResource(template), action) {
+		return
+	}
+
 	if filePath == "" {
 		// Collection endpoint: GET = list, POST = upload
 		switch r.Method {
