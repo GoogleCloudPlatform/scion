@@ -4677,15 +4677,16 @@ func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {
 					AllowedEmails:    nil,
 				},
 				{
-					IssuerURL:        "https://accounts.google.com",
-					JWKSURL:          "",
-					ExpectedAudience: "https://hub-b.example.com",
-					AllowedProjects:  nil,
-					AllowedRootUsers: nil,
-					DefaultScopes:    []string{"agent:status:update"},
-					IssuerType:       "service_account",
-					DefaultRole:      "",
-					AllowedEmails:    []string{"sa@proj.iam.gserviceaccount.com"},
+					IssuerURL:          "https://accounts.google.com",
+					JWKSURL:            "",
+					ExpectedAudience:   "https://hub-b.example.com",
+					AllowedProjects:    nil,
+					AllowedRootUsers:   nil,
+					DefaultScopes:      []string{"agent:status:update"},
+					IssuerType:         "service_account",
+					DefaultRole:        "",
+					AllowedEmails:      []string{"sa@proj.iam.gserviceaccount.com"},
+					AllowedGCPProjects: []string{"gcp-proj-1", "gcp-proj-2"},
 				},
 			},
 			Algorithms:       []string{"RS256", "ES256"},
@@ -4712,6 +4713,7 @@ func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {
 	assert.Equal(t, "https://accounts.google.com", ti1.IssuerURL)
 	assert.Equal(t, "service_account", ti1.IssuerType)
 	assert.Equal(t, []string{"sa@proj.iam.gserviceaccount.com"}, ti1.AllowedEmails)
+	assert.Equal(t, []string{"gcp-proj-1", "gcp-proj-2"}, ti1.AllowedGCPProjects)
 
 	assert.Equal(t, []string{"RS256", "ES256"}, gc.Federation.Algorithms)
 	assert.Equal(t, time.Hour, gc.Federation.Cache.RefreshInterval)
@@ -4739,6 +4741,7 @@ func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {
 	assert.Equal(t, "https://accounts.google.com", vi1.IssuerURL)
 	assert.Equal(t, "service_account", vi1.IssuerType)
 	assert.Equal(t, []string{"sa@proj.iam.gserviceaccount.com"}, vi1.AllowedEmails)
+	assert.Equal(t, []string{"gcp-proj-1", "gcp-proj-2"}, vi1.AllowedGCPProjects)
 }
 
 func TestConvertV1FederationConfig_NilFederation(t *testing.T) {

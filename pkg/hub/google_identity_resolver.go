@@ -48,7 +48,7 @@ var (
 type ResolvePolicy struct {
 	// PreAuthorized skips the Hub sign-in policy (the injected authorize func)
 	// for first-time provisioning. Set ONLY for service accounts admitted by
-	// allowed_projects: the project allowlist IS the authorization decision.
+	// allowed_gcp_projects: the project allowlist IS the authorization decision.
 	// It never bypasses the suspension check on an already-bound user — that
 	// check runs unconditionally in Resolve/resolveAfterConflict.
 	PreAuthorized bool
@@ -240,7 +240,7 @@ func (r *GoogleIdentityResolver) Resolve(ctx context.Context, identity *Validate
 
 	// No existing user by email — provision a new user through the normal path.
 	// This requires the same authorization checks as regular login, unless
-	// policy.PreAuthorized (service accounts admitted by allowed_projects).
+	// policy.PreAuthorized (service accounts admitted by allowed_gcp_projects).
 	//
 	// provisionNewUser may return an existing user instead of a newly created
 	// one when a concurrent resolution wins the unique-email race. The
@@ -325,7 +325,7 @@ func (r *GoogleIdentityResolver) resolveAfterConflict(ctx context.Context, canon
 // provisionNewUser creates a new user via the normal Hub provisioning path.
 // Enforces the same domain/invite/allow-registration policy as the normal
 // Hub login flow via the injected authorize func, UNLESS policy.PreAuthorized
-// is set (service accounts admitted by allowed_projects: the project
+// is set (service accounts admitted by allowed_gcp_projects: the project
 // allowlist is itself the authorization decision). PreAuthorized never
 // bypasses suspension checks — those happen in Resolve/resolveAfterConflict on
 // every call, not just at provisioning time.
@@ -345,7 +345,7 @@ func (r *GoogleIdentityResolver) provisionNewUser(ctx context.Context, identity 
 
 	if policy.PreAuthorized {
 		r.log.Info("google identity resolver: bypassing sign-in policy for pre-authorized principal",
-			"email", normalizedEmail, "sub", identity.Subject, "reason", "allowed_projects")
+			"email", normalizedEmail, "sub", identity.Subject, "reason", "allowed_gcp_projects")
 	} else if !r.authorize(ctx, normalizedEmail) {
 		r.log.Warn("google identity resolver: user not authorized for auto-provisioning",
 			"email", normalizedEmail, "sub", identity.Subject)

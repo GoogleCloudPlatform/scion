@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
@@ -31,11 +32,11 @@ import (
 
 // External bearer authentication.
 //
-// The Hub accepts a Google-issued end-user credential directly in
-// Authorization: Bearer, without a credential-exchange round trip. This is
-// the Phase 1 vertical slice: Google OIDC ID tokens for USER principals only.
-// Access tokens, service accounts, the caching decorator, and the rate
-// limiter all land in later phases (design §5).
+// The Hub accepts a Google-issued end-user or service-account credential
+// directly in Authorization: Bearer, without a credential-exchange round
+// trip: user ID tokens and access tokens (design §5 Phases 1-2), and
+// service-account ID tokens gated by allowed_gcp_projects (design §5 Phase 3).
+// A service-account access token is never accepted, on any phase.
 //
 // serveExternalBearer runs only after the request has already failed every
 // other authentication path (Hub JWT, PAT, agent, proxy, federation). It is
@@ -55,13 +56,21 @@ import (
 // token shape). Callers fall back to their normal rejection message.
 var errExternalBearerNotApplicable = errors.New("external bearer: not applicable")
 
-// errExternalBearerPrincipalRejected reports that the verified identity's
-// principal type is not accepted on this path in this phase (currently:
-// service accounts — SA support lands in a later phase). It is a distinct
-// sentinel, rather than an ad-hoc error, so a future outcome metric (design
-// §4.7) can label this rejection without string matching, and so the mapping
-// in serveExternalBearer stays entirely errors.Is-driven.
-var errExternalBearerPrincipalRejected = errors.New("external bearer: principal type not accepted in this phase")
+// errSAAccessTokenRejected reports that a service-account identity was
+// presented as an OAuth2 access token rather than an ID token. Design §4.2(ii)
+// only makes SA ID tokens validate (azp/sub-bound audience rule); access
+// tokens carry no equivalent binding, so an SA is never admitted this way, on
+// any project. Renamed from errExternalBearerPrincipalRejected (Phase 2),
+// which rejected every SA identity outright before Phase 3 gave ID tokens an
+// admission policy.
+var errSAAccessTokenRejected = errors.New("external bearer: service account access tokens are not accepted")
+
+// errSAProjectNotAllowed reports that a service-account ID token's GCP
+// project — parsed from its verified email by googleSAProject — is not
+// listed in the Google issuer's allowed_gcp_projects (design §4.1, §4.4). An
+// unparseable email (googleSAProject's second return false) and an unset
+// allowed_gcp_projects (admits no service accounts at all) both take this path.
+var errSAProjectNotAllowed = errors.New("external bearer: service account project not allowed")
 
 // errExternalBearerRateLimited reports that the external-bearer path's
 // per-client-IP budget (externalBearerRateLimiter, external_bearer_ratelimit.go)
@@ -174,6 +183,34 @@ func googleTrust(cfg AuthConfig) (config.TrustedIssuerConfig, bool) {
 	return trust, true
 }
 
+// trustAllowedProjects returns the GCP project IDs a service-account
+// identity's project (googleSAProject) must match for trust to admit it
+// (design §4.1, allowed_gcp_projects). Isolated behind this accessor, rather
+// than reading trust.AllowedGCPProjects directly at the one call site, to
+// keep the SA branch's coupling to the exact pkg/config field name in one
+// place — TrustedIssuerConfig also has an unrelated, longer-standing
+// AllowedProjects field (allowed_projects: hub-federation project scoping by
+// JWT project_id claim, federation_auth.go's IssuerTypeHub case); the two
+// are deliberately distinct fields (design §4.1 r7) and must not be confused.
+func trustAllowedProjects(trust config.TrustedIssuerConfig) []string {
+	return trust.AllowedGCPProjects
+}
+
+// containsFold reports whether target is present in list, compared
+// case-insensitively. Used for the allowed_gcp_projects membership check:
+// the Google-issuer entry's list is normalised to lower case at config load
+// (design §4.1), but googleSAProject's parsed project is compared
+// case-insensitively regardless, so this does not depend on that
+// normalisation actually having run.
+func containsFold(list []string, target string) bool {
+	for _, s := range list {
+		if strings.EqualFold(s, target) {
+			return true
+		}
+	}
+	return false
+}
+
 // serveExternalBearer attempts to authenticate the request with an external
 // bearer token. It returns true when it has written a response or served the
 // request, and false when the token is not an external bearer token the Hub
@@ -261,9 +298,10 @@ type externalBearerCacheProbe interface {
 // Google trust at all; other errors describe a token that targeted Google
 // trust but failed verification or policy.
 //
-// A service-account identity is rejected outright on every token kind: SA
-// admission is Phase 3's scope (allowed_projects, ID-token-only), and this
-// phase must not let one slip through an access token in the meantime.
+// A service-account identity is admitted only as an ID token whose GCP
+// project (parsed from its verified email) is listed in the Google issuer's
+// allowed_gcp_projects (design §4.1, §4.4); an SA access token is rejected on
+// every project. A user identity is unaffected by any of this.
 func authenticateExternalBearer(ctx context.Context, r *http.Request, token string, cfg AuthConfig) (UserIdentity, error) {
 	trust, ok := googleTrust(cfg)
 	if !ok {
@@ -309,14 +347,23 @@ func authenticateExternalBearer(ctx context.Context, r *http.Request, token stri
 	if err != nil {
 		return nil, fmt.Errorf("external bearer: %w", err)
 	}
+	policy := ResolvePolicy{}
 	if id.IsServiceAccount {
-		// No SA branch in this phase (design §5 Phase 2): reject explicitly,
-		// on either token kind, rather than falling through to user
-		// resolution.
-		return nil, errExternalBearerPrincipalRejected
+		if kind == externalBearerAccessToken {
+			return nil, errSAAccessTokenRejected
+		}
+		proj, ok := googleSAProject(id.Email)
+		if !ok || !containsFold(trustAllowedProjects(trust), proj) {
+			return nil, errSAProjectNotAllowed
+		}
+		// The project allowlist IS the authorization decision for a
+		// first-time provision (design §4.3's ResolvePolicy.PreAuthorized):
+		// it never bypasses the suspension check on an already-bound SA
+		// user (S6), which Resolve enforces unconditionally.
+		policy.PreAuthorized = true
 	}
 
-	u, err := cfg.GoogleResolver.Resolve(ctx, id, ResolvePolicy{})
+	u, err := cfg.GoogleResolver.Resolve(ctx, id, policy)
 	if err != nil {
 		return nil, classifyResolveError(err)
 	}

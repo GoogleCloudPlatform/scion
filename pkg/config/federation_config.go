@@ -17,6 +17,7 @@ package config
 import (
 	"fmt"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -55,6 +56,17 @@ type TrustedIssuerConfig struct {
 	// Supports leading-wildcard suffix matching (e.g. "*@example.com").
 	// If empty, all emails accepted.
 	AllowedEmails []string `json:"allowed_emails,omitempty" yaml:"allowed_emails,omitempty" koanf:"allowed_emails"`
+
+	// AllowedGCPProjects admits SERVICE-ACCOUNT principals (Google issuer
+	// only) whose GCP project ID — parsed from the SA email — is listed
+	// (exact, case-insensitive). Empty means no service accounts are
+	// admitted. This is deliberately a distinct field from AllowedProjects:
+	// that field already means the Scion project ID matched against a
+	// federated hub agent token's project_id claim (issuer_type: hub,
+	// pkg/hub/federation_auth.go), and reusing it here would give one config
+	// key two unrelated meanings depending on issuer_type — misreadable, and
+	// the misreading fails open (see Validate's rule below).
+	AllowedGCPProjects []string `json:"allowed_gcp_projects,omitempty" yaml:"allowed_gcp_projects,omitempty" koanf:"allowed_gcp_projects"`
 }
 
 // FederationCacheConfig holds cache tuning parameters for federation JWKS fetching.
@@ -75,6 +87,23 @@ var allowedIssuerTypes = map[string]bool{
 var allowedAlgorithms = map[string]bool{
 	"RS256": true,
 	"ES256": true,
+}
+
+// googleIssuerURLs are the two issuer URL forms Google uses for its OIDC
+// issuer. Duplicated from pkg/hub's googleIssuerHTTPS/googleIssuerBare
+// constants (not imported, to avoid a circular import between pkg/config and
+// pkg/hub — the same reason IssuerType is a plain string on this struct).
+var googleIssuerURLs = map[string]bool{
+	"https://accounts.google.com": true,
+	"accounts.google.com":         true,
+}
+
+// isGoogleIssuerURL reports whether issuerURL is one of Google's OIDC issuer
+// forms. Used to gate AllowedGCPProjects (valid only for a Google issuer) and
+// to improve the existing AllowedProjects error message when an operator
+// most likely meant the Google-specific field instead.
+func isGoogleIssuerURL(issuerURL string) bool {
+	return googleIssuerURLs[strings.TrimRight(issuerURL, "/")]
 }
 
 // Validate checks FederationConfig for configuration errors.
@@ -135,11 +164,31 @@ func (c *FederationConfig) Validate() []error {
 		isNonHub := issuer.IssuerType != "" && issuer.IssuerType != "hub"
 
 		// Rule 8: Warn if hub-specific fields are set on non-hub issuers.
+		// AllowedProjects here is the hub-federation Scion-project allowlist
+		// (matched against a federated agent token's project_id claim,
+		// pkg/hub/federation_auth.go) — unrelated to, and unchanged by,
+		// AllowedGCPProjects below. It stays an error on every non-hub
+		// issuer, including a Google one: a Google issuer wants
+		// allowed_gcp_projects instead, so the message says so when that's
+		// the likely mistake (design §4.1 r7).
 		if isNonHub && len(issuer.AllowedProjects) > 0 {
-			errs = append(errs, fmt.Errorf("trusted_issuers[%d]: allowed_projects is not applicable for issuer_type %q", i, issuer.IssuerType))
+			msg := fmt.Sprintf("trusted_issuers[%d]: allowed_projects is not applicable for issuer_type %q", i, issuer.IssuerType)
+			if isGoogleIssuerURL(issuer.IssuerURL) {
+				msg += " (use allowed_gcp_projects for a Google issuer's service-account project allowlist)"
+			}
+			errs = append(errs, fmt.Errorf("%s", msg))
 		}
 		if isNonHub && len(issuer.AllowedRootUsers) > 0 {
 			errs = append(errs, fmt.Errorf("trusted_issuers[%d]: allowed_root_users is not applicable for issuer_type %q", i, issuer.IssuerType))
+		}
+
+		// Rule 9: AllowedGCPProjects (service-account admission by GCP
+		// project, design §4.1/§4.4) is Google-issuer-only. Set on any other
+		// issuer, it must not be silently ignored — that would let an
+		// operator believe they've scoped service-account admission when
+		// nothing enforces it.
+		if len(issuer.AllowedGCPProjects) > 0 && !isGoogleIssuerURL(issuer.IssuerURL) {
+			errs = append(errs, fmt.Errorf("trusted_issuers[%d]: allowed_gcp_projects is only applicable to the Google issuer (%q)", i, issuer.IssuerURL))
 		}
 	}
 

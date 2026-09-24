@@ -85,6 +85,34 @@ func newGoogleFederationAuthWithIssuerType(t *testing.T, expectedAudience, issue
 	return fa
 }
 
+// newGoogleTrustFederationAuthWithSA builds a FederationAuthenticator, via
+// the real validated NewFederationAuthenticator, whose Google issuer entry
+// additionally carries AllowedGCPProjects — the distinct field design §4.1 r7
+// introduced for service-account project admission (not AllowedProjects,
+// which is the unrelated, longer-standing hub-federation Scion-project
+// allowlist). Used for testing the SA branch of authenticateExternalBearer
+// (design §4.1, §4.4, §4.5).
+func newGoogleTrustFederationAuthWithSA(t *testing.T, expectedAudience string, allowedGCPProjects []string) *FederationAuthenticator {
+	t.Helper()
+	fedCfg := config.FederationConfig{
+		Enabled: true,
+		TrustedIssuers: []config.TrustedIssuerConfig{
+			{
+				IssuerURL:          googleIssuerHTTPS,
+				JWKSURL:            "http://unused.invalid/jwks",
+				ExpectedAudience:   expectedAudience,
+				IssuerType:         "user",
+				AllowedGCPProjects: allowedGCPProjects,
+			},
+		},
+	}
+	fa, err := NewFederationAuthenticator(fedCfg, "https://hub.example.com", http.DefaultClient, "hosted", slog.Default())
+	if err != nil {
+		t.Fatalf("NewFederationAuthenticator: %v", err)
+	}
+	return fa
+}
+
 // federationAuthPointer wraps a *FederationAuthenticator in the
 // atomic.Pointer AuthConfig.FederationAuth expects.
 func federationAuthPointer(fa *FederationAuthenticator) *atomic.Pointer[FederationAuthenticator] {
@@ -144,6 +172,25 @@ func newExternalBearerConfig(t *testing.T, validator GoogleCredentialValidator, 
 		t.Fatalf("NewUserTokenService: %v", err)
 	}
 	fa := newGoogleTrustFederationAuth(t, externalBearerTestAudience)
+	return AuthConfig{
+		Mode:            "production",
+		UserTokenSvc:    userTokenSvc,
+		FederationAuth:  federationAuthPointer(fa),
+		GoogleValidator: validator,
+		GoogleResolver:  resolver,
+		Logger:          slog.Default(),
+	}
+}
+
+// newExternalBearerConfigWithSA is newExternalBearerConfig, but the Google
+// trust entry carries AllowedGCPProjects (see newGoogleTrustFederationAuthWithSA).
+func newExternalBearerConfigWithSA(t *testing.T, validator GoogleCredentialValidator, resolver *GoogleIdentityResolver, allowedGCPProjects []string) AuthConfig {
+	t.Helper()
+	userTokenSvc, err := NewUserTokenService(UserTokenConfig{})
+	if err != nil {
+		t.Fatalf("NewUserTokenService: %v", err)
+	}
+	fa := newGoogleTrustFederationAuthWithSA(t, externalBearerTestAudience, allowedGCPProjects)
 	return AuthConfig{
 		Mode:            "production",
 		UserTokenSvc:    userTokenSvc,
@@ -966,14 +1013,15 @@ func TestExternalBearer_EmptyExpectedAudience_NotApplicable(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// R4 — a service-account identity must never be admitted on this path: no SA
-// branch exists yet (design §5 Phase 1), so the identity must be rejected
-// outright rather than falling through to user resolution (SA emails are
-// authoritative for bootstrap, so an unguarded resolver call would happily
-// provision one).
+// S4 — an SA ID token whose azp disagrees with sub must be rejected, even
+// though its aud is on the allowed list. (Originally written in Phase 1/2,
+// when no SA branch existed at all and any SA identity was rejected outright
+// regardless of shape; Phase 3 gives SA ID tokens an admission policy, so
+// this now specifically exercises the azp/sub disagreement rule, design
+// §4.2(ii).)
 // ---------------------------------------------------------------------------
 
-func TestExternalBearer_ServiceAccountIDToken_Rejected(t *testing.T) {
+func TestExternalBearer_ServiceAccountIDToken_AZPNotSub_Unauthorized(t *testing.T) {
 	kp := newGCVTestKeyPair("test-kid-1")
 	endpoints := newTestEndpoints(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -988,18 +1036,21 @@ func TestExternalBearer_ServiceAccountIDToken_Rejected(t *testing.T) {
 	userStore := newFakeUserStore()
 	extStore := newMemExtIDStore()
 	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())
-	cfg := newExternalBearerConfig(t, newTestValidator(endpoints), resolver)
+	// The SA's project ("proj") IS listed, so the only thing that can be
+	// rejecting this token is the azp/sub check — not the allowed_projects
+	// gate. Isolates S4 from S2.
+	cfg := newExternalBearerConfigWithSA(t, newTestValidator(endpoints), resolver, []string{"proj"})
 
 	claims := validIDTokenClaims()
 	claims["aud"] = externalBearerTestAudience
-	claims["azp"] = externalBearerTestAudience
+	claims["azp"] = externalBearerTestAudience // disagrees with sub ("google-sub-test-123")
 	claims["email"] = "sa@proj.iam.gserviceaccount.com"
 	token := signIDToken(kp, claims)
 
 	w, result := doExternalBearerRequest(cfg, token)
 
 	if result.reached {
-		t.Fatal("handler must not be reached: a service-account identity must be rejected, not admitted, in this phase")
+		t.Fatal("handler must not be reached: an SA ID token with azp != sub must be rejected")
 	}
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401: body=%s", w.Code, w.Body.String())
@@ -1651,6 +1702,7 @@ func TestNoPackageLevelMutableState(t *testing.T) {
 		"google_identity_resolver.go",
 		"google_credential_cache.go",
 		"external_bearer_ratelimit.go",
+		"google_sa.go",
 	}
 	fset := token.NewFileSet()
 	for _, file := range files {

@@ -394,6 +394,191 @@ func TestProductionValidator_IDToken_ServiceAccount(t *testing.T) {
 	}
 }
 
+// gcvSANumericSub is a realistic Google service-account "sub"/"azp" value: a
+// large numeric unique ID, matching what the metadata server and
+// iamcredentials.generateIdToken actually issue for SA ID tokens (design
+// §4.2(ii)). Distinct from auth_external_bearer_sa_test.go's saNumericSub so
+// this file has no cross-file test dependency.
+const gcvSANumericSub = "999988887777666655554"
+
+// S1 (validator level) — an SA ID token whose azp equals sub (the SA-minted
+// shape) validates: aud is checked against allowedClientIDs exactly as for a
+// user token (isAllowedAudience, earlier in ValidateIDToken), and the azp/sub
+// rule does not additionally reject it.
+func TestProductionValidator_IDToken_ServiceAccount_AZPEqualsSub_Valid(t *testing.T) {
+	kp := newGCVTestKeyPair("test-kid-1")
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if _, err := w.Write(gcvJWKSJSON(kp)); err != nil {
+				t.Errorf("write JWKS response: %v", err)
+			}
+		}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+	)
+	defer endpoints.close()
+
+	validator := newTestValidator(endpoints)
+	claims := validIDTokenClaims()
+	claims["email"] = "worker@my-project.iam.gserviceaccount.com"
+	claims["sub"] = gcvSANumericSub
+	claims["azp"] = gcvSANumericSub // SA-minted shape: azp == sub
+	token := signIDToken(kp, claims)
+
+	identity, err := validator.ValidateIDToken(t.Context(), token,
+		[]string{"test-client-id.apps.googleusercontent.com"})
+	if err != nil {
+		t.Fatalf("ValidateIDToken failed: %v", err)
+	}
+	if !identity.IsServiceAccount {
+		t.Error("expected IsServiceAccount=true")
+	}
+	if identity.Audience != "test-client-id.apps.googleusercontent.com" {
+		t.Errorf("Audience = %q, want the matched allowed client ID", identity.Audience)
+	}
+}
+
+// S4 (validator level) — an SA ID token whose azp disagrees with sub is
+// rejected, even though its aud is on the allowed list (unlike a user token,
+// azp is not treated as the audience for an SA).
+func TestProductionValidator_IDToken_ServiceAccount_AZPDiffersFromSub_Rejected(t *testing.T) {
+	kp := newGCVTestKeyPair("test-kid-1")
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if _, err := w.Write(gcvJWKSJSON(kp)); err != nil {
+				t.Errorf("write JWKS response: %v", err)
+			}
+		}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+	)
+	defer endpoints.close()
+
+	validator := newTestValidator(endpoints)
+	claims := validIDTokenClaims()
+	claims["email"] = "worker@my-project.iam.gserviceaccount.com"
+	claims["sub"] = gcvSANumericSub
+	claims["azp"] = "test-client-id.apps.googleusercontent.com" // disagrees with sub
+	token := signIDToken(kp, claims)
+
+	_, err := validator.ValidateIDToken(t.Context(), token,
+		[]string{"test-client-id.apps.googleusercontent.com"})
+	if err == nil {
+		t.Fatal("expected error: SA azp disagrees with sub")
+	}
+	if !errors.Is(err, ErrGoogleFieldDisagreement) {
+		t.Errorf("error = %v, want ErrGoogleFieldDisagreement", err)
+	}
+}
+
+// The SA classification must use the verified email, only after the
+// signature check and the email_verified gate — an SA-looking email must
+// never reach the SA branch (and its different aud/azp rule) via a bad
+// signature or an unverified email.
+func TestProductionValidator_IDToken_ServiceAccountEmail_Unverified_NeverReachesSABranch(t *testing.T) {
+	kp := newGCVTestKeyPair("test-kid-1")
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if _, err := w.Write(gcvJWKSJSON(kp)); err != nil {
+				t.Errorf("write JWKS response: %v", err)
+			}
+		}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+	)
+	defer endpoints.close()
+
+	validator := newTestValidator(endpoints)
+	claims := validIDTokenClaims()
+	claims["email"] = "worker@my-project.iam.gserviceaccount.com"
+	claims["email_verified"] = false
+	claims["sub"] = gcvSANumericSub
+	claims["azp"] = gcvSANumericSub // SA-minted shape — would validate if the SA branch ran
+	token := signIDToken(kp, claims)
+
+	_, err := validator.ValidateIDToken(t.Context(), token,
+		[]string{"test-client-id.apps.googleusercontent.com"})
+	if err == nil {
+		t.Fatal("expected error: email not verified, regardless of SA-shaped azp/sub")
+	}
+	if !errors.Is(err, ErrGoogleUnverifiedEmail) {
+		t.Errorf("error = %v, want ErrGoogleUnverifiedEmail (the SA branch must not run before this check)", err)
+	}
+}
+
+func TestProductionValidator_IDToken_ServiceAccountEmail_BadSignature_NeverReachesSABranch(t *testing.T) {
+	kp := newGCVTestKeyPair("test-kid-1")
+	otherKP := newGCVTestKeyPair("other-kid") // signs the token; JWKS only ever publishes kp.
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if _, err := w.Write(gcvJWKSJSON(kp)); err != nil {
+				t.Errorf("write JWKS response: %v", err)
+			}
+		}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+	)
+	defer endpoints.close()
+
+	validator := newTestValidator(endpoints)
+	claims := validIDTokenClaims()
+	claims["email"] = "worker@my-project.iam.gserviceaccount.com"
+	claims["sub"] = gcvSANumericSub
+	claims["azp"] = gcvSANumericSub
+	token := signIDToken(otherKP, claims) // signed by a key not in the JWKS
+
+	_, err := validator.ValidateIDToken(t.Context(), token,
+		[]string{"test-client-id.apps.googleusercontent.com"})
+	if err == nil {
+		t.Fatal("expected error: signature does not verify against the trusted JWKS")
+	}
+	if !errors.Is(err, ErrGoogleInvalidCredential) {
+		t.Errorf("error = %v, want ErrGoogleInvalidCredential (the SA branch must not run before signature verification)", err)
+	}
+}
+
+// This is the mutation-killer for "the SA/user split uses the verified email,
+// not claim shape": a USER (non-SA) email with an SA-shaped azp==sub and an
+// aud that disagrees with azp must still be rejected under the unchanged
+// user rule. If the SA/user branches were ever selected by shape instead of
+// by isGoogleServiceAccount(email), this token would incorrectly validate
+// (the SA rule only checks azp==sub, and aud is separately allowed).
+func TestProductionValidator_IDToken_UserToken_SAShapedAzpSub_StillRejected(t *testing.T) {
+	kp := newGCVTestKeyPair("test-kid-1")
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if _, err := w.Write(gcvJWKSJSON(kp)); err != nil {
+				t.Errorf("write JWKS response: %v", err)
+			}
+		}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+	)
+	defer endpoints.close()
+
+	validator := newTestValidator(endpoints)
+	claims := validIDTokenClaims()
+	claims["email"] = "alice@gmail.com" // definitely not a service account
+	claims["sub"] = "1234567890"
+	claims["azp"] = "1234567890"                                              // == sub: would pass the SA rule if mis-routed
+	claims["aud"] = "some-other-allowed-client-id.apps.googleusercontent.com" // != azp
+	token := signIDToken(kp, claims)
+
+	_, err := validator.ValidateIDToken(t.Context(), token,
+		[]string{"test-client-id.apps.googleusercontent.com", "some-other-allowed-client-id.apps.googleusercontent.com"})
+	if err == nil {
+		t.Fatal("expected error: user token's aud disagrees with azp, even though azp == sub")
+	}
+	if !errors.Is(err, ErrGoogleFieldDisagreement) {
+		t.Errorf("error = %v, want ErrGoogleFieldDisagreement", err)
+	}
+}
+
 func TestProductionValidator_IDToken_UnverifiedEmail(t *testing.T) {
 	kp := newGCVTestKeyPair("test-kid-1")
 	endpoints := newTestEndpoints(

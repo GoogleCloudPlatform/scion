@@ -277,24 +277,43 @@ func (v *googleCredentialValidator) ValidateIDToken(ctx context.Context, token s
 
 	expiry := claims.Expiry.Time()
 
-	// Extract audience — use azp if present (authoritative issued-client),
-	// otherwise the single audience element. Reject multi-valued aud without azp.
+	// Extract audience. Service-account and user ID tokens disagree on what
+	// azp means, so they get different rules (design §4.2(ii)):
+	//
+	//   - User tokens (unchanged): azp, when present, is the authoritative
+	//     issued-to client, and aud must not disagree with it.
+	//   - SA ID tokens (metadata server, iamcredentials.generateIdToken)
+	//     carry azp = sub = the SA's own numeric unique ID, and
+	//     aud = the caller-chosen audience. Applying the user rule here would
+	//     reject every SA ID token, since azp is the SA's identity, not an
+	//     audience. Audience trust is already established above by
+	//     isAllowedAudience (aud contains an allowed client ID); azp, when
+	//     present, must instead equal sub — the SA-minted shape — and
+	//     anything else is a field disagreement.
 	var audience string
-	if claims.AZP != "" {
-		audience = claims.AZP
-		// If aud is also present and differs from azp, reject (disagreement).
-		if len(claims.Audience) > 0 {
-			for _, aud := range claims.Audience {
-				if string(aud) != claims.AZP {
-					return nil, fmt.Errorf("%w: aud %q differs from azp %q",
-						ErrGoogleFieldDisagreement, aud, claims.AZP)
+	if isServiceAccount {
+		if claims.AZP != "" && claims.AZP != claims.Subject {
+			return nil, fmt.Errorf("%w: SA azp %q differs from sub %q",
+				ErrGoogleFieldDisagreement, claims.AZP, claims.Subject)
+		}
+		audience = matchedAudience(claims.Audience, allowedClientIDs)
+	} else {
+		if claims.AZP != "" {
+			audience = claims.AZP
+			// If aud is also present and differs from azp, reject (disagreement).
+			if len(claims.Audience) > 0 {
+				for _, aud := range claims.Audience {
+					if string(aud) != claims.AZP {
+						return nil, fmt.Errorf("%w: aud %q differs from azp %q",
+							ErrGoogleFieldDisagreement, aud, claims.AZP)
+					}
 				}
 			}
+		} else if len(claims.Audience) == 1 {
+			audience = string(claims.Audience[0])
+		} else if len(claims.Audience) > 1 {
+			return nil, fmt.Errorf("%w: multi-valued aud without azp", ErrGoogleInvalidCredential)
 		}
-	} else if len(claims.Audience) == 1 {
-		audience = string(claims.Audience[0])
-	} else if len(claims.Audience) > 1 {
-		return nil, fmt.Errorf("%w: multi-valued aud without azp", ErrGoogleInvalidCredential)
 	}
 
 	return &ValidatedGoogleIdentity{
@@ -739,6 +758,20 @@ func isAllowedAudience(audiences jwt.Audience, allowed []string) bool {
 		}
 	}
 	return false
+}
+
+// matchedAudience returns the first entry of aud that appears in allowed.
+// Callers must have already confirmed a match exists (isAllowedAudience);
+// this only recovers which one, for SA ID tokens where azp is not the
+// audience (design §4.2(ii)). Returns "" if, contrary to that precondition,
+// no entry matches — callers must not treat that as a valid audience.
+func matchedAudience(aud jwt.Audience, allowed []string) string {
+	for _, a := range aud {
+		if containsString(allowed, string(a)) {
+			return string(a)
+		}
+	}
+	return ""
 }
 
 // containsString checks if a string slice contains the target.

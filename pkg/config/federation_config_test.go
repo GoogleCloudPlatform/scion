@@ -319,6 +319,75 @@ func TestFederationConfig_Validate(t *testing.T) {
 			},
 			wantErrs: 0,
 		},
+		// --- allowed_gcp_projects (design §4.1 r7): a distinct field from
+		// allowed_projects above, admitting Google service-account
+		// principals by GCP project. K1.
+		{
+			name: "allowed_gcp_projects on a non-Google hub issuer produces an error",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{
+						IssuerURL:          "https://hub.example.com",
+						IssuerType:         "hub",
+						AllowedGCPProjects: []string{"my-gcp-project"},
+					},
+				},
+			},
+			wantErrs:  1,
+			wantSubst: []string{"allowed_gcp_projects is only applicable to the Google issuer"},
+		},
+		{
+			name: "allowed_gcp_projects on a non-Google user issuer produces an error",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{
+						IssuerURL:          "https://firebase.example.com",
+						IssuerType:         "user",
+						JWKSURL:            "https://firebase.example.com/jwks",
+						AllowedGCPProjects: []string{"my-gcp-project"},
+					},
+				},
+			},
+			wantErrs:  1,
+			wantSubst: []string{"allowed_gcp_projects is only applicable to the Google issuer"},
+		},
+		{
+			// Note: the bare "accounts.google.com" form (no scheme) is a
+			// valid iss claim value inside a token, but not a valid
+			// issuer_url config value — Rule 2 requires a scheme. Only the
+			// https form is a realistic config shape here.
+			name: "allowed_gcp_projects on the Google issuer (https form) is valid",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{
+						IssuerURL:          "https://accounts.google.com",
+						IssuerType:         "user",
+						ExpectedAudience:   "client-id.apps.googleusercontent.com",
+						AllowedGCPProjects: []string{"my-gcp-project"},
+					},
+				},
+			},
+			wantErrs: 0,
+		},
+		{
+			name: "allowed_projects (the OLD field) on the Google issuer still errors, and now names allowed_gcp_projects",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{
+						IssuerURL:        "https://accounts.google.com",
+						IssuerType:       "user",
+						ExpectedAudience: "client-id.apps.googleusercontent.com",
+						AllowedProjects:  []string{"my-gcp-project"}, // wrong field for a Google issuer
+					},
+				},
+			},
+			wantErrs:  1,
+			wantSubst: []string{"allowed_projects is not applicable", "use allowed_gcp_projects"},
+		},
 	}
 
 	for _, tt := range tests {

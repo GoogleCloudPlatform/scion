@@ -531,6 +531,83 @@ func TestGEExchange_ServiceAccount(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// S7 — the exchange endpoint still rejects SA credentials through the REAL
+// validator, using the real SA claim/response shape (azp == sub for ID
+// tokens; a real service-account email for access tokens), not the
+// hand-built fakeGoogleValidator identity TestGEExchange_ServiceAccount
+// above uses. Phase 1's F1 finding flagged that a fake built directly with
+// IsServiceAccount: true never exercises the real classification+validation
+// path this design phase changed (§4.2(ii)); these do.
+// ---------------------------------------------------------------------------
+
+func TestGEExchange_RealValidator_ServiceAccountIDToken_Rejected_ExactBytes(t *testing.T) {
+	kp := newGCVTestKeyPair("test-kid-1")
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(gcvJWKSJSON(kp))
+		}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+	)
+	defer endpoints.close()
+
+	validator := newTestValidator(endpoints)
+	userStore := newFakeUserStore()
+	extStore := newMemExtIDStore()
+	svc := newTestExchangeServiceWithExtStore(validator, userStore, extStore)
+	server := &Server{geExchangeService: svc}
+
+	// Real SA ID-token shape: azp == sub (numeric SA unique ID), which now
+	// validates under §4.2(ii) — proving the exchange's own Step 1.5 rejects
+	// it, not a validator error.
+	claims := serviceAccountIDTokenClaims("worker@my-project.iam.gserviceaccount.com")
+	body := fmt.Sprintf(`{"credential":%q,"credentialType":"id_token"}`, signIDToken(kp, claims))
+	w := httptest.NewRecorder()
+	server.handleGEGoogleExchange(w, exchangeRequest(body))
+
+	wantBody := []byte(`{"error":{"code":"forbidden","message":"service account credentials not accepted for user exchange"}}` + "\n")
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403: body=%s", w.Code, w.Body.String())
+	}
+	if !bytes.Equal(w.Body.Bytes(), wantBody) {
+		t.Errorf("body = %s, want %s", w.Body.Bytes(), wantBody)
+	}
+	if len(userStore.users) != 0 {
+		t.Errorf("expected no users created, got %d", len(userStore.users))
+	}
+	if _, err := extStore.GetExternalIdentity(context.Background(), "google", googleCanonicalIssuer, saNumericSub); err == nil {
+		t.Error("expected no external identity binding to be created")
+	}
+}
+
+func TestGEExchange_RealValidator_ServiceAccountAccessToken_Rejected_ExactBytes(t *testing.T) {
+	tokenInfo, userInfo := validAccessTokenEndpoints("test-client-id.apps.googleusercontent.com", "sa-sub-access-1", "worker@my-project.iam.gserviceaccount.com", true)
+	endpoints := newTestEndpoints(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}), tokenInfo, userInfo)
+	defer endpoints.close()
+
+	validator := newTestValidator(endpoints)
+	userStore := newFakeUserStore()
+	svc := newTestExchangeService(validator, userStore)
+	server := &Server{geExchangeService: svc}
+
+	body := `{"credential":"opaque-sa-access-token","credentialType":"access_token"}`
+	w := httptest.NewRecorder()
+	server.handleGEGoogleExchange(w, exchangeRequest(body))
+
+	wantBody := []byte(`{"error":{"code":"forbidden","message":"service account credentials not accepted for user exchange"}}` + "\n")
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403: body=%s", w.Code, w.Body.String())
+	}
+	if !bytes.Equal(w.Body.Bytes(), wantBody) {
+		t.Errorf("body = %s, want %s", w.Body.Bytes(), wantBody)
+	}
+	if len(userStore.users) != 0 {
+		t.Errorf("expected no users created, got %d", len(userStore.users))
+	}
+}
+
 // TestGEExchange_AdminEmails_ProvisionsAdminRole proves the exchange's role
 // delta (design §4.3: roleFor replaces the hard-coded "member") through the
 // GoogleIdentityResolver, the same way the exchange is actually wired in
