@@ -291,10 +291,10 @@ server:
         # Optional: restrict USER principals to these email domains (exact,
         # case-insensitive, no wildcards, no subdomain matching). Each entry
         # must be a bare domain: no "@" or "*" (this is not the allowed_emails
-        # pattern syntax), no whitespace, and no leading or trailing dot —
-        # config validation rejects any entry that could never match. Omit to
-        # accept any verified Google account that passes the Hub sign-in
-        # policy below.
+        # pattern syntax), no "/" or ":" (not a URL), no whitespace, no
+        # leading or trailing dot, and no ".." — config validation rejects
+        # any entry that could never match. Omit to accept any verified
+        # Google account that passes the Hub sign-in policy below.
         allowed_domains: ["example.com"]
         # Optional: admit SERVICE-ACCOUNT principals whose GCP project ID
         # (parsed from the service account's email) is listed (exact,
