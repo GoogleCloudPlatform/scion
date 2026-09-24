@@ -180,10 +180,9 @@ func (k externalBearerKind) metricLabel() ExternalBearerKind {
 // — is also the single source of truth for the "outcome" label (design
 // §4.7): duplicating that switch's classification a second time, here, would
 // risk the metric and the HTTP response falling out of sync. Both labels
-// start unknown and are only ever set forward (never reset), matching the
-// lead's ruling that a rejection before classification, or before the
-// validated identity's IsServiceAccount is known, records unknown rather
-// than guessing.
+// start unknown and are only ever set forward (never reset): a rejection
+// before classification succeeds, or before the validated identity's
+// IsServiceAccount is known, records unknown rather than guessing.
 type externalBearerAttempt struct {
 	kind      ExternalBearerKind
 	principal ExternalBearerPrincipal

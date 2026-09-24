@@ -283,11 +283,6 @@ func (c *cachingGoogleCredentialValidator) evictExpiredLocked() {
 // configured with a longer or absent timeout.
 const upstreamCallTimeout = 10 * time.Second
 
-// validate is the shared cache/singleflight wrapper around a single upstream
-// call, used by both ValidateIDToken and ValidateAccessToken. upstream is
-// called with a context that is independent of any specific caller's ctx
-// (see the WithoutCancel comment below), even though it was built from the
-// ctx of whichever caller happens to become the singleflight leader.
 // googleCredValidateResult is validate's singleflight.Do return type: the
 // completed entry, plus whether producing it actually required an upstream
 // call. Every waiter on a given key — the leader that ran the callback and
@@ -300,6 +295,11 @@ type googleCredValidateResult struct {
 	viaUpstream bool
 }
 
+// validate is the shared cache/singleflight wrapper around a single upstream
+// call, used by both ValidateIDToken and ValidateAccessToken. upstream is
+// called with a context that is independent of any specific caller's ctx
+// (see the WithoutCancel comment below), even though it was built from the
+// ctx of whichever caller happens to become the singleflight leader.
 func (c *cachingGoogleCredentialValidator) validate(
 	ctx context.Context, token string, allowedClientIDs []string,
 	upstream func(context.Context) (*ValidatedGoogleIdentity, error),

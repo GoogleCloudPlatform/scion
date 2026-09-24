@@ -24,23 +24,35 @@ import (
 
 // OTelExternalBearerMetrics implements ExternalBearerMetricsRecorder,
 // GoogleValidatorCacheMetricsRecorder and GEExchangeMetricsRecorder using
-// OTel instruments for Cloud Monitoring / Prometheus export, following the
-// same registration convention as OTelMetricsRecorder and
-// OTelGCPTokenMetrics: one Int64Counter per metric, registered once under
-// the shared instrumentationScope, with the label set passed as attributes
-// on each Add call rather than as separate counters. One recorder backs all
-// three counters because they are wired together (server.go) and retired
-// together (design §5's "Later" section, once ge_exchange's soak completes).
+// OTel instruments exported to Cloud Monitoring, following the same
+// registration convention as OTelMetricsRecorder and OTelGCPTokenMetrics:
+// one Int64Counter per metric, registered once under the shared
+// instrumentationScope, with the label set passed as attributes on each Add
+// call rather than as separate counters. One recorder backs all three
+// counters because they are wired together (server.go) and retired together
+// (design §5's "Later" section, once ge_exchange's soak completes).
 //
-// Instrument names use dot/underscore segments so that OTel's Prometheus
-// bridge (which lower-cases and joins on "_", then appends "_total" to a
-// monotonic sum) produces exactly the names design §4.7 specifies:
-// scion_hub_external_bearer_total, scion_hub_google_validator_cache_total,
-// and scion_hub_ge_exchange_requests_total.
+// Export only happens through pkg/observability/hubmetrics (mexporter) to
+// GCP Cloud Monitoring, and only when cfg.Hub.GCPProjectID is set
+// (cmd/server_foreground.go); there is no Prometheus exporter anywhere in
+// this binary. The instrument names below (scion.hub.external_bearer,
+// scion.hub.google_validator_cache, scion.hub.ge_exchange.requests) become,
+// in Cloud Monitoring, the metric types workload.googleapis.com/scion.hub.
+// external_bearer, …/scion.hub.google_validator_cache and
+// …/scion.hub.ge_exchange.requests. Every Hub also serves these three
+// counters, aggregated across labels, in the in-process /metrics JSON
+// (embedded snap; see ExternalBearerSnapshotMetrics), which exists
+// regardless of GCP export.
 type OTelExternalBearerMetrics struct {
 	externalBearerTotal metric.Int64Counter
 	validatorCacheTotal metric.Int64Counter
 	geExchangeTotal     metric.Int64Counter
+
+	// snap dual-writes every Record* call into the same in-process snapshot
+	// Server.New wires as the default recorder, so /metrics keeps counting
+	// across the switch from the default recorder to this OTel-backed one
+	// (see server.go's Set*Metrics methods).
+	snap *ExternalBearerSnapshotMetrics
 }
 
 var (
@@ -50,10 +62,13 @@ var (
 )
 
 // NewOTelExternalBearerMetrics creates an OTel-backed recorder for all three
-// design §4.7 counters.
-func NewOTelExternalBearerMetrics(mp metric.MeterProvider) (*OTelExternalBearerMetrics, error) {
+// design §4.7 counters. snap receives a dual-write of every Record* call;
+// callers should pass the same instance already wired as Server's default
+// recorder (Server.ExternalBearerSnapshotMetrics), so /metrics keeps
+// counting the same totals before and after this recorder is wired in.
+func NewOTelExternalBearerMetrics(mp metric.MeterProvider, snap *ExternalBearerSnapshotMetrics) (*OTelExternalBearerMetrics, error) {
 	m := mp.Meter(instrumentationScope)
-	r := &OTelExternalBearerMetrics{}
+	r := &OTelExternalBearerMetrics{snap: snap}
 
 	var err error
 	if r.externalBearerTotal, err = m.Int64Counter("scion.hub.external_bearer",
@@ -82,6 +97,9 @@ func (r *OTelExternalBearerMetrics) RecordExternalBearer(kind ExternalBearerKind
 		attribute.String("principal", string(principal)),
 		attribute.String("outcome", string(outcome)),
 	))
+	if r.snap != nil {
+		r.snap.RecordExternalBearer(kind, principal, outcome)
+	}
 }
 
 // RecordGoogleValidatorCache implements GoogleValidatorCacheMetricsRecorder.
@@ -89,6 +107,9 @@ func (r *OTelExternalBearerMetrics) RecordGoogleValidatorCache(result GoogleVali
 	r.validatorCacheTotal.Add(context.Background(), 1, metric.WithAttributes(
 		attribute.String("result", string(result)),
 	))
+	if r.snap != nil {
+		r.snap.RecordGoogleValidatorCache(result)
+	}
 }
 
 // RecordGEExchangeRequest implements GEExchangeMetricsRecorder.
@@ -96,4 +117,7 @@ func (r *OTelExternalBearerMetrics) RecordGEExchangeRequest(outcome GEExchangeOu
 	r.geExchangeTotal.Add(context.Background(), 1, metric.WithAttributes(
 		attribute.String("outcome", string(outcome)),
 	))
+	if r.snap != nil {
+		r.snap.RecordGEExchangeRequest(outcome)
+	}
 }
