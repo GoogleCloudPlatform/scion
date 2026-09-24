@@ -4689,10 +4689,10 @@ func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {
 				},
 				{
 					// AllowedGCPProjects only does anything on an active Google
-					// user issuer (P3 fix round 1, O2 amendment): issuer_type
-					// "user" and a non-empty ExpectedAudience, unlike the
-					// service_account entry above, which must not set it (that
-					// combination is a config validation error).
+					// user issuer: issuer_type "user" and a non-empty
+					// ExpectedAudience, unlike the service_account entry
+					// above, which must not set it (that combination is a
+					// config validation error).
 					IssuerURL:          "https://accounts.google.com/",
 					ExpectedAudience:   "client-id.apps.googleusercontent.com",
 					IssuerType:         "user",

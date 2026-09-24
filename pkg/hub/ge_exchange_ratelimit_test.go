@@ -55,12 +55,9 @@ func (v *countingGoogleValidator) totalCalls() int64 {
 // newRejectingCountingValidator returns a *countingGoogleValidator whose zero
 // value would otherwise be a fakeGoogleValidator that returns (nil, nil) — if
 // a mutation ever lets a "must not reach the validator" test actually reach
-// it, a nil identity dereference panics the whole test binary (P1 r4
-// Optional 1's problem, and P2 r2 Optional 3's, for this specific type)
-// instead of failing the test's own counting.totalCalls() assertion. Giving
-// both methods a default error means that mutation fails loudly and locally.
-// Extracted (P2 review r3, P3 carry-in Nit 3) to replace 7 identical pasted
-// blocks across auth_external_bearer_test.go.
+// it, a nil identity dereference panics the whole test binary instead of
+// failing the test's own counting.totalCalls() assertion. Giving both
+// methods a default error means that mutation fails loudly and locally.
 func newRejectingCountingValidator() *countingGoogleValidator {
 	return &countingGoogleValidator{fakeGoogleValidator: fakeGoogleValidator{
 		idTokenErr:     ErrGoogleInvalidCredential,

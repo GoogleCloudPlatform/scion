@@ -87,11 +87,11 @@ func newGoogleFederationAuthWithIssuerType(t *testing.T, expectedAudience, issue
 
 // newGoogleTrustFederationAuthWithSA builds a FederationAuthenticator, via
 // the real validated NewFederationAuthenticator, whose Google issuer entry
-// additionally carries AllowedGCPProjects — the distinct field design §4.1 r7
-// introduced for service-account project admission (not AllowedProjects,
-// which is the unrelated, longer-standing hub-federation Scion-project
-// allowlist). Used for testing the SA branch of authenticateExternalBearer
-// (design §4.1, §4.4, §4.5).
+// additionally carries AllowedGCPProjects — the distinct field for
+// service-account project admission (not AllowedProjects, which is the
+// unrelated, longer-standing hub-federation Scion-project allowlist). Used
+// for testing the SA branch of authenticateExternalBearer (design §4.1,
+// §4.4, §4.5).
 func newGoogleTrustFederationAuthWithSA(t *testing.T, expectedAudience string, allowedGCPProjects []string) *FederationAuthenticator {
 	t.Helper()
 	fedCfg := config.FederationConfig{

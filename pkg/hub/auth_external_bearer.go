@@ -188,9 +188,9 @@ func googleTrust(cfg AuthConfig) (config.TrustedIssuerConfig, bool) {
 // (trust.AllowedGCPProjects — a distinct field from the unrelated, existing
 // AllowedProjects/allowed_projects, hub-federation project scoping by JWT
 // project_id claim, federation_auth.go's IssuerTypeHub case; the two must
-// not be confused, design §4.1 r7). Neither list is lower-cased at config
-// load, so this case-insensitive comparison is what makes a mixed-case
-// operator entry match googleSAProject's (always lower-case) parsed project.
+// not be confused). Neither list is rewritten at config load, so this
+// case-insensitive comparison is what makes a mixed-case operator entry
+// match googleSAProject's (always lower-case) parsed project.
 func containsFold(list []string, target string) bool {
 	for _, s := range list {
 		if strings.EqualFold(s, target) {

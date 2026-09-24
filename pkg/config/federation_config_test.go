@@ -319,7 +319,7 @@ func TestFederationConfig_Validate(t *testing.T) {
 			},
 			wantErrs: 0,
 		},
-		// --- allowed_gcp_projects (design §4.1 r7): a distinct field from
+		// --- allowed_gcp_projects: a distinct field from
 		// allowed_projects above, admitting Google service-account
 		// principals by GCP project. K1.
 		{
@@ -373,18 +373,41 @@ func TestFederationConfig_Validate(t *testing.T) {
 			wantErrs: 0,
 		},
 		{
-			// P3 fix round 1, O2 amendment: allowed_gcp_projects on the
-			// Google issuer with the WRONG issuer_type is a hard error, not
-			// silently ignored — googleTrust never reaches this issuer, so
-			// nothing would enforce the list.
+			// allowed_gcp_projects on the Google issuer with the WRONG
+			// issuer_type is a hard error, not silently ignored —
+			// googleTrust never reaches this issuer, so nothing would
+			// enforce the list.
 			name: "allowed_gcp_projects on the Google issuer with issuer_type service_account errors",
 			config: FederationConfig{
 				Enabled: true,
 				TrustedIssuers: []TrustedIssuerConfig{
 					{
+						IssuerURL:  "https://accounts.google.com",
+						IssuerType: "service_account",
+						JWKSURL:    "https://www.googleapis.com/oauth2/v3/certs",
+						// Non-empty on purpose: isolates the issuer_type term
+						// of isActiveGoogleUserIssuer from the
+						// expected_audience term below, so this case can only
+						// trigger on issuer_type (K1c).
+						ExpectedAudience:   "client-id.apps.googleusercontent.com",
+						AllowedGCPProjects: []string{"my-gcp-project"},
+					},
+				},
+			},
+			wantErrs:  1,
+			wantSubst: []string{"allowed_gcp_projects requires issuer_type", "expected_audience"},
+		},
+		{
+			// Same issuer_type term, a different wrong value: the default
+			// hub type. Independent of the service_account case above.
+			name: "allowed_gcp_projects on the Google issuer with issuer_type hub errors",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{
 						IssuerURL:          "https://accounts.google.com",
-						IssuerType:         "service_account",
-						JWKSURL:            "https://www.googleapis.com/oauth2/v3/certs",
+						IssuerType:         "hub",
+						ExpectedAudience:   "client-id.apps.googleusercontent.com",
 						AllowedGCPProjects: []string{"my-gcp-project"},
 					},
 				},

@@ -542,14 +542,13 @@ func TestGEExchange_ServiceAccount(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestGEExchange_RealValidator_ServiceAccountIDToken_Rejected_ExactBytes covers
-// every SA ID-token azp/sub shape the review's differential test found —
-// P3 fix round 1, Required 1. Before the fix, "azp == aud, != sub" and
-// "azp = other" both drifted to 401 {"code":"invalid_credential","message":
-// "credential metadata inconsistent"} because the validator's SA azp/sub
-// check returned a bare ErrGoogleFieldDisagreement, which never reaches the
-// exchange's Step 1.5 SA rejection (validation itself failed first) and
-// instead hit the disagreement case in the switch above. The fix wraps that
-// return with ErrGoogleServiceAccount too, and the switch checks it first.
+// every SA ID-token azp/sub shape: azp == sub, azp == "", azp == aud but !=
+// sub, and azp set to an unrelated value. Without the ErrGoogleServiceAccount
+// wrap on the validator's SA azp/sub disagreement (google_credential_validator.go),
+// the last two shapes would instead hit the plain ErrGoogleFieldDisagreement
+// case in the switch below and return 401 "credential metadata inconsistent"
+// — validation itself fails for those shapes, so the exchange's Step 1.5 SA
+// rejection is never reached on its own.
 //
 // Expected bytes derived from upstream-main (GoogleCloudPlatform/scion,
 // bdf5b6d13): its ValidateIDToken rejects every SA email with
@@ -573,35 +572,30 @@ func TestGEExchange_RealValidator_ServiceAccountIDToken_Rejected_ExactBytes(t *t
 	wantBody := []byte(`{"error":{"code":"forbidden","message":"service account credentials not accepted for user exchange"}}` + "\n")
 
 	tests := []struct {
-		name       string
-		mutateAZP  func(claims map[string]interface{})
-		bindingSub string
+		name      string
+		mutateAZP func(claims map[string]interface{})
 	}{
 		{
-			name:       "azp == sub (real metadata-server shape)",
-			mutateAZP:  func(claims map[string]interface{}) {}, // serviceAccountIDTokenClaims default
-			bindingSub: saNumericSub,
+			name:      "azp == sub (real metadata-server shape)",
+			mutateAZP: func(claims map[string]interface{}) {}, // serviceAccountIDTokenClaims default
 		},
 		{
 			name: "azp == \"\"",
 			mutateAZP: func(claims map[string]interface{}) {
 				delete(claims, "azp")
 			},
-			bindingSub: saNumericSub,
 		},
 		{
 			name: "azp == aud, != sub",
 			mutateAZP: func(claims map[string]interface{}) {
 				claims["azp"] = externalBearerTestAudience // == aud (also externalBearerTestAudience), != sub
 			},
-			bindingSub: saNumericSub,
 		},
 		{
 			name: "azp = other value",
 			mutateAZP: func(claims map[string]interface{}) {
 				claims["azp"] = "some-other-azp-value"
 			},
-			bindingSub: saNumericSub,
 		},
 	}
 
@@ -627,7 +621,7 @@ func TestGEExchange_RealValidator_ServiceAccountIDToken_Rejected_ExactBytes(t *t
 			if len(userStore.users) != 0 {
 				t.Errorf("expected no users created, got %d", len(userStore.users))
 			}
-			if _, err := extStore.GetExternalIdentity(context.Background(), "google", googleCanonicalIssuer, tt.bindingSub); err == nil {
+			if _, err := extStore.GetExternalIdentity(context.Background(), "google", googleCanonicalIssuer, saNumericSub); err == nil {
 				t.Error("expected no external identity binding to be created")
 			}
 		})

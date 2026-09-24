@@ -111,10 +111,9 @@ func isGoogleIssuerURL(issuerURL string) bool {
 // the exact shape the external-bearer path's googleTrust gate requires
 // (pkg/hub/auth_external_bearer.go) for the path to be reachable at all.
 // Any Google-issuer-scoped field that only takes effect through that gate
-// (AllowedGCPProjects here; Phase 4's allowed_domains reuses this same
-// predicate) does nothing on any other shape, so Validate rejects setting
-// it there outright (P3 fix round 1, O2 amendment) instead of silently
-// accepting a config no request path will ever enforce.
+// (AllowedGCPProjects here; allowed_domains reuses this same predicate) does
+// nothing on any other shape, so Validate rejects setting it there outright
+// instead of silently accepting a config no request path will ever enforce.
 func isActiveGoogleUserIssuer(issuer TrustedIssuerConfig) bool {
 	return isGoogleIssuerURL(issuer.IssuerURL) && issuer.IssuerType == "user" && issuer.ExpectedAudience != ""
 }
@@ -183,7 +182,7 @@ func (c *FederationConfig) Validate() []error {
 		// AllowedGCPProjects below. It stays an error on every non-hub
 		// issuer, including a Google one: a Google issuer wants
 		// allowed_gcp_projects instead, so the message says so when that's
-		// the likely mistake (design §4.1 r7).
+		// the likely mistake.
 		if isNonHub && len(issuer.AllowedProjects) > 0 {
 			msg := fmt.Sprintf("trusted_issuers[%d]: allowed_projects is not applicable for issuer_type %q", i, issuer.IssuerType)
 			if isGoogleIssuerURL(issuer.IssuerURL) {
@@ -203,9 +202,8 @@ func (c *FederationConfig) Validate() []error {
 		// scoped service-account admission when nothing enforces it — a
 		// Google issuer with the wrong issuer_type or no expected_audience
 		// is exactly as unenforced as a non-Google issuer. This is a hard
-		// error, not a startup warning, per the lead's amendment: both
-		// fields are new, so no existing config can break (P3 fix round 1,
-		// O2 amendment).
+		// error rather than a startup warning: both fields are new, so no
+		// existing config can break.
 		if len(issuer.AllowedGCPProjects) > 0 && !isActiveGoogleUserIssuer(issuer) {
 			if !isGoogleIssuerURL(issuer.IssuerURL) {
 				errs = append(errs, fmt.Errorf("trusted_issuers[%d]: allowed_gcp_projects is only applicable to the Google issuer (%q)", i, issuer.IssuerURL))

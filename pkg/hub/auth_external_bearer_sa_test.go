@@ -34,8 +34,8 @@ import (
 //
 // These tests use newExternalBearerConfigWithSA, which builds a real,
 // validated FederationAuthenticator with AllowedGCPProjects set on the
-// Google trust entry (design §4.1 r7's distinct field for SA project
-// admission — not the unrelated AllowedProjects/allowed_projects).
+// Google trust entry (the distinct field for SA project admission — not the
+// unrelated AllowedProjects/allowed_projects).
 // ---------------------------------------------------------------------------
 
 // neverAuthorized always denies. Used to prove that a service account
@@ -117,10 +117,9 @@ func TestExternalBearer_ServiceAccountIDToken_ProjectListed_Authenticates(t *tes
 
 // TestExternalBearer_ServiceAccountIDToken_MixedCaseAllowedProject_Authenticates
 // proves that a mixed-case operator-configured allowed_gcp_projects entry
-// still matches a (lower-case) parsed SA project, with NO load-time
-// normalisation involved (P3 fix round 1, Optional 3: the config layer does
-// not lower-case allowed_gcp_projects; containsFold's case-insensitive
-// comparison is the only thing that makes this match).
+// still matches a (lower-case) parsed SA project. The list is not rewritten
+// at config load; containsFold's case-insensitive comparison is what makes
+// this match.
 func TestExternalBearer_ServiceAccountIDToken_MixedCaseAllowedProject_Authenticates(t *testing.T) {
 	kp := newGCVTestKeyPair("test-kid-1")
 	endpoints := newSAJWKSEndpoints(kp)
@@ -342,5 +341,43 @@ func TestExternalBearer_ServiceAccountIDToken_Suspended_Forbidden(t *testing.T) 
 	wantBody := wantErrorBody(t, "user_suspended", "access denied: user account is suspended")
 	if !bytes.Equal(w2.Body.Bytes(), wantBody) {
 		t.Errorf("body = %s, want %s", w2.Body.Bytes(), wantBody)
+	}
+}
+
+// TestExternalBearer_ServiceAccountIDToken_SuspendedExistingUserByEmail_Forbidden
+// covers Resolve's OTHER suspension check: an existing user found by email
+// (no binding yet), rather than the bound-user path
+// TestExternalBearer_ServiceAccountIDToken_Suspended_Forbidden above already
+// covers. An admin can pre-create or import a suspended user at the SA's
+// email before the SA ever presents a token — isGoogleServiceAccount counts
+// as authoritative for auto-linking, so this path is reachable for SAs.
+// PreAuthorized must not exempt this check either.
+func TestExternalBearer_ServiceAccountIDToken_SuspendedExistingUserByEmail_Forbidden(t *testing.T) {
+	kp := newGCVTestKeyPair("test-kid-1")
+	endpoints := newSAJWKSEndpoints(kp)
+	defer endpoints.close()
+
+	userStore := newFakeUserStore()
+	extStore := newMemExtIDStore()
+	addUser(userStore, "existing-suspended-sa-user", "worker@my-a2a-project.iam.gserviceaccount.com", "member", store.UserStatusSuspended)
+	resolver := NewGoogleIdentityResolver(userStore, extStore, neverAuthorized, nil, slog.Default())
+	cfg := newExternalBearerConfigWithSA(t, newTestValidator(endpoints), resolver, []string{"my-a2a-project"})
+
+	claims := serviceAccountIDTokenClaims("worker@my-a2a-project.iam.gserviceaccount.com")
+	token := signIDToken(kp, claims)
+
+	w, result := doExternalBearerRequest(cfg, token)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403: body=%s", w.Code, w.Body.String())
+	}
+	if result.reached {
+		t.Fatal("handler must not be reached for a suspended existing user")
+	}
+	wantBody := wantErrorBody(t, "user_suspended", "access denied: user account is suspended")
+	if !bytes.Equal(w.Body.Bytes(), wantBody) {
+		t.Errorf("body = %s, want %s", w.Body.Bytes(), wantBody)
+	}
+	if _, err := extStore.GetExternalIdentity(context.Background(), "google", googleCanonicalIssuer, saNumericSub); err == nil {
+		t.Error("expected no external identity binding to be created for a suspended user")
 	}
 }
