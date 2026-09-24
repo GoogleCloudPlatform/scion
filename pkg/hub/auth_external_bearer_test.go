@@ -1682,6 +1682,19 @@ func TestNoPackageLevelMutableState(t *testing.T) {
 		"google_credential_cache.go",
 		"external_bearer_ratelimit.go",
 		"google_sa.go",
+		// external_bearer_metrics.go declares only consts, type
+		// definitions and interfaces (no package-level var at all), unlike
+		// its OTel-backed implementation otel_external_bearer_metrics.go,
+		// which — like the pre-existing otel_metrics.go and
+		// otel_gcp_metrics.go — uses package-level
+		// `var _ Interface = (*Impl)(nil)` compile-time assertions. Those
+		// are not mutable state (never written after compilation), but
+		// they are not errors.New(...) calls either, so this AST check's
+		// simple heuristic would flag them; the two pre-existing
+		// otel_*.go files are excluded from this list for the same
+		// reason, and this design's otel_external_bearer_metrics.go
+		// follows that same precedent.
+		"external_bearer_metrics.go",
 	}
 	fset := token.NewFileSet()
 	for _, file := range files {

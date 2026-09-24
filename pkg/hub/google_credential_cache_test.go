@@ -593,3 +593,144 @@ func TestGoogleCredentialCache_LeaderCancellationDoesNotPoisonFollowers(t *testi
 		t.Error("the result was not cached, or was cached negatively: the leader's cancellation must not cause a valid result to go uncached")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// O1 — scion_hub_google_validator_cache_total{result=hit|miss|negative_hit},
+// design §4.7. Each result is proven through the decorator's public
+// ValidateIDToken/ValidateAccessToken methods, not by calling
+// RecordGoogleValidatorCache directly.
+// ---------------------------------------------------------------------------
+
+// fakeCacheMetrics records every RecordGoogleValidatorCache call. Safe for
+// concurrent use (needed for the singleflight/concurrent scenarios above).
+type fakeCacheMetrics struct {
+	mu      sync.Mutex
+	results []GoogleValidatorCacheResult
+}
+
+func (f *fakeCacheMetrics) RecordGoogleValidatorCache(result GoogleValidatorCacheResult) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.results = append(f.results, result)
+}
+
+func (f *fakeCacheMetrics) all() []GoogleValidatorCacheResult {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]GoogleValidatorCacheResult, len(f.results))
+	copy(out, f.results)
+	return out
+}
+
+func (f *fakeCacheMetrics) count(result GoogleValidatorCacheResult) int {
+	n := 0
+	for _, r := range f.all() {
+		if r == result {
+			n++
+		}
+	}
+	return n
+}
+
+func TestGoogleCredentialCache_MetricsRecordsMissThenHit(t *testing.T) {
+	base := &countingBaseValidator{
+		idTokenResult: &ValidatedGoogleIdentity{
+			Subject: "sub-1", Email: "user@gmail.com", EmailVerified: true,
+			UpstreamExpiry: time.Now().Add(10 * time.Minute),
+		},
+	}
+	fake := &fakeCacheMetrics{}
+	cache := NewCachingGoogleCredentialValidator(base, WithCacheMetrics(fake))
+
+	if _, err := cache.ValidateIDToken(context.Background(), "token", []string{"aud"}); err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	if _, err := cache.ValidateIDToken(context.Background(), "token", []string{"aud"}); err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+
+	if got := fake.all(); len(got) != 2 || got[0] != GoogleValidatorCacheMiss || got[1] != GoogleValidatorCacheHit {
+		t.Fatalf("recorded results = %v, want [miss hit]", got)
+	}
+}
+
+func TestGoogleCredentialCache_MetricsRecordsNegativeHit(t *testing.T) {
+	base := &countingBaseValidator{idTokenErr: ErrGoogleUnverifiedEmail}
+	fake := &fakeCacheMetrics{}
+	cache := NewCachingGoogleCredentialValidator(base, WithCacheMetrics(fake))
+
+	if _, err := cache.ValidateIDToken(context.Background(), "token", []string{"aud"}); err == nil {
+		t.Fatal("expected an error")
+	}
+	if _, err := cache.ValidateIDToken(context.Background(), "token", []string{"aud"}); err == nil {
+		t.Fatal("expected an error")
+	}
+
+	if got := fake.all(); len(got) != 2 || got[0] != GoogleValidatorCacheMiss || got[1] != GoogleValidatorCacheNegativeHit {
+		t.Fatalf("recorded results = %v, want [miss negative_hit]", got)
+	}
+}
+
+// TestGoogleCredentialCache_MetricsUpstreamErrorNeverCountsAsHitOrNegativeHit
+// proves ErrGoogleUpstreamError — never cached, positively or negatively
+// (C4) — is recorded as "miss" on every call, never "negative_hit": a
+// mutation that started treating it as cacheable would move this count.
+func TestGoogleCredentialCache_MetricsUpstreamErrorNeverCountsAsHitOrNegativeHit(t *testing.T) {
+	base := &countingBaseValidator{accessTokenErr: ErrGoogleUpstreamError}
+	fake := &fakeCacheMetrics{}
+	cache := NewCachingGoogleCredentialValidator(base, WithCacheMetrics(fake))
+
+	for i := 0; i < 3; i++ {
+		if _, err := cache.ValidateAccessToken(context.Background(), "token", []string{"aud"}); err == nil {
+			t.Fatalf("call %d: expected an error", i)
+		}
+	}
+	if got := fake.count(GoogleValidatorCacheMiss); got != 3 {
+		t.Errorf("miss count = %d, want 3 (every call retries upstream)", got)
+	}
+	if got := fake.count(GoogleValidatorCacheNegativeHit); got != 0 {
+		t.Errorf("negative_hit count = %d, want 0 (ErrGoogleUpstreamError must never be counted as cached)", got)
+	}
+}
+
+// TestGoogleCredentialCache_MetricsSetMetricsAfterConstruction proves the
+// post-construction SetMetrics path (needed for production wiring, where the
+// OTel exporter is only built after New() returns — see
+// Server.SetGoogleValidatorCacheMetrics) behaves the same as wiring it via
+// WithCacheMetrics at construction.
+func TestGoogleCredentialCache_MetricsSetMetricsAfterConstruction(t *testing.T) {
+	base := &countingBaseValidator{
+		idTokenResult: &ValidatedGoogleIdentity{
+			Subject: "sub-1", Email: "user@gmail.com", EmailVerified: true,
+			UpstreamExpiry: time.Now().Add(10 * time.Minute),
+		},
+	}
+	cache := NewCachingGoogleCredentialValidator(base).(*cachingGoogleCredentialValidator)
+
+	fake := &fakeCacheMetrics{}
+	cache.SetMetrics(fake)
+
+	if _, err := cache.ValidateIDToken(context.Background(), "token", []string{"aud"}); err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	if got := fake.count(GoogleValidatorCacheMiss); got != 1 {
+		t.Errorf("miss count = %d, want 1", got)
+	}
+}
+
+// TestGoogleCredentialCache_MetricsNilRecorder_NoPanic proves the default
+// (no WithCacheMetrics / SetMetrics call) never panics — this is the
+// "metrics disabled" case every other test in this file already exercises
+// implicitly, made explicit here.
+func TestGoogleCredentialCache_MetricsNilRecorder_NoPanic(t *testing.T) {
+	base := &countingBaseValidator{
+		idTokenResult: &ValidatedGoogleIdentity{
+			Subject: "sub-1", Email: "user@gmail.com", EmailVerified: true,
+			UpstreamExpiry: time.Now().Add(10 * time.Minute),
+		},
+	}
+	cache := NewCachingGoogleCredentialValidator(base)
+	if _, err := cache.ValidateIDToken(context.Background(), "token", []string{"aud"}); err != nil {
+		t.Fatalf("call: %v", err)
+	}
+}
