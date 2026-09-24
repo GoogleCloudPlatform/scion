@@ -150,3 +150,68 @@ All Phase 1-3 tests, `TestGEExchange*`, and the targeted bridge-adjacent suite s
   `opsettings/registry.go`'s federation schema). Slot released back to `ap-em` for `ap-p5o-dev`.
 - Docs changes have no automated build/lint gate in this repo's CLAUDE.md; verified instead by reading every
   config key, error code, and status against the source files named above.
+
+## Fix round 1 (review `p4-r1-ap-p4-rev.md`: REQUEST CHANGES at `90a4c2a6b`; 0 Critical, 5 Required, 4 Optional,
+2 Nit, 5 FYI)
+
+Reviewer: `ap-p4-rev`. Fix brief: `briefs/ap-p4-dev-fix-r1.md`, plus two same-day amendments relayed by `ap-em`:
+(1) a lead ruling that R1/FYI1 (the K2 "warning" gap) must be **implemented** this round, not just re-worded,
+with a full spec (design §4.1 amended to r7); (2) a note that if these docs mention the §4.7 metric names or
+the exchange soak, they must use the amended real names/wording — neither applies, since this phase's docs
+mention neither. Rebased onto `origin/scion/auth-passthrough` at `206ae48e2` first (Phase 5's observability
+commits, `a215153f8`..`206ae48e2`, landed in parallel on the same branch); per the brief, reset rather than
+rebased my own commits, since they were already on that history.
+
+| # | Finding | Change | Test(s) | Mutant |
+|---|---|---|---|---|
+| R1 (amended to a full implementation) | `auth.md` claimed a startup warning is logged when a Google `user` issuer has empty `expected_audience`; no such warning existed. Lead ruling: implement it. | Added `warnIfExternalBearerDisabled` in `federation_auth.go`, called once per issuer inside `NewFederationAuthenticator`'s per-issuer loop, checking the issuer's raw (pre-fallback) `ExpectedAudience` — the same value `IssuerConfig`/`googleTrust` gate on. Both call sites that construct a `FederationAuthenticator` (initial load in `server.go`, hot reload in `operational_settings.go`) already funnel through this one function, so no second call site was needed. Restored `auth.md`'s wording to name the warning, per the amendment's exact text. | `TestNewFederationAuthenticator_GoogleUserEmptyAudience_WarnsOnce`, `..._WarnsAgainOnReload` (simulates the reload path with a second construction call), `..._GoogleUserWithAudience_NoWarning`, `TestNewFederationAuthenticator_NonGoogleUserEmptyAudience_NoWarning`, `..._GoogleServiceAccountEmptyAudience_NoWarning`, `TestExternalBearer_DisabledPathRequests_NoAddedWarnings` (drives the real `UnifiedAuthMiddleware` 5 times against the disabled path, confirms the warning count stays at 1). | Dropped the `warnIfExternalBearerDisabled` call → the WarnsOnce/WarnsAgainOnReload tests fail (0 warnings, want 1/2). Moved the check into `googleTrust` instead (a per-request call site) → `TestExternalBearer_DisabledPathRequests_NoAddedWarnings` fails at the construction-time assertion, since the warning no longer fires there. Both reverted after confirming. |
+| R2 | `auth.md` said a revoked Google grant is "refused on the next call" — true for suspension, false for revocation: the Hub's validator cache holds a positive verification for up to 5 minutes (`defaultGoogleCredentialCacheMaxTTL`, confirmed by reading `google_credential_cache.go:56`). | Reworded to state the two cases separately: suspension refused on the next call; a revoked credential stops being accepted once the cache entry expires (at most 5 minutes, never beyond the credential's own expiry). | — (docs wording; no code path to test) | — |
+| R3 | No positive access-token test under `allowed_domains`; a mutant rejecting every access token whenever the list is set passed the whole suite. | Added `TestExternalBearer_AccessToken_ListedDomain_Authenticates` (mixed-case config entry and email, with an `hd` claim so the resolver's authoritative-domain bootstrap admits the non-Gmail address). | Same test. | Reproduced the reviewer's M8 by hand (`kind == externalBearerAccessToken` inside the `allowed_domains` branch unconditionally rejects) → new test fails (401 instead of 200). Reverted after confirming. |
+| R4 | The "non-Google user issuer" K1 cases (both `allowed_domains` and `allowed_gcp_projects`) left `ExpectedAudience` empty, so `isActiveGoogleUserIssuer` was already false through the audience term — the Google-issuer-URL term was untested. | Set `ExpectedAudience: "client-id"` on both cases, isolating the issuer-URL term. | Same two `TestFederationConfig_Validate` cases. | Dropped `isGoogleIssuerURL(...)` from `isActiveGoogleUserIssuer` → both cases fail (no error raised, `errs=[]`). Reverted after confirming. |
+| R5 | The docs commit touching #1847-derived prose (`auth.md`'s external-bearer section) lacked the `Co-authored-by: Bobby Matthews <bobbymatthews@google.com>` trailer. | Added the trailer to this round's docs commit, which touches that same section for R1/R2/O1/O2/O4. | — | — |
+| O1 | The `geGoogle` deprecation note (`a2a-bridge.md`, bridge `README.md`) had a circular rationale ("exchanges ... on every re-exchange") and leaked internal scheduling language ("soak"). | Reworded to the reviewer's suggested text: deprecated and scheduled for removal, continues to work until then; `hubBearer` forwards verbatim with no Hub-issued token to cache, and the Hub re-checks the user (including suspension) on every request. Left the bridge README's `auth_scheme`-overwrite caution/recovery paragraphs untouched (confirmed by diff: only the sentence introducing them changed). | — | — |
+| O2 | `a2a-bridge.md` said the bridge supports "four" schemes but never mentions or links `hubBearer` (a fifth). | Corrected the count to five, with one sentence noting `hubBearer` is documented on the Hub side (linked to `auth.md`'s External Bearer Tokens section and `scion-a2a-bridge.yaml.sample`) rather than adding a full subsection here, per the brief's "keep it brief" instruction. | — | — |
+| O3 | No test loaded `allowed_domains`/`allowed_gcp_projects` from real YAML through the koanf decode path; a `koanf` tag typo on either field would silently drop it (failing open). | Added `TestLoadVersionedSettings_FederationGoogleIssuerFields`: writes a `settings.yaml` with both fields under `server.federation.trusted_issuers`, loads via `LoadVersionedSettings`, asserts both reach `TrustedIssuerConfig`. | Same test. | Misspelled `AllowedDomains`'s `koanf` tag (`allowed_domainz`) → test fails (`nil`, want the two configured domains). Reverted after confirming. |
+| O4 | `allowed_domains` entries were not shape-validated: an email address, the `allowed_emails` wildcard idiom, whitespace, or a leading/trailing dot can never match `domainOf`'s parsed domain, silently locking out every user in the domain the operator meant to allow. | Added Rule 11 to `Validate()`: a new `invalidDomainEntryReason` helper flags each such shape with a per-entry message naming the offending index and value, checked independently of `isActiveGoogleUserIssuer` (a malformed entry is a mistake in every position). Added a format note to `auth.md`'s `allowed_domains` comment. `allowed_gcp_projects` is intentionally untouched, per the brief's scope. | `TestInvalidDomainEntryReason` (11-row table: 3 valid shapes, 8 invalid: empty, `@`, leading wildcard, bare `*`, internal whitespace, leading+trailing whitespace, leading dot, trailing dot), `TestFederationConfig_Validate_InvalidDomainEntryShape` (confirms Rule 11 is wired into `Validate()`, with a mixed valid/invalid list producing exactly the expected 2 errors naming each bad entry). | Each row of the table test independently pins one branch of `invalidDomainEntryReason`'s `switch`; the integration test's exact-count assertion (2 errors from a 3-entry list) would catch a version that flagged the wrong entry or double-counted. |
+| N5 | A test comment claimed `allowed_domains` was "empty here" in a config that sets it to `["example.com"]` three lines later. | Deleted the contradictory parenthetical. | N/A (comment-only). | N/A. |
+| N6 | Commit-subject phase narration in `5d783f2b1`. | **Deferred**, per the brief, to the whole-PR polish sweep. New commits this round have no phase/review-round narration in their subjects or bodies (verified by grep, see Gates). | — | — |
+
+### Verification: `pkg/config` is fully green with `SCION_*` unset
+
+Per the brief's exact instruction and FYI 3's finding that the 21 previously-reported `pkg/config` failures are
+caused by the agent container's `SCION_*` environment (notably `SCION_AUTO_EXPOSE_PORTS=true`), not this
+branch: `env $(env | grep ^SCION_ | cut -d= -f1 | sed 's/^/-u /') go test ./pkg/config/... -race` is clean at
+this round's head, both for the targeted subset and the full-run gate below.
+
+### Gates (fix round 1)
+
+- ✅ `gofmt -l pkg/hub pkg/config` — clean.
+- ✅ `go build -buildvcs=false ./pkg/hub/... ./pkg/config/...` — clean.
+- ✅ `go vet -buildvcs=false ./pkg/hub/... ./pkg/config/...` — clean.
+- ✅ `GOGC=40 golangci-lint run --new-from-rev=a53175c23 --concurrency=1 ./pkg/hub/... ./pkg/config/...` —
+  `0 issues.`
+- ✅ Targeted `-race` (`TestFederationConfig_Validate|TestExternalBearer|TestDomainOf|TestConvertV1|
+  LoadVersioned|TestNewFederationAuthenticator_`) across `pkg/hub` (incl. `authzop`) — all green.
+- ✅ `pkg/config` with `SCION_*` unset, targeted subset — all green (see above).
+- ✅ Bare-issue-number greps (`git log a53175c23..HEAD --format=%B`, `git diff a53175c23..HEAD` `+` lines) at
+  the final commit (`e6dc234cb`): both empty.
+- ✅ Review-narration grep over this round's new commits (`git log 206ae48e2..HEAD`, case-insensitive for
+  "phase N", "review rN", "fix round", "EM/lead decision"): both the commit-message and diff greps print
+  nothing.
+- ✅ Manual mutation-resistance pass on every finding with a killable mutant (R1's two, R3's M8, R4's K1d, O3's
+  K1i) — each introduced by hand, confirmed to fail the relevant test, then reverted; working trees diffed
+  against saved originals afterward to confirm no leftover mutant code.
+- ✅ **Full run**, granted by `ap-em` at head `e6dc234cb`: `go test ./pkg/hub/... ./pkg/config/... -timeout 40m
+  -count=1` with `SCION_*` unset, own `GOTMPDIR` (deleted after the run), 591s runtime. `pkg/hub` — 5 failures,
+  all known baseline (`TestDEF164_AtAgentSlug_DeliversToAgent`, `TestDEF164_AtAgentSlug_DMConversationCreated`,
+  `TestDEF152_AgentToAgentDM_DeliversViaOutbound`, `TestCreateTemplateV2_ScopeIDInjectionBlocked`, and this run
+  the flaky `TestDEF162_AC8_Broker_MentionFires` did fire); `pkg/hub/authzop`, `pkg/hub/auth`,
+  `pkg/hub/githubapp`, `pkg/hub/imagecheck` all green. `pkg/config` (with `SCION_*` unset) — fully green, 0
+  failures, confirming FYI 3's diagnosis that the previously-reported 21 failures are environmental, not
+  branch-related. Slot released back to `ap-em` for `ap-p5o-dev`.
+
+### Deviations / design questions (fix round 1)
+
+None beyond what the two amendments already settled. The K2 warning's exact log fields (`issuer_url` + a
+message naming `issuer_type`/`expected_audience`) and placement (inside `NewFederationAuthenticator`, not a
+new call site) were fully determined by the amendment's spec.
