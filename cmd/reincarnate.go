@@ -62,19 +62,10 @@ model, env keys, branch) without migrating anything.`,
 	},
 	ValidArgsFunction: getAgentNames,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		selfName := os.Getenv("SCION_AGENT_NAME")
-
-		var agentName string
-		if len(args) == 1 {
-			agentName = api.Slugify(args[0])
-		} else {
-			if selfName == "" {
-				return fmt.Errorf("specify an agent name, or run this inside an agent container to migrate yourself")
-			}
-			agentName = api.Slugify(selfName)
+		agentName, isSelf, err := resolveReincarnateTarget(args, os.Getenv("SCION_AGENT_NAME"), reincarnateHandoffFile != "", reincarnateDryRun)
+		if err != nil {
+			return err
 		}
-
-		isSelf := selfName != "" && api.Slugify(selfName) == agentName
 
 		var handoff string
 		if reincarnateHandoffFile != "" {
@@ -83,8 +74,6 @@ model, env keys, branch) without migrating anything.`,
 				return fmt.Errorf("failed to read --handoff-file: %w", err)
 			}
 			handoff = string(data)
-		} else if isSelf && !reincarnateDryRun {
-			return fmt.Errorf("self-migration requires --handoff-file: write a handoff describing your work in progress, canonical files, and next action for the new generation, then pass it with --handoff-file")
 		}
 
 		hubCtx, err := CheckHubAvailabilityForAgent(projectPath, agentName, true)
@@ -97,6 +86,32 @@ model, env keys, branch) without migrating anything.`,
 
 		return reincarnateAgentViaHub(hubCtx, agentName, handoff, isSelf)
 	},
+}
+
+// resolveReincarnateTarget implements the self/handoff-required rule
+// (design §3.4 Amendment A3.11 / p1a-r1 F3): resolve the target agent name
+// from the positional arg or $SCION_AGENT_NAME, decide whether this is a
+// self-migration, and require a handoff for one — unless this is a dry run,
+// which migrates nothing and so has nothing to hand off. Split out from RunE
+// so the decision itself (no cobra, no file I/O, no hub client) is directly
+// testable.
+func resolveReincarnateTarget(args []string, selfName string, hasHandoffFile, dryRun bool) (agentName string, isSelf bool, err error) {
+	if len(args) == 1 {
+		agentName = api.Slugify(args[0])
+	} else {
+		if selfName == "" {
+			return "", false, fmt.Errorf("specify an agent name, or run this inside an agent container to migrate yourself")
+		}
+		agentName = api.Slugify(selfName)
+	}
+
+	isSelf = selfName != "" && api.Slugify(selfName) == agentName
+
+	if isSelf && !hasHandoffFile && !dryRun {
+		return "", false, fmt.Errorf("self-migration requires --handoff-file: write a handoff describing your work in progress, canonical files, and next action for the new generation, then pass it with --handoff-file")
+	}
+
+	return agentName, isSelf, nil
 }
 
 func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSelf bool) error {

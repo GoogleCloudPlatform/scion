@@ -227,16 +227,14 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 // snapshot and the handoff remain retrievable on the AgentReincarnation
 // record for a subsequent --rollback (Phase 3).
 //
-// Notification (p1b-r1 N1): Phase 1 relies on the existing
-// PublishAgentStatus subscription path, the same mechanism any other
-// phase=error transition uses. This reaches only callers already subscribed
-// to the agent — a requester who is not (for example a coordinator that did
-// not create the agent) is not directly notified. A direct notification to
-// rec.RequestedBy and the agent's creator is deferred to Phase 2: the
-// notification store's Notification row requires a SubscriptionID, so a
-// "direct" notification needs either a synthetic subscription or a new,
-// unsubscribed delivery path — a bigger change than this fix warrants, and
-// the gap is disclosed here rather than worked around under time pressure.
+// Notification (design §3.4 Amendment A3.8, p1b-r1 N1): both the requester
+// and the creator must learn of a failure, and both do, through the existing
+// PublishAgentStatus subscription path — the same mechanism any other
+// phase=error transition uses. The creator is already subscribed from
+// create. handleReincarnateAgent's ensureReincarnateRequesterSubscribed
+// subscribes the requester too, at request time, if they are not the agent
+// itself and not already subscribed — the same createNotifySubscription
+// mechanism create's --notify flag uses, so no new delivery path is needed.
 func (s *Server) failReincarnation(ctx context.Context, agentID, reincarnationID, errMsg string) {
 	s.agentLifecycleLog.Error("reincarnation failed",
 		"agent_id", agentID, "reincarnation_id", reincarnationID, "error", errMsg)

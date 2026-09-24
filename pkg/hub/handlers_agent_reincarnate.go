@@ -288,9 +288,19 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	}
 
 	requestedBy := ""
-	if identity := GetIdentityFromContext(ctx); identity != nil {
-		requestedBy = identity.ID()
+	requesterIdentity := GetIdentityFromContext(ctx)
+	if requesterIdentity != nil {
+		requestedBy = requesterIdentity.ID()
 	}
+
+	// design §3.4 Amendment A3.8 / p1b-r1 N1: the requester and the creator
+	// must both learn of a failure. The creator is already subscribed (from
+	// create); if the requester is a different principal than the agent
+	// itself and has no existing subscription, subscribe them now via the
+	// same mechanism create's --notify uses. failReincarnation's
+	// PublishAgentStatus on phase=error then reaches both through the
+	// ordinary subscription-dispatch path — no new delivery path needed.
+	s.ensureReincarnateRequesterSubscribed(ctx, agent, requesterIdentity, requestedBy)
 
 	rec := &store.AgentReincarnation{
 		AgentID:               agent.ID,
@@ -330,4 +340,65 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		State:      store.AgentReincarnationStatePending,
 		Plan:       plan,
 	})
+}
+
+// ensureReincarnateRequesterSubscribed implements design §3.4 Amendment
+// A3.8 (p1b-r1 N1): a reincarnate requester who is not the agent itself, and
+// who is not already subscribed to it, gets a notification subscription via
+// the same createNotifySubscription mechanism create's --notify flag uses.
+// The creator is already subscribed from create, so this closes the gap for
+// a coordinator or other requester who is not the creator — failReincarnation's
+// PublishAgentStatus on phase=error then reaches both through the ordinary
+// subscription-dispatch path.
+//
+// No-ops for a self-request (the agent does not need to subscribe to
+// itself) and for any identity type this can't resolve to a subscriber
+// (there is no "requester" concept for a nil identity, and this handler is
+// unreachable without one — authorizeAgentReincarnate already required it).
+// Best-effort: a lookup or write failure here must not fail the
+// reincarnate request itself, so errors are logged, not returned.
+func (s *Server) ensureReincarnateRequesterSubscribed(ctx context.Context, agent *store.Agent, identity Identity, requestedBy string) {
+	if identity == nil {
+		return
+	}
+
+	var subscriberType, subscriberID string
+	switch identity.Type() {
+	case "agent":
+		agentIdent, ok := identity.(AgentIdentity)
+		if !ok || agentIdent.ID() == agent.ID {
+			return // self-request: nothing to subscribe.
+		}
+		requesterAgent, err := s.store.GetAgent(ctx, agentIdent.ID())
+		if err != nil {
+			s.agentLifecycleLog.Warn("reincarnate: failed to resolve requester agent for notify subscription",
+				"agent_id", agent.ID, "requester_id", agentIdent.ID(), "error", err)
+			return
+		}
+		subscriberType = store.SubscriberTypeAgent
+		subscriberID = requesterAgent.Slug
+	case "user", "dev":
+		userIdent, ok := identity.(UserIdentity)
+		if !ok {
+			return
+		}
+		subscriberType = store.SubscriberTypeUser
+		subscriberID = userIdent.ID()
+	default:
+		return
+	}
+
+	existing, err := s.store.GetNotificationSubscriptions(ctx, agent.ID)
+	if err != nil {
+		s.agentLifecycleLog.Warn("reincarnate: failed to check existing notify subscriptions",
+			"agent_id", agent.ID, "error", err)
+		return
+	}
+	for _, sub := range existing {
+		if sub.SubscriberType == subscriberType && sub.SubscriberID == subscriberID {
+			return // already subscribed (e.g. the creator, or a repeat requester).
+		}
+	}
+
+	s.createNotifySubscription(ctx, agent.ID, agent.ProjectID, subscriberType, subscriberID, requestedBy)
 }

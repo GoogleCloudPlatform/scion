@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -1040,6 +1041,68 @@ func TestReincarnateAgent_AC6_StartFailureMarksFailed(t *testing.T) {
 	assert.Contains(t, list[0].Error, "no such image")
 	require.NotNil(t, list[0].PreviousAppliedConfig, "previous config snapshot must remain retrievable")
 	assert.Equal(t, "old-image:v1", list[0].PreviousAppliedConfig.Image)
+}
+
+// TestReincarnateAgent_AC6_NonCreatorRequesterGetsNotifiedOnFailure is the
+// design §3.4 Amendment A3.8 / p1b-r1 N1 regression test: a requester who is
+// not the agent itself and not already subscribed (a coordinator, not the
+// creator) gets a notification subscription at request time, and actually
+// receives the failure notification through the ordinary
+// subscription-dispatch path once the reincarnation fails.
+func TestReincarnateAgent_AC6_NonCreatorRequesterGetsNotifiedOnFailure(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.startErr = fmt.Errorf("no such image: nonexistent:latest")
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+
+	// Wire a real notification dispatcher, same pattern as
+	// setupIntegrationTest: replace the event publisher, then build and
+	// start a dispatcher against it. setupReincarnateTestServer's dispatcher
+	// fake (disp) doubles as the AgentDispatcher the notification dispatcher
+	// uses to deliver agent-to-agent messages.
+	pub := NewChannelEventPublisher()
+	srv.SetEventPublisher(pub)
+	t.Cleanup(pub.Close)
+	nd := NewNotificationDispatcher(s, pub, func() AgentDispatcher { return disp }, slog.Default())
+	nd.Start()
+	t.Cleanup(nd.Stop)
+
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+
+	// A coordinator agent distinct from both the target and its creator
+	// (tid("user-creator")), with no existing subscription.
+	coordinator := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.ID = tid("coordinator-" + t.Name())
+		a.Slug = "coordinator-" + tidSlugSafe(t.Name())
+		a.Name = "Coordinator"
+	})
+	requester := agentIdentityFor(coordinator.ID, project.ID, ScopeAgentLifecycle)
+
+	req := reincarnateRequest(t, agent.ID, requester, ReincarnateAgentRequest{Handoff: "h"})
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, req, agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	subs, err := s.GetNotificationSubscriptions(context.Background(), agent.ID)
+	require.NoError(t, err)
+	found := false
+	for _, sub := range subs {
+		if sub.SubscriberType == store.SubscriberTypeAgent && sub.SubscriberID == coordinator.Slug {
+			found = true
+		}
+	}
+	assert.True(t, found, "non-creator requester must be subscribed to the agent's notifications")
+
+	waitForReincarnationSettled(t, s, agent.ID)
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "error", final.Phase)
+
+	require.Eventually(t, func() bool {
+		notifs, err := s.GetNotifications(context.Background(), store.SubscriberTypeAgent, coordinator.Slug, false)
+		return err == nil && len(notifs) > 0
+	}, 2*time.Second, 50*time.Millisecond,
+		"the non-creator requester must actually receive a failure notification")
 }
 
 // TestReincarnateAgent_R3_StopFailureIsFatal is the p1b-r1 R3 regression
