@@ -30,9 +30,10 @@ import (
 // ---------------------------------------------------------------------------
 // scion_hub_ge_exchange_requests_total{outcome}. Every
 // outcome is proven by driving handleGEGoogleExchange directly (the real
-// handler, not a call to RecordGEExchangeRequest), and every test also
-// checks the response bytes/status are byte-identical to the response
-// without a metrics recorder — recording it must never change the exchange
+// handler, not a call to RecordGEExchangeRequest) and checking the response
+// status. TestGEExchangeMetrics_ResponseShapeUnaffected compares the success
+// response with and without a recorder, and the TestGEExchange_*_ExactBytes
+// tests pin the exact bytes: recording must never change the exchange
 // response.
 // ---------------------------------------------------------------------------
 

@@ -570,13 +570,13 @@ func TestExternalBearer_AdminEmails_ProvisionsAdminRole(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // With no Google trust configured, the external-bearer hook is a true
-// no-op. Golden case (a) in TestExternalBearer_ConfiguredTrustInvariant_Golden
-// pins the exact bytes with GoogleValidator == nil. Production always builds
-// a non-nil GoogleValidator (only trust gates the path), so this test proves
-// the same no-op in that production shape — GoogleValidator non-nil,
-// FederationAuth pointer empty — not just with GoogleValidator == nil like
-// golden case (a). Otherwise the nil-guard in authenticateExternalBearer
-// could mask a bug in the googleTrust gate itself.
+// no-op even for a validly signed Google ID token. Golden case (a) in
+// TestExternalBearer_ConfiguredTrustInvariant_Golden pins the same fallback
+// bytes for a malformed JWT; this test uses a real Google-signed token, in
+// production shape (GoogleValidator and GoogleResolver wired, as New()
+// always builds them; FederationAuth pointer empty), so a googleTrust gate
+// that let a Google-shaped token through would reach the validator and fail
+// the zero-calls assertion below.
 // ---------------------------------------------------------------------------
 
 func TestExternalBearer_NoTrustProductionShape_Golden401(t *testing.T) {
