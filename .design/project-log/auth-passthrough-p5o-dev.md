@@ -298,3 +298,39 @@ was judged adequate and kept as-is.
   `ap-p4-dev`'s `95e3e3b4e`, confirmed clean by `ap-p5o-rev-3` at this half's next commit.)
 - Not run: the full `pkg/hub/...` + `./cmd` suite (`-timeout 40m`) — this round changes non-test Hub code, so the brief requires it.
   Requesting the slot from `ap-em` in my report.
+
+---
+
+## Fix round 3 (review `p5o-r3-ap-p5o-rev-3.md`, REQUEST CHANGES on `dc3749906`/`fa8d5557c`)
+
+**Commits:** `59dd6cf9a` (feature, comments only), `b752fb342` (test), `92d1bf321` (this entry).
+
+Verdict was REQUEST CHANGES with Critical 0, Required 1, Optional 0, Nit 3, FYI 5 — a ~10-line comment fix plus
+one test strengthening. Every fix round 2 finding was verified resolved; 22 of 23 outcome mutants aimed at this
+round's own changes were killed (the survivor, S1, was exactly the Nit this round fixes). The one Required
+finding confirmed the developer's own fix-round-2 deviation (N3) was correct, and asked for the same correction
+to reach three production comments that still described the old, disproven mechanism.
+
+| Finding | Change | Test | Result |
+|---|---|---|---|
+| R1: three production comments still say `authConfig`'s by-value capture happens in `registerRoutes`, inside `New()` (`auth.go:88-99`, `server.go:1654`, `server.go:2552-2556`) | Reworded all three to state the verified mechanism: `UnifiedAuthMiddleware` captures a copy of `authConfig` each time `applyMiddleware` runs (`Start()`, `Handler()`), which in production happens after `cmd/server_foreground.go` calls the setters; the `*atomic.Pointer` removes the dependency on that ordering rather than being required by it. Checked against `ge_exchange_route_test.go:508-518`'s existing (already-correct) test comment for consistency | read against `server.go`'s actual call graph (`registerRoutes` at `:4222` calls only `HandleFunc`/`guarded`; `applyMiddleware` is called only from `Start()` `:3925` and `Handler()` `:4091`) | n/a (comment-only) |
+| N1: `TestExternalBearerSnapshotMetrics_Since` can't detect `since` computed at snapshot time (S1 survives) | Test now overwrites `m.since` with a fixed date decades in the past after construction, and asserts `GetSnapshot` returns exactly that value | same test, strengthened | S1 (`GetSnapshot` uses `time.Now()` instead of `m.since`) — hand-mutated, confirmed to fail the new assertion, reverted |
+| N2: log misreports its own gates (Deviation 1's M8/M13/M14 claim; contradictory F1 wording) | Reworded both: Deviation 1 now says this round's Gates cover D1-D3 (what this round's code change can affect), and that M8/M13/M14 were last verified in fix round 1, unchanged since. The F1 bullet's chronology is now explicit (the hit existed at the fix-round-2 tip; a later, separate `ap-p4-dev` commit removed it) | — (log wording only) | n/a |
+| N3: redundant `"type", fmt.Sprintf("%T", v)` in the drop `Warn`s | Declined, per the brief — matches the r2 disposition ("label and value type"), harmless and PII-free | — | — |
+| F1-F5 | No action, per the brief | — | — |
+
+### Gates (fix round 3)
+
+- ✅ `go build -buildvcs=false ./...` — clean.
+- ✅ `go vet ./pkg/hub/... ./cmd/...` — clean.
+- ✅ `gofmt -l pkg/hub cmd` — empty.
+- ✅ `GOGC=40 golangci-lint run --new-from-rev=a53175c23 --concurrency=1 ./pkg/hub/... ./cmd/...` — `0 issues.`
+- ✅ Targeted `-race`: `TestExternalBearer|TestGoogleCredential|TestGEExchange|TestServer_|TestHandleMetrics|TestRecord`, run
+  before and after rebasing onto concurrent commits on the branch (`fa8d5557c..239448a28`, p4/p5b work) — green both times.
+- ✅ S1 mutation: hand-changed `GetSnapshot` to report `time.Now()` instead of the recorder's fixed `since`; the strengthened
+  `TestExternalBearerSnapshotMetrics_Since` failed with the exact expected/got mismatch; reverted and re-diffed clean.
+- ✅ Narration grep (adds no new terms this round) — empty on this half's delta since `fa8d5557c`.
+- ✅ Commit-message and diff bare-issue-number greps against `a53175c23` — both empty.
+- ✅ `perl -ne 'print "$ARGV:$.\n" if /\xC2\xA0/'` (U+00A0 byte check) on every file this round touched — empty, re-run after
+  each edit.
+- **No full run** — per the brief, this round is comments plus one test; not required.
