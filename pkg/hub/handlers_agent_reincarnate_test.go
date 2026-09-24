@@ -27,6 +27,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1487,6 +1488,97 @@ func TestSweepStaleReincarnations_IgnoresTerminalRecords(t *testing.T) {
 	assert.Equal(t, beforeVersion, after.StateVersion, "an agent with no in-flight reincarnation must be untouched")
 }
 
+// TestSweepStaleReincarnations_TerminalAgentRecordOnly_AgentNone is the
+// design §3.4 Amendment A6.5/A7 (R2) regression test: a stale record whose
+// agent has ALREADY completed (reincarnation_state=="") must be failed on
+// the record alone. The agent's state, phase, Activity, generation and
+// AppliedConfig must be left completely untouched — something else (the
+// completion write) already resolved the agent side of this migration, and
+// there is nothing left for the sweep to reconcile there.
+func TestSweepStaleReincarnations_TerminalAgentRecordOnly_AgentNone(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	// CreateAgent does not persist Generation or ReincarnationState (a
+	// brand-new agent is always generation 1 / ""); set them via UpdateAgent
+	// afterward, exactly as a real completed reincarnation would leave them.
+	agent.ReincarnationState = store.ReincarnationStateNone
+	agent.Generation = 2
+	agent.Phase = "running"
+	agent.Activity = "working"
+	agent.AppliedConfig.Image = "gen-2-image"
+	require.NoError(t, s.UpdateAgent(context.Background(), agent))
+	beforeVersion := agent.StateVersion
+	require.NoError(t, s.CreateAgentReincarnation(context.Background(), &store.AgentReincarnation{
+		AgentID:               agent.ID,
+		FromGeneration:        1,
+		ToGeneration:          2,
+		State:                 store.AgentReincarnationStateStarting,
+		PreviousAppliedConfig: &store.AgentAppliedConfig{Image: "gen-1-image"},
+	}))
+
+	n, err := srv.sweepStaleReincarnationsOlderThan(context.Background(), time.Now().Add(time.Hour))
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+
+	after, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, beforeVersion, after.StateVersion, "the agent row must be completely untouched")
+	assert.Equal(t, store.ReincarnationStateNone, after.ReincarnationState)
+	assert.Equal(t, "running", after.Phase)
+	assert.Equal(t, "working", after.Activity)
+	assert.Equal(t, 2, after.Generation)
+	assert.Equal(t, "gen-2-image", after.AppliedConfig.Image, "gen N+1 must survive; the record's gen-1 PreviousAppliedConfig must not be restored")
+
+	list, err := s.ListAgentReincarnations(context.Background(), agent.ID)
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.Equal(t, store.AgentReincarnationStateFailed, list[0].State)
+	assert.Equal(t, "hub restarted during reincarnation", list[0].Error)
+}
+
+// TestSweepStaleReincarnations_TerminalAgentRecordOnly_AgentFailed is the
+// second A6.5/A7 (R2) variant: an agent already at reincarnation_state=
+// "failed" (an earlier failure or sweep pass already resolved it) must also
+// be left untouched, including its own Message — this record's failure
+// reason must not overwrite a DIFFERENT, earlier failure's message.
+func TestSweepStaleReincarnations_TerminalAgentRecordOnly_AgentFailed(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	agent.ReincarnationState = store.ReincarnationStateFailed
+	agent.Phase = "error"
+	agent.Message = "reincarnation failed: an earlier, unrelated failure"
+	agent.AppliedConfig.Image = "restored-gen-1-image"
+	require.NoError(t, s.UpdateAgent(context.Background(), agent))
+	beforeVersion := agent.StateVersion
+	require.NoError(t, s.CreateAgentReincarnation(context.Background(), &store.AgentReincarnation{
+		AgentID:               agent.ID,
+		FromGeneration:        1,
+		ToGeneration:          2,
+		State:                 store.AgentReincarnationStateProvisioning,
+		PreviousAppliedConfig: &store.AgentAppliedConfig{Image: "restored-gen-1-image"},
+	}))
+
+	n, err := srv.sweepStaleReincarnationsOlderThan(context.Background(), time.Now().Add(time.Hour))
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+
+	after, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, beforeVersion, after.StateVersion, "the agent row must be completely untouched")
+	assert.Equal(t, store.ReincarnationStateFailed, after.ReincarnationState)
+	assert.Equal(t, "error", after.Phase)
+	assert.Equal(t, "reincarnation failed: an earlier, unrelated failure", after.Message,
+		"this record's failure reason must not overwrite an earlier, unrelated failure's Message")
+
+	list, err := s.ListAgentReincarnations(context.Background(), agent.ID)
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.Equal(t, store.AgentReincarnationStateFailed, list[0].State)
+	assert.Equal(t, "hub restarted during reincarnation", list[0].Error)
+}
+
 // =============================================================================
 // Replica-safe sweep, round 3: the record's own state/updated_at must track
 // the worker's progress (design §3.4 Amendment A6), and the sweep's failure
@@ -1744,6 +1836,134 @@ func TestReincarnateAgent_SweepKeepsGenNPlusOneAfterSuccessfulReprovision(t *tes
 		containsAll(after.AppliedConfig.Task, "[SCION REINCARNATION]"))
 	assert.Contains(t, after.AppliedConfig.Task, "[SCION REINCARNATION]",
 		"reprovision had succeeded (state=starting): the sweep must keep the gen N+1 AppliedConfig (A4.3), not restore gen N")
+}
+
+// interposingStore lets a test run code between the sweep's GetAgent (the
+// read sweepFailStaleRecord uses to detect an already-resolved agent) and
+// the record CAS that follows it.
+type interposingStore struct {
+	store.Store
+	armed   atomic.Bool
+	onFirst func()
+}
+
+func (s *interposingStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	a, err := s.Store.GetAgent(ctx, id)
+	if s.armed.CompareAndSwap(true, false) && s.onFirst != nil {
+		s.onFirst()
+	}
+	return a, err
+}
+
+// twoGateDispatcher blocks in reprovision (until relReprov; then succeeds)
+// and again in start (until relStart).
+type twoGateDispatcher struct {
+	*reincarnateTestDispatcher
+	inReprov, relReprov, inStart, relStart chan struct{}
+}
+
+func (d *twoGateDispatcher) DispatchAgentReprovision(ctx context.Context, a *store.Agent) error {
+	close(d.inReprov)
+	<-d.relReprov
+	return d.reincarnateTestDispatcher.DispatchAgentReprovision(ctx, a)
+}
+
+func (d *twoGateDispatcher) DispatchAgentStart(ctx context.Context, a *store.Agent, task string, resume bool) error {
+	close(d.inStart)
+	<-d.relStart
+	return d.reincarnateTestDispatcher.DispatchAgentStart(ctx, a, task, resume)
+}
+
+// TestReincarnateAgent_SweepDoesNotRestoreGenNOverSuccessfulReprovisionRace
+// is the design §3.4 Amendment A7 (R1) regression test for the sweep's own
+// TOCTOU: it lists a record as stale, then reads the agent to decide whether
+// the agent side is already resolved, and only THEN CASes the record. A
+// worker that advances between the sweep's agent read and its CAS — here:
+// its stalled reprovision call returns success and it CASes the record to
+// "starting" — must not have gen N restored over its now-successfully
+// reprovisioned gen N+1 disk. The sweep's CAS is pinned to the state it
+// listed the record at (advanceListedRecord), so once the worker has moved
+// the record on, the sweep's CAS loses the race and does nothing.
+func TestReincarnateAgent_SweepDoesNotRestoreGenNOverSuccessfulReprovisionRace(t *testing.T) {
+	disp := &twoGateDispatcher{reincarnateTestDispatcher: newReincarnateTestDispatcher(),
+		inReprov: make(chan struct{}), relReprov: make(chan struct{}), inStart: make(chan struct{}), relStart: make(chan struct{})}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+	ctx := context.Background()
+
+	ip := &interposingStore{Store: srv.store}
+	srv.store = ip
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	list, err := s.ListAgentReincarnations(ctx, agent.ID)
+	require.NoError(t, err)
+	recID := list[0].ID
+	<-disp.inReprov // worker stalled inside reprovision; agent+record = provisioning
+
+	// Right after the sweep reads the agent (sees "provisioning"), the
+	// stalled worker's reprovision returns success and it advances to
+	// "starting" — a live update the sweep's earlier read cannot see.
+	ip.onFirst = func() {
+		close(disp.relReprov) // reprovision returns success
+		<-disp.inStart        // worker has CASed record->starting and written agent starting
+	}
+	ip.armed.Store(true)
+	_, err = srv.sweepStaleReincarnationsOlderThan(ctx, time.Now().Add(time.Hour))
+	require.NoError(t, err)
+	close(disp.relStart)
+	time.Sleep(200 * time.Millisecond) // let the worker finish/abort
+
+	after, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	r, err := s.GetAgentReincarnation(ctx, recID)
+	require.NoError(t, err)
+	t.Logf("record state=%q err=%q; agent state=%q image=%q taskHasPreamble=%v",
+		r.State, r.Error, after.ReincarnationState, after.AppliedConfig.Image,
+		containsAll(after.AppliedConfig.Task, "[SCION REINCARNATION]"))
+	assert.Contains(t, after.AppliedConfig.Task, "[SCION REINCARNATION]",
+		"reprovision succeeded and the record reached 'starting' before the sweep's CAS: gen N must not be restored")
+}
+
+// TestReincarnateAgent_SweepDecidesFromRecordNotLaggingAgentRow is the design
+// §3.4 Amendment A7 (R1) regression test for the second half of the same
+// finding: the sweep's restore decision must come from rec.State (the
+// listed record), not the agent row, because the agent write for a step
+// always lands AFTER the matching record CAS (see tryAdvanceReincarnation's
+// callers) — a hub crash in that exact window leaves record="starting"
+// (reprovision already succeeded) while the agent still reads "provisioning".
+// Deciding from the lagging agent row would restore gen N over a gen N+1
+// disk; deciding from the record (the thing A6 made truthful) does not.
+func TestReincarnateAgent_SweepDecidesFromRecordNotLaggingAgentRow(t *testing.T) {
+	disp := newGatedDispatcher("start", nil)
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+	ctx := context.Background()
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	<-disp.entered // record=starting, agent=starting, reprovision done
+	defer close(disp.release)
+
+	// Simulate the crash window: the record's CAS to "starting" landed, but
+	// the agent's matching "starting" write did not.
+	a, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	a.ReincarnationState = store.ReincarnationStateProvisioning
+	require.NoError(t, s.UpdateAgent(ctx, a))
+
+	_, err = srv.sweepStaleReincarnationsOlderThan(ctx, time.Now().Add(time.Hour))
+	require.NoError(t, err)
+	after, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	t.Logf("agent state=%q image=%q taskHasPreamble=%v", after.ReincarnationState, after.AppliedConfig.Image,
+		containsAll(after.AppliedConfig.Task, "[SCION REINCARNATION]"))
+	assert.Contains(t, after.AppliedConfig.Task, "[SCION REINCARNATION]",
+		"the record said 'starting' (reprovision succeeded); gen N must not be restored")
 }
 
 // TestReincarnateAgent_E2E_BrokerReprovisionRefusal409EndsInFailedRecord is

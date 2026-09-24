@@ -117,58 +117,137 @@ func (s *Server) updateReincarnationStep(ctx context.Context, agentID string, up
 // (non-nil).
 func reincarnateStrPtr(s string) *string { return &s }
 
+// tryAdvanceReincarnationMaxAttempts bounds tryAdvanceReincarnation's own
+// retry: a single retry recovers a transient read/CAS error (design §3.4
+// Amendment A7) without turning a genuine "someone else owns this
+// record now" result (ok=false, err=nil) into a retry loop — that case is
+// never retried, since retrying it would just observe the same lost race
+// again.
+const tryAdvanceReincarnationMaxAttempts = 2
+
 // tryAdvanceReincarnation is the record-side half of every step and terminal
-// transition the worker makes. It re-reads the record, sets its State to
+// transition the WORKER makes (as opposed to the sweep, which uses
+// advanceListedRecord below). It re-reads the record fresh, sets its State to
 // newState plus whatever mutate applies (Error, CompletedAt,
 // NewAppliedConfig), and CASes the write through
-// store.TryAdvanceAgentReincarnation — which only applies if the record is
-// CURRENTLY in a non-terminal state (design §3.4 Amendment A6, R1/R2).
+// store.TryAdvanceAgentReincarnation with expectState set to the State it
+// JUST READ — so the worker's own check-and-write is atomic (design §3.4
+// Amendment A6/A7).
 //
 // This replaces the old read-then-check (reincarnationRecordTerminal): that
 // check and the write it gated were two separate operations, leaving a
 // window for the replica-safe sweep (or another racing writer) to move the
 // record between them. Folding the check into the write itself closes that
-// window, and — as a side effect that R1 also asked for — means the record's
-// own State and UpdatedAt now advance in step with the agent, instead of
-// sitting at "pending" with a stale UpdatedAt for the whole run.
+// window, and — as a side effect the sweep's staleness bound also relies on — means the
+// record's own State and UpdatedAt now advance in step with the agent,
+// instead of sitting at "pending" with a stale UpdatedAt for the whole run.
 //
 // It returns the instant it stamped on the record (zero if it never got that
 // far) alongside the CAS result, so the caller can pin the SAME instant onto
 // the paired agent-row write (reincarnationStepUpdate.now) — the two writes
-// are ordered (this one always happens first, see below), but the sweep's
-// two staleness clocks should never look out of order relative to each
-// other for the same step just because of which write physically landed
-// first.
+// are ordered (this one always happens first), but the sweep's two staleness
+// clocks should never look out of order relative to each other for the same
+// step just because of which write physically landed first.
 //
-// The caller MUST treat a false return as "this worker no longer owns the
-// record" and return immediately without writing the agent row either. A
-// read or CAS error is logged and also treated as false: proceeding to write
-// the agent row without knowing whether the record-side write landed would
-// defeat the whole point of ordering these two writes.
-func (s *Server) tryAdvanceReincarnation(ctx context.Context, reincarnationID, newState string, mutate func(rec *store.AgentReincarnation, now time.Time)) (time.Time, bool) {
-	rec, err := s.store.GetAgentReincarnation(ctx, reincarnationID)
-	if err != nil {
-		s.agentLifecycleLog.Error("reincarnation worker: failed to read record before advancing it",
-			"reincarnation_id", reincarnationID, "target_state", newState, "error", err)
-		return time.Time{}, false
+// The three-way result distinguishes two very different outcomes a caller
+// must not confuse (design §3.4 Amendment A7):
+//   - (ok=false, err=nil): a clean loss of the CAS race — this worker no
+//     longer owns the record (something else, most likely the replica-safe
+//     sweep, already moved it). The caller MUST return immediately without
+//     writing the agent row, and must NOT treat this as a failure to report.
+//   - (ok=false, err!=nil): a persistent read or CAS error, after one retry.
+//     Silently swallowing this (as an earlier round did, by treating every
+//     error the same as losing the race) can leave the agent stuck
+//     mid-transition with no worker left to retry it and nothing for the
+//     replica-safe sweep to see as non-terminal-but-stale on the RECORD side
+//     (it still has a stale agent-state backstop, but that takes the full
+//     30-minute bound). The caller should run the normal failure path
+//     instead of returning silently.
+func (s *Server) tryAdvanceReincarnation(ctx context.Context, reincarnationID, newState string, mutate func(rec *store.AgentReincarnation, now time.Time)) (time.Time, bool, error) {
+	var lastErr error
+	for attempt := 0; attempt < tryAdvanceReincarnationMaxAttempts; attempt++ {
+		rec, err := s.store.GetAgentReincarnation(ctx, reincarnationID)
+		if err != nil {
+			lastErr = err
+			s.agentLifecycleLog.Warn("reincarnation worker: failed to read record before advancing it",
+				"reincarnation_id", reincarnationID, "target_state", newState, "attempt", attempt, "error", err)
+			continue
+		}
+		expectState := rec.State
+		if !store.IsAgentReincarnationStateNonTerminal(expectState) {
+			// The record is ALREADY terminal (completed or failed) — most
+			// likely the replica-safe sweep, or a racing completion, resolved
+			// it while this call was stalled. Reject up front rather than
+			// pass expectState=<terminal value> to the CAS below: "WHERE
+			// state = 'failed'" against a row that already reads 'failed'
+			// would trivially match itself, letting this call "win" a race
+			// it actually lost (design §3.4 Amendment A7).
+			s.agentLifecycleLog.Warn("reincarnation worker: record already terminal, aborting without writing the agent row",
+				"reincarnation_id", reincarnationID, "current_state", expectState, "target_state", newState)
+			return time.Time{}, false, nil
+		}
+		now := time.Now()
+		rec.State = newState
+		rec.UpdatedAt = now
+		if mutate != nil {
+			mutate(rec, now)
+		}
+		ok, err := s.store.TryAdvanceAgentReincarnation(ctx, rec, expectState)
+		if err != nil {
+			lastErr = err
+			s.agentLifecycleLog.Warn("reincarnation worker: failed to advance record",
+				"reincarnation_id", reincarnationID, "target_state", newState, "attempt", attempt, "error", err)
+			continue
+		}
+		if !ok {
+			s.agentLifecycleLog.Warn("reincarnation worker: record no longer in the expected state, aborting without writing the agent row",
+				"reincarnation_id", reincarnationID, "expect_state", expectState, "target_state", newState)
+		}
+		return now, ok, nil
 	}
+	s.agentLifecycleLog.Error("reincarnation worker: failed to advance record after a retry",
+		"reincarnation_id", reincarnationID, "target_state", newState, "error", lastErr)
+	return time.Time{}, false, lastErr
+}
+
+// advanceListedRecord is the sweep's counterpart to tryAdvanceReincarnation:
+// it CASes an ALREADY-HELD record (rec, as returned by
+// ListStaleNonTerminalAgentReincarnations) rather than re-reading it, using
+// expectState = rec.State — the value the sweep observed when it listed the
+// record as stale (design §3.4 Amendment A7).
+//
+// This distinction matters. A fresh read here (mirroring
+// tryAdvanceReincarnation) would defeat the whole purpose: it would always
+// see "the current state" and the CAS would trivially match it, so a live
+// worker that advanced the record after it was listed — including all the
+// way to "starting", meaning reprovision already succeeded — would still
+// have its record failed and, worse, its gen N+1 config replaced by
+// rec.PreviousAppliedConfig from the stale, already-superseded rec. Pinning
+// the CAS to the value observed at list time means that if the record has
+// moved on at all since then, this call loses the race and does nothing,
+// leaving the live worker's own tryAdvanceReincarnation calls — which race
+// this one fairly, on the same expectState semantics — to decide the
+// record's fate instead.
+func (s *Server) advanceListedRecord(ctx context.Context, rec *store.AgentReincarnation, newState string, mutate func(r *store.AgentReincarnation, now time.Time)) (time.Time, bool, error) {
+	expectState := rec.State
+	upd := *rec // shallow copy: never mutate the caller's (possibly reused) rec
 	now := time.Now()
-	rec.State = newState
-	rec.UpdatedAt = now
+	upd.State = newState
+	upd.UpdatedAt = now
 	if mutate != nil {
-		mutate(rec, now)
+		mutate(&upd, now)
 	}
-	ok, err := s.store.TryAdvanceAgentReincarnation(ctx, rec)
+	ok, err := s.store.TryAdvanceAgentReincarnation(ctx, &upd, expectState)
 	if err != nil {
-		s.agentLifecycleLog.Error("reincarnation worker: failed to advance record",
-			"reincarnation_id", reincarnationID, "target_state", newState, "error", err)
-		return now, false
+		s.agentLifecycleLog.Error("sweep: failed to advance a listed record",
+			"reincarnation_id", rec.ID, "expect_state", expectState, "target_state", newState, "error", err)
+		return now, false, err
 	}
 	if !ok {
-		s.agentLifecycleLog.Warn("reincarnation worker: record no longer non-terminal, aborting without writing the agent row",
-			"reincarnation_id", reincarnationID, "target_state", newState)
+		s.agentLifecycleLog.Info("sweep: record changed since it was listed as stale, leaving it alone",
+			"reincarnation_id", rec.ID, "expect_state", expectState, "target_state", newState)
 	}
-	return now, ok
+	return now, ok, nil
 }
 
 // runReincarnationWorker performs the reincarnation teardown/reprovision/start
@@ -210,7 +289,11 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		return
 	}
 
-	stoppingNow, ok := s.tryAdvanceReincarnation(ctx, reincarnationID, store.AgentReincarnationStateStopping, nil)
+	stoppingNow, ok, err := s.tryAdvanceReincarnation(ctx, reincarnationID, store.AgentReincarnationStateStopping, nil)
+	if err != nil {
+		s.failReincarnation(ctx, agentID, reincarnationID, "failed to advance record to stopping: "+err.Error(), previous)
+		return
+	}
 	if !ok {
 		return
 	}
@@ -245,7 +328,11 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		return
 	}
 
-	provisioningNow, ok := s.tryAdvanceReincarnation(ctx, reincarnationID, store.AgentReincarnationStateProvisioning, nil)
+	provisioningNow, ok, err := s.tryAdvanceReincarnation(ctx, reincarnationID, store.AgentReincarnationStateProvisioning, nil)
+	if err != nil {
+		s.failReincarnation(ctx, agentID, reincarnationID, "failed to advance record to provisioning: "+err.Error(), previous)
+		return
+	}
 	if !ok {
 		return
 	}
@@ -281,7 +368,13 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		return
 	}
 
-	startingNow, ok := s.tryAdvanceReincarnation(ctx, reincarnationID, store.AgentReincarnationStateStarting, nil)
+	startingNow, ok, err := s.tryAdvanceReincarnation(ctx, reincarnationID, store.AgentReincarnationStateStarting, nil)
+	if err != nil {
+		// Reprovision already succeeded, so no restore (same reasoning as the
+		// other post-reprovision-success failure sites below).
+		s.failReincarnation(ctx, agentID, reincarnationID, "failed to advance record to starting: "+err.Error(), nil)
+		return
+	}
 	if !ok {
 		return
 	}
@@ -304,16 +397,26 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		return
 	}
 
-	// Step: complete. Design §3.4 Amendment A6 (R2): CAS the record to
+	// Step: complete. Design §3.4 Amendment A6: CAS the record to
 	// completed FIRST. Only the winner may write the agent row — otherwise a
 	// worker whose record the sweep already resolved out from under it could
 	// still bump generation and clear reincarnation_state after the sweep
 	// (or a completing rival) already decided this record's — and the
 	// agent's — fate.
-	completedNow, ok := s.tryAdvanceReincarnation(ctx, reincarnationID, store.AgentReincarnationStateCompleted, func(rec *store.AgentReincarnation, now time.Time) {
+	completedNow, ok, err := s.tryAdvanceReincarnation(ctx, reincarnationID, store.AgentReincarnationStateCompleted, func(rec *store.AgentReincarnation, now time.Time) {
 		rec.CompletedAt = &now
 		rec.NewAppliedConfig = fresh
 	})
+	if err != nil {
+		// The agent is genuinely running gen N+1 at this point; a persistent
+		// error CASing the record to completed is a bookkeeping failure, not
+		// a reason to mark the reincarnation failed (that would be worse: it
+		// would restore gen N onto an agent already running gen N+1). Log
+		// loudly, same as the generation/reincarnation_state write below.
+		s.agentLifecycleLog.Error("reincarnation worker: agent started on new generation but failed to advance the record to completed",
+			"agent_id", agentID, "reincarnation_id", reincarnationID, "target_generation", toGeneration, "error", err)
+		return
+	}
 	if !ok {
 		// The dispatcher calls above already succeeded — the agent is
 		// genuinely running gen N+1 on disk — but this worker lost the race
@@ -382,7 +485,7 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 // that point the disk really does hold gen N+1, and restoring would create
 // the opposite mismatch.
 //
-// Design §3.4 Amendment A6 (R2/R3-4): the record is CASed to failed FIRST,
+// Design §3.4 Amendment A6: the record is CASed to failed FIRST,
 // via tryAdvanceReincarnation. Only the winner goes on to write the agent
 // row (or restore restoreConfig onto it). Without this, a worker whose
 // record the replica-safe sweep already failed out from under it — and
@@ -395,20 +498,34 @@ func (s *Server) failReincarnation(ctx context.Context, agentID, reincarnationID
 	s.agentLifecycleLog.Error("reincarnation failed",
 		"agent_id", agentID, "reincarnation_id", reincarnationID, "error", errMsg)
 
-	failNow, ok := s.tryAdvanceReincarnation(ctx, reincarnationID, store.AgentReincarnationStateFailed, func(rec *store.AgentReincarnation, _ time.Time) {
+	failNow, ok, err := s.tryAdvanceReincarnation(ctx, reincarnationID, store.AgentReincarnationStateFailed, func(rec *store.AgentReincarnation, _ time.Time) {
 		rec.Error = errMsg
 	})
+	if err != nil {
+		s.agentLifecycleLog.Error("failReincarnation: failed to advance record to failed after a retry, skipping the agent write",
+			"agent_id", agentID, "reincarnation_id", reincarnationID, "error", err)
+		return
+	}
 	if !ok {
-		s.agentLifecycleLog.Warn("failReincarnation: record no longer non-terminal, skipping the agent write",
+		s.agentLifecycleLog.Warn("failReincarnation: record no longer owned by this worker, skipping the agent write",
 			"agent_id", agentID, "reincarnation_id", reincarnationID)
 		return
 	}
+	s.writeFailedAgent(ctx, agentID, errMsg, restoreConfig, failNow)
+}
 
+// writeFailedAgent is the agent-row half shared by failReincarnation (the
+// worker's own failure paths) and failListedReincarnation (the sweep):
+// reincarnation_state=failed, phase=error, Activity cleared, and
+// AppliedConfig replaced with restoreConfig when non-nil (design §3.7). Only
+// called after the caller's own record-side CAS has already won — see both
+// callers' doc comments for why that ordering is required.
+func (s *Server) writeFailedAgent(ctx context.Context, agentID, errMsg string, restoreConfig *store.AgentAppliedConfig, now time.Time) {
 	upd := reincarnationStepUpdate{
 		reincarnationState: store.ReincarnationStateFailed,
 		phase:              "error",
 		activity:           reincarnateStrPtr(""),
-		now:                failNow,
+		now:                now,
 		message:            reincarnateStrPtr("reincarnation failed: " + errMsg),
 	}
 	if restoreConfig != nil {
@@ -428,19 +545,43 @@ func (s *Server) failReincarnation(ctx context.Context, agentID, reincarnationID
 	}
 }
 
-// failReincarnationRecordOnly CASes a record straight to failed without
-// touching the agent row at all (design §3.4 Amendment A6.5). It exists for
-// exactly one caller, sweepFailStaleRecord: a stale record whose agent's
+// failListedReincarnationRecordOnly CASes an already-listed stale record
+// straight to failed without touching the agent row at all (design §3.4
+// Amendment A6.5), pinned to the exact state the sweep observed it at (see
+// advanceListedRecord) rather than a fresh read. It exists for exactly one
+// caller, sweepFailStaleRecord: a stale record whose agent's
 // reincarnation_state is already "" or "failed" means something else (a
 // completion write, an earlier failure or sweep pass) already resolved the
 // agent side of this migration. Writing the agent here would either
 // resurrect a stale phase/config on an agent that has already moved on, or
 // duplicate a failure another writer already recorded — the record itself
 // is the only thing left to reconcile.
-func (s *Server) failReincarnationRecordOnly(ctx context.Context, reincarnationID, errMsg string) {
-	s.tryAdvanceReincarnation(ctx, reincarnationID, store.AgentReincarnationStateFailed, func(rec *store.AgentReincarnation, _ time.Time) {
-		rec.Error = errMsg
+func (s *Server) failListedReincarnationRecordOnly(ctx context.Context, rec *store.AgentReincarnation, errMsg string) {
+	_, _, _ = s.advanceListedRecord(ctx, rec, store.AgentReincarnationStateFailed, func(r *store.AgentReincarnation, _ time.Time) {
+		r.Error = errMsg
 	})
+}
+
+// failListedReincarnation is the sweep's counterpart to failReincarnation: it
+// CASes an already-listed record (via advanceListedRecord, pinned to the
+// state the sweep observed at list time — NOT a fresh read) to failed, and
+// only if that wins does it write the agent row (design §3.4 Amendment
+// A6/A7). Using tryAdvanceReincarnation's fresh-read semantics here
+// instead would defeat the whole point: it would always match "the current
+// state" and so could still fail a record — and restore restoreConfig — out
+// from under a worker that has genuinely moved it on since the sweep listed
+// it as stale.
+func (s *Server) failListedReincarnation(ctx context.Context, rec *store.AgentReincarnation, errMsg string, restoreConfig *store.AgentAppliedConfig) {
+	s.agentLifecycleLog.Error("reincarnation failed (sweep)",
+		"agent_id", rec.AgentID, "reincarnation_id", rec.ID, "error", errMsg)
+
+	failNow, ok, err := s.advanceListedRecord(ctx, rec, store.AgentReincarnationStateFailed, func(r *store.AgentReincarnation, _ time.Time) {
+		r.Error = errMsg
+	})
+	if err != nil || !ok {
+		return
+	}
+	s.writeFailedAgent(ctx, rec.AgentID, errMsg, restoreConfig, failNow)
 }
 
 // buildReincarnationPreamble builds the hub-authored instructions delivered
@@ -476,18 +617,10 @@ func (s *Server) buildReincarnationPreamble(agent *store.Agent, toGeneration int
 const reincarnationStaleAfter = 30 * time.Minute
 
 // sweepFailStaleRecord decides, per stale record, whether and how to fail it
-// (design §3.4 Amendment A6.5). A stale record alone does not tell the sweep
-// whether the worker that owned it ever got as far as a successful
-// reprovision, or even finished — only the agent's own reincarnation_state
-// does, since the worker writes that on every step and on completion:
+// (design §3.4 Amendment A6/A7). The restore decision comes from
+// rec.State — the value this sweep pass observed when it listed the record
+// as stale — NOT from the agent row:
 //
-//   - "" or "failed": something else (a completion write, or an earlier
-//     failure/sweep pass) already resolved the agent side of this
-//     migration. The agent is not this record's to touch any more —
-//     failing the record only (failReincarnationRecordOnly) stops it from
-//     looking non-terminal forever, without overwriting a resolution that
-//     already happened or a newer claim that has nothing to do with this
-//     record.
 //   - "starting": the worker only reaches this state after
 //     DispatchAgentReprovision has already returned successfully, so the
 //     disk holds gen N+1. Restoring rec.PreviousAppliedConfig here would
@@ -499,24 +632,45 @@ const reincarnationStaleAfter = 30 * time.Minute
 //     the safe, conservative choice — a genuinely running gen N+1 cannot
 //     exist yet for these states.
 //
-// A failure to even read the agent falls through to the normal restore
-// path: failReincarnation's own agent write will hit the same error and log
-// it, which is no worse than skipping the decision entirely.
+// The agent row is read for exactly one purpose: detecting that something
+// else already resolved the agent side of this migration ("" or "failed" —
+// a completion write, an earlier failure, or a previous sweep pass), in
+// which case the agent is not this record's to touch any more, and only the
+// record is failed (failListedReincarnationRecordOnly). This is narrower
+// than round 3's version, which read the agent row to pick the restore
+// policy too — that row can lag the record by exactly one write, since the
+// worker always CASes the record before writing the matching agent fields
+// (see tryAdvanceReincarnation's callers), so a hub crash in that window
+// left the sweep reading a stale "provisioning" for an agent whose record
+// already said the truthful "starting". rec.State — the thing A6 made
+// truthful — does not have that lag.
+//
+// Either way, the actual write goes through failListedReincarnation /
+// failListedReincarnationRecordOnly, both of which CAS via
+// advanceListedRecord against the state THIS FUNCTION observed at list
+// time, not a fresh read: if a live worker has since moved the record on
+// (to any state, including "starting"), that CAS loses and this sweep pass
+// does nothing, instead of failing a record — and restoring stale config —
+// out from under a migration that has since succeeded.
+//
+// A failure to even read the agent falls through to the restore-from-
+// rec.State path: there is no better signal available, and it is no worse
+// than the round-3 behavior for that case.
 func (s *Server) sweepFailStaleRecord(ctx context.Context, rec *store.AgentReincarnation, reason string) {
 	agent, err := s.store.GetAgent(ctx, rec.AgentID)
-	if err != nil {
-		s.failReincarnation(ctx, rec.AgentID, rec.ID, reason, rec.PreviousAppliedConfig)
-		return
+	if err == nil {
+		switch agent.ReincarnationState {
+		case store.ReincarnationStateNone, store.ReincarnationStateFailed:
+			s.failListedReincarnationRecordOnly(ctx, rec, reason)
+			return
+		}
 	}
 
-	switch agent.ReincarnationState {
-	case store.ReincarnationStateNone, store.ReincarnationStateFailed:
-		s.failReincarnationRecordOnly(ctx, rec.ID, reason)
-	case store.ReincarnationStateStarting:
-		s.failReincarnation(ctx, rec.AgentID, rec.ID, reason, nil)
-	default: // pending, stopping, provisioning
-		s.failReincarnation(ctx, rec.AgentID, rec.ID, reason, rec.PreviousAppliedConfig)
+	var restoreConfig *store.AgentAppliedConfig
+	if rec.State != store.AgentReincarnationStateStarting {
+		restoreConfig = rec.PreviousAppliedConfig
 	}
+	s.failListedReincarnation(ctx, rec, reason, restoreConfig)
 }
 
 // sweepStaleReincarnations is the replica-safe sweep (design §3.7): it marks
