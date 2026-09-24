@@ -97,7 +97,7 @@ func TestGoogleCredentialCache_KeyIgnoresAudienceOrder(t *testing.T) {
 	k1 := cacheKey("token-a", []string{"aud-1", "aud-2"})
 	k2 := cacheKey("token-a", []string{"aud-2", "aud-1"})
 	if k1 != k2 {
-		t.Error("cache key must not depend on the order of the audience list (design §4.2(iii): sorted(aud))")
+		t.Error("cache key must not depend on the order of the audience list (sorted(aud))")
 	}
 }
 

@@ -85,8 +85,8 @@ func WithCacheMaxEntries(n int) CacheOption {
 }
 
 // withCacheNowFunc overrides the cache's clock. Test-only (unexported): the
-// TTL-vs-UpstreamExpiry and eviction tests need to advance
-// time deterministically instead of sleeping.
+// TTL-vs-UpstreamExpiry and eviction tests need to advance time
+// deterministically instead of sleeping.
 func withCacheNowFunc(now func() time.Time) CacheOption {
 	return func(c *cachingGoogleCredentialValidator) { c.now = now }
 }
@@ -94,10 +94,10 @@ func withCacheNowFunc(now func() time.Time) CacheOption {
 // WithCacheMetrics wires the cache-outcome counter (the google_validator_cache
 // counter; see external_bearer_metrics.go for the closed label set and the
 // real exported metric name). nil (the default) disables recording. See
-// SetMetrics for wiring this after construction, which
-// production needs: server.go's New() builds this decorator before an OTel
-// MeterProvider exists (cmd/server_foreground.go builds one only once the
-// server's Hub ID is known).
+// SetMetrics for wiring this after construction, which production needs:
+// server.go's New() builds this decorator before an OTel MeterProvider
+// exists (cmd/server_foreground.go builds one only once the server's Hub ID
+// is known).
 func WithCacheMetrics(m GoogleValidatorCacheMetricsRecorder) CacheOption {
 	return func(c *cachingGoogleCredentialValidator) { c.metrics.Store(&m) }
 }
@@ -126,10 +126,10 @@ type cachingGoogleCredentialValidator struct {
 
 	group singleflight.Group
 
-	// metrics records hit/miss/negative_hit. A plain
-	// atomic.Pointer, not a mutex-guarded field, so the hot Validate*
-	// path never contends with SetMetrics (called once, at startup, from a
-	// different goroutine — see server.go's SetGoogleValidatorCacheMetrics).
+	// metrics records hit/miss/negative_hit. A plain atomic.Pointer, not a
+	// mutex-guarded field, so the hot Validate* path never contends with
+	// SetMetrics (called once, at startup, from a different goroutine — see
+	// server.go's SetGoogleValidatorCacheMetrics).
 	metrics atomic.Pointer[GoogleValidatorCacheMetricsRecorder]
 }
 
@@ -203,11 +203,11 @@ func cacheKey(token string, allowedClientIDs []string) string {
 }
 
 // negativelyCacheableGoogleError reports whether err is one of the four
-// errors allowed to be cached negatively. ErrGoogleUpstreamError
-// is deliberately excluded — and so is every other error not on this list —
-// so a transient upstream blip, or any credential fault not
-// explicitly vetted for negative caching, is never remembered against the
-// caller: the next request always retries upstream.
+// errors allowed to be cached negatively. ErrGoogleUpstreamError is
+// deliberately excluded — and so is every other error not on this list — so
+// a transient upstream blip, or any credential fault not explicitly vetted
+// for negative caching, is never remembered against the caller: the next
+// request always retries upstream.
 func negativelyCacheableGoogleError(err error) bool {
 	return errors.Is(err, ErrGoogleInvalidCredential) ||
 		errors.Is(err, ErrGoogleExpiredCredential) ||
@@ -332,8 +332,8 @@ func (c *cachingGoogleCredentialValidator) validate(
 		// Detach from the leader's own request context: this call is shared
 		// by every waiter on this key, so the leader cancelling (or timing
 		// out) its own request must not fail every follower's request too.
-		// Still bounded by upstreamCallTimeout so a
-		// leaderless call can't hang forever.
+		// Still bounded by upstreamCallTimeout so a leaderless call can't
+		// hang forever.
 		upstreamCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), upstreamCallTimeout)
 		defer cancel()
 		identity, err := upstream(upstreamCtx)

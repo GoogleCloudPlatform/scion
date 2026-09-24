@@ -312,9 +312,9 @@ func TestGEExchangeMetrics_NilRecorder_NoPanic(t *testing.T) {
 // with and without a metrics recorder wired in and compares every field
 // except the minted access token and its timestamps, which vary run to run
 // by design (a fresh, independently-expiring token is minted each time).
-// Byte-for-byte identity is what TestGEExchange_*_ExactBytes (unchanged by
-// this design) actually pins; this test's job is only to show that adding
-// the metrics call touched none of the response-shaping code.
+// Byte-for-byte identity is what TestGEExchange_*_ExactBytes (unaffected by
+// the metrics call) actually pins; this test's job is only to show that
+// adding the metrics call touched none of the response-shaping code.
 func TestGEExchangeMetrics_ResponseShapeUnaffected(t *testing.T) {
 	identity := validGmailIdentity()
 	validator := &fakeGoogleValidator{idTokenResult: identity}

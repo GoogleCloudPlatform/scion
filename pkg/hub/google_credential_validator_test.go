@@ -708,8 +708,8 @@ func TestProductionValidator_AccessToken_TokenInfo400_InvalidCredential(t *testi
 // not "error", which the 400-status test above uses only incidentally,
 // since a 400 is rejected on status alone before the body is ever parsed).
 // This is the one branch that is otherwise unreachable by any other test:
-// mutating its ErrGoogleInvalidCredential to ErrGoogleUpstreamError
-// previously survived the whole suite.
+// mutating its ErrGoogleInvalidCredential to ErrGoogleUpstreamError is
+// caught only by this test.
 func TestProductionValidator_AccessToken_TokenInfo200WithErrorBody_InvalidCredential(t *testing.T) {
 	endpoints := newTestEndpoints(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Error("JWKS must not be called for an access token") }),

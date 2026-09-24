@@ -407,15 +407,15 @@ func TestGEExchange_Route_SharesValidatorAndResolverWithExternalBearer(t *testin
 		t.Error("authConfig.ExternalBearerLimiter is not the same instance as srv.externalBearerRateLimiter")
 	}
 	if srv.geExchangeService.resolver != srv.authConfig.GoogleResolver {
-		t.Error("GE exchange resolver is not the same instance as the external-bearer path's resolver (design §4.4 wiring)")
+		t.Error("GE exchange resolver is not the same instance as the external-bearer path's resolver")
 	}
 
 	cachingValidator, ok := srv.authConfig.GoogleValidator.(*cachingGoogleCredentialValidator)
 	if !ok {
-		t.Fatalf("expected authConfig.GoogleValidator to be a *cachingGoogleCredentialValidator (design §4.2(iii)), got %T", srv.authConfig.GoogleValidator)
+		t.Fatalf("expected authConfig.GoogleValidator to be a *cachingGoogleCredentialValidator, got %T", srv.authConfig.GoogleValidator)
 	}
 	if cachingValidator.base != srv.geExchangeService.validator {
-		t.Error("the external-bearer path's caching decorator does not wrap the same base validator instance the GE exchange uses (design §4.4 wiring)")
+		t.Error("the external-bearer path's caching decorator does not wrap the same base validator instance the GE exchange uses")
 	}
 }
 
@@ -443,10 +443,10 @@ func TestGEExchange_Route_GoogleStackBuiltWithoutExchangeOrTrust(t *testing.T) {
 		t.Fatal("expected no GE exchange service when GEGoogleExchange is not configured")
 	}
 	if srv.authConfig.GoogleValidator == nil {
-		t.Error("expected authConfig.GoogleValidator to be built unconditionally (O3)")
+		t.Error("expected authConfig.GoogleValidator to be built unconditionally")
 	}
 	if srv.authConfig.GoogleResolver == nil {
-		t.Error("expected authConfig.GoogleResolver to be built unconditionally (O3)")
+		t.Error("expected authConfig.GoogleResolver to be built unconditionally")
 	}
 }
 
@@ -483,7 +483,7 @@ func TestGEExchange_Route_ProductionResolverHonoursAdminEmails(t *testing.T) {
 		t.Fatalf("Resolve(admin@gmail.com): %v", err)
 	}
 	if adminUser.Role != "admin" {
-		t.Errorf("admin@gmail.com role = %q, want %q (production roleFor must honour AdminEmails, M11)", adminUser.Role, "admin")
+		t.Errorf("admin@gmail.com role = %q, want %q (production roleFor must honour AdminEmails)", adminUser.Role, "admin")
 	}
 
 	memberIdentity := validGmailIdentity()

@@ -696,10 +696,12 @@ func TestGEExchange_AdminEmails_ProvisionsAdminRole(t *testing.T) {
 	}
 }
 
-// TestGEExchange_ExternalIdentityLookupFault_ServerError: a GetExternalIdentity fault that is not store.ErrNotFound
-// must surface as a server error (5xx), not the 403 "no binding" treatment a
-// non-authoritative or conflicting-binding case gets. Exercises the exchange
-// side of the same resolver fix that auth_external_bearer_test.go's
+// TestGEExchange_ExternalIdentityLookupFault_ServerError: a
+// GetExternalIdentity fault that is not store.ErrNotFound must surface as a
+// server error (5xx), not the 403 "no binding" treatment a
+// non-authoritative or conflicting-binding case gets. Exercises the
+// exchange side of the same resolver behaviour that
+// auth_external_bearer_test.go's
 // TestExternalBearer_GetExternalIdentityFault_ServiceUnavailable exercises
 // on the external-bearer side.
 func TestGEExchange_ExternalIdentityLookupFault_ServerError(t *testing.T) {
@@ -2265,8 +2267,8 @@ func TestGEExchange_RealValidator_UpstreamFailures_ExactBytes(t *testing.T) {
 }
 
 // TestGEExchange_RealValidator_IDTokenForceRefreshFailure_ExactBytes covers
-// the fifth minimum case the fix brief asked for: an ID-token JWKS
-// force-refresh 5xx, using the same fetchedAt back-dating technique as
+// an ID-token JWKS force-refresh 5xx, using the same fetchedAt back-dating
+// technique as
 // TestProductionValidator_IDToken_ForceRefreshFailure_UpstreamError and
 // TestProductionValidator_IDToken_JWKSForceRefresh.
 func TestGEExchange_RealValidator_IDTokenForceRefreshFailure_ExactBytes(t *testing.T) {
