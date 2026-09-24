@@ -636,7 +636,7 @@ func TestAuthMiddleware_HubBearer_EmptyToken(t *testing.T) {
 }
 
 // TestAuthMiddleware_HubBearer_RejectedByHub proves the exact rejection
-// response the design mandates (§4.6): 401, fixed message, and the
+// response required: 401, fixed message, and the
 // underlying Hub rejection reason never appears in the response body
 // (logged at Info instead). Exact-byte comparison catches a mutation that
 // leaks the reason (e.g. interpolating err.Error() into the message).

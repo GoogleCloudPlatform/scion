@@ -113,7 +113,7 @@ func newMockHubServer(t *testing.T) *mockHubServer {
 		// Route based on path prefix.
 		switch {
 		case r.Method == "GET" && r.URL.Path == "/api/v1/auth/me":
-			// Stands in for the Hub's external-bearer path (design §4.4):
+			// Stands in for the Hub's external-bearer path:
 			// any non-empty bearer token is admitted, EXCEPT the sentinel
 			// "invalid-bearer-token" value tests use to exercise rejection.
 			// This is the endpoint the bridge's hubBearer scheme introspects
