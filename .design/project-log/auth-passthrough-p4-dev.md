@@ -215,3 +215,58 @@ this round's head, both for the targeted subset and the full-run gate below.
 None beyond what the two amendments already settled. The K2 warning's exact log fields (`issuer_url` + a
 message naming `issuer_type`/`expected_audience`) and placement (inside `NewFederationAuthenticator`, not a
 new call site) were fully determined by the amendment's spec.
+
+## Fix round 2 (review `p4-r2-ap-p4-rev-2.md`: REQUEST CHANGES at `2981a58a7`; 0 Critical, 1 Required, 3 Optional,
+1 Nit, 5 FYI)
+
+Reviewer: `ap-p4-rev-2`. Fix brief: `briefs/ap-p4-dev-fix-r2.md`. All fix-round-1 findings verified resolved,
+the K2 warning follows the r7 spec, and overall risk was rated LOW — the only blocker was mechanical. Rebased
+onto `origin/scion/auth-passthrough` (Phase 5's `dcc2b9909`/`647a6bb29` observability-metrics commits landed in
+parallel); no conflicts, since none of them touch the files this round changes.
+
+| # | Finding | Change | Test(s) | Mutant |
+|---|---|---|---|---|
+| R1 | The fix-round-1 log entry's R5 row named the upstream PR this docs section derives from as a bare hash-number reference — the one shape the bare-ref gate exists to catch, and it slipped in because the narration rule (which exempts the project log) was conflated with the separate bare-ref rule (which does not). | Reworded to "upstream-PR-derived", matching how the rest of the log and every commit message already reference it. | — (grep, not a unit test) | — |
+| O1 | The "never on the request path" test (`TestExternalBearer_DisabledPathRequests_NoAddedWarnings`) passed `Logger: slog.Default()` in the `AuthConfig` under test, so it only watched the authenticator's own logger — a regression that additionally routed the warning through the request-scoped `cfg.Logger` would pass unnoticed. | Changed that one field to `Logger: log`, the same capture logger passed to the constructor. | Same test. | Reproduced by adding a second `warnIfExternalBearerDisabled` call inside `googleTrust`, gated on `cfg.Logger`, guarded so it only fires for the exact disabled shape — confirms the mutant would otherwise pass (6 warnings after 5 requests) → **killed** by the `Logger: log` change. Reverted after confirming. |
+| O2 | `invalidDomainEntryReason` accepted `https://example.com`, `example.com/` and `example..com` — none of these can ever equal `domainOf`'s parsed domain, so each is a silent, permanent lockout of the intended domain, the same failure mode Rule 11 already exists to catch. | Added two more `switch` clauses: reject any entry containing `/` or `:` (a URL or scheme/path fragment), and any entry containing `..` (a double dot). Updated `auth.md`'s format note to name both. | Extended `TestInvalidDomainEntryReason` with `double dot`, `pasted URL with scheme`, `trailing slash`, `contains a colon` rows. | Dropped the `/:`  clause → the three URL/slash/colon rows fail (accepted instead of rejected). Dropped the `..` clause → the double-dot row fails. Both reverted after confirming. |
+| O3 | `warnIfExternalBearerDisabled` ran at the top of the per-issuer loop, before the HTTP-scheme check, JWKS discovery, and the audience-fallback error — so an issuer whose construction later failed could still have logged a warning about a config that never took effect (visible on a reload that fails and keeps the old config). | Moved the call to immediately before `issuers[normalizedIssuer] = &issuerEntry{...}`, i.e. only once the issuer is actually going to be stored. | New `TestNewFederationAuthenticator_ConstructionFails_NoWarning`: a Google `user` issuer with empty `expected_audience` (which would otherwise warn) and no `jwks_url`, forced through a failing OIDC-discovery `RoundTripper`, asserts `NewFederationAuthenticator` errors **and** logs no warning. | Reverted the move (call restored to the loop's top) → the new test fails (1 warning logged despite construction failing). Confirmed, then re-applied the fix. All of fix-round-1's W1–W6 warning tests re-ran green after the move (the shared-construction-loop invariant they depend on didn't change, only where within it the call sits). |
+| N1 | The whitespace-rejection table test only pinned an ASCII space (`U+0020`); a narrower, ASCII-only whitespace check would still pass it, since the code's `unicode.IsSpace` guard already covers more than that. | Added a tab and a non-breaking-space (`U+00A0`, via a ` ` escape rather than a literal byte, to avoid it being silently normalised to a plain space by an editing step) row. | Extended `TestInvalidDomainEntryReason`. | Replaced `unicode.IsSpace`'s `strings.IndexFunc` guard with `strings.Contains(domain, " ")` (ASCII space only) → the new tab and NBSP rows fail (accepted instead of rejected). Reverted after confirming. |
+| FYI 1 (double warning at startup; re-warn on unrelated settings writes) | No code change — matches the r7 spec's "once per load" wording, since every rebuild (including an unrelated opsettings write triggering `ApplySnapshot`) is a load. Reviewer is relaying to the lead. | — | — |
+| FYI 5 (design-row IDs in new comments/subjects) | Deferred to the polish sweep, per the brief and consistent with FYI 4 from the previous round. | — | — |
+| FYI 2–4 | No action (equivalent mutants, pre-existing duplication with Rule 10, docs already verified accurate). | — | — |
+
+### Note: a `git reset --hard` slip during this round
+
+While preparing this round's commits I ran `git reset --hard` one commit too far back (to the last *pushed*
+commit, `714186be2`, rather than preserving the round's in-progress work), which discarded all of this round's
+then-uncommitted-equivalent changes from the working tree. Recovered by redoing every edit from the fix table
+above against the same base and re-verifying each one (build, targeted tests, and a fresh mutation pass on the
+two mutation-sensitive changes, O1 and O3) before committing. No pushed history was rewritten — the reset only
+ever moved local `HEAD` backward to a commit already on `origin`, and nothing had been pushed past that point
+yet in this round. Recorded here because it happened, not because it changed anything in the final diff.
+
+### Gates (fix round 2)
+
+- ✅ `gofmt -l pkg/hub pkg/config` — clean.
+- ✅ `go build -buildvcs=false ./...` — clean.
+- ✅ `go vet ./pkg/hub/... ./pkg/config/...` — clean.
+- ✅ `GOGC=40 golangci-lint run --new-from-rev=a53175c23 --concurrency=1 ./pkg/hub/... ./pkg/config/...` —
+  `0 issues.`
+- ✅ Targeted `-race` (`TestFederationConfig_Validate|TestInvalidDomainEntryReason|TestExternalBearer|
+  TestNewFederationAuthenticator_|DisabledPath|Warning`) across `pkg/hub` (incl. `authzop`) and, with `SCION_*`
+  unset, `pkg/config` — all green.
+- ✅ Bare-issue-number greps (`git log a53175c23..HEAD --format=%B`, `git diff a53175c23..HEAD` `+` lines) at
+  the final commit (`47694bb0c`): both empty.
+- ✅ Review-narration grep over this round's new commits (`git log 714186be2..HEAD`, case-insensitive for
+  "phase N", "review rN", "fix round", "EM/lead decision"): both the commit-message and diff greps print
+  nothing.
+- ✅ Manual mutation-resistance pass on O1 and O3 (the two findings whose fix could plausibly regress silently)
+  plus the two new Rule 11 clauses (O2) and the whitespace guard (N1) — all confirmed killed by hand, then
+  reverted; working trees diffed against saved originals afterward.
+- **No full `pkg/hub` run this round**, per the brief: O3 is a local move within the existing constructor
+  (`NewFederationAuthenticator`), not new production surface, and no other non-test Hub code changed.
+
+### Deviations / design questions (fix round 2)
+
+None. Every finding's fix was fully specified by the review and the brief; the only deviation from plan was
+the `git reset --hard` slip noted above, which cost time but changed nothing in the final result.
