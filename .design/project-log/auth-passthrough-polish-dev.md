@@ -135,7 +135,7 @@ Fix brief: `briefs/ap-polish-dev-fix-r1.md`. The lead authorized editing test-fa
 | R6 | `pkg/hub/auth_external_bearer_access_token_test.go:133-135` | "this keeps the existing SA rejection covering both credential kinds" — false: an SA ID token with a listed project is admitted | "even though SA ID tokens can be admitted via allowed_gcp_projects (see auth_external_bearer_sa_test.go)" |
 | R7 | `pkg/hub/auth_external_bearer_test.go:44-45` | Dropping "Phase 1:" earlier turned a historical note into a false present-tense claim: "(Google user ID tokens only)" — the same harness is used by access-token, SA, domain and metrics tests too | Dropped the parenthetical entirely |
 | O1 | `pkg/hub/auth_external_bearer.go:110-113` (dup of `:489-495`), `auth_external_bearer_access_token_test.go:174-178`, `auth_external_bearer_test.go:1399-1400,1401-1409` | "An earlier version…" code-history paragraphs | Rephrased as present-tense rationale; the duplicate at `:110-113` was deleted, keeping the one on `classifyResolveError` |
-| O2 | `auth_external_bearer_sa_test.go:155`, `external_bearer_metrics.go:44`, `external_bearer_metrics_test.go:600`, `external_bearer_ratelimit.go:57`, `ge_exchange_metrics_test.go:316`, `auth_external_bearer_test.go:1688` | "the design's azp check" / "design's closed-label-set rule" / "used by this design" / "with the design's" defaults / "this design" ×2 | Each reworded to name the behaviour or requirement directly, with no "design" reference. (`auth_external_bearer_sa_test.go:155`'s fix was reverted — see Known limitation below.) Also renamed `TestExternalBearerRateLimiter_DefaultsMatchDesign` → `_DefaultsPinned` (no other reference to the old name) |
+| O2 | `auth_external_bearer_sa_test.go:155`, `external_bearer_metrics.go:44`, `external_bearer_metrics_test.go:600`, `external_bearer_ratelimit.go:57`, `ge_exchange_metrics_test.go:316`, `auth_external_bearer_test.go:1688` | "the design's azp check" / "design's closed-label-set rule" / "used by this design" / "with the design's" defaults / "this design" ×2 | Each reworded to name the behaviour or requirement directly, with no "design" reference. (`auth_external_bearer_sa_test.go:155`'s fix was reverted — see Known limitation below; **superseded, see ap-em ruling further below**.) Also renamed `TestExternalBearerRateLimiter_DefaultsMatchDesign` → `_DefaultsPinned` (no other reference to the old name) |
 | O3 | 13 string literals listed in the review (`auth_external_bearer_access_token_test.go:215`, `auth_external_bearer_test.go:1723`, `external_bearer_ratelimit_test.go:131,134,137,140`, `ge_exchange_route_test.go:410,415,418,446,449,486`, `google_credential_cache_test.go:100`) | Narration/design/mutation-ID fragments inside `t.Errorf`/`t.Error`/`t.Fatalf` messages | All 13 edited now that the lead authorized test-failure-message edits; diagnostic content kept, narration removed |
 | N1 | `auth_external_bearer_test.go:595` | "as production's unconditional construction guarantees in production" (says "production" twice) | "as New()'s unconditional construction guarantees in production" |
 | N2 | `auth_external_bearer_sa_test.go:29-33`, `external_bearer_ratelimit_test.go:121-126,163-171`, `auth_external_bearer_access_token_test.go:165-167`, `ge_exchange_test.go:699`, `auth_external_bearer.go:37-39` | Ragged rewraps left by earlier comment deletions | Reflowed to ~78 columns. Also reflowed several other ragged paragraphs found while reading comments in context (`auth_external_bearer.go`'s error-sentinel docs, `domainOf`, the rate-limit comment, `classifyResolveError`'s dedup; `google_credential_cache.go`'s `withCacheNowFunc`/`WithCacheMetrics`/`negativelyCacheableGoogleError`/`metrics` field/leaderless-call docs; `external_bearer_metrics_test.go`'s label-types doc) |
@@ -151,7 +151,7 @@ git diff a53175c23 HEAD -- pkg cmd extras docs-site | /usr/bin/grep -nE '^\+' | 
 ```
 9 hits. 8 were false positives or legitimate technical usage: "by design" as the ordinary English idiom for "intentionally" (`federation_auth.go`, `ge_exchange_metrics_test.go` ×2), "*atomic.Pointer design" meaning the atomic-pointer field shape, not a document (`ge_exchange_route_test.go`), "previously pushed `auth_scheme`" and "before this protection was added" describing real upgrade-path behaviour, not review history (`extras/scion-a2a-bridge/README.md`), and four generic "a mutant that X would Y" test-rationale sentences (standard mutation-testing vocabulary, not narration about this branch's own review rounds — `main_test.go`, `adminoverlay_test.go`, `auth_external_bearer_domain_test.go` ×2). One genuine miss: `auth_external_bearer_domain_test.go:198` referenced a "U2 check" (a design row ID); reworded to "the ID-token-only domain check".
 
-### Known limitation: one O2 item left unfixed
+### Known limitation: one O2 item left unfixed (superseded; see ap-em ruling further below)
 
 `auth_external_bearer_sa_test.go:155`'s trailing comment (`delete(claims, "azp") // azp == "" variant: the design's "azp" check…`) could not be
 reworded without breaking the updated comments-only proof: any edit to a trailing comment on a code line necessarily changes that
@@ -166,9 +166,10 @@ proof's allowed-kinds list in a future round.
 ```
 $ git diff 75d6d4be7..HEAD -- '*.go' | /usr/bin/grep -E '^[+-][^+-]' | /usr/bin/grep -vE '^[+-]\s*(//|$)'
 ```
-Prints 14 lines: 13 are `t.Errorf`/`t.Error`/`t.Fatalf` format-string changes in `_test.go` files (the O3 literals plus the R1/R5/R6
-literal corrections), and 1 is the renamed `func TestExternalBearerRateLimiter_DefaultsMatchDesign` → `func
-TestExternalBearerRateLimiter_DefaultsPinned` line. No other kind of line appears.
+Prints 28 lines (14 −/+ pairs): 13 pairs are `t.Errorf`/`t.Error`/`t.Fatalf` format-string changes in `_test.go` files (the 13 O3
+literals — R1, R5 and R6 were comment-only edits and do not appear here), and 1 pair is the renamed `func
+TestExternalBearerRateLimiter_DefaultsMatchDesign` → `func TestExternalBearerRateLimiter_DefaultsPinned` line. No other kind of line
+appears.
 
 ### Gates (fix round 1)
 
@@ -206,3 +207,135 @@ e501efc5a docs(project-log): fix a self-contradictory row and an inaccurate bare
 ```
 
 **ap-em ruling (post fix round 1):** trailing-comment edits are allowed, provided the code before `//` stays byte-identical. `auth_external_bearer_sa_test.go:156`'s trailing comment (the one Known-limitation item above) was fixed under that ruling: `delete(claims, "azp") ` is identical on both sides of the diff, only the comment text changed from "the design's azp check" to "the azp/sub check".
+
+## Fix round 2
+
+Review: `reviews/polish-r2-ap-polish-rev-2.md` (`ap-polish-rev-2`, REQUEST CHANGES on `88b0a1a32`: 0C / 2R / 2O / 2N / 3FYI). Every
+round-1 finding was verified resolved and accurate; what remained was completeness. Brief: `briefs/ap-polish-dev-fix-r2.md` (final
+version from `ap-em`, replacing an earlier equivalent draft from `auth-passthrough-lead`).
+
+### R1: 15 test-plan row IDs removed
+
+| File:line | Before | After |
+|---|---|---|
+| `extras/scion-a2a-bridge/integration/auth_transport_process_test.go:262` | `UATValidator (B3).` | `UATValidator.` |
+| `…/auth_transport_process_test.go:297` | `(no exchange, B3)` | `(no exchange)` |
+| `…/auth_transport_process_test.go:395` | `— no credential exchange (B3).` | `— no credential exchange.` |
+| `…/auth_transport_process_test.go:828` | `TestHubBearerProcessPassthrough is B3: a real bridge process…` | `…proves hubBearer pass-through end to end: a real bridge process…` |
+| `…/auth_transport_process_test.go:874` | `B3's core assertion: zero exchanges.` | `The core assertion: zero exchanges.` |
+| `extras/scion-a2a-bridge/internal/bridge/auth_test.go:172` | `B1: a Google-shaped (non scion_pat_) credential is admitted…` | `A Google-shaped (non scion_pat_) credential is admitted…` |
+| `…/internal/bridge/auth_test.go:201` | `B4 (empty token -> 401).` | `Empty token -> 401.` |
+| `…/internal/bridge/auth_test.go:697` | `B2 (hubUAT is unchanged) and hubBearer's defining difference…` | `hubUAT's prefix check and hubBearer's defining difference…` |
+| `extras/scion-a2a-bridge/internal/bridge/v0_compat_test.go:819` | `…is the B3-adjacent bridge-side counterpart…` | `…is the companion to TestHubBearerProcessPassthrough…` |
+| `pkg/config/federation_config_test.go:395` | `trigger on issuer_type (K1c).` | `trigger on issuer_type.` |
+| `pkg/hub/auth_external_bearer_access_token_test.go:106` | `U2 (access-token half) — email_verified=false -> 401.` | `An access token with email_verified=false -> 401.` |
+| `pkg/hub/auth_external_bearer_test.go:271` | `U1 (second half) — same sub, changed email…` | `Same sub, changed email…` |
+| `pkg/hub/auth_external_bearer_test.go:393` | `U2 (ID-token half) — email_verified=false…` | `An ID token with email_verified=false…` |
+| `pkg/hub/auth_external_bearer_test.go:1024` | `Isolates S4 from S2.` | `Isolates the azp/sub check from the project allowlist check.` |
+| `pkg/hub/google_credential_validator_test.go:442` | `S4 (validator level) — an SA ID token…` | `At the validator level, an SA ID token…` |
+
+**Generalized sweep (per the brief, to prevent recurrence):**
+```
+/usr/bin/grep -nE '^\+.*//.*\b[A-Z][0-9]{1,2}[a-z]?\b' <(git diff a53175c23 -- pkg cmd extras)
+```
+0 hits at final `HEAD`. Sanity-checked the pattern against a pre-fix copy of one of the 15 lines above (`// UATValidator (B3).`) to confirm it does match — it does. The only surviving letter+digit token found anywhere in the branch's diff by broader inspection is the `"U1"` display-name string literal argument in `GenerateTokenPair(..., "U1", ...)` (`auth_external_bearer_test.go`), which the round-2 review itself already identified and said should stay (it is a token display-name value, not a design-row label).
+
+### R2: six "was X, now Y" / code-history sites fixed
+
+| File:line | Before | After |
+|---|---|---|
+| `pkg/hub/auth_external_bearer_test.go:571-580` | "This used to be its own `_Golden401` test, but it over-claimed… It's superseded by golden case (a)…" (sits directly above a test named `..._Golden401`) | "Golden case (a) in TestExternalBearer_ConfiguredTrustInvariant_Golden pins the exact bytes with GoogleValidator == nil. Production always builds a non-nil GoogleValidator (only trust gates the path), so this test proves the same no-op in that production shape…" |
+| `pkg/hub/auth_external_bearer_test.go:1598` | "server.go's New now always constructs them." | "server.go's New always constructs them." |
+| `pkg/hub/ge_exchange.go:196-200` (production) | "SA rejection moved out of the validator: the validator now only classifies IsServiceAccount… keeps its pre-existing behaviour… unchanged." | "The validator only classifies IsServiceAccount and each caller decides whether to admit it; the exchange endpoint rejects SA credentials outright." |
+| `pkg/hub/ge_exchange_test.go:494-496` | "SA rejection moved out of the validator: the real validator now classifies…" | "The real validator classifies IsServiceAccount rather than erroring…" |
+| `pkg/hub/google_credential_validator.go:282-283,293` (production) | "…to keep its behaviour unchanged" / "User tokens (unchanged):" | dropped both parentheticals |
+| `pkg/hub/ge_exchange_route_test.go:358-359` | "google_credential_cache.go changed the validator half of this: the external-bearer path now uses a caching decorator…" | "For the validator half, the external-bearer path uses a caching decorator…" |
+
+**Additional grep** (`used to\|moved\|now \|unchanged\|no longer\|superseded\|pre-existing\|new files\|before this`, added comment lines):
+32 hits. True positives fixed beyond the six sites above:
+- `pkg/hub/auth_external_bearer_test.go:1666-1671` (comment inside `TestNoPackageLevelMutableState`'s file list): "the pre-existing otel_metrics.go and otel_gcp_metrics.go" / "the two pre-existing otel_*.go files" → dropped "pre-existing" (PR-relative framing describing files that simply already exist in the package).
+- `pkg/hub/external_bearer_snapshot_metrics_test.go:174`: "proves the pre-existing \"no_metrics\" fallback" → dropped "pre-existing".
+- `docs-site/src/content/docs/hosted/single-node/auth.md:310` (table row): "Falls through to the pre-existing rejection for that credential" → "Falls through unchanged to whichever other authentication check applies to that credential".
+- `pkg/config/federation_config.go:109`, `pkg/hub/auth_external_bearer_sa_test.go:42`, `pkg/hub/google_credential_cache_test.go:28,43,501`: "Used to gate/prove/widen/put…" reworded to present tense ("Gates…", "Proves…", "widens…", "Puts…") — grammatically these already meant "is used to", not "used to, but no longer", but the ambiguity was cheap to remove.
+
+Every other hit in the 32 is a false positive, re-verified by reading in context:
+- `time.Now()` calls, the `now`/`clock` mock-clock variables and parameters (`google_credential_cache.go`, `google_credential_cache_test.go`, `external_bearer_ratelimit_test.go`, `google_identity_resolver.go`, `ge_exchange_ratelimit.go`, `ge_exchange_test.go`, `google_credential_validator_test.go`, `auth_external_bearer_sa_test.go`) — "now" as a variable/function name or `time.Now()`;
+- "now" in a present-tense, non-historical sense ("is now full", "should now be admitted", "must now succeed", "must now fit", "Only now, with every issuer… accepted, log…") — describes a runtime condition at a point in execution, not a change from before this PR;
+- "unchanged" describing an invariant (a token/response passed through without modification: `bridge.go:1362`, `auth.go:484`, `auth_external_bearer_test.go:869,1624`, `federation_config.go:230`) — not "unchanged relative to before this PR";
+- "earlier" describing code/loop position, not review history (`auth_external_bearer_test.go:1429,1483,1485`, `federation_auth.go:114`, `google_credential_validator_test.go:403`);
+- "moved" inside "no other outcome series moved" (a testing-invariant phrase) and inside "removed" (`main_test.go:117`, substring match);
+- `docs-site/.../a2a-bridge.md:358` "Deprecated, superseded by hubBearer" — a real, user-facing deprecation notice, not narration;
+- `extras/scion-a2a-bridge/README.md:118` "before this protection was added" / "previously pushed" — real upgrade-path guidance for operators (already reviewed and accepted in fix round 1's own sweep);
+- `google_credential_validator_test.go:508` "must not run before this check" — describes assertion ordering inside the test, not a PR-relative claim.
+
+### Known limitation carried forward (not fixed — outside the current authorized-exceptions list)
+
+`pkg/config/federation_config_test.go:556`: the table-test `name:` field `"allowed_projects (the OLD field) on the Google issuer
+still errors, and now names allowed_gcp_projects"` feeds `t.Run(tt.name, …)` — it is a subtest name, not a comment and not one of
+the `t.Errorf`/`t.Fatalf`/`t.Error`/`t.Fatal`/`t.Logf` format strings the O3 exception covers, and not a trailing comment. Left
+unchanged per the strict "no other string literal changes" rule. Flagging for the lead/reviewer, as the trailing-comment case was
+in fix round 1, in case this class of edit should also be authorized.
+
+### O1: five PR-relative wording sites fixed
+
+| File:line | Before | After |
+|---|---|---|
+| `pkg/hub/auth_external_bearer_test.go:741-747` | Orphaned banner: "No package-level mutable state in the new files. (Documented here; ensured by code review: …)", heading an unrelated test | Deleted — the rule is already documented and mechanically enforced by `TestNoPackageLevelMutableState` (`:1655` area) |
+| `pkg/hub/google_credential_validator_test.go:546` | "under the unchanged user rule" | "under the user rule" |
+| `extras/scion-a2a-bridge/internal/bridge/uatvalidator_test.go:197` | "(since it now handles both types identically)" | "(since it handles both types identically)" |
+| `pkg/config/federation_config.go:257-258` (production) | "This is a hard error rather than a startup warning: both fields are new, so no existing config can break." | "This is a hard error rather than a warning, so a misconfiguration fails at startup instead of silently admitting nothing." |
+| `pkg/hub/ge_exchange_metrics_test.go:34-35` | "…checks the response bytes/status are exactly what they were before this metric existed…" | "…checks the response bytes/status are byte-identical to the response without a metrics recorder…" |
+
+### O2: `external_bearer_metrics.go:110-114` overstatement fixed
+
+Before: "Each value corresponds to exactly one response … that serveExternalBearer writes" — false for `ok` (served by `next`, no
+response written by `serveExternalBearer`) and `not_applicable` (caller writes its own rejection). After (the report's suggested
+wording, checked against `externalBearerOutcomes()`'s eight constants and their own docs at `:118-121`): "Each error outcome
+corresponds to exactly one response (HTTP status plus error code) that serveExternalBearer writes; ok means the request was served
+by the next handler and not_applicable means the caller wrote its usual rejection."
+
+### N1: ragged wraps and dangling word fixed
+
+- `auth_external_bearer.go:274-275` ("silently stripped —" breaking early) — reflowed.
+- `auth_external_bearer_access_token_test.go:395-396` ("A units error (e.g." breaking early) — reflowed.
+- `ge_exchange_test.go:2270-2271` ("technique as") and `:699-706` ("auth_external_bearer_test.go's") — reflowed as far as the long
+  identifier names allow.
+- `external_bearer_metrics_test.go:599-603` — dangling "used" after "by this design" was removed in fix round 1; now "Every label
+  value is one of the named constants…".
+
+### N2: project-log accuracy fixed
+
+- The comments-only-proof paragraph said "Prints 14 lines: 13 are … format-string changes … (the O3 literals plus the R1/R5/R6
+  literal corrections)". Corrected: the command prints **28** lines (14 −/+ pairs), all 13 literal pairs are the O3 set, and R1/R5/R6
+  were comment-only edits that do not appear in that proof's output.
+- Added "(superseded; see ap-em ruling further below)" markers to the O2 table row and the "Known limitation" heading, since the
+  ap-em ruling addendum at the end of the fix-round-1 section already fixed that item.
+
+### Comments-only proof (fix round 2)
+
+```
+$ git diff 88b0a1a32 -- '*.go' | /usr/bin/grep -E '^[+-][^+-]' | /usr/bin/grep -vE '^[+-]\s*(//|$)'
+```
+Empty. This round made zero test-literal, trailing-comment, or test-rename edits — every change is a whole-line comment (or a
+markdown/doc-comment line outside `.go` files). Consequently no test needed re-running for a message/name change this round; the
+targeted-test gate has nothing new to target.
+
+### Gates (fix round 2)
+
+- `gofmt -l pkg cmd extras` — empty.
+- `go build ./...` — clean (both the main module and, separately, `extras/scion-a2a-bridge`).
+- `go vet ./pkg/hub/... ./pkg/config/... ./cmd/...` — clean. `go vet ./...` (bridge module) — clean.
+- `GOGC=40 golangci-lint run --new-from-rev=a53175c23 --concurrency=1 ./pkg/hub/... ./pkg/config/... ./cmd/...` — `0 issues`. Same
+  command with `./...` from `extras/scion-a2a-bridge/` — `0 issues`.
+- `go test ./pkg/config/...` (SCION_* unset, `GOTMPDIR` outside any checkout) — `pkg/config/opsettings` and
+  `pkg/config/templateimport` pass; `pkg/config` itself fails two tests unrelated to this change
+  (`TestLoadVersionedSettings_ProjectIDRemapping`, `TestLoadVersionedSettings_GroveIDBackwardCompat`, both a pre-existing
+  `auto_expose_ports` decode error in `v7_fixes_test.go`) — confirmed via `git stash` that these fail identically on unmodified
+  `88b0a1a32`. Ran `-run 'TestFederationConfig|TestInvalidDomainEntryReason'` explicitly: all pass.
+- `go test ./...` from `extras/scion-a2a-bridge/` — all packages pass.
+- Bonus (not required this round, since no test name/message changed): a full `go test ./pkg/hub/...` run. It surfaced 4 pre-existing,
+  unrelated failures (`TestDEF164_AtAgentSlug_DeliversToAgent`, `TestDEF164_AtAgentSlug_DMConversationCreated`,
+  `TestDEF152_AgentToAgentDM_DeliversViaOutbound`, `TestCreateTemplateV2_ScopeIDInjectionBlocked`), all in files this branch never
+  touches (`handlers_outbound_def142_test.go`, `handlers_outbound_def152_test.go`, `handlers_user_templates_test.go`).
+- Byte hazard (`perl -ne 'print "$ARGV:$.\n" if /\xC2\xA0/'` over every file changed since `a53175c23`) — empty.
+- Bare refs — both commands empty.
