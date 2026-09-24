@@ -30,7 +30,8 @@ import (
 // reprovisionSetup builds a git project with a gitignored .scion/agents and a
 // global generic harness-config + default template. CWD is set OUTSIDE the
 // repo, as on a runtime broker — this is what makes util.BranchExists return
-// false for a broker process, which is the root cause C1 fixes against.
+// false for a broker process, which is the data-loss condition Reprovision's
+// workspace-mode gate (design §3.4 Amendment A2) exists to catch.
 func reprovisionSetup(t *testing.T) (scionDir, globalScionDir string) {
 	t.Helper()
 	t.Setenv("SCION_HOST_UID", "")

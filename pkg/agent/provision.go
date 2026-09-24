@@ -484,7 +484,7 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 		return cfg, err
 	}
 
-	// N3: derive agentDir from the workspace ProvisionAgent actually used,
+	// Derive agentDir from the workspace ProvisionAgent actually used,
 	// instead of independently recomputing project/agent dirs. Safe
 	// specifically because the GitClone-only gate above guarantees
 	// ProvisionAgent's git-clone branch ran, and that branch always sets the
