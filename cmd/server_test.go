@@ -317,7 +317,7 @@ func TestRegisterGlobalGroveAndBroker_StarterHubKeepsDockerProfile(t *testing.T)
 }
 
 // TestRegisterGlobalProjectAndBroker_UpdateSetsReprovisionCapability is the
-// design §3.4 Amendment A2.2(b) (p1a-r2 N1) regression test: the update
+// design §3.4 Amendment A2.2(b) regression test: the update
 // branch (an existing broker record, re-registering) must refresh
 // Capabilities to include Reprovision:true, not just the create branch. A
 // broker registered before the reincarnate feature existed would otherwise

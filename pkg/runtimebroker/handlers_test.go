@@ -1186,7 +1186,7 @@ func TestCreateAgentProvisionOnly(t *testing.T) {
 }
 
 // TestCreateAgentProvisionOnly_Reprovision_CallsReprovisionNotProvision is
-// the design §3.4 Amendment A2.5 (p1a-r2 R2) regression test: a
+// the design §3.4 Amendment A2.5 regression test: a
 // provisionOnly+reprovision request must call Manager.Reprovision, never
 // Manager.Provision, and the response must echo reprovisioned:true — the
 // echo the hub's whole fail-closed dispatch design rests on
@@ -1271,11 +1271,15 @@ func TestCreateAgentProvisionOnly_PlainProvision_DoesNotEchoReprovisioned(t *tes
 }
 
 // TestCreateAgentProvisionOnly_ReprovisionError_ReturnsErrorNoEcho covers a
-// Reprovision failure: the handler must return an error status and must not
-// echo reprovisioned:true for a request that never actually succeeded.
+// plain (unwrapped, not agent.ErrReprovisionRefused) Reprovision failure: the
+// handler must return the generic 500 — not the 409 the sentinel-wrapped
+// path gets — and must not echo reprovisioned:true for a request that never
+// actually succeeded. A neutral error message (no "reprovision refused"
+// substring) keeps this test from being satisfied by accident if the 409
+// path's body text ever changed to also contain "error".
 func TestCreateAgentProvisionOnly_ReprovisionError_ReturnsErrorNoEcho(t *testing.T) {
 	srv, mgr := newTestServerWithProvisionCapture()
-	mgr.reprovisionErr = errors.New("reprovision refused: no existing git clone")
+	mgr.reprovisionErr = errors.New("boom: transient broker failure")
 
 	body := `{
 		"name": "reprovision-fail-agent",
@@ -1291,14 +1295,17 @@ func TestCreateAgentProvisionOnly_ReprovisionError_ReturnsErrorNoEcho(t *testing
 
 	srv.Handler().ServeHTTP(w, req)
 
-	if w.Code < 400 {
-		t.Fatalf("expected an error status, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 for a plain (non-refusal) Reprovision error, got %d: %s", w.Code, w.Body.String())
 	}
 	if !mgr.reprovisionCalled {
 		t.Error("expected Reprovision to have been attempted")
 	}
-	if !strings.Contains(w.Body.String(), "reprovision refused") {
+	if !strings.Contains(w.Body.String(), "boom: transient broker failure") {
 		t.Errorf("expected the error body to surface the Reprovision error, got: %s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), `"reprovisioned":true`) {
+		t.Errorf("a failed Reprovision must never echo reprovisioned:true, got: %s", w.Body.String())
 	}
 }
 

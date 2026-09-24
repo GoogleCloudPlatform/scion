@@ -19,7 +19,7 @@ import (
 	"testing"
 )
 
-// TestResolveReincarnateTarget is the design §3.4 Amendment A3.11 / p1a-r1 F3
+// TestResolveReincarnateTarget is the design §3.4 Amendment A3.11
 // table test for the self/handoff-required rule: self-migration (no
 // argument, or an explicit argument matching $SCION_AGENT_NAME) requires
 // --handoff-file, unless the request is a dry run (which migrates nothing).

@@ -226,7 +226,7 @@ func TestHeartbeatService_ForceHeartbeat(t *testing.T) {
 }
 
 // TestHeartbeatService_ReportsReprovisionCapability is the design §3.4
-// Amendment A2.2(b) (p1a-r2 N1) regression test: every heartbeat must report
+// Amendment A2.2(b) regression test: every heartbeat must report
 // Capabilities.Reprovision=true, since that is what lets an already-joined
 // remote broker's capabilities self-heal after an upgrade without a manual
 // --force re-registration (the hub refreshes its stored capabilities from

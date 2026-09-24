@@ -68,7 +68,7 @@ func reprovisionSetup(t *testing.T) (scionDir, globalScionDir string) {
 	return scionDir, globalScionDir
 }
 
-// TestReprovision_WorktreeMode_Refused is the inverted p1a-r1 C1 repro
+// TestReprovision_WorktreeMode_Refused is a data-loss regression test
 // (design Amendment A2): Reprovision must refuse — not silently delete — a
 // worktree-mode agent's workspace, so uncommitted work always survives.
 // Before the fix, ProvisionAgent's CWD-dependent BranchExists check returned
@@ -103,7 +103,7 @@ func TestReprovision_WorktreeMode_Refused(t *testing.T) {
 }
 
 // TestReprovision_GitCloneSetButNoRealClone_Refused is the design §3.4
-// Amendment A2.1 (p1a-r2 R2) regression test for the SECOND half of the C1
+// Amendment A2.1 regression test for the SECOND half of the workspace-mode
 // gate: GitClone IS set (opts.GitClone != nil passes the first check), but
 // the workspace on disk is a worktree — its .git is a FILE, not a directory,
 // exactly what a worktree-per-agent agent looks like on disk. Without the
@@ -302,8 +302,8 @@ func TestReprovision_PromptMDUntouched(t *testing.T) {
 	}
 }
 
-// TestReprovision_RunningContainer_Refused is the p1a-r1 R3 regression test:
-// Reprovision must refuse when the runtime reports the agent's container as
+// TestReprovision_RunningContainer_Refused is a design §3.4 Amendment A2
+// regression test: Reprovision must refuse when the runtime reports the agent's container as
 // still running, regardless of what the caller believes the state to be.
 func TestReprovision_RunningContainer_Refused(t *testing.T) {
 	scionDir, _ := reprovisionSetup(t)
