@@ -58,8 +58,9 @@ func TestExternalBearerSnapshotMetrics_RecordsMoveTheSnapshot(t *testing.T) {
 }
 
 // TestExternalBearerSnapshotMetrics_Since proves the snapshot carries a
-// parseable RFC3339 construction timestamp, fixed at construction and
-// unchanged across snapshots taken later.
+// parseable RFC3339 construction timestamp, and that GetSnapshot reports
+// exactly the value fixed at construction rather than recomputing one each
+// call (e.g. from time.Now() at snapshot time).
 func TestExternalBearerSnapshotMetrics_Since(t *testing.T) {
 	before := time.Now().UTC()
 	m := NewExternalBearerSnapshotMetrics()
@@ -77,10 +78,25 @@ func TestExternalBearerSnapshotMetrics_Since(t *testing.T) {
 		t.Errorf("Since = %v, want between %v and %v", since, before, after)
 	}
 
-	m.RecordGEExchangeRequest(GEExchangeOutcomeOK)
+	// Overwrite the construction time to a fixed point well in the past,
+	// then prove GetSnapshot reports exactly that value. RFC3339's
+	// one-second resolution would hide a snapshot-time bug in the check
+	// above, since both calls there land in the same second as
+	// construction; a value decades away cannot land in that window by
+	// accident.
+	fixed := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+	m.since = fixed
+	wantFixed := fixed.Format(time.RFC3339)
+
 	snap2 := m.GetSnapshot()
-	if snap2.Since != snap1.Since {
-		t.Errorf("Since changed across snapshots: %q -> %q, want fixed at construction", snap1.Since, snap2.Since)
+	if snap2.Since != wantFixed {
+		t.Fatalf("Since = %q, want %q (must report the fixed construction time, not a time computed when the snapshot is taken)", snap2.Since, wantFixed)
+	}
+
+	m.RecordGEExchangeRequest(GEExchangeOutcomeOK)
+	snap3 := m.GetSnapshot()
+	if snap3.Since != wantFixed {
+		t.Errorf("Since changed across snapshots: %q -> %q, want fixed at construction", snap2.Since, snap3.Since)
 	}
 }
 
