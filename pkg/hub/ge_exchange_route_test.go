@@ -349,13 +349,13 @@ func TestGEExchange_Route_BodyLimitStillOperates(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// R2/R3 — the GE exchange endpoint and the external-bearer path must share
-// exactly one GoogleIdentityResolver instance (design §4.4), so both
+// The GE exchange endpoint and the external-bearer path must share
+// exactly one GoogleIdentityResolver instance, so both
 // mechanisms produce identical resolution/provisioning/suspension decisions
 // during the exchange-to-external-bearer soak. This exercises the actual
 // production wiring in server.go's New, not a test double.
 //
-// Phase 2 (google_credential_cache.go) changed the validator half of this:
+// google_credential_cache.go changed the validator half of this:
 // the external-bearer path now uses a caching decorator (re-validates on
 // every request, unlike the exchange endpoint, so it benefits from a cache),
 // but it wraps the *same base validator instance* the exchange uses, so the
@@ -392,7 +392,7 @@ func TestGEExchange_Route_SharesValidatorAndResolverWithExternalBearer(t *testin
 	if srv.authConfig.GoogleResolver == nil {
 		t.Fatal("expected authConfig.GoogleResolver to be set")
 	}
-	// review r1 finding 1: the external-bearer rate limiter must be wired
+	// The external-bearer rate limiter must be wired
 	// both onto authConfig (what authenticateExternalBearer consults) and
 	// onto Server (so Start/StartBackgroundServices can run its cleanup
 	// goroutine — see TestServer_ExternalBearerRateLimiter_CleanupRunsInBackground).
@@ -419,8 +419,8 @@ func TestGEExchange_Route_SharesValidatorAndResolverWithExternalBearer(t *testin
 	}
 }
 
-// TestGEExchange_Route_GoogleStackBuiltWithoutExchangeOrTrust proves O3: the
-// Google validator/resolver stack is now built unconditionally in New, not
+// TestGEExchange_Route_GoogleStackBuiltWithoutExchangeOrTrust proves the
+// Google validator/resolver stack is built unconditionally in New, not
 // gated on GEGoogleExchange or startup-time trust detection, so that Google
 // trust added later via hot reload takes effect without a restart.
 func TestGEExchange_Route_GoogleStackBuiltWithoutExchangeOrTrust(t *testing.T) {
@@ -450,8 +450,8 @@ func TestGEExchange_Route_GoogleStackBuiltWithoutExchangeOrTrust(t *testing.T) {
 	}
 }
 
-// TestGEExchange_Route_ProductionResolverHonoursAdminEmails is r2 finding 1:
-// both existing U5 tests inject a hand-written stub roleFor into
+// TestGEExchange_Route_ProductionResolverHonoursAdminEmails: other tests
+// inject a hand-written stub roleFor into
 // NewGoogleIdentityResolver directly, proving only that the resolver *uses*
 // roleFor — not that server.go's real closure (func(ctx, email) string {
 // return srv.getUserRole(ctx, email, "", "") }) actually honours AdminEmails
@@ -499,21 +499,24 @@ func TestGEExchange_Route_ProductionResolverHonoursAdminEmails(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// O1 — the three Set*Metrics setters (server.go) actually reach the running
+// The three Set*Metrics setters (server.go) actually reach the running
 // request path they are meant to wire into. Every other metrics test in this
 // package builds its own AuthConfig by hand and calls attachExternalBearerMetrics/
 // WithCacheMetrics directly, bypassing New() -> Handler() entirely — this is
 // the only test that goes through that real wiring.
 //
 // Handler() (server.go) is s.applyMiddleware(s.mux), and it re-reads
-// s.authConfig fresh on every call — it is Start(), not registerRoutes/New(),
-// that captures authConfig by value into UnifiedAuthMiddleware's closure
-// exactly once, when it calls applyMiddleware to build the production
-// http.Server's Handler. cmd/server_foreground.go calls the three setters
-// before Start(). This test captures Handler() once, before calling the
-// setters, to stand in for that single Start()-time capture: only with the
-// handler built first do the setters have to reach an *already-captured*
-// cfg, which is what actually exercises AuthConfig.ExternalBearerMetrics's
+// s.authConfig fresh on every call — it is Start() or Handler(), not
+// registerRoutes/New(), that captures authConfig by value into
+// UnifiedAuthMiddleware's closure, when either calls applyMiddleware to
+// build a request-serving handler. cmd/server_foreground.go calls the three
+// setters before Start() in Hub-only mode; in combined mode it instead calls
+// Handler() once from initWebServer to mount the Hub API into the Web
+// server, so that call is the one that captures authConfig there. This test
+// captures Handler() once, before calling the setters, to stand in for
+// whichever of those a real deployment hits first: only with the handler
+// built first do the setters have to reach an *already-captured* cfg, which
+// is what actually exercises AuthConfig.ExternalBearerMetrics's
 // *atomic.Pointer design and would catch SetExternalBearerMetrics ever
 // replacing the box instead of storing into it.
 // ---------------------------------------------------------------------------
@@ -695,7 +698,7 @@ func decodeExternalBearerSection(t *testing.T, body []byte) *ExternalBearerMetri
 }
 
 // TestServer_DefaultMetricsWiring_OTelSetterStillMovesSnapshot extends the
-// test above (covers Optional O3): builds the OTel recorder exactly as
+// test above: builds the OTel recorder exactly as
 // cmd/server_foreground.go does — NewOTelExternalBearerMetrics(mp,
 // srv.ExternalBearerSnapshotMetrics()) followed by all three setters — and
 // proves /metrics still moves by exactly 1. If the snapshot argument were

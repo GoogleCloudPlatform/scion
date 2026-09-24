@@ -27,7 +27,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// K2's load-time diagnostic: a Google issuer configured as issuer_type "user"
+// A load-time diagnostic: a Google issuer configured as issuer_type "user"
 // with an empty expected_audience leaves the external-bearer path disabled
 // for that issuer (googleTrust). warnIfExternalBearerDisabled
 // (federation_auth.go) logs that once per NewFederationAuthenticator call —

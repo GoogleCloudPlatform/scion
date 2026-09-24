@@ -491,9 +491,9 @@ func TestGEExchange_ExpiredToken(t *testing.T) {
 }
 
 func TestGEExchange_ServiceAccount(t *testing.T) {
-	// SA rejection moved out of the validator (design §4.2(i)): the real
+	// SA rejection moved out of the validator: the real
 	// validator now classifies IsServiceAccount rather than erroring, so this
-	// test drives the exchange's own Step 1.5 rejection (R5), not a validator
+	// test drives the exchange's own Step 1.5 rejection, not a validator
 	// error. The fake mirrors that shape exactly.
 	identity := &ValidatedGoogleIdentity{
 		Subject:          "sa-sub-123",
@@ -532,13 +532,13 @@ func TestGEExchange_ServiceAccount(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// S7 — the exchange endpoint still rejects SA credentials through the REAL
+// The exchange endpoint still rejects SA credentials through the REAL
 // validator, using the real SA claim/response shape (azp == sub for ID
 // tokens; a real service-account email for access tokens), not the
 // hand-built fakeGoogleValidator identity TestGEExchange_ServiceAccount
-// above uses. Phase 1's F1 finding flagged that a fake built directly with
+// above uses. A fake built directly with
 // IsServiceAccount: true never exercises the real classification+validation
-// path this design phase changed (§4.2(ii)); these do.
+// path; these do.
 // ---------------------------------------------------------------------------
 
 // TestGEExchange_RealValidator_ServiceAccountIDToken_Rejected_ExactBytes covers
@@ -546,7 +546,7 @@ func TestGEExchange_ServiceAccount(t *testing.T) {
 // sub, and azp set to an unrelated value. Without the ErrGoogleServiceAccount
 // wrap on the validator's SA azp/sub disagreement (google_credential_validator.go),
 // the last two shapes would instead hit the plain ErrGoogleFieldDisagreement
-// case in the switch below and return 401 "credential metadata inconsistent"
+// case in ge_exchange.go's error switch and return 401 "credential metadata inconsistent"
 // — validation itself fails for those shapes, so the exchange's Step 1.5 SA
 // rejection is never reached on its own.
 //
@@ -655,7 +655,7 @@ func TestGEExchange_RealValidator_ServiceAccountAccessToken_Rejected_ExactBytes(
 }
 
 // TestGEExchange_AdminEmails_ProvisionsAdminRole proves the exchange's role
-// delta (design §4.3: roleFor replaces the hard-coded "member") through the
+// delta (roleFor replaces the hard-coded "member") through the
 // GoogleIdentityResolver, the same way the exchange is actually wired in
 // production (server.go passes a shared resolver into NewGEExchangeService).
 func TestGEExchange_AdminEmails_ProvisionsAdminRole(t *testing.T) {
@@ -696,8 +696,7 @@ func TestGEExchange_AdminEmails_ProvisionsAdminRole(t *testing.T) {
 	}
 }
 
-// TestGEExchange_ExternalIdentityLookupFault_ServerError is F2 (fix round 3,
-// now in scope): a GetExternalIdentity fault that is not store.ErrNotFound
+// TestGEExchange_ExternalIdentityLookupFault_ServerError: a GetExternalIdentity fault that is not store.ErrNotFound
 // must surface as a server error (5xx), not the 403 "no binding" treatment a
 // non-authoritative or conflicting-binding case gets. Exercises the exchange
 // side of the same resolver fix that auth_external_bearer_test.go's
@@ -726,7 +725,7 @@ func TestGEExchange_ExternalIdentityLookupFault_ServerError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for a store fault")
 	}
-	// Pinned to the exact mapping (review r4, optional finding 1), not just
+	// Pinned to the exact mapping, not just
 	// "some 5xx": the exchange's default arm maps every unclassified Resolve
 	// error to exactly 500, and a mutation widening that to any other 5xx
 	// should fail this test.
@@ -2176,9 +2175,9 @@ func TestGEExchange_OrphanCleanup_OnProvisioningConflict(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Review r2 finding 1 (fix round 2): the exchange endpoint's external
+// The exchange endpoint's external
 // behaviour must not change when the base validator's error classification
-// changes (design §4.2, the r1 fix brief for finding 2). Every existing
+// changes. Every existing
 // TestGEExchange_* test uses fakeGoogleValidator, which returns preset
 // sentinels directly and never runs getTokenInfo/getUserInfo/forceRefresh —
 // so none of them could have caught a change in what those functions

@@ -2725,7 +2725,7 @@ var MutationClassifications = []MutationClassification{
 	// pkg/hub/google_identity_resolver.go — shared Google identity resolution,
 	// used by both the GE credential exchange (ge_exchange.go) and the
 	// external-bearer auth path (auth_external_bearer.go). Extracted from
-	// ge_exchange.go's former resolveLocalUser/provisionNewUser (design §4.3).
+	// ge_exchange.go's former resolveLocalUser/provisionNewUser.
 	// -----------------------------------------------------------------------
 	{File: "pkg/hub/google_identity_resolver.go", Function: "Resolve", Symbol: "UpdateUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "Google identity resolution: user email update on binding match", Scope: "pkg/hub/google_identity_resolver.go"}},
 	{File: "pkg/hub/google_identity_resolver.go", Function: "Resolve", Symbol: "UpdateUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "Google identity resolution: user profile update (displayName/avatar)", Scope: "pkg/hub/google_identity_resolver.go"}},

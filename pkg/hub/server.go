@@ -988,12 +988,12 @@ type Server struct {
 	geExchangeService *GEExchangeService
 	// GE exchange endpoint rate limiter (per-client-IP token bucket).
 	geExchangeRateLimiter *geExchangeRateLimiter
-	// GE exchange outcome counter (design §4.7: the ge_exchange.requests
+	// GE exchange outcome counter (the ge_exchange.requests
 	// logical counter). nil disables recording; see handleGEGoogleExchange
 	// and SetGEExchangeMetrics.
 	geExchangeMetrics GEExchangeMetricsRecorder
 	// externalBearerSnapshot is the always-on, in-process recorder for the
-	// three design §4.7 counters, wired as their default (see New) and
+	// three external-bearer/cache/exchange counters, wired as their default (see New) and
 	// served on GET /metrics regardless of GCP export configuration. Never
 	// nil after New.
 	externalBearerSnapshot *ExternalBearerSnapshotMetrics
@@ -1628,10 +1628,9 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// called — and googleTrust (auth_external_bearer.go) is the single
 	// request-time source of truth for whether the external-bearer path is
 	// actually reachable. Building this unconditionally means Google trust
-	// added later via hot reload takes effect without a restart (design §4.1;
-	// this generalizes K3 ahead of its formal Phase 3/4 landing), and keeps
+	// added later via hot reload takes effect without a restart, and keeps
 	// exactly one validator/resolver instance shared between the GE exchange
-	// endpoint and the external-bearer path (design §4.4).
+	// endpoint and the external-bearer path.
 	googleValidator := NewGoogleCredentialValidator(nil)
 	googleResolver := NewGoogleIdentityResolver(
 		s,                    // store.Store embeds UserStore
@@ -1644,9 +1643,9 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	)
 	// The external-bearer path (unlike the exchange endpoint) re-validates on
 	// every request, so it gets a caching decorator in front of the shared
-	// base validator (design §4.2(iii)). The exchange endpoint below is
+	// base validator. The exchange endpoint below is
 	// deliberately wired to the undecorated googleValidator, not this one:
-	// exchange behaviour must not change (design §4.2), and it already
+	// exchange behaviour must not change, and it already
 	// mints a short-lived (default 60s) Hub token per successful exchange
 	// rather than re-verifying the Google credential on every downstream
 	// call, so it has neither the request-per-request cost the cache exists
@@ -1663,7 +1662,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// is used anyway).
 	srv.authConfig.ExternalBearerMetrics = &atomic.Pointer[ExternalBearerMetricsRecorder]{}
 
-	// The in-process design §4.7 counters (external-bearer outcome, cache
+	// The in-process counters (external-bearer outcome, cache
 	// result, exchange outcome) are always constructed and wired as the
 	// default recorder for all three, regardless of GCP export
 	// configuration: the exchange-deletion soak gate must not depend on
@@ -1684,7 +1683,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// goroutine below, the same way geExchangeRateLimiter's is started.
 	// Without a running cleanup, the bounded bucket map fills permanently
 	// after maxEntries distinct client IPs and fails closed for every new
-	// one (review r1 finding 1).
+	// one.
 	srv.externalBearerRateLimiter = newExternalBearerRateLimiter(cfg.TrustedProxies)
 	srv.authConfig.ExternalBearerLimiter = srv.externalBearerRateLimiter
 
@@ -2555,7 +2554,7 @@ func (s *Server) SetGCPTokenMetrics(m GCPTokenMetricsRecorder) {
 }
 
 // SetExternalBearerMetrics wires the external-bearer authentication outcome
-// counter (design §4.7). Unlike SetMetrics/SetDBMetrics/SetDispatchMetrics/
+// counter. Unlike SetMetrics/SetDBMetrics/SetDispatchMetrics/
 // SetGCPTokenMetrics above, this recorder is read from AuthConfig by the
 // free-standing UnifiedAuthMiddleware closure. That closure captures a copy
 // of authConfig each time applyMiddleware runs (Start(), Handler()), not
@@ -2582,7 +2581,7 @@ func (s *Server) SetExternalBearerMetrics(m ExternalBearerMetricsRecorder) {
 }
 
 // SetGoogleValidatorCacheMetrics wires the Google-credential cache counter
-// (design §4.7) into the caching decorator constructed in New(). Logs a
+// into the caching decorator constructed in New(). Logs a
 // warning and does nothing if the configured validator isn't (or is no
 // longer) that decorator — defensive only; production always wires
 // NewCachingGoogleCredentialValidator there.
@@ -2599,7 +2598,7 @@ func (s *Server) SetGoogleValidatorCacheMetrics(m GoogleValidatorCacheMetricsRec
 }
 
 // ExternalBearerSnapshotMetrics returns the always-on, in-process recorder
-// for the external-bearer/cache/exchange counters (design §4.7), for GET
+// for the external-bearer/cache/exchange counters, for GET
 // /metrics (handlers_health.go) and for passing into
 // NewOTelExternalBearerMetrics so the OTel-backed recorder dual-writes into
 // the same instance. Never nil for a Server built through New().

@@ -92,7 +92,7 @@ type GEExchangeService struct {
 // GoogleIdentityResolver and passes the same instance to both), so the
 // exchange endpoint and external-bearer authentication reach identical
 // resolution decisions — including the admin_emails-aware role for newly
-// provisioned users — during the soak between the two mechanisms (design §4.4).
+// provisioned users — during the soak between the two mechanisms.
 func NewGEExchangeService(
 	config GEGoogleExchangeConfig,
 	validator GoogleCredentialValidator,
@@ -194,7 +194,7 @@ func (s *GEExchangeService) Exchange(ctx context.Context, req *ExchangeRequest) 
 	}
 
 	// Step 1.5: reject service-account credentials for user exchange. SA
-	// rejection moved out of the validator (design §4.2(i)): the validator now
+	// rejection moved out of the validator: the validator now
 	// only classifies IsServiceAccount, and each caller decides whether to
 	// admit it. The exchange endpoint keeps its pre-existing behaviour of
 	// rejecting SA credentials outright, unchanged.
@@ -349,7 +349,7 @@ func (s *Server) handleGEGoogleExchange(w http.ResponseWriter, r *http.Request) 
 // recordGEExchange records one exchange-endpoint outcome, nil-safe against
 // s.geExchangeMetrics never having been wired — true only for a Server not
 // built through New() (most hand-built `&Server{}` tests in this package);
-// New() always wires the in-process default (design §4.7's snapshot),
+// New() always wires the in-process default (the snapshot recorder),
 // optionally replaced later by SetGEExchangeMetrics with an OTel-backed one.
 // It also enforces the closed label set at this boundary: an invalid outcome
 // is dropped (with a warning naming only the label and its type, never the

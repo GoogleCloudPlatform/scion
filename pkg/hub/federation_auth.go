@@ -54,8 +54,8 @@ type issuerEntry struct {
 	config config.TrustedIssuerConfig
 	// rawConfig is the configuration exactly as configured, with no fallback
 	// applied. IssuerConfig returns this copy: callers that gate a feature on
-	// "was expected_audience actually set" (e.g. the external-bearer path,
-	// design §4.1) must see an empty ExpectedAudience as empty, not silently
+	// "was expected_audience actually set" (e.g. the external-bearer path)
+	// must see an empty ExpectedAudience as empty, not silently
 	// replaced by the Hub's unrelated OIDC issuer URL.
 	rawConfig config.TrustedIssuerConfig
 	cache     *jwksCache
