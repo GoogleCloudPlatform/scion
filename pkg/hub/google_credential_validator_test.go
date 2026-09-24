@@ -439,7 +439,7 @@ func TestProductionValidator_IDToken_ServiceAccount_AZPEqualsSub_Valid(t *testin
 	}
 }
 
-// S4 (validator level) — an SA ID token whose azp disagrees with sub is
+// At the validator level, an SA ID token whose azp disagrees with sub is
 // rejected, even though its aud is on the allowed list (unlike a user token,
 // azp is not treated as the audience for an SA).
 func TestProductionValidator_IDToken_ServiceAccount_AZPDiffersFromSub_Rejected(t *testing.T) {
@@ -543,8 +543,8 @@ func TestProductionValidator_IDToken_ServiceAccountEmail_BadSignature_NeverReach
 
 // This is the mutation-killer for "the SA/user split uses the verified email,
 // not claim shape": a USER (non-SA) email with an SA-shaped azp==sub and an
-// aud that disagrees with azp must still be rejected under the unchanged
-// user rule. If the SA/user branches were ever selected by shape instead of
+// aud that disagrees with azp must still be rejected under the user rule.
+// If the SA/user branches were ever selected by shape instead of
 // by isGoogleServiceAccount(email), this token would incorrectly validate
 // (the SA rule only checks azp==sub, and aud is separately allowed).
 func TestProductionValidator_IDToken_UserToken_SAShapedAzpSub_StillRejected(t *testing.T) {

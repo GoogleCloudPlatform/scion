@@ -103,7 +103,7 @@ func TestExternalBearer_AccessToken_WrongAzp_Unauthorized(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// U2 (access-token half) — email_verified=false -> 401.
+// An access token with email_verified=false -> 401.
 // ---------------------------------------------------------------------------
 
 func TestExternalBearer_AccessToken_UnverifiedEmail_Unauthorized(t *testing.T) {
@@ -392,8 +392,8 @@ func TestExternalBearer_AccessToken_RateLimitedBeyondBurst(t *testing.T) {
 	}
 	// Pinned to the exact expected value, not just non-empty: with burst 3
 	// exhausted and the default 5 rps refill, ceil(1/5) = 1 second is the
-	// only correct value. A units error (e.g.
-	// milliseconds, or a hardcoded 0) would pass a mere non-empty check.
+	// only correct value. A units error (e.g. milliseconds, or a hardcoded
+	// 0) would pass a mere non-empty check.
 	if got := w.Header().Get("Retry-After"); got != "1" {
 		t.Errorf("Retry-After = %q, want %q", got, "1")
 	}

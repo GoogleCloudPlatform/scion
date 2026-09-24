@@ -39,7 +39,7 @@ import (
 // unrelated AllowedProjects/allowed_projects).
 // ---------------------------------------------------------------------------
 
-// neverAuthorized always denies. Used to prove that a service account
+// neverAuthorized always denies. Proves that a service account
 // admitted via allowed_gcp_projects bypasses the Hub sign-in policy — the
 // project allowlist IS the authorization decision (ResolvePolicy.PreAuthorized).
 func neverAuthorized(_ context.Context, _ string) bool { return false }

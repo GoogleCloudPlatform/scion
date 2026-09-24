@@ -268,8 +268,8 @@ func TestExternalBearer_ValidIDToken_Authenticates(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// U1 (second half) — same sub, changed email on a second request resolves to
-// the same (sub-bound) user, not a new one.
+// Same sub, changed email on a second request resolves to the same
+// (sub-bound) user, not a new one.
 // ---------------------------------------------------------------------------
 
 func TestExternalBearer_SubBound_EmailChangeKeepsSameUser(t *testing.T) {
@@ -390,7 +390,7 @@ func TestExternalBearer_WorkspaceEmail_Provisioned(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// U2 (ID-token half) — email_verified=false is rejected with 401.
+// An ID token with email_verified=false is rejected with 401.
 // ---------------------------------------------------------------------------
 
 func TestExternalBearer_UnverifiedEmail_Unauthorized(t *testing.T) {
@@ -570,18 +570,13 @@ func TestExternalBearer_AdminEmails_ProvisionsAdminRole(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // With no Google trust configured, the external-bearer hook is a true
-// no-op: the response is byte-identical to the pre-existing rejection. This
-// used to be its own "_Golden401" test, but it over-claimed: it asserted only
-// a message prefix. It's superseded by golden case (a) in
-// TestExternalBearer_ConfiguredTrustInvariant_Golden below, which asserts the
-// exact bytes.
-//
-// Production always builds a non-nil GoogleValidator
-// (only trust gates the path now), so this must also be proven in that
-// "production shape" — GoogleValidator non-nil, FederationAuth pointer empty
-// — not just with GoogleValidator == nil like golden case (a). Otherwise the
-// nil-guard in authenticateExternalBearer could mask a bug in the googleTrust
-// gate itself.
+// no-op. Golden case (a) in TestExternalBearer_ConfiguredTrustInvariant_Golden
+// pins the exact bytes with GoogleValidator == nil. Production always builds
+// a non-nil GoogleValidator (only trust gates the path), so this test proves
+// the same no-op in that production shape — GoogleValidator non-nil,
+// FederationAuth pointer empty — not just with GoogleValidator == nil like
+// golden case (a). Otherwise the nil-guard in authenticateExternalBearer
+// could mask a bug in the googleTrust gate itself.
 // ---------------------------------------------------------------------------
 
 func TestExternalBearer_NoTrustProductionShape_Golden401(t *testing.T) {
@@ -737,14 +732,6 @@ func TestNoTokenInfoOutsideGoogleCredentialValidator(t *testing.T) {
 		t.Errorf("unexpected 'tokeninfo' references outside google_credential_validator.go: %v", offenders)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// No package-level mutable state in the new files.
-// (Documented here; ensured by code review: auth_external_bearer.go and
-// google_identity_resolver.go declare only functions, types, and immutable
-// package-level values (error sentinels, constants) — no var with mutable
-// state such as a map, cache, or counter.)
-// ---------------------------------------------------------------------------
 
 // TestExternalBearer_ClassifyNonJWT_AccessToken pins the classifier
 // behaviour: a non-JWT token is a candidate access token, by
@@ -1021,7 +1008,7 @@ func TestExternalBearer_ServiceAccountIDToken_AZPNotSub_Unauthorized(t *testing.
 	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())
 	// The SA's project ("proj") IS listed, so the only thing that can be
 	// rejecting this token is the azp/sub check — not the allowed_gcp_projects
-	// gate. Isolates S4 from S2.
+	// gate. Isolates the azp/sub check from the project allowlist check.
 	cfg := newExternalBearerConfigWithSA(t, newTestValidator(endpoints), resolver, []string{"proj"})
 
 	claims := validIDTokenClaims()
@@ -1595,7 +1582,7 @@ func TestExternalBearer_JWKSUpstreamFailure_ServiceUnavailable(t *testing.T) {
 // Google trust added later via hot reload (no restart) takes effect on
 // the very next request. googleTrust reads through cfg.FederationAuth on
 // every call, and the validator/resolver are never gated on trust being
-// present — server.go's New now always constructs them.
+// present — server.go's New always constructs them.
 // ---------------------------------------------------------------------------
 
 func TestExternalBearer_HotReload_TrustAddedWithoutRestart(t *testing.T) {
@@ -1676,15 +1663,13 @@ func TestNoPackageLevelMutableState(t *testing.T) {
 		// external_bearer_metrics.go declares only consts, type
 		// definitions and interfaces (no package-level var at all), unlike
 		// its OTel-backed implementation otel_external_bearer_metrics.go,
-		// which — like the pre-existing otel_metrics.go and
-		// otel_gcp_metrics.go — uses package-level
-		// `var _ Interface = (*Impl)(nil)` compile-time assertions. Those
-		// are not mutable state (never written after compilation), but
-		// they are not errors.New(...) calls either, so this AST check's
-		// simple heuristic would flag them; the two pre-existing
-		// otel_*.go files are excluded from this list for the same
-		// reason, and otel_external_bearer_metrics.go follows that same
-		// precedent.
+		// which — like otel_metrics.go and otel_gcp_metrics.go — uses
+		// package-level `var _ Interface = (*Impl)(nil)` compile-time
+		// assertions. Those are not mutable state (never written after
+		// compilation), but they are not errors.New(...) calls either, so
+		// this AST check's simple heuristic would flag them; the other
+		// otel_*.go files are excluded from this list for the same reason,
+		// and otel_external_bearer_metrics.go follows that same precedent.
 		"external_bearer_metrics.go",
 		// external_bearer_snapshot_metrics.go is likewise consts/types/a
 		// struct with only mutex-guarded instance fields (no package-level
