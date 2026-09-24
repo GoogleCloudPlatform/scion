@@ -130,9 +130,9 @@ func TestExternalBearer_AccessToken_UnverifiedEmail_Unauthorized(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// A service-account identity must never be admitted via an access token
-// (the SA *ID-token* branch is separate; this keeps the existing SA
-// rejection covering both credential kinds).
+// A service-account identity must never be admitted via an access token,
+// even though SA ID tokens can be admitted via allowed_gcp_projects (see
+// auth_external_bearer_sa_test.go).
 // ---------------------------------------------------------------------------
 
 func TestExternalBearer_AccessToken_ServiceAccount_Rejected(t *testing.T) {
@@ -162,20 +162,18 @@ func TestExternalBearer_AccessToken_ServiceAccount_Rejected(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// With Google trust configured, an
-// opaque token is a candidate access token (absent trust it is
-// unconditionally not-applicable). TestExternalBearer_ConfiguredTrustInvariant_Golden's
-// case (d) proves the complementary "no trust" half of this invariant.
+// With Google trust configured, an opaque token is a candidate access token
+// (absent trust it is unconditionally not-applicable).
+// TestExternalBearer_ConfiguredTrustInvariant_Golden's case (d) proves the
+// complementary "no trust" half of this invariant.
 // ---------------------------------------------------------------------------
 
 // TestExternalBearer_TrustConfiguredOpaqueToken_AttemptsAccessTokenValidation
 // uses the REAL validator against a tokeninfo-400 stub, not a fake configured
-// to return an error the real validator would never produce for this input.
-// An earlier version of this test used
-// fakeGoogleValidator{accessTokenErr: ErrGoogleInvalidCredential}, which
-// happened to assert the post-fix status/body/code but could not have caught
-// the pre-fix bug (real tokeninfo 400 -> ErrGoogleUpstreamError -> 503) at
-// all, since the fake never went near that classification logic.
+// to return an error the real validator would never produce for this input:
+// a fake configured with a preset error would never exercise the
+// validator's own tokeninfo-400 -> ErrGoogleInvalidCredential classification
+// logic, so it could pass even if that classification broke.
 func TestExternalBearer_TrustConfiguredOpaqueToken_AttemptsAccessTokenValidation(t *testing.T) {
 	var tokenInfoCalls atomic.Int64
 	tokenInfoHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -212,7 +210,7 @@ func TestExternalBearer_TrustConfiguredOpaqueToken_AttemptsAccessTokenValidation
 		t.Errorf("body = %s, want %s", w.Body.Bytes(), wantBody)
 	}
 	if got := tokenInfoCalls.Load(); got != 1 {
-		t.Errorf("tokeninfo called %d time(s), want 1 (Phase 2: trust configured + opaque token is now a candidate access token)", got)
+		t.Errorf("tokeninfo called %d time(s), want 1 (trust configured + opaque token is a candidate access token)", got)
 	}
 }
 
@@ -392,9 +390,9 @@ func TestExternalBearer_AccessToken_RateLimitedBeyondBurst(t *testing.T) {
 	if w.Code != http.StatusTooManyRequests {
 		t.Fatalf("status = %d, want 429: body=%s", w.Code, w.Body.String())
 	}
-	// Pinned to the exact expected value, not
-	// just non-empty: with burst 3 exhausted and the default 5 rps refill,
-	// ceil(1/5) = 1 second is the only correct value. A units error (e.g.
+	// Pinned to the exact expected value, not just non-empty: with burst 3
+	// exhausted and the default 5 rps refill, ceil(1/5) = 1 second is the
+	// only correct value. A units error (e.g.
 	// milliseconds, or a hardcoded 0) would pass a mere non-empty check.
 	if got := w.Header().Get("Retry-After"); got != "1" {
 		t.Errorf("Retry-After = %q, want %q", got, "1")

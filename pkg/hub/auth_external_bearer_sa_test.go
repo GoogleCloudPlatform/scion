@@ -27,10 +27,11 @@ import (
 
 // ---------------------------------------------------------------------------
 // The SA branch of authenticateExternalBearer. Some related SA cases live
-// alongside the
-// validator/exchange code they exercise (google_credential_validator_test.go,
-// ge_exchange_test.go); TestExternalBearer_ServiceAccountIDToken_AZPNotSub_Unauthorized
-// (auth_external_bearer_test.go) exercises the azp/sub disagreement case at the middleware level.
+// alongside the validator/exchange code they exercise
+// (google_credential_validator_test.go, ge_exchange_test.go);
+// TestExternalBearer_ServiceAccountIDToken_AZPNotSub_Unauthorized
+// (auth_external_bearer_test.go) exercises the azp/sub disagreement case at
+// the middleware level.
 //
 // These tests use newExternalBearerConfigWithSA, which builds a real,
 // validated FederationAuthenticator with AllowedGCPProjects set on the

@@ -195,8 +195,9 @@ func TestExternalBearer_UserIDToken_MixedCaseAllowedDomain_Authenticates(t *test
 // counterpart of the ID-token mixed-case test above: a listed domain must let
 // a user ACCESS token through too, not just an ID token. Without this, a
 // mutant that rejects every access token once allowed_domains is set (a
-// plausible copy-paste of the ID-token-only U2 check) would pass the whole
-// suite, even though access tokens are the primary GE credential shape.
+// plausible copy-paste of the ID-token-only domain check) would pass the
+// whole suite, even though access tokens are the primary GE credential
+// shape.
 func TestExternalBearer_AccessToken_ListedDomain_Authenticates(t *testing.T) {
 	const email = "user@Example.COM"
 	// A Workspace hd claim is required so the resolver's authoritative-domain

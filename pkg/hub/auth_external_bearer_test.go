@@ -41,13 +41,12 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Test harness for the external-bearer authentication path (Google
-// user ID tokens only). Reuses the production-validator test seam from
-// google_credential_validator_test.go (real RS256 verification against a
-// pinned test JWKS, via *http.Client's RoundTripper) and the fake user/
-// external-identity stores from ge_exchange_test.go, so both the exchange
-// endpoint and the external-bearer path are proven against the same
-// resolution logic.
+// Test harness for the external-bearer authentication path. Reuses the
+// production-validator test seam from google_credential_validator_test.go
+// (real RS256 verification against a pinned test JWKS, via *http.Client's
+// RoundTripper) and the fake user/external-identity stores from
+// ge_exchange_test.go, so both the exchange endpoint and the external-bearer
+// path are proven against the same resolution logic.
 // ---------------------------------------------------------------------------
 
 // newGoogleTrustFederationAuth builds a FederationAuthenticator with a single
@@ -592,9 +591,9 @@ func TestExternalBearer_NoTrustProductionShape_Golden401(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewUserTokenService: %v", err)
 	}
-	// A non-nil validator, as production's unconditional construction guarantees in
-	// production — but it must never be called, so a fake (rather than a real
-	// validator pointed at a JWKS server) both proves and enforces that.
+	// A non-nil validator, as New()'s unconditional construction guarantees
+	// in production — but it must never be called, so a fake (rather than a
+	// real validator pointed at a JWKS server) both proves and enforces that.
 	// A default error (rather than a zero-value fakeGoogleValidator, which
 	// returns (nil, nil)) means that if a mutation ever lets this "must not
 	// reach the validator" test actually reach it, the result is a real
@@ -1397,18 +1396,17 @@ func TestExternalBearer_ConfiguredTrustInvariant_Golden(t *testing.T) {
 			// fails at its own counting.totalCalls() assertion below instead
 			// of panicking (nil-pointer dereference) and aborting the whole
 			// test binary before the remaining golden cases run (the same
-			// class of problem fixed for trackingUserStore).
+			// pattern trackingUserStore uses to avoid a SIGSEGV mid-suite).
 			counting := newRejectingCountingValidator()
 			// GoogleValidator/GoogleResolver are always wired, matching
 			// production shape (server.go's New builds them unconditionally):
-			// only trust varies below. An earlier
-			// version of this test left them nil in the no-trust cases, which
-			// meant authenticateExternalBearer's `cfg.GoogleValidator == nil`
-			// guard returned not-applicable regardless of whether the
-			// googleTrust gate itself was intact — so a mutation that skipped
+			// only trust varies below. Leaving them nil in the no-trust cases
+			// would let authenticateExternalBearer's `cfg.GoogleValidator ==
+			// nil` guard return not-applicable regardless of whether the
+			// googleTrust gate itself is intact — so a mutation that skipped
 			// the trust check for non-JWT tokens (`if !ok && looksLikeJWT(token)`)
-			// passed the whole suite silently. With the validator always
-			// non-nil, that mutation now surfaces as a nonzero
+			// would pass the whole suite silently. With the validator always
+			// non-nil, that mutation surfaces as a nonzero
 			// counting.totalCalls() below.
 			cfg := AuthConfig{
 				Mode:            "production",
@@ -1685,8 +1683,8 @@ func TestNoPackageLevelMutableState(t *testing.T) {
 		// they are not errors.New(...) calls either, so this AST check's
 		// simple heuristic would flag them; the two pre-existing
 		// otel_*.go files are excluded from this list for the same
-		// reason, and this design's otel_external_bearer_metrics.go
-		// follows that same precedent.
+		// reason, and otel_external_bearer_metrics.go follows that same
+		// precedent.
 		"external_bearer_metrics.go",
 		// external_bearer_snapshot_metrics.go is likewise consts/types/a
 		// struct with only mutex-guarded instance fields (no package-level
@@ -1720,7 +1718,7 @@ func TestNoPackageLevelMutableState(t *testing.T) {
 						}
 						call, ok := valueSpec.Values[i].(*ast.CallExpr)
 						if !ok || !isErrorsNewCall(call) {
-							t.Errorf("%s: package-level var %q is not an errors.New(...) sentinel — I4 requires no mutable package-level state", file, name.Name)
+							t.Errorf("%s: package-level var %q is not an errors.New(...) sentinel — no mutable package-level state is allowed", file, name.Name)
 						}
 					}
 				}

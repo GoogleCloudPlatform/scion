@@ -34,9 +34,9 @@ import (
 //
 // The Hub accepts a Google-issued end-user or service-account credential
 // directly in Authorization: Bearer, without a credential-exchange round
-// trip: user ID tokens and access tokens, and
-// service-account ID tokens gated by allowed_gcp_projects.
-// A service-account access token is never accepted.
+// trip: user ID tokens and access tokens, and service-account ID tokens
+// gated by allowed_gcp_projects. A service-account access token is never
+// accepted.
 //
 // serveExternalBearer runs only after the request has already failed every
 // other authentication path (Hub JWT, PAT, agent, proxy, federation). It is
@@ -51,31 +51,30 @@ import (
 // for the same Google identity during the soak between them.
 
 // errExternalBearerNotApplicable reports that the token is not something the
-// external-bearer path can vouch for (no Google trust configured, the token
-// isn't a JWT with a Google issuer, or — in later phases — no issuer for the
-// token shape). Callers fall back to their normal rejection message.
+// external-bearer path can vouch for (no Google trust configured, or a JWT
+// whose issuer is missing or is not Google). Callers fall back to their
+// normal rejection message.
 var errExternalBearerNotApplicable = errors.New("external bearer: not applicable")
 
 // errSAAccessTokenRejected reports that a service-account identity was
 // presented as an OAuth2 access token rather than an ID token. Only SA ID
-// tokens validate (azp/sub-bound audience rule); access
-// tokens carry no equivalent binding, so an SA is never admitted this way, on
-// any project.
+// tokens validate (azp/sub-bound audience rule); access tokens carry no
+// equivalent binding, so an SA is never admitted this way, on any project.
 var errSAAccessTokenRejected = errors.New("external bearer: service account access tokens are not accepted")
 
 // errSAProjectNotAllowed reports that a service-account ID token's GCP
 // project — parsed from its verified email by googleSAProject — is not
-// listed in the Google issuer's allowed_gcp_projects. An
-// unparseable email (googleSAProject's second return false) and an unset
-// allowed_gcp_projects (admits no service accounts at all) both take this path.
+// listed in the Google issuer's allowed_gcp_projects. An unparseable email
+// (googleSAProject's second return false) and an unset allowed_gcp_projects
+// (admits no service accounts at all) both take this path.
 var errSAProjectNotAllowed = errors.New("external bearer: service account project not allowed")
 
 // errDomainNotAllowed reports that a user identity's verified email domain
-// is not listed in the Google issuer's allowed_domains.
-// Applies only to a non-service-account (user) principal; a service
-// account's admission is governed by allowed_gcp_projects instead, never by
-// this check. An unset allowed_domains means no issuer-level domain
-// constraint — the Hub sign-in policy is the only gate in that case.
+// is not listed in the Google issuer's allowed_domains. Applies only to a
+// non-service-account (user) principal; a service account's admission is
+// governed by allowed_gcp_projects instead, never by this check. An unset
+// allowed_domains means no issuer-level domain constraint — the Hub sign-in
+// policy is the only gate in that case.
 var errDomainNotAllowed = errors.New("external bearer: email domain not allowed")
 
 // errExternalBearerRateLimited reports that the external-bearer path's
@@ -105,12 +104,11 @@ func (e *externalBearerRateLimitError) Unwrap() error { return errExternalBearer
 // store.ErrNotFound) are checked first against the same, still-intact error
 // chain, and everything else lands on the 503 store_error arm via this
 // sentinel. That is deliberate: a validator/principal-policy failure (bad
-// signature, wrong audience, SA in this phase, ...) is a credential
-// rejection (401); anything from Resolve is either a known policy outcome or
-// an internal/store fault (403/503) — never "invalid token". An earlier,
-// more elaborate allowlist in classifyResolveError proved redundant with
-// serveExternalBearer's own arms and, if the two ever diverged, could
-// misroute a future resolver error to 401.
+// signature, wrong audience, SA access token, SA project or user domain not
+// allowed, ...) is a credential rejection (401); anything from Resolve is
+// either a known policy outcome or an internal/store fault (403/503) —
+// never "invalid token". See classifyResolveError below for why every
+// Resolve error is wrapped rather than allowlisted.
 var errExternalBearerResolveFailed = errors.New("external bearer: resolve failed")
 
 // externalBearerKind classifies a bearer token for the external-bearer path.
@@ -270,10 +268,10 @@ func containsFold(list []string, target string) bool {
 }
 
 // domainOf extracts the domain from a verified email address, for the
-// allowed_domains membership check. It fails closed
-// (ok=false) on any shape a naive last-"@" split could misread: no "@" at
-// all, more than one "@", or an empty local or domain part. A trailing dot
-// on the domain also fails closed rather than being silently stripped —
+// allowed_domains membership check. It fails closed (ok=false) on any shape
+// a naive last-"@" split could misread: no "@" at all, more than one "@", or
+// an empty local or domain part. A trailing dot on the domain also fails
+// closed rather than being silently stripped —
 // this function decides a security check, not a display string, so an
 // unusual shape is treated as "cannot confidently say what domain this is"
 // rather than guessed at. The domain is lower-cased on success, matching
@@ -343,9 +341,10 @@ func serveExternalBearer(w http.ResponseWriter, r *http.Request, next http.Handl
 			return true
 		default:
 			// The token targeted a trusted issuer but failed verification or
-			// policy (bad signature, wrong audience, unverified email, service
-			// account in this phase, ...). Log the reason; the response never
-			// leaks which specific check failed.
+			// policy (bad signature, wrong audience, unverified email, SA
+			// access token, SA project or user domain not allowed, ...). Log
+			// the reason; the response never leaks which specific check
+			// failed.
 			recordExternalBearer(cfg, attempt, ExternalBearerOutcomeRejected)
 			log.Info("External bearer rejected", "error", err)
 			writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
@@ -386,11 +385,10 @@ type externalBearerCacheProbe interface {
 //
 // A service-account identity is admitted only as an ID token whose GCP
 // project (parsed from its verified email) is listed in the Google issuer's
-// allowed_gcp_projects; an SA access token is rejected on
-// every project. A user identity is unaffected by any of this; instead, if
-// the issuer's allowed_domains is non-empty, the verified email's domain
-// must be listed there — a check that never applies to a
-// service account.
+// allowed_gcp_projects; an SA access token is rejected on every project. A
+// user identity is unaffected by any of this; instead, if the issuer's
+// allowed_domains is non-empty, the verified email's domain must be listed
+// there — a check that never applies to a service account.
 func authenticateExternalBearer(ctx context.Context, r *http.Request, token string, cfg AuthConfig) (UserIdentity, externalBearerAttempt, error) {
 	attempt := externalBearerAttempt{kind: ExternalBearerKindUnknown, principal: ExternalBearerPrincipalUnknown}
 
@@ -410,9 +408,9 @@ func authenticateExternalBearer(ctx context.Context, r *http.Request, token stri
 	aud := []string{trust.ExpectedAudience}
 
 	// Rate limit — consulted only on a credential-cache miss: a cache hit
-	// costs no upstream call, so it must not spend budget
-	// that a genuine burst of distinct garbage tokens needs. cfg.ExternalBearerLimiter
-	// is nil in tests that don't wire one (and in any config that never built
+	// costs no upstream call, so it must not spend budget that a genuine
+	// burst of distinct garbage tokens needs. cfg.ExternalBearerLimiter is
+	// nil in tests that don't wire one (and in any config that never built
 	// one), in which case the path is simply unlimited — the limiter's
 	// presence is a production-wiring concern (server.go), not a correctness
 	// requirement for the paths that don't set it.
@@ -455,9 +453,9 @@ func authenticateExternalBearer(ctx context.Context, r *http.Request, token stri
 			return nil, attempt, errSAProjectNotAllowed
 		}
 		// The project allowlist IS the authorization decision for a
-		// first-time provision (ResolvePolicy.PreAuthorized):
-		// it never bypasses the suspension check on an already-bound SA
-		// user, which Resolve enforces unconditionally.
+		// first-time provision (ResolvePolicy.PreAuthorized): it never
+		// bypasses the suspension check on an already-bound SA user, which
+		// Resolve enforces unconditionally.
 		policy.PreAuthorized = true
 	} else if len(trust.AllowedDomains) > 0 {
 		// A user principal (never a service account, which took the branch
@@ -488,11 +486,10 @@ func authenticateExternalBearer(ctx context.Context, r *http.Request, token stri
 // everything else lands on 503, never the 401 default reserved for
 // validator/principal-policy failures.
 //
-// An earlier version of this function allowlisted the specific-outcome
-// sentinels and left everything else unwrapped, which worked only because
-// it duplicated serveExternalBearer's own list — a future sentinel added to
-// one list but not the other would have silently misrouted a resolver fault
-// to 401. Always wrapping removes that duplication and that risk.
+// Wrapping unconditionally, rather than allowlisting the specific-outcome
+// sentinels and leaving everything else unwrapped, avoids duplicating
+// serveExternalBearer's own list: a future sentinel added to one list but
+// not the other would otherwise silently misroute a resolver fault to 401.
 func classifyResolveError(err error) error {
 	return fmt.Errorf("%w: %w", errExternalBearerResolveFailed, err)
 }
