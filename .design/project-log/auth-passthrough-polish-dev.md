@@ -114,3 +114,92 @@ d79499ade docs(hub): describe external-bearer metrics/rate-limit behaviour, not 
 ```
 
 All pushed to `origin/scion/auth-passthrough`.
+
+## Fix round 1
+
+Review: `reviews/polish-r1-ap-polish-rev.md` (`ap-polish-rev`, REQUEST CHANGES on `75d6d4be7`: 0C / 7R / 3O / 3N / 4FYI).
+Fix brief: `briefs/ap-polish-dev-fix-r1.md`. The lead authorized editing test-failure message strings
+(`t.Errorf`/`t.Fatalf`/`t.Error`/`t.Fatal`/`t.Logf` format strings in `_test.go` files) this round.
+
+### Findings → file:line → change
+
+| # | File:line | Before | After |
+|---|---|---|---|
+| R1 | `pkg/hub/external_bearer_metrics.go:110-114` (`ExternalBearerOutcome` doc) | "Each value maps 1:1 to the HTTP status serveExternalBearer returns" — false: `suspended`/`forbidden` share 403, `upstream_error`/`store_error` share 503 | "Each value corresponds to exactly one response (HTTP status plus error code) that serveExternalBearer writes" |
+| R2 | `pkg/hub/auth_external_bearer.go:55` (`errExternalBearerNotApplicable` doc) | "the token isn't a JWT with a Google issuer, or — in later phases — no issuer for the token shape" — a non-JWT token with trust configured is now a candidate access token, not not-applicable | "no Google trust configured, or a JWT whose issuer is missing or is not Google" |
+| R2 | `pkg/hub/auth_external_bearer.go:108,347` | "SA in this phase" / "service account in this phase" — SA is no longer a blanket rejection (SA ID tokens can be admitted via allowed_gcp_projects) | "SA access token, SA project or user domain not allowed" |
+| R3 | `pkg/hub/ge_exchange_test.go:2268` | "covers the fifth minimum case the fix brief asked for" | "covers an ID-token JWKS force-refresh 5xx" |
+| R3 | `pkg/hub/google_credential_validator_test.go:711-712` | "previously survived the whole suite" | "is caught only by this test" |
+| R4 | `.design/project-log/auth-passthrough-p5b-dev.md:575` (N1 row) | Self-contradictory: says one comment was missed, then says it existed in two files — history shows `F4-*` only ever existed in `internal/bridge/adminoverlay_test.go` | Dropped the "in both … and `cmd/scion-a2a-bridge/main_test.go`" clause |
+| R5 | `pkg/hub/external_bearer_ratelimit_test.go:121-126,145` | "were not pinned" (past tense); "unlike the tests above, which shrink burst" (the tests in *this* file don't shrink burst — the ones in `auth_external_bearer_access_token_test.go` do); "override rate/burst" (only burst is overridden) | Present-tense "Pin the limiter defaults…"; corrected cross-reference to `auth_external_bearer_access_token_test.go`; "override burst" |
+| R6 | `pkg/hub/auth_external_bearer_access_token_test.go:133-135` | "this keeps the existing SA rejection covering both credential kinds" — false: an SA ID token with a listed project is admitted | "even though SA ID tokens can be admitted via allowed_gcp_projects (see auth_external_bearer_sa_test.go)" |
+| R7 | `pkg/hub/auth_external_bearer_test.go:44-45` | Dropping "Phase 1:" earlier turned a historical note into a false present-tense claim: "(Google user ID tokens only)" — the same harness is used by access-token, SA, domain and metrics tests too | Dropped the parenthetical entirely |
+| O1 | `pkg/hub/auth_external_bearer.go:110-113` (dup of `:489-495`), `auth_external_bearer_access_token_test.go:174-178`, `auth_external_bearer_test.go:1399-1400,1401-1409` | "An earlier version…" code-history paragraphs | Rephrased as present-tense rationale; the duplicate at `:110-113` was deleted, keeping the one on `classifyResolveError` |
+| O2 | `auth_external_bearer_sa_test.go:155`, `external_bearer_metrics.go:44`, `external_bearer_metrics_test.go:600`, `external_bearer_ratelimit.go:57`, `ge_exchange_metrics_test.go:316`, `auth_external_bearer_test.go:1688` | "the design's azp check" / "design's closed-label-set rule" / "used by this design" / "with the design's" defaults / "this design" ×2 | Each reworded to name the behaviour or requirement directly, with no "design" reference. (`auth_external_bearer_sa_test.go:155`'s fix was reverted — see Known limitation below.) Also renamed `TestExternalBearerRateLimiter_DefaultsMatchDesign` → `_DefaultsPinned` (no other reference to the old name) |
+| O3 | 13 string literals listed in the review (`auth_external_bearer_access_token_test.go:215`, `auth_external_bearer_test.go:1723`, `external_bearer_ratelimit_test.go:131,134,137,140`, `ge_exchange_route_test.go:410,415,418,446,449,486`, `google_credential_cache_test.go:100`) | Narration/design/mutation-ID fragments inside `t.Errorf`/`t.Error`/`t.Fatalf` messages | All 13 edited now that the lead authorized test-failure-message edits; diagnostic content kept, narration removed |
+| N1 | `auth_external_bearer_test.go:595` | "as production's unconditional construction guarantees in production" (says "production" twice) | "as New()'s unconditional construction guarantees in production" |
+| N2 | `auth_external_bearer_sa_test.go:29-33`, `external_bearer_ratelimit_test.go:121-126,163-171`, `auth_external_bearer_access_token_test.go:165-167`, `ge_exchange_test.go:699`, `auth_external_bearer.go:37-39` | Ragged rewraps left by earlier comment deletions | Reflowed to ~78 columns. Also reflowed several other ragged paragraphs found while reading comments in context (`auth_external_bearer.go`'s error-sentinel docs, `domainOf`, the rate-limit comment, `classifyResolveError`'s dedup; `google_credential_cache.go`'s `withCacheNowFunc`/`WithCacheMetrics`/`negativelyCacheableGoogleError`/`metrics` field/leaderless-call docs; `external_bearer_metrics_test.go`'s label-types doc) |
+| N3 | `external_bearer_ratelimit_test.go:56` | Quoted "after 10000 distinct client IPs" scenario had lost its source | "reproducing the full-limiter scenario at a testable scale" |
+| F1 | — | `TestInitProject_NonGit*` failures | Root cause found: this agent's `GOTMPDIR` sat inside the branch's own git checkout; those tests `t.TempDir()` + `chdir` into a directory they assume is not in a git repo. Re-ran with `GOTMPDIR=/tmp/ap-polish-dev-gotmp` (outside any checkout): `go test ./pkg/config/...` now passes in full, no failures. Purely environmental, confirmed unrelated to this change. |
+| F2 | `.design/project-log/auth-passthrough-polish-dev.md` (Bare refs section) | Claimed "two pre-existing hits" in p1/p5b logs from the second bare-ref grep | Corrected: the `[^/A-Za-z0-9]` guard excludes the alnum character before `#`, so `GoogleCloudPlatform/scion#1847` was never a hit; the real `/usr/bin/grep` printed nothing there from the start |
+
+### Broader sweep (regex-invisible narration)
+
+Ran the requested sweep:
+```
+git diff a53175c23 HEAD -- pkg cmd extras docs-site | /usr/bin/grep -nE '^\+' | /usr/bin/grep -iE 'design|phase|brief|previously|earlier version|mutant|\bM[0-9]+\b'
+```
+9 hits. 8 were false positives or legitimate technical usage: "by design" as the ordinary English idiom for "intentionally" (`federation_auth.go`, `ge_exchange_metrics_test.go` ×2), "*atomic.Pointer design" meaning the atomic-pointer field shape, not a document (`ge_exchange_route_test.go`), "previously pushed `auth_scheme`" and "before this protection was added" describing real upgrade-path behaviour, not review history (`extras/scion-a2a-bridge/README.md`), and four generic "a mutant that X would Y" test-rationale sentences (standard mutation-testing vocabulary, not narration about this branch's own review rounds — `main_test.go`, `adminoverlay_test.go`, `auth_external_bearer_domain_test.go` ×2). One genuine miss: `auth_external_bearer_domain_test.go:198` referenced a "U2 check" (a design row ID); reworded to "the ID-token-only domain check".
+
+### Known limitation: one O2 item left unfixed
+
+`auth_external_bearer_sa_test.go:155`'s trailing comment (`delete(claims, "azp") // azp == "" variant: the design's "azp" check…`) could not be
+reworded without breaking the updated comments-only proof: any edit to a trailing comment on a code line necessarily changes that
+line's raw text on both sides of the diff, and the removed line (code + old comment together) does not match `^[+-]\s*(//|$)`, so it
+would show up as a "non-comment" diff line even though only the comment changed. Moving the comment to its own line above has the
+same problem (the old combined line still appears as removed). Left as `git diff 75d6d4be7 -- auth_external_bearer_sa_test.go`
+shows no change to this line; reported here for the lead/reviewer to decide whether trailing-comment edits should be added to the
+proof's allowed-kinds list in a future round.
+
+### Comments-only proof (updated)
+
+```
+$ git diff 75d6d4be7..HEAD -- '*.go' | /usr/bin/grep -E '^[+-][^+-]' | /usr/bin/grep -vE '^[+-]\s*(//|$)'
+```
+Prints 14 lines: 13 are `t.Errorf`/`t.Error`/`t.Fatalf` format-string changes in `_test.go` files (the O3 literals plus the R1/R5/R6
+literal corrections), and 1 is the renamed `func TestExternalBearerRateLimiter_DefaultsMatchDesign` → `func
+TestExternalBearerRateLimiter_DefaultsPinned` line. No other kind of line appears.
+
+### Gates (fix round 1)
+
+- `gofmt -l pkg cmd extras` — empty.
+- `go vet ./pkg/hub/... ./pkg/config/... ./cmd/...` — clean. `go vet ./...` (bridge module) — clean.
+- `GOGC=40 golangci-lint run --new-from-rev=a53175c23 --concurrency=1 ./pkg/hub/... ./pkg/config/... ./cmd/...` — `0 issues`. Same
+  command with `./...` from `extras/scion-a2a-bridge/` — `0 issues`.
+- `go test ./pkg/config/...` (SCION_* unset, `GOTMPDIR=/tmp/ap-polish-dev-gotmp`, outside any git checkout) — all packages pass,
+  including all three `TestInitProject_NonGit*` tests (see F1 above).
+- `go test ./...` from `extras/scion-a2a-bridge/` — all packages pass.
+- Targeted `pkg/hub` tests for every test whose failure message or name changed this round (`TestExternalBearer_AccessToken_ServiceAccount_Rejected`,
+  `TestExternalBearer_TrustConfiguredOpaqueToken_AttemptsAccessTokenValidation`, `TestExternalBearer_AccessToken_RateLimitedBeyondBurst`,
+  `TestExternalBearer_ServiceAccountIDToken_AZPNotSub_Unauthorized`, `TestNoPackageLevelMutableState`,
+  `TestExternalBearerRateLimiter_CleanupAdmitsNewIPAfterMaxAge`, `TestExternalBearerRateLimiter_DefaultsPinned`,
+  `TestExternalBearerRateLimiter_DefaultBurstExhaustion`, `TestExternalBearerRateLimiter_HonoursXForwardedForOnlyFromTrustedProxy`,
+  `TestGEExchange_Route_SharesValidatorAndResolverWithExternalBearer`, `TestGEExchange_Route_GoogleStackBuiltWithoutExchangeOrTrust`,
+  `TestGEExchange_Route_ProductionResolverHonoursAdminEmails`, `TestGEExchange_ExternalIdentityLookupFault_ServerError`,
+  `TestGEExchange_RealValidator_IDTokenForceRefreshFailure_ExactBytes`, `TestGoogleCredentialCache_KeyIgnoresAudienceOrder`,
+  `TestGoogleCredentialCache_NegativeCacheOnlyForFourListedErrors`, `TestProductionValidator_AccessToken_TokenInfo200WithErrorBody_InvalidCredential`)
+  — all pass.
+- Byte hazard (`perl -ne 'print "$ARGV:$.\n" if /\xC2\xA0/'` over every file changed since `a53175c23`) — empty.
+- Bare refs — both commands empty: commit messages (`git log a53175c23..HEAD --format=%B | /usr/bin/grep -nE '(^|[^/A-Za-z])#[0-9]+'`)
+  and added lines (`git diff a53175c23 | /usr/bin/grep -nE '^\+.*(^|[^/A-Za-z0-9])#[0-9]{3,}'`).
+- Caught and fixed during this round: one of my own commit messages initially included review-round narration ("Fix round 1 per
+  review polish-r1-ap-polish-rev…"); amended before pushing since it had not yet been shared.
+
+### Commits (fix round 1, base `75d6d4be7`)
+
+```
+be2721efd docs(hub): fix false statements and missed narration in external-bearer comments
+3a39f2139 docs(hub): fix wrong cross-reference and status-mapping claim in metrics/rate-limit comments
+48e61ad23 docs(hub): remove remaining narration and reflow ragged comments in GE exchange and credential cache
+e501efc5a docs(project-log): fix a self-contradictory row and an inaccurate bare-ref claim
+```
