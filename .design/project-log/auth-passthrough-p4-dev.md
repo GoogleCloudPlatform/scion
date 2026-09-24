@@ -230,7 +230,7 @@ parallel); no conflicts, since none of them touch the files this round changes.
 | O1 | The "never on the request path" test (`TestExternalBearer_DisabledPathRequests_NoAddedWarnings`) passed `Logger: slog.Default()` in the `AuthConfig` under test, so it only watched the authenticator's own logger — a regression that additionally routed the warning through the request-scoped `cfg.Logger` would pass unnoticed. | Changed that one field to `Logger: log`, the same capture logger passed to the constructor. | Same test. | Reproduced by adding a second `warnIfExternalBearerDisabled` call inside `googleTrust`, gated on `cfg.Logger`, guarded so it only fires for the exact disabled shape — confirms the mutant would otherwise pass (6 warnings after 5 requests) → **killed** by the `Logger: log` change. Reverted after confirming. |
 | O2 | `invalidDomainEntryReason` accepted `https://example.com`, `example.com/` and `example..com` — none of these can ever equal `domainOf`'s parsed domain, so each is a silent, permanent lockout of the intended domain, the same failure mode Rule 11 already exists to catch. | Added two more `switch` clauses: reject any entry containing `/` or `:` (a URL or scheme/path fragment), and any entry containing `..` (a double dot). Updated `auth.md`'s format note to name both. | Extended `TestInvalidDomainEntryReason` with `double dot`, `pasted URL with scheme`, `trailing slash`, `contains a colon` rows. | Dropped the `/:`  clause → the three URL/slash/colon rows fail (accepted instead of rejected). Dropped the `..` clause → the double-dot row fails. Both reverted after confirming. |
 | O3 | `warnIfExternalBearerDisabled` ran at the top of the per-issuer loop, before the HTTP-scheme check, JWKS discovery, and the audience-fallback error — so an issuer whose construction later failed could still have logged a warning about a config that never took effect (visible on a reload that fails and keeps the old config). | Moved the call to immediately before `issuers[normalizedIssuer] = &issuerEntry{...}`, i.e. only once the issuer is actually going to be stored. | New `TestNewFederationAuthenticator_ConstructionFails_NoWarning`: a Google `user` issuer with empty `expected_audience` (which would otherwise warn) and no `jwks_url`, forced through a failing OIDC-discovery `RoundTripper`, asserts `NewFederationAuthenticator` errors **and** logs no warning. | Reverted the move (call restored to the loop's top) → the new test fails (1 warning logged despite construction failing). Confirmed, then re-applied the fix. All of fix-round-1's W1–W6 warning tests re-ran green after the move (the shared-construction-loop invariant they depend on didn't change, only where within it the call sits). |
-| N1 | The whitespace-rejection table test only pinned an ASCII space (`U+0020`); a narrower, ASCII-only whitespace check would still pass it, since the code's `unicode.IsSpace` guard already covers more than that. | Added a tab and a non-breaking-space (`U+00A0`, via a ` ` escape rather than a literal byte, to avoid it being silently normalised to a plain space by an editing step) row. | Extended `TestInvalidDomainEntryReason`. | Replaced `unicode.IsSpace`'s `strings.IndexFunc` guard with `strings.Contains(domain, " ")` (ASCII space only) → the new tab and NBSP rows fail (accepted instead of rejected). Reverted after confirming. |
+| N1 | The whitespace-rejection table test only pinned an ASCII space (`U+0020`); a narrower, ASCII-only whitespace check would still pass it, since the code's `unicode.IsSpace` guard already covers more than that. | Added a tab and a non-breaking-space (`U+00A0`, via a "\u00a0" escape rather than a literal byte, to avoid it being silently normalised to a plain space by an editing step) row. | Extended `TestInvalidDomainEntryReason`. | Replaced `unicode.IsSpace`'s `strings.IndexFunc` guard with `strings.Contains(domain, " ")` (ASCII space only) → the new tab and NBSP rows fail (accepted instead of rejected). Reverted after confirming. |
 | FYI 1 (double warning at startup; re-warn on unrelated settings writes) | No code change — matches the r7 spec's "once per load" wording, since every rebuild (including an unrelated opsettings write triggering `ApplySnapshot`) is a load. Reviewer is relaying to the lead. | — | — |
 | FYI 5 (design-row IDs in new comments/subjects) | Deferred to the polish sweep, per the brief and consistent with FYI 4 from the previous round. | — | — |
 | FYI 2–4 | No action (equivalent mutants, pre-existing duplication with Rule 10, docs already verified accurate). | — | — |
@@ -270,3 +270,43 @@ yet in this round. Recorded here because it happened, not because it changed any
 
 None. Every finding's fix was fully specified by the review and the brief; the only deviation from plan was
 the `git reset --hard` slip noted above, which cost time but changed nothing in the final result.
+
+## Fix round 3 (Phase 4 **APPROVED** at `5fd1240cc`; review `p4-r3-ap-p4-rev-3.md`: 0 Critical, 0 Required,
+1 Optional, 2 Nit — closed in one small follow-up commit per `ap-em`, no separate review round)
+
+Reviewer: `ap-p4-rev-3`. Fix brief: `briefs/ap-p4-dev-followup-r3.md`. Every fix-round-2 finding verified
+resolved and every fix-round-1 behavior re-verified intact; the approval itself has no outstanding blockers.
+These three items were left for a small follow-up rather than blocking approval.
+
+| # | Finding | Change | Test(s) | Mutant |
+|---|---|---|---|---|
+| O1 | The "never logs a warning about a config that didn't take effect" comment (added in fix round 2's O3) overclaimed: it only held when the *failing* issuer was the misconfigured Google one. In a multi-issuer config where the disabled-shaped Google issuer comes first and a *later*, unrelated issuer fails construction, the per-issuer inline warning still fired before that later failure was known, and `NewFederationAuthenticator` then returned an error for the whole config anyway — a warning about a config that was, in full, rejected. | Took the reviewer's first suggested option: `isGoogleUserIssuerMissingAudience` is now a pure predicate (renamed from `warnIfExternalBearerDisabled`, no logging inside it). The per-issuer loop only collects matching issuer URLs into a slice; the warnings are logged in one small loop right before the final, successful `return &FederationAuthenticator{...}` — so nothing is ever logged unless the entire config was accepted. | New `TestNewFederationAuthenticator_MultiIssuer_MisconfiguredBeforeFailing_NoWarning`: a Google user issuer with empty `expected_audience` listed first, followed by an issuer whose `http://` URL is rejected in `hosted` mode; asserts `NewFederationAuthenticator` errors and logs zero warnings. The existing single-issuer `..._ConstructionFails_NoWarning` and all of fix-round-1/2's WarnsOnce/WarnsAgainOnReload/NoWarning/DisabledPath tests re-ran green against the refactor. | Reverted to logging inline inside the loop (moving the `log.Warn` call back next to the predicate check, before the per-issuer failure points) → **both** the new multi-issuer test and the existing single-issuer `ConstructionFails` test fail (1 warning logged despite the whole config being rejected). Confirmed, then re-applied the collect-then-emit fix. |
+| N1 | The `Validate()` call-site comment above the Rule 11 loop still enumerated only the shapes `invalidDomainEntryReason` rejected as of fix round 1 (email address, wildcard, whitespace, leading/trailing dot), silently going stale when fix round 2 added `/`, `:` and `..`. | Reworded to say "any shape `invalidDomainEntryReason` rejects" instead of re-listing them, so it can't go stale the same way again. | N/A (comment-only). | N/A. |
+| N2 | The project log's N1 (fix-round-2) row described writing "a ` ` escape rather than a literal byte" to avoid exactly this problem, but the editing step that produced the row itself silently substituted a literal U+00A0 byte for the intended escape text — the row demonstrated the bug it was warning about. | Replaced the literal NBSP bytes with the literal text `" "`. Verified with the reviewer's exact check. | `grep -nP '\xC2\xA0' .design/project-log/auth-passthrough-p4-dev.md` — confirmed empty before committing. | N/A (documentation-only; no code path). |
+| FYI 1 (W6d, warning via `slog.Default()` on the request path) | No action — accepted by the lead in fix round 2, unchanged. | — | — |
+
+### Gates (fix round 3)
+
+- ✅ `gofmt -l pkg/hub pkg/config` — clean.
+- ✅ `go build -buildvcs=false ./pkg/hub/... ./pkg/config/...` — clean.
+- ✅ `go vet ./pkg/hub/... ./pkg/config/...` — clean.
+- ✅ `GOGC=40 golangci-lint run --new-from-rev=a53175c23 --concurrency=1 ./pkg/hub/... ./pkg/config/...` —
+  `0 issues.`
+- ✅ Targeted `-race` (all `TestNewFederationAuthenticator_*`, `TestExternalBearer_DisabledPathRequests_NoAddedWarnings`,
+  `TestExternalBearer`, `TestDomainOf` in `pkg/hub`; `TestInvalidDomainEntryReason`, `TestFederationConfig_Validate`
+  in `pkg/config` with `SCION_*` unset) — all green.
+- ✅ Bare-issue-number greps (`git log a53175c23..HEAD --format=%B`, `git diff a53175c23..HEAD` `+` lines) at
+  the final commit: both empty.
+- ✅ `grep -nP '\xC2\xA0' .design/project-log/auth-passthrough-p4-dev.md` (the reviewer's N2 check): empty.
+- ✅ Review-narration grep over this round's commit (case-insensitive for "phase N", "review rN", "fix round",
+  "EM/lead decision"): both the commit-message and diff greps print nothing.
+- ✅ Manual mutation-resistance pass on O1 (the only behavior-changing fix this round): the "log inline" mutant
+  reverted and confirmed to fail both the new multi-issuer test and the pre-existing single-issuer test, then
+  re-fixed.
+- **No full `pkg/hub` run this round**, per the brief: the change is a refactor within
+  `NewFederationAuthenticator` (when the same warnings are logged, not what triggers them) plus tests, config,
+  and a doc-comment wording fix — no new production surface.
+
+### Deviations / design questions (fix round 3)
+
+None. Both code findings had a fully specified fix in the brief/review; N2 was a one-line text substitution.
