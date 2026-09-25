@@ -1514,14 +1514,9 @@ func TestReincarnateAgent_EndToEnd_IdentityContinuityAndHandoff(t *testing.T) {
 	assert.GreaterOrEqual(t, disp.stopCalls, 1)
 }
 
-// TestBuildReincarnationPreamble_DoesNotPromiseRedelivery is the design §3.4 Amendment
-// A11 item 4 golden test for the hub-authored preamble's step 2. The
-// design's originally proposed wording claimed messages sent during the
-// migration's down window "are redelivered to you", but that claim does not
-// hold for Phase 1's actual implementation (the §3.7 migration gate was
-// never built — see buildReincarnationPreamble's own comment) and per A11
-// item 4 must be dropped rather than stated as fact. This pins the exact
-// wording so a future edit cannot silently reintroduce the unverified claim.
+// TestBuildReincarnationPreamble_DoesNotPromiseRedelivery pins the wording of
+// the preamble's step 2. Messages sent during a migration are rejected, not
+// queued, so the preamble must not claim they are redelivered.
 func TestBuildReincarnationPreamble_DoesNotPromiseRedelivery(t *testing.T) {
 	srv, _ := testServer(t)
 	agent := &store.Agent{ID: "agent-1", Slug: "arqa-a"}

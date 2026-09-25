@@ -470,21 +470,13 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		return
 	}
 
-	// Design §3.4 Amendment A11.1(b): the broker may resolve a different
-	// image than the hub's own guess (A11.1(a)'s harness-config fallback,
-	// or the broker's own search path) and echo it back on the reprovision
-	// response. DispatchAgentReprovision's HTTP implementation mutates
-	// agent.AppliedConfig in place with that echo (applyBrokerResponse),
-	// and agent.AppliedConfig IS fresh here (the provisioning step's write
-	// above set them to the same pointer) — but a LATER step that doesn't
-	// pass appliedConfig: fresh to updateReincarnationStep re-reads the row
-	// fresh from the store instead of reusing this object, silently losing
-	// that in-memory-only change (this is what made appliedConfig.image go
-	// null after a real reincarnation). Capture the echoed image into fresh
-	// explicitly, rather than relying on that pointer aliasing as an
-	// unstated implementation detail, so the starting step's write below
-	// carries it forward as the same owned-field merge — no new write
-	// needed.
+	// The provisioning step's write left agent.AppliedConfig pointing at
+	// fresh, so fresh is the object DispatchAgentReprovision mutated with the
+	// broker's echo (applyBrokerResponse): image, HarnessConfig, HarnessAuth
+	// and Profile. The starting step's write below passes appliedConfig:
+	// fresh, which persists every echoed field, the same as create. This copy
+	// is therefore a self-assignment; it is kept only to leave behaviour
+	// untouched.
 	if agent.AppliedConfig != nil && agent.AppliedConfig.Image != "" {
 		fresh.Image = agent.AppliedConfig.Image
 	}
@@ -504,8 +496,8 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// now holds gen N+1; a failure from here on must NOT restore `previous`,
 	// since that would make the store claim gen N while the disk (and any
 	// container the start call did manage to create) is gen N+1.
-	// appliedConfig: fresh persists the (possibly broker-corrected) image
-	// from just above, design §3.4 Amendment A11.1(b).
+	// appliedConfig: fresh persists every field the broker echoed back on
+	// reprovision (see above).
 	agent, err = s.updateReincarnationStep(ctx, agentID, reincarnationStepUpdate{
 		reincarnationState: store.ReincarnationStateStarting,
 		phase:              string(state.PhaseStarting),
@@ -747,19 +739,8 @@ func (s *Server) buildReincarnationPreamble(agent *store.Agent, toGeneration int
 		toGeneration, agent.Slug, agent.ID)
 	b.WriteString("Before resuming:\n")
 	b.WriteString(" 1. Verify your environment: `git status` shows your branch up to date with the remote, and any files your handoff names as canonical are readable.\n")
-	// Design §3.4 Amendment A11 item 4: the proposed wording claimed messages
-	// sent during the migration's down window "are redelivered to you", but
-	// that is not true of Phase 1's actual implementation — the designed
-	// migration gate (persist-but-don't-dispatch while reincarnation_state is
-	// non-terminal, §3.7) was never built, so a message sent during the
-	// window either 409s (a human sender) or is silently dropped by the
-	// broker's own debounce buffer (an agent-to-agent DM); nothing queues it
-	// for delivery once the new generation is up. Live validation confirmed
-	// only that ordinary messaging works before the migration starts and
-	// again once it completes (raw/22, raw/25/28: a DM sent before the
-	// migration reaches gen 1, and one sent after completion reaches gen 2;
-	// no message was shown to survive the window itself). Dropping the
-	// redelivery claim rather than stating it as fact.
+	// Messages sent during the migration are rejected, not queued, so step 2
+	// must not promise that they are redelivered.
 	b.WriteString(" 2. Catch up on your conversations (`scion conversation catch-up`). If that command is unavailable in this environment, rely on the handoff and on incoming messages.\n")
 	b.WriteString(" 3. Message whoever requested this migration that the new generation is up, and state your next action.\n")
 	b.WriteString(" 4. Continue from the handoff below. Do not redo anything it says not to.\n")
