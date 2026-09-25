@@ -361,6 +361,48 @@ export function isAgentRunning(agent: Agent): boolean {
 }
 
 /**
+ * Confirmation copy shown before a best-effort resume of an error-phase
+ * agent (POST /start with `{ forceResume: true }`). The agent's home
+ * directory and harness session are usually still intact even after a host
+ * crash, but the crash itself may have corrupted that state, so the resume
+ * is best-effort rather than guaranteed.
+ */
+export const RESUME_BEST_EFFORT_CONFIRM_MESSAGE =
+  'This agent stopped unexpectedly. Resume will try to continue its previous session from the saved home directory. This may fail or behave oddly if the crash corrupted session state. Start instead begins a fresh session with the original task.';
+
+/**
+ * A lifecycle action a caller can request for an agent from the UI.
+ * `force-resume` posts to the same `/start` endpoint as `start`/`resume`,
+ * but with a body asking the hub for a best-effort resume of an
+ * error-phase agent's interrupted harness session (see
+ * RESUME_BEST_EFFORT_CONFIRM_MESSAGE).
+ */
+export type AgentLifecycleAction =
+  | 'start'
+  | 'stop'
+  | 'suspend'
+  | 'resume'
+  | 'delete'
+  | 'force-resume';
+
+/**
+ * Builds the fetch RequestInit for POSTing an agent lifecycle action.
+ * Only `force-resume` needs a JSON body; every other action (including the
+ * plain `start` that a suspended/stopped/error agent otherwise uses) posts
+ * with no body, matching the Hub's existing `/start` and `/stop` handlers.
+ */
+export function lifecycleActionRequestInit(action: AgentLifecycleAction): RequestInit {
+  if (action === 'force-resume') {
+    return {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ forceResume: true }),
+    };
+  }
+  return { method: 'POST' };
+}
+
+/**
  * Telemetry event filter configuration.
  */
 export interface TelemetryEventsConfig {

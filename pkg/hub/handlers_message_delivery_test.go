@@ -187,7 +187,7 @@ func TestHandleAgentMessage_ErrorReturns409(t *testing.T) {
 	if errResp.Error.Code != ErrCodeAgentNotRunning {
 		t.Errorf("expected error code %q, got %q", ErrCodeAgentNotRunning, errResp.Error.Code)
 	}
-	if want := `Agent "error-agent" is in error state. Use 'scion resume' to restart.`; errResp.Error.Message != want {
+	if want := `Agent "error-agent" is in error state. Use 'scion resume --force' to best-effort resume its previous session, or 'scion start' for a fresh one.`; errResp.Error.Message != want {
 		t.Errorf("expected message %q, got %q", want, errResp.Error.Message)
 	}
 }
