@@ -452,6 +452,25 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		return
 	}
 
+	// Design §3.4 Amendment A11.1(b): the broker may resolve a different
+	// image than the hub's own guess (A11.1(a)'s harness-config fallback,
+	// or the broker's own search path) and echo it back on the reprovision
+	// response. DispatchAgentReprovision's HTTP implementation mutates
+	// agent.AppliedConfig in place with that echo (applyBrokerResponse),
+	// and agent.AppliedConfig IS fresh here (the provisioning step's write
+	// above set them to the same pointer) — but a LATER step that doesn't
+	// pass appliedConfig: fresh to updateReincarnationStep re-reads the row
+	// fresh from the store instead of reusing this object, silently losing
+	// that in-memory-only change (this is what made appliedConfig.image go
+	// null after a real reincarnation). Capture the echoed image into fresh
+	// explicitly, rather than relying on that pointer aliasing as an
+	// unstated implementation detail, so the starting step's write below
+	// carries it forward as the same owned-field merge — no new write
+	// needed.
+	if agent.AppliedConfig != nil && agent.AppliedConfig.Image != "" {
+		fresh.Image = agent.AppliedConfig.Image
+	}
+
 	startingNow, ok, err := s.tryAdvanceReincarnation(ctx, reincarnationID, store.AgentReincarnationStateProvisioning, store.AgentReincarnationStateStarting, reincarnationStepMaxAttempts, nil)
 	if err != nil {
 		// Reprovision already succeeded, so no restore (same reasoning as the
@@ -467,9 +486,12 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// now holds gen N+1; a failure from here on must NOT restore `previous`,
 	// since that would make the store claim gen N while the disk (and any
 	// container the start call did manage to create) is gen N+1.
+	// appliedConfig: fresh persists the (possibly broker-corrected) image
+	// from just above, design §3.4 Amendment A11.1(b).
 	agent, err = s.updateReincarnationStep(ctx, agentID, reincarnationStepUpdate{
 		reincarnationState: store.ReincarnationStateStarting,
 		phase:              string(state.PhaseStarting),
+		appliedConfig:      fresh,
 		now:                startingNow,
 	}, reincarnationStepMaxAttempts)
 	if err != nil {

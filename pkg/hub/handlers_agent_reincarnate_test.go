@@ -54,6 +54,12 @@ type reincarnateTestDispatcher struct {
 	stopErr        error
 	reprovisionErr error
 	startErr       error
+
+	// reprovisionImage, when non-empty, simulates the broker echoing back a
+	// resolved container image on a successful reprovision response — as the
+	// real HTTP dispatcher's applyBrokerResponse does by mutating
+	// agent.AppliedConfig.Image in place (design §3.4 Amendment A11.1(b)).
+	reprovisionImage string
 }
 
 func newReincarnateTestDispatcher() *reincarnateTestDispatcher {
@@ -70,7 +76,11 @@ func (d *reincarnateTestDispatcher) DispatchAgentReprovision(_ context.Context, 
 	d.mu.Lock()
 	d.reprovisionCalls++
 	err := d.reprovisionErr
+	image := d.reprovisionImage
 	d.mu.Unlock()
+	if err == nil && image != "" && agent.AppliedConfig != nil {
+		agent.AppliedConfig.Image = image
+	}
 	return err
 }
 func (d *reincarnateTestDispatcher) DispatchAgentStart(_ context.Context, _ *store.Agent, task string, resume bool) error {
@@ -722,6 +732,142 @@ func TestReincarnateAgent_AC2a_ExplicitImageSurvivesTemplateBump(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, "explicit-image:v1", resp.Plan.Image.Old)
 	assert.Equal(t, "explicit-image:v1", resp.Plan.Image.New, "an explicit image must survive a template image bump")
+}
+
+// TestReincarnateAgent_A11F1_PlanFillsImageFromHarnessConfig is the plan-side
+// half of design §3.4 Amendment A11 item 1: an agent with no explicit
+// image and no template image must have its plan show the harness config's
+// image, not "" -> "" (which would look like nothing changed when the agent
+// is actually about to pick up a real image for the first time). This also
+// covers the "previously reincarnated agent with an empty stored image"
+// case: CreateInputs is already non-nil here (as it would be for an agent
+// that has already gone through the CreateInputs-capturing path once before)
+// with AppliedConfig.Image left empty, and the plan must still show
+// "" -> a real image, not "" -> "" read as no-op.
+func TestReincarnateAgent_A11F1_PlanFillsImageFromHarnessConfig(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+
+	hc := &store.HarnessConfig{
+		ID:          tid("hc-a11f1-" + t.Name()),
+		Name:        "hc",
+		Slug:        "a11f1-hc-" + tidSlugSafe(t.Name()),
+		Harness:     "claude",
+		Scope:       store.HarnessConfigScopeGlobal,
+		Status:      store.HarnessConfigStatusActive,
+		ContentHash: "hc-hash-v1",
+		Config:      &store.HarnessConfigData{Image: "harness-config-image:v1"},
+	}
+	require.NoError(t, s.CreateHarnessConfig(context.Background(), hc))
+
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.AppliedConfig.Image = "" // never had an image resolved onto it
+		a.AppliedConfig.HarnessConfig = hc.Slug
+		// HarnessConfig is explicit-only (design §3.3 Amendment A1), driven by
+		// CreateInputs.HarnessConfig, not kept from the live AppliedConfig —
+		// this is what the requester actually asked for at create time.
+		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{HarnessConfig: hc.Slug}
+	})
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	req := reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{DryRun: true})
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, req, agent.ID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var resp ReincarnateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "", resp.Plan.Image.Old)
+	assert.Equal(t, "harness-config-image:v1", resp.Plan.Image.New,
+		"the plan must fall back to the harness config's image when neither an explicit image nor a template supplied one")
+}
+
+// TestReincarnateAgent_A11F1_TemplateImageBeatsHarnessConfig proves the
+// harness-config image fallback (A11.1a) never outranks a template image:
+// the broker's own precedence is explicit inline, then template, then
+// harness config (pkg/agent/provision.go), so a template image must win here
+// even though a harness config with a different image is also in play.
+func TestReincarnateAgent_A11F1_TemplateImageBeatsHarnessConfig(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+
+	template := &store.Template{
+		ID:          tid("tmpl-a11f1-" + t.Name()),
+		Name:        "t",
+		Slug:        "a11f1-template-" + tidSlugSafe(t.Name()),
+		Harness:     "claude",
+		Scope:       store.TemplateScopeGlobal,
+		Status:      store.TemplateStatusActive,
+		ContentHash: "template-hash",
+		Config:      &store.TemplateConfig{Image: "template-image:v1"},
+	}
+	require.NoError(t, s.CreateTemplate(context.Background(), template))
+
+	hc := &store.HarnessConfig{
+		ID:          tid("hc-a11f1b-" + t.Name()),
+		Name:        "hc",
+		Slug:        "a11f1b-hc-" + tidSlugSafe(t.Name()),
+		Harness:     "claude",
+		Scope:       store.HarnessConfigScopeGlobal,
+		Status:      store.HarnessConfigStatusActive,
+		ContentHash: "hc-hash-v1",
+		Config:      &store.HarnessConfigData{Image: "harness-config-image:v1"},
+	}
+	require.NoError(t, s.CreateHarnessConfig(context.Background(), hc))
+
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Template = template.Slug
+		a.AppliedConfig.Image = ""
+		a.AppliedConfig.HarnessConfig = hc.Slug
+		// HarnessConfig is explicit-only (design §3.3 Amendment A1), driven by
+		// CreateInputs.HarnessConfig — record what the requester actually asked
+		// for, so it outranks the template for HarnessConfigID resolution while
+		// still losing to the template for Image.
+		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{HarnessConfig: hc.Slug}
+	})
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	req := reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{DryRun: true})
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, req, agent.ID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var resp ReincarnateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "template-image:v1", resp.Plan.Image.New,
+		"a template image must beat the harness-config fallback")
+}
+
+// TestReincarnateAgent_A11F1_WorkerPersistsBrokerEchoedImage is the worker-side
+// half of design §3.4 Amendment A11 item 1: when the broker's reprovision
+// response echoes back a resolved image different from what the hub planned
+// (e.g. the broker's own search path resolved something the hub could not
+// predict), the worker must persist that image on the agent's live
+// AppliedConfig rather than losing it once the "starting" step re-derives the
+// agent's phase. This is a regression test for the pointer-aliasing bug where
+// a step write omitting appliedConfig silently discarded the broker's echo.
+func TestReincarnateAgent_A11F1_WorkerPersistsBrokerEchoedImage(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.reprovisionImage = "broker-resolved-image:v9"
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.AppliedConfig.Image = "old-image:v1"
+	})
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	req := reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{})
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, req, agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	waitForReincarnationSettled(t, s, agent.ID)
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, final.AppliedConfig)
+	assert.Equal(t, "broker-resolved-image:v9", final.AppliedConfig.Image,
+		"the broker-echoed image must survive the starting step's write, not be lost to a stale re-read")
 }
 
 // TestReincarnateAgent_LegacyAgent_DropsSkillsWithWarning covers the legacy

@@ -180,6 +180,42 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 	// Amendment A1 property 1).
 	s.deriveAgentConfig(ctx, freshAgent, project, resolvedTemplate)
 
+	// Design §3.4 Amendment A11.1(a): fill Image from the resolved harness
+	// config when deriveAgentConfig still left it empty. resolveDerivedConfig
+	// only fills Image from an explicit inline config or the template (see
+	// its own Image-fill code) — it never reads a harness config's image at
+	// all. On create, that gap is invisible because the broker resolves and
+	// echoes the harness-config image back (applyBrokerResponse), and the
+	// create response handler persists it. The reincarnate plan has no
+	// broker round trip to see that value before deciding what to show, so
+	// it is resolved here instead.
+	//
+	// This preserves the broker's own image-resolution precedence: explicit
+	// inline, then template, then harness config. fresh.Image already
+	// reflects "explicit inline, then template" by this point (set from
+	// CreateInputs.InlineConfig.Image above, then possibly filled from the
+	// template by resolveDerivedConfig inside deriveAgentConfig) — see
+	// pkg/agent/provision.go's merge order (inline is merged over the
+	// template first; that combined result is then merged, as the
+	// higher-precedence side, over a harness-config base:
+	// `finalScionCfg = config.MergeScionConfig(hcCfg, finalScionCfg)`) and
+	// pkg/config/templates.go's MergeScionConfig, whose override side
+	// (`if override.Image != "" { result.Image = override.Image }`) only
+	// wins when non-empty — so filling from the harness config ONLY when
+	// fresh.Image is still empty here reproduces that exact order.
+	//
+	// Deliberately NOT added to resolveDerivedConfig itself: that would
+	// change create's own behavior, which the Phase 0 golden test pins.
+	if fresh.Image == "" && fresh.HarnessConfigID != "" {
+		hc, err := s.store.GetHarnessConfig(ctx, fresh.HarnessConfigID)
+		if err != nil {
+			s.agentLifecycleLog.Warn("reincarnate: failed to resolve harness config for the image fallback",
+				"agent_id", agent.ID, "harness_config_id", fresh.HarnessConfigID, "error", err)
+		} else if hc.Config != nil && hc.Config.Image != "" {
+			fresh.Image = hc.Config.Image
+		}
+	}
+
 	return fresh, warnings, nil
 }
 
