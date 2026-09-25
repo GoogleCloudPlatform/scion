@@ -133,14 +133,55 @@ func detectHarnessFromContent(data []byte, templateName string) templateConfigIn
 
 // handleTemplateFiles dispatches template file operations.
 // filePath is empty for listing, non-empty for single-file operations.
+//
+// Authorization is enforced here rather than in each leaf handler, which is a
+// deliberate departure from the sibling template actions. Those gate
+// per-handler, and the reason this route was reachable unauthenticated is that
+// the whole file was written without one: the /api/v1/templates/ route is
+// classified RoutePolicy, which passes through by design and delegates
+// enforcement to the handler, and that delegation was simply never honoured
+// here. Gating at the single dispatch point means a sub-handler added later
+// inherits the check instead of having to remember it.
+//
+// filePath is validated for the same reason it cannot be trusted downstream:
+// it is concatenated into a storage object path and, on write, recorded in the
+// template manifest. The Go mux cleans a literal "../" out of the request path
+// before routing, but r.URL.Path is already percent-decoded by then, so an
+// encoded "..%2f" arrives here intact.
 func (s *Server) handleTemplateFiles(w http.ResponseWriter, r *http.Request, templateID, filePath string) {
+	if filePath != "" {
+		if err := validateWorkspaceFilePath(filePath); err != nil {
+			BadRequest(w, "Invalid file path: "+err.Error())
+			return
+		}
+	}
+
+	template, err := s.store.GetTemplate(r.Context(), templateID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// SECURITY-GATE: authorize access to this specific template before any
+	// storage read, storage write or manifest change. Reads require read;
+	// everything that mutates template content requires update, matching the
+	// upload and finalize actions, which also mutate content rather than the
+	// template record itself.
+	action := ActionUpdate
+	if r.Method == http.MethodGet {
+		action = ActionRead
+	}
+	if !s.authorize(w, r, templateResource(template), action) {
+		return
+	}
+
 	if filePath == "" {
 		// Collection endpoint: GET = list, POST = upload
 		switch r.Method {
 		case http.MethodGet:
-			s.handleTemplateFileList(w, r, templateID)
+			s.handleTemplateFileList(w, r, template)
 		case http.MethodPost:
-			s.handleTemplateFileUpload(w, r, templateID)
+			s.handleTemplateFileUpload(w, r, template)
 		default:
 			MethodNotAllowed(w)
 		}
@@ -150,25 +191,18 @@ func (s *Server) handleTemplateFiles(w http.ResponseWriter, r *http.Request, tem
 	// Single-file endpoint
 	switch r.Method {
 	case http.MethodGet:
-		s.handleTemplateFileRead(w, r, templateID, filePath)
+		s.handleTemplateFileRead(w, r, template, filePath)
 	case http.MethodPut:
-		s.handleTemplateFileWrite(w, r, templateID, filePath)
+		s.handleTemplateFileWrite(w, r, template, filePath)
 	case http.MethodDelete:
-		s.handleTemplateFileDelete(w, r, templateID, filePath)
+		s.handleTemplateFileDelete(w, r, template, filePath)
 	default:
 		MethodNotAllowed(w)
 	}
 }
 
 // handleTemplateFileList returns the file manifest for a template.
-func (s *Server) handleTemplateFileList(w http.ResponseWriter, r *http.Request, templateID string) {
-	ctx := r.Context()
-
-	template, err := s.store.GetTemplate(ctx, templateID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
+func (s *Server) handleTemplateFileList(w http.ResponseWriter, r *http.Request, template *store.Template) {
 
 	var totalSize int64
 	entries := make([]TemplateFileEntry, len(template.Files))
@@ -194,14 +228,8 @@ func (s *Server) handleTemplateFileList(w http.ResponseWriter, r *http.Request, 
 //   - Accept: application/octet-stream — streams raw binary content (used by the
 //     local storage proxy flow for downloads)
 //   - Default — returns JSON with content, size, hash (existing behavior, 1MB limit)
-func (s *Server) handleTemplateFileRead(w http.ResponseWriter, r *http.Request, templateID, filePath string) {
+func (s *Server) handleTemplateFileRead(w http.ResponseWriter, r *http.Request, template *store.Template, filePath string) {
 	ctx := r.Context()
-
-	template, err := s.store.GetTemplate(ctx, templateID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
 
 	// Find the file in the manifest
 	var found *store.TemplateFile
@@ -296,14 +324,8 @@ func (s *Server) handleTemplateFileRead(w http.ResponseWriter, r *http.Request, 
 //   - Raw binary body (any other Content-Type): writes raw request body to storage directly.
 //     Used by the local storage proxy flow where clients PUT file content to hub URLs
 //     instead of file:// signed URLs.
-func (s *Server) handleTemplateFileWrite(w http.ResponseWriter, r *http.Request, templateID, filePath string) {
+func (s *Server) handleTemplateFileWrite(w http.ResponseWriter, r *http.Request, template *store.Template, filePath string) {
 	ctx := r.Context()
-
-	template, err := s.store.GetTemplate(ctx, templateID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
 
 	stor := s.GetStorage()
 	if stor == nil {
@@ -338,7 +360,7 @@ func (s *Server) handleTemplateFileWrite(w http.ResponseWriter, r *http.Request,
 	// Upload content to storage
 	objectPath := template.StoragePath + "/" + filePath
 	content := []byte(req.Content)
-	_, err = stor.Upload(ctx, objectPath, strings.NewReader(req.Content), storage.UploadOptions{
+	_, err := stor.Upload(ctx, objectPath, strings.NewReader(req.Content), storage.UploadOptions{
 		ContentType: "text/plain; charset=utf-8",
 	})
 	if err != nil {
@@ -463,14 +485,8 @@ func (s *Server) handleTemplateFileWriteRaw(w http.ResponseWriter, r *http.Reque
 }
 
 // handleTemplateFileUpload handles multipart file uploads to a template.
-func (s *Server) handleTemplateFileUpload(w http.ResponseWriter, r *http.Request, templateID string) {
+func (s *Server) handleTemplateFileUpload(w http.ResponseWriter, r *http.Request, template *store.Template) {
 	ctx := r.Context()
-
-	template, err := s.store.GetTemplate(ctx, templateID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
 
 	stor := s.GetStorage()
 	if stor == nil {
@@ -588,14 +604,8 @@ func (s *Server) handleTemplateFileUpload(w http.ResponseWriter, r *http.Request
 }
 
 // handleTemplateFileDelete removes a file from a template.
-func (s *Server) handleTemplateFileDelete(w http.ResponseWriter, r *http.Request, templateID, filePath string) {
+func (s *Server) handleTemplateFileDelete(w http.ResponseWriter, r *http.Request, template *store.Template, filePath string) {
 	ctx := r.Context()
-
-	template, err := s.store.GetTemplate(ctx, templateID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
 
 	// Find and remove the file from the manifest
 	idx := -1
