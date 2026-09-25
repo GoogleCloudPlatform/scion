@@ -88,3 +88,50 @@ echo "$@"
 		t.Errorf("expected '--user scion' in exec output, got %q", out)
 	}
 }
+
+// TestDockerRuntime_List_FormatAvoidsSize guards ptone/scion#1867: the ps
+// format must not reference .Size (directly or via "{{json .}}"), because that
+// makes the daemon compute container sizes, which fails intermittently on
+// hosts with high overlay churn.
+func TestDockerRuntime_List_FormatAvoidsSize(t *testing.T) {
+	tmpDir := t.TempDir()
+	mockDocker := filepath.Join(tmpDir, "mock-docker")
+	argsFile := filepath.Join(tmpDir, "args")
+
+	// Record the args, then emit one container line in the shape the real
+	// format produces.
+	script := `#!/bin/sh
+printf '%s\n' "$@" > "` + argsFile + `"
+echo '{"ID":"abc123","Names":"proj--agent1","Status":"Up 5 minutes","Image":"scion-claude:latest","Labels":"scion.name=agent1,scion.template=developer"}'
+`
+	if err := os.WriteFile(mockDocker, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock docker: %v", err)
+	}
+
+	rt := &DockerRuntime{Command: mockDocker}
+	agents, err := rt.List(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+
+	raw, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("failed to read recorded args: %v", err)
+	}
+	args := string(raw)
+	if strings.Contains(args, "{{json .}}") {
+		t.Errorf("ps format must not use {{json .}} (triggers size calculation); args: %q", args)
+	}
+	if strings.Contains(args, ".Size") {
+		t.Errorf("ps format must not reference .Size; args: %q", args)
+	}
+
+	if len(agents) != 1 {
+		t.Fatalf("expected 1 agent, got %d", len(agents))
+	}
+	a := agents[0]
+	if a.ContainerID != "abc123" || a.Name != "agent1" || a.Image != "scion-claude:latest" ||
+		a.ContainerStatus != "Up 5 minutes" || a.Template != "developer" {
+		t.Errorf("unexpected parsed agent: %+v", a)
+	}
+}
