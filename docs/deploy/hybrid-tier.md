@@ -492,7 +492,7 @@ retired copy it explicitly names, never data hidden under a live mount:
 
    ```bash
    test ! -e /var/lib/scion-shared.img || { echo "image exists; not re-creating" >&2; exit 1; }
-   fallocate -l 100G /var/lib/scion-shared.img
+   fallocate -l 100G /var/lib/scion-shared.img      # size per the sizing guidance above: larger than du -sh /srv/scion-shared, with room left on /
    mkfs.ext4 -q /var/lib/scion-shared.img
    mkdir -p /mnt/scion-shared-new
    mount -o loop /var/lib/scion-shared.img /mnt/scion-shared-new
@@ -531,10 +531,10 @@ again). If you stop before starting step 7, just `umount
 agents. Anything written after step 10 remains only on the image file;
 recover it by loop-mounting the image read-only at a temporary path and
 copying it out. The image itself is left in place -- unmount it first if
-you stopped during steps 1-4 and haven't run the rollback -- then remove
-it, or reuse it without re-formatting, before retrying the cutover, since
-the create block's own guard refuses to re-create an image that already
-exists.
+you stopped during steps 1-4 and haven't run the rollback. Step 1's guard
+refuses an existing image; to reuse it, run only the last three lines of
+step 1 (mkdir, mount, mountpoint). Remove the image first if you want a
+fresh one.
 
 ## Reboot, stale-handle, and cross-runtime visibility caveats
 

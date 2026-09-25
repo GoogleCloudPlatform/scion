@@ -31,9 +31,9 @@ temporary mountpoint (and move `.old` back if it was already moved).
 It also notes that anything written after the last rsync stays only on
 the image (recoverable by loop-mounting the image read-only and copying
 it out), and that the image itself needs to be unmounted if still
-mounted, then removed (or reused without re-formatting) before retrying
-the cutover, since the create step's own guard refuses an image that
-already exists.
+mounted. Step 1's own guard refuses an existing image, so reusing it
+means running only step 1's last three lines (mkdir, mount, mountpoint);
+removing the image first gets a fresh one instead.
 
 ## fstab entry: `nofail`
 
