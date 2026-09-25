@@ -1620,6 +1620,33 @@ type SkillFilter struct {
 	Status  string
 	Search  string
 	Tags    []string
+
+	// AccessScope, when non-nil, restricts results to the read boundary
+	// established by ptone/scion#1901. It is applied in the store query
+	// before LIMIT/cursor pagination (and before TotalCount) so that
+	// out-of-scope rows can never crowd a caller's own rows out of a page,
+	// and so TotalCount reflects only rows the caller may actually see. A
+	// nil AccessScope applies no restriction — used for the hub-admin/
+	// super-admin bypass, which sees every skill unfiltered.
+	AccessScope *SkillAccessScope
+}
+
+// SkillAccessScope narrows a skill query to the rows a specific caller may
+// read, mirroring the ptone/scion#1901 ruling:
+//   - IncludeHubScope: hub-scoped (global/core) skills are visible to any
+//     authenticated caller.
+//   - CallerID: a user-scoped skill is visible only when its ScopeID equals
+//     CallerID (the owning user).
+//   - ProjectIDs: a project-scoped skill is visible only when its ScopeID is
+//     one of these (the caller's project memberships).
+//   - IncludePublicVisibility: a skill whose Visibility is "public" remains
+//     visible regardless of scope. Temporary until ptone/scion#1903 removes
+//     the visibility field.
+type SkillAccessScope struct {
+	IncludeHubScope         bool
+	CallerID                string
+	ProjectIDs              []string
+	IncludePublicVisibility bool
 }
 
 // =============================================================================

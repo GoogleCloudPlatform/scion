@@ -77,6 +77,21 @@ type Resource struct {
 	ParentID   string            // Parent resource ID
 	Labels     map[string]string // Resource labels for condition matching
 	Ancestry   []string          // Ordered ancestor chain [root, ..., parent] for transitive access
+
+	// ScopeKind is the resource's own scope classification for resource
+	// types whose records are themselves partitioned by scope (currently
+	// only "skill": store.SkillScopeGlobal/Core/Project/User). It is
+	// distinct from ParentType/ParentID, which describe project containment
+	// for the kernel's project-scoped binding check. ScopeKind instead lets
+	// a resource-type-specific check (see filterHubWideSkillGrants) tell a
+	// genuinely hub-scoped record apart from a user- or project-scoped one
+	// that merely happens to have no ParentType set. Left empty for resource
+	// types that don't need it. For "skill" resources specifically, build
+	// this through skillResource or skillScopeResource (pkg/hub/skill_handlers.go)
+	// rather than a hand-built literal: filterHubWideSkillGrants fails
+	// closed on an empty or unrecognized ScopeKind (ptone/scion#1901 finding
+	// F4), so only those two constructors are guaranteed to set it correctly.
+	ScopeKind string
 }
 
 // PrincipalKind describes the authenticated actor evaluated by an authorization request.
@@ -402,6 +417,15 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 				roleDefs[k] = v
 			}
 		}
+	}
+
+	// ── Step 5c: Skill scope containment (ptone/scion#1901) ───────────
+	// The curated hub-member/hub-viewer roles carry skill.read/skill.list at
+	// system scope purely so every hub member can browse the hub-wide
+	// (global/core) skill catalog. That grant must not leak into user- or
+	// project-scoped skills; see filterHubWideSkillGrants.
+	if request.Resource.Type == "skill" {
+		candidates = filterHubWideSkillGrants(candidates, roleDefs, request.Resource.ScopeKind)
 	}
 
 	// ── Step 6: Build resource context ────────────────────────────────
