@@ -16,9 +16,13 @@
 package hub
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // handleBrokersEndpoint handles POST /api/v1/brokers.
@@ -73,11 +77,48 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	// Create the broker registration
-	resp, err := s.brokerAuthService.CreateBrokerRegistration(r.Context(), req, user.ID())
+	// If this request matches an existing broker record (by name or by a
+	// caller-supplied ID), treat it as re-registration of that broker rather
+	// than a brand-new one. Re-registration mutates the existing record and
+	// issues a fresh join token, so it is gated the same way secret rotation
+	// is: the caller must be a super-admin, be the broker itself, or be the
+	// user that originally created it. A first-time registration (no
+	// existing match) is left open to any authenticated user, who becomes
+	// the new broker's owner.
+	existingBroker, err := s.brokerAuthService.FindExistingBroker(r.Context(), req.Name, req.BrokerID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-			"failed to create broker registration: "+err.Error(), nil)
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	if existingBroker != nil {
+		brokerIdent := GetBrokerIdentityFromContext(r.Context())
+		allowed, err := s.authorizedForBrokerOwnerAction(r.Context(), user, brokerIdent, existingBroker.ID,
+			func() (*store.RuntimeBroker, error) { return existingBroker, nil })
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		if !allowed {
+			logAuthzDenial(r, user, Resource{Type: "broker", ID: existingBroker.ID}, Action("reregister"),
+				"caller is not the broker's creator, the broker itself, or a super-admin")
+			Forbidden(w)
+			return
+		}
+	}
+
+	// Create the broker registration. Pin the mutation to what was just
+	// authorized above, so a lookup race between the authorization check
+	// and this call cannot redirect it onto a broker the caller was not
+	// authorized against — whether that means reusing a specific existing
+	// broker, or, when none matched, creating a genuinely new one.
+	var resp *CreateBrokerRegistrationResponse
+	if existingBroker != nil {
+		resp, err = s.brokerAuthService.CreateBrokerRegistrationForAuthorizedMatch(r.Context(), req, user.ID(), existingBroker.ID)
+	} else {
+		resp, err = s.brokerAuthService.CreateBrokerRegistrationForAuthorizedNew(r.Context(), req, user.ID())
+	}
+	if err != nil {
+		writeBrokerRegistrationError(w, err)
 		return
 	}
 
@@ -85,6 +126,59 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 	LogRegistrationEvent(r.Context(), s.auditLogger, resp.BrokerID, req.Name, user.ID(), getClientIP(r))
 
 	writeJSON(w, http.StatusCreated, resp)
+}
+
+// writeBrokerRegistrationError maps an error from
+// CreateBrokerRegistrationForAuthorizedMatch or
+// CreateBrokerRegistrationForAuthorizedNew to an HTTP response. A stale-pin
+// refusal (ErrBrokerRegistrationAuthorizationStale) means the broker match
+// changed between the authorization check and the mutation — a
+// client-observable conflict the caller can retry, not a server fault — so
+// it maps to 409 rather than the generic 500 used for everything else.
+func writeBrokerRegistrationError(w http.ResponseWriter, err error) {
+	if errors.Is(err, ErrBrokerRegistrationAuthorizationStale) {
+		Conflict(w, err.Error())
+		return
+	}
+	writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+		"failed to create broker registration: "+err.Error(), nil)
+}
+
+// authorizedForBrokerOwnerAction reports whether the caller may perform an
+// ownership-gated action against the broker identified by brokerID — secret
+// rotation, or re-registration of an existing broker record. Access is
+// granted to any one of:
+//   - a system-scoped super-admin,
+//   - the broker itself, authenticated via HMAC, or
+//   - the user recorded as the broker's creator (RuntimeBroker.CreatedBy).
+//
+// Both ownership-gated actions in this package (rotate-secret and
+// re-registration) share this same check, and both scope it to super-admin
+// rather than the broader broker.read catalog permission.
+//
+// fetchBroker is only invoked when the first two checks do not already
+// grant access, so callers that already have the broker record on hand can
+// return it directly instead of re-fetching.
+func (s *Server) authorizedForBrokerOwnerAction(ctx context.Context, user UserIdentity, brokerIdent BrokerIdentity, brokerID string, fetchBroker func() (*store.RuntimeBroker, error)) (bool, error) {
+	if user != nil && s.authzService.IsSystemAdmin(ctx, user.ID()) {
+		return true, nil
+	}
+
+	if brokerIdent != nil && brokerIdent.BrokerID() == brokerID {
+		return true, nil
+	}
+
+	if user != nil {
+		broker, err := fetchBroker()
+		if err != nil {
+			return false, err
+		}
+		if broker != nil && broker.CreatedBy == user.ID() {
+			return true, nil
+		}
+	}
+
+	return false, nil
 }
 
 // handleBrokerJoin handles POST /api/v1/brokers/join.
@@ -206,30 +300,23 @@ func (s *Server) handleBrokerRotateSecret(w http.ResponseWriter, r *http.Request
 	user := GetUserIdentityFromContext(r.Context())
 	brokerIdent := GetBrokerIdentityFromContext(r.Context())
 
-	authorized := false
-	if user != nil && s.authzService.Decide(r.Context(), AuthzRequest{
-		Principal:  principalContextForIdentity(user),
-		Credential: credentialContextForIdentity(user),
-		Resource:   Resource{Type: "broker", ID: "hub"},
-		Action:     Action("read"),
-		Permission: "broker.read",
-	}).Allowed {
-		authorized = true
-	} else if brokerIdent != nil && brokerIdent.BrokerID() == brokerID {
-		authorized = true
-	} else if user != nil {
-		// Check if user is the broker owner
-		broker, err := s.store.GetRuntimeBroker(r.Context(), brokerID)
-		if err != nil {
-			writeErrorFromErr(w, err, "")
-			return
-		}
-		if broker.CreatedBy == user.ID() {
-			authorized = true
-		}
+	authorized, err := s.authorizedForBrokerOwnerAction(r.Context(), user, brokerIdent, brokerID,
+		func() (*store.RuntimeBroker, error) { return s.store.GetRuntimeBroker(r.Context(), brokerID) })
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
 	}
 
 	if !authorized {
+		var denyIdentity Identity
+		switch {
+		case user != nil:
+			denyIdentity = user
+		case brokerIdent != nil:
+			denyIdentity = brokerIdent
+		}
+		logAuthzDenial(r, denyIdentity, Resource{Type: "broker", ID: brokerID}, Action("rotate_secret"),
+			"caller is not the broker's creator, the broker itself, or a super-admin")
 		Forbidden(w)
 		return
 	}

@@ -22,6 +22,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1525,5 +1526,122 @@ func TestBrokerReregistration_HostSAEmail_NormalizedToLowercase(t *testing.T) {
 	if broker.GCPHostServiceAccountEmail != want {
 		t.Errorf("host SA email should be lowercased on re-registration:\n  got:  %q\n  want: %q",
 			broker.GCPHostServiceAccountEmail, want)
+	}
+}
+
+// ============================================================================
+// CreateBrokerRegistrationForAuthorizedMatch / ForAuthorizedNew: the pinned
+// entry points used by the HTTP handler after it authorizes a re-registration
+// or first-time registration request. Each must refuse rather than mutate
+// when the lookup performed here disagrees with what the caller was
+// authorized against.
+// ============================================================================
+
+// TestCreateBrokerRegistrationForAuthorizedMatch_IDMismatchRefused covers the
+// case where the caller was authorized against one broker ID, but the lookup
+// performed here resolves to a different broker (e.g. the authorized broker
+// was renamed or deleted and a different one now matches the request).
+func TestCreateBrokerRegistrationForAuthorizedMatch_IDMismatchRefused(t *testing.T) {
+	svc, s := setupTestBrokerAuthService(t)
+	ctx := context.Background()
+
+	resp, err := svc.CreateBrokerRegistration(ctx, CreateBrokerRegistrationRequest{Name: "pin-mismatch-host"}, "owner")
+	if err != nil {
+		t.Fatalf("initial registration failed: %v", err)
+	}
+	before, err := s.GetRuntimeBroker(ctx, resp.BrokerID)
+	if err != nil {
+		t.Fatalf("GetRuntimeBroker failed: %v", err)
+	}
+	beforeAutoProvide := before.AutoProvide
+
+	_, err = svc.CreateBrokerRegistrationForAuthorizedMatch(ctx, CreateBrokerRegistrationRequest{
+		Name:        "pin-mismatch-host",
+		AutoProvide: !beforeAutoProvide,
+	}, "someone-else", "a-different-broker-id-than-was-matched")
+	if !errors.Is(err, ErrBrokerRegistrationAuthorizationStale) {
+		t.Fatalf("expected ErrBrokerRegistrationAuthorizationStale, got: %v", err)
+	}
+
+	after, err := s.GetRuntimeBroker(ctx, resp.BrokerID)
+	if err != nil {
+		t.Fatalf("GetRuntimeBroker failed: %v", err)
+	}
+	if after.AutoProvide != beforeAutoProvide {
+		t.Errorf("broker must not be mutated when the authorized ID does not match the lookup")
+	}
+}
+
+// TestCreateBrokerRegistrationForAuthorizedMatch_EmptyIDRefused covers the
+// caller-error case: an empty expectedExistingBrokerID can never be
+// satisfied, so the call must refuse without touching the store.
+func TestCreateBrokerRegistrationForAuthorizedMatch_EmptyIDRefused(t *testing.T) {
+	svc, s := setupTestBrokerAuthService(t)
+	ctx := context.Background()
+
+	resp, err := svc.CreateBrokerRegistration(ctx, CreateBrokerRegistrationRequest{Name: "pin-empty-host"}, "owner")
+	if err != nil {
+		t.Fatalf("initial registration failed: %v", err)
+	}
+	before, err := s.GetRuntimeBroker(ctx, resp.BrokerID)
+	if err != nil {
+		t.Fatalf("GetRuntimeBroker failed: %v", err)
+	}
+	beforeAutoProvide := before.AutoProvide
+
+	_, err = svc.CreateBrokerRegistrationForAuthorizedMatch(ctx, CreateBrokerRegistrationRequest{
+		Name:        "pin-empty-host",
+		AutoProvide: !beforeAutoProvide,
+	}, "someone-else", "")
+	if err == nil {
+		t.Fatal("expected an error for an empty expectedExistingBrokerID, got nil")
+	}
+
+	after, err := s.GetRuntimeBroker(ctx, resp.BrokerID)
+	if err != nil {
+		t.Fatalf("GetRuntimeBroker failed: %v", err)
+	}
+	if after.AutoProvide != beforeAutoProvide {
+		t.Errorf("broker must not be mutated when expectedExistingBrokerID is empty")
+	}
+}
+
+// TestCreateBrokerRegistrationForAuthorizedNew_ExistingMatchRefused covers
+// the create-path race: the caller was authorized for a first-time
+// registration because no broker matched at authorization time, but by the
+// time this call performs its own lookup, a broker with the same name now
+// exists (e.g. registered concurrently by someone else). That existing
+// broker must be left alone, not implicitly re-registered.
+func TestCreateBrokerRegistrationForAuthorizedNew_ExistingMatchRefused(t *testing.T) {
+	svc, s := setupTestBrokerAuthService(t)
+	ctx := context.Background()
+
+	resp, err := svc.CreateBrokerRegistration(ctx, CreateBrokerRegistrationRequest{Name: "pin-new-host"}, "original-owner")
+	if err != nil {
+		t.Fatalf("initial registration failed: %v", err)
+	}
+	before, err := s.GetRuntimeBroker(ctx, resp.BrokerID)
+	if err != nil {
+		t.Fatalf("GetRuntimeBroker failed: %v", err)
+	}
+	beforeAutoProvide := before.AutoProvide
+
+	_, err = svc.CreateBrokerRegistrationForAuthorizedNew(ctx, CreateBrokerRegistrationRequest{
+		Name:        "pin-new-host",
+		AutoProvide: !beforeAutoProvide,
+	}, "late-arriving-caller")
+	if !errors.Is(err, ErrBrokerRegistrationAuthorizationStale) {
+		t.Fatalf("expected ErrBrokerRegistrationAuthorizationStale, got: %v", err)
+	}
+
+	after, err := s.GetRuntimeBroker(ctx, resp.BrokerID)
+	if err != nil {
+		t.Fatalf("GetRuntimeBroker failed: %v", err)
+	}
+	if after.AutoProvide != beforeAutoProvide {
+		t.Errorf("the existing broker must not be mutated by a call authorized only for a new registration")
+	}
+	if after.CreatedBy != "original-owner" {
+		t.Errorf("the existing broker's owner must not change; got CreatedBy=%q", after.CreatedBy)
 	}
 }
