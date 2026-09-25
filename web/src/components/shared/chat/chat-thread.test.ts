@@ -2226,6 +2226,517 @@ describe('scion-chat-thread search result navigation', () => {
 });
 
 /**
+ * Jump-to-message paths (search-jump, reply-jump, deep link) all funnel
+ * through scrollToMessageById()'s single smooth `scrollIntoView`. A layout
+ * shift after the scroll starts — an image loading, a late markdown render,
+ * an attachment's height resolving — can leave the target off screen, since
+ * Chromium's smooth scroll targets the position computed when it started
+ * (pre-existing, found in review of #1749). The fix re-checks once the
+ * scroll settles (via `scrollend`, or a poll fallback where that event is
+ * unsupported) and corrects if needed, capped so it can never loop, and
+ * cancellable by a manual scroll, another jump, or a thread switch.
+ */
+describe('scion-chat-thread jump-to-message scrollend re-check', () => {
+  const TARGET = {
+    id: 'jump-target',
+    sender: 'them@example.com',
+    msg: 'jump target',
+    createdAt: '2026-01-01T00:01:00Z',
+  };
+
+  // happy-dom performs no layout: scrollHeight/clientHeight report zero
+  // unless overridden, which would make every scroll position look "clamped"
+  // (see isJumpScrollClamped). Fix them so scrollTop alone determines
+  // top/bottom clamping in the tests that care about it.
+  const SCROLL_HEIGHT = 1000;
+  const CLIENT_HEIGHT = 300;
+  const originalScrollHeight = Object.getOwnPropertyDescriptor(
+    HTMLElement.prototype,
+    'scrollHeight'
+  );
+  const originalClientHeight = Object.getOwnPropertyDescriptor(
+    HTMLElement.prototype,
+    'clientHeight'
+  );
+
+  let scrollIntoViewCalls: Array<{ el: Element; opts: ScrollIntoViewOptions }>;
+  const originalScrollIntoView = HTMLElement.prototype.scrollIntoView;
+
+  let rects: WeakMap<Element, DOMRect>;
+  const originalGetBoundingClientRect = HTMLElement.prototype.getBoundingClientRect;
+
+  /** Give an element a fixed bounding rect for the "in view" check. happy-dom
+   *  performs no layout, so every element reports an all-zero rect unless the
+   *  test supplies one. */
+  function setRect(el: Element, rect: { top: number; bottom: number }): void {
+    rects.set(el, {
+      top: rect.top,
+      bottom: rect.bottom,
+      left: 0,
+      right: 0,
+      width: 0,
+      height: rect.bottom - rect.top,
+      x: 0,
+      y: rect.top,
+      toJSON: () => ({}),
+    } as DOMRect);
+  }
+
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ items: [TARGET] }),
+    } as unknown as Response);
+
+    scrollIntoViewCalls = [];
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: function (this: Element, opts: ScrollIntoViewOptions) {
+        scrollIntoViewCalls.push({ el: this, opts });
+      },
+    });
+
+    rects = new WeakMap();
+    Object.defineProperty(HTMLElement.prototype, 'getBoundingClientRect', {
+      configurable: true,
+      value: function (this: Element) {
+        return rects.get(this) ?? originalGetBoundingClientRect.call(this);
+      },
+    });
+
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get: () => SCROLL_HEIGHT,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      get: () => CLIENT_HEIGHT,
+    });
+  });
+
+  afterEach(() => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: originalScrollIntoView,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'getBoundingClientRect', {
+      configurable: true,
+      value: originalGetBoundingClientRect,
+    });
+    for (const [prop, descriptor] of [
+      ['scrollHeight', originalScrollHeight],
+      ['clientHeight', originalClientHeight],
+    ] as const) {
+      if (descriptor) {
+        Object.defineProperty(HTMLElement.prototype, prop, descriptor);
+      } else {
+        delete (HTMLElement.prototype as unknown as Record<string, unknown>)[prop];
+      }
+    }
+    document.body.innerHTML = '';
+    vi.useRealTimers();
+  });
+
+  /**
+   * Mount (TARGET is already in the seeded history, so no `around` fetch is
+   * needed) and position the target far above the viewport with the
+   * container mid-thread (`scrollTop` away from either scroll extreme), so
+   * the pre-scroll check in `scrollToMessageById` sees a real, unclamped
+   * scroll and arms the watch — the common case most of these tests exercise.
+   * Then simulate the scroll having landed the target in view, and clear the
+   * jump's own `scrollIntoView` call so each test only sees calls made by the
+   * re-check itself.
+   */
+  async function mountAndJump(): Promise<{
+    el: ScionChatThread;
+    scrollEl: HTMLElement;
+    targetEl: HTMLElement;
+  }> {
+    const el = await mount();
+    expect(
+      el.shadowRoot?.getElementById(`msg-${TARGET.id}`),
+      'TARGET must already be loaded from the seeded history'
+    ).not.toBeNull();
+
+    const scrollEl = el.shadowRoot!.querySelector('.messages-scroll') as HTMLElement;
+    const targetEl = el.shadowRoot!.getElementById(`msg-${TARGET.id}`) as HTMLElement;
+    setRect(scrollEl, { top: 0, bottom: 300 });
+    setRect(targetEl, { top: -900, bottom: -850 }); // far above the viewport
+    scrollEl.scrollTop = 500; // mid-thread: not clamped at either end
+
+    await el.scrollToMessageById(TARGET.id);
+    await el.updateComplete;
+
+    setRect(targetEl, { top: 100, bottom: 150 }); // settled — fully inside, "in view"
+    scrollIntoViewCalls = [];
+    return { el, scrollEl, targetEl };
+  }
+
+  it('re-checks on scrollend and corrects when a layout shift moved the target out of view', async () => {
+    const { scrollEl, targetEl } = await mountAndJump();
+
+    // A large layout shift (e.g. an image finishing load above the target)
+    // has pushed it below the visible area by the time the scroll settles.
+    setRect(targetEl, { top: 500, bottom: 550 });
+
+    scrollEl.dispatchEvent(new Event('scrollend'));
+
+    expect(scrollIntoViewCalls).toEqual([
+      { el: targetEl, opts: { behavior: 'auto', block: 'center' } },
+    ]);
+  });
+
+  it('does not re-scroll when the target is already in view on scrollend', async () => {
+    const { scrollEl } = await mountAndJump();
+
+    scrollEl.dispatchEvent(new Event('scrollend'));
+
+    expect(scrollIntoViewCalls).toEqual([]);
+  });
+
+  it('treats a target taller than the viewport as in view once it spans the midpoint, avoiding a wasted correction (R2)', async () => {
+    const { scrollEl, targetEl } = await mountAndJump();
+
+    // A long agent reply: taller than the 300px container, so it can never
+    // be fully contained, but `block: 'center'` has it straddling the
+    // container's midpoint (150) — exactly where centering aims for.
+    setRect(targetEl, { top: -200, bottom: 400 });
+
+    scrollEl.dispatchEvent(new Event('scrollend'));
+
+    expect(scrollIntoViewCalls).toEqual([]);
+  });
+
+  it('cancels the pending re-check when the user scrolls manually (wheel)', async () => {
+    const { scrollEl, targetEl } = await mountAndJump();
+    setRect(targetEl, { top: 500, bottom: 550 });
+
+    // A manual wheel scroll arrives before the browser reports settle.
+    scrollEl.dispatchEvent(new Event('wheel'));
+    scrollEl.dispatchEvent(new Event('scrollend'));
+
+    expect(scrollIntoViewCalls).toEqual([]);
+  });
+
+  it('cancels the pending re-check on a scrollbar-drag/middle-click pointerdown (R1)', async () => {
+    const { scrollEl, targetEl } = await mountAndJump();
+    setRect(targetEl, { top: 500, bottom: 550 });
+
+    // Scrollbar drags and middle-click autoscroll dispatch no wheel, touch,
+    // or key events — only pointerdown.
+    scrollEl.dispatchEvent(new Event('pointerdown'));
+    scrollEl.dispatchEvent(new Event('scrollend'));
+
+    expect(scrollIntoViewCalls).toEqual([]);
+  });
+
+  it('cancels the pending re-check on a document-level keydown even when focus is outside the scroll container (R1)', async () => {
+    const { scrollEl, targetEl } = await mountAndJump();
+    setRect(targetEl, { top: 500, bottom: 550 });
+
+    // The common state right after clicking a message: activeElement is
+    // <body>, so the keydown never reaches scrollEl, yet Chromium still
+    // scrolls the last-clicked scroller on PageUp.
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageUp', bubbles: true }));
+    scrollEl.dispatchEvent(new Event('scrollend'));
+
+    expect(scrollIntoViewCalls).toEqual([]);
+  });
+
+  it('does not cancel the pending re-check for keydowns unrelated to scrolling', async () => {
+    const { scrollEl, targetEl } = await mountAndJump();
+    setRect(targetEl, { top: 500, bottom: 550 });
+
+    // Typing (e.g. in a reply box) must not be treated as a manual scroll.
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', bubbles: true }));
+    scrollEl.dispatchEvent(new Event('scrollend'));
+
+    expect(scrollIntoViewCalls).toEqual([
+      { el: targetEl, opts: { behavior: 'auto', block: 'center' } },
+    ]);
+  });
+
+  it('falls back to a settle poll when scrollend is unsupported', async () => {
+    const { el, scrollEl, targetEl } = await mountAndJump();
+    vi.spyOn(
+      el as unknown as { supportsScrollEndEvent: () => boolean },
+      'supportsScrollEndEvent'
+    ).mockReturnValue(false);
+
+    // Put the target back off-screen so the re-issued jump below sees a real
+    // scroll and arms a fresh watch via the now-stubbed fallback path.
+    setRect(targetEl, { top: -900, bottom: -850 });
+    scrollEl.scrollTop = 500;
+
+    vi.useFakeTimers();
+    try {
+      // Re-issue the jump so the newly stubbed fallback path is picked up.
+      await el.scrollToMessageById(TARGET.id);
+      setRect(targetEl, { top: 500, bottom: 550 });
+      scrollIntoViewCalls = [];
+
+      // Poll interval is 50ms; settle requires JUMP_SCROLL_SETTLE_STABLE_MS
+      // (150ms) of no scrollTop movement, which happy-dom's static scrollTop
+      // satisfies immediately. Advance just past the first settle (150ms) but
+      // well short of the second poll cycle's ~150ms-later correction (that
+      // repeated-correction behavior is covered by the recheck-cap test).
+      await vi.advanceTimersByTimeAsync(200);
+
+      expect(scrollIntoViewCalls).toEqual([
+        { el: targetEl, opts: { behavior: 'auto', block: 'center' } },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('caps corrective re-scrolls so a target that never settles cannot loop forever', async () => {
+    const { scrollEl, targetEl } = await mountAndJump();
+    // Never let the target land in view — every scrollend still sees it off screen.
+    setRect(targetEl, { top: 500, bottom: 550 });
+
+    scrollEl.dispatchEvent(new Event('scrollend'));
+    scrollEl.dispatchEvent(new Event('scrollend'));
+    scrollEl.dispatchEvent(new Event('scrollend'));
+    scrollEl.dispatchEvent(new Event('scrollend'));
+
+    // Capped at 2 re-checks, however many scrollends fire afterward.
+    expect(scrollIntoViewCalls.length).toBe(2);
+  });
+
+  it('cleans up after the idle timeout when there is no scroll activity and scrollend never fires (R1)', async () => {
+    const { el, scrollEl, targetEl } = await mountAndJump();
+    // Re-arm from a clean, off-screen state so the idle timeout below is
+    // timed from this jump, not from mountAndJump's initial one.
+    setRect(targetEl, { top: -900, bottom: -850 });
+    scrollEl.scrollTop = 500;
+
+    vi.useFakeTimers();
+    try {
+      await el.scrollToMessageById(TARGET.id);
+      setRect(targetEl, { top: 500, bottom: 550 }); // stays off-screen throughout
+      scrollIntoViewCalls = [];
+
+      // No `scroll` event and no `scrollend` arrive: the idle timeout
+      // (300ms) fires with no activity at all to have restarted it.
+      await vi.advanceTimersByTimeAsync(300);
+
+      // A stray scrollend afterward — e.g. from the user's own subsequent
+      // scroll — must find nothing armed.
+      scrollEl.dispatchEvent(new Event('scrollend'));
+
+      expect(scrollIntoViewCalls).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('still corrects a settle that takes longer than the old fixed 1500ms deadline, as long as scroll events keep arriving (R4)', async () => {
+    const { el, scrollEl, targetEl } = await mountAndJump();
+    // Re-arm from a clean, off-screen state so this jump's own watch is what
+    // gets timed, not mountAndJump's initial one.
+    setRect(targetEl, { top: -900, bottom: -850 });
+    scrollEl.scrollTop = 500;
+
+    vi.useFakeTimers();
+    try {
+      await el.scrollToMessageById(TARGET.id);
+      scrollIntoViewCalls = [];
+
+      // A long smooth scroll fires `scroll` every frame right up until
+      // `scrollend`. This runs past 1500ms — the fixed deadline from arm
+      // time that review R4 found Chromium's smooth scroll can exceed on
+      // jumps beyond ~8000px (measured ~1520ms) — each `scroll` restarting
+      // the idle timeout so the watch is still armed when it settles.
+      for (let elapsed = 0; elapsed < 1600; elapsed += 100) {
+        scrollEl.dispatchEvent(new Event('scroll'));
+        await vi.advanceTimersByTimeAsync(100);
+      }
+
+      // The layout shift and settle land after the old fixed deadline would
+      // already have torn the watch down.
+      setRect(targetEl, { top: 500, bottom: 550 });
+      scrollEl.dispatchEvent(new Event('scrollend'));
+
+      expect(scrollIntoViewCalls).toEqual([
+        { el: targetEl, opts: { behavior: 'auto', block: 'center' } },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('tears the watch down at the hard cap even while scroll events keep arriving continuously (O2)', async () => {
+    const { el, scrollEl, targetEl } = await mountAndJump();
+    // Re-arm from a clean, off-screen state so this jump's own watch is what
+    // gets timed against the hard cap, not mountAndJump's initial one.
+    setRect(targetEl, { top: -900, bottom: -850 });
+    scrollEl.scrollTop = 500;
+
+    const jumpScrollCleanup = (): (() => void) | null =>
+      (el as unknown as { _jumpScrollCleanup: (() => void) | null })._jumpScrollCleanup;
+
+    vi.useFakeTimers();
+    try {
+      await el.scrollToMessageById(TARGET.id);
+      setRect(targetEl, { top: 500, bottom: 550 }); // never settles
+      scrollIntoViewCalls = [];
+
+      // Continuous `scroll` activity restarts the 300ms idle timeout on its
+      // own forever — a scroller that never goes idle would otherwise stay
+      // watched indefinitely — but the hard cap (JUMP_SCROLL_HARD_CAP_MS,
+      // 5000ms) is not reset by `scroll` events, so it must still fire.
+      for (let elapsed = 0; elapsed < 5100; elapsed += 100) {
+        scrollEl.dispatchEvent(new Event('scroll'));
+        await vi.advanceTimersByTimeAsync(100);
+      }
+
+      expect(jumpScrollCleanup()).toBeNull();
+
+      // A stray scrollend after the cap has fired must find nothing armed.
+      scrollEl.dispatchEvent(new Event('scrollend'));
+
+      expect(scrollIntoViewCalls).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not cancel the pending re-check for a scroll-shaped key typed into an editable field (N3)', async () => {
+    const { scrollEl, targetEl } = await mountAndJump();
+    setRect(targetEl, { top: 500, bottom: 550 });
+
+    // Space and the arrow keys are ordinary typing in the composer (or any
+    // other editable field) — even though they're in JUMP_SCROLL_CANCEL_KEYS
+    // for the document-wide case that catches real scroll input outside the
+    // scroll container. In real Chromium, Shoelace's `<sl-textarea>` wraps its
+    // native `<textarea>` in shadow DOM, so a document-level listener's
+    // `e.target` is retargeted to the `<sl-textarea>` host — a non-editable
+    // element — while `e.composedPath()[0]` is still the real textarea
+    // (review N3). happy-dom does not implement that retargeting: `.target`
+    // is fixed to whichever node `dispatchEvent()` was called on, and
+    // `composedPath()` is derived from that same un-retargeted `.target`
+    // (see Event.js), so even a real shadow-DOM textarea reports the same
+    // element for both — a light-DOM textarea can't tell them apart either,
+    // for the same underlying reason. Faking `composedPath()` on the event is
+    // the only way to reproduce the divergence in this test environment, so
+    // the test still exercises which one the handler actually consults.
+    const textarea = document.createElement('textarea'); // never attached — target is faked below
+    const event = new KeyboardEvent('keydown', { key: ' ', bubbles: true });
+    Object.defineProperty(event, 'composedPath', {
+      value: () => [textarea, document.body, document],
+    });
+    // Dispatched from document.body, so `e.target` is BODY — non-editable,
+    // standing in for the retargeted `<sl-textarea>` host — while the faked
+    // `composedPath()[0]` above is the real, editable textarea.
+    document.body.dispatchEvent(event);
+    scrollEl.dispatchEvent(new Event('scrollend'));
+
+    expect(scrollIntoViewCalls).toEqual([
+      { el: targetEl, opts: { behavior: 'auto', block: 'center' } },
+    ]);
+  });
+
+  it('does not arm a re-check when the target is already centred before the jump (R1)', async () => {
+    const el = await mount();
+    const scrollEl = el.shadowRoot!.querySelector('.messages-scroll') as HTMLElement;
+    const targetEl = el.shadowRoot!.getElementById(`msg-${TARGET.id}`) as HTMLElement;
+    setRect(scrollEl, { top: 0, bottom: 300 });
+    setRect(targetEl, { top: 100, bottom: 150 }); // already centred
+    scrollEl.scrollTop = 500;
+
+    await el.scrollToMessageById(TARGET.id);
+    await el.updateComplete;
+    scrollIntoViewCalls = [];
+
+    // If the watcher had been armed anyway, this later shift-and-scrollend
+    // would "correct" a jump that never needed one.
+    setRect(targetEl, { top: 500, bottom: 550 });
+    scrollEl.dispatchEvent(new Event('scrollend'));
+
+    expect(scrollIntoViewCalls).toEqual([]);
+  });
+
+  it('does not arm a re-check when centering is clamped at the end of the thread (R1)', async () => {
+    const el = await mount();
+    const scrollEl = el.shadowRoot!.querySelector('.messages-scroll') as HTMLElement;
+    const targetEl = el.shadowRoot!.getElementById(`msg-${TARGET.id}`) as HTMLElement;
+    setRect(scrollEl, { top: 0, bottom: 300 });
+    setRect(targetEl, { top: 320, bottom: 370 }); // just below the viewport
+    // Already pinned to the bottom (SCROLL_HEIGHT - CLIENT_HEIGHT): centering
+    // this target would need to scroll further down, which is clamped — the
+    // common reply-jump-while-pinned-to-bottom case (review R1).
+    scrollEl.scrollTop = SCROLL_HEIGHT - CLIENT_HEIGHT;
+
+    await el.scrollToMessageById(TARGET.id);
+    await el.updateComplete;
+    scrollIntoViewCalls = [];
+
+    setRect(targetEl, { top: 500, bottom: 550 });
+    scrollEl.dispatchEvent(new Event('scrollend'));
+
+    expect(scrollIntoViewCalls).toEqual([]);
+  });
+
+  it("never undoes the user's first manual scroll after a jump that produced no scroll (reviewer repro, R1)", async () => {
+    const el = await mount();
+    const scrollEl = el.shadowRoot!.querySelector('.messages-scroll') as HTMLElement;
+    const targetEl = el.shadowRoot!.getElementById(`msg-${TARGET.id}`) as HTMLElement;
+    setRect(scrollEl, { top: 0, bottom: 300 });
+    setRect(targetEl, { top: 320, bottom: 370 }); // off screen, but clamped — see above
+    scrollEl.scrollTop = SCROLL_HEIGHT - CLIENT_HEIGHT;
+
+    await el.scrollToMessageById(TARGET.id);
+    await el.updateComplete;
+    scrollIntoViewCalls = [];
+
+    // The user's next scroll is real and deliberate — a scrollbar drag or a
+    // PageUp with focus elsewhere — and must never be undone.
+    scrollEl.scrollTop = 200;
+    scrollEl.dispatchEvent(new Event('scrollend'));
+
+    expect(scrollIntoViewCalls).toEqual([]);
+    expect(scrollEl.scrollTop).toBe(200);
+  });
+
+  it('tears down the pending re-check on thread switch (R3)', async () => {
+    const { el, scrollEl, targetEl } = await mountAndJump();
+
+    const jumpScrollCleanup = (): (() => void) | null =>
+      (el as unknown as { _jumpScrollCleanup: (() => void) | null })._jumpScrollCleanup;
+    expect(
+      jumpScrollCleanup(),
+      'the mounted jump must have armed a pending watch for this test to be meaningful'
+    ).not.toBeNull();
+
+    // Switching conversations runs resetV2State() (see `updated()`'s
+    // conversationKey handling), which must cancel the pending watch — it
+    // belongs to the thread being left, and a late correction must not fire
+    // against the thread being switched to. Called directly (rather than by
+    // assigning conversationKey and awaiting the reload) to isolate this
+    // teardown from `scrollToBottom()`'s own, separate cancel on the new
+    // thread's initial-load scroll — dispatching scrollend after a real
+    // thread switch made the previous version of this test pass even with
+    // resetV2State's cancel removed, because that second cancel path also
+    // runs and masked the mutation (review R3 was about exactly this kind of
+    // false pass, from a different cause).
+    (el as unknown as { resetV2State: () => void }).resetV2State();
+
+    expect(jumpScrollCleanup()).toBeNull();
+
+    // And the cancellation must actually be effective: a scrollend that
+    // arrives afterward must not trigger a correction.
+    setRect(targetEl, { top: 500, bottom: 550 });
+    scrollIntoViewCalls = [];
+    scrollEl.dispatchEvent(new Event('scrollend'));
+
+    expect(scrollIntoViewCalls).toEqual([]);
+  });
+});
+
+/**
  * SSE-delivered messages with attachments must render the attachment previews
  * immediately — not only after the next user-triggered re-render. The bug was
  * that v2AttachmentMap was populated AFTER mergeMessages(), so the Lit render
