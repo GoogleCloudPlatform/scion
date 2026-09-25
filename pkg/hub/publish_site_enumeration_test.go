@@ -72,7 +72,9 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 		// before publish.
 		"handlers_chat_v2.go:sendHumanToHuman:publish": "CreateMessage error triggers early return before publish",
 
-		// sendHumanToHuman: DM notification after successful persist.
+		// sendHumanToHuman: DM notification after successful persist. Also
+		// covers the unreachable-default override (nc-delivery-unreachable
+		// review R1), which shares this call site.
 		"handlers_chat_v2.go:sendHumanToHuman:notify": "CreateMessage error triggers early return before notification dispatch",
 
 		// deliverToUser: CreateMessage error triggers early return.

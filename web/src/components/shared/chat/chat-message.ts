@@ -477,6 +477,15 @@ export class ScionChatMessage extends LitElement {
   dispatchFailureReason = '';
 
   /**
+   * Machine-readable dispatch failure code, e.g. "agent_unreachable"
+   * (nc-delivery-unreachable). May be empty for history rows sent before this
+   * field existed; renderDeliveryState() falls back to matching the reason
+   * prefix in that case.
+   */
+  @property()
+  dispatchFailureCode = '';
+
+  /**
    * True when the DM peer's read watermark has reached this message. Replaces
    * the single-check "Delivered" indicator with a double-check "Seen".
    */
@@ -1929,15 +1938,23 @@ export class ScionChatMessage extends LitElement {
                 Delivered
               </div>
             `;
-      case 'failed':
+      case 'failed': {
+        // nc-delivery-unreachable: distinguish "the agent can't receive this
+        // at all" from a generic dispatch failure. Prefer the machine-readable
+        // code; history rows sent before that field existed fall back to
+        // matching the reason prefix.
+        const isUnreachable =
+          this.dispatchFailureCode === 'agent_unreachable' ||
+          (!this.dispatchFailureCode && this.dispatchFailureReason.startsWith('Agent unreachable'));
         return html`
           <sl-tooltip content=${this.dispatchFailureReason || 'Delivery failed'} hoist>
             <div class="delivery-state failed">
               <sl-icon name="exclamation-triangle"></sl-icon>
-              Failed
+              ${isUnreachable ? 'Agent unreachable' : 'Failed'}
             </div>
           </sl-tooltip>
         `;
+      }
       default:
         return nothing;
     }

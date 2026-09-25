@@ -61,6 +61,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
@@ -947,6 +948,12 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 
 	// --- Resolve default agent (DM key or topic default) ---
 	var defaultAgent *store.Agent
+	// unresolvedDefaultAgent is set when the topic names a DefaultAgent that
+	// does not resolve to a live agent (soft-deleted, or otherwise missing).
+	// handleConversationSend uses it below to report "Agent unreachable"
+	// instead of silently falling through to a human-to-human message
+	// (nc-delivery-unreachable) when no leading @mention overrides it.
+	var unresolvedDefaultAgent *store.Agent
 	if isDM {
 		if agentID := parseAgentDMKey(key); agentID != "" {
 			if dmAgent, err := s.store.GetAgent(ctx, agentID); err == nil && dmAgent != nil {
@@ -957,19 +964,55 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 		topic, err := wcs.GetTopic(ctx, key)
 		if err == nil && topic != nil && topic.DefaultAgent != "" {
 			da, daErr := s.store.GetAgentBySlug(ctx, projectID, topic.DefaultAgent)
-			if daErr != nil || da == nil {
-				// Fall back to lookup by ID in case the value is a UUID.
+			// foreignProjectDefault stays out of scope here (DEF-31): a
+			// default naming a real agent from a different project keeps the
+			// existing human-to-human fallthrough rather than "Agent
+			// unreachable" — nc-delivery-unreachable is about a default that
+			// no longer resolves at all (deleted, or missing), not about
+			// cross-project routing.
+			foreignProjectDefault := false
+			// transientLookupErr (review round 2, nit 1): a store error that
+			// is not "not found" — a DB hiccup, not "this agent doesn't
+			// exist" — must not be classified the same as a deleted or
+			// missing default. Before nc-delivery-unreachable, that hiccup
+			// degraded to an ordinary human-to-human message; keep that
+			// fallthrough (leave defaultAgent and unresolvedDefaultAgent
+			// nil) instead of permanently persisting "Agent unreachable
+			// (deleted)" rows for a transient failure.
+			transientLookupErr := false
+			if daErr != nil && !errors.Is(daErr, store.ErrNotFound) {
+				transientLookupErr = true
+			} else if daErr != nil || da == nil {
+				// Not found by slug — fall back to lookup by ID in case the
+				// value is a UUID.
 				da, daErr = s.store.GetAgent(ctx, topic.DefaultAgent)
-				// Scope the fallback: reject agents from other projects or
-				// soft-deleted agents — DEF-31.
-				if daErr == nil && da != nil {
-					if da.ProjectID != projectID || !da.DeletedAt.IsZero() {
-						da = nil
+				if daErr != nil && !errors.Is(daErr, store.ErrNotFound) {
+					transientLookupErr = true
+				} else if daErr == nil && da != nil && (da.ProjectID != projectID || !da.DeletedAt.IsZero()) {
+					// Scope the fallback: reject agents from other projects or
+					// soft-deleted agents — DEF-31.
+					if da.ProjectID == projectID {
+						// Same project, soft-deleted: keep the row around so
+						// the caller can report "Agent unreachable (deleted)"
+						// with the real slug/ID instead of a generic one.
+						unresolvedDefaultAgent = da
+					} else {
+						foreignProjectDefault = true
 					}
+					da = nil
 				}
 			}
-			if daErr == nil && da != nil {
-				defaultAgent = da
+			if !transientLookupErr {
+				if daErr == nil && da != nil {
+					defaultAgent = da
+				} else if unresolvedDefaultAgent == nil && !foreignProjectDefault {
+					// The named default doesn't resolve at all (bad data, or a
+					// slug that no longer exists — most commonly because the
+					// agent behind it was soft-deleted, which GetAgentBySlug
+					// already excludes). Treat the same as deleted for reporting
+					// purposes.
+					unresolvedDefaultAgent = &store.Agent{Slug: topic.DefaultAgent}
+				}
 			}
 		}
 	}
@@ -986,8 +1029,15 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 
 	// --- Resolve routing via shared planner ---
 	var plan RoutingPlan
+	// planErr, when non-nil, means resolveRoutingAgents itself failed rather
+	// than resolving to zero agents. It gates the unresolvedDefaultAgent
+	// override below (review round 2, Consider 2): plan.Agents being empty
+	// because of a planning error is not evidence the default agent is
+	// unreachable, so that case must keep the pre-existing human-to-human
+	// fallthrough instead of mislabelling the send "Agent unreachable
+	// (deleted)".
+	var planErr error
 	if projectID != "" {
-		var planErr error
 		plan, planErr = resolveRoutingAgents(ctx, s.store, projectID, content, defaultAgent)
 		if planErr != nil {
 			slog.Error("agent routing resolution failed", "error", planErr)
@@ -1021,12 +1071,100 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	// --- Unresolvable topic default agent (nc-delivery-unreachable) ---
+	// The topic names a default agent that no longer resolves (soft-deleted,
+	// or missing) and no leading @mention overrode it (plan.Agents is empty,
+	// or resolveRoutingAgents wouldn't have fallen through here). Report
+	// "Agent unreachable" rather than silently sending a human-to-human
+	// message to the thread. Only do so when resolveRoutingAgents actually
+	// succeeded (review round 2, Consider 2): if planErr != nil, the empty
+	// plan reflects a routing-plan failure, not the deleted default, so keep
+	// the pre-existing human-to-human error handling below instead.
+	if unresolvedDefaultAgent != nil && planErr == nil {
+		msgID := s.sendHumanToHuman(w, r, key, projectID, user, content, senderLabel, false, plan.MentionNames, attachmentRefs, now, body.ReplyToID,
+			&unreachableAgentOverride{
+				AgentSlug: unresolvedDefaultAgent.Slug,
+				AgentID:   unresolvedDefaultAgent.ID,
+				Reason:    "Agent unreachable (deleted)",
+				Code:      dispatchFailureCodeAgentUnreachable,
+			})
+		if msgID == "" {
+			return // error response already written by sendHumanToHuman
+		}
+		recordIdempotency(msgID)
+		return
+	}
+
 	// --- Human-to-human message ---
-	msgID := s.sendHumanToHuman(w, r, key, projectID, user, content, senderLabel, isDM, plan.MentionNames, attachmentRefs, now, body.ReplyToID)
+	msgID := s.sendHumanToHuman(w, r, key, projectID, user, content, senderLabel, isDM, plan.MentionNames, attachmentRefs, now, body.ReplyToID, nil)
 	if msgID == "" {
 		return // error response already written by sendHumanToHuman
 	}
 	recordIdempotency(msgID)
+}
+
+// Machine-readable dispatchFailureCode values for chatMessageResponse.
+const (
+	// dispatchFailureCodeAgentUnreachable is returned when the primary agent
+	// was skipped by the phase/deleted gate in sendAgentRouted or by the
+	// unresolved-default-agent path in handleConversationSend.
+	dispatchFailureCodeAgentUnreachable = "agent_unreachable"
+	// dispatchFailureCodeDispatchError is returned when dispatch was attempted
+	// (the agent looked reachable) but dispatchWithBrokerRetry returned an
+	// error synchronously.
+	dispatchFailureCodeDispatchError = "dispatch_error"
+)
+
+// dispatchFailureCodeFromReason derives a machine-readable dispatchFailureCode
+// from a persisted DispatchFailureReason string, for event payloads where the
+// row (and thus store.Message, which has no dedicated code column) is the
+// only thing available (nc-delivery-unreachable review R2, events.go
+// PublishUserMessage). Mirrors the frontend's own history-row fallback in
+// chat-message.ts renderDeliveryState: a reason with the "Agent unreachable"
+// prefix implies the agent_unreachable code. Anything else is left empty —
+// in particular the synchronous dispatch_error branch's raw dispatch-error
+// text, which does not follow this prefix and is out of scope here (its SSE
+// publish happens before that reason is even set; see the FYI note in the
+// nc-delivery-unreachable review).
+func dispatchFailureCodeFromReason(reason string) string {
+	if strings.HasPrefix(reason, "Agent unreachable") {
+		return dispatchFailureCodeAgentUnreachable
+	}
+	return ""
+}
+
+// unreachablePhases are agent lifecycle phases where chat v2 treats the
+// primary recipient as unreachable rather than dispatching and letting the
+// runtime broker buffer the message indefinitely (nc-delivery-unreachable).
+// Phases not in this set and not state.PhaseRunning (created, provisioning,
+// cloning, starting) are still forward-progressing: a buffered message lands
+// once the agent comes up, so today's dispatch-normally behaviour is kept for
+// them. Modeled on the phase check in dispatchRoutedRecipient
+// (handlers_broker_inbound_routed.go), which additionally rejects the
+// not-yet-running phases — chat v2 deliberately does not.
+var unreachablePhases = map[string]bool{
+	string(state.PhaseSuspended): true,
+	string(state.PhaseStopping):  true,
+	string(state.PhaseStopped):   true,
+	string(state.PhaseError):     true,
+}
+
+// isAgentUnreachable reports whether agent is unreachable for chat v2 primary
+// dispatch: soft-deleted, or in a phase whose container cannot accept a
+// buffered message (suspended, stopping, stopped, error). The returned string
+// is a short reason suffix for the "Agent unreachable (<reason>)" message
+// (e.g. "deleted" or the phase name); it is empty when reachable.
+func isAgentUnreachable(agent *store.Agent) (bool, string) {
+	if agent == nil {
+		return false, ""
+	}
+	if !agent.DeletedAt.IsZero() {
+		return true, "deleted"
+	}
+	if unreachablePhases[agent.Phase] {
+		return true, agent.Phase
+	}
+	return false, ""
 }
 
 // sendAgentRouted sends a message through the existing agent dispatch path.
@@ -1161,6 +1299,18 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		return ""
 	}
 
+	// Phase gate (nc-delivery-unreachable): a primary that is soft-deleted or
+	// in a lifecycle phase where the container cannot accept a buffered
+	// message (suspended, stopping, stopped, error) is unreachable. Persist
+	// the row as failed and skip dispatch instead of letting the runtime
+	// broker buffer it and answer 200 regardless of whether the container is
+	// up. Not-yet-running phases (created, provisioning, cloning, starting)
+	// are unaffected: dispatch proceeds normally because buffered messages
+	// land once the agent comes up. Modeled on the phase check in
+	// dispatchRoutedRecipient (handlers_broker_inbound_routed.go).
+	primaryUnreachable, primaryUnreachableReason := isAgentUnreachable(primaryAgent)
+	var dispatchFailureCode string
+
 	// F2b (design doc §3.3): agents actually dispatched into a group
 	// conversation become participants (a listing index, not an ACL —
 	// project membership already gates reads per §3.2). Review round 1
@@ -1194,6 +1344,12 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		ThreadID:      key,
 		DispatchState: store.MessageDispatchDispatched,
 		CreatedAt:     now,
+	}
+	if primaryUnreachable {
+		unreachableReason := fmt.Sprintf("Agent unreachable (%s)", primaryUnreachableReason)
+		storeMsg.DispatchState = store.MessageDispatchFailed
+		storeMsg.DispatchFailureReason = &unreachableReason
+		dispatchFailureCode = dispatchFailureCodeAgentUnreachable
 	}
 	// B15 dual-write: resolve-or-create conversation for web chat user→agent messages.
 	// chatV2ConvResult is declared outside the block so Phase 9b(ii)
@@ -1298,15 +1454,28 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		msg.DeliveryText = messaging.RenderDeliveryText(renderInput)
 	}
 
-	// Dispatch to the primary agent.
+	// Dispatch to the primary agent — skipped entirely when the phase gate
+	// above already marked the row failed.
 	dispatcher := s.GetDispatcher()
 	primaryDispatchOK := true
-	if dispatcher != nil {
-		retryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	if primaryUnreachable {
+		primaryDispatchOK = false
+	} else if dispatcher != nil {
+		// withDispatchMessageID carries the hub message ID to the broker so a
+		// later buffered-delivery failure report (#1820) can mark this row
+		// failed even though this synchronous call returns nil (message_delivery_failures.go).
+		retryCtx, cancel := context.WithTimeout(withDispatchMessageID(ctx, storeMsg.ID), 30*time.Second)
 		defer cancel()
 		if err := dispatchWithBrokerRetry(retryCtx, dispatcher, primaryAgent, agentContent, false, msg); err != nil {
 			s.messageLog.Error("Failed to dispatch to agent", "agent", primaryAgent.Slug, "error", err)
 			_ = s.store.MarkMessageFailed(ctx, storeMsg.ID, err.Error())
+			// Keep storeMsg's in-memory state in sync with the store update
+			// above so the response below reports the real outcome instead
+			// of the optimistic "dispatched" state set at persist time.
+			errText := err.Error()
+			storeMsg.DispatchState = store.MessageDispatchFailed
+			storeMsg.DispatchFailureReason = &errText
+			dispatchFailureCode = dispatchFailureCodeDispatchError
 			primaryDispatchOK = false
 		}
 	}
@@ -1420,7 +1589,10 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 
 			mentionDispatchOK := true
 			if dispatcher != nil {
-				retryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				// withDispatchMessageID: same rationale as the primary dispatch
+				// above, so a buffered-delivery failure on this mention row can
+				// also be reported back and marked failed.
+				retryCtx, cancel := context.WithTimeout(withDispatchMessageID(ctx, mentionStoreMsg.ID), 30*time.Second)
 				if err := dispatchWithBrokerRetry(retryCtx, dispatcher, mentionAgent, agentContent, false, mentionMsg); err != nil {
 					s.messageLog.Error("Failed to dispatch mention", "slug", mentionAgent.Slug, "error", err)
 					mentionDispatchOK = false
@@ -1456,16 +1628,22 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		go s.fireHumanMentionNotifications(context.Background(), mentionNames, projectID, key, user.ID(), senderLabel, content)
 	}
 
-	writeJSON(w, http.StatusCreated, chatMessageResponse{
-		ID:          storeMsg.ID,
-		Content:     content,
-		Sender:      storeMsg.Sender,
-		SenderID:    storeMsg.SenderID,
-		Type:        storeMsg.Type,
-		CreatedAt:   now,
-		Mentions:    mentionResults,
-		Attachments: attachmentRefs,
-	})
+	resp := chatMessageResponse{
+		ID:                  storeMsg.ID,
+		Content:             content,
+		Sender:              storeMsg.Sender,
+		SenderID:            storeMsg.SenderID,
+		Type:                storeMsg.Type,
+		CreatedAt:           now,
+		Mentions:            mentionResults,
+		Attachments:         attachmentRefs,
+		DispatchState:       storeMsg.DispatchState,
+		DispatchFailureCode: dispatchFailureCode,
+	}
+	if storeMsg.DispatchFailureReason != nil {
+		resp.DispatchFailureReason = *storeMsg.DispatchFailureReason
+	}
+	writeJSON(w, http.StatusCreated, resp)
 	return storeMsg.ID
 }
 
@@ -1490,10 +1668,39 @@ func groupCoAddressees(agents []*store.Agent) []messaging.Addressee {
 	return addrs
 }
 
-// sendHumanToHuman persists a type:chat message for human-to-human communication.
-// Returns the persisted message ID (empty on error).
+// unreachableAgentOverride redirects sendHumanToHuman's persist/publish/notify
+// pipeline to report "Agent unreachable" against a named agent instead of
+// producing an ordinary human-to-human message. Set when a topic's default
+// agent no longer resolves (soft-deleted, or missing) and no leading
+// @mention overrides it (nc-delivery-unreachable review R1).
+//
+// Before this type existed, that case had its own near-copy of
+// sendHumanToHuman (sendUnreachableDefaultAgent) which silently dropped
+// fireHumanMentionNotifications — a human @mention in a topic whose default
+// agent was deleted stopped notifying. Routing the case through
+// sendHumanToHuman's single persist/publish/notify pipeline instead means
+// there is only one place that pipeline can drift from, so mention
+// notifications keep firing for this path exactly as they do for every other
+// send path.
+type unreachableAgentOverride struct {
+	AgentSlug string // resolved or best-effort slug of the named agent
+	AgentID   string // resolved agent ID, or "" if it never resolved at all
+	Reason    string // e.g. "Agent unreachable (deleted)"
+	Code      string // dispatchFailureCode, e.g. dispatchFailureCodeAgentUnreachable
+}
+
+// sendHumanToHuman persists a type:chat message for human-to-human
+// communication. When unreachable is non-nil, it instead persists the
+// message addressed to unreachable.AgentSlug/AgentID with DispatchState
+// failed and the given reason/code (nc-delivery-unreachable) — the recipient,
+// message type, and response differ, but conversation resolution, SSE
+// publish, watermark updates, and notification firing (including
+// fireHumanMentionNotifications) are shared with the ordinary human-to-human
+// path. unreachable is only ever used for the topic case (isDM is always
+// false alongside it). Returns the persisted message ID (empty on error).
 func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, projectID string, user UserIdentity,
-	content, senderLabel string, isDM bool, mentionNames []string, attachmentRefs []AttachmentRef, now time.Time, replyToID string) string {
+	content, senderLabel string, isDM bool, mentionNames []string, attachmentRefs []AttachmentRef, now time.Time, replyToID string,
+	unreachable *unreachableAgentOverride) string {
 
 	ctx := r.Context()
 
@@ -1502,7 +1709,11 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 	s.mu.RUnlock()
 
 	var recipient, recipientID string
-	if isDM {
+	switch {
+	case unreachable != nil:
+		recipient = "agent:" + unreachable.AgentSlug
+		recipientID = unreachable.AgentID
+	case isDM:
 		peerEmail, peerID := resolveDMPeer(key, user.ID())
 		if peerEmail != "" {
 			recipient = "user:" + peerEmail
@@ -1516,7 +1727,7 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 				recipient = "user:" + peerUser.Email
 			}
 		}
-	} else {
+	default:
 		recipient = "thread:" + key
 		recipientID = key
 	}
@@ -1530,6 +1741,9 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 	}
 
 	msgType := messages.TypeChat
+	if unreachable != nil {
+		msgType = messages.TypeInstruction
+	}
 	if replyToID != "" {
 		msgType = messages.TypeReply
 	}
@@ -1548,7 +1762,19 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 		DispatchState: store.MessageDispatchDispatched,
 		CreatedAt:     now,
 	}
-	// B15 dual-write: resolve-or-create conversation for human-to-human messages.
+	if unreachable != nil {
+		storeMsg.AgentID = unreachable.AgentID
+		storeMsg.DispatchState = store.MessageDispatchFailed
+		reason := unreachable.Reason
+		storeMsg.DispatchFailureReason = &reason
+	}
+
+	// B15 dual-write: resolve-or-create conversation for human-to-human
+	// (and unreachable-default, which is always the thread branch) messages.
+	threadMetric := "chat_v2.human.thread"
+	if unreachable != nil {
+		threadMetric = "chat_v2.unreachable_default.thread"
+	}
 	{
 		var convResult *messaging.ConversationResult
 		if key != "" {
@@ -1563,7 +1789,7 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 			convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, key, msgProjectID, threadOpts...)
 			if convErr != nil {
 				if s.writeDenyEnabled() {
-					messaging.WriteDenialMetrics.Inc("chat_v2.human.thread")
+					messaging.WriteDenialMetrics.Inc(threadMetric)
 					s.messageLog.Error("conversation resolution failed", "error", convErr)
 					writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
 					return ""
@@ -1609,7 +1835,9 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 		}
 	}
 
-	// Publish SSE event.
+	// Publish SSE event. For the unreachable-default override, this carries
+	// the row's actual failed state so other open tabs see "Agent
+	// unreachable" too, not a false "Delivered".
 	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
 
 	// For DMs, ensure DM registry rows exist for both participants. This must
@@ -1629,6 +1857,10 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 	s.autoAdvanceSenderReadState(ctx, user.ID(), key, storeMsg.ID)
 
 	// --- W6: Chat notifications ---
+	// Shared unconditionally with the unreachable-default override (R1): a
+	// human @mention in a topic whose default agent was deleted must still
+	// notify, exactly as it would for an ordinary human-to-human message in
+	// that topic.
 	if cn := s.getChatNotifier(); cn != nil {
 		// DM received notification: notify the peer when a DM is sent.
 		if isDM && recipientID != "" && recipientID != user.ID() {
@@ -1646,7 +1878,7 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 		}
 	}
 
-	writeJSON(w, http.StatusCreated, chatMessageResponse{
+	resp := chatMessageResponse{
 		ID:          storeMsg.ID,
 		Content:     content,
 		Sender:      storeMsg.Sender,
@@ -1654,7 +1886,15 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 		Type:        storeMsg.Type,
 		CreatedAt:   now,
 		Attachments: attachmentRefs,
-	})
+	}
+	if unreachable != nil {
+		resp.DispatchState = storeMsg.DispatchState
+		resp.DispatchFailureCode = unreachable.Code
+		if storeMsg.DispatchFailureReason != nil {
+			resp.DispatchFailureReason = *storeMsg.DispatchFailureReason
+		}
+	}
+	writeJSON(w, http.StatusCreated, resp)
 	return storeMsg.ID
 }
 
@@ -3973,6 +4213,16 @@ type chatMessageResponse struct {
 	CreatedAt   time.Time                `json:"createdAt"`
 	Mentions    []messages.MentionResult `json:"mentions,omitempty"`
 	Attachments []AttachmentRef          `json:"attachments,omitempty"` // W7
+
+	// DispatchState, DispatchFailureReason, and DispatchFailureCode report the
+	// real outcome of dispatching to the primary agent (nc-delivery-unreachable),
+	// so the frontend no longer has to assume "dispatched" on every HTTP 2xx.
+	// DispatchFailureCode is derived here rather than stored on store.Message,
+	// to avoid a schema change; history rows fall back to matching the reason
+	// prefix (see web chat-message.ts renderDeliveryState).
+	DispatchState         string `json:"dispatchState,omitempty"`
+	DispatchFailureReason string `json:"dispatchFailureReason,omitempty"`
+	DispatchFailureCode   string `json:"dispatchFailureCode,omitempty"`
 }
 
 type chatHistoryResponse struct {

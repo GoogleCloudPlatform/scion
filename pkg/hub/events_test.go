@@ -776,6 +776,92 @@ func TestPublishUserMessage_NoChatMessageForNonWebChannel(t *testing.T) {
 	}
 }
 
+// TestPublishUserMessage_DispatchFailureFields covers nc-delivery-unreachable
+// review R2 Consider 1: PublishUserMessage must populate
+// DispatchFailureReason/DispatchFailureCode on the event for a failed row
+// with the agent_unreachable reason prefix, and must omit both for a
+// dispatched row. Without this, dropping the four lines in
+// PublishUserMessage or renaming the "Agent unreachable" prefix would leave
+// every other test green.
+func TestPublishUserMessage_DispatchFailureFields(t *testing.T) {
+	unreachableReason := "Agent unreachable (deleted)"
+	// Round 4, item 5: a stale reason left over from a prior failed attempt
+	// (e.g. a retried row that later dispatched). If PublishUserMessage
+	// dropped its `DispatchState == failed` gate and instead populated the
+	// event fields whenever DispatchFailureReason is non-nil, this case would
+	// still pass with a nil reason. A stale non-nil reason on a dispatched
+	// row proves the state check — not just a nil check — gates the fields.
+	staleReason := "Agent unreachable (suspended)"
+
+	tests := []struct {
+		name          string
+		dispatchState string
+		failureReason *string
+		wantReason    string
+		wantCode      string
+	}{
+		{
+			name:          "failed row with agent_unreachable reason",
+			dispatchState: store.MessageDispatchFailed,
+			failureReason: &unreachableReason,
+			wantReason:    unreachableReason,
+			wantCode:      dispatchFailureCodeAgentUnreachable,
+		},
+		{
+			name:          "dispatched row omits both fields despite a stale failure reason",
+			dispatchState: store.MessageDispatchDispatched,
+			failureReason: &staleReason,
+			wantReason:    "",
+			wantCode:      "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pub := NewChannelEventPublisher()
+			defer pub.Close()
+
+			ch, unsub := pub.Subscribe("agent.agent-uuid-1.message")
+			defer unsub()
+
+			msg := &store.Message{
+				ID:                    "msg-dispatch-fields",
+				ProjectID:             "proj1",
+				Sender:                "user:alice",
+				SenderID:              "user-uuid-1",
+				Recipient:             "agent:coder",
+				RecipientID:           "agent-uuid-1",
+				AgentID:               "agent-uuid-1",
+				Msg:                   "hello",
+				Type:                  "chat",
+				Channel:               "web",
+				ThreadID:              "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+				CreatedAt:             time.Now(),
+				DispatchState:         tt.dispatchState,
+				DispatchFailureReason: tt.failureReason,
+			}
+
+			pub.PublishUserMessage(context.Background(), msg, nil)
+
+			select {
+			case evt := <-ch:
+				var payload UserMessageEvent
+				if err := json.Unmarshal(evt.Data, &payload); err != nil {
+					t.Fatalf("failed to unmarshal event: %v", err)
+				}
+				if payload.DispatchFailureReason != tt.wantReason {
+					t.Errorf("DispatchFailureReason = %q, want %q", payload.DispatchFailureReason, tt.wantReason)
+				}
+				if payload.DispatchFailureCode != tt.wantCode {
+					t.Errorf("DispatchFailureCode = %q, want %q", payload.DispatchFailureCode, tt.wantCode)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("timed out waiting for agent.message event")
+			}
+		})
+	}
+}
+
 // --- Wave-2: PublishChatTopicEvent ---
 
 func TestPublishChatTopicEvent(t *testing.T) {

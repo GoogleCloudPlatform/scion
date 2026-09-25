@@ -4292,10 +4292,21 @@ func TestDEF31_SendPath_ForeignProjectAgent_NotRouted(t *testing.T) {
 
 // TestDEF31_SendPath_SoftDeletedAgent_NotRouted simulates a pre-existing
 // topic row whose default_agent holds a same-project UUID that has since been
-// soft-deleted. The resolver must NOT route to it.
+// soft-deleted. The resolver must never dispatch to it.
+//
+// nc-delivery-unreachable changed what "not routed" looks like for this exact
+// case: instead of silently falling through to a human-to-human chat message,
+// the send path now persists the message addressed to the agent with
+// dispatchState=failed / dispatchFailureCode=agent_unreachable, and skips
+// dispatch. The DEF-31 guard this test protects — the deleted agent must
+// never actually receive the message — is unchanged and is asserted directly
+// via the dispatch count below.
 func TestDEF31_SendPath_SoftDeletedAgent_NotRouted(t *testing.T) {
 	f := setupDEF31(t)
 	ctx := context.Background()
+
+	d := &brokerMockDispatcher{}
+	f.srv.SetDispatcher(d)
 
 	// Write a topic with the soft-deleted agent UUID directly via the store.
 	topicID := tid("def31-send-deleted")
@@ -4323,13 +4334,13 @@ func TestDEF31_SendPath_SoftDeletedAgent_NotRouted(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 
-	if resp.Type == messages.TypeInstruction {
-		t.Fatalf("RESOLVER GUARD FAILURE: message was routed to soft-deleted agent %s "+
-			"(type=%s). The resolver's deleted_at guard is missing or broken — "+
-			"this is the DEF-31 defect at the send path", f.deletedA.ID, resp.Type)
+	if resp.DispatchState != store.MessageDispatchFailed || resp.DispatchFailureCode != dispatchFailureCodeAgentUnreachable {
+		t.Fatalf("RESOLVER GUARD FAILURE: soft-deleted default agent %s was not reported as "+
+			"unreachable (dispatchState=%q, dispatchFailureCode=%q) — this is the DEF-31 defect "+
+			"at the send path", f.deletedA.ID, resp.DispatchState, resp.DispatchFailureCode)
 	}
-	if resp.Type != messages.TypeChat {
-		t.Errorf("expected type %q (no-agent fallthrough), got %q", messages.TypeChat, resp.Type)
+	if len(d.getMessages()) != 0 {
+		t.Fatalf("RESOLVER GUARD FAILURE: message was dispatched to soft-deleted agent %s", f.deletedA.ID)
 	}
 }
 

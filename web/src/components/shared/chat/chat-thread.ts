@@ -114,6 +114,32 @@ function compareMessageOrder(a: Message, b: Message): number {
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
+/**
+ * Return a copy of `msg` with `dispatchState` set to `dispatchState` and
+ * `dispatchFailureReason`/`dispatchFailureCode` replaced by `reason`/`code`
+ * (nc-delivery-unreachable PR #1895 review: build a fresh object instead of
+ * mutating and `delete`-ing the stale fields, which deoptimizes the object's
+ * V8 hidden class). Passing `undefined` for `reason`/`code` clears a stale
+ * value rather than leaving it behind — callers that need a truthy check
+ * instead of a nullish one should pre-convert falsy values to `undefined`
+ * before calling.
+ */
+function withDispatchFailure(
+  msg: Message,
+  dispatchState: string,
+  reason: string | undefined,
+  code: string | undefined
+): Message {
+  /* eslint-disable-next-line @typescript-eslint/no-unused-vars -- rest-omit idiom: bind and drop these two keys so `...rest` excludes them */
+  const { dispatchFailureReason: _reason, dispatchFailureCode: _code, ...rest } = msg;
+  return {
+    ...rest,
+    dispatchState,
+    ...(reason != null ? { dispatchFailureReason: reason } : {}),
+    ...(code != null ? { dispatchFailureCode: code } : {}),
+  };
+}
+
 /** Typing send throttle in ms. */
 const TYPING_SEND_THROTTLE_MS = 4000;
 
@@ -1192,7 +1218,27 @@ export class ScionChatThread extends LitElement {
         msg.recipient = existing.recipient;
         msg.recipientId = existing.recipientId;
       }
-      this.messageMap.set(msg.id, msg);
+      // nc-delivery-unreachable review FYI 1 / round 4 Optional 1: `failed`
+      // is terminal for a given message ID. If the entry already shown is
+      // failed and an incoming update (SSE or HTTP, in either order) would
+      // move it away from `failed` — including an incoming entry that omits
+      // dispatchState entirely, e.g. a backfill/history row that doesn't
+      // carry dispatch info — keep the failed state and its reason/code,
+      // merging every other field from the incoming message so legitimate
+      // edits/updates still apply.
+      let toStore = msg;
+      if (existing?.dispatchState === 'failed' && msg.dispatchState !== 'failed') {
+        // The pinned dispatchFailureReason/Code must come only from
+        // `existing`, so strip any value `msg` carries for them before
+        // conditionally re-adding `existing`'s.
+        toStore = withDispatchFailure(
+          msg,
+          existing.dispatchState,
+          existing.dispatchFailureReason,
+          existing.dispatchFailureCode
+        );
+      }
+      this.messageMap.set(msg.id, toStore);
     }
 
     // Match the server's (created, id) order so the displayed tail is also
@@ -1447,6 +1493,8 @@ export class ScionChatThread extends LitElement {
       channel?: string;
       groupId?: string;
       dispatchState?: string;
+      dispatchFailureReason?: string;
+      dispatchFailureCode?: string;
       urgent?: boolean;
       broadcasted?: boolean;
       read?: boolean;
@@ -1476,9 +1524,12 @@ export class ScionChatThread extends LitElement {
     // If the event carries a full message payload, merge directly instead of
     // doing a round-trip backfill.
     // SSE events from PublishUserMessage carry the full message payload.
-    // mergeMessages() deduplicates by ID (last-write-wins via Map.set),
-    // so if both the POST response and the SSE event provide the same
-    // message, the later arrival's fields prevail — this is acceptable.
+    // mergeMessages() deduplicates by ID (last-write-wins via Map.set), so if
+    // both the POST response and the SSE event provide the same message, the
+    // later arrival's fields prevail — except that `failed` is terminal for
+    // dispatch fields (dispatchState/dispatchFailureReason/dispatchFailureCode):
+    // once a message is failed, a later arrival can't downgrade it back to
+    // dispatched/pending, though its other fields still merge normally.
     if (eventData.id && (eventData.msg !== undefined || eventData.type)) {
       const msg: Message = {
         id: eventData.id,
@@ -1495,6 +1546,12 @@ export class ScionChatThread extends LitElement {
         ...(eventData.threadId != null ? { threadId: eventData.threadId } : {}),
         ...(eventData.groupId != null ? { groupId: eventData.groupId } : {}),
         ...(eventData.dispatchState != null ? { dispatchState: eventData.dispatchState } : {}),
+        ...(eventData.dispatchFailureReason != null
+          ? { dispatchFailureReason: eventData.dispatchFailureReason }
+          : {}),
+        ...(eventData.dispatchFailureCode != null
+          ? { dispatchFailureCode: eventData.dispatchFailureCode }
+          : {}),
         ...(eventData.urgent != null ? { urgent: eventData.urgent } : {}),
         ...(eventData.broadcasted != null ? { broadcasted: eventData.broadcasted } : {}),
         ...(eventData.read != null ? { read: eventData.read } : {}),
@@ -1967,10 +2024,16 @@ export class ScionChatThread extends LitElement {
         const resData = (await res.json().catch(() => null)) as {
           id?: string;
           attachments?: import('./chat-message.js').AttachmentRefInfo[];
+          dispatchState?: string;
+          dispatchFailureReason?: string;
+          dispatchFailureCode?: string;
         } | null;
         if (resData?.id && resData?.attachments && resData.attachments.length > 0) {
           this.v2AttachmentMap.set(resData.id, resData.attachments);
         }
+        // nc-delivery-unreachable: the backend now reports the real dispatch
+        // outcome instead of always being "dispatched" on any HTTP 2xx.
+        const dispatchState = resData?.dispatchState ?? 'dispatched';
 
         // Update the optimistic message in-place with the server-assigned ID
         // instead of deleting it. This avoids a visible flicker (message
@@ -1984,19 +2047,51 @@ export class ScionChatThread extends LitElement {
           // to preserve all server-enriched fields (createdAt, metadata, groupId, etc.)
           const sseVersion = this.messageMap.get(resData.id);
           if (sseVersion) {
-            sseVersion.dispatchState = 'dispatched';
+            // nc-delivery-unreachable review FYI 1: never downgrade a
+            // terminal `failed` state — skip applying this HTTP response's
+            // dispatch fields if the SSE-delivered version is already failed
+            // and this response would move it back to dispatched/pending.
+            const wouldDowngrade =
+              sseVersion.dispatchState === 'failed' &&
+              (dispatchState === 'dispatched' || dispatchState === 'pending');
+            let updatedSseVersion = sseVersion;
+            if (!wouldDowngrade) {
+              // Strip any prior dispatchFailureReason/Code before
+              // conditionally re-adding the response's, so a stale value is
+              // dropped rather than left behind when the response omits it.
+              updatedSseVersion = withDispatchFailure(
+                sseVersion,
+                dispatchState,
+                resData?.dispatchFailureReason || undefined,
+                resData?.dispatchFailureCode || undefined
+              );
+            }
             // Preserve optimistic agent recipient if SSE version lacks it.
             if (
               optimistic.recipient?.startsWith('agent:') &&
-              !sseVersion.recipient?.startsWith('agent:')
+              !updatedSseVersion.recipient?.startsWith('agent:')
             ) {
-              sseVersion.recipient = optimistic.recipient;
-              sseVersion.recipientId = optimistic.recipientId;
+              updatedSseVersion = {
+                ...updatedSseVersion,
+                recipient: optimistic.recipient,
+                recipientId: optimistic.recipientId,
+              };
             }
+            this.messageMap.set(resData.id, updatedSseVersion);
           } else {
-            optimistic.id = resData.id;
-            optimistic.dispatchState = 'dispatched';
-            this.messageMap.set(resData.id, optimistic);
+            // Symmetric with the sseVersion branch above: a stale
+            // dispatchFailureReason/Code is dropped, not left behind on this
+            // reused object, when the response omits it.
+            const updatedOptimistic: Message = {
+              ...withDispatchFailure(
+                optimistic,
+                dispatchState,
+                resData?.dispatchFailureReason || undefined,
+                resData?.dispatchFailureCode || undefined
+              ),
+              id: resData.id,
+            };
+            this.messageMap.set(resData.id, updatedOptimistic);
           }
         } else {
           // Fallback: remove if we cannot remap (should not happen).
@@ -3453,6 +3548,7 @@ export class ScionChatThread extends LitElement {
           dispatchState=${this.deliveryStateFor(msg, lastOwnMessageId, seenExpired)}
           ?seen=${msg.id === lastOwnMessageId && this.isMessageSeen(msg)}
           dispatchFailureReason=${msg.dispatchFailureReason || ''}
+          dispatchFailureCode=${msg.dispatchFailureCode || ''}
           .attachments=${msg.attachments || EMPTY_ATTACHMENTS}
           .attachmentRefs=${this.getMessageAttachmentRefs(msg.id)}
           routedTo=${msgRoutedTo}
