@@ -110,6 +110,7 @@ there's no need to enable them one at a time).
 | `iap.googleapis.com` | `gcloud services list --enabled --filter="name:iap.googleapis.com" --format="value(name)" --project=PROJECT_ID` |
 | `cloudbuild.googleapis.com` | `gcloud services list --enabled --filter="name:cloudbuild.googleapis.com" --format="value(name)" --project=PROJECT_ID` |
 | `artifactregistry.googleapis.com` | `gcloud services list --enabled --filter="name:artifactregistry.googleapis.com" --format="value(name)" --project=PROJECT_ID` |
+| `aiplatform.googleapis.com` | `gcloud services list --enabled --filter="name:aiplatform.googleapis.com" --format="value(name)" --project=PROJECT_ID` |
 | `iam.googleapis.com` | `gcloud services list --enabled --filter="name:iam.googleapis.com" --format="value(name)" --project=PROJECT_ID` |
 
 **Expected:** Each check returns the API name. If any is empty, enable all of them at once:
@@ -121,6 +122,7 @@ gcloud services enable \
   iap.googleapis.com \
   cloudbuild.googleapis.com \
   artifactregistry.googleapis.com \
+  aiplatform.googleapis.com \
   iam.googleapis.com \
   --project=PROJECT_ID
 ```

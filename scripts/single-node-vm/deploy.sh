@@ -699,6 +699,7 @@ gcloud services enable \
   iap.googleapis.com \
   cloudbuild.googleapis.com \
   artifactregistry.googleapis.com \
+  aiplatform.googleapis.com \
   --project="${PROJECT_ID}" --quiet
 
 # --- Cross-org IAP warning (best-effort; never blocks the deploy) ---
@@ -781,13 +782,13 @@ fi
 # artifactregistry.writer lets the VM build and push the Cloud Run IAP proxy
 # image directly to Artifact Registry (see Phase 4).
 info "Binding IAM roles..."
-for ROLE in roles/logging.logWriter roles/monitoring.metricWriter roles/cloudtrace.agent roles/artifactregistry.writer; do
+for ROLE in roles/logging.logWriter roles/monitoring.metricWriter roles/cloudtrace.agent roles/artifactregistry.writer roles/aiplatform.user; do
   gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member="serviceAccount:${SA_EMAIL}" \
     --role="${ROLE}" \
     --quiet &>/dev/null
 done
-echo "  Roles bound: logging.logWriter, monitoring.metricWriter, cloudtrace.agent, artifactregistry.writer"
+echo "  Roles bound: logging.logWriter, monitoring.metricWriter, cloudtrace.agent, artifactregistry.writer, aiplatform.user"
 
 # --- Grant deployer IAP tunnel access (required for SSH to --no-address VMs) ---
 info "Granting IAP tunnel access to deployer..."
@@ -1066,6 +1067,12 @@ gcloud compute ssh "${INSTANCE_NAME}" \
     sudo -u scion tee /home/scion/.scion/settings.yaml > /dev/null << 'SETTINGSEOF'
 schema_version: \"1\"
 image_registry: \"${IMAGE_REGISTRY}\"
+harness_configs:
+  antigravity:
+    harness: antigravity
+    env:
+      GOOGLE_CLOUD_PROJECT: \"${PROJECT_ID}\"
+      GOOGLE_CLOUD_LOCATION: \"global\"
 server:
   hub:
     name: \"${HUB_NAME}\"
@@ -1474,6 +1481,12 @@ gcloud compute ssh "${INSTANCE_NAME}" \
     sudo -u scion tee /home/scion/.scion/settings.yaml > /dev/null << 'SETTINGSEOF'
 schema_version: \"1\"
 image_registry: \"${IMAGE_REGISTRY}\"
+harness_configs:
+  antigravity:
+    harness: antigravity
+    env:
+      GOOGLE_CLOUD_PROJECT: \"${PROJECT_ID}\"
+      GOOGLE_CLOUD_LOCATION: \"global\"
 server:
   hub:
     name: \"${HUB_NAME}\"
