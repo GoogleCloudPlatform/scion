@@ -374,12 +374,16 @@ func TestEnsureHubReady_HubContextSkipsSyncAndRegistration(t *testing.T) {
 }
 
 func TestEnsureHubReady_HubContextProjectIDEnvPriority(t *testing.T) {
-	// When SCION_GROVE_ID env var and settings.project_id both exist in hub
+	// When a project id env var and settings.project_id both exist in hub
 	// context, the env var should take priority. This is important for
 	// template-sync agents that clone an external repo whose .scion/settings
 	// contains the source repo's project_id.
+	//
+	// This also covers the precedence between the two env vars themselves:
+	// SCION_PROJECT_ID is canonical and wins; SCION_GROVE_ID is the legacy
+	// alias and is only consulted as a fallback when SCION_PROJECT_ID is
+	// unset.
 
-	envProjectID := "env-project-id-target"
 	settingsProjectID := "settings-project-id-source"
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -393,43 +397,59 @@ func TestEnsureHubReady_HubContextProjectIDEnvPriority(t *testing.T) {
 	}))
 	defer server.Close()
 
-	tmpHome := t.TempDir()
-	// Create a project directory with .scion that has a project_id in settings
-	projectDir := filepath.Join(tmpHome, "project")
-	scionDir := filepath.Join(projectDir, ".scion")
-	if err := os.MkdirAll(scionDir, 0755); err != nil {
-		t.Fatalf("Failed to create scion dir: %v", err)
+	tests := []struct {
+		name      string
+		projectID string
+		groveID   string
+		want      string
+	}{
+		{name: "project id only", projectID: "env-project-id-target", groveID: "", want: "env-project-id-target"},
+		{name: "grove id only (legacy alias still works)", projectID: "", groveID: "env-grove-id-target", want: "env-grove-id-target"},
+		{name: "both set, project id wins", projectID: "env-project-id-target", groveID: "env-grove-id-target", want: "env-project-id-target"},
 	}
 
-	settingsContent := fmt.Sprintf("grove_id: %s\nruntime: docker\n", settingsProjectID)
-	if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(settingsContent), 0644); err != nil {
-		t.Fatalf("Failed to write settings: %v", err)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpHome := t.TempDir()
+			// Create a project directory with .scion that has a project_id in settings
+			projectDir := filepath.Join(tmpHome, "project")
+			scionDir := filepath.Join(projectDir, ".scion")
+			if err := os.MkdirAll(scionDir, 0755); err != nil {
+				t.Fatalf("Failed to create scion dir: %v", err)
+			}
 
-	t.Setenv("HOME", tmpHome)
-	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
-	t.Setenv("SCION_HUB_URL", "")
-	t.Setenv("SCION_GROVE_ID", envProjectID)
-	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
-	t.Setenv("SCION_DEV_TOKEN", "")
+			settingsContent := fmt.Sprintf("grove_id: %s\nruntime: docker\n", settingsProjectID)
+			if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(settingsContent), 0644); err != nil {
+				t.Fatalf("Failed to write settings: %v", err)
+			}
 
-	origDir, _ := os.Getwd()
-	if err := os.Chdir(projectDir); err != nil {
-		t.Fatalf("Failed to chdir: %v", err)
-	}
-	defer func() { _ = os.Chdir(origDir) }()
+			t.Setenv("HOME", tmpHome)
+			t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+			t.Setenv("SCION_HUB_URL", "")
+			t.Setenv("SCION_PROJECT_ID", tt.projectID)
+			t.Setenv("SCION_GROVE_ID", tt.groveID)
+			t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
+			t.Setenv("SCION_DEV_TOKEN", "")
 
-	hubCtx, err := EnsureHubReady("", EnsureHubReadyOptions{
-		AutoConfirm: true,
-	})
-	if err != nil {
-		t.Fatalf("EnsureHubReady returned error: %v", err)
-	}
-	if hubCtx == nil {
-		t.Fatal("EnsureHubReady returned nil")
-	}
-	if hubCtx.ProjectID != envProjectID {
-		t.Errorf("ProjectID = %q, want %q (SCION_GROVE_ID should take priority over settings.project_id in hub context)", hubCtx.ProjectID, envProjectID)
+			origDir, _ := os.Getwd()
+			if err := os.Chdir(projectDir); err != nil {
+				t.Fatalf("Failed to chdir: %v", err)
+			}
+			defer func() { _ = os.Chdir(origDir) }()
+
+			hubCtx, err := EnsureHubReady("", EnsureHubReadyOptions{
+				AutoConfirm: true,
+			})
+			if err != nil {
+				t.Fatalf("EnsureHubReady returned error: %v", err)
+			}
+			if hubCtx == nil {
+				t.Fatal("EnsureHubReady returned nil")
+			}
+			if hubCtx.ProjectID != tt.want {
+				t.Errorf("ProjectID = %q, want %q", hubCtx.ProjectID, tt.want)
+			}
+		})
 	}
 }
 
