@@ -892,6 +892,12 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				}
 			}
 
+			// Reconcile the max_agents_per_broker reservation against the
+			// phase this heartbeat will actually persist — e.g. release on an
+			// observed crash/exit, or best-effort re-reserve on an observed
+			// out-of-band restart (ptone/scion#1963).
+			s.reconcileBrokerQuotaOnPhaseChange(ctx, agent, agent.Phase, statusUpdate.Phase)
+
 			// Update the agent's status
 			if err := s.store.UpdateAgentStatus(ctx, agent.ID, statusUpdate); err != nil {
 				// Log error but continue processing other agents

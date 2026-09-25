@@ -82,7 +82,13 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 			writeErrorFromErr(w, err, "")
 			return
 		}
+		oldPhase := agent.Phase
 		guardAgentPhaseTransition(agent, &status)
+		// Reconcile the max_agents_per_broker reservation against the phase
+		// this self-reported status update will actually persist (post-guard,
+		// since the guard may clear status.Phase on a regression or while
+		// suspended) — ptone/scion#1963.
+		s.reconcileBrokerQuotaOnPhaseChange(ctx, agent, oldPhase, status.Phase)
 	}
 
 	if err := s.store.UpdateAgentStatus(ctx, id, status); err != nil {
@@ -219,6 +225,10 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	agent.Phase = newPhase
 	agent.ContainerStatus = "stopped"
 	agent.Activity = ""
+	// A suspended agent has no running container: release its
+	// max_agents_per_broker reservation so it stops consuming broker
+	// capacity until it is resumed (ptone/scion#1963).
+	s.releaseBrokerQuota(ctx, agent)
 	s.events.PublishAgentStatus(ctx, agent)
 	return nil
 }
@@ -283,11 +293,26 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 					"agent_id", agent.ID, "agent", agent.Name, "container_status", agent.ContainerStatus)
 			}
 			resume := agent.Phase == string(state.PhaseSuspended) || forcedRecovery
+			// Re-reserve the per-broker ceiling before dispatch, exactly as
+			// create does, so a start that would exceed the cap is rejected
+			// up front rather than after the container is already running
+			// (ptone/scion#1963). Idempotent: a no-op when the agent already
+			// holds an active reservation (e.g. start called again on an
+			// already-running agent).
+			if !s.checkAndReserveBrokerQuotaHTTP(ctx, w, agent) {
+				return
+			}
 			dispatchErr = dispatcher.DispatchAgentStart(ctx, agent, "", resume)
 			// DispatchAgentStart applies the broker response in-place;
 			// use the broker-reported phase if it was set.
 			if dispatchErr == nil && agent.Phase != "" {
 				newPhase = agent.Phase
+			}
+			if dispatchErr != nil {
+				// The reservation was taken speculatively before dispatch;
+				// roll it back so a failed start doesn't strand a reservation
+				// with no running (or soon-to-be-running) container behind it.
+				s.releaseBrokerQuota(ctx, agent)
 			}
 		}
 	case api.AgentActionStop:
@@ -299,6 +324,11 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// This is best-effort: failures are logged but don't block the stop.
 			s.syncWorkspaceOnStop(ctx, agent)
 			dispatchErr = dispatcher.DispatchAgentStop(ctx, agent)
+		}
+		if dispatchErr == nil {
+			// A stopped agent has no running container: release its
+			// max_agents_per_broker reservation (ptone/scion#1963).
+			s.releaseBrokerQuota(ctx, agent)
 		}
 	case api.AgentActionSuspend:
 		// Only running agents can be suspended via the HTTP lifecycle handler.
@@ -339,12 +369,23 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				slog.Warn("Restart: stop dispatch failed, proceeding with start",
 					"agent_id", id, "error", stopErr)
 			}
+			// The stop leg above tears the container down regardless of
+			// dispatch error (tolerated, as noted); release its reservation
+			// the same way an explicit stop would (ptone/scion#1963).
+			s.releaseBrokerQuota(ctx, agent)
 			// Restart is stop + start: a fresh harness session, not a resume.
+			// Re-reserve before the start leg, same as the start action.
+			if !s.checkAndReserveBrokerQuotaHTTP(ctx, w, agent) {
+				return
+			}
 			dispatchErr = dispatcher.DispatchAgentStart(ctx, agent, "", false)
 			// DispatchAgentStart applies the broker response in-place;
 			// use the broker-reported phase if it was set.
 			if dispatchErr == nil && agent.Phase != "" {
 				newPhase = agent.Phase
+			}
+			if dispatchErr != nil {
+				s.releaseBrokerQuota(ctx, agent)
 			}
 		}
 	}
@@ -522,6 +563,9 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 				} else {
 					res.Status = "stopped"
 					agent.Phase = string(state.PhaseStopped)
+					// Release the per-broker reservation, same as a single
+					// explicit stop (ptone/scion#1963).
+					s.releaseBrokerQuota(ctx, agent)
 					s.events.PublishAgentStatus(ctx, agent)
 				}
 			}

@@ -3278,6 +3278,10 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 		agent.Phase = string(state.PhaseSuspended)
 		agent.ContainerStatus = "stopped"
 		agent.Activity = ""
+		// A suspended agent has no running container: release its
+		// max_agents_per_broker reservation (ptone/scion#1963), mirroring
+		// suspendAgent's HTTP-path behavior.
+		s.releaseBrokerQuota(ctx, agent)
 		s.events.PublishAgentStatus(ctx, agent)
 		suspended++
 	}
@@ -4111,6 +4115,11 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	s.scheduler.RegisterRecurringSingleton("failed-message-retention", 60, store.LockFailedMessageRetention, s.failedMessageRetentionHandler())
 	s.scheduler.RegisterRecurringSingleton("exposed-ports-sweep", 5, store.LockExposedPortsSweep, s.exposedPortsSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("notification-dispatch-sweep", 5, store.LockNotificationDispatchSweep, s.notificationDispatchSweepHandler())
+	// Reconcile stale max_agents_per_broker reservations (ptone/scion#1963):
+	// runs immediately at tick 0 (startup) and then hourly, fixing rows left
+	// with released_at IS NULL by the pre-fix stop/suspend paths (or any
+	// future drift) without a separate one-shot migration.
+	s.scheduler.RegisterRecurringSingleton("broker-quota-reconcile", 60, store.LockBrokerQuotaReconcile, s.ReconcileStaleBrokerQuotaReservations)
 
 	// A2A bridge sweep — conditional on the bridge being registered as a standalone plugin.
 	if a2aExternalURL := s.getA2ABridgeExternalURL(); a2aExternalURL != "" {

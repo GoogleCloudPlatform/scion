@@ -827,10 +827,19 @@ func (s *Server) handleExistingAgent(
 			existingAgent.AppliedConfig.Attach = req.Attach
 		}
 
+		// A suspended agent's reservation was released when it was suspended;
+		// re-reserve (with the cap check) before dispatch, same as create
+		// (ptone/scion#1963). Idempotent, and rejects with the same
+		// quota-exceeded response create uses if the broker is at capacity.
+		if !s.checkAndReserveBrokerQuotaHTTP(ctx, w, existingAgent) {
+			return existingAgentErrored
+		}
+
 		// This branch only runs for suspended agents, so resume the harness
 		// session (Claude --continue) rather than starting fresh.
 		resume := existingAgent.Phase == string(state.PhaseSuspended)
 		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, resume); err != nil {
+			s.releaseBrokerQuota(ctx, existingAgent)
 			if isContainerNameConflict(err) {
 				Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
 			} else {
@@ -895,7 +904,14 @@ func (s *Server) handleExistingAgent(
 					"agent_id", existingAgent.ID, "agent", existingAgent.Name,
 					"container_status", existingAgent.ContainerStatus)
 			}
+			// A stopped or errored agent's reservation was released when it
+			// stopped/crashed; re-reserve (with the cap check) before
+			// dispatch, same as create (ptone/scion#1963).
+			if !s.checkAndReserveBrokerQuotaHTTP(ctx, w, existingAgent) {
+				return existingAgentErrored
+			}
 			if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, forcedRecovery); err != nil {
+				s.releaseBrokerQuota(ctx, existingAgent)
 				if isContainerNameConflict(err) {
 					Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
 				} else {
@@ -940,6 +956,17 @@ func (s *Server) handleExistingAgent(
 			writeErrorFromErr(w, err, "")
 			return existingAgentErrored
 		}
+		// ptone/scion#1963 delete-path audit: this hard-deletes a
+		// provisioning-phase agent, which counts against
+		// max_agents_per_broker (isBrokerQuotaCountedPhase). Release both
+		// limits explicitly, matching the main delete handler
+		// (handlers_agents_core.go) — the stale-reservation reconcile would
+		// eventually catch a missed release once the agent record is gone,
+		// but there is no reason to wait for that here.
+		if s.quotaService != nil {
+			s.releaseBrokerQuota(ctx, existingAgent)
+			s.quotaService.Release(ctx, "max_agents_per_project", existingAgent.ID)
+		}
 		return existingAgentDeleted
 	}
 
@@ -969,6 +996,13 @@ func (s *Server) handleExistingAgent(
 			existingAgent.AppliedConfig.Attach = req.Attach
 		}
 
+		// No quota re-reserve here (ptone/scion#1963): created/provisioning is
+		// a counted phase (isBrokerQuotaCountedPhase), so this agent already
+		// holds the reservation createAgentInProject took at CreateAgent time
+		// — it was never released. Re-reserving would be a no-op anyway
+		// (CheckAndReserve is idempotent per resource) but the point is this
+		// path never lost its slot to begin with.
+		//
 		// Dispatch start action — DispatchAgentStart applies the broker's
 		// response (status, container info) onto existingAgent in-place.
 		// A created/provisioning agent has no prior session to resume.
