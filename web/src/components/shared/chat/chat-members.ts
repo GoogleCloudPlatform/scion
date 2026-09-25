@@ -278,12 +278,19 @@ export class ScionChatMembers extends LitElement {
       color: var(--scion-text-muted, #94a3b8);
     }
 
-    .default-agent-label {
+    .agent-subsection-label {
+      padding: 4px 16px 2px;
       font-size: var(--chat-fs-xs, 0.625rem);
-      font-weight: 600;
-      color: var(--scion-primary, #3b82f6);
+      font-weight: 500;
       text-transform: uppercase;
       letter-spacing: 0.04em;
+      color: var(--scion-text-muted, #94a3b8);
+    }
+
+    .agent-default-divider {
+      border: none;
+      border-top: 1px solid var(--scion-border, #e2e8f0);
+      margin: 6px 16px;
     }
 
     .agent-terminal,
@@ -631,13 +638,11 @@ export class ScionChatMembers extends LitElement {
 
     return html`
       <div class="section-label">People — ${sorted.length}</div>
-      ${
-        sorted.length === 0
-          ? html`<div class="empty-note">
-              ${this.memberFilter === 'unread' ? 'No unread' : 'No members'}
-            </div>`
-          : sorted.map((m) => this.renderHuman(m))
-      }
+      ${sorted.length === 0
+        ? html`<div class="empty-note">
+            ${this.memberFilter === 'unread' ? 'No unread' : 'No members'}
+          </div>`
+        : sorted.map((m) => this.renderHuman(m))}
     `;
   }
 
@@ -660,11 +665,9 @@ export class ScionChatMembers extends LitElement {
             presence-state="${m.presenceState || ''}"
           ></scion-chat-avatar>
           ${hasUnread ? html`<div class="unread-dot"></div>` : nothing}
-          ${
-            isTyping
-              ? html`<div class="typing-overlay"><span></span><span></span><span></span></div>`
-              : nothing
-          }
+          ${isTyping
+            ? html`<div class="typing-overlay"><span></span><span></span><span></span></div>`
+            : nothing}
         </div>
         <div class="member-info">
           <div class="member-name">${m.displayName}</div>
@@ -674,15 +677,9 @@ export class ScionChatMembers extends LitElement {
     `;
   }
 
-  private renderAgents() {
-    let visible = [...this.agents];
-
-    // Apply unread filter
-    if (this.memberFilter === 'unread') {
-      visible = visible.filter((a) => this.unreadFromIds.includes(a.id));
-    }
-
-    const sorted = visible.sort((a, b) => {
+  /** Sort agents per the current sort mode (alphabetical or recent activity). */
+  private sortAgents(list: ChatAgentMember[]): ChatAgentMember[] {
+    return [...list].sort((a, b) => {
       if (this.memberSort === 'activity') {
         // Sort by lastActivityEvent timestamp (most recent first)
         const aRaw = a.lastActivityEvent ? Date.parse(a.lastActivityEvent) : NaN;
@@ -695,16 +692,51 @@ export class ScionChatMembers extends LitElement {
       // Alphabetical
       return a.displayName.localeCompare(b.displayName);
     });
+  }
+
+  private renderAgents() {
+    let visible = [...this.agents];
+
+    // Apply unread filter
+    if (this.memberFilter === 'unread') {
+      visible = visible.filter((a) => this.unreadFromIds.includes(a.id));
+    }
+
+    // Pin the thread-default agent first, under its own sub-heading, as long
+    // as it is actually present in the (possibly filtered) visible list —
+    // otherwise we'd show an orphaned "Thread default" heading with nothing
+    // under it.
+    const defaultAgent = this.defaultAgentSlug
+      ? visible.find((a) => a.slug === this.defaultAgentSlug)
+      : undefined;
+
+    const rest = defaultAgent ? visible.filter((a) => a !== defaultAgent) : visible;
+    const sortedRest = this.sortAgents(rest);
 
     return html`
-      <div class="section-label">Agents — ${sorted.length}</div>
-      ${
-        sorted.length === 0
-          ? html`<div class="empty-note">
-              ${this.memberFilter === 'unread' ? 'No unread' : 'No agents'}
-            </div>`
-          : sorted.map((a) => this.renderAgent(a))
-      }
+      <div class="section-label">Agents — ${visible.length}</div>
+      ${visible.length === 0
+        ? html`<div class="empty-note">
+            ${this.memberFilter === 'unread' ? 'No unread' : 'No agents'}
+          </div>`
+        : html`
+            ${defaultAgent
+              ? this.renderDefaultAgentGroup(defaultAgent, sortedRest.length > 0)
+              : nothing}
+            ${sortedRest.map((a) => this.renderAgent(a))}
+          `}
+    `;
+  }
+
+  /**
+   * Render the pinned thread-default agent under its "Thread default"
+   * sub-heading, followed by a divider when other agents follow it.
+   */
+  private renderDefaultAgentGroup(defaultAgent: ChatAgentMember, hasRest: boolean) {
+    return html`
+      <div class="agent-subsection-label">Thread default</div>
+      ${this.renderAgent(defaultAgent)}
+      ${hasRest ? html`<hr class="agent-default-divider" />` : nothing}
     `;
   }
 
@@ -723,7 +755,6 @@ export class ScionChatMembers extends LitElement {
     const isActive = this.dmPeerId === a.id;
     const isTyping = this.typingUserIds.includes(a.id);
     const hasUnread = this.unreadFromIds.includes(a.id);
-    const isDefault = this.defaultAgentSlug && a.slug === this.defaultAgentSlug;
 
     // Build tooltip: status detail (line 1) + updated time (line 2). The
     // detail message is the same text the agent detail page shows, and
@@ -748,60 +779,53 @@ export class ScionChatMembers extends LitElement {
             size="28"
           ></scion-chat-avatar>
           ${hasUnread ? html`<div class="unread-dot"></div>` : nothing}
-          ${
-            isTyping
-              ? html`<div class="typing-overlay"><span></span><span></span><span></span></div>`
-              : nothing
-          }
+          ${isTyping
+            ? html`<div class="typing-overlay"><span></span><span></span><span></span></div>`
+            : nothing}
         </div>
         <div class="member-info">
           <div class="member-name">${a.displayName}</div>
-          ${isDefault ? html`<span class="default-agent-label">thread default</span>` : nothing}
           <scion-status-badge status=${badgeStatus} size="small"></scion-status-badge>
         </div>
-        ${
-          a.canAttach !== true
-            ? nothing
-            : html`<a
-                href=${terminalHref(a.id)}
-                class="agent-terminal"
-                title="Open terminal"
-                @click=${(e: MouseEvent) => {
-                  e.stopPropagation();
-                  // Leave modified and non-primary clicks to the browser so
-                  // Ctrl/Cmd-click, Shift-click and middle-click behave as they
-                  // do on any other link.
-                  if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) {
-                    return;
-                  }
-                  e.preventDefault();
-                  openTerminalFromChat(a.id);
-                }}
-              >
-                <sl-icon name="terminal" style="font-size: var(--chat-fs-base);"></sl-icon>
-              </a>`
-        }
-        ${
-          a.projectId
-            ? html`<a
-                href="/agents/graph?project=${encodeURIComponent(
-                  a.projectId
-                )}&focus=${encodeURIComponent(a.id)}"
-                class="agent-graph"
-                title="Open in graph"
-                @click=${(e: MouseEvent) => {
-                  e.stopPropagation();
-                  if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-                  e.preventDefault();
-                  navigateTo(
-                    `/agents/graph?project=${encodeURIComponent(a.projectId!)}&focus=${encodeURIComponent(a.id)}`
-                  );
-                }}
-              >
-                <sl-icon name="diagram-3" style="font-size: var(--chat-fs-base);"></sl-icon>
-              </a>`
-            : nothing
-        }
+        ${a.canAttach !== true
+          ? nothing
+          : html`<a
+              href=${terminalHref(a.id)}
+              class="agent-terminal"
+              title="Open terminal"
+              @click=${(e: MouseEvent) => {
+                e.stopPropagation();
+                // Leave modified and non-primary clicks to the browser so
+                // Ctrl/Cmd-click, Shift-click and middle-click behave as they
+                // do on any other link.
+                if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) {
+                  return;
+                }
+                e.preventDefault();
+                openTerminalFromChat(a.id);
+              }}
+            >
+              <sl-icon name="terminal" style="font-size: var(--chat-fs-base);"></sl-icon>
+            </a>`}
+        ${a.projectId
+          ? html`<a
+              href="/agents/graph?project=${encodeURIComponent(
+                a.projectId
+              )}&focus=${encodeURIComponent(a.id)}"
+              class="agent-graph"
+              title="Open in graph"
+              @click=${(e: MouseEvent) => {
+                e.stopPropagation();
+                if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+                e.preventDefault();
+                navigateTo(
+                  `/agents/graph?project=${encodeURIComponent(a.projectId!)}&focus=${encodeURIComponent(a.id)}`
+                );
+              }}
+            >
+              <sl-icon name="diagram-3" style="font-size: var(--chat-fs-base);"></sl-icon>
+            </a>`
+          : nothing}
       </div>
     `;
 
