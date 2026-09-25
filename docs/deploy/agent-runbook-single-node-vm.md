@@ -423,6 +423,47 @@ above unless an admin has edited them.
 **If they are missing:** A warning in the deploy output includes the exact
 command to run by hand. This step never fails the deploy.
 
+### 6.3b Agent GCP identity default (passthrough)
+
+Both `settings.yaml` heredocs `deploy.sh` writes (the Phase 3 dev-auth one and
+the Phase 5 proxy/IAP one) set the top-level key
+`default_gcp_identity_mode: passthrough`. Combined with the VM service
+account's `roles/aiplatform.user` grant (§6.3a's prerequisite, added when the
+VM is created) and the `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION` hub
+env vars from §6.3a, this means **agents on this hub default to inheriting
+the VM's service account and can call Vertex AI with no manual credential
+setup.**
+
+`passthrough` is only honoured on the hub's own embedded (co-located) broker
+— which a single-node VM always is — so this is safe by construction; an
+agent dispatched to any other broker still gets `block`.
+
+Verify:
+
+```bash
+gcloud compute ssh scion-hub-HUB_NAME \
+  --zone=ZONE --project=PROJECT_ID \
+  --command='cat /home/scion/.scion/settings.yaml | grep default_gcp_identity_mode'
+```
+
+**Expected:** `default_gcp_identity_mode: passthrough`.
+
+**To change it:** Admin > Server Config > Agent Defaults > General in the web
+UI, or `PUT /api/v1/admin/server-config` with
+`{"default_gcp_identity_mode": "block"}` (or `"assign"`, which also requires
+`default_gcp_identity_service_account_id`). The change applies to new agents
+immediately, no hub restart needed.
+
+**Redeploys revert manual changes.** `deploy.sh` writes the full
+`settings.yaml` from its template on every deploy (Phase 3, and again in
+Phase 5), the same way it does for every other key in that file — it does
+not merge with the existing file. An admin edit to
+`default_gcp_identity_mode` (or any other key not sourced from the deploy
+config) is persisted by being written back into this same file, so it has no
+separate store to survive a redeploy: running `deploy.sh` against an
+existing VM resets the mode back to `passthrough`. Re-apply the change
+afterward if you need something other than the default.
+
 ### 6.4 Container images (if built locally)
 
 If `container_images.source` was `build`, verify images exist on the VM:
@@ -489,6 +530,7 @@ gcloud iap web add-iam-policy-binding \
 | Hub health check fails after deploy | Binary crashed or settings invalid | SSH to VM, check logs: `gcloud compute ssh scion-hub-HUB_NAME --zone=ZONE --project=PROJECT_ID --command='sudo journalctl -u scion-hub.service --no-pager -n 50'` |
 | Hub health check fails after restart | Settings or IAP audience mismatch | SSH to VM, verify settings: `gcloud compute ssh scion-hub-HUB_NAME --zone=ZONE --project=PROJECT_ID --command='cat /home/scion/.scion/settings.yaml'`. Confirm `auth.mode` is `proxy` and the `audience` string is correct. |
 | Agents lack `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION` | The hub env var write after the Phase 3 health check failed (a warning in the deploy output) | Run the manual `sqlite3` command from that warning, or set both as hub-scoped env vars (injection mode `always`) in the admin UI. See §6.3a. |
+| Admin's `default_gcp_identity_mode` change reverted to `passthrough` after a redeploy | `deploy.sh` rewrites the whole `settings.yaml`, not just the fields it manages | Expected — see §6.3b. Re-apply the change via the admin UI or API after redeploying. |
 | `iam.serviceAccounts.create` denied | User lacks IAM admin role | User needs `roles/iam.serviceAccountAdmin` on the project |
 | Image build fails with `muse-code` error | Build script tried to build all images including unsupported ones | Verify the deploy script builds only `core-base`, `scion-base`, and `scion-antigravity`. If running manually, use `--target` to select individual images. |
 | SSH connection fails to VM | IAP tunnel access not granted or firewall rule missing | Verify IAP tunnel role: `gcloud projects get-iam-policy PROJECT_ID --flatten="bindings[].members" --filter="bindings.role:roles/iap.tunnelResourceAccessor" --format="value(bindings.members)"`. Verify firewall rule exists: `gcloud compute firewall-rules describe scion-hub-HUB_NAME-allow-iap-ssh --project=PROJECT_ID`. |
