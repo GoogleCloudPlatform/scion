@@ -314,6 +314,58 @@ describe('scion-chat-thread agent recipient reconciliation', () => {
   });
 });
 
+// nc-reply-recipient: the reply's primary recipient is resolved server-side
+// from reply_to_id (the replied-to message's actual sender), not from a
+// client-supplied agent slug. The client sends only reply_to_id; it must
+// never send a routing hint the server would have to trust.
+describe('scion-chat-thread reply send payload (nc-reply-recipient)', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('sends reply_to_id and never a client-supplied reply_to_agent', async () => {
+    const el = await mount();
+    const internals = el as unknown as {
+      handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    };
+
+    apiFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 201,
+      json: () => Promise.resolve({ id: 'reply-1' }),
+    } as unknown as Response);
+
+    await internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'thanks!',
+          plain: false,
+          interrupt: false,
+          onSuccess: vi.fn(),
+          mentions: [],
+          attachmentIds: [],
+          replyToId: 'orig-msg-1',
+          replyToContent: 'original message from the agent',
+        },
+      })
+    );
+
+    const sendCall = apiFetch.mock.calls.find(
+      (c) =>
+        String(c[0]).endsWith('/messages') && (c[1] as RequestInit | undefined)?.method === 'POST'
+    );
+    expect(sendCall).toBeDefined();
+    const body = JSON.parse(String((sendCall![1] as RequestInit).body));
+    expect(body.reply_to_id).toBe('orig-msg-1');
+    expect(body).not.toHaveProperty('reply_to_agent');
+  });
+});
+
 // nc-delivery-unreachable: the send response now reports the real dispatch
 // outcome instead of the frontend hard-coding "dispatched" on any HTTP 2xx.
 describe('scion-chat-thread dispatch state from send response', () => {
