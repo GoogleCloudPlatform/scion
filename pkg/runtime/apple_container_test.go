@@ -17,10 +17,13 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 )
@@ -135,6 +138,93 @@ echo "$@"
 
 	if strings.Contains(out, "--cap-add") {
 		t.Errorf("Apple container args should not contain --cap-add, got %q", out)
+	}
+}
+
+// TestAppleContainerRuntime_Run_ContextCancelled_RollsBackWithKillThenRm covers
+// the review follow-up on ptone/scion#1886 / GoogleCloudPlatform/scion#1908:
+// the Apple "container" CLI's "rm" does not support "-f" and fails on a
+// running container (see AppleContainerRuntime.Delete), so the rollback path
+// must kill the container first and then remove it without "-f", unlike the
+// Docker/Podman "rm -f" rollback.
+func TestAppleContainerRuntime_Run_ContextCancelled_RollsBackWithKillThenRm(t *testing.T) {
+	tmpDir := t.TempDir()
+	// rollbackCancelledCreate detects the Apple Container CLI by checking
+	// filepath.Base(command) == "container" (matching the runtime's real
+	// default Command value), so the mock binary must be named "container".
+	mockContainer := filepath.Join(tmpDir, "container")
+	log := filepath.Join(tmpDir, "calls.log")
+
+	// The mock "run" hangs until killed by context cancellation, simulating a
+	// slow create that outlives the caller's patience. "kill" and "rm" record
+	// their arguments so the test can confirm the rollback order and flags.
+	// "rm" fails on the first call to model the container not yet being fully
+	// stopped when kill is asynchronous, matching AppleContainerRuntime.Delete's
+	// retry behavior.
+	script := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "run" ]; then
+  exec sleep 30
+elif [ "$1" = "kill" ]; then
+  echo "$@" >> %q
+elif [ "$1" = "rm" ]; then
+  echo "$@" >> %q
+  if [ ! -f %q ]; then
+    touch %q
+    exit 1
+  fi
+fi
+`, log, log, filepath.Join(tmpDir, "rm-attempted"), filepath.Join(tmpDir, "rm-attempted"))
+	if err := os.WriteFile(mockContainer, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock container: %v", err)
+	}
+
+	runtime := &AppleContainerRuntime{
+		Command: mockContainer,
+	}
+
+	config := RunConfig{
+		Harness:      &harness.Generic{},
+		Name:         "test-agent-cancel",
+		UnixUsername: "scion",
+		Image:        "scion-agent:latest",
+		Task:         "hello",
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+	}()
+
+	_, err := runtime.Run(ctx, config)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected Run to return context.Canceled, got %v", err)
+	}
+
+	data, readErr := os.ReadFile(log)
+	if readErr != nil {
+		t.Fatalf("expected a rollback 'kill'/'rm' after cancellation, but calls.log was not written: %v", readErr)
+	}
+	calls := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(calls) < 2 {
+		t.Fatalf("expected at least kill then rm calls, got %v", calls)
+	}
+	if !strings.HasPrefix(calls[0], "kill ") {
+		t.Errorf("expected first rollback call to be 'kill', got %q", calls[0])
+	}
+	if !strings.Contains(calls[0], "test-agent-cancel") {
+		t.Errorf("expected kill to target container 'test-agent-cancel', got %q", calls[0])
+	}
+	for _, c := range calls[1:] {
+		if !strings.HasPrefix(c, "rm ") {
+			t.Errorf("expected subsequent rollback calls to be 'rm', got %q", c)
+		}
+		if strings.Contains(c, "-f") {
+			t.Errorf("Apple container rollback must not pass '-f' to rm (unsupported), got %q", c)
+		}
+		if !strings.Contains(c, "test-agent-cancel") {
+			t.Errorf("expected rm to target container 'test-agent-cancel', got %q", c)
+		}
 	}
 }
 
