@@ -36,6 +36,7 @@ import type {
   Subscription,
   AgentMetricsSummary,
 } from '../../shared/types.js';
+import type { AgentLifecycleAction } from '../../shared/types.js';
 import {
   can,
   canLifecycle,
@@ -43,6 +44,8 @@ import {
   isTerminalAvailable,
   getAgentDisplayStatus,
   isAgentRunning,
+  RESUME_BEST_EFFORT_CONFIRM_MESSAGE,
+  lifecycleActionRequestInit,
 } from '../../shared/types.js';
 
 interface AgentNotificationsResponse {
@@ -852,11 +855,20 @@ export class ScionPageAgentDetail extends LitElement {
     }
   }
 
-  private async handleAction(
-    action: 'start' | 'stop' | 'suspend' | 'resume' | 'delete',
-    event?: MouseEvent
-  ): Promise<void> {
+  private async handleAction(action: AgentLifecycleAction, event?: MouseEvent): Promise<void> {
     if (!this.agent) return;
+
+    if (action === 'force-resume') {
+      if (
+        !(await showConfirm(RESUME_BEST_EFFORT_CONFIRM_MESSAGE, {
+          title: 'Resume (best effort)',
+          confirmText: 'Resume',
+          variant: 'primary',
+        }))
+      ) {
+        return;
+      }
+    }
 
     if (action === 'delete') {
       if (
@@ -910,6 +922,7 @@ export class ScionPageAgentDetail extends LitElement {
       stop: 'stopping',
       suspend: 'stopping',
       resume: 'starting',
+      'force-resume': 'starting',
     };
     this.agent = {
       ...this.agent,
@@ -921,10 +934,11 @@ export class ScionPageAgentDetail extends LitElement {
       stop: `/api/v1/agents/${this.agentId}/stop`,
       suspend: `/api/v1/agents/${this.agentId}/suspend`,
       resume: `/api/v1/agents/${this.agentId}/start`,
+      'force-resume': `/api/v1/agents/${this.agentId}/start`,
     };
 
     try {
-      const response = await apiFetch(actionUrls[action], { method: 'POST' });
+      const response = await apiFetch(actionUrls[action], lifecycleActionRequestInit(action));
 
       if (!response.ok) {
         throw new Error(await extractApiError(response, `Failed to ${action} agent`));
@@ -1334,6 +1348,21 @@ export class ScionPageAgentDetail extends LitElement {
                 : nothing
               : canLifecycle(agent._capabilities)
                 ? html`
+                    ${agent.phase === 'error'
+                      ? html`
+                          <sl-button
+                            variant="default"
+                            outline
+                            size="small"
+                            ?loading=${this.actionLoading['force-resume']}
+                            ?disabled=${this.actionLoading['force-resume']}
+                            @click=${() => this.handleAction('force-resume')}
+                          >
+                            <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+                            Resume (best effort)
+                          </sl-button>
+                        `
+                      : nothing}
                     <sl-button
                       variant="success"
                       size="small"
