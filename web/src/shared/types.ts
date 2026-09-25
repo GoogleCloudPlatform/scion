@@ -782,6 +782,12 @@ export interface Message {
   dispatchState?: string;
   /** Reason for dispatch failure, if any. */
   dispatchFailureReason?: string;
+  /**
+   * Machine-readable dispatch failure code, e.g. "agent_unreachable"
+   * (nc-delivery-unreachable). Only present on rows returned by the chat v2
+   * send response; history rows fall back to matching the reason prefix.
+   */
+  dispatchFailureCode?: string;
   /** Whether the message was sent with plain formatting. */
   plain?: boolean;
   /** File attachment paths. */

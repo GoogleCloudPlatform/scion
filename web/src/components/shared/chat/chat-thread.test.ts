@@ -302,6 +302,394 @@ describe('scion-chat-thread agent recipient reconciliation', () => {
   });
 });
 
+// nc-delivery-unreachable: the send response now reports the real dispatch
+// outcome instead of the frontend hard-coding "dispatched" on any HTTP 2xx.
+describe('scion-chat-thread dispatch state from send response', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('uses resData.dispatchState instead of hard-coding "dispatched"', async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    const internals = el as unknown as {
+      messageMap: Map<string, Message>;
+      handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    };
+
+    apiFetch.mockImplementationOnce(() =>
+      Promise.resolve({
+        ok: true,
+        status: 201,
+        json: () =>
+          Promise.resolve({
+            id: 'server-failed',
+            dispatchState: 'failed',
+            dispatchFailureReason: 'Agent unreachable (suspended)',
+            dispatchFailureCode: 'agent_unreachable',
+          }),
+      } as unknown as Response)
+    );
+
+    await internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'hello',
+          plain: false,
+          interrupt: false,
+          onSuccess: vi.fn(),
+          mentions: [],
+          attachmentIds: [],
+        },
+      })
+    );
+
+    const msg = internals.messageMap.get('server-failed');
+    expect(msg?.dispatchState).toBe('failed');
+    expect(msg?.dispatchFailureReason).toBe('Agent unreachable (suspended)');
+    expect(msg?.dispatchFailureCode).toBe('agent_unreachable');
+  });
+
+  it('falls back to "dispatched" when the response omits dispatchState', async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    const internals = el as unknown as {
+      messageMap: Map<string, Message>;
+      handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    };
+
+    apiFetch.mockImplementationOnce(() =>
+      Promise.resolve({
+        ok: true,
+        status: 201,
+        json: () => Promise.resolve({ id: 'server-ok' }),
+      } as unknown as Response)
+    );
+
+    await internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'hello',
+          plain: false,
+          interrupt: false,
+          onSuccess: vi.fn(),
+          mentions: [],
+          attachmentIds: [],
+        },
+      })
+    );
+
+    const msg = internals.messageMap.get('server-ok');
+    expect(msg?.dispatchState).toBe('dispatched');
+  });
+
+  // Review R2/nit 2: when the SSE echo lands before the HTTP response (the
+  // opposite ordering from the tests above), handleChatSendV2 must mutate the
+  // already-merged SSE message in place (the "sseVersion" branch) rather than
+  // let a later Map.set from mergeMessages wipe the failure reason/code.
+  it('keeps the failed state and reason when HTTP resolves after the SSE echo (sseVersion branch)', async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    const internals = el as unknown as {
+      messageMap: Map<string, Message>;
+      handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    };
+
+    let resolveSend!: (response: Response) => void;
+    apiFetch.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveSend = resolve;
+        })
+    );
+    apiFetch.mockResolvedValue(emptyHistory());
+
+    const sendPromise = internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'hello',
+          plain: false,
+          interrupt: false,
+          onSuccess: vi.fn(),
+          mentions: [],
+          attachmentIds: [],
+        },
+      })
+    );
+
+    // The SSE echo already landed under the real ID, carrying the real
+    // outcome (nc-delivery-unreachable review R2).
+    internals.messageMap.set('server-sse-failed', {
+      id: 'server-sse-failed',
+      projectId: '',
+      sender: 'me@example.com',
+      senderId: 'user-me',
+      recipient: 'agent:coder',
+      recipientId: 'coder',
+      msg: 'hello',
+      type: 'instruction',
+      agentId: '',
+      createdAt: '2026-01-01T00:00:00Z',
+      dispatchState: 'failed',
+      dispatchFailureReason: 'Agent unreachable (suspended)',
+      dispatchFailureCode: 'agent_unreachable',
+    });
+
+    resolveSend({
+      ok: true,
+      status: 201,
+      json: () =>
+        Promise.resolve({
+          id: 'server-sse-failed',
+          dispatchState: 'failed',
+          dispatchFailureReason: 'Agent unreachable (suspended)',
+          dispatchFailureCode: 'agent_unreachable',
+        }),
+    } as unknown as Response);
+
+    await sendPromise;
+
+    const msg = internals.messageMap.get('server-sse-failed');
+    expect(msg?.dispatchState).toBe('failed');
+    expect(msg?.dispatchFailureReason).toBe('Agent unreachable (suspended)');
+    expect(msg?.dispatchFailureCode).toBe('agent_unreachable');
+  });
+
+  // Review round 3, FYI 1: `failed` is terminal for a given message ID. If
+  // the HTTP response resolves first and persists `failed` (the sync
+  // dispatch_error path, whose SSE echo is published optimistically as
+  // "dispatched" before the dispatch attempt runs), a later SSE event for
+  // the same ID reporting "dispatched" must not downgrade the entry back to
+  // "Delivered". mergeMessages must keep the failed state and its reason/code.
+  it('never downgrades a failed message when SSE dispatched arrives after HTTP failed', async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    const internals = el as unknown as {
+      messageMap: Map<string, Message>;
+      handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    };
+
+    apiFetch.mockImplementationOnce(() =>
+      Promise.resolve({
+        ok: true,
+        status: 201,
+        json: () =>
+          Promise.resolve({
+            id: 'server-http-first-failed',
+            dispatchState: 'failed',
+            dispatchFailureReason: 'dispatch failed: connection refused',
+            dispatchFailureCode: 'dispatch_error',
+          }),
+      } as unknown as Response)
+    );
+
+    await internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'hello',
+          plain: false,
+          interrupt: false,
+          onSuccess: vi.fn(),
+          mentions: [],
+          attachmentIds: [],
+        },
+      })
+    );
+
+    expect(internals.messageMap.get('server-http-first-failed')?.dispatchState).toBe('failed');
+
+    // The SSE echo lands afterward, carrying the pre-dispatch optimistic
+    // "dispatched" state (events.go publishes it before the synchronous
+    // dispatch attempt for this path). It also carries a changed `msg` text
+    // and a later `createdAt` — non-dispatch fields that should still merge
+    // in from the incoming entry even though the dispatch fields are pinned
+    // (round 4 Nit 3).
+    emitChatMessage({
+      threadId: CONVERSATION_KEY,
+      id: 'server-http-first-failed',
+      msg: 'hello (edited)',
+      sender: 'me@example.com',
+      senderId: 'user-me',
+      recipient: 'agent:coder',
+      recipientId: 'coder',
+      type: 'instruction',
+      createdAt: '2026-01-01T00:00:01Z',
+      dispatchState: 'dispatched',
+    });
+
+    const msg = internals.messageMap.get('server-http-first-failed');
+    expect(msg?.dispatchState).toBe('failed');
+    expect(msg?.dispatchFailureReason).toBe('dispatch failed: connection refused');
+    expect(msg?.dispatchFailureCode).toBe('dispatch_error');
+    // Other fields from the incoming entry still merge in.
+    expect(msg?.msg).toBe('hello (edited)');
+    expect(msg?.createdAt).toBe('2026-01-01T00:00:01Z');
+  });
+
+  // Round 4, Optional 1: the guard only checked incoming dispatchState against
+  // "dispatched"/"pending". An incoming entry that omits dispatchState
+  // entirely (e.g. a backfill/history row without dispatch info) fell through
+  // the guard and wiped an existing `failed` state to undefined. `failed` is
+  // terminal, so a missing dispatchState must not clear it either.
+  it('never clears a failed message when an incoming entry has no dispatchState at all', async () => {
+    const el = await mount();
+    const internals = el as unknown as {
+      messageMap: Map<string, Message>;
+      mergeMessages(messages: Message[]): void;
+    };
+
+    const failed: Message = {
+      id: 'server-no-dispatch-state',
+      projectId: '',
+      sender: 'me@example.com',
+      senderId: 'user-me',
+      recipient: 'agent:coder',
+      recipientId: 'coder',
+      msg: 'hello',
+      type: 'instruction',
+      agentId: '',
+      createdAt: '2026-01-01T00:00:00Z',
+      dispatchState: 'failed',
+      dispatchFailureReason: 'Agent unreachable (suspended)',
+      dispatchFailureCode: 'agent_unreachable',
+    };
+    // Incoming entry for the same ID with no dispatchState field at all.
+    const noDispatchState: Message = {
+      id: 'server-no-dispatch-state',
+      projectId: '',
+      sender: 'me@example.com',
+      senderId: 'user-me',
+      recipient: 'agent:coder',
+      recipientId: 'coder',
+      msg: 'hello (edited)',
+      type: 'instruction',
+      agentId: '',
+      createdAt: '2026-01-01T00:00:01Z',
+    };
+
+    internals.mergeMessages([failed]);
+    internals.mergeMessages([noDispatchState]);
+
+    const msg = internals.messageMap.get('server-no-dispatch-state');
+    expect(msg?.dispatchState).toBe('failed');
+    expect(msg?.dispatchFailureReason).toBe('Agent unreachable (suspended)');
+    expect(msg?.dispatchFailureCode).toBe('agent_unreachable');
+    // Other fields from the incoming entry still merge in.
+    expect(msg?.msg).toBe('hello (edited)');
+    expect(msg?.createdAt).toBe('2026-01-01T00:00:01Z');
+  });
+
+  // Round 4, item 2: the sseVersion branch of handleChatSendV2 (the SSE echo
+  // lands before the HTTP response) has the same never-downgrade guard as
+  // mergeMessages, but no test exercised an actual downgrade attempt there —
+  // the existing sseVersion-branch test above sends `failed` on both sides,
+  // which passes even without the guard. Send a genuine "dispatched" HTTP
+  // response after an SSE-delivered `failed` to prove the guard holds.
+  it('never downgrades a failed message when HTTP resolves as dispatched after the SSE echo (sseVersion branch)', async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    const internals = el as unknown as {
+      messageMap: Map<string, Message>;
+      handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    };
+
+    let resolveSend!: (response: Response) => void;
+    apiFetch.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveSend = resolve;
+        })
+    );
+    apiFetch.mockResolvedValue(emptyHistory());
+
+    const sendPromise = internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'hello',
+          plain: false,
+          interrupt: false,
+          onSuccess: vi.fn(),
+          mentions: [],
+          attachmentIds: [],
+        },
+      })
+    );
+
+    // The SSE echo already landed under the real ID, carrying `failed`.
+    internals.messageMap.set('server-sse-first-failed', {
+      id: 'server-sse-first-failed',
+      projectId: '',
+      sender: 'me@example.com',
+      senderId: 'user-me',
+      recipient: 'agent:coder',
+      recipientId: 'coder',
+      msg: 'hello',
+      type: 'instruction',
+      agentId: '',
+      createdAt: '2026-01-01T00:00:00Z',
+      dispatchState: 'failed',
+      dispatchFailureReason: 'Agent unreachable (suspended)',
+      dispatchFailureCode: 'agent_unreachable',
+    });
+
+    // The HTTP response resolves afterward, genuinely reporting "dispatched"
+    // (unlike the existing sseVersion test, which resolves "failed" on both
+    // sides and would pass even without the guard).
+    resolveSend({
+      ok: true,
+      status: 201,
+      json: () =>
+        Promise.resolve({
+          id: 'server-sse-first-failed',
+          dispatchState: 'dispatched',
+        }),
+    } as unknown as Response);
+
+    await sendPromise;
+
+    const msg = internals.messageMap.get('server-sse-first-failed');
+    expect(msg?.dispatchState).toBe('failed');
+    expect(msg?.dispatchFailureReason).toBe('Agent unreachable (suspended)');
+    expect(msg?.dispatchFailureCode).toBe('agent_unreachable');
+  });
+
+  // Review R2: PublishUserMessage now carries dispatchFailureReason/Code on
+  // the SSE event for a failed row, so a live viewer in another tab (which
+  // only ever sees the SSE path, never the send response) also renders
+  // "Agent unreachable" instead of a bare "Failed".
+  it('carries dispatchFailureReason and dispatchFailureCode from the SSE event onto the merged message', async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    const internals = el as unknown as { messageMap: Map<string, Message> };
+
+    emitChatMessage({
+      threadId: CONVERSATION_KEY,
+      id: 'sse-failed-1',
+      msg: 'hi',
+      sender: 'me@example.com',
+      senderId: 'user-me',
+      recipient: 'agent:coder',
+      recipientId: 'coder',
+      type: 'instruction',
+      createdAt: '2026-01-01T00:00:00Z',
+      dispatchState: 'failed',
+      dispatchFailureReason: 'Agent unreachable (suspended)',
+      dispatchFailureCode: 'agent_unreachable',
+    });
+
+    await vi.waitFor(() => expect(internals.messageMap.has('sse-failed-1')).toBe(true));
+    const msg = internals.messageMap.get('sse-failed-1');
+    expect(msg?.dispatchState).toBe('failed');
+    expect(msg?.dispatchFailureReason).toBe('Agent unreachable (suspended)');
+    expect(msg?.dispatchFailureCode).toBe('agent_unreachable');
+  });
+});
+
 describe('scion-chat-thread read watermark', () => {
   beforeEach(() => {
     apiFetch.mockReset();

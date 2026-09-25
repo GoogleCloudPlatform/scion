@@ -250,6 +250,17 @@ type UserMessageEvent struct {
 	Read          bool            `json:"read"`
 	DispatchState string          `json:"dispatchState,omitempty"`
 	Attachments   []AttachmentRef `json:"attachments,omitempty"`
+
+	// DispatchFailureReason and DispatchFailureCode carry the same failure
+	// detail as chatMessageResponse (nc-delivery-unreachable review R2), so
+	// live SSE viewers — including the sending tab, when the SSE echo
+	// resolves before the HTTP response — see "Agent unreachable" instead of
+	// a bare "Failed". Populated only for a failed row whose reason was
+	// already known at publish time (see PublishUserMessage); the
+	// synchronous dispatch_error branch publishes before that reason is set,
+	// which is pre-existing ordering, unchanged here.
+	DispatchFailureReason string `json:"dispatchFailureReason,omitempty"`
+	DispatchFailureCode   string `json:"dispatchFailureCode,omitempty"`
 }
 
 // NotificationCreatedEvent is published when a user notification is created.
@@ -734,6 +745,16 @@ func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message,
 		Read:          msg.Read,
 		DispatchState: msg.DispatchState,
 		Attachments:   attachments,
+	}
+	// nc-delivery-unreachable review R2: carry the failure reason/code onto
+	// the event for a row that is already known to be failed at publish
+	// time (the phase gate and the unreachable-default override both set
+	// DispatchFailureReason before calling PublishUserMessage). The code is
+	// derived from the reason the same way the frontend's history-row
+	// fallback does, because store.Message has no dedicated code column.
+	if msg.DispatchState == store.MessageDispatchFailed && msg.DispatchFailureReason != nil {
+		evt.DispatchFailureReason = *msg.DispatchFailureReason
+		evt.DispatchFailureCode = dispatchFailureCodeFromReason(*msg.DispatchFailureReason)
 	}
 	// Only fan out to user-inbox and project-level subjects when the
 	// recipient is actually a human user. For user→agent messages the
