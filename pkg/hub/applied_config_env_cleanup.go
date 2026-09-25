@@ -79,6 +79,21 @@ import (
 type AppliedConfigEnvCleanupExecutor struct {
 	Store         store.Store
 	SecretBackend secret.SecretBackend // optional; nil is handled
+
+	// envVarCache and secretCache memoize per-scope lookups (keyed by
+	// scope+"/"+scopeID) across the agents visited by a single Run call.
+	// The hub scope and, within one project, the project scope are shared
+	// by every agent that reaches them, so without this cache a sweep of N
+	// agents re-fetches the same scope's data up to N times. Run
+	// (re)initializes both maps at the start of every call, so caching is
+	// scoped to a single sweep and carries nothing between Run invocations
+	// even if a caller reused one executor instance across calls -- not how
+	// resolveMaintenanceExecutor wires it today, but cheap to keep true. A
+	// failed lookup is cached too (as a nil/empty result): this matches the
+	// pre-existing best-effort handling of an unreachable scope, just
+	// applied once per sweep instead of once per agent.
+	envVarCache map[string][]store.EnvVar
+	secretCache map[string][]secret.SecretMeta
 }
 
 // appliedConfigEnvCleanupResult is a machine-readable summary, mirroring the
@@ -94,6 +109,9 @@ func (e *AppliedConfigEnvCleanupExecutor) Run(ctx context.Context, logger io.Wri
 	if dryRun {
 		_, _ = fmt.Fprintln(logger, "DRY RUN: no changes will be made.")
 	}
+
+	e.envVarCache = make(map[string][]store.EnvVar)
+	e.secretCache = make(map[string][]secret.SecretMeta)
 
 	result := appliedConfigEnvCleanupResult{}
 	cursor := ""
@@ -254,6 +272,38 @@ func (e *AppliedConfigEnvCleanupExecutor) resolvablePlainValues(ctx context.Cont
 	return values
 }
 
+// cachedEnvVarsForScope returns filter's env vars, fetching them from the
+// store only on the first call for that scope+scopeID within the current
+// Run sweep and serving every subsequent call for the same key from
+// envVarCache.
+func (e *AppliedConfigEnvCleanupExecutor) cachedEnvVarsForScope(ctx context.Context, filter store.EnvVarFilter) []store.EnvVar {
+	key := filter.Scope + "/" + filter.ScopeID
+	if vars, ok := e.envVarCache[key]; ok {
+		return vars
+	}
+	vars, err := e.Store.ListEnvVars(ctx, filter)
+	if err != nil {
+		vars = nil // best-effort: an unreachable scope just yields no match
+	}
+	e.envVarCache[key] = vars
+	return vars
+}
+
+// cachedSecretsForScope is cachedEnvVarsForScope's counterpart for the
+// secret backend.
+func (e *AppliedConfigEnvCleanupExecutor) cachedSecretsForScope(ctx context.Context, filter secret.Filter) []secret.SecretMeta {
+	key := filter.Scope + "/" + filter.ScopeID
+	if metas, ok := e.secretCache[key]; ok {
+		return metas
+	}
+	metas, err := e.SecretBackend.List(ctx, filter)
+	if err != nil {
+		metas = nil
+	}
+	e.secretCache[key] = metas
+	return metas
+}
+
 // reachableEnvVarsByKey lists the agent's user/project/runtime-broker/hub
 // scoped env vars, keyed by name. Precedence does not matter here (unlike
 // dispatch resolution): any scope's declaration of a key is enough to
@@ -261,11 +311,7 @@ func (e *AppliedConfigEnvCleanupExecutor) resolvablePlainValues(ctx context.Cont
 func (e *AppliedConfigEnvCleanupExecutor) reachableEnvVarsByKey(ctx context.Context, agent *store.Agent) map[string]store.EnvVar {
 	out := make(map[string]store.EnvVar)
 	for _, filter := range e.envVarScopeFilters(agent) {
-		vars, err := e.Store.ListEnvVars(ctx, filter)
-		if err != nil {
-			continue // best-effort: an unreachable scope just yields no match
-		}
-		for _, v := range vars {
+		for _, v := range e.cachedEnvVarsForScope(ctx, filter) {
 			if _, exists := out[v.Key]; !exists {
 				out[v.Key] = v
 			}
@@ -282,11 +328,7 @@ func (e *AppliedConfigEnvCleanupExecutor) reachableSecretNames(ctx context.Conte
 		return out
 	}
 	for _, sc := range e.secretScopeFilters(agent) {
-		metas, err := e.SecretBackend.List(ctx, sc)
-		if err != nil {
-			continue
-		}
-		for _, m := range metas {
+		for _, m := range e.cachedSecretsForScope(ctx, sc) {
 			out[m.Name] = true
 			// Environment-type secrets are injected under their Target key,
 			// not their store Name (see buildCreateRequest's

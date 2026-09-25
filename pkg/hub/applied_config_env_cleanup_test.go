@@ -19,6 +19,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log/slog"
 	"testing"
 
@@ -34,6 +35,12 @@ import (
 // pulling in a full secret store.
 type cleanupTestSecretBackend struct {
 	byScope map[string][]secret.SecretMeta // key: scope+"/"+scopeID
+
+	// listCalls counts List invocations per scope key, for tests asserting
+	// the cleanup's per-scope caching (each scope should be listed at most
+	// once per sweep, not once per agent). nil is fine: a nil map is never
+	// written to by tests that don't care about this.
+	listCalls map[string]int
 }
 
 func (b *cleanupTestSecretBackend) key(scope, scopeID string) string { return scope + "/" + scopeID }
@@ -48,6 +55,9 @@ func (b *cleanupTestSecretBackend) Delete(ctx context.Context, name, scope, scop
 	return nil
 }
 func (b *cleanupTestSecretBackend) List(ctx context.Context, filter secret.Filter) ([]secret.SecretMeta, error) {
+	if b.listCalls != nil {
+		b.listCalls[b.key(filter.Scope, filter.ScopeID)]++
+	}
 	return b.byScope[b.key(filter.Scope, filter.ScopeID)], nil
 }
 func (b *cleanupTestSecretBackend) GetMeta(ctx context.Context, name, scope, scopeID string) (*secret.SecretMeta, error) {
@@ -602,5 +612,102 @@ func TestAppliedConfigEnvCleanupStripsInlineConfigEnv(t *testing.T) {
 	}
 	if got := inlineEnv["EXPLICIT_INLINE_VAR"]; got != "user-typed-value" {
 		t.Errorf("expected InlineConfig.Env[EXPLICIT_INLINE_VAR] (no matching live secret) to be preserved, got %q", got)
+	}
+}
+
+// countingEnvVarStore wraps a store.Store and counts ListEnvVars calls per
+// scope+scopeID key, embedding the rest of the interface unchanged.
+type countingEnvVarStore struct {
+	store.Store
+	listCalls map[string]int
+}
+
+func (s *countingEnvVarStore) ListEnvVars(ctx context.Context, filter store.EnvVarFilter) ([]store.EnvVar, error) {
+	s.listCalls[filter.Scope+"/"+filter.ScopeID]++
+	return s.Store.ListEnvVars(ctx, filter)
+}
+
+// TestAppliedConfigEnvCleanupCachesPerScopeLookups verifies that a sweep
+// touching multiple agents that share scopes (the hub scope always, and here
+// also the project scope) fetches each scope's env vars and secrets once for
+// the whole sweep, not once per agent.
+func TestAppliedConfigEnvCleanupCachesPerScopeLookups(t *testing.T) {
+	ctx := context.Background()
+	baseStore := createTestStore(t)
+	countingStore := &countingEnvVarStore{Store: baseStore, listCalls: map[string]int{}}
+
+	project := &store.Project{ID: tid("project-cache"), Name: "Cache Project", Slug: "cache-project"}
+	if err := baseStore.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+	ownerID := tid("owner-cache")
+
+	// A plain project-scope EnvVar and a project-scope secret, each
+	// reachable from every agent below.
+	if err := baseStore.CreateEnvVar(ctx, &store.EnvVar{
+		ID:      tid("envvar-cache-plain"),
+		Key:     "SHARED_PLAIN_VAR",
+		Value:   "plain-value",
+		Scope:   store.ScopeProject,
+		ScopeID: project.ID,
+		Secret:  false,
+	}); err != nil {
+		t.Fatalf("failed to create plain env var: %v", err)
+	}
+	secretBackend := &cleanupTestSecretBackend{
+		byScope: map[string][]secret.SecretMeta{
+			"project/" + project.ID: {{Name: "SHARED_SECRET", SecretType: "variable"}},
+		},
+		listCalls: map[string]int{},
+	}
+
+	// Three agents in the same project, sharing the same owner, so their
+	// user/project/hub scope filters are identical across all three.
+	for i := 0; i < 3; i++ {
+		agent := &store.Agent{
+			ID:        tid(fmt.Sprintf("agent-cache-%d", i)),
+			Slug:      fmt.Sprintf("agent-cache-%d", i),
+			Name:      fmt.Sprintf("Cache Agent %d", i),
+			ProjectID: project.ID,
+			OwnerID:   ownerID,
+			AppliedConfig: &store.AgentAppliedConfig{
+				Env: map[string]string{
+					"SHARED_PLAIN_VAR": "plain-value",
+					"SHARED_SECRET":    "value-must-not-appear-in-log",
+				},
+			},
+		}
+		if err := baseStore.CreateAgent(ctx, agent); err != nil {
+			t.Fatalf("failed to create agent %d: %v", i, err)
+		}
+	}
+
+	exec := &AppliedConfigEnvCleanupExecutor{Store: countingStore, SecretBackend: secretBackend}
+	var buf bytes.Buffer
+	if err := exec.Run(ctx, &buf, nil); err != nil {
+		t.Fatalf("cleanup Run failed: %v", err)
+	}
+
+	projectEnvKey := "project/" + project.ID
+	if got := countingStore.listCalls[projectEnvKey]; got != 1 {
+		t.Errorf("expected ListEnvVars(%q) to be called once for the whole sweep (3 agents share it), got %d calls", projectEnvKey, got)
+	}
+	projectSecretKey := "project/" + project.ID
+	if got := secretBackend.listCalls[projectSecretKey]; got != 1 {
+		t.Errorf("expected SecretBackend.List(%q) to be called once for the whole sweep (3 agents share it), got %d calls", projectSecretKey, got)
+	}
+
+	// Sanity: the sweep still did its job despite the caching.
+	for i := 0; i < 3; i++ {
+		updated, err := baseStore.GetAgent(ctx, tid(fmt.Sprintf("agent-cache-%d", i)))
+		if err != nil {
+			t.Fatalf("failed to reload agent %d: %v", i, err)
+		}
+		if _, ok := updated.AppliedConfig.Env["SHARED_SECRET"]; ok {
+			t.Errorf("agent %d: expected SHARED_SECRET to be stripped, but it remains", i)
+		}
+		if got := updated.AppliedConfig.Env["SHARED_PLAIN_VAR"]; got != "plain-value" {
+			t.Errorf("agent %d: expected SHARED_PLAIN_VAR to be preserved, got %q", i, got)
+		}
 	}
 }
