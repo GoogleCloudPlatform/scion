@@ -6,6 +6,12 @@ Cloud Run IAP reverse proxy — no container builds, no GCS, no external databas
 
 > Part of the Single-Node-VM deploy tier (ptone/scion#1575).
 
+> **Adding a GKE target for shared-dir storage?** See the
+> [Hybrid Deployment Tier](hybrid-tier.md) page — it extends this same VM with
+> a second, Kubernetes-based place to run agents, sharing project scratchpads
+> between the two runtimes over an NFS export served from this VM
+> (`ptone/scion#1777`).
+
 ## Overview
 
 The single-node-VM tier stands up a persistent GCE VM running the `scion` binary

@@ -213,6 +213,8 @@ func TestStartSharedDirStorage_GlobalWinsOverProjectLevel(t *testing.T) {
 	f := newSharedDirStorageRunFixture(t)
 
 	globalMountRoot := filepath.Join(f.tmpDir, "global-nfs")
+	// The host base must exist regardless of runtime.
+	require.NoError(t, os.MkdirAll(filepath.Join(globalMountRoot, "global-share"), 0o775))
 	f.writeGlobalSettings(t, sprintfServerYAML(sharedDirStorageNFSGlobalYAML, globalMountRoot, "global-share", "global-pv"))
 
 	// Project tries to disable NFS entirely — must have no effect.
@@ -481,6 +483,8 @@ harness_configs:
 // dispatch-provided value, not a project-settings injection.
 func TestStartSharedDirStorageNFS_GroveIDFallback_Succeeds(t *testing.T) {
 	f := newSharedDirStorageRunFixture(t)
+	// The host base must exist regardless of runtime.
+	require.NoError(t, os.MkdirAll(filepath.Join(f.tmpDir, "srv", "share"), 0o775))
 	f.writeGlobalSettings(t, sprintfServerYAML(sharedDirStorageNFSGlobalYAML, filepath.Join(f.tmpDir, "srv"), "share", "pv"))
 	f.writeProjectSettings(t, "")
 
@@ -530,6 +534,8 @@ func TestStartSharedDirStorageNFS_AmbientHubEnv_ColidingVar_StillSucceeds(t *tes
 	for _, name := range collidingVars {
 		t.Run(name, func(t *testing.T) {
 			f := newSharedDirStorageRunFixture(t)
+			// The host base must exist regardless of runtime.
+			require.NoError(t, os.MkdirAll(filepath.Join(f.tmpDir, "srv", "share"), 0o775))
 			f.writeGlobalSettings(t, sprintfServerYAML(sharedDirStorageNFSGlobalYAML, filepath.Join(f.tmpDir, "srv"), "share", "pv"))
 			f.writeProjectSettings(t, "")
 

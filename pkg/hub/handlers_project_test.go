@@ -698,6 +698,62 @@ func TestDeleteProject_HubManaged_RemovesFilesystem(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound, "project should be deleted from database")
 }
 
+// TestDeleteProject_NFSSharedDirStorage_RemovesExportTree is Phase 2 item 3
+// (ptone/scion#1802): when the hub's own global settings.yaml has
+// server.shared_dir_storage backend "nfs", deleting a project must remove
+// that project's shared-dir tree from the NFS export via the same
+// symlink-safe resolver used by creation, not just leak it.
+func TestDeleteProject_NFSSharedDirStorage_RemovesExportTree(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	globalScionDir := filepath.Join(tmpHome, ".scion")
+	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
+
+	hostBase := filepath.Join(tmpHome, "nfs-export")
+	require.NoError(t, os.MkdirAll(hostBase, 0o2775))
+
+	settingsYAML := `schema_version: "1"
+server:
+  shared_dir_storage:
+    backend: nfs
+    nfs:
+      mount_root: ` + tmpHome + `
+      shares:
+        - id: nfs-export
+          pv_name: pv
+`
+	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(settingsYAML), 0644))
+
+	srv, s := testServer(t)
+	project := createTestGitProject(t, srv, "NFS Delete Test", "github.com/test/nfs-delete-repo")
+
+	// Pre-populate the project's shared-dir tree on the "export" exactly as
+	// resolveSharedDirs would have, with real content inside it.
+	leaf := filepath.Join(hostBase, "projects", project.ID, "shared-dirs", "scratchpad")
+	require.NoError(t, os.MkdirAll(leaf, 0o2775))
+	require.NoError(t, os.WriteFile(filepath.Join(leaf, "note.txt"), []byte("hello"), 0o644))
+
+	// A sibling project's tree must survive.
+	siblingID := "11111111-2222-3333-4444-555555555555"
+	siblingLeaf := filepath.Join(hostBase, "projects", siblingID, "shared-dirs", "scratchpad")
+	require.NoError(t, os.MkdirAll(siblingLeaf, 0o2775))
+	require.NoError(t, os.WriteFile(filepath.Join(siblingLeaf, "keep.txt"), []byte("keep"), 0o644))
+
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID, nil)
+	assert.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
+
+	_, err := os.Stat(filepath.Join(hostBase, "projects", project.ID))
+	assert.True(t, os.IsNotExist(err), "the deleted project's NFS shared-dir tree must be removed")
+
+	info, err := os.Stat(filepath.Join(siblingLeaf, "keep.txt"))
+	require.NoError(t, err, "a sibling project's shared-dir tree must survive untouched")
+	assert.False(t, info.IsDir())
+
+	ctx := context.Background()
+	_, err = s.GetProject(ctx, project.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "project should be deleted from database")
+}
+
 func TestDeleteProject_GitBacked_NoFilesystemCleanup(t *testing.T) {
 	srv, s := testServer(t)
 

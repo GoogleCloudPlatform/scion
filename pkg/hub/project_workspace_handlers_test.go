@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -30,13 +31,16 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
 
 // doMultipartRequest creates a multipart form request with file uploads.
@@ -830,6 +834,824 @@ func addSharedDirToProject(t *testing.T, srv *Server, projectID, dirName string)
 		"name": dirName,
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+}
+
+// setNFSSharedDirStorageGlobalSettings writes a global settings.yaml with
+// server.shared_dir_storage: nfs, under a fresh HOME, and returns the
+// resolved host base (<mount_root>/<share id>) so the caller can
+// pre-populate/inspect the export directly. Must be called BEFORE
+// testServer(t), since HOME must be set before any settings are read.
+func setNFSSharedDirStorageGlobalSettings(t *testing.T) (hostBase string) {
+	t.Helper()
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	globalScionDir := filepath.Join(tmpHome, ".scion")
+	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
+
+	hostBase = filepath.Join(tmpHome, "nfs-export")
+	require.NoError(t, os.MkdirAll(hostBase, 0o2775))
+
+	settingsYAML := `schema_version: "1"
+server:
+  shared_dir_storage:
+    backend: nfs
+    nfs:
+      mount_root: ` + tmpHome + `
+      shares:
+        - id: nfs-export
+          pv_name: pv
+`
+	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(settingsYAML), 0644))
+	return hostBase
+}
+
+// TestSharedDirFiles_NFSBackend_ListsExportLeaf is Phase 2 item 4 (design
+// §3.2.5): when the hub's own global settings carry shared_dir_storage:
+// nfs, the file browser must resolve and list the NFS export's leaf, not
+// the local project-configs layout.
+func TestSharedDirFiles_NFSBackend_ListsExportLeaf(t *testing.T) {
+	hostBase := setNFSSharedDirStorageGlobalSettings(t)
+
+	srv, _ := testServer(t)
+	project := createTestGitProject(t, srv, "NFS Browse Test", "github.com/test/nfs-browse-repo")
+	addSharedDirToProject(t, srv, project.ID, "artifacts")
+
+	leaf := filepath.Join(hostBase, "projects", project.ID, "shared-dirs", "artifacts")
+	require.NoError(t, os.MkdirAll(leaf, 0o2775))
+	require.NoError(t, os.WriteFile(filepath.Join(leaf, "note.txt"), []byte("from the export"), 0o644))
+
+	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s/shared-dirs/artifacts/files", project.ID), nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp ProjectWorkspaceListResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Equal(t, 1, resp.TotalCount)
+	assert.Equal(t, "note.txt", resp.Files[0].Path)
+}
+
+// TestSharedDirFiles_NFSBackend_SymlinkEscapeRefused is the required
+// "symlink escape is refused" test: a shared dir leaf that is a symlink
+// pointing outside the export must not be browsable, and the symlink's
+// target must be left untouched.
+func TestSharedDirFiles_NFSBackend_SymlinkEscapeRefused(t *testing.T) {
+	hostBase := setNFSSharedDirStorageGlobalSettings(t)
+
+	srv, _ := testServer(t)
+	project := createTestGitProject(t, srv, "NFS Symlink Escape Test", "github.com/test/nfs-symlink-repo")
+	addSharedDirToProject(t, srv, project.ID, "artifacts")
+
+	victim := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(victim, "secret.txt"), []byte("victim data"), 0o644))
+
+	leafParent := filepath.Join(hostBase, "projects", project.ID, "shared-dirs")
+	require.NoError(t, os.MkdirAll(leafParent, 0o2775))
+	require.NoError(t, os.Symlink(victim, filepath.Join(leafParent, "artifacts")))
+
+	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s/shared-dirs/artifacts/files", project.ID), nil)
+	assert.NotEqual(t, http.StatusOK, rec.Code, "a symlinked leaf pointing outside the export must be refused, not browsed")
+
+	info, err := os.Stat(filepath.Join(victim, "secret.txt"))
+	require.NoError(t, err, "the victim must be untouched")
+	assert.False(t, info.IsDir())
+}
+
+// TestSharedDirFiles_NFSBackend_LocalBackendExplicit_Unchanged is the
+// required "local is unchanged" test, using an EXPLICIT backend: local
+// (not just an absent block) to confirm resolveNFSSharedDirPath correctly
+// reports "not applicable" for that value too, falling through to the
+// pre-existing local-layout resolution byte-identically.
+func TestSharedDirFiles_NFSBackend_LocalBackendExplicit_Unchanged(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	globalScionDir := filepath.Join(tmpHome, ".scion")
+	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"),
+		[]byte("schema_version: \"1\"\nserver:\n  shared_dir_storage:\n    backend: local\n"), 0644))
+
+	srv, _ := testServer(t)
+	project, workspacePath := createTestHubManagedProject(t, srv, "Local Backend Explicit Test")
+	addSharedDirToProject(t, srv, project.ID, "build-cache")
+
+	filesURL := fmt.Sprintf("/api/v1/projects/%s/shared-dirs/build-cache/files", project.ID)
+	rec := doRequest(t, srv, http.MethodGet, filesURL, nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp ProjectWorkspaceListResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, 0, resp.TotalCount)
+
+	// A GET must not bring the directory into existence: browsing is not a
+	// provisioning operation (see TestSymlink_ReadDoesNotCreateSharedDir).
+	sdPath := resolveTestSharedDirPath(t, workspacePath, "build-cache")
+	_, err := os.Stat(sdPath)
+	assert.True(t, os.IsNotExist(err), "a read must not create the shared dir")
+
+	// A write, which does legitimately create it on first use, confirms
+	// this really did resolve via the local layout the whole time, not
+	// silently succeed some other way.
+	rec = doRequest(t, srv, http.MethodPut, filesURL+"/note.txt",
+		ProjectWorkspaceWriteRequest{Content: "hello"})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	got, err := os.ReadFile(filepath.Join(sdPath, "note.txt"))
+	require.NoError(t, err, "the write should have landed at the pre-existing project-configs layout")
+	assert.Equal(t, "hello", string(got))
+}
+
+// --- os.Root confinement for every verb ---
+//
+// Every test below plants a symlink INSIDE an NFS-backed shared dir leaf
+// pointing at a victim outside the export (or at another project's leaf,
+// staying inside the export but outside the target leaf), then exercises
+// one HTTP verb and asserts both that the operation is refused (not simply
+// that it "fails silently") and that the victim is provably untouched.
+
+// nfsSharedDirTestFixture sets up an NFS-backed project with one declared
+// shared dir and a pre-created leaf, ready for a test to plant a symlink
+// inside it.
+type nfsSharedDirTestFixture struct {
+	srv     *Server
+	project *store.Project
+	leaf    string // the shared dir's own leaf directory on the export
+}
+
+func setupNFSSharedDirTest(t *testing.T, projectName, dirName string) nfsSharedDirTestFixture {
+	t.Helper()
+	hostBase := setNFSSharedDirStorageGlobalSettings(t)
+	srv, _ := testServer(t)
+	project := createTestGitProject(t, srv, projectName, "github.com/test/"+strings.ToLower(strings.ReplaceAll(projectName, " ", "-")))
+	addSharedDirToProject(t, srv, project.ID, dirName)
+
+	leaf := filepath.Join(hostBase, "projects", project.ID, "shared-dirs", dirName)
+	require.NoError(t, os.MkdirAll(leaf, 0o2775))
+
+	return nfsSharedDirTestFixture{srv: srv, project: project, leaf: leaf}
+}
+
+func TestSharedDirFilesNFS_SymlinkedFile_DownloadRefused(t *testing.T) {
+	f := setupNFSSharedDirTest(t, "Download Escape", "artifacts")
+
+	victim := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(victim, "secret.txt"), []byte("victim data"), 0o644))
+	require.NoError(t, os.Symlink(filepath.Join(victim, "secret.txt"), filepath.Join(f.leaf, "escape.txt")))
+
+	rec := doRequest(t, f.srv, http.MethodGet,
+		fmt.Sprintf("/api/v1/projects/%s/shared-dirs/artifacts/files/escape.txt", f.project.ID), nil)
+	assert.NotEqual(t, http.StatusOK, rec.Code, "downloading a symlink that escapes the leaf must be refused")
+	assert.NotContains(t, rec.Body.String(), "victim data", "the victim's content must never appear in the response")
+}
+
+func TestSharedDirFilesNFS_SymlinkedFile_ArchiveExcludesIt(t *testing.T) {
+	f := setupNFSSharedDirTest(t, "Archive Escape", "artifacts")
+
+	victim := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(victim, "secret.txt"), []byte("victim archive data"), 0o644))
+	require.NoError(t, os.Symlink(filepath.Join(victim, "secret.txt"), filepath.Join(f.leaf, "escape.txt")))
+	require.NoError(t, os.WriteFile(filepath.Join(f.leaf, "real.txt"), []byte("real content"), 0o644))
+
+	rec := doRequest(t, f.srv, http.MethodGet,
+		fmt.Sprintf("/api/v1/projects/%s/shared-dirs/artifacts/archive", f.project.ID), nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	zr, err := zip.NewReader(bytes.NewReader(rec.Body.Bytes()), int64(rec.Body.Len()))
+	require.NoError(t, err)
+
+	var names []string
+	for _, zf := range zr.File {
+		names = append(names, zf.Name)
+		rc, err := zf.Open()
+		require.NoError(t, err)
+		content, err := io.ReadAll(rc)
+		require.NoError(t, err)
+		_ = rc.Close()
+		assert.NotContains(t, string(content), "victim archive data",
+			"the archive must never contain the victim's content, under any entry name")
+	}
+	assert.Contains(t, names, "real.txt", "the archive must still contain the leaf's real content")
+}
+
+func TestSharedDirFilesNFS_SymlinkedDir_PUTRefused(t *testing.T) {
+	f := setupNFSSharedDirTest(t, "PUT Escape", "artifacts")
+
+	victim := t.TempDir()
+	require.NoError(t, os.Symlink(victim, filepath.Join(f.leaf, "escape")))
+
+	rec := doRequest(t, f.srv, http.MethodPut,
+		fmt.Sprintf("/api/v1/projects/%s/shared-dirs/artifacts/files/escape/authorized_keys", f.project.ID),
+		ProjectWorkspaceWriteRequest{Content: "attacker-controlled-key"})
+	assert.NotEqual(t, http.StatusOK, rec.Code, "a PUT through a symlinked directory escaping the leaf must be refused")
+
+	_, statErr := os.Stat(filepath.Join(victim, "authorized_keys"))
+	assert.True(t, os.IsNotExist(statErr), "the victim directory must not receive the written file")
+}
+
+func TestSharedDirFilesNFS_SymlinkedDir_UploadRefused(t *testing.T) {
+	f := setupNFSSharedDirTest(t, "Upload Escape", "artifacts")
+
+	victim := t.TempDir()
+	require.NoError(t, os.Symlink(victim, filepath.Join(f.leaf, "escape")))
+
+	rec := doMultipartRequest(t, f.srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/shared-dirs/artifacts/files", f.project.ID),
+		map[string][]byte{"escape/authorized_keys": []byte("attacker-controlled-key")})
+	assert.NotEqual(t, http.StatusOK, rec.Code, "an upload through a symlinked directory escaping the leaf must be refused")
+
+	_, statErr := os.Stat(filepath.Join(victim, "authorized_keys"))
+	assert.True(t, os.IsNotExist(statErr), "the victim directory must not receive the uploaded file")
+}
+
+func TestSharedDirFilesNFS_SymlinkedDir_DeleteRefused(t *testing.T) {
+	f := setupNFSSharedDirTest(t, "Delete Escape", "artifacts")
+
+	victim := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(victim, "victim-file.txt"), []byte("do not delete me"), 0o644))
+	require.NoError(t, os.Symlink(victim, filepath.Join(f.leaf, "escape")))
+
+	rec := doRequest(t, f.srv, http.MethodDelete,
+		fmt.Sprintf("/api/v1/projects/%s/shared-dirs/artifacts/files/escape/victim-file.txt", f.project.ID), nil)
+	assert.NotEqual(t, http.StatusNoContent, rec.Code, "a DELETE through a symlinked directory escaping the leaf must be refused")
+
+	_, statErr := os.Stat(filepath.Join(victim, "victim-file.txt"))
+	assert.NoError(t, statErr, "the victim's file must survive")
+}
+
+// TestSharedDirFilesNFS_MissingLeaf_SymlinkedPidComponent_Refused: the leaf
+// doesn't exist yet, and the project's own <pid> directory (a structural
+// component, not leaf content) is a symlink. A write verb must not create
+// anything through it, at either the redirected location or the real
+// expected path.
+func TestSharedDirFilesNFS_MissingLeaf_SymlinkedPidComponent_Refused(t *testing.T) {
+	hostBase := setNFSSharedDirStorageGlobalSettings(t)
+	srv, _ := testServer(t)
+	project := createTestGitProject(t, srv, "Mkdir Escape", "github.com/test/mkdir-escape")
+	addSharedDirToProject(t, srv, project.ID, "artifacts")
+
+	victim := t.TempDir()
+	projectsDir := filepath.Join(hostBase, "projects")
+	require.NoError(t, os.MkdirAll(projectsDir, 0o755))
+	require.NoError(t, os.Symlink(victim, filepath.Join(projectsDir, project.ID)))
+
+	rec := doRequest(t, srv, http.MethodPut,
+		fmt.Sprintf("/api/v1/projects/%s/shared-dirs/artifacts/files/note.txt", project.ID),
+		ProjectWorkspaceWriteRequest{Content: "should never land anywhere"})
+	assert.Equal(t, http.StatusInternalServerError, rec.Code,
+		"a write behind a symlinked pid component must be refused: EnsureLeaf's refusal is not an "+
+			"fs.ErrNotExist-compatible error, so it surfaces as a real failure, not a quiet 404")
+
+	_, statErr := os.Stat(filepath.Join(victim, "shared-dirs"))
+	assert.True(t, os.IsNotExist(statErr), "nothing must be created through the symlinked pid component")
+	// The symlink itself must be untouched -- never replaced, never
+	// traversed to create a real directory over it.
+	target, readErr := os.Readlink(filepath.Join(projectsDir, project.ID))
+	require.NoError(t, readErr)
+	assert.Equal(t, victim, target)
+}
+
+// TestSharedDirFilesNFS_MissingLeaf_CreatedWithHardenedModesAndACL: when a
+// write verb legitimately creates a missing leaf (no symlink involved), it
+// must get the same leaf modes/ACL the broker applies -- never a plain
+// 0755 MkdirAll.
+func TestSharedDirFilesNFS_MissingLeaf_CreatedWithHardenedModesAndACL(t *testing.T) {
+	hostBase := setNFSSharedDirStorageGlobalSettings(t)
+	srv, _ := testServer(t)
+	project := createTestGitProject(t, srv, "Mkdir Symlinked Leaf", "github.com/test/mkdir-symlinked-leaf")
+	addSharedDirToProject(t, srv, project.ID, "artifacts")
+
+	// No leaf pre-created this time -- the handler must create the full
+	// chain itself.
+	rec := doRequest(t, srv, http.MethodPut,
+		fmt.Sprintf("/api/v1/projects/%s/shared-dirs/artifacts/files/note.txt", project.ID),
+		ProjectWorkspaceWriteRequest{Content: "hello"})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	pidDir := filepath.Join(hostBase, "projects", project.ID)
+	sharedDirsDir := filepath.Join(pidDir, "shared-dirs")
+	leaf := filepath.Join(sharedDirsDir, "artifacts")
+
+	for _, dir := range []string{filepath.Join(hostBase, "projects"), pidDir, sharedDirsDir} {
+		info, err := os.Stat(dir)
+		require.NoError(t, err, "intermediate dir %q should have been created", dir)
+		assert.Equal(t, os.FileMode(0o755), info.Mode().Perm(), "intermediate dir %q permission bits", dir)
+		assert.NotZero(t, info.Mode()&os.ModeSetgid, "intermediate dir %q must be setgid", dir)
+	}
+
+	info, err := os.Stat(leaf)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o775), info.Mode().Perm(), "leaf permission bits")
+	assert.NotZero(t, info.Mode()&os.ModeSetgid, "leaf must be setgid")
+
+	content, err := os.ReadFile(filepath.Join(leaf, "note.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "hello", string(content))
+
+	// The golden default ACL lands on the leaf itself...
+	leafFd, err := unix.Open(leaf, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	require.NoError(t, err)
+	defer func() { _ = unix.Close(leafFd) }()
+
+	buf := make([]byte, 256)
+	n, xerr := unix.Fgetxattr(leafFd, "system.posix_acl_default", buf)
+	if errors.Is(xerr, unix.ENOTSUP) || errors.Is(xerr, unix.EOPNOTSUPP) {
+		t.Skip("filesystem does not support POSIX ACLs")
+	}
+	require.NoError(t, xerr, "read back system.posix_acl_default")
+	wantACL := []byte{
+		0x02, 0x00, 0x00, 0x00, // acl_ea_header, version 2
+		0x01, 0x00, 0x07, 0x00, 0xff, 0xff, 0xff, 0xff, // ACL_USER_OBJ, rwx, undefined id
+		0x04, 0x00, 0x07, 0x00, 0xff, 0xff, 0xff, 0xff, // ACL_GROUP_OBJ, rwx, undefined id
+		0x20, 0x00, 0x05, 0x00, 0xff, 0xff, 0xff, 0xff, // ACL_OTHER, r-x, undefined id
+	}
+	assert.Equal(t, wantACL, buf[:n], "leaf's default ACL bytes")
+
+	// ...and never on an intermediate: EnsureLeaf's modes/ACL hardening only
+	// ever finalizes the leaf it creates.
+	for _, dir := range []string{filepath.Join(hostBase, "projects"), pidDir, sharedDirsDir} {
+		dirFd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+		require.NoError(t, err)
+		_, xerr := unix.Fgetxattr(dirFd, "system.posix_acl_default", buf)
+		_ = unix.Close(dirFd)
+		assert.True(t, errors.Is(xerr, unix.ENODATA), "intermediate %q must have no default ACL, got %v", dir, xerr)
+	}
+
+	// A follow-up write to the same, now-existing leaf must not re-finalize
+	// it: EnsureLeaf's alreadyExisted=true path skips the chmod/ACL step
+	// entirely. Mark the leaf with a mode EnsureLeaf would never itself
+	// produce, then confirm a second write leaves it exactly as marked.
+	require.NoError(t, os.Chmod(leaf, 0o700))
+	rec = doRequest(t, srv, http.MethodPut,
+		fmt.Sprintf("/api/v1/projects/%s/shared-dirs/artifacts/files/note2.txt", project.ID),
+		ProjectWorkspaceWriteRequest{Content: "again"})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	info, err = os.Stat(leaf)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o700), info.Mode().Perm(),
+		"a follow-up write to an existing leaf must not re-chmod it (EnsureLeaf's existed=true skip path)")
+}
+
+// TestSharedDirFilesNFS_MissingLeaf_ListReturnsEmptyNotFoundNothingCreated:
+// a GET list on a shared dir whose leaf doesn't exist yet must report an
+// empty listing, not create the leaf or any part of its chain
+// (openSharedDirRoot's createIfMissing=false for GET/DELETE). Uses the same
+// hub-managed project fixture as the fail-closed tests below.
+func TestSharedDirFilesNFS_MissingLeaf_ListReturnsEmptyNotFoundNothingCreated(t *testing.T) {
+	hostBase := setNFSSharedDirStorageGlobalSettings(t)
+	srv, _ := testServer(t)
+	project, _ := createTestHubManagedProject(t, srv, "Missing Leaf List")
+	addSharedDirToProject(t, srv, project.ID, "artifacts")
+
+	rec := doRequest(t, srv, http.MethodGet,
+		fmt.Sprintf("/api/v1/projects/%s/shared-dirs/artifacts/files", project.ID), nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp SharedDirListResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Empty(t, resp.Files)
+
+	_, statErr := os.Stat(filepath.Join(hostBase, "projects"))
+	assert.True(t, os.IsNotExist(statErr), "listing a missing leaf must not create anything, not even the projects root")
+}
+
+// TestSharedDirFilesNFS_MissingLeaf_DownloadReturnsNotFoundNothingCreated:
+// a GET on a specific file under a shared dir whose leaf doesn't exist yet
+// must 404, not create anything.
+func TestSharedDirFilesNFS_MissingLeaf_DownloadReturnsNotFoundNothingCreated(t *testing.T) {
+	hostBase := setNFSSharedDirStorageGlobalSettings(t)
+	srv, _ := testServer(t)
+	project, _ := createTestHubManagedProject(t, srv, "Missing Leaf Download")
+	addSharedDirToProject(t, srv, project.ID, "artifacts")
+
+	rec := doRequest(t, srv, http.MethodGet,
+		fmt.Sprintf("/api/v1/projects/%s/shared-dirs/artifacts/files/note.txt", project.ID), nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+
+	_, statErr := os.Stat(filepath.Join(hostBase, "projects"))
+	assert.True(t, os.IsNotExist(statErr), "downloading from a missing leaf must not create anything")
+}
+
+// TestSharedDirFilesNFS_MissingLeaf_DeleteReturnsNotFoundNothingCreated: a
+// DELETE on a file under a shared dir whose leaf doesn't exist yet must
+// 404, not create anything (there is nothing to delete, and delete never
+// creates).
+func TestSharedDirFilesNFS_MissingLeaf_DeleteReturnsNotFoundNothingCreated(t *testing.T) {
+	hostBase := setNFSSharedDirStorageGlobalSettings(t)
+	srv, _ := testServer(t)
+	project := createTestGitProject(t, srv, "Missing Leaf Delete", "github.com/test/missing-leaf-delete")
+	addSharedDirToProject(t, srv, project.ID, "artifacts")
+
+	rec := doRequest(t, srv, http.MethodDelete,
+		fmt.Sprintf("/api/v1/projects/%s/shared-dirs/artifacts/files/note.txt", project.ID), nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+
+	_, statErr := os.Stat(filepath.Join(hostBase, "projects"))
+	assert.True(t, os.IsNotExist(statErr), "deleting from a missing leaf must not create anything")
+}
+
+// TestSharedDirFilesNFS_MissingLeaf_ArchiveReturnsNotFoundNothingCreated: an
+// archive request on a shared dir whose leaf doesn't exist yet must 404,
+// the same as the other read verbs, and must not create the leaf or any
+// part of its chain.
+func TestSharedDirFilesNFS_MissingLeaf_ArchiveReturnsNotFoundNothingCreated(t *testing.T) {
+	hostBase := setNFSSharedDirStorageGlobalSettings(t)
+	srv, _ := testServer(t)
+	project := createTestGitProject(t, srv, "Archive Missing Leaf", "github.com/test/archive-missing-leaf")
+	addSharedDirToProject(t, srv, project.ID, "artifacts")
+
+	rec := doRequest(t, srv, http.MethodGet,
+		fmt.Sprintf("/api/v1/projects/%s/shared-dirs/artifacts/archive", project.ID), nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+
+	_, statErr := os.Stat(filepath.Join(hostBase, "projects"))
+	assert.True(t, os.IsNotExist(statErr), "archiving a missing leaf must not create anything")
+}
+
+// TestSharedDirFilesNFS_PreexistingFileAtPidComponent_ErrorsNothingCreated:
+// a pre-existing REGULAR FILE (not a directory) at the structural
+// projects/<pid> component must produce an error, not silently replace or
+// traverse it, and must not create anything past it (shared-dirs/ or the
+// leaf itself).
+func TestSharedDirFilesNFS_PreexistingFileAtPidComponent_ErrorsNothingCreated(t *testing.T) {
+	hostBase := setNFSSharedDirStorageGlobalSettings(t)
+	srv, _ := testServer(t)
+	project := createTestGitProject(t, srv, "File At Pid Component", "github.com/test/file-at-pid-component")
+	addSharedDirToProject(t, srv, project.ID, "artifacts")
+
+	require.NoError(t, os.MkdirAll(filepath.Join(hostBase, "projects"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(hostBase, "projects", project.ID), []byte("not a directory"), 0o644))
+
+	rec := doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/shared-dirs/artifacts/files", project.ID), nil)
+	assert.NotEqual(t, http.StatusOK, rec.Code, "a file where the pid directory should be must not be silently used")
+	assert.NotEqual(t, http.StatusCreated, rec.Code)
+
+	fi, statErr := os.Stat(filepath.Join(hostBase, "projects", project.ID))
+	require.NoError(t, statErr, "the pre-existing file itself must be left in place")
+	assert.False(t, fi.IsDir(), "the pre-existing file must not have been replaced by a directory")
+
+	// The parent path component (projects/<pid>) is itself a file, so
+	// os.Stat on anything under it fails with ENOTDIR, not ENOENT -- either
+	// way, nothing usable was created there.
+	_, statErr = os.Stat(filepath.Join(hostBase, "projects", project.ID, "shared-dirs"))
+	assert.Error(t, statErr, "nothing must be created past the blocking file")
+}
+
+// TestSharedDirFilesNFS_InvalidNFSBlock_ConflictNeverFallsToLocal: an nfs
+// block that fails V1SharedDirStorageConfig.Validate() (here, an empty
+// mount_root) must report 409 Conflict, and must NEVER fall through to the
+// local-layout resolution -- resolveNFSSharedDirPath's applicable=true
+// short-circuits resolveSharedDirPath regardless of the error. A sanity
+// request against the working local layout runs first, on a project whose
+// local resolution would ALSO otherwise succeed, so a 409 afterward can only
+// be attributed to the broken nfs block, not to some unrelated project
+// setup that would 409 on its own.
+func TestSharedDirFilesNFS_InvalidNFSBlock_ConflictNeverFallsToLocal(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	globalScionDir := filepath.Join(tmpHome, ".scion")
+	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
+
+	srv, _ := testServer(t)
+	project, _ := createTestHubManagedProject(t, srv, "Invalid NFS Block")
+	addSharedDirToProject(t, srv, project.ID, "artifacts")
+	url := fmt.Sprintf("/api/v1/projects/%s/shared-dirs/artifacts/files", project.ID)
+
+	// Sanity: with no settings.yaml at all, the local layout serves a 200.
+	rec := doRequest(t, srv, http.MethodGet, url, nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	// backend: nfs but nfs.mount_root is empty -- fails Validate().
+	settingsYAML := `schema_version: "1"
+server:
+  shared_dir_storage:
+    backend: nfs
+    nfs:
+      shares:
+        - id: nfs-export
+`
+	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(settingsYAML), 0644))
+
+	rec = doRequest(t, srv, http.MethodGet, url, nil)
+	assert.Equal(t, http.StatusConflict, rec.Code,
+		"an invalid nfs block must 409, never silently fall through to the local layout")
+}
+
+// TestSharedDirArchiveNFS_InvalidNFSBlock_ConflictBodyIsFixedMessage: the
+// archive endpoint's twin of the files-endpoint fixed-message requirement --
+// a resolution failure must report the fixed, detail-free message, never the
+// raw settings-parse error or a resolved host path.
+func TestSharedDirArchiveNFS_InvalidNFSBlock_ConflictBodyIsFixedMessage(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	globalScionDir := filepath.Join(tmpHome, ".scion")
+	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
+
+	srv, _ := testServer(t)
+	project, _ := createTestHubManagedProject(t, srv, "Archive Invalid NFS Block")
+	addSharedDirToProject(t, srv, project.ID, "artifacts")
+	filesURL := fmt.Sprintf("/api/v1/projects/%s/shared-dirs/artifacts/files", project.ID)
+	archiveURL := fmt.Sprintf("/api/v1/projects/%s/shared-dirs/artifacts/archive", project.ID)
+
+	// Sanity: with no settings.yaml at all, the local layout resolves fine
+	// (a write creates the leaf archive then reads back).
+	rec := doRequest(t, srv, http.MethodPut, filesURL+"/note.txt", ProjectWorkspaceWriteRequest{Content: "hello"})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	rec = doRequest(t, srv, http.MethodGet, archiveURL, nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	// backend: nfs but nfs.mount_root is empty -- fails Validate().
+	settingsYAML := `schema_version: "1"
+server:
+  shared_dir_storage:
+    backend: nfs
+    nfs:
+      shares:
+        - id: nfs-export
+`
+	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(settingsYAML), 0644))
+
+	rec = doRequest(t, srv, http.MethodGet, archiveURL, nil)
+	require.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), sharedDirStorageUnavailableMessage,
+		"the archive endpoint must return the fixed message")
+	assert.NotContains(t, rec.Body.String(), "mount_root",
+		"the archive endpoint must not echo the raw settings-validation error")
+}
+
+// TestSharedDirFilesNFS_EmptyBackendStringWithNFSBlock_UsesLocal: backend:
+// "" (the zero value, distinct from the block being entirely absent) with a
+// populated nfs sub-block still configured underneath it must resolve via
+// the pre-existing local layout, exactly like an absent shared_dir_storage
+// block -- Validate() treats "" the same as "local", and
+// resolveNFSSharedDirPath's sdCfg.Backend != "nfs" check must agree.
+func TestSharedDirFilesNFS_EmptyBackendStringWithNFSBlock_UsesLocal(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	globalScionDir := filepath.Join(tmpHome, ".scion")
+	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
+
+	hostBase := filepath.Join(tmpHome, "nfs-export")
+	require.NoError(t, os.MkdirAll(hostBase, 0o2775))
+
+	settingsYAML := `schema_version: "1"
+server:
+  shared_dir_storage:
+    backend: ""
+    nfs:
+      mount_root: ` + tmpHome + `
+      shares:
+        - id: nfs-export
+          pv_name: pv
+`
+	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(settingsYAML), 0644))
+
+	srv, _ := testServer(t)
+	project, workspacePath := createTestHubManagedProject(t, srv, "Empty Backend With NFS Block")
+	addSharedDirToProject(t, srv, project.ID, "artifacts")
+
+	filesURL := fmt.Sprintf("/api/v1/projects/%s/shared-dirs/artifacts/files", project.ID)
+	rec := doRequest(t, srv, http.MethodGet, filesURL, nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	// The NFS export must never have been touched -- resolution went through
+	// the local layout entirely.
+	_, statErr := os.Stat(filepath.Join(hostBase, "projects"))
+	assert.True(t, os.IsNotExist(statErr), "backend: \"\" must resolve locally, never touching the nfs export")
+
+	// A read must not create the local shared dir either; a write, which
+	// does create it on first use, confirms this resolved via the local
+	// layout the whole time.
+	sdPath := resolveTestSharedDirPath(t, workspacePath, "artifacts")
+	_, err := os.Stat(sdPath)
+	assert.True(t, os.IsNotExist(err), "a read must not create the shared dir")
+
+	rec = doRequest(t, srv, http.MethodPut, filesURL+"/note.txt",
+		ProjectWorkspaceWriteRequest{Content: "hello"})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	got, err := os.ReadFile(filepath.Join(sdPath, "note.txt"))
+	require.NoError(t, err, "the write should have landed at the pre-existing project-configs layout")
+	assert.Equal(t, "hello", string(got))
+
+	_, statErr = os.Stat(filepath.Join(hostBase, "projects"))
+	assert.True(t, os.IsNotExist(statErr), "backend: \"\" must resolve locally even for a write, never touching the nfs export")
+}
+
+// TestSharedDirFiles_UnreadableGlobalSettings_FailsClosed_NoLocalFallback: a
+// global settings file that fails to load, or loads via the legacy
+// pre-schema_version format, must not silently serve the local layout if
+// its raw bytes mention shared_dir_storage at all. A sanity request against
+// the working local layout runs first, so a fail-closed result afterward
+// can only be attributed to the broken settings, not to some unrelated
+// setup problem.
+func TestSharedDirFiles_UnreadableGlobalSettings_FailsClosed_NoLocalFallback(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	g := filepath.Join(tmpHome, ".scion")
+	require.NoError(t, os.MkdirAll(g, 0o755))
+
+	srv, _ := testServer(t)
+	project, _ := createTestHubManagedProject(t, srv, "Broken Settings Fail Closed")
+	addSharedDirToProject(t, srv, project.ID, "artifacts")
+	url := fmt.Sprintf("/api/v1/projects/%s/shared-dirs/artifacts/files", project.ID)
+
+	// Sanity: with no settings.yaml at all, the local layout serves a 200.
+	rec := doRequest(t, srv, http.MethodGet, url, nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	// A v1-tagged file that mentions shared_dir_storage but fails to parse.
+	require.NoError(t, os.WriteFile(filepath.Join(g, "settings.yaml"),
+		[]byte("schema_version: \"1\"\nserver:\n  shared_dir_storage:\n    backend: nfs\n    nfs: [unterminated\n"), 0o644))
+	buf := captureAuditLogs(t)
+	rec = doRequest(t, srv, http.MethodGet, url, nil)
+	assert.NotEqual(t, http.StatusOK, rec.Code, "an unreadable settings file mentioning shared_dir_storage must fail closed, not serve the local layout")
+	assert.Contains(t, rec.Body.String(), sharedDirStorageUnavailableMessage,
+		"the client-facing error must be the fixed message, not the raw parse error or a host path")
+	assertLogContains(t, buf, "failed to resolve shared directory path")
+
+	// A legacy-format file (no schema_version) that still mentions the key.
+	require.NoError(t, os.WriteFile(filepath.Join(g, "settings.yaml"),
+		[]byte("server:\n  shared_dir_storage:\n    backend: nfs\n"), 0o644))
+	rec = doRequest(t, srv, http.MethodGet, url, nil)
+	assert.NotEqual(t, http.StatusOK, rec.Code, "a legacy-format file mentioning shared_dir_storage must also fail closed")
+}
+
+// TestSharedDirConfigDelete_UnreadableSettings_LogsAndSkipsCleanup_NoLocalTouch:
+// when the global settings fail closed the same way, the config-level
+// DELETE must still remove the DB record (cleanup is best-effort and must
+// never block the caller), must log why cleanup was skipped, and must never
+// fall back to touching the local project-configs layout it can no longer
+// be sure is even the right one.
+func TestSharedDirConfigDelete_UnreadableSettings_LogsAndSkipsCleanup_NoLocalTouch(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	g := filepath.Join(tmpHome, ".scion")
+	require.NoError(t, os.MkdirAll(g, 0o755))
+
+	srv, _ := testServer(t)
+	project, workspacePath := createTestHubManagedProject(t, srv, "Delete Broken Settings")
+	addSharedDirToProject(t, srv, project.ID, "artifacts")
+
+	// Populate the local shared dir while settings are still unset (local
+	// layout), so there is something concrete to prove untouched later.
+	filesURL := fmt.Sprintf("/api/v1/projects/%s/shared-dirs/artifacts/files", project.ID)
+	rec := doRequest(t, srv, http.MethodPut, filesURL+"/note.txt", ProjectWorkspaceWriteRequest{Content: "hello"})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	sdPath := resolveTestSharedDirPath(t, workspacePath, "artifacts")
+	localFile := filepath.Join(sdPath, "note.txt")
+	_, err := os.Stat(localFile)
+	require.NoError(t, err, "sanity: the local file must exist before settings break")
+
+	require.NoError(t, os.WriteFile(filepath.Join(g, "settings.yaml"),
+		[]byte("schema_version: \"1\"\nserver:\n  shared_dir_storage:\n    backend: nfs\n    nfs: [unterminated\n"), 0o644))
+
+	buf := captureAuditLogs(t)
+	rec = doRequest(t, srv, http.MethodDelete, fmt.Sprintf("/api/v1/projects/%s/shared-dirs/artifacts", project.ID), nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
+	assertLogContains(t, buf, "could not resolve shared directory host path for cleanup")
+
+	_, statErr := os.Stat(localFile)
+	assert.NoError(t, statErr, "the local shared dir file must be untouched when cleanup fails closed, not silently removed")
+}
+
+// assertLogContains reports whether any captured JSON log line's "msg"
+// field contains substr.
+func assertLogContains(t *testing.T, buf *bytes.Buffer, substr string) {
+	t.Helper()
+	for _, rec := range auditRecords(t, buf) {
+		if msg, _ := rec["msg"].(string); strings.Contains(msg, substr) {
+			return
+		}
+	}
+	t.Errorf("no captured log line contains %q; log: %s", substr, buf.String())
+}
+
+// TestSharedDirFilesNFS_EnsureLeafFailure_PostPutRefused_NothingWritten:
+// when ensureNFSSharedDirLeaf (shareddirs.EnsureLeaf) fails finalizing a
+// leaf it just created, that error must reach the HTTP caller as a real
+// failure (500 -- see below for why it's specifically 500, not just "any
+// non-2xx"), and nothing must be left behind on the export -- not a
+// half-finalized leaf, not an uploaded/written file. EnsureLeaf's own
+// rollback already removes the leaf it created on a finalization failure.
+//
+// The exact status matters here, not just "non-2xx": EnsureLeaf's rollback
+// means a *masked* ensureNFSSharedDirLeaf error (one that openSharedDirRoot
+// ignored and treated as "proceed anyway") would still hit
+// shareddirs.OpenAnchoredRoot next, which independently finds the
+// just-rolled-back leaf missing and returns its OWN fs.ErrNotExist-compatible
+// error -- which the handler maps to 404, not 500. A test that only checked
+// "not 2xx" could not tell "the real error propagated" (500) apart from "the
+// real error was swallowed, but a byproduct of its own rollback was caught
+// by a second, independent check" (404) -- both are safe, but only the
+// first is the specific failure mode this test pins.
+func TestSharedDirFilesNFS_EnsureLeafFailure_PostPutRefused_NothingWritten(t *testing.T) {
+	t.Run("PUT", func(t *testing.T) {
+		hostBase := setNFSSharedDirStorageGlobalSettings(t)
+		srv, _ := testServer(t)
+		project := createTestGitProject(t, srv, "EnsureLeaf Failure PUT", "github.com/test/ensureleaf-failure-put")
+		addSharedDirToProject(t, srv, project.ID, "artifacts")
+
+		restore := shareddirs.SetLeafFinalizationHooksForTest(
+			func(fd int, mode uint32) error { return unix.EINVAL },
+			nil,
+		)
+		t.Cleanup(restore)
+
+		rec := doRequest(t, srv, http.MethodPut,
+			fmt.Sprintf("/api/v1/projects/%s/shared-dirs/artifacts/files/note.txt", project.ID),
+			ProjectWorkspaceWriteRequest{Content: "hello"})
+		assert.Equal(t, http.StatusInternalServerError, rec.Code,
+			"the EnsureLeaf failure itself must propagate as a real error, not be masked into a 404 by a downstream check")
+
+		_, statErr := os.Stat(filepath.Join(hostBase, "projects", project.ID, "shared-dirs", "artifacts", "note.txt"))
+		assert.True(t, os.IsNotExist(statErr), "nothing must be written when the leaf can't be finalized")
+	})
+
+	t.Run("POST_upload", func(t *testing.T) {
+		hostBase := setNFSSharedDirStorageGlobalSettings(t)
+		srv, _ := testServer(t)
+		project := createTestGitProject(t, srv, "EnsureLeaf Failure POST", "github.com/test/ensureleaf-failure-post")
+		addSharedDirToProject(t, srv, project.ID, "artifacts")
+
+		restore := shareddirs.SetLeafFinalizationHooksForTest(
+			func(fd int, mode uint32) error { return unix.EINVAL },
+			nil,
+		)
+		t.Cleanup(restore)
+
+		rec := doMultipartRequest(t, srv, http.MethodPost,
+			fmt.Sprintf("/api/v1/projects/%s/shared-dirs/artifacts/files", project.ID),
+			map[string][]byte{"note.txt": []byte("hello")})
+		assert.Equal(t, http.StatusInternalServerError, rec.Code,
+			"the EnsureLeaf failure itself must propagate as a real error, not be masked into a 404 by a downstream check")
+
+		_, statErr := os.Stat(filepath.Join(hostBase, "projects", project.ID, "shared-dirs", "artifacts", "note.txt"))
+		assert.True(t, os.IsNotExist(statErr), "nothing must be written when the leaf can't be finalized")
+	})
+}
+
+// TestResolveNFSSharedDirPath_TraversalInputs_Refused: a direct, non-HTTP
+// call into resolveNFSSharedDirPath with a traversal-shaped dirName or
+// projectID must be refused, mirroring the creation-time resolver's own
+// coverage (TestResolveSharedDirs_NFS_PoC_TraversalNamesAndProjectID in
+// pkg/agent) at the hub's own resolver. dirName and projectID are checked by
+// two SEPARATE validators (api.ValidateSharedDirs, shareddirs.ValidProjectID),
+// so each case below breaks only ONE of the two inputs at a time -- a single
+// case with both broken can't tell "the dirName check caught it" apart from
+// "the projectID check caught it", since either alone already refuses.
+func TestResolveNFSSharedDirPath_TraversalInputs_Refused(t *testing.T) {
+	setNFSSharedDirStorageGlobalSettings(t)
+	srv, _ := testServer(t)
+
+	t.Run("valid dirName, traversal-shaped projectID", func(t *testing.T) {
+		resolution, applicable, err := srv.resolveNFSSharedDirPath("artifacts", "../y")
+		assert.True(t, applicable, "nfs is configured, so this must never report not-applicable")
+		require.Error(t, err)
+		assert.Nil(t, resolution)
+	})
+
+	t.Run("traversal-shaped dirName, valid projectID", func(t *testing.T) {
+		resolution, applicable, err := srv.resolveNFSSharedDirPath("../x", "pid-1")
+		assert.True(t, applicable, "nfs is configured, so this must never report not-applicable")
+		require.Error(t, err)
+		assert.Nil(t, resolution)
+	})
+}
+
+// TestSharedDirFilesNFS_ConcurrentSymlinkSwap_NeverWritesVictim: a goroutine
+// repeatedly replaces a leaf entry between a plain directory and a symlink
+// to a victim while PUT requests race it. The victim must never receive a
+// write, regardless of timing.
+func TestSharedDirFilesNFS_ConcurrentSymlinkSwap_NeverWritesVictim(t *testing.T) {
+	f := setupNFSSharedDirTest(t, "Swap Race", "artifacts")
+
+	victim := t.TempDir()
+	real := filepath.Join(f.leaf, "real-target")
+	require.NoError(t, os.MkdirAll(real, 0o775))
+	linkPath := filepath.Join(f.leaf, "sub")
+
+	var stop atomic.Bool
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for !stop.Load() {
+			_ = os.Remove(linkPath)
+			_ = os.Symlink(victim, linkPath)
+			_ = os.Remove(linkPath)
+			_ = os.Mkdir(linkPath, 0o775)
+		}
+	}()
+
+	for i := 0; i < 200; i++ {
+		rec := doRequest(t, f.srv, http.MethodPut,
+			fmt.Sprintf("/api/v1/projects/%s/shared-dirs/artifacts/files/sub/race-%d.txt", f.project.ID, i),
+			ProjectWorkspaceWriteRequest{Content: "race"})
+		_ = rec // either outcome (200 into the real dir, or refused mid-swap) is acceptable
+	}
+	stop.Store(true)
+	<-done
+	_ = os.Remove(linkPath)
+
+	entries, err := os.ReadDir(victim)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "the victim directory must never receive a file, regardless of swap timing")
 }
 
 func TestSharedDirFiles_ListEmpty(t *testing.T) {

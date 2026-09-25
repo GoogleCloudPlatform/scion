@@ -20,6 +20,7 @@ import (
 	"os"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -197,6 +198,15 @@ func (s *Server) handleProjectSharedDirByName(w http.ResponseWriter, r *http.Req
 		case resolution.Path == "" || resolution.Path == "/":
 			slog.WarnContext(ctx, "resolved shared directory path is empty or root, skipping removal",
 				"project_id", projectID, "name", name, "path", resolution.Path)
+		case resolution.Backend == "nfs":
+			// NFS: remove the leaf via DeleteSharedDir, an fd-based walk
+			// (subPathRoot/projectID/shared-dirs/<name>) that refuses a
+			// symlinked structural component and touches only this one
+			// named leaf.
+			if removeErr := shareddirs.DeleteSharedDir(resolution.NFSHostBase, resolution.NFSSubPathRoot, project.ID, name); removeErr != nil {
+				slog.WarnContext(ctx, "failed to remove NFS shared directory",
+					"project_id", projectID, "name", name, "host_base", resolution.NFSHostBase, "error", removeErr)
+			}
 		default:
 			if removeErr := os.RemoveAll(resolution.Path); removeErr != nil {
 				slog.WarnContext(ctx, "failed to remove shared directory host path",

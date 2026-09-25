@@ -416,6 +416,15 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
+	// Phase 2 item 5: one, centralized call site for the shared_dir_storage
+	// startup summary, gated by sharedDirStorageStartupLogWanted so a
+	// hub-only process, a broker-only
+	// process, and a combined hub+broker process all log it exactly once
+	// (logSharedDirStorageStartupOnce's own sync.Once is what makes it
+	// "exactly once", not this condition).
+	if sharedDirStorageStartupLogWanted(cfg.RuntimeBroker.Enabled, enableHub) {
+		logSharedDirStorageStartupOnce()
+	}
 
 	// 13b. Re-check image status for all active harness configs now that
 	// the local image checker has been registered by startRuntimeBroker.
@@ -2424,6 +2433,74 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 	}
 
 	return webSrv, nil
+}
+
+// logSharedDirStorageStartup is the pure half of the Phase 2 item 5 startup
+// summary: given a resolved server.shared_dir_storage config, it warns
+// about any set-but-ignored NFS fields and logs exactly one
+// resolved-layout line, via logf so it's testable without a real logger. A
+// nil sdCfg (server.shared_dir_storage absent) logs nothing.
+func logSharedDirStorageStartup(sdCfg *config.V1SharedDirStorageConfig, logf func(format string, args ...interface{})) {
+	if ignored := sdCfg.IgnoredNFSFields(); len(ignored) > 0 {
+		logf("Warning: server.shared_dir_storage.nfs sets %s, which shared_dir_storage does not use (design deploy-config-explore §3.2.1)",
+			strings.Join(ignored, ", "))
+	}
+	if summary := sdCfg.ResolvedLayoutSummary(); summary != "" {
+		logf("server.shared_dir_storage resolved layout: %s", summary)
+	}
+}
+
+var logSharedDirStorageStartupGuard sync.Once
+
+// loadAndLogSharedDirStorageStartup is logSharedDirStorageStartupOnce's
+// impure half, factored out so a test can call it directly -- as many times
+// as it likes, with a captured logf -- without the once-per-process guard
+// making every call after the first a no-op. It loads global settings the
+// same env-free, global-only way the Start path does (config.LoadGlobalSettings,
+// never LoadEffectiveSettings, so this can never be influenced by a
+// project's own settings.yaml) and forwards to logSharedDirStorageStartup.
+//
+// A settings-load error here never fails startup, but if the file that
+// failed to load plausibly configured shared_dir_storage at all, that is
+// worth one warning line at startup -- the broker's Start path
+// and the hub's resolvers both fail closed on this same condition once a
+// request/agent-start actually needs it, so this is the heads-up an
+// operator sees before that happens.
+func loadAndLogSharedDirStorageStartup(logf func(format string, args ...interface{})) {
+	globalSettings, _, gErr := config.LoadGlobalSettings()
+	if gErr != nil {
+		if config.GlobalSettingsMentions("shared_dir_storage") {
+			logf("Warning: server.shared_dir_storage: global settings failed to load (%v); "+
+				"shared_dir_storage will not take effect until this is fixed", gErr)
+		}
+		return
+	}
+	if globalSettings == nil || globalSettings.Server == nil {
+		return
+	}
+	logSharedDirStorageStartup(globalSettings.Server.SharedDirStorage, logf)
+}
+
+// logSharedDirStorageStartupOnce calls loadAndLogSharedDirStorageStartup
+// exactly once per process, regardless of how many of the broker and
+// hub-only startup paths call it.
+func logSharedDirStorageStartupOnce() {
+	logSharedDirStorageStartupGuard.Do(func() {
+		loadAndLogSharedDirStorageStartup(log.Printf)
+	})
+}
+
+// sharedDirStorageStartupLogWanted reports whether this process should emit
+// the shared_dir_storage startup summary (Phase 2 item 5). NFS shared dirs
+// matter independently to a runtime broker (it creates and
+// mounts them) and to the hub (file browser, project deletion), so either
+// one being enabled is reason enough to want the summary logged -- a
+// hub-only process, a broker-only process, and a combined hub+broker
+// process must all log it exactly once (logSharedDirStorageStartupOnce's
+// sync.Once handles the "exactly once" part regardless of how many of these
+// end up true in the same process).
+func sharedDirStorageStartupLogWanted(brokerEnabled, hubEnabled bool) bool {
+	return brokerEnabled || hubEnabled
 }
 
 // startRuntimeBroker initializes and starts the runtime broker server.
