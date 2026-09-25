@@ -108,6 +108,14 @@ type AuthConfig struct {
 	Debug bool
 	// Logger is the subsystem logger for auth middleware (defaults to slog.Default())
 	Logger *slog.Logger
+	// PlatformAuthSA is the hub's configured platform/transport auth service
+	// account email. UnifiedAuthMiddleware's tokenTypeUser and tokenTypeUAT
+	// arms use it to reject an otherwise-valid user JWT or PAT issued for
+	// that identity — see isReservedPlatformIdentity's invariant comment.
+	// Wired from the same server-config value as Server.platformAuthSA (see
+	// server.go's New) so the two cannot diverge. Empty when no transport
+	// service account is configured, which leaves the check inert.
+	PlatformAuthSA string
 }
 
 // tokenType represents the type of authentication token.
@@ -410,6 +418,14 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						"invalid access token", nil)
 					return
 				}
+				// See isReservedPlatformIdentity: every credential-acceptance
+				// point checks this too, including a PAT issued under a
+				// reserved-identity user row.
+				if isReservedPlatformIdentity(scopedUser.Email(), cfg.PlatformAuthSA) {
+					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+						"invalid access token", nil)
+					return
+				}
 				ctx = context.WithValue(ctx, userContextKey{}, scopedUser)
 				ctx = contextWithIdentity(ctx, scopedUser)
 				ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(scopedUser))
@@ -445,6 +461,19 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 					}
 					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 						"invalid access token: "+err.Error(), nil)
+					return
+				}
+				// PRIMARY choke: see isReservedPlatformIdentity's invariant
+				// comment. This check applies to every self-contained user
+				// JWT that reaches this point, independent of which mint
+				// site issued it or how long ago — it is what revokes an
+				// already-issued, unexpired access token for the reserved
+				// identity. Agent, federation, and broker credentials never
+				// reach this arm (see UnifiedAuthMiddleware's earlier steps),
+				// so this cannot deny an agent or broker token.
+				if isReservedPlatformIdentity(claims.Email, cfg.PlatformAuthSA) {
+					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+						"invalid access token", nil)
 					return
 				}
 				// JWT tokens are self-contained; check current user status
@@ -603,6 +632,50 @@ func isUnauthenticatedEndpoint(path string) bool {
 		return true
 	}
 	return false
+}
+
+// isReservedPlatformIdentity reports whether email is the hub's configured
+// platform/transport auth service account. A reserved-platform-identity
+// credential is never minted, re-minted, accepted as valid at validation, or
+// reported valid — and the validation choke (below) also revokes an
+// already-issued, unexpired token, not just new ones.
+//
+// Invariant: every path that provisions a user, or mints, re-mints, or
+// validates a hub token, checks this. That covers, today:
+//   - Provisioning: Server.provisionUser (API proxy/IAP, OAuth, and session
+//     login), GoogleIdentityResolver.Resolve (GE exchange and the
+//     external-bearer path), WebServer.proxyAuthMiddleware's fresh-identity
+//     branch, and the web OAuth callback.
+//   - Re-minting from an existing credential: Server.handleAuthRefresh,
+//     WebServer.proxyAuthMiddleware's existing-session branch, and
+//     WebServer.sessionToBearerMiddleware (both its cookie-overflow mint and
+//     its refresh branches).
+//   - Validation (the choke that also revokes an already-issued token):
+//     UnifiedAuthMiddleware's tokenTypeUser arm (the primary choke — every
+//     self-contained hub-issued user JWT passes through it) and its
+//     tokenTypeUAT arm (PATs), and Server.handleAuthValidate.
+//
+// Intentionally NOT checked, because none of them can authenticate as this
+// identity or are gated some other way: devAuthMiddleware (mints a token
+// only for the fixed dev-user identity, never an external one),
+// handlers_test_login (gated behind --enable-test-login, never enabled in
+// production), and the a2a-bridge's synthetic service token (server.go,
+// an internal token that never carries an external identity's email).
+//
+// Stating the covered and excluded sites here makes the guard set auditable
+// by checking this list against the code, rather than by a reachability
+// argument for each new call site.
+//
+// Comparison trims surrounding whitespace and is case-insensitive on both
+// sides. Returns false whenever platformAuthSA is empty, so the check is
+// inert on hubs that do not configure a transport service account (the
+// common case).
+func isReservedPlatformIdentity(email, platformAuthSA string) bool {
+	platformAuthSA = strings.TrimSpace(platformAuthSA)
+	if platformAuthSA == "" {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(email), platformAuthSA)
 }
 
 // parseTrustedProxies parses a list of IP addresses and CIDR ranges.

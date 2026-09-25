@@ -23,6 +23,35 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
 
+// TestIsReservedPlatformIdentity covers the shared predicate that
+// provisionUser and GoogleIdentityResolver.Resolve both use to refuse the
+// hub's configured platform/transport auth service account: case/whitespace
+// normalization on both sides, and inertness when no SA is configured.
+func TestIsReservedPlatformIdentity(t *testing.T) {
+	const sa = "transport-sa@example.iam.gserviceaccount.com"
+
+	cases := []struct {
+		name           string
+		email          string
+		platformAuthSA string
+		want           bool
+	}{
+		{"exact match", sa, sa, true},
+		{"case-insensitive match", "Transport-SA@Example.IAM.GSERVICEACCOUNT.COM", sa, true},
+		{"whitespace trimmed on both sides", "  " + sa + "  ", " " + sa + " ", true},
+		{"different identity", "person@example.com", sa, false},
+		{"platform auth SA unconfigured", sa, "", false},
+		{"both empty", "", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isReservedPlatformIdentity(tc.email, tc.platformAuthSA); got != tc.want {
+				t.Errorf("isReservedPlatformIdentity(%q, %q) = %v, want %v", tc.email, tc.platformAuthSA, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestUnifiedAuthMiddleware_DevToken(t *testing.T) {
 	devToken := "scion_dev_test_token_12345678901234567890123456789012"
 

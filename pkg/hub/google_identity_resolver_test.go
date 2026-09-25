@@ -16,7 +16,11 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // TestGoogleIdentityResolver_Resolve_NilIdentity_ReturnsError covers a
@@ -45,5 +49,69 @@ func TestGoogleIdentityResolver_Resolve_NilIdentity_ReturnsError(t *testing.T) {
 	}
 	if user != nil {
 		t.Errorf("expected a nil user, got %+v", user)
+	}
+}
+
+// TestGoogleIdentityResolver_Resolve_PlatformAuthSA_Denied exercises the
+// check in Resolve directly, without going through the credential validator
+// or either of Resolve's two callers. For the GE exchange endpoint this
+// duplicates its existing service-account rejection (ge_exchange.go's Step
+// 1.5); for the external-bearer path, which admits a service-account
+// identity whose GCP project is on its allowed_gcp_projects list, this is
+// the check that applies (see TestExternalBearer_PlatformAuthSA_Denied for
+// that path end-to-end). This test drives Resolve with a hand-built
+// ValidatedGoogleIdentity to exercise the check on its own.
+func TestGoogleIdentityResolver_Resolve_PlatformAuthSA_Denied(t *testing.T) {
+	userStore := newFakeUserStore()
+	extStore := newMemExtIDStore()
+	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, nil)
+	const platformAuthSA = "transport-sa@example.iam.gserviceaccount.com"
+	resolver.SetPlatformAuthSA(platformAuthSA)
+
+	identity := &ValidatedGoogleIdentity{
+		Subject:          "111122223333",
+		Email:            platformAuthSA,
+		EmailVerified:    true,
+		Issuer:           googleIssuerHTTPS,
+		IsServiceAccount: true,
+		UpstreamExpiry:   time.Now().Add(time.Hour),
+	}
+
+	user, err := resolver.Resolve(context.Background(), identity, ResolvePolicy{PreAuthorized: true})
+	if !errors.Is(err, ErrAccessDenied) {
+		t.Fatalf("expected ErrAccessDenied, got %v", err)
+	}
+	if user != nil {
+		t.Errorf("expected a nil user, got %+v", user)
+	}
+
+	if _, lookupErr := userStore.GetUserByEmail(context.Background(), platformAuthSA); !errors.Is(lookupErr, store.ErrNotFound) {
+		t.Fatalf("expected no user row for the configured service account, lookup returned err=%v", lookupErr)
+	}
+}
+
+// TestGoogleIdentityResolver_Resolve_PlatformAuthSA_Unconfigured_Inert is a
+// regression check: with no platform auth SA configured (the default),
+// Resolve's normal provisioning path for a Google identity is unaffected.
+func TestGoogleIdentityResolver_Resolve_PlatformAuthSA_Unconfigured_Inert(t *testing.T) {
+	userStore := newFakeUserStore()
+	extStore := newMemExtIDStore()
+	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, nil)
+	// resolver.platformAuthSA intentionally left unset.
+
+	identity := &ValidatedGoogleIdentity{
+		Subject:        "user-sub-1",
+		Email:          "person@gmail.com",
+		EmailVerified:  true,
+		Issuer:         googleIssuerHTTPS,
+		UpstreamExpiry: time.Now().Add(time.Hour),
+	}
+
+	user, err := resolver.Resolve(context.Background(), identity, ResolvePolicy{})
+	if err != nil {
+		t.Fatalf("unexpected error with no platform auth SA configured: %v", err)
+	}
+	if user == nil || user.Email != "person@gmail.com" {
+		t.Fatalf("expected a provisioned user for person@gmail.com, got %+v", user)
 	}
 }

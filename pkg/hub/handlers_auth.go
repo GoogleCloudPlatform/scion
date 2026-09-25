@@ -428,6 +428,15 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// See isReservedPlatformIdentity: every path that provisions a user or
+	// mints/re-mints a hub token checks this, including an already-issued
+	// refresh token for the configured service account.
+	if isReservedPlatformIdentity(claims.Email, s.platformAuthSA) {
+		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+			"invalid refresh token", nil)
+		return
+	}
+
 	// Re-evaluate admin status on token refresh. The stored role is the source
 	// of truth for UI-granted promotions; admin_emails can only add to it.
 	//
@@ -520,6 +529,14 @@ func (s *Server) handleAuthValidate(w http.ResponseWriter, r *http.Request) {
 
 	claims, err := s.userTokenService.ValidateUserToken(req.Token)
 	if err != nil {
+		writeJSON(w, http.StatusOK, AuthValidateResponse{Valid: false})
+		return
+	}
+
+	// See isReservedPlatformIdentity: a token for the reserved identity must
+	// not be reported valid, matching the same token's rejection at the
+	// UnifiedAuthMiddleware choke point.
+	if isReservedPlatformIdentity(claims.Email, s.platformAuthSA) {
 		writeJSON(w, http.StatusOK, AuthValidateResponse{Valid: false})
 		return
 	}
@@ -1330,6 +1347,14 @@ var ErrUserSuspended = errors.New("user account is suspended")
 // authorized, or ErrUserSuspended when the user is suspended.
 // On success it also ensures hub-members group membership.
 func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*store.User, error) {
+	// The hub does not create or authenticate user accounts for its
+	// configured transport service account. Checked before authorization and
+	// before find-or-create so this covers both a brand-new identity and an
+	// already-existing user row for that email.
+	if isReservedPlatformIdentity(info.Email, s.platformAuthSA) {
+		return nil, ErrAccessDenied
+	}
+
 	// Authorization check
 	if !s.isUserAuthorized(ctx, info.Email) {
 		reason := "not_on_allow_list"

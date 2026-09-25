@@ -17,6 +17,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"testing"
@@ -379,5 +380,49 @@ func TestExternalBearer_ServiceAccountIDToken_SuspendedExistingUserByEmail_Forbi
 	}
 	if _, err := extStore.GetExternalIdentity(context.Background(), "google", googleCanonicalIssuer, saNumericSub); err == nil {
 		t.Error("expected no external identity binding to be created for a suspended user")
+	}
+}
+
+// externalBearerTestPlatformAuthSA is a realistic-shaped configured
+// transport service account email, matching the allowed_gcp_projects entry
+// used below (project "example"). Defined locally (rather than reusing the
+// identical constant in reserved_platform_identity_test.go) because that
+// file carries the !no_sqlite build tag and this one does not.
+const externalBearerTestPlatformAuthSA = "transport-sa@example.iam.gserviceaccount.com"
+
+// TestExternalBearer_PlatformAuthSA_Denied exercises the configured
+// transport service account end to end on the external-bearer path: a
+// service-account ID token is admitted under allowed_gcp_projects with
+// PreAuthorized=true (see
+// TestExternalBearer_ServiceAccountIDToken_ProjectListed_Authenticates
+// above), which skips the Hub sign-in policy entirely. This is the path
+// GoogleIdentityResolver.Resolve's isReservedPlatformIdentity check actually
+// protects — unlike the GE exchange endpoint, nothing upstream of Resolve
+// rejects a service-account credential here.
+func TestExternalBearer_PlatformAuthSA_Denied(t *testing.T) {
+	kp := newGCVTestKeyPair("test-kid-1")
+	endpoints := newSAJWKSEndpoints(kp)
+	defer endpoints.close()
+
+	userStore := newFakeUserStore()
+	extStore := newMemExtIDStore()
+	// authorize always allows: proves the denial comes from the
+	// platformAuthSA guard, not from the sign-in policy PreAuthorized skips.
+	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())
+	resolver.SetPlatformAuthSA(externalBearerTestPlatformAuthSA)
+	cfg := newExternalBearerConfigWithSA(t, newTestValidator(endpoints), resolver, []string{"example"})
+
+	claims := serviceAccountIDTokenClaims(externalBearerTestPlatformAuthSA)
+	token := signIDToken(kp, claims)
+
+	w, result := doExternalBearerRequest(cfg, token)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403: body=%s", w.Code, w.Body.String())
+	}
+	if result.reached {
+		t.Fatal("handler must not be reached for the configured service account")
+	}
+	if _, err := userStore.GetUserByEmail(context.Background(), externalBearerTestPlatformAuthSA); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expected no user row for the configured service account, lookup returned err=%v", err)
 	}
 }
