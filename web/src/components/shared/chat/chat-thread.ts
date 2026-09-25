@@ -92,6 +92,136 @@ const UNREAD_ANCHOR_MARGIN_PX = 16;
  */
 const UNREAD_ANCHOR_WINDOW_MS = 2000;
 
+/**
+ * Jump-to-message re-check (scrollend): pixel tolerance when deciding whether
+ * a jump target is still "in view" after the scroll settles. A late layout
+ * shift (image load, attachment height, late markdown) can move the target
+ * out from under a smooth `scrollIntoView`, since Chromium's smooth scroll
+ * targets the position computed when the scroll started.
+ */
+const JUMP_SCROLL_VIEW_TOLERANCE_PX = 24;
+
+/** Jump-to-message re-check: cap on corrective re-scrolls to avoid a loop. */
+const JUMP_SCROLL_MAX_RECHECKS = 2;
+
+/**
+ * Jump-to-message re-check: how long the fallback poll (older Safari, no
+ * `scrollend`) must see a stable `scrollTop` before treating the scroll as
+ * settled. This is a stability *window*, not the sampling interval — see
+ * `JUMP_SCROLL_SETTLE_POLL_INTERVAL_MS` for that.
+ */
+const JUMP_SCROLL_SETTLE_STABLE_MS = 150;
+
+/** Jump-to-message re-check: fallback poll's sampling interval. */
+const JUMP_SCROLL_SETTLE_POLL_INTERVAL_MS = 50;
+
+/**
+ * Jump-to-message re-check: how long the watch waits, with no `scroll` event
+ * and no `scrollend`, before concluding there's nothing left to watch for —
+ * either the scroll has genuinely gone idle after settling, or (screened by
+ * the pre-scroll check in `scrollToMessageById` for the common cases, but
+ * not every one — e.g. content still streaming in mid-jump) it never moved
+ * at all. Restarted on every `scroll` event, so a long smooth scroll, which
+ * fires `scroll` every frame, stays watched for however long it actually
+ * takes. A *fixed* deadline from arm time doesn't: Chromium's smooth-scroll
+ * duration grows with distance and exceeded a 1500ms fixed deadline on jumps
+ * beyond ~8000px, tearing the watcher down before `scrollend` and silently
+ * dropping the re-check on exactly the long jumps most exposed to the bug
+ * (deep search results, permalinks) (review R4). `scrollend` normally fires
+ * within a frame of the last `scroll`, well inside this window, so it
+ * doesn't delay the normal settle path.
+ */
+const JUMP_SCROLL_IDLE_TIMEOUT_MS = 300;
+
+/**
+ * Jump-to-message re-check: hard cap on the watch's total lifetime,
+ * regardless of `scroll`/`scrollend` activity. The idle timeout above is
+ * what actually bounds the normal cases; this is only a backstop against a
+ * scroller that never goes idle (e.g. a runaway continuous scroll), so it
+ * can be generous.
+ */
+const JUMP_SCROLL_HARD_CAP_MS = 5000;
+
+/**
+ * Jump-to-message re-check: keys that scroll the page even when focus is
+ * outside the scroll container — e.g. `document.activeElement` is `<body>`
+ * after clicking a message, yet Chromium still scrolls the last-clicked
+ * scroller on PageUp/PageDown. Filtered so unrelated typing (in a reply box,
+ * say) doesn't cancel the watch.
+ */
+const JUMP_SCROLL_CANCEL_KEYS = new Set([
+  'PageUp',
+  'PageDown',
+  'ArrowUp',
+  'ArrowDown',
+  'ArrowLeft',
+  'ArrowRight',
+  'Home',
+  'End',
+  ' ',
+]);
+
+/**
+ * Whether `targetRect` counts as "in view" within `containerRect`, allowing
+ * `JUMP_SCROLL_VIEW_TOLERANCE_PX` of slack. Full containment is sufficient
+ * but not necessary: a target taller than the viewport (a long agent reply)
+ * can never be fully contained, and `block: 'center'` deliberately puts its
+ * top above the viewport, so it also counts as in view once it overlaps the
+ * container's vertical midpoint — the point `center` alignment aims for.
+ */
+function isJumpTargetInView(containerRect: DOMRect, targetRect: DOMRect): boolean {
+  const contained =
+    targetRect.top >= containerRect.top - JUMP_SCROLL_VIEW_TOLERANCE_PX &&
+    targetRect.bottom <= containerRect.bottom + JUMP_SCROLL_VIEW_TOLERANCE_PX;
+  if (contained) return true;
+  const mid = (containerRect.top + containerRect.bottom) / 2;
+  return (
+    targetRect.top <= mid + JUMP_SCROLL_VIEW_TOLERANCE_PX &&
+    targetRect.bottom >= mid - JUMP_SCROLL_VIEW_TOLERANCE_PX
+  );
+}
+
+/**
+ * Whether scrolling `scrollEl` toward a target outside `containerRect` is
+ * clamped — i.e. cannot move further in the needed direction because the
+ * container is already scrolled to that end. `scrollIntoView` clamps to the
+ * scrollable range: a reply-jump to a message near the bottom while already
+ * pinned to the bottom, or a jump near the top while already at the top, has
+ * nowhere further to go, so it produces no scroll and no `scrollend`.
+ */
+function isJumpScrollClamped(
+  scrollEl: HTMLElement,
+  containerRect: DOMRect,
+  targetRect: DOMRect
+): boolean {
+  const targetAbove = targetRect.top < containerRect.top;
+  const targetBelow = targetRect.bottom > containerRect.bottom;
+  const atTop = scrollEl.scrollTop <= 0;
+  const atBottom =
+    scrollEl.scrollTop >=
+    scrollEl.scrollHeight - scrollEl.clientHeight - JUMP_SCROLL_VIEW_TOLERANCE_PX;
+  return (targetAbove && atTop) || (targetBelow && atBottom);
+}
+
+/**
+ * Whether `node` is (or is inside) an editable element — an input, textarea,
+ * select, or contenteditable — for the purpose of ignoring scroll-shaped
+ * keydowns (Space, arrows, ...) typed there as ordinary text input rather
+ * than a scroll gesture. Checked against `composedPath()[0]`, the real
+ * innermost element the event originated on, rather than `e.target`: at a
+ * document-level listener, `e.target` is retargeted to the nearest
+ * non-shadow ancestor, and Shoelace's `<sl-textarea>` (the composer) wraps
+ * its native `<textarea>` in shadow DOM, so `e.target` there is the
+ * `<sl-textarea>` host, not the editable element itself (review N3).
+ */
+function isEditableKeydownTarget(node: EventTarget | null): boolean {
+  if (!(node instanceof Element)) return false;
+  if (node.tagName === 'INPUT' || node.tagName === 'TEXTAREA' || node.tagName === 'SELECT') {
+    return true;
+  }
+  return node instanceof HTMLElement && node.isContentEditable;
+}
+
 /** Grouping window: consecutive messages from same sender within 5 min. */
 const GROUP_WINDOW_MS = 5 * 60 * 1000;
 
@@ -470,6 +600,13 @@ export class ScionChatThread extends LitElement {
    *  deactivation so a thread left before that first frame lands can't have
    *  it fire against a superseded or torn-down anchor. */
   private _unreadAnchorInitialRaf: number | null = null;
+
+  /**
+   * Cleanup for the in-flight jump-to-message scrollend re-check, if any.
+   * Set by `watchJumpScrollSettle()`; calling it tears down whatever
+   * listener/timer is pending and is idempotent.
+   */
+  private _jumpScrollCleanup: (() => void) | null = null;
 
   /** Bound listener for v2 SSE chat-message events via stateManager. */
   private _v2MessageHandler = this.handleV2ChatMessage.bind(this);
@@ -1016,6 +1153,11 @@ export class ScionChatThread extends LitElement {
 
   /** Tear down v2 state so a fresh load can happen. */
   private resetV2State(): void {
+    // Cancel any pending jump-to-message scrollend re-check — it belongs to
+    // the thread we're leaving, and a late correction must not fire against
+    // the new one.
+    this.cancelJumpScrollWatch();
+
     // Clear initial watermark timer to prevent it from firing against wrong thread
     if (this._initialWatermarkTimer) {
       clearTimeout(this._initialWatermarkTimer);
@@ -1080,6 +1222,8 @@ export class ScionChatThread extends LitElement {
     super.disconnectedCallback();
     this.stopStream();
     this.deactivateUnreadAnchor();
+    // Cancel any pending jump-to-message scrollend re-check and its listeners/timers.
+    this.cancelJumpScrollWatch();
     // Clean up v2 SSE listeners
     stateManager.removeEventListener('connected', this._sseReconnectHandler);
     stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
@@ -2490,6 +2634,10 @@ export class ScionChatThread extends LitElement {
   }
 
   private scrollToBottom(): void {
+    // A bottom-anchor scroll (autoscroll on new message, "Jump to latest")
+    // supersedes any pending jump-to-message re-check — don't let a stale
+    // correction yank the view back up once we've moved on.
+    this.cancelJumpScrollWatch();
     const scrollEl = this.shadowRoot?.querySelector('.messages-scroll') as HTMLElement | null;
     if (scrollEl) {
       scrollEl.scrollTop = scrollEl.scrollHeight;
@@ -2570,7 +2718,7 @@ export class ScionChatThread extends LitElement {
     // to the divider (R1).
     this.deactivateUnreadAnchor();
     await this.updateComplete;
-    const scrollEl = this.shadowRoot?.querySelector('.messages-scroll');
+    const scrollEl = this.shadowRoot?.querySelector('.messages-scroll') as HTMLElement | null;
     if (!scrollEl) return;
 
     let msgEl = this.shadowRoot?.getElementById(`msg-${messageId}`) ?? null;
@@ -2581,11 +2729,243 @@ export class ScionChatThread extends LitElement {
     }
     if (!msgEl) return;
 
-    msgEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const align: ScrollLogicalPosition = 'center';
+    const containerRect = scrollEl.getBoundingClientRect();
+    const targetRect = msgEl.getBoundingClientRect();
+    // A jump that can't move the scroll position — the target is already in
+    // view, or reaching it is clamped at an end of the thread (the common
+    // reply-jump-while-pinned-to-bottom case) — never fires `scrollend`.
+    // Arming the watcher anyway would leave it pending until the user's next
+    // unrelated scroll, which it would then wrongly "correct" (review R1).
+    const willScroll =
+      !isJumpTargetInView(containerRect, targetRect) &&
+      !isJumpScrollClamped(scrollEl, containerRect, targetRect);
+
+    msgEl.scrollIntoView({ behavior: 'smooth', block: align });
+    if (willScroll) {
+      // A large layout shift mid-scroll (image load, late markdown,
+      // attachment height) can leave the target off screen because the
+      // smooth scroll's destination was computed when it started. Re-check
+      // once it settles and correct if needed (#1749 review).
+      this.watchJumpScrollSettle(scrollEl, messageId, align);
+    } else {
+      // Nothing to watch, but a previous jump's watcher — now superseded —
+      // must still be torn down.
+      this.cancelJumpScrollWatch();
+    }
     if (highlight) {
       msgEl.classList.add('permalink-highlight');
       setTimeout(() => msgEl?.classList.remove('permalink-highlight'), 2000);
     }
+  }
+
+  /** Cancel any pending jump-to-message scrollend re-check. Idempotent. */
+  private cancelJumpScrollWatch(): void {
+    const cleanup = this._jumpScrollCleanup;
+    this._jumpScrollCleanup = null;
+    cleanup?.();
+  }
+
+  /**
+   * Whether the `scrollend` event is supported in the current runtime.
+   * Feature-detected on `window` (a single browser-wide capability, not a
+   * per-element one) rather than on the scroll container: `onscrollend` is a
+   * statically-known property of `HTMLElement` in our TS lib target, so
+   * branching on `'onscrollend' in scrollEl` and then continuing to use
+   * `scrollEl` would let TS narrow the fallback branch to `never`.
+   *
+   * A method (not an inlined check) so tests can stub the older-Safari path
+   * without needing to fight jsdom/happy-dom's global handler properties.
+   */
+  private supportsScrollEndEvent(): boolean {
+    return typeof window !== 'undefined' && 'onscrollend' in window;
+  }
+
+  /**
+   * After starting a smooth jump-to-message scroll, wait for it to settle and
+   * verify the target actually landed in view. If a mid-scroll layout shift
+   * moved it, re-issue the scroll and check again, capped at
+   * `JUMP_SCROLL_MAX_RECHECKS` so a target that can never settle (e.g. content
+   * still streaming in) doesn't loop forever.
+   *
+   * "Settled" is detected via the `scrollend` event where supported. Older
+   * Safari has no `scrollend`, so this falls back to polling `scrollTop` for
+   * `JUMP_SCROLL_SETTLE_STABLE_MS` of no movement. Both paths, and the whole
+   * watch, are additionally bounded by `JUMP_SCROLL_IDLE_TIMEOUT_MS` of
+   * inactivity (no `scroll` event and no `scrollend`), restarted on every
+   * `scroll`, plus a `JUMP_SCROLL_HARD_CAP_MS` backstop — a scroll that never
+   * settles, or never scrolls at all, must not leave the watcher armed
+   * indefinitely (review R1, R4).
+   *
+   * Cancelled by any subsequent manual scroll (wheel, touch, a scrollbar
+   * grab/middle-click via `pointerdown`, or a scroll-relevant `keydown`
+   * anywhere in the document — not just on the scroll container, since focus
+   * often isn't there, and ignoring the same keys typed into an editable
+   * field like the composer, review N3), another jump (scrollToMessageById
+   * re-entry, or scrollToBottom for "Jump to latest" / autoscroll), or
+   * thread switch/disconnect — never yanks the user back to a target they've
+   * since scrolled away from on purpose.
+   */
+  private watchJumpScrollSettle(
+    scrollEl: HTMLElement,
+    messageId: string,
+    align: ScrollLogicalPosition
+  ): void {
+    // Only one jump's re-check is ever pending at a time.
+    this.cancelJumpScrollWatch();
+
+    let recheckCount = 0;
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
+    let scrollEndListener: (() => void) | null = null;
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    let hardCapTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const onManualScroll = (): void => cleanup();
+    const manualScrollEvents: Array<keyof HTMLElementEventMap> = [
+      'wheel',
+      'touchstart',
+      'pointerdown',
+    ];
+    const onManualKeydown = (e: KeyboardEvent): void => {
+      if (!JUMP_SCROLL_CANCEL_KEYS.has(e.key)) return;
+      // Space and the arrow keys are ordinary typing in the composer (or any
+      // other editable field), not a scroll gesture there — even though
+      // they're in JUMP_SCROLL_CANCEL_KEYS for the document-wide case (review
+      // N3).
+      if (isEditableKeydownTarget(e.composedPath()[0])) return;
+      cleanup();
+    };
+    // Not a cancel signal — Chromium fires `scroll` every frame of the
+    // programmatic smooth scroll too — but activity all the same, so it
+    // pushes the idle timeout back out (review R4).
+    const onScrollActivity = (): void => scheduleIdleTimeout();
+
+    const removeManualScrollListeners = (): void => {
+      for (const type of manualScrollEvents) {
+        scrollEl.removeEventListener(type, onManualScroll);
+      }
+      scrollEl.removeEventListener('scroll', onScrollActivity);
+      document.removeEventListener('keydown', onManualKeydown, { capture: true });
+    };
+
+    const cleanup = (): void => {
+      if (this._jumpScrollCleanup !== cleanup) return;
+      this._jumpScrollCleanup = null;
+      removeManualScrollListeners();
+      if (scrollEndListener) {
+        scrollEl.removeEventListener('scrollend', scrollEndListener);
+        scrollEndListener = null;
+      }
+      if (pollTimer !== null) {
+        clearTimeout(pollTimer);
+        pollTimer = null;
+      }
+      if (idleTimer !== null) {
+        clearTimeout(idleTimer);
+        idleTimer = null;
+      }
+      if (hardCapTimer !== null) {
+        clearTimeout(hardCapTimer);
+        hardCapTimer = null;
+      }
+    };
+    this._jumpScrollCleanup = cleanup;
+
+    // Idle timeout (review R4): restarted on every `scroll` event, so a long
+    // smooth scroll (which fires `scroll` every frame) stays watched for
+    // however long it actually takes, instead of being torn down by a fixed
+    // deadline before Chromium's `scrollend` fires. If no `scroll` and no
+    // `scrollend` arrive within the window — the jump produced no scroll to
+    // begin with, e.g. missed by the pre-scroll check — it fires and cleans
+    // up, faster than the old fixed deadline did.
+    const scheduleIdleTimeout = (): void => {
+      if (idleTimer !== null) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => cleanup(), JUMP_SCROLL_IDLE_TIMEOUT_MS);
+    };
+
+    for (const type of manualScrollEvents) {
+      scrollEl.addEventListener(type, onManualScroll, { passive: true });
+    }
+    scrollEl.addEventListener('scroll', onScrollActivity, { passive: true });
+    // Captured on `document`, not `scrollEl`: after clicking a message,
+    // focus commonly lands on `<body>`, so a PageUp/PageDown/arrow `keydown`
+    // never reaches scrollEl even though Chromium still scrolls it.
+    document.addEventListener('keydown', onManualKeydown, { capture: true });
+
+    // Hard cap (review R4): a generous backstop against a scroller that
+    // never goes idle, so `scroll` events alone can't keep this watch armed
+    // forever. The idle timeout above is what bounds the normal cases.
+    hardCapTimer = setTimeout(() => cleanup(), JUMP_SCROLL_HARD_CAP_MS);
+
+    const checkAndMaybeRescroll = (): void => {
+      if (this._jumpScrollCleanup !== cleanup) return; // already cancelled
+      const targetEl = this.shadowRoot?.getElementById(`msg-${messageId}`) ?? null;
+      if (!targetEl) {
+        cleanup();
+        return;
+      }
+      const containerRect = scrollEl.getBoundingClientRect();
+      const targetRect = targetEl.getBoundingClientRect();
+      if (isJumpTargetInView(containerRect, targetRect)) {
+        cleanup();
+        return;
+      }
+      recheckCount++;
+      if (recheckCount > JUMP_SCROLL_MAX_RECHECKS) {
+        cleanup();
+        return;
+      }
+      // Instant for the correction: it's already off screen, and stacking
+      // another smooth animation only widens the window for a second shift.
+      targetEl.scrollIntoView({ behavior: 'auto', block: align });
+      scheduleSettleWait();
+    };
+
+    const scheduleSettleWait = (): void => {
+      // Restart the idle window for this leg of the wait (the initial scroll,
+      // or a re-check's corrective one): a fresh scrollIntoView here may or
+      // may not itself produce `scroll` events, so don't rely solely on a
+      // stale timer from an earlier leg.
+      scheduleIdleTimeout();
+      if (this.supportsScrollEndEvent()) {
+        // Removed manually (also on cleanup) rather than `{ once: true }`:
+        // cleanup() needs to be able to remove a still-pending listener
+        // either way, so `once` would just be a second, redundant mechanism.
+        // Bound to a local `const` (rather than reading back the mutable
+        // `scrollEndListener` field) so TS narrows it to `() => void` here
+        // without an `as EventListener` assertion.
+        const listener = (): void => {
+          scrollEl.removeEventListener('scrollend', listener);
+          scrollEndListener = null;
+          checkAndMaybeRescroll();
+        };
+        scrollEndListener = listener;
+        scrollEl.addEventListener('scrollend', listener);
+        return;
+      }
+      // Fallback: poll scrollTop until it's stable for
+      // JUMP_SCROLL_SETTLE_STABLE_MS; the idle timeout and hard cap above
+      // still bound this path too.
+      let lastTop = scrollEl.scrollTop;
+      let stableSince = Date.now();
+      const poll = (): void => {
+        const now = Date.now();
+        const currentTop = scrollEl.scrollTop;
+        if (currentTop !== lastTop) {
+          lastTop = currentTop;
+          stableSince = now;
+        }
+        if (now - stableSince >= JUMP_SCROLL_SETTLE_STABLE_MS) {
+          pollTimer = null;
+          checkAndMaybeRescroll();
+          return;
+        }
+        pollTimer = setTimeout(poll, JUMP_SCROLL_SETTLE_POLL_INTERVAL_MS);
+      };
+      pollTimer = setTimeout(poll, JUMP_SCROLL_SETTLE_POLL_INTERVAL_MS);
+    };
+
+    scheduleSettleWait();
   }
 
   private async fetchAroundMessage(messageId: string): Promise<void> {
