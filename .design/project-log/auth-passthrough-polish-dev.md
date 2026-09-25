@@ -741,3 +741,87 @@ relay to ptone, not "fixed."
 - Hygiene: `git log a53175c23..HEAD --format=%B | /usr/bin/grep -nE '(^|[^/A-Za-z])#[0-9]+'` — empty.
   `git diff a53175c23 HEAD | /usr/bin/grep -nE '^\+.*(^|[^/A-Za-z0-9])#[0-9]{3,}'` — empty. Perl NBSP check over every file
   changed since `a53175c23` — empty.
+
+## Upstream rebase 1 (GoogleCloudPlatform/scion#1880 not mergeable — rebase onto the new upstream main)
+
+Trigger: upstream main moved `a53175c23` → `4726bec5e` (13 commits) while `GoogleCloudPlatform/scion#1880` was in flight, and `git merge-tree` showed
+`GoogleCloudPlatform/scion#1880` no longer mergeable. Spec: `upstream-1880-rebase-r1.md` (lead) and `briefs/ap-polish-dev-rebase-r1.md` (ap-em, more
+detailed, followed exactly). Pre-rebase head: `b1250499d` (upstream round 1's final head). Post-rebase-and-tests head:
+`1a2ee7168`. **Not pushed yet** — held pending ap-em's "PUSH REBASE" signal, since reviewer `ap-up1-rev` was still testing
+`b1250499d` when this rebase began. All work below is local only.
+
+### Rebase
+
+`git fetch https://github.com/GoogleCloudPlatform/scion.git main:upstream-main` resolved to `4726bec5e1a40c4adb2925e49ed5f07d705ba971`,
+matching the plan. `git rebase upstream-main` hit exactly the one predicted conflict, in `pkg/hub/identity.go`'s `AuthType`
+const block: upstream's `AuthTypeSignedURL` (from `GoogleCloudPlatform/scion#1874`) and this branch's `AuthTypeExternalBearer` landed on the same
+lines. It surfaced on commit 3 of 115 (`9431f8bf1`, this branch's earliest commit touching `identity.go`) because that is
+where `AuthTypeExternalBearer` was first introduced; every later commit in the range replays cleanly once that one conflict
+is resolved. Resolved by keeping both constants (order: existing six, then `AuthTypeSignedURL`, then
+`AuthTypeExternalBearer`, matching each one's original comment), then `gofmt -w`. `GIT_EDITOR=true git rebase --continue`
+completed the remaining 112 commits with no further conflicts.
+
+- Commit count: 115 before (`git log a53175c23..b1250499d --oneline`), 115 after the rebase itself
+  (`git log upstream-main..<rebased-head> --oneline`) — no drops, no empty commits. Saved:
+  `rebase-r1/commits-before.txt`, `rebase-r1/commits-after.txt` (the latter regenerated after the amend below, so it
+  reflects the final 116-commit head — see next section).
+- `git range-diff a53175c23..b1250499d upstream-main..HEAD` (saved: `rebase-r1/range-diff.txt`): 114 of 115 commits show
+  `=` (byte-identical patch); exactly one shows `!` — commit 3, the `identity.go` resolution, whose only content change is
+  keeping both const lines instead of one.
+
+### (a)-(c) verification, with new tests added on top of the rebase
+
+Two new tests were added in one commit on top of the rebased branch (originally `9f16973ba`, amended once — see below — to
+`1a2ee7168`), both mutation-checked:
+
+| Item | Verification | Test | Mutation-check |
+|---|---|---|---|
+| (a) signed-url never reaches serveExternalBearer | `auth.go`'s `UnifiedAuthMiddleware`: Step 3c (`isSignedSkillFileRequest`) only runs inside the `token == ""` branch of Step 3, and `serveExternalBearer` is only called from within Step 4 (the `else` branch) — structurally unreachable from a credential-less request. Confirmed by reading the control flow directly, then pinned with a test. | `TestSignedSkillFileURL_NeverReachesExternalBearer` (new file `auth_signedurl_externalbearer_test.go`): wires a fully-configured external-bearer path (non-nil `GoogleValidator`, `GoogleResolver`, Google trust) behind `UnifiedAuthMiddleware`, sends a request shaped like a signed skill-file capability URL with no `Authorization` header, and asserts `AuthTypeSignedURL` was set, the next handler was reached, the Google validator was called 0 times, and the external-bearer metrics recorded 0 calls. | Temporarily made `extractBearerToken` always return a non-empty forced token (simulating a future bug that routes a credential-less request into Step 4 anyway): the test failed on all three assertions (authType became `external-bearer`, validator called once, one metric call recorded). Reverted; test passes again. |
+| (b) no authz bypass for Google-bearer principals | Upstream's `GoogleCloudPlatform/scion#1882` project-workspace authz gate runs per-request regardless of `AuthType`; nothing in this branch's `serveExternalBearer`/`GoogleIdentityResolver` sets any context value the gate treats specially. Verified by direct comparison rather than by reading code alone. | `TestProjectWorkspaceAuthz_ExternalBearerSameDecisionAsHubToken` (new file `project_workspace_externalbearer_authz_test.go`, `!no_sqlite`): binds a member (project owner) and a non-member to Google identities via a pre-existing external-identity binding (bypassing the resolver's email-domain bootstrap policy, which is a separate concern from the authz decision under test), then for each identity issues the *same* workspace-file request once via a normal Hub token and once via a Google bearer token, asserting the two responses carry the same status code (403 non-member, 200 member) and that the non-member response never leaks workspace content. | Swapped which identity backed the Google-bearer call in the non-member subtest (used `aliceIdentity` where `bobIdentity` was expected): the subtest failed (both status-equality and the literal 403 assertion), proving the test is sensitive to which identity is presented, not vacuously passing. Reverted; both subtests pass again. |
+| (c) external-bearer 401 golden bytes | Re-ran the existing golden test unmodified at the rebased head. | `TestExternalBearer_NoTrustProductionShape_Golden401` — passes, byte-identical, no test change needed. | n/a (pre-existing test, not touched) |
+
+### Commit-message hygiene fix (amend, unpushed commit only)
+
+The first version of the (a)/(b)/(c) test commit (`9f16973ba`) used unqualified upstream PR numbers in its commit message and in one
+test's doc comment, referring to the two upstream PRs by number without qualifying them — a violation of the no-bare-`#NNN`
+rule for upstream-bound text, caught by this round's own hygiene grep before anything was pushed. Since `9f16973ba` had not
+been pushed anywhere (verified: `origin/scion/auth-passthrough` was still at `b1250499d`, and no other branch or remote
+referenced it), it was corrected with `git commit --amend` rather than a follow-up fix commit — the same content, with both
+bare references reworded to plain feature descriptions ("the skill-file capability URL feature", "the project-workspace
+authorization gate"). New SHA: `1a2ee7168`. Both hygiene greps below are clean against the amended head.
+
+### Gates (rebased + tested head `1a2ee7168`)
+
+- `go build ./...` — clean.
+- `make lint` (`go vet -tags no_sqlite ./...`) — clean.
+- `gofmt -l pkg cmd extras` — empty.
+- `make check-authorization-catalog check-authz-guards check-custom` — all pass (`check-authorization-catalog: all checks
+  pass`, `check-authz-guards: analysed 9f16973ba, no violations` — run before the amend, and the amend touched only a test
+  doc comment and commit message, not any code the guard scans — `check-conversation-upsert-guard: no violations`,
+  `check-security-marker-gates: all gates pass`).
+- `GOGC=40 golangci-lint run --new-from-rev=upstream-main --concurrency=1 ./pkg/hub/... ./pkg/config/...` — 0 issues.
+- `go test -tags no_sqlite -count=1 ./pkg/hub/... ./pkg/config/...` — all packages pass. `go test -count=1 ./pkg/config/...`
+  (sqlite-enabled) — all packages pass.
+- `extras/scion-a2a-bridge`: `go build ./...` and `go test -count=1 ./...` — all packages pass.
+- Full `pkg/hub` run, `go test -count=1 -timeout 45m ./pkg/hub/...`, compared at two revisions:
+  - Rebased head (`9f16973ba`, before the cosmetic amend — the amend changed no `pkg/hub` source or test behaviour): 681s,
+    exactly the four documented baseline failures (`TestDEF164_AtAgentSlug_DeliversToAgent`,
+    `TestDEF164_AtAgentSlug_DMConversationCreated`, `TestDEF152_AgentToAgentDM_DeliversViaOutbound`,
+    `TestCreateTemplateV2_ScopeIDInjectionBlocked`) and nothing else. Full output: `rebase-r1/full-pkg-hub-rebased-9f16973ba.log`.
+  - Pure upstream-main tip (`4726bec5e`, via a `/tmp` worktree, removed afterward): 633s, the identical four failures (only
+    per-test timings differ) and nothing else. Full output: `rebase-r1/full-pkg-hub-upstream-4726bec5e.log`. Diff of the two
+    `--- FAIL` line sets: `rebase-r1/hub-baseline-diff.txt` (test names identical; only durations differ).
+  - Conclusion: upstream `4726bec5e` did not change the baseline failure set from `a53175c23`'s, and this branch's rebase
+    introduces no new `pkg/hub` failure.
+- Hygiene (base `upstream-main`, at the final amended head `1a2ee7168`):
+  `git log upstream-main..HEAD --format=%B | /usr/bin/grep -nE '(^|[^/A-Za-z])#[0-9]+'` — empty.
+  `git diff upstream-main HEAD | /usr/bin/grep -nE '^\+.*(^|[^/A-Za-z0-9])#[0-9]{3,}'` — empty. Perl NBSP check over every
+  file changed since `upstream-main` — empty.
+
+All evidence for this section (commit lists, range-diff, both full `pkg/hub` run logs, the baseline diff) is saved under
+`/scion-volumes/scratchpad/projects/auth-passthrough/rebase-r1/`.
+
+**Not yet pushed.** Per the brief, this branch stays local until `ap-em` sends "PUSH REBASE" (reviewer `ap-up1-rev` was
+still testing `b1250499d` when this rebase began). When that signal arrives, push with
+`git push --force-with-lease=scion/auth-passthrough:b1250499d origin HEAD:scion/auth-passthrough`, confirm the remote head
+with `git ls-remote origin scion/auth-passthrough`, and report back.
