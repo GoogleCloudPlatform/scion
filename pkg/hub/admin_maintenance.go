@@ -141,9 +141,11 @@ func (s *Server) executeMigration(w http.ResponseWriter, r *http.Request, key st
 		return
 	}
 
-	// Prevent re-running completed migrations (use CLI --force for that).
+	// Prevent re-running completed migrations. There is no CLI flag that
+	// re-runs a completed migration through this endpoint; the message must
+	// not claim one exists.
 	if op.Status == store.MaintenanceStatusCompleted {
-		writeError(w, http.StatusConflict, ErrCodeConflict, "Migration already completed; use CLI --force to re-run", nil)
+		writeError(w, http.StatusConflict, ErrCodeConflict, "Migration already completed", nil)
 		return
 	}
 
