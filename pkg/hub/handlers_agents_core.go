@@ -2361,7 +2361,7 @@ func (s *Server) writeAgentGetResponse(w http.ResponseWriter, r *http.Request, a
 		}
 	}
 
-	resp.Agent.AppliedConfig = redactAppliedConfigEnvForResponse(resp.Agent.AppliedConfig, capabilityAllows(resp.Cap, ActionAttach))
+	resp.AppliedConfig = redactAppliedConfigEnvForResponse(resp.AppliedConfig, capabilityAllows(resp.Cap, ActionAttach))
 
 	writeJSON(w, http.StatusOK, resp)
 }
