@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -25,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 )
 
@@ -236,6 +238,71 @@ func TestDockerRuntime_List_StopsRetryingWhenContextDone(t *testing.T) {
 	// worth of full backoff would take, to confirm we didn't keep retrying.
 	if got := readCounter(t, counterFile); got >= dockerListMaxAttempts {
 		t.Fatalf("expected fewer than %d invocations once context is done, got %d", dockerListMaxAttempts, got)
+	}
+}
+
+// TestDockerRuntime_List_CallerCancelDoesNotAbortOthers guards against
+// List's singleflight group running its shared `docker ps` exec under
+// whichever caller's context happened to start it: if that caller cancels,
+// every other caller collapsed into the same call must still get the
+// result rather than an error caused by someone else's cancellation.
+func TestDockerRuntime_List_CallerCancelDoesNotAbortOthers(t *testing.T) {
+	tmpDir := t.TempDir()
+	mockDocker := filepath.Join(tmpDir, "mock-docker")
+
+	// Sleep long enough that both callers are guaranteed to have joined the
+	// same singleflight call before either the cancellation or the exec
+	// completes.
+	script := `#!/bin/sh
+sleep 0.3
+echo '{"ID":"abc123","Names":"proj--agent1","Status":"Up 5 minutes","Image":"scion-claude:latest","Labels":"scion.name=agent1"}'
+`
+	if err := os.WriteFile(mockDocker, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock docker: %v", err)
+	}
+
+	rt := &DockerRuntime{Command: mockDocker}
+
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	var cancelledErr error
+	go func() {
+		defer wg.Done()
+		_, cancelledErr = rt.List(cancelledCtx, nil)
+	}()
+
+	var survivorErr error
+	var survivorAgents []api.AgentInfo
+	go func() {
+		defer wg.Done()
+		// Give the first goroutine a head start so it's the one that starts
+		// the singleflight call, then join before it resolves.
+		time.Sleep(20 * time.Millisecond)
+		survivorAgents, survivorErr = rt.List(context.Background(), nil)
+	}()
+
+	// Cancel well before the mock's 0.3s sleep elapses, but after both
+	// callers have joined the shared call.
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	wg.Wait()
+
+	if cancelledErr == nil {
+		t.Fatal("expected the cancelled caller to receive an error")
+	}
+	if !errors.Is(cancelledErr, context.Canceled) {
+		t.Fatalf("expected cancelled caller's error to wrap context.Canceled, got: %v", cancelledErr)
+	}
+
+	if survivorErr != nil {
+		t.Fatalf("expected the other caller to succeed despite the first caller's cancellation, got: %v", survivorErr)
+	}
+	if len(survivorAgents) != 1 || survivorAgents[0].Name != "agent1" {
+		t.Fatalf("unexpected agents from surviving caller: %+v", survivorAgents)
 	}
 }
 

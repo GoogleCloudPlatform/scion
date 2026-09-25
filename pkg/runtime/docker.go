@@ -150,16 +150,37 @@ const (
 	// concurrent callers retrying after the same failure don't all land on
 	// the daemon at once.
 	dockerListJitter = 0.2
+	// dockerListGroupTimeout bounds the detached context the singleflight
+	// group's shared exec runs under (see List below). It comfortably covers
+	// dockerListMaxAttempts worth of retries and backoff plus exec time, so a
+	// slow-but-successful `docker ps` isn't cut off before every joined
+	// caller would have given up on their own.
+	dockerListGroupTimeout = 10 * time.Second
 )
 
 func (r *DockerRuntime) List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
-	v, err, _ := r.listGroup.Do("ps", func() (any, error) {
-		return r.execListWithRetry(ctx)
+	// Use DoChan rather than Do: Do would run the shared exec under
+	// whichever caller's ctx happens to start the call, so that caller
+	// cancelling would abort docker ps for every other caller collapsed into
+	// it. Instead the shared exec runs on its own detached-but-bounded
+	// context, and each caller selects between the shared result and its own
+	// ctx.Done().
+	resultCh := r.listGroup.DoChan("ps", func() (any, error) {
+		groupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dockerListGroupTimeout)
+		defer cancel()
+		return r.execListWithRetry(groupCtx)
 	})
-	if err != nil {
-		return nil, err
+
+	var out []byte
+	select {
+	case res := <-resultCh:
+		if res.Err != nil {
+			return nil, res.Err
+		}
+		out = res.Val.([]byte)
+	case <-ctx.Done():
+		return nil, fmt.Errorf("docker ps failed: %w", ctx.Err())
 	}
-	out := v.([]byte)
 
 	var agents []api.AgentInfo
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")

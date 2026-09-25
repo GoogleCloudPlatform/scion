@@ -116,6 +116,12 @@ func (c *PTYClient) Connect(ctx context.Context) error {
 
 	conn, resp, err := dialer.DialContext(dialCtx, wsURL, headers)
 	if err != nil {
+		// gorilla/websocket returns a non-nil resp (with an unread body) on a
+		// failed handshake so callers can inspect the status/body. Close it
+		// once attachFailureDetail has had a chance to read it, or it leaks.
+		if resp != nil && resp.Body != nil {
+			defer func() { _ = resp.Body.Close() }()
+		}
 		if dialCtx.Err() == context.DeadlineExceeded {
 			return fmt.Errorf("connection timed out after %v", connectTimeout)
 		}
