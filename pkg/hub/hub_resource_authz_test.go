@@ -264,3 +264,121 @@ func TestHarnessConfigRouteAction(t *testing.T) {
 		assert.Equal(t, c.want, harnessConfigRouteAction(c.action, c.method), "%s %s", c.method, c.action)
 	}
 }
+
+// --- Project GitHub settings ----------------------------------------------
+
+// newGitHubBoundProject binds victim to a GitHub installation with explicit
+// token permissions and git identity, and registers a second installation an
+// outsider might try to rebind to. It returns the second installation ID.
+func newGitHubBoundProject(t *testing.T, s store.Store, victim *store.Project) int64 {
+	t.Helper()
+	ctx := context.Background()
+	for _, id := range []int64{7001, 7002} {
+		require.NoError(t, s.CreateGitHubInstallation(ctx, &store.GitHubInstallation{
+			InstallationID: id, AccountLogin: "acct", AccountType: "Organization",
+			AppID: 42, Status: store.GitHubInstallationStatusActive,
+		}))
+	}
+	p, err := s.GetProject(ctx, victim.ID)
+	require.NoError(t, err)
+	inst := int64(7001)
+	p.GitHubInstallationID = &inst
+	p.GitHubPermissions = &store.GitHubTokenPermissions{Contents: "read", Metadata: "read"}
+	p.GitIdentity = &store.GitIdentityConfig{Mode: "bot"}
+	require.NoError(t, s.UpdateProject(ctx, p))
+	return 7002
+}
+
+func assertGitHubSettingsUnchanged(t *testing.T, s store.Store, projectID string) {
+	t.Helper()
+	p, err := s.GetProject(context.Background(), projectID)
+	require.NoError(t, err)
+	require.NotNil(t, p.GitHubInstallationID, "installation must remain bound")
+	assert.Equal(t, int64(7001), *p.GitHubInstallationID, "installation must be unchanged")
+	require.NotNil(t, p.GitHubPermissions, "permissions must remain set")
+	assert.Equal(t, "read", p.GitHubPermissions.Contents, "permissions must be unchanged")
+	require.NotNil(t, p.GitIdentity, "git identity must remain set")
+	assert.Equal(t, "bot", p.GitIdentity.Mode, "git identity must be unchanged")
+}
+
+func TestProjectGitHubSettingsAuthz_OutsidersDenied(t *testing.T) {
+	srv, s, alice, bob, victim := setupTemplateAuthzTest(t)
+	dave := newOtherProjectMember(t, srv, s, alice, "gh-other")
+	otherInst := newGitHubBoundProject(t, s, victim)
+	base := "/api/v1/projects/" + victim.ID
+
+	writes := []struct {
+		name, method, path string
+		body               interface{}
+	}{
+		{"rebind installation", http.MethodPut, "/github-installation", map[string]int64{"installation_id": otherInst}},
+		{"unbind installation", http.MethodDelete, "/github-installation", nil},
+		{"check status", http.MethodPost, "/github-status", nil},
+		{"raise permissions", http.MethodPut, "/github-permissions", map[string]string{"contents": "write", "actions": "write"}},
+		{"reset permissions", http.MethodDelete, "/github-permissions", nil},
+		{"set git identity", http.MethodPut, "/git-identity", map[string]string{"mode": "custom", "name": "x", "email": "x@example.com"}},
+		{"reset git identity", http.MethodDelete, "/git-identity", nil},
+	}
+	reads := []string{"/github-status", "/github-permissions", "/git-identity"}
+
+	for _, who := range []struct {
+		name string
+		user *store.User
+	}{{"non-hub-member", bob}, {"other-project member", dave}} {
+		for _, w := range writes {
+			t.Run(who.name+"/"+w.name, func(t *testing.T) {
+				rec := doRequestAsUser(t, srv, who.user, w.method, base+w.path, w.body)
+				assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+				assertGitHubSettingsUnchanged(t, s, victim.ID)
+			})
+		}
+	}
+	for _, who := range []struct {
+		name string
+		user *store.User
+	}{{"non-hub-member", bob}, {"other-project member", dave}} {
+		for _, path := range reads {
+			t.Run(who.name+"/read "+path, func(t *testing.T) {
+				rec := doRequestAsUser(t, srv, who.user, http.MethodGet, base+path, nil)
+				assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+			})
+		}
+	}
+	// Also reachable via the legacy groves alias.
+	t.Run("groves alias", func(t *testing.T) {
+		rec := doRequestAsUser(t, srv, bob, http.MethodPut, "/api/v1/groves/"+victim.ID+"/github-permissions",
+			map[string]string{"contents": "write"})
+		assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+		assertGitHubSettingsUnchanged(t, s, victim.ID)
+	})
+}
+
+func TestProjectGitHubSettingsAuthz_OwnerAllowed(t *testing.T) {
+	srv, s, alice, _, victim := setupTemplateAuthzTest(t)
+	newGitHubBoundProject(t, s, victim)
+	base := "/api/v1/projects/" + victim.ID
+
+	for _, path := range []string{"/github-status", "/github-permissions", "/git-identity"} {
+		rec := doRequestAsUser(t, srv, alice, http.MethodGet, base+path, nil)
+		assert.Equal(t, http.StatusOK, rec.Code, "GET %s body: %s", path, rec.Body.String())
+	}
+	rec := doRequestAsUser(t, srv, alice, http.MethodPut, base+"/github-permissions",
+		map[string]string{"contents": "write", "metadata": "read"})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	rec = doRequestAsUser(t, srv, alice, http.MethodPut, base+"/git-identity",
+		map[string]string{"mode": "co-authored"})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	p, err := s.GetProject(context.Background(), victim.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "write", p.GitHubPermissions.Contents)
+	assert.Equal(t, "co-authored", p.GitIdentity.Mode)
+}
+
+func TestProjectGitHubRouteAction(t *testing.T) {
+	assert.Equal(t, ActionRead, projectGitHubRouteAction(http.MethodGet))
+	assert.Equal(t, ActionRead, projectGitHubRouteAction(http.MethodHead))
+	for _, m := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch} {
+		assert.Equal(t, ActionUpdate, projectGitHubRouteAction(m), m)
+	}
+}
