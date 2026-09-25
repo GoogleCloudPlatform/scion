@@ -297,6 +297,10 @@ const (
 	// AuthTypeSignedURL labels a credential-less request admitted on the shape
 	// of a skill file capability URL (#1792). It carries no identity.
 	AuthTypeSignedURL = "signed-url"
+	// AuthTypeExternalBearer marks a Hub user authenticated with a bearer
+	// token issued by a trusted external issuer (e.g. a Google ID token)
+	// rather than a Hub-issued credential. See auth_external_bearer.go.
+	AuthTypeExternalBearer = "external-bearer"
 )
 
 // contextWithAuthType returns a new context with the auth type set.

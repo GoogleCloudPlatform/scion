@@ -334,6 +334,15 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 					hubSrv.SetGCPTokenMetrics(otelGCP)
 				}
 
+				otelExtBearer, otelExtBearerErr := hub.NewOTelExternalBearerMetrics(mp, hubSrv.ExternalBearerSnapshotMetrics())
+				if otelExtBearerErr != nil {
+					log.Printf("WARNING: hub external-bearer metrics OTel export disabled: %v", otelExtBearerErr)
+				} else {
+					hubSrv.SetExternalBearerMetrics(otelExtBearer)
+					hubSrv.SetGoogleValidatorCacheMetrics(otelExtBearer)
+					hubSrv.SetGEExchangeMetrics(otelExtBearer)
+				}
+
 				log.Printf("Hub OTel metrics export enabled (project: %s)", cfg.Hub.GCPProjectID)
 			}
 		}

@@ -50,6 +50,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/bridge"
 	bridgestate "github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -218,6 +219,26 @@ func serveHubProcess(t *testing.T, address string) {
 	cfg.GEGoogleExchange = hub.GEGoogleExchangeConfig{
 		Enabled: true, AllowedClientIDs: []string{testGoogleClientID}, TokenTTL: testHubTokenTTL,
 	}
+	// Trust accounts.google.com as a user-type issuer so the Hub's
+	// external-bearer path (auth_external_bearer.go) admits Google ID
+	// tokens at GET /api/v1/auth/me — the path the bridge's hubBearer scheme
+	// introspects. jwks_url is set explicitly (a placeholder value is fine:
+	// the external-bearer path verifies tokens through
+	// GoogleCredentialValidator's hardcoded, pinned JWKS endpoint, not
+	// through this FederationAuthenticator's own JWKS cache) so
+	// NewFederationAuthenticator does not attempt live OIDC discovery of
+	// accounts.google.com at Hub construction time.
+	cfg.Federation = config.FederationConfig{
+		Enabled: true,
+		TrustedIssuers: []config.TrustedIssuerConfig{
+			{
+				IssuerURL:        "https://accounts.google.com",
+				JWKSURL:          "http://unused.invalid/jwks",
+				ExpectedAudience: testGoogleClientID,
+				IssuerType:       "user",
+			},
+		},
+	}
 	hubServer, err := hub.New(cfg, store)
 	if err != nil {
 		t.Fatal(err)
@@ -230,8 +251,16 @@ func serveHubProcess(t *testing.T, address string) {
 	var mu sync.Mutex
 	stats := hubProcessStats{}
 	productionHandler := hubServer.Handler()
+	googleValidator := hub.NewGoogleCredentialValidator(nil)
 	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		switch {
+		case request.URL.Path == "/api/v1/auth/me":
+			// Real production wiring: exercises UnifiedAuthMiddleware and, for
+			// a Google-shaped bearer credential with no other Hub auth
+			// matching, serveExternalBearer (auth_external_bearer.go). This
+			// is the endpoint the bridge's hubBearer scheme introspects via
+			// UATValidator.
+			productionHandler.ServeHTTP(response, request)
 		case request.URL.Path == "/api/v1/auth/integrations/google/exchange":
 			recorder := httptest.NewRecorder()
 			productionHandler.ServeHTTP(recorder, request)
@@ -262,15 +291,26 @@ func serveHubProcess(t *testing.T, address string) {
 			})
 		case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/message"):
 			token := strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer ")
-			claims, err := tokenService.ValidateUserToken(token)
-			if err != nil {
+			// Two credential shapes reach this endpoint depending on the
+			// bridge's auth scheme: geGoogle mints/forwards a Hub-issued
+			// HS256 JWT (exchanged), hubBearer forwards the caller's
+			// original Google ID token verbatim (no exchange). Try the
+			// Hub JWT first (the common case in existing tests), then fall
+			// back to verifying the token as a Google ID token the same way
+			// the Hub's own external-bearer path would.
+			userID := ""
+			if claims, err := tokenService.ValidateUserToken(token); err == nil {
+				userID = claims.UserID
+			} else if identity, gerr := googleValidator.ValidateIDToken(request.Context(), token, []string{testGoogleClientID}); gerr == nil {
+				userID = identity.Email
+			} else {
 				http.Error(response, "unauthorized", http.StatusUnauthorized)
 				return
 			}
 			_, _ = io.Copy(io.Discard, request.Body)
 			mu.Lock()
 			stats.Messages++
-			stats.LastUserID = claims.UserID
+			stats.LastUserID = userID
 			stats.LastMessageAuth = request.Header.Get("Authorization")
 			mu.Unlock()
 			writeTestJSON(response, http.StatusOK, map[string]string{"conversationId": "conv-001", "messageId": "msg-001"})
@@ -344,6 +384,22 @@ func serveAuthBridgeProcess(t *testing.T, address, replica string) {
 
 func serveFullBridgeProcess(t *testing.T, address, replica string) {
 	t.Helper()
+	serveScionA2ABridgeProcess(t, address, replica, bridge.AuthConfig{Scheme: "geGoogle", GEExchange: bridge.GEExchangeConfig{
+		CredentialType: "id_token", CacheTTL: 10 * time.Second,
+	}})
+}
+
+// serveHubBearerBridgeProcess is serveFullBridgeProcess with auth.scheme:
+// hubBearer instead of geGoogle: the bridge admits the caller's Google
+// credential via Hub /api/v1/auth/me (UATValidator) and forwards the same
+// token verbatim on every downstream Hub call — no credential exchange.
+func serveHubBearerBridgeProcess(t *testing.T, address, replica string) {
+	t.Helper()
+	serveScionA2ABridgeProcess(t, address, replica, bridge.AuthConfig{Scheme: "hubBearer"})
+}
+
+func serveScionA2ABridgeProcess(t *testing.T, address, replica string, authCfg bridge.AuthConfig) {
+	t.Helper()
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	database := filepath.Join(os.Getenv("SCION_TEST_BRIDGE_DIR"), replica+".db")
 	stateStore, err := bridgestate.NewSQLite(database)
@@ -357,11 +413,9 @@ func serveFullBridgeProcess(t *testing.T, address, replica string) {
 		t.Fatal(err)
 	}
 	cfg := &bridge.Config{
-		Bridge: bridge.BridgeConfig{ExternalURL: "http://" + address, MaxSubscribers: 8},
-		Hub:    bridge.HubConfig{Endpoint: hubURL, User: "integration@example.invalid"},
-		Auth: bridge.AuthConfig{Scheme: "geGoogle", GEExchange: bridge.GEExchangeConfig{
-			CredentialType: "id_token", CacheTTL: 10 * time.Second,
-		}},
+		Bridge:   bridge.BridgeConfig{ExternalURL: "http://" + address, MaxSubscribers: 8},
+		Hub:      bridge.HubConfig{Endpoint: hubURL, User: "integration@example.invalid"},
+		Auth:     authCfg,
 		Projects: []bridge.ProjectConfig{{Slug: "proj1", ExposedAgents: []string{"agent1"}}},
 		Timeouts: bridge.TimeoutConfig{SendMessage: 2 * time.Second, SSEKeepalive: 100 * time.Millisecond},
 	}
@@ -768,6 +822,68 @@ func TestGEEnvelopeCompatibility(t *testing.T) {
 	stats := getJSON[hubProcessStats](t, hubProcess.URL()+"/__test/stats")
 	if stats.Messages != 1 || stats.Exchanges != 1 || stats.LastUserID == "" {
 		t.Fatalf("Hub receipt counters = %+v; want one exchange and one authenticated message", stats)
+	}
+}
+
+// TestHubBearerProcessPassthrough proves hubBearer pass-through end to end:
+// a real bridge process (auth.scheme: hubBearer) fronting a real Hub
+// process, proving bridge -> Hub pass-through against a test Google issuer.
+//
+// The Hub under test is pointed at the test Google JWKS the same way the
+// existing geGoogle exchange tests are (serveHubProcess overrides
+// http.DefaultTransport before calling hub.New; GoogleCredentialValidator is
+// constructed with a nil *http.Client, which net/http resolves to
+// http.DefaultTransport at call time). No new production seam, config knob,
+// or pkg/ change was needed — the sanctioned *http.Client seam already
+// defaults to the process-global transport this harness overrides.
+//
+// Unlike TestGEEnvelopeCompatibility (geGoogle: the bridge exchanges the
+// Google credential for a Hub-minted token), this test proves the token
+// the client presents is the SAME token the Hub's downstream /message
+// endpoint receives, and that no exchange call is ever made.
+func TestHubBearerProcessPassthrough(t *testing.T) {
+	topology := newProcessTopology(t, nil)
+	fakeGoogle := topology.start(t, processSpec{Name: "fake-google", Mode: "fake-google", ReplicaID: "fake-google"})
+	hubProcess := topology.start(t, processSpec{Name: "hub", Mode: "hub", ReplicaID: "hub", Env: map[string]string{
+		"SCION_TEST_FAKE_GOOGLE_URL": fakeGoogle.URL(), "SCION_TEST_HUB_DATABASE": filepath.Join(t.TempDir(), "hub.db"),
+	}})
+	bridgeDir := t.TempDir()
+	bridgeProcess := topology.start(t, processSpec{Name: "bridge", Mode: "hub-bearer-bridge", ReplicaID: "bridge", Env: map[string]string{
+		"SCION_TEST_HUB_URL": hubProcess.URL(), "SCION_TEST_BRIDGE_DIR": bridgeDir,
+	}})
+
+	token := fetchMintedToken(t, fakeGoogle.URL(), nil)
+
+	payload := `{"jsonrpc":"2.0","id":"hub-bearer-process-1","method":"SendMessage","params":{"message":{"messageId":"message-001","role":"ROLE_USER","parts":[{"text":"synthetic hello via hubBearer"}]}}}`
+	status, body := postBearer(t, bridgeProcess.URL()+"/projects/proj1/agents/agent1", token, payload)
+	if status != http.StatusOK {
+		t.Fatalf("hubBearer JSON-RPC status = %d: %s\nlogs:\n%s", status, body, topology.logs.String())
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope["jsonrpc"] != "2.0" || envelope["error"] != nil {
+		t.Fatalf("unexpected JSON-RPC envelope: %s", body)
+	}
+
+	stats := getJSON[hubProcessStats](t, hubProcess.URL()+"/__test/stats")
+	if stats.Messages != 1 {
+		t.Fatalf("Hub message receipt count = %d, want 1", stats.Messages)
+	}
+	// The core assertion: zero exchanges. hubBearer never calls
+	// /auth/integrations/google/exchange — only /auth/me for admission, and
+	// then the caller's original token again for the downstream call.
+	if stats.Exchanges != 0 {
+		t.Fatalf("Hub exchange count = %d, want 0 (hubBearer must never exchange)", stats.Exchanges)
+	}
+
+	// Hard assertion: the token the Hub received on the downstream call is
+	// byte-for-byte the token the client originally presented — verbatim
+	// pass-through, not a re-minted or exchanged credential.
+	captured := getJSON[map[string]string](t, hubProcess.URL()+"/__test/captured-bearer")
+	if captured["bearer"] != token {
+		t.Fatalf("Hub received bearer %q, want the original token %q verbatim", captured["bearer"], token)
 	}
 }
 

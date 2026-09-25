@@ -73,6 +73,30 @@ type AuthConfig struct {
 	// The middleware loads from this pointer on each request to see
 	// hot-reloaded authenticators.
 	FederationAuth *atomic.Pointer[FederationAuthenticator]
+	// GoogleValidator verifies Google ID tokens / access tokens for the
+	// external-bearer path (auth_external_bearer.go). nil disables that path
+	// even when FederationAuth trusts accounts.google.com.
+	GoogleValidator GoogleCredentialValidator
+	// GoogleResolver resolves a validated Google identity to a Hub user for
+	// the external-bearer path, sharing decisions with GEExchangeService.
+	GoogleResolver *GoogleIdentityResolver
+	// ExternalBearerLimiter rate-limits the external-bearer path per client
+	// IP, consulted only on a Google-credential-cache miss. nil disables
+	// rate limiting for that path (see authenticateExternalBearer).
+	ExternalBearerLimiter *externalBearerRateLimiter
+	// ExternalBearerMetrics records the outcome of every external-bearer
+	// authentication attempt (the external_bearer counter; see
+	// external_bearer_metrics.go for the closed label set and the real
+	// exported metric names). UnifiedAuthMiddleware captures a copy of this
+	// cfg each time applyMiddleware runs (Start(), Handler()).
+	// cmd/server_foreground.go calls SetExternalBearerMetrics before either,
+	// so a plain field would work today; the *atomic.Pointer (the
+	// FederationAuth shape above) makes a setter call after the handler is
+	// already built still take effect, race-free, so correctness does not
+	// depend on that ordering. A nil pointer, or one currently holding a nil
+	// interface, disables recording; it never changes the external-bearer
+	// path's authentication outcome.
+	ExternalBearerMetrics *atomic.Pointer[ExternalBearerMetricsRecorder]
 	// CredentialStore handles agent credential validation (Phase 1H).
 	// When non-nil, agent tokens are validated against persistent credential state.
 	CredentialStore store.AgentCredentialStore
@@ -414,6 +438,11 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				}
 				claims, err := cfg.UserTokenSvc.ValidateUserToken(token)
 				if err != nil {
+					// Not a Hub-issued user JWT. It may be a Google ID token
+					// forwarded verbatim by a trusted external caller.
+					if serveExternalBearer(w, r, next, ctx, token, cfg, log) {
+						return
+					}
 					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 						"invalid access token: "+err.Error(), nil)
 					return
@@ -461,6 +490,21 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				}
 
 			default:
+				// Opaque (non-JWT) bearer tokens land here — detectTokenType
+				// routes every 3-segment token to tokenTypeUser, so this arm
+				// never sees a JWT. This is the external-bearer path's
+				// access-token hook site (auth_external_bearer.go):
+				// serveExternalBearer returns true whenever it has fully
+				// handled the request (Google trust configured, whether
+				// validation succeeds or fails), so this arm returns and the
+				// "unrecognized token format" rejection below never runs. It
+				// returns false only when the token is not applicable to
+				// this path at all (e.g. no Google trust configured), in
+				// which case that rejection runs as usual. The ID-token hook
+				// site is reached only from the tokenTypeUser case above.
+				if serveExternalBearer(w, r, next, ctx, token, cfg, log) {
+					return
+				}
 				writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 					"unrecognized token format", nil)
 				return

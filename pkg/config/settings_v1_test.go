@@ -379,6 +379,46 @@ profiles:
 	assert.Equal(t, "gemini-custom", profile.DefaultHarnessConfig)
 }
 
+// TestLoadVersionedSettings_FederationGoogleIssuerFields loads
+// allowed_domains and allowed_gcp_projects from a settings.yaml file through
+// the real koanf decode path (LoadVersionedSettings), rather than
+// constructing a V1TrustedIssuerConfig struct literal directly. A koanf tag
+// typo on either field would silently drop it from the decoded settings
+// (failing open to "no domain/project constraint") without this test
+// noticing, since every other test for these fields builds the Go struct by
+// hand.
+func TestLoadVersionedSettings_FederationGoogleIssuerFields(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
+
+	projectSettings := `
+schema_version: "1"
+server:
+  federation:
+    enabled: true
+    trusted_issuers:
+      - issuer_url: "https://accounts.google.com"
+        issuer_type: "user"
+        expected_audience: "client-id.apps.googleusercontent.com"
+        allowed_domains: ["example.com", "other.example"]
+        allowed_gcp_projects: ["gcp-proj-1", "gcp-proj-2"]
+`
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(projectSettings), 0644))
+
+	vs, err := LoadVersionedSettings(projectDir)
+	require.NoError(t, err)
+
+	require.NotNil(t, vs.Server)
+	require.NotNil(t, vs.Server.Federation)
+	require.Len(t, vs.Server.Federation.TrustedIssuers, 1)
+	issuer := vs.Server.Federation.TrustedIssuers[0]
+	assert.Equal(t, []string{"example.com", "other.example"}, issuer.AllowedDomains)
+	assert.Equal(t, []string{"gcp-proj-1", "gcp-proj-2"}, issuer.AllowedGCPProjects)
+}
+
 // --- AdaptLegacySettings tests ---
 
 func TestAdaptLegacySettings_FullMapping(t *testing.T) {
@@ -4687,6 +4727,18 @@ func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {
 					DefaultRole:      "",
 					AllowedEmails:    []string{"sa@proj.iam.gserviceaccount.com"},
 				},
+				{
+					// AllowedGCPProjects and AllowedDomains only do anything
+					// on an active Google user issuer: issuer_type "user" and
+					// a non-empty ExpectedAudience, unlike the
+					// service_account entry above, which must not set them
+					// (that combination is a config validation error).
+					IssuerURL:          "https://accounts.google.com/",
+					ExpectedAudience:   "client-id.apps.googleusercontent.com",
+					IssuerType:         "user",
+					AllowedGCPProjects: []string{"gcp-proj-1", "gcp-proj-2"},
+					AllowedDomains:     []string{"Example.com", "other.example"},
+				},
 			},
 			Algorithms:       []string{"RS256", "ES256"},
 			RefreshInterval:  "1h",
@@ -4697,7 +4749,7 @@ func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {
 	// V1 -> GlobalConfig
 	gc := ConvertV1ServerToGlobalConfig(v1)
 	assert.True(t, gc.Federation.Enabled)
-	require.Len(t, gc.Federation.TrustedIssuers, 2)
+	require.Len(t, gc.Federation.TrustedIssuers, 3)
 
 	ti0 := gc.Federation.TrustedIssuers[0]
 	assert.Equal(t, "https://hub-a.example.com", ti0.IssuerURL)
@@ -4713,6 +4765,12 @@ func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {
 	assert.Equal(t, "service_account", ti1.IssuerType)
 	assert.Equal(t, []string{"sa@proj.iam.gserviceaccount.com"}, ti1.AllowedEmails)
 
+	ti2 := gc.Federation.TrustedIssuers[2]
+	assert.Equal(t, "https://accounts.google.com/", ti2.IssuerURL)
+	assert.Equal(t, "user", ti2.IssuerType)
+	assert.Equal(t, []string{"gcp-proj-1", "gcp-proj-2"}, ti2.AllowedGCPProjects)
+	assert.Equal(t, []string{"Example.com", "other.example"}, ti2.AllowedDomains)
+
 	assert.Equal(t, []string{"RS256", "ES256"}, gc.Federation.Algorithms)
 	assert.Equal(t, time.Hour, gc.Federation.Cache.RefreshInterval)
 	assert.Equal(t, 5*time.Second, gc.Federation.Cache.DebounceInterval)
@@ -4725,7 +4783,7 @@ func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {
 	assert.Equal(t, "1h0m0s", v1Back.Federation.RefreshInterval)
 	assert.Equal(t, "5s", v1Back.Federation.DebounceInterval)
 
-	require.Len(t, v1Back.Federation.TrustedIssuers, 2)
+	require.Len(t, v1Back.Federation.TrustedIssuers, 3)
 	vi0 := v1Back.Federation.TrustedIssuers[0]
 	assert.Equal(t, "https://hub-a.example.com", vi0.IssuerURL)
 	assert.Equal(t, "https://hub-a.example.com/.well-known/jwks.json", vi0.JWKSURL)
@@ -4739,6 +4797,12 @@ func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {
 	assert.Equal(t, "https://accounts.google.com", vi1.IssuerURL)
 	assert.Equal(t, "service_account", vi1.IssuerType)
 	assert.Equal(t, []string{"sa@proj.iam.gserviceaccount.com"}, vi1.AllowedEmails)
+
+	vi2 := v1Back.Federation.TrustedIssuers[2]
+	assert.Equal(t, "https://accounts.google.com/", vi2.IssuerURL)
+	assert.Equal(t, "user", vi2.IssuerType)
+	assert.Equal(t, []string{"gcp-proj-1", "gcp-proj-2"}, vi2.AllowedGCPProjects)
+	assert.Equal(t, []string{"Example.com", "other.example"}, vi2.AllowedDomains)
 }
 
 func TestConvertV1FederationConfig_NilFederation(t *testing.T) {

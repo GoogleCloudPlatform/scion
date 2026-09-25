@@ -2722,12 +2722,15 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/handlers_auth.go", Function: "deleteSuperAdminRoleBinding", Symbol: "DeleteRoleBinding", Exemption: &MutationExemption{Kind: ExemptionHubAdmin, Reason: "Super-admin self-demotion, hub-admin operation", Scope: "pkg/hub/handlers_auth.go"}},
 
 	// -----------------------------------------------------------------------
-	// pkg/hub/ge_exchange.go — GE Google credential exchange
+	// pkg/hub/google_identity_resolver.go — shared Google identity resolution,
+	// used by both the GE credential exchange (ge_exchange.go) and the
+	// external-bearer auth path (auth_external_bearer.go). Extracted from
+	// ge_exchange.go's former resolveLocalUser/provisionNewUser.
 	// -----------------------------------------------------------------------
-	{File: "pkg/hub/ge_exchange.go", Function: "resolveLocalUser", Symbol: "UpdateUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "GE exchange user email update on binding match", Scope: "pkg/hub/ge_exchange.go"}},
-	{File: "pkg/hub/ge_exchange.go", Function: "resolveLocalUser", Symbol: "UpdateUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "GE exchange user profile update (displayName/avatar)", Scope: "pkg/hub/ge_exchange.go"}},
-	{File: "pkg/hub/ge_exchange.go", Function: "resolveLocalUser", Symbol: "DeleteUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "GE exchange orphan user cleanup after concurrent binding race", Scope: "pkg/hub/ge_exchange.go"}},
-	{File: "pkg/hub/ge_exchange.go", Function: "provisionNewUser", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "GE exchange new user provisioning", Scope: "pkg/hub/ge_exchange.go"}},
+	{File: "pkg/hub/google_identity_resolver.go", Function: "Resolve", Symbol: "UpdateUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "Google identity resolution: user email update on binding match", Scope: "pkg/hub/google_identity_resolver.go"}},
+	{File: "pkg/hub/google_identity_resolver.go", Function: "Resolve", Symbol: "UpdateUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "Google identity resolution: user profile update (displayName/avatar)", Scope: "pkg/hub/google_identity_resolver.go"}},
+	{File: "pkg/hub/google_identity_resolver.go", Function: "Resolve", Symbol: "DeleteUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "Google identity resolution: orphan user cleanup after concurrent binding race", Scope: "pkg/hub/google_identity_resolver.go"}},
+	{File: "pkg/hub/google_identity_resolver.go", Function: "provisionNewUser", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "Google identity resolution: new user provisioning (GE exchange and external-bearer)", Scope: "pkg/hub/google_identity_resolver.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/web.go — OAuth/session middleware

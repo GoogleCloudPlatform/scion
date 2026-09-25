@@ -112,6 +112,22 @@ func newMockHubServer(t *testing.T) *mockHubServer {
 	m.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Route based on path prefix.
 		switch {
+		case r.Method == "GET" && r.URL.Path == "/api/v1/auth/me":
+			// Stands in for the Hub's external-bearer path:
+			// any non-empty bearer token is admitted, EXCEPT the sentinel
+			// "invalid-bearer-token" value tests use to exercise rejection.
+			// This is the endpoint the bridge's hubBearer scheme introspects
+			// via UATValidator.
+			token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+			if token == "" || token == "invalid-bearer-token" {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"id": "bearer-user-001", "email": "bearer-user@example.com",
+				"display_name": "Bearer User", "role": "member",
+			})
 		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/api/v1/agents"):
 			// Agent list: return a test agent.
 			projectID := r.URL.Query().Get("project_id")
@@ -744,6 +760,118 @@ func TestCallerHubClient_GEExchangeTokenType(t *testing.T) {
 	}
 	if len(agents.Agents) == 0 {
 		t.Error("expected at least one agent from mock Hub")
+	}
+}
+
+// TestCallerHubClient_BearerTokenType proves callerHubClient's "bearer" case
+// (bridge.go) forwards the caller's original token verbatim, exactly like
+// "uat" does. If the "uat", "bearer" case were ever changed to "uat" alone,
+// this call would fail with "unknown token type: bearer" instead of
+// succeeding — the same regression TestCallerHubClient_GEExchangeTokenType
+// guards for the "ge_exchange" type.
+func TestCallerHubClient_BearerTokenType(t *testing.T) {
+	hub := newMockHubServer(t)
+
+	dir := t.TempDir()
+	store, err := state.NewSQLite(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+
+	cfg := &Config{
+		Hub: HubConfig{Endpoint: hub.URL, User: "admin@test"},
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	adminClient, _ := hubclient.New(hub.URL, hubclient.WithBearerToken("admin-token"))
+	b := New(store, adminClient, nil, cfg, nil, log)
+
+	caller := &CallerIdentity{
+		UserID:    "bearer-user-001",
+		Email:     "bearer-user@example.com",
+		Role:      "member",
+		RawToken:  "forwarded-google-id-token",
+		TokenType: "bearer",
+	}
+
+	client, err := b.callerHubClient(caller)
+	if err != nil {
+		t.Fatalf("callerHubClient(bearer) error: %v", err)
+	}
+	if client == nil {
+		t.Fatal("callerHubClient returned nil client")
+	}
+
+	// Verify the client can actually reach the Hub, and that no exchange
+	// happened — the raw token is used directly as the bearer credential.
+	agents, err := client.Agents().List(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("Hub API call with bearer client failed: %v", err)
+	}
+	if len(agents.Agents) == 0 {
+		t.Error("expected at least one agent from mock Hub")
+	}
+	if hub.ExchangeCallCount() != 0 {
+		t.Errorf("exchange calls = %d, want 0 (bearer forwards verbatim, no exchange)", hub.ExchangeCallCount())
+	}
+}
+
+// TestHubBearer_EndToEnd_PassThrough is the companion to
+// TestHubBearerProcessPassthrough (see
+// extras/scion-a2a-bridge/integration/auth_transport_process_test.go
+// for the full-process test against a real Hub with a test Google issuer):
+// through real production wiring (real New(), real Server, real executor,
+// real SDK handler), a caller presents a Google-shaped bearer credential
+// under auth.scheme: hubBearer. It must be (1) admitted via the mock Hub's
+// /api/v1/auth/me, and (2) forwarded to the Hub's message-send call
+// byte-for-byte identical to what the caller presented — never exchanged for
+// a different credential (contrast with geGoogle in
+// TestGEExchange_ExecutorPath_Regression, which mints/forwards a DIFFERENT,
+// Hub-issued token).
+func TestHubBearer_EndToEnd_PassThrough(t *testing.T) {
+	hub := newMockHubServer(t)
+	_, ts, _ := newIntegrationTestServer(t, hub, "hubBearer", "")
+
+	const googleToken = "google-id-token-abc123"
+	payload := `{
+		"jsonrpc": "2.0",
+		"id": "hub-bearer-1",
+		"method": "SendMessage",
+		"params": {
+			"message": {
+				"messageId": "msg-bearer-001",
+				"role": "ROLE_USER",
+				"parts": [{"text": "Hello via hubBearer"}]
+			}
+		}
+	}`
+	status, body := doRPCRaw(t, ts, "/projects/proj1/agents/agent1/jsonrpc", payload,
+		map[string]string{"Authorization": "Bearer " + googleToken})
+
+	if status != http.StatusOK {
+		t.Fatalf("hubBearer message/send status = %d, want 200; body: %s", status, body)
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("response is not valid JSON: %v", err)
+	}
+	if resp["jsonrpc"] != "2.0" || resp["error"] != nil {
+		t.Fatalf("unexpected JSON-RPC envelope: %s", body)
+	}
+
+	msgs := hub.SentMessages()
+	if len(msgs) == 0 {
+		t.Fatal("mock Hub received no messages — executor dispatch failed")
+	}
+	// Hard assertion: verbatim pass-through. Not "hub-token-from-exchange"
+	// (that would mean hubBearer silently started exchanging, like geGoogle).
+	if msgs[0].AuthHeader != "Bearer "+googleToken {
+		t.Fatalf("per-caller Hub send used wrong auth: got %q, want %q",
+			msgs[0].AuthHeader, "Bearer "+googleToken)
+	}
+	if hub.ExchangeCallCount() != 0 {
+		t.Fatalf("exchange calls = %d, want 0 (hubBearer never exchanges)", hub.ExchangeCallCount())
 	}
 }
 

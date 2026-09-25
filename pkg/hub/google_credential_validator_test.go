@@ -19,11 +19,13 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -379,13 +381,201 @@ func TestProductionValidator_IDToken_ServiceAccount(t *testing.T) {
 	claims["email"] = "sa@my-project.iam.gserviceaccount.com"
 	token := signIDToken(kp, claims)
 
+	// The validator classifies service accounts but does not reject them —
+	// rejection (or admission, under other policy) is the caller's
+	// responsibility.
+	identity, err := validator.ValidateIDToken(t.Context(), token,
+		[]string{"test-client-id.apps.googleusercontent.com"})
+	if err != nil {
+		t.Fatalf("ValidateIDToken failed: %v", err)
+	}
+	if !identity.IsServiceAccount {
+		t.Error("expected IsServiceAccount=true for a service-account email")
+	}
+}
+
+// gcvSANumericSub is a realistic Google service-account "sub"/"azp" value: a
+// large numeric unique ID, matching what the metadata server and
+// iamcredentials.generateIdToken actually issue for SA ID tokens.
+// Distinct from auth_external_bearer_sa_test.go's saNumericSub so
+// this file has no cross-file test dependency.
+const gcvSANumericSub = "999988887777666655554"
+
+// At the validator level — an SA ID token whose azp equals sub (the SA-minted
+// shape) validates: aud is checked against allowedClientIDs exactly as for a
+// user token (isAllowedAudience, earlier in ValidateIDToken), and the azp/sub
+// rule does not additionally reject it.
+func TestProductionValidator_IDToken_ServiceAccount_AZPEqualsSub_Valid(t *testing.T) {
+	kp := newGCVTestKeyPair("test-kid-1")
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if _, err := w.Write(gcvJWKSJSON(kp)); err != nil {
+				t.Errorf("write JWKS response: %v", err)
+			}
+		}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+	)
+	defer endpoints.close()
+
+	validator := newTestValidator(endpoints)
+	claims := validIDTokenClaims()
+	claims["email"] = "worker@my-project.iam.gserviceaccount.com"
+	claims["sub"] = gcvSANumericSub
+	claims["azp"] = gcvSANumericSub // SA-minted shape: azp == sub
+	token := signIDToken(kp, claims)
+
+	identity, err := validator.ValidateIDToken(t.Context(), token,
+		[]string{"test-client-id.apps.googleusercontent.com"})
+	if err != nil {
+		t.Fatalf("ValidateIDToken failed: %v", err)
+	}
+	if !identity.IsServiceAccount {
+		t.Error("expected IsServiceAccount=true")
+	}
+	if identity.Audience != "test-client-id.apps.googleusercontent.com" {
+		t.Errorf("Audience = %q, want the matched allowed client ID", identity.Audience)
+	}
+}
+
+// At the validator level, an SA ID token whose azp disagrees with sub is
+// rejected, even though its aud is on the allowed list (unlike a user token,
+// azp is not treated as the audience for an SA).
+func TestProductionValidator_IDToken_ServiceAccount_AZPDiffersFromSub_Rejected(t *testing.T) {
+	kp := newGCVTestKeyPair("test-kid-1")
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if _, err := w.Write(gcvJWKSJSON(kp)); err != nil {
+				t.Errorf("write JWKS response: %v", err)
+			}
+		}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+	)
+	defer endpoints.close()
+
+	validator := newTestValidator(endpoints)
+	claims := validIDTokenClaims()
+	claims["email"] = "worker@my-project.iam.gserviceaccount.com"
+	claims["sub"] = gcvSANumericSub
+	claims["azp"] = "test-client-id.apps.googleusercontent.com" // disagrees with sub
+	token := signIDToken(kp, claims)
+
 	_, err := validator.ValidateIDToken(t.Context(), token,
 		[]string{"test-client-id.apps.googleusercontent.com"})
 	if err == nil {
-		t.Fatal("expected error for service account")
+		t.Fatal("expected error: SA azp disagrees with sub")
 	}
-	if !strings.Contains(err.Error(), "service account") {
-		t.Errorf("error = %q, expected service account rejection", err)
+	if !errors.Is(err, ErrGoogleFieldDisagreement) {
+		t.Errorf("error = %v, want ErrGoogleFieldDisagreement", err)
+	}
+}
+
+// The SA classification must use the verified email, only after the
+// signature check and the email_verified gate — an SA-looking email must
+// never reach the SA branch (and its different aud/azp rule) via a bad
+// signature or an unverified email.
+func TestProductionValidator_IDToken_ServiceAccountEmail_Unverified_NeverReachesSABranch(t *testing.T) {
+	kp := newGCVTestKeyPair("test-kid-1")
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if _, err := w.Write(gcvJWKSJSON(kp)); err != nil {
+				t.Errorf("write JWKS response: %v", err)
+			}
+		}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+	)
+	defer endpoints.close()
+
+	validator := newTestValidator(endpoints)
+	claims := validIDTokenClaims()
+	claims["email"] = "worker@my-project.iam.gserviceaccount.com"
+	claims["email_verified"] = false
+	claims["sub"] = gcvSANumericSub
+	claims["azp"] = gcvSANumericSub // SA-minted shape — would validate if the SA branch ran
+	token := signIDToken(kp, claims)
+
+	_, err := validator.ValidateIDToken(t.Context(), token,
+		[]string{"test-client-id.apps.googleusercontent.com"})
+	if err == nil {
+		t.Fatal("expected error: email not verified, regardless of SA-shaped azp/sub")
+	}
+	if !errors.Is(err, ErrGoogleUnverifiedEmail) {
+		t.Errorf("error = %v, want ErrGoogleUnverifiedEmail (the SA branch must not run before this check)", err)
+	}
+}
+
+func TestProductionValidator_IDToken_ServiceAccountEmail_BadSignature_NeverReachesSABranch(t *testing.T) {
+	kp := newGCVTestKeyPair("test-kid-1")
+	otherKP := newGCVTestKeyPair("other-kid") // signs the token; JWKS only ever publishes kp.
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if _, err := w.Write(gcvJWKSJSON(kp)); err != nil {
+				t.Errorf("write JWKS response: %v", err)
+			}
+		}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+	)
+	defer endpoints.close()
+
+	validator := newTestValidator(endpoints)
+	claims := validIDTokenClaims()
+	claims["email"] = "worker@my-project.iam.gserviceaccount.com"
+	claims["sub"] = gcvSANumericSub
+	claims["azp"] = gcvSANumericSub
+	token := signIDToken(otherKP, claims) // signed by a key not in the JWKS
+
+	_, err := validator.ValidateIDToken(t.Context(), token,
+		[]string{"test-client-id.apps.googleusercontent.com"})
+	if err == nil {
+		t.Fatal("expected error: signature does not verify against the trusted JWKS")
+	}
+	if !errors.Is(err, ErrGoogleInvalidCredential) {
+		t.Errorf("error = %v, want ErrGoogleInvalidCredential (the SA branch must not run before signature verification)", err)
+	}
+}
+
+// This is the mutation-killer for "the SA/user split uses the verified email,
+// not claim shape": a USER (non-SA) email with an SA-shaped azp==sub and an
+// aud that disagrees with azp must still be rejected under the user rule.
+// If the SA/user branches were ever selected by shape instead of by
+// isGoogleServiceAccount(email), this token would incorrectly validate (the
+// SA rule only checks azp==sub, and aud is separately allowed).
+func TestProductionValidator_IDToken_UserToken_SAShapedAzpSub_StillRejected(t *testing.T) {
+	kp := newGCVTestKeyPair("test-kid-1")
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if _, err := w.Write(gcvJWKSJSON(kp)); err != nil {
+				t.Errorf("write JWKS response: %v", err)
+			}
+		}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+	)
+	defer endpoints.close()
+
+	validator := newTestValidator(endpoints)
+	claims := validIDTokenClaims()
+	claims["email"] = "alice@gmail.com" // definitely not a service account
+	claims["sub"] = "1234567890"
+	claims["azp"] = "1234567890"                                              // == sub: would pass the SA rule if mis-routed
+	claims["aud"] = "some-other-allowed-client-id.apps.googleusercontent.com" // != azp
+	token := signIDToken(kp, claims)
+
+	_, err := validator.ValidateIDToken(t.Context(), token,
+		[]string{"test-client-id.apps.googleusercontent.com", "some-other-allowed-client-id.apps.googleusercontent.com"})
+	if err == nil {
+		t.Fatal("expected error: user token's aud disagrees with azp, even though azp == sub")
+	}
+	if !errors.Is(err, ErrGoogleFieldDisagreement) {
+		t.Errorf("error = %v, want ErrGoogleFieldDisagreement", err)
 	}
 }
 
@@ -473,6 +663,184 @@ func TestProductionValidator_IDToken_JWKSForceRefresh(t *testing.T) {
 	}
 	if callCount < 2 {
 		t.Errorf("expected at least 2 JWKS fetches (initial + force refresh), got %d", callCount)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Error classification. Google's tokeninfo/userinfo
+// 400/401 (and a 200 body carrying an "error" field) must map to
+// ErrGoogleInvalidCredential (401, negatively cacheable); a failed JWKS
+// forceRefresh (network/5xx/cancelled) must map to ErrGoogleUpstreamError
+// (503, never negatively cached) rather than ErrGoogleInvalidCredential.
+// ---------------------------------------------------------------------------
+
+func TestProductionValidator_AccessToken_TokenInfo400_InvalidCredential(t *testing.T) {
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Error("JWKS must not be called for an access token") }),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_token"})
+		}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Error("userinfo must not be called when tokeninfo fails")
+		}),
+	)
+	defer endpoints.close()
+
+	validator := newTestValidator(endpoints)
+	_, err := validator.ValidateAccessToken(t.Context(), "an-expired-or-revoked-token",
+		[]string{"test-client-id.apps.googleusercontent.com"})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !errors.Is(err, ErrGoogleInvalidCredential) {
+		t.Errorf("error = %v, want ErrGoogleInvalidCredential (tokeninfo 400 is Google rejecting the credential, not an upstream fault)", err)
+	}
+	if errors.Is(err, ErrGoogleUpstreamError) {
+		t.Error("error must not also be ErrGoogleUpstreamError: that would map to 503 and skip the negative cache for the most common real rejection")
+	}
+}
+
+// TestProductionValidator_AccessToken_TokenInfo200WithErrorBody_InvalidCredential
+// covers the case where a 200 response can still carry a
+// body-level credential rejection via the tokeninfo response's
+// error_description field (googleTokenInfoResponse.Error's actual json tag —
+// not "error", which the 400-status test above uses only incidentally,
+// since a 400 is rejected on status alone before the body is ever parsed).
+// This is the one branch that is otherwise unreachable by any other test:
+// mutating its ErrGoogleInvalidCredential to ErrGoogleUpstreamError is
+// caught only by this test.
+func TestProductionValidator_AccessToken_TokenInfo200WithErrorBody_InvalidCredential(t *testing.T) {
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Error("JWKS must not be called for an access token") }),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"error_description": "Invalid Value"})
+		}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Error("userinfo must not be called when tokeninfo reports an error")
+		}),
+	)
+	defer endpoints.close()
+
+	validator := newTestValidator(endpoints)
+	_, err := validator.ValidateAccessToken(t.Context(), "token",
+		[]string{"test-client-id.apps.googleusercontent.com"})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !errors.Is(err, ErrGoogleInvalidCredential) {
+		t.Errorf("error = %v, want ErrGoogleInvalidCredential (a 200 body carrying error_description is still Google rejecting the credential)", err)
+	}
+	if errors.Is(err, ErrGoogleUpstreamError) {
+		t.Error("error must not also be ErrGoogleUpstreamError")
+	}
+}
+
+func TestProductionValidator_AccessToken_TokenInfo5xx_UpstreamError(t *testing.T) {
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusInternalServerError) }),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Error("userinfo must not be called when tokeninfo fails")
+		}),
+	)
+	defer endpoints.close()
+
+	validator := newTestValidator(endpoints)
+	_, err := validator.ValidateAccessToken(t.Context(), "token",
+		[]string{"test-client-id.apps.googleusercontent.com"})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !errors.Is(err, ErrGoogleUpstreamError) {
+		t.Errorf("error = %v, want ErrGoogleUpstreamError", err)
+	}
+	if errors.Is(err, ErrGoogleInvalidCredential) {
+		t.Error("error must not also be ErrGoogleInvalidCredential: a tokeninfo 5xx is an upstream fault, not a credential verdict")
+	}
+}
+
+func TestProductionValidator_AccessToken_UserInfo400_InvalidCredential(t *testing.T) {
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"azp": "test-client-id.apps.googleusercontent.com",
+				"aud": "test-client-id.apps.googleusercontent.com",
+				"sub": "sub-1", "email": "user@gmail.com", "expires_in": 3600,
+			})
+		}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusUnauthorized) }),
+	)
+	defer endpoints.close()
+
+	validator := newTestValidator(endpoints)
+	_, err := validator.ValidateAccessToken(t.Context(), "token",
+		[]string{"test-client-id.apps.googleusercontent.com"})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !errors.Is(err, ErrGoogleInvalidCredential) {
+		t.Errorf("error = %v, want ErrGoogleInvalidCredential", err)
+	}
+	if errors.Is(err, ErrGoogleUpstreamError) {
+		t.Error("error must not also be ErrGoogleUpstreamError")
+	}
+}
+
+// TestProductionValidator_IDToken_ForceRefreshFailure_UpstreamError proves a
+// failed forceRefresh (the signing key genuinely could not be re-fetched) is
+// ErrGoogleUpstreamError, not ErrGoogleInvalidCredential — the mislabel would
+// make a transient JWKS blip negatively cacheable, refusing a validly-signed
+// token (signed with a newly rotated key) for negTTL seconds afterwards.
+func TestProductionValidator_IDToken_ForceRefreshFailure_UpstreamError(t *testing.T) {
+	kp1 := newGCVTestKeyPair("kid-1")
+	rotatedKP := newGCVTestKeyPair("kid-2") // signs the token; never served successfully
+
+	var jwksCalls atomic.Int64
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if jwksCalls.Add(1) == 1 {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(gcvJWKSJSON(kp1)) // primes the cache without rotatedKP
+				return
+			}
+			w.WriteHeader(http.StatusInternalServerError) // every force-refresh attempt fails
+		}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+	)
+	defer endpoints.close()
+
+	validator := newTestValidator(endpoints)
+	if _, err := validator.ValidateIDToken(t.Context(), signIDToken(kp1, validIDTokenClaims()),
+		[]string{"test-client-id.apps.googleusercontent.com"}); err != nil {
+		t.Fatalf("priming call: %v", err)
+	}
+
+	// Age the cache past forceRefresh's own 30s throttle, exactly like
+	// TestProductionValidator_IDToken_JWKSForceRefresh does, so the next
+	// verification failure actually attempts a network fetch instead of
+	// silently reusing the stale (already known not to verify) keys.
+	gcv := validator.(*googleCredentialValidator)
+	gcv.jwksCache.mu.Lock()
+	gcv.jwksCache.fetchedAt = time.Now().Add(-1 * time.Minute)
+	gcv.jwksCache.mu.Unlock()
+
+	token := signIDToken(rotatedKP, validIDTokenClaims())
+	_, err := validator.ValidateIDToken(t.Context(), token, []string{"test-client-id.apps.googleusercontent.com"})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !errors.Is(err, ErrGoogleUpstreamError) {
+		t.Errorf("error = %v, want ErrGoogleUpstreamError (a failed JWKS refresh is an upstream fault, not an invalid credential)", err)
+	}
+	if errors.Is(err, ErrGoogleInvalidCredential) {
+		t.Error("error must not also be ErrGoogleInvalidCredential: that would make a transient JWKS blip negatively cacheable, " +
+			"refusing a validly-signed token for negTTL seconds")
 	}
 }
 
@@ -783,13 +1151,16 @@ func TestProductionValidator_AccessToken_ServiceAccount(t *testing.T) {
 	defer endpoints.close()
 
 	validator := newTestValidator(endpoints)
-	_, err := validator.ValidateAccessToken(t.Context(), "sa-token",
+	// The validator classifies service accounts but does not reject them —
+	// rejection (or admission, under other policy) is the caller's
+	// responsibility.
+	identity, err := validator.ValidateAccessToken(t.Context(), "sa-token",
 		[]string{"test-client-id.apps.googleusercontent.com"})
-	if err == nil {
-		t.Fatal("expected error for service account access token")
+	if err != nil {
+		t.Fatalf("ValidateAccessToken failed: %v", err)
 	}
-	if !strings.Contains(err.Error(), "service account") {
-		t.Errorf("error = %q, expected service account rejection", err)
+	if !identity.IsServiceAccount {
+		t.Error("expected IsServiceAccount=true for a service-account email")
 	}
 }
 
@@ -1162,9 +1533,7 @@ func TestGEExchange_JWTExpCryptographicallyCapped(t *testing.T) {
 		},
 		validator,
 		tokenSvc,
-		newMemExtIDStore(),
-		userStore,
-		alwaysAuthorized,
+		newTestResolver(userStore, newMemExtIDStore(), alwaysAuthorized, nil),
 		slog.Default(),
 	)
 
@@ -1258,9 +1627,7 @@ func TestGEExchange_ProvisioningRejectedByPolicy(t *testing.T) {
 		},
 		validator,
 		tokenSvc,
-		newMemExtIDStore(),
-		userStore,
-		neverAuthorized, // reject all provisioning
+		newTestResolver(userStore, newMemExtIDStore(), neverAuthorized, nil), // reject all provisioning
 		slog.Default(),
 	)
 
@@ -1301,9 +1668,7 @@ func TestGEExchange_ProvisioningAllowedForExistingUser(t *testing.T) {
 		},
 		validator,
 		tokenSvc,
-		newMemExtIDStore(),
-		userStore,
-		neverAuthorized, // reject provisioning, but existing user bypass
+		newTestResolver(userStore, newMemExtIDStore(), neverAuthorized, nil), // reject provisioning, but existing user bypass
 		slog.Default(),
 	)
 
@@ -1336,9 +1701,7 @@ func TestGEExchange_NilAuthCheckerFailsClosed(t *testing.T) {
 		},
 		validator,
 		tokenSvc,
-		newMemExtIDStore(),
-		userStore,
-		nil, // nil authChecker → fail closed
+		newTestResolver(userStore, newMemExtIDStore(), nil, nil), // nil authorize → fail closed
 		slog.Default(),
 	)
 
@@ -1377,9 +1740,7 @@ func TestGEExchange_OrphanUserCleanup(t *testing.T) {
 		},
 		validator,
 		tokenSvc,
-		extStore,
-		userStore,
-		alwaysAuthorized,
+		newTestResolver(userStore, extStore, alwaysAuthorized, nil),
 		slog.Default(),
 	)
 

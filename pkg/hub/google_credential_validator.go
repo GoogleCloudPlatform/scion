@@ -117,13 +117,22 @@ var (
 	ErrGoogleUntrustedIssuer   = errors.New("untrusted Google issuer")
 	ErrGoogleUnverifiedEmail   = errors.New("google email not verified")
 	ErrGoogleMissingSubject    = errors.New("missing Google subject")
-	ErrGoogleServiceAccount    = errors.New("service account credentials not accepted")
 	ErrGoogleFieldDisagreement = errors.New("google token metadata fields disagree")
-	ErrGoogleMissingField      = errors.New("required field missing from Google response")
-	ErrGoogleUpstreamError     = errors.New("google upstream validation failed")
-	ErrGENotConfigured         = errors.New("GE Google exchange not configured")
-	ErrGEUnsupportedCredType   = errors.New("unsupported credential type")
-	ErrGENoRemainingLifetime   = errors.New("credential has no remaining usable lifetime")
+	// ErrGoogleServiceAccount marks a service-account credential rejection.
+	// GEExchangeService maps it to 403 "service account credentials not
+	// accepted for user exchange". ValidateIDToken's SA azp/sub check wraps
+	// it alongside ErrGoogleFieldDisagreement (never instead of it) so the
+	// exchange keeps that 403 contract for a disagreeing SA token instead of
+	// the generic 401 a bare field-disagreement would give it there; it must
+	// be checked before ErrGoogleFieldDisagreement in any switch matching
+	// both. This does not reject service accounts anywhere else in the
+	// validator — SA ID tokens with azp == sub still validate.
+	ErrGoogleServiceAccount  = errors.New("service-account credential rejected")
+	ErrGoogleMissingField    = errors.New("required field missing from Google response")
+	ErrGoogleUpstreamError   = errors.New("google upstream validation failed")
+	ErrGENotConfigured       = errors.New("GE Google exchange not configured")
+	ErrGEUnsupportedCredType = errors.New("unsupported credential type")
+	ErrGENoRemainingLifetime = errors.New("credential has no remaining usable lifetime")
 )
 
 // ---------------------------------------------------------------------------
@@ -164,7 +173,7 @@ func NewGoogleCredentialValidator(httpClient *http.Client) GoogleCredentialValid
 //   - Expiry/not-before/issued-at with bounded skew
 //   - Non-empty stable sub
 //   - email_verified == true
-//   - Not a service account
+//   - Classifies (does not reject) service accounts; see IsServiceAccount
 func (v *googleCredentialValidator) ValidateIDToken(ctx context.Context, token string, allowedClientIDs []string) (*ValidatedGoogleIdentity, error) {
 	if len(allowedClientIDs) == 0 {
 		return nil, fmt.Errorf("%w: no allowed client IDs configured", ErrGENotConfigured)
@@ -199,8 +208,14 @@ func (v *googleCredentialValidator) ValidateIDToken(ctx context.Context, token s
 	if !verified {
 		refreshedJWKS, err := v.jwksCache.forceRefresh(ctx)
 		if err != nil {
+			// The refresh itself failed (network error, 5xx, cancelled
+			// context, ...) — that is an upstream fault, not evidence the
+			// credential is invalid. Mislabeling it ErrGoogleInvalidCredential
+			// would make it negatively cacheable (google_credential_cache.go),
+			// refusing a validly-signed token for negTTL after a transient
+			// JWKS blip.
 			return nil, fmt.Errorf("%w: signature verification failed and JWKS refresh failed: %v",
-				ErrGoogleInvalidCredential, err)
+				ErrGoogleUpstreamError, err)
 		}
 		for _, key := range refreshedJWKS.Keys {
 			if err := parsedToken.Claims(key, &claims); err == nil {
@@ -263,31 +278,56 @@ func (v *googleCredentialValidator) ValidateIDToken(ctx context.Context, token s
 		return nil, ErrGoogleUnverifiedEmail
 	}
 
-	// Reject service accounts (identified by email suffix).
-	if isGoogleServiceAccount(claims.Email) {
-		return nil, ErrGoogleServiceAccount
-	}
+	// Classify service accounts by the verified email claim. Rejection is the
+	// caller's responsibility: GEExchangeService rejects SA identities
+	// immediately after validation, while other callers (e.g. the
+	// external-bearer path) may admit them under their own policy.
+	isServiceAccount := isGoogleServiceAccount(claims.Email)
 
 	expiry := claims.Expiry.Time()
 
-	// Extract audience — use azp if present (authoritative issued-client),
-	// otherwise the single audience element. Reject multi-valued aud without azp.
+	// Extract audience. Service-account and user ID tokens disagree on what
+	// azp means, so they get different rules:
+	//
+	//   - User tokens: azp, when present, is the authoritative
+	//     issued-to client, and aud must not disagree with it.
+	//   - SA ID tokens (metadata server, iamcredentials.generateIdToken)
+	//     carry azp = sub = the SA's own numeric unique ID, and
+	//     aud = the caller-chosen audience. Applying the user rule here would
+	//     reject every SA ID token, since azp is the SA's identity, not an
+	//     audience. Audience trust is already established above by
+	//     isAllowedAudience (aud contains an allowed client ID); azp, when
+	//     present, must instead equal sub — the SA-minted shape — and
+	//     anything else is a field disagreement, ALSO wrapped with
+	//     ErrGoogleServiceAccount so the exchange rejects it with its SA
+	//     contract (403) rather than the generic field-disagreement one
+	//     (401). The external-bearer path does not special-case
+	//     ErrGoogleServiceAccount, so a disagreeing SA token still lands on
+	//     its 401 default there.
 	var audience string
-	if claims.AZP != "" {
-		audience = claims.AZP
-		// If aud is also present and differs from azp, reject (disagreement).
-		if len(claims.Audience) > 0 {
-			for _, aud := range claims.Audience {
-				if string(aud) != claims.AZP {
-					return nil, fmt.Errorf("%w: aud %q differs from azp %q",
-						ErrGoogleFieldDisagreement, aud, claims.AZP)
+	if isServiceAccount {
+		if claims.AZP != "" && claims.AZP != claims.Subject {
+			return nil, fmt.Errorf("%w: %w: SA azp %q differs from sub %q",
+				ErrGoogleServiceAccount, ErrGoogleFieldDisagreement, claims.AZP, claims.Subject)
+		}
+		audience = matchedAudience(claims.Audience, allowedClientIDs)
+	} else {
+		if claims.AZP != "" {
+			audience = claims.AZP
+			// If aud is also present and differs from azp, reject (disagreement).
+			if len(claims.Audience) > 0 {
+				for _, aud := range claims.Audience {
+					if string(aud) != claims.AZP {
+						return nil, fmt.Errorf("%w: aud %q differs from azp %q",
+							ErrGoogleFieldDisagreement, aud, claims.AZP)
+					}
 				}
 			}
+		} else if len(claims.Audience) == 1 {
+			audience = string(claims.Audience[0])
+		} else if len(claims.Audience) > 1 {
+			return nil, fmt.Errorf("%w: multi-valued aud without azp", ErrGoogleInvalidCredential)
 		}
-	} else if len(claims.Audience) == 1 {
-		audience = string(claims.Audience[0])
-	} else if len(claims.Audience) > 1 {
-		return nil, fmt.Errorf("%w: multi-valued aud without azp", ErrGoogleInvalidCredential)
 	}
 
 	return &ValidatedGoogleIdentity{
@@ -300,7 +340,7 @@ func (v *googleCredentialValidator) ValidateIDToken(ctx context.Context, token s
 		Audience:         audience,
 		UpstreamExpiry:   expiry,
 		HostedDomain:     claims.HD,
-		IsServiceAccount: false,
+		IsServiceAccount: isServiceAccount,
 	}, nil
 }
 
@@ -327,10 +367,15 @@ func (v *googleCredentialValidator) ValidateAccessToken(ctx context.Context, tok
 		return nil, fmt.Errorf("%w: no allowed client IDs configured", ErrGENotConfigured)
 	}
 
-	// Step 1: Call Google tokeninfo endpoint.
+	// Step 1: Call Google tokeninfo endpoint. getTokenInfo already classifies
+	// the failure (ErrGoogleInvalidCredential for a credential Google itself
+	// rejected, ErrGoogleUpstreamError for a network/5xx/decode fault) — do
+	// not re-wrap it as ErrGoogleUpstreamError here, or every tokeninfo 400
+	// (the most common real rejection: an expired or revoked access token)
+	// would be misreported as an upstream outage and never negatively cached.
 	tokenInfo, err := v.getTokenInfo(ctx, token)
 	if err != nil {
-		return nil, fmt.Errorf("%w: tokeninfo call failed: %v", ErrGoogleUpstreamError, err)
+		return nil, fmt.Errorf("tokeninfo call failed: %w", err)
 	}
 
 	// Validate that tokeninfo returned required fields.
@@ -358,10 +403,12 @@ func (v *googleCredentialValidator) ValidateAccessToken(ctx context.Context, tok
 	}
 	upstreamExpiry := time.Now().Add(time.Duration(int64(tokenInfo.ExpiresIn)) * time.Second)
 
-	// Step 2: Call Google userinfo for profile data.
+	// Step 2: Call Google userinfo for profile data. Same reasoning as
+	// getTokenInfo above: preserve its classification rather than forcing
+	// ErrGoogleUpstreamError.
 	userInfo, err := v.getUserInfo(ctx, token)
 	if err != nil {
-		return nil, fmt.Errorf("%w: userinfo call failed: %v", ErrGoogleUpstreamError, err)
+		return nil, fmt.Errorf("userinfo call failed: %w", err)
 	}
 
 	// Validate required userinfo fields.
@@ -392,22 +439,19 @@ func (v *googleCredentialValidator) ValidateAccessToken(ctx context.Context, tok
 			ErrGoogleFieldDisagreement)
 	}
 
-	// Reject service accounts.
-	if isGoogleServiceAccount(userInfo.Email) {
-		return nil, ErrGoogleServiceAccount
-	}
-
 	return &ValidatedGoogleIdentity{
-		Subject:          userInfo.Sub,
-		Email:            userInfo.Email,
-		EmailVerified:    bool(userInfo.EmailVerified),
-		DisplayName:      userInfo.Name,
-		AvatarURL:        userInfo.Picture,
-		Issuer:           googleCanonicalIssuer,
-		Audience:         tokenInfo.AZP,
-		UpstreamExpiry:   upstreamExpiry,
-		HostedDomain:     userInfo.HD,
-		IsServiceAccount: false,
+		Subject:        userInfo.Sub,
+		Email:          userInfo.Email,
+		EmailVerified:  bool(userInfo.EmailVerified),
+		DisplayName:    userInfo.Name,
+		AvatarURL:      userInfo.Picture,
+		Issuer:         googleCanonicalIssuer,
+		Audience:       tokenInfo.AZP,
+		UpstreamExpiry: upstreamExpiry,
+		HostedDomain:   userInfo.HD,
+		// Classify service accounts by the verified email claim. Rejection is
+		// the caller's responsibility; see ValidateIDToken.
+		IsServiceAccount: isGoogleServiceAccount(userInfo.Email),
 	}, nil
 }
 
@@ -503,6 +547,17 @@ type googleUserInfoResponse struct {
 // Google API calls
 // ---------------------------------------------------------------------------
 
+// isGoogleClientErrorStatus reports whether status is an HTTP status Google's
+// tokeninfo/userinfo endpoints use to say "this credential is bad" (as
+// opposed to "we're having trouble right now"). Google answers an invalid,
+// expired or revoked access token with tokeninfo 400 {"error":"invalid_token"};
+// 401 is included defensively for the same class of rejection. Everything
+// else non-2xx (5xx, unexpected 3xx/4xx) is treated as an upstream fault, not
+// a credential verdict.
+func isGoogleClientErrorStatus(status int) bool {
+	return status == http.StatusBadRequest || status == http.StatusUnauthorized
+}
+
 func (v *googleCredentialValidator) getTokenInfo(ctx context.Context, token string) (*googleTokenInfoResponse, error) {
 	// POST to tokeninfo endpoint with access_token in the body.
 	// Do NOT pass the token as a query parameter to avoid logging exposure.
@@ -517,26 +572,37 @@ func (v *googleCredentialValidator) getTokenInfo(ctx context.Context, token stri
 
 	resp, err := v.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("tokeninfo request failed: %w", err)
+		return nil, fmt.Errorf("%w: tokeninfo request failed: %v", ErrGoogleUpstreamError, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 16*1024))
 	if err != nil {
-		return nil, fmt.Errorf("tokeninfo read failed: %w", err)
+		return nil, fmt.Errorf("%w: tokeninfo read failed: %v", ErrGoogleUpstreamError, err)
 	}
 
+	// A 400/401 means Google rejected the credential itself (e.g. expired,
+	// revoked, malformed) — that is ErrGoogleInvalidCredential, mapped to 401
+	// and eligible for the negative cache. Any other non-200 (5xx, or an
+	// unexpected status) is an upstream fault: ErrGoogleUpstreamError, mapped
+	// to 503 and never negatively cached.
+	if isGoogleClientErrorStatus(resp.StatusCode) {
+		return nil, fmt.Errorf("%w: tokeninfo returned %d", ErrGoogleInvalidCredential, resp.StatusCode)
+	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("tokeninfo returned %d", resp.StatusCode)
+		return nil, fmt.Errorf("%w: tokeninfo returned %d", ErrGoogleUpstreamError, resp.StatusCode)
 	}
 
 	var info googleTokenInfoResponse
 	if err := json.Unmarshal(body, &info); err != nil {
-		return nil, fmt.Errorf("tokeninfo decode failed: %w", err)
+		return nil, fmt.Errorf("%w: tokeninfo decode failed: %v", ErrGoogleUpstreamError, err)
 	}
 
 	if info.Error != "" {
-		return nil, fmt.Errorf("tokeninfo error: %s", info.Error)
+		// A 200 response can still carry a body-level error field for an
+		// invalid credential — also a credential verdict, not an upstream
+		// fault.
+		return nil, fmt.Errorf("%w: tokeninfo error: %s", ErrGoogleInvalidCredential, info.Error)
 	}
 
 	return &info, nil
@@ -551,22 +617,25 @@ func (v *googleCredentialValidator) getUserInfo(ctx context.Context, token strin
 
 	resp, err := v.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("userinfo request failed: %w", err)
+		return nil, fmt.Errorf("%w: userinfo request failed: %v", ErrGoogleUpstreamError, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 16*1024))
 	if err != nil {
-		return nil, fmt.Errorf("userinfo read failed: %w", err)
+		return nil, fmt.Errorf("%w: userinfo read failed: %v", ErrGoogleUpstreamError, err)
 	}
 
+	if isGoogleClientErrorStatus(resp.StatusCode) {
+		return nil, fmt.Errorf("%w: userinfo returned %d", ErrGoogleInvalidCredential, resp.StatusCode)
+	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("userinfo returned %d", resp.StatusCode)
+		return nil, fmt.Errorf("%w: userinfo returned %d", ErrGoogleUpstreamError, resp.StatusCode)
 	}
 
 	var info googleUserInfoResponse
 	if err := json.Unmarshal(body, &info); err != nil {
-		return nil, fmt.Errorf("userinfo decode failed: %w", err)
+		return nil, fmt.Errorf("%w: userinfo decode failed: %v", ErrGoogleUpstreamError, err)
 	}
 
 	return &info, nil
@@ -702,6 +771,20 @@ func isAllowedAudience(audiences jwt.Audience, allowed []string) bool {
 		}
 	}
 	return false
+}
+
+// matchedAudience returns the first entry of aud that appears in allowed.
+// Callers must have already confirmed a match exists (isAllowedAudience);
+// this only recovers which one, for SA ID tokens where azp is not the
+// audience. Returns "" if, contrary to that precondition,
+// no entry matches — callers must not treat that as a valid audience.
+func matchedAudience(aud jwt.Audience, allowed []string) string {
+	for _, a := range aud {
+		if containsString(allowed, string(a)) {
+			return string(a)
+		}
+	}
+	return ""
 }
 
 // containsString checks if a string slice contains the target.

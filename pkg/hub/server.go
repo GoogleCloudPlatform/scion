@@ -988,6 +988,20 @@ type Server struct {
 	geExchangeService *GEExchangeService
 	// GE exchange endpoint rate limiter (per-client-IP token bucket).
 	geExchangeRateLimiter *geExchangeRateLimiter
+	// GE exchange outcome counter (the ge_exchange.requests
+	// logical counter). nil disables recording; see handleGEGoogleExchange
+	// and SetGEExchangeMetrics.
+	geExchangeMetrics GEExchangeMetricsRecorder
+	// externalBearerSnapshot is the always-on, in-process recorder for the
+	// three external-bearer/cache/exchange counters, wired as their default (see New) and
+	// served on GET /metrics regardless of GCP export configuration. Never
+	// nil after New.
+	externalBearerSnapshot *ExternalBearerSnapshotMetrics
+	// External-bearer path rate limiter (per-client-IP token bucket,
+	// auth_external_bearer.go). Also assigned to authConfig.ExternalBearerLimiter;
+	// kept here too so Start can run its cleanup goroutine, the same way
+	// geExchangeRateLimiter's is started below.
+	externalBearerRateLimiter *externalBearerRateLimiter
 }
 
 // groupsLogger returns the groups subsystem logger, falling back to
@@ -1608,16 +1622,80 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// Initialize image checker for harness config image status verification
 	srv.imageChecker = imagecheck.NewChecker()
 
-	// Initialize GE Google credential exchange service.
+	// Initialize the shared Google identity verification stack (base
+	// validator + resolver) once, unconditionally. The validator is lazy — it
+	// does no network I/O until ValidateIDToken/ValidateAccessToken is first
+	// called — and googleTrust (auth_external_bearer.go) is the single
+	// request-time source of truth for whether the external-bearer path is
+	// actually reachable. Building this unconditionally means Google trust
+	// added later via hot reload takes effect without a restart, and keeps
+	// exactly one validator/resolver instance shared between the GE exchange
+	// endpoint and the external-bearer path.
+	googleValidator := NewGoogleCredentialValidator(nil)
+	googleResolver := NewGoogleIdentityResolver(
+		s,                    // store.Store embeds UserStore
+		s,                    // store.Store embeds ExternalIdentityStore (ent-backed, durable)
+		srv.isUserAuthorized, // same domain/invite/allow-registration policy as web login
+		func(ctx context.Context, email string) string {
+			return srv.getUserRole(ctx, email, "", "")
+		},
+		slog.Default(),
+	)
+	// The external-bearer path (unlike the exchange endpoint) re-validates on
+	// every request, so it gets a caching decorator in front of the shared
+	// base validator. The exchange endpoint below is
+	// deliberately wired to the undecorated googleValidator, not this one:
+	// exchange behaviour must not change, and it already
+	// mints a short-lived (default 60s) Hub token per successful exchange
+	// rather than re-verifying the Google credential on every downstream
+	// call, so it has neither the request-per-request cost the cache exists
+	// to amortize nor a need to share cache staleness characteristics with
+	// this path. The resolver (identity -> Hub user, including suspension
+	// enforcement, which has no cache) is still the same shared instance
+	// either way.
+	srv.authConfig.GoogleValidator = NewCachingGoogleCredentialValidator(googleValidator)
+	srv.authConfig.GoogleResolver = googleResolver
+	// The atomic.Pointer box, not a recorder, is what must exist here:
+	// SetExternalBearerMetrics stores into this same box later, once an OTel
+	// MeterProvider exists (see AuthConfig.ExternalBearerMetrics for why a
+	// plain field would also work given today's call order, and why the box
+	// is used anyway).
+	srv.authConfig.ExternalBearerMetrics = &atomic.Pointer[ExternalBearerMetricsRecorder]{}
+
+	// The in-process counters (external-bearer outcome, cache
+	// result, exchange outcome) are always constructed and wired as the
+	// default recorder for all three, regardless of GCP export
+	// configuration: the exchange-deletion soak gate must not depend on
+	// cfg.Hub.GCPProjectID being set. cmd/server_foreground.go later wires an
+	// OTel-backed recorder that dual-writes into this same instance, so
+	// GET /metrics keeps counting the same totals across that switch.
+	srv.externalBearerSnapshot = NewExternalBearerSnapshotMetrics()
+	var defaultExtBearerMetrics ExternalBearerMetricsRecorder = srv.externalBearerSnapshot
+	srv.authConfig.ExternalBearerMetrics.Store(&defaultExtBearerMetrics)
+	if setter, ok := srv.authConfig.GoogleValidator.(interface {
+		SetMetrics(GoogleValidatorCacheMetricsRecorder)
+	}); ok {
+		setter.SetMetrics(srv.externalBearerSnapshot)
+	}
+	srv.geExchangeMetrics = srv.externalBearerSnapshot
+
+	// Kept on Server (not just authConfig) so Start can run its cleanup
+	// goroutine below, the same way geExchangeRateLimiter's is started.
+	// Without a running cleanup, the bounded bucket map fills permanently
+	// after maxEntries distinct client IPs and fails closed for every new
+	// one.
+	srv.externalBearerRateLimiter = newExternalBearerRateLimiter(cfg.TrustedProxies)
+	srv.authConfig.ExternalBearerLimiter = srv.externalBearerRateLimiter
+
+	// Initialize GE Google credential exchange service, sharing the validator
+	// and resolver above so both mechanisms produce identical decisions
+	// during the exchange-to-external-bearer soak.
 	if cfg.GEGoogleExchange.IsValid() {
-		geValidator := NewGoogleCredentialValidator(nil)
 		srv.geExchangeService = NewGEExchangeService(
 			cfg.GEGoogleExchange,
-			geValidator,
+			googleValidator,
 			srv.userTokenService,
-			s, // store.Store embeds ExternalIdentityStore (ent-backed, durable)
-			s,
-			srv.isUserAuthorized, // same domain/invite/allow-registration policy as web login
+			googleResolver,
 			slog.Default(),
 		)
 		srv.geExchangeRateLimiter = newGEExchangeRateLimiter()
@@ -2473,6 +2551,76 @@ func (s *Server) SetGCPTokenMetrics(m GCPTokenMetricsRecorder) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.gcpTokenMetrics = m
+}
+
+// SetExternalBearerMetrics wires the external-bearer authentication outcome
+// counter. Unlike SetMetrics/SetDBMetrics/SetDispatchMetrics/
+// SetGCPTokenMetrics above, this recorder is read from AuthConfig by the
+// free-standing UnifiedAuthMiddleware closure. That closure captures a copy
+// of authConfig each time applyMiddleware runs (Start(), Handler()), not
+// once inside New(); cmd/server_foreground.go happens to call this setter
+// before either, so a plain field would work under today's call order too.
+// Storing into the *atomic.Pointer already held by
+// AuthConfig.ExternalBearerMetrics — the same indirection FederationAuth
+// uses for hot reload, for the identical structural reason — means every
+// copy of that cfg, however many times it was captured, keeps observing the
+// same box: this setter takes effect race-free even if a future caller runs
+// it after Start()/Handler() already built the request-serving chain. A nil
+// recorder disables counting; it never changes the external-bearer path's
+// authentication outcome.
+//
+// If ExternalBearerMetrics is nil (a Server built without New(), which
+// never allocates the box), this allocates one rather than panicking; the
+// new box is only ever observed by later callers of this method, since
+// UnifiedAuthMiddleware never runs on such a Server.
+func (s *Server) SetExternalBearerMetrics(m ExternalBearerMetricsRecorder) {
+	if s.authConfig.ExternalBearerMetrics == nil {
+		s.authConfig.ExternalBearerMetrics = &atomic.Pointer[ExternalBearerMetricsRecorder]{}
+	}
+	s.authConfig.ExternalBearerMetrics.Store(&m)
+}
+
+// SetGoogleValidatorCacheMetrics wires the Google-credential cache counter
+// into the caching decorator constructed in New(). Logs a
+// warning and does nothing if the configured validator isn't (or is no
+// longer) that decorator — defensive only; production always wires
+// NewCachingGoogleCredentialValidator there.
+func (s *Server) SetGoogleValidatorCacheMetrics(m GoogleValidatorCacheMetricsRecorder) {
+	setter, ok := s.authConfig.GoogleValidator.(interface {
+		SetMetrics(GoogleValidatorCacheMetricsRecorder)
+	})
+	if !ok {
+		slog.Warn("SetGoogleValidatorCacheMetrics: configured Google validator does not support metrics wiring; cache counter stays disabled",
+			"validator_type", fmt.Sprintf("%T", s.authConfig.GoogleValidator))
+		return
+	}
+	setter.SetMetrics(m)
+}
+
+// ExternalBearerSnapshotMetrics returns the always-on, in-process recorder
+// for the external-bearer/cache/exchange counters, for GET
+// /metrics (handlers_health.go) and for passing into
+// NewOTelExternalBearerMetrics so the OTel-backed recorder dual-writes into
+// the same instance. Never nil for a Server built through New().
+func (s *Server) ExternalBearerSnapshotMetrics() *ExternalBearerSnapshotMetrics {
+	return s.externalBearerSnapshot
+}
+
+// SetGEExchangeMetrics wires the GE exchange outcome counter (the
+// ge_exchange.requests counter; see external_bearer_metrics.go for the
+// closed label set and the real exported metric name). Unlike
+// ExternalBearerMetrics above, handleGEGoogleExchange reads this directly
+// off *Server (it is a Server method, not a captured-by-value closure), so a
+// plain field set here — the same convention SetDBMetrics/SetDispatchMetrics/
+// SetGCPTokenMetrics use — needs no atomic indirection. It is still read
+// without a lock while this setter writes under s.mu, so — like
+// gcpTokenMetrics — callers must call this before Start, not concurrently
+// with request handling; cmd/server_foreground.go does this before
+// hubSrv.Start.
+func (s *Server) SetGEExchangeMetrics(m GEExchangeMetricsRecorder) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.geExchangeMetrics = m
 }
 
 // SetLocalImageChecker wires a local container runtime into the image
@@ -3873,6 +4021,9 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	}
 	if s.geExchangeRateLimiter != nil {
 		s.geExchangeRateLimiter.StartCleanup(ctx)
+	}
+	if s.externalBearerRateLimiter != nil {
+		s.externalBearerRateLimiter.StartCleanup(ctx)
 	}
 
 	// Start OIDC key cleanup loop to remove expired rotated keys from JWKS.

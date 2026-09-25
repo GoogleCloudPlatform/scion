@@ -52,6 +52,19 @@ func (v *countingGoogleValidator) totalCalls() int64 {
 	return v.idTokenCalls.Load() + v.accessTokenCalls.Load()
 }
 
+// newRejectingCountingValidator returns a *countingGoogleValidator whose zero
+// value would otherwise be a fakeGoogleValidator that returns (nil, nil) — if
+// a mutation ever lets a "must not reach the validator" test actually reach
+// it, a nil identity dereference panics the whole test binary instead of
+// failing the test's own counting.totalCalls() assertion. Giving both
+// methods a default error means that mutation fails loudly and locally.
+func newRejectingCountingValidator() *countingGoogleValidator {
+	return &countingGoogleValidator{fakeGoogleValidator: fakeGoogleValidator{
+		idTokenErr:     ErrGoogleInvalidCredential,
+		accessTokenErr: ErrGoogleInvalidCredential,
+	}}
+}
+
 // ---------------------------------------------------------------------------
 // Helper: build a test server with rate limiter + exchange service.
 // ---------------------------------------------------------------------------

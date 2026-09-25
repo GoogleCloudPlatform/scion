@@ -47,11 +47,18 @@ auth:
   # Supported schemes:
   #   "apiKey"  — shared static key via X-API-Key header (default for MVP)
   #   "bearer"  — shared static key via Authorization: Bearer header
-  #   "hubUAT"  — per-user Scion UAT (scion_pat_*) auth; tokens validated
-  #               via Hub /api/v1/auth/me; identity propagated to Hub calls
-  #   "hubJWT"  — per-user Scion JWT auth; tokens validated locally using
-  #               the hub.signing_key; identity propagated to Hub calls
-  #   "none"    — no authentication (not recommended for production)
+  #   "hubUAT"    — per-user Scion UAT (scion_pat_*) auth; tokens validated
+  #                 via Hub /api/v1/auth/me; identity propagated to Hub calls
+  #   "hubBearer" — forwards any bearer credential the Hub itself accepts
+  #                 (e.g. a Google user credential attached by an upstream
+  #                 caller) to Hub /api/v1/auth/me for admission, then
+  #                 forwards the same token verbatim to the Hub. Requires the
+  #                 Hub to have a matching trusted issuer configured
+  #                 (server.federation.trusted_issuers). No scion_pat_
+  #                 prefix requirement — the Hub is the sole arbiter.
+  #   "hubJWT"    — per-user Scion JWT auth; tokens validated locally using
+  #                 the hub.signing_key; identity propagated to Hub calls
+  #   "none"      — no authentication (not recommended for production)
   scheme: "apiKey"
 
   # Static API key (required for "apiKey" and "bearer" schemes only).
@@ -67,6 +74,14 @@ auth:
   # scheme: "hubUAT"
   # Callers present "Authorization: Bearer scion_pat_..." tokens.
   # No api_key needed. The bridge validates each token via Hub /api/v1/auth/me.
+  # uat_cache_ttl: 60s
+
+  # --- Google credential pass-through (e.g. Gemini Enterprise A2A clients) ---
+  # scheme: "hubBearer"
+  # Callers present "Authorization: Bearer <token>" with their own Google ID
+  # token or access token (no exchange). The bridge introspects it via Hub
+  # /api/v1/auth/me and forwards the same token to the Hub on every
+  # downstream call. No api_key needed.
   # uat_cache_ttl: 60s
 
   # --- Per-user JWT auth (for CLI/scripted access) ---

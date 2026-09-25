@@ -47,8 +47,18 @@ type FederationAuthenticator struct {
 
 // issuerEntry holds the configuration and JWKS cache for a single trusted issuer.
 type issuerEntry struct {
+	// config is the resolved configuration: ExpectedAudience falls back to
+	// oidcIssuerURL when the operator left it empty. Authenticate uses this
+	// copy, because federation tokens from a hub-type issuer are expected to
+	// validate against the Hub's own OIDC issuer URL by default.
 	config config.TrustedIssuerConfig
-	cache  *jwksCache
+	// rawConfig is the configuration exactly as configured, with no fallback
+	// applied. IssuerConfig returns this copy: callers that gate a feature on
+	// "was expected_audience actually set" (e.g. the external-bearer path)
+	// must see an empty ExpectedAudience as empty, not silently
+	// replaced by the Hub's unrelated OIDC issuer URL.
+	rawConfig config.TrustedIssuerConfig
+	cache     *jwksCache
 }
 
 // federationClaims is the claims shape for inbound federation OIDC identity tokens.
@@ -62,6 +72,24 @@ type federationClaims struct {
 	Email         string   `json:"email,omitempty"`
 	EmailVerified bool     `json:"email_verified,omitempty"`
 	Name          string   `json:"name,omitempty"`
+}
+
+// isGoogleUserIssuerMissingAudience reports whether issuer is the Google
+// issuer, configured as issuer_type "user", with an empty expected_audience:
+// the exact shape that leaves the external-bearer path permanently disabled
+// for it (googleTrust, auth_external_bearer.go). It checks
+// issuer.ExpectedAudience as configured (the caller's local variable, before
+// the oidcIssuerURL fallback below resolves it to something non-empty),
+// matching what IssuerConfig later reports and what googleTrust actually
+// gates on. Pure and side-effect-free by design: NewFederationAuthenticator
+// only turns a "true" result into a logged warning once the whole config has
+// been accepted, never per issuer inline, so a later issuer's failure can't
+// leave behind a warning about a config that never took effect.
+func isGoogleUserIssuerMissingAudience(issuer config.TrustedIssuerConfig, normalizedIssuerURL string) bool {
+	if normalizedIssuerURL != googleIssuerHTTPS && normalizedIssuerURL != googleIssuerBare {
+		return false
+	}
+	return IssuerType(issuer.IssuerType) == IssuerTypeUser && issuer.ExpectedAudience == ""
 }
 
 // NewFederationAuthenticator creates a FederationAuthenticator from the given config.
@@ -84,9 +112,21 @@ func NewFederationAuthenticator(cfg config.FederationConfig, oidcIssuerURL strin
 
 	issuers := make(map[string]*issuerEntry, len(cfg.TrustedIssuers))
 
+	// Collected here and only logged once every issuer in cfg has been
+	// accepted (just before the final return): logging inline, issuer by
+	// issuer, would log a warning for an earlier, disabled-shaped issuer
+	// even when a later issuer in the same config fails and the whole
+	// rebuild is discarded (operational_settings.go keeps the old config on
+	// error) — a warning about a config that never took effect.
+	var disabledExternalBearerIssuerURLs []string
+
 	for _, issuer := range cfg.TrustedIssuers {
 		// Normalize issuer URL by trimming trailing slashes for consistent map lookup.
 		normalizedIssuer := strings.TrimRight(issuer.IssuerURL, "/")
+
+		if isGoogleUserIssuerMissingAudience(issuer, normalizedIssuer) {
+			disabledExternalBearerIssuerURLs = append(disabledExternalBearerIssuerURLs, issuer.IssuerURL)
+		}
 
 		// Fix 2: In hosted mode (not workstation, not dev), reject HTTP issuer URLs.
 		if mode != "workstation" && mode != "dev" {
@@ -131,7 +171,10 @@ func NewFederationAuthenticator(cfg config.FederationConfig, oidcIssuerURL strin
 			return nil, fmt.Errorf("issuer %q: expected_audience is empty and no oidcIssuerURL provided", issuer.IssuerURL)
 		}
 
-		// Store the resolved audience back into the config copy for later use.
+		// rawCfg preserves ExpectedAudience exactly as configured (possibly
+		// empty); resolvedCfg carries the oidcIssuerURL fallback used by
+		// Authenticate. See issuerEntry's field docs.
+		rawCfg := issuer
 		resolvedCfg := issuer
 		resolvedCfg.ExpectedAudience = expectedAud
 
@@ -144,8 +187,9 @@ func NewFederationAuthenticator(cfg config.FederationConfig, oidcIssuerURL strin
 		}
 
 		issuers[normalizedIssuer] = &issuerEntry{
-			config: resolvedCfg,
-			cache:  cache,
+			config:    resolvedCfg,
+			rawConfig: rawCfg,
+			cache:     cache,
 		}
 	}
 
@@ -160,11 +204,35 @@ func NewFederationAuthenticator(cfg config.FederationConfig, oidcIssuerURL strin
 		}
 	}
 
+	// Only now, with every issuer in cfg accepted, log the collected
+	// warnings: this whole config is what takes effect, so every warning
+	// logged here describes a state that is actually live.
+	for _, issuerURL := range disabledExternalBearerIssuerURLs {
+		log.Warn("external-bearer path disabled for this issuer: issuer_type is \"user\" but expected_audience is empty",
+			"issuer_url", issuerURL)
+	}
+
 	return &FederationAuthenticator{
 		issuers:    issuers,
 		algorithms: algorithms,
 		log:        log,
 	}, nil
+}
+
+// IssuerConfig returns the trusted issuer configuration for issuerURL
+// (trailing slashes ignored) and whether such an issuer is configured.
+// ExpectedAudience reflects the operator's configuration exactly — it is
+// empty when expected_audience was left unset, even for issuer types (hub)
+// where Authenticate itself falls back to the Hub's OIDC issuer URL. Callers
+// that need the resolved-for-federation audience should use Authenticate;
+// callers gating a feature on "was an audience actually configured" (e.g.
+// external-bearer's googleTrust) should use this accessor.
+func (a *FederationAuthenticator) IssuerConfig(issuerURL string) (config.TrustedIssuerConfig, bool) {
+	entry, ok := a.issuers[strings.TrimRight(issuerURL, "/")]
+	if !ok {
+		return config.TrustedIssuerConfig{}, false
+	}
+	return entry.rawConfig, true
 }
 
 // Authenticate validates a federation OIDC identity token and returns the
