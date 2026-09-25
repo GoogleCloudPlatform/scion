@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -36,16 +37,17 @@ import (
 // project, different agent), and an agent JWT scoped to a different project
 // entirely. Shared by the list, get, and update authorization test files.
 type projectAgentAuthzFixture struct {
-	srv       *Server
-	store     store.Store
-	project   *store.Project
-	other     *store.Project
-	member    *store.User  // project owner/member
-	nonMember *store.User  // hub member, not a project member
-	admin     *store.User  // hub admin (system-scope bypass)
-	target    *store.Agent // the agent under test, in project
-	caller    *store.Agent // a different agent in the same project
-	stranger  *store.Agent // an agent in a different project
+	srv         *Server
+	store       store.Store
+	project     *store.Project
+	other       *store.Project
+	member      *store.User  // project owner/member
+	plainMember *store.User  // project member, not owner or admin (no attach)
+	nonMember   *store.User  // hub member, not a project member
+	admin       *store.User  // hub admin (system-scope bypass)
+	target      *store.Agent // the agent under test, in project
+	caller      *store.Agent // a different agent in the same project
+	stranger    *store.Agent // an agent in a different project
 }
 
 func projectAgentAuthzSetup(t *testing.T) *projectAgentAuthzFixture {
@@ -60,6 +62,13 @@ func projectAgentAuthzSetup(t *testing.T) *projectAgentAuthzFixture {
 	}
 	require.NoError(t, s.CreateUser(ctx, f.member))
 	ensureHubMembership(ctx, s, f.member.ID)
+
+	f.plainMember = &store.User{
+		ID: tid("paa-plain-member"), Email: "paa-plain-member@test.com",
+		DisplayName: "PlainMember", Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, f.plainMember))
+	ensureHubMembership(ctx, s, f.plainMember.ID)
 
 	f.nonMember = &store.User{
 		ID: tid("paa-nonmember"), Email: "paa-nonmember@test.com",
@@ -91,6 +100,7 @@ func projectAgentAuthzSetup(t *testing.T) *projectAgentAuthzFixture {
 	}
 	require.NoError(t, s.CreateProject(ctx, f.project))
 	srv.createProjectMembersGroup(ctx, f.project)
+	msgAuthzAddProjectMember(t, s, f.plainMember.ID, f.project.ID, f.project.Slug, store.GroupMemberRoleMember)
 
 	f.other = &store.Project{
 		ID: tid("paa-other-proj"), Name: "PAA Other Project", Slug: "paa-other-project",
@@ -106,6 +116,9 @@ func projectAgentAuthzSetup(t *testing.T) *projectAgentAuthzFixture {
 			CreatedBy: f.member.ID, OwnerID: f.member.ID,
 			AppliedConfig: &store.AgentAppliedConfig{
 				Env: map[string]string{"PLAIN_VAR": "plain-value", "GITHUB_TOKEN": "ghp_should_never_leak"},
+				InlineConfig: &api.ScionConfig{
+					Env: map[string]string{"INLINE_PLAIN_VAR": "inline-plain-value", "GITHUB_TOKEN": "ghp_should_never_leak"},
+				},
 			},
 		}
 		require.NoError(t, s.CreateAgent(ctx, a))
@@ -116,6 +129,18 @@ func projectAgentAuthzSetup(t *testing.T) *projectAgentAuthzFixture {
 	f.stranger = mk("paa-stranger", f.other.ID)
 
 	return f
+}
+
+// selfToken mints an agent JWT for f.target itself, for exercising the
+// "an agent reads its own project-scoped record" self-read path.
+func (f *projectAgentAuthzFixture) selfToken(t *testing.T, scopes ...AgentTokenScope) string {
+	t.Helper()
+	svc := f.srv.GetAgentTokenService()
+	require.NotNil(t, svc)
+	allScopes := append([]AgentTokenScope{ScopeProjectRead}, scopes...)
+	tok, err := svc.GenerateAgentToken(f.target.ID, f.target.ProjectID, allScopes, nil)
+	require.NoError(t, err)
+	return tok
 }
 
 // callerToken mints an agent JWT for f.caller -- a different agent from

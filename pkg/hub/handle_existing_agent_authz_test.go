@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -103,6 +104,9 @@ func (f *handleExistingAgentAuthzFixture) agent(t *testing.T, name, phase string
 		CreatedBy: f.owner.ID, OwnerID: f.owner.ID,
 		AppliedConfig: &store.AgentAppliedConfig{
 			Env: map[string]string{"PLAIN_VAR": "plain-value", "GITHUB_TOKEN": "ghp_should_never_leak"},
+			InlineConfig: &api.ScionConfig{
+				Env: map[string]string{"INLINE_PLAIN_VAR": "inline-plain-value", "GITHUB_TOKEN": "ghp_should_never_leak"},
+			},
 		},
 	}
 	require.NoError(t, f.store.CreateAgent(context.Background(), a))
