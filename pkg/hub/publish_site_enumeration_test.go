@@ -116,6 +116,17 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 
 		// processMentions: publish inside if persisted block.
 		"handlers_agent_messaging.go:processMentions": "Publish inside if persisted block",
+
+		// applyBrokerMessageFailure (ptone/scion#1866): unlike every other
+		// guarded site, this function never calls CreateMessage — it acts on
+		// a row a prior request already persisted. The row's existence is
+		// confirmed by the GetMessage lookup earlier in the function
+		// (returns false on ErrNotFound/lookup error), and the publish is
+		// reached only after s.markFailed has already written
+		// dispatch_state=failed for that row (also returns false on error).
+		// The publish mirrors that committed write onto the in-memory copy;
+		// it is not gating persistence, persistence already happened.
+		"message_delivery_failures.go:applyBrokerMessageFailure": "Acts on an already-persisted row (confirmed via GetMessage) after markFailed has already committed; publish mirrors the committed write, not a pending one",
 	}
 
 	// Build accounted set from guarded entries.

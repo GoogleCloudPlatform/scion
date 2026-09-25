@@ -190,6 +190,65 @@ func TestBufferedFlushFailure_MarksAgentDMFailed(t *testing.T) {
 	assert.Empty(t, notice.MessageID, "the notice itself must not be reportable (no feedback loop)")
 }
 
+// TestBufferedFlushFailure_NotifiesUserSender covers ptone/scion#1866: a
+// human sender has no terminal for a DELIVERY_FAILED notice to be injected
+// into (unlike the agent-sender path above), so the fix re-publishes the
+// message with its updated dispatch state so a connected browser gets the
+// "Failed" delivery badge live instead of only on next reload.
+func TestBufferedFlushFailure_NotifiesUserSender(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := setupBrokerTestProject(t, s)
+	target := setupBrokerTestAgent(t, s, projectID, "target-agent", "running")
+
+	events := NewChannelEventPublisher()
+	defer events.Close()
+	srv.SetEventPublisher(events)
+
+	sub, unsubscribe := events.Subscribe("agent." + target.ID + ".message")
+	defer unsubscribe()
+
+	msgID := api.NewUUID()
+	require.NoError(t, s.CreateMessage(ctx, &store.Message{
+		ID:            msgID,
+		ProjectID:     projectID,
+		Sender:        "user:alice",
+		SenderID:      tid("user-alice"),
+		Recipient:     "agent:" + target.Slug,
+		RecipientID:   target.ID,
+		Msg:           "hello from alice",
+		Type:          "instruction",
+		AgentID:       target.ID,
+		CreatedAt:     time.Now(),
+		DispatchState: store.MessageDispatchDispatched,
+	}))
+
+	rr, resp := postMessageFailures(t, srv, target.RuntimeBrokerID, target.RuntimeBrokerID, messageDeliveryFailure{
+		MessageID: msgID,
+		Reason:    "docker ps failed: exit status 1",
+	})
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	assert.Equal(t, 1, resp.Marked)
+
+	select {
+	case evt := <-sub:
+		var payload UserMessageEvent
+		require.NoError(t, json.Unmarshal(evt.Data, &payload))
+		assert.Equal(t, msgID, payload.ID)
+		assert.Equal(t, store.MessageDispatchFailed, payload.DispatchState,
+			"the user sender's browser must be pushed the updated dispatch state live")
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for a live delivery-failure event for the user sender")
+	}
+
+	row, err := s.GetMessage(ctx, msgID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchFailed, row.DispatchState)
+	require.NotNil(t, row.DispatchFailureReason)
+	assert.Contains(t, *row.DispatchFailureReason, "docker ps failed")
+}
+
 // A broker-supplied reason is untrusted: it is bounded in size and stripped
 // of terminal control sequences before being stored or echoed into the
 // sender's terminal (which may run on a different broker).
