@@ -269,6 +269,9 @@ func TestEnsureHubReady_HubContextEnvVars(t *testing.T) {
 	// Simulate container env vars
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 	t.Setenv("SCION_HUB_URL", "")
+	// Clear SCION_PROJECT_ID so it can't shadow the legacy var this test is
+	// exercising — ambient env in Scion agent containers commonly sets it.
+	t.Setenv("SCION_PROJECT_ID", "")
 	t.Setenv("SCION_GROVE_ID", projectID)
 	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
 	t.Setenv("SCION_DEV_TOKEN", "")
@@ -344,6 +347,9 @@ func TestEnsureHubReady_HubContextSkipsSyncAndRegistration(t *testing.T) {
 	t.Setenv("HOME", tmpHome)
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 	t.Setenv("SCION_HUB_URL", "")
+	// Clear SCION_PROJECT_ID so it can't shadow the legacy var this test is
+	// exercising — ambient env in Scion agent containers commonly sets it.
+	t.Setenv("SCION_PROJECT_ID", "")
 	t.Setenv("SCION_GROVE_ID", projectID)
 	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
 	t.Setenv("SCION_DEV_TOKEN", "")
