@@ -56,6 +56,15 @@ func (c *IAPExecConnector) Exec(ctx context.Context, project, location, instance
 	return outBuf.Bytes(), err
 }
 
+// ExecWithStdin runs cmd over the same IAP SSH tunnel as Exec, but attaches
+// stdin so callers can deliver secrets without putting them in cmd (which
+// becomes part of the remote command line). See #1355.
+func (c *IAPExecConnector) ExecWithStdin(ctx context.Context, project, location, instanceName string, cmd []string, stdin io.Reader) ([]byte, error) {
+	var outBuf bytes.Buffer
+	err := c.runSSH(ctx, project, location, instanceName, cmd, stdin, &outBuf, &outBuf)
+	return outBuf.Bytes(), err
+}
+
 func (c *IAPExecConnector) runSSH(ctx context.Context, project, location, instanceName string, cmdArgs []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
 	authCreds, err := credentials.DetectDefault(&credentials.DetectOptions{})
 	if err != nil {

@@ -2308,6 +2308,20 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 }
 
 func (r *KubernetesRuntime) Exec(ctx context.Context, id string, cmd []string) (string, error) {
+	return r.execWithOptionalStdin(ctx, id, cmd, nil)
+}
+
+// ExecWithStdin runs cmd in the pod with stdin piped from the given reader,
+// instead of embedding data in cmd's argv. Used to deliver secrets without
+// exposing them via a process's command line. See #1355.
+func (r *KubernetesRuntime) ExecWithStdin(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
+	return r.execWithOptionalStdin(ctx, id, cmd, stdin)
+}
+
+// execWithOptionalStdin is the shared implementation behind Exec and
+// ExecWithStdin. stdin may be nil, in which case the exec has no stdin
+// stream attached (the historical Exec behaviour).
+func (r *KubernetesRuntime) execWithOptionalStdin(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
 	var namespace string
 	podName := id
 
@@ -2339,7 +2353,7 @@ func (r *KubernetesRuntime) Exec(ctx context.Context, id string, cmd []string) (
 	option := &corev1.PodExecOptions{
 		Container: agentContainerName,
 		Command:   suCmd,
-		Stdin:     false,
+		Stdin:     stdin != nil,
 		Stdout:    true,
 		Stderr:    true,
 		TTY:       false,
@@ -2357,6 +2371,7 @@ func (r *KubernetesRuntime) Exec(ctx context.Context, id string, cmd []string) (
 
 	var stdout, stderr bytes.Buffer
 	err = executor.StreamWithContext(ctx, remotecommand.StreamOptions{
+		Stdin:  stdin,
 		Stdout: &stdout,
 		Stderr: &stderr,
 	})

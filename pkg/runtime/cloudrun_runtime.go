@@ -28,6 +28,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -819,6 +820,16 @@ func (r *CloudRunRuntime) Exec(ctx context.Context, id string, cmd []string) (st
 		return "", fmt.Errorf("failed to resolve Cloud Run config: %w", err)
 	}
 	out, err := r.exec.Exec(ctx, r.config.ProjectID, r.config.Location, id, cmd)
+	return string(out), err
+}
+
+// ExecWithStdin runs cmd on the instance with stdin piped from the given
+// reader, instead of embedding data in cmd's argv. See #1355.
+func (r *CloudRunRuntime) ExecWithStdin(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
+	if err := r.resolveConfig(ctx); err != nil {
+		return "", fmt.Errorf("failed to resolve Cloud Run config: %w", err)
+	}
+	out, err := r.exec.ExecWithStdin(ctx, r.config.ProjectID, r.config.Location, id, cmd, stdin)
 	return string(out), err
 }
 

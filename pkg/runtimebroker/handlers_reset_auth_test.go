@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -109,6 +110,68 @@ func TestResetAuth_SignalSuccessReturns200(t *testing.T) {
 	}
 	if !signaled {
 		t.Error("expected PID 1 to be signaled via kill -USR2 1")
+	}
+}
+
+// TestResetAuth_TokenDeliveredViaStdinNotArgv is the regression test for
+// ptone/scion#1355: the token must reach the container over the exec's
+// stdin, never as a substring of the exec's cmd slice. The cmd slice is what
+// runtimes append to a host process's argv (e.g. `docker exec ... sh -c
+// "<cmd>"`), which is readable via /proc/<pid>/cmdline for the lifetime of
+// the exec — a heredoc embedded in cmd does not change that, since the
+// heredoc body is still part of cmd's text.
+func TestResetAuth_TokenDeliveredViaStdinNotArgv(t *testing.T) {
+	mgr := resetAuthAgents()
+	const token = "super-secret-reset-auth-token"
+
+	var (
+		writeCalled    bool
+		stdinDelivered string
+	)
+	rt := &scionrt.MockRuntime{
+		NameFunc: func() string { return "docker" },
+		// Exec (argv-only) must never see the token. If the fix regresses to
+		// embedding the token in cmd and calling Exec instead of
+		// ExecWithStdin, this fires and fails the test.
+		ExecFunc: func(_ context.Context, _ string, cmd []string) (string, error) {
+			for _, arg := range cmd {
+				if strings.Contains(arg, token) {
+					t.Errorf("token leaked into argv-only Exec: %q", arg)
+				}
+			}
+			if len(cmd) > 0 && cmd[0] == "kill" {
+				return "", nil
+			}
+			t.Error("token write should go through ExecWithStdin, not Exec")
+			return "", nil
+		},
+		ExecWithStdinFunc: func(_ context.Context, _ string, cmd []string, stdin io.Reader) (string, error) {
+			writeCalled = true
+			for _, arg := range cmd {
+				if strings.Contains(arg, token) {
+					t.Errorf("token embedded in ExecWithStdin's cmd (argv): %q", arg)
+				}
+			}
+			b, err := io.ReadAll(stdin)
+			if err != nil {
+				t.Fatalf("failed to read stdin: %v", err)
+			}
+			stdinDelivered = string(b)
+			return "", nil
+		},
+	}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	w := doResetAuth(t, srv, token)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if !writeCalled {
+		t.Error("expected token write to go through ExecWithStdin")
+	}
+	if stdinDelivered != token {
+		t.Errorf("token not delivered via stdin verbatim: got %q, want %q", stdinDelivered, token)
 	}
 }
 

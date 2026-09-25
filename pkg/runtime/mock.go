@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"context"
+	"io"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
@@ -34,6 +35,7 @@ type MockRuntime struct {
 	PullImageFunc        func(ctx context.Context, image string) error
 	SyncFunc             func(ctx context.Context, id string, direction SyncDirection) error
 	ExecFunc             func(ctx context.Context, id string, cmd []string) (string, error)
+	ExecWithStdinFunc    func(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error)
 	GetWorkspacePathFunc func(ctx context.Context, id string) (string, error)
 }
 
@@ -131,6 +133,18 @@ func (m *MockRuntime) Sync(ctx context.Context, id string, direction SyncDirecti
 }
 
 func (m *MockRuntime) Exec(ctx context.Context, id string, cmd []string) (string, error) {
+	if m.ExecFunc != nil {
+		return m.ExecFunc(ctx, id, cmd)
+	}
+	return "", nil
+}
+
+// ExecWithStdin falls back to ExecFunc (ignoring stdin) when ExecWithStdinFunc
+// is not set, so existing tests built around ExecFunc keep working unchanged.
+func (m *MockRuntime) ExecWithStdin(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
+	if m.ExecWithStdinFunc != nil {
+		return m.ExecWithStdinFunc(ctx, id, cmd, stdin)
+	}
 	if m.ExecFunc != nil {
 		return m.ExecFunc(ctx, id, cmd)
 	}
