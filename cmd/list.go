@@ -173,7 +173,7 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 	return displayAgents(agents, listAll, true)
 }
 
-// enrichAgentsClientSide populates Grove and RuntimeBrokerName fields client-side
+// enrichAgentsClientSide populates project and RuntimeBrokerName fields client-side
 // when the Hub doesn't provide them (for backwards compatibility with older Hubs).
 func enrichAgentsClientSide(ctx context.Context, client hubclient.Client, agents []api.AgentInfo) {
 	// Collect unique IDs that need enrichment
@@ -579,7 +579,7 @@ func handleUnlinkedProjectPrompt(cmd *cobra.Command, args []string) bool {
 		return false // Hub not reachable, different error
 	}
 
-	// Check if project is registered — prefer hub.groveId over grove_id
+	// Check if project is registered — prefer hub.projectId over project_id
 	projectID := settings.GetHubProjectID()
 	if projectID == "" {
 		projectID = settings.ProjectID

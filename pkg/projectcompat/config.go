@@ -16,11 +16,20 @@ package projectcompat
 
 const (
 	ConfigProjectIDKey     = "project_id"
-	ConfigGroveIDKey       = "grove_id"
 	ConfigHubProjectIDKey  = "hub.project_id"
 	ConfigHubProjectIDJSON = "hub.projectId"
-	ConfigHubGroveIDKey    = "hub.grove_id"
-	ConfigHubGroveIDJSON   = "hub.groveId"
+	// ConfigGroveIDKey is the legacy top-level grove_id key name. It is no
+	// longer accepted as CLI key-name input (see IsProjectIDConfigKey), but
+	// it is still used to map SCION_GROVE_ID onto the versioned settings
+	// loader's raw field name (see EnvProjectIDConfigKey).
+	ConfigGroveIDKey = "grove_id"
+	// ConfigHubGroveIDKey is the legacy hub.grove_id settings-FILE key. It
+	// keeps working as a read-only fallback when a settings file still has
+	// a `hub: grove_id:` entry; it is not accepted as `config get/set`
+	// key-name input. Do not delete: pkg/config/koanf.go and
+	// pkg/config/settings_v1.go still read it, and a follow-up change
+	// migrates settings files that still use it.
+	ConfigHubGroveIDKey = "hub.grove_id"
 
 	EnvProjectID    = "SCION_PROJECT_ID"
 	EnvGroveID      = "SCION_GROVE_ID"
@@ -36,27 +45,23 @@ const (
 	GrovesDir         = "groves"
 )
 
+// IsProjectIDConfigKey reports whether key is the canonical top-level
+// project-id config key name. The legacy grove_id key name is no longer
+// accepted as CLI input (see ConfigGroveIDKey for the settings-file fallback
+// that still exists).
 func IsProjectIDConfigKey(key string) bool {
-	return key == ConfigProjectIDKey || key == ConfigGroveIDKey
+	return key == ConfigProjectIDKey
 }
 
+// IsHubProjectIDConfigKey reports whether key is a canonical hub project-id
+// config key name. The legacy hub.grove_id / hub.groveId key names are no
+// longer accepted as CLI input.
 func IsHubProjectIDConfigKey(key string) bool {
 	switch key {
-	case ConfigHubProjectIDKey, ConfigHubProjectIDJSON, ConfigHubGroveIDKey, ConfigHubGroveIDJSON:
+	case ConfigHubProjectIDKey, ConfigHubProjectIDJSON:
 		return true
 	default:
 		return false
-	}
-}
-
-func CanonicalConfigKey(key string) (canonical string, legacy bool) {
-	switch {
-	case IsProjectIDConfigKey(key):
-		return ConfigProjectIDKey, key == ConfigGroveIDKey
-	case IsHubProjectIDConfigKey(key):
-		return ConfigHubProjectIDKey, key == ConfigHubGroveIDKey || key == ConfigHubGroveIDJSON
-	default:
-		return CanonicalFieldAliases(key)
 	}
 }
 

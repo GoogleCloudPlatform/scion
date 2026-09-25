@@ -3082,7 +3082,7 @@ hub:
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(v1Content), 0644))
 
 	// Call UpdateSetting with a key that would clobber the format in the old code
-	err := UpdateSetting(projectDir, "grove_id", "new-grove-id", false)
+	err := UpdateSetting(projectDir, "project_id", "new-grove-id", false)
 	require.NoError(t, err)
 
 	// Read back the file and verify it's still v1 format
@@ -3255,7 +3255,7 @@ hub:
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(v1Content), 0644))
 
 	// Simulate what happens during hub operations: multiple sequential updates
-	require.NoError(t, UpdateSetting(projectDir, "grove_id", "new-grove-id", false))
+	require.NoError(t, UpdateSetting(projectDir, "project_id", "new-grove-id", false))
 	require.NoError(t, UpdateSetting(projectDir, "hub.brokerId", "broker-abc", false))
 	require.NoError(t, UpdateSetting(projectDir, "hub.brokerToken", "token-xyz", false))
 	require.NoError(t, UpdateSetting(projectDir, "hub.enabled", "false", false))
@@ -3305,7 +3305,7 @@ hub:
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(legacyContent), 0644))
 
 	// UpdateSetting should auto-migrate legacy to v1 and apply the update
-	err := UpdateSetting(projectDir, "grove_id", "my-grove-id", false)
+	err := UpdateSetting(projectDir, "project_id", "my-grove-id", false)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(filepath.Join(projectDir, "settings.yaml"))
@@ -4000,11 +4000,11 @@ func TestGetVersionedSettingValue(t *testing.T) {
 		{"default_harness_config", "claude"},
 		{"image_registry", "ghcr.io/myorg"},
 		{"cli.autohelp", "true"},
-		{"grove_id", "grove-123"},
+		{"project_id", "grove-123"},
 		{"hub.enabled", "false"},
 		{"hub.linked", "true"},
 		{"hub.endpoint", "https://hub.example.com"},
-		{"hub.groveId", "grove-123"},
+		{"hub.projectId", "grove-123"},
 		{"hub.local_only", "true"},
 		{"hub.brokerId", "broker-1"},
 		{"hub.brokerToken", "tok-secret"},
@@ -4024,9 +4024,16 @@ func TestGetVersionedSettingValue(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown or complex setting key")
 
+	// Legacy grove_id key names are no longer accepted as CLI key-name input.
+	for _, key := range []string{"grove_id", "hub.grove_id", "hub.groveId"} {
+		_, err := GetVersionedSettingValue(vs, key)
+		assert.Error(t, err, "key=%s", key)
+		assert.Contains(t, err.Error(), "unknown or complex setting key", "key=%s", key)
+	}
+
 	// Nil sub-structs should return empty strings
 	empty := &VersionedSettings{SchemaVersion: "1"}
-	for _, key := range []string{"grove_id", "hub.endpoint", "hub.brokerId", "cli.autohelp"} {
+	for _, key := range []string{"project_id", "hub.endpoint", "hub.brokerId", "cli.autohelp"} {
 		got, err := GetVersionedSettingValue(empty, key)
 		require.NoError(t, err, "key=%s", key)
 		assert.Empty(t, got, "key=%s", key)

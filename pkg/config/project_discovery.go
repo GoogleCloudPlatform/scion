@@ -42,7 +42,6 @@ const (
 type ProjectInfo struct {
 	Name          string        `json:"name"`
 	ProjectID     string        `json:"project_id,omitempty"`
-	GroveID       string        `json:"grove_id,omitempty"`
 	Type          ProjectType   `json:"type"`
 	ConfigPath    string        `json:"config_path"`
 	WorkspacePath string        `json:"workspace_path,omitempty"`
@@ -85,7 +84,6 @@ func DiscoverProjects() ([]ProjectInfo, error) {
 		pi.AgentCount = countAgents(filepath.Join(globalDir, "agents"))
 		if settings, err := LoadSettings(globalDir); err == nil {
 			pi.ProjectID = settings.ProjectID
-			pi.GroveID = settings.ProjectID
 		}
 		projects = append(projects, pi)
 		seenSlugs["global"] = true
@@ -176,7 +174,6 @@ func projectInfoFromExternal(configPath, dirName, slug string) ProjectInfo {
 	settings, err := LoadSettings(configPath)
 	if err == nil {
 		pi.ProjectID = settings.ProjectID
-		pi.GroveID = settings.ProjectID
 		pi.WorkspacePath = settings.WorkspacePath
 	}
 
@@ -211,7 +208,6 @@ func projectInfoFromGitExternalWithConfig(configPath, agentsDir, dirName, slug s
 		if vs.ProjectType == string(ProjectTypeShadow) {
 			if vs.Hub != nil && vs.Hub.ProjectID != "" {
 				pi.ProjectID = vs.Hub.ProjectID
-				pi.GroveID = vs.Hub.ProjectID
 			}
 			pi.Type = ProjectTypeShadow
 			pi.WorkspacePath = vs.WorkspacePath
@@ -225,7 +221,6 @@ func projectInfoFromGitExternalWithConfig(configPath, agentsDir, dirName, slug s
 
 	if settings, err := LoadSettings(configPath); err == nil {
 		pi.ProjectID = settings.ProjectID
-		pi.GroveID = settings.ProjectID
 	}
 	pi.AgentCount = countAgents(agentsDir)
 	if pi.ProjectID == "" {
