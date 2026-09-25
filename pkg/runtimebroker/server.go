@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -1100,6 +1101,13 @@ func (s *Server) discoverAuxiliaryRuntimes() {
 	}
 }
 
+// ErrAgentListUnavailable wraps a runtime.List failure encountered while
+// resolving an agent slug (e.g. LookupAgent, LookupContainerID). It is
+// distinct from "no such agent": the container runtime itself failed to
+// respond (e.g. an intermittent `docker ps` error), so the caller should
+// treat this as retryable rather than reporting the agent as missing.
+var ErrAgentListUnavailable = errors.New("agent runtime listing temporarily unavailable")
+
 // LookupContainerID implements AgentLookup interface.
 // It looks up an agent by slug and returns its container ID.
 // projectID scopes the lookup to prevent cross-project collision.
@@ -1113,7 +1121,7 @@ func (s *Server) LookupContainerID(ctx context.Context, slug, projectID string) 
 	filter := scopedNameFilter(slug, projectID)
 	agents, err := s.manager.List(ctx, filter)
 	if err != nil {
-		return "", fmt.Errorf("failed to list agents: %w", err)
+		return "", fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
 	}
 	agents = agentsForProject(agents, projectID)
 
@@ -1207,7 +1215,7 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 	// Try default manager first
 	agents, err := s.manager.List(ctx, filter)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list agents: %w", err)
+		return nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
 	}
 	agents = agentsForProject(agents, projectID)
 

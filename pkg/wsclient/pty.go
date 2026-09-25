@@ -120,13 +120,43 @@ func (c *PTYClient) Connect(ctx context.Context) error {
 			return fmt.Errorf("connection timed out after %v", connectTimeout)
 		}
 		if resp != nil && resp.StatusCode >= 400 {
-			return fmt.Errorf("connection failed with status %d: %w", resp.StatusCode, err)
+			return fmt.Errorf("connection failed with status %d: %s", resp.StatusCode, attachFailureDetail(resp, err))
 		}
 		return fmt.Errorf("connection failed: %w", err)
 	}
 
 	c.conn = conn
 	return nil
+}
+
+// attachErrorBody mirrors the shape of runtimebroker's JSON error envelope
+// (APIError/ErrorResponse) closely enough to pull out the human-readable
+// message without importing the broker package.
+type attachErrorBody struct {
+	Error struct {
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// attachFailureDetail extracts an actionable message from a failed
+// WebSocket handshake response. Without this, a caller only ever sees
+// "websocket: bad handshake" — the broker's actual explanation (e.g. "agent
+// not found" vs. "container runtime temporarily unavailable, retry") is in
+// the response body, which gorilla/websocket buffers but does not surface.
+func attachFailureDetail(resp *http.Response, fallback error) string {
+	if resp == nil || resp.Body == nil {
+		return fallback.Error()
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if err != nil || len(body) == 0 {
+		return fallback.Error()
+	}
+
+	var parsed attachErrorBody
+	if err := json.Unmarshal(body, &parsed); err == nil && parsed.Error.Message != "" {
+		return parsed.Error.Message
+	}
+	return strings.TrimSpace(string(body))
 }
 
 // buildWebSocketURL constructs the WebSocket URL.
