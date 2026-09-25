@@ -237,6 +237,22 @@ GOOGLE_CLOUD_PROJECT=<your-project-id>
 The `SESSION_SECRET` is generated once during initial deployment and preserved
 on subsequent runs.
 
+### Hub-scoped agent env vars
+
+`hub.env` configures the Hub process only. The env vars that agents receive
+are stored in the hub database. After the Phase 3 health check, the deploy
+script writes these hub-scoped env vars (injection mode `always`) into
+`/home/scion/.scion/hub.db` with `sqlite3`:
+
+| Key | Value |
+|-----|-------|
+| `GOOGLE_CLOUD_PROJECT` | your project ID |
+| `GOOGLE_CLOUD_LOCATION` | `global` (the global Vertex AI endpoint, intentionally) |
+
+They appear in the admin UI as hub env vars, and you can edit them there.
+Re-running `deploy.sh` resets both keys to the values above. If the write
+fails, the deploy continues and prints the command to run manually.
+
 ## Chat Plugins
 
 During deployment, the script prompts you to select chat integrations:
