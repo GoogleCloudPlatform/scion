@@ -292,6 +292,13 @@ type ServerConfig struct {
 	// AuditRetentionDays is the number of days to retain authorization audit records.
 	// Default: 90. Used by CleanupAuditRecords for periodic retention cleanup.
 	AuditRetentionDays int
+
+	// FailedMessageRetentionDays is the number of days to retain messages in
+	// dispatch_state="failed" before the failed-message-retention sweep
+	// purges them. Default: 7 (see defaultFailedMessageRetentionDays). Mirrors
+	// the AuditRetentionDays pattern. Zero or negative falls back to the
+	// default rather than disabling the sweep.
+	FailedMessageRetentionDays int
 }
 
 // MaintenanceConfig holds configuration for routine maintenance operation executors.
@@ -3937,6 +3944,7 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	s.scheduler.RegisterRecurringSingleton("broker-heartbeat-timeout", 5, store.LockBrokerHeartbeatTimeout, s.brokerHeartbeatTimeoutHandler())
 	s.scheduler.RegisterRecurringSingleton("broker-affinity-reap", 5, store.LockBrokerAffinityReap, s.brokerAffinityReapHandler())
 	s.scheduler.RegisterRecurringSingleton("broker-message-sweep", 5, store.LockBrokerMessageSweep, s.brokerMessageSweepHandler())
+	s.scheduler.RegisterRecurringSingleton("failed-message-retention", 60, store.LockFailedMessageRetention, s.failedMessageRetentionHandler())
 	s.scheduler.RegisterRecurringSingleton("exposed-ports-sweep", 5, store.LockExposedPortsSweep, s.exposedPortsSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("notification-dispatch-sweep", 5, store.LockNotificationDispatchSweep, s.notificationDispatchSweepHandler())
 

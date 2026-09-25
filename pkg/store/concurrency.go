@@ -147,6 +147,11 @@ const (
 	// deployments). See design doc §6 "Scheduled Update Check".
 	LockReleaseUpdateCheck AdvisoryLockKey = 0x5C100018
 
+	// LockFailedMessageRetention guards the periodic purge of messages in
+	// dispatch_state="failed" that have exceeded the configured retention
+	// window (Server.Config.FailedMessageRetentionDays).
+	LockFailedMessageRetention AdvisoryLockKey = 0x5C100019
+
 	// LockWorkspaceProvision is the CLASS ID for per-project workspace
 	// provisioning locks. It is used with the two-int advisory lock form
 	// pg_try_advisory_lock(classid, objid), where classid is this constant

@@ -626,6 +626,12 @@ type BrokerDispatchStore interface {
 	// past the given cutoff to failed, recording the reason. Returns the
 	// number of messages expired.
 	ExpireStuckPendingMessages(ctx context.Context, before time.Time, reason string) (int, error)
+
+	// FailPendingMessagesWithMissingRecipient transitions pending messages to
+	// failed early, without waiting for ExpireStuckPendingMessages' TTL, when
+	// their recipient agent has been deleted (soft- or hard-deleted) and can
+	// therefore never accept delivery. Returns the number of messages failed.
+	FailPendingMessagesWithMissingRecipient(ctx context.Context, reason string) (int, error)
 }
 
 // TemplateStore defines template persistence operations.
@@ -1426,6 +1432,13 @@ type MessageStore interface {
 	// PurgeOldMessages removes read messages older than readCutoff and
 	// unread messages older than unreadCutoff. Returns count removed.
 	PurgeOldMessages(ctx context.Context, readCutoff time.Time, unreadCutoff time.Time) (int, error)
+
+	// PurgeFailedMessages removes messages with dispatch_state="failed" whose
+	// created timestamp is before cutoff. Returns the number of messages
+	// removed. Unlike PurgeOldMessages (read/unread semantics, which would
+	// also delete successfully delivered history), this filters strictly on
+	// dispatch_state so delivered messages are never touched.
+	PurgeFailedMessages(ctx context.Context, cutoff time.Time) (int, error)
 
 	// SetMessageConversationID updates the conversation_id on an existing
 	// message. Used by the Phase 4 backfill to link legacy messages to
