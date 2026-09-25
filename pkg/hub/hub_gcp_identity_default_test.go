@@ -49,18 +49,85 @@ func TestHubDefaultGCPIdentity_NoDefaultsFallBackToBlock(t *testing.T) {
 	assert.Equal(t, store.GCPMetadataModeBlock, identity.MetadataMode)
 }
 
+// markBrokerEmbedded labels the fixture's broker as the hub's embedded
+// (co-located) broker, which is what a single-node VM dispatches to.
+func markBrokerEmbedded(t *testing.T, f *bypassAgentsFixture) {
+	t.Helper()
+	ctx := context.Background()
+	b, err := f.store.GetRuntimeBroker(ctx, f.broker.ID)
+	require.NoError(t, err)
+	if b.Labels == nil {
+		b.Labels = map[string]string{}
+	}
+	b.Labels["scion.io/broker-role"] = "embedded"
+	require.NoError(t, f.store.UpdateRuntimeBroker(ctx, b))
+}
+
 // TestHubDefaultGCPIdentity_PassthroughAppliedWhenNoProjectDefault covers the
 // motivating case from the brief: a single-node VM admin sets "passthrough"
 // as the hub-wide default, and a project with no default of its own inherits
-// it.
+// it on the embedded broker.
 func TestHubDefaultGCPIdentity_PassthroughAppliedWhenNoProjectDefault(t *testing.T) {
 	f := bypassAgentsSetup(t)
+	markBrokerEmbedded(t, f)
 	setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
 		DefaultGCPIdentityMode: store.GCPMetadataModePassthrough,
 	})
 
 	identity := createdAgentIdentity(t, f, "hub-passthrough-agent")
 	assert.Equal(t, store.GCPMetadataModePassthrough, identity.MetadataMode)
+}
+
+// TestHubDefaultGCPIdentity_PassthroughNotAppliedOnNonEmbeddedBroker pins
+// review R1: hub-default passthrough skips the broker-owner/actAs gate that
+// explicit passthrough requests go through, so it is confined to the embedded
+// broker. On any other broker — here a remote auto-provide broker — the
+// ladder falls back to block rather than exposing that broker's host identity.
+func TestHubDefaultGCPIdentity_PassthroughNotAppliedOnNonEmbeddedBroker(t *testing.T) {
+	f := bypassAgentsSetup(t)
+	setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
+		DefaultGCPIdentityMode: store.GCPMetadataModePassthrough,
+	})
+
+	identity := createdAgentIdentity(t, f, "hub-passthrough-remote-agent")
+	assert.Equal(t, store.GCPMetadataModeBlock, identity.MetadataMode,
+		"hub-default passthrough must not apply on a non-embedded broker")
+}
+
+// TestHubDefaultGCPIdentity_ProjectPassthroughUnaffectedByBrokerRole confirms
+// the embedded-broker restriction is specific to the hub rung: a project's own
+// passthrough default keeps its existing behaviour on any broker.
+func TestHubDefaultGCPIdentity_ProjectPassthroughUnaffectedByBrokerRole(t *testing.T) {
+	f := bypassAgentsSetup(t)
+	ctx := context.Background()
+	proj, err := f.store.GetProject(ctx, f.proj.ID)
+	require.NoError(t, err)
+	if proj.Annotations == nil {
+		proj.Annotations = map[string]string{}
+	}
+	proj.Annotations[projectSettingDefaultGCPIdentityMode] = store.GCPMetadataModePassthrough
+	require.NoError(t, f.store.UpdateProject(ctx, proj))
+
+	identity := createdAgentIdentity(t, f, "project-passthrough-remote-agent")
+	assert.Equal(t, store.GCPMetadataModePassthrough, identity.MetadataMode)
+}
+
+// TestHubDefaultGCPIdentity_AssignProjectScopedSAFromOtherProjectFails covers
+// the per-project reachability check at dispatch. The PUT validator now
+// rejects project-scoped accounts outright, but a value written before that
+// check (or directly into settings.yaml) can still name one; it must fail
+// creation in other projects with a clear error rather than assign it.
+func TestHubDefaultGCPIdentity_AssignProjectScopedSAFromOtherProjectFails(t *testing.T) {
+	f := bypassAgentsSetup(t)
+	sa := bypassAgentsCreateSA(t, f, f.other.ID, true)
+	setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
+		DefaultGCPIdentityMode:             store.GCPMetadataModeAssign,
+		DefaultGCPIdentityServiceAccountID: sa.ID,
+	})
+
+	rec := createAgentAsOwner(t, f, CreateAgentRequest{Name: "hub-default-cross-project-agent"})
+	require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "hub default GCP service account is not available in this project")
 }
 
 // TestHubDefaultGCPIdentity_ProjectExplicitBlockWinsOverHubPassthrough pins

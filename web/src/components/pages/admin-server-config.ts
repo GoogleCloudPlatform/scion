@@ -3228,8 +3228,10 @@ export class ScionPageAdminServerConfig extends LitElement {
                   <label>Default GCP Identity Mode</label>
                   <span class="hint"
                     >Hub-wide fallback GCP metadata mode for new agents, applied when neither the
-                    agent create request nor the project's default GCP identity setting names
-                    one.</span
+                    agent create request nor the project's default GCP identity setting names one.
+                    Passthrough set here applies only to agents on the hub's embedded broker; agents
+                    on any other broker get Block. Assign requires a verified hub-scoped service
+                    account and gcpIamCheckMode=enforce.</span
                   >
                   ${this.renderFieldValue(
                     'default_gcp_identity_mode',

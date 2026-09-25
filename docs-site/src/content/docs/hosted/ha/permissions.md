@@ -155,6 +155,19 @@ To streamline the agent creation workflow, project administrators can configure 
 - **Enforced at Creation and Selection**: The Policy Troubleshooter `actAs` evaluation is automatically triggered whenever an agent is created using the project's default service account, or when a user selects the default service account option.
 - **Unauthorized Bypass Prevention**: If a user does not possess `iam.serviceAccounts.actAs` permission on the project's default service account, they are barred from creating agents under that project with the default identity, even if they have full project access.
 
+### Hub-Default GCP Identity
+
+Hub administrators can set a hub-wide default GCP identity in **Admin > Server Config > Agent Defaults > General** (`agent_defaults.default_gcp_identity_mode` and `default_gcp_identity_service_account_id`). The Hub picks the identity for a new agent from the first of these that is set:
+
+1. The GCP identity in the agent create request.
+2. The project's default GCP identity. An explicit project **Block** counts as set, so the hub default is not consulted.
+3. The hub default.
+4. **Block**.
+
+The hub default does not bypass the existing gates:
+- **Assign**: the service account must be verified and hub-scoped, and `gcp_iam_check_mode` must be `enforce`. These are checked when the setting is saved. Each agent creation also runs the same creator `actAs` authorization as project-default assignment, recorded under the audit surface `hub-default`.
+- **Passthrough**: applies only when the agent is dispatched to the Hub's embedded (co-located) broker, labelled `scion.io/broker-role=embedded`. This covers the single-node deployment. On any other broker the agent gets **Block**, and the Hub logs why. Without this limit, a hub-wide default would expose every registered broker's host identity to every agent creator. It would also skip the broker-owner and host-SA checks that explicit passthrough requests go through.
+
 ### Passthrough Mode Security & PATCH Parity
 
 In **Passthrough Mode**, an agent bypasses explicit service account binding and directly assumes the GCP identity of its GKE/GCE broker host. To prevent unauthorized access to host-level authority:

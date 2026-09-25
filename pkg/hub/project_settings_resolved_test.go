@@ -115,6 +115,26 @@ func TestResolvedSettings_HubDefaultPresenceSemantics(t *testing.T) {
 			want: ResolvedHubDefaultPresent,
 		},
 		{
+			name: "gcp identity mode present",
+			key:  projectSettingDefaultGCPIdentityMode,
+			doc:  `{"default_gcp_identity_mode": "passthrough"}`,
+			want: ResolvedHubDefaultPresent,
+		},
+		{
+			name: "gcp identity service account present",
+			key:  projectSettingDefaultGCPIdentitySAID,
+			doc:  `{"default_gcp_identity_service_account_id": "sa-1"}`,
+			want: ResolvedHubDefaultPresent,
+		},
+		{
+			// Same ambiguity as the other plain strings: "" is dropped by
+			// omitempty, so a missing mode cannot be reported as absent.
+			name: "gcp identity mode missing is unknown",
+			key:  projectSettingDefaultGCPIdentityMode,
+			doc:  `{}`,
+			want: ResolvedHubDefaultUnknown,
+		},
+		{
 			name: "explicit json null counts as missing",
 			key:  projectSettingDefaultMaxTurns,
 			doc:  `{"default_max_turns": null}`,
@@ -164,6 +184,18 @@ func TestResolvedSettings_HubValueExtraction(t *testing.T) {
 			key:       projectSettingDefaultResourcesDisk,
 			doc:       `{"default_resources": {"disk": "10Gi"}}`,
 			wantValue: "10Gi",
+		},
+		{
+			name:      "gcp identity mode value extracted",
+			key:       projectSettingDefaultGCPIdentityMode,
+			doc:       `{"default_gcp_identity_mode": "assign"}`,
+			wantValue: "assign",
+		},
+		{
+			name:      "gcp identity service account value extracted",
+			key:       projectSettingDefaultGCPIdentitySAID,
+			doc:       `{"default_gcp_identity_service_account_id": "sa-1"}`,
+			wantValue: "sa-1",
 		},
 		{
 			name:      "missing key returns nil value",

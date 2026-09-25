@@ -689,15 +689,29 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 
 // validateHubDefaultGCPIdentity rejects a hub-level default GCP identity that
 // agent creation would later refuse to apply, mirroring
-// validateDefaultGCPIdentity's project-level checks (existence, verification).
+// validateDefaultGCPIdentity's project-level checks (existence, verification)
+// and adding the checks that only make sense one tier up:
 //
-// Reachability is deliberately NOT checked here, unlike the project-level
-// validator: a hub default has no single project to check reachability
-// against — it is evaluated per-project at agent-creation time
-// (handlers_agents_core.go), where a project-scoped service account that
-// isn't reachable from that project falls through to the same error the
-// project-default path already produces.
+//   - The mode must be one of the known values. The JSON schema enum already
+//     enforces this in DB mode; file mode has no schema pass, so it is
+//     repeated here for both.
+//   - The service account must be hub-scoped. A hub default applies to every
+//     project, and a project-scoped account is unreachable from all projects
+//     but its own, so every agent create elsewhere would fail with 400.
+//   - Hub-scoped assignment requires gcpIamCheckMode=enforce (D4, see
+//     authorizeSAAssignment). Outside enforce mode every agent create would
+//     fail with 403, so the admin is told now rather than every creator later.
+//
+// Used by both the DB-mode and file-mode PUT handlers.
 func (s *Server) validateHubDefaultGCPIdentity(w http.ResponseWriter, ctx context.Context, d opsettings.AgentDefaultsSettings) bool {
+	switch d.DefaultGCPIdentityMode {
+	case "", store.GCPMetadataModeBlock, store.GCPMetadataModePassthrough, store.GCPMetadataModeAssign:
+	default:
+		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+			fmt.Sprintf("invalid default_gcp_identity_mode %q: must be one of block, passthrough, assign", d.DefaultGCPIdentityMode), nil)
+		return false
+	}
+
 	if d.DefaultGCPIdentityMode == store.GCPMetadataModeAssign && d.DefaultGCPIdentityServiceAccountID == "" {
 		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
 			"default GCP identity mode 'assign' requires a service account; set default_gcp_identity_service_account_id or choose another mode", nil)
@@ -711,7 +725,7 @@ func (s *Server) validateHubDefaultGCPIdentity(w http.ResponseWriter, ctx contex
 
 	sa, err := s.store.GetGCPServiceAccount(ctx, d.DefaultGCPIdentityServiceAccountID)
 	if err != nil {
-		if err == store.ErrNotFound {
+		if errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
 				"default GCP service account not found", nil)
 			return false
@@ -723,6 +737,22 @@ func (s *Server) validateHubDefaultGCPIdentity(w http.ResponseWriter, ctx contex
 	if !sa.Verified {
 		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
 			"GCP service account is not verified; verify it before setting it as the hub default", nil)
+		return false
+	}
+
+	if sa.Scope != store.ScopeHub {
+		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+			"hub default service account must be hub-scoped; a project-scoped account is unavailable in every other project", nil)
+		return false
+	}
+
+	s.mu.RLock()
+	mode := s.saAssignCheckMode
+	s.mu.RUnlock()
+	if mode != SAAssignCheckEnforce {
+		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+			"hub-scoped service account assignment requires gcpIamCheckMode=enforce; "+
+				"agent creation would be denied for every user until it is enabled", nil)
 		return false
 	}
 
