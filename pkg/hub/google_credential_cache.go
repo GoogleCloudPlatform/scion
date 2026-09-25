@@ -247,6 +247,12 @@ func (c *cachingGoogleCredentialValidator) lookup(key string) (googleCredCacheEn
 func (c *cachingGoogleCredentialValidator) store(key string, identity *ValidatedGoogleIdentity, err error) {
 	var ttl time.Duration
 	switch {
+	case err == nil && identity == nil:
+		// A GoogleCredentialValidator that returned (nil, nil) is a contract
+		// violation, not a verification failure — never cache it (there is no
+		// identity to serve from cache on a hit), and return exactly what the
+		// inner validator returned, unmodified.
+		return
 	case err == nil:
 		ttl = c.maxTTL
 		// Use c.now(), not the wall clock (time.Until), so tests that inject

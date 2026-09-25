@@ -251,6 +251,30 @@ func TestGoogleCredentialCache_UpstreamErrorNeverCached(t *testing.T) {
 	}
 }
 
+// TestGoogleCredentialCache_NilIdentityNilErrorNeverCached covers a base
+// GoogleCredentialValidator that returns (nil, nil) — a contract violation,
+// since ValidateIDToken/ValidateAccessToken must return a non-nil identity
+// whenever err is nil. store must not panic on identity.UpstreamExpiry, must
+// not cache the result (there is no identity to serve from a hit), and the
+// decorator must return exactly what the base validator returned.
+func TestGoogleCredentialCache_NilIdentityNilErrorNeverCached(t *testing.T) {
+	base := &countingBaseValidator{} // zero value: (nil, nil) from both methods
+	cache := NewCachingGoogleCredentialValidator(base)
+
+	for i := 0; i < 3; i++ {
+		id, err := cache.ValidateIDToken(context.Background(), "token", []string{"aud"})
+		if id != nil {
+			t.Fatalf("call %d: identity = %v, want nil", i, id)
+		}
+		if err != nil {
+			t.Fatalf("call %d: err = %v, want nil", i, err)
+		}
+	}
+	if got := base.totalIDTokenCalls(); got != 3 {
+		t.Errorf("base validator called %d times, want 3 ((nil, nil) must never be cached; every call retries upstream)", got)
+	}
+}
+
 // TestGoogleCredentialCache_NegativeCacheOnlyForFourListedErrors proves the
 // negative-cache allowlist is exact: the four named errors are cached (one
 // upstream call for repeated attempts within negTTL); everything else,
