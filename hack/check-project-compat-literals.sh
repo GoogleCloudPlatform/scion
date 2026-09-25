@@ -216,6 +216,12 @@ allowed_paths=(
   "^pkg/runtimebroker/workspace_handlers.go$"
   "^pkg/sciontool/hooks/handlers/telemetry.go$"
   "^pkg/sciontool/telemetry/gcp_exporter.go$"
+  # Reserved-identity-attribute denylist: the three retired grove-named
+  # telemetry keys (scion.grove, scion.grove.id, scion.grove_id) are kept
+  # here so the receiver still strips them from user-supplied attributes,
+  # even though it no longer treats them as valid identity sources (Q2 = (a)).
+  "^pkg/sciontool/telemetry/policy.go$"
+  "^pkg/sciontool/telemetry/policy_test.go$"
   "^pkg/sciontool/telemetry/providers.go$"
   "^pkg/storage/storage.go$"
   "^pkg/store/entadapter/agent_session_metrics_store.go$"
