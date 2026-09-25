@@ -18,17 +18,27 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"golang.org/x/sync/singleflight"
 )
 
 type DockerRuntime struct {
 	Command string
 	Host    string
+
+	// listGroup collapses concurrent List calls into a single `docker ps`
+	// exec. Every caller (PTY lookup, message delivery, heartbeat) issues
+	// the exact same command regardless of labelFilter — filtering happens
+	// afterward in Go — so there is never a reason to run it twice at once.
+	// Its zero value is ready to use.
+	listGroup singleflight.Group
 }
 
 func NewDockerRuntime() *DockerRuntime {
@@ -126,13 +136,30 @@ type dockerListOutput struct {
 // /tmp directories. See ptone/scion#1867.
 const dockerListFormat = `{"ID":{{json .ID}},"Names":{{json .Names}},"Status":{{json .Status}},"Image":{{json .Image}},"Labels":{{json .Labels}}}`
 
+// Bounded retry/backoff for `docker ps`. Even with the size-free format
+// (dockerListFormat, see #1867/#1888) `docker ps` can still fail
+// intermittently — a busy daemon, a momentarily locked overlay snapshot,
+// etc. These failures are typically transient, and List has ~20 callers
+// (PTY attach, message delivery, heartbeat) that previously hard-failed on
+// the first error. See #1864.
+const (
+	dockerListMaxAttempts    = 3
+	dockerListInitialBackoff = 150 * time.Millisecond
+	dockerListBackoffMult    = 3.0
+	// dockerListJitter is the +/- fraction applied to each backoff so that
+	// concurrent callers retrying after the same failure don't all land on
+	// the daemon at once.
+	dockerListJitter = 0.2
+)
+
 func (r *DockerRuntime) List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
-	args := []string{"ps", "-a", "--no-trunc", "--format", dockerListFormat}
-	cmd := exec.CommandContext(ctx, r.Command, args...)
-	out, err := cmd.CombinedOutput()
+	v, err, _ := r.listGroup.Do("ps", func() (any, error) {
+		return r.execListWithRetry(ctx)
+	})
 	if err != nil {
-		return nil, fmt.Errorf("docker ps failed: %w", err)
+		return nil, err
 	}
+	out := v.([]byte)
 
 	var agents []api.AgentInfo
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
@@ -209,6 +236,45 @@ func (r *DockerRuntime) List(ctx context.Context, labelFilter map[string]string)
 	}
 
 	return agents, nil
+}
+
+// execListWithRetry runs `docker ps` for List, retrying transient failures
+// with jittered backoff. It gives up immediately once ctx is done (including
+// the last attempt reaching the deadline), since a retry cannot outlive its
+// caller's context anyway.
+func (r *DockerRuntime) execListWithRetry(ctx context.Context) ([]byte, error) {
+	args := []string{"ps", "-a", "--no-trunc", "--format", dockerListFormat}
+
+	var lastErr error
+	backoff := dockerListInitialBackoff
+	for attempt := 1; attempt <= dockerListMaxAttempts; attempt++ {
+		cmd := exec.CommandContext(ctx, r.Command, args...)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			return out, nil
+		}
+		lastErr = fmt.Errorf("docker ps failed: %w", err)
+
+		if attempt == dockerListMaxAttempts || ctx.Err() != nil {
+			break
+		}
+
+		jitter := 1 + dockerListJitter*(2*rand.Float64()-1)
+		sleep := time.Duration(float64(backoff) * jitter)
+		runtimeLog.Debug("docker ps failed, retrying", "attempt", attempt, "max_attempts", dockerListMaxAttempts, "backoff", sleep, "error", err)
+
+		timer := time.NewTimer(sleep)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, fmt.Errorf("docker ps failed: %w", ctx.Err())
+		case <-timer.C:
+		}
+
+		backoff = time.Duration(float64(backoff) * dockerListBackoffMult)
+	}
+
+	return nil, lastErr
 }
 
 func (r *DockerRuntime) GetLogs(ctx context.Context, id string) (string, error) {
