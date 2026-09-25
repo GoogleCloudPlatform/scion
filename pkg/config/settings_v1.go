@@ -560,15 +560,22 @@ type V1PluginEntry struct {
 
 // V1ServerHubConfig holds the Hub API server settings (when running scion-server).
 type V1ServerHubConfig struct {
-	Port         int           `json:"port,omitempty" yaml:"port,omitempty" koanf:"port"`
-	Host         string        `json:"host,omitempty" yaml:"host,omitempty" koanf:"host"`
-	HubID        string        `json:"hub_id,omitempty" yaml:"hub_id,omitempty" koanf:"hub_id"`
-	HubName      string        `json:"hub_name,omitempty" yaml:"hub_name,omitempty" koanf:"hub_name"`
-	PublicURL    string        `json:"public_url,omitempty" yaml:"public_url,omitempty" koanf:"public_url"`
-	ReadTimeout  string        `json:"read_timeout,omitempty" yaml:"read_timeout,omitempty" koanf:"read_timeout"`
-	WriteTimeout string        `json:"write_timeout,omitempty" yaml:"write_timeout,omitempty" koanf:"write_timeout"`
-	CORS         *V1CORSConfig `json:"cors,omitempty" yaml:"cors,omitempty" koanf:"cors"`
-	AdminEmails  []string      `json:"admin_emails,omitempty" yaml:"admin_emails,omitempty" koanf:"admin_emails"`
+	Port      int    `json:"port,omitempty" yaml:"port,omitempty" koanf:"port"`
+	Host      string `json:"host,omitempty" yaml:"host,omitempty" koanf:"host"`
+	HubID     string `json:"hub_id,omitempty" yaml:"hub_id,omitempty" koanf:"hub_id"`
+	HubName   string `json:"hub_name,omitempty" yaml:"hub_name,omitempty" koanf:"hub_name"`
+	PublicURL string `json:"public_url,omitempty" yaml:"public_url,omitempty" koanf:"public_url"`
+	// AgentEndpoint optionally overrides the Hub URL injected into agents as
+	// SCION_HUB_ENDPOINT, without changing PublicURL's other uses (invite
+	// links, chat-bridge links, the OIDC issuer default, the cloudrun_invoker
+	// audience default). Must be scheme://host[:port] only when set — see
+	// config.ValidateAgentEndpoint for the exact rules and the normalized
+	// form this field should hold.
+	AgentEndpoint string        `json:"agent_endpoint,omitempty" yaml:"agent_endpoint,omitempty" koanf:"agent_endpoint"`
+	ReadTimeout   string        `json:"read_timeout,omitempty" yaml:"read_timeout,omitempty" koanf:"read_timeout"`
+	WriteTimeout  string        `json:"write_timeout,omitempty" yaml:"write_timeout,omitempty" koanf:"write_timeout"`
+	CORS          *V1CORSConfig `json:"cors,omitempty" yaml:"cors,omitempty" koanf:"cors"`
+	AdminEmails   []string      `json:"admin_emails,omitempty" yaml:"admin_emails,omitempty" koanf:"admin_emails"`
 
 	// SoftDeleteRetention is how long soft-deleted agents are retained (e.g., "72h").
 	SoftDeleteRetention string `json:"soft_delete_retention,omitempty" yaml:"soft_delete_retention,omitempty" koanf:"soft_delete_retention"`
@@ -1454,6 +1461,7 @@ var knownCompoundFields = []string{
 	"allowed_methods",
 	"allowed_headers",
 	"dev_token_file",
+	"agent_endpoint",
 	"gcp_project_id",
 	"gcp_credentials",
 	"client_secret",
@@ -1681,6 +1689,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		}
 		if v1.Hub.PublicURL != "" {
 			gc.Hub.Endpoint = v1.Hub.PublicURL
+		}
+		if v1.Hub.AgentEndpoint != "" {
+			gc.Hub.AgentEndpoint = v1.Hub.AgentEndpoint
 		}
 		if v1.Hub.ReadTimeout != "" {
 			if d, err := time.ParseDuration(v1.Hub.ReadTimeout); err == nil {
@@ -2028,14 +2039,15 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 
 	// Hub server config
 	v1Hub := &V1ServerHubConfig{
-		Port:         gc.Hub.Port,
-		Host:         gc.Hub.Host,
-		HubID:        gc.Hub.HubID,
-		HubName:      gc.Hub.HubName,
-		PublicURL:    gc.Hub.Endpoint,
-		ReadTimeout:  gc.Hub.ReadTimeout.String(),
-		WriteTimeout: gc.Hub.WriteTimeout.String(),
-		AdminEmails:  gc.Hub.AdminEmails,
+		Port:          gc.Hub.Port,
+		Host:          gc.Hub.Host,
+		HubID:         gc.Hub.HubID,
+		HubName:       gc.Hub.HubName,
+		PublicURL:     gc.Hub.Endpoint,
+		AgentEndpoint: gc.Hub.AgentEndpoint,
+		ReadTimeout:   gc.Hub.ReadTimeout.String(),
+		WriteTimeout:  gc.Hub.WriteTimeout.String(),
+		AdminEmails:   gc.Hub.AdminEmails,
 		CORS: &V1CORSConfig{
 			Enabled:        gc.Hub.CORSEnabled,
 			AllowedOrigins: gc.Hub.CORSAllowedOrigins,

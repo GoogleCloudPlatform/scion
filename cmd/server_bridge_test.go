@@ -156,6 +156,26 @@ func TestResolveHubEndpointSettingsFallback(t *testing.T) {
 		assert.Equal(t, "https://server-config.example.com", got)
 	})
 
+	t.Run("agent-endpoint override does not affect the resolved public endpoint", func(t *testing.T) {
+		enableHub = true
+		enableDebug = false
+		webBaseURL = ""
+		enableWeb = true
+		webPort = 8080
+		t.Setenv("SCION_SERVER_BASE_URL", "")
+
+		cfg := &config.GlobalConfig{
+			Hub: config.HubServerConfig{
+				Endpoint:      "https://server-config.example.com",
+				AgentEndpoint: "http://192.0.2.10:8080",
+			},
+		}
+		settings := &config.Settings{}
+
+		got := resolveHubEndpoint(cfg, settings)
+		assert.Equal(t, "https://server-config.example.com", got)
+	})
+
 	t.Run("falls back to localhost when no settings", func(t *testing.T) {
 		enableHub = true
 		enableDebug = false

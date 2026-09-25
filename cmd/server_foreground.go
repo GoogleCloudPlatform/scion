@@ -161,6 +161,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if err := validateHostedHAPreflight(cfg); err != nil {
 		return err
 	}
+	if err := validateServerPreflight(cfg); err != nil {
+		return err
+	}
 
 	// 6. Check ports
 	if err := checkServerPorts(cfg); err != nil {
@@ -1097,6 +1100,23 @@ func validateHostedHAPreflight(cfg *config.GlobalConfig) error {
 	return nil
 }
 
+// validateServerPreflight validates settings that matter only when this
+// process runs the Hub, normalizing them in place on success. A broker-only
+// process (enableHub == false) never installs a dispatcher and never reads
+// these settings, so it skips the check rather than refusing to start over a
+// value it will never use.
+func validateServerPreflight(cfg *config.GlobalConfig) error {
+	if !enableHub || cfg == nil {
+		return nil
+	}
+	normalized, err := config.ValidateAgentEndpoint(cfg.Hub.AgentEndpoint)
+	if err != nil {
+		return err
+	}
+	cfg.Hub.AgentEndpoint = normalized
+	return nil
+}
+
 // isSupportedIAPAudience returns true when audience is a recognised IAP
 // audience path.  Two formats are accepted:
 //
@@ -1672,8 +1692,14 @@ func newJWTProxyAuthenticator(jwtCfg *config.JWTAuthConfig) (*hub.JWTProxyAuthen
 }
 
 // initHubServer creates and configures the Hub server.
-func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, entClient *ent.Client, hubEndpoint, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
-	hubCfg := hub.ServerConfig{
+// buildHubServerConfig builds the static portion of hub.ServerConfig from
+// GlobalConfig and the caller's already-resolved values. It is a pure,
+// side-effect-free copy — no I/O, no error return — so a config-copying
+// regression (e.g. dropping a field like AgentEndpoint) shows up in a direct
+// unit test instead of requiring a running Hub to notice the setting is
+// silently ignored.
+func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, secretBackend secret.SecretBackend) hub.ServerConfig {
+	return hub.ServerConfig{
 		HubID:                        cfg.Hub.ResolveHubID(),
 		HubName:                      cfg.Hub.ResolveHubName(),
 		DisableLegacyStorageFallback: cfg.Hub.DisableLegacyStorageFallback,
@@ -1693,6 +1719,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		AdminEmails:                  adminEmailList,
 		UserAccessMode:               cfg.Auth.UserAccessMode,
 		HubEndpoint:                  hubEndpoint,
+		AgentEndpoint:                cfg.Hub.AgentEndpoint,
 		SlowRequestThreshold:         cfg.SlowRequestThreshold,
 		StalledThreshold:             cfg.Hub.StalledThreshold,
 		SoftDeleteRetention:          cfg.Hub.SoftDeleteRetention,
@@ -1775,6 +1802,26 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		// nil (no server.native_chat section) means enabled — chat is default-on.
 		NativeChatEnabled: cfg.NativeChat.EnabledSetting(),
 	}
+}
+
+// resolveTransportAudience returns the effective OIDC audience for
+// auth.transport: the explicitly configured audience if set, otherwise the
+// public hub endpoint when mode is cloudrun_invoker. hubEndpoint must be the
+// resolved public endpoint (never server.hub.agent_endpoint): Cloud Run's own
+// IAM check validates minted tokens against the Hub's public URL, and the
+// agent-only override must not change what that check expects.
+func resolveTransportAudience(oidcAudience, mode, hubEndpoint string) string {
+	if oidcAudience != "" {
+		return oidcAudience
+	}
+	if mode == "cloudrun_invoker" {
+		return hubEndpoint
+	}
+	return ""
+}
+
+func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, entClient *ent.Client, hubEndpoint, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
+	hubCfg := buildHubServerConfig(cfg, hubEndpoint, devAuthToken, adminEmailList, adminMode, maintenanceMessage, secretBackend)
 
 	// In hosted mode every replica must share the same session secret for
 	// cookies and JWT signing keys to work across the load balancer. Running
@@ -1833,11 +1880,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		if cfg.Auth.Transport.PlatformAuthSA == "" {
 			return nil, fmt.Errorf("auth.transport.platformAuthSA is required when auth.transport.mode=%q", cfg.Auth.Transport.Mode)
 		}
-		audience := cfg.Auth.Transport.OIDCAudience
-		if audience == "" && cfg.Auth.Transport.Mode == "cloudrun_invoker" {
-			// Derive audience from hub endpoint for Cloud Run invoker mode
-			audience = hubEndpoint
-		}
+		audience := resolveTransportAudience(cfg.Auth.Transport.OIDCAudience, cfg.Auth.Transport.Mode, hubEndpoint)
 		if audience == "" {
 			return nil, fmt.Errorf("auth.transport.oidcAudience is required when auth.transport.mode=%q", cfg.Auth.Transport.Mode)
 		}

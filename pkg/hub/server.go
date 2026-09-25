@@ -133,6 +133,13 @@ type ServerConfig struct {
 	BrokerAuthConfig BrokerAuthConfig
 	// HubEndpoint is the public endpoint URL for this Hub (used in broker join responses).
 	HubEndpoint string
+	// AgentEndpoint optionally overrides HubEndpoint for the sole purpose of
+	// the SCION_HUB_ENDPOINT value injected into dispatched agents (see
+	// HTTPAgentDispatcher.SetAgentEndpoint). Every other use of HubEndpoint
+	// (invite links, chat-bridge links, the OIDC issuer default, the
+	// cloudrun_invoker audience default, broker join responses) is
+	// unaffected. Empty means agents receive HubEndpoint.
+	AgentEndpoint string
 	// SlowRequestThreshold is the duration after which an HTTP request is
 	// logged as slow. Zero uses logging.DefaultSlowRequestThreshold.
 	SlowRequestThreshold time.Duration
@@ -3004,6 +3011,18 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	} else if s.config.Debug {
 		slog.Warn("No hub.endpoint configured - agents won't know how to reach Hub")
 		slog.Info("Configure via: hub.endpoint in server.yaml or SCION_SERVER_HUB_ENDPOINT env var")
+	}
+
+	// Set the agent-only endpoint override, if configured. This only changes
+	// what gets injected into agents as SCION_HUB_ENDPOINT; every other use
+	// of s.config.HubEndpoint (invite links, chat-bridge links, OIDC issuer
+	// default, cloudrun_invoker audience default) is untouched. It applies to
+	// agents on every broker attached to this Hub, including remote brokers,
+	// so log it at Info (not Debug-only) so operators notice it at startup.
+	if s.config.AgentEndpoint != "" {
+		dispatcher.SetAgentEndpoint(s.config.AgentEndpoint)
+		slog.Info("server.hub.agent_endpoint is set: agents on every broker attached to this Hub, including remote brokers, will report to this URL instead of the hub's regular endpoint",
+			"agent_endpoint", s.config.AgentEndpoint, "hub_endpoint", s.config.HubEndpoint)
 	}
 
 	// Set Hub name so agent log entries carry the hub label.

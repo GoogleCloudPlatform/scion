@@ -361,6 +361,21 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// server.hub.agent_endpoint has no live-reload path (like public_url, it
+	// only takes effect at the next restart), so a malformed value written
+	// here would otherwise only surface as a startup failure later. Reject it
+	// at write time with the same validator the Hub uses at startup, and
+	// persist the normalized form so the written value never diverges from
+	// what the Hub will actually stamp into agents once it restarts.
+	if req.Server != nil && req.Server.Hub != nil && req.Server.Hub.AgentEndpoint != "" {
+		normalized, err := config.ValidateAgentEndpoint(req.Server.Hub.AgentEndpoint)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+			return
+		}
+		req.Server.Hub.AgentEndpoint = normalized
+	}
+
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to resolve settings directory", nil)
