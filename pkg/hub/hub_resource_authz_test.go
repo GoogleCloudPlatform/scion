@@ -19,6 +19,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -381,4 +382,132 @@ func TestProjectGitHubRouteAction(t *testing.T) {
 	for _, m := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch} {
 		assert.Equal(t, ActionUpdate, projectGitHubRouteAction(m), m)
 	}
+}
+
+// --- Chat search ----------------------------------------------------------
+
+// TestChatSearchDMAuthz checks that project-wide and unscoped chat search do
+// not return DM content to project members who are not party to the DM. The
+// chat store shares the main database handle, as it does in production, and
+// the DM is written through the production send endpoint.
+func TestChatSearchDMAuthz(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	dbp, ok := s.(interface{ DB() *sql.DB })
+	require.True(t, ok, "test store must expose DB()")
+	db := dbp.DB()
+	wcs := NewWebChatStore(db, "sqlite3")
+	require.NoError(t, wcs.Init())
+	srv.SetWebChatStore(wcs)
+
+	proj := &store.Project{ID: tid("search-dm"), Name: "search-dm", Slug: "search-dm",
+		Created: time.Now(), Updated: time.Now()}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	srv.createProjectMembersGroup(ctx, proj)
+	carol := makeProjectMemberUser(t, s, proj, tid("search-carol"), "Carol", store.GroupMemberRoleMember)
+
+	agent := &store.Agent{ID: tid("search-dm-agent"), ProjectID: proj.ID, Name: "Bot",
+		Slug: "search-bot", Phase: "idle", OwnerID: DevUserID, CreatedBy: DevUserID}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	dmKey := "dm:agent:" + agent.ID + ":user:" + DevUserID
+	setDMConversationID(t, s, dmKey, proj.ID)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+dmKey+"/messages",
+		map[string]string{"content": "PRIVATEPHRASE agent dm body"})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	// A user-to-user DM row carrying a project ID, and an ordinary project
+	// thread message, inserted directly with the columns search reads.
+	insert := func(id, thread, msg string) {
+		_, err := db.ExecContext(ctx,
+			`INSERT INTO messages (id, project_id, thread_id, sender, recipient, msg, type, channel, created) VALUES (?, ?, ?, 'x', 'y', ?, 'instruction', 'web', ?)`,
+			id, proj.ID, thread, msg, time.Now().UTC().Format(time.RFC3339Nano))
+		require.NoError(t, err)
+	}
+	userDM := "dm:user:" + DevUserID + ":user:" + tid("search-erin")
+	insert(tid("search-msg-udm"), userDM, "PRIVATEPHRASE user dm body")
+	insert(tid("search-msg-topic"), "topic-"+proj.ID, "PRIVATEPHRASE public thread body")
+
+	search := func(user *store.User, extra string) string {
+		t.Helper()
+		url := "/api/v1/chat/search?q=PRIVATEPHRASE" + extra
+		var rec *httptest.ResponseRecorder
+		if user == nil {
+			rec = doRequest(t, srv, http.MethodGet, url, nil)
+		} else {
+			rec = doRequestAsUser(t, srv, user, http.MethodGet, url, nil)
+		}
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+		return rec.Body.String()
+	}
+
+	for name, extra := range map[string]string{"project": "&projectId=" + proj.ID, "unscoped": ""} {
+		t.Run(name+"/non-participant", func(t *testing.T) {
+			body := search(carol, extra)
+			assert.Contains(t, body, "public thread body", "project threads stay searchable")
+			assert.NotContains(t, body, "agent dm body")
+			assert.NotContains(t, body, "user dm body")
+		})
+		t.Run(name+"/participant", func(t *testing.T) {
+			body := search(nil, extra)
+			assert.Contains(t, body, "public thread body")
+			assert.Contains(t, body, "agent dm body", "participants still find their own DMs")
+			assert.Contains(t, body, "user dm body", "participants still find their own DMs")
+		})
+	}
+	t.Run("key-scoped non-participant refused", func(t *testing.T) {
+		rec := doRequestAsUser(t, srv, carol, http.MethodGet, "/api/v1/chat/search?q=PRIVATEPHRASE&key="+dmKey, nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+	})
+}
+
+func TestFilterSearchDMs(t *testing.T) {
+	a := "dm:agent:A:user:u1"
+	b := "dm:user:u1:user:u2"
+	c := "dm:user:u2:user:u3"
+	in := func() []ChatSearchResult {
+		return []ChatSearchResult{{ConversationKey: "topic"}, {ConversationKey: a}, {ConversationKey: b}, {ConversationKey: c}}
+	}
+	keys := func(rs []ChatSearchResult) []string {
+		var out []string
+		for _, r := range rs {
+			out = append(out, r.ConversationKey)
+		}
+		return out
+	}
+	assert.Equal(t, []string{"topic", a, b}, keys(filterSearchDMs(in(), ChatSearchFilter{DMParticipantUserID: "u1"})))
+	assert.Equal(t, []string{"topic", b, c}, keys(filterSearchDMs(in(), ChatSearchFilter{DMParticipantUserID: "u2"})))
+	assert.Equal(t, []string{"topic"}, keys(filterSearchDMs(in(), ChatSearchFilter{})), "no participant means no DMs")
+	assert.Len(t, filterSearchDMs(in(), ChatSearchFilter{ConversationKey: a}), 4, "key-scoped search is authorized by the caller")
+}
+
+// TestSearchChatMessages_DMParticipantFilter exercises the store-level SQL
+// condition on its own, without the handler's defensive post-filter.
+func TestSearchChatMessages_DMParticipantFilter(t *testing.T) {
+	wcs, db := newTestWebChatStoreWithMessages(t)
+	defer func() { _ = db.Close() }()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	insertTestMessage(t, db, "t1", "p1", "topic-1", "user:a", "needle topic", now.Add(-4*time.Minute))
+	insertTestMessage(t, db, "d1", "p1", "dm:agent:A:user:u1", "agent:A", "needle agent dm", now.Add(-3*time.Minute))
+	insertTestMessage(t, db, "d2", "p1", "dm:user:u1:user:u2", "user:u1", "needle user dm", now.Add(-2*time.Minute))
+	// A user ID that is a prefix of another must not match.
+	insertTestMessage(t, db, "d3", "p1", "dm:agent:A:user:u10", "agent:A", "needle other dm", now.Add(-1*time.Minute))
+
+	ids := func(f ChatSearchFilter) []string {
+		t.Helper()
+		f.Query, f.Limit = "needle", 50
+		rs, _, err := wcs.SearchChatMessages(ctx, f)
+		require.NoError(t, err)
+		var out []string
+		for _, r := range rs {
+			out = append(out, r.MessageID)
+		}
+		return out
+	}
+	assert.Equal(t, []string{"d2", "d1", "t1"}, ids(ChatSearchFilter{ProjectID: "p1", DMParticipantUserID: "u1"}))
+	assert.Equal(t, []string{"d2", "t1"}, ids(ChatSearchFilter{ProjectIDs: []string{"p1"}, DMParticipantUserID: "u2"}))
+	assert.Equal(t, []string{"t1"}, ids(ChatSearchFilter{ProjectID: "p1", DMParticipantUserID: "%"}), "IDs are not patterns")
+	assert.Equal(t, []string{"t1"}, ids(ChatSearchFilter{ProjectID: "p1"}), "no participant means no DMs")
+	assert.Equal(t, []string{"d3"}, ids(ChatSearchFilter{ConversationKey: "dm:agent:A:user:u10"}), "key-scoped search is unaffected")
 }

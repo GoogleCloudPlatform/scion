@@ -3459,6 +3459,9 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 		Query:  query,
 		Limit:  limit,
 		Cursor: q.Get("cursor"),
+		// Project-wide and unscoped searches must not surface DMs the caller
+		// is not party to, even when the DM row carries a project ID.
+		DMParticipantUserID: user.ID(),
 	}
 
 	// Scoping.
@@ -3537,6 +3540,7 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "search failed", nil)
 		return
 	}
+	results = filterSearchDMs(results, filter)
 
 	// Enrich results with thread/DM names.
 	s.enrichSearchResults(ctx, wcs, results)

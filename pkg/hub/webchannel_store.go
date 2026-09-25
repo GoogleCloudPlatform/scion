@@ -372,6 +372,39 @@ type ChatSearchFilter struct {
 	ProjectIDs      []string // scope to visible projects (for "all" search)
 	Limit           int      // max results (default 50)
 	Cursor          string   // keyset pagination cursor (base64-encoded "timestamp|id")
+
+	// DMParticipantUserID restricts DM threads ("dm:..." keys) when the search
+	// is not scoped to a single ConversationKey: a DM is returned only if this
+	// user occupies one of its user slots. Empty means no DM threads are
+	// returned at all (fail closed). It has no effect when ConversationKey is
+	// set, because the caller authorizes that conversation directly.
+	DMParticipantUserID string
+}
+
+// dmParticipantBounds returns the exact key prefix and suffix that identify
+// userID as a participant of a DM key of the form dm:<kind>:<id>:<kind>:<id>.
+// They mirror isDMParticipant: the first slot matches the prefix, the second
+// slot matches the suffix.
+func dmParticipantBounds(userID string) (prefix, suffix string) {
+	return "dm:user:" + userID + ":", ":user:" + userID
+}
+
+// filterSearchDMs drops DM results the filter's participant may not see. The
+// SQL condition already enforces this; this is a defensive second check using
+// the canonical isDMParticipant, so it never trims a page for well-formed keys.
+func filterSearchDMs(results []ChatSearchResult, filter ChatSearchFilter) []ChatSearchResult {
+	if filter.ConversationKey != "" {
+		return results
+	}
+	kept := results[:0]
+	for _, r := range results {
+		if strings.HasPrefix(r.ConversationKey, "dm:") &&
+			(filter.DMParticipantUserID == "" || !isDMParticipant(r.ConversationKey, filter.DMParticipantUserID)) {
+			continue
+		}
+		kept = append(kept, r)
+	}
+	return kept
 }
 
 // ChatSearchResult represents a single search result.
@@ -1469,6 +1502,21 @@ func (s *sqliteWebChatStore) SearchChatMessages(ctx context.Context, filter Chat
 			args = append(args, pid)
 		}
 		conditions = append(conditions, fmt.Sprintf("project_id IN (%s)", strings.Join(placeholders, ",")))
+	}
+
+	// DM threads are private to their participants. Unless the search is
+	// scoped to one (already authorized) conversation, include a DM only when
+	// the caller occupies one of its user slots. Exact prefix/suffix
+	// comparison, not LIKE, so IDs are never treated as patterns.
+	if filter.ConversationKey == "" {
+		if filter.DMParticipantUserID == "" {
+			conditions = append(conditions, "(thread_id IS NULL OR substr(thread_id, 1, 3) <> 'dm:')")
+		} else {
+			prefix, suffix := dmParticipantBounds(filter.DMParticipantUserID)
+			conditions = append(conditions, "(thread_id IS NULL OR substr(thread_id, 1, 3) <> 'dm:'"+
+				" OR substr(thread_id, 1, length(?)) = ? OR substr(thread_id, -length(?)) = ?)")
+			args = append(args, prefix, prefix, suffix, suffix)
+		}
 	}
 
 	// Keyset pagination cursor: "timestamp|id"
