@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -248,12 +249,25 @@ func TestOwnerPortAccess_OpenOnlyNotManage(t *testing.T) {
 		{http.MethodPost, base},
 		{http.MethodDelete, base},
 		{http.MethodDelete, base + "/8080"},
-		{http.MethodGet, base + "/tunnel"},
 	} {
 		rec := doRequestAsUser(t, srv, bob, tc.method, tc.path, map[string]any{"port": 8080})
 		assert.Equal(t, http.StatusForbidden, rec.Code,
 			"owner must not manage a member's ports (%s %s): %s", tc.method, tc.path, rec.Body.String())
 	}
+
+	// The tunnel checks for a WebSocket upgrade before authorizing, so send
+	// the handshake headers to reach the port-management gate.
+	token, _, _, err := srv.userTokenService.GenerateTokenPair(bob.ID, bob.Email, bob.DisplayName, bob.Role, ClientTypeWeb)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodGet, base+"/tunnel", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Sec-WebSocket-Version", "13")
+	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	tunnel := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(tunnel, req)
+	assert.Equal(t, http.StatusForbidden, tunnel.Code, "owner must not open a member's port tunnel: %s", tunnel.Body.String())
 
 	// And port access grants nothing terminal-level.
 	for _, action := range []string{"exec", "env"} {
