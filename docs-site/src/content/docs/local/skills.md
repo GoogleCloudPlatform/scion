@@ -88,6 +88,8 @@ skills:
 
 At provisioning time Scion resolves every required skill, downloads its files (using the [content-hash cache](#content-hash-caching)), and mounts them into the harness's skills directory (for example `.claude/skills/` or `.gemini/skills/`).
 
+When a Hub dispatches the agent, the Hub resolves Hub-registry skill references with the permissions of the principal creating the agent. That principal is the user, or the parent agent when an agent creates a child. The Runtime Broker's own identity is not used. A required non-public skill therefore provisions whenever the agent's creator can read it. If the creator cannot, provisioning fails with `the agent's creator does not have permission to access this skill`. The broker installs Hub-resolved skills as-is. It resolves only what the Hub did not cover itself, such as `gh://`, `gcp-skill://`, federated registries, and references found only in broker-local templates.
+
 ## Skill reference URIs
 
 A skill reference is either a **bare name** or a full `skill://` URI. Federated sources use their own schemes (`gh://`, `gcp-skill://`).

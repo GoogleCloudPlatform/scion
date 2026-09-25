@@ -29,7 +29,7 @@ Scion features an interactive, top-level **Native Web Chat** interface in the We
   - **DMs / General Chat**: If there is no active project context (such as when in Direct Messages or bare `/chat`), the toggle falls back to the top-level dashboard `/`.
 - **Direct Messaging (DMs)**: In addition to collaborative project spaces, the chat interface supports robust 1-on-1 Direct Messages (DMs). This includes both **human-to-human (H2H)** communication between team members and **human-to-agent (H2A)** chats. DMs are structured as a "global pair"—a single, consolidated thread per participant pair.
   - **DM Promotion to Shared Threads**: When a 1-on-1 Direct Message with an agent develops context useful for the broader team, you can promote the DM conversation into a Shared Space Thread. This atomic operation safely re-keys the messages and streams the transition live to all clients via SSE without a page reload. Use the promotion button located in the DM header.
-- **Members Sidebar, Presence & Typing**: A right-hand members sidebar lists all participants in the active project space or DM. This includes real-time online **presence indicators** (active, away, offline) and live **typing indicators** to show when a team member or agent is actively composing a message. The thread's default agent is highlighted with a "thread default" label in the AGENTS section of the sidebar. Members can be filtered (All/Unread toggle) and sorted (Alphabetical or Recent Activity).
+- **Members Sidebar, Presence & Typing**: A right-hand members sidebar lists all participants in the active project space or DM. This includes real-time online **presence indicators** (active, away, offline) and live **typing indicators** to show when a team member or agent is actively composing a message. The thread's default agent is highlighted with a "thread default" label in the AGENTS section of the sidebar. When a thread has a default agent, the thread header shows **terminal** and **graph** buttons for that agent, the same as a DM with an agent. Members can be filtered (All/Unread toggle) and sorted (Alphabetical or Recent Activity).
 - **The Thread Rail & Mobile Swipe Navigation**: A left-hand navigation sidebar lists all active chat spaces, threads, and DMs. On mobile viewports, the rail supports native **swipe gestures** for fluid, app-like drawer navigation.
 - **Chat/Log Toggle**: Located on the main `scion-chat-thread` panel, this toggle lets you switch between a clean, dialogue-focused **Chat** view and a live **Execution Log** stream for that agent.
 - **Zero-Reload Navigation**: Move between threads, project spaces, and configuration pages instantly with deep-linking support and no full-page reloads, ensuring no interruption to your active chat context or log streams.
@@ -45,7 +45,7 @@ Scion features an interactive, top-level **Native Web Chat** interface in the We
 The native web chat includes a complete suite of collaboration and developer productivity tools (Phases 0–5):
 
 #### 1. Message Context Menu
-Right-clicking a message (on desktop) or long-pressing (on mobile) opens a contextual **context menu** providing several per-message actions:
+Right-clicking a message (on desktop) or tapping it (on touch devices without hover) opens a contextual **context menu** providing several per-message actions. On touch devices, taps on links, buttons, mentions, and reply previews keep their normal behavior:
 - **Reply / Quote**: Quote a previous message with full backend support for reply-threading, maintaining clear context in fast-moving development discussions.
 - **Edit / Delete**: Edit or delete your own messages.
 - **Copy Permalink**: Generate a direct link to any message in the thread.
@@ -76,6 +76,7 @@ Right-clicking a message (on desktop) or long-pressing (on mobile) opens a conte
 
 - **Real-Time Browser Notifications**: Stay informed of `@mentions` and incoming DMs with native browser push notifications.
 - **Smart Suppression**: Notifications are mute-aware and automatically suppressed for active conversations (threads you are currently looking at) to prevent alert fatigue.
+- **Chat Chime**: A short two-tone chime plays when a chat message arrives from someone else. Your own messages never chime. The chime plays at most once every 2 seconds and does not depend on browser notification permission. Turn it off globally with **Chat chime sound** in your profile's notification settings. To turn it off for one project, choose **Chime on/off** from the thread rail's options menu. Both preferences are stored in the browser. If the browser's autoplay policy blocks audio, no sound plays.
 - **Unread Badges**: The tab title dynamically updates with an unread badge count when you are away from the tab.
 - **Per-Thread Draft Persistence**: Drafts are saved locally per-thread, so if you switch threads or close the tab, your unsent message remains waiting when you return.
 
@@ -94,6 +95,7 @@ The web composer features a security-hardened, developer-friendly file upload sy
 ### Performance & Safety Safeguards
 
 - **Token-Bucket Rate Limiting**: Per-sender token-bucket rate limits prevent message flooding, ensuring platform stability and protecting backend model endpoints.
+- **Touch-Friendly Composer**: On touch devices without hover, `Enter` inserts a newline instead of sending, because there is no `Shift+Enter`. Use the **Send** button to send.
 - **16K Input Character Limit**: A robust 16,000-character limit is enforced in the composer, protecting token context limits.
 - **SSE Direct Append & Real-Time Attachments**: Chat messages stream via Server-Sent Events (SSE) using direct-append logic, providing lag-free typing rendering. Additionally, attachment previews render immediately on incoming SSE messages, ensuring the user interface instantly displays attachment references without waiting for subsequent user-triggered renders.
 - **Idempotency Keys**: Client-side idempotency keys eliminate duplicate messages during transient connection drops or retry states.
@@ -251,6 +253,13 @@ When an agent uses the `ask_user` tool (or similar mechanism depending on the ha
 ## Real-Time Delivery
 
 Messages are delivered in real-time to the Web Dashboard via Server-Sent Events (SSE). The **Messages Tab** on the individual agent detail page provides a real-time stream of all communication with that specific agent.
+
+### Delivery failures
+
+Messages to agents are never silently dropped:
+
+- **Non-running recipients.** A message is rejected if the recipient agent is not running (suspended, stopped, in error, or still starting). For direct messages, human or agent, the send fails immediately with a `409` error. Pass `--wake` to resume a suspended agent and then deliver. Broadcast, group, and message-broker deliveries are rejected per recipient. A sending agent gets a `DELIVERY_FAILED` system notice ("Message delivery to `<agent>` failed: …") for each rejected recipient.
+- **Late broker failures.** A Runtime Broker may accept a message into its short delivery buffer and then fail to deliver it, for example because the container has gone away. The broker reports this to the Hub. The Hub marks the message `failed` rather than leaving it `dispatched`, and notifies the sending agent.
 
 ## Message Authorization & Modes
 

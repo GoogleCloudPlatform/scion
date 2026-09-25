@@ -110,6 +110,17 @@ To guarantee that no API endpoints or handlers can be accessed without explicit 
 - **Strict Isolation Ordering (404-before-403)**: To prevent unauthorized users or agents from discovering the existence of sensitive resources via API probe responses, Scion enforces strict **resource isolation ordering**. If a caller requests a resource they are not authorized to view, the Hub performs resource existence checks and tenant bounds validation first. This ensures the Hub responds with a `404 Not Found` rather than a `403 Forbidden` if the resource does not exist or belongs to another tenant/project, preventing side-channel resource enumeration.
 - **Regression Checks in CI**: To prevent future authorization regressions, an automated `authz-guard` check is wired into the CI pipeline (via a dedicated Makefile target and GitHub Actions step) that statically analyzes and validates that all API handlers are protected by appropriate authorization helpers.
 
+### 3.5 Project File Access Containment
+
+The Hub's project file handlers serve project workspaces and shared directories. These cover list, download, archive, upload, inline write, and delete. Each handler is confined to the directory it serves. The contents of these directories are agent-writable by design: a workspace is a git checkout, and a shared directory is mounted read-write into every agent in the project. A symlink planted inside one must therefore not expose files elsewhere on the host.
+
+- **Kernel-enforced containment**: File operations go through Go's `os.Root`, which checks containment at every path component. A path that resolves outside the served directory, including through a symlink stored inside it, is refused with `400 File not accessible` and a warning is logged. A symlink whose target is outside returns the same response whether or not the target exists, so it cannot be used to probe the host.
+- **In-tree symlinks**: A symlink that resolves to another location inside the same directory is followed normally.
+- **Symlinked base directories**: If the served directory itself is a symlink, the request is refused.
+- **Archives**: Directory archive downloads skip symlinks entirely.
+- **Deletes**: Deleting a symlink removes the link only, never its target.
+- **No implicit creation**: Read and delete requests on a missing workspace or shared directory no longer create it. Only uploads and writes do.
+
 ## 4. Secret Management
 
 Scion provides a typed, scope-aware secret management system. Secret values are never stored in plaintext in the Hub database. For a user-facing guide, see [Secret Management](/scion/hosted/user/secrets/).

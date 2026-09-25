@@ -74,6 +74,6 @@ See [Brokers behind IAP](/scion/hosted/ha/auth-proxy-iap/#brokers-behind-iap) fo
 ## Considerations
 
 - Each broker manages its own **port pools, container images, and local storage**. Images must be available on each broker independently.
-- **Shared directories** (mounted volumes) only work within a single broker — agents on different brokers cannot share a local directory.
+- **Shared directories** (mounted volumes) only work within a single broker by default. Agents on different brokers cannot share a local directory. To share them across brokers, set [`server.shared_dir_storage.backend`](/scion/reference/server-config/#shared-directory-storage-servershared_dir_storage) to `nfs` in every broker's global settings, pointing at the same NFS export.
 - **Workspace strategy** may differ per broker: local brokers typically use git worktrees (`.scion_worktrees/`), while hub-hosted git projects use a single workspace checkout.
 - Broker capacity is determined by the machine's resources. The Hub does not enforce cross-broker resource limits.
