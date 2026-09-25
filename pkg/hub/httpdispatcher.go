@@ -148,6 +148,7 @@ type HTTPAgentDispatcher struct {
 	authzService      *AuthzService        // Optional authz service for progeny secret verification
 	githubAppMinter   GitHubAppTokenMinter // Optional GitHub App token minter
 	hubEndpoint       string               // Hub endpoint URL for agents to call back
+	agentEndpoint     string               // Optional override of hubEndpoint for SCION_HUB_ENDPOINT only
 	hubName           string               // Hub display name for agent log labeling
 	hubID             string               // Hub instance ID for hub-scoped queries
 	devAuthToken      string               // Dev auth token to inject into agent env (dev-auth mode only)
@@ -241,6 +242,26 @@ func agentRoleAndScopes(agent *store.Agent) (AgentRole, []AgentTokenScope) {
 // SetHubEndpoint sets the Hub endpoint URL that agents will use to call back.
 func (d *HTTPAgentDispatcher) SetHubEndpoint(endpoint string) {
 	d.hubEndpoint = endpoint
+}
+
+// SetAgentEndpoint sets an optional override of the Hub endpoint used only
+// for the SCION_HUB_ENDPOINT value injected into dispatched agents. It takes
+// precedence over the value set by SetHubEndpoint at every agent-injection
+// site (create, start, restart), but has no effect on anything else the
+// dispatcher or the wider Hub does with the regular hub endpoint. An empty
+// value (the default) leaves injection using the value set by SetHubEndpoint.
+func (d *HTTPAgentDispatcher) SetAgentEndpoint(endpoint string) {
+	d.agentEndpoint = endpoint
+}
+
+// effectiveAgentHubEndpoint returns the Hub endpoint value to stamp into an
+// agent's SCION_HUB_ENDPOINT: the agent-endpoint override when configured,
+// otherwise the regular hub endpoint.
+func (d *HTTPAgentDispatcher) effectiveAgentHubEndpoint() string {
+	if d.agentEndpoint != "" {
+		return d.agentEndpoint
+	}
+	return d.hubEndpoint
 }
 
 // SetHubName sets the hub display name for agent log labeling.
@@ -436,7 +457,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		Name:          agent.Name,
 		ProjectID:     agent.ProjectID,
 		UserID:        agent.OwnerID,
-		HubEndpoint:   d.hubEndpoint,
+		HubEndpoint:   d.effectiveAgentHubEndpoint(),
 		ProjectPath:   projectInfo.projectPath,
 		ProjectSlug:   projectInfo.projectSlug,
 		SharedDirs:    projectInfo.sharedDirs,
@@ -462,7 +483,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		d.log.Debug(callerName,
 			"agent_id", agent.ID,
 			"agentName", agent.Name,
-			"hubEndpoint", d.hubEndpoint,
+			"hubEndpoint", d.effectiveAgentHubEndpoint(),
 			"hasTokenGenerator", d.tokenGenerator != nil,
 		)
 	}
@@ -2075,8 +2096,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	// The createAgent path sends this as req.HubEndpoint, but the startAgent
 	// path relies on the broker's own config which may be empty for standalone
 	// brokers. Including it here ensures the broker always has the endpoint.
-	if d.hubEndpoint != "" {
-		resolvedEnv["SCION_HUB_ENDPOINT"] = d.hubEndpoint
+	if ep := d.effectiveAgentHubEndpoint(); ep != "" {
+		resolvedEnv["SCION_HUB_ENDPOINT"] = ep
 		classifyEnv(&envClassifications, "SCION_HUB_ENDPOINT", api.EnvKindPlain)
 	}
 	// Include hub name so agents can label their Cloud Logging entries with
@@ -2344,8 +2365,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		resolvedEnv["SCION_AGENT_SLUG"] = agent.Slug
 		classifyEnv(&envClassifications, "SCION_AGENT_SLUG", api.EnvKindPlain)
 	}
-	if d.hubEndpoint != "" {
-		resolvedEnv["SCION_HUB_ENDPOINT"] = d.hubEndpoint
+	if ep := d.effectiveAgentHubEndpoint(); ep != "" {
+		resolvedEnv["SCION_HUB_ENDPOINT"] = ep
 		classifyEnv(&envClassifications, "SCION_HUB_ENDPOINT", api.EnvKindPlain)
 	}
 	// Include hub name so agents can label their Cloud Logging entries with

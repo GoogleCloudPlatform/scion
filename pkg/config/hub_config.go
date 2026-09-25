@@ -19,8 +19,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -44,6 +48,20 @@ type HubServerConfig struct {
 	// This is passed to agents so they know where to report status updates.
 	// If empty, agents won't be able to call back to the Hub.
 	Endpoint string `json:"endpoint" yaml:"endpoint" koanf:"endpoint"`
+
+	// AgentEndpoint optionally overrides Endpoint for the sole purpose of the
+	// SCION_HUB_ENDPOINT value injected into dispatched agents. Use this when
+	// agents must reach the Hub on a different address than users (e.g. an
+	// internal VPC URL), while invite links, chat-bridge links, the OIDC
+	// issuer default, and the cloudrun_invoker audience default continue to
+	// use Endpoint. It is injected into agents on every runtime broker
+	// attached to this Hub, including remote brokers — see the settings
+	// reference before setting it. When unset, agents receive the Hub's
+	// regular endpoint (Endpoint, or the endpoint the Hub resolves when
+	// Endpoint is unset). When set, it must be scheme://host[:port] only —
+	// see ValidateAgentEndpoint, which also returns the normalized form that
+	// should be stored back into this field.
+	AgentEndpoint string `json:"agentEndpoint,omitempty" yaml:"agentEndpoint,omitempty" koanf:"agentEndpoint"`
 
 	// CORS settings
 	CORSEnabled        bool     `json:"corsEnabled" yaml:"corsEnabled" koanf:"corsEnabled"`
@@ -257,6 +275,113 @@ func (c *HubServerConfig) ResolveHubName() string {
 		return "unknown"
 	}
 	return hostname
+}
+
+// validAgentEndpointLabelRE matches one DNS label made only of letters,
+// digits, '_', and '-', each dot-separated label matched individually so that
+// a leading or trailing '-' is rejected per label rather than only at the
+// ends of the whole host. Underscore is accepted because Docker's embedded
+// DNS and Compose-style service names commonly use it (e.g. "scion_hub").
+// IP literals are checked separately with net.ParseIP and never reach this
+// pattern.
+var validAgentEndpointLabelRE = regexp.MustCompile(`^[A-Za-z0-9_]([A-Za-z0-9_-]*[A-Za-z0-9_])?$`)
+
+// isValidAgentEndpointHostname reports whether host is a syntactically valid
+// hostname for server.hub.agent_endpoint: one or more non-empty
+// dot-separated labels, each matching validAgentEndpointLabelRE, with at
+// most one trailing dot for a fully-qualified name.
+func isValidAgentEndpointHostname(host string) bool {
+	h := strings.TrimSuffix(host, ".")
+	if h == "" {
+		return false
+	}
+	for _, label := range strings.Split(h, ".") {
+		if !validAgentEndpointLabelRE.MatchString(label) {
+			return false
+		}
+	}
+	return true
+}
+
+// ValidateAgentEndpoint checks server.hub.agent_endpoint and returns its
+// normalized form. An empty string is valid (the override is optional and
+// unused) and returns "". A non-empty value must be an absolute http(s) URL
+// naming only a host and, optionally, a port: no userinfo, query, fragment,
+// out-of-range port, or path other than "" or "/". The host must be an IP
+// literal or a hostname of letters, digits, '_', '-', and '.'; an IPv6 zone
+// (e.g. "%eth0") is rejected because it cannot be stamped into a URL that
+// agents can re-parse. Rejecting all of this at startup means the Hub fails
+// fast with a clear error instead of silently injecting a broken or
+// credential-carrying endpoint into every dispatched agent.
+//
+// On success, the returned string is the normalized form — lowercase scheme,
+// "scheme://host[:port]" rebuilt from the parsed host and port (so an empty
+// port is dropped and an IPv6 host is bracketed), no path — that callers
+// should store in place of raw and use everywhere the value is read. The
+// normalized form always re-parses to the same scheme and host.
+//
+// No error message from ValidateAgentEndpoint ever echoes any part of the
+// configured value — not raw, not u.Redacted(), not any individual component
+// such as the scheme, host, path, or query: every rejected value is, by
+// definition, a value this function has not finished validating, so no
+// substring of it can be assumed safe to print. The scheme itself could be a
+// leaked secret or username (e.g. "secret://h" or "u:/secret@h"), so even
+// the scheme-mismatch message is a fixed string, and the host could be a
+// leaked secret too (e.g. "http://admin:123456" with an out-of-range port),
+// so the port-range message does not name the host either. This holds even
+// for a hierarchical URL with no "//" authority — e.g. "http:/admin:secret@h"
+// parses with an empty host and a Path of "/admin:secret@h", and
+// "http://h?token=secret" carries the secret in RawQuery — so every message
+// states the rule without echoing anything.
+func ValidateAgentEndpoint(raw string) (string, error) {
+	if raw == "" {
+		return "", nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("server.hub.agent_endpoint: invalid URL")
+	}
+	if u.Opaque != "" {
+		return "", fmt.Errorf("server.hub.agent_endpoint: must be an absolute http(s) URL of the form scheme://host[:port]")
+	}
+	if u.User != nil {
+		return "", fmt.Errorf("server.hub.agent_endpoint: must not contain user credentials")
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return "", fmt.Errorf("server.hub.agent_endpoint: must be an absolute http(s) URL")
+	}
+	if u.RawQuery != "" {
+		return "", fmt.Errorf("server.hub.agent_endpoint: must not contain a query string")
+	}
+	if u.Fragment != "" {
+		return "", fmt.Errorf("server.hub.agent_endpoint: must not contain a fragment")
+	}
+	if u.Path != "" && u.Path != "/" {
+		return "", fmt.Errorf("server.hub.agent_endpoint: must not contain a path")
+	}
+	host := u.Hostname()
+	if host == "" {
+		return "", fmt.Errorf("server.hub.agent_endpoint: must include a host")
+	}
+	if strings.Contains(host, "%") {
+		return "", fmt.Errorf("server.hub.agent_endpoint: host must not contain an IPv6 zone")
+	}
+	if net.ParseIP(host) == nil && !isValidAgentEndpointHostname(host) {
+		return "", fmt.Errorf("server.hub.agent_endpoint: host must be an IP address or a hostname of letters, digits, '_', '-', and '.'")
+	}
+	authority := host
+	if portStr := u.Port(); portStr != "" {
+		port, err := strconv.Atoi(portStr)
+		if err != nil || port < 1 || port > 65535 {
+			return "", fmt.Errorf("server.hub.agent_endpoint: port must be between 1 and 65535")
+		}
+		authority = net.JoinHostPort(host, strconv.Itoa(port))
+	} else if strings.Contains(host, ":") {
+		// A bare IPv6 literal still needs brackets even without a port.
+		authority = "[" + host + "]"
+	}
+	return scheme + "://" + authority, nil
 }
 
 // RuntimeBrokerConfig holds configuration for the Runtime Broker API server.
@@ -1058,6 +1183,7 @@ func parseCommaSeparatedList(s string) []string {
 var snakeCaseFields = map[string]string{
 	// Layer-1 compound segments (from opsettings registry)
 	"adminemails":           "admin_emails",
+	"agentendpoint":         "agent_endpoint",
 	"apibaseurl":            "api_base_url",
 	"appid":                 "app_id",
 	"authorizeddomains":     "authorized_domains",
@@ -1112,6 +1238,7 @@ var snakeCaseFields = map[string]string{
 var camelCaseFields = map[string]string{
 	"adminemails":                   "adminEmails",
 	"adminmode":                     "adminMode",
+	"agentendpoint":                 "agentEndpoint",
 	"allowcontainerscriptharnesses": "allowContainerScriptHarnesses",
 	"apibaseurl":                    "apiBaseUrl",
 	"appid":                         "appId",
