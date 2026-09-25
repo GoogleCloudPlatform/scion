@@ -62,6 +62,58 @@ func (s *Server) resolveTemplate(ctx context.Context, templateRef, projectID str
 	return template, nil
 }
 
+// authorizeResolvedTemplate reports whether identity may read the resolved
+// template candidate before it is used to populate a new agent's applied
+// config. resolveTemplate's first lookup arm resolves by ID across every
+// scope, so a candidate it returns is not yet known to be one the caller may
+// see — this establishes that, mirroring the read-authorization gate every
+// other template read surface applies via templateResource (ptone/scion#1916).
+//
+// A nil template needs no check. A nil identity is fail-closed, not a
+// pass: both of this gate's callers already require an identity before they
+// can reach it (createAgentInProject runs behind authorizeAgentCreate, which
+// rejects a nil identity outright, and the scheduler path's creatorIdentity
+// is resolved from a scheduled event's CreatedBy before dispatch ever calls
+// this — an empty/unresolvable creator fails the dispatch first). A
+// background/system context that has no principal to check against, such as
+// ValidateStartupDefaults, must not call this gate at all — it calls
+// resolveTemplate directly and never surfaces the candidate to a caller, so
+// there is nothing here for it to pass through. If a genuine internal path
+// ever needs to bypass this check, it must do so explicitly (e.g. a
+// documented system-principal Identity), not by leaving identity nil.
+// A global-scope template is the hub-wide catalog — no confidentiality
+// boundary applies, the same rule filterHubWideTemplateGrants encodes for
+// the curated hub-member/hub-viewer grant (ptone/scion#1901/#1916). It is
+// checked directly here, rather than relying on that grant, because it must
+// also cover agent and broker principals, which never hold a
+// hub-member-equivalent grant of their own but must still be able to resolve
+// the hub-wide default template (e.g. a delegate agent's scheduled dispatch
+// applying the hub's DefaultTemplate setting). A broker identity is scoped
+// by brokerMayReadCatalogResource for the same reason getTemplateV2 and
+// handleTemplateDownload use it: brokers read templates during agent
+// creation (hydration) over HMAC auth, not as user principals, but that is
+// authority to hydrate the projects they serve plus the hub-wide catalog —
+// already covered by the global-scope check above — not every project's or
+// user's private template.
+func (s *Server) authorizeResolvedTemplate(ctx context.Context, identity Identity, tmpl *store.Template) bool {
+	if tmpl == nil {
+		return true
+	}
+	if identity == nil {
+		return false
+	}
+	if tmpl.Scope == store.TemplateScopeGlobal {
+		return true
+	}
+	if broker := GetBrokerIdentityFromContext(ctx); broker != nil {
+		return s.brokerMayReadCatalogResource(ctx, broker, tmpl.Scope, tmpl.ScopeID)
+	}
+	if s.authzService == nil {
+		return false
+	}
+	return s.authzService.CheckAccess(ctx, identity, templateResource(tmpl), ActionRead).Allowed
+}
+
 // getHarnessConfigFromTemplate returns the harness config name from a resolved template,
 // or the fallback value if no template was resolved. Prefers the template's
 // DefaultHarnessConfig (e.g. "claude-web") over the generic Harness type (e.g. "claude").

@@ -851,3 +851,70 @@ func TestRequireAdmin_DenialReasons(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// authorizeRead
+// ---------------------------------------------------------------------------
+
+// TestAuthorizeRead_IdentityKinds mirrors TestAuthorize_IdentityKinds for
+// authorizeRead: nil identity is 401, and a denial is 404 rather than 403 so
+// a resource the caller may not read is indistinguishable from a nonexistent
+// one on the wire.
+func TestAuthorizeRead_IdentityKinds(t *testing.T) {
+	srv, s := testServer(t)
+	authzHelperSeedAdmin(t, s)
+
+	deniedResource := Resource{
+		Type:       "agent",
+		ID:         "authz-read-unrelated",
+		ParentType: "project",
+		ParentID:   authzHelperProjectA,
+	}
+
+	tests := []struct {
+		name       string
+		identity   Identity
+		wantAllow  bool
+		wantStatus int
+	}{
+		{"nil identity is unauthenticated", nil, false, http.StatusUnauthorized},
+		{"user allowed by policy", authzHelperAdmin(), true, 0},
+		{"user denied by policy reads as 404", authzHelperMember(), false, http.StatusNotFound},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			got := srv.authorizeRead(rec, authzHelperRequest(tc.identity), deniedResource, "Thing")
+
+			if got != tc.wantAllow {
+				t.Fatalf("authorizeRead() = %v, want %v (body: %s)", got, tc.wantAllow, rec.Body.String())
+			}
+			if tc.wantAllow {
+				return
+			}
+			if rec.Code != tc.wantStatus {
+				t.Errorf("status = %d, want %d (body: %s)", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestAuthorizeRead_NilAuthzServiceFailsClosed is the ptone/scion#1936
+// gemini-review regression: a nil s.authzService must deny with a 404 (the
+// same shape as an ordinary denial), not panic with a nil pointer
+// dereference on the CheckAccess call.
+func TestAuthorizeRead_NilAuthzServiceFailsClosed(t *testing.T) {
+	srv, _ := testServer(t)
+	srv.authzService = nil
+
+	rec := httptest.NewRecorder()
+	got := srv.authorizeRead(rec, authzHelperRequest(authzHelperAdmin()), Resource{Type: "thing", ID: "x"}, "Thing")
+
+	if got {
+		t.Fatal("expected authorizeRead to deny when authzService is nil")
+	}
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want %d (body: %s)", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+}

@@ -20,32 +20,81 @@ func makeAllowed(n int) []bool {
 	return allowed
 }
 
-func TestAuthorizedListRejectsCandidateCap(t *testing.T) {
+// TestAuthorizedListDegradesOnCandidateCap is the ptone/scion#1916
+// follow-up (C3) regression: crossing authorizedListMaxCandidates must
+// degrade the response (an approximate total), never fail the whole
+// request. Every item here is allowed, so the page-fill pass fills its
+// (small) page well before the cap and returns a full, exact page; only the
+// count pass's total is expected to come back approximate.
+func TestAuthorizedListDegradesOnCandidateCap(t *testing.T) {
 	items := make([]authorizedListTestItem, authorizedListMaxCandidates+1)
 	for i := range items {
 		items[i] = authorizedListTestItem{id: fmt.Sprint(i)}
 	}
-	_, err := authorizedList(context.Background(), nil, "", 1,
-		func(_ context.Context, cursor string, limit int) (authorizedCandidatePage[authorizedListTestItem], error) {
-			start := 0
-			if cursor != "" {
-				_, _ = fmt.Sscan(cursor, &start)
-				start++
-			}
-			end := start + limit
-			if end > len(items) {
-				end = len(items)
-			}
-			next := ""
-			if end < len(items) {
-				next = items[end-1].id
-			}
-			return authorizedCandidatePage[authorizedListTestItem]{Items: items[start:end], NextCursor: next}, nil
-		}, func(*authorizedListTestItem) Resource { return Resource{} }, func(item *authorizedListTestItem) string { return item.id },
+	fetch := func(_ context.Context, cursor string, limit int) (authorizedCandidatePage[authorizedListTestItem], error) {
+		start := 0
+		if cursor != "" {
+			_, _ = fmt.Sscan(cursor, &start)
+			start++
+		}
+		end := start + limit
+		if end > len(items) {
+			end = len(items)
+		}
+		next := ""
+		if end < len(items) {
+			next = items[end-1].id
+		}
+		return authorizedCandidatePage[authorizedListTestItem]{Items: items[start:end], NextCursor: next}, nil
+	}
+	result, err := authorizedList(context.Background(), nil, "", 1, fetch,
+		func(*authorizedListTestItem) Resource { return Resource{} }, func(item *authorizedListTestItem) string { return item.id },
 		func(_ context.Context, _ Identity, resources []Resource) ([]bool, error) {
 			return makeAllowed(len(resources)), nil
 		})
-	require.ErrorIs(t, err, ErrAuthorizedListIncomplete)
+	require.NoError(t, err, "crossing the candidate cap must not fail the request")
+	assert.True(t, result.TotalCountApproximate, "the total must be flagged approximate once the cap is crossed")
+	assert.GreaterOrEqual(t, result.TotalCount, authorizedListMaxCandidates, "the approximate total must be at least the scanned candidate count")
+	require.Len(t, result.Items, 1, "the page-fill pass must still return a full page well ahead of the cap")
+	assert.Equal(t, items[0].id, result.Items[0].id)
+	assert.NotEmpty(t, result.NextCursor)
+}
+
+// TestAuthorizedListPageFillDegradesOnCandidateCap is the page-fill-side
+// twin: when every candidate is denied, the page-fill pass must stop at the
+// scan budget with a short (here: empty) page and a resume cursor, rather
+// than scanning the full candidate pool in one request.
+func TestAuthorizedListPageFillDegradesOnCandidateCap(t *testing.T) {
+	items := make([]authorizedListTestItem, authorizedListMaxCandidates+1)
+	for i := range items {
+		items[i] = authorizedListTestItem{id: fmt.Sprint(i)}
+	}
+	fetch := func(_ context.Context, cursor string, limit int) (authorizedCandidatePage[authorizedListTestItem], error) {
+		start := 0
+		if cursor != "" {
+			_, _ = fmt.Sscan(cursor, &start)
+			start++
+		}
+		end := start + limit
+		if end > len(items) {
+			end = len(items)
+		}
+		next := ""
+		if end < len(items) {
+			next = items[end-1].id
+		}
+		return authorizedCandidatePage[authorizedListTestItem]{Items: items[start:end], NextCursor: next}, nil
+	}
+	denyAll := func(_ context.Context, _ Identity, resources []Resource) ([]bool, error) {
+		return make([]bool, len(resources)), nil // all false
+	}
+	result, err := authorizedList(context.Background(), nil, "", 10, fetch,
+		func(*authorizedListTestItem) Resource { return Resource{} }, func(item *authorizedListTestItem) string { return item.id },
+		denyAll)
+	require.NoError(t, err, "an exhausted scan budget must not fail the request")
+	assert.Empty(t, result.Items, "no candidate was allowed, so the page must be empty, not a leaked denied item")
+	assert.NotEmpty(t, result.NextCursor, "a resume cursor must be returned so a follow-up request continues the scan")
+	assert.True(t, result.TotalCountApproximate)
 }
 
 func TestAuthorizedListReturnsCanceledContext(t *testing.T) {

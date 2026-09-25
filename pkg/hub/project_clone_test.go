@@ -192,6 +192,22 @@ func (m *cloneMockStorage) Copy(_ context.Context, srcPath, dstPath string) (*st
 	return dstObj, nil
 }
 
+// DeletePrefix actually removes matching keys, unlike the embedded
+// mockStorage's no-op, so tests can observe whether a handler deleted a
+// prefix it should not have (ptone/scion#1916 follow-up: clone failure
+// cleanup must never remove a prefix the request did not itself create).
+func (m *cloneMockStorage) DeletePrefix(_ context.Context, prefix string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for path := range m.objects {
+		if strings.HasPrefix(path, prefix) {
+			delete(m.objects, path)
+			delete(m.content, path)
+		}
+	}
+	return nil
+}
+
 // seedObject inserts data into the mock storage for testing.
 func (m *cloneMockStorage) seedObject(path string, data []byte) {
 	m.mu.Lock()

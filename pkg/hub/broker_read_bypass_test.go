@@ -121,6 +121,11 @@ func TestBrokerCanGetHarnessConfigByID(t *testing.T) {
 // TestNonBrokerWithoutPermissionDeniedTemplate verifies that a non-broker
 // identity without read permission is still denied access to templates.
 // This ensures the SECURITY-GATE is preserved for non-broker callers.
+//
+// Expects 404, not 403 (ptone/scion#1916): a read denial on this surface
+// must be indistinguishable from a nonexistent template, matching
+// getTemplateV2's authorizeRead gate (authorize.go) and the skill fix's
+// getSkill/writeSkillLookupError precedent (ptone/scion#1901).
 func TestNonBrokerWithoutPermissionDeniedTemplate(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -149,13 +154,16 @@ func TestNonBrokerWithoutPermissionDeniedTemplate(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.mux.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("expected status 403 for non-admin user without read permission, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected status 404 for non-admin user without read permission, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
 // TestNonBrokerWithoutPermissionDeniedHarnessConfig verifies the same deny
 // behavior for harness config endpoints.
+//
+// Expects 404, not 403 (ptone/scion#1916) — see the identical comment on
+// TestNonBrokerWithoutPermissionDeniedTemplate.
 func TestNonBrokerWithoutPermissionDeniedHarnessConfig(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -183,7 +191,7 @@ func TestNonBrokerWithoutPermissionDeniedHarnessConfig(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.mux.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("expected status 403 for non-admin user without read permission, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected status 404 for non-admin user without read permission, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

@@ -166,12 +166,13 @@ func (s *Server) handleTemplateFiles(w http.ResponseWriter, r *http.Request, tem
 	// storage read, storage write or manifest change. Reads require read;
 	// everything that mutates template content requires update, matching the
 	// upload and finalize actions, which also mutate content rather than the
-	// template record itself.
-	action := ActionUpdate
+	// template record itself. A read denial reads as 404 (ptone/scion#1916),
+	// matching getTemplateV2; a write denial stays 403.
 	if r.Method == http.MethodGet {
-		action = ActionRead
-	}
-	if !s.authorize(w, r, templateResource(template), action) {
+		if !s.authorizeTemplateReadRoute(w, r, template) {
+			return
+		}
+	} else if !s.authorize(w, r, templateResource(template), ActionUpdate) {
 		return
 	}
 

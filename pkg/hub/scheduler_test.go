@@ -1635,6 +1635,18 @@ func (r *resolvingTemplateStore) GetTemplateBySlug(_ context.Context, slug, _, _
 		Harness:     "claude",
 		ContentHash: "d00dfeed",
 		Status:      "active",
+		// Scope: global — these tests exercise the scheduler dispatch
+		// mechanics (which rung wins, applied-config precedence), not store
+		// scope filtering, so this stub always resolves regardless of the
+		// scope/scopeID arguments it's called with. It stands in for the
+		// hub-wide default template these tests reference (e.g.
+		// DefaultTemplate), so it must be scoped as such: ptone/scion#1916's
+		// authorizeResolvedTemplate gate (handlers_agent_create_helpers.go)
+		// treats a resolved candidate's scope as authoritative, and a
+		// delegate agent's scheduled dispatch — like any principal without a
+		// hub-member-equivalent grant of its own — can only pass that gate on
+		// a global-scope template.
+		Scope: store.TemplateScopeGlobal,
 	}, nil
 }
 

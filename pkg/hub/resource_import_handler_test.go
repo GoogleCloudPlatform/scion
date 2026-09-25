@@ -786,6 +786,16 @@ func TestHarnessConfigReimport_ProjectUsesHarnessConfigAuthorization(t *testing.
 	require.NoError(t, s.CreateUser(ctx, user))
 	ensureHubMembership(ctx, s, user.ID)
 	grantUserActionOnResource(t, s, user.ID, "harness_config", project.ID, ActionCreate)
+	// The dispatcher's baseline gate for /reimport is ActionRead on the
+	// harness config itself (harnessConfigRouteAction, harness_config_handlers.go),
+	// evaluated before this test's ActionCreate grant is ever reached. Before
+	// ptone/scion#1916, the hub-member role's system-scope harness_config.read
+	// grant satisfied that baseline for any hub member regardless of scope;
+	// now that grant is correctly narrowed to global-scope configs
+	// (filterHubWideHarnessConfigGrants), so a caller who is not a project
+	// member needs read granted explicitly, same as they always needed create
+	// granted explicitly.
+	grantUserActionOnResource(t, s, user.ID, "harness_config", project.ID, ActionRead)
 
 	harnessConfig := &store.HarnessConfig{
 		ID:      tid("harness-config-reimport-authz"),
