@@ -147,16 +147,14 @@ func TestProjectWorkspaceAuthz_MemberStillAllowed(t *testing.T) {
 	})
 }
 
-// TestProjectWorkspaceAction pins the method-to-permission mapping, including
-// the two classifications flagged for review. If PROPFIND or LOCK is
-// reclassified as a read, this test is the place that records the decision.
+// TestProjectWorkspaceAction pins the method-to-permission mapping. Every
+// WebDAV verb is a write by maintainer decision, PROPFIND and LOCK included,
+// and unknown verbs fall on the restrictive side.
 func TestProjectWorkspaceAction(t *testing.T) {
 	reads := []string{http.MethodGet, http.MethodHead, http.MethodOptions}
 	writes := []string{
 		http.MethodPut, http.MethodPost, http.MethodDelete,
-		"MKCOL", "MOVE", "COPY", "PROPPATCH",
-		"PROPFIND", // flagged for review: arguably a read
-		"LOCK",     // flagged for review: arguably a read
+		"MKCOL", "MOVE", "COPY", "PROPPATCH", "PROPFIND", "LOCK", "UNLOCK",
 		"WHATEVER", // unknown verb must default to the restrictive side
 	}
 	for _, m := range reads {

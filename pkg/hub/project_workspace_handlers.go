@@ -344,15 +344,8 @@ func notAccessible(w http.ResponseWriter, what string, path string, err error) {
 //   - GET  (filePath="")  → list files
 //   - POST (filePath="")  → upload files
 //   - DELETE (filePath!="") → delete file
-func (s *Server) handleProjectWorkspace(w http.ResponseWriter, r *http.Request, projectID, filePath string) {
+func (s *Server) handleProjectWorkspace(w http.ResponseWriter, r *http.Request, project *store.Project, filePath string) {
 	ctx := r.Context()
-
-	// Look up the project
-	project, err := s.store.GetProject(ctx, projectID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
 
 	// Resolve workspace path — supports hub-managed, shared-workspace, and linked projects
 	workspacePath, err := s.resolveProjectWebDAVPath(ctx, project)
@@ -377,7 +370,7 @@ func (s *Server) handleProjectWorkspace(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 		slog.ErrorContext(ctx, "failed to open project workspace",
-			"project_id", projectID, "error", err)
+			"project_id", project.ID, "error", err)
 		InternalError(w)
 		return
 	}
@@ -701,18 +694,11 @@ func writeDirectoryToZip(zw *zip.Writer, root *os.Root) error {
 }
 
 // handleProjectWorkspaceArchive creates a zip archive of the entire workspace and serves it for download.
-func (s *Server) handleProjectWorkspaceArchive(w http.ResponseWriter, r *http.Request, projectID string) {
+func (s *Server) handleProjectWorkspaceArchive(w http.ResponseWriter, r *http.Request, project *store.Project) {
 	ctx := r.Context()
 
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
-		return
-	}
-
-	// Look up the project
-	project, err := s.store.GetProject(ctx, projectID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
 		return
 	}
 
@@ -732,7 +718,7 @@ func (s *Server) handleProjectWorkspaceArchive(w http.ResponseWriter, r *http.Re
 			return
 		}
 		slog.ErrorContext(ctx, "failed to open project workspace for archive",
-			"project_id", projectID, "error", err)
+			"project_id", project.ID, "error", err)
 		InternalError(w)
 		return
 	}
@@ -748,7 +734,7 @@ func (s *Server) handleProjectWorkspaceArchive(w http.ResponseWriter, r *http.Re
 	if err := writeDirectoryToZip(zw, root); err != nil {
 		// At this point we've already started writing, so we can't send an error response.
 		// The zip will be truncated/corrupt, which the client will notice.
-		slog.WarnContext(ctx, "failed to complete workspace archive", "project_id", projectID, "error", err)
+		slog.WarnContext(ctx, "failed to complete workspace archive", "project_id", project.ID, "error", err)
 		return
 	}
 }
@@ -1125,7 +1111,7 @@ func validateWorkspaceFilePath(path string) error {
 }
 
 // handleProjectWorkspacePull performs a `git pull --ff-only` on a shared-workspace project.
-func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Request, projectID string) {
+func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Request, project *store.Project) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
 		return
@@ -1140,12 +1126,6 @@ func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Reque
 	}
 
 	ctx := r.Context()
-
-	project, err := s.store.GetProject(ctx, projectID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
 
 	if !project.IsSharedWorkspace() {
 		Conflict(w, "Pull is only available for shared-workspace git projects")
@@ -1251,13 +1231,12 @@ func isProjectWorkspaceSubPath(subPath string) bool {
 // been allowed; being wrong in the permissive direction is the bug this change
 // exists to fix.
 //
-// OPEN QUESTION for review — PROPFIND and LOCK are classified as writes here
-// and arguably should not be. PROPFIND is how a WebDAV client enumerates a
-// collection, so under this mapping a read-only client cannot browse a
-// workspace it is allowed to read. LOCK is a mutation of lock state but is
-// taken by clients that intend only to read. Reclassifying either is a
-// one-line change to this function; it is left alone pending a decision rather
-// than settled quietly inside a security fix.
+// Every WebDAV verb (PROPFIND, PROPPATCH, MKCOL, COPY, MOVE, LOCK, UNLOCK) is
+// deliberately a write, including PROPFIND and LOCK. This was a
+// maintainer decision. The cost is that a read-only principal cannot mount or
+// browse the workspace over WebDAV; it can still read through GET on
+// workspace/files and the archive endpoint. Reclassifying a verb as a read is
+// a one-line change here and in TestProjectWorkspaceAction.
 func projectWorkspaceAction(method string) Action {
 	switch method {
 	case http.MethodGet, http.MethodHead, http.MethodOptions:
@@ -1293,30 +1272,30 @@ func (s *Server) handleProjectWorkspaceRoutes(w http.ResponseWriter, r *http.Req
 	case strings.HasPrefix(subPath, "dav"):
 		davPath := strings.TrimPrefix(subPath, "dav")
 		davPath = strings.TrimPrefix(davPath, "/")
-		s.handleProjectWebDAV(w, r, projectID, davPath)
+		s.handleProjectWebDAV(w, r, project, davPath)
 
 	case subPath == "sync/status":
-		s.handleProjectSyncStatus(w, r, projectID)
+		s.handleProjectSyncStatus(w, r, project)
 
 	case subPath == "workspace/cache/refresh":
-		s.handleProjectCacheRefresh(w, r, projectID)
+		s.handleProjectCacheRefresh(w, r, project)
 
 	case subPath == "workspace/cache/status":
-		s.handleProjectCacheStatus(w, r, projectID)
+		s.handleProjectCacheStatus(w, r, project)
 
 	case subPath == "workspace/cache/notify":
-		s.handleProjectCacheNotify(w, r, projectID)
+		s.handleProjectCacheNotify(w, r, project)
 
 	case subPath == "workspace/pull":
-		s.handleProjectWorkspacePull(w, r, projectID)
+		s.handleProjectWorkspacePull(w, r, project)
 
 	case subPath == "workspace/archive":
-		s.handleProjectWorkspaceArchive(w, r, projectID)
+		s.handleProjectWorkspaceArchive(w, r, project)
 
 	case strings.HasPrefix(subPath, "workspace/files"):
 		filePath := strings.TrimPrefix(subPath, "workspace/files")
 		filePath = strings.TrimPrefix(filePath, "/")
-		s.handleProjectWorkspace(w, r, projectID, filePath)
+		s.handleProjectWorkspace(w, r, project, filePath)
 
 	default:
 		// Reached only for a workspace subpath with no handler, e.g.

@@ -50,14 +50,8 @@ var syncExcludeExtensions = []string{
 // For linked projects (workspace on a remote broker), it serves from the hub's
 // cached copy. The cache is populated via the cache/refresh or cache/notify
 // endpoints (Phase 3: Linked Project Relay).
-func (s *Server) handleProjectWebDAV(w http.ResponseWriter, r *http.Request, projectID, davPath string) {
+func (s *Server) handleProjectWebDAV(w http.ResponseWriter, r *http.Request, project *store.Project, davPath string) {
 	ctx := r.Context()
-
-	project, err := s.store.GetProject(ctx, projectID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
 
 	// Determine workspace path based on project type
 	workspacePath, err := s.resolveProjectWebDAVPath(ctx, project)
@@ -75,7 +69,7 @@ func (s *Server) handleProjectWebDAV(w http.ResponseWriter, r *http.Request, pro
 	root, err := openConfinedBase(workspacePath, true)
 	if err != nil {
 		slog.Error("failed to open project workspace directory",
-			"project_id", projectID, "path", workspacePath, "error", err)
+			"project_id", project.ID, "path", workspacePath, "error", err)
 		InternalError(w)
 		return
 	}
@@ -109,10 +103,10 @@ func (s *Server) handleProjectWebDAV(w http.ResponseWriter, r *http.Request, pro
 	// NewMemLS() was called per-request, making locks completely ephemeral.
 	// Use Load first to avoid allocating a new MemLS on every request.
 	var lockStore interface{}
-	if ls, ok := s.webdavLocks.Load(projectID); ok {
+	if ls, ok := s.webdavLocks.Load(project.ID); ok {
 		lockStore = ls
 	} else {
-		lockStore, _ = s.webdavLocks.LoadOrStore(projectID, webdav.NewMemLS())
+		lockStore, _ = s.webdavLocks.LoadOrStore(project.ID, webdav.NewMemLS())
 	}
 
 	handler := &webdav.Handler{
@@ -521,7 +515,7 @@ func (r *ProjectSyncStatusResponse) UnmarshalJSON(data []byte) error {
 }
 
 // handleProjectSyncStatus returns the sync status for a project.
-func (s *Server) handleProjectSyncStatus(w http.ResponseWriter, r *http.Request, projectID string) {
+func (s *Server) handleProjectSyncStatus(w http.ResponseWriter, r *http.Request, project *store.Project) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
 		return
@@ -529,14 +523,7 @@ func (s *Server) handleProjectSyncStatus(w http.ResponseWriter, r *http.Request,
 
 	ctx := r.Context()
 
-	// Verify project exists
-	_, err := s.store.GetProject(ctx, projectID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
-
-	states, err := s.store.ListProjectSyncStates(ctx, projectID)
+	states, err := s.store.ListProjectSyncStates(ctx, project.ID)
 	if err != nil {
 		InternalError(w)
 		return
@@ -550,7 +537,7 @@ func (s *Server) handleProjectSyncStatus(w http.ResponseWriter, r *http.Request,
 	}
 
 	writeJSON(w, http.StatusOK, ProjectSyncStatusResponse{
-		ProjectID:  projectID,
+		ProjectID:  project.ID,
 		States:     states,
 		TotalFiles: totalFiles,
 		TotalBytes: totalBytes,

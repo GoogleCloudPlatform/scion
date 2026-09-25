@@ -660,7 +660,7 @@ func TestProjectWorkspaceWrite_PathTraversalRejected(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
-	srv.handleProjectWorkspace(rec, req, project.ID, "../../../etc/passwd")
+	srv.handleProjectWorkspace(rec, req, project, "../../../etc/passwd")
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
