@@ -26,9 +26,33 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { getMarkdownRenderer } from '../../../utils/markdown.js';
 import type { Message } from '../../../shared/types.js';
+
+/** Compact 24-hour time label, matching `chat-message.ts`'s `MESSAGE_TIME_FORMAT`. */
+const IA_TIME_FORMAT = new Intl.DateTimeFormat('en', {
+  hour12: false,
+  hour: '2-digit',
+  minute: '2-digit',
+});
+
+/** Fuller date+time label for the full-content dialog, e.g. "Sep 23, 14:15". */
+const IA_DATETIME_FORMAT = new Intl.DateTimeFormat('en', {
+  month: 'short',
+  day: 'numeric',
+  hour12: false,
+  hour: '2-digit',
+  minute: '2-digit',
+});
+
+/** Date-only label for date dividers, e.g. "Sep 23, 2026". */
+const IA_DATE_FORMAT = new Intl.DateTimeFormat('en', {
+  year: 'numeric',
+  month: 'short',
+  day: 'numeric',
+});
 
 @customElement('scion-chat-interagent-marker')
 export class ScionChatInteragentMarker extends LitElement {
@@ -124,13 +148,24 @@ export class ScionChatInteragentMarker extends LitElement {
     }
 
     .ia-msg {
-      display: flex;
-      align-items: baseline;
-      gap: 0.25rem;
+      display: block;
       font-size: var(--chat-fs-base);
       color: var(--scion-text-muted, #64748b);
       line-height: 1.4;
-      padding: 0.125rem 0;
+      padding: 0.25rem 0;
+    }
+
+    .ia-msg-header {
+      display: flex;
+      align-items: baseline;
+      gap: 0.25rem;
+      white-space: nowrap;
+    }
+
+    .ia-time {
+      font-size: 0.6875rem;
+      color: var(--scion-text-muted, #94a3b8);
+      margin-right: 0.25rem;
     }
 
     .ia-sender {
@@ -148,15 +183,43 @@ export class ScionChatInteragentMarker extends LitElement {
       font-weight: 600;
       color: var(--scion-text, #1e293b);
       white-space: nowrap;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .ia-body {
+      margin-top: 0.125rem;
+      margin-left: 0.5rem;
       color: var(--scion-text-muted, #64748b);
       overflow: hidden;
       text-overflow: ellipsis;
       display: -webkit-box;
       -webkit-line-clamp: 2;
       -webkit-box-orient: vertical;
+    }
+
+    .ia-date-divider {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin: 0.375rem 0 0.25rem;
+      font-size: 0.625rem;
+      color: var(--scion-text-muted, #94a3b8);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      font-weight: 600;
+    }
+
+    .ia-date-divider::before,
+    .ia-date-divider::after {
+      content: '';
+      flex: 1;
+      border-top: 1px solid var(--scion-border, rgba(148, 163, 184, 0.2));
+    }
+
+    .ia-date-label {
+      white-space: nowrap;
     }
 
     /* Expand icon button — shown only on truncated messages */
@@ -348,6 +411,54 @@ export class ScionChatInteragentMarker extends LitElement {
     this.expanded = !this.expanded;
   }
 
+  /** Compact time-only label for the two-line expanded row, e.g. "14:15". */
+  private formatTime(iso: string): string {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    return IA_TIME_FORMAT.format(d);
+  }
+
+  /** Fuller date+time label for the full-content dialog, e.g. "Sep 23, 14:15". */
+  private formatDateTime(iso: string): string {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    return IA_DATETIME_FORMAT.format(d);
+  }
+
+  /** Render a single expanded inter-agent message row (header + body). */
+  private renderInteragentMessage(m: Message): TemplateResult {
+    return html`
+      <div class="ia-msg">
+        <div class="ia-msg-header">
+          <span class="ia-time">${this.formatTime(m.createdAt)}</span>
+          <span class="ia-sender">${this.formatParticipant(m.sender, m.senderProjectId)}</span>
+          <span class="ia-arrow">&rarr;</span>
+          <span class="ia-recipient"
+            >${this.formatParticipant(m.recipient, m.recipientProjectId)}</span
+          >
+          ${this.isCrossProject(m)
+            ? html`<span class="ia-cross-project">
+                <sl-icon name="globe" style="font-size:0.5625rem"></sl-icon>
+                cross-project
+              </span>`
+            : nothing}
+          ${this.truncatedIds.has(m.id)
+            ? html`
+                <span class="ia-expand">
+                  <sl-icon-button
+                    name="arrows-angle-expand"
+                    label="Expand message"
+                    @click=${(e: Event) => this.openMessagePreview(m, e)}
+                  ></sl-icon-button>
+                </span>
+              `
+            : nothing}
+        </div>
+        <span class="ia-body" data-msg-id=${m.id}>${m.msg}</span>
+      </div>
+    `;
+  }
+
   /** Render the full-content dialog for a single message. */
   private renderMessagePreview() {
     const msg = this.expandedMessage;
@@ -360,6 +471,7 @@ export class ScionChatInteragentMarker extends LitElement {
         @sl-after-hide=${(e: Event) => this.closeMessagePreview(e)}
       >
         <div class="ia-full-header">
+          <span class="ia-time">${this.formatDateTime(msg.createdAt)}</span>
           <span class="ia-sender">${this.formatParticipant(msg.sender, msg.senderProjectId)}</span>
           <span class="ia-arrow">&rarr;</span>
           <span class="ia-recipient"
@@ -380,43 +492,25 @@ export class ScionChatInteragentMarker extends LitElement {
 
   override render() {
     if (this.expanded) {
+      const rows: TemplateResult[] = [];
+      let lastDate = '';
+      for (let i = 0; i < this.messages.length; i++) {
+        const m = this.messages[i];
+        const d = new Date(m.createdAt);
+        const dateStr = Number.isNaN(d.getTime()) ? '' : IA_DATE_FORMAT.format(d);
+        if (dateStr && dateStr !== lastDate) {
+          lastDate = dateStr;
+          rows.push(html`
+            <div class="ia-date-divider">
+              <span class="ia-date-label">${dateStr}</span>
+            </div>
+          `);
+        }
+        rows.push(this.renderInteragentMessage(m));
+      }
       return html`
         <sl-tooltip content="Click to collapse">
-          <div class="marker-expanded" @click=${this.toggle}>
-            ${this.messages.length > 0
-              ? this.messages.map(
-                  (m) => html`
-                    <div class="ia-msg">
-                      <span class="ia-sender"
-                        >${this.formatParticipant(m.sender, m.senderProjectId)}</span
-                      >
-                      <span class="ia-arrow">&rarr;</span>
-                      <span class="ia-recipient"
-                        >${this.formatParticipant(m.recipient, m.recipientProjectId)}</span
-                      >
-                      ${this.isCrossProject(m)
-                        ? html`<span class="ia-cross-project">
-                            <sl-icon name="globe" style="font-size:0.5625rem"></sl-icon>
-                            cross-project
-                          </span>`
-                        : nothing}:
-                      <span class="ia-body" data-msg-id=${m.id}>${m.msg}</span>
-                      ${this.truncatedIds.has(m.id)
-                        ? html`
-                            <span class="ia-expand">
-                              <sl-icon-button
-                                name="arrows-angle-expand"
-                                label="Expand message"
-                                @click=${(e: Event) => this.openMessagePreview(m, e)}
-                              ></sl-icon-button>
-                            </span>
-                          `
-                        : nothing}
-                    </div>
-                  `
-                )
-              : nothing}
-          </div>
+          <div class="marker-expanded" @click=${this.toggle}>${rows}</div>
         </sl-tooltip>
         ${this.renderMessagePreview()}
       `;
