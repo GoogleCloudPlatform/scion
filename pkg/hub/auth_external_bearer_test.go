@@ -613,7 +613,7 @@ func TestExternalBearer_NoTrustProductionShape_Golden401(t *testing.T) {
 
 	claims := validIDTokenClaims()
 	claims["aud"] = externalBearerTestAudience
-	token := signIDToken(kp, claims) // a validly-signed Google token — must still be rejected
+	token := signIDToken(kp, claims) // signed with a test key and carrying Google's issuer; must still be rejected
 
 	w, result := doExternalBearerRequest(cfg, token)
 	if result.reached {
@@ -866,8 +866,9 @@ func TestGoogleTrust_RequiresIssuerTypeUser(t *testing.T) {
 }
 
 // TestExternalBearer_ServiceAccountFederationIssuer_NotApplicable is the
-// middleware-level half of the issuer_type guard: a real Google-signed user ID token,
-// valid in every other respect, must fall through unchanged when Google is
+// middleware-level half of the issuer_type guard: a Google-issuer user ID
+// token signed with a test key, valid in every other respect, must fall
+// through unchanged when Google is
 // trusted only as a service_account federation issuer.
 func TestExternalBearer_ServiceAccountFederationIssuer_NotApplicable(t *testing.T) {
 	kp := newGCVTestKeyPair("test-kid-1")
@@ -914,7 +915,7 @@ func TestExternalBearer_ServiceAccountFederationIssuer_NotApplicable(t *testing.
 		t.Fatal("handler must not be reached: Google is trusted as issuer_type service_account, not user")
 	}
 	// Exact bytes, the same way golden cases (b)/(c) pin the tokenTypeUser
-	// fallback: a valid Google-signed JWT is
+	// fallback: a JWT signed with a test key and carrying Google's issuer is
 	// still not a valid Hub JWT, so it fails the same way any other JWT with
 	// an issuer google's classifier won't route would.
 	_, verifyErr := userTokenSvc.ValidateUserToken(token)

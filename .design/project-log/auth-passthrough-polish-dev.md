@@ -494,10 +494,33 @@ environment, already documented as the `SCION_AUTO_EXPOSE_PORTS` root cause in t
 The report's suggested wording used "real Google-signed token"; adopted "Google-issuer token signed with a test key" instead,
 since Google never signs this token — only the JWKS the test wires does.
 
-**Considered but not applied:** the trailing comment at `:615` (`// a validly-signed Google token — must still be rejected`) has
-the identical imprecision and could be fixed under the trailing-comment exception (the code before `//` would stay
-byte-identical). Left unchanged this round because the brief's deliverable requires the `e7bf264a0..HEAD` proof to print
-nothing, and this fix was outside the four items listed. Flagging it here in case a future pass wants it.
+**Addendum (ap-em, same day):** the "proof must print nothing" constraint above was relaxed. The trailing comment at `:616`
+(`token := signIDToken(kp, claims) // a validly-signed Google token — must still be rejected`) was fixed under the
+trailing-comment exception (allowed change kind 2: text after `//` only). New text: `// signed with a test key and carrying
+Google's issuer; must still be rejected`. Verified: code before `//` (`token := signIDToken(kp, claims) `) is byte-identical on
+both sides of the diff; `kp := newGCVTestKeyPair("test-kid-1")` (`:584`) is a test key, and `validIDTokenClaims()`
+(`google_credential_validator_test.go:109-122`) sets `iss: googleIssuerHTTPS`.
+
+**Follow-up sweep (ap-em/lead ruling, same day):** searched the whole branch's added lines for the same false-claim class
+(`google-signed|signed by google|google signs|signed google (id token|token)|real google`, plus `validly.signed`). Found and
+fixed two more genuine false claims, left two accurate/declined, and confirmed no others exist:
+- **Fixed** `auth_external_bearer_test.go:869` (banner above `TestExternalBearer_ServiceAccountFederationIssuer_NotApplicable`):
+  "a real Google-signed user ID token" → "a Google-issuer user ID token signed with a test key". Verified: `:874`
+  (`kp := newGCVTestKeyPair("test-kid-1")`), `:911` (`token := signIDToken(kp, claims)` — signed with that same `kp`).
+- **Fixed** `auth_external_bearer_test.go:917-918` (same test, inline comment): "a valid Google-signed JWT" → "a JWT signed
+  with a test key and carrying Google's issuer". Verified against the same `:874`/`:911` lines, plus `:1305,:1319` confirming
+  golden cases (b)/(c) exist (`b_trust_configured_wrong_signature_hub_jwt`, `c_trust_configured_non_google_iss`), matching the
+  comment's "golden cases (b)/(c)" cross-reference.
+- **Declined, per instruction** `auth_external_bearer_test.go:217` ("A valid Google-signed user ID token authenticates…") and
+  `:433` ("A valid Google-signed ID token whose aud does not match…"): left unchanged. "Google-signed" here is test parlance
+  for a token signed under the stubbed Google JWKS the test wires up and validates against with the real
+  `GoogleCredentialValidator` — unlike the three fixed sites above, these tests actually run the token through JWKS-based
+  signature verification, so "Google-signed" describes what the *validator* treats as authentic within the test's stubbed
+  trust boundary, not a false claim about the real Google service having signed it.
+- Also checked `auth_external_bearer_sa_test.go:53` ("claims shaped like a real Google service-account ID token") — describes
+  claim *shape*, not signature authenticity; accurate, no action. And the three `validly-signed` hits in
+  `google_credential_cache.go`/`_test.go` — generic production/test descriptions of the caching decorator's negative-cache
+  policy, not a claim about a specific token's provenance; accurate, no action.
 
 ### N1: `pkg/hub/ge_exchange_route_test.go:358-364` — reflowed as one unit
 
