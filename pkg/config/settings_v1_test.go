@@ -1970,6 +1970,23 @@ func TestConvertGlobalToV1ServerConfig_Nil(t *testing.T) {
 	assert.NotNil(t, v1)
 }
 
+// TestAgentEndpointRoundTrip verifies server.hub.agent_endpoint survives the
+// V1<->GlobalConfig conversion in both directions, independently of
+// public_url / Hub.Endpoint.
+func TestAgentEndpointRoundTrip(t *testing.T) {
+	gc := DefaultGlobalConfig()
+	gc.Hub.Endpoint = "https://hub.example.com"
+	gc.Hub.AgentEndpoint = "http://192.0.2.10:8080"
+
+	v1 := ConvertGlobalToV1ServerConfig(&gc)
+	assert.Equal(t, "https://hub.example.com", v1.Hub.PublicURL)
+	assert.Equal(t, "http://192.0.2.10:8080", v1.Hub.AgentEndpoint)
+
+	gc2 := ConvertV1ServerToGlobalConfig(v1)
+	assert.Equal(t, gc.Hub.Endpoint, gc2.Hub.Endpoint)
+	assert.Equal(t, gc.Hub.AgentEndpoint, gc2.Hub.AgentEndpoint)
+}
+
 func TestLoadGlobalConfig_FromSettingsYAML(t *testing.T) {
 	tmpDir := t.TempDir()
 

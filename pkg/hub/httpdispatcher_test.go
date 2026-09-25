@@ -3058,6 +3058,214 @@ func TestDispatchAgentStart_IncludesHubEndpoint(t *testing.T) {
 	}
 }
 
+// TestHTTPAgentDispatcher_AgentEndpointOverride covers every SCION_HUB_ENDPOINT
+// injection site (create, start, restart) with and without the agent-endpoint
+// override: unset must inject the regular hub endpoint, and set must inject
+// the override instead.
+func TestHTTPAgentDispatcher_AgentEndpointOverride(t *testing.T) {
+	const hubEndpoint = "http://hub.example.com:8080"
+	const agentEndpoint = "http://192.0.2.10:8080"
+
+	tests := []struct {
+		name             string
+		agentEndpoint    string // empty means the override is left unset
+		emptyHubEndpoint bool   // true clears the regular hub endpoint before dispatch
+		dispatch         func(ctx context.Context, d *HTTPAgentDispatcher, agent *store.Agent) error
+		injected         func(m *mockRuntimeBrokerClient) (string, bool)
+		want             string
+		wantNoInjection  bool // true means SCION_HUB_ENDPOINT must not be present at all
+	}{
+		{
+			name: "create, unset",
+			dispatch: func(ctx context.Context, d *HTTPAgentDispatcher, agent *store.Agent) error {
+				return d.DispatchAgentCreate(ctx, agent)
+			},
+			injected: func(m *mockRuntimeBrokerClient) (string, bool) {
+				if m.lastCreateReq == nil {
+					return "", false
+				}
+				return m.lastCreateReq.HubEndpoint, true
+			},
+			want: hubEndpoint,
+		},
+		{
+			name:          "create, override set",
+			agentEndpoint: agentEndpoint,
+			dispatch: func(ctx context.Context, d *HTTPAgentDispatcher, agent *store.Agent) error {
+				return d.DispatchAgentCreate(ctx, agent)
+			},
+			injected: func(m *mockRuntimeBrokerClient) (string, bool) {
+				if m.lastCreateReq == nil {
+					return "", false
+				}
+				return m.lastCreateReq.HubEndpoint, true
+			},
+			want: agentEndpoint,
+		},
+		{
+			name: "start, unset",
+			dispatch: func(ctx context.Context, d *HTTPAgentDispatcher, agent *store.Agent) error {
+				return d.DispatchAgentStart(ctx, agent, "", false)
+			},
+			injected: func(m *mockRuntimeBrokerClient) (string, bool) {
+				ep, ok := m.lastResolvedEnv["SCION_HUB_ENDPOINT"]
+				return ep, ok
+			},
+			want: hubEndpoint,
+		},
+		{
+			name:          "start, override set",
+			agentEndpoint: agentEndpoint,
+			dispatch: func(ctx context.Context, d *HTTPAgentDispatcher, agent *store.Agent) error {
+				return d.DispatchAgentStart(ctx, agent, "", false)
+			},
+			injected: func(m *mockRuntimeBrokerClient) (string, bool) {
+				ep, ok := m.lastResolvedEnv["SCION_HUB_ENDPOINT"]
+				return ep, ok
+			},
+			want: agentEndpoint,
+		},
+		{
+			// Guards against reverting effectiveAgentHubEndpoint() to a check
+			// on d.hubEndpoint alone: with the regular hub endpoint empty and
+			// the override set, injection must still fire using the override.
+			name:             "start, override set, hub endpoint empty",
+			agentEndpoint:    agentEndpoint,
+			emptyHubEndpoint: true,
+			dispatch: func(ctx context.Context, d *HTTPAgentDispatcher, agent *store.Agent) error {
+				return d.DispatchAgentStart(ctx, agent, "", false)
+			},
+			injected: func(m *mockRuntimeBrokerClient) (string, bool) {
+				ep, ok := m.lastResolvedEnv["SCION_HUB_ENDPOINT"]
+				return ep, ok
+			},
+			want: agentEndpoint,
+		},
+		{
+			// Both the regular hub endpoint and the override are empty: no
+			// SCION_HUB_ENDPOINT value exists to inject, so the key must be
+			// absent from resolvedEnv rather than injected as "".
+			name:             "start, both endpoints empty",
+			emptyHubEndpoint: true,
+			dispatch: func(ctx context.Context, d *HTTPAgentDispatcher, agent *store.Agent) error {
+				return d.DispatchAgentStart(ctx, agent, "", false)
+			},
+			injected: func(m *mockRuntimeBrokerClient) (string, bool) {
+				ep, ok := m.lastResolvedEnv["SCION_HUB_ENDPOINT"]
+				return ep, ok
+			},
+			wantNoInjection: true,
+		},
+		{
+			name: "restart, unset",
+			dispatch: func(ctx context.Context, d *HTTPAgentDispatcher, agent *store.Agent) error {
+				return d.DispatchAgentRestart(ctx, agent)
+			},
+			injected: func(m *mockRuntimeBrokerClient) (string, bool) {
+				ep, ok := m.lastRestartResolvedEnv["SCION_HUB_ENDPOINT"]
+				return ep, ok
+			},
+			want: hubEndpoint,
+		},
+		{
+			name:          "restart, override set",
+			agentEndpoint: agentEndpoint,
+			dispatch: func(ctx context.Context, d *HTTPAgentDispatcher, agent *store.Agent) error {
+				return d.DispatchAgentRestart(ctx, agent)
+			},
+			injected: func(m *mockRuntimeBrokerClient) (string, bool) {
+				ep, ok := m.lastRestartResolvedEnv["SCION_HUB_ENDPOINT"]
+				return ep, ok
+			},
+			want: agentEndpoint,
+		},
+		{
+			// Same guard as the start case above, for the restart stamp site.
+			name:             "restart, override set, hub endpoint empty",
+			agentEndpoint:    agentEndpoint,
+			emptyHubEndpoint: true,
+			dispatch: func(ctx context.Context, d *HTTPAgentDispatcher, agent *store.Agent) error {
+				return d.DispatchAgentRestart(ctx, agent)
+			},
+			injected: func(m *mockRuntimeBrokerClient) (string, bool) {
+				ep, ok := m.lastRestartResolvedEnv["SCION_HUB_ENDPOINT"]
+				return ep, ok
+			},
+			want: agentEndpoint,
+		},
+		{
+			// Same as the start both-empty case, for the restart stamp site.
+			name:             "restart, both endpoints empty",
+			emptyHubEndpoint: true,
+			dispatch: func(ctx context.Context, d *HTTPAgentDispatcher, agent *store.Agent) error {
+				return d.DispatchAgentRestart(ctx, agent)
+			},
+			injected: func(m *mockRuntimeBrokerClient) (string, bool) {
+				ep, ok := m.lastRestartResolvedEnv["SCION_HUB_ENDPOINT"]
+				return ep, ok
+			},
+			wantNoInjection: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			memStore := createTestStore(t)
+
+			broker := &store.RuntimeBroker{
+				ID:       tid("host-1"),
+				Name:     "test-host",
+				Slug:     "test-host",
+				Endpoint: "http://localhost:9800",
+				Status:   store.BrokerStatusOnline,
+			}
+			if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+				t.Fatalf("failed to create runtime broker: %v", err)
+			}
+
+			mockClient := &mockRuntimeBrokerClient{}
+			dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+			if !tt.emptyHubEndpoint {
+				dispatcher.SetHubEndpoint(hubEndpoint)
+			}
+			if tt.agentEndpoint != "" {
+				dispatcher.SetAgentEndpoint(tt.agentEndpoint)
+			}
+
+			agent := &store.Agent{
+				ID:              tid("agent-1"),
+				Name:            "test-agent",
+				Slug:            "test-agent",
+				ProjectID:       tid("project-1"),
+				OwnerID:         tid("user-1"),
+				RuntimeBrokerID: tid("host-1"),
+				AppliedConfig: &store.AgentAppliedConfig{
+					HarnessConfig: "claude",
+				},
+			}
+
+			if err := tt.dispatch(ctx, dispatcher, agent); err != nil {
+				t.Fatalf("dispatch failed: %v", err)
+			}
+
+			got, ok := tt.injected(mockClient)
+			if tt.wantNoInjection {
+				if ok {
+					t.Errorf("expected SCION_HUB_ENDPOINT not to be injected, got %q", got)
+				}
+				return
+			}
+			if !ok {
+				t.Fatal("expected SCION_HUB_ENDPOINT to be captured")
+			}
+			if got != tt.want {
+				t.Errorf("injected endpoint = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesSharedWorkspace(t *testing.T) {
 	ctx := context.Background()
 	memStore := createTestStore(t)
