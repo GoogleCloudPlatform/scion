@@ -596,7 +596,10 @@ func (e *AppliedConfigEnvCleanupExecutor) cleanReincarnationSnapshots(ctx contex
 			}
 			ok, err := e.Store.UpdateAgentReincarnationSnapshots(ctx, rec, rec.State)
 			if err != nil {
-				return fmt.Errorf("update reincarnation %s snapshots: %w", rec.ID, err)
+				// Matches the agent-row loop: report the record and move on,
+				// so one failing row does not stop the rest of the scan.
+				_, _ = fmt.Fprintf(logger, "  WARN reincarnation=%s - failed to update: %v\n", rec.ID, err)
+				continue
 			}
 			if !ok {
 				// The record changed state or was removed since it was read;

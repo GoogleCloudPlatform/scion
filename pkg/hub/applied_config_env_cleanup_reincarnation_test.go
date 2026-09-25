@@ -19,6 +19,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -159,6 +160,51 @@ func TestAppliedConfigEnvCleanupStripsReincarnationSnapshots(t *testing.T) {
 			assert.Equal(t, state, rec.State, "state is untouched")
 			assert.Contains(t, log, "Scanned 1 reincarnation record(s); normalized 1 (16 field(s)); skipped 0 non-terminal record(s).")
 		})
+	}
+}
+
+// failingSnapshotStore rejects the snapshot update for one record ID and
+// passes every other call through.
+type failingSnapshotStore struct {
+	store.Store
+	failID string
+}
+
+func (s *failingSnapshotStore) UpdateAgentReincarnationSnapshots(ctx context.Context, r *store.AgentReincarnation, expectState string) (bool, error) {
+	if r.ID == s.failID {
+		return false, errors.New("update rejected")
+	}
+	return s.Store.UpdateAgentReincarnationSnapshots(ctx, r, expectState)
+}
+
+// TestAppliedConfigEnvCleanupContinuesPastFailedReincarnationUpdate checks
+// that a record whose update fails is reported and skipped, the records
+// after it are still cleaned, and the summary line is still printed.
+func TestAppliedConfigEnvCleanupContinuesPastFailedReincarnationUpdate(t *testing.T) {
+	f := newReincarnationCleanupFixture(t, "reinc-fail")
+	idA, idB := tid("reinc-fail-record-a"), tid("reinc-fail-record-b")
+	f.createRecord(t, idA, f.agent.ID, store.AgentReincarnationStateCompleted)
+	f.createRecord(t, idB, f.agent.ID, store.AgentReincarnationStateCompleted)
+	// Fail the record the scan reaches first (records are paged by ID).
+	failID, okID := idA, idB
+	if idB < idA {
+		failID, okID = idB, idA
+	}
+
+	exec := &AppliedConfigEnvCleanupExecutor{Store: &failingSnapshotStore{Store: f.store, failID: failID}, SecretBackend: f.backend}
+	var logBuf bytes.Buffer
+	require.NoError(t, exec.Run(context.Background(), &logBuf, nil))
+	log := logBuf.String()
+	assert.NotContains(t, log, "value-must-not-appear-in-log", "the cleanup log must carry key names only")
+
+	assert.Contains(t, log, "WARN reincarnation="+failID+" - failed to update: update rejected")
+	assert.Contains(t, log, "Scanned 2 reincarnation record(s);")
+
+	failed := f.get(t, failID)
+	assert.Contains(t, failed.PreviousAppliedConfig.Env, "GITHUB_TOKEN", "the failed record is left as it was")
+	cleaned := f.get(t, okID)
+	for name, cfg := range map[string]*store.AgentAppliedConfig{"previous": cleaned.PreviousAppliedConfig, "new": cleaned.NewAppliedConfig} {
+		assertEnvKeys(t, cfg.Env, []string{"INLINE_PLAIN"}, name+".env")
 	}
 }
 
