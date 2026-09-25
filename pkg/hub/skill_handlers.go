@@ -1481,9 +1481,10 @@ func globalWriteAction(scope string, a Action) Action {
 // skillResource constructs a Resource from a store.Skill for capability computation.
 func skillResource(s *store.Skill) Resource {
 	r := Resource{
-		Type:    "skill",
-		ID:      s.ID,
-		OwnerID: s.OwnerID,
+		Type:      "skill",
+		ID:        s.ID,
+		OwnerID:   s.OwnerID,
+		ScopeKind: s.Scope,
 	}
 	if s.Scope == store.SkillScopeProject && s.ScopeID != "" {
 		r.ParentType = "project"
