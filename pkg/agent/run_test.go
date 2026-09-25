@@ -3842,3 +3842,41 @@ func TestReResolveModelAlias(t *testing.T) {
 		})
 	}
 }
+
+// TestSortedEnvVarKeysOmitsValues verifies the helper backing the auth debug
+// log line returns only key names, sorted, never the values -- so a caller
+// formatting this result into a log message cannot accidentally print an env
+// value alongside it.
+func TestSortedEnvVarKeysOmitsValues(t *testing.T) {
+	envVars := map[string]string{
+		"ZEBRA_KEY": "should-not-appear-in-result",
+		"ALPHA_KEY": "also-should-not-appear",
+		"MID_KEY":   "value-must-not-appear-in-log",
+	}
+
+	got := sortedEnvVarKeys(envVars)
+
+	want := []string{"ALPHA_KEY", "MID_KEY", "ZEBRA_KEY"}
+	if len(got) != len(want) {
+		t.Fatalf("sortedEnvVarKeys() = %v, want %v", got, want)
+	}
+	for i, k := range want {
+		if got[i] != k {
+			t.Errorf("sortedEnvVarKeys()[%d] = %q, want %q", i, got[i], k)
+		}
+	}
+
+	for _, k := range got {
+		for _, v := range envVars {
+			if k == v {
+				t.Errorf("sortedEnvVarKeys() returned a value (%q) instead of a key", k)
+			}
+		}
+	}
+}
+
+func TestSortedEnvVarKeysEmpty(t *testing.T) {
+	if got := sortedEnvVarKeys(nil); len(got) != 0 {
+		t.Errorf("sortedEnvVarKeys(nil) = %v, want empty", got)
+	}
+}
