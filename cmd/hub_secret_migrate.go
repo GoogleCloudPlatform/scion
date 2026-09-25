@@ -51,34 +51,35 @@ This operation is idempotent - existing GCP SM secrets will be overwritten.
 
 Examples:
   # Dry run to see what would be migrated
-  scion hub secret migrate --project=my-project --dry-run
+  scion hub secret migrate --gcp-project=my-project --dry-run
 
   # Perform the migration
-  scion hub secret migrate --project=my-project
+  scion hub secret migrate --gcp-project=my-project
 
   # With explicit credentials
-  scion hub secret migrate --project=my-project --credentials=/path/to/creds.json
+  scion hub secret migrate --gcp-project=my-project --credentials=/path/to/creds.json
 
   # Force re-migration of already-migrated secrets (e.g., after naming scheme change)
-  scion hub secret migrate --project=my-project --force`,
-	RunE: runSecretMigrate,
+  scion hub secret migrate --gcp-project=my-project --force`,
+	PreRunE: checkGCPProjectFlag,
+	RunE:    runSecretMigrate,
 }
 
 func init() {
 	hubSecretCmd.AddCommand(hubSecretMigrateCmd)
 
-	hubSecretMigrateCmd.Flags().StringVar(&migrateProject, "project", "", "GCP project ID (required)")
+	hubSecretMigrateCmd.Flags().StringVar(&migrateProject, "gcp-project", "", "GCP project ID (required)")
 	hubSecretMigrateCmd.Flags().StringVar(&migrateCredentials, "credentials", "", "Path to GCP credentials JSON file")
 	hubSecretMigrateCmd.Flags().BoolVar(&migrateDryRun, "dry-run", false, "Show what would be migrated without making changes")
 	hubSecretMigrateCmd.Flags().BoolVar(&migrateForce, "force", false, "Re-migrate secrets that already have a GCP SM reference")
 	hubSecretMigrateCmd.Flags().StringVar(&migrateHubID, "hub-id", "", "Hub instance ID for secret namespacing (defaults to sha256(hostname)[:12])")
 
-	_ = hubSecretMigrateCmd.MarkFlagRequired("project")
+	_ = hubSecretMigrateCmd.MarkFlagRequired("gcp-project")
 }
 
 func runSecretMigrate(cmd *cobra.Command, args []string) error {
 	if migrateProject == "" {
-		return fmt.Errorf("--project flag is required")
+		return fmt.Errorf("--gcp-project flag is required")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
