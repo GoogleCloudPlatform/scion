@@ -523,6 +523,16 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		// reach the real GCE metadata server. Listed explicitly so it is a
 		// recognised mode rather than an unhandled one — the distinction is
 		// the whole point of the default arm below.
+		//
+		// Still record the mode itself (without the redirect). It is the only
+		// channel through which "a GCP SA is reachable via passthrough"
+		// crosses into pkg/agent's Start(), which has no structured
+		// GCPIdentity of its own — auth-type auto-detection (e.g. selecting
+		// vertex-ai for antigravity) depends on this env var actually being
+		// present on the create path, not just on start/restart where the
+		// hub separately injects it via resolvedEnv. See ptone/scion#1873.
+		env["SCION_METADATA_MODE"] = gcpMetadataMode
+		classifyBrokerEnv("SCION_METADATA_MODE", api.EnvKindPlain)
 	default:
 		return nil, &startContextError{
 			Status: http.StatusBadRequest,

@@ -510,6 +510,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		if opts.HarnessAuth != "" && !harness.IsHarnessImplementationName(opts.HarnessAuth) {
 			auth.SelectedType = opts.HarnessAuth
 		}
+		// Auto-detect an auth type when nothing explicit selected one yet.
+		autoDetectAuthSelectedType(&auth, authMeta, &opts)
 		util.Debugf("auth: after overlay — selectedType=%q", auth.SelectedType)
 		resolved, err := h.ResolveAuth(auth)
 		if err != nil {
@@ -1513,6 +1515,83 @@ func buildAuthEnvOverlay(baseEnv map[string]string, secrets []api.ResolvedSecret
 		}
 	}
 	return overlay
+}
+
+// autoDetectAuthSelectedType sets auth.SelectedType when nothing explicit has
+// selected one yet (CLI/template/profile overrides, scion-agent.json). It
+// mirrors the precedence the hub preflight already uses
+// (pkg/runtimebroker/handlers.go extractRequiredEnvKeys): file secrets, then
+// env vars, then GCP identity.
+//
+// Without this, container-script harnesses (e.g. antigravity) never learn a
+// resolved auth type for the auto-detect case: h.ResolveAuth forwards
+// auth.SelectedType into SCION_HARNESS_SELECTED_AUTH / explicit_type
+// (container_script_harness.go), which the container-side provisioner is
+// meant to trust instead of re-guessing via its own, harness-local method
+// ordering. Extracted (like resolveAuthEnvOverlay) so it can be exercised
+// directly in tests. See ptone/scion#1873.
+//
+// gcpSAAssigned is derived from opts.Env["SCION_METADATA_MODE"] rather than a
+// structured GCPIdentity: api.StartOptions carries no such field, and
+// SCION_METADATA_MODE is the only channel this signal has across the
+// runtimebroker -> agent package boundary (pkg/runtimebroker/start_context.go
+// sets it for assign, block, and passthrough alike).
+func autoDetectAuthSelectedType(auth *api.AuthConfig, authMeta *config.HarnessAuthMetadata, opts *api.StartOptions) {
+	if auth.SelectedType != "" || authMeta == nil {
+		return
+	}
+	// Skip in local/workstation mode: the GCP-identity signal
+	// (SCION_METADATA_MODE) and opts.Env / opts.ResolvedSecrets only reflect
+	// what the *broker* pre-resolved. GatherAuthWithEnv(authEnvOverlay,
+	// localSources=true, authMeta) separately discovers host env vars via
+	// os.Getenv and host credential files (e.g. ~/.claude/.credentials.json,
+	// the local ADC file) that never pass through opts.Env/opts.ResolvedSecrets
+	// at all — this function has no visibility into them. Deciding from opts
+	// alone in local mode would bind to a narrower view of the world than
+	// ResolveAuth/provision.py actually have, and could override a real host
+	// credential this function simply cannot see. SCION_METADATA_MODE is also
+	// broker-only by construction (pkg/runtimebroker/start_context.go), so
+	// the identity leg has nothing to contribute locally anyway.
+	if !opts.BrokerMode {
+		return
+	}
+
+	fileSecretNames := make(map[string]struct{})
+	for _, sec := range opts.ResolvedSecrets {
+		if sec.Type == "file" {
+			fileSecretNames[sec.Name] = struct{}{}
+		}
+	}
+
+	envKeys := make(map[string]struct{})
+	for k, v := range opts.Env {
+		if v != "" {
+			envKeys[k] = struct{}{}
+		}
+	}
+	for _, sec := range opts.ResolvedSecrets {
+		if sec.Type == "environment" || sec.Type == "" {
+			target := sec.Target
+			if target == "" {
+				target = sec.Name
+			}
+			if target != "" {
+				envKeys[target] = struct{}{}
+			}
+		}
+	}
+
+	// gcpSAAssigned mirrors the broker's own check (extractRequiredEnvKeys:
+	// assign or passthrough both provide credentials).
+	metadataMode := opts.Env["SCION_METADATA_MODE"]
+	gcpSAAssigned := metadataMode == store.GCPMetadataModeAssign || metadataMode == store.GCPMetadataModePassthrough
+
+	// AutoDetectAuthType runs the file -> env -> identity precedence as a
+	// single call so a present default-type credential (e.g. antigravity's
+	// AGY_TOKEN, claude's ANTHROPIC_API_KEY) always wins over the identity leg.
+	if detected := harness.AutoDetectAuthType(authMeta, fileSecretNames, envKeys, gcpSAAssigned); detected != "" {
+		auth.SelectedType = detected
+	}
 }
 
 // filterResolvedSecretsForResolvedAuth drops auth-candidate secrets that are

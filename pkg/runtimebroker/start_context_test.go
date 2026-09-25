@@ -803,8 +803,13 @@ func TestBuildStartContext_GCPMetadataPassthrough(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if sc.Opts.Env["SCION_METADATA_MODE"] != "" {
-		t.Errorf("expected no SCION_METADATA_MODE for passthrough, got %q", sc.Opts.Env["SCION_METADATA_MODE"])
+	// SCION_METADATA_MODE is still recorded for passthrough (unlike the
+	// redirect vars below) — it is the only channel through which
+	// downstream auth-type auto-detection (e.g. antigravity's vertex-ai
+	// selection, ptone/scion#1873) can tell a GCP SA is reachable via
+	// passthrough on a freshly created agent.
+	if sc.Opts.Env["SCION_METADATA_MODE"] != "passthrough" {
+		t.Errorf("expected SCION_METADATA_MODE='passthrough', got %q", sc.Opts.Env["SCION_METADATA_MODE"])
 	}
 	if sc.Opts.Env["GCE_METADATA_HOST"] != "" {
 		t.Errorf("expected no GCE_METADATA_HOST for passthrough, got %q", sc.Opts.Env["GCE_METADATA_HOST"])

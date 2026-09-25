@@ -1,0 +1,5 @@
+#!/bin/sh
+# Fixture stub: stands in for the real `agy` CLI so provision.py's
+# `agy --version` gate for the vertex-ai path can succeed without the actual
+# binary installed. See pkg/harness/bundle_contract_test.go's bin/ staging.
+echo "1.2.0"
