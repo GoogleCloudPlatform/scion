@@ -169,7 +169,7 @@ func (s *Server) handleTemplateFiles(w http.ResponseWriter, r *http.Request, tem
 	// template record itself. A read denial reads as 404 (ptone/scion#1916),
 	// matching getTemplateV2; a write denial stays 403.
 	if r.Method == http.MethodGet {
-		if !s.authorizeRead(w, r, templateResource(template), "Template") {
+		if !s.authorizeTemplateReadRoute(w, r, template) {
 			return
 		}
 	} else if !s.authorize(w, r, templateResource(template), ActionUpdate) {

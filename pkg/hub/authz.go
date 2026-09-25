@@ -416,6 +416,18 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 	// Agents derive project-scoped permissions from their JWT token scopes.
 	// This creates a synthetic project-scoped binding so the kernel can
 	// evaluate agent permissions through the standard pipeline.
+	//
+	// Deliberately NOT given a hub-wide-catalog carve-out here: this kernel
+	// function is shared by every resource type, including ones (broker,
+	// group, user, github_app — see TestAuthz_AgentProjectReadBaseline_NoProjectDenied)
+	// where a parentless resource must stay unconditionally denied to an
+	// agent. The template/harness_config global-catalog exception for agents
+	// (ptone/scion#1916 follow-up) is instead applied at the two call sites
+	// that need it — catalogListReadBatch (authorized_list.go) and
+	// authorizeTemplateReadRoute/authorizeHarnessConfigRoute — the same way
+	// this function already carves out brokers outside the kernel rather
+	// than inside it, so the exception cannot leak into an unrelated
+	// resource type's evaluation.
 	if isAgentPrincipal(principal.Kind) {
 		if agent, ok := principal.Identity.(AgentIdentity); ok && agent.ProjectID() != "" {
 			synthCandidates, synthRoles := a.buildAgentSyntheticBindings(agent)

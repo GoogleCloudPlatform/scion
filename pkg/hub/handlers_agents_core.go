@@ -1091,6 +1091,7 @@ func (s *Server) createAgentInProject(
 		// degrades exactly like one that does not exist.
 		if err == nil && resolvedTemplate != nil && !s.authorizeResolvedTemplate(ctx, GetIdentityFromContext(ctx), resolvedTemplate) {
 			resolvedTemplate = nil
+			err = store.ErrNotFound
 		}
 		switch {
 		case err != nil && err != store.ErrNotFound:

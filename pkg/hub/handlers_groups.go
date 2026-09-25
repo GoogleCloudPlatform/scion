@@ -38,10 +38,13 @@ import (
 
 // ListGroupsResponse is the response for listing groups.
 type ListGroupsResponse struct {
-	Groups       []GroupWithCapabilities `json:"groups"`
-	NextCursor   string                  `json:"nextCursor,omitempty"`
-	TotalCount   int                     `json:"totalCount"`
-	Capabilities *Capabilities           `json:"_capabilities,omitempty"`
+	Groups     []GroupWithCapabilities `json:"groups"`
+	NextCursor string                  `json:"nextCursor,omitempty"`
+	TotalCount int                     `json:"totalCount"`
+	// TotalCountApproximate marks TotalCount as a lower bound rather than an
+	// exact count (ptone/scion#1916 follow-up, C3) — see ListTemplatesResponse.
+	TotalCountApproximate bool          `json:"totalCountApproximate,omitempty"`
+	Capabilities          *Capabilities `json:"_capabilities,omitempty"`
 }
 
 // CreateGroupRequest is the request body for creating a group.
@@ -124,6 +127,7 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 	var groupItems []store.Group
 	var nextCursor string
 	var totalCount int
+	var totalApprox bool
 	// Check if user has admin-level list visibility via permission.
 	hasAdminView := false
 	if identity != nil {
@@ -155,10 +159,10 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 			return authorizedCandidatePage[store.Group]{Items: page.Items, NextCursor: page.NextCursor}, nil
 		}, groupResource, func(g *store.Group) string { return authorizedListCursor(g.Created, g.ID, cursorBinding) }, s.authzService.AuthorizeReadBatch)
 		if err != nil {
-			writeAuthorizedListError(w, err)
+			writeErrorFromErr(w, err, "")
 			return
 		}
-		groupItems, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
+		groupItems, nextCursor, totalCount, totalApprox = result.Items, result.NextCursor, result.TotalCount, result.TotalCountApproximate
 	} else {
 		// Unauthenticated: return empty list (no identity to authorize against).
 		groupItems = []store.Group{}
@@ -183,10 +187,11 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "group")
 	}
 	writeJSON(w, http.StatusOK, ListGroupsResponse{
-		Groups:       groups,
-		NextCursor:   nextCursor,
-		TotalCount:   totalCount,
-		Capabilities: scopeCap,
+		Groups:                groups,
+		NextCursor:            nextCursor,
+		TotalCount:            totalCount,
+		TotalCountApproximate: totalApprox,
+		Capabilities:          scopeCap,
 	})
 }
 

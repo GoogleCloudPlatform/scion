@@ -130,7 +130,10 @@ type ListHarnessConfigsResponse struct {
 	HarnessConfigs []HarnessConfigWithCapabilities `json:"harnessConfigs"`
 	NextCursor     string                          `json:"nextCursor,omitempty"`
 	TotalCount     int                             `json:"totalCount"`
-	Capabilities   *Capabilities                   `json:"_capabilities,omitempty"`
+	// TotalCountApproximate marks TotalCount as a lower bound rather than an
+	// exact count (ptone/scion#1916 follow-up, C3) — see ListTemplatesResponse.
+	TotalCountApproximate bool          `json:"totalCountApproximate,omitempty"`
+	Capabilities          *Capabilities `json:"_capabilities,omitempty"`
 }
 
 // HarnessConfigManifest is the manifest of uploaded harness config files.
@@ -200,17 +203,13 @@ func (s *Server) listHarnessConfigs(w http.ResponseWriter, r *http.Request) {
 		},
 		harnessConfigResource,
 		func(h *store.HarnessConfig) string { return authorizedListCursor(h.Created, h.ID, cursorBinding) },
-		s.authzService.AuthorizeReadBatch,
+		s.catalogListReadBatch(identity),
 	)
 	if err != nil {
-		if authorizeEach {
-			writeAuthorizedListError(w, err)
-		} else {
-			writeErrorFromErr(w, err, "")
-		}
+		writeErrorFromErr(w, err, "")
 		return
 	}
-	configs, nextCursor, totalCount := result.Items, result.NextCursor, result.TotalCount
+	configs, nextCursor, totalCount, totalApprox := result.Items, result.NextCursor, result.TotalCount, result.TotalCountApproximate
 	items := make([]HarnessConfigWithCapabilities, 0, len(configs))
 	if identity == nil {
 		for i := range configs {
@@ -231,10 +230,11 @@ func (s *Server) listHarnessConfigs(w http.ResponseWriter, r *http.Request) {
 		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "harness_config")
 	}
 	writeJSON(w, http.StatusOK, ListHarnessConfigsResponse{
-		HarnessConfigs: items,
-		NextCursor:     nextCursor,
-		TotalCount:     totalCount,
-		Capabilities:   scopeCap,
+		HarnessConfigs:        items,
+		NextCursor:            nextCursor,
+		TotalCount:            totalCount,
+		TotalCountApproximate: totalApprox,
+		Capabilities:          scopeCap,
 	})
 }
 
@@ -343,7 +343,16 @@ func (s *Server) handleHarnessConfigByID(w http.ResponseWriter, r *http.Request)
 
 	hc, err := s.store.GetHarnessConfig(r.Context(), hcID)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		// A genuinely missing config uses the same "HarnessConfig not found"
+		// message authorizeHarnessConfigRoute writes on denial below
+		// (ptone/scion#1916), so the two outcomes cannot be told apart by
+		// message text either — including on the clone route, whose read of
+		// its source is gated by this same fetch.
+		if errors.Is(err, store.ErrNotFound) {
+			NotFound(w, "HarnessConfig")
+		} else {
+			writeErrorFromErr(w, err, "")
+		}
 		return
 	}
 
@@ -419,18 +428,35 @@ func harnessConfigRouteAction(action, method string) Action {
 // authorizeHarnessConfigRoute applies the dispatcher gate. Runtime brokers
 // read harness configs during agent creation over HMAC auth; they are not
 // user principals, so the authorization kernel cannot evaluate them. They are
-// admitted for reads only, and the HMAC credential is the trust basis.
+// admitted for reads only, and the HMAC credential is the trust basis — but
+// scoped by brokerMayReadCatalogResource to the projects the broker serves
+// plus the hub-wide catalog, not every project's or user's private harness
+// config.
 //
 // A read denial reads as 404 (ptone/scion#1916), matching the skill fix: a
 // harness config a caller may not read (get, download, validate, files,
 // image-status, check-image — every route action harnessConfigRouteAction
 // maps to ActionRead) must not be distinguishable from one that does not
 // exist. Every non-read action keeps the existing 403 behavior.
+//
+// A global-scope config is likewise allowed outright for an agent identity,
+// ahead of the ordinary authorizeRead/CheckAccess call — see the matching
+// comment on authorizeTemplateReadRoute (template_handlers.go) for why this
+// lives here rather than in the shared authorization kernel.
 func (s *Server) authorizeHarnessConfigRoute(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig, action Action) bool {
-	if action == ActionRead && GetBrokerIdentityFromContext(r.Context()) != nil {
-		return true
-	}
 	if action == ActionRead {
+		if broker := GetBrokerIdentityFromContext(r.Context()); broker != nil {
+			if s.brokerMayReadCatalogResource(r.Context(), broker, hc.Scope, hc.ScopeID) {
+				return true
+			}
+			NotFound(w, "HarnessConfig")
+			return false
+		}
+		if hc.Scope == store.HarnessConfigScopeGlobal {
+			if agent := GetAgentIdentityFromContext(r.Context()); agent != nil {
+				return true
+			}
+		}
 		return s.authorizeRead(w, r, harnessConfigResource(hc), "HarnessConfig")
 	}
 	return s.authorize(w, r, harnessConfigResource(hc), action)
@@ -936,6 +962,25 @@ func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 			return
 		}
+	case store.HarnessConfigScopeUser:
+		// Mirrors handleTemplateClone's user-scope branch: scopeID must be
+		// the caller's own, never left empty (which would land the clone at
+		// a shared, ownerless "users//<slug>" path) or set to another user's
+		// ID (which would plant a row and files under that user).
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+			return
+		}
+		if scopeID == "" {
+			scopeID = userIdent.ID()
+		} else if scopeID != userIdent.ID() {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You can only clone harness configs into your own user scope", nil)
+			return
+		}
+	default:
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Cloning into this resource scope is not supported", nil)
+		return
 	}
 
 	clone := &store.HarnessConfig{
@@ -949,6 +994,27 @@ func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request
 		Scope:       destScope,
 		ScopeID:     scopeID,
 		Status:      store.HarnessConfigStatusPending,
+	}
+
+	// For user-scoped clones, set the owner from the authenticated user
+	// (mirrors handleTemplateClone).
+	if clone.Scope == store.HarnessConfigScopeUser {
+		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
+			clone.OwnerID = userIdent.ID()
+			clone.CreatedBy = userIdent.ID()
+		}
+	}
+
+	// Detect a name collision at the destination BEFORE any storage write —
+	// see the matching comment in handleTemplateClone (template_handlers.go)
+	// for why this must run ahead of the copy below rather than only being
+	// caught by CreateHarnessConfig's own uniqueness check.
+	if existing, err := s.store.GetHarnessConfigBySlug(ctx, clone.Slug, clone.Scope, clone.ScopeID); err != nil && err != store.ErrNotFound {
+		writeErrorFromErr(w, err, "")
+		return
+	} else if existing != nil {
+		writeError(w, http.StatusConflict, "conflict", "A resource with this slug already exists in the target scope. Choose a different name.", nil)
+		return
 	}
 
 	storagePath := storage.HarnessConfigStoragePath(s.HubID(), clone.Scope, clone.ScopeID, clone.Slug)

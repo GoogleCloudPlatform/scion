@@ -3756,11 +3756,13 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			// SECURITY-GATE (ptone/scion#1916): same gate as the agent-create
 			// HTTP path in handlers_agents_core.go — a resolved candidate is
 			// not yet known to be one the schedule's creator may read.
-			// tmplErr is left untouched so the degradation rule below (which
-			// keys off tmplErr, not tmpl) treats a denial exactly like a
-			// definitive not-found.
+			// tmplErr is set to store.ErrNotFound on denial so the
+			// degradation rule below (which keys off tmplErr, not tmpl)
+			// treats a denial exactly like a definitive not-found, rather
+			// than leaving tmplErr nil alongside a nil tmpl.
 			if tmplErr == nil && tmpl != nil && !s.authorizeResolvedTemplate(ctx, creatorIdentity, tmpl) {
 				tmpl = nil
+				tmplErr = store.ErrNotFound
 			}
 			// DEGRADATION RULE (design §3.2.2), the scheduler-path equivalent of
 			// the create path's. A resolve failure never fails a scheduled

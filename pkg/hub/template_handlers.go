@@ -79,10 +79,16 @@ type CreateTemplateResponse struct {
 }
 
 type ListTemplatesResponse struct {
-	Templates    []TemplateWithCapabilities `json:"templates"`
-	NextCursor   string                     `json:"nextCursor,omitempty"`
-	TotalCount   int                        `json:"totalCount"`
-	Capabilities *Capabilities              `json:"_capabilities,omitempty"`
+	Templates  []TemplateWithCapabilities `json:"templates"`
+	NextCursor string                     `json:"nextCursor,omitempty"`
+	TotalCount int                        `json:"totalCount"`
+	// TotalCountApproximate marks TotalCount as a lower bound rather than an
+	// exact count (ptone/scion#1916 follow-up, C3): set when the hub-wide
+	// candidate pool crossed authorizedListMaxCandidates before the count
+	// scan finished. Never affects Templates or NextCursor, which are always
+	// exactly the caller's authorized page regardless of this flag.
+	TotalCountApproximate bool          `json:"totalCountApproximate,omitempty"`
+	Capabilities          *Capabilities `json:"_capabilities,omitempty"`
 }
 
 // UploadURLInfo contains a signed URL for uploading a file.
@@ -219,17 +225,13 @@ func (s *Server) listTemplatesV2(w http.ResponseWriter, r *http.Request) {
 		},
 		templateResource,
 		func(t *store.Template) string { return authorizedListCursor(t.Created, t.ID, cursorBinding) },
-		s.authzService.AuthorizeReadBatch,
+		s.catalogListReadBatch(identity),
 	)
 	if err != nil {
-		if authorizeEach {
-			writeAuthorizedListError(w, err)
-		} else {
-			writeErrorFromErr(w, err, "")
-		}
+		writeErrorFromErr(w, err, "")
 		return
 	}
-	items, nextCursor, totalCount := result.Items, result.NextCursor, result.TotalCount
+	items, nextCursor, totalCount, totalApprox := result.Items, result.NextCursor, result.TotalCount, result.TotalCountApproximate
 	templates := make([]TemplateWithCapabilities, 0, len(items))
 	if identity == nil {
 		for i := range items {
@@ -248,7 +250,7 @@ func (s *Server) listTemplatesV2(w http.ResponseWriter, r *http.Request) {
 	if identity != nil {
 		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "template")
 	}
-	writeJSON(w, http.StatusOK, ListTemplatesResponse{Templates: templates, NextCursor: nextCursor, TotalCount: totalCount, Capabilities: scopeCap})
+	writeJSON(w, http.StatusOK, ListTemplatesResponse{Templates: templates, NextCursor: nextCursor, TotalCount: totalCount, TotalCountApproximate: totalApprox, Capabilities: scopeCap})
 }
 
 // createTemplateV2 creates a template with optional file upload URLs.
@@ -455,20 +457,14 @@ func (s *Server) getTemplateV2(w http.ResponseWriter, r *http.Request, id string
 		return
 	}
 
-	// Authenticated runtime brokers read templates during agent creation
-	// (template hydration). They pass HMAC auth via middleware but are not
-	// user principals, so the authorization kernel cannot evaluate them.
-	// Allow read access for brokers; the HMAC credential is the trust basis.
-	if GetBrokerIdentityFromContext(ctx) == nil {
-		// SECURITY-GATE: authorize read access to this specific template.
-		// The list endpoint filters via AuthorizeReadBatch; without this check
-		// a caller could bypass list filtering by addressing the template by ID.
-		// A denial reads as 404 (ptone/scion#1916), matching the skill fix: a
-		// template a caller may not read must not be distinguishable from one
-		// that does not exist.
-		if !s.authorizeRead(w, r, templateResource(template), "Template") {
-			return
-		}
+	// SECURITY-GATE: authorize read access to this specific template.
+	// The list endpoint filters via AuthorizeReadBatch; without this check
+	// a caller could bypass list filtering by addressing the template by ID.
+	// A denial reads as 404 (ptone/scion#1916), matching the skill fix: a
+	// template a caller may not read must not be distinguishable from one
+	// that does not exist.
+	if !s.authorizeTemplateReadRoute(w, r, template) {
+		return
 	}
 
 	resp := TemplateWithCapabilities{Template: *template}
@@ -801,17 +797,10 @@ func (s *Server) handleTemplateDownload(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Authenticated runtime brokers download templates during agent creation
-	// (template hydration). They pass HMAC auth via middleware but are not
-	// user principals, so the authorization kernel cannot evaluate them.
-	// Allow read access for brokers; the HMAC credential is the trust basis.
-	// This mirrors the carve-out in getTemplateV2.
-	if GetBrokerIdentityFromContext(ctx) == nil {
-		// SECURITY-GATE: authorize read access to this template's files. A
-		// denial reads as 404 (ptone/scion#1916), matching getTemplateV2.
-		if !s.authorizeRead(w, r, templateResource(template), "Template") {
-			return
-		}
+	// SECURITY-GATE: authorize read access to this template's files. A
+	// denial reads as 404 (ptone/scion#1916), matching getTemplateV2.
+	if !s.authorizeTemplateReadRoute(w, r, template) {
+		return
 	}
 
 	stor := s.GetStorage()
@@ -893,7 +882,14 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 
 	source, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		// A genuinely missing source uses the same "Template not found"
+		// message authorizeRead below writes on denial (ptone/scion#1916),
+		// so the two outcomes cannot be told apart by message text either.
+		if err == store.ErrNotFound {
+			NotFound(w, "Template")
+		} else {
+			writeErrorFromErr(w, err, "")
+		}
 		return
 	}
 
@@ -902,8 +898,11 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 	// only authorizes ActionCreate at the destination; without this gate
 	// that check alone would let any caller who may create a template
 	// somewhere copy the contents of a source template they cannot
-	// otherwise read.
-	if !s.authorize(w, r, templateResource(source), ActionRead) {
+	// otherwise read. Reading the clone source is a read like any other
+	// (ptone/scion#1916): use authorizeRead so a forbidden source template
+	// reads as the same 404 as a nonexistent one, rather than a 403 that
+	// confirms it exists.
+	if !s.authorizeRead(w, r, templateResource(source), "Template") {
 		return
 	}
 
@@ -1006,6 +1005,21 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		}
 	}
 
+	// Detect a name collision at the destination BEFORE any storage write.
+	// The clone below copies files to a path derived from (scope, scopeID,
+	// slug); if a record already occupies that path, copying into it first
+	// and only checking for the collision at CreateTemplate time would
+	// silently overwrite the existing record's files ahead of ever reporting
+	// the conflict — and the failure-path cleanup a few lines down would
+	// then delete a prefix this request never owned.
+	if existing, err := s.store.GetTemplateBySlug(ctx, clone.Slug, clone.Scope, clone.ScopeID); err != nil && err != store.ErrNotFound {
+		writeErrorFromErr(w, err, "")
+		return
+	} else if existing != nil {
+		writeError(w, http.StatusConflict, "conflict", "A resource with this slug already exists in the target scope. Choose a different name.", nil)
+		return
+	}
+
 	// Generate storage path for the clone
 	storagePath := storage.TemplateStoragePath(s.HubID(), clone.Scope, clone.ScopeID, clone.Slug)
 	clone.StoragePath = storagePath
@@ -1067,6 +1081,43 @@ func templateScopeResource(scope, scopeID string) Resource {
 		r.ParentID = scopeID
 	}
 	return r
+}
+
+// authorizeTemplateReadRoute is the shared read gate for every template read
+// surface that must also admit a runtime broker: get, download, and files
+// (template_file_handlers.go). A denial reads as 404, matching authorizeRead.
+//
+// An authenticated broker is scoped by brokerMayReadCatalogResource rather
+// than admitted unconditionally: brokers read templates during agent
+// creation (hydration) over HMAC auth and are not user principals, so the
+// authorization kernel cannot evaluate them, but that is authority to
+// hydrate the projects the broker serves plus the hub-wide catalog, not
+// every project's or user's private template.
+//
+// A global-scope template is likewise allowed outright for an agent
+// identity, ahead of the ordinary authorizeRead/CheckAccess call: the
+// kernel's agent synthetic binding is project-scoped by design (see the
+// comment on Decide's step 5b, authz.go) and deliberately does not carry a
+// hub-wide-catalog exception, because that would leak into every other
+// parentless resource type the kernel evaluates for agents. Applying the
+// exception here instead — the same way catalogListReadBatch
+// (authorized_list.go) applies it to list — keeps list and this per-ID read
+// in agreement without widening what CheckAccess itself grants an agent.
+func (s *Server) authorizeTemplateReadRoute(w http.ResponseWriter, r *http.Request, template *store.Template) bool {
+	ctx := r.Context()
+	if broker := GetBrokerIdentityFromContext(ctx); broker != nil {
+		if s.brokerMayReadCatalogResource(ctx, broker, template.Scope, template.ScopeID) {
+			return true
+		}
+		NotFound(w, "Template")
+		return false
+	}
+	if template.Scope == store.TemplateScopeGlobal {
+		if agent := GetAgentIdentityFromContext(ctx); agent != nil {
+			return true
+		}
+	}
+	return s.authorizeRead(w, r, templateResource(template), "Template")
 }
 
 // computeContentHash computes the aggregate content hash for a set of resource
