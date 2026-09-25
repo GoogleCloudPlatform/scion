@@ -2121,6 +2121,13 @@ type QuotaStore interface {
 
 	// ListActiveReservations returns active (non-released) reservations for a limit and scope.
 	ListActiveReservations(ctx context.Context, limitDefinitionID, scopeType, scopeID string) ([]*UsageReservation, error)
+
+	// HasActiveReservation reports whether resourceID already holds a
+	// non-released reservation for the given limit, regardless of scope.
+	// Used to make re-reservation idempotent (ptone/scion#1963): a caller
+	// re-reserving on agent start/resume must not create a second active
+	// reservation for an agent that already holds one.
+	HasActiveReservation(ctx context.Context, limitDefinitionID, resourceID string) (bool, error)
 }
 
 // =============================================================================

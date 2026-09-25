@@ -174,6 +174,12 @@ const (
 	// quota checks for the same scope so that the "check count + reserve"
 	// sequence is atomic, preventing over-allocation.
 	LockQuotaEnforcement AdvisoryLockKey = 0x5C101002
+
+	// LockBrokerQuotaReconcile guards the periodic (and startup, tick 0)
+	// reconcile of stale max_agents_per_broker reservations (ptone/scion#1963)
+	// — rows left with released_at IS NULL for agents that are no longer in a
+	// counted phase (stopped/suspended/error) or no longer exist.
+	LockBrokerQuotaReconcile AdvisoryLockKey = 0x5C100021
 )
 
 // AdvisoryLocker is implemented by backends that can take a cluster-wide

@@ -347,6 +347,26 @@ func (q *QuotaStore) CountActiveReservations(ctx context.Context, limitDefinitio
 	return int64(count), nil
 }
 
+// HasActiveReservation reports whether resourceID already holds a
+// non-released reservation for the given limit, regardless of scope.
+func (q *QuotaStore) HasActiveReservation(ctx context.Context, limitDefinitionID, resourceID string) (bool, error) {
+	ldUID, err := parseUUID(limitDefinitionID)
+	if err != nil {
+		return false, err
+	}
+	count, err := q.client.UsageReservation.Query().
+		Where(
+			usagereservation.LimitDefinitionIDEQ(ldUID),
+			usagereservation.ResourceIDEQ(resourceID),
+			usagereservation.ReleasedAtIsNil(),
+		).
+		Count(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return count > 0, nil
+}
+
 // ReleaseReservation releases a reservation by setting released_at.
 // Matches on limit_definition_id and resource_id.
 func (q *QuotaStore) ReleaseReservation(ctx context.Context, limitDefinitionID, resourceID string) error {
