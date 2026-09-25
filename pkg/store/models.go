@@ -2792,6 +2792,16 @@ const (
 const (
 	QuotaScopeSystem  = "system"
 	QuotaScopeProject = "project"
+	// QuotaScopeBroker scopes a limit to a single runtime broker rather than a
+	// user, project, or the whole Hub. See LimitMaxAgentsPerBroker: a broker is
+	// where the resource-exhaustion risk actually lives (it is the process
+	// that spawns agent containers on a specific host), so a safety ceiling
+	// must be scoped to it — a per-user or per-project scope would not stop
+	// one overloaded broker's host from being taken down by agents created by
+	// many different users across many different projects that all happen to
+	// dispatch to it, and a hub-wide scope would wrongly couple brokers with
+	// different host capacity together.
+	QuotaScopeBroker = "broker"
 )
 
 // System limit definition names
@@ -2799,6 +2809,16 @@ const (
 	LimitMaxAgentsPerProject = "max_agents_per_project"
 	LimitMaxProjectsPerUser  = "max_projects_per_user"
 	LimitMaxMembersPerGroup  = "max_members_per_group"
+	// LimitMaxAgentsPerBroker is the per-runtime-broker ceiling on
+	// concurrently live agents (ptone/scion#1303). Unlike the other system
+	// limits, which are opt-in fairness quotas seeded unlimited and scoped to
+	// a user/project, this one is a crash-prevention safety gate scoped to
+	// infrastructure (QuotaScopeBroker, scope_id=runtime broker ID): the
+	// broker is the process that actually spawns agent containers on a given
+	// host, so it is what can be OOM-killed or SIGBUS-crashed by too many of
+	// them, regardless of which project or user created them. It is seeded
+	// with a non-zero default rather than 0/unlimited. See seedLimitDefinitions.
+	LimitMaxAgentsPerBroker = "max_agents_per_broker"
 )
 
 // =============================================================================

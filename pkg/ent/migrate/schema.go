@@ -575,7 +575,7 @@ var (
 		{Name: "id", Type: field.TypeUUID},
 		{Name: "subject_type", Type: field.TypeEnum, Enums: []string{"user", "group", "system_default"}},
 		{Name: "subject_id", Type: field.TypeString, Default: ""},
-		{Name: "scope_type", Type: field.TypeEnum, Enums: []string{"system", "project"}},
+		{Name: "scope_type", Type: field.TypeEnum, Enums: []string{"system", "project", "broker"}},
 		{Name: "scope_id", Type: field.TypeString, Default: ""},
 		{Name: "value", Type: field.TypeInt64},
 		{Name: "created_by", Type: field.TypeString, Nullable: true, Default: ""},
@@ -1964,7 +1964,7 @@ var (
 	UsageReservationsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
 		{Name: "subject_id", Type: field.TypeString},
-		{Name: "scope_type", Type: field.TypeEnum, Enums: []string{"system", "project"}},
+		{Name: "scope_type", Type: field.TypeEnum, Enums: []string{"system", "project", "broker"}},
 		{Name: "scope_id", Type: field.TypeString, Default: ""},
 		{Name: "resource_id", Type: field.TypeString},
 		{Name: "reserved", Type: field.TypeInt64, Default: 1},
