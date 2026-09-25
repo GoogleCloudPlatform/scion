@@ -1928,27 +1928,10 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check for nested /github-installation path
-	if subPath == "github-installation" {
-		s.handleProjectGitHubInstallation(w, r, projectID)
-		return
-	}
-
-	// Check for nested /github-status path
-	if subPath == "github-status" {
-		s.handleProjectGitHubStatus(w, r, projectID)
-		return
-	}
-
-	// Check for nested /github-permissions path
-	if subPath == "github-permissions" {
-		s.handleProjectGitHubPermissions(w, r, projectID)
-		return
-	}
-
-	// Check for nested /git-identity path
-	if subPath == "git-identity" {
-		s.handleProjectGitIdentity(w, r, projectID)
+	// Project GitHub App and git identity settings
+	switch subPath {
+	case "github-installation", "github-status", "github-permissions", "git-identity":
+		s.handleProjectGitHubRoutes(w, r, projectID, subPath)
 		return
 	}
 
