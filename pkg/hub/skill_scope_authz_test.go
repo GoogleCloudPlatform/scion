@@ -331,22 +331,20 @@ func TestSkillScope_CoreScoped_OtherHubMemberStillAllowed(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------
-// Public visibility is out of scope for #1901 and must be unaffected: every
-// CheckAccess(ActionRead) call site for skills is guarded by
-// `skill.Visibility != store.VisibilityPublic` (getSkill, listSkillVersions,
-// getSkillVersion, listSkills, handleSkillDownload, authorizeSkillFileRead,
-// skill_dispatch_resolve.go's resolve gate), so a public skill's read
-// authorization never reaches filterHubWideSkillGrants at all. These tests
-// pin that: a public user- or project-scoped skill must remain readable,
-// listable, resolvable and downloadable by a hub member who is neither the
-// owner nor a project member, exactly as before this change.
+// ptone/scion#1903: `visibility` is removed and no longer widens reads.
+// Before this change, every CheckAccess(ActionRead) call site for skills was
+// guarded by `skill.Visibility != store.VisibilityPublic` (getSkill,
+// listSkillVersions, getSkillVersion, listSkills, handleSkillDownload,
+// authorizeSkillFileRead, skill_dispatch_resolve.go's resolve gate), so a
+// public skill's read authorization never reached filterHubWideSkillGrants
+// at all. These tests were `...StillAllowed` under #1901 pinning that a
+// formerly-public user- or project-scoped skill remained readable, listable,
+// resolvable and downloadable by a hub member who was neither the owner nor
+// a project member. Under #1903's decision — public user- or project-scoped
+// skills keep their creation scope, and visibility no longer widens reads —
+// that same hub member must now be denied, exactly like any other non-owner,
+// non-member caller reading a user- or project-scoped skill.
 // ----------------------------------------------------------------------
-
-func makeSkillPublic(t *testing.T, s store.Store, skill *store.Skill) {
-	t.Helper()
-	skill.Visibility = store.VisibilityPublic
-	require.NoError(t, s.UpdateSkill(context.Background(), skill))
-}
 
 // publishOneFileVersion runs the real two-phase publish flow (create draft
 // version, upload, finalize) as owner so the skill has a real, downloadable
@@ -373,73 +371,77 @@ func publishOneFileVersion(t *testing.T, srv *Server, owner *store.User, skillID
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
 
-func TestSkillScope_PublicUserScopedSkill_OtherHubMemberStillAllowed(t *testing.T) {
+func TestSkillScope_PublicUserScopedSkill_OtherHubMemberDenied(t *testing.T) {
 	srv, s, alice, carol, _ := setupSkillScopeTest(t)
 	stor, err := storage.NewLocal(storage.Config{Provider: storage.ProviderLocal, Bucket: "b", LocalPath: t.TempDir()})
 	require.NoError(t, err)
 	srv.SetStorage(stor)
 
-	skill := createTestSkill(t, s, "alice-public-user-skill", store.SkillScopeUser, alice.ID, alice.ID)
-	makeSkillPublic(t, s, skill)
+	skill := createTestSkill(t, s, "alice-formerly-public-user-skill", store.SkillScopeUser, alice.ID, alice.ID)
 	publishOneFileVersion(t, srv, alice, skill.ID)
 
 	rec := doRequestAsUser(t, srv, carol, http.MethodGet, "/api/v1/skills/"+skill.ID, nil)
-	assert.Equal(t, http.StatusOK, rec.Code,
-		"a public user-scoped skill must remain readable by any hub member; got: %s", rec.Body.String())
+	assert.Equal(t, http.StatusNotFound, rec.Code,
+		"a formerly-public user-scoped skill must not be readable by another hub member now that visibility no longer widens reads; got: %s", rec.Body.String())
 
 	recList := doRequestAsUser(t, srv, carol, http.MethodGet, "/api/v1/skills?scope=user&scopeId="+alice.ID, nil)
 	require.Equal(t, http.StatusOK, recList.Code)
 	var listResp ListSkillsResponse
 	require.NoError(t, json.NewDecoder(recList.Body).Decode(&listResp))
-	assert.NotEmpty(t, listResp.Skills, "a public user-scoped skill must still appear in another member's list")
+	assert.Empty(t, listResp.Skills, "a formerly-public user-scoped skill must not appear in another member's list")
 
 	recResolve := doRequestAsUser(t, srv, carol, http.MethodPost, "/api/v1/skills/resolve", ResolveSkillsRequest{
-		Skills: []ResolveSkillRef{{URI: "skill://scion/user/" + alice.ID + "/alice-public-user-skill"}},
+		Skills: []ResolveSkillRef{{URI: "skill://scion/user/" + alice.ID + "/alice-formerly-public-user-skill"}},
 	})
 	require.Equal(t, http.StatusOK, recResolve.Code)
 	var resolveResp ResolveSkillsResponse
 	require.NoError(t, json.NewDecoder(recResolve.Body).Decode(&resolveResp))
-	assert.Empty(t, resolveResp.Errors, "a public user-scoped skill must still resolve for another member")
-	assert.NotEmpty(t, resolveResp.Resolved)
+	assert.Empty(t, resolveResp.Resolved, "a formerly-public user-scoped skill must not resolve for another member")
+	require.NotEmpty(t, resolveResp.Errors)
+	// ptone/scion#1901 finding F2: a denied candidate is indistinguishable
+	// from a missing one.
+	assert.Equal(t, "not_found", resolveResp.Errors[0].Code)
 
 	recDownload := doRequestAsUser(t, srv, carol, http.MethodGet, "/api/v1/skills/"+skill.ID+"/download?version=1.0.0", nil)
-	assert.Equal(t, http.StatusOK, recDownload.Code,
-		"a public user-scoped skill's download-URL issuance must still succeed for another member; got: %s", recDownload.Body.String())
+	assert.Equal(t, http.StatusNotFound, recDownload.Code,
+		"a formerly-public user-scoped skill's download-URL issuance must be denied to another member; got: %s", recDownload.Body.String())
 }
 
-func TestSkillScope_PublicProjectScopedSkill_OtherHubMemberStillAllowed(t *testing.T) {
+func TestSkillScope_PublicProjectScopedSkill_OtherHubMemberDenied(t *testing.T) {
 	srv, s, alice, carol, project := setupSkillScopeTest(t)
 	stor, err := storage.NewLocal(storage.Config{Provider: storage.ProviderLocal, Bucket: "b", LocalPath: t.TempDir()})
 	require.NoError(t, err)
 	srv.SetStorage(stor)
 
-	skill := createTestSkill(t, s, "alice-public-project-skill", store.SkillScopeProject, project.ID, alice.ID)
-	makeSkillPublic(t, s, skill)
+	skill := createTestSkill(t, s, "alice-formerly-public-project-skill", store.SkillScopeProject, project.ID, alice.ID)
 	publishOneFileVersion(t, srv, alice, skill.ID)
 
 	rec := doRequestAsUser(t, srv, carol, http.MethodGet, "/api/v1/skills/"+skill.ID, nil)
-	assert.Equal(t, http.StatusOK, rec.Code,
-		"a public project-scoped skill must remain readable by a non-member hub member; got: %s", rec.Body.String())
+	assert.Equal(t, http.StatusNotFound, rec.Code,
+		"a formerly-public project-scoped skill must not be readable by a non-member hub member now that visibility no longer widens reads; got: %s", rec.Body.String())
 
 	recList := doRequestAsUser(t, srv, carol, http.MethodGet, "/api/v1/skills?scope=project&scopeId="+project.ID, nil)
 	require.Equal(t, http.StatusOK, recList.Code)
 	var listResp ListSkillsResponse
 	require.NoError(t, json.NewDecoder(recList.Body).Decode(&listResp))
-	assert.NotEmpty(t, listResp.Skills, "a public project-scoped skill must still appear in a non-member's list")
+	assert.Empty(t, listResp.Skills, "a formerly-public project-scoped skill must not appear in a non-member's list")
 
 	recResolve := doRequestAsUser(t, srv, carol, http.MethodPost, "/api/v1/skills/resolve", ResolveSkillsRequest{
-		Skills:    []ResolveSkillRef{{URI: "skill://project/alice-public-project-skill"}},
+		Skills:    []ResolveSkillRef{{URI: "skill://project/alice-formerly-public-project-skill"}},
 		ProjectID: project.ID,
 	})
 	require.Equal(t, http.StatusOK, recResolve.Code)
 	var resolveResp ResolveSkillsResponse
 	require.NoError(t, json.NewDecoder(recResolve.Body).Decode(&resolveResp))
-	assert.Empty(t, resolveResp.Errors, "a public project-scoped skill must still resolve for a non-member")
-	assert.NotEmpty(t, resolveResp.Resolved)
+	assert.Empty(t, resolveResp.Resolved, "a formerly-public project-scoped skill must not resolve for a non-member")
+	require.NotEmpty(t, resolveResp.Errors)
+	// ptone/scion#1901 finding F2: a denied candidate is indistinguishable
+	// from a missing one.
+	assert.Equal(t, "not_found", resolveResp.Errors[0].Code)
 
 	recDownload := doRequestAsUser(t, srv, carol, http.MethodGet, "/api/v1/skills/"+skill.ID+"/download?version=1.0.0", nil)
-	assert.Equal(t, http.StatusOK, recDownload.Code,
-		"a public project-scoped skill's download-URL issuance must still succeed for a non-member; got: %s", recDownload.Body.String())
+	assert.Equal(t, http.StatusNotFound, recDownload.Code,
+		"a formerly-public project-scoped skill's download-URL issuance must be denied to a non-member; got: %s", recDownload.Body.String())
 }
 
 // ----------------------------------------------------------------------

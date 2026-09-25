@@ -347,7 +347,7 @@ func Spec() []TableFixture {
 			{
 				"id": "54000000-0000-0000-0000-000000000001", "name": "Reviewer",
 				"slug": "reviewer", "description": "Review code", "tags": `["code","review"]`,
-				"scope": "global", "status": "active", "visibility": "public",
+				"scope": "global", "status": "active",
 			},
 		}},
 		{Table: "skill_versions", Rows: []row{

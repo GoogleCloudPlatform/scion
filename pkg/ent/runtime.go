@@ -1490,16 +1490,12 @@ func init() {
 	skillDescScope := skillFields[5].Descriptor()
 	// skill.DefaultScope holds the default value on creation for the scope field.
 	skill.DefaultScope = skillDescScope.Default.(string)
-	// skillDescVisibility is the schema descriptor for visibility field.
-	skillDescVisibility := skillFields[14].Descriptor()
-	// skill.DefaultVisibility holds the default value on creation for the visibility field.
-	skill.DefaultVisibility = skillDescVisibility.Default.(string)
 	// skillDescCreated is the schema descriptor for created field.
-	skillDescCreated := skillFields[15].Descriptor()
+	skillDescCreated := skillFields[14].Descriptor()
 	// skill.DefaultCreated holds the default value on creation for the created field.
 	skill.DefaultCreated = skillDescCreated.Default.(func() time.Time)
 	// skillDescUpdated is the schema descriptor for updated field.
-	skillDescUpdated := skillFields[16].Descriptor()
+	skillDescUpdated := skillFields[15].Descriptor()
 	// skill.DefaultUpdated holds the default value on creation for the updated field.
 	skill.DefaultUpdated = skillDescUpdated.Default.(func() time.Time)
 	// skill.UpdateDefaultUpdated holds the default value on update for the updated field.

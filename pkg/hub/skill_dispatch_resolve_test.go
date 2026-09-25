@@ -65,9 +65,9 @@ func dispatchTestAgent(creatorID, projectID string, refs ...string) *store.Agent
 	}
 }
 
-// The #1784 scenario: a private (default visibility) global skill referenced
-// by an agent's config. The broker cannot read it, but the Hub resolves it at
-// dispatch as the creating member, who can.
+// The #1784 scenario: a global skill referenced by an agent's config. The
+// broker cannot read it, but the Hub resolves it at dispatch as the creating
+// member, who can.
 func TestPreResolveAgentSkills_PrivateGlobalSkill_CreatorAllowed(t *testing.T) {
 	srv, s, alice, _, project := setupSkillAuthzTest(t)
 	skill := createTestSkill(t, s, "private-global", store.SkillScopeGlobal, "", alice.ID)
@@ -117,18 +117,25 @@ func TestPreResolveAgentSkills_CreatorWithoutAccess_NotFound(t *testing.T) {
 	assert.Equal(t, "not_found", resp.Errors[0].Code)
 }
 
-func TestPreResolveAgentSkills_PublicSkill_Unchanged(t *testing.T) {
+// TestPreResolveAgentSkills_FormerlyPublicSkill_NonHubMemberDenied replaces
+// the former TestPreResolveAgentSkills_PublicSkill_Unchanged. Visibility no
+// longer widens reads (ptone/scion#1903): a hub-scoped (global) skill is
+// resolved through the ordinary scope check, so a non-hub-member creator is
+// denied exactly as before dispatch-time resolution existed, with no
+// public-visibility bypass available.
+func TestPreResolveAgentSkills_FormerlyPublicSkill_NonHubMemberDenied(t *testing.T) {
 	srv, s, alice, bob, project := setupSkillAuthzTest(t)
-	skill := createTestSkill(t, s, "public-one", store.SkillScopeGlobal, "", alice.ID)
-	skill.Visibility = store.VisibilityPublic
-	require.NoError(t, s.UpdateSkill(context.Background(), skill))
+	skill := createTestSkill(t, s, "formerly-public-one", store.SkillScopeGlobal, "", alice.ID)
 	publishTestSkillVersion(t, s, skill)
 
 	resp := srv.preResolveAgentSkills(context.Background(),
-		dispatchTestAgent(bob.ID, project.ID, "skill://scion/global/public-one"))
+		dispatchTestAgent(bob.ID, project.ID, "skill://scion/global/formerly-public-one"))
 	require.NotNil(t, resp)
-	assert.Empty(t, resp.Errors)
-	require.Len(t, resp.Resolved, 1)
+	assert.Empty(t, resp.Resolved)
+	require.Len(t, resp.Errors, 1)
+	// ptone/scion#1901 finding F2: a denied candidate is indistinguishable
+	// from a missing one — see TestPreResolveAgentSkills_CreatorWithoutAccess_NotFound.
+	assert.Equal(t, "not_found", resp.Errors[0].Code)
 }
 
 // The dispatching request's identity wins when it is a user. A broker

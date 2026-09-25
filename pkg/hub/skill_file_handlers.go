@@ -171,16 +171,14 @@ func (s *Server) handleSkillFileRead(w http.ResponseWriter, r *http.Request, ski
 func (s *Server) authorizeSkillFileRead(w http.ResponseWriter, r *http.Request, skill *store.Skill) bool {
 	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)
-	if skill.Visibility != store.VisibilityPublic {
-		if identity == nil {
-			NotFound(w, "Skill")
-			return false
-		}
-		decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
-		if !decision.Allowed {
-			NotFound(w, "Skill")
-			return false
-		}
+	if identity == nil {
+		NotFound(w, "Skill")
+		return false
+	}
+	decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
+	if !decision.Allowed {
+		NotFound(w, "Skill")
+		return false
 	}
 	return true
 }

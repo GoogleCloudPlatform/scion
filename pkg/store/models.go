@@ -2438,7 +2438,6 @@ type Skill struct {
 	OwnerID       string    `json:"ownerId,omitempty"`
 	CreatedBy     string    `json:"createdBy,omitempty"`
 	UpdatedBy     string    `json:"updatedBy,omitempty"`
-	Visibility    string    `json:"visibility"`
 	Created       time.Time `json:"created"`
 	Updated       time.Time `json:"updated"`
 }

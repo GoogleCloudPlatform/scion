@@ -46,7 +46,6 @@ export class ScionPageSkillDetail extends LitElement {
   @state() private editForm: Partial<{
     name: string;
     description: string;
-    visibility: string;
     tags: string;
   }> = {};
   @state() private saving = false;
@@ -191,24 +190,13 @@ export class ScionPageSkillDetail extends LitElement {
       color: var(--scion-text, #1e293b);
     }
 
-    .scope-badge,
-    .visibility-badge {
+    .scope-badge {
       display: inline-flex;
       align-items: center;
       padding: 0.125rem 0.5rem;
       border-radius: 9999px;
       font-size: 0.8125rem;
       font-weight: 500;
-    }
-    .scope-badge {
-      background: var(--scion-bg-subtle, #f1f5f9);
-      color: var(--scion-text-muted, #64748b);
-    }
-    .visibility-badge.public {
-      background: var(--sl-color-success-100, #dcfce7);
-      color: var(--sl-color-success-700, #15803d);
-    }
-    .visibility-badge.private {
       background: var(--scion-bg-subtle, #f1f5f9);
       color: var(--scion-text-muted, #64748b);
     }
@@ -491,7 +479,6 @@ export class ScionPageSkillDetail extends LitElement {
     this.editForm = {
       name: this.skill.name,
       description: this.skill.description || '',
-      visibility: this.skill.visibility,
       tags: this.skill.tags?.join(', ') || '',
     };
     this.editing = true;
@@ -513,12 +500,6 @@ export class ScionPageSkillDetail extends LitElement {
       }
       if (this.editForm.description !== undefined) {
         body.description = this.editForm.description;
-      }
-      if (
-        this.editForm.visibility !== undefined &&
-        this.editForm.visibility !== this.skill.visibility
-      ) {
-        body.visibility = this.editForm.visibility;
       }
       if (this.editForm.tags !== undefined) {
         body.tags = this.editForm.tags
@@ -697,7 +678,6 @@ export class ScionPageSkillDetail extends LitElement {
           </div>
           <div class="header-meta">
             <span class="scope-badge">${skill.scope}</span>
-            <span class="visibility-badge ${skill.visibility}">${skill.visibility}</span>
           </div>
         </div>
         <div class="header-actions">
@@ -795,12 +775,6 @@ export class ScionPageSkillDetail extends LitElement {
                 </div>
               `
             : nothing}
-          <div class="info-item">
-            <span class="info-label">Visibility</span>
-            <span class="info-value"
-              ><span class="visibility-badge ${skill.visibility}">${skill.visibility}</span></span
-            >
-          </div>
           ${skill.ownerId
             ? html`
                 <div class="info-item">
@@ -871,21 +845,6 @@ export class ScionPageSkillDetail extends LitElement {
             rows="3"
             help-text="Once set, this field cannot be cleared."
           ></sl-textarea>
-        </div>
-        <div class="edit-field">
-          <label>Visibility</label>
-          <sl-radio-group
-            .value=${this.editForm.visibility || 'private'}
-            @sl-change=${(e: Event) => {
-              this.editForm = {
-                ...this.editForm,
-                visibility: (e.target as HTMLElement & { value: string }).value,
-              };
-            }}
-          >
-            <sl-radio-button value="private">Private</sl-radio-button>
-            <sl-radio-button value="public">Public</sl-radio-button>
-          </sl-radio-group>
         </div>
         <div class="edit-field">
           <label>Tags</label>

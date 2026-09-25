@@ -1755,7 +1755,6 @@ var (
 		{Name: "owner_id", Type: field.TypeString, Nullable: true},
 		{Name: "created_by", Type: field.TypeString, Nullable: true},
 		{Name: "updated_by", Type: field.TypeString, Nullable: true},
-		{Name: "visibility", Type: field.TypeString, Default: "private"},
 		{Name: "created", Type: field.TypeTime},
 		{Name: "updated", Type: field.TypeTime},
 	}

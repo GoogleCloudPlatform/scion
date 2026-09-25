@@ -154,7 +154,6 @@ func runSkillsShow(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Tags: %s\n", strings.Join(skill.Tags, ", "))
 	}
 	fmt.Printf("Status: %s\n", skill.Status)
-	fmt.Printf("Visibility: %s\n", skill.Visibility)
 	fmt.Printf("Created: %s\n", skill.Created.Format(time.RFC3339))
 
 	// Show versions
