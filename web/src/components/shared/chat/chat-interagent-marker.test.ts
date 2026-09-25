@@ -127,7 +127,13 @@ describe('scion-chat-interagent-marker', () => {
     expect(badge).toBeTruthy();
   });
 
-  it('renders a date divider for each day when messages span multiple days', async () => {
+  it('renders the shared date divider for each subsequent day when messages span multiple days', async () => {
+    // Defensive case: the main timeline splits runs by day before handing
+    // messages to a marker, but the marker itself must still fall back to
+    // the shared separator (not a bespoke style) if it ever spans days.
+    // The first day's divider is the main timeline's own — rendered directly
+    // above the marker — so the marker itself must not repeat it; only the
+    // day change to Jan 16 gets an internal divider.
     const el = document.createElement('scion-chat-interagent-marker') as ScionChatInteragentMarker;
     el.messageCount = 2;
     el.messages = [
@@ -138,13 +144,16 @@ describe('scion-chat-interagent-marker', () => {
     document.body.appendChild(el);
     await el.updateComplete;
 
-    const dividers = el.shadowRoot?.querySelectorAll('.ia-date-divider');
-    expect(dividers?.length).toBe(2);
-    expect(dividers?.[0].textContent).toContain('Jan 15');
-    expect(dividers?.[1].textContent).toContain('Jan 16');
+    expect(el.shadowRoot?.querySelectorAll('.ia-date-divider').length).toBe(0);
+    const dividers = el.shadowRoot?.querySelectorAll('.date-divider');
+    expect(dividers?.length).toBe(1);
+    expect(dividers?.[0].textContent).toContain('Jan 16');
   });
 
-  it('renders a single date divider when all messages fall on the same day', async () => {
+  it('renders no internal date divider when all messages fall on the same day', async () => {
+    // The main timeline already renders the shared separator above the
+    // marker for this day, so a single-day marker must add nothing of its
+    // own — otherwise every marker would show the date twice.
     const el = document.createElement('scion-chat-interagent-marker') as ScionChatInteragentMarker;
     el.messageCount = 2;
     el.messages = [
@@ -155,9 +164,8 @@ describe('scion-chat-interagent-marker', () => {
     document.body.appendChild(el);
     await el.updateComplete;
 
-    const dividers = el.shadowRoot?.querySelectorAll('.ia-date-divider');
-    expect(dividers?.length).toBe(1);
-    expect(dividers?.[0].textContent).toContain('Jan 15');
+    const dividers = el.shadowRoot?.querySelectorAll('.date-divider');
+    expect(dividers?.length).toBe(0);
   });
 
   it('renders a time label in the header for each message', async () => {

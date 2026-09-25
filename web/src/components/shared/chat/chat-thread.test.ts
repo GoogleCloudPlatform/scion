@@ -1853,3 +1853,292 @@ describe('scion-chat-thread touch tap-to-open context menu', () => {
     expect(el.shadowRoot?.querySelector('.context-menu')).toBeNull();
   });
 });
+
+describe('scion-chat-thread inter-agent day-split markers', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  function makeIaMessage(overrides: Partial<Message> = {}): Message {
+    return {
+      id: 'ia-1',
+      projectId: '',
+      sender: 'agent:alpha',
+      senderId: 'agent-alpha-id',
+      recipient: 'agent:beta',
+      recipientId: 'agent-beta-id',
+      msg: 'hello',
+      type: 'agent-message',
+      agentId: '',
+      createdAt: new Date(2026, 0, 15, 9, 0).toISOString(),
+      ...overrides,
+    };
+  }
+
+  /**
+   * Mount an agent-DM thread whose history and inter-agent endpoints are both
+   * under test control. V2 mode's real-time transport is the mocked
+   * `stateManager` EventTarget, not a network EventSource, so this needs no
+   * further mocking beyond `apiFetch`.
+   */
+  async function mountAgentDM(opts: {
+    history?: Array<Record<string, unknown>>;
+    interagent?: Message[];
+  }): Promise<ScionChatThread> {
+    apiFetch.mockImplementation((url: unknown) => {
+      const u = String(url);
+      if (u.includes('/interagent?')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ messages: opts.interagent ?? [] }),
+        } as unknown as Response);
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ items: opts.history ?? [] }),
+      } as unknown as Response);
+    });
+
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = 'dm:agent:coder';
+    el.isDM = true;
+    document.body.appendChild(el);
+    await vi.waitFor(() => {
+      const internals = el as unknown as { interagentMessages: Message[] };
+      expect(internals.interagentMessages.length).toBe((opts.interagent ?? []).length);
+    });
+    await el.updateComplete;
+    return el;
+  }
+
+  it('splits a run of inter-agent messages across 3 days into 3 markers with the main separator between them', async () => {
+    const iaMessages = [
+      makeIaMessage({ id: 'ia-1', createdAt: new Date(2026, 0, 15, 9, 0).toISOString() }),
+      makeIaMessage({ id: 'ia-2', createdAt: new Date(2026, 0, 16, 9, 0).toISOString() }),
+      makeIaMessage({ id: 'ia-3', createdAt: new Date(2026, 0, 17, 9, 0).toISOString() }),
+    ];
+    const el = await mountAgentDM({ interagent: iaMessages });
+
+    const rows = Array.from(el.shadowRoot!.querySelector('.messages-list')!.children);
+    const tags = rows.map((r) => r.tagName.toLowerCase());
+    expect(tags).toEqual([
+      'div',
+      'scion-chat-interagent-marker',
+      'div',
+      'scion-chat-interagent-marker',
+      'div',
+      'scion-chat-interagent-marker',
+    ]);
+
+    const dividers = el.shadowRoot!.querySelectorAll('.date-divider');
+    expect(dividers.length).toBe(3);
+    expect(dividers[0].textContent).toContain('Jan 15');
+    expect(dividers[1].textContent).toContain('Jan 16');
+    expect(dividers[2].textContent).toContain('Jan 17');
+
+    const markers = el.shadowRoot!.querySelectorAll('scion-chat-interagent-marker');
+    expect(markers.length).toBe(3);
+    for (const marker of markers) {
+      expect((marker as unknown as { messageCount: number }).messageCount).toBe(1);
+    }
+
+    // #1871's per-marker internal divider is gone — the main separator is the
+    // only date UI now. That guard belongs on an *expanded* marker (a
+    // collapsed marker renders only the pill, so checking for the absence of
+    // a divider there proves nothing); see the expanded-marker test below.
+  });
+
+  it('does not duplicate the date separator inside an expanded marker', async () => {
+    // Regression test for R1: expanding every marker must not render a
+    // second, identical divider directly under the one the main timeline
+    // already rendered for that day. Each marker here holds a single day
+    // (one message), so a correct implementation shows zero internal
+    // dividers; the pre-fix code showed one per marker.
+    const iaMessages = [
+      makeIaMessage({ id: 'ia-1', createdAt: new Date(2026, 0, 15, 9, 0).toISOString() }),
+      makeIaMessage({ id: 'ia-2', createdAt: new Date(2026, 0, 16, 9, 0).toISOString() }),
+      makeIaMessage({ id: 'ia-3', createdAt: new Date(2026, 0, 17, 9, 0).toISOString() }),
+    ];
+    const el = await mountAgentDM({ interagent: iaMessages });
+
+    (el as unknown as { interagentExpandAll: boolean }).interagentExpandAll = true;
+    await el.updateComplete;
+
+    const markers = Array.from(el.shadowRoot!.querySelectorAll('scion-chat-interagent-marker'));
+    expect(markers.length).toBe(3);
+    for (const marker of markers) {
+      await (marker as unknown as { updateComplete: Promise<boolean> }).updateComplete;
+      expect(marker.shadowRoot?.querySelectorAll('.date-divider').length).toBe(0);
+    }
+  });
+
+  it('renders no orphan date separators when inter-agent messages are hidden', async () => {
+    // Regression test for R2: hiding the inter-agent toggle must not leave
+    // stacked empty separators for days that contain only hidden markers.
+    const iaMessages = [
+      makeIaMessage({ id: 'ia-1', createdAt: new Date(2026, 0, 15, 9, 0).toISOString() }),
+      makeIaMessage({ id: 'ia-2', createdAt: new Date(2026, 0, 16, 9, 0).toISOString() }),
+      makeIaMessage({ id: 'ia-3', createdAt: new Date(2026, 0, 17, 9, 0).toISOString() }),
+    ];
+    const el = await mountAgentDM({ interagent: iaMessages });
+
+    (el as unknown as { interagentVisible: boolean }).interagentVisible = false;
+    await el.updateComplete;
+
+    expect(el.shadowRoot!.querySelectorAll('.date-divider').length).toBe(0);
+    const markers = el.shadowRoot!.querySelectorAll('scion-chat-interagent-marker');
+    expect(markers.length).toBe(3);
+    for (const marker of markers) {
+      expect((marker as unknown as { hidden: boolean }).hidden).toBe(true);
+    }
+  });
+
+  it('preserves a marker element (and its expanded state) across a hide/show toggle', async () => {
+    // Regression test for R4: the R2 fix omits the divider row for a day
+    // whose only content is a hidden marker, which changes how many rows
+    // precede every later row. Rendered without stable keys, Lit's
+    // positional array diffing tears down and rebuilds every
+    // scion-chat-interagent-marker (and scion-chat-message) after that
+    // point, so an expanded marker comes back collapsed. This must fail
+    // against 5bd970ca5, which renders `rows` as a plain array.
+    const iaMessages = [
+      makeIaMessage({ id: 'ia-1', createdAt: new Date(2026, 0, 15, 9, 0).toISOString() }),
+      makeIaMessage({ id: 'ia-2', createdAt: new Date(2026, 0, 16, 9, 0).toISOString() }),
+      makeIaMessage({ id: 'ia-3', createdAt: new Date(2026, 0, 17, 9, 0).toISOString() }),
+    ];
+    const el = await mountAgentDM({ interagent: iaMessages });
+
+    type MarkerEl = Element & {
+      messages: Message[];
+      expanded: boolean;
+      updateComplete: Promise<boolean>;
+    };
+    const findMarker = (): MarkerEl =>
+      Array.from(el.shadowRoot!.querySelectorAll('scion-chat-interagent-marker')).find(
+        (m) => (m as unknown as MarkerEl).messages[0]?.id === 'ia-2'
+      ) as unknown as MarkerEl;
+
+    const markerBefore = findMarker();
+    markerBefore.expanded = true;
+    await markerBefore.updateComplete;
+    expect(markerBefore.expanded).toBe(true);
+
+    (el as unknown as { interagentVisible: boolean }).interagentVisible = false;
+    await el.updateComplete;
+    (el as unknown as { interagentVisible: boolean }).interagentVisible = true;
+    await el.updateComplete;
+
+    const markerAfter = findMarker();
+    expect(markerAfter).toBe(markerBefore);
+    expect(markerAfter.expanded).toBe(true);
+  });
+
+  it('does not duplicate the date separator for a human message on the same day as an inter-agent run', async () => {
+    const el = await mountAgentDM({
+      history: [
+        {
+          id: 'm1',
+          sender: 'them@example.com',
+          senderId: 'user-them',
+          recipient: 'agent:coder',
+          msg: 'before',
+          type: 'chat',
+          createdAt: new Date(2026, 0, 15, 8, 0).toISOString(),
+        },
+        {
+          id: 'm2',
+          sender: 'them@example.com',
+          senderId: 'user-them',
+          recipient: 'agent:coder',
+          msg: 'after',
+          type: 'chat',
+          createdAt: new Date(2026, 0, 15, 11, 0).toISOString(),
+        },
+      ],
+      interagent: [
+        makeIaMessage({ id: 'ia-1', createdAt: new Date(2026, 0, 15, 9, 0).toISOString() }),
+        makeIaMessage({ id: 'ia-2', createdAt: new Date(2026, 0, 15, 9, 30).toISOString() }),
+      ],
+    });
+
+    const rows = Array.from(el.shadowRoot!.querySelector('.messages-list')!.children);
+    const tags = rows.map((r) => r.tagName.toLowerCase());
+    expect(tags).toEqual([
+      'div', // single date separator
+      'scion-chat-message', // m1
+      'scion-chat-interagent-marker', // ia-1, ia-2 grouped
+      'scion-chat-message', // m2
+    ]);
+
+    const dividers = el.shadowRoot!.querySelectorAll('.date-divider');
+    expect(dividers.length).toBe(1);
+    expect(dividers[0].textContent).toContain('Jan 15');
+
+    const marker = el.shadowRoot!.querySelector('scion-chat-interagent-marker');
+    expect((marker as unknown as { messageCount: number }).messageCount).toBe(2);
+  });
+
+  it('gives a human message its own divider the day after an inter-agent run', async () => {
+    const el = await mountAgentDM({
+      history: [
+        {
+          id: 'm1',
+          sender: 'them@example.com',
+          senderId: 'user-them',
+          recipient: 'agent:coder',
+          msg: 'next day',
+          type: 'chat',
+          createdAt: new Date(2026, 0, 16, 8, 0).toISOString(),
+        },
+      ],
+      interagent: [
+        makeIaMessage({ id: 'ia-1', createdAt: new Date(2026, 0, 15, 9, 0).toISOString() }),
+        makeIaMessage({ id: 'ia-2', createdAt: new Date(2026, 0, 15, 9, 30).toISOString() }),
+      ],
+    });
+
+    const rows = Array.from(el.shadowRoot!.querySelector('.messages-list')!.children);
+    const tags = rows.map((r) => r.tagName.toLowerCase());
+    expect(tags).toEqual([
+      'div', // Jan 15 separator
+      'scion-chat-interagent-marker', // ia-1, ia-2 grouped
+      'div', // Jan 16 separator
+      'scion-chat-message', // m1
+    ]);
+
+    const dividers = el.shadowRoot!.querySelectorAll('.date-divider');
+    expect(dividers.length).toBe(2);
+    expect(dividers[0].textContent).toContain('Jan 15');
+    expect(dividers[1].textContent).toContain('Jan 16');
+  });
+
+  it('splits an inter-agent run across the midnight boundary into two markers', async () => {
+    const el = await mountAgentDM({
+      interagent: [
+        makeIaMessage({ id: 'ia-1', createdAt: new Date(2026, 0, 15, 23, 59, 59).toISOString() }),
+        makeIaMessage({ id: 'ia-2', createdAt: new Date(2026, 0, 16, 0, 0, 0).toISOString() }),
+      ],
+    });
+
+    const rows = Array.from(el.shadowRoot!.querySelector('.messages-list')!.children);
+    const tags = rows.map((r) => r.tagName.toLowerCase());
+    expect(tags).toEqual([
+      'div', // Jan 15 separator
+      'scion-chat-interagent-marker', // ia-1
+      'div', // Jan 16 separator
+      'scion-chat-interagent-marker', // ia-2
+    ]);
+
+    const markers = el.shadowRoot!.querySelectorAll('scion-chat-interagent-marker');
+    expect(markers.length).toBe(2);
+    for (const marker of markers) {
+      expect((marker as unknown as { messageCount: number }).messageCount).toBe(1);
+    }
+  });
+});
