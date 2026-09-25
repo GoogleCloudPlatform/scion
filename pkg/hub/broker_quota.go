@@ -62,7 +62,7 @@ func (s *Server) releaseBrokerQuota(ctx context.Context, agent *store.Agent) {
 // "start" called again on an already-running agent) is a no-op rather than a
 // duplicate reservation.
 func (s *Server) checkAndReserveBrokerQuotaHTTP(ctx context.Context, w http.ResponseWriter, agent *store.Agent) bool {
-	if agent.RuntimeBrokerID == "" {
+	if agent == nil || agent.RuntimeBrokerID == "" {
 		return true
 	}
 	return s.checkAndReserveQuota(ctx, w, store.LimitMaxAgentsPerBroker, agent.RuntimeBrokerID, store.QuotaScopeBroker, agent.RuntimeBrokerID, agent.ID)
@@ -74,7 +74,7 @@ func (s *Server) checkAndReserveBrokerQuotaHTTP(ctx context.Context, w http.Resp
 // succeeded, was already held (idempotent), or no limit is configured;
 // returns store.ErrQuotaExceeded or ErrQuotaLockContention otherwise.
 func (s *Server) checkAndReserveBrokerQuota(ctx context.Context, agent *store.Agent) error {
-	if s.quotaService == nil || agent.RuntimeBrokerID == "" {
+	if s.quotaService == nil || agent == nil || agent.RuntimeBrokerID == "" {
 		return nil
 	}
 	return s.quotaService.CheckAndReserve(ctx, store.LimitMaxAgentsPerBroker, agent.RuntimeBrokerID, store.QuotaScopeBroker, agent.RuntimeBrokerID, agent.ID)
@@ -117,14 +117,27 @@ func (s *Server) reconcileBrokerQuotaOnPhaseChange(ctx context.Context, agent *s
 	s.releaseBrokerQuota(ctx, agent)
 }
 
-// ReconcileStaleBrokerQuotaReservations releases max_agents_per_broker
-// reservations that are active (released_at IS NULL) for an agent that is no
-// longer in a counted phase — or no longer exists — fixing rows left behind
-// from before stop/suspend/crash release the reservation (ptone/scion#1963).
-// Idempotent: safe to call on every hub startup. Best-effort throughout —
-// this is bookkeeping cleanup, not on any request's critical path, so
-// individual lookup/release failures are logged and skipped rather than
-// aborting the whole pass.
+// ReconcileStaleBrokerQuotaReservations reconciles max_agents_per_broker
+// reservations against observed reality, per runtime broker (ptone/scion#1963):
+//
+//   - Release: an active reservation (released_at IS NULL) whose agent no
+//     longer exists, is soft-deleted, or is no longer in a counted phase —
+//     fixing rows left behind from before stop/suspend/crash released the
+//     reservation, or from a delete path that missed the release call.
+//   - Backfill: an agent in a counted phase on this broker with no active
+//     reservation gets one recorded directly (no cap check — this is
+//     accounting for an agent that already exists and is already running,
+//     not a new admission decision; see checkAndReserveBrokerQuota for the
+//     cap-enforced path used at start/resume). Covers legacy agents created
+//     before max_agents_per_broker existed, which hold no reservation at all.
+//
+// Idempotent both ways: releasing an already-released reservation and
+// re-running the backfill after a prior successful pass are no-ops (the
+// latter enforced by the DB's unique-active-reservation-per-resource index,
+// not just the in-memory reservedIDs check below). Safe to call on every hub
+// startup. Best-effort throughout — this is bookkeeping, not on any
+// request's critical path, so individual failures are logged and skipped
+// rather than aborting the whole pass.
 func (s *Server) ReconcileStaleBrokerQuotaReservations(ctx context.Context) {
 	if s.quotaService == nil {
 		return
@@ -143,7 +156,7 @@ func (s *Server) ReconcileStaleBrokerQuotaReservations(ctx context.Context) {
 		return
 	}
 
-	var reconciled, checked int
+	var checked, released, backfilled int
 	for _, broker := range brokers.Items {
 		reservations, err := s.store.ListActiveReservations(ctx, limitDef.ID, store.QuotaScopeBroker, broker.ID)
 		if err != nil {
@@ -151,31 +164,74 @@ func (s *Server) ReconcileStaleBrokerQuotaReservations(ctx context.Context) {
 				"broker_id", broker.ID, "error", err)
 			continue
 		}
+
+		// Batch-fetch every reserved agent in one query instead of one
+		// GetAgent per reservation (N+1). GetAgentsByIDs excludes
+		// soft-deleted agents, so a soft-deleted agent's reservation is
+		// released via the same "missing from the map" path as a
+		// hard-deleted one — its stored phase (which may still read e.g.
+		// "running") never enters into it.
+		resourceIDs := make([]string, len(reservations))
+		reservedIDs := make(map[string]bool, len(reservations))
+		for i, res := range reservations {
+			resourceIDs[i] = res.ResourceID
+			reservedIDs[res.ResourceID] = true
+		}
+		agentsByID, err := s.store.GetAgentsByIDs(ctx, resourceIDs)
+		if err != nil {
+			s.agentLifecycleLog.Warn("quota reconcile: failed to batch-fetch reserved agents",
+				"broker_id", broker.ID, "error", err)
+			continue
+		}
+
+		checked += len(reservations)
 		for _, res := range reservations {
-			checked++
-			agent, err := s.store.GetAgent(ctx, res.ResourceID)
-			if err != nil {
-				if errors.Is(err, store.ErrNotFound) {
-					// The agent no longer exists (hard-deleted); its
-					// reservation should have been released at delete time
-					// but release the stale row now regardless.
-					s.quotaService.Release(ctx, store.LimitMaxAgentsPerBroker, res.ResourceID)
-					reconciled++
-					continue
-				}
-				s.agentLifecycleLog.Warn("quota reconcile: failed to look up agent for reservation",
-					"agent_id", res.ResourceID, "error", err)
+			agent, ok := agentsByID[res.ResourceID]
+			if !ok {
+				// No longer exists or soft-deleted: release the stale row.
+				// It should have been released at delete time; release it
+				// now regardless.
+				s.quotaService.Release(ctx, store.LimitMaxAgentsPerBroker, res.ResourceID)
+				released++
 				continue
 			}
 			if !isBrokerQuotaCountedPhase(agent.Phase) {
 				s.quotaService.Release(ctx, store.LimitMaxAgentsPerBroker, agent.ID)
-				reconciled++
+				released++
 			}
+		}
+
+		// Backfill: agents on this broker in a counted phase with no active
+		// reservation (legacy agents predating the cap, or any other gap).
+		agents, err := s.store.ListAgents(ctx, store.AgentFilter{RuntimeBrokerID: broker.ID}, store.ListOptions{Limit: 10000})
+		if err != nil {
+			s.agentLifecycleLog.Warn("quota reconcile: failed to list agents for broker",
+				"broker_id", broker.ID, "error", err)
+			continue
+		}
+		for i := range agents.Items {
+			agent := &agents.Items[i]
+			if reservedIDs[agent.ID] || !isBrokerQuotaCountedPhase(agent.Phase) {
+				continue
+			}
+			if _, err := s.store.CreateUsageReservation(ctx, &store.UsageReservation{
+				LimitDefinitionID: limitDef.ID,
+				SubjectID:         broker.ID,
+				ScopeType:         store.QuotaScopeBroker,
+				ScopeID:           broker.ID,
+				ResourceID:        agent.ID,
+				Reserved:          1,
+			}); err != nil {
+				s.agentLifecycleLog.Warn("quota reconcile: failed to backfill reservation",
+					"agent_id", agent.ID, "broker_id", broker.ID, "error", err)
+				continue
+			}
+			backfilled++
 		}
 	}
 
-	if reconciled > 0 {
-		s.agentLifecycleLog.Info("quota reconcile: released stale max_agents_per_broker reservations",
-			"checked", checked, "released", reconciled)
+	if released > 0 || backfilled > 0 {
+		s.agentLifecycleLog.Info("quota reconcile: reconciled max_agents_per_broker reservations",
+			"checked", checked, "released", released, "backfilled", backfilled)
 	}
 }

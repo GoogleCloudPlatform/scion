@@ -23,6 +23,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -428,4 +429,127 @@ func TestBrokerQuota_ConcurrentStartsAtCapMinusOne_ExactlyOneSucceeds(t *testing
 	assert.Equal(t, 1, successCount, "exactly one concurrent start must succeed at cap-1: codes=%v", codes)
 	assert.Equal(t, 1, rejectCount, "the other concurrent start must be rejected: codes=%v", codes)
 	assert.EqualValues(t, 1, brokerReservationCount(t, s, broker.ID))
+}
+
+// TestBrokerQuota_ReconcileMultiBroker is the multi-broker case for the
+// gemini review of ptone/scion#1963's N+1 fix: ReconcileStaleBrokerQuotaReservations
+// now batch-fetches reserved agents per broker via GetAgentsByIDs instead of
+// one GetAgent call per reservation. Two brokers, each with one stale and one
+// live reservation, must each be reconciled independently and correctly in a
+// single pass — proving the per-broker agent map isn't accidentally shared or
+// mixed up across brokers.
+func TestBrokerQuota_ReconcileMultiBroker(t *testing.T) {
+	srv, s := testServer(t)
+
+	brokerA, projectA := newQuotaTestBrokerAndProject(t, s, "multi-a")
+	staleA := newQuotaTestAgent(t, s, brokerA, projectA, "multi-a-stale", state.PhaseStopped)
+	reserveBrokerSlot(t, s, brokerA, staleA.ID)
+	liveA := newQuotaTestAgent(t, s, brokerA, projectA, "multi-a-live", state.PhaseRunning)
+	reserveBrokerSlot(t, s, brokerA, liveA.ID)
+
+	brokerB, projectB := newQuotaTestBrokerAndProject(t, s, "multi-b")
+	staleB := newQuotaTestAgent(t, s, brokerB, projectB, "multi-b-stale", state.PhaseSuspended)
+	reserveBrokerSlot(t, s, brokerB, staleB.ID)
+	liveB := newQuotaTestAgent(t, s, brokerB, projectB, "multi-b-live", state.PhaseRunning)
+	reserveBrokerSlot(t, s, brokerB, liveB.ID)
+
+	require.EqualValues(t, 2, brokerReservationCount(t, s, brokerA.ID))
+	require.EqualValues(t, 2, brokerReservationCount(t, s, brokerB.ID))
+
+	srv.ReconcileStaleBrokerQuotaReservations(context.Background())
+
+	assert.EqualValues(t, 1, brokerReservationCount(t, s, brokerA.ID), "broker A: only the live agent's reservation should survive")
+	assert.EqualValues(t, 1, brokerReservationCount(t, s, brokerB.ID), "broker B: only the live agent's reservation should survive")
+
+	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
+	require.NoError(t, err)
+	for _, id := range []string{liveA.ID, liveB.ID} {
+		has, err := s.HasActiveReservation(context.Background(), def.ID, id)
+		require.NoError(t, err)
+		assert.True(t, has, "live agent %s's reservation must survive reconcile", id)
+	}
+	for _, id := range []string{staleA.ID, staleB.ID} {
+		has, err := s.HasActiveReservation(context.Background(), def.ID, id)
+		require.NoError(t, err)
+		assert.False(t, has, "stale agent %s's reservation must be released", id)
+	}
+}
+
+// TestBrokerQuota_ReconcileBackfillsLegacyAgent is the ptone/scion#1963 item-7
+// regression: an agent in a counted phase with no active reservation at all
+// (e.g. created before max_agents_per_broker existed) must get one backfilled
+// by the reconcile, with no cap check — this is accounting for an agent that
+// already exists and is already running, not a new admission decision.
+// Backfilling must be idempotent: running the reconcile again must not create
+// a second reservation for the same agent.
+func TestBrokerQuota_ReconcileBackfillsLegacyAgent(t *testing.T) {
+	srv, s := testServer(t)
+	broker, project := newQuotaTestBrokerAndProject(t, s, "backfill")
+
+	legacy := newQuotaTestAgent(t, s, broker, project, "backfill-legacy", state.PhaseRunning)
+	require.EqualValues(t, 0, brokerReservationCount(t, s, broker.ID), "legacy agent starts with no reservation")
+
+	srv.ReconcileStaleBrokerQuotaReservations(context.Background())
+
+	assert.EqualValues(t, 1, brokerReservationCount(t, s, broker.ID), "reconcile must backfill a reservation for the legacy running agent")
+	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
+	require.NoError(t, err)
+	has, err := s.HasActiveReservation(context.Background(), def.ID, legacy.ID)
+	require.NoError(t, err)
+	assert.True(t, has)
+
+	// Idempotent: running again must not create a second reservation.
+	srv.ReconcileStaleBrokerQuotaReservations(context.Background())
+	assert.EqualValues(t, 1, brokerReservationCount(t, s, broker.ID), "backfill must not double-reserve on a second pass")
+}
+
+// TestBrokerQuota_ReconcileReleasesSoftDeletedAgent is the ptone/scion#1963
+// item-5 regression: a soft-deleted agent's phase is not guaranteed to be
+// stopped/suspended/error (isBrokerQuotaCountedPhase's exclusion list), so
+// checking phase alone is not enough to know the agent is gone. GetAgentsByIDs
+// excludes soft-deleted rows, so a soft-deleted agent's reservation must be
+// released via the same "missing from the batch-fetch" path as a hard-deleted
+// agent's, regardless of its stored phase.
+func TestBrokerQuota_ReconcileReleasesSoftDeletedAgent(t *testing.T) {
+	srv, s := testServer(t)
+	broker, project := newQuotaTestBrokerAndProject(t, s, "softdel")
+
+	agent := newQuotaTestAgent(t, s, broker, project, "softdel-agent", state.PhaseRunning)
+	reserveBrokerSlot(t, s, broker, agent.ID)
+	require.EqualValues(t, 1, brokerReservationCount(t, s, broker.ID))
+
+	// Soft-delete without touching phase, to isolate DeletedAt as the signal
+	// under test (a real delete path also flips phase to stopped, which
+	// would let isBrokerQuotaCountedPhase alone catch this).
+	agent.DeletedAt = time.Now()
+	require.NoError(t, s.UpdateAgent(context.Background(), agent))
+
+	srv.ReconcileStaleBrokerQuotaReservations(context.Background())
+
+	assert.EqualValues(t, 0, brokerReservationCount(t, s, broker.ID),
+		"a soft-deleted agent's reservation must be released even though its phase still reads running")
+}
+
+// TestBrokerQuota_StartAtCapRejected_NamesLimitInError is the ptone/scion#1963
+// item-8 regression: a legacy agent with no reservation that loses the race
+// for the last slot at start/resume must get a 429 whose message clearly
+// names the exceeded limit (max_agents_per_broker), not a generic error.
+func TestBrokerQuota_StartAtCapRejected_NamesLimitInError(t *testing.T) {
+	srv, s := testServer(t)
+	disp := &quotaLifecycleDispatcher{}
+	srv.SetDispatcher(disp)
+	setBrokerAgentCeiling(t, s, 1)
+
+	broker, project := newQuotaTestBrokerAndProject(t, s, "namedlimit")
+
+	occupant := newQuotaTestAgent(t, s, broker, project, "namedlimit-occupant", state.PhaseRunning)
+	reserveBrokerSlot(t, s, broker, occupant.ID)
+
+	// candidate is a legacy agent: stopped, and has never held a reservation.
+	candidate := newQuotaTestAgent(t, s, broker, project, "namedlimit-candidate", state.PhaseStopped)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+candidate.ID+"/start", nil)
+	require.Equal(t, http.StatusTooManyRequests, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), store.LimitMaxAgentsPerBroker,
+		"the rejection must name the exceeded limit; body: %s", rec.Body.String())
 }
