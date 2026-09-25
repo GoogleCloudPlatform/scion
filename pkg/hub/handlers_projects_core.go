@@ -1427,18 +1427,24 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		// Auto-link brokers that have auto_provide enabled
 		s.autoLinkProviders(ctx, project)
 	} else {
-		// Existing project — ensure associated groups exist (backfill for
-		// projects created before group support was added). Pass the
-		// authenticated user so they are added as owner of the members
-		// group (the person linking deserves membership).
-		var callerID string
-		if user := GetUserIdentityFromContext(ctx); user != nil {
-			callerID = user.ID()
+		// SECURITY-GATE: CheckAccess — require project-update authz on the
+		// resolved project before register performs any mutation against it.
+		// The project.create check above only covers provisioning a brand-new
+		// project; resolving an EXISTING project (by client-supplied id, slug,
+		// or git remote) must not let any caller who merely holds hub-scope
+		// project.create mutate a project they hold no binding on.
+		if !s.authorize(w, r, projectResource(project), ActionUpdate) {
+			return
 		}
+
+		// Existing project — ensure associated groups exist (backfill for
+		// projects created before group support was added). The caller is
+		// deliberately NOT granted membership here: register must not add
+		// the caller to the members group of a project that already exists.
 		s.projectsLogger().Debug("ensuring groups for existing project during register",
-			"project_id", project.ID, "slug", project.Slug, "caller", callerID)
+			"project_id", project.ID, "slug", project.Slug)
 		s.createProjectGroup(ctx, project)
-		s.createProjectMembersGroup(ctx, project, callerID)
+		s.createProjectMembersGroup(ctx, project)
 	}
 
 	// Handle broker linking - two paths:

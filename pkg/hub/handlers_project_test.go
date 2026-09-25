@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -1457,10 +1458,13 @@ func TestProjectRegister_CreatesMembershipGroup(t *testing.T) {
 	assert.Equal(t, store.GroupMemberRoleOwner, members[0].Role)
 }
 
-// TestProjectRegister_ExistingProject_CreatesMembershipGroup verifies that
-// registering against an existing project (linking) still creates the membership
-// group and adds the linking user as owner.
-func TestProjectRegister_ExistingProject_CreatesMembershipGroup(t *testing.T) {
+// TestProjectRegister_ExistingProject_BackfillsGroupWithoutAddingCaller
+// verifies that registering against an existing project (linking) backfills
+// the membership group for projects created before group support was added,
+// but does not grant the calling/linking identity membership in that group —
+// group membership continues to reflect the project's own ownership records,
+// not who happened to resolve it via register.
+func TestProjectRegister_ExistingProject_BackfillsGroupWithoutAddingCaller(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -1482,7 +1486,9 @@ func TestProjectRegister_ExistingProject_CreatesMembershipGroup(t *testing.T) {
 	_, err := s.GetGroupBySlug(ctx, "project:"+project.Slug+":members")
 	require.ErrorIs(t, err, store.ErrNotFound, "members group should not exist yet")
 
-	// Register (link) via the API — this should backfill the group
+	// Register (link) via the API, as an identity authorized to update this
+	// project (the default test identity is a hub super-admin) — this should
+	// backfill the group.
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
 		ID:   project.ID,
 		Name: project.Name,
@@ -1499,7 +1505,8 @@ func TestProjectRegister_ExistingProject_CreatesMembershipGroup(t *testing.T) {
 	require.NoError(t, err, "members group should have been created on link")
 	assert.Equal(t, project.ID, group.ProjectID)
 
-	// Both the original creator and the linking user should be owners
+	// Only the original creator should be an owner — the caller who merely
+	// linked the already-existing project is not granted membership.
 	members, err := s.GetGroupMembers(ctx, group.ID)
 	require.NoError(t, err)
 
@@ -1510,7 +1517,208 @@ func TestProjectRegister_ExistingProject_CreatesMembershipGroup(t *testing.T) {
 		}
 	}
 	assert.True(t, ownerIDs[creatorID], "original creator should be an owner")
-	assert.True(t, ownerIDs[DevUserID], "linking user should be an owner")
+	assert.False(t, ownerIDs[DevUserID], "linking caller should not be granted membership")
+}
+
+// ==========================================================================
+// Register-existing-project authorization
+//
+// Register both creates new projects and resolves + mutates existing ones
+// (by client-supplied id, slug, or git remote). The create path is gated by
+// hub-scope project.create; the resolve-existing path additionally requires
+// project-update authorization on the resolved project before any mutation
+// (group backfill, provider link, default-broker set). These tests cover
+// that additional gate.
+// ==========================================================================
+
+// TestProjectRegister_ExistingProject_DeniesNonMemberWithoutBroker verifies
+// that a hub member who holds only the hub-scope project.create permission,
+// and has no binding on a specific existing project, is denied when register
+// resolves that project by ID — and that no membership is granted as a
+// side effect of the denied request.
+func TestProjectRegister_ExistingProject_DeniesNonMemberWithoutBroker(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	owner := &store.User{
+		ID: tid("register-authz-owner-1"), Email: "register-owner-1@test.com",
+		DisplayName: "Owner", Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, owner))
+	ensureHubMembership(ctx, s, owner.ID)
+
+	project := &store.Project{
+		ID: tid("register-authz-project-1"), Name: "Other's Project", Slug: "others-project-1",
+		OwnerID: owner.ID, CreatedBy: owner.ID, Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.createProjectMembersGroup(ctx, project)
+
+	membersSlug := "project:" + project.Slug + ":members"
+	group, err := s.GetGroupBySlug(ctx, membersSlug)
+	require.NoError(t, err)
+	membersBefore, err := s.GetGroupMembers(ctx, group.ID)
+	require.NoError(t, err)
+
+	other := &store.User{
+		ID: tid("register-authz-other-1"), Email: "register-other-1@test.com",
+		DisplayName: "Other Member", Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, other))
+	ensureHubMembership(ctx, s, other.ID) // grants hub-scope project.create only
+
+	rec := doRequestAsUser(t, srv, other, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+		ID:   project.ID,
+		Name: project.Name,
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"member with no binding on an existing project should be denied register; body: %s", rec.Body.String())
+
+	// No membership change on the target project's group.
+	membersAfter, err := s.GetGroupMembers(ctx, group.ID)
+	require.NoError(t, err)
+	assert.Len(t, membersAfter, len(membersBefore), "denied register must not change group membership")
+	for _, m := range membersAfter {
+		assert.NotEqual(t, other.ID, m.MemberID, "denied caller must not be added to the project's members group")
+	}
+}
+
+// TestProjectRegister_ExistingProject_DeniesNonMemberWithBroker verifies that
+// the same deny holds when a brokerId is included in the request, and that no
+// provider row or default-broker assignment lands as a result of the denied
+// request.
+func TestProjectRegister_ExistingProject_DeniesNonMemberWithBroker(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	owner := &store.User{
+		ID: tid("register-authz-owner-2"), Email: "register-owner-2@test.com",
+		DisplayName: "Owner", Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, owner))
+	ensureHubMembership(ctx, s, owner.ID)
+
+	project := &store.Project{
+		ID: tid("register-authz-project-2"), Name: "Other's Project 2", Slug: "others-project-2",
+		OwnerID: owner.ID, CreatedBy: owner.ID, Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.createProjectMembersGroup(ctx, project)
+
+	broker := &store.RuntimeBroker{
+		ID: tid("register-authz-broker-1"), Name: "Register Authz Broker", Slug: "register-authz-broker-1",
+		Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	other := &store.User{
+		ID: tid("register-authz-other-2"), Email: "register-other-2@test.com",
+		DisplayName: "Other Member", Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, other))
+	ensureHubMembership(ctx, s, other.ID) // grants hub-scope project.create only
+
+	rec := doRequestAsUser(t, srv, other, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+		ID:       project.ID,
+		Name:     project.Name,
+		BrokerID: broker.ID,
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"member with no binding on an existing project should be denied register; body: %s", rec.Body.String())
+
+	// No provider row was created for the target project.
+	_, err := s.GetProjectProvider(ctx, project.ID, broker.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "denied register must not link the broker as a provider")
+
+	// The project's default runtime broker must remain unset.
+	stored, err := s.GetProject(ctx, project.ID)
+	require.NoError(t, err)
+	assert.Empty(t, stored.DefaultRuntimeBrokerID, "denied register must not set a default runtime broker")
+
+	// No membership change either.
+	membersSlug := "project:" + project.Slug + ":members"
+	group, err := s.GetGroupBySlug(ctx, membersSlug)
+	require.NoError(t, err)
+	members, err := s.GetGroupMembers(ctx, group.ID)
+	require.NoError(t, err)
+	for _, m := range members {
+		assert.NotEqual(t, other.ID, m.MemberID, "denied caller must not be added to the project's members group")
+	}
+}
+
+// TestProjectRegister_ExistingProject_OwnerCanLinkBroker verifies that the
+// project owner registering/linking their own already-existing project still
+// succeeds: the broker is linked as a provider and the default runtime
+// broker is set.
+func TestProjectRegister_ExistingProject_OwnerCanLinkBroker(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	owner := &store.User{
+		ID: tid("register-authz-owner-3"), Email: "register-owner-3@test.com",
+		DisplayName: "Owner", Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, owner))
+	ensureHubMembership(ctx, s, owner.ID)
+
+	project := &store.Project{
+		ID: tid("register-authz-project-3"), Name: "My Own Project", Slug: "my-own-project-3",
+		OwnerID: owner.ID, CreatedBy: owner.ID, Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.createProjectMembersGroup(ctx, project)
+
+	broker := &store.RuntimeBroker{
+		ID: tid("register-authz-broker-2"), Name: "Owner Link Broker", Slug: "owner-link-broker-2",
+		Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+		ID:       project.ID,
+		Name:     project.Name,
+		BrokerID: broker.ID,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, "project owner should be able to link a broker to their own project; body: %s", rec.Body.String())
+
+	var resp RegisterProjectResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.False(t, resp.Created, "should find existing project")
+
+	provider, err := s.GetProjectProvider(ctx, project.ID, broker.ID)
+	require.NoError(t, err, "owner's broker link should create a provider row")
+	assert.Equal(t, broker.ID, provider.BrokerID)
+
+	stored, err := s.GetProject(ctx, project.ID)
+	require.NoError(t, err)
+	assert.Equal(t, broker.ID, stored.DefaultRuntimeBrokerID, "owner's broker link should set the default runtime broker")
+}
+
+// TestProjectRegister_NewProject_MemberWithCreateSucceeds verifies that a hub
+// member holding only hub-scope project.create (not hub-admin/super-admin)
+// can still register a brand-new project. This is the create path, which
+// this gate must not regress.
+func TestProjectRegister_NewProject_MemberWithCreateSucceeds(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	member := &store.User{
+		ID: tid("register-authz-newproject-member"), Email: "register-newproject-member@test.com",
+		DisplayName: "New Project Member", Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, member))
+	ensureHubMembership(ctx, s, member.ID) // grants hub-scope project.create only
+
+	rec := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+		Name:      "Brand New Member Project",
+		GitRemote: "https://github.com/test/register-authz-newproject",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, "member with project.create should be able to register a new project; body: %s", rec.Body.String())
+
+	var resp RegisterProjectResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.True(t, resp.Created, "expected a new project to be created")
+	assert.Equal(t, member.ID, resp.Project.OwnerID)
 }
 
 // TestCreateProjectMembersGroup_OwnerNotInStore verifies that when the project
