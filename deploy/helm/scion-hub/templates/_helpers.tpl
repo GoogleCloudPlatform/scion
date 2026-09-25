@@ -1492,7 +1492,8 @@ Exactly one list is.
    log line of any kind. --config is a plain StringVarP at cmd/server.go:237 and
    carries no MarkDeprecated anywhere. Exactly two flags reachable on server start
    do carry one: "production", marked on serverStartCmd itself at cmd/server.go:236,
-   and "grove", marked on rootCmd's PERSISTENT flags at cmd/root.go:251 and so
+   and "grove", marked on rootCmd's PERSISTENT flags via
+   PersistentFlags().MarkDeprecated("grove", ...) in cmd/root.go's init(), and so
    inherited here. An earlier version of this sentence read "MarkDeprecated on
    server start covers only production (cmd/server.go:236, :290)" and was wrong
    twice in one clause - it missed the inherited --grove, and :290 is that same
@@ -1552,28 +1553,31 @@ Exactly one list is.
    The hub's server configuration is not reachable from any of them.
 
    What --project/-g/--grove DO do on this command, traced from the flag
-   declaration outward: they set projectPath (cmd/root.go:249-250 - :248 is
-   rootCmd.Long, not a flag declaration), and
-   PersistentPreRunE passes projectPath to config.LoadSettings at cmd/root.go:123
-   and config.LoadEffectiveSettings at :129 for EVERY command, server start
-   included. Those two select which project's settings.yaml supplies cli.autohelp
-   and cli.interactive_disabled, and the second can force the process
-   non-interactive. It also reaches printDevAuthWarningIfNeeded (:187), which
-   loads the same file again to decide whether to warn. That is a narrower effect
-   than this comment used to claim - CLI-level settings, not the hub's server
-   config - but it is a real one, it is configuration selection, and the chart's
-   guarantee is over the whole rendered command line. The project-required check
-   at :117 is NOT among them: :106-108 clears requiresProject for the server
-   subtree.
+   declaration outward: they set projectPath, via the StringVarP/StringVar calls
+   in cmd/root.go's init() (the rootCmd.Long assignment that precedes those
+   calls there is not a flag declaration), and PersistentPreRunE passes
+   projectPath to config.LoadSettings and config.LoadEffectiveSettings for
+   EVERY command, server start included. Those two select which project's
+   settings.yaml supplies cli.autohelp and cli.interactive_disabled, and the
+   second can force the process non-interactive. It also reaches
+   printDevAuthWarningIfNeeded, which loads the same file again to decide
+   whether to warn. That is a narrower effect than this comment used to claim -
+   CLI-level settings, not the hub's server config - but it is a real one, it
+   is configuration selection, and the chart's guarantee is over the whole
+   rendered command line. The project-required check
+   (requiresProject && projectPath == "") is NOT among them: PersistentPreRunE
+   clears requiresProject for the server subtree before that check runs.
 
-   --grove binds the SAME VARIABLE as --project (cmd/root.go:249-250), so
-   reserving one without the other leaves the alias open - the hosted/production
-   pattern again. It is also MarkHidden, so it will not appear in --help to
-   whoever checks.
+   --grove binds the SAME VARIABLE as --project (both the StringVarP and the
+   StringVar calls target &projectPath in cmd/root.go's init()), so reserving
+   one without the other leaves the alias open - the hosted/production pattern
+   again. It is also MarkHidden, so it will not appear in --help to whoever
+   checks.
 
    --profile/-p IS THE WEAK ENTRY AND IS LABELLED AS ONE. Its only consumer on
-   this path is config.RequireImageRegistry at cmd/root.go:181, and that call is
-   skipped for the server subtree at :168-170; LoadSettings does not take it.
+   this path is config.RequireImageRegistry, and that call is skipped whenever
+   requiresRegistry is cleared for the hub or server subtree; LoadSettings does
+   not take it.
    Every other consumer of the variable is a client subcommand. So it is INERT on
    server start today and I could find no harm for it - by axis (d), that is the
    same answer that removed the updateStrategy refusal. It survives here on the
@@ -1629,14 +1633,15 @@ Exactly one list is.
     version this repo pins in go.mod, v1.0.10, and independently at v1.0.5.
     The behaviour is the '-farg' branch of pflag's parseShortArgs.
 
-    PROVENANCE OF THE SET, BY FILE AND LINE, because a shorthand that is not
-    registered cannot be clustered and one that is registered elsewhere would
-    not appear here:
+    PROVENANCE OF THE SET, BY FILE AND DECLARING FUNCTION, because a shorthand
+    that is not registered cannot be clustered and one that is registered
+    elsewhere would not appear here. cmd/root.go entries are cited by symbol,
+    not line number, so this table does not rot as that file grows:
 
-      -c  --config   cmd/server.go:237  (StringVarP, local to `server start`)
-      -g  --project  cmd/root.go:249    (StringVarP, persistent)
-      -p  --profile  cmd/root.go:255    (StringVarP, persistent)
-      -y  --yes      cmd/root.go:263    (BoolVarP,   persistent)  <- NOT reserved
+      -c  --config   cmd/server.go's init()  (StringVarP, local to `server start`)
+      -g  --project  cmd/root.go's init()    (StringVarP, persistent)
+      -p  --profile  cmd/root.go's init()    (StringVarP, persistent)
+      -y  --yes      cmd/root.go's init()    (BoolVarP,   persistent)  <- NOT reserved
 
     THE COMPLETE SET OF SHORTHANDS REACHABLE ON `server start` HAS EXACTLY FOUR
     MEMBERS, and that number is the point rather than a detail: it is why the
@@ -1648,9 +1653,10 @@ Exactly one list is.
     EXACTLY ONE MEMBER: -y. The fixture asserts that one, and asserting it is
     what stops this guard from degenerating into "refuse every single-dash arg".
 
-    --global HAS NO SHORTHAND (cmd/root.go:254 is BoolVar, not BoolVarP), so
-    there is no -G to cluster and none is listed. It is reserved by name in
-    $setByChart and that is the only axis it can be reached on.
+    --global HAS NO SHORTHAND (cmd/root.go's init() registers it via BoolVar,
+    not BoolVarP), so there is no -G to cluster and none is listed. It is
+    reserved by name in $setByChart and that is the only axis it can be
+    reached on.
 
     CASE. THIS AXIS IS CASE-SENSITIVE AND THE NAME AXIS ABOVE IS NOT. That is a
     deliberate divergence from the lowercase-both-sides rule that governs the
@@ -1893,9 +1899,9 @@ change that falsified it.
     sequence assertStartupBudget is written against - is not behind it and runs
     either way. A fresh GKE pod has no legacy hub.db, so the flag is inert here.
   --debug (cmd/server.go:255). Logging verbosity. Note it SHADOWS the persistent
-    --debug at cmd/root.go:267: a local flag of the same name wins, so this sets
-    enableDebug and not debugMode. Harmless either way, and recorded only so the
-    duplicate is not mistaken for a finding later.
+    --debug registered in cmd/root.go's init(): a local flag of the same name
+    wins, so this sets enableDebug and not debugMode. Harmless either way, and
+    recorded only so the duplicate is not mistaken for a finding later.
   --runtime-broker-port (cmd/server.go:248). Sets cfg.RuntimeBroker.Port
     (server_foreground.go:881-883). The chart renders --enable-runtime-broker but
     no port, exposes no broker port on the Service and points no probe at one, so
