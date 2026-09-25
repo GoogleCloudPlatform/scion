@@ -19,12 +19,16 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/spf13/cobra"
 )
 
 func TestResolveAgentIDForSubscription_Found(t *testing.T) {
@@ -309,6 +313,157 @@ func TestResolveProjectID(t *testing.T) {
 			t.Fatal("expected an error when no project can be determined, got nil")
 		}
 	})
+}
+
+// requireHubClientTestState saves/restores the package-level state
+// requireHubClient depends on (cmd/notifications.go), so tests can isolate
+// hub-context env vars and the project path without leaking into other
+// tests in this package.
+type requireHubClientTestState struct {
+	home        string
+	projectPath string
+}
+
+func saveRequireHubClientTestState() requireHubClientTestState {
+	return requireHubClientTestState{home: os.Getenv("HOME"), projectPath: projectPath}
+}
+
+func (s requireHubClientTestState) restore() {
+	_ = os.Setenv("HOME", s.home)
+	projectPath = s.projectPath
+}
+
+// clearHubContextEnv clears every env var config.IsHubContext and
+// requireHubClient's auth resolution consult, so a test starts from a clean
+// "definitely not in an agent container" baseline.
+func clearHubContextEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_GROVE_ID", "SCION_PROJECT_ID",
+		"SCION_AUTH_TOKEN", "SCION_HUB_TOKEN", "SCION_DEV_TOKEN",
+	} {
+		t.Setenv(key, "")
+	}
+}
+
+// TestRequireHubClient_NoHubEnabled_NoAgentContext_Errors is the control
+// case for the ptone/scion#1909 fix: outside of a hub-connected agent
+// container (no hub context env vars) and with hub not enabled in settings,
+// requireHubClient must still refuse. The fix must not widen access beyond
+// the in-container fallback.
+func TestRequireHubClient_NoHubEnabled_NoAgentContext_Errors(t *testing.T) {
+	orig := saveRequireHubClientTestState()
+	defer orig.restore()
+	clearHubContextEnv(t)
+
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+	projectDir := filepath.Join(tmpHome, "no-hub-project", ".scion")
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("failed to create project dir: %v", err)
+	}
+	projectPath = projectDir
+
+	_, _, err := requireHubClient()
+	if err == nil {
+		t.Fatal("expected an error when hub is neither enabled nor in an agent context")
+	}
+	if got := err.Error(); !strings.Contains(got, "require Hub mode") {
+		t.Errorf("error = %q, want it to mention %q", got, "require Hub mode")
+	}
+}
+
+// TestRequireHubClient_AgentHubContext_HubNotEnabledInSettings is the direct
+// regression test for ptone/scion#1909: inside an agent container,
+// hub.enabled is never persisted to settings (see config.IsHubContext's doc
+// comment), but the hub context env vars and an agent-scoped SCION_AUTH_TOKEN
+// are always present. requireHubClient must accept this the same way
+// hubsync.EnsureHubReady's in-container fallback already does, without
+// requiring settings.IsHubEnabled() to be true.
+func TestRequireHubClient_AgentHubContext_HubNotEnabledInSettings(t *testing.T) {
+	orig := saveRequireHubClientTestState()
+	defer orig.restore()
+	clearHubContextEnv(t)
+
+	t.Setenv("SCION_HUB_ENDPOINT", "http://hub.internal.example")
+	t.Setenv("SCION_GROVE_ID", "agent-project-id")
+	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
+
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+	projectDir := filepath.Join(tmpHome, "agent-project", ".scion")
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("failed to create project dir: %v", err)
+	}
+	projectPath = projectDir
+
+	settings, client, err := requireHubClient()
+	if err != nil {
+		t.Fatalf("agent-context callers must not be rejected for missing hub.enabled in settings: %v", err)
+	}
+	if client == nil {
+		t.Fatal("expected a non-nil hub client")
+	}
+	if settings.IsHubEnabled() {
+		t.Fatal("test setup error: this case only proves the in-container fallback, settings.IsHubEnabled() must stay false")
+	}
+}
+
+// TestRunNotificationsList_AgentHubContext_HubNotEnabledInSettings covers the
+// notifications half of the ptone/scion#1909 regression: "scion
+// notifications" failed with "requires Hub mode" inside an agent container
+// for the same reason conversation commands did — requireHubClient is the
+// shared gate for both (cmd/notifications.go, cmd/conversation.go).
+func TestRunNotificationsList_AgentHubContext_HubNotEnabledInSettings(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	origProjectPath := projectPath
+	origJSON := notificationsJSON
+	origShowAll := notificationsShowAll
+	origOutputFormat := outputFormat
+	defer func() {
+		_ = os.Setenv("HOME", origHome)
+		projectPath = origProjectPath
+		notificationsJSON = origJSON
+		notificationsShowAll = origShowAll
+		outputFormat = origOutputFormat
+	}()
+	clearHubContextEnv(t)
+
+	var sawRequest bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/notifications" && r.Method == http.MethodGet {
+			sawRequest = true
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode([]hubclient.Notification{})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+	t.Setenv("SCION_GROVE_ID", "agent-project-id")
+	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
+
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+	projectDir := filepath.Join(tmpHome, "agent-project", ".scion")
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("failed to create project dir: %v", err)
+	}
+	projectPath = projectDir
+	notificationsJSON = true
+	notificationsShowAll = false
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	if err := runNotificationsList(cmd, nil); err != nil {
+		t.Fatalf("agent-context notifications list must not require hub.enabled in settings: %v", err)
+	}
+	if !sawRequest {
+		t.Fatal("expected the notifications list request to reach the mock hub")
+	}
 }
 
 func TestDefaultTriggers(t *testing.T) {
