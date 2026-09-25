@@ -19,6 +19,34 @@ import (
 	"testing"
 )
 
+func TestNewAggregator_ProjectIDEnvPrecedence(t *testing.T) {
+	// SCION_PROJECT_ID is canonical and wins when both it and the legacy
+	// SCION_GROVE_ID alias are set; SCION_GROVE_ID remains a working fallback
+	// on its own.
+	tests := []struct {
+		name      string
+		projectID string
+		legacyID  string
+		want      string
+	}{
+		{name: "project id only", projectID: "proj-1", legacyID: "", want: "proj-1"},
+		{name: "legacy alias only still works", projectID: "", legacyID: "legacy-1", want: "legacy-1"},
+		{name: "both set, project id wins", projectID: "proj-2", legacyID: "legacy-2", want: "proj-2"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("SCION_PROJECT_ID", tt.projectID)
+			t.Setenv("SCION_GROVE_ID", tt.legacyID)
+
+			a := NewAggregator()
+			if a.projectID != tt.want {
+				t.Errorf("NewAggregator().projectID = %q, want %q", a.projectID, tt.want)
+			}
+		})
+	}
+}
+
 func TestAggregator_BasicFlow(t *testing.T) {
 	a := &Aggregator{
 		agentID:   "agent-1",

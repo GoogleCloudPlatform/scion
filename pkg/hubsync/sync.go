@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"gopkg.in/yaml.v3"
 )
@@ -249,25 +250,24 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	}
 
 	// Ensure project_id exists.
-	// In hub context, SCION_GROVE_ID takes priority over settings.ProjectID
-	// because the dispatcher sets it to the authoritative project for this
-	// agent. The workspace may contain a cloned repo whose .scion/settings
-	// has a different project_id (e.g. template-sync from an external repo).
+	// In hub context, the env-provided project id takes priority over
+	// settings.ProjectID because the dispatcher sets it to the authoritative
+	// project for this agent. The workspace may contain a cloned repo whose
+	// .scion/settings has a different project_id (e.g. template-sync from an
+	// external repo). SCION_PROJECT_ID wins when both it and the legacy
+	// SCION_GROVE_ID alias are set.
 	var projectID string
 	if hubContext {
-		projectID = os.Getenv("SCION_GROVE_ID")
-		if projectID == "" {
-			projectID = os.Getenv("SCION_PROJECT_ID")
-		}
+		projectID = projectcompat.ProjectIDFromEnv(os.Getenv)
 	}
 	if projectID == "" {
 		projectID = settings.ProjectID
 	}
 	if projectID == "" {
 		if hubContext {
-			// Inside a container without SCION_GROVE_ID — we can't generate
-			// and persist a project ID. The Hub client can still be constructed
-			// for cross-project operations like list --all.
+			// Inside a container without a project id env var — we can't
+			// generate and persist a project ID. The Hub client can still be
+			// constructed for cross-project operations like list --all.
 			debugf("hub context without project_id — project-scoped operations may fail")
 		} else {
 			// Generate project_id for projects that don't have one
