@@ -997,6 +997,67 @@ func TestHTTPAgentDispatcher_ProvisionMergesResolvedEnv(t *testing.T) {
 	assert.NotContains(t, agent.AppliedConfig.Env, "RESOLVED_VAR")
 }
 
+// TestHTTPAgentDispatcher_ReprovisionCarriesAgentEndpointOverride pins that the
+// reprovision request stamps the agent-endpoint override the same way create
+// does: reprovision builds its request through buildCreateRequest, so
+// HubEndpoint comes from effectiveAgentHubEndpoint(). The start step that
+// follows a reprovision goes through DispatchAgentStart, which
+// TestHTTPAgentDispatcher_AgentEndpointOverride covers.
+func TestHTTPAgentDispatcher_ReprovisionCarriesAgentEndpointOverride(t *testing.T) {
+	const hubEndpoint = "http://hub.example.com:8080"
+	const agentEndpoint = "http://192.0.2.10:8080"
+
+	tests := []struct {
+		name             string
+		agentEndpoint    string
+		emptyHubEndpoint bool
+		want             string
+	}{
+		{name: "unset", want: hubEndpoint},
+		{name: "override set", agentEndpoint: agentEndpoint, want: agentEndpoint},
+		{name: "override set, hub endpoint empty", agentEndpoint: agentEndpoint, emptyHubEndpoint: true, want: agentEndpoint},
+		{name: "both endpoints empty", emptyHubEndpoint: true, want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			memStore := createTestStore(t)
+			require.NoError(t, memStore.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+				ID:       tid("host-1"),
+				Name:     "test-host",
+				Slug:     "test-host",
+				Endpoint: "http://localhost:9800",
+				Status:   store.BrokerStatusOnline,
+			}))
+
+			mockClient := &mockRuntimeBrokerClient{}
+			dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+			if !tt.emptyHubEndpoint {
+				dispatcher.SetHubEndpoint(hubEndpoint)
+			}
+			if tt.agentEndpoint != "" {
+				dispatcher.SetAgentEndpoint(tt.agentEndpoint)
+			}
+
+			agent := &store.Agent{
+				ID:              tid("agent-1"),
+				Name:            "test-agent",
+				Slug:            "test-agent",
+				ProjectID:       tid("project-1"),
+				OwnerID:         tid("user-1"),
+				RuntimeBrokerID: tid("host-1"),
+				AppliedConfig:   &store.AgentAppliedConfig{HarnessConfig: "claude"},
+			}
+			require.NoError(t, dispatcher.DispatchAgentReprovision(ctx, agent))
+
+			require.NotNil(t, mockClient.lastCreateReq)
+			assert.True(t, mockClient.lastCreateReq.Reprovision, "the captured request must be the reprovision request")
+			assert.Equal(t, tt.want, mockClient.lastCreateReq.HubEndpoint)
+		})
+	}
+}
+
 // TestHTTPAgentDispatcher_DispatchAgentReprovision_MissingEchoFails is the
 // design §3.4 Amendment A2 regression test: a broker that returns 201 for a reprovision
 // request WITHOUT echoing Reprovisioned=true must fail the dispatch — that
