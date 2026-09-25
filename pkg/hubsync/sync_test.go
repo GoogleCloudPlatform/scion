@@ -31,6 +31,21 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
 
+// setOrUnsetEnv sets key to val for the duration of the test, unless val is
+// empty, in which case it removes key from the environment entirely rather
+// than setting it to an empty string. This matters for SCION_ config vars:
+// koanf's settings loader treats an empty-valued env var as present and lets
+// it override a real value loaded from a settings file, whereas a genuinely
+// absent env var does not. Always going through t.Setenv first (even when
+// unsetting) keeps its guard against use alongside t.Parallel.
+func setOrUnsetEnv(t *testing.T, key, val string) {
+	t.Helper()
+	t.Setenv(key, val)
+	if val == "" {
+		_ = os.Unsetenv(key)
+	}
+}
+
 func TestEnsureHubReady_GlobalFallbackWithHubEnabled(t *testing.T) {
 	// Unset Hub context to avoid synthetic project root detection
 	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_GROVE_ID", "SCION_HUB_GROVE_ID", "SCION_PROJECT_ID"} {
@@ -271,7 +286,7 @@ func TestEnsureHubReady_HubContextEnvVars(t *testing.T) {
 	t.Setenv("SCION_HUB_URL", "")
 	// Clear SCION_PROJECT_ID so it can't shadow the legacy var this test is
 	// exercising — ambient env in Scion agent containers commonly sets it.
-	t.Setenv("SCION_PROJECT_ID", "")
+	setOrUnsetEnv(t, "SCION_PROJECT_ID", "")
 	t.Setenv("SCION_GROVE_ID", projectID)
 	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
 	t.Setenv("SCION_DEV_TOKEN", "")
@@ -349,7 +364,7 @@ func TestEnsureHubReady_HubContextSkipsSyncAndRegistration(t *testing.T) {
 	t.Setenv("SCION_HUB_URL", "")
 	// Clear SCION_PROJECT_ID so it can't shadow the legacy var this test is
 	// exercising — ambient env in Scion agent containers commonly sets it.
-	t.Setenv("SCION_PROJECT_ID", "")
+	setOrUnsetEnv(t, "SCION_PROJECT_ID", "")
 	t.Setenv("SCION_GROVE_ID", projectID)
 	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
 	t.Setenv("SCION_DEV_TOKEN", "")
@@ -412,6 +427,7 @@ func TestEnsureHubReady_HubContextProjectIDEnvPriority(t *testing.T) {
 		{name: "project id only", projectID: "env-project-id-target", groveID: "", want: "env-project-id-target"},
 		{name: "grove id only (legacy alias still works)", projectID: "", groveID: "env-grove-id-target", want: "env-grove-id-target"},
 		{name: "both set, project id wins", projectID: "env-project-id-target", groveID: "env-grove-id-target", want: "env-project-id-target"},
+		{name: "neither set, falls back to settings", projectID: "", groveID: "", want: settingsProjectID},
 	}
 
 	for _, tt := range tests {
@@ -424,16 +440,28 @@ func TestEnsureHubReady_HubContextProjectIDEnvPriority(t *testing.T) {
 				t.Fatalf("Failed to create scion dir: %v", err)
 			}
 
-			settingsContent := fmt.Sprintf("grove_id: %s\nruntime: docker\n", settingsProjectID)
+			settingsContent := fmt.Sprintf("project_id: %s\nruntime: docker\n", settingsProjectID)
 			if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(settingsContent), 0644); err != nil {
 				t.Fatalf("Failed to write settings: %v", err)
+			}
+			// Also write .scion/project-id: the loader applies this file after
+			// the env provider, so it survives env overrides. Without it,
+			// settings.ProjectID equals the env value and the ordering below
+			// is untestable.
+			if err := os.WriteFile(filepath.Join(scionDir, "project-id"), []byte(settingsProjectID), 0644); err != nil {
+				t.Fatalf("Failed to write project-id: %v", err)
 			}
 
 			t.Setenv("HOME", tmpHome)
 			t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 			t.Setenv("SCION_HUB_URL", "")
-			t.Setenv("SCION_PROJECT_ID", tt.projectID)
-			t.Setenv("SCION_GROVE_ID", tt.groveID)
+			// Unset (rather than set-to-empty) the vars this test isn't
+			// exercising, for hygiene: the .scion/project-id fixture above is
+			// what actually makes settings.ProjectID resist the env vars, so
+			// this isn't load-bearing for the precedence check itself, but
+			// leaving a var truly absent is clearer than leaving it empty.
+			setOrUnsetEnv(t, "SCION_PROJECT_ID", tt.projectID)
+			setOrUnsetEnv(t, "SCION_GROVE_ID", tt.groveID)
 			t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
 			t.Setenv("SCION_DEV_TOKEN", "")
 
