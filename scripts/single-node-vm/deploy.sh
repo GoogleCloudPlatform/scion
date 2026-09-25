@@ -1067,12 +1067,6 @@ gcloud compute ssh "${INSTANCE_NAME}" \
     sudo -u scion tee /home/scion/.scion/settings.yaml > /dev/null << 'SETTINGSEOF'
 schema_version: \"1\"
 image_registry: \"${IMAGE_REGISTRY}\"
-harness_configs:
-  antigravity:
-    harness: antigravity
-    env:
-      GOOGLE_CLOUD_PROJECT: \"${PROJECT_ID}\"
-      GOOGLE_CLOUD_LOCATION: \"global\"
 server:
   hub:
     name: \"${HUB_NAME}\"
@@ -1130,6 +1124,100 @@ else
   echo "  gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} \\"
   echo "    --command='sudo journalctl -u scion-hub.service --no-pager -n 50'"
   exit 1
+fi
+
+# --- Hub-scoped agent env vars (GOOGLE_CLOUD_PROJECT / GOOGLE_CLOUD_LOCATION) ---
+# Agents need these for Vertex AI inference. They go in the hub DB as
+# hub-scoped env vars with injection mode "always", the same rows that
+# `PUT /api/v1/env/<KEY>` with scope=hub would create. There is no
+# unauthenticated way to call that API from the VM, so we write the rows
+# with sqlite3 directly. This must run after the health check, because the
+# hub creates the env_vars table when it first migrates.
+#   - scope_id is the hub instance ID. The dispatcher selects hub rows by it,
+#     and so do the API and web UI. We read it from /healthz so it always
+#     matches the running hub.
+#   - The insert only seeds the rows: ON CONFLICT DO NOTHING against the
+#     unique index envvar_key_scope_scope_id means a redeploy never duplicates
+#     them and never overwrites an admin's edits. A row that was deleted is
+#     created again.
+#   - The hub reads env vars from the DB on every dispatch (there is no
+#     cache), so it does not need a restart.
+#   - Timestamps use Go's time.String() layout, which ent writes and the
+#     modernc driver reads back.
+# If this step fails it only warns, because the vars can be set by hand.
+info "Setting hub-scoped agent env vars (GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_LOCATION)..."
+HUB_ENV_SCOPE_ID="$(gcloud compute ssh "${INSTANCE_NAME}" \
+  --zone="${ZONE}" --project="${PROJECT_ID}" \
+  --command="curl -sf http://localhost:8080/healthz" 2>/dev/null \
+  | sed -n 's/.*"hub_id":"\([^"]*\)".*/\1/p')" || true
+
+# Escape a value as an SQL string literal. The inputs are also validated
+# below, so this is a second layer of protection.
+sql_quote() { local s="${1//\'/\'\'}"; printf "'%s'" "$s"; }
+
+# Random RFC 4122 v4 UUID in canonical dashed form, the same text form ent
+# stores for the id column.
+SQL_UUID="lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))), 2) || '-' || substr('89ab', 1 + (abs(random()) % 4), 1) || substr(lower(hex(randomblob(2))), 2) || '-' || lower(hex(randomblob(6)))"
+SQL_NOW="strftime('%Y-%m-%d %H:%M:%f +0000 UTC', 'now')"
+
+if [[ -n "$HUB_ENV_SCOPE_ID" ]]; then
+  HUB_ENV_SQL_SCOPE_ID="$(sql_quote "${HUB_ENV_SCOPE_ID}")"
+else
+  # /healthz was unreadable, so the manual fallback below has to find the hub
+  # ID itself. It reads the persisted ID from ~/.scion/hub-id with the sqlite3
+  # CLI's readfile(). deploy.sh never sets hub_id explicitly, so that file is
+  # the hub ID. If the file is missing or empty, the expression is NULL and the
+  # NOT NULL constraint rejects the insert, so no junk row is written.
+  HUB_ENV_SQL_SCOPE_ID="NULLIF(trim(CAST(readfile('/home/scion/.scion/hub-id') AS TEXT), char(10, 13, 32)), '')"
+fi
+# GOOGLE_CLOUD_LOCATION=global on purpose: the global Vertex AI endpoint
+# serves the Gemini/Claude models agents use, and it is not tied to REGION.
+HUB_ENV_SQL="$(cat <<EOF
+.timeout 5000
+.bail on
+INSERT INTO env_vars (id, key, value, scope, scope_id, description, sensitive, injection_mode, secret, allow_progeny, created, updated)
+VALUES
+  (${SQL_UUID}, 'GOOGLE_CLOUD_PROJECT', $(sql_quote "${PROJECT_ID}"), 'hub', ${HUB_ENV_SQL_SCOPE_ID}, 'Set by deploy.sh', 0, 'always', 0, 0, ${SQL_NOW}, ${SQL_NOW}),
+  (${SQL_UUID}, 'GOOGLE_CLOUD_LOCATION', 'global', 'hub', ${HUB_ENV_SQL_SCOPE_ID}, 'Set by deploy.sh', 0, 'always', 0, 0, ${SQL_NOW}, ${SQL_NOW})
+ON CONFLICT(key, scope, scope_id) DO NOTHING;
+SELECT '  ' || key || '=' || value || ' (scope=hub, injection=' || injection_mode || ')'
+  FROM env_vars WHERE scope = 'hub' AND scope_id = ${HUB_ENV_SQL_SCOPE_ID}
+  AND key IN ('GOOGLE_CLOUD_PROJECT', 'GOOGLE_CLOUD_LOCATION') ORDER BY key;
+EOF
+)"
+
+HUB_ENV_OK=false
+if [[ ! "$PROJECT_ID" =~ ^[a-z][a-z0-9.:-]*$ ]]; then
+  warn "PROJECT_ID '${PROJECT_ID}' has unexpected characters; skipping hub env var write."
+elif [[ ! "$HUB_ENV_SCOPE_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  warn "Could not read hub_id from /healthz; skipping hub env var write."
+elif gcloud compute ssh "${INSTANCE_NAME}" \
+    --zone="${ZONE}" --project="${PROJECT_ID}" \
+    --command="
+      set -euo pipefail
+      if ! command -v sqlite3 >/dev/null 2>&1; then
+        # VMs created before sqlite3 was in cloud-init.yaml don't have it.
+        sudo apt-get update -qq >/dev/null
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sqlite3 >/dev/null
+      fi
+      sudo -u scion sqlite3 /home/scion/.scion/hub.db << 'SQLEOF'
+${HUB_ENV_SQL}
+SQLEOF
+    "; then
+  HUB_ENV_OK=true
+  echo "  Hub env vars seeded (scope_id=${HUB_ENV_SCOPE_ID}; existing rows left unchanged)."
+fi
+
+if [[ "$HUB_ENV_OK" != "true" ]]; then
+  warn "Hub-scoped env vars were NOT set. Agents will not get GOOGLE_CLOUD_PROJECT/GOOGLE_CLOUD_LOCATION."
+  {
+    echo "  Set them manually (the deploy continues). If sqlite3 is missing, first run"
+    echo "  'sudo apt-get update && sudo apt-get install -y sqlite3' on the VM."
+    echo "  gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} -- \\"
+    echo "    'sudo -u scion sqlite3 /home/scion/.scion/hub.db' <<'SQLEOF'"
+    echo "${HUB_ENV_SQL}"
+    echo "SQLEOF"
+  } >&2
 fi
 
 # ===================================================================
@@ -1481,12 +1569,6 @@ gcloud compute ssh "${INSTANCE_NAME}" \
     sudo -u scion tee /home/scion/.scion/settings.yaml > /dev/null << 'SETTINGSEOF'
 schema_version: \"1\"
 image_registry: \"${IMAGE_REGISTRY}\"
-harness_configs:
-  antigravity:
-    harness: antigravity
-    env:
-      GOOGLE_CLOUD_PROJECT: \"${PROJECT_ID}\"
-      GOOGLE_CLOUD_LOCATION: \"global\"
 server:
   hub:
     name: \"${HUB_NAME}\"

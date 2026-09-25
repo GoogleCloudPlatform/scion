@@ -177,12 +177,6 @@ Final configuration:
 ```yaml
 schema_version: "1"
 image_registry: "localhost/scion"
-harness_configs:
-  antigravity:
-    harness: antigravity
-    env:
-      GOOGLE_CLOUD_PROJECT: "PROJECT_ID"
-      GOOGLE_CLOUD_LOCATION: "global"
 server:
   hub:
     name: "my-hub"
@@ -210,14 +204,6 @@ Key settings:
 - `schema_version` — must be `"1"` (not `settings_version`).
 - `image_registry` — required, even for locally built images. Set to
   `localhost/scion` for local builds, or the registry path for remote images.
-- `harness_configs.antigravity.env` — sets `GOOGLE_CLOUD_PROJECT` and
-  `GOOGLE_CLOUD_LOCATION` for agents on the `antigravity` harness (the one
-  the deploy script builds), so they can use Vertex AI. The VM service account
-  is bound to `roles/aiplatform.user` and the Vertex AI API is enabled. These
-  keys are only delivered to the container when `vertex-ai` is the resolved
-  auth method, which also needs Application Default Credentials.
-  Only `harness` and `env` are set, so the built-in harness config
-  (image, auth, etc.) still applies.
 - `admin_emails` — email(s) auto-promoted to super-admin on login.
 - `storage.local_path` — all workspace data stored on the VM's local disk.
 - `secrets.backend: local` — secrets are read from `hub.env` on disk, not from
@@ -250,6 +236,24 @@ GOOGLE_CLOUD_PROJECT=<your-project-id>
 
 The `SESSION_SECRET` is generated once during initial deployment and preserved
 on subsequent runs.
+
+### Hub-scoped agent env vars
+
+`hub.env` configures the Hub process only. The env vars that agents receive
+are stored in the hub database. After the Phase 3 health check, the deploy
+script writes these hub-scoped env vars (injection mode `always`) into
+`/home/scion/.scion/hub.db` with `sqlite3`:
+
+| Key | Value |
+|-----|-------|
+| `GOOGLE_CLOUD_PROJECT` | your project ID |
+| `GOOGLE_CLOUD_LOCATION` | `global` (the global Vertex AI endpoint, intentionally) |
+
+They appear in the admin UI as hub env vars, and you can edit them there.
+The deploy only seeds these keys when they are absent. Edits made in the
+admin UI are kept across redeploys, and a deleted key is created again on the
+next deploy. If the write fails, the deploy continues and prints the command to
+run manually.
 
 ## Chat Plugins
 
@@ -445,5 +449,6 @@ is not working:
 The script is idempotent. Re-running it will:
 - Skip creating the VM and service account if they already exist
 - Preserve the existing `hub.env` (and its `SESSION_SECRET`)
+- Seed the hub-scoped `GOOGLE_CLOUD_*` env vars only if they are absent (admin edits are preserved)
 - Overwrite `settings.yaml` with the current configuration
 - Re-deploy the Cloud Run proxy (converges to the same state)

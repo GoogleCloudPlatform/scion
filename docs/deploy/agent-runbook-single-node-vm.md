@@ -391,6 +391,38 @@ gcloud compute ssh scion-hub-HUB_NAME \
   --command='sudo journalctl -u scion-hub.service --no-pager -n 50'
 ```
 
+### 6.3a Hub-scoped agent env vars
+
+Right after the Phase 3 health check, `deploy.sh` writes two hub-scoped env
+vars into the hub database (`/home/scion/.scion/hub.db`) with `sqlite3`, run
+as the `scion` user. Both use injection mode `always`, so every agent gets
+them. Agents need them for Vertex AI inference:
+
+| Key | Value |
+|-----|-------|
+| `GOOGLE_CLOUD_PROJECT` | `PROJECT_ID` |
+| `GOOGLE_CLOUD_LOCATION` | `global` (intentional: the global Vertex AI endpoint) |
+
+The rows are scoped to the hub instance ID, which is the `hub_id` field in
+`/healthz`. They appear in the admin UI and under
+`GET /api/v1/env?scope=hub`. The deploy only seeds the rows when they are
+absent. Edits made in the admin UI are kept across redeploys, and a deleted row
+is created again on the next deploy.
+Verify:
+
+```bash
+gcloud compute ssh scion-hub-HUB_NAME \
+  --zone=ZONE --project=PROJECT_ID \
+  --command="sudo -u scion sqlite3 /home/scion/.scion/hub.db \"SELECT key, value, scope, scope_id, injection_mode FROM env_vars WHERE scope='hub' AND key LIKE 'GOOGLE_CLOUD_%'\""
+```
+
+**Expected:** Two rows, each with `scope` = `hub`, `scope_id` equal to the
+`/healthz` `hub_id`, and `injection_mode` = `always`. The values are the ones
+above unless an admin has edited them.
+
+**If they are missing:** A warning in the deploy output includes the exact
+command to run by hand. This step never fails the deploy.
+
 ### 6.4 Container images (if built locally)
 
 If `container_images.source` was `build`, verify images exist on the VM:
@@ -456,6 +488,7 @@ gcloud iap web add-iam-policy-binding \
 | IAP proxy deploy fails | IAP API not enabled or missing OAuth consent screen | Run `gcloud services enable iap.googleapis.com --project=PROJECT_ID`. Check the OAuth consent screen is configured in GCP Console > APIs & Services > OAuth consent screen. |
 | Hub health check fails after deploy | Binary crashed or settings invalid | SSH to VM, check logs: `gcloud compute ssh scion-hub-HUB_NAME --zone=ZONE --project=PROJECT_ID --command='sudo journalctl -u scion-hub.service --no-pager -n 50'` |
 | Hub health check fails after restart | Settings or IAP audience mismatch | SSH to VM, verify settings: `gcloud compute ssh scion-hub-HUB_NAME --zone=ZONE --project=PROJECT_ID --command='cat /home/scion/.scion/settings.yaml'`. Confirm `auth.mode` is `proxy` and the `audience` string is correct. |
+| Agents lack `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION` | The hub env var write after the Phase 3 health check failed (a warning in the deploy output) | Run the manual `sqlite3` command from that warning, or set both as hub-scoped env vars (injection mode `always`) in the admin UI. See §6.3a. |
 | `iam.serviceAccounts.create` denied | User lacks IAM admin role | User needs `roles/iam.serviceAccountAdmin` on the project |
 | Image build fails with `muse-code` error | Build script tried to build all images including unsupported ones | Verify the deploy script builds only `core-base`, `scion-base`, and `scion-antigravity`. If running manually, use `--target` to select individual images. |
 | SSH connection fails to VM | IAP tunnel access not granted or firewall rule missing | Verify IAP tunnel role: `gcloud projects get-iam-policy PROJECT_ID --flatten="bindings[].members" --filter="bindings.role:roles/iap.tunnelResourceAccessor" --format="value(bindings.members)"`. Verify firewall rule exists: `gcloud compute firewall-rules describe scion-hub-HUB_NAME-allow-iap-ssh --project=PROJECT_ID`. |
