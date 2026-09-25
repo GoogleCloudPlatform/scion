@@ -1912,51 +1912,19 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check for nested /dav/ path (WebDAV endpoint for project workspace sync)
-	if strings.HasPrefix(subPath, "dav") {
-		davPath := strings.TrimPrefix(subPath, "dav")
-		davPath = strings.TrimPrefix(davPath, "/")
-		s.handleProjectWebDAV(w, r, projectID, davPath)
-		return
-	}
-
-	// Check for nested /sync/status path (sync metadata)
-	if subPath == "sync/status" {
-		s.handleProjectSyncStatus(w, r, projectID)
-		return
-	}
-
-	// Check for nested /workspace/cache/ paths (linked project cache management)
-	if subPath == "workspace/cache/refresh" {
-		s.handleProjectCacheRefresh(w, r, projectID)
-		return
-	}
-	if subPath == "workspace/cache/status" {
-		s.handleProjectCacheStatus(w, r, projectID)
-		return
-	}
-	if subPath == "workspace/cache/notify" {
-		s.handleProjectCacheNotify(w, r, projectID)
-		return
-	}
-
-	// Check for nested /workspace/pull path (git pull for shared-workspace projects)
-	if subPath == "workspace/pull" {
-		s.handleProjectWorkspacePull(w, r, projectID)
-		return
-	}
-
-	// Check for nested /workspace/archive path (download workspace as zip)
-	if subPath == "workspace/archive" {
-		s.handleProjectWorkspaceArchive(w, r, projectID)
-		return
-	}
-
-	// Check for nested /workspace/files path
-	if strings.HasPrefix(subPath, "workspace/files") {
-		filePath := strings.TrimPrefix(subPath, "workspace/files")
-		filePath = strings.TrimPrefix(filePath, "/")
-		s.handleProjectWorkspace(w, r, projectID, filePath)
+	// Every subtree that reads or writes the project workspace — WebDAV, the
+	// file API, the archive, pull, sync status and the cache endpoints — is
+	// dispatched through one entry point that authorizes before it routes.
+	//
+	// These used to be seven sibling branches here, each calling straight into
+	// its handler. None of them authorized, because authorization in this
+	// dispatcher is done per leaf and these leaves were never given a gate:
+	// control reaches them and returns long before it would arrive at
+	// getProject or updateProject, which do gate correctly. A single entry
+	// point means a workspace subtree added later inherits the check instead
+	// of silently repeating the omission.
+	if isProjectWorkspaceSubPath(subPath) {
+		s.handleProjectWorkspaceRoutes(w, r, projectID, subPath)
 		return
 	}
 

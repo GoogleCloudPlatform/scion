@@ -1225,3 +1225,103 @@ func cleanEmptyDirs(root *os.Root, targetDir string) {
 		targetDir = filepath.Dir(targetDir)
 	}
 }
+
+// isProjectWorkspaceSubPath reports whether a project subpath addresses the
+// project workspace. Membership in this set is what routes a request through
+// handleProjectWorkspaceRoutes, and therefore through its authorization gate.
+//
+// The "dav" arm is a prefix match rather than an exact-or-slash match because
+// that is what this dispatcher has always done. It is wider than it looks —
+// "davos" routes to WebDAV too — but narrowing it here would change routing in
+// the same change that adds a security gate, and those want separate review.
+func isProjectWorkspaceSubPath(subPath string) bool {
+	return strings.HasPrefix(subPath, "dav") ||
+		subPath == "sync/status" ||
+		subPath == "workspace" ||
+		strings.HasPrefix(subPath, "workspace/")
+}
+
+// projectWorkspaceAction maps an HTTP method onto the permission a workspace
+// request needs.
+//
+// Anything that is not a plain read is treated as a write. That is deliberately
+// the blunt choice: WebDAV's verb set is open-ended, and a verb this function
+// has never heard of is far more likely to be a mutation than a read. Being
+// wrong in the restrictive direction returns a 403 to someone who should have
+// been allowed; being wrong in the permissive direction is the bug this change
+// exists to fix.
+//
+// OPEN QUESTION for review — PROPFIND and LOCK are classified as writes here
+// and arguably should not be. PROPFIND is how a WebDAV client enumerates a
+// collection, so under this mapping a read-only client cannot browse a
+// workspace it is allowed to read. LOCK is a mutation of lock state but is
+// taken by clients that intend only to read. Reclassifying either is a
+// one-line change to this function; it is left alone pending a decision rather
+// than settled quietly inside a security fix.
+func projectWorkspaceAction(method string) Action {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return ActionRead
+	default:
+		return ActionUpdate
+	}
+}
+
+// handleProjectWorkspaceRoutes is the single authorized entry point for every
+// project workspace subtree.
+//
+// The gate below is the whole point of this function: it runs before the switch,
+// so it cannot be bypassed by any arm of the switch, and a new arm added later
+// is gated by construction rather than by the author remembering.
+func (s *Server) handleProjectWorkspaceRoutes(w http.ResponseWriter, r *http.Request, projectID, subPath string) {
+	project, err := s.store.GetProject(r.Context(), projectID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// SECURITY-GATE: CheckAccess — authorize this specific project before any
+	// workspace path is resolved, opened, listed, read, written or deleted.
+	// Without this, any authenticated caller reaches another project's files:
+	// the route is classified RoutePolicy, which passes through unconditionally
+	// and delegates enforcement here.
+	if !s.authorize(w, r, projectResource(project), projectWorkspaceAction(r.Method)) {
+		return
+	}
+
+	switch {
+	case strings.HasPrefix(subPath, "dav"):
+		davPath := strings.TrimPrefix(subPath, "dav")
+		davPath = strings.TrimPrefix(davPath, "/")
+		s.handleProjectWebDAV(w, r, projectID, davPath)
+
+	case subPath == "sync/status":
+		s.handleProjectSyncStatus(w, r, projectID)
+
+	case subPath == "workspace/cache/refresh":
+		s.handleProjectCacheRefresh(w, r, projectID)
+
+	case subPath == "workspace/cache/status":
+		s.handleProjectCacheStatus(w, r, projectID)
+
+	case subPath == "workspace/cache/notify":
+		s.handleProjectCacheNotify(w, r, projectID)
+
+	case subPath == "workspace/pull":
+		s.handleProjectWorkspacePull(w, r, projectID)
+
+	case subPath == "workspace/archive":
+		s.handleProjectWorkspaceArchive(w, r, projectID)
+
+	case strings.HasPrefix(subPath, "workspace/files"):
+		filePath := strings.TrimPrefix(subPath, "workspace/files")
+		filePath = strings.TrimPrefix(filePath, "/")
+		s.handleProjectWorkspace(w, r, projectID, filePath)
+
+	default:
+		// Reached only for a workspace subpath with no handler, e.g.
+		// "workspace" alone or "workspace/nope". Previously these fell through
+		// to handleProjectByIDInternal, which answered with this same 404.
+		NotFound(w, "Project resource")
+	}
+}

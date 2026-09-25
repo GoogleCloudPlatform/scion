@@ -92,6 +92,11 @@ allowed_paths=(
   "^pkg/hub/handlers_broker_inbound_test.go$"
   "^pkg/hub/handlers_project_test.go$"
   "^pkg/hub/heartbeat_legacy_test.go$"
+  # Asserts the legacy /groves alias is covered by the project workspace
+  # authorization gate. The literal is the point of the test: the alias is a
+  # second route onto the same dispatcher, and a gate that missed it would be
+  # invisible to every /projects test.
+  "^pkg/hub/project_workspace_authz_test.go$"
   "^pkg/hub/route_classification_test.go$"
   "^pkg/hub/web_test.go$"
   "^pkg/hubclient/agents_test.go$"
