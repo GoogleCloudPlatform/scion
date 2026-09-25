@@ -674,6 +674,36 @@ func validateGCPIdentityRequest(w http.ResponseWriter, cfg *GCPIdentityAssignmen
 	return true
 }
 
+// checkAndReserveQuota performs a single named quota check-and-reserve via
+// s.quotaService, translating the result into an HTTP response. It reports
+// whether the caller may proceed (true) or has already written an error
+// response and must return (false).
+//
+// Factored out because createAgentInProject chains two independent limits
+// (the per-broker agent ceiling, then the per-project agent cap) and both
+// need identical ErrQuotaExceeded / ErrQuotaLockContention / other-error
+// mapping — inlining it twice would let the two drift apart silently.
+func (s *Server) checkAndReserveQuota(ctx context.Context, w http.ResponseWriter, limitName, subjectID, scopeType, scopeID, resourceID string) bool {
+	if s.quotaService == nil {
+		return true
+	}
+	err := s.quotaService.CheckAndReserve(ctx, limitName, subjectID, scopeType, scopeID, resourceID)
+	if err == nil {
+		return true
+	}
+	switch {
+	case errors.Is(err, store.ErrQuotaExceeded):
+		writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
+			"quota exceeded: "+limitName, nil)
+	case errors.Is(err, ErrQuotaLockContention):
+		writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
+			"quota check temporarily unavailable, please retry", nil)
+	default:
+		writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "quota check failed", nil)
+	}
+	return false
+}
+
 func (s *Server) createAgentInProject(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -1369,26 +1399,50 @@ func (s *Server) createAgentInProject(
 
 	s.populateAgentConfig(ctx, agent, project, resolvedTemplate)
 
-	// Quota enforcement: check agent-per-project limit before creation.
-	if s.quotaService != nil {
-		if err := s.quotaService.CheckAndReserve(ctx, "max_agents_per_project", createdBy, "project", projectID, agent.ID); err != nil {
-			if errors.Is(err, store.ErrQuotaExceeded) {
-				writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
-					"quota exceeded: max_agents_per_project", nil)
-				return
-			}
-			if errors.Is(err, ErrQuotaLockContention) {
-				writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
-					"quota check temporarily unavailable, please retry", nil)
-				return
-			}
-			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "quota check failed", nil)
+	// Quota enforcement, in order:
+	//  1. Per-broker agent ceiling (ptone/scion#1303). Exceeding the ceiling
+	//     must reject the create outright — before any per-project
+	//     reservation, before store.CreateAgent, and well before broker
+	//     dispatch — so a caller past the ceiling never gets a 201 that host
+	//     resource exhaustion (OOM/SIGBUS cascade destroying the whole
+	//     Instance the broker runs on) then makes good on seconds later. This
+	//     is a safety gate on the infrastructure that spawns agent
+	//     containers, so it is scoped to the resolved runtime broker
+	//     (QuotaScopeBroker) rather than to the creator or the project: every
+	//     create dispatched to the same broker competes for the same
+	//     counter, regardless of who created it or which project it lands
+	//     in, and a different broker (a different host, with its own
+	//     capacity) has its own independent counter. Skipped entirely when
+	//     runtimeBrokerID is empty (hub-direct managed agents that run
+	//     without a runtime broker) — there is no broker capacity to guard,
+	//     and reserving against scope_id="" would create a bogus shared
+	//     bucket that every hub-direct agent competes for.
+	//  2. Per-project agent limit, as before — a fairness quota, unrelated in
+	//     scope and purpose to the safety gate above.
+	// If step 2 fails we must roll back step 1's reservation ourselves: we
+	// have not reached store.CreateAgent yet, so its failure-path Release
+	// below never runs for this response.
+	if runtimeBrokerID != "" {
+		if !s.checkAndReserveQuota(ctx, w, store.LimitMaxAgentsPerBroker, runtimeBrokerID, store.QuotaScopeBroker, runtimeBrokerID, agent.ID) {
 			return
 		}
+	}
+	if !s.checkAndReserveQuota(ctx, w, "max_agents_per_project", createdBy, "project", projectID, agent.ID) {
+		if s.quotaService != nil && runtimeBrokerID != "" {
+			s.quotaService.Release(ctx, store.LimitMaxAgentsPerBroker, agent.ID)
+		}
+		return
 	}
 
 	if err := s.store.CreateAgent(ctx, agent); err != nil {
 		if s.quotaService != nil {
+			// Release both limits explicitly rather than relying on Release
+			// being resourceID-scoped and clearing every reservation tied to
+			// agent.ID regardless of limitName — that behavior is an
+			// implementation detail of the store today, not a contract.
+			if runtimeBrokerID != "" {
+				s.quotaService.Release(ctx, store.LimitMaxAgentsPerBroker, agent.ID)
+			}
 			s.quotaService.Release(ctx, "max_agents_per_project", agent.ID)
 		}
 		writeErrorFromErr(w, err, "")
@@ -2697,8 +2751,16 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 		}
 	}
 
-	// Release quota reservation for the deleted agent (best-effort).
+	// Release quota reservations for the deleted agent (best-effort). Release
+	// both limits explicitly — the per-project limit and, if a runtime
+	// broker was assigned, the per-broker agent ceiling (#1303) — rather
+	// than relying on Release being resourceID-scoped and clearing every
+	// reservation tied to agent.ID regardless of limitName; that behavior is
+	// an implementation detail of the store today, not a contract.
 	if s.quotaService != nil {
+		if agent.RuntimeBrokerID != "" {
+			s.quotaService.Release(ctx, store.LimitMaxAgentsPerBroker, agent.ID)
+		}
 		s.quotaService.Release(ctx, "max_agents_per_project", agent.ID)
 	}
 
