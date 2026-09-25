@@ -388,7 +388,6 @@ jobs:
           git commit -m "chore: update LATEST.json for ${TAG}"
           git push origin "${BRANCH}"
 
-          # Create PR and enable auto-merge
           PR_URL=$(gh pr create \
             --title "chore: update LATEST.json for ${TAG}" \
             --body "Automated manifest update for release ${TAG}." \
@@ -397,5 +396,23 @@ jobs:
 
           echo "Created PR: ${PR_URL}"
 
-          # Enable auto-merge (will merge once required checks pass)
-          gh pr merge "${PR_URL}" --auto --squash || echo "Auto-merge not available, PR created for manual merge"
+          # Merge directly with retries instead of --auto. cla/google always fails on
+          # bot-authored commits (expected, non-blocking, not a required check) and its
+          # near-instant completion races with enablePullRequestAutoMerge, which rejects
+          # enabling auto-merge if mergeStateStatus is already "unstable" at call time.
+          # A direct merge only cares about `mergeable` (no conflicts), not non-required
+          # check status, so it isn't subject to that race.
+          MERGED="false"
+          for attempt in 1 2 3 4 5; do
+            if gh pr merge "${PR_URL}" --squash --delete-branch; then
+              echo "Merged ${PR_URL} on attempt ${attempt}"
+              MERGED="true"
+              break
+            fi
+            echo "Merge attempt ${attempt} failed, retrying in 10s..."
+            sleep 10
+          done
+
+          if [ "${MERGED}" != "true" ]; then
+            echo "::warning::Failed to merge ${PR_URL} after retries. Manual merge required."
+          fi
