@@ -1363,6 +1363,42 @@ export class ScionPageProjectSettings extends LitElement {
     `;
   }
 
+  /**
+   * Describes the hub default GCP identity this project inherits while its
+   * own setting is "inherit". For "assign" it names the service account (the
+   * mode alone doesn't say which identity agents get); for "passthrough" it
+   * notes that the hub default only takes effect on the embedded broker.
+   */
+  private renderInheritedGCPIdentityHint() {
+    if (this.configDefaultGCPIdentityMode) {
+      return nothing;
+    }
+    const mode = this.resolvedSettings['scion.io/default-gcp-identity-mode'];
+    if (!mode || mode.hubDefault !== 'present' || !mode.hubValue) {
+      return nothing;
+    }
+    if (mode.hubValue === 'assign') {
+      const saEntry = this.resolvedSettings['scion.io/default-gcp-identity-service-account-id'];
+      const saID =
+        saEntry?.hubDefault === 'present' && saEntry.hubValue != null
+          ? String(saEntry.hubValue)
+          : '';
+      const sa = this.gcpServiceAccounts.find((s) => s.id === saID);
+      const saLabel = sa ? sa.email : saID;
+      return html`<span class="field-help"
+        >Inherited from hub: agents are assigned
+        ${saLabel || 'the hub default service account'}.</span
+      >`;
+    }
+    if (mode.hubValue === 'passthrough') {
+      return html`<span class="field-help"
+        >Inherited from hub: passthrough applies only to agents on the hub's embedded broker; agents
+        on other brokers get "Block".</span
+      >`;
+    }
+    return nothing;
+  }
+
   private async loadHarnessConfigs(): Promise<void> {
     try {
       const response = await apiFetch(
@@ -2332,8 +2368,15 @@ export class ScionPageProjectSettings extends LitElement {
                 >
               </div>
 
-              <div class="config-field">
-                <label>Default Service Account</label>
+              <div
+                class="config-field ${this.isHubDefault('scion.io/default-gcp-identity-mode')
+                  ? 'hub-inherited'
+                  : ''}"
+              >
+                <label
+                  >Default Service Account
+                  ${this.renderHubIndicator('scion.io/default-gcp-identity-mode')}</label
+                >
                 <sl-select
                   value=${this.configDefaultGCPIdentityMode || 'inherit'}
                   ?disabled=${!canEdit}
@@ -2345,7 +2388,12 @@ export class ScionPageProjectSettings extends LitElement {
                     }
                   }}
                 >
-                  <sl-option value="inherit">None (default to block)</sl-option>
+                  <sl-option value="inherit"
+                    >${this.hubSelectLabel(
+                      'scion.io/default-gcp-identity-mode',
+                      'None (default to block)'
+                    )}</sl-option
+                  >
                   <sl-option value="block">Block</sl-option>
                   <sl-option value="passthrough">Passthrough</sl-option>
                   <sl-option value="assign">Assign Service Account</sl-option>
@@ -2355,6 +2403,7 @@ export class ScionPageProjectSettings extends LitElement {
                   "Passthrough" allows host identity, "Assign" binds a specific service
                   account.</span
                 >
+                ${this.renderInheritedGCPIdentityHint()}
               </div>
 
               ${this.configDefaultGCPIdentityMode === 'assign'

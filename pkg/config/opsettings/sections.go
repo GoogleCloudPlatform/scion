@@ -73,6 +73,13 @@ type AgentDefaultsSettings struct {
 	// "America/Los_Angeles"). Applied as TZ when neither the profile's
 	// first-class timezone field nor a raw TZ in the profile env is set.
 	DefaultTimezone string `json:"default_timezone,omitempty"`
+	// DefaultGCPIdentityMode is the hub-wide fallback GCP metadata mode
+	// ("block", "passthrough", or "assign") applied when neither the agent
+	// create request nor the project's default GCP identity setting names one.
+	DefaultGCPIdentityMode string `json:"default_gcp_identity_mode,omitempty"`
+	// DefaultGCPIdentityServiceAccountID is the service account used when
+	// DefaultGCPIdentityMode is "assign". Ignored otherwise.
+	DefaultGCPIdentityServiceAccountID string `json:"default_gcp_identity_service_account_id,omitempty"`
 }
 
 // EndpointsSettings holds Layer-1 endpoint configuration.

@@ -28,7 +28,7 @@ import { customElement, state } from 'lit/decorators.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
-import type { RuntimeBroker } from '../../shared/types.js';
+import type { RuntimeBroker, GCPServiceAccount } from '../../shared/types.js';
 
 // ── Type definitions matching the Go API response ──
 
@@ -241,6 +241,8 @@ interface ServerConfigResponse {
   default_max_agent_role?: string;
   default_agent_role?: string;
   default_runtime_broker?: string;
+  default_gcp_identity_mode?: string;
+  default_gcp_identity_service_account_id?: string;
 
   auto_expose_ports?: { enabled?: boolean };
 
@@ -389,6 +391,8 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   default_max_agent_role: 'Default Maximum Agent Role',
   default_agent_role: 'Default Agent Role',
   default_runtime_broker: 'Default Runtime Broker',
+  default_gcp_identity_mode: 'Default GCP Identity Mode',
+  default_gcp_identity_service_account_id: 'Default GCP Identity Service Account',
   // endpoints section
   'server.hub.public_url': 'Public URL',
   image_registry: 'Image Registry',
@@ -474,6 +478,11 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private defaultAgentRole = '';
   @state() private defaultRuntimeBroker = '';
   @state() private runtimeBrokers: RuntimeBroker[] = [];
+
+  // Default GCP identity (hub-wide fallback)
+  @state() private defaultGCPIdentityMode = '';
+  @state() private defaultGCPIdentitySAID = '';
+  @state() private hubGCPServiceAccounts: GCPServiceAccount[] = [];
 
   // Agent defaults sub-tab
   @state() private agentDefaultsTab = 'general';
@@ -1346,6 +1355,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     void this.loadConfig();
     void this.loadHarnessConfigs();
     void this.loadRuntimeBrokers();
+    void this.loadHubGCPServiceAccounts();
     void this.loadGitHubAppInstallations();
     void this.loadMessagingSettings();
   }
@@ -1472,6 +1482,8 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.defaultMaxAgentRole = data.default_max_agent_role || '';
     this.defaultAgentRole = data.default_agent_role || '';
     this.defaultRuntimeBroker = data.default_runtime_broker || '';
+    this.defaultGCPIdentityMode = data.default_gcp_identity_mode || '';
+    this.defaultGCPIdentitySAID = data.default_gcp_identity_service_account_id || '';
 
     // Server
     const srv = data.server;
@@ -1647,6 +1659,22 @@ export class ScionPageAdminServerConfig extends LitElement {
     }
   }
 
+  // Hub-scoped service accounts, for the "Assign Service Account" option of
+  // the hub-wide default GCP identity mode. Scoped to "hub" only — a
+  // hub-wide default naming a project-scoped account would silently fail
+  // reachability checks in every project but the one that owns it.
+  private async loadHubGCPServiceAccounts(): Promise<void> {
+    try {
+      const res = await apiFetch('/api/v1/gcp-service-accounts?scope=hub');
+      if (res.ok) {
+        const data = (await res.json()) as { items?: GCPServiceAccount[] };
+        this.hubGCPServiceAccounts = (data.items || []).filter((sa) => sa.verified);
+      }
+    } catch {
+      // Non-critical — dropdown falls back to an empty list
+    }
+  }
+
   private syncHarnessConfigSelection(): void {
     const value = this.defaultHarnessConfig;
     if (!value) {
@@ -1763,6 +1791,13 @@ export class ScionPageAdminServerConfig extends LitElement {
     }
     if (ok('default_runtime_broker')) {
       payload.default_runtime_broker = this.defaultRuntimeBroker || '';
+    }
+    if (ok('default_gcp_identity_mode')) {
+      payload.default_gcp_identity_mode = this.defaultGCPIdentityMode || '';
+    }
+    if (ok('default_gcp_identity_service_account_id')) {
+      payload.default_gcp_identity_service_account_id =
+        this.defaultGCPIdentityMode === 'assign' ? this.defaultGCPIdentitySAID || '' : '';
     }
 
     const server: Record<string, unknown> = {};
@@ -3189,6 +3224,75 @@ export class ScionPageAdminServerConfig extends LitElement {
                           ></sl-input>`
                   )}
                 </div>
+                <div class="form-field">
+                  <label>Default GCP Identity Mode</label>
+                  <span class="hint"
+                    >Hub-wide fallback GCP metadata mode for new agents, applied when neither the
+                    agent create request nor the project's default GCP identity setting names one.
+                    Passthrough set here applies only to agents on the hub's embedded broker; agents
+                    on any other broker get Block. Assign requires a verified hub-scoped service
+                    account and gcpIamCheckMode=enforce.</span
+                  >
+                  ${this.renderFieldValue(
+                    'default_gcp_identity_mode',
+                    this.defaultGCPIdentityMode || 'Block (default)',
+                    html`${this.renderEnvBadge('default_gcp_identity_mode')}<sl-select
+                        placeholder="Block (default)"
+                        clearable
+                        value=${this.defaultGCPIdentityMode}
+                        @sl-change=${(e: Event) => {
+                          const val = (e.target as HTMLSelectElement).value;
+                          this.defaultGCPIdentityMode = val;
+                          if (val !== 'assign') {
+                            this.defaultGCPIdentitySAID = '';
+                          }
+                        }}
+                      >
+                        <sl-option value="block">Block</sl-option>
+                        <sl-option value="passthrough">Passthrough</sl-option>
+                        <sl-option value="assign">Assign Service Account</sl-option>
+                      </sl-select>`
+                  )}
+                </div>
+                ${this.defaultGCPIdentityMode === 'assign'
+                  ? html`
+                      <div class="form-field">
+                        <label>Default GCP Identity Service Account</label>
+                        <span class="hint"
+                          >Hub-scoped service account assigned to new agents when no project or
+                          request-level identity is set. Only verified hub-scoped accounts are
+                          shown.</span
+                        >
+                        ${this.renderFieldValue(
+                          'default_gcp_identity_service_account_id',
+                          this.defaultGCPIdentitySAID || 'None',
+                          html`${this.renderEnvBadge(
+                              'default_gcp_identity_service_account_id'
+                            )}<sl-select
+                              placeholder="Select a verified hub-scoped service account"
+                              clearable
+                              value=${this.defaultGCPIdentitySAID}
+                              @sl-change=${(e: Event) => {
+                                this.defaultGCPIdentitySAID = (e.target as HTMLSelectElement).value;
+                              }}
+                            >
+                              ${this.hubGCPServiceAccounts.length > 0
+                                ? this.hubGCPServiceAccounts.map(
+                                    (sa) => html`
+                                      <sl-option value=${sa.id}>
+                                        ${sa.displayName || sa.email}
+                                        <small>(${sa.email})</small>
+                                      </sl-option>
+                                    `
+                                  )
+                                : html`<sl-option value="" disabled
+                                    >No verified hub-scoped service accounts available</sl-option
+                                  >`}
+                            </sl-select>`
+                        )}
+                      </div>
+                    `
+                  : nothing}
               </div>
             </sl-tab-panel>
 

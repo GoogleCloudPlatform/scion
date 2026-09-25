@@ -198,6 +198,8 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 	resp.DefaultThinkingLevel = snap.DefaultThinkingLevel
 	resp.DefaultRuntimeBroker = snap.DefaultRuntimeBroker
 	resp.DefaultTimezone = snap.DefaultTimezone
+	resp.DefaultGCPIdentityMode = snap.DefaultGCPIdentityMode
+	resp.DefaultGCPIdentityServiceAccountID = snap.DefaultGCPIdentityServiceAccountID
 
 	// Telemetry — always set from snapshot (nil = no telemetry configured).
 	resp.Telemetry = snap.TelemetryConfig
@@ -594,6 +596,9 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 					return
 				}
 			}
+			if !s.validateHubDefaultGCPIdentity(w, r.Context(), agentDefaults) {
+				return
+			}
 		}
 	}
 
@@ -682,6 +687,81 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// validateHubDefaultGCPIdentity rejects a hub-level default GCP identity that
+// agent creation would later refuse to apply, mirroring
+// validateDefaultGCPIdentity's project-level checks (existence, verification)
+// and adding the checks that only make sense one tier up:
+//
+//   - The mode must be one of the known values. The JSON schema enum already
+//     enforces this in DB mode; file mode has no schema pass, so it is
+//     repeated here for both.
+//   - The service account must be hub-scoped. A hub default applies to every
+//     project, and a project-scoped account is unreachable from all projects
+//     but its own, so every agent create elsewhere would fail with 400.
+//   - Hub-scoped assignment requires gcpIamCheckMode=enforce (D4, see
+//     authorizeSAAssignment). Outside enforce mode every agent create would
+//     fail with 403, so the admin is told now rather than every creator later.
+//
+// Used by both the DB-mode and file-mode PUT handlers.
+func (s *Server) validateHubDefaultGCPIdentity(w http.ResponseWriter, ctx context.Context, d opsettings.AgentDefaultsSettings) bool {
+	switch d.DefaultGCPIdentityMode {
+	case "", store.GCPMetadataModeBlock, store.GCPMetadataModePassthrough, store.GCPMetadataModeAssign:
+	default:
+		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+			fmt.Sprintf("invalid default_gcp_identity_mode %q: must be one of block, passthrough, assign", d.DefaultGCPIdentityMode), nil)
+		return false
+	}
+
+	if d.DefaultGCPIdentityMode == store.GCPMetadataModeAssign && d.DefaultGCPIdentityServiceAccountID == "" {
+		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+			"default GCP identity mode 'assign' requires a service account; set default_gcp_identity_service_account_id or choose another mode", nil)
+		return false
+	}
+
+	if d.DefaultGCPIdentityServiceAccountID == "" {
+		// Empty means clear. Clearing must always be permitted.
+		return true
+	}
+
+	sa, err := s.store.GetGCPServiceAccount(ctx, d.DefaultGCPIdentityServiceAccountID)
+	if err == nil && sa == nil {
+		err = store.ErrNotFound // defensive: treat a nil result as not found
+	}
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+				"default GCP service account not found", nil)
+			return false
+		}
+		writeErrorFromErr(w, err, "")
+		return false
+	}
+
+	if !sa.Verified {
+		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+			"GCP service account is not verified; verify it before setting it as the hub default", nil)
+		return false
+	}
+
+	if sa.Scope != store.ScopeHub {
+		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+			"hub default service account must be hub-scoped; a project-scoped account is unavailable in every other project", nil)
+		return false
+	}
+
+	s.mu.RLock()
+	mode := s.saAssignCheckMode
+	s.mu.RUnlock()
+	if mode != SAAssignCheckEnforce {
+		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+			"hub-scoped service account assignment requires gcpIamCheckMode=enforce; "+
+				"agent creation would be denied for every user until it is enabled", nil)
+		return false
+	}
+
+	return true
+}
+
 // getCurrentRevision reads the current revision for a section from the cache.
 func (s *Server) getCurrentRevision(ops *OperationalSettings, section string) int64 {
 	ops.mu.RLock()
@@ -768,6 +848,12 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 	}
 	if req.DefaultTimezone != nil {
 		keys = append(keys, "default_timezone")
+	}
+	if req.DefaultGCPIdentityMode != nil {
+		keys = append(keys, "default_gcp_identity_mode")
+	}
+	if req.DefaultGCPIdentityServiceAccountID != nil {
+		keys = append(keys, "default_gcp_identity_service_account_id")
 	}
 
 	if req.AutoExposePorts != nil {
@@ -1136,6 +1222,12 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 		}
 		if req.DefaultTimezone != nil {
 			d.DefaultTimezone = *req.DefaultTimezone
+		}
+		if req.DefaultGCPIdentityMode != nil {
+			d.DefaultGCPIdentityMode = *req.DefaultGCPIdentityMode
+		}
+		if req.DefaultGCPIdentityServiceAccountID != nil {
+			d.DefaultGCPIdentityServiceAccountID = *req.DefaultGCPIdentityServiceAccountID
 		}
 		doc = d
 

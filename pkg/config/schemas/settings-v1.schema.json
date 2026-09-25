@@ -254,6 +254,19 @@
       "description": "Default role assigned to new agents when not explicitly specified.",
       "x-scope": "any",
       "x-since": "1"
+    },
+    "default_gcp_identity_mode": {
+      "type": "string",
+      "enum": ["", "block", "passthrough", "assign"],
+      "description": "Hub-wide fallback GCP metadata mode for new agents, applied when neither the agent create request nor the project's default GCP identity setting names one.",
+      "x-scope": "any",
+      "x-since": "1"
+    },
+    "default_gcp_identity_service_account_id": {
+      "type": "string",
+      "description": "Service account used when default_gcp_identity_mode is \"assign\".",
+      "x-scope": "any",
+      "x-since": "1"
     }
   },
   "additionalProperties": false,

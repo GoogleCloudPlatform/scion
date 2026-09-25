@@ -297,6 +297,15 @@ type VersionedSettings struct {
 	// first-class timezone field nor a raw TZ in the profile env is set.
 	DefaultTimezone string `json:"default_timezone,omitempty" yaml:"default_timezone,omitempty" koanf:"default_timezone"`
 
+	// DefaultGCPIdentityMode is the hub-level default GCP metadata mode
+	// ("block", "passthrough", "assign") applied to new agents whose project
+	// has no default of its own. Empty means no hub default (block).
+	DefaultGCPIdentityMode string `json:"default_gcp_identity_mode,omitempty" yaml:"default_gcp_identity_mode,omitempty" koanf:"default_gcp_identity_mode"`
+
+	// DefaultGCPIdentityServiceAccountID is the hub-scoped service account
+	// assigned when DefaultGCPIdentityMode is "assign".
+	DefaultGCPIdentityServiceAccountID string `json:"default_gcp_identity_service_account_id,omitempty" yaml:"default_gcp_identity_service_account_id,omitempty" koanf:"default_gcp_identity_service_account_id"`
+
 	// AutoInjectGcloudADC controls whether the host's gcloud Application Default
 	// Credentials file is automatically injected into agent containers in
 	// co-located (workstation) mode.

@@ -74,6 +74,14 @@ type ServerConfigResponse struct {
 	// DefaultTimezone is the hub-level IANA timezone fallback.
 	DefaultTimezone string `json:"default_timezone,omitempty"`
 
+	// DefaultGCPIdentityMode is the hub-wide fallback GCP metadata mode
+	// ("block", "passthrough", or "assign"), applied when neither the agent
+	// create request nor the project's default GCP identity setting names one.
+	DefaultGCPIdentityMode string `json:"default_gcp_identity_mode,omitempty"`
+	// DefaultGCPIdentityServiceAccountID is the service account used when
+	// DefaultGCPIdentityMode is "assign".
+	DefaultGCPIdentityServiceAccountID string `json:"default_gcp_identity_service_account_id,omitempty"`
+
 	// AutoInjectGcloudADC controls whether gcloud ADC is injected into agent containers.
 	AutoInjectGcloudADC bool `json:"auto_inject_gcloud_adc,omitempty"`
 
@@ -122,6 +130,13 @@ type ServerConfigUpdateRequest struct {
 
 	// DefaultTimezone is the hub-level IANA timezone fallback.
 	DefaultTimezone *string `json:"default_timezone,omitempty"`
+
+	// DefaultGCPIdentityMode is the hub-wide fallback GCP metadata mode
+	// ("block", "passthrough", or "assign").
+	DefaultGCPIdentityMode *string `json:"default_gcp_identity_mode,omitempty"`
+	// DefaultGCPIdentityServiceAccountID is the service account used when
+	// DefaultGCPIdentityMode is "assign".
+	DefaultGCPIdentityServiceAccountID *string `json:"default_gcp_identity_service_account_id,omitempty"`
 
 	// AutoInjectGcloudADC controls whether gcloud ADC is injected into agent containers.
 	AutoInjectGcloudADC *bool `json:"auto_inject_gcloud_adc,omitempty"`
@@ -316,6 +331,9 @@ func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
 		DefaultTimezone:      vs.DefaultTimezone,
 		AutoInjectGcloudADC:  vs.AutoInjectGcloudADC,
 		AutoExposePorts:      vs.AutoExposePorts,
+
+		DefaultGCPIdentityMode:             vs.DefaultGCPIdentityMode,
+		DefaultGCPIdentityServiceAccountID: vs.DefaultGCPIdentityServiceAccountID,
 	}
 
 	// Populate top-level federation field from the server config.
@@ -365,6 +383,20 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 
 	// Apply updates by marshaling the request fields and merging
 	applySettingsUpdates(raw, &req)
+
+	// Validate the effective hub default GCP identity (the merged result, so
+	// a PUT that changes only one of the pair is checked against the other's
+	// stored value). Same checks as the DB-mode handler.
+	if req.DefaultGCPIdentityMode != nil || req.DefaultGCPIdentityServiceAccountID != nil {
+		mode, _ := raw["default_gcp_identity_mode"].(string)
+		saID, _ := raw["default_gcp_identity_service_account_id"].(string)
+		if !s.validateHubDefaultGCPIdentity(w, r.Context(), opsettings.AgentDefaultsSettings{
+			DefaultGCPIdentityMode:             mode,
+			DefaultGCPIdentityServiceAccountID: saID,
+		}) {
+			return
+		}
+	}
 
 	// Ensure schema_version is set
 	if _, ok := raw["schema_version"]; !ok {
@@ -559,6 +591,20 @@ func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateReq
 			raw["default_timezone"] = *req.DefaultTimezone
 		} else {
 			delete(raw, "default_timezone")
+		}
+	}
+	if req.DefaultGCPIdentityMode != nil {
+		if *req.DefaultGCPIdentityMode != "" {
+			raw["default_gcp_identity_mode"] = *req.DefaultGCPIdentityMode
+		} else {
+			delete(raw, "default_gcp_identity_mode")
+		}
+	}
+	if req.DefaultGCPIdentityServiceAccountID != nil {
+		if *req.DefaultGCPIdentityServiceAccountID != "" {
+			raw["default_gcp_identity_service_account_id"] = *req.DefaultGCPIdentityServiceAccountID
+		} else {
+			delete(raw, "default_gcp_identity_service_account_id")
 		}
 	}
 	if req.AutoInjectGcloudADC != nil {

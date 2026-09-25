@@ -1271,83 +1271,62 @@ func (s *Server) createAgentInProject(
 			}
 		case store.GCPMetadataModeAssign:
 			if projectSettings.DefaultGCPIdentityServiceAccountID != "" {
-				sa, err := s.store.GetGCPServiceAccount(ctx, projectSettings.DefaultGCPIdentityServiceAccountID)
-				// Scope-aware admissibility (P4 item F), same predicate as the two
-				// caller-supplied assign sites. A project may legitimately nominate
-				// a hub-scoped account as its default, and the old ScopeID equality
-				// silently refused one.
-				if err != nil || !sa.ReachableFromProject(projectID) {
-					// SA not found or not reachable — fail agent creation.
-					// P10 changes: a project-default SA that fails checks is an
-					// error, not a silent fallback to block. The operator set the
-					// default; if the SA is unreachable, the operator needs to know.
-					slog.Warn("project-default SA assignment failed: service account not available",
-						"surface", SurfaceProjectDefault,
-						"project_id", projectID,
-						"sa_id", projectSettings.DefaultGCPIdentityServiceAccountID,
-						"err", err)
-					writeError(w, http.StatusBadRequest, ErrCodeValidationError,
-						"project default GCP service account is not available in this project; "+
-							"update the project's default GCP identity setting", nil)
+				cfg, ok := s.resolveDefaultSAAssignment(ctx, w, r, projectID,
+					projectSettings.DefaultGCPIdentityServiceAccountID, SurfaceProjectDefault, defaultTierProject)
+				if !ok {
 					return
 				}
-				if !sa.Verified {
-					slog.Warn("project-default SA assignment failed: service account not verified",
-						"surface", SurfaceProjectDefault,
-						"project_id", projectID,
-						"sa_id", sa.ID, "sa_email", sa.Email)
-					writeError(w, http.StatusBadRequest, ErrCodeValidationError,
-						"project default GCP service account is not verified; "+
-							"verify it before it can be assigned to agents", nil)
-					return
-				}
-
-				// P10: Authorization gate for project-default SA assignment.
-				//
-				// Design §4.5 (ruled by ptone): project-default assignment checks
-				// the immediate agent creator. The principal is:
-				//   - for a human-created agent: the human creator;
-				//   - for agent-creates-agent: the creating agent's assigned SA.
-				//
-				// This REPLACES the former "NO authorization check here,
-				// deliberately and by ruling (P4 item F)" comment. P10 changes
-				// the ruling: the project operator selected an available default,
-				// but did not grant every future creator permission to act as it.
-				//
-				// authorizeSAAssignment runs:
-				//   1. Hub-scoped mode coupling (D4) — denies hub-scoped SAs
-				//      when gcpIamCheckMode != enforce.
-				//   2. Hub ActionAssign authorization.
-				//   3. GCP actAs check via callerPrincipal.
-				//   4. Audit record via EvaluateActAs with SurfaceProjectDefault.
-				//
-				// On failure, authorizeSAAssignment writes the HTTP error and
-				// returns false. Agent creation FAILS rather than silently
-				// falling back to block — a failed default is an error, not a
-				// degradation.
-				if !s.authorizeSAAssignment(w, r, sa, SurfaceProjectDefault) {
-					slog.Warn("project-default SA assignment denied by authorization gate",
-						"surface", SurfaceProjectDefault,
-						"project_id", projectID,
-						"sa_id", sa.ID, "sa_email", sa.Email)
-					return
-				}
-
-				agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
-					MetadataMode:        store.GCPMetadataModeAssign,
-					ServiceAccountID:    sa.ID,
-					ServiceAccountEmail: sa.Email,
-					ProjectID:           sa.ProjectID,
-				}
+				agent.AppliedConfig.GCPIdentity = cfg
 			} else {
 				agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
 					MetadataMode: store.GCPMetadataModeBlock,
 				}
 			}
-		default:
-			// No project default or explicit "block" — secure default
+		case store.GCPMetadataModeBlock:
+			// Project explicitly set "block" — that is the operator's decision
+			// and it stops the ladder here. Do NOT fall through to the hub
+			// default: an explicit "block" is different from "no project
+			// setting at all", and only the latter defers further down the
+			// chain.
 			agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
 				MetadataMode: store.GCPMetadataModeBlock,
+			}
+		default:
+			// No project default configured (empty string) — fall back to the
+			// hub-level operational default, then to "block" if the hub has
+			// none either. Mirrors the project-default case above one rung
+			// down the ladder: explicit request -> project default -> hub
+			// default -> block (see hub_agent_defaults.go).
+			hubDefaults := s.hubAgentDefaults()
+			switch hubDefaults.DefaultGCPIdentityMode {
+			case store.GCPMetadataModePassthrough:
+				// Hub-default passthrough is confined to the embedded broker
+				// (see hubDefaultPassthroughAllowed for why); on any other
+				// broker the ladder bottoms out at block.
+				mode := store.GCPMetadataModeBlock
+				if s.hubDefaultPassthroughAllowed(ctx, runtimeBrokerID, projectID) {
+					mode = store.GCPMetadataModePassthrough
+				}
+				agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{MetadataMode: mode}
+			case store.GCPMetadataModeAssign:
+				if hubDefaults.DefaultGCPIdentityServiceAccountID != "" {
+					cfg, ok := s.resolveDefaultSAAssignment(ctx, w, r, projectID,
+						hubDefaults.DefaultGCPIdentityServiceAccountID, SurfaceHubDefault, defaultTierHub)
+					if !ok {
+						return
+					}
+					agent.AppliedConfig.GCPIdentity = cfg
+				} else {
+					agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
+						MetadataMode: store.GCPMetadataModeBlock,
+					}
+				}
+			default:
+				// No hub default either (or hub default is itself "block") —
+				// secure default.
+				agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
+					MetadataMode: store.GCPMetadataModeBlock,
+				}
 			}
 		}
 	}

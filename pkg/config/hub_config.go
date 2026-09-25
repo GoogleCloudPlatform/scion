@@ -586,6 +586,13 @@ type GlobalConfig struct {
 	// in file/SQLite mode.
 	DefaultHarnessConfig string `json:"-" yaml:"-" koanf:"-"`
 
+	// DefaultGCPIdentityMode and DefaultGCPIdentityServiceAccountID are the
+	// hub-level default GCP identity for new agents. Populated from the
+	// top-level keys of the same name in settings.yaml in file/SQLite mode,
+	// so a file-mode admin save reaches hubAgentDefaults() without a restart.
+	DefaultGCPIdentityMode             string `json:"-" yaml:"-" koanf:"-"`
+	DefaultGCPIdentityServiceAccountID string `json:"-" yaml:"-" koanf:"-"`
+
 	// Telemetry default — when set, the Hub exposes this as the default telemetry opt-in
 	// state for new agents via GET /api/v1/settings/public.
 	TelemetryEnabled *bool `json:"telemetryEnabled,omitempty" yaml:"telemetryEnabled,omitempty" koanf:"telemetryEnabled"`
@@ -1631,6 +1638,14 @@ func loadServerFromSettingsFile(dir string) (*GlobalConfig, bool) {
 		if s, ok := dhc.(string); ok {
 			gc.DefaultHarnessConfig = s
 		}
+	}
+
+	// Top-level hub default GCP identity — read from raw YAML.
+	if v, ok := raw["default_gcp_identity_mode"].(string); ok {
+		gc.DefaultGCPIdentityMode = v
+	}
+	if v, ok := raw["default_gcp_identity_service_account_id"].(string); ok {
+		gc.DefaultGCPIdentityServiceAccountID = v
 	}
 
 	return gc, true

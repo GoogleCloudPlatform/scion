@@ -270,6 +270,15 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			log.Fatalf("Hub server failed to start: %v", hubInitErr)
 		}
 
+		// The co-located broker registers (startRuntimeBroker, step 13)
+		// only after the Hub API is serving. Mark it as expected now, under
+		// the same condition startRuntimeBroker registers it, so gates that
+		// depend on the embedded broker ID (hub-default GCP passthrough)
+		// wait for registration instead of misclassifying the broker.
+		if colocatedBrokerRegisters(cfg, s) {
+			hubSrv.ExpectEmbeddedBroker()
+		}
+
 		// Wire hub OTel tracing export to Cloud Trace.
 		if parseBoolEnv("SCION_TRACING_ENABLED") && cfg.Hub.GCPProjectID != "" {
 			tp, tpErr := hubtracing.NewTracerProvider(ctx, cfg.Hub.GCPProjectID,
@@ -2519,6 +2528,17 @@ func sharedDirStorageStartupLogWanted(brokerEnabled, hubEnabled bool) bool {
 }
 
 // startRuntimeBroker initializes and starts the runtime broker server.
+// colocatedBrokerRegisters reports whether this process registers a
+// co-located (embedded) runtime broker with its own Hub. It is the single
+// condition shared by the early hubSrv.ExpectEmbeddedBroker() call and the
+// registration in startRuntimeBroker: if the two drifted, an expected
+// registration that never runs would stall hub-default passthrough creates
+// for the full wait, or a registration that was not expected would reopen the
+// startup window.
+func colocatedBrokerRegisters(cfg *config.GlobalConfig, s store.Store) bool {
+	return enableHub && cfg.RuntimeBroker.Enabled && !simulateRemoteBroker && s != nil
+}
+
 func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.GlobalConfig, hubSrv *hub.Server, webSrv *hub.WebServer, s store.Store, hubEndpoint, devAuthToken string, brokerSettings *config.Settings, globalDir string, requestLogger, messageLogger *slog.Logger, wg *sync.WaitGroup, errCh chan error) error {
 	rt := runtime.GetRuntime("", "")
 	log.Printf("Runtime broker using runtime: %s", rt.Name())
@@ -2574,7 +2594,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	// Co-located registration and credential generation
 	var inMemoryCreds *brokercredentials.BrokerCredentials
 	var colocatedBrokerRegistered bool
-	if enableHub && !simulateRemoteBroker && s != nil {
+	if colocatedBrokerRegisters(cfg, s) {
 		rhEndpoint := fmt.Sprintf("http://%s:%d", cfg.RuntimeBroker.Host, cfg.RuntimeBroker.Port)
 		if cfg.RuntimeBroker.Host == "0.0.0.0" {
 			rhEndpoint = fmt.Sprintf("http://localhost:%d", cfg.RuntimeBroker.Port)
@@ -2583,6 +2603,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		effectiveID, regErr := registerGlobalProjectAndBroker(ctx, s, brokerID, brokerName, rhEndpoint, rt, serverAutoProvide, brokerSettings)
 		if regErr != nil {
 			log.Printf("Warning: failed to register global project: %v", regErr)
+			hubSrv.EmbeddedBrokerRegistrationFailed(regErr)
 		} else {
 			colocatedBrokerRegistered = true
 			if effectiveID != brokerID {
