@@ -33,6 +33,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { guard } from 'lit/directives/guard.js';
+import { live } from 'lit/directives/live.js';
 import type { Agent } from '../../../shared/types.js';
 import type { MentionAcceptDetail } from './mention-autocomplete.js';
 import type { SlashCommandDetail } from './slash-autocomplete.js';
@@ -112,6 +113,17 @@ export interface MemberInfo {
   email: string;
   avatarUrl?: string;
   kind: 'user' | 'agent';
+}
+
+/**
+ * A span of `this.text` occupied by an accepted mention token, `@slug `
+ * (including the trailing space inserted on accept). `start`/`end` are
+ * indices into `this.text`, kept in sync as the surrounding text changes.
+ */
+interface MentionRange {
+  start: number;
+  end: number;
+  slug: string;
 }
 
 /**
@@ -218,12 +230,31 @@ export class ScionChatComposer extends LitElement {
   /** Set of accepted mention slugs. Filtered to those still present on send. */
   private acceptedMentions = new Set<string>();
 
+  /**
+   * Ranges of `this.text` occupied by an *accepted* (resolved) mention —
+   * `@slug ` including its trailing space, as inserted on accept. Backspace/
+   * Delete at the edges of one of these ranges removes the whole token in a
+   * single keystroke (#1912). Edits that land inside a range invalidate it —
+   * it is no longer a clean resolved mention, so it reverts to plain text
+   * that deletes one character at a time like any other typed text.
+   */
+  private mentionRanges: MentionRange[] = [];
+
+  /** Reset per-message mention bookkeeping (ranges + accepted set). */
+  private resetMentionTracking(): void {
+    this.mentionRanges = [];
+    this.acceptedMentions.clear();
+  }
+
   /** Phase-3 + Phase-4: Handle editMessage and conversationKey changes. */
   override updated(changedProperties: Map<string, unknown>): void {
     super.updated(changedProperties);
     if (changedProperties.has('editMessage') && this.editMessage) {
       this.text = this.editMessage.content;
       this.runeCount = countRunes(this.editMessage.content);
+      // Edited content is historical plain text, not a just-accepted
+      // mention — it must not be atomically deletable.
+      this.resetMentionTracking();
       this.focusTextarea();
     }
     if (changedProperties.has('conversationKey')) {
@@ -235,6 +266,7 @@ export class ScionChatComposer extends LitElement {
       // Reset text so stale content from the old conversation is not carried over.
       this.text = '';
       this.runeCount = 0;
+      this.resetMentionTracking();
       this.restoreDraft();
     }
   }
@@ -742,7 +774,7 @@ export class ScionChatComposer extends LitElement {
                 size="small"
                 rows="1"
                 resize=${this.nativeTextareaSizing ? 'none' : 'auto'}
-                .value=${this.text}
+                .value=${live(this.text)}
                 @sl-input=${this.handleInput}
                 @keydown=${this.handleKeydown}
                 @paste=${this.handlePaste}
@@ -839,6 +871,7 @@ export class ScionChatComposer extends LitElement {
     // to the parent (see cancelReply).
     this.text = '';
     this.runeCount = 0;
+    this.resetMentionTracking();
     this.dispatchEvent(new CustomEvent('chat-cancel-edit', { bubbles: true, composed: true }));
     this.focusTextarea();
   }
@@ -934,7 +967,11 @@ export class ScionChatComposer extends LitElement {
 
   private handleInput(e: Event): void {
     const target = e.target as HTMLInputElement;
-    this.text = target.value;
+    const oldText = this.text;
+    const newText = target.value;
+    const caretAfterEdit = this.getTextareaElement()?.selectionStart ?? newText.length;
+    this.reconcileMentionRangesForEdit(oldText, newText, caretAfterEdit);
+    this.text = newText;
     this.runeCount = countRunes(this.text);
 
     // Persist draft with debounce.
@@ -946,17 +983,23 @@ export class ScionChatComposer extends LitElement {
     }
 
     // Feed the autocomplete components.
+    this.notifyMentionAutocompleteOfTextChange();
+    this.notifySlashAutocompleteOfTextChange();
+  }
+
+  /** Tell the mention-autocomplete component about the current text/cursor. */
+  private notifyMentionAutocompleteOfTextChange(): void {
     const autocomplete = this.shadowRoot?.querySelector('scion-mention-autocomplete') as
       | import('./mention-autocomplete.js').ScionMentionAutocomplete
       | null;
-    if (autocomplete) {
-      const textarea = this.getTextareaElement();
-      if (textarea) {
-        autocomplete.handleInput(this.text, textarea.selectionStart ?? this.text.length, textarea);
-      }
+    const textarea = this.getTextareaElement();
+    if (autocomplete && textarea) {
+      autocomplete.handleInput(this.text, textarea.selectionStart ?? this.text.length, textarea);
     }
+  }
 
-    // Feed slash command autocomplete.
+  /** Tell the slash-autocomplete component about the current text/cursor. */
+  private notifySlashAutocompleteOfTextChange(): void {
     const slashAutocomplete = this.shadowRoot?.querySelector('scion-slash-autocomplete') as
       | import('./slash-autocomplete.js').ScionSlashAutocomplete
       | null;
@@ -966,7 +1009,76 @@ export class ScionChatComposer extends LitElement {
     }
   }
 
+  /**
+   * Keep `mentionRanges` in sync with an arbitrary text edit (typing,
+   * pasting, selecting-and-replacing, or a native backspace/delete that we
+   * did not intercept as an atomic mention delete).
+   *
+   * Ranges entirely before or after the edited region are unaffected or
+   * shifted by the length delta. A range that overlaps the edited region is
+   * no longer a clean `@slug ` token — it has been hand-edited — so it is
+   * dropped from `mentionRanges` (it loses atomic delete). Its slug is
+   * *not* removed from `acceptedMentions` here: only an atomic delete
+   * (`deleteMentionRange`) does that. The send-time
+   * `trimmed.includes('@slug')` filter in `doSend` already de-routes text
+   * that no longer reads `@slug` for any other reason (R1 in #1912 round 2).
+   */
+  private reconcileMentionRangesForEdit(
+    oldText: string,
+    newText: string,
+    caretAfterEdit: number
+  ): void {
+    if (this.mentionRanges.length === 0 || oldText === newText) return;
+
+    const maxPrefix = Math.min(oldText.length, newText.length);
+    let prefixLen = 0;
+    while (prefixLen < maxPrefix && oldText[prefixLen] === newText[prefixLen]) prefixLen++;
+
+    const delta = newText.length - oldText.length;
+
+    // A plain greedy common-prefix/suffix diff can misplace the edit when an
+    // inserted or trailing character happens to match the adjacent range's
+    // boundary character (e.g. typing "@" right before an accepted "@slug "
+    // mention: the prefix match greedily swallows that shared "@", putting
+    // the edit *inside* the range instead of outside it). Anchor the diff to
+    // where the caret actually ended up: the edit cannot start later than
+    // that, less any inserted length, so it never creeps past the real edit
+    // point into an adjacent range.
+    const caretCap = Math.max(0, caretAfterEdit - Math.max(delta, 0));
+    prefixLen = Math.min(prefixLen, caretCap);
+
+    const maxSuffix = maxPrefix - prefixLen;
+    let suffixLen = 0;
+    while (
+      suffixLen < maxSuffix &&
+      oldText[oldText.length - 1 - suffixLen] === newText[newText.length - 1 - suffixLen]
+    ) {
+      suffixLen++;
+    }
+
+    const editStart = prefixLen;
+    const editOldEnd = oldText.length - suffixLen;
+
+    const survivors: MentionRange[] = [];
+    for (const range of this.mentionRanges) {
+      if (range.end <= editStart) {
+        survivors.push(range);
+      } else if (range.start >= editOldEnd) {
+        survivors.push({ ...range, start: range.start + delta, end: range.end + delta });
+      }
+      // else: the edit landed inside this range — drop it from tracking.
+    }
+    this.mentionRanges = survivors;
+  }
+
   private handleKeydown(e: KeyboardEvent): void {
+    // Backspace/Delete right at the edge of an accepted mention removes the
+    // whole token atomically, ahead of the slash/mention autocomplete's own
+    // key handling (neither of which claims these keys).
+    if ((e.key === 'Backspace' || e.key === 'Delete') && this.tryAtomicMentionDelete(e)) {
+      return;
+    }
+
     // Let slash command autocomplete handle keys first.
     const slashAutocomplete = this.shadowRoot?.querySelector('scion-slash-autocomplete') as
       | import('./slash-autocomplete.js').ScionSlashAutocomplete
@@ -991,6 +1103,77 @@ export class ScionChatComposer extends LitElement {
     }
   }
 
+  /**
+   * If the caret sits at the edge of an accepted-mention range with no
+   * active selection, delete the whole range in one keystroke: Backspace at
+   * the range's end, Delete at its start. Returns true if it handled the
+   * key (and called preventDefault), so the caller should not fall through
+   * to default text-editing behavior.
+   */
+  private tryAtomicMentionDelete(e: KeyboardEvent): boolean {
+    if (e.shiftKey || e.altKey || e.metaKey || e.ctrlKey || e.isComposing) return false;
+    if (this.mentionRanges.length === 0) return false;
+
+    const textarea = this.getTextareaElement();
+    if (!textarea) return false;
+
+    const selStart = textarea.selectionStart ?? this.text.length;
+    const selEnd = textarea.selectionEnd ?? this.text.length;
+    if (selStart !== selEnd) return false; // a real selection deletes normally
+
+    const isBackspace = e.key === 'Backspace';
+    const range = this.mentionRanges.find((r) =>
+      isBackspace ? r.end === selStart : r.start === selStart
+    );
+    if (!range) return false;
+
+    e.preventDefault();
+    this.deleteMentionRange(range);
+    return true;
+  }
+
+  /** Remove an accepted-mention range from `this.text` in one shot. */
+  private deleteMentionRange(range: MentionRange): void {
+    const before = this.text.slice(0, range.start);
+    const after = this.text.slice(range.end);
+    this.text = before + after;
+    this.runeCount = countRunes(this.text);
+
+    const delta = range.start - range.end; // negative: text got shorter
+    this.mentionRanges = this.mentionRanges
+      .filter((r) => r !== range)
+      .map((r) =>
+        r.start >= range.end ? { ...r, start: r.start + delta, end: r.end + delta } : r
+      );
+
+    // Drop the slug from send-time routing unless the text still literally
+    // reads `@slug` elsewhere (e.g. a second mention of the same agent, or a
+    // hand-edited remnant that lost its tracked range but kept the text).
+    // This mirrors the send-time `trimmed.includes('@slug')` filter exactly,
+    // so an atomic delete never de-routes an agent the send-time check would
+    // still route (and vice versa).
+    if (!this.text.includes('@' + range.slug)) {
+      this.acceptedMentions.delete(range.slug);
+    }
+
+    this.saveDraft();
+
+    const cursorPos = range.start;
+    void this.updateComplete.then(() => {
+      const ta = this.getTextareaElement();
+      if (ta) {
+        ta.setSelectionRange(cursorPos, cursorPos);
+      }
+      // An atomic delete bypasses the native input event both autocomplete
+      // components normally listen to. Tell them directly so their own
+      // bookkeeping (e.g. a dismissed-trigger position) doesn't go stale
+      // relative to the new text, and each stays closed rather than
+      // reopening on stale state (#1912).
+      this.notifyMentionAutocompleteOfTextChange();
+      this.notifySlashAutocompleteOfTextChange();
+    });
+  }
+
   private handleSlashCommand(e: CustomEvent<SlashCommandDetail>): void {
     const { command } = e.detail;
     // Extract args from the current text: `/command arg1 arg2`
@@ -1009,6 +1192,7 @@ export class ScionChatComposer extends LitElement {
     // Clear the text input after dispatching.
     this.text = '';
     this.runeCount = 0;
+    this.resetMentionTracking();
     this.clearDraft();
     this.focusTextarea();
   }
@@ -1027,15 +1211,32 @@ export class ScionChatComposer extends LitElement {
     this.text = before + insertion + after;
     this.runeCount = countRunes(this.text);
 
-    // Track the accepted mention.
+    // Shift any existing mention ranges that sit after the replaced region
+    // (there's an accepted mention later in the text and this one was
+    // inserted before it). The replaced region itself — the `@partial` query
+    // just typed — cannot already contain a range: an accepted mention's
+    // trailing space would have blocked the trigger from being found there.
+    const delta = insertion.length - (cursorPos - triggerStart);
+    this.mentionRanges = this.mentionRanges.map((r) =>
+      r.start >= cursorPos ? { ...r, start: r.start + delta, end: r.end + delta } : r
+    );
+
+    // Track the newly accepted mention, including its trailing space, so
+    // Backspace/Delete at its edges can remove it atomically (#1912).
+    this.mentionRanges.push({ start: triggerStart, end: triggerStart + insertion.length, slug });
     this.acceptedMentions.add(slug);
 
-    // Restore cursor position after the inserted text.
+    // Restore cursor position after the inserted text. The value itself is
+    // already driven by `this.text` via the `live()`-bound textarea — no
+    // need (and no longer safe) to also poke the native element's `.value`
+    // directly here; doing so bypassed both Lit's and sl-textarea's own
+    // dirty-checking and is what made later keystrokes stop visibly
+    // updating the input until an unrelated re-render forced a resync
+    // (#1912, and the reason #1689 removed the old liveMentionOverride).
     const newCursorPos = triggerStart + insertion.length;
     void this.updateComplete.then(() => {
       const ta = this.getTextareaElement();
       if (ta) {
-        ta.value = this.text;
         ta.setSelectionRange(newCursorPos, newCursorPos);
         ta.focus();
       }
@@ -1289,6 +1490,7 @@ export class ScionChatComposer extends LitElement {
       );
       this.text = '';
       this.runeCount = 0;
+      this.resetMentionTracking();
       this.dispatchEvent(new CustomEvent('chat-cancel-edit', { bubbles: true, composed: true }));
       this.focusTextarea();
       return;
@@ -1304,6 +1506,7 @@ export class ScionChatComposer extends LitElement {
     const savedText = this.text;
     const savedRuneCount = this.runeCount;
     const savedMentions = new Set(this.acceptedMentions);
+    const savedMentionRanges = [...this.mentionRanges];
     const savedPendingFiles = [...this.pendingFiles];
     const savedReplyTo = this.replyTo;
 
@@ -1322,6 +1525,7 @@ export class ScionChatComposer extends LitElement {
         this.text = savedText;
         this.runeCount = savedRuneCount;
         this.acceptedMentions = savedMentions;
+        this.mentionRanges = savedMentionRanges;
         this.pendingFiles = savedPendingFiles;
         if (savedReplyTo) {
           this.replyTo = savedReplyTo;
@@ -1347,7 +1551,7 @@ export class ScionChatComposer extends LitElement {
     // parent's state prematurely, making it unrecoverable on send failure.
     this.text = '';
     this.runeCount = 0;
-    this.acceptedMentions.clear();
+    this.resetMentionTracking();
     this.pendingFiles = [];
     this.clearDraft();
     this.focusTextarea();
