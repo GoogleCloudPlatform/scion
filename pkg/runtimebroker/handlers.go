@@ -860,8 +860,13 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// Provision only: set up dirs, worktree, templates without starting the container
 		cfg, err := sc.Manager.Provision(ctx, opts)
 		if err != nil {
-			markAttemptFailed(http.StatusInternalServerError, "failed to provision agent")
 			span.SetStatus(codes.Error, err.Error())
+			if errors.Is(err, config.ErrHarnessConfigNotFound) || errors.Is(err, config.ErrTemplateNotFound) {
+				markAttemptFailed(http.StatusNotFound, "failed to provision agent")
+				writeError(w, http.StatusNotFound, ErrCodeNotFound, "Failed to provision agent: "+err.Error(), nil)
+				return
+			}
+			markAttemptFailed(http.StatusInternalServerError, "failed to provision agent")
 			RuntimeError(w, "Failed to provision agent: "+err.Error())
 			return
 		}
@@ -904,7 +909,17 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	startOpStart := time.Now()
 	agentInfo, err := sc.Manager.Start(ctx, opts)
 	if err != nil {
-		markAttemptFailed(http.StatusInternalServerError, "failed to create agent")
+		// An unresolvable named resource (harness-config or template) is a
+		// naming problem the caller can act on, not an infrastructure
+		// failure — track and report it as a 404 instead of folding it into
+		// the generic 502 the hub maps RuntimeError to (ptone/scion#1316
+		// fault 3).
+		notFoundErr := errors.Is(err, config.ErrHarnessConfigNotFound) || errors.Is(err, config.ErrTemplateNotFound)
+		if notFoundErr {
+			markAttemptFailed(http.StatusNotFound, "failed to create agent")
+		} else {
+			markAttemptFailed(http.StatusInternalServerError, "failed to create agent")
+		}
 
 		s.agentLifecycleLog.Error("Agent create failed",
 			"agent_id", req.ID, "project_id", req.ProjectID,
@@ -922,9 +937,12 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		span.SetStatus(codes.Error, err.Error())
-		if errors.Is(err, agent.ErrContainerNameInUse) {
+		switch {
+		case errors.Is(err, agent.ErrContainerNameInUse):
 			Conflict(w, err.Error())
-		} else {
+		case notFoundErr:
+			writeError(w, http.StatusNotFound, ErrCodeNotFound, "Failed to create agent: "+err.Error(), nil)
+		default:
 			RuntimeError(w, "Failed to create agent: "+err.Error())
 		}
 		return

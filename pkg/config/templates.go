@@ -17,6 +17,7 @@ package config
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,6 +29,14 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"gopkg.in/yaml.v3"
 )
+
+// ErrTemplateNotFound marks a template resolution failure where the named
+// template does not exist in any searched location (project or global
+// template directories). Wrapped into the returned error so callers (e.g.
+// the runtime broker's create/provision handlers) can classify an
+// unresolvable name as a client-facing 4xx naming the resource, instead of
+// folding it into a generic 5xx (ptone/scion#1316 fault 3).
+var ErrTemplateNotFound = errors.New("template not found")
 
 type Template struct {
 	Name  string
@@ -370,7 +379,7 @@ func FindTemplateInProjectPath(name, projectPath string) (*Template, error) {
 		if info, err := os.Stat(name); err == nil && info.IsDir() {
 			return &Template{Name: filepath.Base(name), Path: name}, nil
 		}
-		return nil, fmt.Errorf("template path %s not found or not a directory", name)
+		return nil, fmt.Errorf("template path %s not found or not a directory: %w", name, ErrTemplateNotFound)
 	}
 
 	// Check project-specific templates directory (in-repo .scion/templates/ for git projects)
@@ -389,7 +398,7 @@ func FindTemplateInProjectPath(name, projectPath string) (*Template, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("template %s not found", name)
+	return nil, fmt.Errorf("template %s not found: %w", name, ErrTemplateNotFound)
 }
 
 // findOrHydrateDefaultTemplate resolves the default template, seeding it from the
