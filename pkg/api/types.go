@@ -642,22 +642,6 @@ func (a *AgentInfo) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// MarshalJSON implements custom marshaling to support legacy grove fields.
-func (a AgentInfo) MarshalJSON() ([]byte, error) {
-	type Alias AgentInfo
-	return json.Marshal(&struct {
-		Alias
-		Grove     string `json:"grove,omitempty"`
-		GroveID   string `json:"groveId,omitempty"`
-		GrovePath string `json:"grovePath,omitempty"`
-	}{
-		Alias:     Alias(a),
-		Grove:     a.Project,
-		GroveID:   a.ProjectID,
-		GrovePath: a.ProjectPath,
-	})
-}
-
 // AgentDetail provides freeform context about the current activity.
 type AgentDetail struct {
 	ToolName    string `json:"toolName,omitempty"`
