@@ -1067,6 +1067,14 @@ gcloud compute ssh "${INSTANCE_NAME}" \
     sudo -u scion tee /home/scion/.scion/settings.yaml > /dev/null << 'SETTINGSEOF'
 schema_version: \"1\"
 image_registry: \"${IMAGE_REGISTRY}\"
+# Hub-wide default GCP identity mode for new agents (V1Settings.DefaultGCPIdentityMode
+# in pkg/config, a top-level settings.yaml key, not nested under agent_defaults).
+# passthrough is honoured only on the hub's own embedded broker, which is what a
+# single-node VM always is, so agents inherit the VM service account (already
+# granted roles/aiplatform.user) and authenticate to Vertex AI with no manual
+# setup. Change to \"block\" or \"assign\" via the admin UI or the server-config
+# API if that is not desired; see docs/deploy/agent-runbook-single-node-vm.md §6.3b.
+default_gcp_identity_mode: passthrough
 server:
   hub:
     name: \"${HUB_NAME}\"
@@ -1569,6 +1577,14 @@ gcloud compute ssh "${INSTANCE_NAME}" \
     sudo -u scion tee /home/scion/.scion/settings.yaml > /dev/null << 'SETTINGSEOF'
 schema_version: \"1\"
 image_registry: \"${IMAGE_REGISTRY}\"
+# Hub-wide default GCP identity mode for new agents (V1Settings.DefaultGCPIdentityMode
+# in pkg/config, a top-level settings.yaml key, not nested under agent_defaults).
+# passthrough is honoured only on the hub's own embedded broker, which is what a
+# single-node VM always is, so agents inherit the VM service account (already
+# granted roles/aiplatform.user) and authenticate to Vertex AI with no manual
+# setup. Change to \"block\" or \"assign\" via the admin UI or the server-config
+# API if that is not desired; see docs/deploy/agent-runbook-single-node-vm.md §6.3b.
+default_gcp_identity_mode: passthrough
 server:
   hub:
     name: \"${HUB_NAME}\"
