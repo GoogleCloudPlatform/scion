@@ -189,6 +189,7 @@ allowed_paths=(
   "^pkg/hub/response_types.go$"
   "^pkg/hub/authzop/catalog.go$"
   "^pkg/hub/route_metadata.go$"
+  "^pkg/hub/route_authz_manifest.go$" # Route-authz manifest lists /api/v1/groves/* as registered routes (#598)
   "^pkg/hub/server.go$"
   "^pkg/hub/system_handlers.go$"
   "^pkg/hub/template_handlers.go$"
