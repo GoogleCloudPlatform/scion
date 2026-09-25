@@ -223,6 +223,16 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	return nil
 }
 
+// AgentLifecycleStartRequest is the optional JSON body for the "start"
+// lifecycle action. It is empty for a normal start; ForceResume is only
+// meaningful when the agent is in phase=error, where it requests a
+// best-effort resume of the interrupted harness session instead of a fresh
+// one. See resumeInPlaceDecision for the equivalent semantics on the
+// create-agent resume path.
+type AgentLifecycleStartRequest struct {
+	ForceResume bool `json:"forceResume,omitempty"`
+}
+
 func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id, action string) {
 	ctx := r.Context()
 
@@ -252,8 +262,22 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	case api.AgentActionStart:
 		newPhase = string(state.PhaseRunning)
 		if dispatcher != nil && agent.RuntimeBrokerID != "" {
-			// Resume the harness session only when the agent was suspended.
-			resume := agent.Phase == string(state.PhaseSuspended)
+			// Resume the harness session when the agent was suspended. An
+			// error-phase agent can also request a best-effort resume of its
+			// interrupted session by sending forceResume in the request body
+			// (mirrors resumeInPlaceDecision's forcedRecovery case for the
+			// create-agent resume path). This never applies to any other
+			// phase: a running agent must not be recreated out from under
+			// itself, and a stopped agent restarts fresh even if asked to
+			// resume, matching the create-agent path's behavior.
+			var startReq AgentLifecycleStartRequest
+			_ = readJSON(r, &startReq)
+			forcedRecovery := agent.Phase == string(state.PhaseError) && startReq.ForceResume
+			if forcedRecovery {
+				s.agentLifecycleLog.Warn("Force-resuming agent from error phase via lifecycle start",
+					"agent_id", agent.ID, "agent", agent.Name, "container_status", agent.ContainerStatus)
+			}
+			resume := agent.Phase == string(state.PhaseSuspended) || forcedRecovery
 			dispatchErr = dispatcher.DispatchAgentStart(ctx, agent, "", resume)
 			// DispatchAgentStart applies the broker response in-place;
 			// use the broker-reported phase if it was set.
