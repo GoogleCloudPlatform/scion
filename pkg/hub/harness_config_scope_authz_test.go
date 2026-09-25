@@ -288,3 +288,32 @@ func TestHarnessConfigScope_Agent_SameProjectAllowedOnProjectScopedHarnessConfig
 	assert.True(t, decision.Allowed,
 		"an agent in the same project as a project-scoped harness config must still be able to read it")
 }
+
+// ----------------------------------------------------------------------
+// Clone (C5): the shared harness-config route dispatcher
+// (handleHarnessConfigByID) gates every action, including clone, on
+// authorizeHarnessConfigRoute before the switch runs, so a forbidden clone
+// source and a nonexistent one must already read identically. This test
+// pins that down for the harness-config route the way
+// TestTemplateScope_Clone_ForbiddenAndMissingSourceUseIdenticalMessage does
+// for templates, where the two outcomes were not identical before the fix.
+// ----------------------------------------------------------------------
+
+func TestHarnessConfigScope_Clone_ForbiddenAndMissingSourceUseIdenticalMessage(t *testing.T) {
+	srv, s, alice, carol, project := setupHarnessConfigScopeTest(t)
+	hc := createAuthzTestHarnessConfig(t, s, "alice-clone-source-private", store.HarnessConfigScopeProject, project.ID, alice.ID)
+
+	forbiddenRec := doRequestAsUser(t, srv, carol, http.MethodPost, "/api/v1/harness-configs/"+hc.ID+"/clone", CloneTemplateRequest{Name: "carols-hc-clone-attempt"})
+	require.Equal(t, http.StatusNotFound, forbiddenRec.Code, "got: %s", forbiddenRec.Body.String())
+	var forbidden ErrorResponse
+	require.NoError(t, json.Unmarshal(forbiddenRec.Body.Bytes(), &forbidden))
+
+	missingRec := doRequestAsUser(t, srv, carol, http.MethodPost, "/api/v1/harness-configs/"+tid("hc-clone-does-not-exist")+"/clone", CloneTemplateRequest{Name: "carols-hc-clone-attempt-2"})
+	require.Equal(t, http.StatusNotFound, missingRec.Code, "got: %s", missingRec.Body.String())
+	var missing ErrorResponse
+	require.NoError(t, json.Unmarshal(missingRec.Body.Bytes(), &missing))
+
+	assert.Equal(t, "HarnessConfig not found", forbidden.Error.Message)
+	assert.Equal(t, forbidden.Error.Message, missing.Error.Message,
+		"a forbidden clone source and a nonexistent one must read identically")
+}

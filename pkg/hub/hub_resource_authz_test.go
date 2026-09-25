@@ -231,6 +231,16 @@ func TestHarnessConfigAuthz_BrokerReadOnly(t *testing.T) {
 	key := hc.StoragePath + "/Dockerfile"
 	original := string(stor.content[key])
 
+	// The broker must be a registered provider for victim's project — a
+	// broker's authenticated HMAC identity is not itself authority to read
+	// every project's harness configs (ptone/scion#1916 follow-up); see
+	// brokerMayReadCatalogResource.
+	ctx := context.Background()
+	brokerID := tid("test-broker-hc-authz")
+	broker := &store.RuntimeBroker{ID: brokerID, Name: "test-broker-hc-authz", Slug: "test-broker-hc-authz", Status: store.BrokerStatusOnline}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{ProjectID: victim.ID, BrokerID: broker.ID, BrokerName: broker.Name, Status: store.BrokerStatusOnline}))
+
 	asBroker := func(method, url string, body any) *httptest.ResponseRecorder {
 		var rdr io.Reader
 		if body != nil {
@@ -240,7 +250,7 @@ func TestHarnessConfigAuthz_BrokerReadOnly(t *testing.T) {
 		}
 		req := httptest.NewRequest(method, url, rdr)
 		req.Header.Set("Content-Type", "application/json")
-		ident := NewBrokerIdentity("test-broker-hc-authz")
+		ident := NewBrokerIdentity(brokerID)
 		ctx := contextWithIdentity(contextWithBrokerIdentity(req.Context(), ident), ident)
 		rec := httptest.NewRecorder()
 		srv.mux.ServeHTTP(rec, req.WithContext(ctx))

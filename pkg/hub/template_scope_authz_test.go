@@ -309,6 +309,41 @@ func TestTemplateScope_ResolveAtCreate_CrossProjectTemplateDenied(t *testing.T) 
 		"a project member from another project must not have another project's private template applied to their new agent")
 }
 
+// TestTemplateScope_ResolveAtCreate_CrossProjectTemplateDenied_HTTPCreate is
+// the ptone/scion#1936 gemini-review regression for the HTTP create path
+// (handlers_agents_core.go): denying a resolved template must read as 404
+// and must not create the agent, whether with the private template silently
+// dropped or with a nil-pointer panic.
+func TestTemplateScope_ResolveAtCreate_CrossProjectTemplateDenied_HTTPCreate(t *testing.T) {
+	srv, s, alice, _, project := setupTemplateScopeTest(t)
+	ctx := context.Background()
+	tpl := createAuthzTestTemplate(t, s, "alice-resolve-http-create-template", store.TemplateScopeProject, project.ID, alice.ID)
+
+	otherProject := &store.Project{ID: tid("tplresolve-http-other-project"), Name: "Other Project", Slug: "tplresolve-http-other-project"}
+	require.NoError(t, s.CreateProject(ctx, otherProject))
+	broker := &store.RuntimeBroker{ID: tid("tplresolve-http-broker"), Name: "broker", Slug: "tplresolve-http-broker", Status: store.BrokerStatusOnline, AutoProvide: true}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{ProjectID: otherProject.ID, BrokerID: broker.ID, BrokerName: broker.Name, Status: store.BrokerStatusOnline}))
+	otherProject.DefaultRuntimeBrokerID = broker.ID
+	require.NoError(t, s.UpdateProject(ctx, otherProject))
+	srv.SetDispatcher(&createAgentDispatcher{createPhase: string(state.PhaseRunning)})
+
+	bob := createNamedTestUser(t, s, "tplresolve-http-bob", store.UserRoleMember)
+	ensureHubMembership(ctx, s, bob.ID)
+	createTestUserWithProjectRole(t, s, bob.ID, bob.Email, otherProject.ID, store.ProjectRoleMember)
+
+	rec := doRequestAsUser(t, srv, bob, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "cross-project-template-agent",
+		ProjectID: otherProject.ID,
+		Template:  tpl.ID,
+	})
+	assert.Equal(t, http.StatusNotFound, rec.Code,
+		"a denied cross-project template resolved at create must read as not-found; got: %s", rec.Body.String())
+
+	_, err := s.GetAgentBySlug(ctx, otherProject.ID, "cross-project-template-agent")
+	assert.ErrorIs(t, err, store.ErrNotFound, "an agent must not be created when its requested template is denied")
+}
+
 func TestTemplateScope_ResolveAtCreate_OwnProjectTemplateAllowed(t *testing.T) {
 	srv, s, alice, _, project := setupTemplateScopeTest(t)
 	ctx := context.Background()
@@ -328,12 +363,94 @@ func TestTemplateScope_ResolveAtCreate_OwnProjectTemplateAllowed(t *testing.T) {
 		"a fellow project member creating an agent with the project's own template must still be allowed")
 }
 
+// TestTemplateScope_ResolveAtCreate_NilIdentityDenied is the ptone/scion#1936
+// gemini-review regression: a nil identity must fail closed, not fail open,
+// for a non-global resolved template. Neither of authorizeResolvedTemplate's
+// two callers can currently reach it with a nil identity (createAgentInProject
+// runs behind authorizeAgentCreate, which rejects a nil identity outright, and
+// the scheduler's creatorIdentity is resolved before dispatch ever calls this),
+// so this pins the function's own contract directly rather than a live bypass.
+func TestTemplateScope_ResolveAtCreate_NilIdentityDenied(t *testing.T) {
+	srv, s, alice, _, project := setupTemplateScopeTest(t)
+	ctx := context.Background()
+	tpl := createAuthzTestTemplate(t, s, "alice-resolve-nil-identity-template", store.TemplateScopeProject, project.ID, alice.ID)
+
+	allowed := srv.authorizeResolvedTemplate(ctx, nil, tpl)
+	assert.False(t, allowed, "a nil identity must not be treated as authorized to read a non-global resolved template")
+}
+
+// TestTemplateScope_ResolveAtCreate_BrokerIdentityExempt is the positive
+// case: a broker registered as a provider for the template's own project may
+// hydrate it. Broker admission is scoped by brokerMayReadCatalogResource
+// (authorize.go), not an unconditional exemption — see the companion
+// "NonProviderDenied" test below.
 func TestTemplateScope_ResolveAtCreate_BrokerIdentityExempt(t *testing.T) {
 	srv, s, alice, _, project := setupTemplateScopeTest(t)
 	ctx := context.Background()
 	tpl := createAuthzTestTemplate(t, s, "alice-resolve-broker-template", store.TemplateScopeProject, project.ID, alice.ID)
 
-	brokerCtx := contextWithBrokerIdentity(ctx, NewBrokerIdentity("broker-1"))
+	broker := &store.RuntimeBroker{ID: tid("tplresolve-provider-broker"), Name: "provider-broker", Slug: "tplresolve-provider-broker", Status: store.BrokerStatusOnline}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{ProjectID: project.ID, BrokerID: broker.ID, BrokerName: broker.Name, Status: store.BrokerStatusOnline}))
+
+	brokerCtx := contextWithBrokerIdentity(ctx, NewBrokerIdentity(broker.ID))
 	allowed := srv.authorizeResolvedTemplate(brokerCtx, NewAuthenticatedUser("irrelevant", "", "", "", "cli"), tpl)
-	assert.True(t, allowed, "a runtime broker hydrating a template during agent creation must remain exempt")
+	assert.True(t, allowed, "a runtime broker registered as a provider for the template's project must be able to hydrate it")
+}
+
+// TestTemplateScope_ResolveAtCreate_BrokerIdentityNonProviderDenied is the
+// ptone/scion#1916 follow-up regression: a broker that has never been
+// registered as a provider for the template's project must not hydrate it
+// merely by being an authenticated broker.
+func TestTemplateScope_ResolveAtCreate_BrokerIdentityNonProviderDenied(t *testing.T) {
+	srv, s, alice, _, project := setupTemplateScopeTest(t)
+	ctx := context.Background()
+	tpl := createAuthzTestTemplate(t, s, "alice-resolve-nonprovider-broker-template", store.TemplateScopeProject, project.ID, alice.ID)
+
+	broker := &store.RuntimeBroker{ID: tid("tplresolve-stranger-broker"), Name: "stranger-broker", Slug: "tplresolve-stranger-broker", Status: store.BrokerStatusOnline}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	// Deliberately no AddProjectProvider call: this broker serves no project.
+
+	brokerCtx := contextWithBrokerIdentity(ctx, NewBrokerIdentity(broker.ID))
+	allowed := srv.authorizeResolvedTemplate(brokerCtx, NewAuthenticatedUser("irrelevant", "", "", "", "cli"), tpl)
+	assert.False(t, allowed, "a broker that is not a registered provider for the template's project must not hydrate it")
+}
+
+// ----------------------------------------------------------------------
+// Clone (C5): reading the clone source is a read like any other. A forbidden
+// source must 404, exactly like a nonexistent one, not 403 (which would
+// confirm the source exists).
+// ----------------------------------------------------------------------
+
+func TestTemplateScope_Clone_ForbiddenSourceIsNotFound(t *testing.T) {
+	srv, s, alice, carol, project := setupTemplateScopeTest(t)
+	tpl := createAuthzTestTemplate(t, s, "alice-clone-source-private", store.TemplateScopeProject, project.ID, alice.ID)
+
+	rec := doRequestAsUser(t, srv, carol, http.MethodPost, "/api/v1/templates/"+tpl.ID+"/clone", CloneTemplateRequest{
+		Name: "carols-clone-attempt",
+	})
+	assert.Equal(t, http.StatusNotFound, rec.Code,
+		"cloning a template carol may not read must 404, not 403 or 201; got: %s", rec.Body.String())
+}
+
+// TestTemplateScope_Clone_ForbiddenAndMissingSourceUseIdenticalMessage proves
+// the genuinely-missing and denied-read cases are indistinguishable by
+// message text, not merely by status code.
+func TestTemplateScope_Clone_ForbiddenAndMissingSourceUseIdenticalMessage(t *testing.T) {
+	srv, s, alice, carol, project := setupTemplateScopeTest(t)
+	tpl := createAuthzTestTemplate(t, s, "alice-clone-source-private-2", store.TemplateScopeProject, project.ID, alice.ID)
+
+	forbiddenRec := doRequestAsUser(t, srv, carol, http.MethodPost, "/api/v1/templates/"+tpl.ID+"/clone", CloneTemplateRequest{Name: "carols-clone-attempt-3"})
+	require.Equal(t, http.StatusNotFound, forbiddenRec.Code, "got: %s", forbiddenRec.Body.String())
+	var forbidden ErrorResponse
+	require.NoError(t, json.Unmarshal(forbiddenRec.Body.Bytes(), &forbidden))
+
+	missingRec := doRequestAsUser(t, srv, carol, http.MethodPost, "/api/v1/templates/"+tid("tpl-clone-does-not-exist")+"/clone", CloneTemplateRequest{Name: "carols-clone-attempt-4"})
+	require.Equal(t, http.StatusNotFound, missingRec.Code, "got: %s", missingRec.Body.String())
+	var missing ErrorResponse
+	require.NoError(t, json.Unmarshal(missingRec.Body.Bytes(), &missing))
+
+	assert.Equal(t, "Template not found", forbidden.Error.Message)
+	assert.Equal(t, forbidden.Error.Message, missing.Error.Message,
+		"a forbidden clone source and a nonexistent one must read identically")
 }
