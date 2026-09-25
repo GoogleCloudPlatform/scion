@@ -1100,3 +1100,42 @@ func TestAgentStore_AuthorizedProjectIDs(t *testing.T) {
 		assert.Equal(t, 2, result.TotalCount, "both projects' agents should be returned")
 	})
 }
+
+// TestAgentStore_AppliedConfigEnvSurvivesPersistence guards marshalAppliedConfig's
+// alias bypass (agent_store.go): the DB column must keep storing every field of
+// AppliedConfig, including Env and GITHUB_TOKEN, exactly as held in memory. The
+// response-only visibility gate added to AgentAppliedConfig's own MarshalJSON
+// (pkg/store/models.go) must never reach this path -- if it did, a fresh
+// AgentAppliedConfig (whose gate defaults closed) would silently lose its Env
+// on the next write.
+func TestAgentStore_AppliedConfigEnvSurvivesPersistence(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	a := makeAgent(projectID, "env-persist-1")
+	a.AppliedConfig = &store.AgentAppliedConfig{
+		Image: "img:1",
+		Env: map[string]string{
+			"PLAIN_VAR":    "plain-value",
+			"GITHUB_TOKEN": "ghp_must_survive_the_round_trip",
+		},
+	}
+	require.NoError(t, s.CreateAgent(ctx, a))
+
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.AppliedConfig)
+	assert.Equal(t, "plain-value", got.AppliedConfig.Env["PLAIN_VAR"])
+	assert.Equal(t, "ghp_must_survive_the_round_trip", got.AppliedConfig.Env["GITHUB_TOKEN"],
+		"the DB column must keep the full env regardless of the response-only visibility gate")
+
+	// UpdateAgent goes through the identical marshal path; confirm it too.
+	got.AppliedConfig.Env["NEW_VAR"] = "new-value"
+	require.NoError(t, s.UpdateAgent(ctx, got))
+
+	reGot, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	require.NotNil(t, reGot.AppliedConfig)
+	assert.Equal(t, "new-value", reGot.AppliedConfig.Env["NEW_VAR"])
+	assert.Equal(t, "ghp_must_survive_the_round_trip", reGot.AppliedConfig.Env["GITHUB_TOKEN"])
+}

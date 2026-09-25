@@ -43,34 +43,21 @@ import (
 //     it is not a legitimate value to keep surfacing from the durable config
 //     record.
 //
-// The input AgentAppliedConfig is never mutated; a redacted response either
-// reuses the original pointer (nothing to change) or returns a shallow copy
-// with a fresh Env map, so callers holding the original agent object (e.g.
-// to log it or pass it elsewhere) are unaffected.
+// The actual gate lives one layer down, in store.AgentAppliedConfig's own
+// MarshalJSON: this function's only job is to hand it the access-level
+// decision this package (and only this package) is positioned to compute, via
+// ResponseView. That split is deliberate -- it means a *new* handler that
+// serializes a store.Agent or AgentAppliedConfig without calling this
+// function at all still gets no Env in the response (MarshalJSON's default is
+// closed), rather than depending on every future call site remembering to
+// call this one. Existing call sites keep calling it because they need Env
+// included for an authorized viewer, which requires the explicit opt-in.
+//
+// The input AgentAppliedConfig is never mutated; ResponseView always returns
+// a shallow copy, so callers holding the original agent object (e.g. to log
+// it or pass it elsewhere) are unaffected.
 func redactAppliedConfigEnvForResponse(ac *store.AgentAppliedConfig, canAttach bool) *store.AgentAppliedConfig {
-	if ac == nil || len(ac.Env) == 0 {
-		return ac
-	}
-
-	_, hasGitHubToken := ac.Env["GITHUB_TOKEN"]
-	if canAttach && !hasGitHubToken {
-		return ac
-	}
-
-	redacted := *ac
-	redacted.Env = make(map[string]string, len(ac.Env))
-	if canAttach {
-		for k, v := range ac.Env {
-			if k == "GITHUB_TOKEN" {
-				continue
-			}
-			redacted.Env[k] = v
-		}
-	}
-	if len(redacted.Env) == 0 {
-		redacted.Env = nil
-	}
-	return &redacted
+	return ac.ResponseView(canAttach)
 }
 
 // canViewAgentEnv answers the same access-level question as

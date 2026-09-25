@@ -210,6 +210,76 @@ type AgentAppliedConfig struct {
 	// Bounded to 64 KB at the Hub API layer. When non-empty, the broker stages it
 	// into $HOME/.scion/hooks/pre-start.d/30-project-custom before container start.
 	ProjectPreStartHookScript string `json:"projectPreStartHookScript,omitempty"`
+
+	// envResponseVisible gates whether MarshalJSON includes Env. It defaults
+	// to false (unexported, zero value), which is the "never emit Env by
+	// default" choke point: any code path that serializes an
+	// AgentAppliedConfig without going through ResponseView first -- in
+	// particular a future response handler that forgets to -- gets no Env in
+	// the JSON output, regardless of what the struct actually holds. See
+	// ResponseView and MarshalJSON below.
+	//
+	// encoding/json never marshals unexported fields, so this flag itself
+	// never reaches a JSON document; it only steers what MarshalJSON does
+	// with the exported Env field on its way out. It is likewise inert for
+	// decoding: json.Unmarshal only ever touches exported fields, so a config
+	// round-tripped through JSON (e.g. read back from the DB) always decodes
+	// with the flag at its zero value, i.e. response-hidden by default until
+	// something explicitly calls ResponseView again.
+	//
+	// Persistence (pkg/store/entadapter) is not a response surface and must
+	// keep writing Env to the DB regardless of this flag; it does so by
+	// aliasing this type to bypass MarshalJSON entirely rather than by
+	// setting this field.
+	envResponseVisible bool
+}
+
+// ResponseView returns a copy of ac suitable for embedding in an API response
+// body. canAttach must already reflect an attach-equivalent authorization
+// decision the caller has made for the current viewer against the owning
+// agent -- ResponseView performs no authorization itself.
+//
+// GITHUB_TOKEN is withheld unconditionally, even when canAttach is true: it
+// is never a legitimate value to keep surfacing from the durable config
+// record, independent of who is asking.
+//
+// Nothing else needs to call this to be safe: without it, MarshalJSON's
+// default omits Env entirely (see the envResponseVisible field doc), so a
+// response path that never calls ResponseView fails closed rather than open.
+func (ac *AgentAppliedConfig) ResponseView(canAttach bool) *AgentAppliedConfig {
+	if ac == nil {
+		return nil
+	}
+	view := *ac
+	view.envResponseVisible = canAttach
+	return &view
+}
+
+// MarshalJSON is the single choke point through which AppliedConfig.Env can
+// reach a JSON encoding. By default (envResponseVisible false, the zero
+// value) Env is omitted entirely; ResponseView is the only way to make it
+// visible, and even then GITHUB_TOKEN is stripped. See the envResponseVisible
+// field doc for why this is safe for both the DB-persistence and the
+// decoding paths.
+func (ac AgentAppliedConfig) MarshalJSON() ([]byte, error) {
+	type Alias AgentAppliedConfig
+	out := Alias(ac)
+	if !ac.envResponseVisible {
+		out.Env = nil
+	} else if len(out.Env) > 0 {
+		filtered := make(map[string]string, len(out.Env))
+		for k, v := range out.Env {
+			if k == "GITHUB_TOKEN" {
+				continue
+			}
+			filtered[k] = v
+		}
+		if len(filtered) == 0 {
+			filtered = nil
+		}
+		out.Env = filtered
+	}
+	return json.Marshal(out)
 }
 
 // Project type constants.
