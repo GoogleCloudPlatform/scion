@@ -6366,3 +6366,32 @@ describe('scion-chat-thread /spawn slash command', () => {
     });
   });
 });
+
+describe('scion-chat-thread inter-agent markers', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('fetches inter-agent exchanges without raising the access-denied toast', async () => {
+    // Members lack agent.attach on agents they did not create, so this
+    // optional fetch 403s for them; it must fail quietly.
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.isDM = true;
+    el.conversationKey = 'dm:agent:agent-1:user:user-1';
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    await vi.waitFor(() =>
+      expect(apiFetch.mock.calls.some((c) => String(c[0]).includes('/interagent?'))).toBe(true)
+    );
+    const call = apiFetch.mock.calls.find((c) => String(c[0]).includes('/interagent?'))!;
+    expect((call[1] as { suppressAccessDeniedToast?: boolean })?.suppressAccessDeniedToast).toBe(
+      true
+    );
+  });
+});
