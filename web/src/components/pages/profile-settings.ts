@@ -508,8 +508,8 @@ export class ScionPageProfileSettings extends LitElement {
                   .value=${this._timezoneInput}
                   placeholder="America/Los_Angeles"
                   ?disabled=${this._timezoneSaving}
-                  @sl-input=${this._handleTimezoneInput}
-                  @keydown=${(e: KeyboardEvent) => {
+                  @sl-input=${(e: Event): void => this._handleTimezoneInput(e)}
+                  @keydown=${(e: KeyboardEvent): void => {
                     if (e.key === 'Enter') void this._saveTimezone();
                   }}
                 ></sl-input>
@@ -519,7 +519,7 @@ export class ScionPageProfileSettings extends LitElement {
                   ?loading=${this._timezoneSaving}
                   ?disabled=${this._timezoneSaving ||
                   this._timezoneInput.trim() === this._savedTimezone}
-                  @click=${() => this._saveTimezone()}
+                  @click=${(): void => void this._saveTimezone()}
                 >
                   Save
                 </sl-button>
