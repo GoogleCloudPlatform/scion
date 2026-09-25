@@ -3249,11 +3249,12 @@ func TestResolveAuthEnvOverlay_MutatesCallerOptsEnv(t *testing.T) {
 // concrete model from finalScionCfg.Model.
 func TestReResolveModelAlias(t *testing.T) {
 	tests := []struct {
-		name       string
-		envModel   string
-		cfg        *api.ScionConfig
-		wantModel  string
-		wantResolv bool
+		name        string
+		envModel    string
+		cfg         *api.ScionConfig
+		harnessName string
+		wantModel   string
+		wantResolv  bool
 	}{
 		{
 			name:       "unresolved alias large is re-resolved",
@@ -3318,11 +3319,40 @@ func TestReResolveModelAlias(t *testing.T) {
 			wantModel:  "",
 			wantResolv: false,
 		},
+		// Regression coverage for ptone/scion#1869: when cfg.Model is itself
+		// still the same unresolved alias as envModel (GetAgent had no local
+		// template chain to resolve it against either), the broker falls
+		// back to the harness's built-in model_aliases table instead of
+		// no-op'ing and leaking the alias to the harness process.
+		{
+			name:        "both env and cfg carry the same unresolved alias falls back to built-in table",
+			envModel:    "large",
+			cfg:         &api.ScionConfig{Model: "large"},
+			harnessName: "claude",
+			wantModel:   "claude-opus-5-5",
+			wantResolv:  true,
+		},
+		{
+			name:        "nil cfg falls back to built-in table when harness is known",
+			envModel:    "medium",
+			cfg:         nil,
+			harnessName: "claude",
+			wantModel:   "claude-sonnet-5",
+			wantResolv:  true,
+		},
+		{
+			name:        "unresolved alias with unknown harness name does not re-resolve",
+			envModel:    "large",
+			cfg:         &api.ScionConfig{Model: "large"},
+			harnessName: "not-a-real-harness",
+			wantModel:   "",
+			wantResolv:  false,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, ok := reResolveModelAlias(tt.envModel, tt.cfg)
+			got, ok := reResolveModelAlias(tt.envModel, tt.cfg, tt.harnessName)
 			if ok != tt.wantResolv {
 				t.Errorf("reResolveModelAlias() resolved = %v, want %v", ok, tt.wantResolv)
 			}

@@ -146,3 +146,64 @@ func TestGetAgent_CustomHarnessTypeFromHarnessConfig(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 	assert.Equal(t, "custom-harness", got.ResolvedHarness, "custom harness type should pass through from Hub DB harness config")
 }
+
+// TestResolveModelAliasForAgent_FallsBackToBuiltinTable is a regression test
+// for ptone/scion#1869: on resume, the hub's stored harness config for an
+// agent can lack a model_aliases map (e.g. it predates aliases being added,
+// or the config entry never had one), and resolveModelAliasForAgent used to
+// pass the raw size alias (e.g. "large") straight through. It must instead
+// fall back to the harness's own built-in model_aliases table declared in
+// harnesses/<name>/config.yaml, so a resumed agent never receives an
+// unresolved alias as ANTHROPIC_MODEL (or the equivalent for other harnesses).
+func TestResolveModelAliasForAgent_FallsBackToBuiltinTable(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Stored harness config exists (by slug) but carries no model_aliases.
+	hc := &store.HarnessConfig{
+		ID:         tid("hc-no-aliases"),
+		Name:       "claude-no-aliases",
+		Slug:       "claude-no-aliases",
+		Harness:    "claude",
+		Scope:      store.HarnessConfigScopeGlobal,
+		Status:     store.HarnessConfigStatusActive,
+		Visibility: store.VisibilityPublic,
+		Config:     &store.HarnessConfigData{Harness: "claude"},
+	}
+	require.NoError(t, s.CreateHarnessConfig(ctx, hc))
+
+	agent := seedCreatedAgentForHarnessTest(t, s, "no-aliases", "claude-no-aliases")
+
+	got := srv.resolveModelAliasForAgent(ctx, agent, "large")
+	assert.NotEqual(t, "large", got, "must not pass the unresolved size alias through to the harness")
+	assert.Equal(t, "claude-opus-5-5", got, "should resolve via the claude harness's built-in model_aliases table")
+}
+
+// TestResolveModelAliasForAgent_NoHarnessConfigAtAllFallsBackToBuiltinTable
+// covers the more common resume/restart shape from #1869: the agent's
+// applied config references no harness-config at all (e.g. an inline
+// harness name), so there is nothing to look up by ID or slug. The built-in
+// fallback must still resolve the alias using the resolved harness type.
+func TestResolveModelAliasForAgent_NoHarnessConfigAtAllFallsBackToBuiltinTable(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{ID: tid("project-inline"), Name: "Project inline", Slug: "project-inline"}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	agent := &store.Agent{
+		ID:        tid("agent-inline"),
+		Slug:      "agent-inline",
+		Name:      "Agent inline",
+		ProjectID: project.ID,
+		Phase:     string(state.PhaseCreated),
+		AppliedConfig: &store.AgentAppliedConfig{
+			InlineConfig: &api.ScionConfig{Harness: "claude"},
+		},
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	got := srv.resolveModelAliasForAgent(ctx, agent, "large")
+	assert.NotEqual(t, "large", got, "must not pass the unresolved size alias through to the harness")
+	assert.Equal(t, "claude-opus-5-5", got, "should resolve via the claude harness's built-in model_aliases table")
+}

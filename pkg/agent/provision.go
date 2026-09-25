@@ -1859,6 +1859,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	if err != nil {
 		util.Debugf("GetAgent: template chain for %q not found: %v, returning agentCfg only (harness=%q image=%q)",
 			effectiveTemplate, err, agentCfg.Harness, agentCfg.Image)
+		resolveModelAliasForExistingAgent(ctx, agentCfg, projectPath)
 		return agentDir, agentHome, agentWorkspace, agentCfg, nil
 	}
 
@@ -1879,22 +1880,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	// This covers the case where scion-agent.json was written with a raw alias
 	// (e.g. by applyInlineConfigUpdate before the hub-side fix) or where the
 	// agent was created before the hub resolved aliases at storage time.
-	if finalCfg.Model != "" {
-		hcName := finalCfg.HarnessConfig
-		if hcName == "" {
-			hcName = finalCfg.DefaultHarnessConfig
-		}
-		if hcName != "" {
-			hcDir, err := resolveHarnessConfigDir(ctx, hcName, projectPath)
-			if err == nil && hcDir != nil && hcDir.Config.ModelAliases != nil {
-				resolved := config.ResolveModelAlias(finalCfg.Model, hcDir.Config.ModelAliases)
-				if resolved != finalCfg.Model {
-					util.Debugf("GetAgent: resolved model alias %q → %q", finalCfg.Model, resolved)
-					finalCfg.Model = resolved
-				}
-			}
-		}
-	}
+	resolveModelAliasForExistingAgent(ctx, finalCfg, projectPath)
 
 	// Ensure Info is populated from agent-info.json if available
 	if agentInfo != nil {
@@ -1905,6 +1891,43 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 		finalCfg.Harness, finalCfg.HarnessConfig, finalCfg.Image, finalCfg.DefaultHarnessConfig)
 
 	return agentDir, agentHome, agentWorkspace, finalCfg, nil
+}
+
+// resolveModelAliasForExistingAgent resolves cfg.Model in place when it is
+// still a size alias (e.g. "large"). It first tries the harness-config's
+// model_aliases map resolved from disk (resolveHarnessConfigDir); when that
+// can't be resolved — which is the common case for hub-dispatched agents
+// that have no local template chain — it falls back to the harness's
+// built-in alias table (harnesses/<name>/config.yaml, via
+// harness.DefaultModelAliases). This is a no-op if cfg is nil, cfg.Model is
+// empty, or cfg.Model is not a known alias.
+func resolveModelAliasForExistingAgent(ctx context.Context, cfg *api.ScionConfig, projectPath string) {
+	if cfg == nil || cfg.Model == "" {
+		return
+	}
+
+	aliases := map[string]string{}
+	hcName := cfg.HarnessConfig
+	if hcName == "" {
+		hcName = cfg.DefaultHarnessConfig
+	}
+	if hcName != "" {
+		if hcDir, err := resolveHarnessConfigDir(ctx, hcName, projectPath); err == nil && hcDir != nil && len(hcDir.Config.ModelAliases) > 0 {
+			aliases = hcDir.Config.ModelAliases
+		}
+	}
+	if len(aliases) == 0 && cfg.Harness != "" {
+		aliases = harness.DefaultModelAliases(cfg.Harness)
+	}
+	if len(aliases) == 0 {
+		return
+	}
+
+	resolved := config.ResolveModelAlias(cfg.Model, aliases)
+	if resolved != cfg.Model {
+		util.Debugf("resolveModelAliasForExistingAgent: resolved model alias %q → %q", cfg.Model, resolved)
+		cfg.Model = resolved
+	}
 }
 
 // isWorkspaceEmptyDir returns true if the directory is empty or contains only

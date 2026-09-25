@@ -692,7 +692,7 @@ authDone:
 	// The hub may inject a raw alias (e.g. "large") when its store lacks
 	// the harness config's model_aliases map; the broker has the on-disk
 	// config and can resolve it here.
-	if resolved, ok := reResolveModelAlias(opts.Env["SCION_MODEL"], finalScionCfg); ok {
+	if resolved, ok := reResolveModelAlias(opts.Env["SCION_MODEL"], finalScionCfg, harnessName); ok {
 		util.Debugf("RunAgent: re-resolved leaked model alias %q → %q", opts.Env["SCION_MODEL"], resolved)
 		opts.Env["SCION_MODEL"] = resolved
 	}
@@ -1687,17 +1687,35 @@ func mergeExtraHosts(a, b []string) []string {
 }
 
 // reResolveModelAlias detects when SCION_MODEL contains an unresolved size
-// alias (e.g. "large") that the hub failed to resolve, and returns the
-// broker-side resolved concrete model from cfg.Model. It returns ("", false)
-// when no re-resolution is needed — either because the value is not a known
-// alias, the config is nil, or the config model is empty.
-func reResolveModelAlias(envModel string, cfg *api.ScionConfig) (string, bool) {
-	if envModel == "" || cfg == nil || cfg.Model == "" {
+// alias (e.g. "large") that the hub failed to resolve, and returns a
+// concrete model to use instead. It returns ("", false) when no
+// re-resolution is needed — either because the value is not a known alias,
+// or a concrete replacement could not be determined.
+//
+// It first tries cfg.Model, the broker's own resolved config (this is the
+// pre-existing behavior for when the hub's alias resolution failed but the
+// broker's local config resolved it). When cfg.Model is empty or is itself
+// still the same unresolved alias — e.g. GetAgent had no local template
+// chain to resolve against either — it falls back to the harness's built-in
+// alias table (harnesses/<harnessName>/config.yaml) so a bare alias never
+// reaches the harness verbatim.
+func reResolveModelAlias(envModel string, cfg *api.ScionConfig, harnessName string) (string, bool) {
+	if envModel == "" {
 		return "", false
 	}
 	normalized := config.NormalizeModelAlias(envModel)
-	if config.KnownModelAliases[normalized] && envModel != cfg.Model {
+	if !config.KnownModelAliases[normalized] {
+		return "", false
+	}
+	if cfg != nil && cfg.Model != "" && envModel != cfg.Model {
 		return cfg.Model, true
+	}
+	if harnessName != "" {
+		if aliases := harness.DefaultModelAliases(harnessName); len(aliases) > 0 {
+			if resolved := config.ResolveModelAlias(envModel, aliases); resolved != envModel {
+				return resolved, true
+			}
+		}
 	}
 	return "", false
 }
