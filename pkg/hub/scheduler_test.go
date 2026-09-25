@@ -2065,3 +2065,35 @@ func TestSchedulerMultipleOptions(t *testing.T) {
 		t.Errorf("expected MaxConcurrency 3, got %d", s.MaxConcurrency)
 	}
 }
+
+// #1797: an agent creator's scheduled dispatch records the creator agent's
+// name as CreatorName, mirroring the agent-create path.
+func TestDispatchAgentEventHandler_AgentCreatorSetsCreatorName(t *testing.T) {
+	ms := newMockStore()
+	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
+	ms.agents["creator-agent"] = &store.Agent{
+		ID:            "creator-agent",
+		Name:          "lead-agent",
+		ProjectID:     "project-1",
+		AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(AgentRoleFull)},
+	}
+
+	srv := newEventHandlerTestServer(ms)
+	if err := srv.dispatchAgentEventHandler()(context.Background(), store.ScheduledEvent{
+		ID:        "dispatch-creator-name",
+		ProjectID: "project-1",
+		EventType: "dispatch_agent",
+		Payload:   `{"agentName":"sched-child"}`,
+		CreatedBy: "creator-agent",
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got, err := ms.GetAgentBySlug(context.Background(), "project-1", "sched-child")
+	if err != nil {
+		t.Fatalf("scheduled agent not created: %v", err)
+	}
+	if got.AppliedConfig == nil || got.AppliedConfig.CreatorName != "lead-agent" {
+		t.Fatalf("expected CreatorName %q, got %+v", "lead-agent", got.AppliedConfig)
+	}
+}

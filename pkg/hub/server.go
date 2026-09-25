@@ -3269,6 +3269,108 @@ func (s *Server) authorizeScheduledAgentCreate(ctx context.Context, evt store.Sc
 	return true, nil
 }
 
+// scheduledCreatorIdentity resolves a scheduled event's CreatedBy principal
+// into the Identity the agent-create path would have had on its request
+// context, plus the human-readable creator name that path records in
+// AppliedConfig.CreatorName (#1797). Mirrors createAgent: an agent creator is
+// named by its agent Name, a user creator by their email.
+//
+// authorizeScheduledAgentCreate has already admitted the creator by the time
+// this runs; this is attribution and identity construction, not a gate.
+func (s *Server) scheduledCreatorIdentity(ctx context.Context, createdBy string) (Identity, string, error) {
+	if createdBy == "" {
+		return nil, "", fmt.Errorf("scheduled event has no creator")
+	}
+	if creator, err := s.store.GetAgent(ctx, createdBy); err == nil {
+		role, additionalScopes := agentRoleAndScopes(creator)
+		scopes := append(ScopesForRole(role), additionalScopes...)
+		identity := &agentIdentityWrapper{&AgentTokenClaims{
+			Claims:    jwt.Claims{Subject: creator.ID},
+			ProjectID: creator.ProjectID,
+			Scopes:    scopes,
+		}}
+		return identity, creator.Name, nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return nil, "", fmt.Errorf("failed to resolve scheduled dispatch creator agent %q: %w", createdBy, err)
+	}
+	user, err := s.store.GetUser(ctx, createdBy)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to resolve scheduled dispatch creator user %q: %w", createdBy, err)
+	}
+	identity := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "scheduler")
+	return identity, user.Email, nil
+}
+
+// applyScheduledProjectDefaultGCPIdentity is the scheduler-path twin of the
+// project-default GCP identity block in createAgentInProject
+// (handlers_agents_core.go). A scheduled dispatch carries no explicit
+// gcp_identity, so only the project default applies. The same checks run in
+// the same order — SA reachable from the project, SA verified, then the full
+// authorizeSAAssignment gate (SurfaceProjectDefault) against the immediate
+// creator, whose identity must already be on ctx — and, as on the create
+// path, a project-default SA that fails any check fails the dispatch rather
+// than silently degrading.
+//
+// When the project has no default GCP identity mode (or "block"), the
+// applied config is left untouched, preserving the scheduler path's prior
+// behaviour (#1797).
+func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, agent *store.Agent, project *store.Project) error {
+	if agent.AppliedConfig == nil {
+		agent.AppliedConfig = &store.AgentAppliedConfig{}
+	}
+	projectSettings := projectSettingsFromAnnotations(project)
+	switch projectSettings.DefaultGCPIdentityMode {
+	case store.GCPMetadataModePassthrough:
+		agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
+			MetadataMode: store.GCPMetadataModePassthrough,
+		}
+		if agent.RuntimeBrokerID != "" {
+			if err := s.translatePassthroughForSandbox(ctx, agent, agent.RuntimeBrokerID); err != nil {
+				return fmt.Errorf("failed to configure GCP identity for sandbox runtime: %w", err)
+			}
+		}
+	case store.GCPMetadataModeAssign:
+		if projectSettings.DefaultGCPIdentityServiceAccountID == "" {
+			agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
+				MetadataMode: store.GCPMetadataModeBlock,
+			}
+			return nil
+		}
+		sa, err := s.store.GetGCPServiceAccount(ctx, projectSettings.DefaultGCPIdentityServiceAccountID)
+		// sa == nil is explicit even though ReachableFromProject is nil-safe,
+		// so a store returning (nil, nil) visibly takes this branch.
+		if err != nil || sa == nil || !sa.ReachableFromProject(agent.ProjectID) {
+			slog.Warn("project-default SA assignment failed: service account not available",
+				"surface", SurfaceProjectDefault,
+				"project_id", agent.ProjectID,
+				"sa_id", projectSettings.DefaultGCPIdentityServiceAccountID,
+				"err", err)
+			return fmt.Errorf("project default GCP service account is not available in project %q", agent.ProjectID)
+		}
+		if !sa.Verified {
+			slog.Warn("project-default SA assignment failed: service account not verified",
+				"surface", SurfaceProjectDefault,
+				"project_id", agent.ProjectID,
+				"sa_id", sa.ID, "sa_email", sa.Email)
+			return fmt.Errorf("project default GCP service account %q is not verified", sa.Email)
+		}
+		if denial := s.evaluateSAAssignment(ctx, nil, sa, SurfaceProjectDefault); denial != nil {
+			slog.Warn("project-default SA assignment denied by authorization gate",
+				"surface", SurfaceProjectDefault,
+				"project_id", agent.ProjectID,
+				"sa_id", sa.ID, "sa_email", sa.Email)
+			return denial
+		}
+		agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
+			MetadataMode:        store.GCPMetadataModeAssign,
+			ServiceAccountID:    sa.ID,
+			ServiceAccountEmail: sa.Email,
+			ProjectID:           sa.ProjectID,
+		}
+	}
+	return nil
+}
+
 // dispatchAgentEventHandler returns an EventHandler that creates and starts
 // an agent in the project via the AgentDispatcher.
 func (s *Server) dispatchAgentEventHandler() EventHandler {
@@ -3349,6 +3451,13 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		// code can never reinterpret it as a legacy empty-role agent.
 		agent.AppliedConfig.AgentRole = string(AgentRoleNone)
 		agent.AppliedConfig.NoAuth = true
+		// Record the creator's display name exactly as the agent-create path
+		// does; the broker threads it through to the agent (#1797).
+		creatorIdentity, creatorName, err := s.scheduledCreatorIdentity(ctx, evt.CreatedBy)
+		if err != nil {
+			return err
+		}
+		agent.AppliedConfig.CreatorName = creatorName
 		if payload.Task != "" {
 			agent.AppliedConfig.Task = payload.Task
 		}
@@ -3482,6 +3591,13 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		// applyHubAgentDefaults for why that placement is the whole point.
 		if applyHubAgentDefaults(agent.AppliedConfig, s.hubAgentDefaults()) {
 			ctx = withHubDefaultHarnessConfig(ctx)
+		}
+
+		// Project-default GCP identity, gated against the schedule creator as
+		// the immediate agent creator — twin of the create path (#1797).
+		if err := s.applyScheduledProjectDefaultGCPIdentity(
+			contextWithIdentity(ctx, creatorIdentity), agent, project); err != nil {
+			return fmt.Errorf("scheduled dispatch of agent %q: %w", slug, err)
 		}
 
 		s.populateAgentConfig(ctx, agent, project, tmpl)
