@@ -222,6 +222,10 @@ const PATH_MD_EXTS = new Set(['.md', '.markdown']);
 /** Maximum file size for inline text preview (512 KB). */
 const PATH_PREVIEW_MAX = 512 * 1024;
 
+/** Error shown when a path-link click cannot resolve any project id. */
+const PATH_LINK_NO_PROJECT_ERROR =
+  'Cannot open file: could not determine which project this file belongs to';
+
 /** State for the file-path viewer dialog. */
 interface FilePreviewState {
   /** The raw container path from the link. */
@@ -2789,14 +2793,62 @@ export class ScionChatThread extends LitElement {
   // Path-link file preview (#1148)
   // ---------------------------------------------------------------------------
 
-  /** Handle path-link-click event from a chat message. */
-  private async handlePathLinkClick(e: CustomEvent<{ path: string }>): Promise<void> {
-    const containerPath = e.detail.path;
+  /**
+   * Resolve the best-available project id for a path-link click.
+   *
+   * For project-scoped threads, the thread's own `projectId` is correct and
+   * takes priority. But a DM's thread-level `projectId` is not a project the
+   * DM belongs to — it's whatever project the user happened to be viewing
+   * before opening the DM (`inheritedProjectId()`), kept around only for
+   * attachment uploads. Using it here would resolve links against an
+   * unrelated project (silently opening the wrong `/workspace` file, or
+   * 404ing on a scratchpad path that project doesn't declare). So in a DM we
+   * never fall back to it. Order of preference in a DM:
+   *
+   *   1. The message's own project — `senderProjectId` (server-derived) or
+   *      `projectId` (set on the agent-to-user outbound path, which never
+   *      sets `senderProjectId`; also the hub's user-to-agent send path
+   *      stamps this from the peer agent's project, so a persisted or
+   *      SSE-delivered message in an agent DM always carries it).
+   *   2. The DM peer agent's project, read from the shared agent cache
+   *      (`stateManager`, for the current view scope — cleared on every
+   *      `setScope()` and re-seeded by the chat page's member list — no
+   *      extra fetch). This only fills a narrow, real gap: the client's
+   *      own optimistic message (`optimisticMsg.projectId = ''` above) has
+   *      no project yet because it hasn't round-tripped the server. The
+   *      peer agent is not an unrelated project — it is who the DM is with.
+   *   3. Nothing — return '' so the caller shows the "could not determine
+   *      which project" error instead of guessing at an unrelated project.
+   */
+  private resolvePathLinkProjectId(msg: Message | undefined): string {
+    const fromMsg = msg?.senderProjectId || msg?.projectId || '';
+    if (!this.isDM) return this.projectId || fromMsg;
+    return fromMsg || this.peerAgentProjectId();
+  }
 
-    if (!this.projectId) {
-      this.sendError = 'Cannot open file: no project context';
+  /**
+   * The DM peer agent's project id, from the shared in-memory agent cache
+   * (no network call). Empty when this isn't an agent DM or the peer agent
+   * isn't in the cache.
+   */
+  private peerAgentProjectId(): string {
+    if (!this.isAgentDM) return '';
+    const peerAgentId = this.conversationKey.split(':')[2] || '';
+    return (peerAgentId && stateManager.getAgent(peerAgentId)?.projectId) || '';
+  }
+
+  /** Handle path-link-click event from a chat message. */
+  private async handlePathLinkClick(
+    e: CustomEvent<{ path: string }>,
+    msg?: Message
+  ): Promise<void> {
+    const containerPath = e.detail.path;
+    const resolvedProjectId = this.resolvePathLinkProjectId(msg);
+
+    if (!resolvedProjectId) {
+      this.sendError = PATH_LINK_NO_PROJECT_ERROR;
       setTimeout(() => {
-        if (this.sendError === 'Cannot open file: no project context') {
+        if (this.sendError === PATH_LINK_NO_PROJECT_ERROR) {
           this.sendError = null;
         }
       }, 4000);
@@ -2818,7 +2870,7 @@ export class ScionChatThread extends LitElement {
     const ext = fileName.includes('.') ? '.' + fileName.split('.').pop()!.toLowerCase() : '';
     const isImage = PATH_IMAGE_EXTS.has(ext);
     const isMarkdown = PATH_MD_EXTS.has(ext);
-    const downloadUrl = buildFileApiUrl(this.projectId, target);
+    const downloadUrl = buildFileApiUrl(resolvedProjectId, target);
 
     this.filePreview = {
       containerPath,
@@ -3580,7 +3632,8 @@ export class ScionChatThread extends LitElement {
               ? this.resolveProjectSlug(msg.senderProjectId)
               : ''}
             @scroll-to-message=${this.handleScrollToMessage}
-            @path-link-click=${this.handlePathLinkClick}
+            @path-link-click=${(e: CustomEvent<{ path: string }>) =>
+              this.handlePathLinkClick(e, msg)}
           ></scion-chat-message>
         `,
       });

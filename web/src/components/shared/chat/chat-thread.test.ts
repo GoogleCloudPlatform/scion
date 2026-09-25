@@ -35,6 +35,18 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 /** Stand-in for the global stateManager: only the EventTarget surface is used. */
 class FakeStateManager extends EventTarget {
   currentScope: { type: string; userId: string } | null = null;
+  private agentsById = new Map<string, { id: string; projectId: string }>();
+  /** Seed an agent record for `getAgent` lookups (peer-agent project fallback). */
+  setAgent(id: string, projectId: string): void {
+    this.agentsById.set(id, { id, projectId });
+  }
+  getAgent(id: string): { id: string; projectId: string } | undefined {
+    return this.agentsById.get(id);
+  }
+  /** Clear all seeded agent records (mirrors `setScope()` clearing `state.agents`). */
+  clearAgents(): void {
+    this.agentsById.clear();
+  }
 }
 const fakeStateManager = new FakeStateManager();
 
@@ -2140,5 +2152,350 @@ describe('scion-chat-thread inter-agent day-split markers', () => {
     for (const marker of markers) {
       expect((marker as unknown as { messageCount: number }).messageCount).toBe(1);
     }
+  });
+});
+
+describe('scion-chat-thread path-link project context fallback', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    fakeStateManager.clearAgents();
+  });
+
+  /** Minimal Message fixture; override fields per-test. */
+  function makeMessage(overrides: Partial<Message> = {}): Message {
+    return {
+      id: 'm1',
+      projectId: '',
+      sender: 'agent:fix-filebrowser-symlink-lead',
+      senderId: 'agent-1',
+      recipient: '',
+      recipientId: '',
+      msg: 'Note: /scion-volumes/scratchpad/projects/visibility-removal/scoping.md',
+      type: 'chat',
+      agentId: '',
+      createdAt: '2026-01-01T00:00:00Z',
+      ...overrides,
+    };
+  }
+
+  type Internals = {
+    sendError: string | null;
+    filePreview: { containerPath: string; status: string; downloadUrl?: string } | null;
+    handlePathLinkClick(e: CustomEvent<{ path: string }>, msg?: Message): Promise<void>;
+  };
+
+  it('shows a clear error for a cold-load DM with no thread projectId and no message fallback', async () => {
+    const el = await mount();
+    // A cold load straight into a DM has no inherited project to fall back to.
+    el.isDM = true;
+    el.projectId = '';
+    const internals = el as unknown as Internals;
+
+    await internals.handlePathLinkClick(
+      new CustomEvent('path-link-click', {
+        detail: { path: '/scion-volumes/scratchpad/projects/visibility-removal/scoping.md' },
+      }),
+      makeMessage({ projectId: '' })
+    );
+
+    expect(internals.sendError).toBe(
+      'Cannot open file: could not determine which project this file belongs to'
+    );
+    expect(internals.filePreview).toBeNull();
+  });
+
+  it('a DM with an inherited unrelated project uses the message project, not the thread project', async () => {
+    const el = await mount();
+    el.isDM = true;
+    // The thread project here is only `inheritedProjectId()` — whatever
+    // project the user was last viewing before opening this DM, unrelated
+    // to the DM itself.
+    el.projectId = 'proj-inherited';
+    apiFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ content: 'scoping notes', size: 14 }),
+    } as unknown as Response);
+    const internals = el as unknown as Internals;
+
+    await internals.handlePathLinkClick(
+      new CustomEvent('path-link-click', {
+        detail: { path: '/scion-volumes/scratchpad/projects/visibility-removal/scoping.md' },
+      }),
+      makeMessage({ senderProjectId: 'proj-visibility-removal' })
+    );
+
+    expect(internals.sendError).toBeNull();
+    expect(internals.filePreview?.status).toBe('ready');
+    expect(internals.filePreview?.downloadUrl).toBe(
+      '/api/v1/projects/proj-visibility-removal/shared-dirs/scratchpad/files/projects/visibility-removal/scoping.md'
+    );
+  });
+
+  it('a DM with an inherited unrelated project uses the message projectId when senderProjectId is absent', async () => {
+    const el = await mount();
+    el.isDM = true;
+    // Same inherited-project setup as above, but the message only carries
+    // `projectId` (no `senderProjectId`), as on the agent->user outbound
+    // path: handleAgentOutboundMessage stamps ProjectID but never sets
+    // SenderProjectID.
+    el.projectId = 'proj-inherited';
+    apiFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ content: 'scoping notes', size: 14 }),
+    } as unknown as Response);
+    const internals = el as unknown as Internals;
+
+    await internals.handlePathLinkClick(
+      new CustomEvent('path-link-click', {
+        detail: { path: '/scion-volumes/scratchpad/projects/visibility-removal/scoping.md' },
+      }),
+      makeMessage({ projectId: 'proj-visibility-removal' })
+    );
+
+    expect(internals.sendError).toBeNull();
+    expect(internals.filePreview?.status).toBe('ready');
+    expect(internals.filePreview?.downloadUrl).toBe(
+      '/api/v1/projects/proj-visibility-removal/shared-dirs/scratchpad/files/projects/visibility-removal/scoping.md'
+    );
+  });
+
+  it('a cold-load DM with an empty project uses the message senderProjectId', async () => {
+    const el = await mount();
+    el.isDM = true;
+    el.projectId = '';
+    apiFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ content: 'scoping notes', size: 14 }),
+    } as unknown as Response);
+    const internals = el as unknown as Internals;
+
+    await internals.handlePathLinkClick(
+      new CustomEvent('path-link-click', {
+        detail: { path: '/scion-volumes/scratchpad/projects/visibility-removal/scoping.md' },
+      }),
+      makeMessage({ senderProjectId: 'proj-visibility-removal' })
+    );
+
+    expect(internals.sendError).toBeNull();
+    expect(internals.filePreview?.status).toBe('ready');
+    expect(internals.filePreview?.downloadUrl).toBe(
+      '/api/v1/projects/proj-visibility-removal/shared-dirs/scratchpad/files/projects/visibility-removal/scoping.md'
+    );
+  });
+
+  it('the agent-to-user outbound path (only msg.projectId, no senderProjectId) resolves', async () => {
+    const el = await mount();
+    el.isDM = true;
+    el.projectId = '';
+    apiFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ content: 'notes', size: 5 }),
+    } as unknown as Response);
+    const internals = el as unknown as Internals;
+
+    // handleAgentOutboundMessage stamps ProjectID on the message but never
+    // sets SenderProjectID, so this is the real shape of an agent DM.
+    await internals.handlePathLinkClick(
+      new CustomEvent('path-link-click', {
+        detail: { path: '/scion-volumes/scratchpad/notes.md' },
+      }),
+      makeMessage({ projectId: 'proj-fallback' })
+    );
+
+    expect(internals.sendError).toBeNull();
+    expect(internals.filePreview?.downloadUrl).toBe(
+      '/api/v1/projects/proj-fallback/shared-dirs/scratchpad/files/notes.md'
+    );
+  });
+
+  it('prefers the thread-level projectId for a project-scoped (non-DM) thread', async () => {
+    const el = await mount();
+    el.isDM = false;
+    el.projectId = 'proj-thread';
+    apiFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ content: 'notes', size: 5 }),
+    } as unknown as Response);
+    const internals = el as unknown as Internals;
+
+    await internals.handlePathLinkClick(
+      new CustomEvent('path-link-click', {
+        detail: { path: '/scion-volumes/scratchpad/notes.md' },
+      }),
+      makeMessage({ senderProjectId: 'proj-sender' })
+    );
+
+    expect(internals.filePreview?.downloadUrl).toBe(
+      '/api/v1/projects/proj-thread/shared-dirs/scratchpad/files/notes.md'
+    );
+  });
+
+  it('keeps the "unrecognized path format" behavior for a resolvable project', async () => {
+    const el = await mount();
+    el.isDM = true;
+    el.projectId = '';
+    const internals = el as unknown as Internals;
+
+    await internals.handlePathLinkClick(
+      new CustomEvent('path-link-click', { detail: { path: 'not-a-path' } }),
+      makeMessage({ senderProjectId: 'proj-visibility-removal' })
+    );
+
+    expect(internals.sendError).toBe('Cannot open file: unrecognized path format');
+  });
+
+  it('a DM with an inherited unrelated project and no message project shows the error, not the inherited project', async () => {
+    const el = await mount();
+    el.isDM = true;
+    // The thread project is only `inheritedProjectId()` — whatever project
+    // the user was last viewing before opening this DM — and this is a
+    // human-to-human DM (conversationKey does not start with "dm:agent:"),
+    // so there is no peer-agent fallback either.
+    el.projectId = 'proj-inherited';
+    apiFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ content: 'scoping notes', size: 14 }),
+    } as unknown as Response);
+    const internals = el as unknown as Internals;
+
+    await internals.handlePathLinkClick(
+      new CustomEvent('path-link-click', {
+        detail: { path: '/scion-volumes/scratchpad/projects/visibility-removal/scoping.md' },
+      }),
+      makeMessage({ projectId: '' })
+    );
+
+    expect(internals.sendError).toBe(
+      'Cannot open file: could not determine which project this file belongs to'
+    );
+    expect(internals.filePreview).toBeNull();
+    // Must never have resolved (or fetched) against the unrelated inherited project.
+    expect(apiFetch.mock.calls.some((call) => String(call[0]).includes('/proj-inherited/'))).toBe(
+      false
+    );
+  });
+
+  it('falls back to the DM peer agent project when the message carries no project of its own', async () => {
+    // Simulates clicking a path link on the client's own just-sent optimistic
+    // message (chat-thread sets `optimisticMsg.projectId = ''` until the
+    // server-echoed version replaces it), in an agent DM.
+    fakeStateManager.setAgent('coder', 'proj-peer-agent');
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    apiFetch.mockImplementation(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ items: [] }),
+      } as unknown as Response)
+    );
+    el.conversationKey = 'dm:agent:coder:user:u1';
+    el.isDM = true;
+    // An unrelated inherited project must not win, nor be needed.
+    el.projectId = 'proj-inherited';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalled());
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ content: 'scoping notes', size: 14 }),
+    } as unknown as Response);
+    const internals = el as unknown as Internals;
+
+    await internals.handlePathLinkClick(
+      new CustomEvent('path-link-click', {
+        detail: { path: '/scion-volumes/scratchpad/notes.md' },
+      }),
+      makeMessage({ projectId: '' })
+    );
+
+    expect(internals.sendError).toBeNull();
+    expect(internals.filePreview?.status).toBe('ready');
+    expect(internals.filePreview?.downloadUrl).toBe(
+      '/api/v1/projects/proj-peer-agent/shared-dirs/scratchpad/files/notes.md'
+    );
+  });
+
+  it('uses the message project over the cached peer-agent project when both are available', async () => {
+    // Precedence: the message's own project always wins over the DM peer's
+    // cached project (`resolvePathLinkProjectId`: `fromMsg || peer`, never the
+    // other order). A mutant that checks the peer first would pass this test
+    // with 'proj-peer', not 'proj-msg'.
+    fakeStateManager.setAgent('coder', 'proj-peer');
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    apiFetch.mockImplementation(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ items: [] }),
+      } as unknown as Response)
+    );
+    el.conversationKey = 'dm:agent:coder:user:u1';
+    el.isDM = true;
+    el.projectId = 'proj-inherited';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalled());
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ content: 'scoping notes', size: 14 }),
+    } as unknown as Response);
+    const internals = el as unknown as Internals;
+
+    await internals.handlePathLinkClick(
+      new CustomEvent('path-link-click', {
+        detail: { path: '/scion-volumes/scratchpad/notes.md' },
+      }),
+      makeMessage({ senderProjectId: 'proj-msg' })
+    );
+
+    expect(internals.sendError).toBeNull();
+    expect(internals.filePreview?.status).toBe('ready');
+    expect(internals.filePreview?.downloadUrl).toBe(
+      '/api/v1/projects/proj-msg/shared-dirs/scratchpad/files/notes.md'
+    );
+  });
+
+  it('does not use the peer-agent fallback when the peer agent is not in the local cache', async () => {
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    apiFetch.mockImplementation(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ items: [] }),
+      } as unknown as Response)
+    );
+    el.conversationKey = 'dm:agent:unknown-agent:user:u1';
+    el.isDM = true;
+    el.projectId = 'proj-inherited';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalled());
+    const internals = el as unknown as Internals;
+
+    await internals.handlePathLinkClick(
+      new CustomEvent('path-link-click', {
+        detail: { path: '/scion-volumes/scratchpad/notes.md' },
+      }),
+      makeMessage({ projectId: '' })
+    );
+
+    expect(internals.sendError).toBe(
+      'Cannot open file: could not determine which project this file belongs to'
+    );
+    expect(internals.filePreview).toBeNull();
   });
 });
