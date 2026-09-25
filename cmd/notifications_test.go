@@ -317,19 +317,18 @@ func TestResolveProjectID(t *testing.T) {
 
 // requireHubClientTestState saves/restores the package-level state
 // requireHubClient depends on (cmd/notifications.go), so tests can isolate
-// hub-context env vars and the project path without leaking into other
-// tests in this package.
+// the project path without leaking into other tests in this package. HOME
+// and hub-context env vars are isolated via t.Setenv, which restores them
+// automatically.
 type requireHubClientTestState struct {
-	home        string
 	projectPath string
 }
 
 func saveRequireHubClientTestState() requireHubClientTestState {
-	return requireHubClientTestState{home: os.Getenv("HOME"), projectPath: projectPath}
+	return requireHubClientTestState{projectPath: projectPath}
 }
 
 func (s requireHubClientTestState) restore() {
-	_ = os.Setenv("HOME", s.home)
 	projectPath = s.projectPath
 }
 
@@ -357,7 +356,7 @@ func TestRequireHubClient_NoHubEnabled_NoAgentContext_Errors(t *testing.T) {
 	clearHubContextEnv(t)
 
 	tmpHome := t.TempDir()
-	_ = os.Setenv("HOME", tmpHome)
+	t.Setenv("HOME", tmpHome)
 	projectDir := filepath.Join(tmpHome, "no-hub-project", ".scion")
 	if err := os.MkdirAll(projectDir, 0755); err != nil {
 		t.Fatalf("failed to create project dir: %v", err)
@@ -390,7 +389,7 @@ func TestRequireHubClient_AgentHubContext_HubNotEnabledInSettings(t *testing.T) 
 	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
 
 	tmpHome := t.TempDir()
-	_ = os.Setenv("HOME", tmpHome)
+	t.Setenv("HOME", tmpHome)
 	projectDir := filepath.Join(tmpHome, "agent-project", ".scion")
 	if err := os.MkdirAll(projectDir, 0755); err != nil {
 		t.Fatalf("failed to create project dir: %v", err)
@@ -415,13 +414,11 @@ func TestRequireHubClient_AgentHubContext_HubNotEnabledInSettings(t *testing.T) 
 // for the same reason conversation commands did — requireHubClient is the
 // shared gate for both (cmd/notifications.go, cmd/conversation.go).
 func TestRunNotificationsList_AgentHubContext_HubNotEnabledInSettings(t *testing.T) {
-	origHome := os.Getenv("HOME")
 	origProjectPath := projectPath
 	origJSON := notificationsJSON
 	origShowAll := notificationsShowAll
 	origOutputFormat := outputFormat
 	defer func() {
-		_ = os.Setenv("HOME", origHome)
 		projectPath = origProjectPath
 		notificationsJSON = origJSON
 		notificationsShowAll = origShowAll
@@ -447,7 +444,7 @@ func TestRunNotificationsList_AgentHubContext_HubNotEnabledInSettings(t *testing
 	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
 
 	tmpHome := t.TempDir()
-	_ = os.Setenv("HOME", tmpHome)
+	t.Setenv("HOME", tmpHome)
 	projectDir := filepath.Join(tmpHome, "agent-project", ".scion")
 	if err := os.MkdirAll(projectDir, 0755); err != nil {
 		t.Fatalf("failed to create project dir: %v", err)

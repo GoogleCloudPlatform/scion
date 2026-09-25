@@ -684,7 +684,7 @@ func TestRunConversationList_AgentHubContext_HubNotEnabledInSettings(t *testing.
 	isolateHubEnvForTest(t, server.URL, "agent-project-id")
 	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
 	tmpHome := t.TempDir()
-	_ = os.Setenv("HOME", tmpHome)
+	t.Setenv("HOME", tmpHome)
 	projectPath = setupProjectWithoutHubEnabled(t, tmpHome)
 	convProject = ""
 	convJSON = true
@@ -725,7 +725,7 @@ func TestRunConversationCatchUp_AgentHubContext_HubNotEnabledInSettings(t *testi
 	isolateHubEnvForTest(t, server.URL, "agent-project-id")
 	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
 	tmpHome := t.TempDir()
-	_ = os.Setenv("HOME", tmpHome)
+	t.Setenv("HOME", tmpHome)
 	projectPath = setupProjectWithoutHubEnabled(t, tmpHome)
 	convCatchUpJSON = true
 	convCatchUpSince = "1h"
