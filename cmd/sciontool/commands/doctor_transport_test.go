@@ -143,9 +143,14 @@ func TestCheckAuthentication_WithTransportAuth(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = fmt.Fprint(w, `{"status":"ok"}`)
 	})
-	handler.HandleFunc("/api/v1/agents/test-agent/token/refresh", func(w http.ResponseWriter, r *http.Request) {
+	handler.HandleFunc("/api/v1/agents/test-agent", func(w http.ResponseWriter, r *http.Request) {
+		agentToken := r.Header.Get("X-Scion-Agent-Token")
+		if agentToken != "test-scion-token" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
-		_, _ = fmt.Fprint(w, `{"token":"new-token"}`)
+		_, _ = fmt.Fprint(w, `{"phase":"working"}`)
 	})
 
 	server := httptest.NewServer(doctorIAPMiddleware(transportToken, handler))
@@ -168,6 +173,93 @@ func TestCheckAuthentication_WithTransportAuth(t *testing.T) {
 	}
 	if failures != 0 {
 		t.Errorf("expected 0 failures, got %d", failures)
+	}
+}
+
+// TestCheckAuthentication_DoesNotRevokeOriginalToken is a regression test for
+// ptone/scion#1939. checkAuthentication used to probe auth by POSTing to
+// .../token/refresh and discarding the response. On a real hub, issuing a
+// refresh revokes the credential that was just presented once the
+// replacement is minted (see pkg/hub/handlers_agents_core.go), so the
+// discarded replacement left the agent holding a dead token — every
+// subsequent heartbeat 401'd until restart. This test fails if
+// checkAuthentication ever calls the refresh endpoint, and proves the
+// original credential still authenticates a real follow-up call afterwards.
+func TestCheckAuthentication_DoesNotRevokeOriginalToken(t *testing.T) {
+	const originalToken = "original-scion-token"
+	var revoked bool
+	var refreshCalls int
+
+	authGuard := func(w http.ResponseWriter, r *http.Request) bool {
+		agentToken := r.Header.Get("X-Scion-Agent-Token")
+		if agentToken != originalToken || revoked {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = fmt.Fprint(w, `{"error":"token has been revoked"}`)
+			return false
+		}
+		return true
+	}
+
+	handler := http.NewServeMux()
+	handler.HandleFunc("/api/v1/agents/test-agent/status", func(w http.ResponseWriter, r *http.Request) {
+		if !authGuard(w, r) {
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	handler.HandleFunc("/api/v1/agents/test-agent", func(w http.ResponseWriter, r *http.Request) {
+		if !authGuard(w, r) {
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, `{"phase":"working"}`)
+	})
+	// Mirrors the real hub: a successful refresh revokes the token that was
+	// presented to obtain it. If doctor ever hits this, the assertions below
+	// (refreshCalls and the follow-up request) catch it.
+	handler.HandleFunc("/api/v1/agents/test-agent/token/refresh", func(w http.ResponseWriter, r *http.Request) {
+		refreshCalls++
+		revoked = true
+		w.WriteHeader(http.StatusOK)
+		expires := time.Now().Add(time.Hour).Format(time.RFC3339)
+		_, _ = fmt.Fprintf(w, `{"token":"replacement-token","expires_at":%q}`, expires)
+	})
+
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	t.Setenv("SCION_AGENT_ID", "test-agent")
+
+	tokenDir := t.TempDir()
+	cleanup := hub.SetTokenHome(tokenDir)
+	defer cleanup()
+	scionDir := tokenDir + "/.scion"
+	_ = os.MkdirAll(scionDir, 0700)
+	_ = os.WriteFile(scionDir+"/scion-token", []byte(originalToken), 0600)
+
+	failures := 0
+	result := checkAuthentication(server.URL, &failures, nil)
+	if !result {
+		t.Errorf("expected authentication check to pass, got failures=%d", failures)
+	}
+	if refreshCalls != 0 {
+		t.Fatalf("doctor must not call the rotating token/refresh endpoint; called %d time(s)", refreshCalls)
+	}
+
+	// The real regression check: the original credentials the agent was
+	// already using must still work for a later, real call.
+	req, err := http.NewRequest("POST", server.URL+"/api/v1/agents/test-agent/status", nil)
+	if err != nil {
+		t.Fatalf("failed to build follow-up request: %v", err)
+	}
+	req.Header.Set("X-Scion-Agent-Token", originalToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("follow-up status call failed: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected original token to still work after doctor ran, got status %d", resp.StatusCode)
 	}
 }
 

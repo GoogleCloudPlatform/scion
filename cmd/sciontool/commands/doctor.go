@@ -35,8 +35,7 @@ Checks performed:
   - Environment variables (SCION_HUB_ENDPOINT, SCION_AGENT_ID, etc.)
   - Token file presence, format, and expiry
   - Hub reachability (unauthenticated health check)
-  - Token validity (authenticated status update)
-  - Token refresh capability
+  - Token validity (authenticated status update and a read-only agent lookup)
   - GCP metadata server (if configured)
   - GitHub App token (if configured)
 
@@ -326,32 +325,41 @@ func checkAuthentication(hubURL string, failures *int, transportSrc transportaut
 		fmt.Printf("[WARN] Hub returned %d: %s\n", resp.StatusCode, doctorTruncate(string(respBody), 120))
 	}
 
-	// Test token refresh
-	refreshURL := fmt.Sprintf("%s/api/v1/agents/%s/token/refresh",
+	// Confirm the token a second way using a read-only lookup, deliberately
+	// *not* the token-refresh endpoint: POST .../token/refresh mints a
+	// replacement credential and revokes the one just presented (hub side:
+	// pkg/hub/handlers_agents_core.go). Doctor has no way to hand a rotated
+	// token back to the running agent process, so calling refresh here
+	// discarded the replacement and left the agent holding a now-revoked
+	// token — every subsequent heartbeat/status call 401'd until restart
+	// (ptone/scion#1939). GET /api/v1/agents/{id} exercises the same
+	// authenticated path (it's what `Client.GetSelf` / `scion whoami --full`
+	// use) without mutating any credential state.
+	selfURL := fmt.Sprintf("%s/api/v1/agents/%s",
 		strings.TrimSuffix(hubURL, "/"), agentID)
 
-	req, _ = http.NewRequest("POST", refreshURL, nil)
+	req, _ = http.NewRequest("GET", selfURL, nil)
 	req.Header.Set("X-Scion-Agent-Token", token)
 
 	resp, err = client.Do(req)
 	if err != nil {
-		fmt.Printf("[FAIL] Token refresh check failed: %v\n", err)
+		fmt.Printf("[FAIL] Agent lookup check failed: %v\n", err)
 		*failures++
 		return false
 	}
 	respBody, _ = io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 
-	switch resp.StatusCode {
-	case 200:
-		fmt.Println("[ OK ] Token refresh works")
+	switch {
+	case resp.StatusCode < 400:
+		fmt.Println("[ OK ] Agent record accessible (read-only check; credentials untouched)")
 		return true
-	case 401, 403:
-		fmt.Printf("[FAIL] Token refresh rejected (%d): %s\n", resp.StatusCode, doctorTruncate(string(respBody), 120))
+	case resp.StatusCode == 401 || resp.StatusCode == 403:
+		fmt.Printf("[FAIL] Agent lookup rejected (%d): %s\n", resp.StatusCode, doctorTruncate(string(respBody), 120))
 		*failures++
 		return false
 	default:
-		fmt.Printf("[WARN] Token refresh returned %d: %s\n", resp.StatusCode, doctorTruncate(string(respBody), 120))
+		fmt.Printf("[WARN] Agent lookup returned %d: %s\n", resp.StatusCode, doctorTruncate(string(respBody), 120))
 		return false
 	}
 }
