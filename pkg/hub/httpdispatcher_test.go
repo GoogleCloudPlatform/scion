@@ -69,6 +69,8 @@ type mockRuntimeBrokerClient struct {
 	lastInterrupt              bool
 	lastResolvedEnv            map[string]string
 	lastRestartResolvedEnv     map[string]string
+	lastStartExtras            StartExtras
+	lastRestartExtras          StartExtras
 	lastInlineConfig           *api.ScionConfig
 	lastCreateReq              *RemoteCreateAgentRequest
 	lastDeleteOpts             struct{ deleteFiles, removeBranch bool }
@@ -101,7 +103,7 @@ func (m *mockRuntimeBrokerClient) CreateAgent(ctx context.Context, brokerID, bro
 	}, nil
 }
 
-func (m *mockRuntimeBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace, resume bool) (*RemoteAgentResponse, error) {
+func (m *mockRuntimeBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace, resume bool, extras StartExtras) (*RemoteAgentResponse, error) {
 	m.startCalled = true
 	m.lastBrokerID = brokerID
 	m.lastEndpoint = brokerEndpoint
@@ -111,6 +113,7 @@ func (m *mockRuntimeBrokerClient) StartAgent(ctx context.Context, brokerID, brok
 	m.lastProjectSlug = projectSlug
 	m.lastResolvedEnv = resolvedEnv
 	m.lastInlineConfig = inlineConfig
+	m.lastStartExtras = extras
 	if m.returnErr != nil {
 		return nil, m.returnErr
 	}
@@ -135,12 +138,13 @@ func (m *mockRuntimeBrokerClient) StopAgent(ctx context.Context, brokerID, broke
 	return m.returnErr
 }
 
-func (m *mockRuntimeBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string) error {
+func (m *mockRuntimeBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) error {
 	m.restartCalled = true
 	m.lastBrokerID = brokerID
 	m.lastEndpoint = brokerEndpoint
 	m.lastAgentID = agentID
 	m.lastRestartResolvedEnv = resolvedEnv
+	m.lastRestartExtras = extras
 	return m.returnErr
 }
 
@@ -452,7 +456,7 @@ func TestHTTPRuntimeBrokerClient_StartAgent_InvalidJSONFails(t *testing.T) {
 	defer server.Close()
 
 	client := NewHTTPRuntimeBrokerClient()
-	_, err := client.StartAgent(context.Background(), tid("host-1"), server.URL, "test-agent", "", "", "", "", "", "", "", nil, nil, nil, nil, false, false)
+	_, err := client.StartAgent(context.Background(), tid("host-1"), server.URL, "test-agent", "", "", "", "", "", "", "", nil, nil, nil, nil, false, false, StartExtras{})
 	if err == nil {
 		t.Fatal("expected StartAgent to fail on invalid JSON response")
 	}
@@ -1391,6 +1395,155 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_IncludesAgentIdentity(t *testing
 		t.Error("expected SCION_GROVE_ID in resolvedEnv, but not found")
 	} else if v != tid("project-1") {
 		t.Errorf("expected SCION_GROVE_ID='project-1', got %q", v)
+	}
+}
+
+// TestHTTPAgentDispatcher_DispatchAgentStart_CarriesSkillDispatchMetadata is
+// the regression test for #1960: the start dispatch must send the same
+// PreResolvedSkills (resolved as the agent's creator, #1784) and owning
+// UserID that create sends, so a re-provision reached via start (e.g. after
+// the broker deletes a stale agent dir) can resolve required skills exactly
+// as create does instead of the broker's start handler having nothing to
+// attach a resolver from.
+func TestHTTPAgentDispatcher_DispatchAgentStart_CarriesSkillDispatchMetadata(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	project := &store.Project{
+		ID:        tid("project-1"),
+		Name:      "test-project",
+		Slug:      "test-project",
+		GitRemote: "https://github.com/example/repo.git",
+	}
+	if err := memStore.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	broker := &store.RuntimeBroker{
+		ID:       tid("broker-1"),
+		Name:     "test-broker",
+		Slug:     "test-broker",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+
+	provider := &store.ProjectProvider{
+		ProjectID:  tid("project-1"),
+		BrokerID:   tid("broker-1"),
+		BrokerName: "test-broker",
+		LocalPath:  "/home/user/projects/myproject/.scion",
+		Status:     store.BrokerStatusOnline,
+	}
+	if err := memStore.AddProjectProvider(ctx, provider); err != nil {
+		t.Fatalf("failed to add project provider: %v", err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	wantPreResolved := &ResolveSkillsResponse{
+		Resolved: []ResolvedSkillResponse{{URI: "skill://scion/global/test@1.0.0", Name: "test"}},
+	}
+	var sawAgentID string
+	dispatcher.SetSkillPreResolver(func(_ context.Context, a *store.Agent) *ResolveSkillsResponse {
+		sawAgentID = a.ID
+		return wantPreResolved
+	})
+
+	agent := &store.Agent{
+		ID:              "agent-uuid-123",
+		Name:            "test-agent",
+		Slug:            "test-agent-slug",
+		ProjectID:       tid("project-1"),
+		OwnerID:         "owner-uuid-789",
+		RuntimeBrokerID: tid("broker-1"),
+	}
+
+	if err := dispatcher.DispatchAgentStart(ctx, agent, "", false); err != nil {
+		t.Fatalf("DispatchAgentStart failed: %v", err)
+	}
+
+	if sawAgentID != agent.ID {
+		t.Errorf("expected skillPreResolver to be called with the dispatched agent, got agent id %q", sawAgentID)
+	}
+	if mockClient.lastStartExtras.UserID != agent.OwnerID {
+		t.Errorf("expected StartExtras.UserID=%q, got %q", agent.OwnerID, mockClient.lastStartExtras.UserID)
+	}
+	if mockClient.lastStartExtras.PreResolvedSkills != wantPreResolved {
+		t.Errorf("expected StartExtras.PreResolvedSkills to be exactly what skillPreResolver returned, got %+v", mockClient.lastStartExtras.PreResolvedSkills)
+	}
+}
+
+// TestHTTPAgentDispatcher_DispatchAgentRestart_CarriesSkillDispatchMetadata
+// mirrors the start-path regression above (#1960) for restart, since restart
+// can also reach ProvisionAgent when the broker's agent dir is missing.
+func TestHTTPAgentDispatcher_DispatchAgentRestart_CarriesSkillDispatchMetadata(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	project := &store.Project{
+		ID:        tid("project-1"),
+		Name:      "test-project",
+		Slug:      "test-project",
+		GitRemote: "https://github.com/example/repo.git",
+	}
+	if err := memStore.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	broker := &store.RuntimeBroker{
+		ID:       tid("broker-1"),
+		Name:     "test-broker",
+		Slug:     "test-broker",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+
+	provider := &store.ProjectProvider{
+		ProjectID:  tid("project-1"),
+		BrokerID:   tid("broker-1"),
+		BrokerName: "test-broker",
+		LocalPath:  "/home/user/projects/myproject/.scion",
+		Status:     store.BrokerStatusOnline,
+	}
+	if err := memStore.AddProjectProvider(ctx, provider); err != nil {
+		t.Fatalf("failed to add project provider: %v", err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	wantPreResolved := &ResolveSkillsResponse{
+		Resolved: []ResolvedSkillResponse{{URI: "skill://scion/global/test@1.0.0", Name: "test"}},
+	}
+	dispatcher.SetSkillPreResolver(func(context.Context, *store.Agent) *ResolveSkillsResponse {
+		return wantPreResolved
+	})
+
+	agent := &store.Agent{
+		ID:              "agent-uuid-123",
+		Name:            "test-agent",
+		Slug:            "test-agent-slug",
+		ProjectID:       tid("project-1"),
+		OwnerID:         "owner-uuid-789",
+		RuntimeBrokerID: tid("broker-1"),
+	}
+
+	if err := dispatcher.DispatchAgentRestart(ctx, agent); err != nil {
+		t.Fatalf("DispatchAgentRestart failed: %v", err)
+	}
+
+	if mockClient.lastRestartExtras.UserID != agent.OwnerID {
+		t.Errorf("expected StartExtras.UserID=%q, got %q", agent.OwnerID, mockClient.lastRestartExtras.UserID)
+	}
+	if mockClient.lastRestartExtras.PreResolvedSkills != wantPreResolved {
+		t.Errorf("expected StartExtras.PreResolvedSkills to be exactly what skillPreResolver returned, got %+v", mockClient.lastRestartExtras.PreResolvedSkills)
 	}
 }
 

@@ -163,7 +163,7 @@ func (t *brokerHTTPTransport) CreateAgent(ctx context.Context, brokerID, brokerE
 	return &result, nil
 }
 
-func (t *brokerHTTPTransport) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace, resume bool) (*RemoteAgentResponse, error) {
+func (t *brokerHTTPTransport) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace, resume bool, extras StartExtras) (*RemoteAgentResponse, error) {
 	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/start", strings.TrimSuffix(brokerEndpoint, "/"), url.PathEscape(agentID))
 	if projectID != "" {
 		endpoint += "?projectId=" + url.QueryEscape(projectID)
@@ -204,6 +204,21 @@ func (t *brokerHTTPTransport) StartAgent(ctx context.Context, brokerID, brokerEn
 	}
 	if resume {
 		payload["resume"] = true
+	}
+	// Carry the same dispatch metadata the create path sends (#1960) so the
+	// broker can attach a working skill resolver whenever start (re-)provisions
+	// the agent, not just create.
+	if extras.HubEndpoint != "" {
+		payload["hubEndpoint"] = extras.HubEndpoint
+	}
+	if extras.UserID != "" {
+		payload["userId"] = extras.UserID
+	}
+	if len(extras.ProvisionCredentials) > 0 {
+		payload["provisionCredentials"] = extras.ProvisionCredentials
+	}
+	if extras.PreResolvedSkills != nil {
+		payload["preResolvedSkills"] = extras.PreResolvedSkills
 	}
 
 	var body []byte
@@ -247,16 +262,32 @@ func (t *brokerHTTPTransport) StopAgent(ctx context.Context, brokerID, brokerEnd
 	return nil
 }
 
-func (t *brokerHTTPTransport) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string) error {
+func (t *brokerHTTPTransport) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) error {
 	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/restart", strings.TrimSuffix(brokerEndpoint, "/"), url.PathEscape(agentID))
 	if projectID != "" {
 		endpoint += "?projectId=" + url.QueryEscape(projectID)
 	}
-	var body []byte
+	payload := map[string]interface{}{}
 	if len(resolvedEnv) > 0 {
-		payload := map[string]interface{}{
-			"resolvedEnv": resolvedEnv,
-		}
+		payload["resolvedEnv"] = resolvedEnv
+	}
+	// Carry the same dispatch metadata the create/start paths send (#1960) so
+	// the broker can attach a working skill resolver when restart
+	// (re-)provisions the agent.
+	if extras.HubEndpoint != "" {
+		payload["hubEndpoint"] = extras.HubEndpoint
+	}
+	if extras.UserID != "" {
+		payload["userId"] = extras.UserID
+	}
+	if len(extras.ProvisionCredentials) > 0 {
+		payload["provisionCredentials"] = extras.ProvisionCredentials
+	}
+	if extras.PreResolvedSkills != nil {
+		payload["preResolvedSkills"] = extras.PreResolvedSkills
+	}
+	var body []byte
+	if len(payload) > 0 {
 		var err error
 		body, err = json.Marshal(payload)
 		if err != nil {

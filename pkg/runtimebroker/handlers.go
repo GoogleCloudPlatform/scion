@@ -374,6 +374,110 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// skillResolverInputs bundles the dispatch-provided fields needed to attach a
+// working skill resolver to a provisioning context. Populated from the
+// create request body on the create path and from the start/restart request
+// bodies (plus the URL-scoped projectID) on those paths, so every path that
+// can reach ProvisionAgent carries the same resolver (#1960).
+type skillResolverInputs struct {
+	// HubEndpoint is used only as a fallback for rewriting relative
+	// pre-resolved-skill URLs when the Hub connection doesn't already carry
+	// its own endpoint.
+	HubEndpoint string
+	// ResolvedEnv supplies the default GITHUB_TOKEN used by the GitHub skill
+	// resolver and as the install-phase credential for gh:// skill downloads.
+	ResolvedEnv map[string]string
+	// ProvisionCredentials supplies additional named GitHub credentials
+	// (gh:// convention tokens like GH_{OWNER}) for private-repo skill
+	// resolution. Never forwarded to the agent container environment.
+	ProvisionCredentials map[string]string
+	// PreResolvedSkills carries the Hub-registry skills the Hub resolved at
+	// dispatch as the agent's creator (#1784); the broker's own identity
+	// cannot read non-public skills.
+	PreResolvedSkills *hubclient.ResolveSkillsResponse
+	// ProjectID and UserID scope resolution of project/user-scope skill URIs.
+	ProjectID string
+	UserID    string
+}
+
+// attachSkillResolver builds the hub/GitHub/GCP skill resolver router
+// (wrapped in the caching resolver and, when the Hub pre-resolved
+// creator-scoped skills, the outermost PreResolvedSkillResolver) and installs
+// it — along with the GitHub token and project/user IDs used during
+// resolution — onto ctx. Returns ctx unchanged when there is neither a usable
+// Hub connection nor pre-resolved skills, matching the pre-#1960 create
+// behavior for that case.
+//
+// Shared by createAgent, startAgent, and restartAgent: every path that can
+// reach ProvisionAgent must carry the same resolver, or a required gh://
+// skill fails closed with "no skill resolver available" on retry (#1960).
+func (s *Server) attachSkillResolver(ctx context.Context, r *http.Request, in skillResolverInputs) context.Context {
+	conn := s.resolveHubConnection(r)
+	if conn != nil && conn.HubClient != nil {
+		hubResolver := agent.NewHubSkillResolver(conn.HubClient.Skills())
+		defaultGHToken := in.ResolvedEnv["GITHUB_TOKEN"]
+		ghResolver := agent.NewGitHubSkillResolverWithCredentials(defaultGHToken, in.ProvisionCredentials, s.ghResolutionCache)
+
+		// GCP resolver uses Hub API for registry alias lookup.
+		registrySvc := conn.HubClient.SkillRegistries()
+		gcpLookup := func(ctx context.Context, name string) (*agent.RegistryLookupResult, error) {
+			reg, err := registrySvc.Get(ctx, name)
+			if err != nil {
+				return nil, err
+			}
+			if reg == nil {
+				return nil, fmt.Errorf("registry %q not found", name)
+			}
+			return &agent.RegistryLookupResult{
+				Name:     reg.Name,
+				Endpoint: reg.Endpoint,
+				Type:     reg.Type,
+				Status:   reg.Status,
+			}, nil
+		}
+
+		router := buildSkillRouter(hubResolver, ghResolver, agent.NewGCPSkillResolver(gcpLookup))
+
+		var resolver agent.SkillResolver = router
+		if s.skCache != nil {
+			resolver = agent.NewCachingSkillResolver(resolver, s.skCache)
+		}
+		// Skills the Hub resolved at dispatch as the agent's creator are
+		// served first: the broker's own identity cannot read non-public
+		// skills (#1784). Outermost so pre-resolved results never enter the
+		// broker's resolution cache.
+		if in.PreResolvedSkills != nil {
+			resolver = agent.NewPreResolvedSkillResolver(in.PreResolvedSkills, resolver, preResolvedHubEndpoint(conn, in.HubEndpoint))
+		}
+		ctx = agent.ContextWithSkillResolver(ctx, resolver)
+		// Credential for install-phase downloads of gh:// skills resolved by
+		// the Hub, which returns raw.githubusercontent.com URLs but not the
+		// token behind them. Only ever sent to GitHub hosts.
+		if defaultGHToken != "" {
+			ctx = agent.ContextWithGitHubToken(ctx, defaultGHToken)
+		}
+		if in.ProjectID != "" {
+			ctx = agent.ContextWithResolveProjectID(ctx, in.ProjectID)
+		}
+		if in.UserID != "" {
+			ctx = agent.ContextWithResolveUserID(ctx, in.UserID)
+		}
+	} else if in.PreResolvedSkills != nil {
+		// No usable Hub connection for this request, but the Hub already
+		// resolved its skills: install those, and fail closed (per skill)
+		// for anything it did not cover.
+		ctx = agent.ContextWithSkillResolver(ctx,
+			agent.NewPreResolvedSkillResolver(in.PreResolvedSkills, nil, preResolvedHubEndpoint(conn, in.HubEndpoint)))
+		if in.ProjectID != "" {
+			ctx = agent.ContextWithResolveProjectID(ctx, in.ProjectID)
+		}
+		if in.UserID != "" {
+			ctx = agent.ContextWithResolveUserID(ctx, in.UserID)
+		}
+	}
+	return ctx
+}
+
 func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	createStart := time.Now()
@@ -787,69 +891,14 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Inject skill resolver from Hub connection for skill provisioning.
-	conn := s.resolveHubConnection(r)
-	if conn != nil && conn.HubClient != nil {
-		hubResolver := agent.NewHubSkillResolver(conn.HubClient.Skills())
-		defaultGHToken := req.ResolvedEnv["GITHUB_TOKEN"]
-		ghResolver := agent.NewGitHubSkillResolverWithCredentials(defaultGHToken, req.ProvisionCredentials, s.ghResolutionCache)
-
-		// GCP resolver uses Hub API for registry alias lookup.
-		registrySvc := conn.HubClient.SkillRegistries()
-		gcpLookup := func(ctx context.Context, name string) (*agent.RegistryLookupResult, error) {
-			reg, err := registrySvc.Get(ctx, name)
-			if err != nil {
-				return nil, err
-			}
-			if reg == nil {
-				return nil, fmt.Errorf("registry %q not found", name)
-			}
-			return &agent.RegistryLookupResult{
-				Name:     reg.Name,
-				Endpoint: reg.Endpoint,
-				Type:     reg.Type,
-				Status:   reg.Status,
-			}, nil
-		}
-
-		router := buildSkillRouter(hubResolver, ghResolver, agent.NewGCPSkillResolver(gcpLookup))
-
-		var resolver agent.SkillResolver = router
-		if s.skCache != nil {
-			resolver = agent.NewCachingSkillResolver(resolver, s.skCache)
-		}
-		// Skills the Hub resolved at dispatch as the agent's creator are
-		// served first: the broker's own identity cannot read non-public
-		// skills (#1784). Outermost so pre-resolved results never enter the
-		// broker's resolution cache.
-		if req.PreResolvedSkills != nil {
-			resolver = agent.NewPreResolvedSkillResolver(req.PreResolvedSkills, resolver, preResolvedHubEndpoint(conn, req.HubEndpoint))
-		}
-		ctx = agent.ContextWithSkillResolver(ctx, resolver)
-		// Credential for install-phase downloads of gh:// skills resolved by
-		// the Hub, which returns raw.githubusercontent.com URLs but not the
-		// token behind them. Only ever sent to GitHub hosts.
-		if defaultGHToken != "" {
-			ctx = agent.ContextWithGitHubToken(ctx, defaultGHToken)
-		}
-		if req.ProjectID != "" {
-			ctx = agent.ContextWithResolveProjectID(ctx, req.ProjectID)
-		}
-		if req.UserID != "" {
-			ctx = agent.ContextWithResolveUserID(ctx, req.UserID)
-		}
-	} else if req.PreResolvedSkills != nil {
-		// No usable Hub connection for this request, but the Hub already
-		// resolved its skills: install those, and fail closed (per skill)
-		// for anything it did not cover.
-		ctx = agent.ContextWithSkillResolver(ctx,
-			agent.NewPreResolvedSkillResolver(req.PreResolvedSkills, nil, preResolvedHubEndpoint(conn, req.HubEndpoint)))
-		if req.ProjectID != "" {
-			ctx = agent.ContextWithResolveProjectID(ctx, req.ProjectID)
-		}
-		if req.UserID != "" {
-			ctx = agent.ContextWithResolveUserID(ctx, req.UserID)
-		}
-	}
+	ctx = s.attachSkillResolver(ctx, r, skillResolverInputs{
+		HubEndpoint:          req.HubEndpoint,
+		ResolvedEnv:          req.ResolvedEnv,
+		ProvisionCredentials: req.ProvisionCredentials,
+		PreResolvedSkills:    req.PreResolvedSkills,
+		ProjectID:            req.ProjectID,
+		UserID:               req.UserID,
+	})
 
 	// Carry the hub's operational agent_defaults into provisioning. No-op when
 	// the hub sent none, which is every local and file-mode dispatch.
@@ -1428,6 +1477,17 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		// --continue). The hub is the source of truth and sets this from the
 		// agent's stored phase; when unset we fall back to GetSavedPhase below.
 		Resume bool `json:"resume,omitempty"`
+		// HubEndpoint, UserID, ProvisionCredentials, and PreResolvedSkills
+		// carry the same dispatch-time metadata the create path sends, so a
+		// re-provision reached via start (e.g. after the broker deletes a
+		// stale agent dir) can resolve required skills exactly as create does
+		// instead of failing closed with "no skill resolver available"
+		// (#1960). ProjectID is not repeated here: it is already scoped via
+		// the projectId query parameter on this endpoint.
+		HubEndpoint          string                           `json:"hubEndpoint,omitempty"`
+		UserID               string                           `json:"userId,omitempty"`
+		ProvisionCredentials map[string]string                `json:"provisionCredentials,omitempty"`
+		PreResolvedSkills    *hubclient.ResolveSkillsResponse `json:"preResolvedSkills,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&startReq); err != nil {
@@ -1440,6 +1500,18 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	if startReq.ProjectSlug == "" && startReq.GroveSlug != "" {
 		startReq.ProjectSlug = startReq.GroveSlug
 	}
+
+	// Inject skill resolver from Hub connection for skill provisioning, same
+	// as createAgent (#1960). ProjectID comes from the URL-scoped function
+	// argument since start doesn't repeat it in the body.
+	ctx = s.attachSkillResolver(ctx, r, skillResolverInputs{
+		HubEndpoint:          startReq.HubEndpoint,
+		ResolvedEnv:          startReq.ResolvedEnv,
+		ProvisionCredentials: startReq.ProvisionCredentials,
+		PreResolvedSkills:    startReq.PreResolvedSkills,
+		ProjectID:            projectID,
+		UserID:               startReq.UserID,
+	})
 
 	s.agentLifecycleLog.Debug("startAgent called", "agent_id", id, "task", startReq.Task, "projectPath", startReq.ProjectPath, "projectSlug", startReq.ProjectSlug, "harnessConfig", startReq.HarnessConfig, "resolvedEnvCount", len(startReq.ResolvedEnv))
 
@@ -1714,12 +1786,31 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	var restartReq struct {
 		ResolvedEnv        map[string]string      `json:"resolvedEnv"`
 		EnvClassifications map[string]api.EnvKind `json:"envClassifications,omitempty"`
+		// HubEndpoint, UserID, ProvisionCredentials, and PreResolvedSkills
+		// mirror the same fields on the start path (#1960): they let a
+		// re-provision reached via restart resolve required skills exactly
+		// as create does instead of failing closed.
+		HubEndpoint          string                           `json:"hubEndpoint,omitempty"`
+		UserID               string                           `json:"userId,omitempty"`
+		ProvisionCredentials map[string]string                `json:"provisionCredentials,omitempty"`
+		PreResolvedSkills    *hubclient.ResolveSkillsResponse `json:"preResolvedSkills,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&restartReq); err != nil {
 			s.agentLifecycleLog.Debug("No resolvedEnv in restart request body (ignoring decode error)", "agent_id", id, "error", err)
 		}
 	}
+
+	// Inject skill resolver from Hub connection for skill provisioning, same
+	// as createAgent/startAgent (#1960).
+	ctx = s.attachSkillResolver(ctx, r, skillResolverInputs{
+		HubEndpoint:          restartReq.HubEndpoint,
+		ResolvedEnv:          restartReq.ResolvedEnv,
+		ProvisionCredentials: restartReq.ProvisionCredentials,
+		PreResolvedSkills:    restartReq.PreResolvedSkills,
+		ProjectID:            projectID,
+		UserID:               restartReq.UserID,
+	})
 
 	// Look up agent to get its name and project path
 	agentName := id
