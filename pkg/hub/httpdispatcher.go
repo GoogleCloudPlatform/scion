@@ -1157,14 +1157,23 @@ func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent 
 
 	// Merge resolved storage env vars back into AppliedConfig so they are
 	// visible in the advanced config form. Exclude internal SCION_* vars
-	// and dev tokens which are injected at start time. This runs after both
-	// passes so that as_needed vars resolved in the second pass are included.
+	// which are injected at start time. This runs after both passes so that
+	// as_needed vars resolved in the second pass are included.
+	//
+	// Only keys explicitly classified api.EnvKindPlain in req.EnvClassifications
+	// are persisted (see shouldPersistResolvedEnvKey). A key that is merely
+	// absent from the classification map is NOT plain by default -- it is
+	// dropped, not kept. Every key merged into req.ResolvedEnv anywhere in
+	// this dispatcher must have a matching classifyEnv/classifyEnvKeys call
+	// (enforced by TestBuildCreateRequestClassifiesEveryResolvedEnvKey) or it
+	// will silently stop showing up here; that is the intended fail-closed
+	// behavior, not a bug to work around by classifying it Plain.
 	if agent.AppliedConfig != nil && len(req.ResolvedEnv) > 0 {
 		if agent.AppliedConfig.Env == nil {
 			agent.AppliedConfig.Env = make(map[string]string)
 		}
 		for k, v := range req.ResolvedEnv {
-			if strings.HasPrefix(k, "SCION_") {
+			if !shouldPersistResolvedEnvKey(k, req.EnvClassifications) {
 				continue
 			}
 			if _, exists := agent.AppliedConfig.Env[k]; !exists {
@@ -2930,6 +2939,30 @@ func classifyEnvKeys(m *map[string]api.EnvKind, keys map[string]string, kind api
 	for k := range keys {
 		(*m)[k] = kind
 	}
+}
+
+// shouldPersistResolvedEnvKey decides whether a key from req.ResolvedEnv is
+// allowed into the durable AppliedConfig.Env record. This is an allowlist,
+// not a denylist: a key is persisted only when it is explicitly classified
+// api.EnvKindPlain. Every other outcome -- classified as any non-plain kind,
+// or simply absent from the classifications map -- is rejected. GITHUB_TOKEN
+// is rejected unconditionally regardless of its classification, since it is
+// never a legitimate value to keep in the durable config record.
+//
+// This mirrors the three-state lookup documented on api.EnvKind: a nil map
+// and an "absent key in a non-nil map" both fail the check here, which is
+// the correct fail-closed behavior for a persistence gate (contrast with a
+// gate that would treat "nil map" as "trust everything" -- that would be
+// backwards for this call site).
+func shouldPersistResolvedEnvKey(key string, classifications map[string]api.EnvKind) bool {
+	if key == "GITHUB_TOKEN" {
+		return false
+	}
+	if strings.HasPrefix(key, "SCION_") {
+		return false
+	}
+	kind, ok := api.ClassifyEnvKey(classifications, key)
+	return ok && kind == api.EnvKindPlain
 }
 
 type deleteProjectPathKey struct{}
