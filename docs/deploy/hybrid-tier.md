@@ -486,10 +486,18 @@ over `/srv/scion-shared` until the old tree has already been moved out from
 under that path by name, so the final cleanup step can only ever remove the
 retired copy it explicitly names, never data hidden under a live mount:
 
-1. Create and format the backing image as in the block above, but mount it
-   at a temporary path instead of `/srv/scion-shared`:
-   `mkdir -p /mnt/scion-shared-new && mount -o loop
-   /var/lib/scion-shared.img /mnt/scion-shared-new`.
+1. Create and format the backing image, and mount it at a temporary path
+   instead of `/srv/scion-shared`. Do not add the fstab line or mount at
+   `/srv/scion-shared` yet -- that comes in step 7.
+
+   ```bash
+   test ! -e /var/lib/scion-shared.img || { echo "image exists; not re-creating" >&2; exit 1; }
+   fallocate -l 100G /var/lib/scion-shared.img
+   mkfs.ext4 -q /var/lib/scion-shared.img
+   mkdir -p /mnt/scion-shared-new
+   mount -o loop /var/lib/scion-shared.img /mnt/scion-shared-new
+   mountpoint -q /mnt/scion-shared-new || { echo "mount failed; refusing to continue" >&2; exit 1; }
+   ```
 2. Copy the existing tree across, preserving ACLs and hard links, while the
    hub and agents keep running: `rsync -aHAX /srv/scion-shared/
    /mnt/scion-shared-new/`.

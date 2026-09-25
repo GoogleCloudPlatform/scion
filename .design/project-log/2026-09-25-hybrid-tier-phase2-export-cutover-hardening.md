@@ -9,8 +9,12 @@ Hardens the export-layout guidance's cutover procedure and fstab entry in
 
 ## Cutover procedure: never delete from a path a mount can shadow
 
-The cutover procedure copies the existing tree into a temporary mountpoint
-first (`rsync -aHAX`, preserving hard links and ACLs), stops the hub, agents,
+The cutover procedure's first step has its own exact command block (image
+guard, `fallocate`, `mkfs.ext4`, mount at a temporary path, `mountpoint -q`),
+and states that the fstab line and the `/srv/scion-shared` mount happen
+later, in the step that adds them. The procedure then copies the existing
+tree into that temporary mountpoint
+(`rsync -aHAX`, preserving hard links and ACLs), stops the hub, agents,
 and `nfs-server`, takes a final quick sync to catch anything written since
 the bulk copy, unmounts the temporary mountpoint, and only then moves the
 now-unmounted old tree aside to `/srv/scion-shared.old` -- a plain directory
