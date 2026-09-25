@@ -2028,6 +2028,32 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 	}
 
 	ctx := r.Context()
+	agentIdent := GetAgentIdentityFromContext(ctx)
+
+	if agentIdent != nil {
+		// checkAgentReadScope only checks that the token carries the
+		// project:read scope bit; it never compared the token's own project
+		// to the {id} in this URL. A token minted for one project could
+		// therefore list a different project's agents -- their metadata
+		// always, and (on rows a prior bug had polluted) their secrets too.
+		// 404, matching the "Project" shape returned a few lines up for a
+		// project that does not exist at all, so a token from another
+		// project cannot distinguish "wrong project" from "no such project".
+		if agentIdent.ProjectID() != projectID {
+			NotFound(w, "Project")
+			return
+		}
+	} else {
+		// A user identity (or no identity) reached no gate at all here before
+		// this fix: any authenticated hub user, project member or not, got
+		// every agent record in the project. Require agent.list on the
+		// project, matching what listAgents (handlers_agents_core.go) already
+		// enforces for the global list.
+		if !s.authorize(w, r, Resource{Type: "agent", ParentType: "project", ParentID: projectID}, ActionList) {
+			return
+		}
+	}
+
 	query := r.URL.Query()
 
 	filter := store.AgentFilter{
@@ -2067,8 +2093,13 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 
 	// Compute per-item and scope capabilities
 	identity := GetIdentityFromContext(ctx)
-	agents := make([]AgentWithCapabilities, len(result.Items))
-	if identity != nil {
+	agents := make([]AgentWithCapabilities, 0, len(result.Items))
+	switch {
+	case agentIdent != nil:
+		// Already confirmed above to be scoped to this project. Render every
+		// item, gating only per-item env visibility, exactly as before --
+		// this is the existing sibling-agent-listing use case agent tokens
+		// rely on this endpoint for.
 		resources := make([]Resource, len(result.Items))
 		for i := range result.Items {
 			resources[i] = agentResource(&result.Items[i])
@@ -2077,15 +2108,30 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 		for i := range result.Items {
 			item := result.Items[i]
 			item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, capabilityAllows(caps[i], ActionAttach))
-			agents[i] = AgentWithCapabilities{Agent: item, Cap: caps[i]}
+			agents = append(agents, AgentWithCapabilities{Agent: item, Cap: caps[i]})
 		}
-	} else {
+	case identity != nil:
+		// Per-item ActionRead filter: defense in depth so that passing the
+		// project-level agent.list gate above is not by itself treated as
+		// license to read every item the store returned, matching listAgents'
+		// pattern (handlers_agents_core.go) of computing and checking
+		// per-item capabilities rather than trusting the coarse scope alone.
+		resources := make([]Resource, len(result.Items))
 		for i := range result.Items {
+			resources[i] = agentResource(&result.Items[i])
+		}
+		caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "agent")
+		for i := range result.Items {
+			if !capabilityAllows(caps[i], ActionRead) {
+				continue
+			}
 			item := result.Items[i]
-			item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, false)
-			agents[i] = AgentWithCapabilities{Agent: item}
+			item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, capabilityAllows(caps[i], ActionAttach))
+			agents = append(agents, AgentWithCapabilities{Agent: item, Cap: caps[i]})
 		}
 	}
+	// identity == nil is unreachable here: the authorize call above already
+	// writes 401 for an unauthenticated non-agent caller before this point.
 
 	var scopeCap *Capabilities
 	if identity != nil {
@@ -2160,108 +2206,71 @@ func (s *Server) createProjectAgent(w http.ResponseWriter, r *http.Request, proj
 	s.createAgentInProject(w, r, req, projectID, createdBy, creatorName, ancestry, notifySubscriberType, notifySubscriberID)
 }
 
-// getProjectAgent gets an agent by ID within a specific project
+// getProjectAgent gets an agent by ID within a specific project.
+//
+// This used to resolve the agent and serialize it directly with no
+// authorization check at all for a user caller -- a non-member could read
+// any agent's full record (including, before the AppliedConfig.Env response
+// gate, its plaintext env). It now requires the same agent.read permission
+// getAgent (handlers_agents_core.go) enforces for a user identity, and
+// shares that function's writeAgentGetResponse for the response body itself,
+// so the two routes cannot drift on what a single-agent response looks like.
+//
+// An agent-JWT caller reading itself is exempted from that permission check,
+// matching this route's existing, tested contract
+// (TestReadEndpoint_ProjectScopedAgents_WithReadScope_Allowed): agent.read
+// has no AgentScopes mapping, so the strict check would deny even an agent
+// reading its own record, which is not this route's history and not what
+// that test expects. Reading a *different* agent -- project peer or not --
+// still goes through the same agent.read check as getAgent and is denied by
+// it (CO1), matching the security expectation the sibling test for that
+// route documents.
 func (s *Server) getProjectAgent(w http.ResponseWriter, r *http.Request, projectID, agentID string) {
 	if !checkAgentReadScope(w, r) {
 		return
 	}
 
 	ctx := r.Context()
-
-	// Try to get by slug first (more common case)
-	agent, err := s.store.GetAgentBySlug(ctx, projectID, agentID)
+	agent, err := s.resolveProjectAgent(ctx, projectID, agentID)
 	if err != nil {
-		if err == store.ErrNotFound {
-			// Try by UUID
-			agent, err = s.store.GetAgent(ctx, agentID)
-			if err != nil {
-				writeErrorFromErr(w, err, "")
-				return
-			}
-			// Verify it belongs to this project
-			if agent.ProjectID != projectID {
-				NotFound(w, "Agent")
-				return
-			}
-		} else {
-			writeErrorFromErr(w, err, "")
-			return
-		}
-	}
-
-	// Enrich agent with project and broker names
-	s.enrichAgent(ctx, agent, nil, nil)
-
-	writeJSON(w, http.StatusOK, agent)
-}
-
-// updateProjectAgent updates an agent within a specific project
-func (s *Server) updateProjectAgent(w http.ResponseWriter, r *http.Request, projectID, agentID string) {
-	ctx := r.Context()
-
-	// Try to get by slug first
-	agent, err := s.store.GetAgentBySlug(ctx, projectID, agentID)
-	if err != nil {
-		if err == store.ErrNotFound {
-			// Try by UUID
-			agent, err = s.store.GetAgent(ctx, agentID)
-			if err != nil {
-				writeErrorFromErr(w, err, "")
-				return
-			}
-			if agent.ProjectID != projectID {
-				NotFound(w, "Agent")
-				return
-			}
-		} else {
-			writeErrorFromErr(w, err, "")
-			return
-		}
-	}
-
-	var updates struct {
-		Name         string            `json:"name,omitempty"`
-		Labels       map[string]string `json:"labels,omitempty"`
-		Annotations  map[string]string `json:"annotations,omitempty"`
-		TaskSummary  string            `json:"taskSummary,omitempty"`
-		StateVersion int64             `json:"stateVersion"`
-	}
-
-	if err := readJSON(r, &updates); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
-		return
-	}
-
-	// Check version for optimistic locking
-	if updates.StateVersion != 0 && updates.StateVersion != agent.StateVersion {
-		Conflict(w, "Version conflict - resource was modified")
-		return
-	}
-
-	// Apply updates
-	if updates.Name != "" {
-		agent.Name = updates.Name
-	}
-	if updates.Labels != nil {
-		if err := labels.Validate(updates.Labels); err != nil {
-			ValidationError(w, "Invalid labels: "+err.Error(), nil)
-			return
-		}
-		agent.Labels = updates.Labels
-	}
-	if updates.Annotations != nil {
-		agent.Annotations = updates.Annotations
-	}
-	if updates.TaskSummary != "" {
-		agent.TaskSummary = updates.TaskSummary
-	}
-
-	if err := s.store.UpdateAgent(ctx, agent); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, agent)
+	isSelf := false
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+		if agentIdent.ProjectID() != projectID {
+			NotFound(w, "Agent")
+			return
+		}
+		isSelf = agentIdent.ID() == agent.ID
+	}
+	if !isSelf {
+		if !s.authorize(w, r, agentResource(agent), ActionRead) {
+			return
+		}
+	}
+
+	s.writeAgentGetResponse(w, r, agent)
+}
+
+// updateProjectAgent updates an agent within a specific project.
+//
+// This used to apply a hand-rolled subset of field updates (name/labels/
+// annotations/taskSummary) with no authorization check at all -- any
+// authenticated caller, project member or not, could rewrite any agent's
+// metadata. It now resolves the agent the same way the other project-scoped
+// agent routes do (resolveProjectAgent) and hands off to applyAgentUpdate,
+// the same authorized update path PATCH /api/v1/agents/{id} uses, so both
+// routes share one implementation of "what may be updated and who may update
+// it" instead of two that can drift.
+func (s *Server) updateProjectAgent(w http.ResponseWriter, r *http.Request, projectID, agentID string) {
+	agent, err := s.resolveProjectAgent(r.Context(), projectID, agentID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	s.applyAgentUpdate(w, r, agent)
 }
 
 // deleteProjectAgent deletes an agent within a specific project
