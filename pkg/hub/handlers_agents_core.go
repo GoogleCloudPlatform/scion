@@ -1412,17 +1412,23 @@ func (s *Server) createAgentInProject(
 	//     create dispatched to the same broker competes for the same
 	//     counter, regardless of who created it or which project it lands
 	//     in, and a different broker (a different host, with its own
-	//     capacity) has its own independent counter.
+	//     capacity) has its own independent counter. Skipped entirely when
+	//     runtimeBrokerID is empty (hub-direct managed agents that run
+	//     without a runtime broker) — there is no broker capacity to guard,
+	//     and reserving against scope_id="" would create a bogus shared
+	//     bucket that every hub-direct agent competes for.
 	//  2. Per-project agent limit, as before — a fairness quota, unrelated in
 	//     scope and purpose to the safety gate above.
 	// If step 2 fails we must roll back step 1's reservation ourselves: we
 	// have not reached store.CreateAgent yet, so its failure-path Release
 	// below never runs for this response.
-	if !s.checkAndReserveQuota(ctx, w, store.LimitMaxAgentsPerBroker, runtimeBrokerID, store.QuotaScopeBroker, runtimeBrokerID, agent.ID) {
-		return
+	if runtimeBrokerID != "" {
+		if !s.checkAndReserveQuota(ctx, w, store.LimitMaxAgentsPerBroker, runtimeBrokerID, store.QuotaScopeBroker, runtimeBrokerID, agent.ID) {
+			return
+		}
 	}
 	if !s.checkAndReserveQuota(ctx, w, "max_agents_per_project", createdBy, "project", projectID, agent.ID) {
-		if s.quotaService != nil {
+		if s.quotaService != nil && runtimeBrokerID != "" {
 			s.quotaService.Release(ctx, store.LimitMaxAgentsPerBroker, agent.ID)
 		}
 		return
@@ -1430,9 +1436,13 @@ func (s *Server) createAgentInProject(
 
 	if err := s.store.CreateAgent(ctx, agent); err != nil {
 		if s.quotaService != nil {
-			// Release is resourceID-scoped and clears every reservation tied to
-			// this agent.ID (both the per-broker ceiling and the per-project
-			// limit), regardless of which limit name is passed here.
+			// Release both limits explicitly rather than relying on Release
+			// being resourceID-scoped and clearing every reservation tied to
+			// agent.ID regardless of limitName — that behavior is an
+			// implementation detail of the store today, not a contract.
+			if runtimeBrokerID != "" {
+				s.quotaService.Release(ctx, store.LimitMaxAgentsPerBroker, agent.ID)
+			}
 			s.quotaService.Release(ctx, "max_agents_per_project", agent.ID)
 		}
 		writeErrorFromErr(w, err, "")
@@ -2741,11 +2751,16 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 		}
 	}
 
-	// Release quota reservations for the deleted agent (best-effort). This is
-	// resourceID-scoped and clears every reservation tied to agent.ID — both
-	// the per-project limit and the per-broker agent ceiling (#1303) —
-	// regardless of which limit name is passed here.
+	// Release quota reservations for the deleted agent (best-effort). Release
+	// both limits explicitly — the per-project limit and, if a runtime
+	// broker was assigned, the per-broker agent ceiling (#1303) — rather
+	// than relying on Release being resourceID-scoped and clearing every
+	// reservation tied to agent.ID regardless of limitName; that behavior is
+	// an implementation detail of the store today, not a contract.
 	if s.quotaService != nil {
+		if agent.RuntimeBrokerID != "" {
+			s.quotaService.Release(ctx, store.LimitMaxAgentsPerBroker, agent.ID)
+		}
 		s.quotaService.Release(ctx, "max_agents_per_project", agent.ID)
 	}
 
