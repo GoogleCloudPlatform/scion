@@ -281,6 +281,9 @@ type AgentAppliedConfig struct {
 // caller's original agent object (which the persistence path may still
 // write from) must come out of this call unmodified.
 //
+// CreateInputs.InlineConfig gets the same treatment as InlineConfig, through
+// a deep copy of CreateInputs (see redactCreateInputsForResponse).
+//
 // Nothing else needs to call this to be safe: without it, MarshalJSON's
 // default omits Env entirely (see the envResponseVisible field doc), so a
 // response path that never calls ResponseView fails closed rather than open.
@@ -291,7 +294,28 @@ func (ac *AgentAppliedConfig) ResponseView(canAttach bool) *AgentAppliedConfig {
 	view := *ac
 	view.envResponseVisible = canAttach
 	view.InlineConfig = redactInlineConfigForResponse(ac.InlineConfig, canAttach)
+	view.CreateInputs = redactCreateInputsForResponse(ac.CreateInputs, canAttach)
 	return &view
+}
+
+// redactCreateInputsForResponse returns a deep copy of ci suitable for a
+// response body. CreateInputs.InlineConfig is the create request's explicit
+// config, so it gets exactly the treatment ResponseView gives InlineConfig
+// (see redactInlineConfigForResponse): Env and the Telemetry cloud-export
+// header map are cleared unless canAttach is true, and GITHUB_TOKEN is always
+// stripped. The remaining fields carry no env and are copied through. The
+// input is never mutated.
+func redactCreateInputsForResponse(ci *AgentCreateInputs, canAttach bool) *AgentCreateInputs {
+	if ci == nil {
+		return nil
+	}
+	copied := *ci
+	copied.InlineConfig = redactInlineConfigForResponse(ci.InlineConfig, canAttach)
+	if ci.ThinkingLevel != nil {
+		level := *ci.ThinkingLevel
+		copied.ThinkingLevel = &level
+	}
+	return &copied
 }
 
 // redactInlineConfigForResponse returns a deep copy of cfg suitable for a
