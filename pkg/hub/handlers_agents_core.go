@@ -1314,10 +1314,83 @@ func (s *Server) createAgentInProject(
 					MetadataMode: store.GCPMetadataModeBlock,
 				}
 			}
-		default:
-			// No project default or explicit "block" — secure default
+		case store.GCPMetadataModeBlock:
+			// Project explicitly set "block" — that is the operator's decision
+			// and it stops the ladder here. Do NOT fall through to the hub
+			// default: an explicit "block" is different from "no project
+			// setting at all", and only the latter defers further down the
+			// chain.
 			agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
 				MetadataMode: store.GCPMetadataModeBlock,
+			}
+		default:
+			// No project default configured (empty string) — fall back to the
+			// hub-level operational default, then to "block" if the hub has
+			// none either. Mirrors the project-default case above one rung
+			// down the ladder: explicit request -> project default -> hub
+			// default -> block (see hub_agent_defaults.go).
+			hubDefaults := s.hubAgentDefaults()
+			switch hubDefaults.DefaultGCPIdentityMode {
+			case store.GCPMetadataModePassthrough:
+				agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
+					MetadataMode: store.GCPMetadataModePassthrough,
+				}
+			case store.GCPMetadataModeAssign:
+				if hubDefaults.DefaultGCPIdentityServiceAccountID != "" {
+					sa, err := s.store.GetGCPServiceAccount(ctx, hubDefaults.DefaultGCPIdentityServiceAccountID)
+					// Same scope-aware admissibility as the project-default rung:
+					// a hub default may legitimately name a hub-scoped account, or
+					// a project-scoped one that happens to be reachable here.
+					if err != nil || !sa.ReachableFromProject(projectID) {
+						slog.Warn("hub-default SA assignment failed: service account not available",
+							"surface", SurfaceHubDefault,
+							"project_id", projectID,
+							"sa_id", hubDefaults.DefaultGCPIdentityServiceAccountID,
+							"err", err)
+						writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+							"hub default GCP service account is not available in this project; "+
+								"update the hub's default GCP identity setting", nil)
+						return
+					}
+					if !sa.Verified {
+						slog.Warn("hub-default SA assignment failed: service account not verified",
+							"surface", SurfaceHubDefault,
+							"project_id", projectID,
+							"sa_id", sa.ID, "sa_email", sa.Email)
+						writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+							"hub default GCP service account is not verified; "+
+								"verify it before it can be assigned to agents", nil)
+						return
+					}
+
+					// Same authorization gate as project-default assignment
+					// (P10): a hub-configured default does not itself grant the
+					// immediate creator permission to act as the account.
+					if !s.authorizeSAAssignment(w, r, sa, SurfaceHubDefault) {
+						slog.Warn("hub-default SA assignment denied by authorization gate",
+							"surface", SurfaceHubDefault,
+							"project_id", projectID,
+							"sa_id", sa.ID, "sa_email", sa.Email)
+						return
+					}
+
+					agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
+						MetadataMode:        store.GCPMetadataModeAssign,
+						ServiceAccountID:    sa.ID,
+						ServiceAccountEmail: sa.Email,
+						ProjectID:           sa.ProjectID,
+					}
+				} else {
+					agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
+						MetadataMode: store.GCPMetadataModeBlock,
+					}
+				}
+			default:
+				// No hub default either (or hub default is itself "block") —
+				// secure default.
+				agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
+					MetadataMode: store.GCPMetadataModeBlock,
+				}
 			}
 		}
 	}

@@ -212,17 +212,15 @@ func TestResolvedSettings_UnreadableSourceIsUnknownNotAbsent(t *testing.T) {
 	}
 }
 
-// TestResolvedSettings_NoHubCounterpartIsAbsent covers the opposite case:
-// AgentDefaultsSettings has eight fields, enumerated in full, so "there
-// is no hub default for activeProfile" is a measured structural fact and may be
-// reported as absent rather than unknown.
+// TestResolvedSettings_NoHubCounterpartIsAbsent covers the case where a
+// registered project setting genuinely has no hub-level counterpart: "there
+// is no hub default for activeProfile" is a measured structural fact and may
+// be reported as absent rather than unknown.
 func TestResolvedSettings_NoHubCounterpartIsAbsent(t *testing.T) {
 	resp := (&Server{}).resolvedProjectSettings(&store.Project{ID: "p-1"})
 
 	for _, key := range []string{
 		projectSettingActiveProfile,
-		projectSettingDefaultGCPIdentityMode,
-		projectSettingDefaultGCPIdentitySAID,
 	} {
 		assert.Equalf(t, ResolvedHubDefaultAbsent, resp.Settings[key].HubDefault,
 			"%q has no agent_defaults counterpart; that is a measured structural "+

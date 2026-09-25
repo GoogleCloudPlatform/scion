@@ -74,6 +74,14 @@ type ServerConfigResponse struct {
 	// DefaultTimezone is the hub-level IANA timezone fallback.
 	DefaultTimezone string `json:"default_timezone,omitempty"`
 
+	// DefaultGCPIdentityMode is the hub-wide fallback GCP metadata mode
+	// ("block", "passthrough", or "assign"), applied when neither the agent
+	// create request nor the project's default GCP identity setting names one.
+	DefaultGCPIdentityMode string `json:"default_gcp_identity_mode,omitempty"`
+	// DefaultGCPIdentityServiceAccountID is the service account used when
+	// DefaultGCPIdentityMode is "assign".
+	DefaultGCPIdentityServiceAccountID string `json:"default_gcp_identity_service_account_id,omitempty"`
+
 	// AutoInjectGcloudADC controls whether gcloud ADC is injected into agent containers.
 	AutoInjectGcloudADC bool `json:"auto_inject_gcloud_adc,omitempty"`
 
@@ -122,6 +130,13 @@ type ServerConfigUpdateRequest struct {
 
 	// DefaultTimezone is the hub-level IANA timezone fallback.
 	DefaultTimezone *string `json:"default_timezone,omitempty"`
+
+	// DefaultGCPIdentityMode is the hub-wide fallback GCP metadata mode
+	// ("block", "passthrough", or "assign").
+	DefaultGCPIdentityMode *string `json:"default_gcp_identity_mode,omitempty"`
+	// DefaultGCPIdentityServiceAccountID is the service account used when
+	// DefaultGCPIdentityMode is "assign".
+	DefaultGCPIdentityServiceAccountID *string `json:"default_gcp_identity_service_account_id,omitempty"`
 
 	// AutoInjectGcloudADC controls whether gcloud ADC is injected into agent containers.
 	AutoInjectGcloudADC *bool `json:"auto_inject_gcloud_adc,omitempty"`

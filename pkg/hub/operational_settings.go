@@ -113,6 +113,10 @@ type Layer1Snapshot struct {
 	DefaultThinkingLevel *int
 	DefaultRuntimeBroker string
 	DefaultTimezone      string
+	// DefaultGCPIdentityMode/DefaultGCPIdentityServiceAccountID are the
+	// hub-wide GCP identity default, postgres-mode only (see type comment).
+	DefaultGCPIdentityMode             string
+	DefaultGCPIdentityServiceAccountID string
 
 	// Endpoints
 	PublicURL     string
@@ -796,6 +800,8 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	snap.DefaultModel = k.String("default_model")
 	snap.DefaultRuntimeBroker = k.String("default_runtime_broker")
 	snap.DefaultTimezone = k.String("default_timezone")
+	snap.DefaultGCPIdentityMode = k.String("default_gcp_identity_mode")
+	snap.DefaultGCPIdentityServiceAccountID = k.String("default_gcp_identity_service_account_id")
 	if k.Exists("default_thinking_level") {
 		v := k.Int("default_thinking_level")
 		snap.DefaultThinkingLevel = &v
@@ -1043,15 +1049,17 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	// agent-defaults fields remain at zero values in file mode, so this
 	// assignment is a no-op for those fields and file-mode dispatch is unchanged.
 	newDefaults := opsettings.AgentDefaultsSettings{
-		DefaultTemplate:      snap.DefaultTemplate,
-		DefaultHarnessConfig: snap.DefaultHarnessConfig,
-		DefaultMaxTurns:      snap.DefaultMaxTurns,
-		DefaultMaxModelCalls: snap.DefaultMaxModelCalls,
-		DefaultMaxDuration:   snap.DefaultMaxDuration,
-		DefaultModel:         snap.DefaultModel,
-		DefaultThinkingLevel: snap.DefaultThinkingLevel,
-		DefaultRuntimeBroker: snap.DefaultRuntimeBroker,
-		DefaultTimezone:      snap.DefaultTimezone,
+		DefaultTemplate:                    snap.DefaultTemplate,
+		DefaultHarnessConfig:               snap.DefaultHarnessConfig,
+		DefaultMaxTurns:                    snap.DefaultMaxTurns,
+		DefaultMaxModelCalls:               snap.DefaultMaxModelCalls,
+		DefaultMaxDuration:                 snap.DefaultMaxDuration,
+		DefaultModel:                       snap.DefaultModel,
+		DefaultThinkingLevel:               snap.DefaultThinkingLevel,
+		DefaultRuntimeBroker:               snap.DefaultRuntimeBroker,
+		DefaultTimezone:                    snap.DefaultTimezone,
+		DefaultGCPIdentityMode:             snap.DefaultGCPIdentityMode,
+		DefaultGCPIdentityServiceAccountID: snap.DefaultGCPIdentityServiceAccountID,
 	}
 	// Deep-copy the one pointer field, symmetrically with hubAgentDefaults()'s
 	// read side. Aliasing the snapshot's pointee would leave the CALLER of

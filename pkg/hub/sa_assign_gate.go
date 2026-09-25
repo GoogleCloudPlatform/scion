@@ -50,6 +50,12 @@ const (
 	// immediate agent creator. This surface produces DECISION records via
 	// authorizeSAAssignment, not the binding records it produced before P10.
 	SurfaceProjectDefault = "project-default"
+
+	// SurfaceHubDefault is an SA assigned from the hub-level agent_defaults
+	// operational setting, one rung below SurfaceProjectDefault in the GCP
+	// identity fallback ladder (explicit request -> project default -> hub
+	// default -> block). Same authorization gate as SurfaceProjectDefault.
+	SurfaceHubDefault = "hub-default"
 )
 
 // saAssignCheckMode values. The mode gates the GCP layer only; the Hub policy

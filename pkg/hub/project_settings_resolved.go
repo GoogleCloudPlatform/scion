@@ -157,9 +157,11 @@ type hubDefaultSource int
 
 const (
 	// hubSourceNone: no hub-level counterpart exists for this setting.
-	// opsettings.AgentDefaultsSettings has exactly eight fields, enumerated in
-	// full, so this is a measured structural fact rather than an unsearched
-	// one — which is why these keys may report ABSENT rather than UNKNOWN.
+	// Every resolvedSettingDescriptors entry with this source names a field of
+	// opsettings.AgentDefaultsSettings (or another hub source) that was
+	// checked and does not exist, so this is a measured structural fact rather
+	// than an unsearched one — which is why these keys may report ABSENT
+	// rather than UNKNOWN.
 	hubSourceNone hubDefaultSource = iota
 
 	// hubSourceAgentDefaults: the opsettings "agent_defaults" section document.
@@ -280,10 +282,14 @@ var resolvedSettingDescriptors = map[string]resolvedSettingDescriptor{
 
 	// Default GCP identity
 	projectSettingDefaultGCPIdentityMode: {
-		source: hubSourceNone,
+		source:            hubSourceAgentDefaults,
+		path:              []string{"default_gcp_identity_mode"},
+		absentWhenMissing: false, // string, "" dropped by omitempty
 	},
 	projectSettingDefaultGCPIdentitySAID: {
-		source: hubSourceNone,
+		source:            hubSourceAgentDefaults,
+		path:              []string{"default_gcp_identity_service_account_id"},
+		absentWhenMissing: false, // string, "" dropped by omitempty
 	},
 
 	// Default resource spec. The registry's five flat annotation keys face a

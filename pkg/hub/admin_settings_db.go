@@ -198,6 +198,8 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 	resp.DefaultThinkingLevel = snap.DefaultThinkingLevel
 	resp.DefaultRuntimeBroker = snap.DefaultRuntimeBroker
 	resp.DefaultTimezone = snap.DefaultTimezone
+	resp.DefaultGCPIdentityMode = snap.DefaultGCPIdentityMode
+	resp.DefaultGCPIdentityServiceAccountID = snap.DefaultGCPIdentityServiceAccountID
 
 	// Telemetry — always set from snapshot (nil = no telemetry configured).
 	resp.Telemetry = snap.TelemetryConfig
@@ -594,6 +596,9 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 					return
 				}
 			}
+			if !s.validateHubDefaultGCPIdentity(w, r.Context(), agentDefaults) {
+				return
+			}
 		}
 	}
 
@@ -682,6 +687,48 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// validateHubDefaultGCPIdentity rejects a hub-level default GCP identity that
+// agent creation would later refuse to apply, mirroring
+// validateDefaultGCPIdentity's project-level checks (existence, verification).
+//
+// Reachability is deliberately NOT checked here, unlike the project-level
+// validator: a hub default has no single project to check reachability
+// against — it is evaluated per-project at agent-creation time
+// (handlers_agents_core.go), where a project-scoped service account that
+// isn't reachable from that project falls through to the same error the
+// project-default path already produces.
+func (s *Server) validateHubDefaultGCPIdentity(w http.ResponseWriter, ctx context.Context, d opsettings.AgentDefaultsSettings) bool {
+	if d.DefaultGCPIdentityMode == store.GCPMetadataModeAssign && d.DefaultGCPIdentityServiceAccountID == "" {
+		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+			"default GCP identity mode 'assign' requires a service account; set default_gcp_identity_service_account_id or choose another mode", nil)
+		return false
+	}
+
+	if d.DefaultGCPIdentityServiceAccountID == "" {
+		// Empty means clear. Clearing must always be permitted.
+		return true
+	}
+
+	sa, err := s.store.GetGCPServiceAccount(ctx, d.DefaultGCPIdentityServiceAccountID)
+	if err != nil {
+		if err == store.ErrNotFound {
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+				"default GCP service account not found", nil)
+			return false
+		}
+		writeErrorFromErr(w, err, "")
+		return false
+	}
+
+	if !sa.Verified {
+		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+			"GCP service account is not verified; verify it before setting it as the hub default", nil)
+		return false
+	}
+
+	return true
+}
+
 // getCurrentRevision reads the current revision for a section from the cache.
 func (s *Server) getCurrentRevision(ops *OperationalSettings, section string) int64 {
 	ops.mu.RLock()
@@ -768,6 +815,12 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 	}
 	if req.DefaultTimezone != nil {
 		keys = append(keys, "default_timezone")
+	}
+	if req.DefaultGCPIdentityMode != nil {
+		keys = append(keys, "default_gcp_identity_mode")
+	}
+	if req.DefaultGCPIdentityServiceAccountID != nil {
+		keys = append(keys, "default_gcp_identity_service_account_id")
 	}
 
 	if req.AutoExposePorts != nil {
@@ -1136,6 +1189,12 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 		}
 		if req.DefaultTimezone != nil {
 			d.DefaultTimezone = *req.DefaultTimezone
+		}
+		if req.DefaultGCPIdentityMode != nil {
+			d.DefaultGCPIdentityMode = *req.DefaultGCPIdentityMode
+		}
+		if req.DefaultGCPIdentityServiceAccountID != nil {
+			d.DefaultGCPIdentityServiceAccountID = *req.DefaultGCPIdentityServiceAccountID
 		}
 		doc = d
 
