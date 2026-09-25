@@ -57,6 +57,7 @@ func TestVisibilityColumnRemoval_UpgradeSucceeds(t *testing.T) {
 	// Default("private")) created.
 	raw, err := sql.Open("sqlite", dsn)
 	require.NoError(t, err)
+	defer func() { _ = raw.Close() }()
 	for _, stmt := range []string{
 		"ALTER TABLE agents ADD COLUMN visibility text NOT NULL DEFAULT 'private'",
 		"ALTER TABLE templates ADD COLUMN visibility text NOT NULL DEFAULT 'private'",
@@ -65,7 +66,6 @@ func TestVisibilityColumnRemoval_UpgradeSucceeds(t *testing.T) {
 		_, err := raw.ExecContext(ctx, stmt)
 		require.NoError(t, err, stmt)
 	}
-	require.NoError(t, raw.Close())
 
 	// Re-running AutoMigrate must leave the now-unknown column alone
 	// (WithDropColumn(false)) rather than erroring or dropping it.
