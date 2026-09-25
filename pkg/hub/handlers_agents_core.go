@@ -393,7 +393,9 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		resources[i] = agentResource(&items[i])
 	}
 	for i, cap := range s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "agent") {
-		agents = append(agents, AgentWithCapabilities{Agent: items[i], Cap: cap})
+		item := items[i]
+		item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, capabilityAllows(cap, ActionAttach))
+		agents = append(agents, AgentWithCapabilities{Agent: item, Cap: cap})
 	}
 
 	// Compute messageability for each agent relative to the viewer.
@@ -1520,7 +1522,7 @@ func (s *Server) createAgentInProject(
 			}
 
 			writeJSON(w, http.StatusCreated, CreateAgentResponse{
-				Agent:      agent,
+				Agent:      redactedAgentCopy(ctx, s, agent),
 				Warnings:   warnings,
 				UploadURLs: uploadURLs,
 				Expires:    &expires,
@@ -1595,7 +1597,7 @@ func (s *Server) createAgentInProject(
 		s.enrichAgent(ctx, agent, project, nil)
 
 		writeJSON(w, http.StatusCreated, CreateAgentResponse{
-			Agent: agent,
+			Agent: redactedAgentCopy(ctx, s, agent),
 		})
 		return
 	}
@@ -1643,7 +1645,7 @@ func (s *Server) createAgentInProject(
 					hubEnvGather := s.buildEnvGatherResponse(ctx, agent, envReqs)
 
 					writeJSON(w, http.StatusAccepted, CreateAgentResponse{
-						Agent:     agent,
+						Agent:     redactedAgentCopy(ctx, s, agent),
 						Warnings:  warnings,
 						EnvGather: hubEnvGather,
 					})
@@ -1726,7 +1728,7 @@ func (s *Server) createAgentInProject(
 	s.enrichAgent(ctx, agent, project, nil)
 
 	writeJSON(w, http.StatusCreated, CreateAgentResponse{
-		Agent:    agent,
+		Agent:    redactedAgentCopy(ctx, s, agent),
 		Warnings: warnings,
 	})
 }
@@ -2030,7 +2032,7 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 	s.enrichAgent(ctx, agent, project, nil)
 
 	writeJSON(w, http.StatusOK, CreateAgentResponse{
-		Agent: agent,
+		Agent: redactedAgentCopy(ctx, s, agent),
 	})
 }
 
@@ -2340,6 +2342,8 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request, id string) {
 		}
 	}
 
+	resp.Agent.AppliedConfig = redactAppliedConfigEnvForResponse(resp.Agent.AppliedConfig, capabilityAllows(resp.Cap, ActionAttach))
+
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -2556,7 +2560,7 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request, id string) 
 		return
 	}
 
-	writeJSON(w, http.StatusOK, agent)
+	writeJSON(w, http.StatusOK, redactedAgentCopy(ctx, s, agent))
 }
 
 // checkBrokerAvailability verifies the agent's runtime broker is reachable.

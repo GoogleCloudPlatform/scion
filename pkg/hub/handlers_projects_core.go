@@ -2075,11 +2075,15 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 		}
 		caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "agent")
 		for i := range result.Items {
-			agents[i] = AgentWithCapabilities{Agent: result.Items[i], Cap: caps[i]}
+			item := result.Items[i]
+			item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, capabilityAllows(caps[i], ActionAttach))
+			agents[i] = AgentWithCapabilities{Agent: item, Cap: caps[i]}
 		}
 	} else {
 		for i := range result.Items {
-			agents[i] = AgentWithCapabilities{Agent: result.Items[i]}
+			item := result.Items[i]
+			item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, false)
+			agents[i] = AgentWithCapabilities{Agent: item}
 		}
 	}
 
