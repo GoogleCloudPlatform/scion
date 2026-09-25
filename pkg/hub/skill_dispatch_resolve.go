@@ -21,6 +21,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -129,6 +130,13 @@ func (s *Server) resolveRegistrySkillRef(
 			// Pin the resolved version so the files route serves this exact
 			// version (#1785), for absolute and Hub-relative URLs alike.
 			downloadURLs = withSkillVersionDownloadQuery(downloadURLs, sv.Version)
+			// Sign each file URL (#1792). The caller's read access was checked
+			// above (or the skill is public), so the signature carries that
+			// authorization to whoever downloads — typically the runtime
+			// broker, which has no principal the files route would accept.
+			// Each signature is bound to this skill, version and file path and
+			// expires after skillFileURLTTL.
+			downloadURLs = s.signSkillFileDownloadURLs(downloadURLs, skill.ID, sv.Version, time.Now())
 		}
 		entry.Files = downloadURLs
 	}

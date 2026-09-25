@@ -20,6 +20,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -352,5 +355,15 @@ func TestPreResolveAgentSkills_LocalStorageRelativeVersionedURLs(t *testing.T) {
 	require.Empty(t, resp.Errors)
 	require.Len(t, resp.Resolved, 1)
 	require.Len(t, resp.Resolved[0].Files, 1)
-	assert.Equal(t, "/api/v1/skills/"+skill.ID+"/files/SKILL.md?raw=1&version=1.0.0", resp.Resolved[0].Files[0].URL)
+	fileURL := resp.Resolved[0].Files[0].URL
+	// Pinned to the resolved version and signed as a capability URL (#1792).
+	assert.True(t, strings.HasPrefix(fileURL, "/api/v1/skills/"+skill.ID+"/files/SKILL.md?raw=1&version=1.0.0&exp="), fileURL)
+	assert.Contains(t, fileURL, "&sig=")
+
+	// The broker downloads it with no credentials at all.
+	req := httptest.NewRequest(http.MethodGet, fileURL, nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, content, rec.Body.Bytes())
 }

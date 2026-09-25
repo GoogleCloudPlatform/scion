@@ -330,6 +330,19 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 					}
 				}
 
+				// Step 3c: Skill file capability URL (#1792). A credential-less
+				// GET of /api/v1/skills/{id}/files/{path} carrying exp/sig
+				// parameters is passed through WITHOUT an identity. Only the
+				// request shape is checked here; handleSkillFileRead verifies
+				// the HMAC signature unconditionally and rejects the request
+				// if it does not validate, and every other handler sees an
+				// anonymous request exactly as it would for a public route.
+				if isSignedSkillFileRequest(r) {
+					ctx = contextWithAuthType(ctx, AuthTypeSignedURL)
+					next.ServeHTTP(w, r.WithContext(ctx))
+					return
+				}
+
 				writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 					"missing authorization header", nil)
 				return
