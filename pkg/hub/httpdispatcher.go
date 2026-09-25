@@ -69,16 +69,16 @@ func (c *HTTPRuntimeBrokerClient) CreateAgent(ctx context.Context, brokerID, bro
 	return c.transport.CreateAgent(ctx, brokerID, brokerEndpoint, req)
 }
 
-func (c *HTTPRuntimeBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace, resume bool) (*RemoteAgentResponse, error) {
-	return c.transport.StartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, sharedDirs, sharedWorkspace, resume)
+func (c *HTTPRuntimeBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace, resume bool, extras StartExtras) (*RemoteAgentResponse, error) {
+	return c.transport.StartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, sharedDirs, sharedWorkspace, resume, extras)
 }
 
 func (c *HTTPRuntimeBrokerClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string) error {
 	return c.transport.StopAgent(ctx, brokerID, brokerEndpoint, agentID, projectID)
 }
 
-func (c *HTTPRuntimeBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string) error {
-	return c.transport.RestartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, resolvedEnv)
+func (c *HTTPRuntimeBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) error {
+	return c.transport.RestartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, resolvedEnv, extras)
 }
 
 func (c *HTTPRuntimeBrokerClient) ResetAuthAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, token string) error {
@@ -446,6 +446,70 @@ func (d *HTTPAgentDispatcher) getBrokerEndpoint(ctx context.Context, brokerID st
 
 // buildCreateRequest builds a RemoteCreateAgentRequest from the agent's store record.
 // This is shared between DispatchAgentCreate and DispatchAgentProvision.
+// resolveProvisionCredentials collects project-scope secrets for use by the
+// broker's provision-time credential resolution (skill resolution, URI
+// variable substitution, credential helpers). These are never forwarded to
+// the agent container environment. Shared by the create and start/restart
+// dispatch paths (#1960) so that a required gh:// skill can resolve with the
+// same project credentials regardless of which path (re-)provisions the
+// agent. callerName is used only for debug log attribution.
+func (d *HTTPAgentDispatcher) resolveProvisionCredentials(ctx context.Context, agent *store.Agent, callerName string) map[string]string {
+	if agent.ProjectID == "" || d.secretBackend == nil {
+		return nil
+	}
+	projectSecrets, listErr := d.secretBackend.List(ctx, secret.Filter{
+		Scope:   secret.ScopeProject,
+		ScopeID: agent.ProjectID,
+	})
+	if listErr != nil {
+		if d.debug {
+			d.log.Warn(callerName+": failed to list project secrets for ProvisionCredentials",
+				"agent_id", agent.ID, "error", listErr)
+		}
+		return nil
+	}
+	if len(projectSecrets) == 0 {
+		return nil
+	}
+
+	type namedValue struct{ name, value string }
+	fetched := make([]namedValue, len(projectSecrets))
+
+	g, gctx := errgroup.WithContext(ctx)
+	for i, sm := range projectSecrets {
+		if sm.SecretType == store.SecretTypeInternal {
+			continue
+		}
+		i, sm := i, sm // capture loop vars
+		g.Go(func() error {
+			sv, getErr := d.secretBackend.Get(gctx, sm.Name, secret.ScopeProject, agent.ProjectID)
+			if getErr != nil {
+				if d.debug {
+					d.log.Warn(callerName+": failed to get project secret for ProvisionCredentials",
+						"agent_id", agent.ID, "secret", sm.Name, "error", getErr)
+				}
+				return nil // don't fail the group for individual secrets
+			}
+			if sv != nil && sv.Value != "" {
+				fetched[i] = namedValue{sm.Name, sv.Value}
+			}
+			return nil
+		})
+	}
+	_ = g.Wait()
+
+	creds := make(map[string]string)
+	for _, nv := range fetched {
+		if nv.name != "" {
+			creds[nv.name] = nv.value
+		}
+	}
+	if len(creds) == 0 {
+		return nil
+	}
+	return creds
+}
+
 func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *store.Agent, callerName string) (*RemoteCreateAgentRequest, error) {
 	projectInfo := d.resolveDispatchProjectInfo(ctx, agent)
 
@@ -854,53 +918,8 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 	// NOT gated on noAuth: provisionCredentials serve skill resolution (gh://
 	// convention tokens like GH_{OWNER}), not harness auth. Suppressing them under
 	// noAuth starves the GitHubSkillResolver of credentials for private repos.
-	if agent.ProjectID != "" && d.secretBackend != nil {
-		projectSecrets, listErr := d.secretBackend.List(ctx, secret.Filter{
-			Scope:   secret.ScopeProject,
-			ScopeID: agent.ProjectID,
-		})
-		if listErr != nil {
-			if d.debug {
-				d.log.Warn("buildCreateRequest: failed to list project secrets for ProvisionCredentials",
-					"agent_id", agent.ID, "error", listErr)
-			}
-		} else if len(projectSecrets) > 0 {
-			type namedValue struct{ name, value string }
-			fetched := make([]namedValue, len(projectSecrets))
-
-			g, gctx := errgroup.WithContext(ctx)
-			for i, sm := range projectSecrets {
-				if sm.SecretType == store.SecretTypeInternal {
-					continue
-				}
-				i, sm := i, sm // capture loop vars
-				g.Go(func() error {
-					sv, getErr := d.secretBackend.Get(gctx, sm.Name, secret.ScopeProject, agent.ProjectID)
-					if getErr != nil {
-						if d.debug {
-							d.log.Warn("buildCreateRequest: failed to get project secret for ProvisionCredentials",
-								"agent_id", agent.ID, "secret", sm.Name, "error", getErr)
-						}
-						return nil // don't fail the group for individual secrets
-					}
-					if sv != nil && sv.Value != "" {
-						fetched[i] = namedValue{sm.Name, sv.Value}
-					}
-					return nil
-				})
-			}
-			_ = g.Wait()
-
-			creds := make(map[string]string)
-			for _, nv := range fetched {
-				if nv.name != "" {
-					creds[nv.name] = nv.value
-				}
-			}
-			if len(creds) > 0 {
-				req.ProvisionCredentials = creds
-			}
-		}
+	if creds := d.resolveProvisionCredentials(ctx, agent, "buildCreateRequest"); len(creds) > 0 {
+		req.ProvisionCredentials = creds
 	}
 
 	// Log a summary of env resolution sources
@@ -2261,10 +2280,26 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	// until #1350 is done — otherwise fail-closed + nil map = total outage.
 	_ = envClassifications // avoid unused-variable error until #1350 wire threading
 
-	resp, err := d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, projectInfo.sharedDirs, projectInfo.sharedWorkspace, resume)
+	// Carry the same dispatch metadata the create path sends so that a
+	// re-provision reached via start (e.g. after the broker deletes a stale
+	// agent dir) can resolve required skills exactly as create does (#1960):
+	// the same PreResolvedSkills the Hub resolved as the agent's creator (so
+	// non-public hub-registry skills are never resolved with the broker's own
+	// identity), the same project-scope ProvisionCredentials for gh:// skill
+	// resolution, and the owning user's ID for user-scope resolution.
+	extras := StartExtras{
+		HubEndpoint:          d.effectiveAgentHubEndpoint(),
+		UserID:               agent.OwnerID,
+		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentStart"),
+	}
+	if d.skillPreResolver != nil {
+		extras.PreResolvedSkills = d.skillPreResolver(ctx, agent)
+	}
+
+	resp, err := d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, projectInfo.sharedDirs, projectInfo.sharedWorkspace, resume, extras)
 	if isHashMismatchError(err) {
 		if repairErr := d.repairHashMismatch(ctx, agent, err); repairErr == nil {
-			resp, err = d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, projectInfo.sharedDirs, projectInfo.sharedWorkspace, resume)
+			resp, err = d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, projectInfo.sharedDirs, projectInfo.sharedWorkspace, resume, extras)
 		}
 	}
 	if errors.Is(err, ErrLifecycleDeferred) {
@@ -2487,7 +2522,19 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	// until #1350 is done — otherwise fail-closed + nil map = total outage.
 	_ = envClassifications // avoid unused-variable error until #1350 wire threading
 
-	err = d.client.RestartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, resolvedEnv)
+	// Carry the same dispatch metadata as DispatchAgentStart (see comment
+	// there) so a re-provision reached via restart resolves required skills
+	// exactly as create does (#1960).
+	extras := StartExtras{
+		HubEndpoint:          d.effectiveAgentHubEndpoint(),
+		UserID:               agent.OwnerID,
+		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentRestart"),
+	}
+	if d.skillPreResolver != nil {
+		extras.PreResolvedSkills = d.skillPreResolver(ctx, agent)
+	}
+
+	err = d.client.RestartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, resolvedEnv, extras)
 	if errors.Is(err, ErrLifecycleDeferred) {
 		return d.deferredRestart(ctx, agent)
 	}

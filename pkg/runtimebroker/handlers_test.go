@@ -47,6 +47,10 @@ type mockManager struct {
 	lastDeleteContainerID string
 	lastDeleteFiles       bool
 	lastStopAgentID       string
+	// lastStartCtx captures the context passed to Start, so tests can assert
+	// on what was attached to it (e.g. a skill resolver, #1960) without a
+	// real container runtime or ProvisionAgent call.
+	lastStartCtx context.Context
 }
 
 func (m *mockManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
@@ -59,6 +63,7 @@ func (m *mockManager) Provision(ctx context.Context, opts api.StartOptions) (*ap
 func (m *mockManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
 	m.startCalls++
 	m.lastStartOpts = opts
+	m.lastStartCtx = ctx
 	if m.startErr != nil {
 		return nil, m.startErr
 	}
@@ -1073,11 +1078,14 @@ type provisionCapturingManager struct {
 	provisionCalled bool
 	startCalled     bool
 	lastOpts        api.StartOptions
+	// lastProvisionCtx captures the context passed to Provision (#1960).
+	lastProvisionCtx context.Context
 }
 
 func (m *provisionCapturingManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
 	m.provisionCalled = true
 	m.lastOpts = opts
+	m.lastProvisionCtx = ctx
 	return &api.ScionConfig{Harness: "claude", HarnessConfig: "claude"}, nil
 }
 

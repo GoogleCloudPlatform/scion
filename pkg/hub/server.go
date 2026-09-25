@@ -437,6 +437,23 @@ type AgentDispatcher interface {
 	DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) error
 }
 
+// StartExtras carries the dispatch-time metadata that the create path already
+// sends but that the start/restart paths historically dropped (#1960): the
+// Hub endpoint (for pre-resolved-skill URL rewriting), the owning user's ID,
+// project-scope credentials for provision-time skill resolution, and any
+// Hub-registry skills already resolved as the agent's creator. Passed to
+// StartAgent/RestartAgent so the broker can attach the same skill resolver on
+// every path that can reach ProvisionAgent, not just create.
+//
+// Zero value is valid and simply carries nothing extra, matching pre-#1960
+// behavior for callers (e.g. local/file-mode dispatch) that have none of this.
+type StartExtras struct {
+	HubEndpoint          string
+	UserID               string
+	ProvisionCredentials map[string]string
+	PreResolvedSkills    *ResolveSkillsResponse
+}
+
 // RuntimeBrokerClient is an interface for communicating with runtime brokers over HTTP.
 // This allows the hub to dispatch operations to remote runtime brokers.
 // All methods take a brokerID parameter which is used for HMAC authentication when
@@ -457,7 +474,8 @@ type RuntimeBrokerClient interface {
 	// sharedWorkspace indicates the project uses a shared workspace mount
 	// (hub-project / git-workspace hybrid) so the broker must not create a
 	// per-agent worktree on (re-)start.
-	StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace, resume bool) (*RemoteAgentResponse, error)
+	// extras carries the dispatch metadata described on StartExtras.
+	StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace, resume bool, extras StartExtras) (*RemoteAgentResponse, error)
 
 	// StopAgent stops an agent on a remote runtime broker.
 	// brokerID is used for HMAC authentication lookup.
@@ -469,7 +487,8 @@ type RuntimeBrokerClient interface {
 	// projectID scopes the lookup to a specific project (required for uniqueness).
 	// resolvedEnv carries fresh auth tokens and identity vars so the restarted
 	// container retains Hub connectivity.
-	RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string) error
+	// extras carries the dispatch metadata described on StartExtras.
+	RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) error
 
 	// ResetAuthAgent injects a fresh auth token into a running agent without restarting it.
 	// brokerID is used for HMAC authentication lookup.

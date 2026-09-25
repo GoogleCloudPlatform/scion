@@ -105,7 +105,7 @@ func (c *ControlChannelBrokerClient) CreateAgent(ctx context.Context, brokerID, 
 }
 
 // StartAgent starts an agent via control channel.
-func (c *ControlChannelBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace, resume bool) (*RemoteAgentResponse, error) {
+func (c *ControlChannelBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace, resume bool, extras StartExtras) (*RemoteAgentResponse, error) {
 	_ = brokerEndpoint
 	path := fmt.Sprintf("/api/v1/agents/%s/start", url.PathEscape(agentID))
 	if projectID != "" {
@@ -149,6 +149,21 @@ func (c *ControlChannelBrokerClient) StartAgent(ctx context.Context, brokerID, b
 	if resume {
 		payload["resume"] = true
 	}
+	// Carry the same dispatch metadata the create path sends (#1960) so the
+	// broker can attach a working skill resolver whenever start (re-)provisions
+	// the agent, not just create.
+	if extras.HubEndpoint != "" {
+		payload["hubEndpoint"] = extras.HubEndpoint
+	}
+	if extras.UserID != "" {
+		payload["userId"] = extras.UserID
+	}
+	if len(extras.ProvisionCredentials) > 0 {
+		payload["provisionCredentials"] = extras.ProvisionCredentials
+	}
+	if extras.PreResolvedSkills != nil {
+		payload["preResolvedSkills"] = extras.PreResolvedSkills
+	}
 
 	var body []byte
 	if len(payload) > 0 {
@@ -185,18 +200,34 @@ func (c *ControlChannelBrokerClient) StopAgent(ctx context.Context, brokerID, br
 }
 
 // RestartAgent restarts an agent via control channel.
-func (c *ControlChannelBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string) error {
+func (c *ControlChannelBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) error {
 	_ = brokerEndpoint
 	path := fmt.Sprintf("/api/v1/agents/%s/restart", url.PathEscape(agentID))
 	query := ""
 	if projectID != "" {
 		query = "projectId=" + url.QueryEscape(projectID)
 	}
-	var body []byte
+	payload := map[string]interface{}{}
 	if len(resolvedEnv) > 0 {
-		payload := map[string]interface{}{
-			"resolvedEnv": resolvedEnv,
-		}
+		payload["resolvedEnv"] = resolvedEnv
+	}
+	// Carry the same dispatch metadata the create/start paths send (#1960) so
+	// the broker can attach a working skill resolver when restart
+	// (re-)provisions the agent.
+	if extras.HubEndpoint != "" {
+		payload["hubEndpoint"] = extras.HubEndpoint
+	}
+	if extras.UserID != "" {
+		payload["userId"] = extras.UserID
+	}
+	if len(extras.ProvisionCredentials) > 0 {
+		payload["provisionCredentials"] = extras.ProvisionCredentials
+	}
+	if extras.PreResolvedSkills != nil {
+		payload["preResolvedSkills"] = extras.PreResolvedSkills
+	}
+	var body []byte
+	if len(payload) > 0 {
 		var err error
 		body, err = json.Marshal(payload)
 		if err != nil {
@@ -662,12 +693,12 @@ func (c *HybridBrokerClient) CreateAgent(ctx context.Context, brokerID, brokerEn
 // routeLocal uses the control-channel tunnel (unchanged fast path), routeHTTP
 // falls back to the broker's HTTP endpoint, and routeForward/routeUndeliverable
 // return ErrLifecycleDeferred so the caller can write durable intent + wait.
-func (c *HybridBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace, resume bool) (*RemoteAgentResponse, error) {
+func (c *HybridBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace, resume bool, extras StartExtras) (*RemoteAgentResponse, error) {
 	switch c.route(ctx, brokerID, brokerEndpoint) {
 	case routeLocal:
-		return c.controlChannel.StartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, sharedDirs, sharedWorkspace, resume)
+		return c.controlChannel.StartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, sharedDirs, sharedWorkspace, resume, extras)
 	case routeHTTP:
-		return c.httpClient.StartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, sharedDirs, sharedWorkspace, resume)
+		return c.httpClient.StartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, sharedDirs, sharedWorkspace, resume, extras)
 	default:
 		return nil, ErrLifecycleDeferred
 	}
@@ -690,12 +721,12 @@ func (c *HybridBrokerClient) StopAgent(ctx context.Context, brokerID, brokerEndp
 // RestartAgent restarts an agent, using route() to decide the delivery path.
 // routeLocal uses the control-channel tunnel, routeHTTP falls back to HTTP,
 // and routeForward/routeUndeliverable return ErrLifecycleDeferred.
-func (c *HybridBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string) error {
+func (c *HybridBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) error {
 	switch c.route(ctx, brokerID, brokerEndpoint) {
 	case routeLocal:
-		return c.controlChannel.RestartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, resolvedEnv)
+		return c.controlChannel.RestartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, resolvedEnv, extras)
 	case routeHTTP:
-		return c.httpClient.RestartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, resolvedEnv)
+		return c.httpClient.RestartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, resolvedEnv, extras)
 	default:
 		return ErrLifecycleDeferred
 	}
