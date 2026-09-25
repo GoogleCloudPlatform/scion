@@ -20,6 +20,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -599,6 +600,19 @@ func (s *Server) handleAgentAttach(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := s.LookupAgent(ctx, agentID, projectID)
 	if err != nil {
+		if errors.Is(err, ErrAgentListUnavailable) {
+			// The container runtime itself failed to respond (e.g. an
+			// intermittent `docker ps` error that survived List's internal
+			// retries) — this is not the same as the agent not existing, so
+			// don't tell the user "Agent not found". Give them something
+			// actionable instead.
+			slog.Warn("PTY attach: agent lookup failed, runtime listing unavailable",
+				"agent_id", agentID, "error", err)
+			RuntimeUnavailable(w, fmt.Sprintf(
+				"Unable to look up agent %q: the container runtime is temporarily unavailable. Please retry the attach in a moment.", agentID))
+			return
+		}
+		slog.Info("PTY attach: agent not found", "agent_id", agentID, "error", err)
 		NotFound(w, "Agent")
 		return
 	}

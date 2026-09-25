@@ -39,6 +39,7 @@ type mockManager struct {
 	deleteCalls           int
 	startErr              error
 	stopErr               error
+	listErr               error
 	lastStartOpts         api.StartOptions
 	lastDeleteProjectPath string
 	lastDeleteAgentID     string
@@ -89,6 +90,9 @@ func (m *mockManager) DeleteTarget(ctx context.Context, agentName, containerID s
 }
 
 func (m *mockManager) List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+	if m.listErr != nil {
+		return nil, m.listErr
+	}
 	return m.agents, nil
 }
 
