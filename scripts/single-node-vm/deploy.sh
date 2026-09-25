@@ -1166,9 +1166,9 @@ else
   # /healthz was unreadable, so the manual fallback below has to find the hub
   # ID itself. It reads the persisted ID from ~/.scion/hub-id with the sqlite3
   # CLI's readfile(). deploy.sh never sets hub_id explicitly, so that file is
-  # the hub ID. If the file is missing, readfile() returns NULL and the NOT NULL
-  # constraint rejects the insert, so no junk row is written.
-  HUB_ENV_SQL_SCOPE_ID="trim(CAST(readfile('/home/scion/.scion/hub-id') AS TEXT), char(10, 13, 32))"
+  # the hub ID. If the file is missing or empty, the expression is NULL and the
+  # NOT NULL constraint rejects the insert, so no junk row is written.
+  HUB_ENV_SQL_SCOPE_ID="NULLIF(trim(CAST(readfile('/home/scion/.scion/hub-id') AS TEXT), char(10, 13, 32)), '')"
 fi
 # GOOGLE_CLOUD_LOCATION=global on purpose: the global Vertex AI endpoint
 # serves the Gemini/Claude models agents use, and it is not tied to REGION.
