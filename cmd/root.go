@@ -111,7 +111,7 @@ return an error instead of blocking.`,
 			requiresProject = false
 		}
 		// Project subcommands operate on all projects, not just the current one
-		if parentName == "project" || parentName == "grove" {
+		if parentName == "project" {
 			requiresProject = false
 		}
 
