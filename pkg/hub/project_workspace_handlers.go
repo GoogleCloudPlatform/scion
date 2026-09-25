@@ -743,17 +743,14 @@ func (s *Server) handleProjectWorkspaceArchive(w http.ResponseWriter, r *http.Re
 }
 
 // handleProjectSharedDirArchive creates a zip archive of a shared directory and serves it for download.
-func (s *Server) handleProjectSharedDirArchive(w http.ResponseWriter, r *http.Request, projectID, dirName string) {
+// The project has already been loaded and authorized by
+// handleProjectSharedDirRoutes.
+func (s *Server) handleProjectSharedDirArchive(w http.ResponseWriter, r *http.Request, project *store.Project, dirName string) {
 	ctx := r.Context()
+	projectID := project.ID
 
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
-		return
-	}
-
-	project, err := s.store.GetProject(ctx, projectID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
 		return
 	}
 
@@ -939,15 +936,14 @@ func (s *Server) handleProjectWorkspaceDelete(w http.ResponseWriter, root *os.Ro
 //   - GET  (filePath="")  → list files
 //   - POST (filePath="")  → upload files
 //   - GET  (filePath!="") → download file
+//   - PUT  (filePath!="") → write file
 //   - DELETE (filePath!="") → delete file
-func (s *Server) handleSharedDirFiles(w http.ResponseWriter, r *http.Request, projectID, dirName, filePath string) {
+//
+// The project has already been loaded and authorized by
+// handleProjectSharedDirRoutes.
+func (s *Server) handleSharedDirFiles(w http.ResponseWriter, r *http.Request, project *store.Project, dirName, filePath string) {
 	ctx := r.Context()
-
-	project, err := s.store.GetProject(ctx, projectID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
+	projectID := project.ID
 
 	// Verify the shared dir is declared on this project
 	found := false

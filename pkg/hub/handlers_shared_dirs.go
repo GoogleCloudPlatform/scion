@@ -18,14 +18,24 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// handleProjectSharedDirs handles GET/POST on /api/v1/projects/{projectId}/shared-dirs.
-func (s *Server) handleProjectSharedDirs(w http.ResponseWriter, r *http.Request, projectID string) {
+// handleProjectSharedDirRoutes is the single authorized entry point for the
+// project shared-dirs subtree: list/create, delete-by-name, archive download,
+// and the file operations (list, download, upload, write, delete) reached
+// under /api/v1/projects/{projectId}/shared-dirs[/{name}[/archive|/files...]].
+//
+// The project is loaded once here and passed down, and the gate below runs
+// before sdPath is parsed into a leaf call, so every arm reached through this
+// dispatcher is authorized by construction. This is a floor: a leaf below may
+// still apply a stricter check of its own (e.g. restricting a write to a
+// UserIdentity caller), and this function does not relax any of those.
+func (s *Server) handleProjectSharedDirRoutes(w http.ResponseWriter, r *http.Request, projectID, sdPath string) {
 	ctx := r.Context()
 
 	project, err := s.store.GetProject(ctx, projectID)
@@ -37,6 +47,60 @@ func (s *Server) handleProjectSharedDirs(w http.ResponseWriter, r *http.Request,
 		writeErrorFromErr(w, err, "")
 		return
 	}
+
+	// Project isolation runs before the authorization check so a cross-project
+	// agent caller keeps its 404 and is not told the project exists.
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+		if project.ID != agentIdent.ProjectID() {
+			NotFound(w, "Project")
+			return
+		}
+	}
+
+	// SECURITY-GATE: CheckAccess — GET/HEAD only need project read access,
+	// since listing, downloading and archiving shared-dir contents exposes
+	// project data without changing it; every other method needs update
+	// access, because it creates, overwrites or removes files on disk.
+	action := ActionRead
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		action = ActionUpdate
+	}
+	if !s.authorize(w, r, projectResource(project), action) {
+		return
+	}
+
+	if sdPath == "" {
+		s.handleProjectSharedDirs(w, r, project)
+		return
+	}
+
+	// Split into name and optional sub-path (e.g. "my-dir/files/some/path")
+	parts := strings.SplitN(sdPath, "/", 2)
+	name := parts[0]
+	rest := ""
+	if len(parts) > 1 {
+		rest = parts[1]
+	}
+	switch {
+	case rest == "archive":
+		s.handleProjectSharedDirArchive(w, r, project, name)
+	case strings.HasPrefix(rest, "files"):
+		filePath := strings.TrimPrefix(rest, "files")
+		filePath = strings.TrimPrefix(filePath, "/")
+		s.handleSharedDirFiles(w, r, project, name, filePath)
+	case rest == "":
+		s.handleProjectSharedDirByName(w, r, project, name)
+	default:
+		NotFound(w, "Resource")
+	}
+}
+
+// handleProjectSharedDirs handles GET/POST on /api/v1/projects/{projectId}/shared-dirs.
+// The project has already been loaded and authorized by
+// handleProjectSharedDirRoutes; the checks below are additional to that gate,
+// not a replacement for it.
+func (s *Server) handleProjectSharedDirs(w http.ResponseWriter, r *http.Request, project *store.Project) {
+	ctx := r.Context()
 
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
@@ -123,18 +187,12 @@ func (s *Server) handleProjectSharedDirs(w http.ResponseWriter, r *http.Request,
 }
 
 // handleProjectSharedDirByName handles DELETE on /api/v1/projects/{projectId}/shared-dirs/{name}.
-func (s *Server) handleProjectSharedDirByName(w http.ResponseWriter, r *http.Request, projectID, name string) {
+// The project has already been loaded and authorized by
+// handleProjectSharedDirRoutes; the check below is additional to that gate,
+// not a replacement for it.
+func (s *Server) handleProjectSharedDirByName(w http.ResponseWriter, r *http.Request, project *store.Project, name string) {
 	ctx := r.Context()
-
-	project, err := s.store.GetProject(ctx, projectID)
-	if err != nil {
-		if err == store.ErrNotFound {
-			NotFound(w, "Project")
-			return
-		}
-		writeErrorFromErr(w, err, "")
-		return
-	}
+	projectID := project.ID
 
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
