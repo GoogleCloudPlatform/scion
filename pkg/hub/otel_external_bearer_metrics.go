@@ -67,6 +67,9 @@ var (
 // recorder (Server.ExternalBearerSnapshotMetrics), so /metrics keeps
 // counting the same totals before and after this recorder is wired in.
 func NewOTelExternalBearerMetrics(mp metric.MeterProvider, snap *ExternalBearerSnapshotMetrics) (*OTelExternalBearerMetrics, error) {
+	if mp == nil {
+		return nil, fmt.Errorf("otel external bearer metrics: nil MeterProvider")
+	}
 	m := mp.Meter(instrumentationScope)
 	r := &OTelExternalBearerMetrics{snap: snap}
 

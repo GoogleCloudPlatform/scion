@@ -191,3 +191,21 @@ func TestOTelExternalBearer_NilSnapshotDoesNotPanic(t *testing.T) {
 	rec.RecordGoogleValidatorCache(GoogleValidatorCacheNegativeHit)
 	rec.RecordGEExchangeRequest(GEExchangeOutcomeBadRequest)
 }
+
+// TestOTelExternalBearer_NilMeterProvider_ReturnsError covers a nil
+// metric.MeterProvider — a caller mistake, not a verification failure — and
+// must not panic on mp.Meter(instrumentationScope). server.go's caller
+// (cmd/server_foreground.go) already treats any error from
+// NewOTelExternalBearerMetrics as non-fatal: it logs a warning and continues
+// without OTel export rather than failing Hub startup, so this test only
+// needs to prove the constructor itself returns an error instead of
+// panicking.
+func TestOTelExternalBearer_NilMeterProvider_ReturnsError(t *testing.T) {
+	rec, err := NewOTelExternalBearerMetrics(nil, nil)
+	if err == nil {
+		t.Fatal("expected an error for a nil MeterProvider")
+	}
+	if rec != nil {
+		t.Errorf("expected a nil recorder, got %+v", rec)
+	}
+}
