@@ -79,6 +79,19 @@ const SCROLL_TOP_THRESHOLD = 100;
 /** Threshold in pixels from bottom to consider "pinned to bottom". */
 const SCROLL_BOTTOM_THRESHOLD = 80;
 
+/** Small margin kept above the unread divider when it is anchored to the top. */
+const UNREAD_ANCHOR_MARGIN_PX = 16;
+
+/**
+ * How long to keep correcting the unread-divider anchor against late layout
+ * shifts (images, markdown, attachments finishing their own load) before
+ * giving up. Short-lived on purpose: a live SSE message arriving inside this
+ * window changes the message count, not just element sizes, and is detected
+ * separately so it never re-anchors — this timer only guards against the
+ * anchor drifting while the *same* unread content is still settling.
+ */
+const UNREAD_ANCHOR_WINDOW_MS = 2000;
+
 /** Grouping window: consecutive messages from same sender within 5 min. */
 const GROUP_WINDOW_MS = 5 * 60 * 1000;
 
@@ -418,6 +431,47 @@ export class ScionChatThread extends LitElement {
   private hadError = false;
   private fetchId = 0;
 
+  // ---- Unread-divider open-to-top scroll anchor ----
+
+  /** True while the open-time anchor to the unread divider is still in effect. */
+  private _unreadAnchorActive = false;
+
+  /** Message count captured when the anchor was applied, to tell a late layout
+   *  shift of existing content (re-apply) apart from a new message arriving
+   *  (stop — never re-anchor on live activity). */
+  private _unreadAnchorMessageCount = 0;
+
+  /** True for the duration of our own programmatic scrollTop write, so the
+   *  resulting 'scroll' event is not mistaken for the user scrolling away. */
+  private _applyingUnreadAnchor = false;
+
+  /** Handle of the pending rAF that will clear `_applyingUnreadAnchor`. Kept
+   *  so a second `applyUnreadAnchor` call within the same short window can
+   *  cancel the earlier one before scheduling its own — otherwise the
+   *  earlier rAF (e.g. from a ResizeObserver notification a frame apart from
+   *  a second one) could clear the guard while the later write's own
+   *  'scroll' event is still pending, and that event would then be
+   *  misread as a user scroll. */
+  private _applyingUnreadAnchorRaf: number | null = null;
+
+  /** The value `applyUnreadAnchor` last wrote to `scrollTop` (read back after
+   *  the browser clamps it), so a genuine user scroll landing in the same
+   *  frame as that write — before the guard above clears on the next rAF —
+   *  is still recognized as manual instead of being swallowed by the guard. */
+  private _unreadAnchorWrittenScrollTop = 0;
+
+  /** Watches `.messages-list` for late layout shifts while the anchor is active. */
+  private _unreadAnchorResizeObserver: ResizeObserver | null = null;
+
+  /** Bounds how long the short-lived resize watch stays attached. */
+  private _unreadAnchorTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Handle of the deferred rAF, scheduled by `scrollToUnreadDivider`, that
+   *  applies the initial anchor after `updateComplete`. Canceled on
+   *  deactivation so a thread left before that first frame lands can't have
+   *  it fire against a superseded or torn-down anchor. */
+  private _unreadAnchorInitialRaf: number | null = null;
+
   /** Bound listener for v2 SSE chat-message events via stateManager. */
   private _v2MessageHandler = this.handleV2ChatMessage.bind(this);
 
@@ -599,6 +653,10 @@ export class ScionChatThread extends LitElement {
 
       /* Message scroll area */
       .messages-scroll {
+        /* Positioned so descendants' offsetTop (used to anchor the unread
+         * divider to the top of the viewport on open) is measured relative to
+         * this container instead of bubbling up to an ancestor outside it. */
+        position: relative;
         flex: 1;
         overflow-y: auto;
         overflow-x: hidden;
@@ -965,6 +1023,10 @@ export class ScionChatThread extends LitElement {
       this._initialWatermarkTimer = null;
     }
 
+    // A thread switch is a fresh "open" — the old anchor (and its watchers)
+    // belong to the conversation we just left.
+    this.deactivateUnreadAnchor();
+
     // Stop any active SSE listener
     stateManager.removeEventListener('connected', this._sseReconnectHandler);
     stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
@@ -1018,6 +1080,7 @@ export class ScionChatThread extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.stopStream();
+    this.deactivateUnreadAnchor();
     // Clean up v2 SSE listeners
     stateManager.removeEventListener('connected', this._sseReconnectHandler);
     stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
@@ -2362,6 +2425,19 @@ export class ScionChatThread extends LitElement {
 
   private handleScroll(e: Event): void {
     const el = e.target as HTMLElement;
+
+    // Any scroll not caused by our own anchor write is the user taking over —
+    // stop re-anchoring to the unread divider immediately. A genuine user
+    // scroll landing in the very same frame as our write is still detected:
+    // `_applyingUnreadAnchor` is true for that whole frame, but the resulting
+    // scrollTop then disagrees with the value we just wrote.
+    if (
+      this._unreadAnchorActive &&
+      (!this._applyingUnreadAnchor || el.scrollTop !== this._unreadAnchorWrittenScrollTop)
+    ) {
+      this.deactivateUnreadAnchor();
+    }
+
     const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     this.pinnedToBottom = distFromBottom < SCROLL_BOTTOM_THRESHOLD;
 
@@ -2457,6 +2533,9 @@ export class ScionChatThread extends LitElement {
   }
 
   private async handleJumpToLatest(): Promise<void> {
+    // "Jump to latest" is explicit programmatic navigation too — same
+    // precedence over the open-time unread anchor as scrollToMessageById.
+    this.deactivateUnreadAnchor();
     if (this.viewingAroundMessage) {
       this.messageMap.clear();
       this.messages = [];
@@ -2496,6 +2575,12 @@ export class ScionChatThread extends LitElement {
    * Can be called externally (e.g. from search navigation on same conversation).
    */
   async scrollToMessageById(messageId: string, highlight = true): Promise<void> {
+    // Explicit programmatic navigation (search-jump, reply-jump, deep link)
+    // takes precedence over the open-time unread anchor (rule 5). Without
+    // this, a same-thread search-jump made inside the anchor window is
+    // overridden the moment content resizes and the ResizeObserver re-anchors
+    // to the divider (R1).
+    this.deactivateUnreadAnchor();
     await this.updateComplete;
     const scrollEl = this.shadowRoot?.querySelector('.messages-scroll');
     if (!scrollEl) return;
@@ -2569,17 +2654,148 @@ export class ScionChatThread extends LitElement {
     }
   }
 
-  /** Scroll to the unread divider after render. */
+  /**
+   * Anchor the scroll position to the unread divider after render, so the
+   * user opens the thread reading forward from their first unread message
+   * instead of the tail.
+   *
+   * Only called once, at open time (initial load or a thread/conversationKey
+   * switch) — never from the SSE/merge path, so a message arriving while the
+   * thread is already open keeps the ordinary stick-to-bottom / "Jump to
+   * latest" behavior instead of re-anchoring to the divider.
+   */
   private scrollToUnreadDivider(): void {
+    this._unreadAnchorActive = true;
+    this._unreadAnchorMessageCount = this.messages.length;
+    // Captured as a local, not stored back onto `this`: `fetchId` only bumps
+    // on a thread switch, so if this open is superseded before this deferred
+    // callback runs, a *new* call to scrollToUnreadDivider() would otherwise
+    // overwrite a shared instance field with its own token before this one
+    // fires, making the two indistinguishable. A local closure variable
+    // keeps each open's token fixed to the value it had when scheduled.
+    const openToken = this.fetchId;
     void this.updateComplete.then(() => {
-      const divider = this.shadowRoot?.querySelector('.unread-divider');
-      if (divider) {
-        divider.scrollIntoView({ behavior: 'auto', block: 'center' });
-      } else {
-        // Fallback: scroll to bottom if divider not found.
-        this.scrollToBottom();
-      }
+      // One more frame past updateComplete: images, attachments and markdown
+      // inside already-rendered rows can still change height after Lit has
+      // committed the DOM, and reading geometry too early re-introduces the
+      // jump-to-bottom-then-up flash this anchor exists to avoid.
+      this._unreadAnchorInitialRaf = requestAnimationFrame(() => {
+        this._unreadAnchorInitialRaf = null;
+        if (!this._unreadAnchorActive || this.fetchId !== openToken) return;
+        this.applyUnreadAnchor();
+        this.observeUnreadAnchorLayout(openToken);
+      });
     });
+  }
+
+  /**
+   * Compute and apply the anchor scroll position: the unread divider's top
+   * edge, minus a small margin, clamped to the container's maximum scroll so
+   * unread content shorter than the viewport lands at the bottom instead of
+   * over-scrolling.
+   */
+  private applyUnreadAnchor(): void {
+    const scrollEl = this.shadowRoot?.querySelector('.messages-scroll') as HTMLElement | null;
+    if (!scrollEl) return;
+
+    const divider = this.shadowRoot?.querySelector('.unread-divider') as HTMLElement | null;
+    if (!divider) {
+      // The divider isn't in the DOM (e.g. the unread message was since
+      // removed) — fall back to the ordinary bottom anchor.
+      this.scrollToBottom();
+      return;
+    }
+
+    const maxScroll = Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight);
+    const target = Math.min(maxScroll, Math.max(0, divider.offsetTop - UNREAD_ANCHOR_MARGIN_PX));
+
+    // Reflect where this leaves the user directly, rather than waiting on the
+    // 'scroll' event this write triggers to recompute it: that event is
+    // asynchronous, and an SSE message landing in the gap must already see
+    // the correct state to decide whether to stick-to-bottom or show "Jump to
+    // latest". Only the clamped-to-bottom case (behavior #3) counts as pinned.
+    this.pinnedToBottom = target >= maxScroll;
+
+    this._applyingUnreadAnchor = true;
+    scrollEl.scrollTop = target;
+    // Read back the value the browser actually committed (it may clamp
+    // differently than our own `maxScroll` computation) so handleScroll can
+    // tell our write apart from a real user scroll landing in the same frame.
+    this._unreadAnchorWrittenScrollTop = scrollEl.scrollTop;
+    // The 'scroll' event this write triggers lands asynchronously in real
+    // browsers; clear the guard on the next frame rather than synchronously
+    // so handleScroll still ignores it, and a genuine user scroll shortly
+    // after is still detected as manual.
+    //
+    // Rapid successive calls (e.g. ResizeObserver firing twice in one frame
+    // window) must not leave an earlier rAF racing this one: if it fired
+    // first, it would clear the guard while this write's own 'scroll' event
+    // is still pending, and that event could then be misread as a user
+    // scroll. Canceling any previous one keeps exactly one guard-clearing
+    // rAF alive at a time, tied to the most recent write.
+    if (this._applyingUnreadAnchorRaf !== null) {
+      cancelAnimationFrame(this._applyingUnreadAnchorRaf);
+    }
+    this._applyingUnreadAnchorRaf = requestAnimationFrame(() => {
+      this._applyingUnreadAnchorRaf = null;
+      this._applyingUnreadAnchor = false;
+    });
+  }
+
+  /**
+   * Re-apply the anchor while content above the divider is still settling,
+   * for a short, bounded window. Stops itself — rather than fighting the live
+   * thread indefinitely — the moment the message count changes (a real
+   * message arrived, not a layout shift) or the window elapses.
+   *
+   * `openToken` is the `fetchId` this anchor belongs to, captured by the
+   * caller — see the comment in `scrollToUnreadDivider`. It guards this
+   * closure the same way against firing for a thread already left behind.
+   */
+  private observeUnreadAnchorLayout(openToken: number): void {
+    if (typeof ResizeObserver === 'undefined') return;
+    const list = this.shadowRoot?.querySelector('.messages-list');
+    if (!list) return;
+
+    this._unreadAnchorResizeObserver?.disconnect();
+    this._unreadAnchorResizeObserver = new ResizeObserver(() => {
+      if (!this._unreadAnchorActive || this.fetchId !== openToken) return;
+      if (this.messages.length !== this._unreadAnchorMessageCount) {
+        // New content, not late layout of the unread content itself — leave
+        // it to the ordinary stick-to-bottom / "Jump to latest" behavior.
+        this.deactivateUnreadAnchor();
+        return;
+      }
+      this.applyUnreadAnchor();
+    });
+    this._unreadAnchorResizeObserver.observe(list);
+
+    if (this._unreadAnchorTimer) clearTimeout(this._unreadAnchorTimer);
+    this._unreadAnchorTimer = setTimeout(() => {
+      this.deactivateUnreadAnchor();
+    }, UNREAD_ANCHOR_WINDOW_MS);
+  }
+
+  /** Stop correcting the unread-divider anchor and tear down its watchers. */
+  private deactivateUnreadAnchor(): void {
+    this._unreadAnchorActive = false;
+    this._applyingUnreadAnchor = false;
+    if (this._unreadAnchorResizeObserver) {
+      this._unreadAnchorResizeObserver.disconnect();
+      this._unreadAnchorResizeObserver = null;
+    }
+    if (this._unreadAnchorTimer) {
+      clearTimeout(this._unreadAnchorTimer);
+      this._unreadAnchorTimer = null;
+    }
+    if (this._unreadAnchorInitialRaf !== null) {
+      cancelAnimationFrame(this._unreadAnchorInitialRaf);
+      this._unreadAnchorInitialRaf = null;
+    }
+    if (this._applyingUnreadAnchorRaf !== null) {
+      cancelAnimationFrame(this._applyingUnreadAnchorRaf);
+      this._applyingUnreadAnchorRaf = null;
+    }
   }
 
   // ---------------------------------------------------------------------------
