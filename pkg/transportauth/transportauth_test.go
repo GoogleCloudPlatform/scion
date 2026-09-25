@@ -558,7 +558,7 @@ func TestFromEnv_MetadataBlocked(t *testing.T) {
 }
 
 // TestFromEnv_MetadataPassthrough_StillUsesMetadataSource is the regression
-// guard for ptone/scion#1882 (O1): the broker now records
+// guard for ptone/scion#1882: the broker now records
 // SCION_METADATA_MODE=passthrough on the agent-create path (previously it
 // was absent there, only present on start/restart). Passthrough deliberately
 // does not redirect 169.254.169.254 — the agent reaches the real GCE
@@ -755,7 +755,7 @@ func TestFromSettings_MetadataOnGCE(t *testing.T) {
 }
 
 // TestFromSettings_MetadataPassthrough is FromSettings' twin of
-// TestFromEnv_MetadataPassthrough_StillUsesMetadataSource (ptone/scion#1882 O1).
+// TestFromEnv_MetadataPassthrough_StillUsesMetadataSource (ptone/scion#1882).
 func TestFromSettings_MetadataPassthrough(t *testing.T) {
 	cleanup := overrideGCPDetection(true)
 	defer cleanup()

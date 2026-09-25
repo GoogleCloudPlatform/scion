@@ -3187,7 +3187,7 @@ func TestAutoDetectAuthSelectedType_EnvCredentialBeatsIdentity(t *testing.T) {
 }
 
 // TestAutoDetectAuthSelectedType_DefaultTypeCredentialBeatsIdentity is the
-// pkg/agent regression pin for ptone/scion#1882 (C1) — the exact scenario the
+// pkg/agent regression pin for ptone/scion#1882 — the exact scenario the
 // review found: antigravity's own default_type is "oauth-token", and AGY_TOKEN
 // (which maps to it) must still win over a reachable GCP SA. Before the fix,
 // AutoDetectAuthType's env leg returning "" (pickAutodetectCandidate's
@@ -3350,6 +3350,154 @@ func TestAutoDetectAuthSelectedType_Seam_DefaultTypeCredentialSurvivesResolveAut
 	if got := resolved.EnvVars["SCION_HARNESS_SELECTED_AUTH"]; got != "oauth-token" {
 		t.Errorf("resolved.EnvVars[SCION_HARNESS_SELECTED_AUTH] = %q, want %q (AGY_TOKEN's type must survive to explicit_type, not be evicted by identity)",
 			got, "oauth-token")
+	}
+}
+
+// antigravityLikeAuthMetaYAML is antigravityLikeAuthMeta's config.yaml auth
+// block, staged on disk for TestStartBrokerMode_AutoDetectsAuthSelectedType
+// below — that test needs a real container-script harness-config directory
+// (harness.Resolve requires one on disk), not the in-memory
+// config.HarnessConfigEntry the seam tests above construct directly.
+const antigravityLikeAuthMetaYAML = `
+auth:
+  default_type: oauth-token
+  types:
+    oauth-token:
+      required_env:
+        - any_of: ["AGY_TOKEN"]
+    api-key:
+      required_env:
+        - any_of: ["GEMINI_API_KEY", "GOOGLE_API_KEY"]
+    vertex-ai:
+      required_env:
+        - any_of: ["GOOGLE_CLOUD_PROJECT"]
+        - any_of: ["GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION"]
+      required_files:
+        - name: gcloud-adc
+          type: file
+          field: GoogleAppCredentials
+          alternative_env_keys: ["GOOGLE_APPLICATION_CREDENTIALS"]
+          skipped_when_gcp_service_account_assigned: true
+          required: true
+  autodetect:
+    env:
+      AGY_TOKEN: oauth-token
+      GEMINI_API_KEY: api-key
+      GOOGLE_API_KEY: api-key
+    files:
+      gcloud-adc: vertex-ai
+`
+
+// TestStartBrokerMode_AutoDetectsAuthSelectedType is a full, broker-mode
+// Start() test (ptone/scion#1882) proving the wiring at the
+// autoDetectAuthSelectedType(&auth, authMeta, &opts) call site
+// (pkg/agent/run.go:514) actually reaches the container, using a real
+// on-disk container-script harness-config (not the in-memory entry the seam
+// tests above use) and a real MockRuntime.Run capture — the same
+// TestStartBrokerMode_EmptyEnvNotFatal pattern.
+//
+// Asserts on capturedConfig.ResolvedAuth.EnvVars, not capturedConfig.Env:
+// SCION_HARNESS_SELECTED_AUTH is forwarded via ContainerScriptHarness.ResolveAuth's
+// returned api.ResolvedAuth (run.go's runCfg.ResolvedAuth = resolvedAuth), not
+// merged into the flat container env slice (that slice comes from
+// buildAgentEnv(finalScionCfg, opts.Env) — a separate path auth EnvVars never
+// join at the Go level; runtime implementations read ResolvedAuth.EnvVars
+// directly when actually launching a container, see e.g. pkg/runtime/common.go).
+func TestStartBrokerMode_AutoDetectsAuthSelectedType(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{
+			name: "GCPIdentityPassthrough_SelectsVertexAI",
+			env: map[string]string{
+				"SCION_METADATA_MODE":   "passthrough",
+				"GOOGLE_CLOUD_PROJECT":  "my-gcp-project",
+				"GOOGLE_CLOUD_LOCATION": "global",
+			},
+			want: "vertex-ai",
+		},
+		{
+			name: "DefaultTypeCredentialBeatsIdentity_SelectsOAuthToken",
+			env: map[string]string{
+				"SCION_METADATA_MODE": "passthrough",
+				"AGY_TOKEN":           "some-token",
+			},
+			want: "oauth-token",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+
+			oldWd, _ := os.Getwd()
+			_ = os.Chdir(tmpDir)
+			defer func() { _ = os.Chdir(oldWd) }()
+
+			originalHome := os.Getenv("HOME")
+			defer func() { _ = os.Setenv("HOME", originalHome) }()
+			_ = os.Setenv("HOME", tmpDir)
+
+			globalScionDir := filepath.Join(tmpDir, ".scion")
+
+			// A real on-disk container-script harness-config: harness.Resolve
+			// requires hcDir.Path to be non-empty for the provisioner branch
+			// (pkg/harness/resolve.go), which the in-memory entries the seam
+			// tests use above cannot satisfy.
+			hcDir := filepath.Join(globalScionDir, "harness-configs", "antigravity-test")
+			_ = os.MkdirAll(hcDir, 0755)
+			hcYAML := "harness: antigravity-test\nuser: scion\nimage: test-image:latest\n" +
+				"provisioner:\n  type: container-script\n  command: [\"python3\", \"provision.py\"]\n" +
+				antigravityLikeAuthMetaYAML
+			_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte(hcYAML), 0644)
+
+			tplDir := filepath.Join(globalScionDir, "templates", "default")
+			_ = os.MkdirAll(tplDir, 0755)
+			_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "antigravity-test"}`), 0644)
+
+			_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: docker
+`), 0644)
+
+			projectDir := filepath.Join(tmpDir, "project")
+			projectScionDir := filepath.Join(projectDir, ".scion")
+			_ = os.MkdirAll(projectScionDir, 0755)
+
+			var capturedConfig runtime.RunConfig
+			mockRT := &runtime.MockRuntime{
+				ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+					return []api.AgentInfo{}, nil
+				},
+				RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+					capturedConfig = cfg
+					return "mock-id", nil
+				},
+			}
+
+			mgr := NewManager(mockRT)
+
+			_, err := mgr.Start(context.Background(), api.StartOptions{
+				Name:        "test-agent",
+				ProjectPath: projectScionDir,
+				BrokerMode:  true,
+				Env:         tc.env,
+			})
+			if err != nil {
+				t.Fatalf("Start failed: %v", err)
+			}
+
+			if capturedConfig.ResolvedAuth == nil {
+				t.Fatal("capturedConfig.ResolvedAuth is nil")
+			}
+			if got := capturedConfig.ResolvedAuth.EnvVars["SCION_HARNESS_SELECTED_AUTH"]; got != tc.want {
+				t.Errorf("ResolvedAuth.EnvVars[SCION_HARNESS_SELECTED_AUTH] = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

@@ -106,16 +106,11 @@ var IsOnGCEFunc = func() bool { return metadata.OnGCE() }
 //
 // Only "assign" and "block" redirect (pkg/runtimebroker/start_context.go);
 // "passthrough" deliberately does not — the agent is meant to reach the real
-// metadata server directly. Before ptone/scion#1882, SCION_METADATA_MODE was
-// simply absent for passthrough agents created (not restarted), so the naive
-// "mode != \"\"" check here happened to read that case as "not redirected"
-// by accident. Once the broker started recording "passthrough" on the create
-// path too (fixing an unrelated auth-autodetection gap), that same naive
-// check began misreading passthrough as redirected and disabling ambient-SA
-// OIDC transport for it. Any other non-empty value (including future modes
-// this package doesn't yet know about, or corruption) is treated as
-// redirected — fail closed, matching the allow-list philosophy
-// start_context.go already applies to this same env var.
+// metadata server directly, so ambient-SA OIDC must still work under it. Any
+// other non-empty value (including future modes this package doesn't yet
+// know about, or corruption) is treated as redirected — fail closed, matching
+// the allow-list philosophy start_context.go already applies to this same
+// env var.
 func IsMetadataRedirected(mode string) bool {
 	return mode != "" && mode != metadataModePassthrough
 }

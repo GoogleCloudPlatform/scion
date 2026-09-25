@@ -439,7 +439,7 @@ func TestDetectAuthTypeFromGCPIdentityFromConfig_BuiltInHarnesses(t *testing.T) 
 }
 
 // TestAutoDetectAuthType_DefaultTypeCredentialBeatsGCPIdentity is the
-// regression guard for ptone/scion#1882 (C1): a present credential for the
+// regression guard for ptone/scion#1882: a present credential for the
 // harness's own default_type must win over the GCP-identity leg, using the
 // real built-in harness configs (not a synthetic fixture) so the fix is
 // pinned against the exact repro the review found:

@@ -465,30 +465,18 @@ func DetectAuthTypeFromGCPIdentityFromConfig(authMeta *config.HarnessAuthMetadat
 // precedence chain: file secrets, then env vars, then GCP identity. Callers
 // that need this three-step precedence (the runtimebroker preflight and
 // pkg/agent's Start()) must use this function rather than chaining the
-// Detect*FromConfig functions themselves.
-//
-// The three-step chain used to be inlined at each call site, checking
-// `if authType == "" { if detected := DetectXFromConfig(...); detected != ""
-// { authType = detected } }` for each leg in turn. That inlining hid a real
-// bug (ptone/scion#1882, C1): pickAutodetectCandidate returns "" both when
-// nothing matched at all *and* when a candidate matched but it was already
-// the harness's default_type ("stay on default, no override needed" per its
-// own doc comment). Both DetectAuthTypeFromFileSecretsFromConfig and
-// DetectAuthTypeFromEnvVarsFromConfig share that ambiguity, since both are
-// thin wrappers around pickAutodetectCandidate. A caller chaining "if empty,
-// try the next leg" cannot tell the two apart, so a *present* default-type
-// credential (e.g. antigravity's AGY_TOKEN, claude's ANTHROPIC_API_KEY) was
-// silently skipped over and the GCP-identity leg fired instead — turning on
-// vertex-ai, and evicting the real credential from the container
-// (filterResolvedSecretsForResolvedAuth / pkg/agent/run.go's opts.Env prune
-// only keep auth env/secrets the *selected* type actually uses).
-//
-// AutoDetectAuthType closes that gap: whenever a file or env credential is
-// present at all — even one that resolves to the default type — resolution
-// stops there. The GCP-identity leg only runs when neither leg found any
-// autodetect-relevant key at all, so "no SA" (or an SA with nothing else
-// wired up) is required for it to ever contribute, and it can never override
-// an already-present, more specific credential.
+// Detect*FromConfig functions themselves, because a present credential for
+// the harness's own default_type must stop resolution before the
+// GCP-identity leg runs. DetectAuthTypeFromFileSecretsFromConfig and
+// DetectAuthTypeFromEnvVarsFromConfig cannot signal that on their own:
+// pickAutodetectCandidate returns "" both when nothing matched and when a
+// matched candidate is already the default type, so a caller chaining
+// "if empty, try the next leg" can't tell "no credential" from "the default
+// credential" apart and would wrongly let identity override a real,
+// present credential. AutoDetectAuthType resolves that ambiguity: any file
+// or env credential present — even one that resolves to the default type —
+// stops resolution there. The GCP-identity leg only runs when neither leg
+// found any autodetect-relevant key at all.
 //
 // Returns "" only when no file secret, env var, or GCP identity signal
 // resolves anything — callers should apply their own default-type fallback

@@ -2351,9 +2351,8 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedHarnessC
 			}
 			// AutoDetectAuthType runs the file -> env -> identity chain as a
 			// single call so a present default-type credential (e.g.
-			// ANTHROPIC_API_KEY for claude) is never mistaken for "nothing
-			// detected" and overridden by the identity leg (ptone/scion#1882
-			// C1) — the same bug that motivated pkg/agent's use of this
+			// ANTHROPIC_API_KEY for claude) always wins over the identity
+			// leg — shared with pkg/agent's Start(), which uses the same
 			// function to select the auth type actually wired into the
 			// container.
 			if detected := harness.AutoDetectAuthType(authMeta, fileSecretNames, resolvedEnvKeys, gcpSAAssigned); detected != "" {

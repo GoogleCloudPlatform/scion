@@ -142,7 +142,7 @@ func TestConfigureOIDCTransport_SkipsMetadataWhenScionMetadataActive(t *testing.
 }
 
 // TestConfigureOIDCTransport_PassthroughStillUsesMetadata is the regression
-// guard for ptone/scion#1882 (O1): SCION_METADATA_MODE=passthrough does not
+// guard for ptone/scion#1882: SCION_METADATA_MODE=passthrough does not
 // redirect the real GCE metadata server (unlike assign/block), so ambient-SA
 // OIDC via MetadataSource must still be configured for it.
 func TestConfigureOIDCTransport_PassthroughStillUsesMetadata(t *testing.T) {

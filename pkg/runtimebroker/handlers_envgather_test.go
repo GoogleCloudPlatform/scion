@@ -2261,6 +2261,53 @@ profiles:
 	}
 }
 
+// TestEnvGather_DefaultTypeCredentialBeatsGCPIdentity is the handler-level
+// regression pin for the extractRequiredEnvKeys change: a present credential
+// for the harness's own default_type (claude's ANTHROPIC_API_KEY) must
+// satisfy auto-detected auth even when a GCP SA is reachable via identity —
+// it must not additionally demand vertex-ai's GOOGLE_CLOUD_PROJECT/LOCATION
+// keys. No auth_selected_type is set here (unlike
+// TestEnvGather_VertexAI_GCPIdentitySkipsADC above), so this exercises the
+// auto-detect path through AutoDetectAuthType, not an explicit selection.
+func TestEnvGather_DefaultTypeCredentialBeatsGCPIdentity(t *testing.T) {
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
+		"harness: claude\nimage: test-image\nuser: scion\n"+claudeAuthBlock,
+		`
+schema_version: "1"
+harness_configs:
+  claude:
+    harness: claude
+profiles:
+  default:
+    runtime: mock
+`)
+
+	body := `{
+		"name": "test-agent-default-beats-identity",
+		"id": "agent-uuid-default-beats-identity",
+		"gatherEnv": true,
+		"grovePath": "` + projectDir + `",
+		"resolvedEnv": {
+			"ANTHROPIC_API_KEY": "sk-ant-test"
+		},
+		"config": {
+			"template": "claude",
+			"profile": "default",
+			"gcpIdentity": {"metadata_mode": "passthrough"}
+		}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 (ANTHROPIC_API_KEY should satisfy auth without demanding vertex-ai keys), got %d: %s",
+			w.Code, w.Body.String())
+	}
+}
+
 // TestEnvGather_AvailableAsNeededKeys_AutodetectAPIKey is a regression test for
 // #1447. When a harness has default_type: oauth-token (like antigravity) and
 // GEMINI_API_KEY is an as_needed hub secret, autodetect must still see the key
