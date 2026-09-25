@@ -1540,14 +1540,14 @@ func autoDetectAuthSelectedType(auth *api.AuthConfig, authMeta *config.HarnessAu
 	if auth.SelectedType != "" || authMeta == nil {
 		return
 	}
-	// Local/workstation mode only: the GCP-identity signal (SCION_METADATA_MODE)
-	// and opts.Env / opts.ResolvedSecrets only reflect what the *broker*
-	// pre-resolved. GatherAuthWithEnv(authEnvOverlay, localSources=true,
-	// authMeta) separately discovers host env vars via os.Getenv and host
-	// credential files (e.g. ~/.claude/.credentials.json, the local ADC file)
-	// that never pass through opts.Env/opts.ResolvedSecrets at all — this
-	// function has no visibility into them. Deciding from opts alone in local
-	// mode would bind to a narrower view of the world than
+	// Skip in local/workstation mode: the GCP-identity signal
+	// (SCION_METADATA_MODE) and opts.Env / opts.ResolvedSecrets only reflect
+	// what the *broker* pre-resolved. GatherAuthWithEnv(authEnvOverlay,
+	// localSources=true, authMeta) separately discovers host env vars via
+	// os.Getenv and host credential files (e.g. ~/.claude/.credentials.json,
+	// the local ADC file) that never pass through opts.Env/opts.ResolvedSecrets
+	// at all — this function has no visibility into them. Deciding from opts
+	// alone in local mode would bind to a narrower view of the world than
 	// ResolveAuth/provision.py actually have, and could override a real host
 	// credential this function simply cannot see. SCION_METADATA_MODE is also
 	// broker-only by construction (pkg/runtimebroker/start_context.go), so

@@ -3390,11 +3390,11 @@ auth:
 
 // TestStartBrokerMode_AutoDetectsAuthSelectedType is a full, broker-mode
 // Start() test (ptone/scion#1882) proving the wiring at the
-// autoDetectAuthSelectedType(&auth, authMeta, &opts) call site
-// (pkg/agent/run.go:514) actually reaches the container, using a real
-// on-disk container-script harness-config (not the in-memory entry the seam
-// tests above use) and a real MockRuntime.Run capture — the same
-// TestStartBrokerMode_EmptyEnvNotFatal pattern.
+// autoDetectAuthSelectedType(&auth, authMeta, &opts) call in Start() actually
+// reaches the container, using a real on-disk container-script harness-config
+// (not the in-memory entry the seam tests above use) and a real
+// MockRuntime.Run capture — the same TestStartBrokerMode_EmptyEnvNotFatal
+// pattern.
 //
 // Asserts on capturedConfig.ResolvedAuth.EnvVars, not capturedConfig.Env:
 // SCION_HARNESS_SELECTED_AUTH is forwarded via ContainerScriptHarness.ResolveAuth's
@@ -3432,13 +3432,8 @@ func TestStartBrokerMode_AutoDetectsAuthSelectedType(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			tmpDir := t.TempDir()
 
-			oldWd, _ := os.Getwd()
-			_ = os.Chdir(tmpDir)
-			defer func() { _ = os.Chdir(oldWd) }()
-
-			originalHome := os.Getenv("HOME")
-			defer func() { _ = os.Setenv("HOME", originalHome) }()
-			_ = os.Setenv("HOME", tmpDir)
+			t.Chdir(tmpDir)
+			t.Setenv("HOME", tmpDir)
 
 			globalScionDir := filepath.Join(tmpDir, ".scion")
 
@@ -3447,26 +3442,38 @@ func TestStartBrokerMode_AutoDetectsAuthSelectedType(t *testing.T) {
 			// (pkg/harness/resolve.go), which the in-memory entries the seam
 			// tests use above cannot satisfy.
 			hcDir := filepath.Join(globalScionDir, "harness-configs", "antigravity-test")
-			_ = os.MkdirAll(hcDir, 0755)
+			if err := os.MkdirAll(hcDir, 0755); err != nil {
+				t.Fatalf("mkdir harness-config dir: %v", err)
+			}
 			hcYAML := "harness: antigravity-test\nuser: scion\nimage: test-image:latest\n" +
 				"provisioner:\n  type: container-script\n  command: [\"python3\", \"provision.py\"]\n" +
 				antigravityLikeAuthMetaYAML
-			_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte(hcYAML), 0644)
+			if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte(hcYAML), 0644); err != nil {
+				t.Fatalf("write harness-config config.yaml: %v", err)
+			}
 
 			tplDir := filepath.Join(globalScionDir, "templates", "default")
-			_ = os.MkdirAll(tplDir, 0755)
-			_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "antigravity-test"}`), 0644)
+			if err := os.MkdirAll(tplDir, 0755); err != nil {
+				t.Fatalf("mkdir template dir: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "antigravity-test"}`), 0644); err != nil {
+				t.Fatalf("write template scion-agent.json: %v", err)
+			}
 
-			_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+			if err := os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
 active_profile: local
 profiles:
   local:
     runtime: docker
-`), 0644)
+`), 0644); err != nil {
+				t.Fatalf("write global settings.yaml: %v", err)
+			}
 
 			projectDir := filepath.Join(tmpDir, "project")
 			projectScionDir := filepath.Join(projectDir, ".scion")
-			_ = os.MkdirAll(projectScionDir, 0755)
+			if err := os.MkdirAll(projectScionDir, 0755); err != nil {
+				t.Fatalf("mkdir project .scion dir: %v", err)
+			}
 
 			var capturedConfig runtime.RunConfig
 			mockRT := &runtime.MockRuntime{
