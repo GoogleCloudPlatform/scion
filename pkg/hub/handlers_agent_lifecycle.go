@@ -271,7 +271,12 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// itself, and a stopped agent restarts fresh even if asked to
 			// resume, matching the create-agent path's behavior.
 			var startReq AgentLifecycleStartRequest
-			_ = readJSON(r, &startReq)
+			if r.ContentLength > 0 {
+				if err := readJSON(r, &startReq); err != nil {
+					BadRequest(w, "invalid request body: "+err.Error())
+					return
+				}
+			}
 			forcedRecovery := agent.Phase == string(state.PhaseError) && startReq.ForceResume
 			if forcedRecovery {
 				s.agentLifecycleLog.Warn("Force-resuming agent from error phase via lifecycle start",

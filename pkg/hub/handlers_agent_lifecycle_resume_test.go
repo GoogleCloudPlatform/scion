@@ -141,6 +141,31 @@ func TestAgentLifecycle_Start_StoppedPhase_ForceResumeIgnored(t *testing.T) {
 		"forceResume must not apply outside phase=error")
 }
 
+// TestAgentLifecycle_Start_ErrorPhase_MalformedBody_Returns400 verifies that
+// a malformed JSON body on /start is rejected with 400 Bad Request instead
+// of being silently ignored. Previously the unmarshal error was discarded,
+// so a malformed forceResume request would fall through to a fresh start
+// and silently destroy the agent's interrupted harness session.
+func TestAgentLifecycle_Start_ErrorPhase_MalformedBody_Returns400(t *testing.T) {
+	srv, s := testServer(t)
+	disp := &lifecycleResumeDispatcher{}
+	srv.SetDispatcher(disp)
+
+	agent := setupBrokerAgentInPhase(t, s, "malformed", state.PhaseError)
+
+	rec := doRequestRaw(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/start",
+		[]byte(`{"forceResume": `), "application/json")
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+
+	assert.False(t, disp.startCalled,
+		"a malformed request body must not reach the dispatcher")
+
+	got, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseError), got.Phase,
+		"a rejected malformed body must not change the agent's phase")
+}
+
 // TestAgentLifecycle_Start_SuspendedPhase_AlwaysResumes verifies the
 // pre-existing suspended-agent resume behavior is unaffected by the new
 // forceResume handling.
