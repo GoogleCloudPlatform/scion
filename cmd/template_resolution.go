@@ -78,12 +78,19 @@ func ResolveTemplateForHub(ctx context.Context, hubCtx *HubContext, templateName
 		return nil, fmt.Errorf("template name is required")
 	}
 
+	// --template-scope is a plain word (no URI ambiguity, unlike the
+	// --template prefix parsed below), so reject unknown values rather than
+	// defaulting.
+	if err := validateTemplateScope(templateScope); err != nil {
+		return nil, err
+	}
+
 	// Parse scope prefix if present (e.g., "global:claude", "project:custom")
 	scope, name := parseTemplateScope(templateName)
 
 	// Get project ID for project-scoped lookups
 	projectID, err := GetProjectID(hubCtx)
-	if err != nil && (scope == "grove" || scope == "project") {
+	if err != nil && scope == "project" {
 		return nil, fmt.Errorf("failed to determine project ID for template resolution: %w", err)
 	}
 
@@ -118,17 +125,33 @@ func ResolveTemplateForHub(ctx context.Context, hubCtx *HubContext, templateName
 	return nil, formatTemplateNotFoundError(name, hubCtx.ProjectPath)
 }
 
+// validateTemplateScope rejects a --template-scope flag value that isn't one
+// of the recognized template scopes. Empty is accepted: it means "no
+// explicit scope was requested", and callers fall back to their own default.
+func validateTemplateScope(scope string) error {
+	switch scope {
+	case "", "global", "project", "user":
+		return nil
+	default:
+		return fmt.Errorf("unknown template scope %q (valid: global, project, user)", scope)
+	}
+}
+
 // parseTemplateScope extracts scope prefix from template name.
 // Examples: "global:claude" -> ("global", "claude"), "custom" -> ("", "custom")
+//
+// Only a prefix matching a known scope name is stripped; anything else before
+// a colon is left as part of the name. templateName isn't necessarily a bare
+// template name here - callers pass remote URIs and rclone connection
+// strings through this same path (e.g. "https://host/tpl",
+// ":gcs:bucket/x") with no IsRemoteURI guard beforehand, so treating an
+// unrecognized prefix as an error would reject those as an "unknown scope"
+// instead of letting them resolve as intended.
 func parseTemplateScope(templateName string) (scope, name string) {
 	if idx := strings.Index(templateName, ":"); idx != -1 {
 		prefix := templateName[:idx]
-		// Check if it's a known scope prefix
 		switch prefix {
-		case "global", "grove", "project", "user":
-			if prefix == "grove" {
-				return "project", templateName[idx+1:]
-			}
+		case "global", "project", "user":
 			return prefix, templateName[idx+1:]
 		}
 	}
@@ -146,17 +169,12 @@ func findTemplateOnHub(ctx context.Context, hubCtx *HubContext, name, scope, pro
 
 	// If explicit scope is provided, search only that scope
 	if scope != "" {
-		effectiveScope := scope
-		if effectiveScope == "grove" {
-			effectiveScope = "project"
-		}
-
 		opts := &hubclient.ListTemplatesOptions{
 			Name:   name,
-			Scope:  effectiveScope,
+			Scope:  scope,
 			Status: "active",
 		}
-		if effectiveScope == "project" && projectID != "" {
+		if scope == "project" && projectID != "" {
 			opts.ProjectID = projectID
 		}
 
@@ -405,9 +423,6 @@ func uploadLocalTemplate(ctx context.Context, hubCtx *HubContext, localTemplate 
 		effectiveScope = templateScope
 	}
 	if effectiveScope == "" {
-		effectiveScope = "project"
-	}
-	if effectiveScope == "grove" {
 		effectiveScope = "project"
 	}
 

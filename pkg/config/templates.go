@@ -258,7 +258,7 @@ func FindTemplateInScope(name, scope string) *Template {
 	switch scope {
 	case "global":
 		dir, err = GetGlobalTemplatesDir()
-	case "project", "grove":
+	case "project":
 		dir, err = GetProjectTemplatesDir()
 	default:
 		return nil
