@@ -509,3 +509,21 @@ func TestAssistantDeniedKeysResolveToRealCommands(t *testing.T) {
 		})
 	}
 }
+
+// ptone/scion#1968: agents may browse the hub skill bank read-only. The
+// allowlisted skill paths must resolve to real commands, and every mutating
+// skill verb must stay out of agent mode.
+func TestAgentAllowedSkillBrowse(t *testing.T) {
+	for _, path := range []string{"skills", "skills.list", "skills.show", "skill", "skill.list"} {
+		assert.True(t, agentAllowed[path], "agentAllowed should contain %s", path)
+		assert.NotNil(t, resolveCommandPath(rootCmd, path),
+			"agentAllowed key %q must resolve to a real command", path)
+	}
+	for _, path := range []string{
+		"skills.create", "skills.publish", "skills.delete", "skills.deprecate",
+		"skills.registries", "skills.registries.add", "skills.registries.update",
+		"skills.registries.remove", "skills.registries.pin",
+	} {
+		assert.False(t, agentAllowed[path], "agentAllowed must NOT contain mutating skill verb %s", path)
+	}
+}

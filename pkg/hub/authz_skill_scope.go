@@ -25,6 +25,48 @@ import "github.com/GoogleCloudPlatform/scion/pkg/store"
 var curatedSkillDirectoryRoles = map[string]struct{}{
 	store.SystemRoleHubMember: {},
 	store.SystemRoleHubViewer: {},
+	agentSkillCatalogRoleName: {},
+}
+
+// agentSkillCatalogRoleName names the synthetic, never-persisted role that
+// Decide grants agent principals so they can read the hub-wide (global/core)
+// skill catalog (ptone/scion#1968). No role definition or binding with this
+// name is stored. It is listed in curatedSkillDirectoryRoles so that
+// filterHubWideSkillGrants strips it for every non-hub-scoped skill exactly
+// as it does the hub-member/hub-viewer grant: the agent's own-project skills
+// are covered by its project-scoped JWT binding instead, and user-scoped or
+// other-project skills by nothing.
+const agentSkillCatalogRoleName = "agent-skill-catalog"
+
+// agentSkillCatalogPermissions is the complete permission set of the
+// synthetic agent-skill-catalog role. Read-only by construction.
+var agentSkillCatalogPermissions = []string{"skill.read", "skill.list"}
+
+// agentSkillCatalogBinding builds the synthetic system-scoped candidate
+// binding (and its role definition) that grants an agent read/list on the
+// hub skill catalog. Callers must only add it for Resource.Type == "skill"
+// and must run filterHubWideSkillGrants afterwards; the agent JWT scope
+// restriction (project:read) and the delegation ceiling still apply on top.
+func agentSkillCatalogBinding(agent AgentIdentity) (CandidateBinding, *RolePermissions) {
+	roleID := "synthetic:agent-skill-catalog:" + agent.ID()
+	perms := make(map[string]struct{}, len(agentSkillCatalogPermissions))
+	for _, p := range agentSkillCatalogPermissions {
+		perms[p] = struct{}{}
+	}
+	role := &RolePermissions{
+		RoleID:      roleID,
+		RoleName:    agentSkillCatalogRoleName,
+		ScopeType:   ScopeTypeSystem,
+		Permissions: perms,
+	}
+	cb := CandidateBinding{
+		BindingID:        "synthetic:agent-skill-catalog-binding:" + agent.ID(),
+		RoleDefinitionID: roleID,
+		PrincipalType:    "agent",
+		PrincipalID:      agent.ID(),
+		ScopeType:        ScopeTypeSystem,
+	}
+	return cb, role
 }
 
 // filterHubWideSkillGrants removes system-scoped candidate bindings for the

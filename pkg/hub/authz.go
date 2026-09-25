@@ -438,6 +438,21 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 		}
 	}
 
+	// ── Step 5b2: Agent hub skill catalog (ptone/scion#1968) ──────────
+	// Agents may read the hub-wide (global/core) skill catalog. The
+	// project-scoped JWT binding above cannot express that (a hub-scoped
+	// skill has no ProjectID, so scopeApplies rejects it), so add a
+	// synthetic system-scoped skill.read/skill.list binding. Step 5c strips
+	// it again for any skill that is not global/core, and the agent JWT
+	// restriction (7b) and delegation ceiling (10) still apply.
+	if request.Resource.Type == "skill" && isAgentPrincipal(principal.Kind) {
+		if agent, ok := principal.Identity.(AgentIdentity); ok {
+			cb, role := agentSkillCatalogBinding(agent)
+			candidates = append(candidates, cb)
+			roleDefs[cb.RoleDefinitionID] = role
+		}
+	}
+
 	// ── Step 5c: Skill scope containment (ptone/scion#1901) ───────────
 	// The curated hub-member/hub-viewer roles carry skill.read/skill.list at
 	// system scope purely so every hub member can browse the hub-wide

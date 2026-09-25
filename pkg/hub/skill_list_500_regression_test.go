@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -179,43 +180,54 @@ func TestListSkills_AgentPredicateAndFilterAgree(t *testing.T) {
 	token, err := tokenSvc.GenerateAgentToken(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}, nil)
 	require.NoError(t, err)
 
-	// Default limit: totalCount must equal the number of items actually
-	// returned -- zero, since an agent has no AgentScopes grant for
-	// skill.read/list and no more visibility bypass exists to widen it.
+	// ptone/scion#1968: agents now read the hub catalog plus their own
+	// project's skills, so all 7 seeded rows are in scope. The #1954
+	// invariant this test guards is unchanged: totalCount must equal the
+	// number of items actually returned, and small pages must be full.
+	const want = globalCount + 1
 	rec := doAgentTokenRequestSkills(t, srv, "/api/v1/skills?status=active", token)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	resp := decodeSkillsPageFromRecorder(t, rec)
 	assert.Equal(t, len(resp.Skills), resp.TotalCount,
 		"totalCount must agree with the page for an agent caller; body: %s", rec.Body.String())
-	assert.Zero(t, resp.TotalCount,
-		"an agent has no read grant on any of the hub-scoped or own-project skills seeded here; body: %s", rec.Body.String())
+	assert.Equal(t, want, resp.TotalCount, "body: %s", rec.Body.String())
 
-	// A small limit must not produce an empty page with a nonzero total and
-	// a cursor: with a genuinely zero total there must be exactly one
-	// (empty) page and no nextCursor.
+	// A small limit must yield a full page, a total that matches, and a
+	// cursor only while more rows remain.
 	rec = doAgentTokenRequestSkills(t, srv, "/api/v1/skills?status=active&limit=1", token)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	page := decodeSkillsPageFromRecorder(t, rec)
-	assert.Zero(t, page.TotalCount)
-	assert.Empty(t, page.Skills)
-	assert.Empty(t, page.NextCursor, "a zero-total result must not advertise a further page")
+	assert.Equal(t, want, page.TotalCount)
+	assert.Len(t, page.Skills, 1)
+	assert.NotEmpty(t, page.NextCursor, "more rows remain, so a further page must be advertised")
 }
 
-// TestListSkills_AgentWithIsAllScopeStillGetsEmptyScope covers a gemini
-// review comment on the initial fix: the isAgentIdentity case in listSkills'
-// switch must be checked BEFORE scopeResult.Scopes.IsAll(), not after. An
-// agent whose resolved scope happens to be IsAll (here: a hub-admin role
-// bound directly to the agent's own principal, which the kernel does not
-// forbid) must still get the empty, per-row-filter-agreeing scope -- not an
-// unfiltered query, which would reintroduce the exact totalCount/page
-// mismatch this fix exists to close, just triggered a different way.
-func TestListSkills_AgentWithIsAllScopeStillGetsEmptyScope(t *testing.T) {
+// TestListSkills_AgentWithIsAllScopeStillGetsBoundedScope covers a gemini
+// review comment on the ptone/scion#1954 fix: the isAgentIdentity case in
+// listSkills' switch must be checked BEFORE scopeResult.Scopes.IsAll(), not
+// after. An agent whose resolved scope happens to be IsAll (here: a
+// hub-admin role bound directly to the agent's own principal, which the
+// kernel does not forbid) must still get the explicit, bounded agent
+// predicate -- not an unfiltered query.
+//
+// Since ptone/scion#1968 that bounded predicate is the agent granted set
+// (hub catalog + own project), so the global skill is listed, but another
+// project's skill and a user-scoped skill must not be, even though an
+// unfiltered (IsAll) query would return them.
+func TestListSkills_AgentWithIsAllScopeStillGetsBoundedScope(t *testing.T) {
 	srv, s, alice, _, project := setupSkillAuthzTest(t)
 	ctx := context.Background()
 
 	// A hub-scoped skill the pre-fix (or wrongly-ordered) code would have
 	// disclosed via an unfiltered query.
-	createTestSkill(t, s, "agent-isall-hub", store.SkillScopeGlobal, "", alice.ID)
+	hub := createTestSkill(t, s, "agent-isall-hub", store.SkillScopeGlobal, "", alice.ID)
+	other := &store.Project{
+		ID: tid("agent-isall-other"), Name: "IsAll Other", Slug: "agent-isall-other",
+		OwnerID: alice.ID, CreatedBy: alice.ID, Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, other))
+	createTestSkill(t, s, "agent-isall-other-project", store.SkillScopeProject, other.ID, alice.ID)
+	createTestSkill(t, s, "agent-isall-user", store.SkillScopeUser, alice.ID, alice.ID)
 
 	agent := &store.Agent{
 		ID: tid("agent-isall-agent"), Slug: tid("agent-isall-agent"), Name: "IsAll Agent",
@@ -252,9 +264,10 @@ func TestListSkills_AgentWithIsAllScopeStillGetsEmptyScope(t *testing.T) {
 	rec := doAgentTokenRequestSkills(t, srv, "/api/v1/skills?status=active", token)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	resp := decodeSkillsPageFromRecorder(t, rec)
-	assert.Zero(t, resp.TotalCount,
-		"an agent must get the empty scope even when its resolved scope is IsAll; body: %s", rec.Body.String())
-	assert.Empty(t, resp.Skills)
+	require.Len(t, resp.Skills, 1,
+		"an agent must get the bounded agent scope even when its resolved scope is IsAll; body: %s", rec.Body.String())
+	assert.Equal(t, hub.ID, resp.Skills[0].ID)
+	assert.Equal(t, 1, resp.TotalCount)
 	assert.Empty(t, resp.NextCursor)
 }
 
