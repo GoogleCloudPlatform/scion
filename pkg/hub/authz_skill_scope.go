@@ -28,7 +28,7 @@ var curatedSkillDirectoryRoles = map[string]struct{}{
 }
 
 // filterHubWideSkillGrants removes system-scoped candidate bindings for the
-// curated hub-member/hub-viewer roles when the target skill is not itself
+// curated hub-member/hub-viewer roles unless the target skill is itself
 // hub-scoped (scope "global" or "core").
 //
 // ptone/scion#1901: a hub member must not be able to read another user's
@@ -53,11 +53,29 @@ var curatedSkillDirectoryRoles = map[string]struct{}{
 //     applies to it here.
 //
 // skillScope is the skill's own Scope value (store.SkillScope*), taken from
-// Resource.ScopeKind. An empty value — including the ad hoc Resource
-// literals used by create-time checks, which have no existing skill to
-// read — leaves candidates untouched.
+// Resource.ScopeKind. ptone/scion#1901 finding F4: this fails closed. Only
+// "global" and "core" are exempt; user, project, an empty string, and any
+// future or unrecognized value are all filtered like project/user. Before
+// this fix, an ad hoc Resource{Type:"skill"} literal that forgot to set
+// ScopeKind (see finding F3, canUseProjectGitHubToken) silently kept the
+// curated hub-member/hub-viewer grant in force — exactly the #1901 leak,
+// reopened through a different call site. Legitimate create-time checks
+// that have no existing skill to read still pass an explicit scope via
+// skillScopeResource (never a bare literal), so they are unaffected.
 func filterHubWideSkillGrants(candidates []CandidateBinding, roleDefs map[string]*RolePermissions, skillScope string) []CandidateBinding {
-	if skillScope != store.SkillScopeUser && skillScope != store.SkillScopeProject {
+	if len(candidates) == 0 {
+		return candidates
+	}
+	// Fail closed (ptone/scion#1901 finding F4): only an explicit hub-scope
+	// value (global/core) is exempt from filtering. Anything else — user,
+	// project, an unrecognized future scope, or a caller-built Resource
+	// literal that forgot to set ScopeKind — is filtered the same as
+	// user/project. A hand-built ad hoc Resource{Type:"skill"} literal that
+	// omits ScopeKind (the exact shape of finding F3) must not silently fail
+	// open and re-admit the curated hub-member/hub-viewer grant; every
+	// legitimate caller builds its Resource via skillResource or
+	// skillScopeResource, both of which always set ScopeKind explicitly.
+	if skillScope == store.SkillScopeGlobal || skillScope == store.SkillScopeCore {
 		return candidates
 	}
 

@@ -180,7 +180,11 @@ func TestSkillScope_UserScoped_ResolveDeniedForOtherMember(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.Empty(t, resp.Resolved, "another user's user-scoped skill must not resolve")
 	require.NotEmpty(t, resp.Errors, "resolve of another user's skill should error")
-	assert.Equal(t, "forbidden", resp.Errors[0].Code)
+	// ptone/scion#1901 finding F2: a forbidden candidate must be
+	// indistinguishable from a nonexistent one, so this is "not_found", not
+	// a separate "forbidden" code — see TestSkillScope_UserScoped_ResolveSingleDeniedForOtherMember
+	// and skill_scope_authz_gap_test.go for the surface-specific coverage.
+	assert.Equal(t, "not_found", resp.Errors[0].Code)
 }
 
 func TestSkillScope_UserScoped_ResolveAllowedForOwner(t *testing.T) {
@@ -287,7 +291,9 @@ func TestSkillScope_ProjectScoped_ResolveDeniedForOtherHubMember(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.Empty(t, resp.Resolved)
 	require.NotEmpty(t, resp.Errors)
-	assert.Equal(t, "forbidden", resp.Errors[0].Code)
+	// ptone/scion#1901 finding F2: see the comment in
+	// TestSkillScope_UserScoped_ResolveDeniedForOtherMember.
+	assert.Equal(t, "not_found", resp.Errors[0].Code)
 }
 
 func TestSkillScope_ProjectScoped_DownloadDeniedForOtherHubMember(t *testing.T) {

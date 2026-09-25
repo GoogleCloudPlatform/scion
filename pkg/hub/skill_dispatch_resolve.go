@@ -48,11 +48,6 @@ import (
 // scion-agent.yaml the dispatcher will read to discover skill references.
 const maxDispatchTemplateConfigSize = 1 << 20 // 1 MiB
 
-// dispatchSkillForbiddenMessage is the per-skill error the broker surfaces
-// (wrapped as `required skill %q could not be resolved: ...`) when the agent's
-// creator may not read a non-public skill.
-const dispatchSkillForbiddenMessage = "the agent's creator does not have permission to access this skill"
-
 // resolveRegistrySkillRef resolves a single scion-registry skill reference on
 // behalf of identity. It is the shared core of the /skills/resolve handler and
 // of dispatch-time pre-resolution.
@@ -61,38 +56,33 @@ const dispatchSkillForbiddenMessage = "the agent's creator does not have permiss
 // URLs. When it is empty, local-storage URLs are rewritten to Hub-relative
 // paths (/api/v1/skills/...) that the broker absolutizes against its own Hub
 // endpoint.
+//
+// ptone/scion#1901 finding F2: authorization is resolveSkill's job, not
+// this function's. resolveSkill treats a candidate the caller cannot read
+// exactly like one that does not exist — same "not_found" code, same
+// message shape, and (unlike the pre-fix code) the scope search keeps
+// looking past it instead of stopping to report a distinguishable
+// "forbidden". That makes "doesn't exist" and "exists, but you can't read
+// it" indistinguishable from here on, including the batch resolve surface
+// that calls this once per requested URI.
 func (s *Server) resolveRegistrySkillRef(
 	ctx context.Context,
 	identity Identity,
 	rawURI string,
 	uri *api.SkillURI,
-	projectID, userID, baseURL, forbiddenMessage string,
+	projectID, userID, baseURL string,
 ) (*ResolvedSkillResponse, *ResolveSkillError) {
 	if uri == nil {
 		return nil, &ResolveSkillError{URI: rawURI, Code: "invalid_uri", Message: "invalid skill URI"}
 	}
 	expandScopeAliases(uri, projectID, userID)
 
-	skill, sv, err := s.resolveSkill(ctx, uri, projectID)
+	skill, sv, err := s.resolveSkill(ctx, identity, uri, projectID)
 	if err != nil {
 		return nil, &ResolveSkillError{URI: rawURI, Code: "not_found", Message: err.Error()}
 	}
 	if skill == nil || sv == nil {
 		return nil, &ResolveSkillError{URI: rawURI, Code: "not_found", Message: "skill not found"}
-	}
-
-	if skill.Visibility != store.VisibilityPublic {
-		if identity == nil {
-			return nil, &ResolveSkillError{URI: rawURI, Code: "forbidden", Message: forbiddenMessage}
-		}
-		decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
-		if !decision.Allowed {
-			slog.WarnContext(ctx, "skill resolve denied",
-				"uri", rawURI,
-				"identity_type", identity.Type(),
-				"reason", decision.Reason)
-			return nil, &ResolveSkillError{URI: rawURI, Code: "forbidden", Message: forbiddenMessage}
-		}
 	}
 
 	entry := &ResolvedSkillResponse{
@@ -344,7 +334,7 @@ func (s *Server) preResolveAgentSkills(ctx context.Context, agent *store.Agent) 
 	resp := &ResolveSkillsResponse{}
 	for _, p := range todo {
 		entry, resolveErr := s.resolveRegistrySkillRef(ctx, identity, p.raw, p.uri,
-			agent.ProjectID, agent.OwnerID, "", dispatchSkillForbiddenMessage)
+			agent.ProjectID, agent.OwnerID, "")
 		if resolveErr != nil {
 			resp.Errors = append(resp.Errors, *resolveErr)
 			continue

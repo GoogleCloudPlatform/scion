@@ -149,7 +149,7 @@ func (s *Server) handleSkillFileRead(w http.ResponseWriter, r *http.Request, ski
 
 	skill, err := s.store.GetSkill(ctx, skillID)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		writeSkillLookupError(w, err)
 		return
 	}
 	if signed {

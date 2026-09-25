@@ -86,8 +86,11 @@ type Resource struct {
 	// a resource-type-specific check (see filterHubWideSkillGrants) tell a
 	// genuinely hub-scoped record apart from a user- or project-scoped one
 	// that merely happens to have no ParentType set. Left empty for resource
-	// types that don't need it, and for ad hoc Resource literals (e.g.
-	// create-time checks) that don't reference an existing record.
+	// types that don't need it. For "skill" resources specifically, build
+	// this through skillResource or skillScopeResource (pkg/hub/skill_handlers.go)
+	// rather than a hand-built literal: filterHubWideSkillGrants fails
+	// closed on an empty or unrecognized ScopeKind (ptone/scion#1901 finding
+	// F4), so only those two constructors are guaranteed to set it correctly.
 	ScopeKind string
 }
 

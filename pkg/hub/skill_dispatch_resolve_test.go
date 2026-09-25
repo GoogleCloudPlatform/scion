@@ -98,9 +98,12 @@ func TestPreResolveAgentSkills_PrivateProjectSkill_CreatorAllowed(t *testing.T) 
 	assert.Equal(t, uri, resp.Resolved[0].URI)
 }
 
-// A creator without read access gets a per-skill forbidden error that names
-// the creator's permissions, not the broker's.
-func TestPreResolveAgentSkills_CreatorWithoutAccess_Forbidden(t *testing.T) {
+// A creator without read access gets the same per-skill "not found" outcome
+// as referencing a nonexistent skill (ptone/scion#1901 finding F2: a
+// forbidden candidate must be indistinguishable from a missing one, even on
+// this internal dispatch pre-resolution path that shares resolveSkill with
+// the public resolve endpoints).
+func TestPreResolveAgentSkills_CreatorWithoutAccess_NotFound(t *testing.T) {
 	srv, s, alice, bob, project := setupSkillAuthzTest(t)
 	skill := createTestSkill(t, s, "alice-only", store.SkillScopeProject, project.ID, alice.ID)
 	publishTestSkillVersion(t, s, skill)
@@ -111,8 +114,7 @@ func TestPreResolveAgentSkills_CreatorWithoutAccess_Forbidden(t *testing.T) {
 	assert.Empty(t, resp.Resolved)
 	require.Len(t, resp.Errors, 1)
 	assert.Equal(t, uri, resp.Errors[0].URI)
-	assert.Equal(t, "forbidden", resp.Errors[0].Code)
-	assert.Equal(t, dispatchSkillForbiddenMessage, resp.Errors[0].Message)
+	assert.Equal(t, "not_found", resp.Errors[0].Code)
 }
 
 func TestPreResolveAgentSkills_PublicSkill_Unchanged(t *testing.T) {
@@ -153,7 +155,8 @@ func TestPreResolveAgentSkills_IdentitySelection(t *testing.T) {
 		require.NotNil(t, resp)
 		assert.Empty(t, resp.Resolved)
 		require.Len(t, resp.Errors, 1)
-		assert.Equal(t, "forbidden", resp.Errors[0].Code)
+		// ptone/scion#1901 finding F2: see TestPreResolveAgentSkills_CreatorWithoutAccess_NotFound.
+		assert.Equal(t, "not_found", resp.Errors[0].Code)
 	})
 
 	t.Run("unknown creator skips pre-resolution", func(t *testing.T) {

@@ -219,7 +219,12 @@ func TestSkillAuthz_Resolve_ForbiddenSkill(t *testing.T) {
 
 	assert.Empty(t, resp.Resolved, "forbidden skill should not be in resolved list")
 	require.NotEmpty(t, resp.Errors, "forbidden skill should produce an error")
-	assert.Equal(t, "forbidden", resp.Errors[0].Code)
+	// ptone/scion#1901 finding F2: a scion-registry resolve of a skill the
+	// caller cannot read must be indistinguishable from resolving a
+	// nonexistent one — "not_found", not a separate "forbidden" code. This
+	// is unrelated to the gh:// project-token gate (canUseProjectGitHubToken),
+	// which still reports "forbidden" — see TestSkillAuthz_Resolve_GH_ForbiddenProject.
+	assert.Equal(t, "not_found", resp.Errors[0].Code)
 }
 
 // TestSkillAuthz_Resolve_GH_ForbiddenProject guards the cross-project token-borrowing
@@ -486,8 +491,9 @@ func TestSkillAuthz_Resolve_NilIdentityPrivateDenied(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 
 	assert.Empty(t, resp.Resolved, "private skill should not be resolved with nil identity")
-	require.NotEmpty(t, resp.Errors, "private skill should produce a forbidden error")
-	assert.Equal(t, "forbidden", resp.Errors[0].Code)
+	require.NotEmpty(t, resp.Errors, "private skill should produce an error")
+	// ptone/scion#1901 finding F2: see the comment in TestSkillAuthz_Resolve_ForbiddenSkill.
+	assert.Equal(t, "not_found", resp.Errors[0].Code)
 }
 
 // ============================================================================

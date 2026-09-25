@@ -588,7 +588,8 @@ func TestSignedSkillFileURL_NotIssuedWhenCreatorDenied(t *testing.T) {
 	require.NotNil(t, resp)
 	require.Empty(t, resp.Resolved)
 	require.Len(t, resp.Errors, 1)
-	assert.Equal(t, "forbidden", resp.Errors[0].Code)
+	// ptone/scion#1901 finding F2: see TestPreResolveAgentSkills_CreatorWithoutAccess_NotFound.
+	assert.Equal(t, "not_found", resp.Errors[0].Code)
 }
 
 // The /skills/resolve endpoint (absolute URLs) signs as well, and those URLs
