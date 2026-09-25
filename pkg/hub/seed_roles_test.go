@@ -926,13 +926,13 @@ func TestR2_ProjectOwnerRetainsHumanAgentManagement(t *testing.T) {
 			"project-owner MUST retain human agent-management permission %s", p)
 	}
 
-	// R3 (miller79/scion#88): attach/port_access to another member's agent
-	// would expose that member's user-scoped secrets. Owners reach their own
-	// agents via relationship grants instead.
-	for _, p := range []string{"agent.attach", "agent.port_access"} {
-		assert.False(t, permSet[p],
-			"project-owner must NOT carry %s (cross-member secret exposure)", p)
-	}
+	// R3 (miller79/scion#88): attach to another member's agent would expose
+	// that member's user-scoped secrets. Owners reach their own agents via
+	// relationship grants instead.
+	assert.False(t, permSet["agent.attach"],
+		"project-owner must NOT carry agent.attach (cross-member secret exposure)")
+	// R4 (miller79/scion#121): forwarded ports are reachable project-wide.
+	assert.True(t, permSet["agent.port_access"], "project-owner must carry agent.port_access")
 }
 
 // TestR2_ProjectMemberExcludesStopAllAndSkillCreate verifies the explicit

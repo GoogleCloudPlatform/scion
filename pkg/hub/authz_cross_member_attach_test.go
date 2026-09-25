@@ -60,23 +60,24 @@ func TestCrossMemberAttach_Matrix(t *testing.T) {
 		name     string
 		identity UserIdentity
 		resource Resource
-		allowed  bool
+		attach   bool
+		port     bool // miller79/scion#121: owner/admin carry agent.port_access
 	}{
-		{"owner attaches to own agent", owner, ownerAgent, true},
-		{"owner attaches to own progeny", owner, ownerProgeny, true},
-		{"owner attaches to member's agent", owner, memberAgent, false},
-		{"admin attaches to own agent", admin, adminAgent, true},
-		{"admin attaches to member's agent", admin, memberAgent, false},
-		{"admin attaches to owner's agent", admin, ownerAgent, false},
-		{"member attaches to own agent", member, memberAgent, true},
-		{"member attaches to other's agent", member, ownerAgent, false},
-		{"super-admin attaches to member's agent", superAdmin, memberAgent, true},
+		{"owner on own agent", owner, ownerAgent, true, true},
+		{"owner on own progeny", owner, ownerProgeny, true, true},
+		{"owner on member's agent", owner, memberAgent, false, true},
+		{"admin on own agent", admin, adminAgent, true, true},
+		{"admin on member's agent", admin, memberAgent, false, true},
+		{"admin on owner's agent", admin, ownerAgent, false, true},
+		{"member on own agent", member, memberAgent, true, true},
+		{"member on other's agent", member, ownerAgent, false, false},
+		{"super-admin on member's agent", superAdmin, memberAgent, true, true},
 	}
 	for _, tc := range cases {
-		for _, action := range []Action{ActionAttach, ActionPortAccess} {
+		for action, want := range map[Action]bool{ActionAttach: tc.attach, ActionPortAccess: tc.port} {
 			t.Run(tc.name+"/"+string(action), func(t *testing.T) {
 				d := f.authz.CheckAccess(ctx, tc.identity, tc.resource, action)
-				assert.Equal(t, tc.allowed, d.Allowed, "reason: %s", d.Reason)
+				assert.Equal(t, want, d.Allowed, "reason: %s", d.Reason)
 			})
 		}
 	}
@@ -103,7 +104,7 @@ func TestCrossMemberAttach_Matrix(t *testing.T) {
 		caps := f.authz.ComputeCapabilities(ctx, owner, memberAgent)
 		require.NotNil(t, caps)
 		assert.NotContains(t, caps.Actions, string(ActionAttach))
-		assert.NotContains(t, caps.Actions, string(ActionPortAccess))
+		assert.Contains(t, caps.Actions, string(ActionPortAccess))
 		assert.Contains(t, caps.Actions, string(ActionRead))
 		assert.Contains(t, caps.Actions, string(ActionDelete))
 		assert.Contains(t, caps.Actions, string(ActionLifecycle))
@@ -115,7 +116,7 @@ func TestCrossMemberAttach_Matrix(t *testing.T) {
 		batch := f.authz.ComputeCapabilitiesBatch(ctx, admin, []Resource{memberAgent, adminAgent}, "agent")
 		require.Len(t, batch, 2)
 		assert.NotContains(t, batch[0].Actions, string(ActionAttach))
-		assert.NotContains(t, batch[0].Actions, string(ActionPortAccess))
+		assert.Contains(t, batch[0].Actions, string(ActionPortAccess))
 		assert.Contains(t, batch[1].Actions, string(ActionAttach))
 		assert.Contains(t, batch[1].Actions, string(ActionPortAccess))
 	})
