@@ -739,11 +739,26 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			// start/stop lifecycle actions may leave the suspended phase.
 			agentSuspended := agent.Phase == string(state.PhaseSuspended)
 
+			// Reincarnation in flight is sticky like suspension (design §3.4
+			// Amendment A11 item 2): the worker owns Phase/Activity/ExitCode/
+			// ExitReason/Message for the duration of a migration, so a racing
+			// heartbeat — including one reporting the OLD container being torn
+			// down mid-reprovision, or a stale crash from before the restart —
+			// must not report a spurious failure while the new generation is
+			// still coming up. ContainerStatus and the Heartbeat/LastSeen bump
+			// still apply below; only the status fields the worker itself drives
+			// are suppressed.
+			agentReincarnating := reincarnationInFlight(agent)
+			if agentReincarnating {
+				statusUpdate.Message = ""
+			}
+
 			if agentHB.Phase != "" {
-				if agentSuspended {
+				if agentSuspended || agentReincarnating {
 					// Do not let the heartbeat change the phase or propagate
-					// terminal activities while suspended; leave statusUpdate.Phase
-					// unset so the hub's authoritative suspended phase is kept.
+					// terminal activities while suspended or reincarnating; leave
+					// statusUpdate.Phase unset so the hub's authoritative phase is
+					// kept.
 				} else if agentInTerminalPhase {
 					// Keep the hub's authoritative terminal phase; only
 					// allow the heartbeat to confirm it (not revert it).
@@ -836,7 +851,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 						}
 					}
 				}
-			} else if !agentInTerminalPhase && !agentSuspended {
+			} else if !agentInTerminalPhase && !agentSuspended && !agentReincarnating {
 				// Legacy path: no structured fields, derive from ContainerStatus
 				// Derive phase from container status to ensure agents
 				// registered via sync (not started via hub) get proper state.

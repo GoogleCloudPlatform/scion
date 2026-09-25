@@ -37,6 +37,24 @@ import (
 // worker left to retry it.
 const reincarnationStepMaxAttempts = 2
 
+// reincarnationInFlight reports whether agent is in the middle of a `scion
+// reincarnate` migration (design §3.4 Amendment A11 item 2): its
+// ReincarnationState is neither ReincarnationStateNone (no migration ever
+// started, or the previous one finished) nor ReincarnationStateFailed (the
+// migration ended and the agent is back to being independently owned by its
+// broker-reported status again — a failed migration is not "in flight").
+// Callers use this to suppress the agent's own status-reporting paths
+// (broker heartbeat, direct status POST) while the reincarnation worker owns
+// Phase/Activity/ExitCode/ExitReason/Message for the target agent.
+func reincarnationInFlight(agent *store.Agent) bool {
+	switch agent.ReincarnationState {
+	case store.ReincarnationStateNone, store.ReincarnationStateFailed:
+		return false
+	default:
+		return true
+	}
+}
+
 // reincarnationStepUpdate lists the only Agent fields the reincarnation
 // worker may write. Every call to updateReincarnationStep re-reads the
 // CURRENT row and applies just these fields on top of it (design §3.3): a

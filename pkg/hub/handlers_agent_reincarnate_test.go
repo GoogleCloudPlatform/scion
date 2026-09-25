@@ -1870,6 +1870,144 @@ func TestReincarnateAgent_RecordUpdatedAtBumpedAtStartingStep(t *testing.T) {
 		"the worker's starting step must have bumped the record's updated_at, so it cannot predate that step")
 }
 
+// TestReincarnateAgent_A11F3_ExactlyOneErrorNotificationOnStartFailure is the
+// notification half of design §3.4 Amendment A11 item 2: without the
+// heartbeat-suppression guard (reincarnationInFlight), a heartbeat racing the
+// worker's own failure — e.g. the OLD container reporting a crash while the
+// migration is already in the "starting" step — could persist its own
+// phase=error/activity=crashed onto the agent and publish a premature ERROR
+// notification, distinct from the one the worker's own failReincarnation
+// publishes moments later when DispatchAgentStart actually fails. A
+// subscriber would then see TWO ERROR notifications for a single failure.
+// With suppression in place the racing heartbeat cannot change the agent's
+// persisted Phase/Activity while reincarnating, so only the worker's own
+// failure write ever produces a notification.
+func TestReincarnateAgent_A11F3_ExactlyOneErrorNotificationOnStartFailure(t *testing.T) {
+	disp := newGatedDispatcher("start", fmt.Errorf("no such image: nonexistent:latest"))
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	grantDevUserRuntimeBrokerAccess(t, s)
+
+	pub := NewChannelEventPublisher()
+	srv.SetEventPublisher(pub)
+	t.Cleanup(pub.Close)
+	nd := NewNotificationDispatcher(s, pub, func() AgentDispatcher { return disp }, slog.Default())
+	nd.Start()
+	t.Cleanup(nd.Stop)
+
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	coordinator := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.ID = tid("coord-" + t.Name())
+		a.Slug = "coord-" + tidSlugSafe(t.Name())
+	})
+	requester := agentIdentityFor(coordinator.ID, project.ID, ScopeAgentLifecycle)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, requester, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	<-disp.entered // worker paused inside DispatchAgentStart; ReincarnationState is "starting"
+
+	mid, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	require.Equal(t, store.ReincarnationStateStarting, mid.ReincarnationState, "sanity: the race window must land in the starting state")
+
+	// Simulate the race: a heartbeat reports the OLD container's crash while
+	// the migration is in flight.
+	ec := 137
+	code := sendHeartbeat(t, srv, broker.ID, project.ID, brokerAgentHeartbeat{
+		Slug:       agent.Slug,
+		Phase:      "stopped",
+		Activity:   "crashed",
+		ExitCode:   &ec,
+		ExitReason: "crashed",
+	})
+	require.Equal(t, http.StatusOK, code)
+
+	close(disp.release) // let DispatchAgentStart return its error; worker now fails
+	waitForReincarnationSettled(t, s, agent.ID)
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "error", final.Phase, "the worker's own failure must still land")
+
+	require.Eventually(t, func() bool {
+		notifs, err := s.GetNotifications(context.Background(), store.SubscriberTypeAgent, coordinator.Slug, false)
+		return err == nil && len(notifs) > 0
+	}, 2*time.Second, 50*time.Millisecond, "must receive the failure notification")
+
+	notifs, err := s.GetNotifications(context.Background(), store.SubscriberTypeAgent, coordinator.Slug, false)
+	require.NoError(t, err)
+	assert.Len(t, notifs, 1, "exactly one notification must fire, not a duplicate from the racing heartbeat")
+}
+
+// TestReincarnateAgent_A11F3_ZeroErrorNotificationsOnSuccessWithRacingCrashHeartbeat
+// is the success-path counterpart to
+// TestReincarnateAgent_A11F3_ExactlyOneErrorNotificationOnStartFailure
+// (design §3.4 Amendment A11 item 2): a heartbeat reporting a crash races the
+// migration while it is in the "starting" state, but DispatchAgentStart then
+// succeeds — the migration completes normally. The racing heartbeat must not
+// have left a stray ERROR notification behind: without suppression, the
+// heartbeat's crash report would have persisted phase=error onto the agent
+// (later overwritten by the successful completion), publishing a spurious
+// ERROR notification for a migration that actually succeeded.
+func TestReincarnateAgent_A11F3_ZeroErrorNotificationsOnSuccessWithRacingCrashHeartbeat(t *testing.T) {
+	disp := newGatedDispatcher("start", nil)
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	grantDevUserRuntimeBrokerAccess(t, s)
+
+	pub := NewChannelEventPublisher()
+	srv.SetEventPublisher(pub)
+	t.Cleanup(pub.Close)
+	nd := NewNotificationDispatcher(s, pub, func() AgentDispatcher { return disp }, slog.Default())
+	nd.Start()
+	t.Cleanup(nd.Stop)
+
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	coordinator := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.ID = tid("coord-" + t.Name())
+		a.Slug = "coord-" + tidSlugSafe(t.Name())
+	})
+	requester := agentIdentityFor(coordinator.ID, project.ID, ScopeAgentLifecycle)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, requester, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	<-disp.entered // worker paused inside DispatchAgentStart; ReincarnationState is "starting"
+
+	ec := 137
+	code := sendHeartbeat(t, srv, broker.ID, project.ID, brokerAgentHeartbeat{
+		Slug:       agent.Slug,
+		Phase:      "stopped",
+		Activity:   "crashed",
+		ExitCode:   &ec,
+		ExitReason: "crashed",
+	})
+	require.Equal(t, http.StatusOK, code)
+
+	close(disp.release) // let DispatchAgentStart succeed; the migration completes
+	waitForReincarnationSettled(t, s, agent.ID)
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.NotEqual(t, "error", final.Phase, "the migration must succeed despite the racing crash heartbeat")
+	assert.Equal(t, store.ReincarnationStateNone, final.ReincarnationState)
+	assert.Equal(t, 2, final.Generation, "the migration must actually complete, not just avoid phase=error")
+
+	// Give the notification dispatcher (an async goroutine reading off the
+	// event channel) a moment to process the completion event, and any stray
+	// event the racing heartbeat might have produced, before asserting on the
+	// final notification list.
+	time.Sleep(300 * time.Millisecond)
+
+	notifs, err := s.GetNotifications(context.Background(), store.SubscriberTypeAgent, coordinator.Slug, false)
+	require.NoError(t, err)
+	for _, n := range notifs {
+		assert.NotEqual(t, "ERROR", n.Status,
+			"no ERROR notification may fire from the racing crash heartbeat when the migration succeeds")
+	}
+}
+
 // TestReincarnateAgent_SweptWorkerFailureDoesNotClobberNewClaim is the design
 // §3.4 Amendment A6 regression test: once the sweep has failed a
 // record, the worker that used to own it must not be able to write the
