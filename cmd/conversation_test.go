@@ -642,3 +642,97 @@ func TestRunConversationList_ExplicitProjectFlag_Wins(t *testing.T) {
 		"an explicit --project flag must win over the hub-linked project, and must map to project_id")
 	assert.Empty(t, gotIncludeProjectGroups, "an explicit --project must not also send include_project_groups")
 }
+
+// setupProjectWithoutHubEnabled creates a project ".scion" directory with no
+// settings file at all — in particular, no hub.enabled — mirroring an
+// in-container agent, where hub.enabled is never written to project
+// settings (see config.IsHubContext's doc comment). Any hub context is
+// carried entirely by env vars, as isolateHubEnvForTest sets up.
+func setupProjectWithoutHubEnabled(t *testing.T, home string) string {
+	t.Helper()
+	projectDir := filepath.Join(home, "agent-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
+	return projectDir
+}
+
+// TestRunConversationList_AgentHubContext_HubNotEnabledInSettings is a
+// regression test for ptone/scion#1909: inside an agent container,
+// "scion conversation list" failed with "requires Hub mode" because
+// requireHubClient (cmd/notifications.go) gated only on
+// settings.IsHubEnabled(), which is never true in that container settings
+// never get hub.enabled=true written. It lacked the config.IsHubContext()
+// in-container fallback that hubsync.EnsureHubReady already has. This
+// exercises the actual agent shape: hub context env vars plus an
+// agent-scoped SCION_AUTH_TOKEN, with hub.enabled absent from settings.
+func TestRunConversationList_AgentHubContext_HubNotEnabledInSettings(t *testing.T) {
+	orig := saveConversationListTestState()
+	defer orig.restore()
+
+	var sawRequest bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/conversations" && r.Method == http.MethodGet {
+			sawRequest = true
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"conversations": []interface{}{}})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	isolateHubEnvForTest(t, server.URL, "agent-project-id")
+	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	projectPath = setupProjectWithoutHubEnabled(t, tmpHome)
+	convProject = ""
+	convJSON = true
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	err := runConversationList(cmd, nil)
+	require.NoError(t, err, "agent-context conversation list must not require hub.enabled in settings")
+	require.True(t, sawRequest, "expected the list request to reach the mock hub")
+}
+
+// TestRunConversationCatchUp_AgentHubContext_HubNotEnabledInSettings is the
+// catch-up half of the ptone/scion#1909 regression: reincarnate Phase 2's
+// migration message gate (AC-8b) depends on "conversation catch-up" working
+// inside an agent container the same way list does.
+func TestRunConversationCatchUp_AgentHubContext_HubNotEnabledInSettings(t *testing.T) {
+	orig := saveConversationListTestState()
+	defer orig.restore()
+	origCatchUpJSON, origCatchUpSince := convCatchUpJSON, convCatchUpSince
+	defer func() {
+		convCatchUpJSON, convCatchUpSince = origCatchUpJSON, origCatchUpSince
+	}()
+
+	const convID = "11111111-1111-1111-1111-111111111111"
+	var sawRequest bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/conversations/"+convID+"/messages" && r.Method == http.MethodGet {
+			sawRequest = true
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"items": []interface{}{}})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	isolateHubEnvForTest(t, server.URL, "agent-project-id")
+	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	projectPath = setupProjectWithoutHubEnabled(t, tmpHome)
+	convCatchUpJSON = true
+	convCatchUpSince = "1h"
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	err := runConversationCatchUp(cmd, []string{"conv:" + convID})
+	require.NoError(t, err, "agent-context conversation catch-up must not require hub.enabled in settings")
+	require.True(t, sawRequest, "expected the catch-up request to reach the mock hub")
+}
