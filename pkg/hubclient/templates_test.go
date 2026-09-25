@@ -62,8 +62,8 @@ func TestCreateTemplateRequest_MarshalJSON(t *testing.T) {
 	if m["projectId"] != "p1" {
 		t.Errorf("Expected projectId 'p1', got %v", m["projectId"])
 	}
-	if m["groveId"] != "p1" {
-		t.Errorf("Expected groveId 'p1', got %v", m["groveId"])
+	if _, ok := m["groveId"]; ok {
+		t.Errorf("Expected no groveId field, got %v", m["groveId"])
 	}
 }
 
@@ -121,7 +121,7 @@ func TestCloneTemplateRequest_MarshalJSON(t *testing.T) {
 	if m["projectId"] != "p1" {
 		t.Errorf("Expected projectId 'p1', got %v", m["projectId"])
 	}
-	if m["groveId"] != "p1" {
-		t.Errorf("Expected groveId 'p1', got %v", m["groveId"])
+	if _, ok := m["groveId"]; ok {
+		t.Errorf("Expected no groveId field, got %v", m["groveId"])
 	}
 }

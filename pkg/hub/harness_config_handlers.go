@@ -32,6 +32,22 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
+// isValidHarnessConfigScope reports whether scope is an accepted harness-config
+// scope for create and clone. An empty scope is valid: create defaults it to
+// "global" and clone defaults it to the source harness config's scope. Any
+// other value — including removed legacy scope names — is rejected outright
+// rather than stored as-is. A PUT update does not take its scope from the
+// request at all: it keeps the stored record's scope, scope ID and owner, so
+// this validation does not apply there.
+func isValidHarnessConfigScope(scope string) bool {
+	switch scope {
+	case "", store.HarnessConfigScopeGlobal, store.HarnessConfigScopeProject, store.HarnessConfigScopeUser:
+		return true
+	default:
+		return false
+	}
+}
+
 type imageManager interface {
 	imagecheck.LocalImageExister
 	PullImage(ctx context.Context, image string) error
@@ -254,6 +270,10 @@ func (s *Server) createHarnessConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Harness == "" {
 		ValidationError(w, "harness is required", nil)
+		return
+	}
+	if !isValidHarnessConfigScope(req.Scope) {
+		ValidationError(w, fmt.Sprintf("invalid scope %q: must be \"global\", \"project\" or \"user\"", req.Scope), nil)
 		return
 	}
 
@@ -534,6 +554,12 @@ func (s *Server) updateHarnessConfig(w http.ResponseWriter, r *http.Request, exi
 	hc.ID = existing.ID
 	hc.Created = existing.Created
 	hc.CreatedBy = existing.CreatedBy
+	hc.Scope = existing.Scope
+	hc.ScopeID = existing.ScopeID
+	hc.OwnerID = existing.OwnerID
+	hc.StoragePath = existing.StoragePath
+	hc.StorageURI = existing.StorageURI
+	hc.StorageBucket = existing.StorageBucket
 	if hc.Slug == "" {
 		hc.Slug = api.Slugify(hc.Name)
 	}
@@ -912,6 +938,10 @@ func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request
 
 	if req.Name == "" {
 		ValidationError(w, "name is required", nil)
+		return
+	}
+	if !isValidHarnessConfigScope(req.Scope) {
+		ValidationError(w, fmt.Sprintf("invalid scope %q: must be \"global\", \"project\" or \"user\"", req.Scope), nil)
 		return
 	}
 

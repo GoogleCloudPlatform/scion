@@ -53,18 +53,6 @@ type CreateTokenRequest struct {
 	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
 }
 
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (r CreateTokenRequest) MarshalJSON() ([]byte, error) {
-	type Alias CreateTokenRequest
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId,omitempty"`
-	}{
-		Alias:   Alias(r),
-		GroveID: r.ProjectID,
-	})
-}
-
 // UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
 func (r *CreateTokenRequest) UnmarshalJSON(data []byte) error {
 	type Alias CreateTokenRequest

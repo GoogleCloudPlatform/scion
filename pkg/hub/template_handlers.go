@@ -16,7 +16,6 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -32,6 +31,19 @@ import (
 // SignedURLExpiry is the duration signed URLs are valid for.
 const SignedURLExpiry = 15 * time.Minute
 
+// isValidTemplateScope reports whether scope is an accepted template scope.
+// An empty scope is valid: callers default it (to "global" for create, to
+// "project" for clone). Any other value — including removed legacy scope
+// names — is rejected outright rather than stored as-is.
+func isValidTemplateScope(scope string) bool {
+	switch scope {
+	case "", store.TemplateScopeGlobal, store.TemplateScopeProject, store.TemplateScopeUser:
+		return true
+	default:
+		return false
+	}
+}
+
 // CreateTemplateRequest is the request body for creating a template.
 type CreateTemplateRequest struct {
 	Name         string                `json:"name"`
@@ -45,24 +57,6 @@ type CreateTemplateRequest struct {
 	Config       *store.TemplateConfig `json:"config,omitempty"`
 	BaseTemplate string                `json:"baseTemplate,omitempty"`
 	Files        []FileUploadRequest   `json:"files,omitempty"`
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (r *CreateTemplateRequest) UnmarshalJSON(data []byte) error {
-	type Alias CreateTemplateRequest
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(r),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if r.ProjectID == "" && aux.GroveID != "" {
-		r.ProjectID = aux.GroveID
-	}
-	return nil
 }
 
 // FileUploadRequest describes a file to upload.
@@ -144,22 +138,6 @@ type CloneTemplateRequest struct {
 	Scope     string `json:"scope"`
 	ScopeID   string `json:"scopeId,omitempty"`
 	ProjectID string `json:"projectId,omitempty"` // Deprecated
-}
-
-// UnmarshalJSON implements backward compatibility for the grove-to-project rename.
-func (r *CloneTemplateRequest) UnmarshalJSON(data []byte) error {
-	type Alias CloneTemplateRequest
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{Alias: (*Alias)(r)}
-	if err := json.Unmarshal(data, aux); err != nil {
-		return err
-	}
-	if r.ProjectID == "" && aux.GroveID != "" {
-		r.ProjectID = aux.GroveID
-	}
-	return nil
 }
 
 // handleTemplatesV2 handles the /api/v1/templates endpoint with storage support.
@@ -266,6 +244,10 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 	// Validate required fields
 	if req.Name == "" {
 		ValidationError(w, "name is required", nil)
+		return
+	}
+	if !isValidTemplateScope(req.Scope) {
+		ValidationError(w, fmt.Sprintf("invalid scope %q: must be \"global\", \"project\" or \"user\"", req.Scope), nil)
 		return
 	}
 	// Resolve scope ID
@@ -933,6 +915,10 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 
 	if req.Name == "" {
 		ValidationError(w, "name is required", nil)
+		return
+	}
+	if !isValidTemplateScope(req.Scope) {
+		ValidationError(w, fmt.Sprintf("invalid scope %q: must be \"global\", \"project\" or \"user\"", req.Scope), nil)
 		return
 	}
 

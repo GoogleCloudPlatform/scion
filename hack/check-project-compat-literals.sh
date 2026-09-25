@@ -96,19 +96,35 @@ allowed_paths=(
   "^pkg/hub/fs_safety_test.go$"
   "^pkg/hub/handlers_broker_inbound_test.go$"
   "^pkg/hub/handlers_envsecret_authz_test.go$"
+  # Asserts groveId is no longer a recognized notification filter alias: an
+  # unrecognized query param is ignored rather than treated as projectId. The
+  # literal is the point of the negative test.
+  "^pkg/hub/handlers_notifications_test.go$"
   "^pkg/hub/handlers_project_test.go$"
+  # Asserts the hub rejects the removed "grove" harness-config scope (and
+  # other unrecognized scopes) with 400 instead of storing it and flattening
+  # its storage path. The literal is the point of the negative tests.
+  "^pkg/hub/harness_config_scope_validation_test.go$"
   "^pkg/hub/heartbeat_legacy_test.go$"
   "^pkg/hub/httpdispatcher_test.go$"
   # Regression test for SSE subject authorization default-deny: proves a
   # non-member is denied on the legacy grove.* subjects and other unknown
   # namespaces.
   "^pkg/hub/sse_default_deny_test.go$"
+  # Asserts the hub rejects the removed "grove" template scope (and other
+  # unrecognized scopes) with 400 instead of storing it as-is. The literal is
+  # the point of the negative test.
+  "^pkg/hub/template_scope_validation_test.go$"
   "^pkg/hub/web_test.go$"
   "^pkg/hubclient/agents_test.go$"
   "^pkg/hubclient/client_test.go$"
   "^pkg/hubclient/messages_test.go$"
   "^pkg/hubclient/notifications_test.go$"
   "^pkg/hubclient/projects_test.go$"
+  # Asserts CreateAgentRequest, CreateSubscriptionRequest,
+  # CreateSubscriptionTemplateRequest and CreateTokenRequest no longer emit a
+  # groveId key. The literal is the point of each negative test.
+  "^pkg/hubclient/request_no_grove_marshal_test.go$"
   "^pkg/hubclient/runtime_brokers_test.go$"
   "^pkg/hubclient/scheduled_events_test.go$"
   "^pkg/hubclient/schedules_test.go$"
@@ -148,6 +164,10 @@ allowed_paths=(
   "^pkg/secret/gcpbackend_test.go$"
   "^pkg/secret/localbackend_test.go$"
   "^pkg/storage/storage_test.go$"
+  # Seeds scope='grove' rows with raw SQL to prove the data migration in
+  # legacy_scope_migration.go rewrites them; the literal is the point of the
+  # test.
+  "^pkg/store/entadapter/legacy_scope_migration_test.go$"
   "^pkg/store/models_json_test.go$"
   "^pkg/util/logging/cloud_handler_test.go$"
   "^pkg/wsprotocol/protocol_test.go$"
@@ -186,16 +206,13 @@ allowed_paths=(
   "^pkg/hub/fs_safety.go$"
   "^pkg/hub/handlers_auth.go$"
   "^pkg/hub/handlers_broker_inbound.go$"
-  "^pkg/hub/handlers_notifications.go$"
   "^pkg/hub/handlers_projects_core.go$"
   "^pkg/hub/handlers_runtime_brokers.go$"
   "^pkg/hub/httpdispatcher.go$"
   "^pkg/hub/project_cache.go$"
-  "^pkg/hub/project_compat.go$"
   "^pkg/hub/project_webdav.go$"
   "^pkg/hub/response_types.go$"
   "^pkg/hub/system_handlers.go$"
-  "^pkg/hub/template_handlers.go$"
   "^pkg/hubclient/agents.go$"
   "^pkg/hubclient/messages.go$"
   "^pkg/hubclient/notifications.go$"
@@ -226,6 +243,9 @@ allowed_paths=(
   "^pkg/storage/storage.go$"
   "^pkg/store/entadapter/agent_session_metrics_store.go$"
   "^pkg/store/entadapter/composite.go$"
+  # One-shot data migration rewriting stored scope='grove' rows to 'project';
+  # removed once no hub can have a pre-migration row left to normalize.
+  "^pkg/store/entadapter/legacy_scope_migration.go$"
   "^pkg/store/storetest/domains_project_broker.go$"
   "^pkg/wsprotocol/protocol.go$"
 )

@@ -33,8 +33,8 @@ func TestTemplateStoragePath(t *testing.T) {
 			want:         "templates/global/my-template",
 		},
 		{
-			name:         "grove scope",
-			scope:        "grove",
+			name:         "project scope",
+			scope:        "project",
 			scopeID:      "grove-123",
 			templateSlug: "my-template",
 			want:         "templates/groves/grove-123/my-template",
@@ -62,9 +62,9 @@ func TestTemplateStoragePath(t *testing.T) {
 			want:         "hubs/my-hub/templates/global/my-template",
 		},
 		{
-			name:         "hub-scoped grove",
+			name:         "hub-scoped project",
 			hubID:        "my-hub",
-			scope:        "grove",
+			scope:        "project",
 			scopeID:      "grove-123",
 			templateSlug: "my-template",
 			want:         "hubs/my-hub/templates/groves/grove-123/my-template",
@@ -83,13 +83,13 @@ func TestTemplateStoragePath(t *testing.T) {
 
 func TestTemplateStorageURI(t *testing.T) {
 	bucket := "my-bucket"
-	uri := TemplateStorageURI("", bucket, "grove", "grove-123", "my-template")
+	uri := TemplateStorageURI("", bucket, "project", "grove-123", "my-template")
 	want := "gs://my-bucket/templates/groves/grove-123/my-template/"
 	if uri != want {
 		t.Errorf("TemplateStorageURI() = %q, want %q", uri, want)
 	}
 
-	uri = TemplateStorageURI("my-hub", bucket, "grove", "grove-123", "my-template")
+	uri = TemplateStorageURI("my-hub", bucket, "project", "grove-123", "my-template")
 	want = "gs://my-bucket/hubs/my-hub/templates/groves/grove-123/my-template/"
 	if uri != want {
 		t.Errorf("TemplateStorageURI(hub-scoped) = %q, want %q", uri, want)
@@ -108,19 +108,17 @@ func TestResourceStoragePath(t *testing.T) {
 	}{
 		{"template global", "", ResourceKindTemplate, "global", "", "t1", "templates/global/t1"},
 		{"template project", "", ResourceKindTemplate, "project", "p-1", "t1", "templates/groves/p-1/t1"},
-		{"template grove (legacy)", "", ResourceKindTemplate, "grove", "g-1", "t1", "templates/groves/g-1/t1"},
 		{"template user", "", ResourceKindTemplate, "user", "u-1", "t1", "templates/users/u-1/t1"},
 		{"template default", "", ResourceKindTemplate, "weird", "", "t1", "templates/t1"},
 		{"harness-config global", "", ResourceKindHarnessConfig, "global", "", "h1", "harness-configs/global/h1"},
 		{"harness-config project", "", ResourceKindHarnessConfig, "project", "p-1", "h1", "harness-configs/groves/p-1/h1"},
-		{"harness-config grove (legacy)", "", ResourceKindHarnessConfig, "grove", "g-1", "h1", "harness-configs/groves/g-1/h1"},
 		{"harness-config user", "", ResourceKindHarnessConfig, "user", "u-1", "h1", "harness-configs/users/u-1/h1"},
 		{"harness-config default", "", ResourceKindHarnessConfig, "weird", "", "h1", "harness-configs/h1"},
 		{"hub-scoped template global", "hub-1", ResourceKindTemplate, "global", "", "t1", "hubs/hub-1/templates/global/t1"},
 		{"hub-scoped template project", "hub-1", ResourceKindTemplate, "project", "p-1", "t1", "hubs/hub-1/templates/groves/p-1/t1"},
 		{"hub-scoped harness-config global", "hub-1", ResourceKindHarnessConfig, "global", "", "h1", "hubs/hub-1/harness-configs/global/h1"},
 		{"hub-scoped harness-config user", "hub-1", ResourceKindHarnessConfig, "user", "u-1", "h1", "hubs/hub-1/harness-configs/users/u-1/h1"},
-		{"hub-scoped skill grove", "hub-1", ResourceKindSkill, "grove", "g-1", "s1", "hubs/hub-1/skills/groves/g-1/s1"},
+		{"hub-scoped skill project", "hub-1", ResourceKindSkill, "project", "g-1", "s1", "hubs/hub-1/skills/groves/g-1/s1"},
 	}
 
 	for _, tt := range tests {
