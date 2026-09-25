@@ -60,6 +60,20 @@ type reincarnateTestDispatcher struct {
 	// real HTTP dispatcher's applyBrokerResponse does by mutating
 	// agent.AppliedConfig.Image in place (design §3.4 Amendment A11.1(b)).
 	reprovisionImage string
+
+	// startImage, when non-empty, simulates the broker echoing back a
+	// resolved container image on a successful start response.
+	startImage string
+
+	// imageRegistry is the registry the fake reports through ImageRegistry(),
+	// as the HTTP dispatcher reports the registry it rewrites images to.
+	imageRegistry string
+}
+
+func (d *reincarnateTestDispatcher) ImageRegistry() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.imageRegistry
 }
 
 func newReincarnateTestDispatcher() *reincarnateTestDispatcher {
@@ -83,13 +97,17 @@ func (d *reincarnateTestDispatcher) DispatchAgentReprovision(_ context.Context, 
 	}
 	return err
 }
-func (d *reincarnateTestDispatcher) DispatchAgentStart(_ context.Context, _ *store.Agent, task string, resume bool) error {
+func (d *reincarnateTestDispatcher) DispatchAgentStart(_ context.Context, agent *store.Agent, task string, resume bool) error {
 	d.mu.Lock()
 	d.startCalls++
 	d.lastStartTask = task
 	d.lastStartResume = &resume
 	err := d.startErr
+	image := d.startImage
 	d.mu.Unlock()
+	if err == nil && image != "" && agent.AppliedConfig != nil {
+		agent.AppliedConfig.Image = image
+	}
 	return err
 }
 func (d *reincarnateTestDispatcher) DispatchAgentStop(_ context.Context, _ *store.Agent) error {
@@ -992,6 +1010,136 @@ func TestReincarnateAgent_NoBrokerEchoKeepsHubResolvedImage(t *testing.T) {
 	assert.Equal(t, "harness-config-image:v2", final.AppliedConfig.Image)
 }
 
+// imageRegistryPlan runs a dry-run reincarnate against an agent whose image
+// comes from a harness config holding hcImage, with the dispatcher rewriting
+// images to registry, and returns the plan's image change.
+func imageRegistryPlan(t *testing.T, registry, hcImage, rowImage string) FieldChange {
+	t.Helper()
+	disp := newReincarnateTestDispatcher()
+	disp.imageRegistry = registry
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	hc := createImageHarnessConfig(t, s, hcImage)
+
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.AppliedConfig.Image = rowImage
+		a.AppliedConfig.HarnessConfig = hc.Slug
+		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{HarnessConfig: hc.Slug}
+	})
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{DryRun: true}), agent.ID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp ReincarnateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	return resp.Plan.Image
+}
+
+// TestReincarnateAgent_PlanUnchangedForQualifiedRowAndBareHarnessConfigImage
+// covers a create-born agent: the harness config holds a bare image, the
+// dispatcher rewrote it to the registry at create, and the broker echoed the
+// qualified name onto the row. With nothing changed, the plan must say so.
+func TestReincarnateAgent_PlanUnchangedForQualifiedRowAndBareHarnessConfigImage(t *testing.T) {
+	img := imageRegistryPlan(t, "ghcr.io/test-org", "scion-claude:v1", "ghcr.io/test-org/scion-claude:v1")
+	assert.Equal(t, "ghcr.io/test-org/scion-claude:v1", img.New, "the fresh image must be in the registry-qualified form the broker runs")
+	assert.Equal(t, img.New, img.Old, "an unchanged image must not show as a diff")
+}
+
+// TestReincarnateAgent_PlanShowsQualifiedHarnessConfigImageBump covers the
+// same agent after its harness config's image was bumped: both sides of the
+// diff are registry-qualified.
+func TestReincarnateAgent_PlanShowsQualifiedHarnessConfigImageBump(t *testing.T) {
+	img := imageRegistryPlan(t, "ghcr.io/test-org", "scion-claude:v2", "ghcr.io/test-org/scion-claude:v1")
+	assert.Equal(t, "ghcr.io/test-org/scion-claude:v1", img.Old)
+	assert.Equal(t, "ghcr.io/test-org/scion-claude:v2", img.New)
+}
+
+// TestReincarnateAgent_PlanUnchangedForLegacyBareRowImage covers a row that
+// still holds the bare image (written before the fresh config was stored in
+// canonical form): with the harness config unchanged, the plan must not show
+// a bare -> qualified diff.
+func TestReincarnateAgent_PlanUnchangedForLegacyBareRowImage(t *testing.T) {
+	img := imageRegistryPlan(t, "ghcr.io/test-org", "scion-claude:v1", "scion-claude:v1")
+	assert.Equal(t, "ghcr.io/test-org/scion-claude:v1", img.New)
+	assert.Equal(t, img.New, img.Old, "a bare row image equal to the fresh image in canonical form must not show as a diff")
+}
+
+// TestReincarnateAgent_PlanShowsChangeFromEmptyRowImage proves canonical
+// comparison never hides a change from an empty stored image.
+func TestReincarnateAgent_PlanShowsChangeFromEmptyRowImage(t *testing.T) {
+	img := imageRegistryPlan(t, "ghcr.io/test-org", "scion-claude:v1", "")
+	assert.Equal(t, "", img.Old)
+	assert.Equal(t, "ghcr.io/test-org/scion-claude:v1", img.New)
+}
+
+// TestReincarnateAgent_EmptyDispatcherRegistryLeavesImageBare proves that when
+// the dispatcher does not rewrite images, neither does the fresh config, even
+// if a registry is configured elsewhere: the registry must come from the
+// dispatcher, the component that actually rewrites images on the way to the
+// broker.
+func TestReincarnateAgent_EmptyDispatcherRegistryLeavesImageBare(t *testing.T) {
+	t.Setenv("SCION_IMAGE_REGISTRY", "ghcr.io/elsewhere")
+	img := imageRegistryPlan(t, "", "scion-claude:v1", "")
+	assert.Equal(t, "scion-claude:v1", img.New, "with no dispatcher registry the image must be left as is")
+}
+
+// TestReincarnateAgent_ExplicitImageCanonicalised proves the canonical form
+// applies to an explicit inline image too, since the dispatcher rewrites
+// every image it sends.
+func TestReincarnateAgent_ExplicitImageCanonicalised(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.imageRegistry = "ghcr.io/test-org"
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.AppliedConfig.Image = "ghcr.io/test-org/explicit-image:v1"
+		a.AppliedConfig.CreateInputs.InlineConfig = &api.ScionConfig{Image: "explicit-image:v1"}
+	})
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{DryRun: true}), agent.ID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp ReincarnateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "ghcr.io/test-org/explicit-image:v1", resp.Plan.Image.New)
+	assert.Equal(t, resp.Plan.Image.New, resp.Plan.Image.Old)
+}
+
+// TestReincarnateAgent_RowImageMatchesRecordAfterStartEcho proves the agent
+// row ends a reincarnation with exactly the image in the record, including an
+// image the start response echoed back after the starting step's write.
+func TestReincarnateAgent_RowImageMatchesRecordAfterStartEcho(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.reprovisionImage = "ghcr.io/test-org/reprovision-echo:v1"
+	disp.startImage = "ghcr.io/test-org/start-echo:v2"
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateCompleted, r.State, r.Error)
+	require.NotNil(t, r.NewAppliedConfig)
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, final.AppliedConfig)
+	assert.Equal(t, "ghcr.io/test-org/start-echo:v2", r.NewAppliedConfig.Image)
+	assert.Equal(t, r.NewAppliedConfig.Image, final.AppliedConfig.Image, "the row must end with the image the record holds")
+}
+
+// TestDispatchImageRegistry_ReadsTheHTTPDispatcher proves the reincarnate
+// path reads the registry from the HTTP dispatcher itself, the value it
+// rewrites images with at send time.
+func TestDispatchImageRegistry_ReadsTheHTTPDispatcher(t *testing.T) {
+	d := &HTTPAgentDispatcher{}
+	d.SetImageRegistry("ghcr.io/test-org")
+	assert.Equal(t, "ghcr.io/test-org", dispatchImageRegistry(d))
+	assert.Equal(t, "", dispatchImageRegistry(nil), "a dispatcher that does not rewrite images reports no registry")
+}
+
 // TestReincarnateAgent_LegacyAgent_DropsSkillsWithWarning covers the legacy
 // skills addendum (design §3.4 Amendment A1): an agent with no CreateInputs
 // (predates the field) must have InlineConfig.Skills dropped entirely by the
@@ -1147,7 +1295,7 @@ func TestReincarnateAgent_FreshConfigDoesNotAliasEnv(t *testing.T) {
 		}
 	})
 
-	fresh, _, err := srv.buildFreshAppliedConfig(context.Background(), agent, project)
+	fresh, _, err := srv.buildFreshAppliedConfig(context.Background(), agent, project, "")
 	require.NoError(t, err)
 
 	require.Contains(t, fresh.Env, "TEMPLATE_DEFAULT_KEY", "template env default must reach AppliedConfig.Env")
@@ -3184,7 +3332,7 @@ func TestReincarnateAgent_AC2b_TemplateHarnessConfigBeatsHubDefault(t *testing.T
 		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{} // never explicit
 	})
 
-	fresh, _, err := srv.buildFreshAppliedConfig(context.Background(), agent, project)
+	fresh, _, err := srv.buildFreshAppliedConfig(context.Background(), agent, project, "")
 	require.NoError(t, err)
 	assert.Equal(t, "template-hc", fresh.HarnessConfig,
 		"the template's harness config must still outrank the hub default after reincarnate")
@@ -3460,7 +3608,7 @@ func TestReincarnateAgent_AC2b_Matrix_CreateAndReincarnateAgree(t *testing.T) {
 			created.AppliedConfig.AgentRoleGrandfathered = keptAgentRoleGrandfathered
 			require.NoError(t, s.UpdateAgent(ctx, created))
 
-			fresh, _, err := srv.buildFreshAppliedConfig(ctx, created, project)
+			fresh, _, err := srv.buildFreshAppliedConfig(ctx, created, project, "")
 			require.NoError(t, err)
 
 			assert.Equal(t, want.HarnessConfig, fresh.HarnessConfig, "HarnessConfig must match what create produced")

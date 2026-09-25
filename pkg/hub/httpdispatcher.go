@@ -345,6 +345,12 @@ func (d *HTTPAgentDispatcher) SetImageRegistry(registry string) {
 	d.imageRegistry = registry
 }
 
+// ImageRegistry returns the registry prefix this dispatcher rewrites bare
+// image names to at send time ("" = no rewrite).
+func (d *HTTPAgentDispatcher) ImageRegistry() string {
+	return d.imageRegistry
+}
+
 // SetTemplateRepairer registers a callback that syncs a template's DB manifest
 // from storage when a hash mismatch is detected during dispatch.
 func (d *HTTPAgentDispatcher) SetTemplateRepairer(fn func(ctx context.Context, ref string) error) {

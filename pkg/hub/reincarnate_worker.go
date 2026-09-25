@@ -555,9 +555,14 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// attempts: losing this write leaves the row saying "starting" forever
 	// even though the new generation is live, and generation stuck at N even
 	// though gen N+1 is what is actually running.
+	//
+	// appliedConfig: fresh makes the row end with exactly the config recorded
+	// in rec.NewAppliedConfig above, including anything the start response
+	// echoed back after the starting step's write.
 	if _, err := s.updateReincarnationStep(ctx, agentID, reincarnationStepUpdate{
 		reincarnationState: store.ReincarnationStateNone,
 		generation:         &toGeneration,
+		appliedConfig:      fresh,
 		now:                completedNow,
 	}, reincarnationStepMaxAttempts+3); err != nil {
 		// The new generation is already running at this point — do not mark

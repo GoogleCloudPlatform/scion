@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -56,7 +57,7 @@ import (
 // Returns the fresh config, any warnings to surface on the plan (e.g. the
 // legacy-fallback notice), and an error only for a genuine failure (missing
 // AppliedConfig).
-func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent, project *store.Project) (*store.AgentAppliedConfig, []string, error) {
+func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent, project *store.Project, imageRegistry string) (*store.AgentAppliedConfig, []string, error) {
 	old := agent.AppliedConfig
 	if old == nil {
 		return nil, nil, fmt.Errorf("agent %s has no applied config", agent.ID)
@@ -216,7 +217,28 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 		}
 	}
 
+	// Store the image in the form the broker actually runs: the dispatcher
+	// rewrites every image to its registry at send time and the broker echoes
+	// that form back. RewriteImageRegistry is a no-op for an empty registry
+	// and for an already-qualified name.
+	fresh.Image = config.RewriteImageRegistry(fresh.Image, imageRegistry)
+
 	return fresh, warnings, nil
+}
+
+// imageRegistryProvider is implemented by dispatchers that rewrite image
+// names to a registry before sending them to a broker.
+type imageRegistryProvider interface {
+	ImageRegistry() string
+}
+
+// dispatchImageRegistry returns the registry the dispatcher rewrites images
+// to, or "" when it does not rewrite them.
+func dispatchImageRegistry(dispatcher AgentDispatcher) string {
+	if p, ok := dispatcher.(imageRegistryProvider); ok {
+		return p.ImageRegistry()
+	}
+	return ""
 }
 
 // legacyCreateInputsFromAppliedConfig reconstructs a best-effort
@@ -339,7 +361,11 @@ func legacyCreateInputsFromAppliedConfig(old *store.AgentAppliedConfig, template
 // computeReincarnationPlan diffs the outgoing generation's AppliedConfig
 // against the freshly resolved one, for the ReincarnateAgentResponse (design
 // §3.2). Env key names only are compared, never values.
-func computeReincarnationPlan(old, fresh *store.AgentAppliedConfig, warnings []string) ReincarnationPlan {
+//
+// The image is compared in canonical (registry-qualified) form, so a row that
+// still holds the bare form of the same image shows as unchanged. An empty
+// old image is always shown as a change.
+func computeReincarnationPlan(old, fresh *store.AgentAppliedConfig, warnings []string, imageRegistry string) ReincarnationPlan {
 	plan := ReincarnationPlan{
 		Template:   FieldChange{Old: old.TemplateHash, New: fresh.TemplateHash},
 		Image:      FieldChange{Old: old.Image, New: fresh.Image},
@@ -348,6 +374,9 @@ func computeReincarnationPlan(old, fresh *store.AgentAppliedConfig, warnings []s
 		EnvKeys:    diffEnvKeys(old.Env, fresh.Env),
 		Branch:     fresh.Branch,
 		Warnings:   warnings,
+	}
+	if old.Image != "" && config.RewriteImageRegistry(old.Image, imageRegistry) == fresh.Image {
+		plan.Image.Old = fresh.Image
 	}
 	return plan
 }

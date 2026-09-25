@@ -262,13 +262,14 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// store (templates, harness configs, pre-start hooks, skills settings),
 	// it never writes. Any store writes happen only below this point, and
 	// only for a non-dry-run request.
-	fresh, warnings, err := s.buildFreshAppliedConfig(ctx, agent, project)
+	imageRegistry := dispatchImageRegistry(dispatcher)
+	fresh, warnings, err := s.buildFreshAppliedConfig(ctx, agent, project, imageRegistry)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"failed to resolve new configuration: "+err.Error(), nil)
 		return
 	}
-	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings)
+	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, imageRegistry)
 	targetGeneration := agent.Generation + 1
 
 	if req.DryRun {
