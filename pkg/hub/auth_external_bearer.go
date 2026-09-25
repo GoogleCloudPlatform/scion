@@ -436,6 +436,13 @@ func authenticateExternalBearer(ctx context.Context, r *http.Request, token stri
 	if err != nil {
 		return nil, attempt, fmt.Errorf("external bearer: %w", err)
 	}
+	if id == nil {
+		// A GoogleCredentialValidator that returns (nil, nil) is a
+		// contract violation, not a verification failure — classify it as
+		// an upstream fault (503) rather than reaching the nil pointer
+		// dereference on id.IsServiceAccount below.
+		return nil, attempt, fmt.Errorf("external bearer: validator returned no identity: %w", ErrGoogleUpstreamError)
+	}
 	if id.IsServiceAccount {
 		attempt.principal = ExternalBearerPrincipalServiceAccount
 	} else {

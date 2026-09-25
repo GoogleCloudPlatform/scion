@@ -426,3 +426,32 @@ func TestExternalBearer_AccessToken_CacheHitsNotRateLimited(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// A GoogleCredentialValidator that returns (nil, nil) — a contract
+// violation, since ValidateAccessToken/ValidateIDToken must return a
+// non-nil identity whenever err is nil — must not panic and must not be
+// treated as a successful or a rejected (401) verification. It is an
+// upstream fault: 503 upstream_unavailable, outcome upstream_error.
+// ---------------------------------------------------------------------------
+
+func TestExternalBearer_AccessToken_NilIdentityFromValidator_ServiceUnavailable(t *testing.T) {
+	userStore := newFakeUserStore()
+	extStore := newMemExtIDStore()
+	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())
+	cfg := newExternalBearerConfig(t, &fakeGoogleValidator{}, resolver) // zero value: (nil, nil) from both methods
+	fake := attachExternalBearerMetrics(&cfg)
+
+	w, result := doExternalBearerRequest(cfg, "opaque-nil-identity-token")
+	if result.reached {
+		t.Fatal("handler must not be reached")
+	}
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503: body=%s", w.Code, w.Body.String())
+	}
+	wantBody := wantErrorBody(t, "upstream_unavailable", "external identity provider unavailable")
+	if !bytes.Equal(w.Body.Bytes(), wantBody) {
+		t.Errorf("body = %s, want %s", w.Body.Bytes(), wantBody)
+	}
+	wantOneCall(t, fake, externalBearerMetricCall{ExternalBearerKindAccessToken, ExternalBearerPrincipalUnknown, ExternalBearerOutcomeUpstreamError})
+}
