@@ -700,7 +700,8 @@ straddle a wall-clock second boundary cleanly, by `created_at`: this branch's ow
 (`01:07:10.88482` → `01:07:11.045824`), this developer's local Phase-3 failure (`02:35:50.951593` → `02:35:51.042694`),
 and reviewer `ap-up1-rev`'s local Phase-3 failure `L1-run2` (`03:33:40.945863` → `03:33:41.074121`). A fourth local
 failure (`ap-up1-rev`'s `run5`, `03:14:58.000430` and `03:14:58.005466`) does **not** straddle a second — both
-timestamps fall in the same second, 0.4 ms apart — and is consistent with the first publish having been stamped in the
+timestamps fall in the same second, ~5 ms apart, the first only 0.4 ms after the boundary — and is consistent with the
+first publish having been stamped in the
 previous second, which is inference, not something this evidence shows directly.
 
 **Reachability from this branch's changes: none.** `git diff a53175c23...HEAD -- extras/scion-a2a-bridge` shows
@@ -738,12 +739,12 @@ days after this run.
 `ap-up1-rev`'s 0/32 Phase-3-alone runs; Postgres 15 local, CI DSN shape, `TEST_REQUIRE_DATABASE=1`, fresh database per run
 in both samples). The rates are not equal, and this log does not claim they are: per the mechanism, the per-instance
 failure rate is set by the wall-clock gap between the two `publishBrokerMessage` calls, i.e. by process-startup timing,
-and this branch's Hub process changes (new `pkg/hub` auth code, the Federation config `serveHubProcess` gained since
-squashed into `GoogleCloudPlatform/scion#1880`, or `TestHubBearerProcessPassthrough` running earlier in the same test
-binary) could plausibly widen that gap — this was not measured, and attributing the exact rate difference is out of scope
-here. Upstream-main itself never failed locally in either developer's sample, so there is no upstream-main-side
+and this branch's Hub process changes (new `pkg/hub` auth code, the Federation config `serveHubProcess` gained (now part
+of `6ba3730a3`), or `TestHubBearerProcessPassthrough` running earlier in the same test binary) could plausibly widen that
+gap — this was not measured, and attributing the exact rate difference is out of scope here. Upstream-main itself never
+failed locally in either sample, so there is no upstream-main-side
 artifact-row evidence to compare against; the only upstream-side failure instance is `GoogleCloudPlatform/scion#1748`'s
-pre-merge run above, and its own CI log predates the evidence logger (`logCursorFailureEvidence` does not exist at that
+pre-merge run above, and that run's commit predates the evidence logger (`logCursorFailureEvidence` does not exist at that
 commit) with the unexpected-SSE payload truncated, so it carries no artifact-row evidence either way. What makes this a
 **pre-existing defect** rather than something this branch introduced is the failure signature this branch's failures
 share with that pre-merge run — the same `assertNoSSE` assertion following the same double `cursor-final` publish with
@@ -973,9 +974,10 @@ branch's first hubBearer commit date, and the reviewer's `summary.txt` run talli
   the `integration/` directory diff. Neither exists on any branch reachable from upstream `main` — they were fork-only
   commits, replaced by different SHAs (`f1cc60bcc`/`665e14386`) after the rebase, and both sets vanished when
 `GoogleCloudPlatform/scion#1880` was
-  squash-merged as `6ba3730a3`. A reader with only an upstream checkout could not resolve either. Replaced both
-  occurrences (the §2 paragraph and the "fix round 1" narrative) with a description of the change plus the squash
-  reference `GoogleCloudPlatform/scion#1880`/`6ba3730a3`, which does resolve upstream. (`b1250499d`, cited elsewhere in
+  squash-merged as `6ba3730a3`. A reader with only an upstream checkout could not resolve either. Replaced all three
+  occurrences (the §2 `integration/` and "Run counts" paragraphs, and the "fix round 1" narrative) with a description of
+  the change plus the squash reference `GoogleCloudPlatform/scion#1880`/`6ba3730a3`, which does resolve upstream.
+  (`b1250499d`, cited elsewhere in
   this file as the pre-rebase head, is unaffected by this fix: it is a historical label for what was reviewed, not cited
   as verifiable evidence, and per `ap-up1-rev-2`'s review it remains fetchable by full SHA.)
 - N1 (Nit, declined) and the TestCrossReplicaStreamCursor defect itself (declined, separate optional follow-up): out of
