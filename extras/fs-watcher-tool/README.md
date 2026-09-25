@@ -28,12 +28,12 @@ make ci
 
 The watcher must run as root (or with `CAP_SYS_ADMIN`) on the host machine, not inside a container.
 
-### Watch a grove
+### Watch a project
 
-The simplest way to use the watcher is with `--grove`, which automatically discovers all agent worktree directories by inspecting Docker containers with the matching `scion.grove` label:
+The simplest way to use the watcher is with `--project`, which automatically discovers all agent worktree directories by inspecting Docker containers with the matching `scion.grove` label:
 
 ```bash
-sudo ./scion-fs-watcher --grove my-project
+sudo ./scion-fs-watcher --project my-project
 ```
 
 This will:
@@ -51,10 +51,10 @@ You can also watch specific directories directly:
 sudo ./scion-fs-watcher --watch /path/to/worktree-a --watch /path/to/worktree-b
 ```
 
-Both `--grove` and `--watch` can be combined:
+Both `--project` and `--watch` can be combined:
 
 ```bash
-sudo ./scion-fs-watcher --grove my-project --watch /extra/shared/dir
+sudo ./scion-fs-watcher --project my-project --watch /extra/shared/dir
 ```
 
 ### Write to a log file
@@ -62,7 +62,7 @@ sudo ./scion-fs-watcher --grove my-project --watch /extra/shared/dir
 By default, events are written to stdout. To write to a file instead:
 
 ```bash
-sudo ./scion-fs-watcher --grove my-project --log /var/log/scion/fs-events.ndjson
+sudo ./scion-fs-watcher --project my-project --log /var/log/scion/fs-events.ndjson
 ```
 
 ### Filter noise
@@ -70,7 +70,7 @@ sudo ./scion-fs-watcher --grove my-project --log /var/log/scion/fs-events.ndjson
 Exclude paths with `--ignore` glob patterns (repeatable):
 
 ```bash
-sudo ./scion-fs-watcher --grove my-project \
+sudo ./scion-fs-watcher --project my-project \
   --ignore '.git/**' \
   --ignore 'node_modules/**' \
   --ignore '*.swp'
@@ -79,7 +79,7 @@ sudo ./scion-fs-watcher --grove my-project \
 For more complex filtering, use a `.gitignore`-style filter file:
 
 ```bash
-sudo ./scion-fs-watcher --grove my-project --filter-file /path/to/fs-filter.txt
+sudo ./scion-fs-watcher --project my-project --filter-file /path/to/fs-filter.txt
 ```
 
 The filter file supports `#` comments, `!` negation for re-inclusion, and glob patterns. Send `SIGHUP` to reload the filter file without restarting:
@@ -93,7 +93,7 @@ kill -HUP $(pidof scion-fs-watcher)
 Use `--debug` for verbose output on stderr showing Docker interactions, PID resolution, fanotify setup, and event processing:
 
 ```bash
-sudo ./scion-fs-watcher --grove my-project --debug
+sudo ./scion-fs-watcher --project my-project --debug
 ```
 
 Example debug output:
@@ -106,22 +106,23 @@ Example debug output:
 [resolver]   cached container a1b2c3d4e5f6 → agent "frontend-refactor"
 [resolver]   cached container f6e5d4c3b2a1 → agent "backend-api"
 [resolver] warmed up with 2 scion containers
-[grove] discovered watch dir: /home/user/.scion_worktrees/my-project/frontend-refactor (agent: frontend-refactor)
-[grove] discovered watch dir: /home/user/.scion_worktrees/my-project/backend-api (agent: backend-api)
-[grove] discovered 2 directories for grove "my-project"
-[config] grove="my-project", label-key="scion.name", debounce=300ms, cache-ttl=5m0s
+[project] discovered watch dir: /home/user/.scion_worktrees/my-project/frontend-refactor (agent: frontend-refactor, dest: /workspace)
+[project] discovered watch dir: /home/user/.scion_worktrees/my-project/backend-api (agent: backend-api, dest: /workspace)
+[project] discovered 2 directories for project "my-project"
+[config] project="my-project", label-key="scion.name", debounce=300ms, cache-ttl=5m0s
 [config] ignore patterns: [.git/**]
 [config] log output: -
 [config] watch root [0]: /home/user/.scion_worktrees/my-project/frontend-refactor
 [config] watch root [1]: /home/user/.scion_worktrees/my-project/backend-api
-[watcher] fanotify fd=3, flags=FAN_CLASS_NOTIF|FAN_REPORT_DFID_NAME|FAN_CLOEXEC
-[watcher] mark flags=FAN_MARK_ADD|FAN_MARK_FILESYSTEM, mask=CREATE|DELETE|CLOSE_WRITE|MOVED_FROM|MOVED_TO
+[resolver] subscribing to docker events (type=container, actions=start,die)
+[watcher] subscribed to docker container lifecycle events (start/die)
+scion-fs-watcher started, watching 2 directories
 [watcher] marking filesystem for dir: /home/user/.scion_worktrees/my-project/frontend-refactor
 [watcher] marking filesystem for dir: /home/user/.scion_worktrees/my-project/backend-api
+[watcher] fanotify fd=3, flags=FAN_CLASS_NOTIF|FAN_REPORT_DFID_NAME|FAN_CLOEXEC
+[watcher] mark flags=FAN_MARK_ADD|FAN_MARK_FILESYSTEM, mask=ACCESS|CREATE|DELETE|CLOSE_WRITE|MOVED_FROM|MOVED_TO
 [watcher] watching 2 directories, debounce=300ms
 [watcher] entering event loop (poll timeout=500ms)
-[resolver] subscribed to docker container lifecycle events (start/die)
-scion-fs-watcher started, watching 2 directories
 [resolver] pid 12345 → container a1b2c3d4e5f6 → agent "frontend-refactor" (resolved)
 ```
 
@@ -151,7 +152,8 @@ sudo scion-fs-watcher [flags]
 
 | Flag            | Description | Default |
 |-----------------|-------------|---------|
-| `--grove`       | Grove ID — auto-discover agent directories via Docker labels | (none) |
+| `--project`     | Project ID — auto-discover agent directories via Docker labels | (none) |
+| `--grove`       | Deprecated alias for `--project` | (none) |
 | `--watch`       | Directory to watch explicitly (repeatable) | (none) |
 | `--log`         | Output log file path (`-` for stdout) | `-` (stdout) |
 | `--label-key`   | Docker label key to use as agent ID | `scion.name` |
@@ -161,7 +163,7 @@ sudo scion-fs-watcher [flags]
 | `--cache-ttl`   | Duration to cache PID-to-container mappings | `5m` |
 | `--debug`       | Enable verbose debug logging to stderr | `false` |
 
-At least one of `--grove` or `--watch` is required.
+At least one of `--project` or `--watch` is required.
 
 ## How It Works
 
@@ -173,4 +175,4 @@ At least one of `--grove` or `--watch` is required.
 
 4. **Rename coalescing** detects the common editor save pattern (write to temp file, then rename over the target) and emits a single `modify` event instead of a `rename_from` + `rename_to` pair.
 
-5. **Dynamic discovery** (with `--grove`) subscribes to Docker container lifecycle events to automatically start/stop watching directories as agent containers come and go.
+5. **Dynamic discovery** (with `--project`) subscribes to Docker container lifecycle events to automatically start/stop watching directories as agent containers come and go.

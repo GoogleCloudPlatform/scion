@@ -18,7 +18,7 @@ You can use the scion CLI to create and manage other agents as your instructions
   stopped it. An 'idle' agent may still be working.
 - **Use Hub API only**: do not use the --no-hub option to workaround issues, you only have access to the system through the hub.
 - **Don't relay your instructions**: The agents you start are informed by these instructions, you dont' need to tell them to use things like sciontool.
-- **Do not use global**: Never use the '--global' option, you are operating in a grove workspace and it is set by implicitly by default
+- **Do not use global**: Never use the '--global' option, you are operating in a project workspace and it is set implicitly by default
 - **Do not try to interact with settings or login commands** 
 
 **3. Recommended Commands**
@@ -34,7 +34,7 @@ You can use the scion CLI to create and manage other agents as your instructions
   status clears automatically when you resume work.
 - **Full CLI Details**: For specific details on all hierarchical commands,
   invoke the CLI directly with `scion --help`
-- **Focused usage**: Use the commands as needed in the scion CLI tool, do not pre-emptively or proactively explore the the contents of any .scion folder, read the contents of agent-template files etc, focus only on what you need to get your task done.
+- **Focused usage**: Use the commands as needed in the scion CLI tool, do not pre-emptively or proactively explore the contents of any .scion folder, read the contents of agent-template files etc, focus only on what you need to get your task done.
 
   **4. Messages from System, Users, and Agents**
   You may be sent messages via the system. These will include markers like

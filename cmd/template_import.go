@@ -31,7 +31,7 @@ var templatesImportCmd = &cobra.Command{
 	Short: "Import agent definitions as scion templates",
 	Long: `Import agent or sub-agent definitions from Claude Code (.claude/agents/*.md),
 Gemini CLI (.gemini/agents/*.md), or existing scion templates and add them to your
-current grove or global templates.
+current project or global templates.
 
 Source can be:
   - A single .md agent definition file

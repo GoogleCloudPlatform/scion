@@ -7,7 +7,7 @@ A standalone service that bridges Google Chat (and future Slack) with the Scion 
 - Bidirectional messaging between chat users and Scion agents
 - Agent management via slash commands (`/scion list`, `/scion start`, etc.)
 - Automatic user identity mapping (chat user to Hub account)
-- Space-to-grove linking for scoped interactions
+- Space-to-project linking for scoped interactions
 - Real-time notification cards for agent status changes (`COMPLETED`, `ERROR`, `WAITING_FOR_INPUT`, etc.)
 - Interactive `ask_user` response flow with inline reply fields
 - Per-user notification subscriptions with activity-type filtering
@@ -357,9 +357,9 @@ Once the app is running and connected, users interact via `/scion` in Google Cha
 | `/scion help` | Show available commands |
 | `/scion register` | Link your chat account to your Hub user (auto-matches by email, falls back to device auth) |
 | `/scion unregister` | Remove your chat-to-Hub account link |
-| `/scion link <grove-slug>` | Link the current space to a grove (admin only) |
-| `/scion unlink` | Unlink the current space from its grove (admin only) |
-| `/scion list` | List agents in the linked grove |
+| `/scion link <project-slug>` | Link the current space to a project (admin only) |
+| `/scion unlink` | Unlink the current space from its project (admin only) |
+| `/scion list` | List agents in the linked project |
 | `/scion status <agent>` | Show agent status card with action buttons |
 | `/scion create <agent>` | Create a new agent |
 | `/scion start <agent>` | Start an agent |
@@ -390,7 +390,7 @@ The app uses the **Workspace Add-on HTTP Service** model. Google Chat sends even
 
 The chat app operates under three identity contexts:
 
-1. **Hub admin user** - System-level Hub operations (notification subscriptions, grove lookups)
+1. **Hub admin user** - System-level Hub operations (notification subscriptions, project lookups)
 2. **GCP service account** - Infrastructure access (Secret Manager for signing keys, Google Chat API)
 3. **Impersonated chat users** - User-initiated commands are executed as the linked Hub user via short-lived scoped tokens
 

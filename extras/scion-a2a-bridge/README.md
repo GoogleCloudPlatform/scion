@@ -187,7 +187,7 @@ Edit `scion-a2a-bridge.yaml`. The required fields are:
 | `bridge.listen_address` | Address for the A2A HTTP server | `:8443` |
 | `bridge.external_url` | Public URL where A2A clients reach the bridge | `https://a2a.example.com` |
 | `auth.api_key` | Static API key clients pass in the `X-API-Key` header. Supports env var expansion. | `${A2A_API_KEY}` |
-| `projects[].slug` | Grove slug to expose. Add one entry per project. | `my-project` |
+| `projects[].slug` | Project slug to expose. Add one entry per project. | `my-project` |
 | `plugin.listen_address` | Broker plugin RPC listen address | `localhost:9090` |
 
 Minimal config example:

@@ -8,5 +8,5 @@ Integration test scripts and developer utilities.
 
 ## Integration Tests
 
-- **`hub-env-integration-test.sh`** - Tests environment variable CRUD operations at user and grove scopes.
+- **`hub-env-integration-test.sh`** - Tests environment variable CRUD operations at user and project scopes.
 - **`template-integration-test.sh`** - Tests template management operations via the Hub API.
