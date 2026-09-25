@@ -1317,6 +1317,786 @@ describe('scion-chat-thread initial scroll position', () => {
   });
 });
 
+/**
+ * Opening a thread with unread messages should land the "New messages"
+ * divider near the top of the viewport (nc-open-at-unread), not centered and
+ * not at the bottom — the opposite of "Jump to latest", which the user
+ * confirmed is correct and unchanged. A search result or a `#msg-` deep link
+ * takes precedence, and the anchor only ever applies once, at open time: a
+ * message arriving over SSE afterwards must not re-anchor to the divider.
+ */
+describe('scion-chat-thread unread-divider open anchor', () => {
+  // happy-dom performs no layout: every element reports zero size and zero
+  // offsetTop, so the geometry the component reads has to be supplied by the
+  // test — same approach as the "initial scroll position" describe above.
+  const SCROLL_HEIGHT = 1000;
+  const CLIENT_HEIGHT = 300;
+  const DIVIDER_OFFSET_TOP = 500;
+  const ANCHOR_MARGIN_PX = 16;
+
+  let scrollTops: WeakMap<HTMLElement, number>;
+  let dividerOffsetTop: number;
+
+  /**
+   * Captures the ResizeObserver callback so a test can fire a "resize" by
+   * hand: happy-dom exposes the `ResizeObserver` constructor but never
+   * actually observes real layout changes (nothing in these tests has real
+   * layout at all — see the offsetTop/scrollHeight stubs below).
+   */
+  class StubResizeObserver {
+    static instances: StubResizeObserver[] = [];
+    disconnected = false;
+    private readonly callback: ResizeObserverCallback;
+
+    constructor(callback: ResizeObserverCallback) {
+      this.callback = callback;
+      StubResizeObserver.instances.push(this);
+    }
+
+    observe(): void {}
+    unobserve(): void {}
+    disconnect(): void {
+      this.disconnected = true;
+    }
+    /** Simulate the browser telling us `.messages-list` changed height. */
+    trigger(): void {
+      this.callback([], this as unknown as ResizeObserver);
+    }
+  }
+  const originalResizeObserver = globalThis.ResizeObserver;
+
+  const originalScrollTop = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollTop');
+  const originalScrollHeight = Object.getOwnPropertyDescriptor(
+    HTMLElement.prototype,
+    'scrollHeight'
+  );
+  const originalClientHeight = Object.getOwnPropertyDescriptor(
+    HTMLElement.prototype,
+    'clientHeight'
+  );
+  const originalOffsetTop = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetTop');
+
+  const MESSAGES = [
+    {
+      id: 'm1',
+      sender: 'them@example.com',
+      msg: 'already read',
+      createdAt: '2026-01-01T00:00:00Z',
+    },
+    { id: 'm2', sender: 'them@example.com', msg: 'unread one', createdAt: '2026-01-01T00:01:00Z' },
+    { id: 'm3', sender: 'them@example.com', msg: 'unread two', createdAt: '2026-01-01T00:02:00Z' },
+  ];
+
+  function messagesHistory(): Response {
+    return {
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ items: MESSAGES }),
+    } as unknown as Response;
+  }
+
+  /** Route apiFetch the way the real read-state (GET) / watermark (POST) /
+   *  history endpoints are actually split, so fetchOwnReadState sees a
+   *  distinct response from advanceReadWatermark's POST to the same path. */
+  function mockEndpoints(lastReadMessageId: string | null): void {
+    apiFetch.mockImplementation((url: string, init?: RequestInit) => {
+      const u = String(url);
+      if (u.endsWith('/read')) {
+        if (init?.method === 'POST') {
+          return Promise.resolve({ ok: true, status: 200 } as unknown as Response);
+        }
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve(lastReadMessageId ? { lastReadMessageId } : {}),
+        } as unknown as Response);
+      }
+      if (u.includes('/messages?')) {
+        return Promise.resolve(messagesHistory());
+      }
+      return Promise.resolve(emptyHistory());
+    });
+  }
+
+  function scrollContainer(el: ScionChatThread): HTMLElement {
+    const node = el.shadowRoot?.querySelector('.messages-scroll') as HTMLElement | null;
+    if (!node) throw new Error('scroll container not rendered');
+    return node;
+  }
+
+  function mountThread(): ScionChatThread {
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = CONVERSATION_KEY;
+    document.body.appendChild(el);
+    return el;
+  }
+
+  /**
+   * Installs a fake requestAnimationFrame/cancelAnimationFrame pair backed by
+   * a handle->callback map, mirroring a real browser: only callbacks that
+   * weren't canceled are left for a test to fire. `restore` puts the
+   * originals back and must be called (e.g. from a `finally`) once the test
+   * is done driving the fake queue.
+   */
+  function installRafStub(): {
+    callbacks: Map<number, FrameRequestCallback>;
+    cancelSpy: ReturnType<typeof vi.fn<(handle: number) => void>>;
+    restore: () => void;
+  } {
+    const callbacks = new Map<number, FrameRequestCallback>();
+    let nextHandle = 0;
+    const originalRaf = globalThis.requestAnimationFrame;
+    const originalCancelRaf = globalThis.cancelAnimationFrame;
+    const cancelSpy = vi.fn((handle: number) => {
+      callbacks.delete(handle);
+    });
+    globalThis.requestAnimationFrame = ((cb: FrameRequestCallback) => {
+      const handle = ++nextHandle;
+      callbacks.set(handle, cb);
+      return handle;
+    }) as typeof requestAnimationFrame;
+    globalThis.cancelAnimationFrame = cancelSpy as typeof cancelAnimationFrame;
+    return {
+      callbacks,
+      cancelSpy,
+      restore: () => {
+        globalThis.requestAnimationFrame = originalRaf;
+        globalThis.cancelAnimationFrame = originalCancelRaf;
+      },
+    };
+  }
+
+  beforeEach(() => {
+    apiFetch.mockReset();
+    scrollTops = new WeakMap();
+    dividerOffsetTop = DIVIDER_OFFSET_TOP;
+    window.location.hash = '';
+    StubResizeObserver.instances = [];
+
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get: () => SCROLL_HEIGHT,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      get: () => CLIENT_HEIGHT,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'offsetTop', {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.classList.contains('unread-divider') ? dividerOffsetTop : 0;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      get(this: HTMLElement) {
+        return scrollTops.get(this) ?? 0;
+      },
+      set(this: HTMLElement, value: number) {
+        scrollTops.set(this, value);
+      },
+    });
+  });
+
+  afterEach(() => {
+    for (const [prop, descriptor] of [
+      ['scrollTop', originalScrollTop],
+      ['scrollHeight', originalScrollHeight],
+      ['clientHeight', originalClientHeight],
+      ['offsetTop', originalOffsetTop],
+    ] as const) {
+      if (descriptor) {
+        Object.defineProperty(HTMLElement.prototype, prop, descriptor);
+      } else {
+        delete (HTMLElement.prototype as unknown as Record<string, unknown>)[prop];
+      }
+    }
+    globalThis.ResizeObserver = originalResizeObserver;
+    window.location.hash = '';
+    document.body.innerHTML = '';
+  });
+
+  it('scrolls the unread divider near the top of the viewport on open', async () => {
+    mockEndpoints('m1');
+    const el = mountThread();
+
+    await vi.waitFor(() => expect(el.shadowRoot?.querySelector('.unread-divider')).not.toBeNull());
+    const container = scrollContainer(el);
+    await vi.waitFor(() => expect(container.scrollTop).toBeGreaterThan(0));
+
+    // Anchored just above the divider, with a margin — not centered (the old
+    // behavior) and not at the bottom.
+    expect(container.scrollTop).toBe(DIVIDER_OFFSET_TOP - ANCHOR_MARGIN_PX);
+    expect(container.scrollTop).toBeLessThan(SCROLL_HEIGHT - CLIENT_HEIGHT);
+  });
+
+  it('scrolls to the bottom when there are no unread messages', async () => {
+    mockEndpoints(null);
+    const el = mountThread();
+
+    await vi.waitFor(() =>
+      expect(el.shadowRoot?.querySelectorAll('scion-chat-message').length).toBe(MESSAGES.length)
+    );
+    const container = scrollContainer(el);
+    await vi.waitFor(() => expect(container.scrollTop).toBe(SCROLL_HEIGHT));
+    expect(el.shadowRoot?.querySelector('.unread-divider')).toBeNull();
+  });
+
+  it('clamps to the bottom when the unread content is shorter than the viewport', async () => {
+    mockEndpoints('m1');
+    // The divider sits close enough to the tail that anchoring it to the top
+    // with a margin would overscroll past the container's max scroll.
+    dividerOffsetTop = SCROLL_HEIGHT - 10;
+    const el = mountThread();
+
+    await vi.waitFor(() => expect(el.shadowRoot?.querySelector('.unread-divider')).not.toBeNull());
+    const container = scrollContainer(el);
+    const maxScroll = SCROLL_HEIGHT - CLIENT_HEIGHT;
+    await vi.waitFor(() => expect(container.scrollTop).toBe(maxScroll));
+  });
+
+  it('a message deep link overrides the unread anchor', async () => {
+    mockEndpoints('m1');
+    window.location.hash = '#msg-m2';
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: scrollIntoView,
+    });
+
+    try {
+      const el = mountThread();
+
+      await vi.waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
+
+      // The unread-divider anchor write never happened: jumping straight to
+      // the linked message took precedence, and the container was never
+      // otherwise scrolled.
+      const container = scrollContainer(el);
+      expect(container.scrollTop).toBe(0);
+    } finally {
+      delete (HTMLElement.prototype as unknown as Record<string, unknown>).scrollIntoView;
+    }
+  });
+
+  it('does not re-anchor to the divider when a new SSE message arrives', async () => {
+    mockEndpoints('m1');
+    const el = mountThread();
+
+    await vi.waitFor(() => expect(el.shadowRoot?.querySelector('.unread-divider')).not.toBeNull());
+    const container = scrollContainer(el);
+    await vi.waitFor(() => expect(container.scrollTop).toBe(DIVIDER_OFFSET_TOP - ANCHOR_MARGIN_PX));
+    const anchoredTop = container.scrollTop;
+
+    emitChatMessage({
+      threadId: CONVERSATION_KEY,
+      id: 'm4',
+      msg: 'new incoming',
+      sender: 'them@example.com',
+      createdAt: '2026-01-01T00:03:00Z',
+    });
+    await vi.waitFor(() =>
+      expect(el.shadowRoot?.querySelectorAll('scion-chat-message').length).toBe(4)
+    );
+    await el.updateComplete;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Still parked at the unread anchor — a live message keeps the ordinary
+    // stick-to-bottom / "Jump to latest" behavior, which here means "don't
+    // move", since the anchor already left pinnedToBottom false.
+    expect(container.scrollTop).toBe(anchoredTop);
+    expect(el.shadowRoot?.querySelector('.jump-btn')).not.toBeNull();
+  });
+
+  /**
+   * R1 (review of nc-open-at-unread): `chat.ts:handleSearchNavigate` routes a
+   * same-thread search result straight to `scrollToMessageById`, with no
+   * `#msg-` hash, so `initialLoadV2`'s hash-vs-divider precedence never runs.
+   * Reproduced in Chromium: opening with unread, jumping to a loaded message
+   * at 400ms, then growing a row one frame later left the target at -1808px
+   * because the ResizeObserver's re-anchor overrode the search-jump.
+   */
+  it('deactivates the unread anchor on a same-thread search-jump, so a later resize does not override it (R1)', async () => {
+    mockEndpoints('m1');
+    globalThis.ResizeObserver = StubResizeObserver as unknown as typeof ResizeObserver;
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: scrollIntoView,
+    });
+
+    try {
+      const el = mountThread();
+      await vi.waitFor(() =>
+        expect(el.shadowRoot?.querySelector('.unread-divider')).not.toBeNull()
+      );
+      const container = scrollContainer(el);
+      await vi.waitFor(() =>
+        expect(container.scrollTop).toBe(DIVIDER_OFFSET_TOP - ANCHOR_MARGIN_PX)
+      );
+      const ro = StubResizeObserver.instances.at(-1);
+      expect(ro).toBeDefined();
+
+      // Search-jump to an already-loaded message, within the 2s anchor window.
+      await el.scrollToMessageById('m3');
+      expect(scrollIntoView).toHaveBeenCalled();
+
+      // scrollIntoView is stubbed above (no real layout in happy-dom), so
+      // simulate where the smooth scroll left the viewport.
+      container.scrollTop = 42;
+
+      // One frame later, a row above the divider resizes (image/attachment
+      // load), the way it did in the Chromium repro.
+      ro?.trigger();
+      await el.updateComplete;
+
+      // The anchor must not have re-applied and pulled the view back to the
+      // divider — that was the R1 bug (reproduced as -1808px in Chromium).
+      expect(container.scrollTop).toBe(42);
+    } finally {
+      delete (HTMLElement.prototype as unknown as Record<string, unknown>).scrollIntoView;
+    }
+  });
+
+  it('a reply-jump also deactivates the unread anchor', async () => {
+    mockEndpoints('m1');
+    globalThis.ResizeObserver = StubResizeObserver as unknown as typeof ResizeObserver;
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: scrollIntoView,
+    });
+
+    try {
+      const el = mountThread();
+      await vi.waitFor(() =>
+        expect(el.shadowRoot?.querySelector('.unread-divider')).not.toBeNull()
+      );
+      const container = scrollContainer(el);
+      await vi.waitFor(() =>
+        expect(container.scrollTop).toBe(DIVIDER_OFFSET_TOP - ANCHOR_MARGIN_PX)
+      );
+      const ro = StubResizeObserver.instances.at(-1);
+
+      // Reply-preview click routes through the same `scroll-to-message` event
+      // as the reply-jump path (see `handleScrollToMessage`).
+      const anyMessage = el.shadowRoot?.querySelector('scion-chat-message');
+      expect(anyMessage).not.toBeNull();
+      anyMessage?.dispatchEvent(
+        new CustomEvent('scroll-to-message', {
+          detail: { messageId: 'm3' },
+          bubbles: true,
+          composed: true,
+        })
+      );
+      await el.updateComplete;
+
+      container.scrollTop = 77;
+      ro?.trigger();
+
+      expect(container.scrollTop).toBe(77);
+    } finally {
+      delete (HTMLElement.prototype as unknown as Record<string, unknown>).scrollIntoView;
+    }
+  });
+
+  it('"Jump to latest" also deactivates the unread anchor, for symmetry', async () => {
+    mockEndpoints('m1');
+    globalThis.ResizeObserver = StubResizeObserver as unknown as typeof ResizeObserver;
+    const el = mountThread();
+
+    await vi.waitFor(() => expect(el.shadowRoot?.querySelector('.unread-divider')).not.toBeNull());
+    const container = scrollContainer(el);
+    await vi.waitFor(() => expect(container.scrollTop).toBe(DIVIDER_OFFSET_TOP - ANCHOR_MARGIN_PX));
+    const ro = StubResizeObserver.instances.at(-1);
+
+    const jump = el.shadowRoot?.querySelector('.jump-btn') as HTMLElement | null;
+    expect(jump).not.toBeNull();
+    jump?.click();
+    await el.updateComplete;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(container.scrollTop).toBe(SCROLL_HEIGHT);
+
+    // A later resize must not pull the view back to the divider.
+    container.scrollTop = 123;
+    ro?.trigger();
+    expect(container.scrollTop).toBe(123);
+  });
+
+  describe('rule-6 machinery (resize re-anchor, manual-scroll stop, teardown)', () => {
+    it('re-applies the anchor when content above the divider resizes', async () => {
+      mockEndpoints('m1');
+      globalThis.ResizeObserver = StubResizeObserver as unknown as typeof ResizeObserver;
+      const el = mountThread();
+
+      await vi.waitFor(() =>
+        expect(el.shadowRoot?.querySelector('.unread-divider')).not.toBeNull()
+      );
+      const container = scrollContainer(el);
+      await vi.waitFor(() =>
+        expect(container.scrollTop).toBe(DIVIDER_OFFSET_TOP - ANCHOR_MARGIN_PX)
+      );
+      const ro = StubResizeObserver.instances.at(-1);
+
+      // The divider moves down as content above it grows.
+      dividerOffsetTop = DIVIDER_OFFSET_TOP + 50;
+      ro?.trigger();
+
+      expect(container.scrollTop).toBe(DIVIDER_OFFSET_TOP + 50 - ANCHOR_MARGIN_PX);
+    });
+
+    it('stops re-anchoring once the user scrolls manually', async () => {
+      mockEndpoints('m1');
+      globalThis.ResizeObserver = StubResizeObserver as unknown as typeof ResizeObserver;
+      const el = mountThread();
+
+      await vi.waitFor(() =>
+        expect(el.shadowRoot?.querySelector('.unread-divider')).not.toBeNull()
+      );
+      const container = scrollContainer(el);
+      await vi.waitFor(() =>
+        expect(container.scrollTop).toBe(DIVIDER_OFFSET_TOP - ANCHOR_MARGIN_PX)
+      );
+      const ro = StubResizeObserver.instances.at(-1);
+
+      // A real user scroll: the browser sets scrollTop and fires 'scroll' —
+      // not through applyUnreadAnchor's own write.
+      container.scrollTop = 10;
+      container.dispatchEvent(new Event('scroll'));
+
+      dividerOffsetTop = DIVIDER_OFFSET_TOP + 50;
+      ro?.trigger();
+
+      // No re-apply: the manual scroll already deactivated the anchor.
+      expect(container.scrollTop).toBe(10);
+    });
+
+    /**
+     * O2 (review round 2 of nc-open-at-unread): `resetV2State` and
+     * `disconnectedCallback` also `clearTimeout` unrelated timers
+     * (`_initialWatermarkTimer`, etc.), so a bare
+     * `expect(clearTimeoutSpy).toHaveBeenCalled()` passed even with the
+     * anchor's own `clearTimeout(this._unreadAnchorTimer)` deleted from
+     * `deactivateUnreadAnchor` (review finding O2). Reading `_unreadAnchorTimer`
+     * directly captures the exact id the anchor's own `setTimeout` returned,
+     * so the assertion can require `clearTimeout` be called with that
+     * specific id rather than with any id at all.
+     */
+    it('tears down the resize observer and timer on thread switch', async () => {
+      mockEndpoints('m1');
+      globalThis.ResizeObserver = StubResizeObserver as unknown as typeof ResizeObserver;
+      const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+      const el = mountThread();
+
+      await vi.waitFor(() =>
+        expect(el.shadowRoot?.querySelector('.unread-divider')).not.toBeNull()
+      );
+      await vi.waitFor(() =>
+        expect(scrollContainer(el).scrollTop).toBe(DIVIDER_OFFSET_TOP - ANCHOR_MARGIN_PX)
+      );
+      const ro = StubResizeObserver.instances.at(-1);
+      expect(ro?.disconnected).toBe(false);
+      const anchorTimerId = (
+        el as unknown as { _unreadAnchorTimer: ReturnType<typeof setTimeout> | null }
+      )._unreadAnchorTimer;
+      expect(anchorTimerId).not.toBeNull();
+      clearTimeoutSpy.mockClear();
+
+      el.conversationKey = 'topic-2';
+      await el.updateComplete;
+
+      expect(ro?.disconnected).toBe(true);
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(anchorTimerId);
+      clearTimeoutSpy.mockRestore();
+    });
+
+    it('tears down the resize observer and timer on disconnect', async () => {
+      mockEndpoints('m1');
+      globalThis.ResizeObserver = StubResizeObserver as unknown as typeof ResizeObserver;
+      const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+      const el = mountThread();
+
+      await vi.waitFor(() =>
+        expect(el.shadowRoot?.querySelector('.unread-divider')).not.toBeNull()
+      );
+      await vi.waitFor(() =>
+        expect(scrollContainer(el).scrollTop).toBe(DIVIDER_OFFSET_TOP - ANCHOR_MARGIN_PX)
+      );
+      const ro = StubResizeObserver.instances.at(-1);
+      expect(ro?.disconnected).toBe(false);
+      const anchorTimerId = (
+        el as unknown as { _unreadAnchorTimer: ReturnType<typeof setTimeout> | null }
+      )._unreadAnchorTimer;
+      expect(anchorTimerId).not.toBeNull();
+      clearTimeoutSpy.mockClear();
+
+      el.remove();
+
+      expect(ro?.disconnected).toBe(true);
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(anchorTimerId);
+      clearTimeoutSpy.mockRestore();
+    });
+  });
+
+  /**
+   * O1 (review round 2 of nc-open-at-unread): the anchor state was a shared
+   * boolean, not a per-open token, so a deferred rAF callback (or a
+   * ResizeObserver notification) scheduled by a superseded open (thread A)
+   * could in principle apply to the thread now open (thread B) once B also
+   * activates its own anchor. Both callbacks now capture `fetchId` as a local
+   * `openToken` at schedule time, so a stale callback compares against a
+   * fixed value instead of the shared field the next open's activation would
+   * otherwise have overwritten.
+   *
+   * The round-2 version of this test asserted only that B's scrollTop was
+   * unchanged after firing A's stale callback — but `applyUnreadAnchor`
+   * always reads the *current* DOM, so an ungated stale call just recomputes
+   * and rewrites the value B's own callback had already written, making the
+   * assertion pass even with both token checks deleted (review finding O1).
+   * To make an ungated call produce an observably different result, this
+   * restores A's own divider geometry — a position distinguishable from B's —
+   * immediately before firing each stale callback, so an ungated
+   * `applyUnreadAnchor` would actually move the scroll position to A's
+   * target. It also checks the ResizeObserver side effects an ungated call
+   * would have (tearing down and replacing B's real observer), since B's
+   * `.messages-list` never resizes in this test to trigger the RO through the
+   * scroll-position check alone.
+   */
+  it('a stale deferred rAF and a stale ResizeObserver callback from a superseded open cannot apply to the thread now open', async () => {
+    mockEndpoints('m1');
+    globalThis.ResizeObserver = StubResizeObserver as unknown as typeof ResizeObserver;
+    const rafQueue: FrameRequestCallback[] = [];
+    const originalRaf = globalThis.requestAnimationFrame;
+    globalThis.requestAnimationFrame = ((cb: FrameRequestCallback) => {
+      rafQueue.push(cb);
+      return rafQueue.length;
+    }) as typeof requestAnimationFrame;
+
+    const A_DIVIDER_OFFSET = DIVIDER_OFFSET_TOP;
+    const B_DIVIDER_OFFSET = DIVIDER_OFFSET_TOP + 200;
+    const aAnchorTarget = A_DIVIDER_OFFSET - ANCHOR_MARGIN_PX;
+    const bAnchorTarget = B_DIVIDER_OFFSET - ANCHOR_MARGIN_PX;
+
+    try {
+      const el = mountThread();
+      await vi.waitFor(() =>
+        expect(el.shadowRoot?.querySelector('.unread-divider')).not.toBeNull()
+      );
+      // Thread A's activation rAF is queued, not yet run.
+      await vi.waitFor(() => expect(rafQueue.length).toBe(1));
+      const staleCallbackFromA = rafQueue.shift()!;
+
+      // Switch to thread B before A's rAF fires. B also has unread content,
+      // at a divider position distinguishable from A's.
+      dividerOffsetTop = B_DIVIDER_OFFSET;
+      el.conversationKey = 'topic-2';
+      await el.updateComplete;
+      await vi.waitFor(() =>
+        expect(el.shadowRoot?.querySelector('.unread-divider')).not.toBeNull()
+      );
+      await vi.waitFor(() => expect(rafQueue.length).toBe(1));
+      const callbackFromB = rafQueue.shift()!;
+
+      // B's own activation applies first, as it would in practice.
+      callbackFromB(0);
+      const container = scrollContainer(el);
+      expect(container.scrollTop).toBe(bAnchorTarget);
+      const roFromB = StubResizeObserver.instances.at(-1);
+      expect(roFromB).toBeDefined();
+      expect(roFromB?.disconnected).toBe(false);
+      const instanceCountAfterB = StubResizeObserver.instances.length;
+
+      // Restore A's own divider geometry right before firing the stale rAF
+      // callback the browser still had queued for A: if the token didn't
+      // gate `applyUnreadAnchor`'s current-DOM read, this would move B's
+      // scroll position to A's target — a value distinguishable from B's —
+      // and would also disconnect B's real ResizeObserver and replace it
+      // with one bound to A's stale token.
+      dividerOffsetTop = A_DIVIDER_OFFSET;
+      staleCallbackFromA(0);
+      expect(container.scrollTop).toBe(bAnchorTarget);
+      expect(container.scrollTop).not.toBe(aAnchorTarget);
+      expect(roFromB?.disconnected).toBe(false);
+      expect(StubResizeObserver.instances.length).toBe(instanceCountAfterB);
+
+      // A genuine resize for B still re-anchors correctly afterwards — the
+      // token checks didn't leave B's own machinery broken.
+      dividerOffsetTop = B_DIVIDER_OFFSET - 30;
+      roFromB?.trigger();
+      expect(container.scrollTop).toBe(B_DIVIDER_OFFSET - 30 - ANCHOR_MARGIN_PX);
+    } finally {
+      globalThis.requestAnimationFrame = originalRaf;
+    }
+  });
+
+  /**
+   * Nit (review of nc-open-at-unread): a genuine user scroll landing in the
+   * same frame as `applyUnreadAnchor`'s own scrollTop write was swallowed by
+   * the `_applyingUnreadAnchor` guard, since the guard only clears on the
+   * next rAF. Comparing the observed scrollTop against the value the anchor
+   * itself just wrote recognizes this case too.
+   */
+  it('recognizes a genuine user scroll landing in the same frame as the anchor write', async () => {
+    mockEndpoints('m1');
+    globalThis.ResizeObserver = StubResizeObserver as unknown as typeof ResizeObserver;
+    const el = mountThread();
+
+    await vi.waitFor(() => expect(el.shadowRoot?.querySelector('.unread-divider')).not.toBeNull());
+    const container = scrollContainer(el);
+    await vi.waitFor(() => expect(container.scrollTop).toBe(DIVIDER_OFFSET_TOP - ANCHOR_MARGIN_PX));
+    const ro = StubResizeObserver.instances.at(-1);
+
+    // Simulate a real user scroll landing in the same frame as a re-apply:
+    // the write itself sets `_applyingUnreadAnchor`, but the scrollTop the
+    // 'scroll' event reports disagrees with what was just written.
+    dividerOffsetTop = DIVIDER_OFFSET_TOP + 50;
+    ro?.trigger();
+    container.scrollTop = 5;
+    container.dispatchEvent(new Event('scroll'));
+
+    // The anchor must now be inactive: a further resize does not re-apply.
+    dividerOffsetTop = DIVIDER_OFFSET_TOP + 100;
+    ro?.trigger();
+    expect(container.scrollTop).toBe(5);
+  });
+
+  /**
+   * Gemini review of PR #1932 (round 4, comment 2): `applyUnreadAnchor`
+   * scheduled a guard-clearing rAF on every call without canceling a
+   * previous one still pending. Two rapid layout updates (e.g. ResizeObserver
+   * firing twice in one frame window) could then leave an earlier rAF alive
+   * to clear `_applyingUnreadAnchor` while a later write's own 'scroll'
+   * event was still pending — misreading that programmatic scroll as the
+   * user taking over and wrongly deactivating the anchor.
+   */
+  it('two rapid anchor applications: the earlier rAF does not clear the guard early, so a programmatic scroll from the second is not treated as a user scroll', async () => {
+    mockEndpoints('m1');
+    globalThis.ResizeObserver = StubResizeObserver as unknown as typeof ResizeObserver;
+
+    const { callbacks: rafCallbacks, restore } = installRafStub();
+
+    try {
+      const el = mountThread();
+      await vi.waitFor(() =>
+        expect(el.shadowRoot?.querySelector('.unread-divider')).not.toBeNull()
+      );
+      // Settle the initial open (the deferred initial-anchor rAF, then its
+      // own guard rAF) before driving the rapid resizes under test.
+      while (rafCallbacks.size) {
+        const [handle, cb] = [...rafCallbacks.entries()][0];
+        rafCallbacks.delete(handle);
+        cb(0);
+      }
+      const container = scrollContainer(el);
+      expect(container.scrollTop).toBe(DIVIDER_OFFSET_TOP - ANCHOR_MARGIN_PX);
+      const ro = StubResizeObserver.instances.at(-1);
+      expect(ro).toBeDefined();
+
+      // Write A: schedules a guard-clearing rAF, not yet fired.
+      dividerOffsetTop = DIVIDER_OFFSET_TOP + 10;
+      ro?.trigger();
+      expect(rafCallbacks.size).toBe(1);
+      const [handleA] = [...rafCallbacks.keys()];
+
+      // Write B lands before write A's guard rAF has fired — ResizeObserver
+      // firing twice in one frame window.
+      dividerOffsetTop = DIVIDER_OFFSET_TOP + 20;
+      ro?.trigger();
+      const writtenB = container.scrollTop;
+      expect(writtenB).toBe(DIVIDER_OFFSET_TOP + 20 - ANCHOR_MARGIN_PX);
+
+      // Exactly one guard rAF must survive — write A's must have been
+      // canceled, not left pending alongside write B's.
+      expect(rafCallbacks.size).toBe(1);
+      const [handleB] = [...rafCallbacks.keys()];
+      expect(handleB).not.toBe(handleA);
+
+      // Simulate the browser: it would only fire what wasn't canceled. If A's
+      // rAF is still (wrongly) in the map, firing it here reproduces exactly
+      // the race Gemini flagged.
+      if (rafCallbacks.has(handleA)) {
+        rafCallbacks.get(handleA)!(0);
+        rafCallbacks.delete(handleA);
+      }
+
+      // The 'scroll' event resulting from write B lands now, before write
+      // B's own guard rAF has fired.
+      container.dispatchEvent(new Event('scroll'));
+
+      // If A's stale rAF had wrongly cleared the guard, this would have been
+      // misread as a user scroll and deactivated the anchor. Confirm it is
+      // still active: a further resize still re-anchors.
+      dividerOffsetTop = DIVIDER_OFFSET_TOP + 30;
+      ro?.trigger();
+      expect(container.scrollTop).toBe(DIVIDER_OFFSET_TOP + 30 - ANCHOR_MARGIN_PX);
+    } finally {
+      restore();
+    }
+  });
+
+  /**
+   * Gemini review of PR #1932 (round 4, comment 3): `deactivateUnreadAnchor`
+   * tore down the resize observer and timer but left both the deferred
+   * initial-anchor rAF (`scrollToUnreadDivider`) and the guard-clearing rAF
+   * (`applyUnreadAnchor`) pending, and never reset `_applyingUnreadAnchor`.
+   * A still-pending rAF could fire later against a torn-down or superseded
+   * anchor, and a stuck `true` guard would leak into the next open.
+   */
+  it('deactivateUnreadAnchor cancels pending rAFs and resets the guard: no callback runs afterwards, and the guard is false', async () => {
+    mockEndpoints('m1');
+    globalThis.ResizeObserver = StubResizeObserver as unknown as typeof ResizeObserver;
+
+    const { callbacks: rafCallbacks, cancelSpy, restore } = installRafStub();
+
+    type Internal = {
+      _applyingUnreadAnchor: boolean;
+      applyUnreadAnchor(): void;
+      deactivateUnreadAnchor(): void;
+    };
+
+    try {
+      const el = mountThread();
+      await vi.waitFor(() =>
+        expect(el.shadowRoot?.querySelector('.unread-divider')).not.toBeNull()
+      );
+      const internal = el as unknown as Internal;
+
+      // The deferred initial-anchor rAF is pending — deliberately never
+      // allowed to fire.
+      expect(rafCallbacks.size).toBe(1);
+      const [initialRafHandle] = [...rafCallbacks.keys()];
+
+      // Tearing down the anchor before that first frame lands must cancel
+      // it, not let it fire later against the torn-down anchor.
+      internal.deactivateUnreadAnchor();
+
+      expect(cancelSpy).toHaveBeenCalledWith(initialRafHandle);
+      expect(rafCallbacks.has(initialRafHandle)).toBe(false);
+
+      cancelSpy.mockClear();
+
+      // Now exercise the guard-clearing rAF directly: a fresh programmatic
+      // write leaves the guard true and a rAF pending to clear it.
+      internal.applyUnreadAnchor();
+      expect(internal._applyingUnreadAnchor).toBe(true);
+      expect(rafCallbacks.size).toBe(1);
+      const [guardRafHandle] = [...rafCallbacks.keys()];
+
+      // Deactivating again while that guard rAF is still pending.
+      internal.deactivateUnreadAnchor();
+
+      expect(cancelSpy).toHaveBeenCalledWith(guardRafHandle);
+      // Nothing is left pending to run afterwards.
+      expect(rafCallbacks.size).toBe(0);
+      // Reset immediately — not left waiting on the now-canceled rAF.
+      expect(internal._applyingUnreadAnchor).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+});
+
 describe('scion-chat-thread search result navigation', () => {
   const TARGET = {
     id: 'target-message',
