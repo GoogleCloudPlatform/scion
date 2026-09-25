@@ -79,18 +79,25 @@ type Resource struct {
 	Ancestry   []string          // Ordered ancestor chain [root, ..., parent] for transitive access
 
 	// ScopeKind is the resource's own scope classification for resource
-	// types whose records are themselves partitioned by scope (currently
-	// only "skill": store.SkillScopeGlobal/Core/Project/User). It is
-	// distinct from ParentType/ParentID, which describe project containment
-	// for the kernel's project-scoped binding check. ScopeKind instead lets
-	// a resource-type-specific check (see filterHubWideSkillGrants) tell a
+	// types whose records are themselves partitioned by scope: "skill"
+	// (store.SkillScopeGlobal/Core/Project/User), "template"
+	// (store.TemplateScopeGlobal/Project/User), and "harness_config"
+	// (store.HarnessConfigScopeGlobal/Project/User). It is distinct from
+	// ParentType/ParentID, which describe project containment for the
+	// kernel's project-scoped binding check. ScopeKind instead lets a
+	// resource-type-specific check (see filterHubWideSkillGrants,
+	// filterHubWideTemplateGrants, filterHubWideHarnessConfigGrants) tell a
 	// genuinely hub-scoped record apart from a user- or project-scoped one
 	// that merely happens to have no ParentType set. Left empty for resource
-	// types that don't need it. For "skill" resources specifically, build
-	// this through skillResource or skillScopeResource (pkg/hub/skill_handlers.go)
-	// rather than a hand-built literal: filterHubWideSkillGrants fails
-	// closed on an empty or unrecognized ScopeKind (ptone/scion#1901 finding
-	// F4), so only those two constructors are guaranteed to set it correctly.
+	// types that don't need it. For "skill", "template", and
+	// "harness_config" resources specifically, build this through the
+	// resource's canonical constructor (skillResource/skillScopeResource,
+	// templateResource/templateScopeResource,
+	// harnessConfigResource/harnessConfigScopeResource) rather than a
+	// hand-built literal: each filter fails closed on an empty or
+	// unrecognized ScopeKind (ptone/scion#1901 finding F4; ptone/scion#1916
+	// applies the same rule to template and harness_config), so only those
+	// constructors are guaranteed to set it correctly.
 	ScopeKind string
 }
 
@@ -426,6 +433,21 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 	// project-scoped skills; see filterHubWideSkillGrants.
 	if request.Resource.Type == "skill" {
 		candidates = filterHubWideSkillGrants(candidates, roleDefs, request.Resource.ScopeKind)
+	}
+
+	// ── Step 5d/5e: Template and harness-config scope containment
+	// (ptone/scion#1916) ────────────────────────────────────────────────
+	// Same shape as step 5c: the curated hub-member/hub-viewer roles also
+	// carry template.read/list and harness_config.read/list at system
+	// scope, purely so every hub member can browse the hub-wide (global)
+	// catalog. That grant must not leak into user- or project-scoped
+	// records; see filterHubWideTemplateGrants and
+	// filterHubWideHarnessConfigGrants.
+	if request.Resource.Type == "template" {
+		candidates = filterHubWideTemplateGrants(candidates, roleDefs, request.Resource.ScopeKind)
+	}
+	if request.Resource.Type == "harness_config" {
+		candidates = filterHubWideHarnessConfigGrants(candidates, roleDefs, request.Resource.ScopeKind)
 	}
 
 	// ── Step 6: Build resource context ────────────────────────────────

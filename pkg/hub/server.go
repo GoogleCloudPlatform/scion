@@ -3753,6 +3753,15 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		if payload.Template != "" {
 			var tmplErr error
 			tmpl, tmplErr = s.resolveTemplate(ctx, payload.Template, evt.ProjectID)
+			// SECURITY-GATE (ptone/scion#1916): same gate as the agent-create
+			// HTTP path in handlers_agents_core.go — a resolved candidate is
+			// not yet known to be one the schedule's creator may read.
+			// tmplErr is left untouched so the degradation rule below (which
+			// keys off tmplErr, not tmpl) treats a denial exactly like a
+			// definitive not-found.
+			if tmplErr == nil && tmpl != nil && !s.authorizeResolvedTemplate(ctx, creatorIdentity, tmpl) {
+				tmpl = nil
+			}
 			// DEGRADATION RULE (design §3.2.2), the scheduler-path equivalent of
 			// the create path's. A resolve failure never fails a scheduled
 			// dispatch on this path, so there is no 404 to suppress — but a name

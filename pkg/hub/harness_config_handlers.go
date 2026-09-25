@@ -260,12 +260,11 @@ func (s *Server) createHarnessConfig(w http.ResponseWriter, r *http.Request) {
 	// SECURITY-GATE: require harness_config.create permission before any mutation.
 	// Scope-aware: project-scoped requests authorize against the project parent
 	// so that project-level role bindings (owner/admin/member) grant access.
-	res := Resource{Type: "harness_config"}
-	if req.ScopeID != "" {
-		res.ParentType = "project"
-		res.ParentID = req.ScopeID
+	createScope := req.Scope
+	if createScope == "" {
+		createScope = store.HarnessConfigScopeGlobal
 	}
-	if !s.authorize(w, r, res, ActionCreate) {
+	if !s.authorize(w, r, harnessConfigScopeResource(createScope, req.ScopeID), ActionCreate) {
 		return
 	}
 
@@ -421,9 +420,18 @@ func harnessConfigRouteAction(action, method string) Action {
 // read harness configs during agent creation over HMAC auth; they are not
 // user principals, so the authorization kernel cannot evaluate them. They are
 // admitted for reads only, and the HMAC credential is the trust basis.
+//
+// A read denial reads as 404 (ptone/scion#1916), matching the skill fix: a
+// harness config a caller may not read (get, download, validate, files,
+// image-status, check-image — every route action harnessConfigRouteAction
+// maps to ActionRead) must not be distinguishable from one that does not
+// exist. Every non-read action keeps the existing 403 behavior.
 func (s *Server) authorizeHarnessConfigRoute(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig, action Action) bool {
 	if action == ActionRead && GetBrokerIdentityFromContext(r.Context()) != nil {
 		return true
+	}
+	if action == ActionRead {
+		return s.authorizeRead(w, r, harnessConfigResource(hc), "HarnessConfig")
 	}
 	return s.authorize(w, r, harnessConfigResource(hc), action)
 }
@@ -546,7 +554,7 @@ func (s *Server) deleteHarnessConfig(w http.ResponseWriter, r *http.Request, exi
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 			return
 		}
-		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{Type: "harness_config"}, ActionDelete)
+		decision := s.authzService.CheckAccess(ctx, userIdent, harnessConfigScopeResource(store.HarnessConfigScopeGlobal, ""), ActionDelete)
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to delete global resources", nil)
 			return
@@ -562,9 +570,8 @@ func (s *Server) deleteHarnessConfig(w http.ResponseWriter, r *http.Request, exi
 				return
 			}
 		} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-				Type: "harness_config", ParentType: "project", ParentID: existing.ScopeID,
-			}, ActionDelete)
+			decision := s.authzService.CheckAccess(ctx, userIdent,
+				harnessConfigScopeResource(store.HarnessConfigScopeProject, existing.ScopeID), ActionDelete)
 			if !decision.Allowed {
 				writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to delete resources in this project", nil)
 				return
@@ -903,7 +910,7 @@ func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 			return
 		}
-		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{Type: "harness_config"}, ActionCreate)
+		decision := s.authzService.CheckAccess(ctx, userIdent, harnessConfigScopeResource(store.HarnessConfigScopeGlobal, ""), ActionCreate)
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create global resources", nil)
 			return
@@ -919,9 +926,8 @@ func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request
 				return
 			}
 		} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-				Type: "harness_config", ParentType: "project", ParentID: scopeID,
-			}, ActionCreate)
+			decision := s.authzService.CheckAccess(ctx, userIdent,
+				harnessConfigScopeResource(store.HarnessConfigScopeProject, scopeID), ActionCreate)
 			if !decision.Allowed {
 				writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create resources in this project", nil)
 				return
@@ -1032,7 +1038,7 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 			return
 		}
-		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{Type: "harness_config"}, ActionCreate)
+		decision := s.authzService.CheckAccess(ctx, userIdent, harnessConfigScopeResource(store.HarnessConfigScopeGlobal, ""), ActionCreate)
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to reimport global resources", nil)
 			return
@@ -1406,4 +1412,26 @@ func (s *Server) handleHarnessConfigPullImage(w http.ResponseWriter, r *http.Req
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "pulled", "image": pullImage})
+}
+
+// harnessConfigScopeResource builds an ad hoc "harness_config" Resource for
+// authorization checks that have a scope to evaluate but no concrete
+// store.HarnessConfig record (e.g. authorizing a create, clone destination,
+// or reimport before/without a resolved record in hand). scope should be one
+// of the store.HarnessConfigScope* constants; scopeID is the owning project
+// ID and is ignored outside project scope.
+//
+// ptone/scion#1916: every ad hoc "harness_config" Resource literal must set
+// ScopeKind through this constructor (or harnessConfigResource, for a real
+// record), never by hand — filterHubWideHarnessConfigGrants only narrows the
+// curated hub-member/hub-viewer grant when ScopeKind is populated, so a
+// hand-built literal that forgets it would fall through unfiltered. See
+// TestHarnessConfigResourceLiterals_AllUseCanonicalConstructor.
+func harnessConfigScopeResource(scope, scopeID string) Resource {
+	r := Resource{Type: "harness_config", ScopeKind: scope}
+	if scope == store.HarnessConfigScopeProject && scopeID != "" {
+		r.ParentType = "project"
+		r.ParentID = scopeID
+	}
+	return r
 }

@@ -1084,6 +1084,14 @@ func (s *Server) createAgentInProject(
 	var resolvedTemplate *store.Template
 	if req.Template != "" {
 		resolvedTemplate, err = s.resolveTemplate(ctx, req.Template, projectID)
+		// SECURITY-GATE (ptone/scion#1916): a resolved candidate is not yet
+		// known to be one the caller may read — resolveTemplate's by-ID arm
+		// looks across every scope. Fold a denial into the same "not found"
+		// branch immediately below so a template that exists but is unreadable
+		// degrades exactly like one that does not exist.
+		if err == nil && resolvedTemplate != nil && !s.authorizeResolvedTemplate(ctx, GetIdentityFromContext(ctx), resolvedTemplate) {
+			resolvedTemplate = nil
+		}
 		switch {
 		case err != nil && err != store.ErrNotFound:
 			// Always hard-fails, hub-default provenance included. See above.

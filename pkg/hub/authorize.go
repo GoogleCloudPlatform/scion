@@ -127,6 +127,34 @@ func (s *Server) authorizeWithMessage(w http.ResponseWriter, r *http.Request, re
 	return true
 }
 
+// authorizeRead is authorize's read-surface counterpart. On denial it writes
+// a generic 404 (via NotFound) instead of a 403, so a resource the caller may
+// not read is indistinguishable on the wire from one that does not exist —
+// mirroring the skill fix's getSkill/writeSkillLookupError pattern
+// (ptone/scion#1901) for template and harness-config read surfaces
+// (ptone/scion#1916: get, download, validate, and file read/list).
+//
+// Only genuinely read-only checks should use this. Surfaces that also gate a
+// mutation (create/update/delete) must keep using authorize/authorizeMsg: a
+// write denial should read as a permission problem, not "missing", and
+// authorizeRead always evaluates ActionRead regardless of what actually
+// happens next, so it must never guard a non-read operation.
+func (s *Server) authorizeRead(w http.ResponseWriter, r *http.Request, resource Resource, notFoundLabel string) bool {
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return false
+	}
+	decision := s.authzService.CheckAccess(ctx, identity, resource, ActionRead)
+	if !decision.Allowed {
+		logAuthzDenial(r, identity, resource, ActionRead, decision.Reason)
+		NotFound(w, notFoundLabel)
+		return false
+	}
+	return true
+}
+
 // authorizeAgentCreate gates agent creation for every caller kind. Exhaustive
 // and fail-closed. Replaces the caller-kind branch in createAgent, which had no
 // else clause, and supplies the gate createProjectAgent never had.

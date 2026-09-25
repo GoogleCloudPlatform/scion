@@ -62,6 +62,43 @@ func (s *Server) resolveTemplate(ctx context.Context, templateRef, projectID str
 	return template, nil
 }
 
+// authorizeResolvedTemplate reports whether identity may read the resolved
+// template candidate before it is used to populate a new agent's applied
+// config. resolveTemplate's first lookup arm resolves by ID across every
+// scope, so a candidate it returns is not yet known to be one the caller may
+// see — this establishes that, mirroring the read-authorization gate every
+// other template read surface applies via templateResource (ptone/scion#1916).
+//
+// A nil template needs no check. A nil identity means the caller is a
+// background/system context (e.g. ValidateStartupDefaults) that never
+// surfaces the resolved template to any principal, so this does not apply.
+// A global-scope template is the hub-wide catalog — no confidentiality
+// boundary applies, the same rule filterHubWideTemplateGrants encodes for
+// the curated hub-member/hub-viewer grant (ptone/scion#1901/#1916). It is
+// checked directly here, rather than relying on that grant, because it must
+// also cover agent and broker principals, which never hold a
+// hub-member-equivalent grant of their own but must still be able to resolve
+// the hub-wide default template (e.g. a delegate agent's scheduled dispatch
+// applying the hub's DefaultTemplate setting). A broker identity is exempt
+// for the same reason getTemplateV2 and handleTemplateDownload exempt it:
+// brokers read templates during agent creation (hydration) over HMAC auth,
+// not as user principals.
+func (s *Server) authorizeResolvedTemplate(ctx context.Context, identity Identity, tmpl *store.Template) bool {
+	if tmpl == nil || identity == nil {
+		return true
+	}
+	if tmpl.Scope == store.TemplateScopeGlobal {
+		return true
+	}
+	if GetBrokerIdentityFromContext(ctx) != nil {
+		return true
+	}
+	if s.authzService == nil {
+		return false
+	}
+	return s.authzService.CheckAccess(ctx, identity, templateResource(tmpl), ActionRead).Allowed
+}
+
 // getHarnessConfigFromTemplate returns the harness config name from a resolved template,
 // or the fallback value if no template was resolved. Prefers the template's
 // DefaultHarnessConfig (e.g. "claude-web") over the generic Harness type (e.g. "claude").

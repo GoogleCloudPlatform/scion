@@ -275,12 +275,11 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 	// SECURITY-GATE: require template.create permission before any mutation.
 	// Scope-aware: project-scoped requests authorize against the project parent
 	// so that project-level role bindings (owner/admin/member) grant access.
-	res := Resource{Type: "template"}
-	if scopeID != "" {
-		res.ParentType = "project"
-		res.ParentID = scopeID
+	createScope := req.Scope
+	if createScope == "" {
+		createScope = store.TemplateScopeGlobal
 	}
-	if !s.authorize(w, r, res, ActionCreate) {
+	if !s.authorize(w, r, templateScopeResource(createScope, scopeID), ActionCreate) {
 		return
 	}
 
@@ -464,7 +463,10 @@ func (s *Server) getTemplateV2(w http.ResponseWriter, r *http.Request, id string
 		// SECURITY-GATE: authorize read access to this specific template.
 		// The list endpoint filters via AuthorizeReadBatch; without this check
 		// a caller could bypass list filtering by addressing the template by ID.
-		if !s.authorize(w, r, templateResource(template), ActionRead) {
+		// A denial reads as 404 (ptone/scion#1916), matching the skill fix: a
+		// template a caller may not read must not be distinguishable from one
+		// that does not exist.
+		if !s.authorizeRead(w, r, templateResource(template), "Template") {
 			return
 		}
 	}
@@ -603,7 +605,7 @@ func (s *Server) deleteTemplateV2(w http.ResponseWriter, r *http.Request, id str
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 			return
 		}
-		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{Type: "template"}, ActionDelete)
+		decision := s.authzService.CheckAccess(ctx, userIdent, templateScopeResource(store.TemplateScopeGlobal, ""), ActionDelete)
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to delete global resources", nil)
 			return
@@ -619,9 +621,8 @@ func (s *Server) deleteTemplateV2(w http.ResponseWriter, r *http.Request, id str
 				return
 			}
 		} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-				Type: "template", ParentType: "project", ParentID: existing.ScopeID,
-			}, ActionDelete)
+			decision := s.authzService.CheckAccess(ctx, userIdent,
+				templateScopeResource(store.TemplateScopeProject, existing.ScopeID), ActionDelete)
 			if !decision.Allowed {
 				writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to delete resources in this project", nil)
 				return
@@ -806,8 +807,9 @@ func (s *Server) handleTemplateDownload(w http.ResponseWriter, r *http.Request, 
 	// Allow read access for brokers; the HMAC credential is the trust basis.
 	// This mirrors the carve-out in getTemplateV2.
 	if GetBrokerIdentityFromContext(ctx) == nil {
-		// SECURITY-GATE: authorize read access to this template's files.
-		if !s.authorize(w, r, templateResource(template), ActionRead) {
+		// SECURITY-GATE: authorize read access to this template's files. A
+		// denial reads as 404 (ptone/scion#1916), matching getTemplateV2.
+		if !s.authorizeRead(w, r, templateResource(template), "Template") {
 			return
 		}
 	}
@@ -863,8 +865,9 @@ func (s *Server) handleTemplateValidate(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// SECURITY-GATE: authorize read access to this template's validation report.
-	if !s.authorize(w, r, templateResource(template), ActionRead) {
+	// SECURITY-GATE: authorize read access to this template's validation
+	// report. A denial reads as 404 (ptone/scion#1916), matching getTemplateV2.
+	if !s.authorizeRead(w, r, templateResource(template), "Template") {
 		return
 	}
 
@@ -891,6 +894,16 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 	source, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// SECURITY-GATE: authorize read access to the source template before its
+	// content is copied into the clone. The destination-scope check below
+	// only authorizes ActionCreate at the destination; without this gate
+	// that check alone would let any caller who may create a template
+	// somewhere copy the contents of a source template they cannot
+	// otherwise read.
+	if !s.authorize(w, r, templateResource(source), ActionRead) {
 		return
 	}
 
@@ -923,7 +936,7 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 			return
 		}
-		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{Type: "template"}, ActionCreate)
+		decision := s.authzService.CheckAccess(ctx, userIdent, templateScopeResource(store.TemplateScopeGlobal, ""), ActionCreate)
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create global resources", nil)
 			return
@@ -939,9 +952,8 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 				return
 			}
 		} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-				Type: "template", ParentType: "project", ParentID: scopeID,
-			}, ActionCreate)
+			decision := s.authzService.CheckAccess(ctx, userIdent,
+				templateScopeResource(store.TemplateScopeProject, scopeID), ActionCreate)
 			if !decision.Allowed {
 				writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create resources in this project", nil)
 				return
@@ -1033,6 +1045,28 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 	}
 
 	writeJSON(w, http.StatusCreated, clone)
+}
+
+// templateScopeResource builds an ad hoc "template" Resource for
+// authorization checks that have a scope to evaluate but no concrete
+// store.Template record (e.g. authorizing a create or clone destination
+// before the new record exists). scope should be one of the
+// store.TemplateScope* constants; scopeID is the owning project ID and is
+// ignored outside project scope.
+//
+// ptone/scion#1916: every ad hoc "template" Resource literal must set
+// ScopeKind through this constructor (or templateResource, for a real
+// record), never by hand — filterHubWideTemplateGrants only narrows the
+// curated hub-member/hub-viewer grant when ScopeKind is populated, so a
+// hand-built literal that forgets it would fall through unfiltered. See
+// TestTemplateResourceLiterals_AllUseCanonicalConstructor.
+func templateScopeResource(scope, scopeID string) Resource {
+	r := Resource{Type: "template", ScopeKind: scope}
+	if scope == store.TemplateScopeProject && scopeID != "" {
+		r.ParentType = "project"
+		r.ParentID = scopeID
+	}
+	return r
 }
 
 // computeContentHash computes the aggregate content hash for a set of resource
