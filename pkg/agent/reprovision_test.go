@@ -36,9 +36,7 @@ func reprovisionSetup(t *testing.T) (scionDir, globalScionDir string) {
 	t.Helper()
 	t.Setenv("SCION_HOST_UID", "")
 	tmpDir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	_ = os.Chdir(tmpDir)
-	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	t.Chdir(tmpDir)
 	t.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "project")

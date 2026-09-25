@@ -2020,6 +2020,61 @@ func TestSweepStaleReincarnations_MarksNonTerminalFailed(t *testing.T) {
 	assert.Equal(t, "hub restarted during reincarnation", list[0].Error)
 }
 
+// TestSweepStaleReincarnations_RestoresPreviousEnvIntoAgentRow pins that a
+// failed reincarnation's rollback puts the previous env back into the agent
+// row. The sweep restores from the PreviousAppliedConfig it reads back from
+// the store, so this also covers the snapshot serialization: an env-style map
+// the snapshot drops would be missing from the restored row.
+func TestSweepStaleReincarnations_RestoresPreviousEnvIntoAgentRow(t *testing.T) {
+	ctx := context.Background()
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	withEnv := func(prefix string) *api.ScionConfig {
+		return &api.ScionConfig{
+			Env: map[string]string{prefix + "_INLINE_VAR": prefix + "-inline"},
+			Telemetry: &api.TelemetryConfig{Cloud: &api.TelemetryCloudConfig{
+				Endpoint: "https://otel.example.com",
+				Headers:  map[string]string{"x-" + prefix: prefix + "-header"},
+			}},
+		}
+	}
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.AppliedConfig.Env = map[string]string{"EXPLICIT_VAR": "explicit-value"}
+		a.AppliedConfig.InlineConfig = withEnv("APPLIED")
+		a.AppliedConfig.CreateInputs.InlineConfig = withEnv("CREATE")
+	})
+	previous, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+
+	// The record is written the way the handler writes it: the previous
+	// snapshot is the agent's applied config as stored before migration.
+	require.NoError(t, s.CreateAgentReincarnation(ctx, &store.AgentReincarnation{
+		AgentID:               agent.ID,
+		FromGeneration:        1,
+		ToGeneration:          2,
+		State:                 store.AgentReincarnationStateProvisioning,
+		PreviousAppliedConfig: previous.AppliedConfig,
+	}))
+
+	// Mid-migration the row holds the fresh config, with no env of its own.
+	agent.ReincarnationState = store.ReincarnationStateProvisioning
+	agent.Phase = "provisioning"
+	agent.AppliedConfig = &store.AgentAppliedConfig{Image: "fresh-image:v2"}
+	require.NoError(t, s.UpdateAgent(ctx, agent))
+
+	n, err := srv.sweepStaleReincarnationsOlderThan(ctx, time.Now().Add(time.Hour))
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+
+	after, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ReincarnationStateFailed, after.ReincarnationState)
+	require.NotNil(t, after.AppliedConfig)
+	assert.Equal(t, previous.AppliedConfig, after.AppliedConfig,
+		"rollback must restore the previous applied config exactly, env maps included")
+	assert.Equal(t, map[string]string{"EXPLICIT_VAR": "explicit-value"}, after.AppliedConfig.Env)
+}
+
 // TestSweepStaleReincarnations_IgnoresTerminalRecords is the companion test:
 // a completed or already-failed record must not be touched, and an agent
 // with no in-flight reincarnation must not be counted or modified.

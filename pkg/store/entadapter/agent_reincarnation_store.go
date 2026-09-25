@@ -86,16 +86,14 @@ func unmarshalAppliedConfigSnapshot(raw string) (*store.AgentAppliedConfig, erro
 }
 
 // marshalAppliedConfigSnapshot serializes an AgentAppliedConfig snapshot to
-// JSON text, returning "" for nil so the column is left empty.
+// JSON text, returning "" for nil so the column is left empty. It delegates to
+// marshalAppliedConfig so snapshots and the agents row share one serialization
+// path: a rollback must restore exactly what the row held.
 func marshalAppliedConfigSnapshot(cfg *store.AgentAppliedConfig) string {
 	if cfg == nil {
 		return ""
 	}
-	data, err := json.Marshal(cfg)
-	if err != nil {
-		return ""
-	}
-	return string(data)
+	return marshalAppliedConfig(cfg)
 }
 
 // CreateAgentReincarnation creates a new reincarnation record.
