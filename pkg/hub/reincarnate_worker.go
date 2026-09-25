@@ -747,7 +747,20 @@ func (s *Server) buildReincarnationPreamble(agent *store.Agent, toGeneration int
 		toGeneration, agent.Slug, agent.ID)
 	b.WriteString("Before resuming:\n")
 	b.WriteString(" 1. Verify your environment: `git status` shows your branch up to date with the remote, and any files your handoff names as canonical are readable.\n")
-	b.WriteString(" 2. Catch up on your conversations (`scion conversation catch-up`); messages may have arrived while you were being reincarnated.\n")
+	// Design §3.4 Amendment A11 item 4: the proposed wording claimed messages
+	// sent during the migration's down window "are redelivered to you", but
+	// that is not true of Phase 1's actual implementation — the designed
+	// migration gate (persist-but-don't-dispatch while reincarnation_state is
+	// non-terminal, §3.7) was never built, so a message sent during the
+	// window either 409s (a human sender) or is silently dropped by the
+	// broker's own debounce buffer (an agent-to-agent DM); nothing queues it
+	// for delivery once the new generation is up. Live validation confirmed
+	// only that ordinary messaging works before the migration starts and
+	// again once it completes (raw/22, raw/25/28: a DM sent before the
+	// migration reaches gen 1, and one sent after completion reaches gen 2;
+	// no message was shown to survive the window itself). Dropping the
+	// redelivery claim rather than stating it as fact.
+	b.WriteString(" 2. Catch up on your conversations (`scion conversation catch-up`). If that command is unavailable in this environment, rely on the handoff and on incoming messages.\n")
 	b.WriteString(" 3. Message whoever requested this migration that the new generation is up, and state your next action.\n")
 	b.WriteString(" 4. Continue from the handoff below. Do not redo anything it says not to.\n")
 	b.WriteString("The handoff from your previous generation follows.\n---\n")

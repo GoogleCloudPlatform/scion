@@ -1392,6 +1392,28 @@ func TestReincarnateAgent_EndToEnd_IdentityContinuityAndHandoff(t *testing.T) {
 	assert.GreaterOrEqual(t, disp.stopCalls, 1)
 }
 
+// TestBuildReincarnationPreamble_A11F4_Wording is the design §3.4 Amendment
+// A11 item 4 golden test for the hub-authored preamble's step 2. The
+// design's originally proposed wording claimed messages sent during the
+// migration's down window "are redelivered to you", but that claim does not
+// hold for Phase 1's actual implementation (the §3.7 migration gate was
+// never built — see buildReincarnationPreamble's own comment) and per A11
+// item 4 must be dropped rather than stated as fact. This pins the exact
+// wording so a future edit cannot silently reintroduce the unverified claim.
+func TestBuildReincarnationPreamble_A11F4_Wording(t *testing.T) {
+	srv, _ := testServer(t)
+	agent := &store.Agent{ID: "agent-1", Slug: "arqa-a"}
+
+	preamble := srv.buildReincarnationPreamble(agent, 2, "do the thing next")
+
+	assert.Contains(t, preamble,
+		"2. Catch up on your conversations (`scion conversation catch-up`). If that command is unavailable in this environment, rely on the handoff and on incoming messages.\n",
+		"step 2 must not claim messages sent during the migration window are redelivered — that was never implemented")
+	assert.NotContains(t, preamble, "redeliver",
+		"the unverified redelivery claim must not appear anywhere in the preamble")
+	assert.Contains(t, preamble, "do the thing next", "the handoff must still be appended verbatim")
+}
+
 // AC-6: a start failure leaves state=failed with an error and phase=error,
 // and the previous config snapshot remains retrievable.
 func TestReincarnateAgent_AC6_StartFailureMarksFailed(t *testing.T) {
