@@ -215,6 +215,34 @@ func TestHubDefaultGCPIdentity_RegistrationFailedLogsDistinctCause(t *testing.T)
 	assert.Empty(t, logs.recordsContaining("hub has no embedded broker registered"))
 }
 
+// TestExpectEmbeddedBroker_StatelessRegistrationReleasesWaiters covers the
+// Cloud Run path: startup registers the co-located broker through
+// SetStatelessEmbeddedBrokerID, which must release a pending wait just as
+// SetEmbeddedBrokerID does. The wait timeout is raised well above the test's
+// deadline so that a missing release shows up as a failure, not a slow pass.
+func TestExpectEmbeddedBroker_StatelessRegistrationReleasesWaiters(t *testing.T) {
+	prevTimeout := embeddedBrokerWaitTimeout
+	embeddedBrokerWaitTimeout = time.Hour
+	t.Cleanup(func() { embeddedBrokerWaitTimeout = prevTimeout })
+
+	srv := &Server{}
+	srv.ExpectEmbeddedBroker()
+
+	done := make(chan embeddedBrokerState, 1)
+	go func() { done <- srv.waitForEmbeddedBroker(context.Background()) }()
+	time.Sleep(20 * time.Millisecond)
+	srv.SetStatelessEmbeddedBrokerID("cloudrun-broker")
+
+	select {
+	case state := <-done:
+		assert.Equal(t, embeddedBrokerState{id: "cloudrun-broker"}, state)
+	case <-time.After(5 * time.Second):
+		t.Fatal("SetStatelessEmbeddedBrokerID did not release the pending embedded-broker wait")
+	}
+	assert.True(t, srv.isEmbeddedBroker("cloudrun-broker"))
+	assert.Equal(t, "cloudrun-broker", srv.GetStatelessEmbeddedBrokerID())
+}
+
 // TestExpectEmbeddedBroker_Lifecycle checks the expectation's edge cases:
 // it is a no-op once an embedded broker is known, and resolving it more than
 // once (a later SetEmbeddedBrokerID) does not panic on a closed channel.

@@ -225,3 +225,34 @@ func TestInitOperationalSettings_HubDefaultGCPIdentitySurvivesRestart(t *testing
 			snap.DefaultGCPIdentityMode, snap.DefaultGCPIdentityServiceAccountID)
 	}
 }
+
+// TestColocatedBrokerRegisters pins the single condition shared by the early
+// ExpectEmbeddedBroker call and co-located registration in startRuntimeBroker.
+func TestColocatedBrokerRegisters(t *testing.T) {
+	prevHub, prevSim := enableHub, simulateRemoteBroker
+	t.Cleanup(func() { enableHub, simulateRemoteBroker = prevHub, prevSim })
+
+	st := newTestStore(t)
+	cases := []struct {
+		name          string
+		hub, sim, brk bool
+		store         store.Store
+		want          bool
+	}{
+		{"hub+broker co-located", true, false, true, st, true},
+		{"broker disabled", true, false, false, st, false},
+		{"hub disabled", false, false, true, st, false},
+		{"simulated remote broker", true, true, true, st, false},
+		{"no store", true, false, true, nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			enableHub, simulateRemoteBroker = tc.hub, tc.sim
+			cfg := &config.GlobalConfig{}
+			cfg.RuntimeBroker.Enabled = tc.brk
+			if got := colocatedBrokerRegisters(cfg, tc.store); got != tc.want {
+				t.Errorf("colocatedBrokerRegisters = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
