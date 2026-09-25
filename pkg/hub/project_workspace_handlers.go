@@ -347,15 +347,8 @@ func notAccessible(w http.ResponseWriter, what string, path string, err error) {
 //   - GET  (filePath="")  → list files
 //   - POST (filePath="")  → upload files
 //   - DELETE (filePath!="") → delete file
-func (s *Server) handleProjectWorkspace(w http.ResponseWriter, r *http.Request, projectID, filePath string) {
+func (s *Server) handleProjectWorkspace(w http.ResponseWriter, r *http.Request, project *store.Project, filePath string) {
 	ctx := r.Context()
-
-	// Look up the project
-	project, err := s.store.GetProject(ctx, projectID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
 
 	// Resolve workspace path — supports hub-managed, shared-workspace, and linked projects
 	workspacePath, err := s.resolveProjectWebDAVPath(ctx, project)
@@ -380,7 +373,7 @@ func (s *Server) handleProjectWorkspace(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 		slog.ErrorContext(ctx, "failed to open project workspace",
-			"project_id", projectID, "error", err)
+			"project_id", project.ID, "error", err)
 		InternalError(w)
 		return
 	}
@@ -704,18 +697,11 @@ func writeDirectoryToZip(zw *zip.Writer, root *os.Root) error {
 }
 
 // handleProjectWorkspaceArchive creates a zip archive of the entire workspace and serves it for download.
-func (s *Server) handleProjectWorkspaceArchive(w http.ResponseWriter, r *http.Request, projectID string) {
+func (s *Server) handleProjectWorkspaceArchive(w http.ResponseWriter, r *http.Request, project *store.Project) {
 	ctx := r.Context()
 
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
-		return
-	}
-
-	// Look up the project
-	project, err := s.store.GetProject(ctx, projectID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
 		return
 	}
 
@@ -735,7 +721,7 @@ func (s *Server) handleProjectWorkspaceArchive(w http.ResponseWriter, r *http.Re
 			return
 		}
 		slog.ErrorContext(ctx, "failed to open project workspace for archive",
-			"project_id", projectID, "error", err)
+			"project_id", project.ID, "error", err)
 		InternalError(w)
 		return
 	}
@@ -751,7 +737,7 @@ func (s *Server) handleProjectWorkspaceArchive(w http.ResponseWriter, r *http.Re
 	if err := writeDirectoryToZip(zw, root); err != nil {
 		// At this point we've already started writing, so we can't send an error response.
 		// The zip will be truncated/corrupt, which the client will notice.
-		slog.WarnContext(ctx, "failed to complete workspace archive", "project_id", projectID, "error", err)
+		slog.WarnContext(ctx, "failed to complete workspace archive", "project_id", project.ID, "error", err)
 		return
 	}
 }
@@ -1377,7 +1363,7 @@ func validateWorkspaceFilePath(path string) error {
 }
 
 // handleProjectWorkspacePull performs a `git pull --ff-only` on a shared-workspace project.
-func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Request, projectID string) {
+func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Request, project *store.Project) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
 		return
@@ -1392,12 +1378,6 @@ func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Reque
 	}
 
 	ctx := r.Context()
-
-	project, err := s.store.GetProject(ctx, projectID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
 
 	if !project.IsSharedWorkspace() {
 		Conflict(w, "Pull is only available for shared-workspace git projects")
@@ -1475,5 +1455,104 @@ func cleanEmptyDirs(root *os.Root, targetDir string) {
 			break
 		}
 		targetDir = filepath.Dir(targetDir)
+	}
+}
+
+// isProjectWorkspaceSubPath reports whether a project subpath addresses the
+// project workspace. Membership in this set is what routes a request through
+// handleProjectWorkspaceRoutes, and therefore through its authorization gate.
+//
+// The "dav" arm is a prefix match rather than an exact-or-slash match because
+// that is what this dispatcher has always done. It is wider than it looks —
+// "davos" routes to WebDAV too — but narrowing it here would change routing in
+// the same change that adds a security gate, and those want separate review.
+func isProjectWorkspaceSubPath(subPath string) bool {
+	return strings.HasPrefix(subPath, "dav") ||
+		subPath == "sync/status" ||
+		subPath == "workspace" ||
+		strings.HasPrefix(subPath, "workspace/")
+}
+
+// projectWorkspaceAction maps an HTTP method onto the permission a workspace
+// request needs.
+//
+// Anything that is not a plain read is treated as a write. That is deliberately
+// the blunt choice: WebDAV's verb set is open-ended, and a verb this function
+// has never heard of is far more likely to be a mutation than a read. Being
+// wrong in the restrictive direction returns a 403 to someone who should have
+// been allowed; being wrong in the permissive direction is the bug this change
+// exists to fix.
+//
+// Every WebDAV verb (PROPFIND, PROPPATCH, MKCOL, COPY, MOVE, LOCK, UNLOCK) is
+// deliberately a write, including PROPFIND and LOCK. This was a
+// maintainer decision. The cost is that a read-only principal cannot mount or
+// browse the workspace over WebDAV; it can still read through GET on
+// workspace/files and the archive endpoint. Reclassifying a verb as a read is
+// a one-line change here and in TestProjectWorkspaceAction.
+func projectWorkspaceAction(method string) Action {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return ActionRead
+	default:
+		return ActionUpdate
+	}
+}
+
+// handleProjectWorkspaceRoutes is the single authorized entry point for every
+// project workspace subtree.
+//
+// The gate below is the whole point of this function: it runs before the switch,
+// so it cannot be bypassed by any arm of the switch, and a new arm added later
+// is gated by construction rather than by the author remembering.
+func (s *Server) handleProjectWorkspaceRoutes(w http.ResponseWriter, r *http.Request, projectID, subPath string) {
+	project, err := s.store.GetProject(r.Context(), projectID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// SECURITY-GATE: CheckAccess — authorize this specific project before any
+	// workspace path is resolved, opened, listed, read, written or deleted.
+	// Without this, any authenticated caller reaches another project's files:
+	// the route is classified RoutePolicy, which passes through unconditionally
+	// and delegates enforcement here.
+	if !s.authorize(w, r, projectResource(project), projectWorkspaceAction(r.Method)) {
+		return
+	}
+
+	switch {
+	case strings.HasPrefix(subPath, "dav"):
+		davPath := strings.TrimPrefix(subPath, "dav")
+		davPath = strings.TrimPrefix(davPath, "/")
+		s.handleProjectWebDAV(w, r, project, davPath)
+
+	case subPath == "sync/status":
+		s.handleProjectSyncStatus(w, r, project)
+
+	case subPath == "workspace/cache/refresh":
+		s.handleProjectCacheRefresh(w, r, project)
+
+	case subPath == "workspace/cache/status":
+		s.handleProjectCacheStatus(w, r, project)
+
+	case subPath == "workspace/cache/notify":
+		s.handleProjectCacheNotify(w, r, project)
+
+	case subPath == "workspace/pull":
+		s.handleProjectWorkspacePull(w, r, project)
+
+	case subPath == "workspace/archive":
+		s.handleProjectWorkspaceArchive(w, r, project)
+
+	case strings.HasPrefix(subPath, "workspace/files"):
+		filePath := strings.TrimPrefix(subPath, "workspace/files")
+		filePath = strings.TrimPrefix(filePath, "/")
+		s.handleProjectWorkspace(w, r, project, filePath)
+
+	default:
+		// Reached only for a workspace subpath with no handler, e.g.
+		// "workspace" alone or "workspace/nope". Previously these fell through
+		// to handleProjectByIDInternal, which answered with this same 404.
+		NotFound(w, "Project resource")
 	}
 }
