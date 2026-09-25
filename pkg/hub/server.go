@@ -4524,12 +4524,6 @@ func (s *Server) registerRoutes() {
 	// This handler must come before the generic project-by-id handler
 	s.mux.HandleFunc("/api/v1/projects/", s.guarded("/api/v1/projects/", s.handleProjectRoutes))
 
-	// Legacy /api/v1/groves aliases are external compatibility adapters for
-	// the canonical /api/v1/projects handlers.
-	s.mux.HandleFunc("/api/v1/groves", s.guarded("/api/v1/groves", s.handleLegacyGroveRoute(s.handleProjects)))
-	s.mux.HandleFunc("/api/v1/groves/register", s.guarded("/api/v1/groves/register", s.handleLegacyGroveRoute(s.handleProjectRegister)))
-	s.mux.HandleFunc("/api/v1/groves/", s.guarded("/api/v1/groves/", s.handleLegacyGroveRoute(s.handleProjectRoutes)))
-
 	s.mux.HandleFunc("/api/v1/runtime-brokers", s.guarded("/api/v1/runtime-brokers", s.handleRuntimeBrokers))
 	s.mux.HandleFunc("/api/v1/runtime-brokers/", s.guarded("/api/v1/runtime-brokers/", s.handleRuntimeBrokerRoutes))
 

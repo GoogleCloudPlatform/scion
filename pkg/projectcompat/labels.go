@@ -14,8 +14,6 @@
 
 package projectcompat
 
-import "strings"
-
 func ProjectIDFromLabels(labels map[string]string) string {
 	if labels == nil {
 		return ""
@@ -95,8 +93,4 @@ func CanonicalFieldAliases(key string) (canonical string, legacy bool) {
 	default:
 		return key, false
 	}
-}
-
-func DeprecatedGroveRoute(path string) bool {
-	return path == "/api/v1/groves" || strings.HasPrefix(path, "/api/v1/groves/")
 }

@@ -345,13 +345,6 @@ func TestProjectGitHubSettingsAuthz_OutsidersDenied(t *testing.T) {
 			})
 		}
 	}
-	// Also reachable via the legacy groves alias.
-	t.Run("groves alias", func(t *testing.T) {
-		rec := doRequestAsUser(t, srv, bob, http.MethodPut, "/api/v1/groves/"+victim.ID+"/github-permissions",
-			map[string]string{"contents": "write"})
-		assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
-		assertGitHubSettingsUnchanged(t, s, victim.ID)
-	})
 }
 
 func TestProjectGitHubSettingsAuthz_OwnerAllowed(t *testing.T) {

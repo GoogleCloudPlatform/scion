@@ -92,15 +92,6 @@ allowed_paths=(
   "^pkg/hub/handlers_broker_inbound_test.go$"
   "^pkg/hub/handlers_project_test.go$"
   "^pkg/hub/heartbeat_legacy_test.go$"
-  # Asserts the legacy /groves alias is covered by the project GitHub settings
-  # authorization gate, for the same reason as the workspace test below.
-  "^pkg/hub/hub_resource_authz_test.go$"
-  # Asserts the legacy /groves alias is covered by the project workspace
-  # authorization gate. The literal is the point of the test: the alias is a
-  # second route onto the same dispatcher, and a gate that missed it would be
-  # invisible to every /projects test.
-  "^pkg/hub/project_workspace_authz_test.go$"
-  "^pkg/hub/route_classification_test.go$"
   "^pkg/hub/web_test.go$"
   "^pkg/hubclient/agents_test.go$"
   "^pkg/hubclient/client_test.go$"
@@ -138,7 +129,6 @@ allowed_paths=(
   "^pkg/storage/storage_test.go$"
   "^pkg/store/models_backward_compat_test.go$"
   "^pkg/util/logging/cloud_handler_test.go$"
-  "^pkg/util/logging/request_log_test.go$"
   "^pkg/wsprotocol/protocol_test.go$"
 
   # First-party integration compatibility boundaries.
@@ -187,14 +177,9 @@ allowed_paths=(
   "^pkg/hub/project_compat.go$"
   "^pkg/hub/project_webdav.go$"
   "^pkg/hub/response_types.go$"
-  "^pkg/hub/authzop/catalog.go$"
-  "^pkg/hub/route_metadata.go$"
-  "^pkg/hub/server.go$"
   "^pkg/hub/system_handlers.go$"
   "^pkg/hub/template_handlers.go$"
-  "^pkg/hub/web.go$"
   "^pkg/hubclient/agents.go$"
-  "^pkg/hubclient/client.go$"
   "^pkg/hubclient/messages.go$"
   "^pkg/hubclient/notifications.go$"
   "^pkg/hubclient/projects.go$"
@@ -228,7 +213,6 @@ allowed_paths=(
   "^pkg/store/entadapter/composite.go$"
   "^pkg/store/models.go$"
   "^pkg/store/storetest/domains_project_broker.go$"
-  "^pkg/util/logging/request_log.go$"
   "^pkg/wsprotocol/protocol.go$"
 )
 

@@ -2186,20 +2186,21 @@ func TestCreateProject_ListByGitRemote_ReturnsMultiple(t *testing.T) {
 	assert.Len(t, resp.Projects, 2, "listing by git remote should return all matching projects")
 }
 
-func TestProjectRouteDeprecationHeaders(t *testing.T) {
+// TestLegacyGroveRoutesRemoved is the negative test for design.md §2 row 7
+// (and §7.2): the legacy /api/v1/groves aliases are gone, so both the
+// collection route and a sub-path now 404 like any other unknown route,
+// instead of silently continuing to serve the canonical project handlers.
+func TestLegacyGroveRoutesRemoved(t *testing.T) {
 	srv, _ := testServer(t)
 
 	canonical := doRequest(t, srv, http.MethodGet, "/api/v1/projects", nil)
 	require.Equal(t, http.StatusOK, canonical.Code, "body: %s", canonical.Body.String())
-	assert.Empty(t, canonical.Header().Get("Deprecation"))
-	assert.Empty(t, canonical.Header().Get("Sunset"))
-	assert.Empty(t, canonical.Header().Get("Link"))
 
 	legacy := doRequest(t, srv, http.MethodGet, "/api/v1/groves", nil)
-	require.Equal(t, http.StatusOK, legacy.Code, "body: %s", legacy.Body.String())
-	assert.Equal(t, "true", legacy.Header().Get("Deprecation"))
-	assert.Equal(t, legacyGroveRouteSunset, legacy.Header().Get("Sunset"))
-	assert.Contains(t, legacy.Header().Get("Link"), "/api/v1/projects/")
+	assert.Equal(t, http.StatusNotFound, legacy.Code, "body: %s", legacy.Body.String())
+
+	legacySub := doRequest(t, srv, http.MethodGet, "/api/v1/groves/some-project", nil)
+	assert.Equal(t, http.StatusNotFound, legacySub.Code, "body: %s", legacySub.Body.String())
 }
 
 func TestRegisterProjectRequestLegacyIDAliases(t *testing.T) {

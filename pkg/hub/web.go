@@ -985,7 +985,7 @@ func resolveAPIPath(urlPath string) string {
 	switch {
 	case p == "/agents":
 		return "/api/v1/agents"
-	case p == "/projects", p == "/groves":
+	case p == "/projects":
 		return "/api/v1/projects"
 	case strings.HasPrefix(p, "/agents/") && strings.Count(p, "/") == 2:
 		// /agents/{id} -> /api/v1/agents/{id}

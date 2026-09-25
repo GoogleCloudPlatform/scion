@@ -1644,16 +1644,11 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleProjectRoutes routes requests under /api/v1/projects/{projectId}/... or /api/v1/projects/{projectId}/...
+// handleProjectRoutes routes requests under /api/v1/projects/{projectId}/...
 // It supports both the project resource endpoints and nested agent endpoints.
 func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 	// Extract project ID and remaining path
-	var path string
-	if strings.HasPrefix(r.URL.Path, "/api/v1/projects/") {
-		path = strings.TrimPrefix(r.URL.Path, "/api/v1/projects/")
-	} else {
-		path = strings.TrimPrefix(r.URL.Path, "/api/v1/groves/")
-	}
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/projects/")
 
 	if path == "" {
 		NotFound(w, "Project")
