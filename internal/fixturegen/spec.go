@@ -448,6 +448,20 @@ func Spec() []TableFixture {
 			},
 		}},
 
+		// ---- Agent reincarnations ----
+		{Table: "agent_reincarnations", Rows: []row{
+			{ // completed record with both config snapshots
+				"id": "ar000000-0000-0000-0000-000000000001", "agent_id": agentID,
+				"from_generation": 1, "to_generation": 2,
+				"requested_by": userID, "requested_at": baseTime,
+				"updated_at": baseTime, "completed_at": baseTime.Add(time.Minute),
+				"state": "completed", "error": "",
+				"previous_applied_config": nestedConfigJSON,
+				"new_applied_config":      nestedConfigJSON,
+				"handoff":                 "handoff notes: naïve café 北京 🚀",
+			},
+		}},
+
 		// ---- Agent session metrics ----
 		{Table: "agent_session_metrics", Rows: []row{
 			{
