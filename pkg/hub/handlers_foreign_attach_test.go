@@ -155,7 +155,6 @@ func foreignAttachSetup(t *testing.T) (
 		Slug:            "fa-agent-a",
 		ProjectID:       projectA.ID,
 		Phase:           "running",
-		Visibility:      store.VisibilityPrivate,
 		RuntimeBrokerID: brokerID,
 		MessageMode:     store.MessageModeHub,
 		Ancestry:        []string{owner.ID},
@@ -168,7 +167,6 @@ func foreignAttachSetup(t *testing.T) (
 		Slug:            "fa-agent-b",
 		ProjectID:       projectB.ID,
 		Phase:           "running",
-		Visibility:      store.VisibilityPrivate,
 		RuntimeBrokerID: brokerID,
 		MessageMode:     store.MessageModeHub,
 		Ancestry:        []string{owner.ID},
@@ -362,7 +360,6 @@ func TestForeignAttach_SameProject_Attachments_Allowed(t *testing.T) {
 		Slug:            "same-sender",
 		ProjectID:       project.ID,
 		Phase:           "running",
-		Visibility:      store.VisibilityPrivate,
 		RuntimeBrokerID: brokerID,
 		MessageMode:     store.MessageModeProject,
 	}
@@ -374,7 +371,6 @@ func TestForeignAttach_SameProject_Attachments_Allowed(t *testing.T) {
 		Slug:            "same-target",
 		ProjectID:       project.ID,
 		Phase:           "running",
-		Visibility:      store.VisibilityPrivate,
 		RuntimeBrokerID: brokerID,
 		MessageMode:     store.MessageModeProject,
 	}
@@ -490,7 +486,6 @@ func TestForeignAttach_SameProject_ObserverMessage_BodyPreserved(t *testing.T) {
 		Slug:            "sp-obs-sender",
 		ProjectID:       project.ID,
 		Phase:           "running",
-		Visibility:      store.VisibilityPrivate,
 		RuntimeBrokerID: brokerID,
 		MessageMode:     store.MessageModeProject,
 	}
@@ -502,7 +497,6 @@ func TestForeignAttach_SameProject_ObserverMessage_BodyPreserved(t *testing.T) {
 		Slug:            "sp-obs-target",
 		ProjectID:       project.ID,
 		Phase:           "running",
-		Visibility:      store.VisibilityPrivate,
 		RuntimeBrokerID: brokerID,
 		MessageMode:     store.MessageModeProject,
 	}
@@ -659,7 +653,6 @@ func TestInteragentView_CrossProject_BodyStripped(t *testing.T) {
 		Slug:        "ia-agent-a",
 		ProjectID:   projectA.ID,
 		Phase:       "running",
-		Visibility:  store.VisibilityPrivate,
 		MessageMode: store.MessageModeHub,
 	}
 	require.NoError(t, s.CreateAgent(ctx, agentA))
@@ -670,7 +663,6 @@ func TestInteragentView_CrossProject_BodyStripped(t *testing.T) {
 		Slug:        "ia-agent-b",
 		ProjectID:   projectB.ID,
 		Phase:       "running",
-		Visibility:  store.VisibilityPrivate,
 		MessageMode: store.MessageModeHub,
 	}
 	require.NoError(t, s.CreateAgent(ctx, agentB))
@@ -711,7 +703,6 @@ func TestInteragentView_CrossProject_BodyStripped(t *testing.T) {
 		Slug:        "ia-agent-a2",
 		ProjectID:   projectA.ID,
 		Phase:       "running",
-		Visibility:  store.VisibilityPrivate,
 		MessageMode: store.MessageModeHub,
 	}
 	require.NoError(t, s.CreateAgent(ctx, agentA2))
@@ -830,7 +821,6 @@ func TestForeignAttach_SameProject_GroupPublish_Works(t *testing.T) {
 		Slug:            "fa-grp-agent",
 		ProjectID:       project.ID,
 		Phase:           "running",
-		Visibility:      store.VisibilityPrivate,
 		RuntimeBrokerID: brokerID,
 		MessageMode:     store.MessageModeProject,
 	}

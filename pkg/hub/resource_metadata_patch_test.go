@@ -25,66 +25,60 @@ import (
 
 func TestApplyResourceMetadataPatch(t *testing.T) {
 	tests := []struct {
-		name           string
-		body           string
-		wantOK         bool
-		wantStatus     int
-		wantName       string
-		wantSlug       string
-		wantDisplay    string
-		wantDesc       string
-		wantVisibility string
+		name        string
+		body        string
+		wantOK      bool
+		wantStatus  int
+		wantName    string
+		wantSlug    string
+		wantDisplay string
+		wantDesc    string
 	}{
 		{
-			name:           "updates fields and derives slug",
-			body:           `{"name":"New Name","displayName":"New Display","description":"New description","visibility":"private"}`,
-			wantOK:         true,
-			wantName:       "New Name",
-			wantSlug:       "new-name",
-			wantDisplay:    "New Display",
-			wantDesc:       "New description",
-			wantVisibility: "private",
+			name:        "updates fields and derives slug",
+			body:        `{"name":"New Name","displayName":"New Display","description":"New description"}`,
+			wantOK:      true,
+			wantName:    "New Name",
+			wantSlug:    "new-name",
+			wantDisplay: "New Display",
+			wantDesc:    "New description",
 		},
 		{
-			name:           "explicit slug wins",
-			body:           `{"name":"New Name","slug":"custom-slug"}`,
-			wantOK:         true,
-			wantName:       "New Name",
-			wantSlug:       "custom-slug",
-			wantDisplay:    "Old Display",
-			wantDesc:       "Old description",
-			wantVisibility: "public",
+			name:        "explicit slug wins",
+			body:        `{"name":"New Name","slug":"custom-slug"}`,
+			wantOK:      true,
+			wantName:    "New Name",
+			wantSlug:    "custom-slug",
+			wantDisplay: "Old Display",
+			wantDesc:    "Old description",
 		},
 		{
-			name:           "empty null and unrelated fields are ignored",
-			body:           `{"name":"","slug":null,"displayName":"","description":null,"visibility":"","unrelated":123}`,
-			wantOK:         true,
-			wantName:       "Old Name",
-			wantSlug:       "old-slug",
-			wantDisplay:    "Old Display",
-			wantDesc:       "Old description",
-			wantVisibility: "public",
+			name:        "empty null and unrelated fields are ignored",
+			body:        `{"name":"","slug":null,"displayName":"","description":null,"unrelated":123}`,
+			wantOK:      true,
+			wantName:    "Old Name",
+			wantSlug:    "old-slug",
+			wantDisplay: "Old Display",
+			wantDesc:    "Old description",
 		},
 		{
-			name:           "duplicate fields use last value",
-			body:           `{"name":"First","name":"Second"}`,
-			wantOK:         true,
-			wantName:       "Second",
-			wantSlug:       "second",
-			wantDisplay:    "Old Display",
-			wantDesc:       "Old description",
-			wantVisibility: "public",
+			name:        "duplicate fields use last value",
+			body:        `{"name":"First","name":"Second"}`,
+			wantOK:      true,
+			wantName:    "Second",
+			wantSlug:    "second",
+			wantDisplay: "Old Display",
+			wantDesc:    "Old description",
 		},
 		{
-			name:           "wrong selected type fails before applying",
-			body:           `{"name":"New Name","slug":123}`,
-			wantOK:         false,
-			wantStatus:     http.StatusBadRequest,
-			wantName:       "Old Name",
-			wantSlug:       "old-slug",
-			wantDisplay:    "Old Display",
-			wantDesc:       "Old description",
-			wantVisibility: "public",
+			name:        "wrong selected type fails before applying",
+			body:        `{"name":"New Name","slug":123}`,
+			wantOK:      false,
+			wantStatus:  http.StatusBadRequest,
+			wantName:    "Old Name",
+			wantSlug:    "old-slug",
+			wantDisplay: "Old Display",
+			wantDesc:    "Old description",
 		},
 	}
 
@@ -94,7 +88,6 @@ func TestApplyResourceMetadataPatch(t *testing.T) {
 			slug := "old-slug"
 			displayName := "Old Display"
 			description := "Old description"
-			visibility := "public"
 			req := httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(tt.body))
 			rec := httptest.NewRecorder()
 
@@ -103,7 +96,6 @@ func TestApplyResourceMetadataPatch(t *testing.T) {
 				Slug:        &slug,
 				DisplayName: &displayName,
 				Description: &description,
-				Visibility:  &visibility,
 			})
 
 			assert.Equal(t, tt.wantOK, ok)
@@ -114,7 +106,6 @@ func TestApplyResourceMetadataPatch(t *testing.T) {
 			assert.Equal(t, tt.wantSlug, slug)
 			assert.Equal(t, tt.wantDisplay, displayName)
 			assert.Equal(t, tt.wantDesc, description)
-			assert.Equal(t, tt.wantVisibility, visibility)
 		})
 	}
 }

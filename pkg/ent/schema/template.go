@@ -90,8 +90,6 @@ func (Template) Fields() []ent.Field {
 			Optional(),
 		field.String("source_url").
 			Optional(),
-		field.String("visibility").
-			Default("private"),
 		field.Time("created").
 			Default(time.Now).
 			Immutable(),

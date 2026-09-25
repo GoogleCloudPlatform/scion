@@ -59,7 +59,6 @@ type ResourceRecord struct {
 	Files         []store.TemplateFile
 	Status        string
 	SourceURL     string
-	Visibility    string
 }
 
 // Resource lifecycle states. Templates and harness-configs use identical string
@@ -77,8 +76,6 @@ const (
 type resourcePersistence interface {
 	// Kind identifies the resource kind (drives storage paths).
 	Kind() storage.ResourceKind
-	// DefaultVisibility is the visibility stamped on a newly-created record.
-	DefaultVisibility() string
 	// Label prefixes log messages (e.g. "template bootstrap").
 	Label() string
 
@@ -162,7 +159,6 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 			StorageBucket: stor.Bucket(),
 			StorageURI:    storage.ResourceStorageURI(rs.hubID, stor.Bucket(), kind, scope, scopeID, slug),
 			SourceURL:     sourceURL,
-			Visibility:    p.DefaultVisibility(),
 		}
 		if err := p.Create(ctx, rec, dir); err != nil {
 			return false, err
@@ -239,7 +235,6 @@ type templatePersistence struct {
 }
 
 func (p *templatePersistence) Kind() storage.ResourceKind { return storage.ResourceKindTemplate }
-func (p *templatePersistence) DefaultVisibility() string  { return store.VisibilityPrivate }
 func (p *templatePersistence) Label() string              { return "template bootstrap" }
 
 func (p *templatePersistence) GetBySlug(ctx context.Context, slug, scope, scopeID string) (*ResourceRecord, error) {
@@ -267,7 +262,6 @@ func (p *templatePersistence) Create(ctx context.Context, rec *ResourceRecord, d
 		StorageBucket: rec.StorageBucket,
 		StorageURI:    rec.StorageURI,
 		SourceURL:     rec.SourceURL,
-		Visibility:    rec.Visibility,
 	}
 	// For user-scoped templates imported via the resource pipeline, set
 	// OwnerID and CreatedBy from the scope ID (which IS the user ID for
@@ -347,7 +341,6 @@ func templateToRecord(t *store.Template) *ResourceRecord {
 		Files:         t.Files,
 		Status:        t.Status,
 		SourceURL:     t.SourceURL,
-		Visibility:    t.Visibility,
 	}
 }
 
@@ -362,8 +355,7 @@ type harnessConfigPersistence struct {
 func (p *harnessConfigPersistence) Kind() storage.ResourceKind {
 	return storage.ResourceKindHarnessConfig
 }
-func (p *harnessConfigPersistence) DefaultVisibility() string { return store.VisibilityPublic }
-func (p *harnessConfigPersistence) Label() string             { return "harness config bootstrap" }
+func (p *harnessConfigPersistence) Label() string { return "harness config bootstrap" }
 
 func (p *harnessConfigPersistence) GetBySlug(ctx context.Context, slug, scope, scopeID string) (*ResourceRecord, error) {
 	hc, err := p.s.store.GetHarnessConfigBySlug(ctx, slug, scope, scopeID)
@@ -390,7 +382,6 @@ func (p *harnessConfigPersistence) Create(ctx context.Context, rec *ResourceReco
 		StorageBucket: rec.StorageBucket,
 		StorageURI:    rec.StorageURI,
 		SourceURL:     rec.SourceURL,
-		Visibility:    rec.Visibility,
 	}
 	extractNoAuthBehavior(hc, dir)
 	extractAuthMeta(hc, dir)
@@ -514,6 +505,5 @@ func harnessConfigToRecord(hc *store.HarnessConfig) *ResourceRecord {
 		Files:         hc.Files,
 		Status:        hc.Status,
 		SourceURL:     hc.SourceURL,
-		Visibility:    hc.Visibility,
 	}
 }

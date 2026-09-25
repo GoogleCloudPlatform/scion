@@ -153,7 +153,6 @@ func setupBrokerTestAgent(t *testing.T, s store.Store, projectID, slug, phase st
 		ProjectID:       projectID,
 		Phase:           phase,
 		RuntimeBrokerID: tid("broker-1"),
-		Visibility:      store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(context.Background(), agent); err != nil {
 		t.Fatalf("failed to create agent: %v", err)

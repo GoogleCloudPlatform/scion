@@ -115,7 +115,6 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		Message:             a.Message,
 		Created:             a.Created,
 		Updated:             a.Updated,
-		Visibility:          a.Visibility,
 		MessageMode:         string(a.MessageMode),
 		Ancestry:            a.Ancestry,
 		StateVersion:        a.StateVersion,
@@ -241,9 +240,6 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
 		SetUpdated(now).
 		SetStateVersion(a.StateVersion)
 
-	if a.Visibility != "" {
-		create.SetVisibility(a.Visibility)
-	}
 	if a.MessageMode != "" {
 		create.SetMessageMode(agent.MessageMode(a.MessageMode))
 	}
@@ -394,7 +390,6 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 		SetWebPtyEnabled(a.WebPTYEnabled).
 		SetTaskSummary(a.TaskSummary).
 		SetMessage(a.Message).
-		SetVisibility(a.Visibility).
 		SetUpdated(now).
 		SetStateVersion(newVersion)
 

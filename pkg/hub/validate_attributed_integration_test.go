@@ -87,7 +87,6 @@ func TestValidateAttributed_LegacyPath_ConversationIDStamped(t *testing.T) {
 		ProjectID:       projectID,
 		RuntimeBrokerID: brokerID,
 		Phase:           "running",
-		Visibility:      store.VisibilityPrivate,
 	}); err != nil {
 		t.Fatalf("CreateAgent: %v", err)
 	}

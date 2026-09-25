@@ -601,19 +601,6 @@ export class ScionPageAgentDetail extends LitElement {
       text-decoration: underline;
       color: #22c55e;
     }
-
-    /* ---- Visibility badge ---- */
-    .visibility-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.25rem;
-      padding: 0.125rem 0.5rem;
-      border-radius: 9999px;
-      font-size: 0.8125rem;
-      font-weight: 500;
-      background: var(--scion-bg-subtle, #f1f5f9);
-      color: var(--scion-text-muted, #64748b);
-    }
   `;
 
   private boundOnAgentsUpdated = this.onAgentsUpdated.bind(this);
@@ -2023,16 +2010,6 @@ export class ScionPageAgentDetail extends LitElement {
                               : 'neutral'}
                       >${agent.appliedConfig.agentRole}</sl-badge
                     >
-                  </span>
-                </div>
-              `
-            : ''}
-          ${agent.visibility
-            ? html`
-                <div class="info-item">
-                  <span class="info-label">Visibility</span>
-                  <span class="info-value">
-                    <span class="visibility-badge">${agent.visibility}</span>
                   </span>
                 </div>
               `

@@ -71,7 +71,6 @@ func newTestACStore(t *testing.T) (*AccessConstraintStore, *ent.Client) {
 		SetSlug("test-agent").
 		SetName("Test Agent").
 		SetProjectID(acTestProjectID).
-		SetVisibility("private").
 		SetMessageMode("project").
 		Save(ctx)
 	require.NoError(t, err)
@@ -126,7 +125,6 @@ func newTestACStoreWithSharedIDs(t *testing.T) *AccessConstraintStore {
 		SetSlug("shared-agent").
 		SetName("Shared Agent").
 		SetProjectID(acTestProjectID).
-		SetVisibility("private").
 		SetMessageMode("project").
 		Save(ctx)
 	require.NoError(t, err)

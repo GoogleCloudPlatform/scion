@@ -62,7 +62,7 @@ func def126Setup(t *testing.T) (srv *Server, s store.Store, projectID, agentSlug
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: agentID, Name: "def126-agent", Slug: agentSlug,
 		ProjectID: projectID, RuntimeBrokerID: brokerID,
-		Phase: "running", Visibility: store.VisibilityPrivate,
+		Phase: "running",
 	}))
 
 	srv.SetDispatcher(&recordingDispatcher{})
@@ -294,7 +294,7 @@ func TestDEF126_AC_A8_ExistingForms_NoRegression(t *testing.T) {
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: agentID, Name: "a8-agent", Slug: agentSlug,
 		ProjectID: projectID, RuntimeBrokerID: brokerID,
-		Phase: "running", Visibility: store.VisibilityPrivate,
+		Phase: "running",
 	}))
 
 	// Create a second agent to be targeted.
@@ -303,7 +303,7 @@ func TestDEF126_AC_A8_ExistingForms_NoRegression(t *testing.T) {
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: targetID, Name: "target-agent", Slug: targetSlug,
 		ProjectID: projectID, RuntimeBrokerID: brokerID,
-		Phase: "running", Visibility: store.VisibilityPrivate,
+		Phase: "running",
 	}))
 
 	// Create a user for @<email> and bare email forms.
@@ -392,12 +392,12 @@ func TestDEF126_AC_A9_GroupMalformedUser_RefusesEntireSend(t *testing.T) {
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: agentIDA, Name: "a9-agent-a", Slug: agentSlugA,
 		ProjectID: projectID, RuntimeBrokerID: brokerID,
-		Phase: "running", Visibility: store.VisibilityPrivate,
+		Phase: "running",
 	}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: agentIDB, Name: "a9-agent-b", Slug: agentSlugB,
 		ProjectID: projectID, RuntimeBrokerID: brokerID,
-		Phase: "running", Visibility: store.VisibilityPrivate,
+		Phase: "running",
 	}))
 	require.NoError(t, s.CreateUser(ctx, &store.User{
 		ID: userID, Email: "a9@example.com", DisplayName: "A9 User",
@@ -457,7 +457,7 @@ func TestDEF126_AC_A9b_GroupUnknownEmail_RefusesEntireSend(t *testing.T) {
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: agentID, Name: "a9b-agent", Slug: agentSlug,
 		ProjectID: projectID, RuntimeBrokerID: brokerID,
-		Phase: "running", Visibility: store.VisibilityPrivate,
+		Phase: "running",
 	}))
 	require.NoError(t, s.CreateUser(ctx, &store.User{
 		ID: userID, Email: "a9b@example.com", DisplayName: "A9b User",
@@ -539,7 +539,7 @@ func TestDEF126_AC_A4b_GroupValidEmail_Resolves(t *testing.T) {
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: agentID, Name: "a4b-agent", Slug: agentSlug,
 		ProjectID: projectID, RuntimeBrokerID: brokerID,
-		Phase: "running", Visibility: store.VisibilityPrivate,
+		Phase: "running",
 	}))
 	require.NoError(t, s.CreateUser(ctx, &store.User{
 		ID: userID, Email: "valid-group@example.com", DisplayName: "Valid Group User",

@@ -687,7 +687,6 @@ func TestOutboundMessage_WakeHumanRecipient_ZeroResumes(t *testing.T) {
 		ProjectID:   project.ID,
 		Phase:       string(state.PhaseRunning),
 		MessageMode: store.MessageModeProject,
-		Visibility:  store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 

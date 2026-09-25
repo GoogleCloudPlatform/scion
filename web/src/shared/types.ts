@@ -538,7 +538,6 @@ export interface Agent {
   slug?: string;
   image?: string;
   runtime?: string;
-  visibility?: string;
   createdBy?: string;
   appliedConfig?: AgentAppliedConfig;
 

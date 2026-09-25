@@ -392,20 +392,6 @@ func (_u *HarnessConfigUpdate) ClearSourceURL() *HarnessConfigUpdate {
 	return _u
 }
 
-// SetVisibility sets the "visibility" field.
-func (_u *HarnessConfigUpdate) SetVisibility(v string) *HarnessConfigUpdate {
-	_u.mutation.SetVisibility(v)
-	return _u
-}
-
-// SetNillableVisibility sets the "visibility" field if the given value is not nil.
-func (_u *HarnessConfigUpdate) SetNillableVisibility(v *string) *HarnessConfigUpdate {
-	if v != nil {
-		_u.SetVisibility(*v)
-	}
-	return _u
-}
-
 // SetUpdated sets the "updated" field.
 func (_u *HarnessConfigUpdate) SetUpdated(v time.Time) *HarnessConfigUpdate {
 	_u.mutation.SetUpdated(v)
@@ -596,9 +582,6 @@ func (_u *HarnessConfigUpdate) sqlSave(ctx context.Context) (_node int, err erro
 	}
 	if _u.mutation.SourceURLCleared() {
 		_spec.ClearField(harnessconfig.FieldSourceURL, field.TypeString)
-	}
-	if value, ok := _u.mutation.Visibility(); ok {
-		_spec.SetField(harnessconfig.FieldVisibility, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.Updated(); ok {
 		_spec.SetField(harnessconfig.FieldUpdated, field.TypeTime, value)
@@ -987,20 +970,6 @@ func (_u *HarnessConfigUpdateOne) ClearSourceURL() *HarnessConfigUpdateOne {
 	return _u
 }
 
-// SetVisibility sets the "visibility" field.
-func (_u *HarnessConfigUpdateOne) SetVisibility(v string) *HarnessConfigUpdateOne {
-	_u.mutation.SetVisibility(v)
-	return _u
-}
-
-// SetNillableVisibility sets the "visibility" field if the given value is not nil.
-func (_u *HarnessConfigUpdateOne) SetNillableVisibility(v *string) *HarnessConfigUpdateOne {
-	if v != nil {
-		_u.SetVisibility(*v)
-	}
-	return _u
-}
-
 // SetUpdated sets the "updated" field.
 func (_u *HarnessConfigUpdateOne) SetUpdated(v time.Time) *HarnessConfigUpdateOne {
 	_u.mutation.SetUpdated(v)
@@ -1221,9 +1190,6 @@ func (_u *HarnessConfigUpdateOne) sqlSave(ctx context.Context) (_node *HarnessCo
 	}
 	if _u.mutation.SourceURLCleared() {
 		_spec.ClearField(harnessconfig.FieldSourceURL, field.TypeString)
-	}
-	if value, ok := _u.mutation.Visibility(); ok {
-		_spec.SetField(harnessconfig.FieldVisibility, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.Updated(); ok {
 		_spec.SetField(harnessconfig.FieldUpdated, field.TypeTime, value)

@@ -97,7 +97,6 @@ func entTemplateRowToStore(e *ent.Template) *store.Template {
 		OwnerID:              e.OwnerID,
 		CreatedBy:            e.CreatedBy,
 		UpdatedBy:            e.UpdatedBy,
-		Visibility:           e.Visibility,
 		Created:              e.Created,
 		Updated:              e.Updated,
 	}
@@ -145,7 +144,6 @@ func (s *TemplateStore) CreateTemplate(ctx context.Context, template *store.Temp
 		SetOwnerID(template.OwnerID).
 		SetCreatedBy(template.CreatedBy).
 		SetUpdatedBy(template.UpdatedBy).
-		SetVisibility(template.Visibility).
 		SetCreated(template.Created).
 		SetUpdated(template.Updated)
 
@@ -225,7 +223,6 @@ func (s *TemplateStore) UpdateTemplate(ctx context.Context, template *store.Temp
 		SetStatus(enttemplate.Status(template.Status)).
 		SetOwnerID(template.OwnerID).
 		SetUpdatedBy(template.UpdatedBy).
-		SetVisibility(template.Visibility).
 		SetUpdated(template.Updated).
 		Save(ctx)
 	if err != nil {
@@ -396,7 +393,6 @@ func entHarnessConfigToStore(e *ent.HarnessConfig) *store.HarnessConfig {
 		OwnerID:              e.OwnerID,
 		CreatedBy:            e.CreatedBy,
 		UpdatedBy:            e.UpdatedBy,
-		Visibility:           e.Visibility,
 		Created:              e.Created,
 		Updated:              e.Updated,
 	}
@@ -444,7 +440,6 @@ func (s *TemplateStore) CreateHarnessConfig(ctx context.Context, hc *store.Harne
 		SetOwnerID(hc.OwnerID).
 		SetCreatedBy(hc.CreatedBy).
 		SetUpdatedBy(hc.UpdatedBy).
-		SetVisibility(hc.Visibility).
 		SetCreated(hc.Created).
 		SetUpdated(hc.Updated)
 
@@ -516,7 +511,6 @@ func (s *TemplateStore) UpdateHarnessConfig(ctx context.Context, hc *store.Harne
 		SetImageStatus(entharnessconfig.ImageStatus(hc.ImageStatus)).
 		SetOwnerID(hc.OwnerID).
 		SetUpdatedBy(hc.UpdatedBy).
-		SetVisibility(hc.Visibility).
 		SetUpdated(hc.Updated)
 	if hc.ImageStatusCheckedAt != nil {
 		update.SetImageStatusCheckedAt(*hc.ImageStatusCheckedAt)

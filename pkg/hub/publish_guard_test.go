@@ -178,13 +178,12 @@ func TestHandleAgentMessage_SkipsPublishOnPersistFailure(t *testing.T) {
 	}
 
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "guard-agent",
-		Slug:       "guard-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Runtime:    "managed",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "guard-agent",
+		Slug:      "guard-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
+		Runtime:   "managed",
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("CreateAgent: %v", err)
@@ -232,13 +231,12 @@ func TestHandleAgentMessage_ResponseStatusNotDeliveredOnPersistFailure(t *testin
 	}
 
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "status-agent",
-		Slug:       "status-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Runtime:    "managed",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "status-agent",
+		Slug:      "status-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
+		Runtime:   "managed",
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("CreateAgent: %v", err)
@@ -300,13 +298,12 @@ func TestHandleAgentMessage_PublishesOnPersistSuccess(t *testing.T) {
 	}
 
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "ok-agent",
-		Slug:       "ok-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Runtime:    "managed",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "ok-agent",
+		Slug:      "ok-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
+		Runtime:   "managed",
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("CreateAgent: %v", err)
@@ -374,7 +371,6 @@ func TestHandleGroupMessage_SkipsPublishOnPersistFailure(t *testing.T) {
 		ProjectID:       project.ID,
 		Phase:           "running",
 		RuntimeBrokerID: "broker-1",
-		Visibility:      store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(ctx, anchor); err != nil {
 		t.Fatalf("CreateAgent (anchor): %v", err)
@@ -386,7 +382,6 @@ func TestHandleGroupMessage_SkipsPublishOnPersistFailure(t *testing.T) {
 		ProjectID:       project.ID,
 		Phase:           "running",
 		RuntimeBrokerID: "broker-1",
-		Visibility:      store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(ctx, target); err != nil {
 		t.Fatalf("CreateAgent (target): %v", err)
@@ -454,7 +449,6 @@ func TestHandleGroupMessage_PublishesOnPersistSuccess(t *testing.T) {
 		ProjectID:       project.ID,
 		Phase:           "running",
 		RuntimeBrokerID: "broker-1",
-		Visibility:      store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(ctx, anchor); err != nil {
 		t.Fatalf("CreateAgent (anchor2): %v", err)
@@ -466,7 +460,6 @@ func TestHandleGroupMessage_PublishesOnPersistSuccess(t *testing.T) {
 		ProjectID:       project.ID,
 		Phase:           "running",
 		RuntimeBrokerID: "broker-1",
-		Visibility:      store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(ctx, target); err != nil {
 		t.Fatalf("CreateAgent (target2): %v", err)
@@ -530,7 +523,6 @@ func TestProcessMentions_SkipsPublishOnPersistFailure(t *testing.T) {
 		ProjectID:       project.ID,
 		Phase:           "running",
 		RuntimeBrokerID: "broker-1",
-		Visibility:      store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(ctx, primary); err != nil {
 		t.Fatalf("CreateAgent (primary): %v", err)
@@ -543,7 +535,6 @@ func TestProcessMentions_SkipsPublishOnPersistFailure(t *testing.T) {
 		ProjectID:       project.ID,
 		Phase:           "running",
 		RuntimeBrokerID: "broker-1",
-		Visibility:      store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(ctx, mentioned); err != nil {
 		t.Fatalf("CreateAgent (mentioned): %v", err)
@@ -600,7 +591,6 @@ func TestProcessMentions_PublishesOnPersistSuccess(t *testing.T) {
 		ProjectID:       project.ID,
 		Phase:           "running",
 		RuntimeBrokerID: "broker-1",
-		Visibility:      store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(ctx, primary); err != nil {
 		t.Fatalf("CreateAgent (primary2): %v", err)
@@ -613,7 +603,6 @@ func TestProcessMentions_PublishesOnPersistSuccess(t *testing.T) {
 		ProjectID:       project.ID,
 		Phase:           "running",
 		RuntimeBrokerID: "broker-1",
-		Visibility:      store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(ctx, mentioned); err != nil {
 		t.Fatalf("CreateAgent (mentioned2): %v", err)

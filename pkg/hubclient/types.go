@@ -56,7 +56,6 @@ type Agent struct {
 	DeletedAt         time.Time         `json:"deletedAt,omitempty"`
 	CreatedBy         string            `json:"createdBy,omitempty"`
 	OwnerID           string            `json:"ownerId,omitempty"`
-	Visibility        string            `json:"visibility,omitempty"`
 	MessageMode       string            `json:"messageMode,omitempty"`
 	StateVersion      int64             `json:"stateVersion,omitempty"`
 	ExitCode          *int              `json:"exitCode,omitempty"`
@@ -445,7 +444,6 @@ type Template struct {
 	OwnerID       string          `json:"ownerId,omitempty"`
 	CreatedBy     string          `json:"createdBy,omitempty"`
 	UpdatedBy     string          `json:"updatedBy,omitempty"`
-	Visibility    string          `json:"visibility,omitempty"`
 	Created       time.Time       `json:"created"`
 	Updated       time.Time       `json:"updated"`
 }
@@ -614,7 +612,6 @@ type HarnessConfig struct {
 	OwnerID       string             `json:"ownerId,omitempty"`
 	CreatedBy     string             `json:"createdBy,omitempty"`
 	UpdatedBy     string             `json:"updatedBy,omitempty"`
-	Visibility    string             `json:"visibility,omitempty"`
 	Created       time.Time          `json:"created"`
 	Updated       time.Time          `json:"updated"`
 }

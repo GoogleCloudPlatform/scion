@@ -115,7 +115,6 @@ type CreateHarnessConfigRequest struct {
 	Scope       string                   `json:"scope"`
 	ScopeID     string                   `json:"scopeId,omitempty"`
 	Config      *store.HarnessConfigData `json:"config,omitempty"`
-	Visibility  string                   `json:"visibility,omitempty"`
 	Files       []FileUploadRequest      `json:"files,omitempty"`
 }
 
@@ -285,15 +284,11 @@ func (s *Server) createHarnessConfig(w http.ResponseWriter, r *http.Request) {
 		Config:      req.Config,
 		Scope:       req.Scope,
 		ScopeID:     req.ScopeID,
-		Visibility:  req.Visibility,
 		Status:      store.HarnessConfigStatusPending,
 	}
 
 	if hc.Scope == "" {
 		hc.Scope = store.HarnessConfigScopeGlobal
-	}
-	if hc.Visibility == "" {
-		hc.Visibility = store.VisibilityPrivate
 	}
 
 	// If no files provided, mark as active immediately
@@ -525,7 +520,6 @@ func (s *Server) patchHarnessConfig(w http.ResponseWriter, r *http.Request, exis
 		Slug:        &existing.Slug,
 		DisplayName: &existing.DisplayName,
 		Description: &existing.Description,
-		Visibility:  &existing.Visibility,
 	}) {
 		return
 	}
@@ -948,12 +942,7 @@ func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request
 		Config:      source.Config,
 		Scope:       destScope,
 		ScopeID:     scopeID,
-		Visibility:  req.Visibility,
 		Status:      store.HarnessConfigStatusPending,
-	}
-
-	if clone.Visibility == "" {
-		clone.Visibility = source.Visibility
 	}
 
 	storagePath := storage.HarnessConfigStoragePath(s.HubID(), clone.Scope, clone.ScopeID, clone.Slug)

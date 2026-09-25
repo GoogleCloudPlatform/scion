@@ -788,14 +788,13 @@ func TestHarnessConfigReimport_ProjectUsesHarnessConfigAuthorization(t *testing.
 	grantUserActionOnResource(t, s, user.ID, "harness_config", project.ID, ActionCreate)
 
 	harnessConfig := &store.HarnessConfig{
-		ID:         tid("harness-config-reimport-authz"),
-		Name:       "my-config",
-		Slug:       "my-config",
-		Harness:    "claude",
-		Scope:      store.HarnessConfigScopeProject,
-		ScopeID:    project.ID,
-		Visibility: store.VisibilityPublic,
-		Status:     store.HarnessConfigStatusActive,
+		ID:      tid("harness-config-reimport-authz"),
+		Name:    "my-config",
+		Slug:    "my-config",
+		Harness: "claude",
+		Scope:   store.HarnessConfigScopeProject,
+		ScopeID: project.ID,
+		Status:  store.HarnessConfigStatusActive,
 	}
 	require.NoError(t, s.CreateHarnessConfig(ctx, harnessConfig))
 

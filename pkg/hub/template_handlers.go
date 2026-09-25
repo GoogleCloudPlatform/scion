@@ -44,7 +44,6 @@ type CreateTemplateRequest struct {
 	ProjectID    string                `json:"projectId,omitempty"` // Deprecated: use ScopeID
 	Config       *store.TemplateConfig `json:"config,omitempty"`
 	BaseTemplate string                `json:"baseTemplate,omitempty"`
-	Visibility   string                `json:"visibility,omitempty"`
 	Files        []FileUploadRequest   `json:"files,omitempty"`
 }
 
@@ -135,11 +134,10 @@ type DownloadURLInfo struct {
 
 // CloneTemplateRequest is the request for cloning a template.
 type CloneTemplateRequest struct {
-	Name       string `json:"name"`
-	Scope      string `json:"scope"`
-	ScopeID    string `json:"scopeId,omitempty"`
-	ProjectID  string `json:"projectId,omitempty"` // Deprecated
-	Visibility string `json:"visibility,omitempty"`
+	Name      string `json:"name"`
+	Scope     string `json:"scope"`
+	ScopeID   string `json:"scopeId,omitempty"`
+	ProjectID string `json:"projectId,omitempty"` // Deprecated
 }
 
 // UnmarshalJSON implements backward compatibility for the grove-to-project rename.
@@ -321,15 +319,11 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 		ScopeID:      scopeID,
 		ProjectID:    scopeID, // Keep for backwards compat
 		BaseTemplate: req.BaseTemplate,
-		Visibility:   req.Visibility,
 		Status:       store.TemplateStatusPending, // Start as pending until files uploaded
 	}
 
 	if template.Scope == "" {
 		template.Scope = store.TemplateScopeGlobal
-	}
-	if template.Visibility == "" {
-		template.Visibility = store.VisibilityPrivate
 	}
 
 	// For user-scoped templates, always set the owner and scope ID from the
@@ -576,7 +570,6 @@ func (s *Server) patchTemplateV2(w http.ResponseWriter, r *http.Request, id stri
 		Slug:        &existing.Slug,
 		DisplayName: &existing.DisplayName,
 		Description: &existing.Description,
-		Visibility:  &existing.Visibility,
 	}) {
 		return
 	}
@@ -986,15 +979,11 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		ScopeID:      scopeID,
 		ProjectID:    scopeID,
 		BaseTemplate: source.ID, // Track the source template
-		Visibility:   req.Visibility,
 		Status:       store.TemplateStatusPending,
 	}
 
 	if clone.Scope == "" {
 		clone.Scope = store.TemplateScopeProject
-	}
-	if clone.Visibility == "" {
-		clone.Visibility = source.Visibility
 	}
 
 	// For user-scoped clones, set the owner from the authenticated user

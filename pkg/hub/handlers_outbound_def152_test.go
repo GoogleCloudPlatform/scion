@@ -253,12 +253,11 @@ func TestDEF152_ConvRef_NoRecipient_NotParticipant(t *testing.T) {
 	// Create a direct DM between two OTHER principals.
 	otherAgentID := tid("d152-other-agent")
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID:         otherAgentID,
-		Name:       "d152-other-agent",
-		Slug:       "d152-other-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        otherAgentID,
+		Name:      "d152-other-agent",
+		Slug:      "d152-other-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}))
 	otherUserID := tid("d152-other-user")
 	require.NoError(t, s.CreateUser(ctx, &store.User{
@@ -393,12 +392,11 @@ func TestDEF152_AgentToAgentDM_DeliversViaOutbound(t *testing.T) {
 
 	// Create a second agent in the same project for the DM.
 	otherAgent := &store.Agent{
-		ID:         tid("d152-agent-dm-target"),
-		Name:       "d152-agent-dm-target",
-		Slug:       "d152-agent-dm-target",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        tid("d152-agent-dm-target"),
+		Name:      "d152-agent-dm-target",
+		Slug:      "d152-agent-dm-target",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, otherAgent))
 

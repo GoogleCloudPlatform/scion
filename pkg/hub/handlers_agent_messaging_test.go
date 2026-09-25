@@ -88,12 +88,11 @@ func TestOutboundMessage_RoutingErrorStopsDispatch(t *testing.T) {
 		t.Fatalf("CreateProject: %v", err)
 	}
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "routing-test-agent",
-		Slug:       "routing-test-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "routing-test-agent",
+		Slug:      "routing-test-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("CreateAgent: %v", err)
@@ -177,12 +176,11 @@ func TestOutboundMessage_RateLimitsFloodingAgent(t *testing.T) {
 
 	newAgent := func(name string) string {
 		a := &store.Agent{
-			ID:         api.NewUUID(),
-			Name:       name,
-			Slug:       name,
-			ProjectID:  project.ID,
-			Phase:      "running",
-			Visibility: store.VisibilityPrivate,
+			ID:        api.NewUUID(),
+			Name:      name,
+			Slug:      name,
+			ProjectID: project.ID,
+			Phase:     "running",
 		}
 		if err := s.CreateAgent(ctx, a); err != nil {
 			t.Fatalf("CreateAgent: %v", err)
@@ -257,12 +255,11 @@ func TestOutboundMessage_UnknownTypeIsChargedAsAgentTraffic(t *testing.T) {
 		t.Fatalf("CreateUser: %v", err)
 	}
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "mislabeller",
-		Slug:       "mislabeller",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "mislabeller",
+		Slug:      "mislabeller",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("CreateAgent: %v", err)
@@ -308,12 +305,11 @@ func TestOutboundMessage_TranscriptMirrorDoesNotStarveAgentMessages(t *testing.T
 		t.Fatalf("CreateUser: %v", err)
 	}
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "chatty",
-		Slug:       "chatty",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "chatty",
+		Slug:      "chatty",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("CreateAgent: %v", err)
@@ -392,12 +388,11 @@ func TestAgentMessage_B5_SpoofedSenderDoesNotDeriveConversationKey(t *testing.T)
 	}
 
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "target-agent",
-		Slug:       "target-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "target-agent",
+		Slug:      "target-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("CreateAgent: %v", err)
@@ -515,7 +510,6 @@ func TestBroadcast_B5F1_SpoofedSenderDoesNotDeriveConversationKey(t *testing.T) 
 	agent := &store.Agent{
 		ID: api.NewUUID(), Name: "target-agent", Slug: "target-agent",
 		ProjectID: project.ID, Phase: "running",
-		Visibility:      store.VisibilityPrivate,
 		RuntimeBrokerID: "test-broker",
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
@@ -636,13 +630,11 @@ func TestBroadcast_B5F1b_BroadcastedForcedTrueServerSide(t *testing.T) {
 	agent1 := &store.Agent{
 		ID: api.NewUUID(), Name: "a1", Slug: "a1",
 		ProjectID: project.ID, Phase: "running",
-		Visibility:      store.VisibilityPrivate,
 		RuntimeBrokerID: "test-broker",
 	}
 	agent2 := &store.Agent{
 		ID: api.NewUUID(), Name: "a2", Slug: "a2",
 		ProjectID: project.ID, Phase: "running",
-		Visibility:      store.VisibilityPrivate,
 		RuntimeBrokerID: "test-broker",
 	}
 	for _, a := range []*store.Agent{agent1, agent2} {
@@ -722,13 +714,11 @@ func TestBroadcast_R1_BroadcastingAgentDoesNotReceiveOwnMessage(t *testing.T) {
 	sender := &store.Agent{
 		ID: api.NewUUID(), Name: "sender-agent", Slug: "sender-agent",
 		ProjectID: project.ID, Phase: "running",
-		Visibility:      store.VisibilityPrivate,
 		RuntimeBrokerID: "test-broker",
 	}
 	peer := &store.Agent{
 		ID: api.NewUUID(), Name: "peer-agent", Slug: "peer-agent",
 		ProjectID: project.ID, Phase: "running",
-		Visibility:      store.VisibilityPrivate,
 		RuntimeBrokerID: "test-broker",
 	}
 	if err := s.CreateAgent(ctx, sender); err != nil {
@@ -853,7 +843,6 @@ func TestBroadcast_B5F1a_SenderOverrideStoresAuthIdentity(t *testing.T) {
 	agent := &store.Agent{
 		ID: api.NewUUID(), Name: "a1", Slug: "a1",
 		ProjectID: project.ID, Phase: "running",
-		Visibility: store.VisibilityPrivate,
 		// No RuntimeBrokerID — uses broadcastDirect path.
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
@@ -931,12 +920,10 @@ func TestBroadcast_B5F1c_SelfSkipUsesAuthNotSender(t *testing.T) {
 	senderAgent := &store.Agent{
 		ID: api.NewUUID(), Name: "sender-agent", Slug: "sender-agent",
 		ProjectID: project.ID, Phase: "running",
-		Visibility: store.VisibilityPrivate,
 	}
 	peerAgent := &store.Agent{
 		ID: api.NewUUID(), Name: "peer-agent", Slug: "peer-agent",
 		ProjectID: project.ID, Phase: "running",
-		Visibility: store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(ctx, senderAgent); err != nil {
 		t.Fatalf("CreateAgent sender: %v", err)
@@ -1018,13 +1005,11 @@ func TestBroker_R2_FanOutGlobalSelfSkipBySenderID(t *testing.T) {
 	sender := &store.Agent{
 		ID: api.NewUUID(), Name: "global-sender", Slug: "global-sender",
 		ProjectID: projectA.ID, Phase: "running",
-		Visibility:      store.VisibilityPrivate,
 		RuntimeBrokerID: "test-broker",
 	}
 	peer := &store.Agent{
 		ID: api.NewUUID(), Name: "global-peer", Slug: "global-peer",
 		ProjectID: projectA.ID, Phase: "running",
-		Visibility:      store.VisibilityPrivate,
 		RuntimeBrokerID: "test-broker",
 	}
 	if err := s.CreateAgent(ctx, sender); err != nil {
@@ -1101,7 +1086,6 @@ func TestBroker_R3b_WarnOnEmptySenderID(t *testing.T) {
 	agent := &store.Agent{
 		ID: api.NewUUID(), Name: "warn-agent", Slug: "warn-agent",
 		ProjectID: project.ID, Phase: "running",
-		Visibility:      store.VisibilityPrivate,
 		RuntimeBrokerID: "test-broker",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
@@ -1211,7 +1195,6 @@ func def11Setup(t *testing.T) (srv *Server, s store.Store, projectID, agentSlug,
 		ProjectID:       projectID,
 		RuntimeBrokerID: brokerID,
 		Phase:           "running",
-		Visibility:      store.VisibilityPrivate,
 	}); err != nil {
 		t.Fatalf("CreateAgent: %v", err)
 	}
@@ -1436,7 +1419,6 @@ func TestDEF19_GroupRecipient_FullHandlerPath(t *testing.T) {
 		ProjectID:       projectID,
 		RuntimeBrokerID: brokerID,
 		Phase:           "running",
-		Visibility:      store.VisibilityPrivate,
 	}); err != nil {
 		t.Fatalf("CreateAgent A: %v", err)
 	}
@@ -1447,7 +1429,6 @@ func TestDEF19_GroupRecipient_FullHandlerPath(t *testing.T) {
 		ProjectID:       projectID,
 		RuntimeBrokerID: brokerID,
 		Phase:           "running",
-		Visibility:      store.VisibilityPrivate,
 	}); err != nil {
 		t.Fatalf("CreateAgent B: %v", err)
 	}
@@ -1624,7 +1605,6 @@ func def49Setup(t *testing.T) (srv *Server, s store.Store, projectID string, tar
 		ProjectID:       projectID,
 		RuntimeBrokerID: brokerID,
 		Phase:           "running",
-		Visibility:      store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(ctx, targetAgent); err != nil {
 		t.Fatalf("CreateAgent (target): %v", err)
@@ -1940,12 +1920,12 @@ func TestPhase9e_GroupMessage_DeliveryText_StampedWhenSwitchOn(t *testing.T) {
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: agentIDA, Name: "9e-grp-agent-a", Slug: agentSlugA,
 		ProjectID: projectID, RuntimeBrokerID: brokerID,
-		Phase: "running", Visibility: store.VisibilityPrivate,
+		Phase: "running",
 	}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: agentIDB, Name: "9e-grp-agent-b", Slug: agentSlugB,
 		ProjectID: projectID, RuntimeBrokerID: brokerID,
-		Phase: "running", Visibility: store.VisibilityPrivate,
+		Phase: "running",
 	}))
 	_ = s.CreateUser(ctx, &store.User{
 		ID: userID, Email: "dev@localhost", DisplayName: "Development User",
@@ -2020,12 +2000,12 @@ func TestPhase9e_GroupMessage_DeliveryText_EmptyWhenSwitchOff(t *testing.T) {
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: agentIDA, Name: "9e-off-agent-a", Slug: agentSlugA,
 		ProjectID: projectID, RuntimeBrokerID: brokerID,
-		Phase: "running", Visibility: store.VisibilityPrivate,
+		Phase: "running",
 	}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: agentIDB, Name: "9e-off-agent-b", Slug: agentSlugB,
 		ProjectID: projectID, RuntimeBrokerID: brokerID,
-		Phase: "running", Visibility: store.VisibilityPrivate,
+		Phase: "running",
 	}))
 	_ = s.CreateUser(ctx, &store.User{
 		ID: userID, Email: "dev@localhost", DisplayName: "Development User",
@@ -2187,12 +2167,11 @@ func TestHandleAgentOutboundMessage_DMSyncBackfill(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, user))
 
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "dm-sync-agent",
-		Slug:       "dm-sync-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "dm-sync-agent",
+		Slug:      "dm-sync-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -2315,7 +2294,6 @@ func TestHandleAgentOutboundMessage_DMSyncBrokerPath(t *testing.T) {
 		Slug:            "dm-sync-broker-agent",
 		ProjectID:       project.ID,
 		Phase:           "running",
-		Visibility:      store.VisibilityPrivate,
 		RuntimeBrokerID: "test-broker",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
@@ -2423,12 +2401,11 @@ func TestAgentMessage_UserSenderUsesEmailNotDisplayName(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, user))
 
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "email-test-agent",
-		Slug:       "email-test-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "email-test-agent",
+		Slug:      "email-test-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -2476,12 +2453,11 @@ func TestAgentMessage_UserSenderUsesEmailNotDisplayName(t *testing.T) {
 	t.Run("plain_message", func(t *testing.T) {
 		// Use a different agent to avoid conversation overlap.
 		agent2 := &store.Agent{
-			ID:         api.NewUUID(),
-			Name:       "email-test-agent-2",
-			Slug:       "email-test-agent-2",
-			ProjectID:  project.ID,
-			Phase:      "running",
-			Visibility: store.VisibilityPrivate,
+			ID:        api.NewUUID(),
+			Name:      "email-test-agent-2",
+			Slug:      "email-test-agent-2",
+			ProjectID: project.ID,
+			Phase:     "running",
 		}
 		require.NoError(t, s.CreateAgent(ctx, agent2))
 
@@ -2527,12 +2503,11 @@ func TestAgentMessage_UserSenderUsesEmailNotDisplayName(t *testing.T) {
 		require.NoError(t, s.CreateUser(ctx, emailOnlyUser))
 
 		agent3 := &store.Agent{
-			ID:         api.NewUUID(),
-			Name:       "email-test-agent-3",
-			Slug:       "email-test-agent-3",
-			ProjectID:  project.ID,
-			Phase:      "running",
-			Visibility: store.VisibilityPrivate,
+			ID:        api.NewUUID(),
+			Name:      "email-test-agent-3",
+			Slug:      "email-test-agent-3",
+			ProjectID: project.ID,
+			Phase:     "running",
 		}
 		require.NoError(t, s.CreateAgent(ctx, agent3))
 
@@ -2597,12 +2572,11 @@ func TestOutboundMessage_RecipientUsesEmailNotDisplayName(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, user))
 
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "recip-email-agent",
-		Slug:       "recip-email-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "recip-email-agent",
+		Slug:      "recip-email-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -2645,12 +2619,11 @@ func TestOutboundMessage_RecipientUsesEmailNotDisplayName(t *testing.T) {
 	// --- Subtest 2: email recipient lookup (resolveOutboundRouting L179) ---
 	t.Run("email_recipient", func(t *testing.T) {
 		agent2 := &store.Agent{
-			ID:         api.NewUUID(),
-			Name:       "recip-email-agent-2",
-			Slug:       "recip-email-agent-2",
-			ProjectID:  project.ID,
-			Phase:      "running",
-			Visibility: store.VisibilityPrivate,
+			ID:        api.NewUUID(),
+			Name:      "recip-email-agent-2",
+			Slug:      "recip-email-agent-2",
+			ProjectID: project.ID,
+			Phase:     "running",
 		}
 		require.NoError(t, s.CreateAgent(ctx, agent2))
 
@@ -2692,12 +2665,11 @@ func TestGroupMessage_RecipientUsesEmailNotDisplayName(t *testing.T) {
 
 	agentSlug := "grpmsg-email-agent"
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "grpmsg-email-agent",
-		Slug:       agentSlug,
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "grpmsg-email-agent",
+		Slug:      agentSlug,
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -2795,12 +2767,11 @@ func TestBroadcast_SenderUsesEmailNotDisplayName(t *testing.T) {
 	srv.createProjectMembersGroup(ctx, project)
 
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "bcast-email-agent",
-		Slug:       "bcast-email-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "bcast-email-agent",
+		Slug:      "bcast-email-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -2873,12 +2844,11 @@ func TestAgentMessage_UserSenderFallsBackToUUID(t *testing.T) {
 	}))
 
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "uuid-fallback-agent",
-		Slug:       "uuid-fallback-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "uuid-fallback-agent",
+		Slug:      "uuid-fallback-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -2925,12 +2895,11 @@ func TestAgentMessage_UserSenderFallsBackToUUID(t *testing.T) {
 	// --- Subtest 2: plain message path with no-email identity ---
 	t.Run("plain_message_uuid_fallback", func(t *testing.T) {
 		agent2 := &store.Agent{
-			ID:         api.NewUUID(),
-			Name:       "uuid-fallback-agent-2",
-			Slug:       "uuid-fallback-agent-2",
-			ProjectID:  project.ID,
-			Phase:      "running",
-			Visibility: store.VisibilityPrivate,
+			ID:        api.NewUUID(),
+			Name:      "uuid-fallback-agent-2",
+			Slug:      "uuid-fallback-agent-2",
+			ProjectID: project.ID,
+			Phase:     "running",
 		}
 		require.NoError(t, s.CreateAgent(ctx, agent2))
 
@@ -2982,12 +2951,11 @@ func TestOutboundMessage_GroupConv_AutoRegistersParticipant(t *testing.T) {
 	}))
 
 	agent := &store.Agent{
-		ID:         tid("autopart-outbound-agent"),
-		Name:       "autopart-outbound-agent",
-		Slug:       "autopart-outbound-agent",
-		ProjectID:  projectID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        tid("autopart-outbound-agent"),
+		Name:      "autopart-outbound-agent",
+		Slug:      "autopart-outbound-agent",
+		ProjectID: projectID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -3197,7 +3165,6 @@ func TestAgentMessage_ThreadDerivedGroup_PrimaryAgentRegistered_AgentSender(t *t
 		ProjectID:       projectID,
 		RuntimeBrokerID: targetAgent.RuntimeBrokerID,
 		Phase:           "running",
-		Visibility:      store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, senderAgent))
 
@@ -3371,12 +3338,11 @@ func TestOutboundMessage_NativeGroupConvRef(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "native-group-agent",
-		Slug:       "native-group-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "native-group-agent",
+		Slug:      "native-group-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -3456,12 +3422,11 @@ func TestOutboundMessage_LegacyGroupConvRef(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "legacy-group-agent",
-		Slug:       "legacy-group-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "legacy-group-agent",
+		Slug:      "legacy-group-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -3540,12 +3505,11 @@ func TestOutboundMessage_UnexpectedGroupExternalRef(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "unexpected-extref-agent",
-		Slug:       "unexpected-extref-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "unexpected-extref-agent",
+		Slug:      "unexpected-extref-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 

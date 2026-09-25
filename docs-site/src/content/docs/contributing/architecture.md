@@ -104,7 +104,7 @@ Templates are configuration blueprints for agents. They define:
 
 **Template chain**: Templates support inheritance via a `base` field. When resolving a template, Scion walks the chain and merges configurations bottom-up (base first, then overrides).
 
-**Scopes (Hosted):** Templates can be scoped as `global`, `project`, or `user`, with visibility controls (`private`, `project`, `public`).
+**Scopes (Hosted):** Templates can be scoped as `global`, `project`, or `user`. Access is governed by scope and membership, not a separate visibility field.
 
 ### Harness
 

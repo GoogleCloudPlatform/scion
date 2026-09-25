@@ -195,7 +195,6 @@ func TestIntegration_AgentCreatesAgentWithNotify_FullFlow(t *testing.T) {
 		ProjectID:       env.project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
-		Visibility:      store.VisibilityPrivate,
 	}
 	require.NoError(t, env.store.CreateAgent(ctx, parent))
 
@@ -251,7 +250,6 @@ func TestIntegration_AgentCreatesAgentWithNotify_WaitingForInput(t *testing.T) {
 		ProjectID:       env.project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
-		Visibility:      store.VisibilityPrivate,
 	}
 	require.NoError(t, env.store.CreateAgent(ctx, parent))
 
@@ -299,7 +297,6 @@ func TestIntegration_AgentCreatesAgentWithNotify_MultipleStatusChanges(t *testin
 		ProjectID:       env.project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
-		Visibility:      store.VisibilityPrivate,
 	}
 	require.NoError(t, env.store.CreateAgent(ctx, parent))
 
@@ -357,7 +354,6 @@ func TestIntegration_StatusNormalization_LowercaseEventMatchesUppercaseTrigger(t
 		ProjectID:       env.project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
-		Visibility:      store.VisibilityPrivate,
 	}
 	require.NoError(t, env.store.CreateAgent(ctx, parent))
 
@@ -394,7 +390,6 @@ func TestIntegration_StatusNormalization_DedupAcrossCaseBoundaries(t *testing.T)
 		ProjectID:       env.project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
-		Visibility:      store.VisibilityPrivate,
 	}
 	require.NoError(t, env.store.CreateAgent(ctx, parent))
 
@@ -435,7 +430,6 @@ func TestIntegration_StatusNormalization_NonTriggerStatusNoNotification(t *testi
 		ProjectID:       env.project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
-		Visibility:      store.VisibilityPrivate,
 	}
 	require.NoError(t, env.store.CreateAgent(ctx, parent))
 
@@ -485,7 +479,6 @@ func TestIntegration_SubscriptionCleanup_HardDeleteCascades(t *testing.T) {
 		ProjectID:       env.project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
-		Visibility:      store.VisibilityPrivate,
 	}
 	require.NoError(t, env.store.CreateAgent(ctx, parent))
 
@@ -537,7 +530,6 @@ func TestIntegration_SubscriptionCleanup_SoftDeleteRetainsSubscriptions(t *testi
 		ProjectID:       env.project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
-		Visibility:      store.VisibilityPrivate,
 	}
 	require.NoError(t, env.store.CreateAgent(ctx, parent))
 
@@ -750,7 +742,6 @@ func TestIntegration_MultipleSubscribers_AgentAndUser(t *testing.T) {
 		ProjectID:       env.project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
-		Visibility:      store.VisibilityPrivate,
 	}
 	require.NoError(t, env.store.CreateAgent(ctx, parent))
 
@@ -811,7 +802,6 @@ func TestIntegration_NoNotifyFlag_NoSubscription(t *testing.T) {
 		ProjectID:       env.project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
-		Visibility:      store.VisibilityPrivate,
 	}
 	require.NoError(t, env.store.CreateAgent(ctx, parent))
 

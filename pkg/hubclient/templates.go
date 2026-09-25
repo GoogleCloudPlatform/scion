@@ -89,12 +89,11 @@ type ListTemplatesResponse struct {
 
 // CreateTemplateRequest is the request for creating a template.
 type CreateTemplateRequest struct {
-	Name       string          `json:"name"`
-	Harness    string          `json:"harness,omitempty"`
-	Scope      string          `json:"scope"`
-	ProjectID  string          `json:"projectId,omitempty"`
-	Config     *TemplateConfig `json:"config,omitempty"`
-	Visibility string          `json:"visibility,omitempty"`
+	Name      string          `json:"name"`
+	Harness   string          `json:"harness,omitempty"`
+	Scope     string          `json:"scope"`
+	ProjectID string          `json:"projectId,omitempty"`
+	Config    *TemplateConfig `json:"config,omitempty"`
 }
 
 // UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
@@ -129,9 +128,8 @@ func (r CreateTemplateRequest) MarshalJSON() ([]byte, error) {
 
 // UpdateTemplateRequest is the request for updating a template.
 type UpdateTemplateRequest struct {
-	Name       string          `json:"name,omitempty"`
-	Config     *TemplateConfig `json:"config,omitempty"`
-	Visibility string          `json:"visibility,omitempty"`
+	Name   string          `json:"name,omitempty"`
+	Config *TemplateConfig `json:"config,omitempty"`
 }
 
 // CloneTemplateRequest is the request for cloning a template.
