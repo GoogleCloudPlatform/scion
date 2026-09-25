@@ -1701,6 +1701,78 @@ func TestGetAgent_MissingWorkspaceNonGit(t *testing.T) {
 	}
 }
 
+// TestGetAgent_ResumeWithoutTemplateChainResolvesModelAlias is a regression
+// test for ptone/scion#1869: Claude agents got ANTHROPIC_MODEL=large (an
+// unresolved size alias) on resume because GetAgent returned early —
+// skipping model alias resolution entirely — whenever the agent's recorded
+// template could not be found locally in config.GetTemplateChainInProject.
+// This is the common shape for hub-dispatched agents: the broker they resume
+// on has the agent's own scion-agent.json and a local harness-config, but
+// not the named template that originally provisioned it.
+//
+// It also exercises the built-in alias fallback: the local harness-config
+// here (like a real hub-managed one can be) carries no model_aliases of its
+// own, so resolution must fall back to the harness's built-in table
+// (harnesses/claude/config.yaml) rather than passing "large" through.
+func TestGetAgent_ResumeWithoutTemplateChainResolvesModelAlias(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	// Global harness-config for "claude" with NO model_aliases — this
+	// mirrors a hub-managed harness-config that never got the alias table,
+	// forcing resolution through the harness's built-in defaults.
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	_ = os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
+	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
+
+	// Deliberately do NOT create a "vanished-template" directory anywhere —
+	// GetTemplateChainInProject must fail to find it, taking GetAgent down
+	// the early-return path this test guards.
+	const missingTemplate = "vanished-template"
+
+	// Non-git project directory (keeps worktree recovery out of scope).
+	projectDir := filepath.Join(tmpDir, "project")
+	scionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(scionDir, 0755)
+
+	agentName := "resume-alias-agent"
+	agentDir := filepath.Join(scionDir, "agents", agentName)
+	agentHome := config.GetAgentHomePath(scionDir, agentName)
+	_ = os.MkdirAll(agentDir, 0755)
+	_ = os.MkdirAll(agentHome, 0755)
+
+	// Persisted agent config with an unresolved size alias, as a hub-applied
+	// config would leave it when the hub's own store had no alias table
+	// either (the paired bug fixed in pkg/hub/harness_capabilities.go).
+	_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"),
+		[]byte(`{"harness":"claude","harness_config":"claude","model":"large"}`), 0644)
+	_ = os.WriteFile(filepath.Join(agentHome, "agent-info.json"),
+		[]byte(`{"name":"`+agentName+`","template":"`+missingTemplate+`"}`), 0644)
+
+	_, _, _, cfg, err := GetAgent(context.Background(), agentName, "", "", "", scionDir, "", "", "", "")
+	if err != nil {
+		t.Fatalf("GetAgent failed: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("expected non-nil config from GetAgent")
+	}
+	if cfg.Model == "large" {
+		t.Fatal("GetAgent returned the unresolved model alias \"large\" — " +
+			"resume must resolve it before returning, even without a local template chain")
+	}
+	const wantModel = "claude-opus-5-5" // harnesses/claude/config.yaml model_aliases.large
+	if cfg.Model != wantModel {
+		t.Errorf("expected model alias resolved to built-in default %q, got %q", wantModel, cfg.Model)
+	}
+}
+
 func TestProvisionAgent_SkillsWithMockResolver(t *testing.T) {
 	tmpDir := t.TempDir()
 
