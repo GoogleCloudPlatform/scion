@@ -3028,6 +3028,196 @@ func TestResolveAuthEnvOverlay_NilSettings(t *testing.T) {
 	}
 }
 
+// --- autoDetectAuthSelectedType: ptone/scion#1873 ---------------------------
+//
+// These pin the fix for the antigravity vertex-ai-via-passthrough gap: Start()
+// used to leave auth.SelectedType empty whenever nothing explicit chose one,
+// deferring entirely to the container-side provisioner's own (harness-local,
+// default_type-blind) guess. autoDetectAuthSelectedType makes Go the single
+// source of truth, reusing the same file -> env -> GCP-identity precedence
+// the hub preflight (extractRequiredEnvKeys) already uses.
+
+// antigravityLikeAuthMeta returns auth metadata shaped like
+// harnesses/antigravity/config.yaml's auth block, minus the ambient
+// GOOGLE_CLOUD_PROJECT->vertex-ai env autodetect entry — so tests that use it
+// isolate the GCP-identity leg instead of the (separate, pre-existing,
+// already-tested) env-presence leg.
+func antigravityLikeAuthMeta() *config.HarnessAuthMetadata {
+	return &config.HarnessAuthMetadata{
+		DefaultType: "oauth-token",
+		Types: map[string]config.HarnessAuthTypeMetadata{
+			"oauth-token": {
+				RequiredEnv: []config.HarnessAuthEnvRequirement{
+					{AnyOf: []string{"AGY_TOKEN"}},
+				},
+			},
+			"api-key": {
+				RequiredEnv: []config.HarnessAuthEnvRequirement{
+					{AnyOf: []string{"GEMINI_API_KEY", "GOOGLE_API_KEY"}},
+				},
+			},
+			"vertex-ai": {
+				RequiredEnv: []config.HarnessAuthEnvRequirement{
+					{AnyOf: []string{"GOOGLE_CLOUD_PROJECT"}},
+					{AnyOf: []string{"GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION"}},
+				},
+				RequiredFiles: []config.HarnessAuthFileRequirement{
+					{
+						Name: "gcloud-adc", Type: "file", Field: "GoogleAppCredentials",
+						AlternativeEnvKeys:                   []string{"GOOGLE_APPLICATION_CREDENTIALS"},
+						SkippedWhenGCPServiceAccountAssigned: true,
+						Required:                             true,
+					},
+				},
+			},
+		},
+		Autodetect: config.HarnessAuthAutodetect{
+			Env: map[string]string{
+				"AGY_TOKEN":      "oauth-token",
+				"GEMINI_API_KEY": "api-key",
+				"GOOGLE_API_KEY": "api-key",
+			},
+			Files: map[string]string{"gcloud-adc": "vertex-ai"},
+		},
+	}
+}
+
+// TestAutoDetectAuthSelectedType_GCPIdentityPassthrough proves the core
+// target scenario: with a GCP SA reachable via passthrough (signalled by
+// SCION_METADATA_MODE, the only channel this crosses into pkg/agent) and no
+// other credential present at all, vertex-ai is selected from identity alone
+// — with no ADC file, no AGY_TOKEN, no API key.
+func TestAutoDetectAuthSelectedType_GCPIdentityPassthrough(t *testing.T) {
+	auth := &api.AuthConfig{}
+	opts := &api.StartOptions{
+		Env: map[string]string{
+			"SCION_METADATA_MODE": "passthrough",
+		},
+	}
+
+	autoDetectAuthSelectedType(auth, antigravityLikeAuthMeta(), opts)
+
+	if auth.SelectedType != "vertex-ai" {
+		t.Errorf("SelectedType = %q, want %q (GCP SA reachable via passthrough)", auth.SelectedType, "vertex-ai")
+	}
+}
+
+// TestAutoDetectAuthSelectedType_GCPIdentityAssign is the "assign" twin of
+// the passthrough test above.
+func TestAutoDetectAuthSelectedType_GCPIdentityAssign(t *testing.T) {
+	auth := &api.AuthConfig{}
+	opts := &api.StartOptions{
+		Env: map[string]string{
+			"SCION_METADATA_MODE": "assign",
+		},
+	}
+
+	autoDetectAuthSelectedType(auth, antigravityLikeAuthMeta(), opts)
+
+	if auth.SelectedType != "vertex-ai" {
+		t.Errorf("SelectedType = %q, want %q (GCP SA assigned)", auth.SelectedType, "vertex-ai")
+	}
+}
+
+// TestAutoDetectAuthSelectedType_BlockModeNoAutoVertexAI is the regression
+// guard for "no SA means no vertex-ai auto-selection from identity": block
+// mode (or no GCP identity signal at all) must not auto-select vertex-ai.
+func TestAutoDetectAuthSelectedType_BlockModeNoAutoVertexAI(t *testing.T) {
+	for _, metadataMode := range []string{"block", ""} {
+		t.Run("mode="+metadataMode, func(t *testing.T) {
+			auth := &api.AuthConfig{}
+			opts := &api.StartOptions{Env: map[string]string{}}
+			if metadataMode != "" {
+				opts.Env["SCION_METADATA_MODE"] = metadataMode
+			}
+
+			autoDetectAuthSelectedType(auth, antigravityLikeAuthMeta(), opts)
+
+			if auth.SelectedType != "" {
+				t.Errorf("SelectedType = %q, want %q (no GCP SA available, must not auto-select vertex-ai)", auth.SelectedType, "")
+			}
+		})
+	}
+}
+
+// TestAutoDetectAuthSelectedType_FileSecretBeatsIdentity proves the file leg
+// runs first: an actually-staged ADC file secret should win even without any
+// identity signal at all (e.g. plain local ADC login, no hub-managed GCP
+// identity).
+func TestAutoDetectAuthSelectedType_FileSecretBeatsIdentity(t *testing.T) {
+	auth := &api.AuthConfig{}
+	opts := &api.StartOptions{
+		Env: map[string]string{}, // no SCION_METADATA_MODE at all
+		ResolvedSecrets: []api.ResolvedSecret{
+			{Name: "gcloud-adc", Type: "file", Target: "/home/scion/.config/gcloud/application_default_credentials.json"},
+		},
+	}
+
+	autoDetectAuthSelectedType(auth, antigravityLikeAuthMeta(), opts)
+
+	if auth.SelectedType != "vertex-ai" {
+		t.Errorf("SelectedType = %q, want %q (staged ADC file present)", auth.SelectedType, "vertex-ai")
+	}
+}
+
+// TestAutoDetectAuthSelectedType_EnvCredentialBeatsIdentity proves the env
+// leg outranks the GCP-identity leg: an actually-present API key alongside a
+// reachable GCP SA should still pick api-key, not vertex-ai — identity is the
+// fallback, not a takeover. (Using GEMINI_API_KEY rather than AGY_TOKEN here
+// deliberately: AGY_TOKEN maps to antigravity's own default_type
+// "oauth-token", and pickAutodetectCandidate's documented precedence
+// (pkg/harness/auth.go) treats "candidate == default_type" as "already on
+// default, no override" — i.e. it returns "" and this function's env leg
+// would defer further down the chain in that specific case. GEMINI_API_KEY
+// maps to a non-default type, so it exercises the precedence unambiguously.)
+func TestAutoDetectAuthSelectedType_EnvCredentialBeatsIdentity(t *testing.T) {
+	auth := &api.AuthConfig{}
+	opts := &api.StartOptions{
+		Env: map[string]string{
+			"SCION_METADATA_MODE": "passthrough",
+			"GEMINI_API_KEY":      "some-key",
+		},
+	}
+
+	autoDetectAuthSelectedType(auth, antigravityLikeAuthMeta(), opts)
+
+	if auth.SelectedType != "api-key" {
+		t.Errorf("SelectedType = %q, want %q (GEMINI_API_KEY present should win over bare identity)", auth.SelectedType, "api-key")
+	}
+}
+
+// TestAutoDetectAuthSelectedType_ExplicitSelectionWins proves the function is
+// a no-op once something explicit (CLI --harness-auth, template, profile,
+// scion-agent.json) has already set SelectedType, even in a passthrough
+// environment that would otherwise auto-select vertex-ai.
+func TestAutoDetectAuthSelectedType_ExplicitSelectionWins(t *testing.T) {
+	auth := &api.AuthConfig{SelectedType: "oauth-token"}
+	opts := &api.StartOptions{
+		Env: map[string]string{
+			"SCION_METADATA_MODE": "passthrough",
+		},
+	}
+
+	autoDetectAuthSelectedType(auth, antigravityLikeAuthMeta(), opts)
+
+	if auth.SelectedType != "oauth-token" {
+		t.Errorf("SelectedType = %q, want %q (explicit selection must not be overridden)", auth.SelectedType, "oauth-token")
+	}
+}
+
+// TestAutoDetectAuthSelectedType_NilAuthMetaNoOp guards the nil-authMeta path
+// (harness configs without a declarative auth: block).
+func TestAutoDetectAuthSelectedType_NilAuthMetaNoOp(t *testing.T) {
+	auth := &api.AuthConfig{}
+	opts := &api.StartOptions{Env: map[string]string{"SCION_METADATA_MODE": "passthrough"}}
+
+	autoDetectAuthSelectedType(auth, nil, opts)
+
+	if auth.SelectedType != "" {
+		t.Errorf("SelectedType = %q, want %q (nil authMeta must not auto-select anything)", auth.SelectedType, "")
+	}
+}
+
 // --- Gap 3 follow-up: the RANK limb -----------------------------------------
 //
 // Design §0.2 item 2: Gap 3 has a rank limb as well as a presence limb. The

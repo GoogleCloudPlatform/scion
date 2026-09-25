@@ -112,12 +112,12 @@ const (
 //     corruption on this particular control is "deny", not "do nothing" —
 //     doing nothing leaves the container on the host's compute identity.
 //
-// Passthrough has to be named here rather than left to the default arm. The hub
-// injects SCION_METADATA_MODE verbatim into resolvedEnv on the start/restart
-// path (httpdispatcher.go), so unlike the create path the variable really does
-// arrive holding "passthrough" — and treating that as corruption would put a
-// passthrough agent into block mode on its first restart, severing the metadata
-// access it is supposed to have.
+// Passthrough has to be named here rather than left to the default arm. The
+// broker sets SCION_METADATA_MODE=passthrough on both the create path
+// (start_context.go) and the start/restart path (the hub injects it verbatim
+// into resolvedEnv, httpdispatcher.go) — treating that value as corruption
+// would put a passthrough agent into block mode, severing the metadata access
+// it is supposed to have.
 func ConfigFromEnv() *Config {
 	rawMode, present := os.LookupEnv("SCION_METADATA_MODE")
 	if !present {
