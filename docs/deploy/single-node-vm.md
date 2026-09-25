@@ -250,8 +250,10 @@ script writes these hub-scoped env vars (injection mode `always`) into
 | `GOOGLE_CLOUD_LOCATION` | `global` (the global Vertex AI endpoint, intentionally) |
 
 They appear in the admin UI as hub env vars, and you can edit them there.
-Re-running `deploy.sh` resets both keys to the values above. If the write
-fails, the deploy continues and prints the command to run manually.
+The deploy only seeds these keys when they are absent. Edits made in the
+admin UI are kept across redeploys, and a deleted key is created again on the
+next deploy. If the write fails, the deploy continues and prints the command to
+run manually.
 
 ## Chat Plugins
 
@@ -447,5 +449,6 @@ is not working:
 The script is idempotent. Re-running it will:
 - Skip creating the VM and service account if they already exist
 - Preserve the existing `hub.env` (and its `SESSION_SECRET`)
+- Seed the hub-scoped `GOOGLE_CLOUD_*` env vars only if they are absent (admin edits are preserved)
 - Overwrite `settings.yaml` with the current configuration
 - Re-deploy the Cloud Run proxy (converges to the same state)

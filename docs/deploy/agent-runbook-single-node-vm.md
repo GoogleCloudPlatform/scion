@@ -405,8 +405,9 @@ them. Agents need them for Vertex AI inference:
 
 The rows are scoped to the hub instance ID, which is the `hub_id` field in
 `/healthz`. They appear in the admin UI and under
-`GET /api/v1/env?scope=hub`. Re-running the deploy upserts the rows in place,
-so any value an admin changed for these two keys is reset to the value above.
+`GET /api/v1/env?scope=hub`. The deploy only seeds the rows when they are
+absent. Edits made in the admin UI are kept across redeploys, and a deleted row
+is created again on the next deploy.
 Verify:
 
 ```bash
@@ -416,7 +417,8 @@ gcloud compute ssh scion-hub-HUB_NAME \
 ```
 
 **Expected:** Two rows, each with `scope` = `hub`, `scope_id` equal to the
-`/healthz` `hub_id`, and `injection_mode` = `always`.
+`/healthz` `hub_id`, and `injection_mode` = `always`. The values are the ones
+above unless an admin has edited them.
 
 **If they are missing:** A warning in the deploy output includes the exact
 command to run by hand. This step never fails the deploy.

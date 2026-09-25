@@ -1136,8 +1136,10 @@ fi
 #   - scope_id is the hub instance ID. The dispatcher selects hub rows by it,
 #     and so do the API and web UI. We read it from /healthz so it always
 #     matches the running hub.
-#   - The upsert targets the unique index envvar_key_scope_scope_id, so
-#     re-running the deploy updates the rows instead of adding duplicates.
+#   - The insert only seeds the rows: ON CONFLICT DO NOTHING against the
+#     unique index envvar_key_scope_scope_id means a redeploy never duplicates
+#     them and never overwrites an admin's edits. A row that was deleted is
+#     created again.
 #   - The hub reads env vars from the DB on every dispatch (there is no
 #     cache), so it does not need a restart.
 #   - Timestamps use Go's time.String() layout, which ent writes and the
@@ -1158,7 +1160,16 @@ sql_quote() { local s="${1//\'/\'\'}"; printf "'%s'" "$s"; }
 SQL_UUID="lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))), 2) || '-' || substr('89ab', 1 + (abs(random()) % 4), 1) || substr(lower(hex(randomblob(2))), 2) || '-' || lower(hex(randomblob(6)))"
 SQL_NOW="strftime('%Y-%m-%d %H:%M:%f +0000 UTC', 'now')"
 
-HUB_ENV_SQL_SCOPE_ID="$(sql_quote "${HUB_ENV_SCOPE_ID:-<hub_id from: curl -s localhost:8080/healthz>}")"
+if [[ -n "$HUB_ENV_SCOPE_ID" ]]; then
+  HUB_ENV_SQL_SCOPE_ID="$(sql_quote "${HUB_ENV_SCOPE_ID}")"
+else
+  # /healthz was unreadable, so the manual fallback below has to find the hub
+  # ID itself. It reads the persisted ID from ~/.scion/hub-id with the sqlite3
+  # CLI's readfile(). deploy.sh never sets hub_id explicitly, so that file is
+  # the hub ID. If the file is missing, readfile() returns NULL and the NOT NULL
+  # constraint rejects the insert, so no junk row is written.
+  HUB_ENV_SQL_SCOPE_ID="trim(CAST(readfile('/home/scion/.scion/hub-id') AS TEXT), char(10, 13, 32))"
+fi
 # GOOGLE_CLOUD_LOCATION=global on purpose: the global Vertex AI endpoint
 # serves the Gemini/Claude models agents use, and it is not tied to REGION.
 HUB_ENV_SQL="$(cat <<EOF
@@ -1168,10 +1179,7 @@ INSERT INTO env_vars (id, key, value, scope, scope_id, description, sensitive, i
 VALUES
   (${SQL_UUID}, 'GOOGLE_CLOUD_PROJECT', $(sql_quote "${PROJECT_ID}"), 'hub', ${HUB_ENV_SQL_SCOPE_ID}, 'Set by deploy.sh', 0, 'always', 0, 0, ${SQL_NOW}, ${SQL_NOW}),
   (${SQL_UUID}, 'GOOGLE_CLOUD_LOCATION', 'global', 'hub', ${HUB_ENV_SQL_SCOPE_ID}, 'Set by deploy.sh', 0, 'always', 0, 0, ${SQL_NOW}, ${SQL_NOW})
-ON CONFLICT(key, scope, scope_id) DO UPDATE SET
-  value = excluded.value,
-  injection_mode = excluded.injection_mode,
-  updated = excluded.updated;
+ON CONFLICT(key, scope, scope_id) DO NOTHING;
 SELECT '  ' || key || '=' || value || ' (scope=hub, injection=' || injection_mode || ')'
   FROM env_vars WHERE scope = 'hub' AND scope_id = ${HUB_ENV_SQL_SCOPE_ID}
   AND key IN ('GOOGLE_CLOUD_PROJECT', 'GOOGLE_CLOUD_LOCATION') ORDER BY key;
@@ -1189,6 +1197,7 @@ elif gcloud compute ssh "${INSTANCE_NAME}" \
       set -euo pipefail
       if ! command -v sqlite3 >/dev/null 2>&1; then
         # VMs created before sqlite3 was in cloud-init.yaml don't have it.
+        sudo apt-get update -qq >/dev/null
         sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sqlite3 >/dev/null
       fi
       sudo -u scion sqlite3 /home/scion/.scion/hub.db << 'SQLEOF'
@@ -1196,13 +1205,14 @@ ${HUB_ENV_SQL}
 SQLEOF
     "; then
   HUB_ENV_OK=true
-  echo "  Hub env vars set (scope_id=${HUB_ENV_SCOPE_ID})."
+  echo "  Hub env vars seeded (scope_id=${HUB_ENV_SCOPE_ID}; existing rows left unchanged)."
 fi
 
 if [[ "$HUB_ENV_OK" != "true" ]]; then
   warn "Hub-scoped env vars were NOT set. Agents will not get GOOGLE_CLOUD_PROJECT/GOOGLE_CLOUD_LOCATION."
   {
-    echo "  Set them manually (the deploy continues):"
+    echo "  Set them manually (the deploy continues). If sqlite3 is missing, first run"
+    echo "  'sudo apt-get update && sudo apt-get install -y sqlite3' on the VM."
     echo "  gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} -- \\"
     echo "    'sudo -u scion sqlite3 /home/scion/.scion/hub.db' <<'SQLEOF'"
     echo "${HUB_ENV_SQL}"
