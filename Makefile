@@ -73,9 +73,9 @@ test-fast:
 	@go test -tags no_sqlite ./...
 
 ## test-hub-sqlite: Run pkg/hub tests with SQLite enabled (no build tag). This is
-## the ~67% of pkg/hub's test files that "make test-fast" never compiles (see
-## ptone/scion#1118). Skips four tests with known pre-existing, tracked failures
-## (ptone/scion#1847) so this target can be used as a CI merge gate.
+# the ~67% of pkg/hub's test files that "make test-fast" never compiles (see
+# ptone/scion#1118). Skips four tests with known pre-existing, tracked failures
+# (ptone/scion#1847) so this target can be used as a CI merge gate.
 test-hub-sqlite:
 	@echo "Running pkg/hub tests (SQLite-enabled)..."
 	@go test -count=1 -timeout 15m \
