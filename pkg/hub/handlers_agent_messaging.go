@@ -1077,13 +1077,17 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
-	s.logMessage("outbound message sent",
+	outboundLogAttrs := []any{
 		"agent_id", agent.ID,
 		"agent_name", agent.Name,
 		"project_id", agent.ProjectID,
 		"recipient_id", result.RecipientID,
 		"msg_type", req.Type,
-	)
+	}
+	if result.ConversationID != "" {
+		outboundLogAttrs = append(outboundLogAttrs, "conversation_id", result.ConversationID)
+	}
+	s.logMessage("outbound message sent", outboundLogAttrs...)
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"message_id":   storeMsg.ID,

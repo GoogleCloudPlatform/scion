@@ -537,12 +537,16 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	}
 
 	// 14. Log delivery.
-	s.logMessage("agent DM: message dispatched",
+	dmLogAttrs := []any{
 		"sender_agent_id", input.SenderAgent.ID,
 		"target_agent_id", input.TargetAgent.ID,
 		"project_id", input.ProjectID,
 		"message_id", msgID,
-	)
+	}
+	if input.ConversationID != "" {
+		dmLogAttrs = append(dmLogAttrs, "conversation_id", input.ConversationID)
+	}
+	s.logMessage("agent DM: message dispatched", dmLogAttrs...)
 
 	// Return accepted result.
 	return &AgentDMResult{
