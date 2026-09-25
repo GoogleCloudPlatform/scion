@@ -119,7 +119,7 @@ allowed_paths=(
   "^pkg/secret/gcpbackend_test.go$"
   "^pkg/secret/localbackend_test.go$"
   "^pkg/storage/storage_test.go$"
-  "^pkg/store/models_backward_compat_test.go$"
+  "^pkg/store/models_json_test.go$"
   "^pkg/util/logging/cloud_handler_test.go$"
   "^pkg/wsprotocol/protocol_test.go$"
 
@@ -203,7 +203,6 @@ allowed_paths=(
   "^pkg/storage/storage.go$"
   "^pkg/store/entadapter/agent_session_metrics_store.go$"
   "^pkg/store/entadapter/composite.go$"
-  "^pkg/store/models.go$"
   "^pkg/store/storetest/domains_project_broker.go$"
   "^pkg/wsprotocol/protocol.go$"
 )

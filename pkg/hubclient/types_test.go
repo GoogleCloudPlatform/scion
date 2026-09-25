@@ -21,7 +21,28 @@ import (
 )
 
 func TestAgent_JSON(t *testing.T) {
-	t.Run("unmarshal legacy grove fields", func(t *testing.T) {
+	t.Run("unmarshal canonical fields only", func(t *testing.T) {
+		jsonData := `{
+			"id": "agent-1",
+			"project": "new-project",
+			"projectId": "new-id"
+		}`
+		var a Agent
+		if err := json.Unmarshal([]byte(jsonData), &a); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if a.Project != "new-project" {
+			t.Errorf("Project = %q, want %q", a.Project, "new-project")
+		}
+		if a.ProjectID != "new-id" {
+			t.Errorf("ProjectID = %q, want %q", a.ProjectID, "new-id")
+		}
+	})
+
+	t.Run("unmarshal ignores legacy grove fields", func(t *testing.T) {
+		// The decode-side legacy fallback is removed: a bare
+		// "grove"/"groveId" with no canonical counterpart no longer
+		// populates Project/ProjectID.
 		jsonData := `{
 			"id": "agent-1",
 			"grove": "legacy-grove",
@@ -31,25 +52,11 @@ func TestAgent_JSON(t *testing.T) {
 		if err := json.Unmarshal([]byte(jsonData), &a); err != nil {
 			t.Fatalf("Unmarshal failed: %v", err)
 		}
-		if a.Project != "legacy-grove" {
-			t.Errorf("Project = %q, want %q", a.Project, "legacy-grove")
+		if a.Project != "" {
+			t.Errorf("Project = %q, want empty (legacy grove must not be honored)", a.Project)
 		}
-		if a.ProjectID != "legacy-id" {
-			t.Errorf("ProjectID = %q, want %q", a.ProjectID, "legacy-id")
-		}
-	})
-
-	t.Run("unmarshal project priority", func(t *testing.T) {
-		jsonData := `{
-			"project": "new-project",
-			"grove": "old-grove"
-		}`
-		var a Agent
-		if err := json.Unmarshal([]byte(jsonData), &a); err != nil {
-			t.Fatalf("Unmarshal failed: %v", err)
-		}
-		if a.Project != "new-project" {
-			t.Errorf("Project = %q, want %q (project should win)", a.Project, "new-project")
+		if a.ProjectID != "" {
+			t.Errorf("ProjectID = %q, want empty (legacy groveId must not be honored)", a.ProjectID)
 		}
 	})
 
@@ -83,7 +90,30 @@ func TestAgent_JSON(t *testing.T) {
 	})
 }
 func TestProject_JSON(t *testing.T) {
-	t.Run("unmarshal legacy grove fields", func(t *testing.T) {
+	t.Run("unmarshal canonical fields only", func(t *testing.T) {
+		jsonData := `{
+			"id": "canonical-id",
+			"name": "canonical-name",
+			"projectType": "canonical-type"
+		}`
+		var p Project
+		if err := json.Unmarshal([]byte(jsonData), &p); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if p.ID != "canonical-id" {
+			t.Errorf("ID = %q, want %q", p.ID, "canonical-id")
+		}
+		if p.Name != "canonical-name" {
+			t.Errorf("Name = %q, want %q", p.Name, "canonical-name")
+		}
+		if p.ProjectType != "canonical-type" {
+			t.Errorf("ProjectType = %q, want %q", p.ProjectType, "canonical-type")
+		}
+	})
+
+	t.Run("unmarshal ignores legacy grove fields", func(t *testing.T) {
+		// The decode-side legacy fallback is removed: groveName/groveId/
+		// groveType no longer populate Name/ID/ProjectType.
 		jsonData := `{
 			"groveName": "legacy-name",
 			"groveId": "legacy-id",
@@ -93,14 +123,14 @@ func TestProject_JSON(t *testing.T) {
 		if err := json.Unmarshal([]byte(jsonData), &p); err != nil {
 			t.Fatalf("Unmarshal failed: %v", err)
 		}
-		if p.ID != "legacy-id" {
-			t.Errorf("ID = %q, want %q", p.ID, "legacy-id")
+		if p.ID != "" {
+			t.Errorf("ID = %q, want empty (legacy groveId must not be honored)", p.ID)
 		}
-		if p.Name != "legacy-name" {
-			t.Errorf("Name = %q, want %q", p.Name, "legacy-name")
+		if p.Name != "" {
+			t.Errorf("Name = %q, want empty (legacy groveName must not be honored)", p.Name)
 		}
-		if p.ProjectType != "legacy-type" {
-			t.Errorf("ProjectType = %q, want %q", p.ProjectType, "legacy-type")
+		if p.ProjectType != "" {
+			t.Errorf("ProjectType = %q, want empty (legacy groveType must not be honored)", p.ProjectType)
 		}
 	})
 

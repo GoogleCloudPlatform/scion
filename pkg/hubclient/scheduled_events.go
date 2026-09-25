@@ -79,24 +79,6 @@ type ScheduledEvent struct {
 	ScheduleID string     `json:"scheduleId,omitempty"`
 }
 
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (e *ScheduledEvent) UnmarshalJSON(data []byte) error {
-	type Alias ScheduledEvent
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(e),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if e.ProjectID == "" && aux.GroveID != "" {
-		e.ProjectID = aux.GroveID
-	}
-	return nil
-}
-
 // MarshalJSON implements custom marshaling to support legacy groveId field.
 func (e ScheduledEvent) MarshalJSON() ([]byte, error) {
 	type Alias ScheduledEvent

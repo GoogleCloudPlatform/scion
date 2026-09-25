@@ -62,28 +62,6 @@ type Agent struct {
 	ExitReason        string            `json:"exitReason,omitempty"`
 }
 
-// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
-func (a *Agent) UnmarshalJSON(data []byte) error {
-	type Alias Agent
-	aux := &struct {
-		Grove   string `json:"grove"`
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(a),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if a.Project == "" && aux.Grove != "" {
-		a.Project = aux.Grove
-	}
-	if a.ProjectID == "" && aux.GroveID != "" {
-		a.ProjectID = aux.GroveID
-	}
-	return nil
-}
-
 // MarshalJSON implements custom marshaling to support legacy grove fields.
 func (a Agent) MarshalJSON() ([]byte, error) {
 	type Alias Agent
@@ -142,32 +120,6 @@ type Project struct {
 	AgentCount             int               `json:"agentCount,omitempty"`
 	ActiveBrokerCount      int               `json:"activeBrokerCount,omitempty"`
 	ProjectType            string            `json:"projectType,omitempty"`
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
-func (p *Project) UnmarshalJSON(data []byte) error {
-	type Alias Project
-	aux := &struct {
-		GroveID   string `json:"groveId"`
-		GroveName string `json:"groveName"`
-		GroveType string `json:"groveType"`
-		*Alias
-	}{
-		Alias: (*Alias)(p),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if p.ID == "" && aux.GroveID != "" {
-		p.ID = aux.GroveID
-	}
-	if p.Name == "" && aux.GroveName != "" {
-		p.Name = aux.GroveName
-	}
-	if p.ProjectType == "" && aux.GroveType != "" {
-		p.ProjectType = aux.GroveType
-	}
-	return nil
 }
 
 // MarshalJSON implements custom marshaling to support legacy grove fields.
@@ -450,24 +402,6 @@ type Template struct {
 	UpdatedBy     string          `json:"updatedBy,omitempty"`
 	Created       time.Time       `json:"created"`
 	Updated       time.Time       `json:"updated"`
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
-func (t *Template) UnmarshalJSON(data []byte) error {
-	type Alias Template
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(t),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if t.ProjectID == "" && aux.GroveID != "" {
-		t.ProjectID = aux.GroveID
-	}
-	return nil
 }
 
 // MarshalJSON implements custom marshaling to support legacy grove fields.
