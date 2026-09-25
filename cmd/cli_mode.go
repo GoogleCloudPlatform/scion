@@ -22,10 +22,10 @@ const (
 var assistantDenied = map[string]bool{
 	"hub.auth":             true,
 	"hub.token":            true,
-	"grove.reconnect":      true,
+	"project.reconnect":    true,
 	"config.migrate":       true,
 	"config.cd-config":     true,
-	"config.cd-grove":      true,
+	"config.cd-project":    true,
 	"cdw":                  true,
 	"clean":                true,
 	"server.recover-authz": true,
