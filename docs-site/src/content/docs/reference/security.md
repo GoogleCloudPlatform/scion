@@ -108,6 +108,15 @@ To guarantee that no API endpoints or handlers can be accessed without explicit 
 - **Fail-Closed Dispatch Access**: The `checkBrokerDispatchAccess` guard is strictly fail-closed, ensuring that no agent execution can be triggered on a runtime broker unless dispatch permissions have been verified.
 - **Role Boundary Enforcement (`addGroupMember`)**: Non-user callers (such as automated agents or system services) are strictly capped at the plain `member` role when executing `addGroupMember` operations, preventing elevation of privileges across organizational boundaries.
 - **Strict Isolation Ordering (404-before-403)**: To prevent unauthorized users or agents from discovering the existence of sensitive resources via API probe responses, Scion enforces strict **resource isolation ordering**. If a caller requests a resource they are not authorized to view, the Hub performs resource existence checks and tenant bounds validation first. This ensures the Hub responds with a `404 Not Found` rather than a `403 Forbidden` if the resource does not exist or belongs to another tenant/project, preventing side-channel resource enumeration.
+- **Dispatcher-Level Route Authorization**: Route families that share a resource are authorized once, in a single dispatcher, before any handler runs:
+  - **Project workspace routes** (files, archive, pull, cache, sync status, WebDAV, and the legacy `groves` alias) check project access first. Any non-read method (for example `PUT`, `POST`, `DELETE`) requires update access on the project.
+  - **Template file routes** check access on the specific template before any read or write, and validate file paths with the same rules as the workspace file handlers.
+  - **Agent status updates**: an agent can update only its own status. Any non-agent caller needs update access on the agent.
+  - **Harness config routes** grant Runtime Brokers read-only access.
+  - **Project GitHub settings** require read access on the project for `GET`, and update access for any other method.
+- **Chat Search Visibility**: Chat search returns DM threads only to their participants.
+- **Project-Scoped Agent Deletion**: When a Runtime Broker deletes an agent, it resolves the agent within the requested project only, on every runtime. It never matches by bare slug across projects, so it cannot remove a same-slug agent's container, VM, or files in another project. The broker returns `404` when nothing matches and refuses the delete if the match is ambiguous.
+- **Sanitized Broker Failure Reasons**: Before a message failure reason reported by a Runtime Broker is stored or echoed into the sending agent's terminal, the Hub strips control characters and invalid UTF-8 and truncates it to 512 bytes.
 - **Regression Checks in CI**: To prevent future authorization regressions, an automated `authz-guard` check is wired into the CI pipeline (via a dedicated Makefile target and GitHub Actions step) that statically analyzes and validates that all API handlers are protected by appropriate authorization helpers.
 
 ### 3.5 Project File Access Containment
@@ -120,6 +129,8 @@ The Hub's project file handlers serve project workspaces and shared directories.
 - **Archives**: Directory archive downloads skip symlinks entirely.
 - **Deletes**: Deleting a symlink removes the link only, never its target.
 - **No implicit creation**: Read and delete requests on a missing workspace or shared directory no longer create it. Only uploads and writes do.
+- **Attachment ingest and staging**: Attachments are resolved through an `os.Root` anchored on the project scratchpad, so a symlink at any intermediate directory component cannot redirect them. A shared directory that is itself a symlink is refused.
+- **NFS shared directories**: With `server.shared_dir_storage.backend: nfs`, shared-directory operations use an `O_NOFOLLOW` component walk anchored on the project tree's inode. See [Shared Directory Storage](/scion/reference/server-config/#shared-directory-storage-servershared_dir_storage).
 
 ## 4. Secret Management
 
@@ -180,6 +191,8 @@ Scion ensures that sensitive credentials (GCP Service Accounts, API keys for LLM
 ### 4.6 Hub-Internal Keys
 
 JWT signing keys used for agent and user token issuance are stored through the secret backend when GCP Secret Manager is configured. In development mode (local backend), signing keys fall back to direct database storage with a logged warning. These keys use the internal `hub` scope and are not accessible through the user-facing secrets API.
+
+**Skill download signing key.** Hubs using local storage for the skill registry sign skill file download URLs with HMAC-SHA256. Cloud storage issues presigned object-store URLs and is unaffected. Each URL is a capability for exactly one file of one skill version (`?version=…&exp=…&sig=…`), valid for 15 minutes. The Hub signs it only after checking the creator's read access, and it lets a Runtime Broker download skill files at dispatch without a principal. The key follows the same persistence policy as the signing keys above. When stable keys are required (GCP Secret Manager backend), a failure to load it fails startup. Otherwise the Hub falls back to an in-memory key, which only invalidates URLs that are still outstanding.
 
 ### 4.7 Broker Authentication Secrets
 
