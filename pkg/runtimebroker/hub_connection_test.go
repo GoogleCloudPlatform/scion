@@ -535,8 +535,8 @@ func TestGlobalProjectRejection_MultiHub(t *testing.T) {
 	if !ok {
 		t.Fatal("expected error object in response")
 	}
-	if errObj["code"] != "global_grove_disabled" {
-		t.Errorf("expected error code 'global_grove_disabled', got %q", errObj["code"])
+	if errObj["code"] != "global_project_disabled" {
+		t.Errorf("expected error code 'global_project_disabled', got %q", errObj["code"])
 	}
 }
 
