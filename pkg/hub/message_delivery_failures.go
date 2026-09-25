@@ -197,6 +197,17 @@ func (s *Server) applyBrokerMessageFailure(ctx context.Context, brokerID string,
 	// (rather than only on next reload) and renders the "Failed" delivery
 	// badge the web chat client already supports for its own outbound
 	// messages (ptone/scion#1866).
+	//
+	// This function never calls CreateMessage itself — unlike the other
+	// PublishUserMessage call sites, it acts on a row persisted by an
+	// earlier request. msg came from the s.store.GetMessage(ctx, f.MessageID)
+	// lookup above, which already returned false on a missing/lookup-error
+	// row, and by this point s.markFailed(ctx, msg.ID, reason) has already
+	// written dispatch_state=failed for that same row (returning false above
+	// on error, before this point is reached). The two local field
+	// assignments just mirror that already-committed write onto the
+	// in-memory copy so the published event matches what markFailed
+	// persisted, rather than the stale pre-failure snapshot fetched above.
 	if strings.HasPrefix(msg.Sender, "user:") && s.events != nil {
 		msg.DispatchState = store.MessageDispatchFailed
 		msg.DispatchFailureReason = &reason
