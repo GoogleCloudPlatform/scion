@@ -126,6 +126,40 @@ jobs:
       - name: Build Binary
         run: make build
 
+  hub-sqlite-tests:
+    name: pkg/hub SQLite Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      # `make test-fast` (the Build & Test job, above) uses -tags no_sqlite,
+      # which excludes ~67% of pkg/hub's test files (ptone/scion#1118) --
+      # they carry a `//go:build !no_sqlite` constraint because they need a
+      # real SQLite-backed store. This job runs that excluded set, untagged,
+      # so it is actually compiled and run somewhere that can fail a PR.
+      #
+      # It is scoped to pkg/hub (not the whole module) and runs as its own
+      # parallel job so it doesn't add to the wall-clock time of Build & Test.
+      # Runtime is ~11 minutes; ~15m timeout matches the reproduction in
+      # ptone/scion#1847 (ok pkg/hub 613.006s), +buffer.
+      #
+      # Four tests are skipped: they have known, pre-existing failures
+      # unrelated to this job (ptone/scion#1847) that already reproduce on
+      # main today under `go test ./pkg/hub/...`. They are not new failures
+      # caused by newly-compiled tests. Remove the -skip once #1847 is fixed.
+      - name: Run pkg/hub tests (SQLite-enabled)
+        run: make test-hub-sqlite
+
   test-full-suite:
     name: Full Test Suite (reporting only)
     runs-on: ubuntu-latest
