@@ -25,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
@@ -321,6 +322,118 @@ func TestSkillScope_CoreScoped_OtherHubMemberStillAllowed(t *testing.T) {
 	rec := doRequestAsUser(t, srv, carol, http.MethodGet, "/api/v1/skills/"+skill.ID, nil)
 	assert.Equal(t, http.StatusOK, rec.Code,
 		"every hub member must still read hub-scoped (core) skills; got: %s", rec.Body.String())
+}
+
+// ----------------------------------------------------------------------
+// Public visibility is out of scope for #1901 and must be unaffected: every
+// CheckAccess(ActionRead) call site for skills is guarded by
+// `skill.Visibility != store.VisibilityPublic` (getSkill, listSkillVersions,
+// getSkillVersion, listSkills, handleSkillDownload, authorizeSkillFileRead,
+// skill_dispatch_resolve.go's resolve gate), so a public skill's read
+// authorization never reaches filterHubWideSkillGrants at all. These tests
+// pin that: a public user- or project-scoped skill must remain readable,
+// listable, resolvable and downloadable by a hub member who is neither the
+// owner nor a project member, exactly as before this change.
+// ----------------------------------------------------------------------
+
+func makeSkillPublic(t *testing.T, s store.Store, skill *store.Skill) {
+	t.Helper()
+	skill.Visibility = store.VisibilityPublic
+	require.NoError(t, s.UpdateSkill(context.Background(), skill))
+}
+
+// publishOneFileVersion runs the real two-phase publish flow (create draft
+// version, upload, finalize) as owner so the skill has a real, downloadable
+// file in local storage — handleSkillDownload needs actual storage objects
+// to generate signed URLs, not just a SkillVersion row.
+func publishOneFileVersion(t *testing.T, srv *Server, owner *store.User, skillID string) {
+	t.Helper()
+	content := []byte("---\nname: test\n---\n# Test")
+	uploadReq := FileUploadRequest{Path: "SKILL.md", Size: int64(len(content))}
+	manifest := []store.TemplateFile{{Path: "SKILL.md", Size: int64(len(content)), Hash: sha256Hex(content)}}
+
+	rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/skills/"+skillID+"/versions",
+		PublishVersionRequest{Version: "1.0.0", Files: []FileUploadRequest{uploadReq}})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var pub PublishVersionResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&pub))
+	require.Len(t, pub.UploadURLs, 1)
+
+	rec = doRawRequestAsUser(t, srv, owner, pub.UploadURLs[0].Method, pub.UploadURLs[0].URL, content)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	rec = doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/skills/"+skillID+"/finalize",
+		FinalizeSkillVersionRequest{Version: "1.0.0", Manifest: &SkillManifest{Files: manifest}})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+func TestSkillScope_PublicUserScopedSkill_OtherHubMemberStillAllowed(t *testing.T) {
+	srv, s, alice, carol, _ := setupSkillScopeTest(t)
+	stor, err := storage.NewLocal(storage.Config{Provider: storage.ProviderLocal, Bucket: "b", LocalPath: t.TempDir()})
+	require.NoError(t, err)
+	srv.SetStorage(stor)
+
+	skill := createTestSkill(t, s, "alice-public-user-skill", store.SkillScopeUser, alice.ID, alice.ID)
+	makeSkillPublic(t, s, skill)
+	publishOneFileVersion(t, srv, alice, skill.ID)
+
+	rec := doRequestAsUser(t, srv, carol, http.MethodGet, "/api/v1/skills/"+skill.ID, nil)
+	assert.Equal(t, http.StatusOK, rec.Code,
+		"a public user-scoped skill must remain readable by any hub member; got: %s", rec.Body.String())
+
+	recList := doRequestAsUser(t, srv, carol, http.MethodGet, "/api/v1/skills?scope=user&scopeId="+alice.ID, nil)
+	require.Equal(t, http.StatusOK, recList.Code)
+	var listResp ListSkillsResponse
+	require.NoError(t, json.NewDecoder(recList.Body).Decode(&listResp))
+	assert.NotEmpty(t, listResp.Skills, "a public user-scoped skill must still appear in another member's list")
+
+	recResolve := doRequestAsUser(t, srv, carol, http.MethodPost, "/api/v1/skills/resolve", ResolveSkillsRequest{
+		Skills: []ResolveSkillRef{{URI: "skill://scion/user/" + alice.ID + "/alice-public-user-skill"}},
+	})
+	require.Equal(t, http.StatusOK, recResolve.Code)
+	var resolveResp ResolveSkillsResponse
+	require.NoError(t, json.NewDecoder(recResolve.Body).Decode(&resolveResp))
+	assert.Empty(t, resolveResp.Errors, "a public user-scoped skill must still resolve for another member")
+	assert.NotEmpty(t, resolveResp.Resolved)
+
+	recDownload := doRequestAsUser(t, srv, carol, http.MethodGet, "/api/v1/skills/"+skill.ID+"/download?version=1.0.0", nil)
+	assert.Equal(t, http.StatusOK, recDownload.Code,
+		"a public user-scoped skill's download-URL issuance must still succeed for another member; got: %s", recDownload.Body.String())
+}
+
+func TestSkillScope_PublicProjectScopedSkill_OtherHubMemberStillAllowed(t *testing.T) {
+	srv, s, alice, carol, project := setupSkillScopeTest(t)
+	stor, err := storage.NewLocal(storage.Config{Provider: storage.ProviderLocal, Bucket: "b", LocalPath: t.TempDir()})
+	require.NoError(t, err)
+	srv.SetStorage(stor)
+
+	skill := createTestSkill(t, s, "alice-public-project-skill", store.SkillScopeProject, project.ID, alice.ID)
+	makeSkillPublic(t, s, skill)
+	publishOneFileVersion(t, srv, alice, skill.ID)
+
+	rec := doRequestAsUser(t, srv, carol, http.MethodGet, "/api/v1/skills/"+skill.ID, nil)
+	assert.Equal(t, http.StatusOK, rec.Code,
+		"a public project-scoped skill must remain readable by a non-member hub member; got: %s", rec.Body.String())
+
+	recList := doRequestAsUser(t, srv, carol, http.MethodGet, "/api/v1/skills?scope=project&scopeId="+project.ID, nil)
+	require.Equal(t, http.StatusOK, recList.Code)
+	var listResp ListSkillsResponse
+	require.NoError(t, json.NewDecoder(recList.Body).Decode(&listResp))
+	assert.NotEmpty(t, listResp.Skills, "a public project-scoped skill must still appear in a non-member's list")
+
+	recResolve := doRequestAsUser(t, srv, carol, http.MethodPost, "/api/v1/skills/resolve", ResolveSkillsRequest{
+		Skills:    []ResolveSkillRef{{URI: "skill://project/alice-public-project-skill"}},
+		ProjectID: project.ID,
+	})
+	require.Equal(t, http.StatusOK, recResolve.Code)
+	var resolveResp ResolveSkillsResponse
+	require.NoError(t, json.NewDecoder(recResolve.Body).Decode(&resolveResp))
+	assert.Empty(t, resolveResp.Errors, "a public project-scoped skill must still resolve for a non-member")
+	assert.NotEmpty(t, resolveResp.Resolved)
+
+	recDownload := doRequestAsUser(t, srv, carol, http.MethodGet, "/api/v1/skills/"+skill.ID+"/download?version=1.0.0", nil)
+	assert.Equal(t, http.StatusOK, recDownload.Code,
+		"a public project-scoped skill's download-URL issuance must still succeed for a non-member; got: %s", recDownload.Body.String())
 }
 
 // ----------------------------------------------------------------------
