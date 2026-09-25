@@ -117,6 +117,15 @@ func NewGoogleIdentityResolver(
 //     authoritative email domain requirement.
 //  4. Create atomic binding and return user.
 func (r *GoogleIdentityResolver) Resolve(ctx context.Context, identity *ValidatedGoogleIdentity, policy ResolvePolicy) (*store.User, error) {
+	if identity == nil {
+		// A GoogleCredentialValidator that returns (nil, nil) is a contract
+		// violation, not a verification failure — return a generic error
+		// rather than reaching the nil pointer dereference on identity.Issuer
+		// below. Both callers (ge_exchange.go and auth_external_bearer.go)
+		// already map an unrecognized Resolve error to a 5xx, not the 4xx
+		// arms reserved for the named sentinels below.
+		return nil, fmt.Errorf("google identity resolver: no identity to resolve")
+	}
 	canonicalIssuer := canonicalizeGoogleIssuer(identity.Issuer)
 
 	// Step 1: Look up existing binding.
