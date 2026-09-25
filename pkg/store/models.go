@@ -243,6 +243,14 @@ type AgentAppliedConfig struct {
 // is never a legitimate value to keep surfacing from the durable config
 // record, independent of who is asking.
 //
+// InlineConfig.Env and the Telemetry cloud-export header map get the same
+// default-closed treatment as Env: both are cleared in the returned copy
+// unless canAttach is true. This is done by deep-copying InlineConfig (see
+// redactInlineConfigForResponse), never by mutating ac.InlineConfig or its
+// nested Telemetry config in place -- both are shared pointers, and the
+// caller's original agent object (which the persistence path may still
+// write from) must come out of this call unmodified.
+//
 // Nothing else needs to call this to be safe: without it, MarshalJSON's
 // default omits Env entirely (see the envResponseVisible field doc), so a
 // response path that never calls ResponseView fails closed rather than open.
@@ -252,7 +260,75 @@ func (ac *AgentAppliedConfig) ResponseView(canAttach bool) *AgentAppliedConfig {
 	}
 	view := *ac
 	view.envResponseVisible = canAttach
+	view.InlineConfig = redactInlineConfigForResponse(ac.InlineConfig, canAttach)
 	return &view
+}
+
+// redactInlineConfigForResponse returns a deep copy of cfg suitable for a
+// response body: Env and the Telemetry cloud-export header map are cleared
+// unless canAttach is true, and GITHUB_TOKEN is stripped from Env
+// unconditionally, mirroring AgentAppliedConfig's own top-level rule (see
+// ResponseView/MarshalJSON above). The input is never mutated.
+//
+// This redaction lives here, in the response-view copy, and deliberately
+// not as a MarshalJSON method on api.ScionConfig or api.TelemetryConfig:
+// marshalAppliedConfig's persistence path (pkg/store/entadapter) bypasses
+// AgentAppliedConfig's own MarshalJSON via a local alias type, but that
+// alias trick only defeats a MarshalJSON defined on AgentAppliedConfig
+// itself -- encoding/json would still invoke a MarshalJSON defined on the
+// *nested* ScionConfig/TelemetryConfig types when it reaches the
+// InlineConfig field, alias or no alias, which would silently gate what
+// gets written to the DB. Redacting in this copy instead of in a nested
+// MarshalJSON keeps persistence and the response view fully decoupled: this
+// function's caller (ResponseView) is only ever reached from response
+// serialization code, never from marshalAppliedConfig.
+func redactInlineConfigForResponse(cfg *api.ScionConfig, canAttach bool) *api.ScionConfig {
+	if cfg == nil {
+		return nil
+	}
+	copied := *cfg
+	if !canAttach {
+		copied.Env = nil
+	} else if len(cfg.Env) > 0 {
+		env := make(map[string]string, len(cfg.Env))
+		for k, v := range cfg.Env {
+			if k == "GITHUB_TOKEN" {
+				continue
+			}
+			env[k] = v
+		}
+		if len(env) == 0 {
+			env = nil
+		}
+		copied.Env = env
+	}
+	copied.Telemetry = redactTelemetryForResponse(cfg.Telemetry, canAttach)
+	return &copied
+}
+
+// redactTelemetryForResponse returns a deep copy of cfg with the cloud-export
+// header map (which routinely carries authorization values for the OTLP
+// collector) cleared unless canAttach is true. Every other field is copied
+// through unchanged. The input is never mutated.
+func redactTelemetryForResponse(cfg *api.TelemetryConfig, canAttach bool) *api.TelemetryConfig {
+	if cfg == nil {
+		return nil
+	}
+	copied := *cfg
+	if cfg.Cloud != nil {
+		cloud := *cfg.Cloud
+		if !canAttach {
+			cloud.Headers = nil
+		} else if len(cfg.Cloud.Headers) > 0 {
+			headers := make(map[string]string, len(cfg.Cloud.Headers))
+			for k, v := range cfg.Cloud.Headers {
+				headers[k] = v
+			}
+			cloud.Headers = headers
+		}
+		copied.Cloud = &cloud
+	}
+	return &copied
 }
 
 // MarshalJSON is the single choke point through which AppliedConfig.Env can
