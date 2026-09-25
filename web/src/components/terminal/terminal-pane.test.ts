@@ -537,3 +537,29 @@ describe('overlay strings', () => {
     expect(FakeSocket.instances).toHaveLength(1); // preflight failed before a new socket
   });
 });
+
+// miller79/scion#125: the pane chrome must follow the app theme; only the
+// terminal viewport (and overlays drawn on it) may pin a dark palette.
+it('themes the pane chrome with --scion-* tokens and keeps the viewport dark', () => {
+  const ctor = customElements.get('scion-terminal-pane') as unknown as {
+    styles: { cssText: string };
+  };
+  const cssText = ctor.styles.cssText;
+  const chrome =
+    /^\s*(:host|\.toolbar|\.back-link|\.separator|\.agent-name|\.status-(indicator|dot)|\.reconnect-btn|\.pane-action-btn|\.capture-auth-btn|\.toggle-group|\.loading-state|\.spinner|\.error-state \.error-detail|\.port-(btn|dropdown))/;
+  const offenders: string[] = [];
+  for (const block of cssText.split('}')) {
+    const [selector, body = ''] = block.split('{');
+    if (!selector || !chrome.test(selector.trim())) continue;
+    for (const m of body.matchAll(/(color|background|border(?:-[a-z]+)?)\s*:\s*([^;]+)/g)) {
+      const value = m[2].trim();
+      if (/#[0-9a-f]{3,8}\b|rgba?\(/i.test(value) && !value.includes('var(--scion-')) {
+        offenders.push(`${selector.trim()} { ${m[1]}: ${value} }`);
+      }
+    }
+  }
+  expect(offenders).toEqual([]);
+  expect(cssText).toMatch(/:host\s*\{[^}]*background:\s*var\(--scion-surface/);
+  expect(cssText).toMatch(/:host\s*\{[^}]*color:\s*var\(--scion-text/);
+  expect(cssText).toMatch(/\.terminal-wrapper\s*\{[^}]*background:\s*#1a1a1a/);
+});
