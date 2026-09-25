@@ -3546,18 +3546,29 @@ func (s *Server) scheduledCreatorIdentity(ctx context.Context, createdBy string)
 }
 
 // applyScheduledProjectDefaultGCPIdentity is the scheduler-path twin of the
-// project-default GCP identity block in createAgentInProject
+// project-default/hub-default GCP identity ladder in createAgentInProject
 // (handlers_agents_core.go). A scheduled dispatch carries no explicit
-// gcp_identity, so only the project default applies. The same checks run in
-// the same order — SA reachable from the project, SA verified, then the full
-// authorizeSAAssignment gate (SurfaceProjectDefault) against the immediate
-// creator, whose identity must already be on ctx — and, as on the create
-// path, a project-default SA that fails any check fails the dispatch rather
-// than silently degrading.
+// gcp_identity, so the ladder here starts one rung down: project default,
+// then — when the project has no default at all — the hub default, then
+// block (#1927). The same checks run in the same order at each assign rung
+// (SA reachable from the project, SA verified, then the full
+// evaluateSAAssignment gate against the immediate creator, whose identity
+// must already be on ctx) via resolveDefaultSAAssignmentCore, the resolver
+// shared with the HTTP create path's project-default and hub-default rungs
+// (default_gcp_identity.go) — and, as on the create path, a default SA that
+// fails any check fails the dispatch rather than silently degrading.
 //
-// When the project has no default GCP identity mode (or "block"), the
-// applied config is left untouched, preserving the scheduler path's prior
-// behaviour (#1797).
+// Authorization principal: the scheduled dispatch has no interactive caller,
+// so both the project-default and hub-default assign rungs authorize against
+// the schedule's immediate creator — resolved by scheduledCreatorIdentity and
+// placed on ctx by the caller (dispatchAgentEventHandler) before this runs.
+// The hub-default rung mirrors the project-default rung's existing choice
+// here; it does not introduce a new principal.
+//
+// When neither the project nor the hub has a default GCP identity mode (or
+// either is explicitly "block"), the applied config is left untouched (nil),
+// preserving the scheduler path's prior behaviour (#1797): unlike the create
+// path, this floor of the ladder does not write an explicit "block" record.
 func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, agent *store.Agent, project *store.Project) error {
 	if agent.AppliedConfig == nil {
 		agent.AppliedConfig = &store.AgentAppliedConfig{}
@@ -3580,36 +3591,57 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 			}
 			return nil
 		}
-		sa, err := s.store.GetGCPServiceAccount(ctx, projectSettings.DefaultGCPIdentityServiceAccountID)
-		// sa == nil is explicit even though ReachableFromProject is nil-safe,
-		// so a store returning (nil, nil) visibly takes this branch.
-		if err != nil || sa == nil || !sa.ReachableFromProject(agent.ProjectID) {
-			slog.Warn("project-default SA assignment failed: service account not available",
-				"surface", SurfaceProjectDefault,
-				"project_id", agent.ProjectID,
-				"sa_id", projectSettings.DefaultGCPIdentityServiceAccountID,
-				"err", err)
-			return fmt.Errorf("project default GCP service account is not available in project %q", agent.ProjectID)
+		cfg, err := s.resolveDefaultSAAssignmentCore(ctx, nil, agent.ProjectID,
+			projectSettings.DefaultGCPIdentityServiceAccountID, SurfaceProjectDefault, defaultTierProject)
+		if err != nil {
+			return err
 		}
-		if !sa.Verified {
-			slog.Warn("project-default SA assignment failed: service account not verified",
-				"surface", SurfaceProjectDefault,
-				"project_id", agent.ProjectID,
-				"sa_id", sa.ID, "sa_email", sa.Email)
-			return fmt.Errorf("project default GCP service account %q is not verified", sa.Email)
-		}
-		if denial := s.evaluateSAAssignment(ctx, nil, sa, SurfaceProjectDefault); denial != nil {
-			slog.Warn("project-default SA assignment denied by authorization gate",
-				"surface", SurfaceProjectDefault,
-				"project_id", agent.ProjectID,
-				"sa_id", sa.ID, "sa_email", sa.Email)
-			return denial
-		}
-		agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
-			MetadataMode:        store.GCPMetadataModeAssign,
-			ServiceAccountID:    sa.ID,
-			ServiceAccountEmail: sa.Email,
-			ProjectID:           sa.ProjectID,
+		agent.AppliedConfig.GCPIdentity = cfg
+	case store.GCPMetadataModeBlock:
+		// Project explicitly set "block" — stop the ladder here, matching the
+		// create path's rule that explicit block does not fall through to
+		// the hub default (handlers_agents_core.go). No case previously
+		// matched "block" on this path, so nothing was written to
+		// AppliedConfig.GCPIdentity; that is unchanged here.
+	default:
+		// No project default configured (empty string) — fall back to the
+		// hub-level operational default, one rung down the ladder, mirroring
+		// handlers_agents_core.go's default arm.
+		hubDefaults := s.hubAgentDefaults()
+		switch hubDefaults.DefaultGCPIdentityMode {
+		case store.GCPMetadataModePassthrough:
+			// Hub-default passthrough is confined to the embedded broker,
+			// exactly as on the create path; see hubDefaultPassthroughAllowed.
+			mode := store.GCPMetadataModeBlock
+			if s.hubDefaultPassthroughAllowed(ctx, agent.RuntimeBrokerID, agent.ProjectID) {
+				mode = store.GCPMetadataModePassthrough
+			}
+			agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{MetadataMode: mode}
+			if mode == store.GCPMetadataModePassthrough && agent.RuntimeBrokerID != "" {
+				if err := s.translatePassthroughForSandbox(ctx, agent, agent.RuntimeBrokerID); err != nil {
+					return fmt.Errorf("failed to configure GCP identity for sandbox runtime: %w", err)
+				}
+			}
+		case store.GCPMetadataModeAssign:
+			if hubDefaults.DefaultGCPIdentityServiceAccountID == "" {
+				agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
+					MetadataMode: store.GCPMetadataModeBlock,
+				}
+				return nil
+			}
+			cfg, err := s.resolveDefaultSAAssignmentCore(ctx, nil, agent.ProjectID,
+				hubDefaults.DefaultGCPIdentityServiceAccountID, SurfaceHubDefault, defaultTierHub)
+			if err != nil {
+				return err
+			}
+			agent.AppliedConfig.GCPIdentity = cfg
+		default:
+			// No hub default either (or the hub default is itself "block") —
+			// preserve the scheduler path's prior behaviour when nothing at
+			// all is configured: leave AppliedConfig.GCPIdentity untouched
+			// (nil) rather than writing an explicit "block" record, unlike
+			// the create path's floor. Pinned by
+			// TestScheduledDispatch_NoProjectDefaultLeavesGCPIdentityUnchanged.
 		}
 	}
 	return nil
