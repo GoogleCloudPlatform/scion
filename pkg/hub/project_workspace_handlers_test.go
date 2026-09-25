@@ -419,6 +419,60 @@ func TestProjectWorkspaceDownload_InlineView(t *testing.T) {
 	assert.Equal(t, "inline content", rec.Body.String())
 }
 
+// assertSandboxed checks that a served workspace file carries the sandbox
+// CSP (miller79/scion#131) and never allow-same-origin, which would let the
+// document act with the viewer's session on the hub's origin.
+func assertSandboxed(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	csp := rec.Header().Get("Content-Security-Policy")
+	assert.Equal(t, workspaceFileSandboxCSP, csp)
+	assert.True(t, strings.HasPrefix(csp, "sandbox"), "CSP must start with the sandbox directive: %q", csp)
+	assert.Contains(t, csp, "allow-scripts", "scripts stay enabled so generated reports keep working")
+	assert.NotContains(t, csp, "allow-same-origin", "allow-same-origin would undo the isolation")
+}
+
+func TestProjectWorkspaceDownload_InlineHTMLIsSandboxed(t *testing.T) {
+	srv, _ := testServer(t)
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS Download Sandbox")
+
+	page := []byte("<!doctype html><p>report</p><script>document.title = 'x'</script>")
+	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "report.html"), page, 0644))
+
+	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s/workspace/files/report.html?view=true", project.ID), nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.True(t, strings.HasPrefix(rec.Header().Get("Content-Type"), "text/html"))
+	assert.Contains(t, rec.Header().Get("Content-Disposition"), "inline")
+	assertSandboxed(t, rec)
+	assert.Equal(t, string(page), rec.Body.String(), "content is served unchanged")
+
+	// Downloads carry it too, in case a browser renders one.
+	rec = doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s/workspace/files/report.html", project.ID), nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Header().Get("Content-Disposition"), "attachment")
+	assertSandboxed(t, rec)
+}
+
+func TestSharedDirFiles_InlineHTMLIsSandboxed(t *testing.T) {
+	hostBase := setNFSSharedDirStorageGlobalSettings(t)
+
+	srv, _ := testServer(t)
+	project := createTestGitProject(t, srv, "Shared Dir Sandbox", "github.com/test/shared-dir-sandbox")
+	addSharedDirToProject(t, srv, project.ID, "artifacts")
+
+	leaf := filepath.Join(hostBase, "projects", project.ID, "shared-dirs", "artifacts")
+	require.NoError(t, os.MkdirAll(leaf, 0o2775))
+	require.NoError(t, os.WriteFile(filepath.Join(leaf, "graph.html"), []byte("<script>1</script>"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(leaf, "chart.svg"), []byte(`<svg xmlns="http://www.w3.org/2000/svg"><script>1</script></svg>`), 0o644))
+
+	for _, name := range []string{"graph.html", "chart.svg"} {
+		rec := doRequest(t, srv, http.MethodGet,
+			fmt.Sprintf("/api/v1/projects/%s/shared-dirs/artifacts/files/%s?view=true", project.ID, name), nil)
+		require.Equal(t, http.StatusOK, rec.Code, "%s: %s", name, rec.Body.String())
+		assert.Contains(t, rec.Header().Get("Content-Disposition"), "inline", name)
+		assertSandboxed(t, rec)
+	}
+}
+
 func TestProjectWorkspaceDownload_FormatJSON(t *testing.T) {
 	srv, _ := testServer(t)
 	project, workspacePath := createTestHubManagedProject(t, srv, "WS Download JSON")

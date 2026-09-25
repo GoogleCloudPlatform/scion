@@ -58,6 +58,17 @@ const maxEditableFileSize = 1 * 1024 * 1024
 // maxPreviewFileSize is the maximum file size for read-only preview (50MB).
 const maxPreviewFileSize = 50 * 1024 * 1024
 
+// workspaceFileSandboxCSP isolates workspace and shared-dir files the hub
+// serves, above all ?view=true HTML and SVG, which otherwise render on the
+// hub's origin with the viewer's session. Anything that can write into a
+// project (including its agents) could then act as whoever opens the file
+// (miller79/scion#131). A sandboxed document gets an opaque origin: its
+// scripts still run, so generated reports and visualisations keep working,
+// but it cannot use the viewer's cookies against the hub or read the
+// responses. allow-same-origin must never be added: it would undo exactly
+// that isolation.
+const workspaceFileSandboxCSP = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads"
+
 // isCloudRunEnv checks K_SERVICE to determine if we're running on Cloud Run.
 // In production, K_SERVICE is set once at container startup and never changes,
 // so calling os.Getenv is effectively a cached lookup (the C library caches
@@ -626,6 +637,9 @@ func (s *Server) handleProjectWorkspaceDownload(w http.ResponseWriter, r *http.R
 
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// Set on attachments too, so the file stays sandboxed if a browser ever
+	// renders one instead of downloading it.
+	w.Header().Set("Content-Security-Policy", workspaceFileSandboxCSP)
 	disposition := "attachment"
 	if r.URL.Query().Get("view") == "true" {
 		disposition = "inline"
