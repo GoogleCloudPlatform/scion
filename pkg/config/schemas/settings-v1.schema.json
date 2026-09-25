@@ -154,7 +154,7 @@
     },
     "telemetry": {
       "$ref": "#/$defs/telemetryConfig",
-      "description": "Telemetry and observability settings. Merged across global, grove, template, and agent scopes (last write wins).",
+      "description": "Telemetry and observability settings. Merged across global, project, template, and agent scopes (last write wins).",
       "x-scope": "any",
       "x-since": "1"
     },
@@ -859,7 +859,7 @@
         },
         "auto_provide": {
           "type": "boolean",
-          "description": "Automatically add as provider for new groves.",
+          "description": "Automatically add as provider for new projects.",
           "x-env-var": "SCION_SERVER_BROKER_AUTOPROVIDE"
         },
         "broker_name": {

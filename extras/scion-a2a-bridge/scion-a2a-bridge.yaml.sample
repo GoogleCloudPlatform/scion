@@ -89,7 +89,7 @@ auth:
   # Callers present Scion user JWTs. The hub.signing_key is used for
   # local JWT validation. No api_key needed.
 
-# Groves exposed through the bridge. Each project maps to a set of
+# Projects exposed through the bridge. Each project maps to a set of
 # Scion agents that become discoverable A2A endpoints.
 projects:
   - slug: "my-project"
