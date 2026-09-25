@@ -369,13 +369,16 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// errors for stopping non-running containers. The subsequent
 			// Start will handle cleanup of the exited container.
 			if stopErr := dispatcher.DispatchAgentStop(ctx, agent); stopErr != nil {
+				// The container may still be running, so keep its
+				// reservation: the re-reserve below is then a no-op and a
+				// failed start leg cannot release it (ptone/scion#1978).
 				slog.Warn("Restart: stop dispatch failed, proceeding with start",
 					"agent_id", id, "error", stopErr)
+			} else {
+				// A successful stop leg releases the reservation the same
+				// way an explicit stop would (ptone/scion#1963).
+				s.releaseBrokerQuota(ctx, agent)
 			}
-			// The stop leg above tears the container down regardless of
-			// dispatch error (tolerated, as noted); release its reservation
-			// the same way an explicit stop would (ptone/scion#1963).
-			s.releaseBrokerQuota(ctx, agent)
 			// Restart is stop + start: a fresh harness session, not a resume.
 			// Re-reserve before the start leg, same as the start action.
 			ok, reserved := s.checkAndReserveBrokerQuotaHTTP(ctx, w, agent)

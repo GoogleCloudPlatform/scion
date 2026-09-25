@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -105,6 +106,59 @@ func TestBrokerQuota_FailedRestartReleasesReservation(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+running.ID+"/restart", nil)
 	require.GreaterOrEqual(t, rec.Code, 500, rec.Body.String())
 	assert.EqualValues(t, 0, brokerReservationCount(t, s, broker.ID))
+}
+
+// failingStopStartDispatcher fails both legs of a restart, as a broker that
+// cannot reach a still-running container would.
+type failingStopStartDispatcher struct {
+	failingStartDispatcher
+}
+
+func (d *failingStopStartDispatcher) DispatchAgentStop(_ context.Context, _ *store.Agent) error {
+	return errors.New("simulated broker stop failure")
+}
+
+// ptone/scion#1978: when the stop leg of a restart fails, the container may
+// still be running, so its reservation is kept whether or not the start leg
+// then succeeds, and the broker cap still holds.
+func TestBrokerQuota_FailedStopLegKeepsReservation(t *testing.T) {
+	for _, startFails := range []bool{true, false} {
+		t.Run(fmt.Sprintf("startFails=%v", startFails), func(t *testing.T) {
+			srv, s := testServer(t)
+			if startFails {
+				srv.SetDispatcher(&failingStopStartDispatcher{})
+			} else {
+				srv.SetDispatcher(&failingStopDispatcher{})
+			}
+			setBrokerAgentCeiling(t, s, 1)
+
+			broker, project := newQuotaTestBrokerAndProject(t, s, "restart-stopfail")
+			running := newQuotaTestAgent(t, s, broker, project, "restart-stopfail", state.PhaseRunning)
+			reserveBrokerSlot(t, s, broker, running.ID)
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+running.ID+"/restart", nil)
+			if startFails {
+				require.GreaterOrEqual(t, rec.Code, 500, rec.Body.String())
+			} else {
+				require.Less(t, rec.Code, 300, rec.Body.String())
+			}
+			assert.EqualValues(t, 1, brokerReservationCount(t, s, broker.ID))
+			assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, running.ID))
+
+			other := newQuotaTestAgent(t, s, broker, project, "restart-stopfail-other", state.PhaseStopped)
+			rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+other.ID+"/start", nil)
+			assert.Equal(t, http.StatusTooManyRequests, rec.Code, rec.Body.String())
+		})
+	}
+}
+
+// failingStopDispatcher fails only the stop leg.
+type failingStopDispatcher struct {
+	quotaLifecycleDispatcher
+}
+
+func (d *failingStopDispatcher) DispatchAgentStop(_ context.Context, _ *store.Agent) error {
+	return errors.New("simulated broker stop failure")
 }
 
 // Suspended-agent wake via DM: a failed wake rolls back only a reservation
