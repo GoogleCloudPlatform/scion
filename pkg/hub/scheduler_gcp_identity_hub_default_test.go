@@ -109,6 +109,125 @@ func TestScheduledDispatch_ProjectDefaultWinsOverHubDefault(t *testing.T) {
 		"the project default must win, and the hub default's unusable SA must never be looked up")
 }
 
+// TestScheduledDispatch_ProjectBlockNotOverriddenByHubDefault covers R1 from
+// review sg-rev.md: the new `case store.GCPMetadataModeBlock:` arm in
+// applyScheduledProjectDefaultGCPIdentity (server.go) is the only thing
+// stopping a project's explicit Block from falling through to the hub
+// default now that the default arm consults it. Before this PR, "block" and
+// "unset" behaved identically on the scheduled path because nothing followed
+// either; this test pins that an explicit project Block still does not fall
+// through, even though a hub default that would otherwise apply (passthrough
+// on the embedded broker) is configured. Mirrors the HTTP path's
+// TestHubDefaultGCPIdentity_ProjectExplicitBlockWinsOverHubPassthrough.
+func TestScheduledDispatch_ProjectBlockNotOverriddenByHubDefault(t *testing.T) {
+	f := bypassAgentsSetup(t)
+	markBrokerEmbedded(t, f)
+	setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
+		DefaultGCPIdentityMode: store.GCPMetadataModePassthrough,
+	})
+
+	ctx := context.Background()
+	proj, err := f.store.GetProject(ctx, f.proj.ID)
+	require.NoError(t, err)
+	if proj.Annotations == nil {
+		proj.Annotations = map[string]string{}
+	}
+	proj.Annotations[projectSettingDefaultGCPIdentityMode] = store.GCPMetadataModeBlock
+	require.NoError(t, f.store.UpdateProject(ctx, proj))
+
+	require.NoError(t, fireScheduledDispatchAsOwner(t, f, "sched-project-block-wins"))
+
+	got, err := f.store.GetAgentBySlug(context.Background(), f.proj.ID, "sched-project-block-wins")
+	require.NoError(t, err)
+	require.NotNil(t, got.AppliedConfig)
+	assert.Nil(t, got.AppliedConfig.GCPIdentity,
+		"an explicit project Block must not fall through to a hub default that would otherwise apply; "+
+			"nil is the scheduled path's pre-existing representation of block for this mode")
+}
+
+// TestScheduledDispatch_ProjectBlockStopsBeforeHubDefaultAssignLookup is the
+// review's optional second variant of R1: a hub default naming an
+// unresolvable SA must never be looked up when the project explicitly set
+// Block, because the ladder stops at the project rung. If the block arm ever
+// regressed into consulting the hub default, this dispatch would fail
+// (the SA does not exist) instead of succeeding with no GCP identity.
+func TestScheduledDispatch_ProjectBlockStopsBeforeHubDefaultAssignLookup(t *testing.T) {
+	f := bypassAgentsSetup(t)
+	setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
+		DefaultGCPIdentityMode:             store.GCPMetadataModeAssign,
+		DefaultGCPIdentityServiceAccountID: "does-not-exist",
+	})
+
+	ctx := context.Background()
+	proj, err := f.store.GetProject(ctx, f.proj.ID)
+	require.NoError(t, err)
+	if proj.Annotations == nil {
+		proj.Annotations = map[string]string{}
+	}
+	proj.Annotations[projectSettingDefaultGCPIdentityMode] = store.GCPMetadataModeBlock
+	require.NoError(t, f.store.UpdateProject(ctx, proj))
+
+	require.NoError(t, fireScheduledDispatchAsOwner(t, f, "sched-project-block-stops-assign-lookup"),
+		"the hub default's unresolvable SA must never be looked up when the project explicitly blocked")
+
+	got, err := f.store.GetAgentBySlug(context.Background(), f.proj.ID, "sched-project-block-stops-assign-lookup")
+	require.NoError(t, err)
+	require.NotNil(t, got.AppliedConfig)
+	assert.Nil(t, got.AppliedConfig.GCPIdentity)
+}
+
+// TestScheduledDispatch_HubDefaultAssignEmptySAIDFallsBackToBlock covers O1
+// from review sg-rev.md: a hub default configured as "assign" but with no
+// service account ID selected (server.go ~3626-3631) must fail safe to an
+// explicit block, not be skipped or treated as unset, exactly as the
+// equivalent project-default and HTTP hub-default arms already do.
+func TestScheduledDispatch_HubDefaultAssignEmptySAIDFallsBackToBlock(t *testing.T) {
+	f := bypassAgentsSetup(t)
+	setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
+		DefaultGCPIdentityMode:             store.GCPMetadataModeAssign,
+		DefaultGCPIdentityServiceAccountID: "",
+	})
+
+	require.NoError(t, fireScheduledDispatchAsOwner(t, f, "sched-hub-default-assign-no-sa"))
+
+	got, err := f.store.GetAgentBySlug(context.Background(), f.proj.ID, "sched-hub-default-assign-no-sa")
+	require.NoError(t, err)
+	require.NotNil(t, got.AppliedConfig)
+	require.NotNil(t, got.AppliedConfig.GCPIdentity,
+		"a misconfigured hub-default assign (no SA selected) must write an explicit block, not leave the field nil")
+	assert.Equal(t, store.GCPMetadataModeBlock, got.AppliedConfig.GCPIdentity.MetadataMode)
+}
+
+// TestScheduledDispatch_HubDefaultPassthroughNotAppliedWhenProjectUsesADifferentBroker
+// covers O2 from review sg-rev.md: the more production-relevant passthrough
+// gate case is not "no embedded broker at all" (already covered by
+// TestScheduledDispatch_HubDefaultPassthroughNotAppliedOnNonEmbeddedBroker)
+// but an embedded broker that IS registered while the project's own runtime
+// provider points at a different broker. hubDefaultPassthroughAllowed must
+// still deny, because the agent is not actually dispatched to the embedded
+// broker (mirrors the HTTP path's
+// TestHubDefaultGCPIdentity_PassthroughNotAppliedOnSpoofedEmbeddedLabel,
+// which pins the same gate function against a broker that merely claims to
+// be embedded via its label).
+func TestScheduledDispatch_HubDefaultPassthroughNotAppliedWhenProjectUsesADifferentBroker(t *testing.T) {
+	f := bypassAgentsSetup(t)
+	// The hub does have an embedded broker — just not the one this project
+	// dispatches to (f.broker, wired by bypassAgentsSetup's AddProjectProvider).
+	f.srv.SetEmbeddedBrokerID("some-other-embedded-broker")
+	setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
+		DefaultGCPIdentityMode: store.GCPMetadataModePassthrough,
+	})
+
+	require.NoError(t, fireScheduledDispatchAsOwner(t, f, "sched-hub-passthrough-wrong-broker"))
+
+	got, err := f.store.GetAgentBySlug(context.Background(), f.proj.ID, "sched-hub-passthrough-wrong-broker")
+	require.NoError(t, err)
+	require.NotNil(t, got.AppliedConfig)
+	require.NotNil(t, got.AppliedConfig.GCPIdentity)
+	assert.Equal(t, store.GCPMetadataModeBlock, got.AppliedConfig.GCPIdentity.MetadataMode,
+		"hub-default passthrough must not apply when the project's own broker is not the hub's embedded broker")
+}
+
 // TestScheduledDispatch_NoHubDefaultLeavesGCPIdentityUnchanged double-checks,
 // from this feature's side, the invariant
 // TestScheduledDispatch_NoProjectDefaultLeavesGCPIdentityUnchanged already
