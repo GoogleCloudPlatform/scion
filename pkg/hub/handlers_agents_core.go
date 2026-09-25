@@ -1274,7 +1274,7 @@ func (s *Server) createAgentInProject(
 				// (see hubDefaultPassthroughAllowed for why); on any other
 				// broker the ladder bottoms out at block.
 				mode := store.GCPMetadataModeBlock
-				if s.hubDefaultPassthroughAllowed(runtimeBrokerID, projectID) {
+				if s.hubDefaultPassthroughAllowed(ctx, runtimeBrokerID, projectID) {
 					mode = store.GCPMetadataModePassthrough
 				}
 				agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{MetadataMode: mode}

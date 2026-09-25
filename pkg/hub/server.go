@@ -780,6 +780,12 @@ type Server struct {
 	instanceID       string            // Unique per-process ID (uuid); affinity key for broker dispatch
 	encryptionKey    []byte            // AES-256 key for encrypting backup secrets; nil disables encryption
 	embeddedBrokerID string            // Broker ID when running in hub+broker combo mode
+	// embeddedBrokerPending is non-nil while a co-located broker is expected
+	// (ExpectEmbeddedBroker) but has not yet registered; it is closed when
+	// registration succeeds or fails. embeddedBrokerRegErr records a failed
+	// co-located registration so callers can report it distinctly.
+	embeddedBrokerPending chan struct{}
+	embeddedBrokerRegErr  string
 	// statelessEmbeddedBroker is true when the embedded broker identity is a
 	// replica-independent API adapter rather than a process-owned control channel.
 	statelessEmbeddedBroker bool
@@ -2127,6 +2133,82 @@ func (s *Server) SetEmbeddedBrokerID(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.embeddedBrokerID = id
+	s.resolveEmbeddedBrokerPendingLocked()
+}
+
+// ExpectEmbeddedBroker records that this process will register a co-located
+// broker. Startup calls it before the Hub starts serving, because co-located
+// registration (and so SetEmbeddedBrokerID) happens only after the listener
+// is up. Until SetEmbeddedBrokerID or EmbeddedBrokerRegistrationFailed is
+// called, waitForEmbeddedBroker blocks (bounded) instead of treating the
+// broker as non-embedded. It is a no-op once an embedded broker is known.
+func (s *Server) ExpectEmbeddedBroker() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.embeddedBrokerID != "" || s.embeddedBrokerPending != nil {
+		return
+	}
+	s.embeddedBrokerPending = make(chan struct{})
+}
+
+// EmbeddedBrokerRegistrationFailed records that co-located broker
+// registration failed at startup, releasing anything waiting on it. The Hub
+// then has no embedded broker for the rest of the process lifetime.
+func (s *Server) EmbeddedBrokerRegistrationFailed(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err != nil {
+		s.embeddedBrokerRegErr = err.Error()
+	} else {
+		s.embeddedBrokerRegErr = "unknown error"
+	}
+	s.resolveEmbeddedBrokerPendingLocked()
+}
+
+// resolveEmbeddedBrokerPendingLocked releases waiters on a pending co-located
+// registration. Callers must hold s.mu.
+func (s *Server) resolveEmbeddedBrokerPendingLocked() {
+	if s.embeddedBrokerPending != nil {
+		close(s.embeddedBrokerPending)
+		s.embeddedBrokerPending = nil
+	}
+}
+
+// embeddedBrokerWaitTimeout bounds how long a request waits for a pending
+// co-located broker registration. A variable so tests can shorten it.
+var embeddedBrokerWaitTimeout = 15 * time.Second
+
+// embeddedBrokerState describes the Hub's embedded broker for callers that
+// need to explain a negative isEmbeddedBroker result.
+type embeddedBrokerState struct {
+	id      string // recorded embedded broker ID, "" if none
+	regErr  string // non-empty when co-located registration failed
+	pending bool   // registration still outstanding after the wait
+}
+
+// waitForEmbeddedBroker returns the embedded broker state, first waiting up to
+// embeddedBrokerWaitTimeout (or until ctx is done) if a co-located
+// registration is still pending.
+func (s *Server) waitForEmbeddedBroker(ctx context.Context) embeddedBrokerState {
+	s.mu.RLock()
+	pending := s.embeddedBrokerPending
+	s.mu.RUnlock()
+	if pending != nil {
+		timer := time.NewTimer(embeddedBrokerWaitTimeout)
+		defer timer.Stop()
+		select {
+		case <-pending:
+		case <-timer.C:
+		case <-ctx.Done():
+		}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return embeddedBrokerState{
+		id:      s.embeddedBrokerID,
+		regErr:  s.embeddedBrokerRegErr,
+		pending: s.embeddedBrokerPending != nil,
+	}
 }
 
 // SetStatelessEmbeddedBrokerID records a co-located broker whose runtime
@@ -2136,6 +2218,7 @@ func (s *Server) SetStatelessEmbeddedBrokerID(id string) {
 	defer s.mu.Unlock()
 	s.embeddedBrokerID = id
 	s.statelessEmbeddedBroker = id != ""
+	s.resolveEmbeddedBrokerPendingLocked()
 }
 
 // SetRuntimeReloadFunc registers a callback that reloads the co-located

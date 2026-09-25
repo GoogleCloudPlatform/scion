@@ -18,8 +18,11 @@ package hub
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -85,9 +88,15 @@ func TestHubDefaultGCPIdentity_PassthroughNotAppliedOnNonEmbeddedBroker(t *testi
 		DefaultGCPIdentityMode: store.GCPMetadataModePassthrough,
 	})
 
+	logs := captureDefaultSlog(t)
+
 	identity := createdAgentIdentity(t, f, "hub-passthrough-remote-agent")
 	assert.Equal(t, store.GCPMetadataModeBlock, identity.MetadataMode,
 		"hub-default passthrough must not apply on a non-embedded broker")
+	// This hub has no embedded broker at all; the log says so rather than
+	// blaming the broker.
+	assert.Len(t, logs.recordsContaining("hub has no embedded broker registered"), 1)
+	assert.Empty(t, logs.recordsContaining("broker is not the hub's embedded broker"))
 }
 
 // TestHubDefaultGCPIdentity_PassthroughNotAppliedOnSpoofedEmbeddedLabel pins
@@ -111,9 +120,117 @@ func TestHubDefaultGCPIdentity_PassthroughNotAppliedOnSpoofedEmbeddedLabel(t *te
 		DefaultGCPIdentityMode: store.GCPMetadataModePassthrough,
 	})
 
+	logs := captureDefaultSlog(t)
+
 	identity := createdAgentIdentity(t, f, "hub-passthrough-spoofed-agent")
 	assert.Equal(t, store.GCPMetadataModeBlock, identity.MetadataMode,
 		"a broker-owner-set embedded label must not unlock hub-default passthrough")
+	assert.Len(t, logs.recordsContaining("broker is not the hub's embedded broker"), 1)
+}
+
+// captureDefaultSlog routes the default slog logger into a capturing handler
+// for the duration of the test.
+func captureDefaultSlog(t *testing.T) *levelCapturingHandler {
+	t.Helper()
+	h := &levelCapturingHandler{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(h))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return h
+}
+
+// TestHubDefaultGCPIdentity_PassthroughWaitsForPendingEmbeddedRegistration pins
+// round-3 N-1: the Hub API serves before the co-located broker registers, so
+// startup marks the embedded broker as expected. A create in that window must
+// wait for registration and get the hub-default passthrough, not have block
+// written permanently into its applied config.
+func TestHubDefaultGCPIdentity_PassthroughWaitsForPendingEmbeddedRegistration(t *testing.T) {
+	f := bypassAgentsSetup(t)
+	setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
+		DefaultGCPIdentityMode: store.GCPMetadataModePassthrough,
+	})
+	f.srv.ExpectEmbeddedBroker()
+
+	registered := make(chan struct{})
+	go func() {
+		defer close(registered)
+		time.Sleep(100 * time.Millisecond)
+		f.srv.SetEmbeddedBrokerID(f.broker.ID)
+	}()
+
+	identity := createdAgentIdentity(t, f, "hub-passthrough-startup-agent")
+	<-registered
+	assert.Equal(t, store.GCPMetadataModePassthrough, identity.MetadataMode)
+}
+
+// TestHubDefaultGCPIdentity_PendingRegistrationTimeoutFallsBackToBlock covers
+// the bound on that wait: if registration never resolves, the create falls
+// back to block and the log names the pending registration as the cause.
+func TestHubDefaultGCPIdentity_PendingRegistrationTimeoutFallsBackToBlock(t *testing.T) {
+	f := bypassAgentsSetup(t)
+	setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
+		DefaultGCPIdentityMode: store.GCPMetadataModePassthrough,
+	})
+	prevTimeout := embeddedBrokerWaitTimeout
+	embeddedBrokerWaitTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { embeddedBrokerWaitTimeout = prevTimeout })
+	f.srv.ExpectEmbeddedBroker()
+	logs := captureDefaultSlog(t)
+
+	identity := createdAgentIdentity(t, f, "hub-passthrough-pending-agent")
+	assert.Equal(t, store.GCPMetadataModeBlock, identity.MetadataMode)
+	assert.Len(t, logs.recordsContaining("co-located broker registration still pending"), 1)
+}
+
+// TestHubDefaultGCPIdentity_RegistrationFailedLogsDistinctCause pins round-3
+// N-2: when co-located registration failed at startup the hub has no embedded
+// broker, and the log must say that rather than "not the hub's embedded
+// broker", which would send an operator looking at the wrong thing.
+func TestHubDefaultGCPIdentity_RegistrationFailedLogsDistinctCause(t *testing.T) {
+	f := bypassAgentsSetup(t)
+	setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
+		DefaultGCPIdentityMode: store.GCPMetadataModePassthrough,
+	})
+	f.srv.ExpectEmbeddedBroker()
+	f.srv.EmbeddedBrokerRegistrationFailed(errors.New("database unavailable"))
+	logs := captureDefaultSlog(t)
+
+	start := time.Now()
+	identity := createdAgentIdentity(t, f, "hub-passthrough-regfail-agent")
+	assert.Equal(t, store.GCPMetadataModeBlock, identity.MetadataMode)
+	assert.Less(t, time.Since(start), embeddedBrokerWaitTimeout,
+		"a failed registration must release waiters, not run out the wait")
+
+	recs := logs.recordsContaining("co-located broker registration failed at startup")
+	require.Len(t, recs, 1)
+	var regErr string
+	recs[0].Attrs(func(a slog.Attr) bool {
+		if a.Key == "registration_error" {
+			regErr = a.Value.String()
+		}
+		return true
+	})
+	assert.Equal(t, "database unavailable", regErr)
+	assert.Empty(t, logs.recordsContaining("broker is not the hub's embedded broker"))
+	assert.Empty(t, logs.recordsContaining("hub has no embedded broker registered"))
+}
+
+// TestExpectEmbeddedBroker_Lifecycle checks the expectation's edge cases:
+// it is a no-op once an embedded broker is known, and resolving it more than
+// once (a later SetEmbeddedBrokerID) does not panic on a closed channel.
+func TestExpectEmbeddedBroker_Lifecycle(t *testing.T) {
+	srv := &Server{}
+	srv.SetEmbeddedBrokerID("b1")
+	srv.ExpectEmbeddedBroker()
+	assert.Nil(t, srv.embeddedBrokerPending, "no pending wait once the embedded broker is known")
+
+	srv2 := &Server{}
+	srv2.ExpectEmbeddedBroker()
+	require.NotNil(t, srv2.embeddedBrokerPending)
+	srv2.SetEmbeddedBrokerID("b2")
+	srv2.SetEmbeddedBrokerID("b2")
+	state := srv2.waitForEmbeddedBroker(context.Background())
+	assert.Equal(t, embeddedBrokerState{id: "b2"}, state)
 }
 
 // TestHubDefaultGCPIdentity_PassthroughSurvivesSettingsReload covers the

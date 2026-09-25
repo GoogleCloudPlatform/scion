@@ -121,17 +121,40 @@ func (s *Server) resolveDefaultSAAssignment(ctx context.Context, w http.Response
 // by the broker's owner through the runtime-broker update API, so any user
 // who registers a broker could claim "embedded" and pull the hub default's
 // passthrough onto their own host.
-func (s *Server) hubDefaultPassthroughAllowed(runtimeBrokerID, projectID string) bool {
+//
+// Co-located registration runs after the Hub listener starts, so startup
+// marks the embedded broker as expected (ExpectEmbeddedBroker) and this gate
+// waits, bounded, for registration rather than permanently writing block
+// into an agent created in that window. When the result is still negative,
+// the log line names the cause: registration failed, still pending, no
+// embedded broker at all, or a different broker.
+func (s *Server) hubDefaultPassthroughAllowed(ctx context.Context, runtimeBrokerID, projectID string) bool {
 	if runtimeBrokerID == "" {
 		slog.Info("hub-default GCP passthrough not applied: no runtime broker resolved; using block",
 			"surface", SurfaceHubDefault, "project_id", projectID)
 		return false
 	}
-	if !s.isEmbeddedBroker(runtimeBrokerID) {
-		slog.Info("hub-default GCP passthrough not applied: broker is not the hub's embedded broker; using block",
+	state := s.waitForEmbeddedBroker(ctx)
+	if state.id != "" && state.id == runtimeBrokerID {
+		return true
+	}
+	switch {
+	case state.regErr != "":
+		slog.Warn("hub-default GCP passthrough not applied: co-located broker registration failed at startup, so the hub has no embedded broker; using block",
+			"surface", SurfaceHubDefault, "project_id", projectID,
+			"broker", runtimeBrokerID, "registration_error", state.regErr)
+	case state.pending:
+		slog.Warn("hub-default GCP passthrough not applied: co-located broker registration still pending; using block",
+			"surface", SurfaceHubDefault, "project_id", projectID,
+			"broker", runtimeBrokerID, "waited", embeddedBrokerWaitTimeout)
+	case state.id == "":
+		slog.Info("hub-default GCP passthrough not applied: hub has no embedded broker registered; using block",
 			"surface", SurfaceHubDefault, "project_id", projectID,
 			"broker", runtimeBrokerID)
-		return false
+	default:
+		slog.Info("hub-default GCP passthrough not applied: broker is not the hub's embedded broker; using block",
+			"surface", SurfaceHubDefault, "project_id", projectID,
+			"broker", runtimeBrokerID, "embedded_broker", state.id)
 	}
-	return true
+	return false
 }

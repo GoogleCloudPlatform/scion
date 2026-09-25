@@ -270,6 +270,15 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			log.Fatalf("Hub server failed to start: %v", hubInitErr)
 		}
 
+		// The co-located broker registers (startRuntimeBroker, step 13)
+		// only after the Hub API is serving. Mark it as expected now, under
+		// the same condition startRuntimeBroker registers it, so gates that
+		// depend on the embedded broker ID (hub-default GCP passthrough)
+		// wait for registration instead of misclassifying the broker.
+		if cfg.RuntimeBroker.Enabled && !simulateRemoteBroker && s != nil {
+			hubSrv.ExpectEmbeddedBroker()
+		}
+
 		// Wire hub OTel tracing export to Cloud Trace.
 		if parseBoolEnv("SCION_TRACING_ENABLED") && cfg.Hub.GCPProjectID != "" {
 			tp, tpErr := hubtracing.NewTracerProvider(ctx, cfg.Hub.GCPProjectID,
@@ -2577,6 +2586,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		effectiveID, regErr := registerGlobalProjectAndBroker(ctx, s, brokerID, brokerName, rhEndpoint, rt, serverAutoProvide, brokerSettings)
 		if regErr != nil {
 			log.Printf("Warning: failed to register global project: %v", regErr)
+			hubSrv.EmbeddedBrokerRegistrationFailed(regErr)
 		} else {
 			colocatedBrokerRegistered = true
 			if effectiveID != brokerID {
