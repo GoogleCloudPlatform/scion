@@ -19,6 +19,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -345,6 +346,116 @@ func TestMessageBuffer_FailureHandlersInvokedOnFlushFailure(t *testing.T) {
 	defer cmu.Unlock()
 	if len(calls) != 2 || calls[0] != "m1:container gone" || calls[1] != "m2:container gone" {
 		t.Fatalf("expected both handlers invoked with the error, got %v", calls)
+	}
+}
+
+// withFlushRetryTuning shortens the flush retry backoff for the duration of
+// a test and restores the package defaults afterward, so retry tests don't
+// have to wait on the production backoff.
+func withFlushRetryTuning(t *testing.T, attempts int, backoff time.Duration) {
+	t.Helper()
+	origAttempts, origBackoff := maxFlushAttempts, flushRetryBackoff
+	maxFlushAttempts, flushRetryBackoff = attempts, backoff
+	t.Cleanup(func() {
+		maxFlushAttempts, flushRetryBackoff = origAttempts, origBackoff
+	})
+}
+
+// TestMessageBuffer_RetriesTransientFailureBeforeSucceeding covers #1866:
+// a transient deliverFunc failure (not a PartialDeliveryError) is retried
+// within flush, so a message doesn't need to be marked failed just because
+// the first delivery attempt hit a blip.
+func TestMessageBuffer_RetriesTransientFailureBeforeSucceeding(t *testing.T) {
+	withFlushRetryTuning(t, 3, 5*time.Millisecond)
+
+	var attempts int32
+	done := make(chan struct{}, 1)
+	buf := NewMessageBuffer(10*time.Millisecond, func(agentID, projectID, message string, interrupt bool) error {
+		n := atomic.AddInt32(&attempts, 1)
+		if n < 3 {
+			return errors.New("transient: container briefly unreachable")
+		}
+		done <- struct{}{}
+		return nil
+	})
+	defer buf.Close()
+
+	var handlerCalled bool
+	buf.SendWithFailureHandler("a", "p", "hello", func(error) { handlerCalled = true })
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for delivery to eventually succeed")
+	}
+
+	if got := atomic.LoadInt32(&attempts); got != 3 {
+		t.Fatalf("expected 3 delivery attempts, got %d", got)
+	}
+	if handlerCalled {
+		t.Fatal("failure handler must not be called once a retry succeeds")
+	}
+}
+
+// TestMessageBuffer_GivesUpAfterMaxAttempts covers #1866: retries are
+// bounded — a failure that never clears is reported after maxFlushAttempts,
+// not retried forever.
+func TestMessageBuffer_GivesUpAfterMaxAttempts(t *testing.T) {
+	withFlushRetryTuning(t, 3, 5*time.Millisecond)
+
+	var attempts int32
+	handled := make(chan error, 1)
+	buf := NewMessageBuffer(10*time.Millisecond, func(agentID, projectID, message string, interrupt bool) error {
+		atomic.AddInt32(&attempts, 1)
+		return errors.New("permanently gone")
+	})
+	defer buf.Close()
+
+	buf.SendWithFailureHandler("a", "p", "hello", func(err error) { handled <- err })
+
+	select {
+	case err := <-handled:
+		if err == nil || err.Error() != "permanently gone" {
+			t.Fatalf("expected the final attempt's error, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for failure handler")
+	}
+
+	if got := atomic.LoadInt32(&attempts); got != 3 {
+		t.Fatalf("expected exactly 3 delivery attempts (maxFlushAttempts), got %d", got)
+	}
+}
+
+// TestMessageBuffer_NoRetryForPartialDeliveryError covers #1866: once
+// deliverFunc reports that some content already reached the agent's
+// terminal, flush must not retry — a retry would re-run the whole delivery
+// (including the paste) and the agent would see the text twice.
+func TestMessageBuffer_NoRetryForPartialDeliveryError(t *testing.T) {
+	withFlushRetryTuning(t, 3, 5*time.Millisecond)
+
+	var attempts int32
+	handled := make(chan error, 1)
+	wrapped := errors.New("enter keypress failed after paste")
+	buf := NewMessageBuffer(10*time.Millisecond, func(agentID, projectID, message string, interrupt bool) error {
+		atomic.AddInt32(&attempts, 1)
+		return &PartialDeliveryError{Err: wrapped}
+	})
+	defer buf.Close()
+
+	buf.SendWithFailureHandler("a", "p", "hello", func(err error) { handled <- err })
+
+	select {
+	case err := <-handled:
+		if !errors.Is(err, wrapped) {
+			t.Fatalf("expected the wrapped error to be reported, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for failure handler")
+	}
+
+	if got := atomic.LoadInt32(&attempts); got != 1 {
+		t.Fatalf("expected exactly 1 delivery attempt for a PartialDeliveryError, got %d", got)
 	}
 }
 

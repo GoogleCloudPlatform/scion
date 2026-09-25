@@ -405,22 +405,38 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 		cmds = append(cmds, []string{"tmux", "send-keys", "-t", "scion:0", "Enter"})
 	}
 
-	// 4. Execute
+	// 4. Execute. Once "tmux paste-buffer" succeeds, the message content is
+	// already sitting in the agent's terminal input — a later failure (the
+	// closing Enter, or one of the confirmation Enters below) must not
+	// trigger a retry of the whole delivery, or the retried paste-buffer
+	// would duplicate the already-visible text (ptone/scion#1866). Errors
+	// from that point on are wrapped in PartialDeliveryError so the message
+	// buffer's bounded retry knows not to retry them.
+	delivered := false
 	for _, cmd := range cmds {
 		_, err := m.Runtime.Exec(ctx, agent.ContainerID, cmd)
 		if err != nil {
-			return fmt.Errorf("failed to send message to agent '%s': %w", agent.Name, err)
+			wrapped := fmt.Errorf("failed to send message to agent '%s': %w", agent.Name, err)
+			if delivered {
+				return &PartialDeliveryError{Err: wrapped}
+			}
+			return wrapped
+		}
+		if len(cmd) >= 2 && cmd[1] == "paste-buffer" {
+			delivered = true
 		}
 	}
 
 	// After sending a message, send two extra Enter keypresses with a brief delay
-	// to ensure the input is accepted by the agent.
+	// to ensure the input is accepted by the agent. This runs only once the
+	// message (if any) has already been pasted, so any failure here is
+	// necessarily partial delivery too.
 	if message != "" {
 		enterCmd := []string{"tmux", "send-keys", "-t", "scion:0", "Enter"}
 		for range 2 {
 			time.Sleep(300 * time.Millisecond)
 			if _, err := m.Runtime.Exec(ctx, agent.ContainerID, enterCmd); err != nil {
-				return fmt.Errorf("failed to send Enter to agent '%s': %w", agent.Name, err)
+				return &PartialDeliveryError{Err: fmt.Errorf("failed to send Enter to agent '%s': %w", agent.Name, err)}
 			}
 		}
 	}

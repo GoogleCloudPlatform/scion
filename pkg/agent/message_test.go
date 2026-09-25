@@ -16,6 +16,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -232,6 +233,67 @@ func TestMessageRaw(t *testing.T) {
 		if cmd != expectedCmds[i] {
 			t.Errorf("Expected cmd %d to be '%s', got '%s'", i, expectedCmds[i], cmd)
 		}
+	}
+}
+
+// TestDeliverImmediate_PartialDeliveryAfterPaste covers #1866: once
+// "tmux paste-buffer" has succeeded, the message text is already sitting in
+// the agent's terminal input. A later failure (the closing Enter, or one of
+// the confirmation Enters) must be reported as a PartialDeliveryError so the
+// message buffer's bounded retry does not re-run the whole delivery — doing
+// so would re-paste the text and the agent would see it twice.
+func TestDeliverImmediate_PartialDeliveryAfterPaste(t *testing.T) {
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{
+				{ContainerID: "agent-1", Name: "test-agent", Labels: map[string]string{"scion.name": "test-agent"}},
+			}, nil
+		},
+	}
+	mockRT.ExecFunc = func(ctx context.Context, id string, cmd []string) (string, error) {
+		if len(cmd) >= 2 && cmd[1] == "send-keys" && cmd[len(cmd)-1] == "Enter" {
+			return "", fmt.Errorf("exec failed")
+		}
+		return "", nil
+	}
+
+	mgr := &AgentManager{Runtime: mockRT}
+	err := mgr.deliverImmediate(context.Background(), "test-agent", "", "hello", false)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	var partial *PartialDeliveryError
+	if !errors.As(err, &partial) {
+		t.Fatalf("expected a PartialDeliveryError once paste-buffer succeeded, got %T: %v", err, err)
+	}
+}
+
+// TestDeliverImmediate_RetryableBeforePaste covers #1866: a failure before
+// any content reaches the terminal (e.g. the initial "tmux set-buffer") is
+// safe to retry and must not be wrapped as a PartialDeliveryError.
+func TestDeliverImmediate_RetryableBeforePaste(t *testing.T) {
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{
+				{ContainerID: "agent-1", Name: "test-agent", Labels: map[string]string{"scion.name": "test-agent"}},
+			}, nil
+		},
+	}
+	mockRT.ExecFunc = func(ctx context.Context, id string, cmd []string) (string, error) {
+		if len(cmd) >= 2 && cmd[1] == "set-buffer" {
+			return "", fmt.Errorf("exec failed")
+		}
+		return "", nil
+	}
+
+	mgr := &AgentManager{Runtime: mockRT}
+	err := mgr.deliverImmediate(context.Background(), "test-agent", "", "hello", false)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	var partial *PartialDeliveryError
+	if errors.As(err, &partial) {
+		t.Fatalf("failure before paste-buffer must not be wrapped as PartialDeliveryError: %v", err)
 	}
 }
 

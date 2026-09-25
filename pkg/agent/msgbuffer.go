@@ -16,6 +16,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"sync"
@@ -68,6 +69,21 @@ type agentBuffer struct {
 // delivered after the caller was told it was accepted. It is invoked from
 // the buffer's timer goroutine and must not block for long.
 type DeliveryFailureHandler func(err error)
+
+// PartialDeliveryError marks a deliverFunc failure as unsafe to retry: some
+// of the coalesced message content already reached the agent's terminal
+// before the failure occurred (e.g. the text was pasted but the trailing
+// Enter keypress failed). Retrying such a failure would re-run the whole
+// delivery — including the paste — and the agent would see the same text
+// twice (ptone/scion#1866). deliverFunc implementations should wrap errors
+// this way once they can no longer guarantee a retry is side-effect free;
+// flush's bounded retry only retries errors that are not wrapped this way.
+type PartialDeliveryError struct {
+	Err error
+}
+
+func (e *PartialDeliveryError) Error() string { return e.Err.Error() }
+func (e *PartialDeliveryError) Unwrap() error { return e.Err }
 
 type deliveryFailureHandlerKey struct{}
 
@@ -144,8 +160,25 @@ func bufferKey(agentID, projectID string) string {
 	return agentID + "\x00" + projectID
 }
 
+// maxFlushAttempts bounds how many times flush retries a coalesced delivery
+// before giving up and reporting it to onFailure handlers. It is small: a
+// transient failure (container briefly unreachable, "docker ps failed") is
+// worth a couple of quick retries, but flush runs synchronously in the
+// buffer's timer goroutine and holds up delivery of this agent's messages
+// while retrying, so it must not retry for long (ptone/scion#1866).
+var maxFlushAttempts = 3
+
+// flushRetryBackoff is the delay between retry attempts.
+var flushRetryBackoff = 500 * time.Millisecond
+
 // flush delivers all buffered messages for the given agent as a single
 // concatenated string. Called when the debounce timer fires.
+//
+// A failure is retried up to maxFlushAttempts times with a short backoff,
+// unless it is a PartialDeliveryError: once some of the coalesced text has
+// reached the agent's terminal, retrying would re-deliver it and the agent
+// would see it twice, so that class of failure is reported immediately
+// instead (ptone/scion#1866).
 func (mb *MessageBuffer) flush(agentID, key string) {
 	mb.mu.Lock()
 	buf, exists := mb.buffers[key]
@@ -166,17 +199,38 @@ func (mb *MessageBuffer) flush(agentID, key string) {
 	combined := strings.Join(pending, "\n\n")
 	util.Debugf("msgbuffer: flushing %d message(s) for agent %s project %s", len(pending), agentID, projectID)
 
-	if err := mb.deliverFunc(agentID, projectID, combined, false); err != nil {
-		slog.Warn("msgbuffer: message delivery failed",
-			"agent_id", agentID,
-			"grove_id", projectID,
-			"pending_count", len(pending),
-			"error", err,
-		)
-		for _, fn := range handlers {
-			if fn != nil {
-				fn(err)
-			}
+	var err error
+	for attempt := 1; attempt <= maxFlushAttempts; attempt++ {
+		err = mb.deliverFunc(agentID, projectID, combined, false)
+		if err == nil {
+			return
+		}
+
+		var partial *PartialDeliveryError
+		if errors.As(err, &partial) {
+			break
+		}
+		if attempt < maxFlushAttempts {
+			slog.Warn("msgbuffer: delivery attempt failed, retrying",
+				"agent_id", agentID,
+				"grove_id", projectID,
+				"attempt", attempt,
+				"max_attempts", maxFlushAttempts,
+				"error", err,
+			)
+			time.Sleep(flushRetryBackoff)
+		}
+	}
+
+	slog.Warn("msgbuffer: message delivery failed",
+		"agent_id", agentID,
+		"grove_id", projectID,
+		"pending_count", len(pending),
+		"error", err,
+	)
+	for _, fn := range handlers {
+		if fn != nil {
+			fn(err)
 		}
 	}
 }

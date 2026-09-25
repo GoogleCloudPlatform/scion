@@ -190,6 +190,18 @@ func (s *Server) applyBrokerMessageFailure(ctx context.Context, brokerID string,
 			SenderID: msg.SenderID,
 		}, errors.New(reason))
 	}
+
+	// A human sender has no terminal to inject a DELIVERY_FAILED notice
+	// into. Instead, re-publish the message so any connected browser
+	// showing this conversation gets the updated dispatch state pushed live
+	// (rather than only on next reload) and renders the "Failed" delivery
+	// badge the web chat client already supports for its own outbound
+	// messages (ptone/scion#1866).
+	if strings.HasPrefix(msg.Sender, "user:") && s.events != nil {
+		msg.DispatchState = store.MessageDispatchFailed
+		msg.DispatchFailureReason = &reason
+		s.events.PublishUserMessage(ctx, msg, nil)
+	}
 	return true
 }
 
