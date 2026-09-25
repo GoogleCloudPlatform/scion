@@ -347,81 +347,117 @@ func (s *Server) handleHarnessConfigByID(w http.ResponseWriter, r *http.Request)
 		action = parts[1]
 	}
 
+	hc, err := s.store.GetHarnessConfig(r.Context(), hcID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// SECURITY-GATE: CheckAccess — authorize this specific harness config
+	// before any arm runs. The gate is above the switch so that no arm,
+	// including one added later, is reachable without it.
+	if !s.authorizeHarnessConfigRoute(w, r, hc, harnessConfigRouteAction(action, r.Method)) {
+		return
+	}
+
 	switch action {
 	case "":
-		s.handleHarnessConfigCRUD(w, r, hcID)
+		s.handleHarnessConfigCRUD(w, r, hc)
 	case "upload":
-		s.handleHarnessConfigUpload(w, r, hcID)
+		s.handleHarnessConfigUpload(w, r, hc)
 	case "finalize":
-		s.handleHarnessConfigFinalize(w, r, hcID)
+		s.handleHarnessConfigFinalize(w, r, hc)
 	case "download":
-		s.handleHarnessConfigDownload(w, r, hcID)
+		s.handleHarnessConfigDownload(w, r, hc)
 	case "clone":
-		s.handleHarnessConfigClone(w, r, hcID)
+		s.handleHarnessConfigClone(w, r, hc)
 	case "validate":
-		s.handleHarnessConfigValidate(w, r, hcID)
+		s.handleHarnessConfigValidate(w, r, hc)
 	case "check-image":
-		s.handleHarnessConfigCheckImage(w, r, hcID)
+		s.handleHarnessConfigCheckImage(w, r, hc)
 	case "image-status":
-		s.handleHarnessConfigImageStatus(w, r, hcID)
+		s.handleHarnessConfigImageStatus(w, r, hc)
 	case "local-image":
-		s.handleHarnessConfigDeleteLocalImage(w, r, hcID)
+		s.handleHarnessConfigDeleteLocalImage(w, r, hc)
 	case "pull-image":
-		s.handleHarnessConfigPullImage(w, r, hcID)
+		s.handleHarnessConfigPullImage(w, r, hc)
 	case "reimport":
-		s.handleHarnessConfigReimport(w, r, hcID)
+		s.handleHarnessConfigReimport(w, r, hc)
 	case "files":
-		s.handleHarnessConfigFiles(w, r, hcID, "")
+		s.handleHarnessConfigFiles(w, r, hc, "")
 	default:
 		if strings.HasPrefix(action, "files/") {
 			filePath := strings.TrimPrefix(action, "files/")
-			s.handleHarnessConfigFiles(w, r, hcID, filePath)
+			s.handleHarnessConfigFiles(w, r, hc, filePath)
 			return
 		}
 		NotFound(w, "HarnessConfig action")
 	}
 }
 
+// harnessConfigRouteAction returns the baseline permission a request on
+// /api/v1/harness-configs/{id}[/action] needs on the config itself.
+//
+// Reads need ActionRead. Writes need ActionUpdate, except for the three arms
+// that already carry a stricter, scope-aware check of their own in the
+// handler: delete (harness_config delete on the owning scope), reimport
+// (create on the owning scope) and clone (create on the destination). For
+// those the baseline is ActionRead on the config, and the handler's own
+// check still applies on top.
+//
+// Like projectWorkspaceAction, any method that is not a plain read is
+// treated as a write.
+func harnessConfigRouteAction(action, method string) Action {
+	switch {
+	case action == "" && method == http.MethodDelete,
+		action == "reimport",
+		action == "clone":
+		return ActionRead
+	}
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return ActionRead
+	default:
+		return ActionUpdate
+	}
+}
+
+// authorizeHarnessConfigRoute applies the dispatcher gate. Runtime brokers
+// read harness configs during agent creation over HMAC auth; they are not
+// user principals, so the authorization kernel cannot evaluate them. They are
+// admitted for reads only, and the HMAC credential is the trust basis.
+func (s *Server) authorizeHarnessConfigRoute(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig, action Action) bool {
+	if action == ActionRead && GetBrokerIdentityFromContext(r.Context()) != nil {
+		return true
+	}
+	return s.authorize(w, r, harnessConfigResource(hc), action)
+}
+
 // handleHarnessConfigCRUD handles basic harness config CRUD operations.
-func (s *Server) handleHarnessConfigCRUD(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) handleHarnessConfigCRUD(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
 	switch r.Method {
 	case http.MethodGet:
-		s.getHarnessConfig(w, r, id)
+		s.getHarnessConfig(w, r, hc)
 	case http.MethodPut:
-		s.updateHarnessConfig(w, r, id)
+		s.updateHarnessConfig(w, r, hc)
 	case http.MethodPatch:
-		s.patchHarnessConfig(w, r, id)
+		s.patchHarnessConfig(w, r, hc)
 	case http.MethodDelete:
-		s.deleteHarnessConfig(w, r, id)
+		s.deleteHarnessConfig(w, r, hc)
 	default:
 		MethodNotAllowed(w)
 	}
 }
 
-func (s *Server) getHarnessConfig(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) getHarnessConfig(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
 	if !checkAgentReadScope(w, r) {
 		return
 	}
 
 	ctx := r.Context()
-	hc, err := s.store.GetHarnessConfig(ctx, id)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
 
-	// Authenticated runtime brokers read harness configs during agent creation.
-	// They pass HMAC auth via middleware but are not user principals, so the
-	// authorization kernel cannot evaluate them. Allow read access for brokers;
-	// the HMAC credential is the trust basis.
-	if GetBrokerIdentityFromContext(ctx) == nil {
-		// SECURITY-GATE: authorize read access to this specific harness config.
-		// The list endpoint filters via AuthorizeReadBatch; without this check
-		// a caller could bypass list filtering by addressing the config by ID.
-		if !s.authorize(w, r, harnessConfigResource(hc), ActionRead) {
-			return
-		}
-	}
+	// Authorization (including the read-only broker exemption) is enforced
+	// once, above the switch, in handleHarnessConfigByID.
 
 	resp := HarnessConfigWithCapabilities{HarnessConfig: *hc}
 	if identity := GetIdentityFromContext(ctx); identity != nil {
@@ -456,14 +492,8 @@ func extractImageFromStorage(ctx context.Context, stor storage.Storage, storageP
 	return entry.Image
 }
 
-func (s *Server) updateHarnessConfig(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) updateHarnessConfig(w http.ResponseWriter, r *http.Request, existing *store.HarnessConfig) {
 	ctx := r.Context()
-
-	existing, err := s.store.GetHarnessConfig(ctx, id)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
 
 	var hc store.HarnessConfig
 	if err := readJSON(r, &hc); err != nil {
@@ -487,14 +517,8 @@ func (s *Server) updateHarnessConfig(w http.ResponseWriter, r *http.Request, id 
 	writeJSON(w, http.StatusOK, hc)
 }
 
-func (s *Server) patchHarnessConfig(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) patchHarnessConfig(w http.ResponseWriter, r *http.Request, existing *store.HarnessConfig) {
 	ctx := r.Context()
-
-	existing, err := s.store.GetHarnessConfig(ctx, id)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
 
 	if !applyResourceMetadataPatch(w, r, resourceMetadataFields{
 		Name:        &existing.Name,
@@ -514,17 +538,11 @@ func (s *Server) patchHarnessConfig(w http.ResponseWriter, r *http.Request, id s
 	writeJSON(w, http.StatusOK, existing)
 }
 
-func (s *Server) deleteHarnessConfig(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) deleteHarnessConfig(w http.ResponseWriter, r *http.Request, existing *store.HarnessConfig) {
 	ctx := r.Context()
 	query := r.URL.Query()
 
 	deleteFiles := query.Get("deleteFiles") == "true"
-
-	existing, err := s.store.GetHarnessConfig(ctx, id)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
 
 	// Authorize: check source scope for ActionDelete
 	switch existing.Scope {
@@ -584,7 +602,7 @@ func (s *Server) deleteHarnessConfig(w http.ResponseWriter, r *http.Request, id 
 		}
 	}
 
-	if err := s.store.DeleteHarnessConfig(ctx, id); err != nil {
+	if err := s.store.DeleteHarnessConfig(ctx, existing.ID); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
@@ -593,19 +611,13 @@ func (s *Server) deleteHarnessConfig(w http.ResponseWriter, r *http.Request, id 
 }
 
 // handleHarnessConfigUpload handles requests for upload URLs.
-func (s *Server) handleHarnessConfigUpload(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) handleHarnessConfigUpload(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
 		return
 	}
 
 	ctx := r.Context()
-
-	hc, err := s.store.GetHarnessConfig(ctx, id)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
 
 	stor := s.GetStorage()
 	if stor == nil {
@@ -625,7 +637,7 @@ func (s *Server) handleHarnessConfigUpload(w http.ResponseWriter, r *http.Reques
 	}
 
 	if hc.StoragePath == "" {
-		RuntimeError(w, "Harness config storage path not configured (id: "+id+")")
+		RuntimeError(w, "Harness config storage path not configured (id: "+hc.ID+")")
 		return
 	}
 
@@ -646,19 +658,13 @@ func (s *Server) handleHarnessConfigUpload(w http.ResponseWriter, r *http.Reques
 }
 
 // handleHarnessConfigFinalize finalizes a harness config after file upload.
-func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
 		return
 	}
 
 	ctx := r.Context()
-
-	hc, err := s.store.GetHarnessConfig(ctx, id)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
 
 	stor := s.GetStorage()
 	if stor == nil {
@@ -706,18 +712,13 @@ func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Requ
 
 // handleHarnessConfigCheckImage triggers an immediate image status re-check.
 // POST /api/v1/harness-configs/{id}/check-image
-func (s *Server) handleHarnessConfigCheckImage(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) handleHarnessConfigCheckImage(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
 		return
 	}
 
 	ctx := r.Context()
-	hc, err := s.store.GetHarnessConfig(ctx, id)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
 
 	image := s.harnessConfigImage(hc)
 	if image == "" {
@@ -815,19 +816,13 @@ func (s *Server) handleHarnessConfigCheckImage(w http.ResponseWriter, r *http.Re
 }
 
 // handleHarnessConfigDownload returns signed URLs for downloading harness config files.
-func (s *Server) handleHarnessConfigDownload(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) handleHarnessConfigDownload(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
 		return
 	}
 
 	ctx := r.Context()
-
-	hc, err := s.store.GetHarnessConfig(ctx, id)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
 
 	stor := s.GetStorage()
 	if stor == nil {
@@ -854,18 +849,13 @@ func (s *Server) handleHarnessConfigDownload(w http.ResponseWriter, r *http.Requ
 }
 
 // handleHarnessConfigValidate validates a harness-config's storage consistency.
-func (s *Server) handleHarnessConfigValidate(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) handleHarnessConfigValidate(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
 		return
 	}
 
 	ctx := r.Context()
-	hc, err := s.store.GetHarnessConfig(ctx, id)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
 
 	rec := harnessConfigToRecord(hc)
 	rs := s.harnessConfigStore(hc.Harness)
@@ -879,19 +869,13 @@ func (s *Server) handleHarnessConfigValidate(w http.ResponseWriter, r *http.Requ
 }
 
 // handleHarnessConfigClone creates a copy of a harness config.
-func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request, source *store.HarnessConfig) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
 		return
 	}
 
 	ctx := r.Context()
-
-	source, err := s.store.GetHarnessConfig(ctx, id)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
 
 	var req CloneTemplateRequest
 	if err := readJSON(r, &req); err != nil {
@@ -1018,7 +1002,7 @@ type ReimportHarnessConfigRequest struct {
 
 // handleHarnessConfigReimport re-imports a harness-config from its stored
 // source_url (or an override URL). POST /api/v1/harness-configs/{id}/reimport
-func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
 		return
@@ -1026,11 +1010,6 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 
 	ctx := r.Context()
 
-	hc, err := s.store.GetHarnessConfig(ctx, id)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
 	if hc == nil {
 		NotFound(w, "HarnessConfig")
 		return
@@ -1129,18 +1108,13 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 
 // handleHarnessConfigImageStatus returns per-broker aggregated image status.
 // GET /api/v1/harness-configs/{id}/image-status
-func (s *Server) handleHarnessConfigImageStatus(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) handleHarnessConfigImageStatus(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
 		return
 	}
 
 	ctx := r.Context()
-	hc, err := s.store.GetHarnessConfig(ctx, id)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
 
 	image := s.harnessConfigImage(hc)
 	if image == "" {
@@ -1322,18 +1296,13 @@ func (s *Server) buildLocalImageEntry(ctx context.Context, shortImage, longImage
 
 // handleHarnessConfigDeleteLocalImage removes the local short-form image.
 // DELETE /api/v1/harness-configs/{id}/local-image?broker_id=...
-func (s *Server) handleHarnessConfigDeleteLocalImage(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) handleHarnessConfigDeleteLocalImage(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
 	if r.Method != http.MethodDelete {
 		MethodNotAllowed(w)
 		return
 	}
 
 	ctx := r.Context()
-	hc, err := s.store.GetHarnessConfig(ctx, id)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
 
 	image := s.harnessConfigImage(hc)
 	if image == "" || !imagecheck.IsBareImageName(image) {
@@ -1393,18 +1362,13 @@ func (s *Server) handleHarnessConfigDeleteLocalImage(w http.ResponseWriter, r *h
 
 // handleHarnessConfigPullImage pulls the latest image from the remote registry.
 // POST /api/v1/harness-configs/{id}/pull-image?broker_id=...
-func (s *Server) handleHarnessConfigPullImage(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) handleHarnessConfigPullImage(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
 		return
 	}
 
 	ctx := r.Context()
-	hc, err := s.store.GetHarnessConfig(ctx, id)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
 
 	image := s.harnessConfigImage(hc)
 	if image == "" {

@@ -33,19 +33,33 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)
 
-	// If identity is an agent, verify it's the same agent and has the correct scope
-	if agentIdent, ok := identity.(AgentIdentity); ok {
-		if agentIdent.ID() != id {
+	// Every identity kind is handled explicitly; there is no fall-through.
+	// Agents may update only their own status and need the status scope.
+	// Any other caller must be authorized to update the agent itself.
+	switch ident := identity.(type) {
+	case nil:
+		Unauthorized(w)
+		return
+	case AgentIdentity:
+		if ident.ID() != id {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only update their own status", nil)
 			return
 		}
-		if !agentIdent.HasScope(ScopeAgentStatusUpdate) {
+		if !ident.HasScope(ScopeAgentStatusUpdate) {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope: agent:status:update", nil)
 			return
 		}
-	} else if identity == nil {
-		Unauthorized(w)
-		return
+	default:
+		agent, err := s.store.GetAgent(ctx, id)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		// SECURITY-GATE: CheckAccess — non-agent callers need update access
+		// to this specific agent.
+		if !s.authorize(w, r, agentResource(agent), ActionUpdate) {
+			return
+		}
 	}
 
 	var status store.AgentStatusUpdate
