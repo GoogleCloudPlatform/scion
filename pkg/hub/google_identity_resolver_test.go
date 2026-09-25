@@ -24,13 +24,16 @@ import (
 // contract violation, since ValidateIDToken/ValidateAccessToken must return
 // a non-nil identity whenever err is nil. Resolve must not panic on
 // identity.Issuer and must return an error rather than a user. Both callers
-// (ge_exchange.go's Exchange and auth_external_bearer.go's
-// authenticateExternalBearer via classifyResolveError) already map an
-// unrecognized Resolve error to a 5xx: see
-// TestGEExchange_NilIdentityFromValidator_InternalError and
-// TestExternalBearer_AccessToken_NilIdentityFromValidator_ServiceUnavailable
-// for those two callers' end-to-end coverage. This test exercises Resolve
-// itself, directly.
+// already map an unrecognized Resolve error to a 5xx, not the 4xx arms
+// reserved for the named sentinels: ge_exchange.go's Exchange, covered by
+// TestGEExchange_ProvisionNewUser_CreateError_FailsClosed ("user resolution
+// failed", 500); and auth_external_bearer.go's authenticateExternalBearer
+// via classifyResolveError, covered by
+// TestExternalBearer_ResolveInternalError_ServiceUnavailable and
+// TestExternalBearer_GetExternalIdentityFault_ServiceUnavailable (503
+// store_error). This test exercises Resolve itself, directly, with a nil
+// identity specifically — none of those three reach Resolve with one, since
+// each drives a different Resolve fault.
 func TestGoogleIdentityResolver_Resolve_NilIdentity_ReturnsError(t *testing.T) {
 	userStore := newFakeUserStore()
 	extStore := newMemExtIDStore()

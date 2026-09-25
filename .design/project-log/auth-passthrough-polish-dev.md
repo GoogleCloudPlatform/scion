@@ -658,68 +658,94 @@ it now fails/panics, guard restored) before committing.
 Commits: `391264664` (G1), `3175a7db1` (G2), `b75a13214` (G3), `a382f832c` (G4), `39e49136f` (G5) — one commit per guard, per the
 brief's suggested grouping.
 
-### §2: `TestCrossReplicaStreamCursor` (extras/scion-a2a-bridge PostgreSQL integration) — pre-existing flake, not introduced by this branch
+### §2: `TestCrossReplicaStreamCursor` (extras/scion-a2a-bridge PostgreSQL integration) — pre-existing upstream test defect, not introduced by this branch
 
-**CI invocation** (read from `.github/workflows/extras-ci.yml`, job `a2a-bridge-postgres-integration`; identical on `HEAD` and
-on upstream `main` — see below): a `postgres:15` service container (`POSTGRES_USER=scion`, `POSTGRES_PASSWORD=scion`,
-`POSTGRES_DB=a2a_test`, port 5432), then `extras/scion-a2a-bridge/scripts/run-integration-ci.sh` with
+**Corrected in fix round 1** (see the "Upstream r1 fix round 1" section below): the original version of this section, as
+committed at `b1250499d`, made two false claims and misdescribed the comparison run. Review `ap-up1-rev` caught both and
+supplied the actual mechanism, credited throughout. This is the corrected text.
+
+**CI invocation** (read from `.github/workflows/extras-ci.yml`, job `a2a-bridge-postgres-integration`; the trigger is
+identical on `HEAD` and on upstream `main`): a `postgres:15` service container (`POSTGRES_USER=scion`,
+`POSTGRES_PASSWORD=scion`, `POSTGRES_DB=a2a_test`, port 5432), then
+`extras/scion-a2a-bridge/scripts/run-integration-ci.sh` with
 `TEST_DATABASE_URL=postgres://scion:scion@127.0.0.1:5432/a2a_test?sslmode=disable` and `TEST_REQUIRE_DATABASE=1`. That script
 fails closed on a missing `psql`/DB, verifies connectivity and a canary sentinel row, then runs three phases against
 `./integration`: Phase 1 `go test -v ./integration`, Phase 2 `go test -race ./integration`, Phase 3
-`go test -count=3 ./integration`, and finally re-verifies the canary row is untouched.
+`go test -count=3 ./integration`, and finally re-verifies the canary row is untouched. The branch's own CI failure
+(job `107900942304`, `head_sha=46a9ea618`) was in **Phase 1** (`go test -v ./integration`), not Phase 3.
 
-**Reproduction environment**: Postgres 15 installed locally (`apt-get install postgresql postgresql-contrib`), role `scion`/
-password `scion`, database `a2a_test` — the exact DSN shape CI uses, connected via `psql`/`go test` at `127.0.0.1:5432`. Every
-run: all `SCION_*`/`CLAUDE_CODE_*` env vars unset, `GOTMPDIR` a dedicated non-repo `/tmp` dir, `GOCACHE=/scion-volumes/gocache`.
-Evidence files (full `go test` output for every run below) are under
-`/scion-volumes/scratchpad/projects/auth-passthrough/upstream-r1-s2/`.
+**The failing check** is `ha_final_process_test.go:641`, `assertNoSSE` after `TASK_STATE_COMPLETED`, which receives an
+unexpected extra `kind=artifact-update` event. Line `:550` is not the assertion — it is the `t.Cleanup` evidence logger,
+`logCursorFailureEvidence`, whose snapshot is used as forensic evidence below, not as the failure site itself.
 
-**Targeted runs** (`go test -v -run '^TestCrossReplicaStreamCursor$' ./integration/...`), one `/tmp` worktree per revision:
-- At branch head `46a9ea618`: `-count=5` → 5/5 pass. `-race -count=10` → 10/10 pass.
-- At upstream-main `a53175c23` (same test file, byte-identical to the branch's copy — see below): `-count=5` → 5/5 pass.
-  `-race -count=10` → 10/10 pass.
-- With `GOMAXPROCS=2` (the sandbox has 32 cores; GitHub's public runners have far fewer, and this timing-sensitive test's
-  flake plausibly needs that contention) at branch head: `-count=20` → 20/20 pass.
+**Mechanism** (identified by `ap-up1-rev`'s review, verified independently against the cited lines):
+1. The test calls `publishBrokerMessage(..., "cursor-final", TypeAssistantReply, "final once")` **twice**, back to back,
+   with the same `msgId` (`ha_final_process_test.go:630-631`).
+2. `publishBrokerMessage` stamps `Timestamp: time.Now().UTC().Format(time.RFC3339)`, which has **one-second resolution**
+   (`ha_final_process_test.go` around `:264`).
+3. In `Bridge.HandleBrokerMessage` → `processAndAppendEvent` (`internal/bridge/bridge.go:1175`), the *message* event is
+   deduplicated on `msgId` — so the duplicate message event is correctly dropped. The *artifact* event, however, is
+   deduplicated on `dedupKey + ":artifact:" + art.ArtifactID` (`bridge.go:1275`), and `ArtifactID` is
+   `deterministicID(msg.Timestamp|msg.Msg)` (`internal/bridge/translate.go:33-40,192`) — a hash that includes the
+   second-resolution `Timestamp`.
+4. When the two publishes happen to straddle a wall-clock second boundary, the second call's `Timestamp` differs from the
+   first's, so its artifact gets a **different** `ArtifactID` and dedup key: a second, un-deduplicated artifact event is
+   appended after COMPLETED and dispatched to the SSE stream — exactly the extra event `assertNoSSE` catches.
+5. The failure probability per test instance is roughly the gap between the two publishes divided by one second, which is
+   why the defect is intermittent and appears more often under repetition (`-count=3`, Phase 3).
 
-None of these targeted runs reproduced a failure — the flake did not show up until running the exact CI script end to end
-(all three phases, full `./integration` package, matching CI's own invocation exactly), at which point it did:
+**Evidence for the mechanism**: the `:550` cleanup-evidence snapshot shows **two** `cursor-final:artifact` rows in the
+task's events table (the message row is correctly singular) in every branch failure captured, and in the two instances
+where both writes are far enough apart to read the wall-clock gap, the rows straddle a second boundary — upstream CI job
+`107900942304` (`01:07:10.88482` and `01:07:11.045824`) and this branch's own local Phase-3 failure (`03:14:58.000430` and
+`03:14:58.005466`, 0.4 ms after a boundary).
 
-**Full `run-integration-ci.sh` runs** (5 per revision, fresh `a2a_test` database each run):
-- Branch head `46a9ea618`: 4/5 pass; **1/5 failed**, in run 3, in **Phase 3 (`-count=3`)**:
-  `ha_final_process_test.go:641: unexpected replayed SSE event: ... kind=artifact-update ...`, then
-  `--- FAIL: TestCrossReplicaStreamCursor (1.18s)`. Full output:
-  `upstream-r1-s2/branch-46a9ea618-fullscript-run3.log`. The other four runs' full output is
-  `branch-46a9ea618-fullscript-run{1,2,4,5}.log`.
-- Upstream-main `a53175c23`: 5/5 pass. Full output: `upstream-r1-s2/upstream-a53175c23-fullscript-run{1..5}.log`.
+**Reachability from this branch's changes: none.** `git diff a53175c23...HEAD -- extras/scion-a2a-bridge` shows
+`translate.go`, `processAndAppendEvent`, `HandleBrokerMessage` and all of `internal/state` are unchanged. The only
+`bridge.go` change adds `"bearer"` to `callerHubClient`, the path for caller-initiated Hub calls; the HA topology this test
+exercises runs `serveHABridgeProcess` with `Scheme: "geGoogle"`, so that arm is never reached. `EffectiveAuthScheme`/
+`ApplyOverlay` run only on admin-overlay pushes, which the HA test never sends. `server.go`'s `hubBearer` arms and
+`uatvalidator.go` are both unreachable under `geGoogle`. None of the code the mechanism above depends on is touched by this
+branch.
 
-**Diff of the two worktrees confirms the test itself, and the whole `integration/` package, is byte-identical** between
-`46a9ea618` and `a53175c23` (`diff -rq` shows no differences under `extras/scion-a2a-bridge/integration/`); the only
-differences are in `internal/bridge/*.go` (+tests), `cmd/scion-a2a-bridge/main.go`, `README.md`, and the sample config — i.e.
-exactly this branch's F4/hubBearer changes, none of which are exercised by a test-file diff of zero lines.
+**The `integration/` directory is not byte-identical between `a53175c23` and this branch** — an earlier version of this
+section claimed otherwise, which was false. `707f671dd` and `cc9bd9e34` change `integration/auth_transport_process_test.go`
+(+132 lines: adds `TestHubBearerProcessPassthrough`, refactors `serveFullBridgeProcess` into
+`serveScionA2ABridgeProcess`) and `integration/alternator_harness_test.go` (+2 lines), and add a Federation trusted-issuer
+config to `serveHubProcess`, which the HA topology's `hub` process also uses. `ha_final_process_test.go` itself — the file
+containing the defective dedup logic and the test's publish/timestamp code — **is** byte-identical on both sides; only that
+narrower claim holds. The wider diff can affect process-startup timing (and therefore the publish-gap failure *rate*), but
+it changes none of the code the defect mechanism above depends on, so it cannot be the cause of the defect itself.
 
-**CI history check** (`gh api` against `GoogleCloudPlatform/scion`, read-only, no comments/pushes):
-- The job's own failure: `gh api repos/GoogleCloudPlatform/scion/actions/jobs/107900942304` — `head_sha=46a9ea618`,
-  `event=pull_request` (run 36080426435). Full log saved: `upstream-r1-s2/ci-job-107900942304.log`.
-- **`extras-ci.yml` only triggers on `pull_request` with a `paths:` filter — it has no `push`/`main`-branch trigger at all.**
-  Confirmed the trigger is identical on upstream `main` (`gh api .../contents/.github/workflows/extras-ci.yml?ref=main`, and
-  `raw.githubusercontent.com/.../main/...`) and on this branch. Cross-checked against the last 50 runs of this workflow
-  (`gh run list --workflow=extras-ci.yml --limit 50`): every single one has `event=pull_request`; none is a push to `main`.
-  So "upstream main CI is green" is not a signal this job ever produced — the job simply never runs on a push to `main`. The
-  only meaningful comparison is across PRs.
-- Checked the `a2a-bridge-postgres-integration` job specifically across 24 other recent PR runs of this workflow (unrelated
-  to auth-passthrough): 7 passed cleanly. **One failed with the identical signature**: run `35411542799`
-  (`GoogleCloudPlatform/scion#`-independent fork branch `ptone/scion:scion/dev-postmerge-integration-harness-final-fixes`,
-  2026-09-19, six days before this branch's failure and touching none of this branch's F4/hubBearer code) — job
-  `105811994668`, `ha_final_process_test.go:508: unexpected replayed SSE event: ...`, `--- FAIL: TestCrossReplicaStreamCursor`,
-  and again specifically in **Phase 3 (`-count=3`)** (Phase 1 and Phase 2 both "completed successfully" first). Full log
-  saved: `upstream-r1-s2/ci-job-105811994668-other-pr.log`.
+**Run 35411542799 is upstream PR `GoogleCloudPlatform/scion#1748`'s pre-merge draft run**, not an unrelated fork branch — an
+earlier version of this section misdescribed it as such, and garbled one citation in the process. PR `GoogleCloudPlatform/scion#1748` (merged
+2026-09-19 as `c56bed940`, an ancestor of `a53175c23`) is the PR that **introduced** `ha_final_process_test.go`,
+`run-integration-ci.sh`, and the extras-ci Postgres job in the first place. Run `35411542799` (job `105811994668`) is that
+PR's own CI run against its pre-merge draft, and it failed on the same `assertNoSSE` assertion after the same double
+`cursor-final` publish, with the same second-resolution `Timestamp` — in Phase 3. It contains none of this branch's code:
+`adminoverlay.go`, `server.go` and `uatvalidator.go` at that commit have zero matches for
+`EffectiveAuthScheme|hubBearer|AuthSchemeWarnDedupe`, and this branch's first hubBearer commit is dated 2026-09-24, five
+days after this run.
 
-**Conclusion**: `TestCrossReplicaStreamCursor` is a pre-existing, timing-sensitive flake in the SSE-replay-cursor path under
-repetition stress (`-count=3`/Phase 3) — it reproduces locally on both `46a9ea618` and `a53175c23` given enough repetitions
-of the full CI script, and it has previously failed in CI, with the identical "unexpected replayed SSE event" message, on a
-wholly unrelated fork branch that never touched this branch's F4 (`EffectiveAuthScheme`/`ApplyOverlay`/`applyRuntimeConfig`)
-or `hubBearer` changes. **No code change made for §2** — per the disposition, this is recorded as evidence for the lead to
-relay to ptone, not "fixed."
+**Run counts** (Phase 3 alone, `go test -count=3 ./integration`, fresh database per run, Postgres 15 local, CI DSN shape,
+`TEST_REQUIRE_DATABASE=1`): this branch **3/35** (this developer's 1/5 full-script runs plus `ap-up1-rev`'s independent
+2/30), upstream-main **0/37** (this developer's 0/5 plus `ap-up1-rev`'s 0/32). The rates are not equal, and this log does
+not claim they are: per the mechanism, the per-instance failure rate is set by the wall-clock gap between the two
+`publishBrokerMessage` calls, i.e. by process-startup timing, and this branch's Hub process changes (new `pkg/hub` auth
+code, the Federation config `serveHubProcess` gained from `707f671dd`/`cc9bd9e34`, or `TestHubBearerProcessPassthrough`
+running earlier in the same test binary) could plausibly widen that gap — this was not measured, and attributing the exact
+rate difference is out of scope here. What both revisions' failures share, and what makes this a **pre-existing defect**
+rather than something this branch introduced, is the identical failure signature (the same assertion, the same double
+cursor-final-artifact evidence, the same second-resolution `Timestamp` root cause) occurring on code this branch never
+touches.
+
+**Conclusion**: `TestCrossReplicaStreamCursor` has a pre-existing defect in `internal/bridge`'s artifact dedup key
+(`deterministicID` over a one-second-resolution `Timestamp`, `bridge.go:1275`/`translate.go:33-40,192`), already present
+and already observed failing in upstream PR `GoogleCloudPlatform/scion#1748`'s own pre-merge CI run before this branch
+existed. None of the code this defect depends on is reachable from this branch's changes. **No code change made for
+§2** — per the disposition, this is recorded as evidence for the lead to relay to ptone, and the defect itself is out of
+scope for `GoogleCloudPlatform/scion#1880`; fixing it is a separate follow-up the lead can offer upstream. Do not
+change upstream's test.
 
 ### Gates (final head `39e49136f`)
 
@@ -821,7 +847,61 @@ authorization gate"). New SHA: `1a2ee7168`. Both hygiene greps below are clean a
 All evidence for this section (commit lists, range-diff, both full `pkg/hub` run logs, the baseline diff) is saved under
 `/scion-volumes/scratchpad/projects/auth-passthrough/rebase-r1/`.
 
-**Not yet pushed.** Per the brief, this branch stays local until `ap-em` sends "PUSH REBASE" (reviewer `ap-up1-rev` was
-still testing `b1250499d` when this rebase began). When that signal arrives, push with
-`git push --force-with-lease=scion/auth-passthrough:b1250499d origin HEAD:scion/auth-passthrough`, confirm the remote head
-with `git ls-remote origin scion/auth-passthrough`, and report back.
+**Pushed.** `ap-up1-rev` reviewed `b1250499d` clean (REQUEST CHANGES was doc-only — see "Upstream r1 fix round 1" below),
+`ap-em` sent "PUSH REBASE", and this head was pushed with
+`git push --force-with-lease=scion/auth-passthrough:b1250499d origin HEAD:scion/auth-passthrough`, confirmed via
+`git ls-remote origin scion/auth-passthrough`.
+
+## Upstream r1 fix round 1 (doc-only, on top of the rebase)
+
+Review `ap-up1-rev` (`reviews/up1-r1-ap-up1-rev.md`) verdict on `b1250499d`: REQUEST CHANGES, code clean (§1 and all five
+G1-G5 guards independently re-verified, each still killed by mutation), one Required and one Optional finding, both
+doc-only. Disposition: `upstream-1880-r1b-dispositions.md` (lead), both ACCEPTed. Applied as one commit on top of the
+already-pushed rebase head `74451cc39`, per ap-em's sequencing (rebase first, doc fixes after).
+
+- **R1 (Required):** the "Upstream round 1" section's §2 subsection, above, contained two false statements and one garbled/
+  misleading description: the "whole `integration/` package is byte-identical" claim was false (`707f671dd`/`cc9bd9e34`
+  change two other files); "reproduces locally on both ... given enough repetitions" was false (upstream's local rate was
+  5/5 pass in this developer's own sample, and 0/32 in the reviewer's larger one — never observed failing); and run
+  `35411542799` was mischaracterized as an "unrelated fork branch" when it is upstream PR `GoogleCloudPlatform/scion#1748`'s
+  own pre-merge CI run (the PR that introduced the test in the first place). The review supplied the actual mechanism
+  (the artifact dedup key's dependence on a one-second-resolution `Timestamp`, `bridge.go:1275`/`translate.go:33-40,192`)
+  and the corrected run counts (branch 3/35, upstream 0/37 across both developers' Phase-3 samples). §2 above has been
+  rewritten in place around that mechanism, with the false claims removed and the run described accurately. The
+  conclusion — pre-existing, not introduced by this branch — is unchanged, but now rests on the actual defect and its
+  unreachability from this branch's code, not on a "same rate on both" argument the data never supported. Checked the
+  "Upstream rebase 1" section (above) for any repeat of the same false claims: none found — its only "byte-identical"
+  mentions are about the rebase range-diff and the golden-test bytes, unrelated to the bridge integration directory.
+- **O1 (Optional):** `pkg/hub/google_identity_resolver_test.go`'s doc comment claimed
+  `TestGEExchange_NilIdentityFromValidator_InternalError` and
+  `TestExternalBearer_AccessToken_NilIdentityFromValidator_ServiceUnavailable` provide "end-to-end coverage" of the two
+  callers' Resolve-error-to-5xx mapping. False: those two tests exercise the G2/G1 guards, which fire *before* `Resolve` is
+  ever called, so neither test reaches it. Reworded to cite the tests that actually exercise that mapping:
+  `TestGEExchange_ProvisionNewUser_CreateError_FailsClosed` ("user resolution failed", 500) for the GE-exchange caller, and
+  `TestExternalBearer_ResolveInternalError_ServiceUnavailable` plus
+  `TestExternalBearer_GetExternalIdentityFault_ServiceUnavailable` (503 `store_error`) for the external-bearer caller.
+- F1 (rate asymmetry, no action beyond R1's wording), F2 (G5 typed nil, no action), F3 (G2 message text, no action): no
+  code or doc change; the reviewer concurred these need nothing further.
+
+### Comments-only proof
+
+```
+$ git diff 74451cc39..HEAD -- '*.go' | /usr/bin/grep -E '^[+-][^+-]' | /usr/bin/grep -vE '^[+-]\s*(//|$)'
+```
+Empty. The only Go change this round is the one doc-comment rewrite in `google_identity_resolver_test.go`; everything else
+is the project log (markdown, not part of this proof).
+
+### Gates
+
+- `gofmt -l pkg cmd extras` — empty.
+- `make lint` (`go vet -tags no_sqlite ./...`) — clean.
+- `go build ./pkg/hub/...` — clean.
+- Targeted: `TestGoogleIdentityResolver_Resolve_NilIdentity_ReturnsError`,
+  `TestGEExchange_ProvisionNewUser_CreateError_FailsClosed`, `TestExternalBearer_ResolveInternalError_ServiceUnavailable`,
+  `TestExternalBearer_GetExternalIdentityFault_ServiceUnavailable` — all pass.
+- Hygiene (base `upstream-main`): commit-body bare-issue-number grep — empty. Diff bare-issue-number grep — empty (this
+  round's own first draft of the log text introduced two unqualified issue-number mentions, caught by this same grep and
+  fixed before commit by qualifying them as `GoogleCloudPlatform/scion` references, as used throughout this section).
+  Perl NBSP check — empty.
+
+Evidence (proof output, hygiene output) saved to `/scion-volumes/scratchpad/projects/auth-passthrough/upstream-r1-fix/`.
