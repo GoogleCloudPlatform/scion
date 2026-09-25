@@ -1080,6 +1080,43 @@ func TestReincarnateAgent_AC8_ConflictWhenAlreadyPending(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, rec.Code)
 }
 
+// TestReincarnateAgent_A11F5_DryRunConflictsWhenAlreadyStarting is the design
+// §3.4 Amendment A11 item 3 regression test: the already-pending/already-
+// in-flight 409 gate used to run only on the real (non-dry-run) path, so a
+// --dry-run request against an agent whose migration was already in the
+// "starting" state would compute and return a plan instead of reporting the
+// conflict — misleading a caller into thinking a reincarnate was safe to
+// start when one was already running. The gate must fire for --dry-run too,
+// and it must not touch the agent row at all (no claim to make on a dry
+// run) — state_version stays exactly where it was.
+func TestReincarnateAgent_A11F5_DryRunConflictsWhenAlreadyStarting(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	require.NoError(t, s.CreateAgentReincarnation(context.Background(), &store.AgentReincarnation{
+		AgentID:        agent.ID,
+		FromGeneration: 1,
+		ToGeneration:   2,
+		State:          store.AgentReincarnationStateStarting,
+	}))
+	agent.ReincarnationState = store.ReincarnationStateStarting
+	require.NoError(t, s.UpdateAgent(context.Background(), agent))
+	beforeVersion := agent.StateVersion
+
+	req := reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{DryRun: true})
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, req, agent.ID)
+
+	assert.Equal(t, http.StatusConflict, rec.Code, "a dry run must 409 against an in-flight reincarnation, not silently compute a plan")
+
+	after, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, beforeVersion, after.StateVersion, "a dry run must never write the agent row, conflict or not")
+	assert.Equal(t, store.ReincarnationStateStarting, after.ReincarnationState)
+}
+
 // TestReincarnateAgent_AC8_OrphanCannotWedgeAfterConflict is the design §3.4
 // Amendment A3 regression test: a version conflict on the claim write (the guarded
 // UpdateAgent that sets reincarnation_state=pending) must leave nothing

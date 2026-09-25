@@ -244,6 +244,19 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	// AC-8 / design §3.4 Amendment A3, moved ahead of the plan computation
+	// (design §3.4 Amendment A11 item 3): a reincarnation already in flight
+	// (or one that failed and is retryable — ReincarnationStateFailed is
+	// excluded, same as the real-path claim below) must 409 on a --dry-run
+	// request too, not just on a real one. Checked here, before any plan is
+	// computed, so a dry run against a busy agent reports the conflict
+	// instead of silently computing and returning a plan that a concurrent
+	// real request could invalidate before the caller ever acts on it.
+	if agent.ReincarnationState != store.ReincarnationStateNone && agent.ReincarnationState != store.ReincarnationStateFailed {
+		Conflict(w, "a reincarnation is already pending for this agent")
+		return
+	}
+
 	// AC-2's "dry-run changed nothing" and the real path's plan are computed
 	// by the exact same call — buildFreshAppliedConfig only reads from the
 	// store (templates, harness configs, pre-start hooks, skills settings),
@@ -278,11 +291,12 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// request behind a permanent 409. Claiming first means a conflict here
 	// happens before anything else is written, so there is nothing to leave
 	// behind: the request simply fails, unclaimed.
-	if agent.ReincarnationState != store.ReincarnationStateNone && agent.ReincarnationState != store.ReincarnationStateFailed {
-		Conflict(w, "a reincarnation is already pending for this agent")
-		return
-	}
-
+	//
+	// The already-pending/already-starting check itself now lives above,
+	// before the plan is computed, so it also gates --dry-run (design §3.4
+	// Amendment A11 item 3); a concurrent real request could still slip in
+	// between that check and this claim, but UpdateAgent's own state_version
+	// CAS below catches that race exactly as it always has.
 	previousReincarnationState := agent.ReincarnationState
 	previousReincarnationUpdatedAt := agent.ReincarnationUpdatedAt
 	agent.ReincarnationState = store.ReincarnationStatePending
