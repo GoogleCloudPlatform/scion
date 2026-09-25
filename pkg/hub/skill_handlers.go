@@ -258,21 +258,66 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 	// this boundary (ptone/scion#1903): an anonymous caller gets an
 	// AccessScope with no matching terms, which authorizes nothing.
 	scopeResult, err := s.authzService.ResolveListScopes(ctx, identity, "project.list")
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "unable to resolve authorization", nil)
-		return
+	resolutionFailed := err != nil
+	if resolutionFailed {
+		// ptone/scion#1954: a principal-resolution error here (e.g. a
+		// federated identity whose ID isn't a bare UUID, which trips
+		// parseUUID in GetEffectiveGroups/GetEffectiveGroupsForAgent) must
+		// not take the whole endpoint down for every caller. Logged with
+		// principal type only: never the raw principal ID.
+		principalType := "anonymous"
+		if identity != nil {
+			principalType = identity.Type()
+		}
+		slog.WarnContext(ctx, "listSkills: failed to resolve list scopes; failing closed",
+			"principal_type", principalType, "error", err)
 	}
-	if identity == nil {
+	switch {
+	case identity == nil:
+		// ptone/scion#1903 removed the public-visibility bypass: an
+		// anonymous caller now gets a scope with no matching terms, which
+		// authorizes nothing.
 		filter.AccessScope = &store.SkillAccessScope{}
-	} else if !scopeResult.Scopes.IsAll() {
+	case resolutionFailed:
+		// ptone/scion#1954: the same principal-resolution error that failed
+		// ResolveListScopes also makes Decide() fail closed on every row's
+		// per-row capability check below (see authz.go), so this principal
+		// can never actually read anything regardless of what the query
+		// predicate offers. Giving it the ordinary no-grant-user floor
+		// (IncludeHubScope + CallerID + ProjectIDs) would only produce a
+		// nonzero totalCount over an empty page — exactly the count/page
+		// mismatch this fix closes for agents below — and would needlessly
+		// disclose the hub-wide skill count to a principal that can't read
+		// any of them. Match what Decide() actually grants: nothing.
+		filter.AccessScope = &store.SkillAccessScope{}
+	case isAgentIdentity(identity):
+		// ptone/scion#1954 (N-B): skill.read/skill.list carry no AgentScopes
+		// (pre-existing, tracked separately from this fix), so an agent's
+		// per-row capability check below can never allow any row through —
+		// hub-scoped, project-scoped or otherwise; there is no more
+		// visibility bypass since ptone/scion#1903. Offering hub-scoped rows
+		// in the predicate only for the per-row filter to strip every one of
+		// them produces a totalCount that disagrees with the page (empty
+		// pages with a nonzero total and a nextCursor). Match what the
+		// per-row filter actually grants an agent today: nothing.
+		//
+		// This case must come before the IsAll() check below: an agent
+		// whose resolved scope happens to be IsAll (e.g. a synthetic
+		// binding that somehow reached an unrestricted scope) must still
+		// get the empty, agreeing scope, not an unfiltered query — an
+		// unfiltered query would reproduce the exact count/page mismatch
+		// this fix exists to close, just for a different reason.
+		filter.AccessScope = &store.SkillAccessScope{}
+	case scopeResult.Scopes.IsAll():
+		// identity holds an unrestricted (hub-admin/super-admin) scope —
+		// leave filter.AccessScope nil so the query is unfiltered.
+	default:
 		filter.AccessScope = &store.SkillAccessScope{
 			IncludeHubScope: true,
 			CallerID:        identity.ID(),
 			ProjectIDs:      scopeResult.Scopes.ProjectIDs(),
 		}
 	}
-	// else: identity holds an unrestricted (hub-admin/super-admin) scope —
-	// leave filter.AccessScope nil so the query is unfiltered.
 
 	result, err := s.store.ListSkills(ctx, filter, listOptionsFromQuery(query))
 	if err != nil {
@@ -311,6 +356,15 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 		TotalCount:   result.TotalCount,
 		Capabilities: scopeCap,
 	})
+}
+
+// isAgentIdentity reports whether identity is a local or federated agent.
+// Both agentIdentityWrapper and FederatedAgentIdentity implement
+// AgentIdentity; BrokerIdentity and UserIdentity implementations
+// deliberately do not (see brokerIdentityImpl's doc comment, DEF-58).
+func isAgentIdentity(identity Identity) bool {
+	_, ok := identity.(AgentIdentity)
+	return ok
 }
 
 // createSkill creates a new skill record.

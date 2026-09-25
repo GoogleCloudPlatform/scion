@@ -18,6 +18,7 @@ package entadapter
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"testing"
 
@@ -568,6 +569,28 @@ func TestSkillStore_ListCursorWalkVisitsEveryRowOnce(t *testing.T) {
 	}
 
 	assert.Len(t, seen, total, "cursor walk must visit every matching row exactly once")
+}
+
+// TestSkillStore_ListMalformedCursorIsInvalidInput proves that a malformed
+// cursor is reported as store.ErrInvalidInput (which the hub handler maps to
+// HTTP 400), not a bare error that falls through to a 500. ptone/scion#1954:
+// decodeListCursor's error used to be wrapped in a plain fmt.Errorf with no
+// sentinel, so pkg/hub's writeErrorFromErr had nothing to match and returned
+// 500 for any caller sending a garbled cursor.
+func TestSkillStore_ListMalformedCursorIsInvalidInput(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+
+	for _, cursor := range []string{
+		"not-base64-!!!",
+		"====",
+		base64.URLEncoding.EncodeToString([]byte("not-enough-parts")),
+		base64.URLEncoding.EncodeToString([]byte("not-a-timestamp,not-a-uuid")),
+	} {
+		_, err := cs.ListSkills(ctx, store.SkillFilter{Status: "active"}, store.ListOptions{Limit: 5, Cursor: cursor})
+		require.Error(t, err, "cursor %q should fail to decode", cursor)
+		assert.ErrorIs(t, err, store.ErrInvalidInput, "cursor %q: expected store.ErrInvalidInput so the hub maps it to 400", cursor)
+	}
 }
 
 // TestSkillStore_ListAccessScope_UserAndProjectCombineWithScopeFilter is the

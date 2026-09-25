@@ -272,7 +272,10 @@ func (s *SkillStore) ListSkills(ctx context.Context, filter store.SkillFilter, o
 	if opts.Cursor != "" {
 		cursorCreated, cursorID, err := decodeListCursor(opts.Cursor, opts.CursorBinding)
 		if err != nil {
-			return nil, fmt.Errorf("invalid cursor: %w", err)
+			// A malformed cursor is caller error, not a server failure: wrap it
+			// in store.ErrInvalidInput so writeErrorFromErr maps it to 400
+			// instead of falling through to the generic 500 branch.
+			return nil, fmt.Errorf("invalid cursor: %w: %w", store.ErrInvalidInput, err)
 		}
 		query.Where(skillBeforeCursor(cursorCreated, cursorID))
 	}
