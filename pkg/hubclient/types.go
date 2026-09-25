@@ -62,20 +62,6 @@ type Agent struct {
 	ExitReason        string            `json:"exitReason,omitempty"`
 }
 
-// MarshalJSON implements custom marshaling to support legacy grove fields.
-func (a Agent) MarshalJSON() ([]byte, error) {
-	type Alias Agent
-	return json.Marshal(&struct {
-		Alias
-		Grove   string `json:"grove,omitempty"`
-		GroveID string `json:"groveId,omitempty"`
-	}{
-		Alias:   Alias(a),
-		Grove:   a.Project,
-		GroveID: a.ProjectID,
-	})
-}
-
 // AgentConfig represents agent configuration.
 type AgentConfig struct {
 	Image         string            `json:"image,omitempty"`
@@ -122,21 +108,16 @@ type Project struct {
 	ProjectType            string            `json:"projectType,omitempty"`
 }
 
-// MarshalJSON implements custom marshaling to support legacy grove fields.
+// MarshalJSON implements custom marshaling to also emit the canonical
+// "projectId" alias for "id".
 func (p Project) MarshalJSON() ([]byte, error) {
 	type Alias Project
 	return json.Marshal(&struct {
 		Alias
 		ProjectID string `json:"projectId,omitempty"`
-		GroveID   string `json:"groveId,omitempty"`
-		GroveName string `json:"groveName,omitempty"`
-		GroveType string `json:"groveType,omitempty"`
 	}{
 		Alias:     Alias(p),
 		ProjectID: p.ID,
-		GroveID:   p.ID,
-		GroveName: p.Name,
-		GroveType: p.ProjectType,
 	})
 }
 
@@ -299,18 +280,6 @@ func (b *RuntimeBroker) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// MarshalJSON implements custom marshaling to support legacy grove fields.
-func (b RuntimeBroker) MarshalJSON() ([]byte, error) {
-	type Alias RuntimeBroker
-	return json.Marshal(&struct {
-		Alias
-		Groves []BrokerProjectInfo `json:"groves,omitempty"`
-	}{
-		Alias:  Alias(b),
-		Groves: b.Projects,
-	})
-}
-
 // BrokerCapabilities describes runtime broker capabilities.
 type BrokerCapabilities struct {
 	WebPTY bool `json:"webPty"`
@@ -362,20 +331,6 @@ func (i *BrokerProjectInfo) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// MarshalJSON implements custom marshaling to support legacy grove fields.
-func (i BrokerProjectInfo) MarshalJSON() ([]byte, error) {
-	type Alias BrokerProjectInfo
-	return json.Marshal(&struct {
-		Alias
-		GroveID   string `json:"groveId,omitempty"`
-		GroveName string `json:"groveName,omitempty"`
-	}{
-		Alias:     Alias(i),
-		GroveID:   i.ProjectID,
-		GroveName: i.ProjectName,
-	})
-}
-
 // Template represents a template from the Hub API.
 type Template struct {
 	ID            string          `json:"id"`
@@ -402,18 +357,6 @@ type Template struct {
 	UpdatedBy     string          `json:"updatedBy,omitempty"`
 	Created       time.Time       `json:"created"`
 	Updated       time.Time       `json:"updated"`
-}
-
-// MarshalJSON implements custom marshaling to support legacy grove fields.
-func (t Template) MarshalJSON() ([]byte, error) {
-	type Alias Template
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId,omitempty"`
-	}{
-		Alias:   Alias(t),
-		GroveID: t.ProjectID,
-	})
 }
 
 // TemplateFile represents a file within a template.

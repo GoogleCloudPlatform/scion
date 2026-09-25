@@ -124,7 +124,7 @@ type BrokerInfo struct {
 // RegisterProjectResponse is the response from registering a project.
 type RegisterProjectResponse struct {
 	Project       *Project       `json:"project"`
-	LegacyProject *Project       `json:"grove,omitempty"`       // Legacy alias for compatibility
+	LegacyProject *Project       `json:"-"`                     // Legacy alias for compatibility, decode only
 	Broker        *RuntimeBroker `json:"broker,omitempty"`      // Populated if brokerId or broker provided
 	Created       bool           `json:"created"`               // True if project was newly created
 	Matches       []ProjectMatch `json:"matches,omitempty"`     // Populated when multiple projects share the same git remote
@@ -134,12 +134,17 @@ type RegisterProjectResponse struct {
 
 // UnmarshalJSON implements custom unmarshaling to support legacy grove field.
 func (r *RegisterProjectResponse) UnmarshalJSON(data []byte) error {
-	type alias RegisterProjectResponse
-	var aux alias
+	type Alias RegisterProjectResponse
+	aux := &struct {
+		Grove *Project `json:"grove,omitempty"`
+		*Alias
+	}{
+		Alias: (*Alias)(r),
+	}
 	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
 	}
-	*r = RegisterProjectResponse(aux)
+	r.LegacyProject = aux.Grove
 	if r.Project == nil && r.LegacyProject != nil {
 		r.Project = r.LegacyProject
 	}
@@ -433,18 +438,6 @@ type ProjectCacheRefreshResponse struct {
 	CachedAt   time.Time `json:"cachedAt"`
 }
 
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (r ProjectCacheRefreshResponse) MarshalJSON() ([]byte, error) {
-	type Alias ProjectCacheRefreshResponse
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId"`
-	}{
-		Alias:   Alias(r),
-		GroveID: r.ProjectID,
-	})
-}
-
 // UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
 func (r *ProjectCacheRefreshResponse) UnmarshalJSON(data []byte) error {
 	type Alias ProjectCacheRefreshResponse
@@ -471,18 +464,6 @@ type ProjectCacheStatusResponse struct {
 	FileCount   int        `json:"fileCount"`
 	TotalBytes  int64      `json:"totalBytes"`
 	LastRefresh *time.Time `json:"lastRefresh,omitempty"`
-}
-
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (r ProjectCacheStatusResponse) MarshalJSON() ([]byte, error) {
-	type Alias ProjectCacheStatusResponse
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId"`
-	}{
-		Alias:   Alias(r),
-		GroveID: r.ProjectID,
-	})
 }
 
 // UnmarshalJSON implements custom unmarshaling to support legacy groveId field.

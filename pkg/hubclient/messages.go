@@ -107,18 +107,6 @@ func (m *AgentMessage) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (m AgentMessage) MarshalJSON() ([]byte, error) {
-	type Alias AgentMessage
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId,omitempty"`
-	}{
-		Alias:   Alias(m),
-		GroveID: m.ProjectID,
-	})
-}
-
 // List returns messages for the authenticated user.
 func (s *messageService) List(ctx context.Context, opts *ListMessagesOptions) (*store.ListResult[store.Message], error) {
 	query := url.Values{}
