@@ -41,6 +41,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/extras/scion-chat-app/internal/identity"
 	"github.com/GoogleCloudPlatform/scion/extras/scion-chat-app/internal/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 )
 
 func main() {
@@ -270,7 +271,7 @@ func main() {
 		for _, link := range links {
 			// Subscribe only to user-targeted messages so that agent-to-agent
 			// traffic and broadcasts do not leak into chat.
-			pattern := fmt.Sprintf("scion.grove.%s.user.>", link.ProjectID)
+			pattern := fmt.Sprintf("%s.%s.user.>", projectcompat.CanonicalTopicPrefix, link.ProjectID)
 			if err := broker.RequestSubscription(pattern); err != nil {
 				log.Warn("failed to request subscription for project",
 					"project_id", link.ProjectID,

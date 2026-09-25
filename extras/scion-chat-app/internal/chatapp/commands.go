@@ -30,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/extras/scion-chat-app/internal/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 )
 
 // eventUserLookup returns user info from the ChatEvent itself, using the
@@ -754,6 +755,15 @@ func (r *CommandRouter) cmdCreate(ctx context.Context, event *ChatEvent, args []
 	return textResponse(event, fmt.Sprintf("Agent `%s` created (ID: `%s`).", createResp.Agent.Slug, createResp.Agent.ID)), nil
 }
 
+// projectSubscriptionPattern returns the broker subscription pattern used to
+// receive all messages for a project. Both cmdLink (subscribe) and cmdUnlink
+// (cancel) must build the pattern the same way, or unlink cannot cancel the
+// subscription link created; routing both through this one function keeps
+// them from drifting apart.
+func projectSubscriptionPattern(projectID string) string {
+	return projectcompat.ProjectPattern(projectID)
+}
+
 func (r *CommandRouter) cmdLink(ctx context.Context, event *ChatEvent, args []string) (*EventResponse, error) {
 	if len(args) == 0 {
 		return textResponse(event, "Usage: `/scionAdmin link <project-slug>`"), nil
@@ -795,7 +805,7 @@ func (r *CommandRouter) cmdLink(ctx context.Context, event *ChatEvent, args []st
 	// Subscribe to all project messages; observe mode filtering is
 	// applied at delivery time in HandleBrokerMessage.
 	if r.broker != nil {
-		pattern := fmt.Sprintf("scion.grove.%s.>", proj.ID)
+		pattern := projectSubscriptionPattern(proj.ID)
 		if err := r.broker.RequestSubscription(pattern); err != nil {
 			r.log.Warn("failed to request project subscription", "project_id", proj.ID, "error", err)
 		}
@@ -815,7 +825,7 @@ func (r *CommandRouter) cmdUnlink(ctx context.Context, event *ChatEvent, args []
 
 	// Cancel broker subscription (must match the pattern used during link).
 	if r.broker != nil {
-		pattern := fmt.Sprintf("scion.grove.%s.>", link.ProjectID)
+		pattern := projectSubscriptionPattern(link.ProjectID)
 		if err := r.broker.CancelSubscription(pattern); err != nil {
 			r.log.Warn("failed to cancel project subscription", "project_id", link.ProjectID, "error", err)
 		}
