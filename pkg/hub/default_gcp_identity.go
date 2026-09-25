@@ -47,7 +47,7 @@ func (s *Server) resolveDefaultSAAssignment(ctx context.Context, w http.Response
 	// caller-supplied assign sites. A default may legitimately nominate a
 	// hub-scoped account; a project-scoped one is only usable in its own
 	// project.
-	if err != nil || !sa.ReachableFromProject(projectID) {
+	if err != nil || sa == nil || !sa.ReachableFromProject(projectID) {
 		slog.Warn(tier+"-default SA assignment failed: service account not available",
 			"surface", surface,
 			"project_id", projectID,

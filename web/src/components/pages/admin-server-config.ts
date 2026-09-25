@@ -3292,7 +3292,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                         )}
                       </div>
                     `
-                  : ''}
+                  : nothing}
               </div>
             </sl-tab-panel>
 

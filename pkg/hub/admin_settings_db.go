@@ -724,6 +724,9 @@ func (s *Server) validateHubDefaultGCPIdentity(w http.ResponseWriter, ctx contex
 	}
 
 	sa, err := s.store.GetGCPServiceAccount(ctx, d.DefaultGCPIdentityServiceAccountID)
+	if err == nil && sa == nil {
+		err = store.ErrNotFound // defensive: treat a nil result as not found
+	}
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
