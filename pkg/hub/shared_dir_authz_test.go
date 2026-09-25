@@ -51,7 +51,7 @@ func sharedDirAuthzCases() []sharedDirAuthzCase {
 		{name: "archive", method: http.MethodGet, subPath: "/archive"},
 		{name: "upload file", method: http.MethodPost, subPath: "/files", isMultipart: true},
 		{name: "write file", method: http.MethodPut, subPath: "/files/planted.txt",
-			jsonBody: ProjectWorkspaceWriteRequest{Content: "attacker content"}},
+			jsonBody: ProjectWorkspaceWriteRequest{Content: "other-user content"}},
 		{name: "delete file", method: http.MethodDelete, subPath: "/files/secret.txt"},
 	}
 }
@@ -95,7 +95,7 @@ func doSharedDirAuthzRequest(t *testing.T, srv *Server, user *store.User, base s
 	t.Helper()
 	path := base + tc.subPath
 	if tc.isMultipart {
-		return doSharedDirUploadAsUser(t, srv, user, tc.method, path, map[string][]byte{"uploaded.txt": []byte("attacker upload")})
+		return doSharedDirUploadAsUser(t, srv, user, tc.method, path, map[string][]byte{"uploaded.txt": []byte("other-user upload")})
 	}
 	return doRequestAsUser(t, srv, user, tc.method, path, tc.jsonBody)
 }
@@ -109,11 +109,11 @@ func setupSharedDirAuthzFixture(t *testing.T) (srv *Server, s store.Store, proje
 	srv, s = testServer(t)
 	ctx := context.Background()
 
-	project, workspacePath := createTestHubManagedProject(t, srv, "Victim Project")
+	project, workspacePath := createTestHubManagedProject(t, srv, "Target Project")
 	addSharedDirToProject(t, srv, project.ID, "secrets")
 	sdPath = resolveTestSharedDirPath(t, workspacePath, "secrets")
 	require.NoError(t, os.MkdirAll(sdPath, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(sdPath, "secret.txt"), []byte("VICTIM SECRET"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(sdPath, "secret.txt"), []byte("ORIGINAL SECRET"), 0o644))
 
 	nonMember = &store.User{
 		ID: tid("sdauthz-nonmember"), Email: "nonmember@test.com", DisplayName: "Non Member",
@@ -138,10 +138,10 @@ func TestSharedDirRoutes_NonMemberDenied(t *testing.T) {
 			assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
 
 			// The filesystem must be unchanged, not just the status code: the
-			// victim's file is untouched, and nothing new was planted.
+			// original file is untouched, and nothing new was planted.
 			data, err := os.ReadFile(filepath.Join(sdPath, "secret.txt"))
-			require.NoError(t, err, "victim file must still exist")
-			assert.Equal(t, "VICTIM SECRET", string(data), "victim file must be unmodified")
+			require.NoError(t, err, "original file must still exist")
+			assert.Equal(t, "ORIGINAL SECRET", string(data), "original file must be unmodified")
 			assert.NoFileExists(t, filepath.Join(sdPath, "planted.txt"))
 			assert.NoFileExists(t, filepath.Join(sdPath, "uploaded.txt"))
 		})
@@ -175,7 +175,7 @@ func TestSharedDirRoutes_OwnerAllowed(t *testing.T) {
 			addSharedDirToProject(t, srv, project.ID, "secrets")
 			sdPath := resolveTestSharedDirPath(t, workspacePath, "secrets")
 			require.NoError(t, os.MkdirAll(sdPath, 0o755))
-			require.NoError(t, os.WriteFile(filepath.Join(sdPath, "secret.txt"), []byte("VICTIM SECRET"), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(sdPath, "secret.txt"), []byte("ORIGINAL SECRET"), 0o644))
 
 			base := fmt.Sprintf("/api/v1/projects/%s/shared-dirs/secrets", project.ID)
 
@@ -192,7 +192,7 @@ func TestSharedDirRoutes_OwnerAllowed(t *testing.T) {
 
 // TestSharedDirRoutes_CrossProjectAgent404 proves the agent project-isolation
 // check still runs ahead of the authorization check: an agent identity whose
-// token names a different project gets a 404, not a 403, for a victim
+// token names a different project gets a 404, not a 403, for a target
 // project it otherwise knows nothing about — a 403 would confirm the
 // project's existence to a caller outside it.
 func TestSharedDirRoutes_CrossProjectAgent404(t *testing.T) {
@@ -235,8 +235,8 @@ func TestSharedDirRoutes_MemberReadOnlyOwnerFull(t *testing.T) {
 				// As in the non-member case, a refusal must be provable on
 				// disk, not just by status code.
 				data, err := os.ReadFile(filepath.Join(sdPath, "secret.txt"))
-				require.NoError(t, err, "victim file must still exist")
-				assert.Equal(t, "VICTIM SECRET", string(data), "victim file must be unmodified")
+				require.NoError(t, err, "original file must still exist")
+				assert.Equal(t, "ORIGINAL SECRET", string(data), "original file must be unmodified")
 				assert.NoFileExists(t, filepath.Join(sdPath, "planted.txt"))
 				assert.NoFileExists(t, filepath.Join(sdPath, "uploaded.txt"))
 			}
@@ -277,7 +277,7 @@ func TestSharedDirRoutes_InProjectAgentDeniedOnConfigMutation(t *testing.T) {
 
 	rec := doRequestWithAgentToken(t, srv, http.MethodPost,
 		fmt.Sprintf("/api/v1/projects/%s/shared-dirs", project.ID),
-		map[string]interface{}{"name": "attacker-dir"}, token)
+		map[string]interface{}{"name": "nonmember-dir"}, token)
 	assert.Equal(t, http.StatusForbidden, rec.Code, "POST body: %s", rec.Body.String())
 
 	rec = doRequestWithAgentToken(t, srv, http.MethodDelete,
@@ -291,5 +291,26 @@ func TestSharedDirRoutes_InProjectAgentDeniedOnConfigMutation(t *testing.T) {
 		names = append(names, d.Name)
 	}
 	assert.Contains(t, names, "secrets", "existing shared-dir config must survive the denied delete")
-	assert.NotContains(t, names, "attacker-dir", "no shared dir should have been added by the denied post")
+	assert.NotContains(t, names, "nonmember-dir", "no shared dir should have been added by the denied post")
+}
+
+// TestSharedDirRoutes_ByNameMethodNotAllowed proves the by-name leaf's method
+// check runs ahead of its own identity/authorization checks and ahead of the
+// name lookup: a caller who is fully authorized past the dispatcher gate
+// still gets 405, not 403, for a method the route does not support, and the
+// response does not depend on whether the named shared dir exists.
+func TestSharedDirRoutes_ByNameMethodNotAllowed(t *testing.T) {
+	srv, _ := testServer(t)
+	project, _ := createTestHubManagedProject(t, srv, "Method Check Project")
+	addSharedDirToProject(t, srv, project.ID, "secrets")
+
+	base := fmt.Sprintf("/api/v1/projects/%s/shared-dirs/secrets", project.ID)
+	rec := doRequest(t, srv, http.MethodGet, base, nil)
+	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code, "body: %s", rec.Body.String())
+
+	// Same result for a name that does not exist: the method check runs
+	// before the name lookup, so the response never varies with existence.
+	missing := fmt.Sprintf("/api/v1/projects/%s/shared-dirs/does-not-exist", project.ID)
+	rec = doRequest(t, srv, http.MethodPut, missing, nil)
+	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code, "body: %s", rec.Body.String())
 }

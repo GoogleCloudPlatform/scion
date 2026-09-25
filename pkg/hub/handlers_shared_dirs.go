@@ -122,9 +122,12 @@ func (s *Server) handleProjectSharedDirs(w http.ResponseWriter, r *http.Request,
 	case http.MethodPost:
 		// Write access check. The UserIdentity guard is load-bearing — keep it
 		// even though it duplicates part of the dispatcher's gate — because it
-		// refuses agent and broker principals outright, which projectResource's
-		// CheckAccess alone would not do if either were ever granted
-		// project.update through a role binding.
+		// refuses agent principals outright, which projectResource's
+		// CheckAccess alone would not do if an agent were ever granted
+		// project.update through a role binding. Broker principals are
+		// already refused unconditionally by CheckAccess itself (Decide
+		// fails closed on PrincipalKindBroker), independent of any role
+		// binding.
 		if userIdent, ok := identity.(UserIdentity); ok {
 			decision := s.authzService.CheckAccess(ctx, userIdent, projectResource(project), ActionUpdate)
 			if !decision.Allowed {
@@ -175,6 +178,19 @@ func (s *Server) handleProjectSharedDirs(w http.ResponseWriter, r *http.Request,
 // handleProjectSharedDirRoutes; the check below is additional to that gate,
 // not a replacement for it.
 func (s *Server) handleProjectSharedDirByName(w http.ResponseWriter, r *http.Request, project *store.Project, name string) {
+	// Method check first, ahead of this leaf's own identity/authorization
+	// checks and ahead of the name lookup below, so the response for an
+	// unsupported method is 405 regardless of the name's existence or the
+	// caller's rights past the dispatcher gate. This runs strictly after
+	// handleProjectSharedDirRoutes's authorization gate (the only path that
+	// reaches this function at all): a caller not authorized for this
+	// project still gets 403/404 from that gate on any method, before this
+	// function is ever entered. Do not hoist this check into the dispatcher.
+	if r.Method != http.MethodDelete {
+		MethodNotAllowed(w, http.MethodDelete)
+		return
+	}
+
 	ctx := r.Context()
 	projectID := project.ID
 
@@ -186,9 +202,11 @@ func (s *Server) handleProjectSharedDirByName(w http.ResponseWriter, r *http.Req
 
 	// Write access check. The UserIdentity guard is load-bearing — keep it
 	// even though it duplicates part of the dispatcher's gate — because it
-	// refuses agent and broker principals outright, which projectResource's
-	// CheckAccess alone would not do if either were ever granted
-	// project.update through a role binding.
+	// refuses agent principals outright, which projectResource's
+	// CheckAccess alone would not do if an agent were ever granted
+	// project.update through a role binding. Broker principals are already
+	// refused unconditionally by CheckAccess itself (Decide fails closed on
+	// PrincipalKindBroker), independent of any role binding.
 	if userIdent, ok := identity.(UserIdentity); ok {
 		decision := s.authzService.CheckAccess(ctx, userIdent, projectResource(project), ActionUpdate)
 		if !decision.Allowed {
@@ -200,66 +218,60 @@ func (s *Server) handleProjectSharedDirByName(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	switch r.Method {
-	case http.MethodDelete:
-		found := false
-		updated := make([]api.SharedDir, 0, len(project.SharedDirs))
-		for _, d := range project.SharedDirs {
-			if d.Name == name {
-				found = true
-				continue
-			}
-			updated = append(updated, d)
+	found := false
+	updated := make([]api.SharedDir, 0, len(project.SharedDirs))
+	for _, d := range project.SharedDirs {
+		if d.Name == name {
+			found = true
+			continue
 		}
-
-		if !found {
-			NotFound(w, "Shared directory")
-			return
-		}
-
-		project.SharedDirs = updated
-		if err := s.store.UpdateProject(ctx, project); err != nil {
-			writeErrorFromErr(w, err, "")
-			return
-		}
-
-		// Best-effort host directory cleanup. The CLI does this via
-		// config.RemoveSharedDir(); the hub resolves the host path through
-		// its co-located broker (or hub-managed project path) and removes
-		// the directory directly. If the path cannot be resolved (e.g. no
-		// co-located broker), we log and continue — the DB record is already
-		// removed.
-		resolution, resolveErr := s.resolveSharedDirPath(ctx, project, name)
-		switch {
-		case resolveErr != nil:
-			slog.WarnContext(ctx, "could not resolve shared directory host path for cleanup",
-				"project_id", projectID, "name", name, "error", resolveErr)
-		case !resolution.IsLocal:
-			slog.WarnContext(ctx, "shared directory path is not local, skipping host cleanup",
-				"project_id", projectID, "name", name)
-		case resolution.Path == "" || resolution.Path == "/":
-			slog.WarnContext(ctx, "resolved shared directory path is empty or root, skipping removal",
-				"project_id", projectID, "name", name, "path", resolution.Path)
-		case resolution.Backend == "nfs":
-			// NFS: remove the leaf via DeleteSharedDir, an fd-based walk
-			// (subPathRoot/projectID/shared-dirs/<name>) that refuses a
-			// symlinked structural component and touches only this one
-			// named leaf.
-			if removeErr := shareddirs.DeleteSharedDir(resolution.NFSHostBase, resolution.NFSSubPathRoot, project.ID, name); removeErr != nil {
-				slog.WarnContext(ctx, "failed to remove NFS shared directory",
-					"project_id", projectID, "name", name, "host_base", resolution.NFSHostBase, "error", removeErr)
-			}
-		default:
-			if removeErr := os.RemoveAll(resolution.Path); removeErr != nil {
-				slog.WarnContext(ctx, "failed to remove shared directory host path",
-					"project_id", projectID, "name", name, "path", resolution.Path, "error", removeErr)
-			}
-		}
-
-		s.events.PublishProjectUpdated(ctx, project)
-		w.WriteHeader(http.StatusNoContent)
-
-	default:
-		MethodNotAllowed(w, http.MethodDelete)
+		updated = append(updated, d)
 	}
+
+	if !found {
+		NotFound(w, "Shared directory")
+		return
+	}
+
+	project.SharedDirs = updated
+	if err := s.store.UpdateProject(ctx, project); err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Best-effort host directory cleanup. The CLI does this via
+	// config.RemoveSharedDir(); the hub resolves the host path through
+	// its co-located broker (or hub-managed project path) and removes
+	// the directory directly. If the path cannot be resolved (e.g. no
+	// co-located broker), we log and continue — the DB record is already
+	// removed.
+	resolution, resolveErr := s.resolveSharedDirPath(ctx, project, name)
+	switch {
+	case resolveErr != nil:
+		slog.WarnContext(ctx, "could not resolve shared directory host path for cleanup",
+			"project_id", projectID, "name", name, "error", resolveErr)
+	case !resolution.IsLocal:
+		slog.WarnContext(ctx, "shared directory path is not local, skipping host cleanup",
+			"project_id", projectID, "name", name)
+	case resolution.Path == "" || resolution.Path == "/":
+		slog.WarnContext(ctx, "resolved shared directory path is empty or root, skipping removal",
+			"project_id", projectID, "name", name, "path", resolution.Path)
+	case resolution.Backend == "nfs":
+		// NFS: remove the leaf via DeleteSharedDir, an fd-based walk
+		// (subPathRoot/projectID/shared-dirs/<name>) that refuses a
+		// symlinked structural component and touches only this one
+		// named leaf.
+		if removeErr := shareddirs.DeleteSharedDir(resolution.NFSHostBase, resolution.NFSSubPathRoot, project.ID, name); removeErr != nil {
+			slog.WarnContext(ctx, "failed to remove NFS shared directory",
+				"project_id", projectID, "name", name, "host_base", resolution.NFSHostBase, "error", removeErr)
+		}
+	default:
+		if removeErr := os.RemoveAll(resolution.Path); removeErr != nil {
+			slog.WarnContext(ctx, "failed to remove shared directory host path",
+				"project_id", projectID, "name", name, "path", resolution.Path, "error", removeErr)
+		}
+	}
+
+	s.events.PublishProjectUpdated(ctx, project)
+	w.WriteHeader(http.StatusNoContent)
 }
