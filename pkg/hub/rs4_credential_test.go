@@ -1063,7 +1063,13 @@ func TestRS4_Regression_ValidateTokenStillWorks(t *testing.T) {
 	ownerID := tid("rs4-rv-o")
 	rs4Project(t, s, projectID, ownerID)
 
-	uatKey := mintScopedUAT(t, srv, ownerID, projectID, []string{"agent:read"})
+	// listProjectAgents now requires agent.list on the project (fix-1908 F1 --
+	// this route used to have no authorization check for a user identity at
+	// all, so any scope, including a token that only carried agent:read,
+	// used to reach it). The UAT's caveat can only narrow the owner's
+	// underlying authority, never grant beyond what it's scoped to, so the
+	// token needs agent:list explicitly to exercise this endpoint now.
+	uatKey := mintScopedUAT(t, srv, ownerID, projectID, []string{"agent:read", "agent:list"})
 
 	// The minted token should be usable for authorized operations.
 	rec := doRequestWithUAT(t, srv, uatKey, http.MethodGet,

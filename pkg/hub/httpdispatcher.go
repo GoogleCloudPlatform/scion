@@ -635,7 +635,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 	// Storage env vars fill in keys not already set (with a non-empty value)
 	// by explicit config env vars. Empty-value config entries are passthrough
 	// markers and should be overridden by storage values.
-	envFromStorage, err := d.resolveEnvFromStorage(ctx, agent)
+	envFromStorage, envFromStoragePlain, err := d.resolveEnvFromStorage(ctx, agent)
 	if err != nil {
 		if d.debug {
 			d.log.Warn("buildCreateRequest: failed to resolve env from storage", "agent_id", agent.ID, "error", err)
@@ -647,7 +647,11 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		for k, v := range envFromStorage {
 			if existing, exists := req.ResolvedEnv[k]; !exists || existing == "" {
 				req.ResolvedEnv[k] = v
-				classifyEnv(&req.EnvClassifications, k, api.EnvKindSecretFetchable)
+				if envFromStoragePlain[k] {
+					classifyEnv(&req.EnvClassifications, k, api.EnvKindPlain)
+				} else {
+					classifyEnv(&req.EnvClassifications, k, api.EnvKindSecretFetchable)
+				}
 			}
 		}
 	}
@@ -1178,14 +1182,23 @@ func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent 
 
 	// Merge resolved storage env vars back into AppliedConfig so they are
 	// visible in the advanced config form. Exclude internal SCION_* vars
-	// and dev tokens which are injected at start time. This runs after both
-	// passes so that as_needed vars resolved in the second pass are included.
+	// which are injected at start time. This runs after both passes so that
+	// as_needed vars resolved in the second pass are included.
+	//
+	// Only keys explicitly classified api.EnvKindPlain in req.EnvClassifications
+	// are persisted (see shouldPersistResolvedEnvKey). A key that is merely
+	// absent from the classification map is NOT plain by default -- it is
+	// dropped, not kept. Every key merged into req.ResolvedEnv anywhere in
+	// this dispatcher must have a matching classifyEnv/classifyEnvKeys call
+	// (enforced by TestBuildCreateRequestClassifiesEveryResolvedEnvKey) or it
+	// will silently stop showing up here; that is the intended fail-closed
+	// behavior, not a bug to work around by classifying it Plain.
 	if agent.AppliedConfig != nil && len(req.ResolvedEnv) > 0 {
 		if agent.AppliedConfig.Env == nil {
 			agent.AppliedConfig.Env = make(map[string]string)
 		}
 		for k, v := range req.ResolvedEnv {
-			if strings.HasPrefix(k, "SCION_") {
+			if !shouldPersistResolvedEnvKey(k, req.EnvClassifications) {
 				continue
 			}
 			if _, exists := agent.AppliedConfig.Env[k]; !exists {
@@ -1645,16 +1658,20 @@ func (d *HTTPAgentDispatcher) WarnOutrankedBrokerEnvKeys(ctx context.Context) er
 }
 
 // resolveEnvFromStorage queries Hub env var storage for every scope that
-// applies to the agent and returns a merged map. Scopes are applied lowest
-// precedence first; the order itself is stated in exactly one place,
-// envScopePrecedence above.
+// applies to the agent and returns a merged map, plus a companion map
+// recording which of those keys came from a storage entry with Secret==false
+// ("plain"). A key absent from the plain map (or present with false) is not
+// known plain and must not be treated as one by a caller deciding what to
+// persist. Scopes are applied lowest precedence first; the order itself is
+// stated in exactly one place, envScopePrecedence above.
 //
 // The caller then overlays explicit agent config env on top of the result, so
 // agent config outranks every storage scope (see buildCreateRequest).
-func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *store.Agent) (map[string]string, error) {
+func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *store.Agent) (map[string]string, map[string]bool, error) {
 	result := make(map[string]string)
+	plain := make(map[string]bool)
 	if agent == nil {
-		return result, nil
+		return result, plain, nil
 	}
 
 	for _, filter := range d.envScopesInPrecedenceOrder(agent) {
@@ -1677,6 +1694,7 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 				continue
 			}
 			result[v.Key] = v.Value
+			plain[v.Key] = !v.Secret
 		}
 	}
 
@@ -1697,11 +1715,12 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 					continue // higher-precedence scope already set this key
 				}
 				result[v.Key] = v.Value
+				plain[v.Key] = !v.Secret
 			}
 		}
 	}
 
-	return result, nil
+	return result, plain, nil
 }
 
 // resolveAsNeededForKeys resolves as_needed env vars and environment-type
@@ -2044,7 +2063,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	// Empty-value config entries are passthrough markers — storage values
 	// should override them so that hub-stored secrets (API keys, etc.) are
 	// available to the agent.
-	envFromStorage, err := d.resolveEnvFromStorage(ctx, agent)
+	envFromStorage, envFromStoragePlain, err := d.resolveEnvFromStorage(ctx, agent)
 	if err != nil {
 		if d.debug {
 			d.log.Warn("DispatchAgentStart: failed to resolve env from storage", "error", err)
@@ -2053,7 +2072,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		for k, v := range envFromStorage {
 			if existing, exists := resolvedEnv[k]; !exists || existing == "" {
 				resolvedEnv[k] = v
-				classifyEnv(&envClassifications, k, api.EnvKindSecretFetchable)
+				if envFromStoragePlain[k] {
+					classifyEnv(&envClassifications, k, api.EnvKindPlain)
+				} else {
+					classifyEnv(&envClassifications, k, api.EnvKindSecretFetchable)
+				}
 			}
 		}
 	}
@@ -2319,7 +2342,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 
 	// Merge env vars from Hub storage; storage vars fill in keys not already
 	// set (with a non-empty value) — same precedence as DispatchAgentStart.
-	envFromStorage, err := d.resolveEnvFromStorage(ctx, agent)
+	envFromStorage, envFromStoragePlain, err := d.resolveEnvFromStorage(ctx, agent)
 	if err != nil {
 		if d.debug {
 			d.log.Warn("DispatchAgentRestart: failed to resolve env from storage", "error", err)
@@ -2328,7 +2351,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		for k, v := range envFromStorage {
 			if existing, exists := resolvedEnv[k]; !exists || existing == "" {
 				resolvedEnv[k] = v
-				classifyEnv(&envClassifications, k, api.EnvKindSecretFetchable)
+				if envFromStoragePlain[k] {
+					classifyEnv(&envClassifications, k, api.EnvKindPlain)
+				} else {
+					classifyEnv(&envClassifications, k, api.EnvKindSecretFetchable)
+				}
 			}
 		}
 	}
@@ -2951,6 +2978,30 @@ func classifyEnvKeys(m *map[string]api.EnvKind, keys map[string]string, kind api
 	for k := range keys {
 		(*m)[k] = kind
 	}
+}
+
+// shouldPersistResolvedEnvKey decides whether a key from req.ResolvedEnv is
+// allowed into the durable AppliedConfig.Env record. This is an allowlist,
+// not a denylist: a key is persisted only when it is explicitly classified
+// api.EnvKindPlain. Every other outcome -- classified as any non-plain kind,
+// or simply absent from the classifications map -- is rejected. GITHUB_TOKEN
+// is rejected unconditionally regardless of its classification, since it is
+// never a legitimate value to keep in the durable config record.
+//
+// This mirrors the three-state lookup documented on api.EnvKind: a nil map
+// and an "absent key in a non-nil map" both fail the check here, which is
+// the correct fail-closed behavior for a persistence gate (contrast with a
+// gate that would treat "nil map" as "trust everything" -- that would be
+// backwards for this call site).
+func shouldPersistResolvedEnvKey(key string, classifications map[string]api.EnvKind) bool {
+	if key == "GITHUB_TOKEN" {
+		return false
+	}
+	if strings.HasPrefix(key, "SCION_") {
+		return false
+	}
+	kind, ok := api.ClassifyEnvKey(classifications, key)
+	return ok && kind == api.EnvKindPlain
 }
 
 type deleteProjectPathKey struct{}

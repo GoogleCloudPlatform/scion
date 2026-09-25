@@ -322,7 +322,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			RuntimeError(w, "Failed to dispatch to runtime broker: "+err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, agent)
+		respAgent := *agent
+		respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(agent.AppliedConfig, canViewAgentEnv(ctx, s, agent))
+		writeJSON(w, http.StatusOK, respAgent)
 		return
 	case api.AgentActionRestart:
 		newPhase = string(state.PhaseRunning)
@@ -377,7 +379,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	agent.Phase = newPhase
 	s.events.PublishAgentStatus(ctx, agent)
 
-	writeJSON(w, http.StatusOK, agent)
+	respAgent := *agent
+	respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(agent.AppliedConfig, canViewAgentEnv(ctx, s, agent))
+	writeJSON(w, http.StatusOK, respAgent)
 }
 
 // stopAllResult represents the outcome of stopping a single agent.

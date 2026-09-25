@@ -74,6 +74,17 @@ func isTmuxShellNotFoundError(err error) bool {
 		strings.Contains(msg, "tmux: not found")
 }
 
+// sortedEnvVarKeys returns the sorted key names of an env var map, for
+// diagnostic logging that must not print the values themselves.
+func sortedEnvVarKeys(envVars map[string]string) []string {
+	keys := make([]string, 0, len(envVars))
+	for k := range envVars {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
 	// Resolve project name early so we can scope the container lookup below.
 	projectDir, err := config.GetResolvedProjectDir(opts.ProjectPath)
@@ -549,7 +560,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 				resolved.Files[i].SourcePath = ""
 			}
 		}
-		util.Debugf("auth: resolved — method=%q, envVars=%v, files=%d", resolved.Method, resolved.EnvVars, len(resolved.Files))
+		util.Debugf("auth: resolved — method=%q, envVarKeys=%v, files=%d", resolved.Method, sortedEnvVarKeys(resolved.EnvVars), len(resolved.Files))
 		if err := harness.ValidateAuth(resolved, opts.BrokerMode); err != nil {
 			if canFallbackToNoAuth() {
 				util.Debugf("auth: validation failed, falling back to no-auth mode: %v", err)

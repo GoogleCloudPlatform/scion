@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
@@ -1099,4 +1100,108 @@ func TestAgentStore_AuthorizedProjectIDs(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 2, result.TotalCount, "both projects' agents should be returned")
 	})
+}
+
+// TestAgentStore_AppliedConfigEnvSurvivesPersistence guards marshalAppliedConfig's
+// alias bypass (agent_store.go): the DB column must keep storing every field of
+// AppliedConfig, including Env and GITHUB_TOKEN, exactly as held in memory. The
+// response-only visibility gate added to AgentAppliedConfig's own MarshalJSON
+// (pkg/store/models.go) must never reach this path -- if it did, a fresh
+// AgentAppliedConfig (whose gate defaults closed) would silently lose its Env
+// on the next write.
+func TestAgentStore_AppliedConfigEnvSurvivesPersistence(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	a := makeAgent(projectID, "env-persist-1")
+	a.AppliedConfig = &store.AgentAppliedConfig{
+		Image: "img:1",
+		Env: map[string]string{
+			"PLAIN_VAR":    "plain-value",
+			"GITHUB_TOKEN": "ghp_must_survive_the_round_trip",
+		},
+	}
+	require.NoError(t, s.CreateAgent(ctx, a))
+
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.AppliedConfig)
+	assert.Equal(t, "plain-value", got.AppliedConfig.Env["PLAIN_VAR"])
+	assert.Equal(t, "ghp_must_survive_the_round_trip", got.AppliedConfig.Env["GITHUB_TOKEN"],
+		"the DB column must keep the full env regardless of the response-only visibility gate")
+
+	// UpdateAgent goes through the identical marshal path; confirm it too.
+	got.AppliedConfig.Env["NEW_VAR"] = "new-value"
+	require.NoError(t, s.UpdateAgent(ctx, got))
+
+	reGot, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	require.NotNil(t, reGot.AppliedConfig)
+	assert.Equal(t, "new-value", reGot.AppliedConfig.Env["NEW_VAR"])
+	assert.Equal(t, "ghp_must_survive_the_round_trip", reGot.AppliedConfig.Env["GITHUB_TOKEN"])
+}
+
+// TestAgentStore_InlineConfigEnvAndTelemetrySurvivePersistence extends the
+// guard above to the fields that got the same default-closed response-view
+// treatment as Env: InlineConfig.Env and the Telemetry cloud-export header
+// map (pkg/store/models.go's redactInlineConfigForResponse). Both are nested
+// inside InlineConfig (*api.ScionConfig), not on AgentAppliedConfig directly,
+// so marshalAppliedConfig's alias-bypass trick has to actually reach them --
+// if a nested MarshalJSON were ever added to api.ScionConfig or
+// api.TelemetryConfig to do the response gating, this would catch it: that
+// approach hides data from the DB column too, alias or no alias, because
+// encoding/json invokes a nested type's own MarshalJSON regardless of what
+// the outer type is aliased to.
+func TestAgentStore_InlineConfigEnvAndTelemetrySurvivePersistence(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	a := makeAgent(projectID, "inline-env-persist-1")
+	a.AppliedConfig = &store.AgentAppliedConfig{
+		Image: "img:1",
+		Env: map[string]string{
+			"PLAIN_VAR": "plain-value",
+		},
+		InlineConfig: &api.ScionConfig{
+			Env: map[string]string{
+				"INLINE_PLAIN_VAR": "inline-plain-value",
+				"GITHUB_TOKEN":     "ghp_must_survive_the_round_trip",
+			},
+			Telemetry: &api.TelemetryConfig{
+				Cloud: &api.TelemetryCloudConfig{
+					Endpoint: "https://collector.example.com",
+					Headers: map[string]string{
+						"Authorization": "Bearer must-survive-the-round-trip",
+					},
+				},
+			},
+		},
+	}
+	require.NoError(t, s.CreateAgent(ctx, a))
+
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.AppliedConfig)
+	require.NotNil(t, got.AppliedConfig.InlineConfig)
+	assert.Equal(t, "inline-plain-value", got.AppliedConfig.InlineConfig.Env["INLINE_PLAIN_VAR"])
+	assert.Equal(t, "ghp_must_survive_the_round_trip", got.AppliedConfig.InlineConfig.Env["GITHUB_TOKEN"],
+		"the DB column must keep InlineConfig.Env in full, regardless of the response-only visibility gate")
+	require.NotNil(t, got.AppliedConfig.InlineConfig.Telemetry)
+	require.NotNil(t, got.AppliedConfig.InlineConfig.Telemetry.Cloud)
+	assert.Equal(t, "Bearer must-survive-the-round-trip", got.AppliedConfig.InlineConfig.Telemetry.Cloud.Headers["Authorization"],
+		"the DB column must keep the telemetry header map in full, regardless of the response-only visibility gate")
+
+	// UpdateAgent goes through the identical marshal path; confirm it too.
+	got.AppliedConfig.InlineConfig.Env["NEW_INLINE_VAR"] = "new-inline-value"
+	require.NoError(t, s.UpdateAgent(ctx, got))
+
+	reGot, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	require.NotNil(t, reGot.AppliedConfig)
+	require.NotNil(t, reGot.AppliedConfig.InlineConfig)
+	assert.Equal(t, "new-inline-value", reGot.AppliedConfig.InlineConfig.Env["NEW_INLINE_VAR"])
+	assert.Equal(t, "ghp_must_survive_the_round_trip", reGot.AppliedConfig.InlineConfig.Env["GITHUB_TOKEN"])
+	require.NotNil(t, reGot.AppliedConfig.InlineConfig.Telemetry)
+	require.NotNil(t, reGot.AppliedConfig.InlineConfig.Telemetry.Cloud)
+	assert.Equal(t, "Bearer must-survive-the-round-trip", reGot.AppliedConfig.InlineConfig.Telemetry.Cloud.Headers["Authorization"])
 }

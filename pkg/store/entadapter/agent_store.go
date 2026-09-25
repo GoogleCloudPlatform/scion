@@ -921,11 +921,19 @@ func isTerminalActivity(activity string) bool {
 
 // marshalAppliedConfig serializes the applied-config document to JSON text,
 // returning "" for a nil config so the column is left empty.
+//
+// This is the DB-persistence path, not a response surface: it deliberately
+// bypasses AgentAppliedConfig's own MarshalJSON (which hides Env unless
+// ResponseView has been called -- see pkg/store/models.go) via a local alias
+// type, so every field including Env round-trips to the column exactly as
+// held in memory. The response-side gate only ever applies to what an HTTP
+// handler serializes back to a caller, never to what gets written to the DB.
 func marshalAppliedConfig(cfg *store.AgentAppliedConfig) string {
 	if cfg == nil {
 		return ""
 	}
-	data, err := json.Marshal(cfg)
+	type rawAppliedConfig store.AgentAppliedConfig
+	data, err := json.Marshal((*rawAppliedConfig)(cfg))
 	if err != nil {
 		return ""
 	}

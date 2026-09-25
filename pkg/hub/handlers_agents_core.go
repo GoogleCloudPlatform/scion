@@ -393,7 +393,9 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		resources[i] = agentResource(&items[i])
 	}
 	for i, cap := range s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "agent") {
-		agents = append(agents, AgentWithCapabilities{Agent: items[i], Cap: cap})
+		item := items[i]
+		item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, capabilityAllows(cap, ActionAttach))
+		agents = append(agents, AgentWithCapabilities{Agent: item, Cap: cap})
 	}
 
 	// Compute messageability for each agent relative to the viewer.
@@ -1498,7 +1500,7 @@ func (s *Server) createAgentInProject(
 			}
 
 			writeJSON(w, http.StatusCreated, CreateAgentResponse{
-				Agent:      agent,
+				Agent:      redactedAgentCopy(ctx, s, agent),
 				Warnings:   warnings,
 				UploadURLs: uploadURLs,
 				Expires:    &expires,
@@ -1573,7 +1575,7 @@ func (s *Server) createAgentInProject(
 		s.enrichAgent(ctx, agent, project, nil)
 
 		writeJSON(w, http.StatusCreated, CreateAgentResponse{
-			Agent: agent,
+			Agent: redactedAgentCopy(ctx, s, agent),
 		})
 		return
 	}
@@ -1617,7 +1619,7 @@ func (s *Server) createAgentInProject(
 					hubEnvGather := s.buildEnvGatherResponse(ctx, agent, envReqs)
 
 					writeJSON(w, http.StatusAccepted, CreateAgentResponse{
-						Agent:     agent,
+						Agent:     redactedAgentCopy(ctx, s, agent),
 						Warnings:  warnings,
 						EnvGather: hubEnvGather,
 					})
@@ -1696,7 +1698,7 @@ func (s *Server) createAgentInProject(
 	s.enrichAgent(ctx, agent, project, nil)
 
 	writeJSON(w, http.StatusCreated, CreateAgentResponse{
-		Agent:    agent,
+		Agent:    redactedAgentCopy(ctx, s, agent),
 		Warnings: warnings,
 	})
 }
@@ -2000,7 +2002,7 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 	s.enrichAgent(ctx, agent, project, nil)
 
 	writeJSON(w, http.StatusOK, CreateAgentResponse{
-		Agent: agent,
+		Agent: redactedAgentCopy(ctx, s, agent),
 	})
 }
 
@@ -2283,9 +2285,28 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request, id string) {
 			return
 		}
 	}
+	// CO1: agent.read carries no AgentScopes mapping, so an agent identity is
+	// always denied here, self-read included -- see
+	// TestBypassAgents_LegitimateFlowsStillWork's "agent reads itself" case.
+	// This differs deliberately from getProjectAgent, which exempts an agent
+	// reading its *own* record from this check to preserve that route's
+	// existing, tested self-read contract -- see
+	// TestReadEndpoint_ProjectScopedAgents_WithReadScope_Allowed. Reading a
+	// different agent still goes through this same check on both routes.
 	if !s.authorize(w, r, agentResource(agent), ActionRead) {
 		return
 	}
+
+	s.writeAgentGetResponse(w, r, agent)
+}
+
+// writeAgentGetResponse builds and writes the standard single-agent response
+// body (capabilities, harness info, messageability, env redaction) shared by
+// every route that returns a single agent. It performs no authorization --
+// callers must gate before calling this, since their rules differ (see
+// getAgent vs. getProjectAgent above).
+func (s *Server) writeAgentGetResponse(w http.ResponseWriter, r *http.Request, agent *store.Agent) {
+	ctx := r.Context()
 
 	// Enrich agent with project and broker names
 	s.enrichAgent(ctx, agent, nil, nil)
@@ -2310,6 +2331,8 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request, id string) {
 		}
 	}
 
+	resp.AppliedConfig = redactAppliedConfigEnvForResponse(resp.AppliedConfig, capabilityAllows(resp.Cap, ActionAttach))
+
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -2321,6 +2344,18 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request, id string) 
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	s.applyAgentUpdate(w, r, agent)
+}
+
+// applyAgentUpdate is the single code path behind every route that mutates a
+// single agent's mutable fields (name/labels/annotations/taskSummary/config/
+// GCP identity) -- the global PATCH /api/v1/agents/{id} and the
+// project-scoped PATCH /api/v1/projects/{id}/agents/{agentId}. Both routes
+// resolve their own *store.Agent and pass it in here, so both get the same
+// authorization and the same field-level rules; the project-scoped route
+// used to reimplement a smaller, unauthorized subset of this instead.
+func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent *store.Agent) {
+	ctx := r.Context()
 
 	// This handler had no authorization of any kind before #591: any
 	// authenticated caller could rename, relabel and rewrite the config of any
@@ -2526,7 +2561,7 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request, id string) 
 		return
 	}
 
-	writeJSON(w, http.StatusOK, agent)
+	writeJSON(w, http.StatusOK, redactedAgentCopy(ctx, s, agent))
 }
 
 // checkBrokerAvailability verifies the agent's runtime broker is reachable.

@@ -722,6 +722,26 @@ func (s *Server) handleExistingAgent(
 	if existingAgent == nil {
 		return existingAgentNone
 	}
+
+	// Authorization: every branch below starts, resumes, or restarts
+	// existingAgent -- an agent that may belong to a different owner than the
+	// caller of this create request. The only check the caller
+	// (createAgentInProject) has made so far is authorizeAgentCreate, which
+	// confirms the caller may create SOME agent in this project; it says
+	// nothing about managing this SPECIFIC pre-existing one. Without this
+	// gate, any project member who could create an agent could resume or
+	// restart another member's agent by name, and get its response body
+	// (including, pre-redaction, its applied config) back.
+	//
+	// Gate with the same lifecycle authorization the /start route enforces,
+	// before any branch below acts. A denial folds into the ordinary
+	// name-conflict result (existingAgentConflict) rather than a 403, so a
+	// caller who cannot manage the colliding agent learns only that the name
+	// is taken -- not who owns it, its phase, or its configuration.
+	if !s.agentLifecycleAllowed(ctx, GetIdentityFromContext(ctx), existingAgent) {
+		return existingAgentConflict
+	}
+
 	s.agentLifecycleLog.Info("handleExistingAgent: found existing agent",
 		"slug", existingAgent.Slug,
 		"existing_agent_id", existingAgent.ID,
@@ -780,7 +800,7 @@ func (s *Server) handleExistingAgent(
 
 		s.enrichAgent(ctx, existingAgent, project, nil)
 		writeJSON(w, http.StatusOK, CreateAgentResponse{
-			Agent: existingAgent,
+			Agent: redactedAgentCopy(ctx, s, existingAgent),
 		})
 		return existingAgentStarted
 	}
@@ -843,7 +863,7 @@ func (s *Server) handleExistingAgent(
 
 			s.enrichAgent(ctx, existingAgent, project, nil)
 			writeJSON(w, http.StatusOK, CreateAgentResponse{
-				Agent: existingAgent,
+				Agent: redactedAgentCopy(ctx, s, existingAgent),
 			})
 			return existingAgentStarted
 		}
@@ -927,7 +947,7 @@ func (s *Server) handleExistingAgent(
 		// Enrich and return the existing agent.
 		s.enrichAgent(ctx, existingAgent, project, nil)
 		writeJSON(w, http.StatusOK, CreateAgentResponse{
-			Agent: existingAgent,
+			Agent: redactedAgentCopy(ctx, s, existingAgent),
 		})
 		return existingAgentStarted
 	}

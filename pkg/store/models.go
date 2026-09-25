@@ -209,6 +209,152 @@ type AgentAppliedConfig struct {
 	// Bounded to 64 KB at the Hub API layer. When non-empty, the broker stages it
 	// into $HOME/.scion/hooks/pre-start.d/30-project-custom before container start.
 	ProjectPreStartHookScript string `json:"projectPreStartHookScript,omitempty"`
+
+	// envResponseVisible gates whether MarshalJSON includes Env. It defaults
+	// to false (unexported, zero value), which is the "never emit Env by
+	// default" choke point: any code path that serializes an
+	// AgentAppliedConfig without going through ResponseView first -- in
+	// particular a future response handler that forgets to -- gets no Env in
+	// the JSON output, regardless of what the struct actually holds. See
+	// ResponseView and MarshalJSON below.
+	//
+	// encoding/json never marshals unexported fields, so this flag itself
+	// never reaches a JSON document; it only steers what MarshalJSON does
+	// with the exported Env field on its way out. It is likewise inert for
+	// decoding: json.Unmarshal only ever touches exported fields, so a config
+	// round-tripped through JSON (e.g. read back from the DB) always decodes
+	// with the flag at its zero value, i.e. response-hidden by default until
+	// something explicitly calls ResponseView again.
+	//
+	// Persistence (pkg/store/entadapter) is not a response surface and must
+	// keep writing Env to the DB regardless of this flag; it does so by
+	// aliasing this type to bypass MarshalJSON entirely rather than by
+	// setting this field.
+	envResponseVisible bool
+}
+
+// ResponseView returns a copy of ac suitable for embedding in an API response
+// body. canAttach must already reflect an attach-equivalent authorization
+// decision the caller has made for the current viewer against the owning
+// agent -- ResponseView performs no authorization itself.
+//
+// GITHUB_TOKEN is withheld unconditionally, even when canAttach is true: it
+// is never a legitimate value to keep surfacing from the durable config
+// record, independent of who is asking.
+//
+// InlineConfig.Env and the Telemetry cloud-export header map get the same
+// default-closed treatment as Env: both are cleared in the returned copy
+// unless canAttach is true. This is done by deep-copying InlineConfig (see
+// redactInlineConfigForResponse), never by mutating ac.InlineConfig or its
+// nested Telemetry config in place -- both are shared pointers, and the
+// caller's original agent object (which the persistence path may still
+// write from) must come out of this call unmodified.
+//
+// Nothing else needs to call this to be safe: without it, MarshalJSON's
+// default omits Env entirely (see the envResponseVisible field doc), so a
+// response path that never calls ResponseView fails closed rather than open.
+func (ac *AgentAppliedConfig) ResponseView(canAttach bool) *AgentAppliedConfig {
+	if ac == nil {
+		return nil
+	}
+	view := *ac
+	view.envResponseVisible = canAttach
+	view.InlineConfig = redactInlineConfigForResponse(ac.InlineConfig, canAttach)
+	return &view
+}
+
+// redactInlineConfigForResponse returns a deep copy of cfg suitable for a
+// response body: Env and the Telemetry cloud-export header map are cleared
+// unless canAttach is true, and GITHUB_TOKEN is stripped from Env
+// unconditionally, mirroring AgentAppliedConfig's own top-level rule (see
+// ResponseView/MarshalJSON above). The input is never mutated.
+//
+// This redaction lives here, in the response-view copy, and deliberately
+// not as a MarshalJSON method on api.ScionConfig or api.TelemetryConfig:
+// marshalAppliedConfig's persistence path (pkg/store/entadapter) bypasses
+// AgentAppliedConfig's own MarshalJSON via a local alias type, but that
+// alias trick only defeats a MarshalJSON defined on AgentAppliedConfig
+// itself -- encoding/json would still invoke a MarshalJSON defined on the
+// *nested* ScionConfig/TelemetryConfig types when it reaches the
+// InlineConfig field, alias or no alias, which would silently gate what
+// gets written to the DB. Redacting in this copy instead of in a nested
+// MarshalJSON keeps persistence and the response view fully decoupled: this
+// function's caller (ResponseView) is only ever reached from response
+// serialization code, never from marshalAppliedConfig.
+func redactInlineConfigForResponse(cfg *api.ScionConfig, canAttach bool) *api.ScionConfig {
+	if cfg == nil {
+		return nil
+	}
+	copied := *cfg
+	if !canAttach {
+		copied.Env = nil
+	} else if len(cfg.Env) > 0 {
+		env := make(map[string]string, len(cfg.Env))
+		for k, v := range cfg.Env {
+			if k == "GITHUB_TOKEN" {
+				continue
+			}
+			env[k] = v
+		}
+		if len(env) == 0 {
+			env = nil
+		}
+		copied.Env = env
+	}
+	copied.Telemetry = redactTelemetryForResponse(cfg.Telemetry, canAttach)
+	return &copied
+}
+
+// redactTelemetryForResponse returns a deep copy of cfg with the cloud-export
+// header map (which routinely carries authorization values for the OTLP
+// collector) cleared unless canAttach is true. Every other field is copied
+// through unchanged. The input is never mutated.
+func redactTelemetryForResponse(cfg *api.TelemetryConfig, canAttach bool) *api.TelemetryConfig {
+	if cfg == nil {
+		return nil
+	}
+	copied := *cfg
+	if cfg.Cloud != nil {
+		cloud := *cfg.Cloud
+		if !canAttach {
+			cloud.Headers = nil
+		} else if len(cfg.Cloud.Headers) > 0 {
+			headers := make(map[string]string, len(cfg.Cloud.Headers))
+			for k, v := range cfg.Cloud.Headers {
+				headers[k] = v
+			}
+			cloud.Headers = headers
+		}
+		copied.Cloud = &cloud
+	}
+	return &copied
+}
+
+// MarshalJSON is the single choke point through which AppliedConfig.Env can
+// reach a JSON encoding. By default (envResponseVisible false, the zero
+// value) Env is omitted entirely; ResponseView is the only way to make it
+// visible, and even then GITHUB_TOKEN is stripped. See the envResponseVisible
+// field doc for why this is safe for both the DB-persistence and the
+// decoding paths.
+func (ac AgentAppliedConfig) MarshalJSON() ([]byte, error) {
+	type Alias AgentAppliedConfig
+	out := Alias(ac)
+	if !ac.envResponseVisible {
+		out.Env = nil
+	} else if len(out.Env) > 0 {
+		filtered := make(map[string]string, len(out.Env))
+		for k, v := range out.Env {
+			if k == "GITHUB_TOKEN" {
+				continue
+			}
+			filtered[k] = v
+		}
+		if len(filtered) == 0 {
+			filtered = nil
+		}
+		out.Env = filtered
+	}
+	return json.Marshal(out)
 }
 
 // Project type constants.
