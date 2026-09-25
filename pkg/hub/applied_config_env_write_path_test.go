@@ -108,10 +108,12 @@ func TestShouldPersistResolvedEnvKey(t *testing.T) {
 
 // TestProvisionMergeBackSkipsNonPlainEnv exercises DispatchAgentProvision
 // end-to-end: a plain, non-SCION_ key resolved through hub defaults (TZ) must
-// land in AppliedConfig.Env, while a key resolved from project-scoped
-// storage (classified non-plain by buildCreateRequest, matching production
-// behavior for every value merged in from resolveEnvFromStorage/resolveSecrets)
-// must not, and GITHUB_TOKEN must never land there even when resolved.
+// land in AppliedConfig.Env, and so must a plain (Secret==false) key resolved
+// from project-scoped storage -- storage-sourced keys are classified per the
+// backing EnvVar's own Secret flag, not blanket-classified as fetchable
+// secrets (see resolveEnvFromStorage's plain-key return value). A
+// Secret==true storage key must not land there, and GITHUB_TOKEN must never
+// land there even when resolved.
 func TestProvisionMergeBackSkipsNonPlainEnv(t *testing.T) {
 	ctx := context.Background()
 	memStore := createTestStore(t)
@@ -128,19 +130,29 @@ func TestProvisionMergeBackSkipsNonPlainEnv(t *testing.T) {
 	}
 
 	projectID := tid("project-1")
-	// A project-scoped env var with InjectionMode "always" flows into
-	// req.ResolvedEnv via resolveEnvFromStorage and is classified
-	// api.EnvKindSecretFetchable (httpdispatcher.go's storage-resolution
-	// merge), regardless of its own Secret flag -- see shouldPersistResolvedEnvKey's
-	// doc comment for why that delivery-channel classification, not the
-	// EnvVar's own Secret flag, governs persistence here.
+	// A project-scoped, non-secret env var with InjectionMode "always" flows
+	// into req.ResolvedEnv via resolveEnvFromStorage. Its Secret flag is
+	// false, so it must be classified api.EnvKindPlain and persist.
 	if err := memStore.CreateEnvVar(ctx, &store.EnvVar{
 		ID:            tid("envvar-1"),
-		Key:           "STORAGE_VAR",
-		Value:         "storage-value",
+		Key:           "STORAGE_PLAIN_VAR",
+		Value:         "storage-plain-value",
 		Scope:         store.ScopeProject,
 		ScopeID:       projectID,
 		InjectionMode: store.InjectionModeAlways,
+	}); err != nil {
+		t.Fatalf("failed to create env var: %v", err)
+	}
+	// A project-scoped env var with Secret==true, otherwise identical. It
+	// must be classified non-plain and must not persist.
+	if err := memStore.CreateEnvVar(ctx, &store.EnvVar{
+		ID:            tid("envvar-2"),
+		Key:           "STORAGE_SECRET_VAR",
+		Value:         "storage-secret-value",
+		Scope:         store.ScopeProject,
+		ScopeID:       projectID,
+		InjectionMode: store.InjectionModeAlways,
+		Secret:        true,
 	}); err != nil {
 		t.Fatalf("failed to create env var: %v", err)
 	}
@@ -170,8 +182,11 @@ func TestProvisionMergeBackSkipsNonPlainEnv(t *testing.T) {
 	if got := agent.AppliedConfig.Env["TZ"]; got != "America/New_York" {
 		t.Errorf("expected plain TZ to be persisted, got %q", got)
 	}
-	if _, ok := agent.AppliedConfig.Env["STORAGE_VAR"]; ok {
-		t.Errorf("expected non-plain STORAGE_VAR to be skipped, but it was persisted: %q", agent.AppliedConfig.Env["STORAGE_VAR"])
+	if got := agent.AppliedConfig.Env["STORAGE_PLAIN_VAR"]; got != "storage-plain-value" {
+		t.Errorf("expected plain STORAGE_PLAIN_VAR to be persisted, got %q", got)
+	}
+	if _, ok := agent.AppliedConfig.Env["STORAGE_SECRET_VAR"]; ok {
+		t.Errorf("expected non-plain STORAGE_SECRET_VAR to be skipped, but it was persisted: %q", agent.AppliedConfig.Env["STORAGE_SECRET_VAR"])
 	}
 	if _, ok := agent.AppliedConfig.Env["GITHUB_TOKEN"]; ok {
 		t.Errorf("expected GITHUB_TOKEN to never be persisted, but it was: %q", agent.AppliedConfig.Env["GITHUB_TOKEN"])

@@ -614,7 +614,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 	// Storage env vars fill in keys not already set (with a non-empty value)
 	// by explicit config env vars. Empty-value config entries are passthrough
 	// markers and should be overridden by storage values.
-	envFromStorage, err := d.resolveEnvFromStorage(ctx, agent)
+	envFromStorage, envFromStoragePlain, err := d.resolveEnvFromStorage(ctx, agent)
 	if err != nil {
 		if d.debug {
 			d.log.Warn("buildCreateRequest: failed to resolve env from storage", "agent_id", agent.ID, "error", err)
@@ -626,7 +626,11 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		for k, v := range envFromStorage {
 			if existing, exists := req.ResolvedEnv[k]; !exists || existing == "" {
 				req.ResolvedEnv[k] = v
-				classifyEnv(&req.EnvClassifications, k, api.EnvKindSecretFetchable)
+				if envFromStoragePlain[k] {
+					classifyEnv(&req.EnvClassifications, k, api.EnvKindPlain)
+				} else {
+					classifyEnv(&req.EnvClassifications, k, api.EnvKindSecretFetchable)
+				}
 			}
 		}
 	}
@@ -1633,16 +1637,20 @@ func (d *HTTPAgentDispatcher) WarnOutrankedBrokerEnvKeys(ctx context.Context) er
 }
 
 // resolveEnvFromStorage queries Hub env var storage for every scope that
-// applies to the agent and returns a merged map. Scopes are applied lowest
-// precedence first; the order itself is stated in exactly one place,
-// envScopePrecedence above.
+// applies to the agent and returns a merged map, plus a companion map
+// recording which of those keys came from a storage entry with Secret==false
+// ("plain"). A key absent from the plain map (or present with false) is not
+// known plain and must not be treated as one by a caller deciding what to
+// persist. Scopes are applied lowest precedence first; the order itself is
+// stated in exactly one place, envScopePrecedence above.
 //
 // The caller then overlays explicit agent config env on top of the result, so
 // agent config outranks every storage scope (see buildCreateRequest).
-func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *store.Agent) (map[string]string, error) {
+func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *store.Agent) (map[string]string, map[string]bool, error) {
 	result := make(map[string]string)
+	plain := make(map[string]bool)
 	if agent == nil {
-		return result, nil
+		return result, plain, nil
 	}
 
 	for _, filter := range d.envScopesInPrecedenceOrder(agent) {
@@ -1665,6 +1673,7 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 				continue
 			}
 			result[v.Key] = v.Value
+			plain[v.Key] = !v.Secret
 		}
 	}
 
@@ -1685,11 +1694,12 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 					continue // higher-precedence scope already set this key
 				}
 				result[v.Key] = v.Value
+				plain[v.Key] = !v.Secret
 			}
 		}
 	}
 
-	return result, nil
+	return result, plain, nil
 }
 
 // resolveAsNeededForKeys resolves as_needed env vars and environment-type
@@ -2032,7 +2042,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	// Empty-value config entries are passthrough markers — storage values
 	// should override them so that hub-stored secrets (API keys, etc.) are
 	// available to the agent.
-	envFromStorage, err := d.resolveEnvFromStorage(ctx, agent)
+	envFromStorage, envFromStoragePlain, err := d.resolveEnvFromStorage(ctx, agent)
 	if err != nil {
 		if d.debug {
 			d.log.Warn("DispatchAgentStart: failed to resolve env from storage", "error", err)
@@ -2041,7 +2051,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		for k, v := range envFromStorage {
 			if existing, exists := resolvedEnv[k]; !exists || existing == "" {
 				resolvedEnv[k] = v
-				classifyEnv(&envClassifications, k, api.EnvKindSecretFetchable)
+				if envFromStoragePlain[k] {
+					classifyEnv(&envClassifications, k, api.EnvKindPlain)
+				} else {
+					classifyEnv(&envClassifications, k, api.EnvKindSecretFetchable)
+				}
 			}
 		}
 	}
@@ -2307,7 +2321,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 
 	// Merge env vars from Hub storage; storage vars fill in keys not already
 	// set (with a non-empty value) — same precedence as DispatchAgentStart.
-	envFromStorage, err := d.resolveEnvFromStorage(ctx, agent)
+	envFromStorage, envFromStoragePlain, err := d.resolveEnvFromStorage(ctx, agent)
 	if err != nil {
 		if d.debug {
 			d.log.Warn("DispatchAgentRestart: failed to resolve env from storage", "error", err)
@@ -2316,7 +2330,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		for k, v := range envFromStorage {
 			if existing, exists := resolvedEnv[k]; !exists || existing == "" {
 				resolvedEnv[k] = v
-				classifyEnv(&envClassifications, k, api.EnvKindSecretFetchable)
+				if envFromStoragePlain[k] {
+					classifyEnv(&envClassifications, k, api.EnvKindPlain)
+				} else {
+					classifyEnv(&envClassifications, k, api.EnvKindSecretFetchable)
+				}
 			}
 		}
 	}
