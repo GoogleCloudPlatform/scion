@@ -451,6 +451,20 @@ func (s *MessageStore) PurgeOldMessages(ctx context.Context, readCutoff time.Tim
 	return n, nil
 }
 
+// PurgeFailedMessages removes messages with dispatch_state="failed" whose
+// created timestamp is before cutoff. Returns the number of messages removed.
+// Unlike PurgeOldMessages, this filters strictly on dispatch_state so
+// successfully delivered (dispatched) message history is never touched.
+func (s *MessageStore) PurgeFailedMessages(ctx context.Context, cutoff time.Time) (int, error) {
+	n, err := s.client.Message.Delete().
+		Where(message.DispatchStateEQ(store.MessageDispatchFailed), message.CreatedLT(cutoff)).
+		Exec(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return n, nil
+}
+
 // SetMessageConversationID updates the conversation_id on an existing message.
 // Used by Phase 4 backfill to link legacy messages to Conversation records.
 func (s *MessageStore) SetMessageConversationID(ctx context.Context, messageID, conversationID string) error {

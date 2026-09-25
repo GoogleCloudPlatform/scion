@@ -297,6 +297,82 @@ func TestExpireStuckPendingMessages(t *testing.T) {
 	assert.Equal(t, 0, expired, "already-expired message not counted again")
 }
 
+func TestFailPendingMessagesWithMissingRecipient(t *testing.T) {
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	ctx := context.Background()
+
+	proj := &store.Project{
+		ID: uuid.NewString(), Name: "p", Slug: "p-" + uuid.NewString()[:8],
+		OwnerID: uuid.NewString(),
+	}
+	require.NoError(t, cs.CreateProject(ctx, proj))
+	projUID := uuid.MustParse(proj.ID)
+
+	// A live agent — its pending message must be left alone.
+	aliveID := mustCreateAgent(t, client, projUID, "broker-1")
+
+	// A soft-deleted agent — its pending message must be failed early.
+	deletedID := mustCreateAgent(t, client, projUID, "broker-1")
+	_, err := client.Agent.UpdateOneID(uuid.MustParse(deletedID)).SetDeletedAt(time.Now()).Save(ctx)
+	require.NoError(t, err)
+
+	// A recipient_id that never existed (e.g. hard-deleted/purged) — also failed early.
+	goneID := uuid.NewString()
+
+	toAlive := &store.Message{
+		ID: uuid.NewString(), ProjectID: proj.ID,
+		Sender: "user:x", Recipient: "agent:alive", RecipientID: aliveID, Msg: "hi",
+	}
+	toDeleted := &store.Message{
+		ID: uuid.NewString(), ProjectID: proj.ID,
+		Sender: "user:x", Recipient: "agent:deleted", RecipientID: deletedID, Msg: "hi",
+	}
+	toGone := &store.Message{
+		ID: uuid.NewString(), ProjectID: proj.ID,
+		Sender: "user:x", Recipient: "agent:gone", RecipientID: goneID, Msg: "hi",
+	}
+	// A pending message to a human recipient must never be treated as an
+	// orphaned agent DM, even though its recipient_id resolves to nothing.
+	toUser := &store.Message{
+		ID: uuid.NewString(), ProjectID: proj.ID,
+		Sender: "agent:alive", Recipient: "user:carol", RecipientID: "carol-user-id", Msg: "hi",
+	}
+	require.NoError(t, cs.CreateMessage(ctx, toAlive))
+	require.NoError(t, cs.CreateMessage(ctx, toDeleted))
+	require.NoError(t, cs.CreateMessage(ctx, toGone))
+	require.NoError(t, cs.CreateMessage(ctx, toUser))
+
+	reason := "recipient agent no longer exists"
+	failed, err := cs.FailPendingMessagesWithMissingRecipient(ctx, reason)
+	require.NoError(t, err)
+	assert.Equal(t, 2, failed, "the soft-deleted and never-existed recipients are failed")
+
+	gotAlive, err := cs.GetMessage(ctx, toAlive.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchPending, gotAlive.DispatchState, "live recipient untouched")
+
+	gotDeleted, err := cs.GetMessage(ctx, toDeleted.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchFailed, gotDeleted.DispatchState)
+	require.NotNil(t, gotDeleted.DispatchFailureReason)
+	assert.Equal(t, reason, *gotDeleted.DispatchFailureReason)
+
+	gotGone, err := cs.GetMessage(ctx, toGone.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchFailed, gotGone.DispatchState)
+
+	gotUser, err := cs.GetMessage(ctx, toUser.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchPending, gotUser.DispatchState, "human recipient never touched")
+
+	// Running again should fail 0 (already-failed rows are excluded by the
+	// dispatch_state=pending guard).
+	failed, err = cs.FailPendingMessagesWithMissingRecipient(ctx, reason)
+	require.NoError(t, err)
+	assert.Equal(t, 0, failed, "already-failed messages not counted again")
+}
+
 func mustCreateAgent(t *testing.T, client *ent.Client, projectID uuid.UUID, brokerID string) string {
 	t.Helper()
 	a, err := client.Agent.Create().
