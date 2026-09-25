@@ -38,6 +38,7 @@ type mockManager struct {
 	stopCalls             int
 	deleteCalls           int
 	startErr              error
+	provisionErr          error
 	stopErr               error
 	listErr               error
 	lastStartOpts         api.StartOptions
@@ -49,6 +50,9 @@ type mockManager struct {
 }
 
 func (m *mockManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	if m.provisionErr != nil {
+		return nil, m.provisionErr
+	}
 	return &api.ScionConfig{}, nil
 }
 
@@ -448,6 +452,77 @@ func TestCreateAgentMissingName(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
+	}
+}
+
+// TestCreateAgentFullStart_HarnessConfigNotFound proves the fix for
+// ptone/scion#1316 fault 3: when Start fails because a configured
+// harness-config name does not resolve anywhere the broker looked, the
+// broker must report a 404 naming the resource instead of the blanket 502
+// every other provisioning failure gets.
+func TestCreateAgentFullStart_HarnessConfigNotFound(t *testing.T) {
+	srv := newTestServer(t)
+	mgr := srv.manager.(*mockManager)
+	mgr.startErr = fmt.Errorf("failed to find harness-config %q: %w", "antigravity", config.ErrHarnessConfigNotFound)
+
+	body := `{"name": "new-agent", "config": {"template": "claude", "harness": "antigravity"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusNotFound, w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "antigravity") {
+		t.Errorf("expected response to name the unresolved resource, got: %s", w.Body.String())
+	}
+}
+
+// TestCreateAgentFullStart_OtherErrorStaysRuntimeError proves that a
+// provisioning failure unrelated to naming (e.g. a runtime/infra failure)
+// still gets the generic 502-mapped RuntimeError, not a 404 — the
+// classification in dispatchCreateErrorResponse and its broker-side
+// counterpart must be narrow.
+func TestCreateAgentFullStart_OtherErrorStaysRuntimeError(t *testing.T) {
+	srv := newTestServer(t)
+	mgr := srv.manager.(*mockManager)
+	mgr.startErr = fmt.Errorf("docker daemon unreachable")
+
+	body := `{"name": "new-agent", "config": {"template": "claude"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusInternalServerError, w.Code, w.Body.String())
+	}
+}
+
+// TestCreateAgentProvisionOnly_TemplateNotFound is the ProvisionOnly-path
+// counterpart of TestCreateAgentFullStart_HarnessConfigNotFound, covering the
+// other named resource (template) and the other dispatch branch (Provision).
+func TestCreateAgentProvisionOnly_TemplateNotFound(t *testing.T) {
+	srv := newTestServer(t)
+	mgr := srv.manager.(*mockManager)
+	mgr.provisionErr = fmt.Errorf("failed to load template: %w",
+		fmt.Errorf("template %s not found: %w", "missing-template", config.ErrTemplateNotFound))
+
+	body := `{"name": "new-agent", "provisionOnly": true, "config": {"template": "missing-template"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusNotFound, w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "missing-template") {
+		t.Errorf("expected response to name the unresolved resource, got: %s", w.Body.String())
 	}
 }
 

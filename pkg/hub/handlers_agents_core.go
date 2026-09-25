@@ -1624,11 +1624,7 @@ func (s *Server) createAgentInProject(
 					// trigger spurious sync-registration attempts.
 					_ = dispatcher.DispatchAgentDelete(ctx, agent, true, true, false, time.Time{})
 					_ = s.store.DeleteAgent(ctx, agent.ID)
-					if isContainerNameConflict(err) {
-						Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
-					} else {
-						RuntimeError(w, "Failed to dispatch to runtime broker: "+err.Error())
-					}
+					dispatchCreateErrorResponse(w, err)
 					return
 				} else if envReqs != nil {
 					// Broker returned 202: needs env gather
@@ -1665,11 +1661,7 @@ func (s *Server) createAgentInProject(
 					// trigger spurious sync-registration attempts.
 					_ = dispatcher.DispatchAgentDelete(ctx, agent, true, true, false, time.Time{})
 					_ = s.store.DeleteAgent(ctx, agent.ID)
-					if isContainerNameConflict(err) {
-						Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
-					} else {
-						RuntimeError(w, "Failed to dispatch to runtime broker: "+err.Error())
-					}
+					dispatchCreateErrorResponse(w, err)
 					return
 				} else if envReqs != nil && len(envReqs.Needs) > 0 {
 					// Broker reported missing required env vars — fail the dispatch.
@@ -3245,6 +3237,32 @@ func isContainerNameConflict(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return (strings.Contains(msg, "container name") && strings.Contains(msg, "already in use")) ||
 		strings.Contains(msg, "is already in use by container")
+}
+
+// dispatchCreateErrorResponse classifies a failed create/provision dispatch to
+// the runtime broker and writes the matching HTTP response.
+//
+// Every dispatch failure used to fold into RuntimeError's 502, regardless of
+// what the broker actually reported. The broker now returns 404 naming the
+// resource when a configured harness-config or template name does not
+// resolve anywhere it looked (pkg/runtimebroker/handlers.go), and that
+// status code survives the HTTP hop as a *brokerStatusError — so it is
+// checked here before falling back to the generic "runtime broker failed"
+// 502 every other failure still gets (ptone/scion#1316 fault 3).
+func dispatchCreateErrorResponse(w http.ResponseWriter, err error) {
+	switch {
+	case isContainerNameConflict(err):
+		Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
+	case isBrokerStatus(err, http.StatusNotFound):
+		var se *brokerStatusError
+		message := err.Error()
+		if errors.As(err, &se) {
+			message = se.brokerErrorMessage()
+		}
+		writeError(w, http.StatusNotFound, ErrCodeNotFound, "Failed to dispatch to runtime broker: "+message, nil)
+	default:
+		RuntimeError(w, "Failed to dispatch to runtime broker: "+err.Error())
+	}
 }
 
 // recordDelegationEdge creates a delegation edge from the creator to the new

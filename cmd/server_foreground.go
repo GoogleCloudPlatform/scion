@@ -2019,6 +2019,12 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 			cfg.Database.Driver, err)
 	}
 
+	// ptone/scion#1316 fault 3: confirm the hub's own agent_defaults resolve
+	// to registered resources now that bundled resources are seeded and
+	// operational settings are loaded, so a misconfigured default is a
+	// startup warning rather than a silent 502 at the first agent create.
+	hubSrv.ValidateStartupDefaults(ctx)
+
 	return hubSrv, nil
 }
 

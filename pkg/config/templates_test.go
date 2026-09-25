@@ -15,6 +15,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -566,6 +567,13 @@ func TestFindTemplateInProjectPath(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "not found") {
 			t.Errorf("expected error to contain 'not found', got: %v", err)
+		}
+		// ptone/scion#1316 fault 3: callers must be able to distinguish "this
+		// named template does not exist" from any other failure via
+		// errors.Is, so the runtime broker can report a 404 naming the
+		// resource instead of folding it into a generic 5xx.
+		if !errors.Is(err, ErrTemplateNotFound) {
+			t.Errorf("expected errors.Is(err, ErrTemplateNotFound) to be true, got err: %v", err)
 		}
 	})
 

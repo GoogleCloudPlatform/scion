@@ -15,6 +15,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -354,6 +355,27 @@ func TestFindHarnessConfigDir_NotFoundErrorIncludesSearchedPaths(t *testing.T) {
 	}
 	if !strings.Contains(errMsg, "searched:") {
 		t.Errorf("expected error to include 'searched:' prefix, got: %s", errMsg)
+	}
+}
+
+// TestFindHarnessConfigDir_NotFoundWrapsSentinel proves the fix for
+// ptone/scion#1316 fault 3: a caller must be able to distinguish "this named
+// harness-config does not exist" from any other provisioning failure via
+// errors.Is, so the runtime broker can report a 404 naming the resource
+// instead of folding it into a generic 5xx.
+func TestFindHarnessConfigDir_NotFoundWrapsSentinel(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	origHome := os.Getenv("HOME")
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
+
+	_, err := FindHarnessConfigDir("missing-harness", "")
+	if err == nil {
+		t.Fatal("expected error for missing harness-config")
+	}
+	if !errors.Is(err, ErrHarnessConfigNotFound) {
+		t.Errorf("expected errors.Is(err, ErrHarnessConfigNotFound) to be true, got err: %v", err)
 	}
 }
 
