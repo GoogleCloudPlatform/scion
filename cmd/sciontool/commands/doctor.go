@@ -338,7 +338,12 @@ func checkAuthentication(hubURL string, failures *int, transportSrc transportaut
 	selfURL := fmt.Sprintf("%s/api/v1/agents/%s",
 		strings.TrimSuffix(hubURL, "/"), agentID)
 
-	req, _ = http.NewRequest("GET", selfURL, nil)
+	req, err = http.NewRequest("GET", selfURL, nil)
+	if err != nil {
+		fmt.Printf("[FAIL] Failed to create request: %v\n", err)
+		*failures++
+		return false
+	}
 	req.Header.Set("X-Scion-Agent-Token", token)
 
 	resp, err = client.Do(req)

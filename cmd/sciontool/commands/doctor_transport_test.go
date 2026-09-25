@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -187,12 +188,12 @@ func TestCheckAuthentication_WithTransportAuth(t *testing.T) {
 // original credential still authenticates a real follow-up call afterwards.
 func TestCheckAuthentication_DoesNotRevokeOriginalToken(t *testing.T) {
 	const originalToken = "original-scion-token"
-	var revoked bool
-	var refreshCalls int
+	var revoked atomic.Bool
+	var refreshCalls atomic.Int32
 
 	authGuard := func(w http.ResponseWriter, r *http.Request) bool {
 		agentToken := r.Header.Get("X-Scion-Agent-Token")
-		if agentToken != originalToken || revoked {
+		if agentToken != originalToken || revoked.Load() {
 			w.WriteHeader(http.StatusUnauthorized)
 			_, _ = fmt.Fprint(w, `{"error":"token has been revoked"}`)
 			return false
@@ -218,8 +219,8 @@ func TestCheckAuthentication_DoesNotRevokeOriginalToken(t *testing.T) {
 	// presented to obtain it. If doctor ever hits this, the assertions below
 	// (refreshCalls and the follow-up request) catch it.
 	handler.HandleFunc("/api/v1/agents/test-agent/token/refresh", func(w http.ResponseWriter, r *http.Request) {
-		refreshCalls++
-		revoked = true
+		refreshCalls.Add(1)
+		revoked.Store(true)
 		w.WriteHeader(http.StatusOK)
 		expires := time.Now().Add(time.Hour).Format(time.RFC3339)
 		_, _ = fmt.Fprintf(w, `{"token":"replacement-token","expires_at":%q}`, expires)
@@ -242,8 +243,8 @@ func TestCheckAuthentication_DoesNotRevokeOriginalToken(t *testing.T) {
 	if !result {
 		t.Errorf("expected authentication check to pass, got failures=%d", failures)
 	}
-	if refreshCalls != 0 {
-		t.Fatalf("doctor must not call the rotating token/refresh endpoint; called %d time(s)", refreshCalls)
+	if calls := refreshCalls.Load(); calls != 0 {
+		t.Fatalf("doctor must not call the rotating token/refresh endpoint; called %d time(s)", calls)
 	}
 
 	// The real regression check: the original credentials the agent was
