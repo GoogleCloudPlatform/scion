@@ -489,10 +489,11 @@ environment, already documented as the `SCION_AUTO_EXPOSE_PORTS` root cause in t
 
 | File:line | Before (imprecise) | After | Code lines checked |
 |---|---|---|---|
-| `auth_external_bearer_test.go:572-580` | "a validly signed Google ID token" / "a real Google-signed token" / "pins the same fallback bytes" | "a well-formed, signed ID token carrying Google's issuer" / "a Google-issuer token signed with a test key" / "pins the same fallback rejection, byte-exact" / "FederationAuth unset" | `:583` (`kp := newGCVTestKeyPair("test-kid-1")` — a test key pair, not Google's); `:615` (`signIDToken(kp, claims)`, so the token is signed by that test key); `:1268` (golden case (a)'s token constant, `nonHubJWT = "not-a.valid-hub.jwt"`); `:1286-1299` (case (a)'s table entry: `withTrust: false`, `token: nonHubJWT`); `:1398-1407` (the shared `cfg` wiring `GoogleValidator`/`GoogleResolver` non-nil for every case including (a)); `:623-627` (this test's `wantBody` is `"invalid access token: "+verifyErr.Error()`, the same *pattern* case (a) uses at `:1296` but with a different underlying error, so the two tests pin the same fallback shape byte-exactly each, not the same bytes as each other); `:631` (`counting.totalCalls() != 0`); `auth_external_bearer.go:144-149` (`classifyExternalBearer`: a JWT with Google's `iss` classifies as `externalBearerIDToken`, not not-applicable); `:390-425` (`authenticateExternalBearer`: if `googleTrust` wrongly returned ok, classification would proceed and reach `ValidateIDToken`, so a broken gate would fail the zero-calls assertion). Used "FederationAuth unset" per the brief instead of "FederationAuth pointer empty", since this test leaves the field `nil` rather than pointing it at an empty value (this also resolves F3 in the review). |
+| `auth_external_bearer_test.go:572-580` | "a validly signed Google ID token" / "a real Google-signed token" / "pins the same fallback bytes" | "a well-formed, signed ID token carrying Google's issuer" / "a Google-issuer token signed with a test key" / "pins the same fallback rejection, byte-exact" / "FederationAuth unset" | `:584` (`kp := newGCVTestKeyPair("test-kid-1")` — a test key pair, not Google's); `:616` (`signIDToken(kp, claims)`, so the token is signed by that test key); `:1268` (golden case (a)'s token constant, `nonHubJWT = "not-a.valid-hub.jwt"`); `:1286-1299` (case (a)'s table entry: `withTrust: false`, `token: nonHubJWT`); `:1398-1407` (the shared `cfg` wiring `GoogleValidator`/`GoogleResolver` non-nil for every case including (a)); `:623-627` (this test's `wantBody` is `"invalid access token: "+verifyErr.Error()`, the same *pattern* case (a) uses at `:1300` but with a different underlying error, so the two tests pin the same fallback shape byte-exactly each, not the same bytes as each other); `:632` (`counting.totalCalls() != 0`); `auth_external_bearer.go:144-149` (`classifyExternalBearer`: a JWT with Google's `iss` classifies as `externalBearerIDToken`, not not-applicable); `:390-425` (`authenticateExternalBearer`: if `googleTrust` wrongly returned ok, classification would proceed and reach `ValidateIDToken`, so a broken gate would fail the zero-calls assertion). Used "FederationAuth unset" per the brief instead of "FederationAuth pointer empty", since this test leaves the field `nil` rather than pointing it at an empty value (this also resolves F3 in the review). |
 
-The report's suggested wording used "real Google-signed token"; adopted "Google-issuer token signed with a test key" instead,
-since Google never signs this token — only the JWKS the test wires does.
+Adopted the report's suggested wording ("a Google-issuer token signed with a test key"): the token is signed with the local key
+from `newGCVTestKeyPair`, and no JWKS is wired in this test (the validator is the fake `newRejectingCountingValidator()`,
+`:590-599`, which must never be called).
 
 **Addendum (ap-em, same day):** the "proof must print nothing" constraint above was relaxed. The trailing comment at `:616`
 (`token := signIDToken(kp, claims) // a validly-signed Google token — must still be rejected`) was fixed under the
@@ -555,3 +556,57 @@ Empty. Every change this round is a whole-line comment edit; no trailing comment
   and `-run 'TestGEExchange_Route_SharesValidatorAndResolverWithExternalBearer'` (the test at the reflowed banner) — all pass.
 - `go test -run 'TestFederationConfig_Validate' ./pkg/config/...` with every `SCION_*` variable unset — all pass, including the
   round-3-renamed subtest.
+
+## Fix round 5
+
+Review: `reviews/polish-r5-ap-polish-rev-5.md` (`ap-polish-rev-5`, **APPROVE** on `4f90a60db`: 0C / 0R / 1O / 1N / 4FYI). Folding
+in the Nit and Optional items, plus FYI 1's citation fixes, per the brief.
+
+### Nit: two ragged paragraphs, same class as fix-round-4 N1 — fixed
+
+| File:line | Issue | Fix | Word-for-word check |
+|---|---|---|---|
+| `pkg/config/federation_config.go:231-237` | `:234` (`// below. It stays an error on every non-hub`) about 46 columns, ragged after the fix-round-4 N2 edit | Reflowed `:231-237` as one unit | Extracted the comment text before and after with the `//` prefixes stripped and joined on spaces; identical string both times |
+| `pkg/hub/auth_external_bearer_test.go:868-872` | `:871` (`// through unchanged when Google is`) about 36 columns, ragged after the fix-round-4 `:869` edit | Reflowed `:868-872` as one unit | Same word-for-word check; identical string both times |
+
+Both are whole comment-line edits only — no trailing comments, so the proof over `4f90a60db..HEAD` stays empty.
+
+### Optional: two false sentences in the "Fix round 4" O1 note — fixed
+
+The two sentences following the O1 table (this log) were both false:
+- Claimed the fix-round-4 report's suggested wording was "real Google-signed token". Re-read the round-4 report's suggested
+  block (quoted in this log's own "Fix round 4" section, `briefs/ap-polish-dev-fix-r4.md` review): it reads "this test uses a
+  Google-issuer token signed with a test key" — that developer adopted this wording as committed. "Real Google-signed" was the
+  *old, pre-round-4* code wording, not the round-4 report's suggestion.
+- Claimed "Google never signs this token — only the JWKS the test wires does". False on two counts: a JWKS holds public keys
+  and signs nothing (it is used for verification, not signing), and `TestExternalBearer_NoTrustProductionShape_Golden401`
+  wires **no** JWKS at all — it uses the fake `newRejectingCountingValidator()` (`:590-599`), which must never be called. The
+  token is signed with the local test key from `newGCVTestKeyPair` (`:584`), full stop.
+
+Replaced with the reviewer's suggested sentence, verified: "Adopted the report's suggested wording ('a Google-issuer token
+signed with a test key'): the token is signed with the local key from `newGCVTestKeyPair`, and no JWKS is wired in this test."
+(Extended slightly to name the fake validator and its line range for traceability.)
+
+### FYI 1: O1 row citations corrected to HEAD lines
+
+The "Fix round 4" O1 table row cited `:583`, `:615` and `:631`, which were accurate `@e7bf264a0` but drifted to `:584`, `:616`
+and `:632` once the fix-round-3 banner rewrite and the fix-round-4 `:869` edit each added one line above them (two lines
+total). Corrected all three to the HEAD values. Also corrected `:1296` (cited as where case (a) builds its `wantBody`) — verified
+this is wrong at any point: `@e7bf264a0` that line is `t.Fatal("test token must be invalid")`, and the actual
+`return wantErrorBody(...)` call is two lines later. Accounting for the same two-line drift, that line is `:1300` at HEAD (not
+`:1298`, which is `@e7bf264a0`'s value for that same call, not HEAD's — confirmed by direct inspection of both revisions
+rather than assuming the review's suggested `:1298`).
+
+### Comments-only proof (fix round 5)
+
+```
+$ git diff 4f90a60db -- '*.go' | /usr/bin/grep -E '^[+-][^+-]' | /usr/bin/grep -vE '^[+-]\s*(//|$)'
+```
+Empty. Every change this round is a whole-line comment edit; no trailing comments, test-literal changes, or renames. The
+project-log edits (the false-sentence replacement and the citation fixes) are markdown, not Go, and not part of this proof.
+
+### Gates (fix round 5)
+
+- `gofmt -l pkg cmd extras` — empty.
+- Byte hazard (`perl -ne 'print "$ARGV:$.\n" if /\xC2\xA0/'` over every file changed since `4f90a60db`) — empty.
+- Bare refs — both commands empty (commit messages and added diff lines).

@@ -231,10 +231,9 @@ func (c *FederationConfig) Validate() []error {
 		// AllowedProjects here is the hub-federation Scion-project allowlist
 		// (matched against a federated agent token's project_id claim,
 		// pkg/hub/federation_auth.go) — unrelated to AllowedGCPProjects
-		// below. It stays an error on every non-hub
-		// issuer, including a Google one: a Google issuer wants
-		// allowed_gcp_projects instead, so the message says so when that's
-		// the likely mistake.
+		// below. It stays an error on every non-hub issuer, including a
+		// Google one: a Google issuer wants allowed_gcp_projects instead, so
+		// the message says so when that's the likely mistake.
 		if isNonHub && len(issuer.AllowedProjects) > 0 {
 			msg := fmt.Sprintf("trusted_issuers[%d]: allowed_projects is not applicable for issuer_type %q", i, issuer.IssuerType)
 			if isGoogleIssuerURL(issuer.IssuerURL) {

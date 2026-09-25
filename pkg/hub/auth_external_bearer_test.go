@@ -868,8 +868,8 @@ func TestGoogleTrust_RequiresIssuerTypeUser(t *testing.T) {
 // TestExternalBearer_ServiceAccountFederationIssuer_NotApplicable is the
 // middleware-level half of the issuer_type guard: a Google-issuer user ID
 // token signed with a test key, valid in every other respect, must fall
-// through unchanged when Google is
-// trusted only as a service_account federation issuer.
+// through unchanged when Google is trusted only as a service_account
+// federation issuer.
 func TestExternalBearer_ServiceAccountFederationIssuer_NotApplicable(t *testing.T) {
 	kp := newGCVTestKeyPair("test-kid-1")
 	endpoints := newTestEndpoints(
