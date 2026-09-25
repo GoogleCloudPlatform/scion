@@ -237,7 +237,7 @@ func NewRequestLogger(cfg RequestLoggerConfig) (*slog.Logger, func(), error) {
 
 // PathPattern defines a URL pattern for extracting project/agent IDs.
 type PathPattern struct {
-	Prefix     string // e.g. "/api/v1/groves/"
+	Prefix     string // e.g. "/api/v1/projects/"
 	ProjectIdx int    // segment index after prefix for project ID (-1 if N/A)
 	AgentIdx   int    // segment index after prefix for agent ID (-1 if N/A)
 }
@@ -246,7 +246,6 @@ type PathPattern struct {
 func HubPathPatterns() []PathPattern {
 	return []PathPattern{
 		{Prefix: "/api/v1/projects/", ProjectIdx: 0, AgentIdx: -1},
-		{Prefix: "/api/v1/groves/", ProjectIdx: 0, AgentIdx: -1},
 		{Prefix: "/api/v1/agents/", ProjectIdx: -1, AgentIdx: 0},
 	}
 }
@@ -255,7 +254,6 @@ func HubPathPatterns() []PathPattern {
 func BrokerPathPatterns() []PathPattern {
 	return []PathPattern{
 		{Prefix: "/api/v1/projects/", ProjectIdx: 0, AgentIdx: -1},
-		{Prefix: "/api/v1/groves/", ProjectIdx: 0, AgentIdx: -1},
 		{Prefix: "/api/v1/agents/", ProjectIdx: -1, AgentIdx: 0},
 	}
 }

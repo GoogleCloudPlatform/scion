@@ -67,7 +67,7 @@
 - [project.read](#projectread) — Read a single project's metadata by ID or slug
 - [project.list](#projectlist) — List projects within the caller's authorized scope
 - [project.update](#projectupdate) — Update project settings and metadata
-- [project.register](#projectregister) — Register a project or grove from an external source
+- [project.register](#projectregister) — Register a project from an external source
 - [skill.read](#skillread) — Read skill definitions or list/discover skills
 - [skill.create](#skillcreate) — Create a new skill definition
 - [skill.update](#skillupdate) — Update an existing skill definition
@@ -2334,7 +2334,6 @@
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | GET | `/api/v1/projects/{id}` |
-| http_route | GET | `/api/v1/groves/{id}` |
 
 **Principals:** `user`, `agent`
 
@@ -2365,7 +2364,6 @@
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | GET | `/api/v1/projects` |
-| http_route | GET | `/api/v1/groves` |
 
 **Principals:** `user`, `agent`
 
@@ -2422,7 +2420,6 @@
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | PUT | `/api/v1/projects/{id}` |
-| http_route | PUT | `/api/v1/groves/{id}` |
 
 **Principals:** `user`
 
@@ -2446,14 +2443,13 @@
 
 **Domain:** project
 
-**Description:** Register a project or grove from an external source
+**Description:** Register a project from an external source
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | POST | `/api/v1/projects/register` |
-| http_route | POST | `/api/v1/groves/register` |
 
 **Principals:** `user`
 

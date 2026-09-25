@@ -130,16 +130,3 @@ func TestCanonicalFieldAliases(t *testing.T) {
 		})
 	}
 }
-
-func TestDeprecatedGroveRoute(t *testing.T) {
-	for _, path := range []string{"/api/v1/groves", "/api/v1/groves/p1/agents"} {
-		if !DeprecatedGroveRoute(path) {
-			t.Fatalf("DeprecatedGroveRoute(%q) = false, want true", path)
-		}
-	}
-	for _, path := range []string{"/api/v1/projects", "/api/v1/groves-old"} {
-		if DeprecatedGroveRoute(path) {
-			t.Fatalf("DeprecatedGroveRoute(%q) = true, want false", path)
-		}
-	}
-}

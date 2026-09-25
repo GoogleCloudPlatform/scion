@@ -102,24 +102,6 @@ func TestProjectWorkspaceAuthz_NonMemberDenied(t *testing.T) {
 	}
 }
 
-// TestProjectWorkspaceAuthz_LegacyGrovesAlias covers the second door onto the
-// same dispatcher. Gating only the /projects prefix would leave this open, and
-// nothing about the /projects tests would have noticed.
-func TestProjectWorkspaceAuthz_LegacyGrovesAlias(t *testing.T) {
-	srv, _, _, bob, _ := setupTemplateAuthzTest(t)
-	projectID, _ := newVictimWorkspace(t, srv, "Victim Groves Alias")
-
-	for _, url := range []string{
-		"/api/v1/groves/" + projectID + "/workspace/files",
-		"/api/v1/groves/" + projectID + "/workspace/files/SECRET.md",
-		"/api/v1/groves/" + projectID + "/dav/SECRET.md",
-	} {
-		rec := doRequestAsUser(t, srv, bob, http.MethodGet, url, nil)
-		assert.Equal(t, http.StatusForbidden, rec.Code, "url: %s", url)
-		assert.NotContains(t, rec.Body.String(), workspaceSecret, "url: %s", url)
-	}
-}
-
 // TestProjectWorkspaceAuthz_MemberStillAllowed is the other half. A gate that
 // refuses everyone would pass every assertion above, so the allow path is
 // asserted explicitly: the identity that owns the project keeps full access.
