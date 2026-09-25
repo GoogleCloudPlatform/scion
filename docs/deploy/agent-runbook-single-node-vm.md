@@ -430,13 +430,21 @@ the Phase 5 proxy/IAP one) set the top-level key
 `default_gcp_identity_mode: passthrough`. Combined with the VM service
 account's `roles/aiplatform.user` grant (§6.3a's prerequisite, added when the
 VM is created) and the `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION` hub
-env vars from §6.3a, this means **agents on this hub default to inheriting
-the VM's service account and can call Vertex AI with no manual credential
-setup.**
+env vars from §6.3a, this means **agents created interactively or via the
+API on this hub default to inheriting the VM's service account and can call
+Vertex AI with no manual credential setup.**
 
 `passthrough` is only honoured on the hub's own embedded (co-located) broker
 — which a single-node VM always is — so this is safe by construction; an
 agent dispatched to any other broker still gets `block`.
+
+**Scheduled dispatches don't consult the hub default.** The hub-default mode
+set here only applies on the interactive/API agent-create path. Agents
+started by a scheduled event only consult the *project's* default GCP
+identity mode, not the hub's — a project with no project-level mode set
+still gets `block`/unchanged identity for scheduled agents even with this
+hub default in place. Set a project-level default GCP identity mode on any
+project that needs Vertex access from scheduled agents.
 
 Verify:
 
@@ -463,6 +471,13 @@ config) is persisted by being written back into this same file, so it has no
 separate store to survive a redeploy: running `deploy.sh` against an
 existing VM resets the mode back to `passthrough`. Re-apply the change
 afterward if you need something other than the default.
+
+**A startup `WARN ... unrecognized keys ...` log line is expected and
+harmless.** A legacy-format settings loader logs a warning listing top-level
+keys it doesn't recognize, including `default_gcp_identity_mode` alongside
+other keys that are obviously honoured (`server`, `schema_version`). This is
+pre-existing noise unrelated to this setting — the key is still read and
+applied; see the verification command above.
 
 ### 6.4 Container images (if built locally)
 
