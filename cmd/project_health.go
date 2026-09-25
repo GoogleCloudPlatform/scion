@@ -24,6 +24,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -37,57 +38,70 @@ var (
 )
 
 var projectHealthCmd = &cobra.Command{
-	Use:   "health [project-name]",
-	Short: "Show project agent health and activity metrics",
-	Long: `Show agent lifecycle phases, runtime activity metrics, and health status
+	Use:     "status [project-name]",
+	Aliases: []string{"health"},
+	Short:   "Show project agent status and activity metrics",
+	Long: `Show agent lifecycle phases, runtime activity metrics, and status summary
 for a Scion project.
 
 Queries the Hub to report:
-  - Agent counts by phase (running, error, stopped, suspended)
-  - Agent counts by activity (working, thinking, blocked, completed, stalled)
+  - Agent counts across all lifecycle phases (created, provisioning, cloning, starting, running, stopping, stopped, error, suspended)
+  - Agent counts across all activity states (working, thinking, executing, waiting_for_input, blocked, completed, stalled, limits_exceeded, offline, crashed)
   - Detailed agent matrix with template, harness, lifecycle phase, and activity state
   - Actionable troubleshooting hints for blocked, stalled, or errored agents
 
 If no project name is provided, uses the current project context.
-Use --all to display health metrics across all projects on the Hub.
+Use --all to display status metrics across all projects on the Hub.
 
 Examples:
-  # Show health for current project
-  scion project health
+  # Show status for current project
+  scion project status
 
-  # Show health for a specific project
-  scion project health okf-app
+  # Show status for a specific project
+  scion project status okf-app
 
-  # Show health across all projects
-  scion project health --all
+  # Show status across all projects
+  scion project status --all
 
   # Output as JSON for automated monitoring or agent consumption
-  scion project health okf-app --json`,
+  scion project status okf-app --json`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runProjectHealth,
 }
 
 func init() {
-	projectHealthCmd.Flags().BoolVar(&projectHealthAll, "all", false, "Report health across all projects")
+	projectHealthCmd.Flags().BoolVar(&projectHealthAll, "all", false, "Report status across all projects")
 	projectHealthCmd.Flags().BoolVar(&projectHealthJSON, "json", false, "Output as JSON")
 	projectCmd.AddCommand(projectHealthCmd)
 }
 
-// ProjectHealthSummary contains aggregated metrics for a project.
+// ProjectHealthSummary contains aggregated phase and activity metrics for a project.
 type ProjectHealthSummary struct {
-	Total     int `json:"total"`
-	Running   int `json:"running"`
-	Error     int `json:"error"`
-	Stopped   int `json:"stopped"`
-	Suspended int `json:"suspended"`
-	Working   int `json:"working"`
-	Thinking  int `json:"thinking"`
-	Blocked   int `json:"blocked"`
-	Completed int `json:"completed"`
-	Stalled   int `json:"stalled"`
+	Total           int `json:"total"`
+	Created         int `json:"created"`
+	Provisioning    int `json:"provisioning"`
+	Cloning         int `json:"cloning"`
+	Starting        int `json:"starting"`
+	Running         int `json:"running"`
+	Suspended       int `json:"suspended"`
+	Stopping        int `json:"stopping"`
+	Stopped         int `json:"stopped"`
+	Error           int `json:"error"`
+	OtherPhase      int `json:"otherPhase,omitempty"`
+	Working         int `json:"working"`
+	Thinking        int `json:"thinking"`
+	Executing       int `json:"executing"`
+	WaitingForInput int `json:"waitingForInput"`
+	Blocked         int `json:"blocked"`
+	Completed       int `json:"completed"`
+	LimitsExceeded  int `json:"limitsExceeded"`
+	Stalled         int `json:"stalled"`
+	Offline         int `json:"offline"`
+	Crashed         int `json:"crashed"`
+	OtherActivity   int `json:"otherActivity,omitempty"`
 }
 
-// ProjectHealthReport contains health details for a project.
+// ProjectHealthReport contains status details for a project.
 type ProjectHealthReport struct {
 	ID        string               `json:"id"`
 	Name      string               `json:"name"`
@@ -95,6 +109,11 @@ type ProjectHealthReport struct {
 	GitRemote string               `json:"gitRemote,omitempty"`
 	Summary   ProjectHealthSummary `json:"summary"`
 	Agents    []hubclient.Agent    `json:"agents"`
+}
+
+// ProjectStatusResponse is the typed JSON output wrapper for project status reports.
+type ProjectStatusResponse struct {
+	Projects []ProjectHealthReport `json:"projects"`
 }
 
 func runProjectHealth(cmd *cobra.Command, args []string) error {
@@ -217,6 +236,10 @@ func runProjectHealth(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
+		for i := range allAgents {
+			allAgents[i].Template = config.FriendlyTemplateName(allAgents[i].Template)
+		}
+
 		report := ProjectHealthReport{
 			ID:        p.ID,
 			Name:      p.Name,
@@ -227,36 +250,62 @@ func runProjectHealth(cmd *cobra.Command, args []string) error {
 
 		report.Summary.Total = len(allAgents)
 		for _, a := range allAgents {
-			switch a.Phase {
-			case "running":
+			switch state.Phase(a.Phase) {
+			case state.PhaseCreated:
+				report.Summary.Created++
+			case state.PhaseProvisioning:
+				report.Summary.Provisioning++
+			case state.PhaseCloning:
+				report.Summary.Cloning++
+			case state.PhaseStarting:
+				report.Summary.Starting++
+			case state.PhaseRunning:
 				report.Summary.Running++
-			case "error":
-				report.Summary.Error++
-			case "stopped":
-				report.Summary.Stopped++
-			case "suspended":
+			case state.PhaseSuspended:
 				report.Summary.Suspended++
+			case state.PhaseStopping:
+				report.Summary.Stopping++
+			case state.PhaseStopped:
+				report.Summary.Stopped++
+			case state.PhaseError:
+				report.Summary.Error++
+			default:
+				report.Summary.OtherPhase++
 			}
 
-			switch a.Activity {
-			case "working":
+			switch state.Activity(a.Activity) {
+			case "":
+				// No activity set (e.g., when agent is not running)
+			case state.ActivityWorking:
 				report.Summary.Working++
-			case "thinking":
+			case state.ActivityThinking:
 				report.Summary.Thinking++
-			case "blocked":
+			case state.ActivityExecuting:
+				report.Summary.Executing++
+			case state.ActivityWaitingForInput:
+				report.Summary.WaitingForInput++
+			case state.ActivityBlocked:
 				report.Summary.Blocked++
-			case "completed":
+			case state.ActivityCompleted:
 				report.Summary.Completed++
-			case "stalled":
+			case state.ActivityLimitsExceeded:
+				report.Summary.LimitsExceeded++
+			case state.ActivityStalled:
 				report.Summary.Stalled++
+			case state.ActivityOffline:
+				report.Summary.Offline++
+			case state.ActivityCrashed:
+				report.Summary.Crashed++
+			default:
+				report.Summary.OtherActivity++
 			}
 		}
 		reports = append(reports, report)
 	}
 
 	if isJSONOutput() {
-		return outputJSON(map[string]interface{}{
-			"projects": reports,
+		return outputJSON(ProjectStatusResponse{
+			Projects: reports,
 		})
 	}
 
@@ -264,9 +313,63 @@ func runProjectHealth(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func formatPhaseSummary(s ProjectHealthSummary) string {
+	parts := []string{
+		fmt.Sprintf("Total=%d", s.Total),
+		fmt.Sprintf("Running=%d", s.Running),
+		fmt.Sprintf("Error=%d", s.Error),
+		fmt.Sprintf("Stopped=%d", s.Stopped),
+	}
+	extra := []struct {
+		label string
+		val   int
+	}{
+		{"Created", s.Created},
+		{"Provisioning", s.Provisioning},
+		{"Cloning", s.Cloning},
+		{"Starting", s.Starting},
+		{"Suspended", s.Suspended},
+		{"Stopping", s.Stopping},
+		{"Other", s.OtherPhase},
+	}
+	for _, b := range extra {
+		if b.val > 0 {
+			parts = append(parts, fmt.Sprintf("%s=%d", b.label, b.val))
+		}
+	}
+	return strings.Join(parts, " | ")
+}
+
+func formatActivitySummary(s ProjectHealthSummary) string {
+	parts := []string{
+		fmt.Sprintf("Working=%d", s.Working),
+		fmt.Sprintf("Thinking=%d", s.Thinking),
+		fmt.Sprintf("Blocked=%d", s.Blocked),
+		fmt.Sprintf("Completed=%d", s.Completed),
+	}
+	extra := []struct {
+		label string
+		val   int
+	}{
+		{"Executing", s.Executing},
+		{"WaitingForInput", s.WaitingForInput},
+		{"Stalled", s.Stalled},
+		{"LimitsExceeded", s.LimitsExceeded},
+		{"Offline", s.Offline},
+		{"Crashed", s.Crashed},
+		{"Other", s.OtherActivity},
+	}
+	for _, b := range extra {
+		if b.val > 0 {
+			parts = append(parts, fmt.Sprintf("%s=%d", b.label, b.val))
+		}
+	}
+	return strings.Join(parts, " | ")
+}
+
 func printProjectHealthReports(w io.Writer, reports []ProjectHealthReport) {
 	_, _ = fmt.Fprintln(w, "==================================================================")
-	_, _ = fmt.Fprintln(w, "                     PROJECT HEALTH & AGENT METRICS               ")
+	_, _ = fmt.Fprintln(w, "                     PROJECT STATUS & AGENT METRICS               ")
 	_, _ = fmt.Fprintln(w, "==================================================================")
 
 	for i, r := range reports {
@@ -274,14 +377,8 @@ func printProjectHealthReports(w io.Writer, reports []ProjectHealthReport) {
 			_, _ = fmt.Fprintln(w)
 		}
 		_, _ = fmt.Fprintf(w, "Project: %s (slug: %s, id: %s)\n", r.Name, r.Slug, r.ID)
-		_, _ = fmt.Fprintf(w, "  Summary: Total=%d | Running=%d | Error=%d | Working/Thinking=%d | Blocked=%d | Completed=%d\n\n",
-			r.Summary.Total,
-			r.Summary.Running,
-			r.Summary.Error,
-			r.Summary.Working+r.Summary.Thinking,
-			r.Summary.Blocked,
-			r.Summary.Completed,
-		)
+		_, _ = fmt.Fprintf(w, "  Phases:   %s\n", formatPhaseSummary(r.Summary))
+		_, _ = fmt.Fprintf(w, "  Activity: %s\n\n", formatActivitySummary(r.Summary))
 
 		if len(r.Agents) == 0 {
 			_, _ = fmt.Fprintln(w, "  No agents registered in this project.")
@@ -296,13 +393,13 @@ func printProjectHealthReports(w io.Writer, reports []ProjectHealthReport) {
 			if name == "" {
 				name = a.Slug
 			}
-			tmpl := a.Template
+			tmpl := config.FriendlyTemplateName(a.Template)
 			if tmpl == "" {
 				tmpl = "default"
 			}
 			harness := a.HarnessConfig
 			if harness == "" {
-				harness = "claude"
+				harness = "-"
 			}
 			activity := a.Activity
 			if activity == "" {
@@ -322,7 +419,7 @@ func printProjectHealthReports(w io.Writer, reports []ProjectHealthReport) {
 		if r.Summary.Blocked > 0 || r.Summary.Error > 0 || r.Summary.Stalled > 0 {
 			_, _ = fmt.Fprintln(w)
 			if r.Summary.Blocked > 0 {
-				_, _ = fmt.Fprintf(w, "  ! %d agent(s) are blocked waiting on permissions or inputs.\n", r.Summary.Blocked)
+				_, _ = fmt.Fprintf(w, "  ! %d agent(s) are blocked — run 'scion look <agent>' to see the block reason.\n", r.Summary.Blocked)
 			}
 			if r.Summary.Error > 0 {
 				_, _ = fmt.Fprintf(w, "  x %d agent(s) are in error phase. Run 'scion logs <agent>' or 'scion reset-auth <agent>'.\n", r.Summary.Error)
