@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 
@@ -265,6 +266,39 @@ func (s *Server) authorizeAgentLifecycle(w http.ResponseWriter, r *http.Request,
 		logAuthzDenial(r, identity, resource, action,
 			"identity type may not act on agent lifecycle")
 		writeForbidden(w, "")
+		return false
+	}
+}
+
+// agentLifecycleAllowed reports whether identity may manage target (start,
+// resume, or restart it), applying the identical rule
+// authorizeAgentLifecycle enforces for ActionLifecycle -- the same authority
+// the /start route requires -- but without writing an HTTP response.
+//
+// It exists for callers like handleExistingAgent that need the boolean
+// because a denial there must not surface as authorizeAgentLifecycle's 403
+// (which would confirm to the caller that a specific agent exists and is
+// somebody else's): the caller folds a false result into a generic
+// name-conflict response instead, disclosing nothing about the agent it was
+// denied against.
+func (s *Server) agentLifecycleAllowed(ctx context.Context, identity Identity, target *store.Agent) bool {
+	if identity == nil || target == nil {
+		return false
+	}
+	switch identity.Type() {
+	case "agent":
+		agentIdent, ok := identity.(AgentIdentity)
+		if !ok {
+			return false
+		}
+		return agentIdent.HasScope(ScopeAgentLifecycle) && agentIdent.ProjectID() == target.ProjectID
+	case "user", "dev":
+		userIdent, ok := identity.(UserIdentity)
+		if !ok {
+			return false
+		}
+		return s.authzService.CheckAccess(ctx, userIdent, agentResource(target), ActionLifecycle).Allowed
+	default:
 		return false
 	}
 }
