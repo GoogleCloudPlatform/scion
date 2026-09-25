@@ -883,9 +883,9 @@ already-pushed rebase head `74451cc39`, per ap-em's sequencing (rebase first, do
   fix round 2 below). §2 above has been rewritten in place around that mechanism, with the false claims removed and the
   run described accurately. The conclusion — pre-existing, not introduced by this branch — is unchanged, but now rests on
   the actual defect and its unreachability from this branch's code, not on a "same rate on both" argument the data never
-  supported. Checked the
-  "Upstream rebase 1" section (above) for any repeat of the same false claims: none found — its only "byte-identical"
-  mentions are about the rebase range-diff and the golden-test bytes, unrelated to the bridge integration directory.
+  supported. Checked the "Upstream rebase 1" section (above) for any repeat of the same false claims: none found — its
+  only "byte-identical" mentions are about the rebase range-diff and the golden-test bytes, unrelated to the bridge
+  integration directory.
 - **O1 (Optional):** `pkg/hub/google_identity_resolver_test.go`'s doc comment claimed
   `TestGEExchange_NilIdentityFromValidator_InternalError` and
   `TestExternalBearer_AccessToken_NilIdentityFromValidator_ServiceUnavailable` provide "end-to-end coverage" of the two
