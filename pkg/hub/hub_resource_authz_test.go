@@ -131,6 +131,18 @@ func TestHarnessConfigAuthz_OutsidersDenied(t *testing.T) {
 	// Reads are listed first. Hub members may read harness configs hub-wide
 	// by policy (system-scope harness_config.read), so reads are asserted
 	// only for a caller outside the hub; writes are asserted for both.
+	//
+	// "delete", "clone" and "reimport" sit in their own group even though
+	// they are writes: harnessConfigRouteAction's dispatcher gate
+	// (harness_config_handlers.go) evaluates ActionRead as the baseline
+	// permission for these three specific actions before any handler-level
+	// write check runs, so a caller who fails that baseline is denied at the
+	// read gate, not the write gate.
+	//
+	// Reads and the read-gated writes expect 404, not 403 (ptone/scion#1916):
+	// a denial on the dispatcher's ActionRead baseline must be
+	// indistinguishable from a nonexistent harness config — see
+	// authorizeHarnessConfigRoute's authorizeRead call.
 	type hcCase struct {
 		name, method, url string
 		body              any
@@ -143,15 +155,17 @@ func TestHarnessConfigAuthz_OutsidersDenied(t *testing.T) {
 		{"validate", http.MethodGet, base + "/validate", nil},
 		{"image-status", http.MethodGet, base + "/image-status", nil},
 	}
+	readGatedWrites := []hcCase{
+		{"delete", http.MethodDelete, base, nil},
+		{"clone", http.MethodPost, base + "/clone", map[string]string{"name": "copy"}},
+		{"reimport", http.MethodPost, base + "/reimport", map[string]string{"sourceUrl": "https://github.com/example/repo/tree/main/hc"}},
+	}
 	writes := []hcCase{
 		{"update", http.MethodPut, base, map[string]string{"name": "renamed"}},
 		{"patch", http.MethodPatch, base, map[string]string{"name": "renamed"}},
-		{"delete", http.MethodDelete, base, nil},
 		{"files upload", http.MethodPost, base + "/files", nil},
 		{"file write", http.MethodPut, base + "/files/Dockerfile", map[string]string{"content": "FROM other\n"}},
 		{"file delete", http.MethodDelete, base + "/files/Dockerfile", nil},
-		{"clone", http.MethodPost, base + "/clone", map[string]string{"name": "copy"}},
-		{"reimport", http.MethodPost, base + "/reimport", map[string]string{"sourceUrl": "https://github.com/example/repo/tree/main/hc"}},
 		{"upload", http.MethodPost, base + "/upload", map[string]any{"files": []any{}}},
 		{"finalize", http.MethodPost, base + "/finalize", map[string]any{"manifest": map[string]any{}}},
 		{"check-image", http.MethodPost, base + "/check-image", nil},
@@ -159,14 +173,22 @@ func TestHarnessConfigAuthz_OutsidersDenied(t *testing.T) {
 		{"pull-image", http.MethodPost, base + "/pull-image", nil},
 	}
 	for _, who := range []struct {
-		name  string
-		user  *store.User
-		cases []hcCase
+		name      string
+		user      *store.User
+		notFound  []hcCase
+		forbidden []hcCase
 	}{
-		{"non-hub-member", bob, append(append([]hcCase{}, reads...), writes...)},
-		{"other-project member", dave, writes},
+		{"non-hub-member", bob, append(append([]hcCase{}, reads...), readGatedWrites...), writes},
+		{"other-project member", dave, readGatedWrites, writes},
 	} {
-		for _, c := range who.cases {
+		for _, c := range who.notFound {
+			t.Run(who.name+"/"+c.name, func(t *testing.T) {
+				rec := doRequestAsUser(t, srv, who.user, c.method, c.url, c.body)
+				assert.Equal(t, http.StatusNotFound, rec.Code, "body: %s", rec.Body.String())
+				assert.NotContains(t, rec.Body.String(), harnessConfigSecret)
+			})
+		}
+		for _, c := range who.forbidden {
 			t.Run(who.name+"/"+c.name, func(t *testing.T) {
 				rec := doRequestAsUser(t, srv, who.user, c.method, c.url, c.body)
 				assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())

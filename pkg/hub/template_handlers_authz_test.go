@@ -326,12 +326,15 @@ func TestTemplateAuthz_Download_MemberAllowedOnGlobal(t *testing.T) {
 		"hub member should not get 401; got: %s", rec.Body.String())
 }
 
+// Expects 404, not 403 (ptone/scion#1916): a read denial on this surface
+// must be indistinguishable from a nonexistent template — see authorizeRead
+// (authorize.go) and handleTemplateDownload's read gate.
 func TestTemplateAuthz_Download_NonMemberDenied(t *testing.T) {
 	srv, s, alice, bob, project := setupTemplateAuthzTest(t)
 	tpl := createAuthzTestTemplate(t, s, "dl-priv", store.TemplateScopeProject, project.ID, alice.ID)
 
 	rec := doRequestAsUser(t, srv, bob, http.MethodGet, "/api/v1/templates/"+tpl.ID+"/download", nil)
-	assert.Equal(t, http.StatusForbidden, rec.Code,
+	assert.Equal(t, http.StatusNotFound, rec.Code,
 		"non-member should not be able to download a project template; got: %s", rec.Body.String())
 }
 
@@ -373,12 +376,14 @@ func TestTemplateAuthz_Validate_MemberAllowedOnGlobal(t *testing.T) {
 		"hub member should not get 401; got: %s", rec.Body.String())
 }
 
+// Expects 404, not 403 (ptone/scion#1916) — see the identical comment on
+// TestTemplateAuthz_Download_NonMemberDenied.
 func TestTemplateAuthz_Validate_NonMemberDenied(t *testing.T) {
 	srv, s, alice, bob, project := setupTemplateAuthzTest(t)
 	tpl := createAuthzTestTemplate(t, s, "val-priv", store.TemplateScopeProject, project.ID, alice.ID)
 
 	rec := doRequestAsUser(t, srv, bob, http.MethodGet, "/api/v1/templates/"+tpl.ID+"/validate", nil)
-	assert.Equal(t, http.StatusForbidden, rec.Code,
+	assert.Equal(t, http.StatusNotFound, rec.Code,
 		"non-member should not be able to validate a project template; got: %s", rec.Body.String())
 }
 

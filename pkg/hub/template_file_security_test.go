@@ -58,11 +58,16 @@ func TestTemplateFileAuthz_NonMemberDenied(t *testing.T) {
 		method string
 		path   string
 		body   any
+		// wantCode is the expected denial status. Reads are 404 — not 403 —
+		// per ptone/scion#1916: a read denial on this surface must be
+		// indistinguishable from a nonexistent template (authorizeRead,
+		// authorize.go). Writes remain 403.
+		wantCode int
 	}{
-		{"read a file", http.MethodGet, "/files/CLAUDE.md", nil},
-		{"list files", http.MethodGet, "/files", nil},
-		{"write a file", http.MethodPut, "/files/CLAUDE.md", map[string]string{"content": "PWNED"}},
-		{"delete a file", http.MethodDelete, "/files/CLAUDE.md", nil},
+		{"read a file", http.MethodGet, "/files/CLAUDE.md", nil, http.StatusNotFound},
+		{"list files", http.MethodGet, "/files", nil, http.StatusNotFound},
+		{"write a file", http.MethodPut, "/files/CLAUDE.md", map[string]string{"content": "PWNED"}, http.StatusForbidden},
+		{"delete a file", http.MethodDelete, "/files/CLAUDE.md", nil, http.StatusForbidden},
 	}
 
 	for _, tc := range cases {
@@ -72,7 +77,7 @@ func TestTemplateFileAuthz_NonMemberDenied(t *testing.T) {
 			tpl := createAuthzTestTemplate(t, s, "authz-files", store.TemplateScopeProject, project.ID, alice.ID)
 
 			rec := doRequestAsUser(t, srv, bob, tc.method, "/api/v1/templates/"+tpl.ID+tc.path, tc.body)
-			assert.Equal(t, http.StatusForbidden, rec.Code,
+			assert.Equal(t, tc.wantCode, rec.Code,
 				"a non-member must not reach template files; got %d: %s", rec.Code, rec.Body.String())
 
 			// Control: the same non-member on an action that was always gated.
