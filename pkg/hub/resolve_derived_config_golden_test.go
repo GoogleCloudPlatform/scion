@@ -128,7 +128,10 @@ func TestResolveDerivedConfig_GoldenCreatePath(t *testing.T) {
 
 	srv.populateAgentConfig(ctx, agent, project, template)
 
-	got, err := json.Marshal(agent.AppliedConfig)
+	// AgentAppliedConfig.MarshalJSON omits Env unless the value came from
+	// ResponseView(true); the golden pins Env, so compare that view (it only
+	// differs from the stored config by dropping GITHUB_TOKEN, absent here).
+	got, err := json.Marshal(agent.AppliedConfig.ResponseView(true))
 	require.NoError(t, err)
 
 	want := fmt.Sprintf(`{
