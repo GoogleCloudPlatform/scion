@@ -27,25 +27,64 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
 
-// TestHandleBrokerMessage_UserMessageRouting verifies that user-targeted
-// messages with the full scion broker topic prefix are correctly routed
-// to handleUserMessage.
-func TestHandleBrokerMessage_UserMessageRouting(t *testing.T) {
-	log := slog.Default()
-	relay := NewNotificationRelay(nil, nil, log)
-
-	// Message with empty RecipientID triggers early return in handleUserMessage
-	// without touching the store, so we can test topic routing safely.
-	msg := &messages.StructuredMessage{
-		Sender: "agent:test-agent",
-		Msg:    "hello from agent",
+// TestHandleBrokerMessage_UserTopicAcceptance verifies that a user-targeted
+// message is routed and actually delivered on both the canonical
+// scion.project.* topic — the primary shape published by the hub — and the
+// legacy scion.grove.* topic, kept for compatibility with publishers that
+// have not migrated. A nil-error assertion alone would pass even if one
+// shape were silently dropped, so each case asserts an actual delivery.
+func TestHandleBrokerMessage_UserTopicAcceptance(t *testing.T) {
+	tests := []struct {
+		name  string
+		topic string
+	}{
+		{"canonical", "scion.project.grove-abc.user.hub-user-1.messages"},
+		{"legacy", "scion.grove.grove-abc.user.hub-user-1.messages"},
 	}
 
-	// Full scion-prefixed topic should route to handleUserMessage.
-	err := relay.HandleBrokerMessage(context.Background(),
-		"scion.grove.grove-123.user.user-456.messages", msg)
-	if err != nil {
-		t.Errorf("expected nil error for user message topic, got: %v", err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newTestStore(t)
+
+			if err := store.SetUserMapping(&state.UserMapping{
+				PlatformUserID: "users/12345",
+				Platform:       "googlechat",
+				HubUserID:      "hub-user-1",
+				HubUserEmail:   "test@example.com",
+				RegisteredBy:   "auto",
+			}); err != nil {
+				t.Fatalf("setting user mapping: %v", err)
+			}
+
+			if err := store.SetSpaceLink(&state.SpaceLink{
+				SpaceID:     "spaces/AAQAx",
+				Platform:    "googlechat",
+				ProjectID:   "grove-abc",
+				ProjectSlug: "my-grove",
+				LinkedBy:    "test",
+			}); err != nil {
+				t.Fatalf("setting space link: %v", err)
+			}
+
+			fm := &fakeMessenger{}
+			log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			relay := NewNotificationRelay(store, fm, log)
+
+			msg := &messages.StructuredMessage{
+				Sender:      "agent:test-agent",
+				RecipientID: "hub-user-1",
+				Msg:         "hello from agent",
+				Type:        messages.TypeInstruction,
+			}
+
+			err := relay.HandleBrokerMessage(context.Background(), tc.topic, msg)
+			if err != nil {
+				t.Fatalf("expected nil error for topic %q, got: %v", tc.topic, err)
+			}
+			if len(fm.messages) != 1 {
+				t.Fatalf("expected exactly one delivery for topic %q, got %d", tc.topic, len(fm.messages))
+			}
+		})
 	}
 }
 
@@ -145,7 +184,7 @@ func TestHandleUserMessage_NoSubscriptionRequired(t *testing.T) {
 	}
 
 	err := relay.HandleBrokerMessage(context.Background(),
-		"scion.grove.grove-abc.user.hub-user-1.messages", msg)
+		"scion.project.grove-abc.user.hub-user-1.messages", msg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -226,7 +265,7 @@ func TestHandleUserMessage_RoutesNonInstructionToNotification(t *testing.T) {
 			}
 
 			err := relay.HandleBrokerMessage(context.Background(),
-				"scion.grove.grove-abc.user.hub-user-1.messages", msg)
+				"scion.project.grove-abc.user.hub-user-1.messages", msg)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -325,7 +364,7 @@ func TestHandleUserMessage_AssistantReplyTruncated(t *testing.T) {
 	}
 
 	err := relay.HandleBrokerMessage(context.Background(),
-		"scion.grove.grove-abc.user.hub-user-1.messages", msg)
+		"scion.project.grove-abc.user.hub-user-1.messages", msg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -395,7 +434,7 @@ func TestHandleUserMessage_ShortAssistantReplyNotTruncated(t *testing.T) {
 	}
 
 	err := relay.HandleBrokerMessage(context.Background(),
-		"scion.grove.grove-abc.user.hub-user-1.messages", msg)
+		"scion.project.grove-abc.user.hub-user-1.messages", msg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -684,7 +723,7 @@ func TestHandleBrokerMessage_UserTargetedAlwaysPassesThrough(t *testing.T) {
 
 	// User-targeted topic should always pass through regardless of filter settings.
 	err := relay.HandleBrokerMessage(context.Background(),
-		"scion.grove.proj-3.user.hub-user-9.messages", msg)
+		"scion.project.proj-3.user.hub-user-9.messages", msg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

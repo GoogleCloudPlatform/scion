@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-chat-app/internal/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 )
 
 // outboundEmailRe matches scion user emails in outbound messages, with optional "user:" prefix.
@@ -59,23 +60,18 @@ func (n *NotificationRelay) SetSendQueue(sq *SendQueue) {
 //
 // Expected topics:
 //
-//	scion.grove.<projectID>.user.<userID>.messages  — user-targeted message
-//	scion.grove.<projectID>.agent.<agentID>.messages — agent-targeted message
+//	scion.project.<projectID>.user.<userID>.messages  — user-targeted message
+//	scion.project.<projectID>.agent.<agentID>.messages — agent-targeted message
+//
+// Legacy scion.grove.<projectID>.... topics are still accepted for
+// compatibility with older publishers.
 func (n *NotificationRelay) HandleBrokerMessage(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
-	// Strip the "scion." prefix used by the broker topic hierarchy.
-	normalized := strings.TrimPrefix(topic, "scion.")
-
-	parts := strings.Split(normalized, ".")
-	if len(parts) < 2 {
-		n.log.Debug("ignoring message with short topic", "topic", topic)
+	parsed, err := projectcompat.ParseTopic(topic)
+	if err != nil {
+		n.log.Debug("ignoring unrecognized topic", "topic", topic, "error", err)
 		return nil
 	}
-
-	if parts[0] != "grove" {
-		n.log.Debug("ignoring non-grove topic", "topic", topic)
-		return nil
-	}
-	projectID := parts[1]
+	projectID := parsed.ProjectID
 
 	// Classify the message for filtering.
 	isAgentToAgent := msg != nil &&
@@ -85,7 +81,7 @@ func (n *NotificationRelay) HandleBrokerMessage(ctx context.Context, topic strin
 
 	// User-targeted messages are always relayed (they were explicitly
 	// sent to a specific user and bypass observe/filter settings).
-	if len(parts) >= 5 && parts[2] == "user" {
+	if parsed.Kind == projectcompat.TopicKindUser {
 		return n.handleUserMessage(ctx, projectID, msg)
 	}
 

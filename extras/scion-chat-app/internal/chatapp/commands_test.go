@@ -5,9 +5,11 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-chat-app/internal/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 )
 
 // newTestRouter creates a CommandRouter backed by an ephemeral store and a
@@ -833,5 +835,88 @@ func TestSubscribeFilterAction_UpdatesMessage(t *testing.T) {
 	}
 	if !strings.Contains(resp.UpdateMessage.Text, "all activity types") {
 		t.Errorf("expected 'all activity types' (no checkboxes), got: %s", resp.UpdateMessage.Text)
+	}
+}
+
+// --- subscription pattern tests ---
+
+// fakeHostCallbacks records the patterns BrokerServer forwards via
+// RequestSubscription/CancelSubscription, without needing a real plugin RPC
+// connection to the hub.
+type fakeHostCallbacks struct {
+	mu         sync.Mutex
+	subscribed []string
+	cancelled  []string
+}
+
+func (f *fakeHostCallbacks) RequestSubscription(pattern string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.subscribed = append(f.subscribed, pattern)
+	return nil
+}
+
+func (f *fakeHostCallbacks) CancelSubscription(pattern string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cancelled = append(f.cancelled, pattern)
+	return nil
+}
+
+// TestProjectSubscriptionPattern_MatchesCanonicalProjectPattern guards the
+// shared helper cmdLink and cmdUnlink both call to build their subscription
+// pattern against drifting from the canonical projectcompat helper.
+func TestProjectSubscriptionPattern_MatchesCanonicalProjectPattern(t *testing.T) {
+	got := projectSubscriptionPattern("proj-1")
+	want := projectcompat.ProjectPattern("proj-1")
+	if got != want {
+		t.Errorf("projectSubscriptionPattern(%q) = %q, want %q", "proj-1", got, want)
+	}
+}
+
+// TestCmdUnlink_CancelsMatchingSubscriptionPattern verifies that /scionAdmin
+// unlink cancels the broker subscription using the same pattern shape cmdLink
+// subscribes with (scion.project.<id>.>), by running the real cmdUnlink
+// handler against a BrokerServer wired to a fake host-callback recorder.
+// Reverting this call site to a different pattern fails this test. cmdLink is
+// not exercised directly here — it needs a real identity.Mapper (a concrete
+// type, not swappable like the r.testClient shortcut other commands use) to
+// resolve a user and look up a project over the hub API before it ever
+// reaches RequestSubscription. It shares projectSubscriptionPattern with
+// cmdUnlink, and TestProjectSubscriptionPattern_MatchesCanonicalProjectPattern
+// pins that shared helper against drifting from the canonical
+// projectcompat.ProjectPattern.
+func TestCmdUnlink_CancelsMatchingSubscriptionPattern(t *testing.T) {
+	router, _ := newTestRouter(t)
+
+	hc := &fakeHostCallbacks{}
+	broker := NewBrokerServer(nil, router.log)
+	broker.SetHostCallbacks(hc)
+	router.broker = broker
+
+	if err := router.store.SetSpaceLink(&state.SpaceLink{
+		SpaceID:     "spaces/unlink-test",
+		Platform:    "googlechat",
+		ProjectID:   "proj-77",
+		ProjectSlug: "my-project",
+		LinkedBy:    "test",
+	}); err != nil {
+		t.Fatalf("setting space link: %v", err)
+	}
+
+	event := &ChatEvent{
+		Type:     EventCommand,
+		Platform: "googlechat",
+		SpaceID:  "spaces/unlink-test",
+		UserID:   "user-1",
+	}
+
+	if _, err := router.cmdUnlink(context.Background(), event, nil); err != nil {
+		t.Fatalf("cmdUnlink: %v", err)
+	}
+
+	want := projectcompat.ProjectPattern("proj-77")
+	if len(hc.cancelled) != 1 || hc.cancelled[0] != want {
+		t.Errorf("expected CancelSubscription(%q) exactly once, got %v", want, hc.cancelled)
 	}
 }
