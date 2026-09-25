@@ -1067,12 +1067,6 @@ gcloud compute ssh "${INSTANCE_NAME}" \
     sudo -u scion tee /home/scion/.scion/settings.yaml > /dev/null << 'SETTINGSEOF'
 schema_version: \"1\"
 image_registry: \"${IMAGE_REGISTRY}\"
-harness_configs:
-  antigravity:
-    harness: antigravity
-    env:
-      GOOGLE_CLOUD_PROJECT: \"${PROJECT_ID}\"
-      GOOGLE_CLOUD_LOCATION: \"global\"
 server:
   hub:
     name: \"${HUB_NAME}\"
@@ -1481,12 +1475,6 @@ gcloud compute ssh "${INSTANCE_NAME}" \
     sudo -u scion tee /home/scion/.scion/settings.yaml > /dev/null << 'SETTINGSEOF'
 schema_version: \"1\"
 image_registry: \"${IMAGE_REGISTRY}\"
-harness_configs:
-  antigravity:
-    harness: antigravity
-    env:
-      GOOGLE_CLOUD_PROJECT: \"${PROJECT_ID}\"
-      GOOGLE_CLOUD_LOCATION: \"global\"
 server:
   hub:
     name: \"${HUB_NAME}\"
