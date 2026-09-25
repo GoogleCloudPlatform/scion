@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"testing"
@@ -154,4 +155,82 @@ func TestQuotaService_ReserveReportsCreated(t *testing.T) {
 	created, err = qs.Reserve(ctx, "no-such-limit", broker.ID, store.QuotaScopeBroker, broker.ID, "res-c")
 	require.NoError(t, err)
 	assert.False(t, created, "no limit defined: nothing reserved")
+}
+
+// swappableStartDispatcher lets a test flip start dispatch between success
+// and failure mid-test.
+type swappableStartDispatcher struct {
+	quotaLifecycleDispatcher
+	failStart bool
+}
+
+func (d *swappableStartDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) error {
+	if d.failStart {
+		d.startCount.Add(1)
+		return errors.New("simulated broker start failure")
+	}
+	return d.quotaLifecycleDispatcher.DispatchAgentStart(ctx, agent, task, resume)
+}
+
+func hasReservation(t *testing.T, s store.Store, limitName, resourceID string) bool {
+	t.Helper()
+	def, err := s.GetLimitDefinitionByName(context.Background(), limitName)
+	require.NoError(t, err)
+	held, err := s.HasActiveReservation(context.Background(), def.ID, resourceID)
+	require.NoError(t, err)
+	return held
+}
+
+// ptone/scion#1978: the per-project agent reservation lasts as long as the
+// agent exists. Releasing the broker slot (stop, suspend, failed-start
+// rollback) must not release it; delete releases both.
+func TestProjectQuota_KeptAcrossBrokerReleases_ReleasedOnDelete(t *testing.T) {
+	disp := &swappableStartDispatcher{}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	srv.SetDispatcher(disp)
+	setBrokerAgentCeiling(t, s, 5)
+	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerProject)
+	require.NoError(t, err)
+	def.DefaultValue = 5
+	_, err = s.UpdateLimitDefinition(context.Background(), def)
+	require.NoError(t, err)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name: "project-quota-keep", ProjectID: project.ID,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var created CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+	id := created.Agent.ID
+	require.True(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, id))
+	require.True(t, hasReservation(t, s, store.LimitMaxAgentsPerProject, id))
+
+	post := func(action string) {
+		t.Helper()
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+id+"/"+action, nil)
+		require.Equal(t, http.StatusOK, rec.Code, "%s: %s", action, rec.Body.String())
+	}
+
+	post("stop")
+	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, id), "stop releases the broker slot")
+	assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerProject, id), "stop keeps the project reservation")
+
+	post("start")
+	assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, id))
+	assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerProject, id))
+
+	post("suspend")
+	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, id))
+	assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerProject, id), "suspend keeps the project reservation")
+
+	disp.failStart = true
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+id+"/start", nil)
+	require.GreaterOrEqual(t, rec.Code, 500, rec.Body.String())
+	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, id), "failed start rolls back the new broker slot")
+	assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerProject, id), "rollback keeps the project reservation")
+
+	rec = doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+id, nil)
+	require.Less(t, rec.Code, 300, rec.Body.String())
+	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, id))
+	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerProject, id), "delete releases the project reservation")
 }

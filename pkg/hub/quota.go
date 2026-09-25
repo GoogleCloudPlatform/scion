@@ -251,10 +251,24 @@ func (qs *QuotaService) ResolveEffectiveLimit(ctx context.Context, limitDefID st
 	return maxValue, nil
 }
 
-// Release marks reservations for a resource as released (best-effort).
-// Errors are logged but not returned — deletion must not be blocked by quota bookkeeping.
+// Release marks resourceID's active reservation for limitName as released
+// (best-effort). It touches only that limit: a resource can hold
+// reservations under several limits (an agent holds both
+// max_agents_per_broker and max_agents_per_project), and releasing one must
+// not release the others (ptone/scion#1978). It is a no-op when the limit is
+// not defined or the resource holds no active reservation for it. Errors
+// are logged but not returned: deletion must not be blocked by quota
+// bookkeeping.
 func (qs *QuotaService) Release(ctx context.Context, limitName string, resourceID string) {
-	if err := qs.store.ReleaseReservationsByResource(ctx, resourceID); err != nil {
+	limitDef, err := qs.store.GetLimitDefinitionByName(ctx, limitName)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			qs.logger.Warn("failed to release quota reservation: limit lookup failed",
+				"limit", limitName, "resource_id", resourceID, "error", err)
+		}
+		return
+	}
+	if err := qs.store.ReleaseReservation(ctx, limitDef.ID, resourceID); err != nil && !errors.Is(err, store.ErrNotFound) {
 		qs.logger.Warn("failed to release quota reservation",
 			"limit", limitName, "resource_id", resourceID, "error", err)
 	}
