@@ -715,7 +715,7 @@ branch.
 **The `integration/` directory is not byte-identical between `a53175c23` and this branch** — an earlier version of this
 section claimed otherwise, which was false. Two commits in this branch's history (since squashed into
 `GoogleCloudPlatform/scion#1880`, merged upstream as `6ba3730a3`) changed `integration/auth_transport_process_test.go`
-(`git diff --numstat a53175c23 b1250499d`: +124/−8 lines: added `TestHubBearerProcessPassthrough`, refactored
+(`git diff --numstat a53175c23 b1250499d`: +124/-8 lines: added `TestHubBearerProcessPassthrough`, refactored
 `serveFullBridgeProcess` into `serveScionA2ABridgeProcess`) and `integration/alternator_harness_test.go` (+2 lines), and
 added a Federation trusted-issuer config to `serveHubProcess`, which the HA topology's `hub` process also uses.
 `ha_final_process_test.go` itself — the file containing the defective dedup logic and the test's publish/timestamp code —
@@ -926,23 +926,23 @@ Evidence (proof output, hygiene output) saved to `/scion-volumes/scratchpad/proj
 (`ap-up1-rev-2`, `reviews/up1-r2-ap-up1-rev-2.md`, verdict APPROVE) was in progress against the rebase
 (`b1250499d..3baf248f0`). That review found the rebase and both new tests fully correct, but flagged five follow-up
 inaccuracies in this file's §2 (two Optional, two Nit, one FYI) that shipped in the merged log. Since
-`GoogleCloudPlatform/scion#1880` was already
-merged, this correction is a separate docs-only fork PR against `ptone/scion`'s `main` (never merged upstream directly, and
-never touching `GoogleCloudPlatform/scion`), on a fresh branch off upstream `main`.
+`GoogleCloudPlatform/scion#1880` was already merged, this correction is a separate docs-only fork PR against
+`ptone/scion`'s `main` (never merged upstream directly, and never touching `GoogleCloudPlatform/scion`), on a fresh
+branch off upstream `main`.
 
-Every sentence in §2 and "Upstream rebase 1" above was re-checked against the evidence in
-`upstream-r1-s2/` (including `upstream-r1-s2/reviewer/`) and `rebase-r1/` with a command; the full set of check commands
-and their output is saved to `/scion-volumes/scratchpad/projects/auth-passthrough/logfix/sentence-checks.log`. One check
-(`git merge-base --is-ancestor c56bed940 a53175c23`) could not be answered locally — this clone is shallow
-(`git rev-parse --is-shallow-repository` → `true`) and lacks the connecting history — so it was instead verified via
-`gh api repos/GoogleCloudPlatform/scion/compare/c56bed940...a53175c23` (`status: ahead, behind_by: 0`, confirming
-`c56bed940` **is** an ancestor of `a53175c23`, i.e. the original §2 claim was correct). Every other sentence checked
-(CI workflow trigger and phases, the failing assertion and evidence-logger line numbers, the double-publish and RFC3339
-lines, the `bridge.go`/`translate.go` dedup-key lines, the `bridge.go` diff being limited to the `"bearer"` case addition,
+Every sentence in §2 and "Upstream rebase 1" above was re-checked against the evidence in `upstream-r1-s2/` (including
+`upstream-r1-s2/reviewer/`) and `rebase-r1/` with a command; the full set of check commands and their output is saved to
+`/scion-volumes/scratchpad/projects/auth-passthrough/logfix/sentence-checks.log`. One check (`git merge-base
+--is-ancestor c56bed940 a53175c23`) could not be answered locally — this clone is shallow (`git rev-parse
+--is-shallow-repository` → `true`) and lacks the connecting history — so it was instead verified via `gh api
+repos/GoogleCloudPlatform/scion/compare/c56bed940...a53175c23` (`status: ahead, behind_by: 0`, confirming `c56bed940`
+**is** an ancestor of `a53175c23`, i.e. the original §2 claim was correct). Every other sentence checked (CI workflow
+trigger and phases, the failing assertion and evidence-logger line numbers, the double-publish and RFC3339 lines, the
+`bridge.go`/`translate.go` dedup-key lines, the `bridge.go` diff being limited to the `"bearer"` case addition,
 `serveHABridgeProcess`'s `geGoogle` scheme, `EffectiveAuthScheme`/`hubBearer`/`uatvalidator.go` gating,
-`GoogleCloudPlatform/scion#1748`'s merge
-commit and ancestry, run `35411542799`'s head SHA and PR association, its Phase-3 failure and zero code matches, this
-branch's first hubBearer commit date, and the reviewer's `summary.txt` run tallies) held as originally written.
+`GoogleCloudPlatform/scion#1748`'s merge commit and ancestry, run `35411542799`'s head SHA and PR association, its
+Phase-3 failure and zero code matches, this branch's first hubBearer commit date, and the reviewer's `summary.txt` run
+tallies) held as originally written.
 
 - **O-1 (Optional):** the "Evidence for the mechanism" paragraph cited `ap-up1-rev`'s `run5` pair
   (`03:14:58.000430`/`03:14:58.005466`) as an example of the artifact rows "straddling a second boundary". They do not —
@@ -956,14 +956,13 @@ branch's first hubBearer commit date, and the reviewer's `summary.txt` run talli
 - **O-2 (Optional):** the "Run counts" paragraph's closing sentence claimed both revisions' failures share "the same
   double cursor-final-artifact evidence". They don't: upstream-main itself never failed locally in either sample, so
   there is no upstream-main-side evidence at all, and the only upstream-side failure instance —
-`GoogleCloudPlatform/scion#1748`'s pre-merge run —
-  predates `logCursorFailureEvidence` (it does not exist in that commit's version of the test file) and has its
-  unexpected-SSE payload truncated in the CI log, so it carries no artifact-row evidence either way. Reworded to say what
-  the evidence does support across both: the same `assertNoSSE` assertion following the same double-publish with the same
-  RFC3339 second-resolution stamping, not the double-artifact-row detail, which was observed only in this branch's own
-  failures.
+  `GoogleCloudPlatform/scion#1748`'s pre-merge run — predates `logCursorFailureEvidence` (it does not exist in that
+  commit's version of the test file) and has its unexpected-SSE payload truncated in the CI log, so it carries no
+  artifact-row evidence either way. Reworded to say what the evidence does support across both: the same `assertNoSSE`
+  assertion following the same double-publish with the same RFC3339 second-resolution stamping, not the
+  double-artifact-row detail, which was observed only in this branch's own failures.
 - **N2 (Nit):** "+132 lines" for `auth_transport_process_test.go` was the diffstat's total-changed-lines figure, not the
-  insertion count. Re-ran `git diff --numstat a53175c23 b1250499d -- .../auth_transport_process_test.go`: +124/−8.
+  insertion count. Re-ran `git diff --numstat a53175c23 b1250499d -- .../auth_transport_process_test.go`: +124/-8.
   Corrected.
 - **N3 (Nit):** "Run counts (Phase 3 alone, ...)" mislabeled this developer's own 1/5 and 0/5 as Phase-3-alone runs; they
   are full-script runs (`go test -v`, then `-race`, then `-count=3`, each phase in sequence), with the one failure landing
@@ -973,13 +972,12 @@ branch's first hubBearer commit date, and the reviewer's `summary.txt` run talli
 - **FYI-3 (no severity, informational):** the log cited the pre-rebase fork SHAs `707f671dd`/`cc9bd9e34` as evidence for
   the `integration/` directory diff. Neither exists on any branch reachable from upstream `main` — they were fork-only
   commits, replaced by different SHAs (`f1cc60bcc`/`665e14386`) after the rebase, and both sets vanished when
-`GoogleCloudPlatform/scion#1880` was
-  squash-merged as `6ba3730a3`. A reader with only an upstream checkout could not resolve either. Replaced all three
-  occurrences (the §2 `integration/` and "Run counts" paragraphs, and the "fix round 1" narrative) with a description of
-  the change plus the squash reference `GoogleCloudPlatform/scion#1880`/`6ba3730a3`, which does resolve upstream.
-  (`b1250499d`, cited elsewhere in
-  this file as the pre-rebase head, is unaffected by this fix: it is a historical label for what was reviewed, not cited
-  as verifiable evidence, and per `ap-up1-rev-2`'s review it remains fetchable by full SHA.)
+  `GoogleCloudPlatform/scion#1880` was squash-merged as `6ba3730a3`. A reader with only an upstream checkout could not
+  resolve either. Replaced all three occurrences (the §2 `integration/` and "Run counts" paragraphs, and the "fix round
+  1" narrative) with a description of the change plus the squash reference `GoogleCloudPlatform/scion#1880`/`6ba3730a3`,
+  which does resolve upstream. (`b1250499d`, cited elsewhere in this file as the pre-rebase head, is unaffected by this
+  fix: it is a historical label for what was reviewed, not cited as verifiable evidence, and per `ap-up1-rev-2`'s review
+  it remains fetchable by full SHA.)
 - N1 (Nit, declined) and the TestCrossReplicaStreamCursor defect itself (declined, separate optional follow-up): out of
   scope for this docs-only pass, per the disposition.
 
