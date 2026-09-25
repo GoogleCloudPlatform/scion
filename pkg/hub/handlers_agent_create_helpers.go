@@ -1028,6 +1028,25 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 		// providers aren't established via CLI registration.
 		broker, err := s.findBrokerByIDOrSlug(ctx, requestedBrokerID)
 		if err == nil && broker != nil {
+			// Linking a new provider (and possibly setting it as the project
+			// default) changes where the project's agents may run, so it
+			// requires the same authorization as the providers-add endpoint:
+			// project update.
+			//
+			// SECURITY-GATE: CheckAccess — deny before any state is written;
+			// no provider row and no default broker may persist on denial.
+			identity := GetIdentityFromContext(ctx)
+			if identity == nil {
+				Unauthorized(w)
+				return "", store.ErrNotFound
+			}
+			decision := s.authzService.CheckAccess(ctx, identity, projectResource(project), ActionUpdate)
+			if !decision.Allowed {
+				logAuthzDenial(nil, identity, projectResource(project), ActionUpdate, decision.Reason)
+				writeForbiddenStructured(w, "", projectResource(project).Type, ActionUpdate)
+				return "", store.ErrNotFound
+			}
+
 			provider := &store.ProjectProvider{
 				ProjectID:  project.ID,
 				BrokerID:   broker.ID,
