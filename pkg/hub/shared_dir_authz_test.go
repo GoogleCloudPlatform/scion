@@ -314,3 +314,29 @@ func TestSharedDirRoutes_ByNameMethodNotAllowed(t *testing.T) {
 	rec = doRequest(t, srv, http.MethodPut, missing, nil)
 	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code, "body: %s", rec.Body.String())
 }
+
+// TestSharedDirRoutes_ByNameMethodCheckStaysBehindDispatcherGate guards the
+// leaf's method check against being hoisted ahead of the dispatcher's
+// authorization/isolation gate: if it ever moved that far up, a cross-project
+// agent would get 405 instead of 404 for a name it should know nothing about,
+// re-opening project-existence disclosure. The check must stay behind that
+// gate for every unsupported method, not just DELETE, and independent of
+// whether the named directory exists.
+func TestSharedDirRoutes_ByNameMethodCheckStaysBehindDispatcherGate(t *testing.T) {
+	srv, _, project, _, nonMember := setupSharedDirAuthzFixture(t)
+	other, _ := createTestHubManagedProject(t, srv, "Other Project")
+	token, err := srv.GenerateAgentToken(tid("sdauthz-isolation-agent"), other.ID, nil, AgentRoleFull, nil)
+	require.NoError(t, err)
+
+	for _, name := range []string{"secrets", "does-not-exist"} {
+		for _, method := range []string{http.MethodGet, http.MethodPut} {
+			path := fmt.Sprintf("/api/v1/projects/%s/shared-dirs/%s", project.ID, name)
+
+			rec := doRequestAsUser(t, srv, nonMember, method, path, nil)
+			assert.Equal(t, http.StatusForbidden, rec.Code, "non-member %s %s: body: %s", method, name, rec.Body.String())
+
+			rec = doRequestWithAgentToken(t, srv, method, path, nil, token)
+			assert.Equal(t, http.StatusNotFound, rec.Code, "cross-project agent %s %s: body: %s", method, name, rec.Body.String())
+		}
+	}
+}
