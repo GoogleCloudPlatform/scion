@@ -384,3 +384,128 @@ func TestTryAdvanceAgentReincarnation(t *testing.T) {
 		assert.True(t, ok, "a zero olderThan must not add any staleness constraint")
 	})
 }
+
+func TestListAgentReincarnationsPage_VisitsEveryRecordOnce(t *testing.T) {
+	s := newTestAgentReincarnationStore(t)
+	ctx := context.Background()
+
+	want := map[string]bool{}
+	for i, agentID := range []string{"agent-a", "agent-a", "agent-b", "agent-with-no-row", "agent-c"} {
+		rec := &store.AgentReincarnation{
+			AgentID:        agentID,
+			FromGeneration: i + 1,
+			ToGeneration:   i + 2,
+			State:          store.AgentReincarnationStateCompleted,
+		}
+		require.NoError(t, s.CreateAgentReincarnation(ctx, rec))
+		want[rec.ID] = true
+	}
+
+	seen := map[string]bool{}
+	after := ""
+	pages := 0
+	for {
+		page, err := s.ListAgentReincarnationsPage(ctx, after, 2)
+		require.NoError(t, err)
+		if len(page) == 0 {
+			break
+		}
+		pages++
+		require.LessOrEqual(t, len(page), 2)
+		for _, r := range page {
+			require.False(t, seen[r.ID], "record %s returned twice", r.ID)
+			if after != "" {
+				require.Greater(t, r.ID, after, "records must be ordered by ID ascending")
+			}
+			seen[r.ID] = true
+			after = r.ID
+		}
+	}
+	assert.Equal(t, want, seen)
+	assert.Equal(t, 3, pages)
+}
+
+func TestUpdateAgentReincarnationSnapshots(t *testing.T) {
+	ctx := context.Background()
+
+	newRecord := func(t *testing.T, s *AgentReincarnationStore) *store.AgentReincarnation {
+		t.Helper()
+		rec := &store.AgentReincarnation{
+			AgentID:               "agent-1",
+			FromGeneration:        1,
+			ToGeneration:          2,
+			State:                 store.AgentReincarnationStatePending,
+			PreviousAppliedConfig: &store.AgentAppliedConfig{Image: "old", Env: map[string]string{"A": "1", "B": "2"}},
+			NewAppliedConfig:      &store.AgentAppliedConfig{Image: "new", Env: map[string]string{"C": "3"}},
+		}
+		require.NoError(t, s.CreateAgentReincarnation(ctx, rec))
+		completed := time.Now().UTC()
+		rec.State = store.AgentReincarnationStateCompleted
+		rec.CompletedAt = &completed
+		ok, err := s.TryAdvanceAgentReincarnation(ctx, rec, store.AgentReincarnationStatePending, time.Time{})
+		require.NoError(t, err)
+		require.True(t, ok)
+		got, err := s.GetAgentReincarnation(ctx, rec.ID)
+		require.NoError(t, err)
+		return got
+	}
+
+	t.Run("matching state rewrites both snapshots and keeps updated_at", func(t *testing.T) {
+		s := newTestAgentReincarnationStore(t)
+		rec := newRecord(t, s)
+
+		delete(rec.PreviousAppliedConfig.Env, "B")
+		rec.NewAppliedConfig.Env = nil
+		ok, err := s.UpdateAgentReincarnationSnapshots(ctx, rec, store.AgentReincarnationStateCompleted)
+		require.NoError(t, err)
+		require.True(t, ok)
+
+		got, err := s.GetAgentReincarnation(ctx, rec.ID)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"A": "1"}, got.PreviousAppliedConfig.Env)
+		assert.Empty(t, got.NewAppliedConfig.Env)
+		assert.Equal(t, "new", got.NewAppliedConfig.Image)
+		assert.Equal(t, store.AgentReincarnationStateCompleted, got.State)
+		assert.True(t, rec.UpdatedAt.Equal(got.UpdatedAt), "a snapshot rewrite must not move updated_at: before %v, after %v", rec.UpdatedAt, got.UpdatedAt)
+	})
+
+	t.Run("state mismatch writes nothing", func(t *testing.T) {
+		s := newTestAgentReincarnationStore(t)
+		rec := newRecord(t, s)
+
+		rec.PreviousAppliedConfig.Env = nil
+		ok, err := s.UpdateAgentReincarnationSnapshots(ctx, rec, store.AgentReincarnationStateFailed)
+		require.NoError(t, err)
+		assert.False(t, ok)
+
+		got, err := s.GetAgentReincarnation(ctx, rec.ID)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"A": "1", "B": "2"}, got.PreviousAppliedConfig.Env)
+	})
+
+	t.Run("nil snapshot leaves that column unchanged", func(t *testing.T) {
+		s := newTestAgentReincarnationStore(t)
+		rec := newRecord(t, s)
+
+		rec.PreviousAppliedConfig = nil
+		rec.NewAppliedConfig.Env = map[string]string{"D": "4"}
+		ok, err := s.UpdateAgentReincarnationSnapshots(ctx, rec, store.AgentReincarnationStateCompleted)
+		require.NoError(t, err)
+		require.True(t, ok)
+
+		got, err := s.GetAgentReincarnation(ctx, rec.ID)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"A": "1", "B": "2"}, got.PreviousAppliedConfig.Env)
+		assert.Equal(t, map[string]string{"D": "4"}, got.NewAppliedConfig.Env)
+	})
+
+	t.Run("missing record reports no match", func(t *testing.T) {
+		s := newTestAgentReincarnationStore(t)
+		ok, err := s.UpdateAgentReincarnationSnapshots(ctx, &store.AgentReincarnation{
+			ID:                    "00000000-0000-0000-0000-000000000000",
+			PreviousAppliedConfig: &store.AgentAppliedConfig{Image: "x"},
+		}, store.AgentReincarnationStateCompleted)
+		require.NoError(t, err)
+		assert.False(t, ok)
+	})
+}

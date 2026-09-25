@@ -310,3 +310,68 @@ func (s *AgentReincarnationStore) ListStaleNonTerminalAgentReincarnations(ctx co
 	}
 	return out, nil
 }
+
+// ListAgentReincarnationsPage returns up to limit records across all agents,
+// ordered by ID ascending, starting strictly after afterID (keyset paging).
+func (s *AgentReincarnationStore) ListAgentReincarnationsPage(ctx context.Context, afterID string, limit int) ([]*store.AgentReincarnation, error) {
+	query := s.client.AgentReincarnation.Query().
+		Order(ent.Asc(agentreincarnation.FieldID))
+	if afterID != "" {
+		uid, err := parseGetID(afterID)
+		if err != nil {
+			return nil, err
+		}
+		query = query.Where(agentreincarnation.IDGT(uid))
+	}
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+	rows, err := query.All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]*store.AgentReincarnation, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, entAgentReincarnationToStore(r))
+	}
+	return out, nil
+}
+
+// UpdateAgentReincarnationSnapshots is the state-guarded snapshot rewrite
+// described on store.AgentReincarnationStore. Snapshots go through
+// marshalAppliedConfigSnapshot, the same serialization path as every other
+// write of these columns.
+func (s *AgentReincarnationStore) UpdateAgentReincarnationSnapshots(ctx context.Context, r *store.AgentReincarnation, expectState string) (bool, error) {
+	uid, err := parseGetID(r.ID)
+	if err != nil {
+		return false, err
+	}
+	current, err := s.client.AgentReincarnation.Get(ctx, uid)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return false, nil
+		}
+		return false, mapError(err)
+	}
+
+	builder := s.client.AgentReincarnation.Update().
+		Where(
+			agentreincarnation.IDEQ(uid),
+			agentreincarnation.StateEQ(agentreincarnation.State(expectState)),
+		).
+		// Pin updated_at to its stored value so ent's UpdateDefault does not
+		// move the lifecycle clock the replica-safe sweep reads.
+		SetUpdatedAt(current.UpdatedAt)
+	if cfg := marshalAppliedConfigSnapshot(r.PreviousAppliedConfig); cfg != "" {
+		builder.SetPreviousAppliedConfig(cfg)
+	}
+	if cfg := marshalAppliedConfigSnapshot(r.NewAppliedConfig); cfg != "" {
+		builder.SetNewAppliedConfig(cfg)
+	}
+
+	affected, err := builder.Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return affected > 0, nil
+}

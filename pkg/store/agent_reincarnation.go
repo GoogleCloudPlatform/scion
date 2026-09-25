@@ -177,4 +177,20 @@ type AgentReincarnationStore interface {
 	// caller no longer owns the record as it observed it" and must not act
 	// further on it, including writing the agent row.
 	TryAdvanceAgentReincarnation(ctx context.Context, r *AgentReincarnation, expectState string, olderThan time.Time) (bool, error)
+
+	// ListAgentReincarnationsPage returns up to limit reincarnation records
+	// across all agents, including records whose agent row no longer exists,
+	// ordered by ID ascending and starting strictly after afterID ("" starts
+	// from the beginning). Used by maintenance sweeps that must visit every
+	// record exactly once.
+	ListAgentReincarnationsPage(ctx context.Context, afterID string, limit int) ([]*AgentReincarnation, error)
+
+	// UpdateAgentReincarnationSnapshots rewrites only the
+	// PreviousAppliedConfig and NewAppliedConfig columns of the record with
+	// ID r.ID, and only if that record's CURRENT State equals expectState --
+	// the same single conditional UPDATE as TryAdvanceAgentReincarnation. A
+	// nil snapshot on r leaves that column unchanged. UpdatedAt is left as
+	// stored: a maintenance rewrite is not a lifecycle step. Returns
+	// (false, nil) if no row matched.
+	UpdateAgentReincarnationSnapshots(ctx context.Context, r *AgentReincarnation, expectState string) (bool, error)
 }
