@@ -104,7 +104,8 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 		// A suspended agent's reservation was released when it was suspended;
 		// re-reserve (with the cap check) before dispatch, same as create and
 		// the HTTP start/resume paths (ptone/scion#1963).
-		if err := s.checkAndReserveBrokerQuota(ctx, agent); err != nil {
+		reserved, err := s.checkAndReserveBrokerQuota(ctx, agent)
+		if err != nil {
 			if errors.Is(err, store.ErrQuotaExceeded) {
 				return nil, &AgentDMError{
 					Code:       ErrCodeQuotaExceeded,
@@ -122,7 +123,7 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 		// Resume the suspended agent. continue=true tells the harness to
 		// restore its prior session rather than starting fresh.
 		if err := dispatcher.DispatchAgentStart(ctx, agent, "", true); err != nil {
-			s.releaseBrokerQuota(ctx, agent)
+			s.rollbackBrokerQuota(ctx, agent, reserved)
 			return nil, &AgentDMError{
 				Code:       ErrCodeRuntimeError,
 				Message:    "Failed to wake agent: " + err.Error(),

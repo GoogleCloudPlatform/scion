@@ -299,7 +299,8 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// (ptone/scion#1963). Idempotent: a no-op when the agent already
 			// holds an active reservation (e.g. start called again on an
 			// already-running agent).
-			if !s.checkAndReserveBrokerQuotaHTTP(ctx, w, agent) {
+			ok, reserved := s.checkAndReserveBrokerQuotaHTTP(ctx, w, agent)
+			if !ok {
 				return
 			}
 			dispatchErr = dispatcher.DispatchAgentStart(ctx, agent, "", resume)
@@ -309,10 +310,12 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				newPhase = agent.Phase
 			}
 			if dispatchErr != nil {
-				// The reservation was taken speculatively before dispatch;
-				// roll it back so a failed start doesn't strand a reservation
-				// with no running (or soon-to-be-running) container behind it.
-				s.releaseBrokerQuota(ctx, agent)
+				// Roll back a reservation this call took speculatively, so a
+				// failed start doesn't strand one with no container behind
+				// it. A reservation that already existed (start on a
+				// running agent) is kept: that agent is still counted
+				// (ptone/scion#1978).
+				s.rollbackBrokerQuota(ctx, agent, reserved)
 			}
 		}
 	case api.AgentActionStop:
@@ -375,7 +378,8 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			s.releaseBrokerQuota(ctx, agent)
 			// Restart is stop + start: a fresh harness session, not a resume.
 			// Re-reserve before the start leg, same as the start action.
-			if !s.checkAndReserveBrokerQuotaHTTP(ctx, w, agent) {
+			ok, reserved := s.checkAndReserveBrokerQuotaHTTP(ctx, w, agent)
+			if !ok {
 				return
 			}
 			dispatchErr = dispatcher.DispatchAgentStart(ctx, agent, "", false)
@@ -385,7 +389,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				newPhase = agent.Phase
 			}
 			if dispatchErr != nil {
-				s.releaseBrokerQuota(ctx, agent)
+				s.rollbackBrokerQuota(ctx, agent, reserved)
 			}
 		}
 	}

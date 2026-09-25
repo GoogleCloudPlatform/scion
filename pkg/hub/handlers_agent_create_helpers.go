@@ -831,7 +831,8 @@ func (s *Server) handleExistingAgent(
 		// re-reserve (with the cap check) before dispatch, same as create
 		// (ptone/scion#1963). Idempotent, and rejects with the same
 		// quota-exceeded response create uses if the broker is at capacity.
-		if !s.checkAndReserveBrokerQuotaHTTP(ctx, w, existingAgent) {
+		ok, reserved := s.checkAndReserveBrokerQuotaHTTP(ctx, w, existingAgent)
+		if !ok {
 			return existingAgentErrored
 		}
 
@@ -839,7 +840,7 @@ func (s *Server) handleExistingAgent(
 		// session (Claude --continue) rather than starting fresh.
 		resume := existingAgent.Phase == string(state.PhaseSuspended)
 		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, resume); err != nil {
-			s.releaseBrokerQuota(ctx, existingAgent)
+			s.rollbackBrokerQuota(ctx, existingAgent, reserved)
 			if isContainerNameConflict(err) {
 				Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
 			} else {
@@ -907,11 +908,12 @@ func (s *Server) handleExistingAgent(
 			// A stopped or errored agent's reservation was released when it
 			// stopped/crashed; re-reserve (with the cap check) before
 			// dispatch, same as create (ptone/scion#1963).
-			if !s.checkAndReserveBrokerQuotaHTTP(ctx, w, existingAgent) {
+			ok, reserved := s.checkAndReserveBrokerQuotaHTTP(ctx, w, existingAgent)
+			if !ok {
 				return existingAgentErrored
 			}
 			if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, forcedRecovery); err != nil {
-				s.releaseBrokerQuota(ctx, existingAgent)
+				s.rollbackBrokerQuota(ctx, existingAgent, reserved)
 				if isContainerNameConflict(err) {
 					Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
 				} else {

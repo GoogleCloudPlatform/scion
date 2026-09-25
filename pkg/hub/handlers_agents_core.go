@@ -686,12 +686,20 @@ func validateGCPIdentityRequest(w http.ResponseWriter, cfg *GCPIdentityAssignmen
 // need identical ErrQuotaExceeded / ErrQuotaLockContention / other-error
 // mapping — inlining it twice would let the two drift apart silently.
 func (s *Server) checkAndReserveQuota(ctx context.Context, w http.ResponseWriter, limitName, subjectID, scopeType, scopeID, resourceID string) bool {
+	ok, _ := s.reserveQuotaHTTP(ctx, w, limitName, subjectID, scopeType, scopeID, resourceID)
+	return ok
+}
+
+// reserveQuotaHTTP is checkAndReserveQuota that also reports whether this
+// call created a new reservation (see QuotaService.Reserve). created is
+// only meaningful when ok is true.
+func (s *Server) reserveQuotaHTTP(ctx context.Context, w http.ResponseWriter, limitName, subjectID, scopeType, scopeID, resourceID string) (ok, created bool) {
 	if s.quotaService == nil {
-		return true
+		return true, false
 	}
-	err := s.quotaService.CheckAndReserve(ctx, limitName, subjectID, scopeType, scopeID, resourceID)
+	created, err := s.quotaService.Reserve(ctx, limitName, subjectID, scopeType, scopeID, resourceID)
 	if err == nil {
-		return true
+		return true, created
 	}
 	switch {
 	case errors.Is(err, store.ErrQuotaExceeded):
@@ -703,7 +711,7 @@ func (s *Server) checkAndReserveQuota(ctx context.Context, w http.ResponseWriter
 	default:
 		writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "quota check failed", nil)
 	}
-	return false
+	return false, false
 }
 
 func (s *Server) createAgentInProject(

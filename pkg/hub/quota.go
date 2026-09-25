@@ -54,29 +54,41 @@ func (qs *QuotaService) lockForScope(limitName, scopeType, scopeID string) *sync
 var ErrQuotaLockContention = errors.New("quota lock contention: retry")
 
 // CheckAndReserve atomically checks quota and creates a reservation.
-// It returns nil if the reservation succeeds or if no limit is defined.
-// It returns store.ErrQuotaExceeded if the quota is exhausted.
-// It returns ErrQuotaLockContention if the advisory lock is held by another request.
+// It returns nil if the reservation succeeds, is already held, or if no
+// limit is defined. It returns store.ErrQuotaExceeded if the quota is
+// exhausted. It returns ErrQuotaLockContention if the advisory lock is held
+// by another request.
 func (qs *QuotaService) CheckAndReserve(ctx context.Context, limitName string, subjectID string, scopeType string, scopeID string, resourceID string) error {
+	_, err := qs.Reserve(ctx, limitName, subjectID, scopeType, scopeID, resourceID)
+	return err
+}
+
+// Reserve is CheckAndReserve that also reports whether this call created a
+// new reservation (ptone/scion#1978). created is false when no limit is
+// defined, the limit is unlimited, the resource already held an active
+// reservation for this limit, or err is non-nil. Callers that roll back a
+// reservation after a failed operation must only do so when created is
+// true; otherwise they would release a reservation an earlier call made.
+func (qs *QuotaService) Reserve(ctx context.Context, limitName string, subjectID string, scopeType string, scopeID string, resourceID string) (created bool, err error) {
 	// 1. Look up LimitDefinition by name.
 	limitDef, err := qs.store.GetLimitDefinitionByName(ctx, limitName)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			// No limit defined — no enforcement.
-			return nil
+			return false, nil
 		}
-		return fmt.Errorf("quota: lookup limit definition %q: %w", limitName, err)
+		return false, fmt.Errorf("quota: lookup limit definition %q: %w", limitName, err)
 	}
 
 	// 2. Resolve effective limit for the subject.
 	effectiveLimit, err := qs.ResolveEffectiveLimit(ctx, limitDef.ID, subjectID, scopeType, scopeID)
 	if err != nil {
-		return fmt.Errorf("quota: resolve effective limit for %q: %w", limitName, err)
+		return false, fmt.Errorf("quota: resolve effective limit for %q: %w", limitName, err)
 	}
 
 	// 3. Unlimited — no enforcement.
 	if effectiveLimit <= 0 {
-		return nil
+		return false, nil
 	}
 
 	// 4. Acquire the in-process scope lock first (see lockForScope): this is
@@ -91,13 +103,13 @@ func (qs *QuotaService) CheckAndReserve(ctx context.Context, limitName string, s
 	// without providing mutual exclusion, which is why 4 above exists.
 	locker, ok := qs.store.(store.AdvisoryLocker)
 	if !ok {
-		return fmt.Errorf("quota enforcement unavailable: store does not support advisory locks")
+		return false, fmt.Errorf("quota enforcement unavailable: store does not support advisory locks")
 	}
 
 	objID := store.StableProjectHash(scopeID)
 	acquired, release, err := locker.TryAdvisoryLockObject(ctx, store.LockQuotaEnforcement, objID)
 	if err != nil {
-		return fmt.Errorf("quota: advisory lock for %q: %w", limitName, err)
+		return false, fmt.Errorf("quota: advisory lock for %q: %w", limitName, err)
 	}
 	defer func() {
 		if releaseErr := release(); releaseErr != nil {
@@ -107,7 +119,7 @@ func (qs *QuotaService) CheckAndReserve(ctx context.Context, limitName string, s
 	}()
 
 	if !acquired {
-		return ErrQuotaLockContention
+		return false, ErrQuotaLockContention
 	}
 
 	// 4.5. Idempotency (#1963): a resource that already holds an active
@@ -121,21 +133,21 @@ func (qs *QuotaService) CheckAndReserve(ctx context.Context, limitName string, s
 	// read.
 	alreadyReserved, err := qs.store.HasActiveReservation(ctx, limitDef.ID, resourceID)
 	if err != nil {
-		return fmt.Errorf("quota: check existing reservation for %q: %w", limitName, err)
+		return false, fmt.Errorf("quota: check existing reservation for %q: %w", limitName, err)
 	}
 	if alreadyReserved {
-		return nil
+		return false, nil
 	}
 
 	// 5. Count active reservations.
 	count, err := qs.store.CountActiveReservations(ctx, limitDef.ID, subjectID, scopeType, scopeID)
 	if err != nil {
-		return fmt.Errorf("quota: count active reservations for %q: %w", limitName, err)
+		return false, fmt.Errorf("quota: count active reservations for %q: %w", limitName, err)
 	}
 
 	// 6. Check quota.
 	if count >= effectiveLimit {
-		return store.ErrQuotaExceeded
+		return false, store.ErrQuotaExceeded
 	}
 
 	// 7. Create reservation.
@@ -148,10 +160,10 @@ func (qs *QuotaService) CheckAndReserve(ctx context.Context, limitName string, s
 		Reserved:          1,
 	}
 	if _, err := qs.store.CreateUsageReservation(ctx, reservation); err != nil {
-		return fmt.Errorf("quota: create reservation for %q: %w", limitName, err)
+		return false, fmt.Errorf("quota: create reservation for %q: %w", limitName, err)
 	}
 
-	return nil
+	return true, nil
 }
 
 // ResolveEffectiveLimit determines the effective limit using the merge rule:

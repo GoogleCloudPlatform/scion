@@ -50,6 +50,18 @@ func (s *Server) releaseBrokerQuota(ctx context.Context, agent *store.Agent) {
 	s.quotaService.Release(ctx, store.LimitMaxAgentsPerBroker, agent.ID)
 }
 
+// rollbackBrokerQuota undoes a checkAndReserveBrokerQuota(HTTP) reservation
+// after a failed dispatch, but only if that call created it
+// (ptone/scion#1978). When the reservation already existed (for example,
+// start called on an agent that is already running), the agent is still
+// counted and releasing it would let the broker exceed its cap.
+func (s *Server) rollbackBrokerQuota(ctx context.Context, agent *store.Agent, created bool) {
+	if !created {
+		return
+	}
+	s.releaseBrokerQuota(ctx, agent)
+}
+
 // checkAndReserveBrokerQuotaHTTP re-reserves agent's max_agents_per_broker
 // slot before an HTTP-triggered start/resume/restart dispatch, using the same
 // helper — and therefore the same error/status shape — createAgentInProject
@@ -60,12 +72,13 @@ func (s *Server) releaseBrokerQuota(ctx context.Context, agent *store.Agent) {
 // QuotaService.CheckAndReserve is idempotent per resource, so calling this on
 // an agent that already holds an active reservation (e.g. a fresh create, or
 // "start" called again on an already-running agent) is a no-op rather than a
-// duplicate reservation.
-func (s *Server) checkAndReserveBrokerQuotaHTTP(ctx context.Context, w http.ResponseWriter, agent *store.Agent) bool {
+// duplicate reservation. created reports whether this call made a new
+// reservation; pass it to rollbackBrokerQuota if dispatch then fails.
+func (s *Server) checkAndReserveBrokerQuotaHTTP(ctx context.Context, w http.ResponseWriter, agent *store.Agent) (ok, created bool) {
 	if agent == nil || agent.RuntimeBrokerID == "" {
-		return true
+		return true, false
 	}
-	return s.checkAndReserveQuota(ctx, w, store.LimitMaxAgentsPerBroker, agent.RuntimeBrokerID, store.QuotaScopeBroker, agent.RuntimeBrokerID, agent.ID)
+	return s.reserveQuotaHTTP(ctx, w, store.LimitMaxAgentsPerBroker, agent.RuntimeBrokerID, store.QuotaScopeBroker, agent.RuntimeBrokerID, agent.ID)
 }
 
 // checkAndReserveBrokerQuota is the non-HTTP counterpart of
@@ -73,11 +86,13 @@ func (s *Server) checkAndReserveBrokerQuotaHTTP(ctx context.Context, w http.Resp
 // response directly (e.g. agent DM wake). Returns nil if the reservation
 // succeeded, was already held (idempotent), or no limit is configured;
 // returns store.ErrQuotaExceeded or ErrQuotaLockContention otherwise.
-func (s *Server) checkAndReserveBrokerQuota(ctx context.Context, agent *store.Agent) error {
+// created reports whether this call made a new reservation; pass it to
+// rollbackBrokerQuota if dispatch then fails.
+func (s *Server) checkAndReserveBrokerQuota(ctx context.Context, agent *store.Agent) (created bool, err error) {
 	if s.quotaService == nil || agent == nil || agent.RuntimeBrokerID == "" {
-		return nil
+		return false, nil
 	}
-	return s.quotaService.CheckAndReserve(ctx, store.LimitMaxAgentsPerBroker, agent.RuntimeBrokerID, store.QuotaScopeBroker, agent.RuntimeBrokerID, agent.ID)
+	return s.quotaService.Reserve(ctx, store.LimitMaxAgentsPerBroker, agent.RuntimeBrokerID, store.QuotaScopeBroker, agent.RuntimeBrokerID, agent.ID)
 }
 
 // reconcileBrokerQuotaOnPhaseChange updates agent's max_agents_per_broker
@@ -108,7 +123,7 @@ func (s *Server) reconcileBrokerQuotaOnPhaseChange(ctx context.Context, agent *s
 		return
 	}
 	if nowCounted {
-		if err := s.checkAndReserveBrokerQuota(ctx, agent); err != nil {
+		if _, err := s.checkAndReserveBrokerQuota(ctx, agent); err != nil {
 			s.agentLifecycleLog.Warn("quota: best-effort re-reserve on observed phase change failed",
 				"agent_id", agent.ID, "old_phase", oldPhase, "new_phase", newPhase, "error", err)
 		}
