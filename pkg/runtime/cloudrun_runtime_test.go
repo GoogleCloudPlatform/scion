@@ -108,6 +108,45 @@ func TestCloudRunRuntime_NewFromInstancesMissingRegion(t *testing.T) {
 	}
 }
 
+func TestCloudRunRuntime_NewFromInstancesInitializesExec(t *testing.T) {
+	// Regression test: NewCloudRunRuntimeFromInstances used to leave exec
+	// nil, so Exec/ExecWithStdin/Attach would panic with a nil pointer
+	// dereference the first time they were called on an instances-based
+	// runtime. See ptone/scion#1355 follow-up review.
+	rt, err := NewCloudRunRuntimeFromInstances(&config.V1CloudRunInstancesConfig{
+		ProjectID: "instances-project",
+		Region:    "us-west1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rt.exec == nil {
+		t.Error("NewCloudRunRuntimeFromInstances() left exec nil; want an initialized exec connector")
+	}
+}
+
+func TestCloudRunRuntime_ExecNilExecConnector(t *testing.T) {
+	// Guards against a nil pointer dereference if a CloudRunRuntime is ever
+	// constructed (e.g. directly, or by a future constructor) without an
+	// exec connector. Exec/ExecWithStdin/Attach must return a clean error
+	// instead of panicking.
+	rt := &CloudRunRuntime{
+		config: &config.CloudRunConfig{ProjectID: "p", Location: "us-central1"},
+	}
+
+	if _, err := rt.Exec(context.Background(), "instance-1", []string{"true"}); err == nil {
+		t.Error("Exec() with nil exec connector: expected error, got nil")
+	}
+
+	if _, err := rt.ExecWithStdin(context.Background(), "instance-1", []string{"true"}, strings.NewReader("")); err == nil {
+		t.Error("ExecWithStdin() with nil exec connector: expected error, got nil")
+	}
+
+	if err := rt.Attach(context.Background(), "instance-1"); err == nil {
+		t.Error("Attach() with nil exec connector: expected error, got nil")
+	}
+}
+
 func TestCloudRunRuntime_ResolveConfig_SkipsWhenConfigured(t *testing.T) {
 	// When ProjectID and Location are already set, resolveConfig should be a no-op.
 	rt, err := NewCloudRunRuntime(&config.CloudRunConfig{
