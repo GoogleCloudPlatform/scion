@@ -657,6 +657,9 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 			"topic", topic,
 			"source", "broker",
 		}
+		if storeMsg.ConversationID != "" {
+			logAttrs = append(logAttrs, "conversation_id", storeMsg.ConversationID)
+		}
 		logAttrs = append(logAttrs, msg.LogAttrs()...)
 		p.messageLog.Info("user message delivered via broker", logAttrs...)
 	}
@@ -874,6 +877,9 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 			"agent_name", agent.Name,
 			"project_id", agent.ProjectID,
 			"source", "broker",
+		}
+		if storeMsg.ConversationID != "" {
+			logAttrs = append(logAttrs, "conversation_id", storeMsg.ConversationID)
 		}
 		logAttrs = append(logAttrs, msg.LogAttrs()...)
 		p.messageLog.Info("broker message delivered", logAttrs...)

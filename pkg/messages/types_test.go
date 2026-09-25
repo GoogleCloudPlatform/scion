@@ -426,6 +426,56 @@ func TestLogAttrsWithRecipients(t *testing.T) {
 	}
 }
 
+// TestLogAttrsWithConversationID is a regression test for ptone/scion#1635:
+// the dedicated message audit log omitted conversation_id even though the
+// field is resolved and stamped onto the message before dispatch.
+func TestLogAttrsWithConversationID(t *testing.T) {
+	m := &StructuredMessage{
+		Version:        Version,
+		Sender:         "user:alice",
+		Recipient:      "agent:dev",
+		Msg:            "hello",
+		Type:           TypeInstruction,
+		ConversationID: "conv-uuid-789",
+	}
+
+	attrs := m.LogAttrs()
+
+	found := false
+	for i := 0; i < len(attrs)-1; i += 2 {
+		if attrs[i] == "conversation_id" {
+			found = true
+			if attrs[i+1] != "conv-uuid-789" {
+				t.Errorf("conversation_id = %v, want %q", attrs[i+1], "conv-uuid-789")
+			}
+		}
+	}
+	if !found {
+		t.Error("LogAttrs() should include conversation_id when set")
+	}
+}
+
+// TestLogAttrsWithoutConversationID ensures the field stays absent (rather
+// than emitted empty) when no conversation has been resolved, matching the
+// omitempty convention used by the other optional attrs.
+func TestLogAttrsWithoutConversationID(t *testing.T) {
+	m := &StructuredMessage{
+		Version:   Version,
+		Sender:    "user:alice",
+		Recipient: "agent:dev",
+		Msg:       "hello",
+		Type:      TypeInstruction,
+	}
+
+	attrs := m.LogAttrs()
+
+	for i := 0; i < len(attrs); i += 2 {
+		if attrs[i] == "conversation_id" {
+			t.Error("LogAttrs() should not include conversation_id when empty")
+		}
+	}
+}
+
 func TestStructuredMessage_ValidateMention(t *testing.T) {
 	m := &StructuredMessage{
 		Version:   Version,

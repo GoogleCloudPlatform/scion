@@ -543,6 +543,9 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			"broker_id", broker.ID(),
 			"plugin_name", pluginName,
 		}
+		if storeMsg.ConversationID != "" {
+			logAttrs = append(logAttrs, "conversation_id", storeMsg.ConversationID)
+		}
 		logAttrs = append(logAttrs, req.Message.LogAttrs()...)
 		s.dedicatedMessageLog.Info("inbound broker message delivered", logAttrs...)
 	}
