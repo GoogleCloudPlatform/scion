@@ -260,6 +260,15 @@ Shared directories resolve to `<mount_root>/<share id>/<subpath_root>/<project i
 
 The `nfs` backend fails closed. Agent start is refused when the block is incomplete, the host base directory does not exist, the runtime is not a local-container or Kubernetes runtime (for example, Cloud Run), or a shared-directory path resolves through a symlink. The NFS export itself must be provisioned and mounted before agents start. The `uid`, `gid`, `mount_options`, and `storage_class` fields of the `nfs` block are ignored here.
 
+With the `nfs` backend, the Hub and brokers also apply the following:
+
+- **Symlink-safe access**: Every Hub operation on an NFS shared directory goes through the same confined resolver. This covers the web file browser, archive downloads, attachment staging, and shared-dir deletion. The resolver walks each path component with `O_NOFOLLOW`, anchored on the inode of the project's tree, and refuses any symlink in the path. A missing or incomplete `nfs` block, or an unusable host base directory, fails closed on the Hub as well as on agent start.
+- **Leaf modes and ACLs**: A newly created shared directory gets mode `2775` (setgid, group-writable) and a minimal default POSIX ACL, so files agents create inside it inherit group write access regardless of umask. If the export does not support POSIX ACLs, a warning is logged once and the directory stays plain `2775` with no ACL. Directories that already existed are never modified. See the [hybrid tier guide](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/hybrid-tier.md) for the manual fix-up recipe.
+- **Cleanup on delete**: Deleting a project removes its `<subpath_root>/<project id>/shared-dirs` tree from the export. Removing a single shared directory removes that directory's contents. Both are best-effort: failures are logged and never block or roll back the database change.
+- **Startup summary**: At startup the server logs one `server.shared_dir_storage resolved layout: …` line, plus a warning if any ignored `nfs` fields are set.
+
+The `local` backend (or an unset `shared_dir_storage`) behaves as before.
+
 ```yaml
 server:
   shared_dir_storage:
@@ -340,13 +349,15 @@ Configuration for inbound OIDC-based federation authentication.
 | :--- | :--- | :--- | :--- |
 | `issuer_url` | string | | **MANDATORY.** The exact OIDC issuer URL (matching token `iss` claim). |
 | `jwks_url` | string | | The URL to fetch signing public keys. Discovered via OIDC discovery if empty. |
-| `expected_audience` | string | | The expected audience `aud` claim in tokens. |
+| `expected_audience` | string | | The expected audience `aud` claim in tokens. Required (non-empty) for a `user`-type Google issuer to enable external bearer tokens. |
 | `allowed_projects` | list of strings | | If set, restricts tokens to specific project UUIDs. |
 | `allowed_root_users` | list of strings | | If set, restricts tokens to specific root user emails. |
 | `default_scopes` | list of strings | | Default JWT scopes granted to federated agents. |
 | `issuer_type` | string | `"hub"` | Type of issuer: `"hub"`, `"service_account"`, or `"user"`. |
 | `default_role` | string | `"viewer"` | Default role for federated users (`issuer_type: user`). |
 | `allowed_emails` | list of strings | | Restrict user tokens to specific email claims (supports wildcards e.g. `*@example.com`). |
+| `allowed_domains` | list of strings | | Google issuer only. Restrict **user** principals presenting an [external bearer token](/scion/hosted/single-node/auth/#external-bearer-tokens-google-credential-pass-through) to these email domains (exact, case-insensitive, no wildcards or subdomain matching). The Hub sign-in policy still applies. Never consulted for service accounts. |
+| `allowed_gcp_projects` | list of strings | | Google issuer only. Admit **service-account** principals whose GCP project ID (parsed from the service account email) is listed. Empty admits no service accounts. Distinct from `allowed_projects`, which matches Scion project IDs. |
 
 ### OIDC Login (`server.oidc_login`)
 
