@@ -23,6 +23,8 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/knadh/koanf/providers/confmap"
+	"github.com/knadh/koanf/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -49,18 +51,12 @@ func TestHubDefaultGCPIdentity_NoDefaultsFallBackToBlock(t *testing.T) {
 	assert.Equal(t, store.GCPMetadataModeBlock, identity.MetadataMode)
 }
 
-// markBrokerEmbedded labels the fixture's broker as the hub's embedded
-// (co-located) broker, which is what a single-node VM dispatches to.
+// markBrokerEmbedded records the fixture's broker as the hub's embedded
+// (co-located) broker — the one a single-node VM dispatches to — the same way
+// server startup does, via the server-held embedded broker ID.
 func markBrokerEmbedded(t *testing.T, f *bypassAgentsFixture) {
 	t.Helper()
-	ctx := context.Background()
-	b, err := f.store.GetRuntimeBroker(ctx, f.broker.ID)
-	require.NoError(t, err)
-	if b.Labels == nil {
-		b.Labels = map[string]string{}
-	}
-	b.Labels["scion.io/broker-role"] = "embedded"
-	require.NoError(t, f.store.UpdateRuntimeBroker(ctx, b))
+	f.srv.SetEmbeddedBrokerID(f.broker.ID)
 }
 
 // TestHubDefaultGCPIdentity_PassthroughAppliedWhenNoProjectDefault covers the
@@ -92,6 +88,61 @@ func TestHubDefaultGCPIdentity_PassthroughNotAppliedOnNonEmbeddedBroker(t *testi
 	identity := createdAgentIdentity(t, f, "hub-passthrough-remote-agent")
 	assert.Equal(t, store.GCPMetadataModeBlock, identity.MetadataMode,
 		"hub-default passthrough must not apply on a non-embedded broker")
+}
+
+// TestHubDefaultGCPIdentity_PassthroughNotAppliedOnSpoofedEmbeddedLabel pins
+// the round-2 review: the scion.io/broker-role label is writable by the
+// broker's owner, so a user-registered broker that labels itself "embedded"
+// must not receive the hub-default passthrough. Only the broker the server
+// itself recorded as embedded qualifies.
+func TestHubDefaultGCPIdentity_PassthroughNotAppliedOnSpoofedEmbeddedLabel(t *testing.T) {
+	f := bypassAgentsSetup(t)
+	ctx := context.Background()
+	b, err := f.store.GetRuntimeBroker(ctx, f.broker.ID)
+	require.NoError(t, err)
+	if b.Labels == nil {
+		b.Labels = map[string]string{}
+	}
+	b.Labels["scion.io/broker-role"] = "embedded"
+	require.NoError(t, f.store.UpdateRuntimeBroker(ctx, b))
+	// The hub does have an embedded broker, just not this one.
+	f.srv.SetEmbeddedBrokerID("some-other-embedded-broker")
+	setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
+		DefaultGCPIdentityMode: store.GCPMetadataModePassthrough,
+	})
+
+	identity := createdAgentIdentity(t, f, "hub-passthrough-spoofed-agent")
+	assert.Equal(t, store.GCPMetadataModeBlock, identity.MetadataMode,
+		"a broker-owner-set embedded label must not unlock hub-default passthrough")
+}
+
+// TestHubDefaultGCPIdentity_PassthroughSurvivesSettingsReload covers the
+// round-2 boot-path blocker end to end on the hub side: the hub default is
+// extracted from bootstrap koanf into the agent_defaults hub_settings row (as
+// syncHubSettings does on every boot), loaded by OperationalSettings.Refresh,
+// applied with ApplySnapshot, and then agent creation must still resolve
+// passthrough. The cmd-side boot sequence is pinned by
+// TestInitOperationalSettings_HubDefaultGCPIdentitySurvivesRestart.
+func TestHubDefaultGCPIdentity_PassthroughSurvivesSettingsReload(t *testing.T) {
+	f := bypassAgentsSetup(t)
+	markBrokerEmbedded(t, f)
+
+	bootK := koanf.New(".")
+	require.NoError(t, bootK.Load(confmap.Provider(map[string]interface{}{
+		"default_gcp_identity_mode": store.GCPMetadataModePassthrough,
+	}, "."), nil))
+	doc, err := opsettings.ExtractSectionFromKoanf(bootK, "agent_defaults")
+	require.NoError(t, err)
+
+	settings := newFakeHubSettingStore()
+	settings.seed("agent_defaults", doc)
+	ops := NewOperationalSettings(settings, bootK, emptyKoanf())
+	_, err = ops.Refresh(context.Background())
+	require.NoError(t, err)
+	ApplySnapshot(f.srv, ops.Snapshot())
+
+	identity := createdAgentIdentity(t, f, "hub-passthrough-reloaded-agent")
+	assert.Equal(t, store.GCPMetadataModePassthrough, identity.MetadataMode)
 }
 
 // TestHubDefaultGCPIdentity_ProjectPassthroughUnaffectedByBrokerRole confirms

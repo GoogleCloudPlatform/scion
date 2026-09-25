@@ -112,24 +112,23 @@ func (s *Server) resolveDefaultSAAssignment(ctx context.Context, w http.Response
 // every broker on the hub — including remote brokers registered by other
 // users — to every agent creator. The intended use is the single-node VM,
 // whose broker is the embedded (co-located) one, so the hub default is
-// confined to brokers labelled scion.io/broker-role=embedded. Anything else
-// falls back to block, and the reason is logged so an operator can see why
-// the hub default did not take effect.
-func (s *Server) hubDefaultPassthroughAllowed(ctx context.Context, runtimeBrokerID, projectID string) bool {
+// confined to that broker. Anything else falls back to block, and the reason
+// is logged so an operator can see why the hub default did not take effect.
+//
+// The check is isEmbeddedBroker, which compares against the embedded broker
+// ID the server records at startup (SetEmbeddedBrokerID). It deliberately
+// does not trust the scion.io/broker-role label: broker labels are writable
+// by the broker's owner through the runtime-broker update API, so any user
+// who registers a broker could claim "embedded" and pull the hub default's
+// passthrough onto their own host.
+func (s *Server) hubDefaultPassthroughAllowed(runtimeBrokerID, projectID string) bool {
 	if runtimeBrokerID == "" {
 		slog.Info("hub-default GCP passthrough not applied: no runtime broker resolved; using block",
 			"surface", SurfaceHubDefault, "project_id", projectID)
 		return false
 	}
-	broker, err := s.store.GetRuntimeBroker(ctx, runtimeBrokerID)
-	if err != nil {
-		slog.Warn("hub-default GCP passthrough not applied: runtime broker lookup failed; using block",
-			"surface", SurfaceHubDefault, "project_id", projectID,
-			"broker", runtimeBrokerID, "error", err)
-		return false
-	}
-	if broker.Labels["scion.io/broker-role"] != "embedded" {
-		slog.Info("hub-default GCP passthrough not applied: broker is not the embedded broker; using block",
+	if !s.isEmbeddedBroker(runtimeBrokerID) {
+		slog.Info("hub-default GCP passthrough not applied: broker is not the hub's embedded broker; using block",
 			"surface", SurfaceHubDefault, "project_id", projectID,
 			"broker", runtimeBrokerID)
 		return false

@@ -630,6 +630,33 @@ func TestRoundTripDefaultResources(t *testing.T) {
 	}
 }
 
+// The hub-default GCP identity keys must survive bootstrap extraction:
+// syncHubSettings seeds/re-syncs the agent_defaults row from this document on
+// every boot, so a key missing here is silently dropped on SQLite restart.
+func TestExtractAgentDefaults_GCPIdentityKeys(t *testing.T) {
+	k := koanf.New(".")
+	_ = k.Load(confmap.Provider(map[string]interface{}{
+		"default_gcp_identity_mode":               "assign",
+		"default_gcp_identity_service_account_id": "sa-123",
+	}, "."), nil)
+
+	raw, err := ExtractSectionFromKoanf(k, "agent_defaults")
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+
+	var settings AgentDefaultsSettings
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		t.Fatalf("unmarshal into AgentDefaultsSettings: %v", err)
+	}
+	if settings.DefaultGCPIdentityMode != "assign" {
+		t.Errorf("DefaultGCPIdentityMode = %q, want assign", settings.DefaultGCPIdentityMode)
+	}
+	if settings.DefaultGCPIdentityServiceAccountID != "sa-123" {
+		t.Errorf("DefaultGCPIdentityServiceAccountID = %q, want sa-123", settings.DefaultGCPIdentityServiceAccountID)
+	}
+}
+
 // N1: Stronger round-trip using a real settings.yaml through the koanf YAML
 // parser, matching the actual config loader chain.
 func TestRoundTripFromYAMLFile(t *testing.T) {
