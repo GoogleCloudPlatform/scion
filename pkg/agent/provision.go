@@ -1912,8 +1912,13 @@ func resolveModelAliasForExistingAgent(ctx context.Context, cfg *api.ScionConfig
 		hcName = cfg.DefaultHarnessConfig
 	}
 	if hcName != "" {
-		if hcDir, err := resolveHarnessConfigDir(ctx, hcName, projectPath); err == nil && hcDir != nil && len(hcDir.Config.ModelAliases) > 0 {
-			aliases = hcDir.Config.ModelAliases
+		if hcDir, err := resolveHarnessConfigDir(ctx, hcName, projectPath); err == nil && hcDir != nil {
+			// hcDir.Config is a config.HarnessConfigEntry value (not a
+			// pointer), so it can never itself be nil here; only its
+			// ModelAliases map can be nil/empty, which len() handles safely.
+			if len(hcDir.Config.ModelAliases) > 0 {
+				aliases = hcDir.Config.ModelAliases
+			}
 		}
 	}
 	if len(aliases) == 0 && cfg.Harness != "" {

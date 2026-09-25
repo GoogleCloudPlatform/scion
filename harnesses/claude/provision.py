@@ -263,7 +263,10 @@ def _resolve_model_alias(ctx: scion_harness.ProvisionContext, raw: str) -> str:
     normalized = _normalize_model_alias(raw)
     if normalized not in KNOWN_MODEL_ALIASES:
         return normalized
-    aliases = ctx.harness_config.get("model_aliases")
+    # ctx.harness_config is normally always a dict (the property defaults to
+    # {} when the manifest carries none), but guard defensively in case that
+    # ever changes or a future caller passes a stripped-down context.
+    aliases = ctx.harness_config.get("model_aliases") if ctx.harness_config else None
     if not isinstance(aliases, dict):
         aliases = {}
     return aliases.get(normalized, normalized)

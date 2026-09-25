@@ -59,6 +59,10 @@ func DefaultModelAliases(harnessName string) map[string]string {
 	if err != nil {
 		return nil
 	}
+	// entry is a config.HarnessConfigEntry value (not a pointer), so it can
+	// never be nil here; empty or whitespace-only YAML just yields a
+	// zero-value entry whose ModelAliases map is nil, which callers already
+	// treat as "no aliases".
 	return entry.ModelAliases
 }
 

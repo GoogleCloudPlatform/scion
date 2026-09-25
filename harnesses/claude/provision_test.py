@@ -147,6 +147,19 @@ class ModelResolutionTest(unittest.TestCase):
             ctx = scion_harness.ProvisionContext("claude", manifest)
             self.assertEqual(provision._resolve_model_alias(ctx, "large"), "large")
 
+    def test_missing_harness_config_falls_back_to_tier_name(self) -> None:
+        """Regression guard for the gemini review on GoogleCloudPlatform/scion#1891:
+        ctx.harness_config must never be treated as unconditionally truthy/dict-like
+        without a guard. A manifest with no "harness_config" key at all (so the
+        property defaults to {}) must resolve to the bare tier name, not raise.
+        """
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+            manifest = {
+                "harness_bundle_dir": os.path.join(tmp, ".scion", "harness"),
+            }
+            ctx = scion_harness.ProvisionContext("claude", manifest)
+            self.assertEqual(provision._resolve_model_alias(ctx, "large"), "large")
+
     def test_custom_non_tier_alias_keys_are_ignored(self) -> None:
         """Only the four canonical tiers resolve, as on the Go side."""
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
