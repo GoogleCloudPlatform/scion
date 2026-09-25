@@ -1306,6 +1306,18 @@ func LoadBootstrapKoanf() *koanf.Koanf {
 		"server.log_format":       defaults.LogFormat,
 	}, "."), nil)
 
+	// 1b. Embedded agent-defaults (embeds/default_settings.yaml, or the
+	// tier-specific variant — see GetDefaultSettingsDataYAML). This is the
+	// "coded defaults" layer for default_template/default_harness_config:
+	// without it, an un-seeded instance (no settings.yaml on disk, no
+	// SCION_SEED_* / SCION_SERVER_* env vars) has these keys entirely absent
+	// from bootstrap material, so agent-create requests that omit
+	// harnessConfig resolve to an empty name instead of the product default
+	// (ptone/scion#1306).
+	if agentDefaults := embeddedAgentDefaultsKoanfMap(); len(agentDefaults) > 0 {
+		_ = k.Load(confmap.Provider(agentDefaults, "."), nil)
+	}
+
 	// 2. SCION_SEED_* environment variables (snake_case via envKeyToOpsettingsKey).
 	seedK := LoadSeedEnvKoanf()
 	_ = k.Merge(seedK)
@@ -1336,6 +1348,44 @@ func LoadBootstrapKoanf() *koanf.Koanf {
 	splitCommaSeparatedKoanfKeys(k)
 
 	return k
+}
+
+// embeddedAgentDefaultsKoanfMap extracts default_template and
+// default_harness_config from the embedded default settings YAML
+// (GetDefaultSettingsDataYAML — tier-aware: the Cloud Run sandbox tier gets
+// its own embedded file) for use as the lowest-precedence "coded defaults"
+// layer in LoadBootstrapKoanf.
+//
+// This deliberately reads only those two scalar keys: the embedded file also
+// carries runtime/profile sections that are meaningful for the CLI's local
+// settings.yaml materialization (config/init.go) but have no equivalent in
+// the opsettings agent_defaults section, and pulling them in here would just
+// be dead weight in the bootstrap koanf.
+//
+// Failure to read or parse the embedded file is logged and treated as "no
+// embedded agent defaults" rather than a fatal error — bootstrap material
+// must still be produced even if this best-effort layer comes up empty.
+func embeddedAgentDefaultsKoanfMap() map[string]interface{} {
+	data, err := GetDefaultSettingsDataYAML()
+	if err != nil {
+		slog.Warn("LoadBootstrapKoanf: failed to read embedded default settings", "error", err)
+		return nil
+	}
+
+	var raw map[string]interface{}
+	if err := yamlv3.Unmarshal(data, &raw); err != nil {
+		slog.Warn("LoadBootstrapKoanf: failed to parse embedded default settings", "error", err)
+		return nil
+	}
+
+	out := make(map[string]interface{}, 2)
+	if v, ok := raw["default_template"].(string); ok && v != "" {
+		out["default_template"] = v
+	}
+	if v, ok := raw["default_harness_config"].(string); ok && v != "" {
+		out["default_harness_config"] = v
+	}
+	return out
 }
 
 // commaSplitKoanfKeys lists koanf paths that represent list values and may
