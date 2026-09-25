@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -3086,10 +3087,12 @@ func antigravityLikeAuthMeta() *config.HarnessAuthMetadata {
 // target scenario: with a GCP SA reachable via passthrough (signalled by
 // SCION_METADATA_MODE, the only channel this crosses into pkg/agent) and no
 // other credential present at all, vertex-ai is selected from identity alone
-// — with no ADC file, no AGY_TOKEN, no API key.
+// — with no ADC file, no AGY_TOKEN, no API key. BrokerMode: true because the
+// identity signal only exists on the broker path (R1).
 func TestAutoDetectAuthSelectedType_GCPIdentityPassthrough(t *testing.T) {
 	auth := &api.AuthConfig{}
 	opts := &api.StartOptions{
+		BrokerMode: true,
 		Env: map[string]string{
 			"SCION_METADATA_MODE": "passthrough",
 		},
@@ -3107,6 +3110,7 @@ func TestAutoDetectAuthSelectedType_GCPIdentityPassthrough(t *testing.T) {
 func TestAutoDetectAuthSelectedType_GCPIdentityAssign(t *testing.T) {
 	auth := &api.AuthConfig{}
 	opts := &api.StartOptions{
+		BrokerMode: true,
 		Env: map[string]string{
 			"SCION_METADATA_MODE": "assign",
 		},
@@ -3126,7 +3130,7 @@ func TestAutoDetectAuthSelectedType_BlockModeNoAutoVertexAI(t *testing.T) {
 	for _, metadataMode := range []string{"block", ""} {
 		t.Run("mode="+metadataMode, func(t *testing.T) {
 			auth := &api.AuthConfig{}
-			opts := &api.StartOptions{Env: map[string]string{}}
+			opts := &api.StartOptions{BrokerMode: true, Env: map[string]string{}}
 			if metadataMode != "" {
 				opts.Env["SCION_METADATA_MODE"] = metadataMode
 			}
@@ -3147,7 +3151,8 @@ func TestAutoDetectAuthSelectedType_BlockModeNoAutoVertexAI(t *testing.T) {
 func TestAutoDetectAuthSelectedType_FileSecretBeatsIdentity(t *testing.T) {
 	auth := &api.AuthConfig{}
 	opts := &api.StartOptions{
-		Env: map[string]string{}, // no SCION_METADATA_MODE at all
+		BrokerMode: true,
+		Env:        map[string]string{}, // no SCION_METADATA_MODE at all
 		ResolvedSecrets: []api.ResolvedSecret{
 			{Name: "gcloud-adc", Type: "file", Target: "/home/scion/.config/gcloud/application_default_credentials.json"},
 		},
@@ -3161,18 +3166,13 @@ func TestAutoDetectAuthSelectedType_FileSecretBeatsIdentity(t *testing.T) {
 }
 
 // TestAutoDetectAuthSelectedType_EnvCredentialBeatsIdentity proves the env
-// leg outranks the GCP-identity leg: an actually-present API key alongside a
-// reachable GCP SA should still pick api-key, not vertex-ai — identity is the
-// fallback, not a takeover. (Using GEMINI_API_KEY rather than AGY_TOKEN here
-// deliberately: AGY_TOKEN maps to antigravity's own default_type
-// "oauth-token", and pickAutodetectCandidate's documented precedence
-// (pkg/harness/auth.go) treats "candidate == default_type" as "already on
-// default, no override" — i.e. it returns "" and this function's env leg
-// would defer further down the chain in that specific case. GEMINI_API_KEY
-// maps to a non-default type, so it exercises the precedence unambiguously.)
+// leg outranks the GCP-identity leg: an actually-present, non-default-type
+// API key alongside a reachable GCP SA should still pick api-key, not
+// vertex-ai — identity is the fallback, not a takeover.
 func TestAutoDetectAuthSelectedType_EnvCredentialBeatsIdentity(t *testing.T) {
 	auth := &api.AuthConfig{}
 	opts := &api.StartOptions{
+		BrokerMode: true,
 		Env: map[string]string{
 			"SCION_METADATA_MODE": "passthrough",
 			"GEMINI_API_KEY":      "some-key",
@@ -3186,6 +3186,34 @@ func TestAutoDetectAuthSelectedType_EnvCredentialBeatsIdentity(t *testing.T) {
 	}
 }
 
+// TestAutoDetectAuthSelectedType_DefaultTypeCredentialBeatsIdentity is the
+// pkg/agent regression pin for ptone/scion#1882 (C1) — the exact scenario the
+// review found: antigravity's own default_type is "oauth-token", and AGY_TOKEN
+// (which maps to it) must still win over a reachable GCP SA. Before the fix,
+// AutoDetectAuthType's env leg returning "" (pickAutodetectCandidate's
+// "already on default" signal, indistinguishable from "nothing matched" to a
+// naively-chaining caller) let this function fall through to the identity leg
+// and wrongly select vertex-ai, silently evicting AGY_TOKEN from the
+// container. See TestAutoDetectAuthType_DefaultTypeCredentialBeatsGCPIdentity
+// in pkg/harness for the same pin against the real harness configs
+// (including claude's ANTHROPIC_API_KEY case).
+func TestAutoDetectAuthSelectedType_DefaultTypeCredentialBeatsIdentity(t *testing.T) {
+	auth := &api.AuthConfig{}
+	opts := &api.StartOptions{
+		BrokerMode: true,
+		Env: map[string]string{
+			"SCION_METADATA_MODE": "passthrough",
+			"AGY_TOKEN":           "some-token",
+		},
+	}
+
+	autoDetectAuthSelectedType(auth, antigravityLikeAuthMeta(), opts)
+
+	if auth.SelectedType != "oauth-token" {
+		t.Errorf("SelectedType = %q, want %q (AGY_TOKEN — antigravity's default_type credential — must win over a reachable GCP SA)", auth.SelectedType, "oauth-token")
+	}
+}
+
 // TestAutoDetectAuthSelectedType_ExplicitSelectionWins proves the function is
 // a no-op once something explicit (CLI --harness-auth, template, profile,
 // scion-agent.json) has already set SelectedType, even in a passthrough
@@ -3193,6 +3221,7 @@ func TestAutoDetectAuthSelectedType_EnvCredentialBeatsIdentity(t *testing.T) {
 func TestAutoDetectAuthSelectedType_ExplicitSelectionWins(t *testing.T) {
 	auth := &api.AuthConfig{SelectedType: "oauth-token"}
 	opts := &api.StartOptions{
+		BrokerMode: true,
 		Env: map[string]string{
 			"SCION_METADATA_MODE": "passthrough",
 		},
@@ -3209,12 +3238,118 @@ func TestAutoDetectAuthSelectedType_ExplicitSelectionWins(t *testing.T) {
 // (harness configs without a declarative auth: block).
 func TestAutoDetectAuthSelectedType_NilAuthMetaNoOp(t *testing.T) {
 	auth := &api.AuthConfig{}
-	opts := &api.StartOptions{Env: map[string]string{"SCION_METADATA_MODE": "passthrough"}}
+	opts := &api.StartOptions{BrokerMode: true, Env: map[string]string{"SCION_METADATA_MODE": "passthrough"}}
 
 	autoDetectAuthSelectedType(auth, nil, opts)
 
 	if auth.SelectedType != "" {
 		t.Errorf("SelectedType = %q, want %q (nil authMeta must not auto-select anything)", auth.SelectedType, "")
+	}
+}
+
+// TestAutoDetectAuthSelectedType_LocalModeNoOp is the R1 regression guard:
+// in local/workstation mode (BrokerMode: false), this function must not make
+// a binding decision from opts.Env/opts.ResolvedSecrets alone. Those only
+// reflect what the broker pre-resolved; local mode's GatherAuthWithEnv
+// separately discovers host env vars (os.Getenv) and host credential files
+// (e.g. ~/.claude/.credentials.json, the local ADC file) that never pass
+// through opts at all, and ResolveAuth / provision.py's own ordering already
+// handles that case correctly. The identity signal is also broker-only by
+// construction, so it has nothing to contribute locally.
+func TestAutoDetectAuthSelectedType_LocalModeNoOp(t *testing.T) {
+	auth := &api.AuthConfig{}
+	opts := &api.StartOptions{
+		BrokerMode: false,
+		Env: map[string]string{
+			// Would resolve to vertex-ai via identity in broker mode.
+			"SCION_METADATA_MODE": "passthrough",
+		},
+		ResolvedSecrets: []api.ResolvedSecret{
+			// Would resolve to vertex-ai via file secret in broker mode.
+			{Name: "gcloud-adc", Type: "file", Target: "/home/scion/.config/gcloud/application_default_credentials.json"},
+		},
+	}
+
+	autoDetectAuthSelectedType(auth, antigravityLikeAuthMeta(), opts)
+
+	if auth.SelectedType != "" {
+		t.Errorf("SelectedType = %q, want %q (local mode must defer to GatherAuthWithEnv's own host discovery, not opts alone)", auth.SelectedType, "")
+	}
+}
+
+// TestAutoDetectAuthSelectedType_Seam_ResolveAuthForwardsSelectedType is the
+// R2 Start()-wiring test: it exercises the actual seam Start() relies on —
+// autoDetectAuthSelectedType's result flowing into
+// ContainerScriptHarness.ResolveAuth as SCION_HARNESS_SELECTED_AUTH, which
+// container_script_harness.go stages as auth-candidates.json's
+// "explicit_type" and the container-side provisioner (e.g. antigravity's
+// provision.py) trusts instead of re-guessing.
+func TestAutoDetectAuthSelectedType_Seam_ResolveAuthForwardsSelectedType(t *testing.T) {
+	h, err := harness.NewContainerScriptHarness("/fake/harness-config-dir", config.HarnessConfigEntry{
+		Harness:     "antigravity",
+		Provisioner: &config.HarnessProvisionerConfig{Type: "container-script"},
+		Auth:        antigravityLikeAuthMeta(),
+	})
+	if err != nil {
+		t.Fatalf("NewContainerScriptHarness: %v", err)
+	}
+
+	auth := api.AuthConfig{}
+	opts := &api.StartOptions{
+		BrokerMode: true,
+		Env:        map[string]string{"SCION_METADATA_MODE": "passthrough"},
+	}
+	autoDetectAuthSelectedType(&auth, antigravityLikeAuthMeta(), opts)
+	if auth.SelectedType != "vertex-ai" {
+		t.Fatalf("precondition failed: SelectedType = %q, want %q", auth.SelectedType, "vertex-ai")
+	}
+
+	resolved, err := h.ResolveAuth(auth)
+	if err != nil {
+		t.Fatalf("ResolveAuth: %v", err)
+	}
+	if got := resolved.EnvVars["SCION_HARNESS_SELECTED_AUTH"]; got != "vertex-ai" {
+		t.Errorf("resolved.EnvVars[SCION_HARNESS_SELECTED_AUTH] = %q, want %q — this is what the container-side provisioner trusts as explicit_type",
+			got, "vertex-ai")
+	}
+}
+
+// TestAutoDetectAuthSelectedType_Seam_DefaultTypeCredentialSurvivesResolveAuth
+// is the Start()-wiring counterpart to
+// TestAutoDetectAuthSelectedType_DefaultTypeCredentialBeatsIdentity: it
+// confirms the seam forwards "oauth-token", not "vertex-ai", so
+// provision.py's explicit_type never evicts AGY_TOKEN even when a GCP SA is
+// also reachable (C1, end to end through the actual ResolveAuth call).
+func TestAutoDetectAuthSelectedType_Seam_DefaultTypeCredentialSurvivesResolveAuth(t *testing.T) {
+	h, err := harness.NewContainerScriptHarness("/fake/harness-config-dir", config.HarnessConfigEntry{
+		Harness:     "antigravity",
+		Provisioner: &config.HarnessProvisionerConfig{Type: "container-script"},
+		Auth:        antigravityLikeAuthMeta(),
+	})
+	if err != nil {
+		t.Fatalf("NewContainerScriptHarness: %v", err)
+	}
+
+	auth := api.AuthConfig{}
+	opts := &api.StartOptions{
+		BrokerMode: true,
+		Env: map[string]string{
+			"SCION_METADATA_MODE": "passthrough",
+			"AGY_TOKEN":           "some-token",
+		},
+	}
+	autoDetectAuthSelectedType(&auth, antigravityLikeAuthMeta(), opts)
+	if auth.SelectedType != "oauth-token" {
+		t.Fatalf("precondition failed: SelectedType = %q, want %q", auth.SelectedType, "oauth-token")
+	}
+
+	resolved, err := h.ResolveAuth(auth)
+	if err != nil {
+		t.Fatalf("ResolveAuth: %v", err)
+	}
+	if got := resolved.EnvVars["SCION_HARNESS_SELECTED_AUTH"]; got != "oauth-token" {
+		t.Errorf("resolved.EnvVars[SCION_HARNESS_SELECTED_AUTH] = %q, want %q (AGY_TOKEN's type must survive to explicit_type, not be evicted by identity)",
+			got, "oauth-token")
 	}
 }
 

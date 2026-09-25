@@ -60,7 +60,7 @@ func (c *Client) configureOIDCTransport() {
 	if !transportauth.IsOnGCEFunc() {
 		return
 	}
-	if mode := os.Getenv(transportauth.EnvMetadataMode); mode != "" {
+	if mode := os.Getenv(transportauth.EnvMetadataMode); transportauth.IsMetadataRedirected(mode) {
 		log.Debug("Skipping OIDC metadata mode: scion metadata server active (mode=%s), GCE metadata IP is redirected", mode)
 		return
 	}

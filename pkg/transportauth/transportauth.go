@@ -52,6 +52,13 @@ const (
 	// unreachable.
 	EnvMetadataMode = "SCION_METADATA_MODE"
 
+	// metadataModePassthrough mirrors store.GCPMetadataModePassthrough. It is
+	// duplicated as a literal (rather than importing pkg/store) to keep this
+	// package free of the store/ent dependency graph — the same tradeoff
+	// pkg/agent/run.go's hasMetadataInterception already makes for the same
+	// env var.
+	metadataModePassthrough = "passthrough"
+
 	RefreshMargin = 5 * time.Minute
 	DefaultTTL    = 1 * time.Hour
 	FetchTimeout  = 2 * time.Second
@@ -91,6 +98,27 @@ type TokenSource interface {
 
 // IsOnGCEFunc detects whether we're running on GCP. Override in tests.
 var IsOnGCEFunc = func() bool { return metadata.OnGCE() }
+
+// IsMetadataRedirected reports whether the given SCION_METADATA_MODE value
+// means 169.254.169.254 has been redirected to the scion metadata sidecar,
+// making the real GCE metadata server (and therefore ambient-SA OIDC via
+// MetadataSource) unreachable.
+//
+// Only "assign" and "block" redirect (pkg/runtimebroker/start_context.go);
+// "passthrough" deliberately does not — the agent is meant to reach the real
+// metadata server directly. Before ptone/scion#1882, SCION_METADATA_MODE was
+// simply absent for passthrough agents created (not restarted), so the naive
+// "mode != \"\"" check here happened to read that case as "not redirected"
+// by accident. Once the broker started recording "passthrough" on the create
+// path too (fixing an unrelated auth-autodetection gap), that same naive
+// check began misreading passthrough as redirected and disabling ambient-SA
+// OIDC transport for it. Any other non-empty value (including future modes
+// this package doesn't yet know about, or corruption) is treated as
+// redirected — fail closed, matching the allow-list philosophy
+// start_context.go already applies to this same env var.
+func IsMetadataRedirected(mode string) bool {
+	return mode != "" && mode != metadataModePassthrough
+}
 
 // ParseTokenExpiry extracts the expiry time from a JWT token without
 // validating the signature. This is safe for scheduling purposes since
@@ -145,8 +173,9 @@ func ModeFromEnv() HeaderMode {
 //
 // Resolution order:
 //  1. SCION_TRANSPORT_TOKEN set → InjectedSource
-//  2. On GCE && SCION_METADATA_MODE unset && audience configured
-//     (SCION_TRANSPORT_AUDIENCE or SCION_HUB_OIDC_AUDIENCE) → MetadataSource
+//  2. On GCE && SCION_METADATA_MODE not redirected (unset or "passthrough")
+//     && audience configured (SCION_TRANSPORT_AUDIENCE or
+//     SCION_HUB_OIDC_AUDIENCE) → MetadataSource
 //  3. Otherwise → nil (no transport auth)
 func FromEnv() (TokenSource, error) {
 	if tok := os.Getenv(EnvTransportToken); tok != "" {
@@ -162,7 +191,7 @@ func FromEnv() (TokenSource, error) {
 	if !IsOnGCEFunc() {
 		return nil, nil
 	}
-	if mode := os.Getenv(EnvMetadataMode); mode != "" {
+	if mode := os.Getenv(EnvMetadataMode); IsMetadataRedirected(mode) {
 		return nil, nil
 	}
 
@@ -189,7 +218,8 @@ type TransportSettings struct {
 //
 // Resolution order:
 //  1. SCION_TRANSPORT_TOKEN set → InjectedSource (env always wins)
-//  2. On GCE && SCION_METADATA_MODE unset && audience available → MetadataSource
+//  2. On GCE && SCION_METADATA_MODE not redirected (unset or "passthrough")
+//     && audience available → MetadataSource
 //  3. Settings audience + adcNew → ADCSource
 //  4. Otherwise → nil
 func FromSettings(settings *TransportSettings, adcNew ADCSourceConstructor) (TokenSource, HeaderMode, error) {
@@ -215,7 +245,7 @@ func FromSettings(settings *TransportSettings, adcNew ADCSourceConstructor) (Tok
 
 	// Try metadata server first when on GCE.
 	if IsOnGCEFunc() {
-		if metaMode := os.Getenv(EnvMetadataMode); metaMode == "" {
+		if metaMode := os.Getenv(EnvMetadataMode); !IsMetadataRedirected(metaMode) {
 			return NewMetadataSource(settings.Audience), mode, nil
 		}
 	}

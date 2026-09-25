@@ -2317,8 +2317,8 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedHarnessC
 		// defaulting to api-key. This mirrors the auto-detect priority in each
 		// harness's ResolveAuth.
 		//
-		// All auth preflight uses the config-driven path. The *FromConfig
-		// functions are safe to call with nil authMeta (they return zero values).
+		// All auth preflight uses the config-driven path. AutoDetectAuthType
+		// is safe to call with nil authMeta (returns "").
 		if authType == "" {
 			fileSecretNames := make(map[string]struct{})
 			for _, sec := range req.ResolvedSecrets {
@@ -2326,11 +2326,6 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedHarnessC
 					fileSecretNames[sec.Name] = struct{}{}
 				}
 			}
-			if detected := harness.DetectAuthTypeFromFileSecretsFromConfig(authMeta, fileSecretNames); detected != "" {
-				authType = detected
-			}
-		}
-		if authType == "" {
 			resolvedEnvKeys := make(map[string]struct{})
 			for k, v := range req.ResolvedEnv {
 				if v != "" {
@@ -2354,12 +2349,14 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedHarnessC
 			for _, k := range req.AvailableAsNeededKeys {
 				resolvedEnvKeys[k] = struct{}{}
 			}
-			if detected := harness.DetectAuthTypeFromEnvVarsFromConfig(authMeta, resolvedEnvKeys); detected != "" {
-				authType = detected
-			}
-		}
-		if authType == "" {
-			if detected := harness.DetectAuthTypeFromGCPIdentityFromConfig(authMeta, gcpSAAssigned); detected != "" {
+			// AutoDetectAuthType runs the file -> env -> identity chain as a
+			// single call so a present default-type credential (e.g.
+			// ANTHROPIC_API_KEY for claude) is never mistaken for "nothing
+			// detected" and overridden by the identity leg (ptone/scion#1882
+			// C1) — the same bug that motivated pkg/agent's use of this
+			// function to select the auth type actually wired into the
+			// container.
+			if detected := harness.AutoDetectAuthType(authMeta, fileSecretNames, resolvedEnvKeys, gcpSAAssigned); detected != "" {
 				authType = detected
 			}
 		}

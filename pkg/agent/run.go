@@ -1540,16 +1540,30 @@ func autoDetectAuthSelectedType(auth *api.AuthConfig, authMeta *config.HarnessAu
 	if auth.SelectedType != "" || authMeta == nil {
 		return
 	}
+	// R1 (ptone/scion#1882 review): the GCP-identity signal
+	// (SCION_METADATA_MODE) and the pre-merged opts.Env / opts.ResolvedSecrets
+	// this function inspects only reflect what the *broker* pre-resolved.
+	// In local/workstation mode, GatherAuthWithEnv(authEnvOverlay,
+	// localSources=true, authMeta) already discovers host env vars via
+	// os.Getenv and host credential files (e.g. ~/.claude/.credentials.json,
+	// the local ADC file) that never pass through opts.Env/opts.ResolvedSecrets
+	// at all — this function has no visibility into them. Running the
+	// opts-only autodetect in local mode would therefore make a binding
+	// decision on a narrower view of the world than ResolveAuth/provision.py
+	// actually have, potentially overriding a real host credential this
+	// function simply cannot see. The identity signal is also broker-only by
+	// construction (SCION_METADATA_MODE is injected by
+	// pkg/runtimebroker/start_context.go), so there is nothing for it to
+	// contribute locally anyway.
+	if !opts.BrokerMode {
+		return
+	}
 
 	fileSecretNames := make(map[string]struct{})
 	for _, sec := range opts.ResolvedSecrets {
 		if sec.Type == "file" {
 			fileSecretNames[sec.Name] = struct{}{}
 		}
-	}
-	if detected := harness.DetectAuthTypeFromFileSecretsFromConfig(authMeta, fileSecretNames); detected != "" {
-		auth.SelectedType = detected
-		return
 	}
 
 	envKeys := make(map[string]struct{})
@@ -1569,16 +1583,17 @@ func autoDetectAuthSelectedType(auth *api.AuthConfig, authMeta *config.HarnessAu
 			}
 		}
 	}
-	if detected := harness.DetectAuthTypeFromEnvVarsFromConfig(authMeta, envKeys); detected != "" {
-		auth.SelectedType = detected
-		return
-	}
 
 	// gcpSAAssigned mirrors the broker's own check (extractRequiredEnvKeys:
 	// assign or passthrough both provide credentials).
 	metadataMode := opts.Env["SCION_METADATA_MODE"]
 	gcpSAAssigned := metadataMode == store.GCPMetadataModeAssign || metadataMode == store.GCPMetadataModePassthrough
-	if detected := harness.DetectAuthTypeFromGCPIdentityFromConfig(authMeta, gcpSAAssigned); detected != "" {
+
+	// AutoDetectAuthType runs the file -> env -> identity precedence as a
+	// single call so a present default-type credential (e.g. antigravity's
+	// AGY_TOKEN, claude's ANTHROPIC_API_KEY) is never mistaken for "nothing
+	// detected" and overridden by the identity leg (ptone/scion#1882 C1).
+	if detected := harness.AutoDetectAuthType(authMeta, fileSecretNames, envKeys, gcpSAAssigned); detected != "" {
 		auth.SelectedType = detected
 	}
 }
