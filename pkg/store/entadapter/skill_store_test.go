@@ -18,6 +18,7 @@ package entadapter
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -505,4 +506,145 @@ func TestSkillStore_DeleteSkillVersion_NotFound(t *testing.T) {
 
 	err := cs.DeleteSkillVersion(ctx, uuid.New().String())
 	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
+// TestSkillStore_ListLimitClamped is part of the ptone/scion#1901 pagination
+// follow-up (uat PG-pagination-default50): before this fix, ListSkills
+// honored any caller-supplied limit outright and never emitted a cursor, so
+// a large limit could return the entire table in one page. The store must
+// clamp to maxSkillListLimit (200) and report a nextCursor when more rows
+// remain. This must fail against ac8fc87a6, which has no upper bound and
+// never sets NextCursor.
+func TestSkillStore_ListLimitClamped(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+
+	const total = 210
+	for i := 0; i < total; i++ {
+		name := fmt.Sprintf("clamp-skill-%03d", i)
+		require.NoError(t, cs.CreateSkill(ctx, &store.Skill{
+			ID:         uuid.New().String(),
+			Name:       name,
+			Slug:       name,
+			Scope:      store.SkillScopeGlobal,
+			Status:     "active",
+			Visibility: "private",
+		}))
+	}
+
+	page, err := cs.ListSkills(ctx, store.SkillFilter{Status: "active"}, store.ListOptions{Limit: 100000})
+	require.NoError(t, err)
+	assert.Equal(t, total, page.TotalCount)
+	assert.LessOrEqual(t, len(page.Items), 200, "a caller-supplied limit must be clamped to the documented max of 200")
+	assert.NotEmpty(t, page.NextCursor, "more than 200 matching rows exist, so a cursor must be returned")
+}
+
+// TestSkillStore_ListCursorWalkVisitsEveryRowOnce walks ListSkills with a
+// small page size and confirms every matching row is visited exactly once
+// with no duplicates and none left behind — the keyset cursor ListSkills
+// previously ignored entirely (opts.Cursor was never read and NextCursor
+// was never set, so ?cursor= was silently a no-op).
+func TestSkillStore_ListCursorWalkVisitsEveryRowOnce(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+
+	const total = 23
+	want := make(map[string]bool, total)
+	for i := 0; i < total; i++ {
+		name := fmt.Sprintf("cursor-walk-skill-%03d", i)
+		skill := &store.Skill{
+			ID:         uuid.New().String(),
+			Name:       name,
+			Slug:       name,
+			Scope:      store.SkillScopeGlobal,
+			Status:     "active",
+			Visibility: "private",
+		}
+		require.NoError(t, cs.CreateSkill(ctx, skill))
+		want[skill.ID] = true
+	}
+
+	seen := make(map[string]bool, total)
+	cursor := ""
+	for pages := 0; ; pages++ {
+		require.LessOrEqual(t, pages, total, "cursor walk did not terminate")
+
+		page, err := cs.ListSkills(ctx, store.SkillFilter{Status: "active"}, store.ListOptions{Limit: 5, Cursor: cursor})
+		require.NoError(t, err)
+		require.LessOrEqual(t, len(page.Items), 5)
+
+		for _, it := range page.Items {
+			require.True(t, want[it.ID], "unexpected row %s in cursor walk", it.Name)
+			assert.False(t, seen[it.ID], "duplicate row %s across pages", it.Name)
+			seen[it.ID] = true
+		}
+
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
+	}
+
+	assert.Len(t, seen, total, "cursor walk must visit every matching row exactly once")
+}
+
+// TestSkillStore_ListAccessScope_UserAndProjectCombineWithScopeFilter is the
+// store-level regression for the read boundary pushed down in ListSkills:
+// hub-scoped skills are visible to anyone with IncludeHubScope, a
+// user-scoped skill only to its owning caller, a project-scoped skill only
+// to a caller whose project is in ProjectIDs, and none of that widens when
+// combined with the ordinary Scope/ScopeID query filters.
+func TestSkillStore_ListAccessScope_UserAndProjectCombineWithScopeFilter(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+
+	const callerID = "caller-user"
+	const memberProjectID = "member-project"
+	const otherProjectID = "other-project"
+
+	mine := &store.Skill{ID: uuid.New().String(), Name: "mine-user-skill", Slug: "mine-user-skill",
+		Scope: store.SkillScopeUser, ScopeID: callerID, Status: "active", Visibility: "private"}
+	require.NoError(t, cs.CreateSkill(ctx, mine))
+
+	othersUser := &store.Skill{ID: uuid.New().String(), Name: "others-user-skill", Slug: "others-user-skill",
+		Scope: store.SkillScopeUser, ScopeID: "someone-else", Status: "active", Visibility: "private"}
+	require.NoError(t, cs.CreateSkill(ctx, othersUser))
+
+	myProject := &store.Skill{ID: uuid.New().String(), Name: "my-project-skill", Slug: "my-project-skill",
+		Scope: store.SkillScopeProject, ScopeID: memberProjectID, Status: "active", Visibility: "private"}
+	require.NoError(t, cs.CreateSkill(ctx, myProject))
+
+	otherProject := &store.Skill{ID: uuid.New().String(), Name: "other-project-skill", Slug: "other-project-skill",
+		Scope: store.SkillScopeProject, ScopeID: otherProjectID, Status: "active", Visibility: "private"}
+	require.NoError(t, cs.CreateSkill(ctx, otherProject))
+
+	global := &store.Skill{ID: uuid.New().String(), Name: "hub-catalog-skill", Slug: "hub-catalog-skill",
+		Scope: store.SkillScopeGlobal, Status: "active", Visibility: "private"}
+	require.NoError(t, cs.CreateSkill(ctx, global))
+
+	scope := &store.SkillAccessScope{
+		IncludeHubScope: true,
+		CallerID:        callerID,
+		ProjectIDs:      []string{memberProjectID},
+	}
+
+	all, err := cs.ListSkills(ctx, store.SkillFilter{Status: "active", AccessScope: scope}, store.ListOptions{})
+	require.NoError(t, err)
+	gotIDs := make(map[string]bool, len(all.Items))
+	for _, it := range all.Items {
+		gotIDs[it.ID] = true
+	}
+	assert.True(t, gotIDs[mine.ID], "caller's own user-scoped skill must be visible")
+	assert.True(t, gotIDs[myProject.ID], "caller's member-project skill must be visible")
+	assert.True(t, gotIDs[global.ID], "hub-scoped skill must be visible")
+	assert.False(t, gotIDs[othersUser.ID], "another user's user-scoped skill must not be visible")
+	assert.False(t, gotIDs[otherProject.ID], "a non-member project's skill must not be visible")
+	assert.Equal(t, 3, all.TotalCount)
+
+	// Combining with an explicit ?scope=user filter (no scopeId) must AND
+	// with the access scope, not widen it: only the caller's own skill.
+	userOnly, err := cs.ListSkills(ctx, store.SkillFilter{Status: "active", Scope: store.SkillScopeUser, AccessScope: scope}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, userOnly.Items, 1)
+	assert.Equal(t, mine.ID, userOnly.Items[0].ID)
 }

@@ -246,13 +246,46 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 		filter.Status = "active"
 	}
 
+	identity := GetIdentityFromContext(ctx)
+
+	// ptone/scion#1901 (pagination follow-up): resolve the caller's project
+	// memberships and push the whole read boundary (hub scope, own user
+	// scope, member projects, public-visibility fallback) into the store
+	// query, ahead of COUNT and LIMIT. "project.list" is the right proxy
+	// permission here: every project role that carries skill.list also
+	// carries project.list, and only the elevated hub-admin/super-admin
+	// roles resolve to an unrestricted (IsAll) scope — exactly the pair of
+	// facts (my projects; am I unrestricted) this predicate needs. See
+	// skillAccessScopePredicate in pkg/store/entadapter/skill_store.go.
+	scopeResult, err := s.authzService.ResolveListScopes(ctx, identity, "project.list")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "unable to resolve authorization", nil)
+		return
+	}
+	if identity == nil {
+		filter.AccessScope = &store.SkillAccessScope{IncludePublicVisibility: true}
+	} else if !scopeResult.Scopes.IsAll() {
+		filter.AccessScope = &store.SkillAccessScope{
+			IncludeHubScope:         true,
+			CallerID:                identity.ID(),
+			ProjectIDs:              scopeResult.Scopes.ProjectIDs(),
+			IncludePublicVisibility: true,
+		}
+	}
+	// else: identity holds an unrestricted (hub-admin/super-admin) scope —
+	// leave filter.AccessScope nil so the query is unfiltered.
+
 	result, err := s.store.ListSkills(ctx, filter, listOptionsFromQuery(query))
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
 
-	identity := GetIdentityFromContext(ctx)
+	// The store query above already applies the caller's read boundary, so
+	// result.Items only contains rows the caller may see and result.TotalCount
+	// only counts those rows — pagination cannot crowd them out. The
+	// capability computation below is defense in depth (it also derives the
+	// per-row "_capabilities" the response returns), not the access decision.
 	skills := make([]SkillWithCapabilities, 0, len(result.Items))
 	if identity != nil {
 		resources := make([]Resource, len(result.Items))
@@ -279,15 +312,10 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "skill")
 	}
 
-	totalCount := result.TotalCount
-	if identity != nil {
-		totalCount = len(skills)
-	}
-
 	writeJSON(w, http.StatusOK, ListSkillsResponse{
 		Skills:       skills,
 		NextCursor:   result.NextCursor,
-		TotalCount:   totalCount,
+		TotalCount:   result.TotalCount,
 		Capabilities: scopeCap,
 	})
 }

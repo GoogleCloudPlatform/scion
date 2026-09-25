@@ -65,23 +65,35 @@ func runSkillsList(cmd *cobra.Command, args []string) error {
 		opts.Tags = strings.Split(tags, ",")
 	}
 
-	resp, err := hubCtx.Client.Skills().List(ctx, opts)
-	if err != nil {
-		return fmt.Errorf("failed to list skills: %w", err)
+	// The list endpoint applies the caller's read-scope boundary before
+	// paginating (ptone/scion#1901 pagination follow-up), so a single page
+	// is no longer guaranteed to contain every skill the caller can see —
+	// follow nextCursor until the server reports no more pages.
+	var skills []hubclient.Skill
+	for {
+		resp, err := hubCtx.Client.Skills().List(ctx, opts)
+		if err != nil {
+			return fmt.Errorf("failed to list skills: %w", err)
+		}
+		skills = append(skills, resp.Skills...)
+		if !resp.Page.HasMore() {
+			break
+		}
+		opts.Page.Cursor = resp.Page.NextCursor
 	}
 
 	if isJSONOutput() {
-		return json.NewEncoder(os.Stdout).Encode(resp.Skills)
+		return json.NewEncoder(os.Stdout).Encode(skills)
 	}
 
-	if len(resp.Skills) == 0 {
+	if len(skills) == 0 {
 		fmt.Println("No skills found.")
 		return nil
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(w, "NAME\tSCOPE\tSTATUS\tTAGS\tDESCRIPTION")
-	for _, s := range resp.Skills {
+	for _, s := range skills {
 		desc := s.Description
 		if len(desc) > 50 {
 			desc = desc[:47] + "..."
