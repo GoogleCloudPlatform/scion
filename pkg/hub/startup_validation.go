@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -48,7 +49,7 @@ func (s *Server) ValidateStartupDefaults(ctx context.Context) {
 	if name := d.DefaultTemplate; name != "" {
 		tpl, err := s.resolveTemplate(ctx, name, "")
 		switch {
-		case err != nil:
+		case err != nil && !errors.Is(err, store.ErrNotFound) && !errors.Is(err, config.ErrTemplateNotFound):
 			s.agentLifecycleLog.Warn(
 				"startup validation: failed to look up hub agent_defaults.default_template; "+
 					"agent creates relying on this default may fail unexpectedly",
