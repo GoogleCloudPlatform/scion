@@ -286,8 +286,12 @@ func authorizedList[T any](
 				continue
 			}
 			if len(result.Items) == pageLimit {
-				// Page filled. Resume from this (not-yet-included) item.
-				result.NextCursor = cursorFor(&page.Items[i])
+				// Page filled. NextCursor already holds the cursor of the
+				// last included item, set below when that item was
+				// appended; store cursors are exclusive, so resuming from
+				// it starts immediately after that item. Do not advance it
+				// to this (not-yet-included) item, or that item is skipped
+				// on the next page.
 				return result, nil
 			}
 			item := page.Items[i]

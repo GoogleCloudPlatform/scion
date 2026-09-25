@@ -150,6 +150,126 @@ func TestAuthorizedListFailsClosedOnLaterFetchOrAuthorizationError(t *testing.T)
 	}
 }
 
+// authorizedListBoundaryFetch serves items (in the order supplied) in
+// authorizedListBatchSize-sized batches, using each item's id (its index, as
+// a string) as the resume cursor — the same cursor-is-an-opaque-index
+// convention the other authorizedList tests in this file use.
+func authorizedListBoundaryFetch(items []authorizedListTestItem) func(context.Context, string, int) (authorizedCandidatePage[authorizedListTestItem], error) {
+	return func(_ context.Context, cursor string, limit int) (authorizedCandidatePage[authorizedListTestItem], error) {
+		start := 0
+		if cursor != "" {
+			_, _ = fmt.Sscan(cursor, &start)
+			start++
+		}
+		end := start + limit
+		if end > len(items) {
+			end = len(items)
+		}
+		next := ""
+		if end < len(items) {
+			next = items[end-1].id
+		}
+		return authorizedCandidatePage[authorizedListTestItem]{Items: items[start:end], NextCursor: next}, nil
+	}
+}
+
+// buildAuthorizedListBoundaryItems returns visibleCount*3 items, interleaved
+// two hidden (denied) items for every one visible (allowed) item, in list
+// order — item i is visible when (i+1)%3==0. That places a visible item at
+// (or immediately after) nearly every page boundary the walk below will hit,
+// which is exactly the position ptone/scion#1974's page-filled branch used
+// to drop.
+func buildAuthorizedListBoundaryItems(visibleCount int) (items []authorizedListTestItem, visible map[string]bool) {
+	total := 3 * visibleCount
+	items = make([]authorizedListTestItem, total)
+	visible = make(map[string]bool, visibleCount)
+	for i := 0; i < total; i++ {
+		id := fmt.Sprint(i)
+		items[i] = authorizedListTestItem{id: id}
+		if (i+1)%3 == 0 {
+			visible[id] = true
+		}
+	}
+	return items, visible
+}
+
+// walkAuthorizedListPages drives authorizedList to exhaustion, following
+// NextCursor from a fresh call each time (mirroring how each HTTP request
+// re-runs authorizedList from the caller's cursor). It fails the test if any
+// item is returned on more than one page.
+func walkAuthorizedListPages(t *testing.T, items []authorizedListTestItem, visible map[string]bool, limit int) (pages [][]string) {
+	t.Helper()
+	fetch := authorizedListBoundaryFetch(items)
+	read := func(_ context.Context, _ Identity, resources []Resource) ([]bool, error) {
+		allowed := make([]bool, len(resources))
+		for i, r := range resources {
+			allowed[i] = visible[r.ID]
+		}
+		return allowed, nil
+	}
+	resource := func(item *authorizedListTestItem) Resource { return Resource{ID: item.id} }
+	cursorFor := func(item *authorizedListTestItem) string { return item.id }
+
+	seen := map[string]bool{}
+	cursor := ""
+	for {
+		result, err := authorizedList(context.Background(), nil, cursor, limit, fetch, resource, cursorFor, read)
+		require.NoError(t, err)
+		ids := make([]string, len(result.Items))
+		for i, it := range result.Items {
+			require.False(t, seen[it.id], "item %s returned on more than one page", it.id)
+			seen[it.id] = true
+			ids[i] = it.id
+		}
+		pages = append(pages, ids)
+		if result.NextCursor == "" {
+			return pages
+		}
+		cursor = result.NextCursor
+		require.Less(t, len(pages), len(items)+10, "did not converge within a sane number of pages")
+	}
+}
+
+// TestAuthorizedListPageFillKeepsLastIncludedCursor is the ptone/scion#1974
+// regression test. Before the fix, the page-filled branch of the page-fill
+// pass advanced NextCursor to the next (not returned) allowed candidate
+// instead of leaving it at the last included item; since store cursors are
+// exclusive, the next page then resumed strictly after that unreturned item
+// and it was never returned by any page. This walks a full multi-page list
+// at several limits, including page counts that land exactly on a limit
+// boundary and one past it, and checks the union of every page against the
+// expected set, that no item repeats, that the page count matches
+// ceil(visible/limit), and that two independent walks agree (cursor
+// stability).
+func TestAuthorizedListPageFillKeepsLastIncludedCursor(t *testing.T) {
+	for _, limit := range []int{1, 10, 25, authorizedListBatchSize} {
+		for _, extra := range []int{0, 1} { // exact multiple of limit, then one past it
+			visibleCount := 2*limit + extra
+			t.Run(fmt.Sprintf("limit=%d/visible=%d", limit, visibleCount), func(t *testing.T) {
+				items, visible := buildAuthorizedListBoundaryItems(visibleCount)
+
+				pages1 := walkAuthorizedListPages(t, items, visible, limit)
+				pages2 := walkAuthorizedListPages(t, items, visible, limit)
+				assert.Equal(t, pages1, pages2, "two independent walks over the same list must return identical pages")
+
+				union := map[string]bool{}
+				for i, page := range pages1 {
+					if i < len(pages1)-1 {
+						assert.Len(t, page, limit, "page %d of %d should be full", i+1, len(pages1))
+					}
+					for _, id := range page {
+						union[id] = true
+					}
+				}
+				assert.Equal(t, visible, union, "union of all pages must equal the expected visible set, with no drops and no leaked hidden items")
+
+				wantPages := (visibleCount + limit - 1) / limit
+				assert.Equal(t, wantPages, len(pages1), "page count must equal ceil(visible count / limit)")
+			})
+		}
+	}
+}
+
 func TestAuthorizedListStopsAfterInFlightCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	fetches := 0
