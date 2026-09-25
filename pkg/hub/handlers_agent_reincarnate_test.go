@@ -34,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
@@ -1008,6 +1009,72 @@ func TestReincarnateAgent_NoBrokerEchoKeepsHubResolvedImage(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, final.AppliedConfig)
 	assert.Equal(t, "harness-config-image:v2", final.AppliedConfig.Image)
+}
+
+// httpReprovisionDispatcher is the reincarnate test dispatcher with
+// reprovision sent through the real HTTPAgentDispatcher (to a mock broker
+// client), so the worker runs against the real dispatchProvision.
+type httpReprovisionDispatcher struct {
+	*reincarnateTestDispatcher
+	http *HTTPAgentDispatcher
+}
+
+func (d *httpReprovisionDispatcher) DispatchAgentReprovision(ctx context.Context, agent *store.Agent) error {
+	return d.http.DispatchAgentReprovision(ctx, agent)
+}
+
+// TestReincarnateAgent_RowEnvMatchesFreshConfigAfterReprovision proves the
+// env resolved at reprovision time (storage env vars and environment-type
+// values) is sent to the broker but does not end up in the agent row: after a
+// reincarnation the row's Env equals the fresh derivation's, and the next
+// plan shows no env change.
+func TestReincarnateAgent_RowEnvMatchesFreshConfigAfterReprovision(t *testing.T) {
+	ctx := context.Background()
+	fake := newReincarnateTestDispatcher()
+	disp := &httpReprovisionDispatcher{reincarnateTestDispatcher: fake}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+
+	broker.Endpoint = "http://localhost:9800"
+	require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
+	require.NoError(t, s.CreateEnvVar(ctx, &store.EnvVar{
+		ID:            tid("ev-stored-" + t.Name()),
+		Key:           "STORED_VAR",
+		Value:         "stored-value",
+		Scope:         store.ScopeProject,
+		ScopeID:       project.ID,
+		InjectionMode: store.InjectionModeAlways,
+	}))
+	mockClient := &mockRuntimeBrokerClient{}
+	disp.http = NewHTTPAgentDispatcherWithClient(s, mockClient, false, slog.Default())
+	disp.http.SetSecretBackend(&mockSecretBackend{
+		secrets: []secret.SecretWithValue{
+			{SecretMeta: secret.SecretMeta{Name: "RESOLVED_VAR", SecretType: "environment", Target: "RESOLVED_VAR"}, Value: "resolved-value"},
+		},
+	})
+
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateCompleted, r.State, r.Error)
+
+	require.NotNil(t, mockClient.lastCreateReq)
+	require.True(t, mockClient.lastCreateReq.Reprovision)
+	assert.Equal(t, "stored-value", mockClient.lastCreateReq.ResolvedEnv["STORED_VAR"], "the broker must still receive the storage env var")
+	assert.Equal(t, "resolved-value", mockClient.lastCreateReq.ResolvedEnv["RESOLVED_VAR"], "the broker must still receive the environment-type value")
+
+	final, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, final.AppliedConfig)
+	fresh, _, err := srv.buildFreshAppliedConfig(ctx, final, project, "")
+	require.NoError(t, err)
+	assert.Equal(t, fresh.Env, final.AppliedConfig.Env, "the row's env must equal the fresh derivation's env")
+	assert.NotContains(t, final.AppliedConfig.Env, "STORED_VAR")
+	assert.NotContains(t, final.AppliedConfig.Env, "RESOLVED_VAR")
+	assert.Equal(t, KeyDiff{}, computeReincarnationPlan(final.AppliedConfig, fresh, nil, "").EnvKeys, "the next plan must show no env change")
 }
 
 // imageRegistryPlan runs a dry-run reincarnate against an agent whose image

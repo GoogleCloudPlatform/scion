@@ -34,6 +34,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // createTestStore creates an in-memory SQLite store for testing.
@@ -900,6 +902,99 @@ func TestHTTPAgentDispatcher_DispatchAgentReprovision(t *testing.T) {
 	if mockClient.lastEndpoint != "http://localhost:9800" {
 		t.Errorf("expected endpoint 'http://localhost:9800', got '%s'", mockClient.lastEndpoint)
 	}
+}
+
+// resolvedEnvDispatcher returns a dispatcher whose requests resolve one
+// storage env var (STORED_VAR) and one environment-type value (RESOLVED_VAR)
+// into ResolvedEnv, plus an agent owned by the user they resolve for.
+func resolvedEnvDispatcher(t *testing.T) (*HTTPAgentDispatcher, *mockRuntimeBrokerClient, *store.Agent) {
+	t.Helper()
+	ctx := context.Background()
+	memStore := createTestStore(t)
+	require.NoError(t, memStore.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID:       tid("host-1"),
+		Name:     "test-host",
+		Slug:     "test-host",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}))
+	require.NoError(t, memStore.CreateEnvVar(ctx, &store.EnvVar{
+		ID:            tid("ev-1"),
+		Key:           "STORED_VAR",
+		Value:         "stored-value",
+		Scope:         "user",
+		ScopeID:       tid("user-1"),
+		InjectionMode: store.InjectionModeAlways,
+	}))
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	dispatcher.SetSecretBackend(&mockSecretBackend{
+		secrets: []secret.SecretWithValue{
+			{SecretMeta: secret.SecretMeta{Name: "RESOLVED_VAR", SecretType: "environment", Target: "RESOLVED_VAR"}, Value: "resolved-value"},
+		},
+	})
+
+	agent := &store.Agent{
+		ID:              tid("agent-1"),
+		Name:            "test-agent",
+		Slug:            "test-agent",
+		OwnerID:         tid("user-1"),
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("host-1"),
+		AppliedConfig: &store.AgentAppliedConfig{
+			HarnessConfig: "claude",
+			Env:           map[string]string{"CONFIG_VAR": "config-value"},
+		},
+	}
+	return dispatcher, mockClient, agent
+}
+
+// TestHTTPAgentDispatcher_ReprovisionDoesNotMergeResolvedEnv proves a
+// reprovision sends the resolved env to the broker but leaves the agent's
+// AppliedConfig.Env exactly as the reincarnate worker built it. Merging the
+// resolved env back would make every later reincarnation plan show those
+// keys as removed.
+func TestHTTPAgentDispatcher_ReprovisionDoesNotMergeResolvedEnv(t *testing.T) {
+	dispatcher, mockClient, agent := resolvedEnvDispatcher(t)
+
+	require.NoError(t, dispatcher.DispatchAgentReprovision(context.Background(), agent))
+
+	require.NotNil(t, mockClient.lastCreateReq)
+	assert.Equal(t, "stored-value", mockClient.lastCreateReq.ResolvedEnv["STORED_VAR"], "the broker must still receive the storage env var")
+	assert.Equal(t, "resolved-value", mockClient.lastCreateReq.ResolvedEnv["RESOLVED_VAR"], "the broker must still receive the environment-type value")
+	assert.Equal(t, map[string]string{"CONFIG_VAR": "config-value"}, agent.AppliedConfig.Env)
+}
+
+// TestHTTPAgentDispatcher_ReprovisionSkipHoldsForPlainKeys pins that the
+// reprovision skip runs before the plain-key allowlist: STORED_VAR is
+// classified api.EnvKindPlain, so plain provision would persist it, yet a
+// reprovision must still leave AppliedConfig.Env untouched.
+func TestHTTPAgentDispatcher_ReprovisionSkipHoldsForPlainKeys(t *testing.T) {
+	dispatcher, mockClient, agent := resolvedEnvDispatcher(t)
+
+	require.NoError(t, dispatcher.DispatchAgentReprovision(context.Background(), agent))
+
+	require.NotNil(t, mockClient.lastCreateReq)
+	kind, ok := api.ClassifyEnvKey(mockClient.lastCreateReq.EnvClassifications, "STORED_VAR")
+	require.True(t, ok, "STORED_VAR must carry a classification")
+	require.Equal(t, api.EnvKindPlain, kind, "the case only proves the ordering if STORED_VAR is plain")
+	assert.NotContains(t, agent.AppliedConfig.Env, "STORED_VAR")
+	assert.Equal(t, map[string]string{"CONFIG_VAR": "config-value"}, agent.AppliedConfig.Env)
+}
+
+// TestHTTPAgentDispatcher_ProvisionMergesResolvedEnv pins the plain provision
+// path, which still merges plain-classified resolved env into
+// AppliedConfig.Env so it shows in the advanced config form. The
+// environment-type secret value is not persisted (shouldPersistResolvedEnvKey).
+func TestHTTPAgentDispatcher_ProvisionMergesResolvedEnv(t *testing.T) {
+	dispatcher, _, agent := resolvedEnvDispatcher(t)
+
+	require.NoError(t, dispatcher.DispatchAgentProvision(context.Background(), agent))
+
+	assert.Equal(t, "config-value", agent.AppliedConfig.Env["CONFIG_VAR"])
+	assert.Equal(t, "stored-value", agent.AppliedConfig.Env["STORED_VAR"])
+	assert.NotContains(t, agent.AppliedConfig.Env, "RESOLVED_VAR")
 }
 
 // TestHTTPAgentDispatcher_DispatchAgentReprovision_MissingEchoFails is the

@@ -1278,7 +1278,13 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 	// (enforced by TestBuildCreateRequestClassifiesEveryResolvedEnvKey) or it
 	// will silently stop showing up here; that is the intended fail-closed
 	// behavior, not a bug to work around by classifying it Plain.
-	if agent.AppliedConfig != nil && len(req.ResolvedEnv) > 0 {
+	//
+	// Not on reprovision: the fresh config the reincarnate worker built is
+	// authoritative, and resolved env is re-resolved on every dispatch, so
+	// merging it back would only make the next reincarnation plan show a
+	// false env diff. The skip applies before the classification check, so
+	// it holds even for keys classified api.EnvKindPlain.
+	if !reprovision && agent.AppliedConfig != nil && len(req.ResolvedEnv) > 0 {
 		if agent.AppliedConfig.Env == nil {
 			agent.AppliedConfig.Env = make(map[string]string)
 		}
