@@ -116,8 +116,18 @@ type dockerListOutput struct {
 	Labels string `json:"Labels"`
 }
 
+// dockerListFormat renders exactly the fields in dockerListOutput as JSON.
+//
+// Do not replace this with "{{json .}}": that template references every
+// container field, including .Size, which makes the Docker CLI request
+// size=1 from the daemon. Computing sizes walks every container's overlay
+// filesystem (snapshotter.Usage) and fails the whole `docker ps` call when a
+// file disappears mid-walk, which is routine for agent containers with busy
+// /tmp directories. See ptone/scion#1867.
+const dockerListFormat = `{"ID":{{json .ID}},"Names":{{json .Names}},"Status":{{json .Status}},"Image":{{json .Image}},"Labels":{{json .Labels}}}`
+
 func (r *DockerRuntime) List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
-	args := []string{"ps", "-a", "--no-trunc", "--format", "{{json .}}"}
+	args := []string{"ps", "-a", "--no-trunc", "--format", dockerListFormat}
 	cmd := exec.CommandContext(ctx, r.Command, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
