@@ -407,14 +407,17 @@ how you operate this tier:
 
 **Creating the export as a dedicated filesystem root.** The recommended
 approach: put the export on its own filesystem (a loop-mounted image file on
-the boot disk here; a separate disk is the same recipe with the device in
-place of the image file and no `loop` option) rather than a subdirectory of
-`/`. Run once, as root:
+the boot disk here) rather than a subdirectory of `/`. Run once, as root:
 
 ```bash
 # Create and format the backing image, but only the first time -- never
 # re-create or re-format one that already exists, since that would
 # destroy its contents on every re-run of any provisioning automation.
+# Size this for the scratchpad's expected footprint, leaving headroom on
+# / for the OS, container images, and hub.db -- this example uses 100G on
+# the default 200G boot disk; adjust to fit your workload, and remember
+# that a cutover (below) also needs / to have free space for the image on
+# top of the existing tree it's copying.
 test ! -e /var/lib/scion-shared.img || { echo "image exists; not re-creating" >&2; exit 1; }
 fallocate -l 100G /var/lib/scion-shared.img      # preallocated: also gives the size isolation from / noted above
 mkfs.ext4 -q /var/lib/scion-shared.img           # ext4: the ACL support the E2 section below relies on
@@ -426,18 +429,38 @@ mkdir -p /srv/scion-shared
 # nfs-server start anyway and export the bare directory on / -- exactly
 # the gap this layout exists to close. x-systemd.required-by= is what
 # turns "ordered before" into "required by", so nfs-server.service will
-# not start if this mount unit fails.
-echo '/var/lib/scion-shared.img /srv/scion-shared ext4 loop,x-systemd.before=nfs-server.service,x-systemd.required-by=nfs-server.service 0 2' >> /etc/fstab
+# not start if this mount unit fails. Because required-by= is set here,
+# systemd-fstab-generator does not also attach this mount to
+# local-fs.target (systemd.mount(5)), so a failed mount blocks only
+# nfs-server, never boot. nofail is kept anyway, defensively: it keeps
+# that same "boot never blocks on this mount" property true even if the
+# required-by= option is ever removed from this line. The fsck pass is
+# 0: systemd-fstab-generator only schedules fsck for device paths, so a
+# nonzero pass on this loop-mounted regular file is a no-op that just
+# logs a boot-time warning.
+echo '/var/lib/scion-shared.img /srv/scion-shared ext4 loop,nofail,x-systemd.before=nfs-server.service,x-systemd.required-by=nfs-server.service 0 0' >> /etc/fstab
 systemctl daemon-reload
 mount /srv/scion-shared
 mountpoint -q /srv/scion-shared || { echo "mount failed; refusing to continue" >&2; exit 1; }
 ```
 
+For a separate disk instead of a loop-mounted image file:
+
+- Use the device path in place of the image path throughout, and skip
+  `fallocate` and the `loop` mount option.
+- Guard the format with `blkid -p <dev>` (format only if it reports no
+  filesystem).
+- Use `UUID=<uuid>` or `/dev/disk/by-id/...` in fstab rather than the raw
+  device name, which can change across reboots.
+- Use fsck pass `2` rather than `0`, since fsck does apply to a real
+  device.
+
 The export path is the mounted filesystem's own root, not a subdirectory
 under it. The exports(5) `mp` (mountpoint) option is the export-side half of
-the same fail-closed guarantee -- it makes knfsd itself refuse to serve the
-path unless it's currently a mountpoint, which also covers a mount that fails
-on a later reboot, not just at initial provisioning time:
+the same fail-closed guarantee -- it's enforced by nfs-utils userspace
+(`exportfs`/`rpc.mountd`), not the kernel, and makes the NFS server refuse to
+export the path unless it's currently a mountpoint, which also covers a mount
+that fails on a later reboot, not just at initial provisioning time:
 
 ```
 /srv/scion-shared <node-subnet>(rw,sync,no_subtree_check,all_squash,anonuid=<uid>,anongid=<gid>,mp)
@@ -458,20 +481,60 @@ chmod 2755 /srv/scion-shared
 **On an existing deployment.** Switching an already-running hub to this
 layout replaces the filesystem underneath the export, which the Reboot/
 stale-handle caveats below already flag as an ESTALE trigger -- treat it as a
-migration, not a live change:
+migration, not a live change. The steps below never mount the new filesystem
+over `/srv/scion-shared` until the old tree has already been moved out from
+under that path by name, so the final cleanup step can only ever remove the
+retired copy it explicitly names, never data hidden under a live mount:
 
-1. Stop the hub and any GKE agents so nothing is reading or writing the
-   export during the copy.
-2. Create and mount the new filesystem at a temporary path (the block
-   above, with a scratch mountpoint instead of `/srv/scion-shared`).
-3. Copy the existing tree across, preserving ACLs: `rsync -aAX
-   /srv/scion-shared/ /mnt/new-export/`.
-4. Apply the ownership/mode step above to the new filesystem's root.
-5. Unmount the temporary mountpoint, then mount the same filesystem at
-   `/srv/scion-shared` (update `/etc/fstab` accordingly) and
-   `exportfs -ra`.
-6. Restart the hub and GKE agents; existing NFS clients need to remount.
-7. Once you've verified the copy, remove the old data from `/`.
+1. Create and format the backing image, and mount it at a temporary path
+   instead of `/srv/scion-shared`. Do not add the fstab line or mount at
+   `/srv/scion-shared` yet -- that comes in step 7.
+
+   ```bash
+   test ! -e /var/lib/scion-shared.img || { echo "image exists; not re-creating" >&2; exit 1; }
+   fallocate -l 100G /var/lib/scion-shared.img      # size per the sizing guidance above: larger than du -sh /srv/scion-shared, with room left on /
+   mkfs.ext4 -q /var/lib/scion-shared.img
+   mkdir -p /mnt/scion-shared-new
+   mount -o loop /var/lib/scion-shared.img /mnt/scion-shared-new
+   mountpoint -q /mnt/scion-shared-new || { echo "mount failed; refusing to continue" >&2; exit 1; }
+   ```
+2. Copy the existing tree across, preserving ACLs and hard links, while the
+   hub and agents keep running: `rsync -aHAX /srv/scion-shared/
+   /mnt/scion-shared-new/`.
+3. Stop the hub, any GKE agents, and `systemctl stop nfs-server`, so nothing
+   is reading, writing, or serving the export during the swap.
+4. Catch anything written since step 2 with a final, quick sync:
+   `rsync -aHAX --delete /srv/scion-shared/ /mnt/scion-shared-new/`.
+5. `umount /mnt/scion-shared-new`.
+6. `/srv/scion-shared` is still an ordinary directory at this point --
+   nothing is mounted over it -- so it's safe to retire it by name:
+   `mv /srv/scion-shared /srv/scion-shared.old`.
+7. `mkdir -p /srv/scion-shared`, then add the fstab line and mount it as in
+   the block above (pointing at the real export path this time), and
+   confirm with `mountpoint -q /srv/scion-shared`.
+8. Apply the ownership/mode step above to the new filesystem's root.
+9. Add `mp` to the export line and `systemctl start nfs-server`.
+10. Restart the hub and GKE agents; existing NFS clients need to remount.
+11. Once you've verified the new export, remove the retired copy:
+    `rm -rf /srv/scion-shared.old` -- this only ever targets the `.old` path
+    from step 6, never the live, currently-mounted export.
+
+To roll back once you've started step 7 (including a failed step 7) but
+before step 11: stop the hub and GKE agents, stop `nfs-server`, `umount
+/srv/scion-shared`, remove the fstab line and run `systemctl
+daemon-reload`, then `rmdir /srv/scion-shared && mv
+/srv/scion-shared.old /srv/scion-shared`, drop `mp` from the export line,
+start `nfs-server`, and restart the hub and agents (clients remount
+again). If you stop before starting step 7, just `umount
+/mnt/scion-shared-new` (and, if step 6 ran, `mv /srv/scion-shared.old
+/srv/scion-shared`), then start `nfs-server` and restart the hub and
+agents. Anything written after step 10 remains only on the image file;
+recover it by loop-mounting the image read-only at a temporary path and
+copying it out. The image itself is left in place -- unmount it first if
+you stopped during steps 1-4 and haven't run the rollback. Step 1's guard
+refuses an existing image; to reuse it, run only the last three lines of
+step 1 (mkdir, mount, mountpoint). Remove the image first if you want a
+fresh one.
 
 ## Reboot, stale-handle, and cross-runtime visibility caveats
 
