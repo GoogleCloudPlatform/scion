@@ -65,7 +65,6 @@ func entSkillToStore(e *ent.Skill) *store.Skill {
 		OwnerID:       e.OwnerID,
 		CreatedBy:     e.CreatedBy,
 		UpdatedBy:     e.UpdatedBy,
-		Visibility:    e.Visibility,
 		Created:       e.Created,
 		Updated:       e.Updated,
 	}
@@ -127,7 +126,6 @@ func (s *SkillStore) CreateSkill(ctx context.Context, skill *store.Skill) error 
 		SetOwnerID(skill.OwnerID).
 		SetCreatedBy(skill.CreatedBy).
 		SetUpdatedBy(skill.UpdatedBy).
-		SetVisibility(skill.Visibility).
 		SetCreated(skill.Created).
 		SetUpdated(skill.Updated).
 		Save(ctx)
@@ -192,7 +190,6 @@ func (s *SkillStore) UpdateSkill(ctx context.Context, skill *store.Skill) error 
 		SetStatus(entskill.Status(skill.Status)).
 		SetOwnerID(skill.OwnerID).
 		SetUpdatedBy(skill.UpdatedBy).
-		SetVisibility(skill.Visibility).
 		SetUpdated(skill.Updated).
 		Save(ctx)
 	if err != nil {
@@ -314,10 +311,11 @@ func skillBeforeCursor(cursorCreated time.Time, cursorID uuid.UUID) predicate.Sk
 
 // skillAccessScopePredicate translates a store.SkillAccessScope into the
 // disjunction of conditions under which a skill is visible to the caller:
-// hub-scoped, owned-by-the-caller user scope, a project the caller belongs
-// to, or (temporarily, until ptone/scion#1903) publicly visible regardless
-// of scope. A nil scope means "no restriction" (the admin bypass) and
-// returns a nil predicate so the caller adds nothing to the query.
+// hub-scoped, owned-by-the-caller user scope, or a project the caller
+// belongs to. Visibility no longer widens this (ptone/scion#1903): a skill's
+// creation scope is the only read boundary. A nil scope means "no
+// restriction" (the admin bypass) and returns a nil predicate so the caller
+// adds nothing to the query.
 func skillAccessScopePredicate(scope *store.SkillAccessScope) predicate.Skill {
 	if scope == nil {
 		return nil
@@ -339,14 +337,11 @@ func skillAccessScopePredicate(scope *store.SkillAccessScope) predicate.Skill {
 			entskill.ScopeIDIn(scope.ProjectIDs...),
 		))
 	}
-	if scope.IncludePublicVisibility {
-		terms = append(terms, entskill.VisibilityEQ(store.VisibilityPublic))
-	}
 
 	if len(terms) == 0 {
-		// A non-nil scope with no matching terms (e.g. an anonymous caller
-		// with IncludePublicVisibility false) authorizes nothing. No skill
-		// ID is ever the nil UUID, so this predicate matches no rows.
+		// A non-nil scope with no matching terms (e.g. an anonymous caller)
+		// authorizes nothing. No skill ID is ever the nil UUID, so this
+		// predicate matches no rows.
 		return entskill.IDEQ(uuid.Nil)
 	}
 	return entskill.Or(terms...)

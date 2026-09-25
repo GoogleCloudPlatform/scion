@@ -1632,21 +1632,18 @@ type SkillFilter struct {
 }
 
 // SkillAccessScope narrows a skill query to the rows a specific caller may
-// read, mirroring the ptone/scion#1901 ruling:
+// read, mirroring the ptone/scion#1901 and ptone/scion#1903 rulings —
+// creation scope is the only read boundary; visibility does not widen it:
 //   - IncludeHubScope: hub-scoped (global/core) skills are visible to any
 //     authenticated caller.
 //   - CallerID: a user-scoped skill is visible only when its ScopeID equals
 //     CallerID (the owning user).
 //   - ProjectIDs: a project-scoped skill is visible only when its ScopeID is
 //     one of these (the caller's project memberships).
-//   - IncludePublicVisibility: a skill whose Visibility is "public" remains
-//     visible regardless of scope. Temporary until ptone/scion#1903 removes
-//     the visibility field.
 type SkillAccessScope struct {
-	IncludeHubScope         bool
-	CallerID                string
-	ProjectIDs              []string
-	IncludePublicVisibility bool
+	IncludeHubScope bool
+	CallerID        string
+	ProjectIDs      []string
 }
 
 // =============================================================================

@@ -39,7 +39,6 @@ func TestSkillStore_CreateAndGet(t *testing.T) {
 		Tags:        []string{"test", "example"},
 		Scope:       "global",
 		Status:      "active",
-		Visibility:  "private",
 	}
 
 	err := cs.CreateSkill(ctx, skill)
@@ -66,7 +65,6 @@ func TestSkillStore_GetBySlug(t *testing.T) {
 		Slug:       "my-skill",
 		Scope:      "global",
 		Status:     "active",
-		Visibility: "private",
 	}
 	require.NoError(t, cs.CreateSkill(ctx, skill))
 
@@ -88,7 +86,6 @@ func TestSkillStore_Update(t *testing.T) {
 		Slug:       "old-name",
 		Scope:      "global",
 		Status:     "active",
-		Visibility: "private",
 	}
 	require.NoError(t, cs.CreateSkill(ctx, skill))
 
@@ -113,7 +110,6 @@ func TestSkillStore_DeleteSoftArchives(t *testing.T) {
 		Slug:       "to-delete",
 		Scope:      "global",
 		Status:     "active",
-		Visibility: "private",
 	}
 	require.NoError(t, cs.CreateSkill(ctx, skill))
 
@@ -143,7 +139,6 @@ func TestSkillStore_ListWithFilters(t *testing.T) {
 			Slug:       s.name,
 			Scope:      s.scope,
 			Status:     "active",
-			Visibility: "private",
 		}))
 	}
 
@@ -175,7 +170,6 @@ func TestSkillStore_VersionCRUD(t *testing.T) {
 		Slug:       "versioned-skill",
 		Scope:      "global",
 		Status:     "active",
-		Visibility: "private",
 	}))
 
 	// Create version
@@ -225,7 +219,6 @@ func TestSkillStore_VersionImmutability(t *testing.T) {
 		Slug:       "immutable-test",
 		Scope:      "global",
 		Status:     "active",
-		Visibility: "private",
 	}))
 
 	require.NoError(t, cs.CreateSkillVersion(ctx, &store.SkillVersion{
@@ -256,7 +249,6 @@ func TestSkillStore_ResolveVersion_Latest(t *testing.T) {
 		Slug:       "resolve-test",
 		Scope:      "global",
 		Status:     "active",
-		Visibility: "private",
 	}))
 
 	// Create v1.0.0 and v1.1.0 as published
@@ -299,7 +291,6 @@ func TestSkillStore_ResolveVersion_Exact(t *testing.T) {
 		Slug:       "exact-test",
 		Scope:      "global",
 		Status:     "active",
-		Visibility: "private",
 	}))
 
 	require.NoError(t, cs.CreateSkillVersion(ctx, &store.SkillVersion{
@@ -329,7 +320,6 @@ func TestSkillStore_ResolveVersion_Constraint(t *testing.T) {
 		Slug:       "constraint-test",
 		Scope:      "global",
 		Status:     "active",
-		Visibility: "private",
 	}))
 
 	for _, v := range []string{"1.0.0", "1.1.0", "1.2.0", "2.0.0"} {
@@ -368,7 +358,6 @@ func TestSkillStore_ResolveVersion_ContentHash(t *testing.T) {
 		Slug:       "hash-test",
 		Scope:      "global",
 		Status:     "active",
-		Visibility: "private",
 	}))
 
 	require.NoError(t, cs.CreateSkillVersion(ctx, &store.SkillVersion{
@@ -398,7 +387,6 @@ func TestSkillStore_ResolveVersion_ExcludesDrafts(t *testing.T) {
 		Slug:       "draft-test",
 		Scope:      "global",
 		Status:     "active",
-		Visibility: "private",
 	}))
 
 	// Only a draft version exists
@@ -424,7 +412,6 @@ func TestSkillStore_UniqueSlugPerScope(t *testing.T) {
 		Slug:       "unique-test",
 		Scope:      "global",
 		Status:     "active",
-		Visibility: "private",
 	}))
 
 	// Duplicate slug in same scope should fail
@@ -434,7 +421,6 @@ func TestSkillStore_UniqueSlugPerScope(t *testing.T) {
 		Slug:       "unique-test",
 		Scope:      "global",
 		Status:     "active",
-		Visibility: "private",
 	})
 	assert.Error(t, err)
 
@@ -446,7 +432,6 @@ func TestSkillStore_UniqueSlugPerScope(t *testing.T) {
 		Scope:      "project",
 		ScopeID:    "proj-1",
 		Status:     "active",
-		Visibility: "private",
 	})
 	assert.NoError(t, err)
 }
@@ -462,7 +447,6 @@ func TestSkillStore_DeleteSkillVersion(t *testing.T) {
 		Slug:       "delete-version-test",
 		Scope:      "global",
 		Status:     "active",
-		Visibility: "private",
 	}))
 
 	// Create a draft version and delete it successfully.
@@ -528,7 +512,6 @@ func TestSkillStore_ListLimitClamped(t *testing.T) {
 			Slug:       name,
 			Scope:      store.SkillScopeGlobal,
 			Status:     "active",
-			Visibility: "private",
 		}))
 	}
 
@@ -558,7 +541,6 @@ func TestSkillStore_ListCursorWalkVisitsEveryRowOnce(t *testing.T) {
 			Slug:       name,
 			Scope:      store.SkillScopeGlobal,
 			Status:     "active",
-			Visibility: "private",
 		}
 		require.NoError(t, cs.CreateSkill(ctx, skill))
 		want[skill.ID] = true
@@ -603,23 +585,23 @@ func TestSkillStore_ListAccessScope_UserAndProjectCombineWithScopeFilter(t *test
 	const otherProjectID = "other-project"
 
 	mine := &store.Skill{ID: uuid.New().String(), Name: "mine-user-skill", Slug: "mine-user-skill",
-		Scope: store.SkillScopeUser, ScopeID: callerID, Status: "active", Visibility: "private"}
+		Scope: store.SkillScopeUser, ScopeID: callerID, Status: "active"}
 	require.NoError(t, cs.CreateSkill(ctx, mine))
 
 	othersUser := &store.Skill{ID: uuid.New().String(), Name: "others-user-skill", Slug: "others-user-skill",
-		Scope: store.SkillScopeUser, ScopeID: "someone-else", Status: "active", Visibility: "private"}
+		Scope: store.SkillScopeUser, ScopeID: "someone-else", Status: "active"}
 	require.NoError(t, cs.CreateSkill(ctx, othersUser))
 
 	myProject := &store.Skill{ID: uuid.New().String(), Name: "my-project-skill", Slug: "my-project-skill",
-		Scope: store.SkillScopeProject, ScopeID: memberProjectID, Status: "active", Visibility: "private"}
+		Scope: store.SkillScopeProject, ScopeID: memberProjectID, Status: "active"}
 	require.NoError(t, cs.CreateSkill(ctx, myProject))
 
 	otherProject := &store.Skill{ID: uuid.New().String(), Name: "other-project-skill", Slug: "other-project-skill",
-		Scope: store.SkillScopeProject, ScopeID: otherProjectID, Status: "active", Visibility: "private"}
+		Scope: store.SkillScopeProject, ScopeID: otherProjectID, Status: "active"}
 	require.NoError(t, cs.CreateSkill(ctx, otherProject))
 
 	global := &store.Skill{ID: uuid.New().String(), Name: "hub-catalog-skill", Slug: "hub-catalog-skill",
-		Scope: store.SkillScopeGlobal, Status: "active", Visibility: "private"}
+		Scope: store.SkillScopeGlobal, Status: "active"}
 	require.NoError(t, cs.CreateSkill(ctx, global))
 
 	scope := &store.SkillAccessScope{

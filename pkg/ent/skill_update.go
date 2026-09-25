@@ -264,20 +264,6 @@ func (_u *SkillUpdate) ClearUpdatedBy() *SkillUpdate {
 	return _u
 }
 
-// SetVisibility sets the "visibility" field.
-func (_u *SkillUpdate) SetVisibility(v string) *SkillUpdate {
-	_u.mutation.SetVisibility(v)
-	return _u
-}
-
-// SetNillableVisibility sets the "visibility" field if the given value is not nil.
-func (_u *SkillUpdate) SetNillableVisibility(v *string) *SkillUpdate {
-	if v != nil {
-		_u.SetVisibility(*v)
-	}
-	return _u
-}
-
 // SetUpdated sets the "updated" field.
 func (_u *SkillUpdate) SetUpdated(v time.Time) *SkillUpdate {
 	_u.mutation.SetUpdated(v)
@@ -422,9 +408,6 @@ func (_u *SkillUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.UpdatedByCleared() {
 		_spec.ClearField(skill.FieldUpdatedBy, field.TypeString)
-	}
-	if value, ok := _u.mutation.Visibility(); ok {
-		_spec.SetField(skill.FieldVisibility, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.Updated(); ok {
 		_spec.SetField(skill.FieldUpdated, field.TypeTime, value)
@@ -685,20 +668,6 @@ func (_u *SkillUpdateOne) ClearUpdatedBy() *SkillUpdateOne {
 	return _u
 }
 
-// SetVisibility sets the "visibility" field.
-func (_u *SkillUpdateOne) SetVisibility(v string) *SkillUpdateOne {
-	_u.mutation.SetVisibility(v)
-	return _u
-}
-
-// SetNillableVisibility sets the "visibility" field if the given value is not nil.
-func (_u *SkillUpdateOne) SetNillableVisibility(v *string) *SkillUpdateOne {
-	if v != nil {
-		_u.SetVisibility(*v)
-	}
-	return _u
-}
-
 // SetUpdated sets the "updated" field.
 func (_u *SkillUpdateOne) SetUpdated(v time.Time) *SkillUpdateOne {
 	_u.mutation.SetUpdated(v)
@@ -873,9 +842,6 @@ func (_u *SkillUpdateOne) sqlSave(ctx context.Context) (_node *Skill, err error)
 	}
 	if _u.mutation.UpdatedByCleared() {
 		_spec.ClearField(skill.FieldUpdatedBy, field.TypeString)
-	}
-	if value, ok := _u.mutation.Visibility(); ok {
-		_spec.SetField(skill.FieldVisibility, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.Updated(); ok {
 		_spec.SetField(skill.FieldUpdated, field.TypeTime, value)

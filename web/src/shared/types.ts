@@ -1051,7 +1051,6 @@ export interface PolicyConditions {
 // ---------------------------------------------------------------------------
 
 export type SkillScope = 'core' | 'global' | 'project' | 'user';
-export type SkillVisibility = 'public' | 'private';
 export type SkillVersionStatus = 'draft' | 'published' | 'deprecated' | 'archived';
 
 export interface Skill {
@@ -1065,7 +1064,6 @@ export interface Skill {
   status: string;
   ownerId?: string;
   createdBy?: string;
-  visibility: SkillVisibility;
   created: string;
   updated: string;
   _capabilities?: Capabilities;
