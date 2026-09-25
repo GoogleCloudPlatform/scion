@@ -178,3 +178,78 @@ func TestStartAgent_NoResolverAttachedWithoutHubOrPreResolved(t *testing.T) {
 		t.Errorf("expected no skill resolver on ctx when neither a Hub connection nor PreResolvedSkills is present, got %T", resolver)
 	}
 }
+
+// TestStartAgent_ProvisionCredentialsNotEchoedInResponse and its restart
+// counterpart below guard against #1960's new StartExtras wire fields
+// (ProvisionCredentials, PreResolvedSkills) leaking back out: they must be
+// used only to build the provisioning context (attachSkillResolver) and never
+// appear in the HTTP response body, exactly like the equivalent create-path
+// fields (req.ProvisionCredentials, req.PreResolvedSkills) never do today.
+const startAgentSecretCanary = "SCION-1960-CANARY-do-not-echo-3f9a1c"
+
+func startExtrasProbeBody(uri string) string {
+	return `{
+		"provisionCredentials": {"GH_OCTO_ORG": "` + startAgentSecretCanary + `"},
+		"preResolvedSkills": {
+			"resolved": [{
+				"uri": "` + uri + `",
+				"name": "test-skill",
+				"resolvedVersion": "1.0.0",
+				"contentHash": "sha256:abc",
+				"files": []
+			}]
+		}
+	}`
+}
+
+func TestStartAgent_ProvisionCredentialsNotEchoedInResponse(t *testing.T) {
+	srv := newTestServer(t)
+	mgr := srv.manager.(*mockManager)
+
+	const uri = "gh://octo-org/octo-repo/skills/deploy@main"
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent-1/start", strings.NewReader(startExtrasProbeBody(uri)))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), startAgentSecretCanary) {
+		t.Fatalf("ProvisionCredentials value leaked into the start response body: %s", w.Body.String())
+	}
+	// Sanity: prove the resolver actually saw the credential (so this test
+	// would fail if the field were silently dropped instead of merely hidden).
+	if mgr.lastStartCtx == nil {
+		t.Fatal("expected Start to be called with a captured context")
+	}
+	if resolver := agent.SkillResolverFromContext(mgr.lastStartCtx); resolver == nil {
+		t.Fatal("expected a resolver to be attached")
+	}
+}
+
+func TestRestartAgent_ProvisionCredentialsNotEchoedInResponse(t *testing.T) {
+	srv := newTestServer(t)
+	mgr := srv.manager.(*mockManager)
+
+	const uri = "gh://octo-org/octo-repo/skills/deploy@main"
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent-1/restart", strings.NewReader(startExtrasProbeBody(uri)))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), startAgentSecretCanary) {
+		t.Fatalf("ProvisionCredentials value leaked into the restart response body: %s", w.Body.String())
+	}
+	if mgr.lastStartCtx == nil {
+		t.Fatal("expected Start (via restart) to be called with a captured context")
+	}
+	if resolver := agent.SkillResolverFromContext(mgr.lastStartCtx); resolver == nil {
+		t.Fatal("expected a resolver to be attached")
+	}
+}
