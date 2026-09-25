@@ -39,15 +39,14 @@ func TestAgentListTemplates_GlobalVisibility(t *testing.T) {
 
 	// Create a global template.
 	require.NoError(t, s.CreateTemplate(ctx, &store.Template{
-		ID:         tid("tmpl-agent-global"),
-		Slug:       "agent-global-tmpl",
-		Name:       "Agent Global Template",
-		Harness:    "claude",
-		Scope:      "global",
-		Visibility: store.VisibilityPublic,
-		Status:     "active",
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:      tid("tmpl-agent-global"),
+		Slug:    "agent-global-tmpl",
+		Name:    "Agent Global Template",
+		Harness: "claude",
+		Scope:   "global",
+		Status:  "active",
+		Created: time.Now(),
+		Updated: time.Now(),
 	}))
 
 	// Agent with ScopeProjectRead should see the global template.
@@ -93,15 +92,14 @@ func TestAgentListTemplates_Unauthenticated(t *testing.T) {
 	ctx := context.Background()
 
 	require.NoError(t, s.CreateTemplate(ctx, &store.Template{
-		ID:         tid("tmpl-unauth"),
-		Slug:       "unauth-tmpl",
-		Name:       "Unauth Template",
-		Harness:    "claude",
-		Scope:      "global",
-		Visibility: store.VisibilityPublic,
-		Status:     "active",
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:      tid("tmpl-unauth"),
+		Slug:    "unauth-tmpl",
+		Name:    "Unauth Template",
+		Harness: "claude",
+		Scope:   "global",
+		Status:  "active",
+		Created: time.Now(),
+		Updated: time.Now(),
 	}))
 
 	// No auth token at all — should be rejected.
@@ -121,15 +119,14 @@ func TestAgentListHarnessConfigs_GlobalVisibility(t *testing.T) {
 
 	// Create a global harness config.
 	require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{
-		ID:         tid("hc-agent-global"),
-		Slug:       "agent-global-hc",
-		Name:       "Agent Global HC",
-		Harness:    "claude",
-		Scope:      "global",
-		Visibility: store.VisibilityPublic,
-		Status:     store.HarnessConfigStatusActive,
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:      tid("hc-agent-global"),
+		Slug:    "agent-global-hc",
+		Name:    "Agent Global HC",
+		Harness: "claude",
+		Scope:   "global",
+		Status:  store.HarnessConfigStatusActive,
+		Created: time.Now(),
+		Updated: time.Now(),
 	}))
 
 	// Agent with ScopeProjectRead should see the global harness config.
@@ -173,15 +170,14 @@ func TestAgentListHarnessConfigs_Unauthenticated(t *testing.T) {
 	ctx := context.Background()
 
 	require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{
-		ID:         tid("hc-unauth"),
-		Slug:       "unauth-hc",
-		Name:       "Unauth HC",
-		Harness:    "claude",
-		Scope:      "global",
-		Visibility: store.VisibilityPublic,
-		Status:     store.HarnessConfigStatusActive,
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:      tid("hc-unauth"),
+		Slug:    "unauth-hc",
+		Name:    "Unauth HC",
+		Harness: "claude",
+		Scope:   "global",
+		Status:  store.HarnessConfigStatusActive,
+		Created: time.Now(),
+		Updated: time.Now(),
 	}))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/harness-configs", nil)

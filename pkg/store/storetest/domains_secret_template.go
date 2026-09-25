@@ -53,7 +53,6 @@ func TemplateDomain() Domain[store.Template] {
 				Harness:     "claude",
 				Image:       "img:latest",
 				Scope:       store.TemplateScopeGlobal,
-				Visibility:  "private",
 				Status:      store.TemplateStatusActive,
 				ContentHash: fmt.Sprintf("hash-%d", seq),
 			}
@@ -124,7 +123,6 @@ func HarnessConfigDomain() Domain[store.HarnessConfig] {
 				Slug:        fmt.Sprintf("harness-%d-%s", seq, id[:8]),
 				Harness:     "claude",
 				Scope:       store.HarnessConfigScopeGlobal,
-				Visibility:  "private",
 				Status:      store.HarnessConfigStatusActive,
 				ContentHash: fmt.Sprintf("hash-%d", seq),
 			}

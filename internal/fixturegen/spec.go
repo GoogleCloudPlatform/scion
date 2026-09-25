@@ -113,13 +113,13 @@ func Spec() []TableFixture {
 				"project_id": projectID, "labels": unicodeJSON,
 				"applied_config": nestedConfigJSON,
 				"created_at":     baseTime, "updated_at": baseTime,
-				"phase": "running", "visibility": "private", "state_version": 1,
+				"phase": "running", "state_version": 1,
 			},
 			{ // soft-deleted agent (deleted_at populated)
 				"id": "33333333-3333-3333-3333-3333333333aa", "agent_id": "33333333-3333-3333-3333-3333333333aa",
 				"name": "deleted-worker", "template": "claude", "project_id": projectID,
 				"created_at": baseTime, "updated_at": baseTime, "deleted_at": baseTime,
-				"phase": "stopped", "visibility": "private", "state_version": 2,
+				"phase": "stopped", "state_version": 2,
 			},
 		}},
 
@@ -200,7 +200,7 @@ func Spec() []TableFixture {
 			{
 				"id": "7e000000-0000-0000-0000-000000000001", "name": "claude", "slug": "claude",
 				"harness": "claude", "image": "scion/claude:latest", "config": nestedConfigJSON,
-				"scope": "global", "status": "active", "visibility": "public",
+				"scope": "global", "status": "active",
 				"created_at": baseTime, "updated_at": baseTime,
 			},
 		}},
@@ -208,7 +208,7 @@ func Spec() []TableFixture {
 			{
 				"id": "4a000000-0000-0000-0000-000000000001", "name": "claude-web", "slug": "claude-web",
 				"harness": "claude", "config": nestedConfigJSON, "scope": "global",
-				"status": "active", "visibility": "public", "created_at": baseTime, "updated_at": baseTime,
+				"status": "active", "created_at": baseTime, "updated_at": baseTime,
 			},
 		}},
 

@@ -37,14 +37,13 @@ func TestBrokerCanGetTemplateByID(t *testing.T) {
 	ctx := context.Background()
 
 	tmpl := &store.Template{
-		ID:         tid("tmpl_broker1"),
-		Slug:       "broker-test-tmpl",
-		Name:       "Broker Test Template",
-		Scope:      "global",
-		Visibility: store.VisibilityPublic,
-		Status:     store.TemplateStatusActive,
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:      tid("tmpl_broker1"),
+		Slug:    "broker-test-tmpl",
+		Name:    "Broker Test Template",
+		Scope:   "global",
+		Status:  store.TemplateStatusActive,
+		Created: time.Now(),
+		Updated: time.Now(),
 	}
 	if err := s.CreateTemplate(ctx, tmpl); err != nil {
 		t.Fatalf("failed to create template: %v", err)
@@ -83,15 +82,14 @@ func TestBrokerCanGetHarnessConfigByID(t *testing.T) {
 	ctx := context.Background()
 
 	hc := &store.HarnessConfig{
-		ID:         tid("hc_broker1"),
-		Slug:       "broker-test-hc",
-		Name:       "Broker Test HC",
-		Harness:    "claude",
-		Scope:      "global",
-		Visibility: store.VisibilityPublic,
-		Status:     store.HarnessConfigStatusActive,
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:      tid("hc_broker1"),
+		Slug:    "broker-test-hc",
+		Name:    "Broker Test HC",
+		Harness: "claude",
+		Scope:   "global",
+		Status:  store.HarnessConfigStatusActive,
+		Created: time.Now(),
+		Updated: time.Now(),
 	}
 	if err := s.CreateHarnessConfig(ctx, hc); err != nil {
 		t.Fatalf("failed to create harness config: %v", err)
@@ -128,15 +126,14 @@ func TestNonBrokerWithoutPermissionDeniedTemplate(t *testing.T) {
 	ctx := context.Background()
 
 	tmpl := &store.Template{
-		ID:         tid("tmpl_deny1"),
-		Slug:       "deny-test-tmpl",
-		Name:       "Deny Test Template",
-		Scope:      "project",
-		ScopeID:    tid("project_deny"),
-		Visibility: store.VisibilityPrivate,
-		Status:     store.TemplateStatusActive,
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:      tid("tmpl_deny1"),
+		Slug:    "deny-test-tmpl",
+		Name:    "Deny Test Template",
+		Scope:   "project",
+		ScopeID: tid("project_deny"),
+		Status:  store.TemplateStatusActive,
+		Created: time.Now(),
+		Updated: time.Now(),
 	}
 	if err := s.CreateTemplate(ctx, tmpl); err != nil {
 		t.Fatalf("failed to create template: %v", err)
@@ -164,16 +161,15 @@ func TestNonBrokerWithoutPermissionDeniedHarnessConfig(t *testing.T) {
 	ctx := context.Background()
 
 	hc := &store.HarnessConfig{
-		ID:         tid("hc_deny1"),
-		Slug:       "deny-test-hc",
-		Name:       "Deny Test HC",
-		Harness:    "claude",
-		Scope:      "project",
-		ScopeID:    tid("project_deny"),
-		Visibility: store.VisibilityPrivate,
-		Status:     store.HarnessConfigStatusActive,
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:      tid("hc_deny1"),
+		Slug:    "deny-test-hc",
+		Name:    "Deny Test HC",
+		Harness: "claude",
+		Scope:   "project",
+		ScopeID: tid("project_deny"),
+		Status:  store.HarnessConfigStatusActive,
+		Created: time.Now(),
+		Updated: time.Now(),
 	}
 	if err := s.CreateHarnessConfig(ctx, hc); err != nil {
 		t.Fatalf("failed to create harness config: %v", err)

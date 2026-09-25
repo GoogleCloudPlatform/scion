@@ -186,7 +186,6 @@ func TestPhase4_AgentMessage_MentionCoRecipient_BecomesParticipant(t *testing.T)
 		ProjectID:       projectID,
 		RuntimeBrokerID: targetAgent.RuntimeBrokerID,
 		Phase:           "running",
-		Visibility:      store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, mentioned))
 

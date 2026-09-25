@@ -75,12 +75,11 @@ func def162Setup(t *testing.T) (srv *Server, s store.Store, project *store.Proje
 	require.NoError(t, s.CreateUser(ctx, human))
 
 	agent = &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "NotifyBot",
-		Slug:       "notifybot",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "NotifyBot",
+		Slug:      "notifybot",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 

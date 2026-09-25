@@ -3041,7 +3041,6 @@ type AgentMutation struct {
 	created_by             *uuid.UUID
 	owner_id               *uuid.UUID
 	delegation_enabled     *bool
-	visibility             *string
 	message_mode           *agent.MessageMode
 	labels                 *map[string]string
 	annotations            *map[string]string
@@ -3522,42 +3521,6 @@ func (m *AgentMutation) OldDelegationEnabled(ctx context.Context) (v bool, err e
 // ResetDelegationEnabled resets all changes to the "delegation_enabled" field.
 func (m *AgentMutation) ResetDelegationEnabled() {
 	m.delegation_enabled = nil
-}
-
-// SetVisibility sets the "visibility" field.
-func (m *AgentMutation) SetVisibility(s string) {
-	m.visibility = &s
-}
-
-// Visibility returns the value of the "visibility" field in the mutation.
-func (m *AgentMutation) Visibility() (r string, exists bool) {
-	v := m.visibility
-	if v == nil {
-		return
-	}
-	return *v, true
-}
-
-// OldVisibility returns the old "visibility" field's value of the Agent entity.
-// If the Agent object wasn't provided to the builder, the object is fetched from the database.
-// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *AgentMutation) OldVisibility(ctx context.Context) (v string, err error) {
-	if !m.op.Is(OpUpdateOne) {
-		return v, errors.New("OldVisibility is only allowed on UpdateOne operations")
-	}
-	if m.id == nil || m.oldValue == nil {
-		return v, errors.New("OldVisibility requires an ID field in the mutation")
-	}
-	oldValue, err := m.oldValue(ctx)
-	if err != nil {
-		return v, fmt.Errorf("querying old value for OldVisibility: %w", err)
-	}
-	return oldValue.Visibility, nil
-}
-
-// ResetVisibility resets all changes to the "visibility" field.
-func (m *AgentMutation) ResetVisibility() {
-	m.visibility = nil
 }
 
 // SetMessageMode sets the "message_mode" field.
@@ -5257,7 +5220,7 @@ func (m *AgentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentMutation) Fields() []string {
-	fields := make([]string, 0, 40)
+	fields := make([]string, 0, 39)
 	if m.slug != nil {
 		fields = append(fields, agent.FieldSlug)
 	}
@@ -5281,9 +5244,6 @@ func (m *AgentMutation) Fields() []string {
 	}
 	if m.delegation_enabled != nil {
 		fields = append(fields, agent.FieldDelegationEnabled)
-	}
-	if m.visibility != nil {
-		fields = append(fields, agent.FieldVisibility)
 	}
 	if m.message_mode != nil {
 		fields = append(fields, agent.FieldMessageMode)
@@ -5402,8 +5362,6 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.OwnerID()
 	case agent.FieldDelegationEnabled:
 		return m.DelegationEnabled()
-	case agent.FieldVisibility:
-		return m.Visibility()
 	case agent.FieldMessageMode:
 		return m.MessageMode()
 	case agent.FieldLabels:
@@ -5491,8 +5449,6 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldOwnerID(ctx)
 	case agent.FieldDelegationEnabled:
 		return m.OldDelegationEnabled(ctx)
-	case agent.FieldVisibility:
-		return m.OldVisibility(ctx)
 	case agent.FieldMessageMode:
 		return m.OldMessageMode(ctx)
 	case agent.FieldLabels:
@@ -5619,13 +5575,6 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetDelegationEnabled(v)
-		return nil
-	case agent.FieldVisibility:
-		v, ok := value.(string)
-		if !ok {
-			return fmt.Errorf("unexpected type %T for field %s", value, name)
-		}
-		m.SetVisibility(v)
 		return nil
 	case agent.FieldMessageMode:
 		v, ok := value.(agent.MessageMode)
@@ -6126,9 +6075,6 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldDelegationEnabled:
 		m.ResetDelegationEnabled()
-		return nil
-	case agent.FieldVisibility:
-		m.ResetVisibility()
 		return nil
 	case agent.FieldMessageMode:
 		m.ResetMessageMode()
@@ -24329,7 +24275,6 @@ type HarnessConfigMutation struct {
 	created_by              *string
 	updated_by              *string
 	source_url              *string
-	visibility              *string
 	created                 *time.Time
 	updated                 *time.Time
 	clearedFields           map[string]struct{}
@@ -25344,42 +25289,6 @@ func (m *HarnessConfigMutation) ResetSourceURL() {
 	delete(m.clearedFields, harnessconfig.FieldSourceURL)
 }
 
-// SetVisibility sets the "visibility" field.
-func (m *HarnessConfigMutation) SetVisibility(s string) {
-	m.visibility = &s
-}
-
-// Visibility returns the value of the "visibility" field in the mutation.
-func (m *HarnessConfigMutation) Visibility() (r string, exists bool) {
-	v := m.visibility
-	if v == nil {
-		return
-	}
-	return *v, true
-}
-
-// OldVisibility returns the old "visibility" field's value of the HarnessConfig entity.
-// If the HarnessConfig object wasn't provided to the builder, the object is fetched from the database.
-// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *HarnessConfigMutation) OldVisibility(ctx context.Context) (v string, err error) {
-	if !m.op.Is(OpUpdateOne) {
-		return v, errors.New("OldVisibility is only allowed on UpdateOne operations")
-	}
-	if m.id == nil || m.oldValue == nil {
-		return v, errors.New("OldVisibility requires an ID field in the mutation")
-	}
-	oldValue, err := m.oldValue(ctx)
-	if err != nil {
-		return v, fmt.Errorf("querying old value for OldVisibility: %w", err)
-	}
-	return oldValue.Visibility, nil
-}
-
-// ResetVisibility resets all changes to the "visibility" field.
-func (m *HarnessConfigMutation) ResetVisibility() {
-	m.visibility = nil
-}
-
 // SetCreated sets the "created" field.
 func (m *HarnessConfigMutation) SetCreated(t time.Time) {
 	m.created = &t
@@ -25486,7 +25395,7 @@ func (m *HarnessConfigMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *HarnessConfigMutation) Fields() []string {
-	fields := make([]string, 0, 23)
+	fields := make([]string, 0, 22)
 	if m.name != nil {
 		fields = append(fields, harnessconfig.FieldName)
 	}
@@ -25547,9 +25456,6 @@ func (m *HarnessConfigMutation) Fields() []string {
 	if m.source_url != nil {
 		fields = append(fields, harnessconfig.FieldSourceURL)
 	}
-	if m.visibility != nil {
-		fields = append(fields, harnessconfig.FieldVisibility)
-	}
 	if m.created != nil {
 		fields = append(fields, harnessconfig.FieldCreated)
 	}
@@ -25604,8 +25510,6 @@ func (m *HarnessConfigMutation) Field(name string) (ent.Value, bool) {
 		return m.UpdatedBy()
 	case harnessconfig.FieldSourceURL:
 		return m.SourceURL()
-	case harnessconfig.FieldVisibility:
-		return m.Visibility()
 	case harnessconfig.FieldCreated:
 		return m.Created()
 	case harnessconfig.FieldUpdated:
@@ -25659,8 +25563,6 @@ func (m *HarnessConfigMutation) OldField(ctx context.Context, name string) (ent.
 		return m.OldUpdatedBy(ctx)
 	case harnessconfig.FieldSourceURL:
 		return m.OldSourceURL(ctx)
-	case harnessconfig.FieldVisibility:
-		return m.OldVisibility(ctx)
 	case harnessconfig.FieldCreated:
 		return m.OldCreated(ctx)
 	case harnessconfig.FieldUpdated:
@@ -25813,13 +25715,6 @@ func (m *HarnessConfigMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetSourceURL(v)
-		return nil
-	case harnessconfig.FieldVisibility:
-		v, ok := value.(string)
-		if !ok {
-			return fmt.Errorf("unexpected type %T for field %s", value, name)
-		}
-		m.SetVisibility(v)
 		return nil
 	case harnessconfig.FieldCreated:
 		v, ok := value.(time.Time)
@@ -26030,9 +25925,6 @@ func (m *HarnessConfigMutation) ResetField(name string) error {
 		return nil
 	case harnessconfig.FieldSourceURL:
 		m.ResetSourceURL()
-		return nil
-	case harnessconfig.FieldVisibility:
-		m.ResetVisibility()
 		return nil
 	case harnessconfig.FieldCreated:
 		m.ResetCreated()
@@ -55111,7 +55003,6 @@ type TemplateMutation struct {
 	created_by             *string
 	updated_by             *string
 	source_url             *string
-	visibility             *string
 	created                *time.Time
 	updated                *time.Time
 	clearedFields          map[string]struct{}
@@ -56237,42 +56128,6 @@ func (m *TemplateMutation) ResetSourceURL() {
 	delete(m.clearedFields, template.FieldSourceURL)
 }
 
-// SetVisibility sets the "visibility" field.
-func (m *TemplateMutation) SetVisibility(s string) {
-	m.visibility = &s
-}
-
-// Visibility returns the value of the "visibility" field in the mutation.
-func (m *TemplateMutation) Visibility() (r string, exists bool) {
-	v := m.visibility
-	if v == nil {
-		return
-	}
-	return *v, true
-}
-
-// OldVisibility returns the old "visibility" field's value of the Template entity.
-// If the Template object wasn't provided to the builder, the object is fetched from the database.
-// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *TemplateMutation) OldVisibility(ctx context.Context) (v string, err error) {
-	if !m.op.Is(OpUpdateOne) {
-		return v, errors.New("OldVisibility is only allowed on UpdateOne operations")
-	}
-	if m.id == nil || m.oldValue == nil {
-		return v, errors.New("OldVisibility requires an ID field in the mutation")
-	}
-	oldValue, err := m.oldValue(ctx)
-	if err != nil {
-		return v, fmt.Errorf("querying old value for OldVisibility: %w", err)
-	}
-	return oldValue.Visibility, nil
-}
-
-// ResetVisibility resets all changes to the "visibility" field.
-func (m *TemplateMutation) ResetVisibility() {
-	m.visibility = nil
-}
-
 // SetCreated sets the "created" field.
 func (m *TemplateMutation) SetCreated(t time.Time) {
 	m.created = &t
@@ -56379,7 +56234,7 @@ func (m *TemplateMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *TemplateMutation) Fields() []string {
-	fields := make([]string, 0, 25)
+	fields := make([]string, 0, 24)
 	if m.name != nil {
 		fields = append(fields, template.FieldName)
 	}
@@ -56446,9 +56301,6 @@ func (m *TemplateMutation) Fields() []string {
 	if m.source_url != nil {
 		fields = append(fields, template.FieldSourceURL)
 	}
-	if m.visibility != nil {
-		fields = append(fields, template.FieldVisibility)
-	}
 	if m.created != nil {
 		fields = append(fields, template.FieldCreated)
 	}
@@ -56507,8 +56359,6 @@ func (m *TemplateMutation) Field(name string) (ent.Value, bool) {
 		return m.UpdatedBy()
 	case template.FieldSourceURL:
 		return m.SourceURL()
-	case template.FieldVisibility:
-		return m.Visibility()
 	case template.FieldCreated:
 		return m.Created()
 	case template.FieldUpdated:
@@ -56566,8 +56416,6 @@ func (m *TemplateMutation) OldField(ctx context.Context, name string) (ent.Value
 		return m.OldUpdatedBy(ctx)
 	case template.FieldSourceURL:
 		return m.OldSourceURL(ctx)
-	case template.FieldVisibility:
-		return m.OldVisibility(ctx)
 	case template.FieldCreated:
 		return m.OldCreated(ctx)
 	case template.FieldUpdated:
@@ -56734,13 +56582,6 @@ func (m *TemplateMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetSourceURL(v)
-		return nil
-	case template.FieldVisibility:
-		v, ok := value.(string)
-		if !ok {
-			return fmt.Errorf("unexpected type %T for field %s", value, name)
-		}
-		m.SetVisibility(v)
 		return nil
 	case template.FieldCreated:
 		v, ok := value.(time.Time)
@@ -56975,9 +56816,6 @@ func (m *TemplateMutation) ResetField(name string) error {
 		return nil
 	case template.FieldSourceURL:
 		m.ResetSourceURL()
-		return nil
-	case template.FieldVisibility:
-		m.ResetVisibility()
 		return nil
 	case template.FieldCreated:
 		m.ResetCreated()

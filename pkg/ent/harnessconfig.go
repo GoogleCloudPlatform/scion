@@ -58,8 +58,6 @@ type HarnessConfig struct {
 	UpdatedBy string `json:"updated_by,omitempty"`
 	// SourceURL holds the value of the "source_url" field.
 	SourceURL string `json:"source_url,omitempty"`
-	// Visibility holds the value of the "visibility" field.
-	Visibility string `json:"visibility,omitempty"`
 	// Created holds the value of the "created" field.
 	Created time.Time `json:"created,omitempty"`
 	// Updated holds the value of the "updated" field.
@@ -72,7 +70,7 @@ func (*HarnessConfig) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case harnessconfig.FieldName, harnessconfig.FieldSlug, harnessconfig.FieldDisplayName, harnessconfig.FieldDescription, harnessconfig.FieldHarness, harnessconfig.FieldConfig, harnessconfig.FieldContentHash, harnessconfig.FieldScope, harnessconfig.FieldScopeID, harnessconfig.FieldStorageURI, harnessconfig.FieldStorageBucket, harnessconfig.FieldStoragePath, harnessconfig.FieldFiles, harnessconfig.FieldStatus, harnessconfig.FieldImageStatus, harnessconfig.FieldOwnerID, harnessconfig.FieldCreatedBy, harnessconfig.FieldUpdatedBy, harnessconfig.FieldSourceURL, harnessconfig.FieldVisibility:
+		case harnessconfig.FieldName, harnessconfig.FieldSlug, harnessconfig.FieldDisplayName, harnessconfig.FieldDescription, harnessconfig.FieldHarness, harnessconfig.FieldConfig, harnessconfig.FieldContentHash, harnessconfig.FieldScope, harnessconfig.FieldScopeID, harnessconfig.FieldStorageURI, harnessconfig.FieldStorageBucket, harnessconfig.FieldStoragePath, harnessconfig.FieldFiles, harnessconfig.FieldStatus, harnessconfig.FieldImageStatus, harnessconfig.FieldOwnerID, harnessconfig.FieldCreatedBy, harnessconfig.FieldUpdatedBy, harnessconfig.FieldSourceURL:
 			values[i] = new(sql.NullString)
 		case harnessconfig.FieldImageStatusCheckedAt, harnessconfig.FieldCreated, harnessconfig.FieldUpdated:
 			values[i] = new(sql.NullTime)
@@ -220,12 +218,6 @@ func (_m *HarnessConfig) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.SourceURL = value.String
 			}
-		case harnessconfig.FieldVisibility:
-			if value, ok := values[i].(*sql.NullString); !ok {
-				return fmt.Errorf("unexpected type %T for field visibility", values[i])
-			} else if value.Valid {
-				_m.Visibility = value.String
-			}
 		case harnessconfig.FieldCreated:
 			if value, ok := values[i].(*sql.NullTime); !ok {
 				return fmt.Errorf("unexpected type %T for field created", values[i])
@@ -335,9 +327,6 @@ func (_m *HarnessConfig) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("source_url=")
 	builder.WriteString(_m.SourceURL)
-	builder.WriteString(", ")
-	builder.WriteString("visibility=")
-	builder.WriteString(_m.Visibility)
 	builder.WriteString(", ")
 	builder.WriteString("created=")
 	builder.WriteString(_m.Created.Format(time.ANSIC))

@@ -87,7 +87,6 @@ type Agent struct {
 	// Ownership
 	CreatedBy   string `json:"createdBy,omitempty"`
 	OwnerID     string `json:"ownerId,omitempty"`
-	Visibility  string `json:"visibility"`  // private, team, public
 	MessageMode string `json:"messageMode"` // none, lineage, branch, project, hub
 
 	// Ancestry chain for transitive access control.
@@ -541,11 +540,10 @@ type Template struct {
 	Status string `json:"status"` // pending, active, archived
 
 	// Ownership
-	OwnerID    string `json:"ownerId,omitempty"`
-	CreatedBy  string `json:"createdBy,omitempty"`
-	UpdatedBy  string `json:"updatedBy,omitempty"`
-	SourceURL  string `json:"sourceUrl,omitempty"`
-	Visibility string `json:"visibility"` // private, project, public
+	OwnerID   string `json:"ownerId,omitempty"`
+	CreatedBy string `json:"createdBy,omitempty"`
+	UpdatedBy string `json:"updatedBy,omitempty"`
+	SourceURL string `json:"sourceUrl,omitempty"`
 
 	// Timestamps
 	Created time.Time `json:"created"`
@@ -639,11 +637,10 @@ type HarnessConfig struct {
 	ImageStatusCheckedAt *time.Time `json:"imageStatusCheckedAt,omitempty"` // last image check timestamp
 
 	// Ownership
-	OwnerID    string `json:"ownerId,omitempty"`
-	CreatedBy  string `json:"createdBy,omitempty"`
-	UpdatedBy  string `json:"updatedBy,omitempty"`
-	SourceURL  string `json:"sourceUrl,omitempty"`
-	Visibility string `json:"visibility"` // private, project, public
+	OwnerID   string `json:"ownerId,omitempty"`
+	CreatedBy string `json:"createdBy,omitempty"`
+	UpdatedBy string `json:"updatedBy,omitempty"`
+	SourceURL string `json:"sourceUrl,omitempty"`
 
 	// Timestamps
 	Created time.Time `json:"created"`
@@ -2066,10 +2063,9 @@ func (a *Agent) ToAPI() *api.AgentInfo {
 		DeletedAt: a.DeletedAt,
 
 		// Ownership
-		CreatedBy:  a.CreatedBy,
-		OwnerID:    a.OwnerID,
-		Visibility: a.Visibility,
-		Ancestry:   a.Ancestry,
+		CreatedBy: a.CreatedBy,
+		OwnerID:   a.OwnerID,
+		Ancestry:  a.Ancestry,
 
 		// Optimistic locking
 		StateVersion: a.StateVersion,

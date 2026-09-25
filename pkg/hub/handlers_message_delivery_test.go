@@ -64,7 +64,6 @@ func setupMessageTestAgent(t *testing.T, s store.Store, phase string) (projectID
 		ProjectID:       project.ID,
 		Phase:           phase,
 		RuntimeBrokerID: broker.ID,
-		Visibility:      store.VisibilityPrivate,
 		Created:         time.Now(),
 		Updated:         time.Now(),
 	}
@@ -122,7 +121,7 @@ func TestHandleAgentMessage_StoppedReturns409(t *testing.T) {
 	agent := &store.Agent{
 		ID: tid("msg-agent-stop"), Slug: "stopped-agent", Name: "stopped-agent",
 		ProjectID: project.ID, Phase: string(state.PhaseStopped),
-		RuntimeBrokerID: broker.ID, Visibility: store.VisibilityPrivate,
+		RuntimeBrokerID: broker.ID,
 	}
 	_ = s.CreateAgent(ctx, agent)
 
@@ -165,7 +164,7 @@ func TestHandleAgentMessage_ErrorReturns409(t *testing.T) {
 	agent := &store.Agent{
 		ID: tid("msg-agent-err"), Slug: "error-agent", Name: "error-agent",
 		ProjectID: project.ID, Phase: string(state.PhaseError),
-		RuntimeBrokerID: broker.ID, Visibility: store.VisibilityPrivate,
+		RuntimeBrokerID: broker.ID,
 	}
 	_ = s.CreateAgent(ctx, agent)
 
@@ -208,7 +207,7 @@ func TestHandleAgentMessage_ProvisioningReturns409(t *testing.T) {
 	agent := &store.Agent{
 		ID: tid("msg-agent-prov"), Slug: "prov-agent", Name: "prov-agent",
 		ProjectID: project.ID, Phase: string(state.PhaseProvisioning),
-		RuntimeBrokerID: broker.ID, Visibility: store.VisibilityPrivate,
+		RuntimeBrokerID: broker.ID,
 	}
 	_ = s.CreateAgent(ctx, agent)
 
@@ -300,7 +299,7 @@ func TestHandleProjectBroadcast_Returns202WithTargeting(t *testing.T) {
 		agent := &store.Agent{
 			ID: api.NewUUID(), Slug: tc.slug, Name: tc.slug,
 			ProjectID: project.ID, Phase: tc.phase,
-			RuntimeBrokerID: broker.ID, Visibility: store.VisibilityPrivate,
+			RuntimeBrokerID: broker.ID,
 		}
 		_ = s.CreateAgent(ctx, agent)
 	}
@@ -367,7 +366,7 @@ func TestHandleProjectBroadcast_AllRunning(t *testing.T) {
 		agent := &store.Agent{
 			ID: api.NewUUID(), Slug: slug, Name: slug,
 			ProjectID: project.ID, Phase: string(state.PhaseRunning),
-			RuntimeBrokerID: broker.ID, Visibility: store.VisibilityPrivate,
+			RuntimeBrokerID: broker.ID,
 		}
 		_ = s.CreateAgent(ctx, agent)
 	}

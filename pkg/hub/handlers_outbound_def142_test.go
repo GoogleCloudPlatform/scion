@@ -341,12 +341,11 @@ func TestDEF142_AC3_NotFound_vs_NotParticipant_ByteIdentical(t *testing.T) {
 	// (def138-agent) is NOT a participant.
 	otherAgentID := tid("d142-ac3-other-agent")
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID:         otherAgentID,
-		Name:       "d142-ac3-other",
-		Slug:       "d142-ac3-other",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        otherAgentID,
+		Name:      "d142-ac3-other",
+		Slug:      "d142-ac3-other",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}))
 	otherUserID := tid("d142-ac3-other-user")
 	require.NoError(t, s.CreateUser(ctx, &store.User{
@@ -503,12 +502,11 @@ func TestDEF164_AtAgentSlug_DeliversToAgent(t *testing.T) {
 	ctx := context.Background()
 
 	targetAgent := &store.Agent{
-		ID:         tid("d164-target-agent"),
-		Name:       "d164-target-agent",
-		Slug:       "d164-target-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        tid("d164-target-agent"),
+		Name:      "d164-target-agent",
+		Slug:      "d164-target-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, targetAgent))
 
@@ -552,12 +550,11 @@ func TestDEF164_AtAgentSlug_DMConversationCreated(t *testing.T) {
 	ctx := context.Background()
 
 	targetAgent := &store.Agent{
-		ID:         tid("d164-dm-target"),
-		Name:       "d164-dm-target",
-		Slug:       "d164-dm-target",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        tid("d164-dm-target"),
+		Name:      "d164-dm-target",
+		Slug:      "d164-dm-target",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, targetAgent))
 
@@ -633,12 +630,11 @@ func TestDEF142_AC7_ConversationRef_ThroughRealMux(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, user))
 
 	agent := &store.Agent{
-		ID:         tid("d142-ac7-agent"),
-		Name:       "d142-ac7-agent",
-		Slug:       "d142-ac7-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        tid("d142-ac7-agent"),
+		Name:      "d142-ac7-agent",
+		Slug:      "d142-ac7-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 

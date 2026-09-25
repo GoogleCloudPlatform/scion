@@ -622,12 +622,11 @@ func TestPhase1_SetDefaultAgent_ConvergesAndDispatches(t *testing.T) {
 	// authorizeGroupConversationAccess replaced the participant-row check
 	// this comment used to describe — review round 1 finding #8).
 	defaultAgent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "default-bot",
-		Slug:       "default-bot",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "default-bot",
+		Slug:      "default-bot",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, defaultAgent))
 
@@ -693,12 +692,11 @@ func TestPhase2_CreateThread_DefaultAgent_SetsBothColumns(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "phase2-agent",
-		Slug:       "phase2-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "phase2-agent",
+		Slug:      "phase2-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -734,12 +732,11 @@ func TestPhase2_TopicPatch_DefaultAgent_ConvergesBothColumns(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "phase2-patch-agent",
-		Slug:       "phase2-patch-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "phase2-patch-agent",
+		Slug:      "phase2-patch-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -783,12 +780,11 @@ func TestPhase2_ClearTopicDefaultAgent_ClearsBothColumns(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "phase2-delete-agent",
-		Slug:       "phase2-delete-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "phase2-delete-agent",
+		Slug:      "phase2-delete-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 

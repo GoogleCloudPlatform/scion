@@ -65,12 +65,11 @@ func def138Setup(t *testing.T) (srv *Server, s store.Store, project *store.Proje
 	require.NoError(t, s.CreateUser(ctx, user))
 
 	agent = &store.Agent{
-		ID:         tid("def138-agent"),
-		Name:       "def138-agent",
-		Slug:       "def138-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        tid("def138-agent"),
+		Name:      "def138-agent",
+		Slug:      "def138-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -165,12 +164,11 @@ func TestDEF138_AC2_UnauthorisedConversation_DirectDM_Denied(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, otherUser))
 
 	otherAgent := &store.Agent{
-		ID:         tid("def138-other-agent"),
-		Name:       "def138-other-agent",
-		Slug:       "def138-other-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        tid("def138-other-agent"),
+		Name:      "def138-other-agent",
+		Slug:      "def138-other-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, otherAgent))
 
@@ -679,12 +677,11 @@ func TestDEF138_ExplicitRouting_NeverCountedAsMismatch(t *testing.T) {
 	// Create an agent for the sender FK.
 	agentID := api.NewUUID()
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID:         agentID,
-		Name:       "explicit-test-agent",
-		Slug:       "explicit-test-agent",
-		ProjectID:  projectID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        agentID,
+		Name:      "explicit-test-agent",
+		Slug:      "explicit-test-agent",
+		ProjectID: projectID,
+		Phase:     "running",
 	}))
 
 	// Create the recipient user.
@@ -753,12 +750,11 @@ func TestDEF138_DerivedRouting_StillLogsDivergence(t *testing.T) {
 	// Create an agent for the sender FK.
 	agentID := api.NewUUID()
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID:         agentID,
-		Name:       "derived-test-agent",
-		Slug:       "derived-test-agent",
-		ProjectID:  projectID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        agentID,
+		Name:      "derived-test-agent",
+		Slug:      "derived-test-agent",
+		ProjectID: projectID,
+		Phase:     "running",
 	}))
 
 	// Create the recipient user.

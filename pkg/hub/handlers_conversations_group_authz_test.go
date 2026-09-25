@@ -102,12 +102,11 @@ func TestPhase3_GroupRead_SameProjectNonParticipant_Agent_Allowed(t *testing.T) 
 	project, _, conv := setupConvTestData(t, s)
 
 	nonParticipant := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "phase3-non-participant",
-		Slug:       "phase3-non-participant",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "phase3-non-participant",
+		Slug:      "phase3-non-participant",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(context.Background(), nonParticipant))
 	grantAgentProjectAccess(t, s, nonParticipant.ID, project.ID)
@@ -188,12 +187,11 @@ func TestPhase3_GroupRead_OtherProjectAgent_Denied_EvenWithCrossProjectEnabled(t
 	require.NoError(t, s.CreateProject(context.Background(), otherProject))
 
 	foreignAgent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "phase3-foreign-agent",
-		Slug:       "phase3-foreign-agent",
-		ProjectID:  otherProject.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "phase3-foreign-agent",
+		Slug:      "phase3-foreign-agent",
+		ProjectID: otherProject.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(context.Background(), foreignAgent))
 	// Even with full project access granted on the CONVERSATION's project
@@ -265,14 +263,14 @@ func TestPhase3_GroupRead_LegacyProjectlessGroup_ParticipantCheck(t *testing.T) 
 
 	participant := &store.Agent{
 		ID: api.NewUUID(), Name: "phase3-legacy-participant", Slug: "phase3-legacy-participant",
-		ProjectID: project.ID, Phase: "running", Visibility: store.VisibilityPrivate,
+		ProjectID: project.ID, Phase: "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, participant))
 	addConvParticipant(t, s, legacyConv.ID, "agent", participant.ID)
 
 	nonParticipant := &store.Agent{
 		ID: api.NewUUID(), Name: "phase3-legacy-nonparticipant", Slug: "phase3-legacy-nonparticipant",
-		ProjectID: project.ID, Phase: "running", Visibility: store.VisibilityPrivate,
+		ProjectID: project.ID, Phase: "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, nonParticipant))
 	// Grant nonParticipant full project access — it must still be denied,
@@ -326,7 +324,7 @@ func TestPhase3_ListConversations_ProjectUnion_IncludesNonParticipatedGroup(t *t
 	// The caller's own DM must survive alongside the union (finding #2).
 	dmPeer := &store.Agent{
 		ID: api.NewUUID(), Name: "phase3-dm-peer", Slug: "phase3-dm-peer",
-		ProjectID: project.ID, Phase: "running", Visibility: store.VisibilityPrivate,
+		ProjectID: project.ID, Phase: "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, dmPeer))
 	dmConv := setupDMConversation(t, s, agent.ID, dmPeer.ID)
@@ -464,7 +462,7 @@ func TestPhase3_ForeignAgent_DeniedOnAllFourEndpoints(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, otherProject))
 	foreignAgent := &store.Agent{
 		ID: api.NewUUID(), Name: "phase3-table-foreign", Slug: "phase3-table-foreign",
-		ProjectID: otherProject.ID, Phase: "running", Visibility: store.VisibilityPrivate,
+		ProjectID: otherProject.ID, Phase: "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, foreignAgent))
 	// Review round 2 finding #8: grant the foreign agent a role binding on
@@ -530,7 +528,7 @@ func TestPhase3_SetDefaultAgent_SameProjectNonParticipant_Allowed(t *testing.T) 
 
 	caller := &store.Agent{
 		ID: api.NewUUID(), Name: "phase3-put-caller", Slug: "phase3-put-caller",
-		ProjectID: project.ID, Phase: "running", Visibility: store.VisibilityPrivate,
+		ProjectID: project.ID, Phase: "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, caller))
 	grantAgentProjectAccess(t, s, caller.ID, project.ID)
@@ -538,7 +536,7 @@ func TestPhase3_SetDefaultAgent_SameProjectNonParticipant_Allowed(t *testing.T) 
 
 	newDefault := &store.Agent{
 		ID: api.NewUUID(), Name: "phase3-put-target", Slug: "phase3-put-target",
-		ProjectID: project.ID, Phase: "running", Visibility: store.VisibilityPrivate,
+		ProjectID: project.ID, Phase: "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, newDefault))
 
@@ -570,7 +568,7 @@ func TestPhase3_ListConversations_ForeignAgentWithRoleBinding_NoUnion(t *testing
 
 	foreignAgent := &store.Agent{
 		ID: api.NewUUID(), Name: "phase3-union-foreign", Slug: "phase3-union-foreign",
-		ProjectID: otherProject.ID, Phase: "running", Visibility: store.VisibilityPrivate,
+		ProjectID: otherProject.ID, Phase: "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, foreignAgent))
 	// The foreign agent DOES hold a role binding on `project` — proving the

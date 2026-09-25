@@ -1329,14 +1329,14 @@ func TestDeleteProject_CascadesEnvVarsSecretsHarnessConfigs(t *testing.T) {
 	require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{
 		ID: api.NewUUID(), Name: "project-hc", Slug: "project-hc",
 		Harness: "claude", Scope: store.ScopeProject, ScopeID: project.ID,
-		Status: store.HarnessConfigStatusActive, Visibility: store.VisibilityPrivate,
+		Status: store.HarnessConfigStatusActive,
 	}))
 
 	// Create project-scoped templates
 	require.NoError(t, s.CreateTemplate(ctx, &store.Template{
 		ID: api.NewUUID(), Name: "project-tmpl", Slug: "project-tmpl",
 		Harness: "claude", Scope: store.ScopeProject, ScopeID: project.ID,
-		Status: store.TemplateStatusActive, Visibility: store.VisibilityPrivate,
+		Status: store.TemplateStatusActive,
 	}))
 
 	// Also create a hub-scoped env var that should NOT be deleted

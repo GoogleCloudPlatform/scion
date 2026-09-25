@@ -163,15 +163,14 @@ func TestLifecycleHookIntegration_RegisterDeregisterFlow(t *testing.T) {
 	}))
 
 	agent := &store.Agent{
-		ID:         uuid.New().String(),
-		Slug:       "integration-agent",
-		Name:       "Integration Agent",
-		Template:   "claude",
-		ProjectID:  projectID,
-		Phase:      string(state.PhaseStarting),
-		Visibility: "private",
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:        uuid.New().String(),
+		Slug:      "integration-agent",
+		Name:      "Integration Agent",
+		Template:  "claude",
+		ProjectID: projectID,
+		Phase:     string(state.PhaseStarting),
+		Created:   time.Now(),
+		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -397,15 +396,14 @@ func TestLifecycleHookIntegration_SuspendedAndErrorDeregister(t *testing.T) {
 
 	// --- Agent 1: starting → suspended ---
 	agent1 := &store.Agent{
-		ID:         uuid.New().String(),
-		Slug:       "suspend-agent",
-		Name:       "Suspend Agent",
-		Template:   "claude",
-		ProjectID:  projectID,
-		Phase:      string(state.PhaseStarting),
-		Visibility: "private",
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:        uuid.New().String(),
+		Slug:      "suspend-agent",
+		Name:      "Suspend Agent",
+		Template:  "claude",
+		ProjectID: projectID,
+		Phase:     string(state.PhaseStarting),
+		Created:   time.Now(),
+		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent1))
 
@@ -423,15 +421,14 @@ func TestLifecycleHookIntegration_SuspendedAndErrorDeregister(t *testing.T) {
 
 	// --- Agent 2: starting → error ---
 	agent2 := &store.Agent{
-		ID:         uuid.New().String(),
-		Slug:       "error-agent",
-		Name:       "Error Agent",
-		Template:   "claude",
-		ProjectID:  projectID,
-		Phase:      string(state.PhaseStarting),
-		Visibility: "private",
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:        uuid.New().String(),
+		Slug:      "error-agent",
+		Name:      "Error Agent",
+		Template:  "claude",
+		ProjectID: projectID,
+		Phase:     string(state.PhaseStarting),
+		Created:   time.Now(),
+		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent2))
 
@@ -500,15 +497,14 @@ func TestLifecycleHookIntegration_AgentRegistryA2AFlow(t *testing.T) {
 
 	agentSlug := "test-a2a-agent"
 	agent := &store.Agent{
-		ID:         uuid.New().String(),
-		Slug:       agentSlug,
-		Name:       "Test A2A Agent",
-		Template:   "claude",
-		ProjectID:  projectID,
-		Phase:      string(state.PhaseStarting),
-		Visibility: "private",
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:        uuid.New().String(),
+		Slug:      agentSlug,
+		Name:      "Test A2A Agent",
+		Template:  "claude",
+		ProjectID: projectID,
+		Phase:     string(state.PhaseStarting),
+		Created:   time.Now(),
+		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 

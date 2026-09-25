@@ -87,7 +87,6 @@ func createAuthzTestTemplate(t *testing.T, s store.Store, name, scope, scopeID, 
 		ScopeID:     scopeID,
 		OwnerID:     ownerID,
 		Status:      "active",
-		Visibility:  store.VisibilityPrivate,
 		StoragePath: fmt.Sprintf("templates/%s/%s", scope, api.Slugify(name)),
 		Created:     time.Now(),
 		Updated:     time.Now(),
@@ -427,7 +426,6 @@ func TestTemplateAuthz_Update_AllPinnedFieldsImmutable(t *testing.T) {
 		BaseTemplate: "original-base-template-id",
 		SourceURL:    "https://github.com/example/original-source",
 		UpdatedBy:    alice.ID,
-		Visibility:   store.VisibilityPrivate,
 		Created:      time.Now(),
 		Updated:      time.Now(),
 	}
@@ -523,16 +521,15 @@ func TestTemplateAuthz_Update_StatusPromotionBlocked(t *testing.T) {
 	ctx := context.Background()
 
 	tpl := &store.Template{
-		ID:         api.NewUUID(),
-		Name:       "pending-template",
-		Slug:       "pending-template",
-		Scope:      store.TemplateScopeProject,
-		ScopeID:    project.ID,
-		OwnerID:    alice.ID,
-		Status:     store.TemplateStatusPending,
-		Visibility: store.VisibilityPrivate,
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:      api.NewUUID(),
+		Name:    "pending-template",
+		Slug:    "pending-template",
+		Scope:   store.TemplateScopeProject,
+		ScopeID: project.ID,
+		OwnerID: alice.ID,
+		Status:  store.TemplateStatusPending,
+		Created: time.Now(),
+		Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateTemplate(ctx, tpl))
 

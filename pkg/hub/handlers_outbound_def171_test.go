@@ -114,7 +114,6 @@ func def171Setup(t *testing.T) (srv *Server, s store.Store, project *store.Proje
 		Slug:            "agent-a",
 		ProjectID:       project.ID,
 		Phase:           "running",
-		Visibility:      store.VisibilityPrivate,
 		RuntimeBrokerID: brokerID,
 	}
 	require.NoError(t, s.CreateAgent(ctx, agentA))
@@ -125,7 +124,6 @@ func def171Setup(t *testing.T) (srv *Server, s store.Store, project *store.Proje
 		Slug:            "agent-b",
 		ProjectID:       project.ID,
 		Phase:           "running",
-		Visibility:      store.VisibilityPrivate,
 		RuntimeBrokerID: brokerID,
 	}
 	require.NoError(t, s.CreateAgent(ctx, agentB))

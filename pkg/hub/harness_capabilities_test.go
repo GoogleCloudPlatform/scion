@@ -127,13 +127,12 @@ func TestGetAgent_CustomHarnessTypeFromHarnessConfig(t *testing.T) {
 	ctx := context.Background()
 
 	hc := &store.HarnessConfig{
-		ID:         tid("hc-custom"),
-		Name:       "custom-harness",
-		Slug:       "custom-harness",
-		Harness:    "custom-harness",
-		Scope:      store.HarnessConfigScopeGlobal,
-		Status:     store.HarnessConfigStatusActive,
-		Visibility: store.VisibilityPublic,
+		ID:      tid("hc-custom"),
+		Name:    "custom-harness",
+		Slug:    "custom-harness",
+		Harness: "custom-harness",
+		Scope:   store.HarnessConfigScopeGlobal,
+		Status:  store.HarnessConfigStatusActive,
 	}
 	require.NoError(t, s.CreateHarnessConfig(ctx, hc))
 
@@ -161,14 +160,13 @@ func TestResolveModelAliasForAgent_FallsBackToBuiltinTable(t *testing.T) {
 
 	// Stored harness config exists (by slug) but carries no model_aliases.
 	hc := &store.HarnessConfig{
-		ID:         tid("hc-no-aliases"),
-		Name:       "claude-no-aliases",
-		Slug:       "claude-no-aliases",
-		Harness:    "claude",
-		Scope:      store.HarnessConfigScopeGlobal,
-		Status:     store.HarnessConfigStatusActive,
-		Visibility: store.VisibilityPublic,
-		Config:     &store.HarnessConfigData{Harness: "claude"},
+		ID:      tid("hc-no-aliases"),
+		Name:    "claude-no-aliases",
+		Slug:    "claude-no-aliases",
+		Harness: "claude",
+		Scope:   store.HarnessConfigScopeGlobal,
+		Status:  store.HarnessConfigStatusActive,
+		Config:  &store.HarnessConfigData{Harness: "claude"},
 	}
 	require.NoError(t, s.CreateHarnessConfig(ctx, hc))
 

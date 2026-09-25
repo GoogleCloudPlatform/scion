@@ -138,7 +138,6 @@ func TestContract_AgentDM_DEF164_CLIRequestThroughHandler(t *testing.T) {
 		Slug:            "agent-a",
 		ProjectID:       project.ID,
 		Phase:           "running",
-		Visibility:      store.VisibilityPrivate,
 		RuntimeBrokerID: brokerID,
 	}
 	require.NoError(t, s.CreateAgent(ctx, agentA))
@@ -149,7 +148,6 @@ func TestContract_AgentDM_DEF164_CLIRequestThroughHandler(t *testing.T) {
 		Slug:            "agent-b",
 		ProjectID:       project.ID,
 		Phase:           "running",
-		Visibility:      store.VisibilityPrivate,
 		RuntimeBrokerID: brokerID,
 	}
 	require.NoError(t, s.CreateAgent(ctx, agentB))
