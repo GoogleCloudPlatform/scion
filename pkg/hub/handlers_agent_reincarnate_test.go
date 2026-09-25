@@ -734,7 +734,7 @@ func TestReincarnateAgent_AC2a_ExplicitImageSurvivesTemplateBump(t *testing.T) {
 	assert.Equal(t, "explicit-image:v1", resp.Plan.Image.New, "an explicit image must survive a template image bump")
 }
 
-// TestReincarnateAgent_A11F1_PlanFillsImageFromHarnessConfig is the plan-side
+// TestReincarnateAgent_PlanFillsImageFromHarnessConfig is the plan-side
 // half of design §3.4 Amendment A11 item 1: an agent with no explicit
 // image and no template image must have its plan show the harness config's
 // image, not "" -> "" (which would look like nothing changed when the agent
@@ -744,14 +744,14 @@ func TestReincarnateAgent_AC2a_ExplicitImageSurvivesTemplateBump(t *testing.T) {
 // that has already gone through the CreateInputs-capturing path once before)
 // with AppliedConfig.Image left empty, and the plan must still show
 // "" -> a real image, not "" -> "" read as no-op.
-func TestReincarnateAgent_A11F1_PlanFillsImageFromHarnessConfig(t *testing.T) {
+func TestReincarnateAgent_PlanFillsImageFromHarnessConfig(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 
 	hc := &store.HarnessConfig{
-		ID:          tid("hc-a11f1-" + t.Name()),
+		ID:          tid("hc-plan-fill-" + t.Name()),
 		Name:        "hc",
-		Slug:        "a11f1-hc-" + tidSlugSafe(t.Name()),
+		Slug:        "plan-fill-hc-" + tidSlugSafe(t.Name()),
 		Harness:     "claude",
 		Scope:       store.HarnessConfigScopeGlobal,
 		Status:      store.HarnessConfigStatusActive,
@@ -782,19 +782,19 @@ func TestReincarnateAgent_A11F1_PlanFillsImageFromHarnessConfig(t *testing.T) {
 		"the plan must fall back to the harness config's image when neither an explicit image nor a template supplied one")
 }
 
-// TestReincarnateAgent_A11F1_TemplateImageBeatsHarnessConfig proves the
+// TestReincarnateAgent_TemplateImageBeatsHarnessConfig proves the
 // harness-config image fallback (A11.1a) never outranks a template image:
 // the broker's own precedence is explicit inline, then template, then
 // harness config (pkg/agent/provision.go), so a template image must win here
 // even though a harness config with a different image is also in play.
-func TestReincarnateAgent_A11F1_TemplateImageBeatsHarnessConfig(t *testing.T) {
+func TestReincarnateAgent_TemplateImageBeatsHarnessConfig(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 
 	template := &store.Template{
-		ID:          tid("tmpl-a11f1-" + t.Name()),
+		ID:          tid("tmpl-precedence-" + t.Name()),
 		Name:        "t",
-		Slug:        "a11f1-template-" + tidSlugSafe(t.Name()),
+		Slug:        "precedence-template-" + tidSlugSafe(t.Name()),
 		Harness:     "claude",
 		Scope:       store.TemplateScopeGlobal,
 		Status:      store.TemplateStatusActive,
@@ -804,9 +804,9 @@ func TestReincarnateAgent_A11F1_TemplateImageBeatsHarnessConfig(t *testing.T) {
 	require.NoError(t, s.CreateTemplate(context.Background(), template))
 
 	hc := &store.HarnessConfig{
-		ID:          tid("hc-a11f1b-" + t.Name()),
+		ID:          tid("hc-precedence-" + t.Name()),
 		Name:        "hc",
-		Slug:        "a11f1b-hc-" + tidSlugSafe(t.Name()),
+		Slug:        "precedence-hc-" + tidSlugSafe(t.Name()),
 		Harness:     "claude",
 		Scope:       store.HarnessConfigScopeGlobal,
 		Status:      store.HarnessConfigStatusActive,
@@ -838,7 +838,7 @@ func TestReincarnateAgent_A11F1_TemplateImageBeatsHarnessConfig(t *testing.T) {
 		"a template image must beat the harness-config fallback")
 }
 
-// TestReincarnateAgent_A11F1_WorkerPersistsBrokerEchoedImage is the worker-side
+// TestReincarnateAgent_WorkerPersistsBrokerEchoedImage is the worker-side
 // half of design §3.4 Amendment A11 item 1: when the broker's reprovision
 // response echoes back a resolved image different from what the hub planned
 // (e.g. the broker's own search path resolved something the hub could not
@@ -846,7 +846,7 @@ func TestReincarnateAgent_A11F1_TemplateImageBeatsHarnessConfig(t *testing.T) {
 // AppliedConfig rather than losing it once the "starting" step re-derives the
 // agent's phase. This is a regression test for the pointer-aliasing bug where
 // a step write omitting appliedConfig silently discarded the broker's echo.
-func TestReincarnateAgent_A11F1_WorkerPersistsBrokerEchoedImage(t *testing.T) {
+func TestReincarnateAgent_WorkerPersistsBrokerEchoedImage(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	disp.reprovisionImage = "broker-resolved-image:v9"
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
@@ -1080,7 +1080,7 @@ func TestReincarnateAgent_AC8_ConflictWhenAlreadyPending(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, rec.Code)
 }
 
-// TestReincarnateAgent_A11F5_DryRunConflictsWhenAlreadyStarting is the design
+// TestReincarnateAgent_DryRunConflictsWhenAlreadyStarting is the design
 // §3.4 Amendment A11 item 3 regression test: the already-pending/already-
 // in-flight 409 gate used to run only on the real (non-dry-run) path, so a
 // --dry-run request against an agent whose migration was already in the
@@ -1089,7 +1089,7 @@ func TestReincarnateAgent_AC8_ConflictWhenAlreadyPending(t *testing.T) {
 // start when one was already running. The gate must fire for --dry-run too,
 // and it must not touch the agent row at all (no claim to make on a dry
 // run) — state_version stays exactly where it was.
-func TestReincarnateAgent_A11F5_DryRunConflictsWhenAlreadyStarting(t *testing.T) {
+func TestReincarnateAgent_DryRunConflictsWhenAlreadyStarting(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 	agent := newReincarnateTestAgent(t, s, project, broker, nil)
@@ -1392,7 +1392,7 @@ func TestReincarnateAgent_EndToEnd_IdentityContinuityAndHandoff(t *testing.T) {
 	assert.GreaterOrEqual(t, disp.stopCalls, 1)
 }
 
-// TestBuildReincarnationPreamble_A11F4_Wording is the design §3.4 Amendment
+// TestBuildReincarnationPreamble_DoesNotPromiseRedelivery is the design §3.4 Amendment
 // A11 item 4 golden test for the hub-authored preamble's step 2. The
 // design's originally proposed wording claimed messages sent during the
 // migration's down window "are redelivered to you", but that claim does not
@@ -1400,7 +1400,7 @@ func TestReincarnateAgent_EndToEnd_IdentityContinuityAndHandoff(t *testing.T) {
 // never built — see buildReincarnationPreamble's own comment) and per A11
 // item 4 must be dropped rather than stated as fact. This pins the exact
 // wording so a future edit cannot silently reintroduce the unverified claim.
-func TestBuildReincarnationPreamble_A11F4_Wording(t *testing.T) {
+func TestBuildReincarnationPreamble_DoesNotPromiseRedelivery(t *testing.T) {
 	srv, _ := testServer(t)
 	agent := &store.Agent{ID: "agent-1", Slug: "arqa-a"}
 
@@ -1929,7 +1929,7 @@ func TestReincarnateAgent_RecordUpdatedAtBumpedAtStartingStep(t *testing.T) {
 		"the worker's starting step must have bumped the record's updated_at, so it cannot predate that step")
 }
 
-// TestReincarnateAgent_A11F3_ExactlyOneErrorNotificationOnStartFailure is the
+// TestReincarnateAgent_ExactlyOneErrorNotificationOnStartFailure is the
 // notification half of design §3.4 Amendment A11 item 2: without the
 // heartbeat-suppression guard (reincarnationInFlight), a heartbeat racing the
 // worker's own failure — e.g. the OLD container reporting a crash while the
@@ -1941,7 +1941,7 @@ func TestReincarnateAgent_RecordUpdatedAtBumpedAtStartingStep(t *testing.T) {
 // With suppression in place the racing heartbeat cannot change the agent's
 // persisted Phase/Activity while reincarnating, so only the worker's own
 // failure write ever produces a notification.
-func TestReincarnateAgent_A11F3_ExactlyOneErrorNotificationOnStartFailure(t *testing.T) {
+func TestReincarnateAgent_ExactlyOneErrorNotificationOnStartFailure(t *testing.T) {
 	disp := newGatedDispatcher("start", fmt.Errorf("no such image: nonexistent:latest"))
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 	grantDevUserRuntimeBrokerAccess(t, s)
@@ -1999,9 +1999,9 @@ func TestReincarnateAgent_A11F3_ExactlyOneErrorNotificationOnStartFailure(t *tes
 	assert.Len(t, notifs, 1, "exactly one notification must fire, not a duplicate from the racing heartbeat")
 }
 
-// TestReincarnateAgent_A11F3_ZeroErrorNotificationsOnSuccessWithRacingCrashHeartbeat
+// TestReincarnateAgent_NoErrorNotificationOnSuccessWithRacingCrashHeartbeat
 // is the success-path counterpart to
-// TestReincarnateAgent_A11F3_ExactlyOneErrorNotificationOnStartFailure
+// TestReincarnateAgent_ExactlyOneErrorNotificationOnStartFailure
 // (design §3.4 Amendment A11 item 2): a heartbeat reporting a crash races the
 // migration while it is in the "starting" state, but DispatchAgentStart then
 // succeeds — the migration completes normally. The racing heartbeat must not
@@ -2009,7 +2009,7 @@ func TestReincarnateAgent_A11F3_ExactlyOneErrorNotificationOnStartFailure(t *tes
 // heartbeat's crash report would have persisted phase=error onto the agent
 // (later overwritten by the successful completion), publishing a spurious
 // ERROR notification for a migration that actually succeeded.
-func TestReincarnateAgent_A11F3_ZeroErrorNotificationsOnSuccessWithRacingCrashHeartbeat(t *testing.T) {
+func TestReincarnateAgent_NoErrorNotificationOnSuccessWithRacingCrashHeartbeat(t *testing.T) {
 	disp := newGatedDispatcher("start", nil)
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 	grantDevUserRuntimeBrokerAccess(t, s)
