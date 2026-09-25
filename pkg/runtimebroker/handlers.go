@@ -646,7 +646,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	if s.isMultiHubMode() && s.isGlobalProject(req.ProjectID, req.ProjectPath) {
 		writeJSON(w, http.StatusConflict, map[string]interface{}{
 			"error": map[string]string{
-				"code":    "global_grove_disabled",
+				"code":    "global_project_disabled",
 				"message": "Global project is disabled when broker is connected to multiple hubs",
 			},
 		})
