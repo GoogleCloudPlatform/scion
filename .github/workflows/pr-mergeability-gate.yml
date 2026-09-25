@@ -1,0 +1,92 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# ptone/scion#1294: GitHub does not schedule any `pull_request`-triggered
+# workflow run at all while a PR's merge commit can't be computed
+# (mergeable_state: dirty, i.e. a real merge conflict with the base branch).
+# Verified live on this fork on 2026-09-25 against PR #1207/#1208 (both
+# DIRTY/CONFLICTING): zero check-runs and zero commit statuses for the head
+# SHA -- every `pull_request` workflow in this repo (ci.yml, extras-ci.yml,
+# chart-ci.yml, macos-bash32.yml) was silently skipped, including
+# `Build & Test`. The checks list looks incomplete/empty rather than failing,
+# so a conflicted, never-built commit is indistinguishable from one nobody
+# has looked at yet.
+#
+# This job uses `pull_request_target` instead of `pull_request` specifically
+# because it is dispatched from the base repository's copy of this workflow
+# and does not require a computable merge ref, so it still runs when the PR
+# is conflicted. That gives conflicted PRs one visible, always-present check
+# that goes red instead of missing.
+#
+# SAFETY: `pull_request_target` runs with base-repo context and read access
+# to secrets, so it is only safe to use here because this workflow never
+# checks out the PR head or executes any code from the fork/branch -- it
+# only reads PR metadata via the GitHub API with the default, read-only
+# GITHUB_TOKEN. Do not add an `actions/checkout` step (or anything else that
+# runs PR-controlled code) to this file without re-reviewing for secret
+# exposure; see GitHub's pull_request_target security guidance.
+#
+# Known gap (deferred, see ptone/scion#1294): this only re-evaluates on PR
+# events (opened/synchronize/reopened/ready_for_review). A PR that goes
+# dirty solely because `main` advanced underneath it -- with no new push to
+# the PR branch -- won't get a fresh run until its next update. Making a
+# required check for `build-and-test` in branch protection (settings, not
+# code) is still the complete fix; this workflow is a code-side mitigation
+# for the common case of a PR that is already conflicted when opened or
+# updated.
+name: PR Mergeability Gate
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  mergeability:
+    name: Mergeability Gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PR mergeable state
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          state="unknown"
+          for i in $(seq 1 15); do
+            state=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.mergeable_state')
+            echo "attempt ${i}/15: mergeable_state=${state}"
+            if [ "$state" != "unknown" ]; then
+              break
+            fi
+            sleep 4
+          done
+
+          case "$state" in
+            dirty)
+              echo "::error title=Merge conflict::This PR conflicts with its base branch. GitHub skips all pull_request-triggered CI (including Build & Test) while a PR is in this state (ptone/scion#1294), so the rest of the checks list will look incomplete or empty instead of failing. Resolve the conflict and push an update to restore full CI."
+              exit 1
+              ;;
+            unknown)
+              echo "::warning title=Mergeability not yet determined::GitHub had not finished computing this PR's mergeable state after 60s, so this check passed without confirming the PR is conflict-free. Re-run it (or push a small update) if you want a confirmed result."
+              ;;
+            *)
+              echo "mergeable_state '${state}' does not indicate a merge conflict; not blocking."
+              ;;
+          esac
