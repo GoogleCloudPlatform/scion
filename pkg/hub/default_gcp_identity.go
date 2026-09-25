@@ -32,16 +32,26 @@ const (
 	defaultTierHub     = "hub"
 )
 
-// resolveDefaultSAAssignment resolves a configured default service account
-// (project or hub tier) into the GCPIdentityConfig applied to a new agent.
-// Both the project-default and hub-default rungs of the ladder go through
-// here so the two cannot drift apart.
+// resolveDefaultSAAssignmentCore is the transport-independent body shared by
+// every default-tier assign rung of the GCP identity ladder: the HTTP
+// project-default and hub-default rungs in the interactive/API create path
+// (via resolveDefaultSAAssignment below), and both rungs on the scheduled
+// dispatch path (applyScheduledProjectDefaultGCPIdentity, server.go), which
+// has no http.ResponseWriter to write to. Routing all four call sites through
+// one function is what keeps them from drifting apart (#1927).
 //
-// On failure it writes the HTTP error and returns ok=false. A default that
-// names an unavailable, unverified, or unauthorized account fails agent
-// creation rather than silently falling back to block (P10): the operator set
-// the default, so the operator needs to hear that it is broken.
-func (s *Server) resolveDefaultSAAssignment(ctx context.Context, w http.ResponseWriter, r *http.Request, projectID, saID, surface, tier string) (*store.GCPIdentityConfig, bool) {
+// r is used only to annotate authorization-denial logs with the request
+// path and may be nil for the scheduler, which authorizes against the
+// identity already on ctx (the schedule's creator) rather than an HTTP
+// request; evaluateSAAssignment accepts a nil request.
+//
+// A default that names an unavailable, unverified, or unauthorized account
+// fails resolution rather than silently falling back to block (P10): the
+// operator set the default, so the operator needs to hear that it is broken.
+// The returned error is either a plain error (not available / not verified)
+// or a *saAssignDenial (authorization gate), so a caller with an HTTP
+// response can render either the same way resolveDefaultSAAssignment does.
+func (s *Server) resolveDefaultSAAssignmentCore(ctx context.Context, r *http.Request, projectID, saID, surface, tier string) (*store.GCPIdentityConfig, error) {
 	sa, err := s.store.GetGCPServiceAccount(ctx, saID)
 	// Scope-aware admissibility (P4 item F), same predicate as the two
 	// caller-supplied assign sites. A default may legitimately nominate a
@@ -53,20 +63,16 @@ func (s *Server) resolveDefaultSAAssignment(ctx context.Context, w http.Response
 			"project_id", projectID,
 			"sa_id", saID,
 			"err", err)
-		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
-			fmt.Sprintf("%s default GCP service account is not available in this project; "+
-				"update the %s's default GCP identity setting", tier, tier), nil)
-		return nil, false
+		return nil, fmt.Errorf("%s default GCP service account is not available in this project; "+
+			"update the %s's default GCP identity setting", tier, tier)
 	}
 	if !sa.Verified {
 		slog.Warn(tier+"-default SA assignment failed: service account not verified",
 			"surface", surface,
 			"project_id", projectID,
 			"sa_id", sa.ID, "sa_email", sa.Email)
-		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
-			fmt.Sprintf("%s default GCP service account is not verified; "+
-				"verify it before it can be assigned to agents", tier), nil)
-		return nil, false
+		return nil, fmt.Errorf("%s default GCP service account is not verified; "+
+			"verify it before it can be assigned to agents", tier)
 	}
 
 	// P10: Authorization gate for default SA assignment.
@@ -74,24 +80,28 @@ func (s *Server) resolveDefaultSAAssignment(ctx context.Context, w http.Response
 	// Design §4.5 (ruled by ptone): default assignment checks the immediate
 	// agent creator. The principal is:
 	//   - for a human-created agent: the human creator;
-	//   - for agent-creates-agent: the creating agent's assigned SA.
+	//   - for agent-creates-agent: the creating agent's assigned SA;
+	//   - for a scheduled dispatch: the schedule's immediate creator, resolved
+	//     by scheduledCreatorIdentity and placed on ctx before this runs —
+	//     the same principal the project-default rung already authorizes
+	//     against on this path, so the hub-default rung mirrors it exactly.
 	//
 	// The operator selected an available default, but did not grant every
 	// future creator permission to act as it. The same holds one tier down:
 	// a hub-configured default is no more a grant than a project one.
 	//
-	// authorizeSAAssignment runs:
+	// evaluateSAAssignment runs:
 	//   1. Hub-scoped mode coupling (D4) — denies hub-scoped SAs
 	//      when gcpIamCheckMode != enforce.
 	//   2. Hub ActionAssign authorization.
-	//   3. GCP actAs check via callerPrincipal.
+	//   3. GCP actAs check via callerPrincipal, using the identity on ctx.
 	//   4. Audit record via EvaluateActAs with the given surface.
-	if !s.authorizeSAAssignment(w, r, sa, surface) {
+	if denial := s.evaluateSAAssignment(ctx, r, sa, surface); denial != nil {
 		slog.Warn(tier+"-default SA assignment denied by authorization gate",
 			"surface", surface,
 			"project_id", projectID,
 			"sa_id", sa.ID, "sa_email", sa.Email)
-		return nil, false
+		return nil, denial
 	}
 
 	return &store.GCPIdentityConfig{
@@ -99,7 +109,25 @@ func (s *Server) resolveDefaultSAAssignment(ctx context.Context, w http.Response
 		ServiceAccountID:    sa.ID,
 		ServiceAccountEmail: sa.Email,
 		ProjectID:           sa.ProjectID,
-	}, true
+	}, nil
+}
+
+// resolveDefaultSAAssignment is the HTTP-transport wrapper around
+// resolveDefaultSAAssignmentCore for the interactive/API create path: on
+// failure it writes the appropriate HTTP error (the core's plain errors as a
+// 400 validation error, a *saAssignDenial through its own write method) and
+// returns ok=false.
+func (s *Server) resolveDefaultSAAssignment(ctx context.Context, w http.ResponseWriter, r *http.Request, projectID, saID, surface, tier string) (*store.GCPIdentityConfig, bool) {
+	cfg, err := s.resolveDefaultSAAssignmentCore(ctx, r, projectID, saID, surface, tier)
+	if err == nil {
+		return cfg, true
+	}
+	if denial, ok := err.(*saAssignDenial); ok {
+		denial.write(w)
+		return nil, false
+	}
+	writeError(w, http.StatusBadRequest, ErrCodeValidationError, err.Error(), nil)
+	return nil, false
 }
 
 // hubDefaultPassthroughAllowed reports whether a hub-default "passthrough"
