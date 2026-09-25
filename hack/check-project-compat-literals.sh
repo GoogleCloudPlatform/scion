@@ -25,19 +25,12 @@ fi
 
 allowed_paths=(
   # CLI compatibility adapters, hidden deprecated aliases, and examples.
-  "^cmd/broker.go$"
   "^cmd/cli_mode.go$"
   "^cmd/config.go$"
   "^cmd/delete.go$"
   "^cmd/hub.go$"
-  "^cmd/hub_env.go$"
-  "^cmd/hub_secret.go$"
-  "^cmd/hub_token.go$"
   "^cmd/list.go$"
-  "^cmd/message.go$"
-  "^cmd/notifications.go$"
   "^cmd/project.go$"
-  "^cmd/root.go$"
   "^cmd/scion-broker-repl/main.go$"
   "^cmd/template_import.go$"
   "^cmd/template_resolution.go$"
@@ -48,7 +41,6 @@ allowed_paths=(
   "^cmd/delete_test.go$"
   "^cmd/harness_config_install_test.go$"
   "^cmd/hub_env_test.go$"
-  "^cmd/hub_secret_test.go$"
   "^cmd/message_test.go$"
   "^cmd/notifications_test.go$"
   "^cmd/server_test.go$"

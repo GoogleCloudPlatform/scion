@@ -230,12 +230,13 @@ jobs:
       # Before it was added, scripts/hub-env-integration-test.sh:328 and
       # scripts/hub-secret-integration-test.sh:329 both read:
       #
-      #     GROVE_ID=$($SCION config get grove_id 2>/dev/null || "")
+      #     PROJECT_ID=$($SCION config get project_id 2>/dev/null || "")
       #
       # The `|| ""` runs the empty string as a command name -- SC2286, an
-      # error-severity finding. (The intended form, `|| echo ""`, appears two
-      # lines below in both files.) Re-introducing that `|| ""` makes this step
-      # exit 1, which is how you can confirm the job catches real defects.
+      # error-severity finding. (The intended form, `|| echo ""`, appears on
+      # that same line in both files today.) Re-introducing that `|| ""` makes
+      # this step exit 1, which is how you can confirm the job catches real
+      # defects.
       #
       # -x plus --source-path=SCRIPTDIR lets shellcheck follow `source` targets
       # relative to each script's own directory, which honours the existing

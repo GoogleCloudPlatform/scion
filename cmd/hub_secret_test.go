@@ -121,7 +121,7 @@ func TestHubSecretListCmd_Exists(t *testing.T) {
 
 func TestHubSecretListCmd_Flags(t *testing.T) {
 	// Verify required flags are present on the list command.
-	assert.NotNil(t, hubSecretListCmd.Flags().Lookup("grove"), "list command should have --grove flag")
+	assert.NotNil(t, hubSecretListCmd.Flags().Lookup("project"), "list command should have --project flag")
 	assert.NotNil(t, hubSecretListCmd.Flags().Lookup("broker"), "list command should have --broker flag")
 	assert.NotNil(t, hubSecretListCmd.Flags().Lookup("json"), "list command should have --json flag")
 }
@@ -212,8 +212,8 @@ func TestResolveSecretScope_ScopeHub(t *testing.T) {
 
 	testCmd := &cobra.Command{Use: "test"}
 	testCmd.Flags().StringVar(&secretScope, "scope", "", "")
-	testCmd.Flags().StringVar(&secretProjectScope, "grove", "", "")
-	testCmd.Flags().Lookup("grove").NoOptDefVal = scopeInferSentinel
+	testCmd.Flags().StringVar(&secretProjectScope, "project", "", "")
+	testCmd.Flags().Lookup("project").NoOptDefVal = scopeInferSentinel
 	testCmd.Flags().StringVar(&secretBrokerScope, "broker", "", "")
 	testCmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
 
@@ -235,20 +235,20 @@ func TestResolveSecretScope_ScopeHub(t *testing.T) {
 }
 
 func TestResolveSecretScope_ProjectFallbackToProjectID(t *testing.T) {
-	// When --grove is set without value and settings.Hub.ProjectID is empty,
+	// When --project is set without value and settings.Hub.ProjectID is empty,
 	// it should fall back to settings.ProjectID (the top-level project ID).
 	orig := saveSecretTestState()
 	defer orig.restore()
 
 	testCmd := &cobra.Command{Use: "test"}
 	testCmd.Flags().StringVar(&secretScope, "scope", "", "")
-	testCmd.Flags().StringVar(&secretProjectScope, "grove", "", "")
-	testCmd.Flags().Lookup("grove").NoOptDefVal = scopeInferSentinel
+	testCmd.Flags().StringVar(&secretProjectScope, "project", "", "")
+	testCmd.Flags().Lookup("project").NoOptDefVal = scopeInferSentinel
 	testCmd.Flags().StringVar(&secretBrokerScope, "broker", "", "")
 	testCmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
 
-	// Set --grove without a value (triggers inference)
-	_ = testCmd.Flags().Set("grove", scopeInferSentinel)
+	// Set --project without a value (triggers inference)
+	_ = testCmd.Flags().Set("project", scopeInferSentinel)
 
 	tmpHome := t.TempDir()
 	_ = os.Setenv("HOME", tmpHome)
@@ -274,14 +274,14 @@ func TestResolveSecretScope_ScopeConflictsWithProject(t *testing.T) {
 
 	testCmd := &cobra.Command{Use: "test"}
 	testCmd.Flags().StringVar(&secretScope, "scope", "", "")
-	testCmd.Flags().StringVar(&secretProjectScope, "grove", "", "")
-	testCmd.Flags().Lookup("grove").NoOptDefVal = scopeInferSentinel
+	testCmd.Flags().StringVar(&secretProjectScope, "project", "", "")
+	testCmd.Flags().Lookup("project").NoOptDefVal = scopeInferSentinel
 	testCmd.Flags().StringVar(&secretBrokerScope, "broker", "", "")
 	testCmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
 
-	// Set both --scope and --grove
+	// Set both --scope and --project
 	_ = testCmd.Flags().Set("scope", "hub")
-	_ = testCmd.Flags().Set("grove", "some-project")
+	_ = testCmd.Flags().Set("project", "some-project")
 
 	tmpHome := t.TempDir()
 	_ = os.Setenv("HOME", tmpHome)
@@ -302,8 +302,8 @@ func TestResolveSecretScope_ScopeConflictsWithBroker(t *testing.T) {
 
 	testCmd := &cobra.Command{Use: "test"}
 	testCmd.Flags().StringVar(&secretScope, "scope", "", "")
-	testCmd.Flags().StringVar(&secretProjectScope, "grove", "", "")
-	testCmd.Flags().Lookup("grove").NoOptDefVal = scopeInferSentinel
+	testCmd.Flags().StringVar(&secretProjectScope, "project", "", "")
+	testCmd.Flags().Lookup("project").NoOptDefVal = scopeInferSentinel
 	testCmd.Flags().StringVar(&secretBrokerScope, "broker", "", "")
 	testCmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
 
