@@ -384,7 +384,6 @@ export class ScionChatThread extends LitElement {
     messageId: string;
     senderName: string;
     content: string;
-    sender?: string;
   } | null = null;
 
   /** Edit mode context for the composer. */
@@ -1953,16 +1952,8 @@ export class ScionChatThread extends LitElement {
 
   /** Send a message in v2 mode. */
   private async handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void> {
-    const {
-      text,
-      mentions,
-      attachmentIds,
-      replyToId,
-      replyToSender,
-      replyToContent,
-      onSuccess,
-      onError,
-    } = e.detail;
+    const { text, mentions, attachmentIds, replyToId, replyToContent, onSuccess, onError } =
+      e.detail;
     const hasContent = text.length > 0 || (attachmentIds && attachmentIds.length > 0);
     if (!hasContent || this.sending) return;
 
@@ -2023,13 +2014,10 @@ export class ScionChatThread extends LitElement {
       if (replyToId) {
         body.reply_to_id = replyToId;
       }
-      // Fix: When replying to an agent message, target that agent for routing.
-      if (replyToSender && replyToSender.startsWith('agent:')) {
-        const agentSlug = replyToSender.slice('agent:'.length);
-        if (agentSlug) {
-          body.reply_to_agent = agentSlug;
-        }
-      }
+      // nc-reply-recipient: the primary recipient for a reply is resolved
+      // server-side from reply_to_id (the replied-to message's actual
+      // sender) — not from a client-supplied agent slug, which would be
+      // spoofable and inconsistent across clients.
       // Fix: Add RE-to metadata when replying — first 32 codepoints with ellipsis.
       // Use spread to avoid splitting UTF-16 surrogate pairs (e.g. emoji).
       if (replyToId && replyToContent) {
@@ -2909,7 +2897,6 @@ export class ScionChatThread extends LitElement {
       messageId: msg.id,
       senderName: this.getSenderDisplayName(msg) || msg.sender,
       content: msg.msg.length > 100 ? msg.msg.slice(0, 100) + '...' : msg.msg,
-      sender: msg.sender,
     };
   }
 

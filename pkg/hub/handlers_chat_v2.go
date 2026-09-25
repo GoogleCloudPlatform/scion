@@ -862,10 +862,9 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 	r.Body = http.MaxBytesReader(w, r.Body, 1048576)
 	var body struct {
 		Content        string            `json:"content"`
-		Attachments    []string          `json:"attachments,omitempty"`    // W7: attachment IDs
-		ReplyToID      string            `json:"reply_to_id,omitempty"`    // Phase-3: reply/quote
-		ReplyToAgent   string            `json:"reply_to_agent,omitempty"` // Reply targeting: agent slug to route to
-		Metadata       map[string]string `json:"metadata,omitempty"`       // Client-supplied metadata (e.g. RE_msg_starting)
+		Attachments    []string          `json:"attachments,omitempty"` // W7: attachment IDs
+		ReplyToID      string            `json:"reply_to_id,omitempty"` // Phase-3: reply/quote
+		Metadata       map[string]string `json:"metadata,omitempty"`    // Client-supplied metadata (e.g. RE_msg_starting)
 		IdempotencyKey string            `json:"idempotency_key,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -1017,14 +1016,13 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
-	// --- Reply-to agent override ---
-	// When replying to an agent's message, use that agent as the routing target
-	// instead of the thread default, so the reply reaches the right agent.
-	if body.ReplyToAgent != "" && projectID != "" {
-		replyAgent, err := s.store.GetAgentBySlug(ctx, projectID, body.ReplyToAgent)
-		if err == nil && replyAgent != nil && replyAgent.DeletedAt.IsZero() {
-			defaultAgent = replyAgent
-		}
+	// --- Reply-to agent override (nc-reply-recipient); see resolveReplyTarget's
+	// doc comment for the full rationale. unresolvedDefaultAgent is reused
+	// here (see its declaration above) so the existing "Agent unreachable"
+	// reporting path below also covers a deleted reply-to sender.
+	if replyAgent, replyUnresolved, ok := s.resolveReplyTarget(ctx, key, projectID, body.ReplyToID); ok {
+		defaultAgent = replyAgent
+		unresolvedDefaultAgent = replyUnresolved
 	}
 
 	// --- Resolve routing via shared planner ---
@@ -1101,6 +1099,86 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 		return // error response already written by sendHumanToHuman
 	}
 	recordIdempotency(msgID)
+}
+
+// resolveReplyTarget resolves the reply-to agent override (nc-reply-recipient)
+// for handleConversationSend. When replying to a message, the primary
+// recipient should be the original sender agent, not the thread default. The
+// sender is resolved here from the replied-to message itself (looked up
+// server-side by ID) rather than trusted from client-supplied routing data:
+// this is authoritative, tamper-resistant, and consistent across clients. A
+// leading @mention in the reply body still overrides this, in
+// resolveRoutingAgents.
+//
+// ok reports whether the override applies: when true, the caller should
+// replace its defaultAgent/unresolvedDefaultAgent with agent/unresolved
+// (either may be nil). When false, replyToID didn't resolve to an in-scope
+// agent override and the caller's existing defaultAgent/unresolvedDefaultAgent
+// (topic default, DM default, etc.) should be left untouched.
+func (s *Server) resolveReplyTarget(ctx context.Context, key, projectID, replyToID string) (agent, unresolved *store.Agent, ok bool) {
+	if replyToID == "" {
+		return nil, nil, false
+	}
+	refMsgs, err := s.store.GetMessagesByIDs(ctx, []string{replyToID})
+	if err != nil {
+		return nil, nil, false
+	}
+	refMsg := refMsgs[replyToID]
+	if refMsg == nil {
+		return nil, nil, false
+	}
+	// Authorization: the replied-to message must belong to this same
+	// conversation thread. A mismatched thread means the reply-to reference
+	// doesn't apply here — ignore it rather than route based on a message
+	// from another conversation.
+	agentSlug, isAgentSender := strings.CutPrefix(refMsg.Sender, "agent:")
+	if refMsg.ThreadID != key || !isAgentSender {
+		return nil, nil, false
+	}
+	if refMsg.SenderID == "" {
+		// An agent-prefixed sender with an empty SenderID (legacy or
+		// bridged rows) has no agent record to resolve. This is deliberate:
+		// there is nothing authoritative to look up, so the override does
+		// not apply and the thread default is used instead.
+		return nil, nil, false
+	}
+	replyAgent, aerr := s.store.GetAgent(ctx, refMsg.SenderID)
+	switch {
+	case aerr == nil && replyAgent != nil && replyAgent.DeletedAt.IsZero():
+		if projectID == "" || replyAgent.ProjectID != projectID {
+			// Foreign-project sender (DEF-31): a reply must not route to an
+			// agent outside this conversation's project. Mirror
+			// foreignProjectDefault above — ignore the override and fall
+			// through to the thread default rather than reporting
+			// unreachable. An empty projectID (e.g. a user-user DM) can never
+			// legitimately own an agent, so it must also fail closed here
+			// rather than skip the check (review round 2, R1).
+			return nil, nil, false
+		}
+		return replyAgent, nil, true
+	case aerr == nil && replyAgent != nil:
+		// The original sender has been soft-deleted since sending.
+		if projectID == "" || replyAgent.ProjectID != projectID {
+			// Same DEF-31 scoping applies to the soft-deleted branch: a
+			// foreign-project sender is not reported unreachable either —
+			// fall through to the thread default instead. Same empty-
+			// projectID reasoning as the live branch above.
+			return nil, nil, false
+		}
+		// Report unreachable rather than falling back to the thread default.
+		return nil, replyAgent, true
+	case errors.Is(aerr, store.ErrNotFound):
+		// The agent record is gone entirely (not just soft-deleted):
+		// unreachable, best-effort identity. The agent's original project is
+		// unknown since the record no longer exists, so there is nothing to
+		// scope here.
+		return nil, &store.Agent{ID: refMsg.SenderID, Slug: agentSlug}, true
+	default:
+		// A transient lookup error leaves defaultAgent/unresolvedDefaultAgent
+		// untouched, matching the topic-default resolution's handling of the
+		// same case above.
+		return nil, nil, false
+	}
 }
 
 // Machine-readable dispatchFailureCode values for chatMessageResponse.
