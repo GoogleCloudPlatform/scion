@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -928,11 +929,16 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		scopeID = req.ProjectID
 	}
 
-	// Authorize: check destination scope for ActionCreate
+	// Authorize: check destination scope for ActionCreate. Legacy scope
+	// names are normalized here — in the one place shared by this switch,
+	// the clone record below, and the storage path resolution further
+	// down — so all three always agree on which scope a clone targets
+	// (ptone/scion#1977).
 	destScope := req.Scope
 	if destScope == "" {
 		destScope = store.TemplateScopeProject
 	}
+	destScope = projectcompat.CanonicalResourceScope(destScope)
 	switch destScope {
 	case store.TemplateScopeGlobal:
 		userIdent := GetUserIdentityFromContext(ctx)
@@ -979,6 +985,9 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You can only clone templates into your own user scope", nil)
 			return
 		}
+	default:
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Cloning into this resource scope is not supported", nil)
+		return
 	}
 
 	// Create new template based on source
@@ -991,15 +1000,11 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		Harness:      source.Harness,
 		Image:        source.Image,
 		Config:       source.Config,
-		Scope:        req.Scope,
+		Scope:        destScope,
 		ScopeID:      scopeID,
 		ProjectID:    scopeID,
 		BaseTemplate: source.ID, // Track the source template
 		Status:       store.TemplateStatusPending,
-	}
-
-	if clone.Scope == "" {
-		clone.Scope = store.TemplateScopeProject
 	}
 
 	// For user-scoped clones, set the owner from the authenticated user
