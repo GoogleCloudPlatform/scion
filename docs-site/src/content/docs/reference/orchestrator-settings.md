@@ -224,6 +224,8 @@ profiles:
 3. The Hub-level `agent_defaults.default_timezone` (see [Operational settings](/scion/reference/server-config/#layer-1--operational-postgres-hub_settings-table)).
 4. Otherwise `TZ` is not injected and the container uses its default (UTC).
 
+The web **Profile settings** page includes a **Timezone** card that edits the `timezone` field of the Hub's active runtime profile. Names are checked client-side as IANA timezones before saving; leave the field blank to clear it and fall back to the Hub default. This is a Hub-wide profile setting, not a per-user preference: the card appears only to users who can read the admin server configuration (`GET /api/v1/admin/server-config`), and saving writes the `profiles` map back through the same admin endpoint.
+
 ## Telemetry Configuration (`telemetry`)
 
 Controls agent telemetry collection, forwarding, privacy filtering, and debug output. Telemetry settings can be defined at global or project scope and are merged across the hierarchy (last write wins). They can also be overridden per-template or per-agent in `scion-agent.yaml`.
