@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os/exec"
 	"strings"
@@ -334,6 +335,17 @@ func (r *AppleContainerRuntime) Exec(ctx context.Context, id string, cmd []strin
 	}
 	args := append([]string{"exec", "--user", "scion", id}, cmd...)
 	return runSimpleCommand(ctx, r.Command, args...)
+}
+
+// ExecWithStdin runs cmd inside the container with stdin piped from the
+// given reader. The -i flag is required for `container exec` to attach
+// stdin, mirroring Docker/Podman's exec semantics. See #1355.
+func (r *AppleContainerRuntime) ExecWithStdin(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
+	if agents, err := r.List(ctx, nil); err == nil {
+		id = resolveContainerID(agents, id)
+	}
+	args := append([]string{"exec", "-i", "--user", "scion", id}, cmd...)
+	return runSimpleCommandWithStdin(ctx, stdin, r.Command, args...)
 }
 
 // stripUnsupportedAppleFlags removes flag-value pairs that the Apple

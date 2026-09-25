@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"context"
+	"io"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -147,6 +148,14 @@ type Runtime interface {
 	PullImage(ctx context.Context, image string) error
 	Sync(ctx context.Context, id string, direction SyncDirection) error
 	Exec(ctx context.Context, id string, cmd []string) (string, error)
+	// ExecWithStdin runs cmd with stdin piped from the given reader, instead
+	// of embedding data in the command's argv. Callers delivering secrets
+	// (e.g. a token) into a container MUST use this instead of interpolating
+	// the secret into cmd: argv (including heredoc bodies passed via `sh -c`)
+	// becomes part of the outer host process's command line and is readable
+	// via /proc/<pid>/cmdline for the lifetime of the exec, even though a
+	// heredoc keeps the secret out of the *inner* command's argv. See #1355.
+	ExecWithStdin(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error)
 	// GetWorkspacePath returns the host path to the container's /workspace mount.
 	// This is used for workspace sync operations.
 	GetWorkspacePath(ctx context.Context, id string) (string, error)

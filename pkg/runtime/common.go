@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
 	"os"
@@ -627,6 +628,27 @@ func runSimpleCommand(ctx context.Context, command string, args ...string) (stri
 	runtimeLog.Debug("Executing command", "cmd", command, "argc", len(args))
 	start := time.Now()
 	cmd := exec.CommandContext(ctx, command, args...)
+	out, err := cmd.CombinedOutput()
+	elapsed := time.Since(start)
+	if err != nil {
+		runtimeLog.Debug("Command failed", "cmd", command, "argc", len(args), "duration", elapsed, "output", strings.TrimSpace(string(out)))
+		return string(out), fmt.Errorf("%s failed: %w", command, err)
+	}
+	runtimeLog.Debug("Command completed", "cmd", command, "argc", len(args), "duration", elapsed)
+	return strings.TrimSpace(string(out)), nil
+}
+
+// runSimpleCommandWithStdin is runSimpleCommand's counterpart for callers
+// that need to deliver data to the child process over stdin rather than
+// argv (see #1355 — secrets embedded in argv leak via /proc/<pid>/cmdline
+// for the lifetime of the exec). It never logs the piped content.
+func runSimpleCommandWithStdin(ctx context.Context, stdin io.Reader, command string, args ...string) (string, error) {
+	// Log the command name and argument count only — see runSimpleCommand
+	// comment above. The stdin payload is never logged.
+	runtimeLog.Debug("Executing command with stdin", "cmd", command, "argc", len(args))
+	start := time.Now()
+	cmd := exec.CommandContext(ctx, command, args...)
+	cmd.Stdin = stdin
 	out, err := cmd.CombinedOutput()
 	elapsed := time.Since(start)
 	if err != nil {

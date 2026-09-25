@@ -1982,17 +1982,19 @@ func (s *Server) resetAuth(w http.ResponseWriter, r *http.Request, id, projectID
 	}
 
 	// Write the token to the canonical file atomically via temp+rename.
-	// WARNING: token appears in outer process argv via runtime Exec (docker exec / podman exec
-	// command line includes the full script text). The heredoc only hides it from the inner
-	// cat's argv, not the outer shell. See #1355 for the stdin-pipe fix.
+	// The token is delivered over the exec's stdin rather than embedded in
+	// the script text: argv (including a heredoc body passed via `sh -c`)
+	// becomes part of the outer host process's command line and is readable
+	// via /proc/<pid>/cmdline for the lifetime of the exec, while stdin is
+	// not. See #1355.
 	writeCmd := []string{"sh", "-c",
 		"TOKEN_DIR=\"$(getent passwd scion 2>/dev/null | cut -d: -f6 || echo /home/scion)/.scion\" && " +
 			"mkdir -p \"$TOKEN_DIR\" && " +
-			"cat <<'SCION_TOKEN_EOF' > \"$TOKEN_DIR/scion-token.tmp\"\n" + req.Token + "\nSCION_TOKEN_EOF\n" +
+			"cat > \"$TOKEN_DIR/scion-token.tmp\" && " +
 			"mv \"$TOKEN_DIR/scion-token.tmp\" \"$TOKEN_DIR/scion-token\"",
 	}
 
-	if _, err := rt.Exec(ctx, target, writeCmd); err != nil {
+	if _, err := rt.ExecWithStdin(ctx, target, writeCmd, strings.NewReader(req.Token)); err != nil {
 		s.agentLifecycleLog.Error("reset-auth: failed to write token file", "agent_id", id, "error", err)
 		RuntimeError(w, "Failed to write token file: "+err.Error())
 		return
