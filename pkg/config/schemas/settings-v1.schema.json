@@ -796,6 +796,13 @@
           "x-env-var": "SCION_SERVER_HUB_ENDPOINT",
           "x-env-var-alias": "SCION_SERVER_HUB_PUBLIC_URL"
         },
+        "agent_endpoint": {
+          "type": "string",
+          "format": "uri",
+          "description": "Optional override of public_url used only for the Hub URL injected into agents (SCION_HUB_ENDPOINT). It is injected into agents on every runtime broker attached to this Hub, including remote brokers, so only set it if every broker's agents can reach the address and it is this Hub on each of those networks. Invite links, chat-bridge links, the OIDC issuer default, and the cloudrun_invoker audience default keep using public_url. Must be scheme://host[:port] only: http or https, an IP literal or a hostname of letters, digits, '_', '-', and '.', no path, query, fragment, or credentials (a trailing / is stripped); the Hub fails to start otherwise. When unset, agents receive the Hub's regular endpoint (public_url, or the endpoint the Hub resolves when public_url is unset). In file mode this key can also be set through the admin server-config API (admin only), validated the same way, and takes effect at the next restart. Security: with an http:// value, agent bearer tokens and the secrets and tokens agents fetch from the Hub travel unencrypted between agents and the Hub; use https:// unless that network is trusted and isolated.",
+          "x-env-var": "SCION_SERVER_HUB_AGENTENDPOINT",
+          "x-since": "1"
+        },
         "read_timeout": { "type": "string", "default": "30s", "x-env-var": "SCION_SERVER_HUB_READTIMEOUT" },
         "write_timeout": { "type": "string", "default": "60s", "x-env-var": "SCION_SERVER_HUB_WRITETIMEOUT" },
         "cors": { "$ref": "#/$defs/corsConfig" },

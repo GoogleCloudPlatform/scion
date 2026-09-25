@@ -93,6 +93,25 @@ server:
     # write_timeout: "60s"
     # hub_id: ""                       # Unique hub identifier (auto-generated)
     # gcp_project_id: ""               # GCP project for SA minting (auto-detected on GCE)
+    # agent_endpoint: ""               # Layer 0 (file/env only, restart required; can also be
+    #                                   # set through the admin server-config API in file mode).
+    #                                   # Overrides ONLY the hub URL injected into agents
+    #                                   # (SCION_HUB_ENDPOINT). When unset, agents receive the
+    #                                   # hub's regular endpoint (public_url, or the endpoint
+    #                                   # the hub resolves when public_url is unset). Use when
+    #                                   # agents reach the hub on a different address than users
+    #                                   # (e.g. an internal VPC URL) while invite links and
+    #                                   # similar keep using public_url. Must be
+    #                                   # scheme://host[:port] only: http or https, an IP
+    #                                   # literal or a hostname of letters, digits, '_', '-',
+    #                                   # and '.', no path, query, fragment, or credentials (a
+    #                                   # trailing / is stripped). Applies to agents on EVERY
+    #                                   # broker attached to this hub, including remote
+    #                                   # brokers, so only set it if every broker's agents can
+    #                                   # reach the address and it is this hub on each of those
+    #                                   # networks. Security: an http:// value sends agent
+    #                                   # bearer tokens and fetched secrets unencrypted; use
+    #                                   # https:// unless the network is trusted and isolated.
 
     # Layer 0 — CORS (restart required, middleware-init bound)
     # cors:
