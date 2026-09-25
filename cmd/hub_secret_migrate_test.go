@@ -26,7 +26,7 @@ import (
 // shadows the root --project/-g scion-project selector.
 func TestHubSecretMigrateCmd_GCPProjectFlagRenamed(t *testing.T) {
 	assert.NotNil(t, hubSecretMigrateCmd.Flags().Lookup("gcp-project"), "migrate command should register --gcp-project")
-	assert.Nil(t, hubSecretMigrateCmd.Flags().Lookup("project"), "migrate command must not register a local --project flag")
+	assertNoLocalProjectFlag(t, hubSecretMigrateCmd)
 }
 
 // TestHubSecretMigrateCmd_RootProjectAndGCPProjectFlagsParseIndependently is
