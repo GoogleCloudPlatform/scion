@@ -45,7 +45,7 @@ func (s *Server) brokerMessageSweepHandler() func(ctx context.Context) {
 		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
 
-		cutoff := time.Now().Add(-stuckMessageThreshold)
+		cutoff := time.Now().UTC().Add(-stuckMessageThreshold)
 		count, err := s.store.CountStuckPendingMessages(ctx, cutoff)
 		if err != nil {
 			s.agentLifecycleLog.Error("sweep: count stuck pending messages failed", "error", err)
@@ -61,7 +61,7 @@ func (s *Server) brokerMessageSweepHandler() func(ctx context.Context) {
 			rec.ObserveMessageStuck(ctx, int64(count))
 		}
 
-		expireCutoff := time.Now().Add(-stuckMessageExpireTTL)
+		expireCutoff := time.Now().UTC().Add(-stuckMessageExpireTTL)
 		expired, err := s.store.ExpireStuckPendingMessages(ctx, expireCutoff, "expired: stuck in pending state beyond TTL")
 		if err != nil {
 			s.agentLifecycleLog.Error("sweep: expire stuck pending messages failed", "error", err)
@@ -105,7 +105,7 @@ func (s *Server) failedMessageRetentionHandler() func(ctx context.Context) {
 		if retentionDays <= 0 {
 			retentionDays = defaultFailedMessageRetentionDays
 		}
-		cutoff := time.Now().AddDate(0, 0, -retentionDays)
+		cutoff := time.Now().UTC().AddDate(0, 0, -retentionDays)
 
 		purged, err := s.store.PurgeFailedMessages(ctx, cutoff)
 		if err != nil {
