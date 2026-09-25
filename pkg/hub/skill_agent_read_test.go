@@ -37,6 +37,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -424,4 +425,76 @@ func TestAgentSkillRead_ConsistencyAtScale(t *testing.T) {
 		code, _ := f.agentGet(t, token, "/api/v1/skills/"+sk.ID)
 		assert.Equal(t, listed[sk.ID], code == http.StatusOK, "in LIST ⇔ GET 200 for %s (%s)", sk.Name, sk.Scope)
 	}
+}
+
+// Every per-skill read surface uses the same authorization as GET
+// /skills/{id}, so it must agree with it for an agent: skills in G are
+// readable on each surface, and skills outside G get the same not-found
+// response as a nonexistent skill ID on that surface.
+func TestAgentSkillRead_OtherReadSurfacesAgreeWithGet(t *testing.T) {
+	f := setupAgentSkillFixture(t)
+	stor, err := storage.NewLocal(storage.Config{Provider: storage.ProviderLocal, Bucket: "b", LocalPath: t.TempDir()})
+	require.NoError(t, err)
+	f.srv.SetStorage(stor)
+
+	versions := map[string]string{}
+	for _, sk := range f.all() {
+		addLocalSkillVersion(t, f.srv, stor, sk, "1.0.0", map[string][]byte{"SKILL.md": []byte("# " + sk.Name)})
+		sv, err := f.s.GetSkillVersionByNumber(context.Background(), sk.ID, "1.0.0")
+		require.NoError(t, err)
+		versions[sk.ID] = sv.ID
+	}
+	granted := agentSkillSet(f.sg, f.sc, f.sp)
+	token := f.newAgent(t, "as-agent-surfaces", f.p.ID, f.u.ID, ScopesForRole(AgentRoleBaseline))
+
+	surfaces := []struct {
+		name string
+		path func(skillID, versionID string) string
+	}{
+		{"versions", func(id, _ string) string { return "/api/v1/skills/" + id + "/versions" }},
+		{"version", func(id, vid string) string { return "/api/v1/skills/" + id + "/versions/" + vid }},
+		{"download", func(id, _ string) string { return "/api/v1/skills/" + id + "/download?version=1.0.0" }},
+		{"resolve", func(id, _ string) string { return "/api/v1/skills/" + id + "/resolve?version=1.0.0" }},
+		{"files", func(id, _ string) string { return "/api/v1/skills/" + id + "/files/SKILL.md?version=1.0.0" }},
+	}
+	for _, surface := range surfaces {
+		t.Run(surface.name, func(t *testing.T) {
+			_, missingBody := f.agentGet(t, token, surface.path(api.NewUUID(), api.NewUUID()))
+			for _, sk := range f.all() {
+				code, body := f.agentGet(t, token, surface.path(sk.ID, versions[sk.ID]))
+				if granted[sk.ID] {
+					assert.Equal(t, http.StatusOK, code, "%s (%s) should be readable: %s", sk.Name, sk.Scope, body)
+				} else {
+					assert.Equal(t, http.StatusNotFound, code, "%s (%s) must be a 404: %s", sk.Name, sk.Scope, body)
+					assert.Equal(t, missingBody, body, "%s (%s): not-found response must be consistent", sk.Name, sk.Scope)
+				}
+			}
+		})
+	}
+
+	t.Run("batch-resolve", func(t *testing.T) {
+		uris := map[string]string{
+			f.sg.ID: "skill://scion/global/" + f.sg.Slug,
+			f.sc.ID: "skill://scion/core/" + f.sc.Slug,
+			f.sp.ID: "skill://scion/project/" + f.p.ID + "/" + f.sp.Slug,
+			f.sq.ID: "skill://scion/project/" + f.q.ID + "/" + f.sq.Slug,
+			f.su.ID: "skill://scion/user/" + f.u.ID + "/" + f.su.Slug,
+			f.sv.ID: "skill://scion/user/" + f.v.ID + "/" + f.sv.Slug,
+		}
+		for _, sk := range f.all() {
+			rec := doAgentTokenRequest(t, f.srv, http.MethodPost, "/api/v1/skills/resolve",
+				ResolveSkillsRequest{Skills: []ResolveSkillRef{{URI: uris[sk.ID]}}}, token)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			var resp ResolveSkillsResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			if granted[sk.ID] {
+				assert.Len(t, resp.Resolved, 1, "%s (%s) should resolve: %s", sk.Name, sk.Scope, rec.Body.String())
+				assert.Empty(t, resp.Errors, sk.Name)
+			} else {
+				assert.Empty(t, resp.Resolved, "%s (%s) must not resolve", sk.Name, sk.Scope)
+				require.Len(t, resp.Errors, 1, sk.Name)
+				assert.Equal(t, "not_found", resp.Errors[0].Code, sk.Name)
+			}
+		}
+	})
 }

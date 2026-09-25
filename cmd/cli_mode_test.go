@@ -527,3 +527,37 @@ func TestAgentAllowedSkillBrowse(t *testing.T) {
 		assert.False(t, agentAllowed[path], "agentAllowed must NOT contain mutating skill verb %s", path)
 	}
 }
+
+// cloneCommandShape copies the names of cmd and its subcommands into a fresh
+// tree, so mode filtering can run against the real command layout without
+// mutating the shared rootCmd.
+func cloneCommandShape(cmd *cobra.Command) *cobra.Command {
+	c := &cobra.Command{Use: cmd.Name(), Run: func(*cobra.Command, []string) {}}
+	for _, child := range cmd.Commands() {
+		c.AddCommand(cloneCommandShape(child))
+	}
+	return c
+}
+
+// ptone/scion#1968: runs agent-mode filtering over a copy of the real skills
+// and skill subtrees and checks that exactly the read-only browse verbs
+// survive, so a mistyped allowlist key or a new mutating verb fails here.
+func TestApplyModeRestrictions_AgentRealSkillTree(t *testing.T) {
+	t.Setenv("SCION_CLI_MODE", "agent")
+	root := &cobra.Command{Use: "scion"}
+	for _, name := range []string{"skills", "skill"} {
+		real := resolveCommandPath(rootCmd, name)
+		require.NotNil(t, real, "real command %q must exist", name)
+		root.AddCommand(cloneCommandShape(real))
+	}
+	before := collectCommandNames(root)
+	for _, mutating := range []string{"skills.create", "skills.publish", "skills.delete", "skills.deprecate"} {
+		require.Contains(t, before, mutating, "real tree should contain %s before filtering", mutating)
+	}
+
+	applyModeRestrictions(root)
+
+	assert.Equal(t, []string{"skill", "skill.list", "skills", "skills.list", "skills.show"},
+		collectCommandNames(root),
+		"agent mode must keep exactly the read-only skill browse verbs")
+}
