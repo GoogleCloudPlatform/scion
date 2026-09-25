@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast vet lint compat-literals check-authz-guards check-conversation-upsert-guard check-security-marker-gates check-authorization-catalog check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
+.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite vet lint compat-literals check-authz-guards check-conversation-upsert-guard check-security-marker-gates check-authorization-catalog check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -71,6 +71,16 @@ test:
 test-fast:
 	@echo "Running tests (no SQLite)..."
 	@go test -tags no_sqlite ./...
+
+## test-hub-sqlite: Run pkg/hub tests with SQLite enabled (no build tag). This is
+# the ~67% of pkg/hub's test files that "make test-fast" never compiles (see
+# ptone/scion#1118). Skips four tests with known pre-existing, tracked failures
+# (ptone/scion#1847) so this target can be used as a CI merge gate.
+test-hub-sqlite:
+	@echo "Running pkg/hub tests (SQLite-enabled)..."
+	@go test -count=1 -timeout 15m \
+		-skip '^(TestDEF164_AtAgentSlug_DeliversToAgent|TestDEF164_AtAgentSlug_DMConversationCreated|TestDEF152_AgentToAgentDM_DeliversViaOutbound|TestCreateTemplateV2_ScopeIDInjectionBlocked)$$' \
+		./pkg/hub/...
 
 ## vet: Run go vet
 vet:
