@@ -34,8 +34,8 @@ import (
 // ============================================================================
 // ptone/scion#1974: pagination correctness regression for the per-item scan
 // path (authorizedList in authorized_list.go). This suite seeds more than
-// one page of authorized ("visible") items interleaved with unauthorized
-// ("hidden") ones and walks every page at several limits, for both list
+// one page of authorized ("visible") items interleaved with out-of-scope
+// ("other-owner") ones and walks every page at several limits, for both list
 // endpoints that go through authorizedList's per-item scan (templates,
 // harness configs) plus the group list, which shares the same function.
 //
@@ -60,8 +60,8 @@ var authorizedListPageBoundaryExtras = []int{0, 1}
 // assertAuthorizedListPagesCoverExpected walks the collected pages of a
 // paginated list and asserts: every page but the last is full (page size ==
 // limit); the union of every page's IDs equals exactly the expected
-// (visible) set, so no visible item was dropped and no hidden item leaked
-// in; no ID repeats across pages; and the page count is exactly
+// (visible) set, so no visible item was dropped and no out-of-scope item was
+// included; no ID repeats across pages; and the page count is exactly
 // ceil(len(expected)/limit).
 func assertAuthorizedListPagesCoverExpected(t *testing.T, pages [][]string, expected map[string]bool, limit int) {
 	t.Helper()
@@ -77,7 +77,7 @@ func assertAuthorizedListPagesCoverExpected(t *testing.T, pages [][]string, expe
 			union[id] = true
 		}
 	}
-	assert.Equal(t, expected, union, "union of all pages must equal the expected visible set: no drops at a page boundary, no hidden item leaked")
+	assert.Equal(t, expected, union, "union of all pages must equal the expected visible set: no drops at a page boundary, no out-of-scope item included")
 	wantPages := (len(expected) + limit - 1) / limit
 	assert.Equal(t, wantPages, len(pages), "page count must equal ceil(visible count / limit)")
 }
@@ -86,7 +86,7 @@ func assertAuthorizedListPagesCoverExpected(t *testing.T, pages [][]string, expe
 // strictly decreasing Created timestamps so list order (newest-first) is
 // pinned regardless of wall-clock timestamp ties: the item at list position
 // i is a carol-owned, user-scoped (visible) template when (i+1)%3==0, and
-// otherwise an alice-owned, project-scoped (hidden, outside carol's
+// otherwise an alice-owned, project-scoped (out-of-scope, outside carol's
 // authorized scope) template. Returns the set of visible template IDs.
 func seedInterleavedTemplates(t *testing.T, s store.Store, carolID, aliceID, projectID string, visibleCount int) map[string]bool {
 	t.Helper()
@@ -95,7 +95,7 @@ func seedInterleavedTemplates(t *testing.T, s store.Store, carolID, aliceID, pro
 	visible := make(map[string]bool, visibleCount)
 	for i := 0; i < total; i++ {
 		created := base.Add(-time.Duration(i) * time.Millisecond)
-		scope, scopeID, owner, prefix := store.TemplateScopeProject, projectID, aliceID, "boundary-hidden"
+		scope, scopeID, owner, prefix := store.TemplateScopeProject, projectID, aliceID, "boundary-other"
 		isVisible := (i+1)%3 == 0
 		if isVisible {
 			scope, scopeID, owner, prefix = store.TemplateScopeUser, carolID, carolID, "boundary-visible"
@@ -130,7 +130,7 @@ func seedInterleavedHarnessConfigs(t *testing.T, s store.Store, carolID, aliceID
 	visible := make(map[string]bool, visibleCount)
 	for i := 0; i < total; i++ {
 		created := base.Add(-time.Duration(i) * time.Millisecond)
-		scope, scopeID, owner, prefix := store.HarnessConfigScopeProject, projectID, aliceID, "boundary-hidden"
+		scope, scopeID, owner, prefix := store.HarnessConfigScopeProject, projectID, aliceID, "boundary-other"
 		isVisible := (i+1)%3 == 0
 		if isVisible {
 			scope, scopeID, owner, prefix = store.HarnessConfigScopeUser, carolID, carolID, "boundary-visible"
@@ -161,16 +161,16 @@ func seedInterleavedHarnessConfigs(t *testing.T, s store.Store, carolID, aliceID
 // seedInterleavedGroups creates 3*visibleCount groups with explicit,
 // strictly decreasing Created timestamps: the group at list position i
 // belongs to visibleProjectID (visible, in scope) when (i+1)%3==0, and
-// otherwise to hiddenProjectID (out of scope). Returns the set of visible
+// otherwise to otherProjectID (out of scope). Returns the set of visible
 // group IDs.
-func seedInterleavedGroups(t *testing.T, s store.Store, ownerID, visibleProjectID, hiddenProjectID string, visibleCount int) map[string]bool {
+func seedInterleavedGroups(t *testing.T, s store.Store, ownerID, visibleProjectID, otherProjectID string, visibleCount int) map[string]bool {
 	t.Helper()
 	total := 3 * visibleCount
 	base := time.Now()
 	visible := make(map[string]bool, visibleCount)
 	for i := 0; i < total; i++ {
 		created := base.Add(-time.Duration(i) * time.Millisecond)
-		projectID, prefix := hiddenProjectID, "boundary-hidden"
+		projectID, prefix := otherProjectID, "boundary-other"
 		isVisible := (i+1)%3 == 0
 		if isVisible {
 			projectID, prefix = visibleProjectID, "boundary-visible"
@@ -327,7 +327,7 @@ func TestAuthorizedList_HarnessConfig_MultiPageBoundary_UnionNoDuplicates(t *tes
 // TestScopedAdminListEndpointsFilterCrossProjectRowsAndCountAuthorizedMatches
 // (capabilities_test.go): a project-scoped role binding restricted to
 // visibleProject makes that project's groups visible and the other
-// project's groups hidden.
+// project's groups out of scope.
 func TestAuthorizedList_Group_MultiPageBoundary_UnionNoDuplicates(t *testing.T) {
 	for _, limit := range authorizedListPageBoundaryLimits {
 		for _, extra := range authorizedListPageBoundaryExtras {
@@ -339,9 +339,9 @@ func TestAuthorizedList_Group_MultiPageBoundary_UnionNoDuplicates(t *testing.T) 
 				admin := NewAuthenticatedUser(tid("grp-pb-admin"), "grp-pb-admin@test.com", "Admin", store.UserRoleAdmin, "api")
 				require.NoError(t, s.CreateUser(ctx, &store.User{ID: admin.ID(), Email: admin.Email(), DisplayName: admin.DisplayName(), Role: store.UserRoleAdmin, Status: "active"}))
 				visibleProject := &store.Project{ID: tid("grp-pb-visible-project"), Name: "Visible Project", Slug: "grp-pb-visible-project"}
-				hiddenProject := &store.Project{ID: tid("grp-pb-hidden-project"), Name: "Hidden Project", Slug: "grp-pb-hidden-project"}
+				otherProject := &store.Project{ID: tid("grp-pb-other-project"), Name: "Other Project", Slug: "grp-pb-other-project"}
 				require.NoError(t, s.CreateProject(ctx, visibleProject))
-				require.NoError(t, s.CreateProject(ctx, hiddenProject))
+				require.NoError(t, s.CreateProject(ctx, otherProject))
 
 				rd, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
 					Name:        "grp-pb-reader",
@@ -360,7 +360,7 @@ func TestAuthorizedList_Group_MultiPageBoundary_UnionNoDuplicates(t *testing.T) 
 				require.NoError(t, err)
 				scoped := NewScopedUserIdentity(admin, visibleProject.ID, []string{"group:read", "group:list"})
 
-				visible := seedInterleavedGroups(t, s, admin.ID(), visibleProject.ID, hiddenProject.ID, visibleCount)
+				visible := seedInterleavedGroups(t, s, admin.ID(), visibleProject.ID, otherProject.ID, visibleCount)
 
 				pages := walkGroupsAllPages(t, srv, scoped, limit)
 				assertAuthorizedListPagesCoverExpected(t, pages, visible, limit)

@@ -174,7 +174,7 @@ func authorizedListBoundaryFetch(items []authorizedListTestItem) func(context.Co
 }
 
 // buildAuthorizedListBoundaryItems returns visibleCount*3 items, interleaved
-// two hidden (denied) items for every one visible (allowed) item, in list
+// two denied items for every one visible (allowed) item, in list
 // order — item i is visible when (i+1)%3==0. That places a visible item at
 // (or immediately after) nearly every page boundary the walk below will hit,
 // which is exactly the position ptone/scion#1974's page-filled branch used
@@ -261,7 +261,7 @@ func TestAuthorizedListPageFillKeepsLastIncludedCursor(t *testing.T) {
 						union[id] = true
 					}
 				}
-				assert.Equal(t, visible, union, "union of all pages must equal the expected visible set, with no drops and no leaked hidden items")
+				assert.Equal(t, visible, union, "union of all pages must equal the expected visible set, with no drops and no denied items included")
 
 				wantPages := (visibleCount + limit - 1) / limit
 				assert.Equal(t, wantPages, len(pages1), "page count must equal ceil(visible count / limit)")
