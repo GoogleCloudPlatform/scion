@@ -43,9 +43,9 @@ echo '{"access_token": "mock-token", "refresh_token": "mock-refresh"}' > "$GEMIN
 
 echo "=== Testing OAuth Discovery ==="
 
-# Initialize a grove in the temp dir
+# Initialize a project in the temp dir
 cd "$TEST_TMP"
-scion grove init
+scion project init
 
 echo "=== Starting Agent ==="
 scion start test-oauth-agent "hello" > start_output.log 2>&1 || true

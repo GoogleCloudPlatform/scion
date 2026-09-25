@@ -33,20 +33,18 @@ fi
 
 allowed_paths=(
   # CLI compatibility adapters, hidden deprecated aliases, and examples.
-  "^cmd/config.go$"
   "^cmd/delete.go$"
-  "^cmd/hub.go$"
   "^cmd/list.go$"
   "^cmd/notifications.go$"
-  "^cmd/project.go$"
 
   # Current compatibility and migration tests/fixtures.
-  "^cmd/cli_mode_test.go$"
   "^cmd/common_envgather_test.go$"
+  "^cmd/config_test.go$"
   "^cmd/conversation_test.go$"
   "^cmd/delete_test.go$"
   "^cmd/harness_config_install_test.go$"
   "^cmd/hub_env_test.go$"
+  "^cmd/hub_test.go$"
   "^cmd/message_project_json_test.go$"
   "^cmd/message_test.go$"
   "^cmd/notifications_test.go$"

@@ -83,8 +83,7 @@ func buildTestTree() *cobra.Command {
 	for _, name := range []string{"list", "set", "get", "validate", "migrate", "dir", "cd-config", "schema"} {
 		cfg.AddCommand(&cobra.Command{Use: name})
 	}
-	// cd-project's canonical name is "cd-project"; "cd-grove" is a legacy alias.
-	cfg.AddCommand(&cobra.Command{Use: "cd-project", Aliases: []string{"cd-grove"}})
+	cfg.AddCommand(&cobra.Command{Use: "cd-project"})
 	root.AddCommand(cfg)
 
 	// hub with subcommands
@@ -107,11 +106,6 @@ func buildTestTree() *cobra.Command {
 	hubToken.AddCommand(&cobra.Command{Use: "delete"})
 	hub.AddCommand(hubToken)
 
-	hubGrv := &cobra.Command{Use: "groves"}
-	hubGrv.AddCommand(&cobra.Command{Use: "info"})
-	hubGrv.AddCommand(&cobra.Command{Use: "delete"})
-	hub.AddCommand(hubGrv)
-
 	hubBrk := &cobra.Command{Use: "brokers"}
 	hubBrk.AddCommand(&cobra.Command{Use: "info"})
 	hubBrk.AddCommand(&cobra.Command{Use: "delete"})
@@ -132,9 +126,9 @@ func buildTestTree() *cobra.Command {
 
 	root.AddCommand(hub)
 
-	// project with subcommands; canonical name is "project", "grove" (and
-	// "group") are legacy aliases that must resolve to the same command.
-	project := &cobra.Command{Use: "project", Aliases: []string{"grove", "group"}}
+	// project with subcommands; canonical name is "project", "group" is a
+	// legacy alias that must resolve to the same command.
+	project := &cobra.Command{Use: "project", Aliases: []string{"group"}}
 	for _, name := range []string{"init", "list", "prune", "reconnect"} {
 		project.AddCommand(&cobra.Command{Use: name})
 	}
@@ -260,7 +254,7 @@ func TestApplyModeRestrictions_Assistant(t *testing.T) {
 		"create", "delete", "list", "start", "stop", "attach",
 		"config", "config.list", "config.set", "config.get", "config.validate", "config.dir", "config.schema",
 		"hub", "hub.status", "hub.enable", "hub.disable", "hub.link", "hub.unlink",
-		"hub.groves", "hub.brokers", "hub.env", "hub.secret",
+		"hub.brokers", "hub.env", "hub.secret",
 		"project", "project.init", "project.list", "project.prune", "project.service-accounts",
 		"server", "server.start", "server.stop",
 		"broker",
@@ -449,11 +443,11 @@ func TestAgentAllowedList(t *testing.T) {
 	notAllowed := []string{
 		"attach", "broadcast", "restore", "sync", "clean", "cdw", "init",
 		"completion", "config", "doctor", "hub", "messages",
-		"server", "broker", "grove",
+		"server", "broker",
 		"config.set", "config.validate", "config.migrate",
 		"config.list", "config.get", "config.dir", "config.schema",
 		"hub.enable", "hub.disable", "hub.link", "hub.unlink",
-		"hub.auth", "hub.token", "hub.groves", "hub.brokers",
+		"hub.auth", "hub.token", "hub.brokers",
 		"hub.env", "hub.secret", "hub.status", "hub.notifications",
 		"messages.read",
 		"shared-dir.create", "shared-dir.remove",
@@ -494,9 +488,9 @@ func resolveCommandPath(root *cobra.Command, path string) *cobra.Command {
 
 // TestAssistantDeniedKeysResolveToRealCommands guards against the denylist
 // drifting out of sync with the real command tree: a key built from a stale
-// or aliased name (e.g. "grove.reconnect" instead of the canonical
-// "project.reconnect") silently never matches anything in removeCommands,
-// so the command it names is never actually hidden. This walks every
+// or aliased name instead of a command's canonical name silently never
+// matches anything in removeCommands, so the command it names is never
+// actually hidden. This walks every
 // assistantDenied key against the real rootCmd tree (populated by this
 // package's init() functions) and fails if any key does not resolve.
 func TestAssistantDeniedKeysResolveToRealCommands(t *testing.T) {
