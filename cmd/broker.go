@@ -362,18 +362,12 @@ func init() {
 
 	// Provide/withdraw flags
 	brokerProvideCmd.Flags().StringVar(&brokerProjectID, "project", "", "Project name or ID to add as provider for")
-	brokerProvideCmd.Flags().StringVar(&brokerProjectID, "grove", "", "Deprecated alias for --project")
-	_ = brokerProvideCmd.Flags().MarkDeprecated("grove", "use --project instead")
-	_ = brokerProvideCmd.Flags().MarkHidden("grove")
 
 	brokerProvideCmd.Flags().StringVar(&brokerBrokerID, "broker", "", "Broker name or ID to use (for remote broker operations)")
 	brokerProvideCmd.Flags().BoolVar(&brokerMakeDefault, "make-default", false, "Set this broker as the default for the project")
 	brokerProvideCmd.Flags().StringVar(&brokerHubFlag, "hub", "", "Hub connection name (from 'scion runtime-broker hubs')")
 
 	brokerWithdrawCmd.Flags().StringVar(&brokerProjectID, "project", "", "Project name or ID to remove as provider from")
-	brokerWithdrawCmd.Flags().StringVar(&brokerProjectID, "grove", "", "Deprecated alias for --project")
-	_ = brokerWithdrawCmd.Flags().MarkDeprecated("grove", "use --project instead")
-	_ = brokerWithdrawCmd.Flags().MarkHidden("grove")
 
 	brokerWithdrawCmd.Flags().StringVar(&brokerBrokerID, "broker", "", "Broker name or ID to use (for remote broker operations)")
 	brokerWithdrawCmd.Flags().StringVar(&brokerHubFlag, "hub", "", "Hub connection name (from 'scion runtime-broker hubs')")

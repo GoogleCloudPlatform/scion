@@ -202,15 +202,13 @@ func Execute() {
 	tempProjectPath := ""
 	for i := 1; i < len(os.Args); i++ {
 		arg := os.Args[i]
-		if arg == "--project" || arg == "--grove" || arg == "-g" {
+		if arg == "--project" || arg == "-g" {
 			if i+1 < len(os.Args) {
 				tempProjectPath = os.Args[i+1]
 				i++
 			}
 		} else if strings.HasPrefix(arg, "--project=") {
 			tempProjectPath = strings.TrimPrefix(arg, "--project=")
-		} else if strings.HasPrefix(arg, "--grove=") {
-			tempProjectPath = strings.TrimPrefix(arg, "--grove=")
 		} else if arg == "--global" {
 			tempProjectPath = "global"
 		}
@@ -251,9 +249,6 @@ func commandInSubtree(cmd *cobra.Command, name string) bool {
 func init() {
 	rootCmd.Long = util.GetBanner() + "\n" + rootCmd.Long
 	rootCmd.PersistentFlags().StringVarP(&projectPath, "project", "g", "", "Project identifier: path, slug (with Hub), or git URL (with Hub)")
-	rootCmd.PersistentFlags().StringVar(&projectPath, "grove", "", "Deprecated alias for --project")
-	_ = rootCmd.PersistentFlags().MarkDeprecated("grove", "use --project instead")
-	_ = rootCmd.PersistentFlags().MarkHidden("grove")
 
 	rootCmd.PersistentFlags().BoolVar(&globalMode, "global", false, "Use the global project (equivalent to --project global)")
 	rootCmd.PersistentFlags().StringVarP(&profile, "profile", "p", "", "Configuration profile to use")
