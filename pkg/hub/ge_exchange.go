@@ -193,6 +193,16 @@ func (s *GEExchangeService) Exchange(ctx context.Context, req *ExchangeRequest) 
 		}
 	}
 
+	if identity == nil {
+		// A GoogleCredentialValidator that returns (nil, nil) is a contract
+		// violation, not a verification failure — treat it as a generic
+		// internal error rather than reaching the nil pointer dereference on
+		// identity.IsServiceAccount below.
+		s.logger.Error("GE exchange: validator returned no identity",
+			"credential_type", credType)
+		return nil, http.StatusInternalServerError, fmt.Errorf("credential validation failed")
+	}
+
 	// Step 1.5: reject service-account credentials for user exchange. The
 	// validator only classifies IsServiceAccount and each caller decides
 	// whether to admit it; the exchange endpoint rejects SA credentials

@@ -530,6 +530,37 @@ func TestGEExchange_ServiceAccount(t *testing.T) {
 	}
 }
 
+// TestGEExchange_NilIdentityFromValidator_InternalError covers a
+// GoogleCredentialValidator that returns (nil, nil) — a contract violation,
+// since ValidateIDToken/ValidateAccessToken must return a non-nil identity
+// whenever err is nil. It must not panic on identity.IsServiceAccount and
+// must not be treated as a successful exchange; it is a generic internal
+// error (500), the same status and message the default case in the err !=
+// nil switch above already uses for an unrecognized validator error.
+func TestGEExchange_NilIdentityFromValidator_InternalError(t *testing.T) {
+	validator := &fakeGoogleValidator{} // zero value: (nil, nil) from both methods
+	userStore := newFakeUserStore()
+	svc := newTestExchangeService(validator, userStore)
+
+	_, status, err := svc.Exchange(context.Background(), &ExchangeRequest{
+		Credential:     "opaque-nil-identity-token",
+		CredentialType: "id_token",
+	})
+	if err == nil {
+		t.Fatal("expected error when the validator returns a nil identity")
+	}
+	if status != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", status)
+	}
+	if err.Error() != "credential validation failed" {
+		t.Errorf("error = %q, want the generic validation-failure message", err.Error())
+	}
+	// The resolver must never be reached: no user or binding created.
+	if len(userStore.users) != 0 {
+		t.Errorf("expected no users created, got %d", len(userStore.users))
+	}
+}
+
 // ---------------------------------------------------------------------------
 // The exchange endpoint still rejects SA credentials through the REAL
 // validator, using the real SA claim/response shape (azp == sub for ID
