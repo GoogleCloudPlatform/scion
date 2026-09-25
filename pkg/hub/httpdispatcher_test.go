@@ -1058,6 +1058,66 @@ func TestHTTPAgentDispatcher_ReprovisionCarriesAgentEndpointOverride(t *testing.
 	}
 }
 
+// TestHTTPAgentDispatcher_ReprovisionCarriesSkillDispatchMetadata pins that
+// the reprovision request carries the same dispatch metadata as create
+// (#1960): the pre-resolved skills, the owning user, the hub endpoint and the
+// project-scope provision credentials, so the broker can resolve skills for a
+// reprovision exactly as it does for create.
+func TestHTTPAgentDispatcher_ReprovisionCarriesSkillDispatchMetadata(t *testing.T) {
+	const hubEndpoint = "http://hub.example.com:8080"
+	ctx := context.Background()
+	memStore := createTestStore(t)
+	require.NoError(t, memStore.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID:       tid("host-1"),
+		Name:     "test-host",
+		Slug:     "test-host",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}))
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	dispatcher.SetHubEndpoint(hubEndpoint)
+	dispatcher.SetSecretBackend(&mockProvisionCredsBackend{
+		projectSecrets: []secret.SecretMeta{
+			{Name: "GH_EXAMPLE", SecretType: "environment", Scope: secret.ScopeProject},
+		},
+		secretValues: map[string]*secret.SecretWithValue{
+			"GH_EXAMPLE": {SecretMeta: secret.SecretMeta{Name: "GH_EXAMPLE", SecretType: "environment"}, Value: "value-1"},
+		},
+	})
+
+	wantPreResolved := &ResolveSkillsResponse{
+		Resolved: []ResolvedSkillResponse{{URI: "skill://scion/global/test@1.0.0", Name: "test"}},
+	}
+	var sawAgentID string
+	dispatcher.SetSkillPreResolver(func(_ context.Context, a *store.Agent) *ResolveSkillsResponse {
+		sawAgentID = a.ID
+		return wantPreResolved
+	})
+
+	agent := &store.Agent{
+		ID:              tid("agent-1"),
+		Name:            "test-agent",
+		Slug:            "test-agent",
+		ProjectID:       tid("project-1"),
+		OwnerID:         tid("user-1"),
+		RuntimeBrokerID: tid("host-1"),
+		AppliedConfig:   &store.AgentAppliedConfig{HarnessConfig: "claude"},
+	}
+	require.NoError(t, dispatcher.DispatchAgentReprovision(ctx, agent))
+
+	req := mockClient.lastCreateReq
+	require.NotNil(t, req)
+	assert.True(t, req.Reprovision, "the captured request must be the reprovision request")
+	assert.True(t, req.ProvisionOnly, "a reprovision request is provision-only")
+	assert.Equal(t, agent.ID, sawAgentID, "the skill pre-resolver must run for the reprovisioned agent")
+	assert.Same(t, wantPreResolved, req.PreResolvedSkills)
+	assert.Equal(t, agent.OwnerID, req.UserID)
+	assert.Equal(t, hubEndpoint, req.HubEndpoint)
+	assert.Equal(t, map[string]string{"GH_EXAMPLE": "value-1"}, req.ProvisionCredentials)
+}
+
 // TestHTTPAgentDispatcher_DispatchAgentReprovision_MissingEchoFails is the
 // design §3.4 Amendment A2 regression test: a broker that returns 201 for a reprovision
 // request WITHOUT echoing Reprovisioned=true must fail the dispatch — that

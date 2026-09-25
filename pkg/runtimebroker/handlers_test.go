@@ -1093,6 +1093,8 @@ type provisionCapturingManager struct {
 	reprovisionErr    error
 	// lastProvisionCtx captures the context passed to Provision (#1960).
 	lastProvisionCtx context.Context
+	// lastReprovisionCtx captures the context passed to Reprovision.
+	lastReprovisionCtx context.Context
 }
 
 func (m *provisionCapturingManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
@@ -1104,6 +1106,7 @@ func (m *provisionCapturingManager) Provision(ctx context.Context, opts api.Star
 
 func (m *provisionCapturingManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
 	m.reprovisionCalled = true
+	m.lastReprovisionCtx = ctx
 	m.lastOpts = opts
 	if m.reprovisionErr != nil {
 		return nil, m.reprovisionErr
