@@ -14,7 +14,6 @@ import (
 	"testing"
 
 	"cloud.google.com/go/logging"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	colmetricpb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
@@ -425,7 +424,9 @@ func TestReceiverPolicy_StripsSpoofedIdentityBeforeAuthoritativeReplacement(t *t
 		{Key: "scion.agent.id", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_IntValue{IntValue: 7}}},
 		secretKV("scion.agent.slug", "spoof-slug"),
 		secretKV("scion.project.id", "spoof-project"),
-		secretKV(projectcompat.LegacyTelemetryIdentityKeys()[1], "spoof-project"),
+		secretKV("scion.grove", "spoof-project"),
+		secretKV("scion.grove.id", "spoof-project"),
+		secretKV("scion.grove_id", "spoof-project"),
 		secretKV("scion.broker", "spoof-broker"),
 		secretKV("scion.broker.id", "spoof-broker-id"),
 		secretKV("scion.broker.name", "spoof-broker-name"),
@@ -446,7 +447,7 @@ func TestReceiverPolicy_StripsSpoofedIdentityBeforeAuthoritativeReplacement(t *t
 			t.Fatalf("identity %q = %#v, want one %q", key, got, want)
 		}
 	}
-	for _, absent := range []string{"scion.agent.slug", projectcompat.LegacyTelemetryIdentityKeys()[1], "scion.broker", "scion.broker.id", "scion.model"} {
+	for _, absent := range []string{"scion.agent.slug", "scion.grove", "scion.grove.id", "scion.grove_id", "scion.broker", "scion.broker.id", "scion.model"} {
 		if countAttr(got, absent) != 0 {
 			t.Fatalf("spoofed or legacy identity %q retained: %#v", absent, got)
 		}
