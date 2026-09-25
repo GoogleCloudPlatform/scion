@@ -77,6 +77,23 @@ func TestScheduledDispatch_HubDefaultPassthroughNotAppliedOnNonEmbeddedBroker(t 
 		"hub-default passthrough must not apply on a non-embedded broker")
 }
 
+// setProjectDefaultGCPMode sets the project's default GCP identity mode
+// annotation directly (no service account), for tests that only need to
+// exercise a mode value — passthrough or block — rather than an assign
+// target. setProjectDefaultSAAnnotations (scheduler_creator_identity_test.go)
+// covers the assign+SA case; this is its mode-only counterpart.
+func setProjectDefaultGCPMode(t *testing.T, f *bypassAgentsFixture, mode string) {
+	t.Helper()
+	ctx := context.Background()
+	proj, err := f.store.GetProject(ctx, f.proj.ID)
+	require.NoError(t, err)
+	if proj.Annotations == nil {
+		proj.Annotations = map[string]string{}
+	}
+	proj.Annotations[projectSettingDefaultGCPIdentityMode] = mode
+	require.NoError(t, f.store.UpdateProject(ctx, proj))
+}
+
 // TestScheduledDispatch_ProjectDefaultWinsOverHubDefault mirrors
 // TestHubDefaultGCPIdentity_ProjectDefaultTakesPrecedenceOverHubDefault: a
 // project default answers the question before the hub default is ever
@@ -90,14 +107,7 @@ func TestScheduledDispatch_ProjectDefaultWinsOverHubDefault(t *testing.T) {
 		DefaultGCPIdentityServiceAccountID: "does-not-exist",
 	})
 
-	ctx := context.Background()
-	proj, err := f.store.GetProject(ctx, f.proj.ID)
-	require.NoError(t, err)
-	if proj.Annotations == nil {
-		proj.Annotations = map[string]string{}
-	}
-	proj.Annotations[projectSettingDefaultGCPIdentityMode] = store.GCPMetadataModePassthrough
-	require.NoError(t, f.store.UpdateProject(ctx, proj))
+	setProjectDefaultGCPMode(t, f, store.GCPMetadataModePassthrough)
 
 	require.NoError(t, fireScheduledDispatchAsOwner(t, f, "sched-project-over-hub"))
 
@@ -126,14 +136,7 @@ func TestScheduledDispatch_ProjectBlockNotOverriddenByHubDefault(t *testing.T) {
 		DefaultGCPIdentityMode: store.GCPMetadataModePassthrough,
 	})
 
-	ctx := context.Background()
-	proj, err := f.store.GetProject(ctx, f.proj.ID)
-	require.NoError(t, err)
-	if proj.Annotations == nil {
-		proj.Annotations = map[string]string{}
-	}
-	proj.Annotations[projectSettingDefaultGCPIdentityMode] = store.GCPMetadataModeBlock
-	require.NoError(t, f.store.UpdateProject(ctx, proj))
+	setProjectDefaultGCPMode(t, f, store.GCPMetadataModeBlock)
 
 	require.NoError(t, fireScheduledDispatchAsOwner(t, f, "sched-project-block-wins"))
 
@@ -158,14 +161,7 @@ func TestScheduledDispatch_ProjectBlockStopsBeforeHubDefaultAssignLookup(t *test
 		DefaultGCPIdentityServiceAccountID: "does-not-exist",
 	})
 
-	ctx := context.Background()
-	proj, err := f.store.GetProject(ctx, f.proj.ID)
-	require.NoError(t, err)
-	if proj.Annotations == nil {
-		proj.Annotations = map[string]string{}
-	}
-	proj.Annotations[projectSettingDefaultGCPIdentityMode] = store.GCPMetadataModeBlock
-	require.NoError(t, f.store.UpdateProject(ctx, proj))
+	setProjectDefaultGCPMode(t, f, store.GCPMetadataModeBlock)
 
 	require.NoError(t, fireScheduledDispatchAsOwner(t, f, "sched-project-block-stops-assign-lookup"),
 		"the hub default's unresolvable SA must never be looked up when the project explicitly blocked")
