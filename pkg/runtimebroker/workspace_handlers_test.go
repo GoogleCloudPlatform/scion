@@ -51,6 +51,10 @@ func (m *mockAgentManager) Delete(ctx context.Context, name string, deleteFiles 
 	return true, nil
 }
 
+func (m *mockAgentManager) DeleteTarget(ctx context.Context, agentName, containerID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+	return true, nil
+}
+
 func (m *mockAgentManager) List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
 	return m.agents, nil
 }

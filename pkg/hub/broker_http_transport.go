@@ -139,7 +139,7 @@ func (t *brokerHTTPTransport) decodeResponseWithSnippet(resp *http.Response, out
 
 func brokerHTTPError(resp *http.Response) error {
 	respBody, _ := io.ReadAll(resp.Body)
-	return fmt.Errorf("runtime broker returned error %d: %s", resp.StatusCode, string(respBody))
+	return &brokerStatusError{StatusCode: resp.StatusCode, Body: string(respBody)}
 }
 
 func (t *brokerHTTPTransport) CreateAgent(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, error) {
@@ -300,6 +300,7 @@ func (t *brokerHTTPTransport) DeleteAgent(ctx context.Context, brokerID, brokerE
 	if projectID != "" {
 		endpoint += "&projectId=" + url.QueryEscape(projectID)
 	}
+	endpoint += deleteProjectPathQuery(ctx)
 	if softDelete {
 		endpoint += fmt.Sprintf("&softDelete=true&deletedAt=%s", url.QueryEscape(deletedAt.Format(time.RFC3339)))
 	}

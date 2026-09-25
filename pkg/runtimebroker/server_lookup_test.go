@@ -20,6 +20,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -36,7 +37,13 @@ func (m *filteringMockManager) List(ctx context.Context, filter map[string]strin
 	for _, a := range m.agents {
 		match := true
 		for k, v := range filter {
-			if a.Labels[k] != v {
+			actual := a.Labels[k]
+			// Mirror every real runtime's List: the project_id filter key
+			// also matches the legacy grove_id label.
+			if actual == "" && k == projectcompat.LabelProjectID {
+				actual = projectcompat.ProjectIDFromLabels(a.Labels)
+			}
+			if actual != v {
 				match = false
 				break
 			}

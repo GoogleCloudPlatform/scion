@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -50,32 +51,33 @@ func createTestStore(t *testing.T) store.Store {
 
 // mockRuntimeBrokerClient is a mock implementation of RuntimeBrokerClient for testing.
 type mockRuntimeBrokerClient struct {
-	createCalled           bool
-	startCalled            bool
-	stopCalled             bool
-	restartCalled          bool
-	deleteCalled           bool
-	messageCalled          bool
-	cleanupCalled          bool
-	lastBrokerID           string
-	lastEndpoint           string
-	lastAgentID            string
-	lastTask               string
-	lastProjectPath        string
-	lastProjectSlug        string
-	lastMessage            string
-	lastInterrupt          bool
-	lastResolvedEnv        map[string]string
-	lastRestartResolvedEnv map[string]string
-	lastInlineConfig       *api.ScionConfig
-	lastCreateReq          *RemoteCreateAgentRequest
-	lastDeleteOpts         struct{ deleteFiles, removeBranch bool }
-	returnErr              error
-	cleanupErr             error
-	startReturnResp        *RemoteAgentResponse // custom start response if set
-	cleanupCalls           int
-	cleanupSlugs           []string
-	createWithGatherFunc   func(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error)
+	lastDeleteProjectPathQuery string
+	createCalled               bool
+	startCalled                bool
+	stopCalled                 bool
+	restartCalled              bool
+	deleteCalled               bool
+	messageCalled              bool
+	cleanupCalled              bool
+	lastBrokerID               string
+	lastEndpoint               string
+	lastAgentID                string
+	lastTask                   string
+	lastProjectPath            string
+	lastProjectSlug            string
+	lastMessage                string
+	lastInterrupt              bool
+	lastResolvedEnv            map[string]string
+	lastRestartResolvedEnv     map[string]string
+	lastInlineConfig           *api.ScionConfig
+	lastCreateReq              *RemoteCreateAgentRequest
+	lastDeleteOpts             struct{ deleteFiles, removeBranch bool }
+	returnErr                  error
+	cleanupErr                 error
+	startReturnResp            *RemoteAgentResponse // custom start response if set
+	cleanupCalls               int
+	cleanupSlugs               []string
+	createWithGatherFunc       func(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error)
 }
 
 func (m *mockRuntimeBrokerClient) CreateAgent(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, error) {
@@ -148,6 +150,7 @@ func (m *mockRuntimeBrokerClient) ResetAuthAgent(_ context.Context, _, _, _, _, 
 
 func (m *mockRuntimeBrokerClient) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
 	m.deleteCalled = true
+	m.lastDeleteProjectPathQuery = deleteProjectPathQuery(ctx)
 	m.lastBrokerID = brokerID
 	m.lastEndpoint = brokerEndpoint
 	m.lastAgentID = agentID
@@ -4749,5 +4752,36 @@ func TestHTTPAgentDispatcher_TZInjection_Precedence_ProfileEnvTZ(t *testing.T) {
 	env := mockClient.lastCreateReq.ResolvedEnv
 	if got := env["TZ"]; got != "Europe/London" {
 		t.Errorf("TZ = %q, want Europe/London (config env TZ should beat hub default)", got)
+	}
+}
+
+// For a linked project, DispatchAgentDelete forwards the provider's LocalPath
+// so the broker can clean up a file-only agent there (#1846 UAT).
+func TestHTTPAgentDispatcher_DispatchAgentDelete_ForwardsLinkedProjectPath(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	project := &store.Project{ID: tid("project-1"), Name: "p", Slug: "p", GitRemote: "https://github.com/example/repo.git"}
+	if err := memStore.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	broker := &store.RuntimeBroker{ID: tid("broker-1"), Name: "b", Slug: "b", Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatal(err)
+	}
+	provider := &store.ProjectProvider{ProjectID: tid("project-1"), BrokerID: tid("broker-1"), BrokerName: "b", LocalPath: "/home/user/linked/.scion", Status: store.BrokerStatusOnline}
+	if err := memStore.AddProjectProvider(ctx, provider); err != nil {
+		t.Fatal(err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	agent := &store.Agent{ID: tid("agent-1"), Name: "dev", Slug: "dev", ProjectID: tid("project-1"), RuntimeBrokerID: tid("broker-1")}
+
+	if err := dispatcher.DispatchAgentDelete(ctx, agent, true, false, false, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if want := "&projectPath=" + url.QueryEscape("/home/user/linked/.scion"); mockClient.lastDeleteProjectPathQuery != want {
+		t.Errorf("projectPath query = %q, want %q", mockClient.lastDeleteProjectPathQuery, want)
 	}
 }

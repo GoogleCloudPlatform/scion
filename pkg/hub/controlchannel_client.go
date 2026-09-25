@@ -23,6 +23,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -230,16 +231,19 @@ func (c *ControlChannelBrokerClient) DeleteAgent(ctx context.Context, brokerID, 
 	if projectID != "" {
 		query += "&projectId=" + url.QueryEscape(projectID)
 	}
+	query += deleteProjectPathQuery(ctx)
 	if softDelete {
 		query += fmt.Sprintf("&softDelete=true&deletedAt=%s", url.QueryEscape(deletedAt.Format(time.RFC3339)))
 	}
-	resp, err := c.doRequest(ctx, brokerID, "DELETE", path, query, nil)
+	_, err := c.doRequest(ctx, brokerID, "DELETE", path, query, nil)
 	if err != nil {
+		// A 404 means the broker has no such agent in this project; treat
+		// it as an idempotent success, matching the HTTP transport
+		// (brokerHTTPTransport.DeleteAgent).
+		if isBrokerStatus(err, http.StatusNotFound) {
+			return nil
+		}
 		return err
-	}
-	// Allow 404 for idempotent delete
-	if resp.StatusCode == http.StatusNotFound {
-		return nil
 	}
 	return nil
 }
@@ -528,10 +532,42 @@ func (c *ControlChannelBrokerClient) doRequest(ctx context.Context, brokerID, me
 	}
 
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("runtime broker returned error %d: %s", resp.StatusCode, string(resp.Body))
+		return nil, &brokerStatusError{StatusCode: resp.StatusCode, Body: string(resp.Body)}
 	}
 
 	return resp, nil
+}
+
+// brokerStatusError is returned by doRequest when the broker answers with an
+// HTTP error status, so callers can react to specific codes (e.g. 404 on an
+// idempotent delete) instead of parsing the message.
+type brokerStatusError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *brokerStatusError) Error() string {
+	return fmt.Sprintf("runtime broker returned error %d: %s", e.StatusCode, e.Body)
+}
+
+// isBrokerStatus reports whether err is a broker HTTP error with the given code.
+func isBrokerStatus(err error, code int) bool {
+	var se *brokerStatusError
+	return errors.As(err, &se) && se.StatusCode == code
+}
+
+// brokerErrorMessage returns the message from a broker JSON error body
+// ({"error":{"message":...}}), or the raw body if it is not in that form.
+func (e *brokerStatusError) brokerErrorMessage() string {
+	var body struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(e.Body), &body); err == nil && body.Error.Message != "" {
+		return body.Error.Message
+	}
+	return strings.TrimSpace(e.Body)
 }
 
 func (c *ControlChannelBrokerClient) buildRequestHeaders(ctx context.Context, brokerID, method, path, query string, body []byte) (map[string]string, error) {

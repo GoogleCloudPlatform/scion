@@ -2647,6 +2647,15 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 			} else {
 				// Normal mode: fail the operation to avoid orphaning the agent on the broker
 				s.agentLifecycleLog.Error("Failed to dispatch agent delete to broker", "agent_id", agent.ID, "error", err)
+				var se *brokerStatusError
+				if errors.As(err, &se) && se.StatusCode == http.StatusConflict {
+					// The broker refused because the target is ambiguous
+					// (several agents match in the project). That is a
+					// conflict for the caller to resolve, not a gateway
+					// failure.
+					Conflict(w, "Failed to delete agent on runtime broker: "+se.brokerErrorMessage())
+					return
+				}
 				writeError(w, http.StatusBadGateway, ErrCodeRuntimeError,
 					"Failed to delete agent on runtime broker: "+err.Error(), nil)
 				return

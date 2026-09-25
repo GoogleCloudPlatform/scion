@@ -116,6 +116,10 @@ func (m *heartbeatMockManager) Delete(ctx context.Context, agentID string, delet
 	return false, nil
 }
 
+func (m *heartbeatMockManager) DeleteTarget(ctx context.Context, agentName, containerID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+	return false, nil
+}
+
 func (m *heartbeatMockManager) List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
 	return m.agents, m.err
 }

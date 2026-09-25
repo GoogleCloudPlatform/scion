@@ -1265,60 +1265,66 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 	removeBranch := query.Get("removeBranch") == "true"
 	softDelete := query.Get("softDelete") == "true"
 
-	// Resolve the correct manager for this agent (may be on an auxiliary runtime)
-	mgr := s.resolveManagerForAgent(ctx, id, projectID)
-
-	// Get the agent's project path and project ID before stopping (needed for file deletion and logging)
-	var projectPath, agentProjectID string
-	agents, err := mgr.List(ctx, map[string]string{"scion.agent": "true"})
-	if err == nil {
-		for _, a := range agents {
-			if matchesAgent(a, id, projectID) {
-				projectPath = a.ProjectPath
-				agentProjectID = a.ProjectID
-				if agentProjectID == "" {
-					agentProjectID = a.Project
-				}
-				break
-			}
+	// Resolve the exact entry to delete, scoped to the requested project,
+	// across the default and every auxiliary runtime (ptone/scion#1819).
+	// Everything below acts on this entry only: the runtime operation uses
+	// its container ID and the file deletion uses its project path. Nothing
+	// re-resolves by bare slug, so a same-slug agent in another project can
+	// never be touched, whatever the runtime.
+	// projectPath is an optional hint from the hub (the provider's LocalPath
+	// for a linked project); resolveDeleteTarget verifies it belongs to
+	// projectID before using it.
+	// The project path is needed both to delete files and to mark
+	// agent-info.json deleted on a soft delete.
+	target, err := s.resolveDeleteTarget(ctx, id, projectID, query.Get("projectPath"), deleteFiles || softDelete)
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		if errors.Is(err, errDeleteTargetNotFound) {
+			// No side effects: the hub's broker clients treat a 404 on
+			// delete as an idempotent success.
+			s.agentLifecycleLog.Info("Agent delete: no matching agent in project",
+				"agent_id", id, "project_id", projectID)
+			NotFound(w, "Agent")
+			return
 		}
-	}
-
-	// If no project path was found (container missing or no annotation), check
-	// hub-managed project directories for the agent's files. Without this,
-	// agents in hub-managed projects (~/.scion.projects/<slug>/) are silently
-	// skipped during file cleanup because the default filesystem scan only
-	// checks the CWD-resolved project dir and global ~/.scion.
-	if projectPath == "" && deleteFiles {
-		if resolved := findAgentInHubManagedProjects(id); resolved != "" {
-			projectPath = resolved
-			s.agentLifecycleLog.Debug("Resolved agent project path from hub-managed projects",
-				"agent_id", id, "path", projectPath)
+		if errors.Is(err, errDeleteTargetUnknown) {
+			RuntimeError(w, "Failed to delete agent: "+err.Error())
+			return
 		}
+		Conflict(w, "Failed to delete agent: "+err.Error())
+		return
 	}
+	projectPath := target.projectPath
+	agentProjectID := target.projectID
 
 	// If this is a soft-delete, mark agent-info.json with deleted status before cleanup
 	if softDelete && projectPath != "" {
 		deletedAtStr := query.Get("deletedAt")
-		if err := agent.UpdateAgentConfig(id, projectPath, "deleted", "", ""); err != nil {
+		if err := agent.UpdateAgentConfig(target.name, projectPath, "deleted", "", ""); err != nil {
 			s.agentLifecycleLog.Warn("Failed to mark agent as deleted in agent-info.json", "agent_id", id, "error", err)
 		}
 		if deletedAtStr != "" {
 			if deletedAt, err := time.Parse(time.RFC3339, deletedAtStr); err == nil {
-				if err := agent.UpdateAgentDeletedAt(id, projectPath, deletedAt); err != nil {
+				if err := agent.UpdateAgentDeletedAt(target.name, projectPath, deletedAt); err != nil {
 					s.agentLifecycleLog.Warn("Failed to write deletedAt to agent-info.json", "agent_id", id, "error", err)
 				}
 			}
 		}
 	}
 
-	_, err = mgr.Delete(ctx, id, deleteFiles, projectPath, removeBranch)
+	filesToDelete := deleteFiles
+	if deleteFiles && projectPath == "" && projectID != "" {
+		// The matched entry has no project path and none could be resolved
+		// for this project. Do not let DeleteAgentFiles fall back to the
+		// broker's CWD project, which may belong to someone else.
+		s.agentLifecycleLog.Warn("Agent delete: no project path for matched agent; skipping file cleanup",
+			"agent_id", id, "project_id", projectID)
+		filesToDelete = false
+	}
+
+	_, err = target.mgr.DeleteTarget(ctx, target.name, target.containerID, filesToDelete, projectPath, removeBranch)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
-		if strings.Contains(err.Error(), "not found") {
-			NotFound(w, "Agent")
-			return
-		}
 		RuntimeError(w, "Failed to delete agent: "+err.Error())
 		return
 	}
@@ -2852,20 +2858,376 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// errDeleteTargetNotFound means no agent with the requested slug exists in
+// the requested project on any runtime of this broker, nor as files in that
+// project's hub-managed directory.
+var errDeleteTargetNotFound = errors.New("agent not found in project")
+
+// errDeleteTargetUnknown means the agent could not be resolved because a
+// runtime listing failed.
+var errDeleteTargetUnknown = errors.New("could not list agents to resolve delete target")
+
+// deleteTarget is the single, project-matched agent a delete acts on.
+type deleteTarget struct {
+	mgr         agent.Manager
+	name        string // agent directory / slug name used for file cleanup
+	containerID string // empty for a file-only (never started / container gone) agent
+	projectPath string
+	projectID   string
+}
+
+// agentNameMatches reports whether a runtime entry is the agent named id.
+func agentNameMatches(a api.AgentInfo, id string) bool {
+	return a.Name == id || a.ContainerID == id || a.Slug == id ||
+		strings.TrimPrefix(a.Name, "/") == id
+}
+
+// agentInProjectStrict reports whether an entry is positively identified as
+// belonging to projectID (label first, then the ProjectID field). Unlike
+// matchesAgentProject, an entry with no project identity does not match.
+func agentInProjectStrict(a api.AgentInfo, projectID string) bool {
+	if labelProjectID := projectcompat.ProjectIDFromLabels(a.Labels); labelProjectID != "" {
+		return labelProjectID == projectID
+	}
+	return a.ProjectID != "" && a.ProjectID == projectID
+}
+
+// agentHasNoProjectIdentity reports whether an entry carries no project ID in
+// either labels or fields (a pre-label legacy container).
+func agentHasNoProjectIdentity(a api.AgentInfo) bool {
+	return projectcompat.ProjectIDFromLabels(a.Labels) == "" && a.ProjectID == ""
+}
+
+// resolveDeleteTarget finds the one agent entry a delete of id in projectID
+// must act on, searching the default runtime and every auxiliary runtime.
+//
+// With a projectID:
+//   - runtime entries positively labelled for projectID are preferred; the
+//     List call carries the project scope label;
+//   - if none exist, a legacy container carrying no project identity at all
+//     is accepted only if its recorded project path identifies as projectID
+//     (pre-label containers). File-only entries synthesised from the
+//     broker's CWD project are never accepted this way;
+//   - a runtime entry's project path is used for files only if it verifiably
+//     belongs to projectID;
+//   - if no runtime entry matches, agent files are looked for only in the
+//     project directory (hub-managed, or linked via the hub's path hint or
+//     the broker's working project) whose recorded project ID is projectID;
+//   - otherwise errDeleteTargetNotFound.
+//
+// Without a projectID (solo/CLI), any same-named entry matches, and the
+// hub-managed directory scan must find exactly one project.
+//
+// More than one distinct match is an error (fail closed) rather than a guess.
+func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, projectPathHint string, needProjectPath bool) (*deleteTarget, error) {
+	type candidate struct {
+		mgr   agent.Manager
+		entry api.AgentInfo
+	}
+	managers := []agent.Manager{s.manager}
+	s.auxiliaryRuntimesMu.RLock()
+	auxNames := make([]string, 0, len(s.auxiliaryRuntimes))
+	for name := range s.auxiliaryRuntimes {
+		auxNames = append(auxNames, name)
+	}
+	sort.Strings(auxNames)
+	for _, name := range auxNames {
+		if aux := s.auxiliaryRuntimes[name]; aux.Manager != nil && aux.Manager != s.manager {
+			managers = append(managers, aux.Manager)
+		}
+	}
+	s.auxiliaryRuntimesMu.RUnlock()
+
+	var listErr error
+	collect := func(filter map[string]string, accept func(api.AgentInfo) bool) []candidate {
+		var out []candidate
+		seen := map[string]bool{}
+		for _, mgr := range managers {
+			if mgr == nil {
+				continue
+			}
+			agents, err := mgr.List(ctx, filter)
+			if err != nil {
+				s.agentLifecycleLog.Warn("Agent delete: runtime list failed", "agent_id", id, "error", err)
+				listErr = err
+				continue
+			}
+			for _, a := range agents {
+				if !agentNameMatches(a, id) || !accept(a) {
+					continue
+				}
+				key := a.ContainerID
+				if key == "" {
+					key = "path:" + a.ProjectPath + "|" + a.Name
+				}
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				out = append(out, candidate{mgr: mgr, entry: a})
+			}
+		}
+		return out
+	}
+
+	var matches []candidate
+	if projectID != "" {
+		matches = collect(map[string]string{
+			"scion.agent":                "true",
+			projectcompat.LabelProjectID: projectID,
+		}, func(a api.AgentInfo) bool { return agentInProjectStrict(a, projectID) })
+		if len(matches) == 0 {
+			// Legacy (pre-label) containers carry no project ID. Accept one
+			// only if its recorded project path positively identifies as
+			// projectID; otherwise a same-named legacy container from another
+			// project could be deleted.
+			matches = collect(map[string]string{"scion.agent": "true"}, func(a api.AgentInfo) bool {
+				return a.ContainerID != "" && agentHasNoProjectIdentity(a) &&
+					pathIdentifiesAs(a.ProjectPath, projectID)
+			})
+		}
+	} else {
+		matches = collect(map[string]string{"scion.agent": "true"}, func(api.AgentInfo) bool { return true })
+	}
+
+	switch {
+	case len(matches) > 1:
+		return nil, fmt.Errorf("agent '%s' is ambiguous: %d agents match in project %q", id, len(matches), projectID)
+	case len(matches) == 1:
+		m := matches[0]
+		t := &deleteTarget{
+			mgr:         m.mgr,
+			name:        id,
+			containerID: m.entry.ContainerID,
+			projectPath: m.entry.ProjectPath,
+			projectID:   m.entry.ProjectID,
+		}
+		if t.projectID == "" {
+			t.projectID = m.entry.Project
+		}
+		if t.projectPath != "" && !trustedEntryProjectPath(t.projectPath, projectID) {
+			// The path comes from a runtime label/annotation, which may be
+			// stale or crafted. Never delete files there unless the path is
+			// verifiably this project's; fall back to the broker's own,
+			// identity-checked resolution below.
+			s.agentLifecycleLog.Warn("Agent delete: ignoring runtime project path that does not belong to the project",
+				"agent_id", id, "project_id", projectID, "path", t.projectPath)
+			t.projectPath = ""
+		}
+		if t.projectPath == "" && needProjectPath {
+			// The runtime entry carries no project path (e.g. no
+			// annotation). Resolve it only from this project's own
+			// directory (hub-managed or linked), never by a project-blind
+			// scan.
+			resolved, err := s.findAgentProjectDir(id, projectID, projectPathHint)
+			if err != nil {
+				return nil, err
+			}
+			t.projectPath = resolved
+		}
+		return t, nil
+	}
+
+	// No runtime entry was found. If a runtime could not be listed, that is
+	// not known to be true: its container may still be running. Fail rather
+	// than delete only the files (orphaning the container) or report a 404
+	// (which the hub treats as a completed delete).
+	if listErr != nil {
+		return nil, fmt.Errorf("%w: %v", errDeleteTargetUnknown, listErr)
+	}
+
+	// The agent may exist only as files (never started, or its container is
+	// gone). Look only in this project's directory.
+	resolved, err := s.findAgentProjectDir(id, projectID, projectPathHint)
+	if err != nil {
+		return nil, err
+	}
+	if resolved == "" {
+		return nil, errDeleteTargetNotFound
+	}
+	s.agentLifecycleLog.Debug("Resolved agent project path for file-only delete",
+		"agent_id", id, "project_id", projectID, "path", resolved)
+	return &deleteTarget{
+		mgr:         s.manager,
+		name:        id,
+		projectPath: resolved,
+		projectID:   projectID,
+	}, nil
+}
+
+// findAgentProjectDir returns the .scion dir of the project that owns the
+// agent's files, or "" if none. It checks the hub-managed project directories
+// first. When projectID is set it then checks linked (non hub-managed)
+// projects: the path the hub registered for this project on this broker
+// (projectPathHint, i.e. the provider's LocalPath) and the broker's own
+// working project. A linked path is used only if its recorded project identity
+// equals projectID, so a stale or wrong hint can never redirect deletion to
+// another project's files.
+func (s *Server) findAgentProjectDir(agentName, projectID, projectPathHint string) (string, error) {
+	resolved, err := findAgentInHubManagedProjects(agentName, projectID)
+	if err != nil || resolved != "" || projectID == "" {
+		return resolved, err
+	}
+	candidates := []string{projectPathHint}
+	if cwdProject, err := config.GetResolvedProjectDir(""); err == nil {
+		candidates = append(candidates, cwdProject)
+	}
+	for _, c := range candidates {
+		if dir := linkedProjectAgentDir(c, agentName, projectID); dir != "" {
+			return dir, nil
+		}
+	}
+	return "", nil
+}
+
+// linkedProjectAgentDir returns the resolved .scion dir of the linked project
+// at path if that project's identity is projectID and it holds files for
+// agentName, otherwise "". path may be the project root or its .scion entry.
+// Identity comes from the project-id file (git projects, .scion directory) or
+// the marker file (non-git projects, .scion file).
+func linkedProjectAgentDir(path, agentName, projectID string) string {
+	if path == "" || projectID == "" {
+		return ""
+	}
+	if !pathIdentifiesAs(path, projectID) {
+		return ""
+	}
+	scionDir, err := config.GetResolvedProjectDir(scionEntry(path))
+	if err != nil || scionDir == "" {
+		return ""
+	}
+	if !hubManagedProjectHasAgent(scionDir, agentName) {
+		return ""
+	}
+	return scionDir
+}
+
+// scionEntry returns the .scion entry for path, which may be the project root
+// or the .scion entry itself.
+func scionEntry(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return ""
+	}
+	if filepath.Base(abs) == config.DotScion {
+		return abs
+	}
+	return filepath.Join(abs, config.DotScion)
+}
+
+// projectIDAtPath returns the project identity recorded at path, or "".
+// For a .scion directory it is the project-id (or legacy grove-id) file. For a
+// .scion marker file (non-git linked project) it is the marker's project ID.
+// If path is a project's external config dir, which has no project-id file,
+// the result is "".
+func projectIDAtPath(path string) string {
+	if path == "" {
+		return ""
+	}
+	marker := scionEntry(path)
+	if marker == "" {
+		return ""
+	}
+	info, err := os.Stat(marker)
+	if err != nil {
+		return ""
+	}
+	if info.IsDir() {
+		id, _ := config.ReadProjectID(marker)
+		return id
+	}
+	if m, err := config.ReadProjectMarker(marker); err == nil {
+		return m.ProjectID
+	}
+	return ""
+}
+
+// pathIdentifiesAs reports whether the project at path verifiably belongs to
+// projectID: either its recorded identity (projectIDAtPath) equals projectID,
+// or path is the project's external config dir
+// ~/.scion/{project-configs,grove-configs}/<slug>__<short-id>/.scion, whose
+// name encodes the project ID (non-git linked projects record that dir as
+// the agent's project path).
+func pathIdentifiesAs(path, projectID string) bool {
+	if path == "" || projectID == "" {
+		return false
+	}
+	if projectIDAtPath(path) == projectID {
+		return true
+	}
+	short, ok := externalConfigShortID(path)
+	return ok && short == (config.ProjectMarker{ProjectID: projectID}).ShortUUID()
+}
+
+// externalConfigShortID returns the short project ID encoded in path if path
+// is an external project config dir
+// ~/.scion/{project-configs,grove-configs}/<slug>__<short-id>/.scion.
+func externalConfigShortID(path string) (string, bool) {
+	abs, err := filepath.Abs(path)
+	if err != nil || filepath.Base(abs) != config.DotScion {
+		return "", false
+	}
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return "", false
+	}
+	projectDir := filepath.Dir(abs)
+	parent := filepath.Dir(projectDir)
+	if parent != filepath.Join(globalDir, config.ProjectConfigsDir) && parent != filepath.Join(globalDir, config.GroveConfigsDir) {
+		return "", false
+	}
+	name := filepath.Base(projectDir)
+	i := strings.LastIndex(name, "__")
+	if i <= 0 || i+2 >= len(name) {
+		return "", false
+	}
+	return name[i+2:], true
+}
+
+// trustedEntryProjectPath reports whether a project path taken from a runtime
+// entry may be used for file operations. With a projectID, the path must
+// identify as that project (pathIdentifiesAs). Without one, the path must
+// carry some project identity, be an external project config dir, or be the
+// global project directory.
+func trustedEntryProjectPath(path, projectID string) bool {
+	if projectID != "" {
+		return pathIdentifiesAs(path, projectID)
+	}
+	if projectIDAtPath(path) != "" {
+		return true
+	}
+	if _, ok := externalConfigShortID(path); ok {
+		return true
+	}
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return false
+	}
+	abs, err := filepath.Abs(path)
+	return err == nil && filepath.Clean(abs) == filepath.Clean(globalDir)
+}
+
 // findAgentInHubManagedProjects scans hub-managed project directories
-// (~/.scion.projects/<slug>/.scion/) for an agent directory matching the given
-// name. Returns the .scion dir path if found, or empty string.
-// This is used as a fallback when the container is missing and the agent's
-// project path can't be determined from container labels.
+// (~/.scion/{projects,groves}/<slug>/.scion/) for an agent directory matching
+// the given name and returns that project's .scion dir path, or "" if none.
+//
+// When projectID is set, only a project directory whose recorded project ID
+// (the project-id / grove-id file) equals projectID is considered, so a
+// same-named agent in another project is never returned (ptone/scion#1819).
+// When projectID is empty, the name must be found in exactly one project;
+// more than one is reported as an ambiguity error rather than a guess.
 //
 // Probes both the in-project location (worktree-mode agents) and the external
 // per-agent state dir under ~/.scion.project-configs/ (shared-workspace agents,
 // whose state lives external to the shared checkout).
-func findAgentInHubManagedProjects(agentName string) string {
+func findAgentInHubManagedProjects(agentName, projectID string) (string, error) {
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
-		return ""
+		// Fail closed: without the global dir the agent's absence is not
+		// known, and a 404 would let the hub treat the delete as done.
+		return "", fmt.Errorf("%w: resolve global dir: %v", errDeleteTargetUnknown, err)
 	}
+	var found []string
 	for _, dirName := range []string{"projects", "groves"} {
 		baseDir := filepath.Join(globalDir, dirName)
 		entries, err := os.ReadDir(baseDir)
@@ -2877,20 +3239,39 @@ func findAgentInHubManagedProjects(agentName string) string {
 				continue
 			}
 			scionDir := filepath.Join(baseDir, entry.Name(), ".scion")
-			agentDir := filepath.Join(scionDir, "agents", agentName)
-			if _, err := os.Stat(agentDir); err == nil {
-				return scionDir
-			}
-			// Shared-workspace agents have no in-project agentDir — probe the
-			// external split-storage path.
-			if extDir, err := config.GetGitProjectExternalAgentsDir(scionDir); err == nil && extDir != "" {
-				if _, err := os.Stat(filepath.Join(extDir, agentName)); err == nil {
-					return scionDir
+			if projectID != "" {
+				recorded, err := config.ReadProjectID(scionDir)
+				if err != nil || recorded != projectID {
+					continue
 				}
+			}
+			if hubManagedProjectHasAgent(scionDir, agentName) {
+				found = append(found, scionDir)
 			}
 		}
 	}
-	return ""
+	switch len(found) {
+	case 0:
+		return "", nil
+	case 1:
+		return found[0], nil
+	default:
+		return "", fmt.Errorf("agent '%s' found in %d hub-managed projects; specify the project", agentName, len(found))
+	}
+}
+
+func hubManagedProjectHasAgent(scionDir, agentName string) bool {
+	if _, err := os.Stat(filepath.Join(scionDir, "agents", agentName)); err == nil {
+		return true
+	}
+	// Shared-workspace agents have no in-project agentDir — probe the
+	// external split-storage path.
+	if extDir, err := config.GetGitProjectExternalAgentsDir(scionDir); err == nil && extDir != "" {
+		if _, err := os.Stat(filepath.Join(extDir, agentName)); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // isLocalhostEndpoint returns true if the given endpoint URL refers to a

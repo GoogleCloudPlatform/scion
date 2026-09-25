@@ -42,6 +42,8 @@ type mockManager struct {
 	lastStartOpts         api.StartOptions
 	lastDeleteProjectPath string
 	lastDeleteAgentID     string
+	lastDeleteContainerID string
+	lastDeleteFiles       bool
 	lastStopAgentID       string
 }
 
@@ -73,6 +75,15 @@ func (m *mockManager) Stop(ctx context.Context, agentID string, projectPath stri
 func (m *mockManager) Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	m.lastDeleteProjectPath = projectPath
 	m.lastDeleteAgentID = agentID
+	m.deleteCalls++
+	return true, nil
+}
+
+func (m *mockManager) DeleteTarget(ctx context.Context, agentName, containerID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+	m.lastDeleteProjectPath = projectPath
+	m.lastDeleteAgentID = agentName
+	m.lastDeleteContainerID = containerID
+	m.lastDeleteFiles = deleteFiles
 	m.deleteCalls++
 	return true, nil
 }
@@ -3050,20 +3061,20 @@ func TestFindAgentInHubManagedProjects(t *testing.T) {
 	}
 
 	// Should find the agent in the hub-managed project
-	result := findAgentInHubManagedProjects("test-agent")
+	result, _ := findAgentInHubManagedProjects("test-agent", "")
 	if result != scionDir {
 		t.Errorf("expected %q, got %q", scionDir, result)
 	}
 
 	// Should not find a non-existent agent
-	result = findAgentInHubManagedProjects("nonexistent-agent")
+	result, _ = findAgentInHubManagedProjects("nonexistent-agent", "")
 	if result != "" {
 		t.Errorf("expected empty string for nonexistent agent, got %q", result)
 	}
 
 	// Should handle missing projects directory gracefully
 	t.Setenv("HOME", t.TempDir())
-	result = findAgentInHubManagedProjects("test-agent")
+	result, _ = findAgentInHubManagedProjects("test-agent", "")
 	if result != "" {
 		t.Errorf("expected empty string when projects dir missing, got %q", result)
 	}
