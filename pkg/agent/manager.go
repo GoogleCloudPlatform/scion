@@ -434,7 +434,11 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 	if message != "" {
 		enterCmd := []string{"tmux", "send-keys", "-t", "scion:0", "Enter"}
 		for range 2 {
-			time.Sleep(300 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				return &PartialDeliveryError{Err: fmt.Errorf("context canceled before sending Enter to agent '%s': %w", agent.Name, ctx.Err())}
+			case <-time.After(300 * time.Millisecond):
+			}
 			if _, err := m.Runtime.Exec(ctx, agent.ContainerID, enterCmd); err != nil {
 				return &PartialDeliveryError{Err: fmt.Errorf("failed to send Enter to agent '%s': %w", agent.Name, err)}
 			}

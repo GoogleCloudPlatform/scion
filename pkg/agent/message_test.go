@@ -297,6 +297,55 @@ func TestDeliverImmediate_RetryableBeforePaste(t *testing.T) {
 	}
 }
 
+// TestDeliverImmediate_ContextCanceledDuringEnterWait covers the gemini
+// review follow-up on ptone/scion#1866 (GoogleCloudPlatform/scion#1893): the
+// 300ms wait before each trailing confirmation Enter must respect context
+// cancellation via select instead of an unconditional time.Sleep. Once
+// paste-buffer has already delivered the message text, a cancellation during
+// that wait is reported as a PartialDeliveryError — consistent with any other
+// failure once delivery is no longer safe to retry — rather than sleeping out
+// the full window regardless of ctx.
+func TestDeliverImmediate_ContextCanceledDuringEnterWait(t *testing.T) {
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{
+				{ContainerID: "agent-1", Name: "test-agent", Labels: map[string]string{"scion.name": "test-agent"}},
+			}, nil
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	var enterCalls int
+	mockRT.ExecFunc = func(ctx context.Context, id string, cmd []string) (string, error) {
+		if len(cmd) >= 2 && cmd[1] == "paste-buffer" {
+			// Cancel right after the message text has been pasted, before the
+			// post-delivery confirmation Enters begin waiting.
+			cancel()
+		}
+		if len(cmd) >= 2 && cmd[1] == "send-keys" && cmd[len(cmd)-1] == "Enter" {
+			enterCalls++
+		}
+		return "", nil
+	}
+
+	mgr := &AgentManager{Runtime: mockRT}
+	start := time.Now()
+	err := mgr.deliverImmediate(ctx, "test-agent", "", "hello", false)
+	elapsed := time.Since(start)
+
+	var partial *PartialDeliveryError
+	if !errors.As(err, &partial) {
+		t.Fatalf("expected a PartialDeliveryError on cancellation after paste-buffer, got %T: %v", err, err)
+	}
+	if elapsed >= 300*time.Millisecond {
+		t.Fatalf("expected cancellation to short-circuit the 300ms wait, took %v", elapsed)
+	}
+	// One Enter closes the paste sequence itself; cancellation must prevent
+	// the two confirmation Enters that follow.
+	if enterCalls != 1 {
+		t.Fatalf("expected exactly 1 Enter (the paste's closing keypress) before cancellation stopped further Enters, got %d", enterCalls)
+	}
+}
+
 // filterByPrefix returns entries from calls that start with the given prefix.
 func filterByPrefix(calls []string, prefix string) []string {
 	var result []string

@@ -48,9 +48,30 @@ type MessageBuffer struct {
 	// It receives the agent ID, project ID, the concatenated message text, and the interrupt flag.
 	deliverFunc func(agentID, projectID string, message string, interrupt bool) error
 
+	// maxFlushAttempts bounds how many times flush retries a coalesced
+	// delivery before giving up and reporting it to onFailure handlers. It
+	// is small: a transient failure (container briefly unreachable, "docker
+	// ps failed") is worth a couple of quick retries, but flush runs
+	// synchronously in the buffer's timer goroutine and holds up delivery
+	// of this agent's messages while retrying, so it must not retry for
+	// long (ptone/scion#1866). Set to a default by NewMessageBuffer; tests
+	// may override it per instance.
+	maxFlushAttempts int
+
+	// flushRetryBackoff is the delay between retry attempts. Set to a
+	// default by NewMessageBuffer; tests may override it per instance.
+	flushRetryBackoff time.Duration
+
 	mu      sync.Mutex
 	buffers map[string]*agentBuffer // keyed by agentID + "\x00" + projectID
 }
+
+// defaultMaxFlushAttempts and defaultFlushRetryBackoff are the production
+// values NewMessageBuffer uses for a MessageBuffer's retry bounds.
+const (
+	defaultMaxFlushAttempts  = 3
+	defaultFlushRetryBackoff = 500 * time.Millisecond
+)
 
 // agentBuffer holds the pending messages and timer for a single agent.
 type agentBuffer struct {
@@ -113,9 +134,11 @@ func DeliveryFailureHandlerFromContext(ctx context.Context) DeliveryFailureHandl
 // buffer flushes — it should perform the actual tmux send-keys delivery.
 func NewMessageBuffer(delay time.Duration, deliverFunc func(agentID, projectID string, message string, interrupt bool) error) *MessageBuffer {
 	return &MessageBuffer{
-		bufferDelay: delay,
-		deliverFunc: deliverFunc,
-		buffers:     make(map[string]*agentBuffer),
+		bufferDelay:       delay,
+		deliverFunc:       deliverFunc,
+		maxFlushAttempts:  defaultMaxFlushAttempts,
+		flushRetryBackoff: defaultFlushRetryBackoff,
+		buffers:           make(map[string]*agentBuffer),
 	}
 }
 
@@ -160,21 +183,10 @@ func bufferKey(agentID, projectID string) string {
 	return agentID + "\x00" + projectID
 }
 
-// maxFlushAttempts bounds how many times flush retries a coalesced delivery
-// before giving up and reporting it to onFailure handlers. It is small: a
-// transient failure (container briefly unreachable, "docker ps failed") is
-// worth a couple of quick retries, but flush runs synchronously in the
-// buffer's timer goroutine and holds up delivery of this agent's messages
-// while retrying, so it must not retry for long (ptone/scion#1866).
-var maxFlushAttempts = 3
-
-// flushRetryBackoff is the delay between retry attempts.
-var flushRetryBackoff = 500 * time.Millisecond
-
 // flush delivers all buffered messages for the given agent as a single
 // concatenated string. Called when the debounce timer fires.
 //
-// A failure is retried up to maxFlushAttempts times with a short backoff,
+// A failure is retried up to mb.maxFlushAttempts times with a short backoff,
 // unless it is a PartialDeliveryError: once some of the coalesced text has
 // reached the agent's terminal, retrying would re-deliver it and the agent
 // would see it twice, so that class of failure is reported immediately
@@ -200,7 +212,7 @@ func (mb *MessageBuffer) flush(agentID, key string) {
 	util.Debugf("msgbuffer: flushing %d message(s) for agent %s project %s", len(pending), agentID, projectID)
 
 	var err error
-	for attempt := 1; attempt <= maxFlushAttempts; attempt++ {
+	for attempt := 1; attempt <= mb.maxFlushAttempts; attempt++ {
 		err = mb.deliverFunc(agentID, projectID, combined, false)
 		if err == nil {
 			return
@@ -210,21 +222,21 @@ func (mb *MessageBuffer) flush(agentID, key string) {
 		if errors.As(err, &partial) {
 			break
 		}
-		if attempt < maxFlushAttempts {
+		if attempt < mb.maxFlushAttempts {
 			slog.Warn("msgbuffer: delivery attempt failed, retrying",
 				"agent_id", agentID,
-				"grove_id", projectID,
+				"project_id", projectID,
 				"attempt", attempt,
-				"max_attempts", maxFlushAttempts,
+				"max_attempts", mb.maxFlushAttempts,
 				"error", err,
 			)
-			time.Sleep(flushRetryBackoff)
+			time.Sleep(mb.flushRetryBackoff)
 		}
 	}
 
 	slog.Warn("msgbuffer: message delivery failed",
 		"agent_id", agentID,
-		"grove_id", projectID,
+		"project_id", projectID,
 		"pending_count", len(pending),
 		"error", err,
 	)

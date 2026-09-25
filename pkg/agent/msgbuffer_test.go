@@ -349,16 +349,12 @@ func TestMessageBuffer_FailureHandlersInvokedOnFlushFailure(t *testing.T) {
 	}
 }
 
-// withFlushRetryTuning shortens the flush retry backoff for the duration of
-// a test and restores the package defaults afterward, so retry tests don't
-// have to wait on the production backoff.
-func withFlushRetryTuning(t *testing.T, attempts int, backoff time.Duration) {
-	t.Helper()
-	origAttempts, origBackoff := maxFlushAttempts, flushRetryBackoff
-	maxFlushAttempts, flushRetryBackoff = attempts, backoff
-	t.Cleanup(func() {
-		maxFlushAttempts, flushRetryBackoff = origAttempts, origBackoff
-	})
+// tuneFlushRetry overrides buf's flush retry bounds so retry tests don't
+// have to wait on the production backoff. Each test constructs its own
+// MessageBuffer, so there is no shared state to restore afterward.
+func tuneFlushRetry(buf *MessageBuffer, attempts int, backoff time.Duration) {
+	buf.maxFlushAttempts = attempts
+	buf.flushRetryBackoff = backoff
 }
 
 // TestMessageBuffer_RetriesTransientFailureBeforeSucceeding covers #1866:
@@ -366,8 +362,6 @@ func withFlushRetryTuning(t *testing.T, attempts int, backoff time.Duration) {
 // within flush, so a message doesn't need to be marked failed just because
 // the first delivery attempt hit a blip.
 func TestMessageBuffer_RetriesTransientFailureBeforeSucceeding(t *testing.T) {
-	withFlushRetryTuning(t, 3, 5*time.Millisecond)
-
 	var attempts int32
 	done := make(chan struct{}, 1)
 	buf := NewMessageBuffer(10*time.Millisecond, func(agentID, projectID, message string, interrupt bool) error {
@@ -378,6 +372,7 @@ func TestMessageBuffer_RetriesTransientFailureBeforeSucceeding(t *testing.T) {
 		done <- struct{}{}
 		return nil
 	})
+	tuneFlushRetry(buf, 3, 5*time.Millisecond)
 	defer buf.Close()
 
 	var handlerCalled bool
@@ -401,14 +396,13 @@ func TestMessageBuffer_RetriesTransientFailureBeforeSucceeding(t *testing.T) {
 // bounded — a failure that never clears is reported after maxFlushAttempts,
 // not retried forever.
 func TestMessageBuffer_GivesUpAfterMaxAttempts(t *testing.T) {
-	withFlushRetryTuning(t, 3, 5*time.Millisecond)
-
 	var attempts int32
 	handled := make(chan error, 1)
 	buf := NewMessageBuffer(10*time.Millisecond, func(agentID, projectID, message string, interrupt bool) error {
 		atomic.AddInt32(&attempts, 1)
 		return errors.New("permanently gone")
 	})
+	tuneFlushRetry(buf, 3, 5*time.Millisecond)
 	defer buf.Close()
 
 	buf.SendWithFailureHandler("a", "p", "hello", func(err error) { handled <- err })
@@ -432,8 +426,6 @@ func TestMessageBuffer_GivesUpAfterMaxAttempts(t *testing.T) {
 // terminal, flush must not retry — a retry would re-run the whole delivery
 // (including the paste) and the agent would see the text twice.
 func TestMessageBuffer_NoRetryForPartialDeliveryError(t *testing.T) {
-	withFlushRetryTuning(t, 3, 5*time.Millisecond)
-
 	var attempts int32
 	handled := make(chan error, 1)
 	wrapped := errors.New("enter keypress failed after paste")
@@ -441,6 +433,7 @@ func TestMessageBuffer_NoRetryForPartialDeliveryError(t *testing.T) {
 		atomic.AddInt32(&attempts, 1)
 		return &PartialDeliveryError{Err: wrapped}
 	})
+	tuneFlushRetry(buf, 3, 5*time.Millisecond)
 	defer buf.Close()
 
 	buf.SendWithFailureHandler("a", "p", "hello", func(err error) { handled <- err })
