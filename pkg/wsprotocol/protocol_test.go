@@ -137,6 +137,29 @@ func TestResponseEnvelope(t *testing.T) {
 	assert.Equal(t, body, msg.Body)
 }
 
+func TestCancelMessage(t *testing.T) {
+	msg := NewCancelMessage("req-1")
+
+	assert.Equal(t, TypeCancel, msg.Type)
+	assert.Equal(t, "req-1", msg.RequestID)
+
+	// Test JSON roundtrip
+	data, err := json.Marshal(msg)
+	require.NoError(t, err)
+
+	var parsed CancelMessage
+	err = json.Unmarshal(data, &parsed)
+	require.NoError(t, err)
+	assert.Equal(t, msg.Type, parsed.Type)
+	assert.Equal(t, msg.RequestID, parsed.RequestID)
+
+	// An old broker's envelope parse only looks at Type, which is preserved
+	// through unmarshalling into the generic Envelope too.
+	env, err := ParseEnvelope(data)
+	require.NoError(t, err)
+	assert.Equal(t, TypeCancel, env.Type)
+}
+
 func TestStreamOpenMessage(t *testing.T) {
 	msg := NewStreamOpenMessage("stream-1", StreamTypePTY, "agent-123", "grove-456", 120, 40)
 

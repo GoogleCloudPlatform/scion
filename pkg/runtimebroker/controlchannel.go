@@ -133,6 +133,14 @@ type ControlChannelClient struct {
 	// unbounded goroutine growth under load.
 	dispatchSem chan struct{}
 
+	// cancels tracks the CancelFunc for each in-flight dispatched request,
+	// keyed by RequestID, so a "cancel" message from the Hub (sent when it
+	// gives up waiting past its own dispatch timeout, or the original
+	// caller's request was itself cancelled) can abort the request's
+	// context instead of letting it run to completion uncancellably.
+	cancels  map[string]context.CancelFunc
+	cancelMu sync.Mutex
+
 	// Connection state
 	connected   bool
 	sessionID   string
@@ -170,6 +178,7 @@ func NewControlChannelClient(config ControlChannelConfig, handlers http.Handler,
 		log:            log,
 		streams:        make(map[string]*StreamHandler),
 		dispatchSem:    make(chan struct{}, defaultMaxConcurrentDispatches),
+		cancels:        make(map[string]context.CancelFunc),
 	}
 }
 
@@ -485,6 +494,8 @@ func (c *ControlChannelClient) handleMessage(data []byte) error {
 	switch env.Type {
 	case wsprotocol.TypeRequest:
 		return c.handleRequest(data)
+	case wsprotocol.TypeCancel:
+		return c.handleCancel(data)
 	case wsprotocol.TypeStreamOpen:
 		return c.handleStreamOpen(data)
 	case wsprotocol.TypeStream:
@@ -538,8 +549,20 @@ func (c *ControlChannelClient) dispatchRequest(conn *wsprotocol.Connection, req 
 		return
 	}
 
+	// Derive a per-request cancellable context so a "cancel" message from
+	// the Hub (sent when it gives up waiting, e.g. its own dispatch timeout
+	// elapsed or the original caller's request was itself cancelled) can
+	// abort this request instead of letting it run to completion after
+	// nobody is listening for the result. Without this, a slow create
+	// (e.g. a cold-start container/sandbox build) keeps running and can
+	// leak a started sandbox the Hub no longer knows about.
+	ctx, cancel := context.WithCancel(context.Background())
+	c.registerCancel(req.RequestID, cancel)
+	defer c.unregisterCancel(req.RequestID)
+	defer cancel()
+
 	// Extract trace context from request envelope headers for cross-component propagation.
-	ctx := otel.GetTextMapPropagator().Extract(context.Background(), propagation.MapCarrier(req.Headers))
+	ctx = otel.GetTextMapPropagator().Extract(ctx, propagation.MapCarrier(req.Headers))
 	ctx, span := tracer.Start(ctx, "broker.controlchannel.dispatch")
 	defer span.End()
 	span.SetAttributes(
@@ -602,6 +625,62 @@ func (c *ControlChannelClient) dispatchRequest(conn *wsprotocol.Connection, req 
 		span.SetStatus(codes.Error, "failed to send response: "+err.Error())
 		c.log.Error("Failed to send response", "error", err, "requestID", req.RequestID)
 	}
+}
+
+// registerCancel records the CancelFunc for an in-flight dispatched request
+// so a later "cancel" message from the Hub can abort it.
+func (c *ControlChannelClient) registerCancel(requestID string, cancel context.CancelFunc) {
+	c.cancelMu.Lock()
+	if c.cancels == nil {
+		// Defensive lazy-init: NewControlChannelClient always sets this up,
+		// but tests and other callers sometimes build a ControlChannelClient
+		// via struct literal.
+		c.cancels = make(map[string]context.CancelFunc)
+	}
+	c.cancels[requestID] = cancel
+	c.cancelMu.Unlock()
+}
+
+// unregisterCancel removes the CancelFunc once the request has completed
+// (successfully, with an error, or via cancellation), so handleCancel can
+// no longer find and re-invoke it.
+func (c *ControlChannelClient) unregisterCancel(requestID string) {
+	c.cancelMu.Lock()
+	delete(c.cancels, requestID)
+	c.cancelMu.Unlock()
+}
+
+// handleCancel aborts the context of an in-flight dispatched request in
+// response to a "cancel" message from the Hub. The Hub sends this when it
+// gives up waiting for a response — its own dispatch timeout elapsed, or
+// the original caller's request was itself cancelled — so this request's
+// work can stop instead of continuing to run (and potentially leak a
+// started sandbox) after nobody is listening for the result. If the request
+// already completed or is unknown (e.g. an old Hub replaying a stale
+// RequestID, or the cancel arrived after the response was sent), this is a
+// no-op.
+func (c *ControlChannelClient) handleCancel(data []byte) error {
+	var msg wsprotocol.CancelMessage
+	if err := json.Unmarshal(data, &msg); err != nil {
+		return fmt.Errorf("failed to parse cancel message: %w", err)
+	}
+
+	c.cancelMu.Lock()
+	cancel, ok := c.cancels[msg.RequestID]
+	c.cancelMu.Unlock()
+
+	if !ok {
+		if c.config.Debug {
+			c.log.Debug("Cancel for unknown or already-completed request", "requestID", msg.RequestID)
+		}
+		return nil
+	}
+
+	if c.config.Debug {
+		c.log.Debug("Cancelling in-flight request", "requestID", msg.RequestID)
+	}
+	cancel()
+	return nil
 }
 
 // handleStreamOpen processes a stream open request.
