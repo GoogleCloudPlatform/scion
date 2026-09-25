@@ -870,6 +870,128 @@ func TestReincarnateAgent_WorkerPersistsBrokerEchoedImage(t *testing.T) {
 		"the broker-echoed image must survive the starting step's write, not be lost to a stale re-read")
 }
 
+// createImageHarnessConfig stores a global harness config whose only
+// configured field is its container image.
+func createImageHarnessConfig(t *testing.T, s store.Store, image string) *store.HarnessConfig {
+	t.Helper()
+	hc := &store.HarnessConfig{
+		ID:          tid("hc-image-" + t.Name()),
+		Name:        "hc",
+		Slug:        "image-hc-" + tidSlugSafe(t.Name()),
+		Harness:     "claude",
+		Scope:       store.HarnessConfigScopeGlobal,
+		Status:      store.HarnessConfigStatusActive,
+		ContentHash: "hc-hash-" + image,
+		Config:      &store.HarnessConfigData{Image: image},
+	}
+	require.NoError(t, s.CreateHarnessConfig(context.Background(), hc))
+	return hc
+}
+
+// TestReincarnateAgent_PlanShowsHarnessConfigImageChange covers an agent whose
+// image came from its harness config: when only the harness config's image
+// changes, the plan must show the change as old -> new.
+func TestReincarnateAgent_PlanShowsHarnessConfigImageChange(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	hc := createImageHarnessConfig(t, s, "harness-config-image:v2")
+
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.AppliedConfig.Image = "harness-config-image:v1" // resolved from the harness config at create
+		a.AppliedConfig.HarnessConfig = hc.Slug
+		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{HarnessConfig: hc.Slug}
+	})
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{DryRun: true}), agent.ID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var resp ReincarnateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "harness-config-image:v1", resp.Plan.Image.Old)
+	assert.Equal(t, "harness-config-image:v2", resp.Plan.Image.New,
+		"a harness-config image change must show up in the plan")
+}
+
+// TestReincarnateAgent_InlineImageBeatsHarnessConfig proves an explicit
+// inline image outranks the harness config's image, so a harness-config image
+// change leaves an explicitly chosen image unchanged.
+func TestReincarnateAgent_InlineImageBeatsHarnessConfig(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	hc := createImageHarnessConfig(t, s, "harness-config-image:v2")
+
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.AppliedConfig.Image = "explicit-image:v1"
+		a.AppliedConfig.HarnessConfig = hc.Slug
+		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{
+			HarnessConfig: hc.Slug,
+			InlineConfig:  &api.ScionConfig{Image: "explicit-image:v1"},
+		}
+	})
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{DryRun: true}), agent.ID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var resp ReincarnateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "explicit-image:v1", resp.Plan.Image.Old)
+	assert.Equal(t, "explicit-image:v1", resp.Plan.Image.New,
+		"an explicit inline image must survive a harness-config image change")
+}
+
+// TestReincarnateAgent_RecordCarriesBrokerEchoedImage proves the reincarnation
+// record's NewAppliedConfig carries the image the broker echoed back from
+// reprovision, the same image the agent row ends up with.
+func TestReincarnateAgent_RecordCarriesBrokerEchoedImage(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.reprovisionImage = "broker-resolved-image:v9"
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateCompleted, r.State, r.Error)
+	require.NotNil(t, r.NewAppliedConfig)
+	assert.Equal(t, "broker-resolved-image:v9", r.NewAppliedConfig.Image,
+		"the record must carry the broker-echoed image")
+}
+
+// TestReincarnateAgent_NoBrokerEchoKeepsHubResolvedImage proves that when the
+// broker echoes no image, the image the hub resolved from the harness config
+// is what the agent row ends up with.
+func TestReincarnateAgent_NoBrokerEchoKeepsHubResolvedImage(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	hc := createImageHarnessConfig(t, s, "harness-config-image:v2")
+
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.AppliedConfig.Image = ""
+		a.AppliedConfig.HarnessConfig = hc.Slug
+		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{HarnessConfig: hc.Slug}
+	})
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateCompleted, r.State, r.Error)
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, final.AppliedConfig)
+	assert.Equal(t, "harness-config-image:v2", final.AppliedConfig.Image)
+}
+
 // TestReincarnateAgent_LegacyAgent_DropsSkillsWithWarning covers the legacy
 // skills addendum (design §3.4 Amendment A1): an agent with no CreateInputs
 // (predates the field) must have InlineConfig.Skills dropped entirely by the
