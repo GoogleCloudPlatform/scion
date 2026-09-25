@@ -105,6 +105,7 @@ type BrokerConnection struct {
 	sessionID string
 	conn      *wsprotocol.Connection
 	config    ControlChannelConfig
+	log       *slog.Logger
 
 	// Pending requests waiting for responses
 	pendingRequests map[string]chan *wsprotocol.ResponseEnvelope
@@ -214,6 +215,7 @@ func (m *ControlChannelManager) HandleUpgrade(w http.ResponseWriter, r *http.Req
 		sessionID:       sessionID,
 		conn:            wsConn,
 		config:          m.config,
+		log:             m.log,
 		pendingRequests: make(map[string]chan *wsprotocol.ResponseEnvelope),
 		streams:         make(map[string]*StreamProxy),
 		connectedAt:     time.Now(),
@@ -632,11 +634,32 @@ func (hc *BrokerConnection) TunnelRequest(ctx context.Context, req *wsprotocol.R
 	case resp := <-respCh:
 		return resp, nil
 	case <-ctx.Done():
+		// The caller (e.g. the original HTTP request) gave up. Tell the
+		// broker so it can abort the in-flight request instead of running
+		// it to completion after nobody is listening for the result — see
+		// ptone/scion#1886.
+		hc.sendCancel(req.RequestID)
 		return nil, ctx.Err()
 	case <-time.After(timeout):
+		// We gave up waiting past our own dispatch timeout. Tell the broker
+		// for the same reason as above.
+		hc.sendCancel(req.RequestID)
 		return nil, fmt.Errorf("request timeout after %v", timeout)
 	case <-hc.ctx.Done():
 		return nil, fmt.Errorf("connection closed")
+	}
+}
+
+// sendCancel best-effort notifies the broker that the Hub has given up
+// waiting for the response to requestID, so the broker can abort the
+// in-flight request. A write failure here doesn't change the outcome
+// already decided for TunnelRequest's caller, and an old broker that
+// doesn't understand the "cancel" message type just ignores it (see
+// ControlChannelClient.handleMessage's default case), so this is
+// backward compatible.
+func (hc *BrokerConnection) sendCancel(requestID string) {
+	if err := hc.conn.WriteJSON(wsprotocol.NewCancelMessage(requestID)); err != nil && hc.log != nil {
+		hc.log.Debug("Failed to send cancel for tunneled request", "requestID", requestID, "error", err)
 	}
 }
 

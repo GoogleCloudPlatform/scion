@@ -426,6 +426,110 @@ func TestDispatchRequest_ContextCancelledBeforeSemaphore(t *testing.T) {
 	client.wg.Wait()
 }
 
+// TestHandleCancel_AbortsInFlightRequestContext covers ptone/scion#1886: the
+// Hub sends a "cancel" message when it gives up waiting for a tunneled
+// request (its own dispatch timeout elapsed, or the original caller's
+// context was cancelled). The broker must abort that specific request's
+// context so a slow handler (e.g. a container/sandbox create) can stop
+// instead of running to completion and leaking a sandbox nobody is
+// listening for.
+func TestHandleCancel_AbortsInFlightRequestContext(t *testing.T) {
+	handlerStarted := make(chan struct{})
+	var sawCancel atomic.Bool
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(handlerStarted)
+		select {
+		case <-r.Context().Done():
+			sawCancel.Store(true)
+		case <-time.After(5 * time.Second):
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	brokerConn, hubConn, cleanup := newWSPair(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	client := &ControlChannelClient{
+		config:      ControlChannelConfig{Debug: true},
+		conn:        brokerConn,
+		handlers:    handler,
+		log:         slog.Default(),
+		streams:     make(map[string]*StreamHandler),
+		dispatchSem: make(chan struct{}, defaultMaxConcurrentDispatches),
+		cancels:     make(map[string]context.CancelFunc),
+		ctx:         ctx,
+		cancel:      cancel,
+	}
+
+	req := wsprotocol.RequestEnvelope{
+		Type:      "request",
+		RequestID: "create-req-1",
+		Method:    "POST",
+		Path:      "/api/v1/agents",
+	}
+
+	client.wg.Add(1)
+	go client.dispatchRequest(brokerConn, req)
+
+	select {
+	case <-handlerStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler never started")
+	}
+
+	// Simulate the Hub giving up and sending a cancel for this request.
+	cancelMsg, err := json.Marshal(wsprotocol.NewCancelMessage("create-req-1"))
+	if err != nil {
+		t.Fatalf("failed to marshal cancel message: %v", err)
+	}
+	if err := client.handleMessage(cancelMsg); err != nil {
+		t.Fatalf("handleMessage(cancel) returned error: %v", err)
+	}
+
+	client.wg.Wait()
+
+	if !sawCancel.Load() {
+		t.Error("handler did not observe context cancellation after a cancel message")
+	}
+
+	// The (now-irrelevant) response is still sent; drain it so the test
+	// doesn't leak a goroutine, but nobody on the hub side is listening for
+	// it in the real flow (TunnelRequest already returned).
+	var resp wsprotocol.ResponseEnvelope
+	_ = hubConn.ReadJSON(&resp)
+
+	// The cancel bookkeeping must be cleaned up once the request completes.
+	client.cancelMu.Lock()
+	_, stillTracked := client.cancels["create-req-1"]
+	client.cancelMu.Unlock()
+	if stillTracked {
+		t.Error("expected cancel func to be removed once the request completed")
+	}
+}
+
+// TestHandleCancel_UnknownRequestIDIsNoop covers the case where a cancel
+// arrives for a request that already completed (or was never known to this
+// client) — it must not panic or error.
+func TestHandleCancel_UnknownRequestIDIsNoop(t *testing.T) {
+	client := &ControlChannelClient{
+		config:  ControlChannelConfig{Debug: true},
+		log:     slog.Default(),
+		cancels: make(map[string]context.CancelFunc),
+	}
+
+	cancelMsg, err := json.Marshal(wsprotocol.NewCancelMessage("no-such-request"))
+	if err != nil {
+		t.Fatalf("failed to marshal cancel message: %v", err)
+	}
+	if err := client.handleMessage(cancelMsg); err != nil {
+		t.Fatalf("handleMessage(cancel) returned error: %v", err)
+	}
+}
+
 func TestBuildWebSocketURL_Normalization(t *testing.T) {
 	tests := []struct {
 		name        string

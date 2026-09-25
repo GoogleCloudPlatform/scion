@@ -659,6 +659,55 @@ func runSimpleCommandWithStdin(ctx context.Context, stdin io.Reader, command str
 	return strings.TrimSpace(string(out)), nil
 }
 
+// rollbackCancelledCreate best-effort removes a container that the daemon
+// may have already created/started before the CLI process (e.g. a detached
+// "run -d") was killed by context cancellation. exec.CommandContext only
+// kills the local CLI subprocess — it does not tell the daemon to undo work
+// it already began server-side. Without this, a create whose context is
+// cancelled because the caller gave up (e.g. the Hub's dispatch timeout
+// elapsed, or the original request was itself cancelled) can leak a running
+// container that nothing else knows to reap. See ptone/scion#1886.
+//
+// It intentionally uses a fresh, short-lived context rather than the
+// (already cancelled) caller context, since the caller has already given up
+// and this cleanup must still be allowed to run.
+//
+// The Apple "container" CLI's "rm" does not support "-f" and fails if the
+// container is still running (see AppleContainerRuntime.Delete), so for that
+// runtime we kill first, then retry a plain "rm" a few times — kill is
+// asynchronous and the container may not be immediately ready for removal.
+// Docker/Podman support "rm -f" directly.
+func rollbackCancelledCreate(command, containerName string) {
+	if containerName == "" {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if filepath.Base(command) == "container" {
+		_, _ = runSimpleCommand(cleanupCtx, command, "kill", containerName)
+
+		var out string
+		var err error
+		for attempt := 0; attempt < 5; attempt++ {
+			out, err = runSimpleCommand(cleanupCtx, command, "rm", containerName)
+			if err == nil {
+				return
+			}
+			select {
+			case <-cleanupCtx.Done():
+				runtimeLog.Warn("Failed to roll back cancelled create", "cmd", command, "container", containerName, "error", cleanupCtx.Err(), "output", strings.TrimSpace(out))
+				return
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+		runtimeLog.Warn("Failed to roll back cancelled create", "cmd", command, "container", containerName, "error", err, "output", strings.TrimSpace(out))
+		return
+	}
+	if out, err := runSimpleCommand(cleanupCtx, command, "rm", "-f", containerName); err != nil {
+		runtimeLog.Warn("Failed to roll back cancelled create", "cmd", command, "container", containerName, "error", err, "output", strings.TrimSpace(out))
+	}
+}
+
 func runInteractiveCommand(command string, args ...string) error {
 	// Log command name and argument count only — see runSimpleCommand comment
 	// and #127 / P5 for rationale.

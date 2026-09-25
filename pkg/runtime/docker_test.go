@@ -17,6 +17,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -66,6 +67,74 @@ echo "$@"
 
 	if !strings.Contains(out, "run -t") {
 		t.Errorf("expected 'run -t' in output, got %q", out)
+	}
+}
+
+// TestDockerRuntime_Run_ContextCancelled_RollsBackPartialContainer covers
+// ptone/scion#1886: if the caller's context is cancelled while `docker run
+// -d` is still talking to the daemon, killing the CLI subprocess alone does
+// not undo a container the daemon may have already created/started. Run
+// must roll that back itself with a best-effort `docker rm -f` so a
+// cancelled create (e.g. because the Hub gave up waiting) doesn't leak a
+// running container.
+func TestDockerRuntime_Run_ContextCancelled_RollsBackPartialContainer(t *testing.T) {
+	tmpDir := t.TempDir()
+	mockDocker := filepath.Join(tmpDir, "mock-docker")
+	rmLog := filepath.Join(tmpDir, "rm.log")
+
+	// The mock "run" hangs until killed by context cancellation, simulating
+	// a slow create (e.g. a cold-start container/sandbox build) that
+	// outlives the caller's patience. The mock "rm" records its arguments
+	// so the test can confirm the rollback targeted the right container.
+	// "exec sleep" replaces the shell process in place rather than forking a
+	// child, so killing this process (what exec.CommandContext does on ctx
+	// cancellation) takes effect immediately instead of leaving an orphaned
+	// grandchild holding the output pipe open.
+	script := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "run" ]; then
+  exec sleep 30
+elif [ "$1" = "rm" ]; then
+  echo "$@" >> %q
+fi
+`, rmLog)
+	if err := os.WriteFile(mockDocker, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock docker: %v", err)
+	}
+
+	runtime := &DockerRuntime{
+		Command: mockDocker,
+	}
+
+	config := RunConfig{
+		Harness:      &harness.Generic{},
+		Name:         "test-agent-cancel",
+		UnixUsername: "scion",
+		Image:        "scion-agent:latest",
+		Task:         "hello",
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+	}()
+
+	_, err := runtime.Run(ctx, config)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected Run to return context.Canceled, got %v", err)
+	}
+
+	// rollbackCancelledCreate runs synchronously (on a fresh, uncancelled
+	// context) before Run returns, so rm.log must already exist.
+	data, readErr := os.ReadFile(rmLog)
+	if readErr != nil {
+		t.Fatalf("expected a rollback 'docker rm' after cancellation, but rm.log was not written: %v", readErr)
+	}
+	if !strings.Contains(string(data), "test-agent-cancel") {
+		t.Errorf("expected rollback rm to target container 'test-agent-cancel', got %q", string(data))
+	}
+	if !strings.Contains(string(data), "-f") {
+		t.Errorf("expected rollback rm to force-remove, got %q", string(data))
 	}
 }
 

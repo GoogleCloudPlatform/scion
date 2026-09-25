@@ -31,6 +31,13 @@ const (
 	TypeRequest = "request"
 	// TypeResponse is sent by Runtime Broker with HTTP response
 	TypeResponse = "response"
+	// TypeCancel is sent by Hub to abort a previously tunneled request that
+	// it has given up waiting on (its own dispatch timeout elapsed, or the
+	// original caller's context was cancelled). A Runtime Broker that
+	// doesn't recognize this message type ignores it (see the default case
+	// in ControlChannelClient.handleMessage), so this is backward compatible
+	// with older brokers.
+	TypeCancel = "cancel"
 	// TypeStream is sent for streaming data (e.g., PTY)
 	TypeStream = "stream"
 	// TypeStreamOpen is sent to open a new stream
@@ -143,6 +150,17 @@ type ResponseEnvelope struct {
 	StatusCode int               `json:"statusCode"`
 	Headers    map[string]string `json:"headers,omitempty"`
 	Body       []byte            `json:"body,omitempty"` // Base64 encoded in JSON
+}
+
+// CancelMessage aborts a previously sent RequestEnvelope identified by
+// RequestID. The Hub sends this when it has given up waiting for the
+// response (dispatch timeout, or the original caller's request was itself
+// cancelled) so the Runtime Broker can stop doing wasted (or worse, leaked)
+// work instead of running the request to completion after nobody is
+// listening for the result.
+type CancelMessage struct {
+	Type      string `json:"type"` // Always "cancel"
+	RequestID string `json:"requestId"`
 }
 
 // StreamOpenMessage requests opening a new multiplexed stream.
@@ -332,6 +350,15 @@ func NewResponseEnvelope(requestID string, statusCode int, headers map[string]st
 		StatusCode: statusCode,
 		Headers:    headers,
 		Body:       body,
+	}
+}
+
+// NewCancelMessage creates a cancel message aborting the tunneled request
+// identified by requestID.
+func NewCancelMessage(requestID string) *CancelMessage {
+	return &CancelMessage{
+		Type:      TypeCancel,
+		RequestID: requestID,
 	}
 }
 
