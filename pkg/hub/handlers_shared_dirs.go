@@ -57,15 +57,13 @@ func (s *Server) handleProjectSharedDirRoutes(w http.ResponseWriter, r *http.Req
 		}
 	}
 
-	// SECURITY-GATE: CheckAccess — GET/HEAD only need project read access,
-	// since listing, downloading and archiving shared-dir contents exposes
-	// project data without changing it; every other method needs update
-	// access, because it creates, overwrites or removes files on disk.
-	action := ActionRead
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		action = ActionUpdate
-	}
-	if !s.authorize(w, r, projectResource(project), action) {
+	// SECURITY-GATE: CheckAccess — reuses projectWorkspaceAction's read/write
+	// split (GET/HEAD/OPTIONS read, everything else update) rather than
+	// inlining a second copy of the same method-to-action policy: listing,
+	// downloading and archiving shared-dir contents exposes project data
+	// without changing it, while every other method creates, overwrites or
+	// removes files on disk.
+	if !s.authorize(w, r, projectResource(project), projectWorkspaceAction(r.Method)) {
 		return
 	}
 
@@ -110,23 +108,9 @@ func (s *Server) handleProjectSharedDirs(w http.ResponseWriter, r *http.Request,
 
 	switch r.Method {
 	case http.MethodGet:
-		// Project isolation runs before the authorization check so a cross-project
-		// agent caller keeps its 404 and is not told the project exists.
-		if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
-			if project.ID != agentIdent.ProjectID() {
-				NotFound(w, "Project")
-				return
-			}
-		}
-		// Read access check
-		if !s.authorize(w, r, Resource{
-			Type:    "project",
-			ID:      project.ID,
-			OwnerID: project.OwnerID,
-		}, ActionRead) {
-			return
-		}
-
+		// Isolation and read access are both enforced by
+		// handleProjectSharedDirRoutes before this leaf is ever reached; this
+		// case has no check of its own left to duplicate that gate.
 		dirs := project.SharedDirs
 		if dirs == nil {
 			dirs = []api.SharedDir{}
@@ -136,13 +120,13 @@ func (s *Server) handleProjectSharedDirs(w http.ResponseWriter, r *http.Request,
 		})
 
 	case http.MethodPost:
-		// Write access check
+		// Write access check. The UserIdentity guard is load-bearing — keep it
+		// even though it duplicates part of the dispatcher's gate — because it
+		// refuses agent and broker principals outright, which projectResource's
+		// CheckAccess alone would not do if either were ever granted
+		// project.update through a role binding.
 		if userIdent, ok := identity.(UserIdentity); ok {
-			decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-				Type:    "project",
-				ID:      project.ID,
-				OwnerID: project.OwnerID,
-			}, ActionUpdate)
+			decision := s.authzService.CheckAccess(ctx, userIdent, projectResource(project), ActionUpdate)
 			if !decision.Allowed {
 				Forbidden(w)
 				return
@@ -200,13 +184,13 @@ func (s *Server) handleProjectSharedDirByName(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Write access check
+	// Write access check. The UserIdentity guard is load-bearing — keep it
+	// even though it duplicates part of the dispatcher's gate — because it
+	// refuses agent and broker principals outright, which projectResource's
+	// CheckAccess alone would not do if either were ever granted
+	// project.update through a role binding.
 	if userIdent, ok := identity.(UserIdentity); ok {
-		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-			Type:    "project",
-			ID:      project.ID,
-			OwnerID: project.OwnerID,
-		}, ActionUpdate)
+		decision := s.authzService.CheckAccess(ctx, userIdent, projectResource(project), ActionUpdate)
 		if !decision.Allowed {
 			Forbidden(w)
 			return

@@ -148,11 +148,10 @@ func TestSharedDirRoutes_NonMemberDenied(t *testing.T) {
 	}
 }
 
-// TestSharedDirRoutes_OwnerAllowed proves the gate is a gate and not a
-// blanket deny: the project owner performing the same six operations still
-// succeeds.
-func TestSharedDirRoutes_OwnerAllowed(t *testing.T) {
-	wantStatus := map[string]int{
+// sharedDirAuthzAllowStatus is the expected success status for each case in
+// sharedDirAuthzCases when the caller is actually allowed through.
+func sharedDirAuthzAllowStatus() map[string]int {
+	return map[string]int{
 		"list files":    http.StatusOK,
 		"download file": http.StatusOK,
 		"archive":       http.StatusOK,
@@ -160,6 +159,13 @@ func TestSharedDirRoutes_OwnerAllowed(t *testing.T) {
 		"write file":    http.StatusOK,
 		"delete file":   http.StatusNoContent,
 	}
+}
+
+// TestSharedDirRoutes_OwnerAllowed proves the gate is a gate and not a
+// blanket deny: the project owner performing the same six operations still
+// succeeds.
+func TestSharedDirRoutes_OwnerAllowed(t *testing.T) {
+	wantStatus := sharedDirAuthzAllowStatus()
 
 	for _, tc := range sharedDirAuthzCases() {
 		t.Run(tc.name, func(t *testing.T) {
@@ -200,4 +206,90 @@ func TestSharedDirRoutes_CrossProjectAgent404(t *testing.T) {
 	rec := doRequestWithAgentToken(t, srv, http.MethodGet,
 		fmt.Sprintf("/api/v1/projects/%s/shared-dirs/secrets/files", project.ID), nil, token)
 	assert.Equal(t, http.StatusNotFound, rec.Code, "body: %s", rec.Body.String())
+}
+
+// TestSharedDirRoutes_MemberReadOnlyOwnerFull pins the GET/HEAD→read,
+// everything-else→update split itself, not just its endpoints. A non-member
+// and the dev token both land on the same result whichever way that split is
+// mutated (denied-regardless, allowed-regardless), so neither proves the
+// mapping is right. A real project member sits between them: reads must
+// succeed and writes must be refused (project-member has project:read but
+// not project:update), while a real project owner succeeds on all six.
+func TestSharedDirRoutes_MemberReadOnlyOwnerFull(t *testing.T) {
+	allowStatus := sharedDirAuthzAllowStatus()
+
+	for _, tc := range sharedDirAuthzCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s, project, sdPath, _ := setupSharedDirAuthzFixture(t)
+			base := fmt.Sprintf("/api/v1/projects/%s/shared-dirs/secrets", project.ID)
+
+			member := makeProjectMemberUser(t, s, project, tid("sdauthz-member-"+tc.name), "Member", store.GroupMemberRoleMember)
+			isRead := tc.method == http.MethodGet
+
+			memberRec := doSharedDirAuthzRequest(t, srv, member, base, tc)
+			if isRead {
+				assert.Equal(t, http.StatusOK, memberRec.Code, "member %s: body: %s", tc.name, memberRec.Body.String())
+			} else {
+				assert.Equal(t, http.StatusForbidden, memberRec.Code, "member %s: body: %s", tc.name, memberRec.Body.String())
+
+				// As in the non-member case, a refusal must be provable on
+				// disk, not just by status code.
+				data, err := os.ReadFile(filepath.Join(sdPath, "secret.txt"))
+				require.NoError(t, err, "victim file must still exist")
+				assert.Equal(t, "VICTIM SECRET", string(data), "victim file must be unmodified")
+				assert.NoFileExists(t, filepath.Join(sdPath, "planted.txt"))
+				assert.NoFileExists(t, filepath.Join(sdPath, "uploaded.txt"))
+			}
+
+			owner := makeProjectMemberUser(t, s, project, tid("sdauthz-owner-"+tc.name), "Owner", store.GroupMemberRoleOwner)
+			ownerRec := doSharedDirAuthzRequest(t, srv, owner, base, tc)
+			assert.Equal(t, allowStatus[tc.name], ownerRec.Code, "owner %s: body: %s", tc.name, ownerRec.Body.String())
+		})
+	}
+}
+
+// TestSharedDirRoutes_NonMemberDeniedOnList covers the one route whose leaf
+// no longer has an authorization check of its own: GET /shared-dirs (list)
+// used to be gated redundantly by both the dispatcher and
+// handleProjectSharedDirs's own copy of the same check; now only the
+// dispatcher gates it, so this asserts that gate alone is still sufficient.
+func TestSharedDirRoutes_NonMemberDeniedOnList(t *testing.T) {
+	srv, _, project, _, nonMember := setupSharedDirAuthzFixture(t)
+
+	rec := doRequestAsUser(t, srv, nonMember, http.MethodGet,
+		fmt.Sprintf("/api/v1/projects/%s/shared-dirs", project.ID), nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+}
+
+// TestSharedDirRoutes_InProjectAgentDeniedOnConfigMutation pins, end to end,
+// that an agent cannot mutate a project's shared-dir configuration even from
+// inside its own project. It is doubly denied today: the dispatcher requires
+// project:update, which no agent scope maps to, and the leaf's UserIdentity
+// check refuses agents outright regardless. Either layer denying is enough
+// for the caller-visible behavior, but the config itself — not just the
+// status code — must be provably unchanged.
+func TestSharedDirRoutes_InProjectAgentDeniedOnConfigMutation(t *testing.T) {
+	srv, s, project, _, _ := setupSharedDirAuthzFixture(t)
+	ctx := context.Background()
+
+	token, err := srv.GenerateAgentToken(tid("sdauthz-inproject-agent"), project.ID, nil, AgentRoleFull, nil)
+	require.NoError(t, err)
+
+	rec := doRequestWithAgentToken(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/shared-dirs", project.ID),
+		map[string]interface{}{"name": "attacker-dir"}, token)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "POST body: %s", rec.Body.String())
+
+	rec = doRequestWithAgentToken(t, srv, http.MethodDelete,
+		fmt.Sprintf("/api/v1/projects/%s/shared-dirs/secrets", project.ID), nil, token)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "DELETE body: %s", rec.Body.String())
+
+	reloaded, err := s.GetProject(ctx, project.ID)
+	require.NoError(t, err)
+	names := make([]string, 0, len(reloaded.SharedDirs))
+	for _, d := range reloaded.SharedDirs {
+		names = append(names, d.Name)
+	}
+	assert.Contains(t, names, "secrets", "existing shared-dir config must survive the denied delete")
+	assert.NotContains(t, names, "attacker-dir", "no shared dir should have been added by the denied post")
 }
