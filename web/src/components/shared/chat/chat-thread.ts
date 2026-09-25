@@ -39,6 +39,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { guard } from 'lit/directives/guard.js';
+import { repeat } from 'lit/directives/repeat.js';
 import { apiFetch, extractApiError } from '../../../client/api.js';
 import type { Agent, Message } from '../../../shared/types.js';
 import type { ChatSendDetail } from './chat-composer.js';
@@ -49,6 +50,7 @@ import './chat-message.js';
 import './chat-system-line.js';
 import './chat-composer.js';
 import './chat-interagent-marker.js';
+import { formatChatDate, renderDateDivider, chatDateDividerStyles } from './chat-date-divider.js';
 import { getLanguageFromPath } from '../code-editor.js';
 import '../code-editor.js';
 import '../markdown-preview.js';
@@ -68,11 +70,6 @@ const MAX_BUFFER = 500;
 /** Number of messages to fetch per history request. */
 const HISTORY_PAGE_SIZE = 50;
 
-const MESSAGE_DATE_FORMAT = new Intl.DateTimeFormat('en', {
-  year: 'numeric',
-  month: 'short',
-  day: 'numeric',
-});
 const EMPTY_ATTACHMENTS: NonNullable<Message['attachments']> = [];
 const EMPTY_ATTACHMENT_REFS: import('./chat-message.js').AttachmentRefInfo[] = [];
 
@@ -561,54 +558,56 @@ export class ScionChatThread extends LitElement {
     }
   }
 
-  static override styles = css`
-    :host {
-      display: flex;
-      flex-direction: column;
-      height: 100%;
-      min-height: 300px;
-    }
+  static override styles = [
+    chatDateDividerStyles,
+    css`
+      :host {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+        min-height: 300px;
+      }
 
-    .thread-container {
-      display: flex;
-      flex-direction: column;
-      flex: 1;
-      overflow: hidden;
-    }
+      .thread-container {
+        display: flex;
+        flex-direction: column;
+        flex: 1;
+        overflow: hidden;
+      }
 
-    /* Streaming indicator */
-    .stream-bar {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 0.25rem 1rem;
-      font-size: var(--chat-fs-base);
-      color: var(--scion-text-muted, #64748b);
-      border-bottom: 1px solid var(--scion-border, #e2e8f0);
-      background: var(--scion-surface, #ffffff);
-    }
+      /* Streaming indicator */
+      .stream-bar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0.25rem 1rem;
+        font-size: var(--chat-fs-base);
+        color: var(--scion-text-muted, #64748b);
+        border-bottom: 1px solid var(--scion-border, #e2e8f0);
+        background: var(--scion-surface, #ffffff);
+      }
 
-    .stream-indicator {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.375rem;
-    }
+      .stream-indicator {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.375rem;
+      }
 
-    /* Message scroll area */
-    .messages-scroll {
-      flex: 1;
-      overflow-y: auto;
-      overflow-x: hidden;
-      padding: 0.5rem 0;
-      display: flex;
-      flex-direction: column;
-    }
+      /* Message scroll area */
+      .messages-scroll {
+        flex: 1;
+        overflow-y: auto;
+        overflow-x: hidden;
+        padding: 0.5rem 0;
+        display: flex;
+        flex-direction: column;
+      }
 
-    .messages-list {
-      display: flex;
-      flex-direction: column;
-      gap: 0;
-      /*
+      .messages-list {
+        display: flex;
+        flex-direction: column;
+        gap: 0;
+        /*
        * flex: 0 0 auto is load-bearing. As a flex item of .messages-scroll the
        * list would otherwise shrink to the scroll container's height (the
        * explicit min-height replaces the automatic minimum), and because the
@@ -617,335 +616,311 @@ export class ScionChatThread extends LitElement {
        * cannot be scrolled at all. Keeping the list at its content height makes
        * the overflow land at the bottom, where the scrollbar can reach it.
        */
-      flex: 0 0 auto;
-      min-height: 100%;
-      justify-content: flex-end;
-    }
-
-    /* Loading older messages */
-    .loading-older {
-      display: flex;
-      justify-content: center;
-      padding: 0.5rem;
-    }
-
-    /* Jump to latest pill */
-    .jump-to-latest {
-      position: sticky;
-      bottom: 0.5rem;
-      align-self: center;
-      z-index: 10;
-    }
-
-    .jump-btn {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.375rem;
-      padding: 0.375rem 0.75rem;
-      background: var(--scion-primary, #3b82f6);
-      color: #fff;
-      border: none;
-      border-radius: 1rem;
-      font-size: var(--chat-fs-base);
-      font-weight: 500;
-      cursor: pointer;
-      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
-      transition: background 0.15s;
-    }
-
-    .jump-btn:hover {
-      background: var(--scion-primary-600, #2563eb);
-    }
-
-    .jump-btn sl-icon {
-      font-size: var(--chat-fs-lg);
-    }
-
-    /* Date divider */
-    .date-divider {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      padding: 0.75rem 1rem 0.25rem;
-    }
-
-    .date-divider::before,
-    .date-divider::after {
-      content: '';
-      flex: 1;
-      height: 1px;
-      background: var(--scion-border, #e2e8f0);
-    }
-
-    .date-label {
-      font-size: var(--chat-fs-sm);
-      font-weight: 600;
-      color: var(--scion-text-muted, #64748b);
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      white-space: nowrap;
-    }
-
-    /* Unread divider */
-    .unread-divider {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      padding: 0.5rem 1rem;
-    }
-
-    .unread-divider::before,
-    .unread-divider::after {
-      content: '';
-      flex: 1;
-      height: 1px;
-      background: var(--scion-primary, #3b82f6);
-    }
-
-    .unread-label {
-      font-size: var(--chat-fs-sm);
-      font-weight: 600;
-      color: var(--scion-primary, #3b82f6);
-      white-space: nowrap;
-    }
-
-    /* Permalink highlight animation */
-    .permalink-highlight {
-      animation: permalink-fade 2s ease-out;
-    }
-
-    @keyframes permalink-fade {
-      0% {
-        background-color: rgba(59, 130, 246, 0.2);
+        flex: 0 0 auto;
+        min-height: 100%;
+        justify-content: flex-end;
       }
-      100% {
-        background-color: transparent;
+
+      /* Loading older messages */
+      .loading-older {
+        display: flex;
+        justify-content: center;
+        padding: 0.5rem;
       }
-    }
 
-    /* Empty / Loading / Error states */
-    .state-msg {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      padding: 3rem 2rem;
-      color: var(--scion-text-muted, #64748b);
-      gap: 0.75rem;
-      flex: 1;
-    }
+      /* Jump to latest pill */
+      .jump-to-latest {
+        position: sticky;
+        bottom: 0.5rem;
+        align-self: center;
+        z-index: 10;
+      }
 
-    .state-msg sl-spinner {
-      font-size: var(--chat-fs-5xl);
-    }
+      .jump-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.375rem;
+        padding: 0.375rem 0.75rem;
+        background: var(--scion-primary, #3b82f6);
+        color: #fff;
+        border: none;
+        border-radius: 1rem;
+        font-size: var(--chat-fs-base);
+        font-weight: 500;
+        cursor: pointer;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+        transition: background 0.15s;
+      }
 
-    .state-msg sl-icon {
-      font-size: var(--chat-fs-6xl);
-      opacity: 0.4;
-    }
+      .jump-btn:hover {
+        background: var(--scion-primary-600, #2563eb);
+      }
 
-    /* Send error toast */
-    .send-error {
-      padding: 0.375rem 1rem;
-      font-size: var(--chat-fs-base);
-      color: var(--scion-danger-600, #dc2626);
-      background: var(--scion-danger-50, #fef2f2);
-      border-top: 1px solid var(--scion-danger-200, #fecaca);
-    }
+      .jump-btn sl-icon {
+        font-size: var(--chat-fs-lg);
+      }
 
-    /* Mention results footer */
-    .mention-results {
-      padding: 0.25rem 1rem;
-      font-size: var(--chat-fs-sm);
-      color: var(--scion-text-muted, #64748b);
-      border-top: 1px solid var(--scion-border, #e2e8f0);
-    }
+      /* Unread divider */
+      .unread-divider {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 0.5rem 1rem;
+      }
 
-    .mention-results .mention-slug {
-      font-weight: 600;
-    }
+      .unread-divider::before,
+      .unread-divider::after {
+        content: '';
+        flex: 1;
+        height: 1px;
+        background: var(--scion-primary, #3b82f6);
+      }
 
-    /* Inter-agent toggle bar */
-    .interagent-toggle-bar {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      padding: 0.25rem 1rem;
-      border-bottom: 1px solid var(--scion-border, rgba(148, 163, 184, 0.15));
-    }
+      .unread-label {
+        font-size: var(--chat-fs-sm);
+        font-weight: 600;
+        color: var(--scion-primary, #3b82f6);
+        white-space: nowrap;
+      }
 
-    .interagent-label {
-      font-size: var(--chat-fs-sm);
-      color: var(--scion-text-muted, #64748b);
-      font-weight: 500;
-    }
+      /* Permalink highlight animation */
+      .permalink-highlight {
+        animation: permalink-fade 2s ease-out;
+      }
 
-    .interagent-icons {
-      display: flex;
-      align-items: center;
-      gap: 0.25rem;
-    }
+      @keyframes permalink-fade {
+        0% {
+          background-color: rgba(59, 130, 246, 0.2);
+        }
+        100% {
+          background-color: transparent;
+        }
+      }
 
-    .interagent-icons sl-icon-button::part(base) {
-      font-size: var(--chat-fs-lg);
-      color: var(--scion-text-muted, #64748b);
-    }
+      /* Empty / Loading / Error states */
+      .state-msg {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 3rem 2rem;
+        color: var(--scion-text-muted, #64748b);
+        gap: 0.75rem;
+        flex: 1;
+      }
 
-    /* Typing indicator */
-    .typing-indicator {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      padding: 4px 16px;
-      font-size: var(--chat-fs-base);
-      color: var(--scion-text-muted, #64748b);
-      min-height: 20px;
-    }
+      .state-msg sl-spinner {
+        font-size: var(--chat-fs-5xl);
+      }
 
-    .typing-dots {
-      display: inline-flex;
-      gap: 2px;
-      align-items: center;
-    }
-
-    .typing-dots span {
-      width: 4px;
-      height: 4px;
-      border-radius: 50%;
-      background: var(--scion-text-muted, #64748b);
-      animation: typing-bounce 1.4s ease-in-out infinite;
-    }
-
-    .typing-dots span:nth-child(2) {
-      animation-delay: 0.2s;
-    }
-
-    .typing-dots span:nth-child(3) {
-      animation-delay: 0.4s;
-    }
-
-    @keyframes typing-bounce {
-      0%,
-      60%,
-      100% {
-        transform: translateY(0);
+      .state-msg sl-icon {
+        font-size: var(--chat-fs-6xl);
         opacity: 0.4;
       }
-      30% {
-        transform: translateY(-3px);
-        opacity: 1;
+
+      /* Send error toast */
+      .send-error {
+        padding: 0.375rem 1rem;
+        font-size: var(--chat-fs-base);
+        color: var(--scion-danger-600, #dc2626);
+        background: var(--scion-danger-50, #fef2f2);
+        border-top: 1px solid var(--scion-danger-200, #fecaca);
       }
-    }
 
-    /* Phase-3: Scroll-to-message highlight effect. */
-    scion-chat-message.scroll-highlight {
-      animation: highlight-flash 2s ease-out;
-    }
+      /* Mention results footer */
+      .mention-results {
+        padding: 0.25rem 1rem;
+        font-size: var(--chat-fs-sm);
+        color: var(--scion-text-muted, #64748b);
+        border-top: 1px solid var(--scion-border, #e2e8f0);
+      }
 
-    @keyframes highlight-flash {
-      0%,
-      20% {
+      .mention-results .mention-slug {
+        font-weight: 600;
+      }
+
+      /* Inter-agent toggle bar */
+      .interagent-toggle-bar {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.25rem 1rem;
+        border-bottom: 1px solid var(--scion-border, rgba(148, 163, 184, 0.15));
+      }
+
+      .interagent-label {
+        font-size: var(--chat-fs-sm);
+        color: var(--scion-text-muted, #64748b);
+        font-weight: 500;
+      }
+
+      .interagent-icons {
+        display: flex;
+        align-items: center;
+        gap: 0.25rem;
+      }
+
+      .interagent-icons sl-icon-button::part(base) {
+        font-size: var(--chat-fs-lg);
+        color: var(--scion-text-muted, #64748b);
+      }
+
+      /* Typing indicator */
+      .typing-indicator {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 16px;
+        font-size: var(--chat-fs-base);
+        color: var(--scion-text-muted, #64748b);
+        min-height: 20px;
+      }
+
+      .typing-dots {
+        display: inline-flex;
+        gap: 2px;
+        align-items: center;
+      }
+
+      .typing-dots span {
+        width: 4px;
+        height: 4px;
+        border-radius: 50%;
+        background: var(--scion-text-muted, #64748b);
+        animation: typing-bounce 1.4s ease-in-out infinite;
+      }
+
+      .typing-dots span:nth-child(2) {
+        animation-delay: 0.2s;
+      }
+
+      .typing-dots span:nth-child(3) {
+        animation-delay: 0.4s;
+      }
+
+      @keyframes typing-bounce {
+        0%,
+        60%,
+        100% {
+          transform: translateY(0);
+          opacity: 0.4;
+        }
+        30% {
+          transform: translateY(-3px);
+          opacity: 1;
+        }
+      }
+
+      /* Phase-3: Scroll-to-message highlight effect. */
+      scion-chat-message.scroll-highlight {
+        animation: highlight-flash 2s ease-out;
+      }
+
+      @keyframes highlight-flash {
+        0%,
+        20% {
+          background: var(--scion-primary-50, #eff6ff);
+        }
+        100% {
+          background: transparent;
+        }
+      }
+
+      /* Phase-5: Context menu */
+      .context-menu-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 149;
+      }
+
+      .context-menu {
+        position: fixed;
+        z-index: 150;
+        background: var(--scion-surface, #ffffff);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: 0.5rem;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+        min-width: 180px;
+        padding: 0.25rem 0;
+      }
+
+      .context-menu-item {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.5rem 0.75rem;
+        font-size: var(--chat-fs-md);
+        cursor: pointer;
+        color: var(--scion-text, #1e293b);
+        white-space: nowrap;
+        transition: background 0.1s;
+      }
+
+      .context-menu-item:hover {
         background: var(--scion-primary-50, #eff6ff);
       }
-      100% {
-        background: transparent;
+
+      .context-menu-item.danger {
+        color: var(--scion-danger-600, #dc2626);
       }
-    }
 
-    /* Phase-5: Context menu */
-    .context-menu-overlay {
-      position: fixed;
-      inset: 0;
-      z-index: 149;
-    }
+      .context-menu-item sl-icon {
+        font-size: var(--chat-fs-lg);
+        color: var(--scion-text-muted, #64748b);
+      }
 
-    .context-menu {
-      position: fixed;
-      z-index: 150;
-      background: var(--scion-surface, #ffffff);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.5rem;
-      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
-      min-width: 180px;
-      padding: 0.25rem 0;
-    }
+      .context-menu-item.danger sl-icon {
+        color: var(--scion-danger-600, #dc2626);
+      }
 
-    .context-menu-item {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      padding: 0.5rem 0.75rem;
-      font-size: var(--chat-fs-md);
-      cursor: pointer;
-      color: var(--scion-text, #1e293b);
-      white-space: nowrap;
-      transition: background 0.1s;
-    }
+      /* Path-link file preview dialog (#1148) */
+      .file-preview-dialog::part(panel) {
+        width: min(90vw, 800px);
+        max-height: 85vh;
+      }
 
-    .context-menu-item:hover {
-      background: var(--scion-primary-50, #eff6ff);
-    }
+      .file-preview-dialog::part(body) {
+        padding: 0;
+        overflow: auto;
+      }
 
-    .context-menu-item.danger {
-      color: var(--scion-danger-600, #dc2626);
-    }
+      .file-preview-placeholder {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.5rem;
+        padding: 3rem 2rem;
+        color: var(--scion-text-muted, #64748b);
+        font-size: var(--chat-fs-lg);
+      }
 
-    .context-menu-item sl-icon {
-      font-size: var(--chat-fs-lg);
-      color: var(--scion-text-muted, #64748b);
-    }
+      .file-preview-placeholder.error {
+        color: var(--scion-danger-600, #dc2626);
+      }
 
-    .context-menu-item.danger sl-icon {
-      color: var(--scion-danger-600, #dc2626);
-    }
+      .file-preview-image {
+        max-width: 100%;
+        max-height: 70vh;
+        display: block;
+        margin: 0 auto;
+      }
 
-    /* Path-link file preview dialog (#1148) */
-    .file-preview-dialog::part(panel) {
-      width: min(90vw, 800px);
-      max-height: 85vh;
-    }
+      .file-preview-dialog scion-code-editor {
+        --editor-max-height: 70vh;
+      }
 
-    .file-preview-dialog::part(body) {
-      padding: 0;
-      overflow: auto;
-    }
-
-    .file-preview-placeholder {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 0.5rem;
-      padding: 3rem 2rem;
-      color: var(--scion-text-muted, #64748b);
-      font-size: var(--chat-fs-lg);
-    }
-
-    .file-preview-placeholder.error {
-      color: var(--scion-danger-600, #dc2626);
-    }
-
-    .file-preview-image {
-      max-width: 100%;
-      max-height: 70vh;
-      display: block;
-      margin: 0 auto;
-    }
-
-    .file-preview-dialog scion-code-editor {
-      --editor-max-height: 70vh;
-    }
-
-    /* Phase-5: Slash command system message */
-    .system-info-message {
-      padding: 0.5rem 1rem;
-      font-size: var(--chat-fs-base);
-      color: var(--scion-text-muted, #64748b);
-      background: var(--scion-bg-subtle, #f1f5f9);
-      border-radius: 0.375rem;
-      margin: 0.25rem 1rem;
-      white-space: pre-wrap;
-    }
-  `;
+      /* Phase-5: Slash command system message */
+      .system-info-message {
+        padding: 0.5rem 1rem;
+        font-size: var(--chat-fs-base);
+        color: var(--scion-text-muted, #64748b);
+        background: var(--scion-bg-subtle, #f1f5f9);
+        border-radius: 0.375rem;
+        margin: 0.25rem 1rem;
+        white-space: pre-wrap;
+      }
+    `,
+  ];
 
   /** Auto-trigger loadHistory when the component first renders in v2 mode. */
   override firstUpdated(): void {
@@ -3398,7 +3373,14 @@ export class ScionChatThread extends LitElement {
   }
 
   private renderMessages() {
-    const rows: unknown[] = [];
+    // Rendered with lit/directives/repeat.js and stable keys (not index
+    // position) so that hiding/showing inter-agent markers — which changes
+    // how many divider rows precede later rows — does not shift the
+    // identity of unrelated rows. Without stable keys, Lit's default
+    // positional array diffing tears down and recreates every row after the
+    // point where the row count changed, which loses per-element state such
+    // as a marker's expanded/collapsed toggle (R4).
+    const rows: Array<{ key: string; tpl: unknown }> = [];
     let lastDate = '';
     let prevSender = '';
     let prevTimestamp = 0;
@@ -3421,15 +3403,62 @@ export class ScionChatThread extends LitElement {
       lastReadIdx = this.messages.findIndex((m) => m.id === this.lastReadMessageId);
     }
 
+    // Inter-agent messages are dated items like any other row: a run of
+    // consecutive messages is split into one marker per calendar day (local
+    // time), with the shared date-divider inserted between them exactly as
+    // it appears between normal messages. `msgs` is time-sorted, so day
+    // boundaries within it are contiguous.
+    const pushInteragentGroups = (msgs: Message[]): void => {
+      let groupStart = 0;
+      // Cache the current group's date string rather than recomputing it
+      // from msgs[groupStart] on every iteration of a long run.
+      let groupDateStr = msgs.length > 0 ? formatChatDate(msgs[0].createdAt) : '';
+      for (let i = 1; i <= msgs.length; i++) {
+        const atBoundary = i === msgs.length || formatChatDate(msgs[i].createdAt) !== groupDateStr;
+        if (!atBoundary) continue;
+        const group = msgs.slice(groupStart, i);
+        // Only a visible marker actually occupies a day in the timeline —
+        // when inter-agent messages are hidden, don't advance lastDate or
+        // emit a divider for them, or the next human message's own divider
+        // (or a divider for a day with no visible content at all) would be
+        // suppressed or left dangling with nothing under it.
+        if (this.interagentVisible) {
+          const groupDate = groupDateStr || 'Invalid Date';
+          if (groupDate !== lastDate) {
+            lastDate = groupDate;
+            rows.push({ key: `day:${groupDate}`, tpl: renderDateDivider(groupDate) });
+          }
+        }
+        rows.push({
+          key: `ia:${group[0].id}`,
+          tpl: html`
+            <scion-chat-interagent-marker
+              .messageCount=${group.length}
+              .messages=${group}
+              ?global-expanded=${this.interagentExpandAll}
+              ?hidden=${!this.interagentVisible}
+              current-project-id=${this.projectId}
+            ></scion-chat-interagent-marker>
+          `,
+        });
+        // Reset grouping after a marker so the next message shows its header.
+        prevSender = '';
+        prevTimestamp = 0;
+        groupStart = i;
+        if (i < msgs.length) groupDateStr = formatChatDate(msgs[i].createdAt);
+      }
+    };
+
     for (let mi = 0; mi < this.messages.length; mi++) {
       const msg = this.messages[mi];
-      const d = new Date(msg.createdAt);
-      const dateStr = Number.isNaN(d.getTime()) ? 'Invalid Date' : MESSAGE_DATE_FORMAT.format(d);
+      // Used for both the inter-agent cutoff below and the sender-grouping
+      // window further down — not tied to any single one of them.
+      const msgTime = new Date(msg.createdAt).getTime();
+      const dateStr = formatChatDate(msg.createdAt) || 'Invalid Date';
 
       // Collect all inter-agent messages that fall before this DM message
-      // and insert ONE pill for the entire group.
+      // and split them into one marker per day.
       if (hasIA) {
-        const msgTime = d.getTime();
         const pendingIA: Message[] = [];
         while (
           iaIdx < iaMessages.length &&
@@ -3439,18 +3468,7 @@ export class ScionChatThread extends LitElement {
           iaIdx++;
         }
         if (pendingIA.length > 0) {
-          rows.push(html`
-            <scion-chat-interagent-marker
-              .messageCount=${pendingIA.length}
-              .messages=${pendingIA}
-              ?global-expanded=${this.interagentExpandAll}
-              ?hidden=${!this.interagentVisible}
-              current-project-id=${this.projectId}
-            ></scion-chat-interagent-marker>
-          `);
-          // Reset grouping after a marker so the next message shows its header.
-          prevSender = '';
-          prevTimestamp = 0;
+          pushInteragentGroups(pendingIA);
         }
       }
 
@@ -3459,21 +3477,20 @@ export class ScionChatThread extends LitElement {
         lastDate = dateStr;
         prevSender = '';
         prevTimestamp = 0;
-        rows.push(html`
-          <div class="date-divider">
-            <span class="date-label">${dateStr}</span>
-          </div>
-        `);
+        rows.push({ key: `day:${dateStr}`, tpl: renderDateDivider(dateStr) });
       }
 
       // Unread divider: insert between the last-read message and the next one.
       if (!unreadDividerInserted && lastReadIdx >= 0 && mi > lastReadIdx) {
         unreadDividerInserted = true;
-        rows.push(html`
-          <div class="unread-divider">
-            <span class="unread-label">New messages</span>
-          </div>
-        `);
+        rows.push({
+          key: 'unread',
+          tpl: html`
+            <div class="unread-divider">
+              <span class="unread-label">New messages</span>
+            </div>
+          `,
+        });
         // Reset grouping so the first unread message shows its header.
         prevSender = '';
         prevTimestamp = 0;
@@ -3483,18 +3500,20 @@ export class ScionChatThread extends LitElement {
       if (SYSTEM_MESSAGE_TYPES.has(msg.type)) {
         prevSender = '';
         prevTimestamp = 0;
-        rows.push(html`
-          <scion-chat-system-line
-            message=${msg.msg}
-            timestamp=${msg.createdAt}
-            category=${(msg.metadata?.['system_category'] as string) || ''}
-          ></scion-chat-system-line>
-        `);
+        rows.push({
+          key: `msg:${msg.id}`,
+          tpl: html`
+            <scion-chat-system-line
+              message=${msg.msg}
+              timestamp=${msg.createdAt}
+              category=${(msg.metadata?.['system_category'] as string) || ''}
+            ></scion-chat-system-line>
+          `,
+        });
         continue;
       }
 
       // Grouping: consecutive *visible* messages from same sender within GROUP_WINDOW_MS
-      const msgTime = d.getTime();
       const sameSender = msg.sender === prevSender;
       const withinWindow = msgTime - prevTimestamp < GROUP_WINDOW_MS;
       const showHeader = !sameSender || !withinWindow;
@@ -3527,41 +3546,44 @@ export class ScionChatThread extends LitElement {
       const replyPreview = ext?.replyToId
         ? (this.v2ReplyPreviewMap.get(ext.replyToId) ?? null)
         : null;
-      rows.push(html`
-        <scion-chat-message
-          @contextmenu=${(e: MouseEvent) => this.handleMessageContextMenu(e, msg)}
-          @click=${(e: MouseEvent) => this.handleMessageTap(e, msg)}
-          id="msg-${msg.id}"
-          body=${msg.msg}
-          sender=${msg.sender}
-          senderId=${msg.senderId || ''}
-          senderName=${senderDisplayName}
-          ?fromAgent=${isFromAgent}
-          ?plain=${msg.plain ?? false}
-          agentSlug=${isFromAgent ? senderDisplayName : ''}
-          timestamp=${msg.createdAt}
-          .showHeader=${showHeader}
-          ?urgent=${msg.urgent ?? false}
-          ?broadcasted=${msg.broadcasted ?? false}
-          channel=${msg.channel || ''}
-          messageType=${msg.type || ''}
-          dispatchState=${this.deliveryStateFor(msg, lastOwnMessageId, seenExpired)}
-          ?seen=${msg.id === lastOwnMessageId && this.isMessageSeen(msg)}
-          dispatchFailureReason=${msg.dispatchFailureReason || ''}
-          dispatchFailureCode=${msg.dispatchFailureCode || ''}
-          .attachments=${msg.attachments || EMPTY_ATTACHMENTS}
-          .attachmentRefs=${this.getMessageAttachmentRefs(msg.id)}
-          routedTo=${msgRoutedTo}
-          .replyPreview=${replyPreview}
-          editedAt=${ext?.editedAt || ''}
-          deletedAt=${ext?.deletedAt || ''}
-          senderProjectSlug=${msg.senderProjectId
-            ? this.resolveProjectSlug(msg.senderProjectId)
-            : ''}
-          @scroll-to-message=${this.handleScrollToMessage}
-          @path-link-click=${this.handlePathLinkClick}
-        ></scion-chat-message>
-      `);
+      rows.push({
+        key: `msg:${msg.id}`,
+        tpl: html`
+          <scion-chat-message
+            @contextmenu=${(e: MouseEvent) => this.handleMessageContextMenu(e, msg)}
+            @click=${(e: MouseEvent) => this.handleMessageTap(e, msg)}
+            id="msg-${msg.id}"
+            body=${msg.msg}
+            sender=${msg.sender}
+            senderId=${msg.senderId || ''}
+            senderName=${senderDisplayName}
+            ?fromAgent=${isFromAgent}
+            ?plain=${msg.plain ?? false}
+            agentSlug=${isFromAgent ? senderDisplayName : ''}
+            timestamp=${msg.createdAt}
+            .showHeader=${showHeader}
+            ?urgent=${msg.urgent ?? false}
+            ?broadcasted=${msg.broadcasted ?? false}
+            channel=${msg.channel || ''}
+            messageType=${msg.type || ''}
+            dispatchState=${this.deliveryStateFor(msg, lastOwnMessageId, seenExpired)}
+            ?seen=${msg.id === lastOwnMessageId && this.isMessageSeen(msg)}
+            dispatchFailureReason=${msg.dispatchFailureReason || ''}
+            dispatchFailureCode=${msg.dispatchFailureCode || ''}
+            .attachments=${msg.attachments || EMPTY_ATTACHMENTS}
+            .attachmentRefs=${this.getMessageAttachmentRefs(msg.id)}
+            routedTo=${msgRoutedTo}
+            .replyPreview=${replyPreview}
+            editedAt=${ext?.editedAt || ''}
+            deletedAt=${ext?.deletedAt || ''}
+            senderProjectSlug=${msg.senderProjectId
+              ? this.resolveProjectSlug(msg.senderProjectId)
+              : ''}
+            @scroll-to-message=${this.handleScrollToMessage}
+            @path-link-click=${this.handlePathLinkClick}
+          ></scion-chat-message>
+        `,
+      });
 
       // Render "also notified" footer under the specific message bubble (O3).
       const msgMentionResults = this.mentionResultsByMessageId.get(msg.id);
@@ -3569,12 +3591,15 @@ export class ScionChatThread extends LitElement {
         const delivered = msgMentionResults.filter((r) => r.status === 'delivered');
         if (delivered.length > 0) {
           const slugs = delivered.map((r) => html`<span class="mention-slug">@${r.slug}</span>`);
-          rows.push(html`
-            <div class="mention-results">
-              Also notified:
-              ${slugs.reduce((acc, s, i) => (i === 0 ? [s] : [...acc, ', ', s]), [] as unknown[])}
-            </div>
-          `);
+          rows.push({
+            key: `mention:${msg.id}`,
+            tpl: html`
+              <div class="mention-results">
+                Also notified:
+                ${slugs.reduce((acc, s, i) => (i === 0 ? [s] : [...acc, ', ', s]), [] as unknown[])}
+              </div>
+            `,
+          });
         }
       }
 
@@ -3584,19 +3609,14 @@ export class ScionChatThread extends LitElement {
 
     // Append any remaining inter-agent messages that come after all DM messages.
     if (hasIA && iaIdx < iaMessages.length) {
-      const trailingIA = iaMessages.slice(iaIdx);
-      rows.push(html`
-        <scion-chat-interagent-marker
-          .messageCount=${trailingIA.length}
-          .messages=${trailingIA}
-          ?global-expanded=${this.interagentExpandAll}
-          ?hidden=${!this.interagentVisible}
-          current-project-id=${this.projectId}
-        ></scion-chat-interagent-marker>
-      `);
+      pushInteragentGroups(iaMessages.slice(iaIdx));
     }
 
-    return rows;
+    return repeat(
+      rows,
+      (row) => row.key,
+      (row) => row.tpl
+    );
   }
 
   // ---------------------------------------------------------------------------
