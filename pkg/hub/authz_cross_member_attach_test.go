@@ -214,3 +214,50 @@ func TestCrossMemberAttach_UATScopes(t *testing.T) {
 		require.NoError(t, err, "project owner should be able to select explicit attach for their own agents")
 	})
 }
+
+// TestOwnerPortAccess_OpenOnlyNotManage pins the scope of the port-access
+// grant owners and admins carry (miller79/scion#121): it opens a member's
+// already-exposed ports through the proxy and nothing else. Registering,
+// removing or tunnelling ports needs hub-level port_access, and the
+// terminal-level actions stay behind agent.attach.
+func TestOwnerPortAccess_OpenOnlyNotManage(t *testing.T) {
+	srv, s, alice, _, project := setupDemoPolicyTest(t)
+	ctx := context.Background()
+
+	bob := makeProjectMemberUser(t, s, project, tid("user-bob-portscope"), "Bob", store.GroupMemberRoleOwner)
+	createTestUserWithProjectRole(t, s, bob.ID, bob.Email, project.ID, store.ProjectRoleOwner)
+	carol := makeProjectMemberUser(t, s, project, tid("user-carol-portscope"), "Carol", store.GroupMemberRoleMember)
+	createTestUserWithProjectRole(t, s, carol.ID, carol.Email, project.ID, store.ProjectRoleMember)
+
+	agent := &store.Agent{
+		ID: tid("alice-agent-portscope"), Slug: "alice-agent-portscope", Name: "Alice Agent",
+		ProjectID: project.ID, OwnerID: alice.ID, Phase: string(state.PhaseRunning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+	base := "/api/v1/agents/" + agent.ID + "/ports"
+
+	// Opening a port: the owner passes authorization (404 because nothing is
+	// exposed on this test agent); a plain member is refused.
+	rec := doRequestAsUser(t, srv, bob, http.MethodGet, base+"/8080/proxy/", nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code, "owner must pass port authorization: %s", rec.Body.String())
+	rec = doRequestAsUser(t, srv, carol, http.MethodGet, base+"/8080/proxy/", nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "member must not open another member's port: %s", rec.Body.String())
+
+	// Managing ports stays out of reach for the owner.
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodPost, base},
+		{http.MethodDelete, base},
+		{http.MethodDelete, base + "/8080"},
+		{http.MethodGet, base + "/tunnel"},
+	} {
+		rec := doRequestAsUser(t, srv, bob, tc.method, tc.path, map[string]any{"port": 8080})
+		assert.Equal(t, http.StatusForbidden, rec.Code,
+			"owner must not manage a member's ports (%s %s): %s", tc.method, tc.path, rec.Body.String())
+	}
+
+	// And port access grants nothing terminal-level.
+	for _, action := range []string{"exec", "env"} {
+		rec := doRequestAsUser(t, srv, bob, http.MethodPost, "/api/v1/agents/"+agent.ID+"/"+action, map[string]any{})
+		assert.Equal(t, http.StatusForbidden, rec.Code, "owner must not %s a member's agent: %s", action, rec.Body.String())
+	}
+}
