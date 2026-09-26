@@ -368,6 +368,10 @@ print(json.dumps(out))
       echo "gcloud-stub: simulated routers list failure" >&2
       exit 1
     fi
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/routers-list-should-return-empty" ]]; then
+      # Exit 0, no stdout -- distinct from the exit-1 case above.
+      exit 0
+    fi
     f="${GCLOUD_STUB_STATE_DIR}/routers-list.json"
     if [[ -f "$f" ]]; then
       cat "$f"
