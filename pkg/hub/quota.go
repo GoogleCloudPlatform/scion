@@ -79,6 +79,10 @@ func (qs *QuotaService) Reserve(ctx context.Context, limitName string, subjectID
 		}
 		return false, fmt.Errorf("quota: lookup limit definition %q: %w", limitName, err)
 	}
+	if limitDef == nil {
+		// No limit defined — no enforcement.
+		return false, nil
+	}
 
 	// 2. Resolve effective limit for the subject.
 	effectiveLimit, err := qs.ResolveEffectiveLimit(ctx, limitDef.ID, subjectID, scopeType, scopeID)
@@ -266,6 +270,10 @@ func (qs *QuotaService) Release(ctx context.Context, limitName string, resourceI
 			qs.logger.Warn("failed to release quota reservation: limit lookup failed",
 				"limit", limitName, "resource_id", resourceID, "error", err)
 		}
+		return
+	}
+	if limitDef == nil {
+		// No limit defined — nothing to release.
 		return
 	}
 	if err := qs.store.ReleaseReservation(ctx, limitDef.ID, resourceID); err != nil && !errors.Is(err, store.ErrNotFound) {
