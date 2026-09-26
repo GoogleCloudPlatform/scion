@@ -125,8 +125,11 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
     # would still write a result file with whatever ran before the error,
     # so the file's own testing looks like a normal (partial) pass instead
     # of the loud failure below. Check the file parses *before* sourcing
-    # it, not just handle a bad exit status after.
-    if ! bash -n "$TEST_FILE" 2>&1; then
+    # it, not just handle a bad exit status after. "$BASH" (not a bare
+    # `bash`) so the syntax check uses the exact interpreter that will
+    # `source` the file below, not whatever `bash` resolves to first on
+    # PATH.
+    if ! "$BASH" -n "$TEST_FILE" 2>&1; then
       echo "CRASH [$(basename "$TEST_FILE")]: syntax error -- this file was not sourced, so none of its tests ran"
       exit 1
     fi
