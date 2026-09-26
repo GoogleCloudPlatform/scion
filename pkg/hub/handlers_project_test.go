@@ -1721,6 +1721,103 @@ func TestProjectRegister_NewProject_MemberWithCreateSucceeds(t *testing.T) {
 	assert.Equal(t, member.ID, resp.Project.OwnerID)
 }
 
+// ==========================================================================
+// POST /api/v1/projects (createProject) — client-supplied-ID idempotency
+//
+// createProject's client-supplied-ID branch resolves an existing project the
+// same way register does, and runs the same group-backfill sink. It needs
+// the identical project-update authz gate before any mutation, and must not
+// grant the caller membership on a project that already exists.
+// ==========================================================================
+
+// TestProjectCreate_ExistingID_DeniesNonMemberWithoutBinding verifies that a
+// hub member who holds only hub-scope project.create, and has no binding on
+// a specific existing project, is denied when createProject's idempotent
+// client-supplied-ID branch resolves that project — and that no membership
+// or owner role binding is granted as a side effect of the denied request.
+func TestProjectCreate_ExistingID_DeniesNonMemberWithoutBinding(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	owner := &store.User{
+		ID: tid("create-authz-owner-1"), Email: "create-owner-1@test.com",
+		DisplayName: "Owner", Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, owner))
+	ensureHubMembership(ctx, s, owner.ID)
+
+	project := &store.Project{
+		ID: tid("create-authz-project-1"), Name: "Other's Project", Slug: "create-authz-others-project-1",
+		OwnerID: owner.ID, CreatedBy: owner.ID, Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.createProjectMembersGroup(ctx, project)
+
+	membersSlug := "project:" + project.Slug + ":members"
+	group, err := s.GetGroupBySlug(ctx, membersSlug)
+	require.NoError(t, err)
+	membersBefore, err := s.GetGroupMembers(ctx, group.ID)
+	require.NoError(t, err)
+
+	other := seedHubMemberNoProjects(t, s, "create-authz-other-1") // grants hub-scope project.create only
+
+	rec := doRequestAsUser(t, srv, other, http.MethodPost, "/api/v1/projects", CreateProjectRequest{
+		ID:   project.ID,
+		Name: project.Name,
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"member with no binding on an existing project should be denied create's idempotent resolve; body: %s", rec.Body.String())
+
+	// No membership change on the target project's group.
+	membersAfter, err := s.GetGroupMembers(ctx, group.ID)
+	require.NoError(t, err)
+	assert.Len(t, membersAfter, len(membersBefore), "denied create must not change group membership")
+	for _, m := range membersAfter {
+		assert.NotEqual(t, other.ID, m.MemberID, "denied caller must not be added to the project's members group")
+	}
+
+	// No owner role binding was created for the denied caller on this project.
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, other.ID)
+	require.NoError(t, err)
+	for _, rb := range bindings {
+		assert.False(t, rb.ScopeType == store.RoleScopeProject && rb.ScopeID == project.ID,
+			"denied caller must not receive any role binding on the target project; got %+v", rb)
+	}
+}
+
+// TestProjectCreate_ExistingID_OwnerIdempotentSucceeds verifies that the
+// create-new-project path still works for a hub member holding only
+// project.create, and that the SAME member re-POSTing with the same
+// client-supplied ID (now their own already-existing project) still
+// succeeds idempotently.
+func TestProjectCreate_ExistingID_OwnerIdempotentSucceeds(t *testing.T) {
+	srv, s := testServer(t)
+
+	member := seedHubMemberNoProjects(t, s, "create-authz-idem-owner") // grants hub-scope project.create only
+
+	projectID := tid("create-authz-idem-project")
+	body := CreateProjectRequest{
+		ID:   projectID,
+		Name: "Idempotent Owner Project",
+	}
+
+	rec1 := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/projects", body)
+	require.Equal(t, http.StatusCreated, rec1.Code, "member with project.create should be able to create a new project; body: %s", rec1.Body.String())
+
+	var project1 store.Project
+	require.NoError(t, json.NewDecoder(rec1.Body).Decode(&project1))
+	assert.Equal(t, projectID, project1.ID)
+	assert.Equal(t, member.ID, project1.OwnerID)
+
+	// Re-POST with the same client-supplied ID, as the same (owning) member.
+	rec2 := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/projects", body)
+	require.Equal(t, http.StatusOK, rec2.Code, "owner's idempotent re-create of their own project should succeed; body: %s", rec2.Body.String())
+
+	var project2 store.Project
+	require.NoError(t, json.NewDecoder(rec2.Body).Decode(&project2))
+	assert.Equal(t, project1.ID, project2.ID)
+}
+
 // TestCreateProjectMembersGroup_OwnerNotInStore verifies that when the project
 // owner does not yet exist in the users table (e.g. legacy proxy auth on a
 // fresh Postgres deployment), the members group is still created without an

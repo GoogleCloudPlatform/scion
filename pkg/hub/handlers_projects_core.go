@@ -339,15 +339,23 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	if req.ID != "" {
 		existing, err := s.store.GetProject(ctx, req.ID)
 		if err == nil {
-			// Project already exists — ensure associated groups exist (backfill for
-			// projects created before group support was added). Pass the caller
-			// so they get added as an owner of the members group.
-			var callerID string
-			if user := GetUserIdentityFromContext(ctx); user != nil {
-				callerID = user.ID()
+			// SECURITY-GATE: CheckAccess — require project-update authz on the
+			// resolved project before this idempotent-create path performs any
+			// mutation against it. The project.create check above only covers
+			// provisioning a brand-new project; resolving an EXISTING project by
+			// client-supplied id must not let any caller who merely holds
+			// hub-scope project.create mutate a project they hold no binding on.
+			if !s.authorize(w, r, projectResource(existing), ActionUpdate) {
+				return
 			}
+
+			// Project already exists — ensure associated groups exist (backfill
+			// for projects created before group support was added). The caller
+			// is deliberately NOT granted membership here: this idempotent path
+			// must not add the caller to the members group of a project that
+			// already exists.
 			s.createProjectGroup(ctx, existing)
-			s.createProjectMembersGroup(ctx, existing, callerID)
+			s.createProjectMembersGroup(ctx, existing)
 			writeJSON(w, http.StatusOK, existing)
 			return
 		}
