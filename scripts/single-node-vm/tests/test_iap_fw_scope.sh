@@ -382,3 +382,36 @@ test_iap_fw_scope_target_tags_describe_failure_does_not_narrow() {
   assert_contains "$DEPLOY_LOG" "the read failed" \
     "deploy.sh should explain that the rule's target tags could not be read"
 }
+
+# =====================================================================
+# Harness self-test: the stub's own `compute firewall-rules update`
+# partial-update semantics (R2-4).
+# =====================================================================
+# Not a deploy.sh test -- calls the stub `gcloud` directly. Real gcloud
+# only touches the fields a flag was given for: an update with no
+# --target-tags leaves the rule's existing tags alone, --target-tags=x,y
+# replaces them, and --target-tags= (present but empty) clears them.
+# Nothing in deploy.sh exercises the no-flag case today (deploy.sh:901
+# always passes --target-tags), so this guards the stub itself rather
+# than anything currently reachable through deploy.sh.
+
+test_iap_fw_scope_stub_update_leaves_tags_unchanged_without_target_tags_flag() {
+  fresh_gcloud_state
+  local name="stub-update-semantics-rule" project="demo-project"
+  seed_firewall_rule_json "$name" \
+    "desc" "default" "INGRESS" "ALLOW" "tcp" "22" "" "35.235.240.0/20" "a,b" "1000"
+
+  gcloud compute firewall-rules update "$name" --project="$project" --priority=900 --quiet
+  assert_eq "0" "$?" "an update with no --target-tags should still succeed"
+  local tags
+  tags="$(gcloud compute firewall-rules describe "$name" --project="$project" --format="value(targetTags)")"
+  assert_eq "a;b" "$tags" "an update with no --target-tags must leave the existing target tags unchanged"
+
+  gcloud compute firewall-rules update "$name" --project="$project" --target-tags=x,y --quiet
+  tags="$(gcloud compute firewall-rules describe "$name" --project="$project" --format="value(targetTags)")"
+  assert_eq "x;y" "$tags" "--target-tags=x,y must replace the existing target tags"
+
+  gcloud compute firewall-rules update "$name" --project="$project" --target-tags= --quiet
+  tags="$(gcloud compute firewall-rules describe "$name" --project="$project" --format="value(targetTags)")"
+  assert_eq "" "$tags" "--target-tags= (present but empty) must clear the target tags, distinct from the flag being absent"
+}

@@ -183,10 +183,9 @@ case "${1:-} ${2:-} ${3:-}" in
         # A name-scoped fixture flag: the rule itself exists (the
         # unformatted describe above still succeeds), but this specific
         # --format=value(targetTags) read fails, e.g. a transient error
-        # between two back-to-back describe calls. Deliberately does not
-        # touch stdout on failure -- deploy.sh's own error redirect
-        # (2>/dev/null) is what a real gcloud failure would leave it to
-        # discard.
+        # between two back-to-back describe calls. On failure, write only
+        # to stderr and leave stdout empty, as real gcloud does; the
+        # caller decides whether to discard stderr.
         if [[ -f "${f}.describe-target-tags-fail" ]]; then
           echo "gcloud-stub: simulated failure reading target tags for ${name}" >&2
           exit 1
