@@ -1648,7 +1648,7 @@ type SkillFilter struct {
 //   - IncludeHubScope: hub-scoped (global/core) skills are visible to any
 //     authenticated caller.
 //   - CallerID: a user-scoped skill is visible only when its ScopeID equals
-//     CallerID (the owning user).
+//     CallerID (the owning user; for an agent caller, its creator).
 //   - ProjectIDs: a project-scoped skill is visible only when its ScopeID is
 //     one of these (the caller's project memberships).
 type SkillAccessScope struct {

@@ -292,7 +292,8 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 		filter.AccessScope = &store.SkillAccessScope{}
 	case isAgentIdentity(identity):
 		// ptone/scion#1968: agents read exactly their granted set — the hub
-		// catalog (global/core) plus their own project's skills, each gated
+		// catalog (global/core), their own project's skills, and their
+		// creator's own user-scoped skills, each gated
 		// by the agent JWT scope restriction and the delegation ceiling. See
 		// agentSkillAccessScope for why per-bucket probes equal the per-row
 		// decision, which keeps totalCount and pages consistent with point
@@ -356,19 +357,21 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 // authorization decisions its point reads get (ptone/scion#1968).
 //
 // For an agent principal every term of Decide depends on a skill row only
-// through its (scope kind, project): the project-scoped JWT binding and the
-// synthetic agent-skill-catalog binding (Step 5b/5b2), which applies only to
-// global/core skills (Step 5c), the JWT scope restriction and access
-// constraints (Step 7, keyed on project/system scope), and the delegation
-// ceiling (Step 10, permission-level at the agent's project). No agent
-// relationship grant applies to skills. So one probe per bucket equals the
-// per-row outcome for every row in that bucket, and the store predicate
-// built from the probes returns exactly the rows the per-row check allows.
+// through its bucket: (scope kind, project) for hub and project skills, and
+// (scope kind, owning user) for user skills. The project-scoped JWT binding,
+// the synthetic agent-skill-catalog binding (Step 5b/5b2, global/core only
+// after Step 5c), the creator user-skill relationship grant (Step 9, user
+// skills owned by the agent's origin user only), the JWT scope restriction
+// and access constraints (Step 7), and the delegation ceiling (Step 10,
+// permission-level at the agent's project) all read nothing else from the
+// row. So one probe per bucket equals the per-row outcome for every row in
+// that bucket, and the store predicate built from the probes returns exactly
+// the rows the per-row check allows.
 //
 // global and core share one probe: the store predicate groups them
 // (ScopeIn(global, core)) and every Decide input treats them identically.
-// CallerID is deliberately empty: an agent never owns a user-scoped skill,
-// and must not see its creator's.
+// The only user bucket that can be granted is the origin user's, so that is
+// the only one probed; every other user's skills stay out of the predicate.
 func (s *Server) agentSkillAccessScope(ctx context.Context, agent AgentIdentity) *store.SkillAccessScope {
 	scope := &store.SkillAccessScope{}
 	scope.IncludeHubScope = s.authzService.CheckAccess(ctx, agent,
@@ -377,6 +380,12 @@ func (s *Server) agentSkillAccessScope(ctx context.Context, agent AgentIdentity)
 		if s.authzService.CheckAccess(ctx, agent,
 			skillScopeResource(store.SkillScopeProject, projectID), ActionRead).Allowed {
 			scope.ProjectIDs = []string{projectID}
+		}
+	}
+	if origin := agent.OriginUserID(); origin != "" {
+		if s.authzService.CheckAccess(ctx, agent,
+			skillScopeResource(store.SkillScopeUser, origin), ActionRead).Allowed {
+			scope.CallerID = origin
 		}
 	}
 	return scope
@@ -1646,6 +1655,9 @@ func skillScopeResource(scope, scopeID string) Resource {
 	if scope == store.SkillScopeProject && scopeID != "" {
 		r.ParentType = "project"
 		r.ParentID = scopeID
+	}
+	if scope == store.SkillScopeUser {
+		r.ScopeUserID = scopeID
 	}
 	return r
 }

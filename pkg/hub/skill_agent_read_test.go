@@ -12,16 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !no_sqlite
+
 package hub
 
 // ptone/scion#1968: agents read skills. The granted set for an agent A in
 // project P, created by user U, is
 //
-//	G(A) = {global, core skills} ∪ {project skills of P}
+//	G(A) = {global, core skills} ∪ {project skills of P} ∪ {U's own user skills}
 //
 // gated by the agent JWT carrying project:read and by the delegation ceiling
-// (U must still hold skill.read). U's own user-scoped skills, other users'
-// user-scoped skills and other projects' skills are never in G(A).
+// (U must still hold skill.read). U is the agent's origin user (the human at
+// the root of its creation chain). Other users' user-scoped skills and other
+// projects' skills are never in G(A).
 //
 // Row labels (A1, A2, ...) refer to the phase-1 test matrix.
 
@@ -39,6 +42,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -206,14 +210,15 @@ func (f *agentSkillFixture) assertAgentSees(t *testing.T, token string, want map
 	assert.Equal(t, agentSortedKeys(pointOK), agentSortedKeys(listed), "in LIST ⇔ GET 200")
 }
 
-// A1/A2: baseline and read-only agents read the hub catalog and their own
-// project's skills — nothing else.
+// A1/A2: baseline and read-only agents read the hub catalog, their own
+// project's skills and their creator's user skills — nothing else. In
+// particular Su (U's) is granted and Sv (V's) is not.
 func TestAgentSkillRead_BaselineAndReadOnlySeeGrantedSet(t *testing.T) {
 	for _, role := range []AgentRole{AgentRoleBaseline, AgentRoleReadOnly, AgentRoleFull} {
 		t.Run(string(role), func(t *testing.T) {
 			f := setupAgentSkillFixture(t)
 			token := f.newAgent(t, "as-agent-"+string(role), f.p.ID, f.u.ID, ScopesForRole(role))
-			f.assertAgentSees(t, token, agentSkillSet(f.sg, f.sc, f.sp))
+			f.assertAgentSees(t, token, agentSkillSet(f.sg, f.sc, f.sp, f.su))
 		})
 	}
 }
@@ -241,6 +246,22 @@ func TestAgentSkillRead_CeilingDeniedSeesNothing(t *testing.T) {
 	f := setupAgentSkillFixture(t)
 	token := f.newAgent(t, "as-agent-ceiling", f.p.ID, f.bob.ID, ScopesForRole(AgentRoleBaseline))
 	f.assertAgentSees(t, token, agentSkillSet())
+}
+
+// A4 for the user bucket: a creator who no longer holds skill.read (no hub
+// membership, no project role) gets no creator user-skill access either —
+// the delegation ceiling applies to the relationship grant too — even for a
+// user skill the creator owns.
+func TestAgentSkillRead_CeilingDeniesCreatorUserSkill(t *testing.T) {
+	f := setupAgentSkillFixture(t)
+	sb := createTestSkill(t, f.s, "as-user-bob", store.SkillScopeUser, f.bob.ID, f.bob.ID)
+	token := f.newAgent(t, "as-agent-ceiling-user", f.p.ID, f.bob.ID, ScopesForRole(AgentRoleBaseline))
+	f.assertAgentSees(t, token, agentSkillSet())
+	code, _ := f.agentGet(t, token, "/api/v1/skills/"+sb.ID)
+	assert.Equal(t, http.StatusNotFound, code, "the creator's own user skill must be denied when the ceiling is empty")
+	listed, total := f.agentListAll(t, token, "", 10)
+	assert.Empty(t, listed)
+	assert.Zero(t, total)
 }
 
 // A7: an access constraint capping the agent below skill.read denies every
@@ -274,7 +295,8 @@ func TestAgentSkillRead_CoreAndGlobalCannotDiverge(t *testing.T) {
 		Purpose: "test", CreatedBy: "test",
 	})
 	require.NoError(t, err)
-	f.assertAgentSees(t, token, agentSkillSet(f.sg, f.sc))
+	// Su is not project-scoped, so a constraint on P does not reach it.
+	f.assertAgentSees(t, token, agentSkillSet(f.sg, f.sc, f.su))
 
 	// And at the Decide level: for every agent condition in this file,
 	// global and core decisions are identical.
@@ -295,13 +317,16 @@ func TestAgentSkillRead_CoreAndGlobalCannotDiverge(t *testing.T) {
 func TestAgentSkillRead_FilterParamsCannotWiden(t *testing.T) {
 	f := setupAgentSkillFixture(t)
 	token := f.newAgent(t, "as-agent-filters", f.p.ID, f.u.ID, ScopesForRole(AgentRoleBaseline))
-	granted := agentSkillSet(f.sg, f.sc, f.sp)
+	granted := agentSkillSet(f.sg, f.sc, f.sp, f.su)
 	for _, extra := range []string{
 		"&scopeId=" + f.q.ID,
 		"&scope=project&scopeId=" + f.q.ID,
 		"&scope=user",
 		"&scope=user&scopeId=" + f.u.ID,
 		"&ownerId=" + f.u.ID,
+		"&scope=user&scopeId=" + f.v.ID,
+		"&ownerId=" + f.v.ID,
+		"&name=as-user-v",
 		"&search=as-project-q",
 		"&search=as-user",
 		"&name=as-user-u",
@@ -316,25 +341,103 @@ func TestAgentSkillRead_FilterParamsCannotWiden(t *testing.T) {
 }
 
 // A17: a project-less agent never gets a project bucket, and its predicate is
-// never nil (unfiltered). Its granted set degenerates to the hub catalog:
-// the delegation ceiling walks with an empty scope (it logs "no project
-// scope" but does not itself deny), and post-backfill reads by a
-// hub-attested agent with no edge are allowed. Pinned here, together with
-// probe ⇔ per-row agreement on every fixture skill.
+// never nil (unfiltered). Its granted set is the hub catalog plus its
+// creator's user skills: the delegation ceiling walks with an empty scope
+// (it logs "no project scope" but does not itself deny), and post-backfill
+// reads by a hub-attested agent with no edge are allowed. With no origin user
+// there is no user bucket. Pinned here, together with probe ⇔ per-row
+// agreement on every fixture skill.
 func TestAgentSkillRead_ProjectlessAgent(t *testing.T) {
 	f := setupAgentSkillFixture(t)
 	ctx := context.Background()
-	ident := dcAgentIdentity(tid("as-agent-projectless"), "", AgentRoleBaseline)
-	scope := f.srv.agentSkillAccessScope(ctx, ident)
-	require.NotNil(t, scope, "an agent predicate must never be nil (unfiltered)")
-	assert.Empty(t, scope.ProjectIDs)
-	assert.Empty(t, scope.CallerID)
-	assert.True(t, scope.IncludeHubScope, "project-less agent: G = hub catalog (design A17)")
-	for _, sk := range f.all() {
-		inPredicate := (scope.IncludeHubScope && (sk.Scope == store.SkillScopeGlobal || sk.Scope == store.SkillScopeCore)) ||
-			(sk.Scope == store.SkillScopeProject && len(scope.ProjectIDs) == 1 && sk.ScopeID == scope.ProjectIDs[0])
-		allowed := f.srv.authzService.CheckAccess(ctx, ident, skillResource(sk), ActionRead).Allowed
-		assert.Equal(t, inPredicate, allowed, "probe and per-row decision must agree for %s (%s)", sk.Name, sk.Scope)
+	for _, tc := range []struct {
+		name     string
+		ancestry []string
+		wantUser string
+	}{
+		{"with-creator", []string{f.u.ID}, f.u.ID},
+		{"no-ancestry", nil, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ident := &agentIdentityWrapper{&AgentTokenClaims{
+				Claims:   jwt.Claims{Subject: tid("as-agent-projectless")},
+				Scopes:   ScopesForRole(AgentRoleBaseline),
+				Ancestry: tc.ancestry,
+			}}
+			scope := f.srv.agentSkillAccessScope(ctx, ident)
+			require.NotNil(t, scope, "an agent predicate must never be nil (unfiltered)")
+			assert.Empty(t, scope.ProjectIDs)
+			assert.Equal(t, tc.wantUser, scope.CallerID)
+			assert.True(t, scope.IncludeHubScope, "project-less agent: G includes the hub catalog (design A17)")
+			for _, sk := range f.all() {
+				allowed := f.srv.authzService.CheckAccess(ctx, ident, skillResource(sk), ActionRead).Allowed
+				assert.Equal(t, agentPredicateMatches(scope, sk), allowed,
+					"probe and per-row decision must agree for %s (%s)", sk.Name, sk.Scope)
+			}
+		})
+	}
+}
+
+// agentPredicateMatches mirrors skillAccessScopePredicate for one row.
+func agentPredicateMatches(scope *store.SkillAccessScope, sk *store.Skill) bool {
+	switch sk.Scope {
+	case store.SkillScopeGlobal, store.SkillScopeCore:
+		return scope.IncludeHubScope
+	case store.SkillScopeUser:
+		return scope.CallerID != "" && sk.ScopeID == scope.CallerID
+	case store.SkillScopeProject:
+		for _, id := range scope.ProjectIDs {
+			if sk.ScopeID == id {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// The creator user-skill grant matches only a read of a user-scoped skill
+// owned by a hub-attested agent's origin user. A child agent (ancestry
+// [U, parent]) gets U's bucket, never its parent's or anyone else's.
+func TestAgentCreatorUserSkillGrant_Conditions(t *testing.T) {
+	u, v, parent := tid("cus-user-u"), tid("cus-user-v"), tid("cus-parent")
+	agent := func(ancestry ...string) PrincipalContext {
+		ident := &agentIdentityWrapper{&AgentTokenClaims{
+			Claims: jwt.Claims{Subject: tid("cus-agent")}, ProjectID: tid("cus-p"),
+			Scopes: ScopesForRole(AgentRoleBaseline), Ancestry: ancestry,
+		}}
+		return PrincipalContext{ID: ident.ID(), Kind: PrincipalKindAgent, Identity: ident}
+	}
+	su := skillScopeResource(store.SkillScopeUser, u)
+	sv := skillScopeResource(store.SkillScopeUser, v)
+	fed := NewFederatedAgentIdentity("https://other.example", tid("cus-fed"), tid("cus-p"), "fed", u, []string{u}, ScopesForRole(AgentRoleBaseline))
+
+	cases := []struct {
+		name      string
+		principal PrincipalContext
+		resource  Resource
+		action    Action
+		want      bool
+	}{
+		{"creator skill", agent(u), su, ActionRead, true},
+		{"child agent gets origin user's skill", agent(u, parent), su, ActionRead, true},
+		{"other user's skill", agent(u), sv, ActionRead, false},
+		{"parent agent id is not a user bucket", agent(u, parent), skillScopeResource(store.SkillScopeUser, parent), ActionRead, false},
+		{"no ancestry", agent(), su, ActionRead, false},
+		{"update", agent(u), su, ActionUpdate, false},
+		{"delete", agent(u), su, ActionDelete, false},
+		{"global skill", agent(u), skillScopeResource(store.SkillScopeGlobal, ""), ActionRead, false},
+		{"project skill", agent(u), skillScopeResource(store.SkillScopeProject, u), ActionRead, false},
+		{"user scope without owner", agent(u), skillScopeResource(store.SkillScopeUser, ""), ActionRead, false},
+		{"no scope kind", agent(u), Resource{Type: "skill", ScopeUserID: u}, ActionRead, false},
+		{"not a skill", agent(u), Resource{Type: "secret", ScopeKind: store.SkillScopeUser, ScopeUserID: u}, ActionRead, false},
+		{"federated agent", PrincipalContext{ID: fed.ID(), Kind: PrincipalKindAgent, Identity: fed}, su, ActionRead, false},
+		{"user principal", PrincipalContext{ID: u, Kind: PrincipalKindUser}, su, ActionRead, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, ok := agentCreatorUserSkillGrant(tc.principal, tc.resource, tc.action)
+			assert.Equal(t, tc.want, ok)
+		})
 	}
 }
 
@@ -371,11 +474,25 @@ func TestAgentSkillRead_CatalogGrantDoesNotReachNonHubResources(t *testing.T) {
 	assert.False(t, authz.CheckAccess(ctx, ident, Resource{Type: "skill", ID: f.sg.ID}, ActionRead).Allowed,
 		"a skill Resource with no ScopeKind must be denied")
 	assert.False(t, authz.CheckAccess(ctx, ident, skillResource(f.sq), ActionRead).Allowed)
-	assert.False(t, authz.CheckAccess(ctx, ident, skillResource(f.su), ActionRead).Allowed)
+	assert.False(t, authz.CheckAccess(ctx, ident, skillResource(f.su), ActionRead).Allowed,
+		"an agent with no origin user reads no user skill")
 	assert.False(t, authz.CheckAccess(ctx, ident, skillResource(f.sq), ActionUpdate).Allowed)
 	assert.False(t, authz.CheckAccess(ctx, ident, skillResource(f.sg), ActionUpdate).Allowed,
 		"the catalog grant is read-only")
 	assert.False(t, authz.CheckAccess(ctx, ident, skillResource(f.sg), ActionDelete).Allowed)
+
+	// The creator user-skill grant is read-only and reaches only the
+	// creator's own skills.
+	// newAgent also records the agent's delegation edge from U.
+	f.newAgent(t, "as-agent-a15u", f.p.ID, f.u.ID, ScopesForRole(AgentRoleBaseline))
+	withCreator := &agentIdentityWrapper{&AgentTokenClaims{
+		Claims: jwt.Claims{Subject: tid("as-agent-a15u")}, ProjectID: f.p.ID,
+		Scopes: ScopesForRole(AgentRoleBaseline), Ancestry: []string{f.u.ID},
+	}}
+	assert.True(t, authz.CheckAccess(ctx, withCreator, skillResource(f.su), ActionRead).Allowed)
+	assert.False(t, authz.CheckAccess(ctx, withCreator, skillResource(f.sv), ActionRead).Allowed)
+	assert.False(t, authz.CheckAccess(ctx, withCreator, skillResource(f.su), ActionUpdate).Allowed)
+	assert.False(t, authz.CheckAccess(ctx, withCreator, skillResource(f.su), ActionDelete).Allowed)
 }
 
 // A8/A9 regressions: the agent grant does not change what users see.
@@ -404,13 +521,14 @@ func TestAgentSkillRead_ConsistencyAtScale(t *testing.T) {
 	f := setupAgentSkillFixture(t)
 	ctx := context.Background()
 	const hubN = 1005
-	want := agentSkillSet(f.sg, f.sc, f.sp)
+	want := agentSkillSet(f.sg, f.sc, f.sp, f.su)
 	for i := 0; i < hubN; i++ {
 		want[createTestSkill(t, f.s, fmt.Sprintf("as-scale-global-%04d", i), store.SkillScopeGlobal, "", f.v.ID).ID] = true
 	}
 	for i := 0; i < 50; i++ {
 		createTestSkill(t, f.s, fmt.Sprintf("as-scale-q-%02d", i), store.SkillScopeProject, f.q.ID, f.v.ID)
-		createTestSkill(t, f.s, fmt.Sprintf("as-scale-u-%02d", i), store.SkillScopeUser, f.u.ID, f.u.ID)
+		want[createTestSkill(t, f.s, fmt.Sprintf("as-scale-u-%02d", i), store.SkillScopeUser, f.u.ID, f.u.ID).ID] = true
+		createTestSkill(t, f.s, fmt.Sprintf("as-scale-v-%02d", i), store.SkillScopeUser, f.v.ID, f.v.ID)
 	}
 	token := f.newAgent(t, "as-agent-scale", f.p.ID, f.u.ID, ScopesForRole(AgentRoleBaseline))
 
@@ -444,7 +562,7 @@ func TestAgentSkillRead_OtherReadSurfacesAgreeWithGet(t *testing.T) {
 		require.NoError(t, err)
 		versions[sk.ID] = sv.ID
 	}
-	granted := agentSkillSet(f.sg, f.sc, f.sp)
+	granted := agentSkillSet(f.sg, f.sc, f.sp, f.su)
 	token := f.newAgent(t, "as-agent-surfaces", f.p.ID, f.u.ID, ScopesForRole(AgentRoleBaseline))
 
 	surfaces := []struct {

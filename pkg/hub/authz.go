@@ -99,6 +99,13 @@ type Resource struct {
 	// applies the same rule to template and harness_config), so only those
 	// constructors are guaranteed to set it correctly.
 	ScopeKind string
+
+	// ScopeUserID is the owning user of a user-scoped skill
+	// (store.Skill.ScopeID when ScopeKind is store.SkillScopeUser), set only
+	// by skillScopeResource/skillResource. It lets the agent creator
+	// user-skill relationship grant (agentCreatorUserSkillGrant) match the
+	// same column the skill list predicate filters on. Empty otherwise.
+	ScopeUserID string
 }
 
 // PrincipalKind describes the authenticated actor evaluated by an authorization request.
@@ -1021,7 +1028,16 @@ func (a *AuthzService) checkRelationshipGrants(
 		}
 	}
 
-	// 4. Progeny relationship grants (agents only).
+	// 4. Creator user-skill read (agents only).
+	// An agent may read its creator's own user-scoped skills; see
+	// agentCreatorUserSkillGrant. The agent JWT restriction and access
+	// constraints (applied by the caller) and the delegation ceiling still
+	// apply on top.
+	if d, ok := agentCreatorUserSkillGrant(principal, resource, action); ok {
+		return d, true
+	}
+
+	// 5. Progeny relationship grants (agents only).
 	// Agent reads on secrets, env vars, and skill injections via the
 	// creator-progeny ancestry chain. Replaces the old DelegatedFrom
 	// policy pattern.
