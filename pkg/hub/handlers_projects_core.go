@@ -1333,6 +1333,77 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// SECURITY-GATE: CheckAccess — resolve the deprecated embedded-broker
+	// path's target and decide authorization for it BEFORE any project
+	// mutation below. Only the lookup and the authorization decision happen
+	// here (no store writes); the actual broker overwrite/create and secret
+	// mint still happen later, once the project exists, using the result
+	// resolved here. Doing this first means a denial cannot leave a
+	// caller-owned project — with a consumed quota slot and auto-linked
+	// providers — behind it.
+	//
+	// This is independent of, and in addition to, the project-update gate
+	// above: that gate authorizes mutating the resolved PROJECT; this one
+	// authorizes mutating the resolved BROKER. A caller can hold
+	// project-update on their own (new or existing) project while naming, by
+	// ID, a broker recorded under someone else's project — neither gate
+	// substitutes for the other.
+	var embeddedBroker *store.RuntimeBroker
+	if req.Broker != nil {
+		embeddedBrokerID := req.Broker.ID
+		var embeddedBrokerMatchedByID bool
+
+		if embeddedBrokerID != "" {
+			b, err := s.store.GetRuntimeBroker(ctx, embeddedBrokerID)
+			if err != nil && err != store.ErrNotFound {
+				writeErrorFromErr(w, err, "")
+				return
+			}
+			if b != nil {
+				embeddedBroker = b
+				embeddedBrokerMatchedByID = true
+			}
+		}
+
+		// If not found by ID, try to find by name (prevents duplicate brokers with same hostname)
+		if embeddedBroker == nil && req.Broker.Name != "" {
+			b, err := s.store.GetRuntimeBrokerByName(ctx, req.Broker.Name)
+			if err != nil && err != store.ErrNotFound {
+				writeErrorFromErr(w, err, "")
+				return
+			}
+			embeddedBroker = b
+		}
+
+		if embeddedBroker != nil {
+			matched := embeddedBroker
+			callerUser := GetUserIdentityFromContext(ctx)
+			brokerIdent := GetBrokerIdentityFromContext(ctx)
+			allowed, err := s.authorizedForBrokerOwnerAction(ctx, callerUser, brokerIdent, matched.ID,
+				func() (*store.RuntimeBroker, error) { return matched, nil })
+			if err != nil {
+				writeErrorFromErr(w, err, "")
+				return
+			}
+			if !allowed {
+				logAuthzDenial(r, GetIdentityFromContext(ctx), Resource{Type: "broker", ID: matched.ID}, ActionUpdate,
+					"caller is not the broker's creator, the broker itself, or a super-admin")
+				if embeddedBrokerMatchedByID {
+					// The caller named an explicit broker ID they do not
+					// own: hard deny, before any project mutation.
+					writeForbidden(w, "not authorized to modify this broker")
+					return
+				}
+				// Matched only by name (names are not unique): leave the
+				// matched broker untouched and treat this as no existing
+				// match, same as the register git-remote fall-through. The
+				// caller ends up with a new broker of their own instead of
+				// being blocked by a name collision they don't control.
+				embeddedBroker = nil
+			}
+		}
+	}
+
 	// Create new project if not found
 	if project == nil {
 		// Use client-provided ID if available; fall back to random UUID.
@@ -1528,27 +1599,15 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		util.Debugf("Warning: embedded Broker field in project registration is deprecated. Use two-phase registration: POST /brokers + POST /brokers/join, then pass brokerId")
 
 		brokerID := req.Broker.ID
+		callerUser := GetUserIdentityFromContext(ctx)
 
-		// Try to find existing broker by ID first, then by name
-		var existingBroker *store.RuntimeBroker
-		var err error
-
-		if brokerID != "" {
-			existingBroker, err = s.store.GetRuntimeBroker(ctx, brokerID)
-			if err != nil && err != store.ErrNotFound {
-				writeErrorFromErr(w, err, "")
-				return
-			}
-		}
-
-		// If not found by ID, try to find by name (prevents duplicate brokers with same hostname)
-		if existingBroker == nil && req.Broker.Name != "" {
-			existingBroker, err = s.store.GetRuntimeBrokerByName(ctx, req.Broker.Name)
-			if err != nil && err != store.ErrNotFound {
-				writeErrorFromErr(w, err, "")
-				return
-			}
-		}
+		// existingBroker and its authorization were already resolved and
+		// decided above, before the project was created/mutated — see the
+		// SECURITY-GATE block preceding "Create new project if not found".
+		// A denied match by ID already returned 403 there; a denied match by
+		// name was cleared to nil there so it falls through to the create
+		// branch below, leaving the matched broker untouched.
+		existingBroker := embeddedBroker
 
 		if existingBroker != nil {
 			// Update existing broker
@@ -1581,6 +1640,14 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 				Capabilities:    req.Broker.Capabilities,
 				Profiles:        req.Broker.Profiles,
 			}
+
+			// Record ownership on the newly created broker so the overwrite
+			// path gated above has a recorded owner to authorize against; a
+			// broker with no recorded owner has nothing for that check to
+			// match. ownerForNewBroker returns "" when the caller has no
+			// real identity, so this never writes a non-empty CreatedBy for
+			// an empty-ID caller.
+			broker.CreatedBy = ownerForNewBroker(callerUser)
 
 			if err := s.store.CreateRuntimeBroker(ctx, broker); err != nil {
 				writeErrorFromErr(w, err, "")

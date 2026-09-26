@@ -250,9 +250,84 @@ func capabilitiesFromStrings(names []string) *store.BrokerCapabilities {
 	return caps
 }
 
+// FindExistingBroker looks up the broker record, if any, that a registration
+// request for the given name and (optional) caller-supplied ID would match:
+// first by name, then by ID when no name match is found. It returns (nil,
+// nil) when no existing broker matches, which means the request describes a
+// brand-new registration. Callers that need to authorize a match before it
+// is acted upon (e.g. the HTTP handler's ownership gate) should use this
+// method rather than re-deriving the matching rule.
+func (s *BrokerAuthService) FindExistingBroker(ctx context.Context, name, brokerID string) (*store.RuntimeBroker, error) {
+	existingBroker, err := s.store.GetRuntimeBrokerByName(ctx, name)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return nil, fmt.Errorf("failed to check existing broker: %w", err)
+	}
+
+	if existingBroker == nil && brokerID != "" {
+		existingByID, err := s.store.GetRuntimeBroker(ctx, brokerID)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return nil, fmt.Errorf("failed to check existing broker by ID: %w", err)
+		}
+		existingBroker = existingByID
+	}
+
+	return existingBroker, nil
+}
+
+// ErrBrokerRegistrationAuthorizationStale is returned by
+// CreateBrokerRegistrationForAuthorizedMatch and
+// CreateBrokerRegistrationForAuthorizedNew when the existing-broker lookup
+// performed during the mutation no longer matches what the caller was
+// authorized against: the authorization decision and this call must agree
+// on whether an existing broker is being reused, and on which one.
+var ErrBrokerRegistrationAuthorizationStale = errors.New("broker registration authorization is stale; retry")
+
 // CreateBrokerRegistration creates a new broker with a join token.
 // Requires admin authentication.
 func (s *BrokerAuthService) CreateBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy string) (*CreateBrokerRegistrationResponse, error) {
+	return s.createBrokerRegistration(ctx, req, createdBy, "", false)
+}
+
+// CreateBrokerRegistrationForAuthorizedMatch is CreateBrokerRegistration for
+// a caller that has already been authorized against a specific existing
+// broker returned by FindExistingBroker. expectedExistingBrokerID must equal
+// that broker's ID; if the lookup performed here resolves to a different
+// broker, or no longer finds a match at all, the registration is refused
+// (ErrBrokerRegistrationAuthorizationStale) rather than mutating a record
+// the caller was not authorized against.
+func (s *BrokerAuthService) CreateBrokerRegistrationForAuthorizedMatch(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy, expectedExistingBrokerID string) (*CreateBrokerRegistrationResponse, error) {
+	if expectedExistingBrokerID == "" {
+		return nil, errors.New("expectedExistingBrokerID is required")
+	}
+	return s.createBrokerRegistration(ctx, req, createdBy, expectedExistingBrokerID, false)
+}
+
+// CreateBrokerRegistrationForAuthorizedNew is CreateBrokerRegistration for a
+// caller that has already been authorized for a first-time registration,
+// specifically because FindExistingBroker found no match at authorization
+// time. If the lookup performed here now finds an existing broker — a
+// registration for the same name or ID landed in the window between
+// authorization and this call — the request is refused
+// (ErrBrokerRegistrationAuthorizationStale) rather than treated as an
+// implicit re-registration of a broker the caller was never authorized
+// against.
+func (s *BrokerAuthService) CreateBrokerRegistrationForAuthorizedNew(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy string) (*CreateBrokerRegistrationResponse, error) {
+	return s.createBrokerRegistration(ctx, req, createdBy, "", true)
+}
+
+// createBrokerRegistration implements CreateBrokerRegistration,
+// CreateBrokerRegistrationForAuthorizedMatch, and
+// CreateBrokerRegistrationForAuthorizedNew.
+//
+// expectedExistingBrokerID and expectNoExistingMatch express what the
+// caller was authorized for, if anything:
+//   - both unset (empty / false): no pin, used by the plain entry point
+//     that performs no HTTP-level authorization decision of its own.
+//   - expectedExistingBrokerID set: the lookup below must resolve to that
+//     exact broker.
+//   - expectNoExistingMatch true: the lookup below must resolve to no
+//     broker at all.
+func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy, expectedExistingBrokerID string, expectNoExistingMatch bool) (*CreateBrokerRegistrationResponse, error) {
 	if req.Name == "" {
 		return nil, errors.New("name is required")
 	}
@@ -273,20 +348,16 @@ func (s *BrokerAuthService) CreateBrokerRegistration(ctx context.Context, req Cr
 	var brokerID string
 	var reregistered bool
 
-	existingBroker, err := s.store.GetRuntimeBrokerByName(ctx, req.Name)
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		return nil, fmt.Errorf("failed to check existing broker: %w", err)
+	existingBroker, err := s.FindExistingBroker(ctx, req.Name, req.BrokerID)
+	if err != nil {
+		return nil, err
 	}
 
-	// Also check for re-registration by client-supplied BrokerID
-	if existingBroker == nil && req.BrokerID != "" {
-		existingByID, err := s.store.GetRuntimeBroker(ctx, req.BrokerID)
-		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			return nil, fmt.Errorf("failed to check existing broker by ID: %w", err)
-		}
-		if existingByID != nil {
-			existingBroker = existingByID
-		}
+	if expectedExistingBrokerID != "" && (existingBroker == nil || existingBroker.ID != expectedExistingBrokerID) {
+		return nil, ErrBrokerRegistrationAuthorizationStale
+	}
+	if expectNoExistingMatch && existingBroker != nil {
+		return nil, ErrBrokerRegistrationAuthorizationStale
 	}
 
 	if existingBroker != nil {
