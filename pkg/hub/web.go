@@ -166,6 +166,11 @@ type WebServerConfig struct {
 	// ProxyAuthenticator verifies proxy-supplied assertions (e.g., IAP JWT).
 	// Required when AuthMode == "proxy".
 	ProxyAuthenticator ProxyAuthenticator
+	// PlatformAuthSA is the hub's configured platform/transport auth service
+	// account email (cfg.Auth.Transport.PlatformAuthSA). The web proxy-auth
+	// path does not create or authenticate a user account for this identity.
+	// Empty when no transport service account is configured.
+	PlatformAuthSA string
 	// SSEMaxConnectionAge is the maximum lifetime of an SSE connection before
 	// the server proactively closes it so the client can reconnect cleanly.
 	// Defaults to defaultSSEMaxConnectionAge (3500s) when zero.
@@ -713,6 +718,24 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 			// Create a fresh session so the redirect logic below can
 			// handle browser proxy requests instead of returning a raw 401.
 			session, _ = ws.sessionStore.New(r, webSessionName)
+		}
+
+		// See isReservedPlatformIdentity: a session for the reserved identity
+		// must not have a hub token minted or refreshed from it — including
+		// an existing session, whether or not it currently holds an access
+		// token (both the overflow-mint branch and the refresh branches
+		// below). Clear it and continue with no Authorization header so the
+		// request falls through the normal auth flow instead.
+		if email, _ := session.Values[sessKeyUserEmail].(string); isReservedPlatformIdentity(email, ws.config.PlatformAuthSA) {
+			for key := range session.Values {
+				delete(session.Values, key)
+			}
+			session.Options.MaxAge = -1
+			if err := session.Save(r, w); err != nil {
+				ws.logger().Warn("Failed to clear session for the configured service account", "error", err)
+			}
+			next.ServeHTTP(w, r)
+			return
 		}
 
 		accessToken, _ := session.Values[sessKeyHubAccessToken].(string)
@@ -1923,6 +1946,14 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 					storedRole = u.Role
 					// Refresh email from authoritative record in case it changed.
 					email = u.Email
+					// See isReservedPlatformIdentity: every path that provisions a
+					// user or mints/re-mints a hub token checks this, including an
+					// existing session for the configured service account.
+					if isReservedPlatformIdentity(email, ws.config.PlatformAuthSA) {
+						ws.logger().Warn("Proxy auth: clearing stale session for the configured service account", "user_id", u.ID)
+						ws.clearStaleSession(w, r)
+						return
+					}
 				case errors.Is(err, store.ErrNotFound):
 					// Definitive answer: the account is gone. Unlike a
 					// transient read failure, this must not fall back to
@@ -2009,6 +2040,18 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 
 		// Verified proxy identity — check authorization and provision/lookup user
 		ctx := r.Context()
+
+		// The hub does not create or authenticate user accounts for its
+		// configured transport service account; this path does its own
+		// find-or-create (it does not go through Server.provisionUser), so it
+		// carries the same check independently. Checked before authorization,
+		// before find-or-create, and before any session/token is issued.
+		if isReservedPlatformIdentity(proxyUser.Email, ws.config.PlatformAuthSA) {
+			ws.logger().Warn("Proxy auth: rejecting configured service account identity", "email", proxyUser.Email)
+			http.Error(w, "access denied", http.StatusForbidden)
+			return
+		}
+
 		if ws.store == nil {
 			ws.logger().Error("Proxy auth: store not configured")
 			http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -2389,6 +2432,16 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		ws.logger().Error("OAuth code exchange failed", "provider", provider, "error", err)
 		http.Redirect(w, r, "/login?error=exchange_failed", http.StatusFound)
+		return
+	}
+
+	// See isReservedPlatformIdentity: every path that provisions a user or
+	// mints/re-mints a hub token checks this. A service account cannot
+	// complete interactive OAuth, so this is not reachable in practice; kept
+	// for consistency with the other find-or-create paths.
+	if isReservedPlatformIdentity(userInfo.Email, ws.config.PlatformAuthSA) {
+		ws.logger().Warn("OAuth callback: rejecting configured service account identity", "email", userInfo.Email)
+		http.Redirect(w, r, "/login?error=unauthorized_domain", http.StatusFound)
 		return
 	}
 

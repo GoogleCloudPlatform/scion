@@ -1905,6 +1905,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		hubCfg.TransportMode = cfg.Auth.Transport.Mode
 		hubCfg.TransportAudience = audience
 		hubCfg.TransportMinter = hub.NewGCPTransportMinter(cfg.Auth.Transport.PlatformAuthSA, "")
+		hubCfg.PlatformAuthSA = cfg.Auth.Transport.PlatformAuthSA
 		log.Printf("Transport auth configured: mode=%s, audience=%s, sa=%s",
 			cfg.Auth.Transport.Mode, audience, cfg.Auth.Transport.PlatformAuthSA)
 	}
@@ -2470,6 +2471,22 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		}
 	}
 
+	// Same configured platform/transport auth service account that guards
+	// Server.provisionUser and GoogleIdentityResolver.Resolve (see
+	// initHubServer): the web proxy-auth path does its own find-or-create and
+	// needs the identical check.
+	//
+	// cfg.Auth is GlobalConfig.Auth, a DevAuthConfig value (not a pointer),
+	// so cfg.Auth itself is never nil here or anywhere else in this file
+	// (see, e.g., the unguarded cfg.Auth.Enabled / cfg.Auth.Mode reads
+	// throughout initHubServer and initWebServer). Only its nested pointer
+	// fields — Transport and Proxy — can be nil, which is what the checks
+	// here and elsewhere in this file guard against.
+	var webPlatformAuthSA string
+	if cfg.Auth.Transport != nil {
+		webPlatformAuthSA = cfg.Auth.Transport.PlatformAuthSA
+	}
+
 	webCfg := hub.WebServerConfig{
 		Port:                 webPort,
 		Host:                 webHost,
@@ -2483,6 +2500,7 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		MaintenanceMessage:   maintenanceMessage,
 		EnableTestLogin:      enableTestLogin,
 		ProxyAuthenticator:   webProxyAuth,
+		PlatformAuthSA:       webPlatformAuthSA,
 		SlowRequestThreshold: cfg.SlowRequestThreshold,
 	}
 	if enableTestLogin {

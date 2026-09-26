@@ -71,6 +71,28 @@ type GoogleIdentityResolver struct {
 	authorize func(ctx context.Context, email string) bool
 	roleFor   func(ctx context.Context, email string) string
 	log       *slog.Logger
+
+	// platformAuthSA is the configured platform/transport auth service
+	// account email, if any. Set via SetPlatformAuthSA after construction
+	// (server.go wires it from the same Server field used by
+	// provisionUser). Empty by default, which leaves the check in Resolve
+	// inert — safe for the many existing callers that construct a resolver
+	// directly without setting it.
+	platformAuthSA string
+}
+
+// SetPlatformAuthSA records the hub's configured platform/transport auth
+// service account so Resolve can refuse to resolve or provision a user for
+// that identity. Resolve is the single resolution entry point shared by two
+// callers with different service-account handling: the GE exchange endpoint
+// rejects every service-account credential itself before Resolve is reached
+// (ge_exchange.go's Step 1.5), so here this check duplicates that existing
+// rejection; the external-bearer path admits a service-account identity
+// whose GCP project is on its allowed_gcp_projects list, so on that path
+// this check is the one that applies. It is narrow — a backstop for the one
+// configured identity, not a general service-account gate.
+func (r *GoogleIdentityResolver) SetPlatformAuthSA(email string) {
+	r.platformAuthSA = email
 }
 
 // NewGoogleIdentityResolver creates a GoogleIdentityResolver.
@@ -126,6 +148,15 @@ func (r *GoogleIdentityResolver) Resolve(ctx context.Context, identity *Validate
 		// arms reserved for the named sentinels below.
 		return nil, fmt.Errorf("google identity resolver: no identity to resolve")
 	}
+
+	// See isReservedPlatformIdentity: every path that provisions a user or
+	// mints/re-mints a hub token checks this. See SetPlatformAuthSA for how
+	// the two callers of Resolve differ in whether this duplicates an
+	// existing rejection or is the applicable check.
+	if isReservedPlatformIdentity(identity.Email, r.platformAuthSA) {
+		return nil, ErrAccessDenied
+	}
+
 	canonicalIssuer := canonicalizeGoogleIssuer(identity.Issuer)
 
 	// Step 1: Look up existing binding.

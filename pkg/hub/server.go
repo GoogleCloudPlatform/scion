@@ -244,6 +244,11 @@ type ServerConfig struct {
 	// TransportMinter mints transport-layer OIDC tokens for agents.
 	// Nil when TransportMode == "none" or unset.
 	TransportMinter TransportTokenMinter
+	// PlatformAuthSA is the configured platform/transport auth service
+	// account email (cfg.Auth.Transport.PlatformAuthSA). The hub does not
+	// create or authenticate user accounts for this identity. Empty when no
+	// transport service account is configured.
+	PlatformAuthSA string
 	// SchedulerIntervalSeconds is the root ticker interval for the background
 	// scheduler, in seconds. Default: 60. Increasing this reduces DB connection
 	// pressure on small deployments.
@@ -912,6 +917,13 @@ type Server struct {
 	transportAudience string
 	transportMode     string
 
+	// platformAuthSA is the configured platform/transport auth service
+	// account email, if any. The hub does not create or authenticate user
+	// accounts for this identity (see isReservedPlatformIdentity). Empty
+	// when no transport service account is configured, which leaves that
+	// check inert.
+	platformAuthSA string
+
 	// OIDC identity provider (nil = OIDC IdP disabled)
 	oidcKeyManager       *OIDCKeyManager
 	oidcIssuerURL        string
@@ -1300,6 +1312,13 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		slog.Info("Broker HMAC authentication enabled")
 	}
 
+	// Copied unconditionally (not gated on transport mode being enabled) so
+	// provisionUser and the Google identity resolver can refuse the
+	// configured platform/transport auth service account regardless of
+	// whether transport minting itself is active. Empty when unset, which
+	// isReservedPlatformIdentity treats as inert.
+	srv.platformAuthSA = cfg.PlatformAuthSA
+
 	// Store transport token minter if configured
 	if cfg.TransportMinter != nil {
 		srv.transportMinter = cfg.TransportMinter
@@ -1659,6 +1678,10 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		AuthMode:           cfg.AuthMode,
 		Debug:              cfg.Debug,
 		Logger:             srv.authLog,
+		// Sourced from srv.platformAuthSA (set above from cfg.PlatformAuthSA),
+		// not cfg.PlatformAuthSA directly, so this and Server.platformAuthSA
+		// can never diverge.
+		PlatformAuthSA: srv.platformAuthSA,
 	}
 	// Wire the proxy user provisioner (wraps provisionUser with 60s cache)
 	if cfg.ProxyAuth != nil {
@@ -1720,6 +1743,9 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		},
 		slog.Default(),
 	)
+	// See platformAuthSA above: shared by the GE exchange endpoint and the
+	// external-bearer path, both of which resolve through this instance.
+	googleResolver.SetPlatformAuthSA(cfg.PlatformAuthSA)
 	// The external-bearer path (unlike the exchange endpoint) re-validates on
 	// every request, so it gets a caching decorator in front of the shared
 	// base validator. The exchange endpoint below is
