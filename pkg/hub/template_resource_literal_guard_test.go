@@ -44,8 +44,9 @@ func TestTemplateResourceLiterals_AllUseCanonicalConstructor(t *testing.T) {
 	dir := findHubDir(t)
 
 	allowedFuncs := map[string]bool{
-		"templateResource":      true,
-		"templateScopeResource": true,
+		"templateResource":          true,
+		"templateScopeResource":     true,
+		"templateUserScopeResource": true,
 	}
 
 	fset := token.NewFileSet()
