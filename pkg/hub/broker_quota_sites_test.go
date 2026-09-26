@@ -94,7 +94,7 @@ func TestBrokerQuota_ReconcileConvergesOnMixedState(t *testing.T) {
 	r1 := newQuotaTestAgent(t, s, broker, project, "mixed-run1", state.PhaseRunning) // legacy: no reservation
 	r2 := newQuotaTestAgent(t, s, broker, project, "mixed-run2", state.PhaseRunning) // legacy: no reservation
 	st := newQuotaTestAgent(t, s, broker, project, "mixed-stopped", state.PhaseStopped)
-	reserveBrokerSlot(t, s, broker, st.ID)                                  // stale counted
+	reserveStaleBrokerSlot(t, s, broker, st.ID)                             // stale counted
 	reserveBrokerSlot(t, s, broker, "00000000-0000-0000-0000-00000000dead") // missing agent ID
 	hd := newQuotaTestAgent(t, s, broker, project, "mixed-harddel", state.PhaseRunning)
 	reserveBrokerSlot(t, s, broker, hd.ID)

@@ -138,6 +138,27 @@ func reserveBrokerSlot(t *testing.T, s store.Store, broker *store.RuntimeBroker,
 	require.NoError(t, err)
 }
 
+// reserveStaleBrokerSlot is reserveBrokerSlot but backdates the reservation's
+// CreatedAt past reconcileMinReservationAge, simulating a reservation left
+// over from a genuinely old dispatch (as opposed to one reconcile might
+// observe mid-dispatch) so that phase-based reconcile release still applies
+// to it in tests (ptone/scion#2011).
+func reserveStaleBrokerSlot(t *testing.T, s store.Store, broker *store.RuntimeBroker, agentID string) {
+	t.Helper()
+	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
+	require.NoError(t, err)
+	_, err = s.CreateUsageReservation(context.Background(), &store.UsageReservation{
+		LimitDefinitionID: def.ID,
+		SubjectID:         broker.ID,
+		ScopeType:         store.QuotaScopeBroker,
+		ScopeID:           broker.ID,
+		ResourceID:        agentID,
+		Reserved:          1,
+		CreatedAt:         time.Now().Add(-2 * reconcileMinReservationAge),
+	})
+	require.NoError(t, err)
+}
+
 // TestBrokerQuota_StopFreesSlot is the core regression test for
 // ptone/scion#1963: a stopped agent must not continue consuming its broker's
 // max_agents_per_broker slot.
@@ -356,13 +377,13 @@ func TestBrokerQuota_ReconcileFixesStaleRows(t *testing.T) {
 	broker, project := newQuotaTestBrokerAndProject(t, s, "stale")
 
 	stoppedAgent := newQuotaTestAgent(t, s, broker, project, "stale-stopped", state.PhaseStopped)
-	reserveBrokerSlot(t, s, broker, stoppedAgent.ID)
+	reserveStaleBrokerSlot(t, s, broker, stoppedAgent.ID)
 
 	suspendedAgent := newQuotaTestAgent(t, s, broker, project, "stale-suspended", state.PhaseSuspended)
-	reserveBrokerSlot(t, s, broker, suspendedAgent.ID)
+	reserveStaleBrokerSlot(t, s, broker, suspendedAgent.ID)
 
 	erroredAgent := newQuotaTestAgent(t, s, broker, project, "stale-error", state.PhaseError)
-	reserveBrokerSlot(t, s, broker, erroredAgent.ID)
+	reserveStaleBrokerSlot(t, s, broker, erroredAgent.ID)
 
 	runningAgent := newQuotaTestAgent(t, s, broker, project, "stale-running", state.PhaseRunning)
 	reserveBrokerSlot(t, s, broker, runningAgent.ID)
@@ -444,13 +465,13 @@ func TestBrokerQuota_ReconcileMultiBroker(t *testing.T) {
 
 	brokerA, projectA := newQuotaTestBrokerAndProject(t, s, "multi-a")
 	staleA := newQuotaTestAgent(t, s, brokerA, projectA, "multi-a-stale", state.PhaseStopped)
-	reserveBrokerSlot(t, s, brokerA, staleA.ID)
+	reserveStaleBrokerSlot(t, s, brokerA, staleA.ID)
 	liveA := newQuotaTestAgent(t, s, brokerA, projectA, "multi-a-live", state.PhaseRunning)
 	reserveBrokerSlot(t, s, brokerA, liveA.ID)
 
 	brokerB, projectB := newQuotaTestBrokerAndProject(t, s, "multi-b")
 	staleB := newQuotaTestAgent(t, s, brokerB, projectB, "multi-b-stale", state.PhaseSuspended)
-	reserveBrokerSlot(t, s, brokerB, staleB.ID)
+	reserveStaleBrokerSlot(t, s, brokerB, staleB.ID)
 	liveB := newQuotaTestAgent(t, s, brokerB, projectB, "multi-b-live", state.PhaseRunning)
 	reserveBrokerSlot(t, s, brokerB, liveB.ID)
 
