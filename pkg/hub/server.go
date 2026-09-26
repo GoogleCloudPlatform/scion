@@ -847,6 +847,11 @@ type Server struct {
 	ctx         context.Context    // Server-lifetime context; cancelled on Shutdown
 	ctxCancel   context.CancelFunc // Cancels ctx
 
+	// githubWebhookNoSecretWarnOnce ensures the "no webhook secret configured"
+	// rejection is logged at most once per process, so a hub being repeatedly
+	// probed on the GitHub webhook endpoint does not fill its log.
+	githubWebhookNoSecretWarnOnce sync.Once
+
 	logQueryService  *LogQueryService         // Cloud Logging query service (nil = disabled)
 	metricsDashboard *MetricsDashboardService // Cloud Monitoring metrics dashboard (nil = disabled)
 

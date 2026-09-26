@@ -23,8 +23,10 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -127,6 +129,157 @@ func TestHandleGitHubWebhook_Ping(t *testing.T) {
 	_ = json.NewDecoder(rec.Body).Decode(&resp)
 	if resp["status"] != "pong" {
 		t.Errorf("expected pong, got %s", resp["status"])
+	}
+}
+
+func TestHandleGitHubWebhook_NoSecretConfigured_UnsignedRejected(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// A "not configured" secret lookup (store.ErrNotFound) must not be treated
+	// as a backend error: only the once-per-process "not configured" WARN
+	// should fire, not the per-request "secret lookup failed" WARN.
+	var logBuf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	payload := mustJSON(t, map[string]interface{}{
+		"action": "created",
+		"installation": map[string]interface{}{
+			"id":     987654321,
+			"app_id": 42,
+			"account": map[string]interface{}{
+				"login": "example-org",
+				"type":  "Organization",
+			},
+			"repository_selection": "all",
+		},
+		"repositories": []map[string]interface{}{
+			{"id": 1, "full_name": "example-org/example-repo", "name": "example-repo"},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", bytes.NewReader(payload))
+	req.Header.Set("X-GitHub-Event", "installation")
+	req.Header.Set("X-GitHub-Delivery", "test-delivery-no-secret-1")
+	req.Header.Set("Content-Type", "application/json")
+	// Deliberately no Authorization header and no X-Hub-Signature-256 header.
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	if _, err := s.GetGitHubInstallation(ctx, 987654321); err == nil {
+		t.Fatal("expected no installation row to be created when no webhook secret is configured")
+	}
+
+	if strings.Contains(logBuf.String(), "secret lookup failed") {
+		t.Errorf("expected no \"secret lookup failed\" WARN for a not-configured secret, got log: %s", logBuf.String())
+	}
+}
+
+func TestHandleGitHubWebhook_NoSecretConfigured_BogusSignatureRejected(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	payload := mustJSON(t, map[string]interface{}{
+		"action": "created",
+		"installation": map[string]interface{}{
+			"id":     987654322,
+			"app_id": 42,
+			"account": map[string]interface{}{
+				"login": "example-org",
+				"type":  "Organization",
+			},
+			"repository_selection": "all",
+		},
+		"repositories": []map[string]interface{}{
+			{"id": 1, "full_name": "example-org/example-repo", "name": "example-repo"},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", bytes.NewReader(payload))
+	req.Header.Set("X-GitHub-Event", "installation")
+	req.Header.Set("X-GitHub-Delivery", "test-delivery-no-secret-2")
+	req.Header.Set("X-Hub-Signature-256", "sha256=deadbeef")
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	if _, err := s.GetGitHubInstallation(ctx, 987654322); err == nil {
+		t.Fatal("expected no installation row to be created when no webhook secret is configured")
+	}
+}
+
+func TestHandleGitHubWebhook_NoSecretConfigured_PingRejected(t *testing.T) {
+	srv, _ := testServer(t)
+
+	payload := []byte(`{"zen":"Practicality beats purity."}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", bytes.NewReader(payload))
+	req.Header.Set("X-GitHub-Event", "ping")
+	req.Header.Set("X-GitHub-Delivery", "test-delivery-no-secret-3")
+	// No signature header at all — even ping must not be let through.
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleGitHubWebhook_SecretConfigured_ValidSignatureStillProcessed guards
+// against regressing the existing behavior: when a secret IS configured and
+// the signature is valid, the request must still be processed normally.
+func TestHandleGitHubWebhook_SecretConfigured_ValidSignatureStillProcessed(t *testing.T) {
+	srv, _ := webhookTestServer(t)
+
+	payload := []byte(`{"zen":"Practicality beats purity."}`)
+	sig := signWebhookPayload(payload, "test-webhook-secret")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", bytes.NewReader(payload))
+	req.Header.Set("X-GitHub-Event", "ping")
+	req.Header.Set("X-GitHub-Delivery", "test-delivery-valid-sig")
+	req.Header.Set("X-Hub-Signature-256", sig)
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]string
+	_ = json.NewDecoder(rec.Body).Decode(&resp)
+	if resp["status"] != "pong" {
+		t.Errorf("expected pong, got %s", resp["status"])
+	}
+}
+
+// TestHandleGitHubWebhook_SecretConfigured_WrongSignatureRejected guards
+// against regressing the existing behavior: when a secret IS configured, a
+// wrong signature must still be rejected with 401.
+func TestHandleGitHubWebhook_SecretConfigured_WrongSignatureRejected(t *testing.T) {
+	srv, _ := webhookTestServer(t)
+
+	payload := []byte(`{"action":"created"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", bytes.NewReader(payload))
+	req.Header.Set("X-GitHub-Event", "installation")
+	req.Header.Set("X-Hub-Signature-256", "sha256=badsignature")
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
