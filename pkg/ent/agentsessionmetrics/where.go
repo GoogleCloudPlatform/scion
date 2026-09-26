@@ -60,9 +60,9 @@ func AgentID(v string) predicate.AgentSessionMetrics {
 	return predicate.AgentSessionMetrics(sql.FieldEQ(FieldAgentID, v))
 }
 
-// GroveID applies equality check predicate on the "grove_id" field. It's identical to GroveIDEQ.
-func GroveID(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldEQ(FieldGroveID, v))
+// ProjectID applies equality check predicate on the "project_id" field. It's identical to ProjectIDEQ.
+func ProjectID(v string) predicate.AgentSessionMetrics {
+	return predicate.AgentSessionMetrics(sql.FieldEQ(FieldProjectID, v))
 }
 
 // SessionID applies equality check predicate on the "session_id" field. It's identical to SessionIDEQ.
@@ -185,69 +185,69 @@ func AgentIDContainsFold(v string) predicate.AgentSessionMetrics {
 	return predicate.AgentSessionMetrics(sql.FieldContainsFold(FieldAgentID, v))
 }
 
-// GroveIDEQ applies the EQ predicate on the "grove_id" field.
-func GroveIDEQ(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldEQ(FieldGroveID, v))
+// ProjectIDEQ applies the EQ predicate on the "project_id" field.
+func ProjectIDEQ(v string) predicate.AgentSessionMetrics {
+	return predicate.AgentSessionMetrics(sql.FieldEQ(FieldProjectID, v))
 }
 
-// GroveIDNEQ applies the NEQ predicate on the "grove_id" field.
-func GroveIDNEQ(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldNEQ(FieldGroveID, v))
+// ProjectIDNEQ applies the NEQ predicate on the "project_id" field.
+func ProjectIDNEQ(v string) predicate.AgentSessionMetrics {
+	return predicate.AgentSessionMetrics(sql.FieldNEQ(FieldProjectID, v))
 }
 
-// GroveIDIn applies the In predicate on the "grove_id" field.
-func GroveIDIn(vs ...string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldIn(FieldGroveID, vs...))
+// ProjectIDIn applies the In predicate on the "project_id" field.
+func ProjectIDIn(vs ...string) predicate.AgentSessionMetrics {
+	return predicate.AgentSessionMetrics(sql.FieldIn(FieldProjectID, vs...))
 }
 
-// GroveIDNotIn applies the NotIn predicate on the "grove_id" field.
-func GroveIDNotIn(vs ...string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldNotIn(FieldGroveID, vs...))
+// ProjectIDNotIn applies the NotIn predicate on the "project_id" field.
+func ProjectIDNotIn(vs ...string) predicate.AgentSessionMetrics {
+	return predicate.AgentSessionMetrics(sql.FieldNotIn(FieldProjectID, vs...))
 }
 
-// GroveIDGT applies the GT predicate on the "grove_id" field.
-func GroveIDGT(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldGT(FieldGroveID, v))
+// ProjectIDGT applies the GT predicate on the "project_id" field.
+func ProjectIDGT(v string) predicate.AgentSessionMetrics {
+	return predicate.AgentSessionMetrics(sql.FieldGT(FieldProjectID, v))
 }
 
-// GroveIDGTE applies the GTE predicate on the "grove_id" field.
-func GroveIDGTE(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldGTE(FieldGroveID, v))
+// ProjectIDGTE applies the GTE predicate on the "project_id" field.
+func ProjectIDGTE(v string) predicate.AgentSessionMetrics {
+	return predicate.AgentSessionMetrics(sql.FieldGTE(FieldProjectID, v))
 }
 
-// GroveIDLT applies the LT predicate on the "grove_id" field.
-func GroveIDLT(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldLT(FieldGroveID, v))
+// ProjectIDLT applies the LT predicate on the "project_id" field.
+func ProjectIDLT(v string) predicate.AgentSessionMetrics {
+	return predicate.AgentSessionMetrics(sql.FieldLT(FieldProjectID, v))
 }
 
-// GroveIDLTE applies the LTE predicate on the "grove_id" field.
-func GroveIDLTE(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldLTE(FieldGroveID, v))
+// ProjectIDLTE applies the LTE predicate on the "project_id" field.
+func ProjectIDLTE(v string) predicate.AgentSessionMetrics {
+	return predicate.AgentSessionMetrics(sql.FieldLTE(FieldProjectID, v))
 }
 
-// GroveIDContains applies the Contains predicate on the "grove_id" field.
-func GroveIDContains(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldContains(FieldGroveID, v))
+// ProjectIDContains applies the Contains predicate on the "project_id" field.
+func ProjectIDContains(v string) predicate.AgentSessionMetrics {
+	return predicate.AgentSessionMetrics(sql.FieldContains(FieldProjectID, v))
 }
 
-// GroveIDHasPrefix applies the HasPrefix predicate on the "grove_id" field.
-func GroveIDHasPrefix(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldHasPrefix(FieldGroveID, v))
+// ProjectIDHasPrefix applies the HasPrefix predicate on the "project_id" field.
+func ProjectIDHasPrefix(v string) predicate.AgentSessionMetrics {
+	return predicate.AgentSessionMetrics(sql.FieldHasPrefix(FieldProjectID, v))
 }
 
-// GroveIDHasSuffix applies the HasSuffix predicate on the "grove_id" field.
-func GroveIDHasSuffix(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldHasSuffix(FieldGroveID, v))
+// ProjectIDHasSuffix applies the HasSuffix predicate on the "project_id" field.
+func ProjectIDHasSuffix(v string) predicate.AgentSessionMetrics {
+	return predicate.AgentSessionMetrics(sql.FieldHasSuffix(FieldProjectID, v))
 }
 
-// GroveIDEqualFold applies the EqualFold predicate on the "grove_id" field.
-func GroveIDEqualFold(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldEqualFold(FieldGroveID, v))
+// ProjectIDEqualFold applies the EqualFold predicate on the "project_id" field.
+func ProjectIDEqualFold(v string) predicate.AgentSessionMetrics {
+	return predicate.AgentSessionMetrics(sql.FieldEqualFold(FieldProjectID, v))
 }
 
-// GroveIDContainsFold applies the ContainsFold predicate on the "grove_id" field.
-func GroveIDContainsFold(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldContainsFold(FieldGroveID, v))
+// ProjectIDContainsFold applies the ContainsFold predicate on the "project_id" field.
+func ProjectIDContainsFold(v string) predicate.AgentSessionMetrics {
+	return predicate.AgentSessionMetrics(sql.FieldContainsFold(FieldProjectID, v))
 }
 
 // SessionIDEQ applies the EQ predicate on the "session_id" field.

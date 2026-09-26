@@ -8498,7 +8498,7 @@ type AgentSessionMetricsMutation struct {
 	typ                 string
 	id                  *uuid.UUID
 	agent_id            *string
-	grove_id            *string
+	project_id          *string
 	session_id          *string
 	started_at          *time.Time
 	ended_at            *time.Time
@@ -8664,40 +8664,40 @@ func (m *AgentSessionMetricsMutation) ResetAgentID() {
 	m.agent_id = nil
 }
 
-// SetGroveID sets the "grove_id" field.
-func (m *AgentSessionMetricsMutation) SetGroveID(s string) {
-	m.grove_id = &s
+// SetProjectID sets the "project_id" field.
+func (m *AgentSessionMetricsMutation) SetProjectID(s string) {
+	m.project_id = &s
 }
 
-// GroveID returns the value of the "grove_id" field in the mutation.
-func (m *AgentSessionMetricsMutation) GroveID() (r string, exists bool) {
-	v := m.grove_id
+// ProjectID returns the value of the "project_id" field in the mutation.
+func (m *AgentSessionMetricsMutation) ProjectID() (r string, exists bool) {
+	v := m.project_id
 	if v == nil {
 		return
 	}
 	return *v, true
 }
 
-// OldGroveID returns the old "grove_id" field's value of the AgentSessionMetrics entity.
+// OldProjectID returns the old "project_id" field's value of the AgentSessionMetrics entity.
 // If the AgentSessionMetrics object wasn't provided to the builder, the object is fetched from the database.
 // An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *AgentSessionMetricsMutation) OldGroveID(ctx context.Context) (v string, err error) {
+func (m *AgentSessionMetricsMutation) OldProjectID(ctx context.Context) (v string, err error) {
 	if !m.op.Is(OpUpdateOne) {
-		return v, errors.New("OldGroveID is only allowed on UpdateOne operations")
+		return v, errors.New("OldProjectID is only allowed on UpdateOne operations")
 	}
 	if m.id == nil || m.oldValue == nil {
-		return v, errors.New("OldGroveID requires an ID field in the mutation")
+		return v, errors.New("OldProjectID requires an ID field in the mutation")
 	}
 	oldValue, err := m.oldValue(ctx)
 	if err != nil {
-		return v, fmt.Errorf("querying old value for OldGroveID: %w", err)
+		return v, fmt.Errorf("querying old value for OldProjectID: %w", err)
 	}
-	return oldValue.GroveID, nil
+	return oldValue.ProjectID, nil
 }
 
-// ResetGroveID resets all changes to the "grove_id" field.
-func (m *AgentSessionMetricsMutation) ResetGroveID() {
-	m.grove_id = nil
+// ResetProjectID resets all changes to the "project_id" field.
+func (m *AgentSessionMetricsMutation) ResetProjectID() {
+	m.project_id = nil
 }
 
 // SetSessionID sets the "session_id" field.
@@ -9457,8 +9457,8 @@ func (m *AgentSessionMetricsMutation) Fields() []string {
 	if m.agent_id != nil {
 		fields = append(fields, agentsessionmetrics.FieldAgentID)
 	}
-	if m.grove_id != nil {
-		fields = append(fields, agentsessionmetrics.FieldGroveID)
+	if m.project_id != nil {
+		fields = append(fields, agentsessionmetrics.FieldProjectID)
 	}
 	if m.session_id != nil {
 		fields = append(fields, agentsessionmetrics.FieldSessionID)
@@ -9509,8 +9509,8 @@ func (m *AgentSessionMetricsMutation) Field(name string) (ent.Value, bool) {
 	switch name {
 	case agentsessionmetrics.FieldAgentID:
 		return m.AgentID()
-	case agentsessionmetrics.FieldGroveID:
-		return m.GroveID()
+	case agentsessionmetrics.FieldProjectID:
+		return m.ProjectID()
 	case agentsessionmetrics.FieldSessionID:
 		return m.SessionID()
 	case agentsessionmetrics.FieldStartedAt:
@@ -9548,8 +9548,8 @@ func (m *AgentSessionMetricsMutation) OldField(ctx context.Context, name string)
 	switch name {
 	case agentsessionmetrics.FieldAgentID:
 		return m.OldAgentID(ctx)
-	case agentsessionmetrics.FieldGroveID:
-		return m.OldGroveID(ctx)
+	case agentsessionmetrics.FieldProjectID:
+		return m.OldProjectID(ctx)
 	case agentsessionmetrics.FieldSessionID:
 		return m.OldSessionID(ctx)
 	case agentsessionmetrics.FieldStartedAt:
@@ -9592,12 +9592,12 @@ func (m *AgentSessionMetricsMutation) SetField(name string, value ent.Value) err
 		}
 		m.SetAgentID(v)
 		return nil
-	case agentsessionmetrics.FieldGroveID:
+	case agentsessionmetrics.FieldProjectID:
 		v, ok := value.(string)
 		if !ok {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
-		m.SetGroveID(v)
+		m.SetProjectID(v)
 		return nil
 	case agentsessionmetrics.FieldSessionID:
 		v, ok := value.(string)
@@ -9868,8 +9868,8 @@ func (m *AgentSessionMetricsMutation) ResetField(name string) error {
 	case agentsessionmetrics.FieldAgentID:
 		m.ResetAgentID()
 		return nil
-	case agentsessionmetrics.FieldGroveID:
-		m.ResetGroveID()
+	case agentsessionmetrics.FieldProjectID:
+		m.ResetProjectID()
 		return nil
 	case agentsessionmetrics.FieldSessionID:
 		m.ResetSessionID()
