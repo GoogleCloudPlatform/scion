@@ -5,7 +5,7 @@ A standalone service that bridges Google Chat (and future Slack) with the Scion 
 ## Features
 
 - Bidirectional messaging between chat users and Scion agents
-- Agent management via slash commands (`/scion list`, `/scion start`, etc.)
+- Agent management via slash commands (`/scionAdmin list`, `/scionAdmin start`, etc.)
 - Automatic user identity mapping (chat user to Hub account)
 - Space-to-project linking for scoped interactions
 - Real-time notification cards for agent status changes (`COMPLETED`, `ERROR`, `WAITING_FOR_INPUT`, etc.)
@@ -350,25 +350,40 @@ In this setup, set `external_url` to `https://scion.example.com/chat/events` and
 
 ## Slash Commands
 
-Once the app is running and connected, users interact via `/scion` in Google Chat:
+Once the app is running and connected, users interact via `/scion` (message agents) and `/scionAdmin` (agent and space administration) in Google Chat:
 
 | Command | Description |
 |---------|-------------|
-| `/scion help` | Show available commands |
-| `/scion register` | Link your chat account to your Hub user (auto-matches by email, falls back to device auth) |
-| `/scion unregister` | Remove your chat-to-Hub account link |
-| `/scion link <project-slug>` | Link the current space to a project (admin only) |
-| `/scion unlink` | Unlink the current space from its project (admin only) |
-| `/scion list` | List agents in the linked project |
-| `/scion status <agent>` | Show agent status card with action buttons |
-| `/scion create <agent>` | Create a new agent |
-| `/scion start <agent>` | Start an agent |
-| `/scion stop <agent>` | Stop an agent |
-| `/scion delete <agent>` | Delete an agent (with confirmation) |
-| `/scion logs <agent>` | Show recent agent logs |
-| `/scion message <agent> <text>` | Send a message to an agent (supports `--thread <id>`) |
-| `/scion subscribe <agent>` | Subscribe to agent notifications (with activity filter dialog) |
-| `/scion unsubscribe <agent>` | Unsubscribe from agent notifications |
+| `/scion help` | Show available `/scion` commands |
+| `/scion <text>` | Send a message to the default agent |
+| `/scion <agent> <text>` | Send a message to a specific agent |
+| `/scion --thread <id> <agent> <text>` | Send a message in a specific thread |
+| `/scion message <agent> <text>` (alias `msg`) | Send a message to an agent (supports `--thread <id>`) |
+| `/scionAdmin help` | Show available `/scionAdmin` commands |
+| `/scionAdmin info` | Show registration, project link, and agent info |
+| `/scionAdmin register` | Link your chat account to your Hub user (auto-matches by email, falls back to device auth) |
+| `/scionAdmin unregister` | Remove your chat-to-Hub account link |
+| `/scionAdmin link <project-slug>` | Link the current space to a project |
+| `/scionAdmin unlink` | Unlink the current space from its project |
+| `/scionAdmin list` | List agents in the linked project |
+| `/scionAdmin status <agent>` | Show agent status card with action buttons |
+| `/scionAdmin create <agent-name>` | Create a new agent |
+| `/scionAdmin start <agent>` | Start an agent |
+| `/scionAdmin stop <agent>` | Stop an agent |
+| `/scionAdmin delete <agent>` | Delete an agent (with confirmation) |
+| `/scionAdmin logs <agent>` | Show recent agent logs |
+| `/scionAdmin set-default <agent>` | Set the default agent for `/scion` messages (`clear` to remove) |
+| `/scionAdmin set-default <agent> --thread` | Set the default agent for the current thread (`clear --thread` to remove) |
+| `/scionAdmin terminal <agent>` | Get the web terminal URL for an agent |
+| `/scionAdmin thread <name> [instruction]` | Create a new agent and thread, optionally sending an initial instruction |
+| `/scionAdmin send <agent> <path>` | Show file info from an agent's workspace |
+| `/scionAdmin secret list` | List project secrets (metadata only) |
+| `/scionAdmin secret set <key>` | Set a secret value (entered via secure card input) |
+| `/scionAdmin secret get <key>` | Show secret metadata |
+| `/scionAdmin secret delete <key>` | Delete a secret |
+| `/scionAdmin settings` | Toggle observe mode and notification filters |
+| `/scionAdmin subscribe <agent>` | Subscribe to agent notifications (with activity filter dialog) |
+| `/scionAdmin unsubscribe <agent>` | Unsubscribe from agent notifications |
 
 You can also @mention the bot to send messages to agents:
 
