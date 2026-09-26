@@ -559,9 +559,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// work — see the comment there for why the Kubernetes/"block" check
 	// runs where it does.
 	//
-	// requireLocalRuntime follows the identical struct-or-env precedence
-	// gcpMetadataMode used above — see downgradeUnverifiedHubDefaultPassthrough's
-	// doc comment for what it means and how it's used below and in
+	// gcpMetadataMode itself was already resolved earlier in this function
+	// (effectiveGCPMetadataMode) and validated against the Kubernetes/"block"
+	// check above. requireLocalRuntime follows the identical struct-or-env
+	// precedence — see downgradeUnverifiedHubDefaultPassthrough's doc comment
+	// for what it means and how it's used below and in
 	// recheckHubDefaultPassthrough.
 	requireLocalRuntime := false
 	if in.Config != nil && in.Config.GCPIdentity != nil {
@@ -1034,11 +1036,18 @@ func effectiveGCPMetadataMode(isKubernetesDispatch bool, cfg *CreateAgentConfig,
 		return cfg.GCPIdentity.MetadataMode
 	}
 	raw := resolvedEnv["SCION_METADATA_MODE"]
+	source := resolvedEnv["SCION_METADATA_MODE_SOURCE"]
 	if cfg != nil {
 		for _, e := range cfg.Env {
 			parts := strings.SplitN(e, "=", 2)
-			if len(parts) == 2 && parts[0] == "SCION_METADATA_MODE" {
+			if len(parts) != 2 {
+				continue
+			}
+			switch parts[0] {
+			case "SCION_METADATA_MODE":
 				raw = parts[1]
+			case "SCION_METADATA_MODE_SOURCE":
+				source = parts[1]
 			}
 		}
 	}
@@ -1047,6 +1056,20 @@ func effectiveGCPMetadataMode(isKubernetesDispatch bool, cfg *CreateAgentConfig,
 		// resolvedEnv when dispatching a start for a provisioned agent. This
 		// is also how a resolved project or hub default GCP identity mode
 		// reaches the broker.
+		//
+		// The current hub always writes SCION_METADATA_MODE_SOURCE=hub
+		// alongside its own authoritative mode (DispatchAgentStart,
+		// DispatchAgentRestart, buildCreateRequest). A hub old enough to
+		// predate that write won't send the marker at all, and on such a hub
+		// this value could be whatever a stray stored env var or secret
+		// happened to contain rather than a real dispatch decision. Downgrade
+		// an elevated (non-block) mode to the secure default in that case; an
+		// already out-of-range mode still falls through to the allow-list
+		// rejection elsewhere unchanged, marker or not.
+		elevated := raw == store.GCPMetadataModeAssign || raw == store.GCPMetadataModePassthrough
+		if elevated && source != "hub" {
+			return store.GCPMetadataModeBlock
+		}
 		return raw
 	}
 	return mode

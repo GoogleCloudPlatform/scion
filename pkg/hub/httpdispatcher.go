@@ -793,6 +793,14 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 	}
 	req.ResolvedEnv["SCION_METADATA_MODE"] = gcpMetadataMode
 	classifyEnv(&req.EnvClassifications, "SCION_METADATA_MODE", api.EnvKindPlain)
+	// Marks the mode above as this hub's own authoritative write, not a value
+	// that survived from a storage/secret merge. A broker that predates this
+	// marker ignores it (harmless); a broker that checks it only trusts an
+	// elevated (non-block) mode from resolvedEnv when this is present, which
+	// is what closes the fallback path for a broker talking to an older hub
+	// that never sends this marker at all.
+	req.ResolvedEnv["SCION_METADATA_MODE_SOURCE"] = "hub"
+	classifyEnv(&req.EnvClassifications, "SCION_METADATA_MODE_SOURCE", api.EnvKindPlain)
 
 	// Include template secrets declarations for broker env-gather
 	if agent.AppliedConfig != nil && agent.AppliedConfig.TemplateID != "" {
@@ -2569,6 +2577,9 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	}
 	resolvedEnv["SCION_METADATA_MODE"] = gcpMetadataMode
 	classifyEnv(&envClassifications, "SCION_METADATA_MODE", api.EnvKindPlain)
+	// See buildCreateRequest for why this marker travels alongside the mode.
+	resolvedEnv["SCION_METADATA_MODE_SOURCE"] = "hub"
+	classifyEnv(&envClassifications, "SCION_METADATA_MODE_SOURCE", api.EnvKindPlain)
 
 	// Generate a fresh agent token for Hub authentication.
 	tokenIssued := false
