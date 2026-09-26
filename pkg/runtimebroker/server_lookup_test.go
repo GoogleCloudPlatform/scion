@@ -865,3 +865,89 @@ func TestLookupAgent_AuxiliaryLoopStopsAfterFirstMatch(t *testing.T) {
 		}
 	}
 }
+
+// TestLookupContainerID_NoContainerIDIsErrAgentNotFound proves the "matched
+// record but no container id" classification directly: LookupContainerID
+// must satisfy errors.Is(err, ErrAgentNotFound) so restartAgent/stopAgent
+// fold it into the idempotent not-found path (skip stop, proceed to start).
+func TestLookupContainerID_NoContainerIDIsErrAgentNotFound(t *testing.T) {
+	mgr := &filteringMockManager{}
+	mgr.agents = []api.AgentInfo{
+		{
+			Name:   "coordinator",
+			Labels: map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
+		},
+	}
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	_, err := srv.LookupContainerID(context.Background(), "coordinator", "project-A")
+	if err == nil {
+		t.Fatal("expected an error for a matched agent with no container id")
+	}
+	if !errors.Is(err, ErrAgentNotFound) {
+		t.Errorf("expected errors.Is(err, ErrAgentNotFound), got: %v", err)
+	}
+}
+
+// TestLookupContainerID_AmbiguousMatchIsNotErrAgentNotFound proves the
+// opposite direction: an ambiguous match (two distinct containers for the
+// same slug/project) is a real lookup failure and must NOT satisfy
+// errors.Is(err, ErrAgentNotFound), so callers surface it as an error
+// instead of treating it as "not found".
+func TestLookupContainerID_AmbiguousMatchIsNotErrAgentNotFound(t *testing.T) {
+	mgr := &filteringMockManager{}
+	mgr.agents = []api.AgentInfo{
+		{
+			ContainerID: "container-A",
+			Name:        "coordinator",
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
+		},
+		{
+			ContainerID: "container-A2",
+			Name:        "coordinator",
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
+		},
+	}
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	_, err := srv.LookupContainerID(context.Background(), "coordinator", "project-A")
+	if err == nil {
+		t.Fatal("expected an error for an ambiguous match")
+	}
+	if errors.Is(err, ErrAgentNotFound) {
+		t.Errorf("an ambiguous match must not be classified as ErrAgentNotFound, got: %v", err)
+	}
+}
+
+// TestLookupContainerID_ListingErrorIsNotErrAgentNotFound proves that a
+// runtime listing failure (the manager's List call itself erroring) also
+// must NOT satisfy errors.Is(err, ErrAgentNotFound): it is a retryable
+// infrastructure problem, not evidence the agent doesn't exist. It must
+// instead satisfy errors.Is(err, ErrAgentListUnavailable), which is what
+// callers such as controlchannel.go branch on.
+func TestLookupContainerID_ListingErrorIsNotErrAgentNotFound(t *testing.T) {
+	mgr := &filteringMockManager{}
+	mgr.agents = []api.AgentInfo{
+		{
+			ContainerID: "container-A",
+			Name:        "coordinator",
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
+		},
+	}
+	mgr.listErr = errors.New("docker ps failed: exit status 1")
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	_, err := srv.LookupContainerID(context.Background(), "coordinator", "project-A")
+	if err == nil {
+		t.Fatal("expected an error when the runtime listing fails")
+	}
+	if errors.Is(err, ErrAgentNotFound) {
+		t.Errorf("a listing failure must not be classified as ErrAgentNotFound, got: %v", err)
+	}
+	if !errors.Is(err, ErrAgentListUnavailable) {
+		t.Errorf("expected errors.Is(err, ErrAgentListUnavailable), got: %v", err)
+	}
+}
