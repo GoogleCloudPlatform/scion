@@ -875,13 +875,13 @@ func TestLookupContainerID_NoContainerIDIsErrAgentNotFound(t *testing.T) {
 	mgr.agents = []api.AgentInfo{
 		{
 			Name:   "coordinator",
-			Labels: map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+			Labels: map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(DefaultServerConfig(), mgr, rt)
 
-	_, err := srv.LookupContainerID(context.Background(), "coordinator", "grove-A")
+	_, err := srv.LookupContainerID(context.Background(), "coordinator", "project-A")
 	if err == nil {
 		t.Fatal("expected an error for a matched agent with no container id")
 	}
@@ -901,18 +901,18 @@ func TestLookupContainerID_AmbiguousMatchIsNotErrAgentNotFound(t *testing.T) {
 		{
 			ContainerID: "container-A",
 			Name:        "coordinator",
-			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
 		},
 		{
 			ContainerID: "container-A2",
 			Name:        "coordinator",
-			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(DefaultServerConfig(), mgr, rt)
 
-	_, err := srv.LookupContainerID(context.Background(), "coordinator", "grove-A")
+	_, err := srv.LookupContainerID(context.Background(), "coordinator", "project-A")
 	if err == nil {
 		t.Fatal("expected an error for an ambiguous match")
 	}
@@ -924,25 +924,30 @@ func TestLookupContainerID_AmbiguousMatchIsNotErrAgentNotFound(t *testing.T) {
 // TestLookupContainerID_ListingErrorIsNotErrAgentNotFound proves that a
 // runtime listing failure (the manager's List call itself erroring) also
 // must NOT satisfy errors.Is(err, ErrAgentNotFound): it is a retryable
-// infrastructure problem, not evidence the agent doesn't exist.
+// infrastructure problem, not evidence the agent doesn't exist. It must
+// instead satisfy errors.Is(err, ErrAgentListUnavailable), which is what
+// callers such as controlchannel.go branch on.
 func TestLookupContainerID_ListingErrorIsNotErrAgentNotFound(t *testing.T) {
 	mgr := &filteringMockManager{}
 	mgr.agents = []api.AgentInfo{
 		{
 			ContainerID: "container-A",
 			Name:        "coordinator",
-			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
 		},
 	}
 	mgr.listErr = errors.New("docker ps failed: exit status 1")
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(DefaultServerConfig(), mgr, rt)
 
-	_, err := srv.LookupContainerID(context.Background(), "coordinator", "grove-A")
+	_, err := srv.LookupContainerID(context.Background(), "coordinator", "project-A")
 	if err == nil {
 		t.Fatal("expected an error when the runtime listing fails")
 	}
 	if errors.Is(err, ErrAgentNotFound) {
 		t.Errorf("a listing failure must not be classified as ErrAgentNotFound, got: %v", err)
+	}
+	if !errors.Is(err, ErrAgentListUnavailable) {
+		t.Errorf("expected errors.Is(err, ErrAgentListUnavailable), got: %v", err)
 	}
 }

@@ -231,18 +231,18 @@ func TestStopAgent_AmbiguousMatchAbortsWithoutStop(t *testing.T) {
 		{
 			ContainerID: "container-A",
 			Name:        "coordinator",
-			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
 		},
 		{
 			ContainerID: "container-A2",
 			Name:        "coordinator",
-			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(DefaultServerConfig(), mgr, rt)
 
-	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/stop?projectId=grove-A", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/stop?projectId=project-A", nil)
 	w := httptest.NewRecorder()
 	srv.handleAgentByID(w, r)
 
@@ -266,12 +266,12 @@ func TestStopAgent_NoContainerIDIsNoOp(t *testing.T) {
 	mgr.agents = []api.AgentInfo{
 		{
 			Name:   "coordinator",
-			Labels: map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+			Labels: map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
 		},
 	}
 	srv := newTestServerWithManager(t, mgr)
 
-	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/stop?projectId=grove-A", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/stop?projectId=project-A", nil)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, r)
 
@@ -387,17 +387,17 @@ func TestRestartAgent_AmbiguousMatchAbortsWithoutStart(t *testing.T) {
 		{
 			ContainerID: "container-A",
 			Name:        "coordinator",
-			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
 		},
 		{
 			ContainerID: "container-A2",
 			Name:        "coordinator",
-			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
 		},
 	}
 	srv := newTestServerWithManager(t, mgr)
 
-	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/restart?projectId=grove-A", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/restart?projectId=project-A", nil)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, r)
 
@@ -414,22 +414,22 @@ func TestRestartAgent_AmbiguousMatchAbortsWithoutStart(t *testing.T) {
 
 // TestRestartAgent_NoContainerIDProceedsWithStart: a matching agent record
 // with no resolvable container id (no "scion.container.id" label, no
-// ContainerID, no ID — e.g. a malformed or partial runtime entry that
-// carries no container id — nothing addressable to stop) has nothing to
-// stop. LookupContainerID's "no container ID" result is classified as
-// ErrAgentNotFound, so restartAgent must treat it like a genuine not-found:
-// skip the stop and proceed to start, rather than aborting with a 5xx.
+// ContainerID, no ID — e.g. a malformed or partial runtime entry) has
+// nothing addressable to stop. LookupContainerID's "no container ID" result
+// is classified as ErrAgentNotFound, so restartAgent must treat it like a
+// genuine not-found: skip the stop and proceed to start, rather than
+// aborting with a 5xx.
 func TestRestartAgent_NoContainerIDProceedsWithStart(t *testing.T) {
 	mgr := &filteringMockManager{}
 	mgr.agents = []api.AgentInfo{
 		{
 			Name:   "coordinator",
-			Labels: map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+			Labels: map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
 		},
 	}
 	srv := newTestServerWithManager(t, mgr)
 
-	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/restart?projectId=grove-A", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/restart?projectId=project-A", nil)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, r)
 
