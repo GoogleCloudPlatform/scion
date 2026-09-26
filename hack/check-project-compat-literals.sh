@@ -39,7 +39,6 @@ allowed_paths=(
   "^cmd/list.go$"
   "^cmd/notifications.go$"
   "^cmd/project.go$"
-  "^cmd/template_resolution.go$"
 
   # Current compatibility and migration tests/fixtures.
   "^cmd/cli_mode_test.go$"
@@ -166,7 +165,6 @@ allowed_paths=(
   "^pkg/config/settings.go$"
   "^pkg/config/settings_v1.go$"
   "^pkg/config/shared_dirs.go$"
-  "^pkg/config/templates.go$"
   "^pkg/hub/events.go$"
   "^pkg/hub/events_postgres.go$"
   "^pkg/hub/fs_safety.go$"

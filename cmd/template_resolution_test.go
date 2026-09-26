@@ -21,6 +21,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -47,12 +48,6 @@ func TestParseTemplateScope(t *testing.T) {
 			expectedName:  "claude",
 		},
 		{
-			name:          "legacy grove scope prefix (normalized to project)",
-			input:         "grove:custom-template",
-			expectedScope: "project",
-			expectedName:  "custom-template",
-		},
-		{
 			name:          "project scope prefix",
 			input:         "project:custom-template",
 			expectedScope: "project",
@@ -71,8 +66,40 @@ func TestParseTemplateScope(t *testing.T) {
 			expectedName:  "unknown:template",
 		},
 		{
+			// The removed "grove" scope alias is just another unrecognized
+			// prefix now: it falls through to the existing "treat the whole
+			// string as a literal name" path, the same as any other
+			// unmatched word, rather than resolving to "project" or being
+			// rejected outright. ResolveTemplateForHub then fails to find a
+			// template literally named "grove:custom-template" and returns
+			// the ordinary template-not-found error. The "grove" literal
+			// here is allowlisted in hack/check-project-compat-literals.sh;
+			// a later cleanup may rewrite this case to use a generic
+			// "bogus:" scope instead.
+			name:          "legacy grove scope prefix falls through to the name",
+			input:         "grove:custom-template",
+			expectedScope: "",
+			expectedName:  "grove:custom-template",
+		},
+		{
+			// ResolveTemplateForHub runs parseTemplateScope on the raw
+			// --template value with no IsRemoteURI guard, so remote URIs and
+			// rclone connection strings must pass through unchanged instead
+			// of having their leading segment mistaken for a scope prefix.
+			name:          "remote URI passes through unchanged",
+			input:         "https://host/tpl",
+			expectedScope: "",
+			expectedName:  "https://host/tpl",
+		},
+		{
+			name:          "rclone connection string passes through unchanged",
+			input:         ":gcs:bucket/x",
+			expectedScope: "",
+			expectedName:  ":gcs:bucket/x",
+		},
+		{
 			name:          "multiple colons",
-			input:         "grove:my:template",
+			input:         "project:my:template",
 			expectedScope: "project",
 			expectedName:  "my:template",
 		},
@@ -94,6 +121,105 @@ func TestParseTemplateScope(t *testing.T) {
 				t.Errorf("parseTemplateScope(%q) name = %q, want %q", tt.input, name, tt.expectedName)
 			}
 		})
+	}
+}
+
+func TestValidateTemplateScope(t *testing.T) {
+	tests := []struct {
+		name    string
+		scope   string
+		wantErr bool
+	}{
+		{name: "empty is accepted (no explicit scope requested)", scope: ""},
+		{name: "global is accepted", scope: "global"},
+		{name: "project is accepted", scope: "project"},
+		{name: "user is accepted", scope: "user"},
+		{
+			// --template-scope is a plain flag value with no colon-in-URI
+			// ambiguity, unlike a template-name prefix, so the removed
+			// "grove" alias is rejected outright here rather than falling
+			// back to a default. This is what stops
+			// `--template-scope grove --upload-template` from reaching the
+			// Hub as a real, mis-scoped template upload.
+			name:    "grove is rejected",
+			scope:   "grove",
+			wantErr: true,
+		},
+		{name: "other unrecognized values are rejected", scope: "bogus", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateTemplateScope(tt.scope)
+			if tt.wantErr && err == nil {
+				t.Fatalf("validateTemplateScope(%q) = nil, want error", tt.scope)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("validateTemplateScope(%q) unexpected error: %v", tt.scope, err)
+			}
+		})
+	}
+}
+
+// TestResolveTemplateForHub_RejectsLegacyGroveTemplateScope proves that
+// ResolveTemplateForHub actually calls validateTemplateScope on the
+// --template-scope flag value, not just that the helper works in isolation.
+// Without this wiring test, deleting the validateTemplateScope call from
+// ResolveTemplateForHub leaves every other test green.
+func TestResolveTemplateForHub_RejectsLegacyGroveTemplateScope(t *testing.T) {
+	oldTemplateScope := templateScope
+	templateScope = "grove"
+	defer func() { templateScope = oldTemplateScope }()
+
+	_, err := ResolveTemplateForHub(context.Background(), &HubContext{}, "anything")
+	if err == nil {
+		t.Fatal("ResolveTemplateForHub() = nil error, want rejection of --template-scope grove")
+	}
+	if want := `unknown template scope "grove"`; !strings.Contains(err.Error(), want) {
+		t.Errorf("ResolveTemplateForHub() error = %q, want it to contain %q", err.Error(), want)
+	}
+}
+
+// TestResolveTemplateForHub_GroveNamePrefixFallsThroughToNotFound proves the
+// other half of the removed alias: a "grove:"-prefixed --template value is no
+// longer a recognized scope, so it is treated as a literal template name and
+// ends in the ordinary not-found error rather than resolving under project
+// scope.
+func TestResolveTemplateForHub_GroveNamePrefixFallsThroughToNotFound(t *testing.T) {
+	oldTemplateScope := templateScope
+	templateScope = ""
+	defer func() { templateScope = oldTemplateScope }()
+
+	t.Setenv("HOME", t.TempDir())
+
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd() failed: %v", err)
+	}
+	defer func() { _ = os.Chdir(origWd) }()
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatalf("os.Chdir() failed: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"templates":[],"totalCount":0}`))
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	if err != nil {
+		t.Fatalf("hubclient.New failed: %v", err)
+	}
+
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: "p1", ProjectPath: t.TempDir()}
+
+	_, err = ResolveTemplateForHub(context.Background(), hubCtx, "grove:foo")
+	if err == nil {
+		t.Fatal("ResolveTemplateForHub() = nil error, want template not found")
+	}
+	if want := "template 'grove:foo' not found"; !strings.Contains(err.Error(), want) {
+		t.Errorf("ResolveTemplateForHub() error = %q, want it to contain %q", err.Error(), want)
 	}
 }
 
