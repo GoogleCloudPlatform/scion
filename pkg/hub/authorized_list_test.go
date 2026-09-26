@@ -270,6 +270,40 @@ func TestAuthorizedListPageFillKeepsLastIncludedCursor(t *testing.T) {
 	}
 }
 
+// TestAuthorizedListPageFillAdvancesCursorPastScannedItems checks that when
+// the page fills partway through a batch, NextCursor advances past every
+// item already examined in that batch (denied or otherwise), not just to the
+// last included item. Items 2 and 3 below are denied and sit between the
+// last included item (1) and the item that overflows the page (4); the
+// resume cursor should skip straight to "3" so a follow-up request starts at
+// item 4 instead of re-examining 2 and 3.
+func TestAuthorizedListPageFillAdvancesCursorPastScannedItems(t *testing.T) {
+	items := []authorizedListTestItem{{id: "0"}, {id: "1"}, {id: "2"}, {id: "3"}, {id: "4"}}
+	allowedIDs := map[string]bool{"0": true, "1": true, "4": true}
+	fetch := authorizedListBoundaryFetch(items)
+	read := func(_ context.Context, _ Identity, resources []Resource) ([]bool, error) {
+		allowed := make([]bool, len(resources))
+		for i, r := range resources {
+			allowed[i] = allowedIDs[r.ID]
+		}
+		return allowed, nil
+	}
+	resource := func(item *authorizedListTestItem) Resource { return Resource{ID: item.id} }
+	cursorFor := func(item *authorizedListTestItem) string { return item.id }
+
+	result, err := authorizedList(context.Background(), nil, "", 2, fetch, resource, cursorFor, read)
+	require.NoError(t, err)
+	require.Len(t, result.Items, 2)
+	assert.Equal(t, "0", result.Items[0].id)
+	assert.Equal(t, "1", result.Items[1].id)
+	assert.Equal(t, "3", result.NextCursor, "resume cursor must skip past items already examined in this batch")
+
+	next, err := authorizedList(context.Background(), nil, result.NextCursor, 2, fetch, resource, cursorFor, read)
+	require.NoError(t, err)
+	require.NotEmpty(t, next.Items)
+	assert.Equal(t, "4", next.Items[0].id, "the follow-up page must start at the overflowing item, not re-return a denied one")
+}
+
 func TestAuthorizedListStopsAfterInFlightCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	fetches := 0
