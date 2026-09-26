@@ -27,9 +27,12 @@
 package config
 
 import (
+	"bytes"
 	"context"
+	encjson "encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -40,9 +43,11 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"gopkg.in/yaml.v3"
 )
 
 // legacyProjectIDFile is the pre-rename name of the per-project id file.
@@ -76,6 +81,16 @@ type Reporter interface {
 	// but is no longer read; replacement is the canonical variable to use
 	// instead. The legacy value is never adopted.
 	EnvIgnored(name, replacement string)
+
+	// PrecedenceChanged reports that migrating a project's own hub.grove_id
+	// populated hub.project_id with value, which differs from other, the
+	// value an already-loaded global settings file provided. Before
+	// per-file migration, a project-level hub.grove_id was only consulted
+	// when no file in the merge set hub.project_id, so a global value like
+	// other used to win here; after migration the project's own value wins
+	// through normal project-over-global precedence instead (see
+	// migrateProjectSettingsFile).
+	PrecedenceChanged(path, value, other string)
 }
 
 // legacyRemovedEnv pairs a removed legacy environment variable with its
@@ -97,8 +112,7 @@ var removedLegacyEnvVars = []legacyRemovedEnv{
 // The env-key mappers in koanf.go and settings_v1.go call this to make sure
 // a removed legacy variable is never picked up by the generic SCION_*
 // fallback mapping (e.g. SCION_HUB_GROVE_ID would otherwise still land on
-// the koanf key hub.grove_id, which readers keep honouring as a *file*
-// fallback).
+// the koanf key hub.grove_id, an unrecognised key nothing reads).
 func isRemovedLegacyEnv(name string) bool {
 	for _, e := range removedLegacyEnvVars {
 		if e.name == name {
@@ -176,6 +190,11 @@ func (r slogReporter) EnvIgnored(name, replacement string) {
 	r.log().Warn("legacy environment variable ignored", "name", name, "replacement", replacement)
 }
 
+func (r slogReporter) PrecedenceChanged(path, value, other string) {
+	r.log().Info("project hub.project_id now takes precedence over global",
+		"path", path, "value", value, "previous", other)
+}
+
 // ProjectOverrides carries values a caller should use for the current
 // invocation when MigrateLegacyProject could not rewrite a legacy file on
 // disk (read-only filesystem, not owner). An empty field means "nothing to
@@ -251,6 +270,27 @@ var syncFile = func(f *os.File) error {
 	return f.Sync()
 }
 
+// renameFile mimics os.Rename for algorithm C's commit-only rename (the tmp
+// file created by migrateLegacyYAMLKeysLocked onto the real path). Tests
+// override it to force a failure after a conflict backup has already been
+// written, so the backup-removed-on-rename-failure path can be exercised
+// without a filesystem that actually rejects rename.
+var renameFile = os.Rename
+
+// backupWriteFile mimics (*os.File).Write for writeConflictBackup's own
+// write to the backup file. Tests override it to force a failure after the
+// backup file has been created, so the partial-file cleanup can be
+// exercised without a filesystem that actually rejects the write.
+var backupWriteFile = func(f *os.File, data []byte) (int, error) {
+	return f.Write(data)
+}
+
+// backupCloseFile mimics (*os.File).Close for writeConflictBackup's own
+// backup file, the same way backupWriteFile stands in for its Write.
+var backupCloseFile = func(f *os.File) error {
+	return f.Close()
+}
+
 // checkGitTracked is indirected through a package var so tests can count
 // calls and assert it is never invoked on a path that did not migrate
 // anything (the no-op, conflict, and skipped cases).
@@ -276,6 +316,29 @@ type projectMigrationDirState struct {
 	reportedMigrated bool
 	reportedConflict bool
 	reportedSkipped  bool
+
+	// reportedYAMLEvents dedups algorithm C's per-key events ("migrated:
+	// grove-id", "conflict:grove_id", ...) at finer granularity than the
+	// three booleans above: a single call can legitimately report several
+	// distinct keys (a marker file's grove-id, grove-name and grove-slug),
+	// so dedup must be keyed by event+key, not just fired once for the
+	// whole file.
+	reportedYAMLEvents map[string]bool
+}
+
+// yamlEventOnce reports whether kind+key has not been reported before for
+// this file, recording it as reported either way. Used by
+// migrateLegacyYAMLKeysLocked while holding st.mu.
+func (st *projectMigrationDirState) yamlEventOnce(kind, key string) bool {
+	if st.reportedYAMLEvents == nil {
+		st.reportedYAMLEvents = map[string]bool{}
+	}
+	full := kind + ":" + key
+	if st.reportedYAMLEvents[full] {
+		return false
+	}
+	st.reportedYAMLEvents[full] = true
+	return true
 }
 
 // projectMigrationDirs is keyed by projectMigrationDirKey(absolute dir).
@@ -333,6 +396,10 @@ func (d projectMigrationDedupReporter) Skipped(old, reason, manual string) {
 
 func (d projectMigrationDedupReporter) EnvIgnored(name, replacement string) {
 	d.next.EnvIgnored(name, replacement)
+}
+
+func (d projectMigrationDedupReporter) PrecedenceChanged(path, value, other string) {
+	d.next.PrecedenceChanged(path, value, other)
 }
 
 // MigrateLegacyProject migrates a project's legacy .scion/grove-id file to
@@ -608,4 +675,593 @@ func gitTracked(path string) bool {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "-C", filepath.Dir(abs), "ls-files", "--error-unmatch", filepath.Base(abs))
 	return cmd.Run() == nil
+}
+
+// legacyYAMLKeyRename describes one legacy->canonical YAML key that
+// migrateLegacyYAMLKeys looks for in a document. parent names the
+// containing mapping ("" for a top-level key, "hub" for a key nested one
+// level under a top-level "hub:" mapping); scion's legacy keys never nest
+// more deeply than that.
+type legacyYAMLKeyRename struct {
+	parent    string
+	legacy    string
+	canonical string
+}
+
+// markerKeyRenames lists the legacy top-level keys a .scion marker file may
+// still use.
+var markerKeyRenames = []legacyYAMLKeyRename{
+	{legacy: "grove-id", canonical: "project-id"},
+	{legacy: "grove-name", canonical: "project-name"},
+	{legacy: "grove-slug", canonical: "project-slug"},
+}
+
+// hubGroveIDRename is the legacy settings-file key migrateProjectSettingsFile
+// looks for.
+var hubGroveIDRename = []legacyYAMLKeyRename{
+	{parent: "hub", legacy: "grove_id", canonical: "project_id"},
+}
+
+// joinKey renders parent+key the way they appear in a dotted settings key
+// (e.g. "hub.grove_id"), or just key for a top-level marker key.
+func joinKey(parent, key string) string {
+	if parent == "" {
+		return key
+	}
+	return parent + "." + key
+}
+
+// migrateLegacyMarkerFile migrates a .scion marker file's legacy grove-id,
+// grove-name and grove-slug keys to project-id, project-name and
+// project-slug in place. The returned map holds the legacy value for every
+// canonical field the file lacked, whether or not the on-disk rewrite
+// succeeded: ReadProjectMarker's own subsequent read of the file already
+// returns the right value when the rewrite did succeed, so it only actually
+// consults this map for a field its own read still finds empty (the file
+// could not be rewritten) — a field is absent from the map only when the
+// file already had that canonical key (nothing for the caller to fall back
+// to; its own read is authoritative) or had no legacy key for it at all.
+func migrateLegacyMarkerFile(path string) map[string]string {
+	return migrateLegacyYAMLKeys(path, markerKeyRenames, currentProjectMigrationReporter())
+}
+
+// migrateProjectSettingsFile migrates a project or global settings.yaml's
+// legacy hub.grove_id key to hub.project_id in place. path must already be
+// resolved to a specific settings file (see loadSettingsFile and
+// LoadSingleFileVersioned). migrated reports whether a hub.grove_id key was
+// found and had no existing hub.project_id to yield to (the "surgical" case,
+// which is also the precedence-change trigger callers check for); override,
+// when non-empty, is the value a caller should use in memory if the on-disk
+// rewrite failed.
+//
+// Only YAML settings files are in scope: the surgical rewrite is
+// line/column based against a YAML parse, and settings.json is rare enough
+// that it is left alone here (its hub.grove_id, if any, simply stops being
+// read, like any other unrecognised key).
+func migrateProjectSettingsFile(path string) (migrated bool, override string) {
+	switch filepath.Ext(path) {
+	case ".yaml", ".yml":
+	default:
+		return false, ""
+	}
+	overrides := migrateLegacyYAMLKeys(path, hubGroveIDRename, currentProjectMigrationReporter())
+	v, ok := overrides[projectcompat.ConfigProjectIDKey]
+	return ok, v
+}
+
+// settingsJSONHasLegacyHubGroveID reports whether the JSON settings file at
+// path has a top-level "hub": {"grove_id": ...} entry with no sibling
+// "project_id". Malformed or unreadable JSON is treated as "no", the same
+// as any other settings-file read failure elsewhere in this package.
+func settingsJSONHasLegacyHubGroveID(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var raw map[string]encjson.RawMessage
+	if err := encjson.Unmarshal(data, &raw); err != nil {
+		return false
+	}
+	hubRaw, ok := raw[hubGroveIDRename[0].parent]
+	if !ok {
+		return false
+	}
+	var hub map[string]encjson.RawMessage
+	if err := encjson.Unmarshal(hubRaw, &hub); err != nil {
+		return false
+	}
+	_, hasLegacy := hub[hubGroveIDRename[0].legacy]
+	_, hasCanonical := hub[hubGroveIDRename[0].canonical]
+	return hasLegacy && !hasCanonical
+}
+
+// warnUnmigratedHubGroveID reports, once per process per file, that a
+// settings file's legacy hub.grove_id key exists but was not migrated
+// (algorithm C only rewrites a literal "grove_id:" entry directly under a
+// YAML "hub:" mapping): unlike the old merged-config remap, which read it
+// from any format or shape, this key now simply goes unread outside that
+// one shape, so the user needs an explicit pointer rather than a silent,
+// unlinked project. reason names the specific gap (JSON format, a YAML
+// merge key, ...).
+func warnUnmigratedHubGroveID(path string, report Reporter, reason string) {
+	st := projectMigrationStateFor(path)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if !st.yamlEventOnce("skipped", hubGroveIDRename[0].legacy) {
+		return
+	}
+	report.Skipped(path+":"+joinKey(hubGroveIDRename[0].parent, hubGroveIDRename[0].legacy),
+		reason,
+		manualKeyRenameCommand(hubGroveIDRename[0], path))
+}
+
+// betweenReadAndRename is called after migrateLegacyYAMLKeys has written its
+// replacement content to a temp file but before it re-reads the target path
+// to compare against the bytes it started from. Tests override it to land a
+// concurrent writer (another scion process, or a hand edit) in that window,
+// without needing real timing-dependent concurrency.
+var betweenReadAndRename = func() {}
+
+// legacyKeyAction is one legacyYAMLKeyRename found present in a document,
+// together with what migrateLegacyYAMLKeys decided to do about it.
+type legacyKeyAction struct {
+	rename       legacyYAMLKeyRename
+	legacyNode   *yaml.Node
+	legacyValue  string
+	canonicalSet bool // a canonical key already existed alongside the legacy one
+	conflict     bool // canonical existed with a different value
+}
+
+// migrateLegacyYAMLKeys implements the YAML key rewrite algorithm shared by
+// marker keys and hub.grove_id: it finds every rename whose legacy key is
+// present in file, migrates each to its canonical name, and returns the
+// legacy value for any canonical field that could not be written to disk
+// (read-only filesystem, not owner) — the in-memory fallback described in
+// the package doc comment.
+//
+// Safe to call repeatedly and concurrently for the same file, from any
+// number of goroutines and call sites: each distinct key's event (Migrated,
+// Conflict, Skipped) is reported at most once per process for that file,
+// reusing the same per-path state MigrateLegacyProject uses for the id file
+// (keyed by the exact path given, so a marker file's state and a project
+// directory's state never collide) — but keyed additionally by which legacy
+// key the event is about, since one call can legitimately migrate several
+// distinct keys (a marker file's grove-id, grove-name and grove-slug) and
+// each of those must still be reported the first time. Every call still
+// re-examines the filesystem, so a file edited or migrated by another
+// process between calls is always picked up correctly.
+func migrateLegacyYAMLKeys(file string, renames []legacyYAMLKeyRename, report Reporter) map[string]string {
+	path := file
+	if resolved, err := filepath.EvalSymlinks(file); err == nil {
+		// A dotfile-managed settings file: rewrite the resolved target in
+		// place and leave the link alone.
+		path = resolved
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	st := projectMigrationStateFor(path)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return migrateLegacyYAMLKeysLocked(path, renames, report, st, 0)
+}
+
+func migrateLegacyYAMLKeysLocked(path string, renames []legacyYAMLKeyRename, report Reporter, st *projectMigrationDirState, attempt int) map[string]string {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil
+	}
+	orig, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+
+	var doc yaml.Node
+	if err := yaml.Unmarshal(orig, &doc); err != nil || len(doc.Content) == 0 {
+		return nil // malformed or empty YAML: leave it alone
+	}
+	root := doc.Content[0]
+
+	actions := planLegacyKeyActions(root, renames)
+	if len(actions) == 0 {
+		return nil // no legacy keys present: nothing to migrate, no write
+	}
+	overrides := legacyValueOverrides(actions)
+
+	if uid, ok := fileOwnerUID(info); ok && uid != geteuid() {
+		reportActionsSkipped(report, st, actions, path, "owned by another user")
+		return overrides
+	}
+
+	allSurgical := allActionsSurgical(actions)
+	if !allSurgical && hasMultipleYAMLDocuments(orig) {
+		// A re-encode only ever writes the first parsed document; refuse
+		// rather than silently drop everything after the first "---".
+		reportActionsSkipped(report, st, actions, path,
+			"settings file has multiple YAML documents; refusing an automatic rewrite")
+		return overrides
+	}
+
+	newContent, hasConflict := applyLegacyKeyActions(orig, &doc, root, actions, allSurgical)
+
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".migrate-*")
+	if err != nil {
+		reportActionsSkipped(report, st, actions, path, unwrapErrno(err))
+		return overrides
+	}
+	tmpPath := tmp.Name()
+	writeOK := func() bool {
+		if err := chmodFile(tmp, info.Mode().Perm()); err != nil {
+			return false
+		}
+		if _, err := tmp.Write(newContent); err != nil {
+			return false
+		}
+		return syncFile(tmp) == nil
+	}()
+	closeErr := tmp.Close()
+	if !writeOK || closeErr != nil {
+		_ = os.Remove(tmpPath)
+		reportActionsSkipped(report, st, actions, path, "could not write migrated file")
+		return overrides
+	}
+
+	betweenReadAndRename()
+
+	if cur, err := os.ReadFile(path); err != nil || !bytes.Equal(cur, orig) {
+		_ = os.Remove(tmpPath)
+		if attempt == 0 {
+			return migrateLegacyYAMLKeysLocked(path, renames, report, st, attempt+1)
+		}
+		reportActionsSkipped(report, st, actions, path, "file changed during migration")
+		return overrides
+	}
+
+	// The backup is written only once every earlier check has already
+	// succeeded, immediately before the atomic rename that commits the
+	// migration: a backup only belongs on disk paired with a completed
+	// migration, so a rename failure below removes it again rather than
+	// leaving an orphan behind.
+	var backupPath string
+	if hasConflict {
+		if backupPath, err = writeConflictBackup(path, orig); err != nil {
+			_ = os.Remove(tmpPath)
+			reportActionsSkipped(report, st, actions, path, unwrapErrno(err))
+			return overrides
+		}
+	}
+
+	if err := renameFile(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		if hasConflict {
+			_ = os.Remove(backupPath)
+		}
+		reportActionsSkipped(report, st, actions, path, unwrapErrno(err))
+		return overrides
+	}
+
+	tracked := checkGitTracked(path)
+	for _, a := range actions {
+		key := joinKey(a.rename.parent, a.rename.legacy)
+		canonical := joinKey(a.rename.parent, a.rename.canonical)
+		if a.conflict {
+			if st.yamlEventOnce("conflict", a.rename.legacy) {
+				report.Conflict(path+":"+key, path+":"+canonical, fmt.Sprintf(
+					"both %s and %s exist in %s with different values; using %s. Original value saved to %s.",
+					key, canonical, path, canonical, backupPath))
+			}
+			continue
+		}
+		if st.yamlEventOnce("migrated", a.rename.legacy) {
+			// Matches the CLI wire format: "scion: migrated hub.grove_id ->
+			// hub.project_id in <file>".
+			report.Migrated(key, canonical+" in "+path, tracked)
+		}
+	}
+	return overrides
+}
+
+// planLegacyKeyActions finds, for each rename, whether its legacy key is
+// present in root, and if so whether a canonical key already sits alongside
+// it (and with what relationship to the legacy value).
+func planLegacyKeyActions(root *yaml.Node, renames []legacyYAMLKeyRename) []legacyKeyAction {
+	var actions []legacyKeyAction
+	for _, r := range renames {
+		mapping := findChildMapping(root, r.parent)
+		legacyKey, legacyVal := findMapKey(mapping, r.legacy)
+		if legacyKey == nil {
+			continue
+		}
+		legacyVal = resolveAlias(legacyVal)
+		if legacyVal == nil {
+			continue // a broken alias; leave the file alone rather than guess
+		}
+		a := legacyKeyAction{rename: r, legacyNode: legacyKey, legacyValue: legacyVal.Value}
+		if _, canonicalVal := findMapKey(mapping, r.canonical); canonicalVal != nil {
+			canonicalVal = resolveAlias(canonicalVal)
+			a.canonicalSet = true
+			a.conflict = canonicalVal == nil || canonicalVal.Value != legacyVal.Value
+		}
+		actions = append(actions, a)
+	}
+	return actions
+}
+
+// resolveAlias follows n through any YAML anchors/aliases (`grove-id: *v`) to
+// the node it actually refers to, so value comparisons and the in-memory
+// override read the real value rather than the anchor name. Returns nil for
+// a dangling alias. Non-alias nodes are returned unchanged.
+func resolveAlias(n *yaml.Node) *yaml.Node {
+	for n != nil && n.Kind == yaml.AliasNode {
+		n = n.Alias
+	}
+	return n
+}
+
+// allActionsSurgical reports whether every action is a pure key rename (no
+// canonical key already present for any of them), the only case where the
+// byte-level rewrite path applies.
+func allActionsSurgical(actions []legacyKeyAction) bool {
+	for _, a := range actions {
+		if a.canonicalSet {
+			return false
+		}
+	}
+	return true
+}
+
+// hasMultipleYAMLDocuments reports whether data contains more than one
+// "---"-separated YAML document. yaml.Unmarshal (and this file's own Node
+// parse) only ever sees the first; a re-encode built from that parse would
+// silently drop everything after it.
+func hasMultipleYAMLDocuments(data []byte) bool {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	var first yaml.Node
+	if err := dec.Decode(&first); err != nil {
+		return false
+	}
+	var second yaml.Node
+	// Anything other than a clean end-of-input after the first document —
+	// including a second document that is itself malformed — means a
+	// re-encode would not round-trip the file, so it must fail closed here
+	// too, not just when the second document parses cleanly.
+	err := dec.Decode(&second)
+	return !errors.Is(err, io.EOF)
+}
+
+// legacyValueOverrides returns, for each action whose canonical key was
+// absent (the only case where a caller might need the legacy value if the
+// write fails), the legacy value keyed by canonical name.
+func legacyValueOverrides(actions []legacyKeyAction) map[string]string {
+	var overrides map[string]string
+	for _, a := range actions {
+		if !a.canonicalSet {
+			if overrides == nil {
+				overrides = map[string]string{}
+			}
+			overrides[a.rename.canonical] = a.legacyValue
+		}
+	}
+	return overrides
+}
+
+// applyLegacyKeyActions builds the replacement file content for actions.
+// When every action is a pure rename (no canonical key already present), it
+// edits the legacy key tokens directly on orig's bytes, preserving comments,
+// order and formatting byte-for-byte. Otherwise (a canonical key already
+// exists for at least one action) it re-encodes the whole document from the
+// parsed tree; formatting may normalise, which the design accepts as rare.
+// allSurgical must equal allActionsSurgical(actions); the caller already
+// computes it once to gate the multi-document check.
+func applyLegacyKeyActions(orig []byte, doc *yaml.Node, root *yaml.Node, actions []legacyKeyAction, allSurgical bool) (newContent []byte, hasConflict bool) {
+	for _, a := range actions {
+		if a.conflict {
+			hasConflict = true
+		}
+	}
+
+	if allSurgical {
+		lines := bytes.Split(append([]byte(nil), orig...), []byte("\n"))
+		ok := true
+		for _, a := range actions {
+			if !surgicalRenameKey(lines, a.legacyNode, a.rename.canonical) {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return bytes.Join(lines, []byte("\n")), false
+		}
+		// A line didn't match what the parser reported for it (e.g. an
+		// exotic quoting form): fall through to the safe re-encode path
+		// below rather than risk writing a corrupted file.
+	}
+
+	for _, a := range actions {
+		if !a.canonicalSet {
+			a.legacyNode.Value = a.rename.canonical
+			continue
+		}
+		deleteMapKey(findChildMapping(root, a.rename.parent), a.rename.legacy)
+	}
+	out, err := yaml.Marshal(doc)
+	if err != nil {
+		return orig, hasConflict
+	}
+	return out, hasConflict
+}
+
+// utf8BOM is the byte-order-mark yaml.v3 skips before counting columns, but
+// which is still physically present at the start of the original file.
+var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
+
+// surgicalRenameKey replaces node's key token, at its recorded Line/Column,
+// with canonical, in place within lines (as produced by bytes.Split(orig,
+// "\n")). node.Column is a 1-indexed *rune* column (yaml.v3's convention),
+// not a byte offset, so it is converted by walking runes; line 0 additionally
+// accounts for a leading BOM, which yaml.v3 strips before counting columns.
+// A key written with quotes ("grove-id": ...) has its Column pointing at the
+// opening quote; the token comparison and replacement happen between the
+// quotes, leaving the quote characters themselves in place. Returns false,
+// leaving lines untouched, if the bytes at that position don't match node's
+// own value — a defensive check that never trusts stale coordinates into
+// producing a corrupt rewrite.
+func surgicalRenameKey(lines [][]byte, node *yaml.Node, canonical string) bool {
+	idx := node.Line - 1
+	if idx < 0 || idx >= len(lines) {
+		return false
+	}
+	line := lines[idx]
+	off, ok := runeColumnToByteOffset(line, node.Column, idx == 0)
+	if !ok {
+		return false
+	}
+
+	var quote byte
+	if off < len(line) && (line[off] == '"' || line[off] == '\'') {
+		quote = line[off]
+		off++
+	}
+
+	legacy := node.Value
+	end := off + len(legacy)
+	if off < 0 || end > len(line) || string(line[off:end]) != legacy {
+		return false
+	}
+	if quote != 0 && (end >= len(line) || line[end] != quote) {
+		return false
+	}
+
+	newLine := make([]byte, 0, len(line)-len(legacy)+len(canonical))
+	newLine = append(newLine, line[:off]...)
+	newLine = append(newLine, canonical...)
+	newLine = append(newLine, line[end:]...)
+	lines[idx] = newLine
+	return true
+}
+
+// runeColumnToByteOffset converts a 1-indexed, rune-counted yaml.v3 Column
+// on line into a 0-indexed byte offset. firstLine skips a leading UTF-8 BOM
+// before counting, matching yaml.v3's own column numbering, while still
+// returning an offset relative to line's real bytes (BOM included).
+func runeColumnToByteOffset(line []byte, column int, firstLine bool) (int, bool) {
+	if column < 1 {
+		return 0, false
+	}
+	rest := line
+	prefix := 0
+	if firstLine && bytes.HasPrefix(rest, utf8BOM) {
+		prefix = len(utf8BOM)
+		rest = rest[prefix:]
+	}
+	runeIdx := 1
+	byteIdx := 0
+	for byteIdx < len(rest) {
+		if runeIdx == column {
+			return prefix + byteIdx, true
+		}
+		_, size := utf8.DecodeRune(rest[byteIdx:])
+		if size == 0 {
+			return 0, false
+		}
+		byteIdx += size
+		runeIdx++
+	}
+	if runeIdx == column {
+		return prefix + byteIdx, true
+	}
+	return 0, false
+}
+
+// findChildMapping returns root itself for name == "", or the mapping node
+// of the top-level key name within root (nil if absent or not a mapping,
+// following an alias first so `hub: *anchor` resolves to the real mapping).
+func findChildMapping(root *yaml.Node, name string) *yaml.Node {
+	if name == "" {
+		return root
+	}
+	_, val := findMapKey(root, name)
+	val = resolveAlias(val)
+	if val == nil || val.Kind != yaml.MappingNode {
+		return nil
+	}
+	return val
+}
+
+// findMapKey returns the key and value nodes for name in mapping's Content
+// (alternating key/value pairs), or nil, nil if mapping is nil or has no
+// such key.
+func findMapKey(mapping *yaml.Node, name string) (key, value *yaml.Node) {
+	if mapping == nil {
+		return nil, nil
+	}
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if mapping.Content[i].Value == name {
+			return mapping.Content[i], mapping.Content[i+1]
+		}
+	}
+	return nil, nil
+}
+
+// deleteMapKey removes name's key/value pair from mapping's Content, if
+// present.
+func deleteMapKey(mapping *yaml.Node, name string) {
+	if mapping == nil {
+		return
+	}
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if mapping.Content[i].Value == name {
+			mapping.Content = append(mapping.Content[:i], mapping.Content[i+2:]...)
+			return
+		}
+	}
+}
+
+// writeConflictBackup writes orig, unchanged, to path+".grove-migration.bak"
+// (or that name with a numeric suffix if it's already taken), using
+// O_CREAT|O_EXCL so it never clobbers an existing backup. Returns the name
+// actually used. A backup file only ever exists complete or not at all: a
+// write or close failure removes the partial candidate before returning the
+// error.
+func writeConflictBackup(path string, orig []byte) (string, error) {
+	base := path + ".grove-migration.bak"
+	for n := 0; ; n++ {
+		candidate := base
+		if n > 0 {
+			candidate = fmt.Sprintf("%s.%d", base, n)
+		}
+		f, err := os.OpenFile(candidate, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err != nil {
+			if errors.Is(err, fs.ErrExist) {
+				continue
+			}
+			return "", err
+		}
+		_, writeErr := backupWriteFile(f, orig)
+		closeErr := backupCloseFile(f)
+		if writeErr != nil {
+			_ = os.Remove(candidate)
+			return "", writeErr
+		}
+		if closeErr != nil {
+			_ = os.Remove(candidate)
+			return "", closeErr
+		}
+		return candidate, nil
+	}
+}
+
+// reportActionsSkipped reports Skipped, once per action, each with its own
+// manual rename command.
+func reportActionsSkipped(report Reporter, st *projectMigrationDirState, actions []legacyKeyAction, path, reason string) {
+	for _, a := range actions {
+		if st.yamlEventOnce("skipped", a.rename.legacy) {
+			report.Skipped(path+":"+joinKey(a.rename.parent, a.rename.legacy), reason, manualKeyRenameCommand(a.rename, path))
+		}
+	}
+}
+
+// manualKeyRenameCommand returns the copy-pasteable instruction a Skipped
+// report suggests for a YAML key rename.
+func manualKeyRenameCommand(r legacyYAMLKeyRename, path string) string {
+	return fmt.Sprintf("rename key `%s` to `%s` in %s", joinKey(r.parent, r.legacy), joinKey(r.parent, r.canonical), path)
 }

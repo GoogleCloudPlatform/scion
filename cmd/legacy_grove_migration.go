@@ -117,3 +117,7 @@ func (stderrReporter) Skipped(old, reason, manual string) {
 func (stderrReporter) EnvIgnored(name, replacement string) {
 	fmt.Fprintf(os.Stderr, "scion: %s is no longer read; set %s instead\n", name, replacement)
 }
+
+func (stderrReporter) PrecedenceChanged(path, value, other string) {
+	fmt.Fprintf(os.Stderr, "scion: hub.project_id in %s (%s) now takes precedence over the global hub.project_id (%s)\n", path, value, other)
+}

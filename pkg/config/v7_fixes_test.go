@@ -34,25 +34,33 @@ func TestLoadVersionedSettings_ProjectIDRemapping(t *testing.T) {
 
 func TestLoadSingleFileVersioned_GroveIDBackwardCompat(t *testing.T) {
 	// Verify that settings files using the legacy grove_id key under hub
-	// are still read correctly after the struct tag migration to project_id.
+	// are migrated to project_id in place, and read correctly, after the
+	// struct tag migration to project_id.
 	tmpDir := t.TempDir()
 
+	settingsPath := filepath.Join(tmpDir, "settings.yaml")
 	settingsContent := `schema_version: "1"
 hub:
   endpoint: "https://hub.example.com"
   grove_id: "legacy-grove-uuid-1234"
 `
-	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "settings.yaml"), []byte(settingsContent), 0644))
+	require.NoError(t, os.WriteFile(settingsPath, []byte(settingsContent), 0644))
 
 	vs, err := LoadSingleFileVersioned(tmpDir)
 	require.NoError(t, err)
 	require.NotNil(t, vs.Hub)
-	assert.Equal(t, "legacy-grove-uuid-1234", vs.Hub.ProjectID, "grove_id should be read into ProjectID for backward compatibility")
+	assert.Equal(t, "legacy-grove-uuid-1234", vs.Hub.ProjectID, "grove_id should migrate into ProjectID")
 	assert.Equal(t, "https://hub.example.com", vs.Hub.Endpoint)
+
+	data, err := os.ReadFile(settingsPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "project_id: \"legacy-grove-uuid-1234\"", "file should be migrated in place")
+	assert.NotContains(t, string(data), "grove_id", "grove_id should be gone after migration")
 }
 
 func TestLoadVersionedSettings_GroveIDBackwardCompat(t *testing.T) {
-	// Verify that the koanf-based loader also handles grove_id in settings files.
+	// Verify that the koanf-based loader also migrates grove_id in settings
+	// files, on both the global and project files.
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
@@ -62,12 +70,13 @@ func TestLoadVersionedSettings_GroveIDBackwardCompat(t *testing.T) {
 	globalDir := filepath.Join(tmpDir, ".scion")
 	require.NoError(t, os.MkdirAll(globalDir, 0755))
 
+	globalSettingsPath := filepath.Join(globalDir, "settings.yaml")
 	settingsContent := `schema_version: "1"
 hub:
   endpoint: "https://hub.example.com"
   grove_id: "legacy-grove-uuid-5678"
 `
-	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(settingsContent), 0644))
+	require.NoError(t, os.WriteFile(globalSettingsPath, []byte(settingsContent), 0644))
 
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
@@ -75,7 +84,12 @@ hub:
 	vs, err := LoadVersionedSettings(projectDir)
 	require.NoError(t, err)
 	require.NotNil(t, vs.Hub)
-	assert.Equal(t, "legacy-grove-uuid-5678", vs.Hub.ProjectID, "grove_id should be remapped to project_id in koanf loading")
+	assert.Equal(t, "legacy-grove-uuid-5678", vs.Hub.ProjectID, "grove_id should migrate into project_id")
+
+	data, err := os.ReadFile(globalSettingsPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "project_id: \"legacy-grove-uuid-5678\"", "global file should be migrated in place")
+	assert.NotContains(t, string(data), "grove_id", "grove_id should be gone after migration")
 }
 
 func TestSaveVersionedSettings_WritesProjectID(t *testing.T) {
@@ -95,7 +109,6 @@ func TestSaveVersionedSettings_WritesProjectID(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(tmpDir, "settings.yaml"))
 	require.NoError(t, err)
 	assert.Contains(t, string(data), "project_id: my-project-id", "should write project_id, not grove_id")
-	assert.NotContains(t, string(data), "grove_id", "should not write grove_id")
 }
 
 func TestUpdateVersionedSetting_SnakeCaseKeys(t *testing.T) {
