@@ -390,13 +390,23 @@ func TestDEF152_AgentToAgentDM_DeliversViaOutbound(t *testing.T) {
 	srv, s, project, agent, _ := def138Setup(t)
 	ctx := context.Background()
 
+	brokerID := tid("d152-broker")
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID:     brokerID,
+		Name:   "d152-broker",
+		Slug:   "d152-broker",
+		Status: store.BrokerStatusOnline,
+	}))
+	srv.SetDispatcher(&brokerMockDispatcher{})
+
 	// Create a second agent in the same project for the DM.
 	otherAgent := &store.Agent{
-		ID:        tid("d152-agent-dm-target"),
-		Name:      "d152-agent-dm-target",
-		Slug:      "d152-agent-dm-target",
-		ProjectID: project.ID,
-		Phase:     "running",
+		ID:              tid("d152-agent-dm-target"),
+		Name:            "d152-agent-dm-target",
+		Slug:            "d152-agent-dm-target",
+		ProjectID:       project.ID,
+		Phase:           "running",
+		RuntimeBrokerID: brokerID,
 	}
 	require.NoError(t, s.CreateAgent(ctx, otherAgent))
 

@@ -501,12 +501,22 @@ func TestDEF164_AtAgentSlug_DeliversToAgent(t *testing.T) {
 	srv, s, project, agent, _ := def141BrokerSetup(t)
 	ctx := context.Background()
 
+	brokerID := tid("d164-broker")
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID:     brokerID,
+		Name:   "d164-broker",
+		Slug:   "d164-broker",
+		Status: store.BrokerStatusOnline,
+	}))
+	srv.SetDispatcher(&brokerMockDispatcher{})
+
 	targetAgent := &store.Agent{
-		ID:        tid("d164-target-agent"),
-		Name:      "d164-target-agent",
-		Slug:      "d164-target-agent",
-		ProjectID: project.ID,
-		Phase:     "running",
+		ID:              tid("d164-target-agent"),
+		Name:            "d164-target-agent",
+		Slug:            "d164-target-agent",
+		ProjectID:       project.ID,
+		Phase:           "running",
+		RuntimeBrokerID: brokerID,
 	}
 	require.NoError(t, s.CreateAgent(ctx, targetAgent))
 
@@ -549,12 +559,22 @@ func TestDEF164_AtAgentSlug_DMConversationCreated(t *testing.T) {
 	srv, s, project, agent, _ := def141BrokerSetup(t)
 	ctx := context.Background()
 
+	brokerID := tid("d164-dm-broker")
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID:     brokerID,
+		Name:   "d164-dm-broker",
+		Slug:   "d164-dm-broker",
+		Status: store.BrokerStatusOnline,
+	}))
+	srv.SetDispatcher(&brokerMockDispatcher{})
+
 	targetAgent := &store.Agent{
-		ID:        tid("d164-dm-target"),
-		Name:      "d164-dm-target",
-		Slug:      "d164-dm-target",
-		ProjectID: project.ID,
-		Phase:     "running",
+		ID:              tid("d164-dm-target"),
+		Name:            "d164-dm-target",
+		Slug:            "d164-dm-target",
+		ProjectID:       project.ID,
+		Phase:           "running",
+		RuntimeBrokerID: brokerID,
 	}
 	require.NoError(t, s.CreateAgent(ctx, targetAgent))
 
