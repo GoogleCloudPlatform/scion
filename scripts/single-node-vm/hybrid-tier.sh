@@ -588,6 +588,63 @@ hybrid_nfs_export_line() {
   echo "${export_root} ${cidr}(rw,sync,no_subtree_check,all_squash,anonuid=${anonuid},anongid=${anongid},sec=sys,mp,fsid=${fsid})"
 }
 
+# hybrid_nfs_squash_identity_script SQUASH_USER
+#
+# Renders the remote script that idempotently creates the dedicated NFS
+# squash identity (a system account, no home, no login shell, primary
+# group "scion") if it doesn't already exist, then validates it --
+# whether freshly created just now or pre-existing from an earlier run --
+# against every property the squash identity's security purpose depends
+# on: uid not 0, uid in the system range (at or below /etc/login.defs'
+# SYS_UID_MAX, defaulting to 999 when that file or key is missing, same
+# as useradd's own default), primary group exactly "scion", login shell
+# /usr/sbin/nologin, and (as before) a uid distinct from the "scion"
+# (broker) user's own -- squashing every NFS client to the broker's own
+# identity would let any pod that can reach the export act as the broker
+# on the shared tree. A pre-existing account that fails any of these was
+# not created by this script and is refused outright rather than reused,
+# since silently squashing to it could be squashing to something with
+# far more privilege than intended. Only on success does it print
+# "SQUASH_UID:SCION_GID" for the caller to capture. Pure string
+# rendering -- no gcloud or SSH calls -- so it's directly unit-testable;
+# the caller (deploy.sh) is responsible for actually running the result
+# over SSH.
+hybrid_nfs_squash_identity_script() {
+  local squash_user="$1"
+  cat <<SCRIPT
+set -euo pipefail
+id ${squash_user} >/dev/null 2>&1 || sudo useradd -r -M -N -g scion -s /usr/sbin/nologin ${squash_user}
+SQUASH_UID=\$(id -u ${squash_user})
+SQUASH_GROUP=\$(id -gn ${squash_user})
+SQUASH_SHELL=\$(getent passwd ${squash_user} | cut -d: -f7)
+SYS_UID_MAX=\$(awk -F'[ \\t]+' '\$1 == "SYS_UID_MAX" {print \$2}' /etc/login.defs 2>/dev/null | tail -1 || true)
+case "\$SYS_UID_MAX" in ''|*[!0-9]*) SYS_UID_MAX=999 ;; esac
+SCION_UID=\$(id -u scion)
+SCION_GID=\$(getent group scion | cut -d: -f3)
+if [ "\$SQUASH_UID" -eq 0 ]; then
+  echo "The NFS squash user (${squash_user}) must not be uid 0." >&2
+  exit 1
+fi
+if [ "\$SQUASH_UID" -gt "\$SYS_UID_MAX" ]; then
+  echo "The NFS squash user (${squash_user})'s uid (\$SQUASH_UID) must be a system uid (<= \$SYS_UID_MAX)." >&2
+  exit 1
+fi
+if [ "\$SQUASH_GROUP" != "scion" ]; then
+  echo "The NFS squash user (${squash_user})'s primary group must be scion, found '\$SQUASH_GROUP'." >&2
+  exit 1
+fi
+if [ "\$SQUASH_SHELL" != "/usr/sbin/nologin" ]; then
+  echo "The NFS squash user (${squash_user})'s login shell must be /usr/sbin/nologin, found '\$SQUASH_SHELL'." >&2
+  exit 1
+fi
+if [ "\$SQUASH_UID" = "\$SCION_UID" ]; then
+  echo 'The NFS squash uid must not equal the scion (broker) uid.' >&2
+  exit 1
+fi
+echo "\${SQUASH_UID}:\${SCION_GID}"
+SCRIPT
+}
+
 # hybrid_nfs_export_script EXPORT_ROOT CIDR ANONUID ANONGID FSID HUB_NAME \
 #   IMAGE_PATH IMAGE_SIZE_GB
 #
