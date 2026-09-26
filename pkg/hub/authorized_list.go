@@ -286,8 +286,26 @@ func authorizedList[T any](
 				continue
 			}
 			if len(result.Items) == pageLimit {
-				// Page filled. Resume from this (not-yet-included) item.
-				result.NextCursor = cursorFor(&page.Items[i])
+				// Page filled. NextCursor already holds the cursor of the
+				// last included item, set below when that item was
+				// appended; store cursors are exclusive, so resuming from
+				// it starts immediately after that item. Do not advance it
+				// to this (not-yet-included) item, or that item is skipped
+				// on the next page.
+				//
+				// Items examined earlier in this same batch but not
+				// included (denied, or simply skipped) sit between the
+				// last included item and this one. Advance the cursor past
+				// them too, to the item just before this one, so the next
+				// request resumes at this item directly instead of
+				// re-examining ones already resolved here. i is always > 0
+				// when this happens mid-batch (the append that reached
+				// pageLimit occurred earlier in this same loop); when the
+				// page instead fills exactly at a batch boundary, i is 0
+				// here and NextCursor is left as already set above.
+				if i > 0 {
+					result.NextCursor = cursorFor(&page.Items[i-1])
+				}
 				return result, nil
 			}
 			item := page.Items[i]
