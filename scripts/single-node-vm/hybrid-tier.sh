@@ -116,6 +116,27 @@ _hybrid_gcloud_not_found() {
   echo "$text" | grep -qE 'code=404\b|\bHTTP 404\b|(^|[^A-Za-z0-9_])NOT_FOUND($|[^A-Za-z0-9_])'
 }
 
+# _hybrid_kubectl_not_found TEXT
+#
+# True only for kubectl's own specific "genuinely absent" signal for a
+# named object: "Error from server (NotFound): <kind> "<name>" not
+# found" -- requiring the quoted kind and name, not just the bare
+# "(NotFound)" reason token. kubectl also returns "Error from server
+# (NotFound): the server could not find the requested resource" when
+# the API server itself doesn't recognize the requested endpoint (a
+# stale kubectl/server version skew, for example) -- that carries the
+# same "(NotFound)" token but says nothing about whether the object this
+# call was actually checking for exists, so it must never read as
+# absent, and the kind/name requirement above already excludes it. Same
+# permission/forbidden exclusion as _hybrid_gcloud_not_found above.
+_hybrid_kubectl_not_found() {
+  local text="$1"
+  if echo "$text" | grep -qiE 'permission|forbidden'; then
+    return 1
+  fi
+  echo "$text" | grep -qE 'Error from server \(NotFound\): [A-Za-z.]+ "[^"]+" not found'
+}
+
 # _hybrid_registry_is_loopback REGISTRY
 #
 # True if REGISTRY's host component is one of the common loopback
@@ -845,6 +866,51 @@ echo 'NFS export configured.'
 SCRIPT
 }
 
+# hybrid_settings_shared_dir_storage_yaml VM_IP EXPORT_ROOT PVC_NAME
+#
+# Renders the server.shared_dir_storage block for settings.yaml (the
+# schema from pkg/config/settings_v1.go's V1SharedDirStorageConfig/
+# V1NFSConfig/V1NFSShare), indented to nest under "server:" at the same
+# level as its existing "hub:"/"storage:"/etc. keys. backend is "nfs".
+#
+# The Docker broker on this same VM computes its local mount path as
+# filepath.Join(mount_root, shares[0].id) (see
+# pkg/runtime/workspace_backend_nfs.go) -- so mount_root and id are set
+# to EXPORT_ROOT's parent directory and base name respectively, the only
+# split that makes mount_root/id resolve back to EXPORT_ROOT itself, the
+# same path the share's own "export" field (and the PV's nfs.path) name.
+# Getting this wrong doesn't fail loudly: it just gives Docker and GKE
+# two different trees on what's supposed to be the same shared directory.
+#
+# subpath_root is the fixed "projects" subdirectory every project's
+# shared-dirs live under. PVC_NAME is the PersistentVolumeClaim this
+# hub's GKE pods actually bind to -- despite the YAML field's own name,
+# "pv_name" is consumed as the pod spec's claimName (see
+# pkg/runtime/k8s_runtime.go), not the PersistentVolume's own name, so
+# the caller must pass the resolved PVC name here, not the PV name.
+# Pure string rendering -- no gcloud, kubectl, or SSH calls -- so it's
+# directly unit-testable; the caller only calls this when the tier is
+# on, and splices its output into an otherwise-unchanged settings.yaml
+# render.
+hybrid_settings_shared_dir_storage_yaml() {
+  local vm_ip="$1" export_root="$2" pvc_name="$3"
+  local mount_root share_id
+  mount_root="$(dirname "$export_root")"
+  share_id="$(basename "$export_root")"
+  cat <<YAML
+  shared_dir_storage:
+    backend: nfs
+    nfs:
+      mount_root: "${mount_root}"
+      subpath_root: "projects"
+      shares:
+        - id: "${share_id}"
+          server: "${vm_ip}"
+          export: "${export_root}"
+          pv_name: "${pvc_name}"
+YAML
+}
+
 # hybrid_cloud_run_label_args SERVICE_NAME PROJECT_ID REGION HUB_NAME
 #
 # Echoes the --labels=... argument to pass to `gcloud beta run deploy`, or
@@ -1368,6 +1434,551 @@ hybrid_teardown_delete() {
       HYBRID_TEARDOWN_DELETE_FAILED+=("${name}")
       stopped=true
     fi
+    rm -f "${delete_err}"
+  done
+}
+
+# =====================================================================
+# Kubernetes objects: the PV/namespace/PVC the hybrid tier's shared
+# tree is mounted through, and their teardown. Every kubectl call below
+# requires HYBRID_KUBECONFIG to already be set by
+# hybrid_k8s_setup_kubeconfig -- a task-private temporary file, never
+# the operator's default ~/.kube/config.
+# =====================================================================
+
+# hybrid_k8s_pv_name HUB_NAME — the cluster-scoped PV's name.
+hybrid_k8s_pv_name() {
+  echo "scion-hub-$1-shared"
+}
+
+# hybrid_k8s_default_namespace HUB_NAME — used when gke_target.namespace
+# isn't set.
+hybrid_k8s_default_namespace() {
+  echo "scion-hub-$1"
+}
+
+# hybrid_k8s_default_pvc_name HUB_NAME — used when gke_target.pvc_name
+# isn't set.
+hybrid_k8s_default_pvc_name() {
+  echo "scion-hub-$1-shared"
+}
+
+# hybrid_k8s_setup_kubeconfig
+#
+# Preflights that kubectl AND the gke-gcloud-auth-plugin are both present
+# (only ever called when the tier is on) -- GKE's own credential plugin,
+# required by `gcloud container clusters get-credentials` since kubectl
+# client-go dropped built-in GCP auth; kubectl alone being present is not
+# enough, and its absence otherwise surfaces as a confusing runtime
+# authentication failure rather than a clear preflight message -- then
+# runs get-credentials into a fresh, task-private temporary file and
+# sets HYBRID_KUBECONFIG to its path. The caller (deploy.sh) is
+# responsible for removing that file on exit; every subsequent kubectl
+# call in this file sets KUBECONFIG="$HYBRID_KUBECONFIG" explicitly
+# rather than relying on an ambient default.
+hybrid_k8s_setup_kubeconfig() {
+  if ! command -v kubectl &>/dev/null; then
+    err "kubectl is required for the hybrid tier's Kubernetes objects but was not found."
+    exit 1
+  fi
+  if ! command -v gke-gcloud-auth-plugin &>/dev/null; then
+    err "gke-gcloud-auth-plugin is required for the hybrid tier's Kubernetes objects but was not found. See docs/deploy/agent-runbook-single-node-vm.md for how to install it."
+    exit 1
+  fi
+  HYBRID_KUBECONFIG="$(mktemp)"
+  local cred_err
+  cred_err="$(mktemp)"
+  if ! KUBECONFIG="$HYBRID_KUBECONFIG" gcloud container clusters get-credentials "${GKE_NAME}" \
+      --location="${GKE_LOCATION}" --project="${GKE_PROJECT}" --quiet 2>"${cred_err}"; then
+    err "Could not get credentials for GKE cluster $(_hybrid_cluster_ref):"
+    err "  $(cat "${cred_err}")"
+    rm -f "${cred_err}"
+    exit 1
+  fi
+  rm -f "${cred_err}"
+}
+
+# hybrid_k8s_pv_manifest PV_NAME HUB_NAME VM_IP EXPORT_ROOT NAMESPACE PVC_NAME
+#
+# Renders the cluster-scoped PV: NFS server/path point at the hub VM's
+# export, Retain reclaim policy (the export's data outlives any single
+# claim), storageClassName "" (a static PV, never dynamically
+# provisioned), and a claimRef pinned to the namespace/PVC below so no
+# other claim in the cluster can bind it first. Mount options follow the
+# design's own rationale: nfsvers=4.1 (single port, in-protocol
+# locking), hard (avoids silent corruption), proto=tcp, and the
+# attribute-cache/lookup-cache tuning that bounds cross-runtime
+# staleness. Pure string rendering -- no gcloud, kubectl, or SSH calls.
+hybrid_k8s_pv_manifest() {
+  local pv_name="$1" hub_name="$2" vm_ip="$3" export_root="$4" namespace="$5" pvc_name="$6"
+  cat <<YAML
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: ${pv_name}
+  labels:
+    scion-deployment: ${hub_name}
+spec:
+  capacity:
+    storage: 100Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  mountOptions:
+    - nfsvers=4.1
+    - hard
+    - proto=tcp
+    - timeo=600
+    - retrans=2
+    - actimeo=3
+    - lookupcache=positive
+  nfs:
+    server: ${vm_ip}
+    path: ${export_root}
+  claimRef:
+    namespace: ${namespace}
+    name: ${pvc_name}
+YAML
+}
+
+# hybrid_k8s_namespace_manifest NAMESPACE HUB_NAME
+hybrid_k8s_namespace_manifest() {
+  local namespace="$1" hub_name="$2"
+  cat <<YAML
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${namespace}
+  labels:
+    scion-deployment: ${hub_name}
+YAML
+}
+
+# hybrid_k8s_pvc_manifest PVC_NAME NAMESPACE HUB_NAME PV_NAME
+hybrid_k8s_pvc_manifest() {
+  local pvc_name="$1" namespace="$2" hub_name="$3" pv_name="$4"
+  cat <<YAML
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ${pvc_name}
+  namespace: ${namespace}
+  labels:
+    scion-deployment: ${hub_name}
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ""
+  volumeName: ${pv_name}
+  resources:
+    requests:
+      storage: 100Gi
+YAML
+}
+
+# _hybrid_k8s_label JSON — the value of metadata.labels["scion-deployment"]
+# on the given kubectl JSON object, or empty if unset.
+_hybrid_k8s_label() {
+  echo "$1" | "$PYTHON" -c "
+import json, sys
+d = json.load(sys.stdin)
+print(d.get('metadata', {}).get('labels', {}).get('scion-deployment') or '')
+"
+}
+
+# _hybrid_k8s_get KIND NAME [EXTRA ARGS...]
+#
+# Runs `kubectl get KIND NAME [EXTRA ARGS] -o json`. On success, sets
+# K8S_GET_JSON to the object and returns 0. On a genuine "not found"
+# (matched by the server's own error text), sets K8S_GET_STATUS=absent
+# and returns 1. On any other failure -- a connectivity or permissions
+# problem, for instance -- sets K8S_GET_STATUS=unknown and K8S_GET_ERR
+# to the error text, and also returns 1: the caller must distinguish
+# "absent" from "unknown" itself, since only "absent" is safe to create
+# over, matching the "unknown is never treated as gone" rule used
+# throughout this file's other teardown checks.
+_hybrid_k8s_get() {
+  local kind="$1" name="$2"
+  shift 2
+  local extra_args=("$@")
+  local err_file
+  err_file="$(mktemp)"
+  K8S_GET_STATUS=""
+  K8S_GET_ERR=""
+  if K8S_GET_JSON="$(KUBECONFIG="$HYBRID_KUBECONFIG" kubectl get "$kind" "$name" \
+      ${extra_args[@]+"${extra_args[@]}"} -o json 2>"${err_file}")"; then
+    K8S_GET_STATUS="found"
+    rm -f "${err_file}"
+    return 0
+  fi
+  K8S_GET_JSON=""
+  if _hybrid_kubectl_not_found "$(cat "${err_file}")"; then
+    K8S_GET_STATUS="absent"
+  else
+    K8S_GET_STATUS="unknown"
+    K8S_GET_ERR="$(cat "${err_file}")"
+  fi
+  rm -f "${err_file}"
+  return 1
+}
+
+# hybrid_k8s_preflight HUB_NAME
+#
+# Everything about the hybrid tier's Kubernetes objects that does NOT
+# depend on the hub VM's IP address, meant to be called right after
+# hybrid_discover -- before the VM, the NFS server/export, or any other
+# Phase 2 resource is created, alongside the firewall-rule checks:
+# kubectl and the gke-gcloud-auth-plugin are present, credentials can be
+# fetched into a task-private kubeconfig (hybrid_k8s_setup_kubeconfig,
+# which sets HYBRID_KUBECONFIG), and a PRE-EXISTING PV or PVC with the
+# target name carries this deployment's marker label and matches every
+# identity field that doesn't depend on the VM's IP (path, claimRef,
+# reclaim policy for the PV; the bound volume name for the PVC) --
+# refusing before anything else is created if not, rather than only
+# after the VM, NFS export, and firewall rules already exist. Only once
+# both of those checks pass does it create the namespace if it's
+# missing: namespace creation doesn't depend on the VM's IP either, so
+# there's no reason to defer it to Phase 4, but it must come after the
+# PV/PVC checks so a refusal never leaves a freshly created namespace
+# behind it. An existing, unmarked namespace is used as-is: never
+# labeled, never adopted, never refused, since reusing an existing
+# namespace is allowed.
+#
+# Deliberately does not check or create the PV's "server" field (the VM
+# IP) or create an absent PV/PVC -- those depend on the VM's IP and stay
+# in hybrid_k8s_ensure_objects (Phase 4, below), which re-validates
+# everything this function already checked plus the IP-dependent parts,
+# so calling this first is what makes that later, fuller check almost
+# always a no-op confirmation rather than the first opportunity to
+# refuse.
+hybrid_k8s_preflight() {
+  local hub_name="$1"
+  local namespace pvc_name pv_name
+
+  hybrid_k8s_setup_kubeconfig
+
+  namespace="${GKE_NAMESPACE:-$(config_get 'gke_target.namespace' "$(hybrid_k8s_default_namespace "$hub_name")")}"
+  pvc_name="${GKE_PVC_NAME:-$(config_get 'gke_target.pvc_name' "$(hybrid_k8s_default_pvc_name "$hub_name")")}"
+  pv_name="$(hybrid_k8s_pv_name "$hub_name")"
+
+  if _hybrid_k8s_get pv "$pv_name"; then
+    if [[ "$(_hybrid_k8s_label "$K8S_GET_JSON")" != "$hub_name" ]]; then
+      err "Persistent volume ${pv_name} already exists without this deployment's marker. Refusing to adopt it."
+      exit 1
+    fi
+    local act_path act_claim_ns act_claim_name act_reclaim
+    act_path="$(echo "$K8S_GET_JSON" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d.get('spec',{}).get('nfs',{}).get('path') or '')")"
+    act_claim_ns="$(echo "$K8S_GET_JSON" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d.get('spec',{}).get('claimRef',{}).get('namespace') or '')")"
+    act_claim_name="$(echo "$K8S_GET_JSON" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d.get('spec',{}).get('claimRef',{}).get('name') or '')")"
+    act_reclaim="$(echo "$K8S_GET_JSON" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d.get('spec',{}).get('persistentVolumeReclaimPolicy') or '')")"
+    local -a mismatches=()
+    [[ "$act_path" != "$HYBRID_NFS_EXPORT_ROOT" ]] && mismatches+=("path: expected '${HYBRID_NFS_EXPORT_ROOT}', found '${act_path}'")
+    [[ "$act_claim_ns" != "$namespace" ]] && mismatches+=("claimRef.namespace: expected '${namespace}', found '${act_claim_ns}'")
+    [[ "$act_claim_name" != "$pvc_name" ]] && mismatches+=("claimRef.name: expected '${pvc_name}', found '${act_claim_name}'")
+    [[ "$act_reclaim" != "Retain" ]] && mismatches+=("persistentVolumeReclaimPolicy: expected 'Retain', found '${act_reclaim}'")
+    if [[ ${#mismatches[@]} -gt 0 ]]; then
+      err "Persistent volume ${pv_name} carries this deployment's marker but its spec has drifted from what this tier expects:"
+      local m
+      for m in "${mismatches[@]}"; do
+        err "  ${m}"
+      done
+      err "Refusing to auto-correct. Delete the PVC, then the PV, then re-run deploy.sh:"
+      err "  kubectl delete pvc ${pvc_name} -n ${namespace}"
+      err "  kubectl delete pv ${pv_name}"
+      exit 1
+    fi
+  elif [[ "$K8S_GET_STATUS" == "unknown" ]]; then
+    err "Could not check persistent volume ${pv_name}: ${K8S_GET_ERR}"
+    exit 1
+  fi
+
+  if _hybrid_k8s_get pvc "$pvc_name" -n "$namespace"; then
+    if [[ "$(_hybrid_k8s_label "$K8S_GET_JSON")" != "$hub_name" ]]; then
+      err "Persistent volume claim ${pvc_name} in namespace ${namespace} already exists without this deployment's marker. Refusing to adopt it."
+      exit 1
+    fi
+    local act_volume
+    act_volume="$(echo "$K8S_GET_JSON" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d.get('spec',{}).get('volumeName') or '')")"
+    if [[ "$act_volume" != "$pv_name" ]]; then
+      err "Persistent volume claim ${pvc_name} carries this deployment's marker but is bound to '${act_volume}', not the expected '${pv_name}'."
+      err "Refusing to auto-correct. Delete the PVC, then the PV, then re-run deploy.sh:"
+      err "  kubectl delete pvc ${pvc_name} -n ${namespace}"
+      err "  kubectl delete pv ${pv_name}"
+      exit 1
+    fi
+  elif [[ "$K8S_GET_STATUS" == "unknown" ]]; then
+    err "Could not check persistent volume claim ${pvc_name}: ${K8S_GET_ERR}"
+    exit 1
+  fi
+
+  if _hybrid_k8s_get namespace "$namespace"; then
+    if [[ "$(_hybrid_k8s_label "$K8S_GET_JSON")" != "$hub_name" ]]; then
+      warn "Namespace ${namespace} already exists without this deployment's marker; using it as-is, not labeling or adopting it."
+    fi
+  elif [[ "$K8S_GET_STATUS" == "unknown" ]]; then
+    err "Could not check namespace ${namespace}: ${K8S_GET_ERR}"
+    exit 1
+  else
+    hybrid_k8s_namespace_manifest "$namespace" "$hub_name" | KUBECONFIG="$HYBRID_KUBECONFIG" kubectl create -f - >/dev/null
+    echo "  Created namespace: ${namespace}"
+  fi
+}
+
+# hybrid_k8s_ensure_objects HUB_NAME VM_IP
+#
+# Ensures the namespace, PV, and PVC exist with the expected identity,
+# creating whichever are missing. Refuses to proceed if an existing PV
+# or PVC with the target name lacks this deployment's marker label
+# (the same marker refusal hybrid_k8s_preflight above already checked
+# for the non-IP-dependent fields; this repeats it because it's also
+# reachable on its own from tests), or if a
+# marked one has drifted from its expected identity (a changed VM IP
+# after a VM recreate is the expected way for the PV to drift -- see the
+# printed remediation; never auto-corrected, matching the firewall
+# rules' own policy). An existing, unmarked namespace is used as-is:
+# never labeled, never adopted, never refused, since reusing an existing
+# namespace is allowed. Requires HYBRID_KUBECONFIG to already be set.
+hybrid_k8s_ensure_objects() {
+  local hub_name="$1" vm_ip="$2"
+  local namespace pvc_name pv_name
+  namespace="${GKE_NAMESPACE:-$(config_get 'gke_target.namespace' "$(hybrid_k8s_default_namespace "$hub_name")")}"
+  pvc_name="${GKE_PVC_NAME:-$(config_get 'gke_target.pvc_name' "$(hybrid_k8s_default_pvc_name "$hub_name")")}"
+  pv_name="$(hybrid_k8s_pv_name "$hub_name")"
+
+  if _hybrid_k8s_get namespace "$namespace"; then
+    if [[ "$(_hybrid_k8s_label "$K8S_GET_JSON")" != "$hub_name" ]]; then
+      warn "Namespace ${namespace} already exists without this deployment's marker; using it as-is, not labeling or adopting it."
+    fi
+  elif [[ "$K8S_GET_STATUS" == "unknown" ]]; then
+    err "Could not check namespace ${namespace}: ${K8S_GET_ERR}"
+    exit 1
+  else
+    hybrid_k8s_namespace_manifest "$namespace" "$hub_name" | KUBECONFIG="$HYBRID_KUBECONFIG" kubectl create -f - >/dev/null
+    echo "  Created namespace: ${namespace}"
+  fi
+
+  if _hybrid_k8s_get pv "$pv_name"; then
+    if [[ "$(_hybrid_k8s_label "$K8S_GET_JSON")" != "$hub_name" ]]; then
+      err "Persistent volume ${pv_name} already exists without this deployment's marker. Refusing to adopt it."
+      exit 1
+    fi
+    local act_server act_path act_claim_ns act_claim_name act_reclaim
+    act_server="$(echo "$K8S_GET_JSON" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d.get('spec',{}).get('nfs',{}).get('server') or '')")"
+    act_path="$(echo "$K8S_GET_JSON" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d.get('spec',{}).get('nfs',{}).get('path') or '')")"
+    act_claim_ns="$(echo "$K8S_GET_JSON" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d.get('spec',{}).get('claimRef',{}).get('namespace') or '')")"
+    act_claim_name="$(echo "$K8S_GET_JSON" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d.get('spec',{}).get('claimRef',{}).get('name') or '')")"
+    act_reclaim="$(echo "$K8S_GET_JSON" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d.get('spec',{}).get('persistentVolumeReclaimPolicy') or '')")"
+    local -a mismatches=()
+    [[ "$act_server" != "$vm_ip" ]] && mismatches+=("server: expected '${vm_ip}', found '${act_server}'")
+    [[ "$act_path" != "$HYBRID_NFS_EXPORT_ROOT" ]] && mismatches+=("path: expected '${HYBRID_NFS_EXPORT_ROOT}', found '${act_path}'")
+    [[ "$act_claim_ns" != "$namespace" ]] && mismatches+=("claimRef.namespace: expected '${namespace}', found '${act_claim_ns}'")
+    [[ "$act_claim_name" != "$pvc_name" ]] && mismatches+=("claimRef.name: expected '${pvc_name}', found '${act_claim_name}'")
+    [[ "$act_reclaim" != "Retain" ]] && mismatches+=("persistentVolumeReclaimPolicy: expected 'Retain', found '${act_reclaim}'")
+    if [[ ${#mismatches[@]} -gt 0 ]]; then
+      err "Persistent volume ${pv_name} carries this deployment's marker but its spec has drifted from what this tier expects:"
+      local m
+      for m in "${mismatches[@]}"; do
+        err "  ${m}"
+      done
+      err "Refusing to auto-correct. A changed VM IP after a VM recreate is the expected way for this to happen: delete the PVC, then the PV, then re-run deploy.sh:"
+      err "  kubectl delete pvc ${pvc_name} -n ${namespace}"
+      err "  kubectl delete pv ${pv_name}"
+      exit 1
+    fi
+  elif [[ "$K8S_GET_STATUS" == "unknown" ]]; then
+    err "Could not check persistent volume ${pv_name}: ${K8S_GET_ERR}"
+    exit 1
+  else
+    hybrid_k8s_pv_manifest "$pv_name" "$hub_name" "$vm_ip" "$HYBRID_NFS_EXPORT_ROOT" "$namespace" "$pvc_name" \
+      | KUBECONFIG="$HYBRID_KUBECONFIG" kubectl create -f - >/dev/null
+    echo "  Created persistent volume: ${pv_name}"
+  fi
+
+  if _hybrid_k8s_get pvc "$pvc_name" -n "$namespace"; then
+    if [[ "$(_hybrid_k8s_label "$K8S_GET_JSON")" != "$hub_name" ]]; then
+      err "Persistent volume claim ${pvc_name} in namespace ${namespace} already exists without this deployment's marker. Refusing to adopt it."
+      exit 1
+    fi
+    local act_volume
+    act_volume="$(echo "$K8S_GET_JSON" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d.get('spec',{}).get('volumeName') or '')")"
+    if [[ "$act_volume" != "$pv_name" ]]; then
+      err "Persistent volume claim ${pvc_name} carries this deployment's marker but is bound to '${act_volume}', not the expected '${pv_name}'."
+      err "Refusing to auto-correct. Delete the PVC, then the PV, then re-run deploy.sh:"
+      err "  kubectl delete pvc ${pvc_name} -n ${namespace}"
+      err "  kubectl delete pv ${pv_name}"
+      exit 1
+    fi
+  elif [[ "$K8S_GET_STATUS" == "unknown" ]]; then
+    err "Could not check persistent volume claim ${pvc_name}: ${K8S_GET_ERR}"
+    exit 1
+  else
+    hybrid_k8s_pvc_manifest "$pvc_name" "$namespace" "$hub_name" "$pv_name" \
+      | KUBECONFIG="$HYBRID_KUBECONFIG" kubectl create -f - >/dev/null
+    echo "  Created persistent volume claim: ${pvc_name} (namespace: ${namespace})"
+  fi
+}
+
+# _hybrid_k8s_pods_using_pvc PVC_NAME NAMESPACE
+#
+# Sets K8S_PODS_USING_PVC to a newline-separated list of every pod in
+# NAMESPACE that mounts PVC_NAME via a persistentVolumeClaim volume
+# (empty means none) and returns 0, or, on a list failure, sets
+# K8S_PODS_CHECK_ERR and returns 1 -- the caller must treat that the
+# same as "unknown", never as "none found". A plain function call, not
+# invoked via command substitution: the caller needs both of these
+# globals, and command substitution would run this in a subshell,
+# losing whichever one it didn't capture as stdout. Requires
+# HYBRID_KUBECONFIG to already be set.
+_hybrid_k8s_pods_using_pvc() {
+  local pvc_name="$1" namespace="$2"
+  local err_file pods_json
+  err_file="$(mktemp)"
+  K8S_PODS_CHECK_ERR=""
+  K8S_PODS_USING_PVC=""
+  if ! pods_json="$(KUBECONFIG="$HYBRID_KUBECONFIG" kubectl get pods -n "$namespace" -o json 2>"${err_file}")"; then
+    K8S_PODS_CHECK_ERR="$(cat "${err_file}")"
+    rm -f "${err_file}"
+    return 1
+  fi
+  rm -f "${err_file}"
+  K8S_PODS_USING_PVC="$(echo "$pods_json" | "$PYTHON" -c "
+import json, sys
+pvc = sys.argv[1]
+d = json.load(sys.stdin)
+names = []
+for pod in d.get('items') or []:
+    for vol in pod.get('spec', {}).get('volumes') or []:
+        claim = vol.get('persistentVolumeClaim') or {}
+        if claim.get('claimName') == pvc:
+            names.append(pod.get('metadata', {}).get('name', '?'))
+            break
+print('\n'.join(names))
+" "$pvc_name")"
+  return 0
+}
+
+# hybrid_k8s_teardown_check HUB_NAME
+#
+# Classifies the PVC, PV, and namespace by name, in the order they'll be
+# deleted: found+marked (queued into HYBRID_K8S_TEARDOWN_DELETE) or
+# found+unmarked (SKIPPED). An unmarked PVC or PV aborts the whole
+# teardown (HYBRID_K8S_TEARDOWN_FAILED=true), the same rule as the
+# firewall rules; an unmarked namespace is only SKIPPED and does not
+# abort, since using an existing namespace without adopting it is
+# allowed on create too. Any check that itself fails (not just "not
+# found") also aborts: unknown is never treated as gone. Requires
+# HYBRID_KUBECONFIG to already be set.
+#
+# Before queuing a marked PVC for deletion, also refuses outright if any
+# pod in its namespace still mounts it: `kubectl delete pvc` blocks
+# indefinitely under its own storage-protection finalizer while a pod
+# references the claim, and the pods that would do so here are exactly
+# the GKE agent pods this tier exists to run -- deleting under a live
+# agent would hang the whole teardown rather than fail it cleanly, so
+# this catches it up front with an actionable message instead.
+hybrid_k8s_teardown_check() {
+  local hub_name="$1"
+  HYBRID_K8S_NAMESPACE="${GKE_NAMESPACE:-$(config_get 'gke_target.namespace' "$(hybrid_k8s_default_namespace "$hub_name")")}"
+  HYBRID_K8S_PVC_NAME="${GKE_PVC_NAME:-$(config_get 'gke_target.pvc_name' "$(hybrid_k8s_default_pvc_name "$hub_name")")}"
+  HYBRID_K8S_PV_NAME="$(hybrid_k8s_pv_name "$hub_name")"
+  HYBRID_K8S_TEARDOWN_DELETE=()
+  HYBRID_K8S_TEARDOWN_FAILED=false
+
+  if _hybrid_k8s_get pvc "$HYBRID_K8S_PVC_NAME" -n "$HYBRID_K8S_NAMESPACE"; then
+    if [[ "$(_hybrid_k8s_label "$K8S_GET_JSON")" == "$hub_name" ]]; then
+      echo "  found (marked): persistentvolumeclaim/${HYBRID_K8S_PVC_NAME}"
+      if ! _hybrid_k8s_pods_using_pvc "$HYBRID_K8S_PVC_NAME" "$HYBRID_K8S_NAMESPACE"; then
+        err "Could not check whether any pod in namespace ${HYBRID_K8S_NAMESPACE} still references persistentvolumeclaim/${HYBRID_K8S_PVC_NAME}: ${K8S_PODS_CHECK_ERR}"
+        HYBRID_K8S_TEARDOWN_FAILED=true
+      elif [[ -n "$K8S_PODS_USING_PVC" ]]; then
+        err "Refusing to tear down: the following pod(s) in namespace ${HYBRID_K8S_NAMESPACE} still mount persistentvolumeclaim/${HYBRID_K8S_PVC_NAME}. Stop those agents first, then re-run teardown:"
+        local p
+        while IFS= read -r p; do
+          [[ -n "$p" ]] && err "  pod/${p}"
+        done <<< "$K8S_PODS_USING_PVC"
+        HYBRID_K8S_TEARDOWN_FAILED=true
+      else
+        HYBRID_K8S_TEARDOWN_DELETE+=("pvc")
+      fi
+    else
+      echo "  SKIPPED (unmarked): persistentvolumeclaim/${HYBRID_K8S_PVC_NAME}"
+      HYBRID_K8S_TEARDOWN_FAILED=true
+    fi
+  elif [[ "$K8S_GET_STATUS" == "unknown" ]]; then
+    err "Could not check persistentvolumeclaim ${HYBRID_K8S_PVC_NAME}: ${K8S_GET_ERR}"
+    HYBRID_K8S_TEARDOWN_FAILED=true
+  fi
+
+  if _hybrid_k8s_get pv "$HYBRID_K8S_PV_NAME"; then
+    if [[ "$(_hybrid_k8s_label "$K8S_GET_JSON")" == "$hub_name" ]]; then
+      echo "  found (marked): persistentvolume/${HYBRID_K8S_PV_NAME}"
+      HYBRID_K8S_TEARDOWN_DELETE+=("pv")
+    else
+      echo "  SKIPPED (unmarked): persistentvolume/${HYBRID_K8S_PV_NAME}"
+      HYBRID_K8S_TEARDOWN_FAILED=true
+    fi
+  elif [[ "$K8S_GET_STATUS" == "unknown" ]]; then
+    err "Could not check persistentvolume ${HYBRID_K8S_PV_NAME}: ${K8S_GET_ERR}"
+    HYBRID_K8S_TEARDOWN_FAILED=true
+  fi
+
+  if _hybrid_k8s_get namespace "$HYBRID_K8S_NAMESPACE"; then
+    if [[ "$(_hybrid_k8s_label "$K8S_GET_JSON")" == "$hub_name" ]]; then
+      echo "  found (marked): namespace/${HYBRID_K8S_NAMESPACE}"
+      HYBRID_K8S_TEARDOWN_DELETE+=("namespace")
+    else
+      echo "  SKIPPED (unmarked, in use): namespace/${HYBRID_K8S_NAMESPACE}"
+    fi
+  elif [[ "$K8S_GET_STATUS" == "unknown" ]]; then
+    err "Could not check namespace ${HYBRID_K8S_NAMESPACE}: ${K8S_GET_ERR}"
+    HYBRID_K8S_TEARDOWN_FAILED=true
+  fi
+}
+
+# hybrid_k8s_teardown_delete
+#
+# Deletes exactly what hybrid_k8s_teardown_check queued into
+# HYBRID_K8S_TEARDOWN_DELETE, in that array's order (PVC, then PV, then
+# namespace-if-marked), stopping at the first failure and recording
+# every kind from that point on in HYBRID_K8S_TEARDOWN_DELETE_FAILED --
+# the same stop-at-first-failure policy as the firewall rules' own
+# teardown delete. Every delete carries an explicit --timeout: the pod
+# preflight in hybrid_k8s_teardown_check above should already have
+# refused before this ever runs against a PVC a live pod still mounts,
+# but a bounded timeout is the backstop if a pod attaches in the window
+# between that check and this delete, or the object doesn't finish
+# terminating for some other reason -- a `delete` that hangs is treated
+# as a failure exactly like one that errors immediately.
+hybrid_k8s_teardown_delete() {
+  HYBRID_K8S_TEARDOWN_DELETED=()
+  HYBRID_K8S_TEARDOWN_DELETE_FAILED=()
+  local stopped=false kind name delete_err
+  local -a ns_args
+  for kind in ${HYBRID_K8S_TEARDOWN_DELETE[@]+"${HYBRID_K8S_TEARDOWN_DELETE[@]}"}; do
+    if [[ "$stopped" == "true" ]]; then
+      err "Not attempted (kept): ${kind}"
+      HYBRID_K8S_TEARDOWN_DELETE_FAILED+=("${kind}")
+      continue
+    fi
+    ns_args=()
+    case "$kind" in
+      pvc) name="$HYBRID_K8S_PVC_NAME"; ns_args=(-n "$HYBRID_K8S_NAMESPACE") ;;
+      pv) name="$HYBRID_K8S_PV_NAME" ;;
+      namespace) name="$HYBRID_K8S_NAMESPACE" ;;
+    esac
+    delete_err="$(mktemp)"
+    if KUBECONFIG="$HYBRID_KUBECONFIG" kubectl delete "$kind" "$name" --timeout=60s \
+        ${ns_args[@]+"${ns_args[@]}"} 2>"${delete_err}"; then
+      echo "  Deleted: ${kind}/${name}"
+      HYBRID_K8S_TEARDOWN_DELETED+=("${kind}")
+      rm -f "${delete_err}"
+      continue
+    fi
+    err "Failed to delete ${kind}/${name}:"
+    err "  $(cat "${delete_err}")"
+    HYBRID_K8S_TEARDOWN_DELETE_FAILED+=("${kind}")
+    stopped=true
     rm -f "${delete_err}"
   done
 }
