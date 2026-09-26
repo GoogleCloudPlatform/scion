@@ -172,6 +172,137 @@ func TestPreResolveAgentSkills_IdentitySelection(t *testing.T) {
 	})
 }
 
+// TestPreResolveAgentSkillsAsCreator_SameResultRegardlessOfCaller is the
+// regression test for ptone/scion#1994: start and restart resolve as the
+// agent's recorded creator, so the same agent gets an identical pre-resolved
+// set whether the creator, an admin, or a project owner is the one starting
+// or restarting it — unlike preResolveAgentSkills (the create-path resolver,
+// unchanged), which prefers the dispatching caller (see
+// TestPreResolveAgentSkills_IdentitySelection, where bob dispatching alice's
+// agent gets a different, worse outcome than alice would).
+func TestPreResolveAgentSkillsAsCreator_SameResultRegardlessOfCaller(t *testing.T) {
+	srv, s, alice, bob, project := setupSkillAuthzTest(t)
+	skill := createTestSkill(t, s, "creator-only", store.SkillScopeProject, project.ID, alice.ID)
+	publishTestSkillVersion(t, s, skill)
+	uri := "skill://scion/project/" + project.ID + "/creator-only"
+	agent := dispatchTestAgent(alice.ID, project.ID, uri)
+
+	// alice, the creator, starts her own agent.
+	aliceIdent := NewAuthenticatedUser(alice.ID, alice.Email, alice.DisplayName, alice.Role, "api")
+	aliceResp := srv.preResolveAgentSkillsAsCreator(contextWithIdentity(context.Background(), aliceIdent), agent)
+
+	// bob -- who cannot read this project-private skill himself -- is the one
+	// starting alice's agent instead (e.g. as an admin or project owner).
+	bobIdent := NewAuthenticatedUser(bob.ID, bob.Email, bob.DisplayName, bob.Role, "api")
+	bobResp := srv.preResolveAgentSkillsAsCreator(contextWithIdentity(context.Background(), bobIdent), agent)
+
+	// No caller in context at all (e.g. an internal dispatch path).
+	noCallerResp := srv.preResolveAgentSkillsAsCreator(context.Background(), agent)
+
+	require.NotNil(t, aliceResp)
+	assert.Empty(t, aliceResp.Errors)
+	require.Len(t, aliceResp.Resolved, 1)
+	assert.Equal(t, uri, aliceResp.Resolved[0].URI)
+
+	assert.Equal(t, aliceResp, bobResp, "start/restart must resolve the same set for the same agent regardless of who starts it")
+	assert.Equal(t, aliceResp, noCallerResp, "start/restart must resolve the same set with no caller in context")
+}
+
+// TestPreResolveAgentSkillsAsCreator_EmptyCreatedBy_NoFallback is the
+// regression test for the ptone/scion#1994 scope addition: when an agent's
+// recorded creator is empty (no creator on record, e.g. agent.CreatedBy is
+// unset in storage), start/restart pre-resolution is skipped -- it does not
+// fall back to the dispatching caller's identity or to agent.OwnerID, even
+// when either of those could read the skill.
+func TestPreResolveAgentSkillsAsCreator_EmptyCreatedBy_NoFallback(t *testing.T) {
+	srv, s, alice, _, project := setupSkillAuthzTest(t)
+	skill := createTestSkill(t, s, "no-creator", store.SkillScopeProject, project.ID, alice.ID)
+	publishTestSkillVersion(t, s, skill)
+	uri := "skill://scion/project/" + project.ID + "/no-creator"
+
+	agent := dispatchTestAgent("", project.ID, uri) // no recorded creator
+	agent.OwnerID = alice.ID                        // owner can read the skill; must not be used either
+
+	// alice -- who could read this skill -- is the one dispatching the
+	// start/restart.
+	aliceIdent := NewAuthenticatedUser(alice.ID, alice.Email, alice.DisplayName, alice.Role, "api")
+	ctx := contextWithIdentity(context.Background(), aliceIdent)
+
+	resp := srv.preResolveAgentSkillsAsCreator(ctx, agent)
+	assert.Nil(t, resp, "pre-resolution must be skipped, not fall back to the dispatching caller or the owner, when created_by is empty")
+}
+
+// TestDispatchSkillAliasUserID pins the ptone/scion#1994 scope addition: a
+// bare skill://user alias expands against the agent's origin user
+// (Ancestry[0]), never agent.OwnerID or agent.CreatedBy. For an agent-created
+// child, OwnerID/CreatedBy record the immediate parent agent, not the root
+// human at the head of the chain, so using either for the alias would target
+// the wrong user's skills.
+func TestDispatchSkillAliasUserID(t *testing.T) {
+	t.Run("uses Ancestry[0], not OwnerID or CreatedBy", func(t *testing.T) {
+		agent := &store.Agent{
+			CreatedBy: "parent-agent-id",
+			OwnerID:   "parent-agent-id",
+			Ancestry:  []string{"root-user-id", "parent-agent-id"},
+		}
+		assert.Equal(t, "root-user-id", dispatchSkillAliasUserID(agent))
+	})
+
+	t.Run("empty Ancestry means no alias, never falls back", func(t *testing.T) {
+		agent := &store.Agent{
+			CreatedBy: "parent-agent-id",
+			OwnerID:   "parent-agent-id",
+		}
+		assert.Empty(t, dispatchSkillAliasUserID(agent))
+	})
+
+	t.Run("nil agent means no alias", func(t *testing.T) {
+		assert.Empty(t, dispatchSkillAliasUserID(nil))
+	})
+
+	t.Run("human-created agent: Ancestry[0] matches OwnerID/CreatedBy", func(t *testing.T) {
+		agent := &store.Agent{
+			CreatedBy: "user-id",
+			OwnerID:   "user-id",
+			Ancestry:  []string{"user-id"},
+		}
+		assert.Equal(t, "user-id", dispatchSkillAliasUserID(agent))
+	})
+}
+
+// TestPreResolveAgentSkillsAsCreator_UserAliasUsesOriginUser is the
+// end-to-end regression test for the same scope addition: dispatch resolves
+// a bare skill://user alias against the agent's origin user, not its owner.
+// It deliberately gives the agent an OwnerID/CreatedBy that differ from
+// Ancestry[0] -- the shape an agent-created child has (see
+// TestDispatchSkillAliasUserID) -- so that resolving against the wrong field
+// would produce a different (and here, nonexistent) user's scope and the
+// skill would come back not_found instead of resolved.
+//
+// Note: CreatedBy is set to alice's own user ID here (rather than a real
+// parent agent's ID) purely so the resolving identity has read access on
+// main today; ptone/scion#1994 already established (Q3=(a), confirmed
+// against the #1968 p1 origin-user grant) that a true agent-created child
+// resolves as its creating agent's own identity, which is exercised by
+// TestPreResolveAgentSkillsAsCreator_SameResultRegardlessOfCaller. What this
+// test isolates is strictly the alias-expansion field, independent of which
+// identity ends up doing the read.
+func TestPreResolveAgentSkillsAsCreator_UserAliasUsesOriginUser(t *testing.T) {
+	srv, s, alice, _, project := setupSkillAuthzTest(t)
+	skill := createTestSkill(t, s, "alice-private", store.SkillScopeUser, alice.ID, alice.ID)
+	publishTestSkillVersion(t, s, skill)
+
+	agent := dispatchTestAgent(alice.ID, project.ID, "skill://user/alice-private")
+	agent.OwnerID = "not-alice-owner-id-should-not-be-used"
+	agent.Ancestry = []string{alice.ID, "not-alice-owner-id-should-not-be-used"}
+
+	resp := srv.preResolveAgentSkillsAsCreator(context.Background(), agent)
+	require.NotNil(t, resp)
+	assert.Empty(t, resp.Errors, "resolving against OwnerID instead of Ancestry[0] would report alice's skill as not_found")
+	require.Len(t, resp.Resolved, 1)
+	assert.Equal(t, "skill://user/alice-private", resp.Resolved[0].URI)
+}
+
 // gh://, gcp-skill:// and federated registries stay with the broker's router.
 func TestPreResolveAgentSkills_SkipsNonRegistrySchemes(t *testing.T) {
 	srv, _, alice, _, project := setupSkillAuthzTest(t)

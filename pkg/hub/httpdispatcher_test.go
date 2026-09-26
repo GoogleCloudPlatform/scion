@@ -1832,12 +1832,23 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_CarriesSkillDispatchMetadata(t *
 
 	mockClient := &mockRuntimeBrokerClient{}
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	dispatcher.SetSecretBackend(&mockProvisionCredsBackend{
+		projectSecrets: []secret.SecretMeta{
+			{Name: "GH_EXAMPLE", SecretType: "environment", Scope: secret.ScopeProject},
+		},
+		secretValues: map[string]*secret.SecretWithValue{
+			"GH_EXAMPLE": {SecretMeta: secret.SecretMeta{Name: "GH_EXAMPLE", SecretType: "environment"}, Value: "value-1"},
+		},
+	})
 
 	wantPreResolved := &ResolveSkillsResponse{
 		Resolved: []ResolvedSkillResponse{{URI: "skill://scion/global/test@1.0.0", Name: "test"}},
 	}
 	var sawAgentID string
-	dispatcher.SetSkillPreResolver(func(_ context.Context, a *store.Agent) *ResolveSkillsResponse {
+	// Start/restart carry PreResolvedSkills from the creator-based resolver
+	// (SetCreatorSkillPreResolver), not the create-path SetSkillPreResolver
+	// (ptone/scion#1994).
+	dispatcher.SetCreatorSkillPreResolver(func(_ context.Context, a *store.Agent) *ResolveSkillsResponse {
 		sawAgentID = a.ID
 		return wantPreResolved
 	})
@@ -1856,14 +1867,15 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_CarriesSkillDispatchMetadata(t *
 	}
 
 	if sawAgentID != agent.ID {
-		t.Errorf("expected skillPreResolver to be called with the dispatched agent, got agent id %q", sawAgentID)
+		t.Errorf("expected creatorSkillPreResolver to be called with the dispatched agent, got agent id %q", sawAgentID)
 	}
 	if mockClient.lastStartExtras.UserID != agent.OwnerID {
 		t.Errorf("expected StartExtras.UserID=%q, got %q", agent.OwnerID, mockClient.lastStartExtras.UserID)
 	}
 	if mockClient.lastStartExtras.PreResolvedSkills != wantPreResolved {
-		t.Errorf("expected StartExtras.PreResolvedSkills to be exactly what skillPreResolver returned, got %+v", mockClient.lastStartExtras.PreResolvedSkills)
+		t.Errorf("expected StartExtras.PreResolvedSkills to be exactly what creatorSkillPreResolver returned, got %+v", mockClient.lastStartExtras.PreResolvedSkills)
 	}
+	assert.Equal(t, map[string]string{"GH_EXAMPLE": "value-1"}, mockClient.lastStartExtras.ProvisionCredentials)
 }
 
 // TestHTTPAgentDispatcher_DispatchAgentRestart_CarriesSkillDispatchMetadata
@@ -1907,11 +1919,22 @@ func TestHTTPAgentDispatcher_DispatchAgentRestart_CarriesSkillDispatchMetadata(t
 
 	mockClient := &mockRuntimeBrokerClient{}
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	dispatcher.SetSecretBackend(&mockProvisionCredsBackend{
+		projectSecrets: []secret.SecretMeta{
+			{Name: "GH_EXAMPLE", SecretType: "environment", Scope: secret.ScopeProject},
+		},
+		secretValues: map[string]*secret.SecretWithValue{
+			"GH_EXAMPLE": {SecretMeta: secret.SecretMeta{Name: "GH_EXAMPLE", SecretType: "environment"}, Value: "value-1"},
+		},
+	})
 
 	wantPreResolved := &ResolveSkillsResponse{
 		Resolved: []ResolvedSkillResponse{{URI: "skill://scion/global/test@1.0.0", Name: "test"}},
 	}
-	dispatcher.SetSkillPreResolver(func(context.Context, *store.Agent) *ResolveSkillsResponse {
+	// Start/restart carry PreResolvedSkills from the creator-based resolver
+	// (SetCreatorSkillPreResolver), not the create-path SetSkillPreResolver
+	// (ptone/scion#1994).
+	dispatcher.SetCreatorSkillPreResolver(func(context.Context, *store.Agent) *ResolveSkillsResponse {
 		return wantPreResolved
 	})
 
@@ -1932,8 +1955,9 @@ func TestHTTPAgentDispatcher_DispatchAgentRestart_CarriesSkillDispatchMetadata(t
 		t.Errorf("expected StartExtras.UserID=%q, got %q", agent.OwnerID, mockClient.lastRestartExtras.UserID)
 	}
 	if mockClient.lastRestartExtras.PreResolvedSkills != wantPreResolved {
-		t.Errorf("expected StartExtras.PreResolvedSkills to be exactly what skillPreResolver returned, got %+v", mockClient.lastRestartExtras.PreResolvedSkills)
+		t.Errorf("expected StartExtras.PreResolvedSkills to be exactly what creatorSkillPreResolver returned, got %+v", mockClient.lastRestartExtras.PreResolvedSkills)
 	}
+	assert.Equal(t, map[string]string{"GH_EXAMPLE": "value-1"}, mockClient.lastRestartExtras.ProvisionCredentials)
 }
 
 func TestHTTPAgentDispatcher_DispatchAgentStart_HubManagedProject(t *testing.T) {
