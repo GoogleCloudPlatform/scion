@@ -90,6 +90,19 @@
 #   gke_target.pvc_name           Name of the PersistentVolumeClaim in that
 #                                 namespace. Defaults to
 #                                 scion-hub-<hub_name>-shared.
+#   user_access_mode             Hybrid tier only. The tier configures
+#                                 restricted user access: invite_only
+#                                 (the default when unset) or
+#                                 domain_restricted. "open" and an empty
+#                                 value are refused. admin_email must be
+#                                 set to a user account; it can always
+#                                 sign in and invites other users.
+#   authorized_domains           Hybrid tier only. Optional list of email
+#                                 domains ("example.com" or
+#                                 "*.example.com"); required for
+#                                 domain_restricted. Service account
+#                                 domains (gserviceaccount.com) are
+#                                 refused.
 
 set -euo pipefail
 
@@ -491,6 +504,7 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   echo "  Cloud Router:      ${ROUTER_NAME} (region: ${REGION})"
   echo "  Service account:   ${SA_EMAIL}"
   echo "  Proxy SA:          ${PROXY_SA_EMAIL}"
+  echo "  Service account:   $(hybrid_transport_sa_name "${HUB_NAME}")@${PROJECT_ID}.iam.gserviceaccount.com (hybrid tier agent transport; if present and marked)"
   echo "  Firewall rule:     ${FW_RULE_NAME}"
   echo "  Firewall rule:     ${FW_8080_RULE_NAME}"
   for name in ${HYBRID_TEARDOWN_DELETE[@]+"${HYBRID_TEARDOWN_DELETE[@]}"}; do
@@ -569,7 +583,7 @@ if [[ "$DELETE_MODE" == "true" ]]; then
     fi
     rm -f "${PROXY_SERVICE_DELETE_ERR}"
 
-    # The hybrid NFS/hub-allow firewall rules and the static internal IP
+    # The hybrid firewall rules and the static internal IP
     # reservation are only safe to delete once this VM is confirmed gone
     # (the reservation is still attached to the VM's NIC until the VM
     # itself is deleted, so deleting it earlier would fail anyway). With
@@ -686,6 +700,16 @@ if [[ "$DELETE_MODE" == "true" ]]; then
     fi
     rm -f "${PROXY_SA_DELETE_ERR}"
 
+    info "Deleting agent transport service account (if present)..."
+    PROXY_SERVICE_GONE=false
+    if [[ "$PROXY_SERVICE_DELETED" == "true" || "${PROXY_SERVICE_NOT_FOUND:-false}" == "true" ]]; then
+      PROXY_SERVICE_GONE=true
+    fi
+    hybrid_teardown_transport_sa "${HUB_NAME}" "${PROJECT_ID}" "${PROXY_SERVICE}" "${REGION}" "${PROXY_SERVICE_GONE}"
+    if [[ "$HYBRID_TRANSPORT_SA_DELETE_FAILED" == "true" ]]; then
+      TEARDOWN_HAD_FAILURE=true
+    fi
+
     # Note: We intentionally do NOT revoke roles/iap.tunnelResourceAccessor from
     # the deployer. This role is bound to the operator (not a service account) and
     # may be used for IAP SSH access to other VMs in the project. Revoking it here
@@ -728,7 +752,7 @@ if [[ "$DELETE_MODE" == "true" ]]; then
           TEARDOWN_HAD_FAILURE=true
         fi
       else
-        err "Keeping the hybrid-tier firewall rules and internal IP reservation because GCE VM ${INSTANCE_NAME} still exists; tcp:2049/8080 access and the reserved address stay in place. Re-run teardown after the VM is deleted."
+        err "Keeping the hybrid-tier firewall rules and internal IP reservation because GCE VM ${INSTANCE_NAME} still exists; the pod-range deny and NFS access rules and the reserved address stay in place. Re-run teardown after the VM is deleted."
         HYBRID_RULES_DELETE_SKIP_REASON="VM not confirmed gone"
         TEARDOWN_HAD_FAILURE=true
       fi
@@ -814,6 +838,20 @@ if [[ "$DELETE_MODE" == "true" ]]; then
     echo "  Not found proxy SA:         ${PROXY_SA_EMAIL}"
   else
     echo "  Kept proxy SA:              ${PROXY_SA_EMAIL}"
+  fi
+  if [[ -n "${HYBRID_TRANSPORT_SA_TEARDOWN_EMAIL:-}" ]]; then
+    if [[ "${HYBRID_TRANSPORT_SA_DELETED:-false}" == "true" ]]; then
+      echo "  Deleted transport SA:       ${HYBRID_TRANSPORT_SA_TEARDOWN_EMAIL}"
+    elif [[ "${HYBRID_TRANSPORT_SA_NOT_FOUND:-false}" == "true" ]]; then
+      echo "  Not found transport SA:     ${HYBRID_TRANSPORT_SA_TEARDOWN_EMAIL}"
+    else
+      echo "  Kept transport SA:          ${HYBRID_TRANSPORT_SA_TEARDOWN_EMAIL} (${HYBRID_TRANSPORT_SA_KEPT_REASON:-not attempted})"
+    fi
+    case "${HYBRID_TRANSPORT_SA_BINDING_STATE:-not-attempted}" in
+      removed) echo "  Removed transport SA IAP access on: ${PROXY_SERVICE}" ;;
+      absent)  echo "  No transport SA IAP access left on: ${PROXY_SERVICE}" ;;
+      failed)  echo "  Kept transport SA IAP access on:    ${PROXY_SERVICE} (removal failed)" ;;
+    esac
   fi
   if [[ "$FW_RULE_DELETED" == "true" ]]; then
     echo "  Deleted firewall rule:      ${FW_RULE_NAME}"
@@ -1123,6 +1161,18 @@ if [[ "$HYBRID_ENABLED" == "true" ]]; then
     err "The hybrid tier is on, but container_images.registry ('${IMAGE_REGISTRY}') names this VM itself (a loopback address). GKE nodes cannot reach it there."
     err "Set container_images.registry to a registry the cluster's node service account can read (for example an Artifact Registry repository with artifactregistry.reader granted to that service account)."
     exit 1
+  fi
+  # The hybrid tier configures restricted user access (invite-only by
+  # default): validated here, before any create, and spliced into both
+  # settings.yaml writes below as HYBRID_USER_ACCESS_YAML.
+  hybrid_resolve_user_access "$ADMIN_EMAIL"
+  echo "  User access:  ${HYBRID_USER_ACCESS_MODE}"
+else
+  # Empty when the tier is off, so both settings.yaml writes render
+  # exactly as they do without the tier.
+  HYBRID_USER_ACCESS_YAML=""
+  if hybrid_user_access_config_present; then
+    warn "user_access_mode / authorized_domains in the config file are applied only when the hybrid tier is on; ignoring them."
   fi
 fi
 
@@ -1643,6 +1693,39 @@ else
   echo "  Created service account: ${SA_EMAIL}"
 fi
 
+# --- Hybrid tier: agent transport auth setup ---
+# GKE agent pods reach the hub through its public IAP URL, authenticating
+# the transport hop with a Google OIDC ID token minted by impersonating a
+# dedicated service account -- gated on the hybrid tier, not on IAP being
+# on in general, because only GKE-dispatched agents ever leave the hub VM
+# to reach it; a Docker-dispatched agent on the VM itself never traverses
+# IAP. Runs here, right after the hub's own runtime SA exists (needed for
+# the grant below), and after the cross-organization IAP check above:
+# both the client-ID discovery and that check depend on IAP already
+# being configured for this project. The Cloud Run resource-level grant
+# (hybrid_grant_transport_sa_iap_access) happens later, in Phase 4,
+# since the Cloud Run service and its own IAP enablement don't exist
+# yet at this point.
+if [[ "$HYBRID_ENABLED" == "true" ]]; then
+  info "Setting up agent transport auth..."
+  hybrid_discover_iap_client_id "${PROJECT_ID}"
+  hybrid_ensure_transport_sa "${HUB_NAME}" "${PROJECT_ID}"
+  hybrid_grant_transport_token_creator "${HYBRID_TRANSPORT_SA_EMAIL}" "${SA_EMAIL}" "${PROJECT_ID}"
+  # Rendered once, here, and spliced into both settings.yaml writes below
+  # (dev mode in Phase 3, proxy mode in Phase 5), the same pattern
+  # HYBRID_SHARED_DIR_STORAGE_YAML uses. IAM changes (the grants above,
+  # and the Cloud Run accessor grant in Phase 4) can take on the order of
+  # a minute to propagate; the first agent dispatched immediately after
+  # this deploy finishes may see a transient 403 minting or using its
+  # transport token. deploy.sh has nothing that blocks on this
+  # propagation itself -- it never mints or uses a transport token -- so
+  # it's documented here and in the runbook rather than covered with a
+  # blind sleep.
+  HYBRID_AUTH_TRANSPORT_YAML="$(hybrid_settings_auth_transport_yaml "${HYBRID_IAP_CLIENT_ID}" "${HYBRID_TRANSPORT_SA_EMAIL}")"
+else
+  HYBRID_AUTH_TRANSPORT_YAML=""
+fi
+
 # Bind minimal IAM roles (idempotent)
 # artifactregistry.writer lets the VM build and push the Cloud Run IAP proxy
 # image directly to Artifact Registry (see Phase 4).
@@ -1915,10 +1998,10 @@ else
   echo "  Created firewall rule: ${FW_8080_RULE_NAME} (source: ${DEFAULT_SUBNET_CIDR}, target tags: ${HUB_TAG})"
 fi
 
-# --- Hybrid tier: NFS firewall rules ---
+# --- Hybrid tier: firewall rules ---
 if [[ "$HYBRID_ENABLED" == "true" ]]; then
-  info "Creating hybrid-tier NFS firewall rules (if needed)..."
-  hybrid_ensure_firewall_rules "$HUB_NAME" "$PROJECT_ID" "default"
+  info "Creating hybrid-tier firewall rules (if needed)..."
+  hybrid_ensure_firewall_rules "$HUB_NAME" "$PROJECT_ID" "default" "$REGION"
 fi
 
 # --- Create VM ---
@@ -1968,12 +2051,12 @@ else
   echo "  Created VM: ${INSTANCE_NAME} (zone: ${ZONE})"
 fi
 
-# --- Hub URL guard (post-create half) ---
-# GKE agent pods reach the hub at http://<internal-ip>:8080 over the
-# VPC; there is no other shape this tier supports. See hybrid_hub_url_
-# guard_verify's own comment for what this does and doesn't cover.
+# --- Internal IP guard (post-create half) ---
+# The shared NFS PV's server field needs the reserved internal IP to
+# actually match the VM. See hybrid_internal_ip_guard_verify's own
+# comment for what this does and doesn't cover.
 if [[ "$HYBRID_ENABLED" == "true" ]]; then
-  hybrid_hub_url_guard_verify "$HUB_NAME" "$PROJECT_ID" "$REGION" "$INSTANCE_NAME" "$ZONE"
+  hybrid_internal_ip_guard_verify "$HUB_NAME" "$PROJECT_ID" "$REGION" "$INSTANCE_NAME" "$ZONE"
 fi
 
 # --- Wait for SSH readiness (avoids race on initial boot) ---
@@ -2315,7 +2398,9 @@ ${ADMIN_EMAIL:+    admin_emails:
     backend: local
   auth:
     mode: dev
-${HYBRID_SHARED_DIR_STORAGE_YAML:+${HYBRID_SHARED_DIR_STORAGE_YAML}
+${HYBRID_AUTH_TRANSPORT_YAML:+${HYBRID_AUTH_TRANSPORT_YAML}
+}${HYBRID_USER_ACCESS_YAML:+${HYBRID_USER_ACCESS_YAML}
+}${HYBRID_SHARED_DIR_STORAGE_YAML:+${HYBRID_SHARED_DIR_STORAGE_YAML}
 }  listen_port: 8080
 SETTINGSEOF
   "
@@ -2866,6 +2951,15 @@ else
   fi
 fi
 
+# --- Hybrid tier: grant agent transport SA IAP access ---
+# The Cloud Run service and its own IAP enablement now exist, so the
+# resource-level grant deferred from the transport-setup step in Phase 2
+# happens here, alongside the operator's own grant above.
+if [[ "$HYBRID_ENABLED" == "true" ]]; then
+  info "Granting agent transport service account IAP access..."
+  hybrid_grant_transport_sa_iap_access "${HYBRID_TRANSPORT_SA_EMAIL}" "${PROXY_SERVICE}" "${REGION}" "${PROJECT_ID}"
+fi
+
 # --- Wait for IAP enforcement ---
 info "Waiting for IAP enforcement to activate..."
 echo "  IAP takes 30-60 seconds to begin enforcing after being enabled."
@@ -2922,7 +3016,9 @@ ${ADMIN_EMAIL:+    admin_emails:
       provider: iap
       iap:
         audience: \"${IAP_AUDIENCE}\"
-${HYBRID_SHARED_DIR_STORAGE_YAML:+${HYBRID_SHARED_DIR_STORAGE_YAML}
+${HYBRID_AUTH_TRANSPORT_YAML:+${HYBRID_AUTH_TRANSPORT_YAML}
+}${HYBRID_USER_ACCESS_YAML:+${HYBRID_USER_ACCESS_YAML}
+}${HYBRID_SHARED_DIR_STORAGE_YAML:+${HYBRID_SHARED_DIR_STORAGE_YAML}
 }  listen_port: 8080
 SETTINGSEOF
   "
