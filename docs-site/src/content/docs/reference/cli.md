@@ -18,6 +18,15 @@ These flags are available on all commands:
 - `--non-interactive`: Full non-interactive mode (implies `--yes`, errors on ambiguous prompts).
 - `--debug`: Enable verbose debug output.
 
+The legacy hidden `--grove` flag has been removed from every command; passing it fails with
+`unknown flag: --grove`. Use `--project`.
+
+:::caution[`--gcp-project` on GCP commands]
+On `scion project service-accounts add` and `scion hub secret migrate`, the GCP project ID is passed
+with `--gcp-project`. On those commands `--project` is the global Scion project selector, and using
+it for the GCP project ID fails with a hint pointing to `--gcp-project`.
+:::
+
 :::tip[Decluttered CLI Help]
 To keep subcommand help output clean and readable, global flags are hidden from default subcommand help outputs. You can view the full list of global flags anytime by running:
 
@@ -299,9 +308,35 @@ Synchronizes the agent workspace between the host and the container.
 Injects a fresh Hub token into a **running** agent's container and signals it to reload, without
 restarting the agent. Use this to recover an agent whose token expired and cannot self-refresh
 (e.g. after a Hub signing-key rotation). Requires a Hub connection. The same action is available
-as a **Reset Auth** button in the web UI.
+as a **Reset Auth** button in the web UI. The token is passed to the container over stdin, not on the
+command line, so it does not appear in the host's process list.
 
 **Usage:** `scion reset-auth <agent-name>`
+
+### `scion reincarnate`
+
+Migrates an agent to a fresh **generation**: it stops the agent, re-resolves its configuration
+against the current template and harness-config catalog (template, image, harness config, model,
+env keys), and starts it again with the **same** agent ID and slug. The new generation's first task
+is a Hub-built preamble plus the handoff you provide. Requires a Hub connection.
+
+The Hub accepts the request with `202 Accepted` and completes the migration in the background. If
+the new generation cannot be provisioned, the Hub restores the previous generation's configuration.
+
+Run it with no argument inside an agent container to migrate the agent itself (self-migration).
+Self-migration requires `--handoff-file`, because there is no one else to describe the work in
+progress. When migrating another agent, the handoff is optional.
+
+**Usage:** `scion reincarnate [agent-name] [flags]`
+
+- **Flags:**
+    - `--handoff-file <path>`: File whose content becomes the new generation's first task. Required for self-migration.
+    - `--dry-run`: Print the resolved plan (old → new template, image, harness config, model, env key names, and branch) without migrating anything.
+
+:::note[Phase 1]
+This release supports only `--handoff-file` and `--dry-run`. Overrides such as a different image,
+model, or harness config are not yet available.
+:::
 
 ## Configuration & Workspace
 
@@ -318,6 +353,15 @@ Manages the Scion workspace (Project).
     - **Hub Integration:** If a Hub endpoint is configured, `init` will prompt to register the new project with the Hub.
 - `scion project list` (alias `ls`): List all projects known to Scion on this machine, including their type, agent count, status, and workspace path.
 - `scion project prune`: Detect and remove project configurations whose workspace directories no longer exist. This stops any running containers associated with orphaned projects before cleaning up.
+- `scion project status [project]` (alias `health`): Show agent status for a project from the Hub: counts per lifecycle phase and per activity, a per-agent table (template, harness, phase, activity), and troubleshooting hints for blocked, stalled, or errored agents. Uses the current project when no name is given.
+    - Flags: `--all` (report across all projects on the Hub), `--json` (JSON output).
+- `scion project service-accounts` (alias `sa`): Manage GCP service accounts registered for the project.
+    - `add <email>`: Register an existing GCP service account.
+        - Flags: `--gcp-project <id>` (required, the GCP project ID), `--name <string>` (display name).
+    - `mint`: Create a new service account in the Hub's GCP project (the account ID is prefixed with `scion-`). Flags: `--account-id`, `--name`.
+    - `list` (alias `ls`): List registered service accounts. Flags: `--json`.
+    - `verify <id>`: Verify that the Hub can impersonate the service account.
+    - `remove <id>` (aliases `rm`, `delete`): Remove a service account registration.
 - `scion project reconnect <new-workspace-path>`: Reconnect a moved workspace to its externalized project configuration. This fixes projects that show as "orphaned" after being relocated.
 - `scion project skills`: Manage auto-injected skills for the project.
     - `list [project]` (alias `ls`): List auto-injected skills configured for the current project (or a specified project).
@@ -516,12 +560,14 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
     - `set <key> <value>`: Set a secret (supports `--allow-progeny` for user-scoped secrets).
     - `get [key]`: Get secret metadata.
     - `clear <key>`: Remove a secret.
+    - `migrate`: Move existing secrets from the Hub database to GCP Secret Manager.
+        - Flags: `--gcp-project <id>` (required, the GCP project ID), `--credentials <path>` (GCP credentials JSON), `--dry-run`, `--force` (re-migrate secrets that already reference Secret Manager), `--hub-id <id>` (Hub instance ID used to namespace secrets).
 - `scion hub env`: Manage environment variables on the Hub.
     - `set <key>=<value>`: Set a variable.
     - `get [key]`: Get variable values.
     - `clear <key>`: Remove a variable.
 - `scion hub project create <git-url>`: Create a project from a remote git repository.
-    - Flags: `--slug`, `--name`, `--branch`, `--visibility`, `--json`
+    - Flags: `--slug`, `--name`, `--branch`, `--json`
 - `scion hub hook` (alias `psh`): Manage hub-scoped (baseline) pre-start hooks. Requires administrator privileges.
     - `list` (alias `ls`): List hub-scoped pre-start hooks.
     - `show <id-or-slug>`: Show details and script content of a hub-scoped hook.
@@ -645,7 +691,7 @@ health (Docker/Podman daemon, or Kubernetes cluster/namespace/RBAC/CSI access). 
 :::note[In-container diagnostics]
 A separate **`sciontool doctor`** command runs *inside* an agent container and diagnoses the
 agent's own health — environment variables, Hub token (presence/format/expiry), Hub reachability,
-token refresh, the GCP metadata server, and the GitHub App token. See
+token validity (a read-only check that does not refresh or revoke the token), the GCP metadata server, and the GitHub App token. See
 [Harness Authentication](/scion/local/agent-credentials/#diagnostics).
 :::
 
