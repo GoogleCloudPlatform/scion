@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -159,6 +160,9 @@ func (s *Server) listTemplatesV2(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, query := r.Context(), r.URL.Query()
 	filter := store.TemplateFilter{Name: query.Get("name"), Scope: query.Get("scope"), ScopeID: query.Get("scopeId"), ProjectID: query.Get("projectId"), Harness: query.Get("harness"), Status: query.Get("status"), Search: query.Get("search")}
+	// Normalize a legacy scope name to its canonical form before it drives
+	// the scope switch below or the store filter (ptone/scion#1977).
+	filter.Scope = projectcompat.CanonicalResourceScope(filter.Scope)
 	if filter.Status == "" {
 		filter.Status = store.TemplateStatusActive
 	}
@@ -928,7 +932,13 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		scopeID = req.ProjectID
 	}
 
-	// Authorize: check destination scope for ActionCreate
+	// Authorize: check destination scope for ActionCreate. destScope is the
+	// single value shared by this switch, the clone record below, and the
+	// storage path resolution further down, so all three always agree on
+	// which scope a clone targets (ptone/scion#1977). isValidTemplateScope
+	// above already rejected anything other than "", "global", "project" or
+	// "user" — including removed legacy scope names — so no further
+	// normalization is needed here.
 	destScope := req.Scope
 	if destScope == "" {
 		destScope = store.TemplateScopeProject
@@ -979,6 +989,9 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You can only clone templates into your own user scope", nil)
 			return
 		}
+	default:
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Cloning into this resource scope is not supported", nil)
+		return
 	}
 
 	// Create new template based on source
@@ -991,15 +1004,11 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		Harness:      source.Harness,
 		Image:        source.Image,
 		Config:       source.Config,
-		Scope:        req.Scope,
+		Scope:        destScope,
 		ScopeID:      scopeID,
 		ProjectID:    scopeID,
 		BaseTemplate: source.ID, // Track the source template
 		Status:       store.TemplateStatusPending,
-	}
-
-	if clone.Scope == "" {
-		clone.Scope = store.TemplateScopeProject
 	}
 
 	// For user-scoped clones, set the owner from the authenticated user
