@@ -367,7 +367,7 @@ Once the app is running and connected, users interact via `/scion` (message agen
 | `/scionAdmin unlink` | Unlink the current space from its project |
 | `/scionAdmin list` | List agents in the linked project |
 | `/scionAdmin status <agent>` | Show agent status card with action buttons |
-| `/scionAdmin create <agent>` | Create a new agent |
+| `/scionAdmin create <agent-name>` | Create a new agent |
 | `/scionAdmin start <agent>` | Start an agent |
 | `/scionAdmin stop <agent>` | Stop an agent |
 | `/scionAdmin delete <agent>` | Delete an agent (with confirmation) |
