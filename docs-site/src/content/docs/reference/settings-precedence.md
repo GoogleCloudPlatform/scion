@@ -859,3 +859,5 @@ of a settings change.
 - [Admin Settings](/scion/reference/admin-settings/) — where hub `agent_defaults` are configured.
 - [Harness-Specific Settings](/scion/reference/harness-settings/) — configuration consumed by the tools
   running inside the container.
+- [Migrating from grove names](/scion/reference/grove-removal/) — the removed `grove`-named flags,
+  environment variables, and config keys, and their `project`-named replacements.
