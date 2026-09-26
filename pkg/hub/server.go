@@ -3127,6 +3127,12 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	// broker never needs to read non-public skills with its own identity (#1784).
 	dispatcher.SetSkillPreResolver(s.preResolveAgentSkills)
 
+	// Start/restart always resolve as the agent's recorded creator, so a
+	// re-provision reached through either verb resolves the same set for a
+	// given agent regardless of which permitted principal dispatches it
+	// (ptone/scion#1994).
+	dispatcher.SetCreatorSkillPreResolver(s.preResolveAgentSkillsAsCreator)
+
 	// Wire the hub's operational agent_defaults so dispatch can carry the
 	// limit/resource ones to the broker's low-precedence tier. The accessor
 	// takes s.mu; it returns the zero value in file mode, where the wire field

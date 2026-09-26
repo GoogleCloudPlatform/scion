@@ -235,14 +235,20 @@ func TestStartAgent_NoResolverAttachedWithoutHubOrPreResolved(t *testing.T) {
 
 // TestStartAgent_ProvisionCredentialsNotEchoedInResponse and its restart
 // counterpart below guard against #1960's new StartExtras wire fields
-// (ProvisionCredentials, PreResolvedSkills) leaking back out: they must be
-// used only to build the provisioning context (attachSkillResolver) and never
-// appear in the HTTP response body, exactly like the equivalent create-path
-// fields (req.ProvisionCredentials, req.PreResolvedSkills) never do today.
+// (ProvisionCredentials, PreResolvedSkills, UserID, HubEndpoint) appearing in
+// the response: they must be used only to build the provisioning context
+// (attachSkillResolver) and never appear in the HTTP response body, exactly
+// like the equivalent create-path fields (req.ProvisionCredentials,
+// req.PreResolvedSkills) never do today.
 const startAgentSecretCanary = "SCION-1960-CANARY-do-not-echo-3f9a1c"
+const startAgentURLCanary = "SCION-1960-CANARY-url-8b21f0c4"
+const startAgentUserIDCanary = "SCION-1960-CANARY-user-71adf4e9"
+const startAgentHubEndpointCanary = "SCION-1960-CANARY-hub-5c9e2a17"
 
 func startExtrasProbeBody(uri string) string {
 	return `{
+		"hubEndpoint": "https://` + startAgentHubEndpointCanary + `.example.com",
+		"userId": "` + startAgentUserIDCanary + `",
 		"provisionCredentials": {"GH_OCTO_ORG": "` + startAgentSecretCanary + `"},
 		"preResolvedSkills": {
 			"resolved": [{
@@ -250,10 +256,30 @@ func startExtrasProbeBody(uri string) string {
 				"name": "test-skill",
 				"resolvedVersion": "1.0.0",
 				"contentHash": "sha256:abc",
-				"files": []
+				"files": [{
+					"path": "SKILL.md",
+					"url": "https://storage.example.com/skill.md?sig=` + startAgentURLCanary + `"
+				}]
 			}]
 		}
 	}`
+}
+
+// assertStartExtrasCanariesNotEchoed fails t if any of the start/restart
+// dispatch-metadata canaries (provisioned value, file URL, UserID,
+// HubEndpoint) appear in body.
+func assertStartExtrasCanariesNotEchoed(t *testing.T, verb, body string) {
+	t.Helper()
+	for _, canary := range []string{
+		startAgentSecretCanary,
+		startAgentURLCanary,
+		startAgentUserIDCanary,
+		startAgentHubEndpointCanary,
+	} {
+		if strings.Contains(body, canary) {
+			t.Fatalf("canary %q appeared in the %s response body: %s", canary, verb, body)
+		}
+	}
 }
 
 func TestStartAgent_ProvisionCredentialsNotEchoedInResponse(t *testing.T) {
@@ -270,9 +296,7 @@ func TestStartAgent_ProvisionCredentialsNotEchoedInResponse(t *testing.T) {
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
 	}
-	if strings.Contains(w.Body.String(), startAgentSecretCanary) {
-		t.Fatalf("ProvisionCredentials value leaked into the start response body: %s", w.Body.String())
-	}
+	assertStartExtrasCanariesNotEchoed(t, "start", w.Body.String())
 	// Sanity: prove the resolver actually saw the credential (so this test
 	// would fail if the field were silently dropped instead of merely hidden).
 	if mgr.lastStartCtx == nil {
@@ -297,9 +321,7 @@ func TestRestartAgent_ProvisionCredentialsNotEchoedInResponse(t *testing.T) {
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
 	}
-	if strings.Contains(w.Body.String(), startAgentSecretCanary) {
-		t.Fatalf("ProvisionCredentials value leaked into the restart response body: %s", w.Body.String())
-	}
+	assertStartExtrasCanariesNotEchoed(t, "restart", w.Body.String())
 	if mgr.lastStartCtx == nil {
 		t.Fatal("expected Start (via restart) to be called with a captured context")
 	}

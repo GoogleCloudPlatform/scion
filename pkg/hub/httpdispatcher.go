@@ -177,6 +177,14 @@ type HTTPAgentDispatcher struct {
 	templateRepairer      func(ctx context.Context, ref string) error
 	skillPreResolver      func(ctx context.Context, agent *store.Agent) *ResolveSkillsResponse
 
+	// creatorSkillPreResolver is skillPreResolver's start/restart counterpart:
+	// it resolves as the agent's recorded creator regardless of who is
+	// dispatching the start/restart, so a re-provision reached through either
+	// verb resolves the same set for a given agent no matter which permitted
+	// principal triggers it (ptone/scion#1994). Nil = no creator-based
+	// resolution (start/restart carry no PreResolvedSkills, same as before).
+	creatorSkillPreResolver func(ctx context.Context, agent *store.Agent) *ResolveSkillsResponse
+
 	// hubAgentDefaultsProvider returns the hub's operational agent_defaults at
 	// dispatch time. A callback rather than a snapshot because the settings
 	// propagation goroutine rewrites them while the hub runs; the Server's
@@ -362,6 +370,15 @@ func (d *HTTPAgentDispatcher) SetTemplateRepairer(fn func(ctx context.Context, r
 // is attached to every create request as PreResolvedSkills.
 func (d *HTTPAgentDispatcher) SetSkillPreResolver(fn func(ctx context.Context, agent *store.Agent) *ResolveSkillsResponse) {
 	d.skillPreResolver = fn
+}
+
+// SetCreatorSkillPreResolver registers the callback that resolves an agent's
+// Hub-registry skill references as its recorded creator, independent of the
+// principal dispatching the current call (ptone/scion#1994). Start and
+// restart use this so their PreResolvedSkills matches what the agent's
+// creator would get, regardless of who starts/restarts the agent.
+func (d *HTTPAgentDispatcher) SetCreatorSkillPreResolver(fn func(ctx context.Context, agent *store.Agent) *ResolveSkillsResponse) {
+	d.creatorSkillPreResolver = fn
 }
 
 // isHashMismatchError reports whether err is a broker hash-mismatch error
@@ -2355,17 +2372,21 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	// Carry the same dispatch metadata the create path sends so that a
 	// re-provision reached via start (e.g. after the broker deletes a stale
 	// agent dir) can resolve required skills exactly as create does (#1960):
-	// the same PreResolvedSkills the Hub resolved as the agent's creator (so
+	// the same PreResolvedSkills the Hub resolves as the agent's creator (so
 	// non-public hub-registry skills are never resolved with the broker's own
 	// identity), the same project-scope ProvisionCredentials for gh:// skill
 	// resolution, and the owning user's ID for user-scope resolution.
+	// PreResolvedSkills always resolves as the agent's creator regardless of
+	// who is dispatching this start (ptone/scion#1994), so the resolved set
+	// for a given agent is the same whether the creator, an admin, or a
+	// project owner starts it.
 	extras := StartExtras{
 		HubEndpoint:          d.effectiveAgentHubEndpoint(),
 		UserID:               agent.OwnerID,
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentStart"),
 	}
-	if d.skillPreResolver != nil {
-		extras.PreResolvedSkills = d.skillPreResolver(ctx, agent)
+	if d.creatorSkillPreResolver != nil {
+		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)
 	}
 
 	resp, err := d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, projectInfo.sharedDirs, projectInfo.sharedWorkspace, resume, extras)
@@ -2596,14 +2617,15 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 
 	// Carry the same dispatch metadata as DispatchAgentStart (see comment
 	// there) so a re-provision reached via restart resolves required skills
-	// exactly as create does (#1960).
+	// exactly as create does (#1960), always as the agent's creator
+	// regardless of who is dispatching this restart (ptone/scion#1994).
 	extras := StartExtras{
 		HubEndpoint:          d.effectiveAgentHubEndpoint(),
 		UserID:               agent.OwnerID,
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentRestart"),
 	}
-	if d.skillPreResolver != nil {
-		extras.PreResolvedSkills = d.skillPreResolver(ctx, agent)
+	if d.creatorSkillPreResolver != nil {
+		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)
 	}
 
 	err = d.client.RestartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, resolvedEnv, extras)

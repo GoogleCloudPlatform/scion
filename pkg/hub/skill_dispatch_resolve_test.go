@@ -172,6 +172,66 @@ func TestPreResolveAgentSkills_IdentitySelection(t *testing.T) {
 	})
 }
 
+// TestPreResolveAgentSkillsAsCreator_SameResultRegardlessOfCaller is the
+// regression test for ptone/scion#1994: start and restart resolve as the
+// agent's recorded creator, so the same agent gets an identical pre-resolved
+// set whether the creator, an admin, or a project owner is the one starting
+// or restarting it — unlike preResolveAgentSkills (the create-path resolver,
+// unchanged), which prefers the dispatching caller (see
+// TestPreResolveAgentSkills_IdentitySelection, where bob dispatching alice's
+// agent gets a different, worse outcome than alice would).
+func TestPreResolveAgentSkillsAsCreator_SameResultRegardlessOfCaller(t *testing.T) {
+	srv, s, alice, bob, project := setupSkillAuthzTest(t)
+	skill := createTestSkill(t, s, "creator-only", store.SkillScopeProject, project.ID, alice.ID)
+	publishTestSkillVersion(t, s, skill)
+	uri := "skill://scion/project/" + project.ID + "/creator-only"
+	agent := dispatchTestAgent(alice.ID, project.ID, uri)
+
+	// alice, the creator, starts her own agent.
+	aliceIdent := NewAuthenticatedUser(alice.ID, alice.Email, alice.DisplayName, alice.Role, "api")
+	aliceResp := srv.preResolveAgentSkillsAsCreator(contextWithIdentity(context.Background(), aliceIdent), agent)
+
+	// bob -- who cannot read this project-private skill himself -- is the one
+	// starting alice's agent instead (e.g. as an admin or project owner).
+	bobIdent := NewAuthenticatedUser(bob.ID, bob.Email, bob.DisplayName, bob.Role, "api")
+	bobResp := srv.preResolveAgentSkillsAsCreator(contextWithIdentity(context.Background(), bobIdent), agent)
+
+	// No caller in context at all (e.g. an internal dispatch path).
+	noCallerResp := srv.preResolveAgentSkillsAsCreator(context.Background(), agent)
+
+	require.NotNil(t, aliceResp)
+	assert.Empty(t, aliceResp.Errors)
+	require.Len(t, aliceResp.Resolved, 1)
+	assert.Equal(t, uri, aliceResp.Resolved[0].URI)
+
+	assert.Equal(t, aliceResp, bobResp, "start/restart must resolve the same set for the same agent regardless of who starts it")
+	assert.Equal(t, aliceResp, noCallerResp, "start/restart must resolve the same set with no caller in context")
+}
+
+// TestPreResolveAgentSkillsAsCreator_EmptyCreatedBy_NoFallback is the
+// regression test for the ptone/scion#1994 scope addition: when an agent's
+// recorded creator is empty (no creator on record, e.g. agent.CreatedBy is
+// unset in storage), start/restart pre-resolution is skipped -- it does not
+// fall back to the dispatching caller's identity or to agent.OwnerID, even
+// when either of those could read the skill.
+func TestPreResolveAgentSkillsAsCreator_EmptyCreatedBy_NoFallback(t *testing.T) {
+	srv, s, alice, _, project := setupSkillAuthzTest(t)
+	skill := createTestSkill(t, s, "no-creator", store.SkillScopeProject, project.ID, alice.ID)
+	publishTestSkillVersion(t, s, skill)
+	uri := "skill://scion/project/" + project.ID + "/no-creator"
+
+	agent := dispatchTestAgent("", project.ID, uri) // no recorded creator
+	agent.OwnerID = alice.ID                        // owner can read the skill; must not be used either
+
+	// alice -- who could read this skill -- is the one dispatching the
+	// start/restart.
+	aliceIdent := NewAuthenticatedUser(alice.ID, alice.Email, alice.DisplayName, alice.Role, "api")
+	ctx := contextWithIdentity(context.Background(), aliceIdent)
+
+	resp := srv.preResolveAgentSkillsAsCreator(ctx, agent)
+	assert.Nil(t, resp, "pre-resolution must be skipped, not fall back to the dispatching caller or the owner, when created_by is empty")
+}
+
 // gh://, gcp-skill:// and federated registries stay with the broker's router.
 func TestPreResolveAgentSkills_SkipsNonRegistrySchemes(t *testing.T) {
 	srv, _, alice, _, project := setupSkillAuthzTest(t)

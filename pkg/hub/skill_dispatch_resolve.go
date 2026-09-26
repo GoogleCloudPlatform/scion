@@ -298,6 +298,34 @@ func (s *Server) creatorIdentityForAgent(ctx context.Context, agent *store.Agent
 // Returns nil when there is nothing to pre-resolve or no principal is
 // available, in which case the broker resolves as before.
 func (s *Server) preResolveAgentSkills(ctx context.Context, agent *store.Agent) *ResolveSkillsResponse {
+	return s.preResolveAgentSkillsAsIdentity(ctx, agent, s.skillResolveIdentityForAgent(ctx, agent))
+}
+
+// preResolveAgentSkillsAsCreator resolves the agent's Hub-registry skill
+// references as the agent's recorded creator (agent.CreatedBy), regardless of
+// which permitted principal is driving the current dispatch. Start and
+// restart use this so a given agent's pre-resolved set is the same whoever
+// starts or restarts it — the creator, an admin, or a project owner all get
+// the same, creator-based resolution (ptone/scion#1994). A parent-agent
+// creator resolves through the same creatorIdentityForAgent path used
+// elsewhere.
+//
+// When agent.CreatedBy is empty (no recorded creator) or the recorded
+// creator no longer exists, pre-resolution is skipped: this never falls back
+// to the dispatching caller's identity or to agent.OwnerID. A skill that
+// needed pre-resolution then goes unresolved here, and any required skill
+// reaches the broker's own resolution attempt, which reports the same clean,
+// existing "could not be resolved" outcome it already reports for other
+// unresolvable skills — no panic, no new error path.
+func (s *Server) preResolveAgentSkillsAsCreator(ctx context.Context, agent *store.Agent) *ResolveSkillsResponse {
+	return s.preResolveAgentSkillsAsIdentity(ctx, agent, s.creatorIdentityForAgent(ctx, agent))
+}
+
+// preResolveAgentSkillsAsIdentity is the shared core of preResolveAgentSkills
+// and preResolveAgentSkillsAsCreator: it resolves the agent's dispatchable
+// Hub-registry skill references as identity, which the two callers derive
+// differently.
+func (s *Server) preResolveAgentSkillsAsIdentity(ctx context.Context, agent *store.Agent, identity Identity) *ResolveSkillsResponse {
 	refs := s.dispatchSkillRefs(ctx, agent)
 	if len(refs) == 0 {
 		return nil
@@ -324,7 +352,6 @@ func (s *Server) preResolveAgentSkills(ctx context.Context, agent *store.Agent) 
 		return nil
 	}
 
-	identity := s.skillResolveIdentityForAgent(ctx, agent)
 	if identity == nil {
 		slog.WarnContext(ctx, "dispatch skill pre-resolution skipped: no creator identity available",
 			"agent_id", agent.ID, "created_by", agent.CreatedBy)
