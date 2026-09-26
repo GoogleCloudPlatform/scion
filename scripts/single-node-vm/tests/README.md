@@ -18,10 +18,16 @@ files in the PR that adds the feature.
   this suite is not the vehicle for verifying that support.
 - **python3** — the stub's own JSON fixtures (firewall rules, service
   accounts, ...) are built and parsed with python3, not jq.
-- **jq** — `deploy.sh` itself shells out to jq, when available, to parse
-  a GitHub Releases response for its default `VERSION`. Pass `--version`
-  (as every test in this suite does) to skip that path entirely, or
-  install jq if you add a test that omits it.
+- **jq** — `deploy.sh` checks for jq as a hard Phase 1 prerequisite (it's
+  required to safely detect an existing Cloud NAT before creating any
+  resources; see the Cloud NAT reuse check), and fails immediately if it's
+  missing -- before Phase 1 even gets to reading `--version`. It's also
+  used, when reached, to parse a GitHub Releases response for the default
+  `VERSION`, but every test in this suite passes `--version` and so never
+  exercises that second path. Install jq to run this suite at all; a test
+  that specifically wants to simulate jq being absent (see
+  `test_nat_reuse.sh`'s `_dir_without_jq`) does so for a single
+  subprocess invocation, not for the suite as a whole.
 
 ## Running the suite
 

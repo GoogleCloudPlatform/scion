@@ -273,6 +273,16 @@ set_routers_list_will_fail() {
   touch "${GCLOUD_STUB_STATE_DIR}/routers-list-should-fail"
 }
 
+# set_routers_list_returns_empty — the next (and every subsequent)
+# `compute routers list` call exits 0 but prints nothing, distinct from
+# set_routers_list_will_fail's exit 1: a real `list` that succeeds always
+# prints at least "[]", so empty stdout on a zero exit is its own failure
+# mode (a caller parsing it as JSON gets nothing to parse), not the "no
+# routers" empty-array case.
+set_routers_list_returns_empty() {
+  touch "${GCLOUD_STUB_STATE_DIR}/routers-list-should-return-empty"
+}
+
 gcloud_log() {
   [[ -f "$GCLOUD_STUB_LOG" ]] && cat "$GCLOUD_STUB_LOG"
 }

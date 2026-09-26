@@ -233,6 +233,11 @@ if [[ "$DELETE_MODE" == "true" ]]; then
 
   INSTANCE_NAME="scion-hub-${HUB_NAME}"
   PROXY_SERVICE="${INSTANCE_NAME}-iap-proxy"
+  # Deliberately our own fixed names only -- never a router/NAT discovered by
+  # the reuse check in the create path. If deploy.sh reused someone else's
+  # NAT, our own scion-hub-${HUB_NAME}-router/-nat were never created, so the
+  # deletes below simply no-op ("not found or already deleted") and the
+  # reused resource is left untouched.
   ROUTER_NAME="scion-hub-${HUB_NAME}-router"
   NAT_NAME="scion-hub-${HUB_NAME}-nat"
   FW_RULE_NAME="scion-hub-${HUB_NAME}-allow-iap-ssh"
@@ -347,6 +352,16 @@ fi
 # Phase 1: Prerequisites
 # ===================================================================
 section "Phase 1: Prerequisites"
+
+# jq is required later (Phase 2) to safely detect an existing Cloud NAT
+# before creating any resources -- see the Cloud NAT reuse check below.
+# Checked here, with the other prerequisites, so a missing jq is caught
+# before any prompts, API-enable calls, or release detection run, not after
+# most of Phase 2 has already happened.
+if ! command -v jq &>/dev/null; then
+  err "jq is required (used to safely detect an existing Cloud NAT before creating resources; see docs/deploy/agent-runbook-single-node-vm.md, Cloud NAT reuse). Install jq and re-run."
+  exit 1
+fi
 
 # --- GCP project ---
 PROJECT_ID="$(config_get 'project_id' '')"
@@ -631,11 +646,10 @@ if [[ -z "$VERSION" ]]; then
     RELEASE_JSON="$(curl -fsSL 'https://api.github.com/repos/GoogleCloudPlatform/scion/releases?per_page=1')" \
       || { err "Could not fetch releases from GitHub API."; exit 1; }
   fi
-  if command -v jq &>/dev/null; then
-    VERSION="$(echo "$RELEASE_JSON" | jq -r 'select(. != null) | if type == "array" then .[0].tag_name else .tag_name end // empty')" || true
-  else
-    VERSION="$(echo "$RELEASE_JSON" | grep '"tag_name"' | head -1 | sed -E 's/.*"tag_name":\s*"([^"]+)".*/\1/')" || true
-  fi
+  # jq is a hard prerequisite (checked in Phase 1), so no text-based fallback
+  # is needed here. Here-string, not `echo | jq` -- see the NAT_ROWS comment
+  # below for why.
+  VERSION="$(jq -r 'select(. != null) | if type == "array" then .[0].tag_name else .tag_name end // empty' <<< "$RELEASE_JSON")" || true
   if [[ -z "$VERSION" ]]; then
     err "Could not detect latest release. Use --version to specify."
     exit 1
@@ -767,6 +781,137 @@ else
   fi
 fi
 
+# --- Detect existing Cloud NAT to reuse (network default, region ${REGION}) ---
+# A Cloud NAT gateway in ALL_SUBNETWORKS_* mode (all subnets, or all subnets'
+# primary IP ranges) cannot coexist with any other NAT gateway on the same
+# network+region -- GCP rejects creating one while another gateway is
+# already there, regardless of what that other gateway covers. So there are
+# two cases where our own `--nat-all-subnet-ip-ranges` NAT create in the
+# Cloud Router + Cloud NAT step below would otherwise be rejected:
+#   1. Some other router's NAT already covers our VM's subnet ("default") --
+#      reuse it instead of creating our own.
+#   2. Some other router has a NAT that does NOT cover "default" -- our own
+#      NAT still can't use ALL_SUBNETWORKS_* mode alongside it, so it's
+#      created scoped to just subnet "default" instead
+#      (--nat-custom-subnet-ip-ranges), which coexists fine.
+# Either way, by the time the plain `nats create` call failed, the service
+# account, IAM bindings, and possibly an orphan router would already exist
+# with no clean way to unwind them -- so this runs first, before any
+# resource below is created. See docs/deploy/agent-runbook-single-node-vm.md
+# (Cloud NAT reuse).
+#
+# This has to inspect every router's NAT config on this network+region, not
+# just our own name -- idempotent re-runs that recognize OUR OWN router/NAT
+# are still handled below, unchanged, by the existing describe-by-name
+# checks. jq (checked as a Phase 1 prerequisite) is required: NAT coverage
+# is nested JSON (sourceSubnetworkIpRangesToNat / subnetworks[]), and a
+# text-based fallback risks silently misjudging reuse.
+info "Checking for an existing Cloud NAT covering this network/region..."
+ROUTER_NAME="scion-hub-${HUB_NAME}-router"
+NAT_NAME="scion-hub-${HUB_NAME}-nat"
+
+# No `2>/dev/null` here or on the jq call below: on failure, gcloud's/jq's
+# own error (permission denied, API disabled, bad JSON, ...) prints to
+# stderr right above our `err`, instead of being silently discarded.
+ROUTERS_JSON="$(gcloud compute routers list \
+  --project="${PROJECT_ID}" \
+  --filter="region:(${REGION}) AND network:(default)" \
+  --format=json)" || {
+  err "Could not list Cloud Routers in ${REGION} on network 'default' (see gcloud error above). Aborting before creating any resources."
+  exit 1
+}
+if [[ -z "$ROUTERS_JSON" ]]; then
+  # A successful `list` always prints at least "[]"; empty output means
+  # something went wrong upstream of gcloud's own exit code. Treat it as a
+  # failure rather than silently matching "no routers" (fail closed).
+  err "Cloud Router list returned no output for ${REGION} on network 'default' (expected at least '[]'). Aborting before creating any resources."
+  exit 1
+fi
+
+# Emits one "<router><TAB><nat><TAB>covers<TAB>foreign" row per NAT, for
+# routers that are actually on network "default" in exactly this region
+# (re-checked here with endswith -- gcloud's `--filter` ':' operator is a
+# word/substring match, not equality, so e.g. a router on network
+# "default-vpc" would otherwise slip through). A NAT with type PRIVATE
+# (Private NAT, for NCC/hybrid connectivity -- not internet egress) never
+# counts as coverage: it can't provide the VM's internet egress no matter
+# what it covers. It DOES still count as a foreign gateway, though --
+# GCP's ALL_SUBNETWORKS exclusivity rule ("there should not be any other
+# Router.Nat section in any Router for this network in this region") is
+# not qualified by type, so an all-subnets create is rejected next to a
+# foreign Private NAT exactly like next to any other foreign gateway.
+# Excluding Private NATs from "foreign" as well as "covers" would let
+# deploy.sh attempt that same rejected all-subnets create -- the #2003
+# failure again, after the SA/IAM already exist. So a foreign Private NAT
+# still routes to the scoped (--nat-custom-subnet-ip-ranges=default)
+# create below, same as any other non-covering foreign gateway; our own
+# router is never treated as foreign; a hand-added extra NAT on it is out
+# of scope. "covers" is true when the NAT is PUBLIC (the
+# default when `type` is absent) AND already provides egress for subnet
+# "default": ALL_SUBNETWORKS_* mode (all ranges, or all primary ranges),
+# or a LIST_OF_SUBNETWORKS entry for "default" whose sourceIpRangesToNat
+# actually includes the primary range (ALL_IP_RANGES or PRIMARY_IP_RANGE
+# -- an entry that only forwards secondary ranges does NOT give the VM's
+# primary IP egress). "foreign" is true when the router isn't the one
+# we'd create ourselves, regardless of NAT type.
+# A here-string avoids piping through `echo`, which can misbehave on
+# option-like leading hyphens in $ROUTERS_JSON (e.g. a value starting
+# with "-n" or "-e").
+NAT_ROWS="$(jq -r \
+  --arg region "$REGION" \
+  --arg own "$ROUTER_NAME" '
+  .[]
+  | select((.network // "") | endswith("/global/networks/default"))
+  | select((.region // "") | endswith("/regions/" + $region))
+  | . as $r
+  | ($r.nats // [])[]
+  | . as $n
+  | (($n.type // "PUBLIC") == "PUBLIC") as $public
+  | ( ($n.subnetworks // [])
+      | any(
+          (.name // "" | endswith("/subnetworks/default"))
+          and ( ( .sourceIpRangesToNat // ["ALL_IP_RANGES"] )
+                | any(. == "ALL_IP_RANGES" or . == "PRIMARY_IP_RANGE") )
+        )
+    ) as $listCovers
+  | ( ($n.sourceSubnetworkIpRangesToNat // "") | startswith("ALL_SUBNETWORKS_") ) as $allCovers
+  | [$r.name, $n.name, (($public and ($allCovers or $listCovers)) | tostring), (($r.name != $own) | tostring)]
+  | @tsv
+' <<< "$ROUTERS_JSON")" || {
+  err "Could not parse Cloud Router/NAT config in ${REGION} (see jq error above). Aborting before creating any resources."
+  exit 1
+}
+
+REUSE_ROUTER=""
+REUSE_NAT=""
+FOREIGN_NAT_EXISTS="false"
+if [[ -n "$NAT_ROWS" ]]; then
+  while IFS=$'\t' read -r RTR NAT COVERS FOREIGN; do
+    [[ -z "$RTR" ]] && continue
+    if [[ "$FOREIGN" == "true" ]]; then
+      FOREIGN_NAT_EXISTS="true"
+      if [[ -z "$REUSE_NAT" && "$COVERS" == "true" ]]; then
+        REUSE_ROUTER="$RTR"
+        REUSE_NAT="$NAT"
+      fi
+    fi
+  done <<< "$NAT_ROWS"
+fi
+
+REUSE_EXISTING_NAT="false"
+NAT_CREATE_MODE="all-subnets"
+if [[ -n "$REUSE_NAT" ]]; then
+  REUSE_EXISTING_NAT="true"
+  ROUTER_NAME="$REUSE_ROUTER"
+  NAT_NAME="$REUSE_NAT"
+  info "Found an existing Cloud NAT that already covers this network/region; reusing it instead of creating our own."
+  echo "  Reusing Cloud Router: ${ROUTER_NAME}"
+  echo "  Reusing Cloud NAT:    ${NAT_NAME}"
+elif [[ "$FOREIGN_NAT_EXISTS" == "true" ]]; then
+  NAT_CREATE_MODE="custom-default-subnet"
+  info "A Cloud NAT gateway already exists on this network/region but doesn't provide internet egress for subnet 'default'; scoping our own NAT to that subnet only (an all-subnets NAT can't coexist with another gateway)."
+fi
+
 # --- Service account ---
 info "Creating service account (if needed)..."
 if gcloud iam service-accounts describe "${SA_EMAIL}" \
@@ -820,36 +965,52 @@ fi
 # --- Cloud Router + Cloud NAT ---
 # The VM has no public IP (--no-address).  Cloud NAT gives it outbound internet
 # access so cloud-init can install packages, download binaries, and pull images.
-ROUTER_NAME="scion-hub-${HUB_NAME}-router"
-NAT_NAME="scion-hub-${HUB_NAME}-nat"
-
-info "Creating Cloud Router (if needed)..."
-if gcloud compute routers describe "${ROUTER_NAME}" \
-    --region="${REGION}" --project="${PROJECT_ID}" &>/dev/null; then
-  echo "  Cloud Router already exists: ${ROUTER_NAME}"
+# ROUTER_NAME/NAT_NAME were set above during the reuse check -- either our
+# own names, or an existing router/NAT we're reusing (REUSE_EXISTING_NAT).
+if [[ "$REUSE_EXISTING_NAT" == "true" ]]; then
+  echo "  Skipping Cloud Router create: reusing ${ROUTER_NAME}"
+  echo "  Skipping Cloud NAT create: reusing ${NAT_NAME}"
 else
-  gcloud compute routers create "${ROUTER_NAME}" \
-    --region="${REGION}" \
-    --project="${PROJECT_ID}" \
-    --network=default \
-    --quiet
-  echo "  Created Cloud Router: ${ROUTER_NAME}"
-fi
+  info "Creating Cloud Router (if needed)..."
+  if gcloud compute routers describe "${ROUTER_NAME}" \
+      --region="${REGION}" --project="${PROJECT_ID}" &>/dev/null; then
+    echo "  Cloud Router already exists: ${ROUTER_NAME}"
+  else
+    gcloud compute routers create "${ROUTER_NAME}" \
+      --region="${REGION}" \
+      --project="${PROJECT_ID}" \
+      --network=default \
+      --quiet
+    echo "  Created Cloud Router: ${ROUTER_NAME}"
+  fi
 
-info "Creating Cloud NAT (if needed)..."
-if gcloud compute routers nats describe "${NAT_NAME}" \
-    --router="${ROUTER_NAME}" \
-    --region="${REGION}" --project="${PROJECT_ID}" &>/dev/null; then
-  echo "  Cloud NAT already exists: ${NAT_NAME}"
-else
-  gcloud compute routers nats create "${NAT_NAME}" \
-    --router="${ROUTER_NAME}" \
-    --region="${REGION}" \
-    --project="${PROJECT_ID}" \
-    --auto-allocate-nat-external-ips \
-    --nat-all-subnet-ip-ranges \
-    --quiet
-  echo "  Created Cloud NAT: ${NAT_NAME}"
+  info "Creating Cloud NAT (if needed)..."
+  if gcloud compute routers nats describe "${NAT_NAME}" \
+      --router="${ROUTER_NAME}" \
+      --region="${REGION}" --project="${PROJECT_ID}" &>/dev/null; then
+    echo "  Cloud NAT already exists: ${NAT_NAME}"
+  elif [[ "$NAT_CREATE_MODE" == "custom-default-subnet" ]]; then
+    # A foreign NAT gateway exists on this network+region but doesn't cover
+    # us (see the reuse check above) -- ALL_SUBNETWORKS_* mode can't
+    # coexist with it, so scope ours to just subnet "default".
+    gcloud compute routers nats create "${NAT_NAME}" \
+      --router="${ROUTER_NAME}" \
+      --region="${REGION}" \
+      --project="${PROJECT_ID}" \
+      --auto-allocate-nat-external-ips \
+      --nat-custom-subnet-ip-ranges=default \
+      --quiet
+    echo "  Created Cloud NAT: ${NAT_NAME} (scoped to subnet 'default')"
+  else
+    gcloud compute routers nats create "${NAT_NAME}" \
+      --router="${ROUTER_NAME}" \
+      --region="${REGION}" \
+      --project="${PROJECT_ID}" \
+      --auto-allocate-nat-external-ips \
+      --nat-all-subnet-ip-ranges \
+      --quiet
+    echo "  Created Cloud NAT: ${NAT_NAME}"
+  fi
 fi
 
 # --- Hub VM network tag ---
