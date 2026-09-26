@@ -168,17 +168,29 @@ func (s *Server) authorizedForBrokerOwnerAction(ctx context.Context, user UserId
 		return true, nil
 	}
 
-	if user != nil {
+	if user != nil && user.ID() != "" {
 		broker, err := fetchBroker()
 		if err != nil {
 			return false, err
 		}
-		if broker != nil && broker.CreatedBy == user.ID() {
+		if broker != nil && broker.CreatedBy != "" && broker.CreatedBy == user.ID() {
 			return true, nil
 		}
 	}
 
 	return false, nil
+}
+
+// ownerForNewBroker returns the CreatedBy value to record for a newly
+// created broker: the caller's ID when non-empty, or "" otherwise. Called by
+// the register path's create-new-broker branch (handlers_projects_core.go).
+// The two-phase POST /brokers path sets CreatedBy directly in
+// createBrokerRegistration above, not through this helper.
+func ownerForNewBroker(callerUser UserIdentity) string {
+	if callerUser != nil && callerUser.ID() != "" {
+		return callerUser.ID()
+	}
+	return ""
 }
 
 // handleBrokerJoin handles POST /api/v1/brokers/join.

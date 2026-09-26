@@ -1644,10 +1644,10 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			// Record ownership on the newly created broker so the overwrite
 			// path gated above has a recorded owner to authorize against; a
 			// broker with no recorded owner has nothing for that check to
-			// match.
-			if callerUser != nil {
-				broker.CreatedBy = callerUser.ID()
-			}
+			// match. ownerForNewBroker returns "" when the caller has no
+			// real identity, so this never writes a non-empty CreatedBy for
+			// an empty-ID caller.
+			broker.CreatedBy = ownerForNewBroker(callerUser)
 
 			if err := s.store.CreateRuntimeBroker(ctx, broker); err != nil {
 				writeErrorFromErr(w, err, "")

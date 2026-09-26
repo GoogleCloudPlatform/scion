@@ -505,6 +505,30 @@ func TestBrokerRotateSecret_SelfAllowed(t *testing.T) {
 	assert.False(t, bytes.Equal(originalKey, stored.SecretKey), "the stored secret should change on a successful rotation")
 }
 
+// ----------------------------------------------------------------------------
+// Empty caller ID (G1) — authorizedForBrokerOwnerAction is the single shared
+// predicate behind re-registration, secret rotation, and the embedded
+// register path (see handlers_project_register_broker_test.go), so a direct
+// call here covers all three. An identity whose ID() is "" must never match
+// an ownerless broker's empty CreatedBy: without the both-non-empty guard,
+// "" == "" is true.
+// ----------------------------------------------------------------------------
+
+func TestAuthorizedForBrokerOwnerAction_EmptyCallerIDNeverMatchesOwnerlessBroker(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	broker := &store.RuntimeBroker{ID: tid("empty-id-broker"), Name: "Empty ID Broker", Slug: "empty-id-broker", CreatedBy: ""}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	emptyIDUser := NewAuthenticatedUser("", "empty-id@test.com", "Empty ID", store.UserRoleMember, "api")
+
+	allowed, err := srv.authorizedForBrokerOwnerAction(ctx, emptyIDUser, nil, broker.ID,
+		func() (*store.RuntimeBroker, error) { return broker, nil })
+
+	require.NoError(t, err)
+	assert.False(t, allowed, "an empty caller ID must never match an ownerless broker's empty CreatedBy")
+}
+
 func TestBrokerRotateSecret_NonOwnerNoGrantDenied(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()

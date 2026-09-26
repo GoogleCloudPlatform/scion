@@ -242,6 +242,22 @@ func TestProjectRegisterEmbeddedBroker_SuperAdminAllowed(t *testing.T) {
 	assert.Equal(t, "3.0.0-admin", updated.Version)
 }
 
+// TestOwnerForNewBroker_EmptyCallerIDNotRecorded pins ownerForNewBroker's
+// return value for a nil identity, an empty-ID identity, and a real ID.
+// ownerForNewBroker is called by the register path's create-new-broker
+// branch (handlers_projects_core.go); the two-phase POST /brokers path sets
+// CreatedBy directly in createBrokerRegistration instead of through this
+// helper.
+func TestOwnerForNewBroker_EmptyCallerIDNotRecorded(t *testing.T) {
+	assert.Empty(t, ownerForNewBroker(nil), "no caller identity must not record an owner")
+
+	emptyIDUser := NewAuthenticatedUser("", "empty-id-owner@test.com", "Empty ID", store.UserRoleMember, "api")
+	assert.Empty(t, ownerForNewBroker(emptyIDUser), "an empty caller ID must not be recorded as CreatedBy")
+
+	realUser := NewAuthenticatedUser("real-user-id", "real@test.com", "Real User", store.UserRoleMember, "api")
+	assert.Equal(t, "real-user-id", ownerForNewBroker(realUser), "a real caller ID must still be recorded")
+}
+
 func TestProjectRegisterEmbeddedBroker_NewBrokerSetsOwnership(t *testing.T) {
 	srv, s := testServer(t)
 	requester := newHubMemberUser(t, s, "register-broker-newuser-d")
