@@ -134,36 +134,6 @@ type ExposedPort struct {
 	ExposedBy string    `json:"exposedBy"`
 }
 
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (a Agent) MarshalJSON() ([]byte, error) {
-	type Alias Agent
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId"`
-	}{
-		Alias:   Alias(a),
-		GroveID: a.ProjectID,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (a *Agent) UnmarshalJSON(data []byte) error {
-	type Alias Agent
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(a),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if a.ProjectID == "" && aux.GroveID != "" {
-		a.ProjectID = aux.GroveID
-	}
-	return nil
-}
-
 // AgentAppliedConfig stores the effective configuration of an agent.
 type AgentAppliedConfig struct {
 	Image         string              `json:"image,omitempty"`
@@ -584,48 +554,6 @@ type Project struct {
 	OwnerName         string `json:"ownerName,omitempty"`   // Enriched: resolved from OwnerID
 }
 
-// MarshalJSON implements custom marshaling to support legacy grove fields.
-func (p Project) MarshalJSON() ([]byte, error) {
-	type Alias Project
-	return json.Marshal(&struct {
-		Alias
-		ProjectID string `json:"groveId"`
-		GroveName string `json:"groveName"`
-		Grove     string `json:"grove"`
-	}{
-		Alias:     Alias(p),
-		ProjectID: p.ID,
-		GroveName: p.Name,
-		Grove:     p.Slug,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
-func (p *Project) UnmarshalJSON(data []byte) error {
-	type Alias Project
-	aux := &struct {
-		GroveID   string `json:"groveId"`
-		GroveName string `json:"groveName"`
-		Grove     string `json:"grove"`
-		*Alias
-	}{
-		Alias: (*Alias)(p),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if p.ID == "" && aux.GroveID != "" {
-		p.ID = aux.GroveID
-	}
-	if p.Name == "" && aux.GroveName != "" {
-		p.Name = aux.GroveName
-	}
-	if p.Slug == "" && aux.Grove != "" {
-		p.Slug = aux.Grove
-	}
-	return nil
-}
-
 // IsSharedWorkspace returns true if this is a git project configured to use a
 // single shared workspace clone instead of per-agent clones.
 func (p *Project) IsSharedWorkspace() bool {
@@ -731,36 +659,6 @@ type ProjectProvider struct {
 	LinkedAt time.Time `json:"linkedAt,omitempty"` // Timestamp when the link was created
 }
 
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (p ProjectProvider) MarshalJSON() ([]byte, error) {
-	type Alias ProjectProvider
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId"`
-	}{
-		Alias:   Alias(p),
-		GroveID: p.ProjectID,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (p *ProjectProvider) UnmarshalJSON(data []byte) error {
-	type Alias ProjectProvider
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(p),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if p.ProjectID == "" && aux.GroveID != "" {
-		p.ProjectID = aux.GroveID
-	}
-	return nil
-}
-
 // Template represents an agent template in the Hub database.
 type Template struct {
 	// Identity
@@ -806,36 +704,6 @@ type Template struct {
 	// Timestamps
 	Created time.Time `json:"created"`
 	Updated time.Time `json:"updated"`
-}
-
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (t Template) MarshalJSON() ([]byte, error) {
-	type Alias Template
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId,omitempty"`
-	}{
-		Alias:   Alias(t),
-		GroveID: t.ProjectID,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (t *Template) UnmarshalJSON(data []byte) error {
-	type Alias Template
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(t),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if t.ProjectID == "" && aux.GroveID != "" {
-		t.ProjectID = aux.GroveID
-	}
-	return nil
 }
 
 // TemplateFile represents a file within a template.
@@ -1262,36 +1130,6 @@ type NotificationSubscription struct {
 	CreatedBy         string    `json:"createdBy"`
 }
 
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (s NotificationSubscription) MarshalJSON() ([]byte, error) {
-	type Alias NotificationSubscription
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId"`
-	}{
-		Alias:   Alias(s),
-		GroveID: s.ProjectID,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (s *NotificationSubscription) UnmarshalJSON(data []byte) error {
-	type Alias NotificationSubscription
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(s),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if s.ProjectID == "" && aux.GroveID != "" {
-		s.ProjectID = aux.GroveID
-	}
-	return nil
-}
-
 // MatchesActivity returns true if the given activity matches any of the subscription's
 // trigger activities. Comparison is case-insensitive.
 func (s *NotificationSubscription) MatchesActivity(activity string) bool {
@@ -1315,36 +1153,6 @@ type SubscriptionTemplate struct {
 	CreatedBy         string   `json:"createdBy"`
 }
 
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (t SubscriptionTemplate) MarshalJSON() ([]byte, error) {
-	type Alias SubscriptionTemplate
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId,omitempty"`
-	}{
-		Alias:   Alias(t),
-		GroveID: t.ProjectID,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (t *SubscriptionTemplate) UnmarshalJSON(data []byte) error {
-	type Alias SubscriptionTemplate
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(t),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if t.ProjectID == "" && aux.GroveID != "" {
-		t.ProjectID = aux.GroveID
-	}
-	return nil
-}
-
 // Notification represents a notification record generated from a subscription match.
 type Notification struct {
 	ID             string    `json:"id"`             // UUID primary key
@@ -1358,36 +1166,6 @@ type Notification struct {
 	Dispatched     bool      `json:"dispatched"`   // Whether dispatch was attempted
 	Acknowledged   bool      `json:"acknowledged"` // Whether acknowledged (for human targets)
 	CreatedAt      time.Time `json:"createdAt"`
-}
-
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (n Notification) MarshalJSON() ([]byte, error) {
-	type Alias Notification
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId"`
-	}{
-		Alias:   Alias(n),
-		GroveID: n.ProjectID,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (n *Notification) UnmarshalJSON(data []byte) error {
-	type Alias Notification
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(n),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if n.ProjectID == "" && aux.GroveID != "" {
-		n.ProjectID = aux.GroveID
-	}
-	return nil
 }
 
 // ListOptions provides pagination and filtering for list operations.
@@ -1804,36 +1582,6 @@ type UserAccessToken struct {
 	Created   time.Time  `json:"created"`
 }
 
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (t UserAccessToken) MarshalJSON() ([]byte, error) {
-	type Alias UserAccessToken
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId"`
-	}{
-		Alias:   Alias(t),
-		GroveID: t.ProjectID,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (t *UserAccessToken) UnmarshalJSON(data []byte) error {
-	type Alias UserAccessToken
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(t),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if t.ProjectID == "" && aux.GroveID != "" {
-		t.ProjectID = aux.GroveID
-	}
-	return nil
-}
-
 // UATPrefix is the token prefix that distinguishes UATs from other token types.
 const UATPrefix = "scion_pat_"
 
@@ -2028,36 +1776,6 @@ type Message struct {
 	DispatchFailureReason *string    `json:"dispatchFailureReason,omitempty"`
 }
 
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (m Message) MarshalJSON() ([]byte, error) {
-	type Alias Message
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId"`
-	}{
-		Alias:   Alias(m),
-		GroveID: m.ProjectID,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (m *Message) UnmarshalJSON(data []byte) error {
-	type Alias Message
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(m),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if m.ProjectID == "" && aux.GroveID != "" {
-		m.ProjectID = aux.GroveID
-	}
-	return nil
-}
-
 // MessageFilter defines query parameters for listing messages.
 type MessageFilter struct {
 	ProjectID   string // Filter by project
@@ -2161,36 +1879,6 @@ type ScheduledEvent struct {
 	ScheduleID string     `json:"scheduleId,omitempty"` // FK to schedules.id for recurring schedule fires
 }
 
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (e ScheduledEvent) MarshalJSON() ([]byte, error) {
-	type Alias ScheduledEvent
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId"`
-	}{
-		Alias:   Alias(e),
-		GroveID: e.ProjectID,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (e *ScheduledEvent) UnmarshalJSON(data []byte) error {
-	type Alias ScheduledEvent
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(e),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if e.ProjectID == "" && aux.GroveID != "" {
-		e.ProjectID = aux.GroveID
-	}
-	return nil
-}
-
 // ScheduledEventStatus constants
 const (
 	ScheduledEventPending   = "pending"
@@ -2230,36 +1918,6 @@ type Schedule struct {
 	CreatedAt     time.Time  `json:"createdAt"`
 	CreatedBy     string     `json:"createdBy,omitempty"`
 	UpdatedAt     time.Time  `json:"updatedAt"`
-}
-
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (s Schedule) MarshalJSON() ([]byte, error) {
-	type Alias Schedule
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId"`
-	}{
-		Alias:   Alias(s),
-		GroveID: s.ProjectID,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (s *Schedule) UnmarshalJSON(data []byte) error {
-	type Alias Schedule
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(s),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if s.ProjectID == "" && aux.GroveID != "" {
-		s.ProjectID = aux.GroveID
-	}
-	return nil
 }
 
 // ScheduleStatus constants
@@ -2498,36 +2156,6 @@ type ProjectSyncState struct {
 	LastCommitSHA string     `json:"lastCommitSha,omitempty"`
 	FileCount     int        `json:"fileCount"`
 	TotalBytes    int64      `json:"totalBytes"`
-}
-
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (s ProjectSyncState) MarshalJSON() ([]byte, error) {
-	type Alias ProjectSyncState
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId"`
-	}{
-		Alias:   Alias(s),
-		GroveID: s.ProjectID,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (s *ProjectSyncState) UnmarshalJSON(data []byte) error {
-	type Alias ProjectSyncState
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(s),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if s.ProjectID == "" && aux.GroveID != "" {
-		s.ProjectID = aux.GroveID
-	}
-	return nil
 }
 
 // =============================================================================
@@ -2882,36 +2510,6 @@ type AgentCredential struct {
 	RevokedBy    *string    `json:"revoked_by,omitempty"`
 	RevokeReason *string    `json:"revoke_reason,omitempty"`
 	LastSeenAt   *time.Time `json:"last_seen_at,omitempty"`
-}
-
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (m AgentSessionMetrics) MarshalJSON() ([]byte, error) {
-	type Alias AgentSessionMetrics
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId"`
-	}{
-		Alias:   Alias(m),
-		GroveID: m.ProjectID,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (m *AgentSessionMetrics) UnmarshalJSON(data []byte) error {
-	type Alias AgentSessionMetrics
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(m),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if m.ProjectID == "" && aux.GroveID != "" {
-		m.ProjectID = aux.GroveID
-	}
-	return nil
 }
 
 // =============================================================================

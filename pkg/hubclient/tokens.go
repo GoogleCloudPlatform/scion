@@ -114,24 +114,6 @@ func (i TokenInfo) MarshalJSON() ([]byte, error) {
 	})
 }
 
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (i *TokenInfo) UnmarshalJSON(data []byte) error {
-	type Alias TokenInfo
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(i),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if i.ProjectID == "" && aux.GroveID != "" {
-		i.ProjectID = aux.GroveID
-	}
-	return nil
-}
-
 // ListTokensResponse is the response from listing user access tokens.
 type ListTokensResponse struct {
 	Items []TokenInfo `json:"items"`

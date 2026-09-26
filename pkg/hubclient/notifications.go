@@ -60,24 +60,6 @@ type Notification struct {
 	CreatedAt      time.Time `json:"createdAt"`
 }
 
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (n *Notification) UnmarshalJSON(data []byte) error {
-	type Alias Notification
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(n),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if n.ProjectID == "" && aux.GroveID != "" {
-		n.ProjectID = aux.GroveID
-	}
-	return nil
-}
-
 // MarshalJSON implements custom marshaling to support legacy groveId field.
 func (n Notification) MarshalJSON() ([]byte, error) {
 	type Alias Notification
@@ -216,24 +198,6 @@ type Subscription struct {
 	TriggerActivities []string  `json:"triggerActivities"`
 	CreatedAt         time.Time `json:"createdAt"`
 	CreatedBy         string    `json:"createdBy"`
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (s *Subscription) UnmarshalJSON(data []byte) error {
-	type Alias Subscription
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(s),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if s.ProjectID == "" && aux.GroveID != "" {
-		s.ProjectID = aux.GroveID
-	}
-	return nil
 }
 
 // MarshalJSON implements custom marshaling to support legacy groveId field.
@@ -384,24 +348,6 @@ type SubscriptionTemplate struct {
 	TriggerActivities []string `json:"triggerActivities"`
 	ProjectID         string   `json:"projectId"`
 	CreatedBy         string   `json:"createdBy"`
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (t *SubscriptionTemplate) UnmarshalJSON(data []byte) error {
-	type Alias SubscriptionTemplate
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(t),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if t.ProjectID == "" && aux.GroveID != "" {
-		t.ProjectID = aux.GroveID
-	}
-	return nil
 }
 
 // MarshalJSON implements custom marshaling to support legacy groveId field.

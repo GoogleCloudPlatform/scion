@@ -55,7 +55,7 @@ func (a AgentWithCapabilities) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON implements custom unmarshaling to handle embedded store.Agent and legacy fields.
 func (a *AgentWithCapabilities) UnmarshalJSON(data []byte) error {
-	if err := a.Agent.UnmarshalJSON(data); err != nil {
+	if err := json.Unmarshal(data, &a.Agent); err != nil {
 		return err
 	}
 	type WrapperFields struct {
@@ -106,7 +106,7 @@ func (p ProjectWithCapabilities) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON implements custom unmarshaling to handle embedded store.Project and legacy fields.
 func (p *ProjectWithCapabilities) UnmarshalJSON(data []byte) error {
-	if err := p.Project.UnmarshalJSON(data); err != nil {
+	if err := json.Unmarshal(data, &p.Project); err != nil {
 		return err
 	}
 	type WrapperFields struct {
