@@ -2662,27 +2662,25 @@ func TestLegacyGroveRoutesRemoved(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, legacySub.Code, "body: %s", legacySub.Body.String())
 }
 
-func TestRegisterProjectRequestLegacyIDAliases(t *testing.T) {
-	var legacyCamel RegisterProjectRequest
-	require.NoError(t, json.Unmarshal([]byte(`{"name":"Legacy","gitRemote":"github.com/acme/legacy","groveId":"legacy-camel"}`), &legacyCamel))
-	assert.Equal(t, "legacy-camel", legacyCamel.ID)
+func TestRegisterProjectRequestCanonicalIDOnly(t *testing.T) {
+	var canonical RegisterProjectRequest
+	require.NoError(t, json.Unmarshal([]byte(`{"id":"canonical","name":"Canonical","gitRemote":"github.com/acme/canonical"}`), &canonical))
+	assert.Equal(t, "canonical", canonical.ID)
 
-	var legacySnake RegisterProjectRequest
-	require.NoError(t, json.Unmarshal([]byte(`{"name":"Legacy","gitRemote":"github.com/acme/legacy","grove_id":"legacy-snake"}`), &legacySnake))
-	assert.Equal(t, "legacy-snake", legacySnake.ID)
-
-	var canonicalWins RegisterProjectRequest
-	require.NoError(t, json.Unmarshal([]byte(`{"id":"canonical","name":"Canonical","gitRemote":"github.com/acme/canonical","groveId":"legacy"}`), &canonicalWins))
-	assert.Equal(t, "canonical", canonicalWins.ID)
+	// groveId/grove_id are no longer recognized aliases: the request decodes
+	// with an empty ID rather than falling back to the legacy field.
+	var legacyIgnored RegisterProjectRequest
+	require.NoError(t, json.Unmarshal([]byte(`{"name":"Legacy","gitRemote":"github.com/acme/legacy","groveId":"legacy-camel"}`), &legacyIgnored))
+	assert.Empty(t, legacyIgnored.ID)
 }
 
-func TestProjectRegisterAcceptsLegacyJSONID(t *testing.T) {
+func TestProjectRegisterAcceptsCanonicalJSONID(t *testing.T) {
 	srv, _ := testServer(t)
 
 	body := map[string]interface{}{
-		"groveId":   tid("legacy_register_id"),
-		"gitRemote": "https://github.com/test/legacy-register.git",
-		"name":      "Legacy Register",
+		"id":        tid("canonical_register_id"),
+		"gitRemote": "https://github.com/test/canonical-register.git",
+		"name":      "Canonical Register",
 	}
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/register", body)
@@ -2691,5 +2689,5 @@ func TestProjectRegisterAcceptsLegacyJSONID(t *testing.T) {
 	var resp RegisterProjectResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	require.NotNil(t, resp.Project)
-	assert.Equal(t, tid("legacy_register_id"), resp.Project.ID)
+	assert.Equal(t, tid("canonical_register_id"), resp.Project.ID)
 }

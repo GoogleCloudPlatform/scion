@@ -226,18 +226,6 @@ type GCPIdentityConfig struct {
 	ServiceAccountID string `json:"service_account_id,omitempty"`
 }
 
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (r CreateAgentRequest) MarshalJSON() ([]byte, error) {
-	type Alias CreateAgentRequest
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId,omitempty"`
-	}{
-		Alias:   Alias(r),
-		GroveID: r.ProjectID,
-	})
-}
-
 // UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
 func (r *CreateAgentRequest) UnmarshalJSON(data []byte) error {
 	type Alias CreateAgentRequest
@@ -335,7 +323,6 @@ func (s *agentService) List(ctx context.Context, opts *ListAgentsOptions) (*List
 	if opts != nil {
 		if opts.ProjectID != "" {
 			query.Set("projectId", opts.ProjectID)
-			query.Set("groveId", opts.ProjectID)
 		}
 		if opts.Phase != "" {
 			query.Set("phase", opts.Phase)

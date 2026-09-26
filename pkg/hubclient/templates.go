@@ -114,18 +114,6 @@ func (r *CreateTemplateRequest) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (r CreateTemplateRequest) MarshalJSON() ([]byte, error) {
-	type Alias CreateTemplateRequest
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId,omitempty"`
-	}{
-		Alias:   Alias(r),
-		GroveID: r.ProjectID,
-	})
-}
-
 // UpdateTemplateRequest is the request for updating a template.
 type UpdateTemplateRequest struct {
 	Name   string          `json:"name,omitempty"`
@@ -155,18 +143,6 @@ func (r *CloneTemplateRequest) UnmarshalJSON(data []byte) error {
 		r.ProjectID = aux.GroveID
 	}
 	return nil
-}
-
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (r CloneTemplateRequest) MarshalJSON() ([]byte, error) {
-	type Alias CloneTemplateRequest
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId,omitempty"`
-	}{
-		Alias:   Alias(r),
-		GroveID: r.ProjectID,
-	})
 }
 
 // FileUploadRequest describes a file to upload.
@@ -255,7 +231,6 @@ func (s *templateService) List(ctx context.Context, opts *ListTemplatesOptions) 
 		}
 		if opts.ProjectID != "" {
 			query.Set("projectId", opts.ProjectID)
-			query.Set("groveId", opts.ProjectID)
 		}
 		if opts.Harness != "" {
 			query.Set("harness", opts.Harness)

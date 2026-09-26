@@ -289,6 +289,16 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 		return err
 	}
 
+	// Must run before pkg/hub/storage_migration.go's namespacing migration
+	// (called later, outside CompositeStore.Migrate, once the hub boots)
+	// walks stored templates, harness configs and skills: that migration and
+	// pkg/storage.ResourceStoragePath both resolve a stored scope into a
+	// path, and neither has an arm for "grove". See NormalizeLegacyGroveScopes
+	// for the full rationale.
+	if err := c.NormalizeLegacyGroveScopes(ctx); err != nil {
+		return fmt.Errorf("normalize legacy grove scopes: %w", err)
+	}
+
 	if err := c.BackfillEmptyAgentRoles(ctx); err != nil {
 		return fmt.Errorf("empty agent role backfill: %w", err)
 	}

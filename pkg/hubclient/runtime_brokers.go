@@ -277,7 +277,6 @@ func (s *runtimeBrokerService) List(ctx context.Context, opts *ListBrokersOption
 		}
 		if opts.ProjectID != "" {
 			query.Set("projectId", opts.ProjectID)
-			query.Set("groveId", opts.ProjectID)
 		}
 		if opts.Name != "" {
 			query.Set("name", opts.Name)

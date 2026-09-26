@@ -16,7 +16,6 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -66,27 +65,6 @@ type RegisterProjectRequest struct {
 	Broker    *RegisterProjectBrokerInfo `json:"broker,omitempty"`   // DEPRECATED: Use BrokerID with two-phase registration
 	Profiles  []string                   `json:"profiles,omitempty"`
 	Labels    map[string]string          `json:"labels,omitempty"`
-}
-
-// UnmarshalJSON accepts legacy grove ID aliases at the Hub JSON adapter boundary.
-func (r *RegisterProjectRequest) UnmarshalJSON(data []byte) error {
-	type Alias RegisterProjectRequest
-	aux := &struct {
-		*Alias
-	}{
-		Alias: (*Alias)(r),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if r.ID == "" {
-		legacyID, err := legacyProjectIDFromJSON(data)
-		if err != nil {
-			return err
-		}
-		r.ID = legacyID
-	}
-	return nil
 }
 
 type RegisterProjectBrokerInfo struct {

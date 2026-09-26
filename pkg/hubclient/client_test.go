@@ -101,8 +101,11 @@ func TestAgentsList(t *testing.T) {
 		}
 
 		// Check query params
-		if r.URL.Query().Get("groveId") != "grove-123" {
-			t.Errorf("expected groveId=grove-123, got %s", r.URL.Query().Get("groveId"))
+		if r.URL.Query().Get("projectId") != "grove-123" {
+			t.Errorf("expected projectId=grove-123, got %s", r.URL.Query().Get("projectId"))
+		}
+		if r.URL.Query().Get("groveId") != "" {
+			t.Errorf("expected no groveId query param, got %s", r.URL.Query().Get("groveId"))
 		}
 
 		w.Header().Set("Content-Type", "application/json")

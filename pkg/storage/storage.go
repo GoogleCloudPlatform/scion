@@ -237,7 +237,7 @@ func ResourceStoragePath(hubID string, kind ResourceKind, scope, scopeID, slug s
 	switch scope {
 	case "global":
 		scopePath = prefix + "/global/" + slug
-	case "grove", "project":
+	case "project":
 		scopePath = prefix + "/groves/" + scopeID + "/" + slug
 	case "user":
 		scopePath = prefix + "/users/" + scopeID + "/" + slug
