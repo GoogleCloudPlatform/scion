@@ -858,15 +858,25 @@ fi
 # where the VM already exists (e.g. from a deploy predating this tag), make
 # sure the tag is applied *before* the firewall rule is narrowed to target
 # it, so there is never a window where the rule targets a tag the VM lacks.
+# HUB_TAG_CONFIRMED only flips to true once add-tags has actually succeeded
+# against a VM this run found. Narrowing an existing unscoped rule below is
+# gated on that, not merely on "describe didn't find a VM" -- a zone
+# mismatch or a transient describe error looks identical to "no VM" here,
+# and narrowing in that case could lock out a VM that still lacks the tag.
+HUB_TAG_CONFIRMED=false
 if gcloud compute instances describe "${INSTANCE_NAME}" \
     --zone="${ZONE}" --project="${PROJECT_ID}" &>/dev/null; then
   info "Ensuring hub VM has network tag..."
-  gcloud compute instances add-tags "${INSTANCE_NAME}" \
-    --zone="${ZONE}" \
-    --project="${PROJECT_ID}" \
-    --tags="${HUB_TAG}" \
-    --quiet
-  echo "  Ensured network tag on VM ${INSTANCE_NAME}: ${HUB_TAG}"
+  if gcloud compute instances add-tags "${INSTANCE_NAME}" \
+      --zone="${ZONE}" \
+      --project="${PROJECT_ID}" \
+      --tags="${HUB_TAG}" \
+      --quiet; then
+    echo "  Ensured network tag on VM ${INSTANCE_NAME}: ${HUB_TAG}"
+    HUB_TAG_CONFIRMED=true
+  else
+    warn "Could not add network tag ${HUB_TAG} to VM ${INSTANCE_NAME}; will not narrow an existing unscoped firewall rule this run."
+  fi
 fi
 
 # --- IAP SSH firewall rule ---
@@ -880,12 +890,18 @@ if gcloud compute firewall-rules describe "${FW_RULE_NAME}" \
   EXISTING_TARGET_TAGS="$(gcloud compute firewall-rules describe "${FW_RULE_NAME}" \
     --project="${PROJECT_ID}" --format="value(targetTags)" 2>/dev/null)" || true
   if [[ -z "$EXISTING_TARGET_TAGS" ]]; then
-    info "Firewall rule ${FW_RULE_NAME} has no target tags (pre-existing, unscoped rule); narrowing to ${HUB_TAG}..."
-    gcloud compute firewall-rules update "${FW_RULE_NAME}" \
-      --project="${PROJECT_ID}" \
-      --target-tags="${HUB_TAG}" \
-      --quiet
-    echo "  Updated firewall rule ${FW_RULE_NAME} with --target-tags=${HUB_TAG}"
+    if [[ "$HUB_TAG_CONFIRMED" == "true" ]]; then
+      warn "Firewall rule ${FW_RULE_NAME} has no target tags (pre-existing, unscoped rule); narrowing to ${HUB_TAG}. Any other VM that relied on this rule for IAP SSH loses that access -- give it its own rule if it still needs one."
+      gcloud compute firewall-rules update "${FW_RULE_NAME}" \
+        --project="${PROJECT_ID}" \
+        --target-tags="${HUB_TAG}" \
+        --quiet
+      echo "  Updated firewall rule ${FW_RULE_NAME} with --target-tags=${HUB_TAG}"
+    else
+      warn "Firewall rule ${FW_RULE_NAME} has no target tags, but the hub VM's tag could not be confirmed this run. Leaving it unscoped rather than risk locking out SSH; it will be narrowed once the tag is confirmed on a later run."
+    fi
+  elif ! printf '%s' "${EXISTING_TARGET_TAGS}" | tr ',;' '  ' | grep -qw -- "${HUB_TAG}"; then
+    warn "Firewall rule ${FW_RULE_NAME} exists but its target tags (${EXISTING_TARGET_TAGS}) do not include ${HUB_TAG}. IAP SSH to the hub VM may fail; add ${HUB_TAG} to the rule manually or delete it and re-run."
   else
     echo "  Firewall rule already exists: ${FW_RULE_NAME} (target tags: ${EXISTING_TARGET_TAGS})"
   fi

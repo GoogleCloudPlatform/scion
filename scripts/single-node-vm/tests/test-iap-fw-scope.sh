@@ -147,6 +147,15 @@ assert_not_called() {
   fi
 }
 
+assert_output_contains() {
+  local name="$1" out_file="$2" pattern="$3"
+  if grep -qF -- "${pattern}" "${out_file}"; then
+    pass
+  else
+    fail "${name}: expected script output to contain '${pattern}'"
+  fi
+}
+
 # Asserts the first call matching $pattern_a appears before the first call
 # matching $pattern_b in the log (line-number order).
 assert_before() {
@@ -212,6 +221,36 @@ assert_called "idempotent-rerun" "${LOG}" "compute instances add-tags scion-hub-
 assert_not_called "idempotent-rerun" "${LOG}" "compute firewall-rules update"
 assert_not_called "idempotent-rerun" "${LOG}" "compute firewall-rules create"
 assert_not_called "idempotent-rerun" "${LOG}" "compute instances create"
+echo
+
+# ---------------------------------------------------------------------------
+# Scenario 4: `instances describe` reports no VM (zone mismatch or a
+# transient error look identical to "no VM" here) while an unscoped
+# firewall rule already exists. Must NOT narrow: doing so could lock out a
+# VM that actually exists but wasn't found, and still lacks the tag.
+# ---------------------------------------------------------------------------
+run_scenario "describe-fails-fw-unscoped" false true ""
+LOG="${WORK_DIR}/describe-fails-fw-unscoped.log"
+assert_not_called "describe-fails-fw-unscoped" "${LOG}" "compute instances add-tags"
+assert_not_called "describe-fails-fw-unscoped" "${LOG}" "compute firewall-rules update"
+assert_not_called "describe-fails-fw-unscoped" "${LOG}" "compute firewall-rules create"
+assert_output_contains "describe-fails-fw-unscoped" "${WORK_DIR}/describe-fails-fw-unscoped.out" \
+  "could not be confirmed this run"
+echo
+
+# ---------------------------------------------------------------------------
+# Scenario 5: the rule already exists with target tags, but they don't
+# include the hub tag (e.g. a hand-edited rule). Must not silently claim
+# the rule is fine — warn instead of matching the generic "already exists"
+# case, and never auto-modify a rule that already has an owner's tags.
+# ---------------------------------------------------------------------------
+run_scenario "foreign-target-tags" true true "some-other-tag"
+LOG="${WORK_DIR}/foreign-target-tags.log"
+assert_called "foreign-target-tags" "${LOG}" "compute instances add-tags scion-hub-my-hub"
+assert_not_called "foreign-target-tags" "${LOG}" "compute firewall-rules update"
+assert_not_called "foreign-target-tags" "${LOG}" "compute firewall-rules create"
+assert_output_contains "foreign-target-tags" "${WORK_DIR}/foreign-target-tags.out" \
+  "do not include ${HUB_TAG}"
 echo
 
 echo "=========================================="
