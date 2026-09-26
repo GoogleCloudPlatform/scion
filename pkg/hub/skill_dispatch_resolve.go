@@ -359,9 +359,10 @@ func (s *Server) preResolveAgentSkillsAsIdentity(ctx context.Context, agent *sto
 	}
 
 	resp := &ResolveSkillsResponse{}
+	aliasUserID := dispatchSkillAliasUserID(agent)
 	for _, p := range todo {
 		entry, resolveErr := s.resolveRegistrySkillRef(ctx, identity, p.raw, p.uri,
-			agent.ProjectID, agent.OwnerID, "")
+			agent.ProjectID, aliasUserID, "")
 		if resolveErr != nil {
 			resp.Errors = append(resp.Errors, *resolveErr)
 			continue
@@ -369,4 +370,23 @@ func (s *Server) preResolveAgentSkillsAsIdentity(ctx context.Context, agent *sto
 		resp.Resolved = append(resp.Resolved, *entry)
 	}
 	return resp
+}
+
+// dispatchSkillAliasUserID returns the user ID used to expand a bare
+// skill://user alias (no explicit scope ID) at dispatch time: the agent's
+// origin user, Ancestry[0], the root human at the head of the creation
+// chain. For a human-created agent this is the same value as
+// OwnerID/CreatedBy (its Ancestry is exactly [userID]); for an agent-created
+// child it is the chain's root user, not the immediate parent agent that
+// OwnerID/CreatedBy record.
+//
+// This deliberately does not fall back to CreatedBy the way
+// resolveOriginUserID (authorize_message.go) does: an agent with no recorded
+// Ancestry gets no user-scope alias at all here, rather than one keyed off
+// the wrong principal.
+func dispatchSkillAliasUserID(agent *store.Agent) string {
+	if agent == nil || len(agent.Ancestry) == 0 {
+		return ""
+	}
+	return agent.Ancestry[0]
 }
