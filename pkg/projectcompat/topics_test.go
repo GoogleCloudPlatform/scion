@@ -39,7 +39,7 @@ func TestTopicBuildersUseCanonicalProjectPrefix(t *testing.T) {
 	}
 }
 
-func TestParseTopicAcceptsCanonicalAndLegacy(t *testing.T) {
+func TestParseTopicAcceptsCanonical(t *testing.T) {
 	tests := []struct {
 		name string
 		in   string
@@ -51,19 +51,14 @@ func TestParseTopicAcceptsCanonicalAndLegacy(t *testing.T) {
 			want: Topic{ProjectID: "p1", Kind: TopicKindAgent, Actor: "coder"},
 		},
 		{
-			name: "legacy agent",
-			in:   "scion.grove.p1.agent.coder.messages",
-			want: Topic{ProjectID: "p1", Kind: TopicKindAgent, Actor: "coder", Legacy: true},
-		},
-		{
 			name: "canonical user wildcard",
 			in:   "scion.project.p1.user.*.messages",
 			want: Topic{ProjectID: "p1", Kind: TopicKindUser, Actor: "*"},
 		},
 		{
-			name: "legacy broadcast",
-			in:   "scion.grove.p1.broadcast",
-			want: Topic{ProjectID: "p1", Kind: TopicKindBroadcast, Legacy: true},
+			name: "canonical broadcast",
+			in:   "scion.project.p1.broadcast",
+			want: Topic{ProjectID: "p1", Kind: TopicKindBroadcast},
 		},
 	}
 	for _, tt := range tests {
@@ -83,6 +78,8 @@ func TestParseTopicRejectsMalformedTopics(t *testing.T) {
 	for _, topic := range []string{
 		"",
 		"scion.global.broadcast",
+		"scion.grove.p1.agent.coder.messages",
+		"scion.grove.p1.broadcast",
 		"scion.project",
 		"scion.project..broadcast",
 		"scion.project.p1.agent.coder",

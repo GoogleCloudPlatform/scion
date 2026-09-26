@@ -934,7 +934,7 @@ func parseTopicComponents(topic string) (projectID, agentSlug string) {
 	} else {
 		parts := strings.Split(topic, ".")
 		for i, part := range parts {
-			if (part == "grove" || part == "project") && i+1 < len(parts) {
+			if part == "project" && i+1 < len(parts) {
 				projectID = parts[i+1]
 			}
 			if part == "agent" && i+1 < len(parts) {

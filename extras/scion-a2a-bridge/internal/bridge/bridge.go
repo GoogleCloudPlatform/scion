@@ -1730,7 +1730,6 @@ func (b *Bridge) unregisterActiveTask(taskID, aKey string) {
 }
 
 // parseTopic extracts project and agent identifiers from a broker topic string.
-// Canonical scion.project topics and legacy scion.grove topics are accepted.
 func parseTopic(topic string) (projectID, agentSlug string, err error) {
 	parsed, err := projectcompat.ParseTopic(topic)
 	if err != nil {

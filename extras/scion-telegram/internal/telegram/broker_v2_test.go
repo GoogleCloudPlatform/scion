@@ -370,10 +370,13 @@ func TestParseTopicComponents(t *testing.T) {
 		wantAgent   string
 	}{
 		{"scion.project.myproj.agent.coder.messages", "myproj", "coder"},
-		{"scion.grove.myproj.agent.coder.messages", "myproj", "coder"},
 		{"scion.project.proj1.broadcast", "proj1", ""},
 		{"scion.project.proj2.agent.reviewer.messages", "proj2", "reviewer"},
 		{"scion.project.proj1.agent.coder.agent.reviewer.messages", "proj1", "reviewer"},
+		// A grove-prefixed topic is not a project topic: the project ID
+		// falls back to the whole topic string, and the agent segment is
+		// still extracted.
+		{"scion.grove.myproj.agent.coder.messages", "scion.grove.myproj.agent.coder.messages", "coder"},
 		{"unknown-topic-format", "unknown-topic-format", ""},
 	}
 
@@ -382,6 +385,24 @@ func TestParseTopicComponents(t *testing.T) {
 			projID, agentSlug := parseTopicComponents(tt.topic)
 			assert.Equal(t, tt.wantProject, projID)
 			assert.Equal(t, tt.wantAgent, agentSlug)
+		})
+	}
+}
+
+func TestNormalizeV1RouteTopic(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"v1 legacy agent route", "scion.grove.proj1.agent.coder.messages", "scion.project.proj1.agent.coder.messages"},
+		{"v1 legacy broadcast route", "scion.grove.proj1.broadcast", "scion.project.proj1.broadcast"},
+		{"already canonical", "scion.project.proj1.agent.coder.messages", "scion.project.proj1.agent.coder.messages"},
+		{"unrelated string", "not-a-topic", "not-a-topic"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, normalizeV1RouteTopic(tt.in))
 		})
 	}
 }

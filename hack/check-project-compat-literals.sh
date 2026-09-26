@@ -55,12 +55,20 @@ allowed_paths=(
   "^cmd/templates_test.go$"
   "^extras/agent-viz/internal/logparser/parser_test.go$"
   "^extras/fs-watcher-tool/pkg/fswatcher/project_test.go$"
+  # Asserts a scion.grove.* user topic yields no user ID from
+  # extractUserIDFromTopic. The literal is the point of the negative test.
+  "^extras/scion-a2a-bridge/internal/bridge/pgstore_crossprocess_test.go$"
   "^extras/scion-a2a-bridge/internal/bridge/server_test.go$"
   "^extras/scion-a2a-bridge/internal/bridge/stream_test.go$"
   "^extras/scion-a2a-bridge/internal/state/state_test.go$"
   "^extras/scion-chat-app/internal/chatapp/commands_test.go$"
   "^extras/scion-chat-app/internal/chatapp/notifications_test.go$"
   "^extras/scion-chat-app/internal/state/state_test.go$"
+  # Asserts parseTopicComponents does not treat a scion.grove.* prefix as a
+  # project topic: the project ID falls back to the whole topic string. The
+  # literal is the point of the negative test.
+  "^extras/scion-discord/internal/discord/broker_test.go$"
+  "^extras/scion-slack/internal/slack/broker_test.go$"
   "^extras/scion-telegram/internal/telegram/broker_v2_test.go$"
   "^pkg/agent/list_test.go$"
   "^pkg/agent/provision_test.go$"
@@ -179,13 +187,8 @@ allowed_paths=(
 
   # First-party integration compatibility boundaries.
   "^extras/agent-viz/internal/logparser/parser.go$"
-  "^extras/scion-a2a-bridge/internal/bridge/bridge.go$"
   "^extras/scion-chat-app/internal/chatapp/messenger.go$"
-  "^extras/scion-chat-app/internal/chatapp/notifications.go$"
   "^extras/scion-chat-app/internal/state/state.go$"
-  "^extras/scion-discord/internal/discord/broker.go$"
-  "^extras/scion-slack/internal/slack/broker.go$"
-  "^extras/scion-slack/internal/slack/broker_test.go$"
   "^extras/scion-telegram/internal/telegram/broker_v2.go$"
 
   # Core compatibility adapters and bounded legacy protocol/storage surfaces.
@@ -203,7 +206,6 @@ allowed_paths=(
   "^pkg/hub/events_postgres.go$"
   "^pkg/hub/fs_safety.go$"
   "^pkg/hub/handlers_auth.go$"
-  "^pkg/hub/handlers_broker_inbound.go$"
   "^pkg/hub/handlers_projects_core.go$"
   "^pkg/hub/handlers_runtime_brokers.go$"
   "^pkg/hub/httpdispatcher.go$"

@@ -1959,3 +1959,28 @@ func TestConfigure_BootstrapSkippedWhenDone(t *testing.T) {
 	// bootstrapDone should still be true (not reset by Phase 2 alone).
 	assert.True(t, b.bootstrapDone, "bootstrapDone should remain true when no session replacement")
 }
+
+// --- Topic parsing ---
+
+func TestParseTopicComponents(t *testing.T) {
+	tests := []struct {
+		topic     string
+		projectID string
+		agentSlug string
+	}{
+		{"scion.project.proj123.agent.myagent", "proj123", "myagent"},
+		// A grove-prefixed topic is not a project topic: the project ID
+		// falls back to the whole topic string, and the agent segment is
+		// still extracted.
+		{"scion.grove.proj123.agent.myagent", "scion.grove.proj123.agent.myagent", "myagent"},
+		{"some-topic", "some-topic", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.topic, func(t *testing.T) {
+			pid, slug := parseTopicComponents(tt.topic)
+			assert.Equal(t, tt.projectID, pid)
+			assert.Equal(t, tt.agentSlug, slug)
+		})
+	}
+}

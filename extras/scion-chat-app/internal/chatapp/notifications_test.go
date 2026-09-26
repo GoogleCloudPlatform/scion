@@ -28,18 +28,20 @@ import (
 )
 
 // TestHandleBrokerMessage_UserTopicAcceptance verifies that a user-targeted
-// message is routed and actually delivered on both the canonical
-// scion.project.* topic — the primary shape published by the hub — and the
-// legacy scion.grove.* topic, kept for compatibility with publishers that
-// have not migrated. A nil-error assertion alone would pass even if one
-// shape were silently dropped, so each case asserts an actual delivery.
+// message is delivered on the canonical scion.project.* topic — the shape
+// published by the hub — and that a scion.grove.*-prefixed topic delivers
+// nothing, since it is not a project topic. A nil-error assertion alone
+// would pass even if a delivery were silently dropped or an undelivered
+// case were silently delivered, so each case asserts the exact delivery
+// count.
 func TestHandleBrokerMessage_UserTopicAcceptance(t *testing.T) {
 	tests := []struct {
-		name  string
-		topic string
+		name           string
+		topic          string
+		wantDeliveries int
 	}{
-		{"canonical", "scion.project.grove-abc.user.hub-user-1.messages"},
-		{"legacy", "scion.grove.grove-abc.user.hub-user-1.messages"},
+		{"canonical", "scion.project.grove-abc.user.hub-user-1.messages", 1},
+		{"legacy prefix rejected", "scion.grove.grove-abc.user.hub-user-1.messages", 0},
 	}
 
 	for _, tc := range tests {
@@ -81,15 +83,16 @@ func TestHandleBrokerMessage_UserTopicAcceptance(t *testing.T) {
 			if err != nil {
 				t.Fatalf("expected nil error for topic %q, got: %v", tc.topic, err)
 			}
-			if len(fm.messages) != 1 {
-				t.Fatalf("expected exactly one delivery for topic %q, got %d", tc.topic, len(fm.messages))
+			if len(fm.messages) != tc.wantDeliveries {
+				t.Fatalf("topic %q: got %d deliveries, want %d", tc.topic, len(fm.messages), tc.wantDeliveries)
 			}
 		})
 	}
 }
 
 // TestHandleBrokerMessage_IgnoredTopics verifies that unrecognized or
-// malformed topics are silently ignored.
+// malformed topics produce a nil error rather than being treated as a
+// processing failure.
 func TestHandleBrokerMessage_IgnoredTopics(t *testing.T) {
 	log := slog.Default()
 	relay := NewNotificationRelay(nil, nil, log)
