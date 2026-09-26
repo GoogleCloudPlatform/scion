@@ -646,8 +646,8 @@ if [[ -z "$VERSION" ]]; then
       || { err "Could not fetch releases from GitHub API."; exit 1; }
   fi
   # jq is a hard prerequisite (checked in Phase 1), so no text-based fallback
-  # is needed here. A here-string avoids piping through `echo`, which can
-  # misbehave on leading hyphens or backslashes in $RELEASE_JSON.
+  # is needed here. Here-string, not `echo | jq` -- see the NAT_ROWS comment
+  # below for why.
   VERSION="$(jq -r 'select(. != null) | if type == "array" then .[0].tag_name else .tag_name end // empty' <<< "$RELEASE_JSON")" || true
   if [[ -z "$VERSION" ]]; then
     err "Could not detect latest release. Use --version to specify."
@@ -854,7 +854,8 @@ fi
 # primary IP egress). "foreign" is true when the router isn't the one
 # we'd create ourselves, regardless of NAT type.
 # A here-string avoids piping through `echo`, which can misbehave on
-# leading hyphens or backslashes in $ROUTERS_JSON.
+# option-like leading hyphens in $ROUTERS_JSON (e.g. a value starting
+# with "-n" or "-e").
 NAT_ROWS="$(jq -r \
   --arg region "$REGION" \
   --arg own "$ROUTER_NAME" '
