@@ -346,7 +346,7 @@ func TestWakeAgentForDM_Suspended_DispatchStartFails(t *testing.T) {
 }
 
 func TestWakeAgentForDM_Suspended_ReadinessTimeout(t *testing.T) {
-	srv, _, _, target := createWakeDMFixtures(t, string(state.PhaseSuspended))
+	srv, s, _, target := createWakeDMFixtures(t, string(state.PhaseSuspended))
 
 	disp := &wakeTrackingDispatcher{}
 	srv.SetDispatcher(disp)
@@ -361,6 +361,16 @@ func TestWakeAgentForDM_Suspended_ReadinessTimeout(t *testing.T) {
 	assert.Equal(t, ErrCodeRuntimeError, dmErr.Code)
 	assert.Equal(t, http.StatusBadGateway, dmErr.HTTPStatus)
 	assert.Contains(t, dmErr.Message, "did not become ready")
+
+	// A readiness timeout must not move the agent to an uncounted phase
+	// (ptone/scion#1984): the container may still be running and occupying
+	// the broker slot, so the stored phase must stay "starting" — the phase
+	// this same helper set just before waiting — rather than "error".
+	got, err := s.GetAgent(context.Background(), target.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseStarting), got.Phase,
+		"readiness timeout must leave the agent in a counted phase, not error")
+	assert.Contains(t, got.Message, "Failed to become ready after wake")
 }
 
 func TestWakeAgentForDM_ManagedRuntime_Unsupported(t *testing.T) {
@@ -721,4 +731,169 @@ func TestOutboundMessage_WakeHumanRecipient_ZeroResumes(t *testing.T) {
 	// Zero DispatchAgentStart calls — wake must not invoke resume on a human.
 	starts := disp.getStartCalls()
 	assert.Empty(t, starts, "wake:true targeting a human recipient must invoke zero resumes")
+}
+
+// ---------------------------------------------------------------------------
+// Wake readiness-timeout quota accounting (ptone/scion#1984)
+//
+// A DM wake re-reserves the target's max_agents_per_broker slot before
+// dispatch (ptone/scion#1963). If the resumed container then fails to signal
+// readiness in time, the container itself may still be running — a readiness
+// timeout is not a confirmed exit. Before this fix, the timeout path wrote
+// phase=error directly, an uncounted phase, so the reservation looked stale
+// to ReconcileStaleBrokerQuotaReservations and was released out from under a
+// (possibly still-running) container, letting the broker exceed its cap.
+// ---------------------------------------------------------------------------
+
+// TestBrokerQuota_WakeReadinessTimeoutHoldsSlotThroughReconcile is the RED/GREEN
+// regression test for ptone/scion#1984: a wake readiness timeout must keep the
+// broker slot reserved through a reconcile pass, and a subsequent start at cap
+// must still be refused.
+func TestBrokerQuota_WakeReadinessTimeoutHoldsSlotThroughReconcile(t *testing.T) {
+	// createWakeDMFixtures also creates a permanently-running sender agent on
+	// the same broker (needed for message authorization), created directly
+	// via the store rather than the reservation-creating HTTP flow. It holds
+	// no reservation of its own until a reconcile pass backfills one, so the
+	// cap below is sized for target + sender: 2.
+	srv, s, sender, target := createWakeDMFixtures(t, string(state.PhaseSuspended))
+	setBrokerAgentCeiling(t, s, 2)
+	require.Equal(t, sender.RuntimeBrokerID, target.RuntimeBrokerID)
+
+	disp := &wakeTrackingDispatcher{}
+	srv.SetDispatcher(disp)
+
+	// Target never reports activity, so waitForAgentReady times out.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result, dmErr := srv.wakeAgentForDM(ctx, target)
+	assert.Nil(t, result)
+	require.NotNil(t, dmErr, "readiness timeout must surface as a wake failure")
+
+	require.EqualValues(t, 1, brokerReservationCount(t, s, target.RuntimeBrokerID),
+		"wake must reserve the slot before dispatch")
+
+	// Run the periodic sweep that reconciles reservations against observed
+	// phase. It also backfills the sender's until-now-unreserved running
+	// agent, bringing the count to 2 (= the cap) — unless the timeout
+	// wrongly freed the target's slot first, in which case it would stay at
+	// 1. On base this releases the target's slot because phase=error is
+	// uncounted; on head the agent is still "starting" (counted), so its
+	// reservation survives alongside the backfilled sender.
+	srv.ReconcileStaleBrokerQuotaReservations(context.Background())
+	require.EqualValues(t, 2, brokerReservationCount(t, s, target.RuntimeBrokerID),
+		"reconcile must not release a wake-timeout agent's reservation while its container may still be running")
+
+	// At cap, starting a third agent on the same broker/project must be
+	// refused — on base this incorrectly returns 200 because the reconcile
+	// pass above already freed the target's slot.
+	candidate := &store.Agent{
+		ID:              tid("wake-cap-candidate"),
+		Slug:            "wake-cap-candidate",
+		Name:            "Wake Cap Candidate",
+		ProjectID:       target.ProjectID,
+		RuntimeBrokerID: target.RuntimeBrokerID,
+		Phase:           string(state.PhaseStopped),
+	}
+	require.NoError(t, s.CreateAgent(context.Background(), candidate))
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+candidate.ID+"/start", nil)
+	assert.Equal(t, http.StatusTooManyRequests, rec.Code, rec.Body.String())
+}
+
+// TestBrokerQuota_WakeReadinessTimeoutThenConfirmedStopReleases is the positive
+// control for #1984: once the runtime broker actually confirms the container
+// exited (reported over heartbeat, the normal "hub observes reality" path),
+// the reservation must still be released.
+func TestBrokerQuota_WakeReadinessTimeoutThenConfirmedStopReleases(t *testing.T) {
+	srv, s, _, target := createWakeDMFixtures(t, string(state.PhaseSuspended))
+	setBrokerAgentCeiling(t, s, 1)
+	grantDevUserRuntimeBrokerAccess(t, s)
+
+	disp := &wakeTrackingDispatcher{}
+	srv.SetDispatcher(disp)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, dmErr := srv.wakeAgentForDM(ctx, target)
+	require.NotNil(t, dmErr)
+
+	require.EqualValues(t, 1, brokerReservationCount(t, s, target.RuntimeBrokerID))
+
+	// The broker later reports, via heartbeat, that the container actually
+	// exited. This must drive reconcileBrokerQuotaOnPhaseChange and free the
+	// slot the normal way.
+	ec := 1
+	code := sendHeartbeat(t, srv, target.RuntimeBrokerID, target.ProjectID, brokerAgentHeartbeat{
+		Slug:       target.Slug,
+		Phase:      "stopped",
+		ExitCode:   &ec,
+		ExitReason: "crashed",
+	})
+	require.Equal(t, http.StatusOK, code)
+
+	assert.EqualValues(t, 0, brokerReservationCount(t, s, target.RuntimeBrokerID),
+		"a confirmed container stop must free the slot")
+}
+
+// wakeWithReadinessBudget wakes target with a bounded caller context; the test
+// dispatcher never reports readiness, so wake fails on the readiness path.
+func wakeWithReadinessBudget(t *testing.T, srv *Server, target *store.Agent, d time.Duration) *AgentDMError {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), d)
+	defer cancel()
+	_, dmErr := srv.wakeAgentForDM(ctx, target)
+	return dmErr
+}
+
+// wakeQuotaFixture is a minimal broker+project+target fixture for wake/quota
+// interaction tests, built on the shared quota-test helpers rather than
+// createWakeDMFixtures so the caller controls the broker ceiling directly.
+type wakeQuotaFixture struct {
+	srv     *Server
+	s       store.Store
+	broker  *store.RuntimeBroker
+	project *store.Project
+	target  *store.Agent
+}
+
+func newWakeQuotaFixture(t *testing.T, name string, limit int64) *wakeQuotaFixture {
+	srv, s := testServer(t)
+	srv.SetDispatcher(&quotaLifecycleDispatcher{})
+	setBrokerAgentCeiling(t, s, limit)
+	grantDevUserRuntimeBrokerAccess(t, s)
+	broker, project := newQuotaTestBrokerAndProject(t, s, name)
+	target := newQuotaTestAgent(t, s, broker, project, name+"-target", state.PhaseSuspended)
+	return &wakeQuotaFixture{srv, s, broker, project, target}
+}
+
+func (u *wakeQuotaFixture) count(t *testing.T) int64 {
+	return int64(brokerReservationCount(t, u.s, u.broker.ID))
+}
+
+// TestBrokerQuota_WakeReadinessTimeoutLiveCtxNoTransientRelease is a further
+// regression guard for #1984: a wake that fails readiness with a LIVE caller
+// context (the unexpected-phase fast-fail path in waitForAgentReady, which
+// takes the same failure branch as the internal 30s readiness timeout) must
+// not release the broker quota slot even transiently while the container is
+// still alive — a start at cap issued BEFORE any reconcile tick must be
+// rejected. The two tests above cannot catch a caller-ctx-keyed release
+// because they always reach the failure through an already-expired caller
+// context, where such a release would be a silent no-op.
+func TestBrokerQuota_WakeReadinessTimeoutLiveCtxNoTransientRelease(t *testing.T) {
+	u := newWakeQuotaFixture(t, "wq-livectx", 1)
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		_ = u.s.UpdateAgentStatus(context.Background(), u.target.ID, store.AgentStatusUpdate{Phase: "resumed"})
+	}()
+	dmErr := wakeWithReadinessBudget(t, u.srv, u.target, 10*time.Second)
+	require.NotNil(t, dmErr)
+	require.Equal(t, http.StatusBadGateway, dmErr.HTTPStatus, dmErr.Message)
+	assert.EqualValues(t, 1, u.count(t), "slot held immediately after live-ctx wake failure")
+
+	disp := &quotaLifecycleDispatcher{}
+	u.srv.SetDispatcher(disp)
+	other := newQuotaTestAgent(t, u.s, u.broker, u.project, "wq-livectx-other", state.PhaseStopped)
+	rec := doRequest(t, u.srv, http.MethodPost, "/api/v1/agents/"+other.ID+"/start", nil)
+	assertBrokerQuotaExceeded(t, rec)
+	assert.EqualValues(t, 0, disp.startCount.Load(), "no second container dispatched")
 }
