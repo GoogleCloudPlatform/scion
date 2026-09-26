@@ -136,10 +136,6 @@ case "${1:-} ${2:-}" in
     echo "123456789012"
     exit 0
     ;;
-  "config get-value")
-    echo "stub-deployer@example.com"
-    exit 0
-    ;;
   "run deploy")
     require_project "$@"
     require_flag region "$@"
@@ -151,6 +147,20 @@ case "${1:-} ${2:-}" in
 esac
 
 case "${1:-} ${2:-} ${3:-}" in
+  "config get-value account")
+    echo "stub-deployer@example.com"
+    exit 0
+    ;;
+  "config get-value project")
+    # Deliberately a different, project-ID-shaped value from "account"
+    # above: deploy.sh reads this as a literal PROJECT_ID fallback when
+    # project_id is missing from its config, so returning the deployer's
+    # email here (as a single two-word "config get-value" case matching
+    # regardless of the property name once did) would silently feed an
+    # email address into every --project= flag on that path.
+    echo "demo-project"
+    exit 0
+    ;;
   "compute firewall-rules describe")
     require_project "$@"
     name="${4:-}"

@@ -116,6 +116,20 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
     # other. harness.sh's shared helpers (assert_*, fresh_gcloud_state,
     # gcloud_log, ...) are already in scope here, inherited from run.sh's
     # own shell at the point this subshell forked.
+    # `source` on a file with a syntax error (a leftover merge-conflict
+    # marker is the realistic case, with three PRs rebasing onto this
+    # file) prints to stderr and abandons the rest of the file -- bash
+    # does not treat that as fatal, and `set -e` is off in this script on
+    # purpose (see the top-of-file comment). Left unchecked, every test_*
+    # after the bad line simply never gets defined, and this subshell
+    # would still write a result file with whatever ran before the error,
+    # so the file's own testing looks like a normal (partial) pass instead
+    # of the loud failure below. Check the file parses *before* sourcing
+    # it, not just handle a bad exit status after.
+    if ! bash -n "$TEST_FILE" 2>&1; then
+      echo "CRASH [$(basename "$TEST_FILE")]: syntax error -- this file was not sourced, so none of its tests ran"
+      exit 1
+    fi
     mapfile -t BEFORE_NAMES < <(declare -F | awk '{print $3}' | grep '^test_' | sort)
     # shellcheck disable=SC1090
     source "$TEST_FILE"
@@ -184,7 +198,7 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
     # shellcheck disable=SC1090
     source "$FILE_RESULT_FILE"
   else
-    echo "CRASH [$(basename "$TEST_FILE")]: test file's own subshell exited with status ${FILE_SUBSHELL_RC} before reporting any result -- a syntax error or an unguarded top-level failure at source time, not a single test"
+    echo "CRASH [$(basename "$TEST_FILE")]: test file's own subshell exited with status ${FILE_SUBSHELL_RC} before reporting any result -- if the syntax-error message above named this file, that's the cause; otherwise an unguarded top-level \`exit\` (or a signal) ran at source time, before any of this file's own tests, not inside one of them"
     FILE_PASS=0
     FILE_FAIL=1
     FILE_TEST_COUNT=0

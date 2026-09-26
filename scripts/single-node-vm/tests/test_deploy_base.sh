@@ -161,10 +161,10 @@ test_deploy_base_create_provisions_expected_resources() {
     "a fresh create must create exactly one service account"
 
   local router_line nat_line fw_create_line vm_line
-  router_line="$(echo "$log" | grep -n "^compute routers create ${ROUTER_NAME} " | head -1 | cut -d: -f1)"
-  nat_line="$(echo "$log" | grep -n "^compute routers nats create ${NAT_NAME} " | head -1 | cut -d: -f1)"
-  fw_create_line="$(echo "$log" | grep -n "^compute firewall-rules create ${FW_RULE_NAME} " | head -1 | cut -d: -f1)"
-  vm_line="$(echo "$log" | grep -n "^compute instances create ${INSTANCE_NAME} " | head -1 | cut -d: -f1)"
+  router_line="$(line_number "compute routers create ${ROUTER_NAME} " "$log")"
+  nat_line="$(line_number "compute routers nats create ${NAT_NAME} " "$log")"
+  fw_create_line="$(line_number "compute firewall-rules create ${FW_RULE_NAME} " "$log")"
+  vm_line="$(line_number "compute instances create ${INSTANCE_NAME} " "$log")"
   assert_true "$([[ -n "$router_line" && -n "$vm_line" && "$router_line" -lt "$vm_line" ]] && echo true || echo false)" \
     "the Cloud Router must be created before the VM"
   assert_true "$([[ -n "$nat_line" && -n "$vm_line" && "$nat_line" -lt "$vm_line" ]] && echo true || echo false)" \
@@ -240,7 +240,7 @@ test_deploy_base_create_then_delete_removes_everything() {
 
   assert_eq "0" "$DEPLOY_RC" "teardown of everything create just made should exit 0"
 
-  local log
+  local log pattern
   log="$(gcloud_log)"
   for pattern in \
     "^run services delete ${INSTANCE_NAME}-iap-proxy " \
@@ -257,4 +257,8 @@ test_deploy_base_create_then_delete_removes_everything() {
     "no firewall-rule fixture should remain after teardown"
   assert_eq "0" "$(find "${GCLOUD_STUB_STATE_DIR}/instances" -mindepth 1 | wc -l | tr -d ' ')" \
     "no instance fixture should remain after teardown"
+  assert_false "$([[ -f "${GCLOUD_STUB_STATE_DIR}/router-exists" ]] && echo true)" \
+    "the router-exists marker should be cleared after teardown"
+  assert_false "$([[ -f "${GCLOUD_STUB_STATE_DIR}/nats/${NAT_NAME}.exists" ]] && echo true)" \
+    "the NAT's own exists marker should be cleared after teardown"
 }

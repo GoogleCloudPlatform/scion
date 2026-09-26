@@ -56,6 +56,23 @@ pass/fail count. Exits non-zero if any assertion failed.
   real `deploy.sh`/stub subprocesses a test starts — is not isolated by
   this and is each test's own responsibility, via `fresh_gcloud_state`
   and each test running in its own subshell.
+- **Corollary: a test file may use only `lib/harness.sh`'s shared helpers
+  plus what it defines itself.** It cannot call a function or read a
+  variable another `tests/test_*.sh` file happens to define — per-file
+  isolation means that dependency is invisible at the point the other
+  file needs it, not just discouraged. If two or more test files
+  genuinely need the same helper or constant, add it to
+  `lib/harness.sh` (see `line_number()` there for an example of exactly
+  this: a helper more than one test file's ordering assertions need,
+  moved here instead of staying private to whichever file used it
+  first) rather than having one file source or duplicate another's.
+- **Before sourcing a file, `run.sh` runs `bash -n` on it and fails the
+  whole run loudly if it doesn't parse** (a leftover merge-conflict
+  marker after a rebase is the realistic way this happens). Without this
+  check, bash abandons a syntactically broken file partway through
+  instead of treating it as fatal, so every `test_*` function after the
+  bad line would simply never be defined — and the run would still
+  report a pass. Do not remove this check when editing `run.sh`.
 - `tests/lib/gcloud` is the fake `gcloud`. Every invocation is logged
   (see `gcloud_log`/`gcloud_call_count` in harness.sh) before being
   dispatched on `$1 $2 [$3 [$4]]`. Responses are served from small files
@@ -118,6 +135,12 @@ pass/fail count. Exits non-zero if any assertion failed.
    never blocks; via a background process plus a sentinel file for
    create-mode, to stop it before its real SSH-readiness retry loop), and
    assert on `gcloud_log`/`DEPLOY_LOG`/`DEPLOY_RC` with the `assert_*`
-   helpers.
+   helpers; for an ordering assertion ("X must happen before Y"), use
+   `line_number PATTERN LOG` (also in `lib/harness.sh`) to find each
+   call's line number and compare them. Remember the isolation rule
+   above: if what you need isn't in `lib/harness.sh` and isn't something
+   your own file defines, it isn't reachable — add it to
+   `lib/harness.sh` instead of relying on another test file happening to
+   run first.
 8. **Run `./run.sh`** and confirm both your new test and the full suite
    pass, then `shellcheck -x` every changed file from the repo root.

@@ -262,6 +262,16 @@ gcloud_call_count() {
   gcloud_log | grep -c . || true
 }
 
+# line_number PATTERN LOG — the 1-based line number of the first log line
+# containing PATTERN, or empty if none matches. Shared here (rather than
+# left as a private helper in whichever test file happens to need it
+# first) because more than one tests/test_*.sh file wants ordering
+# assertions against gcloud_log, and a test file may only use
+# lib/harness.sh plus its own definitions -- see README.md "How it works".
+line_number() {
+  echo "$2" | grep -n -F -- "$1" | head -1 | cut -d: -f1
+}
+
 # --- Assertions ----------------------------------------------------------
 # Each prints PASS/FAIL with the current test name and bumps the counters.
 # CURRENT_TEST is set by run.sh before invoking each test_* function.
