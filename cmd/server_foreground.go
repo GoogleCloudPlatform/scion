@@ -219,6 +219,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	// explicitly so all three boot hooks (CLI, hub, broker) are visible at
 	// their call sites.
 	config.SetProjectMigrationReporter(config.NewSlogReporter())
+	// Migrate the global ~/.scion layout before project discovery and
+	// storage init scan it (step 8 below and beyond).
+	config.MigrateLegacyGlobalLayoutOnce(globalDir, config.NewSlogReporter())
 
 	// 8. Initialize store
 	var s store.Store

@@ -56,27 +56,13 @@ func (m ProjectMarker) DirName() string {
 
 // ExternalProjectPath returns the absolute path to the external project config
 // directory: ~/.scion/project-configs/<project-slug>__<short-uuid>/.scion/
-// Checks project-configs first, falling back to legacy grove-configs if not found.
 func (m ProjectMarker) ExternalProjectPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
 
-	// 1. Try project-configs/
-	projectPath := filepath.Join(home, GlobalDir, ProjectConfigsDir, m.DirName(), DotScion)
-	if _, err := os.Stat(projectPath); err == nil {
-		return projectPath, nil
-	}
-
-	// 2. Fallback to legacy grove-configs/
-	legacyPath := filepath.Join(home, GlobalDir, GroveConfigsDir, m.DirName(), DotScion)
-	if _, err := os.Stat(legacyPath); err == nil {
-		return legacyPath, nil
-	}
-
-	// 3. Default to project-configs/
-	return projectPath, nil
+	return filepath.Join(home, GlobalDir, ProjectConfigsDir, m.DirName(), DotScion), nil
 }
 
 // ReadProjectMarker reads and parses a .scion marker file. A legacy

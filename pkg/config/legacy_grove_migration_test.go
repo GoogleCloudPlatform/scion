@@ -323,7 +323,7 @@ func TestMigrateLegacyProjectFile(t *testing.T) {
 		if r.skipped != 1 {
 			t.Errorf("skipped reports = %d, want 1", r.skipped)
 		}
-		wantManual := "mv " + filepath.Join(dir, "grove-id") + " " + filepath.Join(dir, "project-id")
+		wantManual := "mv " + shellQuote(filepath.Join(dir, "grove-id")) + " " + shellQuote(filepath.Join(dir, "project-id"))
 		if r.lastManual != wantManual {
 			t.Errorf("manual command = %q, want %q", r.lastManual, wantManual)
 		}
@@ -2590,5 +2590,1289 @@ func TestMigrateLegacyYAMLKeys_BOMKeyOnFirstLine(t *testing.T) {
 	}
 	if string(got) != want {
 		t.Errorf("migrated content = %q, want %q", got, want)
+	}
+}
+
+// migratedEvent, conflictEvent and skippedEvent capture one call each to
+// globalLayoutRecorder, below.
+type migratedEvent struct {
+	old, new string
+	tracked  bool
+}
+type conflictEvent struct{ old, new, detail string }
+type skippedEvent struct{ old, reason, manual string }
+
+// globalLayoutRecorder records every Reporter call made while migrating the
+// global ~/.scion layout, unlike fakeReporter (used by the per-project
+// algorithm above), which only needs the last call and a count: a single
+// MigrateLegacyGlobalLayout call can report on several independent entries
+// at once, so tests need to tell them apart. Safe for concurrent use, since
+// entries under different legacy roots — or different entries racing under
+// the same root — can report from different goroutines at once.
+type globalLayoutRecorder struct {
+	mu        sync.Mutex
+	migrated  []migratedEvent
+	conflicts []conflictEvent
+	skipped   []skippedEvent
+}
+
+func (r *globalLayoutRecorder) Migrated(old, new string, tracked bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.migrated = append(r.migrated, migratedEvent{old, new, tracked})
+}
+
+func (r *globalLayoutRecorder) Conflict(old, new, detail string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.conflicts = append(r.conflicts, conflictEvent{old, new, detail})
+}
+
+func (r *globalLayoutRecorder) Skipped(old, reason, manual string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.skipped = append(r.skipped, skippedEvent{old, reason, manual})
+}
+
+func (r *globalLayoutRecorder) EnvIgnored(name, replacement string) {}
+
+func (r *globalLayoutRecorder) PrecedenceChanged(path, value, other string) {}
+
+func (r *globalLayoutRecorder) totalEvents() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.migrated) + len(r.conflicts) + len(r.skipped)
+}
+
+// TestMigrateLegacyGlobalLayout_NoLegacyRoot covers the common case: neither
+// legacy root exists, so both Lstat calls return ENOENT and nothing else
+// happens (no canonical directory is created, nothing is reported).
+func TestMigrateLegacyGlobalLayout_NoLegacyRoot(t *testing.T) {
+	home := t.TempDir()
+	r := &globalLayoutRecorder{}
+
+	MigrateLegacyGlobalLayout(home, r)
+
+	if got := r.totalEvents(); got != 0 {
+		t.Fatalf("events = %d, want 0", got)
+	}
+	if _, err := os.Stat(filepath.Join(home, "projects")); !os.IsNotExist(err) {
+		t.Errorf("canonical dir should not be created when nothing legacy exists, stat err = %v", err)
+	}
+}
+
+// TestMigrateLegacyGlobalLayout_ReadDirFailureDoesNotNest covers a legacy
+// root that Lstat and MkdirAll can both see (so the canonical root gets
+// created) but ReadDir cannot list (e.g. execute-only permissions): the
+// printed command must not be a bare "mv legacyRoot canonicalRoot", which
+// would nest the legacy root's entries one level too deep inside the
+// (already-existing) canonical root instead of merging them.
+func TestMigrateLegacyGlobalLayout_ReadDirFailureDoesNotNest(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permission checks")
+	}
+	home := t.TempDir()
+	legacyRoot := filepath.Join(home, "groves")
+	writeFile(t, filepath.Join(legacyRoot, "p1", "workspace.txt"), "hello")
+	if err := os.Chmod(legacyRoot, 0311); err != nil { // execute+write, no read
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(legacyRoot, 0755) })
+
+	r := &globalLayoutRecorder{}
+	MigrateLegacyGlobalLayout(home, r)
+
+	if len(r.skipped) != 1 || r.skipped[0].old != legacyRoot {
+		t.Fatalf("skipped = %+v, want exactly one event for %q", r.skipped, legacyRoot)
+	}
+	wantManual := "chmod u+rwx " + shellQuote(legacyRoot) + ", then re-run scion"
+	if r.skipped[0].manual != wantManual {
+		t.Errorf("manual = %q, want %q", r.skipped[0].manual, wantManual)
+	}
+}
+
+// TestMigrateLegacyGlobalLayout_MkdirAllFailureUsesBareRename covers the
+// other root-level failure, where the canonical root does not exist yet (so
+// there is nothing to nest into): a bare mv is the right — and only —
+// suggestion here, since MkdirAll never got far enough to create anything.
+func TestMigrateLegacyGlobalLayout_MkdirAllFailureUsesBareRename(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permission checks")
+	}
+
+	t.Run("exact command text", func(t *testing.T) {
+		home := t.TempDir()
+		legacyRoot := filepath.Join(home, "groves")
+		writeFile(t, filepath.Join(legacyRoot, "p1", "workspace.txt"), "hello")
+		// projects/ cannot be created because home itself is read-only.
+		if err := os.Chmod(home, 0555); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(home, 0755) })
+
+		r := &globalLayoutRecorder{}
+		MigrateLegacyGlobalLayout(home, r)
+
+		if len(r.skipped) != 1 || r.skipped[0].old != legacyRoot {
+			t.Fatalf("skipped = %+v, want exactly one event for %q", r.skipped, legacyRoot)
+		}
+		wantManual := "mv " + shellQuote(legacyRoot) + " " + shellQuote(filepath.Join(home, "projects"))
+		if r.skipped[0].manual != wantManual {
+			t.Errorf("manual = %q, want %q (canonicalRoot does not exist yet, so a bare mv is correct)", r.skipped[0].manual, wantManual)
+		}
+	})
+
+	t.Run("HOME contains a space", func(t *testing.T) {
+		parent := t.TempDir()
+		home := filepath.Join(parent, "with space")
+		if err := os.MkdirAll(home, 0755); err != nil {
+			t.Fatal(err)
+		}
+		legacyRoot := filepath.Join(home, "groves")
+		writeFile(t, filepath.Join(legacyRoot, "p1", "workspace.txt"), "hello")
+		if err := os.Chmod(home, 0555); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(home, 0755) })
+
+		r := &globalLayoutRecorder{}
+		MigrateLegacyGlobalLayout(home, r)
+		if len(r.skipped) != 1 {
+			t.Fatalf("skipped = %+v, want exactly one event", r.skipped)
+		}
+
+		// Fix the permission problem the command's own reason names, then
+		// actually run the printed command through a shell: unquoted, "with
+		// space" would split into two operands and either fail outright or
+		// move the wrong thing.
+		if err := os.Chmod(home, 0755); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("sh", "-c", r.skipped[0].manual)
+		var out strings.Builder
+		cmd.Stdout = &out
+		cmd.Stderr = &out
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("command failed: %v\noutput: %s\ncommand: %s", err, out.String(), r.skipped[0].manual)
+		}
+		assertFileContent(t, filepath.Join(home, "projects", "p1", "workspace.txt"), "hello")
+	})
+}
+
+// TestMigrateLegacyGlobalLayout_RenameAndSymlinkResolves covers the common
+// case for one entry under one legacy root (groves -> projects): the entry
+// is renamed, a relative symlink is left at the old path, and anything that
+// recorded the old absolute path outside scion's control — modelled here by
+// a git worktree gitdir pointer — keeps resolving through it.
+func TestMigrateLegacyGlobalLayout_RenameAndSymlinkResolves(t *testing.T) {
+	home := t.TempDir()
+	legacyRoot := filepath.Join(home, "groves")
+	acme := filepath.Join(legacyRoot, "acme")
+	writeFile(t, filepath.Join(acme, "workspace.txt"), "hello")
+
+	// A worktree gitdir pointer recorded before migration, holding the
+	// legacy absolute path (as `<repo>/.git/worktrees/*/gitdir` and the
+	// worktree's own `.git` file do in practice).
+	oldWorktreeGitDir := filepath.Join(acme, ".git", "worktrees", "wt")
+	if err := os.MkdirAll(oldWorktreeGitDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	gitdirFile := filepath.Join(t.TempDir(), ".git")
+	writeFile(t, gitdirFile, "gitdir: "+oldWorktreeGitDir+"\n")
+
+	r := &globalLayoutRecorder{}
+	MigrateLegacyGlobalLayout(home, r)
+
+	wantNew := filepath.Join(home, "projects", "acme")
+	if len(r.migrated) != 1 || r.migrated[0].old != acme || r.migrated[0].new != wantNew {
+		t.Fatalf("migrated = %+v, want exactly one event (%q, %q)", r.migrated, acme, wantNew)
+	}
+	if len(r.conflicts) != 0 || len(r.skipped) != 0 {
+		t.Fatalf("unexpected conflicts=%+v skipped=%+v", r.conflicts, r.skipped)
+	}
+
+	// The old path is now a relative symlink into the canonical root.
+	linkInfo, err := os.Lstat(acme)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if linkInfo.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("%s is not a symlink after migration", acme)
+	}
+	wantTarget := filepath.Join("..", "projects", "acme")
+	if target, err := os.Readlink(acme); err != nil || target != wantTarget {
+		t.Errorf("symlink target = %q, %v, want %q", target, err, wantTarget)
+	}
+
+	// The content is reachable both directly and through the old path.
+	assertFileContent(t, filepath.Join(acme, "workspace.txt"), "hello")
+	assertFileContent(t, filepath.Join(wantNew, "workspace.txt"), "hello")
+
+	// The gitdir pointer, still holding the old absolute path, resolves to
+	// the same place the canonical path does.
+	resolvedOld, err := filepath.EvalSymlinks(oldWorktreeGitDir)
+	if err != nil {
+		t.Fatalf("legacy gitdir path no longer resolves: %v", err)
+	}
+	resolvedNew, err := filepath.EvalSymlinks(filepath.Join(wantNew, ".git", "worktrees", "wt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolvedOld != resolvedNew {
+		t.Errorf("resolved gitdir = %q, want %q", resolvedOld, resolvedNew)
+	}
+
+	// The legacy root itself is never removed: it now holds the symlink.
+	if info, err := os.Lstat(legacyRoot); err != nil || info.Mode()&os.ModeSymlink != 0 {
+		t.Errorf("legacy root %s should still exist as a real directory, info=%+v err=%v", legacyRoot, info, err)
+	}
+}
+
+// TestMigrateLegacyGlobalLayout_EmptyCanonicalReplaced covers an existing but
+// empty canonical directory: syscall.Rename succeeds because the destination
+// is an empty directory, so the entry migrates the same as if dst were
+// absent.
+func TestMigrateLegacyGlobalLayout_EmptyCanonicalReplaced(t *testing.T) {
+	home := t.TempDir()
+	acme := filepath.Join(home, "groves", "acme")
+	writeFile(t, filepath.Join(acme, "workspace.txt"), "hello")
+	if err := os.MkdirAll(filepath.Join(home, "projects", "acme"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &globalLayoutRecorder{}
+	MigrateLegacyGlobalLayout(home, r)
+
+	if len(r.migrated) != 1 {
+		t.Fatalf("migrated = %+v, want exactly one event", r.migrated)
+	}
+	assertFileContent(t, filepath.Join(home, "projects", "acme", "workspace.txt"), "hello")
+}
+
+// TestMigrateLegacyGlobalLayout_ConflictRepeatsEveryRun covers a non-empty
+// canonical directory: syscall.Rename fails with ENOTEMPTY, so both directories
+// are left in place (no data loss) and the warning is not deduplicated the
+// way a successful migration is — it repeats on every call until a person
+// resolves it by hand.
+func TestMigrateLegacyGlobalLayout_ConflictRepeatsEveryRun(t *testing.T) {
+	home := t.TempDir()
+	acme := filepath.Join(home, "groves", "acme")
+	writeFile(t, filepath.Join(acme, "legacy.txt"), "legacy-content")
+	canonical := filepath.Join(home, "projects", "acme")
+	writeFile(t, filepath.Join(canonical, "canonical.txt"), "canonical-content")
+
+	r1 := &globalLayoutRecorder{}
+	MigrateLegacyGlobalLayout(home, r1)
+
+	if len(r1.conflicts) != 1 {
+		t.Fatalf("conflicts = %+v, want exactly one event", r1.conflicts)
+	}
+	if len(r1.migrated) != 0 {
+		t.Fatalf("migrated = %+v, want none (conflict, not migration)", r1.migrated)
+	}
+	wantDetail := "both " + acme + " and " + canonical + " exist; using " + canonical +
+		". Inspect " + acme + " and remove it or merge manually."
+	if r1.conflicts[0].detail != wantDetail {
+		t.Errorf("conflict detail = %q, want %q", r1.conflicts[0].detail, wantDetail)
+	}
+
+	// No data loss: both sides keep their own content.
+	assertFileContent(t, filepath.Join(acme, "legacy.txt"), "legacy-content")
+	assertFileContent(t, filepath.Join(canonical, "canonical.txt"), "canonical-content")
+
+	// Nothing on disk changed, so a second run reports the same conflict
+	// again rather than staying silent.
+	r2 := &globalLayoutRecorder{}
+	MigrateLegacyGlobalLayout(home, r2)
+	if len(r2.conflicts) != 1 {
+		t.Errorf("second run conflicts = %d, want 1 (conflicts repeat every run)", len(r2.conflicts))
+	}
+}
+
+// TestMigrateLegacyGlobalLayout_DanglingSymlinks covers both symlink cases in
+// one pass: a leftover pointing at its own now-deleted canonical target is
+// cleaned up, while one pointing anywhere else — meaning something other
+// than this migration manages it — is left alone.
+func TestMigrateLegacyGlobalLayout_DanglingSymlinks(t *testing.T) {
+	home := t.TempDir()
+	legacyRoot := filepath.Join(home, "groves")
+	if err := os.MkdirAll(legacyRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	ownDangling := filepath.Join(legacyRoot, "own")
+	if err := os.Symlink(filepath.Join("..", "projects", "own"), ownDangling); err != nil {
+		t.Fatal(err)
+	}
+	foreignDangling := filepath.Join(legacyRoot, "foreign")
+	if err := os.Symlink("/nonexistent/elsewhere", foreignDangling); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &globalLayoutRecorder{}
+	MigrateLegacyGlobalLayout(home, r)
+
+	if got := r.totalEvents(); got != 0 {
+		t.Fatalf("events = %d, want 0 (dangling-symlink handling is silent)", got)
+	}
+	if _, err := os.Lstat(ownDangling); !os.IsNotExist(err) {
+		t.Errorf("own dangling symlink should have been removed, stat err = %v", err)
+	}
+	if info, err := os.Lstat(foreignDangling); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("foreign dangling symlink should be left alone, info=%+v err=%v", info, err)
+	}
+}
+
+// TestRemoveDanglingOwnGlobalSymlink_NonNotExistErrorLeavesLinkAlone covers a
+// target Stat failure other than "not exist" (e.g. ELOOP, or EACCES on the
+// target's parent): it proves nothing about whether the target exists, so
+// the link must be left alone rather than treated as dangling. The symlink
+// here points at itself, which makes Stat fail with ELOOP deterministically
+// (including when running as root, unlike a permission-based setup) while
+// Readlink still returns the same wantTarget text this migration wrote.
+func TestRemoveDanglingOwnGlobalSymlink_NonNotExistErrorLeavesLinkAlone(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "own")
+	wantTarget := "own"
+	if err := os.Symlink(wantTarget, src); err != nil {
+		t.Fatal(err)
+	}
+	if target, err := os.Readlink(src); err != nil || target != wantTarget {
+		t.Fatalf("Readlink(%q) = %q, %v, want %q (test setup)", src, target, err, wantTarget)
+	}
+	if _, err := os.Stat(src); err == nil || os.IsNotExist(err) {
+		t.Fatalf("os.Stat(%q) = %v, want a non-not-exist error to set up this test", src, err)
+	}
+
+	removeDanglingOwnGlobalSymlink(src, wantTarget)
+
+	if _, err := os.Lstat(src); err != nil {
+		t.Errorf("symlink should be left alone after a non-not-exist Stat error, Lstat err = %v", err)
+	}
+}
+
+// TestMigrateLegacyGlobalLayout_LegacyRootIsSymlinkSkipped covers the legacy
+// root itself being a symlink (user-managed): it is left alone entirely, and
+// the canonical root is never even created.
+func TestMigrateLegacyGlobalLayout_LegacyRootIsSymlinkSkipped(t *testing.T) {
+	home := t.TempDir()
+	realElsewhere := t.TempDir()
+	legacyRoot := filepath.Join(home, "groves")
+	if err := os.Symlink(realElsewhere, legacyRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &globalLayoutRecorder{}
+	MigrateLegacyGlobalLayout(home, r)
+
+	if len(r.skipped) != 1 || r.skipped[0].old != legacyRoot {
+		t.Fatalf("skipped = %+v, want exactly one event for %q", r.skipped, legacyRoot)
+	}
+	if !strings.Contains(r.skipped[0].reason, "symlink") {
+		t.Errorf("reason = %q, want it to mention the symlink", r.skipped[0].reason)
+	}
+	canonicalRoot := filepath.Join(home, "projects")
+	wantManual := "{ [ ! -e " + shellQuote(canonicalRoot) + " ] || rmdir " + shellQuote(canonicalRoot) + "; } && mv " +
+		shellQuote(legacyRoot) + " " + shellQuote(canonicalRoot) + " && ln -s " + shellQuote("projects") + " " + shellQuote(legacyRoot)
+	if r.skipped[0].manual != wantManual {
+		t.Errorf("manual = %q, want %q (an actual runnable command, not just a description)", r.skipped[0].manual, wantManual)
+	}
+	if _, err := os.Stat(canonicalRoot); !os.IsNotExist(err) {
+		t.Errorf("canonical root should not be created, stat err = %v", err)
+	}
+	// The symlink itself is untouched.
+	if target, err := os.Readlink(legacyRoot); err != nil || target != realElsewhere {
+		t.Errorf("legacy root symlink target = %q, %v, want %q", target, err, realElsewhere)
+	}
+}
+
+// TestMigrateLegacyGlobalLayout_LegacyRootSymlinkAlreadyMigrated is the
+// deterministic, direct version of the idempotency check exercised through
+// the shell in TestMigrateLegacyGlobalLayout_LegacyRootSymlinkManualCommand:
+// a legacy root that is a symlink resolving to the canonical root itself —
+// whether the link was written as a relative or an absolute path — is
+// recognised as already migrated and produces no report at all, the same as
+// a migrated per-entry symlink. Without this, every scion command would
+// warn forever after a user (or the migrator's own suggested command) turns
+// the legacy root into exactly this kind of symlink.
+func TestMigrateLegacyGlobalLayout_LegacyRootSymlinkAlreadyMigrated(t *testing.T) {
+	t.Run("relative link to the canonical root", func(t *testing.T) {
+		home := t.TempDir()
+		canonicalRoot := filepath.Join(home, "projects")
+		writeFile(t, filepath.Join(canonicalRoot, "acme", "workspace.txt"), "hello")
+		legacyRoot := filepath.Join(home, "groves")
+		if err := os.Symlink("projects", legacyRoot); err != nil {
+			t.Fatal(err)
+		}
+
+		r := &globalLayoutRecorder{}
+		MigrateLegacyGlobalLayout(home, r)
+		if got := r.totalEvents(); got != 0 {
+			t.Fatalf("events = %+v, want none: a legacy root already pointing at the canonical root is already migrated", r)
+		}
+	})
+
+	t.Run("absolute link to the canonical root", func(t *testing.T) {
+		home := t.TempDir()
+		canonicalRoot := filepath.Join(home, "projects")
+		writeFile(t, filepath.Join(canonicalRoot, "acme", "workspace.txt"), "hello")
+		legacyRoot := filepath.Join(home, "groves")
+		if err := os.Symlink(canonicalRoot, legacyRoot); err != nil {
+			t.Fatal(err)
+		}
+
+		r := &globalLayoutRecorder{}
+		MigrateLegacyGlobalLayout(home, r)
+		if got := r.totalEvents(); got != 0 {
+			t.Fatalf("events = %+v, want none: an absolute link to the canonical root is also recognised", r)
+		}
+	})
+
+	t.Run("dangling legacy root is reported, not silently treated as migrated", func(t *testing.T) {
+		// legacyRootAlreadyMigrated must return false (not "already
+		// migrated") when the legacy root's own target doesn't resolve,
+		// even though the canonical root exists: an unresolvable link is
+		// never proof that it points at the canonical root. Without this,
+		// a dangling or looping legacy root would silently stop being
+		// reported instead of warning the user to fix it by hand.
+		home := t.TempDir()
+		canonicalRoot := filepath.Join(home, "projects")
+		writeFile(t, filepath.Join(canonicalRoot, "acme", "workspace.txt"), "hello")
+		legacyRoot := filepath.Join(home, "groves")
+		if err := os.Symlink(filepath.Join(home, "nonexistent"), legacyRoot); err != nil {
+			t.Fatal(err)
+		}
+
+		r := &globalLayoutRecorder{}
+		MigrateLegacyGlobalLayout(home, r)
+		if len(r.skipped) != 1 || r.skipped[0].old != legacyRoot {
+			t.Fatalf("skipped = %+v, want exactly one event for %q", r.skipped, legacyRoot)
+		}
+		if len(r.migrated) != 0 || len(r.conflicts) != 0 {
+			t.Errorf("migrated=%+v conflicts=%+v, want both empty", r.migrated, r.conflicts)
+		}
+	})
+}
+
+// TestMigrateLegacyGlobalLayout_LegacyRootSymlinkManualCommand actually runs
+// the command TestMigrateLegacyGlobalLayout_LegacyRootIsSymlinkSkipped only
+// asserts the text of, covering the edge cases a naive
+// `mv legacyRoot/* canonicalRoot/` would get wrong: it must handle a
+// dotfile-only target (no shell glob involved, since it renames the whole
+// symlink rather than copying entries), an empty or absent canonical target
+// (succeed), a non-empty canonical target (refuse, leaving the symlink in
+// place so the warning can repeat), and it must never touch anything outside
+// scionHome (so it can never trigger a cross-device copy the way moving the
+// symlink's *contents* could).
+func TestMigrateLegacyGlobalLayout_LegacyRootSymlinkManualCommand(t *testing.T) {
+	runCommand := func(t *testing.T, command string) (stdout, stderr string, exitErr error) {
+		t.Helper()
+		cmd := exec.Command("sh", "-c", command)
+		var outBuf, errBuf strings.Builder
+		cmd.Stdout = &outBuf
+		cmd.Stderr = &errBuf
+		exitErr = cmd.Run()
+		return outBuf.String(), errBuf.String(), exitErr
+	}
+
+	t.Run("dotfile-only target, canonical absent", func(t *testing.T) {
+		home := t.TempDir()
+		real := t.TempDir()
+		if err := os.WriteFile(filepath.Join(real, ".hidden"), []byte("secret"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		legacyRoot := filepath.Join(home, "groves")
+		if err := os.Symlink(real, legacyRoot); err != nil {
+			t.Fatal(err)
+		}
+		canonicalRoot := filepath.Join(home, "projects")
+
+		r := &globalLayoutRecorder{}
+		MigrateLegacyGlobalLayout(home, r)
+		if len(r.skipped) != 1 {
+			t.Fatalf("skipped = %+v, want exactly one event", r.skipped)
+		}
+
+		if _, stderr, err := runCommand(t, r.skipped[0].manual); err != nil {
+			t.Fatalf("command failed: %v\nstderr: %s", err, stderr)
+		}
+
+		// The dotfile survived, reachable both directly and through the
+		// preserved old path.
+		assertFileContent(t, filepath.Join(canonicalRoot, ".hidden"), "secret")
+		assertFileContent(t, filepath.Join(legacyRoot, ".hidden"), "secret")
+		if target, err := os.Readlink(legacyRoot); err != nil || target != "projects" {
+			t.Errorf("legacy root symlink target = %q, %v, want %q", target, err, "projects")
+		}
+		if target, err := os.Readlink(canonicalRoot); err != nil || target != real {
+			t.Errorf("canonical root symlink target = %q, %v, want %q", target, err, real)
+		}
+
+		// Two further runs of the migrator, after the manual command has
+		// left groves -> projects, must both be completely silent: the
+		// legacy root is now recognised as already migrated, not reported
+		// as a fresh symlink to investigate.
+		for i := 0; i < 2; i++ {
+			r2 := &globalLayoutRecorder{}
+			MigrateLegacyGlobalLayout(home, r2)
+			if got := r2.totalEvents(); got != 0 {
+				t.Fatalf("run %d after the manual command reported %+v, want silence", i+1, r2)
+			}
+		}
+	})
+
+	t.Run("empty canonical target", func(t *testing.T) {
+		home := t.TempDir()
+		real := t.TempDir()
+		writeFile(t, filepath.Join(real, "workspace.txt"), "hello")
+		legacyRoot := filepath.Join(home, "groves")
+		if err := os.Symlink(real, legacyRoot); err != nil {
+			t.Fatal(err)
+		}
+		canonicalRoot := filepath.Join(home, "projects")
+		if err := os.MkdirAll(canonicalRoot, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		r := &globalLayoutRecorder{}
+		MigrateLegacyGlobalLayout(home, r)
+		if len(r.skipped) != 1 {
+			t.Fatalf("skipped = %+v, want exactly one event", r.skipped)
+		}
+
+		if _, stderr, err := runCommand(t, r.skipped[0].manual); err != nil {
+			t.Fatalf("command failed against an empty target: %v\nstderr: %s", err, stderr)
+		}
+		assertFileContent(t, filepath.Join(canonicalRoot, "workspace.txt"), "hello")
+
+		for i := 0; i < 2; i++ {
+			r2 := &globalLayoutRecorder{}
+			MigrateLegacyGlobalLayout(home, r2)
+			if got := r2.totalEvents(); got != 0 {
+				t.Fatalf("run %d after the manual command reported %+v, want silence", i+1, r2)
+			}
+		}
+	})
+
+	t.Run("HOME contains a space", func(t *testing.T) {
+		home := filepath.Join(t.TempDir(), "with space")
+		if err := os.MkdirAll(home, 0755); err != nil {
+			t.Fatal(err)
+		}
+		real := t.TempDir()
+		writeFile(t, filepath.Join(real, "workspace.txt"), "hello")
+		legacyRoot := filepath.Join(home, "groves")
+		if err := os.Symlink(real, legacyRoot); err != nil {
+			t.Fatal(err)
+		}
+		canonicalRoot := filepath.Join(home, "projects")
+
+		r := &globalLayoutRecorder{}
+		MigrateLegacyGlobalLayout(home, r)
+		if len(r.skipped) != 1 {
+			t.Fatalf("skipped = %+v, want exactly one event", r.skipped)
+		}
+
+		// Unquoted, this command would split "with space" into two
+		// operands and fail (or silently touch the wrong paths).
+		if _, stderr, err := runCommand(t, r.skipped[0].manual); err != nil {
+			t.Fatalf("command failed against a HOME containing a space: %v\ncommand: %s\nstderr: %s",
+				err, r.skipped[0].manual, stderr)
+		}
+		assertFileContent(t, filepath.Join(canonicalRoot, "workspace.txt"), "hello")
+		assertFileContent(t, filepath.Join(legacyRoot, "workspace.txt"), "hello")
+
+		r2 := &globalLayoutRecorder{}
+		MigrateLegacyGlobalLayout(home, r2)
+		if got := r2.totalEvents(); got != 0 {
+			t.Fatalf("run after the manual command reported %+v, want silence", r2)
+		}
+	})
+
+	t.Run("HOME contains a single quote", func(t *testing.T) {
+		home := filepath.Join(t.TempDir(), "it's mine")
+		if err := os.MkdirAll(home, 0755); err != nil {
+			t.Fatal(err)
+		}
+		real := t.TempDir()
+		writeFile(t, filepath.Join(real, "workspace.txt"), "hello")
+		legacyRoot := filepath.Join(home, "groves")
+		if err := os.Symlink(real, legacyRoot); err != nil {
+			t.Fatal(err)
+		}
+		canonicalRoot := filepath.Join(home, "projects")
+
+		r := &globalLayoutRecorder{}
+		MigrateLegacyGlobalLayout(home, r)
+		if len(r.skipped) != 1 {
+			t.Fatalf("skipped = %+v, want exactly one event", r.skipped)
+		}
+
+		if _, stderr, err := runCommand(t, r.skipped[0].manual); err != nil {
+			t.Fatalf("command failed against a HOME containing a single quote: %v\ncommand: %s\nstderr: %s",
+				err, r.skipped[0].manual, stderr)
+		}
+		assertFileContent(t, filepath.Join(canonicalRoot, "workspace.txt"), "hello")
+	})
+
+	t.Run("non-empty canonical target refuses", func(t *testing.T) {
+		home := t.TempDir()
+		real := t.TempDir()
+		writeFile(t, filepath.Join(real, "workspace.txt"), "legacy-content")
+		legacyRoot := filepath.Join(home, "groves")
+		if err := os.Symlink(real, legacyRoot); err != nil {
+			t.Fatal(err)
+		}
+		canonicalRoot := filepath.Join(home, "projects")
+		writeFile(t, filepath.Join(canonicalRoot, "other.txt"), "canonical-precious")
+
+		r := &globalLayoutRecorder{}
+		MigrateLegacyGlobalLayout(home, r)
+		if len(r.skipped) != 1 {
+			t.Fatalf("skipped = %+v, want exactly one event", r.skipped)
+		}
+
+		if _, _, err := runCommand(t, r.skipped[0].manual); err == nil {
+			t.Fatalf("command unexpectedly succeeded against a non-empty target")
+		}
+
+		// Nothing was clobbered or moved: the chain aborted at rmdir.
+		assertFileContent(t, filepath.Join(canonicalRoot, "other.txt"), "canonical-precious")
+		if target, err := os.Readlink(legacyRoot); err != nil || target != real {
+			t.Errorf("legacy root symlink should be untouched, target = %q, %v", target, err)
+		}
+	})
+}
+
+// TestMigrateLegacyGlobalLayout_EXDEV covers a legacy root on a different
+// filesystem from the canonical root: the migration never falls back to a
+// copy (workspaces under these directories can be many GB), only a manual
+// mv-and-relink command — a bare mv would lose the symlink this migration
+// exists to leave at the old path.
+func TestMigrateLegacyGlobalLayout_EXDEV(t *testing.T) {
+	home := t.TempDir()
+	acme := filepath.Join(home, "groves", "acme")
+	writeFile(t, filepath.Join(acme, "workspace.txt"), "hello")
+
+	orig := renameDir
+	renameDir = func(oldname, newname string) error {
+		return &os.LinkError{Op: "rename", Old: oldname, New: newname, Err: syscall.EXDEV}
+	}
+	t.Cleanup(func() { renameDir = orig })
+
+	r := &globalLayoutRecorder{}
+	MigrateLegacyGlobalLayout(home, r)
+
+	if len(r.skipped) != 1 || r.skipped[0].old != acme {
+		t.Fatalf("skipped = %+v, want exactly one event for %q", r.skipped, acme)
+	}
+	if r.skipped[0].reason != "on a different filesystem" {
+		t.Errorf("reason = %q, want %q", r.skipped[0].reason, "on a different filesystem")
+	}
+	wantManual := "mv " + shellQuote(acme) + " " + shellQuote(filepath.Join(home, "projects", "acme")) +
+		" && ln -s " + shellQuote(filepath.Join("..", "projects", "acme")) + " " + shellQuote(acme)
+	if r.skipped[0].manual != wantManual {
+		t.Errorf("manual = %q, want %q (never a copy, and keeps the old path resolving)", r.skipped[0].manual, wantManual)
+	}
+
+	// Nothing was copied: the legacy content is untouched, and no canonical
+	// entry was created for it.
+	assertFileContent(t, filepath.Join(acme, "workspace.txt"), "hello")
+	if _, err := os.Stat(filepath.Join(home, "projects", "acme")); !os.IsNotExist(err) {
+		t.Errorf("canonical entry should not exist after EXDEV, stat err = %v", err)
+	}
+}
+
+// TestMigrateLegacyGlobalLayout_NotOwner covers an entry owned by another
+// user (e.g. `sudo scion ...` run over another user's files): the owner
+// check, via the geteuid seam, stops a root-owned rewrite.
+func TestMigrateLegacyGlobalLayout_NotOwner(t *testing.T) {
+	home := t.TempDir()
+	acme := filepath.Join(home, "groves", "acme")
+	writeFile(t, filepath.Join(acme, "workspace.txt"), "hello")
+
+	origEuid := geteuid
+	geteuid = func() int { return origEuid() + 1 }
+	t.Cleanup(func() { geteuid = origEuid })
+
+	r := &globalLayoutRecorder{}
+	MigrateLegacyGlobalLayout(home, r)
+
+	if len(r.skipped) != 1 || r.skipped[0].old != acme {
+		t.Fatalf("skipped = %+v, want exactly one event for %q", r.skipped, acme)
+	}
+	if r.skipped[0].reason != "owned by another user" {
+		t.Errorf("reason = %q, want %q", r.skipped[0].reason, "owned by another user")
+	}
+	wantManual := "mv " + shellQuote(acme) + " " + shellQuote(filepath.Join(home, "projects", "acme")) +
+		" && ln -s " + shellQuote(filepath.Join("..", "projects", "acme")) + " " + shellQuote(acme)
+	if r.skipped[0].manual != wantManual {
+		t.Errorf("manual = %q, want %q", r.skipped[0].manual, wantManual)
+	}
+	assertFileContent(t, filepath.Join(acme, "workspace.txt"), "hello")
+	if _, err := os.Stat(filepath.Join(home, "projects", "acme")); !os.IsNotExist(err) {
+		t.Errorf("canonical entry should not exist, stat err = %v", err)
+	}
+}
+
+// TestMigrateLegacyGlobalLayout_EntryLstatErrorSkipped covers a non-ENOENT
+// Lstat failure on an entry: the legacy root is readable (ReadDir succeeds
+// and lists the entry) but not searchable, so Lstat on the entry itself
+// fails with EACCES rather than ENOENT. This must be reported, not silently
+// dropped — after this PR there is no pkg/config fallback left to fall back
+// to, so a silently-dropped entry disappears from discovery entirely.
+func TestMigrateLegacyGlobalLayout_EntryLstatErrorSkipped(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permission checks")
+	}
+	home := t.TempDir()
+	legacyRoot := filepath.Join(home, "groves")
+	acme := filepath.Join(legacyRoot, "acme")
+	writeFile(t, filepath.Join(acme, "workspace.txt"), "hello")
+	if err := os.Chmod(legacyRoot, 0444); err != nil { // read, no search
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(legacyRoot, 0755) })
+
+	r := &globalLayoutRecorder{}
+	MigrateLegacyGlobalLayout(home, r)
+
+	if len(r.skipped) != 1 || r.skipped[0].old != acme {
+		t.Fatalf("skipped = %+v, want exactly one event for %q", r.skipped, acme)
+	}
+	if r.skipped[0].reason != "permission denied" {
+		t.Errorf("reason = %q, want %q", r.skipped[0].reason, "permission denied")
+	}
+	wantManual := "mv " + shellQuote(acme) + " " + shellQuote(filepath.Join(home, "projects", "acme")) +
+		" && ln -s " + shellQuote(filepath.Join("..", "projects", "acme")) + " " + shellQuote(acme)
+	if r.skipped[0].manual != wantManual {
+		t.Errorf("manual = %q, want %q", r.skipped[0].manual, wantManual)
+	}
+	if len(r.migrated) != 0 {
+		t.Errorf("migrated = %+v, want none", r.migrated)
+	}
+}
+
+// TestRaceLostAfterConcurrentMigration_NonNotExistErrorIsNotARace pins
+// raceLostAfterConcurrentMigration's own contract directly: only ENOENT (a
+// concurrent process finished the migration) or a symlink (same thing, seen
+// via a successful Lstat) counts as a lost race. Any other Lstat error is a
+// real failure and must not be masked, so the function returns false and
+// lets the caller fall through to classify the original rename error.
+func TestRaceLostAfterConcurrentMigration_NonNotExistErrorIsNotARace(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permission checks")
+	}
+	dir := t.TempDir()
+	unsearchable := filepath.Join(dir, "unsearchable")
+	target := filepath.Join(unsearchable, "entry")
+	if err := os.MkdirAll(unsearchable, 0444); err != nil { // read, no search
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(unsearchable, 0755) })
+
+	if got := raceLostAfterConcurrentMigration(target); got {
+		t.Errorf("raceLostAfterConcurrentMigration(%q) = true for a permission error, want false", target)
+	}
+
+	gone := filepath.Join(dir, "does-not-exist")
+	if got := raceLostAfterConcurrentMigration(gone); !got {
+		t.Errorf("raceLostAfterConcurrentMigration(%q) = false for ENOENT, want true", gone)
+	}
+}
+
+// TestMigrateLegacyGlobalLayout_UnrecognizedRenameErrorSkipped covers an
+// unrecognized rename error (e.g. EIO): reported Skipped with the unwrapped
+// errno text and, like every other per-entry Skipped case, a manual command
+// that includes the relink — a bare mv would lose the symlink this
+// migration exists to leave at the old path.
+func TestMigrateLegacyGlobalLayout_UnrecognizedRenameErrorSkipped(t *testing.T) {
+	home := t.TempDir()
+	acme := filepath.Join(home, "groves", "acme")
+	writeFile(t, filepath.Join(acme, "workspace.txt"), "hello")
+
+	orig := renameDir
+	renameDir = func(oldname, newname string) error {
+		return &os.LinkError{Op: "rename", Old: oldname, New: newname, Err: syscall.EIO}
+	}
+	t.Cleanup(func() { renameDir = orig })
+
+	r := &globalLayoutRecorder{}
+	MigrateLegacyGlobalLayout(home, r)
+
+	if len(r.skipped) != 1 || r.skipped[0].old != acme {
+		t.Fatalf("skipped = %+v, want exactly one event for %q", r.skipped, acme)
+	}
+	if r.skipped[0].reason != syscall.EIO.Error() {
+		t.Errorf("reason = %q, want %q", r.skipped[0].reason, syscall.EIO.Error())
+	}
+	wantManual := "mv " + shellQuote(acme) + " " + shellQuote(filepath.Join(home, "projects", "acme")) +
+		" && ln -s " + shellQuote(filepath.Join("..", "projects", "acme")) + " " + shellQuote(acme)
+	if r.skipped[0].manual != wantManual {
+		t.Errorf("manual = %q, want %q", r.skipped[0].manual, wantManual)
+	}
+	assertFileContent(t, filepath.Join(acme, "workspace.txt"), "hello")
+}
+
+// TestMigrateLegacyGlobalLayout_ConcurrentRacers pins the concurrency safety
+// the directory migration relies on (the same safety a multi-replica hub on
+// a shared filesystem needs at boot, exercised here in-process): 8 goroutines
+// racing the same legacy root must migrate each entry exactly once, because
+// only one goroutine's syscall.Rename per entry can win. Every other
+// goroutine either sees the entry already gone, or loses the race between
+// its own Lstat and rename call and sees the entry already turned into this
+// migration's own symlink — either way it must move on silently: a loser
+// that reports Skipped or Conflict here would be a regression (see
+// TestMigrateLegacyGlobalEntry_LosesRaceAfterLstat for the deterministic,
+// single-goroutine version of exactly that failure mode).
+func TestMigrateLegacyGlobalLayout_ConcurrentRacers(t *testing.T) {
+	home := t.TempDir()
+	names := []string{"acme", "bravo", "charlie"}
+	for _, name := range names {
+		writeFile(t, filepath.Join(home, "groves", name, "workspace.txt"), name)
+	}
+
+	r := &globalLayoutRecorder{}
+	const n = 8
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			MigrateLegacyGlobalLayout(home, r)
+		}()
+	}
+	wg.Wait()
+
+	if len(r.migrated) != len(names) {
+		t.Fatalf("migrated events = %d, want %d: %+v", len(r.migrated), len(names), r.migrated)
+	}
+	if len(r.skipped) != 0 || len(r.conflicts) != 0 {
+		t.Fatalf("a losing racer reported skipped=%+v conflicts=%+v, want both empty", r.skipped, r.conflicts)
+	}
+	seen := map[string]bool{}
+	for _, ev := range r.migrated {
+		if seen[ev.old] {
+			t.Errorf("entry %q reported migrated more than once", ev.old)
+		}
+		seen[ev.old] = true
+	}
+	for _, name := range names {
+		old := filepath.Join(home, "groves", name)
+		if !seen[old] {
+			t.Errorf("entry %q was never reported migrated", old)
+		}
+		assertFileContent(t, filepath.Join(home, "projects", name, "workspace.txt"), name)
+		if target, err := os.Readlink(old); err != nil || target != filepath.Join("..", "projects", name) {
+			t.Errorf("symlink at %q = %q, %v, want %q", old, target, err, filepath.Join("..", "projects", name))
+		}
+	}
+}
+
+// TestMigrateLegacyGlobalEntry_LosesRaceAfterLstat is the deterministic,
+// single-goroutine version of the race TestMigrateLegacyGlobalLayout_ConcurrentRacers
+// exercises probabilistically: a caller's Lstat confirms a plain directory,
+// then — before its rename call — a concurrent process finishes the entire
+// migration (rename, then symlink) out from under it. The losing rename must
+// fail silently, not report Skipped: a Skipped report here would print a
+// manual `mv` command that, if followed, moves this migration's own symlink
+// into the project and deletes the legacy path, breaking every old absolute
+// reference to it (worktree gitdirs, container bind mounts, hub records).
+func TestMigrateLegacyGlobalEntry_LosesRaceAfterLstat(t *testing.T) {
+	home := t.TempDir()
+	acme := filepath.Join(home, "groves", "acme")
+	writeFile(t, filepath.Join(acme, "workspace.txt"), "hello")
+	canonicalRoot := filepath.Join(home, "projects")
+	if err := os.MkdirAll(canonicalRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	origRename := renameDir
+	renameDir = func(oldname, newname string) error {
+		// Simulate the concurrent winner: it renames and symlinks first,
+		// so by the time our own rename call runs, oldname is already a
+		// symlink and newname is already the fully-migrated directory.
+		if err := origRename(oldname, newname); err != nil {
+			return err
+		}
+		if err := os.Symlink(filepath.Join("..", "projects", "acme"), oldname); err != nil {
+			return err
+		}
+		// Now perform the actual call under test: a second, losing
+		// rename attempt against the now-symlinked oldname and the
+		// now-populated newname.
+		return origRename(oldname, newname)
+	}
+	t.Cleanup(func() { renameDir = origRename })
+
+	entries, err := os.ReadDir(filepath.Join(home, "groves"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("ReadDir(groves) = %d entries, want 1", len(entries))
+	}
+
+	r := &globalLayoutRecorder{}
+	migrateLegacyGlobalEntry(filepath.Join(home, "groves"), canonicalRoot, "projects", entries[0], r)
+
+	if got := r.totalEvents(); got != 0 {
+		t.Fatalf("events = %+v, want none: a lost race must be silent", r)
+	}
+	assertFileContent(t, filepath.Join(canonicalRoot, "acme", "workspace.txt"), "hello")
+	if target, err := os.Readlink(acme); err != nil || target != filepath.Join("..", "projects", "acme") {
+		t.Errorf("symlink at %q = %q, %v", acme, target, err)
+	}
+}
+
+// TestMigrateLegacyGlobalLayout_ConcurrentRacersMultiProcess is the real
+// multi-process version of TestMigrateLegacyGlobalLayout_ConcurrentRacers:
+// several actual OS processes (not just goroutines in one process) race a
+// shared legacy root with many entries, re-invoking this test binary as a
+// subprocess helper. This is the shape of the real failure mode a
+// multi-replica hub on a shared filesystem hits at boot: a losing process
+// must never report Skipped or Conflict. All subprocesses are started first
+// and then released together past a shared start barrier (a file they poll
+// for), so they actually contend for the same entries instead of finishing
+// one after another — with 8 subprocesses and only a handful of entries
+// each, sequential process-startup jitter alone is enough to mean no two
+// subprocesses are ever actually racing the same entry at the same time,
+// which defeats the point of this test. With the barrier and enough
+// entries, reverting either race fix in migrateLegacyGlobalEntry reliably
+// fails this test; TestMigrateLegacyGlobalEntry_LosesRaceAfterLstat remains
+// the deterministic, single-goroutine version of the same regression.
+func TestMigrateLegacyGlobalLayout_ConcurrentRacersMultiProcess(t *testing.T) {
+	if home := os.Getenv("SCION_TEST_HELPER_MIGRATE_GLOBAL_LAYOUT_HOME"); home != "" {
+		runMigrateGlobalLayoutHelperProcess(
+			home,
+			os.Getenv("SCION_TEST_HELPER_MIGRATE_GLOBAL_LAYOUT_REPORT"),
+			os.Getenv("SCION_TEST_HELPER_MIGRATE_GLOBAL_LAYOUT_BARRIER"),
+		)
+		return
+	}
+	if testing.Short() {
+		t.Skip("spawns real subprocesses; skipped in -short mode")
+	}
+
+	home := t.TempDir()
+	const entriesPerRoot = 40
+	var names []string
+	for i := 0; i < entriesPerRoot; i++ {
+		name := fmt.Sprintf("p%02d", i)
+		names = append(names, name)
+		writeFile(t, filepath.Join(home, "groves", name, "workspace.txt"), name)
+		writeFile(t, filepath.Join(home, "grove-configs", name+"__cfg", ".scion", "settings.yaml"), "workspace_path: /tmp\n")
+	}
+	wantMigrated := 2 * entriesPerRoot // both legacy roots
+
+	const n = 8
+	reportDir := t.TempDir()
+	barrier := filepath.Join(t.TempDir(), "go")
+	reportPaths := make([]string, n)
+	cmds := make([]*exec.Cmd, n)
+	outputs := make([]*strings.Builder, n)
+	waited := make([]bool, n)
+	// Covers t.Fatal or a panic in this test before every subprocess has
+	// been Wait'ed on below — a later cmd.Start failing, or the barrier
+	// write failing — by killing every started-but-not-yet-waited-on child
+	// immediately. This Cleanup does NOT run if go test's own -timeout
+	// fires: the testing package kills the whole process without running
+	// Cleanup funcs in that case, so already-started children are still
+	// only bounded by their own barrier-poll deadline (see
+	// runMigrateGlobalLayoutHelperProcess), which is the sole protection
+	// against that specific failure mode, not a backstop for this one.
+	t.Cleanup(func() {
+		for i, cmd := range cmds {
+			if cmd != nil && !waited[i] && cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+		}
+	})
+	for i := 0; i < n; i++ {
+		reportPath := filepath.Join(reportDir, fmt.Sprintf("report-%d.json", i))
+		reportPaths[i] = reportPath
+		cmd := exec.Command(os.Args[0], "-test.run=^TestMigrateLegacyGlobalLayout_ConcurrentRacersMultiProcess$")
+		cmd.Env = append(os.Environ(),
+			"SCION_TEST_HELPER_MIGRATE_GLOBAL_LAYOUT_HOME="+home,
+			"SCION_TEST_HELPER_MIGRATE_GLOBAL_LAYOUT_REPORT="+reportPath,
+			"SCION_TEST_HELPER_MIGRATE_GLOBAL_LAYOUT_BARRIER="+barrier,
+		)
+		var out strings.Builder
+		outputs[i] = &out
+		cmd.Stdout = &out
+		cmd.Stderr = &out
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("starting subprocess %d: %v", i, err)
+		}
+		cmds[i] = cmd
+	}
+
+	// Give every subprocess time to reach its barrier poll loop before
+	// releasing them together: without this, subprocess start-up jitter
+	// alone (fork/exec, Go runtime init) spaces the migrations out enough
+	// that they never actually contend for the same entry.
+	time.Sleep(300 * time.Millisecond)
+	if err := os.WriteFile(barrier, nil, 0644); err != nil {
+		t.Fatalf("creating start barrier: %v", err)
+	}
+
+	for i, cmd := range cmds {
+		err := cmd.Wait()
+		waited[i] = true
+		if err != nil {
+			t.Fatalf("subprocess %d: %v: %s", i, err, outputs[i].String())
+		}
+	}
+
+	var totalMigrated, totalSkipped, totalConflicts int
+	for _, p := range reportPaths {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatalf("reading subprocess report %s: %v", p, err)
+		}
+		var rep migrateGlobalLayoutHelperReport
+		if err := json.Unmarshal(data, &rep); err != nil {
+			t.Fatalf("parsing subprocess report %s: %v", p, err)
+		}
+		totalMigrated += rep.Migrated
+		totalSkipped += rep.Skipped
+		totalConflicts += rep.Conflicts
+	}
+
+	if totalMigrated != wantMigrated {
+		t.Errorf("total migrated across %d processes = %d, want %d", n, totalMigrated, wantMigrated)
+	}
+	if totalSkipped != 0 || totalConflicts != 0 {
+		t.Errorf("total skipped=%d conflicts=%d across %d processes, want 0 and 0 (a losing process must never warn)",
+			totalSkipped, totalConflicts, n)
+	}
+	for _, name := range names {
+		assertFileContent(t, filepath.Join(home, "projects", name, "workspace.txt"), name)
+		if target, err := os.Readlink(filepath.Join(home, "groves", name)); err != nil || target != filepath.Join("..", "projects", name) {
+			t.Errorf("symlink at groves/%s = %q, %v", name, target, err)
+		}
+	}
+}
+
+// migrateGlobalLayoutHelperReport is the JSON shape
+// runMigrateGlobalLayoutHelperProcess writes for its parent to read.
+type migrateGlobalLayoutHelperReport struct {
+	Migrated  int
+	Skipped   int
+	Conflicts int
+}
+
+// runMigrateGlobalLayoutHelperProcess is the subprocess body for
+// TestMigrateLegacyGlobalLayout_ConcurrentRacersMultiProcess: it waits for
+// the shared start barrier to appear, then runs one real migration attempt
+// against the shared home and writes its own report to reportPath,
+// following the standard os/exec "helper process" test pattern (as used by,
+// e.g., os/exec_test.go) so this can run inside the same compiled test
+// binary instead of needing a separate helper command.
+func runMigrateGlobalLayoutHelperProcess(home, reportPath, barrier string) {
+	if barrier != "" {
+		// A deadline, not just a t.Cleanup on the parent's side: the parent
+		// can fail before ever creating (or trying to create) the barrier
+		// file, in which case nothing else would ever stop this loop.
+		deadline := time.Now().Add(30 * time.Second)
+		for {
+			if _, err := os.Stat(barrier); err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				fmt.Fprintln(os.Stderr, "timed out waiting for the start barrier")
+				os.Exit(2)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	r := &globalLayoutRecorder{}
+	MigrateLegacyGlobalLayout(home, r)
+	data, err := json.Marshal(migrateGlobalLayoutHelperReport{
+		Migrated:  len(r.migrated),
+		Skipped:   len(r.skipped),
+		Conflicts: len(r.conflicts),
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "marshal report:", err)
+		os.Exit(1)
+	}
+	if err := os.WriteFile(reportPath, data, 0644); err != nil {
+		fmt.Fprintln(os.Stderr, "write report:", err)
+		os.Exit(1)
+	}
+}
+
+// TestMigrateLegacyGlobalLayout_IdempotentSecondRunSilent covers the common
+// steady state after a successful migration: nothing under the legacy root
+// is a plain directory any more (every migrated entry is now a symlink), so
+// a second call finds nothing to do and reports nothing.
+func TestMigrateLegacyGlobalLayout_IdempotentSecondRunSilent(t *testing.T) {
+	home := t.TempDir()
+	writeFile(t, filepath.Join(home, "groves", "acme", "workspace.txt"), "hello")
+
+	r1 := &globalLayoutRecorder{}
+	MigrateLegacyGlobalLayout(home, r1)
+	if len(r1.migrated) != 1 {
+		t.Fatalf("first run migrated = %+v, want exactly one event", r1.migrated)
+	}
+
+	r2 := &globalLayoutRecorder{}
+	MigrateLegacyGlobalLayout(home, r2)
+	if got := r2.totalEvents(); got != 0 {
+		t.Errorf("second run events = %d, want 0 (silent)", got)
+	}
+}
+
+// TestMigrateLegacyGlobalLayout_NonDirectoryEntryLeftAlone covers a
+// non-directory entry under a legacy root: syscall.Rename would otherwise
+// replace a same-named canonical *file* silently (the ENOTEMPTY/EEXIST
+// no-clobber guard only fires when the source is a directory too), so a
+// plain file is left alone rather than risking that clobber.
+func TestMigrateLegacyGlobalLayout_NonDirectoryEntryLeftAlone(t *testing.T) {
+	home := t.TempDir()
+	writeFile(t, filepath.Join(home, "groves", "notes"), "legacy")
+	writeFile(t, filepath.Join(home, "projects", "notes"), "canonical-precious")
+
+	r := &globalLayoutRecorder{}
+	MigrateLegacyGlobalLayout(home, r)
+
+	if len(r.migrated) != 0 {
+		t.Fatalf("migrated = %+v, want none: a file entry must never be migrated", r.migrated)
+	}
+	if len(r.skipped) != 1 {
+		t.Fatalf("skipped = %+v, want exactly one event", r.skipped)
+	}
+	if r.skipped[0].reason != "not a directory" {
+		t.Errorf("reason = %q, want %q", r.skipped[0].reason, "not a directory")
+	}
+	// The canonical file must survive untouched: canonical-wins, and no
+	// clobber.
+	assertFileContent(t, filepath.Join(home, "projects", "notes"), "canonical-precious")
+	assertFileContent(t, filepath.Join(home, "groves", "notes"), "legacy")
+}
+
+// TestMigrateLegacyGlobalLayoutOnce covers the shared boot-hook Once: hub and
+// broker both call MigrateLegacyGlobalLayoutOnce in the same process
+// (`scion server start --enable-hub --enable-runtime-broker`), and it must
+// migrate exactly once total, not once per caller. The fixture is a
+// conflict, not a successful migration: a successful Migrated is already
+// naturally idempotent (nothing under the legacy root is a plain directory
+// after the first run, so a second unwrapped call would find nothing to do
+// anyway), so it would pass even with the sync.Once dropped entirely and
+// prove nothing. A conflict is not deduplicated at that lower level — it
+// repeats on every call for as long as the same on-disk state persists — so
+// only the Once wrapper itself can keep the second call from reporting it
+// again.
+func TestMigrateLegacyGlobalLayoutOnce(t *testing.T) {
+	migrateLegacyGlobalLayoutOnce = sync.Once{}
+	t.Cleanup(func() { migrateLegacyGlobalLayoutOnce = sync.Once{} })
+
+	home := t.TempDir()
+	writeFile(t, filepath.Join(home, "groves", "acme", "legacy.txt"), "legacy")
+	writeFile(t, filepath.Join(home, "projects", "acme", "canonical.txt"), "canonical")
+
+	r := &globalLayoutRecorder{}
+	MigrateLegacyGlobalLayoutOnce(home, r) // hub's call
+	MigrateLegacyGlobalLayoutOnce(home, r) // broker's call, same process
+
+	if len(r.conflicts) != 1 {
+		t.Fatalf("conflicts across two MigrateLegacyGlobalLayoutOnce calls = %d, want exactly 1 "+
+			"(the Once must prevent the second call from reporting the same conflict again)", len(r.conflicts))
+	}
+}
+
+// TestMigrateLegacyGlobalLayout_ProjectConfigsRoot covers the second legacy
+// root (grove-configs -> project-configs), exercised end to end so a
+// mistake wiring only one of the two legacyGlobalRoots entries would be
+// caught.
+func TestMigrateLegacyGlobalLayout_ProjectConfigsRoot(t *testing.T) {
+	home := t.TempDir()
+	dirName := "acme__12345678"
+	writeFile(t, filepath.Join(home, "grove-configs", dirName, ".scion", "settings.yaml"), "workspace_path: /tmp/acme\n")
+
+	r := &globalLayoutRecorder{}
+	MigrateLegacyGlobalLayout(home, r)
+
+	wantOld := filepath.Join(home, "grove-configs", dirName)
+	wantNew := filepath.Join(home, "project-configs", dirName)
+	if len(r.migrated) != 1 || r.migrated[0].old != wantOld || r.migrated[0].new != wantNew {
+		t.Fatalf("migrated = %+v, want exactly one event (%q, %q)", r.migrated, wantOld, wantNew)
+	}
+	if target, err := os.Readlink(wantOld); err != nil || target != filepath.Join("..", "project-configs", dirName) {
+		t.Errorf("symlink at %q = %q, %v", wantOld, target, err)
+	}
+}
+
+// TestMigrateLegacyGlobalLayout_SlogSubsystem is the hub/broker-side check
+// that a real migration logs through logging.Subsystem("layout-migration"),
+// exercised end to end (not just through the Reporter methods directly, as
+// TestSlogReporter above does) so a mistake in how MigrateLegacyGlobalLayout
+// invokes the Reporter would be caught here too.
+func TestMigrateLegacyGlobalLayout_SlogSubsystem(t *testing.T) {
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(orig) })
+
+	home := t.TempDir()
+	writeFile(t, filepath.Join(home, "groves", "acme", "workspace.txt"), "hello")
+
+	MigrateLegacyGlobalLayout(home, NewSlogReporter())
+
+	out := buf.String()
+	if !strings.Contains(out, `"subsystem":"layout-migration"`) {
+		t.Fatalf("expected a layout-migration log record, got:\n%s", out)
+	}
+	if !strings.Contains(out, `"msg":"migrated legacy layout"`) {
+		t.Fatalf("expected a migrated-legacy-layout record, got:\n%s", out)
+	}
+}
+
+// TestDiscoverProjects_FindsProjectMigratedFromGroves is the acceptance-level
+// check that discovery finds a project that used to live under groves/ once
+// the global layout has migrated: readWorkspaceMarkerForSlug (used by
+// DiscoverProjects' git-external path) only looks under ProjectsDir, so this
+// also guards against reintroducing the deleted groves/ fallback there.
+func TestDiscoverProjects_FindsProjectMigratedFromGroves(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// A legacy git-project workspace: a directory under groves/ whose only
+	// scion content is a marker *file* (not a directory) pointing at itself,
+	// as split-storage git projects use once externalized.
+	slug := "myslug"
+	marker := &ProjectMarker{
+		ProjectID:   "11111111-2222-3333-4444-555555555555",
+		ProjectName: slug,
+		ProjectSlug: slug,
+	}
+	markerPath := filepath.Join(home, ".scion", "groves", slug, DotScion)
+	if err := os.MkdirAll(filepath.Dir(markerPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteProjectMarker(markerPath, marker); err != nil {
+		t.Fatal(err)
+	}
+
+	MigrateLegacyGlobalLayout(filepath.Join(home, ".scion"), NewSlogReporter())
+
+	got, workspacePath, err := readWorkspaceMarkerForSlug(slug)
+	if err != nil {
+		t.Fatalf("readWorkspaceMarkerForSlug(%q) after migration: %v", slug, err)
+	}
+	wantWorkspace := filepath.Join(home, ".scion", "projects", slug)
+	if workspacePath != wantWorkspace {
+		t.Errorf("workspacePath = %q, want %q", workspacePath, wantWorkspace)
+	}
+	if got.ProjectID != marker.ProjectID {
+		t.Errorf("ProjectID = %q, want %q", got.ProjectID, marker.ProjectID)
+	}
+
+	// The old path still resolves too, through the symlink left behind:
+	// agents and tools holding the old path keep working.
+	oldMarkerPath := filepath.Join(home, ".scion", "groves", slug, DotScion)
+	if _, err := ReadProjectMarker(oldMarkerPath); err != nil {
+		t.Errorf("marker no longer resolves through the legacy path: %v", err)
 	}
 }
