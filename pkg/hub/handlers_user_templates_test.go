@@ -236,20 +236,19 @@ func TestCreateTemplateV2_ScopeIDInjectionBlocked(t *testing.T) {
 	assert.Equal(t, alice.ID, resp.Template.OwnerID, "OwnerID should be forced to the caller's ID")
 }
 
-// TestTemplateScopeResource_UserScopeSetsOwnerID is the R2 (Optional #1) unit
-// test the review asked for: it pins the user-scope OwnerID assignment
-// directly, independent of the HTTP authorization path that
-// TestCreateTemplateV2_ScopeIDInjectionBlocked and
+// TestTemplateScopeResources_OwnerIDOnlyFromUserIdentity pins the
+// user-scope OwnerID assignment directly, independent of the HTTP
+// authorization path that TestCreateTemplateV2_ScopeIDInjectionBlocked and
 // TestCreateTemplateV2_UserScope_EmptyScopeIDDefaultsToCaller exercise
 // end-to-end. If a future edit stops setting Resource.OwnerID for user
 // scope, this fails immediately instead of surfacing only as a 403 several
 // layers away.
 //
-// It also pins the R2 (Consider #2) structural split: templateScopeResource
-// itself must never set OwnerID, even if a future caller mistakenly invokes
-// it with store.TemplateScopeUser — only templateUserScopeResource, which
-// takes a UserIdentity rather than a bare string, may grant ownership.
-func TestTemplateScopeResource_UserScopeSetsOwnerID(t *testing.T) {
+// It also pins the structural split: templateScopeResource itself must
+// never set OwnerID, even if a future caller mistakenly invokes it with
+// store.TemplateScopeUser — only templateUserScopeResource, which takes a
+// UserIdentity rather than a bare string, may grant ownership.
+func TestTemplateScopeResources_OwnerIDOnlyFromUserIdentity(t *testing.T) {
 	const uid = "resource-owner-id"
 	userIdent := NewAuthenticatedUser(uid, "owner@test.com", "Owner", store.UserRoleMember, "cli")
 
@@ -268,11 +267,10 @@ func TestTemplateScopeResource_UserScopeSetsOwnerID(t *testing.T) {
 		"templateScopeResource must fail closed (no OwnerID) even if mistakenly called with user scope")
 }
 
-// TestCreateTemplateV2_ProjectScope_NonMemberDenied is the R2 (Optional #1)
-// HTTP create-gate coverage the review asked for: TestTemplateScope_
-// ProjectScoped_* (template_scope_authz_test.go) cover reads of an existing
-// project-scoped template, but nothing exercised the create gate itself for
-// a caller who is not a member of the target project.
+// TestCreateTemplateV2_ProjectScope_NonMemberDenied covers the create gate
+// itself for a caller who is not a member of the target project;
+// TestTemplateScope_ProjectScoped_* (template_scope_authz_test.go) only
+// covers reads of an existing project-scoped template.
 func TestCreateTemplateV2_ProjectScope_NonMemberDenied(t *testing.T) {
 	srv, _, _, carol, project := setupTemplateScopeTest(t)
 
@@ -288,11 +286,10 @@ func TestCreateTemplateV2_ProjectScope_NonMemberDenied(t *testing.T) {
 		"a hub member who is not a project member must not create a template in that project; got: %s", rec.Body.String())
 }
 
-// TestCreateTemplateV2_UserScope_EmptyScopeIDDefaultsToCaller is the R2
-// (Optional #1) HTTP create-gate coverage for the other half of the
-// scope=user contract: an empty scopeId (the normal, non-adversarial
-// request shape) must still succeed and resolve to the caller's own scope
-// and ownership, not merely fail to be hijacked the way
+// TestCreateTemplateV2_UserScope_EmptyScopeIDDefaultsToCaller covers the
+// other half of the scope=user contract: an empty scopeId (the normal,
+// non-adversarial request shape) must still succeed and resolve to the
+// caller's own scope and ownership, not merely fail to be hijacked the way
 // TestCreateTemplateV2_ScopeIDInjectionBlocked proves.
 func TestCreateTemplateV2_UserScope_EmptyScopeIDDefaultsToCaller(t *testing.T) {
 	srv, _, alice, _ := setupUserTemplateTest(t)
