@@ -254,6 +254,35 @@ func TestStopAgent_AmbiguousMatchAbortsWithoutStop(t *testing.T) {
 	}
 }
 
+// TestStopAgent_NoContainerIDIsNoOp: a matching agent record with no
+// resolvable container id (no "scion.container.id" label, no ContainerID,
+// no ID) has nothing to stop. LookupContainerID's "no container ID" result
+// is classified as ErrAgentNotFound, so stopAgent must treat it like a
+// genuine not-found: return 202 as an idempotent no-op rather than aborting
+// with a 5xx, and must NOT call Stop. Mirrors
+// TestRestartAgent_NoContainerIDProceedsWithStart.
+func TestStopAgent_NoContainerIDIsNoOp(t *testing.T) {
+	mgr := &filteringMockManager{}
+	mgr.agents = []api.AgentInfo{
+		{
+			Name:   "coordinator",
+			Labels: map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+		},
+	}
+	srv := newTestServerWithManager(t, mgr)
+
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/stop?projectId=grove-A", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, r)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+	}
+	if mgr.stopCalls != 0 {
+		t.Errorf("Stop was called %d time(s); a no-container agent has nothing to stop", mgr.stopCalls)
+	}
+}
+
 // TestExecCommand_NotFoundInProject verifies that exec returns 404 when the
 // slug does not resolve to any agent in the requested project (and there is no
 // legacy unlabeled container to fall back to).
@@ -383,12 +412,11 @@ func TestRestartAgent_AmbiguousMatchAbortsWithoutStart(t *testing.T) {
 	}
 }
 
-// TestRestartAgent_NoContainerIDProceedsWithStart is a regression test for
-// the upstream main CI failure this fix addresses
-// (TestRestartAgent_ContainerScanSuppliesSettingsFallback): a matching agent
-// record with no resolvable container id (no "scion.container.id" label, no
-// ContainerID, no ID — e.g. its container was removed) has nothing to stop.
-// LookupContainerID's "no container ID" result is classified as
+// TestRestartAgent_NoContainerIDProceedsWithStart: a matching agent record
+// with no resolvable container id (no "scion.container.id" label, no
+// ContainerID, no ID — e.g. a malformed or partial runtime entry that
+// carries no container id — nothing addressable to stop) has nothing to
+// stop. LookupContainerID's "no container ID" result is classified as
 // ErrAgentNotFound, so restartAgent must treat it like a genuine not-found:
 // skip the stop and proceed to start, rather than aborting with a 5xx.
 func TestRestartAgent_NoContainerIDProceedsWithStart(t *testing.T) {
