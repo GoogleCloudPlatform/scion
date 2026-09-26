@@ -812,9 +812,15 @@ type createAgentDispatcher struct {
 	startCalled   bool
 	execOutput    string
 	execExitCode  int
+	// capturedAgent records the agent passed to DispatchAgentCreate, so tests
+	// that need the create-time agent.ID (e.g. to check quota reservations,
+	// ptone/scion#1986) can read it back after the HTTP response, which for
+	// a failure path never echoes the ID.
+	capturedAgent *store.Agent
 }
 
 func (d *createAgentDispatcher) DispatchAgentCreate(_ context.Context, agent *store.Agent) error {
+	d.capturedAgent = agent
 	if d.createPhase != "" {
 		agent.Phase = d.createPhase
 	}
@@ -875,7 +881,8 @@ type failingCreateDispatcher struct {
 	deleteBranch      bool
 }
 
-func (d *failingCreateDispatcher) DispatchAgentCreateWithGather(_ context.Context, _ *store.Agent) (*RemoteEnvRequirementsResponse, error) {
+func (d *failingCreateDispatcher) DispatchAgentCreateWithGather(_ context.Context, agent *store.Agent) (*RemoteEnvRequirementsResponse, error) {
+	d.capturedAgent = agent
 	return nil, d.createErr
 }
 func (d *failingCreateDispatcher) DispatchAgentDelete(_ context.Context, _ *store.Agent, deleteFiles, removeBranch, _ bool, _ time.Time) error {
@@ -4118,6 +4125,14 @@ func TestCreateAgent_DispatchFailure_CleansUpBroker(t *testing.T) {
 	// Verify agent record was deleted from hub store
 	_, err := s.GetAgent(ctx, "auth-fail-agent")
 	assert.ErrorIs(t, err, store.ErrNotFound, "agent should be deleted from hub store after dispatch failure")
+
+	// ptone/scion#1986: a dispatch failure must not strand either quota
+	// reservation the create path took before dispatching.
+	require.NotNil(t, disp.capturedAgent, "dispatcher must have observed the create-time agent")
+	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, disp.capturedAgent.ID),
+		"a failed create must release the per-broker reservation")
+	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerProject, disp.capturedAgent.ID),
+		"a failed create must release the per-project reservation")
 }
 
 // --- GCP Identity Assignment Tests ---
