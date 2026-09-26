@@ -1,0 +1,125 @@
+{
+  "description": "PTY WebSocket close-code dispositions. Shared parity fixture for wsprotocol.ClassifyPTYClose (Go) and classifyPtyClose (web/src/client/terminal-close-codes.ts). Change all three together.",
+  "codes": [
+    {
+      "code": 1000,
+      "name": "normal_closure",
+      "disposition": "detached"
+    },
+    {
+      "code": 1001,
+      "name": "going_away",
+      "disposition": "retry"
+    },
+    {
+      "code": 1002,
+      "name": "protocol_error",
+      "disposition": "terminal"
+    },
+    {
+      "code": 1003,
+      "name": "unsupported_data",
+      "disposition": "terminal"
+    },
+    {
+      "code": 1005,
+      "name": "no_status_received",
+      "disposition": "retry"
+    },
+    {
+      "code": 1006,
+      "name": "abnormal_closure",
+      "disposition": "retry"
+    },
+    {
+      "code": 1007,
+      "name": "invalid_payload",
+      "disposition": "terminal"
+    },
+    {
+      "code": 1008,
+      "name": "policy_violation",
+      "disposition": "terminal"
+    },
+    {
+      "code": 1009,
+      "name": "message_too_big",
+      "disposition": "terminal"
+    },
+    {
+      "code": 1010,
+      "name": "mandatory_extension",
+      "disposition": "terminal"
+    },
+    {
+      "code": 1011,
+      "name": "internal_error",
+      "disposition": "retry"
+    },
+    {
+      "code": 1012,
+      "name": "service_restart",
+      "disposition": "retry"
+    },
+    {
+      "code": 1013,
+      "name": "try_again_later",
+      "disposition": "retry"
+    },
+    {
+      "code": 1014,
+      "name": "bad_gateway",
+      "disposition": "retry"
+    },
+    {
+      "code": 1015,
+      "name": "tls_handshake",
+      "disposition": "retry"
+    },
+    {
+      "code": 3000,
+      "name": "registered_unassigned",
+      "disposition": "retry"
+    },
+    {
+      "code": 4000,
+      "name": "unknown_application",
+      "disposition": "terminal"
+    },
+    {
+      "code": 4401,
+      "name": "pty_auth_required",
+      "disposition": "terminal"
+    },
+    {
+      "code": 4403,
+      "name": "pty_forbidden",
+      "disposition": "terminal"
+    },
+    {
+      "code": 4404,
+      "name": "pty_agent_not_found",
+      "disposition": "terminal"
+    },
+    {
+      "code": 4410,
+      "name": "pty_session_gone",
+      "disposition": "terminal"
+    },
+    {
+      "code": 4503,
+      "name": "pty_upstream_unavailable",
+      "disposition": "retry"
+    },
+    {
+      "code": 4504,
+      "name": "pty_upstream_timeout",
+      "disposition": "retry"
+    },
+    {
+      "code": 4999,
+      "name": "unknown_application_max",
+      "disposition": "terminal"
+    }
+  ]
+}
