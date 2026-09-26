@@ -14,6 +14,9 @@ _Avoid_: worker, bot, instance, process
 An agent spawned by another agent; "sub" only from the orchestrating user's view, since it is a full agent in capability.
 _Avoid_: helper, thread, worker thread
 
+**Reincarnation**:
+Migrating an existing agent to a new *generation*: the Hub re-resolves its template, image, and harness-config, then starts it again with the same agent ID and slug and a handoff as its first task. Done with `scion reincarnate`. Distinct from *restart* (same config) and *resume* (same harness session).
+
 **Project**:
 A namespace and collection of agents and configuration, represented by a `.scion` directory and usually one-to-one with a git repository.
 _Avoid_: grove, group, repo, workspace

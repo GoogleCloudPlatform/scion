@@ -223,7 +223,7 @@ Manages bidirectional communication and persistent messages sent by agents to hu
 
 ### `scion conversation` (alias: `conv`)
 
-Manages conversations — the surface-agnostic containers for message threads. Requires Hub mode. Running `scion conversation` without a subcommand defaults to `list`.
+Manages conversations — the surface-agnostic containers for message threads. Requires Hub mode. Running `scion conversation` without a subcommand defaults to `list`. It also works inside Hub-connected agent containers, as does `scion notifications`; this requires a harness image built from this release or later.
 
 Conversations are referenced using one of three forms:
 
