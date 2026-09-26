@@ -277,11 +277,30 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 	// SECURITY-GATE: require template.create permission before any mutation.
 	// Scope-aware: project-scoped requests authorize against the project parent
 	// so that project-level role bindings (owner/admin/member) grant access.
+	//
+	// User-scoped requests never authorize against a caller-supplied scopeID
+	// at all: templateUserScopeResource takes the authenticated UserIdentity
+	// directly rather than a bare string, so there is no request field this
+	// gate could be tricked into authorizing against (e.g. another user's
+	// ID) — an attacker-supplied scopeID is simply never consulted. scopeID
+	// is still forced to the caller's own ID here, ahead of the redundant
+	// forcing on the template record below, so the persisted record agrees
+	// with what was authorized.
 	createScope := req.Scope
 	if createScope == "" {
 		createScope = store.TemplateScopeGlobal
 	}
-	if !s.authorize(w, r, templateScopeResource(createScope, scopeID), ActionCreate) {
+	if createScope == store.TemplateScopeUser {
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			Unauthorized(w)
+			return
+		}
+		scopeID = userIdent.ID()
+		if !s.authorize(w, r, templateUserScopeResource(userIdent), ActionCreate) {
+			return
+		}
+	} else if !s.authorize(w, r, templateScopeResource(createScope, scopeID), ActionCreate) {
 		return
 	}
 
@@ -1062,17 +1081,23 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 }
 
 // templateScopeResource builds an ad hoc "template" Resource for
-// authorization checks that have a scope to evaluate but no concrete
-// store.Template record (e.g. authorizing a create or clone destination
-// before the new record exists). scope should be one of the
-// store.TemplateScope* constants; scopeID is the owning project ID and is
-// ignored outside project scope.
+// authorization checks that have a project or global scope to evaluate but
+// no concrete store.Template record (e.g. authorizing a create or clone
+// destination before the new record exists). scope should be
+// store.TemplateScopeProject or store.TemplateScopeGlobal; scopeID is the
+// owning project ID for project scope, and is ignored for global scope.
+//
+// User scope is deliberately not handled here — use
+// templateUserScopeResource, which takes the authenticated UserIdentity
+// directly instead of a bare scopeID string. See that function's doc for
+// why the distinction matters (ptone/scion#2015).
 //
 // ptone/scion#1916: every ad hoc "template" Resource literal must set
 // ScopeKind through this constructor (or templateResource, for a real
-// record), never by hand — filterHubWideTemplateGrants only narrows the
-// curated hub-member/hub-viewer grant when ScopeKind is populated, so a
-// hand-built literal that forgets it would fall through unfiltered. See
+// record, or templateUserScopeResource, for user scope), never by hand —
+// filterHubWideTemplateGrants only narrows the curated hub-member/hub-viewer
+// grant when ScopeKind is populated, so a hand-built literal that forgets it
+// would fall through unfiltered. See
 // TestTemplateResourceLiterals_AllUseCanonicalConstructor.
 func templateScopeResource(scope, scopeID string) Resource {
 	r := Resource{Type: "template", ScopeKind: scope}
@@ -1081,6 +1106,24 @@ func templateScopeResource(scope, scopeID string) Resource {
 		r.ParentID = scopeID
 	}
 	return r
+}
+
+// templateUserScopeResource builds the ad hoc "template" Resource for the
+// user-scope authorization check in template create (createTemplateV2), the
+// user-scope counterpart to templateScopeResource.
+//
+// It takes the authenticated UserIdentity directly, never a bare scopeID
+// string (ptone/scion#2015): Resource.OwnerID drives the kernel's
+// "relationship grant: resource owner" check (authz.go), so whatever lands
+// there gets ownership access to that scope. Taking UserIdentity makes
+// sourcing OwnerID from an unvalidated request field a type error rather
+// than a doc-comment violation.
+//
+// filterHubWideTemplateGrants (ptone/scion#1916) narrows the hub-member/
+// hub-viewer system-scope grant to global-scope records only, so without
+// OwnerID set here, a user-scope create would have no candidate binding.
+func templateUserScopeResource(userIdent UserIdentity) Resource {
+	return Resource{Type: "template", ScopeKind: store.TemplateScopeUser, OwnerID: userIdent.ID()}
 }
 
 // authorizeTemplateReadRoute is the shared read gate for every template read
