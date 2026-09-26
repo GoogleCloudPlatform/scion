@@ -834,3 +834,66 @@ func TestBrokerQuota_WakeReadinessTimeoutThenConfirmedStopReleases(t *testing.T)
 	assert.EqualValues(t, 0, brokerReservationCount(t, s, target.RuntimeBrokerID),
 		"a confirmed container stop must free the slot")
 }
+
+// wakeWithReadinessBudget wakes target with a bounded caller context; the test
+// dispatcher never reports readiness, so wake fails on the readiness path.
+func wakeWithReadinessBudget(t *testing.T, srv *Server, target *store.Agent, d time.Duration) *AgentDMError {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), d)
+	defer cancel()
+	_, dmErr := srv.wakeAgentForDM(ctx, target)
+	return dmErr
+}
+
+// wakeQuotaFixture is a minimal broker+project+target fixture for wake/quota
+// interaction tests, built on the shared quota-test helpers rather than
+// createWakeDMFixtures so the caller controls the broker ceiling directly.
+type wakeQuotaFixture struct {
+	srv     *Server
+	s       store.Store
+	broker  *store.RuntimeBroker
+	project *store.Project
+	target  *store.Agent
+}
+
+func newWakeQuotaFixture(t *testing.T, name string, limit int64) *wakeQuotaFixture {
+	srv, s := testServer(t)
+	srv.SetDispatcher(&quotaLifecycleDispatcher{})
+	setBrokerAgentCeiling(t, s, limit)
+	grantDevUserRuntimeBrokerAccess(t, s)
+	broker, project := newQuotaTestBrokerAndProject(t, s, name)
+	target := newQuotaTestAgent(t, s, broker, project, name+"-target", state.PhaseSuspended)
+	return &wakeQuotaFixture{srv, s, broker, project, target}
+}
+
+func (u *wakeQuotaFixture) count(t *testing.T) int64 {
+	return int64(brokerReservationCount(t, u.s, u.broker.ID))
+}
+
+// TestBrokerQuota_WakeReadinessTimeoutLiveCtxNoTransientRelease is a further
+// regression guard for #1984: a wake that fails readiness with a LIVE caller
+// context (the unexpected-phase fast-fail path in waitForAgentReady, which
+// takes the same failure branch as the internal 30s readiness timeout) must
+// not release the broker quota slot even transiently while the container is
+// still alive — a start at cap issued BEFORE any reconcile tick must be
+// rejected. The two tests above cannot catch a caller-ctx-keyed release
+// because they always reach the failure through an already-expired caller
+// context, where such a release would be a silent no-op.
+func TestBrokerQuota_WakeReadinessTimeoutLiveCtxNoTransientRelease(t *testing.T) {
+	u := newWakeQuotaFixture(t, "wq-livectx", 1)
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		_ = u.s.UpdateAgentStatus(context.Background(), u.target.ID, store.AgentStatusUpdate{Phase: "resumed"})
+	}()
+	dmErr := wakeWithReadinessBudget(t, u.srv, u.target, 10*time.Second)
+	require.NotNil(t, dmErr)
+	require.Equal(t, http.StatusBadGateway, dmErr.HTTPStatus, dmErr.Message)
+	assert.EqualValues(t, 1, u.count(t), "slot held immediately after live-ctx wake failure")
+
+	disp := &quotaLifecycleDispatcher{}
+	u.srv.SetDispatcher(disp)
+	other := newQuotaTestAgent(t, u.s, u.broker, u.project, "wq-livectx-other", state.PhaseStopped)
+	rec := doRequest(t, u.srv, http.MethodPost, "/api/v1/agents/"+other.ID+"/start", nil)
+	assertBrokerQuotaExceeded(t, rec)
+	assert.EqualValues(t, 0, disp.startCount.Load(), "no second container dispatched")
+}
