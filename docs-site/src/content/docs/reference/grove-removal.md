@@ -31,6 +31,7 @@ agents and make sure hub and broker are on the same release.
 
 | Removed | Replacement / action |
 | --- | --- |
+| `.scion/grove-id` file | migrated automatically to `.scion/project-id`. If the file is committed, commit the rename. |
 <!-- Rows are appended here as later changes merge. -->
 
 ## Wire / env / labels

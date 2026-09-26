@@ -222,10 +222,16 @@ func ExtractSlugFromExternalDir(dirName string) string {
 	return ""
 }
 
-// ReadProjectID reads the project-id file from a git project's .scion directory.
-// Checks project-id first, then falls back to grove-id for legacy projects.
+// ReadProjectID reads the project-id file from a git project's .scion
+// directory. A legacy .scion/grove-id file is migrated to project-id as a
+// side effect on every call (see MigrateLegacyProject; each migration event
+// is reported at most once per process, but the filesystem is always
+// re-checked, so a project-id removed later or a grove-id that appears
+// later are both handled correctly): when the rewrite cannot happen (e.g. a
+// read-only filesystem), the legacy value is used for this call only.
 func ReadProjectID(projectDir string) (string, error) {
-	// 1. Try project-id
+	overrides := MigrateLegacyProject(projectDir, currentProjectMigrationReporter())
+
 	data, err := os.ReadFile(filepath.Join(projectDir, projectcompat.ProjectIDFile))
 	if err == nil {
 		return strings.TrimSpace(string(data)), nil
@@ -233,13 +239,10 @@ func ReadProjectID(projectDir string) (string, error) {
 	if !os.IsNotExist(err) {
 		return "", err
 	}
-
-	// 2. Fallback to legacy grove-id
-	data, err = os.ReadFile(filepath.Join(projectDir, projectcompat.GroveIDFile))
-	if err != nil {
-		return "", err
+	if overrides.ProjectID != "" {
+		return overrides.ProjectID, nil
 	}
-	return strings.TrimSpace(string(data)), nil
+	return "", err
 }
 
 // WriteProjectID writes a project-id file to a git project's .scion directory.
