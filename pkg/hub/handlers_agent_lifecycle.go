@@ -368,23 +368,22 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// exited and some runtimes (podman) return non-standard
 			// errors for stopping non-running containers. The subsequent
 			// Start will handle cleanup of the exited container.
-			if stopErr := dispatcher.DispatchAgentStop(ctx, agent); stopErr != nil {
-				// The container may still be running, so keep its
-				// reservation: the re-reserve below is then a no-op and a
-				// failed start leg cannot release it (ptone/scion#1978).
+			stopErr := dispatcher.DispatchAgentStop(ctx, agent)
+			if stopErr != nil {
 				slog.Warn("Restart: stop dispatch failed, proceeding with start",
 					"agent_id", id, "error", stopErr)
-			} else {
-				// A successful stop leg releases the reservation the same
-				// way an explicit stop would (ptone/scion#1963).
-				s.releaseBrokerQuota(ctx, agent)
 			}
-			// Restart is stop + start: a fresh harness session, not a resume.
-			// Re-reserve before the start leg, same as the start action.
+			// The broker reservation is held across the restart
+			// (ptone/scion#1978). Releasing it after the stop leg and
+			// re-reserving before the start leg would let another start
+			// take the slot in between. This reserve is a no-op for an
+			// agent that already holds one, and applies the cap to an
+			// agent that does not (for example, a stopped agent).
 			ok, reserved := s.checkAndReserveBrokerQuotaHTTP(ctx, w, agent)
 			if !ok {
 				return
 			}
+			// Restart is stop + start: a fresh harness session, not a resume.
 			dispatchErr = dispatcher.DispatchAgentStart(ctx, agent, "", false)
 			// DispatchAgentStart applies the broker response in-place;
 			// use the broker-reported phase if it was set.
@@ -392,7 +391,15 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				newPhase = agent.Phase
 			}
 			if dispatchErr != nil {
-				s.rollbackBrokerQuota(ctx, agent, reserved)
+				if stopErr == nil {
+					// The stop leg succeeded, so the container is down:
+					// release the slot as an explicit stop would.
+					s.releaseBrokerQuota(ctx, agent)
+				} else {
+					// The container may still be running: keep a
+					// reservation this call did not create.
+					s.rollbackBrokerQuota(ctx, agent, reserved)
+				}
 			}
 		}
 	}

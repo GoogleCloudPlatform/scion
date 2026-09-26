@@ -288,3 +288,40 @@ func TestProjectQuota_KeptAcrossBrokerReleases_ReleasedOnDelete(t *testing.T) {
 	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, id))
 	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerProject, id), "delete releases the project reservation")
 }
+
+// brokerReservationIDs returns the IDs of broker's active
+// max_agents_per_broker reservations.
+func brokerReservationIDs(t *testing.T, s store.Store, brokerID string) []string {
+	t.Helper()
+	ctx := context.Background()
+	def, err := s.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
+	require.NoError(t, err)
+	rows, err := s.ListActiveReservations(ctx, def.ID, store.QuotaScopeBroker, brokerID)
+	require.NoError(t, err)
+	ids := make([]string, 0, len(rows))
+	for _, r := range rows {
+		ids = append(ids, r.ID)
+	}
+	return ids
+}
+
+// ptone/scion#1978: a restart holds the agent's broker reservation across
+// the stop and start legs instead of releasing it and reserving again, so
+// there is no point between the legs where another start could take the
+// slot. The reservation row itself must survive the restart.
+func TestBrokerQuota_RestartHoldsReservationAcrossLegs(t *testing.T) {
+	srv, s := testServer(t)
+	srv.SetDispatcher(&quotaLifecycleDispatcher{})
+	setBrokerAgentCeiling(t, s, 1)
+
+	broker, project := newQuotaTestBrokerAndProject(t, s, "restart-hold")
+	running := newQuotaTestAgent(t, s, broker, project, "restart-hold", state.PhaseRunning)
+	reserveBrokerSlot(t, s, broker, running.ID)
+	before := brokerReservationIDs(t, s, broker.ID)
+	require.Len(t, before, 1)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+running.ID+"/restart", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, before, brokerReservationIDs(t, s, broker.ID),
+		"restart must keep the existing reservation, not release and re-create it")
+}
