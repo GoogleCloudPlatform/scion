@@ -47,20 +47,26 @@ EOF
 }
 
 # _router_json ROUTER_NAME NAT_NAME NETWORK_SUFFIX REGION SRT
-#   [SUBNETWORKS_JSON] — one routers-list.json entry with a single NAT.
-# SUBNETWORKS_JSON, if given, is embedded verbatim as the NAT's
-# "subnetworks" array.
+#   [SUBNETWORKS_JSON [NAT_TYPE]] — one routers-list.json entry with a
+# single NAT. SUBNETWORKS_JSON, if given, is embedded verbatim as the
+# NAT's "subnetworks" array. NAT_TYPE, if given, is embedded as the NAT's
+# "type" field (e.g. "PRIVATE"); omitted by default, matching a real
+# PUBLIC NAT's response shape (deploy.sh's own jq defaults a missing type
+# to PUBLIC).
 _router_json() {
-  local router_name="$1" nat_name="$2" network_suffix="$3" region="$4" srt="$5" subnetworks="${6:-}"
-  local subnetworks_field=""
+  local router_name="$1" nat_name="$2" network_suffix="$3" region="$4" srt="$5" subnetworks="${6:-}" nat_type="${7:-}"
+  local subnetworks_field="" type_field=""
   if [[ -n "$subnetworks" ]]; then
     subnetworks_field=",\"subnetworks\":${subnetworks}"
+  fi
+  if [[ -n "$nat_type" ]]; then
+    type_field=",\"type\":\"${nat_type}\""
   fi
   cat <<EOF
 {"name":"${router_name}",
  "region":"https://www.googleapis.com/compute/v1/projects/demo-project/regions/${region}",
  "network":"https://www.googleapis.com/compute/v1/projects/demo-project/global/networks/${network_suffix}",
- "nats":[{"name":"${nat_name}","sourceSubnetworkIpRangesToNat":"${srt}"${subnetworks_field}}]}
+ "nats":[{"name":"${nat_name}","sourceSubnetworkIpRangesToNat":"${srt}"${subnetworks_field}${type_field}}]}
 EOF
 }
 
@@ -220,6 +226,73 @@ test_nat_reuse_foreign_all_primary_ip_ranges_nat_is_reused() {
     "an ALL_SUBNETWORKS_ALL_PRIMARY_IP_RANGES NAT must be reused, not duplicated"
   assert_contains "$DEPLOY_LOG" "Reusing Cloud NAT:    other-team-nat" \
     "deploy.sh must report reusing the ALL_PRIMARY NAT"
+}
+
+# A LIST_OF_SUBNETWORKS entry (not just an ALL_SUBNETWORKS_* NAT) that
+# explicitly forwards "default"'s primary range also covers us and must be
+# reused -- this is the positive side of $listCovers; the only other LIST
+# test (secondary_only, below) exercises just the negative side, so
+# without this one, $listCovers could be hardcoded to `false` and every
+# test would still pass (round-2 review, RR1).
+test_nat_reuse_foreign_list_entry_covering_default_primary_is_reused() {
+  fresh_gcloud_state
+  local covering_default='[{"name":"https://www.googleapis.com/compute/v1/projects/demo-project/regions/us-central1/subnetworks/default","sourceIpRangesToNat":["PRIMARY_IP_RANGE"]}]'
+  seed_routers_list "[$(_router_json "other-team-router" "other-team-nat" "default" "$REGION" "LIST_OF_SUBNETWORKS" "$covering_default")]"
+  run_deploy_create "$(nat_reuse_config_json "$HUB")"
+  local log
+  log="$(gcloud_log)"
+
+  assert_eq "0" "$(echo "$log" | grep -c '^compute routers create' || true)" \
+    "a LIST_OF_SUBNETWORKS entry that forwards 'default's primary range must be reused, not duplicated"
+  assert_eq "0" "$(echo "$log" | grep -c '^compute routers nats create' || true)" \
+    "a LIST_OF_SUBNETWORKS entry that forwards 'default's primary range must be reused, not duplicated"
+  assert_contains "$DEPLOY_LOG" "Reusing Cloud NAT:    other-team-nat" \
+    "deploy.sh must report reusing the LIST-mode NAT"
+}
+
+# A covering NAT that isn't the first row jq emits must still be found --
+# without scanning every row, only the first router/NAT in the list would
+# ever be considered (round-2 review, RR1).
+test_nat_reuse_covering_nat_on_second_router_is_reused() {
+  fresh_gcloud_state
+  local other_subnetworks='[{"name":"https://www.googleapis.com/compute/v1/projects/demo-project/regions/us-central1/subnetworks/other-subnet","sourceIpRangesToNat":["ALL_IP_RANGES"]}]'
+  local first second
+  first="$(_router_json "first-router" "first-nat" "default" "$REGION" "LIST_OF_SUBNETWORKS" "$other_subnetworks")"
+  second="$(_router_json "second-router" "second-nat" "default" "$REGION" "ALL_SUBNETWORKS_ALL_IP_RANGES")"
+  seed_routers_list "[${first},${second}]"
+  run_deploy_create "$(nat_reuse_config_json "$HUB")"
+  local log
+  log="$(gcloud_log)"
+
+  assert_eq "0" "$(echo "$log" | grep -c '^compute routers create' || true)" \
+    "the covering NAT on the second router must be reused, not shadowed by the first (non-covering) one"
+  assert_eq "0" "$(echo "$log" | grep -c '^compute routers nats create' || true)" \
+    "the covering NAT on the second router must be reused, not shadowed by the first (non-covering) one"
+  assert_contains "$DEPLOY_LOG" "Reusing Cloud Router: second-router" \
+    "must pick the router whose NAT actually covers us, not just the first one listed"
+  assert_contains "$DEPLOY_LOG" "Reusing Cloud NAT:    second-nat" \
+    "must pick the NAT that actually covers us, not just the first one listed"
+}
+
+# N1: a Private NAT (NCC/hybrid connectivity, not internet egress) must
+# never be treated as covering our subnet, and must not even count as "a
+# gateway exists" for the scoped-create decision -- a Private and a
+# PUBLIC NAT can coexist on the same subnet, so its presence must not
+# change what deploy.sh creates at all.
+test_nat_reuse_private_nat_is_ignored_entirely() {
+  fresh_gcloud_state
+  seed_routers_list "[$(_router_json "other-team-router" "other-team-nat" "default" "$REGION" "ALL_SUBNETWORKS_ALL_IP_RANGES" "" "PRIVATE")]"
+  run_deploy_create "$(nat_reuse_config_json "$HUB")"
+  local log nat_line
+  log="$(gcloud_log)"
+  nat_line="$(echo "$log" | grep "^compute routers nats create ${NAT_NAME} " | head -1)"
+
+  assert_not_contains "$DEPLOY_LOG" "Reusing Cloud NAT" \
+    "a Private NAT must never be reused for internet egress"
+  assert_eq "1" "$(echo "$log" | grep -c "^compute routers create ${ROUTER_NAME} " || true)" \
+    "our own router must still be created; a Private NAT elsewhere doesn't block us"
+  assert_contains "$nat_line" "--nat-all-subnet-ip-ranges" \
+    "a Private NAT must not even count as 'a gateway exists' -- our own NAT stays all-subnets, not scoped"
 }
 
 # =====================================================================
@@ -385,6 +458,28 @@ test_nat_reuse_routers_list_empty_output_fails_closed() {
     "must report the empty-output case specifically"
   assert_eq "0" "$(gcloud_log | grep -c '^iam service-accounts create' || true)" \
     "must not create a service account when the NAT check fails closed"
+  assert_eq "0" "$(gcloud_log | grep -c '^compute routers create' || true)" \
+    "must not create a router when the NAT check fails closed"
+}
+
+# jq itself failing to parse the routers-list response (truncated/invalid
+# JSON -- a realistic shape for a transient API hiccup or an SDK-version
+# mismatch) must fail closed the same way a list-command failure does, not
+# silently fall through with an empty NAT_ROWS (which would read as "no
+# gateway" and create an all-subnets NAT unconditionally -- round-2
+# review, RR1).
+test_nat_reuse_unparsable_routers_list_fails_closed_before_sa() {
+  fresh_gcloud_state
+  seed_routers_list '{"truncated":'
+  run_deploy_create_sync "$(nat_reuse_config_json "$HUB")"
+
+  assert_eq "1" "$DEPLOY_RC" "deploy.sh must exit non-zero when the routers list output can't be parsed"
+  assert_contains "$DEPLOY_LOG" "Could not parse Cloud Router/NAT config" \
+    "must report the parse failure"
+  assert_eq "0" "$(gcloud_log | grep -c '^iam service-accounts create' || true)" \
+    "must not create a service account when the NAT check fails closed"
+  assert_eq "0" "$(gcloud_log | grep -c '^compute routers create' || true)" \
+    "must not create a router when the NAT check fails closed"
 }
 
 # =====================================================================

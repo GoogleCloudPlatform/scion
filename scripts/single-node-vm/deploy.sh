@@ -830,13 +830,19 @@ fi
 # routers that are actually on network "default" in exactly this region
 # (re-checked here with endswith -- gcloud's `--filter` ':' operator is a
 # word/substring match, not equality, so e.g. a router on network
-# "default-vpc" would otherwise slip through). "covers" is true when the NAT
-# already provides egress for subnet "default": ALL_SUBNETWORKS_* mode (all
-# ranges, or all primary ranges), or a LIST_OF_SUBNETWORKS entry for
-# "default" whose sourceIpRangesToNat actually includes the primary range
-# (ALL_IP_RANGES or PRIMARY_IP_RANGE -- an entry that only forwards
-# secondary ranges does NOT give the VM's primary IP egress). "foreign" is
-# true when the router isn't the one we'd create ourselves.
+# "default-vpc" would otherwise slip through). A NAT with type PRIVATE
+# (Private NAT, for NCC/hybrid connectivity -- not internet egress) is
+# skipped entirely: it can't provide the VM's internet egress no matter
+# what it covers, so it must not count as reuse coverage, nor as a
+# "foreign gateway exists" reason to scope our own create -- a Private NAT
+# and a PUBLIC one can coexist on the same subnet. "covers" is true when
+# the (PUBLIC) NAT already provides egress for subnet "default":
+# ALL_SUBNETWORKS_* mode (all ranges, or all primary ranges), or a
+# LIST_OF_SUBNETWORKS entry for "default" whose sourceIpRangesToNat
+# actually includes the primary range (ALL_IP_RANGES or PRIMARY_IP_RANGE --
+# an entry that only forwards secondary ranges does NOT give the VM's
+# primary IP egress). "foreign" is true when the router isn't the one
+# we'd create ourselves.
 NAT_ROWS="$(echo "$ROUTERS_JSON" | jq -r \
   --arg region "$REGION" \
   --arg own "$ROUTER_NAME" '
@@ -846,6 +852,7 @@ NAT_ROWS="$(echo "$ROUTERS_JSON" | jq -r \
   | . as $r
   | ($r.nats // [])[]
   | . as $n
+  | select(($n.type // "PUBLIC") == "PUBLIC")
   | ( ($n.subnetworks // [])
       | any(
           (.name // "" | endswith("/subnetworks/default"))

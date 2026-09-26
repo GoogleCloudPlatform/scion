@@ -568,7 +568,8 @@ gateway on the same network+region — not just another all-subnets one. GCP
 rejects creating one while another gateway already exists there, regardless
 of what that other gateway covers. `deploy.sh` checks for this before
 creating the service account, IAM bindings, or its own router/NAT (Phase 2,
-right after the Phase 1 `jq` check), and handles it one of two ways:
+after API enablement and before the service account is created), and
+handles it one of two ways:
 
 - **Some other router's NAT already covers our VM's subnet** (`default`) —
   either `ALL_SUBNETWORKS_*` mode, or a `LIST_OF_SUBNETWORKS` entry that
