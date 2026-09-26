@@ -251,12 +251,19 @@ jobs:
             if ! shellcheck -x --source-path=SCRIPTDIR "$script"; then
               failed=$((failed + 1))
             fi
-          done < <(find . -type f -name '*.sh' \
-                     -not -path './.git/*' \
-                     -not -path './vendor/*' \
-                     -not -path '*/vendor/*' \
-                     -not -path '*/node_modules/*' \
-                   | sort)
+          done < <(
+            {
+              find . -type f -name '*.sh' \
+                -not -path './.git/*' \
+                -not -path './vendor/*' \
+                -not -path '*/vendor/*' \
+                -not -path '*/node_modules/*'
+              # The stub gcloud has no extension (it stands in for a real
+              # `gcloud` on PATH, which has none either), so the *.sh find
+              # above never sees it.
+              echo './scripts/single-node-vm/tests/lib/gcloud'
+            } | sort
+          )
           echo "shellcheck: $((checked - failed))/${checked} file(s) passed"
           if [ "$checked" -eq 0 ]; then
             echo "::error::no shell scripts found -- the file discovery is broken"
@@ -266,6 +273,21 @@ jobs:
             echo "::error::shellcheck reported issues in ${failed} file(s)"
             exit 1
           fi
+
+  single-node-vm-deploy-tests:
+    name: single-node-vm deploy.sh test harness
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      # Never contacts GCP: a stub `gcloud` shadows any real one on PATH.
+      # ubuntu-latest already ships bash >= 4 and python3; see
+      # scripts/single-node-vm/tests/README.md for what this covers.
+      - name: Run scripts/single-node-vm/tests/run.sh
+        run: ./scripts/single-node-vm/tests/run.sh
 
   lint-method-not-allowed:
     name: Lint 405 Allow header (reporting only)
