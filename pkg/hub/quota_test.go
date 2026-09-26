@@ -498,3 +498,30 @@ func TestCheckAndReserve_ScopesAreIndependent(t *testing.T) {
 	// project-2 should still have quota available.
 	require.NoError(t, qs.CheckAndReserve(ctx, "max_agents_per_project", "user-1", "project", "project-2", "a4"))
 }
+
+// ptone/scion#1978: Release touches only the named limit. A resource that
+// holds reservations under two limits keeps the other one.
+func TestRelease_OnlyNamedLimit(t *testing.T) {
+	qs, s := newTestQuotaService(t)
+	ctx := context.Background()
+
+	a := seedLimit(t, s, "max_test_a", 5)
+	b := seedLimit(t, s, "max_test_b", 5)
+	require.NoError(t, qs.CheckAndReserve(ctx, "max_test_a", "user-1", "project", "p1", "shared-resource"))
+	require.NoError(t, qs.CheckAndReserve(ctx, "max_test_b", "user-1", "project", "p1", "shared-resource"))
+
+	qs.Release(ctx, "max_test_a", "shared-resource")
+
+	heldA, err := s.HasActiveReservation(ctx, a.ID, "shared-resource")
+	require.NoError(t, err)
+	heldB, err := s.HasActiveReservation(ctx, b.ID, "shared-resource")
+	require.NoError(t, err)
+	assert.False(t, heldA, "the named limit's reservation is released")
+	assert.True(t, heldB, "another limit's reservation for the same resource is kept")
+
+	// Unknown limit names are a no-op.
+	qs.Release(ctx, "no-such-limit", "shared-resource")
+	heldB, err = s.HasActiveReservation(ctx, b.ID, "shared-resource")
+	require.NoError(t, err)
+	assert.True(t, heldB)
+}

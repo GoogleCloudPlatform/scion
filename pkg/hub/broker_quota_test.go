@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -549,7 +550,52 @@ func TestBrokerQuota_StartAtCapRejected_NamesLimitInError(t *testing.T) {
 	candidate := newQuotaTestAgent(t, s, broker, project, "namedlimit-candidate", state.PhaseStopped)
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+candidate.ID+"/start", nil)
+	assertBrokerQuotaExceeded(t, rec)
+}
+
+// assertBrokerQuotaExceeded checks rec is the broker-cap rejection, with the
+// exact code and message every path uses.
+func assertBrokerQuotaExceeded(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
 	require.Equal(t, http.StatusTooManyRequests, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), store.LimitMaxAgentsPerBroker,
-		"the rejection must name the exceeded limit; body: %s", rec.Body.String())
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
+	assert.Equal(t, ErrCodeQuotaExceeded, resp.Error.Code)
+	assert.Equal(t, "quota exceeded: max_agents_per_broker", resp.Error.Message)
+}
+
+// ptone/scion#1978: every path refused at the broker cap reports the same
+// code and message: start, restart, create, and waking an agent for a DM.
+func TestBrokerQuota_AtCapRejectionIsUniform(t *testing.T) {
+	disp := &quotaLifecycleDispatcher{}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	srv.SetDispatcher(disp)
+	setBrokerAgentCeiling(t, s, 1)
+	ctx := context.Background()
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{Name: "uniform-first", ProjectID: project.ID})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	t.Run("create", func(t *testing.T) {
+		assertBrokerQuotaExceeded(t, doRequest(t, srv, http.MethodPost, "/api/v1/agents",
+			CreateAgentRequest{Name: "uniform-second", ProjectID: project.ID}))
+	})
+
+	broker, err := s.GetRuntimeBroker(ctx, project.DefaultRuntimeBrokerID)
+	require.NoError(t, err)
+	stopped := newQuotaTestAgent(t, s, broker, project, "uniform-stopped", state.PhaseStopped)
+	t.Run("start", func(t *testing.T) {
+		assertBrokerQuotaExceeded(t, doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+stopped.ID+"/start", nil))
+	})
+	t.Run("restart", func(t *testing.T) {
+		assertBrokerQuotaExceeded(t, doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+stopped.ID+"/restart", nil))
+	})
+	t.Run("wake", func(t *testing.T) {
+		suspended := newQuotaTestAgent(t, s, broker, project, "uniform-suspended", state.PhaseSuspended)
+		_, dmErr := srv.wakeAgentForDM(ctx, suspended)
+		require.NotNil(t, dmErr)
+		assert.Equal(t, http.StatusTooManyRequests, dmErr.HTTPStatus)
+		assert.Equal(t, ErrCodeQuotaExceeded, dmErr.Code)
+		assert.Equal(t, "quota exceeded: max_agents_per_broker", dmErr.Message)
+	})
 }

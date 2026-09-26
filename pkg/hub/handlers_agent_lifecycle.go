@@ -321,7 +321,8 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// (ptone/scion#1963). Idempotent: a no-op when the agent already
 			// holds an active reservation (e.g. start called again on an
 			// already-running agent).
-			if !s.checkAndReserveBrokerQuotaHTTP(ctx, w, agent) {
+			ok, reserved := s.checkAndReserveBrokerQuotaHTTP(ctx, w, agent)
+			if !ok {
 				return
 			}
 			dispatchErr = dispatcher.DispatchAgentStart(ctx, agent, "", resume)
@@ -331,10 +332,12 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				newPhase = agent.Phase
 			}
 			if dispatchErr != nil {
-				// The reservation was taken speculatively before dispatch;
-				// roll it back so a failed start doesn't strand a reservation
-				// with no running (or soon-to-be-running) container behind it.
-				s.releaseBrokerQuota(ctx, agent)
+				// Roll back a reservation this call took speculatively, so a
+				// failed start doesn't strand one with no container behind
+				// it. A reservation that already existed (start on a
+				// running agent) is kept: that agent is still counted
+				// (ptone/scion#1978).
+				s.rollbackBrokerQuota(ctx, agent, reserved)
 			}
 		}
 	case api.AgentActionStop:
@@ -387,19 +390,22 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// exited and some runtimes (podman) return non-standard
 			// errors for stopping non-running containers. The subsequent
 			// Start will handle cleanup of the exited container.
-			if stopErr := dispatcher.DispatchAgentStop(ctx, agent); stopErr != nil {
+			stopErr := dispatcher.DispatchAgentStop(ctx, agent)
+			if stopErr != nil {
 				slog.Warn("Restart: stop dispatch failed, proceeding with start",
 					"agent_id", id, "error", stopErr)
 			}
-			// The stop leg above tears the container down regardless of
-			// dispatch error (tolerated, as noted); release its reservation
-			// the same way an explicit stop would (ptone/scion#1963).
-			s.releaseBrokerQuota(ctx, agent)
-			// Restart is stop + start: a fresh harness session, not a resume.
-			// Re-reserve before the start leg, same as the start action.
-			if !s.checkAndReserveBrokerQuotaHTTP(ctx, w, agent) {
+			// The broker reservation is held across the restart
+			// (ptone/scion#1978). Releasing it after the stop leg and
+			// re-reserving before the start leg would let another start
+			// take the slot in between. This reserve is a no-op for an
+			// agent that already holds one, and applies the cap to an
+			// agent that does not (for example, a stopped agent).
+			ok, reserved := s.checkAndReserveBrokerQuotaHTTP(ctx, w, agent)
+			if !ok {
 				return
 			}
+			// Restart is stop + start: a fresh harness session, not a resume.
 			dispatchErr = dispatcher.DispatchAgentStart(ctx, agent, "", false)
 			// DispatchAgentStart applies the broker response in-place;
 			// use the broker-reported phase if it was set.
@@ -407,7 +413,15 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				newPhase = agent.Phase
 			}
 			if dispatchErr != nil {
-				s.releaseBrokerQuota(ctx, agent)
+				if stopErr == nil {
+					// The stop leg succeeded, so the container is down:
+					// release the slot as an explicit stop would.
+					s.releaseBrokerQuota(ctx, agent)
+				} else {
+					// The container may still be running: keep a
+					// reservation this call did not create.
+					s.rollbackBrokerQuota(ctx, agent, reserved)
+				}
 			}
 		}
 	}
