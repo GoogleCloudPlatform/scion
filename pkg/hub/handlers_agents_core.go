@@ -690,6 +690,13 @@ func (s *Server) checkAndReserveQuota(ctx context.Context, w http.ResponseWriter
 	return ok
 }
 
+// quotaExceededMessage is the error message for a request refused because
+// limitName is at its cap. Every path that refuses a request over a quota
+// uses it, so callers see the same text regardless of the path.
+func quotaExceededMessage(limitName string) string {
+	return "quota exceeded: " + limitName
+}
+
 // reserveQuotaHTTP is checkAndReserveQuota that also reports whether this
 // call created a new reservation (see QuotaService.Reserve). created is
 // only meaningful when ok is true.
@@ -704,7 +711,7 @@ func (s *Server) reserveQuotaHTTP(ctx context.Context, w http.ResponseWriter, li
 	switch {
 	case errors.Is(err, store.ErrQuotaExceeded):
 		writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
-			"quota exceeded: "+limitName, nil)
+			quotaExceededMessage(limitName), nil)
 	case errors.Is(err, ErrQuotaLockContention):
 		writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
 			"quota check temporarily unavailable, please retry", nil)

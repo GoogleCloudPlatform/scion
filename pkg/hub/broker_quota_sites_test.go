@@ -167,7 +167,7 @@ func TestBrokerQuota_RestartAtCapRejected_NoDispatch(t *testing.T) {
 	reserveBrokerSlot(t, s, broker, held.ID)
 	cand := newQuotaTestAgent(t, s, broker, project, "bq-restart-cand", state.PhaseStopped)
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+cand.ID+"/restart", nil)
-	assert.Equal(t, http.StatusTooManyRequests, rec.Code, rec.Body.String())
+	assertBrokerQuotaExceeded(t, rec)
 	assert.EqualValues(t, 0, disp.startCount.Load(), "restart at cap must not dispatch a start")
 	assert.EqualValues(t, 1, brokerReservationCount(t, s, broker.ID))
 }
@@ -222,7 +222,7 @@ func assertCreateExistingAgentAtCap(t *testing.T, action string) {
 	brokerID := project.DefaultRuntimeBrokerID
 	before := disp.startCount.Load()
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{Name: name, ProjectID: project.ID, Resume: true})
-	assert.Equal(t, http.StatusTooManyRequests, rec.Code, "POST create of %s agent at cap: %s", action, rec.Body.String())
+	assertBrokerQuotaExceeded(t, rec)
 	assert.Equal(t, before, disp.startCount.Load(), "no start dispatch at cap")
 	assert.EqualValues(t, 2, brokerReservationCount(t, s, brokerID))
 	// positive control: free a slot, the same create now resumes/starts and reserves
@@ -259,6 +259,7 @@ func TestBrokerQuota_WakeAtCapRejected(t *testing.T) {
 	require.NotNil(t, dmErr, "wake at cap must fail")
 	assert.Equal(t, http.StatusTooManyRequests, dmErr.HTTPStatus)
 	assert.Equal(t, ErrCodeQuotaExceeded, dmErr.Code)
+	assert.Equal(t, "quota exceeded: max_agents_per_broker", dmErr.Message)
 	assert.Len(t, disp.getStartCalls(), 0, "no resume dispatch at cap")
 	assert.EqualValues(t, 1, brokerReservationCount(t, s, broker.ID))
 
