@@ -325,3 +325,77 @@ func TestBrokerQuota_RestartHoldsReservationAcrossLegs(t *testing.T) {
 	assert.Equal(t, before, brokerReservationIDs(t, s, broker.ID),
 		"restart must keep the existing reservation, not release and re-create it")
 }
+
+// ptone/scion#1978: restarting a stopped agent creates its reservation, so
+// when both the stop and start legs fail the restart must still roll that
+// reservation back.
+func TestBrokerQuota_RestartStoppedAgentBothLegsFailReleasesNewReservation(t *testing.T) {
+	srv, s := testServer(t)
+	srv.SetDispatcher(&failingStopStartDispatcher{})
+	setBrokerAgentCeiling(t, s, 2)
+	broker, project := newQuotaTestBrokerAndProject(t, s, "restart-stopped-bothfail")
+	a := newQuotaTestAgent(t, s, broker, project, "restart-stopped-bothfail", state.PhaseStopped)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/restart", nil)
+	require.GreaterOrEqual(t, rec.Code, 500, rec.Body.String())
+	assert.EqualValues(t, 0, brokerReservationCount(t, s, broker.ID),
+		"the restart created the reservation, so a failed start rolls it back even when the stop leg also failed")
+	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID))
+}
+
+// assertCreateExistingAgentFailedStartReleases puts an agent into the state
+// left by action ("suspend" or "stop"), which frees its broker slot, then
+// re-creates it with a start that fails. The create reserved the slot, so it
+// must roll the reservation back.
+func assertCreateExistingAgentFailedStartReleases(t *testing.T, action string) {
+	t.Helper()
+	disp := &swappableStartDispatcher{}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	srv.SetDispatcher(disp)
+	setBrokerAgentCeiling(t, s, 2)
+	brokerID := project.DefaultRuntimeBrokerID
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{Name: "create-existing-fail", ProjectID: project.ID})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var cr CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &cr))
+	require.NoError(t, s.UpdateAgentStatus(context.Background(), cr.Agent.ID, store.AgentStatusUpdate{Phase: string(state.PhaseRunning)}))
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+cr.Agent.ID+"/"+action, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.EqualValues(t, 0, brokerReservationCount(t, s, brokerID), action+" released the slot")
+
+	disp.failStart = true
+	before := disp.startCount.Load()
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{Name: "create-existing-fail", ProjectID: project.ID, Resume: true})
+	require.GreaterOrEqual(t, rec.Code, 500, rec.Body.String())
+	require.Equal(t, before+1, disp.startCount.Load(), "the start reached dispatch")
+	assert.EqualValues(t, 0, brokerReservationCount(t, s, brokerID),
+		"create of an existing agent (after %s): a failed start rolls back the reservation it created", action)
+}
+
+// Create of an existing suspended agent (resume) whose start fails.
+func TestBrokerQuota_CreateResumeSuspendedFailedStartReleases(t *testing.T) {
+	assertCreateExistingAgentFailedStartReleases(t, "suspend")
+}
+
+// Create of an existing stopped agent (start) whose start fails.
+func TestBrokerQuota_CreateStartStoppedFailedStartReleases(t *testing.T) {
+	assertCreateExistingAgentFailedStartReleases(t, "stop")
+}
+
+// Waking a suspended agent for a DM reserves a slot; when the resume dispatch
+// fails, the wake rolls that reservation back.
+func TestBrokerQuota_WakeFailedStartReleases(t *testing.T) {
+	srv, s := testServer(t)
+	disp := &failingStartDispatcher{}
+	srv.SetDispatcher(disp)
+	setBrokerAgentCeiling(t, s, 2)
+	broker, project := newQuotaTestBrokerAndProject(t, s, "wake-failed-start")
+	target := newQuotaTestAgent(t, s, broker, project, "wake-failed-start", state.PhaseSuspended)
+
+	_, dmErr := srv.wakeAgentForDM(context.Background(), target)
+	require.NotNil(t, dmErr)
+	assert.Equal(t, http.StatusBadGateway, dmErr.HTTPStatus)
+	assert.EqualValues(t, 1, disp.startCount.Load(), "the resume reached dispatch")
+	assert.EqualValues(t, 0, brokerReservationCount(t, s, broker.ID), "a failed wake rolls back the reservation it created")
+}
