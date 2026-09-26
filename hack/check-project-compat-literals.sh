@@ -14,30 +14,37 @@ fi
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
 
-rg -n 'grove|Grove|scion\.grove|grove_id|groveId|/groves' \
+# With -i, scion\.grove|grove_id|groveId|/groves are all substrings of
+# grove, so the single alternative below is the same match set.
+rc=0
+rg -in 'grove' \
   cmd pkg extras \
   --glob '*.go' \
-  --glob '!pkg/ent/**' >"$tmp" || true
-
-if [[ ! -s "$tmp" ]]; then
-  exit 0
+  --glob '!pkg/ent/**' >"$tmp" || rc=$?
+# rg exits 1 for "no matches", which is normal and leaves $tmp empty; that
+# case falls through to the stale-entry check below so a fully-empty match
+# set still reports every allowlist entry as stale rather than passing
+# silently. Only exit codes above 1 (bad pattern, unreadable path, etc.) are
+# real failures.
+if (( rc > 1 )); then
+  echo "rg failed (exit $rc)" >&2
+  exit "$rc"
 fi
 
 allowed_paths=(
   # CLI compatibility adapters, hidden deprecated aliases, and examples.
-  "^cmd/cli_mode.go$"
   "^cmd/config.go$"
   "^cmd/delete.go$"
   "^cmd/hub.go$"
   "^cmd/list.go$"
+  "^cmd/notifications.go$"
   "^cmd/project.go$"
-  "^cmd/scion-broker-repl/main.go$"
-  "^cmd/template_import.go$"
   "^cmd/template_resolution.go$"
 
   # Current compatibility and migration tests/fixtures.
   "^cmd/cli_mode_test.go$"
   "^cmd/common_envgather_test.go$"
+  "^cmd/conversation_test.go$"
   "^cmd/delete_test.go$"
   "^cmd/harness_config_install_test.go$"
   "^cmd/hub_env_test.go$"
@@ -48,7 +55,6 @@ allowed_paths=(
   "^cmd/template_resolution_test.go$"
   "^cmd/templates_test.go$"
   "^extras/agent-viz/internal/logparser/parser_test.go$"
-  "^extras/scion-a2a-bridge/internal/bridge/auth_test.go$"
   "^extras/scion-a2a-bridge/internal/bridge/metrics_test.go$"
   "^extras/scion-a2a-bridge/internal/bridge/middleware_test.go$"
   "^extras/scion-a2a-bridge/internal/bridge/server_test.go$"
@@ -79,11 +85,15 @@ allowed_paths=(
   "^pkg/config/templates_test.go$"
   "^pkg/config/v7_fixes_test.go$"
   "^pkg/hub/capability_marshal_test.go$"
+  "^pkg/hub/envgather_resolution_test.go$"
+  "^pkg/hub/envgather_test.go$"
   "^pkg/hub/events_postgres_test.go$"
   "^pkg/hub/fs_safety_test.go$"
   "^pkg/hub/handlers_broker_inbound_test.go$"
+  "^pkg/hub/handlers_envsecret_authz_test.go$"
   "^pkg/hub/handlers_project_test.go$"
   "^pkg/hub/heartbeat_legacy_test.go$"
+  "^pkg/hub/httpdispatcher_test.go$"
   "^pkg/hub/web_test.go$"
   "^pkg/hubclient/agents_test.go$"
   "^pkg/hubclient/client_test.go$"
@@ -100,6 +110,9 @@ allowed_paths=(
   "^pkg/projectcompat/config_test.go$"
   "^pkg/projectcompat/labels_test.go$"
   "^pkg/projectcompat/topics_test.go$"
+  "^pkg/runtime/cloudrun_runtime_test.go$"
+  "^pkg/runtime/cloudrun_sandbox_runtime_test.go$"
+  "^pkg/runtime/factory_test.go$"
   "^pkg/runtime/k8s_nfs_test.go$"
   "^pkg/runtime/k8s_secrets_test.go$"
   "^pkg/runtime/k8s_shared_dirs_test.go$"
@@ -116,6 +129,7 @@ allowed_paths=(
   "^pkg/runtimebroker/types_test.go$"
   "^pkg/runtimebroker/workspace_handlers_test.go$"
   "^pkg/sciontool/hooks/handlers/status_test.go$"
+  "^pkg/sciontool/telemetry/aggregator_test.go$"
   "^pkg/secret/gcpbackend_test.go$"
   "^pkg/secret/localbackend_test.go$"
   "^pkg/storage/storage_test.go$"
@@ -130,10 +144,7 @@ allowed_paths=(
   "^extras/scion-a2a-bridge/cmd/scion-a2a-bridge/main.go$"
   "^extras/scion-a2a-bridge/internal/bridge/bridge.go$"
   "^extras/scion-a2a-bridge/internal/bridge/config.go$"
-  "^extras/scion-a2a-bridge/internal/bridge/executor.go$"
   "^extras/scion-a2a-bridge/internal/bridge/server.go$"
-  "^extras/scion-chat-app/cmd/scion-chat-app/main.go$"
-  "^extras/scion-chat-app/internal/chatapp/commands.go$"
   "^extras/scion-chat-app/internal/chatapp/messenger.go$"
   "^extras/scion-chat-app/internal/chatapp/notifications.go$"
   "^extras/scion-chat-app/internal/state/state.go$"
@@ -144,10 +155,9 @@ allowed_paths=(
 
   # Core compatibility adapters and bounded legacy protocol/storage surfaces.
   "^pkg/agent/list.go$"
-  "^pkg/agent/msgbuffer.go$"
+  "^pkg/agent/run.go$"
   "^pkg/api/types.go$"
   "^pkg/brokerclient/agents.go$"
-  "^pkg/config/init.go$"
   "^pkg/config/koanf.go$"
   "^pkg/config/paths.go$"
   "^pkg/config/project_discovery.go$"
@@ -159,12 +169,12 @@ allowed_paths=(
   "^pkg/hub/events.go$"
   "^pkg/hub/events_postgres.go$"
   "^pkg/hub/fs_safety.go$"
-  "^pkg/hub/handlers.go$"
   "^pkg/hub/handlers_auth.go$"
   "^pkg/hub/handlers_broker_inbound.go$"
   "^pkg/hub/handlers_notifications.go$"
   "^pkg/hub/handlers_projects_core.go$"
   "^pkg/hub/handlers_runtime_brokers.go$"
+  "^pkg/hub/httpdispatcher.go$"
   "^pkg/hub/project_cache.go$"
   "^pkg/hub/project_compat.go$"
   "^pkg/hub/project_webdav.go$"
@@ -183,23 +193,23 @@ allowed_paths=(
   "^pkg/hubclient/types.go$"
   "^pkg/hubsync/sync.go$"
   "^pkg/projectcompat/.*\\.go$"
+  "^pkg/runtime/cloudrun_sandbox_runtime.go$"
   "^pkg/runtime/common.go$"
   "^pkg/runtime/k8s_runtime.go$"
   "^pkg/runtimebroker/handlers.go$"
+  "^pkg/runtimebroker/hubenv.go$"
   "^pkg/runtimebroker/pty_handlers.go$"
   "^pkg/runtimebroker/server.go$"
   "^pkg/runtimebroker/start_context.go$"
   "^pkg/runtimebroker/types.go$"
   "^pkg/runtimebroker/workspace_handlers.go$"
-  "^pkg/sciontool/hooks/handlers/telemetry.go$"
-  "^pkg/sciontool/telemetry/gcp_exporter.go$"
+  "^pkg/sciontool/telemetry/aggregator.go$"
   # Reserved-identity-attribute denylist: the three retired grove-named
   # telemetry keys (scion.grove, scion.grove.id, scion.grove_id) are kept
   # here so the receiver still strips them from user-supplied attributes,
   # even though it no longer treats them as valid identity sources (Q2 = (a)).
   "^pkg/sciontool/telemetry/policy.go$"
   "^pkg/sciontool/telemetry/policy_test.go$"
-  "^pkg/sciontool/telemetry/providers.go$"
   "^pkg/storage/storage.go$"
   "^pkg/store/entadapter/agent_session_metrics_store.go$"
   "^pkg/store/entadapter/composite.go$"
@@ -210,11 +220,45 @@ allowed_paths=(
 
 allowlist="$(printf '%s\n' "${allowed_paths[@]}" | sed 's/\$$/:/' | paste -sd '|' -)"
 
-violations="$(grep -Ev "$allowlist" "$tmp" || true)"
+# Stale entry detection: every allowlisted path is expected to match the
+# literal search above. An entry that matches nothing here is dead
+# bookkeeping - either the legacy literal was removed from that file, or the
+# entry never matched and was copied in by mistake. Fix by deleting the entry,
+# not by re-adding the literal it once excused.
+stale_entries=()
+for path in "${allowed_paths[@]}"; do
+  pattern="${path%\$}:"
+  if ! grep -qE "$pattern" "$tmp"; then
+    stale_entries+=("$path")
+  fi
+done
+
+violations=""
+if [[ -n "$allowlist" ]]; then
+  violations="$(grep -Ev "$allowlist" "$tmp" || true)"
+elif [[ -s "$tmp" ]]; then
+  violations="$(cat "$tmp")"
+fi
+
+# Report both failure classes from one run rather than stopping at whichever
+# is checked first - otherwise fixing one class only reveals the other on
+# the next CI attempt.
+failed=0
+if [[ ${#stale_entries[@]} -gt 0 ]]; then
+  echo "Stale entries in the project compatibility allowlist (match nothing):" >&2
+  printf '  %s\n' "${stale_entries[@]}" >&2
+  echo >&2
+  echo "Remove these entries from hack/check-project-compat-literals.sh." >&2
+  echo >&2
+  failed=1
+fi
 if [[ -n "$violations" ]]; then
   echo "Legacy grove literals found outside the project compatibility allowlist:" >&2
   echo "$violations" >&2
   echo >&2
   echo "Use project vocabulary for new code, or route legacy handling through pkg/projectcompat." >&2
+  failed=1
+fi
+if [[ "$failed" -eq 1 ]]; then
   exit 1
 fi
