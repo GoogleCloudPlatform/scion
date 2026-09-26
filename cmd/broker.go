@@ -535,6 +535,7 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 			Capabilities: []string{
 				"sync",
 				"attach",
+				"reprovision",
 			},
 			AutoProvide: brokerAutoProvide,
 			Labels: map[string]string{
@@ -565,6 +566,7 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 			Capabilities: []string{
 				"sync",
 				"attach",
+				"reprovision",
 			},
 			Profiles: profiles,
 		}

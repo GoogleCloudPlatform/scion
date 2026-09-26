@@ -345,6 +345,12 @@ func (d *HTTPAgentDispatcher) SetImageRegistry(registry string) {
 	d.imageRegistry = registry
 }
 
+// ImageRegistry returns the registry prefix this dispatcher rewrites bare
+// image names to at send time ("" = no rewrite).
+func (d *HTTPAgentDispatcher) ImageRegistry() string {
+	return d.imageRegistry
+}
+
 // SetTemplateRepairer registers a callback that syncs a template's DB manifest
 // from storage when a hash mismatch is detected during dispatch.
 func (d *HTTPAgentDispatcher) SetTemplateRepairer(fn func(ctx context.Context, ref string) error) {
@@ -1126,6 +1132,32 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 // that as_needed env vars (e.g. GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_REGION) are
 // resolved before auth provisioning runs on the broker.
 func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent *store.Agent) error {
+	return d.dispatchProvision(ctx, agent, "DispatchAgentProvision", false)
+}
+
+// DispatchAgentReprovision re-renders an EXISTING agent's on-disk config
+// (scion-agent.json, agent-info.json, home dotfiles, skills) on the runtime
+// broker from the agent's current AppliedConfig, for a `scion reincarnate`
+// request (design §3.4). The caller (the reincarnate worker) must have
+// already replaced agent.AppliedConfig with a freshly resolved config before
+// calling this — buildCreateRequest below reads directly from it, the same
+// way it does for a brand new agent.
+//
+// Unlike DispatchAgentProvision, this always sets Reprovision on the wire
+// request, which tells the broker to overwrite the persisted config rather
+// than reuse it (see runtimebroker.CreateAgentRequest.Reprovision and
+// agent.Manager.Reprovision). It does not start the container; the caller
+// does that separately via DispatchAgentStart. Precondition: the agent's
+// container is already stopped.
+func (d *HTTPAgentDispatcher) DispatchAgentReprovision(ctx context.Context, agent *store.Agent) error {
+	return d.dispatchProvision(ctx, agent, "DispatchAgentReprovision", true)
+}
+
+// dispatchProvision is the shared implementation behind DispatchAgentProvision
+// and DispatchAgentReprovision: build a provision-only create request, dispatch
+// it with the GatherEnv two-pass mechanism, and merge any resolved storage env
+// back into AppliedConfig.
+func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *store.Agent, callerName string, reprovision bool) error {
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
@@ -1135,11 +1167,12 @@ func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent 
 		return err
 	}
 
-	req, err := d.buildCreateRequest(ctx, agent, "DispatchAgentProvision")
+	req, err := d.buildCreateRequest(ctx, agent, callerName)
 	if err != nil {
 		return err
 	}
 	req.ProvisionOnly = true
+	req.Reprovision = reprovision
 	req.GatherEnv = true
 
 	// Track which scope provided each key
@@ -1157,12 +1190,15 @@ func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent 
 		// deferredCreateWithGather dispatches via DispatchAgentCreateWithGather which
 		// does not set ProvisionOnly — fall back to returning the error rather than
 		// accidentally triggering a full create on the remote node.
-		return fmt.Errorf("provision not supported for cross-node broker: %w", err)
+		return fmt.Errorf("%s not supported for cross-node broker: %w", callerName, err)
 	} else if err != nil {
 		return err
 	} else if resp != nil {
 		d.applyBrokerResponse(agent, resp)
 	}
+
+	finalResp := resp
+	finalNeeds := envReqs
 
 	// Second pass: if the broker reported needed keys, check whether any can
 	// be satisfied by as_needed env vars or secrets — mirroring the pattern in
@@ -1178,6 +1214,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent 
 				req.ResolvedEnv[k] = v
 			}
 			req.EnvSources = d.buildEnvSources(ctx, agent, req.ResolvedEnv)
+			// Design §3.4 Amendment A2.3: a fresh RequestID for the replay. Reusing the first
+			// pass's ID would let the broker's attempt cache (keyed by
+			// RequestID) replay the stored 202 instead of reprocessing with
+			// the newly resolved env — silently defeating this whole retry.
+			req.RequestID = api.NewUUID()
 
 			// Replay the provision request with the resolved env.
 			resp2, envReqs2, err2 := d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
@@ -1190,12 +1231,37 @@ func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent 
 				return err2
 			}
 			if envReqs2 != nil && len(envReqs2.Needs) > 0 {
-				d.log.Warn("DispatchAgentProvision: env vars still missing after second pass",
+				d.log.Warn(callerName+": env vars still missing after second pass",
 					"agent", agent.Name, "needs", envReqs2.Needs)
 			}
 			if resp2 != nil {
 				d.applyBrokerResponse(agent, resp2)
 			}
+			finalResp = resp2
+			finalNeeds = envReqs2
+		}
+	}
+
+	// Design §3.4 Amendment A2.3: for a reprovision specifically, a final 202-with-Needs (env
+	// still missing) or a missing 201 response is a hard failure, never
+	// "warn and continue". DispatchAgentProvision's more forgiving behavior
+	// exists because a follow-up start re-gathers env on that path; the
+	// reincarnate worker goes straight from this call to DispatchAgentStart,
+	// so "warn and continue" here would silently start the new generation on
+	// an incomplete or unreplaced config and still report AC-1 success.
+	if reprovision {
+		if finalNeeds != nil && len(finalNeeds.Needs) > 0 {
+			return fmt.Errorf("%s: required env still missing after reprovision: %v", callerName, finalNeeds.Needs)
+		}
+		if finalResp == nil {
+			return fmt.Errorf("%s: broker returned no confirmation for the reprovision request", callerName)
+		}
+		// Design §3.4 Amendment A2.2(a): mandatory echo. An old broker has no concept of
+		// Reprovision, so it silently ran a plain Provision and returned 201
+		// with Reprovisioned unset — the persisted config was NOT replaced,
+		// so this must fail exactly like any other reprovision failure.
+		if !finalResp.Reprovisioned {
+			return fmt.Errorf("%s: broker did not confirm the reprovision (it may not support reincarnate; its reported capabilities may be stale)", callerName)
 		}
 	}
 
@@ -1212,7 +1278,13 @@ func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent 
 	// (enforced by TestBuildCreateRequestClassifiesEveryResolvedEnvKey) or it
 	// will silently stop showing up here; that is the intended fail-closed
 	// behavior, not a bug to work around by classifying it Plain.
-	if agent.AppliedConfig != nil && len(req.ResolvedEnv) > 0 {
+	//
+	// Not on reprovision: the fresh config the reincarnate worker built is
+	// authoritative, and resolved env is re-resolved on every dispatch, so
+	// merging it back would only make the next reincarnation plan show a
+	// false env diff. The skip applies before the classification check, so
+	// it holds even for keys classified api.EnvKindPlain.
+	if !reprovision && agent.AppliedConfig != nil && len(req.ResolvedEnv) > 0 {
 		if agent.AppliedConfig.Env == nil {
 			agent.AppliedConfig.Env = make(map[string]string)
 		}

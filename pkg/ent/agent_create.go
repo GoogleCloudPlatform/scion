@@ -518,6 +518,48 @@ func (_c *AgentCreate) SetNillableStateVersion(v *int64) *AgentCreate {
 	return _c
 }
 
+// SetGeneration sets the "generation" field.
+func (_c *AgentCreate) SetGeneration(v int) *AgentCreate {
+	_c.mutation.SetGeneration(v)
+	return _c
+}
+
+// SetNillableGeneration sets the "generation" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableGeneration(v *int) *AgentCreate {
+	if v != nil {
+		_c.SetGeneration(*v)
+	}
+	return _c
+}
+
+// SetReincarnationState sets the "reincarnation_state" field.
+func (_c *AgentCreate) SetReincarnationState(v string) *AgentCreate {
+	_c.mutation.SetReincarnationState(v)
+	return _c
+}
+
+// SetNillableReincarnationState sets the "reincarnation_state" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableReincarnationState(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetReincarnationState(*v)
+	}
+	return _c
+}
+
+// SetReincarnationUpdatedAt sets the "reincarnation_updated_at" field.
+func (_c *AgentCreate) SetReincarnationUpdatedAt(v time.Time) *AgentCreate {
+	_c.mutation.SetReincarnationUpdatedAt(v)
+	return _c
+}
+
+// SetNillableReincarnationUpdatedAt sets the "reincarnation_updated_at" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableReincarnationUpdatedAt(v *time.Time) *AgentCreate {
+	if v != nil {
+		_c.SetReincarnationUpdatedAt(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *AgentCreate) SetID(v uuid.UUID) *AgentCreate {
 	_c.mutation.SetID(v)
@@ -642,6 +684,14 @@ func (_c *AgentCreate) defaults() {
 		v := agent.DefaultStateVersion
 		_c.mutation.SetStateVersion(v)
 	}
+	if _, ok := _c.mutation.Generation(); !ok {
+		v := agent.DefaultGeneration
+		_c.mutation.SetGeneration(v)
+	}
+	if _, ok := _c.mutation.ReincarnationState(); !ok {
+		v := agent.DefaultReincarnationState
+		_c.mutation.SetReincarnationState(v)
+	}
 	if _, ok := _c.mutation.ID(); !ok {
 		v := agent.DefaultID()
 		_c.mutation.SetID(v)
@@ -708,6 +758,9 @@ func (_c *AgentCreate) check() error {
 	}
 	if _, ok := _c.mutation.StateVersion(); !ok {
 		return &ValidationError{Name: "state_version", err: errors.New(`ent: missing required field "Agent.state_version"`)}
+	}
+	if _, ok := _c.mutation.Generation(); !ok {
+		return &ValidationError{Name: "generation", err: errors.New(`ent: missing required field "Agent.generation"`)}
 	}
 	if len(_c.mutation.ProjectIDs()) == 0 {
 		return &ValidationError{Name: "project", err: errors.New(`ent: missing required edge "Agent.project"`)}
@@ -899,6 +952,18 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.StateVersion(); ok {
 		_spec.SetField(agent.FieldStateVersion, field.TypeInt64, value)
 		_node.StateVersion = value
+	}
+	if value, ok := _c.mutation.Generation(); ok {
+		_spec.SetField(agent.FieldGeneration, field.TypeInt, value)
+		_node.Generation = value
+	}
+	if value, ok := _c.mutation.ReincarnationState(); ok {
+		_spec.SetField(agent.FieldReincarnationState, field.TypeString, value)
+		_node.ReincarnationState = value
+	}
+	if value, ok := _c.mutation.ReincarnationUpdatedAt(); ok {
+		_spec.SetField(agent.FieldReincarnationUpdatedAt, field.TypeTime, value)
+		_node.ReincarnationUpdatedAt = &value
 	}
 	if nodes := _c.mutation.ProjectIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
@@ -1634,6 +1699,60 @@ func (u *AgentUpsert) UpdateStateVersion() *AgentUpsert {
 // AddStateVersion adds v to the "state_version" field.
 func (u *AgentUpsert) AddStateVersion(v int64) *AgentUpsert {
 	u.Add(agent.FieldStateVersion, v)
+	return u
+}
+
+// SetGeneration sets the "generation" field.
+func (u *AgentUpsert) SetGeneration(v int) *AgentUpsert {
+	u.Set(agent.FieldGeneration, v)
+	return u
+}
+
+// UpdateGeneration sets the "generation" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateGeneration() *AgentUpsert {
+	u.SetExcluded(agent.FieldGeneration)
+	return u
+}
+
+// AddGeneration adds v to the "generation" field.
+func (u *AgentUpsert) AddGeneration(v int) *AgentUpsert {
+	u.Add(agent.FieldGeneration, v)
+	return u
+}
+
+// SetReincarnationState sets the "reincarnation_state" field.
+func (u *AgentUpsert) SetReincarnationState(v string) *AgentUpsert {
+	u.Set(agent.FieldReincarnationState, v)
+	return u
+}
+
+// UpdateReincarnationState sets the "reincarnation_state" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateReincarnationState() *AgentUpsert {
+	u.SetExcluded(agent.FieldReincarnationState)
+	return u
+}
+
+// ClearReincarnationState clears the value of the "reincarnation_state" field.
+func (u *AgentUpsert) ClearReincarnationState() *AgentUpsert {
+	u.SetNull(agent.FieldReincarnationState)
+	return u
+}
+
+// SetReincarnationUpdatedAt sets the "reincarnation_updated_at" field.
+func (u *AgentUpsert) SetReincarnationUpdatedAt(v time.Time) *AgentUpsert {
+	u.Set(agent.FieldReincarnationUpdatedAt, v)
+	return u
+}
+
+// UpdateReincarnationUpdatedAt sets the "reincarnation_updated_at" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateReincarnationUpdatedAt() *AgentUpsert {
+	u.SetExcluded(agent.FieldReincarnationUpdatedAt)
+	return u
+}
+
+// ClearReincarnationUpdatedAt clears the value of the "reincarnation_updated_at" field.
+func (u *AgentUpsert) ClearReincarnationUpdatedAt() *AgentUpsert {
+	u.SetNull(agent.FieldReincarnationUpdatedAt)
 	return u
 }
 
@@ -2427,6 +2546,69 @@ func (u *AgentUpsertOne) AddStateVersion(v int64) *AgentUpsertOne {
 func (u *AgentUpsertOne) UpdateStateVersion() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.UpdateStateVersion()
+	})
+}
+
+// SetGeneration sets the "generation" field.
+func (u *AgentUpsertOne) SetGeneration(v int) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetGeneration(v)
+	})
+}
+
+// AddGeneration adds v to the "generation" field.
+func (u *AgentUpsertOne) AddGeneration(v int) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.AddGeneration(v)
+	})
+}
+
+// UpdateGeneration sets the "generation" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateGeneration() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateGeneration()
+	})
+}
+
+// SetReincarnationState sets the "reincarnation_state" field.
+func (u *AgentUpsertOne) SetReincarnationState(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetReincarnationState(v)
+	})
+}
+
+// UpdateReincarnationState sets the "reincarnation_state" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateReincarnationState() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateReincarnationState()
+	})
+}
+
+// ClearReincarnationState clears the value of the "reincarnation_state" field.
+func (u *AgentUpsertOne) ClearReincarnationState() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearReincarnationState()
+	})
+}
+
+// SetReincarnationUpdatedAt sets the "reincarnation_updated_at" field.
+func (u *AgentUpsertOne) SetReincarnationUpdatedAt(v time.Time) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetReincarnationUpdatedAt(v)
+	})
+}
+
+// UpdateReincarnationUpdatedAt sets the "reincarnation_updated_at" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateReincarnationUpdatedAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateReincarnationUpdatedAt()
+	})
+}
+
+// ClearReincarnationUpdatedAt clears the value of the "reincarnation_updated_at" field.
+func (u *AgentUpsertOne) ClearReincarnationUpdatedAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearReincarnationUpdatedAt()
 	})
 }
 
@@ -3387,6 +3569,69 @@ func (u *AgentUpsertBulk) AddStateVersion(v int64) *AgentUpsertBulk {
 func (u *AgentUpsertBulk) UpdateStateVersion() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.UpdateStateVersion()
+	})
+}
+
+// SetGeneration sets the "generation" field.
+func (u *AgentUpsertBulk) SetGeneration(v int) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetGeneration(v)
+	})
+}
+
+// AddGeneration adds v to the "generation" field.
+func (u *AgentUpsertBulk) AddGeneration(v int) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.AddGeneration(v)
+	})
+}
+
+// UpdateGeneration sets the "generation" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateGeneration() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateGeneration()
+	})
+}
+
+// SetReincarnationState sets the "reincarnation_state" field.
+func (u *AgentUpsertBulk) SetReincarnationState(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetReincarnationState(v)
+	})
+}
+
+// UpdateReincarnationState sets the "reincarnation_state" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateReincarnationState() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateReincarnationState()
+	})
+}
+
+// ClearReincarnationState clears the value of the "reincarnation_state" field.
+func (u *AgentUpsertBulk) ClearReincarnationState() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearReincarnationState()
+	})
+}
+
+// SetReincarnationUpdatedAt sets the "reincarnation_updated_at" field.
+func (u *AgentUpsertBulk) SetReincarnationUpdatedAt(v time.Time) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetReincarnationUpdatedAt(v)
+	})
+}
+
+// UpdateReincarnationUpdatedAt sets the "reincarnation_updated_at" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateReincarnationUpdatedAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateReincarnationUpdatedAt()
+	})
+}
+
+// ClearReincarnationUpdatedAt clears the value of the "reincarnation_updated_at" field.
+func (u *AgentUpsertBulk) ClearReincarnationUpdatedAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearReincarnationUpdatedAt()
 	})
 }
 

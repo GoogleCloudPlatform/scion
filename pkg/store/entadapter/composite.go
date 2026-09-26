@@ -81,6 +81,7 @@ type CompositeStore struct {
 	*QuotaStore
 	*AccessConstraintStore
 	*ExternalIdentityStore
+	*AgentReincarnationStore
 
 	client *ent.Client
 	inTx   bool // true when this CompositeStore wraps a transaction
@@ -159,6 +160,7 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		QuotaStore:               NewQuotaStore(client),
 		AccessConstraintStore:    NewAccessConstraintStore(client),
 		ExternalIdentityStore:    NewExternalIdentityStore(client),
+		AgentReincarnationStore:  NewAgentReincarnationStore(client),
 		client:                   client,
 	}
 }
@@ -185,6 +187,12 @@ func (c *CompositeStore) DeleteAgent(ctx context.Context, id string) error {
 	}
 	if _, err := c.client.NotificationSubscription.Delete().
 		Where(notificationsubscription.AgentIDEQ(uid)).Exec(ctx); err != nil {
+		return err
+	}
+	// agent_reincarnations.agent_id is likewise a plain field with no DB-level
+	// FK (same reasoning as AgentCredential — the requester side is
+	// polymorphic, so a real FK edge doesn't fit); cascade explicitly.
+	if err := c.DeleteAgentReincarnationsForAgent(ctx, id); err != nil {
 		return err
 	}
 	return nil

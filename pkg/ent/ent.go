@@ -16,6 +16,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/accesspolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentcredential"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentreincarnation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentsessionmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/allowlistentry"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/apikey"
@@ -135,6 +136,7 @@ func checkColumn(t, c string) error {
 			accesspolicy.Table:             accesspolicy.ValidColumn,
 			agent.Table:                    agent.ValidColumn,
 			agentcredential.Table:          agentcredential.ValidColumn,
+			agentreincarnation.Table:       agentreincarnation.ValidColumn,
 			agentsessionmetrics.Table:      agentsessionmetrics.ValidColumn,
 			allowlistentry.Table:           allowlistentry.ValidColumn,
 			apikey.Table:                   apikey.ValidColumn,

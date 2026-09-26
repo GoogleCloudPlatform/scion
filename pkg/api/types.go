@@ -896,6 +896,26 @@ func IsBrokerModeFromContext(ctx context.Context) bool {
 	return v
 }
 
+type reprovisionContextKey struct{}
+
+// ContextWithReprovision returns a new context flagged as a reincarnation
+// reprovision (design: /scion-volumes/scratchpad/projects/agent-migrate/design.md
+// §3.4). Provisioning uses this to force-overwrite content that a normal
+// provision call leaves alone once present (e.g. a platform skill directory
+// whose embedded content changed in a newer broker binary), while still
+// preserving the agent's home directory and workspace/worktree as a whole.
+func ContextWithReprovision(ctx context.Context) context.Context {
+	return context.WithValue(ctx, reprovisionContextKey{}, true)
+}
+
+// IsReprovisionFromContext returns true if the context indicates a
+// reincarnation reprovision rather than a normal (first-time or restart)
+// provision.
+func IsReprovisionFromContext(ctx context.Context) bool {
+	v, _ := ctx.Value(reprovisionContextKey{}).(bool)
+	return v
+}
+
 type harnessConfigPathContextKey struct{}
 
 // ContextWithHarnessConfigPath records a pre-resolved local directory for the

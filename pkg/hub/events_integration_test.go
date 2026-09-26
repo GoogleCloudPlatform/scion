@@ -37,7 +37,8 @@ func (noopDispatcher) DispatchAgentCreate(_ context.Context, agent *store.Agent)
 	agent.Phase = string(state.PhaseRunning)
 	return nil
 }
-func (noopDispatcher) DispatchAgentProvision(_ context.Context, _ *store.Agent) error { return nil }
+func (noopDispatcher) DispatchAgentProvision(_ context.Context, _ *store.Agent) error   { return nil }
+func (noopDispatcher) DispatchAgentReprovision(_ context.Context, _ *store.Agent) error { return nil }
 func (noopDispatcher) DispatchAgentStart(_ context.Context, _ *store.Agent, _ string, _ bool) error {
 	return nil
 }

@@ -153,6 +153,60 @@ func TestCreateAgent_AttachesSkillResolver_PreResolvedSkills(t *testing.T) {
 	}
 }
 
+// TestCreateAgent_Reprovision_AttachesSkillResolver pins that a reprovision
+// request reaches Manager.Reprovision with the same skill resolver create
+// attaches (#1960), so a reprovision resolves the hub's pre-resolved skills
+// exactly as create does.
+func TestCreateAgent_Reprovision_AttachesSkillResolver(t *testing.T) {
+	srv, mgr := newTestServerWithProvisionCapture()
+
+	const uri = "skill://scion/global/test-skill@1.0.0"
+	body := `{
+		"name": "provisioned-agent",
+		"id": "agent-uuid-456",
+		"slug": "provisioned-agent",
+		"provisionOnly": true,
+		"reprovision": true,
+		"config": {"template": "claude"},
+		"preResolvedSkills": {
+			"resolved": [{
+				"uri": "` + uri + `",
+				"name": "test-skill",
+				"resolvedVersion": "1.0.0",
+				"contentHash": "sha256:abc",
+				"files": []
+			}]
+		}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, w.Code, w.Body.String())
+	}
+	if !mgr.reprovisionCalled || mgr.provisionCalled {
+		t.Fatalf("expected Reprovision (not Provision), got reprovision=%v provision=%v", mgr.reprovisionCalled, mgr.provisionCalled)
+	}
+	if mgr.lastReprovisionCtx == nil {
+		t.Fatal("expected Reprovision to be called with a captured context")
+	}
+
+	resolver := agent.SkillResolverFromContext(mgr.lastReprovisionCtx)
+	if resolver == nil {
+		t.Fatal("expected createAgent to attach a skill resolver to the reprovision context")
+	}
+	result, err := resolver.Resolve(mgr.lastReprovisionCtx, []api.SkillReference{{URI: uri}}, agent.ResolveOpts{})
+	if err != nil {
+		t.Fatalf("resolver.Resolve returned error: %v", err)
+	}
+	if len(result.Resolved) != 1 || result.Resolved[0].URI != uri {
+		t.Errorf("expected the pre-resolved skill to resolve successfully, got: %+v", result)
+	}
+}
+
 // TestStartAgent_NoResolverAttachedWithoutHubOrPreResolved is the parity
 // check for #1960: when the start request carries neither a Hub connection
 // nor PreResolvedSkills — the same as before the fix, for a request that

@@ -162,10 +162,11 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		Name:     s.config.BrokerName,
 		Version:  s.version,
 		Capabilities: &BrokerCapabilities{
-			WebPTY: false, // TODO: Implement WebSocket PTY
-			Sync:   true,
-			Attach: true,
-			Exec:   true,
+			WebPTY:      false, // TODO: Implement WebSocket PTY
+			Sync:        true,
+			Attach:      true,
+			Exec:        true,
+			Reprovision: true,
 		},
 		Profiles: s.buildInfoProfiles(runtimeType),
 	}
@@ -906,9 +907,28 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 
 	// Branch based on provision-only flag
 	if req.ProvisionOnly {
-		// Provision only: set up dirs, worktree, templates without starting the container
-		cfg, err := sc.Manager.Provision(ctx, opts)
+		// Provision only: set up dirs, worktree, templates without starting the container.
+		// Reprovision (reincarnation) forces a fresh render of an existing agent's
+		// config instead of reusing what's persisted — see Manager.Reprovision.
+		var cfg *api.ScionConfig
+		var err error
+		if req.Reprovision {
+			cfg, err = sc.Manager.Reprovision(ctx, opts)
+		} else {
+			cfg, err = sc.Manager.Provision(ctx, opts)
+		}
 		if err != nil {
+			// Design §3.4 Amendment A4.2: Reprovision wraps every refusal in
+			// agent.ErrReprovisionRefused (workspace preconditions, running-container
+			// check). Surface those as 409 Conflict rather than a generic 500 so
+			// callers — and the reincarnate worker's failure message — can tell
+			// "refused to run" apart from an actual provisioning error.
+			if errors.Is(err, agent.ErrReprovisionRefused) {
+				markAttemptFailed(http.StatusConflict, "reprovision refused")
+				span.SetStatus(codes.Error, err.Error())
+				Conflict(w, "Failed to provision agent: "+err.Error())
+				return
+			}
 			span.SetStatus(codes.Error, err.Error())
 			if errors.Is(err, config.ErrHarnessConfigNotFound) || errors.Is(err, config.ErrTemplateNotFound) {
 				markAttemptFailed(http.StatusNotFound, "failed to provision agent")
@@ -923,6 +943,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		s.agentLifecycleLog.Info("Agent provisioned",
 			"agent_id", req.ID, "project_id", req.ProjectID,
 			"name", req.Name, "slug", req.Slug,
+			"reprovision", req.Reprovision,
 			"phase", string(state.PhaseCreated))
 
 		// Build a response with "created" status (no container launched)
@@ -944,6 +965,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		resp := CreateAgentResponse{
 			Agent:   agentResp,
 			Created: true,
+			// Design §3.4 Amendment A2.2(a): echo Reprovision only when this branch actually
+			// ran Manager.Reprovision, never merely because the request
+			// asked for it — the hub's dispatch fails closed when it asked
+			// for a reprovision and did not get this echo back.
+			Reprovisioned: req.Reprovision,
 		}
 		if attempt != nil {
 			s.dispatchAttemptsMu.Lock()

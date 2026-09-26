@@ -71,6 +71,21 @@ import (
 // delete legitimate explicit env instead of only the residue this cleanup
 // exists to remove.
 //
+// CreateInputs.InlineConfig.Env (the create request's explicit config, kept
+// for `scion reincarnate`) gets the InlineConfig.Env rule for the same reason.
+//
+// The same sweep then visits every agent_reincarnations record, including
+// records whose agent has since been deleted, and applies these rules to both
+// config snapshots (previous_applied_config and new_applied_config). A
+// snapshot's Env gets the AppliedConfig.Env rule, evaluated against the
+// owning agent's scopes and the snapshot's own template and InlineConfig;
+// its InlineConfig.Env and CreateInputs.InlineConfig.Env get the narrow
+// rule. When the owning agent row no longer exists there are no agent scopes
+// to evaluate against, so Env falls back to the narrow rule too (hub-scope
+// secret names plus GITHUB_TOKEN). Non-terminal records are skipped and
+// counted: they are live rollback sources owned by a running reincarnation,
+// and a later run picks them up once they are terminal.
+//
 // The response-side redaction (redactAppliedConfigEnvForResponse,
 // AgentAppliedConfig.ResponseView) remains the backstop regardless of what
 // this sweep identifies in either field: GITHUB_TOKEN is always withheld,
@@ -94,6 +109,10 @@ type AppliedConfigEnvCleanupExecutor struct {
 	// applied once per sweep instead of once per agent.
 	envVarCache map[string][]store.EnvVar
 	secretCache map[string][]secret.SecretMeta
+
+	// agentCache memoizes the owning-agent lookup for reincarnation records
+	// within one Run; a nil entry records that the agent row is gone.
+	agentCache map[string]*store.Agent
 }
 
 // appliedConfigEnvCleanupResult is a machine-readable summary, mirroring the
@@ -102,6 +121,11 @@ type appliedConfigEnvCleanupResult struct {
 	AgentsScanned int `json:"agentsScanned"`
 	AgentsUpdated int `json:"agentsUpdated"`
 	KeysStripped  int `json:"keysStripped"`
+
+	ReincarnationsScanned            int `json:"reincarnationsScanned"`
+	ReincarnationsUpdated            int `json:"reincarnationsUpdated"`
+	ReincarnationsSkippedNonTerminal int `json:"reincarnationsSkippedNonTerminal"`
+	ReincarnationKeysStripped        int `json:"reincarnationKeysStripped"`
 }
 
 func (e *AppliedConfigEnvCleanupExecutor) Run(ctx context.Context, logger io.Writer, params map[string]string) error {
@@ -112,6 +136,7 @@ func (e *AppliedConfigEnvCleanupExecutor) Run(ctx context.Context, logger io.Wri
 
 	e.envVarCache = make(map[string][]store.EnvVar)
 	e.secretCache = make(map[string][]secret.SecretMeta)
+	e.agentCache = make(map[string]*store.Agent)
 
 	result := appliedConfigEnvCleanupResult{}
 	cursor := ""
@@ -134,14 +159,12 @@ func (e *AppliedConfigEnvCleanupExecutor) Run(ctx context.Context, logger io.Wri
 			if agent.AppliedConfig == nil {
 				continue
 			}
-			hasAppliedEnv := len(agent.AppliedConfig.Env) > 0
-			hasInlineEnv := agent.AppliedConfig.InlineConfig != nil && len(agent.AppliedConfig.InlineConfig.Env) > 0
-			if !hasAppliedEnv && !hasInlineEnv {
+			if !appliedConfigHasEnv(agent.AppliedConfig) {
 				continue
 			}
 
-			appliedStrip, inlineStrip := e.keysToStrip(ctx, agent)
-			if len(appliedStrip) == 0 && len(inlineStrip) == 0 {
+			appliedStrip, inlineStrip, createInputsStrip := e.keysToStrip(ctx, agent, agent.AppliedConfig, false)
+			if len(appliedStrip) == 0 && len(inlineStrip) == 0 && len(createInputsStrip) == 0 {
 				continue
 			}
 
@@ -151,13 +174,16 @@ func (e *AppliedConfigEnvCleanupExecutor) Run(ctx context.Context, logger io.Wri
 			for _, k := range inlineStrip {
 				_, _ = fmt.Fprintf(logger, "  %s agent=%s field=inlineConfig.env key=%s\n", stripVerb(dryRun), agent.ID, k)
 			}
-			result.KeysStripped += len(appliedStrip) + len(inlineStrip)
+			for _, k := range createInputsStrip {
+				_, _ = fmt.Fprintf(logger, "  %s agent=%s field=createInputs.inlineConfig.env key=%s\n", stripVerb(dryRun), agent.ID, k)
+			}
+			result.KeysStripped += len(appliedStrip) + len(inlineStrip) + len(createInputsStrip)
 			result.AgentsUpdated++
 
 			if dryRun {
 				continue
 			}
-			if err := e.stripKeysWithRetry(ctx, agent.ID, appliedStrip, inlineStrip); err != nil {
+			if err := e.stripKeysWithRetry(ctx, agent.ID, appliedStrip, inlineStrip, createInputsStrip); err != nil {
 				_, _ = fmt.Fprintf(logger, "  WARN agent=%s - failed to update: %v\n", agent.ID, err)
 			}
 		}
@@ -170,7 +196,36 @@ func (e *AppliedConfigEnvCleanupExecutor) Run(ctx context.Context, logger io.Wri
 
 	_, _ = fmt.Fprintf(logger, "Scanned %d agent(s); normalized %d agent config row(s) (%d field(s)).\n",
 		result.AgentsScanned, result.AgentsUpdated, result.KeysStripped)
+
+	if err := e.cleanReincarnationSnapshots(ctx, logger, dryRun, &result); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(logger, "Scanned %d reincarnation record(s); normalized %d (%d field(s)); skipped %d non-terminal record(s).\n",
+		result.ReincarnationsScanned, result.ReincarnationsUpdated, result.ReincarnationKeysStripped, result.ReincarnationsSkippedNonTerminal)
 	return nil
+}
+
+// appliedConfigHasEnv reports whether cfg has any env map this cleanup
+// inspects.
+func appliedConfigHasEnv(cfg *store.AgentAppliedConfig) bool {
+	if cfg == nil {
+		return false
+	}
+	if len(cfg.Env) > 0 {
+		return true
+	}
+	if cfg.InlineConfig != nil && len(cfg.InlineConfig.Env) > 0 {
+		return true
+	}
+	return createInputsInlineEnv(cfg) != nil
+}
+
+// createInputsInlineEnv returns cfg.CreateInputs.InlineConfig.Env, or nil.
+func createInputsInlineEnv(cfg *store.AgentAppliedConfig) map[string]string {
+	if cfg == nil || cfg.CreateInputs == nil || cfg.CreateInputs.InlineConfig == nil || len(cfg.CreateInputs.InlineConfig.Env) == 0 {
+		return nil
+	}
+	return cfg.CreateInputs.InlineConfig.Env
 }
 
 func stripVerb(dryRun bool) string {
@@ -192,10 +247,22 @@ func stripVerb(dryRun bool) string {
 // other source to match against by design, so demanding one here would
 // delete legitimate explicit env instead of only the residue this cleanup
 // exists to remove.
-func (e *AppliedConfigEnvCleanupExecutor) keysToStrip(ctx context.Context, agent *store.Agent) (applied, inline []string) {
+//
+// agent supplies the scopes (owner, project, runtime broker) the secret and
+// env-var lookups run against; cfg is the config being decided, which is the
+// agent's own AppliedConfig for an agent row or a snapshot for a
+// reincarnation record. createInputs lists keys to remove from
+// cfg.CreateInputs.InlineConfig.Env, decided by the same narrow rule as
+// inline.
+//
+// narrowEnv applies the narrow rule to cfg.Env as well. It is set for a
+// reincarnation snapshot whose agent row is gone: without the agent's scopes
+// the "currently resolvable plain source" test cannot be evaluated, so only
+// keys positively known to be secret are removed.
+func (e *AppliedConfigEnvCleanupExecutor) keysToStrip(ctx context.Context, agent *store.Agent, cfg *store.AgentAppliedConfig, narrowEnv bool) (applied, inline, createInputs []string) {
 	envVarsByKey := e.reachableEnvVarsByKey(ctx, agent)
 	secretNames := e.reachableSecretNames(ctx, agent)
-	plainValues := e.resolvablePlainValues(ctx, agent, envVarsByKey)
+	plainValues := e.resolvablePlainValues(ctx, cfg, envVarsByKey)
 
 	isKnownSecret := func(k string) bool {
 		if k == "GITHUB_TOKEN" {
@@ -207,9 +274,12 @@ func (e *AppliedConfigEnvCleanupExecutor) keysToStrip(ctx context.Context, agent
 		return secretNames[k]
 	}
 
-	for k, v := range agent.AppliedConfig.Env {
+	for k, v := range cfg.Env {
 		if isKnownSecret(k) {
 			applied = append(applied, k)
+			continue
+		}
+		if narrowEnv {
 			continue
 		}
 		if values, ok := plainValues[k]; ok && values[v] {
@@ -218,15 +288,21 @@ func (e *AppliedConfigEnvCleanupExecutor) keysToStrip(ctx context.Context, agent
 		applied = append(applied, k)
 	}
 
-	if agent.AppliedConfig.InlineConfig != nil {
-		for k := range agent.AppliedConfig.InlineConfig.Env {
+	if cfg.InlineConfig != nil {
+		for k := range cfg.InlineConfig.Env {
 			if isKnownSecret(k) {
 				inline = append(inline, k)
 			}
 		}
 	}
 
-	return applied, inline
+	for k := range createInputsInlineEnv(cfg) {
+		if isKnownSecret(k) {
+			createInputs = append(createInputs, k)
+		}
+	}
+
+	return applied, inline, createInputs
 }
 
 // resolvablePlainValues returns, for every key, the set of values a
@@ -237,7 +313,7 @@ func (e *AppliedConfigEnvCleanupExecutor) keysToStrip(ctx context.Context, agent
 // run, not a residual value from before the write-path fix. This mirrors the
 // persistence allowlist in shouldPersistResolvedEnvKey (httpdispatcher.go),
 // applied after the fact to rows that were already written.
-func (e *AppliedConfigEnvCleanupExecutor) resolvablePlainValues(ctx context.Context, agent *store.Agent, envVarsByKey map[string]store.EnvVar) map[string]map[string]bool {
+func (e *AppliedConfigEnvCleanupExecutor) resolvablePlainValues(ctx context.Context, cfg *store.AgentAppliedConfig, envVarsByKey map[string]store.EnvVar) map[string]map[string]bool {
 	values := make(map[string]map[string]bool)
 	add := func(k, v string) {
 		set, ok := values[k]
@@ -248,16 +324,16 @@ func (e *AppliedConfigEnvCleanupExecutor) resolvablePlainValues(ctx context.Cont
 		set[v] = true
 	}
 
-	if agent.AppliedConfig != nil {
-		if agent.AppliedConfig.TemplateID != "" {
-			if tmpl, err := e.Store.GetTemplate(ctx, agent.AppliedConfig.TemplateID); err == nil && tmpl != nil && tmpl.Config != nil {
+	if cfg != nil {
+		if cfg.TemplateID != "" {
+			if tmpl, err := e.Store.GetTemplate(ctx, cfg.TemplateID); err == nil && tmpl != nil && tmpl.Config != nil {
 				for k, v := range tmpl.Config.Env {
 					add(k, v)
 				}
 			}
 		}
-		if agent.AppliedConfig.InlineConfig != nil {
-			for k, v := range agent.AppliedConfig.InlineConfig.Env {
+		if cfg.InlineConfig != nil {
+			for k, v := range cfg.InlineConfig.Env {
 				add(k, v)
 			}
 		}
@@ -382,14 +458,15 @@ func (e *AppliedConfigEnvCleanupExecutor) secretScopeFilters(agent *store.Agent)
 }
 
 // stripKeysWithRetry deletes appliedKeys from the agent's persisted
-// AppliedConfig.Env and inlineKeys from AppliedConfig.InlineConfig.Env (both
-// in the same read-modify-write), retrying on an optimistic-lock conflict by
+// AppliedConfig.Env, inlineKeys from AppliedConfig.InlineConfig.Env and
+// createInputsKeys from AppliedConfig.CreateInputs.InlineConfig.Env (all in
+// the same read-modify-write), retrying on an optimistic-lock conflict by
 // re-reading the latest row and recomputing which of the target keys are
 // still present (a concurrent writer may have already removed or changed
 // them). Bounded at a handful of attempts so a pathologically hot row cannot
 // spin the migration forever; a row that keeps losing the race is simply
 // picked up again on the next run of this (idempotent) migration.
-func (e *AppliedConfigEnvCleanupExecutor) stripKeysWithRetry(ctx context.Context, agentID string, appliedKeys, inlineKeys []string) error {
+func (e *AppliedConfigEnvCleanupExecutor) stripKeysWithRetry(ctx context.Context, agentID string, appliedKeys, inlineKeys, createInputsKeys []string) error {
 	const maxAttempts = 5
 	removeApplied := make(map[string]bool, len(appliedKeys))
 	for _, k := range appliedKeys {
@@ -398,6 +475,10 @@ func (e *AppliedConfigEnvCleanupExecutor) stripKeysWithRetry(ctx context.Context
 	removeInline := make(map[string]bool, len(inlineKeys))
 	for _, k := range inlineKeys {
 		removeInline[k] = true
+	}
+	removeCreateInputs := make(map[string]bool, len(createInputsKeys))
+	for _, k := range createInputsKeys {
+		removeCreateInputs[k] = true
 	}
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
@@ -424,6 +505,14 @@ func (e *AppliedConfigEnvCleanupExecutor) stripKeysWithRetry(ctx context.Context
 				}
 			}
 		}
+		if env := createInputsInlineEnv(agent.AppliedConfig); env != nil {
+			for k := range removeCreateInputs {
+				if _, ok := env[k]; ok {
+					delete(env, k)
+					changed = true
+				}
+			}
+		}
 		if !changed {
 			return nil
 		}
@@ -438,4 +527,134 @@ func (e *AppliedConfigEnvCleanupExecutor) stripKeysWithRetry(ctx context.Context
 		// Lost the race: loop and retry against the latest row.
 	}
 	return fmt.Errorf("agent %s: gave up after %d version-conflict retries", agentID, maxAttempts)
+}
+
+// reincarnationSnapshotPageSize bounds each ListAgentReincarnationsPage call.
+const reincarnationSnapshotPageSize = 200
+
+// cleanReincarnationSnapshots applies the agent-row rules to both config
+// snapshots of every terminal agent_reincarnations record. See the type doc
+// for the per-field rules and the deleted-agent fallback.
+func (e *AppliedConfigEnvCleanupExecutor) cleanReincarnationSnapshots(ctx context.Context, logger io.Writer, dryRun bool, result *appliedConfigEnvCleanupResult) error {
+	afterID := ""
+	for {
+		page, err := e.Store.ListAgentReincarnationsPage(ctx, afterID, reincarnationSnapshotPageSize)
+		if err != nil {
+			return fmt.Errorf("list agent reincarnations: %w", err)
+		}
+		for _, rec := range page {
+			result.ReincarnationsScanned++
+			if store.IsAgentReincarnationStateNonTerminal(rec.State) {
+				result.ReincarnationsSkippedNonTerminal++
+				continue
+			}
+			if !appliedConfigHasEnv(rec.PreviousAppliedConfig) && !appliedConfigHasEnv(rec.NewAppliedConfig) {
+				continue
+			}
+
+			scopeAgent, gone, err := e.reincarnationOwner(ctx, rec.AgentID)
+			if err != nil {
+				return err
+			}
+
+			stripped := 0
+			for _, snap := range []struct {
+				name string
+				cfg  *store.AgentAppliedConfig
+			}{
+				{"previous", rec.PreviousAppliedConfig},
+				{"new", rec.NewAppliedConfig},
+			} {
+				if !appliedConfigHasEnv(snap.cfg) {
+					continue
+				}
+				applied, inline, createInputs := e.keysToStrip(ctx, scopeAgent, snap.cfg, gone)
+				for _, field := range []struct {
+					suffix string
+					keys   []string
+				}{
+					{"env", applied},
+					{"inlineConfig.env", inline},
+					{"createInputs.inlineConfig.env", createInputs},
+				} {
+					for _, k := range field.keys {
+						_, _ = fmt.Fprintf(logger, "  %s reincarnation=%s agent=%s field=reincarnation.%s.%s key=%s\n",
+							stripVerb(dryRun), rec.ID, rec.AgentID, snap.name, field.suffix, k)
+					}
+				}
+				stripped += len(applied) + len(inline) + len(createInputs)
+				removeSnapshotEnvKeys(snap.cfg, applied, inline, createInputs)
+			}
+			if stripped == 0 {
+				continue
+			}
+			result.ReincarnationKeysStripped += stripped
+			result.ReincarnationsUpdated++
+
+			if dryRun {
+				continue
+			}
+			ok, err := e.Store.UpdateAgentReincarnationSnapshots(ctx, rec, rec.State)
+			if err != nil {
+				// Matches the agent-row loop: report the record and move on,
+				// so one failing row does not stop the rest of the scan.
+				_, _ = fmt.Fprintf(logger, "  WARN reincarnation=%s - failed to update: %v\n", rec.ID, err)
+				continue
+			}
+			if !ok {
+				// The record changed state or was removed since it was read;
+				// the next (idempotent) run re-evaluates it.
+				_, _ = fmt.Fprintf(logger, "  WARN reincarnation=%s changed concurrently; left for the next run\n", rec.ID)
+			}
+		}
+		if len(page) < reincarnationSnapshotPageSize {
+			break
+		}
+		afterID = page[len(page)-1].ID
+	}
+	if result.ReincarnationsSkippedNonTerminal > 0 {
+		_, _ = fmt.Fprintf(logger, "  skipped %d non-terminal reincarnation record(s); re-run once they finish\n",
+			result.ReincarnationsSkippedNonTerminal)
+	}
+	return nil
+}
+
+// reincarnationOwner returns the agent whose scopes a reincarnation record's
+// snapshots are evaluated against. When the agent row no longer exists it
+// returns a stub with no owner, project or broker, so the scope lookups
+// resolve hub-scope entries only, and gone == true.
+func (e *AppliedConfigEnvCleanupExecutor) reincarnationOwner(ctx context.Context, agentID string) (agent *store.Agent, gone bool, err error) {
+	if cached, ok := e.agentCache[agentID]; ok {
+		if cached == nil {
+			return &store.Agent{ID: agentID}, true, nil
+		}
+		return cached, false, nil
+	}
+	a, err := e.Store.GetAgent(ctx, agentID)
+	if errors.Is(err, store.ErrNotFound) {
+		e.agentCache[agentID] = nil
+		return &store.Agent{ID: agentID}, true, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("get agent %s: %w", agentID, err)
+	}
+	e.agentCache[agentID] = a
+	return a, false, nil
+}
+
+// removeSnapshotEnvKeys deletes the given keys from cfg's env maps in place.
+func removeSnapshotEnvKeys(cfg *store.AgentAppliedConfig, applied, inline, createInputs []string) {
+	for _, k := range applied {
+		delete(cfg.Env, k)
+	}
+	if cfg.InlineConfig != nil {
+		for _, k := range inline {
+			delete(cfg.InlineConfig.Env, k)
+		}
+	}
+	if env := createInputsInlineEnv(cfg); env != nil {
+		for _, k := range createInputs {
+			delete(env, k)
+		}
+	}
 }

@@ -87,6 +87,10 @@ type protocolMockManager struct {
 func (m *protocolMockManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
 	return nil, nil
 }
+
+func (m *protocolMockManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	return nil, nil
+}
 func (m *protocolMockManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
 	return nil, nil
 }

@@ -77,6 +77,10 @@ func (d *containmentDispatchSpy) DispatchAgentCreate(_ context.Context, agent *s
 func (d *containmentDispatchSpy) DispatchAgentProvision(_ context.Context, _ *store.Agent) error {
 	return nil
 }
+
+func (d *containmentDispatchSpy) DispatchAgentReprovision(_ context.Context, _ *store.Agent) error {
+	return nil
+}
 func (d *containmentDispatchSpy) DispatchAgentStart(_ context.Context, agent *store.Agent, _ string, _ bool) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()

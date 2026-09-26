@@ -294,3 +294,63 @@ func TestCompositeStore_MigrateRunsVerificationBackfill(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, store.GCPVerificationVerified, got.VerificationStatus)
 }
+
+// TestCompositeStore_DeleteAgent_CascadesAgentReincarnations covers the
+// agent-reincarnate schema addition (ptone/scion#1821): agent_reincarnations
+// has no DB-level FK to agents (agent_id is a plain field, like
+// AgentCredential's), so DeleteAgent must cascade-delete it explicitly,
+// exactly like the existing notification/notification_subscription cascade.
+func TestCompositeStore_DeleteAgent_CascadesAgentReincarnations(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+
+	projectID := uuid.NewString()
+	require.NoError(t, cs.CreateProject(ctx, &store.Project{
+		ID:   projectID,
+		Name: "cascade-test-project",
+		Slug: "cascade-test-project",
+	}))
+
+	agentID := uuid.NewString()
+	require.NoError(t, cs.CreateAgent(ctx, &store.Agent{
+		ID:        agentID,
+		Slug:      "cascade-agent",
+		Name:      "Cascade Agent",
+		ProjectID: projectID,
+		Phase:     "running",
+	}))
+
+	rec := &store.AgentReincarnation{
+		AgentID:        agentID,
+		FromGeneration: 1,
+		ToGeneration:   2,
+		State:          store.AgentReincarnationStateCompleted,
+	}
+	require.NoError(t, cs.CreateAgentReincarnation(ctx, rec))
+
+	// A reincarnation row for a DIFFERENT agent must survive.
+	otherAgentID := uuid.NewString()
+	require.NoError(t, cs.CreateAgent(ctx, &store.Agent{
+		ID:        otherAgentID,
+		Slug:      "other-agent",
+		Name:      "Other Agent",
+		ProjectID: projectID,
+		Phase:     "running",
+	}))
+	otherRec := &store.AgentReincarnation{
+		AgentID:        otherAgentID,
+		FromGeneration: 1,
+		ToGeneration:   2,
+		State:          store.AgentReincarnationStateCompleted,
+	}
+	require.NoError(t, cs.CreateAgentReincarnation(ctx, otherRec))
+
+	require.NoError(t, cs.DeleteAgent(ctx, agentID))
+
+	_, err := cs.GetAgentReincarnation(ctx, rec.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "reincarnation history must be cascade-deleted with its agent")
+
+	stillThere, err := cs.GetAgentReincarnation(ctx, otherRec.ID)
+	require.NoError(t, err)
+	assert.Equal(t, otherAgentID, stillThere.AgentID, "another agent's reincarnation history must survive")
+}

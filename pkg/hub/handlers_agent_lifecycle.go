@@ -113,6 +113,10 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 //  2. Activity-driven phase auto-correction: when an activity that implies the
 //     agent is running arrives but the phase is pre-running, auto-promotes the
 //     phase to running.
+//
+// It also blocks a status update entirely while a `scion reincarnate`
+// migration owns the agent (Guard 0b, design §3.4 Amendment A11 item 2) —
+// see that guard's comment.
 func guardAgentPhaseTransition(agent *store.Agent, status *store.AgentStatusUpdate) {
 	currentPhase := state.Phase(agent.Phase)
 
@@ -126,6 +130,24 @@ func guardAgentPhaseTransition(agent *store.Agent, status *store.AgentStatusUpda
 	if currentPhase == state.PhaseSuspended {
 		status.Phase = ""
 		status.Activity = ""
+		return
+	}
+
+	// Guard 0b: a `scion reincarnate` migration in flight is sticky the same
+	// way — the reincarnation worker owns Phase/Activity/ExitCode/ExitReason/
+	// Message for the agent until it completes or fails, so an async
+	// sciontool /status POST from the OLD container racing the migration
+	// (e.g. a crash report from the generation the worker is in the middle of
+	// tearing down and replacing) must not surface as the agent's live status.
+	// ContainerStatus and the Heartbeat/LastSeen bump are not status's
+	// concern here (this endpoint does not set them), so nothing further
+	// needs blanking.
+	if reincarnationInFlight(agent) {
+		status.Phase = ""
+		status.Activity = ""
+		status.ExitCode = nil
+		status.ExitReason = ""
+		status.Message = ""
 		return
 	}
 

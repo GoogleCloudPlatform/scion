@@ -106,6 +106,12 @@ type AgentService interface {
 
 	// SetMessageMode changes the messaging mode for an agent.
 	SetMessageMode(ctx context.Context, agentID string, req *SetMessageModeRequest, opts *SetMessageModeOptions) (*SetMessageModeResponse, error)
+
+	// Reincarnate requests a `scion reincarnate` migration for an agent:
+	// re-resolve its configuration against the current template/harness-config
+	// catalog and start a new generation with the given handoff as its first
+	// task. With req.DryRun, returns the resolved plan and changes nothing.
+	Reincarnate(ctx context.Context, agentID string, req *ReincarnateAgentRequest) (*ReincarnateAgentResponse, error)
 }
 
 // agentService is the implementation of AgentService.
@@ -810,4 +816,69 @@ func (s *agentService) SetMessageMode(ctx context.Context, agentID string, req *
 		return nil, err
 	}
 	return apiclient.DecodeResponse[SetMessageModeResponse](resp)
+}
+
+// Reincarnate requests a `scion reincarnate` migration for an agent (design
+// /scion-volumes/scratchpad/projects/agent-migrate/design.md §3.2).
+func (s *agentService) Reincarnate(ctx context.Context, agentID string, req *ReincarnateAgentRequest) (*ReincarnateAgentResponse, error) {
+	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/reincarnate", req, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeResponse[ReincarnateAgentResponse](resp)
+}
+
+// ReincarnateAgentRequest is the request body for Reincarnate. Phase 1
+// supports only Handoff and DryRun; every override field is accepted on the
+// wire (so a hub that has adopted overrides can still parse an old client's
+// request), but a Phase-1 hub rejects any of them with a 400.
+type ReincarnateAgentRequest struct {
+	Handoff string `json:"handoff,omitempty"`
+	DryRun  bool   `json:"dryRun,omitempty"`
+
+	// Phase 3 overrides — not yet supported by a Phase 1 hub.
+	Image          string            `json:"image,omitempty"`
+	HarnessConfig  string            `json:"harnessConfig,omitempty"`
+	HarnessAuth    string            `json:"harnessAuth,omitempty"`
+	Model          string            `json:"model,omitempty"`
+	Env            map[string]string `json:"env,omitempty"`
+	TemplateHash   string            `json:"templateHash,omitempty"`
+	ResetOverrides bool              `json:"resetOverrides,omitempty"`
+	Rollback       bool              `json:"rollback,omitempty"`
+}
+
+// ReincarnateAgentResponse is the response body for Reincarnate: 202 for a
+// persisted (pending) reincarnation, or 200 for a dry run.
+type ReincarnateAgentResponse struct {
+	AgentID    string            `json:"agentId"`
+	Generation int               `json:"generation"`
+	State      string            `json:"state"`
+	Plan       ReincarnationPlan `json:"plan"`
+}
+
+// FieldChange describes an old→new change to a single scalar field on the
+// reincarnation plan.
+type FieldChange struct {
+	Old string `json:"old,omitempty"`
+	New string `json:"new,omitempty"`
+}
+
+// KeyDiff describes an old→new change to a set of map keys (e.g. env var
+// names), by name only — never by value.
+type KeyDiff struct {
+	Added   []string `json:"added,omitempty"`
+	Removed []string `json:"removed,omitempty"`
+	Changed []string `json:"changed,omitempty"`
+}
+
+// ReincarnationPlan is the old→new diff returned by both a dry run and a real
+// reincarnate request.
+type ReincarnationPlan struct {
+	Template   FieldChange `json:"template"`
+	Image      FieldChange `json:"image"`
+	HarnessCfg FieldChange `json:"harnessConfig"`
+	Model      FieldChange `json:"model"`
+	EnvKeys    KeyDiff     `json:"envKeys"`
+	Branch     string      `json:"branch"`
+	Warnings   []string    `json:"warnings,omitempty"`
 }

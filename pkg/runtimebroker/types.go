@@ -98,6 +98,11 @@ type BrokerCapabilities struct {
 	Sync   bool `json:"sync"`
 	Attach bool `json:"attach"`
 	Exec   bool `json:"exec"`
+	// Reprovision indicates this broker supports the reincarnation reprovision
+	// primitive (POST .../agents/{id} with provisionOnly+reprovision, design
+	// §3.4). The hub gates `scion reincarnate` on this — see
+	// store.BrokerCapabilities.Reprovision and its 412 gate in pkg/hub.
+	Reprovision bool `json:"reprovision"`
 }
 
 // ProjectInfo is a summary of a project registered on this broker.
@@ -299,6 +304,15 @@ type CreateAgentRequest struct {
 	// ProvisionOnly indicates the agent should be provisioned (dirs, worktree, templates)
 	// but not started. The container will not be launched.
 	ProvisionOnly bool `json:"provisionOnly,omitempty"`
+	// Reprovision indicates this ProvisionOnly request targets an existing
+	// agent whose on-disk config should be replaced from the current
+	// template/harness-config catalog, for a `scion reincarnate` request
+	// (design §3.4). The hub always sets ProvisionOnly alongside this. Unlike
+	// a plain ProvisionOnly call (which reuses persisted config when the
+	// agent directory already exists), Reprovision forces a fresh render
+	// while preserving the agent's home directory and clone-per-agent
+	// workspace. Ignored when ProvisionOnly is false.
+	Reprovision bool `json:"reprovision,omitempty"`
 	// ProjectPath is the local filesystem path to the project on this runtime broker.
 	// This is provided by the Hub from the project provider record.
 	ProjectPath string `json:"projectPath,omitempty"`
@@ -476,6 +490,15 @@ type GCPIdentityConfig struct {
 type CreateAgentResponse struct {
 	Agent   *AgentResponse `json:"agent"`
 	Created bool           `json:"created"`
+
+	// Reprovisioned is set true ONLY on the branch of handleCreateAgent that
+	// actually ran Manager.Reprovision (design §3.4 Amendment A2.2(a)).
+	// A broker that predates the reincarnate feature has no field named
+	// "reprovision" in its request handling at all, so it silently runs a
+	// plain Provision for a request that set Reprovision=true — the hub
+	// treats an absent echo on a reprovision dispatch as a failure, which is
+	// what keeps that failure mode closed instead of a silent no-op.
+	Reprovisioned bool `json:"reprovisioned,omitempty"`
 }
 
 // EnvRequirementsResponse is returned by the broker when GatherEnv is true

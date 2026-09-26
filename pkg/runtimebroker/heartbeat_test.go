@@ -104,6 +104,10 @@ func (m *heartbeatMockManager) Provision(ctx context.Context, opts api.StartOpti
 	return nil, nil
 }
 
+func (m *heartbeatMockManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	return nil, nil
+}
+
 func (m *heartbeatMockManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
 	return nil, nil
 }
@@ -218,6 +222,36 @@ func TestHeartbeatService_ForceHeartbeat(t *testing.T) {
 	calls := client.getHeartbeatCalls()
 	if len(calls) != 1 {
 		t.Errorf("Expected 1 heartbeat call, got %d", len(calls))
+	}
+}
+
+// TestHeartbeatService_ReportsReprovisionCapability is the design §3.4
+// Amendment A2.2(b) regression test: every heartbeat must report
+// Capabilities.Reprovision=true, since that is what lets an already-joined
+// remote broker's capabilities self-heal after an upgrade without a manual
+// --force re-registration (the hub refreshes its stored capabilities from
+// this field — see hub handlers_runtime_brokers.go's heartbeat handler).
+func TestHeartbeatService_ReportsReprovisionCapability(t *testing.T) {
+	client := &mockRuntimeBrokerService{}
+	svc := NewHeartbeatService(client, "test-host", time.Hour, nil, nil, slog.Default())
+
+	if err := svc.ForceHeartbeat(context.Background()); err != nil {
+		t.Fatalf("ForceHeartbeat failed: %v", err)
+	}
+
+	calls := client.getHeartbeatCalls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 heartbeat call, got %d", len(calls))
+	}
+	hb := calls[0].Heartbeat
+	if hb.Capabilities == nil {
+		t.Fatal("expected the heartbeat to include Capabilities")
+	}
+	if !hb.Capabilities.Reprovision {
+		t.Error("expected Capabilities.Reprovision to be true on every heartbeat")
+	}
+	if !hb.Capabilities.Sync || !hb.Capabilities.Attach {
+		t.Error("expected Sync and Attach capabilities to still be reported")
 	}
 }
 

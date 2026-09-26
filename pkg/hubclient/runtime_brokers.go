@@ -134,6 +134,17 @@ func (r *ListBrokerProjectsResponse) UnmarshalJSON(data []byte) error {
 type BrokerHeartbeat struct {
 	Status   string             `json:"status"`
 	Projects []ProjectHeartbeat `json:"projects,omitempty"`
+	// Capabilities refreshes the broker's reported capabilities on every
+	// heartbeat (design §3.4 Amendment A2.2(b)). Chosen over a hub->broker live /info query:
+	// no such query path exists today, and adding one would mean a new
+	// authenticated hub-initiated call plus endpoint resolution and timeout
+	// handling on the `scion reincarnate` pre-flight path, for a value that
+	// changes at most once per broker binary upgrade. Piggybacking on the
+	// heartbeat the broker already sends every few seconds gets the same
+	// "never stale for long" property for free. A CompleteBrokerJoin-time
+	// snapshot alone (the pre-A2 state) is never refreshed for an
+	// already-registered broker until it re-registers with --force.
+	Capabilities *BrokerCapabilities `json:"capabilities,omitempty"`
 }
 
 // MarshalJSON implements custom marshaling to support legacy grove fields.

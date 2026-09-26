@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -563,6 +564,12 @@ func subtractProjectIDs(all, exclude []string) []string {
 type brokerHeartbeatRequest struct {
 	Status   string                   `json:"status"`
 	Projects []brokerProjectHeartbeat `json:"projects,omitempty"`
+	// Capabilities refreshes the broker's stored capabilities on every
+	// heartbeat (design §3.4 Amendment A2.2(b); see
+	// hubclient.BrokerHeartbeat.Capabilities). Omitted by an old broker, in
+	// which case the store's capabilities are
+	// left exactly as CompleteBrokerJoin last set them.
+	Capabilities *store.BrokerCapabilities `json:"capabilities,omitempty"`
 }
 
 // UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
@@ -663,6 +670,26 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
+	// Design §3.4 Amendment A2.2(b): refresh stored capabilities from every heartbeat that
+	// reports them, so an already-registered broker's capabilities are never
+	// stuck at whatever CompleteBrokerJoin saw once at join time — the false
+	// 412 case that otherwise blocks `scion reincarnate` until a manual
+	// --force re-registration. An old broker sends no Capabilities field at
+	// all, and the store keeps whatever it already had (nil-safe: a missing
+	// field, not an empty struct, is the "don't touch" signal).
+	if heartbeat.Capabilities != nil {
+		if broker, err := s.store.GetRuntimeBroker(ctx, id); err != nil {
+			s.agentLifecycleLog.Warn("heartbeat: failed to load broker to refresh capabilities",
+				"broker_id", id, "error", err)
+		} else if !reflect.DeepEqual(broker.Capabilities, heartbeat.Capabilities) {
+			broker.Capabilities = heartbeat.Capabilities
+			if err := s.store.UpdateRuntimeBroker(ctx, broker); err != nil {
+				s.agentLifecycleLog.Warn("heartbeat: failed to persist refreshed capabilities",
+					"broker_id", id, "error", err)
+			}
+		}
+	}
+
 	// Process agent status updates from each project
 	for _, project := range heartbeat.Projects {
 		for _, agentHB := range project.Agents {
@@ -712,11 +739,26 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			// start/stop lifecycle actions may leave the suspended phase.
 			agentSuspended := agent.Phase == string(state.PhaseSuspended)
 
+			// Reincarnation in flight is sticky like suspension (design §3.4
+			// Amendment A11 item 2): the worker owns Phase/Activity/ExitCode/
+			// ExitReason/Message for the duration of a migration, so a racing
+			// heartbeat — including one reporting the OLD container being torn
+			// down mid-reprovision, or a stale crash from before the restart —
+			// must not report a spurious failure while the new generation is
+			// still coming up. ContainerStatus and the Heartbeat/LastSeen bump
+			// still apply below; only the status fields the worker itself drives
+			// are suppressed.
+			agentReincarnating := reincarnationInFlight(agent)
+			if agentReincarnating {
+				statusUpdate.Message = ""
+			}
+
 			if agentHB.Phase != "" {
-				if agentSuspended {
+				if agentSuspended || agentReincarnating {
 					// Do not let the heartbeat change the phase or propagate
-					// terminal activities while suspended; leave statusUpdate.Phase
-					// unset so the hub's authoritative suspended phase is kept.
+					// terminal activities while suspended or reincarnating; leave
+					// statusUpdate.Phase unset so the hub's authoritative phase is
+					// kept.
 				} else if agentInTerminalPhase {
 					// Keep the hub's authoritative terminal phase; only
 					// allow the heartbeat to confirm it (not revert it).
@@ -809,7 +851,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 						}
 					}
 				}
-			} else if !agentInTerminalPhase && !agentSuspended {
+			} else if !agentInTerminalPhase && !agentSuspended && !agentReincarnating {
 				// Legacy path: no structured fields, derive from ContainerStatus
 				// Derive phase from container status to ensure agents
 				// registered via sync (not started via hub) get proper state.

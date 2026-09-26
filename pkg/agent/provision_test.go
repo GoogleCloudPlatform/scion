@@ -2517,6 +2517,109 @@ func TestInjectPlatformSkills(t *testing.T) {
 		}
 	})
 
+	t.Run("stale platform skill is left alone without ForceOverwrite", func(t *testing.T) {
+		agentHome := t.TempDir()
+		skillsDir := ".claude/commands"
+
+		staleContent := "stale platform version from a previous generation"
+		staleSkillDir := filepath.Join(agentHome, skillsDir, "platform-skill")
+		if err := os.MkdirAll(staleSkillDir, 0755); err != nil {
+			t.Fatalf("failed to create stale skill dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(staleSkillDir, "SKILL.md"), []byte(staleContent), 0644); err != nil {
+			t.Fatalf("failed to write stale skill: %v", err)
+		}
+
+		skillsFS := fstest.MapFS{
+			"platform-skill/SKILL.md": &fstest.MapFile{
+				Data: []byte("---\nname: platform-skill\n---\n\nnew platform version"),
+			},
+		}
+
+		injCtx := workspaceSkillsInjectionContext{}
+		if err := injectPlatformSkills(skillsFS, agentHome, skillsDir, injCtx); err != nil {
+			t.Fatalf("injectPlatformSkills failed: %v", err)
+		}
+
+		data, err := os.ReadFile(filepath.Join(staleSkillDir, "SKILL.md"))
+		if err != nil {
+			t.Fatalf("failed to read skill: %v", err)
+		}
+		if string(data) != staleContent {
+			t.Errorf("expected stale skill left untouched without ForceOverwrite: got %q, want %q", string(data), staleContent)
+		}
+	})
+
+	t.Run("ForceOverwrite refreshes a stale platform skill", func(t *testing.T) {
+		agentHome := t.TempDir()
+		skillsDir := ".claude/commands"
+
+		staleContent := "stale platform version from a previous generation"
+		staleSkillDir := filepath.Join(agentHome, skillsDir, "platform-skill")
+		if err := os.MkdirAll(staleSkillDir, 0755); err != nil {
+			t.Fatalf("failed to create stale skill dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(staleSkillDir, "SKILL.md"), []byte(staleContent), 0644); err != nil {
+			t.Fatalf("failed to write stale skill: %v", err)
+		}
+
+		newContent := "---\nname: platform-skill\n---\n\nnew platform version"
+		skillsFS := fstest.MapFS{
+			"platform-skill/SKILL.md": &fstest.MapFile{Data: []byte(newContent)},
+		}
+
+		injCtx := workspaceSkillsInjectionContext{ForceOverwrite: true}
+		if err := injectPlatformSkills(skillsFS, agentHome, skillsDir, injCtx); err != nil {
+			t.Fatalf("injectPlatformSkills failed: %v", err)
+		}
+
+		data, err := os.ReadFile(filepath.Join(staleSkillDir, "SKILL.md"))
+		if err != nil {
+			t.Fatalf("failed to read skill: %v", err)
+		}
+		if string(data) != newContent {
+			t.Errorf("expected ForceOverwrite to refresh stale skill: got %q, want %q", string(data), newContent)
+		}
+	})
+
+	t.Run("ForceOverwrite still respects template precedence", func(t *testing.T) {
+		agentHome := t.TempDir()
+		skillsDir := ".claude/commands"
+
+		// A template-provided skill of the same name — must never be
+		// clobbered by the platform default, even with ForceOverwrite.
+		tplContent := "template version, must survive ForceOverwrite"
+		tplSkillDir := filepath.Join(agentHome, skillsDir, "conflict-skill")
+		if err := os.MkdirAll(tplSkillDir, 0755); err != nil {
+			t.Fatalf("failed to create template skill dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(tplSkillDir, "SKILL.md"), []byte(tplContent), 0644); err != nil {
+			t.Fatalf("failed to write template skill: %v", err)
+		}
+
+		skillsFS := fstest.MapFS{
+			"conflict-skill/SKILL.md": &fstest.MapFile{
+				Data: []byte("---\nname: conflict-skill\n---\n\nplatform version"),
+			},
+		}
+
+		injCtx := workspaceSkillsInjectionContext{
+			ForceOverwrite:     true,
+			TemplateSkillNames: map[string]bool{"conflict-skill": true},
+		}
+		if err := injectPlatformSkills(skillsFS, agentHome, skillsDir, injCtx); err != nil {
+			t.Fatalf("injectPlatformSkills failed: %v", err)
+		}
+
+		data, err := os.ReadFile(filepath.Join(tplSkillDir, "SKILL.md"))
+		if err != nil {
+			t.Fatalf("failed to read skill: %v", err)
+		}
+		if string(data) != tplContent {
+			t.Errorf("template skill was overwritten despite ForceOverwrite: got %q, want %q", string(data), tplContent)
+		}
+	})
+
 	t.Run("skill with nested subdirectory is fully copied", func(t *testing.T) {
 		agentHome := t.TempDir()
 		skillsDir := ".claude/commands"

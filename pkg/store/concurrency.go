@@ -104,6 +104,12 @@ const (
 	// operations and ensures no server is running during recovery.
 	LockRecoveryAuthz AdvisoryLockKey = 0x5C100020
 
+	// LockReincarnationSweep guards the periodic replica-safe sweep that
+	// fails stale non-terminal `scion reincarnate` records and agent
+	// reincarnation_state left behind by a replica that crashed or
+	// restarted mid-migration (design §3.7).
+	LockReincarnationSweep AdvisoryLockKey = 0x5C100022
+
 	// LockInlineSecretsMigration guards the one-shot migration of inline
 	// plugin secrets from settings.yaml to the secret backend at boot time.
 	LockInlineSecretsMigration AdvisoryLockKey = 0x5C100011

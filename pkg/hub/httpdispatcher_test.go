@@ -34,6 +34,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // createTestStore creates an in-memory SQLite store for testing.
@@ -219,6 +221,10 @@ func (m *mockRuntimeBrokerClient) CreateAgentWithGather(ctx context.Context, bro
 			Phase: string(state.PhaseRunning),
 		},
 		Created: true,
+		// Reprovisioned mirrors a real (non-stale) broker's echo: it only
+		// runs Manager.Reprovision, and only sets this, when the request
+		// asked for it. See runtimebroker/handlers.go's ProvisionOnly branch.
+		Reprovisioned: req.Reprovision,
 	}, nil, nil
 }
 
@@ -833,6 +839,389 @@ func TestHTTPAgentDispatcher_DispatchAgentProvision(t *testing.T) {
 	// Verify broker ID was passed
 	if mockClient.lastBrokerID != tid("host-1") {
 		t.Errorf("expected brokerID 'host-1', got '%s'", mockClient.lastBrokerID)
+	}
+}
+
+// TestHTTPAgentDispatcher_DispatchAgentReprovision covers the Phase 1 vertical
+// slice's broker dispatch step (design §3.4): reprovision must set BOTH
+// ProvisionOnly (don't start the container) AND Reprovision (overwrite the
+// persisted config rather than reuse it) on the wire request, and must read
+// the config to send from the agent's CURRENT AppliedConfig — the reincarnate
+// worker is expected to have already replaced it with the freshly resolved
+// generation N+1 config before calling this.
+func TestHTTPAgentDispatcher_DispatchAgentReprovision(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	broker := &store.RuntimeBroker{
+		ID:       tid("host-1"),
+		Name:     "test-host",
+		Slug:     "test-host",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	agent := &store.Agent{
+		ID:              tid("agent-1"),
+		Name:            "test-agent",
+		Slug:            "test-agent",
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("host-1"),
+		AppliedConfig: &store.AgentAppliedConfig{
+			HarnessConfig: "claude",
+			TemplateHash:  "new-generation-hash",
+			Image:         "new-generation-image:v2",
+		},
+	}
+
+	if err := dispatcher.DispatchAgentReprovision(ctx, agent); err != nil {
+		t.Fatalf("DispatchAgentReprovision failed: %v", err)
+	}
+
+	if !mockClient.createCalled {
+		t.Fatal("expected CreateAgent to be called for reprovision")
+	}
+	if !mockClient.lastCreateReq.ProvisionOnly {
+		t.Error("expected ProvisionOnly to be true in the request")
+	}
+	if !mockClient.lastCreateReq.Reprovision {
+		t.Error("expected Reprovision to be true in the request")
+	}
+	if mockClient.lastCreateReq.Config == nil || mockClient.lastCreateReq.Config.TemplateHash != "new-generation-hash" {
+		t.Errorf("expected the new generation's TemplateHash to be sent, got %+v", mockClient.lastCreateReq.Config)
+	}
+	if mockClient.lastCreateReq.Config == nil || mockClient.lastCreateReq.Config.Image != "new-generation-image:v2" {
+		t.Errorf("expected the new generation's Image to be sent, got %+v", mockClient.lastCreateReq.Config)
+	}
+	if mockClient.lastEndpoint != "http://localhost:9800" {
+		t.Errorf("expected endpoint 'http://localhost:9800', got '%s'", mockClient.lastEndpoint)
+	}
+}
+
+// resolvedEnvDispatcher returns a dispatcher whose requests resolve one
+// storage env var (STORED_VAR) and one environment-type value (RESOLVED_VAR)
+// into ResolvedEnv, plus an agent owned by the user they resolve for.
+func resolvedEnvDispatcher(t *testing.T) (*HTTPAgentDispatcher, *mockRuntimeBrokerClient, *store.Agent) {
+	t.Helper()
+	ctx := context.Background()
+	memStore := createTestStore(t)
+	require.NoError(t, memStore.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID:       tid("host-1"),
+		Name:     "test-host",
+		Slug:     "test-host",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}))
+	require.NoError(t, memStore.CreateEnvVar(ctx, &store.EnvVar{
+		ID:            tid("ev-1"),
+		Key:           "STORED_VAR",
+		Value:         "stored-value",
+		Scope:         "user",
+		ScopeID:       tid("user-1"),
+		InjectionMode: store.InjectionModeAlways,
+	}))
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	dispatcher.SetSecretBackend(&mockSecretBackend{
+		secrets: []secret.SecretWithValue{
+			{SecretMeta: secret.SecretMeta{Name: "RESOLVED_VAR", SecretType: "environment", Target: "RESOLVED_VAR"}, Value: "resolved-value"},
+		},
+	})
+
+	agent := &store.Agent{
+		ID:              tid("agent-1"),
+		Name:            "test-agent",
+		Slug:            "test-agent",
+		OwnerID:         tid("user-1"),
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("host-1"),
+		AppliedConfig: &store.AgentAppliedConfig{
+			HarnessConfig: "claude",
+			Env:           map[string]string{"CONFIG_VAR": "config-value"},
+		},
+	}
+	return dispatcher, mockClient, agent
+}
+
+// TestHTTPAgentDispatcher_ReprovisionDoesNotMergeResolvedEnv proves a
+// reprovision sends the resolved env to the broker but leaves the agent's
+// AppliedConfig.Env exactly as the reincarnate worker built it. Merging the
+// resolved env back would make every later reincarnation plan show those
+// keys as removed.
+func TestHTTPAgentDispatcher_ReprovisionDoesNotMergeResolvedEnv(t *testing.T) {
+	dispatcher, mockClient, agent := resolvedEnvDispatcher(t)
+
+	require.NoError(t, dispatcher.DispatchAgentReprovision(context.Background(), agent))
+
+	require.NotNil(t, mockClient.lastCreateReq)
+	assert.Equal(t, "stored-value", mockClient.lastCreateReq.ResolvedEnv["STORED_VAR"], "the broker must still receive the storage env var")
+	assert.Equal(t, "resolved-value", mockClient.lastCreateReq.ResolvedEnv["RESOLVED_VAR"], "the broker must still receive the environment-type value")
+	assert.Equal(t, map[string]string{"CONFIG_VAR": "config-value"}, agent.AppliedConfig.Env)
+}
+
+// TestHTTPAgentDispatcher_ReprovisionSkipHoldsForPlainKeys pins that the
+// reprovision skip runs before the plain-key allowlist: STORED_VAR is
+// classified api.EnvKindPlain, so plain provision would persist it, yet a
+// reprovision must still leave AppliedConfig.Env untouched.
+func TestHTTPAgentDispatcher_ReprovisionSkipHoldsForPlainKeys(t *testing.T) {
+	dispatcher, mockClient, agent := resolvedEnvDispatcher(t)
+
+	require.NoError(t, dispatcher.DispatchAgentReprovision(context.Background(), agent))
+
+	require.NotNil(t, mockClient.lastCreateReq)
+	kind, ok := api.ClassifyEnvKey(mockClient.lastCreateReq.EnvClassifications, "STORED_VAR")
+	require.True(t, ok, "STORED_VAR must carry a classification")
+	require.Equal(t, api.EnvKindPlain, kind, "the case only proves the ordering if STORED_VAR is plain")
+	assert.NotContains(t, agent.AppliedConfig.Env, "STORED_VAR")
+	assert.Equal(t, map[string]string{"CONFIG_VAR": "config-value"}, agent.AppliedConfig.Env)
+}
+
+// TestHTTPAgentDispatcher_ProvisionMergesResolvedEnv pins the plain provision
+// path, which still merges plain-classified resolved env into
+// AppliedConfig.Env so it shows in the advanced config form. The
+// environment-type secret value is not persisted (shouldPersistResolvedEnvKey).
+func TestHTTPAgentDispatcher_ProvisionMergesResolvedEnv(t *testing.T) {
+	dispatcher, _, agent := resolvedEnvDispatcher(t)
+
+	require.NoError(t, dispatcher.DispatchAgentProvision(context.Background(), agent))
+
+	assert.Equal(t, "config-value", agent.AppliedConfig.Env["CONFIG_VAR"])
+	assert.Equal(t, "stored-value", agent.AppliedConfig.Env["STORED_VAR"])
+	assert.NotContains(t, agent.AppliedConfig.Env, "RESOLVED_VAR")
+}
+
+// TestHTTPAgentDispatcher_ReprovisionCarriesAgentEndpointOverride pins that the
+// reprovision request stamps the agent-endpoint override the same way create
+// does: reprovision builds its request through buildCreateRequest, so
+// HubEndpoint comes from effectiveAgentHubEndpoint(). The start step that
+// follows a reprovision goes through DispatchAgentStart, which
+// TestHTTPAgentDispatcher_AgentEndpointOverride covers.
+func TestHTTPAgentDispatcher_ReprovisionCarriesAgentEndpointOverride(t *testing.T) {
+	const hubEndpoint = "http://hub.example.com:8080"
+	const agentEndpoint = "http://192.0.2.10:8080"
+
+	tests := []struct {
+		name             string
+		agentEndpoint    string
+		emptyHubEndpoint bool
+		want             string
+	}{
+		{name: "unset", want: hubEndpoint},
+		{name: "override set", agentEndpoint: agentEndpoint, want: agentEndpoint},
+		{name: "override set, hub endpoint empty", agentEndpoint: agentEndpoint, emptyHubEndpoint: true, want: agentEndpoint},
+		{name: "both endpoints empty", emptyHubEndpoint: true, want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			memStore := createTestStore(t)
+			require.NoError(t, memStore.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+				ID:       tid("host-1"),
+				Name:     "test-host",
+				Slug:     "test-host",
+				Endpoint: "http://localhost:9800",
+				Status:   store.BrokerStatusOnline,
+			}))
+
+			mockClient := &mockRuntimeBrokerClient{}
+			dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+			if !tt.emptyHubEndpoint {
+				dispatcher.SetHubEndpoint(hubEndpoint)
+			}
+			if tt.agentEndpoint != "" {
+				dispatcher.SetAgentEndpoint(tt.agentEndpoint)
+			}
+
+			agent := &store.Agent{
+				ID:              tid("agent-1"),
+				Name:            "test-agent",
+				Slug:            "test-agent",
+				ProjectID:       tid("project-1"),
+				OwnerID:         tid("user-1"),
+				RuntimeBrokerID: tid("host-1"),
+				AppliedConfig:   &store.AgentAppliedConfig{HarnessConfig: "claude"},
+			}
+			require.NoError(t, dispatcher.DispatchAgentReprovision(ctx, agent))
+
+			require.NotNil(t, mockClient.lastCreateReq)
+			assert.True(t, mockClient.lastCreateReq.Reprovision, "the captured request must be the reprovision request")
+			assert.Equal(t, tt.want, mockClient.lastCreateReq.HubEndpoint)
+		})
+	}
+}
+
+// TestHTTPAgentDispatcher_ReprovisionCarriesSkillDispatchMetadata pins that
+// the reprovision request carries the same dispatch metadata as create
+// (#1960): the pre-resolved skills, the owning user, the hub endpoint and the
+// project-scope provision credentials, so the broker can resolve skills for a
+// reprovision exactly as it does for create.
+func TestHTTPAgentDispatcher_ReprovisionCarriesSkillDispatchMetadata(t *testing.T) {
+	const hubEndpoint = "http://hub.example.com:8080"
+	ctx := context.Background()
+	memStore := createTestStore(t)
+	require.NoError(t, memStore.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID:       tid("host-1"),
+		Name:     "test-host",
+		Slug:     "test-host",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}))
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	dispatcher.SetHubEndpoint(hubEndpoint)
+	dispatcher.SetSecretBackend(&mockProvisionCredsBackend{
+		projectSecrets: []secret.SecretMeta{
+			{Name: "GH_EXAMPLE", SecretType: "environment", Scope: secret.ScopeProject},
+		},
+		secretValues: map[string]*secret.SecretWithValue{
+			"GH_EXAMPLE": {SecretMeta: secret.SecretMeta{Name: "GH_EXAMPLE", SecretType: "environment"}, Value: "value-1"},
+		},
+	})
+
+	wantPreResolved := &ResolveSkillsResponse{
+		Resolved: []ResolvedSkillResponse{{URI: "skill://scion/global/test@1.0.0", Name: "test"}},
+	}
+	var sawAgentID string
+	dispatcher.SetSkillPreResolver(func(_ context.Context, a *store.Agent) *ResolveSkillsResponse {
+		sawAgentID = a.ID
+		return wantPreResolved
+	})
+
+	agent := &store.Agent{
+		ID:              tid("agent-1"),
+		Name:            "test-agent",
+		Slug:            "test-agent",
+		ProjectID:       tid("project-1"),
+		OwnerID:         tid("user-1"),
+		RuntimeBrokerID: tid("host-1"),
+		AppliedConfig:   &store.AgentAppliedConfig{HarnessConfig: "claude"},
+	}
+	require.NoError(t, dispatcher.DispatchAgentReprovision(ctx, agent))
+
+	req := mockClient.lastCreateReq
+	require.NotNil(t, req)
+	assert.True(t, req.Reprovision, "the captured request must be the reprovision request")
+	assert.True(t, req.ProvisionOnly, "a reprovision request is provision-only")
+	assert.Equal(t, agent.ID, sawAgentID, "the skill pre-resolver must run for the reprovisioned agent")
+	assert.Same(t, wantPreResolved, req.PreResolvedSkills)
+	assert.Equal(t, agent.OwnerID, req.UserID)
+	assert.Equal(t, hubEndpoint, req.HubEndpoint)
+	assert.Equal(t, map[string]string{"GH_EXAMPLE": "value-1"}, req.ProvisionCredentials)
+}
+
+// TestHTTPAgentDispatcher_DispatchAgentReprovision_MissingEchoFails is the
+// design §3.4 Amendment A2 regression test: a broker that returns 201 for a reprovision
+// request WITHOUT echoing Reprovisioned=true must fail the dispatch — that
+// echo missing is exactly what an old broker (which has no concept of
+// Reprovision at all) looks like, and it silently ran a plain Provision
+// instead of replacing the persisted config.
+func TestHTTPAgentDispatcher_DispatchAgentReprovision_MissingEchoFails(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	broker := &store.RuntimeBroker{
+		ID: tid("host-1"), Name: "test-host", Slug: "test-host",
+		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+	agent := &store.Agent{
+		ID: tid("agent-1"), Name: "test-agent", Slug: "test-agent",
+		ProjectID: tid("project-1"), RuntimeBrokerID: tid("host-1"),
+		AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "claude"},
+	}
+
+	mockClient := &mockRuntimeBrokerClient{
+		createWithGatherFunc: func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+			// An old broker: 201 success, but no Reprovisioned field at all
+			// (it ran a plain Provision, unaware the request even asked for
+			// Reprovision — the wire field is additive and ignored).
+			return &RemoteAgentResponse{
+				Agent:   &RemoteAgentInfo{ID: req.ID, Slug: req.Slug, Name: req.Name},
+				Created: true,
+			}, nil, nil
+		},
+	}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	if err := dispatcher.DispatchAgentReprovision(ctx, agent); err == nil {
+		t.Fatal("expected DispatchAgentReprovision to fail when the broker's response does not echo Reprovisioned=true")
+	}
+}
+
+// TestHTTPAgentDispatcher_DispatchAgentReprovision_StillMissingEnvFails is
+// the design §3.4 Amendment A2 regression test: a reprovision whose final response is still
+// 202-with-Needs (env gather never completed, including a broker whose
+// attempt cache replays the same 202 on the retried pass) must fail, not
+// "warn and continue" into DispatchAgentStart on an incomplete config.
+func TestHTTPAgentDispatcher_DispatchAgentReprovision_StillMissingEnvFails(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	agent := setupProvisionEnvTest(t, ctx, memStore, []store.EnvVar{
+		{Key: "API_KEY", Value: "resolved-api-key"},
+	})
+
+	callCount := 0
+	seenRequestIDs := map[string]bool{}
+	mockClient := &mockRuntimeBrokerClient{
+		createWithGatherFunc: func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+			callCount++
+			seenRequestIDs[req.RequestID] = true
+			// Every pass — including the retry — still reports API_KEY
+			// missing (e.g. a broker attempt-cache replay of the stored 202,
+			// which is exactly why each pass must use its own RequestID).
+			return nil, &RemoteEnvRequirementsResponse{AgentID: req.ID, Needs: []string{"API_KEY"}}, nil
+		},
+	}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	err := dispatcher.DispatchAgentReprovision(ctx, agent)
+	if err == nil {
+		t.Fatal("expected DispatchAgentReprovision to fail when env is still missing after the retry")
+	}
+	if callCount != 2 {
+		t.Fatalf("expected 2 CreateAgentWithGather calls (first pass + retry with resolved env), got %d", callCount)
+	}
+	if len(seenRequestIDs) != 2 {
+		t.Fatalf("expected each pass to use a distinct RequestID, got %d distinct IDs across %d calls", len(seenRequestIDs), callCount)
+	}
+}
+
+// TestHTTPAgentDispatcher_DispatchAgentReprovision_NoBroker mirrors the
+// no-broker-assigned guard on DispatchAgentProvision: AC-9's 412 gate lives
+// one layer up (the hub handler checks broker capability before dispatch at
+// all), but the dispatcher itself must still fail closed if somehow called
+// against an agent with no assigned broker.
+func TestHTTPAgentDispatcher_DispatchAgentReprovision_NoBroker(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	agent := &store.Agent{
+		ID:              tid("agent-1"),
+		Name:            "test-agent",
+		Slug:            "test-agent",
+		RuntimeBrokerID: "",
+	}
+
+	if err := dispatcher.DispatchAgentReprovision(ctx, agent); err == nil {
+		t.Fatal("expected error when no runtime broker is assigned")
+	}
+	if mockClient.createCalled {
+		t.Fatal("CreateAgent should not be called when no broker is assigned")
 	}
 }
 

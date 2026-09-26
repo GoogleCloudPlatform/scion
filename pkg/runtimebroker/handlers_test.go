@@ -17,6 +17,7 @@ package runtimebroker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -25,6 +26,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -57,6 +59,10 @@ func (m *mockManager) Provision(ctx context.Context, opts api.StartOptions) (*ap
 	if m.provisionErr != nil {
 		return nil, m.provisionErr
 	}
+	return &api.ScionConfig{}, nil
+}
+
+func (m *mockManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
 	return &api.ScionConfig{}, nil
 }
 
@@ -1072,20 +1078,39 @@ func TestCreateAgentWithoutHubCredentials(t *testing.T) {
 	}
 }
 
-// provisionCapturingManager tracks whether Provision vs Start was called.
+// provisionCapturingManager tracks whether Provision, Reprovision or Start
+// was called. Provision and Reprovision use DISTINCT flags (design §3.4
+// Amendment A2.5): the whole fail-closed design rests on the broker calling
+// exactly one of them per the request's Reprovision flag, and a shared flag
+// cannot catch a regression where handleCreateAgent's branch is inverted or
+// deleted.
 type provisionCapturingManager struct {
 	mockManager
-	provisionCalled bool
-	startCalled     bool
-	lastOpts        api.StartOptions
+	provisionCalled   bool
+	reprovisionCalled bool
+	startCalled       bool
+	lastOpts          api.StartOptions
+	reprovisionErr    error
 	// lastProvisionCtx captures the context passed to Provision (#1960).
 	lastProvisionCtx context.Context
+	// lastReprovisionCtx captures the context passed to Reprovision.
+	lastReprovisionCtx context.Context
 }
 
 func (m *provisionCapturingManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
 	m.provisionCalled = true
 	m.lastOpts = opts
 	m.lastProvisionCtx = ctx
+	return &api.ScionConfig{Harness: "claude", HarnessConfig: "claude"}, nil
+}
+
+func (m *provisionCapturingManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	m.reprovisionCalled = true
+	m.lastReprovisionCtx = ctx
+	m.lastOpts = opts
+	if m.reprovisionErr != nil {
+		return nil, m.reprovisionErr
+	}
 	return &api.ScionConfig{Harness: "claude", HarnessConfig: "claude"}, nil
 }
 
@@ -1160,6 +1185,165 @@ func TestCreateAgentProvisionOnly(t *testing.T) {
 	}
 	if resp.Agent.Slug != "provisioned-agent" {
 		t.Errorf("expected slug 'provisioned-agent', got '%s'", resp.Agent.Slug)
+	}
+}
+
+// TestCreateAgentProvisionOnly_Reprovision_CallsReprovisionNotProvision is
+// the design §3.4 Amendment A2.5 regression test: a
+// provisionOnly+reprovision request must call Manager.Reprovision, never
+// Manager.Provision, and the response must echo reprovisioned:true — the
+// echo the hub's whole fail-closed dispatch design rests on
+// (design §3.4 Amendment A2.2(a)).
+func TestCreateAgentProvisionOnly_Reprovision_CallsReprovisionNotProvision(t *testing.T) {
+	srv, mgr := newTestServerWithProvisionCapture()
+
+	body := `{
+		"name": "reprovisioned-agent",
+		"id": "agent-uuid-reprov",
+		"slug": "reprovisioned-agent",
+		"provisionOnly": true,
+		"reprovision": true,
+		"config": {"template": "claude"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, w.Code, w.Body.String())
+	}
+	if !mgr.reprovisionCalled {
+		t.Error("expected Reprovision to be called")
+	}
+	if mgr.provisionCalled {
+		t.Error("expected Provision NOT to be called when reprovision=true")
+	}
+	if mgr.startCalled {
+		t.Error("expected Start NOT to be called for provision-only")
+	}
+
+	var resp CreateAgentResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !resp.Reprovisioned {
+		t.Error("expected Reprovisioned=true in the response")
+	}
+}
+
+// TestCreateAgentProvisionOnly_PlainProvision_DoesNotEchoReprovisioned is the
+// reverse of the above: a plain provisionOnly request (no reprovision) must
+// call Manager.Provision, never Manager.Reprovision, and must NOT echo
+// reprovisioned:true — a broker that always echoed true regardless of which
+// branch ran would defeat the hub's mandatory-echo fail-closed check.
+func TestCreateAgentProvisionOnly_PlainProvision_DoesNotEchoReprovisioned(t *testing.T) {
+	srv, mgr := newTestServerWithProvisionCapture()
+
+	body := `{
+		"name": "plain-provisioned-agent",
+		"id": "agent-uuid-plain",
+		"slug": "plain-provisioned-agent",
+		"provisionOnly": true,
+		"config": {"template": "claude"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, w.Code, w.Body.String())
+	}
+	if !mgr.provisionCalled {
+		t.Error("expected Provision to be called")
+	}
+	if mgr.reprovisionCalled {
+		t.Error("expected Reprovision NOT to be called when reprovision is unset")
+	}
+
+	var resp CreateAgentResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if resp.Reprovisioned {
+		t.Error("expected Reprovisioned to be false/absent for a plain provision")
+	}
+}
+
+// TestCreateAgentProvisionOnly_ReprovisionError_ReturnsErrorNoEcho covers a
+// plain (unwrapped, not agent.ErrReprovisionRefused) Reprovision failure: the
+// handler must return the generic 500 — not the 409 the sentinel-wrapped
+// path gets — and must not echo reprovisioned:true for a request that never
+// actually succeeded. A neutral error message (no "reprovision refused"
+// substring) keeps this test from being satisfied by accident if the 409
+// path's body text ever changed to also contain "error".
+func TestCreateAgentProvisionOnly_ReprovisionError_ReturnsErrorNoEcho(t *testing.T) {
+	srv, mgr := newTestServerWithProvisionCapture()
+	mgr.reprovisionErr = errors.New("boom: transient broker failure")
+
+	body := `{
+		"name": "reprovision-fail-agent",
+		"id": "agent-uuid-reprov-fail",
+		"slug": "reprovision-fail-agent",
+		"provisionOnly": true,
+		"reprovision": true,
+		"config": {"template": "claude"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 for a plain (non-refusal) Reprovision error, got %d: %s", w.Code, w.Body.String())
+	}
+	if !mgr.reprovisionCalled {
+		t.Error("expected Reprovision to have been attempted")
+	}
+	if !strings.Contains(w.Body.String(), "boom: transient broker failure") {
+		t.Errorf("expected the error body to surface the Reprovision error, got: %s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), `"reprovisioned":true`) {
+		t.Errorf("a failed Reprovision must never echo reprovisioned:true, got: %s", w.Body.String())
+	}
+}
+
+// TestCreateAgentProvisionOnly_ReprovisionRefused_Returns409 covers design
+// §3.4 Amendment A4.2: a Reprovision failure that wraps agent.ErrReprovisionRefused
+// (workspace preconditions, running-container check) must surface as 409
+// Conflict specifically, not a generic 500 — so the reincarnate worker's
+// failure message and any future caller-side retry logic can tell "refused
+// to run" apart from an actual provisioning error.
+func TestCreateAgentProvisionOnly_ReprovisionRefused_Returns409(t *testing.T) {
+	srv, mgr := newTestServerWithProvisionCapture()
+	mgr.reprovisionErr = fmt.Errorf("%w: agent %q container is still running; stop it first", agent.ErrReprovisionRefused, "reprovision-409-agent")
+
+	body := `{
+		"name": "reprovision-409-agent",
+		"id": "agent-uuid-reprov-409",
+		"slug": "reprovision-409-agent",
+		"provisionOnly": true,
+		"reprovision": true,
+		"config": {"template": "claude"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 Conflict for a refused reprovision, got %d: %s", w.Code, w.Body.String())
+	}
+	if !mgr.reprovisionCalled {
+		t.Error("expected Reprovision to have been attempted")
+	}
+	if !strings.Contains(w.Body.String(), "reprovision refused") {
+		t.Errorf("expected the error body to surface the refusal reason, got: %s", w.Body.String())
 	}
 }
 

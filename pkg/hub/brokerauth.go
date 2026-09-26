@@ -226,6 +226,30 @@ type BrokerJoinResponse struct {
 // JoinTokenPrefix is the prefix for join tokens.
 const JoinTokenPrefix = "scion_join_"
 
+// capabilitiesFromStrings converts the broker-reported capability name list
+// (CreateBrokerRegistrationRequest.Capabilities / BrokerJoinRequest.Capabilities,
+// e.g. []string{"sync", "attach", "reprovision"}) into the structured
+// store.BrokerCapabilities the hub gates dispatch decisions on. Unrecognized
+// names are ignored rather than rejected, so an older hub talking to a newer
+// broker (or vice versa) never fails registration over an unknown capability
+// string.
+func capabilitiesFromStrings(names []string) *store.BrokerCapabilities {
+	caps := &store.BrokerCapabilities{}
+	for _, name := range names {
+		switch strings.ToLower(strings.TrimSpace(name)) {
+		case "webpty", "web_pty":
+			caps.WebPTY = true
+		case "sync":
+			caps.Sync = true
+		case "attach":
+			caps.Attach = true
+		case "reprovision":
+			caps.Reprovision = true
+		}
+	}
+	return caps
+}
+
 // CreateBrokerRegistration creates a new broker with a join token.
 // Requires admin authentication.
 func (s *BrokerAuthService) CreateBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy string) (*CreateBrokerRegistrationResponse, error) {
@@ -422,6 +446,16 @@ func (s *BrokerAuthService) CompleteBrokerJoin(ctx context.Context, req BrokerJo
 	// Update profiles if provided in the join request
 	if len(req.Profiles) > 0 {
 		broker.Profiles = req.Profiles
+	}
+
+	// Update capabilities if provided in the join request. This was
+	// previously accepted but silently discarded (the join handshake is the
+	// only point at which a broker reports what it supports — there is no
+	// separate heartbeat-time capability refresh). `scion reincarnate`'s
+	// broker-capability gate (design §5) needs Reprovision here to
+	// distinguish an upgraded broker from an old one.
+	if len(req.Capabilities) > 0 {
+		broker.Capabilities = capabilitiesFromStrings(req.Capabilities)
 	}
 
 	if err := s.store.UpdateRuntimeBroker(ctx, broker); err != nil {

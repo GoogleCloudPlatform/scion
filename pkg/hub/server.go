@@ -392,6 +392,14 @@ type AgentDispatcher interface {
 	// This sets up directories, worktree, templates, and settings but does not launch the container.
 	DispatchAgentProvision(ctx context.Context, agent *store.Agent) error
 
+	// DispatchAgentReprovision re-renders an EXISTING agent's on-disk config
+	// on the runtime broker from its current AppliedConfig, for a
+	// `scion reincarnate` request (design §3.4). Unlike DispatchAgentProvision
+	// it overwrites the persisted config rather than reusing it, while
+	// preserving the agent's home directory and clone-per-agent workspace. It
+	// does not start the container.
+	DispatchAgentReprovision(ctx context.Context, agent *store.Agent) error
+
 	// DispatchAgentStart resumes a stopped agent on the runtime broker.
 	// task is an optional task string to pass to the agent on start.
 	// resume requests harness session continuation (e.g. Claude --continue);
@@ -570,6 +578,11 @@ type RemoteCreateAgentRequest struct {
 	// ProvisionOnly indicates the agent should be provisioned (dirs, worktree, templates)
 	// but not started. The container will not be launched.
 	ProvisionOnly bool `json:"provisionOnly,omitempty"`
+	// Reprovision indicates this ProvisionOnly request targets an existing
+	// agent whose on-disk config should be replaced from the current
+	// catalog rather than reused (`scion reincarnate`, design §3.4). See
+	// runtimebroker.CreateAgentRequest.Reprovision, the wire twin this maps to.
+	Reprovision bool `json:"reprovision,omitempty"`
 	// ProjectPath is the local filesystem path to the project on the target runtime broker.
 	// This is looked up from the project provider record for the target broker.
 	ProjectPath string `json:"projectPath,omitempty"`
@@ -730,6 +743,14 @@ type RemoteGCPIdentityConfig struct {
 type RemoteAgentResponse struct {
 	Agent   *RemoteAgentInfo `json:"agent,omitempty"`
 	Created bool             `json:"created"`
+
+	// Reprovisioned mirrors runtimebroker.CreateAgentResponse.Reprovisioned:
+	// set by the broker ONLY on the branch that actually ran
+	// Manager.Reprovision (design §3.4 Amendment A2.2(a)). dispatchProvision treats a
+	// reprovision dispatch whose final response lacks this as a failure —
+	// an old broker has no such field and silently ran a plain Provision
+	// instead, which must not be reported as reincarnate success.
+	Reprovisioned bool `json:"reprovisioned,omitempty"`
 }
 
 // RemoteEnvRequirementsResponse is returned by the broker when env gather is needed.
@@ -1567,6 +1588,20 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	} else if runs > 0 || migrations > 0 {
 		slog.Info("Aborted stalled maintenance operations from previous run",
 			"runs", runs, "migrations", migrations)
+	}
+
+	// Same shape, for `scion reincarnate` (design §3.7): a reincarnation
+	// record and its agent's reincarnation_state left non-terminal past the
+	// staleness bound can only mean the hub replica running it is gone —
+	// claim-then-create order means a failed request never leaves one behind
+	// otherwise. Without this sweep those agents would be stuck behind a
+	// permanent 409 forever (Phase 3 owns actually resuming them). Also
+	// registered as a recurring singleton job below, so a restart is not the
+	// only trigger.
+	if n, err := srv.sweepStaleReincarnations(ctx); err != nil {
+		slog.Warn("Failed to sweep stale reincarnations", "error", err)
+	} else if n > 0 {
+		slog.Info("Marked stale reincarnations failed after restart", "count", n)
 	}
 
 	// Initialize federation authenticator if enabled.
@@ -3782,6 +3817,19 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		if payload.Branch != "" {
 			agent.AppliedConfig.Branch = payload.Branch
 		}
+		// CreateInputs (design §3.4 Amendment A3.7): without this, every scheduled agent looks
+		// "legacy" to `scion reincarnate` forever — not just until its first
+		// reincarnation, since the legacy fallback pins whatever HarnessConfig/
+		// HarnessAuth/Profile/ThinkingLevel it resolved to into CreateInputs
+		// permanently, so a template change is never picked up on a second
+		// reincarnation either. Branch and NoAuth=true are the only explicit
+		// inputs a scheduled agent has; everything else this path sets
+		// (AgentRole, Task) is either a kept field or replaced by the
+		// preamble+handoff on reincarnate.
+		agent.AppliedConfig.CreateInputs = &store.AgentCreateInputs{
+			Branch: payload.Branch,
+			NoAuth: true,
+		}
 
 		// Apply project-level default template if none specified
 		if payload.Template == "" && project != nil && project.Annotations != nil {
@@ -3886,50 +3934,26 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 				if tmpl.Slug != "" {
 					agent.Template = tmpl.Slug
 				}
-				// Only fall back to the template's harness config when the
-				// project has no default-harness-config annotation — the
-				// project setting outranks the template, matching the
-				// default-template block above and the agent-create path.
-				//
-				// MECHANISM NOTE — leaving AppliedConfig.HarnessConfig empty
-				// when the annotation is present is deliberate:
-				// applyProjectDefaults below is what actually applies the
-				// project value on this path. The agent-create path in
-				// handlers_agents_core.go reads the same annotation inline
-				// instead, which makes applyProjectDefaults' harness-config
-				// branch unreachable there. Behaviourally identical today —
-				// keep the two in sync, and if you change
-				// applyProjectDefaults' harness handling, check BOTH paths.
-				projectHarnessConfig := ""
-				if project != nil && project.Annotations != nil {
-					projectHarnessConfig = project.Annotations[projectSettingDefaultHarnessConfig]
-				}
-				if projectHarnessConfig == "" {
-					if harnessConfig := s.getHarnessConfigFromTemplate(tmpl, ""); harnessConfig != "" {
-						agent.AppliedConfig.HarnessConfig = harnessConfig
-					}
-				}
+				// Harness-config resolution (project annotation, then this
+				// template's default) happens later, in deriveAgentConfig,
+				// along with the rest of create's config-resolution pipeline
+				// — not here. See deriveAgentConfig's doc comment.
 			}
 		}
 
-		// Apply project-level defaults (harness config, limits, resources) from annotations
-		applyProjectDefaults(agent.AppliedConfig, project)
-
-		// Hub operational agent_defaults — strictly between applyProjectDefaults
-		// and populateAgentConfig, exactly as on the agent-create path. See
-		// applyHubAgentDefaults for why that placement is the whole point.
-		if applyHubAgentDefaults(agent.AppliedConfig, s.hubAgentDefaults()) {
-			ctx = withHubDefaultHarnessConfig(ctx)
-		}
-
 		// Project-default GCP identity, gated against the schedule creator as
-		// the immediate agent creator — twin of the create path (#1797).
+		// the immediate agent creator — twin of the create path (#1797). It
+		// must run before deriveAgentConfig: populateAgentConfig reads
+		// AppliedConfig.GCPIdentity when checking auth credentials.
 		if err := s.applyScheduledProjectDefaultGCPIdentity(
 			contextWithIdentity(ctx, creatorIdentity), agent, project); err != nil {
 			return fmt.Errorf("scheduled dispatch of agent %q: %w", slug, err)
 		}
 
-		s.populateAgentConfig(ctx, agent, project, tmpl)
+		// Apply project-level defaults, hub operational defaults, and the
+		// template/harness-config derivation pipeline, exactly as on the
+		// agent-create path. See deriveAgentConfig.
+		s.deriveAgentConfig(ctx, agent, project, tmpl)
 
 		if err := s.store.CreateAgent(ctx, agent); err != nil {
 			return fmt.Errorf("failed to create agent %q: %w", slug, err)
@@ -4120,6 +4144,7 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// with released_at IS NULL by the pre-fix stop/suspend paths (or any
 	// future drift) without a separate one-shot migration.
 	s.scheduler.RegisterRecurringSingleton("broker-quota-reconcile", 60, store.LockBrokerQuotaReconcile, s.ReconcileStaleBrokerQuotaReservations)
+	s.scheduler.RegisterRecurringSingleton("reincarnation-sweep", 5, store.LockReincarnationSweep, s.reincarnationSweepHandler())
 
 	// A2A bridge sweep — conditional on the bridge being registered as a standalone plugin.
 	if a2aExternalURL := s.getA2ABridgeExternalURL(); a2aExternalURL != "" {

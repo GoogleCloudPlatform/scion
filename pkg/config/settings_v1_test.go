@@ -5376,3 +5376,18 @@ func TestGlobalSettingsIsLegacyFormat_LegacyGlobalWithV1ProjectConfigsOverlay(t 
 	require.NoError(t, err)
 	assert.Nil(t, vs.Server, "a legacy-format global file must load via the legacy adapter (Server nil), not the versioned one")
 }
+
+// TestRewriteImageRegistry_Idempotent proves that rewriting an image that was
+// already rewritten to the same registry returns it unchanged, including for
+// registries without a hostname (where the first path component carries no
+// "." or ":" and only the basename extraction keeps the result stable).
+func TestRewriteImageRegistry_Idempotent(t *testing.T) {
+	registries := []string{"ghcr.io/org", "ghcr.io/org/", "localhost:5000", "myorg", "us-docker.pkg.dev/p/r"}
+	images := []string{"scion-claude:v1", "scion-claude", "ubuntu:22.04", "scion-claude@sha256:abc"}
+	for _, registry := range registries {
+		for _, image := range images {
+			once := RewriteImageRegistry(image, registry)
+			assert.Equal(t, once, RewriteImageRegistry(once, registry), "registry %q image %q", registry, image)
+		}
+	}
+}
