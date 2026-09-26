@@ -1090,7 +1090,7 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 // User scope is deliberately not handled here — use
 // templateUserScopeResource, which takes the authenticated UserIdentity
 // directly instead of a bare scopeID string. See that function's doc for
-// why the distinction matters (ptone/scion#2015 round 2).
+// why the distinction matters (ptone/scion#2015).
 //
 // ptone/scion#1916: every ad hoc "template" Resource literal must set
 // ScopeKind through this constructor (or templateResource, for a real
@@ -1108,28 +1108,20 @@ func templateScopeResource(scope, scopeID string) Resource {
 	return r
 }
 
-// templateUserScopeResource builds the ad hoc "template" Resource for a
-// user-scope authorization check (create or clone destination), the user-
-// scope counterpart to templateScopeResource.
+// templateUserScopeResource builds the ad hoc "template" Resource for the
+// user-scope authorization check in template create (createTemplateV2), the
+// user-scope counterpart to templateScopeResource.
 //
-// It takes the authenticated UserIdentity directly rather than a bare
-// scopeID string on purpose (ptone/scion#2015 round 2, Consider #2):
-// Resource.OwnerID drives the kernel's "relationship grant: resource owner"
-// check (authz.go), so whatever value lands there is granted ownership
-// access to that scope. templateScopeResource's original single-function
-// design relied entirely on a doc comment ("callers must pass the caller's
-// own authenticated user ID, never an unvalidated request field") to keep
-// that safe; a future clone/import path could violate that comment by
-// passing a request field for user scope. Taking the UserIdentity here
-// makes that mistake a type error instead of a doc-comment violation: there
-// is no scopeID parameter left for a caller to accidentally source from the
-// request.
+// It takes the authenticated UserIdentity directly, never a bare scopeID
+// string (ptone/scion#2015): Resource.OwnerID drives the kernel's
+// "relationship grant: resource owner" check (authz.go), so whatever lands
+// there gets ownership access to that scope. Taking UserIdentity makes
+// sourcing OwnerID from an unvalidated request field a type error rather
+// than a doc-comment violation.
 //
-// Without OwnerID set from the caller's own ID, a user-scope create has no
-// candidate binding at all: filterHubWideTemplateGrants (ptone/scion#1916)
-// narrows the hub-member/hub-viewer system-scope grant to global-scope
-// records only, so it can no longer stand in for per-user ownership the way
-// it did before that fix.
+// filterHubWideTemplateGrants (ptone/scion#1916) narrows the hub-member/
+// hub-viewer system-scope grant to global-scope records only, so without
+// OwnerID set here, a user-scope create would have no candidate binding.
 func templateUserScopeResource(userIdent UserIdentity) Resource {
 	return Resource{Type: "template", ScopeKind: store.TemplateScopeUser, OwnerID: userIdent.ID()}
 }
