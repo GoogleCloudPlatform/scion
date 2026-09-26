@@ -439,6 +439,42 @@ func TestBuildStartContext_ResolvedSecrets(t *testing.T) {
 	}
 }
 
+// TestBuildStartContext_DropsReservedTargetResolvedSecret verifies that an
+// environment-type resolved secret whose target is reserved for scion's own
+// control-plane env vars is dropped before it reaches opts.ResolvedSecrets,
+// as defense in depth for a row that reached this call without going through
+// the hub's create/patch check or dispatch-time drop. A non-reserved secret
+// in the same request must still pass through.
+func TestBuildStartContext_DropsReservedTargetResolvedSecret(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+
+	secrets := []api.ResolvedSecret{
+		{Name: "RESERVED_NAME_SECRET", Type: "environment", Target: "SCION_METADATA_MODE", Value: "passthrough"},
+		{Name: "API_KEY", Type: "environment", Target: "API_KEY", Value: "secret-value"},
+	}
+	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:            "agent-1",
+		ResolvedSecrets: secrets,
+		HTTPRequest:     r,
+		Operation:       opCreate,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, rs := range sc.Opts.ResolvedSecrets {
+		if rs.Target == "SCION_METADATA_MODE" {
+			t.Errorf("expected reserved-target secret to be dropped, found it in opts.ResolvedSecrets: %+v", rs)
+		}
+	}
+	if len(sc.Opts.ResolvedSecrets) != 1 || sc.Opts.ResolvedSecrets[0].Name != "API_KEY" {
+		t.Errorf("expected only the non-reserved secret to pass through, got %v", sc.Opts.ResolvedSecrets)
+	}
+}
+
 func TestBuildStartContext_ConfigFields(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()

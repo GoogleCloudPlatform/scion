@@ -2011,6 +2011,13 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 			if v.InjectionMode == store.InjectionModeAsNeeded {
 				continue
 			}
+			// Defense in depth for rows that predate the create/patch
+			// reserved-target check, or that reached the store through some
+			// other path: never let a stored env var decide a scion
+			// control-plane env var's value.
+			if secret.IsReservedEnvTarget(v.Key) {
+				continue
+			}
 			result[v.Key] = v.Value
 			plain[v.Key] = !v.Secret
 		}
@@ -2029,6 +2036,9 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 			}
 		} else {
 			for _, v := range progenyVars {
+				if secret.IsReservedEnvTarget(v.Key) {
+					continue
+				}
 				if _, exists := result[v.Key]; exists {
 					continue // higher-precedence scope already set this key
 				}
@@ -2096,6 +2106,12 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 		}
 		for _, v := range vars {
 			if v.InjectionMode != store.InjectionModeAsNeeded {
+				continue
+			}
+			// Defense in depth, matching resolveSecrets: never satisfy an
+			// as-needed request for a scion control-plane env var from a
+			// stored plain env var either.
+			if secret.IsReservedEnvTarget(v.Key) {
 				continue
 			}
 			if _, needed := keySet[v.Key]; needed {
@@ -2188,6 +2204,12 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 				target := sv.Target
 				if target == "" {
 					target = sv.Name
+				}
+				// Defense in depth, matching resolveSecrets: never satisfy an
+				// as-needed request for a scion control-plane env var from a
+				// stored secret.
+				if secret.IsReservedEnvTarget(target) {
+					continue
 				}
 				if _, needed := keySet[target]; needed {
 					// Store under the canonical key if this was an alternative match
@@ -3416,6 +3438,17 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 	result := make([]ResolvedSecret, 0, len(resolved))
 	var asNeededKeys []string
 	for _, sv := range resolved {
+		// Defense in depth for rows that predate the create/patch reserved-
+		// target check, or that reached the store through some other path:
+		// drop any environment-type secret whose target is reserved for
+		// scion's own control-plane env vars before it is attached to the
+		// dispatch request at all, in either injection mode.
+		if (sv.SecretType == store.SecretTypeEnvironment || sv.SecretType == "") && secret.IsReservedEnvTarget(sv.Target) {
+			if d.debug {
+				d.log.Debug("resolveSecrets: dropping reserved-target secret", "name", sv.Name, "target", sv.Target, "scope", sv.Scope)
+			}
+			continue
+		}
 		// Only skip as_needed environment-type secrets (handled by the
 		// two-pass env-gather flow). File-type and variable-type secrets
 		// should always be placed regardless of injection mode — the

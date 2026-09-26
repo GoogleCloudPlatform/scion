@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"go.opentelemetry.io/otel/attribute"
@@ -823,7 +824,21 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	if in.NoAuth {
 		opts.ResolvedSecrets = nil
 	} else if len(in.ResolvedSecrets) > 0 {
-		opts.ResolvedSecrets = in.ResolvedSecrets
+		// Defense in depth for rows that predate the hub's create/patch
+		// reserved-target check and dispatch-time drop, or that reached this
+		// call through some other path: never attach an environment-type
+		// secret whose target is reserved for scion's own control-plane env
+		// vars to the runtime config.
+		opts.ResolvedSecrets = make([]api.ResolvedSecret, 0, len(in.ResolvedSecrets))
+		for _, rs := range in.ResolvedSecrets {
+			if (rs.Type == "environment" || rs.Type == "") && secret.IsReservedEnvTarget(rs.Target) {
+				if s.config.Debug {
+					s.envSecretLog.Debug("Dropping reserved-target resolved secret", "name", rs.Name, "target", rs.Target)
+				}
+				continue
+			}
+			opts.ResolvedSecrets = append(opts.ResolvedSecrets, rs)
+		}
 		if s.config.Debug {
 			s.envSecretLog.Debug("Received resolved secrets", "count", len(in.ResolvedSecrets))
 		}
