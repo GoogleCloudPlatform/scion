@@ -814,9 +814,11 @@ func (s *LocalPTYSession) Run() error {
 	// Populate cleanExit from the reaped process's exit status. Registered
 	// before the gracefulShutdownExec defer below so it runs AFTER
 	// gracefulShutdownExec (defers run LIFO), i.e. once s.cmd.ProcessState is
-	// actually populated.
+	// actually populated. cleanExitFromCmd treats a nil s.cmd defensively
+	// (today's control flow only reaches here after s.cmd has been set, but
+	// this does not depend on that holding forever).
 	defer func() {
-		s.cleanExit = isCleanExit(s.cmd.ProcessState)
+		s.cleanExit = cleanExitFromCmd(s.cmd)
 	}()
 	defer func() {
 		// readFromWebSocket has already exited (joined below).
@@ -1355,9 +1357,11 @@ func (h *StreamPTYHandler) Run() error {
 	// Populate cleanExit from the reaped process's exit status. Registered
 	// before the gracefulShutdownExec defer below so it runs AFTER
 	// gracefulShutdownExec (defers run LIFO), i.e. once h.cmd.ProcessState is
-	// actually populated.
+	// actually populated. cleanExitFromCmd treats a nil h.cmd defensively
+	// (today's control flow only reaches here after h.cmd has been set, but
+	// this does not depend on that holding forever).
 	defer func() {
-		h.cleanExit = isCleanExit(h.cmd.ProcessState)
+		h.cleanExit = cleanExitFromCmd(h.cmd)
 	}()
 	defer func() {
 		// Graceful shutdown: close PTY (terminal hangup) → wait → SIGTERM →

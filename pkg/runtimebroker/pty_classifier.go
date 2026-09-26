@@ -136,6 +136,19 @@ func isCleanExit(state *os.ProcessState) bool {
 	return state != nil && state.Success()
 }
 
+// cleanExitFromCmd reports whether cmd represents a clean exit, treating a
+// nil cmd the same as a nil ProcessState: not clean. A nil cmd should not
+// happen — both Run() implementations only reach the defer that calls this
+// after the exec has already been started (cmd assigned) — but the field
+// itself does not encode that guarantee, so this stays safe against a
+// future change to that ordering instead of a nil-pointer panic.
+func cleanExitFromCmd(cmd *exec.Cmd) bool {
+	if cmd == nil {
+		return false
+	}
+	return isCleanExit(cmd.ProcessState)
+}
+
 // awaitK8sExecEnd waits for a k8s PTY bridge (StreamPTYHandler.runK8sExec or
 // LocalPTYSession.runK8sExec) to end, and resolves both "when to stop" and
 // "was the tmux client's exit clean" from two independent signals:
