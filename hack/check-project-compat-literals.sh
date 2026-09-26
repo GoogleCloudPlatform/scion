@@ -111,6 +111,7 @@ allowed_paths=(
   # non-member is denied on the legacy grove.* subjects and other unknown
   # namespaces.
   "^pkg/hub/sse_default_deny_test.go$"
+  "^pkg/hub/template_clone_scope_test.go$"
   # Asserts the hub rejects the removed "grove" template scope (and other
   # unrecognized scopes) with 400 instead of storing it as-is. The literal is
   # the point of the negative test.
