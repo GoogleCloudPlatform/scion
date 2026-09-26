@@ -80,9 +80,10 @@ seed_instance() {
   printf '%s' "$2" > "${GCLOUD_STUB_STATE_DIR}/instances/$1"
 }
 
-# set_instance_delete_will_fail NAME — the next `instances delete` call
-# for this instance fails instead of succeeding (the instance stays
-# "present" in the stub's state, matching a real failed delete).
+# set_instance_delete_will_fail NAME — the next (and every subsequent)
+# `instances delete` call for this instance fails instead of succeeding
+# (the instance stays "present" in the stub's state, matching a real
+# failed delete).
 set_instance_delete_will_fail() {
   touch "${GCLOUD_STUB_STATE_DIR}/instances/$1.delete-fail"
 }
@@ -93,6 +94,14 @@ set_instance_delete_will_fail() {
 # not-found error from an ambiguous one (permission, API outage, etc.).
 set_instance_delete_error_text() {
   printf '%s' "$2" > "${GCLOUD_STUB_STATE_DIR}/instances/$1.delete-fail-text"
+}
+
+# set_instance_add_tags_will_fail NAME — the next (and every subsequent)
+# `instances add-tags` call for this instance fails instead of succeeding
+# (e.g. a permissions gap), so a caller's "confirmed tagged" logic has
+# something real to be gated on.
+set_instance_add_tags_will_fail() {
+  touch "${GCLOUD_STUB_STATE_DIR}/instances/$1.add-tags-fail"
 }
 
 # set_firewall_list_will_fail — the next `firewall-rules list` call fails
@@ -209,12 +218,22 @@ set_run_service_delete_error() {
   touch "${GCLOUD_STUB_STATE_DIR}/run-services/$1.delete-error"
 }
 
-# set_firewall_delete_will_fail NAME — the next `firewall-rules delete`
-# call for this rule fails instead of succeeding (the rule's JSON stays
-# present in stub state, matching a real failed delete rather than one
-# that succeeded or found nothing).
+# set_firewall_delete_will_fail NAME — the next (and every subsequent)
+# `firewall-rules delete` call for this rule fails instead of succeeding
+# (the rule's JSON stays present in stub state, matching a real failed
+# delete rather than one that succeeded or found nothing).
 set_firewall_delete_will_fail() {
   touch "${GCLOUD_STUB_STATE_DIR}/firewall-rules/$1.json.delete-fail"
+}
+
+# set_firewall_describe_target_tags_will_fail NAME — the next (and every
+# subsequent) `firewall-rules describe --format=value(targetTags)` call
+# for this rule fails, while a plain `describe` for the same rule still
+# succeeds -- simulating a transient error on the second of the two
+# describe calls deploy.sh makes for an existing rule, distinct from the
+# rule not existing at all.
+set_firewall_describe_target_tags_will_fail() {
+  touch "${GCLOUD_STUB_STATE_DIR}/firewall-rules/$1.json.describe-target-tags-fail"
 }
 
 # seed_firewall_rule_desc_only NAME DESCRIPTION — simulates a pre-existing

@@ -178,10 +178,57 @@ case "${1:-} ${2:-} ${3:-}" in
     name="${4:-}"
     f="${GCLOUD_STUB_STATE_DIR}/firewall-rules/${name}.json"
     if [[ -f "$f" ]]; then
-      cat "$f"
+      format="$(get_flag format "$@")" || format=""
+      if [[ "$format" == "value(targetTags)" ]]; then
+        # A name-scoped fixture flag: the rule itself exists (the
+        # unformatted describe above still succeeds), but this specific
+        # --format=value(targetTags) read fails, e.g. a transient error
+        # between two back-to-back describe calls. On failure, write only
+        # to stderr and leave stdout empty, as real gcloud does; the
+        # caller decides whether to discard stderr.
+        if [[ -f "${f}.describe-target-tags-fail" ]]; then
+          echo "gcloud-stub: simulated failure reading target tags for ${name}" >&2
+          exit 1
+        fi
+        # Real gcloud's value() transform joins a repeated field with ";".
+        # Prints nothing (not "[]" or similar) when the list is empty, same
+        # as a real unscoped rule.
+        "$PYTHON" -c "
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(';'.join(d.get('targetTags') or []))
+" "$f"
+      else
+        cat "$f"
+      fi
       exit 0
     fi
     exit 1
+    ;;
+  "compute firewall-rules update")
+    require_project "$@"
+    name="${4:-}"
+    f="${GCLOUD_STUB_STATE_DIR}/firewall-rules/${name}.json"
+    if [[ ! -f "$f" ]]; then
+      echo "gcloud-stub: firewall rule ${name} not found" >&2
+      exit 1
+    fi
+    # Real gcloud only touches the fields a flag was actually given for;
+    # an update call with no --target-tags leaves the rule's existing
+    # target tags alone, not clears them. Only write targetTags when
+    # get_flag actually found the flag (its own exit status, not whether
+    # the value came back empty -- "--target-tags=" is a valid, distinct
+    # "clear the list" request from "the flag wasn't passed at all").
+    if target_tags="$(get_flag target-tags "$@")"; then
+      "$PYTHON" -c "
+import json, sys
+path, tags = sys.argv[1], sys.argv[2]
+d = json.load(open(path))
+d['targetTags'] = [t for t in tags.split(',') if t]
+json.dump(d, open(path, 'w'))
+" "$f" "$target_tags"
+    fi
+    exit 0
     ;;
   "compute firewall-rules create")
     require_project "$@"
@@ -252,6 +299,11 @@ print(json.dumps(out))
   "compute instances add-tags")
     require_project "$@"
     require_flag zone "$@"
+    name="${4:-}"
+    if [[ -n "$name" && -f "${GCLOUD_STUB_STATE_DIR}/instances/${name}.add-tags-fail" ]]; then
+      echo "gcloud-stub: simulated add-tags failure for ${name}" >&2
+      exit 1
+    fi
     # Re-touches the same sentinel as "instances create" below: on the
     # existing-VM branch, this is real work a create-mode wiring test
     # needs to have actually happened before it stops deploy.sh, not
