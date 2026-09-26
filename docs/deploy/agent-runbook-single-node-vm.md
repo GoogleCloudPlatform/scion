@@ -548,7 +548,7 @@ gcloud iap web add-iam-policy-binding \
 | Admin's `default_gcp_identity_mode` change reverted to `passthrough` after a redeploy | `deploy.sh` rewrites the whole `settings.yaml`, not just the fields it manages | Expected — see §6.3b. Re-apply the change via the admin UI or API after redeploying. |
 | `iam.serviceAccounts.create` denied | User lacks IAM admin role | User needs `roles/iam.serviceAccountAdmin` on the project |
 | Image build fails with `muse-code` error | Build script tried to build all images including unsupported ones | Verify the deploy script builds only `core-base`, `scion-base`, and `scion-antigravity`. If running manually, use `--target` to select individual images. |
-| SSH connection fails to VM | IAP tunnel access not granted or firewall rule missing | Verify IAP tunnel role: `gcloud projects get-iam-policy PROJECT_ID --flatten="bindings[].members" --filter="bindings.role:roles/iap.tunnelResourceAccessor" --format="value(bindings.members)"`. Verify firewall rule exists: `gcloud compute firewall-rules describe scion-hub-HUB_NAME-allow-iap-ssh --project=PROJECT_ID`. |
+| SSH connection fails to VM | IAP tunnel access not granted, firewall rule missing, or VM missing the network tag the rule targets | Verify IAP tunnel role: `gcloud projects get-iam-policy PROJECT_ID --flatten="bindings[].members" --filter="bindings.role:roles/iap.tunnelResourceAccessor" --format="value(bindings.members)"`. Verify firewall rule exists and its target tags: `gcloud compute firewall-rules describe scion-hub-HUB_NAME-allow-iap-ssh --project=PROJECT_ID --format="value(targetTags)"`. Verify the VM carries a matching tag: `gcloud compute instances describe scion-hub-HUB_NAME --zone=ZONE --project=PROJECT_ID --format="value(tags.items)"`. |
 | `403 Forbidden` accessing the hub URL | User missing IAP access binding | Grant access: `gcloud iap web add-iam-policy-binding --resource-type=cloud-run --service=scion-hub-HUB_NAME-iap-proxy --region=REGION --project=PROJECT_ID --member=user:USER_EMAIL --role=roles/iap.httpsResourceAccessor` |
 | VM has no outbound internet | Cloud NAT not created or misconfigured | Verify router and NAT exist: `gcloud compute routers nats describe scion-hub-HUB_NAME-nat --router=scion-hub-HUB_NAME-router --region=REGION --project=PROJECT_ID` |
 | IAP auth fails outright, or shows an unexpected consent screen | Deployer account is in a different GCP organization than the target project, or the project is not in a GCP organization at all | See "Cross-org IAP" below. `deploy.sh` prints a warning during Phase 2 for both cases it can detect (no-org is a certain warning; cross-domain is a heuristic) — either check is skipped silently if ancestry/org metadata can't be read, so trust the symptom over the absence of the warning. |
@@ -701,7 +701,7 @@ bash scripts/single-node-vm/deploy.sh --delete
 | Cloud NAT | `scion-hub-HUB_NAME-nat` |
 | Cloud Router | `scion-hub-HUB_NAME-router` |
 | Service account | `scion-hub-HUB_NAME@PROJECT_ID.iam.gserviceaccount.com` |
-| IAP SSH firewall rule | `scion-hub-HUB_NAME-allow-iap-ssh` |
+| IAP SSH firewall rule | `scion-hub-HUB_NAME-allow-iap-ssh` (scoped via `--target-tags` to instances tagged `scion-hub-HUB_NAME`; deleting the VM removes the tag along with it) |
 
 ### What is intentionally NOT deleted
 

@@ -589,6 +589,7 @@ if [[ -z "$ZONE" ]]; then
   warn "Could not discover zone dynamically; defaulting to ${ZONE}"
 fi
 INSTANCE_NAME="scion-hub-${HUB_NAME}"
+HUB_TAG="scion-hub-${HUB_NAME}"
 SA_NAME="scion-hub-${HUB_NAME}"
 # GCP service-account IDs must be 6-30 chars; truncate as a safety net
 if [[ ${#SA_NAME} -gt 30 ]]; then
@@ -851,13 +852,43 @@ else
   echo "  Created Cloud NAT: ${NAT_NAME}"
 fi
 
+# --- Hub VM network tag ---
+# The IAP SSH firewall rule below is scoped to this tag so it only ever
+# grants SSH to the hub VM, not to every VM on the network. On a re-run
+# where the VM already exists (e.g. from a deploy predating this tag), make
+# sure the tag is applied *before* the firewall rule is narrowed to target
+# it, so there is never a window where the rule targets a tag the VM lacks.
+if gcloud compute instances describe "${INSTANCE_NAME}" \
+    --zone="${ZONE}" --project="${PROJECT_ID}" &>/dev/null; then
+  info "Ensuring hub VM has network tag..."
+  gcloud compute instances add-tags "${INSTANCE_NAME}" \
+    --zone="${ZONE}" \
+    --project="${PROJECT_ID}" \
+    --tags="${HUB_TAG}" \
+    --quiet
+  echo "  Ensured network tag on VM ${INSTANCE_NAME}: ${HUB_TAG}"
+fi
+
 # --- IAP SSH firewall rule ---
 # gcloud compute ssh via IAP tunneling requires TCP:22 from 35.235.240.0/20.
+# Scoped with --target-tags so it only applies to the hub VM, not every VM
+# on network default.
 FW_RULE_NAME="scion-hub-${HUB_NAME}-allow-iap-ssh"
 info "Creating IAP SSH firewall rule (if needed)..."
 if gcloud compute firewall-rules describe "${FW_RULE_NAME}" \
     --project="${PROJECT_ID}" &>/dev/null; then
-  echo "  Firewall rule already exists: ${FW_RULE_NAME}"
+  EXISTING_TARGET_TAGS="$(gcloud compute firewall-rules describe "${FW_RULE_NAME}" \
+    --project="${PROJECT_ID}" --format="value(targetTags)" 2>/dev/null)" || true
+  if [[ -z "$EXISTING_TARGET_TAGS" ]]; then
+    info "Firewall rule ${FW_RULE_NAME} has no target tags (pre-existing, unscoped rule); narrowing to ${HUB_TAG}..."
+    gcloud compute firewall-rules update "${FW_RULE_NAME}" \
+      --project="${PROJECT_ID}" \
+      --target-tags="${HUB_TAG}" \
+      --quiet
+    echo "  Updated firewall rule ${FW_RULE_NAME} with --target-tags=${HUB_TAG}"
+  else
+    echo "  Firewall rule already exists: ${FW_RULE_NAME} (target tags: ${EXISTING_TARGET_TAGS})"
+  fi
 else
   gcloud compute firewall-rules create "${FW_RULE_NAME}" \
     --project="${PROJECT_ID}" \
@@ -866,9 +897,10 @@ else
     --action=ALLOW \
     --rules=tcp:22 \
     --source-ranges=35.235.240.0/20 \
+    --target-tags="${HUB_TAG}" \
     --description="Allow SSH via IAP tunneling for Scion Hub" \
     --quiet
-  echo "  Created firewall rule: ${FW_RULE_NAME}"
+  echo "  Created firewall rule: ${FW_RULE_NAME} (target tags: ${HUB_TAG})"
 fi
 
 # --- Create VM ---
@@ -884,6 +916,7 @@ else
     --no-address \
     --service-account="${SA_EMAIL}" \
     --scopes=cloud-platform \
+    --tags="${HUB_TAG}" \
     --boot-disk-size="${DISK_SIZE}" \
     --image-family=ubuntu-2204-lts \
     --image-project=ubuntu-os-cloud \
