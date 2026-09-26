@@ -319,10 +319,10 @@ section 7 (Troubleshooting) before retrying.
 **Re-running on an existing deployment narrows the IAP SSH firewall rule.**
 `scion-hub-HUB_NAME-allow-iap-ssh` is scoped to the hub VM's network tag.
 Deployments from before this scoping existed had an unscoped rule that
-allowed IAP-range SSH to *every* VM on network `default` in the project. The
-first re-run of `deploy.sh` against such a deployment narrows that rule
-in place to the hub VM only — any other VM that was relying on it for IAP
-SSH loses that access and needs its own firewall rule.
+allowed IAP-range SSH to *every* VM on network `default` in the project. A
+re-run of `deploy.sh` (normally the first) narrows that rule in place to the
+hub VM only — any other VM that was relying on it for IAP SSH loses that
+access and needs its own firewall rule.
 
 ### 5.3 Capture outputs
 

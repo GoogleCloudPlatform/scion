@@ -180,6 +180,17 @@ case "${1:-} ${2:-} ${3:-}" in
     if [[ -f "$f" ]]; then
       format="$(get_flag format "$@")" || format=""
       if [[ "$format" == "value(targetTags)" ]]; then
+        # A name-scoped fixture flag: the rule itself exists (the
+        # unformatted describe above still succeeds), but this specific
+        # --format=value(targetTags) read fails, e.g. a transient error
+        # between two back-to-back describe calls. Deliberately does not
+        # touch stdout on failure -- deploy.sh's own error redirect
+        # (2>/dev/null) is what a real gcloud failure would leave it to
+        # discard.
+        if [[ -f "${f}.describe-target-tags-fail" ]]; then
+          echo "gcloud-stub: simulated failure reading target tags for ${name}" >&2
+          exit 1
+        fi
         # Real gcloud's value() transform joins a repeated field with ";".
         # Prints nothing (not "[]" or similar) when the list is empty, same
         # as a real unscoped rule.
@@ -203,14 +214,21 @@ print(';'.join(d.get('targetTags') or []))
       echo "gcloud-stub: firewall rule ${name} not found" >&2
       exit 1
     fi
-    target_tags="$(get_flag target-tags "$@")" || target_tags=""
-    "$PYTHON" -c "
+    # Real gcloud only touches the fields a flag was actually given for;
+    # an update call with no --target-tags leaves the rule's existing
+    # target tags alone, not clears them. Only write targetTags when
+    # get_flag actually found the flag (its own exit status, not whether
+    # the value came back empty -- "--target-tags=" is a valid, distinct
+    # "clear the list" request from "the flag wasn't passed at all").
+    if target_tags="$(get_flag target-tags "$@")"; then
+      "$PYTHON" -c "
 import json, sys
 path, tags = sys.argv[1], sys.argv[2]
 d = json.load(open(path))
 d['targetTags'] = [t for t in tags.split(',') if t]
 json.dump(d, open(path, 'w'))
 " "$f" "$target_tags"
+    fi
     exit 0
     ;;
   "compute firewall-rules create")

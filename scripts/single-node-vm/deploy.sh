@@ -887,28 +887,37 @@ FW_RULE_NAME="scion-hub-${HUB_NAME}-allow-iap-ssh"
 info "Creating IAP SSH firewall rule (if needed)..."
 if gcloud compute firewall-rules describe "${FW_RULE_NAME}" \
     --project="${PROJECT_ID}" &>/dev/null; then
-  EXISTING_TARGET_TAGS="$(gcloud compute firewall-rules describe "${FW_RULE_NAME}" \
-    --project="${PROJECT_ID}" --format="value(targetTags)" 2>/dev/null)" || true
-  if [[ -z "$EXISTING_TARGET_TAGS" ]]; then
-    if [[ "$HUB_TAG_CONFIRMED" == "true" ]]; then
-      warn "Firewall rule ${FW_RULE_NAME} has no target tags (pre-existing, unscoped rule); narrowing to ${HUB_TAG}. Any other VM that relied on this rule for IAP SSH loses that access -- give it its own rule if it still needs one."
-      gcloud compute firewall-rules update "${FW_RULE_NAME}" \
-        --project="${PROJECT_ID}" \
-        --target-tags="${HUB_TAG}" \
-        --quiet
-      echo "  Updated firewall rule ${FW_RULE_NAME} with --target-tags=${HUB_TAG}"
+  # A failed read here is not the same as "no target tags": treat it as
+  # unknown, not unscoped. Folding a describe failure into an empty
+  # EXISTING_TARGET_TAGS (via `|| true`) would make a transient error look
+  # exactly like an unscoped rule, and -- if HUB_TAG_CONFIRMED is already
+  # true -- narrow the rule from under any foreign target tags it actually
+  # carries, which is the one thing the elif branch below exists to avoid.
+  if EXISTING_TARGET_TAGS="$(gcloud compute firewall-rules describe "${FW_RULE_NAME}" \
+      --project="${PROJECT_ID}" --format="value(targetTags)" 2>/dev/null)"; then
+    if [[ -z "$EXISTING_TARGET_TAGS" ]]; then
+      if [[ "$HUB_TAG_CONFIRMED" == "true" ]]; then
+        warn "Firewall rule ${FW_RULE_NAME} has no target tags (pre-existing, unscoped rule); narrowing to ${HUB_TAG}. Any other VM that relied on this rule for IAP SSH loses that access -- give it its own rule if it still needs one."
+        gcloud compute firewall-rules update "${FW_RULE_NAME}" \
+          --project="${PROJECT_ID}" \
+          --target-tags="${HUB_TAG}" \
+          --quiet
+        echo "  Updated firewall rule ${FW_RULE_NAME} with --target-tags=${HUB_TAG}"
+      else
+        warn "Firewall rule ${FW_RULE_NAME} has no target tags, but the hub VM's tag could not be confirmed this run. Leaving it unscoped rather than risk locking out SSH; it will be narrowed once the tag is confirmed on a later run."
+      fi
+    # Exact whole-tag match against one line of the split list, not a
+    # substring/word match against the raw string: `grep -w` would treat
+    # "-" as a non-word character and falsely match HUB_TAG against a
+    # hyphen-extended tag like "${HUB_TAG}-nfs". Two single-character `tr`
+    # calls (rather than one `tr ',;' '\n\n'`) so each has a 1:1 mapping.
+    elif ! printf '%s\n' "${EXISTING_TARGET_TAGS}" | tr ',' ';' | tr ';' '\n' | grep -qxF -- "${HUB_TAG}"; then
+      warn "Firewall rule ${FW_RULE_NAME} exists but its target tags (${EXISTING_TARGET_TAGS}) do not include ${HUB_TAG}. IAP SSH to the hub VM may fail; add ${HUB_TAG} to the rule manually or delete it and re-run."
     else
-      warn "Firewall rule ${FW_RULE_NAME} has no target tags, but the hub VM's tag could not be confirmed this run. Leaving it unscoped rather than risk locking out SSH; it will be narrowed once the tag is confirmed on a later run."
+      echo "  Firewall rule already exists: ${FW_RULE_NAME} (target tags: ${EXISTING_TARGET_TAGS})"
     fi
-  # Exact whole-tag match against one line of the split list, not a
-  # substring/word match against the raw string: `grep -w` would treat
-  # "-" as a non-word character and falsely match HUB_TAG against a
-  # hyphen-extended tag like "${HUB_TAG}-nfs". Two single-character `tr`
-  # calls (rather than one `tr ',;' '\n\n'`) so each has a 1:1 mapping.
-  elif ! printf '%s\n' "${EXISTING_TARGET_TAGS}" | tr ',' ';' | tr ';' '\n' | grep -qxF -- "${HUB_TAG}"; then
-    warn "Firewall rule ${FW_RULE_NAME} exists but its target tags (${EXISTING_TARGET_TAGS}) do not include ${HUB_TAG}. IAP SSH to the hub VM may fail; add ${HUB_TAG} to the rule manually or delete it and re-run."
   else
-    echo "  Firewall rule already exists: ${FW_RULE_NAME} (target tags: ${EXISTING_TARGET_TAGS})"
+    warn "Could not read target tags for firewall rule ${FW_RULE_NAME} (it exists, but the read failed); leaving it as-is rather than risk narrowing it while its target tags are unknown. Re-run once the read succeeds."
   fi
 else
   gcloud compute firewall-rules create "${FW_RULE_NAME}" \

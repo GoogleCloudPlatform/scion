@@ -349,3 +349,36 @@ test_iap_fw_scope_hyphenated_lookalike_tag_still_warns() {
   assert_contains "$DEPLOY_LOG" "do not include ${HUB_TAG}" \
     "a hyphenated look-alike tag is not the hub tag and must still trigger the N3 warning"
 }
+
+# =====================================================================
+# Scenario 8: the rule exists (the plain `describe` succeeds) and already
+# carries foreign target tags, but the second describe -- the one reading
+# `--format=value(targetTags)` -- fails.
+# =====================================================================
+# A `|| true` around that second read would fold a transient failure into
+# an empty EXISTING_TARGET_TAGS, indistinguishable from a genuinely
+# unscoped rule. With the VM's tag confirmed this run, that would narrow
+# the rule and silently wipe out the foreign tags it actually has. The
+# read failing must instead be treated as "unknown": warn, and leave the
+# rule alone.
+
+test_iap_fw_scope_target_tags_describe_failure_does_not_narrow() {
+  fresh_gcloud_state
+  seed_instance "$INSTANCE_NAME" "$ZONE"
+  seed_firewall_rule_json "$FW_RULE_NAME" \
+    "Allow SSH via IAP tunneling for Scion Hub" "default" "INGRESS" "ALLOW" "tcp" "22" \
+    "" "35.235.240.0/20" "some-other-tag" "1000"
+  set_firewall_describe_target_tags_will_fail "$FW_RULE_NAME"
+  run_deploy_create "$(iap_fw_config_json "$HUB")"
+  local log
+  log="$(gcloud_log)"
+
+  assert_eq "1" "$(echo "$log" | grep -c "^compute instances add-tags ${INSTANCE_NAME} " || true)" \
+    "the VM still gets tagged even though the rule's tags couldn't be read"
+  assert_eq "0" "$(echo "$log" | grep -c '^compute firewall-rules update' || true)" \
+    "must not narrow the rule while its target tags are unknown -- doing so would silently replace whatever foreign tags it actually has"
+  assert_eq "0" "$(echo "$log" | grep -c '^compute firewall-rules create' || true)" \
+    "an existing rule must not also be created"
+  assert_contains "$DEPLOY_LOG" "the read failed" \
+    "deploy.sh should explain that the rule's target tags could not be read"
+}
