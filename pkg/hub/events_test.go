@@ -617,6 +617,47 @@ func TestChannelEventPublisher_PublishNotification(t *testing.T) {
 	}
 }
 
+// TestChannelEventPublisher_NoLegacyGroveSubjects guards a cross-project SSE
+// invariant: grove.<projectId>.* must never be published. That subject would
+// duplicate the authorized project.<projectId>.* subjects without SSE
+// subject authorization covering the "grove" namespace, so anything sent
+// there is readable by any authenticated session regardless of project
+// membership (default-deny authorization for unrecognized namespaces is
+// covered separately in pkg/hub/sse_default_deny_test.go). This test
+// subscribes to the wildcard grove.> pattern and asserts nothing is ever
+// delivered there, across every event type a project can publish.
+func TestChannelEventPublisher_NoLegacyGroveSubjects(t *testing.T) {
+	pub := NewChannelEventPublisher()
+	defer pub.Close()
+
+	groveCh, unsub := pub.Subscribe("grove.>")
+	defer unsub()
+
+	ctx := context.Background()
+	pub.PublishAgentStatus(ctx, &store.Agent{ID: "a1", ProjectID: "g1", Phase: "running"})
+	pub.PublishAgentCreated(ctx, &store.Agent{ID: "a1", ProjectID: "g1"})
+	pub.PublishAgentDeleted(ctx, "a1", "g1")
+	pub.PublishAgentPorts(ctx, &store.Agent{ID: "a1", ProjectID: "g1"})
+	pub.PublishProjectCreated(ctx, &store.Project{ID: "g1", Name: "Project"})
+	pub.PublishProjectUpdated(ctx, &store.Project{ID: "g1", Name: "Project"})
+	pub.PublishProjectDeleted(ctx, "g1")
+	pub.PublishBrokerConnected(ctx, "b1", "broker-one", []string{"g1"})
+	pub.PublishBrokerDisconnected(ctx, "b1", []string{"g1"})
+	pub.PublishNotification(ctx, &store.Notification{ID: "n1", ProjectID: "g1", Status: "COMPLETED"})
+	pub.PublishUserMessage(ctx, &store.Message{
+		ID: "m1", ProjectID: "g1", Sender: "agent:a1", SenderID: "a1",
+		Recipient: "user:alice", RecipientID: "u1", Msg: "secret", Type: "assistant-reply",
+		CreatedAt: time.Now().UTC(),
+	}, nil)
+
+	select {
+	case evt := <-groveCh:
+		t.Fatalf("legacy grove.* subject must not be published, got %q", evt.Subject)
+	default:
+		// Expected: nothing was published on grove.>.
+	}
+}
+
 func TestNoopEventPublisher(t *testing.T) {
 	var pub noopEventPublisher
 	ctx := context.Background()

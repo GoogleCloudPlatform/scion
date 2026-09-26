@@ -84,6 +84,11 @@ allowed_paths=(
   "^pkg/hub/capability_marshal_test.go$"
   "^pkg/hub/envgather_resolution_test.go$"
   "^pkg/hub/envgather_test.go$"
+  # Regression test proving grove.<projectId>.* duplicate SSE subjects are
+  # never published by pkg/hub/events.go. The literal is the point of the
+  # test: it subscribes to the legacy wildcard and asserts nothing is ever
+  # delivered there.
+  "^pkg/hub/events_test.go$"
   "^pkg/hub/events_postgres_test.go$"
   "^pkg/hub/fs_safety_test.go$"
   "^pkg/hub/handlers_broker_inbound_test.go$"
@@ -91,6 +96,10 @@ allowed_paths=(
   "^pkg/hub/handlers_project_test.go$"
   "^pkg/hub/heartbeat_legacy_test.go$"
   "^pkg/hub/httpdispatcher_test.go$"
+  # Regression test for SSE subject authorization default-deny: proves a
+  # non-member is denied on the legacy grove.* subjects and other unknown
+  # namespaces.
+  "^pkg/hub/sse_default_deny_test.go$"
   "^pkg/hub/web_test.go$"
   "^pkg/hubclient/agents_test.go$"
   "^pkg/hubclient/client_test.go$"
