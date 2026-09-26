@@ -1721,6 +1721,160 @@ func TestProjectRegister_NewProject_MemberWithCreateSucceeds(t *testing.T) {
 	assert.Equal(t, member.ID, resp.Project.OwnerID)
 }
 
+// TestProjectRegister_GitRemoteMatch_DeniedFallsThroughToNewCallerOwnedProject
+// verifies that when register resolves an existing project only via an
+// INCIDENTAL single git-remote match (not an explicit id), and the caller
+// cannot update that project, register does not 403 — this is a legitimate
+// hub link/sync/provide flow, and GetProjectsByGitRemote already supports
+// more than one project sharing a remote. Instead it falls through to the
+// ordinary create-new-project path and provisions a new, caller-owned
+// project carrying the same git remote, running the full create path (quota
+// reservation and owner role binding included), and never mutates or
+// describes the other user's project in the response.
+func TestProjectRegister_GitRemoteMatch_DeniedFallsThroughToNewCallerOwnedProject(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	owner := &store.User{
+		ID: tid("register-authz-gitremote-owner"), Email: "register-gitremote-owner@test.com",
+		DisplayName: "Owner", Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, owner))
+	ensureHubMembership(ctx, s, owner.ID)
+
+	remote := "github.com/test/register-authz-gitremote-fallthrough"
+	existing := &store.Project{
+		ID: tid("register-authz-gitremote-existing"), Name: "Existing Remote Project", Slug: "register-authz-gitremote-existing",
+		GitRemote: util.NormalizeGitRemote(remote), OwnerID: owner.ID, CreatedBy: owner.ID, Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, existing))
+	srv.createProjectMembersGroup(ctx, existing)
+
+	membersSlug := "project:" + existing.Slug + ":members"
+	group, err := s.GetGroupBySlug(ctx, membersSlug)
+	require.NoError(t, err)
+	membersBefore, err := s.GetGroupMembers(ctx, group.ID)
+	require.NoError(t, err)
+
+	other := seedHubMemberNoProjects(t, s, "register-authz-gitremote-other") // grants hub-scope project.create only
+
+	rec := doRequestAsUser(t, srv, other, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+		Name:      "New Project Same Remote",
+		GitRemote: remote,
+	})
+	require.Equal(t, http.StatusOK, rec.Code,
+		"a denied incidental git-remote match must fall through to create, not 403; body: %s", rec.Body.String())
+
+	var resp RegisterProjectResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.True(t, resp.Created, "expected a new project to be created")
+	assert.NotEqual(t, existing.ID, resp.Project.ID, "the new project must not be the other user's existing project")
+	assert.Equal(t, other.ID, resp.Project.OwnerID, "the new project must be owned by the caller")
+	assert.Equal(t, util.NormalizeGitRemote(remote), resp.Project.GitRemote)
+	assert.Empty(t, resp.Matches, "the response must not describe or list the other user's existing project")
+
+	// The other user's existing project is untouched.
+	membersAfter, err := s.GetGroupMembers(ctx, group.ID)
+	require.NoError(t, err)
+	assert.Len(t, membersAfter, len(membersBefore), "the other user's project group must be unchanged")
+	for _, m := range membersAfter {
+		assert.NotEqual(t, other.ID, m.MemberID, "the caller must not be added to the other user's project")
+	}
+
+	// The new project ran the full create path: the caller has an owner role
+	// binding on it (createProjectOwnerRoleBinding), not just a bare row.
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, other.ID)
+	require.NoError(t, err)
+	var foundOwnerBinding bool
+	for _, rb := range bindings {
+		if rb.ScopeType == store.RoleScopeProject && rb.ScopeID == resp.Project.ID {
+			foundOwnerBinding = true
+		}
+	}
+	assert.True(t, foundOwnerBinding, "the caller should hold a role binding on their new project")
+}
+
+// TestProjectRegister_SlugMatch_DeniesNonMemberWithoutBroker verifies that a
+// denied match via the slug/global-project lookup (no git remote, name
+// matches an existing project's slug) still 403s outright rather than
+// falling through to create — this is a known, documented limitation for
+// this change: it does not broaden member registration against the global
+// project.
+func TestProjectRegister_SlugMatch_DeniesNonMemberWithoutBroker(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	owner := &store.User{
+		ID: tid("register-authz-slug-owner"), Email: "register-slug-owner@test.com",
+		DisplayName: "Owner", Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, owner))
+	ensureHubMembership(ctx, s, owner.ID)
+
+	name := "Register Authz Slug Project"
+	project := &store.Project{
+		ID: tid("register-authz-slug-project"), Name: name, Slug: api.Slugify(name),
+		OwnerID: owner.ID, CreatedBy: owner.ID, Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.createProjectMembersGroup(ctx, project)
+
+	other := seedHubMemberNoProjects(t, s, "register-authz-slug-other") // grants hub-scope project.create only
+
+	rec := doRequestAsUser(t, srv, other, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+		Name: name, // no id, no gitRemote -> resolves via slug lookup
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"a denied slug/global-project match must still 403 (known limitation, not fixed here); body: %s", rec.Body.String())
+}
+
+// TestProjectRegister_ExistingProject_DeprecatedBrokerFlow_DeniesNonMember
+// pins that the project-update authz gate short-circuits BEFORE the
+// deprecated embedded-broker flow runs: a caller who cannot update the
+// resolved existing project is denied even when the request also carries an
+// embedded broker payload, and no broker is created/mutated as a result.
+//
+// NOTE: this only pins the gate short-circuit. A separate, pre-existing
+// ownership question in the embedded-broker flow itself (when the caller CAN
+// update the project) is out of scope here and tracked elsewhere.
+func TestProjectRegister_ExistingProject_DeprecatedBrokerFlow_DeniesNonMember(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	owner := &store.User{
+		ID: tid("register-authz-embedded-owner"), Email: "register-embedded-owner@test.com",
+		DisplayName: "Owner", Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, owner))
+	ensureHubMembership(ctx, s, owner.ID)
+
+	project := &store.Project{
+		ID: tid("register-authz-embedded-project"), Name: "Embedded Broker Project", Slug: "register-authz-embedded-project",
+		OwnerID: owner.ID, CreatedBy: owner.ID, Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.createProjectMembersGroup(ctx, project)
+
+	brokerName := "register-authz-embedded-broker"
+	other := seedHubMemberNoProjects(t, s, "register-authz-embedded-other") // grants hub-scope project.create only
+
+	rec := doRequestAsUser(t, srv, other, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+		ID:   project.ID,
+		Name: project.Name,
+		Broker: &RegisterProjectBrokerInfo{
+			Name:    brokerName,
+			Version: "1.0.0",
+		},
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"denied caller must not reach the embedded-broker flow; body: %s", rec.Body.String())
+
+	_, err := s.GetRuntimeBrokerByName(ctx, brokerName)
+	assert.ErrorIs(t, err, store.ErrNotFound, "denied register must not create a broker via the embedded-broker flow")
+
+	assert.NotContains(t, rec.Body.String(), "secretKey", "denied register must not return a broker secret")
+}
+
 // ==========================================================================
 // POST /api/v1/projects (createProject) — client-supplied-ID idempotency
 //

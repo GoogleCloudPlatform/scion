@@ -739,11 +739,7 @@ func isSystemProjectAgentsGroup(group *store.Group, projectID string) bool {
 //
 // PM1 contract: project membership IS the set of project-scoped role bindings.
 // The special project:<slug>:members group no longer has authorization meaning.
-//
-// callerUserID, when non-empty, also receives a project-owner RoleBinding
-// (e.g. the user who linked the project). It is safe to pass the same value as
-// project.CreatedBy — duplicate bindings are handled gracefully.
-func (s *Server) createProjectMembersGroup(ctx context.Context, project *store.Project, callerUserID ...string) {
+func (s *Server) createProjectMembersGroup(ctx context.Context, project *store.Project) {
 	membersSlug := projectMembersGroupSlug(project.Slug)
 
 	s.projectsLogger().Debug("ensuring project members group",
@@ -830,26 +826,6 @@ func (s *Server) createProjectMembersGroup(ctx context.Context, project *store.P
 		if rbErr := s.createProjectOwnerRoleBinding(ctx, project.ID, project.CreatedBy); rbErr != nil {
 			s.projectsLogger().Debug("project owner role binding already exists or failed",
 				"project_id", project.ID, "user", project.CreatedBy, "error", rbErr.Error())
-		}
-	}
-
-	// Add the caller (e.g. the user who linked the project) as an owner too.
-	// This is a no-op when callerUserID matches project.CreatedBy.
-	if len(callerUserID) > 0 && callerUserID[0] != "" && callerUserID[0] != project.CreatedBy {
-		if err := s.store.AddGroupMember(ctx, &store.GroupMember{
-			GroupID:    membersGroup.ID,
-			MemberType: store.GroupMemberTypeUser,
-			MemberID:   callerUserID[0],
-			Role:       store.GroupMemberRoleOwner,
-		}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
-			s.projectsLogger().Warn("failed to add caller to project members group",
-				"project_id", project.ID, "user", callerUserID[0], "error", err.Error())
-		}
-
-		// Ensure role binding for caller too.
-		if rbErr := s.createProjectOwnerRoleBinding(ctx, project.ID, callerUserID[0]); rbErr != nil {
-			s.projectsLogger().Debug("caller project owner role binding already exists or failed",
-				"project_id", project.ID, "user", callerUserID[0], "error", rbErr.Error())
 		}
 	}
 
@@ -1280,11 +1256,19 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 	var project *store.Project
 	var created bool
 
+	// resolvedBy records HOW an existing project was matched, so the
+	// authorization gate below can distinguish an explicit request from an
+	// incidental one: "id" (client-supplied project id), "gitremote" (a
+	// single incidental git-remote match), or "slug" (the global-project
+	// slug lookup).
+	var resolvedBy string
+
 	// First, try to look up by client-provided project ID
 	if req.ID != "" {
 		existingProject, err := s.store.GetProject(ctx, req.ID)
 		if err == nil {
 			project = existingProject
+			resolvedBy = "id"
 		} else if err != store.ErrNotFound {
 			writeErrorFromErr(w, err, "")
 			return
@@ -1303,6 +1287,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		if len(matchingProjects) == 1 {
 			// Backward compatible: single match auto-links
 			project = matchingProjects[0]
+			resolvedBy = "gitremote"
 		} else if len(matchingProjects) > 1 {
 			// Multiple matches — return the list for client-side disambiguation.
 			gitRemoteMatches = matchingProjects
@@ -1316,9 +1301,57 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		existingProject, err := s.store.GetProjectBySlugCaseInsensitive(ctx, slug)
 		if err == nil {
 			project = existingProject
+			resolvedBy = "slug"
 		} else if err != store.ErrNotFound {
 			writeErrorFromErr(w, err, "")
 			return
+		}
+	}
+
+	// SECURITY-GATE: CheckAccess — an EXISTING project resolved by an
+	// explicit client-supplied id, or by the slug/global-project lookup,
+	// requires project-update authorization before any mutation: a denial
+	// returns 403 and performs no mutation.
+	//
+	// A project resolved only via an INCIDENTAL single git-remote match is
+	// handled differently: the caller never named this project, so instead
+	// of mutating — or outright blocking — a project someone else owns, a
+	// denied git-remote match falls through to the ordinary create-new path
+	// below and provisions a new caller-owned project carrying the same git
+	// remote. This mirrors the existing disambiguation behavior for multiple
+	// projects sharing a remote (GetProjectsByGitRemote already supports
+	// more than one project per remote). The other project is left
+	// untouched — no membership, no group backfill — and is never named in
+	// the response; only the newly created project is returned.
+	//
+	// KNOWN LIMITATION: a denied slug/global-project match still 403s
+	// outright rather than falling through. Broadening member registration
+	// against the global project is a follow-up, not addressed here.
+	if project != nil {
+		identity := GetIdentityFromContext(ctx)
+		if identity == nil {
+			// Mirrors s.authorize's own contract for a nil identity. In
+			// practice unreachable here — the project.create gate above
+			// already requires an authenticated identity — but this keeps
+			// the gate correct standalone rather than relying on that.
+			Unauthorized(w)
+			return
+		}
+		decision := s.authzService.CheckAccess(ctx, identity, projectResource(project), ActionUpdate)
+		if !decision.Allowed {
+			if resolvedBy == "gitremote" {
+				project = nil
+			} else {
+				// Single decision, single write: this deliberately does NOT
+				// call s.authorize (which would re-run CheckAccess). Re-running
+				// it risked a second, differently-timed decision disagreeing
+				// with the first — the deny path would then log nothing and
+				// fall through to an empty 200. Emit exactly what s.authorize
+				// emits on denial, from the one decision already computed.
+				logAuthzDenial(r, identity, projectResource(project), ActionUpdate, decision.Reason)
+				writeForbiddenStructured(w, "", "project", ActionUpdate)
+				return
+			}
 		}
 	}
 
@@ -1435,20 +1468,13 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		// Auto-link brokers that have auto_provide enabled
 		s.autoLinkProviders(ctx, project)
 	} else {
-		// SECURITY-GATE: CheckAccess — require project-update authz on the
-		// resolved project before register performs any mutation against it.
-		// The project.create check above only covers provisioning a brand-new
-		// project; resolving an EXISTING project (by client-supplied id, slug,
-		// or git remote) must not let any caller who merely holds hub-scope
-		// project.create mutate a project they hold no binding on.
-		if !s.authorize(w, r, projectResource(project), ActionUpdate) {
-			return
-		}
-
-		// Existing project — ensure associated groups exist (backfill for
-		// projects created before group support was added). The caller is
-		// deliberately NOT granted membership here: register must not add
-		// the caller to the members group of a project that already exists.
+		// Existing project, and the update-authz gate above already passed
+		// (or this project was resolved by an incidental git-remote match,
+		// which never reaches here — see the gate above). Ensure associated
+		// groups exist (backfill for projects created before group support
+		// was added). The caller is deliberately NOT granted membership
+		// here: register must not add the caller to the members group of a
+		// project that already exists.
 		s.projectsLogger().Debug("ensuring groups for existing project during register",
 			"project_id", project.ID, "slug", project.Slug)
 		s.createProjectGroup(ctx, project)
