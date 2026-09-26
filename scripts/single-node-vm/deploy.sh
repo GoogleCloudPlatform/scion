@@ -842,9 +842,9 @@ fi
 # deploy.sh attempt that same rejected all-subnets create -- the #2003
 # failure again, after the SA/IAM already exist. So a foreign Private NAT
 # still routes to the scoped (--nat-custom-subnet-ip-ranges=default)
-# create below, same as any other non-covering foreign gateway; only our
-# own router's NAT type is irrelevant either way, since "foreign" is
-# false for it regardless. "covers" is true when the NAT is PUBLIC (the
+# create below, same as any other non-covering foreign gateway; our own
+# router is never treated as foreign; a hand-added extra NAT on it is out
+# of scope. "covers" is true when the NAT is PUBLIC (the
 # default when `type` is absent) AND already provides egress for subnet
 # "default": ALL_SUBNETWORKS_* mode (all ranges, or all primary ranges),
 # or a LIST_OF_SUBNETWORKS entry for "default" whose sourceIpRangesToNat
@@ -904,7 +904,7 @@ if [[ -n "$REUSE_NAT" ]]; then
   echo "  Reusing Cloud NAT:    ${NAT_NAME}"
 elif [[ "$FOREIGN_NAT_EXISTS" == "true" ]]; then
   NAT_CREATE_MODE="custom-default-subnet"
-  info "A Cloud NAT gateway already exists on this network/region but doesn't cover subnet 'default'; scoping our own NAT to that subnet only (an all-subnets NAT can't coexist with another gateway)."
+  info "A Cloud NAT gateway already exists on this network/region but doesn't provide internet egress for subnet 'default'; scoping our own NAT to that subnet only (an all-subnets NAT can't coexist with another gateway)."
 fi
 
 # --- Service account ---

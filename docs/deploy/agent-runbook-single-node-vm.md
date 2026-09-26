@@ -590,7 +590,7 @@ handles it one of two ways:
   existing gateway:
 
   ```
-  ==> A Cloud NAT gateway already exists on this network/region but doesn't cover subnet 'default'; scoping our own NAT to that subnet only (an all-subnets NAT can't coexist with another gateway).
+  ==> A Cloud NAT gateway already exists on this network/region but doesn't provide internet egress for subnet 'default'; scoping our own NAT to that subnet only (an all-subnets NAT can't coexist with another gateway).
   ```
 
 A Private NAT (used for NCC/hybrid connectivity, not internet egress) is
