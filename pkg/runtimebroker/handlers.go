@@ -803,6 +803,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		Attach:             req.Attach,
 		WorkspaceMode:      req.WorkspaceMode,
 		HTTPRequest:        r,
+		Operation:          opCreate,
 	})
 	if err != nil {
 		markAttemptFailed(http.StatusInternalServerError, err.Error())
@@ -1567,12 +1568,14 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		ProjectSlug:        startReq.ProjectSlug,
 		Config:             cfg,
 		InlineConfig:       startReq.InlineConfig,
+		HubEndpoint:        startReq.HubEndpoint,
 		ResolvedEnv:        startReq.ResolvedEnv,
 		EnvClassifications: startReq.EnvClassifications,
 		ResolvedSecrets:    startReq.ResolvedSecrets,
 		SharedDirs:         startReq.SharedDirs,
 		AgentToken:         startContextAgentToken,
 		HTTPRequest:        r,
+		Operation:          opHTTPStart,
 	})
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
@@ -1855,9 +1858,11 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	sc, err := s.buildStartContext(ctx, startContextInputs{
 		Name:               agentName,
 		ProjectPath:        projectPath,
+		HubEndpoint:        restartReq.HubEndpoint,
 		ResolvedEnv:        restartReq.ResolvedEnv,
 		EnvClassifications: restartReq.EnvClassifications,
 		HTTPRequest:        r,
+		Operation:          opHTTPRestart,
 	})
 	if err != nil {
 		RuntimeError(w, err.Error())
