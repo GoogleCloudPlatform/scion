@@ -721,6 +721,24 @@ func (s *Server) reserveQuotaHTTP(ctx context.Context, w http.ResponseWriter, li
 	return false, false
 }
 
+// releaseAgentQuotas releases resourceID's create-time quota reservations:
+// the per-broker agent ceiling (#1303), when a runtime broker was assigned,
+// and the per-project agent limit. Both are released explicitly rather than
+// relying on Release being resourceID-scoped and clearing every reservation
+// tied to resourceID regardless of limitName — that behavior is an
+// implementation detail of the store today, not a contract. Release is a
+// no-op for a limit that was never reserved, so this is safe to call even
+// when only one of the two reservations was ever made (ptone/scion#1986).
+func (s *Server) releaseAgentQuotas(ctx context.Context, resourceID, runtimeBrokerID string) {
+	if s.quotaService == nil {
+		return
+	}
+	if runtimeBrokerID != "" {
+		s.quotaService.Release(ctx, store.LimitMaxAgentsPerBroker, resourceID)
+	}
+	s.quotaService.Release(ctx, "max_agents_per_project", resourceID)
+}
+
 func (s *Server) createAgentInProject(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -1401,23 +1419,12 @@ func (s *Server) createAgentInProject(
 		}
 	}
 	if !s.checkAndReserveQuota(ctx, w, "max_agents_per_project", createdBy, "project", projectID, agent.ID) {
-		if s.quotaService != nil && runtimeBrokerID != "" {
-			s.quotaService.Release(ctx, store.LimitMaxAgentsPerBroker, agent.ID)
-		}
+		s.releaseAgentQuotas(ctx, agent.ID, runtimeBrokerID)
 		return
 	}
 
 	if err := s.store.CreateAgent(ctx, agent); err != nil {
-		if s.quotaService != nil {
-			// Release both limits explicitly rather than relying on Release
-			// being resourceID-scoped and clearing every reservation tied to
-			// agent.ID regardless of limitName — that behavior is an
-			// implementation detail of the store today, not a contract.
-			if runtimeBrokerID != "" {
-				s.quotaService.Release(ctx, store.LimitMaxAgentsPerBroker, agent.ID)
-			}
-			s.quotaService.Release(ctx, "max_agents_per_project", agent.ID)
-		}
+		s.releaseAgentQuotas(ctx, agent.ID, runtimeBrokerID)
 		writeErrorFromErr(w, err, "")
 		return
 	}
@@ -1550,6 +1557,7 @@ func (s *Server) createAgentInProject(
 		if err := s.managedAgentCreate(ctx, agent, task); err != nil {
 			_ = s.managedAgentDelete(ctx, agent)
 			_ = s.store.DeleteAgent(ctx, agent.ID)
+			s.releaseAgentQuotas(ctx, agent.ID, runtimeBrokerID)
 			RuntimeError(w, "Failed to create managed agent: "+err.Error())
 			return
 		}
@@ -1597,6 +1605,7 @@ func (s *Server) createAgentInProject(
 					// trigger spurious sync-registration attempts.
 					_ = dispatcher.DispatchAgentDelete(ctx, agent, true, true, false, time.Time{})
 					_ = s.store.DeleteAgent(ctx, agent.ID)
+					s.releaseAgentQuotas(ctx, agent.ID, runtimeBrokerID)
 					dispatchCreateErrorResponse(w, err)
 					return
 				} else if envReqs != nil {
@@ -1634,6 +1643,7 @@ func (s *Server) createAgentInProject(
 					// trigger spurious sync-registration attempts.
 					_ = dispatcher.DispatchAgentDelete(ctx, agent, true, true, false, time.Time{})
 					_ = s.store.DeleteAgent(ctx, agent.ID)
+					s.releaseAgentQuotas(ctx, agent.ID, runtimeBrokerID)
 					dispatchCreateErrorResponse(w, err)
 					return
 				} else if envReqs != nil && len(envReqs.Needs) > 0 {
@@ -1642,6 +1652,7 @@ func (s *Server) createAgentInProject(
 					// local state doesn't trigger spurious sync-registration.
 					_ = dispatcher.DispatchAgentDelete(ctx, agent, true, true, false, time.Time{})
 					_ = s.store.DeleteAgent(ctx, agent.ID)
+					s.releaseAgentQuotas(ctx, agent.ID, runtimeBrokerID)
 					MissingEnvVars(w, envReqs.Needs, s.buildEnvGatherResponse(ctx, agent, envReqs))
 					return
 				} else {
@@ -2749,18 +2760,8 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 		}
 	}
 
-	// Release quota reservations for the deleted agent (best-effort). Release
-	// both limits explicitly — the per-project limit and, if a runtime
-	// broker was assigned, the per-broker agent ceiling (#1303) — rather
-	// than relying on Release being resourceID-scoped and clearing every
-	// reservation tied to agent.ID regardless of limitName; that behavior is
-	// an implementation detail of the store today, not a contract.
-	if s.quotaService != nil {
-		if agent.RuntimeBrokerID != "" {
-			s.quotaService.Release(ctx, store.LimitMaxAgentsPerBroker, agent.ID)
-		}
-		s.quotaService.Release(ctx, "max_agents_per_project", agent.ID)
-	}
+	// Release quota reservations for the deleted agent (best-effort).
+	s.releaseAgentQuotas(ctx, agent.ID, agent.RuntimeBrokerID)
 
 	// A deleted agent must not remain a thread's default — the binding would
 	// route new messages at an agent that no longer exists.
