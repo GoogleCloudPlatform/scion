@@ -76,6 +76,22 @@ const (
 	processTermTimeout = 2 * time.Second
 )
 
+// directAttachKeepaliveConfig configures wsprotocol.StartKeepalive for the
+// direct-attach WebSocket (LocalPTYSession). Only PingInterval, PongWait and
+// WriteWait are used. These are the same values wsprotocol uses by default;
+// naming them explicitly here states that intent and keeps the two from
+// drifting apart silently.
+var directAttachKeepaliveConfig = wsprotocol.ConnectionConfig{
+	PingInterval: wsprotocol.DefaultPingInterval,
+	PongWait:     wsprotocol.DefaultPongWait,
+	WriteWait:    wsprotocol.DefaultWriteWait,
+}
+
+// readDeadlinePokeInterval bounds how long a pong that raced Run's teardown
+// can push LocalPTYSession's read deadline back out. See the teardown
+// comment in Run for the full race.
+const readDeadlinePokeInterval = 50 * time.Millisecond
+
 // isDockerCompatibleRuntime returns true for runtimes that support docker exec
 // -e for env injection and /proc access for PID lookup. Only "docker" qualifies.
 // "container" (Apple container) is excluded because its /proc and kill behavior
@@ -613,6 +629,15 @@ func (s *Server) handleAgentAttach(w http.ResponseWriter, r *http.Request) {
 		slog.Error("WebSocket upgrade failed for agent", "agent_id", agentID, "error", err)
 		return
 	}
+
+	// Safety net: sendCloseFrame below closes conn on every normal return
+	// path, but a panic in Run, classifyAttachEnd or the prober would skip
+	// straight past it and leak the hijacked connection (net/http's own
+	// panic recovery does not close hijacked connections). A second Close
+	// on a gorilla connection is a harmless error return, so this does not
+	// reintroduce a bare close on the normal path. Registered right after
+	// the upgrade so nothing between here and sendCloseFrame can panic
+	// without it.
 	defer func() { _ = conn.Close() }()
 
 	// Get terminal size from query params
@@ -638,7 +663,24 @@ func (s *Server) handleAgentAttach(w http.ResponseWriter, r *http.Request) {
 		slog.Error("Attach session error", "agent_id", agentID, "error", err)
 	}
 
-	slog.Info("Attach session ended", "agent_id", agentID)
+	// Classify why the attach ended and send a close frame carrying that
+	// code and reason, instead of a bare conn.Close() (which a client can
+	// only ever observe as an abnormal 1006 closure).
+	prober := &attachEndProber{
+		lookup:       s,
+		slug:         agentID,
+		projectID:    projectID,
+		runtimeCmd:   runtimeCmd,
+		containerID:  containerID,
+		namespace:    result.Namespace,
+		execUser:     result.ExecUser,
+		k8sConfig:    result.K8sConfig,
+		k8sClientset: result.K8sClientset,
+	}
+	code, reason := classifyAttachEnd(ctx, session.startErr, session.cleanExit, prober)
+	session.sendCloseFrame(code, reason)
+
+	slog.Info("Attach session ended", "agent_id", agentID, "close_code", code, "close_reason", reason)
 }
 
 // extractAgentIDFromAttachPath extracts agent ID from /api/v1/agents/{id}/attach
@@ -724,6 +766,14 @@ func newLocalPTYSession(ctx context.Context, agentID, containerID, runtimeCmd, e
 
 // Run starts the PTY session.
 func (s *LocalPTYSession) Run() error {
+	// Arm the read deadline, install the pong handler, and start the ping
+	// loop, sharing writeMu with the data-plane writes below (a WebSocket
+	// connection allows only one writer at a time).
+	if err := wsprotocol.StartKeepalive(s.ctx, s.conn, &s.writeMu, directAttachKeepaliveConfig); err != nil {
+		s.startErr = err
+		return err
+	}
+
 	isK8s := (s.runtimeCmd == "kubernetes" || s.runtimeCmd == "k8s") && s.k8sConfig != nil && s.k8sClientset != nil
 	isCloudRunSandbox := s.runtimeCmd == "cloudrun-sandbox"
 
@@ -810,15 +860,31 @@ func (s *LocalPTYSession) Run() error {
 	}
 	s.cancel()
 
-	// Close WebSocket to unblock readFromWebSocket if still blocked on
-	// conn.ReadMessage(). This also prevents any future resize messages.
+	// Force the read deadline into the past to unblock readFromWebSocket if
+	// still blocked on conn.ReadMessage(), and to stop any future resize
+	// messages. This deliberately does not close the connection outright
+	// (unlike before): the caller still needs it open to send a close frame
+	// carrying the classified end reason once Run returns.
+	//
+	// A single SetReadDeadline(now) can be undone: the keepalive's pong
+	// handler runs on this same reader, inside ReadMessage, and a pong
+	// whose payload was already read but whose handler had not yet fired
+	// when the line above ran will push the deadline back out by PongWait
+	// right after it lands. ReadMessage then keeps blocking on that
+	// far-future deadline — it swallows control frames internally and
+	// never re-checks ctx.Done() — which would stall the join below, and
+	// the close frame it gates, for up to PongWait. Re-asserting the past
+	// deadline on a short tick until the reader actually exits bounds that
+	// race to about one tick instead of a full PongWait.
 	if s.conn != nil {
-		_ = s.conn.Close()
+		pokeReadDeadlineFn(s.conn, wsDone)
+	} else {
+		// No connection to poke; just join readFromWebSocket — ensures no
+		// in-flight resize (Setsize). readFromWebSocket exits promptly:
+		// ReadMessage returns a deadline error, or the ctx.Done() check at
+		// the loop top fires.
+		<-wsDone
 	}
-	// Join readFromWebSocket — ensures no in-flight resize (Setsize).
-	// readFromWebSocket exits promptly: ReadMessage returns error from
-	// conn.Close(), or ctx.Done() check at loop top.
-	<-wsDone
 
 	// NOW readFromWebSocket has fully exited — no concurrent Setsize.
 	// PTY close happens in deferred gracefulShutdownExec.
@@ -1130,6 +1196,59 @@ func (s *LocalPTYSession) writeToWebSocket(v interface{}) error {
 	defer s.writeMu.Unlock()
 	return s.conn.WriteJSON(v)
 }
+
+// sendCloseFrame sends a WebSocket close frame carrying code and reason, then
+// closes the connection. This replaces a bare conn.Close(), which gave a
+// direct-attach client no way to tell a clean detach from a reason it should
+// retry — every attach end looked like an ungraceful drop (observed as close
+// code 1006).
+func (s *LocalPTYSession) sendCloseFrame(code int, reason string) {
+	if !wsprotocol.IsSendableCloseCode(code) {
+		code = wsprotocol.ClosePTYInternalError
+	}
+	reason = wsprotocol.TruncateCloseReason(reason)
+
+	s.writeMu.Lock()
+	_ = s.conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason), time.Now().Add(directAttachKeepaliveConfig.WriteWait))
+	s.writeMu.Unlock()
+
+	_ = s.conn.Close()
+}
+
+// pokeReadDeadlineUntilDone repeatedly forces conn's read deadline into the
+// past until done is closed, instead of setting it once. A single
+// SetReadDeadline(now) can be undone by the keepalive's pong handler, which
+// runs on the same reader goroutine inside ReadMessage: if a pong's payload
+// was already read but its handler had not yet fired when the deadline was
+// set into the past, the handler pushes it back out by PongWait right
+// after, and ReadMessage keeps blocking on that far-future deadline (it
+// swallows control frames internally and never re-checks context
+// cancellation). Re-asserting the past deadline on a short tick bounds that
+// race to about one tick instead of a full PongWait.
+func pokeReadDeadlineUntilDone(conn *websocket.Conn, done <-chan struct{}) {
+	ticker := time.NewTicker(readDeadlinePokeInterval)
+	defer ticker.Stop()
+	_ = conn.SetReadDeadline(time.Now())
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+			_ = conn.SetReadDeadline(time.Now())
+		}
+	}
+}
+
+// pokeReadDeadlineFn is pokeReadDeadlineUntilDone by default. Run calls it
+// through this indirection, rather than calling pokeReadDeadlineUntilDone
+// directly, so a test can confirm Run's teardown actually goes through it —
+// reproducing the pong/teardown race pokeReadDeadlineUntilDone guards
+// against end-to-end, through a real Run() call, is impractical (it would
+// need to control the timing of the production pong handler installed deep
+// inside wsprotocol.StartKeepalive). A test that only calls
+// pokeReadDeadlineUntilDone directly cannot tell whether Run's call site
+// still uses it, or was quietly reverted to a bare SetReadDeadline call.
+var pokeReadDeadlineFn = pokeReadDeadlineUntilDone
 
 // StreamPTYHandler handles PTY streams coming through the control channel.
 type StreamPTYHandler struct {

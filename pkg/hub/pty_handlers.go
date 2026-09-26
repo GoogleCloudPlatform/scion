@@ -40,6 +40,14 @@ const (
 	ptyWriteWait       = 10 * time.Second
 )
 
+// ptyKeepaliveConfig configures wsprotocol.StartKeepalive for PTY client
+// connections. Only PingInterval, PongWait and WriteWait are used.
+var ptyKeepaliveConfig = wsprotocol.ConnectionConfig{
+	PingInterval: ptyPingInterval,
+	PongWait:     ptyPongWait,
+	WriteWait:    ptyWriteWait,
+}
+
 var ptyUpgrader = websocket.Upgrader{
 	ReadBufferSize:  ptyReadBufferSize,
 	WriteBufferSize: ptyWriteBufferSize,
@@ -313,10 +321,14 @@ func (s *PTYSession) Run() error {
 	}
 	s.stream = stream
 
-	// Set up ping/pong for client connection
-	s.conn.SetPongHandler(func(appData string) error {
-		return s.conn.SetReadDeadline(time.Now().Add(ptyPongWait))
-	})
+	// Arm the read deadline, install the pong handler, and start the ping
+	// loop. Keepalive writes share writeMu with the data-plane writes in
+	// writeToClient, since a WebSocket connection allows only one writer at
+	// a time.
+	if err := wsprotocol.StartKeepalive(s.ctx, s.conn, &s.writeMu, ptyKeepaliveConfig); err != nil {
+		s.closeWith(ptyCloseCause(err))
+		return err
+	}
 
 	// Start goroutines for bidirectional data flow
 	errCh := make(chan error, 2)
@@ -331,21 +343,16 @@ func (s *PTYSession) Run() error {
 		errCh <- s.readFromBroker()
 	}()
 
-	// Start ping ticker
-	go s.pingLoop()
-
 	// Wait for either direction to fail; the first error decides the code.
 	err = <-errCh
 	s.closeWith(ptyCloseCause(err))
 	return err
 }
 
-// readFromClient reads messages from the WebSocket client and forwards to broker.
+// readFromClient reads messages from the WebSocket client and forwards to
+// broker. The read deadline is armed by StartKeepalive before this goroutine
+// starts, and extended by the pong handler it installs.
 func (s *PTYSession) readFromClient() error {
-	if err := s.conn.SetReadDeadline(time.Now().Add(ptyPongWait)); err != nil {
-		return err
-	}
-
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -420,30 +427,6 @@ func (s *PTYSession) writeToClient(v interface{}) error {
 		return err
 	}
 	return s.conn.WriteJSON(v)
-}
-
-// pingLoop sends periodic pings to the client.
-func (s *PTYSession) pingLoop() {
-	ticker := time.NewTicker(ptyPingInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-s.ctx.Done():
-			return
-		case <-ticker.C:
-			s.writeMu.Lock()
-			err := s.conn.WriteControl(
-				websocket.PingMessage,
-				[]byte{},
-				time.Now().Add(ptyWriteWait),
-			)
-			s.writeMu.Unlock()
-			if err != nil {
-				return
-			}
-		}
-	}
 }
 
 // Close closes the PTY session with a normal closure. Close-code row 1000:
