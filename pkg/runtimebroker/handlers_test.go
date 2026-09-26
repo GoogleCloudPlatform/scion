@@ -25,6 +25,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -119,7 +120,11 @@ func (m *mockManager) Watch(ctx context.Context, agentID string) (<-chan api.Sta
 
 func (m *mockManager) Close() {}
 
-func newTestServer(t *testing.T) *Server {
+// setupTestScionEnv isolates the test from the repo's own .scion directory by
+// switching to a temp CWD with its own settings/templates/harness-configs, so
+// buildStartContext (used by start/restart) can resolve a harness config
+// without touching real project state.
+func setupTestScionEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
 
@@ -178,11 +183,30 @@ runtimes:
 			t.Fatal(err)
 		}
 	}
+}
+
+// newTestServerWithManager wires up a Server with the given agent.Manager
+// (e.g. a *filteringMockManager for tests that need List to honor the filter
+// map) plus the same isolated .scion environment newTestServer uses, so
+// restart's buildStartContext path resolves cleanly.
+func newTestServerWithManager(t *testing.T, mgr agent.Manager) *Server {
+	t.Helper()
+	setupTestScionEnv(t)
 
 	cfg := DefaultServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.ForceRuntime = "mock"
+
+	// NameFunc returns "mock" to match ForceRuntime so resolveManagerForOpts
+	// returns the mock manager directly instead of creating a real one.
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "mock" }}
+
+	return New(cfg, mgr, rt)
+}
+
+func newTestServer(t *testing.T) *Server {
+	t.Helper()
 
 	mgr := &mockManager{
 		agents: []api.AgentInfo{
@@ -201,11 +225,7 @@ runtimes:
 		},
 	}
 
-	// NameFunc returns "mock" to match ForceRuntime so resolveManagerForOpts
-	// returns the mock manager directly instead of creating a real one.
-	rt := &runtime.MockRuntime{NameFunc: func() string { return "mock" }}
-
-	return New(cfg, mgr, rt)
+	return newTestServerWithManager(t, mgr)
 }
 
 func TestHealthz(t *testing.T) {

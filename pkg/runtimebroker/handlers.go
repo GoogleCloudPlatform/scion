@@ -1698,6 +1698,14 @@ func isContainerStopTolerable(err error) bool {
 // back to the bare slug, which would risk acting on a same-slug agent in a
 // different project. Only when no projectID is supplied does it degrade to the
 // original id for backward compatibility (solo/CLI mode, unlabeled containers).
+//
+// In the project-scoped case, a lookup failure other than a genuine
+// ErrAgentNotFound (e.g. a runtime listing error, an ambiguous match) is
+// returned to the caller rather than silently treated as "not found" —
+// callers must surface it as a real error instead of reporting a successful
+// stop/restart. The solo/CLI fallback above predates project scoping and is
+// left unchanged: it already tolerates lookup failures by degrading to the
+// bare id.
 // agentsWithoutProjectLabel returns the subset of agents that carry no project
 // label (neither scion.grove_id nor scion.project_id). The project-scoped
 // lookups fall back to a slug-only search for backward compatibility with
@@ -1715,14 +1723,18 @@ func agentsWithoutProjectLabel(agents []api.AgentInfo) []api.AgentInfo {
 	return filtered
 }
 
-func (s *Server) projectScopedTarget(ctx context.Context, id, projectID string) string {
-	if containerID, err := s.LookupContainerID(ctx, id, projectID); err == nil && containerID != "" {
-		return containerID
+func (s *Server) projectScopedTarget(ctx context.Context, id, projectID string) (string, error) {
+	containerID, err := s.LookupContainerID(ctx, id, projectID)
+	if err == nil && containerID != "" {
+		return containerID, nil
+	}
+	if projectID != "" && err != nil && !errors.Is(err, ErrAgentNotFound) {
+		return "", err
 	}
 	if projectID != "" {
-		return ""
+		return "", nil
 	}
-	return id
+	return id, nil
 }
 
 func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
@@ -1740,8 +1752,15 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 	// Resolve the project-scoped container so that same-slug agents in
 	// different projects on this broker don't collide. An empty target means
 	// the agent isn't present in this project; treat that as an idempotent
-	// no-op rather than stopping a same-slug agent in another project.
-	target := s.projectScopedTarget(ctx, id, projectID)
+	// no-op rather than stopping a same-slug agent in another project. A
+	// lookup error other than "not found" (e.g. the runtime listing itself
+	// failed) must not be reported as a successful stop.
+	target, err := s.projectScopedTarget(ctx, id, projectID)
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		RuntimeError(w, "Failed to stop agent: "+err.Error())
+		return
+	}
 	if target == "" {
 		s.agentLifecycleLog.Info("Agent stopped (not found in project)",
 			"agent_id", id,
@@ -1847,7 +1866,15 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	// be exited and the subsequent start will handle cleanup.
 	// Use resolveManagerForAgent to find the agent on auxiliary runtimes.
 	stopMgr := s.resolveManagerForAgent(ctx, id, projectID)
-	stopTarget := s.projectScopedTarget(ctx, id, projectID)
+	stopTarget, err := s.projectScopedTarget(ctx, id, projectID)
+	if err != nil {
+		// A lookup error other than "not found" must abort the restart
+		// without starting a second container — otherwise a runtime hiccup
+		// during the stop-target lookup would leave two containers running
+		// for the same agent.
+		RuntimeError(w, "Failed to restart agent: "+err.Error())
+		return
+	}
 	// An empty target means the agent isn't present in this project — skip the
 	// stop (don't risk stopping a same-slug agent in another project) and let
 	// the start below create it.
