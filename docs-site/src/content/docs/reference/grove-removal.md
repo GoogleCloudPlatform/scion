@@ -37,6 +37,7 @@ agents and make sure hub and broker are on the same release.
 
 | Removed | Replacement / action |
 | --- | --- |
+| listing agents whose pods/containers carry only `scion.grove*` labels (created before the rename) | restart those agents |
 <!-- Rows are appended here as later changes merge. -->
 
 ## Hub API

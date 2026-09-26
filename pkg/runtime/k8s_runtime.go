@@ -1890,19 +1890,7 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 	if len(labelFilter) > 0 {
 		var selectors []string
 		for k, v := range labelFilter {
-			key := k
-			// Translate project filter keys to grove label variants for the K8s selector.
-			// Since new pods have both labels and old pods only have grove labels,
-			// filtering by the grove label variant finds both.
-			switch k {
-			case projectcompat.LabelProject:
-				key = projectcompat.LabelGrove
-			case projectcompat.LabelProjectID:
-				key = projectcompat.LabelGroveID
-			case projectcompat.LabelProjectPath:
-				key = projectcompat.LabelGrovePath
-			}
-			selectors = append(selectors, fmt.Sprintf("%s=%s", key, v))
+			selectors = append(selectors, fmt.Sprintf("%s=%s", k, v))
 		}
 		selector = strings.Join(selectors, ",")
 	} else {
