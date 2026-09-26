@@ -2390,7 +2390,14 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 	}
 
 	// Apply updates
+	var newDisplayNameKey string
 	if updates.Name != "" {
+		key, err := api.ValidateDisplayName(updates.Name)
+		if err != nil {
+			ValidationError(w, "Invalid name: "+err.Error(), nil)
+			return
+		}
+		newDisplayNameKey = key
 		agent.Name = updates.Name
 	}
 	if updates.Labels != nil {
@@ -2560,7 +2567,29 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		}
 	}
 
-	if err := s.store.UpdateAgent(ctx, agent); err != nil {
+	if updates.Name != "" {
+		// Name and its identity key are written in the same transaction:
+		// the key row is what makes the key's per-project uniqueness a
+		// database invariant, so it must never be able to drift from the
+		// Name it was computed from. Only append newDisplayNameKey when it
+		// differs from Slug, so the common case -- the display name's key
+		// already equals Slug (e.g. a freshly created agent) -- writes a
+		// single row instead of a self-collision.
+		keys := []string{agent.Slug}
+		if newDisplayNameKey != agent.Slug {
+			keys = append(keys, newDisplayNameKey)
+		}
+		err := s.store.WithTx(ctx, func(tx store.Store) error {
+			if err := tx.UpdateAgent(ctx, agent); err != nil {
+				return err
+			}
+			return tx.ReplaceAgentIdentityKeys(ctx, agent.ID, agent.ProjectID, keys)
+		})
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+	} else if err := s.store.UpdateAgent(ctx, agent); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}

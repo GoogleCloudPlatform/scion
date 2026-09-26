@@ -83,6 +83,66 @@ func ValidateAgentName(name string) (string, error) {
 	return slug, nil
 }
 
+// MaxDisplayNameLength is the maximum length, in runes, of an agent display
+// name. It is independent of MaxSlugLength, which caps the slug itself in
+// bytes.
+const MaxDisplayNameLength = 63
+
+// reservedDisplayNameKeys are identity keys (post-Slugify) an agent display
+// name must not produce, so a display name can never be confused for a
+// system principal or role rather than an agent identity.
+var reservedDisplayNameKeys = map[string]bool{
+	"user":   true,
+	"system": true,
+	"hub":    true,
+	"scion":  true,
+	"admin":  true,
+}
+
+// ValidateDisplayName enforces the agent display-name allowlist: 1-63 runes,
+// each either one of the literal separators (space, '-', '_', '.') or a rune
+// Slugify keeps or folds to a single ASCII letter or digit, slugifying
+// overall to a non-empty key that is not a reserved word. Returns the
+// identity key (Slugify(name)) on success.
+//
+// The per-rune check is deliberately narrower than
+// unicode.Is(unicode.Latin, r) || unicode.IsDigit(r): that wider allowlist
+// admits characters Slugify itself drops or folds to nothing -- small-capital
+// and fullwidth letter forms, ligatures, Roman numerals, dotless i, letters
+// with no canonical decomposition such as o-stroke or sharp s, and non-ASCII
+// digits. Those would let a display name render as one thing (for example a
+// reserved word, or a value equal to a different agent's key) while
+// producing an unrelated key of its own that separately passes the reserved-
+// word and uniqueness checks. Requiring Slugify(string(r)) to collapse to
+// exactly one ASCII alphanumeric character keeps the persisted key visibly
+// tied to what the name displays.
+func ValidateDisplayName(name string) (key string, err error) {
+	runes := []rune(name)
+	if len(runes) == 0 {
+		return "", fmt.Errorf("display name must not be empty")
+	}
+	if len(runes) > MaxDisplayNameLength {
+		return "", fmt.Errorf("display name %q is too long: must be at most %d characters", name, MaxDisplayNameLength)
+	}
+	for _, r := range runes {
+		if r == ' ' || r == '-' || r == '_' || r == '.' {
+			continue
+		}
+		if len(Slugify(string(r))) == 1 {
+			continue
+		}
+		return "", fmt.Errorf("display name %q contains an unsupported character %q: must use letters that reduce to a-z, digits, space, '-', '_' or '.'", name, r)
+	}
+	key = Slugify(name)
+	if key == "" {
+		return "", fmt.Errorf("display name %q produces an empty key: must contain at least one Latin letter or digit", name)
+	}
+	if reservedDisplayNameKeys[key] {
+		return "", fmt.Errorf("display name %q is a reserved word", name)
+	}
+	return key, nil
+}
+
 // SlugifyWithSuffix creates a slug with a collision-avoidance suffix.
 // The suffix is appended with a dash separator.
 func SlugifyWithSuffix(s, suffix string) string {

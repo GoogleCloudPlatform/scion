@@ -266,6 +266,10 @@ func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 		statusCode = http.StatusConflict
 		code = ErrCodeConflict
 		message = "Principal already has a built-in membership role in this project"
+	case errors.Is(err, store.ErrIdentityKeyConflict):
+		statusCode = http.StatusConflict
+		code = ErrCodeConflict
+		message = "display name collides with another agent in this project"
 	case errors.Is(err, secret.ErrNoSecretBackend):
 		statusCode = http.StatusNotImplemented
 		code = ErrCodeUnavailable

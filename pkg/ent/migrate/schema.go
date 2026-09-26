@@ -205,6 +205,31 @@ var (
 			},
 		},
 	}
+	// AgentIdentityKeysColumns holds the columns for the "agent_identity_keys" table.
+	AgentIdentityKeysColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "project_id", Type: field.TypeUUID},
+		{Name: "key", Type: field.TypeString},
+		{Name: "agent_id", Type: field.TypeUUID},
+	}
+	// AgentIdentityKeysTable holds the schema information for the "agent_identity_keys" table.
+	AgentIdentityKeysTable = &schema.Table{
+		Name:       "agent_identity_keys",
+		Columns:    AgentIdentityKeysColumns,
+		PrimaryKey: []*schema.Column{AgentIdentityKeysColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "agentidentitykey_project_id_key",
+				Unique:  true,
+				Columns: []*schema.Column{AgentIdentityKeysColumns[1], AgentIdentityKeysColumns[2]},
+			},
+			{
+				Name:    "agentidentitykey_agent_id",
+				Unique:  false,
+				Columns: []*schema.Column{AgentIdentityKeysColumns[3]},
+			},
+		},
+	}
 	// AgentReincarnationsColumns holds the columns for the "agent_reincarnations" table.
 	AgentReincarnationsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -2129,6 +2154,7 @@ var (
 		AccessPoliciesTable,
 		AgentsTable,
 		AgentCredentialsTable,
+		AgentIdentityKeysTable,
 		AgentReincarnationsTable,
 		AgentSessionMetricsTable,
 		AllowListTable,

@@ -268,6 +268,71 @@ func TestParseProjectID(t *testing.T) {
 	}
 }
 
+func TestValidateDisplayName(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantKey string
+		wantErr bool
+	}{
+		{name: "empty", input: "", wantErr: true},
+		{name: "at max length (63 runes)", input: strings.Repeat("a", 63), wantKey: strings.Repeat("a", 63)},
+		{name: "over max length (64 runes)", input: strings.Repeat("a", 64), wantErr: true},
+		{name: "plain ascii", input: "Builder Prime", wantKey: "builder-prime"},
+		{name: "digits", input: "Agent 007", wantKey: "agent-007"},
+		{name: "separators", input: "under_score.dot-dash", wantKey: "under-score-dot-dash"},
+		{name: "latin diacritics accented e", input: "Café Bot", wantKey: "cafe-bot"},
+		{name: "latin diacritics tilde n", input: "Ñandú", wantKey: "nandu"},
+		{name: "reserved word lowercase", input: "user", wantErr: true},
+		{name: "reserved word uppercase", input: "ADMIN", wantErr: true},
+		{name: "reserved word mixed case", input: "Admin", wantErr: true},
+		{name: "reserved word scion", input: "scion", wantErr: true},
+		{name: "reserved word hub", input: "hub", wantErr: true},
+		{name: "reserved word system", input: "system", wantErr: true},
+		{name: "empty key from separators only", input: "---", wantErr: true},
+		{name: "empty key from dots and spaces", input: ". . .", wantErr: true},
+		{name: "control character", input: "bot\nname", wantErr: true},
+		{name: "at sign", input: "bot@host", wantErr: true},
+		{name: "colon", input: "bot:1", wantErr: true},
+		{name: "cyrillic", input: "Бот", wantErr: true},
+		{name: "zero-width space", input: "bot​name", wantErr: true},
+
+		// Reject table: characters Slugify itself drops or folds to
+		// nothing must not be admitted by the charset check, since they
+		// would let a display name render as one thing while its key
+		// (computed from the same lossy Slugify) says another.
+		{name: "small capital A folds toward the reserved word admin", input: "ᴀdmin", wantErr: true},
+		{name: "fullwidth letters", input: "Ｄeploy Bot", wantErr: true},
+		{name: "fullwidth letter mid-word", input: "Aｄmin", wantErr: true},
+		{name: "dotless i", input: "Admın", wantErr: true},
+		{name: "o with stroke", input: "Røbot", wantErr: true},
+		{name: "sharp s", input: "Straße", wantErr: true},
+		{name: "fi ligature", input: "ﬁle bot", wantErr: true},
+		{name: "roman numeral", input: "Ⅰnfra", wantErr: true},
+		{name: "arabic-indic digit", input: "bot٣", wantErr: true},
+		{name: "fullwidth digit", input: "bot３", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			key, err := ValidateDisplayName(tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("ValidateDisplayName(%q) = %q, nil; want an error", tt.input, key)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("ValidateDisplayName(%q) unexpected error: %v", tt.input, err)
+				return
+			}
+			if key != tt.wantKey {
+				t.Errorf("ValidateDisplayName(%q) = %q, want %q", tt.input, key, tt.wantKey)
+			}
+		})
+	}
+}
+
 func TestIsHostedProjectID(t *testing.T) {
 	tests := []struct {
 		projectID string

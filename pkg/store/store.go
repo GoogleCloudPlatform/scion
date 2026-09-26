@@ -51,6 +51,13 @@ var (
 	// the existing membership binding before assigning a different built-in
 	// membership role (change-role = delete + create).
 	ErrBuiltInMembershipConflict = errors.New("principal already has a built-in membership role in this project")
+
+	// ErrIdentityKeyConflict is returned when writing an agent's identity
+	// keys (its slug and/or slugify(displayName)) would collide with a key
+	// already reserved by a different agent in the same project, including a
+	// soft-deleted one. Kept distinct from ErrAlreadyExists so callers can
+	// map it to a specific message instead of a generic conflict.
+	ErrIdentityKeyConflict = errors.New("identity key already reserved by another agent in this project")
 )
 
 // SystemReconcileCreatedBy is the CreatedBy sentinel that identifies the
@@ -204,6 +211,9 @@ type Store interface {
 
 	// Agent Credential operations (Permissions Foundation Phase 1H)
 	AgentCredentialStore
+
+	// Agent Identity Key operations (per-project display-name / slug uniqueness)
+	AgentIdentityKeyStore
 
 	// Decision Audit operations (Authorization Decision Audit Phase 1I)
 	DecisionAuditStore
@@ -2036,6 +2046,31 @@ type AgentCredentialStore interface {
 	// DeleteAgentCredentialsByProject permanently removes all agent credentials for a project.
 	// Returns the number of credentials deleted.
 	DeleteAgentCredentialsByProject(ctx context.Context, projectID string) (int, error)
+}
+
+// =============================================================================
+// Agent Identity Key Store (per-project display-name / slug uniqueness)
+// =============================================================================
+
+// AgentIdentityKeyStore defines agent identity-key persistence operations.
+// An agent's identity keys are the distinct set {slug, slugify(displayName)};
+// the store enforces uniqueness of each key within a project as a database
+// invariant (UNIQUE(project_id, key)), including against soft-deleted agents.
+type AgentIdentityKeyStore interface {
+	// ReplaceAgentIdentityKeys atomically replaces agentID's identity-key
+	// rows in projectID with keys: rows for keys no longer present are
+	// deleted, rows for new keys are inserted, and rows for keys already
+	// present are left alone. Returns ErrIdentityKeyConflict if any key in
+	// keys is already reserved by a different agent in the project.
+	ReplaceAgentIdentityKeys(ctx context.Context, agentID, projectID string, keys []string) error
+
+	// DeleteAgentIdentityKeys removes all of agentID's identity-key rows,
+	// freeing its keys for reuse. Used on hard delete/purge.
+	DeleteAgentIdentityKeys(ctx context.Context, agentID string) error
+
+	// ListAgentIdentityKeys returns every identity-key row in projectID,
+	// across all agents.
+	ListAgentIdentityKeys(ctx context.Context, projectID string) ([]*AgentIdentityKey, error)
 }
 
 // =============================================================================

@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentidentitykey"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationedge"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	entgroup "github.com/GoogleCloudPlatform/scion/pkg/ent/group"
@@ -76,6 +77,7 @@ type CompositeStore struct {
 	*RoleStore
 	*DelegationEdgeStore
 	*AgentCredentialStore
+	*AgentIdentityKeyStore
 	*DecisionAuditStore
 	*MutationAuditStore
 	*QuotaStore
@@ -155,6 +157,7 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		RoleStore:                NewRoleStore(client),
 		DelegationEdgeStore:      NewDelegationEdgeStore(client),
 		AgentCredentialStore:     NewAgentCredentialStore(client),
+		AgentIdentityKeyStore:    NewAgentIdentityKeyStore(client),
 		DecisionAuditStore:       NewDecisionAuditStore(client),
 		MutationAuditStore:       NewMutationAuditStore(client),
 		QuotaStore:               NewQuotaStore(client),
@@ -195,6 +198,13 @@ func (c *CompositeStore) DeleteAgent(ctx context.Context, id string) error {
 	if err := c.DeleteAgentReincarnationsForAgent(ctx, id); err != nil {
 		return err
 	}
+	// agent_identity_keys.agent_id is likewise a plain field with no DB-level
+	// FK (see agent_identity_key.go); cascade explicitly, or the deleted
+	// agent's keys stay reserved forever — including its own slug, which
+	// then blocks renaming any agent later created with that same slug.
+	if err := c.DeleteAgentIdentityKeys(ctx, id); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -226,6 +236,14 @@ func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 			Where(agent.ProjectIDEQ(uid)).Exec(ctx); err != nil {
 			return err
 		}
+	}
+	// agent_identity_keys is keyed by project_id directly, so this is a
+	// single bulk delete rather than one per agent ID. Same reasoning as the
+	// per-agent cascade in DeleteAgent: no DB-level FK, so it must be
+	// explicit or a deleted project's keys stay reserved forever.
+	if _, err := c.client.AgentIdentityKey.Delete().
+		Where(agentidentitykey.ProjectIDEQ(uid)).Exec(ctx); err != nil {
+		return err
 	}
 	return c.ProjectStore.DeleteProject(ctx, id)
 }
