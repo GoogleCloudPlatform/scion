@@ -91,9 +91,9 @@ func TestTemplateResourceLiterals_AllUseCanonicalConstructor(t *testing.T) {
 				pos := fset.Position(lit.Pos())
 				t.Errorf(
 					"%s:%d: hand-built Resource{Type: \"template\", ...} literal in %s — "+
-						"build it via templateResource(template) or templateScopeResource(scope, scopeID) "+
-						"instead, or filterHubWideTemplateGrants's fail-closed check (ptone/scion#1916) will "+
-						"silently deny every non-admin caller",
+						"build it via templateResource(template), templateScopeResource(scope, scopeID), "+
+						"or templateUserScopeResource(userIdent) instead, or filterHubWideTemplateGrants's "+
+						"fail-closed check (ptone/scion#1916) will silently deny every non-admin caller",
 					name, pos.Line, fn)
 			}
 			return true
