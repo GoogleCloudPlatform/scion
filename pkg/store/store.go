@@ -511,6 +511,18 @@ type RuntimeBrokerStore interface {
 	// Returns ErrNotFound if the broker doesn't exist.
 	UpdateRuntimeBroker(ctx context.Context, broker *RuntimeBroker) error
 
+	// SetRuntimeBrokerCreatedByIfEmpty atomically sets created_by on a runtime
+	// broker, but only if the row's created_by is currently empty. Returns
+	// applied=false (not an error) when the row already has a non-empty
+	// created_by, or when the row does not exist — both are safe no-ops for
+	// an idempotent, never-overwrite backfill of legacy ownerless records.
+	//
+	// This is intentionally separate from UpdateRuntimeBroker, which never
+	// touches created_by at all: ownership must not become settable through
+	// the same path a broker uses to update its own heartbeat, status, or
+	// capabilities.
+	SetRuntimeBrokerCreatedByIfEmpty(ctx context.Context, id, createdBy string) (applied bool, err error)
+
 	// DeleteRuntimeBroker removes a runtime broker by ID.
 	// Returns ErrNotFound if the broker doesn't exist.
 	DeleteRuntimeBroker(ctx context.Context, id string) error

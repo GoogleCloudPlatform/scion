@@ -897,6 +897,37 @@ func (s *ProjectStore) UpdateRuntimeBroker(ctx context.Context, b *store.Runtime
 	return store.ErrVersionConflict
 }
 
+// SetRuntimeBrokerCreatedByIfEmpty atomically sets created_by on a runtime
+// broker, but only if it is currently empty. It is a plain conditional
+// update guarded by an empty-created_by precondition, rather than the
+// lock_version CAS loop UpdateRuntimeBroker uses: the only precondition that
+// matters here is "still unset", not "unchanged since last read", so a
+// single statement is sufficient and race-safe across concurrent
+// writers/nodes.
+//
+// "Empty" matches both an empty string and SQL NULL: created_by is an
+// Optional (not Nillable) ent field, so an unset value round-trips through
+// Go as "" but may be stored as NULL — a plain CreatedByEQ("") predicate
+// would silently match zero rows for NULL-backed columns and turn every
+// attribution into a no-op.
+func (s *ProjectStore) SetRuntimeBrokerCreatedByIfEmpty(ctx context.Context, id, createdBy string) (bool, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return false, err
+	}
+	affected, err := s.client.RuntimeBroker.Update().
+		Where(
+			runtimebroker.IDEQ(uid),
+			runtimebroker.Or(runtimebroker.CreatedByIsNil(), runtimebroker.CreatedByEQ("")),
+		).
+		SetCreatedBy(createdBy).
+		Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return affected == 1, nil
+}
+
 // DeleteRuntimeBroker removes a runtime broker by ID.
 func (s *ProjectStore) DeleteRuntimeBroker(ctx context.Context, id string) error {
 	uid, err := parseUUID(id)
@@ -960,9 +991,29 @@ func (s *ProjectStore) ListRuntimeBrokers(ctx context.Context, filter store.Runt
 		limit = 50
 	}
 
+	// Keyset pagination, mirroring ListProjects exactly (Order DESC on
+	// (created, id), Limit(limit+1), trim and derive NextCursor from the
+	// last row on overflow). Without this, opts.Cursor was silently
+	// ignored and NextCursor was never set: any caller that paginates
+	// through more than one page only ever sees the first `limit` newest
+	// brokers and then stops, believing the list is exhausted. Ordering
+	// stays DESC so every caller's first page is unchanged: the only
+	// caller that forwards a client cursor is the runtime-brokers list API
+	// (listOptionsFromQuery), where it previously had no effect — a
+	// client-supplied cursor is now honored there instead of being
+	// silently dropped, and its first page (no cursor) is unchanged apart
+	// from the id tiebreak on rows sharing a Created timestamp.
+	if opts.Cursor != "" {
+		cursorCreated, cursorID, err := decodeListCursor(opts.Cursor, opts.CursorBinding)
+		if err != nil {
+			return nil, fmt.Errorf("invalid cursor: %w", err)
+		}
+		query.Where(runtimeBrokerBeforeCursor(cursorCreated, cursorID))
+	}
+
 	rows, err := query.
-		Order(ent.Desc(runtimebroker.FieldCreated)).
-		Limit(limit).
+		Order(ent.Desc(runtimebroker.FieldCreated), ent.Desc(runtimebroker.FieldID)).
+		Limit(limit + 1).
 		All(ctx)
 	if err != nil {
 		return nil, err
@@ -972,10 +1023,22 @@ func (s *ProjectStore) ListRuntimeBrokers(ctx context.Context, filter store.Runt
 	for _, b := range rows {
 		items = append(items, *entBrokerToStore(b))
 	}
-	return &store.ListResult[store.RuntimeBroker]{
-		Items:      items,
-		TotalCount: totalCount,
-	}, nil
+
+	result := &store.ListResult[store.RuntimeBroker]{TotalCount: totalCount}
+	if len(items) > limit {
+		result.Items = items[:limit]
+		last := result.Items[len(result.Items)-1]
+		result.NextCursor = encodeListCursor(last.Created, last.ID, opts.CursorBinding)
+	} else {
+		result.Items = items
+	}
+	return result, nil
+}
+
+// runtimeBrokerBeforeCursor returns a predicate for keyset pagination after
+// the given cursor, mirroring projectBeforeCursor/templateBeforeCursor.
+func runtimeBrokerBeforeCursor(cursorCreated time.Time, cursorID uuid.UUID) predicate.RuntimeBroker {
+	return keysetBeforeCursor(runtimebroker.FieldCreated, runtimebroker.FieldID, cursorCreated, cursorID)
 }
 
 // FindEmbeddedBroker returns the single embedded broker if exactly one exists,
