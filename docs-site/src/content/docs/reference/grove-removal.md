@@ -62,6 +62,7 @@ agents and make sure hub and broker are on the same release.
 | harness-config update (`PUT /api/v1/harness-configs/{id}`) accepted `scope`, `scopeId`, `ownerId`, `storagePath`, `storageUri` and `storageBucket` from the request body | update keeps the stored record's scope, scope ID, owner and storage location, matching template updates |
 | pre-existing stored `scope='grove'` rows in `templates`, `harness_configs` and `subscription_templates` | normalized to `scope='project'` automatically on hub boot; no action needed |
 | `groveId` (and `groveName`/`grove` on project records) in hub API responses for notifications, subscriptions, subscription templates, schedules, scheduled events, access tokens, messages, project providers, project sync state and agent session metrics | `projectId` (`name`/`slug` where applicable). Agent, project and template API responses are not yet updated. |
+| `groveId` in hub event payloads; metric attribute `scope="grove"` | `projectId`; `scope="project"` (update dashboards and alerts) |
 <!-- Rows are appended here as later changes merge. -->
 
 ## Extras / telemetry
