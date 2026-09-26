@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -186,6 +187,37 @@ func TestStopAgent_NotFoundInProjectIsNoOp(t *testing.T) {
 	}
 }
 
+// TestStopAgent_LookupErrorReturns5xx is a regression test for #1985: when
+// resolving the project-scoped stop target fails for a reason other than
+// genuine "not found" (here, the runtime listing itself errors), stopAgent
+// must surface a 5xx rather than reporting the idempotent-no-op 202 that a
+// real "not found" gets. Before the fix, projectScopedTarget mapped every
+// lookup failure to "" and stopAgent treated "" as success.
+func TestStopAgent_LookupErrorReturns5xx(t *testing.T) {
+	mgr := &filteringMockManager{}
+	mgr.agents = []api.AgentInfo{
+		{
+			ContainerID: "container-A",
+			Name:        "coordinator",
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+		},
+	}
+	mgr.listErr = fmt.Errorf("docker ps failed: exit status 1")
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/stop?projectId=grove-A", nil)
+	w := httptest.NewRecorder()
+	srv.handleAgentByID(w, r)
+
+	if w.Code < 500 {
+		t.Fatalf("expected a 5xx status when the lookup fails, got %d (%s)", w.Code, w.Body.String())
+	}
+	if mgr.stopCalls != 0 {
+		t.Errorf("Stop was called %d time(s); a lookup failure must not be treated as a successful stop", mgr.stopCalls)
+	}
+}
+
 // TestExecCommand_NotFoundInProject verifies that exec returns 404 when the
 // slug does not resolve to any agent in the requested project (and there is no
 // legacy unlabeled container to fall back to).
@@ -211,5 +243,69 @@ func TestExecCommand_NotFoundInProject(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Errorf("expected 404 for missing agent, got %d (%s)", w.Code, w.Body.String())
+	}
+}
+
+// TestRestartAgent_LookupErrorAbortsWithoutStart is a regression test for
+// #1985: when resolving the project-scoped stop target during a restart
+// fails for a reason other than genuine "not found" (here, the runtime
+// listing itself errors), restartAgent must abort with a 5xx and must NOT
+// call Start — otherwise a runtime hiccup during the lookup would leave a
+// second container running alongside whatever the first lookup couldn't see.
+func TestRestartAgent_LookupErrorAbortsWithoutStart(t *testing.T) {
+	mgr := &filteringMockManager{}
+	mgr.agents = []api.AgentInfo{
+		{
+			ContainerID: "container-A",
+			Name:        "coordinator",
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+		},
+	}
+	mgr.listErr = fmt.Errorf("docker ps failed: exit status 1")
+	srv := newTestServerWithManager(t, mgr)
+
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/restart?projectId=grove-A", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, r)
+
+	if w.Code < 500 {
+		t.Fatalf("expected a 5xx status when the lookup fails, got %d (%s)", w.Code, w.Body.String())
+	}
+	if mgr.startCalls != 0 {
+		t.Errorf("Start was called %d time(s); a lookup failure during restart must not start a second container", mgr.startCalls)
+	}
+	if mgr.stopCalls != 0 {
+		t.Errorf("Stop was called %d time(s); a lookup failure must abort before stopping", mgr.stopCalls)
+	}
+}
+
+// TestRestartAgent_NotFoundInProjectProceedsWithStart verifies the other side
+// of the #1985 fix: a genuine "not found in this project" result (no lookup
+// error, just no match) must keep the existing idempotent behavior — restart
+// skips the stop and proceeds to start, exactly as it did before the fix.
+func TestRestartAgent_NotFoundInProjectProceedsWithStart(t *testing.T) {
+	mgr := &filteringMockManager{}
+	mgr.agents = []api.AgentInfo{
+		{
+			ContainerID: "container-A",
+			Name:        "coordinator",
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+		},
+	}
+	srv := newTestServerWithManager(t, mgr)
+
+	// grove-B has no "coordinator" agent — a genuine not-found, not a lookup error.
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/restart?projectId=grove-B", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, r)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+	}
+	if mgr.stopCalls != 0 {
+		t.Errorf("Stop was called %d time(s); must not stop a same-slug agent in another project", mgr.stopCalls)
+	}
+	if mgr.startCalls != 1 {
+		t.Errorf("expected Start to be called once, got %d", mgr.startCalls)
 	}
 }

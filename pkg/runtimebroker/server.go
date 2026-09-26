@@ -1108,6 +1108,26 @@ func (s *Server) discoverAuxiliaryRuntimes() {
 // treat this as retryable rather than reporting the agent as missing.
 var ErrAgentListUnavailable = errors.New("agent runtime listing temporarily unavailable")
 
+// ErrAgentNotFound marks a genuine "no such agent" result from
+// LookupContainerID: the runtime listing succeeded, but no agent matched the
+// requested slug/project. Callers use errors.Is(err, ErrAgentNotFound) to
+// distinguish this idempotent case from any other lookup failure (a runtime
+// listing error, an ambiguous match, a missing container ID, etc.), which
+// must be surfaced as a real error rather than treated as "not found".
+var ErrAgentNotFound = errors.New("agent not found")
+
+// agentNotFoundError implements the existing "agent '<slug>' not found"
+// message while allowing errors.Is(err, ErrAgentNotFound) to match it.
+type agentNotFoundError struct{ slug string }
+
+func (e *agentNotFoundError) Error() string {
+	return fmt.Sprintf("agent '%s' not found", e.slug)
+}
+
+func (e *agentNotFoundError) Is(target error) bool {
+	return target == ErrAgentNotFound
+}
+
 // LookupContainerID implements AgentLookup interface.
 // It looks up an agent by slug and returns its container ID.
 // projectID scopes the lookup to prevent cross-project collision.
@@ -1178,7 +1198,7 @@ func (s *Server) LookupContainerID(ctx context.Context, slug, projectID string) 
 	}
 
 	if len(agents) == 0 {
-		return "", fmt.Errorf("agent '%s' not found", slug)
+		return "", &agentNotFoundError{slug: slug}
 	}
 
 	agent, err := uniqueAgentEntry(slug, agents)

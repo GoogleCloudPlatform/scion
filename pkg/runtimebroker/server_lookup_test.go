@@ -30,6 +30,9 @@ type filteringMockManager struct {
 }
 
 func (m *filteringMockManager) List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+	if m.listErr != nil {
+		return nil, m.listErr
+	}
 	if filter == nil {
 		return m.agents, nil
 	}
