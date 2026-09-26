@@ -1214,22 +1214,22 @@ func TestD11Fix2_NilAndEmptyCollapse(t *testing.T) {
 // D11 AC5: determineUserRole demotes admin when email removed from adminEmails.
 func TestD11_DetermineUserRole_DemotesAdmin(t *testing.T) {
 	// User was admin, adminEmails non-empty but does not include user → demote.
-	got := determineUserRole("former@example.com", []string{"real-admin@example.com"}, "admin", true, false)
+	got := determineUserRole("former@example.com", []string{"real-admin@example.com"}, "admin", true, false, "member")
 	assert.Equal(t, "member", got, "admin not in adminEmails should be demoted to member")
 }
 
 // D11 AC5b: determineUserRole does NOT demote admin when adminEmails is empty.
 func TestD11_DetermineUserRole_EmptyListNoChange(t *testing.T) {
-	got := determineUserRole("admin@example.com", nil, "admin", true, false)
+	got := determineUserRole("admin@example.com", nil, "admin", true, false, "member")
 	assert.Equal(t, "admin", got, "admin should not be demoted when adminEmails is nil")
 
-	got = determineUserRole("admin@example.com", []string{}, "admin", true, false)
+	got = determineUserRole("admin@example.com", []string{}, "admin", true, false, "member")
 	assert.Equal(t, "admin", got, "admin should not be demoted when adminEmails is empty")
 }
 
 // D11 AC5c: determineUserRole preserves non-admin roles.
 func TestD11_DetermineUserRole_PreservesViewer(t *testing.T) {
-	got := determineUserRole("viewer@example.com", []string{"admin@example.com"}, "viewer", true, false)
+	got := determineUserRole("viewer@example.com", []string{"admin@example.com"}, "viewer", true, false, "member")
 	assert.Equal(t, "viewer", got, "viewer role must be preserved")
 }
 
@@ -1243,7 +1243,7 @@ func TestD11Fix3_WhitespaceAdminEmailsMatch(t *testing.T) {
 	// After SanitizeEmailList, "  admin@example.com  " becomes "admin@example.com".
 	// determineUserRole should match.
 	sanitized := config.SanitizeEmailList([]string{"  admin@example.com  "})
-	got := determineUserRole("admin@example.com", sanitized, "member", true, false)
+	got := determineUserRole("admin@example.com", sanitized, "member", true, false, "member")
 	assert.Equal(t, "admin", got, "sanitized whitespace-padded admin email should match")
 }
 
