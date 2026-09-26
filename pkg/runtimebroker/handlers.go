@@ -1733,9 +1733,9 @@ func isContainerStopTolerable(err error) bool {
 // returned to the caller rather than silently treated as "not found" —
 // callers must surface it as a real error instead of reporting a successful
 // stop/restart. ErrAgentNotFound also covers a matching agent record with no
-// resolvable container id (created or stopped with no container ever
-// launched): there is nothing to stop, so that case is folded into the same
-// "not found in this project" outcome as a genuine no-match. The solo/CLI
+// resolvable container id (e.g. its container was removed): there is nothing
+// to stop, so that case is folded into the same "not found in this project"
+// outcome as a genuine no-match. The solo/CLI
 // fallback above predates project scoping and is left unchanged: it already
 // tolerates lookup failures by degrading to the bare id.
 // agentsWithoutProjectLabel returns the subset of agents that carry no project

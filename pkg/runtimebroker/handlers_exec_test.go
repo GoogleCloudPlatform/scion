@@ -218,6 +218,42 @@ func TestStopAgent_LookupErrorReturns5xx(t *testing.T) {
 	}
 }
 
+// TestStopAgent_AmbiguousMatchAbortsWithoutStop is a regression test for
+// #1985: when the project-scoped lookup finds more than one distinct
+// container matching the slug (uniqueAgentEntry's ambiguous case), that is a
+// real lookup failure, not a "not found," so stopAgent must abort with a 5xx
+// and must NOT call Stop — a lookup that can't tell which container to stop
+// must not guess and stop one of them anyway. Mirrors
+// TestRestartAgent_AmbiguousMatchAbortsWithoutStart.
+func TestStopAgent_AmbiguousMatchAbortsWithoutStop(t *testing.T) {
+	mgr := &filteringMockManager{}
+	mgr.agents = []api.AgentInfo{
+		{
+			ContainerID: "container-A",
+			Name:        "coordinator",
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+		},
+		{
+			ContainerID: "container-A2",
+			Name:        "coordinator",
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+		},
+	}
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/stop?projectId=grove-A", nil)
+	w := httptest.NewRecorder()
+	srv.handleAgentByID(w, r)
+
+	if w.Code < 500 {
+		t.Fatalf("expected a 5xx status for an ambiguous match, got %d (%s)", w.Code, w.Body.String())
+	}
+	if mgr.stopCalls != 0 {
+		t.Errorf("Stop was called %d time(s); an ambiguous match must abort before stopping", mgr.stopCalls)
+	}
+}
+
 // TestExecCommand_NotFoundInProject verifies that exec returns 404 when the
 // slug does not resolve to any agent in the requested project (and there is no
 // legacy unlabeled container to fall back to).
@@ -351,11 +387,10 @@ func TestRestartAgent_AmbiguousMatchAbortsWithoutStart(t *testing.T) {
 // the upstream main CI failure this fix addresses
 // (TestRestartAgent_ContainerScanSuppliesSettingsFallback): a matching agent
 // record with no resolvable container id (no "scion.container.id" label, no
-// ContainerID, no ID — e.g. created or stopped with no container ever
-// launched) has nothing to stop. LookupContainerID's "no container ID"
-// result is classified as ErrAgentNotFound, so restartAgent must treat it
-// like a genuine not-found: skip the stop and proceed to start, rather than
-// aborting with a 5xx.
+// ContainerID, no ID — e.g. its container was removed) has nothing to stop.
+// LookupContainerID's "no container ID" result is classified as
+// ErrAgentNotFound, so restartAgent must treat it like a genuine not-found:
+// skip the stop and proceed to start, rather than aborting with a 5xx.
 func TestRestartAgent_NoContainerIDProceedsWithStart(t *testing.T) {
 	mgr := &filteringMockManager{}
 	mgr.agents = []api.AgentInfo{

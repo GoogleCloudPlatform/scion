@@ -1125,9 +1125,9 @@ var ErrAgentListUnavailable = errors.New("agent runtime listing temporarily unav
 // treated the same as a genuine "no such agent": either the runtime listing
 // succeeded but no agent matched the requested slug/project, or a matching
 // agent record was found but carries no resolvable container id at all (no
-// "scion.container.id" label, no ContainerID, no ID) — e.g. an agent that was
-// created or stopped without ever having a container running. In both cases
-// there is nothing present to act on, so callers use errors.Is(err,
+// "scion.container.id" label, no ContainerID, no ID) — e.g. its container
+// was removed, leaving a record with no identifying fields left to resolve.
+// In both cases there is nothing present to act on, so callers use errors.Is(err,
 // ErrAgentNotFound) to fold this into the idempotent "not found" path (skip
 // stop, proceed to start on restart) rather than aborting. This is distinct
 // from any other lookup failure (a runtime listing error, an ambiguous
