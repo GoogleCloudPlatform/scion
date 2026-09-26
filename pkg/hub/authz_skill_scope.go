@@ -14,7 +14,11 @@
 
 package hub
 
-import "github.com/GoogleCloudPlatform/scion/pkg/store"
+import (
+	"context"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+)
 
 // curatedSkillDirectoryRoles are the built-in, system-scoped roles whose
 // skill.read/skill.list permission (hubMemberPermissionIDs,
@@ -174,4 +178,24 @@ func agentCreatorUserSkillGrant(principal PrincipalContext, resource Resource, a
 		Scope:        ScopeTypeRelationship,
 		MatchedGrant: "creator-user-skill",
 	}, true
+}
+
+// originUserActive reports whether the agent principal's origin user still
+// exists and is active. The creator user-skill grant requires it: the grant
+// exists so an agent can act for a live user, and it must not outlive that
+// user. Any lookup failure (including a missing store) denies.
+func (a *AuthzService) originUserActive(ctx context.Context, principal PrincipalContext) bool {
+	agent, ok := principal.Identity.(AgentIdentity)
+	if !ok || a.store == nil {
+		return false
+	}
+	origin := agent.OriginUserID()
+	if origin == "" {
+		return false
+	}
+	user, err := a.store.GetUser(ctx, origin)
+	if err != nil || user == nil {
+		return false
+	}
+	return user.Status == store.UserStatusActive
 }

@@ -1030,10 +1030,10 @@ func (a *AuthzService) checkRelationshipGrants(
 
 	// 4. Creator user-skill read (agents only).
 	// An agent may read its creator's own user-scoped skills; see
-	// agentCreatorUserSkillGrant. The agent JWT restriction and access
-	// constraints (applied by the caller) and the delegation ceiling still
-	// apply on top.
-	if d, ok := agentCreatorUserSkillGrant(principal, resource, action); ok {
+	// agentCreatorUserSkillGrant. The origin user must also still exist and
+	// be active. The agent JWT restriction and access constraints (applied
+	// by the caller) and the delegation ceiling still apply on top.
+	if d, ok := agentCreatorUserSkillGrant(principal, resource, action); ok && a.originUserActive(ctx, principal) {
 		return d, true
 	}
 

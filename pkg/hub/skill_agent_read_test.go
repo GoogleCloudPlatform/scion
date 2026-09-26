@@ -33,6 +33,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"sort"
 	"testing"
@@ -264,6 +265,87 @@ func TestAgentSkillRead_CeilingDeniesCreatorUserSkill(t *testing.T) {
 	assert.Zero(t, total)
 }
 
+// A18: an agent created by another agent (ancestry [U, parent], delegation
+// edge from the parent agent) reads exactly its parent's granted set: U's
+// user skills, never V's. The ceiling walks through the parent to U.
+func TestAgentSkillRead_ChildAgentSeesParentGrantedSet(t *testing.T) {
+	f := setupAgentSkillFixture(t)
+	ctx := context.Background()
+	parentToken := f.newAgent(t, "as-agent-parent", f.p.ID, f.u.ID, ScopesForRole(AgentRoleBaseline))
+	parentID := tid("as-agent-parent")
+	// The ceiling checks a delegating agent's stored role, so record it.
+	parent, err := f.s.GetAgent(ctx, parentID)
+	require.NoError(t, err)
+	parent.AppliedConfig = &store.AgentAppliedConfig{AgentRole: string(AgentRoleBaseline)}
+	require.NoError(t, f.s.UpdateAgent(ctx, parent))
+
+	child := &store.Agent{
+		ID: tid("as-agent-child"), Slug: tid("as-agent-child"), Name: "as-agent-child",
+		ProjectID: f.p.ID, Phase: string(state.PhaseRunning),
+		CreatedBy: parentID, OwnerID: parentID, Ancestry: []string{f.u.ID, parentID},
+	}
+	require.NoError(t, f.s.CreateAgent(ctx, child))
+	require.NoError(t, f.s.CreateDelegationEdge(ctx, &store.DelegationEdge{
+		DelegatorType: store.DelegationPrincipalAgent, DelegatorID: parentID,
+		DelegateType: store.DelegationPrincipalAgent, DelegateID: child.ID,
+		ScopeType: store.RoleScopeProject, ScopeID: f.p.ID,
+		Role: string(AgentRoleBaseline), Active: true,
+	}))
+	var childToken string
+	childToken, err = f.srv.GetAgentTokenService().GenerateAgentToken(child.ID, f.p.ID,
+		ScopesForRole(AgentRoleBaseline), child.Ancestry)
+	require.NoError(t, err)
+
+	want := agentSkillSet(f.sg, f.sc, f.sp, f.su)
+	f.assertAgentSees(t, parentToken, want)
+	f.assertAgentSees(t, childToken, want)
+}
+
+// A19: the creator user-skill grant requires a live origin user. Once the
+// creator is suspended or deleted, the agent no longer reads that user's
+// skills (LIST and GET agree), whatever else the delegation ceiling allows.
+func TestAgentSkillRead_CreatorSuspendedOrDeletedLosesUserSkills(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		revoke func(t *testing.T, s store.Store, w *store.User)
+	}{
+		{"suspended", func(t *testing.T, s store.Store, w *store.User) {
+			w.Status = store.UserStatusSuspended
+			require.NoError(t, s.UpdateUser(context.Background(), w))
+		}},
+		{"deleted", func(t *testing.T, s store.Store, w *store.User) {
+			require.NoError(t, s.DeleteUser(context.Background(), w.ID))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := setupAgentSkillFixture(t)
+			ctx := context.Background()
+			w := createNamedTestUser(t, f.s, "agentskill-w-"+tc.name, store.UserRoleMember)
+			ensureHubMembership(ctx, f.s, w.ID)
+			createTestUserWithProjectRole(t, f.s, w.ID, w.Email, f.p.ID, store.ProjectRoleMember)
+			sw := createTestSkill(t, f.s, "as-user-w-"+tc.name, store.SkillScopeUser, w.ID, w.ID)
+			token := f.newAgent(t, "as-agent-w-"+tc.name, f.p.ID, w.ID, ScopesForRole(AgentRoleBaseline))
+
+			code, body := f.agentGet(t, token, "/api/v1/skills/"+sw.ID)
+			require.Equal(t, http.StatusOK, code, "before: the creator's skill is readable: %s", body)
+			listed, _ := f.agentListAll(t, token, "", 10)
+			require.True(t, listed[sw.ID])
+
+			fresh, err := f.s.GetUser(ctx, w.ID)
+			require.NoError(t, err)
+			tc.revoke(t, f.s, fresh)
+
+			_, missingBody := f.agentGet(t, token, "/api/v1/skills/"+api.NewUUID())
+			code, body = f.agentGet(t, token, "/api/v1/skills/"+sw.ID)
+			assert.Equal(t, http.StatusNotFound, code)
+			assert.Equal(t, missingBody, body)
+			listed, total := f.agentListAll(t, token, "", 10)
+			assert.False(t, listed[sw.ID], "LIST must drop the creator's skill")
+			assert.Equal(t, len(listed), total)
+		})
+	}
+}
+
 // A7: an access constraint capping the agent below skill.read denies every
 // skill; LIST agrees (the probe sees the same restriction).
 func TestAgentSkillRead_AccessConstraintDeniesAll(t *testing.T) {
@@ -493,6 +575,13 @@ func TestAgentSkillRead_CatalogGrantDoesNotReachNonHubResources(t *testing.T) {
 	assert.False(t, authz.CheckAccess(ctx, withCreator, skillResource(f.sv), ActionRead).Allowed)
 	assert.False(t, authz.CheckAccess(ctx, withCreator, skillResource(f.su), ActionUpdate).Allowed)
 	assert.False(t, authz.CheckAccess(ctx, withCreator, skillResource(f.su), ActionDelete).Allowed)
+
+	// A federated agent's ancestry is a remote claim: no user bucket, on
+	// point reads or in the list predicate, even when it names U.
+	fed := NewFederatedAgentIdentity("https://other.example", tid("as-agent-fed"), f.p.ID, "fed",
+		f.u.ID, []string{f.u.ID}, ScopesForRole(AgentRoleBaseline))
+	assert.False(t, authz.CheckAccess(ctx, fed, skillResource(f.su), ActionRead).Allowed)
+	assert.Empty(t, f.srv.agentSkillAccessScope(ctx, fed).CallerID)
 }
 
 // A8/A9 regressions: the agent grant does not change what users see.
@@ -590,6 +679,29 @@ func TestAgentSkillRead_OtherReadSurfacesAgreeWithGet(t *testing.T) {
 		})
 	}
 
+	// Batch resolve with a caller-supplied userId: U's alias resolves U's
+	// skill; pointing it at V finds nothing.
+	t.Run("batch-resolve-user-alias", func(t *testing.T) {
+		for _, tc := range []struct {
+			userID, slug string
+			ok           bool
+		}{
+			{f.u.ID, f.su.Slug, true},
+			{f.v.ID, f.sv.Slug, false},
+		} {
+			rec := doAgentTokenRequest(t, f.srv, http.MethodPost, "/api/v1/skills/resolve",
+				ResolveSkillsRequest{UserID: tc.userID, Skills: []ResolveSkillRef{{URI: "skill://user/" + tc.slug}}}, token)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			var resp ResolveSkillsResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			assert.Equal(t, tc.ok, len(resp.Resolved) == 1, "%s: %s", tc.slug, rec.Body.String())
+			if !tc.ok {
+				require.Len(t, resp.Errors, 1)
+				assert.Equal(t, "not_found", resp.Errors[0].Code)
+			}
+		}
+	})
+
 	t.Run("batch-resolve", func(t *testing.T) {
 		uris := map[string]string{
 			f.sg.ID: "skill://scion/global/" + f.sg.Slug,
@@ -615,4 +727,34 @@ func TestAgentSkillRead_OtherReadSurfacesAgreeWithGet(t *testing.T) {
 			}
 		}
 	})
+}
+
+// The explain endpoint builds a skill's resource from the stored record, so
+// its answer for a skill matches the real read decision: the owner is
+// allowed to read their user skill, and another member is not.
+func TestExplainAPI_SkillResourceMatchesReadDecision(t *testing.T) {
+	f := setupAgentSkillFixture(t)
+	for _, tc := range []struct {
+		user *store.User
+		want bool
+	}{
+		{f.u, true},
+		{f.v, false},
+	} {
+		body, _ := json.Marshal(map[string]interface{}{
+			"resource": map[string]interface{}{"type": "skill", "id": f.su.ID},
+			"action":   "read",
+		})
+		req := newRequestWithIdentity(t, http.MethodPost, "/api/v1/authz/explain", body,
+			NewAuthenticatedUser(tc.user.ID, tc.user.Email, tc.user.DisplayName, "member", "api"))
+		rec := httptest.NewRecorder()
+		f.srv.handleAuthzExplain(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp explainResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Equal(t, tc.want, resp.Allowed, "explain for %s", tc.user.ID)
+		assert.Equal(t, tc.want, f.srv.authzService.CheckAccess(context.Background(),
+			NewAuthenticatedUser(tc.user.ID, tc.user.Email, tc.user.DisplayName, "member", "api"),
+			skillResource(f.su), ActionRead).Allowed, "real decision for %s", tc.user.ID)
+	}
 }
