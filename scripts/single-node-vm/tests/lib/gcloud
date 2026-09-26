@@ -89,6 +89,9 @@ require_project() {
 # case below, where the resource name is $4 -- is one word later, at $5.
 case "${1:-} ${2:-} ${3:-} ${4:-}" in
   "compute routers nats describe")
+    require_project "$@"
+    require_flag region "$@"
+    require_flag router "$@"
     name="${5:-}"
     if [[ -n "$name" && -f "${GCLOUD_STUB_STATE_DIR}/nats/${name}.exists" ]]; then
       exit 0
@@ -97,6 +100,8 @@ case "${1:-} ${2:-} ${3:-} ${4:-}" in
     ;;
   "compute routers nats create")
     require_project "$@"
+    require_flag region "$@"
+    require_flag router "$@"
     name="${5:-}"
     if [[ -n "$name" ]]; then
       mkdir -p "${GCLOUD_STUB_STATE_DIR}/nats"
@@ -105,12 +110,16 @@ case "${1:-} ${2:-} ${3:-} ${4:-}" in
     exit 0
     ;;
   "compute routers nats delete")
+    require_project "$@"
+    require_flag region "$@"
+    require_flag router "$@"
     name="${5:-}"
     [[ -n "$name" ]] && rm -f "${GCLOUD_STUB_STATE_DIR}/nats/${name}.exists"
     exit 0
     ;;
   "beta run services update")
     require_project "$@"
+    require_flag region "$@"
     exit 0
     ;;
 esac
@@ -229,7 +238,7 @@ out = []
 for n in names:
     p = os.path.join(state_dir, 'firewall-rules', n + '.json')
     if os.path.isfile(p):
-        with open(p) as f:
+        with open(p, encoding='utf-8') as f:
             d = json.load(f)
         d['name'] = n
         out.append(d)
@@ -315,6 +324,7 @@ print(json.dumps(out))
     ;;
   "compute instances create")
     require_project "$@"
+    require_flag zone "$@"
     name="${4:-}"
     echo "us-central1-b" > "${GCLOUD_STUB_STATE_DIR}/instances/${name}"
     # A sentinel the create-mode wiring tests poll for, so they can stop
@@ -331,10 +341,13 @@ print(json.dumps(out))
     exit 0
     ;;
   "compute zones list")
+    require_project "$@"
     echo "us-central1-b"
     exit 0
     ;;
   "compute routers describe")
+    require_project "$@"
+    require_flag region "$@"
     if [[ -f "${GCLOUD_STUB_STATE_DIR}/router-exists" ]]; then
       exit 0
     fi
@@ -362,6 +375,7 @@ print(json.dumps(out))
     ;;
   "compute routers create")
     require_project "$@"
+    require_flag region "$@"
     # Persists the same flag "compute routers describe" (above) and
     # set_router_exists (harness.sh) both use, so a re-run against the
     # state a create actually left behind sees the router as already
@@ -370,10 +384,13 @@ print(json.dumps(out))
     exit 0
     ;;
   "compute routers delete")
+    require_project "$@"
+    require_flag region "$@"
     rm -f "${GCLOUD_STUB_STATE_DIR}/router-exists"
     exit 0
     ;;
   "iam service-accounts describe")
+    require_project "$@"
     # $4 is a full email for this call. A name-scoped describe-error
     # fixture is checked first (an error unrelated to existence, e.g.
     # PERMISSION_DENIED), then a name-scoped JSON fixture keyed by that
@@ -411,13 +428,14 @@ print(json.dumps(out))
       "$PYTHON" -c "
 import json, sys
 email, desc, path = sys.argv[1:4]
-json.dump({'email': email, 'description': desc}, open(path, 'w'))
+json.dump({'email': email, 'description': desc}, open(path, 'w', encoding='utf-8'))
 " "${sa_id}@${create_project}.iam.gserviceaccount.com" "$create_desc" \
         "${GCLOUD_STUB_STATE_DIR}/service-accounts/${sa_id}@${create_project}.iam.gserviceaccount.com.json"
     fi
     exit 0
     ;;
   "iam service-accounts delete")
+    require_project "$@"
     sa_email="${4:-}"
     if [[ -f "${GCLOUD_STUB_STATE_DIR}/service-accounts/${sa_email}.json.delete-fail" ]]; then
       echo "gcloud-stub: simulated delete failure for service account ${sa_email}" >&2
@@ -448,6 +466,8 @@ json.dump({'email': email, 'description': desc}, open(path, 'w'))
     exit 0
     ;;
   "iap web add-iam-policy-binding")
+    require_project "$@"
+    require_flag region "$@"
     if [[ -f "${GCLOUD_STUB_STATE_DIR}/iap-web-add-binding-should-fail" ]]; then
       echo "gcloud-stub: simulated IAP web binding failure" >&2
       exit 1
@@ -455,6 +475,8 @@ json.dump({'email': email, 'description': desc}, open(path, 'w'))
     exit 0
     ;;
   "run services delete")
+    require_project "$@"
+    require_flag region "$@"
     name="${4:-}"
     if [[ -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.delete-error" ]]; then
       echo "gcloud-stub: ERROR: (gcloud.run.services.delete) PERMISSION_DENIED: simulated delete failure for service [${name}]" >&2

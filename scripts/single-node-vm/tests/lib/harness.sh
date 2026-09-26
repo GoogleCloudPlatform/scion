@@ -147,7 +147,7 @@ seed_service_account() {
   "$PYTHON" -c "
 import json, sys
 email, desc, path = sys.argv[1:4]
-json.dump({'email': email, 'description': desc}, open(path, 'w'))
+json.dump({'email': email, 'description': desc}, open(path, 'w', encoding='utf-8'))
 " "$email" "$description" "${GCLOUD_STUB_STATE_DIR}/service-accounts/${email}.json"
 }
 
