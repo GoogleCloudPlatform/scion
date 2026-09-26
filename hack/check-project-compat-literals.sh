@@ -233,7 +233,12 @@ for path in "${allowed_paths[@]}"; do
   fi
 done
 
-violations="$(grep -Ev "$allowlist" "$tmp" || true)"
+violations=""
+if [[ -n "$allowlist" ]]; then
+  violations="$(grep -Ev "$allowlist" "$tmp" || true)"
+elif [[ -s "$tmp" ]]; then
+  violations="$(cat "$tmp")"
+fi
 
 # Report both failure classes from one run rather than stopping at whichever
 # is checked first - otherwise fixing one class only reveals the other on
