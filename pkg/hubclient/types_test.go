@@ -60,7 +60,7 @@ func TestAgent_JSON(t *testing.T) {
 		}
 	})
 
-	t.Run("marshal dual fields", func(t *testing.T) {
+	t.Run("marshal emits only canonical fields", func(t *testing.T) {
 		a := Agent{
 			Project:   "my-project",
 			ProjectID: "my-id",
@@ -78,14 +78,14 @@ func TestAgent_JSON(t *testing.T) {
 		if m["project"] != "my-project" {
 			t.Errorf("project = %v, want %q", m["project"], "my-project")
 		}
-		if m["grove"] != "my-project" {
-			t.Errorf("grove = %v, want %q", m["grove"], "my-project")
-		}
 		if m["projectId"] != "my-id" {
 			t.Errorf("projectId = %v, want %q", m["projectId"], "my-id")
 		}
-		if m["groveId"] != "my-id" {
-			t.Errorf("groveId = %v, want %q", m["groveId"], "my-id")
+		if _, ok := m["grove"]; ok {
+			t.Errorf("grove = %v, want key absent", m["grove"])
+		}
+		if _, ok := m["groveId"]; ok {
+			t.Errorf("groveId = %v, want key absent", m["groveId"])
 		}
 	})
 }
@@ -134,7 +134,7 @@ func TestProject_JSON(t *testing.T) {
 		}
 	})
 
-	t.Run("marshal dual fields", func(t *testing.T) {
+	t.Run("marshal emits only canonical fields", func(t *testing.T) {
 		p := Project{
 			ID:          "my-id",
 			Name:        "my-name",
@@ -152,17 +152,125 @@ func TestProject_JSON(t *testing.T) {
 
 		expected := map[string]string{
 			"id":          "my-id",
-			"groveId":     "my-id",
+			"projectId":   "my-id",
 			"name":        "my-name",
-			"groveName":   "my-name",
 			"projectType": "my-type",
-			"groveType":   "my-type",
 		}
 
 		for k, v := range expected {
 			if m[k] != v {
 				t.Errorf("Field %q = %v, want %v", k, m[k], v)
 			}
+		}
+
+		for _, legacyKey := range []string{"groveId", "groveName", "groveType"} {
+			if _, ok := m[legacyKey]; ok {
+				t.Errorf("legacy key %q present in marshal output, want absent: %v", legacyKey, m[legacyKey])
+			}
+		}
+	})
+}
+
+func TestRuntimeBroker_JSON(t *testing.T) {
+	t.Run("unmarshal legacy groves key", func(t *testing.T) {
+		jsonData := `{"id": "b1", "groves": [{"projectId": "p1", "projectName": "Project 1"}]}`
+		var b RuntimeBroker
+		if err := json.Unmarshal([]byte(jsonData), &b); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if len(b.Projects) != 1 || b.Projects[0].ProjectID != "p1" {
+			t.Errorf("Projects = %+v, want one project with ProjectID p1", b.Projects)
+		}
+	})
+
+	t.Run("marshal emits only canonical fields", func(t *testing.T) {
+		b := RuntimeBroker{
+			ID:       "b1",
+			Projects: []BrokerProjectInfo{{ProjectID: "p1", ProjectName: "Project 1"}},
+		}
+		data, err := json.Marshal(b)
+		if err != nil {
+			t.Fatalf("Marshal failed: %v", err)
+		}
+
+		var m map[string]interface{}
+		if err := json.Unmarshal(data, &m); err != nil {
+			t.Fatalf("Unmarshal back failed: %v", err)
+		}
+
+		if _, ok := m["projects"]; !ok {
+			t.Errorf("Missing 'projects' field")
+		}
+		if _, ok := m["groves"]; ok {
+			t.Errorf("legacy 'groves' key present in marshal output, want absent: %v", m["groves"])
+		}
+	})
+}
+
+func TestBrokerProjectInfo_JSON(t *testing.T) {
+	t.Run("unmarshal legacy grove fields", func(t *testing.T) {
+		jsonData := `{"groveId": "p1", "groveName": "Project 1"}`
+		var i BrokerProjectInfo
+		if err := json.Unmarshal([]byte(jsonData), &i); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if i.ProjectID != "p1" || i.ProjectName != "Project 1" {
+			t.Errorf("ProjectID/ProjectName = %q/%q, want p1/Project 1", i.ProjectID, i.ProjectName)
+		}
+	})
+
+	t.Run("marshal emits only canonical fields", func(t *testing.T) {
+		i := BrokerProjectInfo{ProjectID: "p1", ProjectName: "Project 1"}
+		data, err := json.Marshal(i)
+		if err != nil {
+			t.Fatalf("Marshal failed: %v", err)
+		}
+
+		var m map[string]interface{}
+		if err := json.Unmarshal(data, &m); err != nil {
+			t.Fatalf("Unmarshal back failed: %v", err)
+		}
+
+		if m["projectId"] != "p1" || m["projectName"] != "Project 1" {
+			t.Errorf("projectId/projectName = %v/%v, want p1/Project 1", m["projectId"], m["projectName"])
+		}
+		for _, legacyKey := range []string{"groveId", "groveName"} {
+			if _, ok := m[legacyKey]; ok {
+				t.Errorf("legacy key %q present in marshal output, want absent: %v", legacyKey, m[legacyKey])
+			}
+		}
+	})
+}
+
+func TestTemplate_JSON(t *testing.T) {
+	t.Run("unmarshal legacy groveId field is not honored", func(t *testing.T) {
+		jsonData := `{"id": "t1", "groveId": "p1"}`
+		var tpl Template
+		if err := json.Unmarshal([]byte(jsonData), &tpl); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if tpl.ProjectID != "" {
+			t.Errorf("ProjectID = %q, want empty (legacy groveId must not be honored)", tpl.ProjectID)
+		}
+	})
+
+	t.Run("marshal emits only canonical fields", func(t *testing.T) {
+		tpl := Template{ID: "t1", ProjectID: "p1"}
+		data, err := json.Marshal(tpl)
+		if err != nil {
+			t.Fatalf("Marshal failed: %v", err)
+		}
+
+		var m map[string]interface{}
+		if err := json.Unmarshal(data, &m); err != nil {
+			t.Fatalf("Unmarshal back failed: %v", err)
+		}
+
+		if m["projectId"] != "p1" {
+			t.Errorf("projectId = %v, want %q", m["projectId"], "p1")
+		}
+		if _, ok := m["groveId"]; ok {
+			t.Errorf("legacy 'groveId' key present in marshal output, want absent: %v", m["groveId"])
 		}
 	})
 }

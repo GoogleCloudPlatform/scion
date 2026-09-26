@@ -16,7 +16,6 @@ package hubclient
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"time"
@@ -103,18 +102,6 @@ type Schedule struct {
 	CreatedBy     string     `json:"createdBy"`
 	UpdatedAt     time.Time  `json:"updatedAt"`
 	UpdatedBy     string     `json:"updatedBy,omitempty"`
-}
-
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (s Schedule) MarshalJSON() ([]byte, error) {
-	type Alias Schedule
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId,omitempty"`
-	}{
-		Alias:   Alias(s),
-		GroveID: s.ProjectID,
-	})
 }
 
 // ListSchedulesOptions configures schedule listing.

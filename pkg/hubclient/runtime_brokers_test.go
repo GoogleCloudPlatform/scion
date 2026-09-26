@@ -38,15 +38,16 @@ func TestListBrokerProjectsResponse_MarshalJSON(t *testing.T) {
 	if _, ok := m["projects"]; !ok {
 		t.Errorf("Missing 'projects' field")
 	}
-	if _, ok := m["groves"]; !ok {
-		t.Errorf("Missing 'groves' field")
+	if _, ok := m["groves"]; ok {
+		t.Errorf("'groves' field should not be emitted, got %v", m["groves"])
 	}
 
 	projects := m["projects"].([]interface{})
-	groves := m["groves"].([]interface{})
-
-	if len(projects) != 1 || len(groves) != 1 {
-		t.Errorf("Expected 1 project/grove, got %d/%d", len(projects), len(groves))
+	if len(projects) != 1 {
+		t.Errorf("Expected 1 project, got %d", len(projects))
+	}
+	if projects[0].(map[string]interface{})["groveId"] != nil {
+		t.Errorf("'groveId' field should not be emitted on project entries, got %v", projects[0].(map[string]interface{})["groveId"])
 	}
 }
 

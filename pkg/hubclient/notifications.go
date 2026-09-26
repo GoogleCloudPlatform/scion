@@ -60,18 +60,6 @@ type Notification struct {
 	CreatedAt      time.Time `json:"createdAt"`
 }
 
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (n Notification) MarshalJSON() ([]byte, error) {
-	type Alias Notification
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId,omitempty"`
-	}{
-		Alias:   Alias(n),
-		GroveID: n.ProjectID,
-	})
-}
-
 // List returns notifications for the current user.
 func (s *notificationService) List(ctx context.Context, opts *ListNotificationsOptions) ([]Notification, error) {
 	query := url.Values{}
@@ -198,18 +186,6 @@ type Subscription struct {
 	TriggerActivities []string  `json:"triggerActivities"`
 	CreatedAt         time.Time `json:"createdAt"`
 	CreatedBy         string    `json:"createdBy"`
-}
-
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (s Subscription) MarshalJSON() ([]byte, error) {
-	type Alias Subscription
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId,omitempty"`
-	}{
-		Alias:   Alias(s),
-		GroveID: s.ProjectID,
-	})
 }
 
 // Create creates a new notification subscription.
@@ -348,18 +324,6 @@ type SubscriptionTemplate struct {
 	TriggerActivities []string `json:"triggerActivities"`
 	ProjectID         string   `json:"projectId"`
 	CreatedBy         string   `json:"createdBy"`
-}
-
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (t SubscriptionTemplate) MarshalJSON() ([]byte, error) {
-	type Alias SubscriptionTemplate
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId,omitempty"`
-	}{
-		Alias:   Alias(t),
-		GroveID: t.ProjectID,
-	})
 }
 
 // Create creates a new subscription template.

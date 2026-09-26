@@ -100,18 +100,6 @@ type ListBrokerProjectsResponse struct {
 	Projects []BrokerProjectInfo `json:"projects"`
 }
 
-// MarshalJSON implements custom marshaling to support legacy grove fields.
-func (r ListBrokerProjectsResponse) MarshalJSON() ([]byte, error) {
-	type Alias ListBrokerProjectsResponse
-	return json.Marshal(&struct {
-		Alias
-		Groves []BrokerProjectInfo `json:"groves,omitempty"`
-	}{
-		Alias:  Alias(r),
-		Groves: r.Projects,
-	})
-}
-
 // UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
 func (r *ListBrokerProjectsResponse) UnmarshalJSON(data []byte) error {
 	type Alias ListBrokerProjectsResponse
