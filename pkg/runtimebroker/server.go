@@ -1121,12 +1121,19 @@ func (s *Server) discoverAuxiliaryRuntimes() {
 // treat this as retryable rather than reporting the agent as missing.
 var ErrAgentListUnavailable = errors.New("agent runtime listing temporarily unavailable")
 
-// ErrAgentNotFound marks a genuine "no such agent" result from
-// LookupContainerID: the runtime listing succeeded, but no agent matched the
-// requested slug/project. Callers use errors.Is(err, ErrAgentNotFound) to
-// distinguish this idempotent case from any other lookup failure (a runtime
-// listing error, an ambiguous match, a missing container ID, etc.), which
-// must be surfaced as a real error rather than treated as "not found".
+// ErrAgentNotFound marks a lookup result from LookupContainerID that must be
+// treated the same as a genuine "no such agent": either the runtime listing
+// succeeded but no agent matched the requested slug/project, or a matching
+// agent record was found but carries no resolvable container id at all (no
+// "scion.container.id" label, no ContainerID, no ID) — e.g. an agent that was
+// created or stopped without ever having a container running. In both cases
+// there is nothing present to act on, so callers use errors.Is(err,
+// ErrAgentNotFound) to fold this into the idempotent "not found" path (skip
+// stop, proceed to start on restart) rather than aborting. This is distinct
+// from any other lookup failure (a runtime listing error, an ambiguous
+// match), which reflects a real problem resolving an agent that may well
+// exist and must still be surfaced as an error rather than treated as "not
+// found".
 var ErrAgentNotFound = errors.New("agent not found")
 
 // agentNotFoundError implements the existing "agent '<slug>' not found"
@@ -1228,7 +1235,7 @@ func (s *Server) LookupContainerID(ctx context.Context, slug, projectID string) 
 		containerID = agent.ID
 	}
 	if containerID == "" {
-		return "", fmt.Errorf("agent '%s' has no container ID", slug)
+		return "", fmt.Errorf("agent '%s' has no container ID: %w", slug, ErrAgentNotFound)
 	}
 
 	return containerID, nil

@@ -309,3 +309,74 @@ func TestRestartAgent_NotFoundInProjectProceedsWithStart(t *testing.T) {
 		t.Errorf("expected Start to be called once, got %d", mgr.startCalls)
 	}
 }
+
+// TestRestartAgent_AmbiguousMatchAbortsWithoutStart is a regression test for
+// #1985: when the project-scoped lookup finds more than one distinct
+// container matching the slug (uniqueAgentEntry's ambiguous case), that is a
+// real lookup failure, not a "not found," so restartAgent must abort with a
+// 5xx and must NOT call Start — a lookup that can't tell which container to
+// stop must not just start a second one anyway.
+func TestRestartAgent_AmbiguousMatchAbortsWithoutStart(t *testing.T) {
+	mgr := &filteringMockManager{}
+	mgr.agents = []api.AgentInfo{
+		{
+			ContainerID: "container-A",
+			Name:        "coordinator",
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+		},
+		{
+			ContainerID: "container-A2",
+			Name:        "coordinator",
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+		},
+	}
+	srv := newTestServerWithManager(t, mgr)
+
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/restart?projectId=grove-A", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, r)
+
+	if w.Code < 500 {
+		t.Fatalf("expected a 5xx status for an ambiguous match, got %d (%s)", w.Code, w.Body.String())
+	}
+	if mgr.startCalls != 0 {
+		t.Errorf("Start was called %d time(s); an ambiguous match must not start a second container", mgr.startCalls)
+	}
+	if mgr.stopCalls != 0 {
+		t.Errorf("Stop was called %d time(s); an ambiguous match must abort before stopping", mgr.stopCalls)
+	}
+}
+
+// TestRestartAgent_NoContainerIDProceedsWithStart is a regression test for
+// the upstream main CI failure this fix addresses
+// (TestRestartAgent_ContainerScanSuppliesSettingsFallback): a matching agent
+// record with no resolvable container id (no "scion.container.id" label, no
+// ContainerID, no ID — e.g. created or stopped with no container ever
+// launched) has nothing to stop. LookupContainerID's "no container ID"
+// result is classified as ErrAgentNotFound, so restartAgent must treat it
+// like a genuine not-found: skip the stop and proceed to start, rather than
+// aborting with a 5xx.
+func TestRestartAgent_NoContainerIDProceedsWithStart(t *testing.T) {
+	mgr := &filteringMockManager{}
+	mgr.agents = []api.AgentInfo{
+		{
+			Name:   "coordinator",
+			Labels: map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+		},
+	}
+	srv := newTestServerWithManager(t, mgr)
+
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/restart?projectId=grove-A", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, r)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+	}
+	if mgr.stopCalls != 0 {
+		t.Errorf("Stop was called %d time(s); a no-container agent has nothing to stop", mgr.stopCalls)
+	}
+	if mgr.startCalls != 1 {
+		t.Errorf("expected Start to be called once, got %d", mgr.startCalls)
+	}
+}

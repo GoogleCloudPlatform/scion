@@ -1732,9 +1732,12 @@ func isContainerStopTolerable(err error) bool {
 // ErrAgentNotFound (e.g. a runtime listing error, an ambiguous match) is
 // returned to the caller rather than silently treated as "not found" —
 // callers must surface it as a real error instead of reporting a successful
-// stop/restart. The solo/CLI fallback above predates project scoping and is
-// left unchanged: it already tolerates lookup failures by degrading to the
-// bare id.
+// stop/restart. ErrAgentNotFound also covers a matching agent record with no
+// resolvable container id (created or stopped with no container ever
+// launched): there is nothing to stop, so that case is folded into the same
+// "not found in this project" outcome as a genuine no-match. The solo/CLI
+// fallback above predates project scoping and is left unchanged: it already
+// tolerates lookup failures by degrading to the bare id.
 // agentsWithoutProjectLabel returns the subset of agents that carry no project
 // label (neither scion.grove_id nor scion.project_id). The project-scoped
 // lookups fall back to a slug-only search for backward compatibility with
