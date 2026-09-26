@@ -55,8 +55,10 @@ type startContext struct {
 }
 
 // startContextInputs captures the handler-specific fields that vary across
-// createAgent, startAgent, restartAgent, and finalizeEnv. Each handler
-// populates this from its own request structure, then calls buildStartContext.
+// createAgent, startAgent, and restartAgent. Each handler populates this from
+// its own request structure, then calls buildStartContext. A finalize-env
+// dispatch reaches the broker as a full create request (see
+// DispatchFinalizeEnv on the Hub side), so it takes the createAgent path.
 type startContextInputs struct {
 	// Agent identity
 	Name    string
@@ -98,10 +100,16 @@ type startContextInputs struct {
 
 	// HTTP request (for hub connection resolution)
 	HTTPRequest *http.Request
+
+	// Operation identifies which dispatch path is calling buildStartContext,
+	// so the hub endpoint resolver is chosen explicitly by the caller rather
+	// than inferred from request shape (see resolveEffectiveHubEndpoint).
+	// Required: buildStartContext rejects the zero value.
+	Operation startOperation
 }
 
 // buildStartContext unifies the common startup logic shared by createAgent,
-// startAgent, restartAgent, and finalizeEnv:
+// startAgent, and restartAgent:
 //   - Hub-managed project path resolution (ProjectSlug → ~/.scion.projects/<slug>/)
 //   - Merged env assembly (resolved env + config env + auth + hub endpoint + broker identity)
 //   - Template hydration
@@ -113,6 +121,16 @@ type startContextInputs struct {
 // The caller may further customize the returned startContext before calling
 // mgr.Start or mgr.Provision.
 func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (*startContext, error) {
+	// The caller must name its operation explicitly: resolveEffectiveHubEndpoint's
+	// ranking depends on it, and there is no safe default to infer from
+	// request shape. Checked first, before any directory or file side effect.
+	if !in.Operation.valid() {
+		return nil, &startContextError{
+			Status:  http.StatusInternalServerError,
+			Message: fmt.Sprintf("buildStartContext: Operation not set or unrecognized: %q", in.Operation),
+		}
+	}
+
 	ctx, span := tracer.Start(ctx, "broker.agent.provision")
 	defer span.End()
 	span.SetAttributes(attribute.String("scion.agent.name", in.Name))
@@ -340,63 +358,32 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	}
 
 	// Resolve hub connection early — needed for colocated detection and
-	// template hydration below.
+	// template hydration below. The connection-endpoint header applies to
+	// any HTTP request tunneled through a remote control channel, not just
+	// create, so it is resolved once here and fed into every HTTP operation.
 	var hubConn *HubConnection
+	var connectionHubEndpoint string
 	if in.HTTPRequest != nil {
 		hubConn = s.resolveHubConnection(in.HTTPRequest)
+		connectionHubEndpoint = s.resolveHubEndpointFromRequest(in.HTTPRequest)
 	}
 
-	var hubEndpoint string
-	if in.HTTPRequest != nil {
-		// Full create path: request-level, connection-level, and broker-level fallbacks
-		hubEndpoint = resolveHubEndpointForCreate(
-			in.HubEndpoint,
-			s.resolveHubEndpointFromRequest(in.HTTPRequest),
-			s.config.HubEndpoint,
-			in.ResolvedEnv,
-			in.ProjectPath,
-			s.config.ContainerHubEndpoint,
-			runtimeName,
-		)
-	} else {
-		// Start/restart/finalize path: broker-level and settings fallbacks
-		hubEndpoint = resolveHubEndpointForStart(
-			s.config.HubEndpoint,
-			in.ResolvedEnv,
-			in.ProjectPath,
-			s.config.ContainerHubEndpoint,
-			runtimeName,
-		)
-	}
-	// On the cloudrun-sandbox runtime, sandboxes cannot reach the hub's
-	// public IAP-fronted URL (they hold no IAP credential). The hub is on the
-	// same Instance, listening on 0.0.0.0, and reachable via the launcher's
-	// link-local address. Override the endpoint so the sandbox's sciontool
-	// init (and the metadata emulator's FetchGCPToken) can reach the hub.
-	if runtimeName == "cloudrun-sandbox" {
-		sandboxEndpoint, err := cloudrunSandboxHubEndpoint(s.config.HubListenPort)
-		if err != nil {
-			return nil, &startContextError{
-				Status:  http.StatusInternalServerError,
-				Message: fmt.Sprintf("cannot resolve hub endpoint for sandbox: %v", err),
-			}
+	hubEndpoint, err := resolveEffectiveHubEndpoint(ctx, hubEndpointInputs{
+		Op:                    in.Operation,
+		ReqHubEndpoint:        in.HubEndpoint,
+		ConnectionHubEndpoint: connectionHubEndpoint,
+		BrokerHubEndpoint:     s.config.HubEndpoint,
+		ResolvedEnv:           in.ResolvedEnv,
+		ProjectPath:           in.ProjectPath,
+		ContainerHubEndpoint:  s.config.ContainerHubEndpoint,
+		RuntimeName:           runtimeName,
+		HubListenPort:         s.config.HubListenPort,
+	})
+	if err != nil {
+		return nil, &startContextError{
+			Status:  http.StatusInternalServerError,
+			Message: err.Error(),
 		}
-		hubEndpoint = sandboxEndpoint
-	}
-	// On the cloudrun (CRI) runtime, standalone instances run on separate VMs
-	// (potentially in different regions) and cannot reach the broker's localhost
-	// endpoint. Unlike cloudrun-sandbox (co-located with the hub, reachable via
-	// link-local), CRI instances need the hub's public Cloud Run service URL.
-	// Resolve it from the K_SERVICE env var and GCE metadata.
-	if runtimeName == "cloudrun" && isLocalhostEndpoint(hubEndpoint) {
-		criEndpoint, err := cloudrunInstancesHubEndpoint(ctx)
-		if err != nil {
-			return nil, &startContextError{
-				Status:  http.StatusInternalServerError,
-				Message: fmt.Sprintf("cannot resolve hub endpoint for Cloud Run instance: %v", err),
-			}
-		}
-		hubEndpoint = criEndpoint
 	}
 	if hubEndpoint != "" {
 		env["SCION_HUB_ENDPOINT"] = hubEndpoint
