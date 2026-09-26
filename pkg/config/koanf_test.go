@@ -389,8 +389,40 @@ func TestLoadSettingsKoanfV1ProjectIDFromEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Set SCION_HUB_GROVE_ID env var — should map to top-level grove_id
-	_ = os.Setenv("SCION_HUB_GROVE_ID", "env-grove-uuid")
+	// Set SCION_HUB_PROJECT_ID env var — should map to top-level project_id
+	_ = os.Setenv("SCION_HUB_PROJECT_ID", "env-project-uuid")
+	defer func() { _ = os.Unsetenv("SCION_HUB_PROJECT_ID") }()
+
+	s, err := LoadSettingsKoanf(projectScionDir)
+	if err != nil {
+		t.Fatalf("LoadSettingsKoanf failed: %v", err)
+	}
+
+	if s.ProjectID != "env-project-uuid" {
+		t.Errorf("expected ProjectID 'env-project-uuid' from env var, got '%s'", s.ProjectID)
+	}
+}
+
+// TestLoadSettingsKoanfV1LegacyEnvNeverAdopted is the negative half of
+// TestLoadSettingsKoanfV1ProjectIDFromEnv: SCION_HUB_GROVE_ID must
+// never resolve to a project ID, even though it maps to the same hub.grove_id
+// koanf key as the *file*-based fallback. Guards against the generic
+// "hub_" env mapper reviving the variable via hub.grove_id when only the
+// EnvHubGroveID special case is removed.
+func TestLoadSettingsKoanfV1LegacyEnvNeverAdopted(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	projectDir := filepath.Join(tmpDir, "my-project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	_ = os.Setenv("SCION_HUB_GROVE_ID", "legacy-env-uuid")
 	defer func() { _ = os.Unsetenv("SCION_HUB_GROVE_ID") }()
 
 	s, err := LoadSettingsKoanf(projectScionDir)
@@ -398,8 +430,44 @@ func TestLoadSettingsKoanfV1ProjectIDFromEnv(t *testing.T) {
 		t.Fatalf("LoadSettingsKoanf failed: %v", err)
 	}
 
-	if s.ProjectID != "env-grove-uuid" {
-		t.Errorf("expected ProjectID 'env-grove-uuid' from env var, got '%s'", s.ProjectID)
+	if s.ProjectID != "" {
+		t.Errorf("expected empty ProjectID (SCION_HUB_GROVE_ID must not be adopted), got %q", s.ProjectID)
+	}
+}
+
+// TestLoadSettingsKoanfV1LegacyEnvDoesNotOverrideFile pins that the
+// file-based hub.grove_id fallback is unaffected by the
+// env var's removal: a legacy file value still resolves, and a legacy env
+// var set alongside it changes nothing (it is dropped entirely, not merely
+// out-ranked).
+func TestLoadSettingsKoanfV1LegacyEnvDoesNotOverrideFile(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	projectDir := filepath.Join(tmpDir, "my-project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	legacySettings := "hub:\n  grove_id: \"file-grove\"\n"
+	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(legacySettings), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_ = os.Setenv("SCION_HUB_GROVE_ID", "legacy-env-uuid")
+	defer func() { _ = os.Unsetenv("SCION_HUB_GROVE_ID") }()
+
+	s, err := LoadSettingsKoanf(projectScionDir)
+	if err != nil {
+		t.Fatalf("LoadSettingsKoanf failed: %v", err)
+	}
+
+	if s.ProjectID != "file-grove" {
+		t.Errorf("expected ProjectID 'file-grove' from the file fallback, got %q", s.ProjectID)
 	}
 }
 
@@ -545,7 +613,7 @@ func TestV1ProjectIDSurvivesUpdateSetting(t *testing.T) {
 	_ = os.Setenv("HOME", tmpDir)
 
 	// Unset env vars that could interfere
-	for _, env := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_GROVE_ID"} {
+	for _, env := range []string{"SCION_HUB_ENDPOINT"} {
 		if orig, ok := os.LookupEnv(env); ok {
 			_ = os.Unsetenv(env)
 			t.Cleanup(func() { _ = os.Setenv(env, orig) })
@@ -603,7 +671,7 @@ func TestLoadSettingsKoanf_ProjectIDFileOverridesGlobal(t *testing.T) {
 	defer func() { _ = os.Setenv("HOME", originalHome) }()
 	_ = os.Setenv("HOME", tmpDir)
 
-	for _, env := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_GROVE_ID"} {
+	for _, env := range []string{"SCION_HUB_ENDPOINT"} {
 		if orig, ok := os.LookupEnv(env); ok {
 			_ = os.Unsetenv(env)
 			t.Cleanup(func() { _ = os.Setenv(env, orig) })
@@ -658,7 +726,7 @@ func TestLoadSettingsKoanf_GlobalProjectIDDoesNotBleedIntoProject(t *testing.T) 
 	defer func() { _ = os.Setenv("HOME", originalHome) }()
 	_ = os.Setenv("HOME", tmpDir)
 
-	for _, env := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_GROVE_ID"} {
+	for _, env := range []string{"SCION_HUB_ENDPOINT"} {
 		if orig, ok := os.LookupEnv(env); ok {
 			_ = os.Unsetenv(env)
 			t.Cleanup(func() { _ = os.Setenv(env, orig) })
@@ -703,7 +771,7 @@ func TestLoadSettingsKoanf_V1HubProjectIDPopulatesGetHubProjectID(t *testing.T) 
 	defer func() { _ = os.Setenv("HOME", originalHome) }()
 	_ = os.Setenv("HOME", tmpDir)
 
-	for _, env := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_GROVE_ID"} {
+	for _, env := range []string{"SCION_HUB_ENDPOINT"} {
 		if orig, ok := os.LookupEnv(env); ok {
 			_ = os.Unsetenv(env)
 			t.Cleanup(func() { _ = os.Setenv(env, orig) })
@@ -745,7 +813,7 @@ func TestLoadSettingsKoanf_V1HubProjectIDWithMarkerFile(t *testing.T) {
 	defer func() { _ = os.Setenv("HOME", originalHome) }()
 	_ = os.Setenv("HOME", tmpDir)
 
-	for _, env := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_GROVE_ID"} {
+	for _, env := range []string{"SCION_HUB_ENDPOINT"} {
 		if orig, ok := os.LookupEnv(env); ok {
 			_ = os.Unsetenv(env)
 			t.Cleanup(func() { _ = os.Setenv(env, orig) })
@@ -797,7 +865,7 @@ func TestLoadSettingsKoanf_InRepoSettingsLayered(t *testing.T) {
 	defer func() { _ = os.Setenv("HOME", originalHome) }()
 	_ = os.Setenv("HOME", tmpDir)
 
-	for _, env := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_GROVE_ID", "SCION_ACTIVE_PROFILE"} {
+	for _, env := range []string{"SCION_HUB_ENDPOINT", "SCION_ACTIVE_PROFILE"} {
 		if orig, ok := os.LookupEnv(env); ok {
 			_ = os.Unsetenv(env)
 			t.Cleanup(func() { _ = os.Setenv(env, orig) })
@@ -1072,7 +1140,7 @@ func TestLoadSettingsKoanf_ExternalOverridesInRepo(t *testing.T) {
 	defer func() { _ = os.Setenv("HOME", originalHome) }()
 	_ = os.Setenv("HOME", tmpDir)
 
-	for _, env := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_GROVE_ID", "SCION_ACTIVE_PROFILE"} {
+	for _, env := range []string{"SCION_HUB_ENDPOINT", "SCION_ACTIVE_PROFILE"} {
 		if orig, ok := os.LookupEnv(env); ok {
 			_ = os.Unsetenv(env)
 			t.Cleanup(func() { _ = os.Setenv(env, orig) })

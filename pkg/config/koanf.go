@@ -117,6 +117,18 @@ func LoadSettingsKoanf(projectPath string) (*Settings, error) {
 		if mapped, ok := projectcompat.EnvProjectIDConfigKey(s, true); ok {
 			return mapped
 		}
+		if isRemovedLegacyEnv(s) {
+			// SCION_HUB_GROVE_ID is no longer read. Without this check
+			// it would otherwise fall through to the generic "hub_" mapping
+			// below and land on hub.grove_id, which the v1 remap below
+			// still honours as a *file* fallback — silently
+			// reviving env-var support. Returning "" makes the env provider
+			// drop the variable entirely (env.go's Provider skips a "" key),
+			// the same idiom settings_v1.go already uses for
+			// SCION_OTEL_INSECURE. WarnRemovedLegacyEnv reports it
+			// separately.
+			return ""
+		}
 		key := strings.ToLower(strings.TrimPrefix(s, "SCION_"))
 		// Handle nested bucket keys
 		if strings.HasPrefix(key, "bucket_") {

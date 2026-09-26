@@ -75,11 +75,14 @@ func TestEnvProjectIDConfigKey(t *testing.T) {
 		{EnvProjectID, true, ConfigProjectIDKey, true},
 		{EnvGroveID, true, ConfigProjectIDKey, true},
 		{EnvHubProjectID, true, ConfigProjectIDKey, true},
-		{EnvHubGroveID, true, ConfigProjectIDKey, true},
 		{EnvProjectID, false, ConfigProjectIDKey, true},
 		{EnvGroveID, false, ConfigGroveIDKey, true},
 		{EnvHubProjectID, false, ConfigHubProjectIDKey, true},
-		{EnvHubGroveID, false, ConfigHubGroveIDKey, true},
+		// SCION_HUB_GROVE_ID: removed, no replacement case. Must stay
+		// (false, "", false) — a caller falling through to a generic
+		// mapping for a "false" result here would silently revive the
+		// removed variable via koanf.go/settings_v1.go's generic mapper.
+		{"SCION_HUB_GROVE_ID", false, "", false},
 		{"SCION_HUB_ENDPOINT", false, "", false},
 	}
 

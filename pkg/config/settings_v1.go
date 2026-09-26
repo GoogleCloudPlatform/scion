@@ -1412,6 +1412,16 @@ func versionedEnvKeyMapper(s string) string {
 	if mapped, ok := projectcompat.EnvProjectIDConfigKey(s, false); ok {
 		return mapped
 	}
+	if isRemovedLegacyEnv(s) {
+		// SCION_HUB_GROVE_ID is no longer read, not even via the
+		// generic "hub_" mapping below, which would otherwise land on
+		// hub.grove_id and get remapped to hub.project_id below (a file
+		// fallback). Returning "" makes the env provider
+		// drop the variable entirely, the same idiom used for
+		// SCION_OTEL_INSECURE above. WarnRemovedLegacyEnv reports it
+		// separately.
+		return ""
+	}
 	key := strings.ToLower(strings.TrimPrefix(s, "SCION_"))
 
 	// Handle nested hub keys (single level: hub.endpoint, hub.project_id, etc.)

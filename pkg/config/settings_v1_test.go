@@ -261,9 +261,9 @@ func TestLoadVersionedSettings_HubEnvVars(t *testing.T) {
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
-	// Test SCION_HUB_GROVE_ID maps correctly (regression test)
-	_ = os.Setenv("SCION_HUB_GROVE_ID", "my-grove-id")
-	defer func() { _ = os.Unsetenv("SCION_HUB_GROVE_ID") }()
+	// Test SCION_HUB_PROJECT_ID maps correctly (regression test)
+	_ = os.Setenv("SCION_HUB_PROJECT_ID", "my-project-id")
+	defer func() { _ = os.Unsetenv("SCION_HUB_PROJECT_ID") }()
 
 	_ = os.Setenv("SCION_HUB_LOCAL_ONLY", "true")
 	defer func() { _ = os.Unsetenv("SCION_HUB_LOCAL_ONLY") }()
@@ -272,7 +272,62 @@ func TestLoadVersionedSettings_HubEnvVars(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NotNil(t, vs.Hub)
-	assert.Equal(t, "my-grove-id", vs.Hub.ProjectID)
+	assert.Equal(t, "my-project-id", vs.Hub.ProjectID)
+}
+
+// TestLoadVersionedSettings_LegacyHubEnvNeverAdopted is the negative half of
+// TestLoadVersionedSettings_HubEnvVars: SCION_HUB_GROVE_ID must never
+// resolve to a project ID here either, even though it maps to the same
+// hub.grove_id key the *file*-based fallback reads. Guards against the
+// generic "hub_" env mapper reviving the variable via hub.grove_id when
+// only the EnvHubGroveID special case is removed.
+func TestLoadVersionedSettings_LegacyHubEnvNeverAdopted(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
+
+	_ = os.Setenv("SCION_HUB_GROVE_ID", "legacy-env-uuid")
+	defer func() { _ = os.Unsetenv("SCION_HUB_GROVE_ID") }()
+
+	vs, err := LoadVersionedSettings(projectDir)
+	require.NoError(t, err)
+
+	if vs.Hub != nil {
+		assert.Empty(t, vs.Hub.ProjectID, "SCION_HUB_GROVE_ID must not be adopted")
+	}
+}
+
+// TestLoadVersionedSettings_LegacyHubEnvDoesNotOverrideFile pins that the
+// file-based hub.grove_id fallback is unaffected by the env
+// var's removal: a legacy file value still resolves, and a legacy env var
+// set alongside it changes nothing (it is dropped entirely, not merely
+// out-ranked).
+func TestLoadVersionedSettings_LegacyHubEnvDoesNotOverrideFile(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
+
+	v1Settings := "schema_version: \"1\"\nhub:\n  grove_id: \"file-grove\"\n"
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(v1Settings), 0644))
+
+	_ = os.Setenv("SCION_HUB_GROVE_ID", "legacy-env-uuid")
+	defer func() { _ = os.Unsetenv("SCION_HUB_GROVE_ID") }()
+
+	vs, err := LoadVersionedSettings(projectDir)
+	require.NoError(t, err)
+
+	require.NotNil(t, vs.Hub)
+	assert.Equal(t, "file-grove", vs.Hub.ProjectID)
 }
 
 func TestLoadVersionedSettings_CLIEnvVars(t *testing.T) {
@@ -976,7 +1031,8 @@ func TestVersionedEnvKeyMapper(t *testing.T) {
 		{"SCION_ACTIVE_PROFILE", "active_profile"},
 		{"SCION_DEFAULT_TEMPLATE", "default_template"},
 		{"SCION_HUB_ENDPOINT", "hub.endpoint"},
-		{"SCION_HUB_GROVE_ID", "hub.grove_id"},
+		{"SCION_HUB_PROJECT_ID", "hub.project_id"},
+		{"SCION_HUB_GROVE_ID", ""},
 		{"SCION_HUB_LOCAL_ONLY", "hub.local_only"},
 		{"SCION_HUB_ENABLED", "hub.enabled"},
 		{"SCION_CLI_AUTOHELP", "cli.autohelp"},
