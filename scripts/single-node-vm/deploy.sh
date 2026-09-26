@@ -186,6 +186,36 @@ config_prompt() {
   fi
 }
 
+# proxy_sa_name HUB_NAME — derives the Cloud Run proxy's service-account
+# ID from the hub name. A single helper shared by both the create path
+# (Phase 2) and teardown, so they can never compute two different names
+# for the same hub -- the two paths used to duplicate this logic, and a
+# mutation that only broke one of the two copies passed the full test
+# suite (see the fix for that: a test exercising create-then-delete with
+# a long, truncation-triggering hub name).
+#
+# Truncates "scion-hub-${HUB_NAME}-proxy" to the 30-char GCP
+# service-account ID limit when needed. A plain positional truncation
+# (keep the first N characters and drop the rest) would map any two hub
+# names sharing a long-enough prefix to the *same* truncated name --
+# e.g. "engineering-team-a" and "engineering-team-b" both under a naive
+# 14-char cut -- so `--delete` on one would silently delete the SA the
+# other hub's Cloud Run proxy is still running as. Appending a short hash
+# of the *full* hub name (not just the truncated prefix) keeps two such
+# names distinct.
+proxy_sa_name() {
+  local hub_name="$1" name="scion-hub-${1}-proxy"
+  if [[ ${#name} -le 30 ]]; then
+    printf '%s' "$name"
+    return
+  fi
+  local hash
+  hash="$(printf '%s' "$hub_name" | openssl dgst -sha256 -r | cut -d' ' -f1 | cut -c1-4)"
+  name="scion-hub-${hub_name:0:9}-${hash}-proxy"
+  warn "Proxy service-account name truncated to 30 chars: ${name}"
+  printf '%s' "$name"
+}
+
 # Validate config file exists if specified
 if [[ -n "$CONFIG_FILE" ]]; then
   if [[ ! -f "$CONFIG_FILE" ]]; then
@@ -261,6 +291,10 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   fi
   SA_NAME="scion-hub-${HUB_NAME}"
   SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+  # proxy_sa_name is shared with the create path (Phase 2) precisely so
+  # this can never drift from what create actually named the SA.
+  PROXY_SA_NAME="$(proxy_sa_name "$HUB_NAME")"
+  PROXY_SA_EMAIL="${PROXY_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 
   echo ""
   echo "The following resources will be deleted:"
@@ -269,6 +303,7 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   echo "  Cloud NAT:         ${NAT_NAME} (router: ${ROUTER_NAME})"
   echo "  Cloud Router:      ${ROUTER_NAME} (region: ${REGION})"
   echo "  Service account:   ${SA_EMAIL}"
+  echo "  Proxy SA:          ${PROXY_SA_EMAIL}"
   echo "  Firewall rule:     ${FW_RULE_NAME}"
   echo ""
   if [[ -n "$CONFIG_FILE" && ! -t 0 ]]; then
@@ -322,6 +357,14 @@ if [[ "$DELETE_MODE" == "true" ]]; then
     warn "Service account ${SA_EMAIL} not found or already deleted."
   fi
 
+  info "Deleting proxy service account..."
+  if gcloud iam service-accounts delete "${PROXY_SA_EMAIL}" \
+      --project="${PROJECT_ID}" --quiet 2>/dev/null; then
+    echo "  Deleted: ${PROXY_SA_EMAIL}"
+  else
+    warn "Proxy service account ${PROXY_SA_EMAIL} not found or already deleted."
+  fi
+
   # Note: We intentionally do NOT revoke roles/iap.tunnelResourceAccessor from
   # the deployer. This role is bound to the operator (not a service account) and
   # may be used for IAP SSH access to other VMs in the project. Revoking it here
@@ -344,6 +387,7 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   echo "  Deleted Cloud NAT:         ${NAT_NAME}"
   echo "  Deleted Cloud Router:      ${ROUTER_NAME}"
   echo "  Deleted service account:   ${SA_EMAIL}"
+  echo "  Deleted proxy SA:          ${PROXY_SA_EMAIL}"
   echo "  Deleted firewall rule:     ${FW_RULE_NAME}"
   exit 0
 fi
@@ -613,6 +657,15 @@ if [[ ${#SA_NAME} -gt 30 ]]; then
 fi
 SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 
+# Dedicated Cloud Run proxy service account -- deliberately never SA_EMAIL
+# (the hub VM's own SA), which holds aiplatform.user and
+# artifactregistry.writer. The proxy only reverse-proxies HTTP to the VM's
+# internal IP; it calls no GCP API and needs no project role (see Phase 2,
+# "Proxy service account"). See proxy_sa_name (defined near the top of
+# this script, shared with teardown) for how the name itself is derived.
+PROXY_SA_NAME="$(proxy_sa_name "$HUB_NAME")"
+PROXY_SA_EMAIL="${PROXY_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+
 echo ""
 echo "  Hub name:     ${HUB_NAME}"
 echo "  Region:       ${REGION}"
@@ -715,7 +768,20 @@ gcloud services enable \
   cloudbuild.googleapis.com \
   artifactregistry.googleapis.com \
   aiplatform.googleapis.com \
+  iam.googleapis.com \
   --project="${PROJECT_ID}" --quiet
+
+# --- IAP service agent identity (idempotent) ---
+# Ensures service-PROJECT_NUMBER@gcp-sa-iap.iam.gserviceaccount.com exists
+# before Phase 4 grants it roles/run.invoker on the proxy. On a project
+# where IAP has never been used before, that agent may not have been
+# provisioned yet; without this, the first-ever deploy could reach Phase 4
+# with the proxy already live but no agent to grant the role to, and the
+# explicit grant there is a hard failure (see Phase 4). A no-op if the
+# agent already exists.
+gcloud beta services identity create \
+  --service=iap.googleapis.com \
+  --project="${PROJECT_ID}" --quiet 2>/dev/null || true
 
 # --- Cross-org IAP warning (best-effort; never blocks the deploy) ---
 # IAP's default (Google-managed) OAuth client only covers same-organization
@@ -936,6 +1002,33 @@ for ROLE in roles/logging.logWriter roles/monitoring.metricWriter roles/cloudtra
 done
 echo "  Roles bound: logging.logWriter, monitoring.metricWriter, cloudtrace.agent, artifactregistry.writer, aiplatform.user"
 
+# --- Proxy service account ---
+# A separate, minimally-privileged identity for the Cloud Run IAP proxy
+# (see Phase 4). It never calls a GCP API -- it only reverse-proxies HTTP
+# to the hub VM's internal IP -- so, unlike SA_EMAIL above, it gets no
+# project IAM roles at all. In organizations where the default Compute
+# Engine service account is disabled, deploying the proxy with no
+# --service-account would otherwise fall back to that disabled account
+# and fail; this SA is what Phase 4 passes via --service-account instead.
+#
+# Deploying a Cloud Run service with --service-account=X requires the
+# deployer to already hold iam.serviceAccounts.actAs on X -- the same
+# requirement SA_EMAIL above has always had for the VM create in this
+# script, which has never granted it automatically either. Owner and
+# Editor both include this permission; a more narrowly-scoped deployer
+# needs roles/iam.serviceAccountUser on the SA. See the hardened-org
+# addendum doc.
+info "Creating proxy service account (if needed)..."
+if gcloud iam service-accounts describe "${PROXY_SA_EMAIL}" \
+    --project="${PROJECT_ID}" &>/dev/null; then
+  echo "  Proxy service account already exists: ${PROXY_SA_EMAIL}"
+else
+  gcloud iam service-accounts create "${PROXY_SA_NAME}" \
+    --display-name="Scion Hub IAP Proxy (${HUB_NAME})" \
+    --project="${PROJECT_ID}"
+  echo "  Created proxy service account: ${PROXY_SA_EMAIL}"
+fi
+
 # --- Grant deployer IAP tunnel access (required for SSH to --no-address VMs) ---
 info "Granting IAP tunnel access to deployer..."
 DEPLOYER_EMAIL="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null | head -1)" || true
@@ -1113,6 +1206,7 @@ else
     --boot-disk-size="${DISK_SIZE}" \
     --image-family=ubuntu-2204-lts \
     --image-project=ubuntu-os-cloud \
+    --shielded-secure-boot \
     --metadata-from-file=user-data="${SCRIPT_DIR}/cloud-init.yaml" \
     --quiet
   echo "  Created VM: ${INSTANCE_NAME} (zone: ${ZONE})"
@@ -1691,21 +1785,36 @@ gcloud compute ssh "${INSTANCE_NAME}" \
 echo "  Proxy image pushed: ${PROXY_IMAGE}"
 
 # --- Deploy Cloud Run IAP proxy ---
+# One-step IAP: --no-allow-unauthenticated --iap on the initial deploy
+# itself, instead of `--allow-unauthenticated` followed by a later
+# `gcloud beta run services update --iap`. The two-step form has a window
+# -- between the two calls -- where the service carries an allUsers
+# roles/run.invoker binding; organizations enforcing
+# constraints/iam.allowedPolicyMemberDomains reject that binding outright,
+# and even where it's allowed, it's an unauthenticated-access window this
+# script should never create. `beta run deploy` (rather than the non-beta
+# `run deploy`) is used here for compatibility with older Cloud SDK
+# versions where --iap required the beta surface; current SDKs also
+# support --iap on plain `run deploy`. --service-account is the dedicated
+# proxy SA from Phase 2, never SA_EMAIL (the hub VM's own SA).
 info "Deploying Cloud Run IAP proxy: ${PROXY_SERVICE}..."
 echo "  Target URL: http://${VM_IP}:8080"
 echo "  Image: ${PROXY_IMAGE}"
 
-gcloud run deploy "${PROXY_SERVICE}" \
+gcloud beta run deploy "${PROXY_SERVICE}" \
   --project="${PROJECT_ID}" \
   --region="${REGION}" \
   --image="${PROXY_IMAGE}" \
+  --service-account="${PROXY_SA_EMAIL}" \
   --set-env-vars="TARGET_URL=http://${VM_IP}:8080" \
   --network=default \
   --subnet=default \
   --vpc-egress=all-traffic \
-  --allow-unauthenticated \
+  --no-allow-unauthenticated \
+  --iap \
   --port=8080 \
   --quiet
+echo "  Cloud Run IAP proxy deployed with IAP enabled (no allUsers invoker binding was ever created)."
 
 # --- Get Cloud Run service URL ---
 info "Getting Cloud Run service URL..."
@@ -1718,16 +1827,98 @@ if [[ -z "$PROXY_URL" ]]; then
 fi
 echo "  Proxy URL: ${PROXY_URL}"
 
-# --- Enable IAP ---
-# Note: --resource-type=cloud-run is NOT valid for gcloud iap web enable.
-# The supported path for Cloud Run is the --iap flag on the service itself.
-info "Enabling IAP on Cloud Run service..."
-gcloud beta run services update "${PROXY_SERVICE}" \
-  --region="${REGION}" \
+# --- Project number (needed below, and again for the IAP audience in
+# Phase 5 -- computed once here and reused there) ---
+info "Looking up project number..."
+PROJECT_NUMBER="$(gcloud projects describe "${PROJECT_ID}" \
+  --format="value(projectNumber)" 2>/dev/null)" || true
+if [[ -z "$PROJECT_NUMBER" ]]; then
+  err "Could not determine project number for ${PROJECT_ID}"
+  exit 1
+fi
+echo "  Project number: ${PROJECT_NUMBER}"
+
+# --- Grant the IAP service agent access to invoke the proxy ---
+# gcloud's --iap above already grants the IAP service agent
+# roles/run.invoker itself (serverless_operations._HandleIap), but only
+# warns if that grant fails -- it never fails the deploy. This explicit
+# call is a safety net that makes that failure fatal instead: idempotent
+# (add-iam-policy-binding is a no-op if the binding already exists), so
+# it's a no-op itself on the common path where gcloud's own grant already
+# worked. --condition=None matches this deploy family's existing
+# IAM-binding style (see scripts/cloudrun/deploy.sh's add_project_role)
+# and avoids an interactive "add a condition?" prompt in an org with
+# conditional IAM.
+info "Granting the IAP service agent access to invoke the proxy..."
+IAP_SA_EMAIL="service-${PROJECT_NUMBER}@gcp-sa-iap.iam.gserviceaccount.com"
+gcloud run services add-iam-policy-binding "${PROXY_SERVICE}" \
   --project="${PROJECT_ID}" \
-  --iap \
+  --region="${REGION}" \
+  --member="serviceAccount:${IAP_SA_EMAIL}" \
+  --role="roles/run.invoker" \
+  --condition=None \
   --quiet
-echo "  IAP enabled."
+echo "  IAP service agent can invoke: ${PROXY_SERVICE}"
+
+# --- Verify no allUsers invoker binding remains ---
+# `gcloud beta run deploy --no-allow-unauthenticated` above already asks
+# gcloud to remove any allUsers roles/run.invoker binding when the
+# service already existed (serverless_operations._HandleAllowUnauthenticated),
+# which covers the upgrade path from a prior --allow-unauthenticated
+# deploy. But gcloud only warns if that removal fails -- it never fails
+# the deploy -- so this re-checks explicitly and fails safe: query the
+# current policy first (a fresh deploy, or one where gcloud's own removal
+# already worked, finds nothing and does nothing further -- no removal
+# call, no warning); if allUsers is still bound, try one more removal,
+# and if that also fails, stop the deploy rather than leave the service
+# reachable by anyone.
+info "Verifying no allUsers invoker binding remains..."
+ALLUSERS_STDERR_FILE="$(mktemp)"
+# Re-set (not appended to) the EXIT trap set for SSH_STDERR_FILE earlier:
+# that file has always already removed itself via the explicit `rm -f`
+# calls on both of its own branches by the time this line runs, so
+# referencing it again here is a harmless no-op, not a double-cleanup.
+# Without this, a Ctrl-C or SIGTERM while get-iam-policy is running would
+# leave this one file behind in $TMPDIR (teardown never touches this
+# code path, so there is no other cleanup for it).
+trap 'rm -f "$SSH_STDERR_FILE" "${ALLUSERS_STDERR_FILE:-}"' EXIT
+if ALLUSERS_INVOKER="$(gcloud run services get-iam-policy "${PROXY_SERVICE}" \
+    --project="${PROJECT_ID}" \
+    --region="${REGION}" \
+    --flatten="bindings[].members" \
+    --filter="bindings.role=roles/run.invoker AND bindings.members=allUsers" \
+    --format="value(bindings.members)" 2>"${ALLUSERS_STDERR_FILE}")"; then
+  rm -f "${ALLUSERS_STDERR_FILE}"
+else
+  # Fail closed, not open: an unreadable policy (a transient error, a
+  # permissions gap, ...) is not the same as "verified no allUsers
+  # binding", and treating it that way would silently defeat the whole
+  # point of this check.
+  err "Could not read the IAM policy for ${PROXY_SERVICE} to verify no allUsers invoker binding remains:"
+  if [[ -s "${ALLUSERS_STDERR_FILE}" ]]; then
+    cat "${ALLUSERS_STDERR_FILE}" >&2
+  fi
+  rm -f "${ALLUSERS_STDERR_FILE}"
+  exit 1
+fi
+if [[ -z "$ALLUSERS_INVOKER" ]]; then
+  echo "  No allUsers invoker binding present."
+else
+  warn "Found a legacy allUsers invoker binding on ${PROXY_SERVICE} (likely from a prior --allow-unauthenticated deploy); removing it."
+  if gcloud run services remove-iam-policy-binding "${PROXY_SERVICE}" \
+      --project="${PROJECT_ID}" \
+      --region="${REGION}" \
+      --member="allUsers" \
+      --role="roles/run.invoker" \
+      --condition=None \
+      --quiet 2>/dev/null; then
+    echo "  allUsers invoker binding removed."
+  else
+    err "Could not remove the allUsers invoker binding from ${PROXY_SERVICE}. Refusing to leave this service reachable by allUsers."
+    err "Verify and fix manually: gcloud run services get-iam-policy ${PROXY_SERVICE} --region=${REGION} --project=${PROJECT_ID}"
+    exit 1
+  fi
+fi
 
 # --- Bind IAP access for deployer ---
 info "Binding IAP access for deployer..."
@@ -1784,15 +1975,10 @@ section "Phase 5: Finalize"
 # --- Compute IAP audience ---
 # For Cloud Run services, the IAP audience uses the format:
 #   /projects/PROJECT_NUMBER/locations/REGION/services/SERVICE_NAME
+# PROJECT_NUMBER was already looked up in Phase 4 (needed there first, to
+# address the IAP service agent binding), so this just reuses it.
 info "Computing IAP audience..."
-PROJECT_NUMBER="$(gcloud projects describe "${PROJECT_ID}" \
-  --format="value(projectNumber)" 2>/dev/null)" || true
-if [[ -z "$PROJECT_NUMBER" ]]; then
-  err "Could not determine project number for ${PROJECT_ID}"
-  exit 1
-fi
 IAP_AUDIENCE="/projects/${PROJECT_NUMBER}/locations/${REGION}/services/${PROXY_SERVICE}"
-echo "  Project number: ${PROJECT_NUMBER}"
 echo "  IAP audience:   ${IAP_AUDIENCE}"
 
 # --- Update settings.yaml with proxy auth ---

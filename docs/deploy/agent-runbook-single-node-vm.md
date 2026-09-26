@@ -765,6 +765,7 @@ bash scripts/single-node-vm/deploy.sh --delete
 | Cloud NAT | `scion-hub-HUB_NAME-nat` |
 | Cloud Router | `scion-hub-HUB_NAME-router` |
 | Service account | `scion-hub-HUB_NAME@PROJECT_ID.iam.gserviceaccount.com` |
+| Cloud Run proxy service account | `scion-hub-HUB_NAME-proxy@PROJECT_ID.iam.gserviceaccount.com` (name truncated and hashed for long HUB_NAME values) |
 | IAP SSH firewall rule | `scion-hub-HUB_NAME-allow-iap-ssh` (scoped via `--target-tags` to instances tagged `scion-hub-HUB_NAME`; deleting the VM removes the tag along with it) |
 
 ### What is intentionally NOT deleted

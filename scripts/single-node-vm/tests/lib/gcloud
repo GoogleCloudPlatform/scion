@@ -44,7 +44,8 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON="${GCLOUD_STUB_PYTHON:-python3}"
 
 mkdir -p "${GCLOUD_STUB_STATE_DIR}/firewall-rules" "${GCLOUD_STUB_STATE_DIR}/instances" \
-  "${GCLOUD_STUB_STATE_DIR}/run-services" "${GCLOUD_STUB_STATE_DIR}/nats"
+  "${GCLOUD_STUB_STATE_DIR}/run-services" "${GCLOUD_STUB_STATE_DIR}/nats" \
+  "${GCLOUD_STUB_STATE_DIR}/service-accounts"
 
 printf '%s\n' "$*" >> "$GCLOUD_STUB_LOG"
 
@@ -123,6 +124,10 @@ case "${1:-} ${2:-} ${3:-} ${4:-}" in
   "beta run services update")
     require_project "$@"
     require_flag region "$@"
+    exit 0
+    ;;
+  "beta services identity create")
+    require_project "$@"
     exit 0
     ;;
 esac
@@ -354,7 +359,20 @@ print(json.dumps(out))
     # a create-mode wiring test has seen everything interesting on either
     # branch, whether or not a new VM actually gets created.
     touch "${GCLOUD_STUB_STATE_DIR}/vm-create-happened"
-    [[ -f "${GCLOUD_STUB_STATE_DIR}/instances/${name}" ]] && exit 0
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/instances/${name}" ]]; then
+      format="$(get_flag format "$@")" || format=""
+      if [[ "$format" == "get(networkInterfaces[0].networkIP)" ]]; then
+        # Phase 4's VM-internal-IP lookup. A sidecar file, not the
+        # instances/${name} fixture itself -- that file's content is the
+        # zone string, read verbatim by "compute instances list"'s
+        # --format=value(zone) case below. Defaults to a realistic
+        # RFC1918 internal IP so a test that doesn't care about the exact
+        # value still gets a real one back, matching this stub's usual
+        # "default to the realistic response" convention.
+        cat "${GCLOUD_STUB_STATE_DIR}/instances/${name}.internal-ip" 2>/dev/null || echo "10.128.0.5"
+      fi
+      exit 0
+    fi
     exit 1
     ;;
   "compute instances delete")
@@ -527,6 +545,20 @@ json.dump({'email': email, 'description': desc}, open(path, 'w', encoding='utf-8
   "iap web add-iam-policy-binding")
     require_project "$@"
     require_flag region "$@"
+    # The deployer-facing IAP binding: the first gcloud call *after* the
+    # entire allUsers-verification block (get-iam-policy, and the
+    # conditional remove-iam-policy-binding). A create-mode wiring test
+    # that needs to run deploy.sh past Phase 4's IAP hardening
+    # (GCLOUD_STUB_SSH_SUCCEEDS=true) polls for this sentinel to stop
+    # deploy.sh here, well before the (real, 60s) IAP-enforcement sleep
+    # later in Phase 4 -- and, just as importantly, *after* the allUsers
+    # block has had a chance to run to completion, so a test asserting on
+    # what that block did (or didn't do) isn't racing the harness's own
+    # kill. On the allUsers-hard-fail path, deploy.sh exits before ever
+    # reaching this call, so the sentinel is never touched there --
+    # that's the point: a test on that path sees the process end on its
+    # own instead.
+    touch "${GCLOUD_STUB_STATE_DIR}/phase4-iap-hardening-done"
     if [[ -f "${GCLOUD_STUB_STATE_DIR}/iap-web-add-binding-should-fail" ]]; then
       echo "gcloud-stub: simulated IAP web binding failure" >&2
       exit 1
@@ -560,6 +592,66 @@ json.dump({'email': email, 'description': desc}, open(path, 'w', encoding='utf-8
       exit 0
     fi
     echo "gcloud-stub: ERROR: (gcloud.run.services.describe) Cannot find service [${name}]" >&2
+    exit 1
+    ;;
+  "beta run deploy")
+    # The one-step IAP deploy (--no-allow-unauthenticated --iap). Same
+    # sentinel/state as the plain "run deploy" case above (this stub does
+    # not model any behavioral difference between the two beyond what a
+    # wiring test asserts directly off the logged invocation's flags).
+    require_project "$@"
+    require_flag region "$@"
+    name="${4:-}"
+    mkdir -p "${GCLOUD_STUB_STATE_DIR}/run-services"
+    touch "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.exists"
+    exit 0
+    ;;
+  "run services add-iam-policy-binding")
+    require_project "$@"
+    require_flag region "$@"
+    name="${4:-}"
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.add-binding-fail" ]]; then
+      echo "gcloud-stub: simulated failure adding an IAM binding to service [${name}]" >&2
+      exit 1
+    fi
+    exit 0
+    ;;
+  "run services get-iam-policy")
+    require_project "$@"
+    require_flag region "$@"
+    name="${4:-}"
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.get-policy-fail" ]]; then
+      echo "gcloud-stub: simulated failure reading IAM policy for service [${name}]" >&2
+      exit 1
+    fi
+    # Simplified relative to real gcloud's --flatten/--filter machinery:
+    # this stub only ever needs to answer the one shape deploy.sh asks
+    # for (is allUsers bound to roles/run.invoker), modeled as a
+    # name-scoped marker file rather than a real IAM policy document.
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.allusers-invoker" ]]; then
+      echo "allUsers"
+    fi
+    exit 0
+    ;;
+  "run services remove-iam-policy-binding")
+    require_project "$@"
+    require_flag region "$@"
+    name="${4:-}"
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.remove-binding-fail" ]]; then
+      echo "gcloud-stub: simulated failure removing an IAM binding from service [${name}]" >&2
+      exit 1
+    fi
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.allusers-invoker" ]]; then
+      rm -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.allusers-invoker"
+      exit 0
+    fi
+    # Real gcloud's remove-iam-policy-binding raises IamPolicyBindingNotFound
+    # (exit 1) when the given member+role isn't present in the policy --
+    # it is NOT a no-op success (iam_util.RemoveBindingFromIamPolicy in
+    # the Cloud SDK). deploy.sh only calls this after confirming presence
+    # via `run services get-iam-policy` above, so this path is a realistic
+    # "gone by the time we tried to remove it" race, not the common case.
+    echo "ERROR: (gcloud.run.services.remove-iam-policy-binding) Policy binding with the specified principal and role not found!" >&2
     exit 1
     ;;
   "compute ssh "*)

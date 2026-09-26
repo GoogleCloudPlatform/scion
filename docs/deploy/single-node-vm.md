@@ -147,8 +147,9 @@ The deploy script creates the following GCP resources:
 |----------|-------------|---------|
 | GCE VM | `scion-hub-<hub-name>` | Runs the Scion Hub binary via systemd |
 | Service account | `scion-hub-<hub-name>@<project>.iam.gserviceaccount.com` | VM identity with logging/monitoring roles |
+| Service account | `scion-hub-<hub-name>-proxy@<project>.iam.gserviceaccount.com` (truncated and hashed for long hub names) | Cloud Run proxy identity, with no project IAM roles |
 | Cloud Run service | `scion-hub-<hub-name>-iap-proxy` | IAP-authenticated reverse proxy to the VM |
-| IAM bindings | IAP `httpsResourceAccessor` for the deployer | Grants the deployer browser access through IAP |
+| IAM bindings | IAP `httpsResourceAccessor` for the deployer; `roles/run.invoker` for the IAP service agent on the Cloud Run proxy | Grants the deployer browser access through IAP; lets IAP itself invoke the proxy service |
 
 On the VM itself:
 

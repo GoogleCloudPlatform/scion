@@ -71,7 +71,8 @@ fresh_gcloud_state() {
   GCLOUD_STUB_STATE_DIR="$(mktemp -d)"
   GCLOUD_STUB_LOG="$(mktemp)"
   mkdir -p "${GCLOUD_STUB_STATE_DIR}/firewall-rules" "${GCLOUD_STUB_STATE_DIR}/instances" \
-    "${GCLOUD_STUB_STATE_DIR}/run-services" "${GCLOUD_STUB_STATE_DIR}/nats"
+    "${GCLOUD_STUB_STATE_DIR}/run-services" "${GCLOUD_STUB_STATE_DIR}/nats" \
+    "${GCLOUD_STUB_STATE_DIR}/service-accounts"
   export GCLOUD_STUB_STATE_DIR GCLOUD_STUB_LOG
 }
 
@@ -94,6 +95,14 @@ set_instance_delete_will_fail() {
 # not-found error from an ambiguous one (permission, API outage, etc.).
 set_instance_delete_error_text() {
   printf '%s' "$2" > "${GCLOUD_STUB_STATE_DIR}/instances/$1.delete-fail-text"
+}
+
+# set_instance_internal_ip NAME IP — overrides the internal IP `compute
+# instances describe --format=get(networkInterfaces[0].networkIP)`
+# reports for this instance. Without this, the stub returns a realistic
+# default ("10.128.0.5").
+set_instance_internal_ip() {
+  printf '%s' "$2" > "${GCLOUD_STUB_STATE_DIR}/instances/$1.internal-ip"
 }
 
 # set_instance_add_tags_will_fail NAME — the next (and every subsequent)
@@ -194,6 +203,41 @@ set_service_account_describe_error() {
 # add-iam-policy-binding` call fails.
 set_iap_web_binding_will_fail() {
   touch "${GCLOUD_STUB_STATE_DIR}/iap-web-add-binding-should-fail"
+}
+
+# set_run_service_add_binding_will_fail NAME — the next `run services
+# add-iam-policy-binding` call for this service fails.
+set_run_service_add_binding_will_fail() {
+  mkdir -p "${GCLOUD_STUB_STATE_DIR}/run-services"
+  touch "${GCLOUD_STUB_STATE_DIR}/run-services/$1.add-binding-fail"
+}
+
+# set_run_service_remove_binding_will_fail NAME — the next `run services
+# remove-iam-policy-binding` call for this service fails, with a
+# simulated error distinct from the stub's default "not found" response
+# (see seed_run_service_allusers_invoker below for modeling absence).
+set_run_service_remove_binding_will_fail() {
+  mkdir -p "${GCLOUD_STUB_STATE_DIR}/run-services"
+  touch "${GCLOUD_STUB_STATE_DIR}/run-services/$1.remove-binding-fail"
+}
+
+# seed_run_service_allusers_invoker NAME — simulates this service
+# currently having an allUsers roles/run.invoker binding (e.g. left by a
+# prior --allow-unauthenticated deploy). `run services get-iam-policy`
+# reports it present; `run services remove-iam-policy-binding` clears it
+# (unless set_run_service_remove_binding_will_fail is also set). Without
+# this, get-iam-policy reports no allUsers binding, matching a fresh
+# deploy or one where gcloud's own removal already ran.
+seed_run_service_allusers_invoker() {
+  mkdir -p "${GCLOUD_STUB_STATE_DIR}/run-services"
+  touch "${GCLOUD_STUB_STATE_DIR}/run-services/$1.allusers-invoker"
+}
+
+# set_run_service_get_policy_will_fail NAME — the next `run services
+# get-iam-policy` call for this service fails.
+set_run_service_get_policy_will_fail() {
+  mkdir -p "${GCLOUD_STUB_STATE_DIR}/run-services"
+  touch "${GCLOUD_STUB_STATE_DIR}/run-services/$1.get-policy-fail"
 }
 
 # seed_run_service_exists NAME — the next `run services describe` call
