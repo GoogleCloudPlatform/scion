@@ -138,6 +138,12 @@ scion resume <agent-name> --force
 
 Using `scion resume --force` on an agent in the `error` phase permits an in-place restart, passing the harness-specific resume/continue flag so that the interrupted conversation is preserved.
 
+In Hub-connected setups, the same recovery is available in the web UI as a **Resume (best effort)** action on an `error`-phase agent, which asks you to confirm first. It calls the agent's `start` action with `forceResume` set (see the [API reference](/scion/reference/api/#agents-apiv1agents)). The resume is best effort: if the harness session cannot be continued, the agent may still start fresh or fail again.
+
+#### Reincarnating an Agent
+
+To move an existing agent onto the current template, image, and harness config without losing its identity, use [`scion reincarnate`](/scion/reference/cli/#scion-reincarnate). It keeps the agent ID and slug, starts a new generation with a freshly resolved config, and hands it the task you supply with `--handoff-file`. Use `--dry-run` to preview the changes first. Reincarnation requires a Hub.
+
 ## Auto-Suspend of Stalled Agents
 
 To reclaim resources from agents that are no longer making progress, the Hub can
