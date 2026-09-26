@@ -17,6 +17,7 @@ package cmd
 import (
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -33,13 +34,39 @@ func resetFlagChanged(fs *pflag.FlagSet, names ...string) {
 	}
 }
 
+// assertNoLocalProjectFlag asserts that cmd does not register its own
+// --project flag distinct from the root's persistent --project/-g, and does
+// not inherit one from an intermediate parent's PersistentFlags either. It
+// forces cobra's mergePersistentFlags via InheritedFlags before looking, so
+// the check does not depend on some other test having already triggered
+// that merge: mergePersistentFlags copies both cmd's own PersistentFlags
+// and every parent's PersistentFlags into cmd's own FlagSet (see
+// Command.mergePersistentFlags / Command.updateParentsPflags in
+// spf13/cobra, which visits the nearest parent first), and cmd.Flags()
+// only reflects that once the merge has run. After forcing it, "project"
+// must resolve to a flag, and that flag must be the exact same object
+// (pointer identity) as the root's persistent --project — not a distinct
+// local flag on cmd itself or on an intermediate parent such as
+// projectServiceAccountsCmd. pflag's FlagSet.AddFlagSet only fills in names
+// not already present, so any of those three real overrides (the
+// regression this guards against) always keeps its own place and is never
+// silently replaced by the merge, regardless of run order.
+func assertNoLocalProjectFlag(t *testing.T, cmd *cobra.Command) {
+	t.Helper()
+	_ = cmd.InheritedFlags() // forces mergePersistentFlags
+	f := cmd.Flags().Lookup("project")
+	require.NotNil(t, f, "%s should inherit the root's --project/-g flag", cmd.Name())
+	assert.Same(t, rootCmd.PersistentFlags().Lookup("project"), f,
+		"%s must not register or inherit a --project flag distinct from the root's --project/-g", cmd.Name())
+}
+
 // TestSAAddCmd_GCPProjectFlagRenamed locks in the rename: the local --project
 // flag (GCP project ID) became --gcp-project so it no longer shadows the root
 // --project/-g scion-project selector. No alias for the old name is
 // registered: an alias called "project" would recreate the shadowing.
 func TestSAAddCmd_GCPProjectFlagRenamed(t *testing.T) {
 	assert.NotNil(t, saAddCmd.Flags().Lookup("gcp-project"), "add command should register --gcp-project")
-	assert.Nil(t, saAddCmd.Flags().Lookup("project"), "add command must not register a local --project flag")
+	assertNoLocalProjectFlag(t, saAddCmd)
 }
 
 // TestSAAddCmd_RootProjectAndGCPProjectFlagsParseIndependently is the

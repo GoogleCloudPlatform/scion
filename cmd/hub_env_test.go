@@ -318,7 +318,8 @@ func TestRunEnvList_BareProjectFlag(t *testing.T) {
 	// Set always leaves Changed permanently true, even after a later
 	// Set("project", "") resets the value, so mutating hubEnvListCmd's real
 	// flags here would leak Changed=true into any later test that inspects
-	// them (as TestResolveEnvScope_* does via a temp command of its own).
+	// them (TestRunEnvList_WithResults/_Empty/_JSON call
+	// runEnvList(hubEnvListCmd) and read Changed("project")).
 	testCmd := &cobra.Command{Use: "test"}
 	testCmd.Flags().StringVar(&envProjectScope, "project", "", "")
 	testCmd.Flags().Lookup("project").NoOptDefVal = scopeInferSentinel
