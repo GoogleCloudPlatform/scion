@@ -171,6 +171,15 @@ test_deploy_base_create_provisions_expected_resources() {
     "the Cloud NAT must be created before the VM"
   assert_true "$([[ -n "$fw_create_line" && -n "$vm_line" && "$fw_create_line" -lt "$vm_line" ]] && echo true || echo false)" \
     "the IAP SSH firewall rule must be created before the VM"
+
+  # `compute zones list` succeeding (i.e. actually receiving --project) is
+  # what keeps deploy.sh off its own "couldn't discover, fall back to
+  # REGION-b" path -- which a mutation dropping --project from that call
+  # would otherwise hide, since the fallback zone happens to equal what
+  # the stub returns on success anyway (see tests/lib/gcloud's
+  # `compute zones list` case).
+  assert_not_contains "$DEPLOY_LOG" "Could not discover zone dynamically" \
+    "zone discovery must succeed on its own, not fall back to a default"
 }
 
 # =====================================================================
@@ -261,4 +270,27 @@ test_deploy_base_create_then_delete_removes_everything() {
     "the router-exists marker should be cleared after teardown"
   assert_false "$([[ -f "${GCLOUD_STUB_STATE_DIR}/nats/${NAT_NAME}.exists" ]] && echo true)" \
     "the NAT's own exists marker should be cleared after teardown"
+  assert_false "$([[ -f "${GCLOUD_STUB_STATE_DIR}/service-accounts/${SA_EMAIL}.json" ]] && echo true)" \
+    "the service account fixture should be gone after teardown (proves the delete call actually carried --project, not just that it was logged)"
+  assert_contains "$DEPLOY_LOG" "Deleted: ${INSTANCE_NAME}-iap-proxy" \
+    "the summary must report the Cloud Run proxy service as deleted (proves the delete call actually carried --region, not just that it was logged)"
+}
+
+# =====================================================================
+# Stub self-test: require_flag itself (tests/lib/gcloud)
+# =====================================================================
+
+# A direct probe of the stub's own require_flag/require_project, not of
+# deploy.sh: a missing --region fails loudly (rc 1, "missing --region" on
+# stderr), and an explicitly empty one (--region=) is reported as "empty"
+# rather than silently treated the same as absent.
+test_gcloud_stub_require_flag_fails_loudly() {
+  fresh_gcloud_state
+  local out rc
+  out="$(gcloud compute routers describe some-router --project=demo-project 2>&1)"; rc=$?
+  assert_eq "1" "$rc" "a required flag missing entirely must exit non-zero"
+  assert_contains "$out" "missing --region" "the stub must say which flag was missing"
+  out="$(gcloud compute routers describe some-router --project=demo-project --region= 2>&1)"; rc=$?
+  assert_eq "1" "$rc" "an explicitly empty required flag must exit non-zero too"
+  assert_contains "$out" "empty --region" "the stub must distinguish empty from missing"
 }

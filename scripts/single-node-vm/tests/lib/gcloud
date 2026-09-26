@@ -25,9 +25,10 @@
 # --project and --zone are required on every call that takes them in the
 # real gcloud CLI; this stub asserts they're present (and non-empty)
 # everywhere deploy.sh is expected to pass them -- --project on every
-# create/list/delete/describe, --zone on every per-instance call -- and
-# fails loudly (not just "not found") if one is missing, rather than
-# silently falling back to an ambient default the way real gcloud would.
+# create/list/delete/describe, --zone on every per-instance call, plus
+# --region/--router on regional router/NAT/Cloud Run calls -- and fails
+# loudly (not just "not found") if one is missing, rather than silently
+# falling back to an ambient default the way real gcloud would.
 
 set -euo pipefail
 
@@ -48,7 +49,9 @@ mkdir -p "${GCLOUD_STUB_STATE_DIR}/firewall-rules" "${GCLOUD_STUB_STATE_DIR}/ins
 printf '%s\n' "$*" >> "$GCLOUD_STUB_LOG"
 
 # get_flag KEY "$@" — echoes the value of --KEY=VALUE among the remaining
-# args, or fails (no output) if absent.
+# args, or fails (no output) if absent. Matches only the --KEY=VALUE
+# form; a caller using the space-separated --KEY VALUE form real gcloud
+# also accepts would be reported as a missing flag, not read.
 get_flag() {
   local key="$1"
   shift
