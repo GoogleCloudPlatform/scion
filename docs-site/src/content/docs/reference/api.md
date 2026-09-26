@@ -22,11 +22,16 @@ Most endpoints require a `Bearer` token in the `Authorization` header.
 - `POST /`: Dispatch a new agent.
 - `GET /:id`: Get detailed agent state (phase, activity, detail).
 - `POST /:id/suspend`: Suspend a running agent, preserving its harness session for a later resume. Sets the phase to `suspended`. Requires a harness that supports session resume.
-- `POST /:id/start`, `POST /:id/restart`: Start/restart an agent. Starting a `suspended` agent resumes (continues) its harness session; starting a `stopped` or `error` agent runs a fresh session.
+- `POST /:id/start`, `POST /:id/restart`: Start/restart an agent. Starting a `suspended` agent resumes (continues) its harness session; starting a `stopped` or `error` agent runs a fresh session. To continue the interrupted session of an `error` agent instead, send `{"forceResume": true}` as the `start` body (best effort). `forceResume` has no effect in other phases.
+- `POST /:id/reincarnate`: Migrate the agent to a new generation with the same ID and slug and a freshly resolved config (see [`scion reincarnate`](/scion/reference/cli/#scion-reincarnate)). Body: `handoff` (optional text for the new generation's first task, max 256 KiB) and `dryRun`. Returns `202 Accepted` with the pending plan, or `200 OK` with the plan only for a dry run. The migration runs in the background. Also available as `POST /api/v1/projects/:projectId/agents/:agentIdOrSlug/reincarnate`.
 - `DELETE /:id`: Stop and remove an agent.
 - `GET /:id/logs`: Stream agent logs (WebSocket).
 
 There is no separate resume endpoint: resuming is the **start** action applied to a `suspended` agent. A `suspended` agent is also resumed automatically when a message is delivered to it with the `wake` option set.
+
+Agent creation and start are rejected with `429 Too Many Requests` (`quota_exceeded`) when the target runtime broker is at its `max_agents_per_broker` limit (see [Admin](#admin-apiv1admin)).
+
+Agent responses no longer include a `visibility` field. Access is determined by scope and grants only.
 
 Agent state uses a layered model:
 - **Phase**: Lifecycle stage (`created`, `provisioning`, `cloning`, `starting`, `running`, `stopping`, `stopped`), plus `suspended` (paused for resume) and `error` (the agent crashed — restartable).
@@ -34,6 +39,9 @@ Agent state uses a layered model:
 - **Detail**: Freeform context (tool name, message, task summary).
 
 #### Projects (`/api/v1/projects`)
+
+The legacy `/api/v1/groves` aliases have been removed. Requests to `/api/v1/groves` or any path under it now return `404 Not Found`; use `/api/v1/projects`.
+
 - `GET /`: List projects you have access to.
 - `POST /register`: Register or link a project repository.
 - `GET /:id`: Get project metadata and statistics.
@@ -96,6 +104,8 @@ The stored MIME type is derived from the file's content plus its extension; the 
 - `GET /entitlements/:id`: Inspect an Entitlement Binding.
 - `GET /gcp-quota`: View GCP quota status.
 - `GET /messaging/divergence`: View a read-only snapshot of migration divergence counters and metadata for the conversation model transition (requires `hub.diagnostics.read` permission).
+
+The Hub seeds a `max_agents_per_broker` limit (default **12**) that caps how many agents can be running on a single runtime broker. It is checked before an agent is created, and again when an agent is started, resumed, or restarted. Only running agents count: stop, suspend, and exit release an agent's slot. The Hub reconciles stale reservations at startup and hourly. To change the default for every broker, update the limit definition with `PUT /limits/:id`. To override it for one broker, add an entitlement binding with `POST /limits/:id/entitlements` whose `subjectType` is `system_default`, `scopeType` is `broker`, and `scopeId` is the broker ID.
 
 The Quota System API enforces fail-closed limits. Route guards strictly separate read and write permissions, preventing arbitrary modification of system limits.
 
