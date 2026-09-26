@@ -550,6 +550,244 @@ print('OK::%s' % tag)
   GKE_NODE_TAG="$disc_detail"
 }
 
+# hybrid_nfs_fsid HUB_NAME
+#
+# A stable, deterministic NFS export fsid for this hub: a UUID5 derived
+# from the hub name, so it's the same across every re-run without needing
+# a separate value generated once and recorded somewhere. nfs-utils
+# accepts a UUID for `fsid=` (the documented way to keep file handles
+# stable and avoid ESTALE) just as readily as a small integer, and a UUID
+# needs no coordination between hubs the way hand-assigned integers would.
+hybrid_nfs_fsid() {
+  local hub_name="$1"
+  "$PYTHON" -c "
+import uuid, sys
+print(uuid.uuid5(uuid.NAMESPACE_DNS, 'scion-hub-' + sys.argv[1] + '.nfs-export'))
+" "$hub_name"
+}
+
+# hybrid_nfs_export_line EXPORT_ROOT CIDR ANONUID ANONGID FSID
+#
+# Renders one `/etc/exports.d` line for the hybrid tier's NFS export:
+# `sync` (required so both Docker and GKE writers see consistent state),
+# `no_subtree_check`, `all_squash` to the given anonuid/anongid, `sec=sys`
+# (this tier's authorization is by source IP -- see the docs, not by NFS
+# auth), `mp` (mountpoint-only: knfsd itself refuses to serve EXPORT_ROOT
+# unless it's currently a mountpoint), and the given fsid. `mp` is the
+# export-side half of the fail-closed guarantee the caller's mount check
+# provides at provisioning time -- it also covers a mount that fails on a
+# later reboot, which a one-time provisioning check can't. There is no
+# separate squash group: anongid is the "scion" group's own gid, since
+# the Phase 2 leaf ACL grants that group access, and a different anongid
+# would make GKE's writes invisible to it. Pure string rendering -- no
+# gcloud or SSH calls -- so it's directly unit-testable; the caller is
+# responsible for actually reading the anonuid/anongid off the VM and
+# writing the result to a file.
+hybrid_nfs_export_line() {
+  local export_root="$1" cidr="$2" anonuid="$3" anongid="$4" fsid="$5"
+  echo "${export_root} ${cidr}(rw,sync,no_subtree_check,all_squash,anonuid=${anonuid},anongid=${anongid},sec=sys,mp,fsid=${fsid})"
+}
+
+# hybrid_nfs_export_script EXPORT_ROOT CIDR ANONUID ANONGID FSID HUB_NAME \
+#   IMAGE_PATH IMAGE_SIZE_GB
+#
+# IMAGE_PATH is a parameter (rather than reading the HYBRID_NFS_IMAGE_PATH
+# constant directly) purely so tests can point it at a throwaway temp
+# path when executing the rendered script for real -- the real caller
+# (deploy.sh) always passes $HYBRID_NFS_IMAGE_PATH.
+#
+# Renders the remote script that idempotently:
+#   - creates the backing image file (IMAGE_PATH) at IMAGE_SIZE_GB
+#      gigabytes with fallocate (which actually reserves the space,
+#      unlike a sparse truncate, and fails clearly -- removing the
+#      partial file -- if the disk can't hold it) and formats it ext4,
+#      but ONLY the first time -- an existing image file is never
+#      re-created or re-mkfs'd, since doing so would destroy whatever
+#      the export already holds;
+#   - adds an /etc/fstab entry loop-mounting that image at EXPORT_ROOT,
+#      with BOTH x-systemd.before=nfs-server.service (orders the mount
+#      before the NFS server unit) AND x-systemd.required-by=
+#      nfs-server.service (makes it an actual dependency, not just an
+#      ordering) -- before= alone only orders the units; on a failed
+#      mount it would let nfs-server start anyway and export whatever's
+#      really at EXPORT_ROOT (the boot disk's root filesystem), exactly
+#      the exposure this dedicated filesystem exists to close. Because
+#      required-by= is set, systemd-fstab-generator does not also
+#      attach this mount to local-fs.target (systemd.mount(5)), so a
+#      failed mount blocks only nfs-server, never boot; nofail is kept
+#      anyway, defensively, to keep that same "boot never blocks on
+#      this mount" property true even if required-by= is ever removed
+#      from this line. The fsck pass is 0: systemd-fstab-generator only
+#      ever schedules fsck for device paths, so a nonzero pass on this
+#      loop-mounted regular file is a no-op that just logs a boot-time
+#      warning.
+#      Then mounts it if it isn't already, and verifies (findmnt +
+#      losetup) that whatever ends up mounted at EXPORT_ROOT is
+#      actually the loop device backing IMAGE_PATH, not a stray tmpfs
+#      or bind mount left over from something else;
+#   - fails closed -- before writing or activating anything below --
+#      if EXPORT_ROOT is not actually a mountpoint after that: this is
+#      the deploy-time half of the guarantee; the exports line's own
+#      `mp` option (see hybrid_nfs_export_line) is the export-side half,
+#      and additionally covers a mount that fails on a later reboot,
+#      which this one-time check can't. A
+#      /etc/systemd/system/scion-hub.service.d/10-scion-shared.conf
+#      drop-in adds RequiresMountsFor=EXPORT_ROOT to scion-hub.service
+#      (tier-on only; the base service install is unaffected when the
+#      tier is off), so the hub itself -- which creates shared-dir
+#      paths under EXPORT_ROOT for the co-located Docker broker -- can
+#      never start against an unmounted export and write to the boot
+#      disk's root filesystem instead, the same split this whole layout
+#      exists to prevent on the NFS side;
+#   - sets ownership/mode on the now-mounted export root (scion:scion,
+#      mode 2755 so the squash uid can't write it), installs
+#      nfs-kernel-server if it isn't already, disables NFSv2/v3/4.0 and
+#      UDP via /etc/nfs.conf.d (this tier is NFSv4.1+/TCP-only; the PV
+#      pins nfsvers=4.1) and masks rpcbind (unneeded once v2/v3
+#      are off), verifying the socket mask took,
+#      writes this hub's own file under /etc/exports.d/ (using
+#      hybrid_nfs_export_line for the rendered line, so the two stay in
+#      sync), re-exports, and enables the server under its canonical
+#      unit name (nfs-server; nfs-kernel-server is only the Debian/
+#      Ubuntu package name). A restart -- not just enable --now, which
+#      would be a no-op against an already-running unit -- only happens
+#      when it's actually needed: either this is the first time
+#      /etc/nfs.conf.d/scion-hub.conf has this exact content (apt's
+#      postinst already started the server with the stock v2/v3/UDP-
+#      enabled config before this script's write, so the very first
+#      run must restart to pick up v4.1/TCP-only), or nfs-server isn't
+#      confirmed already active, or /proc/fs/nfsd/versions shows the
+#      running kernel still has v3 or v4.0 enabled (a version the
+#      config write alone can't retroactively disable for an already-
+#      running server). Every later re-run with unchanged content, a
+#      confirmed-active server, and v3/v4.0 both confirmed off leaves
+#      it running untouched, avoiding an NFSv4 grace-period stall
+#      (during which GKE clients can't reclaim or open new state) on
+#      every redeploy. Fails closed toward restarting: an inconclusive
+#      "is it active" or "which versions are on" check is treated the
+#      same as "needs a restart".
+# Always rewrites the exports file and re-exports, which is how the
+# export picks up a changed CIDR on re-run with no separate drift
+# detection needed. Pure string rendering -- no gcloud or SSH calls --
+# so it's directly unit-testable; the caller is responsible for actually
+# running the result over SSH, after the squash identity script above
+# has already run.
+hybrid_nfs_export_script() {
+  local export_root="$1" cidr="$2" anonuid="$3" anongid="$4" fsid="$5" hub_name="$6" \
+    image_path="$7" image_size_gb="$8" fstab_path="${9:-/etc/fstab}"
+  local export_line image_dir
+  export_line="$(hybrid_nfs_export_line "$export_root" "$cidr" "$anonuid" "$anongid" "$fsid")"
+  image_dir="$(dirname "$image_path")"
+  local fstab_line="${image_path} ${export_root} ext4 loop,nofail,x-systemd.before=nfs-server.service,x-systemd.required-by=nfs-server.service 0 0"
+  cat <<SCRIPT
+set -euo pipefail
+sudo mkdir -p ${image_dir}
+# Refuse before touching anything -- no fallocate, no mkfs, no fstab
+# write -- if EXPORT_ROOT is already in use by a layout this script
+# doesn't manage: a pre-existing mount from a different source (for
+# example a manually provisioned image at another path), or an existing
+# fstab line for EXPORT_ROOT that isn't exactly this one. Checking this
+# first means a manually created layout is refused outright instead of
+# silently getting a second image allocated and a second fstab line
+# appended alongside it, only to fail later at the mount-source check.
+if mountpoint -q ${export_root}; then
+  existing_src="\$(findmnt -n -o SOURCE --mountpoint ${export_root} 2>/dev/null || true)"
+  existing_back="\$(losetup -n -O BACK-FILE "\$existing_src" 2>/dev/null || true)"
+  if [ "\$existing_back" != "${image_path}" ]; then
+    echo "${export_root} is already mounted (source: \${existing_src:-<unknown>}, backing file: \${existing_back:-<none>}), not from the image this script manages (${image_path}); refusing to continue on top of an existing layout it doesn't recognize." >&2
+    exit 1
+  fi
+fi
+if awk -v mp="${export_root}" -v exact="${fstab_line}" '
+  /^[[:space:]]*#/ { next }
+  \$0 == exact { next }
+  { m2 = \$2; sub(/\/\$/, "", m2); if (m2 == mp) found=1 }
+  END { exit !found }
+' ${fstab_path} 2>/dev/null; then
+  echo "${fstab_path} already has a line for ${export_root} that does not match the expected entry; refusing to continue. Expected: ${fstab_line}" >&2
+  exit 1
+fi
+if grep -qxF "${fstab_line}" ${fstab_path} 2>/dev/null; then
+  : # fstab already has exactly the expected line; nothing to add.
+else
+  echo "${fstab_line}" | sudo tee -a ${fstab_path} > /dev/null
+  sudo systemctl daemon-reload
+fi
+if [ ! -e ${image_path} ]; then
+  sudo fallocate -l ${image_size_gb}G ${image_path} || { sudo rm -f ${image_path}; echo "could not reserve ${image_size_gb}G for ${image_path} (insufficient disk space?); refusing to continue" >&2; exit 1; }
+  sudo mkfs.ext4 -F -q ${image_path}
+fi
+sudo mkdir -p ${export_root}
+if ! mountpoint -q ${export_root}; then
+  sudo mount ${export_root}
+fi
+if ! mountpoint -q ${export_root}; then
+  echo "${export_root} is not a mountpoint after attempting to mount ${image_path}; refusing to write or activate the NFS export on the boot disk's root filesystem instead." >&2
+  exit 1
+fi
+mount_src="\$(findmnt -n -o SOURCE --mountpoint ${export_root})"
+mount_back="\$(losetup -n -O BACK-FILE "\$mount_src" 2>/dev/null || true)"
+if [ "\$mount_back" != "${image_path}" ]; then
+  echo "${export_root} is mounted, but not from the loop device backing ${image_path} (found: \${mount_back:-<none>}); refusing to write or activate the NFS export against the wrong filesystem" >&2
+  exit 1
+fi
+sudo chown scion:scion ${export_root}
+sudo chmod 2755 ${export_root}
+sudo install -d -m 0755 /etc/systemd/system/scion-hub.service.d
+cat <<HUBDROPIN | sudo tee /etc/systemd/system/scion-hub.service.d/10-scion-shared.conf > /dev/null
+[Unit]
+RequiresMountsFor=${export_root}
+HUBDROPIN
+sudo systemctl daemon-reload
+sudo install -d -m 0755 /etc/exports.d
+if ! dpkg -s nfs-kernel-server >/dev/null 2>&1; then
+  sudo apt-get update -y
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nfs-kernel-server
+fi
+sudo install -d -m 0755 /etc/nfs.conf.d
+NFS_CONF_CONTENT="\$(cat <<'NFSCONF'
+[nfsd]
+vers2=n
+vers3=n
+vers4.0=n
+udp=n
+NFSCONF
+)"
+NFS_CONF_EXISTING="\$(cat /etc/nfs.conf.d/scion-hub.conf 2>/dev/null || true)"
+NFS_CONF_NEEDS_RESTART=true
+if [ "\$NFS_CONF_EXISTING" = "\$NFS_CONF_CONTENT" ]; then
+  NFS_CONF_NEEDS_RESTART=false
+fi
+echo "\$NFS_CONF_CONTENT" | sudo tee /etc/nfs.conf.d/scion-hub.conf > /dev/null
+sudo systemctl mask --now rpcbind.service rpcbind.socket
+[ "\$(systemctl is-enabled rpcbind.socket 2>/dev/null || true)" = masked ] || { echo "rpcbind.socket did not mask; refusing to continue" >&2; exit 1; }
+echo '${export_line}' | sudo tee /etc/exports.d/scion-hub-${hub_name}.exports > /dev/null
+sudo exportfs -ra
+sudo systemctl enable nfs-server
+# Even with an unchanged config and an already-active server, the kernel's
+# own enabled-version set is what the config drop-in actually controls --
+# an interrupted first run can write the drop-in, die before ever
+# restarting, and leave nfs-server serving whatever it started with
+# (v2/v3/v4.0 all still on). Restart unless the kernel confirms v3 and
+# v4.0 are both off; an unreadable versions file is treated the same as
+# "not confirmed", not as "fine".
+NFS_VERSIONS_OK=false
+if NFS_VERSIONS_CONTENT="\$(cat /proc/fs/nfsd/versions 2>/dev/null)"; then
+  case " \$NFS_VERSIONS_CONTENT " in
+    *" -3 "*)
+      case " \$NFS_VERSIONS_CONTENT " in
+        *" -4.0 "*) NFS_VERSIONS_OK=true ;;
+      esac
+      ;;
+  esac
+fi
+if [ "\$NFS_CONF_NEEDS_RESTART" = "true" ] || ! systemctl is-active --quiet nfs-server || [ "\$NFS_VERSIONS_OK" != "true" ]; then
+  sudo systemctl restart nfs-server
+fi
+echo 'NFS export configured.'
+SCRIPT
+}
+
 # hybrid_cloud_run_label_args SERVICE_NAME PROJECT_ID REGION HUB_NAME
 #
 # Echoes the --labels=... argument to pass to `gcloud beta run deploy`, or
