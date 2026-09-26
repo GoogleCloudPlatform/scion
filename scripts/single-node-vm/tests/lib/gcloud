@@ -178,10 +178,40 @@ case "${1:-} ${2:-} ${3:-}" in
     name="${4:-}"
     f="${GCLOUD_STUB_STATE_DIR}/firewall-rules/${name}.json"
     if [[ -f "$f" ]]; then
-      cat "$f"
+      format="$(get_flag format "$@")" || format=""
+      if [[ "$format" == "value(targetTags)" ]]; then
+        # Real gcloud's value() transform joins a repeated field with ";".
+        # Prints nothing (not "[]" or similar) when the list is empty, same
+        # as a real unscoped rule.
+        "$PYTHON" -c "
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(';'.join(d.get('targetTags') or []))
+" "$f"
+      else
+        cat "$f"
+      fi
       exit 0
     fi
     exit 1
+    ;;
+  "compute firewall-rules update")
+    require_project "$@"
+    name="${4:-}"
+    f="${GCLOUD_STUB_STATE_DIR}/firewall-rules/${name}.json"
+    if [[ ! -f "$f" ]]; then
+      echo "gcloud-stub: firewall rule ${name} not found" >&2
+      exit 1
+    fi
+    target_tags="$(get_flag target-tags "$@")" || target_tags=""
+    "$PYTHON" -c "
+import json, sys
+path, tags = sys.argv[1], sys.argv[2]
+d = json.load(open(path))
+d['targetTags'] = [t for t in tags.split(',') if t]
+json.dump(d, open(path, 'w'))
+" "$f" "$target_tags"
+    exit 0
     ;;
   "compute firewall-rules create")
     require_project "$@"
