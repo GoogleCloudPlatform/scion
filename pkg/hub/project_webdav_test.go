@@ -15,10 +15,24 @@
 package hub
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+func TestProjectSyncStatusResponse_JSON_NoLegacyGroveID(t *testing.T) {
+	data, err := json.Marshal(ProjectSyncStatusResponse{ProjectID: "p1"})
+	require.NoError(t, err)
+
+	var m map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &m))
+
+	assert.Equal(t, "p1", m["projectId"])
+	_, hasGroveID := m["groveId"]
+	assert.False(t, hasGroveID)
+}
 
 func TestIsExcluded(t *testing.T) {
 	tests := []struct {

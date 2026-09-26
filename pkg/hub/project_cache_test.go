@@ -203,6 +203,28 @@ func TestProjectCacheStatus_CacheExists(t *testing.T) {
 	assert.True(t, resp.Cached)
 }
 
+func TestProjectCacheResponses_JSON_NoLegacyGroveID(t *testing.T) {
+	t.Run("ProjectCacheRefreshResponse", func(t *testing.T) {
+		data, err := json.Marshal(ProjectCacheRefreshResponse{ProjectID: "p1"})
+		require.NoError(t, err)
+		var m map[string]interface{}
+		require.NoError(t, json.Unmarshal(data, &m))
+		assert.Equal(t, "p1", m["projectId"])
+		_, hasGroveID := m["groveId"]
+		assert.False(t, hasGroveID)
+	})
+
+	t.Run("ProjectCacheStatusResponse", func(t *testing.T) {
+		data, err := json.Marshal(ProjectCacheStatusResponse{ProjectID: "p1"})
+		require.NoError(t, err)
+		var m map[string]interface{}
+		require.NoError(t, json.Unmarshal(data, &m))
+		assert.Equal(t, "p1", m["projectId"])
+		_, hasGroveID := m["groveId"]
+		assert.False(t, hasGroveID)
+	})
+}
+
 func TestProjectCacheStatus_MethodNotAllowed(t *testing.T) {
 	srv, s := testServer(t)
 	project, _ := createTestLinkedProject(t, srv, s, "Cache Status Method", "https://github.com/org/method.git")

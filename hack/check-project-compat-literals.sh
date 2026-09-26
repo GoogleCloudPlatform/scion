@@ -105,6 +105,9 @@ allowed_paths=(
   # delivered there.
   "^pkg/hub/events_test.go$"
   "^pkg/hub/fs_safety_test.go$"
+  # Asserts TokenResponse no longer emits a groveId key alongside projectId.
+  # The literal is the point of the negative test.
+  "^pkg/hub/handlers_auth_test.go$"
   "^pkg/hub/handlers_broker_inbound_test.go$"
   "^pkg/hub/handlers_envsecret_authz_test.go$"
   # Asserts groveId is no longer a recognized notification filter alias: an
@@ -118,6 +121,10 @@ allowed_paths=(
   "^pkg/hub/harness_config_scope_validation_test.go$"
   "^pkg/hub/heartbeat_legacy_test.go$"
   "^pkg/hub/httpdispatcher_test.go$"
+  # Asserts the project cache/sync-status responses no longer emit a groveId
+  # key alongside projectId. The literal is the point of the negative tests.
+  "^pkg/hub/project_cache_test.go$"
+  "^pkg/hub/project_webdav_test.go$"
   # Regression test for SSE subject authorization default-deny: proves a
   # non-member is denied on the legacy grove.* subjects and other unknown
   # namespaces.
@@ -130,7 +137,6 @@ allowed_paths=(
   "^pkg/hub/web_test.go$"
   "^pkg/hubclient/agents_test.go$"
   "^pkg/hubclient/client_test.go$"
-  "^pkg/hubclient/messages_test.go$"
   "^pkg/hubclient/notifications_test.go$"
   "^pkg/hubclient/projects_test.go$"
   # Asserts CreateAgentRequest, CreateSubscriptionRequest,
@@ -201,22 +207,15 @@ allowed_paths=(
   "^pkg/config/project_marker.go$"
   "^pkg/config/settings_v1.go$"
   "^pkg/hub/fs_safety.go$"
-  "^pkg/hub/handlers_auth.go$"
   "^pkg/hub/handlers_projects_core.go$"
   "^pkg/hub/handlers_runtime_brokers.go$"
   "^pkg/hub/httpdispatcher.go$"
-  "^pkg/hub/project_cache.go$"
-  "^pkg/hub/project_webdav.go$"
-  "^pkg/hub/response_types.go$"
   "^pkg/hub/system_handlers.go$"
   "^pkg/hubclient/agents.go$"
-  "^pkg/hubclient/messages.go$"
   "^pkg/hubclient/notifications.go$"
-  "^pkg/hubclient/projects.go$"
   "^pkg/hubclient/runtime_brokers.go$"
   "^pkg/hubclient/templates.go$"
   "^pkg/hubclient/tokens.go$"
-  "^pkg/hubclient/types.go$"
   "^pkg/hubsync/sync.go$"
   "^pkg/projectcompat/.*\\.go$"
   "^pkg/runtime/cloudrun_sandbox_runtime.go$"

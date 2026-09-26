@@ -2674,6 +2674,45 @@ func TestRegisterProjectRequestCanonicalIDOnly(t *testing.T) {
 	assert.Empty(t, legacyIgnored.ID)
 }
 
+func TestListProjectsResponse_JSON_NoLegacyKeys(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var m map[string]interface{}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&m))
+
+	if _, ok := m["projects"]; !ok {
+		t.Errorf("missing 'projects' field")
+	}
+	if _, ok := m["groves"]; ok {
+		t.Errorf("legacy 'groves' key present in response, want absent: %v", m["groves"])
+	}
+}
+
+func TestRegisterProjectResponse_JSON_NoLegacyKeys(t *testing.T) {
+	srv, _ := testServer(t)
+
+	body := map[string]interface{}{
+		"name":      "No Legacy Keys",
+		"gitRemote": "https://github.com/test/no-legacy-keys.git",
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/register", body)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var m map[string]interface{}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&m))
+
+	if _, ok := m["project"]; !ok {
+		t.Errorf("missing 'project' field")
+	}
+	if _, ok := m["grove"]; ok {
+		t.Errorf("legacy 'grove' key present in response, want absent: %v", m["grove"])
+	}
+}
+
 func TestProjectRegisterAcceptsCanonicalJSONID(t *testing.T) {
 	srv, _ := testServer(t)
 

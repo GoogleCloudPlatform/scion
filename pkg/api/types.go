@@ -717,35 +717,6 @@ type ResolvedSecret struct {
 	Ref    string `json:"ref,omitempty"` // External secret reference (e.g., "gcpsm:projects/123/secrets/name")
 }
 
-// UnmarshalJSON implements custom unmarshaling to support legacy "grove" source.
-func (s *ResolvedSecret) UnmarshalJSON(data []byte) error {
-	type Alias ResolvedSecret
-	aux := (*Alias)(s)
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if s.Source == "grove" {
-		s.Source = "project"
-	}
-	return nil
-}
-
-// MarshalJSON implements custom marshaling to support legacy "grove" source.
-func (s ResolvedSecret) MarshalJSON() ([]byte, error) {
-	type Alias ResolvedSecret
-	var grove string
-	if s.Source == "project" {
-		grove = "grove"
-	}
-	return json.Marshal(&struct {
-		Alias
-		Grove string `json:"grove,omitempty"`
-	}{
-		Alias: Alias(s),
-		Grove: grove,
-	})
-}
-
 // EnvKind classifies the origin and delivery channel of an environment
 // variable in the dispatch request. Used by the env classification system
 // (#127, P3a) to determine how each value should be delivered to the
