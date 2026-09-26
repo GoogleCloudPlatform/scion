@@ -260,10 +260,6 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 		scopeID = req.ProjectID
 	}
 
-	// Normalize a legacy scope name to its canonical form before it drives
-	// authorization or is persisted on the record (ptone/scion#1977).
-	req.Scope = projectcompat.CanonicalResourceScope(req.Scope)
-
 	// SECURITY-GATE: require template.create permission before any mutation.
 	// Scope-aware: project-scoped requests authorize against the project parent
 	// so that project-level role bindings (owner/admin/member) grant access.
@@ -936,16 +932,17 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		scopeID = req.ProjectID
 	}
 
-	// Authorize: check destination scope for ActionCreate. Legacy scope
-	// names are normalized here — in the one place shared by this switch,
-	// the clone record below, and the storage path resolution further
-	// down — so all three always agree on which scope a clone targets
-	// (ptone/scion#1977).
+	// Authorize: check destination scope for ActionCreate. destScope is the
+	// single value shared by this switch, the clone record below, and the
+	// storage path resolution further down, so all three always agree on
+	// which scope a clone targets (ptone/scion#1977). isValidTemplateScope
+	// above already rejected anything other than "", "global", "project" or
+	// "user" — including removed legacy scope names — so no further
+	// normalization is needed here.
 	destScope := req.Scope
 	if destScope == "" {
 		destScope = store.TemplateScopeProject
 	}
-	destScope = projectcompat.CanonicalResourceScope(destScope)
 	switch destScope {
 	case store.TemplateScopeGlobal:
 		userIdent := GetUserIdentityFromContext(ctx)

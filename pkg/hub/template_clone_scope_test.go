@@ -30,25 +30,34 @@ import (
 )
 
 // ============================================================================
-// ptone/scion#1977: template clone destination-scope validation and legacy
-// scope-name normalization.
+// ptone/scion#1977: template clone destination-scope validation.
 //
 // handleTemplateClone's destination-scope switch had no default case, so a
-// scope value it did not recognize (including the legacy "grove" name for
-// what is now the "project" scope) fell through the switch without ever
-// being authorized. The clone record itself was then built from the raw,
-// unnormalized request scope rather than the value the switch validated, so
-// a legacy-named clone could be stored under a scope value that the storage
-// path resolver (storage.ResourceStoragePath) still treats as an alias for
-// "project". This suite pins both fixes: an explicit default-403, mirroring
-// handleHarnessConfigClone, and normalizing the legacy scope name via
-// pkg/projectcompat before authorization, storage path resolution, and the
-// record lookup/create all happen — so they can never resolve a clone
-// request to different targets.
+// scope value it did not recognize fell through the switch without ever
+// being authorized. This suite originally pinned that fix together with
+// normalizing the legacy "grove" scope name to "project" so legacy callers
+// kept working.
+//
+// GCP#1968 (upstream 9385d07b, "stop accepting legacy grove request input")
+// superseded the normalization half: createTemplateV2 and handleTemplateClone
+// now call isValidTemplateScope up front and reject anything other than "",
+// "global", "project" or "user" with 400 — including "grove" — before
+// authorization or normalization ever runs. Accepting "grove" again would
+// reintroduce the legacy input GCP#1968 removed, so this suite now pins
+// rejection instead of normalization for create and clone. Only
+// listTemplatesV2 (a read-only filter, not a write path) still normalizes
+// "grove" so a caller can find templates stored under the canonical
+// "project" scope before the legacy name is retired entirely; see
+// TestListTemplatesV2_LegacyScopeName_FindsProjectTemplates below.
+//
+// The default case in handleTemplateClone's switch (mirroring
+// handleHarnessConfigClone) is kept as a defense-in-depth safety net, but it
+// is no longer reachable through the HTTP API: isValidTemplateScope already
+// rejects every value the switch does not otherwise handle.
 // ============================================================================
 
 func TestTemplateClone_UnsupportedScope_Rejected(t *testing.T) {
-	cases := []string{"bogus", "GROVE", "Project", "arbitrary", "global "}
+	cases := []string{"bogus", "GROVE", "Project", "arbitrary", "global ", "grove"}
 	for _, scope := range cases {
 		t.Run(scope, func(t *testing.T) {
 			srv, s, alice, _, project := setupTemplateAuthzTest(t)
@@ -58,9 +67,9 @@ func TestTemplateClone_UnsupportedScope_Rejected(t *testing.T) {
 				Name:  "unsupported-scope-clone-" + scope,
 				Scope: scope,
 			})
-			assert.Equal(t, http.StatusForbidden, rec.Code,
-				"an unrecognized destination scope must be rejected; got: %s", rec.Body.String())
-			assert.Contains(t, rec.Body.String(), "Cloning into this resource scope is not supported")
+			assert.Equal(t, http.StatusBadRequest, rec.Code,
+				"an unrecognized destination scope, including the legacy \"grove\" name, must be rejected; got: %s", rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "invalid scope")
 		})
 	}
 }
@@ -92,60 +101,57 @@ func TestTemplateClone_UnsupportedScope_MatchesHarnessConfig(t *testing.T) {
 	assert.Equal(t, hcRec.Body.String(), tplRec.Body.String(), "template and harness-config clone must reject an unknown scope with the same message")
 }
 
-// TestTemplateClone_LegacyScopeName_AuthorizedAsItsCanonicalTarget asserts
-// that the legacy "grove" scope name is normalized to "project" before
-// authorization runs: a caller without create rights on the destination
-// project is denied exactly as they would be under the canonical "project"
-// scope name, and an authorized project member succeeds and gets back a
-// record stored under the canonical scope name.
-func TestTemplateClone_LegacyScopeName_AuthorizedAsItsCanonicalTarget(t *testing.T) {
+// TestTemplateClone_LegacyScopeName_RejectedBeforeAuthorization asserts that
+// the legacy "grove" scope name is rejected by isValidTemplateScope before
+// authorization ever runs: an outsider with no rights on the destination
+// project and a member with full create rights on it both get the same 400
+// rejection, rather than the member succeeding. Accepting "grove" for one of
+// them (normalizing it to "project") would reintroduce the legacy input
+// GCP#1968 removed.
+func TestTemplateClone_LegacyScopeName_RejectedBeforeAuthorization(t *testing.T) {
 	srv, s, alice, _, project := setupTemplateAuthzTest(t)
 	tpl := createAuthzTestTemplate(t, s, "legacy-scope-source", store.TemplateScopeGlobal, "", alice.ID)
 
 	outsider := createNamedTestUser(t, s, "legacy-scope-outsider", store.UserRoleMember)
 	ensureHubMembership(context.Background(), s, outsider.ID)
 
-	deniedRec := doRequestAsUser(t, srv, outsider, http.MethodPost, "/api/v1/templates/"+tpl.ID+"/clone", CloneTemplateRequest{
-		Name:    "legacy-scope-denied-clone",
+	outsiderRec := doRequestAsUser(t, srv, outsider, http.MethodPost, "/api/v1/templates/"+tpl.ID+"/clone", CloneTemplateRequest{
+		Name:    "legacy-scope-outsider-clone",
 		Scope:   "grove",
 		ScopeID: project.ID,
 	})
-	assert.Equal(t, http.StatusForbidden, deniedRec.Code,
-		"a caller without create rights on the target project must be denied under the legacy scope name too; got: %s", deniedRec.Body.String())
+	assert.Equal(t, http.StatusBadRequest, outsiderRec.Code,
+		"the legacy scope name must be rejected regardless of the caller's rights; got: %s", outsiderRec.Body.String())
+	assert.Contains(t, outsiderRec.Body.String(), "invalid scope")
 
 	member := createNamedTestUser(t, s, "legacy-scope-member", store.UserRoleMember)
 	ensureHubMembership(context.Background(), s, member.ID)
 	createTestUserWithProjectRole(t, s, member.ID, member.Email, project.ID, store.ProjectRoleMember)
 
-	allowedRec := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/templates/"+tpl.ID+"/clone", CloneTemplateRequest{
-		Name:    "legacy-scope-allowed-clone",
+	memberRec := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/templates/"+tpl.ID+"/clone", CloneTemplateRequest{
+		Name:    "legacy-scope-member-clone",
 		Scope:   "grove",
 		ScopeID: project.ID,
 	})
-	require.Equal(t, http.StatusCreated, allowedRec.Code, "a project member must still be able to clone using the legacy scope name; got: %s", allowedRec.Body.String())
-
-	var clone store.Template
-	require.NoError(t, json.NewDecoder(allowedRec.Body).Decode(&clone))
-	assert.Equal(t, store.TemplateScopeProject, clone.Scope,
-		"the legacy scope name must be normalized to its canonical form before the record is stored")
-	assert.Equal(t, project.ID, clone.ScopeID)
+	assert.Equal(t, http.StatusBadRequest, memberRec.Code,
+		"a project member must not be able to clone using the legacy scope name; got: %s", memberRec.Body.String())
+	assert.Contains(t, memberRec.Body.String(), "invalid scope")
 }
 
-// TestTemplateClone_LegacyScopeName_CollisionDetected is the normalization
-// counterpart to TestTemplateClone_CollisionLeavesExistingTemplateIntact: a
-// clone request naming the legacy scope must resolve to the same (scope,
-// slug, scopeId) target as a request naming the canonical scope, so an
-// existing template at that target is found and reported as a conflict
-// rather than missed by the lookup.
-func TestTemplateClone_LegacyScopeName_CollisionDetected(t *testing.T) {
+// TestTemplateClone_LegacyScopeName_RejectedBeforeCollisionCheck asserts that
+// a clone request naming the legacy "grove" scope is rejected before the
+// destination (scope, slug, scopeId) lookup ever runs, even when a template
+// already occupies the canonical "project" target the legacy name would have
+// resolved to. It must fail the same way regardless of what already exists
+// at that target, and must leave the existing template untouched.
+func TestTemplateClone_LegacyScopeName_RejectedBeforeCollisionCheck(t *testing.T) {
 	srv, s, alice, _, project := setupTemplateAuthzTest(t)
 	ctx := context.Background()
 	stor := newCloneMockStorage("test-bucket")
 	srv.SetStorage(stor)
 
-	// The existing template is stored canonically ("project"), at the same
-	// physical path storage.TemplateStoragePath computes for the legacy
-	// "grove" alias — this is the path the two must agree on.
+	// Stored canonically ("project"), at the same physical path
+	// storage.TemplateStoragePath would compute for the legacy "grove" name.
 	existingPath := storage.TemplateStoragePath(srv.HubID(), store.TemplateScopeProject, project.ID, "legacy-collide")
 	existingContent := []byte("scion-agent-config: existing\n")
 	stor.seedObject(existingPath+"/scion-agent.yaml", existingContent)
@@ -179,23 +185,24 @@ func TestTemplateClone_LegacyScopeName_CollisionDetected(t *testing.T) {
 		Scope:   "grove",
 		ScopeID: project.ID,
 	})
-	assert.Equal(t, http.StatusConflict, rec.Code,
-		"a legacy-scope clone that targets an already-occupied (scope, slug) pair must conflict, not silently succeed; got: %s", rec.Body.String())
+	assert.Equal(t, http.StatusBadRequest, rec.Code,
+		"the legacy scope name must be rejected before the collision lookup runs, not surfaced as a conflict; got: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "invalid scope")
 
 	reloaded, err := s.GetTemplate(ctx, existing.ID)
 	require.NoError(t, err)
-	assert.Equal(t, existing.ContentHash, reloaded.ContentHash, "the existing template's record must be unaffected by a colliding legacy-scope clone attempt")
+	assert.Equal(t, existing.ContentHash, reloaded.ContentHash, "the existing template's record must be unaffected by a rejected legacy-scope clone attempt")
 	assert.Equal(t, existingContent, stor.content[existingPath+"/scion-agent.yaml"],
-		"the existing template's file content must survive a colliding legacy-scope clone attempt")
+		"the existing template's file content must survive a rejected legacy-scope clone attempt")
 }
 
-// TestCreateTemplateV2_LegacyScopeName_GetsProjectParent verifies that
-// createTemplateV2 (the generic POST /api/v1/templates handler) also
-// normalizes the legacy "grove" scope name via
-// projectcompat.CanonicalResourceScope, so a create request naming it
-// authorizes against the project parent and the stored record ends up
-// scoped canonically, matching handleTemplateClone's normalization.
-func TestCreateTemplateV2_LegacyScopeName_GetsProjectParent(t *testing.T) {
+// TestCreateTemplateV2_LegacyScopeName_Rejected verifies that createTemplateV2
+// (the generic POST /api/v1/templates handler) rejects the legacy "grove"
+// scope name with 400 via isValidTemplateScope, the same as any other
+// unrecognized scope, even for a caller with full create rights on the named
+// project. See the package comment above TestTemplateClone_UnsupportedScope_Rejected
+// for why this suite pins rejection rather than normalization here.
+func TestCreateTemplateV2_LegacyScopeName_Rejected(t *testing.T) {
 	srv, s, _, _, project := setupTemplateAuthzTest(t)
 
 	member := createNamedTestUser(t, s, "create-legacy-scope-member", store.UserRoleMember)
@@ -208,14 +215,9 @@ func TestCreateTemplateV2_LegacyScopeName_GetsProjectParent(t *testing.T) {
 		Scope:   "grove",
 		ScopeID: project.ID,
 	})
-	require.Equal(t, http.StatusCreated, rec.Code,
-		"a project member must be able to create using the legacy scope name; got: %s", rec.Body.String())
-
-	var resp CreateTemplateResponse
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-	assert.Equal(t, store.TemplateScopeProject, resp.Template.Scope,
-		"the legacy scope name must be normalized to its canonical form before the record is stored")
-	assert.Equal(t, project.ID, resp.Template.ScopeID)
+	assert.Equal(t, http.StatusBadRequest, rec.Code,
+		"a create request using the legacy scope name must be rejected even for a caller with full project rights; got: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "invalid scope")
 }
 
 // TestListTemplatesV2_LegacyScopeName_FindsProjectTemplates verifies that
