@@ -43,6 +43,11 @@ tell the user what is missing.
 | bash | `bash --version` | Version string (any version) |
 | python3 | `python3 --version` | Version string (3.6+) |
 | curl | `curl --version` | Version string (any version) |
+| jq | `jq --version` | Version string (any version) |
+
+`jq` is required for the Cloud Router/Cloud NAT reuse check (see below) --
+`deploy.sh` checks for it up front in Phase 1, before any prompts or API
+calls, and fails immediately rather than guessing if it's missing.
 
 The config file is JSON, parsed with Python's built-in `json` module — no
 extra install is required. If `python3` is not on `PATH`, or you need a
@@ -550,8 +555,50 @@ gcloud iap web add-iam-policy-binding \
 | Image build fails with `muse-code` error | Build script tried to build all images including unsupported ones | Verify the deploy script builds only `core-base`, `scion-base`, and `scion-antigravity`. If running manually, use `--target` to select individual images. |
 | SSH connection fails to VM | IAP tunnel access not granted or firewall rule missing | Verify IAP tunnel role: `gcloud projects get-iam-policy PROJECT_ID --flatten="bindings[].members" --filter="bindings.role:roles/iap.tunnelResourceAccessor" --format="value(bindings.members)"`. Verify firewall rule exists: `gcloud compute firewall-rules describe scion-hub-HUB_NAME-allow-iap-ssh --project=PROJECT_ID`. |
 | `403 Forbidden` accessing the hub URL | User missing IAP access binding | Grant access: `gcloud iap web add-iam-policy-binding --resource-type=cloud-run --service=scion-hub-HUB_NAME-iap-proxy --region=REGION --project=PROJECT_ID --member=user:USER_EMAIL --role=roles/iap.httpsResourceAccessor` |
-| VM has no outbound internet | Cloud NAT not created or misconfigured | Verify router and NAT exist: `gcloud compute routers nats describe scion-hub-HUB_NAME-nat --router=scion-hub-HUB_NAME-router --region=REGION --project=PROJECT_ID` |
+| VM has no outbound internet | Cloud NAT not created or misconfigured | Verify router and NAT exist: `gcloud compute routers nats describe scion-hub-HUB_NAME-nat --router=scion-hub-HUB_NAME-router --region=REGION --project=PROJECT_ID`. If deploy.sh logged "Reusing Cloud NAT" instead, check the *reused* router/NAT it named instead — see "Cloud NAT reuse" below. |
+| `deploy.sh` fails immediately in Phase 1 with "jq is required" | `jq` is not installed | Install `jq` and re-run. Checked up front, before any prompts or API calls. |
+| `deploy.sh` fails at "Checking for an existing Cloud NAT..." before creating any resources | The Cloud Router/NAT config in the region could not be listed or parsed | Check the deployer has `roles/compute.viewer` (or broader) on the project — the actual `gcloud`/`jq` error prints just above this message. This check intentionally fails closed rather than guessing — see "Cloud NAT reuse" below. |
 | IAP auth fails outright, or shows an unexpected consent screen | Deployer account is in a different GCP organization than the target project, or the project is not in a GCP organization at all | See "Cross-org IAP" below. `deploy.sh` prints a warning during Phase 2 for both cases it can detect (no-org is a certain warning; cross-domain is a heuristic) — either check is skipped silently if ancestry/org metadata can't be read, so trust the symptom over the absence of the warning. |
+
+### Cloud NAT reuse
+
+A Cloud NAT gateway in an `ALL_SUBNETWORKS_*` mode (all subnets' full IP
+ranges, or all subnets' primary ranges) cannot coexist with **any** other NAT
+gateway on the same network+region — not just another all-subnets one. GCP
+rejects creating one while another gateway already exists there, regardless
+of what that other gateway covers. `deploy.sh` checks for this before
+creating the service account, IAM bindings, or its own router/NAT (Phase 2,
+right after the Phase 1 `jq` check), and handles it one of two ways:
+
+- **Some other router's NAT already covers our VM's subnet** (`default`) —
+  either `ALL_SUBNETWORKS_*` mode, or a `LIST_OF_SUBNETWORKS` entry that
+  explicitly forwards `default`'s primary range. `deploy.sh` reuses it
+  instead of creating a duplicate, and logs which router and NAT provide
+  egress:
+
+  ```
+  ==> Found an existing Cloud NAT that already covers this network/region; reusing it instead of creating our own.
+    Reusing Cloud Router: some-other-router
+    Reusing Cloud NAT:    some-other-nat
+  ```
+
+- **Some other router has a NAT that does *not* cover `default`** — an
+  all-subnets NAT still can't be created alongside it, so `deploy.sh`
+  creates its own NAT scoped to just subnet `default`
+  (`--nat-custom-subnet-ip-ranges=default`), which coexists with the
+  existing gateway:
+
+  ```
+  ==> A Cloud NAT gateway already exists on this network/region but doesn't cover subnet 'default'; scoping our own NAT to that subnet only (an all-subnets NAT can't coexist with another gateway).
+  ```
+
+A reused NAT/router is owned by whatever created it, not by this deploy: if
+that owner later deletes or reconfigures it, the hub VM can silently lose
+egress with no warning from `deploy.sh`. `--delete` never deletes a reused
+NAT/router — it only ever targets the `scion-hub-HUB_NAME-router` /
+`scion-hub-HUB_NAME-nat` names deploy.sh itself would have created, so a
+reused resource owned by something else is left alone (its delete call
+simply reports "not found").
 
 ### Cross-org IAP: custom OAuth client required
 
