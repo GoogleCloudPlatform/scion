@@ -146,3 +146,30 @@ func TestScopedEnvVarByKeyLifecycle(t *testing.T) {
 		})
 	}
 }
+
+// TestScopedEnvVarByKey_ReservedTarget_Rejected verifies that the
+// project/broker-scoped env var PUT path enforces the same reserved-target
+// check as the user-scoped path (setEnvVar).
+func TestScopedEnvVarByKey_ReservedTarget_Rejected(t *testing.T) {
+	srv, s := testServer(t)
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
+
+	project := &store.Project{
+		ID:      tid("scoped-env-reserved-project"),
+		Name:    "Scoped Env Reserved Project",
+		Slug:    "scoped-env-reserved-project",
+		OwnerID: DevUserID,
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	if err := s.CreateProject(context.Background(), project); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/env/SCION_METADATA_MODE", SetEnvVarRequest{
+		Value: "test-value",
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("PUT (reserved key) status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
