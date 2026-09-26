@@ -593,6 +593,14 @@ handles it one of two ways:
   ==> A Cloud NAT gateway already exists on this network/region but doesn't cover subnet 'default'; scoping our own NAT to that subnet only (an all-subnets NAT can't coexist with another gateway).
   ```
 
+A Private NAT (used for NCC/hybrid connectivity, not internet egress) is
+never reused, even if it technically covers `default` -- it can't provide
+the VM's internet egress. It still counts as "some other router has a NAT"
+above, though: GCP's exclusivity rule for an all-subnets NAT isn't
+qualified by NAT type, so `deploy.sh` falls back to the scoped create in
+this case too, rather than attempting (and having GCP reject) an
+all-subnets NAT next to it.
+
 A reused NAT/router is owned by whatever created it, not by this deploy: if
 that owner later deletes or reconfigures it, the hub VM can silently lose
 egress with no warning from `deploy.sh`. `--delete` never deletes a reused

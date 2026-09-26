@@ -175,6 +175,15 @@ run_deploy_create_sync() {
     done
     if kill -0 "$pid" 2>/dev/null; then
       kill -TERM -- "-${pid}" 2>/dev/null || true
+      # N6: mirror `timeout -k 2`'s SIGKILL escalation -- give it a short
+      # moment to exit on SIGTERM (deploy.sh has no TERM trap, so this is
+      # normally immediate), then force it if it's somehow still around.
+      local kill_wait_ms=0
+      while kill -0 -- "-${pid}" 2>/dev/null && [[ "$kill_wait_ms" -lt 2000 ]]; do
+        sleep 0.1
+        kill_wait_ms=$((kill_wait_ms + 100))
+      done
+      kill -KILL -- "-${pid}" 2>/dev/null || true
       wait "$pid" 2>/dev/null
       rc=124
     else
@@ -185,7 +194,11 @@ run_deploy_create_sync() {
     rm -f "$log_file"
   fi
 
-  if [[ "$rc" -eq 124 ]]; then
+  # N5: GNU `timeout -k` reports 137 (128+SIGKILL), not 124, when SIGTERM
+  # alone didn't stop the command and it had to escalate to SIGKILL.
+  # Either way the meaning to this helper's callers is the same: deploy.sh
+  # did not exit within the bound.
+  if [[ "$rc" -eq 124 || "$rc" -eq 137 ]]; then
     DEPLOY_RC=124
     DEPLOY_LOG="${DEPLOY_LOG}
 FATAL: run_deploy_create_sync: deploy.sh did not exit within ${RUN_SYNC_TIMEOUT_SECS}s. Every caller of this helper expects a fast fail-closed exit (a NAT-detection error, before Phase 2) -- a timeout means deploy.sh instead fell through into VM creation and the real SSH-readiness retry loop. Reporting this as a fast failure instead of hanging the suite; check deploy.sh's NAT-detection error handling for a regression that falls open instead of failing closed."
@@ -330,12 +343,17 @@ test_nat_reuse_covering_nat_on_second_router_is_reused() {
     "must pick the NAT that actually covers us, not just the first one listed"
 }
 
-# N1: a Private NAT (NCC/hybrid connectivity, not internet egress) must
-# never be treated as covering our subnet, and must not even count as "a
-# gateway exists" for the scoped-create decision -- a Private and a
-# PUBLIC NAT can coexist on the same subnet, so its presence must not
-# change what deploy.sh creates at all.
-test_nat_reuse_private_nat_is_ignored_entirely() {
+# N1/RR2: a Private NAT (NCC/hybrid connectivity, not internet egress)
+# must never be treated as covering our subnet -- but it DOES still count
+# as a foreign gateway. GCP's ALL_SUBNETWORKS exclusivity rule isn't
+# qualified by NAT type, so an all-subnets create is rejected next to a
+# foreign Private NAT exactly like next to any other foreign gateway
+# (round-3 review, RR2: excluding it from "foreign" too would let
+# deploy.sh attempt that same rejected all-subnets create -- the #2003
+# failure again, after the SA/IAM already exist). So a foreign Private NAT
+# routes to the scoped create, the same as any other non-covering foreign
+# gateway.
+test_nat_reuse_private_nat_is_not_coverage_but_scopes_create() {
   fresh_gcloud_state
   seed_routers_list "[$(_router_json "other-team-router" "other-team-nat" "default" "$REGION" "ALL_SUBNETWORKS_ALL_IP_RANGES" "" "PRIVATE")]"
   run_deploy_create "$(nat_reuse_config_json "$HUB")"
@@ -347,8 +365,10 @@ test_nat_reuse_private_nat_is_ignored_entirely() {
     "a Private NAT must never be reused for internet egress"
   assert_eq "1" "$(echo "$log" | grep -c "^compute routers create ${ROUTER_NAME} " || true)" \
     "our own router must still be created; a Private NAT elsewhere doesn't block us"
-  assert_contains "$nat_line" "--nat-all-subnet-ip-ranges" \
-    "a Private NAT must not even count as 'a gateway exists' -- our own NAT stays all-subnets, not scoped"
+  assert_contains "$nat_line" "--nat-custom-subnet-ip-ranges=default" \
+    "a Private NAT still counts as 'a gateway exists' -- our own NAT must be scoped, not all-subnets"
+  assert_not_contains "$nat_line" "--nat-all-subnet-ip-ranges" \
+    "an all-subnets NAT can't coexist with the foreign Private NAT either, so it must not be requested"
 }
 
 # =====================================================================

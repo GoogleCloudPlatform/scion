@@ -831,18 +831,27 @@ fi
 # (re-checked here with endswith -- gcloud's `--filter` ':' operator is a
 # word/substring match, not equality, so e.g. a router on network
 # "default-vpc" would otherwise slip through). A NAT with type PRIVATE
-# (Private NAT, for NCC/hybrid connectivity -- not internet egress) is
-# skipped entirely: it can't provide the VM's internet egress no matter
-# what it covers, so it must not count as reuse coverage, nor as a
-# "foreign gateway exists" reason to scope our own create -- a Private NAT
-# and a PUBLIC one can coexist on the same subnet. "covers" is true when
-# the (PUBLIC) NAT already provides egress for subnet "default":
-# ALL_SUBNETWORKS_* mode (all ranges, or all primary ranges), or a
-# LIST_OF_SUBNETWORKS entry for "default" whose sourceIpRangesToNat
-# actually includes the primary range (ALL_IP_RANGES or PRIMARY_IP_RANGE --
-# an entry that only forwards secondary ranges does NOT give the VM's
+# (Private NAT, for NCC/hybrid connectivity -- not internet egress) never
+# counts as coverage: it can't provide the VM's internet egress no matter
+# what it covers. It DOES still count as a foreign gateway, though --
+# GCP's ALL_SUBNETWORKS exclusivity rule ("there should not be any other
+# Router.Nat section in any Router for this network in this region") is
+# not qualified by type, so an all-subnets create is rejected next to a
+# foreign Private NAT exactly like next to any other foreign gateway.
+# Excluding Private NATs from "foreign" as well as "covers" would let
+# deploy.sh attempt that same rejected all-subnets create -- the #2003
+# failure again, after the SA/IAM already exist. So a foreign Private NAT
+# still routes to the scoped (--nat-custom-subnet-ip-ranges=default)
+# create below, same as any other non-covering foreign gateway; only our
+# own router's NAT type is irrelevant either way, since "foreign" is
+# false for it regardless. "covers" is true when the NAT is PUBLIC (the
+# default when `type` is absent) AND already provides egress for subnet
+# "default": ALL_SUBNETWORKS_* mode (all ranges, or all primary ranges),
+# or a LIST_OF_SUBNETWORKS entry for "default" whose sourceIpRangesToNat
+# actually includes the primary range (ALL_IP_RANGES or PRIMARY_IP_RANGE
+# -- an entry that only forwards secondary ranges does NOT give the VM's
 # primary IP egress). "foreign" is true when the router isn't the one
-# we'd create ourselves.
+# we'd create ourselves, regardless of NAT type.
 NAT_ROWS="$(echo "$ROUTERS_JSON" | jq -r \
   --arg region "$REGION" \
   --arg own "$ROUTER_NAME" '
@@ -852,7 +861,7 @@ NAT_ROWS="$(echo "$ROUTERS_JSON" | jq -r \
   | . as $r
   | ($r.nats // [])[]
   | . as $n
-  | select(($n.type // "PUBLIC") == "PUBLIC")
+  | (($n.type // "PUBLIC") == "PUBLIC") as $public
   | ( ($n.subnetworks // [])
       | any(
           (.name // "" | endswith("/subnetworks/default"))
@@ -861,7 +870,7 @@ NAT_ROWS="$(echo "$ROUTERS_JSON" | jq -r \
         )
     ) as $listCovers
   | ( ($n.sourceSubnetworkIpRangesToNat // "") | startswith("ALL_SUBNETWORKS_") ) as $allCovers
-  | [$r.name, $n.name, (($allCovers or $listCovers) | tostring), (($r.name != $own) | tostring)]
+  | [$r.name, $n.name, (($public and ($allCovers or $listCovers)) | tostring), (($r.name != $own) | tostring)]
   | @tsv
 ')" || {
   err "Could not parse Cloud Router/NAT config in ${REGION} (see jq error above). Aborting before creating any resources."
