@@ -84,6 +84,41 @@ const (
 	CloseReasonInternalError      = "internal_error"
 )
 
+// Close reasons emitted by the broker's attach-end classifier
+// (pkg/runtimebroker classifyAttachEnd).
+const (
+	// CloseReasonRuntimeStreamDropped (4503): the tmux session is still
+	// alive, but the exec transport between the broker and the container
+	// ended abnormally (killed process, docker/podman exec transport drop,
+	// k8s apiserver stream error).
+	CloseReasonRuntimeStreamDropped = "runtime_stream_dropped"
+	// CloseReasonSessionEnded (4410): the tmux session is gone but the
+	// container/pod that hosted it still resolves.
+	CloseReasonSessionEnded = "session_ended"
+	// CloseReasonContainerRemoved (4410): the tmux session is gone and the
+	// agent's container/pod no longer resolves either.
+	CloseReasonContainerRemoved = "container_removed"
+	// CloseReasonSessionNotReady (4503): the attach exec never started
+	// because the tmux session was not ready yet (e.g. the agent is still
+	// starting up), and the container itself still resolves. Retry.
+	CloseReasonSessionNotReady = "session_not_ready"
+	// CloseReasonLookupUnavailable (4503): the broker could not determine
+	// whether the agent's container still exists because the runtime's list
+	// call itself failed. This must never be reported as 4404 or 4410.
+	CloseReasonLookupUnavailable = "lookup_unavailable"
+	// CloseReasonProbeFailed (1011): the post-exit tmux has-session probe
+	// itself failed or timed out (runtime unreachable), so the broker cannot
+	// tell whether the session survived. Retry.
+	CloseReasonProbeFailed = "probe_failed"
+	// CloseReasonAgentNotFound (4404): the broker could not resolve the
+	// agent to a container at stream-open time.
+	CloseReasonAgentNotFound = "agent_not_found"
+	// CloseReasonRuntimeUnavailable (4503): the broker's agent lookup itself
+	// failed (the container runtime could not be listed) at stream-open
+	// time. Retry.
+	CloseReasonRuntimeUnavailable = "runtime_unavailable"
+)
+
 // MaxCloseReasonBytes is the largest reason RFC 6455 allows in a close frame
 // (125-byte control payload minus the 2-byte code).
 const MaxCloseReasonBytes = 123

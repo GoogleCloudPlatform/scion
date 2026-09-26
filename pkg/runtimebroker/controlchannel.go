@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -822,20 +823,28 @@ func (c *ControlChannelClient) handlePTYStream(handler *StreamHandler, cols, row
 	// Look up the container ID for this agent
 	if c.agentLookup == nil {
 		c.log.Error("PTY stream failed: no agent lookup configured", "slug", handler.slug)
-		_ = c.CloseStream(handler.streamID, "agent lookup not configured", 500)
+		_ = c.CloseStream(handler.streamID, wsprotocol.CloseReasonInternalError, wsprotocol.ClosePTYInternalError)
 		return
 	}
 
 	result, err := c.agentLookup.LookupAgent(c.ctx, handler.slug, handler.projectID)
 	if err != nil {
+		if errors.Is(err, ErrAgentListUnavailable) {
+			// The container runtime itself failed to answer (e.g. an
+			// intermittent `docker ps` error), not "no such agent". Send a
+			// retriable code so the client re-attaches instead of giving up.
+			c.log.Warn("PTY stream failed: agent lookup unavailable", "slug", handler.slug, "error", err)
+			_ = c.CloseStream(handler.streamID, wsprotocol.CloseReasonRuntimeUnavailable, wsprotocol.ClosePTYUpstreamUnavailable)
+			return
+		}
 		c.log.Error("PTY stream failed: agent lookup error", "slug", handler.slug, "error", err)
-		_ = c.CloseStream(handler.streamID, fmt.Sprintf("agent lookup failed: %v", err), 404)
+		_ = c.CloseStream(handler.streamID, wsprotocol.CloseReasonAgentNotFound, wsprotocol.ClosePTYAgentNotFound)
 		return
 	}
 
 	if result.ContainerID == "" {
 		c.log.Error("PTY stream failed: container not found", "slug", handler.slug)
-		_ = c.CloseStream(handler.streamID, "container not found", 404)
+		_ = c.CloseStream(handler.streamID, wsprotocol.CloseReasonAgentNotFound, wsprotocol.ClosePTYAgentNotFound)
 		return
 	}
 
@@ -847,13 +856,12 @@ func (c *ControlChannelClient) handlePTYStream(handler *StreamHandler, cols, row
 		runtimeCmd = c.agentLookup.RuntimeCommand()
 	}
 
-	// Start the actual PTY session
+	// Start the actual PTY session. handlePTYStreamWithAgent classifies why
+	// it ended and reports the close itself (or skips reporting entirely if
+	// the Hub already closed the stream).
 	c.handlePTYStreamWithAgent(handler, cols, rows, result.ContainerID, runtimeCmd, result.ExecUser, result.Namespace, result.K8sConfig, result.K8sClientset)
 
 	c.log.Info("PTY stream ended via control channel", "slug", handler.slug)
-
-	// Notify the Hub that the stream is closed so it can close the client websocket
-	_ = c.CloseStream(handler.streamID, "session ended", 0)
 }
 
 // SendStreamData sends data on a stream.

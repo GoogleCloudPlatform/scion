@@ -16,6 +16,7 @@ package runtimebroker
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
@@ -644,6 +645,128 @@ func TestLookupContainerID_DifferentProjectNotMatchedViaFallback(t *testing.T) {
 	}
 }
 
+// TestLookupAgent_AuxiliaryListErrorSurfacesUnavailable proves that an
+// auxiliary runtime's List failure (e.g. an intermittent `docker ps` or
+// apiserver error) must not be indistinguishable from "no such agent". The
+// default manager finds nothing
+// (a real signal the agent isn't there via the default runtime), but the
+// only auxiliary runtime consulted couldn't answer at all — so the overall
+// result must be ErrAgentListUnavailable (which the broker's PTY classifier
+// and stream-open path turn into 4503, retry), never a plain "not found"
+// (which would become a terminal 4404).
+func TestLookupAgent_AuxiliaryListErrorSurfacesUnavailable(t *testing.T) {
+	defaultMgr := &filteringMockManager{}
+	defaultMgr.agents = []api.AgentInfo{}
+
+	auxMgr := &mockManager{listErr: errors.New("docker ps: connection refused")}
+
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	auxRt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
+	srv := New(DefaultServerConfig(), defaultMgr, rt)
+
+	srv.auxiliaryRuntimesMu.Lock()
+	srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{Runtime: auxRt, Manager: auxMgr}
+	srv.auxiliaryRuntimesMu.Unlock()
+
+	_, err := srv.LookupAgent(context.Background(), "ghost", "")
+	if err == nil {
+		t.Fatal("expected an error when the auxiliary runtime's List call fails")
+	}
+	if !errors.Is(err, ErrAgentListUnavailable) {
+		t.Errorf("expected ErrAgentListUnavailable, got: %v", err)
+	}
+}
+
+// scopedThenFailManager succeeds (empty, no error) for a project-scoped List
+// filter and fails for the unscoped fallback filter (`{"scion.name": slug}`,
+// used by LookupAgent's backward-compatibility retry). This lets a test drive
+// LookupAgent's second, project-fallback code path specifically — a manager
+// that fails on every filter would already trip the first, project-scoped
+// loop, which sets listUnavailable itself and passes even if the fallback
+// loop's own check is broken (that's exactly the gap the reviewer's mutation
+// found: removing the fallback loop's `listUnavailable = true` left every
+// TestLookupAgent* test green).
+type scopedThenFailManager struct {
+	mockManager
+	failErr error
+}
+
+func (m *scopedThenFailManager) List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+	if filter[projectcompat.LabelProjectID] != "" {
+		return nil, nil
+	}
+	return nil, m.failErr
+}
+
+// TestLookupAgent_AuxiliaryListErrorInProjectFallbackSurfacesUnavailable is
+// the same regression as TestLookupAgent_AuxiliaryListErrorSurfacesUnavailable,
+// but isolated to the project-scoped backward-compatibility fallback path
+// (the second aux loop in LookupAgent, `server.go` around line 1277): the
+// auxiliary runtime here succeeds (empty) for the first, project-scoped aux
+// loop, so only the second loop's List failure can be the source of the
+// ErrAgentListUnavailable this test requires.
+func TestLookupAgent_AuxiliaryListErrorInProjectFallbackSurfacesUnavailable(t *testing.T) {
+	defaultMgr := &filteringMockManager{}
+	defaultMgr.agents = []api.AgentInfo{}
+
+	auxMgr := &scopedThenFailManager{failErr: errors.New("apiserver: context deadline exceeded")}
+
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	auxRt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
+	srv := New(DefaultServerConfig(), defaultMgr, rt)
+
+	srv.auxiliaryRuntimesMu.Lock()
+	srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{Runtime: auxRt, Manager: auxMgr}
+	srv.auxiliaryRuntimesMu.Unlock()
+
+	_, err := srv.LookupAgent(context.Background(), "ghost", "some-project")
+	if err == nil {
+		t.Fatal("expected an error when the fallback aux runtime's List call fails")
+	}
+	if !errors.Is(err, ErrAgentListUnavailable) {
+		t.Errorf("expected ErrAgentListUnavailable, got: %v", err)
+	}
+}
+
+// TestLookupAgent_PrimaryManagerFallbackListErrorSurfacesUnavailable covers
+// the primary (non-auxiliary) manager's own fallback List call: LookupAgent's
+// backward-compatibility retry (`agents, err = s.manager.List(ctx,
+// fallbackFilter)`) previously dropped a non-nil err on the floor and fell
+// through to "not found" instead of propagating it. No auxiliary runtimes are
+// registered, isolating this specific call.
+func TestLookupAgent_PrimaryManagerFallbackListErrorSurfacesUnavailable(t *testing.T) {
+	mgr := &scopedThenFailManager{failErr: errors.New("list: connection reset")}
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	_, err := srv.LookupAgent(context.Background(), "ghost", "some-project")
+	if err == nil {
+		t.Fatal("expected an error when the primary manager's fallback List call fails")
+	}
+	if !errors.Is(err, ErrAgentListUnavailable) {
+		t.Errorf("expected ErrAgentListUnavailable, got: %v", err)
+	}
+}
+
+// TestLookupAgent_NoAuxiliaryRuntimesStillReportsNotFound guards against
+// over-correction: when nothing errors and nothing matches, LookupAgent must
+// still report a plain not-found (which the broker maps to a terminal 4404),
+// not ErrAgentListUnavailable.
+func TestLookupAgent_NoAuxiliaryRuntimesStillReportsNotFound(t *testing.T) {
+	mgr := &filteringMockManager{}
+	mgr.agents = []api.AgentInfo{}
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	_, err := srv.LookupAgent(context.Background(), "ghost", "")
+	if err == nil {
+		t.Fatal("expected an error for a nonexistent agent")
+	}
+	if errors.Is(err, ErrAgentListUnavailable) {
+		t.Error("a genuine not-found must not be reported as ErrAgentListUnavailable")
+	}
+}
+
 func TestLookupAgent_ProjectFallbackForLegacyContainers(t *testing.T) {
 	mgr := &filteringMockManager{}
 	mgr.agents = []api.AgentInfo{
@@ -663,5 +786,82 @@ func TestLookupAgent_ProjectFallbackForLegacyContainers(t *testing.T) {
 	}
 	if result.ContainerID != "legacy-container" {
 		t.Errorf("expected legacy-container, got %s", result.ContainerID)
+	}
+}
+
+// countingListManager wraps filteringMockManager to count how many times
+// List is called, so a test can prove an aux loop stopped after its first
+// match instead of unconditionally consulting every registered runtime.
+type countingListManager struct {
+	filteringMockManager
+	listCalls int
+}
+
+func (m *countingListManager) List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+	m.listCalls++
+	return m.filteringMockManager.List(ctx, filter)
+}
+
+// TestLookupAgent_AuxiliaryLoopStopsAfterFirstMatch covers the auxiliary-
+// runtime loop's early exit: once one auxiliary runtime's List call matches
+// the slug, the loop must not go on to call List on any other registered
+// runtime. Map iteration order is random, so both auxiliary runtimes here
+// are set up to match — whichever one iteration reaches first should be the
+// only one queried, regardless of which that turns out to be.
+func TestLookupAgent_AuxiliaryLoopStopsAfterFirstMatch(t *testing.T) {
+	defaultMgr := &filteringMockManager{}
+	defaultMgr.agents = []api.AgentInfo{}
+
+	auxA := &countingListManager{}
+	auxA.agents = []api.AgentInfo{{
+		ContainerID: "aux-a-container",
+		Name:        "twoaux",
+		Labels:      map[string]string{"scion.name": "twoaux"},
+	}}
+	auxB := &countingListManager{}
+	auxB.agents = []api.AgentInfo{{
+		ContainerID: "aux-b-container",
+		Name:        "twoaux",
+		Labels:      map[string]string{"scion.name": "twoaux"},
+	}}
+
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	auxRtA := &runtime.MockRuntime{NameFunc: func() string { return "runtime-a" }}
+	auxRtB := &runtime.MockRuntime{NameFunc: func() string { return "runtime-b" }}
+	srv := New(DefaultServerConfig(), defaultMgr, rt)
+
+	srv.auxiliaryRuntimesMu.Lock()
+	srv.auxiliaryRuntimes["runtime-a"] = auxiliaryRuntime{Runtime: auxRtA, Manager: auxA}
+	srv.auxiliaryRuntimes["runtime-b"] = auxiliaryRuntime{Runtime: auxRtB, Manager: auxB}
+	srv.auxiliaryRuntimesMu.Unlock()
+
+	result, err := srv.LookupAgent(context.Background(), "twoaux", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	totalCalls := auxA.listCalls + auxB.listCalls
+	if totalCalls != 1 {
+		t.Fatalf("expected exactly one auxiliary List call once a match is found, got %d (auxA=%d, auxB=%d)",
+			totalCalls, auxA.listCalls, auxB.listCalls)
+	}
+
+	// Whichever aux was actually queried must be the one the result came
+	// from, and the other must never have been touched.
+	switch {
+	case auxA.listCalls == 1:
+		if result.ContainerID != "aux-a-container" {
+			t.Errorf("expected aux-a-container (the queried runtime), got %s", result.ContainerID)
+		}
+		if auxB.listCalls != 0 {
+			t.Errorf("aux runtime-b's List should not have been called, got %d calls", auxB.listCalls)
+		}
+	case auxB.listCalls == 1:
+		if result.ContainerID != "aux-b-container" {
+			t.Errorf("expected aux-b-container (the queried runtime), got %s", result.ContainerID)
+		}
+		if auxA.listCalls != 0 {
+			t.Errorf("aux runtime-a's List should not have been called, got %d calls", auxA.listCalls)
+		}
 	}
 }
