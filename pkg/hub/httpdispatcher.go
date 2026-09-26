@@ -1614,6 +1614,27 @@ func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *st
 // gather answer for TZ (UTC rather than no TZ) because the broker listed TZ
 // as needed; a TZ need reported by this replay is answered the same way.
 func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string, answerTZ bool) (err error) {
+	// Defense in depth for a caller-supplied env map that does not go through
+	// the submitAgentEnv reserved-target check (or reaches this dispatch path
+	// some other way): never let it override a scion control-plane env var.
+	// This reassigns the local env variable, so both the merge below and the
+	// deferred-replay call further down inherit the sanitized map — and a
+	// deferred op queued before this check existed is sanitized fresh the
+	// next time it is replayed through this same function.
+	if len(env) > 0 {
+		sanitized := make(map[string]string, len(env))
+		for k, v := range env {
+			if secret.IsReservedEnvTarget(k) {
+				if d.debug {
+					d.log.Debug("DispatchFinalizeEnv: dropping reserved-target caller env", "agent_id", agent.ID, "key", k)
+				}
+				continue
+			}
+			sanitized[k] = v
+		}
+		env = sanitized
+	}
+
 	env = d.withoutCallerTZ(ctx, agent, env)
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err

@@ -5743,6 +5743,123 @@ func TestDispatchFinalizeEnv_NoAsNeededMatches(t *testing.T) {
 	}
 }
 
+// TestDispatchFinalizeEnv_DropsReservedTargetFromCallerEnv verifies that a
+// caller-supplied env map (as submitAgentEnv passes through) cannot override
+// a scion control-plane env var by injecting it directly at the dispatch
+// layer, even if it carries the same key buildCreateRequest already wrote
+// authoritatively. Defense in depth for a path that does not go through
+// submitAgentEnv's own reserved-target rejection.
+func TestDispatchFinalizeEnv_DropsReservedTargetFromCallerEnv(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	// AppliedConfig.GCPIdentity is nil, so the authoritative write is "block".
+	agent := setupFinalizeEnvTest(t, ctx, memStore, nil)
+
+	var captured *RemoteCreateAgentRequest
+	mockClient := &mockRuntimeBrokerClient{
+		createWithGatherFunc: func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+			captured = req
+			return &RemoteAgentResponse{
+				Agent: &RemoteAgentInfo{
+					ID:    req.ID,
+					Slug:  req.Slug,
+					Name:  req.Name,
+					Phase: string(state.PhaseRunning),
+				},
+				Created: true,
+			}, nil, nil
+		},
+	}
+
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	err := dispatcher.DispatchFinalizeEnv(ctx, agent, map[string]string{
+		"SCION_METADATA_MODE":        "passthrough",
+		"SCION_METADATA_MODE_SOURCE": "hub",
+		"ORDINARY_VAR":               "ordinary-value",
+	})
+	if err != nil {
+		t.Fatalf("DispatchFinalizeEnv returned unexpected error: %v", err)
+	}
+	if captured == nil {
+		t.Fatal("expected CreateAgentWithGather to be called")
+	}
+
+	if got := captured.ResolvedEnv["SCION_METADATA_MODE"]; got != "block" {
+		t.Errorf("expected SCION_METADATA_MODE=block despite caller-supplied env, got %q", got)
+	}
+	if got := captured.ResolvedEnv["SCION_METADATA_MODE_SOURCE"]; got != "hub" {
+		t.Errorf("expected SCION_METADATA_MODE_SOURCE=hub (buildCreateRequest's own write), got %q", got)
+	}
+	if got := captured.ResolvedEnv["ORDINARY_VAR"]; got != "ordinary-value" {
+		t.Errorf("expected non-reserved caller env to still pass through, got %q", got)
+	}
+}
+
+// TestDispatchFinalizeEnv_DeferredReplayDropsReservedTarget verifies that a
+// deferred finalize_env dispatch row — including one that predates this
+// check and so was stored with reserved keys already in its Args — is
+// sanitized when replayed through execDispatchFinalizeEnv, because that
+// replay re-enters DispatchFinalizeEnv, which sanitizes fresh every call.
+func TestDispatchFinalizeEnv_DeferredReplayDropsReservedTarget(t *testing.T) {
+	ctx := context.Background()
+	srv, memStore := testServer(t)
+
+	agent := setupFinalizeEnvTest(t, ctx, memStore, nil)
+	agent.OwnerID = tid("owner-1") // setupFinalizeEnvTest's literal "owner-1" is not a valid UUID
+	if err := memStore.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("failed to create agent: %v", err)
+	}
+
+	var captured *RemoteCreateAgentRequest
+	mockClient := &mockRuntimeBrokerClient{
+		createWithGatherFunc: func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+			captured = req
+			return &RemoteAgentResponse{
+				Agent: &RemoteAgentInfo{
+					ID:    req.ID,
+					Slug:  req.Slug,
+					Name:  req.Name,
+					Phase: string(state.PhaseRunning),
+				},
+				Created: true,
+			}, nil, nil
+		},
+	}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	srv.SetDispatcher(dispatcher)
+
+	// Simulate a dispatch row stored before the reserved-target check existed
+	// (or one that otherwise reached storage with reserved keys): its Args
+	// carry the reserved-target env directly, not through submitAgentEnv.
+	argsJSON, err := MarshalDispatchArgs(FinalizeEnvDispatchArgs{
+		Env: map[string]string{
+			"SCION_METADATA_MODE":        "passthrough",
+			"SCION_METADATA_MODE_SOURCE": "hub",
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to marshal dispatch args: %v", err)
+	}
+	dispatchRow := store.BrokerDispatch{
+		ID:      tid("dispatch-finalize-env"),
+		AgentID: agent.ID,
+		Op:      "finalize_env",
+		Args:    argsJSON,
+	}
+
+	if _, err := srv.execDispatchFinalizeEnv(ctx, dispatchRow); err != nil {
+		t.Fatalf("execDispatchFinalizeEnv returned unexpected error: %v", err)
+	}
+	if captured == nil {
+		t.Fatal("expected CreateAgentWithGather to be called via the deferred replay")
+	}
+	if got := captured.ResolvedEnv["SCION_METADATA_MODE"]; got != "block" {
+		t.Errorf("expected SCION_METADATA_MODE=block on deferred replay, got %q", got)
+	}
+}
+
 // TestDispatchAgentStart_IncludesHubName verifies that when hubName is set on
 // the dispatcher, SCION_HUB_NAME is injected into resolvedEnv for DispatchAgentStart.
 func TestDispatchAgentStart_IncludesHubName(t *testing.T) {
