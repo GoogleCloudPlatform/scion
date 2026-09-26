@@ -99,6 +99,13 @@ type Resource struct {
 	// applies the same rule to template and harness_config), so only those
 	// constructors are guaranteed to set it correctly.
 	ScopeKind string
+
+	// ScopeUserID is the owning user of a user-scoped skill
+	// (store.Skill.ScopeID when ScopeKind is store.SkillScopeUser), set only
+	// by skillScopeResource/skillResource. It lets the agent creator
+	// user-skill relationship grant (agentCreatorUserSkillGrant) match the
+	// same column the skill list predicate filters on. Empty otherwise.
+	ScopeUserID string
 }
 
 // PrincipalKind describes the authenticated actor evaluated by an authorization request.
@@ -435,6 +442,21 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 			for k, v := range synthRoles {
 				roleDefs[k] = v
 			}
+		}
+	}
+
+	// ── Step 5b2: Agent hub skill catalog (ptone/scion#1968) ──────────
+	// Agents may read the hub-wide (global/core) skill catalog. The
+	// project-scoped JWT binding above cannot express that (a hub-scoped
+	// skill has no ProjectID, so scopeApplies rejects it), so add a
+	// synthetic system-scoped skill.read/skill.list binding. Step 5c strips
+	// it again for any skill that is not global/core, and the agent JWT
+	// restriction (7b) and delegation ceiling (10) still apply.
+	if request.Resource.Type == "skill" && isAgentPrincipal(principal.Kind) {
+		if agent, ok := principal.Identity.(AgentIdentity); ok {
+			cb, role := agentSkillCatalogBinding(agent)
+			candidates = append(candidates, cb)
+			roleDefs[cb.RoleDefinitionID] = role
 		}
 	}
 
@@ -1006,7 +1028,16 @@ func (a *AuthzService) checkRelationshipGrants(
 		}
 	}
 
-	// 4. Progeny relationship grants (agents only).
+	// 4. Creator user-skill read (agents only).
+	// An agent may read its creator's own user-scoped skills; see
+	// agentCreatorUserSkillGrant. The origin user must also still exist and
+	// be active. The agent JWT restriction and access constraints (applied
+	// by the caller) and the delegation ceiling still apply on top.
+	if d, ok := agentCreatorUserSkillGrant(principal, resource, action); ok && a.originUserActive(ctx, principal) {
+		return d, true
+	}
+
+	// 5. Progeny relationship grants (agents only).
 	// Agent reads on secrets, env vars, and skill injections via the
 	// creator-progeny ancestry chain. Replaces the old DelegatedFrom
 	// policy pattern.

@@ -14,7 +14,11 @@
 
 package hub
 
-import "github.com/GoogleCloudPlatform/scion/pkg/store"
+import (
+	"context"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+)
 
 // curatedSkillDirectoryRoles are the built-in, system-scoped roles whose
 // skill.read/skill.list permission (hubMemberPermissionIDs,
@@ -25,6 +29,49 @@ import "github.com/GoogleCloudPlatform/scion/pkg/store"
 var curatedSkillDirectoryRoles = map[string]struct{}{
 	store.SystemRoleHubMember: {},
 	store.SystemRoleHubViewer: {},
+	agentSkillCatalogRoleName: {},
+}
+
+// agentSkillCatalogRoleName names the synthetic, never-persisted role that
+// Decide grants agent principals so they can read the hub-wide (global/core)
+// skill catalog (ptone/scion#1968). No role definition or binding with this
+// name is stored. It is listed in curatedSkillDirectoryRoles so that
+// filterHubWideSkillGrants strips it for every non-hub-scoped skill exactly
+// as it does the hub-member/hub-viewer grant: the agent's own-project skills
+// are covered by its project-scoped JWT binding instead, its creator's own
+// user-scoped skills by agentCreatorUserSkillGrant, and other users' or other
+// projects' skills by nothing.
+const agentSkillCatalogRoleName = "agent-skill-catalog"
+
+// agentSkillCatalogPermissions is the complete permission set of the
+// synthetic agent-skill-catalog role. Read-only by construction.
+var agentSkillCatalogPermissions = []string{"skill.read", "skill.list"}
+
+// agentSkillCatalogBinding builds the synthetic system-scoped candidate
+// binding (and its role definition) that grants an agent read/list on the
+// hub skill catalog. Callers must only add it for Resource.Type == "skill"
+// and must run filterHubWideSkillGrants afterwards; the agent JWT scope
+// restriction (project:read) and the delegation ceiling still apply on top.
+func agentSkillCatalogBinding(agent AgentIdentity) (CandidateBinding, *RolePermissions) {
+	roleID := "synthetic:agent-skill-catalog:" + agent.ID()
+	perms := make(map[string]struct{}, len(agentSkillCatalogPermissions))
+	for _, p := range agentSkillCatalogPermissions {
+		perms[p] = struct{}{}
+	}
+	role := &RolePermissions{
+		RoleID:      roleID,
+		RoleName:    agentSkillCatalogRoleName,
+		ScopeType:   ScopeTypeSystem,
+		Permissions: perms,
+	}
+	cb := CandidateBinding{
+		BindingID:        "synthetic:agent-skill-catalog-binding:" + agent.ID(),
+		RoleDefinitionID: roleID,
+		PrincipalType:    "agent",
+		PrincipalID:      agent.ID(),
+		ScopeType:        ScopeTypeSystem,
+	}
+	return cb, role
 }
 
 // filterHubWideSkillGrants removes system-scoped candidate bindings for the
@@ -91,4 +138,64 @@ func filterHubWideSkillGrants(candidates []CandidateBinding, roleDefs map[string
 		filtered = append(filtered, cb)
 	}
 	return filtered
+}
+
+// agentCreatorUserSkillGrant is the relationship grant that lets an agent
+// read its creator's own user-scoped skills (ptone/scion#1968): an agent
+// acts on behalf of the user who started it, so that user's personal skills
+// are part of what it may read.
+//
+// It applies only when every condition holds:
+//   - the principal is an agent whose ancestry is hub-attested (a federated
+//     agent's ancestry is a remote claim and grants nothing here);
+//   - the action is read;
+//   - the resource is a user-scoped skill whose owning user
+//     (Resource.ScopeUserID) is the agent's origin user (Ancestry[0]).
+//
+// The origin user is the human at the root of the creation chain, so an
+// agent created by another agent gets the same user bucket as its parent and
+// never a different user's. Other users' user-scoped skills match nothing.
+// Decide still applies the agent JWT restriction, access constraints, and
+// the delegation ceiling to a decision granted here.
+func agentCreatorUserSkillGrant(principal PrincipalContext, resource Resource, action Action) (Decision, bool) {
+	if !isAgentPrincipal(principal.Kind) || action != ActionRead {
+		return Decision{}, false
+	}
+	if resource.Type != "skill" || resource.ScopeKind != store.SkillScopeUser || resource.ScopeUserID == "" {
+		return Decision{}, false
+	}
+	agent, ok := principal.Identity.(AgentIdentity)
+	if !ok || !AncestryIsHubAttested(agent) {
+		return Decision{}, false
+	}
+	origin := agent.OriginUserID()
+	if origin == "" || origin != resource.ScopeUserID {
+		return Decision{}, false
+	}
+	return Decision{
+		Allowed:      true,
+		Reason:       "relationship grant: creator user skill",
+		Scope:        ScopeTypeRelationship,
+		MatchedGrant: "creator-user-skill",
+	}, true
+}
+
+// originUserActive reports whether the agent principal's origin user still
+// exists and is active. The creator user-skill grant requires it: the grant
+// exists so an agent can act for a live user, and it must not outlive that
+// user. Any lookup failure (including a missing store) denies.
+func (a *AuthzService) originUserActive(ctx context.Context, principal PrincipalContext) bool {
+	agent, ok := principal.Identity.(AgentIdentity)
+	if !ok || a.store == nil {
+		return false
+	}
+	origin := agent.OriginUserID()
+	if origin == "" {
+		return false
+	}
+	user, err := a.store.GetUser(ctx, origin)
+	if err != nil || user == nil {
+		return false
+	}
+	return user.Status == store.UserStatusActive
 }

@@ -105,6 +105,11 @@ var agentAllowed = map[string]bool{
 	"user.skills.list":            true,
 	"user.skills.add":             true,
 	"user.skills.remove":          true,
+	"skills":                      true,
+	"skills.list":                 true,
+	"skills.show":                 true, // text output also lists versions (skills.versions itself is not allowed)
+	"skill":                       true,
+	"skill.list":                  true,
 	"project":                     true,
 	"project.skills":              true,
 	"project.skills.list":         true,

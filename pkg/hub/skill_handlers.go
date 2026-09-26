@@ -291,23 +291,18 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 		// any of them. Match what Decide() actually grants: nothing.
 		filter.AccessScope = &store.SkillAccessScope{}
 	case isAgentIdentity(identity):
-		// ptone/scion#1954 (N-B): skill.read/skill.list carry no AgentScopes
-		// (pre-existing, tracked separately from this fix), so an agent's
-		// per-row capability check below can never allow any row through —
-		// hub-scoped, project-scoped or otherwise; there is no more
-		// visibility bypass since ptone/scion#1903. Offering hub-scoped rows
-		// in the predicate only for the per-row filter to strip every one of
-		// them produces a totalCount that disagrees with the page (empty
-		// pages with a nonzero total and a nextCursor). Match what the
-		// per-row filter actually grants an agent today: nothing.
+		// ptone/scion#1968: agents read exactly their granted set — the hub
+		// catalog (global/core), their own project's skills, and their
+		// creator's own user-scoped skills, each gated
+		// by the agent JWT scope restriction and the delegation ceiling. See
+		// agentSkillAccessScope for why per-bucket probes equal the per-row
+		// decision, which keeps totalCount and pages consistent with point
+		// reads (the ptone/scion#1954 count/page mismatch).
 		//
-		// This case must come before the IsAll() check below: an agent
-		// whose resolved scope happens to be IsAll (e.g. a synthetic
-		// binding that somehow reached an unrestricted scope) must still
-		// get the empty, agreeing scope, not an unfiltered query — an
-		// unfiltered query would reproduce the exact count/page mismatch
-		// this fix exists to close, just for a different reason.
-		filter.AccessScope = &store.SkillAccessScope{}
+		// This case must stay before the IsAll() check below
+		// (ptone/scion#1954): an agent always gets an explicit, bounded
+		// predicate, never an unfiltered query.
+		filter.AccessScope = s.agentSkillAccessScope(ctx, identity.(AgentIdentity))
 	case scopeResult.Scopes.IsAll():
 		// identity holds an unrestricted (hub-admin/super-admin) scope —
 		// leave filter.AccessScope nil so the query is unfiltered.
@@ -356,6 +351,44 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 		TotalCount:   result.TotalCount,
 		Capabilities: scopeCap,
 	})
+}
+
+// agentSkillAccessScope derives an agent's list predicate from the same
+// authorization decisions its point reads get (ptone/scion#1968).
+//
+// For an agent principal every term of Decide depends on a skill row only
+// through its bucket: (scope kind, project) for hub and project skills, and
+// (scope kind, owning user) for user skills. The project-scoped JWT binding,
+// the synthetic agent-skill-catalog binding (Step 5b/5b2, global/core only
+// after Step 5c), the creator user-skill relationship grant (Step 9, user
+// skills owned by the agent's origin user only), the JWT scope restriction
+// and access constraints (Step 7), and the delegation ceiling (Step 10,
+// permission-level at the agent's project) all read nothing else from the
+// row. So one probe per bucket equals the per-row outcome for every row in
+// that bucket, and the store predicate built from the probes returns exactly
+// the rows the per-row check allows.
+//
+// global and core share one probe: the store predicate groups them
+// (ScopeIn(global, core)) and every Decide input treats them identically.
+// The only user bucket that can be granted is the origin user's, so that is
+// the only one probed; every other user's skills stay out of the predicate.
+func (s *Server) agentSkillAccessScope(ctx context.Context, agent AgentIdentity) *store.SkillAccessScope {
+	scope := &store.SkillAccessScope{}
+	scope.IncludeHubScope = s.authzService.CheckAccess(ctx, agent,
+		skillScopeResource(store.SkillScopeGlobal, ""), ActionRead).Allowed
+	if projectID := agent.ProjectID(); projectID != "" {
+		if s.authzService.CheckAccess(ctx, agent,
+			skillScopeResource(store.SkillScopeProject, projectID), ActionRead).Allowed {
+			scope.ProjectIDs = []string{projectID}
+		}
+	}
+	if origin := agent.OriginUserID(); origin != "" {
+		if s.authzService.CheckAccess(ctx, agent,
+			skillScopeResource(store.SkillScopeUser, origin), ActionRead).Allowed {
+			scope.CallerID = origin
+		}
+	}
+	return scope
 }
 
 // isAgentIdentity reports whether identity is a local or federated agent.
@@ -1622,6 +1655,9 @@ func skillScopeResource(scope, scopeID string) Resource {
 	if scope == store.SkillScopeProject && scopeID != "" {
 		r.ParentType = "project"
 		r.ParentID = scopeID
+	}
+	if scope == store.SkillScopeUser {
+		r.ScopeUserID = scopeID
 	}
 	return r
 }
