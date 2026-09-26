@@ -71,7 +71,7 @@ fresh_gcloud_state() {
   GCLOUD_STUB_STATE_DIR="$(mktemp -d)"
   GCLOUD_STUB_LOG="$(mktemp)"
   mkdir -p "${GCLOUD_STUB_STATE_DIR}/firewall-rules" "${GCLOUD_STUB_STATE_DIR}/instances" \
-    "${GCLOUD_STUB_STATE_DIR}/run-services"
+    "${GCLOUD_STUB_STATE_DIR}/run-services" "${GCLOUD_STUB_STATE_DIR}/nats"
   export GCLOUD_STUB_STATE_DIR GCLOUD_STUB_LOG
 }
 
@@ -125,6 +125,17 @@ set_router_exists() {
 }
 set_service_account_exists() {
   touch "${GCLOUD_STUB_STATE_DIR}/service-account-exists"
+}
+
+# set_nat_exists NAME — simulates a pre-existing Cloud NAT with this name
+# (name-scoped, unlike set_router_exists above, since a project can have
+# more than one NAT), so its create-only marker can be asserted absent on
+# a re-run/adopt path. `compute routers nats create` for this name sets
+# the same marker, so a re-run against a create's own leftover state sees
+# it without a test needing to hand-seed it too.
+set_nat_exists() {
+  mkdir -p "${GCLOUD_STUB_STATE_DIR}/nats"
+  touch "${GCLOUD_STUB_STATE_DIR}/nats/$1.exists"
 }
 
 # seed_service_account EMAIL DESCRIPTION — a name-scoped service-account

@@ -94,6 +94,10 @@ run_deploy_create() {
   pid="$_DEPLOY_BG_PID"
   local waited_ms=0
   while [[ ! -f "$sentinel" && "$waited_ms" -lt 30000 ]]; do
+    # If deploy.sh has already exited (a real regression that makes it
+    # fail before ever reaching the sentinel, say), there is no point
+    # waiting out the rest of the 30s budget to find that out.
+    kill -0 "$pid" 2>/dev/null || break
     sleep 0.1
     waited_ms=$((waited_ms + 100))
   done
@@ -144,47 +148,76 @@ test_deploy_base_create_provisions_expected_resources() {
     "a fresh create must create exactly one Cloud Router"
   assert_eq "1" "$(echo "$log" | grep -c "^compute routers nats create ${NAT_NAME} " || true)" \
     "a fresh create must create exactly one Cloud NAT"
+
   assert_eq "1" "$(echo "$log" | grep -c "^compute firewall-rules create ${FW_RULE_NAME} " || true)" \
     "a fresh create must create exactly one IAP SSH firewall rule"
+  local fw_line
+  fw_line="$(echo "$log" | grep "^compute firewall-rules create ${FW_RULE_NAME} " | head -1)"
+  assert_contains "$fw_line" "--network=default" "the IAP SSH rule must be on the default network"
+  assert_contains "$fw_line" "--rules=tcp:22" "the IAP SSH rule must allow only tcp:22"
+  assert_contains "$fw_line" "--source-ranges=35.235.240.0/20" "the IAP SSH rule must be scoped to the IAP TCP forwarding range"
+
   assert_eq "1" "$(echo "$log" | grep -c "^iam service-accounts create scion-hub-${HUB} " || true)" \
     "a fresh create must create exactly one service account"
 
-  local router_line vm_line
+  local router_line nat_line fw_create_line vm_line
   router_line="$(echo "$log" | grep -n "^compute routers create ${ROUTER_NAME} " | head -1 | cut -d: -f1)"
+  nat_line="$(echo "$log" | grep -n "^compute routers nats create ${NAT_NAME} " | head -1 | cut -d: -f1)"
+  fw_create_line="$(echo "$log" | grep -n "^compute firewall-rules create ${FW_RULE_NAME} " | head -1 | cut -d: -f1)"
   vm_line="$(echo "$log" | grep -n "^compute instances create ${INSTANCE_NAME} " | head -1 | cut -d: -f1)"
   assert_true "$([[ -n "$router_line" && -n "$vm_line" && "$router_line" -lt "$vm_line" ]] && echo true || echo false)" \
-    "the router/NAT/firewall prerequisites must be created before the VM"
+    "the Cloud Router must be created before the VM"
+  assert_true "$([[ -n "$nat_line" && -n "$vm_line" && "$nat_line" -lt "$vm_line" ]] && echo true || echo false)" \
+    "the Cloud NAT must be created before the VM"
+  assert_true "$([[ -n "$fw_create_line" && -n "$vm_line" && "$fw_create_line" -lt "$vm_line" ]] && echo true || echo false)" \
+    "the IAP SSH firewall rule must be created before the VM"
 }
 
 # =====================================================================
 # Re-run (idempotent create)
 # =====================================================================
 
+# Reuses the state a real create run left behind (router-exists, the NAT's
+# own name-scoped marker, the VM/SA/firewall-rule fixtures) rather than
+# hand-seeding it, so a regression that makes any single create-mode
+# resource forget how to persist its own "already exists" state is caught
+# here too, not just in whatever test happens to hand-seed that one
+# resource.
 test_deploy_base_rerun_is_idempotent() {
   fresh_gcloud_state
-  seed_instance "$INSTANCE_NAME" "us-central1-b"
-  set_router_exists
-  seed_service_account "$SA_EMAIL" "Scion Hub VM (${HUB})"
-  seed_firewall_rule_desc_only "$FW_RULE_NAME" "Allow SSH via IAP tunneling for Scion Hub"
-
+  run_deploy_create "$(base_config_json "$HUB")"
   run_deploy_create "$(base_config_json "$HUB")"
   local log
   log="$(gcloud_log)"
 
-  assert_eq "0" "$(echo "$log" | grep -c '^compute instances create' || true)" \
+  assert_eq "1" "$(echo "$log" | grep -c '^compute instances create' || true)" \
     "a re-run against an already-existing VM must not create a second one"
-  assert_eq "0" "$(echo "$log" | grep -c '^compute routers create' || true)" \
+  assert_eq "1" "$(echo "$log" | grep -c '^compute routers create' || true)" \
     "a re-run against an already-existing router must not create a second one"
-  assert_eq "0" "$(echo "$log" | grep -c '^iam service-accounts create' || true)" \
+  assert_eq "1" "$(echo "$log" | grep -c '^compute routers nats create' || true)" \
+    "a re-run against an already-existing NAT must not create a second one"
+  assert_eq "1" "$(echo "$log" | grep -c '^iam service-accounts create' || true)" \
     "a re-run against an already-existing service account must not create a second one"
-  assert_eq "0" "$(echo "$log" | grep -c '^compute firewall-rules create' || true)" \
+  assert_eq "1" "$(echo "$log" | grep -c '^compute firewall-rules create' || true)" \
     "a re-run against an already-existing firewall rule must not create a second one"
+
+  # DEPLOY_LOG is the second run's own output (run_deploy_create
+  # overwrites it on every call), so these are the re-run's own messages,
+  # not left over from the first.
   assert_contains "$DEPLOY_LOG" "VM already exists: ${INSTANCE_NAME}" \
     "deploy.sh should report the VM as already existing"
+  assert_contains "$DEPLOY_LOG" "Cloud Router already exists: ${ROUTER_NAME}" \
+    "deploy.sh should report the router as already existing"
+  assert_contains "$DEPLOY_LOG" "Cloud NAT already exists: ${NAT_NAME}" \
+    "deploy.sh should report the NAT as already existing"
+  assert_contains "$DEPLOY_LOG" "Firewall rule already exists: ${FW_RULE_NAME}" \
+    "deploy.sh should report the firewall rule as already existing"
+  assert_contains "$DEPLOY_LOG" "Service account already exists: ${SA_EMAIL}" \
+    "deploy.sh should report the service account as already existing"
 }
 
 # =====================================================================
-# --delete, against a clean project
+# --delete
 # =====================================================================
 
 test_deploy_base_delete_on_clean_project_exits_zero() {
@@ -194,4 +227,34 @@ test_deploy_base_delete_on_clean_project_exits_zero() {
     "tearing down a hub with nothing left to delete should still exit 0 (every delete is best-effort)"
   assert_eq "1" "$(gcloud_log | grep -c "^compute instances delete ${INSTANCE_NAME} " || true)" \
     "teardown must still attempt to delete the VM even when it's already gone"
+}
+
+# Runs a create, then a --delete against the exact state that create left
+# behind (same $GCLOUD_STUB_STATE_DIR, no fresh_gcloud_state in between),
+# so teardown is exercised against real resources instead of an empty
+# project (see test_deploy_base_delete_on_clean_project_exits_zero above).
+test_deploy_base_create_then_delete_removes_everything() {
+  fresh_gcloud_state
+  run_deploy_create "$(base_config_json "$HUB")"
+  run_deploy_delete "$(base_config_json "$HUB")"
+
+  assert_eq "0" "$DEPLOY_RC" "teardown of everything create just made should exit 0"
+
+  local log
+  log="$(gcloud_log)"
+  for pattern in \
+    "^run services delete ${INSTANCE_NAME}-iap-proxy " \
+    "^compute instances delete ${INSTANCE_NAME} " \
+    "^compute routers nats delete ${NAT_NAME} " \
+    "^compute routers delete ${ROUTER_NAME} " \
+    "^iam service-accounts delete ${SA_EMAIL} " \
+    "^compute firewall-rules delete ${FW_RULE_NAME} "; do
+    assert_eq "1" "$(echo "$log" | grep -c -- "$pattern" || true)" \
+      "teardown must issue exactly one call matching: ${pattern}"
+  done
+
+  assert_eq "0" "$(find "${GCLOUD_STUB_STATE_DIR}/firewall-rules" -name '*.json' | wc -l | tr -d ' ')" \
+    "no firewall-rule fixture should remain after teardown"
+  assert_eq "0" "$(find "${GCLOUD_STUB_STATE_DIR}/instances" -mindepth 1 | wc -l | tr -d ' ')" \
+    "no instance fixture should remain after teardown"
 }

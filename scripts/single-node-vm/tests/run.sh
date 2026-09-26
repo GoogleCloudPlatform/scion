@@ -17,16 +17,25 @@
 # directory against a stub `gcloud`.
 #
 # This never contacts GCP: it puts tests/lib (containing a stub `gcloud`)
-# at the front of PATH, sources tests/lib/harness.sh for shared fixture
-# and assertion helpers, then sources every tests/test_*.sh file (sorted)
-# and calls each test_* function it finds. Test files that drive deploy.sh
-# itself run it as a real subprocess against the same stub; see
-# README.md for how to add a new stub case and fixture.
+# at the front of PATH, sources tests/lib/harness.sh once for shared
+# fixture and assertion helpers, then sources every tests/test_*.sh file
+# (sorted) -- each in its own subshell -- and calls each test_* function
+# it finds. Test files that drive deploy.sh itself run it as a real
+# subprocess against the same stub; see README.md for how to add a new
+# stub case, fixture, and test file.
 #
-# Requires python3 and jq: the stub's own JSON fixtures are built with
-# python3 (see tests/lib/gcloud), and deploy.sh itself shells out to jq,
-# when available, to parse a GitHub Releases response for its default
-# VERSION -- tests that don't pass --version exercise that path.
+# ISOLATION: each test file is sourced into its own subshell, not into
+# run.sh's own shell. A file-level global or helper (e.g. HUB,
+# run_deploy_create) is therefore private to the file that defines it --
+# two files defining the same name never clobber each other, and there is
+# no ordering dependency between files. See README.md "How it works" for
+# the mechanics and for what this does and doesn't isolate.
+#
+# Requires python3: the stub's own JSON fixtures (see tests/lib/gcloud)
+# are built and parsed with it. jq is optional -- deploy.sh shells out to
+# it, when available, only to parse a GitHub Releases response for its
+# default VERSION, and every test in this suite passes --version to skip
+# that path.
 #
 # Requires bash >= 4 (uses `mapfile` and associative arrays). This is a
 # dev-only test runner, not a deployment artifact: deploy.sh itself
@@ -41,6 +50,11 @@
 # expected and meaningful, not a script error. -e would abort the whole
 # suite on the first one instead of reporting a normal pass/fail count.
 set -uo pipefail
+
+if ! command -v python3 &>/dev/null; then
+  echo "run.sh: python3 is required (the stub gcloud and its fixture helpers parse/build JSON with it) but was not found on PATH" >&2
+  exit 1
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TIER_DIR="$(dirname "$SCRIPT_DIR")"
@@ -65,7 +79,7 @@ trap 'rm -rf "$RUN_TMPDIR"' EXIT
 # shellcheck source=scripts/single-node-vm/tests/lib/harness.sh
 source "${SCRIPT_DIR}/lib/harness.sh"
 
-# Source every test file in this directory (sorted, for a deterministic
+# Discover every test file in this directory (sorted, for a deterministic
 # run order), not a hardcoded list -- multiple stub-case PRs each add
 # their own tests/test_*.sh file on top of this harness, and a hardcoded
 # source list here would be an add/add conflict point between them.
@@ -76,59 +90,114 @@ if [[ "${#TEST_FILES[@]}" -eq 0 ]]; then
   echo "run.sh: no tests/test_*.sh files found in ${SCRIPT_DIR}" >&2
   exit 1
 fi
-for TEST_FILE in "${TEST_FILES[@]}"; do
-  # shellcheck disable=SC1090
-  source "$TEST_FILE"
-done
 
-mapfile -t TEST_NAMES < <(declare -F | awk '{print $3}' | grep '^test_' | sort)
+# Every test_* name claimed so far, across all files -- one per line.
+# Populated by each file's own subshell below (a real file on disk, not a
+# shell variable, since a subshell can't write back into its parent's
+# variables) and checked before that same subshell trusts one of its own
+# test names, so two files defining the same test_* name is a loud
+# failure instead of one of them silently disappearing.
+CLAIMED_TEST_NAMES_FILE="$(mktemp)"
 
 TOTAL_PASS=0
 TOTAL_FAIL=0
+TOTAL_TEST_COUNT=0
 
-# Each test runs in its own subshell: a test_* function that unexpectedly
-# hits an unhandled `exit` (a bug, since only run_expect_fail cases are
-# supposed to do that) then only ends that one subshell, not the whole
-# run.sh process, so the remaining tests still get a chance to run and
-# the suite still reports a final pass/fail count instead of dying
-# silently partway through.
-for CURRENT_TEST in "${TEST_NAMES[@]}"; do
-  RESULT_FILE="$(mktemp)"
+for TEST_FILE in "${TEST_FILES[@]}"; do
+  FILE_RESULT_FILE="$(mktemp)"
   (
-    # Cleans up this one test's own fresh_gcloud_state entries the moment
-    # this subshell exits, on any path -- normal return, a test's own
-    # early `exit` (the CRASH case above), or a signal. This is
-    # deliberately systematic rather than relying on each test
-    # remembering its own cleanup: without a trap here, each test's
-    # mktemp entries only get removed in bulk when the whole run's
-    # RUN_TMPDIR is torn down at the very end, so anyone inspecting
-    # TMPDIR mid-run (or a run that never reaches its own exit, killed
-    # from outside) would still see the full accumulation.
-    trap 'rm -rf "${GCLOUD_STUB_STATE_DIR:-}"; rm -f "${GCLOUD_STUB_LOG:-}"' EXIT
-    PASS_COUNT=0
-    FAIL_COUNT=0
-    "$CURRENT_TEST"
-    {
-      echo "PASS_COUNT=${PASS_COUNT}"
-      echo "FAIL_COUNT=${FAIL_COUNT}"
-    } > "$RESULT_FILE"
-  )
-  SUBSHELL_RC=$?
-  if [[ -s "$RESULT_FILE" ]]; then
+    # Everything this test file defines at source time -- HUB, DEPLOY_SH,
+    # run_deploy_create, or any other file-level global/helper -- lives
+    # only in this subshell and the test-level subshells it forks below.
+    # It never reaches run.sh's own shell or any other file's subshell,
+    # so two files are free to reuse the same names (as #1900's
+    # test_deploy_wiring.sh and this harness's own test_deploy_base.sh
+    # both do, for HUB and INSTANCE_NAME) without one clobbering the
+    # other. harness.sh's shared helpers (assert_*, fresh_gcloud_state,
+    # gcloud_log, ...) are already in scope here, inherited from run.sh's
+    # own shell at the point this subshell forked.
+    mapfile -t BEFORE_NAMES < <(declare -F | awk '{print $3}' | grep '^test_' | sort)
     # shellcheck disable=SC1090
-    source "$RESULT_FILE"
+    source "$TEST_FILE"
+    mapfile -t AFTER_NAMES < <(declare -F | awk '{print $3}' | grep '^test_' | sort)
+    mapfile -t FILE_TEST_NAMES < <(comm -13 <(printf '%s\n' "${BEFORE_NAMES[@]}") <(printf '%s\n' "${AFTER_NAMES[@]}"))
+
+    FILE_PASS=0
+    FILE_FAIL=0
+    for CURRENT_TEST in "${FILE_TEST_NAMES[@]}"; do
+      if grep -qxF "$CURRENT_TEST" "$CLAIMED_TEST_NAMES_FILE" 2>/dev/null; then
+        echo "FAIL [${CURRENT_TEST}]: defined by more than one tests/test_*.sh file (already claimed by an earlier one) -- rename one of them"
+        FILE_FAIL=$((FILE_FAIL + 1))
+        continue
+      fi
+      echo "$CURRENT_TEST" >> "$CLAIMED_TEST_NAMES_FILE"
+
+      # Each test additionally runs in its own subshell: a test_*
+      # function that unexpectedly hits an unhandled `exit` (a bug, since
+      # only run_expect_fail cases are supposed to do that) then only
+      # ends that one subshell, not this file's subshell or run.sh
+      # itself, so the remaining tests -- in this file and every other
+      # one -- still get a chance to run.
+      RESULT_FILE="$(mktemp)"
+      (
+        # Cleans up this one test's own fresh_gcloud_state entries the
+        # moment this subshell exits, on any path -- normal return, a
+        # test's own early `exit` (the CRASH case below), or a signal.
+        # This is deliberately systematic rather than relying on each
+        # test remembering its own cleanup: without a trap here, each
+        # test's mktemp entries only get removed in bulk when the whole
+        # run's RUN_TMPDIR is torn down at the very end, so anyone
+        # inspecting TMPDIR mid-run (or a run that never reaches its own
+        # exit, killed from outside) would still see the full
+        # accumulation.
+        trap 'rm -rf "${GCLOUD_STUB_STATE_DIR:-}"; rm -f "${GCLOUD_STUB_LOG:-}"' EXIT
+        PASS_COUNT=0
+        FAIL_COUNT=0
+        "$CURRENT_TEST"
+        {
+          echo "PASS_COUNT=${PASS_COUNT}"
+          echo "FAIL_COUNT=${FAIL_COUNT}"
+        } > "$RESULT_FILE"
+      )
+      SUBSHELL_RC=$?
+      if [[ -s "$RESULT_FILE" ]]; then
+        # shellcheck disable=SC1090
+        source "$RESULT_FILE"
+      else
+        echo "CRASH [${CURRENT_TEST}]: test subshell exited with status ${SUBSHELL_RC} before reporting any result"
+        PASS_COUNT=0
+        FAIL_COUNT=1
+      fi
+      FILE_PASS=$((FILE_PASS + PASS_COUNT))
+      FILE_FAIL=$((FILE_FAIL + FAIL_COUNT))
+      rm -f "$RESULT_FILE"
+    done
+
+    {
+      echo "FILE_PASS=${FILE_PASS}"
+      echo "FILE_FAIL=${FILE_FAIL}"
+      echo "FILE_TEST_COUNT=${#FILE_TEST_NAMES[@]}"
+    } > "$FILE_RESULT_FILE"
+  )
+  FILE_SUBSHELL_RC=$?
+  if [[ -s "$FILE_RESULT_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$FILE_RESULT_FILE"
   else
-    echo "CRASH [${CURRENT_TEST}]: test subshell exited with status ${SUBSHELL_RC} before reporting any result"
-    PASS_COUNT=0
-    FAIL_COUNT=1
+    echo "CRASH [$(basename "$TEST_FILE")]: test file's own subshell exited with status ${FILE_SUBSHELL_RC} before reporting any result -- a syntax error or an unguarded top-level failure at source time, not a single test"
+    FILE_PASS=0
+    FILE_FAIL=1
+    FILE_TEST_COUNT=0
   fi
-  TOTAL_PASS=$((TOTAL_PASS + PASS_COUNT))
-  TOTAL_FAIL=$((TOTAL_FAIL + FAIL_COUNT))
-  rm -f "$RESULT_FILE"
+  TOTAL_PASS=$((TOTAL_PASS + FILE_PASS))
+  TOTAL_FAIL=$((TOTAL_FAIL + FILE_FAIL))
+  TOTAL_TEST_COUNT=$((TOTAL_TEST_COUNT + FILE_TEST_COUNT))
+  rm -f "$FILE_RESULT_FILE"
 done
+rm -f "$CLAIMED_TEST_NAMES_FILE"
 
 echo ""
-echo "deploy.sh gcloud-stub tests: ${TOTAL_PASS} passed, ${TOTAL_FAIL} failed (of $((TOTAL_PASS + TOTAL_FAIL)) assertions across ${#TEST_NAMES[@]} tests)."
+echo "deploy.sh gcloud-stub tests: ${TOTAL_PASS} passed, ${TOTAL_FAIL} failed (of $((TOTAL_PASS + TOTAL_FAIL)) assertions across ${TOTAL_TEST_COUNT} tests)."
 
 # Self-check: every test's own EXIT trap above should have already
 # removed its fresh_gcloud_state entries, and every RESULT_FILE is

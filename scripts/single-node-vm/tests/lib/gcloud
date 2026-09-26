@@ -43,7 +43,7 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON="${GCLOUD_STUB_PYTHON:-python3}"
 
 mkdir -p "${GCLOUD_STUB_STATE_DIR}/firewall-rules" "${GCLOUD_STUB_STATE_DIR}/instances" \
-  "${GCLOUD_STUB_STATE_DIR}/run-services"
+  "${GCLOUD_STUB_STATE_DIR}/run-services" "${GCLOUD_STUB_STATE_DIR}/nats"
 
 printf '%s\n' "$*" >> "$GCLOUD_STUB_LOG"
 
@@ -84,16 +84,29 @@ require_project() {
 # "routers nats <verb>" is a four-word subcommand (unlike every other
 # case below, which is three words plus a resource name at $4, or two
 # words plus a name/project at $3), so it needs its own match on
-# $1..$4 before the general dispatch.
+# $1..$4 before the general dispatch. Because the subcommand itself is
+# four words, the NAT's own name -- unlike every describe/create/delete
+# case below, where the resource name is $4 -- is one word later, at $5.
 case "${1:-} ${2:-} ${3:-} ${4:-}" in
   "compute routers nats describe")
+    name="${5:-}"
+    if [[ -n "$name" && -f "${GCLOUD_STUB_STATE_DIR}/nats/${name}.exists" ]]; then
+      exit 0
+    fi
     exit 1
     ;;
   "compute routers nats create")
     require_project "$@"
+    name="${5:-}"
+    if [[ -n "$name" ]]; then
+      mkdir -p "${GCLOUD_STUB_STATE_DIR}/nats"
+      touch "${GCLOUD_STUB_STATE_DIR}/nats/${name}.exists"
+    fi
     exit 0
     ;;
   "compute routers nats delete")
+    name="${5:-}"
+    [[ -n "$name" ]] && rm -f "${GCLOUD_STUB_STATE_DIR}/nats/${name}.exists"
     exit 0
     ;;
   "beta run services update")
@@ -339,9 +352,15 @@ print(json.dumps(out))
     ;;
   "compute routers create")
     require_project "$@"
+    # Persists the same flag "compute routers describe" (above) and
+    # set_router_exists (harness.sh) both use, so a re-run against the
+    # state a create actually left behind sees the router as already
+    # existing, not just a test that hand-seeds it upfront.
+    touch "${GCLOUD_STUB_STATE_DIR}/router-exists"
     exit 0
     ;;
   "compute routers delete")
+    rm -f "${GCLOUD_STUB_STATE_DIR}/router-exists"
     exit 0
     ;;
   "iam service-accounts describe")

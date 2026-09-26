@@ -35,10 +35,27 @@ pass/fail count. Exits non-zero if any assertion failed.
 ## How it works
 
 - `run.sh` puts `tests/lib` at the front of `PATH` (so the stub `gcloud`
-  shadows any real one), sources `tests/lib/harness.sh` for shared
-  fixture/assertion helpers, then sources every `tests/test_*.sh` file
-  (sorted) and calls each `test_*` function it finds, each in its own
-  subshell with a fresh `fresh_gcloud_state`.
+  shadows any real one) and sources `tests/lib/harness.sh` once, for
+  shared fixture/assertion helpers.
+- **Every `tests/test_*.sh` file is sourced into its own subshell, not
+  into `run.sh`'s own shell, and each `test_*` function it defines then
+  runs in a further, per-test subshell of that.** A file-level global or
+  helper — `HUB`, `DEPLOY_SH`, `run_deploy_create`, or anything else a
+  test file defines at source time — is therefore **private to the file
+  that defines it**. Two files are free to reuse the same name (this
+  harness's own `test_deploy_base.sh` and a feature PR's test file both
+  commonly define `HUB` and `INSTANCE_NAME`, for instance) without one
+  clobbering the other, and files run in no particular dependency order
+  beyond the sort order used to pick which one's `test_*` functions
+  appear first in the output. What subshell isolation does *not* give
+  you: two `test_*` functions with the *identical* name across two files
+  is still a mistake, not a feature — `run.sh` detects this (a shared,
+  on-disk list of every test name claimed so far) and fails the later
+  one loudly rather than silently dropping it. Shared state that isn't a
+  shell variable or function — files under `$GCLOUD_STUB_STATE_DIR`, the
+  real `deploy.sh`/stub subprocesses a test starts — is not isolated by
+  this and is each test's own responsibility, via `fresh_gcloud_state`
+  and each test running in its own subshell.
 - `tests/lib/gcloud` is the fake `gcloud`. Every invocation is logged
   (see `gcloud_log`/`gcloud_call_count` in harness.sh) before being
   dispatched on `$1 $2 [$3 [$4]]`. Responses are served from small files
@@ -52,11 +69,13 @@ pass/fail count. Exits non-zero if any assertion failed.
   succeed, or a real wiring bug (e.g. a typo'd subcommand) will pass
   silently too.
 - `test_deploy_base.sh` is the harness's own smoke test: it runs
-  `deploy.sh` through a fresh create and a re-run against the state that
-  create left behind, using only stub cases and fixtures this file
-  provides. It has no feature-specific code in it — if it fails, the
-  harness itself is broken, independent of any feature built on top of
-  it.
+  `deploy.sh` through a fresh create, a re-run against the state that
+  create left behind (proving each resource's own "already exists"
+  fixture persists, not just that a test can hand-seed one), and a
+  `--delete` against both a clean project and the state a create left
+  behind, using only stub cases and fixtures this file provides. It has
+  no feature-specific code in it — if it fails, the harness itself is
+  broken, independent of any feature built on top of it.
 
 ## Adding a stub case and fixture
 
