@@ -272,7 +272,7 @@ test_proxy_hardening_teardown_deletes_proxy_sa() {
     "teardown must delete the proxy service account exactly once"
   assert_false "$([[ -f "${GCLOUD_STUB_STATE_DIR}/service-accounts/${PROXY_SA_EMAIL}.json" ]] && echo true)" \
     "the proxy SA fixture should be gone after teardown"
-  assert_contains "$DEPLOY_LOG" "Deleted proxy SA:          ${PROXY_SA_EMAIL}" \
+  assert_contains "$DEPLOY_LOG" "Deleted proxy SA:           ${PROXY_SA_EMAIL}" \
     "the summary must report the proxy SA as deleted"
 }
 
