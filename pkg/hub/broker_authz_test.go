@@ -141,7 +141,7 @@ func TestBroadcast_UserWithProjectAttach(t *testing.T) {
 		t.Fatalf("CreateUser: %v", err)
 	}
 	ensureHubMembership(ctx, s, userID)
-	srv.createProjectMembersGroup(ctx, project, userID)
+	srv.createProjectMembersGroup(ctx, project)
 	if err := srv.createProjectOwnerRoleBinding(ctx, project.ID, userID); err != nil {
 		t.Fatalf("createProjectOwnerRoleBinding: %v", err)
 	}
@@ -316,7 +316,7 @@ func TestSendAgentRouted_WithAttach(t *testing.T) {
 		t.Fatalf("CreateUser: %v", err)
 	}
 	ensureHubMembership(ctx, s, userID)
-	srv.createProjectMembersGroup(ctx, project, userID)
+	srv.createProjectMembersGroup(ctx, project)
 	if err := srv.createProjectOwnerRoleBinding(ctx, project.ID, userID); err != nil {
 		t.Fatalf("createProjectOwnerRoleBinding: %v", err)
 	}
@@ -390,7 +390,7 @@ func TestSendAgentRouted_MentionSkippedWithoutAttach(t *testing.T) {
 		t.Fatalf("CreateUser: %v", err)
 	}
 	ensureHubMembership(ctx, s, userID)
-	srv.createProjectMembersGroup(ctx, project, userID)
+	srv.createProjectMembersGroup(ctx, project)
 	if err := srv.createProjectOwnerRoleBinding(ctx, project.ID, userID); err != nil {
 		t.Fatalf("createProjectOwnerRoleBinding: %v", err)
 	}
