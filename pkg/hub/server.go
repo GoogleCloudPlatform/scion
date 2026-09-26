@@ -3992,7 +3992,7 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		// agent-create path. See deriveAgentConfig.
 		s.deriveAgentConfig(ctx, agent, project, tmpl)
 
-		if err := s.store.CreateAgent(ctx, agent); err != nil {
+		if err := s.createAgentWithIdentityKey(ctx, agent, slug); err != nil {
 			return fmt.Errorf("failed to create agent %q: %w", slug, err)
 		}
 

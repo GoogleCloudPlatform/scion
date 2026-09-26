@@ -739,6 +739,42 @@ func (s *Server) releaseAgentQuotas(ctx context.Context, resourceID, runtimeBrok
 	s.quotaService.Release(ctx, "max_agents_per_project", resourceID)
 }
 
+// errInvalidDisplayName is returned by createAgentWithIdentityKey when slug
+// fails api.ValidateDisplayName. It is deliberately distinct from
+// store.ErrInvalidInput: the transaction that follows can also fail with
+// store.ErrInvalidInput for unrelated reasons (e.g. a foreign-key violation
+// if the project row disappears under a concurrent delete), and that error's
+// text comes from the store layer, not from validating the display name --
+// it must not be reported to the caller as if it were one.
+var errInvalidDisplayName = errors.New("invalid display name")
+
+// createAgentWithIdentityKey validates slug as the identity key agent.Name
+// will hold at creation (both production callers set Name to Slug before
+// calling this), then writes agent and its identity-key row in the same
+// transaction: the key row is what makes the key's per-project uniqueness a
+// database invariant, so it must never be able to drift from the row it was
+// computed from. This is the single point every production create path --
+// createAgentInProject and the scheduler's dispatchAgentEventHandler -- goes
+// through for this, so they cannot drift on the invariant the way only one
+// of them did before.
+//
+// A validation failure is wrapped in errInvalidDisplayName so a caller that
+// wants the specific, safe-to-surface message can distinguish it with
+// errors.Is before falling through to the transaction's own errors, which
+// include store.ErrIdentityKeyConflict and, separately, store.ErrInvalidInput
+// for reasons unrelated to the display name itself.
+func (s *Server) createAgentWithIdentityKey(ctx context.Context, agent *store.Agent, slug string) error {
+	if _, err := api.ValidateDisplayName(slug); err != nil {
+		return fmt.Errorf("%w: %s", errInvalidDisplayName, err)
+	}
+	return s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := tx.CreateAgent(ctx, agent); err != nil {
+			return err
+		}
+		return tx.ReplaceAgentIdentityKeys(ctx, agent.ID, agent.ProjectID, []string{slug})
+	})
+}
+
 func (s *Server) createAgentInProject(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -1423,8 +1459,12 @@ func (s *Server) createAgentInProject(
 		return
 	}
 
-	if err := s.store.CreateAgent(ctx, agent); err != nil {
+	if err := s.createAgentWithIdentityKey(ctx, agent, slug); err != nil {
 		s.releaseAgentQuotas(ctx, agent.ID, runtimeBrokerID)
+		if errors.Is(err, errInvalidDisplayName) {
+			writeError(w, http.StatusBadRequest, "invalid_name", err.Error(), nil)
+			return
+		}
 		writeErrorFromErr(w, err, "")
 		return
 	}
