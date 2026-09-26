@@ -58,7 +58,7 @@ func TestAgentInfo_JSON(t *testing.T) {
 		}
 	})
 
-	t.Run("marshal dual fields", func(t *testing.T) {
+	t.Run("marshal emits only canonical fields", func(t *testing.T) {
 		info := AgentInfo{
 			Project:     "my-project",
 			ProjectID:   "my-id",
@@ -76,16 +76,19 @@ func TestAgentInfo_JSON(t *testing.T) {
 
 		expected := map[string]string{
 			"project":     "my-project",
-			"grove":       "my-project",
 			"projectId":   "my-id",
-			"groveId":     "my-id",
 			"projectPath": "/my/path",
-			"grovePath":   "/my/path",
 		}
 
 		for k, v := range expected {
 			if m[k] != v {
 				t.Errorf("Field %q = %v, want %v", k, m[k], v)
+			}
+		}
+
+		for _, legacyKey := range []string{"grove", "groveId", "grovePath"} {
+			if _, ok := m[legacyKey]; ok {
+				t.Errorf("legacy key %q present in marshal output, want absent: %v", legacyKey, m[legacyKey])
 			}
 		}
 	})

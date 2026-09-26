@@ -1069,8 +1069,8 @@ func TestListTruncationWarning(t *testing.T) {
 
 func TestListJSONAlwaysBareArray(t *testing.T) {
 	agents := []api.AgentInfo{
-		{Name: "agent-1", Phase: "running", Template: "default", Runtime: "docker", Project: "p"},
-		{Name: "agent-2", Phase: "running", Template: "default", Runtime: "docker", Project: "p"},
+		{Name: "agent-1", Phase: "running", Template: "default", Runtime: "docker", Project: "p", ProjectID: "p-id", ProjectPath: "/p/path"},
+		{Name: "agent-2", Phase: "running", Template: "default", Runtime: "docker", Project: "p", ProjectID: "p-id", ProjectPath: "/p/path"},
 	}
 
 	// Save and restore global flags
@@ -1106,5 +1106,28 @@ func TestListJSONAlwaysBareArray(t *testing.T) {
 	}
 	if len(arr) != 2 {
 		t.Errorf("expected 2 agents in array, got %d", len(arr))
+	}
+
+	// The output must carry the canonical project fields and must not carry
+	// any legacy grove key.
+	var raw []map[string]interface{}
+	if err := json.Unmarshal(buf.Bytes(), &raw); err != nil {
+		t.Fatalf("failed to decode raw JSON array: %v\noutput: %s", err, buf.String())
+	}
+	for i, entry := range raw {
+		if entry["project"] != "p" {
+			t.Errorf("entry %d: project = %v, want %q", i, entry["project"], "p")
+		}
+		if entry["projectId"] != "p-id" {
+			t.Errorf("entry %d: projectId = %v, want %q", i, entry["projectId"], "p-id")
+		}
+		if entry["projectPath"] != "/p/path" {
+			t.Errorf("entry %d: projectPath = %v, want %q", i, entry["projectPath"], "/p/path")
+		}
+		for _, legacyKey := range []string{"grove", "groveId", "grovePath"} {
+			if _, ok := entry[legacyKey]; ok {
+				t.Errorf("entry %d: legacy key %q present in JSON output, want absent: %v", i, legacyKey, entry[legacyKey])
+			}
+		}
 	}
 }

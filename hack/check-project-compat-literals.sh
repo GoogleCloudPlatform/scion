@@ -44,6 +44,7 @@ allowed_paths=(
   "^cmd/harness_config_install_test.go$"
   "^cmd/hub_env_test.go$"
   "^cmd/hub_test.go$"
+  "^cmd/list_test.go$"
   "^cmd/message_project_json_test.go$"
   "^cmd/message_test.go$"
   "^cmd/notifications_test.go$"
