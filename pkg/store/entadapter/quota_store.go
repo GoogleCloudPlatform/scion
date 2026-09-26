@@ -310,6 +310,14 @@ func (q *QuotaStore) CreateUsageReservation(ctx context.Context, reservation *st
 		SetResourceID(reservation.ResourceID).
 		SetReserved(reservation.Reserved)
 
+	// CreatedAt is normally left to the schema default (time.Now at
+	// creation); callers that need to backdate a reservation — e.g. tests
+	// simulating a reservation old enough to clear
+	// reconcileMinReservationAge — may set it explicitly.
+	if !reservation.CreatedAt.IsZero() {
+		builder.SetCreatedAt(reservation.CreatedAt)
+	}
+
 	if reservation.ID != "" {
 		uid, err := parseUUID(reservation.ID)
 		if err != nil {

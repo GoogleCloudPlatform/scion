@@ -18,10 +18,25 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// reconcileMinReservationAge is the minimum age a reservation must reach
+// before ReconcileStaleBrokerQuotaReservations will release it on the basis
+// of the agent's stored phase. Start (HTTP) and DM wake both reserve the
+// broker slot before dispatch but only write the counted phase (e.g.
+// "starting") after dispatch returns, so a reconcile pass — the periodic
+// tick or a startup sweep — that lands in that window would otherwise see an
+// uncounted stored phase and release a reservation for a dispatch that is
+// still in flight (ptone/scion#2011). The threshold must clear the
+// worst-case dispatch latency, including a cold image pull, with margin;
+// 15 minutes is chosen for that reason and is not meant to be tuned per
+// deployment. This grace period does not apply to reservations whose agent
+// is missing or soft-deleted — those are always released regardless of age.
+const reconcileMinReservationAge = 15 * time.Minute
 
 // isBrokerQuotaCountedPhase reports whether phase currently counts toward an
 // agent's runtime broker's max_agents_per_broker ceiling (ptone/scion#1963).
@@ -138,7 +153,11 @@ func (s *Server) reconcileBrokerQuotaOnPhaseChange(ctx context.Context, agent *s
 //   - Release: an active reservation (released_at IS NULL) whose agent no
 //     longer exists, is soft-deleted, or is no longer in a counted phase —
 //     fixing rows left behind from before stop/suspend/crash released the
-//     reservation, or from a delete path that missed the release call.
+//     reservation, or from a delete path that missed the release call. The
+//     phase-based case is skipped for a reservation younger than
+//     reconcileMinReservationAge, since dispatch reserves before it writes
+//     the counted phase (ptone/scion#2011); the missing/soft-deleted case is
+//     never subject to that grace period.
 //   - Backfill: an agent in a counted phase on this broker with no active
 //     reservation gets one recorded directly (no cap check — this is
 //     accounting for an agent that already exists and is already running,
@@ -210,7 +229,7 @@ func (s *Server) ReconcileStaleBrokerQuotaReservations(ctx context.Context) {
 				released++
 				continue
 			}
-			if !isBrokerQuotaCountedPhase(agent.Phase) {
+			if !isBrokerQuotaCountedPhase(agent.Phase) && time.Since(res.CreatedAt) >= reconcileMinReservationAge {
 				s.quotaService.Release(ctx, store.LimitMaxAgentsPerBroker, agent.ID)
 				released++
 			}
