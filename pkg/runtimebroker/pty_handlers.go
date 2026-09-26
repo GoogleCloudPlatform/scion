@@ -495,7 +495,6 @@ func waitForTmuxSession(ctx context.Context, runtimeCmd, containerID, namespace,
 
 	execUser = sanitizeExecUser(execUser)
 
-	isK8s := runtimeCmd == "kubernetes" || runtimeCmd == "k8s"
 	isCloudRunSandbox := runtimeCmd == "cloudrun-sandbox"
 
 	if isCloudRunSandbox {
@@ -504,9 +503,7 @@ func waitForTmuxSession(ctx context.Context, runtimeCmd, containerID, namespace,
 			case <-ctx.Done():
 				return fmt.Errorf("timed out waiting for tmux session in sandbox '%s'", containerID)
 			case <-ticker.C:
-				cmd := exec.CommandContext(ctx, cloudRunSandboxBin, "exec", containerID, "--",
-					"/usr/bin/tmux", "has-session", "-t", "scion")
-				if cmd.Run() == nil {
+				if tmuxHasSession(ctx, runtimeCmd, containerID, namespace, execUser, k8sConfig, k8sClientset) == probeAlive {
 					return nil
 				}
 				slog.Debug("Waiting for tmux session", "sandbox", containerID, "runtime", runtimeCmd)
@@ -519,16 +516,7 @@ func waitForTmuxSession(ctx context.Context, runtimeCmd, containerID, namespace,
 		case <-ctx.Done():
 			return fmt.Errorf("timed out waiting for tmux session in container '%s' to become ready", containerID)
 		case <-ticker.C:
-			var checkErr error
-			if isK8s && k8sConfig != nil && k8sClientset != nil {
-				// The tmux session runs as the scion user (via sciontool init privilege drop),
-				// so we must check as that user — root can't see scion's tmux socket.
-				checkErr = k8sExecCheck(ctx, k8sConfig, k8sClientset, namespace, containerID, runtime.ExecAsUserCmd(execUser, "tmux has-session -t scion"))
-			} else {
-				cmd := exec.CommandContext(ctx, runtimeCmd, "exec", "--user", execUser, containerID, "tmux", "has-session", "-t", "scion")
-				checkErr = cmd.Run()
-			}
-			if checkErr == nil {
+			if tmuxHasSession(ctx, runtimeCmd, containerID, namespace, execUser, k8sConfig, k8sClientset) == probeAlive {
 				return nil
 			}
 			slog.Debug("Waiting for tmux session", "containerID", containerID, "runtime", runtimeCmd)
@@ -694,6 +682,14 @@ type LocalPTYSession struct {
 	// K8s Go client for direct API exec
 	k8sConfig    *rest.Config
 	k8sClientset kubernetes.Interface
+
+	// startErr and cleanExit mirror StreamPTYHandler's fields (see there):
+	// classifyAttachEnd inputs, populated by Run(). Not yet read here — a
+	// future change will use them to send a classified close frame from the
+	// direct-attach path, the way handlePTYStreamWithAgent already does for
+	// the control-channel path.
+	startErr  error
+	cleanExit bool
 }
 
 // newLocalPTYSession creates a new local PTY session.
@@ -733,6 +729,7 @@ func (s *LocalPTYSession) Run() error {
 
 	if isCloudRunSandbox {
 		if err := s.startCloudRunSandboxExec(); err != nil {
+			s.startErr = err
 			return fmt.Errorf("failed to start sandbox exec: %w", err)
 		}
 		// Send initial active window.
@@ -752,6 +749,7 @@ func (s *LocalPTYSession) Run() error {
 
 		// Start docker/container exec with PTY
 		if err := s.startDockerExec(); err != nil {
+			s.startErr = err
 			return fmt.Errorf("failed to start exec: %w", err)
 		}
 
@@ -763,6 +761,13 @@ func (s *LocalPTYSession) Run() error {
 		}
 	}
 
+	// Populate cleanExit from the reaped process's exit status. Registered
+	// before the gracefulShutdownExec defer below so it runs AFTER
+	// gracefulShutdownExec (defers run LIFO), i.e. once s.cmd.ProcessState is
+	// actually populated.
+	defer func() {
+		s.cleanExit = isCleanExit(s.cmd.ProcessState)
+	}()
 	defer func() {
 		// readFromWebSocket has already exited (joined below).
 		// Safe to close PTY — no in-flight resize.
@@ -831,6 +836,7 @@ func (s *LocalPTYSession) runK8sExec() error {
 	}
 
 	if err := waitForTmuxSession(s.ctx, s.runtimeCmd, s.containerID, namespace, s.execUser, s.k8sConfig, s.k8sClientset); err != nil {
+		s.startErr = err
 		return err
 	}
 
@@ -864,6 +870,15 @@ func (s *LocalPTYSession) runK8sExec() error {
 		return fmt.Errorf("failed to create SPDY executor: %w", err)
 	}
 
+	return s.bridgeK8sExec(executor)
+}
+
+// bridgeK8sExec pumps a k8s exec session between the direct-attach WebSocket
+// and the pod, given an already-created executor. Split out from runK8sExec
+// for the same reason as StreamPTYHandler.bridgeK8sExec: it lets a fake
+// remotecommand.Executor drive the executor-error-vs-I/O-EOF wiring directly
+// in tests (see TestLocalPTYSessionBridgeK8sExec).
+func (s *LocalPTYSession) bridgeK8sExec(executor remotecommand.Executor) error {
 	stdinReader, stdinWriter := io.Pipe()
 	stdoutReader, stdoutWriter := io.Pipe()
 
@@ -876,7 +891,11 @@ func (s *LocalPTYSession) runK8sExec() error {
 		initial:  &remotecommand.TerminalSize{Width: uint16(s.cols), Height: uint16(s.rows)},
 	}
 
-	errCh := make(chan error, 3)
+	// execErrCh carries only the SPDY executor's own result; see the
+	// matching comment in StreamPTYHandler.bridgeK8sExec for why this must
+	// not share a channel with the I/O goroutines' EOF signals.
+	execErrCh := make(chan error, 1)
+	errCh := make(chan error, 2)
 
 	// Run SPDY executor
 	go func() {
@@ -889,7 +908,7 @@ func (s *LocalPTYSession) runK8sExec() error {
 		})
 		_ = stdoutWriter.Close()
 		_ = stdinReader.Close()
-		errCh <- execErr
+		execErrCh <- execErr
 	}()
 
 	// Read from SPDY stdout, send to WebSocket
@@ -955,8 +974,10 @@ func (s *LocalPTYSession) runK8sExec() error {
 		}
 	}()
 
-	err = <-errCh
-	s.cancel()
+	// Return as soon as anything ends the session, but always resolve
+	// cleanExit from the executor's own result (see awaitK8sExecEnd).
+	var err error
+	err, s.cleanExit = awaitK8sExecEnd(execErrCh, errCh, s.cancel, attachProbeTimeout)
 	_ = stdinWriter.Close()
 	_ = stdoutReader.Close()
 	return err
@@ -1131,6 +1152,15 @@ type StreamPTYHandler struct {
 	// K8s Go client for direct API exec (avoids needing kubectl binary)
 	k8sConfig    *rest.Config
 	k8sClientset kubernetes.Interface
+
+	// startErr and cleanExit are classifyAttachEnd's inputs, populated by
+	// Run(). startErr is set when the tmux exec never started (e.g.
+	// waitForTmuxSession timed out). cleanExit is only meaningful when
+	// startErr is nil: it is true when the exec that ran `tmux
+	// attach-session` ended without error (see isCleanExit and the k8s
+	// executor-error handling in runK8sExec).
+	startErr  error
+	cleanExit bool
 }
 
 // NewStreamPTYHandler creates a handler for a PTY stream from the control channel.
@@ -1173,6 +1203,7 @@ func (h *StreamPTYHandler) Run() error {
 
 	if isCloudRunSandbox {
 		if err := h.startCloudRunSandboxExec(); err != nil {
+			h.startErr = err
 			return err
 		}
 		// Send initial active window.
@@ -1191,6 +1222,7 @@ func (h *StreamPTYHandler) Run() error {
 
 		// Start docker/container exec with tmux attach
 		if err := h.startDockerExec(); err != nil {
+			h.startErr = err
 			return err
 		}
 
@@ -1201,6 +1233,13 @@ func (h *StreamPTYHandler) Run() error {
 		}
 	}
 
+	// Populate cleanExit from the reaped process's exit status. Registered
+	// before the gracefulShutdownExec defer below so it runs AFTER
+	// gracefulShutdownExec (defers run LIFO), i.e. once h.cmd.ProcessState is
+	// actually populated.
+	defer func() {
+		h.cleanExit = isCleanExit(h.cmd.ProcessState)
+	}()
 	defer func() {
 		// Graceful shutdown: close PTY (terminal hangup) → wait → SIGTERM →
 		// SIGKILL. This gives the container runtime a chance to propagate
@@ -1268,6 +1307,7 @@ func (h *StreamPTYHandler) runK8sExec() error {
 
 	// Wait for tmux session readiness using Go client
 	if err := waitForTmuxSession(h.ctx, h.runtimeCmd, h.containerID, namespace, h.execUser, h.k8sConfig, h.k8sClientset); err != nil {
+		h.startErr = err
 		return err
 	}
 
@@ -1300,6 +1340,16 @@ func (h *StreamPTYHandler) runK8sExec() error {
 		return fmt.Errorf("failed to create SPDY executor: %w", err)
 	}
 
+	return h.bridgeK8sExec(executor)
+}
+
+// bridgeK8sExec pumps a k8s exec session between the control channel and the
+// pod, given an already-created executor. Split out from runK8sExec so the
+// executor-error-vs-I/O-EOF wiring can be driven directly by a fake
+// remotecommand.Executor in tests (see TestBridgeK8sExec), rather than only
+// by awaitK8sExecEnd's own unit tests, which build execErrCh/errCh by hand
+// and so cannot see how this function wires them up.
+func (h *StreamPTYHandler) bridgeK8sExec(executor remotecommand.Executor) error {
 	// Create a pipe for stdin: control channel data → pipe writer → SPDY stdin
 	stdinReader, stdinWriter := io.Pipe()
 
@@ -1314,11 +1364,21 @@ func (h *StreamPTYHandler) runK8sExec() error {
 		initial:  &remotecommand.TerminalSize{Width: uint16(h.cols), Height: uint16(h.rows)},
 	}
 
-	errCh := make(chan error, 3)
+	// execErrCh carries only the SPDY executor's own result. It is kept
+	// separate from errCh (the general "something ended" signal) because this
+	// goroutine closes stdoutWriter right before it sends the executor's
+	// error, and the stdout reader's resulting EOF can race that error into
+	// the same channel — usually winning, which would mask the real
+	// transport error behind a plain io.EOF. The executor's own error is the
+	// only signal that tells a clean tmux detach (nil) from a
+	// transport/apiserver drop (non-nil): see isCleanExit's commentary and
+	// classifyAttachEnd.
+	execErrCh := make(chan error, 1)
+	errCh := make(chan error, 2)
 
 	// Run SPDY executor in background
 	go func() {
-		err := executor.StreamWithContext(h.ctx, remotecommand.StreamOptions{
+		execErr := executor.StreamWithContext(h.ctx, remotecommand.StreamOptions{
 			Stdin:             stdinReader,
 			Stdout:            stdoutWriter,
 			Stderr:            stdoutWriter, // merge stderr into stdout
@@ -1327,7 +1387,7 @@ func (h *StreamPTYHandler) runK8sExec() error {
 		})
 		_ = stdoutWriter.Close()
 		_ = stdinReader.Close()
-		errCh <- err
+		execErrCh <- execErr
 	}()
 
 	// Read from SPDY stdout, send to control channel
@@ -1368,8 +1428,10 @@ func (h *StreamPTYHandler) runK8sExec() error {
 		}
 	}()
 
-	err = <-errCh
-	h.cancel()
+	// Return as soon as anything ends the session, but always resolve
+	// cleanExit from the executor's own result (see awaitK8sExecEnd).
+	var err error
+	err, h.cleanExit = awaitK8sExecEnd(execErrCh, errCh, h.cancel, attachProbeTimeout)
 	_ = stdinWriter.Close()
 	_ = stdoutReader.Close()
 	return err
@@ -1563,10 +1625,49 @@ func (h *StreamPTYHandler) Close() {
 	}
 }
 
-// handlePTYStreamWithAgent is called by the control channel to handle PTY streams.
+// handlePTYStreamWithAgent is called by the control channel to run a PTY
+// stream to completion. It then classifies why the tmux attach ended (clean
+// detach, transport drop, session gone, or a lookup/probe failure) and
+// reports the close over the control channel — unless the Hub already
+// initiated the close (handler.closed), in which case the peer is already
+// gone, so no probe runs and nothing is sent.
 func (c *ControlChannelClient) handlePTYStreamWithAgent(handler *StreamHandler, cols, rows int, containerID, runtimeCmd, execUser, namespace string, k8sConfig *rest.Config, k8sClientset kubernetes.Interface) {
 	ptyHandler := NewStreamPTYHandler(c, handler, containerID, runtimeCmd, execUser, namespace, cols, rows, k8sConfig, k8sClientset)
 	if err := ptyHandler.Run(); err != nil && err != io.EOF {
 		slog.Error("PTY stream error", "slug", handler.slug, "error", err)
 	}
+
+	handler.closeMu.Lock()
+	hubClosed := handler.closed
+	handler.closeMu.Unlock()
+	if hubClosed {
+		return
+	}
+
+	prober := &attachEndProber{
+		lookup:       c.agentLookup,
+		slug:         handler.slug,
+		projectID:    handler.projectID,
+		runtimeCmd:   runtimeCmd,
+		containerID:  containerID,
+		namespace:    namespace,
+		execUser:     execUser,
+		k8sConfig:    k8sConfig,
+		k8sClientset: k8sClientset,
+	}
+	// Use the control channel's own ctx, not context.Background(): if the
+	// broker is shutting down or the control channel is already gone, the
+	// probe and lookup exec calls below inherit that cancellation and return
+	// probeUnknown/lookupUnknown quickly instead of running the full 2s
+	// bound, which classifyAttachEnd already treats as retry (1011) — the
+	// right answer during shutdown, reached sooner. c.ctx is only unset in
+	// tests that build a ControlChannelClient by struct literal without
+	// Connect(); fall back to Background so classifyAttachEnd's own
+	// context.WithTimeout calls never see a nil parent.
+	probeCtx := c.ctx
+	if probeCtx == nil {
+		probeCtx = context.Background()
+	}
+	code, reason := classifyAttachEnd(probeCtx, ptyHandler.startErr, ptyHandler.cleanExit, prober)
+	_ = c.CloseStream(handler.streamID, reason, code)
 }
