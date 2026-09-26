@@ -529,10 +529,10 @@ func TestDEF164_AtAgentSlug_DeliversToAgent(t *testing.T) {
 		"DEF-164: @agent-slug on outbound endpoint must succeed: %s",
 		rr.Body.String())
 
-	// R2 (FYI 3): verify the mock dispatcher was actually invoked for the
-	// target agent, not merely that persistence succeeded. Dispatch
-	// (agent_dm_operation.go step 11) runs synchronously before the HTTP
-	// response is written, so no wait is needed.
+	// Verify the mock dispatcher was actually invoked for the target agent,
+	// not merely that persistence succeeded. Dispatch (agent_dm_operation.go
+	// step 11) runs synchronously before the HTTP response is written, so no
+	// wait is needed.
 	dispatched := dispatcher.getMessages()
 	require.Len(t, dispatched, 1, "dispatcher must be invoked exactly once")
 	assert.Equal(t, targetAgent.Slug, dispatched[0].agentSlug,
@@ -596,8 +596,8 @@ func TestDEF164_AtAgentSlug_DMConversationCreated(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code,
 		"delivery must succeed: %s", rr.Body.String())
 
-	// R2 (FYI 3): verify the mock dispatcher was actually invoked for the
-	// target agent, not merely that persistence succeeded.
+	// Verify the mock dispatcher was actually invoked for the target agent,
+	// not merely that persistence succeeded.
 	dispatched := dispatcher.getMessages()
 	require.Len(t, dispatched, 1, "dispatcher must be invoked exactly once")
 	assert.Equal(t, targetAgent.Slug, dispatched[0].agentSlug,

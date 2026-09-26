@@ -463,8 +463,8 @@ func TestDEF152_AgentToAgentDM_DeliversViaOutbound(t *testing.T) {
 	assert.NotEmpty(t, storedMsg.ConversationID,
 		"message must be attributed to a conversation")
 
-	// R2 (FYI 3): verify the mock dispatcher was actually invoked for the
-	// target agent, not merely that persistence succeeded.
+	// Verify the mock dispatcher was actually invoked for the target agent,
+	// not merely that persistence succeeded.
 	dispatched := dispatcher.getMessages()
 	require.Len(t, dispatched, 1, "dispatcher must be invoked exactly once")
 	assert.Equal(t, otherAgent.Slug, dispatched[0].agentSlug,
