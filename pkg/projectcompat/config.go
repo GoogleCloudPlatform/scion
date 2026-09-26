@@ -34,7 +34,6 @@ const (
 	EnvProjectID    = "SCION_PROJECT_ID"
 	EnvGroveID      = "SCION_GROVE_ID"
 	EnvHubProjectID = "SCION_HUB_PROJECT_ID"
-	EnvHubGroveID   = "SCION_HUB_GROVE_ID"
 
 	ProjectIDFile = "project-id"
 	GroveIDFile   = "grove-id"
@@ -72,12 +71,9 @@ func EnvProjectIDConfigKey(envName string, hubProjectAsTopLevel bool) (string, b
 			return ConfigGroveIDKey, true
 		}
 		return ConfigProjectIDKey, true
-	case EnvHubProjectID, EnvHubGroveID:
+	case EnvHubProjectID:
 		if hubProjectAsTopLevel {
 			return ConfigProjectIDKey, true
-		}
-		if envName == EnvHubGroveID {
-			return ConfigHubGroveIDKey, true
 		}
 		return ConfigHubProjectIDKey, true
 	default:

@@ -117,7 +117,6 @@
         "grove_id": {
           "type": "string",
           "description": "Deprecated: Use 'project_id' instead.",
-          "x-env-var": "SCION_HUB_GROVE_ID",
           "x-since": "1"
         },
         "local_only": {

@@ -930,6 +930,19 @@ func (s *Server) Start(ctx context.Context) error {
 		)
 	}
 
+	// Runtime broker boot hook: warn about legacy environment variables
+	// scion no longer reads, before scanning projects/. This is the
+	// broker-boot half of the legacy-migration hook points;
+	// the CLI equivalent is Execute()/rootCmd.PersistentPreRunE in
+	// cmd/root.go (skipped for "start" under the "server"/"runtime-broker"
+	// subtree — this hook reports instead), and the hub equivalent is
+	// cmd/server_foreground.go:runServerStart. Both this hook and the hub's
+	// share config's process-wide sync.Once (WarnRemovedLegacyEnvOnce), so
+	// a combined `--enable-hub --enable-runtime-broker` process reports
+	// once, not twice. On-disk layout migration is expected to run at this
+	// same hook point.
+	config.WarnRemovedLegacyEnvOnce(os.Getenv, config.NewSlogReporter())
+
 	// Discover auxiliary runtimes (e.g. Kubernetes) from project settings
 	// so that agents running on non-default runtimes can be found after
 	// a broker restart.

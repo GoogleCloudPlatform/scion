@@ -44,6 +44,14 @@ return an error instead of blocking.`,
 	SilenceErrors: true,
 	SilenceUsage:  true,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		// Warn (once per process) about legacy environment variables that
+		// scion no longer reads. For real top-level invocations this has
+		// already run in Execute(), before any settings or project
+		// resolution; this call is the deduplicated (sync.Once-guarded)
+		// path for callers that invoke rootCmd directly (e.g. cmd-level
+		// tests) without going through the package's own Execute().
+		maybeWarnRemovedLegacyEnv(cmd)
+
 		// --non-interactive implies --yes
 		if nonInteractive {
 			autoConfirm = true
@@ -197,6 +205,20 @@ return an error instead of blocking.`,
 // Execute adds all child commands to the root command and sets flags appropriately.
 // This is called by main.main(). It only needs to happen once to the rootCmd.
 func Execute() {
+	// Warn about legacy environment variables scion no longer reads. This
+	// must run before any settings or project resolution,
+	// including the early settings load a few lines below — PersistentPreRunE
+	// runs too late for that. rootCmd.Find is a read-only tree walk (no
+	// flags are parsed, nothing executes), so it is safe to call before
+	// ExecuteC(). Skipped for "start" under the "server"/"runtime-broker"
+	// subtree; see maybeWarnRemovedLegacyEnv.
+	var cliArgs []string
+	if len(os.Args) > 1 {
+		cliArgs = os.Args[1:]
+	}
+	target, _, _ := rootCmd.Find(cliArgs)
+	maybeWarnRemovedLegacyEnv(target)
+
 	// Early settings load to determine autoHelp behavior
 	// This handles cases where ExecuteC fails during flag parsing or unknown commands
 	tempProjectPath := ""
