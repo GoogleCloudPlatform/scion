@@ -90,8 +90,29 @@ export class ScionTerminalPane extends LitElement {
   @state()
   private disconnectReason: TerminalDisconnectReason = null;
 
+  /**
+   * True whenever `pending` is set (a connect() call is in flight): used only
+   * to guard against double-submitting a manual Reconnect click.
+   */
   @state()
   private reconnectInProgress = false;
+
+  /**
+   * Derived from `connection ∈ {loading, connecting}` rather than
+   * `session.reconnecting`. `pending` clears once the WebSocket is
+   * constructed, before the handshake finishes, so it under-reports how
+   * long an attempt is actually running; connection state does not.
+   */
+  @state()
+  private attempting = false;
+
+  /** A reconnect attempt failed; auto-retry is blocked. */
+  @state()
+  private reconnectFailed = false;
+
+  /** Whether the failed attempt above was manually triggered. */
+  @state()
+  private reconnectFailedManual = false;
 
   @state()
   private activeWindow: TmuxWindow = 'agent';
@@ -405,6 +426,15 @@ export class ScionTerminalPane extends LitElement {
       color: #f59e0b;
     }
 
+    .disconnected-overlay.reconnecting .overlay-title {
+      color: #60a5fa;
+    }
+
+    .disconnected-overlay sl-spinner {
+      font-size: 2rem;
+      --track-width: 3px;
+    }
+
     .disconnected-overlay .overlay-detail {
       color: #94a3b8;
       font-size: 0.875rem;
@@ -638,6 +668,11 @@ export class ScionTerminalPane extends LitElement {
     // from focus leaving entirely (rail/header/sibling click). (P1.8)
     this.addEventListener('focusin', this._onFocusIn);
     this.addEventListener('focusout', this._onFocusOut);
+    // "Frontmost" also requires the document itself to be visible (the
+    // browser tab is in the foreground), not just this pane's slot in the
+    // workspace layout.
+    document.addEventListener('visibilitychange', this._onDocumentVisibilityChange);
+    this.updateFrontmost();
     void this.reveal();
   }
 
@@ -646,9 +681,20 @@ export class ScionTerminalPane extends LitElement {
     // DOM placement is not session lifetime. The retained owner explicitly closes.
     this.removeEventListener('focusin', this._onFocusIn);
     this.removeEventListener('focusout', this._onFocusOut);
+    document.removeEventListener('visibilitychange', this._onDocumentVisibilityChange);
+    this.session?.setFrontmost(false);
     this.removeWindowListeners();
     this.terminal?.blur();
     this.cancelResize();
+  }
+
+  /** Recompute and push the combined frontmost signal. */
+  private _onDocumentVisibilityChange = (): void => {
+    this.updateFrontmost();
+  };
+
+  private updateFrontmost(): void {
+    this.session?.setFrontmost(this._visible && document.visibilityState === 'visible');
   }
 
   /**
@@ -711,6 +757,12 @@ export class ScionTerminalPane extends LitElement {
       this.applyMetadata(value)
     );
     this.sessionUnsubscribe = this.session!.subscribe((state) => this.applySessionState(state));
+    // open() supports bind-after-mount (see the class doc above), and on
+    // that path connectedCallback already ran with session == null, so it
+    // never pushed a frontmost signal. Push it now that a session exists, so
+    // a pane that is already visible arms auto-reconnect immediately instead
+    // of waiting for the next visibility change.
+    this.updateFrontmost();
     return this.session!;
   }
 
@@ -741,6 +793,7 @@ export class ScionTerminalPane extends LitElement {
       // Remove drop prevention so Chat/Dashboard drops are unaffected.
       this.removeWindowListeners();
     }
+    this.updateFrontmost();
   }
 
   /** Explicit lifetime boundary. Navigation is reserved for the legacy adapter. */
@@ -792,6 +845,9 @@ export class ScionTerminalPane extends LitElement {
     this.error = this.metadataError ?? state.error;
     this.disconnectReason = state.disconnectReason;
     this.reconnectInProgress = this.ownedSession?.reconnecting ?? false;
+    this.attempting = state.connection === 'loading' || state.connection === 'connecting';
+    this.reconnectFailed = state.reconnectFailed;
+    this.reconnectFailedManual = state.reconnectFailedManual;
     if (state.connection !== 'loading') this.loading = false;
     if (newlyConnected) {
       this.wasConnected = true;
@@ -1645,6 +1701,11 @@ export class ScionTerminalPane extends LitElement {
 
   /** Human-readable overlay title for disconnected/unavailable states. */
   private get overlayTitle(): string {
+    // While an attempt (automatic or manual) is running, the overlay always
+    // shows "Reconnecting...", regardless of the reason that preceded it.
+    // Derived from connection state, not from session.reconnecting: `pending`
+    // clears once the socket is constructed, before the handshake finishes.
+    if (this.attempting) return 'RECONNECTING...';
     switch (this.disconnectReason) {
       case 'auth-401':
         return 'AUTHENTICATION REQUIRED';
@@ -1652,6 +1713,10 @@ export class ScionTerminalPane extends LitElement {
         return 'ACCESS DENIED';
       case 'not-found':
         return 'AGENT NOT FOUND';
+      case 'session-ended':
+        return 'SESSION ENDED';
+      case 'detached':
+        return 'DETACHED';
       case 'agent-offline':
       case 'agent-phase':
       case 'agent-stopped':
@@ -1661,6 +1726,21 @@ export class ScionTerminalPane extends LitElement {
       default:
         return 'DISCONNECTED';
     }
+  }
+
+  /**
+   * Once a reconnect attempt has failed, replace the generic error detail
+   * with the product-specified copy until the next attempt starts. A failed
+   * manual attempt uses neutral wording instead ("Automatic" would be
+   * wrong). Both share the same trailing punctuation.
+   */
+  private get overlayDetail(): string | null {
+    if (this.reconnectFailed && !this.attempting) {
+      return this.reconnectFailedManual
+        ? 'Reconnection failed, try manually reconnecting later'
+        : 'Automatic reconnection failed, try manually reconnecting later';
+    }
+    return this.error;
   }
 
   /** Whether the current disconnect state should be rendered as "unavailable" rather than "disconnected". */
@@ -1859,7 +1939,7 @@ export class ScionTerminalPane extends LitElement {
                 ?disabled=${this.reconnectDisabled}
                 @click=${() => this.handleReconnect()}
               >
-                ${this.reconnectInProgress ? 'Reconnecting...' : 'Reconnect'}
+                ${this.attempting ? 'Reconnecting...' : 'Reconnect'}
               </button>
             `
           : ''}
@@ -1887,15 +1967,23 @@ export class ScionTerminalPane extends LitElement {
       >
         <div class="terminal-container"></div>
         ${!this.connected && this.wasConnected
-          ? html`<div class="disconnected-overlay ${this.isUnavailableState ? 'unavailable' : ''}">
+          ? html`<div
+              class="disconnected-overlay ${this.isUnavailableState ? 'unavailable' : ''} ${this
+                .attempting
+                ? 'reconnecting'
+                : ''}"
+            >
+              ${this.attempting ? html`<sl-spinner></sl-spinner>` : nothing}
               <span class="overlay-title">${this.overlayTitle}</span>
-              ${this.error ? html`<span class="overlay-detail">${this.error}</span>` : nothing}
+              ${this.overlayDetail
+                ? html`<span class="overlay-detail">${this.overlayDetail}</span>`
+                : nothing}
               <button
                 class="overlay-reconnect"
                 ?disabled=${this.reconnectDisabled}
                 @click=${() => this.handleReconnect()}
               >
-                ${this.reconnectInProgress ? 'Reconnecting...' : 'Reconnect'}
+                ${this.attempting ? 'Reconnecting...' : 'Reconnect'}
               </button>
             </div>`
           : ''}

@@ -41,6 +41,7 @@ class FakeSocket {
   readyState = 0;
   onopen: (() => void) | null = null;
   onclose: ((event: { code: number }) => void) | null = null;
+  onmessage: ((event: { data: unknown }) => void) | null = null;
   send = vi.fn();
   close = vi.fn();
   constructor() {
@@ -49,6 +50,13 @@ class FakeSocket {
   open() {
     this.readyState = 1;
     this.onopen?.();
+  }
+  /**
+   * A data frame is what actually confirms the stream is live, not bare
+   * onopen. Simulates tmux's redraw on attach.
+   */
+  data(payload = '') {
+    this.onmessage?.({ data: JSON.stringify({ type: 'data', data: btoa(payload) }) });
   }
 }
 class FakeEventSource extends EventTarget {
@@ -126,6 +134,7 @@ async function mountConnected() {
   frames.shift()?.(0);
   await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(1));
   FakeSocket.instances[0].open();
+  FakeSocket.instances[0].data(); // confirms the stream live
   await page.updateComplete;
 }
 
@@ -291,6 +300,7 @@ describe('hidden pane interaction isolation (P1.8)', () => {
     const xt = terminal.instances[0];
     xt.focus.mockClear();
     FakeSocket.instances[0].open();
+    FakeSocket.instances[0].data();
     await page.updateComplete;
     // Terminal should NOT have been focused since pane is hidden
     expect(xt.focus).not.toHaveBeenCalled();
@@ -399,4 +409,131 @@ it('a failed metadata snapshot does not remove the independently authorized term
   });
   expect(page.shadowRoot?.querySelector('.terminal-container')).not.toBeNull();
   expect(page.shadowRoot?.textContent).toContain('metadata unavailable');
+});
+
+describe('bind-after-mount still arms frontmost', () => {
+  it('a pane mounted before open() (the legacy page order) still auto-reconnects on a retriable close', async () => {
+    const registry2 = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'account-r3',
+    });
+    const page2 = document.createElement('scion-terminal-pane') as ScionTerminalPane;
+    // connectedCallback runs with no session bound yet — the exact order that
+    // pages/terminal.ts uses (mount the shell, then open()).
+    document.body.append(page2);
+    try {
+      page2.open(registry2, agentId);
+      await vi.waitFor(() => {
+        frames.splice(0).forEach((frame) => frame(0));
+        expect(FakeSocket.instances.length).toBeGreaterThanOrEqual(1);
+      });
+      const socket = FakeSocket.instances[FakeSocket.instances.length - 1];
+      socket.open();
+      socket.data(); // confirms the stream live before the drop below
+      await page2.updateComplete;
+      const session = page2.session!;
+      socket.readyState = 3;
+      socket.onclose?.({ code: 1006 });
+      // Without binding frontmost state on this path, it would stay false
+      // forever, and this session would never attempt again without an
+      // explicit visibility event.
+      expect(session.reconnecting).toBe(true);
+    } finally {
+      page2.dispose();
+      page2.remove();
+    }
+  });
+});
+
+describe('document visibilitychange feeds frontmost', () => {
+  afterEach(() => {
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
+  });
+
+  it('a hidden document suppresses auto-reconnect; becoming visible triggers it', async () => {
+    await mountConnected();
+    const session = page.session!;
+    Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+
+    FakeSocket.instances[0].readyState = 3;
+    FakeSocket.instances[0].onclose?.({ code: 1006 });
+    expect(session.reconnecting).toBe(false);
+    expect(FakeSocket.instances).toHaveLength(1);
+
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+    expect(session.reconnecting).toBe(true);
+  });
+
+  it('removes the visibilitychange listener on disconnectedCallback', async () => {
+    await mountConnected();
+    const removed = vi.spyOn(document, 'removeEventListener');
+    page.remove();
+    expect(removed).toHaveBeenCalledWith('visibilitychange', expect.any(Function));
+  });
+});
+
+describe('overlay strings', () => {
+  it('shows RECONNECTING... with a spinner while an attempt is in flight', async () => {
+    await mountConnected();
+    FakeSocket.instances[0].readyState = 3;
+    FakeSocket.instances[0].onclose?.({ code: 4503 });
+    await page.updateComplete;
+    expect(page.shadowRoot?.textContent).toContain('RECONNECTING...');
+    expect(page.shadowRoot?.querySelector('.disconnected-overlay sl-spinner')).toBeTruthy();
+  });
+
+  // Pins the intended derivation, not a regression guard.
+  // `applySessionState` only runs on session update(), and `pending` clears
+  // in `finally` without one, so the pane's last-seen `reconnecting` value
+  // never actually goes stale under today's code — nothing else notifies
+  // while `connecting` (resize/sendData are gated on `connected`, and pongs
+  // don't notify either). This assertion therefore cannot fail if `attempting`
+  // is reverted to derive from `session.reconnecting`; keeping the
+  // connection-based derivation is still correct defensively.
+  it('shows RECONNECTING... while still waiting for the handshake, after session.reconnecting has cleared', async () => {
+    await mountConnected();
+    FakeSocket.instances[0].readyState = 3;
+    FakeSocket.instances[0].onclose?.({ code: 4503 }); // triggers the automatic attempt
+    await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(2));
+    // The reconnect socket now exists (connection === 'connecting'), but it
+    // has not opened yet, and `pending` (session.reconnecting) has already
+    // cleared, well before the handshake finishes.
+    await vi.waitFor(() => expect(page.session?.reconnecting).toBe(false));
+    await page.updateComplete;
+    expect(page.shadowRoot?.textContent).toContain('RECONNECTING...');
+    expect(page.shadowRoot?.querySelector('.disconnected-overlay sl-spinner')).toBeTruthy();
+  });
+
+  it('shows the exact copy, pinned rather than matched as a substring, once an automatic attempt fails', async () => {
+    await mountConnected();
+    FakeSocket.instances[0].readyState = 3;
+    FakeSocket.instances[0].onclose?.({ code: 4503 }); // frontmost: one automatic attempt
+    await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(2));
+    FakeSocket.instances[1].readyState = 3;
+    FakeSocket.instances[1].onclose?.({ code: 4503 }); // that attempt also fails
+    await page.updateComplete;
+    // toBe (not toContain), so a stray trailing period fails.
+    expect(page.shadowRoot?.querySelector('.overlay-detail')?.textContent?.trim()).toBe(
+      'Automatic reconnection failed, try manually reconnecting later'
+    );
+  });
+
+  it('shows the exact neutral copy, pinned rather than matched as a substring, after a failed manual reconnect', async () => {
+    await mountConnected();
+    FakeSocket.instances[0].readyState = 3;
+    FakeSocket.instances[0].onclose?.({ code: 1000 }); // detached: terminal, no auto attempt
+    await page.updateComplete;
+    fetcher
+      .mockResolvedValueOnce(json({ id: agentId, name: 'test', phase: 'running' }))
+      .mockResolvedValueOnce(json({}, 503));
+    page.shadowRoot?.querySelector<HTMLButtonElement>('.overlay-reconnect')?.click();
+    await vi.waitFor(() => {
+      expect(page.shadowRoot?.querySelector('.overlay-detail')?.textContent?.trim()).toBe(
+        'Reconnection failed, try manually reconnecting later'
+      );
+    });
+    expect(FakeSocket.instances).toHaveLength(1); // preflight failed before a new socket
+  });
 });
