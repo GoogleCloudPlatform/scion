@@ -861,9 +861,6 @@ func loadConfig(path string) (*bridge.Config, error) {
 	var missing []string
 	expanded := os.Expand(string(data), func(name string) string {
 		v, ok := os.LookupEnv(name)
-		if !ok && name == "SCION_PROJECT_ID" {
-			v, ok = os.LookupEnv("SCION_GROVE_ID")
-		}
 		if !ok {
 			missing = append(missing, name)
 		}
@@ -881,11 +878,6 @@ func loadConfig(path string) (*bridge.Config, error) {
 	// Capture the YAML-configured auth scheme once, before any admin overlay
 	// or runtime config is applied. See bridge.EffectiveAuthScheme.
 	cfg.Auth.YAMLScheme = cfg.Auth.Scheme
-
-	// Backward compatibility: merge legacy 'groves' into 'projects' if 'projects' is empty.
-	if len(cfg.Projects) == 0 && len(cfg.Groves) > 0 {
-		cfg.Projects = cfg.Groves
-	}
 
 	if cfg.Timeouts.SendMessage == 0 {
 		cfg.Timeouts.SendMessage = 120 * time.Second

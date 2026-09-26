@@ -42,7 +42,6 @@ var slugRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 func BridgePathPatterns() []logging.PathPattern {
 	return []logging.PathPattern{
 		{Prefix: "/projects/", ProjectIdx: 0, AgentIdx: 2}, // /projects/{slug}/agents/{slug}/...
-		{Prefix: "/groves/", ProjectIdx: 0, AgentIdx: 2},   // /groves/{slug}/agents/{slug}/...
 	}
 }
 
@@ -231,19 +230,12 @@ func (s *Server) Handler() http.Handler {
 	// to the agent root (without /jsonrpc suffix).
 	mux.HandleFunc("POST /projects/{projectSlug}/agents/{agentSlug}", s.handleJSONRPC)
 
-	// Legacy per-agent routes (backward compatibility for "grove" naming).
-	mux.HandleFunc("GET /groves/{projectSlug}/agents/{agentSlug}/.well-known/agent-card.json", s.handleAgentCard)
-	mux.HandleFunc("GET /groves/{projectSlug}/agents/{agentSlug}/.well-known/agent.json", s.handleAgentCard)
-	mux.HandleFunc("POST /groves/{projectSlug}/agents/{agentSlug}/jsonrpc", s.handleJSONRPC)
-	mux.HandleFunc("POST /groves/{projectSlug}/agents/{agentSlug}", s.handleJSONRPC)
-
 	// v0.3 REST compat routes — catch-all under per-agent prefix delegates to
 	// the SDK v0.3 REST handler (if configured) after stripping the prefix.
 	// Go 1.22 mux ensures the more-specific agent-card, jsonrpc, and direct POST
 	// patterns above take precedence over this wildcard.
 	if s.v0RESTHandler != nil {
 		mux.HandleFunc("/projects/{projectSlug}/agents/{agentSlug}/{v0rest...}", s.handleV0REST)
-		mux.HandleFunc("/groves/{projectSlug}/agents/{agentSlug}/{v0rest...}", s.handleV0REST)
 	}
 
 	// Health, readiness, and metrics.
@@ -497,9 +489,9 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		// Per-agent card: exactly /projects/{slug}/agents/{slug}/.well-known/agent-card.json
-		// or agent.json, or legacy /groves/{slug}/agents/{slug}/.well-known/agent-card.json
+		// or agent.json
 		segments := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
-		if len(segments) == 6 && (segments[0] == "projects" || segments[0] == "groves") && segments[2] == "agents" && segments[4] == ".well-known" && (segments[5] == "agent-card.json" || segments[5] == "agent.json") {
+		if len(segments) == 6 && segments[0] == "projects" && segments[2] == "agents" && segments[4] == ".well-known" && (segments[5] == "agent-card.json" || segments[5] == "agent.json") {
 			next.ServeHTTP(w, r)
 			return
 		}

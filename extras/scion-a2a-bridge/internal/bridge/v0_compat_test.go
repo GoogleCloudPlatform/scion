@@ -351,13 +351,6 @@ func TestV0REST_RouteRegistration(t *testing.T) {
 			wantPath:   "/tasks/abc:resubscribe",
 		},
 		{
-			name:       "groves alias",
-			method:     "POST",
-			path:       "/groves/proj1/agents/agent1/message:send",
-			wantStatus: http.StatusOK,
-			wantPath:   "/message:send",
-		},
-		{
 			name:       "nested path",
 			method:     "GET",
 			path:       "/projects/proj1/agents/agent1/tasks/task-123",
@@ -645,19 +638,6 @@ func TestDiscovery_PerAgentAgentJSON(t *testing.T) {
 	}
 }
 
-func TestDiscovery_PerAgentAgentJSON_GrovesAlias(t *testing.T) {
-	srv, _ := newV0TestServer(t, "none", "", nil)
-	handler := srv.Handler()
-
-	req := httptest.NewRequest("GET", "/groves/proj1/agents/agent1/.well-known/agent.json", nil)
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("groves agent.json status = %d, want 200", w.Code)
-	}
-}
-
 func TestDiscovery_AgentJSON_PublicNoAuth(t *testing.T) {
 	srv, _ := newV0TestServer(t, "apiKey", "secret-key", nil)
 	handler := srv.Handler()
@@ -699,18 +679,6 @@ func TestDiscovery_DirectPOST_AgentRoot(t *testing.T) {
 	// Should get a JSON-RPC error (task not found), but the request should be processed.
 	if resp["jsonrpc"] != "2.0" {
 		t.Errorf("response is not JSON-RPC 2.0: %s", string(body))
-	}
-}
-
-func TestDiscovery_DirectPOST_GrovesAlias(t *testing.T) {
-	hub := newMockHubServer(t)
-	_, ts, _ := newIntegrationTestServer(t, hub, "none", "")
-
-	payload := `{"jsonrpc":"2.0","id":1,"method":"GetTask","params":{"id":"nonexistent"}}`
-	status, body := doRPCRaw(t, ts, "/groves/proj1/agents/agent1", payload, nil)
-
-	if status != http.StatusOK {
-		t.Fatalf("direct POST via /groves/ status = %d, want 200; body: %s", status, string(body))
 	}
 }
 
@@ -1114,51 +1082,6 @@ func TestJSONRPC_RealHandler_UnknownMethod(t *testing.T) {
 	errObj := resp["error"].(map[string]interface{})
 	if code, ok := errObj["code"].(float64); !ok || code != -32601 {
 		t.Errorf("error code = %v, want -32601", errObj["code"])
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Discovery aliases (/groves/ ↔ /projects/) through real handler
-// ---------------------------------------------------------------------------
-
-func TestJSONRPC_DiscoveryAlias_GrovesPath(t *testing.T) {
-	hub := newMockHubServer(t)
-	_, ts, _ := newIntegrationTestServer(t, hub, "none", "")
-
-	payload := `{"jsonrpc":"2.0","id":"req-grove","method":"GetTask","params":{"id":"nonexistent"}}`
-	status, body := doRPCRaw(t, ts, "/groves/proj1/agents/agent1/jsonrpc", payload, nil)
-
-	if status != http.StatusOK {
-		t.Fatalf("groves alias status = %d, want 200; body: %s", status, body)
-	}
-
-	var resp map[string]interface{}
-	json.Unmarshal(body, &resp)
-	if resp["jsonrpc"] != "2.0" {
-		t.Errorf("response via /groves/ is not valid JSON-RPC")
-	}
-}
-
-func TestJSONRPC_DiscoveryAlias_AgentCard(t *testing.T) {
-	stub := &v0StubHandler{}
-	srv, _ := newV0TestServer(t, "none", "", stub)
-	handler := srv.Handler()
-
-	// Agent card via /groves/ should work.
-	req := httptest.NewRequest("GET", "/groves/proj1/agents/agent1/.well-known/agent-card.json", nil)
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("agent card via /groves/ status = %d, want 200", w.Code)
-	}
-
-	var card map[string]interface{}
-	if err := json.Unmarshal(w.Body.Bytes(), &card); err != nil {
-		t.Fatalf("failed to parse agent card: %v", err)
-	}
-	if card["name"] == nil {
-		t.Error("agent card missing 'name' field")
 	}
 }
 

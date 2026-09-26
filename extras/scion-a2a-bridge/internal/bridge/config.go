@@ -25,7 +25,6 @@ type Config struct {
 	Plugin    PluginConfig    `yaml:"plugin"`
 	Auth      AuthConfig      `yaml:"auth"`
 	Projects  []ProjectConfig `yaml:"projects"`
-	Groves    []ProjectConfig `yaml:"groves,omitempty"` // Legacy field for backward compatibility
 	State     StateConfig     `yaml:"state"`
 	Timeouts  TimeoutConfig   `yaml:"timeouts"`
 	Logging   LoggingConfig   `yaml:"logging"`
@@ -96,9 +95,6 @@ type ProjectConfig struct {
 	AutoProvision   bool     `yaml:"auto_provision" json:"auto_provision"`
 	ExposedAgents   []string `yaml:"exposed_agents" json:"exposed_agents"`
 }
-
-// GroveConfig is a legacy alias for ProjectConfig.
-type GroveConfig = ProjectConfig
 
 // StateConfig holds local state database settings.
 type StateConfig struct {

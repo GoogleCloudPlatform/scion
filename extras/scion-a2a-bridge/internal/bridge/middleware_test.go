@@ -172,7 +172,6 @@ func TestBridgePathPatternsEnrichContext(t *testing.T) {
 	}{
 		{"/projects/my-proj/agents/my-agent/jsonrpc", "my-proj", "my-agent"},
 		{"/projects/p1/agents/a1/.well-known/agent-card.json", "p1", "a1"},
-		{"/groves/old-grove/agents/old-agent/jsonrpc", "old-grove", "old-agent"},
 		{"/healthz", "", ""},
 	}
 
