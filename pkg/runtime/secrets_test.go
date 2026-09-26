@@ -486,6 +486,46 @@ func TestBuildCommonRunArgs_EnvironmentSecrets(t *testing.T) {
 	}
 }
 
+// TestBuildCommonRunArgs_ResolvedSecretCollidingWithConfigEnv_SystemEnvWins
+// verifies that when an environment-type resolved secret targets the same
+// name as an entry already in config.Env, the config.Env value is the one
+// that reaches the container: the colliding secret is skipped rather than
+// emitted as a second, later "-e" for the same name. config.Env is where the
+// runtime's caller (the broker) places values it has already authoritatively
+// decided, such as SCION_METADATA_MODE, so a later-emitted secret must not be
+// able to re-decide them.
+func TestBuildCommonRunArgs_ResolvedSecretCollidingWithConfigEnv_SystemEnvWins(t *testing.T) {
+	config := RunConfig{
+		Name:         "test-agent",
+		UnixUsername: "scion",
+		Image:        "test:latest",
+		Harness:      harness.New("gemini"),
+		Env:          []string{"SCION_METADATA_MODE=block"},
+		ResolvedSecrets: []api.ResolvedSecret{
+			{Name: "RESERVED_NAME_SECRET", Type: "environment", Target: "SCION_METADATA_MODE", Value: "passthrough", Source: "user"},
+			{Name: "API_KEY", Type: "environment", Target: "API_KEY", Value: "sk-123", Source: "user"},
+		},
+	}
+
+	args, err := buildCommonRunArgs(config)
+	if err != nil {
+		t.Fatalf("buildCommonRunArgs failed: %v", err)
+	}
+
+	argsStr := joinArgs(args)
+
+	if !containsArg(args, "-e", "SCION_METADATA_MODE=block") {
+		t.Errorf("expected config.Env value SCION_METADATA_MODE=block to survive, got: %s", argsStr)
+	}
+	if containsArg(args, "-e", "SCION_METADATA_MODE=passthrough") {
+		t.Errorf("colliding secret value must not reach argv, got: %s", argsStr)
+	}
+	// A non-colliding secret should still be injected normally.
+	if !containsArg(args, "-e", "API_KEY=sk-123") {
+		t.Errorf("expected non-colliding environment secret API_KEY in args, got: %s", argsStr)
+	}
+}
+
 // containsArg checks if the args slice contains flag followed by value.
 func containsArg(args []string, flag, value string) bool {
 	for i := 0; i < len(args)-1; i++ {
