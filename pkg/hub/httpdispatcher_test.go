@@ -4529,6 +4529,88 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_GCPBlockMode(t *testing.T) {
 	}
 }
 
+// TestHTTPAgentDispatcher_DispatchAgentStart_NoGCPIdentityIgnoresStoredMetadataModeEnv
+// verifies that when an agent has no GCP identity configured at all (a real
+// case for e.g. scheduled-dispatch agents with no project or hub default),
+// the dispatch still sends an authoritative "block" mode to the broker even
+// when a plain, non-secret, user-scoped env var happens to already be stored
+// under the same control-plane name. The stored var here is seeded directly
+// through the store, as a stand-in for a row that predates a create/patch
+// validation gate (or any other path that did not go through it) — the
+// dispatch layer is a separate, defense-in-depth choke point from that gate.
+func TestHTTPAgentDispatcher_DispatchAgentStart_NoGCPIdentityIgnoresStoredMetadataModeEnv(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	project := &store.Project{
+		ID:        tid("project-gcp-nil-identity"),
+		Name:      "gcp-project",
+		Slug:      "gcp-project",
+		GitRemote: "https://github.com/example/repo.git",
+	}
+	if err := memStore.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	broker := &store.RuntimeBroker{
+		ID:       tid("broker-gcp-nil-identity"),
+		Name:     "test-broker",
+		Slug:     "test-broker",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+
+	provider := &store.ProjectProvider{
+		ProjectID:  tid("project-gcp-nil-identity"),
+		BrokerID:   tid("broker-gcp-nil-identity"),
+		BrokerName: "test-broker",
+		LocalPath:  "/home/user/projects/myproject/.scion",
+		Status:     store.BrokerStatusOnline,
+	}
+	if err := memStore.AddProjectProvider(ctx, provider); err != nil {
+		t.Fatalf("failed to add project provider: %v", err)
+	}
+
+	ownerID := tid("owner-gcp-nil-identity")
+	if _, err := memStore.UpsertEnvVar(ctx, &store.EnvVar{
+		ID:            api.NewUUID(),
+		Key:           "SCION_METADATA_MODE",
+		Value:         store.GCPMetadataModePassthrough,
+		Scope:         store.ScopeUser,
+		ScopeID:       ownerID,
+		InjectionMode: store.InjectionModeAlways,
+	}); err != nil {
+		t.Fatalf("failed to seed stored env var: %v", err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	agent := &store.Agent{
+		ID:              "agent-gcp-nil-identity",
+		Name:            "gcp-agent",
+		Slug:            "gcp-agent",
+		ProjectID:       tid("project-gcp-nil-identity"),
+		OwnerID:         ownerID,
+		RuntimeBrokerID: tid("broker-gcp-nil-identity"),
+		AppliedConfig:   &store.AgentAppliedConfig{
+			// GCPIdentity intentionally left nil.
+		},
+	}
+
+	err := dispatcher.DispatchAgentStart(ctx, agent, "", false)
+	if err != nil {
+		t.Fatalf("DispatchAgentStart failed: %v", err)
+	}
+
+	if v := mockClient.lastResolvedEnv["SCION_METADATA_MODE"]; v != store.GCPMetadataModeBlock {
+		t.Errorf("expected SCION_METADATA_MODE=%q despite the stored env var, got %q", store.GCPMetadataModeBlock, v)
+	}
+}
+
 // mockGitHubAppMinter is a test implementation of GitHubAppTokenMinter.
 type mockGitHubAppMinter struct {
 	token  string

@@ -780,6 +780,20 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		}
 	}
 
+	// SCION_METADATA_MODE must be hub-authoritative, never sourced from
+	// storage: overwrite whatever the fill-absent merge above put there.
+	// req.Config.GCPIdentity (set above from agent.AppliedConfig.GCPIdentity)
+	// is what the broker primarily trusts, but that struct is nil when the
+	// agent has no GCP identity configured, and the broker then falls back to
+	// this env var. Without this authoritative overwrite, a stored env var of
+	// this name would decide the metadata mode on that fallback path.
+	gcpMetadataMode := store.GCPMetadataModeBlock
+	if req.Config != nil && req.Config.GCPIdentity != nil {
+		gcpMetadataMode = req.Config.GCPIdentity.MetadataMode
+	}
+	req.ResolvedEnv["SCION_METADATA_MODE"] = gcpMetadataMode
+	classifyEnv(&req.EnvClassifications, "SCION_METADATA_MODE", api.EnvKindPlain)
+
 	// Include template secrets declarations for broker env-gather
 	if agent.AppliedConfig != nil && agent.AppliedConfig.TemplateID != "" {
 		tmpl, err := d.store.GetTemplate(ctx, agent.AppliedConfig.TemplateID)
@@ -2496,11 +2510,18 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	// createAgent path this information travels inside CreateAgentConfig,
 	// but the startAgent/restartAgent path doesn't carry that struct, so we
 	// surface the values through resolvedEnv instead.
+	//
+	// This write is unconditional and always the last word on
+	// SCION_METADATA_MODE (identity vars are set after the storage/secrets
+	// merge above, at "highest precedence" per the comment on SCION_AGENT_ID
+	// et al.): when the agent has no GCP identity configured at all, the mode
+	// still needs to be authoritatively set to the secure default rather than
+	// left for whatever a lower-precedence merge put in resolvedEnv.
+	gcpMetadataMode := store.GCPMetadataModeBlock
 	if agent.AppliedConfig != nil {
 		if gcpID := agent.AppliedConfig.GCPIdentity; gcpID != nil {
-			resolvedEnv["SCION_METADATA_MODE"] = gcpID.MetadataMode
-			classifyEnv(&envClassifications, "SCION_METADATA_MODE", api.EnvKindPlain)
-			if gcpID.MetadataMode == store.GCPMetadataModeAssign {
+			gcpMetadataMode = gcpID.MetadataMode
+			if gcpMetadataMode == store.GCPMetadataModeAssign {
 				resolvedEnv["SCION_METADATA_SA_EMAIL"] = gcpID.ServiceAccountEmail
 				classifyEnv(&envClassifications, "SCION_METADATA_SA_EMAIL", api.EnvKindPlain)
 				resolvedEnv["SCION_METADATA_PROJECT_ID"] = gcpID.ProjectID
@@ -2524,6 +2545,8 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 			}
 		}
 	}
+	resolvedEnv["SCION_METADATA_MODE"] = gcpMetadataMode
+	classifyEnv(&envClassifications, "SCION_METADATA_MODE", api.EnvKindPlain)
 
 	// Generate a fresh agent token for Hub authentication.
 	tokenIssued := false
