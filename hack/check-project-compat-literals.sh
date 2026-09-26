@@ -165,6 +165,7 @@ allowed_paths=(
   "^pkg/secret/gcpbackend_test.go$"
   "^pkg/secret/localbackend_test.go$"
   "^pkg/storage/storage_test.go$"
+  "^pkg/store/entadapter/agent_session_metrics_projectid_test.go$"
   # Seeds scope='grove' rows with raw SQL to prove the data migration in
   # legacy_scope_migration.go rewrites them; the literal is the point of the
   # test.
@@ -242,7 +243,6 @@ allowed_paths=(
   "^pkg/sciontool/telemetry/policy.go$"
   "^pkg/sciontool/telemetry/policy_test.go$"
   "^pkg/storage/storage.go$"
-  "^pkg/store/entadapter/agent_session_metrics_store.go$"
   "^pkg/store/entadapter/composite.go$"
   # One-shot data migration rewriting stored scope='grove' rows to 'project';
   # removed once no hub can have a pre-migration row left to normalize.

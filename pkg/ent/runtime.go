@@ -251,10 +251,10 @@ func init() {
 	agentsessionmetricsDescAgentID := agentsessionmetricsFields[1].Descriptor()
 	// agentsessionmetrics.AgentIDValidator is a validator for the "agent_id" field. It is called by the builders before save.
 	agentsessionmetrics.AgentIDValidator = agentsessionmetricsDescAgentID.Validators[0].(func(string) error)
-	// agentsessionmetricsDescGroveID is the schema descriptor for grove_id field.
-	agentsessionmetricsDescGroveID := agentsessionmetricsFields[2].Descriptor()
-	// agentsessionmetrics.GroveIDValidator is a validator for the "grove_id" field. It is called by the builders before save.
-	agentsessionmetrics.GroveIDValidator = agentsessionmetricsDescGroveID.Validators[0].(func(string) error)
+	// agentsessionmetricsDescProjectID is the schema descriptor for project_id field.
+	agentsessionmetricsDescProjectID := agentsessionmetricsFields[2].Descriptor()
+	// agentsessionmetrics.ProjectIDValidator is a validator for the "project_id" field. It is called by the builders before save.
+	agentsessionmetrics.ProjectIDValidator = agentsessionmetricsDescProjectID.Validators[0].(func(string) error)
 	// agentsessionmetricsDescSessionID is the schema descriptor for session_id field.
 	agentsessionmetricsDescSessionID := agentsessionmetricsFields[3].Descriptor()
 	// agentsessionmetrics.SessionIDValidator is a validator for the "session_id" field. It is called by the builders before save.

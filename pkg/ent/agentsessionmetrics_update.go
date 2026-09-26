@@ -43,16 +43,16 @@ func (_u *AgentSessionMetricsUpdate) SetNillableAgentID(v *string) *AgentSession
 	return _u
 }
 
-// SetGroveID sets the "grove_id" field.
-func (_u *AgentSessionMetricsUpdate) SetGroveID(v string) *AgentSessionMetricsUpdate {
-	_u.mutation.SetGroveID(v)
+// SetProjectID sets the "project_id" field.
+func (_u *AgentSessionMetricsUpdate) SetProjectID(v string) *AgentSessionMetricsUpdate {
+	_u.mutation.SetProjectID(v)
 	return _u
 }
 
-// SetNillableGroveID sets the "grove_id" field if the given value is not nil.
-func (_u *AgentSessionMetricsUpdate) SetNillableGroveID(v *string) *AgentSessionMetricsUpdate {
+// SetNillableProjectID sets the "project_id" field if the given value is not nil.
+func (_u *AgentSessionMetricsUpdate) SetNillableProjectID(v *string) *AgentSessionMetricsUpdate {
 	if v != nil {
-		_u.SetGroveID(*v)
+		_u.SetProjectID(*v)
 	}
 	return _u
 }
@@ -349,9 +349,9 @@ func (_u *AgentSessionMetricsUpdate) check() error {
 			return &ValidationError{Name: "agent_id", err: fmt.Errorf(`ent: validator failed for field "AgentSessionMetrics.agent_id": %w`, err)}
 		}
 	}
-	if v, ok := _u.mutation.GroveID(); ok {
-		if err := agentsessionmetrics.GroveIDValidator(v); err != nil {
-			return &ValidationError{Name: "grove_id", err: fmt.Errorf(`ent: validator failed for field "AgentSessionMetrics.grove_id": %w`, err)}
+	if v, ok := _u.mutation.ProjectID(); ok {
+		if err := agentsessionmetrics.ProjectIDValidator(v); err != nil {
+			return &ValidationError{Name: "project_id", err: fmt.Errorf(`ent: validator failed for field "AgentSessionMetrics.project_id": %w`, err)}
 		}
 	}
 	if v, ok := _u.mutation.SessionID(); ok {
@@ -377,8 +377,8 @@ func (_u *AgentSessionMetricsUpdate) sqlSave(ctx context.Context) (_node int, er
 	if value, ok := _u.mutation.AgentID(); ok {
 		_spec.SetField(agentsessionmetrics.FieldAgentID, field.TypeString, value)
 	}
-	if value, ok := _u.mutation.GroveID(); ok {
-		_spec.SetField(agentsessionmetrics.FieldGroveID, field.TypeString, value)
+	if value, ok := _u.mutation.ProjectID(); ok {
+		_spec.SetField(agentsessionmetrics.FieldProjectID, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.SessionID(); ok {
 		_spec.SetField(agentsessionmetrics.FieldSessionID, field.TypeString, value)
@@ -500,16 +500,16 @@ func (_u *AgentSessionMetricsUpdateOne) SetNillableAgentID(v *string) *AgentSess
 	return _u
 }
 
-// SetGroveID sets the "grove_id" field.
-func (_u *AgentSessionMetricsUpdateOne) SetGroveID(v string) *AgentSessionMetricsUpdateOne {
-	_u.mutation.SetGroveID(v)
+// SetProjectID sets the "project_id" field.
+func (_u *AgentSessionMetricsUpdateOne) SetProjectID(v string) *AgentSessionMetricsUpdateOne {
+	_u.mutation.SetProjectID(v)
 	return _u
 }
 
-// SetNillableGroveID sets the "grove_id" field if the given value is not nil.
-func (_u *AgentSessionMetricsUpdateOne) SetNillableGroveID(v *string) *AgentSessionMetricsUpdateOne {
+// SetNillableProjectID sets the "project_id" field if the given value is not nil.
+func (_u *AgentSessionMetricsUpdateOne) SetNillableProjectID(v *string) *AgentSessionMetricsUpdateOne {
 	if v != nil {
-		_u.SetGroveID(*v)
+		_u.SetProjectID(*v)
 	}
 	return _u
 }
@@ -819,9 +819,9 @@ func (_u *AgentSessionMetricsUpdateOne) check() error {
 			return &ValidationError{Name: "agent_id", err: fmt.Errorf(`ent: validator failed for field "AgentSessionMetrics.agent_id": %w`, err)}
 		}
 	}
-	if v, ok := _u.mutation.GroveID(); ok {
-		if err := agentsessionmetrics.GroveIDValidator(v); err != nil {
-			return &ValidationError{Name: "grove_id", err: fmt.Errorf(`ent: validator failed for field "AgentSessionMetrics.grove_id": %w`, err)}
+	if v, ok := _u.mutation.ProjectID(); ok {
+		if err := agentsessionmetrics.ProjectIDValidator(v); err != nil {
+			return &ValidationError{Name: "project_id", err: fmt.Errorf(`ent: validator failed for field "AgentSessionMetrics.project_id": %w`, err)}
 		}
 	}
 	if v, ok := _u.mutation.SessionID(); ok {
@@ -864,8 +864,8 @@ func (_u *AgentSessionMetricsUpdateOne) sqlSave(ctx context.Context) (_node *Age
 	if value, ok := _u.mutation.AgentID(); ok {
 		_spec.SetField(agentsessionmetrics.FieldAgentID, field.TypeString, value)
 	}
-	if value, ok := _u.mutation.GroveID(); ok {
-		_spec.SetField(agentsessionmetrics.FieldGroveID, field.TypeString, value)
+	if value, ok := _u.mutation.ProjectID(); ok {
+		_spec.SetField(agentsessionmetrics.FieldProjectID, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.SessionID(); ok {
 		_spec.SetField(agentsessionmetrics.FieldSessionID, field.TypeString, value)
