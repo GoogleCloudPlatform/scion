@@ -397,7 +397,8 @@ func TestDEF152_AgentToAgentDM_DeliversViaOutbound(t *testing.T) {
 		Slug:   "d152-broker",
 		Status: store.BrokerStatusOnline,
 	}))
-	srv.SetDispatcher(&brokerMockDispatcher{})
+	dispatcher := &brokerMockDispatcher{}
+	srv.SetDispatcher(dispatcher)
 
 	// Create a second agent in the same project for the DM.
 	otherAgent := &store.Agent{
@@ -461,4 +462,11 @@ func TestDEF152_AgentToAgentDM_DeliversViaOutbound(t *testing.T) {
 		"recipient_id must be the target agent's ID")
 	assert.NotEmpty(t, storedMsg.ConversationID,
 		"message must be attributed to a conversation")
+
+	// R2 (FYI 3): verify the mock dispatcher was actually invoked for the
+	// target agent, not merely that persistence succeeded.
+	dispatched := dispatcher.getMessages()
+	require.Len(t, dispatched, 1, "dispatcher must be invoked exactly once")
+	assert.Equal(t, otherAgent.Slug, dispatched[0].agentSlug,
+		"dispatched message must target the resolved agent")
 }
