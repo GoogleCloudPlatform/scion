@@ -1863,6 +1863,18 @@ type GCPIdentityConfig struct {
 	ServiceAccountID    string `json:"serviceAccountId,omitempty"`    // FK to GCPServiceAccount (required for "assign")
 	ServiceAccountEmail string `json:"serviceAccountEmail,omitempty"` // Denormalized for runtime use
 	ProjectID           string `json:"projectId,omitempty"`           // Denormalized
+
+	// RequireLocalRuntime marks a "passthrough" mode as granted by the
+	// hub-default rung specifically (hubDefaultRuntimeAllowed,
+	// default_gcp_identity.go), never by an explicit request or a
+	// project-level default. The hub resolves the runtime this agent will
+	// dispatch under from the broker's own registration data, which can
+	// differ from what the broker resolves at dispatch time against
+	// project-effective settings. The broker re-checks this flag once it
+	// knows the real resolved runtime, and downgrades to "block" itself if
+	// that runtime turns out not to be a local container runtime — a second
+	// line of defense behind the hub-side gate, not a replacement for it.
+	RequireLocalRuntime bool `json:"requireLocalRuntime,omitempty"`
 }
 
 // GCPVerificationStatus constants describe the outcome of the Hub's last

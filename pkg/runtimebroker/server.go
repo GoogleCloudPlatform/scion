@@ -241,6 +241,13 @@ type Server struct {
 	auxiliaryRuntimes   map[string]auxiliaryRuntime
 	auxiliaryRuntimesMu sync.RWMutex
 
+	// runtimeResolver constructs the runtime for a project/agent/profile in
+	// resolveManagerForOpts when settings resolve to something other than
+	// the broker's default runtime. Defaults to agent.ResolveRuntime; tests
+	// override it to substitute a mock without touching the production
+	// resolution path or its constructed managers.
+	runtimeResolver func(projectPath, agentName, profileFlag string) scionrt.Runtime
+
 	// projectProvisionMu serializes worktree provisioning per project on this
 	// node. Without this, concurrent agent creations for the same project could
 	// race inside ProvisionShared (double-clone / corrupt .git state).
@@ -301,6 +308,7 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 		hubConnections:    make(map[string]*HubConnection),
 		dispatchAttempts:  make(map[string]*dispatchAttempt),
 		auxiliaryRuntimes: make(map[string]auxiliaryRuntime),
+		runtimeResolver:   agent.ResolveRuntime,
 
 		// Subsystem loggers
 		agentLifecycleLog: logging.Subsystem("broker.agent-lifecycle"),
