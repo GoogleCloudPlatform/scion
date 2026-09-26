@@ -1295,13 +1295,13 @@ protection; the reserved list is the protection.
 THE FLAG SET IS cmd/server.go PLUS cmd/root.go. server start inherits rootCmd's
 PERSISTENT flags, so the flags it accepts are not all declared in the file that
 declares the command. Two rounds of this list were built from cmd/server.go
-alone and both were incomplete in the same direction: --global, --project, -g
-and --grove are all inherited, all accepted by server start, and all absent from
+alone and both were incomplete in the same direction: --global, --project and
+-g are all inherited, all accepted by server start, and all absent from
 cmd/server.go. If you extend this list, enumerate both files.
 
-The RESERVED flags are grouped by WHY they are reserved, in five lists below,
+The RESERVED flags are grouped by WHY they are reserved, in six lists below,
 and the grouping is load-bearing rather than tidy. Only one group is verifiable
-against the rendered arguments. For the other four, finding no match in the
+against the rendered arguments. For the other five, finding no match in the
 rendered arguments is the expected steady state and NOT evidence that the entry
 is stale - which is exactly the reasoning that would delete them. A flat list
 under one comment invites the next maintainer to verify each entry against what
@@ -1343,7 +1343,7 @@ way to override; names are handled by the exact-match reserved list instead.
     "--auto-provide"
     "--global" }}
 {{- /*
-Five lists, not one, because they are reserved for five different reasons and a
+Six lists, not one, because they are reserved for six different reasons and a
 flat list loses the reason. See the block comment above for why that matters:
 the entries below are NOT all verifiable by checking what the chart renders.
 Exactly one list is.
@@ -1398,7 +1398,7 @@ Exactly one list is.
 
    --config AND -c: READ THIS BEFORE YOU CHANGE OR CHECK IT. It reaches exactly
    one place on this command's path: config.LoadGlobalConfig(serverConfigPath),
-   cmd/server_foreground.go:827, via cmd/server.go:237.
+   cmd/server_foreground.go:827, via cmd/server.go:238.
 
    THE STATE OF THIS FLAG, IN THE ONLY FORM THAT STAYS TRUE:
 
@@ -1489,24 +1489,18 @@ Exactly one list is.
 
    AND IT GOES INERT IN COMPLETE SILENCE, WHICH IS THE REASON A RESERVED FLAG IS
    THE ONLY GUARD AVAILABLE. There is no deprecation warning on --config and no
-   log line of any kind. --config is a plain StringVarP at cmd/server.go:237 and
-   carries no MarkDeprecated anywhere. Exactly two flags reachable on server start
-   do carry one: "production", marked on serverStartCmd itself at cmd/server.go:236,
-   and "grove", marked on rootCmd's PERSISTENT flags via
-   PersistentFlags().MarkDeprecated("grove", ...) in cmd/root.go's init(), and so
-   inherited here. An earlier version of this sentence read "MarkDeprecated on
-   server start covers only production (cmd/server.go:236, :290)" and was wrong
-   twice in one clause - it missed the inherited --grove, and :290 is that same
-   mark on serverInstallCmd, a DIFFERENT COMMAND, offered as though it were a
-   second site on this one. Neither error touches the conclusion about --config,
-   which is exactly why it survived three readings: A CITATION THAT FAILS IN A
-   PLAUSIBLE WAY IS WORSE THAN ONE THAT FAILS OBVIOUSLY. The
-   only two warnings anywhere on this path (pkg/config/hub_config.go:668 and
-   :678) fire on server.yaml coexisting with settings.yaml and are not about
-   --config at all. An earlier version of this comment claimed a deprecation
-   warning; it does not exist, and "accepted and silently ignored" is a worse
-   defect than "redirects", not a milder one - a redirect is at least detectable
-   by its effects.
+   log line of any kind. --config is a plain StringVarP at cmd/server.go:238 and
+   carries no MarkDeprecated anywhere. Exactly one flag reachable on server start
+   carries one: "production", marked deprecated at cmd/server.go:237 on
+   serverStartCmd itself. cmd/server.go:291 marks the SAME flag name deprecated
+   again, but on serverInstallCmd, a DIFFERENT COMMAND - worth stating
+   separately so it is not mistaken for a second deprecated flag on this one.
+   The only two warnings anywhere on this path
+   (pkg/config/hub_config.go:668 and :678) fire on server.yaml coexisting with
+   settings.yaml and are not about --config at all. An earlier version of this
+   comment claimed a deprecation warning; it does not exist, and "accepted and
+   silently ignored" is a worse defect than "redirects", not a milder one - a
+   redirect is at least detectable by its effects.
 
    THE ONE FEEDBACK PATH THE FLAG CAN PRODUCE IS WORSE THAN SILENCE. Point
    --config at a directory that also holds a server.yaml and :678 prints "Both
@@ -1542,37 +1536,31 @@ Exactly one list is.
    agree with, not answers - that is the only comparison that has ever caught one
    of these.
 
-   --project, -g, --grove, --profile and -p: THE REASON HERE IS DIFFERENT AND
-   WEAKER THAN THE ONE THIS COMMENT USED TO GIVE, and it is written out rather
-   than borrowed from --config because borrowing it is what made it wrong. They
-   are declared in cmd/root.go as PERSISTENT flags, which is why three
-   enumerations of cmd/server.go missed them.
+   --project, -g, --profile and -p: THE REASON HERE IS DIFFERENT AND WEAKER THAN
+   THE ONE THIS COMMENT USED TO GIVE, and it is written out rather than borrowed
+   from --config because borrowing it is what made it wrong. They are declared
+   in cmd/root.go as PERSISTENT flags, which is why three enumerations of
+   cmd/server.go missed them.
 
    What they do NOT do: move the global configuration directory, or reach
    LoadGlobalConfig - the loader every paragraph above is about - at any point.
    The hub's server configuration is not reachable from any of them.
 
-   What --project/-g/--grove DO do on this command, traced from the flag
-   declaration outward: they set projectPath, via the StringVarP/StringVar calls
-   in cmd/root.go's init() (the rootCmd.Long assignment that precedes those
-   calls there is not a flag declaration), and PersistentPreRunE passes
-   projectPath to config.LoadSettings and config.LoadEffectiveSettings for
-   EVERY command, server start included. Those two select which project's
-   settings.yaml supplies cli.autohelp and cli.interactive_disabled, and the
-   second can force the process non-interactive. It also reaches
-   printDevAuthWarningIfNeeded, which loads the same file again to decide
-   whether to warn. That is a narrower effect than this comment used to claim -
-   CLI-level settings, not the hub's server config - but it is a real one, it
-   is configuration selection, and the chart's guarantee is over the whole
-   rendered command line. The project-required check
-   (requiresProject && projectPath == "") is NOT among them: PersistentPreRunE
-   clears requiresProject for the server subtree before that check runs.
-
-   --grove binds the SAME VARIABLE as --project (both the StringVarP and the
-   StringVar calls target &projectPath in cmd/root.go's init()), so reserving
-   one without the other leaves the alias open - the hosted/production pattern
-   again. It is also MarkHidden, so it will not appear in --help to whoever
-   checks.
+   What --project/-g DO do on this command, traced from the flag declaration
+   outward: they set projectPath, via the StringVarP call in cmd/root.go's
+   init() (the rootCmd.Long assignment that precedes it there is not a flag
+   declaration), and PersistentPreRunE passes projectPath to
+   config.LoadSettings and config.LoadEffectiveSettings for EVERY command,
+   server start included. Those two select which project's settings.yaml
+   supplies cli.autohelp and cli.interactive_disabled, and the second can force
+   the process non-interactive. It also reaches printDevAuthWarningIfNeeded,
+   which loads the same file again to decide whether to warn. That is a
+   narrower effect than this comment used to claim - CLI-level settings, not
+   the hub's server config - but it is a real one, it is configuration
+   selection, and the chart's guarantee is over the whole rendered command
+   line. The project-required check (requiresProject && projectPath == "") is
+   NOT among them: PersistentPreRunE clears requiresProject for the server
+   subtree before that check runs.
 
    --profile/-p IS THE WEAK ENTRY AND IS LABELLED AS ONE. Its only consumer on
    this path is config.RequireImageRegistry, and that call is skipped whenever
@@ -1603,7 +1591,7 @@ Exactly one list is.
    running from the container's working directory instead. It does not move
    $HOME/.scion, because nothing does.
 */}}
-{{- $neverPassed := list "config" "c" "project" "g" "grove" "profile" "p" }}
+{{- $neverPassed := list "config" "c" "project" "g" "profile" "p" }}
 
 {{- /*
 2b. THE SAME RESERVED SHORTHANDS AGAIN, AS SINGLE CHARACTERS, FOR THE CLUSTER
@@ -1703,7 +1691,35 @@ Exactly one list is.
 {{- $valueTakingShorthand := list "c" "g" "p" }}
 
 {{- /*
-3. Not the lever they appear to be. Each of these is a flag an operator could
+3. THE FLAG NO LONGER EXISTS AT ALL, WHICH IS A DIFFERENT REASON FROM EVERY
+   OTHER LIST ON THIS PAGE. Every list above and below guards a flag server
+   start still accepts; this one does not. cmd/root.go declares no --grove flag
+   any more, so it does not alias --project and it does not reach projectPath,
+   which is why it is not part of the --project/-g/--profile/-p paragraph above.
+
+   IT STAYS RESERVED ANYWAY, TO TURN A CRASH LOOP INTO A RENDER ERROR. Every
+   spelling this entry matches is refused by pflag itself as an unknown flag
+   or an unknown shorthand, and the CLI only reports that after the pod has
+   already started. This entry catches the same argument at render time
+   instead, before anything is deployed, with a message that says the flag no
+   longer exists rather than describing what it used to do - the same trade
+   the case-folding of --CONFIG makes above for a spelling mismatch instead
+   of a removal.
+
+   CHECKED AFTER THE CLUSTER WALK. Single-dash -grove is a -g CLUSTER that
+   pflag reads as -g rove, silently setting the project; the walk below
+   refuses it first and names -g. Every other spelling - --grove, --GROVE,
+   and single-dash forms such as -GROVE that start with no registered
+   shorthand - reaches this entry instead, which is why it is placed after
+   the walk rather than restricted to the double-dash form: a dash-count
+   guard here would let -GROVE and -Grove through unrefused, and pflag would
+   crash-loop the hub on the unknown shorthand rather than this chart
+   refusing the render.
+*/}}
+{{- $removedFlags := list "grove" }}
+
+{{- /*
+4. Not the lever they appear to be. Each of these is a flag an operator could
    reasonably reach for, which either aliases something the chart controls or is
    silently ignored in the configuration this chart renders. NOT verifiable
    against the rendered args - the chart emits neither - and that is why they are
@@ -1725,7 +1741,7 @@ Exactly one list is.
 {{- $aliasOrIgnored := list "production" "port" }}
 
 {{- /*
-4. THESE ARE DELIVERED THROUGH A CHANNEL OTHER THAN argv, AND argv WINS OVER IT
+5. THESE ARE DELIVERED THROUGH A CHANNEL OTHER THAN argv, AND argv WINS OVER IT
    SILENTLY. Two of the five are delivered by this chart and three are not, and
    that split is the paragraph. It was one claim about five flags until the
    settings rendering landed, and it is two claims now.
@@ -1763,8 +1779,9 @@ Exactly one list is.
    phase - db, that is the first list above, and the answer is still not argv.
    For the other two, admin-emails and storage-dir, it is nowhere yet. None of
    the five is rendered as an argument ($setByChart), none selects
-   which configuration is loaded ($neverPassed), none is inert or misnamed
-   ($aliasOrIgnored), and none weakens authentication ($unsafeToPass).
+   which configuration is loaded ($neverPassed), none is a flag that no longer
+   exists ($removedFlags), none is inert or misnamed ($aliasOrIgnored), and
+   none weakens authentication ($unsafeToPass).
 
    The harm is present for three of the five and scheduled for the other two.
    Passing -base-url, -storage-bucket or -db today makes argv the silent winner
@@ -1824,7 +1841,7 @@ Exactly one list is.
 {{- $ownedByConfig := list "admin-emails" "base-url" "db" "storage-bucket" "storage-dir" }}
 
 {{- /*
-5. These weaken authentication or place credentials where they can be read.
+6. These weaken authentication or place credentials where they can be read.
 
    PER-ENTRY, WITH THE EFFECT TRACED, because "unsafe" was the entire stated
    reason for four flags until round 4 and an unexplained reservation is the kind
@@ -1884,7 +1901,7 @@ Exactly one list is.
 {{- $unsafeToPass := list "session-secret" "dev-auth" "enable-test-login" "web-assets-dir" }}
 
 {{- /*
-ADJUDICATED AND DELIBERATELY NOT RESERVED. The five lists above say what is
+ADJUDICATED AND DELIBERATELY NOT RESERVED. The six lists above say what is
 refused; a reader auditing them for COMPLETENESS needs to know which flags were
 considered and let through, or they re-derive the same six every time. Round 4
 raised these by name. None is reserved, and the ground is given per flag rather
@@ -1941,7 +1958,7 @@ A alone was implemented first and would not have caught B's case at all. Both
 mistakes are the same mistake - the list and the render drifting - and one
 containment only ever sees one direction of drift.
 
-DIRECTION B IS MEANINGFUL FOR $setByChart AND FOR NO OTHER LIST. The other three
+DIRECTION B IS MEANINGFUL FOR $setByChart AND FOR NO OTHER LIST. The other five
 are reserved precisely BECAUSE the chart does not render them, so for them the
 empty intersection is the expected steady state forever. That is what the split
 into reasons bought beyond documentation: it isolated the one group whose
@@ -2002,7 +2019,7 @@ would be a third thing to keep in step with the command.
 {{- end }}
 {{- range $listed := $setByChart }}
 {{- if not (has $listed $renderedFlags) }}
-{{- fail (printf "chart defect, not a values error: $setByChart lists %q but scion-hub.hubArgs does not render it, and that list's stated reason for reserving a flag is that the chart sets it. Do NOT fix this by deleting the entry - a reserved flag the chart does not render may still be dangerous to accept, and deleting it would silently reopen whatever it was guarding. Move it to the list whose reason actually applies ($neverPassed, $aliasOrIgnored, $ownedByConfig or $unsafeToPass), or render it. If a later phase renders it conditionally, append to $setByChart inside the same conditional." $listed) }}
+{{- fail (printf "chart defect, not a values error: $setByChart lists %q but scion-hub.hubArgs does not render it, and that list's stated reason for reserving a flag is that the chart sets it. Do NOT fix this by deleting the entry - a reserved flag the chart does not render may still be dangerous to accept, and deleting it would silently reopen whatever it was guarding. Move it to the list whose reason actually applies ($neverPassed, $removedFlags, $aliasOrIgnored, $ownedByConfig or $unsafeToPass), or render it. If a later phase renders it conditionally, append to $setByChart inside the same conditional." $listed) }}
 {{- end }}
 {{- end }}
 {{- range $raw := .Values.hub.args }}
@@ -2034,7 +2051,7 @@ overlay on the other, and no single verb covers both.
 {{- fail (printf "hub.args may not contain -%s: the chart renders it, and pflag is last-wins, so this would silently replace the chart's value rather than conflict with it - disabling hosted mode, unbinding the listener, taking the daemon fork so PID 1 exits, leaving /readyz unregistered, or leaving the runtime broker off in a pod that still reports Ready and can never launch an agent." $flag) }}
 {{- end }}
 {{- if has $flag $neverPassed }}
-{{- fail (printf "hub.args may not contain -%s: it changes which configuration the hub selects, and the chart's guarantee is that the configuration in force is the configuration it rendered. -config and -c either replace the hub's whole server section with one read from the directory they name - not from the file named on the flag - or layer a file over it, depending on which loader is reached; and once the global settings document carries a non-nil top-level server: key, the same flag is accepted and ignored instead. That key is the trigger, not the existence of any file. All three outcomes are silent: no warning, no log line, nothing observable from the running pod. -project, -g and -grove change which project's settings supply the CLI's own behaviour, including whether it runs non-interactively. -profile has no effect on this command today and is reserved against acquiring one. In every case the rendered values keep reporting the operator's intent while the process may not be following it." $flag) }}
+{{- fail (printf "hub.args may not contain -%s: it changes which configuration the hub selects, and the chart's guarantee is that the configuration in force is the configuration it rendered. -config and -c either replace the hub's whole server section with one read from the directory they name - not from the file named on the flag - or layer a file over it, depending on which loader is reached; and once the global settings document carries a non-nil top-level server: key, the same flag is accepted and ignored instead. That key is the trigger, not the existence of any file. All three outcomes are silent: no warning, no log line, nothing observable from the running pod. -project and -g change which project's settings supply the CLI's own behaviour, including whether it runs non-interactively. -profile has no effect on this command today and is reserved against acquiring one. In every case the rendered values keep reporting the operator's intent while the process may not be following it." $flag) }}
 {{- end }}
 {{- if has $flag $aliasOrIgnored }}
 {{- fail (printf "hub.args may not contain -%s: it is not the lever it looks like. -production is a deprecated alias bound to the same variable as -hosted, so passing it can disable hosted mode; -port is ignored whenever -enable-web is set, which this chart always sets, so passing it changes nothing observable. The chart renders neither, which is why this is a separate reservation and not a stale entry." $flag) }}
@@ -2070,6 +2087,9 @@ overlay on the other, and no single verb covers both.
 {{- end }}
 {{- end }}
 {{- end }}
+{{- end }}
+{{- if has $flag $removedFlags }}
+{{- fail (printf "hub.args may not contain -%s: scion server start no longer has this flag, so the hub would exit with an unknown-flag error and the pod would crash-loop. Remove it from hub.args." $flag) }}
 {{- end }}
 {{- /*
    $flagRaw, NOT $flag. The reserved-name lists above are matched case-insensitively
@@ -2792,8 +2812,8 @@ them.
 
 IN THE INERT STATE IT IS A NO-OP WITH NO SIGNAL, WHICH IS WHY THIS ASSERTION IS
 THE ONLY WARNING THERE WILL EVER BE. --config is not marked deprecated -
-MarkDeprecated appears twice in cmd/server.go, :236 and :290, both for
---production; the flag itself is a plain StringVarP at :237 - and the two
+MarkDeprecated appears twice in cmd/server.go, :237 and :291, both for
+--production; the flag itself is a plain StringVarP at :238 - and the two
 warnings in the load path (:668, :678) are about a server.yaml beside
 settings.yaml, the second of them additionally requiring hasServerYAML(dir)
 (:1393), which this chart creates nowhere. So while this key is emitted the flag
@@ -2813,7 +2833,7 @@ The six keys below are nested under server: in V1ServerConfig. A file that
 places any of them at the top level parses, installs, and is silently not read.
 */}}
 {{- if not (hasKey $doc "server") }}
-{{- fail "rendered settings.yaml has no top-level server: section. Two consequences. (1) Every server setting in this file is lost: the hub reads the server section and nothing else from it (pkg/config/hub_config.go:1344-1347). (2) --config goes back to being live, and it is Phase 0's reserved flag. That flag is not inert by nature - at Phase 0 it was fully live, and not because no settings.yaml existed: the hub seeds one from embedded defaults that carry no server key (cmd/server_foreground.go:104-109, pkg/config/init.go:588-599), and the loader tests the key, not the file (:1344-1347). Emitting this key is what makes the global settings read succeed (:647) and the --config path go unread; drop it and loadGlobalConfigFromSettings consults that path instead (:648-659), where its own settings.yaml becomes the sole source of the server config, and failing that loadGlobalConfigLegacy layers the --config file over the loaded configuration (:777-787). Neither state announces itself: --config is silently accepted and ignored while this key is here - no error, no warning, no log line, and it is not marked deprecated (cmd/server.go:237 defines it; the MarkDeprecated calls at :236 and :290 are both for --production) - so this render-time failure is the only signal a settings-shape refactor will ever get." }}
+{{- fail "rendered settings.yaml has no top-level server: section. Two consequences. (1) Every server setting in this file is lost: the hub reads the server section and nothing else from it (pkg/config/hub_config.go:1344-1347). (2) --config goes back to being live, and it is Phase 0's reserved flag. That flag is not inert by nature - at Phase 0 it was fully live, and not because no settings.yaml existed: the hub seeds one from embedded defaults that carry no server key (cmd/server_foreground.go:104-109, pkg/config/init.go:588-599), and the loader tests the key, not the file (:1344-1347). Emitting this key is what makes the global settings read succeed (:647) and the --config path go unread; drop it and loadGlobalConfigFromSettings consults that path instead (:648-659), where its own settings.yaml becomes the sole source of the server config, and failing that loadGlobalConfigLegacy layers the --config file over the loaded configuration (:777-787). Neither state announces itself: --config is silently accepted and ignored while this key is here - no error, no warning, no log line, and it is not marked deprecated (cmd/server.go:238 defines it; the MarkDeprecated calls at :237 and :291 are both for --production) - so this render-time failure is the only signal a settings-shape refactor will ever get." }}
 {{- end }}
 {{- if not (kindIs "map" (get $doc "server")) }}
 {{- fail (printf "rendered settings.yaml has a top-level server: key that is not a map (%v). The hub tests raw[\"server\"] != nil (pkg/config/hub_config.go:1344-1347), so an empty or nulled server section reads as no settings file at all: every server setting is lost, and --config - reserved by Phase 0, live there, and silently accepted and ignored only while this chart emits this key as a map - returns to live as a sole-source substitution at :648-659 or as an overlay at :777-787. Same consequence as omitting the key entirely; see the comment above this check." (get $doc "server")) }}
