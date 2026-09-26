@@ -160,6 +160,9 @@ func (s *Server) listTemplatesV2(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, query := r.Context(), r.URL.Query()
 	filter := store.TemplateFilter{Name: query.Get("name"), Scope: query.Get("scope"), ScopeID: query.Get("scopeId"), ProjectID: query.Get("projectId"), Harness: query.Get("harness"), Status: query.Get("status"), Search: query.Get("search")}
+	// Normalize a legacy scope name to its canonical form before it drives
+	// the scope switch below or the store filter (ptone/scion#1977).
+	filter.Scope = projectcompat.CanonicalResourceScope(filter.Scope)
 	if filter.Status == "" {
 		filter.Status = store.TemplateStatusActive
 	}
@@ -256,6 +259,10 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 	if scopeID == "" && req.ProjectID != "" {
 		scopeID = req.ProjectID
 	}
+
+	// Normalize a legacy scope name to its canonical form before it drives
+	// authorization or is persisted on the record (ptone/scion#1977).
+	req.Scope = projectcompat.CanonicalResourceScope(req.Scope)
 
 	// SECURITY-GATE: require template.create permission before any mutation.
 	// Scope-aware: project-scoped requests authorize against the project parent

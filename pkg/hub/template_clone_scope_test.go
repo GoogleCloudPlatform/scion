@@ -188,3 +188,56 @@ func TestTemplateClone_LegacyScopeName_CollisionDetected(t *testing.T) {
 	assert.Equal(t, existingContent, stor.content[existingPath+"/scion-agent.yaml"],
 		"the existing template's file content must survive a colliding legacy-scope clone attempt")
 }
+
+// TestCreateTemplateV2_LegacyScopeName_GetsProjectParent verifies that
+// createTemplateV2 (the generic POST /api/v1/templates handler) also
+// normalizes the legacy "grove" scope name via
+// projectcompat.CanonicalResourceScope, so a create request naming it
+// authorizes against the project parent and the stored record ends up
+// scoped canonically, matching handleTemplateClone's normalization.
+func TestCreateTemplateV2_LegacyScopeName_GetsProjectParent(t *testing.T) {
+	srv, s, _, _, project := setupTemplateAuthzTest(t)
+
+	member := createNamedTestUser(t, s, "create-legacy-scope-member", store.UserRoleMember)
+	ensureHubMembership(context.Background(), s, member.ID)
+	createTestUserWithProjectRole(t, s, member.ID, member.Email, project.ID, store.ProjectRoleMember)
+
+	rec := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/templates", CreateTemplateRequest{
+		Name:    "create-legacy-scope-template",
+		Harness: "claude",
+		Scope:   "grove",
+		ScopeID: project.ID,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code,
+		"a project member must be able to create using the legacy scope name; got: %s", rec.Body.String())
+
+	var resp CreateTemplateResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, store.TemplateScopeProject, resp.Template.Scope,
+		"the legacy scope name must be normalized to its canonical form before the record is stored")
+	assert.Equal(t, project.ID, resp.Template.ScopeID)
+}
+
+// TestListTemplatesV2_LegacyScopeName_FindsProjectTemplates verifies that
+// listTemplatesV2 (the generic GET /api/v1/templates handler) normalizes the
+// legacy "grove" scope name before filtering, so a list request naming it
+// finds templates stored under the canonical "project" scope rather than
+// returning nothing.
+func TestListTemplatesV2_LegacyScopeName_FindsProjectTemplates(t *testing.T) {
+	srv, s, alice, _, project := setupTemplateAuthzTest(t)
+	tpl := createAuthzTestTemplate(t, s, "list-legacy-scope-target", store.TemplateScopeProject, project.ID, alice.ID)
+
+	rec := doRequestAsUser(t, srv, alice, http.MethodGet, "/api/v1/templates?scope=grove&scopeId="+project.ID, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp ListTemplatesResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	var found bool
+	for _, item := range resp.Templates {
+		if item.ID == tpl.ID {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "listing with the legacy scope name must find templates stored under the canonical project scope")
+}
