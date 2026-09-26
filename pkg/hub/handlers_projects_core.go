@@ -1732,32 +1732,16 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check for nested /shared-dirs path
+	// Every shared-dir operation — list/create, delete-by-name, archive
+	// download, and the file operations (list, download, upload, write,
+	// delete) — is dispatched through one entry point that authorizes before
+	// it routes, the same single-entry-point shape used for the workspace
+	// subtree below. A shared-dir path added later inherits the check by
+	// construction instead of needing each leaf to remember one.
 	if strings.HasPrefix(subPath, "shared-dirs") {
 		sdPath := strings.TrimPrefix(subPath, "shared-dirs")
 		sdPath = strings.TrimPrefix(sdPath, "/")
-		if sdPath == "" {
-			s.handleProjectSharedDirs(w, r, projectID)
-		} else {
-			// Split into name and optional sub-path (e.g. "my-dir/files/some/path")
-			parts := strings.SplitN(sdPath, "/", 2)
-			name := parts[0]
-			rest := ""
-			if len(parts) > 1 {
-				rest = parts[1]
-			}
-			if rest == "archive" {
-				s.handleProjectSharedDirArchive(w, r, projectID, name)
-			} else if strings.HasPrefix(rest, "files") {
-				filePath := strings.TrimPrefix(rest, "files")
-				filePath = strings.TrimPrefix(filePath, "/")
-				s.handleSharedDirFiles(w, r, projectID, name, filePath)
-			} else if rest == "" {
-				s.handleProjectSharedDirByName(w, r, projectID, name)
-			} else {
-				NotFound(w, "Resource")
-			}
-		}
+		s.handleProjectSharedDirRoutes(w, r, projectID, sdPath)
 		return
 	}
 
