@@ -900,7 +900,12 @@ if gcloud compute firewall-rules describe "${FW_RULE_NAME}" \
     else
       warn "Firewall rule ${FW_RULE_NAME} has no target tags, but the hub VM's tag could not be confirmed this run. Leaving it unscoped rather than risk locking out SSH; it will be narrowed once the tag is confirmed on a later run."
     fi
-  elif ! printf '%s' "${EXISTING_TARGET_TAGS}" | tr ',;' '  ' | grep -qw -- "${HUB_TAG}"; then
+  # Exact whole-tag match against one line of the split list, not a
+  # substring/word match against the raw string: `grep -w` would treat
+  # "-" as a non-word character and falsely match HUB_TAG against a
+  # hyphen-extended tag like "${HUB_TAG}-nfs". Two single-character `tr`
+  # calls (rather than one `tr ',;' '\n\n'`) so each has a 1:1 mapping.
+  elif ! printf '%s\n' "${EXISTING_TARGET_TAGS}" | tr ',' ';' | tr ';' '\n' | grep -qxF -- "${HUB_TAG}"; then
     warn "Firewall rule ${FW_RULE_NAME} exists but its target tags (${EXISTING_TARGET_TAGS}) do not include ${HUB_TAG}. IAP SSH to the hub VM may fail; add ${HUB_TAG} to the rule manually or delete it and re-run."
   else
     echo "  Firewall rule already exists: ${FW_RULE_NAME} (target tags: ${EXISTING_TARGET_TAGS})"

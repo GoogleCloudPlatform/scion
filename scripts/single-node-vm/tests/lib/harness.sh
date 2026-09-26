@@ -95,6 +95,14 @@ set_instance_delete_error_text() {
   printf '%s' "$2" > "${GCLOUD_STUB_STATE_DIR}/instances/$1.delete-fail-text"
 }
 
+# set_instance_add_tags_will_fail NAME — the next `instances add-tags`
+# call for this instance fails instead of succeeding (e.g. a permissions
+# gap), so a caller's "confirmed tagged" logic has something real to be
+# gated on.
+set_instance_add_tags_will_fail() {
+  touch "${GCLOUD_STUB_STATE_DIR}/instances/$1.add-tags-fail"
+}
+
 # set_firewall_list_will_fail — the next `firewall-rules list` call fails
 # instead of returning a rule list.
 set_firewall_list_will_fail() {

@@ -282,6 +282,11 @@ print(json.dumps(out))
   "compute instances add-tags")
     require_project "$@"
     require_flag zone "$@"
+    name="${4:-}"
+    if [[ -n "$name" && -f "${GCLOUD_STUB_STATE_DIR}/instances/${name}.add-tags-fail" ]]; then
+      echo "gcloud-stub: simulated add-tags failure for ${name}" >&2
+      exit 1
+    fi
     # Re-touches the same sentinel as "instances create" below: on the
     # existing-VM branch, this is real work a create-mode wiring test
     # needs to have actually happened before it stops deploy.sh, not

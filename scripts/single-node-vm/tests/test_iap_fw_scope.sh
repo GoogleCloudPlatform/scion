@@ -275,3 +275,77 @@ test_iap_fw_scope_foreign_target_tags_are_left_alone_with_a_warning() {
   assert_contains "$DEPLOY_LOG" "do not include ${HUB_TAG}" \
     "deploy.sh should warn that the existing rule's tags don't cover the hub VM"
 }
+
+# =====================================================================
+# Scenario 6: `instances add-tags` itself fails (e.g. a permissions gap),
+# for a VM that `describe` did find.
+# =====================================================================
+# Expect: add-tags is still attempted, but its failure must leave
+# HUB_TAG_CONFIRMED false -- the rule must not be narrowed, and deploy.sh
+# must say why. A later run where add-tags can succeed must then tag the
+# VM and narrow the rule, proving this converges rather than getting
+# stuck unscoped forever.
+
+test_iap_fw_scope_add_tags_failure_does_not_narrow_then_converges_next_run() {
+  fresh_gcloud_state
+  seed_instance "$INSTANCE_NAME" "$ZONE"
+  seed_firewall_rule_desc_only "$FW_RULE_NAME" "Allow SSH via IAP tunneling for Scion Hub"
+  set_instance_add_tags_will_fail "$INSTANCE_NAME"
+  run_deploy_create "$(iap_fw_config_json "$HUB")"
+  local log
+  log="$(gcloud_log)"
+
+  assert_eq "1" "$(echo "$log" | grep -c "^compute instances add-tags ${INSTANCE_NAME} " || true)" \
+    "add-tags must still be attempted even though it's set up to fail"
+  assert_eq "0" "$(echo "$log" | grep -c '^compute firewall-rules update' || true)" \
+    "must not narrow the rule when add-tags failed -- the tag isn't confirmed"
+  assert_contains "$DEPLOY_LOG" "Could not add network tag ${HUB_TAG} to VM ${INSTANCE_NAME}" \
+    "deploy.sh should warn that it could not tag the VM"
+  assert_contains "$DEPLOY_LOG" "could not be confirmed this run" \
+    "deploy.sh should explain why it's leaving the rule unscoped"
+
+  # Convergence: once add-tags can succeed, a later run tags the VM and
+  # narrows the rule. Removes the fixture's failure flag directly (there
+  # is no unset_* helper for it, matching how other tests in this suite
+  # reach into $GCLOUD_STUB_STATE_DIR when a fixture has no dedicated
+  # helper for reverting itself, e.g. test_deploy_base.sh's direct
+  # `[[ -f "${GCLOUD_STUB_STATE_DIR}/router-exists" ]]` checks).
+  rm -f "${GCLOUD_STUB_STATE_DIR}/instances/${INSTANCE_NAME}.add-tags-fail"
+  run_deploy_create "$(iap_fw_config_json "$HUB")"
+  log="$(gcloud_log)"
+
+  assert_eq "2" "$(echo "$log" | grep -c "^compute instances add-tags ${INSTANCE_NAME} " || true)" \
+    "add-tags is attempted again on the next run"
+  assert_eq "1" "$(echo "$log" | grep -c "^compute firewall-rules update ${FW_RULE_NAME} " || true)" \
+    "a later run where add-tags succeeds must narrow the rule"
+  # DEPLOY_LOG was reassigned by the second run_deploy_create call above,
+  # so this is specifically the converging run's own output.
+  assert_contains "$DEPLOY_LOG" "Updated firewall rule ${FW_RULE_NAME} with --target-tags=${HUB_TAG}" \
+    "the converging run should report the rule as narrowed"
+}
+
+# =====================================================================
+# Scenario 7: the rule's only target tag is a hyphenated extension of the
+# hub tag (e.g. a hybrid-tier-style "${HUB_TAG}-nfs"), not the hub tag
+# itself.
+# =====================================================================
+# `grep -w` treats "-" as a non-word character, so a naive word-boundary
+# membership check would treat "${HUB_TAG}-nfs" as containing "${HUB_TAG}"
+# and skip the N3 warning. Membership must be an exact match against one
+# item of the tag list, not a substring/word match against the raw string.
+
+test_iap_fw_scope_hyphenated_lookalike_tag_still_warns() {
+  fresh_gcloud_state
+  seed_instance "$INSTANCE_NAME" "$ZONE"
+  seed_firewall_rule_json "$FW_RULE_NAME" \
+    "Allow SSH via IAP tunneling for Scion Hub" "default" "INGRESS" "ALLOW" "tcp" "22" \
+    "" "35.235.240.0/20" "${HUB_TAG}-nfs" "1000"
+  run_deploy_create "$(iap_fw_config_json "$HUB")"
+  local log
+  log="$(gcloud_log)"
+
+  assert_eq "0" "$(echo "$log" | grep -c '^compute firewall-rules update' || true)" \
+    "a rule whose only tag is a look-alike extension of the hub tag must not be auto-modified"
+  assert_contains "$DEPLOY_LOG" "do not include ${HUB_TAG}" \
+    "a hyphenated look-alike tag is not the hub tag and must still trigger the N3 warning"
+}
