@@ -127,15 +127,71 @@ FATAL: run_deploy_create: sentinel '${sentinel}' was never reached within 30000m
 }
 
 # run_deploy_create_sync CONFIG_JSON — for the fail-closed tests below,
-# which exit before Phase 2 (some before any prompt or gcloud call at
-# all) and so never reach the `phase2-complete` sentinel: a plain
-# foreground run is enough, no background process or polling needed.
+# which are all expected to exit before Phase 2 (some before any prompt or
+# gcloud call at all) and so never reach the `phase2-complete` sentinel: a
+# plain foreground run would otherwise be enough, no background process or
+# polling needed.
+#
+# Bounded to RUN_SYNC_TIMEOUT_SECS: every caller expects a fast fail-closed
+# exit, so a regression that instead falls through past the NAT-detection
+# check runs deploy.sh all the way into VM creation and the real
+# SSH-readiness retry loop (multiple minutes -- see SSH_MAX_ATTEMPTS and
+# its backoff in deploy.sh) instead of exiting. Without a bound, the test
+# that catches such a regression (e.g.
+# test_nat_reuse_unparsable_routers_list_fails_closed_before_sa) would
+# still eventually fail on its own assertions, just minutes later --
+# hanging the whole suite in the meantime instead of failing fast with a
+# clear reason. Uses `timeout` where available (the common case); falls
+# back to a background run with a poll-and-kill, mirroring
+# _start_deploy_bg/_stop_deploy_bg above, for an image that lacks it.
+RUN_SYNC_TIMEOUT_SECS=8
+
 run_deploy_create_sync() {
   local config_json="$1" config_file
   config_file="$(mktemp)"
   printf '%s' "$config_json" > "$config_file"
-  DEPLOY_LOG="$(bash "$DEPLOY_SH" --config "$config_file" --version v1.0.0-test < /dev/null 2>&1)"
-  DEPLOY_RC=$?
+
+  local rc
+  if command -v timeout &>/dev/null; then
+    # -k: if SIGTERM alone doesn't stop it within 2s (e.g. deploy.sh is
+    # blocked in its own `sleep` between SSH attempts), follow up with
+    # SIGKILL rather than leaving it to `timeout`'s default of never doing
+    # so.
+    DEPLOY_LOG="$(timeout -k 2 "${RUN_SYNC_TIMEOUT_SECS}s" \
+      bash "$DEPLOY_SH" --config "$config_file" --version v1.0.0-test \
+      < /dev/null 2>&1)"
+    rc=$?
+  else
+    local log_file pid waited_ms=0
+    log_file="$(mktemp)"
+    set -m
+    bash "$DEPLOY_SH" --config "$config_file" --version v1.0.0-test \
+      < /dev/null > "$log_file" 2>&1 &
+    pid=$!
+    set +m
+    while kill -0 "$pid" 2>/dev/null && [[ "$waited_ms" -lt $((RUN_SYNC_TIMEOUT_SECS * 1000)) ]]; do
+      sleep 0.1
+      waited_ms=$((waited_ms + 100))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -TERM -- "-${pid}" 2>/dev/null || true
+      wait "$pid" 2>/dev/null
+      rc=124
+    else
+      wait "$pid" 2>/dev/null
+      rc=$?
+    fi
+    DEPLOY_LOG="$(cat "$log_file")"
+    rm -f "$log_file"
+  fi
+
+  if [[ "$rc" -eq 124 ]]; then
+    DEPLOY_RC=124
+    DEPLOY_LOG="${DEPLOY_LOG}
+FATAL: run_deploy_create_sync: deploy.sh did not exit within ${RUN_SYNC_TIMEOUT_SECS}s. Every caller of this helper expects a fast fail-closed exit (a NAT-detection error, before Phase 2) -- a timeout means deploy.sh instead fell through into VM creation and the real SSH-readiness retry loop. Reporting this as a fast failure instead of hanging the suite; check deploy.sh's NAT-detection error handling for a regression that falls open instead of failing closed."
+  else
+    DEPLOY_RC="$rc"
+  fi
   rm -f "$config_file"
 }
 
