@@ -19,25 +19,36 @@ import (
 	"testing"
 )
 
-func TestCanonicalConfigKey(t *testing.T) {
+func TestIsProjectIDConfigKey(t *testing.T) {
 	tests := []struct {
-		key       string
-		canonical string
-		legacy    bool
+		key  string
+		want bool
 	}{
-		{ConfigProjectIDKey, ConfigProjectIDKey, false},
-		{ConfigGroveIDKey, ConfigProjectIDKey, true},
-		{ConfigHubProjectIDKey, ConfigHubProjectIDKey, false},
-		{ConfigHubProjectIDJSON, ConfigHubProjectIDKey, false},
-		{ConfigHubGroveIDKey, ConfigHubProjectIDKey, true},
-		{ConfigHubGroveIDJSON, ConfigHubProjectIDKey, true},
-		{"hub.endpoint", "hub.endpoint", false},
+		{ConfigProjectIDKey, true},
+		{ConfigGroveIDKey, false},
+		{"hub.endpoint", false},
 	}
-
 	for _, tt := range tests {
-		canonical, legacy := CanonicalConfigKey(tt.key)
-		if canonical != tt.canonical || legacy != tt.legacy {
-			t.Fatalf("CanonicalConfigKey(%q) = (%q, %v), want (%q, %v)", tt.key, canonical, legacy, tt.canonical, tt.legacy)
+		if got := IsProjectIDConfigKey(tt.key); got != tt.want {
+			t.Fatalf("IsProjectIDConfigKey(%q) = %v, want %v", tt.key, got, tt.want)
+		}
+	}
+}
+
+func TestIsHubProjectIDConfigKey(t *testing.T) {
+	tests := []struct {
+		key  string
+		want bool
+	}{
+		{ConfigHubProjectIDKey, true},
+		{ConfigHubProjectIDJSON, true},
+		{ConfigHubGroveIDKey, false},
+		{"hub.groveId", false},
+		{"hub.endpoint", false},
+	}
+	for _, tt := range tests {
+		if got := IsHubProjectIDConfigKey(tt.key); got != tt.want {
+			t.Fatalf("IsHubProjectIDConfigKey(%q) = %v, want %v", tt.key, got, tt.want)
 		}
 	}
 }

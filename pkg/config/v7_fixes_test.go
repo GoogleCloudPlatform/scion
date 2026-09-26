@@ -102,7 +102,7 @@ func TestUpdateVersionedSetting_SnakeCaseKeys(t *testing.T) {
 	tmpDir := t.TempDir()
 	require.NoError(t, os.MkdirAll(tmpDir, 0755))
 
-	// 1. Test hub.project_id
+	// hub.project_id is the canonical key-name input.
 	err := UpdateVersionedSetting(tmpDir, "hub.project_id", "project-123")
 	require.NoError(t, err)
 
@@ -111,21 +111,25 @@ func TestUpdateVersionedSetting_SnakeCaseKeys(t *testing.T) {
 	require.NotNil(t, vs.Hub)
 	assert.Equal(t, "project-123", vs.Hub.ProjectID)
 
-	// 2. Test hub.grove_id
-	err = UpdateVersionedSetting(tmpDir, "hub.grove_id", "grove-456")
-	require.NoError(t, err)
-
-	vs, err = LoadSingleFileVersioned(tmpDir)
-	require.NoError(t, err)
-	require.NotNil(t, vs.Hub)
-	assert.Equal(t, "grove-456", vs.Hub.ProjectID)
-
-	// 3. Test GetVersionedSettingValue with snake_case
 	val, err := GetVersionedSettingValue(vs, "hub.project_id")
 	require.NoError(t, err)
-	assert.Equal(t, "grove-456", val)
+	assert.Equal(t, "project-123", val)
+}
 
-	val, err = GetVersionedSettingValue(vs, "hub.grove_id")
+func TestUpdateVersionedSetting_HubGroveIDKeyNameRejected(t *testing.T) {
+	// The legacy hub.grove_id key name is no longer accepted as config
+	// get/set key-name input, even though a settings FILE with a `hub:
+	// grove_id:` entry still loads correctly (TestLoadSingleFileVersioned_GroveIDBackwardCompat).
+	tmpDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(tmpDir, 0755))
+
+	err := UpdateVersionedSetting(tmpDir, "hub.grove_id", "grove-456")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown or complex setting key")
+
+	vs, err := LoadSingleFileVersioned(tmpDir)
 	require.NoError(t, err)
-	assert.Equal(t, "grove-456", val)
+	_, err = GetVersionedSettingValue(vs, "hub.grove_id")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown or complex setting key")
 }

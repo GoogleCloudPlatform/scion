@@ -34,7 +34,6 @@ fi
 allowed_paths=(
   # CLI compatibility adapters, hidden deprecated aliases, and examples.
   "^cmd/delete.go$"
-  "^cmd/list.go$"
   "^cmd/notifications.go$"
 
   # Current compatibility and migration tests/fixtures.

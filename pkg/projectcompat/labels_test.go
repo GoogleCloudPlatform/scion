@@ -108,25 +108,3 @@ func TestProjectNameAndPathLabels(t *testing.T) {
 		t.Fatalf("ProjectPathLabels(includeLegacy=false) included legacy label")
 	}
 }
-
-func TestCanonicalFieldAliases(t *testing.T) {
-	tests := []struct {
-		in        string
-		canonical string
-		legacy    bool
-	}{
-		{"projectId", "projectId", false},
-		{"groveId", "projectId", true},
-		{"grove_id", "project_id", true},
-		{"hub.grove_id", "hub.project_id", true},
-		{"unrelated", "unrelated", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.in, func(t *testing.T) {
-			canonical, legacy := CanonicalFieldAliases(tt.in)
-			if canonical != tt.canonical || legacy != tt.legacy {
-				t.Fatalf("CanonicalFieldAliases(%q) = %q, %v; want %q, %v", tt.in, canonical, legacy, tt.canonical, tt.legacy)
-			}
-		})
-	}
-}

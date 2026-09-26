@@ -73,24 +73,3 @@ func ProjectPathLabels(projectPath string, includeLegacy bool) map[string]string
 	}
 	return labels
 }
-
-func CanonicalFieldAliases(key string) (canonical string, legacy bool) {
-	switch key {
-	case "project", "projects", "projectId", "project_id":
-		return key, false
-	case "grove":
-		return "project", true
-	case "groves":
-		return "projects", true
-	case "groveId":
-		return "projectId", true
-	case "grove_id":
-		return "project_id", true
-	case "hub.grove_id":
-		return "hub.project_id", true
-	case "hub.groveId":
-		return "hub.projectId", true
-	default:
-		return key, false
-	}
-}

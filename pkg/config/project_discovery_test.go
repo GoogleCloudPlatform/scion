@@ -15,6 +15,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -59,6 +60,66 @@ func TestDiscoverProjects_GlobalOnly(t *testing.T) {
 	}
 	if projects[0].Status != ProjectStatusOK {
 		t.Errorf("expected status ok, got %s", projects[0].Status)
+	}
+}
+
+// TestDiscoverProjects_JSONHasNoGroveIDField is a negative regression test
+// for the removed ProjectInfo.GroveID field: it proves the JSON emitted for
+// a discovered project with a project ID set contains "project_id" and
+// never contains "grove_id". Unmarshals into []map[string]any (rather than
+// back into ProjectInfo) so the assertion is driven by the actual JSON keys
+// on the wire, not by the Go struct's tags, which is the only way this
+// catches the field coming back.
+func TestDiscoverProjects_JSONHasNoGroveIDField(t *testing.T) {
+	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_HUB_TOKEN", "SCION_GROVE_ID", "SCION_HUB_GROVE_ID", "SCION_OTEL_ENDPOINT", "SCION_OTEL_PROTOCOL", "SCION_PROJECT_ID"} {
+		if val, ok := os.LookupEnv(e); ok {
+			_ = os.Unsetenv(e)
+			defer func() { _ = os.Setenv(e, val) }()
+		}
+	}
+
+	tmpHome := t.TempDir()
+	origHome := os.Getenv("HOME")
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
+
+	globalDir := filepath.Join(tmpHome, ".scion")
+	_ = os.MkdirAll(filepath.Join(globalDir, "agents"), 0755)
+
+	const projectID = "abcd1234-0000-0000-0000-000000000000"
+	settingsContent := "project_id: " + projectID + "\n"
+	_ = os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(settingsContent), 0644)
+
+	projects, err := DiscoverProjects()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(projects) != 1 {
+		t.Fatalf("expected 1 project, got %d", len(projects))
+	}
+	if projects[0].ProjectID != projectID {
+		t.Fatalf("expected ProjectID %q on the Go struct, got %q", projectID, projects[0].ProjectID)
+	}
+
+	data, err := json.Marshal(projects)
+	if err != nil {
+		t.Fatalf("unexpected marshal error: %v", err)
+	}
+
+	var raw []map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unexpected unmarshal error: %v", err)
+	}
+	if len(raw) != 1 {
+		t.Fatalf("expected 1 entry in the raw JSON, got %d", len(raw))
+	}
+
+	entry := raw[0]
+	if got, ok := entry["project_id"]; !ok || got != projectID {
+		t.Errorf("expected JSON field \"project_id\" = %q, got %v (present: %v)", projectID, got, ok)
+	}
+	if _, ok := entry["grove_id"]; ok {
+		t.Errorf("JSON output must not contain a \"grove_id\" key, got entry: %v", entry)
 	}
 }
 
