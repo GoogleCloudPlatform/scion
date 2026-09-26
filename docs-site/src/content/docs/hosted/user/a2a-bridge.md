@@ -414,10 +414,6 @@ The bridge exposes the following HTTP endpoints:
 | `/readyz` | GET | None | Readiness check (checks DB and active broker plugin connection). |
 | `/metrics` | GET | Configured Scheme | Prometheus metrics. |
 
-:::note[Backward Compatibility]
-To support legacy configurations, the bridge also routes endpoints prefixed with `/groves/` (e.g., `/groves/{projectSlug}/agents/{agentSlug}/jsonrpc`) to the exact same handlers.
-:::
-
 ---
 
 ### Supported JSON-RPC Methods

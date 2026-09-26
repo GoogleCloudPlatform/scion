@@ -1456,10 +1456,6 @@ func (b *Bridge) subscribeAdminUserTopics(projectID string) {
 	if err := b.broker.RequestSubscription(pattern); err != nil {
 		b.log.Warn("failed to request subscription", "pattern", pattern, "error", err)
 	}
-	legacyPattern := projectcompat.LegacyUserTopic(projectID, b.config.Hub.User)
-	if err := b.broker.RequestSubscription(legacyPattern); err != nil {
-		b.log.Warn("failed to request legacy subscription", "pattern", legacyPattern, "error", err)
-	}
 }
 
 // GenerateAgentCard builds an agent card for the given project and agent,

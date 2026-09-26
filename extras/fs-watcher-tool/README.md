@@ -153,7 +153,6 @@ sudo scion-fs-watcher [flags]
 | Flag            | Description | Default |
 |-----------------|-------------|---------|
 | `--project`     | Project ID — auto-discover agent directories via Docker labels | (none) |
-| `--grove`       | Deprecated alias for `--project` | (none) |
 | `--watch`       | Directory to watch explicitly (repeatable) | (none) |
 | `--log`         | Output log file path (`-` for stdout) | `-` (stdout) |
 | `--label-key`   | Docker label key to use as agent ID | `scion.name` |
