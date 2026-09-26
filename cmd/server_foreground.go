@@ -197,6 +197,24 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	var wg sync.WaitGroup
 	errCh := make(chan error, 3)
 
+	// Server boot hook: warn about legacy environment variables scion no
+	// longer reads, before project discovery and storage init. This is the
+	// server-boot half of the legacy-migration hook points;
+	// the CLI equivalent is Execute()/rootCmd.PersistentPreRunE in
+	// cmd/root.go (skipped for the "start" command under "server" or
+	// "runtime-broker" — this hook reports instead), and the broker
+	// equivalent is pkg/runtimebroker/server.go:(*Server).Start. This hook
+	// and the broker's share config's process-wide sync.Once
+	// (WarnRemovedLegacyEnvOnce), so a combined `--enable-hub
+	// --enable-runtime-broker` process reports once, not twice; the CLI
+	// hook is skipped for this command and plays no part in that dedup.
+	// Unconditional (not gated on enableHub): a
+	// `--enable-web`-only process still boots via this same command and
+	// must still report, since the CLI hook is skipped for the whole
+	// `server start` invocation regardless of which components it enables.
+	// On-disk layout migration is expected to run at this same hook point.
+	config.WarnRemovedLegacyEnvOnce(os.Getenv, config.NewSlogReporter())
+
 	// 8. Initialize store
 	var s store.Store
 	var entClient *ent.Client
