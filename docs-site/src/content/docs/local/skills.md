@@ -286,11 +286,11 @@ Most commands accept either a skill **name** or **ID**. Add the global `--format
 
 ### From inside an agent
 
-Agents can browse skills too. In agent mode, the CLI allows `scion skills list` and `scion skills show`, but not `versions`, `resolve`, or `delete`. Access is read-only, and an agent can see:
+Agents can browse skills too. In agent mode, the CLI allows `scion skills list` and `scion skills show`, but not `versions`, `resolve`, or `delete`. Access is read-only. An agent can see:
 
-- the Hub's global skill catalog,
-- skills scoped to the agent's own project, and
-- the personal (user-scoped) skills of the user at the root of the agent's creation chain.
+- The Hub's global skill catalog
+- Skills scoped to the agent's own project
+- The personal (user-scoped) skills of the user at the root of the agent's creation chain
 
 Other projects' skills and other users' personal skills are not visible. Agent project scope and the creator's delegated permissions still apply on top of these grants.
 
