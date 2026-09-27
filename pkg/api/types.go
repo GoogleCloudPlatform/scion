@@ -812,6 +812,24 @@ func GitCloneFromContext(ctx context.Context) *GitCloneConfig {
 	return gc
 }
 
+type freshProvisionContextKey struct{}
+
+// ContextWithFreshProvision returns a new context marking this dispatch as a
+// fresh provision: an agent directory left over from a same-named agent may
+// be wiped and re-cloned. Set only for a create dispatch
+// (GoogleCloudPlatform/scion#1931) — start and restart never carry this, so
+// GetAgent preserves an existing populated workspace on those paths.
+func ContextWithFreshProvision(ctx context.Context) context.Context {
+	return context.WithValue(ctx, freshProvisionContextKey{}, true)
+}
+
+// IsFreshProvisionFromContext returns true if the context marks this
+// dispatch as a fresh provision.
+func IsFreshProvisionFromContext(ctx context.Context) bool {
+	v, _ := ctx.Value(freshProvisionContextKey{}).(bool)
+	return v
+}
+
 type sharedWorkspaceContextKey struct{}
 
 // ContextWithSharedWorkspace returns a new context with the shared workspace flag attached.
@@ -961,10 +979,16 @@ type StartOptions struct {
 	Workspace         string
 	GitClone          *GitCloneConfig // When set, skip workspace creation; sciontool clones inside container
 	SharedWorkspace   bool            // When true, workspace is a shared git clone (git-workspace hybrid); skip worktree, configure credential helper
-	TelemetryOverride *bool           // Explicit telemetry override from CLI flags (--enable-telemetry / --disable-telemetry)
-	InlineConfig      *ScionConfig    // Inline config from --config flag, merged over template config
-	SharedDirs        []SharedDir     // Project-level shared directories (from Hub, merged with settings)
-	ExtraHosts        []string        // Extra --add-host entries for container networking (e.g. "example.com:host-gateway")
+	// FreshProvision marks this dispatch as a create, not a start or restart:
+	// GetAgent wipes and re-clones an existing populated workspace only when
+	// this is set, so a same-named leftover agent directory is not confused
+	// with a start/restart that must preserve un-pushed work
+	// (GoogleCloudPlatform/scion#1931).
+	FreshProvision    bool
+	TelemetryOverride *bool        // Explicit telemetry override from CLI flags (--enable-telemetry / --disable-telemetry)
+	InlineConfig      *ScionConfig // Inline config from --config flag, merged over template config
+	SharedDirs        []SharedDir  // Project-level shared directories (from Hub, merged with settings)
+	ExtraHosts        []string     // Extra --add-host entries for container networking (e.g. "example.com:host-gateway")
 
 	// ProjectPreStartHookScript is the project-owner-supplied shell script
 	// inlined from the project's active ProjectPreStartHook at agent-create

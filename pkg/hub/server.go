@@ -450,6 +450,33 @@ type AgentDispatcher interface {
 	DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) error
 }
 
+// WorkspaceDispatchSpec carries the inputs a broker needs to recreate an
+// agent's workspace, built once by workspaceSpecFor so create and start
+// dispatch from a single source and cannot drift from each other
+// (GoogleCloudPlatform/scion#1931).
+//
+// sciontool's own clone step is idempotent with respect to a populated
+// workspace (it skips cloning when /workspace is already non-empty), and the
+// broker only clears an existing workspace on a create dispatch (see
+// FreshProvision), so GitClone and Branch are safe to send on start as well
+// as create: where the workspace survived a stop, the clone is a no-op;
+// where it didn't, it recreates it. WorkspaceMode is included so the broker
+// can apply create's worktree-per-agent provisioning on start too, instead
+// of always falling through to the in-container clone path GitClone
+// otherwise triggers.
+//
+// Exported because it is a field of the exported StartExtras.
+type WorkspaceDispatchSpec struct {
+	// GitClone specifies git clone parameters for git-anchored projects.
+	GitClone *api.GitCloneConfig
+	// Branch is the git branch name (defaults to the agent slug if empty).
+	Branch string
+	// WorkspaceMode is the resolved workspace sharing mode (e.g.
+	// "worktree-per-agent"), the same value create sends as
+	// RemoteCreateAgentRequest.WorkspaceMode.
+	WorkspaceMode string
+}
+
 // StartExtras carries the dispatch-time metadata that the create path already
 // sends but that the start/restart paths historically dropped (#1960): the
 // Hub endpoint (for pre-resolved-skill URL rewriting), the owning user's ID,
@@ -458,6 +485,10 @@ type AgentDispatcher interface {
 // StartAgent/RestartAgent so the broker can attach the same skill resolver on
 // every path that can reach ProvisionAgent, not just create.
 //
+// Workspace carries the workspace-recreation inputs
+// (GoogleCloudPlatform/scion#1931). DispatchAgentStart populates it;
+// DispatchAgentRestart does not send it and leaves it at its zero value.
+//
 // Zero value is valid and simply carries nothing extra, matching pre-#1960
 // behavior for callers (e.g. local/file-mode dispatch) that have none of this.
 type StartExtras struct {
@@ -465,6 +496,36 @@ type StartExtras struct {
 	UserID               string
 	ProvisionCredentials map[string]string
 	PreResolvedSkills    *ResolveSkillsResponse
+	Workspace            WorkspaceDispatchSpec
+}
+
+// applyStartExtras writes extras onto payload as flat top-level wire keys.
+// Both the HTTP transport (brokerHTTPTransport) and the control-channel
+// transport (ControlChannelBrokerClient) call this for their StartAgent and
+// RestartAgent payloads, so the two transports cannot drift from each other
+// on which StartExtras fields are sent or under what key.
+func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
+	if extras.HubEndpoint != "" {
+		payload["hubEndpoint"] = extras.HubEndpoint
+	}
+	if extras.UserID != "" {
+		payload["userId"] = extras.UserID
+	}
+	if len(extras.ProvisionCredentials) > 0 {
+		payload["provisionCredentials"] = extras.ProvisionCredentials
+	}
+	if extras.PreResolvedSkills != nil {
+		payload["preResolvedSkills"] = extras.PreResolvedSkills
+	}
+	if extras.Workspace.GitClone != nil {
+		payload["gitClone"] = extras.Workspace.GitClone
+	}
+	if extras.Workspace.Branch != "" {
+		payload["branch"] = extras.Workspace.Branch
+	}
+	if extras.Workspace.WorkspaceMode != "" {
+		payload["workspaceMode"] = extras.Workspace.WorkspaceMode
+	}
 }
 
 // RuntimeBrokerClient is an interface for communicating with runtime brokers over HTTP.

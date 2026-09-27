@@ -149,21 +149,10 @@ func (c *ControlChannelBrokerClient) StartAgent(ctx context.Context, brokerID, b
 	if resume {
 		payload["resume"] = true
 	}
-	// Carry the same dispatch metadata the create path sends (#1960) so the
-	// broker can attach a working skill resolver whenever start (re-)provisions
-	// the agent, not just create.
-	if extras.HubEndpoint != "" {
-		payload["hubEndpoint"] = extras.HubEndpoint
-	}
-	if extras.UserID != "" {
-		payload["userId"] = extras.UserID
-	}
-	if len(extras.ProvisionCredentials) > 0 {
-		payload["provisionCredentials"] = extras.ProvisionCredentials
-	}
-	if extras.PreResolvedSkills != nil {
-		payload["preResolvedSkills"] = extras.PreResolvedSkills
-	}
+	// Carry the same dispatch-time metadata create sends, so the broker can
+	// attach a working skill resolver and recreate the workspace on every
+	// path that can reach ProvisionAgent, not just create.
+	applyStartExtras(payload, extras)
 
 	var body []byte
 	if len(payload) > 0 {
@@ -211,21 +200,10 @@ func (c *ControlChannelBrokerClient) RestartAgent(ctx context.Context, brokerID,
 	if len(resolvedEnv) > 0 {
 		payload["resolvedEnv"] = resolvedEnv
 	}
-	// Carry the same dispatch metadata the create/start paths send (#1960) so
+	// Carry the same dispatch-time metadata the create/start paths send, so
 	// the broker can attach a working skill resolver when restart
 	// (re-)provisions the agent.
-	if extras.HubEndpoint != "" {
-		payload["hubEndpoint"] = extras.HubEndpoint
-	}
-	if extras.UserID != "" {
-		payload["userId"] = extras.UserID
-	}
-	if len(extras.ProvisionCredentials) > 0 {
-		payload["provisionCredentials"] = extras.ProvisionCredentials
-	}
-	if extras.PreResolvedSkills != nil {
-		payload["preResolvedSkills"] = extras.PreResolvedSkills
-	}
+	applyStartExtras(payload, extras)
 	var body []byte
 	if len(payload) > 0 {
 		var err error

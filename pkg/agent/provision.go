@@ -363,6 +363,9 @@ func buildProvisionContext(ctx context.Context, opts api.StartOptions) (context.
 	if opts.GitClone != nil {
 		ctx = api.ContextWithGitClone(ctx, opts.GitClone)
 	}
+	if opts.FreshProvision {
+		ctx = api.ContextWithFreshProvision(ctx)
+	}
 	if opts.SharedWorkspace {
 		ctx = api.ContextWithSharedWorkspace(ctx)
 	}
@@ -2059,12 +2062,18 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 
 	util.Debugf("GetAgent: agent dir exists, loading existing config from %s", agentDir)
 
-	// When git clone is configured (hub-dispatched create), clear the workspace
-	// so sciontool performs a fresh clone. The agent directory may be left over
-	// from a previous agent with the same name that was deleted via the hub but
-	// whose local files were not cleaned up. Without this, sciontool sees the
-	// old clone as "already populated" and skips cloning.
-	if gitClone := api.GitCloneFromContext(ctx); gitClone != nil {
+	// When git clone is configured on a fresh provision (hub-dispatched
+	// create), clear the workspace so sciontool performs a fresh clone. The
+	// agent directory may be left over from a previous agent with the same
+	// name that was deleted via the hub but whose local files were not
+	// cleaned up. Without this, sciontool sees the old clone as "already
+	// populated" and skips cloning.
+	//
+	// Gated on FreshProvision, not just GitClone being set: start also
+	// carries GitClone, so a workspace that didn't survive a stop can be
+	// recreated, but it must never clear a workspace that did survive —
+	// that would discard un-pushed work.
+	if gitClone := api.GitCloneFromContext(ctx); gitClone != nil && api.IsFreshProvisionFromContext(ctx) {
 		if info, err := os.Stat(agentWorkspace); err == nil && info.IsDir() {
 			if !isWorkspaceEmptyDir(agentWorkspace) {
 				util.Debugf("GetAgent: clearing existing workspace for git-clone re-provision: %s", agentWorkspace)
