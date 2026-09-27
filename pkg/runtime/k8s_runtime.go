@@ -1678,6 +1678,35 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	return pod, nil
 }
 
+// classifyTerminalWaitingReason turns a terminal (non-retryable)
+// ContainerStateWaiting reason into an error, or returns nil if reason is
+// not one of the terminal reasons. initContainerName should be the empty
+// string for the main agent container, and the container's name for init
+// containers — the resulting error names the init container so it can be
+// told apart from the main container in logs. Shared by the init-container
+// and main-container checks in waitForPodReady so their wording can't drift.
+func classifyTerminalWaitingReason(podName, initContainerName, reason, message string) error {
+	container := fmt.Sprintf("pod %q", podName)
+	if initContainerName != "" {
+		container = fmt.Sprintf("init container %q in pod %q", initContainerName, podName)
+	}
+	switch reason {
+	case "ImagePullBackOff", "ErrImagePull":
+		return fmt.Errorf("image pull failed for %s: %s — verify the image name and registry access (image pull policy: check kubernetes.imagePullPolicy)", container, message)
+	case "InvalidImageName":
+		return fmt.Errorf("invalid image name for %s: %s", container, message)
+	case "CreateContainerConfigError":
+		return fmt.Errorf("container configuration error for %s: %s — check secret references and volume mounts", container, message)
+	case "CrashLoopBackOff":
+		if initContainerName != "" {
+			return fmt.Errorf("init container %q is crash-looping in pod %q: %s — check container logs with 'scion logs'", initContainerName, podName, message)
+		}
+		return fmt.Errorf("container is crash-looping in pod %q: %s — check container logs with 'scion logs'", podName, message)
+	default:
+		return nil
+	}
+}
+
 func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podName string) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute) // GKE Autopilot can be slow
 	defer cancel()
@@ -1715,11 +1744,12 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 					return fmt.Errorf("init container %q failed in pod %q: exit code %d (%s): %s",
 						ics.Name, podName, ics.State.Terminated.ExitCode, ics.State.Terminated.Reason, ics.State.Terminated.Message)
 				}
-				if ics.State.Waiting != nil && ics.State.Waiting.Reason == "CrashLoopBackOff" {
-					runtimeLog.Error("Init container crash loop", "pod", podName, "container", ics.Name,
-						"message", ics.State.Waiting.Message, "phase", "init-container")
-					return fmt.Errorf("init container %q is crash-looping in pod %q: %s — check container logs with 'scion logs'",
-						ics.Name, podName, ics.State.Waiting.Message)
+				if ics.State.Waiting != nil {
+					if err := classifyTerminalWaitingReason(podName, ics.Name, ics.State.Waiting.Reason, ics.State.Waiting.Message); err != nil {
+						runtimeLog.Error("Init container failed", "pod", podName, "container", ics.Name,
+							"reason", ics.State.Waiting.Reason, "message", ics.State.Waiting.Message, "phase", "init-container")
+						return err
+					}
 				}
 			}
 
@@ -1749,16 +1779,16 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 				switch reason {
 				case "ImagePullBackOff", "ErrImagePull":
 					runtimeLog.Error("Image pull failed", "pod", podName, "reason", reason, "message", message, "phase", "image-pull")
-					return fmt.Errorf("image pull failed for pod %q: %s — verify the image name and registry access (image pull policy: check kubernetes.imagePullPolicy)", podName, message)
+					return classifyTerminalWaitingReason(podName, "", reason, message)
 				case "InvalidImageName":
 					runtimeLog.Error("Invalid image name", "pod", podName, "message", message, "phase", "image-pull")
-					return fmt.Errorf("invalid image name for pod %q: %s", podName, message)
+					return classifyTerminalWaitingReason(podName, "", reason, message)
 				case "CreateContainerConfigError":
 					runtimeLog.Error("Container config error", "pod", podName, "message", message, "phase", "container-config")
-					return fmt.Errorf("container configuration error for pod %q: %s — check secret references and volume mounts", podName, message)
+					return classifyTerminalWaitingReason(podName, "", reason, message)
 				case "CrashLoopBackOff":
 					runtimeLog.Error("Container crash loop", "pod", podName, "message", message, "phase", "crash-loop")
-					return fmt.Errorf("container is crash-looping in pod %q: %s — check container logs with 'scion logs'", podName, message)
+					return classifyTerminalWaitingReason(podName, "", reason, message)
 				case "Unschedulable":
 					if r.isGKEScheduling() {
 						runtimeLog.Info("Pod unschedulable (GKE Autopilot will auto-provision nodes)", "pod", podName, "message", message, "phase", "scheduling")

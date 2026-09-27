@@ -853,6 +853,190 @@ func TestWaitForPodReady_NamesFailedInitContainer(t *testing.T) {
 	}
 }
 
+// TestWaitForPodReady_InitContainerTerminalWaitingReasons is the GCP#2027
+// review fix: the init-container loop in waitForPodReady only recognized
+// Terminated (non-zero exit) and Waiting=CrashLoopBackOff. It missed
+// ImagePullBackOff, ErrImagePull, InvalidImageName, and
+// CreateContainerConfigError — reasons the main-container block already
+// failed fast on — so an init container stuck on a bad image (our
+// provisioning init container uses the agent image) hung until the full
+// 10-minute cap. classifyTerminalWaitingReason is now shared by both
+// blocks so they can't drift; this proves the init-container side returns
+// promptly and names the failing container for all five terminal reasons.
+func TestWaitForPodReady_InitContainerTerminalWaitingReasons(t *testing.T) {
+	reasons := []string{
+		"ImagePullBackOff",
+		"ErrImagePull",
+		"InvalidImageName",
+		"CreateContainerConfigError",
+		"CrashLoopBackOff",
+	}
+	for _, reason := range reasons {
+		t.Run(reason, func(t *testing.T) {
+			r := newNFSTestK8sRuntime()
+			namespace := "default"
+			podName := "test-init-" + strings.ToLower(reason)
+
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: namespace},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodPending,
+					InitContainerStatuses: []corev1.ContainerStatus{
+						{
+							Name: "workspace-provision",
+							State: corev1.ContainerState{
+								Waiting: &corev1.ContainerStateWaiting{
+									Reason:  reason,
+									Message: "test message for " + reason,
+								},
+							},
+						},
+					},
+				},
+			}
+			if _, err := r.Client.Clientset.CoreV1().Pods(namespace).Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+				t.Fatalf("failed to create test pod: %v", err)
+			}
+
+			// Bounded timeout: if the fix regresses, waitForPodReady will
+			// hang until this deadline instead of returning promptly.
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			err := r.waitForPodReady(ctx, namespace, podName)
+			if err == nil {
+				t.Fatalf("expected waitForPodReady to fail promptly for init container reason %s", reason)
+			}
+			if errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("waitForPodReady should classify the terminal reason %s promptly instead of waiting for the timeout, got: %v", reason, err)
+			}
+			if !strings.Contains(err.Error(), "workspace-provision") {
+				t.Errorf("error should name the failing init container, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestWaitForPodReady_InitContainerNonTerminalWaitingReasonKeepsWaiting
+// confirms that a non-terminal init-container waiting reason
+// (PodInitializing, the normal state while an init container runs) does not
+// trip the new classification and does not return early — it keeps waiting
+// until the caller's context is done.
+func TestWaitForPodReady_InitContainerNonTerminalWaitingReasonKeepsWaiting(t *testing.T) {
+	r := newNFSTestK8sRuntime()
+	namespace := "default"
+	podName := "test-init-podinitializing"
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: namespace},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodPending,
+			InitContainerStatuses: []corev1.ContainerStatus{
+				{
+					Name: "workspace-provision",
+					State: corev1.ContainerState{
+						Waiting: &corev1.ContainerStateWaiting{
+							Reason: "PodInitializing",
+						},
+					},
+				},
+			},
+		},
+	}
+	if _, err := r.Client.Clientset.CoreV1().Pods(namespace).Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("failed to create test pod: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	err := r.waitForPodReady(ctx, namespace, podName)
+	if err == nil {
+		t.Fatal("expected waitForPodReady to time out while the init container is still PodInitializing, not succeed")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("expected a context-deadline timeout while init container is PodInitializing, got: %v", err)
+	}
+}
+
+// TestWaitForPodReady_MainContainerTerminalWaitingReasons pins the exact
+// error text for the main container's terminal waiting reasons (including
+// the kubernetes.imagePullPolicy hint) so that sharing
+// classifyTerminalWaitingReason with the init-container block above cannot
+// silently change these user-facing messages.
+func TestWaitForPodReady_MainContainerTerminalWaitingReasons(t *testing.T) {
+	cases := []struct {
+		reason  string
+		message string
+		wantErr string
+	}{
+		{
+			reason:  "ImagePullBackOff",
+			message: "rpc error: image not found",
+			wantErr: `image pull failed for pod "test-main-imagepullbackoff": rpc error: image not found — verify the image name and registry access (image pull policy: check kubernetes.imagePullPolicy)`,
+		},
+		{
+			reason:  "ErrImagePull",
+			message: "manifest unknown",
+			wantErr: `image pull failed for pod "test-main-errimagepull": manifest unknown — verify the image name and registry access (image pull policy: check kubernetes.imagePullPolicy)`,
+		},
+		{
+			reason:  "InvalidImageName",
+			message: "invalid reference format",
+			wantErr: `invalid image name for pod "test-main-invalidimagename": invalid reference format`,
+		},
+		{
+			reason:  "CreateContainerConfigError",
+			message: `secret "foo" not found`,
+			wantErr: `container configuration error for pod "test-main-createcontainerconfigerror": secret "foo" not found — check secret references and volume mounts`,
+		},
+		{
+			reason:  "CrashLoopBackOff",
+			message: "back-off restarting failed container",
+			wantErr: `container is crash-looping in pod "test-main-crashloopbackoff": back-off restarting failed container — check container logs with 'scion logs'`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.reason, func(t *testing.T) {
+			r := newNFSTestK8sRuntime()
+			namespace := "default"
+			podName := "test-main-" + strings.ToLower(tc.reason)
+
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: namespace},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodPending,
+					ContainerStatuses: []corev1.ContainerStatus{
+						{
+							Name: agentContainerName,
+							State: corev1.ContainerState{
+								Waiting: &corev1.ContainerStateWaiting{
+									Reason:  tc.reason,
+									Message: tc.message,
+								},
+							},
+						},
+					},
+				},
+			}
+			if _, err := r.Client.Clientset.CoreV1().Pods(namespace).Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+				t.Fatalf("failed to create test pod: %v", err)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			err := r.waitForPodReady(ctx, namespace, podName)
+			if err == nil {
+				t.Fatalf("expected waitForPodReady to fail for main container reason %s", tc.reason)
+			}
+			if err.Error() != tc.wantErr {
+				t.Errorf("unexpected error text for %s:\n got:  %s\n want: %s", tc.reason, err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestRun_NFSLockLost_CreatesWaitPod(t *testing.T) {
 	// When the lock is held by another node, the pod should have a
 	// wait-for-sentinel init container, not a cloning one.
