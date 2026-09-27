@@ -71,7 +71,9 @@ fresh_gcloud_state() {
   GCLOUD_STUB_STATE_DIR="$(mktemp -d)"
   GCLOUD_STUB_LOG="$(mktemp)"
   mkdir -p "${GCLOUD_STUB_STATE_DIR}/firewall-rules" "${GCLOUD_STUB_STATE_DIR}/instances" \
-    "${GCLOUD_STUB_STATE_DIR}/run-services" "${GCLOUD_STUB_STATE_DIR}/nats"
+    "${GCLOUD_STUB_STATE_DIR}/run-services" "${GCLOUD_STUB_STATE_DIR}/nats" \
+    "${GCLOUD_STUB_STATE_DIR}/networks" "${GCLOUD_STUB_STATE_DIR}/subnets" \
+    "${GCLOUD_STUB_STATE_DIR}/service-accounts"
   export GCLOUD_STUB_STATE_DIR GCLOUD_STUB_LOG
 }
 
@@ -94,6 +96,14 @@ set_instance_delete_will_fail() {
 # not-found error from an ambiguous one (permission, API outage, etc.).
 set_instance_delete_error_text() {
   printf '%s' "$2" > "${GCLOUD_STUB_STATE_DIR}/instances/$1.delete-fail-text"
+}
+
+# set_instance_internal_ip NAME IP — overrides the internal IP `compute
+# instances describe --format=get(networkInterfaces[0].networkIP)`
+# reports for this instance. Without this, the stub returns a realistic
+# default ("10.128.0.5").
+set_instance_internal_ip() {
+  printf '%s' "$2" > "${GCLOUD_STUB_STATE_DIR}/instances/$1.internal-ip"
 }
 
 # set_instance_add_tags_will_fail NAME — the next (and every subsequent)
@@ -194,6 +204,127 @@ set_service_account_describe_error() {
 # add-iam-policy-binding` call fails.
 set_iap_web_binding_will_fail() {
   touch "${GCLOUD_STUB_STATE_DIR}/iap-web-add-binding-should-fail"
+}
+
+# set_network_missing NAME — simulates a project with no VPC network named
+# NAME (e.g. no "default" network -- the hardened-org
+# compute.skipDefaultNetworkCreation scenario). Without this, `compute
+# networks describe` reports the network as existing, matching the
+# realistic default for most projects.
+set_network_missing() {
+  mkdir -p "${GCLOUD_STUB_STATE_DIR}/networks"
+  touch "${GCLOUD_STUB_STATE_DIR}/networks/$1.missing"
+}
+
+# set_network_describe_error NAME MESSAGE — the next (and every
+# subsequent) `compute networks describe` call for this network fails
+# with MESSAGE (printed verbatim to stderr), instead of the realistic
+# "exists" default or the ".missing" not-found shape. Used to simulate a
+# permission or transient API error distinct from a genuinely absent
+# network.
+set_network_describe_error() {
+  mkdir -p "${GCLOUD_STUB_STATE_DIR}/networks"
+  printf '%s' "$2" > "${GCLOUD_STUB_STATE_DIR}/networks/$1.describe-error"
+}
+
+# set_network_appears_after NAME N — the network doesn't exist for the
+# first N `compute networks describe` calls (a realistic "not found",
+# matching the async-propagation window right after enabling
+# compute.googleapis.com), then exists from the N+1th call onward. N=0
+# behaves like the network already existing on the first call. Used to
+# exercise the poll loop itself: N below NETWORK_CHECK_MAX_ATTEMPTS
+# proves it retries and then proceeds; N at or above it proves it gives
+# up after exactly the configured budget, not sooner or later.
+set_network_appears_after() {
+  mkdir -p "${GCLOUD_STUB_STATE_DIR}/networks"
+  rm -f "${GCLOUD_STUB_STATE_DIR}/networks/$1.describe-count"
+  printf '%s' "$2" > "${GCLOUD_STUB_STATE_DIR}/networks/$1.appears-after"
+}
+
+# set_network_appears_after_service_disabled NAME N [SHAPE] — same as
+# set_network_appears_after, but the first N calls report a
+# SERVICE_DISABLED-related error instead of a plain not-found. SHAPE
+# selects which one (default "service-disabled"):
+#   service-disabled             the realistic shape when gcloud's
+#                                 API-enablement prompt is declined (or
+#                                 auto-declined by --quiet): the "has not
+#                                 been used in project" message, plus a
+#                                 details block with reason:
+#                                 SERVICE_DISABLED. Has both match
+#                                 substrings.
+#   service-disabled-bare-message the realistic shape when the
+#                                 API-enablement prompt is disabled
+#                                 entirely: a "Could not fetch resource:"
+#                                 header plus the message, no
+#                                 PERMISSION_DENIED prefix and no details
+#                                 block. Has only the message-fragment
+#                                 substring, proving that match matters on
+#                                 its own.
+#   service-disabled-reason-only  synthetic, not a shape real gcloud is
+#                                 known to produce for this call: a
+#                                 details block with reason:
+#                                 SERVICE_DISABLED and none of the message
+#                                 text. Exists only so the SERVICE_DISABLED
+#                                 match is exercised independently of the
+#                                 message fragment too.
+# Used to prove the retry loop treats each of these the same as a genuine
+# not-found, per N1.
+set_network_appears_after_service_disabled() {
+  mkdir -p "${GCLOUD_STUB_STATE_DIR}/networks"
+  rm -f "${GCLOUD_STUB_STATE_DIR}/networks/$1.describe-count"
+  printf '%s' "$2" > "${GCLOUD_STUB_STATE_DIR}/networks/$1.appears-after"
+  printf '%s' "${3:-service-disabled}" > "${GCLOUD_STUB_STATE_DIR}/networks/$1.appears-after-error-shape"
+}
+
+# set_subnet_cidr NAME CIDR — overrides the CIDR `compute networks subnets
+# describe` reports for this subnet. Without this, the stub returns a
+# realistic default ("10.128.0.0/20").
+set_subnet_cidr() {
+  mkdir -p "${GCLOUD_STUB_STATE_DIR}/subnets"
+  printf '%s' "$2" > "${GCLOUD_STUB_STATE_DIR}/subnets/$1.cidr"
+}
+
+# set_subnet_missing NAME — simulates a region with no subnet named NAME
+# (e.g. a "default" network that was created custom-mode instead of
+# auto-mode, so it has no per-region "default" subnet).
+set_subnet_missing() {
+  mkdir -p "${GCLOUD_STUB_STATE_DIR}/subnets"
+  touch "${GCLOUD_STUB_STATE_DIR}/subnets/$1.missing"
+}
+
+# set_run_service_add_binding_will_fail NAME — the next `run services
+# add-iam-policy-binding` call for this service fails.
+set_run_service_add_binding_will_fail() {
+  mkdir -p "${GCLOUD_STUB_STATE_DIR}/run-services"
+  touch "${GCLOUD_STUB_STATE_DIR}/run-services/$1.add-binding-fail"
+}
+
+# set_run_service_remove_binding_will_fail NAME — the next `run services
+# remove-iam-policy-binding` call for this service fails, with a
+# simulated error distinct from the stub's default "not found" response
+# (see seed_run_service_allusers_invoker below for modeling absence).
+set_run_service_remove_binding_will_fail() {
+  mkdir -p "${GCLOUD_STUB_STATE_DIR}/run-services"
+  touch "${GCLOUD_STUB_STATE_DIR}/run-services/$1.remove-binding-fail"
+}
+
+# seed_run_service_allusers_invoker NAME — simulates this service
+# currently having an allUsers roles/run.invoker binding (e.g. left by a
+# prior --allow-unauthenticated deploy). `run services get-iam-policy`
+# reports it present; `run services remove-iam-policy-binding` clears it
+# (unless set_run_service_remove_binding_will_fail is also set). Without
+# this, get-iam-policy reports no allUsers binding, matching a fresh
+# deploy or one where gcloud's own removal already ran.
+seed_run_service_allusers_invoker() {
+  mkdir -p "${GCLOUD_STUB_STATE_DIR}/run-services"
+  touch "${GCLOUD_STUB_STATE_DIR}/run-services/$1.allusers-invoker"
+}
+
+# set_run_service_get_policy_will_fail NAME — the next `run services
+# get-iam-policy` call for this service fails.
+set_run_service_get_policy_will_fail() {
+  mkdir -p "${GCLOUD_STUB_STATE_DIR}/run-services"
+  touch "${GCLOUD_STUB_STATE_DIR}/run-services/$1.get-policy-fail"
 }
 
 # seed_run_service_exists NAME — the next `run services describe` call

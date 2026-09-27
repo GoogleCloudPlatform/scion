@@ -109,6 +109,8 @@ Agents on the `antigravity` harness detect the metadata-server identity and sele
 
 For the full guide, including architecture, access patterns, and troubleshooting, see [`docs/deploy/single-node-vm.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/single-node-vm.md). If an AI agent is running the deployment for you, point it at the step-by-step [agent deployment runbook](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/agent-runbook-single-node-vm.md). The runbook covers GCP preflight checks, the questions to ask the user, config file generation, and troubleshooting.
 
+Deploying into a GCP organization with a security-hardening baseline (no default network, Shielded VM required, etc.)? See [Deploy on a VM (Hardened Org)](/scion/hosted/single-node/hub-setup-gce-hardened-org/) for the one manual prerequisite and what the script already handles for you.
+
 ## Internal Deployments (BYO TLS)
 
 The steps above assume a public-facing VM with an external IP and public DNS. If your VM is internal-only — for example, on a private VPC with no external IP — the Hub works identically, but TLS must be provided by you or terminated upstream.

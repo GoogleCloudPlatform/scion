@@ -44,7 +44,9 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON="${GCLOUD_STUB_PYTHON:-python3}"
 
 mkdir -p "${GCLOUD_STUB_STATE_DIR}/firewall-rules" "${GCLOUD_STUB_STATE_DIR}/instances" \
-  "${GCLOUD_STUB_STATE_DIR}/run-services" "${GCLOUD_STUB_STATE_DIR}/nats"
+  "${GCLOUD_STUB_STATE_DIR}/run-services" "${GCLOUD_STUB_STATE_DIR}/nats" \
+  "${GCLOUD_STUB_STATE_DIR}/networks" "${GCLOUD_STUB_STATE_DIR}/subnets" \
+  "${GCLOUD_STUB_STATE_DIR}/service-accounts"
 
 printf '%s\n' "$*" >> "$GCLOUD_STUB_LOG"
 
@@ -125,6 +127,29 @@ case "${1:-} ${2:-} ${3:-} ${4:-}" in
     require_flag region "$@"
     exit 0
     ;;
+  "beta services identity create")
+    require_project "$@"
+    exit 0
+    ;;
+  "compute networks subnets describe")
+    require_project "$@"
+    require_flag region "$@"
+    name="${5:-}"
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/subnets/${name}.missing" ]]; then
+      echo "gcloud-stub: ERROR: (gcloud.compute.networks.subnets.describe) Could not fetch resource: subnetwork '${name}' not found" >&2
+      exit 1
+    fi
+    # Default to a realistic auto-mode "default" subnet CIDR (matching
+    # real GCP's us-central1 default subnet) when a test hasn't overridden
+    # it with set_subnet_cidr -- most tests don't care about the exact
+    # value, only that a real one comes back.
+    cidr="$(cat "${GCLOUD_STUB_STATE_DIR}/subnets/${name}.cidr" 2>/dev/null || echo "10.128.0.0/20")"
+    format="$(get_flag format "$@")" || format=""
+    if [[ "$format" == "value(ipCidrRange)" || -z "$format" ]]; then
+      echo "$cidr"
+    fi
+    exit 0
+    ;;
 esac
 
 case "${1:-} ${2:-}" in
@@ -197,6 +222,38 @@ case "${1:-} ${2:-} ${3:-}" in
 import json, sys
 d = json.load(open(sys.argv[1]))
 print(';'.join(d.get('targetTags') or []))
+" "$f"
+      elif [[ "$format" == "value(sourceRanges,allowed[].map().firewall_rule().list(),targetTags)" ]]; then
+        # The proxy-to-VM rule's own drift check reads all three fields in
+        # one combined value() call instead of three separate ones. Real
+        # gcloud's value() printer joins multiple requested fields with a
+        # single tab, and joins each repeated field's own values
+        # (sourceRanges, targetTags) with ";" -- verified by rendering
+        # synthetic firewall-rule resources through the installed Cloud
+        # SDK's own csv_printer.ValuePrinter, including the empty-field
+        # case (renders as nothing between its two tabs, field position
+        # preserved). The allowed-ports sub-expression mirrors
+        # compute/transforms.py's TransformFirewallRule: each entry becomes
+        # "PROTO:PORT" (or just "PROTO" with no ports), joined with ","
+        # by list() -- see googlecloudsdk/command_lib/compute/
+        # firewall_rules/flags.py, which is where deploy.sh's own
+        # --format string comes from.
+        "$PYTHON" -c "
+import json, sys
+d = json.load(open(sys.argv[1]))
+source = ';'.join(d.get('sourceRanges') or [])
+parts = []
+for rule in d.get('allowed') or []:
+    proto = rule.get('IPProtocol')
+    ports = rule.get('ports')
+    if ports:
+        for p in ports:
+            parts.append(f'{proto}:{p}')
+    else:
+        parts.append(proto)
+allowed = ','.join(parts)
+tags = ';'.join(d.get('targetTags') or [])
+print('\t'.join([source, allowed, tags]))
 " "$f"
       else
         cat "$f"
@@ -354,7 +411,20 @@ print(json.dumps(out))
     # a create-mode wiring test has seen everything interesting on either
     # branch, whether or not a new VM actually gets created.
     touch "${GCLOUD_STUB_STATE_DIR}/vm-create-happened"
-    [[ -f "${GCLOUD_STUB_STATE_DIR}/instances/${name}" ]] && exit 0
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/instances/${name}" ]]; then
+      format="$(get_flag format "$@")" || format=""
+      if [[ "$format" == "get(networkInterfaces[0].networkIP)" ]]; then
+        # Phase 4's VM-internal-IP lookup. A sidecar file, not the
+        # instances/${name} fixture itself -- that file's content is the
+        # zone string, read verbatim by "compute instances list"'s
+        # --format=value(zone) case below. Defaults to a realistic
+        # RFC1918 internal IP so a test that doesn't care about the exact
+        # value still gets a real one back, matching this stub's usual
+        # "default to the realistic response" convention.
+        cat "${GCLOUD_STUB_STATE_DIR}/instances/${name}.internal-ip" 2>/dev/null || echo "10.128.0.5"
+      fi
+      exit 0
+    fi
     exit 1
     ;;
   "compute instances delete")
@@ -527,6 +597,20 @@ json.dump({'email': email, 'description': desc}, open(path, 'w', encoding='utf-8
   "iap web add-iam-policy-binding")
     require_project "$@"
     require_flag region "$@"
+    # The deployer-facing IAP binding: the first gcloud call *after* the
+    # entire allUsers-verification block (get-iam-policy, and the
+    # conditional remove-iam-policy-binding). A create-mode wiring test
+    # that needs to run deploy.sh past Phase 4's IAP hardening
+    # (GCLOUD_STUB_SSH_SUCCEEDS=true) polls for this sentinel to stop
+    # deploy.sh here, well before the (real, 60s) IAP-enforcement sleep
+    # later in Phase 4 -- and, just as importantly, *after* the allUsers
+    # block has had a chance to run to completion, so a test asserting on
+    # what that block did (or didn't do) isn't racing the harness's own
+    # kill. On the allUsers-hard-fail path, deploy.sh exits before ever
+    # reaching this call, so the sentinel is never touched there --
+    # that's the point: a test on that path sees the process end on its
+    # own instead.
+    touch "${GCLOUD_STUB_STATE_DIR}/phase4-iap-hardening-done"
     if [[ -f "${GCLOUD_STUB_STATE_DIR}/iap-web-add-binding-should-fail" ]]; then
       echo "gcloud-stub: simulated IAP web binding failure" >&2
       exit 1
@@ -561,6 +645,165 @@ json.dump({'email': email, 'description': desc}, open(path, 'w', encoding='utf-8
     fi
     echo "gcloud-stub: ERROR: (gcloud.run.services.describe) Cannot find service [${name}]" >&2
     exit 1
+    ;;
+  "beta run deploy")
+    # The one-step IAP deploy (--no-allow-unauthenticated --iap). Same
+    # sentinel/state as the plain "run deploy" case above (this stub does
+    # not model any behavioral difference between the two beyond what a
+    # wiring test asserts directly off the logged invocation's flags).
+    require_project "$@"
+    require_flag region "$@"
+    name="${4:-}"
+    mkdir -p "${GCLOUD_STUB_STATE_DIR}/run-services"
+    touch "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.exists"
+    exit 0
+    ;;
+  "run services add-iam-policy-binding")
+    require_project "$@"
+    require_flag region "$@"
+    name="${4:-}"
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.add-binding-fail" ]]; then
+      echo "gcloud-stub: simulated failure adding an IAM binding to service [${name}]" >&2
+      exit 1
+    fi
+    exit 0
+    ;;
+  "run services get-iam-policy")
+    require_project "$@"
+    require_flag region "$@"
+    name="${4:-}"
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.get-policy-fail" ]]; then
+      echo "gcloud-stub: simulated failure reading IAM policy for service [${name}]" >&2
+      exit 1
+    fi
+    # Simplified relative to real gcloud's --flatten/--filter machinery:
+    # this stub only ever needs to answer the one shape deploy.sh asks
+    # for (is allUsers bound to roles/run.invoker), modeled as a
+    # name-scoped marker file rather than a real IAM policy document.
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.allusers-invoker" ]]; then
+      echo "allUsers"
+    fi
+    exit 0
+    ;;
+  "run services remove-iam-policy-binding")
+    require_project "$@"
+    require_flag region "$@"
+    name="${4:-}"
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.remove-binding-fail" ]]; then
+      echo "gcloud-stub: simulated failure removing an IAM binding from service [${name}]" >&2
+      exit 1
+    fi
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.allusers-invoker" ]]; then
+      rm -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.allusers-invoker"
+      exit 0
+    fi
+    # Real gcloud's remove-iam-policy-binding raises IamPolicyBindingNotFound
+    # (exit 1) when the given member+role isn't present in the policy --
+    # it is NOT a no-op success (iam_util.RemoveBindingFromIamPolicy in
+    # the Cloud SDK). deploy.sh only calls this after confirming presence
+    # via `run services get-iam-policy` above, so this path is a realistic
+    # "gone by the time we tried to remove it" race, not the common case.
+    echo "ERROR: (gcloud.run.services.remove-iam-policy-binding) Policy binding with the specified principal and role not found!" >&2
+    exit 1
+    ;;
+  "compute networks describe")
+    require_project "$@"
+    name="${4:-}"
+    # A name-scoped, non-"not found" error (permission denied, a
+    # transient API error, ...) -- checked first, distinct from ".missing"
+    # below, since deploy.sh must treat the two very differently (R1:
+    # retry/report "missing" only for a genuine not-found; surface
+    # anything else immediately with the real error text).
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/networks/${name}.describe-error" ]]; then
+      cat "${GCLOUD_STUB_STATE_DIR}/networks/${name}.describe-error" >&2
+      exit 1
+    fi
+    # Models the network's real asynchronous appearance after
+    # services-enable: the first N calls report "not found", then it
+    # exists from call N+1 onward. Checked before the permanently-missing
+    # fixture below, so a test can exercise the poll loop's
+    # retry-then-succeed path (N < NETWORK_CHECK_MAX_ATTEMPTS) and its
+    # give-up-after-budget path (N >= it) without needing two different
+    # fixtures.
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/networks/${name}.appears-after" ]]; then
+      appears_after="$(cat "${GCLOUD_STUB_STATE_DIR}/networks/${name}.appears-after")"
+      count_file="${GCLOUD_STUB_STATE_DIR}/networks/${name}.describe-count"
+      count="$(cat "$count_file" 2>/dev/null || echo 0)"
+      count=$((count + 1))
+      echo "$count" > "$count_file"
+      if [[ "$count" -le "$appears_after" ]]; then
+        # Retryable shapes, selected by an optional companion fixture
+        # (not-found is the default): a genuine not-found (the network
+        # itself is still propagating), or one of three SERVICE_DISABLED
+        # shapes real gcloud can produce right after
+        # compute.googleapis.com is enabled on a brand-new project (see
+        # deploy.sh's own comment on the retry condition for which gcloud
+        # code paths produce which shape).
+        error_shape="$(cat "${GCLOUD_STUB_STATE_DIR}/networks/${name}.appears-after-error-shape" 2>/dev/null || echo "")"
+        case "$error_shape" in
+          service-disabled)
+            # The realistic shape when gcloud's API-enablement prompt is
+            # declined (or auto-declined by --quiet): the rendered
+            # HttpException's message, followed by a details block whose
+            # reason is SERVICE_DISABLED. Contains both match substrings.
+            cat >&2 <<STUBERR
+gcloud-stub: ERROR: (gcloud.compute.networks.describe) PERMISSION_DENIED: Compute Engine API has not been used in project 123456789012 before or it is disabled.  Enable it by visiting https://console.developers.google.com/apis/api/compute.googleapis.com/overview?project=123456789012 then retry.  If you enabled this API recently, wait a few minutes for the action to propagate to our systems and retry.
+- '@type': type.googleapis.com/google.rpc.ErrorInfo
+  domain: googleapis.com
+  metadata:
+    consumer: projects/123456789012
+    service: compute.googleapis.com
+  reason: SERVICE_DISABLED
+STUBERR
+            ;;
+          service-disabled-bare-message)
+            # The realistic shape when the API-enablement prompt is
+            # disabled entirely (should_prompt_to_enable_api=false): the
+            # batch-request error path (compute/utils.RaiseToolException)
+            # renders a plain "Could not fetch resource:" header line
+            # followed by the message, no PERMISSION_DENIED prefix and no
+            # details block -- so only the message fragment is present,
+            # not the literal "SERVICE_DISABLED". Proves the fragment
+            # match matters on its own.
+            cat >&2 <<STUBERR
+gcloud-stub: ERROR: (gcloud.compute.networks.describe) Could not fetch resource:
+ - Compute Engine API has not been used in project 123456789012 before or it is disabled.  Enable it by visiting https://console.developers.google.com/apis/api/compute.googleapis.com/overview?project=123456789012 then retry.  If you enabled this API recently, wait a few minutes for the action to propagate to our systems and retry.
+STUBERR
+            ;;
+          service-disabled-reason-only)
+            # Synthetic, not a shape real gcloud is known to produce for
+            # this exact call: a details block carrying reason:
+            # SERVICE_DISABLED with none of the "has not been used in
+            # project" message text. Exists only so the SERVICE_DISABLED
+            # match condition is independently exercised too, in case a
+            # future gcloud version (or a related API) reports the same
+            # machine-readable reason under different message wording.
+            cat >&2 <<STUBERR
+gcloud-stub: ERROR: (gcloud.compute.networks.describe) PERMISSION_DENIED: request rejected.
+- '@type': type.googleapis.com/google.rpc.ErrorInfo
+  domain: googleapis.com
+  reason: SERVICE_DISABLED
+STUBERR
+            ;;
+          *)
+            echo "gcloud-stub: ERROR: (gcloud.compute.networks.describe) Could not fetch resource: - The resource 'projects/$(get_flag project "$@")/global/networks/${name}' was not found" >&2
+            ;;
+        esac
+        exit 1
+      fi
+      exit 0
+    fi
+    # Realistic projects have a "default" network unless the operator's
+    # org enforces compute.skipDefaultNetworkCreation -- the opposite
+    # default from most other resources in this stub (which don't exist
+    # until deploy.sh itself creates them), so "exists" is the default
+    # response here, and a hardened-org test opts into "missing" via
+    # set_network_missing.
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/networks/${name}.missing" ]]; then
+      echo "gcloud-stub: ERROR: (gcloud.compute.networks.describe) Could not fetch resource: - The resource 'projects/$(get_flag project "$@")/global/networks/${name}' was not found" >&2
+      exit 1
+    fi
+    exit 0
     ;;
   "compute ssh "*)
     # The first `compute ssh` call of deploy.sh's own SSH-readiness retry
