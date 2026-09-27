@@ -60,7 +60,7 @@ Controls the central Hub API server.
 | `gcp_iam_deny_unknown_policy` | string | `"fail-open"` | Behavior when Policy Troubleshooter cannot evaluate deny policies (e.g. if the Hub lacks org-level reviewer roles). Supported values: `"fail-open"` (allow if no explicit deny is found; default) or `"fail-closed"` (treat as indeterminate and deny). |
 | `read_timeout` | duration | `"30s"` | HTTP read timeout. |
 | `write_timeout` | duration | `"60s"` | HTTP write timeout. |
-| `admin_emails` | list | `[]` | List of emails granted super-admin access. Additive only: listed users are promoted to admin on login, but the list never demotes or rewrites a role already stored in the database (e.g. `admin` or `viewer` set from the admin UI). Changing a role is an explicit admin action. |
+| `admin_emails` | list | `[]` | List of emails granted super-admin access. Listed users are always admins: they are promoted on sign-in. When the list is non-empty, an admin whose email is removed from it is demoted to [`default_user_role`](#authentication-serverauth) at the next hub restart or their next sign-in, whichever comes first. At restart, the default role comes from `settings.yaml` or the environment. If it was set only in the Admin UI (Postgres mode), a user demoted at restart becomes Member. Two exceptions: admins promoted from **Admin > Users** (or the users API) stay admins, and nobody is demoted while the startup safety check is refusing demotions (for example, when no existing user matches the list). Roles set from the admin UI for users who were never config admins (`member`, `viewer`) are not changed by this list. |
 | `soft_delete_retention` | duration | | Duration to retain soft-deleted agents (e.g., `"72h"`). |
 | `soft_delete_retain_files` | bool | `false` | Preserve workspace files during the soft-delete period. |
 | `cors` | object | | CORS configuration (see below). |
@@ -105,6 +105,8 @@ Persistence settings for the Hub.
 | `dev_mode` | bool | `false` | Enable insecure development authentication (used in `"dev"` mode). |
 | `dev_token` | string | | Static token for dev mode. |
 | `authorized_domains` | list | `[]` | Limit access to specific email domains. |
+| `user_access_mode` | string | `"open"` | Who may sign in: `"open"` (any verified email), `"domain_restricted"` (email domain must be in `authorized_domains`), or `"invite_only"` (email must have been invited or allow-listed). Users in `admin_emails` are always allowed. |
+| `default_user_role` | string | `"member"` | Hub role given to a user when their account is first created or activated: first sign-in, including the first sign-in of an invited or allow-listed user. Values: `"member"` or `"viewer"` (`"admin"` is rejected; use `admin_emails`). Users in `admin_emails` are always admins. Changing it does not affect existing users. It is also the role given to an admin who is removed from `admin_emails`. See [Hub roles](/scion/hosted/ha/permissions/#hub-roles). Environment: `SCION_SEED_SERVER_AUTH_DEFAULTUSERROLE` (recommended) or `SCION_SERVER_AUTH_DEFAULTUSERROLE` (per-node, deprecated for Layer-1 keys). |
 
 ### Proxy Auth (`server.auth.proxy`)
 
@@ -653,7 +655,7 @@ Settings that can be changed at runtime and are shared across all replicas. Stor
 
 | Section | Contents |
 | :--- | :--- |
-| `access` | `admin_emails`, `user_access_mode`, `authorized_domains` |
+| `access` | `admin_emails`, `user_access_mode`, `authorized_domains`, `default_user_role` |
 | `lifecycle` | `auto_suspend_stalled`, `soft_delete_retention`, `soft_delete_retain_files` |
 | `maintenance` | `admin_mode`, `maintenance_message` (durable + cluster-wide) |
 | `telemetry` | Full `telemetry.*` subtree (enabled, cloud, hub, local, filter, resource) |
@@ -695,7 +697,7 @@ Because env overrides on Layer-1 keys reintroduce per-node drift, the system war
 
 **Revision CAS**: The request body may include `expected_revisions` — a map of section name to expected revision number. On mismatch, the response is `409 Conflict` with the conflicting sections and their current revisions. Omitted sections use last-writer-wins semantics. Sections are written in alphabetical order for deterministic partial-apply behavior.
 
-**Presence-aware clearing**: The PUT handler distinguishes **omitted** fields (preserve current DB value) from **explicitly-sent empty values** (`""`, `[]`, `null`) which **clear** the field. This enables clearing admin_emails, user_access_mode, authorized_domains, notification_channels, and public_url without sending every field.
+**Presence-aware clearing**: The PUT handler distinguishes **omitted** fields (preserve current DB value) from **explicitly-sent empty values** (`""`, `[]`, `null`) which **clear** the field. This enables clearing admin_emails, user_access_mode, authorized_domains, default_user_role, notification_channels, and public_url without sending every field.
 
 **Maintenance durability**: `PUT /api/v1/admin/maintenance` writes to the `maintenance` section in DB, making admin/maintenance mode durable across restarts and propagated to all replicas. `SCION_SERVER_ADMINMODE` env var still force-enables per node for break-glass access. In file/SQLite mode, maintenance changes are ephemeral (in-memory only, lost on restart). Use `SCION_SERVER_ADMINMODE=true` env var for persistent control.
 

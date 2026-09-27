@@ -22,7 +22,7 @@ Settings are classified into two layers:
 | Layer | Examples | Behavior |
 |-------|----------|----------|
 | **Layer-0** (bootstrap) | `server.mode`, `server.database.*`, `server.storage.*`, `server.secrets.*`, `server.hub.port`, `server.auth.dev_mode` | Always resolved from bootstrap configuration. Cannot be changed via the admin UI in database mode. |
-| **Layer-1** (operational) | `server.hub.admin_emails`, `server.auth.user_access_mode`, `telemetry.*`, `agent_defaults.*`, `server.github_app.*`, `server.notification_channels`, `server.federation.*`, `runtimes`, `profiles`, `harness_configs` | In database mode, stored in the database and editable via the admin UI. Bootstrap values serve as initial defaults. |
+| **Layer-1** (operational) | `server.hub.admin_emails`, `server.auth.user_access_mode`, `server.auth.default_user_role`, `telemetry.*`, `agent_defaults.*`, `server.github_app.*`, `server.notification_channels`, `server.federation.*`, `runtimes`, `profiles`, `harness_configs` | In database mode, stored in the database and editable via the admin UI. Bootstrap values serve as initial defaults. |
 
 ### Database Mode
 
@@ -92,6 +92,7 @@ Seeds re-sync on restart for sections that haven't been admin-edited (seeded sec
 | `server.hub.public_url` | `SCION_SEED_SERVER_HUB_PUBLICURL` |
 | `server.auth.user_access_mode` | `SCION_SEED_SERVER_AUTH_USERACCESSMODE` |
 | `server.auth.authorized_domains` | `SCION_SEED_SERVER_AUTH_AUTHORIZEDDOMAINS` |
+| `server.auth.default_user_role` | `SCION_SEED_SERVER_AUTH_DEFAULTUSERROLE` |
 | `server.hub.auto_suspend_stalled` | `SCION_SEED_SERVER_HUB_AUTOSUSPENDSTALLED` |
 | `server.hub.soft_delete_retain_files` | `SCION_SEED_SERVER_HUB_SOFTDELETERETAINFILES` |
 | `server.hub.image_registry` | `SCION_SEED_SERVER_HUB_IMAGEREGISTRY` |
@@ -124,6 +125,8 @@ Example:
 ```diff
 - SCION_SERVER_HUB_ADMINEMAILS=admin@example.com
 + SCION_SEED_SERVER_HUB_ADMINEMAILS=admin@example.com
+- SCION_SERVER_AUTH_DEFAULTUSERROLE=viewer
++ SCION_SEED_SERVER_AUTH_DEFAULTUSERROLE=viewer
 ```
 :::
 
