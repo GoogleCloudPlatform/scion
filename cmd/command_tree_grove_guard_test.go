@@ -56,6 +56,8 @@ func TestCommandTreeHasNoGroveTerms(t *testing.T) {
 		checkString(path, kind+" flag --"+f.Name+" Usage", f.Usage)
 		checkString(path, kind+" flag --"+f.Name+" Deprecated", f.Deprecated)
 		checkString(path, kind+" flag --"+f.Name+" ShorthandDeprecated", f.ShorthandDeprecated)
+		checkString(path, kind+" flag --"+f.Name+" DefValue", f.DefValue)
+		checkString(path, kind+" flag --"+f.Name+" NoOptDefVal", f.NoOptDefVal)
 	}
 
 	commandCount := 0
