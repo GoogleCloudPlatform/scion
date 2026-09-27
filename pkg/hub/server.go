@@ -1585,7 +1585,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// Must run after BackfillRoleBindings.
 	// D11: pass AdminEmails to enable bidirectional convergence (demotion).
 	// Revocation latency: takes effect on this restart; documented in commit.
-	if demotionSafe, err := ReconcileSuperAdminBindings(ctx, s, cfg.AdminEmails); err != nil {
+	if demotionSafe, err := ReconcileSuperAdminBindings(ctx, s, cfg.AdminEmails, cfg.DefaultUserRole); err != nil {
 		slog.Error("failed to reconcile super-admin bindings — revocation may be incomplete", "error", err)
 	} else {
 		srv.demotionSafe.Store(demotionSafe)

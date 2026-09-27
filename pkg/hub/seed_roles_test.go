@@ -610,6 +610,112 @@ func TestBackfill_SkipsInvitedUsers(t *testing.T) {
 }
 
 // =============================================================================
+// Startup super-admin reconciliation: demotion follows default_user_role and
+// hub role grants are synced (design §5 D2)
+// =============================================================================
+
+// setupReconcileDemotion creates an anchor admin who stays in admin_emails
+// (so the effect guard allows demotions) and a config-granted admin who was
+// removed from admin_emails and is also in hub-members.
+func setupReconcileDemotion(t *testing.T, s store.Store) (anchor, demoted *store.User) {
+	t.Helper()
+	anchor = setupHubRoleGrantState(t, s, "rc-anchor", store.UserRoleAdmin)
+	demoted = setupHubRoleGrantState(t, s, "rc-demoted", "none")
+	demoted.Role = store.UserRoleAdmin
+	require.NoError(t, s.UpdateUser(context.Background(), demoted))
+	createSystemBinding(t, s, demoted.ID, store.SystemRoleSuperAdmin, store.SystemReconcileCreatedBy)
+	require.NoError(t, ensureHubMembershipTx(context.Background(), s, demoted.ID))
+	return anchor, demoted
+}
+
+func TestReconcileSuperAdmin_DemotesToViewerDefault(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+	anchor, demoted := setupReconcileDemotion(t, s)
+
+	safe, err := ReconcileSuperAdminBindings(ctx, s, []string{anchor.Email}, store.UserRoleViewer)
+	require.NoError(t, err)
+	assert.True(t, safe)
+
+	u, err := s.GetUser(ctx, demoted.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.UserRoleViewer, u.Role)
+	assert.Equal(t, hubRoleGrantState{HubViewerBindings: 1}, observeHubRoleGrants(t, s, demoted.ID),
+		"demoted viewer: hub-viewer binding, no hub-members, no super-admin")
+}
+
+func TestReconcileSuperAdmin_EmptyDefaultDemotesToMember(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+	anchor, demoted := setupReconcileDemotion(t, s)
+	// A stale hub-viewer binding must also go when the user becomes a member.
+	createSystemBinding(t, s, demoted.ID, store.SystemRoleHubViewer, store.SystemBackfillCreatedBy)
+
+	_, err := ReconcileSuperAdminBindings(ctx, s, []string{anchor.Email}, "")
+	require.NoError(t, err)
+
+	u, err := s.GetUser(ctx, demoted.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.UserRoleMember, u.Role)
+	assert.Equal(t, hubRoleGrantState{InHubMembers: true}, observeHubRoleGrants(t, s, demoted.ID))
+}
+
+func TestReconcileSuperAdmin_UIPromotedAdminNotDemoted(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+	anchor := setupHubRoleGrantState(t, s, "rc-anchor-ui", store.UserRoleAdmin)
+	ui := setupHubRoleGrantState(t, s, "rc-ui-admin", "none")
+	ui.Role = store.UserRoleAdmin
+	require.NoError(t, s.UpdateUser(ctx, ui))
+	createSystemBinding(t, s, ui.ID, store.SystemRoleSuperAdmin, store.AdminAPICreatedBy)
+
+	_, err := ReconcileSuperAdminBindings(ctx, s, []string{anchor.Email}, store.UserRoleViewer)
+	require.NoError(t, err)
+
+	u, err := s.GetUser(ctx, ui.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.UserRoleAdmin, u.Role)
+	assert.Equal(t, hubRoleGrantState{SuperAdminBinding: 1}, observeHubRoleGrants(t, s, ui.ID),
+		"UI-promoted admin keeps role and grants are untouched")
+}
+
+func TestReconcileSuperAdmin_PromotionRemovesHubViewerBinding(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+	viewer := setupHubRoleGrantState(t, s, "rc-promoted", "none")
+	viewer.Role = store.UserRoleViewer
+	require.NoError(t, s.UpdateUser(ctx, viewer))
+	require.NoError(t, syncHubRoleGrants(ctx, s, viewer.ID, store.UserRoleViewer, store.SystemBackfillCreatedBy))
+
+	_, err := ReconcileSuperAdminBindings(ctx, s, []string{viewer.Email}, store.UserRoleViewer)
+	require.NoError(t, err)
+
+	u, err := s.GetUser(ctx, viewer.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.UserRoleAdmin, u.Role)
+	assert.Equal(t, hubRoleGrantState{SuperAdminBinding: 1}, observeHubRoleGrants(t, s, viewer.ID))
+}
+
+func TestReconcileSuperAdmin_InvitedAdminDemotedGetsNoGrants(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+	anchor := setupHubRoleGrantState(t, s, "rc-anchor-inv", store.UserRoleAdmin)
+	inv := &store.User{
+		ID:     tid("rc-invited-admin"),
+		Email:  "rc-invited-admin@example.com",
+		Role:   store.UserRoleAdmin,
+		Status: store.UserStatusInvited,
+	}
+	require.NoError(t, s.CreateUser(ctx, inv))
+
+	_, err := ReconcileSuperAdminBindings(ctx, s, []string{anchor.Email}, store.UserRoleMember)
+	require.NoError(t, err)
+
+	assert.Equal(t, hubRoleGrantState{}, observeHubRoleGrants(t, s, inv.ID),
+		"invited placeholder must get no hub grants from the reconciler")
+}
+
+// =============================================================================
 // Cross-project visibility regression tests (with reconciled roles)
 // =============================================================================
 

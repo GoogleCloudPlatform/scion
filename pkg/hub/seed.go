@@ -925,6 +925,19 @@ func backfillSuperAdminBinding(ctx context.Context, s store.Store, userID string
 	return true, nil
 }
 
+// reconcileSyncHubRoleGrants syncs hub role grants after the startup
+// reconciler changed a user's role. Invited users are skipped (placeholder
+// role). Best-effort: errors are logged.
+func reconcileSyncHubRoleGrants(ctx context.Context, s store.Store, u *store.User) {
+	if u.Status == store.UserStatusInvited {
+		return
+	}
+	if err := syncHubRoleGrants(ctx, s, u.ID, u.Role, store.SystemReconcileCreatedBy); err != nil {
+		slog.Warn("failed to sync hub role grants during super-admin reconciliation",
+			"user_id", u.ID, "role", u.Role, "error", err)
+	}
+}
+
 // backfillProjectOwnerRoleBindings creates project-scoped project-owner role
 // bindings from legacy Project.CreatedBy values. Pre-existing projects
 // (created before the RoleBinding-based membership model) have a CreatedBy
@@ -997,8 +1010,13 @@ func backfillProjectOwnerRoleBindings(ctx context.Context, s store.Store) error 
 //	  - If the user is in adminEmails: promote Role to "admin" (if needed) and
 //	    ensure a super-admin binding exists.
 //	  - If the user is NOT in adminEmails AND adminEmails is non-empty: demote
-//	    Role from "admin" to "member" (if needed) and delete any super-admin
-//	    binding. Ordinary grants (non-super-admin) are NOT touched.
+//	    Role from "admin" to defaultRole (normalized: "viewer" or "member") if
+//	    needed and delete any super-admin binding.
+//	  - After a successful role change, syncHubRoleGrants brings the
+//	    hub-members group and hub-viewer binding in line with the new role
+//	    (this runs after BackfillRoleBindings, so grants would otherwise be
+//	    stale until the next restart). Invited users are not synced: their
+//	    stored role is a placeholder until first sign-in.
 //
 // Empty-list safety guard:
 //   - When adminEmails is nil or empty, no demotions occur and a warning is
@@ -1009,7 +1027,14 @@ func backfillProjectOwnerRoleBindings(ctx context.Context, s store.Store) error 
 // Revocation latency: super-admin revocation takes effect on next hub restart.
 //
 // This is called after BackfillRoleBindings and is idempotent.
-func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails []string) (demotionSafe bool, err error) {
+func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails []string, defaultRole string) (demotionSafe bool, err error) {
+	// Demotion lands on the configured default role, like login-time
+	// demotion in determineUserRole; anything but "viewer" means "member".
+	demoteTo := store.UserRoleMember
+	if defaultRole == store.UserRoleViewer {
+		demoteTo = store.UserRoleViewer
+	}
+
 	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -1125,6 +1150,8 @@ func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails
 					if err := s.UpdateUser(ctx, u); err != nil {
 						slog.Warn("failed to promote user during reconciliation",
 							"user_id", u.ID, "error", err)
+					} else {
+						reconcileSyncHubRoleGrants(ctx, s, u)
 					}
 				}
 				_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
@@ -1165,13 +1192,14 @@ func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails
 				// Reverse: demote role and delete super-admin binding (config-granted only).
 				if u.Role == "admin" {
 					slog.Warn("demoting user: removed from AdminEmails",
-						"user_id", u.ID, "email", u.Email, "old_role", "admin", "new_role", "member")
-					u.Role = "member"
+						"user_id", u.ID, "email", u.Email, "old_role", "admin", "new_role", demoteTo)
+					u.Role = demoteTo
 					if err := s.UpdateUser(ctx, u); err != nil {
 						slog.Warn("failed to demote user during reconciliation",
 							"user_id", u.ID, "error", err)
 					} else {
 						demoted++
+						reconcileSyncHubRoleGrants(ctx, s, u)
 					}
 				}
 				// Delete orphaned super-admin bindings for users NOT in adminEmails.

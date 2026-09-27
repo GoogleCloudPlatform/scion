@@ -678,7 +678,7 @@ func TestReconcileSuperAdminBindings_CreatesBindingForAdminUser(t *testing.T) {
 	}))
 
 	// Run reconciliation with an admin list containing this user (forward mode).
-	_, err := ReconcileSuperAdminBindings(ctx, s, []string{"reconcile@test.com"})
+	_, err := ReconcileSuperAdminBindings(ctx, s, []string{"reconcile@test.com"}, "")
 	require.NoError(t, err)
 
 	// Verify binding was created
@@ -708,9 +708,9 @@ func TestReconcileSuperAdminBindings_Idempotent(t *testing.T) {
 	}))
 
 	// Run twice with explicit admin emails list - should not error
-	_, err := ReconcileSuperAdminBindings(ctx, s, []string{"idem@test.com"})
+	_, err := ReconcileSuperAdminBindings(ctx, s, []string{"idem@test.com"}, "")
 	require.NoError(t, err)
-	_, err = ReconcileSuperAdminBindings(ctx, s, []string{"idem@test.com"})
+	_, err = ReconcileSuperAdminBindings(ctx, s, []string{"idem@test.com"}, "")
 	require.NoError(t, err)
 }
 
@@ -969,7 +969,7 @@ func TestD11_RemovedFromAdminEmailsLosesRole(t *testing.T) {
 	}))
 
 	// Reconcile with adminEmails that do NOT include this user.
-	_, err = ReconcileSuperAdminBindings(ctx, s, []string{"other-admin@test.com"})
+	_, err = ReconcileSuperAdminBindings(ctx, s, []string{"other-admin@test.com"}, "")
 	require.NoError(t, err)
 
 	// Verify role was demoted.
@@ -1008,7 +1008,7 @@ func TestD11_RemovedFromAdminEmailsLosesBinding(t *testing.T) {
 	}))
 
 	// Reconcile with a list that does NOT include this user.
-	_, err = ReconcileSuperAdminBindings(ctx, s, []string{"other@test.com"})
+	_, err = ReconcileSuperAdminBindings(ctx, s, []string{"other@test.com"}, "")
 	require.NoError(t, err)
 
 	// Verify binding was deleted.
@@ -1053,7 +1053,7 @@ func TestD11_FunctionallyAdminUserKeepsOrdinaryGrants(t *testing.T) {
 	}))
 
 	// Run reconciliation with an admin list that does NOT include this user.
-	_, err = ReconcileSuperAdminBindings(ctx, s, []string{"real-admin@test.com"})
+	_, err = ReconcileSuperAdminBindings(ctx, s, []string{"real-admin@test.com"}, "")
 	require.NoError(t, err)
 
 	// Verify the ordinary hub-member binding is still there.
@@ -1097,7 +1097,7 @@ func TestD11_EmptyAdminEmailsNoChange(t *testing.T) {
 	require.NoError(t, err)
 
 	// Reconcile with an EMPTY admin emails list.
-	_, err = ReconcileSuperAdminBindings(ctx, s, []string{})
+	_, err = ReconcileSuperAdminBindings(ctx, s, []string{}, "")
 	require.NoError(t, err)
 
 	// Verify user was NOT demoted (empty-list safety guard).
@@ -1140,7 +1140,7 @@ func TestD11Fix2_ForwardPassGatedOnAdminList(t *testing.T) {
 	}))
 
 	// Reconcile with an admin list that does NOT include this user.
-	_, err := ReconcileSuperAdminBindings(ctx, s, []string{"real-admin@test.com"})
+	_, err := ReconcileSuperAdminBindings(ctx, s, []string{"real-admin@test.com"}, "")
 	require.NoError(t, err)
 
 	// Verify: no super-admin binding was created for the removed admin.
@@ -1185,7 +1185,7 @@ func TestD11Fix2_NilAndEmptyCollapse(t *testing.T) {
 	require.NoError(t, err)
 
 	// nil adminEmails — should not demote or delete binding.
-	_, err = ReconcileSuperAdminBindings(ctx, s, nil)
+	_, err = ReconcileSuperAdminBindings(ctx, s, nil, "")
 	require.NoError(t, err)
 
 	u, err := s.GetUser(ctx, userID)
@@ -1203,7 +1203,7 @@ func TestD11Fix2_NilAndEmptyCollapse(t *testing.T) {
 	assert.True(t, found, "nil AdminEmails must not delete super-admin binding")
 
 	// empty []string{} — same behavior as nil.
-	_, err = ReconcileSuperAdminBindings(ctx, s, []string{})
+	_, err = ReconcileSuperAdminBindings(ctx, s, []string{}, "")
 	require.NoError(t, err)
 
 	u, err = s.GetUser(ctx, userID)
@@ -1287,7 +1287,7 @@ func TestD11Fix3_EffectGuardRefusesZeroAdmins(t *testing.T) {
 	}
 
 	// Reconcile with AdminEmails that match NO existing users (typos/non-existent).
-	_, err = ReconcileSuperAdminBindings(ctx, s, []string{"nobody@test.com", "also-nobody@test.com"})
+	_, err = ReconcileSuperAdminBindings(ctx, s, []string{"nobody@test.com", "also-nobody@test.com"}, "")
 	require.NoError(t, err)
 
 	// Verify: both admins still have their role (effect guard fired).
@@ -1328,7 +1328,7 @@ func TestD11Fix3_AdminRotationAliceToBob(t *testing.T) {
 	require.NoError(t, err)
 
 	// Rotate: replace alice with bob in AdminEmails.
-	_, err = ReconcileSuperAdminBindings(ctx, s, []string{"bob@test.com"})
+	_, err = ReconcileSuperAdminBindings(ctx, s, []string{"bob@test.com"}, "")
 	require.NoError(t, err)
 
 	// Alice should be demoted.
