@@ -56,12 +56,16 @@ COPY resources/ ./resources/
 # Keep -buildvcs=false — .git/ is in .dockerignore; without the flag the build
 # fails.
 ARG GIT_COMMIT
+ARG VERSION
 ARG BUILD_TIME
 RUN BUILD_TIME="${BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" && \
     SCION_PKG="github.com/GoogleCloudPlatform/scion/pkg/version" && \
     LDFLAGS="-s -w -X ${SCION_PKG}.BuildTime=${BUILD_TIME}" && \
     if [ -n "${GIT_COMMIT}" ]; then \
         LDFLAGS="${LDFLAGS} -X ${SCION_PKG}.Commit=${GIT_COMMIT}"; \
+    fi && \
+    if [ -n "${VERSION}" ]; then \
+        LDFLAGS="${LDFLAGS} -X ${SCION_PKG}.Version=${VERSION}"; \
     fi && \
     go build -buildvcs=false -ldflags="${LDFLAGS}" -o /usr/local/bin/scion ./cmd/scion/
 

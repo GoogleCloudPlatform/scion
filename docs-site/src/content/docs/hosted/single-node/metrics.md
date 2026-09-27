@@ -411,6 +411,10 @@ The aggregated relational metrics are exposed directly within the Hub's Web UI:
 - **Project Summary Panel**: Provides an operational cost and model usage dashboard across all agents in the selected project.
 
 
+## Upgrading
+
+`sciontool`'s telemetry code (including usage-metrics fixes) is compiled into the `scion-base` image; harness and hub images only build on top of it. A `sciontool`-side fix reaches running agents only after `scion-base` is rebuilt, then the harness/hub images on top of it — rebuilding harnesses alone against an old `scion-base` keeps the old telemetry behavior. See [Build provenance and stale sciontool](https://github.com/GoogleCloudPlatform/scion/blob/main/image-build/README.md#build-provenance-and-stale-sciontool) for how to check which commit is embedded in a given image and the required rebuild order.
+
 ## Implementation Details
 
 The telemetry pipeline is implemented in `pkg/sciontool/telemetry/`:

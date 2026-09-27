@@ -31,7 +31,7 @@
 #     gcloud builds submit \
 #       --project=<your-project> \
 #       --config=image-build/cloudbuild-omni.yaml \
-#       --substitutions="_TAG=dev-$(git rev-parse --short HEAD),_SHORT_SHA=$(git rev-parse --short HEAD),_COMMIT_SHA=$(git rev-parse HEAD),_REGISTRY=us-central1-docker.pkg.dev/<your-project>/scion" \
+#       --substitutions="_TAG=dev-$(git rev-parse --short HEAD),_SHORT_SHA=$(git rev-parse --short HEAD),_COMMIT_SHA=$(git rev-parse HEAD),_VERSION=$(git describe --tags --exact-match 2>/dev/null || true),_REGISTRY=us-central1-docker.pkg.dev/<your-project>/scion" \
 #       --ignore-file=image-build/gcloudignore-omni \
 #       --gcs-source-staging-dir=gs://<your-project>_cloudbuild/source \
 #       --async .
@@ -81,6 +81,8 @@ steps:
       - 'BASE_IMAGE=$_REGISTRY/thick-prep:$_TAG'
       - '--build-arg'
       - 'GIT_COMMIT=$_COMMIT_SHA'
+      - '--build-arg'
+      - 'VERSION=$_VERSION'
       - '-t'
       - '$_REGISTRY/scion-base:$_TAG'
       - '-f'
@@ -184,6 +186,8 @@ steps:
       - 'BASE_IMAGE=$_REGISTRY/scion-grok-build:$_TAG'
       - '--build-arg'
       - 'GIT_COMMIT=$_COMMIT_SHA'
+      - '--build-arg'
+      - 'VERSION=$_VERSION'
       - '-t'
       - '$_REGISTRY/scion-omni:$_SHORT_SHA'
       - '-t'

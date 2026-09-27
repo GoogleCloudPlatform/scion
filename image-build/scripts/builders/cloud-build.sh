@@ -113,6 +113,9 @@ builder_run_target() {
   # (referenced) in the template steps.
   local short_sha="${SHORT_SHA:-unknown}"
   local commit_sha="${COMMIT_SHA:-unknown}"
+  # Unlike short_sha/commit_sha, an empty VERSION is a normal, expected value
+  # (off-tag builds), not a placeholder — same convention as hack/version.sh.
+  local version_val="${VERSION:-}"
 
   local subs="_TAG=${tag}"
   if grep -q '_SHORT_SHA' "${config}"; then
@@ -120,6 +123,9 @@ builder_run_target() {
   fi
   if grep -q '_COMMIT_SHA' "${config}"; then
     subs="${subs},_COMMIT_SHA=${commit_sha}"
+  fi
+  if grep -q '_VERSION' "${config}"; then
+    subs="${subs},_VERSION=${version_val}"
   fi
   if [[ -n "${registry}" ]]; then
     subs="${subs},_REGISTRY=${registry}"

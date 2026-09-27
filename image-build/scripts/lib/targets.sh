@@ -273,6 +273,9 @@ step_build_args() {
       if [[ -n "${COMMIT_SHA:-}" ]]; then
         echo "GIT_COMMIT=${COMMIT_SHA}"
       fi
+      if [[ -n "${VERSION:-}" ]]; then
+        echo "VERSION=${VERSION}"
+      fi
       ;;
     scion-hub)
       echo "BASE_IMAGE=${prefix}scion-base:${BASE_TAG}"
@@ -287,6 +290,9 @@ step_build_args() {
       fi
       if [[ -n "${COMMIT_SHA:-}" ]]; then
         echo "GIT_COMMIT=${COMMIT_SHA}"
+      fi
+      if [[ -n "${VERSION:-}" ]]; then
+        echo "VERSION=${VERSION}"
       fi
       ;;
     *)
