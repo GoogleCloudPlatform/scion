@@ -123,8 +123,13 @@ module "hub_cloudrun" {
   # not split between incidental variable wiring and this map. The one
   # requirement that had NO other edge at all was the nfs-init Job: nfs_export
   # (above) is a plain path string, known before the Job ever runs, so
-  # nfs_init_job_id (a real attribute of the Job resource, only known once
-  # wait_for_completion's wait is over) is what actually closes that gap.
+  # nfs_init_job_id (a real attribute of the Job resource) is what actually
+  # closes that gap. It is the Job's .id ("<namespace>/<name>"), not its
+  # .metadata[0].uid (F-113): the provider sets .id from the create response
+  # before wait_for_completion runs, but leaves uid null in state until the
+  # next refresh, so keying on uid made this terraform_data show a spurious
+  # 0/1/0 on every fresh hub's second plan even though the graph edge (and
+  # so the ordering) was never actually broken.
   boot_prerequisites = {
     nfs_init_job   = module.agent_runtime_k8s.nfs_init_job_id
     db_name        = module.cloudsql_database.db_name
