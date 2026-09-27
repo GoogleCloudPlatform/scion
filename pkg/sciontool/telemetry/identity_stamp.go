@@ -5,9 +5,9 @@ Copyright 2026 The Scion Authors.
 package telemetry
 
 import (
-	"fmt"
-
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -26,11 +26,28 @@ import (
 // before a point ever reaches this function, so there is nothing left to
 // reject here, and nothing here can fail a whole batch that admission has
 // already accepted point-by-point.
+//
+// The ExponentialHistogram and Summary branches are unreachable through the
+// real pipeline today (round-2 review Nit-2): Pipeline.handleMetrics calls
+// metricKind on every metric in a request, for both exporters, before any
+// admission or export step runs, and metricKind only recognizes Sum, Gauge
+// and Histogram — a request containing either kind is rejected outright
+// (InvalidArgument) long before ExportProtoMetrics or this function sees it.
+// They stay, stamping correctly rather than silently skipping, in case that
+// restriction is ever lifted for the generic-forwarding path specifically;
+// TestGenericOTLPIdentityStampingCoversEveryPointKind exercises this
+// function directly (bypassing metricKind) to pin that they do.
 func stampIdentityLabels(input []*metricpb.ResourceMetrics) ([]*metricpb.ResourceMetrics, error) {
 	output := make([]*metricpb.ResourceMetrics, 0, len(input))
 	for _, source := range input {
 		if source == nil {
-			return nil, fmt.Errorf("nil resource metrics")
+			// Also unreachable through the real pipeline: metricStreams.add
+			// rejects a nil ResourceMetrics at admission (both exporters),
+			// so nothing nil ever reaches a stream, let alone a snapshot
+			// batch passed to ExportProtoMetrics. Kept as a defensive,
+			// explicitly non-retryable guard against a direct or future
+			// caller, rather than a panic.
+			return nil, status.Error(codes.InvalidArgument, "nil resource metrics")
 		}
 		rm := proto.Clone(source).(*metricpb.ResourceMetrics)
 		attrs := rm.GetResource().GetAttributes()

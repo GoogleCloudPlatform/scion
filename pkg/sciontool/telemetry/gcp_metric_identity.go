@@ -98,16 +98,36 @@ func cloudPointFieldsFor(scopeName, metricName string) map[string]bool {
 }
 
 // checkTokenTypeField enforces the closed token_type enum (design §3.2:
-// "Any other value is an admission error") wherever the label is allowed at
-// all (only scion.usage.tokens, via cloudPointFieldsFor/cloudUsageTokenFields
-// above). It is a no-op for every other point label.
+// "Any other value is an admission error") on the GCP path, wherever the
+// label is allowed at all (only scion.usage.tokens, via
+// cloudPointFieldsFor/cloudUsageTokenFields above). It is a no-op for every
+// other point label. checkUsageTokenTypeField below is its generic-OTLP
+// counterpart.
 func checkTokenTypeField(kv *commonpb.KeyValue) error {
 	if kv == nil || kv.Key != telemetrycontract.TokenTypeLabel {
 		return nil
 	}
 	value, ok := kv.GetValue().GetValue().(*commonpb.AnyValue_StringValue)
 	if !ok || !telemetrycontract.ValidTokenType(value.StringValue) {
-		return fmt.Errorf("invalid Cloud Monitoring token_type")
+		return fmt.Errorf("invalid token_type")
+	}
+	return nil
+}
+
+// checkUsageTokenTypeField enforces the same closed token_type enum on the
+// generic OTLP admission path (round-2 review FYI-4: "the contract says a
+// token_type outside the enum is an admission error", and that wasn't true
+// there — the generic path has no per-metric label allowlist to route
+// token_type's validation through the way cloudPointFieldsFor does for GCP,
+// so this checks it directly, scoped to scion.usage.tokens the same way).
+func checkUsageTokenTypeField(metricName string, attrs []*commonpb.KeyValue) error {
+	if metricName != telemetrycontract.MetricUsageTokens {
+		return nil
+	}
+	for _, kv := range attrs {
+		if err := checkTokenTypeField(kv); err != nil {
+			return err
+		}
 	}
 	return nil
 }

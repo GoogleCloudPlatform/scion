@@ -290,6 +290,24 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 		return nil
 	}
 
+	// Shut the usage deriver down first, before intake/receiver close (R-2):
+	// its Shutdown does a final ForceFlush over its loopback connection back
+	// into this same receiver, which must still be listening for that flush
+	// to land in the still-open pipeline and reach the exporter via
+	// flushMetricsOnStop below. Shutting it down after the receiver closes
+	// (as an earlier version of this fix did) makes that flush retry against
+	// a dead loopback for its own timeout — measured at 10s — and loses the
+	// final increment entirely. This also runs ahead of every early-return
+	// branch further down in Stop, so a slow or incomplete pipeline shutdown
+	// never skips it.
+	if deriver := p.usageDeriver.Swap(nil); deriver != nil {
+		deriverCtx, cancel := context.WithTimeout(ctx, usageDeriverFlushTimeout)
+		if err := deriver.Shutdown(deriverCtx); err != nil {
+			log.Error("Usage deriver shutdown error: %v", err)
+		}
+		cancel()
+	}
+
 	var errs []error
 	intakeDone := p.closeIntake()
 	if p.diagnosticCancel != nil {
@@ -409,12 +427,6 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 			p.deliveryState.Store("degraded")
 			p.logDeliverySnapshot(true)
 			return fmt.Errorf("telemetry shutdown incomplete: %w", p.shutdownErr)
-		}
-	}
-
-	if deriver := p.usageDeriver.Swap(nil); deriver != nil {
-		if err := deriver.Shutdown(ctx); err != nil {
-			log.Error("Usage deriver shutdown error: %v", err)
 		}
 	}
 

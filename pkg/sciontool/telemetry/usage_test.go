@@ -53,6 +53,19 @@ func loadClaudeUsageFixture(t *testing.T) []*logspb.ResourceLogs {
 	return req.ResourceLogs
 }
 
+// mustEventName is normalizedLogEventName for tests that exercise
+// claudeUsageRule.MatchLog directly: since Nit-3 (round 2), MatchLog takes
+// the already-computed event name rather than deriving it itself, so tests
+// calling it directly compute it the same way observe() does.
+func mustEventName(t *testing.T, record *logspb.LogRecord, scope string) string {
+	t.Helper()
+	name, err := normalizedLogEventName(record, scope)
+	if err != nil {
+		t.Fatalf("normalizedLogEventName: %v", err)
+	}
+	return name
+}
+
 // fixtureRecordsByEvent returns every log record in the fixture whose
 // event.name attribute equals name.
 func fixtureRecordsByEvent(t *testing.T, name string) []*logspb.LogRecord {
@@ -75,7 +88,7 @@ func TestClaudeUsageRuleMatchesFixtureAPIRequest(t *testing.T) {
 	if len(records) != 1 {
 		t.Fatalf("fixture api_request records = %d, want 1", len(records))
 	}
-	increment, matched, err := claudeUsageRule{}.MatchLog(claudeUsageScope, records[0])
+	increment, matched, err := claudeUsageRule{}.MatchLog(claudeUsageScope, mustEventName(t, records[0], claudeUsageScope), records[0])
 	if err != nil {
 		t.Fatalf("MatchLog error: %v", err)
 	}
@@ -106,7 +119,7 @@ func TestClaudeUsageRuleMatchesFixtureAPIError(t *testing.T) {
 	if len(records) != 1 {
 		t.Fatalf("fixture api_error records = %d, want 1", len(records))
 	}
-	increment, matched, err := claudeUsageRule{}.MatchLog(claudeUsageScope, records[0])
+	increment, matched, err := claudeUsageRule{}.MatchLog(claudeUsageScope, mustEventName(t, records[0], claudeUsageScope), records[0])
 	if err != nil {
 		t.Fatalf("MatchLog error: %v", err)
 	}
@@ -125,13 +138,13 @@ func TestClaudeUsageRuleIgnoresUnrelatedEvents(t *testing.T) {
 		if len(records) == 0 {
 			t.Fatalf("fixture missing %s records", name)
 		}
-		if _, matched, err := rule.MatchLog(claudeUsageScope, records[0]); matched || err != nil {
+		if _, matched, err := rule.MatchLog(claudeUsageScope, mustEventName(t, records[0], claudeUsageScope), records[0]); matched || err != nil {
 			t.Errorf("event %s: matched=%v err=%v, want matched=false err=nil", name, matched, err)
 		}
 	}
 	// Wrong scope never matches, even for a real api_request record.
 	apiRequest := fixtureRecordsByEvent(t, "api_request")[0]
-	if _, matched, _ := rule.MatchLog("some.other.scope", apiRequest); matched {
+	if _, matched, _ := rule.MatchLog("some.other.scope", mustEventName(t, apiRequest, claudeUsageScope), apiRequest); matched {
 		t.Error("claudeUsageRule matched outside its native scope")
 	}
 }
@@ -142,7 +155,7 @@ func TestClaudeUsageRuleMalformedTokenField(t *testing.T) {
 		{Key: "model", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "claude-sonnet-5"}}},
 		{Key: "input_tokens", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "not-a-number"}}},
 	}}
-	increment, matched, err := claudeUsageRule{}.MatchLog(claudeUsageScope, record)
+	increment, matched, err := claudeUsageRule{}.MatchLog(claudeUsageScope, mustEventName(t, record, claudeUsageScope), record)
 	if !matched {
 		t.Fatal("expected the malformed api_request to still match (so it counts as usage_malformed, not silently ignored)")
 	}
@@ -164,7 +177,7 @@ func TestClaudeUsageRuleNegativeTokenField(t *testing.T) {
 		{Key: "event.name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "api_request"}}},
 		{Key: "output_tokens", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_IntValue{IntValue: -1}}},
 	}}
-	increment, matched, err := (claudeUsageRule{}).MatchLog(claudeUsageScope, record)
+	increment, matched, err := (claudeUsageRule{}).MatchLog(claudeUsageScope, mustEventName(t, record, claudeUsageScope), record)
 	if !matched || err == nil {
 		t.Fatalf("matched=%v err=%v, want matched=true err!=nil", matched, err)
 	}
@@ -184,7 +197,7 @@ func TestClaudeUsageRuleTokenFieldTypeTolerance(t *testing.T) {
 		{Key: "input_tokens", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "5"}}},
 		{Key: "output_tokens", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_DoubleValue{DoubleValue: 7}}},
 	}}
-	increment, matched, err := (claudeUsageRule{}).MatchLog(claudeUsageScope, record)
+	increment, matched, err := (claudeUsageRule{}).MatchLog(claudeUsageScope, mustEventName(t, record, claudeUsageScope), record)
 	if !matched || err != nil {
 		t.Fatalf("matched=%v err=%v, want matched=true err=nil", matched, err)
 	}
@@ -201,7 +214,7 @@ func TestClaudeUsageRuleFractionalDoubleTokenFieldIsMalformed(t *testing.T) {
 		{Key: "event.name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "api_request"}}},
 		{Key: "input_tokens", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_DoubleValue{DoubleValue: 1.5}}},
 	}}
-	if _, matched, err := (claudeUsageRule{}).MatchLog(claudeUsageScope, record); !matched || err == nil {
+	if _, matched, err := (claudeUsageRule{}).MatchLog(claudeUsageScope, mustEventName(t, record, claudeUsageScope), record); !matched || err == nil {
 		t.Fatalf("matched=%v err=%v, want matched=true err!=nil for a fractional double", matched, err)
 	}
 }
@@ -213,7 +226,7 @@ func TestClaudeUsageRuleMatchesEventNameField(t *testing.T) {
 	record := &logspb.LogRecord{
 		EventName: "api_error",
 	}
-	increment, matched, err := (claudeUsageRule{}).MatchLog(claudeUsageScope, record)
+	increment, matched, err := (claudeUsageRule{}).MatchLog(claudeUsageScope, mustEventName(t, record, claudeUsageScope), record)
 	if !matched || err != nil {
 		t.Fatalf("matched=%v err=%v, want matched=true err=nil for a native EventName field", matched, err)
 	}
@@ -625,16 +638,10 @@ func TestPipelineStartConstructsUsageDeriverFromEnv(t *testing.T) {
 		if err := p.Start(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		// A short deadline, not context.Background(): on Stop, the deriver's
-		// own MeterProvider attempts one last flush over its loopback
-		// connection, which by then the receiver has already stopped
-		// accepting — that flush would otherwise retry for the SDK's full
-		// default export timeout before giving up.
-		defer func() {
-			stopCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-			defer cancel()
-			_ = p.Stop(stopCtx)
-		}()
+		// Stop shuts the deriver down before closing intake/the receiver
+		// (R-2), so its final flush lands in the still-open pipeline — no
+		// bounded-context workaround needed here.
+		defer func() { _ = p.Stop(context.Background()) }()
 		deriver := p.usageDeriver.Load()
 		if deriver == nil || len(deriver.rules) == 0 {
 			t.Fatal("Pipeline.Start must construct an active claude usage deriver when SCION_USAGE_SOURCE=native and SCION_HARNESS=claude")
@@ -648,16 +655,10 @@ func TestPipelineStartConstructsUsageDeriverFromEnv(t *testing.T) {
 		if err := p.Start(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		// A short deadline, not context.Background(): on Stop, the deriver's
-		// own MeterProvider attempts one last flush over its loopback
-		// connection, which by then the receiver has already stopped
-		// accepting — that flush would otherwise retry for the SDK's full
-		// default export timeout before giving up.
-		defer func() {
-			stopCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-			defer cancel()
-			_ = p.Stop(stopCtx)
-		}()
+		// Stop shuts the deriver down before closing intake/the receiver
+		// (R-2), so its final flush lands in the still-open pipeline — no
+		// bounded-context workaround needed here.
+		defer func() { _ = p.Stop(context.Background()) }()
 		deriver := p.usageDeriver.Load()
 		if deriver == nil {
 			t.Fatal("Start must still store a (no-op) deriver, never a nil pointer")
@@ -666,6 +667,99 @@ func TestPipelineStartConstructsUsageDeriverFromEnv(t *testing.T) {
 			t.Fatal("Pipeline.Start must not activate usage derivation unless SCION_USAGE_SOURCE=native")
 		}
 	})
+}
+
+// TestPipelineStopFlushesFinalUsageIncrementQuickly is the R-2 regression
+// test: with the usage deriver active, Stop must shut it down before
+// closing intake/the receiver, so its final ForceFlush lands in the
+// still-open pipeline and reaches the exporter — and it must do so without
+// waiting out the deriver's own export timeout against an already-closed
+// loopback (measured at 10s before this fix; hook-mode Stop is
+// sub-millisecond).
+func TestPipelineStopFlushesFinalUsageIncrementQuickly(t *testing.T) {
+	t.Setenv("SCION_AGENT_ID", "agent-stop-1")
+	t.Setenv("SCION_PROJECT_ID", "project-stop-1")
+	t.Setenv("SCION_HARNESS", "claude")
+	t.Setenv("SCION_USAGE_SOURCE", "native")
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listener.Close() }()
+	capture := &monitoringCapture{}
+	server := grpc.NewServer()
+	monitoringpb.RegisterMetricServiceServer(server, capture)
+	go func() { _ = server.Serve(listener) }()
+	defer server.Stop()
+	conn, err := grpc.NewClient(listener.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	sdkExporter, err := mexporter.New(mexporter.WithProjectID("test-project"), mexporter.WithMonitoringClientOptions(option.WithGRPCConn(conn)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sdkExporter.Shutdown(context.Background()) }()
+
+	cfg := &Config{
+		Enabled: true, CloudProvider: "gcp", GRPCPort: availableTCPPort(t), HTTPPort: 0,
+		// This test's fake exporter only has a metric exporter configured
+		// (below); excluding every real event name keeps the raw Claude log
+		// records from being forwarded (which would otherwise fail with "log
+		// exporter unavailable"). Derivation runs before this filter either
+		// way (AC-1.4, exercised elsewhere), so it doesn't affect this test.
+		Filter: FilterConfig{Include: []string{"nonexistent_event"}},
+	}
+	p := NewWithConfig(cfg)
+	if err := p.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// Cloud isn't configured (no ProjectID), so Start did not create a real
+	// exporter; point it at the capture server, as the other Pipeline.Start
+	// test in this file does.
+	p.exporter = &CloudExporter{gcpExporter: &GCPExporter{metricExporter: sdkExporter}}
+
+	if deriver := p.usageDeriver.Load(); deriver == nil || len(deriver.rules) == 0 {
+		t.Fatal("expected an active claude usage deriver")
+	}
+
+	body, err := proto.Marshal(&collogspb.ExportLogsServiceRequest{ResourceLogs: loadClaudeUsageFixture(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	p.receiver.handleHTTPLogs(rec, otlpHTTPRequest("/v1/logs", bytes.NewReader(body)))
+	if rec.Code != 200 {
+		t.Fatalf("post fixture status = %d: %s", rec.Code, rec.Body.String())
+	}
+	if diag := p.UsageDiagnostics(); diag.Derived == 0 {
+		t.Fatalf("expected at least one derived increment before Stop, diagnostics = %+v", diag)
+	}
+	// Comfortably clears snapshotGCP's 2ms collector-epoch guard
+	// (metric_streams.go) before Stop's own flush; unrelated to the R-2
+	// property this test pins.
+	time.Sleep(10 * time.Millisecond)
+
+	stopStart := time.Now()
+	if err := p.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop returned an error: %v", err)
+	}
+	if elapsed := time.Since(stopStart); elapsed > time.Second {
+		t.Fatalf("Stop took %v, want well under 1s (R-2: the deriver's final flush must not wait out its own export timeout against an already-closed loopback)", elapsed)
+	}
+
+	series := allCapturedSeries(capture)
+	var sawCalls bool
+	for _, ts := range series {
+		if ts.GetMetric().GetType() == "workload.googleapis.com/gen_ai.api.calls" {
+			sawCalls = true
+		}
+	}
+	if !sawCalls {
+		t.Fatalf("Stop's final flush did not reach the exporter with the derived gen_ai.api.calls point: captured %v", describeSeries(series))
+	}
 }
 
 // mutateRequestID rewrites the request_id attribute (and bumps

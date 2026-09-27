@@ -10,7 +10,6 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
-	"log/slog"
 	"math"
 	"os"
 	"strconv"
@@ -55,11 +54,17 @@ type usageIncrement struct {
 // fields are malformed (non-numeric or negative); the caller counts that as
 // usage_malformed but still records the returned increment (a call is a
 // completed response, even when its token fields could not be parsed).
+//
+// eventName is normalizedLogEventName's result for record, computed once by
+// the caller (observe) rather than a second time inside MatchLog (round-2
+// review Nit-3): the fingerprint needs it too, and it isn't free (it walks
+// record's attributes and, per the design, must also honor a native
+// LogRecord.EventName field).
 type usageRule interface {
 	// Harness is the SCION_HARNESS value this rule applies to.
 	Harness() string
 	// MatchLog inspects one log record from the given instrumentation scope.
-	MatchLog(scopeName string, record *logspb.LogRecord) (increment usageIncrement, matched bool, err error)
+	MatchLog(scopeName, eventName string, record *logspb.LogRecord) (increment usageIncrement, matched bool, err error)
 }
 
 // claudeUsageScope is Claude Code's native OTel log instrumentation scope.
@@ -84,12 +89,8 @@ type claudeUsageRule struct{}
 
 func (claudeUsageRule) Harness() string { return "claude" }
 
-func (claudeUsageRule) MatchLog(scopeName string, record *logspb.LogRecord) (usageIncrement, bool, error) {
-	if scopeName != claudeUsageScope || record == nil {
-		return usageIncrement{}, false, nil
-	}
-	eventName, err := normalizedLogEventName(record, scopeName)
-	if err != nil || eventName == "" {
+func (claudeUsageRule) MatchLog(scopeName, eventName string, record *logspb.LogRecord) (usageIncrement, bool, error) {
+	if scopeName != claudeUsageScope || record == nil || eventName == "" {
 		return usageIncrement{}, false, nil
 	}
 	switch eventName {
@@ -285,18 +286,20 @@ func (d *UsageDeriver) observe(ctx context.Context, scopeName string, record *lo
 		return false
 	}
 	for _, rule := range d.rules {
-		increment, matched, err := rule.MatchLog(scopeName, record)
+		increment, matched, err := rule.MatchLog(scopeName, eventName, record)
 		if !matched {
 			continue
 		}
 		if err != nil {
 			d.malformed.Add(1)
 			// One malformed event tells the operator everything they need;
-			// logging every occurrence at Warn would be noisy on a chatty,
-			// unpinned CLI. Never includes the offending value, only the
-			// (fixed-cardinality) event name.
+			// logging every occurrence would be noisy on a chatty, unpinned
+			// CLI. Never includes the offending value, only the
+			// (fixed-cardinality) event name. Through the package logger
+			// (not slog directly), so it lands in the same sink and format
+			// as every other telemetry log line.
 			d.malformedWarnOnce.Do(func() {
-				slog.Warn("usage deriver observed a malformed native usage event; its token fields were dropped, the call is still counted", "event", eventName)
+				log.Error("Usage deriver observed a malformed native usage event=%s; its token fields were dropped, the call is still counted", eventName)
 			})
 		}
 		// A rule that recognizes the event but derives nothing usable from it

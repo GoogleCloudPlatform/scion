@@ -314,8 +314,13 @@ func (s *metricStreams) add(rms []*metricpb.ResourceMetrics) error {
 							if err := s.validateCloudIdentity(rm, sm, m, kind, temporal, monotonic, point.Attributes); err != nil {
 								return err
 							}
-						} else if err := rejectReservedIdentityPointLabel(point.Attributes); err != nil {
-							return s.reject(err.Error())
+						} else {
+							if err := rejectReservedIdentityPointLabel(point.Attributes); err != nil {
+								return s.reject(err.Error())
+							}
+							if err := checkUsageTokenTypeField(m.Name, point.Attributes); err != nil {
+								return s.reject(err.Error())
+							}
 						}
 						key, err := canonicalAttrs(point.Attributes)
 						if err != nil {

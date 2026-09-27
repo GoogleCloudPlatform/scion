@@ -492,6 +492,27 @@ func TestUsageTokensClosedEnumEnforcedAtGCPAdmission(t *testing.T) {
 	}
 }
 
+// TestUsageTokensClosedEnumEnforcedOnGenericOTLPAdmission is round-2 FYI-4:
+// the contract's closed token_type enum ("Any other value is an admission
+// error") was enforced only on the GCP path; the generic OTLP path forwarded
+// any value unchecked. usageTokensPoint's shape admits on the generic path
+// too (it carries no GCP-only fields), so it can be reused directly with
+// s.gcp left false.
+func TestUsageTokensClosedEnumEnforcedOnGenericOTLPAdmission(t *testing.T) {
+	for _, tokenType := range telemetrycontract.TokenTypes {
+		s := newMetricStreams()
+		if err := s.add([]*metricpb.ResourceMetrics{usageTokensPoint(tokenType)}); err != nil {
+			t.Fatalf("token_type=%q rejected, want admitted: %v", tokenType, err)
+		}
+	}
+	for _, bad := range []string{"", "bogus", "INPUT", "input "} {
+		s := newMetricStreams()
+		if err := s.add([]*metricpb.ResourceMetrics{usageTokensPoint(bad)}); err == nil {
+			t.Fatalf("token_type=%q was admitted on the generic OTLP path, want rejection (closed enum, FYI-4)", bad)
+		}
+	}
+}
+
 // TestTokenTypeLabelRestrictedToUsageTokensMetric is the second half of F2:
 // token_type is meaningful only on scion.usage.tokens. cloudPointFieldsFor
 // must not let it slip onto any other reserved counter, such as
