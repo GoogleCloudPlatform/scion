@@ -115,6 +115,7 @@ steps:
 substitutions:
   _REGISTRY: 'us-central1-docker.pkg.dev/${PROJECT_ID}/public-docker'
   _TAG: 'latest'
+  _VERSION: ''
 options:
   dynamicSubstitutions: true
   machineType: 'E2_HIGHCPU_8'

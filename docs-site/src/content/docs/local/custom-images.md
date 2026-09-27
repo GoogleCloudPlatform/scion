@@ -354,7 +354,7 @@ The `cloud-build` builder maps each `--target` to a static YAML file in `image-b
 | `harnesses` | `cloudbuild-harnesses.yaml` |
 | `hub` | `cloudbuild-hub.yaml` |
 
-These YAMLs reference `$_TAG`, `$_SHORT_SHA`, `$_COMMIT_SHA`, and `$_REGISTRY` substitutions, all forwarded by the orchestrator. `_TAG` defaults to `latest` in each YAML's `substitutions:` block, preserving the prior behavior when `--tag` is omitted.
+These YAMLs reference `$_TAG`, `$_SHORT_SHA`, `$_COMMIT_SHA`, `$_VERSION`, and `$_REGISTRY` substitutions, all forwarded by the orchestrator. `_TAG` defaults to `latest` and `_VERSION` defaults to `''` in each YAML's `substitutions:` block, preserving the prior behavior when `--tag` or a version tag is omitted.
 
 ### Initial Setup
 

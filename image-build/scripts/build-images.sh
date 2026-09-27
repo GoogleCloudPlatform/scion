@@ -276,6 +276,26 @@ echo ""
 warn_if_scion_base_not_in_run() {
   local built_scion_base="false"
   local needs_scion_base="false"
+
+  # In target mode (cloud-build), STEPS is resolve_targets()'s per-image view
+  # and is only used above for the banner/dry-run listing -- it is not what
+  # actually runs. The orchestrator hands the *whole target* off to a static
+  # cloudbuild-*.yaml, and that yaml can build scion-base itself even when
+  # STEPS (computed the same way regardless of builder) doesn't include it.
+  # cloudbuild-omni.yaml is exactly this case: it rebuilds the full chain
+  # from thick-prep, unlike the per-image "omni" target, which chains from
+  # whatever scion-base image already exists. Ask the yaml, not STEPS, in
+  # that mode. Guarded by `declare -F` so this stays a no-op if a future
+  # target-mode builder doesn't define the helper.
+  if [[ "${BUILDER_MODE}" == "target" ]] && declare -F cloud_build_config_for_target >/dev/null; then
+    local target_config
+    if target_config="$(cloud_build_config_for_target "${TARGET}" 2>/dev/null)" \
+      && [[ -f "${target_config}" ]] \
+      && grep -q "id: 'build-scion-base'" "${target_config}"; then
+      built_scion_base="true"
+    fi
+  fi
+
   local s
   for s in "${STEPS[@]}"; do
     if [[ "${s}" == "scion-base" ]]; then
@@ -295,27 +315,36 @@ warn_if_scion_base_not_in_run() {
   echo "Warning: this build does not (re)build scion-base." >&2
   echo "  These images will inherit whatever sciontool is already baked into" >&2
   echo "  ${inherited}." >&2
-  echo "  If usage-telemetry (or any other sciontool) fix hasn't been folded" >&2
-  echo "  into that scion-base yet, the embedded sciontool is stale until you" >&2
-  echo "  rebuild it: --target scion-base, then re-run this build." >&2
+  echo "  If that scion-base predates a sciontool fix you need (e.g. usage" >&2
+  echo "  telemetry), rebuild it first: --target scion-base, then re-run" >&2
+  echo "  this build." >&2
 
-  # Best-effort only: if the inherited image happens to be present in the
-  # local docker/podman store already, surface its revision label so the
-  # warning is actionable instead of just alarming. Never treat a miss here
-  # (image absent locally, docker/podman unavailable, remote-only image) as
-  # an error -- this is a convenience, not a check.
-  local revision=""
-  if command -v docker >/dev/null 2>&1; then
-    revision="$(docker image inspect "${inherited}" \
-      --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
-      2>/dev/null || true)"
-  elif command -v podman >/dev/null 2>&1; then
-    revision="$(podman image inspect "${inherited}" \
-      --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
-      2>/dev/null || true)"
-  fi
-  if [[ -n "${revision}" && "${revision}" != "<no value>" ]]; then
-    echo "  ${inherited} org.opencontainers.image.revision = ${revision}" >&2
+  # Best-effort only, and only where a local store is actually authoritative
+  # for what the build will use:
+  #   - cloud-build always resolves BASE_IMAGE from the registry, never a
+  #     local store, so there is nothing useful to inspect locally;
+  #   - local-docker/local-podman resolve it from whichever local store the
+  #     builder itself writes to and reads from, so ask that store, not the
+  #     other one.
+  # A hit here is a *local copy*, which can be stale or simply absent even
+  # when the registry has a newer image (e.g. pushed from another machine);
+  # it is a convenience for the common single-machine case, not a check, so
+  # any miss (image absent, tool missing) is silently swallowed.
+  if [[ "${BUILDER_MODE}" != "target" ]]; then
+    local inspect_tool=""
+    case "${BUILDER}" in
+      local-podman) command -v podman >/dev/null 2>&1 && inspect_tool="podman" ;;
+      *)            command -v docker >/dev/null 2>&1 && inspect_tool="docker" ;;
+    esac
+    if [[ -n "${inspect_tool}" ]]; then
+      local revision
+      revision="$("${inspect_tool}" image inspect "${inherited}" \
+        --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+        2>/dev/null || true)"
+      if [[ -n "${revision}" && "${revision}" != "<no value>" ]]; then
+        echo "  local copy of ${inherited}: revision ${revision}" >&2
+      fi
+    fi
   fi
   echo "" >&2
 }

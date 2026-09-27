@@ -206,7 +206,7 @@ lineages. The `cloud-build` path uses `gcloudignore-omni` to include web source
 files that the default `.gcloudignore` excludes (the omni Dockerfile runs
 `npm install && npm run build` to embed the web frontend).
 
-These YAMLs reference `$_TAG`, `$_SHORT_SHA`, `$_COMMIT_SHA`, `$_VERSION`, and `$_REGISTRY` substitutions, all forwarded by the orchestrator.
+These YAMLs reference `$_TAG`, `$_SHORT_SHA`, `$_COMMIT_SHA`, `$_VERSION`, and `$_REGISTRY` substitutions, all forwarded by the orchestrator. `_TAG` defaults to `latest` and `_VERSION` defaults to `''` in each YAML's `substitutions:` block, so a manual `gcloud builds submit` that omits them still works.
 
 The aggregate `cloudbuild-harnesses.yaml`, `cloudbuild-common.yaml`, and
 `cloudbuild.yaml` files are static snapshots of the current catalog. When adding

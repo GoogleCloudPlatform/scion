@@ -124,7 +124,14 @@ builder_run_target() {
   if grep -q '_COMMIT_SHA' "${config}"; then
     subs="${subs},_COMMIT_SHA=${commit_sha}"
   fi
-  if grep -q '_VERSION' "${config}"; then
+  # Only override the yaml's own `_VERSION: ''` default when we actually have
+  # a value. This is belt-and-suspenders on top of that default: it avoids
+  # ever depending on Cloud Build accepting an explicit empty substitution
+  # (unverified server-side behavior) for the common off-tag case. The
+  # pattern is tightened (vs. the plain `_SHORT_SHA`/`_COMMIT_SHA` greps
+  # above) because `_VERSION` is a materially more collision-prone substring
+  # (e.g. a future `GO_VERSION` build-arg) than the SHA names.
+  if [[ -n "${version_val}" ]] && grep -qE '\$\{?_VERSION\b' "${config}"; then
     subs="${subs},_VERSION=${version_val}"
   fi
   if [[ -n "${registry}" ]]; then
