@@ -510,6 +510,23 @@ describe('scion-page-admin-users — role filter across pages', () => {
     expect(queryAll(element, 'tbody tr')).toHaveLength(5);
   });
 
+  it('shows the exact count and "Page a of b" when a status filter excludes invited rows on the server', async () => {
+    element = await createPaged(members('m1', 50), members('m2', 10), 60);
+    const statusSelect = Array.from(
+      element.shadowRoot!.querySelectorAll<HTMLElement>('sl-select')
+    ).find((s) => !s.classList.contains('role-filter'))!;
+    await chooseSelect(element, statusSelect, 'active');
+    const roleSelect = element.shadowRoot!.querySelector<HTMLElement>('sl-select.role-filter')!;
+    await chooseSelect(element, roleSelect, 'member');
+
+    const last = listCalls().at(-1)!;
+    expect(last.searchParams.get('status')).toBe('active');
+    expect(last.searchParams.get('role')).toBe('member');
+    expect(text(element, '.user-count')).toBe('60 users');
+    expect(text(element, '.page-indicator')).toBe('Page 1 of 2');
+    expect(text(element, '.pagination-info')).toBe('Showing 1-50 of 60');
+  });
+
   it('shows the exact server count and "Page a of b" without the role filter', async () => {
     element = await createPaged(members('m1', 50), members('m2', 10), 60);
     expect(text(element, '.user-count')).toBe('60 users');

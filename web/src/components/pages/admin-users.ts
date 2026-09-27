@@ -1169,18 +1169,27 @@ export class ScionPageAdminUsers extends LitElement {
   }
 
   /**
-   * Whether the user count can be shown as exact. Under the role filter,
-   * invited rows are dropped client-side, so the server total over-counts
-   * unless the whole result fits on this one page.
+   * True when invited rows may have been dropped client-side from the loaded
+   * list: the role filter is on and no status filter excludes them on the
+   * server (Status: Invited already disables the role filter).
+   */
+  private get invitedDroppedClientSide(): boolean {
+    return this.roleFilterActive && this.statusFilter === 'all';
+  }
+
+  /**
+   * Whether the user count can be shown as exact. When invited rows are
+   * dropped client-side, the server total over-counts unless the whole
+   * result fits on this one page.
    */
   private get countIsExact(): boolean {
-    return !this.roleFilterActive || !this.hasMultiplePages;
+    return !this.invitedDroppedClientSide || !this.hasMultiplePages;
   }
 
   /** Count shown in the toolbar. */
   private get displayedCount(): string {
     if (!this.countIsExact) return `up to ${this.totalCount} users`;
-    const n = this.roleFilterActive ? this.users.length : this.totalCount;
+    const n = this.invitedDroppedClientSide ? this.users.length : this.totalCount;
     return `${n} user${n !== 1 ? 's' : ''}`;
   }
 
