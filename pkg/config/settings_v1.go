@@ -2136,6 +2136,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		DevTokenFile:      gc.Auth.TokenFile,
 		AuthorizedDomains: gc.Auth.AuthorizedDomains,
 		UserAccessMode:    gc.Auth.UserAccessMode,
+		DefaultUserRole:   gc.Auth.DefaultUserRole,
 		Username:          gc.Auth.Username,
 		DisplayName:       gc.Auth.DisplayName,
 		Email:             gc.Auth.Email,
