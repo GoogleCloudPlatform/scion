@@ -520,6 +520,96 @@ func TestSeedDefaultGroupsAndBindings_Idempotent(t *testing.T) {
 }
 
 // =============================================================================
+// Startup backfill of hub role grants (design §5.C, §5.D)
+// =============================================================================
+
+// TestBackfill_RemovesStaleHubViewerBinding verifies that the startup
+// backfill removes hub-viewer bindings from members and admins (left behind
+// by older role changes) while keeping their own grants.
+func TestBackfill_RemovesStaleHubViewerBinding(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	member := setupHubRoleGrantState(t, s, "bf-stale-member", store.UserRoleMember)
+	createSystemBinding(t, s, member.ID, store.SystemRoleHubViewer, store.SystemBackfillCreatedBy)
+	admin := setupHubRoleGrantState(t, s, "bf-stale-admin", store.UserRoleAdmin)
+	createSystemBinding(t, s, admin.ID, store.SystemRoleHubViewer, store.SystemBackfillCreatedBy)
+
+	require.NoError(t, BackfillRoleBindings(ctx, s))
+
+	assert.Equal(t, hubRoleGrantState{InHubMembers: true}, observeHubRoleGrants(t, s, member.ID),
+		"member keeps hub-members and loses the stale hub-viewer binding")
+	assert.Equal(t, hubRoleGrantState{InHubMembers: true, SuperAdminBinding: 1}, observeHubRoleGrants(t, s, admin.ID),
+		"admin keeps super-admin and hub-members and loses the stale hub-viewer binding")
+}
+
+// TestBackfill_ViewerGetsBindingAndLeavesHubMembers verifies that a viewer
+// left in hub-members by older code is removed from it and gets the
+// hub-viewer binding (the job reconcileViewerHubMemberships used to do).
+func TestBackfill_ViewerGetsBindingAndLeavesHubMembers(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	viewer := setupHubRoleGrantState(t, s, "bf-viewer", "none")
+	viewer.Role = store.UserRoleViewer
+	require.NoError(t, s.UpdateUser(ctx, viewer))
+	require.NoError(t, ensureHubMembershipTx(ctx, s, viewer.ID))
+
+	require.NoError(t, BackfillRoleBindings(ctx, s))
+
+	assert.Equal(t, hubRoleGrantState{HubViewerBindings: 1}, observeHubRoleGrants(t, s, viewer.ID))
+}
+
+// TestBackfill_GrantsFollowRole verifies the backfill result for each role
+// starting from no grants, and that a second run changes nothing.
+func TestBackfill_GrantsFollowRole(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	users := map[string]*store.User{}
+	for _, role := range []string{store.UserRoleMember, store.UserRoleViewer, store.UserRoleAdmin} {
+		u := setupHubRoleGrantState(t, s, "bf-none-"+role, "none")
+		u.Role = role
+		require.NoError(t, s.UpdateUser(ctx, u))
+		users[role] = u
+	}
+	want := map[string]hubRoleGrantState{
+		store.UserRoleMember: {InHubMembers: true},
+		store.UserRoleViewer: {HubViewerBindings: 1},
+		store.UserRoleAdmin:  {SuperAdminBinding: 1},
+	}
+
+	for run := 1; run <= 2; run++ {
+		require.NoError(t, BackfillRoleBindings(ctx, s))
+		for role, u := range users {
+			assert.Equal(t, want[role], observeHubRoleGrants(t, s, u.ID), "run %d, role %s", run, role)
+		}
+	}
+}
+
+// TestBackfill_SkipsInvitedUsers verifies that pending invites get no hub
+// grants at startup: their stored role is a placeholder until first sign-in.
+func TestBackfill_SkipsInvitedUsers(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	for _, role := range []string{store.UserRoleMember, store.UserRoleViewer, store.UserRoleAdmin} {
+		u := &store.User{
+			ID:     tid("bf-invited-" + role),
+			Email:  "bf-invited-" + role + "@example.com",
+			Role:   role,
+			Status: store.UserStatusInvited,
+		}
+		require.NoError(t, s.CreateUser(ctx, u))
+
+		require.NoError(t, BackfillRoleBindings(ctx, s))
+
+		assert.Equal(t, hubRoleGrantState{}, observeHubRoleGrants(t, s, u.ID),
+			"invited %s placeholder must get no hub grants", role)
+	}
+}
+
+// =============================================================================
 // Cross-project visibility regression tests (with reconciled roles)
 // =============================================================================
 
