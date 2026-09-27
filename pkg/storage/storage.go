@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"time"
 )
 
@@ -262,7 +263,7 @@ func ResourceStorageURI(hubID, bucket string, kind ResourceKind, scope, scopeID,
 // one of its per-kind wrappers) instead, so the URI format stays defined in
 // this one place either way.
 func StorageURIForPath(bucket, path string) string {
-	return "gs://" + bucket + "/" + path + "/"
+	return "gs://" + bucket + "/" + strings.TrimRight(path, "/") + "/"
 }
 
 // TemplateStoragePath returns the storage path for a template.
