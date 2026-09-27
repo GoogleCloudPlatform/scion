@@ -465,12 +465,27 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 	if newRole := s.getUserRole(r.Context(), claims.Email, storedRole, refreshUserID); role != newRole {
 		slog.Info("User role changed on token refresh", "email", claims.Email, "old_role", role, "new_role", newRole)
 		role = newRole
-		// Persist the role change
+		// Persist the role change, then bring the super-admin binding and
+		// the hub role grants in line with it (mirrors provisionUser). Grant
+		// changes are applied only after UpdateUser succeeds so they never
+		// diverge from the stored role; grant failures are logged and the
+		// refresh continues.
 		if user != nil && user.Role != role {
+			oldRole := user.Role
 			user.Role = role
 			if err := s.store.UpdateUser(r.Context(), user); err != nil {
 				slog.Error("Failed to persist role change on token refresh",
 					"email", claims.Email, "error", err)
+			} else {
+				if oldRole == store.UserRoleAdmin {
+					s.deleteSuperAdminBinding(r.Context(), user.ID)
+				} else if role == store.UserRoleAdmin {
+					s.ensureSuperAdminBinding(r.Context(), user.ID)
+				}
+				if err := syncHubRoleGrants(r.Context(), s.store, user.ID, role, store.SystemReconcileCreatedBy); err != nil {
+					slog.Warn("failed to sync hub role grants on token refresh",
+						"email", claims.Email, "user_id", user.ID, "role", role, "error", err)
+				}
 			}
 		}
 	}
@@ -1402,7 +1417,16 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 			}
 			user.LastLogin = time.Now()
 			oldRole := user.Role
-			user.Role = s.getUserRole(ctx, info.Email, user.Role, user.ID)
+			// The stored role on an invited row is a placeholder (invites
+			// carry no role), so evaluate as a brand-new user: admin if in
+			// admin_emails, otherwise the current default_user_role. The one
+			// carve-out is a pending invite that was already promoted through
+			// the admin UI; keep that admin.
+			activationRole := ""
+			if user.Role == store.UserRoleAdmin && hasUIPromotedBinding(ctx, s.store, user.ID) {
+				activationRole = user.Role
+			}
+			user.Role = s.getUserRole(ctx, info.Email, activationRole, user.ID)
 			if oldRole == "admin" && user.Role != "admin" {
 				bindingSuperAdmin = "delete"
 			} else if user.Role == "admin" && oldRole != "admin" {
@@ -1448,9 +1472,12 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 		}
 	}
 
-	// Only members (not viewers) get hub-members group membership.
-	if user.Role == "member" {
-		ensureHubMembership(ctx, s.store, user.ID)
+	// Make the hub-members group and hub-viewer binding match the role now,
+	// so the user's first request already has the right hub permissions.
+	// Best-effort: a grant write failure degrades the session but must not
+	// fail the login; the startup backfill repairs it.
+	if err := syncHubRoleGrants(ctx, s.store, user.ID, user.Role, store.SystemReconcileCreatedBy); err != nil {
+		slog.Warn("failed to sync hub role grants on login", "email", info.Email, "user_id", user.ID, "role", user.Role, "error", err)
 	}
 
 	return user, nil
