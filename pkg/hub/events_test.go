@@ -17,6 +17,8 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"reflect"
+	"sort"
 	"testing"
 	"time"
 
@@ -655,6 +657,98 @@ func TestChannelEventPublisher_NoLegacyGroveSubjects(t *testing.T) {
 		t.Fatalf("legacy grove.* subject must not be published, got %q", evt.Subject)
 	default:
 		// Expected: nothing was published on grove.>.
+	}
+}
+
+// TestChannelEventPublisher_PayloadsCarryProjectIDNotGroveID verifies every
+// event payload struct that identifies a project marshals it as "projectId"
+// and never emits a "groveId" key.
+func TestChannelEventPublisher_PayloadsCarryProjectIDNotGroveID(t *testing.T) {
+	pub := NewChannelEventPublisher()
+	defer pub.Close()
+
+	ch, unsub := pub.Subscribe(">")
+	defer unsub()
+
+	ctx := context.Background()
+	pub.PublishAgentStatus(ctx, &store.Agent{ID: "a1", ProjectID: "p1", Phase: "running"})
+	pub.PublishAgentCreated(ctx, &store.Agent{ID: "a1", ProjectID: "p1"})
+	pub.PublishAgentDeleted(ctx, "a1", "p1")
+	pub.PublishAgentPorts(ctx, &store.Agent{ID: "a1", ProjectID: "p1"})
+	pub.PublishProjectCreated(ctx, &store.Project{ID: "p1", Name: "Project"})
+	pub.PublishProjectUpdated(ctx, &store.Project{ID: "p1", Name: "Project"})
+	pub.PublishProjectDeleted(ctx, "p1")
+	pub.PublishBrokerConnected(ctx, "b1", "broker-one", []string{"p1"})
+	pub.PublishBrokerDisconnected(ctx, "b1", []string{"p1"})
+	pub.PublishNotification(ctx, &store.Notification{ID: "n1", ProjectID: "p1", Status: "COMPLETED"})
+	pub.PublishUserMessage(ctx, &store.Message{
+		ID: "m1", ProjectID: "p1", Sender: "agent:a1", SenderID: "a1",
+		Recipient: "user:alice", RecipientID: "u1", Msg: "hi", Type: "assistant-reply",
+		CreatedAt: time.Now().UTC(),
+	}, nil)
+	pub.PublishChatNotification(ctx,
+		&store.Notification{ID: "n2", ProjectID: "p1", Status: "COMPLETED", SubscriberID: "u2"},
+		ChatMessageContext{})
+
+	drain := func() []Event {
+		var got []Event
+		for {
+			select {
+			case evt := <-ch:
+				got = append(got, evt)
+			case <-time.After(100 * time.Millisecond):
+				return got
+			}
+		}
+	}
+
+	// Every one of the calls above carries a project identity, so every
+	// resulting event must carry "projectId" — there is no payload above
+	// that legitimately omits it. Asserting the exact subject multiset
+	// means a dropped publish can't hide behind another one that still
+	// lands.
+	wantSubjects := []string{
+		"agent.a1.status", "project.p1.agent.status",
+		"agent.a1.created", "project.p1.agent.created",
+		"agent.a1.deleted", "project.p1.agent.deleted",
+		"agent.a1.ports", "project.p1.agent.ports",
+		"project.p1.created",
+		"project.p1.updated",
+		"project.p1.deleted",
+		"project.p1.broker.status", "project.p1.broker.status",
+		"notification.created", "project.p1.notification",
+		"user.u1.message", "project.p1.user.message",
+		"user.u2.notification",
+	}
+
+	events := drain()
+	gotSubjects := make([]string, len(events))
+	for i, evt := range events {
+		gotSubjects[i] = evt.Subject
+	}
+	sort.Strings(gotSubjects)
+	wantSorted := append([]string(nil), wantSubjects...)
+	sort.Strings(wantSorted)
+	if !reflect.DeepEqual(gotSubjects, wantSorted) {
+		t.Fatalf("published subjects = %v, want %v", gotSubjects, wantSorted)
+	}
+
+	for _, evt := range events {
+		var m map[string]interface{}
+		if err := json.Unmarshal(evt.Data, &m); err != nil {
+			t.Fatalf("%s: unmarshal: %v", evt.Subject, err)
+		}
+		if _, ok := m["groveId"]; ok {
+			t.Errorf("%s: payload must not contain groveId, got %s", evt.Subject, evt.Data)
+		}
+		got, ok := m["projectId"]
+		if !ok {
+			t.Errorf("%s: payload must contain projectId, got %s", evt.Subject, evt.Data)
+			continue
+		}
+		if got != "p1" {
+			t.Errorf("%s: projectId = %v, want %q", evt.Subject, got, "p1")
+		}
 	}
 }
 

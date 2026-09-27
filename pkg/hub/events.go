@@ -145,7 +145,6 @@ type AgentDetail struct {
 type AgentStatusEvent struct {
 	AgentID           string       `json:"agentId"`
 	ProjectID         string       `json:"projectId"`
-	GroveID           string       `json:"groveId"`
 	Phase             string       `json:"phase,omitempty"`
 	Activity          string       `json:"activity,omitempty"`
 	Detail            *AgentDetail `json:"detail,omitempty"`
@@ -159,7 +158,6 @@ type AgentStatusEvent struct {
 type AgentCreatedEvent struct {
 	AgentID         string   `json:"agentId"`
 	ProjectID       string   `json:"projectId"`
-	GroveID         string   `json:"groveId"`
 	Name            string   `json:"name"`
 	Slug            string   `json:"slug"`
 	Template        string   `json:"template,omitempty"`
@@ -179,21 +177,18 @@ type AgentCreatedEvent struct {
 type AgentDeletedEvent struct {
 	AgentID   string `json:"agentId"`
 	ProjectID string `json:"projectId"`
-	GroveID   string `json:"groveId"`
 }
 
 // AgentPortsEvent is published when an agent's exposed ports change.
 type AgentPortsEvent struct {
 	AgentID   string              `json:"agentId"`
 	ProjectID string              `json:"projectId"`
-	GroveID   string              `json:"groveId"`
 	Ports     []store.ExposedPort `json:"ports"`
 }
 
 // ProjectCreatedEvent is published when a project is created.
 type ProjectCreatedEvent struct {
 	ProjectID string `json:"projectId"`
-	GroveID   string `json:"groveId"`
 	Name      string `json:"name"`
 	Slug      string `json:"slug"`
 }
@@ -201,14 +196,12 @@ type ProjectCreatedEvent struct {
 // ProjectUpdatedEvent is published when a project is updated.
 type ProjectUpdatedEvent struct {
 	ProjectID string `json:"projectId"`
-	GroveID   string `json:"groveId"`
 	Name      string `json:"name"`
 }
 
 // ProjectDeletedEvent is published when a project is deleted.
 type ProjectDeletedEvent struct {
 	ProjectID string `json:"projectId"`
-	GroveID   string `json:"groveId"`
 }
 
 // BrokerProjectEvent is published when a broker connects or disconnects,
@@ -217,7 +210,6 @@ type BrokerProjectEvent struct {
 	BrokerID   string `json:"brokerId"`
 	BrokerName string `json:"brokerName,omitempty"`
 	ProjectID  string `json:"projectId"`
-	GroveID    string `json:"groveId"`
 	Status     string `json:"status"` // "online" or "offline"
 }
 
@@ -232,7 +224,6 @@ type BrokerStatusEvent struct {
 type UserMessageEvent struct {
 	ID            string          `json:"id"`
 	ProjectID     string          `json:"projectId"`
-	GroveID       string          `json:"groveId"`
 	Sender        string          `json:"sender"`
 	SenderID      string          `json:"senderId"`
 	Recipient     string          `json:"recipient"`
@@ -267,7 +258,6 @@ type NotificationCreatedEvent struct {
 	ID        string `json:"id"`
 	AgentID   string `json:"agentId"`
 	ProjectID string `json:"projectId"`
-	GroveID   string `json:"groveId"`
 	Status    string `json:"status"`
 	Message   string `json:"message"`
 	CreatedAt string `json:"createdAt"`
@@ -475,7 +465,6 @@ func (p *eventBuilder) PublishAgentStatus(_ context.Context, agent *store.Agent)
 	evt := AgentStatusEvent{
 		AgentID:         agent.ID,
 		ProjectID:       agent.ProjectID,
-		GroveID:         agent.ProjectID,
 		Phase:           agent.Phase,
 		Activity:        agent.Activity,
 		ContainerStatus: agent.ContainerStatus,
@@ -509,7 +498,6 @@ func (p *eventBuilder) PublishAgentCreated(_ context.Context, agent *store.Agent
 	evt := AgentCreatedEvent{
 		AgentID:         agent.ID,
 		ProjectID:       agent.ProjectID,
-		GroveID:         agent.ProjectID,
 		Name:            agent.Name,
 		Slug:            agent.Slug,
 		Template:        agent.Template,
@@ -538,7 +526,6 @@ func (p *eventBuilder) PublishAgentDeleted(_ context.Context, agentID, projectID
 	evt := AgentDeletedEvent{
 		AgentID:   agentID,
 		ProjectID: projectID,
-		GroveID:   projectID,
 	}
 	p.sink("agent."+agentID+".deleted", evt)
 	if projectID != "" {
@@ -551,7 +538,6 @@ func (p *eventBuilder) PublishAgentPorts(_ context.Context, agent *store.Agent) 
 	evt := AgentPortsEvent{
 		AgentID:   agent.ID,
 		ProjectID: agent.ProjectID,
-		GroveID:   agent.ProjectID,
 		Ports:     agent.ExposedPorts,
 	}
 	p.sink("agent."+agent.ID+".ports", evt)
@@ -564,7 +550,6 @@ func (p *eventBuilder) PublishAgentPorts(_ context.Context, agent *store.Agent) 
 func (p *eventBuilder) PublishProjectCreated(_ context.Context, project *store.Project) {
 	evt := ProjectCreatedEvent{
 		ProjectID: project.ID,
-		GroveID:   project.ID,
 		Name:      project.Name,
 		Slug:      project.Slug,
 	}
@@ -575,7 +560,6 @@ func (p *eventBuilder) PublishProjectCreated(_ context.Context, project *store.P
 func (p *eventBuilder) PublishProjectUpdated(_ context.Context, project *store.Project) {
 	evt := ProjectUpdatedEvent{
 		ProjectID: project.ID,
-		GroveID:   project.ID,
 		Name:      project.Name,
 	}
 	p.sink("project."+project.ID+".updated", evt)
@@ -585,7 +569,6 @@ func (p *eventBuilder) PublishProjectUpdated(_ context.Context, project *store.P
 func (p *eventBuilder) PublishProjectDeleted(_ context.Context, projectID string) {
 	evt := ProjectDeletedEvent{
 		ProjectID: projectID,
-		GroveID:   projectID,
 	}
 	p.sink("project."+projectID+".deleted", evt)
 }
@@ -597,7 +580,6 @@ func (p *eventBuilder) PublishBrokerConnected(_ context.Context, brokerID, broke
 			BrokerID:   brokerID,
 			BrokerName: brokerName,
 			ProjectID:  pid,
-			GroveID:    pid,
 			Status:     "online",
 		}
 		p.sink("project."+pid+".broker.status", evt)
@@ -610,7 +592,6 @@ func (p *eventBuilder) PublishBrokerDisconnected(_ context.Context, brokerID str
 		evt := BrokerProjectEvent{
 			BrokerID:  brokerID,
 			ProjectID: pid,
-			GroveID:   pid,
 			Status:    "offline",
 		}
 		p.sink("project."+pid+".broker.status", evt)
@@ -632,7 +613,6 @@ func (p *eventBuilder) PublishNotification(_ context.Context, notif *store.Notif
 		ID:        notif.ID,
 		AgentID:   notif.AgentID,
 		ProjectID: notif.ProjectID,
-		GroveID:   notif.ProjectID,
 		Status:    notif.Status,
 		Message:   notif.Message,
 		CreatedAt: notif.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
@@ -665,7 +645,6 @@ func (p *eventBuilder) PublishChatNotification(_ context.Context, notif *store.N
 			ID:        notif.ID,
 			AgentID:   notif.AgentID,
 			ProjectID: notif.ProjectID,
-			GroveID:   notif.ProjectID,
 			Status:    notif.Status,
 			Message:   notif.Message,
 			CreatedAt: notif.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
@@ -715,7 +694,6 @@ func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message,
 	evt := UserMessageEvent{
 		ID:            msg.ID,
 		ProjectID:     msg.ProjectID,
-		GroveID:       msg.ProjectID,
 		Sender:        msg.Sender,
 		SenderID:      msg.SenderID,
 		Recipient:     msg.Recipient,
