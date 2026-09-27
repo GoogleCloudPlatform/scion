@@ -39,8 +39,8 @@ var initImageRegistry string
 // projectCmd represents the project command
 var projectCmd = &cobra.Command{
 	Use:     "project",
-	Aliases: []string{"grove", "group"},
-	Short:   "Manage scion projects (formerly groves)",
+	Aliases: []string{"group"},
+	Short:   "Manage scion projects",
 	Long:    `A project is the grouping construct for a set of agents. The .scion folder represents a project.`,
 }
 

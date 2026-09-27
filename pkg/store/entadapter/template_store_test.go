@@ -49,7 +49,6 @@ func TestCreateAndGetTemplate(t *testing.T) {
 		Harness:     "claude",
 		Image:       "img:latest",
 		Scope:       store.TemplateScopeGlobal,
-		Visibility:  "public",
 		ContentHash: "abc123",
 		Config: &store.TemplateConfig{
 			Harness: "claude",

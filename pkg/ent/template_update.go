@@ -438,20 +438,6 @@ func (_u *TemplateUpdate) ClearSourceURL() *TemplateUpdate {
 	return _u
 }
 
-// SetVisibility sets the "visibility" field.
-func (_u *TemplateUpdate) SetVisibility(v string) *TemplateUpdate {
-	_u.mutation.SetVisibility(v)
-	return _u
-}
-
-// SetNillableVisibility sets the "visibility" field if the given value is not nil.
-func (_u *TemplateUpdate) SetNillableVisibility(v *string) *TemplateUpdate {
-	if v != nil {
-		_u.SetVisibility(*v)
-	}
-	return _u
-}
-
 // SetUpdated sets the "updated" field.
 func (_u *TemplateUpdate) SetUpdated(v time.Time) *TemplateUpdate {
 	_u.mutation.SetUpdated(v)
@@ -647,9 +633,6 @@ func (_u *TemplateUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.SourceURLCleared() {
 		_spec.ClearField(template.FieldSourceURL, field.TypeString)
-	}
-	if value, ok := _u.mutation.Visibility(); ok {
-		_spec.SetField(template.FieldVisibility, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.Updated(); ok {
 		_spec.SetField(template.FieldUpdated, field.TypeTime, value)
@@ -1084,20 +1067,6 @@ func (_u *TemplateUpdateOne) ClearSourceURL() *TemplateUpdateOne {
 	return _u
 }
 
-// SetVisibility sets the "visibility" field.
-func (_u *TemplateUpdateOne) SetVisibility(v string) *TemplateUpdateOne {
-	_u.mutation.SetVisibility(v)
-	return _u
-}
-
-// SetNillableVisibility sets the "visibility" field if the given value is not nil.
-func (_u *TemplateUpdateOne) SetNillableVisibility(v *string) *TemplateUpdateOne {
-	if v != nil {
-		_u.SetVisibility(*v)
-	}
-	return _u
-}
-
 // SetUpdated sets the "updated" field.
 func (_u *TemplateUpdateOne) SetUpdated(v time.Time) *TemplateUpdateOne {
 	_u.mutation.SetUpdated(v)
@@ -1323,9 +1292,6 @@ func (_u *TemplateUpdateOne) sqlSave(ctx context.Context) (_node *Template, err 
 	}
 	if _u.mutation.SourceURLCleared() {
 		_spec.ClearField(template.FieldSourceURL, field.TypeString)
-	}
-	if value, ok := _u.mutation.Visibility(); ok {
-		_spec.SetField(template.FieldVisibility, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.Updated(); ok {
 		_spec.SetField(template.FieldUpdated, field.TypeTime, value)

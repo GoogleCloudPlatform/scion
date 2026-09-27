@@ -132,6 +132,9 @@ func (m *mockAgentService) StreamCloudLogs(ctx context.Context, agentID string, 
 func (m *mockAgentService) SetMessageMode(ctx context.Context, agentID string, req *hubclient.SetMessageModeRequest, opts *hubclient.SetMessageModeOptions) (*hubclient.SetMessageModeResponse, error) {
 	return nil, fmt.Errorf("not implemented")
 }
+func (m *mockAgentService) Reincarnate(ctx context.Context, agentID string, req *hubclient.ReincarnateAgentRequest) (*hubclient.ReincarnateAgentResponse, error) {
+	return nil, fmt.Errorf("not implemented")
+}
 
 // mockHubClient implements hubclient.Client for testing, delegating to a mockAgentService.
 type mockHubClient struct {

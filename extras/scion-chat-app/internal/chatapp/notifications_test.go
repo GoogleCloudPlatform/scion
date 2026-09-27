@@ -27,30 +27,72 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
 
-// TestHandleBrokerMessage_UserMessageRouting verifies that user-targeted
-// messages with the full scion broker topic prefix are correctly routed
-// to handleUserMessage.
-func TestHandleBrokerMessage_UserMessageRouting(t *testing.T) {
-	log := slog.Default()
-	relay := NewNotificationRelay(nil, nil, log)
-
-	// Message with empty RecipientID triggers early return in handleUserMessage
-	// without touching the store, so we can test topic routing safely.
-	msg := &messages.StructuredMessage{
-		Sender: "agent:test-agent",
-		Msg:    "hello from agent",
+// TestHandleBrokerMessage_UserTopicAcceptance verifies that a user-targeted
+// message is delivered on the canonical scion.project.* topic — the shape
+// published by the hub — and that a scion.grove.*-prefixed topic delivers
+// nothing, since it is not a project topic. A nil-error assertion alone
+// would pass even if a delivery were silently dropped or an undelivered
+// case were silently delivered, so each case asserts the exact delivery
+// count.
+func TestHandleBrokerMessage_UserTopicAcceptance(t *testing.T) {
+	tests := []struct {
+		name           string
+		topic          string
+		wantDeliveries int
+	}{
+		{"canonical", "scion.project.grove-abc.user.hub-user-1.messages", 1},
+		{"legacy prefix rejected", "scion.grove.grove-abc.user.hub-user-1.messages", 0},
 	}
 
-	// Full scion-prefixed topic should route to handleUserMessage.
-	err := relay.HandleBrokerMessage(context.Background(),
-		"scion.grove.grove-123.user.user-456.messages", msg)
-	if err != nil {
-		t.Errorf("expected nil error for user message topic, got: %v", err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newTestStore(t)
+
+			if err := store.SetUserMapping(&state.UserMapping{
+				PlatformUserID: "users/12345",
+				Platform:       "googlechat",
+				HubUserID:      "hub-user-1",
+				HubUserEmail:   "test@example.com",
+				RegisteredBy:   "auto",
+			}); err != nil {
+				t.Fatalf("setting user mapping: %v", err)
+			}
+
+			if err := store.SetSpaceLink(&state.SpaceLink{
+				SpaceID:     "spaces/AAQAx",
+				Platform:    "googlechat",
+				ProjectID:   "grove-abc",
+				ProjectSlug: "my-grove",
+				LinkedBy:    "test",
+			}); err != nil {
+				t.Fatalf("setting space link: %v", err)
+			}
+
+			fm := &fakeMessenger{}
+			log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			relay := NewNotificationRelay(store, fm, log)
+
+			msg := &messages.StructuredMessage{
+				Sender:      "agent:test-agent",
+				RecipientID: "hub-user-1",
+				Msg:         "hello from agent",
+				Type:        messages.TypeInstruction,
+			}
+
+			err := relay.HandleBrokerMessage(context.Background(), tc.topic, msg)
+			if err != nil {
+				t.Fatalf("expected nil error for topic %q, got: %v", tc.topic, err)
+			}
+			if len(fm.messages) != tc.wantDeliveries {
+				t.Fatalf("topic %q: got %d deliveries, want %d", tc.topic, len(fm.messages), tc.wantDeliveries)
+			}
+		})
 	}
 }
 
 // TestHandleBrokerMessage_IgnoredTopics verifies that unrecognized or
-// malformed topics are silently ignored.
+// malformed topics produce a nil error rather than being treated as a
+// processing failure.
 func TestHandleBrokerMessage_IgnoredTopics(t *testing.T) {
 	log := slog.Default()
 	relay := NewNotificationRelay(nil, nil, log)
@@ -145,7 +187,7 @@ func TestHandleUserMessage_NoSubscriptionRequired(t *testing.T) {
 	}
 
 	err := relay.HandleBrokerMessage(context.Background(),
-		"scion.grove.grove-abc.user.hub-user-1.messages", msg)
+		"scion.project.grove-abc.user.hub-user-1.messages", msg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -226,7 +268,7 @@ func TestHandleUserMessage_RoutesNonInstructionToNotification(t *testing.T) {
 			}
 
 			err := relay.HandleBrokerMessage(context.Background(),
-				"scion.grove.grove-abc.user.hub-user-1.messages", msg)
+				"scion.project.grove-abc.user.hub-user-1.messages", msg)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -325,7 +367,7 @@ func TestHandleUserMessage_AssistantReplyTruncated(t *testing.T) {
 	}
 
 	err := relay.HandleBrokerMessage(context.Background(),
-		"scion.grove.grove-abc.user.hub-user-1.messages", msg)
+		"scion.project.grove-abc.user.hub-user-1.messages", msg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -395,7 +437,7 @@ func TestHandleUserMessage_ShortAssistantReplyNotTruncated(t *testing.T) {
 	}
 
 	err := relay.HandleBrokerMessage(context.Background(),
-		"scion.grove.grove-abc.user.hub-user-1.messages", msg)
+		"scion.project.grove-abc.user.hub-user-1.messages", msg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -684,7 +726,7 @@ func TestHandleBrokerMessage_UserTargetedAlwaysPassesThrough(t *testing.T) {
 
 	// User-targeted topic should always pass through regardless of filter settings.
 	err := relay.HandleBrokerMessage(context.Background(),
-		"scion.grove.proj-3.user.hub-user-9.messages", msg)
+		"scion.project.proj-3.user.hub-user-9.messages", msg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

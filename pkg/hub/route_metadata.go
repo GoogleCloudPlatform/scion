@@ -324,25 +324,6 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 
 	// -------------------------------------------------------------------------
-	// Policy: Legacy groves (aliases for projects)
-	// -------------------------------------------------------------------------
-	"/api/v1/groves": {
-		Pattern: "/api/v1/groves", RouteID: "groves.list",
-		Classification: RoutePolicy,
-		Permission:     "project.read", Resource: "project", Action: "read",
-	},
-	"/api/v1/groves/register": {
-		Pattern: "/api/v1/groves/register", RouteID: "groves.register",
-		Classification: RoutePolicy,
-		Permission:     "project.register", Resource: "project", Action: "register",
-	},
-	"/api/v1/groves/": {
-		Pattern: "/api/v1/groves/", RouteID: "groves.byId",
-		Classification: RoutePolicy,
-		Permission:     "project.read", Resource: "project", Action: "read",
-	},
-
-	// -------------------------------------------------------------------------
 	// Policy: Runtime brokers
 	// -------------------------------------------------------------------------
 	"/api/v1/runtime-brokers": {

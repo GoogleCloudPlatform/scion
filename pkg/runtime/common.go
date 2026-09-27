@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
 	"os"
@@ -331,9 +332,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 
 	// Phase 3 & 5: Project identity injection
 	addEnv("SCION_PROJECT", config.Project)
-	addEnv("SCION_GROVE", config.Project)
 	addEnv("SCION_PROJECT_ID", config.ProjectID)
-	addEnv("SCION_GROVE_ID", config.ProjectID)
 
 	// Mount gcloud config if it exists on the host (local mode only).
 	// In broker mode, credentials are projected via ResolvedSecrets;
@@ -438,11 +437,9 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	// Phase 5: Standard project labels
 	if config.Project != "" {
 		addArg("--label", fmt.Sprintf("%s=%s", projectcompat.LabelProject, config.Project))
-		addArg("--label", fmt.Sprintf("%s=%s", projectcompat.LabelGrove, config.Project))
 	}
 	if config.ProjectID != "" {
 		addArg("--label", fmt.Sprintf("%s=%s", projectcompat.LabelProjectID, config.ProjectID))
-		addArg("--label", fmt.Sprintf("%s=%s", projectcompat.LabelGroveID, config.ProjectID))
 	}
 
 	if config.Template != "" {
@@ -635,6 +632,76 @@ func runSimpleCommand(ctx context.Context, command string, args ...string) (stri
 	}
 	runtimeLog.Debug("Command completed", "cmd", command, "argc", len(args), "duration", elapsed)
 	return strings.TrimSpace(string(out)), nil
+}
+
+// runSimpleCommandWithStdin is runSimpleCommand's counterpart for callers
+// that need to deliver data to the child process over stdin rather than
+// argv (see #1355 — secrets embedded in argv leak via /proc/<pid>/cmdline
+// for the lifetime of the exec). It never logs the piped content.
+func runSimpleCommandWithStdin(ctx context.Context, stdin io.Reader, command string, args ...string) (string, error) {
+	// Log the command name and argument count only — see runSimpleCommand
+	// comment above. The stdin payload is never logged.
+	runtimeLog.Debug("Executing command with stdin", "cmd", command, "argc", len(args))
+	start := time.Now()
+	cmd := exec.CommandContext(ctx, command, args...)
+	cmd.Stdin = stdin
+	out, err := cmd.CombinedOutput()
+	elapsed := time.Since(start)
+	if err != nil {
+		runtimeLog.Debug("Command failed", "cmd", command, "argc", len(args), "duration", elapsed, "output", strings.TrimSpace(string(out)))
+		return string(out), fmt.Errorf("%s failed: %w", command, err)
+	}
+	runtimeLog.Debug("Command completed", "cmd", command, "argc", len(args), "duration", elapsed)
+	return strings.TrimSpace(string(out)), nil
+}
+
+// rollbackCancelledCreate best-effort removes a container that the daemon
+// may have already created/started before the CLI process (e.g. a detached
+// "run -d") was killed by context cancellation. exec.CommandContext only
+// kills the local CLI subprocess — it does not tell the daemon to undo work
+// it already began server-side. Without this, a create whose context is
+// cancelled because the caller gave up (e.g. the Hub's dispatch timeout
+// elapsed, or the original request was itself cancelled) can leak a running
+// container that nothing else knows to reap. See ptone/scion#1886.
+//
+// It intentionally uses a fresh, short-lived context rather than the
+// (already cancelled) caller context, since the caller has already given up
+// and this cleanup must still be allowed to run.
+//
+// The Apple "container" CLI's "rm" does not support "-f" and fails if the
+// container is still running (see AppleContainerRuntime.Delete), so for that
+// runtime we kill first, then retry a plain "rm" a few times — kill is
+// asynchronous and the container may not be immediately ready for removal.
+// Docker/Podman support "rm -f" directly.
+func rollbackCancelledCreate(command, containerName string) {
+	if containerName == "" {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if filepath.Base(command) == "container" {
+		_, _ = runSimpleCommand(cleanupCtx, command, "kill", containerName)
+
+		var out string
+		var err error
+		for attempt := 0; attempt < 5; attempt++ {
+			out, err = runSimpleCommand(cleanupCtx, command, "rm", containerName)
+			if err == nil {
+				return
+			}
+			select {
+			case <-cleanupCtx.Done():
+				runtimeLog.Warn("Failed to roll back cancelled create", "cmd", command, "container", containerName, "error", cleanupCtx.Err(), "output", strings.TrimSpace(out))
+				return
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+		runtimeLog.Warn("Failed to roll back cancelled create", "cmd", command, "container", containerName, "error", err, "output", strings.TrimSpace(out))
+		return
+	}
+	if out, err := runSimpleCommand(cleanupCtx, command, "rm", "-f", containerName); err != nil {
+		runtimeLog.Warn("Failed to roll back cancelled create", "cmd", command, "container", containerName, "error", err, "output", strings.TrimSpace(out))
+	}
 }
 
 func runInteractiveCommand(command string, args ...string) error {

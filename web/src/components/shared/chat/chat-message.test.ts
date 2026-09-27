@@ -561,3 +561,82 @@ describe('scion-chat-message cross-project label', () => {
     expect(label).toBeNull();
   });
 });
+
+// nc-delivery-unreachable: "Agent unreachable" replaces the generic "Failed"
+// label when the primary agent could not receive the message at all, either
+// via the machine-readable code (new sends) or the reason prefix (history
+// rows sent before the code field existed).
+describe('scion-chat-message delivery state', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  async function mountOutbound(props: Partial<ScionChatMessage>): Promise<ScionChatMessage> {
+    const el = document.createElement('scion-chat-message') as ScionChatMessage;
+    el.body = 'hello';
+    el.fromAgent = false;
+    Object.assign(el, props);
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await Promise.resolve();
+    await el.updateComplete;
+    return el;
+  }
+
+  function deliveryState(el: ScionChatMessage): Element | null | undefined {
+    return el.shadowRoot?.querySelector('.delivery-state');
+  }
+
+  it('shows "Agent unreachable" when dispatchFailureCode is agent_unreachable', async () => {
+    const el = await mountOutbound({
+      dispatchState: 'failed',
+      dispatchFailureReason: 'Agent unreachable (suspended)',
+      dispatchFailureCode: 'agent_unreachable',
+    });
+
+    const state = deliveryState(el);
+    expect(state?.textContent).toContain('Agent unreachable');
+    expect(state?.classList.contains('failed')).toBe(true);
+    const tooltip = el.shadowRoot?.querySelector('sl-tooltip');
+    expect(tooltip?.getAttribute('content')).toBe('Agent unreachable (suspended)');
+  });
+
+  it('falls back to matching the reason prefix for history rows without a code', async () => {
+    const el = await mountOutbound({
+      dispatchState: 'failed',
+      dispatchFailureReason: 'Agent unreachable (deleted)',
+      dispatchFailureCode: '',
+    });
+
+    const state = deliveryState(el);
+    expect(state?.textContent).toContain('Agent unreachable');
+  });
+
+  it('keeps the generic "Failed" label for a non-unreachable dispatch error', async () => {
+    const el = await mountOutbound({
+      dispatchState: 'failed',
+      dispatchFailureReason: "agent 'x' not found or not running",
+      dispatchFailureCode: 'dispatch_error',
+    });
+
+    const state = deliveryState(el);
+    expect(state?.textContent).toContain('Failed');
+    expect(state?.textContent).not.toContain('Agent unreachable');
+  });
+
+  it('keeps the generic "Failed" label when neither code nor reason indicate unreachable', async () => {
+    const el = await mountOutbound({
+      dispatchState: 'failed',
+      dispatchFailureReason: "agent 'x' not found or not running",
+      dispatchFailureCode: '',
+    });
+
+    const state = deliveryState(el);
+    expect(state?.textContent).toContain('Failed');
+    expect(state?.textContent).not.toContain('Agent unreachable');
+  });
+});

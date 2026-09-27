@@ -39,6 +39,10 @@ func (m *mockAgentManager) Provision(ctx context.Context, opts api.StartOptions)
 	return nil, nil
 }
 
+func (m *mockAgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	return nil, nil
+}
+
 func (m *mockAgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
 	return nil, nil
 }
@@ -48,6 +52,10 @@ func (m *mockAgentManager) Stop(ctx context.Context, name string, projectPath st
 }
 
 func (m *mockAgentManager) Delete(ctx context.Context, name string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+	return true, nil
+}
+
+func (m *mockAgentManager) DeleteTarget(ctx context.Context, agentName, containerID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	return true, nil
 }
 
@@ -988,12 +996,31 @@ func TestProjectWorkspaceUpload_MethodNotAllowed(t *testing.T) {
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(cfg, mgr, rt)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/grove-upload", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/project-upload", nil)
 	rec := httptest.NewRecorder()
 	srv.handleProjectWorkspaceUpload(rec, req)
 
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("expected 405, got %d", rec.Code)
+	}
+}
+
+// TestProjectWorkspaceUpload_LegacyRouteRemoved verifies that the retired
+// /api/v1/workspace/grove-upload route no longer resolves. Callers must use
+// /api/v1/workspace/project-upload instead.
+func TestProjectWorkspaceUpload_LegacyRouteRemoved(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	mgr := &mockAgentManager{}
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	srv := New(cfg, mgr, rt)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/workspace/grove-upload", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for removed route, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -1004,7 +1031,7 @@ func doProjectUploadRequest(t *testing.T, srv *Server, body ProjectWorkspaceUplo
 		t.Fatalf("failed to marshal body: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/workspace/grove-upload", bytes.NewReader(bodyBytes))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/workspace/project-upload", bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	srv.handleProjectWorkspaceUpload(rec, req)

@@ -16,11 +16,11 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -563,24 +563,12 @@ func subtractProjectIDs(all, exclude []string) []string {
 type brokerHeartbeatRequest struct {
 	Status   string                   `json:"status"`
 	Projects []brokerProjectHeartbeat `json:"projects,omitempty"`
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
-func (h *brokerHeartbeatRequest) UnmarshalJSON(data []byte) error {
-	type Alias brokerHeartbeatRequest
-	aux := &struct {
-		Groves []brokerProjectHeartbeat `json:"groves,omitempty"`
-		*Alias
-	}{
-		Alias: (*Alias)(h),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if len(h.Projects) == 0 && len(aux.Groves) > 0 {
-		h.Projects = aux.Groves
-	}
-	return nil
+	// Capabilities refreshes the broker's stored capabilities on every
+	// heartbeat (design §3.4 Amendment A2.2(b); see
+	// hubclient.BrokerHeartbeat.Capabilities). Omitted by an old broker, in
+	// which case the store's capabilities are
+	// left exactly as CompleteBrokerJoin last set them.
+	Capabilities *store.BrokerCapabilities `json:"capabilities,omitempty"`
 }
 
 // brokerProjectHeartbeat is per-project status in a heartbeat.
@@ -588,24 +576,6 @@ type brokerProjectHeartbeat struct {
 	ProjectID  string                 `json:"projectId"`
 	AgentCount int                    `json:"agentCount"`
 	Agents     []brokerAgentHeartbeat `json:"agents,omitempty"`
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
-func (p *brokerProjectHeartbeat) UnmarshalJSON(data []byte) error {
-	type Alias brokerProjectHeartbeat
-	aux := &struct {
-		GroveID string `json:"groveId,omitempty"`
-		*Alias
-	}{
-		Alias: (*Alias)(p),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if p.ProjectID == "" && aux.GroveID != "" {
-		p.ProjectID = aux.GroveID
-	}
-	return nil
 }
 
 // brokerAgentHeartbeat is per-agent status in a heartbeat.
@@ -663,6 +633,26 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
+	// Design §3.4 Amendment A2.2(b): refresh stored capabilities from every heartbeat that
+	// reports them, so an already-registered broker's capabilities are never
+	// stuck at whatever CompleteBrokerJoin saw once at join time — the false
+	// 412 case that otherwise blocks `scion reincarnate` until a manual
+	// --force re-registration. An old broker sends no Capabilities field at
+	// all, and the store keeps whatever it already had (nil-safe: a missing
+	// field, not an empty struct, is the "don't touch" signal).
+	if heartbeat.Capabilities != nil {
+		if broker, err := s.store.GetRuntimeBroker(ctx, id); err != nil {
+			s.agentLifecycleLog.Warn("heartbeat: failed to load broker to refresh capabilities",
+				"broker_id", id, "error", err)
+		} else if !reflect.DeepEqual(broker.Capabilities, heartbeat.Capabilities) {
+			broker.Capabilities = heartbeat.Capabilities
+			if err := s.store.UpdateRuntimeBroker(ctx, broker); err != nil {
+				s.agentLifecycleLog.Warn("heartbeat: failed to persist refreshed capabilities",
+					"broker_id", id, "error", err)
+			}
+		}
+	}
+
 	// Process agent status updates from each project
 	for _, project := range heartbeat.Projects {
 		for _, agentHB := range project.Agents {
@@ -712,11 +702,26 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			// start/stop lifecycle actions may leave the suspended phase.
 			agentSuspended := agent.Phase == string(state.PhaseSuspended)
 
+			// Reincarnation in flight is sticky like suspension (design §3.4
+			// Amendment A11 item 2): the worker owns Phase/Activity/ExitCode/
+			// ExitReason/Message for the duration of a migration, so a racing
+			// heartbeat — including one reporting the OLD container being torn
+			// down mid-reprovision, or a stale crash from before the restart —
+			// must not report a spurious failure while the new generation is
+			// still coming up. ContainerStatus and the Heartbeat/LastSeen bump
+			// still apply below; only the status fields the worker itself drives
+			// are suppressed.
+			agentReincarnating := reincarnationInFlight(agent)
+			if agentReincarnating {
+				statusUpdate.Message = ""
+			}
+
 			if agentHB.Phase != "" {
-				if agentSuspended {
+				if agentSuspended || agentReincarnating {
 					// Do not let the heartbeat change the phase or propagate
-					// terminal activities while suspended; leave statusUpdate.Phase
-					// unset so the hub's authoritative suspended phase is kept.
+					// terminal activities while suspended or reincarnating; leave
+					// statusUpdate.Phase unset so the hub's authoritative phase is
+					// kept.
 				} else if agentInTerminalPhase {
 					// Keep the hub's authoritative terminal phase; only
 					// allow the heartbeat to confirm it (not revert it).
@@ -809,7 +814,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 						}
 					}
 				}
-			} else if !agentInTerminalPhase && !agentSuspended {
+			} else if !agentInTerminalPhase && !agentSuspended && !agentReincarnating {
 				// Legacy path: no structured fields, derive from ContainerStatus
 				// Derive phase from container status to ensure agents
 				// registered via sync (not started via hub) get proper state.
@@ -891,6 +896,12 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 						"agent_id", agent.ID, "harnessAuth", agentHB.HarnessAuth, "profile", agentHB.Profile, "error", err)
 				}
 			}
+
+			// Reconcile the max_agents_per_broker reservation against the
+			// phase this heartbeat will actually persist — e.g. release on an
+			// observed crash/exit, or best-effort re-reserve on an observed
+			// out-of-band restart (ptone/scion#1963).
+			s.reconcileBrokerQuotaOnPhaseChange(ctx, agent, agent.Phase, statusUpdate.Phase)
 
 			// Update the agent's status
 			if err := s.store.UpdateAgentStatus(ctx, agent.ID, statusUpdate); err != nil {

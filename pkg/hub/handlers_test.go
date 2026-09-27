@@ -2294,14 +2294,13 @@ func TestTemplateList(t *testing.T) {
 	ctx := context.Background()
 
 	template := &store.Template{
-		ID:         tid("tmpl_test1"),
-		Slug:       "test-template",
-		Name:       "Test Template",
-		Harness:    "claude",
-		Scope:      "global",
-		Visibility: store.VisibilityPublic,
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:      tid("tmpl_test1"),
+		Slug:    "test-template",
+		Name:    "Test Template",
+		Harness: "claude",
+		Scope:   "global",
+		Created: time.Now(),
+		Updated: time.Now(),
 	}
 	if err := s.CreateTemplate(ctx, template); err != nil {
 		t.Fatalf("failed to create template: %v", err)
@@ -2332,7 +2331,7 @@ func TestTemplateListByProjectID(t *testing.T) {
 	if err := s.CreateTemplate(ctx, &store.Template{
 		ID: tid("tmpl_global1"), Slug: "global-tmpl", Name: "Global Template",
 		Harness: "claude", Scope: "global",
-		Visibility: store.VisibilityPublic, Status: "active",
+		Status:  "active",
 		Created: now, Updated: now,
 	}); err != nil {
 		t.Fatalf("failed to create global template: %v", err)
@@ -2342,7 +2341,7 @@ func TestTemplateListByProjectID(t *testing.T) {
 	if err := s.CreateTemplate(ctx, &store.Template{
 		ID: tid("tmpl_project1"), Slug: "project-tmpl", Name: "Project Template",
 		Harness: "gemini", Scope: "project", ScopeID: tid("project_abc"),
-		Visibility: store.VisibilityPublic, Status: "active",
+		Status:  "active",
 		Created: now, Updated: now,
 	}); err != nil {
 		t.Fatalf("failed to create project template: %v", err)
@@ -2352,7 +2351,7 @@ func TestTemplateListByProjectID(t *testing.T) {
 	if err := s.CreateTemplate(ctx, &store.Template{
 		ID: tid("tmpl_project2"), Slug: "other-project-tmpl", Name: "Other Project Template",
 		Harness: "claude", Scope: "project", ScopeID: tid("project_xyz"),
-		Visibility: store.VisibilityPublic, Status: "active",
+		Status:  "active",
 		Created: now, Updated: now,
 	}); err != nil {
 		t.Fatalf("failed to create other project template: %v", err)
@@ -2393,11 +2392,10 @@ func TestTemplateCreate(t *testing.T) {
 	srv, _ := testServer(t)
 
 	body := map[string]interface{}{
-		"slug":       "new-template",
-		"name":       "New Template",
-		"harness":    "claude",
-		"scope":      "global",
-		"visibility": "private",
+		"slug":    "new-template",
+		"name":    "New Template",
+		"harness": "claude",
+		"scope":   "global",
 	}
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/templates", body)
@@ -2417,10 +2415,6 @@ func TestTemplateCreate(t *testing.T) {
 
 	if resp.Template.Slug != "new-template" {
 		t.Errorf("expected slug 'new-template', got %q", resp.Template.Slug)
-	}
-
-	if resp.Template.Visibility != store.VisibilityPrivate {
-		t.Errorf("expected visibility 'private', got %q", resp.Template.Visibility)
 	}
 }
 
@@ -2985,7 +2979,6 @@ func TestAgentCreate_StoresTemplateSlug(t *testing.T) {
 		Name:        "My Claude Template",
 		Harness:     "claude",
 		Scope:       "global",
-		Visibility:  store.VisibilityPublic,
 		Status:      store.TemplateStatusActive,
 		ContentHash: "abc123",
 		Files:       []store.TemplateFile{{Path: "CLAUDE.md", Size: 100, Hash: "deadbeef"}},
@@ -3129,14 +3122,13 @@ func TestEnrichAgents_ResolvesTemplateSlug(t *testing.T) {
 
 	// Create a template
 	tmpl := &store.Template{
-		ID:         tid("tmpl_enrich_123"),
-		Slug:       "enriched-template",
-		Name:       "Enriched Template",
-		Harness:    "gemini",
-		Scope:      "global",
-		Visibility: store.VisibilityPublic,
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:      tid("tmpl_enrich_123"),
+		Slug:    "enriched-template",
+		Name:    "Enriched Template",
+		Harness: "gemini",
+		Scope:   "global",
+		Created: time.Now(),
+		Updated: time.Now(),
 	}
 	if err := s.CreateTemplate(ctx, tmpl); err != nil {
 		t.Fatalf("failed to create template: %v", err)
@@ -3170,14 +3162,13 @@ func TestEnrichAgent_ResolvesTemplateSlug(t *testing.T) {
 
 	// Create a template
 	tmpl := &store.Template{
-		ID:         tid("tmpl_enrich_single"),
-		Slug:       "single-enriched",
-		Name:       "Single Enriched",
-		Harness:    "claude",
-		Scope:      "global",
-		Visibility: store.VisibilityPublic,
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:      tid("tmpl_enrich_single"),
+		Slug:    "single-enriched",
+		Name:    "Single Enriched",
+		Harness: "claude",
+		Scope:   "global",
+		Created: time.Now(),
+		Updated: time.Now(),
 	}
 	if err := s.CreateTemplate(ctx, tmpl); err != nil {
 		t.Fatalf("failed to create template: %v", err)
@@ -3231,7 +3222,6 @@ func TestOutboundMessage_UnknownRecipient(t *testing.T) {
 		ProjectID:       project.ID,
 		Phase:           "running",
 		RuntimeBrokerID: tid("broker-msg"),
-		Visibility:      store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatal(err)

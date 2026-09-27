@@ -21,6 +21,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -47,11 +48,6 @@ import (
 // scion-agent.yaml the dispatcher will read to discover skill references.
 const maxDispatchTemplateConfigSize = 1 << 20 // 1 MiB
 
-// dispatchSkillForbiddenMessage is the per-skill error the broker surfaces
-// (wrapped as `required skill %q could not be resolved: ...`) when the agent's
-// creator may not read a non-public skill.
-const dispatchSkillForbiddenMessage = "the agent's creator does not have permission to access this skill"
-
 // resolveRegistrySkillRef resolves a single scion-registry skill reference on
 // behalf of identity. It is the shared core of the /skills/resolve handler and
 // of dispatch-time pre-resolution.
@@ -60,38 +56,33 @@ const dispatchSkillForbiddenMessage = "the agent's creator does not have permiss
 // URLs. When it is empty, local-storage URLs are rewritten to Hub-relative
 // paths (/api/v1/skills/...) that the broker absolutizes against its own Hub
 // endpoint.
+//
+// ptone/scion#1901 finding F2: authorization is resolveSkill's job, not
+// this function's. resolveSkill treats a candidate the caller cannot read
+// exactly like one that does not exist — same "not_found" code, same
+// message shape, and (unlike the pre-fix code) the scope search keeps
+// looking past it instead of stopping to report a distinguishable
+// "forbidden". That makes "doesn't exist" and "exists, but you can't read
+// it" indistinguishable from here on, including the batch resolve surface
+// that calls this once per requested URI.
 func (s *Server) resolveRegistrySkillRef(
 	ctx context.Context,
 	identity Identity,
 	rawURI string,
 	uri *api.SkillURI,
-	projectID, userID, baseURL, forbiddenMessage string,
+	projectID, userID, baseURL string,
 ) (*ResolvedSkillResponse, *ResolveSkillError) {
 	if uri == nil {
 		return nil, &ResolveSkillError{URI: rawURI, Code: "invalid_uri", Message: "invalid skill URI"}
 	}
 	expandScopeAliases(uri, projectID, userID)
 
-	skill, sv, err := s.resolveSkill(ctx, uri, projectID)
+	skill, sv, err := s.resolveSkill(ctx, identity, uri, projectID)
 	if err != nil {
 		return nil, &ResolveSkillError{URI: rawURI, Code: "not_found", Message: err.Error()}
 	}
 	if skill == nil || sv == nil {
 		return nil, &ResolveSkillError{URI: rawURI, Code: "not_found", Message: "skill not found"}
-	}
-
-	if skill.Visibility != store.VisibilityPublic {
-		if identity == nil {
-			return nil, &ResolveSkillError{URI: rawURI, Code: "forbidden", Message: forbiddenMessage}
-		}
-		decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
-		if !decision.Allowed {
-			slog.WarnContext(ctx, "skill resolve denied",
-				"uri", rawURI,
-				"identity_type", identity.Type(),
-				"reason", decision.Reason)
-			return nil, &ResolveSkillError{URI: rawURI, Code: "forbidden", Message: forbiddenMessage}
-		}
 	}
 
 	entry := &ResolvedSkillResponse{
@@ -129,6 +120,13 @@ func (s *Server) resolveRegistrySkillRef(
 			// Pin the resolved version so the files route serves this exact
 			// version (#1785), for absolute and Hub-relative URLs alike.
 			downloadURLs = withSkillVersionDownloadQuery(downloadURLs, sv.Version)
+			// Sign each file URL (#1792). The caller's read access was checked
+			// above (or the skill is public), so the signature carries that
+			// authorization to whoever downloads — typically the runtime
+			// broker, which has no principal the files route would accept.
+			// Each signature is bound to this skill, version and file path and
+			// expires after skillFileURLTTL.
+			downloadURLs = s.signSkillFileDownloadURLs(downloadURLs, skill.ID, sv.Version, time.Now())
 		}
 		entry.Files = downloadURLs
 	}
@@ -300,6 +298,34 @@ func (s *Server) creatorIdentityForAgent(ctx context.Context, agent *store.Agent
 // Returns nil when there is nothing to pre-resolve or no principal is
 // available, in which case the broker resolves as before.
 func (s *Server) preResolveAgentSkills(ctx context.Context, agent *store.Agent) *ResolveSkillsResponse {
+	return s.preResolveAgentSkillsAsIdentity(ctx, agent, s.skillResolveIdentityForAgent(ctx, agent))
+}
+
+// preResolveAgentSkillsAsCreator resolves the agent's Hub-registry skill
+// references as the agent's recorded creator (agent.CreatedBy), regardless of
+// which permitted principal is driving the current dispatch. Start and
+// restart use this so a given agent's pre-resolved set is the same whoever
+// starts or restarts it — the creator, an admin, or a project owner all get
+// the same, creator-based resolution (ptone/scion#1994). A parent-agent
+// creator resolves through the same creatorIdentityForAgent path used
+// elsewhere.
+//
+// When agent.CreatedBy is empty (no recorded creator) or the recorded
+// creator no longer exists, pre-resolution is skipped: this never falls back
+// to the dispatching caller's identity or to agent.OwnerID. A skill that
+// needed pre-resolution then goes unresolved here, and any required skill
+// reaches the broker's own resolution attempt, which reports the same clean,
+// existing "could not be resolved" outcome it already reports for other
+// unresolvable skills — no panic, no new error path.
+func (s *Server) preResolveAgentSkillsAsCreator(ctx context.Context, agent *store.Agent) *ResolveSkillsResponse {
+	return s.preResolveAgentSkillsAsIdentity(ctx, agent, s.creatorIdentityForAgent(ctx, agent))
+}
+
+// preResolveAgentSkillsAsIdentity is the shared core of preResolveAgentSkills
+// and preResolveAgentSkillsAsCreator: it resolves the agent's dispatchable
+// Hub-registry skill references as identity, which the two callers derive
+// differently.
+func (s *Server) preResolveAgentSkillsAsIdentity(ctx context.Context, agent *store.Agent, identity Identity) *ResolveSkillsResponse {
 	refs := s.dispatchSkillRefs(ctx, agent)
 	if len(refs) == 0 {
 		return nil
@@ -326,7 +352,6 @@ func (s *Server) preResolveAgentSkills(ctx context.Context, agent *store.Agent) 
 		return nil
 	}
 
-	identity := s.skillResolveIdentityForAgent(ctx, agent)
 	if identity == nil {
 		slog.WarnContext(ctx, "dispatch skill pre-resolution skipped: no creator identity available",
 			"agent_id", agent.ID, "created_by", agent.CreatedBy)
@@ -334,9 +359,10 @@ func (s *Server) preResolveAgentSkills(ctx context.Context, agent *store.Agent) 
 	}
 
 	resp := &ResolveSkillsResponse{}
+	aliasUserID := dispatchSkillAliasUserID(agent)
 	for _, p := range todo {
 		entry, resolveErr := s.resolveRegistrySkillRef(ctx, identity, p.raw, p.uri,
-			agent.ProjectID, agent.OwnerID, "", dispatchSkillForbiddenMessage)
+			agent.ProjectID, aliasUserID, "")
 		if resolveErr != nil {
 			resp.Errors = append(resp.Errors, *resolveErr)
 			continue
@@ -344,4 +370,23 @@ func (s *Server) preResolveAgentSkills(ctx context.Context, agent *store.Agent) 
 		resp.Resolved = append(resp.Resolved, *entry)
 	}
 	return resp
+}
+
+// dispatchSkillAliasUserID returns the user ID used to expand a bare
+// skill://user alias (no explicit scope ID) at dispatch time: the agent's
+// origin user, Ancestry[0], the root human at the head of the creation
+// chain. For a human-created agent this is the same value as
+// OwnerID/CreatedBy (its Ancestry is exactly [userID]); for an agent-created
+// child it is the chain's root user, not the immediate parent agent that
+// OwnerID/CreatedBy record.
+//
+// This deliberately does not fall back to CreatedBy the way
+// resolveOriginUserID (authorize_message.go) does: an agent with no recorded
+// Ancestry gets no user-scope alias at all here, rather than one keyed off
+// the wrong principal.
+func dispatchSkillAliasUserID(agent *store.Agent) string {
+	if agent == nil || len(agent.Ancestry) == 0 {
+		return ""
+	}
+	return agent.Ancestry[0]
 }

@@ -18,6 +18,7 @@ import (
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -31,6 +32,14 @@ import (
 )
 
 const harnessConfigsDirName = "harness-configs"
+
+// ErrHarnessConfigNotFound marks a FindHarnessConfigDir failure where the
+// named harness-config was not found in any searched location (template,
+// project, or global directories). Wrapped into the returned error so
+// callers (e.g. the runtime broker's create/provision handlers) can
+// classify an unresolvable name as a client-facing 4xx naming the resource,
+// instead of folding it into a generic 5xx (ptone/scion#1316 fault 3).
+var ErrHarnessConfigNotFound = errors.New("harness-config not found")
 
 // HarnessConfigDir represents a harness-config directory on disk.
 // Located at ~/.scion/harness-configs/<name>/ or .scion/harness-configs/<name>/
@@ -152,7 +161,7 @@ func FindHarnessConfigDir(name string, projectPath string, templatePaths ...stri
 		}, nil
 	}
 
-	return nil, fmt.Errorf("harness-config %q not found (searched: %s)", name, strings.Join(searched, ", "))
+	return nil, fmt.Errorf("harness-config %q not found (searched: %s): %w", name, strings.Join(searched, ", "), ErrHarnessConfigNotFound)
 }
 
 // ListHarnessConfigDirs lists all available harness-configs.

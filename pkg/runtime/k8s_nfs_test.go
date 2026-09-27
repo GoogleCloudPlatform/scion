@@ -938,7 +938,7 @@ func TestBuildPod_SharedDirs_LocalBackend_SeparatePVCs(t *testing.T) {
 		Image:        "test-image",
 		UnixUsername: "scion",
 		Labels: map[string]string{
-			"scion.grove": "my-project",
+			"scion.project": "my-project",
 		},
 		SharedDirs: []api.SharedDir{
 			{Name: "build-cache"},
@@ -987,7 +987,7 @@ func TestBuildPod_SharedDirs_NFSBackend_UsesNFSSubPaths(t *testing.T) {
 		NFSPVClaimName:       "scion-workspaces",
 		NFSSubPath:           "projects/proj-123/workspace",
 		Labels: map[string]string{
-			"scion.grove": "my-project",
+			"scion.project": "my-project",
 		},
 		SharedDirs: []api.SharedDir{
 			{Name: "build-cache"},
@@ -1103,8 +1103,8 @@ func TestCreateSharedDirPVCs_NFSBackend_SkipsPVCCreation(t *testing.T) {
 		WorkspaceBackendName: "nfs",
 		NFSPVClaimName:       "scion-workspaces",
 		Labels: map[string]string{
-			"scion.grove":    "my-project",
-			"scion.grove_id": "proj-123",
+			"scion.project":    "my-project",
+			"scion.project_id": "proj-123",
 		},
 		SharedDirs: []api.SharedDir{
 			{Name: "build-cache"},
@@ -1136,8 +1136,8 @@ func TestCreateSharedDirPVCs_LocalBackend_CreatesPVCs(t *testing.T) {
 	config := RunConfig{
 		Name: "test-local",
 		Labels: map[string]string{
-			"scion.grove":    "my-project",
-			"scion.grove_id": "proj-123",
+			"scion.project":    "my-project",
+			"scion.project_id": "proj-123",
 		},
 		SharedDirs: []api.SharedDir{
 			{Name: "build-cache"},
@@ -1159,10 +1159,21 @@ func TestCreateSharedDirPVCs_LocalBackend_CreatesPVCs(t *testing.T) {
 		t.Errorf("local backend: expected 2 PVCs, got %d", len(pvcs.Items))
 	}
 
-	// Verify PVC names
+	// Verify PVC names and the exact label set — nothing beyond the
+	// canonical project labels and the shared-dir marker (no unexpected
+	// extra key survives).
 	pvcNames := map[string]bool{}
 	for _, pvc := range pvcs.Items {
 		pvcNames[pvc.Name] = true
+		wantDir := "build-cache"
+		if strings.Contains(pvc.Name, "logs") {
+			wantDir = "logs"
+		}
+		assert.Equal(t, map[string]string{
+			"scion.project":    "my-project",
+			"scion.project_id": "proj-123",
+			"scion.shared-dir": wantDir,
+		}, pvc.Labels)
 	}
 	if !pvcNames["scion-shared-my-project-build-cache"] {
 		t.Error("missing PVC scion-shared-my-project-build-cache")

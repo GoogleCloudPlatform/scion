@@ -161,6 +161,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if err := validateHostedHAPreflight(cfg); err != nil {
 		return err
 	}
+	if err := validateServerPreflight(cfg); err != nil {
+		return err
+	}
 
 	// 6. Check ports
 	if err := checkServerPorts(cfg); err != nil {
@@ -193,6 +196,32 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 
 	var wg sync.WaitGroup
 	errCh := make(chan error, 3)
+
+	// Server boot hook: warn about legacy environment variables scion no
+	// longer reads, before project discovery and storage init. This is the
+	// server-boot half of the legacy-migration hook points;
+	// the CLI equivalent is Execute()/rootCmd.PersistentPreRunE in
+	// cmd/root.go (skipped for the "start" command under "server" or
+	// "runtime-broker" — this hook reports instead), and the broker
+	// equivalent is pkg/runtimebroker/server.go:(*Server).Start. This hook
+	// and the broker's share config's process-wide sync.Once
+	// (WarnRemovedLegacyEnvOnce), so a combined `--enable-hub
+	// --enable-runtime-broker` process reports once, not twice; the CLI
+	// hook is skipped for this command and plays no part in that dedup.
+	// Unconditional (not gated on enableHub): a
+	// `--enable-web`-only process still boots via this same command and
+	// must still report, since the CLI hook is skipped for the whole
+	// `server start` invocation regardless of which components it enables.
+	// On-disk layout migration is expected to run at this same hook point.
+	config.WarnRemovedLegacyEnvOnce(os.Getenv, config.NewSlogReporter())
+	// Per-project migration (config.ReadProjectID, as projects load) reports
+	// through slog here too. This is already the default, but set it
+	// explicitly so all three boot hooks (CLI, hub, broker) are visible at
+	// their call sites.
+	config.SetProjectMigrationReporter(config.NewSlogReporter())
+	// Migrate the global ~/.scion layout before project discovery and
+	// storage init scan it (step 8 below and beyond).
+	config.MigrateLegacyGlobalLayoutOnce(globalDir, config.NewSlogReporter())
 
 	// 8. Initialize store
 	var s store.Store
@@ -270,6 +299,15 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			log.Fatalf("Hub server failed to start: %v", hubInitErr)
 		}
 
+		// The co-located broker registers (startRuntimeBroker, step 13)
+		// only after the Hub API is serving. Mark it as expected now, under
+		// the same condition startRuntimeBroker registers it, so gates that
+		// depend on the embedded broker ID (hub-default GCP passthrough)
+		// wait for registration instead of misclassifying the broker.
+		if colocatedBrokerRegisters(cfg, s) {
+			hubSrv.ExpectEmbeddedBroker()
+		}
+
 		// Wire hub OTel tracing export to Cloud Trace.
 		if parseBoolEnv("SCION_TRACING_ENABLED") && cfg.Hub.GCPProjectID != "" {
 			tp, tpErr := hubtracing.NewTracerProvider(ctx, cfg.Hub.GCPProjectID,
@@ -332,6 +370,15 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 					log.Printf("WARNING: hub GCP token metrics OTel export disabled: %v", otelGCPErr)
 				} else {
 					hubSrv.SetGCPTokenMetrics(otelGCP)
+				}
+
+				otelExtBearer, otelExtBearerErr := hub.NewOTelExternalBearerMetrics(mp, hubSrv.ExternalBearerSnapshotMetrics())
+				if otelExtBearerErr != nil {
+					log.Printf("WARNING: hub external-bearer metrics OTel export disabled: %v", otelExtBearerErr)
+				} else {
+					hubSrv.SetExternalBearerMetrics(otelExtBearer)
+					hubSrv.SetGoogleValidatorCacheMetrics(otelExtBearer)
+					hubSrv.SetGEExchangeMetrics(otelExtBearer)
 				}
 
 				log.Printf("Hub OTel metrics export enabled (project: %s)", cfg.Hub.GCPProjectID)
@@ -415,6 +462,15 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		if err := startRuntimeBroker(ctx, cmd, cfg, hubSrv, webSrv, s, hubEndpoint, devAuthToken, brokerSettings, globalDir, requestLogger, messageLogger, &wg, errCh); err != nil {
 			return err
 		}
+	}
+	// Phase 2 item 5: one, centralized call site for the shared_dir_storage
+	// startup summary, gated by sharedDirStorageStartupLogWanted so a
+	// hub-only process, a broker-only
+	// process, and a combined hub+broker process all log it exactly once
+	// (logSharedDirStorageStartupOnce's own sync.Once is what makes it
+	// "exactly once", not this condition).
+	if sharedDirStorageStartupLogWanted(cfg.RuntimeBroker.Enabled, enableHub) {
+		logSharedDirStorageStartupOnce()
 	}
 
 	// 13b. Re-check image status for all active harness configs now that
@@ -1070,6 +1126,23 @@ func validateHostedHAPreflight(cfg *config.GlobalConfig) error {
 	return nil
 }
 
+// validateServerPreflight validates settings that matter only when this
+// process runs the Hub, normalizing them in place on success. A broker-only
+// process (enableHub == false) never installs a dispatcher and never reads
+// these settings, so it skips the check rather than refusing to start over a
+// value it will never use.
+func validateServerPreflight(cfg *config.GlobalConfig) error {
+	if !enableHub || cfg == nil {
+		return nil
+	}
+	normalized, err := config.ValidateAgentEndpoint(cfg.Hub.AgentEndpoint)
+	if err != nil {
+		return err
+	}
+	cfg.Hub.AgentEndpoint = normalized
+	return nil
+}
+
 // isSupportedIAPAudience returns true when audience is a recognised IAP
 // audience path.  Two formats are accepted:
 //
@@ -1645,8 +1718,14 @@ func newJWTProxyAuthenticator(jwtCfg *config.JWTAuthConfig) (*hub.JWTProxyAuthen
 }
 
 // initHubServer creates and configures the Hub server.
-func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, entClient *ent.Client, hubEndpoint, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
-	hubCfg := hub.ServerConfig{
+// buildHubServerConfig builds the static portion of hub.ServerConfig from
+// GlobalConfig and the caller's already-resolved values. It is a pure,
+// side-effect-free copy — no I/O, no error return — so a config-copying
+// regression (e.g. dropping a field like AgentEndpoint) shows up in a direct
+// unit test instead of requiring a running Hub to notice the setting is
+// silently ignored.
+func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, secretBackend secret.SecretBackend) hub.ServerConfig {
+	return hub.ServerConfig{
 		HubID:                        cfg.Hub.ResolveHubID(),
 		HubName:                      cfg.Hub.ResolveHubName(),
 		DisableLegacyStorageFallback: cfg.Hub.DisableLegacyStorageFallback,
@@ -1666,6 +1745,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		AdminEmails:                  adminEmailList,
 		UserAccessMode:               cfg.Auth.UserAccessMode,
 		HubEndpoint:                  hubEndpoint,
+		AgentEndpoint:                cfg.Hub.AgentEndpoint,
 		SlowRequestThreshold:         cfg.SlowRequestThreshold,
 		StalledThreshold:             cfg.Hub.StalledThreshold,
 		SoftDeleteRetention:          cfg.Hub.SoftDeleteRetention,
@@ -1748,6 +1828,26 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		// nil (no server.native_chat section) means enabled — chat is default-on.
 		NativeChatEnabled: cfg.NativeChat.EnabledSetting(),
 	}
+}
+
+// resolveTransportAudience returns the effective OIDC audience for
+// auth.transport: the explicitly configured audience if set, otherwise the
+// public hub endpoint when mode is cloudrun_invoker. hubEndpoint must be the
+// resolved public endpoint (never server.hub.agent_endpoint): Cloud Run's own
+// IAM check validates minted tokens against the Hub's public URL, and the
+// agent-only override must not change what that check expects.
+func resolveTransportAudience(oidcAudience, mode, hubEndpoint string) string {
+	if oidcAudience != "" {
+		return oidcAudience
+	}
+	if mode == "cloudrun_invoker" {
+		return hubEndpoint
+	}
+	return ""
+}
+
+func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, entClient *ent.Client, hubEndpoint, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
+	hubCfg := buildHubServerConfig(cfg, hubEndpoint, devAuthToken, adminEmailList, adminMode, maintenanceMessage, secretBackend)
 
 	// In hosted mode every replica must share the same session secret for
 	// cookies and JWT signing keys to work across the load balancer. Running
@@ -1806,17 +1906,14 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		if cfg.Auth.Transport.PlatformAuthSA == "" {
 			return nil, fmt.Errorf("auth.transport.platformAuthSA is required when auth.transport.mode=%q", cfg.Auth.Transport.Mode)
 		}
-		audience := cfg.Auth.Transport.OIDCAudience
-		if audience == "" && cfg.Auth.Transport.Mode == "cloudrun_invoker" {
-			// Derive audience from hub endpoint for Cloud Run invoker mode
-			audience = hubEndpoint
-		}
+		audience := resolveTransportAudience(cfg.Auth.Transport.OIDCAudience, cfg.Auth.Transport.Mode, hubEndpoint)
 		if audience == "" {
 			return nil, fmt.Errorf("auth.transport.oidcAudience is required when auth.transport.mode=%q", cfg.Auth.Transport.Mode)
 		}
 		hubCfg.TransportMode = cfg.Auth.Transport.Mode
 		hubCfg.TransportAudience = audience
 		hubCfg.TransportMinter = hub.NewGCPTransportMinter(cfg.Auth.Transport.PlatformAuthSA, "")
+		hubCfg.PlatformAuthSA = cfg.Auth.Transport.PlatformAuthSA
 		log.Printf("Transport auth configured: mode=%s, audience=%s, sa=%s",
 			cfg.Auth.Transport.Mode, audience, cfg.Auth.Transport.PlatformAuthSA)
 	}
@@ -2000,6 +2097,12 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		return nil, fmt.Errorf("operational settings init failed after retries (driver=%s): %w",
 			cfg.Database.Driver, err)
 	}
+
+	// ptone/scion#1316 fault 3: confirm the hub's own agent_defaults resolve
+	// to registered resources now that bundled resources are seeded and
+	// operational settings are loaded, so a misconfigured default is a
+	// startup warning rather than a silent 502 at the first agent create.
+	hubSrv.ValidateStartupDefaults(ctx)
 
 	return hubSrv, nil
 }
@@ -2376,6 +2479,22 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		}
 	}
 
+	// Same configured platform/transport auth service account that guards
+	// Server.provisionUser and GoogleIdentityResolver.Resolve (see
+	// initHubServer): the web proxy-auth path does its own find-or-create and
+	// needs the identical check.
+	//
+	// cfg.Auth is GlobalConfig.Auth, a DevAuthConfig value (not a pointer),
+	// so cfg.Auth itself is never nil here or anywhere else in this file
+	// (see, e.g., the unguarded cfg.Auth.Enabled / cfg.Auth.Mode reads
+	// throughout initHubServer and initWebServer). Only its nested pointer
+	// fields — Transport and Proxy — can be nil, which is what the checks
+	// here and elsewhere in this file guard against.
+	var webPlatformAuthSA string
+	if cfg.Auth.Transport != nil {
+		webPlatformAuthSA = cfg.Auth.Transport.PlatformAuthSA
+	}
+
 	webCfg := hub.WebServerConfig{
 		Port:                 webPort,
 		Host:                 webHost,
@@ -2389,6 +2508,7 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		MaintenanceMessage:   maintenanceMessage,
 		EnableTestLogin:      enableTestLogin,
 		ProxyAuthenticator:   webProxyAuth,
+		PlatformAuthSA:       webPlatformAuthSA,
 		SlowRequestThreshold: cfg.SlowRequestThreshold,
 	}
 	if enableTestLogin {
@@ -2426,7 +2546,86 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 	return webSrv, nil
 }
 
+// logSharedDirStorageStartup is the pure half of the Phase 2 item 5 startup
+// summary: given a resolved server.shared_dir_storage config, it warns
+// about any set-but-ignored NFS fields and logs exactly one
+// resolved-layout line, via logf so it's testable without a real logger. A
+// nil sdCfg (server.shared_dir_storage absent) logs nothing.
+func logSharedDirStorageStartup(sdCfg *config.V1SharedDirStorageConfig, logf func(format string, args ...interface{})) {
+	if ignored := sdCfg.IgnoredNFSFields(); len(ignored) > 0 {
+		logf("Warning: server.shared_dir_storage.nfs sets %s, which shared_dir_storage does not use (design deploy-config-explore §3.2.1)",
+			strings.Join(ignored, ", "))
+	}
+	if summary := sdCfg.ResolvedLayoutSummary(); summary != "" {
+		logf("server.shared_dir_storage resolved layout: %s", summary)
+	}
+}
+
+var logSharedDirStorageStartupGuard sync.Once
+
+// loadAndLogSharedDirStorageStartup is logSharedDirStorageStartupOnce's
+// impure half, factored out so a test can call it directly -- as many times
+// as it likes, with a captured logf -- without the once-per-process guard
+// making every call after the first a no-op. It loads global settings the
+// same env-free, global-only way the Start path does (config.LoadGlobalSettings,
+// never LoadEffectiveSettings, so this can never be influenced by a
+// project's own settings.yaml) and forwards to logSharedDirStorageStartup.
+//
+// A settings-load error here never fails startup, but if the file that
+// failed to load plausibly configured shared_dir_storage at all, that is
+// worth one warning line at startup -- the broker's Start path
+// and the hub's resolvers both fail closed on this same condition once a
+// request/agent-start actually needs it, so this is the heads-up an
+// operator sees before that happens.
+func loadAndLogSharedDirStorageStartup(logf func(format string, args ...interface{})) {
+	globalSettings, _, gErr := config.LoadGlobalSettings()
+	if gErr != nil {
+		if config.GlobalSettingsMentions("shared_dir_storage") {
+			logf("Warning: server.shared_dir_storage: global settings failed to load (%v); "+
+				"shared_dir_storage will not take effect until this is fixed", gErr)
+		}
+		return
+	}
+	if globalSettings == nil || globalSettings.Server == nil {
+		return
+	}
+	logSharedDirStorageStartup(globalSettings.Server.SharedDirStorage, logf)
+}
+
+// logSharedDirStorageStartupOnce calls loadAndLogSharedDirStorageStartup
+// exactly once per process, regardless of how many of the broker and
+// hub-only startup paths call it.
+func logSharedDirStorageStartupOnce() {
+	logSharedDirStorageStartupGuard.Do(func() {
+		loadAndLogSharedDirStorageStartup(log.Printf)
+	})
+}
+
+// sharedDirStorageStartupLogWanted reports whether this process should emit
+// the shared_dir_storage startup summary (Phase 2 item 5). NFS shared dirs
+// matter independently to a runtime broker (it creates and
+// mounts them) and to the hub (file browser, project deletion), so either
+// one being enabled is reason enough to want the summary logged -- a
+// hub-only process, a broker-only process, and a combined hub+broker
+// process must all log it exactly once (logSharedDirStorageStartupOnce's
+// sync.Once handles the "exactly once" part regardless of how many of these
+// end up true in the same process).
+func sharedDirStorageStartupLogWanted(brokerEnabled, hubEnabled bool) bool {
+	return brokerEnabled || hubEnabled
+}
+
 // startRuntimeBroker initializes and starts the runtime broker server.
+// colocatedBrokerRegisters reports whether this process registers a
+// co-located (embedded) runtime broker with its own Hub. It is the single
+// condition shared by the early hubSrv.ExpectEmbeddedBroker() call and the
+// registration in startRuntimeBroker: if the two drifted, an expected
+// registration that never runs would stall hub-default passthrough creates
+// for the full wait, or a registration that was not expected would reopen the
+// startup window.
+func colocatedBrokerRegisters(cfg *config.GlobalConfig, s store.Store) bool {
+	return enableHub && cfg.RuntimeBroker.Enabled && !simulateRemoteBroker && s != nil
+}
+
 func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.GlobalConfig, hubSrv *hub.Server, webSrv *hub.WebServer, s store.Store, hubEndpoint, devAuthToken string, brokerSettings *config.Settings, globalDir string, requestLogger, messageLogger *slog.Logger, wg *sync.WaitGroup, errCh chan error) error {
 	rt := runtime.GetRuntime("", "")
 	log.Printf("Runtime broker using runtime: %s", rt.Name())
@@ -2482,7 +2681,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	// Co-located registration and credential generation
 	var inMemoryCreds *brokercredentials.BrokerCredentials
 	var colocatedBrokerRegistered bool
-	if enableHub && !simulateRemoteBroker && s != nil {
+	if colocatedBrokerRegisters(cfg, s) {
 		rhEndpoint := fmt.Sprintf("http://%s:%d", cfg.RuntimeBroker.Host, cfg.RuntimeBroker.Port)
 		if cfg.RuntimeBroker.Host == "0.0.0.0" {
 			rhEndpoint = fmt.Sprintf("http://localhost:%d", cfg.RuntimeBroker.Port)
@@ -2491,6 +2690,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		effectiveID, regErr := registerGlobalProjectAndBroker(ctx, s, brokerID, brokerName, rhEndpoint, rt, serverAutoProvide, brokerSettings)
 		if regErr != nil {
 			log.Printf("Warning: failed to register global project: %v", regErr)
+			hubSrv.EmbeddedBrokerRegistrationFailed(regErr)
 		} else {
 			colocatedBrokerRegistered = true
 			if effectiveID != brokerID {

@@ -187,7 +187,6 @@ func TestRequireProjectPath_NoProjectError(t *testing.T) {
 	// Ensure no hub context
 	t.Setenv("SCION_HUB_ENDPOINT", "")
 	t.Setenv("SCION_HUB_URL", "")
-	t.Setenv("SCION_GROVE_ID", "")
 	t.Setenv("SCION_PROJECT_ID", "")
 
 	if err := os.Chdir(tmpDir); err != nil {
@@ -273,7 +272,6 @@ func TestFindProjectRoot_HubContextNoScion_Disabled(t *testing.T) {
 	t.Setenv("HOME", tmpHome)
 	t.Setenv("SCION_HUB_ENDPOINT", "")
 	t.Setenv("SCION_HUB_URL", "")
-	t.Setenv("SCION_GROVE_ID", "")
 	t.Setenv("SCION_PROJECT_ID", "")
 
 	if err := os.Chdir(tmpDir); err != nil {

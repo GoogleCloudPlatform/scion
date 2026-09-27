@@ -1359,7 +1359,10 @@ func truncate(s string, n int) string {
 }
 
 // callerHubClient creates a per-request Hub client authenticated as the caller.
-// For UAT callers, the original token is passed through to the Hub.
+// For UAT and external bearer callers (tokens the Hub already introspected
+// via /api/v1/auth/me — Scion PATs and, under hubBearer, anything else the
+// Hub accepted, e.g. a forwarded Google token), the original token is passed
+// through to the Hub unchanged.
 // For JWT callers, a fresh 5-minute JWT is minted for the caller's identity.
 // For federation callers, the bridge's admin auth is used with the federation
 // token passed via X-Scion-Federation-Token header.
@@ -1369,7 +1372,7 @@ func truncate(s string, n int) string {
 // identity-aware proxies.
 func (b *Bridge) callerHubClient(caller *CallerIdentity) (hubclient.Client, error) {
 	switch caller.TokenType {
-	case "uat":
+	case "uat", "bearer":
 		opts := []hubclient.Option{hubclient.WithBearerToken(caller.RawToken)}
 		if b.transportSrc != nil {
 			opts = append(opts, hubclient.WithTransportAuth(b.transportSrc, b.transportMode))
@@ -1452,10 +1455,6 @@ func (b *Bridge) subscribeAdminUserTopics(projectID string) {
 	pattern := projectcompat.UserTopic(projectID, b.config.Hub.User)
 	if err := b.broker.RequestSubscription(pattern); err != nil {
 		b.log.Warn("failed to request subscription", "pattern", pattern, "error", err)
-	}
-	legacyPattern := projectcompat.LegacyUserTopic(projectID, b.config.Hub.User)
-	if err := b.broker.RequestSubscription(legacyPattern); err != nil {
-		b.log.Warn("failed to request legacy subscription", "pattern", legacyPattern, "error", err)
 	}
 }
 
@@ -1731,7 +1730,6 @@ func (b *Bridge) unregisterActiveTask(taskID, aKey string) {
 }
 
 // parseTopic extracts project and agent identifiers from a broker topic string.
-// Canonical scion.project topics and legacy scion.grove topics are accepted.
 func parseTopic(topic string) (projectID, agentSlug string, err error) {
 	parsed, err := projectcompat.ParseTopic(topic)
 	if err != nil {

@@ -16,7 +16,7 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -31,6 +32,19 @@ import (
 
 // SignedURLExpiry is the duration signed URLs are valid for.
 const SignedURLExpiry = 15 * time.Minute
+
+// isValidTemplateScope reports whether scope is an accepted template scope.
+// An empty scope is valid: callers default it (to "global" for create, to
+// "project" for clone). Any other value — including removed legacy scope
+// names — is rejected outright rather than stored as-is.
+func isValidTemplateScope(scope string) bool {
+	switch scope {
+	case "", store.TemplateScopeGlobal, store.TemplateScopeProject, store.TemplateScopeUser:
+		return true
+	default:
+		return false
+	}
+}
 
 // CreateTemplateRequest is the request body for creating a template.
 type CreateTemplateRequest struct {
@@ -44,26 +58,7 @@ type CreateTemplateRequest struct {
 	ProjectID    string                `json:"projectId,omitempty"` // Deprecated: use ScopeID
 	Config       *store.TemplateConfig `json:"config,omitempty"`
 	BaseTemplate string                `json:"baseTemplate,omitempty"`
-	Visibility   string                `json:"visibility,omitempty"`
 	Files        []FileUploadRequest   `json:"files,omitempty"`
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (r *CreateTemplateRequest) UnmarshalJSON(data []byte) error {
-	type Alias CreateTemplateRequest
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(r),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if r.ProjectID == "" && aux.GroveID != "" {
-		r.ProjectID = aux.GroveID
-	}
-	return nil
 }
 
 // FileUploadRequest describes a file to upload.
@@ -80,10 +75,16 @@ type CreateTemplateResponse struct {
 }
 
 type ListTemplatesResponse struct {
-	Templates    []TemplateWithCapabilities `json:"templates"`
-	NextCursor   string                     `json:"nextCursor,omitempty"`
-	TotalCount   int                        `json:"totalCount"`
-	Capabilities *Capabilities              `json:"_capabilities,omitempty"`
+	Templates  []TemplateWithCapabilities `json:"templates"`
+	NextCursor string                     `json:"nextCursor,omitempty"`
+	TotalCount int                        `json:"totalCount"`
+	// TotalCountApproximate marks TotalCount as a lower bound rather than an
+	// exact count (ptone/scion#1916 follow-up, C3): set when the hub-wide
+	// candidate pool crossed authorizedListMaxCandidates before the count
+	// scan finished. Never affects Templates or NextCursor, which are always
+	// exactly the caller's authorized page regardless of this flag.
+	TotalCountApproximate bool          `json:"totalCountApproximate,omitempty"`
+	Capabilities          *Capabilities `json:"_capabilities,omitempty"`
 }
 
 // UploadURLInfo contains a signed URL for uploading a file.
@@ -135,27 +136,10 @@ type DownloadURLInfo struct {
 
 // CloneTemplateRequest is the request for cloning a template.
 type CloneTemplateRequest struct {
-	Name       string `json:"name"`
-	Scope      string `json:"scope"`
-	ScopeID    string `json:"scopeId,omitempty"`
-	ProjectID  string `json:"projectId,omitempty"` // Deprecated
-	Visibility string `json:"visibility,omitempty"`
-}
-
-// UnmarshalJSON implements backward compatibility for the grove-to-project rename.
-func (r *CloneTemplateRequest) UnmarshalJSON(data []byte) error {
-	type Alias CloneTemplateRequest
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{Alias: (*Alias)(r)}
-	if err := json.Unmarshal(data, aux); err != nil {
-		return err
-	}
-	if r.ProjectID == "" && aux.GroveID != "" {
-		r.ProjectID = aux.GroveID
-	}
-	return nil
+	Name      string `json:"name"`
+	Scope     string `json:"scope"`
+	ScopeID   string `json:"scopeId,omitempty"`
+	ProjectID string `json:"projectId,omitempty"` // Deprecated
 }
 
 // handleTemplatesV2 handles the /api/v1/templates endpoint with storage support.
@@ -177,6 +161,9 @@ func (s *Server) listTemplatesV2(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, query := r.Context(), r.URL.Query()
 	filter := store.TemplateFilter{Name: query.Get("name"), Scope: query.Get("scope"), ScopeID: query.Get("scopeId"), ProjectID: query.Get("projectId"), Harness: query.Get("harness"), Status: query.Get("status"), Search: query.Get("search")}
+	// Normalize a legacy scope name to its canonical form before it drives
+	// the scope switch below or the store filter (ptone/scion#1977).
+	filter.Scope = projectcompat.CanonicalResourceScope(filter.Scope)
 	if filter.Status == "" {
 		filter.Status = store.TemplateStatusActive
 	}
@@ -221,17 +208,13 @@ func (s *Server) listTemplatesV2(w http.ResponseWriter, r *http.Request) {
 		},
 		templateResource,
 		func(t *store.Template) string { return authorizedListCursor(t.Created, t.ID, cursorBinding) },
-		s.authzService.AuthorizeReadBatch,
+		s.catalogListReadBatch(identity),
 	)
 	if err != nil {
-		if authorizeEach {
-			writeAuthorizedListError(w, err)
-		} else {
-			writeErrorFromErr(w, err, "")
-		}
+		writeErrorFromErr(w, err, "")
 		return
 	}
-	items, nextCursor, totalCount := result.Items, result.NextCursor, result.TotalCount
+	items, nextCursor, totalCount, totalApprox := result.Items, result.NextCursor, result.TotalCount, result.TotalCountApproximate
 	templates := make([]TemplateWithCapabilities, 0, len(items))
 	if identity == nil {
 		for i := range items {
@@ -250,7 +233,7 @@ func (s *Server) listTemplatesV2(w http.ResponseWriter, r *http.Request) {
 	if identity != nil {
 		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "template")
 	}
-	writeJSON(w, http.StatusOK, ListTemplatesResponse{Templates: templates, NextCursor: nextCursor, TotalCount: totalCount, Capabilities: scopeCap})
+	writeJSON(w, http.StatusOK, ListTemplatesResponse{Templates: templates, NextCursor: nextCursor, TotalCount: totalCount, TotalCountApproximate: totalApprox, Capabilities: scopeCap})
 }
 
 // createTemplateV2 creates a template with optional file upload URLs.
@@ -268,6 +251,10 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 		ValidationError(w, "name is required", nil)
 		return
 	}
+	if !isValidTemplateScope(req.Scope) {
+		ValidationError(w, fmt.Sprintf("invalid scope %q: must be \"global\", \"project\" or \"user\"", req.Scope), nil)
+		return
+	}
 	// Resolve scope ID
 	scopeID := req.ScopeID
 	if scopeID == "" && req.ProjectID != "" {
@@ -277,12 +264,30 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 	// SECURITY-GATE: require template.create permission before any mutation.
 	// Scope-aware: project-scoped requests authorize against the project parent
 	// so that project-level role bindings (owner/admin/member) grant access.
-	res := Resource{Type: "template"}
-	if scopeID != "" {
-		res.ParentType = "project"
-		res.ParentID = scopeID
+	//
+	// User-scoped requests never authorize against a caller-supplied scopeID
+	// at all: templateUserScopeResource takes the authenticated UserIdentity
+	// directly rather than a bare string, so there is no request field this
+	// gate could be tricked into authorizing against (e.g. another user's
+	// ID) — an attacker-supplied scopeID is simply never consulted. scopeID
+	// is still forced to the caller's own ID here, ahead of the redundant
+	// forcing on the template record below, so the persisted record agrees
+	// with what was authorized.
+	createScope := req.Scope
+	if createScope == "" {
+		createScope = store.TemplateScopeGlobal
 	}
-	if !s.authorize(w, r, res, ActionCreate) {
+	if createScope == store.TemplateScopeUser {
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			Unauthorized(w)
+			return
+		}
+		scopeID = userIdent.ID()
+		if !s.authorize(w, r, templateUserScopeResource(userIdent), ActionCreate) {
+			return
+		}
+	} else if !s.authorize(w, r, templateScopeResource(createScope, scopeID), ActionCreate) {
 		return
 	}
 
@@ -321,15 +326,11 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 		ScopeID:      scopeID,
 		ProjectID:    scopeID, // Keep for backwards compat
 		BaseTemplate: req.BaseTemplate,
-		Visibility:   req.Visibility,
 		Status:       store.TemplateStatusPending, // Start as pending until files uploaded
 	}
 
 	if template.Scope == "" {
 		template.Scope = store.TemplateScopeGlobal
-	}
-	if template.Visibility == "" {
-		template.Visibility = store.VisibilityPrivate
 	}
 
 	// For user-scoped templates, always set the owner and scope ID from the
@@ -458,21 +459,18 @@ func (s *Server) getTemplateV2(w http.ResponseWriter, r *http.Request, id string
 	ctx := r.Context()
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		writeStoreErr(w, err, "Template")
 		return
 	}
 
-	// Authenticated runtime brokers read templates during agent creation
-	// (template hydration). They pass HMAC auth via middleware but are not
-	// user principals, so the authorization kernel cannot evaluate them.
-	// Allow read access for brokers; the HMAC credential is the trust basis.
-	if GetBrokerIdentityFromContext(ctx) == nil {
-		// SECURITY-GATE: authorize read access to this specific template.
-		// The list endpoint filters via AuthorizeReadBatch; without this check
-		// a caller could bypass list filtering by addressing the template by ID.
-		if !s.authorize(w, r, templateResource(template), ActionRead) {
-			return
-		}
+	// SECURITY-GATE: authorize read access to this specific template.
+	// The list endpoint filters via AuthorizeReadBatch; without this check
+	// a caller could bypass list filtering by addressing the template by ID.
+	// A denial reads as 404 (ptone/scion#1916), matching the skill fix: a
+	// template a caller may not read must not be distinguishable from one
+	// that does not exist.
+	if !s.authorizeTemplateReadRoute(w, r, template) {
+		return
 	}
 
 	resp := TemplateWithCapabilities{Template: *template}
@@ -576,7 +574,6 @@ func (s *Server) patchTemplateV2(w http.ResponseWriter, r *http.Request, id stri
 		Slug:        &existing.Slug,
 		DisplayName: &existing.DisplayName,
 		Description: &existing.Description,
-		Visibility:  &existing.Visibility,
 	}) {
 		return
 	}
@@ -610,7 +607,7 @@ func (s *Server) deleteTemplateV2(w http.ResponseWriter, r *http.Request, id str
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 			return
 		}
-		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{Type: "template"}, ActionDelete)
+		decision := s.authzService.CheckAccess(ctx, userIdent, templateScopeResource(store.TemplateScopeGlobal, ""), ActionDelete)
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to delete global resources", nil)
 			return
@@ -626,9 +623,8 @@ func (s *Server) deleteTemplateV2(w http.ResponseWriter, r *http.Request, id str
 				return
 			}
 		} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-				Type: "template", ParentType: "project", ParentID: existing.ScopeID,
-			}, ActionDelete)
+			decision := s.authzService.CheckAccess(ctx, userIdent,
+				templateScopeResource(store.TemplateScopeProject, existing.ScopeID), ActionDelete)
 			if !decision.Allowed {
 				writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to delete resources in this project", nil)
 				return
@@ -678,7 +674,7 @@ func (s *Server) handleTemplateUpload(w http.ResponseWriter, r *http.Request, id
 
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		writeStoreErr(w, err, "Template")
 		return
 	}
 
@@ -746,7 +742,7 @@ func (s *Server) handleTemplateFinalize(w http.ResponseWriter, r *http.Request, 
 
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		writeStoreErr(w, err, "Template")
 		return
 	}
 
@@ -803,20 +799,14 @@ func (s *Server) handleTemplateDownload(w http.ResponseWriter, r *http.Request, 
 
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		writeStoreErr(w, err, "Template")
 		return
 	}
 
-	// Authenticated runtime brokers download templates during agent creation
-	// (template hydration). They pass HMAC auth via middleware but are not
-	// user principals, so the authorization kernel cannot evaluate them.
-	// Allow read access for brokers; the HMAC credential is the trust basis.
-	// This mirrors the carve-out in getTemplateV2.
-	if GetBrokerIdentityFromContext(ctx) == nil {
-		// SECURITY-GATE: authorize read access to this template's files.
-		if !s.authorize(w, r, templateResource(template), ActionRead) {
-			return
-		}
+	// SECURITY-GATE: authorize read access to this template's files. A
+	// denial reads as 404 (ptone/scion#1916), matching getTemplateV2.
+	if !s.authorizeTemplateReadRoute(w, r, template) {
+		return
 	}
 
 	stor := s.GetStorage()
@@ -866,12 +856,13 @@ func (s *Server) handleTemplateValidate(w http.ResponseWriter, r *http.Request, 
 	ctx := r.Context()
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		writeStoreErr(w, err, "Template")
 		return
 	}
 
-	// SECURITY-GATE: authorize read access to this template's validation report.
-	if !s.authorize(w, r, templateResource(template), ActionRead) {
+	// SECURITY-GATE: authorize read access to this template's validation
+	// report. A denial reads as 404 (ptone/scion#1916), matching getTemplateV2.
+	if !s.authorizeRead(w, r, templateResource(template), "Template") {
 		return
 	}
 
@@ -897,7 +888,23 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 
 	source, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		// A genuinely missing source uses the same "Template not found"
+		// message authorizeRead below writes on denial (ptone/scion#1916),
+		// so the two outcomes cannot be told apart by message text either.
+		writeStoreErr(w, err, "Template")
+		return
+	}
+
+	// SECURITY-GATE: authorize read access to the source template before its
+	// content is copied into the clone. The destination-scope check below
+	// only authorizes ActionCreate at the destination; without this gate
+	// that check alone would let any caller who may create a template
+	// somewhere copy the contents of a source template they cannot
+	// otherwise read. Reading the clone source is a read like any other
+	// (ptone/scion#1916): use authorizeRead so a forbidden source template
+	// reads as the same 404 as a nonexistent one, rather than a 403 that
+	// confirms it exists.
+	if !s.authorizeRead(w, r, templateResource(source), "Template") {
 		return
 	}
 
@@ -911,6 +918,10 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		ValidationError(w, "name is required", nil)
 		return
 	}
+	if !isValidTemplateScope(req.Scope) {
+		ValidationError(w, fmt.Sprintf("invalid scope %q: must be \"global\", \"project\" or \"user\"", req.Scope), nil)
+		return
+	}
 
 	// Resolve scope ID
 	scopeID := req.ScopeID
@@ -918,7 +929,13 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		scopeID = req.ProjectID
 	}
 
-	// Authorize: check destination scope for ActionCreate
+	// Authorize: check destination scope for ActionCreate. destScope is the
+	// single value shared by this switch, the clone record below, and the
+	// storage path resolution further down, so all three always agree on
+	// which scope a clone targets (ptone/scion#1977). isValidTemplateScope
+	// above already rejected anything other than "", "global", "project" or
+	// "user" — including removed legacy scope names — so no further
+	// normalization is needed here.
 	destScope := req.Scope
 	if destScope == "" {
 		destScope = store.TemplateScopeProject
@@ -930,7 +947,7 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 			return
 		}
-		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{Type: "template"}, ActionCreate)
+		decision := s.authzService.CheckAccess(ctx, userIdent, templateScopeResource(store.TemplateScopeGlobal, ""), ActionCreate)
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create global resources", nil)
 			return
@@ -946,9 +963,8 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 				return
 			}
 		} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-				Type: "template", ParentType: "project", ParentID: scopeID,
-			}, ActionCreate)
+			decision := s.authzService.CheckAccess(ctx, userIdent,
+				templateScopeResource(store.TemplateScopeProject, scopeID), ActionCreate)
 			if !decision.Allowed {
 				writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create resources in this project", nil)
 				return
@@ -970,6 +986,9 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You can only clone templates into your own user scope", nil)
 			return
 		}
+	default:
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Cloning into this resource scope is not supported", nil)
+		return
 	}
 
 	// Create new template based on source
@@ -982,19 +1001,11 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		Harness:      source.Harness,
 		Image:        source.Image,
 		Config:       source.Config,
-		Scope:        req.Scope,
+		Scope:        destScope,
 		ScopeID:      scopeID,
 		ProjectID:    scopeID,
 		BaseTemplate: source.ID, // Track the source template
-		Visibility:   req.Visibility,
 		Status:       store.TemplateStatusPending,
-	}
-
-	if clone.Scope == "" {
-		clone.Scope = store.TemplateScopeProject
-	}
-	if clone.Visibility == "" {
-		clone.Visibility = source.Visibility
 	}
 
 	// For user-scoped clones, set the owner from the authenticated user
@@ -1005,14 +1016,37 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		}
 	}
 
-	// Generate storage path for the clone
-	storagePath := storage.TemplateStoragePath(s.HubID(), clone.Scope, clone.ScopeID, clone.Slug)
+	// Detect a name collision at the destination BEFORE any storage write.
+	// This is a fast path for the common, non-concurrent case: it lets an
+	// ordinary colliding request fail with 409 before touching storage at
+	// all. It is not sufficient on its own — two requests can both pass this
+	// check before either has written a record — so the storage path below
+	// is also made request-unique, and CreateTemplate's own uniqueness
+	// constraint (handled further down) is what actually guarantees exactly
+	// one request wins a given (scope, slug) destination.
+	if existing, err := s.store.GetTemplateBySlug(ctx, clone.Slug, clone.Scope, clone.ScopeID); err != nil && !errors.Is(err, store.ErrNotFound) {
+		writeErrorFromErr(w, err, "")
+		return
+	} else if existing != nil {
+		writeError(w, http.StatusConflict, "conflict", "A resource with this slug already exists in the target scope. Choose a different name.", nil)
+		return
+	}
+
+	// Generate a storage path for the clone that is unique to this request
+	// (suffixed with the clone's own ID) rather than deterministic from
+	// (scope, scopeID, slug) alone. Two concurrent requests cloning into the
+	// same destination name would otherwise compute the identical path; if
+	// one of them then loses the race below and runs its failure-path
+	// DeletePrefix, it would delete the files the other just copied. A
+	// request-unique path means the failure cleanup below can only ever
+	// remove a subtree this request itself created.
+	storagePath := storage.TemplateStoragePath(s.HubID(), clone.Scope, clone.ScopeID, clone.Slug) + "/" + clone.ID
 	clone.StoragePath = storagePath
 
 	stor := s.GetStorage()
 	if stor != nil {
 		clone.StorageBucket = stor.Bucket()
-		clone.StorageURI = storage.TemplateStorageURI(s.HubID(), stor.Bucket(), clone.Scope, clone.ScopeID, clone.Slug)
+		clone.StorageURI = storage.StorageURIForPath(stor.Bucket(), storagePath)
 	}
 
 	// Copy files from source to clone location
@@ -1035,7 +1069,7 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		if stor != nil {
 			_ = stor.DeletePrefix(ctx, storagePath)
 		}
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+		if errors.Is(err, store.ErrAlreadyExists) {
 			writeError(w, http.StatusConflict, "conflict", "A resource with this slug already exists in the target scope. Choose a different name.", nil)
 			return
 		}
@@ -1044,6 +1078,89 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 	}
 
 	writeJSON(w, http.StatusCreated, clone)
+}
+
+// templateScopeResource builds an ad hoc "template" Resource for
+// authorization checks that have a project or global scope to evaluate but
+// no concrete store.Template record (e.g. authorizing a create or clone
+// destination before the new record exists). scope should be
+// store.TemplateScopeProject or store.TemplateScopeGlobal; scopeID is the
+// owning project ID for project scope, and is ignored for global scope.
+//
+// User scope is deliberately not handled here — use
+// templateUserScopeResource, which takes the authenticated UserIdentity
+// directly instead of a bare scopeID string. See that function's doc for
+// why the distinction matters (ptone/scion#2015).
+//
+// ptone/scion#1916: every ad hoc "template" Resource literal must set
+// ScopeKind through this constructor (or templateResource, for a real
+// record, or templateUserScopeResource, for user scope), never by hand —
+// filterHubWideTemplateGrants only narrows the curated hub-member/hub-viewer
+// grant when ScopeKind is populated, so a hand-built literal that forgets it
+// would fall through unfiltered. See
+// TestTemplateResourceLiterals_AllUseCanonicalConstructor.
+func templateScopeResource(scope, scopeID string) Resource {
+	r := Resource{Type: "template", ScopeKind: scope}
+	if scope == store.TemplateScopeProject && scopeID != "" {
+		r.ParentType = "project"
+		r.ParentID = scopeID
+	}
+	return r
+}
+
+// templateUserScopeResource builds the ad hoc "template" Resource for the
+// user-scope authorization check in template create (createTemplateV2), the
+// user-scope counterpart to templateScopeResource.
+//
+// It takes the authenticated UserIdentity directly, never a bare scopeID
+// string (ptone/scion#2015): Resource.OwnerID drives the kernel's
+// "relationship grant: resource owner" check (authz.go), so whatever lands
+// there gets ownership access to that scope. Taking UserIdentity makes
+// sourcing OwnerID from an unvalidated request field a type error rather
+// than a doc-comment violation.
+//
+// filterHubWideTemplateGrants (ptone/scion#1916) narrows the hub-member/
+// hub-viewer system-scope grant to global-scope records only, so without
+// OwnerID set here, a user-scope create would have no candidate binding.
+func templateUserScopeResource(userIdent UserIdentity) Resource {
+	return Resource{Type: "template", ScopeKind: store.TemplateScopeUser, OwnerID: userIdent.ID()}
+}
+
+// authorizeTemplateReadRoute is the shared read gate for every template read
+// surface that must also admit a runtime broker: get, download, and files
+// (template_file_handlers.go). A denial reads as 404, matching authorizeRead.
+//
+// An authenticated broker is scoped by brokerMayReadCatalogResource rather
+// than admitted unconditionally: brokers read templates during agent
+// creation (hydration) over HMAC auth and are not user principals, so the
+// authorization kernel cannot evaluate them, but that is authority to
+// hydrate the projects the broker serves plus the hub-wide catalog, not
+// every project's or user's private template.
+//
+// A global-scope template is likewise allowed outright for an agent
+// identity, ahead of the ordinary authorizeRead/CheckAccess call: the
+// kernel's agent synthetic binding is project-scoped by design (see the
+// comment on Decide's step 5b, authz.go) and deliberately does not carry a
+// hub-wide-catalog exception, because that would leak into every other
+// parentless resource type the kernel evaluates for agents. Applying the
+// exception here instead — the same way catalogListReadBatch
+// (authorized_list.go) applies it to list — keeps list and this per-ID read
+// in agreement without widening what CheckAccess itself grants an agent.
+func (s *Server) authorizeTemplateReadRoute(w http.ResponseWriter, r *http.Request, template *store.Template) bool {
+	ctx := r.Context()
+	if broker := GetBrokerIdentityFromContext(ctx); broker != nil {
+		if s.brokerMayReadCatalogResource(ctx, broker, template.Scope, template.ScopeID) {
+			return true
+		}
+		NotFound(w, "Template")
+		return false
+	}
+	if template.Scope == store.TemplateScopeGlobal {
+		if agent := GetAgentIdentityFromContext(ctx); agent != nil {
+			return true
+		}
+	}
+	return s.authorizeRead(w, r, templateResource(template), "Template")
 }
 
 // computeContentHash computes the aggregate content hash for a set of resource

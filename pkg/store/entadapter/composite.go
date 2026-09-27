@@ -21,11 +21,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	entsql "entgo.io/ent/dialect/sql"
+	"github.com/google/uuid"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentidentitykey"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationedge"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	entgroup "github.com/GoogleCloudPlatform/scion/pkg/ent/group"
@@ -42,6 +46,7 @@ const projectAgentsGroupMarkerBackfillSection = "migration_project_agents_group_
 const systemProjectAgentsGroupAnnotation = "scion.io/project-agents-group"
 const adoptionReviewRequiredAnnotation = "scion.io/adoption-review-required"
 const githubTokenInjectionModeMarkerSection = "migration_github_token_injection_mode_always"
+const agentIdentityKeyBackfillMarkerSection = "migration_agent_identity_keys_backfilled"
 
 // CompositeStore is a fully Ent-backed implementation of store.Store. Every
 // domain is served by a dedicated Ent sub-store; CompositeStore embeds them so
@@ -76,11 +81,13 @@ type CompositeStore struct {
 	*RoleStore
 	*DelegationEdgeStore
 	*AgentCredentialStore
+	*AgentIdentityKeyStore
 	*DecisionAuditStore
 	*MutationAuditStore
 	*QuotaStore
 	*AccessConstraintStore
 	*ExternalIdentityStore
+	*AgentReincarnationStore
 
 	client *ent.Client
 	inTx   bool // true when this CompositeStore wraps a transaction
@@ -154,11 +161,13 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		RoleStore:                NewRoleStore(client),
 		DelegationEdgeStore:      NewDelegationEdgeStore(client),
 		AgentCredentialStore:     NewAgentCredentialStore(client),
+		AgentIdentityKeyStore:    NewAgentIdentityKeyStore(client),
 		DecisionAuditStore:       NewDecisionAuditStore(client),
 		MutationAuditStore:       NewMutationAuditStore(client),
 		QuotaStore:               NewQuotaStore(client),
 		AccessConstraintStore:    NewAccessConstraintStore(client),
 		ExternalIdentityStore:    NewExternalIdentityStore(client),
+		AgentReincarnationStore:  NewAgentReincarnationStore(client),
 		client:                   client,
 	}
 }
@@ -185,6 +194,19 @@ func (c *CompositeStore) DeleteAgent(ctx context.Context, id string) error {
 	}
 	if _, err := c.client.NotificationSubscription.Delete().
 		Where(notificationsubscription.AgentIDEQ(uid)).Exec(ctx); err != nil {
+		return err
+	}
+	// agent_reincarnations.agent_id is likewise a plain field with no DB-level
+	// FK (same reasoning as AgentCredential — the requester side is
+	// polymorphic, so a real FK edge doesn't fit); cascade explicitly.
+	if err := c.DeleteAgentReincarnationsForAgent(ctx, id); err != nil {
+		return err
+	}
+	// agent_identity_keys.agent_id is likewise a plain field with no DB-level
+	// FK (see agent_identity_key.go); cascade explicitly, or the deleted
+	// agent's keys stay reserved forever — including its own slug, which
+	// then blocks renaming any agent later created with that same slug.
+	if err := c.DeleteAgentIdentityKeys(ctx, id); err != nil {
 		return err
 	}
 	return nil
@@ -219,7 +241,149 @@ func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 			return err
 		}
 	}
+	// agent_identity_keys is keyed by project_id directly, so this is a
+	// single bulk delete rather than one per agent ID. Same reasoning as the
+	// per-agent cascade in DeleteAgent: no DB-level FK, so it must be
+	// explicit or a deleted project's keys stay reserved forever.
+	if _, err := c.client.AgentIdentityKey.Delete().
+		Where(agentidentitykey.ProjectIDEQ(uid)).Exec(ctx); err != nil {
+		return err
+	}
 	return c.ProjectStore.DeleteProject(ctx, id)
+}
+
+// purgeDeletedAgentsBatchSize caps how many agent IDs a single purge
+// statement's IN(...) clause covers, so a large purge-eligible set is
+// processed in bounded chunks rather than one unbounded IN(...) list. A var,
+// not a const, so a test can force multi-batch behavior with a small
+// purge-eligible set instead of needing hundreds of rows to exercise it.
+var purgeDeletedAgentsBatchSize = 500
+
+// purgeDeletedAgentsTestHook, when non-nil, is invoked by PurgeDeletedAgents
+// once per batch, after the candidate IDs for that batch are resolved but
+// before they are deleted, and is passed the same in-flight transaction the
+// purge itself is using. It exists so a test can deterministically write a
+// restore into the exact window the eligibility-predicate re-check on the
+// delete itself (below) must close. That window is a Postgres-specific
+// concern: under READ COMMITTED, a separate connection's restore can commit
+// after this purge's candidate query but before its delete, so the delete
+// must re-check the predicate itself rather than trust the candidate list.
+// SQLite has no such window in this codebase's production configuration --
+// applyDatabasePoolDefaults forces MaxOpenConns to 1 for a sqlite driver
+// (pkg/config/hub_config.go; load-bearing there for the same reason it is
+// here), so no second, independent connection -- let alone transaction --
+// can exist at the same time as this one to interleave with it. This hook
+// writes through the purge's own transaction instead of a second, genuinely
+// concurrent one for exactly that reason: on this package's
+// single-connection SQLite test setup, a second connection attempting to
+// write while this transaction is still open would deadlock against it, not
+// race it. A write made through the given tx is visible to
+// every statement the purge issues afterward on that same tx, which is what
+// a Postgres restore's write would also be, once committed, to a subsequent
+// statement in this transaction under READ COMMITTED. Always nil in
+// production.
+var purgeDeletedAgentsTestHook func(tx *ent.Tx, batchCandidateIDs []uuid.UUID)
+
+// PurgeDeletedAgents permanently removes soft-deleted agents older than
+// cutoff, and their identity-key rows, in one transaction. This overrides
+// the embedded AgentStore's implementation, which bulk-deletes agent rows
+// directly with no re-applied eligibility check and no transaction --
+// splitting the original single-predicate DELETE into a separate select and
+// delete reopened a window where an agent restored in between the two would
+// be hard-deleted anyway, taking its keys with it. That is closed here two
+// ways: the whole purge runs in one transaction, and the eligibility
+// predicate (deleted_at IS NOT NULL AND deleted_at < cutoff) is re-applied
+// directly on the agent delete itself, not just the initial candidate query
+// -- a candidate restored in between no longer matches it at delete time and
+// is excluded, regardless of how stale the candidate list has become.
+// Because a bulk delete reports only a count, not which rows it removed,
+// identity keys are freed only for the subset of candidates that no longer
+// exist afterward (a diff against which of them survived), never for one the
+// predicate excluded.
+//
+// agent_identity_keys has no DB-level FK to agents (see
+// agent_identity_key.go), so this cascade must be explicit, the same as
+// DeleteAgent and DeleteProject, or a purged agent's keys -- including its
+// own slug -- stay reserved forever, blocking any later agent from taking
+// them.
+func (c *CompositeStore) PurgeDeletedAgents(ctx context.Context, cutoff time.Time) (int, error) {
+	tx, err := c.client.Tx(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	candidateIDs, err := tx.Agent.Query().
+		Where(agent.DeletedAtNotNil(), agent.DeletedAtLT(cutoff)).
+		IDs(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	var totalDeleted int
+	for _, batch := range chunkUUIDs(candidateIDs, purgeDeletedAgentsBatchSize) {
+		if purgeDeletedAgentsTestHook != nil {
+			purgeDeletedAgentsTestHook(tx, batch)
+		}
+
+		deleted, err := tx.Agent.Delete().
+			Where(agent.IDIn(batch...), agent.DeletedAtNotNil(), agent.DeletedAtLT(cutoff)).
+			Exec(ctx)
+		if err != nil {
+			return 0, err
+		}
+		totalDeleted += deleted
+
+		survivorIDs, err := tx.Agent.Query().Where(agent.IDIn(batch...)).IDs(ctx)
+		if err != nil {
+			return 0, err
+		}
+		survived := make(map[uuid.UUID]bool, len(survivorIDs))
+		for _, id := range survivorIDs {
+			survived[id] = true
+		}
+		removedIDs := make([]uuid.UUID, 0, len(batch)-len(survivorIDs))
+		for _, id := range batch {
+			if !survived[id] {
+				removedIDs = append(removedIDs, id)
+			}
+		}
+		if len(removedIDs) > 0 {
+			if _, err := tx.AgentIdentityKey.Delete().
+				Where(agentidentitykey.AgentIDIn(removedIDs...)).Exec(ctx); err != nil {
+				return 0, err
+			}
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return totalDeleted, nil
+}
+
+// chunkUUIDs splits ids into slices of at most size, preserving order. A nil
+// or empty ids yields no chunks, so a range over the result is a no-op. A
+// non-positive size yields a single chunk containing all ids.
+func chunkUUIDs(ids []uuid.UUID, size int) [][]uuid.UUID {
+	if len(ids) == 0 {
+		return nil
+	}
+	if size <= 0 {
+		// A non-positive batch size would divide by zero in the capacity hint
+		// below and never advance the loop; treat it as "no batching" and
+		// return all ids as a single chunk.
+		return [][]uuid.UUID{ids}
+	}
+	chunks := make([][]uuid.UUID, 0, (len(ids)+size-1)/size)
+	for i := 0; i < len(ids); i += size {
+		end := i + size
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunks = append(chunks, ids[i:end])
+	}
+	return chunks
 }
 
 // Close closes the underlying Ent client.
@@ -281,6 +445,16 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 		return err
 	}
 
+	// Must run before pkg/hub/storage_migration.go's namespacing migration
+	// (called later, outside CompositeStore.Migrate, once the hub boots)
+	// walks stored templates, harness configs and skills: that migration and
+	// pkg/storage.ResourceStoragePath both resolve a stored scope into a
+	// path, and neither has an arm for "grove". See NormalizeLegacyGroveScopes
+	// for the full rationale.
+	if err := c.NormalizeLegacyGroveScopes(ctx); err != nil {
+		return fmt.Errorf("normalize legacy grove scopes: %w", err)
+	}
+
 	if err := c.BackfillEmptyAgentRoles(ctx); err != nil {
 		return fmt.Errorf("empty agent role backfill: %w", err)
 	}
@@ -292,6 +466,9 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 	}
 	if err := c.BackfillProjectAgentsGroupMarkers(ctx); err != nil {
 		return fmt.Errorf("project agents group marker backfill: %w", err)
+	}
+	if err := c.BackfillAgentIdentityKeys(ctx); err != nil {
+		return fmt.Errorf("agent identity key backfill: %w", err)
 	}
 
 	// Migrate AllowListEntry records to User(status=invited) records.
@@ -702,6 +879,121 @@ func (c *CompositeStore) BackfillProjectAgentsGroupMarkers(ctx context.Context) 
 		"rows_updated", updated, "rows_skipped", skipped)
 
 	_, err = c.UpsertHubSetting(ctx, projectAgentsGroupMarkerBackfillSection,
+		json.RawMessage(`{"schema_version":1,"completed":true}`), "migration", 0, "seeded")
+	if errors.Is(err, store.ErrRevisionConflict) {
+		return nil
+	}
+	return err
+}
+
+// BackfillAgentIdentityKeys populates agent_identity_keys for every
+// pre-existing agent, including soft-deleted ones, so the identity-key
+// uniqueness invariant covers agents created before this feature existed,
+// not just ones created through the create/rename/restore paths that already
+// write their own keys.
+//
+// Agents are processed in a deterministic order (created ASC, then id ASC):
+// slug keys take precedence, and created order decides among display-name
+// keys, no matter how many times this runs. A collision does not fail the
+// migration -- pre-existing data can hold inconsistencies that predate any
+// uniqueness invariant, and a clean backfill cannot be guaranteed
+// retroactively. The losing agent's key is logged, not silently dropped.
+//
+// This runs in two passes over that same order, not one pass writing each
+// agent's full key set together: pass one inserts every agent's own slug
+// key, pass two inserts display-name keys. A Slug is already unique per
+// (project_id, slug) at the Agent table level, so no two agents can ever
+// collide on their own slug -- pass one alone can never lose a collision.
+// Interleaving slug and display-name inserts per-agent, in created order,
+// would let an EARLIER agent's display-name key claim a LATER agent's own
+// slug before that later agent ever gets to insert it, leaving a live agent
+// with no key for its own immutable identifier: it could not be renamed or
+// restored (both re-assert the slug key and would find it already
+// reserved). Guaranteeing every slug is claimed before any display-name key
+// is attempted keeps each live agent's own slug key intact.
+//
+// Uses api.IdentityKeysFor, the same function restore and rename use, so a
+// legacy Name that slugifies to "" is skipped identically everywhere
+// (agent_identity_keys.key is NotEmpty; an empty insert would be a
+// permanent failure for that agent's every future write). IdentityKeysFor
+// is documented to return the slug first and, when present, the
+// display-name key second; this function's two passes rely on that order.
+//
+// The per-agent, per-key insert is idempotent independent of the completion
+// marker below: a (project_id, key) row that already belongs to the agent
+// currently being processed is left alone (a re-run after a partial
+// failure, or the marker manually cleared, inserts nothing new); one that
+// belongs to a DIFFERENT agent is treated as a collision, the same as a
+// same-run collision.
+func (c *CompositeStore) BackfillAgentIdentityKeys(ctx context.Context) error {
+	if _, err := c.GetHubSetting(ctx, agentIdentityKeyBackfillMarkerSection); err == nil {
+		return nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+
+	agents, err := c.client.Agent.Query().
+		Order(ent.Asc(agent.FieldCreated), ent.Asc(agent.FieldID)).
+		All(ctx)
+	if err != nil {
+		return err
+	}
+
+	var inserted, collisions int
+	insertKey := func(a *ent.Agent, key string) error {
+		_, err := c.client.AgentIdentityKey.Create().
+			SetProjectID(a.ProjectID).
+			SetKey(key).
+			SetAgentID(a.ID).
+			Save(ctx)
+		if err == nil {
+			inserted++
+			return nil
+		}
+		if !ent.IsConstraintError(err) {
+			return fmt.Errorf("backfill identity key %q for agent %s: %w", key, a.ID, err)
+		}
+		existing, qErr := c.client.AgentIdentityKey.Query().
+			Where(agentidentitykey.ProjectIDEQ(a.ProjectID), agentidentitykey.KeyEQ(key)).
+			Only(ctx)
+		if qErr != nil {
+			return fmt.Errorf("resolve identity key conflict %q for agent %s: %w", key, a.ID, qErr)
+		}
+		if existing.AgentID == a.ID {
+			// Already backfilled this exact (agent, key) pair: a re-run
+			// after a partial failure, or the marker was cleared.
+			return nil
+		}
+		collisions++
+		slog.Warn("agent identity key backfill: key already held by another agent, skipped",
+			"key", key, "project_id", a.ProjectID,
+			"kept_agent_id", existing.AgentID, "dropped_agent_id", a.ID)
+		return nil
+	}
+
+	// Pass 1: every agent's own slug key first, so a later-created agent's
+	// slug is always claimed before any earlier-created agent's
+	// display-name key could otherwise pre-empt it.
+	for _, a := range agents {
+		if err := insertKey(a, a.Slug); err != nil {
+			return err
+		}
+	}
+	// Pass 2: display-name keys, keep-first by the same created order.
+	for _, a := range agents {
+		keys := api.IdentityKeysFor(a.Slug, a.Name)
+		if len(keys) < 2 {
+			continue // no display-name key distinct from the slug
+		}
+		if err := insertKey(a, keys[1]); err != nil {
+			return err
+		}
+	}
+	if inserted > 0 || collisions > 0 {
+		slog.Info("backfilled agent identity keys", "rows_inserted", inserted, "collisions_logged", collisions)
+	}
+
+	_, err = c.UpsertHubSetting(ctx, agentIdentityKeyBackfillMarkerSection,
 		json.RawMessage(`{"schema_version":1,"completed":true}`), "migration", 0, "seeded")
 	if errors.Is(err, store.ErrRevisionConflict) {
 		return nil

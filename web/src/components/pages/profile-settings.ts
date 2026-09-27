@@ -24,7 +24,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
-import { apiFetch } from '../../client/api.js';
+import { apiFetch, extractApiError } from '../../client/api.js';
 import {
   canShowPushNotification,
   enablePushWithPermission,
@@ -35,6 +35,17 @@ import {
 } from '../../client/push-preference.js';
 import { isChimeEnabled, setChimeEnabled } from '../../utils/audio.js';
 import '../shared/subscription-manager.js';
+
+/**
+ * Minimal shape of a runtime profile as returned by
+ * GET /api/v1/admin/server-config. Only the fields this page reads or
+ * writes are declared; the API returns more (runtime, resources, etc.)
+ * which are preserved untouched via the spread in `_saveTimezone`.
+ */
+interface AgentProfile {
+  timezone?: string;
+  [key: string]: unknown;
+}
 
 @customElement('scion-page-profile-settings')
 export class ScionPageProfileSettings extends LitElement {
@@ -55,6 +66,30 @@ export class ScionPageProfileSettings extends LitElement {
 
   @state()
   private _isWorkstation = false;
+
+  // Timezone (agent execution profile) state. The timezone field lives on
+  // the active runtime profile (`V1ProfileConfig.timezone`), read/written
+  // via the admin server-config API. The section is hidden entirely if that
+  // endpoint isn't reachable for the current user (e.g. insufficient
+  // permissions on a shared hub) so we never show a control that can't work.
+  @state()
+  private _timezoneSectionAvailable = false;
+
+  @state()
+  private _timezoneInput = '';
+
+  @state()
+  private _timezoneSaving = false;
+
+  @state()
+  private _timezoneError: string | null = null;
+
+  @state()
+  private _timezoneSaved = false;
+
+  private _activeProfileName = '';
+  private _profiles: Record<string, AgentProfile> = {};
+  private _savedTimezone = '';
 
   static override styles = css`
     :host {
@@ -173,6 +208,18 @@ export class ScionPageProfileSettings extends LitElement {
       color: var(--sl-color-danger-700, #b91c1c);
       border: 1px solid var(--sl-color-danger-200, #fecaca);
     }
+
+    .timezone-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.75rem;
+      margin-top: 0.75rem;
+    }
+
+    .timezone-row sl-input {
+      flex: 1;
+      max-width: 22rem;
+    }
   `;
 
   private readonly _onPushPreferenceChanged = (): void => this._initNotificationState();
@@ -184,6 +231,7 @@ export class ScionPageProfileSettings extends LitElement {
     // must show the same answer.
     window.addEventListener(PUSH_PREFERENCE_EVENT, this._onPushPreferenceChanged);
     void this._loadSystemStatus();
+    void this._loadTimezoneSettings();
   }
 
   override disconnectedCallback(): void {
@@ -206,6 +254,101 @@ export class ScionPageProfileSettings extends LitElement {
       }
     } catch {
       // Non-critical — leave defaults
+    }
+  }
+
+  /**
+   * Loads the timezone of the hub's active runtime profile. Uses the admin
+   * server-config endpoint, since profile timezone is a field on the shared
+   * `V1ProfileConfig` catalog rather than a per-user record. On hubs where
+   * the current user lacks permission to read server config (403), the
+   * request fails silently and the timezone section stays hidden.
+   */
+  private async _loadTimezoneSettings(): Promise<void> {
+    try {
+      const res = await apiFetch('/api/v1/admin/server-config');
+      if (!res.ok) {
+        return;
+      }
+      const data = (await res.json()) as {
+        active_profile?: string;
+        profiles?: Record<string, AgentProfile>;
+      };
+      const activeProfile = data.active_profile;
+      if (!activeProfile) {
+        return;
+      }
+      this._profiles = data.profiles ?? {};
+      this._activeProfileName = activeProfile;
+      const tz = this._profiles[activeProfile]?.timezone ?? '';
+      this._timezoneInput = tz;
+      this._savedTimezone = tz;
+      this._timezoneSectionAvailable = true;
+    } catch {
+      // Non-critical — leave the section hidden.
+    }
+  }
+
+  /** Returns an error message if `tz` isn't a recognized IANA timezone name. */
+  private _validateTimezone(tz: string): string | null {
+    if (!tz) return null;
+    try {
+      // Throws RangeError for unrecognized IANA zone names.
+      new Intl.DateTimeFormat('en-US', { timeZone: tz });
+      return null;
+    } catch {
+      return `"${tz}" is not a recognized IANA timezone name (e.g. "America/Los_Angeles").`;
+    }
+  }
+
+  private _handleTimezoneInput(e: Event): void {
+    this._timezoneInput = (e.target as HTMLInputElement).value;
+    this._timezoneError = null;
+    this._timezoneSaved = false;
+  }
+
+  private async _saveTimezone(): Promise<void> {
+    const value = this._timezoneInput.trim();
+    const validationError = this._validateTimezone(value);
+    if (validationError) {
+      this._timezoneError = validationError;
+      return;
+    }
+
+    this._timezoneSaving = true;
+    this._timezoneError = null;
+    this._timezoneSaved = false;
+
+    // The API replaces the entire `profiles` map on write, so we send back
+    // the full map we loaded with only the active profile's timezone changed.
+    const activeProfile: AgentProfile = { ...this._profiles[this._activeProfileName] };
+    if (value) {
+      activeProfile.timezone = value;
+    } else {
+      delete activeProfile.timezone;
+    }
+    const updatedProfiles: Record<string, AgentProfile> = {
+      ...this._profiles,
+      [this._activeProfileName]: activeProfile,
+    };
+
+    try {
+      const res = await apiFetch('/api/v1/admin/server-config', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profiles: updatedProfiles }),
+      });
+      if (!res.ok) {
+        this._timezoneError = await extractApiError(res, 'Failed to update timezone');
+        return;
+      }
+      this._profiles = updatedProfiles;
+      this._savedTimezone = value;
+      this._timezoneSaved = true;
+    } catch {
+      this._timezoneError = 'Failed to update timezone';
+    } finally {
+      this._timezoneSaving = false;
     }
   }
 
@@ -341,6 +484,66 @@ export class ScionPageProfileSettings extends LitElement {
         </div>
       </div>
 
+      ${this._timezoneSectionAvailable
+        ? html`
+            <div class="settings-card">
+              <h2 class="section-title">
+                <sl-icon name="clock"></sl-icon>
+                Timezone
+              </h2>
+
+              <div class="setting-row">
+                <div class="setting-info">
+                  <p class="setting-label">Agent timezone</p>
+                  <p class="setting-description">
+                    IANA timezone name (e.g. "America/Los_Angeles") injected as
+                    <code>TZ</code> into agent containers using the "${this._activeProfileName}"
+                    profile. Leave blank to fall back to the hub default.
+                  </p>
+                </div>
+              </div>
+
+              <div class="timezone-row">
+                <sl-input
+                  .value=${this._timezoneInput}
+                  placeholder="America/Los_Angeles"
+                  ?disabled=${this._timezoneSaving}
+                  @sl-input=${(e: Event): void => this._handleTimezoneInput(e)}
+                  @keydown=${(e: KeyboardEvent): void => {
+                    if (e.key === 'Enter') void this._saveTimezone();
+                  }}
+                ></sl-input>
+                <sl-button
+                  variant="primary"
+                  size="medium"
+                  ?loading=${this._timezoneSaving}
+                  ?disabled=${this._timezoneSaving ||
+                  this._timezoneInput.trim() === this._savedTimezone}
+                  @click=${(): void => void this._saveTimezone()}
+                >
+                  Save
+                </sl-button>
+              </div>
+
+              ${this._timezoneError
+                ? html`
+                    <div class="permission-status status-denied">
+                      <sl-icon name="exclamation-triangle"></sl-icon>
+                      ${this._timezoneError}
+                    </div>
+                  `
+                : nothing}
+              ${this._timezoneSaved
+                ? html`
+                    <div class="permission-status status-granted">
+                      <sl-icon name="check-circle"></sl-icon>
+                      Timezone updated.
+                    </div>
+                  `
+                : nothing}
+            </div>
+          `
+        : nothing}
       ${this._gcloudADCAvailable && this._isWorkstation
         ? html`
             <div class="settings-card">

@@ -42,21 +42,22 @@ import (
 // subscribers using the same NATS-style subject matching as
 // ChannelEventPublisher.
 //
-// Channel model — per grove plus a global channel (flat exact-match, since
+// Channel model — per project plus a global channel (flat exact-match, since
 // Postgres channels do not support wildcards):
 //
-//   - Grove-scoped subjects ("project.<id>.*" / "grove.<id>.*") are published
-//     to a per-grove channel (scion_ev_g_<id>) AND to the global channel. The
-//     per-grove channel lets a replica that only watches a specific grove (e.g.
+//   - Project-scoped subjects ("project.<id>.*") are published to a per-project
+//     channel (scion_ev_g_<id>) AND to the global channel. The per-project
+//     channel lets a replica that only watches a specific project (e.g.
 //     a browser SSE stream) LISTEN on just that channel instead of the firehose.
 //   - All other subjects ("agent.*", "user.*", "broker.*", "admin.*",
 //     "notification.*") are published to the global channel only.
-//   - Subscriptions with a concrete grove id resolve to that grove's channel;
-//     everything else (grove-spanning wildcards used by the notification
-//     dispatcher and message-broker proxy, and non-grove subjects) resolves to
-//     the global channel. Each subscriber's patterns are grouped by the channel
-//     they resolve to, so an event arriving on a channel is only matched against
-//     the patterns that opted into that channel — no double delivery.
+//   - Subscriptions with a concrete project id resolve to that project's
+//     channel; everything else (project-spanning wildcards used by the
+//     notification dispatcher and message-broker proxy, and non-project
+//     subjects) resolves to the global channel. Each subscriber's patterns are
+//     grouped by the channel they resolve to, so an event arriving on a
+//     channel is only matched against the patterns that opted into that
+//     channel — no double delivery.
 //
 // Delivery is performed exclusively by the listener (events are not fanned out
 // locally at publish time). This gives transactional publish semantics for free
@@ -712,36 +713,40 @@ func execListen(ctx context.Context, conn *pgx.Conn, verb, channel string) error
 
 // channelsForSubject returns the Postgres channels a subject is published to.
 func channelsForSubject(subject string) []string {
-	if gc := groveChannelForSubject(subject); gc != "" {
-		return []string{gc, pgGlobalChannel}
+	if pc := projectChannelForSubject(subject); pc != "" {
+		return []string{pc, pgGlobalChannel}
 	}
 	return []string{pgGlobalChannel}
 }
 
 // channelsForPattern returns the Postgres channels a subscription pattern needs.
-// A concrete grove/project pattern resolves to that grove's channel; everything
-// else (wildcard grove, or non-grove subjects) resolves to the global channel.
+// A concrete project pattern resolves to that project's channel; everything
+// else (wildcard project, or non-project subjects) resolves to the global channel.
 func channelsForPattern(pattern string) []string {
 	parts := strings.SplitN(pattern, ".", 3)
-	if len(parts) >= 2 && (parts[0] == "project" || parts[0] == "grove") && isConcreteToken(parts[1]) {
-		return []string{groveChannel(parts[1])}
+	if len(parts) >= 2 && parts[0] == "project" && isConcreteToken(parts[1]) {
+		return []string{projectChannel(parts[1])}
 	}
 	return []string{pgGlobalChannel}
 }
 
-// groveChannelForSubject returns the per-grove channel for a grove-scoped
-// subject, or "" if the subject is not grove-scoped.
-func groveChannelForSubject(subject string) string {
+// projectChannelForSubject returns the per-project channel for a project-scoped
+// subject, or "" if the subject is not project-scoped.
+func projectChannelForSubject(subject string) string {
 	parts := strings.SplitN(subject, ".", 3)
-	if len(parts) >= 2 && (parts[0] == "project" || parts[0] == "grove") {
-		return groveChannel(parts[1])
+	if len(parts) >= 2 && parts[0] == "project" {
+		return projectChannel(parts[1])
 	}
 	return ""
 }
 
-// groveChannel builds the Postgres channel name for a grove id, hashing the id
-// if the resulting identifier would exceed the Postgres length limit.
-func groveChannel(id string) string {
+// projectChannel builds the Postgres channel name for a project id, hashing
+// the id if the resulting identifier would exceed the Postgres length limit.
+//
+// The "g_" wire prefix is an internal key shared by hub replicas; it must not
+// change, or a rolling deploy would drop cross-replica events between a
+// replica running the old prefix and one running a new one.
+func projectChannel(id string) string {
 	name := pgChannelPrefix + "g_" + id
 	if len(name) <= maxPGIdentifier {
 		return name
@@ -750,11 +755,11 @@ func groveChannel(id string) string {
 	return pgChannelPrefix + "g_" + hex.EncodeToString(sum[:])[:32]
 }
 
-// channelScope returns a low-cardinality label ("grove" or "global") for the
+// channelScope returns a low-cardinality label ("project" or "global") for the
 // channel a subject maps to, suitable for use as a metric attribute.
 func channelScope(subject string) string {
-	if groveChannelForSubject(subject) != "" {
-		return "grove"
+	if projectChannelForSubject(subject) != "" {
+		return "project"
 	}
 	return "global"
 }

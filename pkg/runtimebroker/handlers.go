@@ -65,8 +65,7 @@ func matchesAgent(a api.AgentInfo, id, projectID string) bool {
 }
 
 func matchesAgentProject(a api.AgentInfo, projectID string) bool {
-	// Check runtime labels first (canonical project_id, then legacy grove_id),
-	// then ProjectID field.
+	// Check the runtime's project_id label first, then the ProjectID field.
 	if labelProjectID := projectcompat.ProjectIDFromLabels(a.Labels); labelProjectID != "" {
 		return labelProjectID == projectID
 	}
@@ -162,10 +161,11 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		Name:     s.config.BrokerName,
 		Version:  s.version,
 		Capabilities: &BrokerCapabilities{
-			WebPTY: false, // TODO: Implement WebSocket PTY
-			Sync:   true,
-			Attach: true,
-			Exec:   true,
+			WebPTY:      false, // TODO: Implement WebSocket PTY
+			Sync:        true,
+			Attach:      true,
+			Exec:        true,
+			Reprovision: true,
 		},
 		Profiles: s.buildInfoProfiles(runtimeType),
 	}
@@ -298,10 +298,8 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		"scion.agent": "true",
 	}
 
-	// Add optional filters — support both projectId and legacy groveId.
+	// Add an optional project filter.
 	if projectID := query.Get("projectId"); projectID != "" {
-		filter["scion.project_id"] = projectID
-	} else if projectID := query.Get("groveId"); projectID != "" {
 		filter["scion.project_id"] = projectID
 	}
 	if status := query.Get("status"); status != "" {
@@ -374,6 +372,131 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// skillResolverInputs bundles the dispatch-provided fields needed to attach a
+// working skill resolver to a provisioning context. Populated from the
+// create request body on the create path and from the start/restart request
+// bodies (plus the URL-scoped projectID) on those paths, so every path that
+// can reach ProvisionAgent carries the same resolver (#1960).
+type skillResolverInputs struct {
+	// HubEndpoint is used only as a fallback for rewriting relative
+	// pre-resolved-skill URLs when the Hub connection doesn't already carry
+	// its own endpoint.
+	HubEndpoint string
+	// ResolvedEnv supplies the default GITHUB_TOKEN used by the GitHub skill
+	// resolver and as the install-phase credential for gh:// skill downloads.
+	ResolvedEnv map[string]string
+	// ProvisionCredentials supplies additional named GitHub credentials
+	// (gh:// convention tokens like GH_{OWNER}) for private-repo skill
+	// resolution. Never forwarded to the agent container environment.
+	ProvisionCredentials map[string]string
+	// PreResolvedSkills carries the Hub-registry skills the Hub resolved at
+	// dispatch as the agent's creator (#1784); the broker's own identity
+	// cannot read non-public skills.
+	PreResolvedSkills *hubclient.ResolveSkillsResponse
+	// ProjectID and UserID scope resolution of project/user-scope skill URIs.
+	ProjectID string
+	UserID    string
+}
+
+// attachSkillResolver builds the hub/GitHub/GCP skill resolver router
+// (wrapped in the caching resolver and, when the Hub pre-resolved
+// creator-scoped skills, the outermost PreResolvedSkillResolver) and installs
+// it — along with the GitHub token and project/user IDs used during
+// resolution — onto ctx. Returns ctx unchanged when there is neither a usable
+// Hub connection nor pre-resolved skills, matching the pre-#1960 create
+// behavior for that case.
+//
+// Shared by createAgent, startAgent, and restartAgent: every path that can
+// reach ProvisionAgent must carry the same resolver, or a required gh://
+// skill fails closed with "no skill resolver available" on retry (#1960).
+func (s *Server) attachSkillResolver(ctx context.Context, r *http.Request, in skillResolverInputs) context.Context {
+	conn := s.resolveHubConnection(r)
+	if conn != nil && conn.HubClient != nil {
+		hubResolver := agent.NewHubSkillResolver(conn.HubClient.Skills())
+		defaultGHToken := in.ResolvedEnv["GITHUB_TOKEN"]
+		ghResolver := agent.NewGitHubSkillResolverWithCredentials(defaultGHToken, in.ProvisionCredentials, s.ghResolutionCache)
+
+		// GCP resolver uses Hub API for registry alias lookup.
+		registrySvc := conn.HubClient.SkillRegistries()
+		gcpLookup := func(ctx context.Context, name string) (*agent.RegistryLookupResult, error) {
+			reg, err := registrySvc.Get(ctx, name)
+			if err != nil {
+				return nil, err
+			}
+			if reg == nil {
+				return nil, fmt.Errorf("registry %q not found", name)
+			}
+			return &agent.RegistryLookupResult{
+				Name:     reg.Name,
+				Endpoint: reg.Endpoint,
+				Type:     reg.Type,
+				Status:   reg.Status,
+			}, nil
+		}
+
+		router := buildSkillRouter(hubResolver, ghResolver, agent.NewGCPSkillResolver(gcpLookup))
+
+		var resolver agent.SkillResolver = router
+		if s.skCache != nil {
+			resolver = agent.NewCachingSkillResolver(resolver, s.skCache)
+		}
+		// Skills the Hub resolved at dispatch as the agent's creator are
+		// served first: the broker's own identity cannot read non-public
+		// skills (#1784). Outermost so pre-resolved results never enter the
+		// broker's resolution cache.
+		if in.PreResolvedSkills != nil {
+			resolver = agent.NewPreResolvedSkillResolver(in.PreResolvedSkills, resolver, preResolvedHubEndpoint(conn, in.HubEndpoint))
+		}
+		ctx = agent.ContextWithSkillResolver(ctx, resolver)
+		// Credential for install-phase downloads of gh:// skills resolved by
+		// the Hub, which returns raw.githubusercontent.com URLs but not the
+		// token behind them. Only ever sent to GitHub hosts.
+		if defaultGHToken != "" {
+			ctx = agent.ContextWithGitHubToken(ctx, defaultGHToken)
+		}
+		if in.ProjectID != "" {
+			ctx = agent.ContextWithResolveProjectID(ctx, in.ProjectID)
+		}
+		if in.UserID != "" {
+			ctx = agent.ContextWithResolveUserID(ctx, in.UserID)
+		}
+	} else if in.PreResolvedSkills != nil {
+		// No usable Hub connection for this request, but the Hub already
+		// resolved its skills: install those, and fail closed (per skill)
+		// for anything it did not cover.
+		ctx = agent.ContextWithSkillResolver(ctx,
+			agent.NewPreResolvedSkillResolver(in.PreResolvedSkills, nil, preResolvedHubEndpoint(conn, in.HubEndpoint)))
+		if in.ProjectID != "" {
+			ctx = agent.ContextWithResolveProjectID(ctx, in.ProjectID)
+		}
+		if in.UserID != "" {
+			ctx = agent.ContextWithResolveUserID(ctx, in.UserID)
+		}
+	}
+	return ctx
+}
+
+// isSingleCleanPathElement reports whether name is safe to join onto a
+// directory as exactly one path segment: no path separator, not "." or
+// "..", and unchanged by filepath.Clean (which also rejects an empty
+// string). Every agent-addressing path built from a request-supplied name
+// in this package and in pkg/agent joins that name onto a root this way, so
+// an identifier that fails this check must never reach one of those joins.
+//
+// Both '/' and '\' are rejected explicitly and unconditionally, regardless
+// of GOOS: relying on os.PathSeparator would only reject '\' when built for
+// Windows, letting a name containing '\' slip through on every other
+// platform even though it is a path separator there.
+func isSingleCleanPathElement(name string) bool {
+	if name == "" || name == "." || name == ".." {
+		return false
+	}
+	if strings.ContainsRune(name, '/') || strings.ContainsRune(name, '\\') {
+		return false
+	}
+	return filepath.Clean(name) == name
+}
+
 func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	createStart := time.Now()
@@ -391,6 +514,17 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// Validate required fields
 	if req.Name == "" {
 		ValidationError(w, "name is required", nil)
+		return
+	}
+	// req.Name is joined onto a directory as a single path segment all the
+	// way down (buildStartContext -> opts.Name -> GetAgentDir), so it must
+	// be exactly that: reject anything that would join as more than one
+	// segment, or as ".." / ".", before it reaches any of those joins.
+	// GetAgentDir/GetAgent enforce the same constraint independently as the
+	// backstop in front of their own stale-directory removal branch; this
+	// rejects the same shape earlier, at the request boundary.
+	if !isSingleCleanPathElement(req.Name) {
+		ValidationError(w, "name must be a single path element", nil)
 		return
 	}
 
@@ -646,7 +780,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	if s.isMultiHubMode() && s.isGlobalProject(req.ProjectID, req.ProjectPath) {
 		writeJSON(w, http.StatusConflict, map[string]interface{}{
 			"error": map[string]string{
-				"code":    "global_grove_disabled",
+				"code":    "global_project_disabled",
 				"message": "Global project is disabled when broker is connected to multiple hubs",
 			},
 		})
@@ -698,6 +832,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		Attach:             req.Attach,
 		WorkspaceMode:      req.WorkspaceMode,
 		HTTPRequest:        r,
+		Operation:          opCreate,
 	})
 	if err != nil {
 		markAttemptFailed(http.StatusInternalServerError, err.Error())
@@ -787,69 +922,14 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Inject skill resolver from Hub connection for skill provisioning.
-	conn := s.resolveHubConnection(r)
-	if conn != nil && conn.HubClient != nil {
-		hubResolver := agent.NewHubSkillResolver(conn.HubClient.Skills())
-		defaultGHToken := req.ResolvedEnv["GITHUB_TOKEN"]
-		ghResolver := agent.NewGitHubSkillResolverWithCredentials(defaultGHToken, req.ProvisionCredentials, s.ghResolutionCache)
-
-		// GCP resolver uses Hub API for registry alias lookup.
-		registrySvc := conn.HubClient.SkillRegistries()
-		gcpLookup := func(ctx context.Context, name string) (*agent.RegistryLookupResult, error) {
-			reg, err := registrySvc.Get(ctx, name)
-			if err != nil {
-				return nil, err
-			}
-			if reg == nil {
-				return nil, fmt.Errorf("registry %q not found", name)
-			}
-			return &agent.RegistryLookupResult{
-				Name:     reg.Name,
-				Endpoint: reg.Endpoint,
-				Type:     reg.Type,
-				Status:   reg.Status,
-			}, nil
-		}
-
-		router := buildSkillRouter(hubResolver, ghResolver, agent.NewGCPSkillResolver(gcpLookup))
-
-		var resolver agent.SkillResolver = router
-		if s.skCache != nil {
-			resolver = agent.NewCachingSkillResolver(resolver, s.skCache)
-		}
-		// Skills the Hub resolved at dispatch as the agent's creator are
-		// served first: the broker's own identity cannot read non-public
-		// skills (#1784). Outermost so pre-resolved results never enter the
-		// broker's resolution cache.
-		if req.PreResolvedSkills != nil {
-			resolver = agent.NewPreResolvedSkillResolver(req.PreResolvedSkills, resolver, preResolvedHubEndpoint(conn, req.HubEndpoint))
-		}
-		ctx = agent.ContextWithSkillResolver(ctx, resolver)
-		// Credential for install-phase downloads of gh:// skills resolved by
-		// the Hub, which returns raw.githubusercontent.com URLs but not the
-		// token behind them. Only ever sent to GitHub hosts.
-		if defaultGHToken != "" {
-			ctx = agent.ContextWithGitHubToken(ctx, defaultGHToken)
-		}
-		if req.ProjectID != "" {
-			ctx = agent.ContextWithResolveProjectID(ctx, req.ProjectID)
-		}
-		if req.UserID != "" {
-			ctx = agent.ContextWithResolveUserID(ctx, req.UserID)
-		}
-	} else if req.PreResolvedSkills != nil {
-		// No usable Hub connection for this request, but the Hub already
-		// resolved its skills: install those, and fail closed (per skill)
-		// for anything it did not cover.
-		ctx = agent.ContextWithSkillResolver(ctx,
-			agent.NewPreResolvedSkillResolver(req.PreResolvedSkills, nil, preResolvedHubEndpoint(conn, req.HubEndpoint)))
-		if req.ProjectID != "" {
-			ctx = agent.ContextWithResolveProjectID(ctx, req.ProjectID)
-		}
-		if req.UserID != "" {
-			ctx = agent.ContextWithResolveUserID(ctx, req.UserID)
-		}
-	}
+	ctx = s.attachSkillResolver(ctx, r, skillResolverInputs{
+		HubEndpoint:          req.HubEndpoint,
+		ResolvedEnv:          req.ResolvedEnv,
+		ProvisionCredentials: req.ProvisionCredentials,
+		PreResolvedSkills:    req.PreResolvedSkills,
+		ProjectID:            req.ProjectID,
+		UserID:               req.UserID,
+	})
 
 	// Carry the hub's operational agent_defaults into provisioning. No-op when
 	// the hub sent none, which is every local and file-mode dispatch.
@@ -857,11 +937,35 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 
 	// Branch based on provision-only flag
 	if req.ProvisionOnly {
-		// Provision only: set up dirs, worktree, templates without starting the container
-		cfg, err := sc.Manager.Provision(ctx, opts)
+		// Provision only: set up dirs, worktree, templates without starting the container.
+		// Reprovision (reincarnation) forces a fresh render of an existing agent's
+		// config instead of reusing what's persisted — see Manager.Reprovision.
+		var cfg *api.ScionConfig
+		var err error
+		if req.Reprovision {
+			cfg, err = sc.Manager.Reprovision(ctx, opts)
+		} else {
+			cfg, err = sc.Manager.Provision(ctx, opts)
+		}
 		if err != nil {
-			markAttemptFailed(http.StatusInternalServerError, "failed to provision agent")
+			// Design §3.4 Amendment A4.2: Reprovision wraps every refusal in
+			// agent.ErrReprovisionRefused (workspace preconditions, running-container
+			// check). Surface those as 409 Conflict rather than a generic 500 so
+			// callers — and the reincarnate worker's failure message — can tell
+			// "refused to run" apart from an actual provisioning error.
+			if errors.Is(err, agent.ErrReprovisionRefused) {
+				markAttemptFailed(http.StatusConflict, "reprovision refused")
+				span.SetStatus(codes.Error, err.Error())
+				Conflict(w, "Failed to provision agent: "+err.Error())
+				return
+			}
 			span.SetStatus(codes.Error, err.Error())
+			if errors.Is(err, config.ErrHarnessConfigNotFound) || errors.Is(err, config.ErrTemplateNotFound) {
+				markAttemptFailed(http.StatusNotFound, "failed to provision agent")
+				writeError(w, http.StatusNotFound, ErrCodeNotFound, "Failed to provision agent: "+err.Error(), nil)
+				return
+			}
+			markAttemptFailed(http.StatusInternalServerError, "failed to provision agent")
 			RuntimeError(w, "Failed to provision agent: "+err.Error())
 			return
 		}
@@ -869,6 +973,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		s.agentLifecycleLog.Info("Agent provisioned",
 			"agent_id", req.ID, "project_id", req.ProjectID,
 			"name", req.Name, "slug", req.Slug,
+			"reprovision", req.Reprovision,
 			"phase", string(state.PhaseCreated))
 
 		// Build a response with "created" status (no container launched)
@@ -890,6 +995,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		resp := CreateAgentResponse{
 			Agent:   agentResp,
 			Created: true,
+			// Design §3.4 Amendment A2.2(a): echo Reprovision only when this branch actually
+			// ran Manager.Reprovision, never merely because the request
+			// asked for it — the hub's dispatch fails closed when it asked
+			// for a reprovision and did not get this echo back.
+			Reprovisioned: req.Reprovision,
 		}
 		if attempt != nil {
 			s.dispatchAttemptsMu.Lock()
@@ -904,7 +1014,17 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	startOpStart := time.Now()
 	agentInfo, err := sc.Manager.Start(ctx, opts)
 	if err != nil {
-		markAttemptFailed(http.StatusInternalServerError, "failed to create agent")
+		// An unresolvable named resource (harness-config or template) is a
+		// naming problem the caller can act on, not an infrastructure
+		// failure — track and report it as a 404 instead of folding it into
+		// the generic 502 the hub maps RuntimeError to (ptone/scion#1316
+		// fault 3).
+		notFoundErr := errors.Is(err, config.ErrHarnessConfigNotFound) || errors.Is(err, config.ErrTemplateNotFound)
+		if notFoundErr {
+			markAttemptFailed(http.StatusNotFound, "failed to create agent")
+		} else {
+			markAttemptFailed(http.StatusInternalServerError, "failed to create agent")
+		}
 
 		s.agentLifecycleLog.Error("Agent create failed",
 			"agent_id", req.ID, "project_id", req.ProjectID,
@@ -922,9 +1042,12 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		span.SetStatus(codes.Error, err.Error())
-		if errors.Is(err, agent.ErrContainerNameInUse) {
+		switch {
+		case errors.Is(err, agent.ErrContainerNameInUse):
 			Conflict(w, err.Error())
-		} else {
+		case notFoundErr:
+			writeError(w, http.StatusNotFound, ErrCodeNotFound, "Failed to create agent: "+err.Error(), nil)
+		default:
 			RuntimeError(w, "Failed to create agent: "+err.Error())
 		}
 		return
@@ -1197,13 +1320,10 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract projectId (or legacy groveId) from query params for project-scoped agent resolution.
+	// Extract projectId from query params for project-scoped agent resolution.
 	// This prevents cross-project agent collision when two agents with the same
 	// name exist in different projects on the same broker.
 	projectID := r.URL.Query().Get("projectId")
-	if projectID == "" {
-		projectID = r.URL.Query().Get("groveId")
-	}
 
 	// Handle WebSocket attach for PTY
 	if action == "attach" && isPTYWebSocketUpgrade(r) {
@@ -1265,60 +1385,94 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 	removeBranch := query.Get("removeBranch") == "true"
 	softDelete := query.Get("softDelete") == "true"
 
-	// Resolve the correct manager for this agent (may be on an auxiliary runtime)
-	mgr := s.resolveManagerForAgent(ctx, id, projectID)
-
-	// Get the agent's project path and project ID before stopping (needed for file deletion and logging)
-	var projectPath, agentProjectID string
-	agents, err := mgr.List(ctx, map[string]string{"scion.agent": "true"})
-	if err == nil {
-		for _, a := range agents {
-			if matchesAgent(a, id, projectID) {
-				projectPath = a.ProjectPath
-				agentProjectID = a.ProjectID
-				if agentProjectID == "" {
-					agentProjectID = a.Project
-				}
-				break
-			}
+	// Resolve the exact entry to delete, scoped to the requested project,
+	// across the default and every auxiliary runtime (ptone/scion#1819).
+	// Everything below acts on this entry only: the runtime operation uses
+	// its container ID and the file deletion uses its project path. Nothing
+	// re-resolves by bare slug, so a same-slug agent in another project can
+	// never be touched, whatever the runtime.
+	// projectPath is an optional hint from the hub (the provider's LocalPath
+	// for a linked project); resolveDeleteTarget verifies it belongs to
+	// projectID before using it.
+	// The project path is needed both to delete files and to mark
+	// agent-info.json deleted on a soft delete.
+	target, err := s.resolveDeleteTarget(ctx, id, projectID, query.Get("projectPath"), deleteFiles || softDelete)
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		if errors.Is(err, errDeleteTargetNotFound) {
+			// No side effects: the hub's broker clients treat a 404 on
+			// delete as an idempotent success.
+			s.agentLifecycleLog.Info("Agent delete: no matching agent in project",
+				"agent_id", id, "project_id", projectID)
+			NotFound(w, "Agent")
+			return
 		}
+		if errors.Is(err, errDeleteTargetUnknown) {
+			RuntimeError(w, "Failed to delete agent: "+err.Error())
+			return
+		}
+		Conflict(w, "Failed to delete agent: "+err.Error())
+		return
+	}
+	projectPath := target.projectPath
+	agentProjectID := target.projectID
+
+	filesToDelete := deleteFiles
+	if deleteFiles && projectPath == "" && projectID != "" {
+		// The matched entry has no project path and none could be resolved
+		// for this project. Do not let DeleteAgentFiles fall back to the
+		// broker's CWD project, which may belong to someone else.
+		s.agentLifecycleLog.Warn("Agent delete: no project path for matched agent; skipping file cleanup",
+			"agent_id", id, "project_id", projectID)
+		filesToDelete = false
 	}
 
-	// If no project path was found (container missing or no annotation), check
-	// hub-managed project directories for the agent's files. Without this,
-	// agents in hub-managed projects (~/.scion.projects/<slug>/) are silently
-	// skipped during file cleanup because the default filesystem scan only
-	// checks the CWD-resolved project dir and global ~/.scion.
-	if projectPath == "" && deleteFiles {
-		if resolved := findAgentInHubManagedProjects(id); resolved != "" {
-			projectPath = resolved
-			s.agentLifecycleLog.Debug("Resolved agent project path from hub-managed projects",
-				"agent_id", id, "path", projectPath)
+	// target.name is joined onto a project directory as a single path
+	// segment by every file operation below -- the soft-delete
+	// agent-info.json update and DeleteTarget's eventual filesystem cleanup
+	// -- so before either one runs it must be exactly that, and the
+	// resolved directory must still be contained under this project's
+	// agents root. A delete that touches no files at all (deleteFiles=false
+	// and not a soft-delete, the default) never joins target.name onto
+	// anything, so it is intentionally left ungated here: rejecting it too
+	// would make a legacy agent with a bad name impossible to remove by
+	// container ID alone, when nothing about that request ever touches the
+	// filesystem.
+	if (softDelete && projectPath != "") || filesToDelete {
+		if !isSingleCleanPathElement(target.name) {
+			span.SetStatus(codes.Error, "invalid agent name")
+			ValidationError(w, "agent id must be a single path element", nil)
+			return
+		}
+		if projectPath != "" {
+			if projectDir, dirErr := config.GetResolvedProjectDir(projectPath); dirErr == nil {
+				if _, containErr := agent.CheckAgentDirContained(projectDir, target.name, false); containErr != nil {
+					span.SetStatus(codes.Error, containErr.Error())
+					ValidationError(w, "agent id resolves outside the project's agent directory", nil)
+					return
+				}
+			}
 		}
 	}
 
 	// If this is a soft-delete, mark agent-info.json with deleted status before cleanup
 	if softDelete && projectPath != "" {
 		deletedAtStr := query.Get("deletedAt")
-		if err := agent.UpdateAgentConfig(id, projectPath, "deleted", "", ""); err != nil {
+		if err := agent.UpdateAgentConfig(target.name, projectPath, "deleted", "", ""); err != nil {
 			s.agentLifecycleLog.Warn("Failed to mark agent as deleted in agent-info.json", "agent_id", id, "error", err)
 		}
 		if deletedAtStr != "" {
 			if deletedAt, err := time.Parse(time.RFC3339, deletedAtStr); err == nil {
-				if err := agent.UpdateAgentDeletedAt(id, projectPath, deletedAt); err != nil {
+				if err := agent.UpdateAgentDeletedAt(target.name, projectPath, deletedAt); err != nil {
 					s.agentLifecycleLog.Warn("Failed to write deletedAt to agent-info.json", "agent_id", id, "error", err)
 				}
 			}
 		}
 	}
 
-	_, err = mgr.Delete(ctx, id, deleteFiles, projectPath, removeBranch)
+	_, err = target.mgr.DeleteTarget(ctx, target.name, target.containerID, filesToDelete, projectPath, removeBranch)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
-		if strings.Contains(err.Error(), "not found") {
-			NotFound(w, "Agent")
-			return
-		}
 		RuntimeError(w, "Failed to delete agent: "+err.Error())
 		return
 	}
@@ -1381,13 +1535,22 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		attribute.String("scion.project.id", projectID),
 	)
 
+	// id is joined onto a project directory as a single path segment by
+	// every file operation below (applyInlineConfigUpdate, GetSavedProfile,
+	// GetSavedPhase, and ultimately GetAgentDir via mgr.Start), so it must be
+	// exactly that: reject anything that would join as more than one
+	// segment, or as ".." / ".", before any of those joins happens.
+	if !isSingleCleanPathElement(id) {
+		span.SetStatus(codes.Error, "invalid agent id")
+		ValidationError(w, "agent id must be a single path element", nil)
+		return
+	}
+
 	// Read optional task, projectPath, projectSlug, harnessConfig, and resolvedEnv from request body
 	var startReq struct {
 		Task               string                 `json:"task"`
 		ProjectPath        string                 `json:"projectPath"`
 		ProjectSlug        string                 `json:"projectSlug"`
-		GrovePath          string                 `json:"grovePath"`
-		GroveSlug          string                 `json:"groveSlug"`
 		HarnessConfig      string                 `json:"harnessConfig"`
 		HarnessConfigID    string                 `json:"harnessConfigId"`
 		HarnessConfigHash  string                 `json:"harnessConfigHash"`
@@ -1404,18 +1567,34 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		// --continue). The hub is the source of truth and sets this from the
 		// agent's stored phase; when unset we fall back to GetSavedPhase below.
 		Resume bool `json:"resume,omitempty"`
+		// HubEndpoint, UserID, ProvisionCredentials, and PreResolvedSkills
+		// carry the same dispatch-time metadata the create path sends, so a
+		// re-provision reached via start (e.g. after the broker deletes a
+		// stale agent dir) can resolve required skills exactly as create does
+		// instead of failing closed with "no skill resolver available"
+		// (#1960). ProjectID is not repeated here: it is already scoped via
+		// the projectId query parameter on this endpoint.
+		HubEndpoint          string                           `json:"hubEndpoint,omitempty"`
+		UserID               string                           `json:"userId,omitempty"`
+		ProvisionCredentials map[string]string                `json:"provisionCredentials,omitempty"`
+		PreResolvedSkills    *hubclient.ResolveSkillsResponse `json:"preResolvedSkills,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&startReq); err != nil {
 			s.agentLifecycleLog.Debug("No task in start request body (ignoring decode error)", "agent_id", id, "error", err)
 		}
 	}
-	if startReq.ProjectPath == "" && startReq.GrovePath != "" {
-		startReq.ProjectPath = startReq.GrovePath
-	}
-	if startReq.ProjectSlug == "" && startReq.GroveSlug != "" {
-		startReq.ProjectSlug = startReq.GroveSlug
-	}
+	// Inject skill resolver from Hub connection for skill provisioning, same
+	// as createAgent (#1960). ProjectID comes from the URL-scoped function
+	// argument since start doesn't repeat it in the body.
+	ctx = s.attachSkillResolver(ctx, r, skillResolverInputs{
+		HubEndpoint:          startReq.HubEndpoint,
+		ResolvedEnv:          startReq.ResolvedEnv,
+		ProvisionCredentials: startReq.ProvisionCredentials,
+		PreResolvedSkills:    startReq.PreResolvedSkills,
+		ProjectID:            projectID,
+		UserID:               startReq.UserID,
+	})
 
 	s.agentLifecycleLog.Debug("startAgent called", "agent_id", id, "task", startReq.Task, "projectPath", startReq.ProjectPath, "projectSlug", startReq.ProjectSlug, "harnessConfig", startReq.HarnessConfig, "resolvedEnvCount", len(startReq.ResolvedEnv))
 
@@ -1445,12 +1624,14 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		ProjectSlug:        startReq.ProjectSlug,
 		Config:             cfg,
 		InlineConfig:       startReq.InlineConfig,
+		HubEndpoint:        startReq.HubEndpoint,
 		ResolvedEnv:        startReq.ResolvedEnv,
 		EnvClassifications: startReq.EnvClassifications,
 		ResolvedSecrets:    startReq.ResolvedSecrets,
 		SharedDirs:         startReq.SharedDirs,
 		AgentToken:         startContextAgentToken,
 		HTTPRequest:        r,
+		Operation:          opHTTPStart,
 	})
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
@@ -1473,6 +1654,21 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 					opts.ProjectPath = agents[i].ProjectPath
 				}
 				break
+			}
+		}
+	}
+
+	// Once ProjectPath is resolved, confirm id's agent directory actually
+	// resolves under this project's agents root before applyInlineConfigUpdate,
+	// GetSavedProfile, or GetSavedPhase touch it below -- the same
+	// defense-in-depth pairing checkAgentDirContained already provides
+	// against isSingleCleanPathElement inside ProvisionAgent and GetAgent.
+	if opts.ProjectPath != "" {
+		if projectDir, dirErr := config.GetResolvedProjectDir(opts.ProjectPath); dirErr == nil {
+			if _, containErr := agent.CheckAgentDirContained(projectDir, id, startReq.SharedWorkspace); containErr != nil {
+				span.SetStatus(codes.Error, containErr.Error())
+				ValidationError(w, "agent id resolves outside the project's agent directory", nil)
+				return
 			}
 		}
 	}
@@ -1602,31 +1798,47 @@ func isContainerStopTolerable(err error) bool {
 // back to the bare slug, which would risk acting on a same-slug agent in a
 // different project. Only when no projectID is supplied does it degrade to the
 // original id for backward compatibility (solo/CLI mode, unlabeled containers).
-// agentsWithoutProjectLabel returns the subset of agents that carry no project
-// label (neither scion.grove_id nor scion.project_id). The project-scoped
-// lookups fall back to a slug-only search for backward compatibility with
-// pre-existing / solo-mode containers that predate project labels; that
-// fallback must only match such genuinely unlabeled containers. A container
-// labeled for a *different* project must never satisfy a project-scoped
-// request, or same-slug agents across projects would collide.
+//
+// In the project-scoped case, a lookup failure other than a genuine
+// ErrAgentNotFound (e.g. a runtime listing error, an ambiguous match) is
+// returned to the caller rather than silently treated as "not found" —
+// callers must surface it as a real error instead of reporting a successful
+// stop/restart. ErrAgentNotFound also covers a matching agent record with no
+// resolvable container id (e.g. a malformed or partial runtime entry that
+// carries no container id — nothing addressable to stop): that case is
+// folded into the same "not found in this project" outcome as a genuine
+// no-match. The solo/CLI
+// fallback above predates project scoping and is left unchanged: it already
+// tolerates lookup failures by degrading to the bare id.
+// agentsWithoutProjectLabel returns the subset of agents that carry no
+// scion.project_id label. The project-scoped lookups fall back to a
+// slug-only search for backward compatibility with pre-existing / solo-mode
+// containers that predate project labels; that fallback must only match such
+// genuinely unlabeled containers. A container labeled for a *different*
+// project must never satisfy a project-scoped request, or same-slug agents
+// across projects would collide.
 func agentsWithoutProjectLabel(agents []api.AgentInfo) []api.AgentInfo {
 	filtered := make([]api.AgentInfo, 0, len(agents))
 	for _, a := range agents {
-		if a.Labels["scion.grove_id"] == "" && a.Labels["scion.project_id"] == "" {
+		if a.Labels["scion.project_id"] == "" {
 			filtered = append(filtered, a)
 		}
 	}
 	return filtered
 }
 
-func (s *Server) projectScopedTarget(ctx context.Context, id, projectID string) string {
-	if containerID, err := s.LookupContainerID(ctx, id, projectID); err == nil && containerID != "" {
-		return containerID
+func (s *Server) projectScopedTarget(ctx context.Context, id, projectID string) (string, error) {
+	containerID, err := s.LookupContainerID(ctx, id, projectID)
+	if err == nil && containerID != "" {
+		return containerID, nil
+	}
+	if projectID != "" && err != nil && !errors.Is(err, ErrAgentNotFound) {
+		return "", err
 	}
 	if projectID != "" {
-		return ""
+		return "", nil
 	}
-	return id
+	return id, nil
 }
 
 func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
@@ -1644,8 +1856,15 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 	// Resolve the project-scoped container so that same-slug agents in
 	// different projects on this broker don't collide. An empty target means
 	// the agent isn't present in this project; treat that as an idempotent
-	// no-op rather than stopping a same-slug agent in another project.
-	target := s.projectScopedTarget(ctx, id, projectID)
+	// no-op rather than stopping a same-slug agent in another project. A
+	// lookup error other than "not found" (e.g. the runtime listing itself
+	// failed) must not be reported as a successful stop.
+	target, err := s.projectScopedTarget(ctx, id, projectID)
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		RuntimeError(w, "Failed to stop agent: "+err.Error())
+		return
+	}
 	if target == "" {
 		s.agentLifecycleLog.Info("Agent stopped (not found in project)",
 			"agent_id", id,
@@ -1690,12 +1909,31 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	var restartReq struct {
 		ResolvedEnv        map[string]string      `json:"resolvedEnv"`
 		EnvClassifications map[string]api.EnvKind `json:"envClassifications,omitempty"`
+		// HubEndpoint, UserID, ProvisionCredentials, and PreResolvedSkills
+		// mirror the same fields on the start path (#1960): they let a
+		// re-provision reached via restart resolve required skills exactly
+		// as create does instead of failing closed.
+		HubEndpoint          string                           `json:"hubEndpoint,omitempty"`
+		UserID               string                           `json:"userId,omitempty"`
+		ProvisionCredentials map[string]string                `json:"provisionCredentials,omitempty"`
+		PreResolvedSkills    *hubclient.ResolveSkillsResponse `json:"preResolvedSkills,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&restartReq); err != nil {
 			s.agentLifecycleLog.Debug("No resolvedEnv in restart request body (ignoring decode error)", "agent_id", id, "error", err)
 		}
 	}
+
+	// Inject skill resolver from Hub connection for skill provisioning, same
+	// as createAgent/startAgent (#1960).
+	ctx = s.attachSkillResolver(ctx, r, skillResolverInputs{
+		HubEndpoint:          restartReq.HubEndpoint,
+		ResolvedEnv:          restartReq.ResolvedEnv,
+		ProvisionCredentials: restartReq.ProvisionCredentials,
+		PreResolvedSkills:    restartReq.PreResolvedSkills,
+		ProjectID:            projectID,
+		UserID:               restartReq.UserID,
+	})
 
 	// Look up agent to get its name and project path
 	agentName := id
@@ -1714,9 +1952,11 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	sc, err := s.buildStartContext(ctx, startContextInputs{
 		Name:               agentName,
 		ProjectPath:        projectPath,
+		HubEndpoint:        restartReq.HubEndpoint,
 		ResolvedEnv:        restartReq.ResolvedEnv,
 		EnvClassifications: restartReq.EnvClassifications,
 		HTTPRequest:        r,
+		Operation:          opHTTPRestart,
 	})
 	if err != nil {
 		RuntimeError(w, err.Error())
@@ -1732,7 +1972,15 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	// be exited and the subsequent start will handle cleanup.
 	// Use resolveManagerForAgent to find the agent on auxiliary runtimes.
 	stopMgr := s.resolveManagerForAgent(ctx, id, projectID)
-	stopTarget := s.projectScopedTarget(ctx, id, projectID)
+	stopTarget, err := s.projectScopedTarget(ctx, id, projectID)
+	if err != nil {
+		// A lookup error other than "not found" must abort the restart
+		// without starting a second container — otherwise a runtime hiccup
+		// during the stop-target lookup would leave two containers running
+		// for the same agent.
+		RuntimeError(w, "Failed to restart agent: "+err.Error())
+		return
+	}
 	// An empty target means the agent isn't present in this project — skip the
 	// stop (don't risk stopping a same-slug agent in another project) and let
 	// the start below create it.
@@ -1976,17 +2224,19 @@ func (s *Server) resetAuth(w http.ResponseWriter, r *http.Request, id, projectID
 	}
 
 	// Write the token to the canonical file atomically via temp+rename.
-	// WARNING: token appears in outer process argv via runtime Exec (docker exec / podman exec
-	// command line includes the full script text). The heredoc only hides it from the inner
-	// cat's argv, not the outer shell. See #1355 for the stdin-pipe fix.
+	// The token is delivered over the exec's stdin rather than embedded in
+	// the script text: argv (including a heredoc body passed via `sh -c`)
+	// becomes part of the outer host process's command line and is readable
+	// via /proc/<pid>/cmdline for the lifetime of the exec, while stdin is
+	// not. See #1355.
 	writeCmd := []string{"sh", "-c",
 		"TOKEN_DIR=\"$(getent passwd scion 2>/dev/null | cut -d: -f6 || echo /home/scion)/.scion\" && " +
 			"mkdir -p \"$TOKEN_DIR\" && " +
-			"cat <<'SCION_TOKEN_EOF' > \"$TOKEN_DIR/scion-token.tmp\"\n" + req.Token + "\nSCION_TOKEN_EOF\n" +
+			"cat > \"$TOKEN_DIR/scion-token.tmp\" && " +
 			"mv \"$TOKEN_DIR/scion-token.tmp\" \"$TOKEN_DIR/scion-token\"",
 	}
 
-	if _, err := rt.Exec(ctx, target, writeCmd); err != nil {
+	if _, err := rt.ExecWithStdin(ctx, target, writeCmd, strings.NewReader(req.Token)); err != nil {
 		s.agentLifecycleLog.Error("reset-auth: failed to write token file", "agent_id", id, "error", err)
 		RuntimeError(w, "Failed to write token file: "+err.Error())
 		return
@@ -2309,8 +2559,8 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedHarnessC
 		// defaulting to api-key. This mirrors the auto-detect priority in each
 		// harness's ResolveAuth.
 		//
-		// All auth preflight uses the config-driven path. The *FromConfig
-		// functions are safe to call with nil authMeta (they return zero values).
+		// All auth preflight uses the config-driven path. AutoDetectAuthType
+		// is safe to call with nil authMeta (returns "").
 		if authType == "" {
 			fileSecretNames := make(map[string]struct{})
 			for _, sec := range req.ResolvedSecrets {
@@ -2318,11 +2568,6 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedHarnessC
 					fileSecretNames[sec.Name] = struct{}{}
 				}
 			}
-			if detected := harness.DetectAuthTypeFromFileSecretsFromConfig(authMeta, fileSecretNames); detected != "" {
-				authType = detected
-			}
-		}
-		if authType == "" {
 			resolvedEnvKeys := make(map[string]struct{})
 			for k, v := range req.ResolvedEnv {
 				if v != "" {
@@ -2346,12 +2591,13 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedHarnessC
 			for _, k := range req.AvailableAsNeededKeys {
 				resolvedEnvKeys[k] = struct{}{}
 			}
-			if detected := harness.DetectAuthTypeFromEnvVarsFromConfig(authMeta, resolvedEnvKeys); detected != "" {
-				authType = detected
-			}
-		}
-		if authType == "" {
-			if detected := harness.DetectAuthTypeFromGCPIdentityFromConfig(authMeta, gcpSAAssigned); detected != "" {
+			// AutoDetectAuthType runs the file -> env -> identity chain as a
+			// single call so a present default-type credential (e.g.
+			// ANTHROPIC_API_KEY for claude) always wins over the identity
+			// leg — shared with pkg/agent's Start(), which uses the same
+			// function to select the auth type actually wired into the
+			// container.
+			if detected := harness.AutoDetectAuthType(authMeta, fileSecretNames, resolvedEnvKeys, gcpSAAssigned); detected != "" {
 				authType = detected
 			}
 		}
@@ -2852,20 +3098,376 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// errDeleteTargetNotFound means no agent with the requested slug exists in
+// the requested project on any runtime of this broker, nor as files in that
+// project's hub-managed directory.
+var errDeleteTargetNotFound = errors.New("agent not found in project")
+
+// errDeleteTargetUnknown means the agent could not be resolved because a
+// runtime listing failed.
+var errDeleteTargetUnknown = errors.New("could not list agents to resolve delete target")
+
+// deleteTarget is the single, project-matched agent a delete acts on.
+type deleteTarget struct {
+	mgr         agent.Manager
+	name        string // agent directory / slug name used for file cleanup
+	containerID string // empty for a file-only (never started / container gone) agent
+	projectPath string
+	projectID   string
+}
+
+// agentNameMatches reports whether a runtime entry is the agent named id.
+func agentNameMatches(a api.AgentInfo, id string) bool {
+	return a.Name == id || a.ContainerID == id || a.Slug == id ||
+		strings.TrimPrefix(a.Name, "/") == id
+}
+
+// agentInProjectStrict reports whether an entry is positively identified as
+// belonging to projectID (label first, then the ProjectID field). Unlike
+// matchesAgentProject, an entry with no project identity does not match.
+func agentInProjectStrict(a api.AgentInfo, projectID string) bool {
+	if labelProjectID := projectcompat.ProjectIDFromLabels(a.Labels); labelProjectID != "" {
+		return labelProjectID == projectID
+	}
+	return a.ProjectID != "" && a.ProjectID == projectID
+}
+
+// agentHasNoProjectIdentity reports whether an entry carries no project ID in
+// either labels or fields (a pre-label legacy container).
+func agentHasNoProjectIdentity(a api.AgentInfo) bool {
+	return projectcompat.ProjectIDFromLabels(a.Labels) == "" && a.ProjectID == ""
+}
+
+// resolveDeleteTarget finds the one agent entry a delete of id in projectID
+// must act on, searching the default runtime and every auxiliary runtime.
+//
+// With a projectID:
+//   - runtime entries positively labelled for projectID are preferred; the
+//     List call carries the project scope label;
+//   - if none exist, a legacy container carrying no project identity at all
+//     is accepted only if its recorded project path identifies as projectID
+//     (pre-label containers). File-only entries synthesised from the
+//     broker's CWD project are never accepted this way;
+//   - a runtime entry's project path is used for files only if it verifiably
+//     belongs to projectID;
+//   - if no runtime entry matches, agent files are looked for only in the
+//     project directory (hub-managed, or linked via the hub's path hint or
+//     the broker's working project) whose recorded project ID is projectID;
+//   - otherwise errDeleteTargetNotFound.
+//
+// Without a projectID (solo/CLI), any same-named entry matches, and the
+// hub-managed directory scan must find exactly one project.
+//
+// More than one distinct match is an error (fail closed) rather than a guess.
+func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, projectPathHint string, needProjectPath bool) (*deleteTarget, error) {
+	type candidate struct {
+		mgr   agent.Manager
+		entry api.AgentInfo
+	}
+	managers := []agent.Manager{s.manager}
+	s.auxiliaryRuntimesMu.RLock()
+	auxNames := make([]string, 0, len(s.auxiliaryRuntimes))
+	for name := range s.auxiliaryRuntimes {
+		auxNames = append(auxNames, name)
+	}
+	sort.Strings(auxNames)
+	for _, name := range auxNames {
+		if aux := s.auxiliaryRuntimes[name]; aux.Manager != nil && aux.Manager != s.manager {
+			managers = append(managers, aux.Manager)
+		}
+	}
+	s.auxiliaryRuntimesMu.RUnlock()
+
+	var listErr error
+	collect := func(filter map[string]string, accept func(api.AgentInfo) bool) []candidate {
+		var out []candidate
+		seen := map[string]bool{}
+		for _, mgr := range managers {
+			if mgr == nil {
+				continue
+			}
+			agents, err := mgr.List(ctx, filter)
+			if err != nil {
+				s.agentLifecycleLog.Warn("Agent delete: runtime list failed", "agent_id", id, "error", err)
+				listErr = err
+				continue
+			}
+			for _, a := range agents {
+				if !agentNameMatches(a, id) || !accept(a) {
+					continue
+				}
+				key := a.ContainerID
+				if key == "" {
+					key = "path:" + a.ProjectPath + "|" + a.Name
+				}
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				out = append(out, candidate{mgr: mgr, entry: a})
+			}
+		}
+		return out
+	}
+
+	var matches []candidate
+	if projectID != "" {
+		matches = collect(map[string]string{
+			"scion.agent":                "true",
+			projectcompat.LabelProjectID: projectID,
+		}, func(a api.AgentInfo) bool { return agentInProjectStrict(a, projectID) })
+		if len(matches) == 0 {
+			// Legacy (pre-label) containers carry no project ID. Accept one
+			// only if its recorded project path positively identifies as
+			// projectID; otherwise a same-named legacy container from another
+			// project could be deleted.
+			matches = collect(map[string]string{"scion.agent": "true"}, func(a api.AgentInfo) bool {
+				return a.ContainerID != "" && agentHasNoProjectIdentity(a) &&
+					pathIdentifiesAs(a.ProjectPath, projectID)
+			})
+		}
+	} else {
+		matches = collect(map[string]string{"scion.agent": "true"}, func(api.AgentInfo) bool { return true })
+	}
+
+	switch {
+	case len(matches) > 1:
+		return nil, fmt.Errorf("agent '%s' is ambiguous: %d agents match in project %q", id, len(matches), projectID)
+	case len(matches) == 1:
+		m := matches[0]
+		t := &deleteTarget{
+			mgr:         m.mgr,
+			name:        id,
+			containerID: m.entry.ContainerID,
+			projectPath: m.entry.ProjectPath,
+			projectID:   m.entry.ProjectID,
+		}
+		if t.projectID == "" {
+			t.projectID = m.entry.Project
+		}
+		if t.projectPath != "" && !trustedEntryProjectPath(t.projectPath, projectID) {
+			// The path comes from a runtime label/annotation, which may be
+			// stale or crafted. Never delete files there unless the path is
+			// verifiably this project's; fall back to the broker's own,
+			// identity-checked resolution below.
+			s.agentLifecycleLog.Warn("Agent delete: ignoring runtime project path that does not belong to the project",
+				"agent_id", id, "project_id", projectID, "path", t.projectPath)
+			t.projectPath = ""
+		}
+		if t.projectPath == "" && needProjectPath {
+			// The runtime entry carries no project path (e.g. no
+			// annotation). Resolve it only from this project's own
+			// directory (hub-managed or linked), never by a project-blind
+			// scan.
+			resolved, err := s.findAgentProjectDir(id, projectID, projectPathHint)
+			if err != nil {
+				return nil, err
+			}
+			t.projectPath = resolved
+		}
+		return t, nil
+	}
+
+	// No runtime entry was found. If a runtime could not be listed, that is
+	// not known to be true: its container may still be running. Fail rather
+	// than delete only the files (orphaning the container) or report a 404
+	// (which the hub treats as a completed delete).
+	if listErr != nil {
+		return nil, fmt.Errorf("%w: %v", errDeleteTargetUnknown, listErr)
+	}
+
+	// The agent may exist only as files (never started, or its container is
+	// gone). Look only in this project's directory.
+	resolved, err := s.findAgentProjectDir(id, projectID, projectPathHint)
+	if err != nil {
+		return nil, err
+	}
+	if resolved == "" {
+		return nil, errDeleteTargetNotFound
+	}
+	s.agentLifecycleLog.Debug("Resolved agent project path for file-only delete",
+		"agent_id", id, "project_id", projectID, "path", resolved)
+	return &deleteTarget{
+		mgr:         s.manager,
+		name:        id,
+		projectPath: resolved,
+		projectID:   projectID,
+	}, nil
+}
+
+// findAgentProjectDir returns the .scion dir of the project that owns the
+// agent's files, or "" if none. It checks the hub-managed project directories
+// first. When projectID is set it then checks linked (non hub-managed)
+// projects: the path the hub registered for this project on this broker
+// (projectPathHint, i.e. the provider's LocalPath) and the broker's own
+// working project. A linked path is used only if its recorded project identity
+// equals projectID, so a stale or wrong hint can never redirect deletion to
+// another project's files.
+func (s *Server) findAgentProjectDir(agentName, projectID, projectPathHint string) (string, error) {
+	resolved, err := findAgentInHubManagedProjects(agentName, projectID)
+	if err != nil || resolved != "" || projectID == "" {
+		return resolved, err
+	}
+	candidates := []string{projectPathHint}
+	if cwdProject, err := config.GetResolvedProjectDir(""); err == nil {
+		candidates = append(candidates, cwdProject)
+	}
+	for _, c := range candidates {
+		if dir := linkedProjectAgentDir(c, agentName, projectID); dir != "" {
+			return dir, nil
+		}
+	}
+	return "", nil
+}
+
+// linkedProjectAgentDir returns the resolved .scion dir of the linked project
+// at path if that project's identity is projectID and it holds files for
+// agentName, otherwise "". path may be the project root or its .scion entry.
+// Identity comes from the project-id file (git projects, .scion directory) or
+// the marker file (non-git projects, .scion file).
+func linkedProjectAgentDir(path, agentName, projectID string) string {
+	if path == "" || projectID == "" {
+		return ""
+	}
+	if !pathIdentifiesAs(path, projectID) {
+		return ""
+	}
+	scionDir, err := config.GetResolvedProjectDir(scionEntry(path))
+	if err != nil || scionDir == "" {
+		return ""
+	}
+	if !hubManagedProjectHasAgent(scionDir, agentName) {
+		return ""
+	}
+	return scionDir
+}
+
+// scionEntry returns the .scion entry for path, which may be the project root
+// or the .scion entry itself.
+func scionEntry(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return ""
+	}
+	if filepath.Base(abs) == config.DotScion {
+		return abs
+	}
+	return filepath.Join(abs, config.DotScion)
+}
+
+// projectIDAtPath returns the project identity recorded at path, or "".
+// For a .scion directory it is the project-id (or legacy grove-id) file. For a
+// .scion marker file (non-git linked project) it is the marker's project ID.
+// If path is a project's external config dir, which has no project-id file,
+// the result is "".
+func projectIDAtPath(path string) string {
+	if path == "" {
+		return ""
+	}
+	marker := scionEntry(path)
+	if marker == "" {
+		return ""
+	}
+	info, err := os.Stat(marker)
+	if err != nil {
+		return ""
+	}
+	if info.IsDir() {
+		id, _ := config.ReadProjectID(marker)
+		return id
+	}
+	if m, err := config.ReadProjectMarker(marker); err == nil {
+		return m.ProjectID
+	}
+	return ""
+}
+
+// pathIdentifiesAs reports whether the project at path verifiably belongs to
+// projectID: either its recorded identity (projectIDAtPath) equals projectID,
+// or path is the project's external config dir
+// ~/.scion/{project-configs,grove-configs}/<slug>__<short-id>/.scion, whose
+// name encodes the project ID (non-git linked projects record that dir as
+// the agent's project path).
+func pathIdentifiesAs(path, projectID string) bool {
+	if path == "" || projectID == "" {
+		return false
+	}
+	if projectIDAtPath(path) == projectID {
+		return true
+	}
+	short, ok := externalConfigShortID(path)
+	return ok && short == (config.ProjectMarker{ProjectID: projectID}).ShortUUID()
+}
+
+// externalConfigShortID returns the short project ID encoded in path if path
+// is an external project config dir
+// ~/.scion/{project-configs,grove-configs}/<slug>__<short-id>/.scion.
+func externalConfigShortID(path string) (string, bool) {
+	abs, err := filepath.Abs(path)
+	if err != nil || filepath.Base(abs) != config.DotScion {
+		return "", false
+	}
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return "", false
+	}
+	projectDir := filepath.Dir(abs)
+	parent := filepath.Dir(projectDir)
+	if parent != filepath.Join(globalDir, config.ProjectConfigsDir) && parent != filepath.Join(globalDir, config.GroveConfigsDir) {
+		return "", false
+	}
+	name := filepath.Base(projectDir)
+	i := strings.LastIndex(name, "__")
+	if i <= 0 || i+2 >= len(name) {
+		return "", false
+	}
+	return name[i+2:], true
+}
+
+// trustedEntryProjectPath reports whether a project path taken from a runtime
+// entry may be used for file operations. With a projectID, the path must
+// identify as that project (pathIdentifiesAs). Without one, the path must
+// carry some project identity, be an external project config dir, or be the
+// global project directory.
+func trustedEntryProjectPath(path, projectID string) bool {
+	if projectID != "" {
+		return pathIdentifiesAs(path, projectID)
+	}
+	if projectIDAtPath(path) != "" {
+		return true
+	}
+	if _, ok := externalConfigShortID(path); ok {
+		return true
+	}
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return false
+	}
+	abs, err := filepath.Abs(path)
+	return err == nil && filepath.Clean(abs) == filepath.Clean(globalDir)
+}
+
 // findAgentInHubManagedProjects scans hub-managed project directories
-// (~/.scion.projects/<slug>/.scion/) for an agent directory matching the given
-// name. Returns the .scion dir path if found, or empty string.
-// This is used as a fallback when the container is missing and the agent's
-// project path can't be determined from container labels.
+// (~/.scion/{projects,groves}/<slug>/.scion/) for an agent directory matching
+// the given name and returns that project's .scion dir path, or "" if none.
+//
+// When projectID is set, only a project directory whose recorded project ID
+// (the project-id / grove-id file) equals projectID is considered, so a
+// same-named agent in another project is never returned (ptone/scion#1819).
+// When projectID is empty, the name must be found in exactly one project;
+// more than one is reported as an ambiguity error rather than a guess.
 //
 // Probes both the in-project location (worktree-mode agents) and the external
 // per-agent state dir under ~/.scion.project-configs/ (shared-workspace agents,
 // whose state lives external to the shared checkout).
-func findAgentInHubManagedProjects(agentName string) string {
+func findAgentInHubManagedProjects(agentName, projectID string) (string, error) {
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
-		return ""
+		// Fail closed: without the global dir the agent's absence is not
+		// known, and a 404 would let the hub treat the delete as done.
+		return "", fmt.Errorf("%w: resolve global dir: %v", errDeleteTargetUnknown, err)
 	}
+	var found []string
 	for _, dirName := range []string{"projects", "groves"} {
 		baseDir := filepath.Join(globalDir, dirName)
 		entries, err := os.ReadDir(baseDir)
@@ -2877,20 +3479,39 @@ func findAgentInHubManagedProjects(agentName string) string {
 				continue
 			}
 			scionDir := filepath.Join(baseDir, entry.Name(), ".scion")
-			agentDir := filepath.Join(scionDir, "agents", agentName)
-			if _, err := os.Stat(agentDir); err == nil {
-				return scionDir
-			}
-			// Shared-workspace agents have no in-project agentDir — probe the
-			// external split-storage path.
-			if extDir, err := config.GetGitProjectExternalAgentsDir(scionDir); err == nil && extDir != "" {
-				if _, err := os.Stat(filepath.Join(extDir, agentName)); err == nil {
-					return scionDir
+			if projectID != "" {
+				recorded, err := config.ReadProjectID(scionDir)
+				if err != nil || recorded != projectID {
+					continue
 				}
+			}
+			if hubManagedProjectHasAgent(scionDir, agentName) {
+				found = append(found, scionDir)
 			}
 		}
 	}
-	return ""
+	switch len(found) {
+	case 0:
+		return "", nil
+	case 1:
+		return found[0], nil
+	default:
+		return "", fmt.Errorf("agent '%s' found in %d hub-managed projects; specify the project", agentName, len(found))
+	}
+}
+
+func hubManagedProjectHasAgent(scionDir, agentName string) bool {
+	if _, err := os.Stat(filepath.Join(scionDir, "agents", agentName)); err == nil {
+		return true
+	}
+	// Shared-workspace agents have no in-project agentDir — probe the
+	// external split-storage path.
+	if extDir, err := config.GetGitProjectExternalAgentsDir(scionDir); err == nil && extDir != "" {
+		if _, err := os.Stat(filepath.Join(extDir, agentName)); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // isLocalhostEndpoint returns true if the given endpoint URL refers to a

@@ -88,6 +88,8 @@ skills:
 
 At provisioning time Scion resolves every required skill, downloads its files (using the [content-hash cache](#content-hash-caching)), and mounts them into the harness's skills directory (for example `.claude/skills/` or `.gemini/skills/`).
 
+When a Hub dispatches the agent, the Hub resolves Hub-registry skill references with the permissions of the principal creating the agent. That principal is the user, or the parent agent when an agent creates a child. The Runtime Broker's own identity is not used. A required non-public skill therefore provisions whenever the agent's creator can read it. If the creator cannot, provisioning fails with `the agent's creator does not have permission to access this skill`. The broker installs Hub-resolved skills as-is. It resolves only what the Hub did not cover itself, such as `gh://`, `gcp-skill://`, federated registries, and references found only in broker-local templates.
+
 ## Skill reference URIs
 
 A skill reference is either a **bare name** or a full `skill://` URI. Federated sources use their own schemes (`gh://`, `gcp-skill://`).
@@ -281,6 +283,16 @@ Most commands accept either a skill **name** or **ID**. Add the global `--format
 :::tip
 `scion skill` (singular) is an alias for `scion skills`.
 :::
+
+### From inside an agent
+
+Agents can browse skills too. In agent mode, the CLI allows `scion skills list` and `scion skills show`, but not `versions`, `resolve`, or `delete`. Access is read-only. An agent can see:
+
+- The Hub's global skill catalog
+- Skills scoped to the agent's own project
+- The personal (user-scoped) skills of the user at the root of the agent's creation chain
+
+Other projects' skills and other users' personal skills are not visible. Agent project scope and the creator's delegated permissions still apply on top of these grants.
 
 ## Auto-Injected Skills (Multi-Scope)
 

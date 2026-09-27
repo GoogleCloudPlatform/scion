@@ -591,14 +591,18 @@ func (s *Server) dispatchRoutedRecipient(
 
 	// --- Audit log ---
 	if s.dedicatedMessageLog != nil {
-		s.dedicatedMessageLog.Info("routed inbound message delivered",
+		logAttrs := []any{
 			"agent_id", agent.ID,
 			"agent_slug", agent.Slug,
 			"project_id", params.req.ProjectID,
 			"message_id", msgID,
 			"source", "broker-inbound-routed",
 			"type", msg.Type,
-		)
+		}
+		if storeMsg.ConversationID != "" {
+			logAttrs = append(logAttrs, "conversation_id", storeMsg.ConversationID)
+		}
+		s.dedicatedMessageLog.Info("routed inbound message delivered", logAttrs...)
 	}
 
 	// F2b (design doc §3.3): the agent was just dispatched and persisted

@@ -143,8 +143,11 @@ func TestAgentsList(t *testing.T) {
 		}
 
 		// Check query params
-		if r.URL.Query().Get("groveId") != "grove-123" {
-			t.Errorf("expected groveId=grove-123, got %s", r.URL.Query().Get("groveId"))
+		if r.URL.Query().Get("projectId") != "grove-123" {
+			t.Errorf("expected projectId=grove-123, got %s", r.URL.Query().Get("projectId"))
+		}
+		if r.URL.Query().Get("groveId") != "" {
+			t.Errorf("expected no groveId query param, got %s", r.URL.Query().Get("groveId"))
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -368,62 +371,19 @@ func TestProjectsRegister(t *testing.T) {
 	}
 }
 
-func TestFallback(t *testing.T) {
+// TestProjectsGet_JSONNotFound_ReturnsError covers the application-level 404
+// path for Projects().Get: the route matched but the resource doesn't exist,
+// so the client must surface an error from a single request. Before H-1, this
+// case also proved that a JSON-bodied 404 skipped the (now-removed) /groves
+// fallback; the fallback itself is gone, so only the single-attempt error
+// behavior remains to assert.
+func TestProjectsGet_JSONNotFound_ReturnsError(t *testing.T) {
 	var attempts []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		attempts = append(attempts, r.URL.Path)
-		if r.URL.Path == "/api/v1/projects/my-project" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		if r.URL.Path == "/api/v1/groves/my-project" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(Project{ID: "my-project", Name: "My Project"})
-			return
-		}
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer server.Close()
-
-	client, _ := New(server.URL)
-	project, err := client.Projects().Get(context.Background(), "my-project")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if project.Name != "My Project" {
-		t.Errorf("expected 'My Project', got %q", project.Name)
-	}
-
-	if len(attempts) != 2 {
-		t.Errorf("expected 2 attempts, got %d", len(attempts))
-	}
-	if attempts[0] != "/api/v1/projects/my-project" {
-		t.Errorf("expected first attempt to /api/v1/projects/my-project, got %s", attempts[0])
-	}
-	if attempts[1] != "/api/v1/groves/my-project" {
-		t.Errorf("expected second attempt to /api/v1/groves/my-project, got %s", attempts[1])
-	}
-}
-
-func TestFallbackSkippedOnJSONNotFound(t *testing.T) {
-	var attempts []string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		attempts = append(attempts, r.URL.Path)
-		if r.URL.Path == "/api/v1/projects/my-project" {
-			// Application-level 404: the route matched, but the resource doesn't exist.
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusNotFound)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "project not found"})
-			return
-		}
-		// The groves fallback should never be reached.
-		if r.URL.Path == "/api/v1/groves/my-project" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(Project{ID: "my-project", Name: "My Project"})
-			return
-		}
-		w.WriteHeader(http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "project not found"})
 	}))
 	defer server.Close()
 
@@ -434,7 +394,7 @@ func TestFallbackSkippedOnJSONNotFound(t *testing.T) {
 	}
 
 	if len(attempts) != 1 {
-		t.Errorf("expected 1 attempt (no fallback), got %d: %v", len(attempts), attempts)
+		t.Errorf("expected 1 attempt, got %d: %v", len(attempts), attempts)
 	}
 	if attempts[0] != "/api/v1/projects/my-project" {
 		t.Errorf("expected attempt to /api/v1/projects/my-project, got %s", attempts[0])

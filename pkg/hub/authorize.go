@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 
@@ -125,6 +126,76 @@ func (s *Server) authorizeWithMessage(w http.ResponseWriter, r *http.Request, re
 		return false
 	}
 	return true
+}
+
+// authorizeRead is authorize's read-surface counterpart. On denial it writes
+// a generic 404 (via NotFound) instead of a 403, so a resource the caller may
+// not read is indistinguishable on the wire from one that does not exist —
+// mirroring the skill fix's getSkill/writeSkillLookupError pattern
+// (ptone/scion#1901) for template and harness-config read surfaces
+// (ptone/scion#1916: get, download, validate, and file read/list).
+//
+// Only genuinely read-only checks should use this. Surfaces that also gate a
+// mutation (create/update/delete) must keep using authorize/authorizeMsg: a
+// write denial should read as a permission problem, not "missing", and
+// authorizeRead always evaluates ActionRead regardless of what actually
+// happens next, so it must never guard a non-read operation.
+func (s *Server) authorizeRead(w http.ResponseWriter, r *http.Request, resource Resource, notFoundLabel string) bool {
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return false
+	}
+	if s.authzService == nil {
+		NotFound(w, notFoundLabel)
+		return false
+	}
+	decision := s.authzService.CheckAccess(ctx, identity, resource, ActionRead)
+	if !decision.Allowed {
+		logAuthzDenial(r, identity, resource, ActionRead, decision.Reason)
+		NotFound(w, notFoundLabel)
+		return false
+	}
+	return true
+}
+
+// brokerMayReadCatalogResource reports whether an authenticated runtime
+// broker may read a template or harness-config record with the given scope
+// and scope ID. Brokers read these during agent creation (hydration) over
+// HMAC auth, not as user principals, so the authorization kernel cannot
+// evaluate them directly — but "the caller is an authenticated broker" is
+// not itself authority to read every record in the catalog. Mirrors
+// canUseProjectGitHubToken (skill_handlers.go): a broker may act on a
+// project's resources only when it is a registered provider for that
+// project (store.GetProjectProvider). Every broker exemption for a
+// template/harness-config read surface (get, list, download, files) must
+// call this instead of admitting any authenticated broker unconditionally.
+//
+//   - Global (hub-wide) scope: always allowed — no confidentiality boundary,
+//     the same rule filterHubWideTemplateGrants/filterHubWideHarnessConfigGrants
+//     encode for the curated hub-member/hub-viewer grant.
+//   - Project scope: allowed only when the broker is a registered provider
+//     for that project.
+//   - User scope, or any other/unrecognized scope value: never — a broker
+//     has no legitimate reason to read a user's private catalog entry, and
+//     an unrecognized scope must fail closed rather than default-allow.
+func (s *Server) brokerMayReadCatalogResource(ctx context.Context, broker BrokerIdentity, scope, scopeID string) bool {
+	if broker == nil {
+		return false
+	}
+	switch scope {
+	case store.TemplateScopeGlobal: // == store.HarnessConfigScopeGlobal ("global")
+		return true
+	case store.TemplateScopeProject: // == store.HarnessConfigScopeProject ("project")
+		if s.store == nil || scopeID == "" {
+			return false
+		}
+		_, err := s.store.GetProjectProvider(ctx, scopeID, broker.BrokerID())
+		return err == nil
+	default:
+		return false
+	}
 }
 
 // authorizeAgentCreate gates agent creation for every caller kind. Exhaustive
@@ -265,6 +336,39 @@ func (s *Server) authorizeAgentLifecycle(w http.ResponseWriter, r *http.Request,
 		logAuthzDenial(r, identity, resource, action,
 			"identity type may not act on agent lifecycle")
 		writeForbidden(w, "")
+		return false
+	}
+}
+
+// agentLifecycleAllowed reports whether identity may manage target (start,
+// resume, or restart it), applying the identical rule
+// authorizeAgentLifecycle enforces for ActionLifecycle -- the same authority
+// the /start route requires -- but without writing an HTTP response.
+//
+// It exists for callers like handleExistingAgent that need the boolean
+// because a denial there must not surface as authorizeAgentLifecycle's 403
+// (which would confirm to the caller that a specific agent exists and is
+// somebody else's): the caller folds a false result into a generic
+// name-conflict response instead, disclosing nothing about the agent it was
+// denied against.
+func (s *Server) agentLifecycleAllowed(ctx context.Context, identity Identity, target *store.Agent) bool {
+	if identity == nil || target == nil {
+		return false
+	}
+	switch identity.Type() {
+	case "agent":
+		agentIdent, ok := identity.(AgentIdentity)
+		if !ok {
+			return false
+		}
+		return agentIdent.HasScope(ScopeAgentLifecycle) && agentIdent.ProjectID() == target.ProjectID
+	case "user", "dev":
+		userIdent, ok := identity.(UserIdentity)
+		if !ok {
+			return false
+		}
+		return s.authzService.CheckAccess(ctx, userIdent, agentResource(target), ActionLifecycle).Allowed
+	default:
 		return false
 	}
 }

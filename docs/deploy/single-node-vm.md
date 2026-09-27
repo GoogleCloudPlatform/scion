@@ -6,6 +6,12 @@ Cloud Run IAP reverse proxy — no container builds, no GCS, no external databas
 
 > Part of the Single-Node-VM deploy tier (ptone/scion#1575).
 
+> **Adding a GKE target for shared-dir storage?** See the
+> [Hybrid Deployment Tier](hybrid-tier.md) page — it extends this same VM with
+> a second, Kubernetes-based place to run agents, sharing project scratchpads
+> between the two runtimes over an NFS export served from this VM
+> (`ptone/scion#1777`).
+
 ## Overview
 
 The single-node-VM tier stands up a persistent GCE VM running the `scion` binary
@@ -141,8 +147,10 @@ The deploy script creates the following GCP resources:
 |----------|-------------|---------|
 | GCE VM | `scion-hub-<hub-name>` | Runs the Scion Hub binary via systemd |
 | Service account | `scion-hub-<hub-name>@<project>.iam.gserviceaccount.com` | VM identity with logging/monitoring roles |
+| Service account | `scion-hub-<hub-name>-proxy@<project>.iam.gserviceaccount.com` (truncated and hashed for long hub names) | Cloud Run proxy identity, with no project IAM roles |
 | Cloud Run service | `scion-hub-<hub-name>-iap-proxy` | IAP-authenticated reverse proxy to the VM |
-| IAM bindings | IAP `httpsResourceAccessor` for the deployer | Grants the deployer browser access through IAP |
+| Firewall rule | `scion-hub-<hub-name>-allow-proxy` | Allows the Cloud Run proxy (Direct VPC egress) to reach the VM on tcp:8080 |
+| IAM bindings | IAP `httpsResourceAccessor` for the deployer; `roles/run.invoker` for the IAP service agent on the Cloud Run proxy | Grants the deployer browser access through IAP; lets IAP itself invoke the proxy service |
 
 On the VM itself:
 
@@ -230,6 +238,24 @@ GOOGLE_CLOUD_PROJECT=<your-project-id>
 
 The `SESSION_SECRET` is generated once during initial deployment and preserved
 on subsequent runs.
+
+### Hub-scoped agent env vars
+
+`hub.env` configures the Hub process only. The env vars that agents receive
+are stored in the hub database. After the Phase 3 health check, the deploy
+script writes these hub-scoped env vars (injection mode `always`) into
+`/home/scion/.scion/hub.db` with `sqlite3`:
+
+| Key | Value |
+|-----|-------|
+| `GOOGLE_CLOUD_PROJECT` | your project ID |
+| `GOOGLE_CLOUD_LOCATION` | `global` (the global Vertex AI endpoint, intentionally) |
+
+They appear in the admin UI as hub env vars, and you can edit them there.
+The deploy only seeds these keys when they are absent. Edits made in the
+admin UI are kept across redeploys, and a deleted key is created again on the
+next deploy. If the write fails, the deploy continues and prints the command to
+run manually.
 
 ## Chat Plugins
 
@@ -349,7 +375,11 @@ The teardown flow prompts for the hub name and region, then deletes:
 
 1. The Cloud Run IAP proxy service
 2. The GCE VM instance
-3. The service account
+3. The Cloud NAT and Cloud Router (unless they were reused from a pre-existing gateway on the network/region)
+4. The hub VM's service account
+5. The Cloud Run proxy's service account
+6. The IAP SSH firewall rule
+7. The proxy-to-VM firewall rule (tcp:8080)
 
 **Note:** IAP access bindings are scoped to the region, not to the service.
 Teardown does not remove them. To clean up IAP bindings manually:
@@ -425,5 +455,6 @@ is not working:
 The script is idempotent. Re-running it will:
 - Skip creating the VM and service account if they already exist
 - Preserve the existing `hub.env` (and its `SESSION_SECRET`)
+- Seed the hub-scoped `GOOGLE_CLOUD_*` env vars only if they are absent (admin edits are preserved)
 - Overwrite `settings.yaml` with the current configuration
 - Re-deploy the Cloud Run proxy (converges to the same state)

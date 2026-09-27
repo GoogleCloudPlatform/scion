@@ -51,6 +51,13 @@ var (
 	// the existing membership binding before assigning a different built-in
 	// membership role (change-role = delete + create).
 	ErrBuiltInMembershipConflict = errors.New("principal already has a built-in membership role in this project")
+
+	// ErrIdentityKeyConflict is returned when writing an agent's identity
+	// keys (its slug and/or slugify(displayName)) would collide with a key
+	// already reserved by a different agent in the same project, including a
+	// soft-deleted one. Kept distinct from ErrAlreadyExists so callers can
+	// map it to a specific message instead of a generic conflict.
+	ErrIdentityKeyConflict = errors.New("identity key already reserved by another agent in this project")
 )
 
 // SystemReconcileCreatedBy is the CreatedBy sentinel that identifies the
@@ -205,6 +212,9 @@ type Store interface {
 	// Agent Credential operations (Permissions Foundation Phase 1H)
 	AgentCredentialStore
 
+	// Agent Identity Key operations (per-project display-name / slug uniqueness)
+	AgentIdentityKeyStore
+
 	// Decision Audit operations (Authorization Decision Audit Phase 1I)
 	DecisionAuditStore
 
@@ -219,6 +229,9 @@ type Store interface {
 
 	// External Identity operations (GE Google Credential Exchange)
 	ExternalIdentityStore
+
+	// Agent Reincarnation operations (agent-reincarnate, ptone/scion#1821)
+	AgentReincarnationStore
 }
 
 // AgentStore defines agent-related persistence operations.
@@ -252,6 +265,14 @@ type AgentStore interface {
 
 	// ListAgents returns agents matching the filter criteria.
 	ListAgents(ctx context.Context, filter AgentFilter, opts ListOptions) (*ListResult[Agent], error)
+
+	// ListAgentsWithStaleNonTerminalReincarnationState returns every agent
+	// whose reincarnation_state is non-terminal and whose row has not been
+	// updated since before olderThan. Backstop for the replica-safe
+	// reincarnation sweep (design §3.7): catches an agent left claimed with
+	// no matching non-terminal AgentReincarnation record for the main sweep
+	// to find (e.g. the record was deleted).
+	ListAgentsWithStaleNonTerminalReincarnationState(ctx context.Context, olderThan time.Time) ([]*Agent, error)
 
 	// UpdateAgentStatus updates only status-related fields.
 	// This is a partial update that doesn't require version checking.
@@ -511,6 +532,18 @@ type RuntimeBrokerStore interface {
 	// Returns ErrNotFound if the broker doesn't exist.
 	UpdateRuntimeBroker(ctx context.Context, broker *RuntimeBroker) error
 
+	// SetRuntimeBrokerCreatedByIfEmpty atomically sets created_by on a runtime
+	// broker, but only if the row's created_by is currently empty. Returns
+	// applied=false (not an error) when the row already has a non-empty
+	// created_by, or when the row does not exist — both are safe no-ops for
+	// an idempotent, never-overwrite backfill of legacy ownerless records.
+	//
+	// This is intentionally separate from UpdateRuntimeBroker, which never
+	// touches created_by at all: ownership must not become settable through
+	// the same path a broker uses to update its own heartbeat, status, or
+	// capabilities.
+	SetRuntimeBrokerCreatedByIfEmpty(ctx context.Context, id, createdBy string) (applied bool, err error)
+
 	// DeleteRuntimeBroker removes a runtime broker by ID.
 	// Returns ErrNotFound if the broker doesn't exist.
 	DeleteRuntimeBroker(ctx context.Context, id string) error
@@ -626,6 +659,12 @@ type BrokerDispatchStore interface {
 	// past the given cutoff to failed, recording the reason. Returns the
 	// number of messages expired.
 	ExpireStuckPendingMessages(ctx context.Context, before time.Time, reason string) (int, error)
+
+	// FailPendingMessagesWithMissingRecipient transitions pending messages to
+	// failed early, without waiting for ExpireStuckPendingMessages' TTL, when
+	// their recipient agent has been deleted (soft- or hard-deleted) and can
+	// therefore never accept delivery. Returns the number of messages failed.
+	FailPendingMessagesWithMissingRecipient(ctx context.Context, reason string) (int, error)
 }
 
 // TemplateStore defines template persistence operations.
@@ -1427,6 +1466,13 @@ type MessageStore interface {
 	// unread messages older than unreadCutoff. Returns count removed.
 	PurgeOldMessages(ctx context.Context, readCutoff time.Time, unreadCutoff time.Time) (int, error)
 
+	// PurgeFailedMessages removes messages with dispatch_state="failed" whose
+	// created timestamp is before cutoff. Returns the number of messages
+	// removed. Unlike PurgeOldMessages (read/unread semantics, which would
+	// also delete successfully delivered history), this filters strictly on
+	// dispatch_state so delivered messages are never touched.
+	PurgeFailedMessages(ctx context.Context, cutoff time.Time) (int, error)
+
 	// SetMessageConversationID updates the conversation_id on an existing
 	// message. Used by the Phase 4 backfill to link legacy messages to
 	// Conversation records. Returns ErrNotFound if the message doesn't exist.
@@ -1607,6 +1653,30 @@ type SkillFilter struct {
 	Status  string
 	Search  string
 	Tags    []string
+
+	// AccessScope, when non-nil, restricts results to the read boundary
+	// established by ptone/scion#1901. It is applied in the store query
+	// before LIMIT/cursor pagination (and before TotalCount) so that
+	// out-of-scope rows can never crowd a caller's own rows out of a page,
+	// and so TotalCount reflects only rows the caller may actually see. A
+	// nil AccessScope applies no restriction — used for the hub-admin/
+	// super-admin bypass, which sees every skill unfiltered.
+	AccessScope *SkillAccessScope
+}
+
+// SkillAccessScope narrows a skill query to the rows a specific caller may
+// read, mirroring the ptone/scion#1901 and ptone/scion#1903 rulings —
+// creation scope is the only read boundary; visibility does not widen it:
+//   - IncludeHubScope: hub-scoped (global/core) skills are visible to any
+//     authenticated caller.
+//   - CallerID: a user-scoped skill is visible only when its ScopeID equals
+//     CallerID (the owning user; for an agent caller, its creator).
+//   - ProjectIDs: a project-scoped skill is visible only when its ScopeID is
+//     one of these (the caller's project memberships).
+type SkillAccessScope struct {
+	IncludeHubScope bool
+	CallerID        string
+	ProjectIDs      []string
 }
 
 // =============================================================================
@@ -1979,6 +2049,31 @@ type AgentCredentialStore interface {
 }
 
 // =============================================================================
+// Agent Identity Key Store (per-project display-name / slug uniqueness)
+// =============================================================================
+
+// AgentIdentityKeyStore defines agent identity-key persistence operations.
+// An agent's identity keys are the distinct set {slug, slugify(displayName)};
+// the store enforces uniqueness of each key within a project as a database
+// invariant (UNIQUE(project_id, key)), including against soft-deleted agents.
+type AgentIdentityKeyStore interface {
+	// ReplaceAgentIdentityKeys atomically replaces agentID's identity-key
+	// rows in projectID with keys: rows for keys no longer present are
+	// deleted, rows for new keys are inserted, and rows for keys already
+	// present are left alone. Returns ErrIdentityKeyConflict if any key in
+	// keys is already reserved by a different agent in the project.
+	ReplaceAgentIdentityKeys(ctx context.Context, agentID, projectID string, keys []string) error
+
+	// DeleteAgentIdentityKeys removes all of agentID's identity-key rows,
+	// freeing its keys for reuse. Used on hard delete/purge.
+	DeleteAgentIdentityKeys(ctx context.Context, agentID string) error
+
+	// ListAgentIdentityKeys returns every identity-key row in projectID,
+	// across all agents.
+	ListAgentIdentityKeys(ctx context.Context, projectID string) ([]*AgentIdentityKey, error)
+}
+
+// =============================================================================
 // Decision Audit Store (Authorization Decision Audit Phase 1I)
 // =============================================================================
 
@@ -2084,6 +2179,13 @@ type QuotaStore interface {
 
 	// ListActiveReservations returns active (non-released) reservations for a limit and scope.
 	ListActiveReservations(ctx context.Context, limitDefinitionID, scopeType, scopeID string) ([]*UsageReservation, error)
+
+	// HasActiveReservation reports whether resourceID already holds a
+	// non-released reservation for the given limit, regardless of scope.
+	// Used to make re-reservation idempotent (ptone/scion#1963): a caller
+	// re-reserving on agent start/resume must not create a second active
+	// reservation for an agent that already holds one.
+	HasActiveReservation(ctx context.Context, limitDefinitionID, resourceID string) (bool, error)
 }
 
 // =============================================================================

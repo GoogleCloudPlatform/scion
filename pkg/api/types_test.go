@@ -22,43 +22,7 @@ import (
 )
 
 func TestAgentInfo_JSON(t *testing.T) {
-	t.Run("unmarshal legacy grove fields", func(t *testing.T) {
-		jsonData := `{
-			"id": "agent-1",
-			"grove": "legacy-grove",
-			"groveId": "legacy-id",
-			"grovePath": "/legacy/path"
-		}`
-		var info AgentInfo
-		if err := json.Unmarshal([]byte(jsonData), &info); err != nil {
-			t.Fatalf("Unmarshal failed: %v", err)
-		}
-		if info.Project != "legacy-grove" {
-			t.Errorf("Project = %q, want %q", info.Project, "legacy-grove")
-		}
-		if info.ProjectID != "legacy-id" {
-			t.Errorf("ProjectID = %q, want %q", info.ProjectID, "legacy-id")
-		}
-		if info.ProjectPath != "/legacy/path" {
-			t.Errorf("ProjectPath = %q, want %q", info.ProjectPath, "/legacy/path")
-		}
-	})
-
-	t.Run("unmarshal project priority", func(t *testing.T) {
-		jsonData := `{
-			"project": "new-project",
-			"grove": "old-grove"
-		}`
-		var info AgentInfo
-		if err := json.Unmarshal([]byte(jsonData), &info); err != nil {
-			t.Fatalf("Unmarshal failed: %v", err)
-		}
-		if info.Project != "new-project" {
-			t.Errorf("Project = %q, want %q (project should win)", info.Project, "new-project")
-		}
-	})
-
-	t.Run("marshal dual fields", func(t *testing.T) {
+	t.Run("canonical round-trip", func(t *testing.T) {
 		info := AgentInfo{
 			Project:     "my-project",
 			ProjectID:   "my-id",
@@ -76,11 +40,8 @@ func TestAgentInfo_JSON(t *testing.T) {
 
 		expected := map[string]string{
 			"project":     "my-project",
-			"grove":       "my-project",
 			"projectId":   "my-id",
-			"groveId":     "my-id",
 			"projectPath": "/my/path",
-			"grovePath":   "/my/path",
 		}
 
 		for k, v := range expected {
@@ -88,22 +49,52 @@ func TestAgentInfo_JSON(t *testing.T) {
 				t.Errorf("Field %q = %v, want %v", k, m[k], v)
 			}
 		}
+
+		for _, legacyKey := range []string{"grove", "groveId", "grovePath"} {
+			if _, ok := m[legacyKey]; ok {
+				t.Errorf("legacy key %q present in marshal output, want absent: %v", legacyKey, m[legacyKey])
+			}
+		}
+
+		var roundTripped AgentInfo
+		if err := json.Unmarshal(data, &roundTripped); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if roundTripped.Project != info.Project || roundTripped.ProjectID != info.ProjectID || roundTripped.ProjectPath != info.ProjectPath {
+			t.Errorf("round-trip = %+v, want %+v", roundTripped, info)
+		}
+	})
+
+	t.Run("unmarshal ignores unknown legacy fields", func(t *testing.T) {
+		jsonData := `{
+			"id": "agent-1",
+			"grove": "legacy-grove",
+			"groveId": "legacy-id",
+			"grovePath": "/legacy/path"
+		}`
+		var info AgentInfo
+		if err := json.Unmarshal([]byte(jsonData), &info); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if info.Project != "" || info.ProjectID != "" || info.ProjectPath != "" {
+			t.Errorf("legacy grove keys were honoured: %+v", info)
+		}
 	})
 }
 
 func TestResolvedSecret_JSON(t *testing.T) {
-	t.Run("unmarshal legacy grove source", func(t *testing.T) {
+	t.Run("does not translate a bare legacy grove source", func(t *testing.T) {
 		jsonData := `{"name": "MY_SECRET", "source": "grove"}`
 		var secret ResolvedSecret
 		if err := json.Unmarshal([]byte(jsonData), &secret); err != nil {
 			t.Fatalf("Unmarshal failed: %v", err)
 		}
-		if secret.Source != "project" {
-			t.Errorf("Source = %q, want %q", secret.Source, "project")
+		if secret.Source != "grove" {
+			t.Errorf("Source = %q, want %q (legacy source value is no longer translated)", secret.Source, "grove")
 		}
 	})
 
-	t.Run("marshal project source", func(t *testing.T) {
+	t.Run("marshal emits only canonical fields", func(t *testing.T) {
 		secret := ResolvedSecret{
 			Name:   "MY_SECRET",
 			Source: "project",
@@ -114,6 +105,14 @@ func TestResolvedSecret_JSON(t *testing.T) {
 		}
 		if !strings.Contains(string(data), `"source":"project"`) {
 			t.Errorf("Marshal output missing source:project: %s", string(data))
+		}
+
+		var m map[string]interface{}
+		if err := json.Unmarshal(data, &m); err != nil {
+			t.Fatalf("Unmarshal back failed: %v", err)
+		}
+		if _, ok := m["grove"]; ok {
+			t.Errorf("legacy 'grove' key present in marshal output, want absent: %v", m["grove"])
 		}
 	})
 }

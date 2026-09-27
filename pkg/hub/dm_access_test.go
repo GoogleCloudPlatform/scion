@@ -83,12 +83,11 @@ func TestDMAccess_ThirdPrincipalDenied(t *testing.T) {
 
 	// Create two agents for the DM.
 	agentB := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "dm-agent-b",
-		Slug:       "dm-agent-b",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "dm-agent-b",
+		Slug:      "dm-agent-b",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(context.Background(), agentB))
 
@@ -98,12 +97,11 @@ func TestDMAccess_ThirdPrincipalDenied(t *testing.T) {
 	// participant row for a principal not named in the key. This test
 	// verifies the handler-level authorization as a defense in depth.
 	intruder := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "intruder-agent",
-		Slug:       "intruder-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "intruder-agent",
+		Slug:      "intruder-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(context.Background(), intruder))
 
@@ -175,12 +173,11 @@ func TestDMAccess_WrongPrincipalKindDenied(t *testing.T) {
 	project, agentA, _ := setupConvTestData(t, s)
 
 	agentB := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "kind-test-agent-b",
-		Slug:       "kind-test-agent-b",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "kind-test-agent-b",
+		Slug:      "kind-test-agent-b",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agentB))
 
@@ -232,12 +229,11 @@ func TestDMAccess_MissingParticipantRowStillAuthorized(t *testing.T) {
 	project, agentA, _ := setupConvTestData(t, s)
 
 	agentB := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "missing-row-agent-b",
-		Slug:       "missing-row-agent-b",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "missing-row-agent-b",
+		Slug:      "missing-row-agent-b",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agentB))
 
@@ -277,12 +273,11 @@ func TestDMAccess_LeaveDoesNotChangeIdentity(t *testing.T) {
 	project, agentA, _ := setupConvTestData(t, s)
 
 	agentB := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "leave-test-agent-b",
-		Slug:       "leave-test-agent-b",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "leave-test-agent-b",
+		Slug:      "leave-test-agent-b",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(context.Background(), agentB))
 
@@ -347,24 +342,22 @@ func TestDMAccess_ParticipantAdditionRejected(t *testing.T) {
 	project, agentA, _ := setupConvTestData(t, s)
 
 	agentB := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "part-add-agent-b",
-		Slug:       "part-add-agent-b",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "part-add-agent-b",
+		Slug:      "part-add-agent-b",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(context.Background(), agentB))
 
 	dmConv := setupDMConversation(t, s, agentA.ID, agentB.ID)
 
 	newAgent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "third-party",
-		Slug:       "third-party",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "third-party",
+		Slug:      "third-party",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(context.Background(), newAgent))
 
@@ -393,12 +386,11 @@ func TestDMAccess_DefaultAgentRejected(t *testing.T) {
 	project, agentA, _ := setupConvTestData(t, s)
 
 	agentB := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "default-test-agent-b",
-		Slug:       "default-test-agent-b",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "default-test-agent-b",
+		Slug:      "default-test-agent-b",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(context.Background(), agentB))
 
@@ -474,12 +466,11 @@ func TestDMAccess_GroupConversationsUnchanged(t *testing.T) {
 
 	// Verify non-participant is still denied for groups.
 	nonParticipant := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "non-participant-group",
-		Slug:       "non-participant-group",
-		ProjectID:  *conv.ProjectID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "non-participant-group",
+		Slug:      "non-participant-group",
+		ProjectID: *conv.ProjectID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(context.Background(), nonParticipant))
 

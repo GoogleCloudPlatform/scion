@@ -18,6 +18,9 @@ An isolated worker: one LLM-plus-harness loop in its own container with its own 
 ### Sub-agent
 An agent spawned by another agent; "sub" only from the orchestrating user's view, since it is a full agent in capability.
 
+### Reincarnation
+Migrating an existing agent to a new *generation*: the Hub re-resolves its template, image, and harness-config, then starts it again with the same agent ID and slug and a handoff as its first task. Done with [`scion reincarnate`](/scion/reference/cli/#scion-reincarnate). Distinct from *restart* (same config) and *resume* (same harness session).
+
 ### Project
 A namespace and collection of agents and configuration, represented by a `.scion` directory and usually one-to-one with a git repository. Not the same as a **Group**.
 
@@ -78,7 +81,7 @@ A workspace sharing mode where each agent gets its own git worktree over a share
 A workspace sharing mode where each agent gets its own full git clone of the repository.
 
 ### Shared directory
-A persistent, mutable volume shared by the agents within one project. Backed by host filesystem directories (local) or Kubernetes PersistentVolumeClaims (K8s).
+A persistent, mutable volume shared by the agents within one project. Backed by host filesystem directories (local) or Kubernetes PersistentVolumeClaims (K8s). In hosted deployments, `server.shared_dir_storage` can place them on a shared NFS export so they span Runtime Brokers.
 
 ### Agent home
 The directory mounted as the container user's home folder, holding that agent's unique config and history.

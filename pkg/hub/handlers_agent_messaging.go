@@ -1077,13 +1077,17 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
-	s.logMessage("outbound message sent",
+	outboundLogAttrs := []any{
 		"agent_id", agent.ID,
 		"agent_name", agent.Name,
 		"project_id", agent.ProjectID,
 		"recipient_id", result.RecipientID,
 		"msg_type", req.Type,
-	)
+	}
+	if result.ConversationID != "" {
+		outboundLogAttrs = append(outboundLogAttrs, "conversation_id", result.ConversationID)
+	}
+	s.logMessage("outbound message sent", outboundLogAttrs...)
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"message_id":   storeMsg.ID,
@@ -1201,7 +1205,27 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 	agent.DeletedAt = time.Time{}
 	agent.Updated = time.Now()
 
-	if err := s.store.UpdateAgent(ctx, agent); err != nil {
+	// Identity-key rows persist through soft-delete (only a hard delete or
+	// purge frees them -- see composite.go's DeleteAgent/DeleteProject/
+	// PurgeDeletedAgents), so restoring an agent should normally find its own
+	// keys already reserved and in place. But an agent soft-deleted before
+	// this invariant existed, or before a backfill of it, may have no key
+	// rows at all, leaving a window where another agent could since have
+	// taken its slug or display-name key. Re-asserting the keys in the same
+	// transaction as the restore turns that window into a defensive
+	// revalidation: a genuine collision surfaces as the same
+	// store.ErrIdentityKeyConflict (409) a create or rename would get, rather
+	// than silently restoring an agent whose key now belongs to someone else.
+	// api.IdentityKeysFor is also what the backfill migration uses, so a
+	// legacy row's empty-display-name-key tolerance is handled identically
+	// by both.
+	keys := api.IdentityKeysFor(agent.Slug, agent.Name)
+	if err := s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := tx.UpdateAgent(ctx, agent); err != nil {
+			return err
+		}
+		return tx.ReplaceAgentIdentityKeys(ctx, agent.ID, agent.ProjectID, keys)
+	}); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
@@ -1531,7 +1555,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			return
 		case state.PhaseError:
 			writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
-				fmt.Sprintf("Agent %q is in error state. Use 'scion resume' to restart.", agent.Slug), nil)
+				fmt.Sprintf("Agent %q is in error state. Use 'scion resume --force' to best-effort resume its previous session, or 'scion start' for a fresh one.", agent.Slug), nil)
 			return
 		default:
 			writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,

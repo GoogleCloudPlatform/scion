@@ -33,19 +33,33 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)
 
-	// If identity is an agent, verify it's the same agent and has the correct scope
-	if agentIdent, ok := identity.(AgentIdentity); ok {
-		if agentIdent.ID() != id {
+	// Every identity kind is handled explicitly; there is no fall-through.
+	// Agents may update only their own status and need the status scope.
+	// Any other caller must be authorized to update the agent itself.
+	switch ident := identity.(type) {
+	case nil:
+		Unauthorized(w)
+		return
+	case AgentIdentity:
+		if ident.ID() != id {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only update their own status", nil)
 			return
 		}
-		if !agentIdent.HasScope(ScopeAgentStatusUpdate) {
+		if !ident.HasScope(ScopeAgentStatusUpdate) {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope: agent:status:update", nil)
 			return
 		}
-	} else if identity == nil {
-		Unauthorized(w)
-		return
+	default:
+		agent, err := s.store.GetAgent(ctx, id)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		// SECURITY-GATE: CheckAccess — non-agent callers need update access
+		// to this specific agent.
+		if !s.authorize(w, r, agentResource(agent), ActionUpdate) {
+			return
+		}
 	}
 
 	var status store.AgentStatusUpdate
@@ -68,7 +82,13 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 			writeErrorFromErr(w, err, "")
 			return
 		}
+		oldPhase := agent.Phase
 		guardAgentPhaseTransition(agent, &status)
+		// Reconcile the max_agents_per_broker reservation against the phase
+		// this self-reported status update will actually persist (post-guard,
+		// since the guard may clear status.Phase on a regression or while
+		// suspended) — ptone/scion#1963.
+		s.reconcileBrokerQuotaOnPhaseChange(ctx, agent, oldPhase, status.Phase)
 	}
 
 	if err := s.store.UpdateAgentStatus(ctx, id, status); err != nil {
@@ -93,6 +113,10 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 //  2. Activity-driven phase auto-correction: when an activity that implies the
 //     agent is running arrives but the phase is pre-running, auto-promotes the
 //     phase to running.
+//
+// It also blocks a status update entirely while a `scion reincarnate`
+// migration owns the agent (Guard 0b, design §3.4 Amendment A11 item 2) —
+// see that guard's comment.
 func guardAgentPhaseTransition(agent *store.Agent, status *store.AgentStatusUpdate) {
 	currentPhase := state.Phase(agent.Phase)
 
@@ -106,6 +130,24 @@ func guardAgentPhaseTransition(agent *store.Agent, status *store.AgentStatusUpda
 	if currentPhase == state.PhaseSuspended {
 		status.Phase = ""
 		status.Activity = ""
+		return
+	}
+
+	// Guard 0b: a `scion reincarnate` migration in flight is sticky the same
+	// way — the reincarnation worker owns Phase/Activity/ExitCode/ExitReason/
+	// Message for the agent until it completes or fails, so an async
+	// sciontool /status POST from the OLD container racing the migration
+	// (e.g. a crash report from the generation the worker is in the middle of
+	// tearing down and replacing) must not surface as the agent's live status.
+	// ContainerStatus and the Heartbeat/LastSeen bump are not status's
+	// concern here (this endpoint does not set them), so nothing further
+	// needs blanking.
+	if reincarnationInFlight(agent) {
+		status.Phase = ""
+		status.Activity = ""
+		status.ExitCode = nil
+		status.ExitReason = ""
+		status.Message = ""
 		return
 	}
 
@@ -205,8 +247,22 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	agent.Phase = newPhase
 	agent.ContainerStatus = "stopped"
 	agent.Activity = ""
+	// A suspended agent has no running container: release its
+	// max_agents_per_broker reservation so it stops consuming broker
+	// capacity until it is resumed (ptone/scion#1963).
+	s.releaseBrokerQuota(ctx, agent)
 	s.events.PublishAgentStatus(ctx, agent)
 	return nil
+}
+
+// AgentLifecycleStartRequest is the optional JSON body for the "start"
+// lifecycle action. It is empty for a normal start; ForceResume is only
+// meaningful when the agent is in phase=error, where it requests a
+// best-effort resume of the interrupted harness session instead of a fresh
+// one. See resumeInPlaceDecision for the equivalent semantics on the
+// create-agent resume path.
+type AgentLifecycleStartRequest struct {
+	ForceResume bool `json:"forceResume,omitempty"`
 }
 
 func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id, action string) {
@@ -238,13 +294,50 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	case api.AgentActionStart:
 		newPhase = string(state.PhaseRunning)
 		if dispatcher != nil && agent.RuntimeBrokerID != "" {
-			// Resume the harness session only when the agent was suspended.
-			resume := agent.Phase == string(state.PhaseSuspended)
+			// Resume the harness session when the agent was suspended. An
+			// error-phase agent can also request a best-effort resume of its
+			// interrupted session by sending forceResume in the request body
+			// (mirrors resumeInPlaceDecision's forcedRecovery case for the
+			// create-agent resume path). This never applies to any other
+			// phase: a running agent must not be recreated out from under
+			// itself, and a stopped agent restarts fresh even if asked to
+			// resume, matching the create-agent path's behavior.
+			var startReq AgentLifecycleStartRequest
+			if r.ContentLength > 0 {
+				if err := readJSON(r, &startReq); err != nil {
+					BadRequest(w, "invalid request body: "+err.Error())
+					return
+				}
+			}
+			forcedRecovery := agent.Phase == string(state.PhaseError) && startReq.ForceResume
+			if forcedRecovery {
+				s.agentLifecycleLog.Warn("Force-resuming agent from error phase via lifecycle start",
+					"agent_id", agent.ID, "agent", agent.Name, "container_status", agent.ContainerStatus)
+			}
+			resume := agent.Phase == string(state.PhaseSuspended) || forcedRecovery
+			// Re-reserve the per-broker ceiling before dispatch, exactly as
+			// create does, so a start that would exceed the cap is rejected
+			// up front rather than after the container is already running
+			// (ptone/scion#1963). Idempotent: a no-op when the agent already
+			// holds an active reservation (e.g. start called again on an
+			// already-running agent).
+			ok, reserved := s.checkAndReserveBrokerQuotaHTTP(ctx, w, agent)
+			if !ok {
+				return
+			}
 			dispatchErr = dispatcher.DispatchAgentStart(ctx, agent, "", resume)
 			// DispatchAgentStart applies the broker response in-place;
 			// use the broker-reported phase if it was set.
 			if dispatchErr == nil && agent.Phase != "" {
 				newPhase = agent.Phase
+			}
+			if dispatchErr != nil {
+				// Roll back a reservation this call took speculatively, so a
+				// failed start doesn't strand one with no container behind
+				// it. A reservation that already existed (start on a
+				// running agent) is kept: that agent is still counted
+				// (ptone/scion#1978).
+				s.rollbackBrokerQuota(ctx, agent, reserved)
 			}
 		}
 	case api.AgentActionStop:
@@ -256,6 +349,11 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// This is best-effort: failures are logged but don't block the stop.
 			s.syncWorkspaceOnStop(ctx, agent)
 			dispatchErr = dispatcher.DispatchAgentStop(ctx, agent)
+		}
+		if dispatchErr == nil {
+			// A stopped agent has no running container: release its
+			// max_agents_per_broker reservation (ptone/scion#1963).
+			s.releaseBrokerQuota(ctx, agent)
 		}
 	case api.AgentActionSuspend:
 		// Only running agents can be suspended via the HTTP lifecycle handler.
@@ -279,7 +377,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			RuntimeError(w, "Failed to dispatch to runtime broker: "+err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, agent)
+		respAgent := *agent
+		respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(agent.AppliedConfig, canViewAgentEnv(ctx, s, agent))
+		writeJSON(w, http.StatusOK, respAgent)
 		return
 	case api.AgentActionRestart:
 		newPhase = string(state.PhaseRunning)
@@ -290,9 +390,20 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// exited and some runtimes (podman) return non-standard
 			// errors for stopping non-running containers. The subsequent
 			// Start will handle cleanup of the exited container.
-			if stopErr := dispatcher.DispatchAgentStop(ctx, agent); stopErr != nil {
+			stopErr := dispatcher.DispatchAgentStop(ctx, agent)
+			if stopErr != nil {
 				slog.Warn("Restart: stop dispatch failed, proceeding with start",
 					"agent_id", id, "error", stopErr)
+			}
+			// The broker reservation is held across the restart
+			// (ptone/scion#1978). Releasing it after the stop leg and
+			// re-reserving before the start leg would let another start
+			// take the slot in between. This reserve is a no-op for an
+			// agent that already holds one, and applies the cap to an
+			// agent that does not (for example, a stopped agent).
+			ok, reserved := s.checkAndReserveBrokerQuotaHTTP(ctx, w, agent)
+			if !ok {
+				return
 			}
 			// Restart is stop + start: a fresh harness session, not a resume.
 			dispatchErr = dispatcher.DispatchAgentStart(ctx, agent, "", false)
@@ -300,6 +411,17 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// use the broker-reported phase if it was set.
 			if dispatchErr == nil && agent.Phase != "" {
 				newPhase = agent.Phase
+			}
+			if dispatchErr != nil {
+				if stopErr == nil {
+					// The stop leg succeeded, so the container is down:
+					// release the slot as an explicit stop would.
+					s.releaseBrokerQuota(ctx, agent)
+				} else {
+					// The container may still be running: keep a
+					// reservation this call did not create.
+					s.rollbackBrokerQuota(ctx, agent, reserved)
+				}
 			}
 		}
 	}
@@ -334,7 +456,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	agent.Phase = newPhase
 	s.events.PublishAgentStatus(ctx, agent)
 
-	writeJSON(w, http.StatusOK, agent)
+	respAgent := *agent
+	respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(agent.AppliedConfig, canViewAgentEnv(ctx, s, agent))
+	writeJSON(w, http.StatusOK, respAgent)
 }
 
 // stopAllResult represents the outcome of stopping a single agent.
@@ -475,6 +599,9 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 				} else {
 					res.Status = "stopped"
 					agent.Phase = string(state.PhaseStopped)
+					// Release the per-broker reservation, same as a single
+					// explicit stop (ptone/scion#1963).
+					s.releaseBrokerQuota(ctx, agent)
 					s.events.PublishAgentStatus(ctx, agent)
 				}
 			}

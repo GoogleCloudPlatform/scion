@@ -87,7 +87,6 @@ type Agent struct {
 	// Ownership
 	CreatedBy   string `json:"createdBy,omitempty"`
 	OwnerID     string `json:"ownerId,omitempty"`
-	Visibility  string `json:"visibility"`  // private, team, public
 	MessageMode string `json:"messageMode"` // none, lineage, branch, project, hub
 
 	// Ancestry chain for transitive access control.
@@ -97,7 +96,32 @@ type Agent struct {
 
 	// Optimistic locking
 	StateVersion int64 `json:"stateVersion"`
+
+	// Reincarnation (design: agent-reincarnate, ptone/scion#1821).
+	// Generation counts completed `scion reincarnate` migrations; a
+	// brand-new agent starts at 1. ReincarnationState tracks an in-flight
+	// reincarnation ("" when none is in flight) and is deliberately kept
+	// separate from Phase, so existing phase consumers are unaffected.
+	Generation         int    `json:"generation"`
+	ReincarnationState string `json:"reincarnationState,omitempty"`
+	// ReincarnationUpdatedAt is bumped ONLY by reincarnation-owned writes
+	// (the claim, each worker step, and every terminal write) — unlike
+	// Updated, which every broker heartbeat's UpdateAgentStatus also bumps.
+	// The replica-safe sweep's agent-state backstop (design §3.4 Amendment
+	// A6.6) keys on this instead of Updated. Nil means no reincarnation has
+	// ever touched this agent.
+	ReincarnationUpdatedAt *time.Time `json:"reincarnationUpdatedAt,omitempty"`
 }
+
+// ReincarnationState values for Agent.ReincarnationState.
+const (
+	ReincarnationStateNone         = ""
+	ReincarnationStatePending      = "pending"
+	ReincarnationStateStopping     = "stopping"
+	ReincarnationStateProvisioning = "provisioning"
+	ReincarnationStateStarting     = "starting"
+	ReincarnationStateFailed       = "failed"
+)
 
 // ExposedPort is a Hub-registered local port that may be reached through an
 // authenticated agent-held tunnel.
@@ -108,36 +132,6 @@ type ExposedPort struct {
 	Mode      string    `json:"mode,omitempty"`
 	ExposedAt time.Time `json:"exposedAt"`
 	ExposedBy string    `json:"exposedBy"`
-}
-
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (a Agent) MarshalJSON() ([]byte, error) {
-	type Alias Agent
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId"`
-	}{
-		Alias:   Alias(a),
-		GroveID: a.ProjectID,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (a *Agent) UnmarshalJSON(data []byte) error {
-	type Alias Agent
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(a),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if a.ProjectID == "" && aux.GroveID != "" {
-		a.ProjectID = aux.GroveID
-	}
-	return nil
 }
 
 // AgentAppliedConfig stores the effective configuration of an agent.
@@ -210,6 +204,234 @@ type AgentAppliedConfig struct {
 	// Bounded to 64 KB at the Hub API layer. When non-empty, the broker stages it
 	// into $HOME/.scion/hooks/pre-start.d/30-project-custom before container start.
 	ProjectPreStartHookScript string `json:"projectPreStartHookScript,omitempty"`
+
+	// CreateInputs snapshots the explicit request-level inputs captured at
+	// create time, before any template/harness-config/hub-default derivation
+	// ran. See AgentCreateInputs. Nil for agents created before this field
+	// existed (falls back to a heuristic reconstruction at reincarnate time).
+	CreateInputs *AgentCreateInputs `json:"createInputs,omitempty"`
+
+	// envResponseVisible gates whether MarshalJSON includes Env. It defaults
+	// to false (unexported, zero value), which is the "never emit Env by
+	// default" choke point: any code path that serializes an
+	// AgentAppliedConfig without going through ResponseView first -- in
+	// particular a future response handler that forgets to -- gets no Env in
+	// the JSON output, regardless of what the struct actually holds. See
+	// ResponseView and MarshalJSON below.
+	//
+	// encoding/json never marshals unexported fields, so this flag itself
+	// never reaches a JSON document; it only steers what MarshalJSON does
+	// with the exported Env field on its way out. It is likewise inert for
+	// decoding: json.Unmarshal only ever touches exported fields, so a config
+	// round-tripped through JSON (e.g. read back from the DB) always decodes
+	// with the flag at its zero value, i.e. response-hidden by default until
+	// something explicitly calls ResponseView again.
+	//
+	// Persistence (pkg/store/entadapter) is not a response surface and must
+	// keep writing Env to the DB regardless of this flag; it does so by
+	// aliasing this type to bypass MarshalJSON entirely rather than by
+	// setting this field.
+	envResponseVisible bool
+}
+
+// ResponseView returns a copy of ac suitable for embedding in an API response
+// body. canAttach must already reflect an attach-equivalent authorization
+// decision the caller has made for the current viewer against the owning
+// agent -- ResponseView performs no authorization itself.
+//
+// GITHUB_TOKEN is withheld unconditionally, even when canAttach is true: it
+// is never a legitimate value to keep surfacing from the durable config
+// record, independent of who is asking.
+//
+// InlineConfig.Env and the Telemetry cloud-export header map get the same
+// default-closed treatment as Env: both are cleared in the returned copy
+// unless canAttach is true. This is done by deep-copying InlineConfig (see
+// redactInlineConfigForResponse), never by mutating ac.InlineConfig or its
+// nested Telemetry config in place -- both are shared pointers, and the
+// caller's original agent object (which the persistence path may still
+// write from) must come out of this call unmodified.
+//
+// CreateInputs.InlineConfig gets the same treatment as InlineConfig, through
+// a deep copy of CreateInputs (see redactCreateInputsForResponse).
+//
+// Nothing else needs to call this to be safe: without it, MarshalJSON's
+// default omits Env entirely (see the envResponseVisible field doc), so a
+// response path that never calls ResponseView fails closed rather than open.
+func (ac *AgentAppliedConfig) ResponseView(canAttach bool) *AgentAppliedConfig {
+	if ac == nil {
+		return nil
+	}
+	view := *ac
+	view.envResponseVisible = canAttach
+	view.InlineConfig = redactInlineConfigForResponse(ac.InlineConfig, canAttach)
+	view.CreateInputs = redactCreateInputsForResponse(ac.CreateInputs, canAttach)
+	return &view
+}
+
+// redactCreateInputsForResponse returns a deep copy of ci suitable for a
+// response body. CreateInputs.InlineConfig is the create request's explicit
+// config, so it gets exactly the treatment ResponseView gives InlineConfig
+// (see redactInlineConfigForResponse): Env and the Telemetry cloud-export
+// header map are cleared unless canAttach is true, and GITHUB_TOKEN is always
+// stripped. The remaining fields carry no env and are copied through. The
+// input is never mutated.
+func redactCreateInputsForResponse(ci *AgentCreateInputs, canAttach bool) *AgentCreateInputs {
+	if ci == nil {
+		return nil
+	}
+	copied := *ci
+	copied.InlineConfig = redactInlineConfigForResponse(ci.InlineConfig, canAttach)
+	if ci.ThinkingLevel != nil {
+		level := *ci.ThinkingLevel
+		copied.ThinkingLevel = &level
+	}
+	return &copied
+}
+
+// redactInlineConfigForResponse returns a deep copy of cfg suitable for a
+// response body: Env and the Telemetry cloud-export header map are cleared
+// unless canAttach is true, and GITHUB_TOKEN is stripped from Env
+// unconditionally, mirroring AgentAppliedConfig's own top-level rule (see
+// ResponseView/MarshalJSON above). The input is never mutated.
+//
+// This redaction lives here, in the response-view copy, and deliberately
+// not as a MarshalJSON method on api.ScionConfig or api.TelemetryConfig:
+// marshalAppliedConfig's persistence path (pkg/store/entadapter) bypasses
+// AgentAppliedConfig's own MarshalJSON via a local alias type, but that
+// alias trick only defeats a MarshalJSON defined on AgentAppliedConfig
+// itself -- encoding/json would still invoke a MarshalJSON defined on the
+// *nested* ScionConfig/TelemetryConfig types when it reaches the
+// InlineConfig field, alias or no alias, which would silently gate what
+// gets written to the DB. Redacting in this copy instead of in a nested
+// MarshalJSON keeps persistence and the response view fully decoupled: this
+// function's caller (ResponseView) is only ever reached from response
+// serialization code, never from marshalAppliedConfig.
+func redactInlineConfigForResponse(cfg *api.ScionConfig, canAttach bool) *api.ScionConfig {
+	if cfg == nil {
+		return nil
+	}
+	copied := *cfg
+	if !canAttach {
+		copied.Env = nil
+	} else if len(cfg.Env) > 0 {
+		env := make(map[string]string, len(cfg.Env))
+		for k, v := range cfg.Env {
+			if k == "GITHUB_TOKEN" {
+				continue
+			}
+			env[k] = v
+		}
+		if len(env) == 0 {
+			env = nil
+		}
+		copied.Env = env
+	}
+	copied.Telemetry = redactTelemetryForResponse(cfg.Telemetry, canAttach)
+	return &copied
+}
+
+// redactTelemetryForResponse returns a deep copy of cfg with the cloud-export
+// header map (which routinely carries authorization values for the OTLP
+// collector) cleared unless canAttach is true. Every other field is copied
+// through unchanged. The input is never mutated.
+func redactTelemetryForResponse(cfg *api.TelemetryConfig, canAttach bool) *api.TelemetryConfig {
+	if cfg == nil {
+		return nil
+	}
+	copied := *cfg
+	if cfg.Cloud != nil {
+		cloud := *cfg.Cloud
+		if !canAttach {
+			cloud.Headers = nil
+		} else if len(cfg.Cloud.Headers) > 0 {
+			headers := make(map[string]string, len(cfg.Cloud.Headers))
+			for k, v := range cfg.Cloud.Headers {
+				headers[k] = v
+			}
+			cloud.Headers = headers
+		}
+		copied.Cloud = &cloud
+	}
+	return &copied
+}
+
+// MarshalJSON is the single choke point through which AppliedConfig.Env can
+// reach a JSON encoding. By default (envResponseVisible false, the zero
+// value) Env is omitted entirely; ResponseView is the only way to make it
+// visible, and even then GITHUB_TOKEN is stripped. See the envResponseVisible
+// field doc for why this is safe for both the DB-persistence and the
+// decoding paths.
+func (ac AgentAppliedConfig) MarshalJSON() ([]byte, error) {
+	type Alias AgentAppliedConfig
+	out := Alias(ac)
+	if !ac.envResponseVisible {
+		out.Env = nil
+	} else if len(out.Env) > 0 {
+		filtered := make(map[string]string, len(out.Env))
+		for k, v := range out.Env {
+			if k == "GITHUB_TOKEN" {
+				continue
+			}
+			filtered[k] = v
+		}
+		if len(filtered) == 0 {
+			filtered = nil
+		}
+		out.Env = filtered
+	}
+	return json.Marshal(out)
+}
+
+// AgentCreateInputs snapshots the explicit request-level inputs an agent was
+// created with, independent of anything the template/harness-config/hub
+// defaults later filled in on top of them. `scion reincarnate` (design
+// /scion-volumes/scratchpad/projects/agent-migrate/design.md §3.3 Amendment
+// A1) replays these — plus its own request overrides — through the same
+// derivation resolveDerivedConfig applies at create, against a freshly built
+// AgentAppliedConfig. It must never call resolveDerivedConfig on the
+// existing (already-derived, possibly stale) AppliedConfig: several fields
+// (Image, Model, Env, HarnessAuth, Workspace, Branch) are dual-purpose —
+// resolveDerivedConfig and populateAgentConfig only fill them in when empty,
+// so a later read of AppliedConfig alone cannot tell "the requester set
+// this" from "the template/hub defaulted it".
+//
+// Deliberately excludes Task: reincarnate's hub-built preamble plus handoff
+// always replaces it, so the original create-time task is never replayed.
+type AgentCreateInputs struct {
+	// InlineConfig is a deep copy of the request's Config (ScionConfig) as
+	// given at create time, before resolveDerivedConfig had a chance to stamp
+	// hub-level defaults (e.g. telemetry, auto-expose-ports env) into it.
+	InlineConfig *api.ScionConfig `json:"inlineConfig,omitempty"`
+
+	// HarnessConfig is the harness-config name as it was at create time
+	// (explicit request value, or whatever default resolution supplied it
+	// before the template/harness-config default was resolved — for Phase 1
+	// this is simply kept verbatim; see design §3.6a for the future
+	// --harness override).
+	HarnessConfig string `json:"harnessConfig,omitempty"`
+
+	// HarnessAuth is the explicit auth-type request value, captured before
+	// the auto-no-auth fallback (resolveDerivedConfig) may have overwritten
+	// it with "none".
+	HarnessAuth string `json:"harnessAuth,omitempty"`
+
+	Profile       string `json:"profile,omitempty"`
+	ThinkingLevel *int   `json:"thinkingLevel,omitempty"`
+
+	// NoAuth is the explicit no-credentials request, captured AFTER the
+	// role=none -> req.NoAuth mapping (handlers_agents_core.go) so that a
+	// role-derived NoAuth is preserved exactly like an explicitly-requested
+	// one — role is itself a kept field, so its NoAuth consequence must be
+	// too. Reincarnate ORs this with the auto-no-auth outcome
+	// (HarnessAuth=="none") rather than overwriting it, so neither source can
+	// clear the other; see buildFreshAppliedConfig.
+	NoAuth bool `json:"noAuth,omitempty"`
+
+	// Branch and Workspace are the raw request values (possibly empty),
+	// captured before populateAgentConfig's project-derived defaulting
+	// (hub-managed workspace path, shared-workspace default branch) ran.
+	Branch    string `json:"branch,omitempty"`
+	Workspace string `json:"workspace,omitempty"`
 }
 
 // Project type constants.
@@ -332,48 +554,6 @@ type Project struct {
 	OwnerName         string `json:"ownerName,omitempty"`   // Enriched: resolved from OwnerID
 }
 
-// MarshalJSON implements custom marshaling to support legacy grove fields.
-func (p Project) MarshalJSON() ([]byte, error) {
-	type Alias Project
-	return json.Marshal(&struct {
-		Alias
-		ProjectID string `json:"groveId"`
-		GroveName string `json:"groveName"`
-		Grove     string `json:"grove"`
-	}{
-		Alias:     Alias(p),
-		ProjectID: p.ID,
-		GroveName: p.Name,
-		Grove:     p.Slug,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
-func (p *Project) UnmarshalJSON(data []byte) error {
-	type Alias Project
-	aux := &struct {
-		GroveID   string `json:"groveId"`
-		GroveName string `json:"groveName"`
-		Grove     string `json:"grove"`
-		*Alias
-	}{
-		Alias: (*Alias)(p),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if p.ID == "" && aux.GroveID != "" {
-		p.ID = aux.GroveID
-	}
-	if p.Name == "" && aux.GroveName != "" {
-		p.Name = aux.GroveName
-	}
-	if p.Slug == "" && aux.Grove != "" {
-		p.Slug = aux.Grove
-	}
-	return nil
-}
-
 // IsSharedWorkspace returns true if this is a git project configured to use a
 // single shared workspace clone instead of per-agent clones.
 func (p *Project) IsSharedWorkspace() bool {
@@ -449,6 +629,11 @@ type BrokerCapabilities struct {
 	WebPTY bool `json:"webPty"`
 	Sync   bool `json:"sync"`
 	Attach bool `json:"attach"`
+	// Reprovision indicates the broker supports the reincarnation reprovision
+	// primitive. The hub gates `scion reincarnate` on this, returning 412 when
+	// unset (design /scion-volumes/scratchpad/projects/agent-migrate/design.md
+	// §5 "Broker/hub version skew").
+	Reprovision bool `json:"reprovision"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.
@@ -472,36 +657,6 @@ type ProjectProvider struct {
 	// Ownership - tracks who linked this broker to the project
 	LinkedBy string    `json:"linkedBy,omitempty"` // User ID who performed the link
 	LinkedAt time.Time `json:"linkedAt,omitempty"` // Timestamp when the link was created
-}
-
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (p ProjectProvider) MarshalJSON() ([]byte, error) {
-	type Alias ProjectProvider
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId"`
-	}{
-		Alias:   Alias(p),
-		GroveID: p.ProjectID,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (p *ProjectProvider) UnmarshalJSON(data []byte) error {
-	type Alias ProjectProvider
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(p),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if p.ProjectID == "" && aux.GroveID != "" {
-		p.ProjectID = aux.GroveID
-	}
-	return nil
 }
 
 // Template represents an agent template in the Hub database.
@@ -541,45 +696,14 @@ type Template struct {
 	Status string `json:"status"` // pending, active, archived
 
 	// Ownership
-	OwnerID    string `json:"ownerId,omitempty"`
-	CreatedBy  string `json:"createdBy,omitempty"`
-	UpdatedBy  string `json:"updatedBy,omitempty"`
-	SourceURL  string `json:"sourceUrl,omitempty"`
-	Visibility string `json:"visibility"` // private, project, public
+	OwnerID   string `json:"ownerId,omitempty"`
+	CreatedBy string `json:"createdBy,omitempty"`
+	UpdatedBy string `json:"updatedBy,omitempty"`
+	SourceURL string `json:"sourceUrl,omitempty"`
 
 	// Timestamps
 	Created time.Time `json:"created"`
 	Updated time.Time `json:"updated"`
-}
-
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (t Template) MarshalJSON() ([]byte, error) {
-	type Alias Template
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId,omitempty"`
-	}{
-		Alias:   Alias(t),
-		GroveID: t.ProjectID,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (t *Template) UnmarshalJSON(data []byte) error {
-	type Alias Template
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(t),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if t.ProjectID == "" && aux.GroveID != "" {
-		t.ProjectID = aux.GroveID
-	}
-	return nil
 }
 
 // TemplateFile represents a file within a template.
@@ -639,11 +763,10 @@ type HarnessConfig struct {
 	ImageStatusCheckedAt *time.Time `json:"imageStatusCheckedAt,omitempty"` // last image check timestamp
 
 	// Ownership
-	OwnerID    string `json:"ownerId,omitempty"`
-	CreatedBy  string `json:"createdBy,omitempty"`
-	UpdatedBy  string `json:"updatedBy,omitempty"`
-	SourceURL  string `json:"sourceUrl,omitempty"`
-	Visibility string `json:"visibility"` // private, project, public
+	OwnerID   string `json:"ownerId,omitempty"`
+	CreatedBy string `json:"createdBy,omitempty"`
+	UpdatedBy string `json:"updatedBy,omitempty"`
+	SourceURL string `json:"sourceUrl,omitempty"`
 
 	// Timestamps
 	Created time.Time `json:"created"`
@@ -1007,36 +1130,6 @@ type NotificationSubscription struct {
 	CreatedBy         string    `json:"createdBy"`
 }
 
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (s NotificationSubscription) MarshalJSON() ([]byte, error) {
-	type Alias NotificationSubscription
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId"`
-	}{
-		Alias:   Alias(s),
-		GroveID: s.ProjectID,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (s *NotificationSubscription) UnmarshalJSON(data []byte) error {
-	type Alias NotificationSubscription
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(s),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if s.ProjectID == "" && aux.GroveID != "" {
-		s.ProjectID = aux.GroveID
-	}
-	return nil
-}
-
 // MatchesActivity returns true if the given activity matches any of the subscription's
 // trigger activities. Comparison is case-insensitive.
 func (s *NotificationSubscription) MatchesActivity(activity string) bool {
@@ -1060,36 +1153,6 @@ type SubscriptionTemplate struct {
 	CreatedBy         string   `json:"createdBy"`
 }
 
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (t SubscriptionTemplate) MarshalJSON() ([]byte, error) {
-	type Alias SubscriptionTemplate
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId,omitempty"`
-	}{
-		Alias:   Alias(t),
-		GroveID: t.ProjectID,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (t *SubscriptionTemplate) UnmarshalJSON(data []byte) error {
-	type Alias SubscriptionTemplate
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(t),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if t.ProjectID == "" && aux.GroveID != "" {
-		t.ProjectID = aux.GroveID
-	}
-	return nil
-}
-
 // Notification represents a notification record generated from a subscription match.
 type Notification struct {
 	ID             string    `json:"id"`             // UUID primary key
@@ -1103,36 +1166,6 @@ type Notification struct {
 	Dispatched     bool      `json:"dispatched"`   // Whether dispatch was attempted
 	Acknowledged   bool      `json:"acknowledged"` // Whether acknowledged (for human targets)
 	CreatedAt      time.Time `json:"createdAt"`
-}
-
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (n Notification) MarshalJSON() ([]byte, error) {
-	type Alias Notification
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId"`
-	}{
-		Alias:   Alias(n),
-		GroveID: n.ProjectID,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (n *Notification) UnmarshalJSON(data []byte) error {
-	type Alias Notification
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(n),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if n.ProjectID == "" && aux.GroveID != "" {
-		n.ProjectID = aux.GroveID
-	}
-	return nil
 }
 
 // ListOptions provides pagination and filtering for list operations.
@@ -1549,36 +1582,6 @@ type UserAccessToken struct {
 	Created   time.Time  `json:"created"`
 }
 
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (t UserAccessToken) MarshalJSON() ([]byte, error) {
-	type Alias UserAccessToken
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId"`
-	}{
-		Alias:   Alias(t),
-		GroveID: t.ProjectID,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (t *UserAccessToken) UnmarshalJSON(data []byte) error {
-	type Alias UserAccessToken
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(t),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if t.ProjectID == "" && aux.GroveID != "" {
-		t.ProjectID = aux.GroveID
-	}
-	return nil
-}
-
 // UATPrefix is the token prefix that distinguishes UATs from other token types.
 const UATPrefix = "scion_pat_"
 
@@ -1773,36 +1776,6 @@ type Message struct {
 	DispatchFailureReason *string    `json:"dispatchFailureReason,omitempty"`
 }
 
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (m Message) MarshalJSON() ([]byte, error) {
-	type Alias Message
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId"`
-	}{
-		Alias:   Alias(m),
-		GroveID: m.ProjectID,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (m *Message) UnmarshalJSON(data []byte) error {
-	type Alias Message
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(m),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if m.ProjectID == "" && aux.GroveID != "" {
-		m.ProjectID = aux.GroveID
-	}
-	return nil
-}
-
 // MessageFilter defines query parameters for listing messages.
 type MessageFilter struct {
 	ProjectID   string // Filter by project
@@ -1906,36 +1879,6 @@ type ScheduledEvent struct {
 	ScheduleID string     `json:"scheduleId,omitempty"` // FK to schedules.id for recurring schedule fires
 }
 
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (e ScheduledEvent) MarshalJSON() ([]byte, error) {
-	type Alias ScheduledEvent
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId"`
-	}{
-		Alias:   Alias(e),
-		GroveID: e.ProjectID,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (e *ScheduledEvent) UnmarshalJSON(data []byte) error {
-	type Alias ScheduledEvent
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(e),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if e.ProjectID == "" && aux.GroveID != "" {
-		e.ProjectID = aux.GroveID
-	}
-	return nil
-}
-
 // ScheduledEventStatus constants
 const (
 	ScheduledEventPending   = "pending"
@@ -1975,36 +1918,6 @@ type Schedule struct {
 	CreatedAt     time.Time  `json:"createdAt"`
 	CreatedBy     string     `json:"createdBy,omitempty"`
 	UpdatedAt     time.Time  `json:"updatedAt"`
-}
-
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (s Schedule) MarshalJSON() ([]byte, error) {
-	type Alias Schedule
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId"`
-	}{
-		Alias:   Alias(s),
-		GroveID: s.ProjectID,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (s *Schedule) UnmarshalJSON(data []byte) error {
-	type Alias Schedule
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(s),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if s.ProjectID == "" && aux.GroveID != "" {
-		s.ProjectID = aux.GroveID
-	}
-	return nil
 }
 
 // ScheduleStatus constants
@@ -2066,10 +1979,9 @@ func (a *Agent) ToAPI() *api.AgentInfo {
 		DeletedAt: a.DeletedAt,
 
 		// Ownership
-		CreatedBy:  a.CreatedBy,
-		OwnerID:    a.OwnerID,
-		Visibility: a.Visibility,
-		Ancestry:   a.Ancestry,
+		CreatedBy: a.CreatedBy,
+		OwnerID:   a.OwnerID,
+		Ancestry:  a.Ancestry,
 
 		// Optimistic locking
 		StateVersion: a.StateVersion,
@@ -2246,36 +2158,6 @@ type ProjectSyncState struct {
 	TotalBytes    int64      `json:"totalBytes"`
 }
 
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (s ProjectSyncState) MarshalJSON() ([]byte, error) {
-	type Alias ProjectSyncState
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId"`
-	}{
-		Alias:   Alias(s),
-		GroveID: s.ProjectID,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (s *ProjectSyncState) UnmarshalJSON(data []byte) error {
-	type Alias ProjectSyncState
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(s),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if s.ProjectID == "" && aux.GroveID != "" {
-		s.ProjectID = aux.GroveID
-	}
-	return nil
-}
-
 // =============================================================================
 // Skills (Skill Bank)
 // =============================================================================
@@ -2296,7 +2178,6 @@ type Skill struct {
 	OwnerID       string    `json:"ownerId,omitempty"`
 	CreatedBy     string    `json:"createdBy,omitempty"`
 	UpdatedBy     string    `json:"updatedBy,omitempty"`
-	Visibility    string    `json:"visibility"`
 	Created       time.Time `json:"created"`
 	Updated       time.Time `json:"updated"`
 }
@@ -2631,34 +2512,20 @@ type AgentCredential struct {
 	LastSeenAt   *time.Time `json:"last_seen_at,omitempty"`
 }
 
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (m AgentSessionMetrics) MarshalJSON() ([]byte, error) {
-	type Alias AgentSessionMetrics
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId"`
-	}{
-		Alias:   Alias(m),
-		GroveID: m.ProjectID,
-	})
-}
+// =============================================================================
+// Agent Identity Keys (per-project display-name / slug uniqueness)
+// =============================================================================
 
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (m *AgentSessionMetrics) UnmarshalJSON(data []byte) error {
-	type Alias AgentSessionMetrics
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(m),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if m.ProjectID == "" && aux.GroveID != "" {
-		m.ProjectID = aux.GroveID
-	}
-	return nil
+// AgentIdentityKey is one reserved identity key for an agent within a
+// project. Each agent reserves a row for every distinct value in
+// {slug, slugify(displayName)}; the store enforces UNIQUE(project_id, key)
+// as a database invariant. Rows persist while the owning agent is
+// soft-deleted and are removed only on hard delete.
+type AgentIdentityKey struct {
+	ID        string `json:"id"`
+	ProjectID string `json:"project_id"`
+	Key       string `json:"key"`
+	AgentID   string `json:"agent_id"`
 }
 
 // =============================================================================
@@ -2792,6 +2659,16 @@ const (
 const (
 	QuotaScopeSystem  = "system"
 	QuotaScopeProject = "project"
+	// QuotaScopeBroker scopes a limit to a single runtime broker rather than a
+	// user, project, or the whole Hub. See LimitMaxAgentsPerBroker: a broker is
+	// where the resource-exhaustion risk actually lives (it is the process
+	// that spawns agent containers on a specific host), so a safety ceiling
+	// must be scoped to it — a per-user or per-project scope would not stop
+	// one overloaded broker's host from being taken down by agents created by
+	// many different users across many different projects that all happen to
+	// dispatch to it, and a hub-wide scope would wrongly couple brokers with
+	// different host capacity together.
+	QuotaScopeBroker = "broker"
 )
 
 // System limit definition names
@@ -2799,6 +2676,16 @@ const (
 	LimitMaxAgentsPerProject = "max_agents_per_project"
 	LimitMaxProjectsPerUser  = "max_projects_per_user"
 	LimitMaxMembersPerGroup  = "max_members_per_group"
+	// LimitMaxAgentsPerBroker is the per-runtime-broker ceiling on
+	// concurrently live agents (ptone/scion#1303). Unlike the other system
+	// limits, which are opt-in fairness quotas seeded unlimited and scoped to
+	// a user/project, this one is a crash-prevention safety gate scoped to
+	// infrastructure (QuotaScopeBroker, scope_id=runtime broker ID): the
+	// broker is the process that actually spawns agent containers on a given
+	// host, so it is what can be OOM-killed or SIGBUS-crashed by too many of
+	// them, regardless of which project or user created them. It is seeded
+	// with a non-zero default rather than 0/unlimited. See seedLimitDefinitions.
+	LimitMaxAgentsPerBroker = "max_agents_per_broker"
 )
 
 // =============================================================================

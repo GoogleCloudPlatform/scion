@@ -30,6 +30,7 @@ import type {
   AgentPhase,
   Capabilities,
   ProjectSessionMetricsSummary,
+  AgentLifecycleAction,
 } from '../../shared/types.js';
 import {
   can,
@@ -39,6 +40,8 @@ import {
   isAgentRunning,
   isTerminalAvailable,
   isSharedWorkspace,
+  RESUME_BEST_EFFORT_CONFIRM_MESSAGE,
+  lifecycleActionRequestInit,
 } from '../../shared/types.js';
 import type { StatusType } from '../shared/status-badge.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
@@ -1272,9 +1275,21 @@ export class ScionPageProjectDetail extends LitElement {
 
   private async handleAgentAction(
     agentId: string,
-    action: 'start' | 'stop' | 'suspend' | 'resume' | 'delete',
+    action: AgentLifecycleAction,
     event?: MouseEvent
   ): Promise<void> {
+    if (action === 'force-resume') {
+      if (
+        !(await showConfirm(RESUME_BEST_EFFORT_CONFIRM_MESSAGE, {
+          title: 'Resume (best effort)',
+          confirmText: 'Resume',
+          variant: 'primary',
+        }))
+      ) {
+        return;
+      }
+    }
+
     if (action === 'delete') {
       const agentName = this.agents.find((a) => a.id === agentId)?.name ?? 'this agent';
       if (
@@ -1313,6 +1328,7 @@ export class ScionPageProjectDetail extends LitElement {
       stop: 'stopping',
       suspend: 'stopping',
       resume: 'starting',
+      'force-resume': 'starting',
     };
     const agentIndex = this.agents.findIndex((a) => a.id === agentId);
     if (agentIndex >= 0) {
@@ -1327,10 +1343,11 @@ export class ScionPageProjectDetail extends LitElement {
       stop: `/api/v1/agents/${agentId}/stop`,
       suspend: `/api/v1/agents/${agentId}/suspend`,
       resume: `/api/v1/agents/${agentId}/start`,
+      'force-resume': `/api/v1/agents/${agentId}/start`,
     };
 
     try {
-      const response = await apiFetch(actionUrls[action], { method: 'POST' });
+      const response = await apiFetch(actionUrls[action], lifecycleActionRequestInit(action));
 
       if (!response.ok) {
         throw new Error(await extractApiError(response, `Failed to ${action} agent`));
@@ -2425,6 +2442,22 @@ export class ScionPageProjectDetail extends LitElement {
                   : nothing
                 : canLifecycle(agent._capabilities)
                   ? html`
+                      ${agent.phase === 'error'
+                        ? html`
+                            <sl-tooltip content="Resume (best effort)">
+                              <sl-button
+                                size="small"
+                                outline
+                                ?loading=${isLoading}
+                                ?disabled=${isLoading}
+                                @click=${() => this.handleAgentAction(agent.id, 'force-resume')}
+                                aria-label="Resume (best effort)"
+                              >
+                                <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+                              </sl-button>
+                            </sl-tooltip>
+                          `
+                        : nothing}
                       <sl-tooltip content="Start">
                         <sl-button
                           variant="success"
@@ -2570,6 +2603,22 @@ export class ScionPageProjectDetail extends LitElement {
                 : nothing
               : canLifecycle(agent._capabilities)
                 ? html`
+                    ${agent.phase === 'error'
+                      ? html`
+                          <sl-tooltip content="Resume (best effort)">
+                            <sl-button
+                              size="small"
+                              outline
+                              ?loading=${isLoading}
+                              ?disabled=${isLoading}
+                              @click=${() => this.handleAgentAction(agent.id, 'force-resume')}
+                              aria-label="Resume (best effort)"
+                            >
+                              <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+                            </sl-button>
+                          </sl-tooltip>
+                        `
+                      : nothing}
                     <sl-tooltip content="Start">
                       <sl-button
                         variant="success"

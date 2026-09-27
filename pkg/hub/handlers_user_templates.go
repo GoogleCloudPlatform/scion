@@ -178,12 +178,7 @@ func (s *Server) createUserTemplate(w http.ResponseWriter, r *http.Request) {
 		OwnerID:      userIdent.ID(),
 		CreatedBy:    userIdent.ID(),
 		BaseTemplate: req.BaseTemplate,
-		Visibility:   req.Visibility,
 		Status:       store.TemplateStatusPending,
-	}
-
-	if template.Visibility == "" {
-		template.Visibility = store.VisibilityPrivate
 	}
 
 	// Generate storage path and URI

@@ -1,0 +1,14 @@
+{
+  "auth_candidates": {
+    "schema_version": 1,
+    "explicit_type": "vertex-ai",
+    "env_vars": [],
+    "env_secret_files": {
+      "GOOGLE_CLOUD_PROJECT": "$HOME/.scion/harness/secrets/GOOGLE_CLOUD_PROJECT",
+      "GOOGLE_CLOUD_LOCATION": "$HOME/.scion/harness/secrets/GOOGLE_CLOUD_LOCATION"
+    },
+    "file_secret_files": {},
+    "files": []
+  },
+  "harness_config": {}
+}

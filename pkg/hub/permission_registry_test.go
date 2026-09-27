@@ -115,10 +115,13 @@ func TestAgentTokenScopesMapToRegistry(t *testing.T) {
 		// been failing on main since. The scope constant documents itself as
 		// covering "agents, templates, skills, harness configs, projects", so the
 		// widening is intended - it just was not recorded here.
+		// ptone/scion#1968 adds skill.read/list (agents read skills).
 		ScopeProjectRead: {
 			"harness_config.list",
 			"harness_config.read",
 			"project.read",
+			"skill.list",
+			"skill.read",
 			"template.list",
 			"template.read",
 		},

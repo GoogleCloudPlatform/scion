@@ -261,7 +261,10 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 
 	// ── Step 7: Create members group (collaboration) ─────────────────────
 	// The group exists for collaboration; authorization is via RoleBindings.
-	s.createProjectMembersGroup(ctx, clone, callerID)
+	// clone.CreatedBy is already callerID (set at construction), so the
+	// creator-membership grant inside createProjectMembersGroup covers the
+	// caller here; no separate caller argument is needed.
+	s.createProjectMembersGroup(ctx, clone)
 
 	// ── Step 8: Deep-copy project-scoped harness configs ─────────────────
 
@@ -432,7 +435,6 @@ func (s *Server) cloneProjectHarnessConfigs(ctx context.Context, srcProjectID st
 			Config:      srcHC.Config,
 			Scope:       store.HarnessConfigScopeProject,
 			ScopeID:     clone.ID,
-			Visibility:  srcHC.Visibility,
 			Status:      srcHC.Status,
 			Files:       srcHC.Files,
 			ContentHash: srcHC.ContentHash,
@@ -511,7 +513,6 @@ func (s *Server) cloneProjectTemplates(ctx context.Context, srcProjectID string,
 			Config:       srcTmpl.Config,
 			Scope:        store.TemplateScopeProject,
 			ScopeID:      clone.ID,
-			Visibility:   srcTmpl.Visibility,
 			Status:       srcTmpl.Status,
 			Files:        srcTmpl.Files,
 			ContentHash:  srcTmpl.ContentHash,

@@ -18,7 +18,6 @@ package hub
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -204,8 +203,10 @@ func doAnonymousRequest(srv *Server, path string) *httptest.ResponseRecorder {
 }
 
 // TestSkillFiles_ReadAuthz verifies that skill file reads and /download
-// enforce visibility: private skills require an identity with read access,
-// public skills are readable anonymously.
+// enforce the scope check unconditionally: a skill requires an identity with
+// read access, and there is no visibility bypass — anonymous requests are
+// always denied, even for a skill that would formerly have been marked
+// public (ptone/scion#1903: visibility removed, no longer widens reads).
 func TestSkillFiles_ReadAuthz(t *testing.T) {
 	srv, alice, bob, skill := setupLocalStorageSkillTest(t)
 	content := []byte("---\nname: secret\n---\n# Secret")
@@ -214,46 +215,42 @@ func TestSkillFiles_ReadAuthz(t *testing.T) {
 	fileURL := "/api/v1/skills/" + skill.ID + "/files/SKILL.md?version=1.0.0"
 	downloadURL := "/api/v1/skills/" + skill.ID + "/download?version=1.0.0"
 
-	// Private skill.
-	t.Run("private/anonymous file read denied", func(t *testing.T) {
+	t.Run("anonymous file read denied", func(t *testing.T) {
 		rec := doAnonymousRequest(srv, fileURL)
 		assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 		assert.NotContains(t, rec.Body.String(), "Secret")
 	})
-	t.Run("private/anonymous download denied", func(t *testing.T) {
+	t.Run("anonymous download denied", func(t *testing.T) {
 		rec := doAnonymousRequest(srv, downloadURL)
 		assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 		assert.NotContains(t, rec.Body.String(), "/files/")
 	})
-	t.Run("private/no-access user file read denied", func(t *testing.T) {
+	t.Run("no-access user file read denied", func(t *testing.T) {
 		rec := doRawRequestAsUser(t, srv, bob, http.MethodGet, fileURL, nil)
 		assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 	})
-	t.Run("private/no-access user download denied", func(t *testing.T) {
+	t.Run("no-access user download denied", func(t *testing.T) {
 		rec := doRequestAsUser(t, srv, bob, http.MethodGet, downloadURL, nil)
 		assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 	})
-	t.Run("private/authorized user file read allowed", func(t *testing.T) {
+	t.Run("authorized user file read allowed", func(t *testing.T) {
 		rec := doRawRequestAsUser(t, srv, alice, http.MethodGet, fileURL, nil)
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		assert.Equal(t, content, rec.Body.Bytes())
 	})
-	t.Run("private/authorized user download allowed", func(t *testing.T) {
+	t.Run("authorized user download allowed", func(t *testing.T) {
 		rec := doRequestAsUser(t, srv, alice, http.MethodGet, downloadURL, nil)
 		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	})
 
-	// Public skill: readable without identity.
-	skill.Visibility = store.VisibilityPublic
-	require.NoError(t, srv.store.UpdateSkill(context.Background(), skill))
-
-	t.Run("public/anonymous file read allowed", func(t *testing.T) {
+	// A skill that would formerly have been marked public no longer gets any
+	// anonymous access: visibility no longer widens reads.
+	t.Run("formerly-public anonymous file read still denied", func(t *testing.T) {
 		rec := doAnonymousRequest(srv, fileURL)
-		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-		assert.Equal(t, content, rec.Body.Bytes())
+		assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 	})
-	t.Run("public/anonymous download allowed", func(t *testing.T) {
+	t.Run("formerly-public anonymous download still denied", func(t *testing.T) {
 		rec := doAnonymousRequest(srv, downloadURL)
-		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 	})
 }

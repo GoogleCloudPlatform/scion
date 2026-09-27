@@ -32,8 +32,6 @@ const (
 	FieldOwnerID = "owner_id"
 	// FieldDelegationEnabled holds the string denoting the delegation_enabled field in the database.
 	FieldDelegationEnabled = "delegation_enabled"
-	// FieldVisibility holds the string denoting the visibility field in the database.
-	FieldVisibility = "visibility"
 	// FieldMessageMode holds the string denoting the message_mode field in the database.
 	FieldMessageMode = "message_mode"
 	// FieldLabels holds the string denoting the labels field in the database.
@@ -96,6 +94,12 @@ const (
 	FieldDeletedAt = "deleted_at"
 	// FieldStateVersion holds the string denoting the state_version field in the database.
 	FieldStateVersion = "state_version"
+	// FieldGeneration holds the string denoting the generation field in the database.
+	FieldGeneration = "generation"
+	// FieldReincarnationState holds the string denoting the reincarnation_state field in the database.
+	FieldReincarnationState = "reincarnation_state"
+	// FieldReincarnationUpdatedAt holds the string denoting the reincarnation_updated_at field in the database.
+	FieldReincarnationUpdatedAt = "reincarnation_updated_at"
 	// EdgeProject holds the string denoting the project edge name in mutations.
 	EdgeProject = "project"
 	// EdgeMemberships holds the string denoting the memberships edge name in mutations.
@@ -138,7 +142,6 @@ var Columns = []string{
 	FieldCreatedBy,
 	FieldOwnerID,
 	FieldDelegationEnabled,
-	FieldVisibility,
 	FieldMessageMode,
 	FieldLabels,
 	FieldAnnotations,
@@ -170,6 +173,9 @@ var Columns = []string{
 	FieldStartedAt,
 	FieldDeletedAt,
 	FieldStateVersion,
+	FieldGeneration,
+	FieldReincarnationState,
+	FieldReincarnationUpdatedAt,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -189,8 +195,6 @@ var (
 	NameValidator func(string) error
 	// DefaultDelegationEnabled holds the default value on creation for the "delegation_enabled" field.
 	DefaultDelegationEnabled bool
-	// DefaultVisibility holds the default value on creation for the "visibility" field.
-	DefaultVisibility string
 	// DefaultCurrentTurns holds the default value on creation for the "current_turns" field.
 	DefaultCurrentTurns int
 	// DefaultCurrentModelCalls holds the default value on creation for the "current_model_calls" field.
@@ -207,6 +211,10 @@ var (
 	UpdateDefaultUpdated func() time.Time
 	// DefaultStateVersion holds the default value on creation for the "state_version" field.
 	DefaultStateVersion int64
+	// DefaultGeneration holds the default value on creation for the "generation" field.
+	DefaultGeneration int
+	// DefaultReincarnationState holds the default value on creation for the "reincarnation_state" field.
+	DefaultReincarnationState string
 	// DefaultID holds the default value on creation for the "id" field.
 	DefaultID func() uuid.UUID
 )
@@ -319,11 +327,6 @@ func ByOwnerID(opts ...sql.OrderTermOption) OrderOption {
 // ByDelegationEnabled orders the results by the delegation_enabled field.
 func ByDelegationEnabled(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldDelegationEnabled, opts...).ToFunc()
-}
-
-// ByVisibility orders the results by the visibility field.
-func ByVisibility(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldVisibility, opts...).ToFunc()
 }
 
 // ByMessageMode orders the results by the message_mode field.
@@ -459,6 +462,21 @@ func ByDeletedAt(opts ...sql.OrderTermOption) OrderOption {
 // ByStateVersion orders the results by the state_version field.
 func ByStateVersion(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldStateVersion, opts...).ToFunc()
+}
+
+// ByGeneration orders the results by the generation field.
+func ByGeneration(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldGeneration, opts...).ToFunc()
+}
+
+// ByReincarnationState orders the results by the reincarnation_state field.
+func ByReincarnationState(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldReincarnationState, opts...).ToFunc()
+}
+
+// ByReincarnationUpdatedAt orders the results by the reincarnation_updated_at field.
+func ByReincarnationUpdatedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldReincarnationUpdatedAt, opts...).ToFunc()
 }
 
 // ByProjectField orders the results by project field.

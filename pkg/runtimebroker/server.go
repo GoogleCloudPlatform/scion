@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -929,6 +930,30 @@ func (s *Server) Start(ctx context.Context) error {
 		)
 	}
 
+	// Runtime broker boot hook: warn about legacy environment variables
+	// scion no longer reads, before scanning projects/. This is the
+	// broker-boot half of the legacy-migration hook points;
+	// the CLI equivalent is Execute()/rootCmd.PersistentPreRunE in
+	// cmd/root.go (skipped for "start" under the "server"/"runtime-broker"
+	// subtree — this hook reports instead), and the hub equivalent is
+	// cmd/server_foreground.go:runServerStart. Both this hook and the hub's
+	// share config's process-wide sync.Once (WarnRemovedLegacyEnvOnce), so
+	// a combined `--enable-hub --enable-runtime-broker` process reports
+	// once, not twice. On-disk layout migration is expected to run at this
+	// same hook point.
+	config.WarnRemovedLegacyEnvOnce(os.Getenv, config.NewSlogReporter())
+	// Per-project migration (config.ReadProjectID, as projects load) reports
+	// through slog here too. This is already the default, but set it
+	// explicitly so all three boot hooks (CLI, hub, broker) are visible at
+	// their call sites.
+	config.SetProjectMigrationReporter(config.NewSlogReporter())
+	// Migrate the global ~/.scion layout before scanning projects/ below.
+	if globalDir, err := config.GetGlobalDir(); err == nil {
+		config.MigrateLegacyGlobalLayoutOnce(globalDir, config.NewSlogReporter())
+	} else {
+		slog.Warn("skipping legacy layout migration: could not resolve global directory", "error", err)
+	}
+
 	// Discover auxiliary runtimes (e.g. Kubernetes) from project settings
 	// so that agents running on non-default runtimes can be found after
 	// a broker restart.
@@ -1100,6 +1125,40 @@ func (s *Server) discoverAuxiliaryRuntimes() {
 	}
 }
 
+// ErrAgentListUnavailable wraps a runtime.List failure encountered while
+// resolving an agent slug (e.g. LookupAgent, LookupContainerID). It is
+// distinct from "no such agent": the container runtime itself failed to
+// respond (e.g. an intermittent `docker ps` error), so the caller should
+// treat this as retryable rather than reporting the agent as missing.
+var ErrAgentListUnavailable = errors.New("agent runtime listing temporarily unavailable")
+
+// ErrAgentNotFound marks a lookup result from LookupContainerID that must be
+// treated the same as a genuine "no such agent": either the runtime listing
+// succeeded but no agent matched the requested slug/project, or a matching
+// agent record was found but carries no resolvable container id at all (no
+// "scion.container.id" label, no ContainerID, no ID) — e.g. a malformed or
+// partial runtime entry that carries no container id — nothing addressable
+// to stop. In both cases there is nothing present to act on, so callers use
+// errors.Is(err, ErrAgentNotFound) to fold this into the idempotent "not
+// found" path (skip stop, proceed to start on restart) rather than
+// aborting. This is distinct from any other lookup failure (a runtime
+// listing error, an ambiguous match), which reflects a real problem
+// resolving an agent that may well exist and must still be surfaced as an
+// error rather than treated as "not found".
+var ErrAgentNotFound = errors.New("agent not found")
+
+// agentNotFoundError implements the existing "agent '<slug>' not found"
+// message while allowing errors.Is(err, ErrAgentNotFound) to match it.
+type agentNotFoundError struct{ slug string }
+
+func (e *agentNotFoundError) Error() string {
+	return fmt.Sprintf("agent '%s' not found", e.slug)
+}
+
+func (e *agentNotFoundError) Is(target error) bool {
+	return target == ErrAgentNotFound
+}
+
 // LookupContainerID implements AgentLookup interface.
 // It looks up an agent by slug and returns its container ID.
 // projectID scopes the lookup to prevent cross-project collision.
@@ -1110,10 +1169,10 @@ func (s *Server) LookupContainerID(ctx context.Context, slug, projectID string) 
 
 	slug = strings.ToLower(slug)
 
-	filter := map[string]string{"scion.name": slug}
+	filter := scopedNameFilter(slug, projectID)
 	agents, err := s.manager.List(ctx, filter)
 	if err != nil {
-		return "", fmt.Errorf("failed to list agents: %w", err)
+		return "", fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
 	}
 	agents = agentsForProject(agents, projectID)
 
@@ -1170,10 +1229,13 @@ func (s *Server) LookupContainerID(ctx context.Context, slug, projectID string) 
 	}
 
 	if len(agents) == 0 {
-		return "", fmt.Errorf("agent '%s' not found", slug)
+		return "", &agentNotFoundError{slug: slug}
 	}
 
-	agent := agents[0]
+	agent, err := uniqueAgentEntry(slug, agents)
+	if err != nil {
+		return "", err
+	}
 
 	// Get container ID - prefer label, then ContainerID from runtime, then ID
 	containerID := agent.Labels["scion.container.id"]
@@ -1184,7 +1246,7 @@ func (s *Server) LookupContainerID(ctx context.Context, slug, projectID string) 
 		containerID = agent.ID
 	}
 	if containerID == "" {
-		return "", fmt.Errorf("agent '%s' has no container ID", slug)
+		return "", fmt.Errorf("agent '%s' has no container ID: %w", slug, ErrAgentNotFound)
 	}
 
 	return containerID, nil
@@ -1199,17 +1261,24 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 	}
 
 	slug = strings.ToLower(slug)
-	filter := map[string]string{"scion.name": slug}
+	filter := scopedNameFilter(slug, projectID)
 
 	// Try default manager first
 	agents, err := s.manager.List(ctx, filter)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list agents: %w", err)
+		return nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
 	}
 	agents = agentsForProject(agents, projectID)
 
 	runtimeName := s.runtime.Name()
 	var matchedRuntime scionrt.Runtime
+
+	// listUnavailable tracks whether any consulted runtime's List call itself
+	// failed (as opposed to succeeding with zero matches). A failure here must
+	// not be indistinguishable from "no such agent": the caller (the PTY
+	// stream classifier) needs to tell a genuinely missing agent (4404,
+	// terminal) from a runtime that briefly could not answer (4503, retry).
+	var listUnavailable bool
 
 	// Fall back to auxiliary runtimes
 	if len(agents) == 0 {
@@ -1222,10 +1291,12 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 
 		for rtName, aux := range auxRuntimes {
 			auxAgents, auxErr := aux.Manager.List(ctx, filter)
-			if auxErr == nil {
-				auxAgents = agentsForProject(auxAgents, projectID)
+			if auxErr != nil {
+				listUnavailable = true
+				continue
 			}
-			if auxErr == nil && len(auxAgents) > 0 {
+			auxAgents = agentsForProject(auxAgents, projectID)
+			if len(auxAgents) > 0 {
 				agents = auxAgents
 				runtimeName = rtName
 				matchedRuntime = aux.Runtime
@@ -1242,8 +1313,11 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 	if len(agents) == 0 && projectID != "" {
 		fallbackFilter := map[string]string{"scion.name": slug}
 		agents, err = s.manager.List(ctx, fallbackFilter)
+		if err != nil {
+			return nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
+		}
 		agents = agentsWithoutProjectLabel(agents)
-		if err == nil && len(agents) == 0 {
+		if len(agents) == 0 {
 			s.auxiliaryRuntimesMu.RLock()
 			auxRuntimes := make(map[string]auxiliaryRuntime, len(s.auxiliaryRuntimes))
 			for k, v := range s.auxiliaryRuntimes {
@@ -1253,10 +1327,12 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 
 			for rtName, aux := range auxRuntimes {
 				auxAgents, auxErr := aux.Manager.List(ctx, fallbackFilter)
-				if auxErr == nil {
-					auxAgents = agentsWithoutProjectLabel(auxAgents)
+				if auxErr != nil {
+					listUnavailable = true
+					continue
 				}
-				if auxErr == nil && len(auxAgents) > 0 {
+				auxAgents = agentsWithoutProjectLabel(auxAgents)
+				if len(auxAgents) > 0 {
 					agents = auxAgents
 					runtimeName = rtName
 					matchedRuntime = aux.Runtime
@@ -1268,10 +1344,16 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 	}
 
 	if len(agents) == 0 {
+		if listUnavailable {
+			return nil, fmt.Errorf("%w: an auxiliary runtime failed to list agents while resolving '%s'", ErrAgentListUnavailable, slug)
+		}
 		return nil, fmt.Errorf("agent '%s' not found", slug)
 	}
 
-	ag := agents[0]
+	ag, err := uniqueAgentEntry(slug, agents)
+	if err != nil {
+		return nil, err
+	}
 
 	containerID := ag.Labels["scion.container.id"]
 	if containerID == "" {
@@ -1313,6 +1395,55 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 	}
 
 	return result, nil
+}
+
+// scopedNameFilter builds the Runtime.List label filter for a slug lookup,
+// including the project scope label when a project is known so that runtimes
+// can narrow the listing themselves (ptone/scion#1819). Every runtime's List
+// also honours the legacy grove_id label for the project_id key.
+func scopedNameFilter(slug, projectID string) map[string]string {
+	filter := map[string]string{"scion.name": slug}
+	if projectID != "" {
+		filter[projectcompat.LabelProjectID] = projectID
+	}
+	return filter
+}
+
+// uniqueAgentEntry returns the single runtime entry in agents, failing closed
+// when more than one distinct container matches rather than acting on
+// whichever entry the runtime happened to list first.
+func uniqueAgentEntry(slug string, agents []api.AgentInfo) (api.AgentInfo, error) {
+	distinct := dedupeAgentEntries(agents)
+	if len(distinct) > 1 {
+		return api.AgentInfo{}, fmt.Errorf("agent '%s' is ambiguous: %d containers match", slug, len(distinct))
+	}
+	return distinct[0], nil
+}
+
+// dedupeAgentEntries collapses entries that refer to the same backing
+// container (the same container can be reported more than once, e.g. by a
+// runtime that is registered both as default and auxiliary).
+func dedupeAgentEntries(agents []api.AgentInfo) []api.AgentInfo {
+	if len(agents) < 2 {
+		return agents
+	}
+	seen := make(map[string]bool, len(agents))
+	out := make([]api.AgentInfo, 0, len(agents))
+	for _, a := range agents {
+		key := a.ContainerID
+		if key == "" {
+			key = a.ID
+		}
+		if key == "" {
+			key = "path:" + a.ProjectPath + "|" + a.Name
+		}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, a)
+	}
+	return out
 }
 
 func agentsForProject(agents []api.AgentInfo, projectID string) []api.AgentInfo {
@@ -1639,7 +1770,6 @@ func (s *Server) registerRoutes() {
 	// Workspace sync routes (for Hub-initiated sync via control channel)
 	s.mux.HandleFunc("/api/v1/workspace/upload", s.handleWorkspaceUpload)
 	s.mux.HandleFunc("/api/v1/workspace/apply", s.handleWorkspaceApply)
-	s.mux.HandleFunc("/api/v1/workspace/grove-upload", s.handleProjectWorkspaceUpload)
 	s.mux.HandleFunc("/api/v1/workspace/project-upload", s.handleProjectWorkspaceUpload)
 }
 

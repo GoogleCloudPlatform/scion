@@ -1052,6 +1052,23 @@ func (s *pgWebChatStore) SearchChatMessages(ctx context.Context, filter ChatSear
 		conditions = append(conditions, fmt.Sprintf("project_id IN (%s)", strings.Join(placeholders, ",")))
 	}
 
+	// DM threads are private to their participants. Unless the search is
+	// scoped to one (already authorized) conversation, include a DM only when
+	// the caller occupies one of its user slots. Exact prefix/suffix
+	// comparison, not LIKE, so IDs are never treated as patterns.
+	if filter.ConversationKey == "" {
+		if filter.DMParticipantUserID == "" {
+			conditions = append(conditions, "(thread_id IS NULL OR left(thread_id, 3) <> 'dm:')")
+		} else {
+			prefix, suffix := dmParticipantBounds(filter.DMParticipantUserID)
+			conditions = append(conditions, fmt.Sprintf(
+				"(thread_id IS NULL OR left(thread_id, 3) <> 'dm:' OR left(thread_id, length($%d::text)) = $%d::text OR right(thread_id, length($%d::text)) = $%d::text)",
+				argIdx, argIdx, argIdx+1, argIdx+1))
+			args = append(args, prefix, suffix)
+			argIdx += 2
+		}
+	}
+
 	// Keyset pagination cursor: "timestamp|id"
 	if filter.Cursor != "" {
 		cursorParts := strings.SplitN(filter.Cursor, "|", 2)

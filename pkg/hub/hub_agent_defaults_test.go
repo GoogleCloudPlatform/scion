@@ -198,6 +198,71 @@ func TestAgentDefaultsEqual_Timezone(t *testing.T) {
 	}
 }
 
+// TestApplySnapshot_DefaultGCPIdentity verifies that the hub-level default GCP
+// identity fields flow through Snapshot → ApplySnapshot → hubAgentDefaults,
+// and that a later snapshot without them clears them.
+func TestApplySnapshot_DefaultGCPIdentity(t *testing.T) {
+	srv := &Server{maintenance: NewMaintenanceState(false, "")}
+	ApplySnapshot(srv, Layer1Snapshot{
+		DefaultGCPIdentityMode:             "assign",
+		DefaultGCPIdentityServiceAccountID: "sa-1",
+	})
+
+	got := srv.hubAgentDefaults()
+	if got.DefaultGCPIdentityMode != "assign" {
+		t.Errorf("DefaultGCPIdentityMode: want assign, got %q", got.DefaultGCPIdentityMode)
+	}
+	if got.DefaultGCPIdentityServiceAccountID != "sa-1" {
+		t.Errorf("DefaultGCPIdentityServiceAccountID: want sa-1, got %q", got.DefaultGCPIdentityServiceAccountID)
+	}
+
+	ApplySnapshot(srv, Layer1Snapshot{})
+	got = srv.hubAgentDefaults()
+	if got.DefaultGCPIdentityMode != "" || got.DefaultGCPIdentityServiceAccountID != "" {
+		t.Errorf("clearing snapshot should clear GCP identity defaults, got %+v", got)
+	}
+}
+
+// TestAgentDefaultsEqual_GCPIdentity ensures that agentDefaultsEqual detects
+// changes in either default GCP identity field.
+func TestAgentDefaultsEqual_GCPIdentity(t *testing.T) {
+	a := opsettings.AgentDefaultsSettings{DefaultGCPIdentityMode: "assign", DefaultGCPIdentityServiceAccountID: "sa-1"}
+
+	b := a
+	b.DefaultGCPIdentityMode = "passthrough"
+	if agentDefaultsEqual(a, b) {
+		t.Error("agentDefaultsEqual should return false for different GCP identity modes")
+	}
+
+	b = a
+	b.DefaultGCPIdentityServiceAccountID = "sa-2"
+	if agentDefaultsEqual(a, b) {
+		t.Error("agentDefaultsEqual should return false for different GCP identity service accounts")
+	}
+
+	b = a
+	if !agentDefaultsEqual(a, b) {
+		t.Error("agentDefaultsEqual should return true for equal GCP identity defaults")
+	}
+}
+
+// TestBuildLayer1SnapshotFromFile_DefaultGCPIdentity verifies the file/SQLite
+// snapshot carries the hub default GCP identity, so a file-mode admin save
+// reaches hubAgentDefaults() via reloadSettings.
+func TestBuildLayer1SnapshotFromFile_DefaultGCPIdentity(t *testing.T) {
+	gc := config.DefaultGlobalConfig()
+	gc.DefaultGCPIdentityMode = "passthrough"
+	gc.DefaultGCPIdentityServiceAccountID = "sa-1"
+
+	snap := BuildLayer1SnapshotFromFile(&gc)
+	if snap.DefaultGCPIdentityMode != "passthrough" {
+		t.Errorf("DefaultGCPIdentityMode: want passthrough, got %q", snap.DefaultGCPIdentityMode)
+	}
+	if snap.DefaultGCPIdentityServiceAccountID != "sa-1" {
+		t.Errorf("DefaultGCPIdentityServiceAccountID: want sa-1, got %q", snap.DefaultGCPIdentityServiceAccountID)
+	}
+}
+
 // TestProfileTimezone_ReturnsTimezoneFromOverlay verifies the profileTimezone
 // method returns the timezone from the global settings overlay.
 func TestProfileTimezone_ReturnsTimezoneFromOverlay(t *testing.T) {

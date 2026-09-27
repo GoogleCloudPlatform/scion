@@ -19,8 +19,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -44,6 +48,20 @@ type HubServerConfig struct {
 	// This is passed to agents so they know where to report status updates.
 	// If empty, agents won't be able to call back to the Hub.
 	Endpoint string `json:"endpoint" yaml:"endpoint" koanf:"endpoint"`
+
+	// AgentEndpoint optionally overrides Endpoint for the sole purpose of the
+	// SCION_HUB_ENDPOINT value injected into dispatched agents. Use this when
+	// agents must reach the Hub on a different address than users (e.g. an
+	// internal VPC URL), while invite links, chat-bridge links, the OIDC
+	// issuer default, and the cloudrun_invoker audience default continue to
+	// use Endpoint. It is injected into agents on every runtime broker
+	// attached to this Hub, including remote brokers — see the settings
+	// reference before setting it. When unset, agents receive the Hub's
+	// regular endpoint (Endpoint, or the endpoint the Hub resolves when
+	// Endpoint is unset). When set, it must be scheme://host[:port] only —
+	// see ValidateAgentEndpoint, which also returns the normalized form that
+	// should be stored back into this field.
+	AgentEndpoint string `json:"agentEndpoint,omitempty" yaml:"agentEndpoint,omitempty" koanf:"agentEndpoint"`
 
 	// CORS settings
 	CORSEnabled        bool     `json:"corsEnabled" yaml:"corsEnabled" koanf:"corsEnabled"`
@@ -257,6 +275,113 @@ func (c *HubServerConfig) ResolveHubName() string {
 		return "unknown"
 	}
 	return hostname
+}
+
+// validAgentEndpointLabelRE matches one DNS label made only of letters,
+// digits, '_', and '-', each dot-separated label matched individually so that
+// a leading or trailing '-' is rejected per label rather than only at the
+// ends of the whole host. Underscore is accepted because Docker's embedded
+// DNS and Compose-style service names commonly use it (e.g. "scion_hub").
+// IP literals are checked separately with net.ParseIP and never reach this
+// pattern.
+var validAgentEndpointLabelRE = regexp.MustCompile(`^[A-Za-z0-9_]([A-Za-z0-9_-]*[A-Za-z0-9_])?$`)
+
+// isValidAgentEndpointHostname reports whether host is a syntactically valid
+// hostname for server.hub.agent_endpoint: one or more non-empty
+// dot-separated labels, each matching validAgentEndpointLabelRE, with at
+// most one trailing dot for a fully-qualified name.
+func isValidAgentEndpointHostname(host string) bool {
+	h := strings.TrimSuffix(host, ".")
+	if h == "" {
+		return false
+	}
+	for _, label := range strings.Split(h, ".") {
+		if !validAgentEndpointLabelRE.MatchString(label) {
+			return false
+		}
+	}
+	return true
+}
+
+// ValidateAgentEndpoint checks server.hub.agent_endpoint and returns its
+// normalized form. An empty string is valid (the override is optional and
+// unused) and returns "". A non-empty value must be an absolute http(s) URL
+// naming only a host and, optionally, a port: no userinfo, query, fragment,
+// out-of-range port, or path other than "" or "/". The host must be an IP
+// literal or a hostname of letters, digits, '_', '-', and '.'; an IPv6 zone
+// (e.g. "%eth0") is rejected because it cannot be stamped into a URL that
+// agents can re-parse. Rejecting all of this at startup means the Hub fails
+// fast with a clear error instead of silently injecting a broken or
+// credential-carrying endpoint into every dispatched agent.
+//
+// On success, the returned string is the normalized form — lowercase scheme,
+// "scheme://host[:port]" rebuilt from the parsed host and port (so an empty
+// port is dropped and an IPv6 host is bracketed), no path — that callers
+// should store in place of raw and use everywhere the value is read. The
+// normalized form always re-parses to the same scheme and host.
+//
+// No error message from ValidateAgentEndpoint ever echoes any part of the
+// configured value — not raw, not u.Redacted(), not any individual component
+// such as the scheme, host, path, or query: every rejected value is, by
+// definition, a value this function has not finished validating, so no
+// substring of it can be assumed safe to print. The scheme itself could be a
+// leaked secret or username (e.g. "secret://h" or "u:/secret@h"), so even
+// the scheme-mismatch message is a fixed string, and the host could be a
+// leaked secret too (e.g. "http://admin:123456" with an out-of-range port),
+// so the port-range message does not name the host either. This holds even
+// for a hierarchical URL with no "//" authority — e.g. "http:/admin:secret@h"
+// parses with an empty host and a Path of "/admin:secret@h", and
+// "http://h?token=secret" carries the secret in RawQuery — so every message
+// states the rule without echoing anything.
+func ValidateAgentEndpoint(raw string) (string, error) {
+	if raw == "" {
+		return "", nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("server.hub.agent_endpoint: invalid URL")
+	}
+	if u.Opaque != "" {
+		return "", fmt.Errorf("server.hub.agent_endpoint: must be an absolute http(s) URL of the form scheme://host[:port]")
+	}
+	if u.User != nil {
+		return "", fmt.Errorf("server.hub.agent_endpoint: must not contain user credentials")
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return "", fmt.Errorf("server.hub.agent_endpoint: must be an absolute http(s) URL")
+	}
+	if u.RawQuery != "" {
+		return "", fmt.Errorf("server.hub.agent_endpoint: must not contain a query string")
+	}
+	if u.Fragment != "" {
+		return "", fmt.Errorf("server.hub.agent_endpoint: must not contain a fragment")
+	}
+	if u.Path != "" && u.Path != "/" {
+		return "", fmt.Errorf("server.hub.agent_endpoint: must not contain a path")
+	}
+	host := u.Hostname()
+	if host == "" {
+		return "", fmt.Errorf("server.hub.agent_endpoint: must include a host")
+	}
+	if strings.Contains(host, "%") {
+		return "", fmt.Errorf("server.hub.agent_endpoint: host must not contain an IPv6 zone")
+	}
+	if net.ParseIP(host) == nil && !isValidAgentEndpointHostname(host) {
+		return "", fmt.Errorf("server.hub.agent_endpoint: host must be an IP address or a hostname of letters, digits, '_', '-', and '.'")
+	}
+	authority := host
+	if portStr := u.Port(); portStr != "" {
+		port, err := strconv.Atoi(portStr)
+		if err != nil || port < 1 || port > 65535 {
+			return "", fmt.Errorf("server.hub.agent_endpoint: port must be between 1 and 65535")
+		}
+		authority = net.JoinHostPort(host, strconv.Itoa(port))
+	} else if strings.Contains(host, ":") {
+		// A bare IPv6 literal still needs brackets even without a port.
+		authority = "[" + host + "]"
+	}
+	return scheme + "://" + authority, nil
 }
 
 // RuntimeBrokerConfig holds configuration for the Runtime Broker API server.
@@ -585,6 +710,13 @@ type GlobalConfig struct {
 	// Populated from the top-level default_harness_config key in settings.yaml
 	// in file/SQLite mode.
 	DefaultHarnessConfig string `json:"-" yaml:"-" koanf:"-"`
+
+	// DefaultGCPIdentityMode and DefaultGCPIdentityServiceAccountID are the
+	// hub-level default GCP identity for new agents. Populated from the
+	// top-level keys of the same name in settings.yaml in file/SQLite mode,
+	// so a file-mode admin save reaches hubAgentDefaults() without a restart.
+	DefaultGCPIdentityMode             string `json:"-" yaml:"-" koanf:"-"`
+	DefaultGCPIdentityServiceAccountID string `json:"-" yaml:"-" koanf:"-"`
 
 	// Telemetry default — when set, the Hub exposes this as the default telemetry opt-in
 	// state for new agents via GET /api/v1/settings/public.
@@ -1051,6 +1183,7 @@ func parseCommaSeparatedList(s string) []string {
 var snakeCaseFields = map[string]string{
 	// Layer-1 compound segments (from opsettings registry)
 	"adminemails":           "admin_emails",
+	"agentendpoint":         "agent_endpoint",
 	"apibaseurl":            "api_base_url",
 	"appid":                 "app_id",
 	"authorizeddomains":     "authorized_domains",
@@ -1105,6 +1238,7 @@ var snakeCaseFields = map[string]string{
 var camelCaseFields = map[string]string{
 	"adminemails":                   "adminEmails",
 	"adminmode":                     "adminMode",
+	"agentendpoint":                 "agentEndpoint",
 	"allowcontainerscriptharnesses": "allowContainerScriptHarnesses",
 	"apibaseurl":                    "apiBaseUrl",
 	"appid":                         "appId",
@@ -1230,7 +1364,7 @@ func LoadFileOnlyKoanf() *koanf.Koanf {
 		slog.Warn("LoadFileOnlyKoanf: failed to resolve global settings directory", "error", err)
 	}
 	if globalDir != "" {
-		if err := loadSettingsFile(k, globalDir); err != nil {
+		if _, err := loadSettingsFile(k, globalDir); err != nil {
 			slog.Warn("LoadFileOnlyKoanf: failed to load settings file", "dir", globalDir, "error", err)
 		}
 	}
@@ -1306,6 +1440,18 @@ func LoadBootstrapKoanf() *koanf.Koanf {
 		"server.log_format":       defaults.LogFormat,
 	}, "."), nil)
 
+	// 1b. Embedded agent-defaults (embeds/default_settings.yaml, or the
+	// tier-specific variant — see GetDefaultSettingsDataYAML). This is the
+	// "coded defaults" layer for default_template/default_harness_config:
+	// without it, an un-seeded instance (no settings.yaml on disk, no
+	// SCION_SEED_* / SCION_SERVER_* env vars) has these keys entirely absent
+	// from bootstrap material, so agent-create requests that omit
+	// harnessConfig resolve to an empty name instead of the product default
+	// (ptone/scion#1306).
+	if agentDefaults := embeddedAgentDefaultsKoanfMap(); len(agentDefaults) > 0 {
+		_ = k.Load(confmap.Provider(agentDefaults, "."), nil)
+	}
+
 	// 2. SCION_SEED_* environment variables (snake_case via envKeyToOpsettingsKey).
 	seedK := LoadSeedEnvKoanf()
 	_ = k.Merge(seedK)
@@ -1316,7 +1462,7 @@ func LoadBootstrapKoanf() *koanf.Koanf {
 		slog.Warn("LoadBootstrapKoanf: failed to resolve global settings directory", "error", err)
 	}
 	if globalDir != "" {
-		if err := loadSettingsFile(k, globalDir); err != nil {
+		if _, err := loadSettingsFile(k, globalDir); err != nil {
 			slog.Warn("LoadBootstrapKoanf: failed to load settings file", "dir", globalDir, "error", err)
 		}
 		loadServerConfigFile(k, globalDir)
@@ -1336,6 +1482,44 @@ func LoadBootstrapKoanf() *koanf.Koanf {
 	splitCommaSeparatedKoanfKeys(k)
 
 	return k
+}
+
+// embeddedAgentDefaultsKoanfMap extracts default_template and
+// default_harness_config from the embedded default settings YAML
+// (GetDefaultSettingsDataYAML — tier-aware: the Cloud Run sandbox tier gets
+// its own embedded file) for use as the lowest-precedence "coded defaults"
+// layer in LoadBootstrapKoanf.
+//
+// This deliberately reads only those two scalar keys: the embedded file also
+// carries runtime/profile sections that are meaningful for the CLI's local
+// settings.yaml materialization (config/init.go) but have no equivalent in
+// the opsettings agent_defaults section, and pulling them in here would just
+// be dead weight in the bootstrap koanf.
+//
+// Failure to read or parse the embedded file is logged and treated as "no
+// embedded agent defaults" rather than a fatal error — bootstrap material
+// must still be produced even if this best-effort layer comes up empty.
+func embeddedAgentDefaultsKoanfMap() map[string]interface{} {
+	data, err := GetDefaultSettingsDataYAML()
+	if err != nil {
+		slog.Warn("LoadBootstrapKoanf: failed to read embedded default settings", "error", err)
+		return nil
+	}
+
+	var raw map[string]interface{}
+	if err := yamlv3.Unmarshal(data, &raw); err != nil {
+		slog.Warn("LoadBootstrapKoanf: failed to parse embedded default settings", "error", err)
+		return nil
+	}
+
+	out := make(map[string]interface{}, 2)
+	if v, ok := raw["default_template"].(string); ok && v != "" {
+		out["default_template"] = v
+	}
+	if v, ok := raw["default_harness_config"].(string); ok && v != "" {
+		out["default_harness_config"] = v
+	}
+	return out
 }
 
 // commaSplitKoanfKeys lists koanf paths that represent list values and may
@@ -1581,6 +1765,14 @@ func loadServerFromSettingsFile(dir string) (*GlobalConfig, bool) {
 		if s, ok := dhc.(string); ok {
 			gc.DefaultHarnessConfig = s
 		}
+	}
+
+	// Top-level hub default GCP identity — read from raw YAML.
+	if v, ok := raw["default_gcp_identity_mode"].(string); ok {
+		gc.DefaultGCPIdentityMode = v
+	}
+	if v, ok := raw["default_gcp_identity_service_account_id"].(string); ok {
+		gc.DefaultGCPIdentityServiceAccountID = v
 	}
 
 	return gc, true

@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"time"
 )
 
@@ -200,8 +201,8 @@ func New(ctx context.Context, cfg Config) (Storage, error) {
 	}
 }
 
-// ResourceKind identifies a storable, file-based resource type. The grove→project
-// resource-storage refactor (§7.3) is collapsing the parallel template and
+// ResourceKind identifies a storable, file-based resource type. The
+// resource-storage layout collapses the parallel template and
 // harness-config storage code onto a single kind-keyed implementation; this is
 // the first shared seam — the storage-path layout.
 type ResourceKind string
@@ -237,7 +238,7 @@ func ResourceStoragePath(hubID string, kind ResourceKind, scope, scopeID, slug s
 	switch scope {
 	case "global":
 		scopePath = prefix + "/global/" + slug
-	case "grove", "project":
+	case "project":
 		scopePath = prefix + "/groves/" + scopeID + "/" + slug
 	case "user":
 		scopePath = prefix + "/users/" + scopeID + "/" + slug
@@ -252,7 +253,17 @@ func ResourceStoragePath(hubID string, kind ResourceKind, scope, scopeID, slug s
 
 // ResourceStorageURI returns the full bucket URI for a file-based resource.
 func ResourceStorageURI(hubID, bucket string, kind ResourceKind, scope, scopeID, slug string) string {
-	return "gs://" + bucket + "/" + ResourceStoragePath(hubID, kind, scope, scopeID, slug) + "/"
+	return StorageURIForPath(bucket, ResourceStoragePath(hubID, kind, scope, scopeID, slug))
+}
+
+// StorageURIForPath returns the full bucket URI for an already-computed
+// storage path, e.g. one made request-unique with a suffix the per-kind
+// path helpers above don't know about. Callers that can express their path
+// as (hubID, kind, scope, scopeID, slug) should use ResourceStorageURI (or
+// one of its per-kind wrappers) instead, so the URI format stays defined in
+// this one place either way.
+func StorageURIForPath(bucket, path string) string {
+	return "gs://" + bucket + "/" + strings.TrimRight(path, "/") + "/"
 }
 
 // TemplateStoragePath returns the storage path for a template.
@@ -289,9 +300,9 @@ func HarnessConfigStorageURI(hubID, bucket, scope, scopeID, slug string) string 
 }
 
 // WorkspaceStoragePath returns the storage path for an agent's workspace.
-// Workspaces are stored under /workspaces/{groveId}/{agentId}/.
-func WorkspaceStoragePath(hubID, groveID, agentID string) string {
-	path := "workspaces/" + groveID + "/" + agentID
+// Workspaces are stored under /workspaces/{projectId}/{agentId}/.
+func WorkspaceStoragePath(hubID, projectID, agentID string) string {
+	path := "workspaces/" + projectID + "/" + agentID
 	if hubID != "" {
 		return "hubs/" + hubID + "/" + path
 	}
@@ -300,9 +311,9 @@ func WorkspaceStoragePath(hubID, groveID, agentID string) string {
 
 // ProjectWorkspaceStoragePath returns the storage path for a hub-managed project's shared workspace.
 // Hub-managed projects share a single workspace across agents (no per-agent worktrees),
-// so the path is grove-level rather than agent-level.
-func ProjectWorkspaceStoragePath(hubID, groveID string) string {
-	path := "workspaces/" + groveID + "/grove-workspace"
+// so the path is project-level rather than agent-level.
+func ProjectWorkspaceStoragePath(hubID, projectID string) string {
+	path := "workspaces/" + projectID + "/grove-workspace"
 	if hubID != "" {
 		return "hubs/" + hubID + "/" + path
 	}
@@ -310,7 +321,7 @@ func ProjectWorkspaceStoragePath(hubID, groveID string) string {
 }
 
 // WorkspaceStorageURI returns the full storage URI for an agent's workspace.
-func WorkspaceStorageURI(hubID, bucket, groveID, agentID string) string {
-	path := WorkspaceStoragePath(hubID, groveID, agentID)
+func WorkspaceStorageURI(hubID, bucket, projectID, agentID string) string {
+	path := WorkspaceStoragePath(hubID, projectID, agentID)
 	return "gs://" + bucket + "/" + path + "/"
 }

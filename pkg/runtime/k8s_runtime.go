@@ -807,7 +807,7 @@ func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace s
 
 	projectName := projectcompat.ProjectNameFromLabels(config.Labels)
 	if projectName == "" {
-		return fmt.Errorf("cannot create shared dir PVCs: missing scion.project or scion.grove label")
+		return fmt.Errorf("cannot create shared dir PVCs: missing scion.project label")
 	}
 
 	storageClass := ""
@@ -870,11 +870,11 @@ func (r *KubernetesRuntime) ensureProjectRWXClaim(
 		},
 	}
 
-	for k, v := range projectcompat.ProjectNameLabels(projectName, true) {
+	for k, v := range projectcompat.ProjectNameLabels(projectName) {
 		pvc.Labels[k] = v
 	}
 	if projectID != "" {
-		for k, v := range projectcompat.ProjectIDLabels(projectID, true) {
+		for k, v := range projectcompat.ProjectIDLabels(projectID) {
 			pvc.Labels[k] = v
 		}
 	}
@@ -1890,19 +1890,7 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 	if len(labelFilter) > 0 {
 		var selectors []string
 		for k, v := range labelFilter {
-			key := k
-			// Translate project filter keys to grove label variants for the K8s selector.
-			// Since new pods have both labels and old pods only have grove labels,
-			// filtering by the grove label variant finds both.
-			switch k {
-			case projectcompat.LabelProject:
-				key = projectcompat.LabelGrove
-			case projectcompat.LabelProjectID:
-				key = projectcompat.LabelGroveID
-			case projectcompat.LabelProjectPath:
-				key = projectcompat.LabelGrovePath
-			}
-			selectors = append(selectors, fmt.Sprintf("%s=%s", key, v))
+			selectors = append(selectors, fmt.Sprintf("%s=%s", k, v))
 		}
 		selector = strings.Join(selectors, ",")
 	} else {
@@ -2308,6 +2296,20 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 }
 
 func (r *KubernetesRuntime) Exec(ctx context.Context, id string, cmd []string) (string, error) {
+	return r.execWithOptionalStdin(ctx, id, cmd, nil)
+}
+
+// ExecWithStdin runs cmd in the pod with stdin piped from the given reader,
+// instead of embedding data in cmd's argv. Used to deliver secrets without
+// exposing them via a process's command line. See #1355.
+func (r *KubernetesRuntime) ExecWithStdin(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
+	return r.execWithOptionalStdin(ctx, id, cmd, stdin)
+}
+
+// execWithOptionalStdin is the shared implementation behind Exec and
+// ExecWithStdin. stdin may be nil, in which case the exec has no stdin
+// stream attached (the historical Exec behaviour).
+func (r *KubernetesRuntime) execWithOptionalStdin(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
 	var namespace string
 	podName := id
 
@@ -2339,7 +2341,7 @@ func (r *KubernetesRuntime) Exec(ctx context.Context, id string, cmd []string) (
 	option := &corev1.PodExecOptions{
 		Container: agentContainerName,
 		Command:   suCmd,
-		Stdin:     false,
+		Stdin:     stdin != nil,
 		Stdout:    true,
 		Stderr:    true,
 		TTY:       false,
@@ -2357,6 +2359,7 @@ func (r *KubernetesRuntime) Exec(ctx context.Context, id string, cmd []string) (
 
 	var stdout, stderr bytes.Buffer
 	err = executor.StreamWithContext(ctx, remotecommand.StreamOptions{
+		Stdin:  stdin,
 		Stdout: &stdout,
 		Stderr: &stderr,
 	})

@@ -209,6 +209,44 @@ func TestSetMessageMode_ProjectAdminDenied(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Test 1b: Non-member denied with 403, not a runtime error
+// ---------------------------------------------------------------------------
+
+// TestSetMessageMode_NonMemberDenied guards against a non-member's
+// GetProjectMembership lookup (which returns store.ErrNotFound, since a
+// non-member has no membership row at all) being mistaken for an
+// unexpected lookup failure. The correct outcome for "no membership row"
+// is the same 403 every other unauthorized caller gets, not a 500-class
+// error.
+func TestSetMessageMode_NonMemberDenied(t *testing.T) {
+	srv, s, owner, _, _, projectID := smmSetup(t)
+	ctx := context.Background()
+
+	nonMember := &store.User{
+		ID:          tid("smm-non-member"),
+		Email:       "smm-non-member@test.com",
+		DisplayName: "SMM Non-Member",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require_NoError(t, s.CreateUser(ctx, nonMember))
+	ensureHubMembership(ctx, s, nonMember.ID)
+	// Deliberately not added to the project's members group or given any
+	// project-scoped role binding.
+
+	agent := smmAgent(t, s, "smm-non-member-denied", projectID, store.MessageModeProject,
+		[]string{owner.ID})
+
+	nonMemberIdent := msgAuthzUserIdentity(nonMember.ID)
+	rr := smmDoRequest(t, srv, agent.ID, SetMessageModeRequest{Mode: "none"}, nonMemberIdent)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for a non-member, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Test 2: Project owner allowed
 // ---------------------------------------------------------------------------
 

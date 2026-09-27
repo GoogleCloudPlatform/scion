@@ -297,7 +297,6 @@ func TestDrainUndispatchedNotifications_FiltersByBroker(t *testing.T) {
 		ProjectID:       env.project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: tid("broker-2"),
-		Visibility:      store.VisibilityPrivate,
 	}
 	require.NoError(t, env.store.CreateAgent(ctx, otherSubscriber))
 

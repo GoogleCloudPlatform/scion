@@ -102,7 +102,6 @@ export class ScionPageSkillCreate extends LitElement {
   @state() private description = '';
   @state() private scope: 'global' | 'project' | 'user' = 'global';
   @state() private scopeId = '';
-  @state() private visibility: 'private' | 'public' = 'private';
   @state() private tagsInput = '';
 
   /* --- auto-populate tracking --- */
@@ -800,7 +799,6 @@ export class ScionPageSkillCreate extends LitElement {
     const body: Record<string, unknown> = {
       name: this.name.trim(),
       scope: this.scope,
-      visibility: this.visibility,
     };
     if (this.description.trim()) body.description = this.description.trim();
     if (this.scope === 'project' && this.scopeId.trim()) body.scopeId = this.scopeId.trim();
@@ -1094,21 +1092,6 @@ export class ScionPageSkillCreate extends LitElement {
               </div>
             `
           : nothing}
-
-        <div class="form-field">
-          <label>Visibility</label>
-          <sl-radio-group
-            .value=${this.visibility}
-            @sl-change=${(e: Event) => {
-              this.visibility = (e.target as HTMLElement & { value: string }).value as
-                | 'private'
-                | 'public';
-            }}
-          >
-            <sl-radio-button value="private" ?disabled=${isSubmitting}>Private</sl-radio-button>
-            <sl-radio-button value="public" ?disabled=${isSubmitting}>Public</sl-radio-button>
-          </sl-radio-group>
-        </div>
 
         <div class="form-field">
           <label for="tags">

@@ -9,7 +9,7 @@ The Hub is the authoritative **Skill Registry** for the Skill Bank: it stores pu
 
 The Hub persists two record types:
 
-- **Skill** — the logical skill: `name`, `slug`, `description`, `tags`, `scope` (`core`, `global`, `project`, `user`) and optional `scope_id`, `visibility`, ownership, and `status` (`active` or `archived`). Skills are unique per `(slug, scope, scope_id)`.
+- **Skill** — the logical skill: `name`, `slug`, `description`, `tags`, `scope` (`core`, `global`, `project`, `user`) and optional `scope_id`, ownership, and `status` (`active` or `archived`). Skills are unique per `(slug, scope, scope_id)`.
 - **SkillVersion** — an immutable release of a skill: `version` (semver), `status` (`draft`, `published`, `deprecated`, `archived`), a `sha256:` `content_hash`, the file manifest, publisher, download count, and — for deprecated versions — a deprecation message and optional replacement URI.
 
 `scion skills delete` performs a **soft delete**: the skill's status becomes `archived` and its records are retained for audit and history.

@@ -315,3 +315,40 @@ func TestRegisterGlobalGroveAndBroker_StarterHubKeepsDockerProfile(t *testing.T)
 	assert.True(t, types["docker"], "docker profile should be present on starter hub")
 	assert.True(t, types["kubernetes"], "kubernetes profile should be present")
 }
+
+// TestRegisterGlobalProjectAndBroker_UpdateSetsReprovisionCapability is the
+// design §3.4 Amendment A2.2(b) regression test: the update
+// branch (an existing broker record, re-registering) must refresh
+// Capabilities to include Reprovision:true, not just the create branch. A
+// broker registered before the reincarnate feature existed would otherwise
+// keep Capabilities.Reprovision unset forever, since CompleteBrokerJoin (the
+// remote-broker capability path) never runs for the embedded broker.
+func TestRegisterGlobalProjectAndBroker_UpdateSetsReprovisionCapability(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	settings := &config.Settings{}
+	brokerID := tid("broker-preexisting")
+
+	// Simulate a broker record from before the Reprovision capability
+	// existed: created directly, with the old capability set.
+	pre := &store.RuntimeBroker{
+		ID:           brokerID,
+		Name:         "pre-existing-broker",
+		Slug:         "pre-existing-broker",
+		Status:       store.BrokerStatusOnline,
+		Capabilities: &store.BrokerCapabilities{Sync: true, Attach: true},
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, pre))
+
+	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, brokerID, "pre-existing-broker", "http://localhost:9800", nil, true, settings)
+	require.NoError(t, err)
+	assert.Equal(t, brokerID, effectiveID)
+
+	updated, err := s.GetRuntimeBroker(ctx, brokerID)
+	require.NoError(t, err)
+	require.NotNil(t, updated.Capabilities)
+	assert.True(t, updated.Capabilities.Reprovision,
+		"re-registering an existing broker must refresh Capabilities.Reprovision to true")
+	assert.True(t, updated.Capabilities.Sync)
+	assert.True(t, updated.Capabilities.Attach)
+}

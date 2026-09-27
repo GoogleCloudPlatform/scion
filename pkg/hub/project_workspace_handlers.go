@@ -34,7 +34,10 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
@@ -344,15 +347,8 @@ func notAccessible(w http.ResponseWriter, what string, path string, err error) {
 //   - GET  (filePath="")  → list files
 //   - POST (filePath="")  → upload files
 //   - DELETE (filePath!="") → delete file
-func (s *Server) handleProjectWorkspace(w http.ResponseWriter, r *http.Request, projectID, filePath string) {
+func (s *Server) handleProjectWorkspace(w http.ResponseWriter, r *http.Request, project *store.Project, filePath string) {
 	ctx := r.Context()
-
-	// Look up the project
-	project, err := s.store.GetProject(ctx, projectID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
 
 	// Resolve workspace path — supports hub-managed, shared-workspace, and linked projects
 	workspacePath, err := s.resolveProjectWebDAVPath(ctx, project)
@@ -377,7 +373,7 @@ func (s *Server) handleProjectWorkspace(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 		slog.ErrorContext(ctx, "failed to open project workspace",
-			"project_id", projectID, "error", err)
+			"project_id", project.ID, "error", err)
 		InternalError(w)
 		return
 	}
@@ -701,18 +697,11 @@ func writeDirectoryToZip(zw *zip.Writer, root *os.Root) error {
 }
 
 // handleProjectWorkspaceArchive creates a zip archive of the entire workspace and serves it for download.
-func (s *Server) handleProjectWorkspaceArchive(w http.ResponseWriter, r *http.Request, projectID string) {
+func (s *Server) handleProjectWorkspaceArchive(w http.ResponseWriter, r *http.Request, project *store.Project) {
 	ctx := r.Context()
 
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
-		return
-	}
-
-	// Look up the project
-	project, err := s.store.GetProject(ctx, projectID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
 		return
 	}
 
@@ -732,7 +721,7 @@ func (s *Server) handleProjectWorkspaceArchive(w http.ResponseWriter, r *http.Re
 			return
 		}
 		slog.ErrorContext(ctx, "failed to open project workspace for archive",
-			"project_id", projectID, "error", err)
+			"project_id", project.ID, "error", err)
 		InternalError(w)
 		return
 	}
@@ -748,23 +737,20 @@ func (s *Server) handleProjectWorkspaceArchive(w http.ResponseWriter, r *http.Re
 	if err := writeDirectoryToZip(zw, root); err != nil {
 		// At this point we've already started writing, so we can't send an error response.
 		// The zip will be truncated/corrupt, which the client will notice.
-		slog.WarnContext(ctx, "failed to complete workspace archive", "project_id", projectID, "error", err)
+		slog.WarnContext(ctx, "failed to complete workspace archive", "project_id", project.ID, "error", err)
 		return
 	}
 }
 
 // handleProjectSharedDirArchive creates a zip archive of a shared directory and serves it for download.
-func (s *Server) handleProjectSharedDirArchive(w http.ResponseWriter, r *http.Request, projectID, dirName string) {
+// The project has already been loaded and authorized by
+// handleProjectSharedDirRoutes.
+func (s *Server) handleProjectSharedDirArchive(w http.ResponseWriter, r *http.Request, project *store.Project, dirName string) {
 	ctx := r.Context()
+	projectID := project.ID
 
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
-		return
-	}
-
-	project, err := s.store.GetProject(ctx, projectID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
 		return
 	}
 
@@ -783,11 +769,22 @@ func (s *Server) handleProjectSharedDirArchive(w http.ResponseWriter, r *http.Re
 
 	resolution, resolveErr := s.resolveSharedDirPath(ctx, project, dirName)
 	if resolveErr != nil {
+		var nfsErr *sharedDirStorageResolveError
+		if errors.As(resolveErr, &nfsErr) {
+			// This error can carry the resolved host path or a settings
+			// parse error. Log it server-side and return a fixed message.
+			slog.ErrorContext(ctx, "failed to resolve shared directory path for archive",
+				"project_id", projectID, "dir", dirName, "error", resolveErr)
+			Conflict(w, sharedDirStorageUnavailableMessage)
+			return
+		}
 		Conflict(w, resolveErr.Error())
 		return
 	}
+	archiveName := project.Slug + "-" + dirName + ".zip"
+
 	// As above: archiving never creates the shared directory.
-	root, err := openConfinedBase(resolution.Path, false)
+	root, err := s.openSharedDirRoot(resolution, false)
 	if err != nil {
 		if os.IsNotExist(err) {
 			NotFound(w, "Shared directory")
@@ -800,7 +797,6 @@ func (s *Server) handleProjectSharedDirArchive(w http.ResponseWriter, r *http.Re
 	}
 	defer func() { _ = root.Close() }()
 
-	archiveName := project.Slug + "-" + dirName + ".zip"
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, archiveName))
 
@@ -940,15 +936,14 @@ func (s *Server) handleProjectWorkspaceDelete(w http.ResponseWriter, root *os.Ro
 //   - GET  (filePath="")  → list files
 //   - POST (filePath="")  → upload files
 //   - GET  (filePath!="") → download file
+//   - PUT  (filePath!="") → write file
 //   - DELETE (filePath!="") → delete file
-func (s *Server) handleSharedDirFiles(w http.ResponseWriter, r *http.Request, projectID, dirName, filePath string) {
+//
+// The project has already been loaded and authorized by
+// handleProjectSharedDirRoutes.
+func (s *Server) handleSharedDirFiles(w http.ResponseWriter, r *http.Request, project *store.Project, dirName, filePath string) {
 	ctx := r.Context()
-
-	project, err := s.store.GetProject(ctx, projectID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
+	projectID := project.ID
 
 	// Verify the shared dir is declared on this project
 	found := false
@@ -966,6 +961,15 @@ func (s *Server) handleSharedDirFiles(w http.ResponseWriter, r *http.Request, pr
 	// Resolve shared dir host path based on project type
 	resolution, resolveErr := s.resolveSharedDirPath(ctx, project, dirName)
 	if resolveErr != nil {
+		var nfsErr *sharedDirStorageResolveError
+		if errors.As(resolveErr, &nfsErr) {
+			// Don't hand the client the resolved host path or a settings
+			// parse error; log it server-side instead.
+			slog.ErrorContext(ctx, "failed to resolve shared directory path",
+				"project_id", projectID, "dir", dirName, "error", resolveErr)
+			Conflict(w, sharedDirStorageUnavailableMessage)
+			return
+		}
 		Conflict(w, resolveErr.Error())
 		return
 	}
@@ -977,7 +981,8 @@ func (s *Server) handleSharedDirFiles(w http.ResponseWriter, r *http.Request, pr
 	// needed it; a list of a directory that does not exist yet is an empty
 	// list, and a read or delete in one is a 404.
 	createIfMissing := r.Method == http.MethodPost || r.Method == http.MethodPut
-	root, err := openConfinedBase(resolution.Path, createIfMissing)
+
+	root, err := s.openSharedDirRoot(resolution, createIfMissing)
 	if err != nil {
 		if os.IsNotExist(err) {
 			if r.Method == http.MethodGet && filePath == "" {
@@ -1018,6 +1023,61 @@ type sharedDirResolution struct {
 	Path          string
 	ProviderCount int  // total project providers (for multi-broker warning)
 	IsLocal       bool // true when resolved via co-located broker
+	// Backend is "nfs" when this resolution came from
+	// resolveNFSSharedDirPath; empty otherwise. Backend is consulted at
+	// openSharedDirRoot, to choose how the leaf is opened, and at
+	// ensureNFSSharedDirLeaf, for how a missing leaf gets created.
+	Backend string
+	// NFSHostBase and NFSRelPath are populated only when Backend == "nfs":
+	// the resolved (symlink-free) host base, and Path's path relative to
+	// it. They let a caller (re)create the leaf via shareddirs.EnsureLeaf,
+	// the same confined entry point the broker itself uses, without ever
+	// trusting Path's own on-disk state for that decision.
+	NFSHostBase string
+	NFSRelPath  string
+	// NFSSubPathRoot is the resolved server.shared_dir_storage.nfs.subpath_root
+	// value (defaulted to "projects" if unset), populated only when
+	// Backend == "nfs". Kept separate from NFSRelPath (which already
+	// includes it as a prefix) because shareddirs.DeleteSharedDir needs
+	// subPathRoot and the project ID as distinct path components, not the
+	// single already-joined relative path EnsureLeaf/OpenAnchoredRoot want.
+	NFSSubPathRoot string
+}
+
+// ensureNFSSharedDirLeaf creates resolution's NFS leaf via
+// shareddirs.EnsureLeaf, applying the leaf's modes/ACL hardening through
+// EnsureLeaf's no-follow component walk. A no-op (by EnsureLeaf's own alreadyExisted
+// contract) if the leaf already exists.
+func (s *Server) ensureNFSSharedDirLeaf(resolution *sharedDirResolution) error {
+	leafFd, _, err := shareddirs.EnsureLeaf(resolution.NFSHostBase, resolution.NFSRelPath)
+	if err != nil {
+		return fmt.Errorf("create shared dir: %w", err)
+	}
+	return shareddirs.CloseFd(leafFd)
+}
+
+// openSharedDirRoot opens resolution.Path as an *os.Root, choosing the
+// confinement mechanism by backend. NFS-backed shared dirs are opened via
+// OpenAnchoredRoot, which re-verifies the leaf's identity (device + inode)
+// against an independent walk immediately before opening it; other backends
+// use openConfinedBase.
+//
+// For NFS, createIfMissing=true creates the leaf first via
+// ensureNFSSharedDirLeaf (shareddirs.EnsureLeaf's own O_NOFOLLOW walk), and
+// OpenAnchoredRoot is then called with false.
+func (s *Server) openSharedDirRoot(resolution *sharedDirResolution, createIfMissing bool) (*os.Root, error) {
+	if resolution.Backend != "nfs" {
+		return openConfinedBase(resolution.Path, createIfMissing)
+	}
+	if createIfMissing {
+		if err := s.ensureNFSSharedDirLeaf(resolution); err != nil {
+			// Not an fs.ErrNotExist-compatible error, so the caller's own
+			// os.IsNotExist branch won't fire for this -- it logs and
+			// returns InternalError on any other error, which covers this.
+			return nil, err
+		}
+	}
+	return shareddirs.OpenAnchoredRoot(resolution.NFSHostBase, resolution.NFSRelPath)
 }
 
 // resolveSharedDirPath resolves the host-side path for a shared directory.
@@ -1027,6 +1087,26 @@ type sharedDirResolution struct {
 // resolved via config.GetSharedDirPath(localPath, dirName). Otherwise, the path is
 // resolved via the .scion marker in the hub-managed workspace directory.
 func (s *Server) resolveSharedDirPath(ctx context.Context, project *store.Project, dirName string) (*sharedDirResolution, error) {
+	// Phase 2 item 4 (design deploy-config-explore §3.2.5): if the hub's
+	// own global settings carry server.shared_dir_storage: nfs, every
+	// project's shared dirs live on the NFS export, keyed by hub project
+	// ID — independent of whether this project has a co-located broker at
+	// all, and checked FIRST, before any of the local-layout resolution
+	// below. resolveNFSSharedDirPath's second return value tells us
+	// whether this branch even applies (nfs is configured); when it
+	// doesn't, fall through unchanged to today's local-layout resolution.
+	if resolution, applicable, err := s.resolveNFSSharedDirPath(dirName, project.ID); applicable {
+		if err != nil {
+			// Every error resolveNFSSharedDirPath returns is wrapped here,
+			// in the one place both of its callers pass through, marking it
+			// as an NFS resolution failure: its message may contain a
+			// resolved host path or a settings parse error, and must not
+			// reach the client directly.
+			err = &sharedDirStorageResolveError{err: err}
+		}
+		return resolution, err
+	}
+
 	if project.GitRemote == "" {
 		// Hub-managed project: resolve via the .scion marker in the workspace directory
 		// to find the project-configs path where shared dirs actually live.
@@ -1086,6 +1166,160 @@ func (s *Server) resolveSharedDirPath(ctx context.Context, project *store.Projec
 	return nil, fmt.Errorf("shared directory file browsing requires a co-located runtime broker")
 }
 
+// sharedDirStorageUnavailableMessage is the fixed, detail-free message
+// returned to the client when resolveSharedDirPath fails because
+// server.shared_dir_storage=nfs resolution itself failed. The underlying
+// error can carry the resolved host path or a settings parse error, neither
+// of which belongs in an HTTP response; the detail goes to the server log
+// instead.
+const sharedDirStorageUnavailableMessage = "shared directory storage is misconfigured or unavailable; see hub logs"
+
+// sharedDirStorageResolveError marks an error as having come from the
+// server.shared_dir_storage=nfs resolution path (resolveNFSSharedDirPath).
+type sharedDirStorageResolveError struct{ err error }
+
+func (e *sharedDirStorageResolveError) Error() string { return e.err.Error() }
+func (e *sharedDirStorageResolveError) Unwrap() error { return e.err }
+
+// resolveNFSSharedDirPath resolves dirName's path for projectID via the
+// same confined resolver used by agent Start (pkg/shareddirs,
+// runtime.NewNFSBackend), when the hub's own global settings carry
+// server.shared_dir_storage: nfs (design deploy-config-explore §3.2.5,
+// Phase 2 item 4).
+//
+// The second return value, applicable, is false whenever this branch does
+// not apply at all — the global settings failed to load, no
+// shared_dir_storage block is configured, or its backend is "" / "local" —
+// in which case resolveSharedDirPath must fall through unchanged to the
+// pre-existing local-layout resolution (byte-identical to today). When
+// applicable is true, the caller must return (resolution, err) directly:
+// backend "nfs" is configured, so the local-layout resolution below does
+// NOT apply, whether this call succeeded or failed.
+//
+// Settings are read via config.LoadGlobalSettings() — the same env-free,
+// global-only loader the broker's Start path uses — so a project's own
+// settings.yaml (including in-repo content from a cloned git project) can
+// never influence where the hub looks for its shared dirs, exactly like
+// the creation-time resolver.
+func (s *Server) resolveNFSSharedDirPath(dirName, projectID string) (resolution *sharedDirResolution, applicable bool, err error) {
+	// A broken or legacy-format global settings file that plausibly
+	// configured shared_dir_storage fails closed here, matching the
+	// broker's own Start path (pkg/agent/run.go), rather than resolving
+	// successfully for what the operator intended to be an NFS-backed
+	// project.
+	globalSettings, _, gErr := config.LoadGlobalSettings()
+	if gErr != nil {
+		if config.GlobalSettingsMentions("shared_dir_storage") {
+			return nil, true, fmt.Errorf("server.shared_dir_storage: global settings unreadable: %w", gErr)
+		}
+		return nil, false, nil
+	}
+	if globalSettings.Server == nil || globalSettings.Server.SharedDirStorage == nil {
+		// A file that loaded successfully as v1 is authoritative: no block
+		// means genuinely unset. Only a LEGACY-format file that mentions the
+		// key can silently drop it, gated by GlobalSettingsIsLegacyFormat.
+		if config.GlobalSettingsIsLegacyFormat() && config.GlobalSettingsMentions("shared_dir_storage") {
+			return nil, true, fmt.Errorf(
+				"server.shared_dir_storage: global settings mention it but it was not loaded (missing schema_version \"1\"?)")
+		}
+		return nil, false, nil
+	}
+	sdCfg := globalSettings.Server.SharedDirStorage
+	if sdCfg.Backend != "nfs" {
+		return nil, false, nil
+	}
+
+	// From here on, nfs IS the configured backend: every error below is
+	// returned to the caller directly, never treated as "not applicable".
+	if err := sdCfg.Validate(); err != nil {
+		return nil, true, fmt.Errorf("server.shared_dir_storage: %w", err)
+	}
+	// Same validation as the creation-time resolver: dirName and projectID
+	// are both path segments in the NFS layout and are checked before any
+	// path is constructed from them.
+	if err := api.ValidateSharedDirs([]api.SharedDir{{Name: dirName}}); err != nil {
+		return nil, true, fmt.Errorf("server.shared_dir_storage: %w", err)
+	}
+	if !shareddirs.ValidProjectID(projectID) {
+		return nil, true, fmt.Errorf("server.shared_dir_storage: invalid hub project ID %q", projectID)
+	}
+
+	res, resolveErr := runtime.NewNFSBackend(sdCfg.NFS).Resolve(runtime.ResolveInput{
+		ProjectID:      projectID,
+		SharedDirNames: []string{dirName},
+	})
+	if resolveErr != nil {
+		return nil, true, fmt.Errorf("server.shared_dir_storage: resolve: %w", resolveErr)
+	}
+	sd, ok := res.SharedDirs[dirName]
+	if !ok {
+		return nil, true, fmt.Errorf("server.shared_dir_storage: shared dir %q not found in NFS resolution", dirName)
+	}
+
+	subPathRoot := sdCfg.NFS.SubPathRoot
+	if subPathRoot == "" {
+		subPathRoot = "projects"
+	}
+	// Defense in depth alongside the name/ID validation above, exactly as
+	// resolveSharedDirs does at creation time.
+	if err := shareddirs.ConfineLeaf(sd.HostPath, res.HostBase, subPathRoot, projectID, dirName); err != nil {
+		return nil, true, fmt.Errorf("server.shared_dir_storage: %w", err)
+	}
+
+	// Symlink-escape backstop on the resolved PATH this function returns.
+	// Read, write and list on this resolution go through OpenAnchoredRoot
+	// (via openSharedDirRoot), which re-verifies the leaf's identity
+	// immediately before opening it; removing the shared dir's declaration
+	// instead uses DeleteSharedDir's own no-follow walk. This check exists
+	// so that the returned Path itself, and NFSHostBase/NFSRelPath (used to
+	// safely CREATE the leaf if it doesn't exist yet), are never handed back
+	// pointing through a symlinked structural component when the leaf
+	// already exists.
+	resolvedHostBase, err := filepath.EvalSymlinks(res.HostBase)
+	if err != nil {
+		return nil, true, fmt.Errorf("server.shared_dir_storage: resolve host base symlinks: %w", err)
+	}
+	wantResolvedLeaf := filepath.Join(resolvedHostBase, sd.ServerRelativePath)
+	resolvedLeaf, evalErr := filepath.EvalSymlinks(sd.HostPath)
+	if evalErr != nil {
+		if os.IsNotExist(evalErr) {
+			// Nothing has created this shared dir on the export yet (e.g.
+			// no agent has started in this project). That's not a security
+			// concern by itself — only "nothing to browse yet" — but it
+			// also means EvalSymlinks couldn't confirm the structural
+			// components are symlink-free. Callers must NOT create
+			// anything at the returned Path directly: they must go through
+			// ensureNFSSharedDirLeaf (shareddirs.EnsureLeaf), which
+			// independently refuses a symlinked structural component via
+			// its own O_NOFOLLOW walk regardless of what this function
+			// assumed here.
+			return &sharedDirResolution{
+				Path:           wantResolvedLeaf,
+				IsLocal:        true,
+				Backend:        "nfs",
+				NFSHostBase:    resolvedHostBase,
+				NFSRelPath:     sd.ServerRelativePath,
+				NFSSubPathRoot: subPathRoot,
+			}, true, nil
+		}
+		return nil, true, fmt.Errorf("server.shared_dir_storage: resolve shared dir %q: %w", dirName, evalErr)
+	}
+	if resolvedLeaf != wantResolvedLeaf {
+		return nil, true, fmt.Errorf(
+			"server.shared_dir_storage: shared dir %q resolves through a symlink to %q, want %q",
+			dirName, resolvedLeaf, wantResolvedLeaf)
+	}
+
+	return &sharedDirResolution{
+		Path:           resolvedLeaf,
+		IsLocal:        true,
+		Backend:        "nfs",
+		NFSHostBase:    resolvedHostBase,
+		NFSRelPath:     sd.ServerRelativePath,
+		NFSSubPathRoot: subPathRoot,
+	}, true, nil
+}
+
 // resolveHubProjectSharedDirPath resolves the project-configs shared dir path for
 // a project whose workspace lives at ~/.scion/projects/<slug>/. It reads the .scion
 // marker (or project-id for git clones) to find the external project-configs path,
@@ -1125,7 +1359,7 @@ func validateWorkspaceFilePath(path string) error {
 }
 
 // handleProjectWorkspacePull performs a `git pull --ff-only` on a shared-workspace project.
-func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Request, projectID string) {
+func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Request, project *store.Project) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
 		return
@@ -1140,12 +1374,6 @@ func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Reque
 	}
 
 	ctx := r.Context()
-
-	project, err := s.store.GetProject(ctx, projectID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
 
 	if !project.IsSharedWorkspace() {
 		Conflict(w, "Pull is only available for shared-workspace git projects")
@@ -1223,5 +1451,104 @@ func cleanEmptyDirs(root *os.Root, targetDir string) {
 			break
 		}
 		targetDir = filepath.Dir(targetDir)
+	}
+}
+
+// isProjectWorkspaceSubPath reports whether a project subpath addresses the
+// project workspace. Membership in this set is what routes a request through
+// handleProjectWorkspaceRoutes, and therefore through its authorization gate.
+//
+// The "dav" arm is a prefix match rather than an exact-or-slash match because
+// that is what this dispatcher has always done. It is wider than it looks —
+// "davos" routes to WebDAV too — but narrowing it here would change routing in
+// the same change that adds a security gate, and those want separate review.
+func isProjectWorkspaceSubPath(subPath string) bool {
+	return strings.HasPrefix(subPath, "dav") ||
+		subPath == "sync/status" ||
+		subPath == "workspace" ||
+		strings.HasPrefix(subPath, "workspace/")
+}
+
+// projectWorkspaceAction maps an HTTP method onto the permission a workspace
+// request needs.
+//
+// Anything that is not a plain read is treated as a write. That is deliberately
+// the blunt choice: WebDAV's verb set is open-ended, and a verb this function
+// has never heard of is far more likely to be a mutation than a read. Being
+// wrong in the restrictive direction returns a 403 to someone who should have
+// been allowed; being wrong in the permissive direction is the bug this change
+// exists to fix.
+//
+// Every WebDAV verb (PROPFIND, PROPPATCH, MKCOL, COPY, MOVE, LOCK, UNLOCK) is
+// deliberately a write, including PROPFIND and LOCK. This was a
+// maintainer decision. The cost is that a read-only principal cannot mount or
+// browse the workspace over WebDAV; it can still read through GET on
+// workspace/files and the archive endpoint. Reclassifying a verb as a read is
+// a one-line change here and in TestProjectWorkspaceAction.
+func projectWorkspaceAction(method string) Action {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return ActionRead
+	default:
+		return ActionUpdate
+	}
+}
+
+// handleProjectWorkspaceRoutes is the single authorized entry point for every
+// project workspace subtree.
+//
+// The gate below is the whole point of this function: it runs before the switch,
+// so it cannot be bypassed by any arm of the switch, and a new arm added later
+// is gated by construction rather than by the author remembering.
+func (s *Server) handleProjectWorkspaceRoutes(w http.ResponseWriter, r *http.Request, projectID, subPath string) {
+	project, err := s.store.GetProject(r.Context(), projectID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// SECURITY-GATE: CheckAccess — authorize this specific project before any
+	// workspace path is resolved, opened, listed, read, written or deleted.
+	// Without this, any authenticated caller reaches another project's files:
+	// the route is classified RoutePolicy, which passes through unconditionally
+	// and delegates enforcement here.
+	if !s.authorize(w, r, projectResource(project), projectWorkspaceAction(r.Method)) {
+		return
+	}
+
+	switch {
+	case strings.HasPrefix(subPath, "dav"):
+		davPath := strings.TrimPrefix(subPath, "dav")
+		davPath = strings.TrimPrefix(davPath, "/")
+		s.handleProjectWebDAV(w, r, project, davPath)
+
+	case subPath == "sync/status":
+		s.handleProjectSyncStatus(w, r, project)
+
+	case subPath == "workspace/cache/refresh":
+		s.handleProjectCacheRefresh(w, r, project)
+
+	case subPath == "workspace/cache/status":
+		s.handleProjectCacheStatus(w, r, project)
+
+	case subPath == "workspace/cache/notify":
+		s.handleProjectCacheNotify(w, r, project)
+
+	case subPath == "workspace/pull":
+		s.handleProjectWorkspacePull(w, r, project)
+
+	case subPath == "workspace/archive":
+		s.handleProjectWorkspaceArchive(w, r, project)
+
+	case strings.HasPrefix(subPath, "workspace/files"):
+		filePath := strings.TrimPrefix(subPath, "workspace/files")
+		filePath = strings.TrimPrefix(filePath, "/")
+		s.handleProjectWorkspace(w, r, project, filePath)
+
+	default:
+		// Reached only for a workspace subpath with no handler, e.g.
+		// "workspace" alone or "workspace/nope". Previously these fell through
+		// to handleProjectByIDInternal, which answered with this same 404.
+		NotFound(w, "Project resource")
 	}
 }

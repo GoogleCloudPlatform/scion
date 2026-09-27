@@ -202,6 +202,41 @@ func TestPurgeOldMessages(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestPurgeFailedMessages(t *testing.T) {
+	s := newTestMessageStore(t)
+	ctx := context.Background()
+	projectID := uuid.NewString()
+
+	oldFailed := newTestMessage(projectID, "agent-1")
+	oldFailed.DispatchState = store.MessageDispatchFailed
+	oldFailed.CreatedAt = time.Now().Add(-10 * 24 * time.Hour).UTC().Truncate(time.Second)
+	require.NoError(t, s.CreateMessage(ctx, oldFailed))
+
+	recentFailed := newTestMessage(projectID, "agent-1")
+	recentFailed.DispatchState = store.MessageDispatchFailed
+	require.NoError(t, s.CreateMessage(ctx, recentFailed))
+
+	// A dispatched (successfully delivered) message old enough to be purged
+	// by PurgeOldMessages semantics, but must survive PurgeFailedMessages
+	// since it filters strictly on dispatch_state=failed.
+	oldDelivered := newTestMessage(projectID, "agent-1")
+	oldDelivered.DispatchState = store.MessageDispatchDispatched
+	oldDelivered.CreatedAt = time.Now().Add(-10 * 24 * time.Hour).UTC().Truncate(time.Second)
+	require.NoError(t, s.CreateMessage(ctx, oldDelivered))
+
+	cutoff := time.Now().Add(-7 * 24 * time.Hour)
+	n, err := s.PurgeFailedMessages(ctx, cutoff)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n, "only the old failed message is purged")
+
+	_, err = s.GetMessage(ctx, oldFailed.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	_, err = s.GetMessage(ctx, recentFailed.ID)
+	require.NoError(t, err, "recent failed message is within the retention window")
+	_, err = s.GetMessage(ctx, oldDelivered.ID)
+	require.NoError(t, err, "delivered message history is never purged by this sweep")
+}
+
 // fakePublisher records PublishUserMessage calls to verify the LISTEN/NOTIFY
 // design-in hook fires on create.
 type fakePublisher struct {

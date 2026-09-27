@@ -508,6 +508,25 @@ func (m *mockScheduledEventStore) CreateAgent(_ context.Context, agent *store.Ag
 	return nil
 }
 
+// WithTx runs fn directly against m: this mock has no real transactions, and
+// none of the tests that use it exercise rollback behavior. Needed because
+// the scheduler's create path now writes the agent row and its identity-key
+// row inside WithTx (createAgentWithIdentityKey); without this override that
+// call panics on the embedded nil store.Store, same as any other unhandled
+// method here.
+func (m *mockScheduledEventStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return fn(m)
+}
+
+// ReplaceAgentIdentityKeys is a no-op: this mock has no identity-key
+// storage, and the tests that use it exercise dispatch mechanics (template
+// resolution, applied-config precedence), not the identity-key invariant
+// itself -- that invariant is covered separately against the real ent-backed
+// store (scheduler_identity_key_test.go).
+func (m *mockScheduledEventStore) ReplaceAgentIdentityKeys(_ context.Context, _, _ string, _ []string) error {
+	return nil
+}
+
 func (m *mockScheduledEventStore) CreateDelegationEdge(_ context.Context, _ *store.DelegationEdge) error {
 	return nil // no-op for mock
 }
@@ -1635,6 +1654,18 @@ func (r *resolvingTemplateStore) GetTemplateBySlug(_ context.Context, slug, _, _
 		Harness:     "claude",
 		ContentHash: "d00dfeed",
 		Status:      "active",
+		// Scope: global — these tests exercise the scheduler dispatch
+		// mechanics (which rung wins, applied-config precedence), not store
+		// scope filtering, so this stub always resolves regardless of the
+		// scope/scopeID arguments it's called with. It stands in for the
+		// hub-wide default template these tests reference (e.g.
+		// DefaultTemplate), so it must be scoped as such: ptone/scion#1916's
+		// authorizeResolvedTemplate gate (handlers_agent_create_helpers.go)
+		// treats a resolved candidate's scope as authoritative, and a
+		// delegate agent's scheduled dispatch — like any principal without a
+		// hub-member-equivalent grant of its own — can only pass that gate on
+		// a global-scope template.
+		Scope: store.TemplateScopeGlobal,
 	}, nil
 }
 
@@ -2063,5 +2094,37 @@ func TestSchedulerMultipleOptions(t *testing.T) {
 	}
 	if s.MaxConcurrency != 3 {
 		t.Errorf("expected MaxConcurrency 3, got %d", s.MaxConcurrency)
+	}
+}
+
+// #1797: an agent creator's scheduled dispatch records the creator agent's
+// name as CreatorName, mirroring the agent-create path.
+func TestDispatchAgentEventHandler_AgentCreatorSetsCreatorName(t *testing.T) {
+	ms := newMockStore()
+	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
+	ms.agents["creator-agent"] = &store.Agent{
+		ID:            "creator-agent",
+		Name:          "lead-agent",
+		ProjectID:     "project-1",
+		AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(AgentRoleFull)},
+	}
+
+	srv := newEventHandlerTestServer(ms)
+	if err := srv.dispatchAgentEventHandler()(context.Background(), store.ScheduledEvent{
+		ID:        "dispatch-creator-name",
+		ProjectID: "project-1",
+		EventType: "dispatch_agent",
+		Payload:   `{"agentName":"sched-child"}`,
+		CreatedBy: "creator-agent",
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got, err := ms.GetAgentBySlug(context.Background(), "project-1", "sched-child")
+	if err != nil {
+		t.Fatalf("scheduled agent not created: %v", err)
+	}
+	if got.AppliedConfig == nil || got.AppliedConfig.CreatorName != "lead-agent" {
+		t.Fatalf("expected CreatorName %q, got %+v", "lead-agent", got.AppliedConfig)
 	}
 }

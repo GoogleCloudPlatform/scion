@@ -104,6 +104,12 @@ const (
 	// operations and ensures no server is running during recovery.
 	LockRecoveryAuthz AdvisoryLockKey = 0x5C100020
 
+	// LockReincarnationSweep guards the periodic replica-safe sweep that
+	// fails stale non-terminal `scion reincarnate` records and agent
+	// reincarnation_state left behind by a replica that crashed or
+	// restarted mid-migration (design §3.7).
+	LockReincarnationSweep AdvisoryLockKey = 0x5C100022
+
 	// LockInlineSecretsMigration guards the one-shot migration of inline
 	// plugin secrets from settings.yaml to the secret backend at boot time.
 	LockInlineSecretsMigration AdvisoryLockKey = 0x5C100011
@@ -147,6 +153,11 @@ const (
 	// deployments). See design doc §6 "Scheduled Update Check".
 	LockReleaseUpdateCheck AdvisoryLockKey = 0x5C100018
 
+	// LockFailedMessageRetention guards the periodic purge of messages in
+	// dispatch_state="failed" that have exceeded the configured retention
+	// window (Server.Config.FailedMessageRetentionDays).
+	LockFailedMessageRetention AdvisoryLockKey = 0x5C100019
+
 	// LockWorkspaceProvision is the CLASS ID for per-project workspace
 	// provisioning locks. It is used with the two-int advisory lock form
 	// pg_try_advisory_lock(classid, objid), where classid is this constant
@@ -169,6 +180,12 @@ const (
 	// quota checks for the same scope so that the "check count + reserve"
 	// sequence is atomic, preventing over-allocation.
 	LockQuotaEnforcement AdvisoryLockKey = 0x5C101002
+
+	// LockBrokerQuotaReconcile guards the periodic (and startup, tick 0)
+	// reconcile of stale max_agents_per_broker reservations (ptone/scion#1963)
+	// — rows left with released_at IS NULL for agents that are no longer in a
+	// counted phase (stopped/suspended/error) or no longer exist.
+	LockBrokerQuotaReconcile AdvisoryLockKey = 0x5C100021
 )
 
 // AdvisoryLocker is implemented by backends that can take a cluster-wide

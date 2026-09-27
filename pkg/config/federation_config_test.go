@@ -319,6 +319,255 @@ func TestFederationConfig_Validate(t *testing.T) {
 			},
 			wantErrs: 0,
 		},
+		// --- allowed_gcp_projects: a distinct field from
+		// allowed_projects above, admitting Google service-account
+		// principals by GCP project.
+		{
+			name: "allowed_gcp_projects on a non-Google hub issuer produces an error",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{
+						IssuerURL:          "https://hub.example.com",
+						IssuerType:         "hub",
+						AllowedGCPProjects: []string{"my-gcp-project"},
+					},
+				},
+			},
+			wantErrs:  1,
+			wantSubst: []string{"allowed_gcp_projects is only applicable to the Google issuer"},
+		},
+		{
+			name: "allowed_gcp_projects on a non-Google user issuer produces an error",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{
+						IssuerURL:  "https://firebase.example.com",
+						IssuerType: "user",
+						JWKSURL:    "https://firebase.example.com/jwks",
+						// Non-empty on purpose: isolates isActiveGoogleUserIssuer's
+						// Google-issuer-URL term from its expected_audience term,
+						// so this case can only trigger on the issuer not being Google.
+						ExpectedAudience:   "client-id",
+						AllowedGCPProjects: []string{"my-gcp-project"},
+					},
+				},
+			},
+			wantErrs:  1,
+			wantSubst: []string{"allowed_gcp_projects is only applicable to the Google issuer"},
+		},
+		{
+			// Note: the bare "accounts.google.com" form (no scheme) is a
+			// valid iss claim value inside a token, but not a valid
+			// issuer_url config value — Rule 2 requires a scheme. Only the
+			// https form is a realistic config shape here.
+			name: "allowed_gcp_projects on the Google issuer (https form) is valid",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{
+						IssuerURL:          "https://accounts.google.com",
+						IssuerType:         "user",
+						ExpectedAudience:   "client-id.apps.googleusercontent.com",
+						AllowedGCPProjects: []string{"my-gcp-project"},
+					},
+				},
+			},
+			wantErrs: 0,
+		},
+		{
+			// allowed_gcp_projects on the Google issuer with the WRONG
+			// issuer_type is a hard error, not silently ignored —
+			// googleTrust never reaches this issuer, so nothing would
+			// enforce the list.
+			name: "allowed_gcp_projects on the Google issuer with issuer_type service_account errors",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{
+						IssuerURL:  "https://accounts.google.com",
+						IssuerType: "service_account",
+						JWKSURL:    "https://www.googleapis.com/oauth2/v3/certs",
+						// Non-empty on purpose: isolates the issuer_type term
+						// of isActiveGoogleUserIssuer from the
+						// expected_audience term below, so this case can only
+						// trigger on issuer_type.
+						ExpectedAudience:   "client-id.apps.googleusercontent.com",
+						AllowedGCPProjects: []string{"my-gcp-project"},
+					},
+				},
+			},
+			wantErrs:  1,
+			wantSubst: []string{"allowed_gcp_projects requires issuer_type", "expected_audience"},
+		},
+		{
+			// Same issuer_type term, a different wrong value: the default
+			// hub type. Independent of the service_account case above.
+			name: "allowed_gcp_projects on the Google issuer with issuer_type hub errors",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{
+						IssuerURL:          "https://accounts.google.com",
+						IssuerType:         "hub",
+						ExpectedAudience:   "client-id.apps.googleusercontent.com",
+						AllowedGCPProjects: []string{"my-gcp-project"},
+					},
+				},
+			},
+			wantErrs:  1,
+			wantSubst: []string{"allowed_gcp_projects requires issuer_type", "expected_audience"},
+		},
+		{
+			// Same rule, other half: issuer_type is right but
+			// expected_audience is empty, so googleTrust still never
+			// reaches this issuer (an empty expected_audience disables the
+			// path entirely).
+			name: "allowed_gcp_projects on the Google issuer with empty expected_audience errors",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{
+						IssuerURL:          "https://accounts.google.com",
+						IssuerType:         "user",
+						AllowedGCPProjects: []string{"my-gcp-project"},
+					},
+				},
+			},
+			wantErrs:  1,
+			wantSubst: []string{"allowed_gcp_projects requires issuer_type", "expected_audience"},
+		},
+		// --- allowed_domains: a distinct field from allowed_gcp_projects
+		// above, constraining USER (not service-account) principals by email
+		// domain. Validated identically.
+		{
+			name: "allowed_domains on a non-Google hub issuer produces an error",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{
+						IssuerURL:      "https://hub.example.com",
+						IssuerType:     "hub",
+						AllowedDomains: []string{"example.com"},
+					},
+				},
+			},
+			wantErrs:  1,
+			wantSubst: []string{"allowed_domains is only applicable to the Google issuer"},
+		},
+		{
+			name: "allowed_domains on a non-Google user issuer produces an error",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{
+						IssuerURL:  "https://firebase.example.com",
+						IssuerType: "user",
+						JWKSURL:    "https://firebase.example.com/jwks",
+						// Non-empty on purpose: isolates isActiveGoogleUserIssuer's
+						// Google-issuer-URL term from its expected_audience term,
+						// so this case can only trigger on the issuer not being Google.
+						ExpectedAudience: "client-id",
+						AllowedDomains:   []string{"example.com"},
+					},
+				},
+			},
+			wantErrs:  1,
+			wantSubst: []string{"allowed_domains is only applicable to the Google issuer"},
+		},
+		{
+			name: "allowed_domains on the Google issuer (https form) is valid",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{
+						IssuerURL:        "https://accounts.google.com",
+						IssuerType:       "user",
+						ExpectedAudience: "client-id.apps.googleusercontent.com",
+						AllowedDomains:   []string{"example.com"},
+					},
+				},
+			},
+			wantErrs: 0,
+		},
+		{
+			// allowed_domains on the Google issuer with the WRONG issuer_type
+			// is a hard error, not silently ignored — googleTrust never
+			// reaches this issuer, so nothing would enforce the list.
+			name: "allowed_domains on the Google issuer with issuer_type service_account errors",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{
+						IssuerURL:  "https://accounts.google.com",
+						IssuerType: "service_account",
+						JWKSURL:    "https://www.googleapis.com/oauth2/v3/certs",
+						// Non-empty on purpose: isolates the issuer_type term
+						// of isActiveGoogleUserIssuer from the
+						// expected_audience term below, so this case can only
+						// trigger on issuer_type.
+						ExpectedAudience: "client-id.apps.googleusercontent.com",
+						AllowedDomains:   []string{"example.com"},
+					},
+				},
+			},
+			wantErrs:  1,
+			wantSubst: []string{"allowed_domains requires issuer_type", "expected_audience"},
+		},
+		{
+			// Same issuer_type term, a different wrong value: the default hub
+			// type. Independent of the service_account case above.
+			name: "allowed_domains on the Google issuer with issuer_type hub errors",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{
+						IssuerURL:        "https://accounts.google.com",
+						IssuerType:       "hub",
+						ExpectedAudience: "client-id.apps.googleusercontent.com",
+						AllowedDomains:   []string{"example.com"},
+					},
+				},
+			},
+			wantErrs:  1,
+			wantSubst: []string{"allowed_domains requires issuer_type", "expected_audience"},
+		},
+		{
+			// Same rule, other half: issuer_type is right but
+			// expected_audience is empty, so googleTrust still never reaches
+			// this issuer (an empty expected_audience disables the path
+			// entirely).
+			name: "allowed_domains on the Google issuer with empty expected_audience errors",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{
+						IssuerURL:      "https://accounts.google.com",
+						IssuerType:     "user",
+						AllowedDomains: []string{"example.com"},
+					},
+				},
+			},
+			wantErrs:  1,
+			wantSubst: []string{"allowed_domains requires issuer_type", "expected_audience"},
+		},
+		{
+			name: "allowed_projects on a Google issuer errors and names allowed_gcp_projects",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{
+						IssuerURL:        "https://accounts.google.com",
+						IssuerType:       "user",
+						ExpectedAudience: "client-id.apps.googleusercontent.com",
+						AllowedProjects:  []string{"my-gcp-project"}, // wrong field for a Google issuer
+					},
+				},
+			},
+			wantErrs:  1,
+			wantSubst: []string{"allowed_projects is not applicable", "use allowed_gcp_projects"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -340,5 +589,73 @@ func TestFederationConfig_Validate(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestInvalidDomainEntryReason table-tests every shape Rule 11 rejects: an
+// allowed_domains entry that can never equal anything domainOf
+// (pkg/hub/auth_external_bearer.go) returns, so it would otherwise silently
+// lock out every user in the domain the operator meant to allow.
+func TestInvalidDomainEntryReason(t *testing.T) {
+	tests := []struct {
+		name        string
+		domain      string
+		wantInvalid bool
+	}{
+		{"valid domain", "example.com", false},
+		{"valid mixed-case domain", "Example.COM", false},
+		{"valid multi-label domain", "sub.example.com", false},
+		{"empty entry", "", true},
+		{"contains at sign (email address)", "user@example.com", true},
+		{"leading wildcard (allowed_emails idiom)", "*.example.com", true},
+		{"bare wildcard", "*", true},
+		{"contains whitespace", "exa mple.com", true},
+		{"leading and trailing whitespace", " example.com ", true},
+		{"contains a tab", "example.com\t", true},
+		{"contains a non-breaking space", "example.com\u00a0", true},
+		{"leading dot", ".example.com", true},
+		{"trailing dot", "example.com.", true},
+		{"double dot", "example..com", true},
+		{"pasted URL with scheme", "https://example.com", true},
+		{"trailing slash", "example.com/", true},
+		{"contains a colon (e.g. a port)", "example.com:443", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := invalidDomainEntryReason(tt.domain)
+			if (got != "") != tt.wantInvalid {
+				t.Errorf("invalidDomainEntryReason(%q) = %q, wantInvalid %v", tt.domain, got, tt.wantInvalid)
+			}
+		})
+	}
+}
+
+// TestFederationConfig_Validate_InvalidDomainEntryShape confirms Rule 11 is
+// actually wired into Validate() (not just the pure predicate above), with a
+// per-entry error message that names the offending entry.
+func TestFederationConfig_Validate_InvalidDomainEntryShape(t *testing.T) {
+	cfg := FederationConfig{
+		Enabled: true,
+		TrustedIssuers: []TrustedIssuerConfig{
+			{
+				IssuerURL:        "https://accounts.google.com",
+				IssuerType:       "user",
+				ExpectedAudience: "client-id.apps.googleusercontent.com",
+				AllowedDomains:   []string{"example.com", "user@example.com", ".leading-dot.com"},
+			},
+		},
+	}
+	errs := cfg.Validate()
+	if len(errs) != 2 {
+		t.Fatalf("Validate() returned %d errors, want 2 (one per malformed entry, the valid entry produces none): %v", len(errs), errs)
+	}
+	combined := ""
+	for _, e := range errs {
+		combined += e.Error() + " "
+	}
+	for _, want := range []string{`allowed_domains[1] "user@example.com"`, `allowed_domains[2] ".leading-dot.com"`} {
+		if !strings.Contains(combined, want) {
+			t.Errorf("expected error messages to contain %q, got: %s", want, combined)
+		}
 	}
 }

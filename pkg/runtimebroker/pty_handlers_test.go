@@ -17,7 +17,11 @@ package runtimebroker
 import (
 	"bufio"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,10 +30,72 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/creack/pty"
 	"github.com/stretchr/testify/require"
 	"k8s.io/client-go/tools/remotecommand"
 )
+
+// newAttachTestRequest builds a WebSocket-upgrade GET request for the given
+// agent slug, matching what handleAgentAttach expects before it gets far
+// enough to call ptyUpgrader.Upgrade.
+func newAttachTestRequest(slug string) *http.Request {
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/"+slug+"/attach", nil)
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Connection", "Upgrade")
+	return req
+}
+
+func decodeErrorResponse(t *testing.T, rec *httptest.ResponseRecorder) ErrorResponse {
+	t.Helper()
+	var resp ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode error response %q: %v", rec.Body.String(), err)
+	}
+	return resp
+}
+
+func TestHandleAgentAttach_AgentNotFound(t *testing.T) {
+	mgr := &mockManager{}
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	rec := httptest.NewRecorder()
+	srv.handleAgentAttach(rec, newAttachTestRequest("missing-agent"))
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for a genuinely missing agent, got %d: %s", rec.Code, rec.Body.String())
+	}
+	resp := decodeErrorResponse(t, rec)
+	if resp.Error.Code != ErrCodeAgentNotFound {
+		t.Errorf("expected code %q, got %q", ErrCodeAgentNotFound, resp.Error.Code)
+	}
+}
+
+func TestHandleAgentAttach_RuntimeListUnavailable(t *testing.T) {
+	mgr := &mockManager{listErr: errors.New("docker ps failed: exit status 1")}
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	rec := httptest.NewRecorder()
+	srv.handleAgentAttach(rec, newAttachTestRequest("some-agent"))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 when the runtime listing itself fails, got %d: %s", rec.Code, rec.Body.String())
+	}
+	resp := decodeErrorResponse(t, rec)
+	if resp.Error.Code != ErrCodeRuntimeUnavailable {
+		t.Errorf("expected code %q, got %q", ErrCodeRuntimeUnavailable, resp.Error.Code)
+	}
+	if !strings.Contains(resp.Error.Message, "retry") && !strings.Contains(resp.Error.Message, "temporarily") {
+		t.Errorf("expected an actionable, retry-oriented message, got %q", resp.Error.Message)
+	}
+	// The message must not just be "Agent not found" — the whole point is
+	// distinguishing a transient runtime failure from a real not-found.
+	if strings.Contains(resp.Error.Message, "not found") {
+		t.Errorf("runtime-unavailable message should not read like a not-found error, got %q", resp.Error.Message)
+	}
+}
 
 func TestWaitForTmuxSession_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())

@@ -461,6 +461,69 @@ func DetectAuthTypeFromGCPIdentityFromConfig(authMeta *config.HarnessAuthMetadat
 	return ""
 }
 
+// AutoDetectAuthType resolves an effective auth type using the full
+// precedence chain: file secrets, then env vars, then GCP identity. Callers
+// that need this three-step precedence (the runtimebroker preflight and
+// pkg/agent's Start()) must use this function rather than chaining the
+// Detect*FromConfig functions themselves, because a present credential for
+// the harness's own default_type must stop resolution before the
+// GCP-identity leg runs. DetectAuthTypeFromFileSecretsFromConfig and
+// DetectAuthTypeFromEnvVarsFromConfig cannot signal that on their own:
+// pickAutodetectCandidate returns "" both when nothing matched and when a
+// matched candidate is already the default type, so a caller chaining
+// "if empty, try the next leg" can't tell "no credential" from "the default
+// credential" apart and would wrongly let identity override a real,
+// present credential. AutoDetectAuthType resolves that ambiguity: any file
+// or env credential present — even one that resolves to the default type —
+// stops resolution there. The GCP-identity leg only runs when neither leg
+// found any autodetect-relevant key at all.
+//
+// Returns "" only when no file secret, env var, or GCP identity signal
+// resolves anything — callers should apply their own default-type fallback
+// in that case, exactly as RequiredAuthEnvKeysFromConfig and
+// RequiredAuthSecretsFromConfig already do.
+func AutoDetectAuthType(authMeta *config.HarnessAuthMetadata, fileSecretNames, envKeys map[string]struct{}, gcpSAAssigned bool) string {
+	if authMeta == nil {
+		return ""
+	}
+
+	if detected := DetectAuthTypeFromFileSecretsFromConfig(authMeta, fileSecretNames); detected != "" {
+		return detected
+	}
+	if hasAutodetectCandidate(authMeta.Autodetect.Files, fileSecretNames) {
+		// A file credential is present and resolves to default_type — see
+		// the ambiguity explained above. pickAutodetectCandidate only
+		// returns "" here when authMeta.DefaultType is non-empty and among
+		// the matched candidates, so this is never itself empty.
+		return authMeta.DefaultType
+	}
+
+	if detected := DetectAuthTypeFromEnvVarsFromConfig(authMeta, envKeys); detected != "" {
+		return detected
+	}
+	if hasAutodetectCandidate(authMeta.Autodetect.Env, envKeys) {
+		return authMeta.DefaultType
+	}
+
+	return DetectAuthTypeFromGCPIdentityFromConfig(authMeta, gcpSAAssigned)
+}
+
+// hasAutodetectCandidate reports whether any key in presentKeys maps to a
+// non-empty auth type in the given autodetect table — i.e. whether
+// pickAutodetectCandidate had *something* to resolve, independent of whether
+// it returned that something or "" (already-on-default).
+func hasAutodetectCandidate(autodetect map[string]string, presentKeys map[string]struct{}) bool {
+	for key, authType := range autodetect {
+		if authType == "" {
+			continue
+		}
+		if _, ok := presentKeys[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // pickAutodetectCandidate implements the deterministic precedence rule
 // documented above: prefer the default_type, otherwise return the
 // alphabetically-smallest candidate.

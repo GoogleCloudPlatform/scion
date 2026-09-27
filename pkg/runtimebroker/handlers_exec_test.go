@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -39,12 +40,12 @@ func TestExecCommand_ProjectScopedDisambiguation(t *testing.T) {
 		{
 			ContainerID: "container-A",
 			Name:        "coordinator",
-			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
 		},
 		{
 			ContainerID: "container-B",
 			Name:        "coordinator",
-			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-B"},
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-B"},
 		},
 	}
 
@@ -71,23 +72,23 @@ func TestExecCommand_ProjectScopedDisambiguation(t *testing.T) {
 		return w.Body.String(), w.Code
 	}
 
-	// Exec scoped to grove-A must target container-A.
-	respA, codeA := doExec("grove-A")
+	// Exec scoped to project-A must target container-A.
+	respA, codeA := doExec("project-A")
 	if codeA != http.StatusOK {
-		t.Fatalf("grove-A exec: expected 200, got %d (%s)", codeA, respA)
+		t.Fatalf("project-A exec: expected 200, got %d (%s)", codeA, respA)
 	}
 	if execedID != "container-A" {
-		t.Errorf("grove-A exec targeted %q, want container-A", execedID)
+		t.Errorf("project-A exec targeted %q, want container-A", execedID)
 	}
 
-	// Exec scoped to grove-B must target container-B — not whichever the
+	// Exec scoped to project-B must target container-B — not whichever the
 	// slug-only lookup happened to find first.
-	respB, codeB := doExec("grove-B")
+	respB, codeB := doExec("project-B")
 	if codeB != http.StatusOK {
-		t.Fatalf("grove-B exec: expected 200, got %d (%s)", codeB, respB)
+		t.Fatalf("project-B exec: expected 200, got %d (%s)", codeB, respB)
 	}
 	if execedID != "container-B" {
-		t.Errorf("grove-B exec targeted %q, want container-B (cross-project slug collision)", execedID)
+		t.Errorf("project-B exec targeted %q, want container-B (cross-project slug collision)", execedID)
 	}
 }
 
@@ -100,18 +101,18 @@ func TestStopAgent_ProjectScopedDisambiguation(t *testing.T) {
 		{
 			ContainerID: "container-A",
 			Name:        "coordinator",
-			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
 		},
 		{
 			ContainerID: "container-B",
 			Name:        "coordinator",
-			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-B"},
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-B"},
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(DefaultServerConfig(), mgr, rt)
 
-	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/stop?projectId=grove-B", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/stop?projectId=project-B", nil)
 	w := httptest.NewRecorder()
 	srv.handleAgentByID(w, r)
 
@@ -125,7 +126,7 @@ func TestStopAgent_ProjectScopedDisambiguation(t *testing.T) {
 
 // TestExecCommand_NotFoundWhenOnlyInOtherProject verifies that exec does NOT
 // fall back to a same-slug agent in a different project. Asking to exec
-// "coordinator" in grove-B when only grove-A has one must 404 and never invoke
+// "coordinator" in project-B when only project-A has one must 404 and never invoke
 // the runtime — the core cross-project collision the review feedback targeted.
 func TestExecCommand_NotFoundWhenOnlyInOtherProject(t *testing.T) {
 	mgr := &filteringMockManager{}
@@ -133,7 +134,7 @@ func TestExecCommand_NotFoundWhenOnlyInOtherProject(t *testing.T) {
 		{
 			ContainerID: "container-A",
 			Name:        "coordinator",
-			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
 		},
 	}
 	execCalled := false
@@ -147,7 +148,7 @@ func TestExecCommand_NotFoundWhenOnlyInOtherProject(t *testing.T) {
 	srv := New(DefaultServerConfig(), mgr, rt)
 
 	body, _ := json.Marshal(map[string]any{"command": []string{"echo", "hi"}})
-	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/exec?projectId=grove-B", bytes.NewReader(body))
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/exec?projectId=project-B", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	srv.handleAgentByID(w, r)
 
@@ -168,13 +169,13 @@ func TestStopAgent_NotFoundInProjectIsNoOp(t *testing.T) {
 		{
 			ContainerID: "container-A",
 			Name:        "coordinator",
-			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(DefaultServerConfig(), mgr, rt)
 
-	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/stop?projectId=grove-B", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/stop?projectId=project-B", nil)
 	w := httptest.NewRecorder()
 	srv.handleAgentByID(w, r)
 
@@ -183,6 +184,102 @@ func TestStopAgent_NotFoundInProjectIsNoOp(t *testing.T) {
 	}
 	if mgr.stopCalls != 0 {
 		t.Errorf("Stop was called %d time(s); must not stop a same-slug agent in another project", mgr.stopCalls)
+	}
+}
+
+// TestStopAgent_LookupErrorReturns5xx is a regression test for #1985: when
+// resolving the project-scoped stop target fails for a reason other than
+// genuine "not found" (here, the runtime listing itself errors), stopAgent
+// must surface a 5xx rather than reporting the idempotent-no-op 202 that a
+// real "not found" gets. Before the fix, projectScopedTarget mapped every
+// lookup failure to "" and stopAgent treated "" as success.
+func TestStopAgent_LookupErrorReturns5xx(t *testing.T) {
+	mgr := &filteringMockManager{}
+	mgr.agents = []api.AgentInfo{
+		{
+			ContainerID: "container-A",
+			Name:        "coordinator",
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
+		},
+	}
+	mgr.listErr = fmt.Errorf("docker ps failed: exit status 1")
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/stop?projectId=project-A", nil)
+	w := httptest.NewRecorder()
+	srv.handleAgentByID(w, r)
+
+	if w.Code < 500 {
+		t.Fatalf("expected a 5xx status when the lookup fails, got %d (%s)", w.Code, w.Body.String())
+	}
+	if mgr.stopCalls != 0 {
+		t.Errorf("Stop was called %d time(s); a lookup failure must not be treated as a successful stop", mgr.stopCalls)
+	}
+}
+
+// TestStopAgent_AmbiguousMatchAbortsWithoutStop is a regression test for
+// #1985: when the project-scoped lookup finds more than one distinct
+// container matching the slug (uniqueAgentEntry's ambiguous case), that is a
+// real lookup failure, not a "not found," so stopAgent must abort with a 5xx
+// and must NOT call Stop — a lookup that can't tell which container to stop
+// must not guess and stop one of them anyway. Mirrors
+// TestRestartAgent_AmbiguousMatchAbortsWithoutStart.
+func TestStopAgent_AmbiguousMatchAbortsWithoutStop(t *testing.T) {
+	mgr := &filteringMockManager{}
+	mgr.agents = []api.AgentInfo{
+		{
+			ContainerID: "container-A",
+			Name:        "coordinator",
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
+		},
+		{
+			ContainerID: "container-A2",
+			Name:        "coordinator",
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
+		},
+	}
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/stop?projectId=project-A", nil)
+	w := httptest.NewRecorder()
+	srv.handleAgentByID(w, r)
+
+	if w.Code < 500 {
+		t.Fatalf("expected a 5xx status for an ambiguous match, got %d (%s)", w.Code, w.Body.String())
+	}
+	if mgr.stopCalls != 0 {
+		t.Errorf("Stop was called %d time(s); an ambiguous match must abort before stopping", mgr.stopCalls)
+	}
+}
+
+// TestStopAgent_NoContainerIDIsNoOp: a matching agent record with no
+// resolvable container id (no "scion.container.id" label, no ContainerID,
+// no ID) has nothing to stop. LookupContainerID's "no container ID" result
+// is classified as ErrAgentNotFound, so stopAgent must treat it like a
+// genuine not-found: return 202 as an idempotent no-op rather than aborting
+// with a 5xx, and must NOT call Stop. Mirrors
+// TestRestartAgent_NoContainerIDProceedsWithStart.
+func TestStopAgent_NoContainerIDIsNoOp(t *testing.T) {
+	mgr := &filteringMockManager{}
+	mgr.agents = []api.AgentInfo{
+		{
+			Name:   "coordinator",
+			Labels: map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
+		},
+	}
+	srv := newTestServerWithManager(t, mgr)
+
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/stop?projectId=project-A", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, r)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+	}
+	if mgr.stopCalls != 0 {
+		t.Errorf("Stop was called %d time(s); a no-container agent has nothing to stop", mgr.stopCalls)
 	}
 }
 
@@ -195,7 +292,7 @@ func TestExecCommand_NotFoundInProject(t *testing.T) {
 		{
 			ContainerID: "container-A",
 			Name:        "coordinator",
-			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
 		},
 	}
 	rt := &runtime.MockRuntime{
@@ -205,11 +302,144 @@ func TestExecCommand_NotFoundInProject(t *testing.T) {
 	srv := New(DefaultServerConfig(), mgr, rt)
 
 	body, _ := json.Marshal(map[string]any{"command": []string{"echo", "hi"}})
-	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/ghost/exec?projectId=grove-A", bytes.NewReader(body))
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/ghost/exec?projectId=project-A", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	srv.handleAgentByID(w, r)
 
 	if w.Code != http.StatusNotFound {
 		t.Errorf("expected 404 for missing agent, got %d (%s)", w.Code, w.Body.String())
+	}
+}
+
+// TestRestartAgent_LookupErrorAbortsWithoutStart is a regression test for
+// #1985: when resolving the project-scoped stop target during a restart
+// fails for a reason other than genuine "not found" (here, the runtime
+// listing itself errors), restartAgent must abort with a 5xx and must NOT
+// call Start — otherwise a runtime hiccup during the lookup would leave a
+// second container running alongside whatever the first lookup couldn't see.
+func TestRestartAgent_LookupErrorAbortsWithoutStart(t *testing.T) {
+	mgr := &filteringMockManager{}
+	mgr.agents = []api.AgentInfo{
+		{
+			ContainerID: "container-A",
+			Name:        "coordinator",
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
+		},
+	}
+	mgr.listErr = fmt.Errorf("docker ps failed: exit status 1")
+	srv := newTestServerWithManager(t, mgr)
+
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/restart?projectId=project-A", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, r)
+
+	if w.Code < 500 {
+		t.Fatalf("expected a 5xx status when the lookup fails, got %d (%s)", w.Code, w.Body.String())
+	}
+	if mgr.startCalls != 0 {
+		t.Errorf("Start was called %d time(s); a lookup failure during restart must not start a second container", mgr.startCalls)
+	}
+	if mgr.stopCalls != 0 {
+		t.Errorf("Stop was called %d time(s); a lookup failure must abort before stopping", mgr.stopCalls)
+	}
+}
+
+// TestRestartAgent_NotFoundInProjectProceedsWithStart verifies the other side
+// of the #1985 fix: a genuine "not found in this project" result (no lookup
+// error, just no match) must keep the existing idempotent behavior — restart
+// skips the stop and proceeds to start, exactly as it did before the fix.
+func TestRestartAgent_NotFoundInProjectProceedsWithStart(t *testing.T) {
+	mgr := &filteringMockManager{}
+	mgr.agents = []api.AgentInfo{
+		{
+			ContainerID: "container-A",
+			Name:        "coordinator",
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
+		},
+	}
+	srv := newTestServerWithManager(t, mgr)
+
+	// project-B has no "coordinator" agent — a genuine not-found, not a lookup error.
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/restart?projectId=project-B", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, r)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+	}
+	if mgr.stopCalls != 0 {
+		t.Errorf("Stop was called %d time(s); must not stop a same-slug agent in another project", mgr.stopCalls)
+	}
+	if mgr.startCalls != 1 {
+		t.Errorf("expected Start to be called once, got %d", mgr.startCalls)
+	}
+}
+
+// TestRestartAgent_AmbiguousMatchAbortsWithoutStart is a regression test for
+// #1985: when the project-scoped lookup finds more than one distinct
+// container matching the slug (uniqueAgentEntry's ambiguous case), that is a
+// real lookup failure, not a "not found," so restartAgent must abort with a
+// 5xx and must NOT call Start — a lookup that can't tell which container to
+// stop must not just start a second one anyway.
+func TestRestartAgent_AmbiguousMatchAbortsWithoutStart(t *testing.T) {
+	mgr := &filteringMockManager{}
+	mgr.agents = []api.AgentInfo{
+		{
+			ContainerID: "container-A",
+			Name:        "coordinator",
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
+		},
+		{
+			ContainerID: "container-A2",
+			Name:        "coordinator",
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
+		},
+	}
+	srv := newTestServerWithManager(t, mgr)
+
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/restart?projectId=project-A", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, r)
+
+	if w.Code < 500 {
+		t.Fatalf("expected a 5xx status for an ambiguous match, got %d (%s)", w.Code, w.Body.String())
+	}
+	if mgr.startCalls != 0 {
+		t.Errorf("Start was called %d time(s); an ambiguous match must not start a second container", mgr.startCalls)
+	}
+	if mgr.stopCalls != 0 {
+		t.Errorf("Stop was called %d time(s); an ambiguous match must abort before stopping", mgr.stopCalls)
+	}
+}
+
+// TestRestartAgent_NoContainerIDProceedsWithStart: a matching agent record
+// with no resolvable container id (no "scion.container.id" label, no
+// ContainerID, no ID — e.g. a malformed or partial runtime entry) has
+// nothing addressable to stop. LookupContainerID's "no container ID" result
+// is classified as ErrAgentNotFound, so restartAgent must treat it like a
+// genuine not-found: skip the stop and proceed to start, rather than
+// aborting with a 5xx.
+func TestRestartAgent_NoContainerIDProceedsWithStart(t *testing.T) {
+	mgr := &filteringMockManager{}
+	mgr.agents = []api.AgentInfo{
+		{
+			Name:   "coordinator",
+			Labels: map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
+		},
+	}
+	srv := newTestServerWithManager(t, mgr)
+
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/restart?projectId=project-A", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, r)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+	}
+	if mgr.stopCalls != 0 {
+		t.Errorf("Stop was called %d time(s); a no-container agent has nothing to stop", mgr.stopCalls)
+	}
+	if mgr.startCalls != 1 {
+		t.Errorf("expected Start to be called once, got %d", mgr.startCalls)
 	}
 }

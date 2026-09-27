@@ -19,38 +19,49 @@ import (
 	"testing"
 )
 
-func TestCanonicalConfigKey(t *testing.T) {
+func TestIsProjectIDConfigKey(t *testing.T) {
 	tests := []struct {
-		key       string
-		canonical string
-		legacy    bool
+		key  string
+		want bool
 	}{
-		{ConfigProjectIDKey, ConfigProjectIDKey, false},
-		{ConfigGroveIDKey, ConfigProjectIDKey, true},
-		{ConfigHubProjectIDKey, ConfigHubProjectIDKey, false},
-		{ConfigHubProjectIDJSON, ConfigHubProjectIDKey, false},
-		{ConfigHubGroveIDKey, ConfigHubProjectIDKey, true},
-		{ConfigHubGroveIDJSON, ConfigHubProjectIDKey, true},
-		{"hub.endpoint", "hub.endpoint", false},
+		{ConfigProjectIDKey, true},
+		{"grove_id", false},
+		{"hub.endpoint", false},
 	}
-
 	for _, tt := range tests {
-		canonical, legacy := CanonicalConfigKey(tt.key)
-		if canonical != tt.canonical || legacy != tt.legacy {
-			t.Fatalf("CanonicalConfigKey(%q) = (%q, %v), want (%q, %v)", tt.key, canonical, legacy, tt.canonical, tt.legacy)
+		if got := IsProjectIDConfigKey(tt.key); got != tt.want {
+			t.Fatalf("IsProjectIDConfigKey(%q) = %v, want %v", tt.key, got, tt.want)
+		}
+	}
+}
+
+func TestIsHubProjectIDConfigKey(t *testing.T) {
+	tests := []struct {
+		key  string
+		want bool
+	}{
+		{ConfigHubProjectIDKey, true},
+		{ConfigHubProjectIDJSON, true},
+		{"hub.grove_id", false},
+		{"hub.groveId", false},
+		{"hub.endpoint", false},
+	}
+	for _, tt := range tests {
+		if got := IsHubProjectIDConfigKey(tt.key); got != tt.want {
+			t.Fatalf("IsHubProjectIDConfigKey(%q) = %v, want %v", tt.key, got, tt.want)
 		}
 	}
 }
 
 func TestProjectIDFromEnv(t *testing.T) {
 	t.Setenv(EnvProjectID, "canonical")
-	t.Setenv(EnvGroveID, "legacy")
 	if got := ProjectIDFromEnv(os.Getenv); got != "canonical" {
 		t.Fatalf("ProjectIDFromEnv() = %q, want canonical", got)
 	}
+	t.Setenv("SCION_GROVE_ID", "legacy")
 	t.Setenv(EnvProjectID, "")
-	if got := ProjectIDFromEnv(os.Getenv); got != "legacy" {
-		t.Fatalf("ProjectIDFromEnv() fallback = %q, want legacy", got)
+	if got := ProjectIDFromEnv(os.Getenv); got != "" {
+		t.Fatalf("ProjectIDFromEnv() = %q, want empty: SCION_GROVE_ID is no longer read", got)
 	}
 }
 
@@ -62,13 +73,16 @@ func TestEnvProjectIDConfigKey(t *testing.T) {
 		ok                   bool
 	}{
 		{EnvProjectID, true, ConfigProjectIDKey, true},
-		{EnvGroveID, true, ConfigProjectIDKey, true},
 		{EnvHubProjectID, true, ConfigProjectIDKey, true},
-		{EnvHubGroveID, true, ConfigProjectIDKey, true},
 		{EnvProjectID, false, ConfigProjectIDKey, true},
-		{EnvGroveID, false, ConfigGroveIDKey, true},
 		{EnvHubProjectID, false, ConfigHubProjectIDKey, true},
-		{EnvHubGroveID, false, ConfigHubGroveIDKey, true},
+		// SCION_HUB_GROVE_ID and SCION_GROVE_ID: removed, no replacement
+		// case. Must stay (false, "", false) — a caller falling through to a
+		// generic mapping for a "false" result here would silently revive a
+		// removed variable via koanf.go/settings_v1.go's generic mapper.
+		{"SCION_HUB_GROVE_ID", false, "", false},
+		{"SCION_GROVE_ID", false, "", false},
+		{"SCION_GROVE_ID", true, "", false},
 		{"SCION_HUB_ENDPOINT", false, "", false},
 	}
 

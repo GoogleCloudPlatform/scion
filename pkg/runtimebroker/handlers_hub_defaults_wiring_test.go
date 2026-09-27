@@ -48,6 +48,12 @@ func (m *hubDefaultsCapturingManager) Provision(ctx context.Context, opts api.St
 	return &api.ScionConfig{Harness: "claude", HarnessConfig: "claude"}, nil
 }
 
+func (m *hubDefaultsCapturingManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	m.provisionCalled = true
+	m.seenOnContext = api.HubAgentDefaultsFromContext(ctx)
+	return &api.ScionConfig{Harness: "claude", HarnessConfig: "claude"}, nil
+}
+
 func newHubDefaultsWiringServer() (*Server, *hubDefaultsCapturingManager) {
 	cfg := DefaultServerConfig()
 	cfg.BrokerID = "test-broker-id"

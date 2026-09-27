@@ -87,7 +87,6 @@ func createAuthzTestTemplate(t *testing.T, s store.Store, name, scope, scopeID, 
 		ScopeID:     scopeID,
 		OwnerID:     ownerID,
 		Status:      "active",
-		Visibility:  store.VisibilityPrivate,
 		StoragePath: fmt.Sprintf("templates/%s/%s", scope, api.Slugify(name)),
 		Created:     time.Now(),
 		Updated:     time.Now(),
@@ -327,12 +326,15 @@ func TestTemplateAuthz_Download_MemberAllowedOnGlobal(t *testing.T) {
 		"hub member should not get 401; got: %s", rec.Body.String())
 }
 
+// Expects 404, not 403 (ptone/scion#1916): a read denial on this surface
+// must be indistinguishable from a nonexistent template — see authorizeRead
+// (authorize.go) and handleTemplateDownload's read gate.
 func TestTemplateAuthz_Download_NonMemberDenied(t *testing.T) {
 	srv, s, alice, bob, project := setupTemplateAuthzTest(t)
 	tpl := createAuthzTestTemplate(t, s, "dl-priv", store.TemplateScopeProject, project.ID, alice.ID)
 
 	rec := doRequestAsUser(t, srv, bob, http.MethodGet, "/api/v1/templates/"+tpl.ID+"/download", nil)
-	assert.Equal(t, http.StatusForbidden, rec.Code,
+	assert.Equal(t, http.StatusNotFound, rec.Code,
 		"non-member should not be able to download a project template; got: %s", rec.Body.String())
 }
 
@@ -374,12 +376,14 @@ func TestTemplateAuthz_Validate_MemberAllowedOnGlobal(t *testing.T) {
 		"hub member should not get 401; got: %s", rec.Body.String())
 }
 
+// Expects 404, not 403 (ptone/scion#1916) — see the identical comment on
+// TestTemplateAuthz_Download_NonMemberDenied.
 func TestTemplateAuthz_Validate_NonMemberDenied(t *testing.T) {
 	srv, s, alice, bob, project := setupTemplateAuthzTest(t)
 	tpl := createAuthzTestTemplate(t, s, "val-priv", store.TemplateScopeProject, project.ID, alice.ID)
 
 	rec := doRequestAsUser(t, srv, bob, http.MethodGet, "/api/v1/templates/"+tpl.ID+"/validate", nil)
-	assert.Equal(t, http.StatusForbidden, rec.Code,
+	assert.Equal(t, http.StatusNotFound, rec.Code,
 		"non-member should not be able to validate a project template; got: %s", rec.Body.String())
 }
 
@@ -427,7 +431,6 @@ func TestTemplateAuthz_Update_AllPinnedFieldsImmutable(t *testing.T) {
 		BaseTemplate: "original-base-template-id",
 		SourceURL:    "https://github.com/example/original-source",
 		UpdatedBy:    alice.ID,
-		Visibility:   store.VisibilityPrivate,
 		Created:      time.Now(),
 		Updated:      time.Now(),
 	}
@@ -523,16 +526,15 @@ func TestTemplateAuthz_Update_StatusPromotionBlocked(t *testing.T) {
 	ctx := context.Background()
 
 	tpl := &store.Template{
-		ID:         api.NewUUID(),
-		Name:       "pending-template",
-		Slug:       "pending-template",
-		Scope:      store.TemplateScopeProject,
-		ScopeID:    project.ID,
-		OwnerID:    alice.ID,
-		Status:     store.TemplateStatusPending,
-		Visibility: store.VisibilityPrivate,
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:      api.NewUUID(),
+		Name:    "pending-template",
+		Slug:    "pending-template",
+		Scope:   store.TemplateScopeProject,
+		ScopeID: project.ID,
+		OwnerID: alice.ID,
+		Status:  store.TemplateStatusPending,
+		Created: time.Now(),
+		Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateTemplate(ctx, tpl))
 

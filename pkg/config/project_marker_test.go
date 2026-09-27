@@ -510,7 +510,6 @@ func TestIsHubContext(t *testing.T) {
 	// Clear all hub env vars
 	t.Setenv("SCION_HUB_ENDPOINT", "")
 	t.Setenv("SCION_HUB_URL", "")
-	t.Setenv("SCION_GROVE_ID", "")
 	t.Setenv("SCION_PROJECT_ID", "")
 
 	if IsHubContext() {
@@ -531,10 +530,17 @@ func TestIsHubContext(t *testing.T) {
 	}
 	t.Setenv("SCION_HUB_URL", "")
 
-	// SCION_GROVE_ID alone (broker-dispatched)
-	t.Setenv("SCION_GROVE_ID", "grove-uuid-123")
+	// SCION_PROJECT_ID alone (broker-dispatched)
+	t.Setenv("SCION_PROJECT_ID", "project-uuid-123")
 	if !IsHubContext() {
-		t.Error("expected IsHubContext() = true when SCION_GROVE_ID is set")
+		t.Error("expected IsHubContext() = true when SCION_PROJECT_ID is set")
+	}
+	t.Setenv("SCION_PROJECT_ID", "")
+
+	// SCION_GROVE_ID is no longer read.
+	t.Setenv("SCION_GROVE_ID", "grove-uuid-123")
+	if IsHubContext() {
+		t.Error("expected IsHubContext() = false when only SCION_GROVE_ID is set")
 	}
 }
 

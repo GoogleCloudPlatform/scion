@@ -46,6 +46,27 @@ func httpJSONResponse(status int, body string) *http.Response {
 	}
 }
 
+func TestTokenResponse_JSON(t *testing.T) {
+	tr := TokenResponse{
+		ID:        "t1",
+		Name:      "ci-token",
+		Prefix:    "scion_pat_abc1",
+		ProjectID: "p1",
+		Scopes:    []string{"agent:dispatch"},
+		Created:   time.Now(),
+	}
+
+	data, err := json.Marshal(tr)
+	require.NoError(t, err)
+
+	var m map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &m))
+
+	require.Equal(t, "p1", m["projectId"])
+	_, hasGroveID := m["groveId"]
+	require.False(t, hasGroveID, "legacy 'groveId' key present in marshal output, want absent")
+}
+
 func TestAuthLogin(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()

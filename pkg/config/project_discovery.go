@@ -42,7 +42,6 @@ const (
 type ProjectInfo struct {
 	Name          string        `json:"name"`
 	ProjectID     string        `json:"project_id,omitempty"`
-	GroveID       string        `json:"grove_id,omitempty"`
 	Type          ProjectType   `json:"type"`
 	ConfigPath    string        `json:"config_path"`
 	WorkspacePath string        `json:"workspace_path,omitempty"`
@@ -62,8 +61,8 @@ func (g ProjectInfo) AgentsDir() string {
 }
 
 // DiscoverProjects scans for all known projects on this machine.
-// It checks the global project, then scans ~/.scion/project-configs/ and
-// the legacy ~/.scion/grove-configs/ for external and git project configs.
+// It checks the global project, then scans ~/.scion/project-configs/ for
+// external and git project configs.
 func DiscoverProjects() ([]ProjectInfo, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -85,19 +84,14 @@ func DiscoverProjects() ([]ProjectInfo, error) {
 		pi.AgentCount = countAgents(filepath.Join(globalDir, "agents"))
 		if settings, err := LoadSettings(globalDir); err == nil {
 			pi.ProjectID = settings.ProjectID
-			pi.GroveID = settings.ProjectID
 		}
 		projects = append(projects, pi)
 		seenSlugs["global"] = true
 	}
 
-	// 2. Scan project-configs directory (preferred)
+	// 2. Scan project-configs directory
 	projectConfigsDir := filepath.Join(home, GlobalDir, ProjectConfigsDir)
 	projects = scanConfigDir(projects, projectConfigsDir, seenSlugs)
-
-	// 3. Scan legacy grove-configs directory
-	legacyConfigsDir := filepath.Join(home, GlobalDir, GroveConfigsDir)
-	projects = scanConfigDir(projects, legacyConfigsDir, seenSlugs)
 
 	return projects, nil
 }
@@ -176,7 +170,6 @@ func projectInfoFromExternal(configPath, dirName, slug string) ProjectInfo {
 	settings, err := LoadSettings(configPath)
 	if err == nil {
 		pi.ProjectID = settings.ProjectID
-		pi.GroveID = settings.ProjectID
 		pi.WorkspacePath = settings.WorkspacePath
 	}
 
@@ -211,7 +204,6 @@ func projectInfoFromGitExternalWithConfig(configPath, agentsDir, dirName, slug s
 		if vs.ProjectType == string(ProjectTypeShadow) {
 			if vs.Hub != nil && vs.Hub.ProjectID != "" {
 				pi.ProjectID = vs.Hub.ProjectID
-				pi.GroveID = vs.Hub.ProjectID
 			}
 			pi.Type = ProjectTypeShadow
 			pi.WorkspacePath = vs.WorkspacePath
@@ -225,7 +217,6 @@ func projectInfoFromGitExternalWithConfig(configPath, agentsDir, dirName, slug s
 
 	if settings, err := LoadSettings(configPath); err == nil {
 		pi.ProjectID = settings.ProjectID
-		pi.GroveID = settings.ProjectID
 	}
 	pi.AgentCount = countAgents(agentsDir)
 	if pi.ProjectID == "" {
@@ -246,16 +237,8 @@ func readWorkspaceMarkerForSlug(slug string) (*ProjectMarker, string, error) {
 		return nil, "", err
 	}
 
-	// 1. Try projects/
 	workspacePath := filepath.Join(home, GlobalDir, ProjectsDir, slug)
 	markerPath := filepath.Join(workspacePath, DotScion)
-	if marker, err := ReadProjectMarker(markerPath); err == nil {
-		return marker, workspacePath, nil
-	}
-
-	// 2. Fallback to legacy groves/
-	workspacePath = filepath.Join(home, GlobalDir, GrovesDir, slug)
-	markerPath = filepath.Join(workspacePath, DotScion)
 	if marker, err := ReadProjectMarker(markerPath); err == nil {
 		return marker, workspacePath, nil
 	}
@@ -379,15 +362,14 @@ func RemoveProjectConfig(configPath string) error {
 		parent = filepath.Dir(parent)
 	}
 
-	// Safety: only remove if it's under project-configs/ or legacy grove-configs/
+	// Safety: only remove if it's under project-configs/
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
 	}
 	projectConfigsDir := filepath.Join(home, GlobalDir, ProjectConfigsDir)
-	legacyConfigsDir := filepath.Join(home, GlobalDir, GroveConfigsDir)
 
-	if !strings.HasPrefix(parent, projectConfigsDir) && !strings.HasPrefix(parent, legacyConfigsDir) {
+	if !strings.HasPrefix(parent, projectConfigsDir) {
 		return os.ErrPermission
 	}
 

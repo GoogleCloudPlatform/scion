@@ -83,6 +83,7 @@ describe('terminal sessions', () => {
     await attempt;
     expect(FakeSocket.instances).toHaveLength(1);
     FakeSocket.instances[0].open();
+    FakeSocket.instances[0].data([]);
     expect(f.registry.open(agentId, f.initialize)).toBe(first);
     await first.connect();
     expect(f.fetcher).toHaveBeenCalledTimes(2);
@@ -151,6 +152,7 @@ describe('terminal sessions', () => {
     expect(FakeSocket.instances).toHaveLength(1);
     await session.connect();
     FakeSocket.instances[1].open();
+    FakeSocket.instances[1].data([]);
     expect(FakeSocket.instances[1].send).not.toHaveBeenCalled();
     expect(f.resources.dispose).not.toHaveBeenCalled();
     expect(f.resources.reset).toHaveBeenCalledTimes(1);
@@ -167,6 +169,8 @@ describe('terminal sessions', () => {
     await session.connect();
     const current = FakeSocket.instances[1];
     current.open();
+    current.data([]); // confirms the current socket live; clear its own write call below
+    f.resources.write.mockClear();
     old.onmessage?.({ data: JSON.stringify({ type: 'data', data: 'eA==' }) });
     old.onclose?.({ code: 1006 });
     old.onerror?.();
@@ -188,6 +192,7 @@ describe('terminal sessions', () => {
     await session.connect();
     const socket = FakeSocket.instances[0];
     socket.open();
+    socket.data([]);
     session.close();
     session.close();
     await session.connect();
@@ -262,13 +267,13 @@ describe('terminal lifecycle boundaries', () => {
     const current = f.registry.open(agentId, () => Promise.resolve(replacementResources));
     await current.connect();
     FakeSocket.instances[0].open();
+    FakeSocket.instances[0].data([97]); // confirms live and is the payload under test
     late.resolve(f.resources);
     await oldAttempt;
     expect(f.resources.dispose).toHaveBeenCalledTimes(1);
     expect(replacementResources.dispose).not.toHaveBeenCalled();
     expect(current.state.connection).toBe('connected');
     expect(f.registry.list()).toEqual([current]);
-    FakeSocket.instances[0].data([97]);
     expect(replacementResources.write).toHaveBeenCalledExactlyOnceWith(new Uint8Array([97]));
   });
 
@@ -311,6 +316,7 @@ describe('terminal lifecycle boundaries', () => {
     await session.connect();
     const socket = FakeSocket.instances[0];
     socket.open();
+    socket.data([]);
     session.sendData('a');
     session.resize(100, 30);
     session.sendData('b');
@@ -332,6 +338,7 @@ describe('terminal lifecycle boundaries', () => {
     const unsubscribe = session.subscribe(listener);
     await session.connect();
     FakeSocket.instances[0].open();
+    FakeSocket.instances[0].data([]);
     expect(listener.mock.calls.map(([state]) => state.connection)).toEqual([
       'loading',
       'loading',
@@ -357,11 +364,17 @@ it('keeps prior screen/resources until a reconnect socket actually opens', async
   await session.connect();
   expect(f.resources.dispose).not.toHaveBeenCalled();
   expect(f.resources.reset).not.toHaveBeenCalled();
+  // onerror alone never classifies or releases the socket; browsers always
+  // follow it with close, which is what actually transitions the session
+  // back to 'disconnected'.
   FakeSocket.instances[1].onerror?.();
+  FakeSocket.instances[1].readyState = 3;
+  FakeSocket.instances[1].onclose?.({ code: 1006 });
   expect(f.resources.reset).not.toHaveBeenCalled();
   expect(f.resources.dispose).not.toHaveBeenCalled();
   await session.connect();
   FakeSocket.instances[2].open();
+  FakeSocket.instances[2].data([]);
   expect(f.resources.reset).toHaveBeenCalledTimes(1);
   expect(f.initialize).toHaveBeenCalledTimes(1);
   session.close();

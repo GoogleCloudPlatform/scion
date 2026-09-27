@@ -40,6 +40,7 @@ class FakeSocket {
   readyState = 0;
   onopen: (() => void) | null = null;
   onclose: ((event: { code: number }) => void) | null = null;
+  onmessage: ((event: { data: unknown }) => void) | null = null;
   send = vi.fn();
   close = vi.fn();
   constructor() {
@@ -48,6 +49,13 @@ class FakeSocket {
   open() {
     this.readyState = 1;
     this.onopen?.();
+  }
+  /**
+   * A data frame is what actually confirms the stream is live, not bare
+   * onopen. Simulates tmux's redraw on attach.
+   */
+  data(payload = '') {
+    this.onmessage?.({ data: JSON.stringify({ type: 'data', data: btoa(payload) }) });
   }
 }
 class FakeEventSource extends EventTarget {
@@ -114,6 +122,7 @@ async function mountConnected() {
   frames.shift()?.(0);
   await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(1));
   FakeSocket.instances[0].open();
+  FakeSocket.instances[0].data(); // confirms the stream live
   await page.updateComplete;
 }
 
@@ -159,19 +168,26 @@ describe('legacy terminal transport adapter', () => {
     await mountConnected();
     const socket = FakeSocket.instances[0];
     socket.readyState = 3;
-    socket.onclose?.({ code: 1006 });
-    await page.updateComplete;
+    // The legacy page is frontmost by default (no setVisible call;
+    // "frontmost" there is document visibility, which happy-dom defaults to
+    // visible). A retriable close therefore attempts automatically, so the
+    // denial has to be queued before the close fires.
     fetcher
       .mockResolvedValueOnce(json({ id: agentId, name: 'test', phase: 'running' }))
       .mockResolvedValueOnce(json({}, 403));
-    pane()?.shadowRoot?.querySelector<HTMLButtonElement>('.reconnect-btn')?.click();
+    socket.onclose?.({ code: 1006 });
     await vi.waitFor(() => expect(pane()?.shadowRoot?.textContent).toContain('permission'));
     expect(terminal.instances[0].dispose).not.toHaveBeenCalled();
     expect(terminal.instances[0].reset).not.toHaveBeenCalled();
+
+    // The automatic attempt failed (403 is terminal, not retriable), which
+    // blocks further auto-attempts, so a manual click is required.
+    fetcher.mockResolvedValue(json({ id: agentId, name: 'test', phase: 'running' }));
     pane()?.shadowRoot?.querySelector<HTMLButtonElement>('.reconnect-btn')?.click();
     await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(2));
     expect(terminal.instances[0].reset).not.toHaveBeenCalled();
     FakeSocket.instances[1].open();
+    FakeSocket.instances[1].data(); // confirms the reconnect attempt live
     expect(terminal.instances[0].reset).toHaveBeenCalledTimes(1);
     expect(terminal.instances).toHaveLength(1);
   });

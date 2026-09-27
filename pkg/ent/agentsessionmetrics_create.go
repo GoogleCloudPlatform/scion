@@ -30,9 +30,9 @@ func (_c *AgentSessionMetricsCreate) SetAgentID(v string) *AgentSessionMetricsCr
 	return _c
 }
 
-// SetGroveID sets the "grove_id" field.
-func (_c *AgentSessionMetricsCreate) SetGroveID(v string) *AgentSessionMetricsCreate {
-	_c.mutation.SetGroveID(v)
+// SetProjectID sets the "project_id" field.
+func (_c *AgentSessionMetricsCreate) SetProjectID(v string) *AgentSessionMetricsCreate {
+	_c.mutation.SetProjectID(v)
 	return _c
 }
 
@@ -275,12 +275,12 @@ func (_c *AgentSessionMetricsCreate) check() error {
 			return &ValidationError{Name: "agent_id", err: fmt.Errorf(`ent: validator failed for field "AgentSessionMetrics.agent_id": %w`, err)}
 		}
 	}
-	if _, ok := _c.mutation.GroveID(); !ok {
-		return &ValidationError{Name: "grove_id", err: errors.New(`ent: missing required field "AgentSessionMetrics.grove_id"`)}
+	if _, ok := _c.mutation.ProjectID(); !ok {
+		return &ValidationError{Name: "project_id", err: errors.New(`ent: missing required field "AgentSessionMetrics.project_id"`)}
 	}
-	if v, ok := _c.mutation.GroveID(); ok {
-		if err := agentsessionmetrics.GroveIDValidator(v); err != nil {
-			return &ValidationError{Name: "grove_id", err: fmt.Errorf(`ent: validator failed for field "AgentSessionMetrics.grove_id": %w`, err)}
+	if v, ok := _c.mutation.ProjectID(); ok {
+		if err := agentsessionmetrics.ProjectIDValidator(v); err != nil {
+			return &ValidationError{Name: "project_id", err: fmt.Errorf(`ent: validator failed for field "AgentSessionMetrics.project_id": %w`, err)}
 		}
 	}
 	if _, ok := _c.mutation.SessionID(); !ok {
@@ -337,9 +337,9 @@ func (_c *AgentSessionMetricsCreate) createSpec() (*AgentSessionMetrics, *sqlgra
 		_spec.SetField(agentsessionmetrics.FieldAgentID, field.TypeString, value)
 		_node.AgentID = value
 	}
-	if value, ok := _c.mutation.GroveID(); ok {
-		_spec.SetField(agentsessionmetrics.FieldGroveID, field.TypeString, value)
-		_node.GroveID = value
+	if value, ok := _c.mutation.ProjectID(); ok {
+		_spec.SetField(agentsessionmetrics.FieldProjectID, field.TypeString, value)
+		_node.ProjectID = value
 	}
 	if value, ok := _c.mutation.SessionID(); ok {
 		_spec.SetField(agentsessionmetrics.FieldSessionID, field.TypeString, value)
@@ -457,15 +457,15 @@ func (u *AgentSessionMetricsUpsert) UpdateAgentID() *AgentSessionMetricsUpsert {
 	return u
 }
 
-// SetGroveID sets the "grove_id" field.
-func (u *AgentSessionMetricsUpsert) SetGroveID(v string) *AgentSessionMetricsUpsert {
-	u.Set(agentsessionmetrics.FieldGroveID, v)
+// SetProjectID sets the "project_id" field.
+func (u *AgentSessionMetricsUpsert) SetProjectID(v string) *AgentSessionMetricsUpsert {
+	u.Set(agentsessionmetrics.FieldProjectID, v)
 	return u
 }
 
-// UpdateGroveID sets the "grove_id" field to the value that was provided on create.
-func (u *AgentSessionMetricsUpsert) UpdateGroveID() *AgentSessionMetricsUpsert {
-	u.SetExcluded(agentsessionmetrics.FieldGroveID)
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *AgentSessionMetricsUpsert) UpdateProjectID() *AgentSessionMetricsUpsert {
+	u.SetExcluded(agentsessionmetrics.FieldProjectID)
 	return u
 }
 
@@ -768,17 +768,17 @@ func (u *AgentSessionMetricsUpsertOne) UpdateAgentID() *AgentSessionMetricsUpser
 	})
 }
 
-// SetGroveID sets the "grove_id" field.
-func (u *AgentSessionMetricsUpsertOne) SetGroveID(v string) *AgentSessionMetricsUpsertOne {
+// SetProjectID sets the "project_id" field.
+func (u *AgentSessionMetricsUpsertOne) SetProjectID(v string) *AgentSessionMetricsUpsertOne {
 	return u.Update(func(s *AgentSessionMetricsUpsert) {
-		s.SetGroveID(v)
+		s.SetProjectID(v)
 	})
 }
 
-// UpdateGroveID sets the "grove_id" field to the value that was provided on create.
-func (u *AgentSessionMetricsUpsertOne) UpdateGroveID() *AgentSessionMetricsUpsertOne {
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *AgentSessionMetricsUpsertOne) UpdateProjectID() *AgentSessionMetricsUpsertOne {
 	return u.Update(func(s *AgentSessionMetricsUpsert) {
-		s.UpdateGroveID()
+		s.UpdateProjectID()
 	})
 }
 
@@ -1287,17 +1287,17 @@ func (u *AgentSessionMetricsUpsertBulk) UpdateAgentID() *AgentSessionMetricsUpse
 	})
 }
 
-// SetGroveID sets the "grove_id" field.
-func (u *AgentSessionMetricsUpsertBulk) SetGroveID(v string) *AgentSessionMetricsUpsertBulk {
+// SetProjectID sets the "project_id" field.
+func (u *AgentSessionMetricsUpsertBulk) SetProjectID(v string) *AgentSessionMetricsUpsertBulk {
 	return u.Update(func(s *AgentSessionMetricsUpsert) {
-		s.SetGroveID(v)
+		s.SetProjectID(v)
 	})
 }
 
-// UpdateGroveID sets the "grove_id" field to the value that was provided on create.
-func (u *AgentSessionMetricsUpsertBulk) UpdateGroveID() *AgentSessionMetricsUpsertBulk {
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *AgentSessionMetricsUpsertBulk) UpdateProjectID() *AgentSessionMetricsUpsertBulk {
 	return u.Update(func(s *AgentSessionMetricsUpsert) {
-		s.UpdateGroveID()
+		s.UpdateProjectID()
 	})
 }
 

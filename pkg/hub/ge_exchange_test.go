@@ -26,6 +26,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -254,6 +255,13 @@ func addUser(s *fakeUserStore, id, email, role, status string) *store.User {
 // the authorization policy path.
 func alwaysAuthorized(_ context.Context, _ string) bool { return true }
 
+// newTestResolver builds a GoogleIdentityResolver for tests. roleFor may be
+// nil (defaults to "member", matching the exchange's pre-refactor hardcoded
+// role); pass a custom one to exercise the admin_emails-aware role delta.
+func newTestResolver(userStore store.UserStore, extStore store.ExternalIdentityStore, authorize func(context.Context, string) bool, roleFor func(context.Context, string) string) *GoogleIdentityResolver {
+	return NewGoogleIdentityResolver(userStore, extStore, authorize, roleFor, slog.Default())
+}
+
 func newTestExchangeService(validator GoogleCredentialValidator, userStore *fakeUserStore) *GEExchangeService {
 	tokenSvc, _ := NewUserTokenService(UserTokenConfig{
 		AccessTokenDuration: DefaultGETokenTTL,
@@ -266,9 +274,7 @@ func newTestExchangeService(validator GoogleCredentialValidator, userStore *fake
 		},
 		validator,
 		tokenSvc,
-		newMemExtIDStore(),
-		userStore,
-		alwaysAuthorized,
+		newTestResolver(userStore, newMemExtIDStore(), alwaysAuthorized, nil),
 		slog.Default(),
 	)
 }
@@ -287,9 +293,7 @@ func newTestExchangeServiceWithExtStore(validator GoogleCredentialValidator, use
 		},
 		validator,
 		tokenSvc,
-		extStore,
-		userStore,
-		alwaysAuthorized,
+		newTestResolver(userStore, extStore, alwaysAuthorized, nil),
 		slog.Default(),
 	)
 }
@@ -337,9 +341,7 @@ func newPersistentTestExchangeService(t *testing.T, dbPath, driverName string) (
 		},
 		validator,
 		tokenSvc,
-		extStore,
-		compositeStore,
-		alwaysAuthorized,
+		newTestResolver(compositeStore, extStore, alwaysAuthorized, nil),
 		slog.Default(),
 	)
 	return svc, compositeStore, extStore
@@ -489,11 +491,22 @@ func TestGEExchange_ExpiredToken(t *testing.T) {
 }
 
 func TestGEExchange_ServiceAccount(t *testing.T) {
-	validator := &fakeGoogleValidator{
-		idTokenErr: ErrGoogleServiceAccount,
+	// The real validator classifies IsServiceAccount rather than erroring,
+	// so this test drives the exchange's own Step 1.5 rejection, not a
+	// validator error. The fake mirrors that shape exactly.
+	identity := &ValidatedGoogleIdentity{
+		Subject:          "sa-sub-123",
+		Email:            "sa@proj.iam.gserviceaccount.com",
+		EmailVerified:    true,
+		Issuer:           googleCanonicalIssuer,
+		Audience:         "test-client-id.apps.googleusercontent.com",
+		UpstreamExpiry:   time.Now().Add(30 * time.Minute),
+		IsServiceAccount: true,
 	}
+	validator := &fakeGoogleValidator{idTokenResult: identity}
 	userStore := newFakeUserStore()
-	svc := newTestExchangeService(validator, userStore)
+	extStore := newMemExtIDStore()
+	svc := newTestExchangeServiceWithExtStore(validator, userStore, extStore)
 
 	_, status, err := svc.Exchange(context.Background(), &ExchangeRequest{
 		Credential:     "sa-token",
@@ -504,6 +517,260 @@ func TestGEExchange_ServiceAccount(t *testing.T) {
 	}
 	if status != http.StatusForbidden {
 		t.Errorf("expected 403, got %d", status)
+	}
+	if err.Error() != "service account credentials not accepted for user exchange" {
+		t.Errorf("error = %q, want the SA rejection message", err.Error())
+	}
+	// The resolver must never be reached: no user or binding created.
+	if len(userStore.users) != 0 {
+		t.Errorf("expected no users created, got %d", len(userStore.users))
+	}
+	if _, err := extStore.GetExternalIdentity(context.Background(), "google", googleCanonicalIssuer, "sa-sub-123"); err == nil {
+		t.Error("expected no external identity binding to be created")
+	}
+}
+
+// TestGEExchange_NilIdentityFromValidator_InternalError covers a
+// GoogleCredentialValidator that returns (nil, nil) — a contract violation,
+// since ValidateIDToken/ValidateAccessToken must return a non-nil identity
+// whenever err is nil. It must not panic on identity.IsServiceAccount and
+// must not be treated as a successful exchange; it is a generic internal
+// error (500), the same status and message the default case in the err !=
+// nil switch above already uses for an unrecognized validator error.
+func TestGEExchange_NilIdentityFromValidator_InternalError(t *testing.T) {
+	validator := &fakeGoogleValidator{} // zero value: (nil, nil) from both methods
+	userStore := newFakeUserStore()
+	svc := newTestExchangeService(validator, userStore)
+
+	_, status, err := svc.Exchange(context.Background(), &ExchangeRequest{
+		Credential:     "opaque-nil-identity-token",
+		CredentialType: "id_token",
+	})
+	if err == nil {
+		t.Fatal("expected error when the validator returns a nil identity")
+	}
+	if status != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", status)
+	}
+	if err.Error() != "credential validation failed" {
+		t.Errorf("error = %q, want the generic validation-failure message", err.Error())
+	}
+	// The resolver must never be reached: no user or binding created.
+	if len(userStore.users) != 0 {
+		t.Errorf("expected no users created, got %d", len(userStore.users))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The exchange endpoint still rejects SA credentials through the REAL
+// validator, using the real SA claim/response shape (azp == sub for ID
+// tokens; a real service-account email for access tokens), not the
+// hand-built fakeGoogleValidator identity TestGEExchange_ServiceAccount
+// above uses. A fake built directly with
+// IsServiceAccount: true never exercises the real classification+validation
+// path; these do.
+// ---------------------------------------------------------------------------
+
+// TestGEExchange_RealValidator_ServiceAccountIDToken_Rejected_ExactBytes covers
+// every SA ID-token azp/sub shape: azp == sub, azp == "", azp == aud but !=
+// sub, and azp set to an unrelated value. Without the ErrGoogleServiceAccount
+// wrap on the validator's SA azp/sub disagreement (google_credential_validator.go),
+// the last two shapes would instead hit the plain ErrGoogleFieldDisagreement
+// case in ge_exchange.go's error switch and return 401 "credential metadata inconsistent"
+// — validation itself fails for those shapes, so the exchange's Step 1.5 SA
+// rejection is never reached on its own.
+//
+// Expected bytes derived from upstream-main (GoogleCloudPlatform/scion,
+// bdf5b6d13): its ValidateIDToken rejects every SA email with
+// ErrGoogleServiceAccount unconditionally, before any azp/aud logic runs at
+// all, and ge_exchange.go maps that to exactly this 403 body — confirmed by
+// reading google_credential_validator.go:266-269 and ge_exchange.go:188-189
+// in a bdf5b6d13 worktree (`git worktree add --detach ... bdf5b6d13`), not
+// merely assumed.
+func TestGEExchange_RealValidator_ServiceAccountIDToken_Rejected_ExactBytes(t *testing.T) {
+	kp := newGCVTestKeyPair("test-kid-1")
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(gcvJWKSJSON(kp))
+		}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+	)
+	defer endpoints.close()
+
+	wantBody := []byte(`{"error":{"code":"forbidden","message":"service account credentials not accepted for user exchange"}}` + "\n")
+
+	tests := []struct {
+		name      string
+		mutateAZP func(claims map[string]interface{})
+	}{
+		{
+			name:      "azp == sub (real metadata-server shape)",
+			mutateAZP: func(claims map[string]interface{}) {}, // serviceAccountIDTokenClaims default
+		},
+		{
+			name: "azp == \"\"",
+			mutateAZP: func(claims map[string]interface{}) {
+				delete(claims, "azp")
+			},
+		},
+		{
+			name: "azp == aud, != sub",
+			mutateAZP: func(claims map[string]interface{}) {
+				claims["azp"] = externalBearerTestAudience // == aud (also externalBearerTestAudience), != sub
+			},
+		},
+		{
+			name: "azp = other value",
+			mutateAZP: func(claims map[string]interface{}) {
+				claims["azp"] = "some-other-azp-value"
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			userStore := newFakeUserStore()
+			extStore := newMemExtIDStore()
+			svc := newTestExchangeServiceWithExtStore(newTestValidator(endpoints), userStore, extStore)
+			server := &Server{geExchangeService: svc}
+
+			claims := serviceAccountIDTokenClaims("worker@my-project.iam.gserviceaccount.com")
+			tt.mutateAZP(claims)
+			body := fmt.Sprintf(`{"credential":%q,"credentialType":"id_token"}`, signIDToken(kp, claims))
+			w := httptest.NewRecorder()
+			server.handleGEGoogleExchange(w, exchangeRequest(body))
+
+			if w.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403: body=%s", w.Code, w.Body.String())
+			}
+			if !bytes.Equal(w.Body.Bytes(), wantBody) {
+				t.Errorf("body = %s, want %s", w.Body.Bytes(), wantBody)
+			}
+			if len(userStore.users) != 0 {
+				t.Errorf("expected no users created, got %d", len(userStore.users))
+			}
+			if _, err := extStore.GetExternalIdentity(context.Background(), "google", googleCanonicalIssuer, saNumericSub); err == nil {
+				t.Error("expected no external identity binding to be created")
+			}
+		})
+	}
+}
+
+func TestGEExchange_RealValidator_ServiceAccountAccessToken_Rejected_ExactBytes(t *testing.T) {
+	tokenInfo, userInfo := validAccessTokenEndpoints("test-client-id.apps.googleusercontent.com", "sa-sub-access-1", "worker@my-project.iam.gserviceaccount.com", true)
+	endpoints := newTestEndpoints(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}), tokenInfo, userInfo)
+	defer endpoints.close()
+
+	validator := newTestValidator(endpoints)
+	userStore := newFakeUserStore()
+	svc := newTestExchangeService(validator, userStore)
+	server := &Server{geExchangeService: svc}
+
+	body := `{"credential":"opaque-sa-access-token","credentialType":"access_token"}`
+	w := httptest.NewRecorder()
+	server.handleGEGoogleExchange(w, exchangeRequest(body))
+
+	wantBody := []byte(`{"error":{"code":"forbidden","message":"service account credentials not accepted for user exchange"}}` + "\n")
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403: body=%s", w.Code, w.Body.String())
+	}
+	if !bytes.Equal(w.Body.Bytes(), wantBody) {
+		t.Errorf("body = %s, want %s", w.Body.Bytes(), wantBody)
+	}
+	if len(userStore.users) != 0 {
+		t.Errorf("expected no users created, got %d", len(userStore.users))
+	}
+}
+
+// TestGEExchange_AdminEmails_ProvisionsAdminRole proves the exchange's role
+// delta (roleFor replaces the hard-coded "member") through the
+// GoogleIdentityResolver, the same way the exchange is actually wired in
+// production (server.go passes a shared resolver into NewGEExchangeService).
+func TestGEExchange_AdminEmails_ProvisionsAdminRole(t *testing.T) {
+	identity := validGmailIdentity()
+	identity.Email = "admin@gmail.com"
+	validator := &fakeGoogleValidator{idTokenResult: identity}
+	userStore := newFakeUserStore()
+	extStore := newMemExtIDStore()
+	roleFor := func(_ context.Context, email string) string {
+		if strings.EqualFold(email, "admin@gmail.com") {
+			return "admin"
+		}
+		return "member"
+	}
+	resolver := newTestResolver(userStore, extStore, alwaysAuthorized, roleFor)
+	tokenSvc, _ := NewUserTokenService(UserTokenConfig{AccessTokenDuration: DefaultGETokenTTL})
+	svc := NewGEExchangeService(
+		GEGoogleExchangeConfig{
+			Enabled:          true,
+			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
+			TokenTTL:         DefaultGETokenTTL,
+		},
+		validator, tokenSvc, resolver, slog.Default(),
+	)
+
+	resp, status, err := svc.Exchange(context.Background(), &ExchangeRequest{
+		Credential:     "admin-token",
+		CredentialType: "id_token",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d", status)
+	}
+	if resp.User == nil || resp.User.Role != "admin" {
+		t.Fatalf("expected admin role, got %+v", resp.User)
+	}
+}
+
+// TestGEExchange_ExternalIdentityLookupFault_ServerError: a
+// GetExternalIdentity fault that is not store.ErrNotFound must surface as a
+// server error (5xx), not the 403 "no binding" treatment a
+// non-authoritative or conflicting-binding case gets. Exercises the
+// exchange side of the same resolver behaviour that
+// auth_external_bearer_test.go's TestExternalBearer_GetExternalIdentityFault_ServiceUnavailable
+// exercises on the external-bearer side.
+func TestGEExchange_ExternalIdentityLookupFault_ServerError(t *testing.T) {
+	identity := validGmailIdentity()
+	validator := &fakeGoogleValidator{idTokenResult: identity}
+	extStore := &trackingExtIDStore{getErr: errors.New("connection refused")}
+	userStore := &trackingUserStore{}
+	resolver := newTestResolver(userStore, extStore, alwaysAuthorized, nil)
+	tokenSvc, _ := NewUserTokenService(UserTokenConfig{AccessTokenDuration: DefaultGETokenTTL})
+	svc := NewGEExchangeService(
+		GEGoogleExchangeConfig{
+			Enabled:          true,
+			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
+			TokenTTL:         DefaultGETokenTTL,
+		},
+		validator, tokenSvc, resolver, slog.Default(),
+	)
+
+	_, status, err := svc.Exchange(context.Background(), &ExchangeRequest{
+		Credential:     "token",
+		CredentialType: "id_token",
+	})
+	if err == nil {
+		t.Fatal("expected an error for a store fault")
+	}
+	// Pinned to the exact mapping, not just
+	// "some 5xx": the exchange's default arm maps every unclassified Resolve
+	// error to exactly 500, and a mutation widening that to any other 5xx
+	// should fail this test.
+	if status != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d (not 403 \"no binding\")", status, http.StatusInternalServerError)
+	}
+	if userStore.getByEmailCalled {
+		t.Error("GetUserByEmail must not be called: a GetExternalIdentity fault is not \"no binding\"")
+	}
+	if userStore.createUserCalled {
+		t.Error("CreateUser must not be called: a GetExternalIdentity fault must fail closed before bootstrap")
+	}
+	if extStore.createCalled {
+		t.Error("CreateExternalIdentity must not be called: a GetExternalIdentity fault must fail closed before bootstrap")
 	}
 }
 
@@ -533,8 +800,8 @@ func TestGEExchange_MissingTrustConfig(t *testing.T) {
 	svc := NewGEExchangeService(
 		GEGoogleExchangeConfig{Enabled: false},
 		validator, tokenSvc,
-		newMemExtIDStore(), userStore,
-		alwaysAuthorized, slog.Default(),
+		newTestResolver(userStore, newMemExtIDStore(), alwaysAuthorized, nil),
+		slog.Default(),
 	)
 
 	_, status, err := svc.Exchange(context.Background(), &ExchangeRequest{
@@ -662,7 +929,7 @@ func TestGEExchange_StableLinkage_ConflictingSubject(t *testing.T) {
 			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
 			TokenTTL:         DefaultGETokenTTL,
 		},
-		validator, tokenSvc, extIDStore, userStore, alwaysAuthorized, slog.Default(),
+		validator, tokenSvc, newTestResolver(userStore, extIDStore, alwaysAuthorized, nil), slog.Default(),
 	)
 
 	_, status, err := svc.Exchange(context.Background(), &ExchangeRequest{
@@ -1444,9 +1711,7 @@ func TestGEExchange_JWTExpCryptographicRegression(t *testing.T) {
 		},
 		validator,
 		tokenSvc,
-		newMemExtIDStore(),
-		userStore,
-		alwaysAuthorized,
+		newTestResolver(userStore, newMemExtIDStore(), alwaysAuthorized, nil),
 		slog.Default(),
 	)
 
@@ -1542,8 +1807,7 @@ func TestGEExchange_JWTExpRegression_ConfiguredTTLWins(t *testing.T) {
 			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
 			TokenTTL:         DefaultGETokenTTL, // 60s
 		},
-		validator, tokenSvc, newMemExtIDStore(), userStore,
-		alwaysAuthorized, slog.Default(),
+		validator, tokenSvc, newTestResolver(userStore, newMemExtIDStore(), alwaysAuthorized, nil), slog.Default(),
 	)
 
 	resp, _, err := svc.Exchange(context.Background(), &ExchangeRequest{
@@ -1606,8 +1870,7 @@ func TestGEExchange_ProvisioningAuth_DomainRestricted(t *testing.T) {
 			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
 			TokenTTL:         DefaultGETokenTTL,
 		},
-		validator, tokenSvc, newMemExtIDStore(), userStore,
-		authChecker, slog.Default(),
+		validator, tokenSvc, newTestResolver(userStore, newMemExtIDStore(), authChecker, nil), slog.Default(),
 	)
 
 	_, status, err := svc.Exchange(context.Background(), &ExchangeRequest{
@@ -1652,8 +1915,7 @@ func TestGEExchange_ProvisioningAuth_DomainAllowed(t *testing.T) {
 			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
 			TokenTTL:         DefaultGETokenTTL,
 		},
-		validator, tokenSvc, newMemExtIDStore(), userStore,
-		authChecker, slog.Default(),
+		validator, tokenSvc, newTestResolver(userStore, newMemExtIDStore(), authChecker, nil), slog.Default(),
 	)
 
 	resp, status, err := svc.Exchange(context.Background(), &ExchangeRequest{
@@ -1697,8 +1959,7 @@ func TestGEExchange_ProvisioningAuth_InviteOnly_Rejected(t *testing.T) {
 			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
 			TokenTTL:         DefaultGETokenTTL,
 		},
-		validator, tokenSvc, newMemExtIDStore(), userStore,
-		authChecker, slog.Default(),
+		validator, tokenSvc, newTestResolver(userStore, newMemExtIDStore(), authChecker, nil), slog.Default(),
 	)
 
 	_, status, err := svc.Exchange(context.Background(), &ExchangeRequest{
@@ -1745,8 +2006,7 @@ func TestGEExchange_ProvisioningAuth_AdminBypass(t *testing.T) {
 			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
 			TokenTTL:         DefaultGETokenTTL,
 		},
-		validator, tokenSvc, newMemExtIDStore(), userStore,
-		authChecker, slog.Default(),
+		validator, tokenSvc, newTestResolver(userStore, newMemExtIDStore(), authChecker, nil), slog.Default(),
 	)
 
 	resp, status, err := svc.Exchange(context.Background(), &ExchangeRequest{
@@ -1778,8 +2038,8 @@ func TestGEExchange_ProvisioningAuth_NilAuthChecker_FailsClosed(t *testing.T) {
 			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
 			TokenTTL:         DefaultGETokenTTL,
 		},
-		validator, tokenSvc, newMemExtIDStore(), userStore,
-		nil, // nil authChecker — must fail closed
+		validator, tokenSvc,
+		newTestResolver(userStore, newMemExtIDStore(), nil, nil), // nil authorize — must fail closed
 		slog.Default(),
 	)
 
@@ -1788,7 +2048,7 @@ func TestGEExchange_ProvisioningAuth_NilAuthChecker_FailsClosed(t *testing.T) {
 		CredentialType: "id_token",
 	})
 	if err == nil {
-		t.Fatal("expected error: nil authChecker must fail closed")
+		t.Fatal("expected error: nil authorize must fail closed")
 	}
 	if status != http.StatusForbidden {
 		t.Errorf("expected 403, got %d", status)
@@ -1876,7 +2136,7 @@ func TestGEExchange_ConflictResolution_ExpectedUserMismatch(t *testing.T) {
 			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
 			TokenTTL:         DefaultGETokenTTL,
 		},
-		validator, tokenSvc, extStore, userStore, alwaysAuthorized, slog.Default(),
+		validator, tokenSvc, newTestResolver(userStore, extStore, alwaysAuthorized, nil), slog.Default(),
 	)
 
 	_, status, err := svc.Exchange(context.Background(), &ExchangeRequest{
@@ -1921,7 +2181,7 @@ func TestGEExchange_OrphanCleanup_OnProvisioningConflict(t *testing.T) {
 			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
 			TokenTTL:         DefaultGETokenTTL,
 		},
-		validator, tokenSvc, extStore, userStore, alwaysAuthorized, slog.Default(),
+		validator, tokenSvc, newTestResolver(userStore, extStore, alwaysAuthorized, nil), slog.Default(),
 	)
 
 	resp, status, err := svc.Exchange(context.Background(), &ExchangeRequest{
@@ -1942,5 +2202,151 @@ func TestGEExchange_OrphanCleanup_OnProvisioningConflict(t *testing.T) {
 	// winner user and no provisioned orphan.
 	if len(userStore.users) != 1 {
 		t.Errorf("expected 1 user (winner only), got %d — orphan not cleaned up", len(userStore.users))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The exchange endpoint's external
+// behaviour must not change when the base validator's error classification
+// changes. Every existing
+// TestGEExchange_* test uses fakeGoogleValidator, which returns preset
+// sentinels directly and never runs getTokenInfo/getUserInfo/forceRefresh —
+// so none of them could have caught a change in what those functions
+// classify an upstream failure as. These tests drive the real validator
+// against stubbed Google endpoints, the same way
+// google_credential_validator_test.go and the external-bearer access-token
+// tests do, and assert the exchange's exact response bytes.
+// ---------------------------------------------------------------------------
+
+func TestGEExchange_RealValidator_UpstreamFailures_ExactBytes(t *testing.T) {
+	wantBody := []byte(`{"error":{"code":"invalid_credential","message":"credential validation failed"}}` + "\n")
+
+	validAccessTokenInfo := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"azp": "test-client-id.apps.googleusercontent.com",
+			"aud": "test-client-id.apps.googleusercontent.com",
+			"sub": "sub-1", "email": "user@gmail.com", "expires_in": 3600,
+		})
+	})
+
+	tests := []struct {
+		name           string
+		credentialType string
+		jwks           http.HandlerFunc
+		tokenInfo      http.HandlerFunc
+		userInfo       http.HandlerFunc
+	}{
+		{
+			name:           "tokeninfo_400",
+			credentialType: "access_token",
+			jwks:           http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+			tokenInfo:      http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusBadRequest) }),
+			userInfo: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				t.Error("userinfo must not be called when tokeninfo fails")
+			}),
+		},
+		{
+			name:           "tokeninfo_5xx",
+			credentialType: "access_token",
+			jwks:           http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+			tokenInfo:      http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusInternalServerError) }),
+			userInfo: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				t.Error("userinfo must not be called when tokeninfo fails")
+			}),
+		},
+		{
+			name:           "userinfo_401",
+			credentialType: "access_token",
+			jwks:           http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+			tokenInfo:      validAccessTokenInfo,
+			userInfo:       http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusUnauthorized) }),
+		},
+		{
+			name:           "userinfo_5xx",
+			credentialType: "access_token",
+			jwks:           http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+			tokenInfo:      validAccessTokenInfo,
+			userInfo:       http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusInternalServerError) }),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			endpoints := newTestEndpoints(tt.jwks, tt.tokenInfo, tt.userInfo)
+			defer endpoints.close()
+
+			validator := newTestValidator(endpoints)
+			userStore := newFakeUserStore()
+			svc := newTestExchangeService(validator, userStore)
+			server := &Server{geExchangeService: svc}
+
+			body := fmt.Sprintf(`{"credential":%q,"credentialType":%q}`, "some-credential", tt.credentialType)
+			w := httptest.NewRecorder()
+			server.handleGEGoogleExchange(w, exchangeRequest(body))
+
+			if w.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401: body=%s", w.Code, w.Body.String())
+			}
+			if !bytes.Equal(w.Body.Bytes(), wantBody) {
+				t.Errorf("body = %s, want %s", w.Body.Bytes(), wantBody)
+			}
+		})
+	}
+}
+
+// TestGEExchange_RealValidator_IDTokenForceRefreshFailure_ExactBytes covers
+// an ID-token JWKS force-refresh 5xx, using the same fetchedAt back-dating
+// technique as TestProductionValidator_IDToken_ForceRefreshFailure_UpstreamError
+// and TestProductionValidator_IDToken_JWKSForceRefresh.
+func TestGEExchange_RealValidator_IDTokenForceRefreshFailure_ExactBytes(t *testing.T) {
+	kp1 := newGCVTestKeyPair("kid-1")
+	rotatedKP := newGCVTestKeyPair("kid-2") // signs the token; never served successfully
+
+	var jwksCalls atomic.Int64
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if jwksCalls.Add(1) == 1 {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(gcvJWKSJSON(kp1)) // primes the cache without rotatedKP
+				return
+			}
+			w.WriteHeader(http.StatusInternalServerError) // every force-refresh attempt fails
+		}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+	)
+	defer endpoints.close()
+
+	validator := newTestValidator(endpoints)
+	userStore := newFakeUserStore()
+	svc := newTestExchangeService(validator, userStore)
+	server := &Server{geExchangeService: svc}
+
+	// Prime the cache with kp1 through a successful exchange.
+	primeBody := fmt.Sprintf(`{"credential":%q,"credentialType":"id_token"}`, signIDToken(kp1, validIDTokenClaims()))
+	wPrime := httptest.NewRecorder()
+	server.handleGEGoogleExchange(wPrime, exchangeRequest(primeBody))
+	if wPrime.Code != http.StatusOK {
+		t.Fatalf("priming exchange failed: status=%d body=%s", wPrime.Code, wPrime.Body.String())
+	}
+
+	// Age the cache past forceRefresh's own 30s throttle, exactly like the
+	// validator-level force-refresh tests do.
+	gcv := validator.(*googleCredentialValidator)
+	gcv.jwksCache.mu.Lock()
+	gcv.jwksCache.fetchedAt = time.Now().Add(-1 * time.Minute)
+	gcv.jwksCache.mu.Unlock()
+
+	body := fmt.Sprintf(`{"credential":%q,"credentialType":"id_token"}`, signIDToken(rotatedKP, validIDTokenClaims()))
+	w := httptest.NewRecorder()
+	server.handleGEGoogleExchange(w, exchangeRequest(body))
+
+	wantBody := []byte(`{"error":{"code":"invalid_credential","message":"credential validation failed"}}` + "\n")
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401: body=%s", w.Code, w.Body.String())
+	}
+	if !bytes.Equal(w.Body.Bytes(), wantBody) {
+		t.Errorf("body = %s, want %s", w.Body.Bytes(), wantBody)
 	}
 }

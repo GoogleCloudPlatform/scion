@@ -363,7 +363,11 @@ describe('terminal — _handleFileDrop upload paths', () => {
     // Simulate a focused, connected terminal with a stable session.
     document.body.appendChild(el);
     el._onFocusIn();
-    el.ownedSession = { state: { generation: 0 } };
+    el.ownedSession = {
+      state: { generation: 0 },
+      setFrontmost: () => {},
+      noteAgentAvailable: () => {},
+    };
     return el;
   }
 

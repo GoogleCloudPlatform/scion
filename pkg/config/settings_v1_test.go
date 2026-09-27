@@ -261,9 +261,9 @@ func TestLoadVersionedSettings_HubEnvVars(t *testing.T) {
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
-	// Test SCION_HUB_GROVE_ID maps correctly (regression test)
-	_ = os.Setenv("SCION_HUB_GROVE_ID", "my-grove-id")
-	defer func() { _ = os.Unsetenv("SCION_HUB_GROVE_ID") }()
+	// Test SCION_HUB_PROJECT_ID maps correctly (regression test)
+	_ = os.Setenv("SCION_HUB_PROJECT_ID", "my-project-id")
+	defer func() { _ = os.Unsetenv("SCION_HUB_PROJECT_ID") }()
 
 	_ = os.Setenv("SCION_HUB_LOCAL_ONLY", "true")
 	defer func() { _ = os.Unsetenv("SCION_HUB_LOCAL_ONLY") }()
@@ -272,7 +272,62 @@ func TestLoadVersionedSettings_HubEnvVars(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NotNil(t, vs.Hub)
-	assert.Equal(t, "my-grove-id", vs.Hub.ProjectID)
+	assert.Equal(t, "my-project-id", vs.Hub.ProjectID)
+}
+
+// TestLoadVersionedSettings_LegacyHubEnvNeverAdopted is the negative half of
+// TestLoadVersionedSettings_HubEnvVars: SCION_HUB_GROVE_ID must never
+// resolve to a project ID here either, even though it maps to the same
+// hub.grove_id key the *file*-based fallback reads. Guards against the
+// generic "hub_" env mapper reviving the variable via hub.grove_id when
+// only the EnvHubGroveID special case is removed.
+func TestLoadVersionedSettings_LegacyHubEnvNeverAdopted(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
+
+	_ = os.Setenv("SCION_HUB_GROVE_ID", "legacy-env-uuid")
+	defer func() { _ = os.Unsetenv("SCION_HUB_GROVE_ID") }()
+
+	vs, err := LoadVersionedSettings(projectDir)
+	require.NoError(t, err)
+
+	if vs.Hub != nil {
+		assert.Empty(t, vs.Hub.ProjectID, "SCION_HUB_GROVE_ID must not be adopted")
+	}
+}
+
+// TestLoadVersionedSettings_LegacyHubEnvDoesNotOverrideFile pins that the
+// file-based hub.grove_id fallback is unaffected by the env
+// var's removal: a legacy file value still resolves, and a legacy env var
+// set alongside it changes nothing (it is dropped entirely, not merely
+// out-ranked).
+func TestLoadVersionedSettings_LegacyHubEnvDoesNotOverrideFile(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
+
+	v1Settings := "schema_version: \"1\"\nhub:\n  grove_id: \"file-grove\"\n"
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(v1Settings), 0644))
+
+	_ = os.Setenv("SCION_HUB_GROVE_ID", "legacy-env-uuid")
+	defer func() { _ = os.Unsetenv("SCION_HUB_GROVE_ID") }()
+
+	vs, err := LoadVersionedSettings(projectDir)
+	require.NoError(t, err)
+
+	require.NotNil(t, vs.Hub)
+	assert.Equal(t, "file-grove", vs.Hub.ProjectID)
 }
 
 func TestLoadVersionedSettings_CLIEnvVars(t *testing.T) {
@@ -377,6 +432,46 @@ profiles:
 	require.True(t, ok)
 	assert.Equal(t, "gemini", profile.DefaultTemplate)
 	assert.Equal(t, "gemini-custom", profile.DefaultHarnessConfig)
+}
+
+// TestLoadVersionedSettings_FederationGoogleIssuerFields loads
+// allowed_domains and allowed_gcp_projects from a settings.yaml file through
+// the real koanf decode path (LoadVersionedSettings), rather than
+// constructing a V1TrustedIssuerConfig struct literal directly. A koanf tag
+// typo on either field would silently drop it from the decoded settings
+// (failing open to "no domain/project constraint") without this test
+// noticing, since every other test for these fields builds the Go struct by
+// hand.
+func TestLoadVersionedSettings_FederationGoogleIssuerFields(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
+
+	projectSettings := `
+schema_version: "1"
+server:
+  federation:
+    enabled: true
+    trusted_issuers:
+      - issuer_url: "https://accounts.google.com"
+        issuer_type: "user"
+        expected_audience: "client-id.apps.googleusercontent.com"
+        allowed_domains: ["example.com", "other.example"]
+        allowed_gcp_projects: ["gcp-proj-1", "gcp-proj-2"]
+`
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(projectSettings), 0644))
+
+	vs, err := LoadVersionedSettings(projectDir)
+	require.NoError(t, err)
+
+	require.NotNil(t, vs.Server)
+	require.NotNil(t, vs.Server.Federation)
+	require.Len(t, vs.Server.Federation.TrustedIssuers, 1)
+	issuer := vs.Server.Federation.TrustedIssuers[0]
+	assert.Equal(t, []string{"example.com", "other.example"}, issuer.AllowedDomains)
+	assert.Equal(t, []string{"gcp-proj-1", "gcp-proj-2"}, issuer.AllowedGCPProjects)
 }
 
 // --- AdaptLegacySettings tests ---
@@ -936,7 +1031,8 @@ func TestVersionedEnvKeyMapper(t *testing.T) {
 		{"SCION_ACTIVE_PROFILE", "active_profile"},
 		{"SCION_DEFAULT_TEMPLATE", "default_template"},
 		{"SCION_HUB_ENDPOINT", "hub.endpoint"},
-		{"SCION_HUB_GROVE_ID", "hub.grove_id"},
+		{"SCION_HUB_PROJECT_ID", "hub.project_id"},
+		{"SCION_HUB_GROVE_ID", ""},
 		{"SCION_HUB_LOCAL_ONLY", "hub.local_only"},
 		{"SCION_HUB_ENABLED", "hub.enabled"},
 		{"SCION_CLI_AUTOHELP", "cli.autohelp"},
@@ -1928,6 +2024,23 @@ func TestConvertGlobalToV1ServerConfig_RoundTrip(t *testing.T) {
 func TestConvertGlobalToV1ServerConfig_Nil(t *testing.T) {
 	v1 := ConvertGlobalToV1ServerConfig(nil)
 	assert.NotNil(t, v1)
+}
+
+// TestAgentEndpointRoundTrip verifies server.hub.agent_endpoint survives the
+// V1<->GlobalConfig conversion in both directions, independently of
+// public_url / Hub.Endpoint.
+func TestAgentEndpointRoundTrip(t *testing.T) {
+	gc := DefaultGlobalConfig()
+	gc.Hub.Endpoint = "https://hub.example.com"
+	gc.Hub.AgentEndpoint = "http://192.0.2.10:8080"
+
+	v1 := ConvertGlobalToV1ServerConfig(&gc)
+	assert.Equal(t, "https://hub.example.com", v1.Hub.PublicURL)
+	assert.Equal(t, "http://192.0.2.10:8080", v1.Hub.AgentEndpoint)
+
+	gc2 := ConvertV1ServerToGlobalConfig(v1)
+	assert.Equal(t, gc.Hub.Endpoint, gc2.Hub.Endpoint)
+	assert.Equal(t, gc.Hub.AgentEndpoint, gc2.Hub.AgentEndpoint)
 }
 
 func TestLoadGlobalConfig_FromSettingsYAML(t *testing.T) {
@@ -3025,7 +3138,7 @@ hub:
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(v1Content), 0644))
 
 	// Call UpdateSetting with a key that would clobber the format in the old code
-	err := UpdateSetting(projectDir, "grove_id", "new-grove-id", false)
+	err := UpdateSetting(projectDir, "project_id", "new-grove-id", false)
 	require.NoError(t, err)
 
 	// Read back the file and verify it's still v1 format
@@ -3198,7 +3311,7 @@ hub:
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(v1Content), 0644))
 
 	// Simulate what happens during hub operations: multiple sequential updates
-	require.NoError(t, UpdateSetting(projectDir, "grove_id", "new-grove-id", false))
+	require.NoError(t, UpdateSetting(projectDir, "project_id", "new-grove-id", false))
 	require.NoError(t, UpdateSetting(projectDir, "hub.brokerId", "broker-abc", false))
 	require.NoError(t, UpdateSetting(projectDir, "hub.brokerToken", "token-xyz", false))
 	require.NoError(t, UpdateSetting(projectDir, "hub.enabled", "false", false))
@@ -3248,7 +3361,7 @@ hub:
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(legacyContent), 0644))
 
 	// UpdateSetting should auto-migrate legacy to v1 and apply the update
-	err := UpdateSetting(projectDir, "grove_id", "my-grove-id", false)
+	err := UpdateSetting(projectDir, "project_id", "my-grove-id", false)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(filepath.Join(projectDir, "settings.yaml"))
@@ -3943,11 +4056,11 @@ func TestGetVersionedSettingValue(t *testing.T) {
 		{"default_harness_config", "claude"},
 		{"image_registry", "ghcr.io/myorg"},
 		{"cli.autohelp", "true"},
-		{"grove_id", "grove-123"},
+		{"project_id", "grove-123"},
 		{"hub.enabled", "false"},
 		{"hub.linked", "true"},
 		{"hub.endpoint", "https://hub.example.com"},
-		{"hub.groveId", "grove-123"},
+		{"hub.projectId", "grove-123"},
 		{"hub.local_only", "true"},
 		{"hub.brokerId", "broker-1"},
 		{"hub.brokerToken", "tok-secret"},
@@ -3967,9 +4080,16 @@ func TestGetVersionedSettingValue(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown or complex setting key")
 
+	// Legacy grove_id key names are no longer accepted as CLI key-name input.
+	for _, key := range []string{"grove_id", "hub.grove_id", "hub.groveId"} {
+		_, err := GetVersionedSettingValue(vs, key)
+		assert.Error(t, err, "key=%s", key)
+		assert.Contains(t, err.Error(), "unknown or complex setting key", "key=%s", key)
+	}
+
 	// Nil sub-structs should return empty strings
 	empty := &VersionedSettings{SchemaVersion: "1"}
-	for _, key := range []string{"grove_id", "hub.endpoint", "hub.brokerId", "cli.autohelp"} {
+	for _, key := range []string{"project_id", "hub.endpoint", "hub.brokerId", "cli.autohelp"} {
 		got, err := GetVersionedSettingValue(empty, key)
 		require.NoError(t, err, "key=%s", key)
 		assert.Empty(t, got, "key=%s", key)
@@ -4378,6 +4498,124 @@ func TestSharedDirStorageConfig_Validate(t *testing.T) {
 	}
 }
 
+// TestSharedDirStorageConfig_IgnoredNFSFields is Phase 2 item 5 (design §7
+// Phase 2: "startup validation warns about ignored fields"): uid, gid,
+// mount_options, and storage_class are meaningful for workspace_storage but
+// never consulted by shared_dir_storage (design §3.2.1).
+func TestSharedDirStorageConfig_IgnoredNFSFields(t *testing.T) {
+	t.Run("nil receiver returns nil", func(t *testing.T) {
+		var s *V1SharedDirStorageConfig
+		assert.Nil(t, s.IgnoredNFSFields())
+	})
+
+	t.Run("nil NFS block returns nil", func(t *testing.T) {
+		s := &V1SharedDirStorageConfig{Backend: "nfs"}
+		assert.Nil(t, s.IgnoredNFSFields())
+	})
+
+	t.Run("local backend never warns even if NFS fields happen to be set", func(t *testing.T) {
+		s := &V1SharedDirStorageConfig{Backend: "local", NFS: &V1NFSConfig{UID: 1000, GID: 1000}}
+		assert.Nil(t, s.IgnoredNFSFields())
+	})
+
+	t.Run("nfs backend with none of the ignored fields set returns nil", func(t *testing.T) {
+		s := &V1SharedDirStorageConfig{
+			Backend: "nfs",
+			NFS: &V1NFSConfig{
+				MountRoot: "/srv",
+				Shares:    []V1NFSShare{{ID: "scion-shared"}},
+			},
+		}
+		assert.Nil(t, s.IgnoredNFSFields())
+	})
+
+	t.Run("nfs backend with all four ignored fields set", func(t *testing.T) {
+		s := &V1SharedDirStorageConfig{
+			Backend: "nfs",
+			NFS: &V1NFSConfig{
+				MountRoot:    "/srv",
+				Shares:       []V1NFSShare{{ID: "scion-shared"}},
+				UID:          1000,
+				GID:          1000,
+				MountOptions: "vers=3",
+				StorageClass: "standard",
+			},
+		}
+		assert.ElementsMatch(t, []string{"uid", "gid", "mount_options", "storage_class"}, s.IgnoredNFSFields())
+	})
+
+	t.Run("nfs backend with only one ignored field set", func(t *testing.T) {
+		s := &V1SharedDirStorageConfig{
+			Backend: "nfs",
+			NFS: &V1NFSConfig{
+				MountRoot: "/srv",
+				Shares:    []V1NFSShare{{ID: "scion-shared"}},
+				GID:       1003,
+			},
+		}
+		assert.Equal(t, []string{"gid"}, s.IgnoredNFSFields())
+	})
+}
+
+// TestSharedDirStorageConfig_ResolvedLayoutSummary is the other half of
+// Phase 2 item 5: "log exactly one resolved-layout line: backend, host
+// base, subpath_root, pv_name."
+func TestSharedDirStorageConfig_ResolvedLayoutSummary(t *testing.T) {
+	t.Run("nil receiver returns empty", func(t *testing.T) {
+		var s *V1SharedDirStorageConfig
+		assert.Empty(t, s.ResolvedLayoutSummary())
+	})
+
+	t.Run("unset/local backend returns empty (nothing new to log)", func(t *testing.T) {
+		assert.Empty(t, (&V1SharedDirStorageConfig{}).ResolvedLayoutSummary())
+		assert.Empty(t, (&V1SharedDirStorageConfig{Backend: "local"}).ResolvedLayoutSummary())
+	})
+
+	t.Run("nfs backend summarizes backend, host base, subpath_root, pv_name", func(t *testing.T) {
+		s := &V1SharedDirStorageConfig{
+			Backend: "nfs",
+			NFS: &V1NFSConfig{
+				MountRoot: "/srv",
+				Shares:    []V1NFSShare{{ID: "scion-shared", PVName: "scion-shared-pv"}},
+			},
+		}
+		summary := s.ResolvedLayoutSummary()
+		assert.Contains(t, summary, "backend=nfs")
+		assert.Contains(t, summary, filepath.Join("/srv", "scion-shared"))
+		assert.Contains(t, summary, "subpath_root=projects") // default
+		assert.Contains(t, summary, "pv_name=scion-shared-pv")
+	})
+
+	t.Run("nfs backend with a custom subpath_root", func(t *testing.T) {
+		s := &V1SharedDirStorageConfig{
+			Backend: "nfs",
+			NFS: &V1NFSConfig{
+				MountRoot:   "/srv",
+				Shares:      []V1NFSShare{{ID: "scion-shared", PVName: "pv"}},
+				SubPathRoot: "nested/subdir",
+			},
+		}
+		assert.Contains(t, s.ResolvedLayoutSummary(), "subpath_root="+filepath.Join("nested", "subdir"))
+	})
+
+	// Distinct from "local backend, no nfs block at all" above -- an nfs
+	// sub-block can still be present (e.g. left over from a prior nfs
+	// configuration, or configured ahead of a planned switch) while backend
+	// stays "local". No summary line must be logged either way:
+	// ResolvedLayoutSummary gates strictly on Backend == "nfs", never on the
+	// nfs block's mere presence.
+	t.Run("local backend with an nfs block present still returns empty", func(t *testing.T) {
+		s := &V1SharedDirStorageConfig{
+			Backend: "local",
+			NFS: &V1NFSConfig{
+				MountRoot: "/srv",
+				Shares:    []V1NFSShare{{ID: "scion-shared", PVName: "pv"}},
+			},
+		}
+		assert.Empty(t, s.ResolvedLayoutSummary())
+	})
+}
+
 // TestSharedDirStorageConfig_YAMLRoundTrip replaces a prior tautological
 // test that built the struct in Go and read the same fields back (r1-test.md
 // #9: a koanf tag typo would have gone undetected). This writes the design
@@ -4569,6 +4807,18 @@ func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {
 					DefaultRole:      "",
 					AllowedEmails:    []string{"sa@proj.iam.gserviceaccount.com"},
 				},
+				{
+					// AllowedGCPProjects and AllowedDomains only do anything
+					// on an active Google user issuer: issuer_type "user" and
+					// a non-empty ExpectedAudience, unlike the
+					// service_account entry above, which must not set them
+					// (that combination is a config validation error).
+					IssuerURL:          "https://accounts.google.com/",
+					ExpectedAudience:   "client-id.apps.googleusercontent.com",
+					IssuerType:         "user",
+					AllowedGCPProjects: []string{"gcp-proj-1", "gcp-proj-2"},
+					AllowedDomains:     []string{"Example.com", "other.example"},
+				},
 			},
 			Algorithms:       []string{"RS256", "ES256"},
 			RefreshInterval:  "1h",
@@ -4579,7 +4829,7 @@ func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {
 	// V1 -> GlobalConfig
 	gc := ConvertV1ServerToGlobalConfig(v1)
 	assert.True(t, gc.Federation.Enabled)
-	require.Len(t, gc.Federation.TrustedIssuers, 2)
+	require.Len(t, gc.Federation.TrustedIssuers, 3)
 
 	ti0 := gc.Federation.TrustedIssuers[0]
 	assert.Equal(t, "https://hub-a.example.com", ti0.IssuerURL)
@@ -4595,6 +4845,12 @@ func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {
 	assert.Equal(t, "service_account", ti1.IssuerType)
 	assert.Equal(t, []string{"sa@proj.iam.gserviceaccount.com"}, ti1.AllowedEmails)
 
+	ti2 := gc.Federation.TrustedIssuers[2]
+	assert.Equal(t, "https://accounts.google.com/", ti2.IssuerURL)
+	assert.Equal(t, "user", ti2.IssuerType)
+	assert.Equal(t, []string{"gcp-proj-1", "gcp-proj-2"}, ti2.AllowedGCPProjects)
+	assert.Equal(t, []string{"Example.com", "other.example"}, ti2.AllowedDomains)
+
 	assert.Equal(t, []string{"RS256", "ES256"}, gc.Federation.Algorithms)
 	assert.Equal(t, time.Hour, gc.Federation.Cache.RefreshInterval)
 	assert.Equal(t, 5*time.Second, gc.Federation.Cache.DebounceInterval)
@@ -4607,7 +4863,7 @@ func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {
 	assert.Equal(t, "1h0m0s", v1Back.Federation.RefreshInterval)
 	assert.Equal(t, "5s", v1Back.Federation.DebounceInterval)
 
-	require.Len(t, v1Back.Federation.TrustedIssuers, 2)
+	require.Len(t, v1Back.Federation.TrustedIssuers, 3)
 	vi0 := v1Back.Federation.TrustedIssuers[0]
 	assert.Equal(t, "https://hub-a.example.com", vi0.IssuerURL)
 	assert.Equal(t, "https://hub-a.example.com/.well-known/jwks.json", vi0.JWKSURL)
@@ -4621,6 +4877,12 @@ func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {
 	assert.Equal(t, "https://accounts.google.com", vi1.IssuerURL)
 	assert.Equal(t, "service_account", vi1.IssuerType)
 	assert.Equal(t, []string{"sa@proj.iam.gserviceaccount.com"}, vi1.AllowedEmails)
+
+	vi2 := v1Back.Federation.TrustedIssuers[2]
+	assert.Equal(t, "https://accounts.google.com/", vi2.IssuerURL)
+	assert.Equal(t, "user", vi2.IssuerType)
+	assert.Equal(t, []string{"gcp-proj-1", "gcp-proj-2"}, vi2.AllowedGCPProjects)
+	assert.Equal(t, []string{"Example.com", "other.example"}, vi2.AllowedDomains)
 }
 
 func TestConvertV1FederationConfig_NilFederation(t *testing.T) {
@@ -5176,4 +5438,19 @@ func TestGlobalSettingsIsLegacyFormat_LegacyGlobalWithV1ProjectConfigsOverlay(t 
 	vs, _, err := LoadGlobalSettings()
 	require.NoError(t, err)
 	assert.Nil(t, vs.Server, "a legacy-format global file must load via the legacy adapter (Server nil), not the versioned one")
+}
+
+// TestRewriteImageRegistry_Idempotent proves that rewriting an image that was
+// already rewritten to the same registry returns it unchanged, including for
+// registries without a hostname (where the first path component carries no
+// "." or ":" and only the basename extraction keeps the result stable).
+func TestRewriteImageRegistry_Idempotent(t *testing.T) {
+	registries := []string{"ghcr.io/org", "ghcr.io/org/", "localhost:5000", "myorg", "us-docker.pkg.dev/p/r"}
+	images := []string{"scion-claude:v1", "scion-claude", "ubuntu:22.04", "scion-claude@sha256:abc"}
+	for _, registry := range registries {
+		for _, image := range images {
+			once := RewriteImageRegistry(image, registry)
+			assert.Equal(t, once, RewriteImageRegistry(once, registry), "registry %q image %q", registry, image)
+		}
+	}
 }

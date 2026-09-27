@@ -69,9 +69,10 @@ func projectResource(g *store.Project) Resource {
 // templateResource constructs a Resource from a store.Template for capability computation.
 func templateResource(t *store.Template) Resource {
 	r := Resource{
-		Type:    "template",
-		ID:      t.ID,
-		OwnerID: t.OwnerID,
+		Type:      "template",
+		ID:        t.ID,
+		OwnerID:   t.OwnerID,
+		ScopeKind: t.Scope,
 	}
 	// Project-scoped templates are children of their project (mirrors
 	// harnessConfigResource and policyResource). Without this the resource is
@@ -99,9 +100,10 @@ func harnessConfigResource(hc *store.HarnessConfig) Resource {
 		return Resource{}
 	}
 	r := Resource{
-		Type:    "harness_config",
-		ID:      hc.ID,
-		OwnerID: hc.OwnerID,
+		Type:      "harness_config",
+		ID:        hc.ID,
+		OwnerID:   hc.OwnerID,
+		ScopeKind: hc.Scope,
 	}
 	// Project-scoped harness configs are children of the project, so project
 	// owner/admin bypass applies (mirrors gcpServiceAccountResource).

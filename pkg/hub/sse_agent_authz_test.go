@@ -123,7 +123,7 @@ func TestAuthorizeSSESubjects_AgentPolicy(t *testing.T) {
 		{name: "role string alone is not admin grant", role: "admin", bindings: &mockAuthzStore{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			agent := &store.Agent{ID: id, ProjectID: projectID, OwnerID: tc.owner, Ancestry: tc.ancestry, Visibility: "public"}
+			agent := &store.Agent{ID: id, ProjectID: projectID, OwnerID: tc.owner, Ancestry: tc.ancestry}
 			s := &sseAgentStore{mockAuthzStore: tc.bindings, agents: map[string]*store.Agent{id: agent}}
 			ws := &WebServer{store: s, authzService: NewAuthzService(s, slog.Default())}
 			req := sseAgentRequest(context.Background(), "user-1", tc.role)

@@ -34,23 +34,21 @@ func setupCloneTestServer(t *testing.T) (*Server, store.Store, string, string) {
 	require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{
 		ID: hcID, Slug: "source-hc", Name: "Source HC",
 		DisplayName: "Source Display", Description: "Source desc",
-		Harness:    "claude",
-		Config:     &store.HarnessConfigData{Harness: "claude", Image: "img:latest"},
-		Scope:      store.HarnessConfigScopeGlobal,
-		Visibility: store.VisibilityPublic,
-		Status:     store.HarnessConfigStatusActive,
-		Created:    now, Updated: now,
+		Harness: "claude",
+		Config:  &store.HarnessConfigData{Harness: "claude", Image: "img:latest"},
+		Scope:   store.HarnessConfigScopeGlobal,
+		Status:  store.HarnessConfigStatusActive,
+		Created: now, Updated: now,
 	}))
 
 	// Seed a source template (global).
 	require.NoError(t, s.CreateTemplate(ctx, &store.Template{
 		ID: tplID, Slug: "source-tpl", Name: "Source Template",
 		DisplayName: "TPL Display", Description: "TPL desc",
-		Harness:    "claude",
-		Scope:      store.TemplateScopeGlobal,
-		Visibility: store.VisibilityPublic,
-		Status:     store.TemplateStatusActive,
-		Created:    now, Updated: now,
+		Harness: "claude",
+		Scope:   store.TemplateScopeGlobal,
+		Status:  store.TemplateStatusActive,
+		Created: now, Updated: now,
 	}))
 
 	return srv, s, hcID, tplID
@@ -60,9 +58,8 @@ func TestHandleHarnessConfigClone_Success(t *testing.T) {
 	srv, _, hcID, _ := setupCloneTestServer(t)
 
 	body := map[string]interface{}{
-		"name":       "My Clone",
-		"scope":      "global",
-		"visibility": "private",
+		"name":  "My Clone",
+		"scope": "global",
 	}
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/harness-configs/"+hcID+"/clone", body)
@@ -78,7 +75,6 @@ func TestHandleHarnessConfigClone_Success(t *testing.T) {
 	assert.Equal(t, "Source desc", clone.Description)
 	assert.Equal(t, "claude", clone.Harness)
 	assert.Equal(t, "global", clone.Scope)
-	assert.Equal(t, "private", clone.Visibility)
 	assert.NotNil(t, clone.Config)
 }
 

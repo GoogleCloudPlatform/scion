@@ -74,6 +74,17 @@ func isTmuxShellNotFoundError(err error) bool {
 		strings.Contains(msg, "tmux: not found")
 }
 
+// sortedEnvVarKeys returns the sorted key names of an env var map, for
+// diagnostic logging that must not print the values themselves.
+func sortedEnvVarKeys(envVars map[string]string) []string {
+	keys := make([]string, 0, len(envVars))
+	for k := range envVars {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
 	// Resolve project name early so we can scope the container lookup below.
 	projectDir, err := config.GetResolvedProjectDir(opts.ProjectPath)
@@ -91,14 +102,11 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			agentID = opts.Env["SCION_AGENT_ID"]
 		}
 		projectID = opts.Env["SCION_PROJECT_ID"]
-		if projectID == "" {
-			projectID = opts.Env["SCION_GROVE_ID"]
-		}
 	}
 	// Snapshot the dispatch-provided project ID now, before any
 	// settings-driven env merging (resolveAuthEnvOverlay copying
 	// harness-config env into opts.Env for absent keys, telemetry env, etc.)
-	// can inject a project-controlled SCION_PROJECT_ID/SCION_GROVE_ID.
+	// can inject a project-controlled SCION_PROJECT_ID.
 	// Used only by the nfs shared_dir_storage branch below (round 3 review
 	// finding C1/S-L1): a project's harness_configs.<name>.env can set
 	// these keys, and since resolveAuthEnvOverlay only fills in *absent*
@@ -510,6 +518,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		if opts.HarnessAuth != "" && !harness.IsHarnessImplementationName(opts.HarnessAuth) {
 			auth.SelectedType = opts.HarnessAuth
 		}
+		// Auto-detect an auth type when nothing explicit selected one yet.
+		autoDetectAuthSelectedType(&auth, authMeta, &opts)
 		util.Debugf("auth: after overlay — selectedType=%q", auth.SelectedType)
 		resolved, err := h.ResolveAuth(auth)
 		if err != nil {
@@ -547,7 +557,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 				resolved.Files[i].SourcePath = ""
 			}
 		}
-		util.Debugf("auth: resolved — method=%q, envVars=%v, files=%d", resolved.Method, resolved.EnvVars, len(resolved.Files))
+		util.Debugf("auth: resolved — method=%q, envVarKeys=%v, files=%d", resolved.Method, sortedEnvVarKeys(resolved.EnvVars), len(resolved.Files))
 		if err := harness.ValidateAuth(resolved, opts.BrokerMode); err != nil {
 			if canFallbackToNoAuth() {
 				util.Debugf("auth: validation failed, falling back to no-auth mode: %v", err)
@@ -667,7 +677,6 @@ authDone:
 		opts.Env = make(map[string]string)
 	}
 	opts.Env["SCION_AGENT_NAME"] = opts.Name
-	opts.Env["SCION_GROVE"] = projectName
 	opts.Env["SCION_PROJECT"] = projectName
 	if template != "" {
 		opts.Env["SCION_TEMPLATE_NAME"] = template
@@ -692,7 +701,7 @@ authDone:
 	// The hub may inject a raw alias (e.g. "large") when its store lacks
 	// the harness config's model_aliases map; the broker has the on-disk
 	// config and can resolve it here.
-	if resolved, ok := reResolveModelAlias(opts.Env["SCION_MODEL"], finalScionCfg); ok {
+	if resolved, ok := reResolveModelAlias(opts.Env["SCION_MODEL"], finalScionCfg, harnessName); ok {
 		util.Debugf("RunAgent: re-resolved leaked model alias %q → %q", opts.Env["SCION_MODEL"], resolved)
 		opts.Env["SCION_MODEL"] = resolved
 	}
@@ -1035,10 +1044,10 @@ authDone:
 	// and NOT a fresh read of opts.Env here. By this point opts.Env may
 	// already have been filled in from project-level harness-config env by
 	// resolveAuthEnvOverlay (it only fills *absent* keys, but that includes
-	// SCION_PROJECT_ID/SCION_GROVE_ID when the hub didn't dispatch this
+	// SCION_PROJECT_ID when the hub didn't dispatch this
 	// start), so re-reading opts.Env at this line would reopen exactly the
 	// hole this snapshot closes (round 3 review finding C1/S-L1). The hub
-	// sets SCION_PROJECT_ID/SCION_GROVE_ID unconditionally after merging any
+	// sets SCION_PROJECT_ID unconditionally after merging any
 	// user-supplied env for hub-dispatched starts
 	// (pkg/hub/httpdispatcher.go DispatchAgentStart/DispatchAgentRestart,
 	// "Identity vars at highest precedence"), so hubDispatchedProjectID is
@@ -1213,18 +1222,18 @@ authDone:
 				"scion.harness_auth":   opts.HarnessAuth,
 				"agent_id":             agentID,
 			}
-			for k, v := range projectcompat.ProjectNameLabels(projectName, true) {
+			for k, v := range projectcompat.ProjectNameLabels(projectName) {
 				l[k] = v
 			}
 			// Add project_id label for project-scoped agent isolation.
 			if projectID != "" {
-				for k, v := range projectcompat.ProjectIDLabels(projectID, true) {
+				for k, v := range projectcompat.ProjectIDLabels(projectID) {
 					l[k] = v
 				}
 			}
 			return l
 		}(),
-		Annotations: projectcompat.ProjectPathLabels(projectDir, true),
+		Annotations: projectcompat.ProjectPathLabels(projectDir),
 	}
 	id, err := m.Runtime.Run(ctx, runCfg)
 	if err != nil {
@@ -1515,6 +1524,83 @@ func buildAuthEnvOverlay(baseEnv map[string]string, secrets []api.ResolvedSecret
 	return overlay
 }
 
+// autoDetectAuthSelectedType sets auth.SelectedType when nothing explicit has
+// selected one yet (CLI/template/profile overrides, scion-agent.json). It
+// mirrors the precedence the hub preflight already uses
+// (pkg/runtimebroker/handlers.go extractRequiredEnvKeys): file secrets, then
+// env vars, then GCP identity.
+//
+// Without this, container-script harnesses (e.g. antigravity) never learn a
+// resolved auth type for the auto-detect case: h.ResolveAuth forwards
+// auth.SelectedType into SCION_HARNESS_SELECTED_AUTH / explicit_type
+// (container_script_harness.go), which the container-side provisioner is
+// meant to trust instead of re-guessing via its own, harness-local method
+// ordering. Extracted (like resolveAuthEnvOverlay) so it can be exercised
+// directly in tests. See ptone/scion#1873.
+//
+// gcpSAAssigned is derived from opts.Env["SCION_METADATA_MODE"] rather than a
+// structured GCPIdentity: api.StartOptions carries no such field, and
+// SCION_METADATA_MODE is the only channel this signal has across the
+// runtimebroker -> agent package boundary (pkg/runtimebroker/start_context.go
+// sets it for assign, block, and passthrough alike).
+func autoDetectAuthSelectedType(auth *api.AuthConfig, authMeta *config.HarnessAuthMetadata, opts *api.StartOptions) {
+	if auth.SelectedType != "" || authMeta == nil {
+		return
+	}
+	// Skip in local/workstation mode: the GCP-identity signal
+	// (SCION_METADATA_MODE) and opts.Env / opts.ResolvedSecrets only reflect
+	// what the *broker* pre-resolved. GatherAuthWithEnv(authEnvOverlay,
+	// localSources=true, authMeta) separately discovers host env vars via
+	// os.Getenv and host credential files (e.g. ~/.claude/.credentials.json,
+	// the local ADC file) that never pass through opts.Env/opts.ResolvedSecrets
+	// at all — this function has no visibility into them. Deciding from opts
+	// alone in local mode would bind to a narrower view of the world than
+	// ResolveAuth/provision.py actually have, and could override a real host
+	// credential this function simply cannot see. SCION_METADATA_MODE is also
+	// broker-only by construction (pkg/runtimebroker/start_context.go), so
+	// the identity leg has nothing to contribute locally anyway.
+	if !opts.BrokerMode {
+		return
+	}
+
+	fileSecretNames := make(map[string]struct{})
+	for _, sec := range opts.ResolvedSecrets {
+		if sec.Type == "file" {
+			fileSecretNames[sec.Name] = struct{}{}
+		}
+	}
+
+	envKeys := make(map[string]struct{})
+	for k, v := range opts.Env {
+		if v != "" {
+			envKeys[k] = struct{}{}
+		}
+	}
+	for _, sec := range opts.ResolvedSecrets {
+		if sec.Type == "environment" || sec.Type == "" {
+			target := sec.Target
+			if target == "" {
+				target = sec.Name
+			}
+			if target != "" {
+				envKeys[target] = struct{}{}
+			}
+		}
+	}
+
+	// gcpSAAssigned mirrors the broker's own check (extractRequiredEnvKeys:
+	// assign or passthrough both provide credentials).
+	metadataMode := opts.Env["SCION_METADATA_MODE"]
+	gcpSAAssigned := metadataMode == store.GCPMetadataModeAssign || metadataMode == store.GCPMetadataModePassthrough
+
+	// AutoDetectAuthType runs the file -> env -> identity precedence as a
+	// single call so a present default-type credential (e.g. antigravity's
+	// AGY_TOKEN, claude's ANTHROPIC_API_KEY) always wins over the identity leg.
+	if detected := harness.AutoDetectAuthType(authMeta, fileSecretNames, envKeys, gcpSAAssigned); detected != "" {
+		auth.SelectedType = detected
+	}
+}
+
 // filterResolvedSecretsForResolvedAuth drops auth-candidate secrets that are
 // not required by the selected resolved auth method while preserving all
 // non-auth secrets. configAuthKeys extends the hardcoded auth key set with
@@ -1687,17 +1773,35 @@ func mergeExtraHosts(a, b []string) []string {
 }
 
 // reResolveModelAlias detects when SCION_MODEL contains an unresolved size
-// alias (e.g. "large") that the hub failed to resolve, and returns the
-// broker-side resolved concrete model from cfg.Model. It returns ("", false)
-// when no re-resolution is needed — either because the value is not a known
-// alias, the config is nil, or the config model is empty.
-func reResolveModelAlias(envModel string, cfg *api.ScionConfig) (string, bool) {
-	if envModel == "" || cfg == nil || cfg.Model == "" {
+// alias (e.g. "large") that the hub failed to resolve, and returns a
+// concrete model to use instead. It returns ("", false) when no
+// re-resolution is needed — either because the value is not a known alias,
+// or a concrete replacement could not be determined.
+//
+// It first tries cfg.Model, the broker's own resolved config (this is the
+// pre-existing behavior for when the hub's alias resolution failed but the
+// broker's local config resolved it). When cfg.Model is empty or is itself
+// still the same unresolved alias — e.g. GetAgent had no local template
+// chain to resolve against either — it falls back to the harness's built-in
+// alias table (harnesses/<harnessName>/config.yaml) so a bare alias never
+// reaches the harness verbatim.
+func reResolveModelAlias(envModel string, cfg *api.ScionConfig, harnessName string) (string, bool) {
+	if envModel == "" {
 		return "", false
 	}
 	normalized := config.NormalizeModelAlias(envModel)
-	if config.KnownModelAliases[normalized] && envModel != cfg.Model {
+	if !config.KnownModelAliases[normalized] {
+		return "", false
+	}
+	if cfg != nil && cfg.Model != "" && envModel != cfg.Model {
 		return cfg.Model, true
+	}
+	if harnessName != "" {
+		if aliases := harness.DefaultModelAliases(harnessName); len(aliases) > 0 {
+			if resolved := config.ResolveModelAlias(envModel, aliases); resolved != envModel {
+				return resolved, true
+			}
+		}
 	}
 	return "", false
 }

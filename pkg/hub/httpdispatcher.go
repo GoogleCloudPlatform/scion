@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"net/url"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -68,16 +69,16 @@ func (c *HTTPRuntimeBrokerClient) CreateAgent(ctx context.Context, brokerID, bro
 	return c.transport.CreateAgent(ctx, brokerID, brokerEndpoint, req)
 }
 
-func (c *HTTPRuntimeBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace, resume bool) (*RemoteAgentResponse, error) {
-	return c.transport.StartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, sharedDirs, sharedWorkspace, resume)
+func (c *HTTPRuntimeBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace, resume bool, extras StartExtras) (*RemoteAgentResponse, error) {
+	return c.transport.StartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, sharedDirs, sharedWorkspace, resume, extras)
 }
 
 func (c *HTTPRuntimeBrokerClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string) error {
 	return c.transport.StopAgent(ctx, brokerID, brokerEndpoint, agentID, projectID)
 }
 
-func (c *HTTPRuntimeBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string) error {
-	return c.transport.RestartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, resolvedEnv)
+func (c *HTTPRuntimeBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) error {
+	return c.transport.RestartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, resolvedEnv, extras)
 }
 
 func (c *HTTPRuntimeBrokerClient) ResetAuthAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, token string) error {
@@ -147,6 +148,7 @@ type HTTPAgentDispatcher struct {
 	authzService      *AuthzService        // Optional authz service for progeny secret verification
 	githubAppMinter   GitHubAppTokenMinter // Optional GitHub App token minter
 	hubEndpoint       string               // Hub endpoint URL for agents to call back
+	agentEndpoint     string               // Optional override of hubEndpoint for SCION_HUB_ENDPOINT only
 	hubName           string               // Hub display name for agent log labeling
 	hubID             string               // Hub instance ID for hub-scoped queries
 	devAuthToken      string               // Dev auth token to inject into agent env (dev-auth mode only)
@@ -174,6 +176,14 @@ type HTTPAgentDispatcher struct {
 	harnessConfigRepairer func(ctx context.Context, name string) error
 	templateRepairer      func(ctx context.Context, ref string) error
 	skillPreResolver      func(ctx context.Context, agent *store.Agent) *ResolveSkillsResponse
+
+	// creatorSkillPreResolver is skillPreResolver's start/restart counterpart:
+	// it resolves as the agent's recorded creator regardless of who is
+	// dispatching the start/restart, so a re-provision reached through either
+	// verb resolves the same set for a given agent no matter which permitted
+	// principal triggers it (ptone/scion#1994). Nil = no creator-based
+	// resolution (start/restart carry no PreResolvedSkills, same as before).
+	creatorSkillPreResolver func(ctx context.Context, agent *store.Agent) *ResolveSkillsResponse
 
 	// hubAgentDefaultsProvider returns the hub's operational agent_defaults at
 	// dispatch time. A callback rather than a snapshot because the settings
@@ -240,6 +250,26 @@ func agentRoleAndScopes(agent *store.Agent) (AgentRole, []AgentTokenScope) {
 // SetHubEndpoint sets the Hub endpoint URL that agents will use to call back.
 func (d *HTTPAgentDispatcher) SetHubEndpoint(endpoint string) {
 	d.hubEndpoint = endpoint
+}
+
+// SetAgentEndpoint sets an optional override of the Hub endpoint used only
+// for the SCION_HUB_ENDPOINT value injected into dispatched agents. It takes
+// precedence over the value set by SetHubEndpoint at every agent-injection
+// site (create, start, restart), but has no effect on anything else the
+// dispatcher or the wider Hub does with the regular hub endpoint. An empty
+// value (the default) leaves injection using the value set by SetHubEndpoint.
+func (d *HTTPAgentDispatcher) SetAgentEndpoint(endpoint string) {
+	d.agentEndpoint = endpoint
+}
+
+// effectiveAgentHubEndpoint returns the Hub endpoint value to stamp into an
+// agent's SCION_HUB_ENDPOINT: the agent-endpoint override when configured,
+// otherwise the regular hub endpoint.
+func (d *HTTPAgentDispatcher) effectiveAgentHubEndpoint() string {
+	if d.agentEndpoint != "" {
+		return d.agentEndpoint
+	}
+	return d.hubEndpoint
 }
 
 // SetHubName sets the hub display name for agent log labeling.
@@ -323,6 +353,12 @@ func (d *HTTPAgentDispatcher) SetImageRegistry(registry string) {
 	d.imageRegistry = registry
 }
 
+// ImageRegistry returns the registry prefix this dispatcher rewrites bare
+// image names to at send time ("" = no rewrite).
+func (d *HTTPAgentDispatcher) ImageRegistry() string {
+	return d.imageRegistry
+}
+
 // SetTemplateRepairer registers a callback that syncs a template's DB manifest
 // from storage when a hash mismatch is detected during dispatch.
 func (d *HTTPAgentDispatcher) SetTemplateRepairer(fn func(ctx context.Context, ref string) error) {
@@ -334,6 +370,15 @@ func (d *HTTPAgentDispatcher) SetTemplateRepairer(fn func(ctx context.Context, r
 // is attached to every create request as PreResolvedSkills.
 func (d *HTTPAgentDispatcher) SetSkillPreResolver(fn func(ctx context.Context, agent *store.Agent) *ResolveSkillsResponse) {
 	d.skillPreResolver = fn
+}
+
+// SetCreatorSkillPreResolver registers the callback that resolves an agent's
+// Hub-registry skill references as its recorded creator, independent of the
+// principal dispatching the current call (ptone/scion#1994). Start and
+// restart use this so their PreResolvedSkills matches what the agent's
+// creator would get, regardless of who starts/restarts the agent.
+func (d *HTTPAgentDispatcher) SetCreatorSkillPreResolver(fn func(ctx context.Context, agent *store.Agent) *ResolveSkillsResponse) {
+	d.creatorSkillPreResolver = fn
 }
 
 // isHashMismatchError reports whether err is a broker hash-mismatch error
@@ -424,18 +469,91 @@ func (d *HTTPAgentDispatcher) getBrokerEndpoint(ctx context.Context, brokerID st
 
 // buildCreateRequest builds a RemoteCreateAgentRequest from the agent's store record.
 // This is shared between DispatchAgentCreate and DispatchAgentProvision.
+// resolveProvisionCredentials collects project-scope secrets for use by the
+// broker's provision-time credential resolution (skill resolution, URI
+// variable substitution, credential helpers). These are never forwarded to
+// the agent container environment. Shared by the create and start/restart
+// dispatch paths (#1960) so that a required gh:// skill can resolve with the
+// same project credentials regardless of which path (re-)provisions the
+// agent. callerName is used only for debug log attribution.
+func (d *HTTPAgentDispatcher) resolveProvisionCredentials(ctx context.Context, agent *store.Agent, callerName string) map[string]string {
+	if agent.ProjectID == "" || d.secretBackend == nil {
+		return nil
+	}
+	projectSecrets, listErr := d.secretBackend.List(ctx, secret.Filter{
+		Scope:   secret.ScopeProject,
+		ScopeID: agent.ProjectID,
+	})
+	if listErr != nil {
+		if d.debug {
+			d.log.Warn(callerName+": failed to list project secrets for ProvisionCredentials",
+				"agent_id", agent.ID, "error", listErr)
+		}
+		return nil
+	}
+	if len(projectSecrets) == 0 {
+		return nil
+	}
+
+	type namedValue struct{ name, value string }
+	fetched := make([]namedValue, len(projectSecrets))
+
+	g, gctx := errgroup.WithContext(ctx)
+	for i, sm := range projectSecrets {
+		if sm.SecretType == store.SecretTypeInternal {
+			continue
+		}
+		i, sm := i, sm // capture loop vars
+		g.Go(func() error {
+			sv, getErr := d.secretBackend.Get(gctx, sm.Name, secret.ScopeProject, agent.ProjectID)
+			if getErr != nil {
+				if d.debug {
+					d.log.Warn(callerName+": failed to get project secret for ProvisionCredentials",
+						"agent_id", agent.ID, "secret", sm.Name, "error", getErr)
+				}
+				return nil // don't fail the group for individual secrets
+			}
+			if sv != nil && sv.Value != "" {
+				fetched[i] = namedValue{sm.Name, sv.Value}
+			}
+			return nil
+		})
+	}
+	_ = g.Wait()
+
+	creds := make(map[string]string)
+	for _, nv := range fetched {
+		if nv.name != "" {
+			creds[nv.name] = nv.value
+		}
+	}
+	if len(creds) == 0 {
+		return nil
+	}
+	return creds
+}
+
 func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *store.Agent, callerName string) (*RemoteCreateAgentRequest, error) {
 	projectInfo := d.resolveDispatchProjectInfo(ctx, agent)
 
 	// Build the remote create request
+	//
+	// Name carries agent.Slug, not agent.Name: the broker's create/replay
+	// path (handlers.go's createAgent, and everything downstream of it,
+	// including GetAgentDir) addresses the agent's on-disk directory using
+	// this Name field directly, exactly like the Slug that start, stop,
+	// restart and delete already send. Slug is immutable post-create and is
+	// validated at creation time; Name is a freely PATCHable display field
+	// (see applyAgentUpdate) that must never reach a path computation on its
+	// own, including for a row whose Name and Slug have diverged.
 	req := &RemoteCreateAgentRequest{
 		RequestID:     api.NewUUID(),
 		ID:            agent.ID,
 		Slug:          agent.Slug,
-		Name:          agent.Name,
+		Name:          agent.Slug,
 		ProjectID:     agent.ProjectID,
 		UserID:        agent.OwnerID,
-		HubEndpoint:   d.hubEndpoint,
+		HubEndpoint:   d.effectiveAgentHubEndpoint(),
 		ProjectPath:   projectInfo.projectPath,
 		ProjectSlug:   projectInfo.projectSlug,
 		SharedDirs:    projectInfo.sharedDirs,
@@ -461,7 +579,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		d.log.Debug(callerName,
 			"agent_id", agent.ID,
 			"agentName", agent.Name,
-			"hubEndpoint", d.hubEndpoint,
+			"hubEndpoint", d.effectiveAgentHubEndpoint(),
 			"hasTokenGenerator", d.tokenGenerator != nil,
 		)
 	}
@@ -613,7 +731,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 	// Storage env vars fill in keys not already set (with a non-empty value)
 	// by explicit config env vars. Empty-value config entries are passthrough
 	// markers and should be overridden by storage values.
-	envFromStorage, err := d.resolveEnvFromStorage(ctx, agent)
+	envFromStorage, envFromStoragePlain, err := d.resolveEnvFromStorage(ctx, agent)
 	if err != nil {
 		if d.debug {
 			d.log.Warn("buildCreateRequest: failed to resolve env from storage", "agent_id", agent.ID, "error", err)
@@ -625,7 +743,11 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		for k, v := range envFromStorage {
 			if existing, exists := req.ResolvedEnv[k]; !exists || existing == "" {
 				req.ResolvedEnv[k] = v
-				classifyEnv(&req.EnvClassifications, k, api.EnvKindSecretFetchable)
+				if envFromStoragePlain[k] {
+					classifyEnv(&req.EnvClassifications, k, api.EnvKindPlain)
+				} else {
+					classifyEnv(&req.EnvClassifications, k, api.EnvKindSecretFetchable)
+				}
 			}
 		}
 	}
@@ -828,53 +950,8 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 	// NOT gated on noAuth: provisionCredentials serve skill resolution (gh://
 	// convention tokens like GH_{OWNER}), not harness auth. Suppressing them under
 	// noAuth starves the GitHubSkillResolver of credentials for private repos.
-	if agent.ProjectID != "" && d.secretBackend != nil {
-		projectSecrets, listErr := d.secretBackend.List(ctx, secret.Filter{
-			Scope:   secret.ScopeProject,
-			ScopeID: agent.ProjectID,
-		})
-		if listErr != nil {
-			if d.debug {
-				d.log.Warn("buildCreateRequest: failed to list project secrets for ProvisionCredentials",
-					"agent_id", agent.ID, "error", listErr)
-			}
-		} else if len(projectSecrets) > 0 {
-			type namedValue struct{ name, value string }
-			fetched := make([]namedValue, len(projectSecrets))
-
-			g, gctx := errgroup.WithContext(ctx)
-			for i, sm := range projectSecrets {
-				if sm.SecretType == store.SecretTypeInternal {
-					continue
-				}
-				i, sm := i, sm // capture loop vars
-				g.Go(func() error {
-					sv, getErr := d.secretBackend.Get(gctx, sm.Name, secret.ScopeProject, agent.ProjectID)
-					if getErr != nil {
-						if d.debug {
-							d.log.Warn("buildCreateRequest: failed to get project secret for ProvisionCredentials",
-								"agent_id", agent.ID, "secret", sm.Name, "error", getErr)
-						}
-						return nil // don't fail the group for individual secrets
-					}
-					if sv != nil && sv.Value != "" {
-						fetched[i] = namedValue{sm.Name, sv.Value}
-					}
-					return nil
-				})
-			}
-			_ = g.Wait()
-
-			creds := make(map[string]string)
-			for _, nv := range fetched {
-				if nv.name != "" {
-					creds[nv.name] = nv.value
-				}
-			}
-			if len(creds) > 0 {
-				req.ProvisionCredentials = creds
-			}
-		}
+	if creds := d.resolveProvisionCredentials(ctx, agent, "buildCreateRequest"); len(creds) > 0 {
+		req.ProvisionCredentials = creds
 	}
 
 	// Log a summary of env resolution sources
@@ -1081,6 +1158,32 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 // that as_needed env vars (e.g. GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_REGION) are
 // resolved before auth provisioning runs on the broker.
 func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent *store.Agent) error {
+	return d.dispatchProvision(ctx, agent, "DispatchAgentProvision", false)
+}
+
+// DispatchAgentReprovision re-renders an EXISTING agent's on-disk config
+// (scion-agent.json, agent-info.json, home dotfiles, skills) on the runtime
+// broker from the agent's current AppliedConfig, for a `scion reincarnate`
+// request (design §3.4). The caller (the reincarnate worker) must have
+// already replaced agent.AppliedConfig with a freshly resolved config before
+// calling this — buildCreateRequest below reads directly from it, the same
+// way it does for a brand new agent.
+//
+// Unlike DispatchAgentProvision, this always sets Reprovision on the wire
+// request, which tells the broker to overwrite the persisted config rather
+// than reuse it (see runtimebroker.CreateAgentRequest.Reprovision and
+// agent.Manager.Reprovision). It does not start the container; the caller
+// does that separately via DispatchAgentStart. Precondition: the agent's
+// container is already stopped.
+func (d *HTTPAgentDispatcher) DispatchAgentReprovision(ctx context.Context, agent *store.Agent) error {
+	return d.dispatchProvision(ctx, agent, "DispatchAgentReprovision", true)
+}
+
+// dispatchProvision is the shared implementation behind DispatchAgentProvision
+// and DispatchAgentReprovision: build a provision-only create request, dispatch
+// it with the GatherEnv two-pass mechanism, and merge any resolved storage env
+// back into AppliedConfig.
+func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *store.Agent, callerName string, reprovision bool) error {
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
@@ -1090,11 +1193,12 @@ func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent 
 		return err
 	}
 
-	req, err := d.buildCreateRequest(ctx, agent, "DispatchAgentProvision")
+	req, err := d.buildCreateRequest(ctx, agent, callerName)
 	if err != nil {
 		return err
 	}
 	req.ProvisionOnly = true
+	req.Reprovision = reprovision
 	req.GatherEnv = true
 
 	// Track which scope provided each key
@@ -1112,12 +1216,15 @@ func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent 
 		// deferredCreateWithGather dispatches via DispatchAgentCreateWithGather which
 		// does not set ProvisionOnly — fall back to returning the error rather than
 		// accidentally triggering a full create on the remote node.
-		return fmt.Errorf("provision not supported for cross-node broker: %w", err)
+		return fmt.Errorf("%s not supported for cross-node broker: %w", callerName, err)
 	} else if err != nil {
 		return err
 	} else if resp != nil {
 		d.applyBrokerResponse(agent, resp)
 	}
+
+	finalResp := resp
+	finalNeeds := envReqs
 
 	// Second pass: if the broker reported needed keys, check whether any can
 	// be satisfied by as_needed env vars or secrets — mirroring the pattern in
@@ -1133,6 +1240,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent 
 				req.ResolvedEnv[k] = v
 			}
 			req.EnvSources = d.buildEnvSources(ctx, agent, req.ResolvedEnv)
+			// Design §3.4 Amendment A2.3: a fresh RequestID for the replay. Reusing the first
+			// pass's ID would let the broker's attempt cache (keyed by
+			// RequestID) replay the stored 202 instead of reprocessing with
+			// the newly resolved env — silently defeating this whole retry.
+			req.RequestID = api.NewUUID()
 
 			// Replay the provision request with the resolved env.
 			resp2, envReqs2, err2 := d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
@@ -1145,25 +1257,65 @@ func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent 
 				return err2
 			}
 			if envReqs2 != nil && len(envReqs2.Needs) > 0 {
-				d.log.Warn("DispatchAgentProvision: env vars still missing after second pass",
+				d.log.Warn(callerName+": env vars still missing after second pass",
 					"agent", agent.Name, "needs", envReqs2.Needs)
 			}
 			if resp2 != nil {
 				d.applyBrokerResponse(agent, resp2)
 			}
+			finalResp = resp2
+			finalNeeds = envReqs2
+		}
+	}
+
+	// Design §3.4 Amendment A2.3: for a reprovision specifically, a final 202-with-Needs (env
+	// still missing) or a missing 201 response is a hard failure, never
+	// "warn and continue". DispatchAgentProvision's more forgiving behavior
+	// exists because a follow-up start re-gathers env on that path; the
+	// reincarnate worker goes straight from this call to DispatchAgentStart,
+	// so "warn and continue" here would silently start the new generation on
+	// an incomplete or unreplaced config and still report AC-1 success.
+	if reprovision {
+		if finalNeeds != nil && len(finalNeeds.Needs) > 0 {
+			return fmt.Errorf("%s: required env still missing after reprovision: %v", callerName, finalNeeds.Needs)
+		}
+		if finalResp == nil {
+			return fmt.Errorf("%s: broker returned no confirmation for the reprovision request", callerName)
+		}
+		// Design §3.4 Amendment A2.2(a): mandatory echo. An old broker has no concept of
+		// Reprovision, so it silently ran a plain Provision and returned 201
+		// with Reprovisioned unset — the persisted config was NOT replaced,
+		// so this must fail exactly like any other reprovision failure.
+		if !finalResp.Reprovisioned {
+			return fmt.Errorf("%s: broker did not confirm the reprovision (it may not support reincarnate; its reported capabilities may be stale)", callerName)
 		}
 	}
 
 	// Merge resolved storage env vars back into AppliedConfig so they are
 	// visible in the advanced config form. Exclude internal SCION_* vars
-	// and dev tokens which are injected at start time. This runs after both
-	// passes so that as_needed vars resolved in the second pass are included.
-	if agent.AppliedConfig != nil && len(req.ResolvedEnv) > 0 {
+	// which are injected at start time. This runs after both passes so that
+	// as_needed vars resolved in the second pass are included.
+	//
+	// Only keys explicitly classified api.EnvKindPlain in req.EnvClassifications
+	// are persisted (see shouldPersistResolvedEnvKey). A key that is merely
+	// absent from the classification map is NOT plain by default -- it is
+	// dropped, not kept. Every key merged into req.ResolvedEnv anywhere in
+	// this dispatcher must have a matching classifyEnv/classifyEnvKeys call
+	// (enforced by TestBuildCreateRequestClassifiesEveryResolvedEnvKey) or it
+	// will silently stop showing up here; that is the intended fail-closed
+	// behavior, not a bug to work around by classifying it Plain.
+	//
+	// Not on reprovision: the fresh config the reincarnate worker built is
+	// authoritative, and resolved env is re-resolved on every dispatch, so
+	// merging it back would only make the next reincarnation plan show a
+	// false env diff. The skip applies before the classification check, so
+	// it holds even for keys classified api.EnvKindPlain.
+	if !reprovision && agent.AppliedConfig != nil && len(req.ResolvedEnv) > 0 {
 		if agent.AppliedConfig.Env == nil {
 			agent.AppliedConfig.Env = make(map[string]string)
 		}
 		for k, v := range req.ResolvedEnv {
-			if strings.HasPrefix(k, "SCION_") {
+			if !shouldPersistResolvedEnvKey(k, req.EnvClassifications) {
 				continue
 			}
 			if _, exists := agent.AppliedConfig.Env[k]; !exists {
@@ -1623,16 +1775,20 @@ func (d *HTTPAgentDispatcher) WarnOutrankedBrokerEnvKeys(ctx context.Context) er
 }
 
 // resolveEnvFromStorage queries Hub env var storage for every scope that
-// applies to the agent and returns a merged map. Scopes are applied lowest
-// precedence first; the order itself is stated in exactly one place,
-// envScopePrecedence above.
+// applies to the agent and returns a merged map, plus a companion map
+// recording which of those keys came from a storage entry with Secret==false
+// ("plain"). A key absent from the plain map (or present with false) is not
+// known plain and must not be treated as one by a caller deciding what to
+// persist. Scopes are applied lowest precedence first; the order itself is
+// stated in exactly one place, envScopePrecedence above.
 //
 // The caller then overlays explicit agent config env on top of the result, so
 // agent config outranks every storage scope (see buildCreateRequest).
-func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *store.Agent) (map[string]string, error) {
+func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *store.Agent) (map[string]string, map[string]bool, error) {
 	result := make(map[string]string)
+	plain := make(map[string]bool)
 	if agent == nil {
-		return result, nil
+		return result, plain, nil
 	}
 
 	for _, filter := range d.envScopesInPrecedenceOrder(agent) {
@@ -1655,6 +1811,7 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 				continue
 			}
 			result[v.Key] = v.Value
+			plain[v.Key] = !v.Secret
 		}
 	}
 
@@ -1675,11 +1832,12 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 					continue // higher-precedence scope already set this key
 				}
 				result[v.Key] = v.Value
+				plain[v.Key] = !v.Secret
 			}
 		}
 	}
 
-	return result, nil
+	return result, plain, nil
 }
 
 // resolveAsNeededForKeys resolves as_needed env vars and environment-type
@@ -2022,7 +2180,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	// Empty-value config entries are passthrough markers — storage values
 	// should override them so that hub-stored secrets (API keys, etc.) are
 	// available to the agent.
-	envFromStorage, err := d.resolveEnvFromStorage(ctx, agent)
+	envFromStorage, envFromStoragePlain, err := d.resolveEnvFromStorage(ctx, agent)
 	if err != nil {
 		if d.debug {
 			d.log.Warn("DispatchAgentStart: failed to resolve env from storage", "error", err)
@@ -2031,7 +2189,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		for k, v := range envFromStorage {
 			if existing, exists := resolvedEnv[k]; !exists || existing == "" {
 				resolvedEnv[k] = v
-				classifyEnv(&envClassifications, k, api.EnvKindSecretFetchable)
+				if envFromStoragePlain[k] {
+					classifyEnv(&envClassifications, k, api.EnvKindPlain)
+				} else {
+					classifyEnv(&envClassifications, k, api.EnvKindSecretFetchable)
+				}
 			}
 		}
 	}
@@ -2061,9 +2223,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		classifyEnv(&envClassifications, "SCION_AGENT_ID", api.EnvKindPlain)
 	}
 	if agent.ProjectID != "" {
-		resolvedEnv["SCION_GROVE_ID"] = agent.ProjectID
 		resolvedEnv["SCION_PROJECT_ID"] = agent.ProjectID
-		classifyEnv(&envClassifications, "SCION_GROVE_ID", api.EnvKindPlain)
 		classifyEnv(&envClassifications, "SCION_PROJECT_ID", api.EnvKindPlain)
 	}
 	if agent.Slug != "" {
@@ -2074,8 +2234,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	// The createAgent path sends this as req.HubEndpoint, but the startAgent
 	// path relies on the broker's own config which may be empty for standalone
 	// brokers. Including it here ensures the broker always has the endpoint.
-	if d.hubEndpoint != "" {
-		resolvedEnv["SCION_HUB_ENDPOINT"] = d.hubEndpoint
+	if ep := d.effectiveAgentHubEndpoint(); ep != "" {
+		resolvedEnv["SCION_HUB_ENDPOINT"] = ep
 		classifyEnv(&envClassifications, "SCION_HUB_ENDPOINT", api.EnvKindPlain)
 	}
 	// Include hub name so agents can label their Cloud Logging entries with
@@ -2216,10 +2376,30 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	// until #1350 is done — otherwise fail-closed + nil map = total outage.
 	_ = envClassifications // avoid unused-variable error until #1350 wire threading
 
-	resp, err := d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, projectInfo.sharedDirs, projectInfo.sharedWorkspace, resume)
+	// Carry the same dispatch metadata the create path sends so that a
+	// re-provision reached via start (e.g. after the broker deletes a stale
+	// agent dir) can resolve required skills exactly as create does (#1960):
+	// the same PreResolvedSkills the Hub resolves as the agent's creator (so
+	// non-public hub-registry skills are never resolved with the broker's own
+	// identity), the same project-scope ProvisionCredentials for gh:// skill
+	// resolution, and the owning user's ID for user-scope resolution.
+	// PreResolvedSkills always resolves as the agent's creator regardless of
+	// who is dispatching this start (ptone/scion#1994), so the resolved set
+	// for a given agent is the same whether the creator, an admin, or a
+	// project owner starts it.
+	extras := StartExtras{
+		HubEndpoint:          d.effectiveAgentHubEndpoint(),
+		UserID:               agent.OwnerID,
+		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentStart"),
+	}
+	if d.creatorSkillPreResolver != nil {
+		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)
+	}
+
+	resp, err := d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, projectInfo.sharedDirs, projectInfo.sharedWorkspace, resume, extras)
 	if isHashMismatchError(err) {
 		if repairErr := d.repairHashMismatch(ctx, agent, err); repairErr == nil {
-			resp, err = d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, projectInfo.sharedDirs, projectInfo.sharedWorkspace, resume)
+			resp, err = d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, projectInfo.sharedDirs, projectInfo.sharedWorkspace, resume, extras)
 		}
 	}
 	if errors.Is(err, ErrLifecycleDeferred) {
@@ -2297,7 +2477,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 
 	// Merge env vars from Hub storage; storage vars fill in keys not already
 	// set (with a non-empty value) — same precedence as DispatchAgentStart.
-	envFromStorage, err := d.resolveEnvFromStorage(ctx, agent)
+	envFromStorage, envFromStoragePlain, err := d.resolveEnvFromStorage(ctx, agent)
 	if err != nil {
 		if d.debug {
 			d.log.Warn("DispatchAgentRestart: failed to resolve env from storage", "error", err)
@@ -2306,7 +2486,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		for k, v := range envFromStorage {
 			if existing, exists := resolvedEnv[k]; !exists || existing == "" {
 				resolvedEnv[k] = v
-				classifyEnv(&envClassifications, k, api.EnvKindSecretFetchable)
+				if envFromStoragePlain[k] {
+					classifyEnv(&envClassifications, k, api.EnvKindPlain)
+				} else {
+					classifyEnv(&envClassifications, k, api.EnvKindSecretFetchable)
+				}
 			}
 		}
 	}
@@ -2334,17 +2518,15 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		classifyEnv(&envClassifications, "SCION_AGENT_ID", api.EnvKindPlain)
 	}
 	if agent.ProjectID != "" {
-		resolvedEnv["SCION_GROVE_ID"] = agent.ProjectID
 		resolvedEnv["SCION_PROJECT_ID"] = agent.ProjectID
-		classifyEnv(&envClassifications, "SCION_GROVE_ID", api.EnvKindPlain)
 		classifyEnv(&envClassifications, "SCION_PROJECT_ID", api.EnvKindPlain)
 	}
 	if agent.Slug != "" {
 		resolvedEnv["SCION_AGENT_SLUG"] = agent.Slug
 		classifyEnv(&envClassifications, "SCION_AGENT_SLUG", api.EnvKindPlain)
 	}
-	if d.hubEndpoint != "" {
-		resolvedEnv["SCION_HUB_ENDPOINT"] = d.hubEndpoint
+	if ep := d.effectiveAgentHubEndpoint(); ep != "" {
+		resolvedEnv["SCION_HUB_ENDPOINT"] = ep
 		classifyEnv(&envClassifications, "SCION_HUB_ENDPOINT", api.EnvKindPlain)
 	}
 	// Include hub name so agents can label their Cloud Logging entries with
@@ -2438,7 +2620,20 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	// until #1350 is done — otherwise fail-closed + nil map = total outage.
 	_ = envClassifications // avoid unused-variable error until #1350 wire threading
 
-	err = d.client.RestartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, resolvedEnv)
+	// Carry the same dispatch metadata as DispatchAgentStart (see comment
+	// there) so a re-provision reached via restart resolves required skills
+	// exactly as create does (#1960), always as the agent's creator
+	// regardless of who is dispatching this restart (ptone/scion#1994).
+	extras := StartExtras{
+		HubEndpoint:          d.effectiveAgentHubEndpoint(),
+		UserID:               agent.OwnerID,
+		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentRestart"),
+	}
+	if d.creatorSkillPreResolver != nil {
+		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)
+	}
+
+	err = d.client.RestartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, resolvedEnv, extras)
 	if errors.Is(err, ErrLifecycleDeferred) {
 		return d.deferredRestart(ctx, agent)
 	}
@@ -2482,6 +2677,13 @@ func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *st
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
 	if err != nil {
 		return err
+	}
+
+	// For a linked project, tell the broker where the project lives on its
+	// filesystem so it can find a file-only agent (container gone) there.
+	// The broker checks the path's project identity before using it.
+	if pp := d.resolveDispatchProjectInfo(ctx, agent).projectPath; pp != "" {
+		ctx = withDeleteProjectPath(ctx, pp)
 	}
 
 	err = d.client.DeleteAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, deleteFiles, removeBranch, softDelete, deletedAt)
@@ -2922,4 +3124,48 @@ func classifyEnvKeys(m *map[string]api.EnvKind, keys map[string]string, kind api
 	for k := range keys {
 		(*m)[k] = kind
 	}
+}
+
+// shouldPersistResolvedEnvKey decides whether a key from req.ResolvedEnv is
+// allowed into the durable AppliedConfig.Env record. This is an allowlist,
+// not a denylist: a key is persisted only when it is explicitly classified
+// api.EnvKindPlain. Every other outcome -- classified as any non-plain kind,
+// or simply absent from the classifications map -- is rejected. GITHUB_TOKEN
+// is rejected unconditionally regardless of its classification, since it is
+// never a legitimate value to keep in the durable config record.
+//
+// This mirrors the three-state lookup documented on api.EnvKind: a nil map
+// and an "absent key in a non-nil map" both fail the check here, which is
+// the correct fail-closed behavior for a persistence gate (contrast with a
+// gate that would treat "nil map" as "trust everything" -- that would be
+// backwards for this call site).
+func shouldPersistResolvedEnvKey(key string, classifications map[string]api.EnvKind) bool {
+	if key == "GITHUB_TOKEN" {
+		return false
+	}
+	if strings.HasPrefix(key, "SCION_") {
+		return false
+	}
+	kind, ok := api.ClassifyEnvKey(classifications, key)
+	return ok && kind == api.EnvKindPlain
+}
+
+type deleteProjectPathKey struct{}
+
+// withDeleteProjectPath attaches the broker-local project path (a linked
+// project's provider LocalPath) to a delete request context. The broker
+// transports send it as the projectPath query parameter. It is carried on the
+// context rather than as a parameter to keep the RuntimeBrokerClient
+// interface unchanged.
+func withDeleteProjectPath(ctx context.Context, projectPath string) context.Context {
+	return context.WithValue(ctx, deleteProjectPathKey{}, projectPath)
+}
+
+// deleteProjectPathQuery returns "&projectPath=<escaped>" if a project path
+// was attached with withDeleteProjectPath, otherwise "".
+func deleteProjectPathQuery(ctx context.Context) string {
+	if pp, _ := ctx.Value(deleteProjectPathKey{}).(string); pp != "" {
+		return "&projectPath=" + url.QueryEscape(pp)
+	}
+	return ""
 }

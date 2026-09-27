@@ -302,16 +302,14 @@ func TestStopAllAgents_ScopeCapabilities_ProjectMember(t *testing.T) {
 	assert.Contains(t, resp.Capabilities.Actions, "stop_all",
 		"project member should have stop_all in scope capabilities")
 
-	// Bob (non-member) should NOT see stop_all in project-scoped capabilities
+	// Bob (non-member) should not reach this endpoint at all: listProjectAgents
+	// now requires agent.list on the project (fix-1908 F1 -- this route used
+	// to have no authorization check for a user identity, so a non-member
+	// used to get 200 back with an empty scope-capabilities list; the
+	// stronger, correct outcome is that they are denied the endpoint
+	// entirely, which trivially also means they never see "stop_all").
 	rec = doRequestAsUser(t, srv, bob, http.MethodGet,
 		"/api/v1/projects/"+project.ID+"/agents", nil)
-	assert.Equal(t, http.StatusOK, rec.Code)
-
-	var resp2 struct {
-		Capabilities *Capabilities `json:"_capabilities"`
-	}
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp2))
-	require.NotNil(t, resp2.Capabilities)
-	assert.NotContains(t, resp2.Capabilities.Actions, "stop_all",
-		"non-member should not have stop_all in scope capabilities")
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"non-member should be denied the project agent list outright; got: %s", rec.Body.String())
 }

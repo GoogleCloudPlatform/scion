@@ -52,6 +52,10 @@ func (d *brokerMockDispatcher) DispatchAgentCreate(ctx context.Context, agent *s
 func (d *brokerMockDispatcher) DispatchAgentProvision(ctx context.Context, agent *store.Agent) error {
 	return nil
 }
+
+func (d *brokerMockDispatcher) DispatchAgentReprovision(ctx context.Context, agent *store.Agent) error {
+	return nil
+}
 func (d *brokerMockDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, _ bool) error {
 	return nil
 }
@@ -153,7 +157,6 @@ func setupBrokerTestAgent(t *testing.T, s store.Store, projectID, slug, phase st
 		ProjectID:       projectID,
 		Phase:           phase,
 		RuntimeBrokerID: tid("broker-1"),
-		Visibility:      store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(context.Background(), agent); err != nil {
 		t.Fatalf("failed to create agent: %v", err)

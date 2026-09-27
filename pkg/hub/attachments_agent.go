@@ -99,15 +99,19 @@ func attachmentMimeForName(name string) string {
 	return "application/octet-stream"
 }
 
-// agentAttachmentHostPath maps a container-visible attachment path to its
-// location on the hub host, given the host directory backing the project's
-// scratchpad shared dir.
+// agentAttachmentRelPath maps a container-visible attachment path to its path
+// relative to the host directory backing the project's scratchpad shared dir.
 //
 // Only paths inside that shared dir are accepted. An agent names the files it
 // attaches, so anything else would let it have the hub read arbitrary files
 // off its own disk and publish them into a chat.
-func agentAttachmentHostPath(agentPath, sharedHostDir string) (string, bool) {
-	if sharedHostDir == "" || agentPath == "" {
+//
+// The result is relative, and deliberately not joined onto the host dir here:
+// the agent owns every component of it, so it has to be resolved against an
+// os.Root rather than handed to a path-based os call. IsLocal below rules out
+// a lexical escape; only the root rules out a symlinked component.
+func agentAttachmentRelPath(agentPath string) (string, bool) {
+	if agentPath == "" {
 		return "", false
 	}
 	clean := path.Clean(agentPath)
@@ -128,7 +132,7 @@ func agentAttachmentHostPath(agentPath, sharedHostDir string) (string, bool) {
 		if !filepath.IsLocal(rel) {
 			return "", false
 		}
-		return filepath.Join(sharedHostDir, filepath.FromSlash(rel)), true
+		return rel, true
 	}
 	return "", false
 }
@@ -163,9 +167,19 @@ func (s *Server) ingestAgentAttachments(ctx context.Context, projectID, senderID
 		paths = paths[:MaxAttachmentsPerMessage]
 	}
 
+	// One root for the batch: agents mount this dir read-write, so the path
+	// under it is attacker-controlled and has to be resolved per component.
+	root, err := openConfinedBase(sharedHostDir, false)
+	if err != nil {
+		s.messageLog.ErrorContext(ctx, "Agent attachments dropped: cannot open scratchpad shared dir",
+			"project_id", projectID, "count", len(paths), "error", err)
+		return nil
+	}
+	defer func() { _ = root.Close() }()
+
 	refs := make([]AttachmentRef, 0, len(paths))
 	for _, p := range paths {
-		ref, err := s.storeAgentAttachment(ctx, wcs, as, projectID, senderID, sharedHostDir, p)
+		ref, err := s.storeAgentAttachment(ctx, wcs, as, root, projectID, senderID, p)
 		if err != nil {
 			s.messageLog.Warn("Failed to record agent attachment",
 				"project_id", projectID, "path", p, "error", err)
@@ -178,17 +192,21 @@ func (s *Server) ingestAgentAttachments(ctx context.Context, projectID, senderID
 
 // storeAgentAttachment copies one agent-attached file into the attachment
 // store and writes its metadata row.
+//
+// root is anchored on the project's scratchpad shared dir; rel is resolved
+// through it, so a symlink at any component is refused rather than followed.
 func (s *Server) storeAgentAttachment(ctx context.Context, wcs WebChatStore, as AttachmentStore,
-	projectID, senderID, sharedHostDir, agentPath string) (AttachmentRef, error) {
+	root *os.Root, projectID, senderID, agentPath string) (AttachmentRef, error) {
 
-	hostPath, ok := agentAttachmentHostPath(agentPath, sharedHostDir)
+	rel, ok := agentAttachmentRelPath(agentPath)
 	if !ok {
 		return AttachmentRef{}, errAttachmentOutsideSharedDir
 	}
 
 	// Lstat, not Stat: an agent writes into the same shared dir, so a symlink
-	// planted there would otherwise hand it any file the hub can read.
-	info, err := os.Lstat(hostPath)
+	// at the final component would otherwise hand it any file the hub can read.
+	// The root covers the components above it, which Lstat does follow.
+	info, err := root.Lstat(rel)
 	if err != nil {
 		return AttachmentRef{}, err
 	}
@@ -199,12 +217,12 @@ func (s *Server) storeAgentAttachment(ctx context.Context, wcs WebChatStore, as 
 		return AttachmentRef{}, errAttachmentTooLarge
 	}
 
-	name, err := SanitizeFilename(filepath.Base(hostPath))
+	name, err := SanitizeFilename(path.Base(rel))
 	if err != nil {
 		return AttachmentRef{}, err
 	}
 
-	f, err := os.Open(hostPath)
+	f, err := root.Open(rel)
 	if err != nil {
 		return AttachmentRef{}, err
 	}

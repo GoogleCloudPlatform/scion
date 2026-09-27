@@ -35,6 +35,13 @@ class FakeSocket {
     this.readyState = 1;
     this.onopen?.();
   }
+  /**
+   * A data frame is what actually confirms the stream is live, not bare
+   * onopen. Simulates tmux's redraw on attach.
+   */
+  data(payload = '') {
+    this.onmessage?.({ data: JSON.stringify({ type: 'data', data: btoa(payload) }) });
+  }
 }
 
 function fixture() {
@@ -72,6 +79,7 @@ describe('disconnect detection and state (#1659 AC1)', () => {
     const session = f.registry.open(agentId, f.initialize);
     await session.connect();
     FakeSocket.instances[0].open();
+    FakeSocket.instances[0].data();
     expect(session.state.connection).toBe('connected');
     expect(session.state.disconnectReason).toBeNull();
 
@@ -83,7 +91,7 @@ describe('disconnect detection and state (#1659 AC1)', () => {
     expect(session.state.error).toContain('1006');
   });
 
-  it('clean socket close (code 1000) does not set a disconnect reason', async () => {
+  it('clean socket close (code 1000) sets disconnectReason=detached', async () => {
     const f = fixture();
     const session = f.registry.open(agentId, f.initialize);
     await session.connect();
@@ -93,19 +101,31 @@ describe('disconnect detection and state (#1659 AC1)', () => {
     FakeSocket.instances[0].onclose?.({ code: 1000 });
 
     expect(session.state.connection).toBe('disconnected');
-    expect(session.state.disconnectReason).toBeNull();
+    expect(session.state.disconnectReason).toBe('detached');
     expect(session.state.error).toBeNull();
   });
 
-  it('WebSocket error sets connect-error reason', async () => {
-    const f = fixture();
-    const session = f.registry.open(agentId, f.initialize);
-    await session.connect();
-    FakeSocket.instances[0].onerror?.();
+  it(
+    'WebSocket error sets connect-error reason once the close-fallback timer fires ' +
+      '(classify in onclose only; onerror never releases the socket)',
+    async () => {
+      vi.useFakeTimers();
+      try {
+        const f = fixture();
+        const session = f.registry.open(agentId, f.initialize);
+        await session.connect();
+        FakeSocket.instances[0].onerror?.();
+        // onerror alone must not classify or release the socket yet.
+        expect(session.state.connection).toBe('connecting');
+        await vi.advanceTimersByTimeAsync(1000);
 
-    expect(session.state.connection).toBe('disconnected');
-    expect(session.state.disconnectReason).toBe('connect-error');
-  });
+        expect(session.state.connection).toBe('disconnected');
+        expect(session.state.disconnectReason).toBe('connect-error');
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+  );
 
   it('retains resources and session entry after unexpected disconnect', async () => {
     const f = fixture();
@@ -174,6 +194,8 @@ describe('reconnect deduplication (#1659 AC2)', () => {
     await session.connect();
     const newSocket = FakeSocket.instances[1];
     newSocket.open();
+    newSocket.data(); // confirms the new socket live; clear its own write call below
+    f.resources.write.mockClear();
 
     // Old socket events after reconnect must not corrupt state
     oldSocket.onmessage?.({
@@ -286,6 +308,7 @@ describe('SSE agent-stopped/deleted → unavailable (#1659 AC4)', () => {
     const session = f.registry.open(agentId, f.initialize);
     await session.connect();
     FakeSocket.instances[0].open();
+    FakeSocket.instances[0].data();
     expect(session.state.connection).toBe('connected');
 
     session.markUnavailable('agent-stopped', 'Agent has stopped.');
@@ -340,6 +363,7 @@ describe('warm navigation guard (#1659 AC5)', () => {
     const session = f.registry.open(agentId, f.initialize);
     await session.connect();
     FakeSocket.instances[0].open();
+    FakeSocket.instances[0].data();
     expect(session.state.connection).toBe('connected');
     const initialGeneration = session.state.generation;
 
@@ -377,6 +401,7 @@ describe('buffer reset on reconnect (#1659 AC6)', () => {
 
     await session.connect();
     FakeSocket.instances[1].open();
+    FakeSocket.instances[1].data();
     expect(f.resources.reset).toHaveBeenCalledTimes(1);
   });
 
@@ -414,6 +439,7 @@ describe('buffer reset on reconnect (#1659 AC6)', () => {
     f.fetcher.mockResolvedValue(json(agent));
     await session.connect();
     FakeSocket.instances[1].open();
+    FakeSocket.instances[1].data();
     expect(f.resources.reset).toHaveBeenCalledTimes(1);
   });
 });

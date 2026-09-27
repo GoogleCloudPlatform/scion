@@ -55,7 +55,7 @@ Scion enforces strict role-binding-based authorization for all agent operations:
 
 ### Membership-Based Project Access (Visibility Eradication)
 
-The legacy, non-functional project `Visibility` field (e.g., `private`, `team`, or `public`) has been completely eradicated. Instead, access control is governed entirely by membership-based policies.
+The legacy, non-functional project `Visibility` field (e.g., `private`, `team`, or `public`) has been completely eradicated. Instead, access control is governed entirely by membership-based policies. The same applies to agents, templates, harness configs, and skills: their `visibility` field has been removed from the API (including the agent SSE payload), and access depends only on scope and grants. User- and project-scoped templates, harness configs, and skills are readable only by their owner, project members, and Hub admins; Hub-wide member and viewer grants cover only hub- and global-scoped records (see [Security](/scion/reference/security/#34-fail-closed-api-authorization-and-resource-isolation)).
 - **Project Scope Governance**: Access to a project and its associated resources is restricted to principals belonging to the project's member group (i.e. `project:<slug>:members`). This group is bound to per-project read and access roles using Project-scoped RoleBindings (such as `project:<slug>:member-read-project` and `project:<slug>:member-read-agent` mappings).
 - **Fail-Closed Retrieval (404 Gate)**: Project read access is verified via a `CheckAccess` gate on retrieval. If a caller is not authorized to read the project, the API responds with a standard `404 Not Found` (rather than a `403 Forbidden`) to prevent callers from probing the existence of private projects.
 
@@ -154,6 +154,21 @@ To prevent unauthorized assignment of global resources, Scion applies specialize
 To streamline the agent creation workflow, project administrators can configure a project-default GCP service account that is automatically applied to newly created agents. However, to prevent privilege-escalation bypasses, this assignment is strictly gated:
 - **Enforced at Creation and Selection**: The Policy Troubleshooter `actAs` evaluation is automatically triggered whenever an agent is created using the project's default service account, or when a user selects the default service account option.
 - **Unauthorized Bypass Prevention**: If a user does not possess `iam.serviceAccounts.actAs` permission on the project's default service account, they are barred from creating agents under that project with the default identity, even if they have full project access.
+
+### Hub-Default GCP Identity
+
+Hub administrators can set a hub-wide default GCP identity in **Admin > Server Config > Agent Defaults > General** (`agent_defaults.default_gcp_identity_mode` and `default_gcp_identity_service_account_id`). The Hub picks the identity for a new agent from the first of these that is set:
+
+1. The GCP identity in the agent create request. Not applicable to an agent dispatched by a schedule, which carries no explicit identity.
+2. The project's default GCP identity. An explicit project **Block** counts as set, so the hub default is not consulted.
+3. The hub default.
+4. **Block**.
+
+This ladder applies the same way whether the agent is created interactively/via the API or dispatched by a schedule (ptone/scion#1927): a scheduled dispatch starts at rung 2, and a hub default with no project-level override reaches it exactly as it would an interactive create.
+
+The hub default does not bypass the existing gates:
+- **Assign**: the service account must be verified and hub-scoped, and `gcp_iam_check_mode` must be `enforce`. These are checked when the setting is saved. Each agent creation also runs the same creator `actAs` authorization as project-default assignment, recorded under the audit surface `hub-default`. For a scheduled dispatch, the "creator" is the schedule's immediate creator (the user or agent that created the schedule), the same principal the project-default rung already authorizes against on that path.
+- **Passthrough**: applies only when the agent is dispatched to the Hub's embedded (co-located) broker. The Hub identifies that broker by the ID it records when it starts its embedded broker, not by the `scion.io/broker-role` label, because a broker's owner can set its labels. During startup the Hub API can accept requests before the embedded broker has registered. An agent created in that window waits up to 15 seconds for registration instead of immediately getting **Block**. If registration fails, the Hub has no embedded broker until it restarts, and the Hub log says so on each affected create. This covers the single-node deployment. On any other broker the agent gets **Block**, and the Hub logs why. Without this limit, a hub-wide default would expose every registered broker's host identity to every agent creator. It would also skip the broker-owner and host-SA checks that explicit passthrough requests go through.
 
 ### Passthrough Mode Security & PATCH Parity
 

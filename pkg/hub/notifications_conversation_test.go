@@ -42,13 +42,12 @@ func TestCreateInboxMessage_StampsConversationID(t *testing.T) {
 	}
 
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "conv-agent",
-		Slug:       "conv-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Runtime:    "managed",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "conv-agent",
+		Slug:      "conv-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
+		Runtime:   "managed",
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("CreateAgent: %v", err)
@@ -122,13 +121,12 @@ func TestCreateInboxMessage_NonUUIDSubscriber_NoStampNoPanic(t *testing.T) {
 	}
 
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "conv-noid-agent",
-		Slug:       "conv-noid-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Runtime:    "managed",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "conv-noid-agent",
+		Slug:      "conv-noid-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
+		Runtime:   "managed",
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("CreateAgent: %v", err)

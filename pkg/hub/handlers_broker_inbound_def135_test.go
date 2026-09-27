@@ -77,6 +77,10 @@ func (d *def135Dispatcher) DispatchAgentCreate(_ context.Context, _ *store.Agent
 func (d *def135Dispatcher) DispatchAgentProvision(_ context.Context, _ *store.Agent) error {
 	return nil
 }
+
+func (d *def135Dispatcher) DispatchAgentReprovision(_ context.Context, _ *store.Agent) error {
+	return nil
+}
 func (d *def135Dispatcher) DispatchAgentStart(_ context.Context, _ *store.Agent, _ string, _ bool) error {
 	return nil
 }

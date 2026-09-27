@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -137,6 +138,58 @@ func TestConnect_WithoutTransportAuth(t *testing.T) {
 
 	assert.Equal(t, "Bearer scion-user-token", receivedAuth, "scion token should be in Authorization")
 	assert.Empty(t, receivedProxy, "no Proxy-Authorization without transport auth")
+}
+
+// TestConnect_SurfacesBrokerErrorBody exercises the PTY attach failure path
+// end to end: the broker rejects the handshake with its JSON error envelope
+// (as errors.go's writeError produces), and Connect must surface that
+// message rather than the generic "websocket: bad handshake" gorilla would
+// otherwise return. This is what makes a PTY attach failure actionable
+// instead of a dead end (ptone/scion#1864).
+func TestConnect_SurfacesBrokerErrorBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":{"code":"runtime_unavailable","message":"Unable to look up agent \"flaky\": the container runtime is temporarily unavailable. Please retry the attach in a moment."}}`))
+	}))
+	defer srv.Close()
+
+	client := NewPTYClient(PTYClientConfig{
+		Endpoint: srv.URL,
+		Token:    "scion-user-token",
+		Slug:     "flaky",
+	})
+
+	err := client.Connect(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "status 503")
+	assert.Contains(t, err.Error(), "temporarily unavailable")
+	assert.Contains(t, err.Error(), "retry")
+	assert.NotContains(t, err.Error(), "bad handshake",
+		"the actionable broker message should replace the opaque gorilla error, not just prefix it")
+}
+
+// TestConnect_FallsBackToRawBodyWhenNotJSON covers a handshake rejection
+// from something that isn't the broker's JSON error envelope (e.g. a proxy
+// or load balancer 502 page): Connect should still surface *something*
+// useful instead of silently dropping the body.
+func TestConnect_FallsBackToRawBodyWhenNotJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte("upstream connect error"))
+	}))
+	defer srv.Close()
+
+	client := NewPTYClient(PTYClientConfig{
+		Endpoint: srv.URL,
+		Token:    "scion-user-token",
+		Slug:     "flaky",
+	})
+
+	err := client.Connect(context.Background())
+	require.Error(t, err)
+	assert.True(t, strings.Contains(err.Error(), "upstream connect error"),
+		"expected raw body fallback in error, got: %v", err)
 }
 
 func TestWithTransport_AttachOption(t *testing.T) {

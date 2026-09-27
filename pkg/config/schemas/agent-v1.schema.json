@@ -102,7 +102,7 @@
     },
     "hub": {
       "type": "object",
-      "description": "Hub connection settings override for this agent/template. Takes highest priority over grove and server settings.",
+      "description": "Hub connection settings override for this agent/template. Takes highest priority over project and server settings.",
       "properties": {
         "endpoint": {
           "type": "string",

@@ -1985,14 +1985,42 @@ func (s *Server) autoLinkProviders(ctx context.Context, project *store.Project) 
 func (s *Server) handleProjectProviders(w http.ResponseWriter, r *http.Request, projectID, subPath string) {
 	ctx := r.Context()
 
-	// Verify project exists
-	_, err := s.store.GetProject(ctx, projectID)
+	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		if err == store.ErrNotFound {
 			NotFound(w, "Project")
 			return
 		}
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return
+	}
+
+	// Project isolation runs before the authorization check so a cross-project
+	// agent caller keeps its 404 and is not told the project exists.
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+		if project.ID != agentIdent.ProjectID() {
+			NotFound(w, "Project")
+			return
+		}
+	}
+
+	// Listing providers is a read of the project; linking or unlinking a
+	// provider changes where the project's agents may run, so it is an update.
+	action := ActionRead
+	switch r.Method {
+	case http.MethodPost, http.MethodDelete:
+		action = ActionUpdate
+	}
+
+	// SECURITY-GATE: CheckAccess — one check here gates the whole providers
+	// subtree (list, link, unlink) before dispatching to the handlers below.
+	if !s.authorize(w, r, projectResource(project), action) {
 		return
 	}
 

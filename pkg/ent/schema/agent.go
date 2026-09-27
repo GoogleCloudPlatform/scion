@@ -28,7 +28,7 @@ import (
 // Agent holds the schema definition for the Agent entity.
 //
 // The agent entity carries both the principal-relevant fields used by the
-// authorization layer (created_by, owner_id, delegation_enabled, visibility)
+// authorization layer (created_by, owner_id, delegation_enabled)
 // and the full set of operational fields required to back store.Agent through
 // the Ent adapter (P2-port-agent). Together they give the Ent-backed agent
 // store parity with the former raw-SQL store implementation.
@@ -67,8 +67,6 @@ func (Agent) Fields() []ent.Field {
 			Nillable(),
 		field.Bool("delegation_enabled").
 			Default(false),
-		field.String("visibility").
-			Default("private"),
 		field.Enum("message_mode").
 			Values("none", "lineage", "branch", "project", "hub").
 			Default("project"),
@@ -163,6 +161,35 @@ func (Agent) Fields() []ent.Field {
 		// guard to detect concurrent modifications under multi-replica Postgres.
 		field.Int64("state_version").
 			Default(1),
+
+		// --- Reincarnation (design: agent-reincarnate, ptone/scion#1821) ---
+		// generation counts completed `scion reincarnate` migrations of this
+		// agent row; a brand-new agent starts at 1. It is incremented only by
+		// the reincarnation worker on a completed migration.
+		field.Int("generation").
+			Default(1),
+		// reincarnation_state tracks an in-flight reincarnation and is kept
+		// separate from `phase` so existing phase consumers are unaffected;
+		// phase still moves through stopping/provisioning/starting/running as
+		// normal during a reincarnation. Empty means no reincarnation is in
+		// flight. A non-empty value here is also what gates the (future,
+		// Phase 2) migration message delivery gate.
+		field.String("reincarnation_state").
+			Optional().
+			Default(""),
+		// reincarnation_updated_at is bumped ONLY by reincarnation-owned
+		// writes (the claim, each worker step, and every terminal write) —
+		// unlike `updated`, which every broker heartbeat's UpdateAgentStatus
+		// also bumps (runtimebroker/heartbeat.go lists containers via `docker
+		// ps -a`, so a stopped-but-present container still heartbeats). The
+		// replica-safe sweep's agent-state backstop (design §3.4 Amendment
+		// A6.6) keys on this column instead of `updated`, so a heartbeat
+		// arriving for an orphaned claim can no longer keep it from ever
+		// looking stale. Nil means no reincarnation has ever touched this
+		// agent.
+		field.Time("reincarnation_updated_at").
+			Optional().
+			Nillable(),
 	}
 }
 

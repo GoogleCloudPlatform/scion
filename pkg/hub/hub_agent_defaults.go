@@ -69,7 +69,9 @@ func agentDefaultsEqual(a, b opsettings.AgentDefaultsSettings) bool {
 		a.DefaultMaxAgentRole != b.DefaultMaxAgentRole ||
 		a.DefaultAgentRole != b.DefaultAgentRole ||
 		a.DefaultRuntimeBroker != b.DefaultRuntimeBroker ||
-		a.DefaultTimezone != b.DefaultTimezone {
+		a.DefaultTimezone != b.DefaultTimezone ||
+		a.DefaultGCPIdentityMode != b.DefaultGCPIdentityMode ||
+		a.DefaultGCPIdentityServiceAccountID != b.DefaultGCPIdentityServiceAccountID {
 		return false
 	}
 	if !intPtrEqual(a.DefaultThinkingLevel, b.DefaultThinkingLevel) {

@@ -141,9 +141,11 @@ func (s *Server) executeMigration(w http.ResponseWriter, r *http.Request, key st
 		return
 	}
 
-	// Prevent re-running completed migrations (use CLI --force for that).
+	// Prevent re-running completed migrations. There is no CLI flag that
+	// re-runs a completed migration through this endpoint; the message must
+	// not claim one exists.
 	if op.Status == store.MaintenanceStatusCompleted {
-		writeError(w, http.StatusConflict, ErrCodeConflict, "Migration already completed; use CLI --force to re-run", nil)
+		writeError(w, http.StatusConflict, ErrCodeConflict, "Migration already completed", nil)
 		return
 	}
 
@@ -257,6 +259,11 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 		return &SecretMigrationExecutor{
 			store:         s.store,
 			secretBackend: backend,
+		}, nil
+	case "applied-config-env-cleanup":
+		return &AppliedConfigEnvCleanupExecutor{
+			Store:         s.store,
+			SecretBackend: s.GetSecretBackend(),
 		}, nil
 	case "pull-images":
 		log.Debug("Resolved pull-images executor",

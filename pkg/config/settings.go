@@ -555,20 +555,10 @@ func UpdateSetting(projectPath string, key string, value string, global bool) er
 		}
 		// Resolve through GetProjectConfigDir so that git projects with split
 		// storage write to the external config dir (~/.scion/project-configs/…)
-		// — the same location LoadSettingsKoanf reads from.
+		// — the same location LoadSettingsKoanf reads from. This also
+		// migrates a project's legacy id file to its canonical name as a
+		// side effect, via ReadProjectID.
 		dir = GetProjectConfigDir(projectPath)
-
-		// Phase 5: Migrate .scion/grove-id to project-id if it exists.
-		// This ensures that subsequent reads prefer the new filename.
-		if projectPath != "" {
-			legacyIDFile := filepath.Join(projectPath, projectcompat.GroveIDFile)
-			projectIDFile := filepath.Join(projectPath, projectcompat.ProjectIDFile)
-			if _, err := os.Stat(legacyIDFile); err == nil {
-				if _, err := os.Stat(projectIDFile); os.IsNotExist(err) {
-					_ = os.Rename(legacyIDFile, projectIDFile)
-				}
-			}
-		}
 	}
 
 	// Find existing settings file (YAML or JSON)

@@ -23,6 +23,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerdispatch"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/message"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 )
 
 // BrokerDispatchStore is the Ent-backed store for the broker_dispatch durable
@@ -285,6 +286,71 @@ func (s *BrokerDispatchStore) CountStuckPendingMessages(ctx context.Context, bef
 func (s *BrokerDispatchStore) ExpireStuckPendingMessages(ctx context.Context, before time.Time, reason string) (int, error) {
 	affected, err := s.client.Message.Update().
 		Where(message.DispatchStateEQ(store.MessageDispatchPending), message.CreatedLT(before)).
+		SetDispatchState(store.MessageDispatchFailed).
+		SetNillableDispatchFailureReason(&reason).
+		Save(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return affected, nil
+}
+
+// FailPendingMessagesWithMissingRecipient transitions pending messages to
+// failed early when their recipient agent has been deleted (soft- or
+// hard-deleted), instead of waiting for ExpireStuckPendingMessages' TTL.
+// Non-agent recipients (e.g. "user:...") and messages with no recipient_id
+// are left untouched — a lookup miss there does not mean the recipient is
+// gone. Returns the number of messages transitioned.
+func (s *BrokerDispatchStore) FailPendingMessagesWithMissingRecipient(ctx context.Context, reason string) (int, error) {
+	pending, err := s.client.Message.Query().
+		Where(
+			message.DispatchStateEQ(store.MessageDispatchPending),
+			message.RecipientHasPrefix("agent:"),
+			message.RecipientIDNEQ(""),
+		).
+		Select(message.FieldID, message.FieldRecipientID).
+		All(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	if len(pending) == 0 {
+		return 0, nil
+	}
+
+	recipientIDSet := make(map[string]struct{}, len(pending))
+	for _, m := range pending {
+		recipientIDSet[m.RecipientID] = struct{}{}
+	}
+	recipientIDs := make([]string, 0, len(recipientIDSet))
+	for id := range recipientIDSet {
+		recipientIDs = append(recipientIDs, id)
+	}
+
+	existingAgents, err := s.client.Agent.Query().
+		Where(agent.IDIn(parseUUIDList(recipientIDs)...), agent.DeletedAtIsNil()).
+		Select(agent.FieldID).
+		All(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	existingIDs := make(map[string]struct{}, len(existingAgents))
+	for _, a := range existingAgents {
+		existingIDs[a.ID.String()] = struct{}{}
+	}
+
+	orphanedIDs := make([]uuid.UUID, 0)
+	for _, m := range pending {
+		if _, ok := existingIDs[m.RecipientID]; ok {
+			continue
+		}
+		orphanedIDs = append(orphanedIDs, m.ID)
+	}
+	if len(orphanedIDs) == 0 {
+		return 0, nil
+	}
+
+	affected, err := s.client.Message.Update().
+		Where(message.IDIn(orphanedIDs...), message.DispatchStateEQ(store.MessageDispatchPending)).
 		SetDispatchState(store.MessageDispatchFailed).
 		SetNillableDispatchFailureReason(&reason).
 		Save(ctx)

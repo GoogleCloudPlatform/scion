@@ -83,6 +83,9 @@ jobs:
       - name: Check Compatibility Literals
         run: make compat-literals
 
+      - name: Check Annotation Prefix
+        run: make check-annotation-prefix
+
       - name: Check Authorization Guards
         run: |
           # Invoked directly rather than via `make check-authz-guards`: GNU make
@@ -125,6 +128,40 @@ jobs:
 
       - name: Build Binary
         run: make build
+
+  hub-sqlite-tests:
+    name: pkg/hub SQLite Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      # `make test-fast` (the Build & Test job, above) uses -tags no_sqlite,
+      # which excludes ~67% of pkg/hub's test files (ptone/scion#1118) --
+      # they carry a `//go:build !no_sqlite` constraint because they need a
+      # real SQLite-backed store. This job runs that excluded set, untagged,
+      # so it is actually compiled and run somewhere that can fail a PR.
+      #
+      # It is scoped to pkg/hub (not the whole module) and runs as its own
+      # parallel job so it doesn't add to the wall-clock time of Build & Test.
+      # Runtime is ~11 minutes; ~15m timeout matches the reproduction in
+      # ptone/scion#1847 (ok pkg/hub 613.006s), +buffer.
+      #
+      # Four tests are skipped: they have known, pre-existing failures
+      # unrelated to this job (ptone/scion#1847) that already reproduce on
+      # main today under `go test ./pkg/hub/...`. They are not new failures
+      # caused by newly-compiled tests. Remove the -skip once #1847 is fixed.
+      - name: Run pkg/hub tests (SQLite-enabled)
+        run: make test-hub-sqlite
 
   test-full-suite:
     name: Full Test Suite (reporting only)
@@ -196,12 +233,13 @@ jobs:
       # Before it was added, scripts/hub-env-integration-test.sh:328 and
       # scripts/hub-secret-integration-test.sh:329 both read:
       #
-      #     GROVE_ID=$($SCION config get grove_id 2>/dev/null || "")
+      #     PROJECT_ID=$($SCION config get project_id 2>/dev/null || "")
       #
       # The `|| ""` runs the empty string as a command name -- SC2286, an
-      # error-severity finding. (The intended form, `|| echo ""`, appears two
-      # lines below in both files.) Re-introducing that `|| ""` makes this step
-      # exit 1, which is how you can confirm the job catches real defects.
+      # error-severity finding. (The intended form, `|| echo ""`, appears on
+      # that same line in both files today.) Re-introducing that `|| ""` makes
+      # this step exit 1, which is how you can confirm the job catches real
+      # defects.
       #
       # -x plus --source-path=SCRIPTDIR lets shellcheck follow `source` targets
       # relative to each script's own directory, which honours the existing
@@ -216,12 +254,19 @@ jobs:
             if ! shellcheck -x --source-path=SCRIPTDIR "$script"; then
               failed=$((failed + 1))
             fi
-          done < <(find . -type f -name '*.sh' \
-                     -not -path './.git/*' \
-                     -not -path './vendor/*' \
-                     -not -path '*/vendor/*' \
-                     -not -path '*/node_modules/*' \
-                   | sort)
+          done < <(
+            {
+              find . -type f -name '*.sh' \
+                -not -path './.git/*' \
+                -not -path './vendor/*' \
+                -not -path '*/vendor/*' \
+                -not -path '*/node_modules/*'
+              # The stub gcloud has no extension (it stands in for a real
+              # `gcloud` on PATH, which has none either), so the *.sh find
+              # above never sees it.
+              echo './scripts/single-node-vm/tests/lib/gcloud'
+            } | sort
+          )
           echo "shellcheck: $((checked - failed))/${checked} file(s) passed"
           if [ "$checked" -eq 0 ]; then
             echo "::error::no shell scripts found -- the file discovery is broken"
@@ -231,6 +276,21 @@ jobs:
             echo "::error::shellcheck reported issues in ${failed} file(s)"
             exit 1
           fi
+
+  single-node-vm-deploy-tests:
+    name: single-node-vm deploy.sh test harness
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      # Never contacts GCP: a stub `gcloud` shadows any real one on PATH.
+      # ubuntu-latest already ships bash >= 4 and python3; see
+      # scripts/single-node-vm/tests/README.md for what this covers.
+      - name: Run scripts/single-node-vm/tests/run.sh
+        run: ./scripts/single-node-vm/tests/run.sh
 
   lint-method-not-allowed:
     name: Lint 405 Allow header (reporting only)

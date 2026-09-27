@@ -210,16 +210,15 @@ func TestBootstrapBundledResources_SeedsNewConfigsWhenExistingPresent(t *testing
 	// that added only a subset of configs.
 	now := time.Now()
 	preSeeded := &store.HarnessConfig{
-		ID:         tid("hc_pre_seeded"),
-		Slug:       "pre-seeded-config",
-		Name:       "pre-seeded-config",
-		Harness:    "generic",
-		Scope:      store.HarnessConfigScopeGlobal,
-		SourceURL:  "",
-		Visibility: "public",
-		Status:     store.HarnessConfigStatusActive,
-		Created:    now,
-		Updated:    now,
+		ID:        tid("hc_pre_seeded"),
+		Slug:      "pre-seeded-config",
+		Name:      "pre-seeded-config",
+		Harness:   "generic",
+		Scope:     store.HarnessConfigScopeGlobal,
+		SourceURL: "",
+		Status:    store.HarnessConfigStatusActive,
+		Created:   now,
+		Updated:   now,
 	}
 	if err := s.CreateHarnessConfig(ctx, preSeeded); err != nil {
 		t.Fatalf("failed to pre-seed harness config: %v", err)
@@ -327,16 +326,15 @@ func TestArchiveObsoleteBundledHarnessConfigs(t *testing.T) {
 
 	// Insert a stale bundled harness-config that no longer exists in the embed.
 	staleBuiltin := &store.HarnessConfig{
-		ID:         tid("hc_stale_builtin"),
-		Slug:       "old-removed-harness",
-		Name:       "old-removed-harness",
-		Harness:    "generic",
-		Scope:      store.HarnessConfigScopeGlobal,
-		SourceURL:  "git+https://github.com/GoogleCloudPlatform/scion/harnesses/old-removed-harness",
-		Visibility: "public",
-		Status:     store.HarnessConfigStatusActive,
-		Created:    now,
-		Updated:    now,
+		ID:        tid("hc_stale_builtin"),
+		Slug:      "old-removed-harness",
+		Name:      "old-removed-harness",
+		Harness:   "generic",
+		Scope:     store.HarnessConfigScopeGlobal,
+		SourceURL: "git+https://github.com/GoogleCloudPlatform/scion/harnesses/old-removed-harness",
+		Status:    store.HarnessConfigStatusActive,
+		Created:   now,
+		Updated:   now,
 	}
 	if err := s.CreateHarnessConfig(ctx, staleBuiltin); err != nil {
 		t.Fatalf("failed to create stale builtin config: %v", err)
@@ -344,16 +342,15 @@ func TestArchiveObsoleteBundledHarnessConfigs(t *testing.T) {
 
 	// Insert a stale config with empty source_url (old format).
 	staleEmpty := &store.HarnessConfig{
-		ID:         tid("hc_stale_empty"),
-		Slug:       "old-empty-source",
-		Name:       "old-empty-source",
-		Harness:    "generic",
-		Scope:      store.HarnessConfigScopeGlobal,
-		SourceURL:  "",
-		Visibility: "public",
-		Status:     store.HarnessConfigStatusActive,
-		Created:    now,
-		Updated:    now,
+		ID:        tid("hc_stale_empty"),
+		Slug:      "old-empty-source",
+		Name:      "old-empty-source",
+		Harness:   "generic",
+		Scope:     store.HarnessConfigScopeGlobal,
+		SourceURL: "",
+		Status:    store.HarnessConfigStatusActive,
+		Created:   now,
+		Updated:   now,
 	}
 	if err := s.CreateHarnessConfig(ctx, staleEmpty); err != nil {
 		t.Fatalf("failed to create stale empty-source config: %v", err)
@@ -361,16 +358,15 @@ func TestArchiveObsoleteBundledHarnessConfigs(t *testing.T) {
 
 	// Insert a user-imported config from an external source — must NOT be archived.
 	userImported := &store.HarnessConfig{
-		ID:         tid("hc_user_imported"),
-		Slug:       "user-custom-harness",
-		Name:       "user-custom-harness",
-		Harness:    "generic",
-		Scope:      store.HarnessConfigScopeGlobal,
-		SourceURL:  "git+https://github.com/example/custom-harness",
-		Visibility: "public",
-		Status:     store.HarnessConfigStatusActive,
-		Created:    now,
-		Updated:    now,
+		ID:        tid("hc_user_imported"),
+		Slug:      "user-custom-harness",
+		Name:      "user-custom-harness",
+		Harness:   "generic",
+		Scope:     store.HarnessConfigScopeGlobal,
+		SourceURL: "git+https://github.com/example/custom-harness",
+		Status:    store.HarnessConfigStatusActive,
+		Created:   now,
+		Updated:   now,
 	}
 	if err := s.CreateHarnessConfig(ctx, userImported); err != nil {
 		t.Fatalf("failed to create user-imported config: %v", err)
@@ -378,17 +374,16 @@ func TestArchiveObsoleteBundledHarnessConfigs(t *testing.T) {
 
 	// Insert a project-scoped config — must NOT be archived.
 	projectScoped := &store.HarnessConfig{
-		ID:         tid("hc_project_scoped"),
-		Slug:       "project-harness",
-		Name:       "project-harness",
-		Harness:    "generic",
-		Scope:      store.HarnessConfigScopeProject,
-		ScopeID:    tid("project_1"),
-		SourceURL:  "",
-		Visibility: "public",
-		Status:     store.HarnessConfigStatusActive,
-		Created:    now,
-		Updated:    now,
+		ID:        tid("hc_project_scoped"),
+		Slug:      "project-harness",
+		Name:      "project-harness",
+		Harness:   "generic",
+		Scope:     store.HarnessConfigScopeProject,
+		ScopeID:   tid("project_1"),
+		SourceURL: "",
+		Status:    store.HarnessConfigStatusActive,
+		Created:   now,
+		Updated:   now,
 	}
 	if err := s.CreateHarnessConfig(ctx, projectScoped); err != nil {
 		t.Fatalf("failed to create project-scoped config: %v", err)

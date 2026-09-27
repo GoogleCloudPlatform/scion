@@ -62,8 +62,6 @@ type Template struct {
 	UpdatedBy string `json:"updated_by,omitempty"`
 	// SourceURL holds the value of the "source_url" field.
 	SourceURL string `json:"source_url,omitempty"`
-	// Visibility holds the value of the "visibility" field.
-	Visibility string `json:"visibility,omitempty"`
 	// Created holds the value of the "created" field.
 	Created time.Time `json:"created,omitempty"`
 	// Updated holds the value of the "updated" field.
@@ -76,7 +74,7 @@ func (*Template) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case template.FieldName, template.FieldSlug, template.FieldDisplayName, template.FieldDescription, template.FieldHarness, template.FieldDefaultHarnessConfig, template.FieldImage, template.FieldConfig, template.FieldContentHash, template.FieldScope, template.FieldScopeID, template.FieldProjectID, template.FieldStorageURI, template.FieldStorageBucket, template.FieldStoragePath, template.FieldFiles, template.FieldBaseTemplate, template.FieldStatus, template.FieldOwnerID, template.FieldCreatedBy, template.FieldUpdatedBy, template.FieldSourceURL, template.FieldVisibility:
+		case template.FieldName, template.FieldSlug, template.FieldDisplayName, template.FieldDescription, template.FieldHarness, template.FieldDefaultHarnessConfig, template.FieldImage, template.FieldConfig, template.FieldContentHash, template.FieldScope, template.FieldScopeID, template.FieldProjectID, template.FieldStorageURI, template.FieldStorageBucket, template.FieldStoragePath, template.FieldFiles, template.FieldBaseTemplate, template.FieldStatus, template.FieldOwnerID, template.FieldCreatedBy, template.FieldUpdatedBy, template.FieldSourceURL:
 			values[i] = new(sql.NullString)
 		case template.FieldCreated, template.FieldUpdated:
 			values[i] = new(sql.NullTime)
@@ -235,12 +233,6 @@ func (_m *Template) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.SourceURL = value.String
 			}
-		case template.FieldVisibility:
-			if value, ok := values[i].(*sql.NullString); !ok {
-				return fmt.Errorf("unexpected type %T for field visibility", values[i])
-			} else if value.Valid {
-				_m.Visibility = value.String
-			}
 		case template.FieldCreated:
 			if value, ok := values[i].(*sql.NullTime); !ok {
 				return fmt.Errorf("unexpected type %T for field created", values[i])
@@ -354,9 +346,6 @@ func (_m *Template) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("source_url=")
 	builder.WriteString(_m.SourceURL)
-	builder.WriteString(", ")
-	builder.WriteString("visibility=")
-	builder.WriteString(_m.Visibility)
 	builder.WriteString(", ")
 	builder.WriteString("created=")
 	builder.WriteString(_m.Created.Format(time.ANSIC))

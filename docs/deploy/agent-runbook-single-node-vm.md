@@ -43,6 +43,11 @@ tell the user what is missing.
 | bash | `bash --version` | Version string (any version) |
 | python3 | `python3 --version` | Version string (3.6+) |
 | curl | `curl --version` | Version string (any version) |
+| jq | `jq --version` | Version string (any version) |
+
+`jq` is required for the Cloud Router/Cloud NAT reuse check (see below) --
+`deploy.sh` checks for it up front in Phase 1, before any prompts or API
+calls, and fails immediately rather than guessing if it's missing.
 
 The config file is JSON, parsed with Python's built-in `json` module — no
 extra install is required. If `python3` is not on `PATH`, or you need a
@@ -110,6 +115,7 @@ there's no need to enable them one at a time).
 | `iap.googleapis.com` | `gcloud services list --enabled --filter="name:iap.googleapis.com" --format="value(name)" --project=PROJECT_ID` |
 | `cloudbuild.googleapis.com` | `gcloud services list --enabled --filter="name:cloudbuild.googleapis.com" --format="value(name)" --project=PROJECT_ID` |
 | `artifactregistry.googleapis.com` | `gcloud services list --enabled --filter="name:artifactregistry.googleapis.com" --format="value(name)" --project=PROJECT_ID` |
+| `aiplatform.googleapis.com` | `gcloud services list --enabled --filter="name:aiplatform.googleapis.com" --format="value(name)" --project=PROJECT_ID` |
 | `iam.googleapis.com` | `gcloud services list --enabled --filter="name:iam.googleapis.com" --format="value(name)" --project=PROJECT_ID` |
 
 **Expected:** Each check returns the API name. If any is empty, enable all of them at once:
@@ -121,6 +127,7 @@ gcloud services enable \
   iap.googleapis.com \
   cloudbuild.googleapis.com \
   artifactregistry.googleapis.com \
+  aiplatform.googleapis.com \
   iam.googleapis.com \
   --project=PROJECT_ID
 ```
@@ -314,6 +321,14 @@ bash scripts/single-node-vm/deploy.sh --config /tmp/scion-deploy-config.json
 **Do not interrupt the script.** If it fails, read the error output and consult
 section 7 (Troubleshooting) before retrying.
 
+**Re-running on an existing deployment narrows the IAP SSH firewall rule.**
+`scion-hub-HUB_NAME-allow-iap-ssh` is scoped to the hub VM's network tag.
+Deployments from before this scoping existed had an unscoped rule that
+allowed IAP-range SSH to *every* VM on network `default` in the project. A
+re-run of `deploy.sh` (normally the first) narrows that rule in place to the
+hub VM only — any other VM that was relying on it for IAP SSH loses that
+access and needs its own firewall rule.
+
 ### 5.3 Capture outputs
 
 When the script completes successfully, it prints a summary block. Capture these
@@ -389,6 +404,94 @@ gcloud compute ssh scion-hub-HUB_NAME \
   --command='sudo journalctl -u scion-hub.service --no-pager -n 50'
 ```
 
+### 6.3a Hub-scoped agent env vars
+
+Right after the Phase 3 health check, `deploy.sh` writes two hub-scoped env
+vars into the hub database (`/home/scion/.scion/hub.db`) with `sqlite3`, run
+as the `scion` user. Both use injection mode `always`, so every agent gets
+them. Agents need them for Vertex AI inference:
+
+| Key | Value |
+|-----|-------|
+| `GOOGLE_CLOUD_PROJECT` | `PROJECT_ID` |
+| `GOOGLE_CLOUD_LOCATION` | `global` (intentional: the global Vertex AI endpoint) |
+
+The rows are scoped to the hub instance ID, which is the `hub_id` field in
+`/healthz`. They appear in the admin UI and under
+`GET /api/v1/env?scope=hub`. The deploy only seeds the rows when they are
+absent. Edits made in the admin UI are kept across redeploys, and a deleted row
+is created again on the next deploy.
+Verify:
+
+```bash
+gcloud compute ssh scion-hub-HUB_NAME \
+  --zone=ZONE --project=PROJECT_ID \
+  --command="sudo -u scion sqlite3 /home/scion/.scion/hub.db \"SELECT key, value, scope, scope_id, injection_mode FROM env_vars WHERE scope='hub' AND key LIKE 'GOOGLE_CLOUD_%'\""
+```
+
+**Expected:** Two rows, each with `scope` = `hub`, `scope_id` equal to the
+`/healthz` `hub_id`, and `injection_mode` = `always`. The values are the ones
+above unless an admin has edited them.
+
+**If they are missing:** A warning in the deploy output includes the exact
+command to run by hand. This step never fails the deploy.
+
+### 6.3b Agent GCP identity default (passthrough)
+
+Both `settings.yaml` heredocs `deploy.sh` writes (the Phase 3 dev-auth one and
+the Phase 5 proxy/IAP one) set the top-level key
+`default_gcp_identity_mode: passthrough`. Combined with the VM service
+account's `roles/aiplatform.user` grant (§6.3a's prerequisite, added when the
+VM is created) and the `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION` hub
+env vars from §6.3a, this means **agents created interactively, via the API,
+or dispatched by a schedule all default to inheriting the VM's service
+account and can call Vertex AI with no manual credential setup.**
+
+`passthrough` is only honoured on the hub's own embedded (co-located) broker
+— which a single-node VM always is — so this is safe by construction; an
+agent dispatched to any other broker still gets `block`.
+
+**Scheduled dispatches consult the hub default too.** Agents started by a
+scheduled event follow the same fallback ladder as interactive/API creates:
+an explicit project-level default GCP identity mode still wins, but a
+project with no project-level mode set inherits this hub default exactly as
+an interactively created agent would (GoogleCloudPlatform/scion#1927). No
+extra per-project configuration is needed for scheduled agents to get Vertex
+access via this passthrough default.
+
+Verify:
+
+```bash
+gcloud compute ssh scion-hub-HUB_NAME \
+  --zone=ZONE --project=PROJECT_ID \
+  --command='cat /home/scion/.scion/settings.yaml | grep default_gcp_identity_mode'
+```
+
+**Expected:** `default_gcp_identity_mode: passthrough`.
+
+**To change it:** Admin > Server Config > Agent Defaults > General in the web
+UI, or `PUT /api/v1/admin/server-config` with
+`{"default_gcp_identity_mode": "block"}` (or `"assign"`, which also requires
+`default_gcp_identity_service_account_id`). The change applies to new agents
+immediately, no hub restart needed.
+
+**Redeploys revert manual changes.** `deploy.sh` writes the full
+`settings.yaml` from its template on every deploy (Phase 3, and again in
+Phase 5), the same way it does for every other key in that file — it does
+not merge with the existing file. An admin edit to
+`default_gcp_identity_mode` (or any other key not sourced from the deploy
+config) is persisted by being written back into this same file, so it has no
+separate store to survive a redeploy: running `deploy.sh` against an
+existing VM resets the mode back to `passthrough`. Re-apply the change
+afterward if you need something other than the default.
+
+**A startup `WARN ... unrecognized keys ...` log line is expected and
+harmless.** A legacy-format settings loader logs a warning listing top-level
+keys it doesn't recognize, including `default_gcp_identity_mode` alongside
+other keys that are obviously honoured (`server`, `schema_version`). This is
+pre-existing noise unrelated to this setting — the key is still read and
+applied; see the verification command above.
+
 ### 6.4 Container images (if built locally)
 
 If `container_images.source` was `build`, verify images exist on the VM:
@@ -454,12 +557,65 @@ gcloud iap web add-iam-policy-binding \
 | IAP proxy deploy fails | IAP API not enabled or missing OAuth consent screen | Run `gcloud services enable iap.googleapis.com --project=PROJECT_ID`. Check the OAuth consent screen is configured in GCP Console > APIs & Services > OAuth consent screen. |
 | Hub health check fails after deploy | Binary crashed or settings invalid | SSH to VM, check logs: `gcloud compute ssh scion-hub-HUB_NAME --zone=ZONE --project=PROJECT_ID --command='sudo journalctl -u scion-hub.service --no-pager -n 50'` |
 | Hub health check fails after restart | Settings or IAP audience mismatch | SSH to VM, verify settings: `gcloud compute ssh scion-hub-HUB_NAME --zone=ZONE --project=PROJECT_ID --command='cat /home/scion/.scion/settings.yaml'`. Confirm `auth.mode` is `proxy` and the `audience` string is correct. |
+| Agents lack `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION` | The hub env var write after the Phase 3 health check failed (a warning in the deploy output) | Run the manual `sqlite3` command from that warning, or set both as hub-scoped env vars (injection mode `always`) in the admin UI. See §6.3a. |
+| Admin's `default_gcp_identity_mode` change reverted to `passthrough` after a redeploy | `deploy.sh` rewrites the whole `settings.yaml`, not just the fields it manages | Expected — see §6.3b. Re-apply the change via the admin UI or API after redeploying. |
 | `iam.serviceAccounts.create` denied | User lacks IAM admin role | User needs `roles/iam.serviceAccountAdmin` on the project |
 | Image build fails with `muse-code` error | Build script tried to build all images including unsupported ones | Verify the deploy script builds only `core-base`, `scion-base`, and `scion-antigravity`. If running manually, use `--target` to select individual images. |
-| SSH connection fails to VM | IAP tunnel access not granted or firewall rule missing | Verify IAP tunnel role: `gcloud projects get-iam-policy PROJECT_ID --flatten="bindings[].members" --filter="bindings.role:roles/iap.tunnelResourceAccessor" --format="value(bindings.members)"`. Verify firewall rule exists: `gcloud compute firewall-rules describe scion-hub-HUB_NAME-allow-iap-ssh --project=PROJECT_ID`. |
+| SSH connection fails to VM | IAP tunnel access not granted, firewall rule missing, or VM missing the network tag the rule targets | Verify IAP tunnel role: `gcloud projects get-iam-policy PROJECT_ID --flatten="bindings[].members" --filter="bindings.role:roles/iap.tunnelResourceAccessor" --format="value(bindings.members)"`. Verify firewall rule exists and its target tags: `gcloud compute firewall-rules describe scion-hub-HUB_NAME-allow-iap-ssh --project=PROJECT_ID --format="value(targetTags)"`. Verify the VM carries a matching tag: `gcloud compute instances describe scion-hub-HUB_NAME --zone=ZONE --project=PROJECT_ID --format="value(tags.items)"`. |
 | `403 Forbidden` accessing the hub URL | User missing IAP access binding | Grant access: `gcloud iap web add-iam-policy-binding --resource-type=cloud-run --service=scion-hub-HUB_NAME-iap-proxy --region=REGION --project=PROJECT_ID --member=user:USER_EMAIL --role=roles/iap.httpsResourceAccessor` |
-| VM has no outbound internet | Cloud NAT not created or misconfigured | Verify router and NAT exist: `gcloud compute routers nats describe scion-hub-HUB_NAME-nat --router=scion-hub-HUB_NAME-router --region=REGION --project=PROJECT_ID` |
+| VM has no outbound internet | Cloud NAT not created or misconfigured | Verify router and NAT exist: `gcloud compute routers nats describe scion-hub-HUB_NAME-nat --router=scion-hub-HUB_NAME-router --region=REGION --project=PROJECT_ID`. If deploy.sh logged "Reusing Cloud NAT" instead, check the *reused* router/NAT it named instead — see "Cloud NAT reuse" below. |
+| `deploy.sh` fails immediately in Phase 1 with "jq is required" | `jq` is not installed | Install `jq` and re-run. Checked up front, before any prompts or API calls. |
+| `deploy.sh` fails at "Checking for an existing Cloud NAT..." before creating any resources | The Cloud Router/NAT config in the region could not be listed or parsed | Check the deployer has `roles/compute.viewer` (or broader) on the project — the actual `gcloud`/`jq` error prints just above this message. This check intentionally fails closed rather than guessing — see "Cloud NAT reuse" below. |
 | IAP auth fails outright, or shows an unexpected consent screen | Deployer account is in a different GCP organization than the target project, or the project is not in a GCP organization at all | See "Cross-org IAP" below. `deploy.sh` prints a warning during Phase 2 for both cases it can detect (no-org is a certain warning; cross-domain is a heuristic) — either check is skipped silently if ancestry/org metadata can't be read, so trust the symptom over the absence of the warning. |
+
+### Cloud NAT reuse
+
+A Cloud NAT gateway in an `ALL_SUBNETWORKS_*` mode (all subnets' full IP
+ranges, or all subnets' primary ranges) cannot coexist with **any** other NAT
+gateway on the same network+region — not just another all-subnets one. GCP
+rejects creating one while another gateway already exists there, regardless
+of what that other gateway covers. `deploy.sh` checks for this before
+creating the service account, IAM bindings, or its own router/NAT (Phase 2,
+after API enablement and before the service account is created), and
+handles it one of two ways:
+
+- **Some other router's NAT already covers our VM's subnet** (`default`) —
+  either `ALL_SUBNETWORKS_*` mode, or a `LIST_OF_SUBNETWORKS` entry that
+  explicitly forwards `default`'s primary range. `deploy.sh` reuses it
+  instead of creating a duplicate, and logs which router and NAT provide
+  egress:
+
+  ```
+  ==> Found an existing Cloud NAT that already covers this network/region; reusing it instead of creating our own.
+    Reusing Cloud Router: some-other-router
+    Reusing Cloud NAT:    some-other-nat
+  ```
+
+- **Some other router has a NAT that does *not* cover `default`** — an
+  all-subnets NAT still can't be created alongside it, so `deploy.sh`
+  creates its own NAT scoped to just subnet `default`
+  (`--nat-custom-subnet-ip-ranges=default`), which coexists with the
+  existing gateway:
+
+  ```
+  ==> A Cloud NAT gateway already exists on this network/region but doesn't provide internet egress for subnet 'default'; scoping our own NAT to that subnet only (an all-subnets NAT can't coexist with another gateway).
+  ```
+
+A Private NAT (used for NCC/hybrid connectivity, not internet egress) is
+never reused, even if it technically covers `default` -- it can't provide
+the VM's internet egress. It still counts as "some other router has a NAT"
+above, though: GCP's exclusivity rule for an all-subnets NAT isn't
+qualified by NAT type, so `deploy.sh` falls back to the scoped create in
+this case too, rather than attempting (and having GCP reject) an
+all-subnets NAT next to it.
+
+A reused NAT/router is owned by whatever created it, not by this deploy: if
+that owner later deletes or reconfigures it, the hub VM can silently lose
+egress with no warning from `deploy.sh`. `--delete` never deletes a reused
+NAT/router — it only ever targets the `scion-hub-HUB_NAME-router` /
+`scion-hub-HUB_NAME-nat` names deploy.sh itself would have created, so a
+reused resource owned by something else is left alone (its delete call
+simply reports "not found").
 
 ### Cross-org IAP: custom OAuth client required
 
@@ -609,7 +765,9 @@ bash scripts/single-node-vm/deploy.sh --delete
 | Cloud NAT | `scion-hub-HUB_NAME-nat` |
 | Cloud Router | `scion-hub-HUB_NAME-router` |
 | Service account | `scion-hub-HUB_NAME@PROJECT_ID.iam.gserviceaccount.com` |
-| IAP SSH firewall rule | `scion-hub-HUB_NAME-allow-iap-ssh` |
+| Cloud Run proxy service account | `scion-hub-HUB_NAME-proxy@PROJECT_ID.iam.gserviceaccount.com` (name truncated and hashed for long HUB_NAME values) |
+| IAP SSH firewall rule | `scion-hub-HUB_NAME-allow-iap-ssh` (scoped via `--target-tags` to instances tagged `scion-hub-HUB_NAME`; deleting the VM removes the tag along with it) |
+| Proxy-to-VM firewall rule | `scion-hub-HUB_NAME-allow-proxy` (tcp:8080 only, scoped to the same `scion-hub-HUB_NAME` tag) |
 
 ### What is intentionally NOT deleted
 

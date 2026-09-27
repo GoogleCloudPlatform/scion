@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -100,9 +101,29 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			}
 		}
 
+		// A suspended agent's reservation was released when it was suspended;
+		// re-reserve (with the cap check) before dispatch, same as create and
+		// the HTTP start/resume paths (ptone/scion#1963).
+		reserved, err := s.checkAndReserveBrokerQuota(ctx, agent)
+		if err != nil {
+			if errors.Is(err, store.ErrQuotaExceeded) {
+				return nil, &AgentDMError{
+					Code:       ErrCodeQuotaExceeded,
+					Message:    quotaExceededMessage(store.LimitMaxAgentsPerBroker),
+					HTTPStatus: http.StatusTooManyRequests,
+				}
+			}
+			return nil, &AgentDMError{
+				Code:       ErrCodeRuntimeError,
+				Message:    "quota check failed: " + err.Error(),
+				HTTPStatus: http.StatusInternalServerError,
+			}
+		}
+
 		// Resume the suspended agent. continue=true tells the harness to
 		// restore its prior session rather than starting fresh.
 		if err := dispatcher.DispatchAgentStart(ctx, agent, "", true); err != nil {
+			s.rollbackBrokerQuota(ctx, agent, reserved)
 			return nil, &AgentDMError{
 				Code:       ErrCodeRuntimeError,
 				Message:    "Failed to wake agent: " + err.Error(),
@@ -126,12 +147,25 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 
 		// Wait for the agent to report its first activity (readiness signal).
 		if err := s.waitForAgentReady(ctx, agent.ID, 30*time.Second); err != nil {
-			// On readiness failure, mark the agent as errored for visibility.
+			// A readiness timeout does not mean the container has exited —
+			// the harness may just be slow, or hung, while still occupying
+			// the broker slot. Leave Phase unset (a no-op field on
+			// UpdateAgentStatus) rather than transitioning to
+			// state.PhaseError: error is an uncounted phase for
+			// max_agents_per_broker (isBrokerQuotaCountedPhase), so writing
+			// it here would let both this write's own bookkeeping and the
+			// periodic ReconcileStaleBrokerQuotaReservations sweep release
+			// the reservation while the container may still be running
+			// (ptone/scion#1984). Staying in "starting" keeps the slot
+			// counted; the real release happens once the runtime broker
+			// reports a confirmed exit over heartbeat, which drives
+			// reconcileBrokerQuotaOnPhaseChange the normal way. The Message
+			// field is still recorded for visibility.
+			//
 			// Use a detached context so this cleanup write succeeds even if
 			// the parent context was cancelled (e.g. client disconnect).
 			cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 			_ = s.store.UpdateAgentStatus(cleanupCtx, agent.ID, store.AgentStatusUpdate{
-				Phase:   string(state.PhaseError),
 				Message: "Failed to become ready after wake",
 			})
 			cleanupCancel()

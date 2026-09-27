@@ -16,7 +16,6 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -42,36 +41,6 @@ type ProjectCacheRefreshResponse struct {
 	CachedAt time.Time `json:"cachedAt"`
 }
 
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (r ProjectCacheRefreshResponse) MarshalJSON() ([]byte, error) {
-	type Alias ProjectCacheRefreshResponse
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId"`
-	}{
-		Alias:   Alias(r),
-		GroveID: r.ProjectID,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (r *ProjectCacheRefreshResponse) UnmarshalJSON(data []byte) error {
-	type Alias ProjectCacheRefreshResponse
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(r),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if r.ProjectID == "" && aux.GroveID != "" {
-		r.ProjectID = aux.GroveID
-	}
-	return nil
-}
-
 // ProjectCacheStatusResponse is the response for the project cache status endpoint.
 type ProjectCacheStatusResponse struct {
 	// ProjectID is the project identifier.
@@ -86,36 +55,6 @@ type ProjectCacheStatusResponse struct {
 	TotalBytes int64 `json:"totalBytes"`
 	// LastRefresh is when the cache was last refreshed.
 	LastRefresh *time.Time `json:"lastRefresh,omitempty"`
-}
-
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (r ProjectCacheStatusResponse) MarshalJSON() ([]byte, error) {
-	type Alias ProjectCacheStatusResponse
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId"`
-	}{
-		Alias:   Alias(r),
-		GroveID: r.ProjectID,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (r *ProjectCacheStatusResponse) UnmarshalJSON(data []byte) error {
-	type Alias ProjectCacheStatusResponse
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(r),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if r.ProjectID == "" && aux.GroveID != "" {
-		r.ProjectID = aux.GroveID
-	}
-	return nil
 }
 
 // RuntimeBrokerProjectUploadRequest is sent to a Runtime Broker to upload a project's
@@ -152,19 +91,13 @@ type RuntimeBrokerProjectUploadResponse struct {
 // 3. Tunnels a request to the broker to upload the workspace to GCS
 // 4. Downloads the workspace from GCS to the hub's local cache
 // 5. Updates sync state
-func (s *Server) handleProjectCacheRefresh(w http.ResponseWriter, r *http.Request, projectID string) {
+func (s *Server) handleProjectCacheRefresh(w http.ResponseWriter, r *http.Request, project *store.Project) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
 		return
 	}
 
 	ctx := r.Context()
-
-	project, err := s.store.GetProject(ctx, projectID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
 
 	// Hub-managed projects don't need cache refresh — they are the source of truth
 	if project.GitRemote == "" && !s.isLinkedProject(ctx, project) {
@@ -198,19 +131,13 @@ func (s *Server) handleProjectCacheRefresh(w http.ResponseWriter, r *http.Reques
 
 // handleProjectCacheStatus returns the cache status for a linked project.
 // GET /api/v1/projects/{projectId}/workspace/cache/status
-func (s *Server) handleProjectCacheStatus(w http.ResponseWriter, r *http.Request, projectID string) {
+func (s *Server) handleProjectCacheStatus(w http.ResponseWriter, r *http.Request, project *store.Project) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
 		return
 	}
 
 	ctx := r.Context()
-
-	project, err := s.store.GetProject(ctx, projectID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
 
 	// Check if a cache exists on disk
 	cachePath, err := s.hubManagedProjectPath(project.Slug)
@@ -226,12 +153,12 @@ func (s *Server) handleProjectCacheStatus(w http.ResponseWriter, r *http.Request
 
 	// Get sync state for the cache
 	resp := ProjectCacheStatusResponse{
-		ProjectID: projectID,
+		ProjectID: project.ID,
 		Cached:    cached,
 	}
 
 	// Look up the latest sync state (from any broker)
-	states, err := s.store.ListProjectSyncStates(ctx, projectID)
+	states, err := s.store.ListProjectSyncStates(ctx, project.ID)
 	if err == nil {
 		for _, st := range states {
 			if st.BrokerID != "" {
@@ -250,19 +177,13 @@ func (s *Server) handleProjectCacheStatus(w http.ResponseWriter, r *http.Request
 // handleProjectCacheNotify handles a notification from a broker that it has pushed
 // workspace updates to GCS and the hub cache should be refreshed.
 // POST /api/v1/projects/{projectId}/workspace/cache/notify
-func (s *Server) handleProjectCacheNotify(w http.ResponseWriter, r *http.Request, projectID string) {
+func (s *Server) handleProjectCacheNotify(w http.ResponseWriter, r *http.Request, project *store.Project) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
 		return
 	}
 
 	ctx := r.Context()
-
-	project, err := s.store.GetProject(ctx, projectID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
 
 	// Check storage is configured
 	stor := s.GetStorage()
@@ -279,12 +200,12 @@ func (s *Server) handleProjectCacheNotify(w http.ResponseWriter, r *http.Request
 	}
 
 	if err := os.MkdirAll(cachePath, 0755); err != nil {
-		s.workspaceLog.Error("failed to create cache directory", "project_id", projectID, "error", err)
+		s.workspaceLog.Error("failed to create cache directory", "project_id", project.ID, "error", err)
 		InternalError(w)
 		return
 	}
 
-	storagePath := storage.ProjectWorkspaceStoragePath(s.HubID(), projectID)
+	storagePath := storage.ProjectWorkspaceStoragePath(s.HubID(), project.ID)
 	if err := gcp.SyncFromGCS(ctx, stor.Bucket(), storagePath+"/files", cachePath); err != nil {
 		RuntimeError(w, "Failed to download workspace from GCS: "+err.Error())
 		return
@@ -306,21 +227,21 @@ func (s *Server) handleProjectCacheNotify(w http.ResponseWriter, r *http.Request
 	}
 
 	state := &store.ProjectSyncState{
-		ProjectID:    projectID,
+		ProjectID:    project.ID,
 		BrokerID:     brokerID,
 		LastSyncTime: &now,
 		FileCount:    fileCount,
 		TotalBytes:   totalBytes,
 	}
 	if err := s.store.UpsertProjectSyncState(ctx, state); err != nil {
-		s.workspaceLog.Warn("failed to update project sync state after cache notify", "project_id", projectID, "error", err)
+		s.workspaceLog.Warn("failed to update project sync state after cache notify", "project_id", project.ID, "error", err)
 	}
 
 	s.workspaceLog.Info("project cache refreshed via notify",
-		"project_id", projectID, "files", fileCount, "bytes", totalBytes)
+		"project_id", project.ID, "files", fileCount, "bytes", totalBytes)
 
 	writeJSON(w, http.StatusOK, ProjectCacheRefreshResponse{
-		ProjectID:  projectID,
+		ProjectID:  project.ID,
 		BrokerID:   brokerID,
 		FileCount:  fileCount,
 		TotalBytes: totalBytes,

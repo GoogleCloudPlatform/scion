@@ -482,7 +482,7 @@ func (b *TelegramBrokerV2) importV1ChatRoutes(ctx context.Context, routesJSON st
 			continue
 		}
 
-		projectID, agentSlug := parseTopicComponents(topic)
+		projectID, agentSlug := parseTopicComponents(normalizeV1RouteTopic(topic))
 		// Attempt to resolve the project slug from the hub. Falls back to
 		// the project ID if the hub is unavailable during migration.
 		projectSlug := projectID
@@ -533,7 +533,6 @@ func (b *TelegramBrokerV2) importV1UserMappings(ctx context.Context, mappingsJSO
 }
 
 // parseTopicComponents extracts projectID and agentSlug from a broker topic.
-// Legacy scion.grove topics are accepted by projectcompat at this adapter boundary.
 func parseTopicComponents(topic string) (projectID, agentSlug string) {
 	parsed, err := projectcompat.ParseTopic(topic)
 	if err == nil {
@@ -544,7 +543,7 @@ func parseTopicComponents(topic string) (projectID, agentSlug string) {
 	} else {
 		parts := strings.Split(topic, ".")
 		for i, part := range parts {
-			if (part == "grove" || part == "project") && i+1 < len(parts) {
+			if part == "project" && i+1 < len(parts) {
 				projectID = parts[i+1]
 			}
 			if part == "agent" && i+1 < len(parts) {
@@ -556,6 +555,21 @@ func parseTopicComponents(topic string) (projectID, agentSlug string) {
 		projectID = topic
 	}
 	return projectID, agentSlug
+}
+
+// v1LegacyRouteTopicPrefix is the topic prefix used by v1 chat-route exports.
+// v1 exports are an immutable snapshot format, so this is the only place
+// that recognizes it: normalizeV1RouteTopic rewrites it to the canonical
+// prefix before the route is parsed.
+const v1LegacyRouteTopicPrefix = "scion.grove."
+
+// normalizeV1RouteTopic rewrites a v1 chat-route export's topic string to use
+// the canonical topic prefix, if it still uses the frozen v1 prefix.
+func normalizeV1RouteTopic(topic string) string {
+	if rest, ok := strings.CutPrefix(topic, v1LegacyRouteTopicPrefix); ok {
+		return projectcompat.CanonicalTopicPrefix + "." + rest
+	}
+	return topic
 }
 
 // --- Publish (outbound: Hub → Telegram) ---
@@ -784,7 +798,7 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 		if strings.HasPrefix(msg.Recipient, "user:") {
 			recipientUsername = b.resolveRecipientUsername(ctx, store, msg.Recipient)
 		}
-		// Fallback: extract user ID from topic (scion.grove.<id>.user.<userid>.messages)
+		// Fallback: extract user ID from topic (scion.project.<id>.user.<userid>.messages)
 		if recipientUsername == "" {
 			if userID := extractUserIDFromTopic(topic); userID != "" {
 				recipientUsername = b.resolveRecipientUsername(ctx, store, "user:"+userID)
@@ -2872,7 +2886,7 @@ func FormatMessageV2(msg *messages.StructuredMessage, agentSlug string, recipien
 }
 
 // extractUserIDFromTopic extracts the user ID from a topic of the form
-// scion.grove.<id>.user.<userid>.messages or scion.project.<id>.user.<userid>.messages.
+// scion.project.<id>.user.<userid>.messages.
 func extractUserIDFromTopic(topic string) string {
 	parts := strings.Split(topic, ".")
 	for i, p := range parts {

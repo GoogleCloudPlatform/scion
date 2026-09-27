@@ -72,6 +72,7 @@ func runBootDataMigrations(ctx context.Context, s store.Store) {
 		runMigrationSafe(ctx, s, "Message backfill", runMessageBackfill)                    // §4.5
 		runMigrationSafe(ctx, s, "Group ref repair", runGroupRefRepair)                     // DEF-166
 		runMigrationSafe(ctx, s, "Workspace mode label backfill", runWorkspaceModeBackfill) // pre-b5e32b6c projects
+		runMigrationSafe(ctx, s, "Broker ownership backfill", runBrokerOwnershipBackfill)   // legacy ownerless runtime brokers
 	})
 
 	// Split the residual report into reachable/unreachable (M6, §4.6).

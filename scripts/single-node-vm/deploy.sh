@@ -106,6 +106,44 @@ readonly HEALTH_CHECK_RETRY_SECS=5
 readonly BUILD_POLL_MAX_ATTEMPTS=180
 readonly BUILD_POLL_INTERVAL_SECS=15
 readonly IAP_ENFORCEMENT_WAIT_SECS=60
+# The default VPC network's creation (triggered by enabling
+# compute.googleapis.com in an ordinary org) is asynchronous but usually
+# visible within a few seconds; ~60s total gives real propagation room to
+# clear (including a brand-new project's compute.googleapis.com itself
+# still settling right after being enabled -- see the SERVICE_DISABLED
+# retry below) without making a genuinely-missing-network failure (the
+# hardened-org case) too slow to report. The interval is overridable via
+# SCION_TEST_NETWORK_RETRY_SECS so the test suite doesn't have to sleep
+# through the real budget; unset (the normal case) it's just 5.
+readonly NETWORK_CHECK_MAX_ATTEMPTS=12
+readonly NETWORK_CHECK_DEFAULT_RETRY_SECS=5
+# Validated, not trusted verbatim: this is the one place a non-numeric,
+# negative, or implausibly large override (a typo, a stray shell fragment
+# in the environment, or a fat-fingered value) would otherwise reach
+# `sleep` directly -- a non-numeric one kills the deploy with a bare
+# "invalid time interval" under set -e, on the retry path only, which
+# would be a confusing way to fail; a huge one is effectively a hang on
+# that same path. Capped at 60s (already well beyond what any legitimate
+# test needs) rather than left unbounded. The integer-part length check
+# runs before any arithmetic, so an arbitrarily long digit string can't
+# reach bash's 64-bit `-gt` and silently wrap around into something
+# small enough to be accepted; the `10#` prefix on that comparison forces
+# base 10, so a leading zero (e.g. "08") isn't misread as octal, which
+# `-gt` would otherwise reject with a bash error of its own.
+if [[ -n "${SCION_TEST_NETWORK_RETRY_SECS:-}" ]]; then
+  if [[ ! "${SCION_TEST_NETWORK_RETRY_SECS}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    warn "SCION_TEST_NETWORK_RETRY_SECS='${SCION_TEST_NETWORK_RETRY_SECS}' is not a valid non-negative number; using the default."
+    SCION_TEST_NETWORK_RETRY_SECS=""
+  else
+    NETWORK_RETRY_SECS_INT_PART="${SCION_TEST_NETWORK_RETRY_SECS%%.*}"
+    if [[ ${#NETWORK_RETRY_SECS_INT_PART} -gt 2 || "$((10#$NETWORK_RETRY_SECS_INT_PART))" -gt 60 ]]; then
+      warn "SCION_TEST_NETWORK_RETRY_SECS='${SCION_TEST_NETWORK_RETRY_SECS}' is out of range; using the default."
+      SCION_TEST_NETWORK_RETRY_SECS=""
+    fi
+    unset NETWORK_RETRY_SECS_INT_PART
+  fi
+fi
+readonly NETWORK_CHECK_RETRY_SECS="${SCION_TEST_NETWORK_RETRY_SECS:-$NETWORK_CHECK_DEFAULT_RETRY_SECS}"
 
 # ---------------------------------------------------------------------------
 # Parse flags
@@ -186,6 +224,36 @@ config_prompt() {
   fi
 }
 
+# proxy_sa_name HUB_NAME — derives the Cloud Run proxy's service-account
+# ID from the hub name. A single helper shared by both the create path
+# (Phase 2) and teardown, so they can never compute two different names
+# for the same hub -- the two paths used to duplicate this logic, and a
+# mutation that only broke one of the two copies passed the full test
+# suite (see the fix for that: a test exercising create-then-delete with
+# a long, truncation-triggering hub name).
+#
+# Truncates "scion-hub-${HUB_NAME}-proxy" to the 30-char GCP
+# service-account ID limit when needed. A plain positional truncation
+# (keep the first N characters and drop the rest) would map any two hub
+# names sharing a long-enough prefix to the *same* truncated name --
+# e.g. "engineering-team-a" and "engineering-team-b" both under a naive
+# 14-char cut -- so `--delete` on one would silently delete the SA the
+# other hub's Cloud Run proxy is still running as. Appending a short hash
+# of the *full* hub name (not just the truncated prefix) keeps two such
+# names distinct.
+proxy_sa_name() {
+  local hub_name="$1" name="scion-hub-${1}-proxy"
+  if [[ ${#name} -le 30 ]]; then
+    printf '%s' "$name"
+    return
+  fi
+  local hash
+  hash="$(printf '%s' "$hub_name" | openssl dgst -sha256 -r | cut -d' ' -f1 | cut -c1-4)"
+  name="scion-hub-${hub_name:0:9}-${hash}-proxy"
+  warn "Proxy service-account name truncated to 30 chars: ${name}"
+  printf '%s' "$name"
+}
+
 # Validate config file exists if specified
 if [[ -n "$CONFIG_FILE" ]]; then
   if [[ ! -f "$CONFIG_FILE" ]]; then
@@ -233,9 +301,15 @@ if [[ "$DELETE_MODE" == "true" ]]; then
 
   INSTANCE_NAME="scion-hub-${HUB_NAME}"
   PROXY_SERVICE="${INSTANCE_NAME}-iap-proxy"
+  # Deliberately our own fixed names only -- never a router/NAT discovered by
+  # the reuse check in the create path. If deploy.sh reused someone else's
+  # NAT, our own scion-hub-${HUB_NAME}-router/-nat were never created, so the
+  # deletes below simply no-op ("not found or already deleted") and the
+  # reused resource is left untouched.
   ROUTER_NAME="scion-hub-${HUB_NAME}-router"
   NAT_NAME="scion-hub-${HUB_NAME}-nat"
   FW_RULE_NAME="scion-hub-${HUB_NAME}-allow-iap-ssh"
+  FW_8080_RULE_NAME="scion-hub-${HUB_NAME}-allow-proxy"
 
   # Discover the actual zone of the instance (if it still exists)
   ZONE="$(gcloud compute instances list \
@@ -256,6 +330,10 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   fi
   SA_NAME="scion-hub-${HUB_NAME}"
   SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+  # proxy_sa_name is shared with the create path (Phase 2) precisely so
+  # this can never drift from what create actually named the SA.
+  PROXY_SA_NAME="$(proxy_sa_name "$HUB_NAME")"
+  PROXY_SA_EMAIL="${PROXY_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 
   echo ""
   echo "The following resources will be deleted:"
@@ -264,7 +342,9 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   echo "  Cloud NAT:         ${NAT_NAME} (router: ${ROUTER_NAME})"
   echo "  Cloud Router:      ${ROUTER_NAME} (region: ${REGION})"
   echo "  Service account:   ${SA_EMAIL}"
+  echo "  Proxy SA:          ${PROXY_SA_EMAIL}"
   echo "  Firewall rule:     ${FW_RULE_NAME}"
+  echo "  Firewall rule:     ${FW_8080_RULE_NAME}"
   echo ""
   if [[ -n "$CONFIG_FILE" && ! -t 0 ]]; then
     info "Non-interactive mode: proceeding with teardown."
@@ -317,6 +397,14 @@ if [[ "$DELETE_MODE" == "true" ]]; then
     warn "Service account ${SA_EMAIL} not found or already deleted."
   fi
 
+  info "Deleting proxy service account..."
+  if gcloud iam service-accounts delete "${PROXY_SA_EMAIL}" \
+      --project="${PROJECT_ID}" --quiet 2>/dev/null; then
+    echo "  Deleted: ${PROXY_SA_EMAIL}"
+  else
+    warn "Proxy service account ${PROXY_SA_EMAIL} not found or already deleted."
+  fi
+
   # Note: We intentionally do NOT revoke roles/iap.tunnelResourceAccessor from
   # the deployer. This role is bound to the operator (not a service account) and
   # may be used for IAP SSH access to other VMs in the project. Revoking it here
@@ -331,6 +419,14 @@ if [[ "$DELETE_MODE" == "true" ]]; then
     warn "Firewall rule ${FW_RULE_NAME} not found or already deleted."
   fi
 
+  info "Deleting proxy-to-VM firewall rule..."
+  if gcloud compute firewall-rules delete "${FW_8080_RULE_NAME}" \
+      --project="${PROJECT_ID}" --quiet 2>/dev/null; then
+    echo "  Deleted: ${FW_8080_RULE_NAME}"
+  else
+    warn "Firewall rule ${FW_8080_RULE_NAME} not found or already deleted."
+  fi
+
   echo ""
   echo -e "${BOLD}=== Teardown Complete ===${RESET}"
   echo ""
@@ -339,7 +435,9 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   echo "  Deleted Cloud NAT:         ${NAT_NAME}"
   echo "  Deleted Cloud Router:      ${ROUTER_NAME}"
   echo "  Deleted service account:   ${SA_EMAIL}"
+  echo "  Deleted proxy SA:          ${PROXY_SA_EMAIL}"
   echo "  Deleted firewall rule:     ${FW_RULE_NAME}"
+  echo "  Deleted firewall rule:     ${FW_8080_RULE_NAME}"
   exit 0
 fi
 
@@ -347,6 +445,16 @@ fi
 # Phase 1: Prerequisites
 # ===================================================================
 section "Phase 1: Prerequisites"
+
+# jq is required later (Phase 2) to safely detect an existing Cloud NAT
+# before creating any resources -- see the Cloud NAT reuse check below.
+# Checked here, with the other prerequisites, so a missing jq is caught
+# before any prompts, API-enable calls, or release detection run, not after
+# most of Phase 2 has already happened.
+if ! command -v jq &>/dev/null; then
+  err "jq is required (used to safely detect an existing Cloud NAT before creating resources; see docs/deploy/agent-runbook-single-node-vm.md, Cloud NAT reuse). Install jq and re-run."
+  exit 1
+fi
 
 # --- GCP project ---
 PROJECT_ID="$(config_get 'project_id' '')"
@@ -589,6 +697,7 @@ if [[ -z "$ZONE" ]]; then
   warn "Could not discover zone dynamically; defaulting to ${ZONE}"
 fi
 INSTANCE_NAME="scion-hub-${HUB_NAME}"
+HUB_TAG="scion-hub-${HUB_NAME}"
 SA_NAME="scion-hub-${HUB_NAME}"
 # GCP service-account IDs must be 6-30 chars; truncate as a safety net
 if [[ ${#SA_NAME} -gt 30 ]]; then
@@ -596,6 +705,15 @@ if [[ ${#SA_NAME} -gt 30 ]]; then
   warn "Service-account name truncated to 30 chars: ${SA_NAME}"
 fi
 SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+
+# Dedicated Cloud Run proxy service account -- deliberately never SA_EMAIL
+# (the hub VM's own SA), which holds aiplatform.user and
+# artifactregistry.writer. The proxy only reverse-proxies HTTP to the VM's
+# internal IP; it calls no GCP API and needs no project role (see Phase 2,
+# "Proxy service account"). See proxy_sa_name (defined near the top of
+# this script, shared with teardown) for how the name itself is derived.
+PROXY_SA_NAME="$(proxy_sa_name "$HUB_NAME")"
+PROXY_SA_EMAIL="${PROXY_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 
 echo ""
 echo "  Hub name:     ${HUB_NAME}"
@@ -630,11 +748,10 @@ if [[ -z "$VERSION" ]]; then
     RELEASE_JSON="$(curl -fsSL 'https://api.github.com/repos/GoogleCloudPlatform/scion/releases?per_page=1')" \
       || { err "Could not fetch releases from GitHub API."; exit 1; }
   fi
-  if command -v jq &>/dev/null; then
-    VERSION="$(echo "$RELEASE_JSON" | jq -r 'select(. != null) | if type == "array" then .[0].tag_name else .tag_name end // empty')" || true
-  else
-    VERSION="$(echo "$RELEASE_JSON" | grep '"tag_name"' | head -1 | sed -E 's/.*"tag_name":\s*"([^"]+)".*/\1/')" || true
-  fi
+  # jq is a hard prerequisite (checked in Phase 1), so no text-based fallback
+  # is needed here. Here-string, not `echo | jq` -- see the NAT_ROWS comment
+  # below for why.
+  VERSION="$(jq -r 'select(. != null) | if type == "array" then .[0].tag_name else .tag_name end // empty' <<< "$RELEASE_JSON")" || true
   if [[ -z "$VERSION" ]]; then
     err "Could not detect latest release. Use --version to specify."
     exit 1
@@ -699,7 +816,93 @@ gcloud services enable \
   iap.googleapis.com \
   cloudbuild.googleapis.com \
   artifactregistry.googleapis.com \
+  aiplatform.googleapis.com \
+  iam.googleapis.com \
   --project="${PROJECT_ID}" --quiet
+
+# --- IAP service agent identity (idempotent) ---
+# Ensures service-PROJECT_NUMBER@gcp-sa-iap.iam.gserviceaccount.com exists
+# before Phase 4 grants it roles/run.invoker on the proxy. On a project
+# where IAP has never been used before, that agent may not have been
+# provisioned yet; without this, the first-ever deploy could reach Phase 4
+# with the proxy already live but no agent to grant the role to, and the
+# explicit grant there is a hard failure (see Phase 4). A no-op if the
+# agent already exists.
+gcloud beta services identity create \
+  --service=iap.googleapis.com \
+  --project="${PROJECT_ID}" --quiet 2>/dev/null || true
+
+# --- Default VPC network must already exist ---
+# Organizations enforcing constraints/compute.skipDefaultNetworkCreation
+# get no "default" network on new projects, and this script relies on
+# --network=default / --subnet=default throughout (Cloud Router, Cloud
+# NAT, the hub VM, both firewall rules below, and the Cloud Run proxy's
+# Direct VPC egress). Creating a VPC network is a network-design decision
+# for the operator to make explicitly, not something to do silently on
+# their behalf -- so this fails fast, before any resource in this script
+# is created, rather than creating one itself. See the hardened-org
+# addendum doc for the exact command to create it (an auto-mode network,
+# which is all this script needs).
+#
+# Runs AFTER "Enable APIs" above, not before: on a brand-new project in an
+# ordinary (non-hardened) org, compute.googleapis.com has never been
+# enabled yet, and enabling it (just above) is what triggers the default
+# network's creation. Checking beforehand would report a false "missing
+# network" on every fresh project, hardened org or not. That creation is
+# asynchronous, so this polls for a bounded time instead of failing on
+# the very first check. Enabling APIs is not itself a resource this
+# script would need to tear down, so the "before any resource is created"
+# contract still holds for everything from here on.
+info "Checking for the default VPC network..."
+NETWORK_FOUND=false
+NETWORK_CHECK_ERROR=""
+for attempt in $(seq 1 "$NETWORK_CHECK_MAX_ATTEMPTS"); do
+  # --quiet is required here, not cosmetic: without it, gcloud may ask on
+  # stderr whether to enable the API and then read stdin. stderr is
+  # captured here, so on an interactive terminal the deploy appears to
+  # freeze at this step while waiting for an answer the operator cannot
+  # see. An open, non-TTY stdin (a pipe held without EOF) blocks the same
+  # way. --quiet takes the default answer ("no") immediately, so the
+  # SERVICE_DISABLED error reaches the retry check below instead.
+  if NETWORK_CHECK_ERROR="$(gcloud compute networks describe default \
+      --project="${PROJECT_ID}" --quiet 2>&1 >/dev/null)"; then
+    NETWORK_FOUND=true
+    break
+  fi
+  # A genuine "not found" is worth retrying -- the network can still be
+  # propagating from the services-enable call above. So is
+  # SERVICE_DISABLED -- on a truly fresh project, compute.googleapis.com
+  # itself can still be settling right after being enabled, and describe
+  # calls against it fail with the same "has not been used in project"
+  # error enabling the API is meant to fix. Matched on both the
+  # machine-readable reason (present in the error's details block) and
+  # the message fragment (present even when the API-enablement prompt is
+  # disabled and gcloud never renders a details block at all), since
+  # either form can be all that's available depending on gcloud's
+  # configuration. Any other error (permission denied, a genuinely
+  # transient API error, ...) is something a retry can't fix, so it's
+  # reported immediately instead of spending the whole budget on it.
+  if [[ "$NETWORK_CHECK_ERROR" != *"was not found"* \
+        && "$NETWORK_CHECK_ERROR" != *"SERVICE_DISABLED"* \
+        && "$NETWORK_CHECK_ERROR" != *"has not been used in project"* ]]; then
+    break
+  fi
+  if [[ "$attempt" -lt "$NETWORK_CHECK_MAX_ATTEMPTS" ]]; then
+    sleep "$NETWORK_CHECK_RETRY_SECS"
+  fi
+done
+if [[ "$NETWORK_FOUND" != "true" ]]; then
+  if [[ "$NETWORK_CHECK_ERROR" == *"was not found"* ]]; then
+    err "No 'default' VPC network found in project ${PROJECT_ID}."
+    err "Organizations with the compute.skipDefaultNetworkCreation org policy do not get one automatically, and this script does not create one on your behalf."
+    err "See https://googlecloudplatform.github.io/scion/hosted/single-node/hub-setup-gce-hardened-org/ (docs-site/src/content/docs/hosted/single-node/hub-setup-gce-hardened-org.md in a checkout) for the one command needed to create it."
+  else
+    err "Could not verify the default VPC network in project ${PROJECT_ID}:"
+    err "$NETWORK_CHECK_ERROR"
+  fi
+  exit 1
+fi
+echo "  Default VPC network found."
 
 # --- Cross-org IAP warning (best-effort; never blocks the deploy) ---
 # IAP's default (Google-managed) OAuth client only covers same-organization
@@ -765,6 +968,137 @@ else
   fi
 fi
 
+# --- Detect existing Cloud NAT to reuse (network default, region ${REGION}) ---
+# A Cloud NAT gateway in ALL_SUBNETWORKS_* mode (all subnets, or all subnets'
+# primary IP ranges) cannot coexist with any other NAT gateway on the same
+# network+region -- GCP rejects creating one while another gateway is
+# already there, regardless of what that other gateway covers. So there are
+# two cases where our own `--nat-all-subnet-ip-ranges` NAT create in the
+# Cloud Router + Cloud NAT step below would otherwise be rejected:
+#   1. Some other router's NAT already covers our VM's subnet ("default") --
+#      reuse it instead of creating our own.
+#   2. Some other router has a NAT that does NOT cover "default" -- our own
+#      NAT still can't use ALL_SUBNETWORKS_* mode alongside it, so it's
+#      created scoped to just subnet "default" instead
+#      (--nat-custom-subnet-ip-ranges), which coexists fine.
+# Either way, by the time the plain `nats create` call failed, the service
+# account, IAM bindings, and possibly an orphan router would already exist
+# with no clean way to unwind them -- so this runs first, before any
+# resource below is created. See docs/deploy/agent-runbook-single-node-vm.md
+# (Cloud NAT reuse).
+#
+# This has to inspect every router's NAT config on this network+region, not
+# just our own name -- idempotent re-runs that recognize OUR OWN router/NAT
+# are still handled below, unchanged, by the existing describe-by-name
+# checks. jq (checked as a Phase 1 prerequisite) is required: NAT coverage
+# is nested JSON (sourceSubnetworkIpRangesToNat / subnetworks[]), and a
+# text-based fallback risks silently misjudging reuse.
+info "Checking for an existing Cloud NAT covering this network/region..."
+ROUTER_NAME="scion-hub-${HUB_NAME}-router"
+NAT_NAME="scion-hub-${HUB_NAME}-nat"
+
+# No `2>/dev/null` here or on the jq call below: on failure, gcloud's/jq's
+# own error (permission denied, API disabled, bad JSON, ...) prints to
+# stderr right above our `err`, instead of being silently discarded.
+ROUTERS_JSON="$(gcloud compute routers list \
+  --project="${PROJECT_ID}" \
+  --filter="region:(${REGION}) AND network:(default)" \
+  --format=json)" || {
+  err "Could not list Cloud Routers in ${REGION} on network 'default' (see gcloud error above). Aborting before creating any resources."
+  exit 1
+}
+if [[ -z "$ROUTERS_JSON" ]]; then
+  # A successful `list` always prints at least "[]"; empty output means
+  # something went wrong upstream of gcloud's own exit code. Treat it as a
+  # failure rather than silently matching "no routers" (fail closed).
+  err "Cloud Router list returned no output for ${REGION} on network 'default' (expected at least '[]'). Aborting before creating any resources."
+  exit 1
+fi
+
+# Emits one "<router><TAB><nat><TAB>covers<TAB>foreign" row per NAT, for
+# routers that are actually on network "default" in exactly this region
+# (re-checked here with endswith -- gcloud's `--filter` ':' operator is a
+# word/substring match, not equality, so e.g. a router on network
+# "default-vpc" would otherwise slip through). A NAT with type PRIVATE
+# (Private NAT, for NCC/hybrid connectivity -- not internet egress) never
+# counts as coverage: it can't provide the VM's internet egress no matter
+# what it covers. It DOES still count as a foreign gateway, though --
+# GCP's ALL_SUBNETWORKS exclusivity rule ("there should not be any other
+# Router.Nat section in any Router for this network in this region") is
+# not qualified by type, so an all-subnets create is rejected next to a
+# foreign Private NAT exactly like next to any other foreign gateway.
+# Excluding Private NATs from "foreign" as well as "covers" would let
+# deploy.sh attempt that same rejected all-subnets create -- the #2003
+# failure again, after the SA/IAM already exist. So a foreign Private NAT
+# still routes to the scoped (--nat-custom-subnet-ip-ranges=default)
+# create below, same as any other non-covering foreign gateway; our own
+# router is never treated as foreign; a hand-added extra NAT on it is out
+# of scope. "covers" is true when the NAT is PUBLIC (the
+# default when `type` is absent) AND already provides egress for subnet
+# "default": ALL_SUBNETWORKS_* mode (all ranges, or all primary ranges),
+# or a LIST_OF_SUBNETWORKS entry for "default" whose sourceIpRangesToNat
+# actually includes the primary range (ALL_IP_RANGES or PRIMARY_IP_RANGE
+# -- an entry that only forwards secondary ranges does NOT give the VM's
+# primary IP egress). "foreign" is true when the router isn't the one
+# we'd create ourselves, regardless of NAT type.
+# A here-string avoids piping through `echo`, which can misbehave on
+# option-like leading hyphens in $ROUTERS_JSON (e.g. a value starting
+# with "-n" or "-e").
+NAT_ROWS="$(jq -r \
+  --arg region "$REGION" \
+  --arg own "$ROUTER_NAME" '
+  .[]
+  | select((.network // "") | endswith("/global/networks/default"))
+  | select((.region // "") | endswith("/regions/" + $region))
+  | . as $r
+  | ($r.nats // [])[]
+  | . as $n
+  | (($n.type // "PUBLIC") == "PUBLIC") as $public
+  | ( ($n.subnetworks // [])
+      | any(
+          (.name // "" | endswith("/subnetworks/default"))
+          and ( ( .sourceIpRangesToNat // ["ALL_IP_RANGES"] )
+                | any(. == "ALL_IP_RANGES" or . == "PRIMARY_IP_RANGE") )
+        )
+    ) as $listCovers
+  | ( ($n.sourceSubnetworkIpRangesToNat // "") | startswith("ALL_SUBNETWORKS_") ) as $allCovers
+  | [$r.name, $n.name, (($public and ($allCovers or $listCovers)) | tostring), (($r.name != $own) | tostring)]
+  | @tsv
+' <<< "$ROUTERS_JSON")" || {
+  err "Could not parse Cloud Router/NAT config in ${REGION} (see jq error above). Aborting before creating any resources."
+  exit 1
+}
+
+REUSE_ROUTER=""
+REUSE_NAT=""
+FOREIGN_NAT_EXISTS="false"
+if [[ -n "$NAT_ROWS" ]]; then
+  while IFS=$'\t' read -r RTR NAT COVERS FOREIGN; do
+    [[ -z "$RTR" ]] && continue
+    if [[ "$FOREIGN" == "true" ]]; then
+      FOREIGN_NAT_EXISTS="true"
+      if [[ -z "$REUSE_NAT" && "$COVERS" == "true" ]]; then
+        REUSE_ROUTER="$RTR"
+        REUSE_NAT="$NAT"
+      fi
+    fi
+  done <<< "$NAT_ROWS"
+fi
+
+REUSE_EXISTING_NAT="false"
+NAT_CREATE_MODE="all-subnets"
+if [[ -n "$REUSE_NAT" ]]; then
+  REUSE_EXISTING_NAT="true"
+  ROUTER_NAME="$REUSE_ROUTER"
+  NAT_NAME="$REUSE_NAT"
+  info "Found an existing Cloud NAT that already covers this network/region; reusing it instead of creating our own."
+  echo "  Reusing Cloud Router: ${ROUTER_NAME}"
+  echo "  Reusing Cloud NAT:    ${NAT_NAME}"
+elif [[ "$FOREIGN_NAT_EXISTS" == "true" ]]; then
+  NAT_CREATE_MODE="custom-default-subnet"
+  info "A Cloud NAT gateway already exists on this network/region but doesn't provide internet egress for subnet 'default'; scoping our own NAT to that subnet only (an all-subnets NAT can't coexist with another gateway)."
+fi
+
 # --- Service account ---
 info "Creating service account (if needed)..."
 if gcloud iam service-accounts describe "${SA_EMAIL}" \
@@ -781,13 +1115,40 @@ fi
 # artifactregistry.writer lets the VM build and push the Cloud Run IAP proxy
 # image directly to Artifact Registry (see Phase 4).
 info "Binding IAM roles..."
-for ROLE in roles/logging.logWriter roles/monitoring.metricWriter roles/cloudtrace.agent roles/artifactregistry.writer; do
+for ROLE in roles/logging.logWriter roles/monitoring.metricWriter roles/cloudtrace.agent roles/artifactregistry.writer roles/aiplatform.user; do
   gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member="serviceAccount:${SA_EMAIL}" \
     --role="${ROLE}" \
     --quiet &>/dev/null
 done
-echo "  Roles bound: logging.logWriter, monitoring.metricWriter, cloudtrace.agent, artifactregistry.writer"
+echo "  Roles bound: logging.logWriter, monitoring.metricWriter, cloudtrace.agent, artifactregistry.writer, aiplatform.user"
+
+# --- Proxy service account ---
+# A separate, minimally-privileged identity for the Cloud Run IAP proxy
+# (see Phase 4). It never calls a GCP API -- it only reverse-proxies HTTP
+# to the hub VM's internal IP -- so, unlike SA_EMAIL above, it gets no
+# project IAM roles at all. In organizations where the default Compute
+# Engine service account is disabled, deploying the proxy with no
+# --service-account would otherwise fall back to that disabled account
+# and fail; this SA is what Phase 4 passes via --service-account instead.
+#
+# Deploying a Cloud Run service with --service-account=X requires the
+# deployer to already hold iam.serviceAccounts.actAs on X -- the same
+# requirement SA_EMAIL above has always had for the VM create in this
+# script, which has never granted it automatically either. Owner and
+# Editor both include this permission; a more narrowly-scoped deployer
+# needs roles/iam.serviceAccountUser on the SA. See the hardened-org
+# addendum doc.
+info "Creating proxy service account (if needed)..."
+if gcloud iam service-accounts describe "${PROXY_SA_EMAIL}" \
+    --project="${PROJECT_ID}" &>/dev/null; then
+  echo "  Proxy service account already exists: ${PROXY_SA_EMAIL}"
+else
+  gcloud iam service-accounts create "${PROXY_SA_NAME}" \
+    --display-name="Scion Hub IAP Proxy (${HUB_NAME})" \
+    --project="${PROJECT_ID}"
+  echo "  Created proxy service account: ${PROXY_SA_EMAIL}"
+fi
 
 # --- Grant deployer IAP tunnel access (required for SSH to --no-address VMs) ---
 info "Granting IAP tunnel access to deployer..."
@@ -818,45 +1179,123 @@ fi
 # --- Cloud Router + Cloud NAT ---
 # The VM has no public IP (--no-address).  Cloud NAT gives it outbound internet
 # access so cloud-init can install packages, download binaries, and pull images.
-ROUTER_NAME="scion-hub-${HUB_NAME}-router"
-NAT_NAME="scion-hub-${HUB_NAME}-nat"
-
-info "Creating Cloud Router (if needed)..."
-if gcloud compute routers describe "${ROUTER_NAME}" \
-    --region="${REGION}" --project="${PROJECT_ID}" &>/dev/null; then
-  echo "  Cloud Router already exists: ${ROUTER_NAME}"
+# ROUTER_NAME/NAT_NAME were set above during the reuse check -- either our
+# own names, or an existing router/NAT we're reusing (REUSE_EXISTING_NAT).
+if [[ "$REUSE_EXISTING_NAT" == "true" ]]; then
+  echo "  Skipping Cloud Router create: reusing ${ROUTER_NAME}"
+  echo "  Skipping Cloud NAT create: reusing ${NAT_NAME}"
 else
-  gcloud compute routers create "${ROUTER_NAME}" \
-    --region="${REGION}" \
-    --project="${PROJECT_ID}" \
-    --network=default \
-    --quiet
-  echo "  Created Cloud Router: ${ROUTER_NAME}"
+  info "Creating Cloud Router (if needed)..."
+  if gcloud compute routers describe "${ROUTER_NAME}" \
+      --region="${REGION}" --project="${PROJECT_ID}" &>/dev/null; then
+    echo "  Cloud Router already exists: ${ROUTER_NAME}"
+  else
+    gcloud compute routers create "${ROUTER_NAME}" \
+      --region="${REGION}" \
+      --project="${PROJECT_ID}" \
+      --network=default \
+      --quiet
+    echo "  Created Cloud Router: ${ROUTER_NAME}"
+  fi
+
+  info "Creating Cloud NAT (if needed)..."
+  if gcloud compute routers nats describe "${NAT_NAME}" \
+      --router="${ROUTER_NAME}" \
+      --region="${REGION}" --project="${PROJECT_ID}" &>/dev/null; then
+    echo "  Cloud NAT already exists: ${NAT_NAME}"
+  elif [[ "$NAT_CREATE_MODE" == "custom-default-subnet" ]]; then
+    # A foreign NAT gateway exists on this network+region but doesn't cover
+    # us (see the reuse check above) -- ALL_SUBNETWORKS_* mode can't
+    # coexist with it, so scope ours to just subnet "default".
+    gcloud compute routers nats create "${NAT_NAME}" \
+      --router="${ROUTER_NAME}" \
+      --region="${REGION}" \
+      --project="${PROJECT_ID}" \
+      --auto-allocate-nat-external-ips \
+      --nat-custom-subnet-ip-ranges=default \
+      --quiet
+    echo "  Created Cloud NAT: ${NAT_NAME} (scoped to subnet 'default')"
+  else
+    gcloud compute routers nats create "${NAT_NAME}" \
+      --router="${ROUTER_NAME}" \
+      --region="${REGION}" \
+      --project="${PROJECT_ID}" \
+      --auto-allocate-nat-external-ips \
+      --nat-all-subnet-ip-ranges \
+      --quiet
+    echo "  Created Cloud NAT: ${NAT_NAME}"
+  fi
 fi
 
-info "Creating Cloud NAT (if needed)..."
-if gcloud compute routers nats describe "${NAT_NAME}" \
-    --router="${ROUTER_NAME}" \
-    --region="${REGION}" --project="${PROJECT_ID}" &>/dev/null; then
-  echo "  Cloud NAT already exists: ${NAT_NAME}"
-else
-  gcloud compute routers nats create "${NAT_NAME}" \
-    --router="${ROUTER_NAME}" \
-    --region="${REGION}" \
-    --project="${PROJECT_ID}" \
-    --auto-allocate-nat-external-ips \
-    --nat-all-subnet-ip-ranges \
-    --quiet
-  echo "  Created Cloud NAT: ${NAT_NAME}"
+# --- Hub VM network tag ---
+# The IAP SSH firewall rule below is scoped to this tag so it only ever
+# grants SSH to the hub VM, not to every VM on the network. On a re-run
+# where the VM already exists (e.g. from a deploy predating this tag), make
+# sure the tag is applied *before* the firewall rule is narrowed to target
+# it, so there is never a window where the rule targets a tag the VM lacks.
+# HUB_TAG_CONFIRMED only flips to true once add-tags has actually succeeded
+# against a VM this run found. Narrowing an existing unscoped rule below is
+# gated on that, not merely on "describe didn't find a VM" -- a zone
+# mismatch or a transient describe error looks identical to "no VM" here,
+# and narrowing in that case could lock out a VM that still lacks the tag.
+HUB_TAG_CONFIRMED=false
+if gcloud compute instances describe "${INSTANCE_NAME}" \
+    --zone="${ZONE}" --project="${PROJECT_ID}" &>/dev/null; then
+  info "Ensuring hub VM has network tag..."
+  if gcloud compute instances add-tags "${INSTANCE_NAME}" \
+      --zone="${ZONE}" \
+      --project="${PROJECT_ID}" \
+      --tags="${HUB_TAG}" \
+      --quiet; then
+    echo "  Ensured network tag on VM ${INSTANCE_NAME}: ${HUB_TAG}"
+    HUB_TAG_CONFIRMED=true
+  else
+    warn "Could not add network tag ${HUB_TAG} to VM ${INSTANCE_NAME}; will not narrow an existing unscoped firewall rule this run."
+  fi
 fi
 
 # --- IAP SSH firewall rule ---
 # gcloud compute ssh via IAP tunneling requires TCP:22 from 35.235.240.0/20.
+# Scoped with --target-tags so it only applies to the hub VM, not every VM
+# on network default.
 FW_RULE_NAME="scion-hub-${HUB_NAME}-allow-iap-ssh"
 info "Creating IAP SSH firewall rule (if needed)..."
 if gcloud compute firewall-rules describe "${FW_RULE_NAME}" \
     --project="${PROJECT_ID}" &>/dev/null; then
-  echo "  Firewall rule already exists: ${FW_RULE_NAME}"
+  # A failed read here is not the same as "no target tags": treat it as
+  # unknown, not unscoped. Folding a describe failure into an empty
+  # EXISTING_TARGET_TAGS (via `|| true`) would make a transient error look
+  # exactly like an unscoped rule, and -- if HUB_TAG_CONFIRMED is already
+  # true -- narrow the rule from under any foreign target tags it actually
+  # carries, which is the one thing the elif branch below exists to avoid.
+  if EXISTING_TARGET_TAGS="$(gcloud compute firewall-rules describe "${FW_RULE_NAME}" \
+      --project="${PROJECT_ID}" --format="value(targetTags)" 2>/dev/null)"; then
+    if [[ -z "$EXISTING_TARGET_TAGS" ]]; then
+      if [[ "$HUB_TAG_CONFIRMED" == "true" ]]; then
+        warn "Firewall rule ${FW_RULE_NAME} has no target tags (pre-existing, unscoped rule); narrowing to ${HUB_TAG}. Any other VM that relied on this rule for IAP SSH loses that access -- give it its own rule if it still needs one."
+        gcloud compute firewall-rules update "${FW_RULE_NAME}" \
+          --project="${PROJECT_ID}" \
+          --target-tags="${HUB_TAG}" \
+          --quiet
+        echo "  Updated firewall rule ${FW_RULE_NAME} with --target-tags=${HUB_TAG}"
+      else
+        warn "Firewall rule ${FW_RULE_NAME} has no target tags, but the hub VM's tag could not be confirmed this run. Leaving it unscoped rather than risk locking out SSH; it will be narrowed once the tag is confirmed on a later run."
+      fi
+    # Exact whole-tag match against one line of the split list, not a
+    # substring/word match against the raw string: `grep -w` would treat
+    # "-" as a non-word character and falsely match HUB_TAG against a
+    # hyphen-extended tag like "${HUB_TAG}-nfs". Bash parameter expansion
+    # does the split (replacing every "," or ";" with a newline) so grep
+    # is the only external process spawned, rather than piping through
+    # printf and two tr calls.
+    elif ! grep -qxF -- "${HUB_TAG}" <<< "${EXISTING_TARGET_TAGS//[;,]/$'\n'}"; then
+      warn "Firewall rule ${FW_RULE_NAME} exists but its target tags (${EXISTING_TARGET_TAGS}) do not include ${HUB_TAG}. IAP SSH to the hub VM may fail; add ${HUB_TAG} to the rule manually or delete it and re-run."
+    else
+      echo "  Firewall rule already exists: ${FW_RULE_NAME} (target tags: ${EXISTING_TARGET_TAGS})"
+    fi
+  else
+    warn "Could not read target tags for firewall rule ${FW_RULE_NAME} (it exists, but the read failed); leaving it as-is rather than risk narrowing it while its target tags are unknown. Re-run once the read succeeds."
+  fi
 else
   gcloud compute firewall-rules create "${FW_RULE_NAME}" \
     --project="${PROJECT_ID}" \
@@ -865,9 +1304,74 @@ else
     --action=ALLOW \
     --rules=tcp:22 \
     --source-ranges=35.235.240.0/20 \
+    --target-tags="${HUB_TAG}" \
     --description="Allow SSH via IAP tunneling for Scion Hub" \
     --quiet
-  echo "  Created firewall rule: ${FW_RULE_NAME}"
+  echo "  Created firewall rule: ${FW_RULE_NAME} (target tags: ${HUB_TAG})"
+fi
+
+# --- Proxy-to-VM firewall rule (tcp:8080) ---
+# The Cloud Run proxy reaches the hub VM's internal IP on :8080 via Direct
+# VPC egress (--vpc-egress=all-traffic in Phase 4), which sources traffic
+# from the region's "default" subnet range. Rather than depend on the
+# network's own default-allow-internal rule -- broad (all protocols, all
+# of 10.128.0.0/9, every VM on the network) and not guaranteed to exist at
+# all in a hardened org (creating the default network via CLI does not
+# create it) -- this scopes a dedicated rule to exactly what's needed:
+# tcp:8080, from just the default subnet's own range, to just the hub VM.
+info "Looking up the default subnet's IP range (${REGION})..."
+DEFAULT_SUBNET_CIDR="$(gcloud compute networks subnets describe default \
+  --region="${REGION}" --project="${PROJECT_ID}" \
+  --format="value(ipCidrRange)" 2>/dev/null)" || true
+if [[ -z "$DEFAULT_SUBNET_CIDR" ]]; then
+  err "Could not determine the IP range of the 'default' subnet in ${REGION}."
+  err "An auto-mode default network creates one subnet per region automatically; see https://googlecloudplatform.github.io/scion/hosted/single-node/hub-setup-gce-hardened-org/ (docs-site/src/content/docs/hosted/single-node/hub-setup-gce-hardened-org.md in a checkout)."
+  exit 1
+fi
+echo "  Default subnet CIDR (${REGION}): ${DEFAULT_SUBNET_CIDR}"
+
+FW_8080_RULE_NAME="scion-hub-${HUB_NAME}-allow-proxy"
+info "Creating proxy-to-VM firewall rule (if needed)..."
+# A single combined describe covers both the existence check and all three
+# drift fields, instead of four separate gcloud calls. gcloud's value()
+# printer joins multiple requested fields with a single tab, and joins a
+# repeated field's own values (sourceRanges, targetTags) with ";" --
+# verified by rendering synthetic firewall-rule resources through the
+# installed Cloud SDK's own csv_printer.ValuePrinter, including the empty-
+# field case (an empty or absent field renders as nothing between the
+# tabs on either side of it, never omitted or reflowed). Split with plain
+# parameter expansion, not `read -d $'\t'`/`IFS=$'\t' read`: bash's `read`
+# classifies tab as "IFS whitespace" and silently strips/collapses a
+# leading or trailing empty field (verified by hand), which would shift
+# every field after it instead of just leaving one blank.
+if FW_8080_DESCRIBE="$(gcloud compute firewall-rules describe "${FW_8080_RULE_NAME}" \
+    --project="${PROJECT_ID}" \
+    --format="value(sourceRanges,allowed[].map().firewall_rule().list(),targetTags)" \
+    2>/dev/null)"; then
+  EXISTING_8080_SOURCE="${FW_8080_DESCRIBE%%$'\t'*}"
+  FW_8080_REST="${FW_8080_DESCRIBE#*$'\t'}"
+  EXISTING_8080_ALLOWED="${FW_8080_REST%%$'\t'*}"
+  EXISTING_8080_TARGET_TAGS="${FW_8080_REST#*$'\t'}"
+  unset FW_8080_DESCRIBE FW_8080_REST
+  if [[ "$EXISTING_8080_SOURCE" == "$DEFAULT_SUBNET_CIDR" \
+        && "$EXISTING_8080_ALLOWED" == "tcp:8080" \
+        && "$EXISTING_8080_TARGET_TAGS" == "$HUB_TAG" ]]; then
+    echo "  Firewall rule already exists: ${FW_8080_RULE_NAME} (source: ${EXISTING_8080_SOURCE})"
+  else
+    warn "Firewall rule ${FW_8080_RULE_NAME} exists but drifted from what this script expects (source: ${EXISTING_8080_SOURCE}, allowed: ${EXISTING_8080_ALLOWED}, target tags: ${EXISTING_8080_TARGET_TAGS}; expected source: ${DEFAULT_SUBNET_CIDR}, allowed: tcp:8080, target tags: ${HUB_TAG}). Not auto-updating it -- delete the rule and re-run, or update it manually, if this is unintentional."
+  fi
+else
+  gcloud compute firewall-rules create "${FW_8080_RULE_NAME}" \
+    --project="${PROJECT_ID}" \
+    --network=default \
+    --direction=INGRESS \
+    --action=ALLOW \
+    --rules=tcp:8080 \
+    --source-ranges="${DEFAULT_SUBNET_CIDR}" \
+    --target-tags="${HUB_TAG}" \
+    --description="Allow the Cloud Run IAP proxy (Direct VPC egress) to reach the Scion Hub VM on 8080" \
+    --quiet
+  echo "  Created firewall rule: ${FW_8080_RULE_NAME} (source: ${DEFAULT_SUBNET_CIDR}, target tags: ${HUB_TAG})"
 fi
 
 # --- Create VM ---
@@ -883,9 +1387,11 @@ else
     --no-address \
     --service-account="${SA_EMAIL}" \
     --scopes=cloud-platform \
+    --tags="${HUB_TAG}" \
     --boot-disk-size="${DISK_SIZE}" \
     --image-family=ubuntu-2204-lts \
     --image-project=ubuntu-os-cloud \
+    --shielded-secure-boot \
     --metadata-from-file=user-data="${SCRIPT_DIR}/cloud-init.yaml" \
     --quiet
   echo "  Created VM: ${INSTANCE_NAME} (zone: ${ZONE})"
@@ -1066,6 +1572,14 @@ gcloud compute ssh "${INSTANCE_NAME}" \
     sudo -u scion tee /home/scion/.scion/settings.yaml > /dev/null << 'SETTINGSEOF'
 schema_version: \"1\"
 image_registry: \"${IMAGE_REGISTRY}\"
+# Hub-wide default GCP identity mode for new agents (V1Settings.DefaultGCPIdentityMode
+# in pkg/config, a top-level settings.yaml key, not nested under agent_defaults).
+# passthrough is honoured only on the hub's own embedded broker, which is what a
+# single-node VM always is, so agents inherit the VM service account (already
+# granted roles/aiplatform.user) and authenticate to Vertex AI with no manual
+# setup. Change to \"block\" or \"assign\" via the admin UI or the server-config
+# API if that is not desired; see docs/deploy/agent-runbook-single-node-vm.md §6.3b.
+default_gcp_identity_mode: passthrough
 server:
   hub:
     name: \"${HUB_NAME}\"
@@ -1123,6 +1637,100 @@ else
   echo "  gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} \\"
   echo "    --command='sudo journalctl -u scion-hub.service --no-pager -n 50'"
   exit 1
+fi
+
+# --- Hub-scoped agent env vars (GOOGLE_CLOUD_PROJECT / GOOGLE_CLOUD_LOCATION) ---
+# Agents need these for Vertex AI inference. They go in the hub DB as
+# hub-scoped env vars with injection mode "always", the same rows that
+# `PUT /api/v1/env/<KEY>` with scope=hub would create. There is no
+# unauthenticated way to call that API from the VM, so we write the rows
+# with sqlite3 directly. This must run after the health check, because the
+# hub creates the env_vars table when it first migrates.
+#   - scope_id is the hub instance ID. The dispatcher selects hub rows by it,
+#     and so do the API and web UI. We read it from /healthz so it always
+#     matches the running hub.
+#   - The insert only seeds the rows: ON CONFLICT DO NOTHING against the
+#     unique index envvar_key_scope_scope_id means a redeploy never duplicates
+#     them and never overwrites an admin's edits. A row that was deleted is
+#     created again.
+#   - The hub reads env vars from the DB on every dispatch (there is no
+#     cache), so it does not need a restart.
+#   - Timestamps use Go's time.String() layout, which ent writes and the
+#     modernc driver reads back.
+# If this step fails it only warns, because the vars can be set by hand.
+info "Setting hub-scoped agent env vars (GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_LOCATION)..."
+HUB_ENV_SCOPE_ID="$(gcloud compute ssh "${INSTANCE_NAME}" \
+  --zone="${ZONE}" --project="${PROJECT_ID}" \
+  --command="curl -sf http://localhost:8080/healthz" 2>/dev/null \
+  | sed -n 's/.*"hub_id":"\([^"]*\)".*/\1/p')" || true
+
+# Escape a value as an SQL string literal. The inputs are also validated
+# below, so this is a second layer of protection.
+sql_quote() { local s="${1//\'/\'\'}"; printf "'%s'" "$s"; }
+
+# Random RFC 4122 v4 UUID in canonical dashed form, the same text form ent
+# stores for the id column.
+SQL_UUID="lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))), 2) || '-' || substr('89ab', 1 + (abs(random()) % 4), 1) || substr(lower(hex(randomblob(2))), 2) || '-' || lower(hex(randomblob(6)))"
+SQL_NOW="strftime('%Y-%m-%d %H:%M:%f +0000 UTC', 'now')"
+
+if [[ -n "$HUB_ENV_SCOPE_ID" ]]; then
+  HUB_ENV_SQL_SCOPE_ID="$(sql_quote "${HUB_ENV_SCOPE_ID}")"
+else
+  # /healthz was unreadable, so the manual fallback below has to find the hub
+  # ID itself. It reads the persisted ID from ~/.scion/hub-id with the sqlite3
+  # CLI's readfile(). deploy.sh never sets hub_id explicitly, so that file is
+  # the hub ID. If the file is missing or empty, the expression is NULL and the
+  # NOT NULL constraint rejects the insert, so no junk row is written.
+  HUB_ENV_SQL_SCOPE_ID="NULLIF(trim(CAST(readfile('/home/scion/.scion/hub-id') AS TEXT), char(10, 13, 32)), '')"
+fi
+# GOOGLE_CLOUD_LOCATION=global on purpose: the global Vertex AI endpoint
+# serves the Gemini/Claude models agents use, and it is not tied to REGION.
+HUB_ENV_SQL="$(cat <<EOF
+.timeout 5000
+.bail on
+INSERT INTO env_vars (id, key, value, scope, scope_id, description, sensitive, injection_mode, secret, allow_progeny, created, updated)
+VALUES
+  (${SQL_UUID}, 'GOOGLE_CLOUD_PROJECT', $(sql_quote "${PROJECT_ID}"), 'hub', ${HUB_ENV_SQL_SCOPE_ID}, 'Set by deploy.sh', 0, 'always', 0, 0, ${SQL_NOW}, ${SQL_NOW}),
+  (${SQL_UUID}, 'GOOGLE_CLOUD_LOCATION', 'global', 'hub', ${HUB_ENV_SQL_SCOPE_ID}, 'Set by deploy.sh', 0, 'always', 0, 0, ${SQL_NOW}, ${SQL_NOW})
+ON CONFLICT(key, scope, scope_id) DO NOTHING;
+SELECT '  ' || key || '=' || value || ' (scope=hub, injection=' || injection_mode || ')'
+  FROM env_vars WHERE scope = 'hub' AND scope_id = ${HUB_ENV_SQL_SCOPE_ID}
+  AND key IN ('GOOGLE_CLOUD_PROJECT', 'GOOGLE_CLOUD_LOCATION') ORDER BY key;
+EOF
+)"
+
+HUB_ENV_OK=false
+if [[ ! "$PROJECT_ID" =~ ^[a-z][a-z0-9.:-]*$ ]]; then
+  warn "PROJECT_ID '${PROJECT_ID}' has unexpected characters; skipping hub env var write."
+elif [[ ! "$HUB_ENV_SCOPE_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  warn "Could not read hub_id from /healthz; skipping hub env var write."
+elif gcloud compute ssh "${INSTANCE_NAME}" \
+    --zone="${ZONE}" --project="${PROJECT_ID}" \
+    --command="
+      set -euo pipefail
+      if ! command -v sqlite3 >/dev/null 2>&1; then
+        # VMs created before sqlite3 was in cloud-init.yaml don't have it.
+        sudo apt-get update -qq >/dev/null
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sqlite3 >/dev/null
+      fi
+      sudo -u scion sqlite3 /home/scion/.scion/hub.db << 'SQLEOF'
+${HUB_ENV_SQL}
+SQLEOF
+    "; then
+  HUB_ENV_OK=true
+  echo "  Hub env vars seeded (scope_id=${HUB_ENV_SCOPE_ID}; existing rows left unchanged)."
+fi
+
+if [[ "$HUB_ENV_OK" != "true" ]]; then
+  warn "Hub-scoped env vars were NOT set. Agents will not get GOOGLE_CLOUD_PROJECT/GOOGLE_CLOUD_LOCATION."
+  {
+    echo "  Set them manually (the deploy continues). If sqlite3 is missing, first run"
+    echo "  'sudo apt-get update && sudo apt-get install -y sqlite3' on the VM."
+    echo "  gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} -- \\"
+    echo "    'sudo -u scion sqlite3 /home/scion/.scion/hub.db' <<'SQLEOF'"
+    echo "${HUB_ENV_SQL}"
+    echo "SQLEOF"
+  } >&2
 fi
 
 # ===================================================================
@@ -1362,21 +1970,36 @@ gcloud compute ssh "${INSTANCE_NAME}" \
 echo "  Proxy image pushed: ${PROXY_IMAGE}"
 
 # --- Deploy Cloud Run IAP proxy ---
+# One-step IAP: --no-allow-unauthenticated --iap on the initial deploy
+# itself, instead of `--allow-unauthenticated` followed by a later
+# `gcloud beta run services update --iap`. The two-step form has a window
+# -- between the two calls -- where the service carries an allUsers
+# roles/run.invoker binding; organizations enforcing
+# constraints/iam.allowedPolicyMemberDomains reject that binding outright,
+# and even where it's allowed, it's an unauthenticated-access window this
+# script should never create. `beta run deploy` (rather than the non-beta
+# `run deploy`) is used here for compatibility with older Cloud SDK
+# versions where --iap required the beta surface; current SDKs also
+# support --iap on plain `run deploy`. --service-account is the dedicated
+# proxy SA from Phase 2, never SA_EMAIL (the hub VM's own SA).
 info "Deploying Cloud Run IAP proxy: ${PROXY_SERVICE}..."
 echo "  Target URL: http://${VM_IP}:8080"
 echo "  Image: ${PROXY_IMAGE}"
 
-gcloud run deploy "${PROXY_SERVICE}" \
+gcloud beta run deploy "${PROXY_SERVICE}" \
   --project="${PROJECT_ID}" \
   --region="${REGION}" \
   --image="${PROXY_IMAGE}" \
+  --service-account="${PROXY_SA_EMAIL}" \
   --set-env-vars="TARGET_URL=http://${VM_IP}:8080" \
   --network=default \
   --subnet=default \
   --vpc-egress=all-traffic \
-  --allow-unauthenticated \
+  --no-allow-unauthenticated \
+  --iap \
   --port=8080 \
   --quiet
+echo "  Cloud Run IAP proxy deployed with IAP enabled (no allUsers invoker binding was ever created)."
 
 # --- Get Cloud Run service URL ---
 info "Getting Cloud Run service URL..."
@@ -1389,16 +2012,98 @@ if [[ -z "$PROXY_URL" ]]; then
 fi
 echo "  Proxy URL: ${PROXY_URL}"
 
-# --- Enable IAP ---
-# Note: --resource-type=cloud-run is NOT valid for gcloud iap web enable.
-# The supported path for Cloud Run is the --iap flag on the service itself.
-info "Enabling IAP on Cloud Run service..."
-gcloud beta run services update "${PROXY_SERVICE}" \
-  --region="${REGION}" \
+# --- Project number (needed below, and again for the IAP audience in
+# Phase 5 -- computed once here and reused there) ---
+info "Looking up project number..."
+PROJECT_NUMBER="$(gcloud projects describe "${PROJECT_ID}" \
+  --format="value(projectNumber)" 2>/dev/null)" || true
+if [[ -z "$PROJECT_NUMBER" ]]; then
+  err "Could not determine project number for ${PROJECT_ID}"
+  exit 1
+fi
+echo "  Project number: ${PROJECT_NUMBER}"
+
+# --- Grant the IAP service agent access to invoke the proxy ---
+# gcloud's --iap above already grants the IAP service agent
+# roles/run.invoker itself (serverless_operations._HandleIap), but only
+# warns if that grant fails -- it never fails the deploy. This explicit
+# call is a safety net that makes that failure fatal instead: idempotent
+# (add-iam-policy-binding is a no-op if the binding already exists), so
+# it's a no-op itself on the common path where gcloud's own grant already
+# worked. --condition=None matches this deploy family's existing
+# IAM-binding style (see scripts/cloudrun/deploy.sh's add_project_role)
+# and avoids an interactive "add a condition?" prompt in an org with
+# conditional IAM.
+info "Granting the IAP service agent access to invoke the proxy..."
+IAP_SA_EMAIL="service-${PROJECT_NUMBER}@gcp-sa-iap.iam.gserviceaccount.com"
+gcloud run services add-iam-policy-binding "${PROXY_SERVICE}" \
   --project="${PROJECT_ID}" \
-  --iap \
+  --region="${REGION}" \
+  --member="serviceAccount:${IAP_SA_EMAIL}" \
+  --role="roles/run.invoker" \
+  --condition=None \
   --quiet
-echo "  IAP enabled."
+echo "  IAP service agent can invoke: ${PROXY_SERVICE}"
+
+# --- Verify no allUsers invoker binding remains ---
+# `gcloud beta run deploy --no-allow-unauthenticated` above already asks
+# gcloud to remove any allUsers roles/run.invoker binding when the
+# service already existed (serverless_operations._HandleAllowUnauthenticated),
+# which covers the upgrade path from a prior --allow-unauthenticated
+# deploy. But gcloud only warns if that removal fails -- it never fails
+# the deploy -- so this re-checks explicitly and fails safe: query the
+# current policy first (a fresh deploy, or one where gcloud's own removal
+# already worked, finds nothing and does nothing further -- no removal
+# call, no warning); if allUsers is still bound, try one more removal,
+# and if that also fails, stop the deploy rather than leave the service
+# reachable by anyone.
+info "Verifying no allUsers invoker binding remains..."
+ALLUSERS_STDERR_FILE="$(mktemp)"
+# Re-set (not appended to) the EXIT trap set for SSH_STDERR_FILE earlier:
+# that file has always already removed itself via the explicit `rm -f`
+# calls on both of its own branches by the time this line runs, so
+# referencing it again here is a harmless no-op, not a double-cleanup.
+# Without this, a Ctrl-C or SIGTERM while get-iam-policy is running would
+# leave this one file behind in $TMPDIR (teardown never touches this
+# code path, so there is no other cleanup for it).
+trap 'rm -f "$SSH_STDERR_FILE" "${ALLUSERS_STDERR_FILE:-}"' EXIT
+if ALLUSERS_INVOKER="$(gcloud run services get-iam-policy "${PROXY_SERVICE}" \
+    --project="${PROJECT_ID}" \
+    --region="${REGION}" \
+    --flatten="bindings[].members" \
+    --filter="bindings.role=roles/run.invoker AND bindings.members=allUsers" \
+    --format="value(bindings.members)" 2>"${ALLUSERS_STDERR_FILE}")"; then
+  rm -f "${ALLUSERS_STDERR_FILE}"
+else
+  # Fail closed, not open: an unreadable policy (a transient error, a
+  # permissions gap, ...) is not the same as "verified no allUsers
+  # binding", and treating it that way would silently defeat the whole
+  # point of this check.
+  err "Could not read the IAM policy for ${PROXY_SERVICE} to verify no allUsers invoker binding remains:"
+  if [[ -s "${ALLUSERS_STDERR_FILE}" ]]; then
+    cat "${ALLUSERS_STDERR_FILE}" >&2
+  fi
+  rm -f "${ALLUSERS_STDERR_FILE}"
+  exit 1
+fi
+if [[ -z "$ALLUSERS_INVOKER" ]]; then
+  echo "  No allUsers invoker binding present."
+else
+  warn "Found a legacy allUsers invoker binding on ${PROXY_SERVICE} (likely from a prior --allow-unauthenticated deploy); removing it."
+  if gcloud run services remove-iam-policy-binding "${PROXY_SERVICE}" \
+      --project="${PROJECT_ID}" \
+      --region="${REGION}" \
+      --member="allUsers" \
+      --role="roles/run.invoker" \
+      --condition=None \
+      --quiet 2>/dev/null; then
+    echo "  allUsers invoker binding removed."
+  else
+    err "Could not remove the allUsers invoker binding from ${PROXY_SERVICE}. Refusing to leave this service reachable by allUsers."
+    err "Verify and fix manually: gcloud run services get-iam-policy ${PROXY_SERVICE} --region=${REGION} --project=${PROJECT_ID}"
+    exit 1
+  fi
+fi
 
 # --- Bind IAP access for deployer ---
 info "Binding IAP access for deployer..."
@@ -1455,15 +2160,10 @@ section "Phase 5: Finalize"
 # --- Compute IAP audience ---
 # For Cloud Run services, the IAP audience uses the format:
 #   /projects/PROJECT_NUMBER/locations/REGION/services/SERVICE_NAME
+# PROJECT_NUMBER was already looked up in Phase 4 (needed there first, to
+# address the IAP service agent binding), so this just reuses it.
 info "Computing IAP audience..."
-PROJECT_NUMBER="$(gcloud projects describe "${PROJECT_ID}" \
-  --format="value(projectNumber)" 2>/dev/null)" || true
-if [[ -z "$PROJECT_NUMBER" ]]; then
-  err "Could not determine project number for ${PROJECT_ID}"
-  exit 1
-fi
 IAP_AUDIENCE="/projects/${PROJECT_NUMBER}/locations/${REGION}/services/${PROXY_SERVICE}"
-echo "  Project number: ${PROJECT_NUMBER}"
 echo "  IAP audience:   ${IAP_AUDIENCE}"
 
 # --- Update settings.yaml with proxy auth ---
@@ -1474,6 +2174,14 @@ gcloud compute ssh "${INSTANCE_NAME}" \
     sudo -u scion tee /home/scion/.scion/settings.yaml > /dev/null << 'SETTINGSEOF'
 schema_version: \"1\"
 image_registry: \"${IMAGE_REGISTRY}\"
+# Hub-wide default GCP identity mode for new agents (V1Settings.DefaultGCPIdentityMode
+# in pkg/config, a top-level settings.yaml key, not nested under agent_defaults).
+# passthrough is honoured only on the hub's own embedded broker, which is what a
+# single-node VM always is, so agents inherit the VM service account (already
+# granted roles/aiplatform.user) and authenticate to Vertex AI with no manual
+# setup. Change to \"block\" or \"assign\" via the admin UI or the server-config
+# API if that is not desired; see docs/deploy/agent-runbook-single-node-vm.md §6.3b.
+default_gcp_identity_mode: passthrough
 server:
   hub:
     name: \"${HUB_NAME}\"

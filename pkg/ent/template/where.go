@@ -160,11 +160,6 @@ func SourceURL(v string) predicate.Template {
 	return predicate.Template(sql.FieldEQ(FieldSourceURL, v))
 }
 
-// Visibility applies equality check predicate on the "visibility" field. It's identical to VisibilityEQ.
-func Visibility(v string) predicate.Template {
-	return predicate.Template(sql.FieldEQ(FieldVisibility, v))
-}
-
 // Created applies equality check predicate on the "created" field. It's identical to CreatedEQ.
 func Created(v time.Time) predicate.Template {
 	return predicate.Template(sql.FieldEQ(FieldCreated, v))
@@ -1728,71 +1723,6 @@ func SourceURLEqualFold(v string) predicate.Template {
 // SourceURLContainsFold applies the ContainsFold predicate on the "source_url" field.
 func SourceURLContainsFold(v string) predicate.Template {
 	return predicate.Template(sql.FieldContainsFold(FieldSourceURL, v))
-}
-
-// VisibilityEQ applies the EQ predicate on the "visibility" field.
-func VisibilityEQ(v string) predicate.Template {
-	return predicate.Template(sql.FieldEQ(FieldVisibility, v))
-}
-
-// VisibilityNEQ applies the NEQ predicate on the "visibility" field.
-func VisibilityNEQ(v string) predicate.Template {
-	return predicate.Template(sql.FieldNEQ(FieldVisibility, v))
-}
-
-// VisibilityIn applies the In predicate on the "visibility" field.
-func VisibilityIn(vs ...string) predicate.Template {
-	return predicate.Template(sql.FieldIn(FieldVisibility, vs...))
-}
-
-// VisibilityNotIn applies the NotIn predicate on the "visibility" field.
-func VisibilityNotIn(vs ...string) predicate.Template {
-	return predicate.Template(sql.FieldNotIn(FieldVisibility, vs...))
-}
-
-// VisibilityGT applies the GT predicate on the "visibility" field.
-func VisibilityGT(v string) predicate.Template {
-	return predicate.Template(sql.FieldGT(FieldVisibility, v))
-}
-
-// VisibilityGTE applies the GTE predicate on the "visibility" field.
-func VisibilityGTE(v string) predicate.Template {
-	return predicate.Template(sql.FieldGTE(FieldVisibility, v))
-}
-
-// VisibilityLT applies the LT predicate on the "visibility" field.
-func VisibilityLT(v string) predicate.Template {
-	return predicate.Template(sql.FieldLT(FieldVisibility, v))
-}
-
-// VisibilityLTE applies the LTE predicate on the "visibility" field.
-func VisibilityLTE(v string) predicate.Template {
-	return predicate.Template(sql.FieldLTE(FieldVisibility, v))
-}
-
-// VisibilityContains applies the Contains predicate on the "visibility" field.
-func VisibilityContains(v string) predicate.Template {
-	return predicate.Template(sql.FieldContains(FieldVisibility, v))
-}
-
-// VisibilityHasPrefix applies the HasPrefix predicate on the "visibility" field.
-func VisibilityHasPrefix(v string) predicate.Template {
-	return predicate.Template(sql.FieldHasPrefix(FieldVisibility, v))
-}
-
-// VisibilityHasSuffix applies the HasSuffix predicate on the "visibility" field.
-func VisibilityHasSuffix(v string) predicate.Template {
-	return predicate.Template(sql.FieldHasSuffix(FieldVisibility, v))
-}
-
-// VisibilityEqualFold applies the EqualFold predicate on the "visibility" field.
-func VisibilityEqualFold(v string) predicate.Template {
-	return predicate.Template(sql.FieldEqualFold(FieldVisibility, v))
-}
-
-// VisibilityContainsFold applies the ContainsFold predicate on the "visibility" field.
-func VisibilityContainsFold(v string) predicate.Template {
-	return predicate.Template(sql.FieldContainsFold(FieldVisibility, v))
 }
 
 // CreatedEQ applies the EQ predicate on the "created" field.

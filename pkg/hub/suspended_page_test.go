@@ -413,6 +413,86 @@ func TestProxyAuth_DeletedUser_ClearsSession(t *testing.T) {
 	assert.Equal(t, "/login", rec2.Header().Get("Location"))
 }
 
+// TestProxyAuth_PlatformAuthSA_Denied covers the web proxy-auth path's own
+// find-or-create (it does not go through Server.provisionUser, so it carries
+// an independent check): the configured transport service account arriving
+// as a verified proxy identity must be denied, must not get a user row, and
+// must not get a session or Hub tokens issued.
+func TestProxyAuth_PlatformAuthSA_Denied(t *testing.T) {
+	const sa = "transport-sa@example.iam.gserviceaccount.com"
+	mockAuth := &mockProxyAuthenticator{
+		user: &ProxyUserInfo{
+			Subject: "12345",
+			Email:   sa,
+			Domain:  "example.iam.gserviceaccount.com",
+		},
+	}
+
+	st := newProxyAuthStore()
+	ws := newTestWebServer(t, WebServerConfig{
+		AuthMode:           "proxy",
+		ProxyAuthenticator: mockAuth,
+		PlatformAuthSA:     sa,
+	})
+	ws.SetAccessSettingsProvider(&staticAccessSettings{adminEmails: []string{}})
+	ws.SetStore(st)
+	tokenSvc, err := NewUserTokenService(UserTokenConfig{})
+	require.NoError(t, err)
+	ws.SetUserTokenService(tokenSvc)
+	handler := ws.Handler()
+
+	req := httptest.NewRequest("GET", "/projects", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Empty(t, rec.Result().Cookies(),
+		"no session (and therefore no Hub access/refresh token) should be issued for the configured service account")
+
+	_, lookupErr := st.GetUserByEmail(context.Background(), sa)
+	assert.ErrorIs(t, lookupErr, store.ErrNotFound,
+		"no user row should be created for the configured service account")
+}
+
+// TestProxyAuth_NormalUser_UnaffectedByPlatformAuthSA is a regression check:
+// configuring a platform auth SA does not change proxy-auth provisioning for
+// any other identity.
+func TestProxyAuth_NormalUser_UnaffectedByPlatformAuthSA(t *testing.T) {
+	mockAuth := &mockProxyAuthenticator{
+		user: &ProxyUserInfo{
+			Subject: "12345",
+			Email:   "proxy-user@example.com",
+			Domain:  "example.com",
+		},
+	}
+
+	st := newProxyAuthStore()
+	ws := newTestWebServer(t, WebServerConfig{
+		AuthMode:           "proxy",
+		ProxyAuthenticator: mockAuth,
+		PlatformAuthSA:     "transport-sa@example.iam.gserviceaccount.com",
+	})
+	ws.SetAccessSettingsProvider(&staticAccessSettings{adminEmails: []string{}})
+	ws.SetStore(st)
+	tokenSvc, err := NewUserTokenService(UserTokenConfig{})
+	require.NoError(t, err)
+	ws.SetUserTokenService(tokenSvc)
+	handler := ws.Handler()
+
+	req := httptest.NewRequest("GET", "/projects", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.NotEqual(t, http.StatusForbidden, rec.Code)
+	assert.NotEmpty(t, rec.Result().Cookies(), "a normal user should get a session")
+
+	created, err := st.GetUserByEmail(context.Background(), "proxy-user@example.com")
+	require.NoError(t, err, "a normal user should still be provisioned")
+	assert.Equal(t, "proxy-user@example.com", created.Email)
+}
+
 func TestProxyAuth_NewLogin_SuspendedUser_ServesPage(t *testing.T) {
 	// Verifies that proxy mode serves the suspended page when a known
 	// suspended user attempts to login through proxy auth (no existing session).

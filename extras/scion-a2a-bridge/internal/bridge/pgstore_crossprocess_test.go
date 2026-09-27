@@ -2554,6 +2554,7 @@ func TestExtractUserIDFromTopic(t *testing.T) {
 	}{
 		{"user topic", "scion.project.p1.user.u123.messages", "u123"},
 		{"agent topic", "scion.project.p1.agent.a1.messages", ""},
+		{"legacy grove topic", "scion.grove.p1.user.u123.messages", ""},
 		{"malformed", "invalid", ""},
 		{"empty", "", ""},
 	}

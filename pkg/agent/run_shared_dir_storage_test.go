@@ -213,6 +213,8 @@ func TestStartSharedDirStorage_GlobalWinsOverProjectLevel(t *testing.T) {
 	f := newSharedDirStorageRunFixture(t)
 
 	globalMountRoot := filepath.Join(f.tmpDir, "global-nfs")
+	// The host base must exist regardless of runtime.
+	require.NoError(t, os.MkdirAll(filepath.Join(globalMountRoot, "global-share"), 0o775))
 	f.writeGlobalSettings(t, sprintfServerYAML(sharedDirStorageNFSGlobalYAML, globalMountRoot, "global-share", "global-pv"))
 
 	// Project tries to disable NFS entirely — must have no effect.
@@ -339,7 +341,7 @@ func TestStartSharedDirStorageNFS_MissingProjectID_ErrorsAndNeverRuns(t *testing
 		NoAuth:      true,
 		Env: map[string]string{
 			"SCION_AGENT_ID": "agent-4",
-			// No SCION_PROJECT_ID / SCION_GROVE_ID.
+			// No SCION_PROJECT_ID.
 		},
 		SharedDirs: []api.SharedDir{{Name: "scratchpad"}},
 	})
@@ -350,7 +352,7 @@ func TestStartSharedDirStorageNFS_MissingProjectID_ErrorsAndNeverRuns(t *testing
 
 // TestStartSharedDirStorageNFS_ProjectSettingsProjectID_Ignored is round 2
 // review item 3 (S-F4): the nfs branch must use only the dispatch-provided
-// SCION_PROJECT_ID/SCION_GROVE_ID (opts.Env), never the broker-local
+// SCION_PROJECT_ID (opts.Env), never the broker-local
 // project-settings fallback (settings.Hub.ProjectID) that the general
 // projectID variable elsewhere in run.go may carry. A project's settings —
 // including in-repo settings.yaml content from a cloned repository — must
@@ -382,7 +384,7 @@ hub:
 		NoAuth:      true,
 		Env: map[string]string{
 			"SCION_AGENT_ID": "agent-8",
-			// No SCION_PROJECT_ID / SCION_GROVE_ID — only the project
+			// No SCION_PROJECT_ID — only the project
 			// settings' hub.project_id, which the nfs branch must ignore.
 		},
 		SharedDirs: []api.SharedDir{{Name: "scratchpad"}},
@@ -428,7 +430,7 @@ harness_configs:
 		NoAuth:      true,
 		Env: map[string]string{
 			"SCION_AGENT_ID": "agent-9",
-			// No SCION_PROJECT_ID / SCION_GROVE_ID — only the harness
+			// No SCION_PROJECT_ID — only the harness
 			// config's env, which the nfs branch must not pick up.
 		},
 		SharedDirs: []api.SharedDir{{Name: "scratchpad"}},
@@ -438,22 +440,19 @@ harness_configs:
 	assert.Equal(t, 0, ranCount, "Run must never be called when a harness-config env project ID is used instead of the dispatch-provided one")
 }
 
-// TestStartSharedDirStorageNFS_HarnessConfigEnvGroveID_Ignored is the
-// SCION_GROVE_ID variant of the same finding (C1/S-L1).
-func TestStartSharedDirStorageNFS_HarnessConfigEnvGroveID_Ignored(t *testing.T) {
+// TestStartSharedDirStorageNFS_GroveIDAlone_FailsClosed proves that
+// SCION_GROVE_ID is no longer read as a project-id fallback: with only that
+// (removed) variable set and no SCION_PROJECT_ID anywhere, Start must fail
+// closed exactly as if no project ID were configured at all, and Run must
+// never be called.
+func TestStartSharedDirStorageNFS_GroveIDAlone_FailsClosed(t *testing.T) {
 	f := newSharedDirStorageRunFixture(t)
 	f.writeGlobalSettings(t, sprintfServerYAML(sharedDirStorageNFSGlobalYAML, filepath.Join(f.tmpDir, "srv"), "share", "pv"))
-	require.NoError(t, os.WriteFile(filepath.Join(f.projectScionDir, "settings.yaml"), []byte(`schema_version: "1"
-harness_configs:
-  test-harness:
-    harness: gemini
-    env:
-      SCION_GROVE_ID: victim-project
-`), 0644))
+	f.writeProjectSettings(t, "")
 
 	ranCount := 0
 	mockRT := &runtime.MockRuntime{
-		NameFunc: func() string { return "docker" },
+		NameFunc: func() string { return "kubernetes" },
 		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
 			ranCount++
 			return "mock-id", nil
@@ -467,47 +466,14 @@ harness_configs:
 		NoAuth:      true,
 		Env: map[string]string{
 			"SCION_AGENT_ID": "agent-10",
+			"SCION_GROVE_ID": "grove-pid",
+			// No SCION_PROJECT_ID: SCION_GROVE_ID is no longer read.
 		},
 		SharedDirs: []api.SharedDir{{Name: "scratchpad"}},
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "hub project ID")
-	assert.Equal(t, 0, ranCount, "Run must never be called when a harness-config env grove ID is used instead of the dispatch-provided one")
-}
-
-// TestStartSharedDirStorageNFS_GroveIDFallback_Succeeds is round 3 test
-// review Low #3 / disposition item 1's T3: the SCION_GROVE_ID fallback
-// (older hubs / grove-era dispatch) must still work when it is the
-// dispatch-provided value, not a project-settings injection.
-func TestStartSharedDirStorageNFS_GroveIDFallback_Succeeds(t *testing.T) {
-	f := newSharedDirStorageRunFixture(t)
-	f.writeGlobalSettings(t, sprintfServerYAML(sharedDirStorageNFSGlobalYAML, filepath.Join(f.tmpDir, "srv"), "share", "pv"))
-	f.writeProjectSettings(t, "")
-
-	var capturedConfig runtime.RunConfig
-	mockRT := &runtime.MockRuntime{
-		NameFunc: func() string { return "kubernetes" },
-		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
-			capturedConfig = config
-			return "mock-id", nil
-		},
-	}
-	mgr := NewManager(mockRT)
-
-	_, err := mgr.Start(context.Background(), api.StartOptions{
-		Name:        "test-agent",
-		ProjectPath: f.projectScionDir,
-		NoAuth:      true,
-		Env: map[string]string{
-			"SCION_AGENT_ID": "agent-11",
-			"SCION_GROVE_ID": "grove-pid",
-			// No SCION_PROJECT_ID.
-		},
-		SharedDirs: []api.SharedDir{{Name: "scratchpad"}},
-	})
-	require.NoError(t, err)
-	require.NotNil(t, capturedConfig.SharedDirStorage)
-	assert.Equal(t, "projects/grove-pid/shared-dirs/scratchpad", capturedConfig.SharedDirStorage.SubPaths["scratchpad"])
+	assert.Equal(t, 0, ranCount, "Run must never be called: SCION_GROVE_ID is no longer a project-id fallback")
 }
 
 // TestStartSharedDirStorageNFS_AmbientHubEnv_ColidingVar_StillSucceeds is the
@@ -530,6 +496,8 @@ func TestStartSharedDirStorageNFS_AmbientHubEnv_ColidingVar_StillSucceeds(t *tes
 	for _, name := range collidingVars {
 		t.Run(name, func(t *testing.T) {
 			f := newSharedDirStorageRunFixture(t)
+			// The host base must exist regardless of runtime.
+			require.NoError(t, os.MkdirAll(filepath.Join(f.tmpDir, "srv", "share"), 0o775))
 			f.writeGlobalSettings(t, sprintfServerYAML(sharedDirStorageNFSGlobalYAML, filepath.Join(f.tmpDir, "srv"), "share", "pv"))
 			f.writeProjectSettings(t, "")
 

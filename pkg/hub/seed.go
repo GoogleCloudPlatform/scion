@@ -1266,9 +1266,26 @@ func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails
 }
 
 // seedLimitDefinitions creates the system limit definitions if they don't
-// already exist. Shipped with DefaultValue=0 (unlimited) for discoverability
-// per sponsor decision OQ-2 Option B. It is called once during Hub
-// initialization and is idempotent.
+// already exist. Most are shipped with DefaultValue=0 (unlimited) for
+// discoverability per sponsor decision OQ-2 Option B — opt-in fairness
+// quotas that do nothing until an operator sets them. It is called once
+// during Hub initialization and is idempotent.
+//
+// max_agents_per_broker is the deliberate exception: it is an infra-scoped
+// crash-prevention gate, not a per-user/per-project fairness quota
+// (ptone/scion#1303 — exceeding a runtime broker's agent capacity destroys
+// the whole Instance it runs on, including the control plane in the
+// single-node tier, after already returning HTTP 201). Seeding it at 0 would
+// leave every new deployment exposed to that crash until an operator
+// discovers and sets the limit, which defeats the fix. The default below is
+// a conservative flat number safe for the smallest supported tier (4
+// CPU/8 GiB observed a ~17-18 agent ceiling); operators on larger tiers, or
+// running multiple brokers of different sizes, can raise it per broker via
+// the existing admin limits/entitlements API (scope_type=broker,
+// scope_id=<broker ID>) once they know their own headroom — the relationship
+// between host size and ceiling is not linear (see
+// .design/hosted/cloud-run-single-node.md §9.1), so no formula is offered
+// here, only an override.
 func seedLimitDefinitions(ctx context.Context, s store.Store) {
 	systemLimits := []struct {
 		name         string
@@ -1280,6 +1297,7 @@ func seedLimitDefinitions(ctx context.Context, s store.Store) {
 		{store.LimitMaxAgentsPerProject, "agent", "count", "Maximum agents per project", 0},
 		{store.LimitMaxProjectsPerUser, "project", "count", "Maximum projects per user", 0},
 		{store.LimitMaxMembersPerGroup, "group", "count", "Maximum members per group", 0},
+		{store.LimitMaxAgentsPerBroker, "agent", "count", "Maximum concurrently live agents per runtime broker (crash-prevention ceiling, ptone/scion#1303)", 12},
 	}
 
 	for _, lim := range systemLimits {

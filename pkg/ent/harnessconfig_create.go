@@ -280,20 +280,6 @@ func (_c *HarnessConfigCreate) SetNillableSourceURL(v *string) *HarnessConfigCre
 	return _c
 }
 
-// SetVisibility sets the "visibility" field.
-func (_c *HarnessConfigCreate) SetVisibility(v string) *HarnessConfigCreate {
-	_c.mutation.SetVisibility(v)
-	return _c
-}
-
-// SetNillableVisibility sets the "visibility" field if the given value is not nil.
-func (_c *HarnessConfigCreate) SetNillableVisibility(v *string) *HarnessConfigCreate {
-	if v != nil {
-		_c.SetVisibility(*v)
-	}
-	return _c
-}
-
 // SetCreated sets the "created" field.
 func (_c *HarnessConfigCreate) SetCreated(v time.Time) *HarnessConfigCreate {
 	_c.mutation.SetCreated(v)
@@ -383,10 +369,6 @@ func (_c *HarnessConfigCreate) defaults() {
 		v := harnessconfig.DefaultImageStatus
 		_c.mutation.SetImageStatus(v)
 	}
-	if _, ok := _c.mutation.Visibility(); !ok {
-		v := harnessconfig.DefaultVisibility
-		_c.mutation.SetVisibility(v)
-	}
 	if _, ok := _c.mutation.Created(); !ok {
 		v := harnessconfig.DefaultCreated()
 		_c.mutation.SetCreated(v)
@@ -445,9 +427,6 @@ func (_c *HarnessConfigCreate) check() error {
 		if err := harnessconfig.ImageStatusValidator(v); err != nil {
 			return &ValidationError{Name: "image_status", err: fmt.Errorf(`ent: validator failed for field "HarnessConfig.image_status": %w`, err)}
 		}
-	}
-	if _, ok := _c.mutation.Visibility(); !ok {
-		return &ValidationError{Name: "visibility", err: errors.New(`ent: missing required field "HarnessConfig.visibility"`)}
 	}
 	if _, ok := _c.mutation.Created(); !ok {
 		return &ValidationError{Name: "created", err: errors.New(`ent: missing required field "HarnessConfig.created"`)}
@@ -570,10 +549,6 @@ func (_c *HarnessConfigCreate) createSpec() (*HarnessConfig, *sqlgraph.CreateSpe
 	if value, ok := _c.mutation.SourceURL(); ok {
 		_spec.SetField(harnessconfig.FieldSourceURL, field.TypeString, value)
 		_node.SourceURL = value
-	}
-	if value, ok := _c.mutation.Visibility(); ok {
-		_spec.SetField(harnessconfig.FieldVisibility, field.TypeString, value)
-		_node.Visibility = value
 	}
 	if value, ok := _c.mutation.Created(); ok {
 		_spec.SetField(harnessconfig.FieldCreated, field.TypeTime, value)
@@ -956,18 +931,6 @@ func (u *HarnessConfigUpsert) UpdateSourceURL() *HarnessConfigUpsert {
 // ClearSourceURL clears the value of the "source_url" field.
 func (u *HarnessConfigUpsert) ClearSourceURL() *HarnessConfigUpsert {
 	u.SetNull(harnessconfig.FieldSourceURL)
-	return u
-}
-
-// SetVisibility sets the "visibility" field.
-func (u *HarnessConfigUpsert) SetVisibility(v string) *HarnessConfigUpsert {
-	u.Set(harnessconfig.FieldVisibility, v)
-	return u
-}
-
-// UpdateVisibility sets the "visibility" field to the value that was provided on create.
-func (u *HarnessConfigUpsert) UpdateVisibility() *HarnessConfigUpsert {
-	u.SetExcluded(harnessconfig.FieldVisibility)
 	return u
 }
 
@@ -1409,20 +1372,6 @@ func (u *HarnessConfigUpsertOne) UpdateSourceURL() *HarnessConfigUpsertOne {
 func (u *HarnessConfigUpsertOne) ClearSourceURL() *HarnessConfigUpsertOne {
 	return u.Update(func(s *HarnessConfigUpsert) {
 		s.ClearSourceURL()
-	})
-}
-
-// SetVisibility sets the "visibility" field.
-func (u *HarnessConfigUpsertOne) SetVisibility(v string) *HarnessConfigUpsertOne {
-	return u.Update(func(s *HarnessConfigUpsert) {
-		s.SetVisibility(v)
-	})
-}
-
-// UpdateVisibility sets the "visibility" field to the value that was provided on create.
-func (u *HarnessConfigUpsertOne) UpdateVisibility() *HarnessConfigUpsertOne {
-	return u.Update(func(s *HarnessConfigUpsert) {
-		s.UpdateVisibility()
 	})
 }
 
@@ -2033,20 +1982,6 @@ func (u *HarnessConfigUpsertBulk) UpdateSourceURL() *HarnessConfigUpsertBulk {
 func (u *HarnessConfigUpsertBulk) ClearSourceURL() *HarnessConfigUpsertBulk {
 	return u.Update(func(s *HarnessConfigUpsert) {
 		s.ClearSourceURL()
-	})
-}
-
-// SetVisibility sets the "visibility" field.
-func (u *HarnessConfigUpsertBulk) SetVisibility(v string) *HarnessConfigUpsertBulk {
-	return u.Update(func(s *HarnessConfigUpsert) {
-		s.SetVisibility(v)
-	})
-}
-
-// UpdateVisibility sets the "visibility" field to the value that was provided on create.
-func (u *HarnessConfigUpsertBulk) UpdateVisibility() *HarnessConfigUpsertBulk {
-	return u.Update(func(s *HarnessConfigUpsert) {
-		s.UpdateVisibility()
 	})
 }
 

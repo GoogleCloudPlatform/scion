@@ -40,7 +40,6 @@ func TestGetRuntime(t *testing.T) {
 		// Ensure we are not picking up some random settings file
 		tmpHome := t.TempDir()
 		t.Setenv("HOME", tmpHome)
-		t.Setenv("SCION_GROVE", "") // Ensure no project path influence
 
 		r := GetRuntime("", "")
 		// On Linux, default "local" profile maps to DockerRuntime
@@ -232,7 +231,6 @@ active_profile: apple
 
 		tmpHome := t.TempDir()
 		t.Setenv("HOME", tmpHome)
-		t.Setenv("SCION_GROVE", "")
 		t.Setenv("K_SERVICE", "scion-hub")
 
 		oldWd, _ := os.Getwd()
@@ -255,7 +253,6 @@ active_profile: apple
 
 		tmpHome := t.TempDir()
 		t.Setenv("HOME", tmpHome)
-		t.Setenv("SCION_GROVE", "")
 		t.Setenv("K_SERVICE", "")
 
 		oldWd, _ := os.Getwd()
@@ -312,7 +309,6 @@ func TestGetRuntime_CloudRun_Precedence_Over_Docker(t *testing.T) {
 
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
-	t.Setenv("SCION_GROVE", "")
 	t.Setenv("K_SERVICE", "scion-hub")
 
 	oldWd, _ := os.Getwd()

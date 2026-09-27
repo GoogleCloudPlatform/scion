@@ -178,7 +178,6 @@ func TestGetRuntime_CloudRunSandbox_DirectProfileName(t *testing.T) {
 
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
-	t.Setenv("SCION_GROVE", "")
 
 	globalDir := filepath.Join(tmpHome, ".scion")
 	if err := os.MkdirAll(globalDir, 0755); err != nil {
@@ -249,7 +248,6 @@ func TestGetRuntime_CloudRunInstance_Precedence_Over_Docker(t *testing.T) {
 
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
-	t.Setenv("SCION_GROVE", "")
 	t.Setenv("CLOUD_RUN_INSTANCE", "instance-1")
 	t.Setenv("K_SERVICE", "")
 
@@ -668,11 +666,11 @@ func TestEnvFor_BasicEnv(t *testing.T) {
 	if env["SCION_PROJECT_ID"] != "proj-123" {
 		t.Errorf("SCION_PROJECT_ID = %q, want %q", env["SCION_PROJECT_ID"], "proj-123")
 	}
-	if env["SCION_GROVE"] != "my-project" {
-		t.Errorf("SCION_GROVE = %q, want %q", env["SCION_GROVE"], "my-project")
+	if _, ok := env["SCION_GROVE"]; ok {
+		t.Errorf("SCION_GROVE should not be set, got %q", env["SCION_GROVE"])
 	}
-	if env["SCION_GROVE_ID"] != "proj-123" {
-		t.Errorf("SCION_GROVE_ID = %q, want %q", env["SCION_GROVE_ID"], "proj-123")
+	if _, ok := env["SCION_GROVE_ID"]; ok {
+		t.Errorf("SCION_GROVE_ID should not be set, got %q", env["SCION_GROVE_ID"])
 	}
 
 	// Check UID/GID are set to the scion user (non-root).
@@ -922,10 +920,9 @@ func TestP3a_EnvForBehaviourIdentity(t *testing.T) {
 		"SCION_TRANSPORT_TOKEN=FAKE-AUTH-SENTINEL-not-a-real-credential",
 		// Broker-side plain (B1-B22 plain subset)
 		"SCION_AGENT_ID=agent-001",
-		// Note: SCION_GROVE_ID and SCION_PROJECT_ID are set by envFor() from
-		// cfg.ProjectID, overwriting any broker-env value. They appear in
-		// envForOwnKeys below, not here.
-		//   "SCION_GROVE_ID" → cfg.ProjectID
+		// Note: SCION_PROJECT_ID is set by envFor() from cfg.ProjectID,
+		// overwriting any broker-env value. It appears in envForOwnKeys
+		// below, not here.
 		//   "SCION_PROJECT_ID" → cfg.ProjectID
 		"SCION_AGENT_SLUG=test-agent",
 		"SCION_HUB_ENDPOINT=https://hub.example.com",
@@ -966,14 +963,19 @@ func TestP3a_EnvForBehaviourIdentity(t *testing.T) {
 	// not by the broker, and must not disappear due to P3a).
 	envForOwnKeys := []string{
 		"PATH", "HOME", "USER", "LOGNAME",
-		"SCION_PROJECT", "SCION_GROVE",
-		"SCION_PROJECT_ID", "SCION_GROVE_ID",
+		"SCION_PROJECT",
+		"SCION_PROJECT_ID",
 		"SCION_HOST_UID", "SCION_HOST_GID",
 		"SCION_WORKSPACE_PATH",
 	}
 	for _, key := range envForOwnKeys {
 		if _, ok := env[key]; !ok {
 			t.Errorf("envFor() own key %q missing from output", key)
+		}
+	}
+	for _, key := range []string{"SCION_GROVE", "SCION_GROVE_ID"} {
+		if _, ok := env[key]; ok {
+			t.Errorf("envFor() output should not contain legacy key %q", key)
 		}
 	}
 

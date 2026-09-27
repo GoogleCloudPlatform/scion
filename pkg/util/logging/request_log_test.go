@@ -183,13 +183,13 @@ func TestExtractIDsFromPath(t *testing.T) {
 		projectID string
 		agentID   string
 	}{
-		{"/api/v1/groves/my-project/agents", "my-project", ""},
-		{"/api/v1/groves/my-project", "my-project", ""},
+		{"/api/v1/projects/my-project/agents", "my-project", ""},
+		{"/api/v1/projects/my-project", "my-project", ""},
 		{"/api/v1/agents/agent-42", "", "agent-42"},
 		{"/api/v1/agents/agent-42/start", "", "agent-42"},
 		{"/api/v1/info", "", ""},
 		{"/healthz", "", ""},
-		{"/api/v1/groves/", "", ""},
+		{"/api/v1/projects/", "", ""},
 	}
 
 	for _, tt := range tests {
@@ -216,7 +216,7 @@ func TestRequestLogMiddleware_ProducesCorrectJSON(t *testing.T) {
 		}),
 	)
 
-	req := httptest.NewRequest("GET", "/api/v1/groves/test-project/agents", nil)
+	req := httptest.NewRequest("GET", "/api/v1/projects/test-project/agents", nil)
 	req.Header.Set("User-Agent", "scion-cli/0.1.0")
 	rec := httptest.NewRecorder()
 

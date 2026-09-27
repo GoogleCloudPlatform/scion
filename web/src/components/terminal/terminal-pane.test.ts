@@ -41,6 +41,7 @@ class FakeSocket {
   readyState = 0;
   onopen: (() => void) | null = null;
   onclose: ((event: { code: number }) => void) | null = null;
+  onmessage: ((event: { data: unknown }) => void) | null = null;
   send = vi.fn();
   close = vi.fn();
   constructor() {
@@ -49,6 +50,13 @@ class FakeSocket {
   open() {
     this.readyState = 1;
     this.onopen?.();
+  }
+  /**
+   * A data frame is what actually confirms the stream is live, not bare
+   * onopen. Simulates tmux's redraw on attach.
+   */
+  data(payload = '') {
+    this.onmessage?.({ data: JSON.stringify({ type: 'data', data: btoa(payload) }) });
   }
 }
 class FakeEventSource extends EventTarget {
@@ -126,6 +134,7 @@ async function mountConnected() {
   frames.shift()?.(0);
   await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(1));
   FakeSocket.instances[0].open();
+  FakeSocket.instances[0].data(); // confirms the stream live
   await page.updateComplete;
 }
 
@@ -291,6 +300,7 @@ describe('hidden pane interaction isolation (P1.8)', () => {
     const xt = terminal.instances[0];
     xt.focus.mockClear();
     FakeSocket.instances[0].open();
+    FakeSocket.instances[0].data();
     await page.updateComplete;
     // Terminal should NOT have been focused since pane is hidden
     expect(xt.focus).not.toHaveBeenCalled();
@@ -399,4 +409,317 @@ it('a failed metadata snapshot does not remove the independently authorized term
   });
   expect(page.shadowRoot?.querySelector('.terminal-container')).not.toBeNull();
   expect(page.shadowRoot?.textContent).toContain('metadata unavailable');
+});
+
+describe('bind-after-mount still arms frontmost', () => {
+  it('a pane mounted before open() (the legacy page order) still auto-reconnects on a retriable close', async () => {
+    const registry2 = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'account-r3',
+    });
+    const page2 = document.createElement('scion-terminal-pane') as ScionTerminalPane;
+    // connectedCallback runs with no session bound yet — the exact order that
+    // pages/terminal.ts uses (mount the shell, then open()).
+    document.body.append(page2);
+    try {
+      page2.open(registry2, agentId);
+      await vi.waitFor(() => {
+        frames.splice(0).forEach((frame) => frame(0));
+        expect(FakeSocket.instances.length).toBeGreaterThanOrEqual(1);
+      });
+      const socket = FakeSocket.instances[FakeSocket.instances.length - 1];
+      socket.open();
+      socket.data(); // confirms the stream live before the drop below
+      await page2.updateComplete;
+      const session = page2.session!;
+      socket.readyState = 3;
+      socket.onclose?.({ code: 1006 });
+      // Without binding frontmost state on this path, it would stay false
+      // forever, and this session would never attempt again without an
+      // explicit visibility event.
+      expect(session.reconnecting).toBe(true);
+    } finally {
+      page2.dispose();
+      page2.remove();
+    }
+  });
+});
+
+describe('document visibilitychange feeds frontmost', () => {
+  afterEach(() => {
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
+  });
+
+  it('a hidden document suppresses auto-reconnect; becoming visible triggers it', async () => {
+    await mountConnected();
+    const session = page.session!;
+    Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+
+    FakeSocket.instances[0].readyState = 3;
+    FakeSocket.instances[0].onclose?.({ code: 1006 });
+    expect(session.reconnecting).toBe(false);
+    expect(FakeSocket.instances).toHaveLength(1);
+
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+    expect(session.reconnecting).toBe(true);
+  });
+
+  it('removes the visibilitychange listener on disconnectedCallback', async () => {
+    await mountConnected();
+    const removed = vi.spyOn(document, 'removeEventListener');
+    page.remove();
+    expect(removed).toHaveBeenCalledWith('visibilitychange', expect.any(Function));
+  });
+});
+
+describe('overlay strings', () => {
+  it('shows RECONNECTING... with a spinner while an attempt is in flight', async () => {
+    await mountConnected();
+    FakeSocket.instances[0].readyState = 3;
+    FakeSocket.instances[0].onclose?.({ code: 4503 });
+    await page.updateComplete;
+    expect(page.shadowRoot?.textContent).toContain('RECONNECTING...');
+    expect(page.shadowRoot?.querySelector('.disconnected-overlay sl-spinner')).toBeTruthy();
+  });
+
+  // Pins the intended derivation, not a regression guard.
+  // `applySessionState` only runs on session update(), and `pending` clears
+  // in `finally` without one, so the pane's last-seen `reconnecting` value
+  // never actually goes stale under today's code — nothing else notifies
+  // while `connecting` (resize/sendData are gated on `connected`, and pongs
+  // don't notify either). This assertion therefore cannot fail if `attempting`
+  // is reverted to derive from `session.reconnecting`; keeping the
+  // connection-based derivation is still correct defensively.
+  it('shows RECONNECTING... while still waiting for the handshake, after session.reconnecting has cleared', async () => {
+    await mountConnected();
+    FakeSocket.instances[0].readyState = 3;
+    FakeSocket.instances[0].onclose?.({ code: 4503 }); // triggers the automatic attempt
+    await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(2));
+    // The reconnect socket now exists (connection === 'connecting'), but it
+    // has not opened yet, and `pending` (session.reconnecting) has already
+    // cleared, well before the handshake finishes.
+    await vi.waitFor(() => expect(page.session?.reconnecting).toBe(false));
+    await page.updateComplete;
+    expect(page.shadowRoot?.textContent).toContain('RECONNECTING...');
+    expect(page.shadowRoot?.querySelector('.disconnected-overlay sl-spinner')).toBeTruthy();
+  });
+
+  it('shows the exact copy, pinned rather than matched as a substring, once an automatic attempt fails', async () => {
+    await mountConnected();
+    FakeSocket.instances[0].readyState = 3;
+    FakeSocket.instances[0].onclose?.({ code: 4503 }); // frontmost: one automatic attempt
+    await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(2));
+    FakeSocket.instances[1].readyState = 3;
+    FakeSocket.instances[1].onclose?.({ code: 4503 }); // that attempt also fails
+    await page.updateComplete;
+    // toBe (not toContain), so a stray trailing period fails.
+    expect(page.shadowRoot?.querySelector('.overlay-detail')?.textContent?.trim()).toBe(
+      'Automatic reconnection failed, try manually reconnecting later'
+    );
+  });
+
+  it('shows the exact neutral copy, pinned rather than matched as a substring, after a failed manual reconnect', async () => {
+    await mountConnected();
+    FakeSocket.instances[0].readyState = 3;
+    FakeSocket.instances[0].onclose?.({ code: 1000 }); // detached: terminal, no auto attempt
+    await page.updateComplete;
+    fetcher
+      .mockResolvedValueOnce(json({ id: agentId, name: 'test', phase: 'running' }))
+      .mockResolvedValueOnce(json({}, 503));
+    page.shadowRoot?.querySelector<HTMLButtonElement>('.overlay-reconnect')?.click();
+    await vi.waitFor(() => {
+      expect(page.shadowRoot?.querySelector('.overlay-detail')?.textContent?.trim()).toBe(
+        'Reconnection failed, try manually reconnecting later'
+      );
+    });
+    expect(FakeSocket.instances).toHaveLength(1); // preflight failed before a new socket
+  });
+});
+
+// The pane chrome (toolbar, buttons, dialogs, loading/error states) must
+// follow the app theme; only the terminal viewport and the overlays drawn on
+// it may pin a literal (dark) palette. This is a denylist over every rule, so
+// new chrome rules are covered without updating a selector list.
+// See miller79/scion#133.
+describe('theme', () => {
+  let TERMINAL_BACKGROUND = '';
+  beforeAll(async () => {
+    ({ TERMINAL_BACKGROUND } = await import('./terminal-pane.js'));
+  });
+  // A viewport selector must end the class name exactly (so, for example,
+  // .terminal-wrapper-foo is not exempt).
+  const VIEWPORT =
+    /^\.(terminal-wrapper|terminal-container|disconnected-overlay|drop-overlay)(?=[\s.:#[>+~]|$)/;
+  // Colour-bearing properties, including shadows and every custom property
+  // (for example --sl-panel-background-color or --indicator-color); custom
+  // properties with non-colour values never match LITERAL_COLOR.
+  const COLOR_PROPS =
+    /^(color|background(-color)?|border(-(top|right|bottom|left))?(-color)?|outline(-color)?|fill|stroke|box-shadow|text-shadow|--[\w-]+)$/;
+  const LITERAL_COLOR = /#[0-9a-f]{3,8}\b|\b(rgba?|hsla?)\(|\b(white|black)\b/i;
+  // var(--scion-x) and var(--scion-x, <fallback>), including one level of
+  // nested parentheses in the fallback (for example rgba(...)).
+  const SCION_VAR = /var\(\s*--scion-[\w-]+\s*(?:,(?:[^()]|\([^()]*\))*)?\)/g;
+
+  /** Leaf style rules from Lit cssText, skipping @keyframes contents. */
+  function styleRules(cssText: string): Array<{ selector: string; body: string }> {
+    const rules: Array<{ selector: string; body: string }> = [];
+    const stack: string[] = [];
+    let buf = '';
+    for (const ch of cssText.replace(/\/\*[\s\S]*?\*\//g, '')) {
+      if (ch === '{') {
+        stack.push(buf.trim());
+        buf = '';
+      } else if (ch === '}') {
+        const selector = stack.pop() ?? '';
+        if (!selector.startsWith('@') && !stack.some((s) => s.startsWith('@keyframes'))) {
+          rules.push({ selector, body: buf });
+        }
+        buf = '';
+      } else {
+        buf += ch;
+      }
+    }
+    return rules;
+  }
+
+  function paneStyles(): string {
+    const ctor = customElements.get('scion-terminal-pane') as unknown as {
+      styles: { cssText: string };
+    };
+    return ctor.styles.cssText;
+  }
+
+  it('uses only --scion-* tokens for colours outside the terminal viewport', () => {
+    const rules = styleRules(paneStyles());
+    expect(rules.length).toBeGreaterThan(20);
+    const offenders: string[] = [];
+    for (const { selector, body } of rules) {
+      const parts = selector.split(',').map((p) => p.trim());
+      if (parts.every((p) => VIEWPORT.test(p))) continue;
+      for (const decl of body.split(';')) {
+        const idx = decl.indexOf(':');
+        if (idx < 0) continue;
+        const prop = decl.slice(0, idx).trim();
+        const value = decl.slice(idx + 1).trim();
+        if (!COLOR_PROPS.test(prop)) continue;
+        if (LITERAL_COLOR.test(value.replace(SCION_VAR, ''))) {
+          offenders.push(`${selector} { ${prop}: ${value} }`);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('themes the host and keeps the viewport on the xterm background', () => {
+    const rules = styleRules(paneStyles());
+    const host = rules.find((r) => r.selector === ':host')?.body ?? '';
+    expect(host).toMatch(/background:\s*var\(--scion-surface\b/);
+    expect(host).toMatch(/(^|;)\s*color:\s*var\(--scion-text\b/);
+    const wrapper = rules.find((r) => r.selector === '.terminal-wrapper')?.body ?? '';
+    const bg = /(^|;)\s*background:\s*([^;]+)/.exec(wrapper)?.[2].trim();
+    expect(bg?.toLowerCase()).toBe(TERMINAL_BACKGROUND.toLowerCase());
+  });
+
+  // The colour denylist cannot see a control with no rule at all: an
+  // unstyled <button> falls back to the browser's native palette in both
+  // themes (GoogleCloudPlatform/scion#2011 review). Every chrome button must
+  // be matched by at least one static style rule.
+  it('styles every chrome button outside the terminal viewport, in every render branch', async () => {
+    // Base selectors: a button must have a rule that applies at rest, so
+    // interaction-state rules (:hover, :focus, :active, :disabled) do not
+    // count. Remaining structural pseudo-classes (:first-child, ...) are
+    // stripped, and :host rules are skipped (not matchable from inside).
+    const selectors = styleRules(paneStyles())
+      .flatMap((r) => r.selector.split(','))
+      .map((p) => p.trim())
+      .filter((p) => p && !p.startsWith(':'))
+      .filter((p) => !/:(hover|focus|focus-visible|focus-within|active|disabled)\b/.test(p))
+      .map((p) => p.replace(/:[\w-]+(\([^)]*\))?/g, '').trim())
+      .filter(Boolean);
+    const seen = new Set<string>();
+    const unstyled: string[] = [];
+    const collect = async () => {
+      await page.updateComplete;
+      for (const b of Array.from(page.shadowRoot!.querySelectorAll<HTMLElement>('button'))) {
+        if (b.closest('.terminal-wrapper')) continue;
+        const label = b.className || `${b.parentElement?.className ?? ''} > button`;
+        seen.add(label.trim());
+        if (!selectors.some((sel) => b.matches(sel))) unstyled.push(b.outerHTML.slice(0, 80));
+      }
+    };
+    const pane = page as unknown as {
+      error: string | null;
+      metadataError: string | null;
+      projectId: string;
+      agent: Record<string, unknown> | null;
+      terminal: unknown;
+    };
+
+    // 1. Connected, with every optional toolbar control and the metadata
+    //    banner: toggles, graph action, capture auth, ports, metadata retry.
+    await mountConnected();
+    pane.projectId = 'project-1';
+    pane.agent = {
+      ...(pane.agent ?? {}),
+      id: agentId,
+      phase: 'running',
+      harnessAuth: 'none',
+      resolvedHarness: 'claude',
+    };
+    pane.error = 'metadata unavailable';
+    pane.metadataError = 'metadata unavailable';
+    await collect();
+
+    // 2. Disconnected (detached): the toolbar Reconnect button.
+    FakeSocket.instances[0].readyState = 3;
+    FakeSocket.instances[0].onclose?.({ code: 1000 });
+    await collect();
+
+    // 3. The session-error branch (no terminal host): the error-state Retry.
+    const realSession = page.session!;
+    Object.defineProperty(page, 'session', {
+      configurable: true,
+      get: () => ({ ...realSession, state: { ...realSession.state, error: 'boom' } }),
+    });
+    const realTerminal = pane.terminal;
+    pane.terminal = null;
+    page.requestUpdate();
+    await collect();
+    pane.terminal = realTerminal;
+    delete (page as unknown as { session?: unknown }).session;
+
+    // The 8 chrome buttons across the three branches (the inactive window
+    // toggle has no class, so it is labelled by its parent).
+    expect([...seen].sort()).toEqual([
+      'active',
+      'capture-auth-btn',
+      'error-state > button',
+      'metadata-retry',
+      'pane-action-btn',
+      'port-dropdown-trigger',
+      'reconnect-btn',
+      'toggle-group > button',
+    ]);
+    expect(unstyled).toEqual([]);
+  });
+
+  // Inline style attributes are not in static styles, so check the rendered
+  // chrome too, with the metadata error banner (the one conditional
+  // strip outside the viewport) showing.
+  it('renders no literal colours in inline styles outside the terminal viewport', async () => {
+    await mountConnected();
+    const state = page as unknown as { error: string | null; metadataError: string | null };
+    state.error = 'metadata unavailable';
+    state.metadataError = 'metadata unavailable';
+    await page.updateComplete;
+    const root = page.shadowRoot!;
+    expect(root.querySelector('.error-banner')).not.toBeNull();
+    const offenders = Array.from(root.querySelectorAll<HTMLElement>('[style]'))
+      .filter((el) => !el.closest('.terminal-wrapper'))
+      .map((el) => el.getAttribute('style') ?? '')
+      .filter((style) => LITERAL_COLOR.test(style.replace(SCION_VAR, '')));
+    expect(offenders).toEqual([]);
+  });
 });

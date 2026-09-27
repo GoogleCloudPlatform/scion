@@ -71,6 +71,10 @@ func (d *recordingDispatcher) DispatchAgentCreate(_ context.Context, _ *store.Ag
 func (d *recordingDispatcher) DispatchAgentProvision(_ context.Context, _ *store.Agent) error {
 	return nil
 }
+
+func (d *recordingDispatcher) DispatchAgentReprovision(_ context.Context, _ *store.Agent) error {
+	return nil
+}
 func (d *recordingDispatcher) DispatchAgentStart(_ context.Context, _ *store.Agent, _ string, _ bool) error {
 	return nil
 }
@@ -190,7 +194,6 @@ func setupNotificationTest(t *testing.T) *notificationTestEnv {
 		ProjectID:       project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: tid("broker-1"),
-		Visibility:      store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, watched))
 
@@ -202,7 +205,6 @@ func setupNotificationTest(t *testing.T) *notificationTestEnv {
 		ProjectID:       project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: tid("broker-1"),
-		Visibility:      store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, subscriber))
 

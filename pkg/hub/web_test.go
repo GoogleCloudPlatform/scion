@@ -3705,6 +3705,69 @@ func TestProxyAuthMiddleware_Demotion_DeletesSuperAdminBinding(t *testing.T) {
 		"admin demoted via proxy auth must have super-admin RoleBinding removed")
 }
 
+// TestOAuthCallback_PlatformAuthSA_Denied is a consistency check: a service
+// account cannot complete interactive Google OAuth in practice, but the
+// callback carries the same isReservedPlatformIdentity guard as every other
+// find-or-create path (see that predicate's invariant comment), so this
+// covers it in case that ever changes.
+func TestOAuthCallback_PlatformAuthSA_Denied(t *testing.T) {
+	const secret = "test-session-secret-for-platform-auth-sa-oauth-1234"
+	const sa = "transport-sa@example.iam.gserviceaccount.com"
+
+	ws := newTestWebServer(t, WebServerConfig{
+		SessionSecret:  secret,
+		BaseURL:        "http://localhost:8080",
+		PlatformAuthSA: sa,
+	})
+
+	ws.oauthService = NewOAuthService(OAuthConfig{
+		Web: OAuthClientConfig{
+			Google: OAuthProviderConfig{
+				ClientID:     "test-client-id",
+				ClientSecret: "test-client-secret",
+			},
+		},
+	}, nil)
+	ws.oauthService.httpClient = &http.Client{
+		Transport: &mockOAuthTransport{
+			tokenJSON:    `{"access_token":"mock-token","token_type":"Bearer","expires_in":3600}`,
+			userinfoJSON: `{"id":"sa-subject","email":"` + sa + `","verified_email":true,"name":"Transport SA"}`,
+		},
+	}
+
+	st := newProxyAuthStore()
+	ws.store = st
+	ws.SetAccessSettingsProvider(&staticAccessSettings{adminEmails: []string{}})
+
+	reqSetup := httptest.NewRequest(http.MethodGet, "/auth/login/google", nil)
+	recSetup := httptest.NewRecorder()
+	sess, err := ws.sessionStore.Get(reqSetup, webSessionName)
+	require.NoError(t, err)
+	oauthState := "test-state-platform-auth-sa"
+	sess.Values[sessKeyOAuthState] = oauthState
+	require.NoError(t, sess.Save(reqSetup, recSetup))
+	cookies := recSetup.Result().Cookies()
+	require.NotEmpty(t, cookies)
+
+	callbackURL := "/auth/callback/google?code=test-code&state=" + oauthState
+	reqCallback := httptest.NewRequest(http.MethodGet, callbackURL, nil)
+	for _, c := range cookies {
+		reqCallback.AddCookie(c)
+	}
+	recCallback := httptest.NewRecorder()
+
+	ws.Handler().ServeHTTP(recCallback, reqCallback)
+
+	resp := recCallback.Result()
+	assert.Equal(t, http.StatusFound, resp.StatusCode)
+	assert.Contains(t, resp.Header.Get("Location"), "/login?error=",
+		"OAuth callback must redirect to login with an error for the configured service account")
+
+	_, lookupErr := st.GetUserByEmail(context.Background(), sa)
+	assert.ErrorIs(t, lookupErr, store.ErrNotFound,
+		"no user row should be created for the configured service account")
+}
+
 func TestOAuthCallback_NewAdminUser_GetsSuperAdminBinding(t *testing.T) {
 	// When a new user is provisioned as admin via OAuth callback, a
 	// super-admin RoleBinding must be created.

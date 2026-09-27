@@ -16,7 +16,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -599,10 +598,9 @@ type AgentInfo struct {
 	DeletedAt         time.Time `json:"deletedAt,omitempty"`         // When the agent was soft-deleted
 
 	// Ownership & access
-	CreatedBy  string   `json:"createdBy,omitempty"`  // User/system that created the agent
-	OwnerID    string   `json:"ownerId,omitempty"`    // Current owner user ID
-	Visibility string   `json:"visibility,omitempty"` // Access level: private, team, public
-	Ancestry   []string `json:"ancestry,omitempty"`   // Ordered ancestor chain [root, ..., parent] for transitive access
+	CreatedBy string   `json:"createdBy,omitempty"` // User/system that created the agent
+	OwnerID   string   `json:"ownerId,omitempty"`   // Current owner user ID
+	Ancestry  []string `json:"ancestry,omitempty"`  // Ordered ancestor chain [root, ..., parent] for transitive access
 
 	// Hosted/distributed mode fields
 	RuntimeBrokerID   string `json:"runtimeBrokerId,omitempty"`   // ID of the Runtime Broker managing this agent
@@ -615,48 +613,6 @@ type AgentInfo struct {
 
 	// Optimistic locking
 	StateVersion int64 `json:"stateVersion,omitempty"` // Version for concurrent update detection
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
-func (a *AgentInfo) UnmarshalJSON(data []byte) error {
-	type Alias AgentInfo
-	aux := &struct {
-		Grove     string `json:"grove"`
-		GroveID   string `json:"groveId"`
-		GrovePath string `json:"grovePath"`
-		*Alias
-	}{
-		Alias: (*Alias)(a),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if a.Project == "" && aux.Grove != "" {
-		a.Project = aux.Grove
-	}
-	if a.ProjectID == "" && aux.GroveID != "" {
-		a.ProjectID = aux.GroveID
-	}
-	if a.ProjectPath == "" && aux.GrovePath != "" {
-		a.ProjectPath = aux.GrovePath
-	}
-	return nil
-}
-
-// MarshalJSON implements custom marshaling to support legacy grove fields.
-func (a AgentInfo) MarshalJSON() ([]byte, error) {
-	type Alias AgentInfo
-	return json.Marshal(&struct {
-		Alias
-		Grove     string `json:"grove,omitempty"`
-		GroveID   string `json:"groveId,omitempty"`
-		GrovePath string `json:"grovePath,omitempty"`
-	}{
-		Alias:     Alias(a),
-		Grove:     a.Project,
-		GroveID:   a.ProjectID,
-		GrovePath: a.ProjectPath,
-	})
 }
 
 // AgentDetail provides freeform context about the current activity.
@@ -732,35 +688,6 @@ type ResolvedSecret struct {
 	Value  string `json:"value"`         // Decrypted secret value
 	Source string `json:"source"`        // Scope that provided this secret (user, project, runtime_broker)
 	Ref    string `json:"ref,omitempty"` // External secret reference (e.g., "gcpsm:projects/123/secrets/name")
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy "grove" source.
-func (s *ResolvedSecret) UnmarshalJSON(data []byte) error {
-	type Alias ResolvedSecret
-	aux := (*Alias)(s)
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if s.Source == "grove" {
-		s.Source = "project"
-	}
-	return nil
-}
-
-// MarshalJSON implements custom marshaling to support legacy "grove" source.
-func (s ResolvedSecret) MarshalJSON() ([]byte, error) {
-	type Alias ResolvedSecret
-	var grove string
-	if s.Source == "project" {
-		grove = "grove"
-	}
-	return json.Marshal(&struct {
-		Alias
-		Grove string `json:"grove,omitempty"`
-	}{
-		Alias: Alias(s),
-		Grove: grove,
-	})
 }
 
 // EnvKind classifies the origin and delivery channel of an environment
@@ -894,6 +821,26 @@ func ContextWithBrokerMode(ctx context.Context) context.Context {
 // IsBrokerModeFromContext returns true if the context indicates broker mode.
 func IsBrokerModeFromContext(ctx context.Context) bool {
 	v, _ := ctx.Value(brokerModeContextKey{}).(bool)
+	return v
+}
+
+type reprovisionContextKey struct{}
+
+// ContextWithReprovision returns a new context flagged as a reincarnation
+// reprovision (design: /scion-volumes/scratchpad/projects/agent-migrate/design.md
+// §3.4). Provisioning uses this to force-overwrite content that a normal
+// provision call leaves alone once present (e.g. a platform skill directory
+// whose embedded content changed in a newer broker binary), while still
+// preserving the agent's home directory and workspace/worktree as a whole.
+func ContextWithReprovision(ctx context.Context) context.Context {
+	return context.WithValue(ctx, reprovisionContextKey{}, true)
+}
+
+// IsReprovisionFromContext returns true if the context indicates a
+// reincarnation reprovision rather than a normal (first-time or restart)
+// provision.
+func IsReprovisionFromContext(ctx context.Context) bool {
+	v, _ := ctx.Value(reprovisionContextKey{}).(bool)
 	return v
 }
 

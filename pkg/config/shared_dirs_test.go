@@ -173,11 +173,12 @@ func TestGetSharedDirsBasePath_GitProject(t *testing.T) {
 	agentsDir := filepath.Join(projectConfigDir, "agents")
 	require.NoError(t, os.MkdirAll(agentsDir, 0755))
 
-	// Create a git project dir with grove-id file
+	// Create a git project dir with a legacy grove-id file. GetSharedDirsBasePath
+	// resolves the external config dir through ReadProjectID, which migrates
+	// grove-id to project-id as a side effect.
 	projectDir := filepath.Join(tmpDir, "myproject", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
-	// Write grove-id
 	projectID := "abc12345-test-id"
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "grove-id"), []byte(projectID+"\n"), 0644))
 
@@ -185,6 +186,13 @@ func TestGetSharedDirsBasePath_GitProject(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, basePath, SharedDirsSubdir)
 	assert.Contains(t, basePath, "project-configs")
+
+	// The legacy file is gone, migrated to project-id with the same content.
+	_, err = os.Stat(filepath.Join(projectDir, "grove-id"))
+	assert.True(t, os.IsNotExist(err), "grove-id should have been migrated away")
+	migrated, err := os.ReadFile(filepath.Join(projectDir, "project-id"))
+	require.NoError(t, err)
+	assert.Equal(t, projectID, strings.TrimSpace(string(migrated)))
 }
 
 func TestSharedDirHostPath(t *testing.T) {

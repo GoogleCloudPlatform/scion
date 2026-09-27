@@ -308,20 +308,6 @@ func (_c *TemplateCreate) SetNillableSourceURL(v *string) *TemplateCreate {
 	return _c
 }
 
-// SetVisibility sets the "visibility" field.
-func (_c *TemplateCreate) SetVisibility(v string) *TemplateCreate {
-	_c.mutation.SetVisibility(v)
-	return _c
-}
-
-// SetNillableVisibility sets the "visibility" field if the given value is not nil.
-func (_c *TemplateCreate) SetNillableVisibility(v *string) *TemplateCreate {
-	if v != nil {
-		_c.SetVisibility(*v)
-	}
-	return _c
-}
-
 // SetCreated sets the "created" field.
 func (_c *TemplateCreate) SetCreated(v time.Time) *TemplateCreate {
 	_c.mutation.SetCreated(v)
@@ -407,10 +393,6 @@ func (_c *TemplateCreate) defaults() {
 		v := template.DefaultStatus
 		_c.mutation.SetStatus(v)
 	}
-	if _, ok := _c.mutation.Visibility(); !ok {
-		v := template.DefaultVisibility
-		_c.mutation.SetVisibility(v)
-	}
 	if _, ok := _c.mutation.Created(); !ok {
 		v := template.DefaultCreated()
 		_c.mutation.SetCreated(v)
@@ -456,9 +438,6 @@ func (_c *TemplateCreate) check() error {
 		if err := template.StatusValidator(v); err != nil {
 			return &ValidationError{Name: "status", err: fmt.Errorf(`ent: validator failed for field "Template.status": %w`, err)}
 		}
-	}
-	if _, ok := _c.mutation.Visibility(); !ok {
-		return &ValidationError{Name: "visibility", err: errors.New(`ent: missing required field "Template.visibility"`)}
 	}
 	if _, ok := _c.mutation.Created(); !ok {
 		return &ValidationError{Name: "created", err: errors.New(`ent: missing required field "Template.created"`)}
@@ -589,10 +568,6 @@ func (_c *TemplateCreate) createSpec() (*Template, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.SourceURL(); ok {
 		_spec.SetField(template.FieldSourceURL, field.TypeString, value)
 		_node.SourceURL = value
-	}
-	if value, ok := _c.mutation.Visibility(); ok {
-		_spec.SetField(template.FieldVisibility, field.TypeString, value)
-		_node.Visibility = value
 	}
 	if value, ok := _c.mutation.Created(); ok {
 		_spec.SetField(template.FieldCreated, field.TypeTime, value)
@@ -1017,18 +992,6 @@ func (u *TemplateUpsert) UpdateSourceURL() *TemplateUpsert {
 // ClearSourceURL clears the value of the "source_url" field.
 func (u *TemplateUpsert) ClearSourceURL() *TemplateUpsert {
 	u.SetNull(template.FieldSourceURL)
-	return u
-}
-
-// SetVisibility sets the "visibility" field.
-func (u *TemplateUpsert) SetVisibility(v string) *TemplateUpsert {
-	u.Set(template.FieldVisibility, v)
-	return u
-}
-
-// UpdateVisibility sets the "visibility" field to the value that was provided on create.
-func (u *TemplateUpsert) UpdateVisibility() *TemplateUpsert {
-	u.SetExcluded(template.FieldVisibility)
 	return u
 }
 
@@ -1519,20 +1482,6 @@ func (u *TemplateUpsertOne) UpdateSourceURL() *TemplateUpsertOne {
 func (u *TemplateUpsertOne) ClearSourceURL() *TemplateUpsertOne {
 	return u.Update(func(s *TemplateUpsert) {
 		s.ClearSourceURL()
-	})
-}
-
-// SetVisibility sets the "visibility" field.
-func (u *TemplateUpsertOne) SetVisibility(v string) *TemplateUpsertOne {
-	return u.Update(func(s *TemplateUpsert) {
-		s.SetVisibility(v)
-	})
-}
-
-// UpdateVisibility sets the "visibility" field to the value that was provided on create.
-func (u *TemplateUpsertOne) UpdateVisibility() *TemplateUpsertOne {
-	return u.Update(func(s *TemplateUpsert) {
-		s.UpdateVisibility()
 	})
 }
 
@@ -2192,20 +2141,6 @@ func (u *TemplateUpsertBulk) UpdateSourceURL() *TemplateUpsertBulk {
 func (u *TemplateUpsertBulk) ClearSourceURL() *TemplateUpsertBulk {
 	return u.Update(func(s *TemplateUpsert) {
 		s.ClearSourceURL()
-	})
-}
-
-// SetVisibility sets the "visibility" field.
-func (u *TemplateUpsertBulk) SetVisibility(v string) *TemplateUpsertBulk {
-	return u.Update(func(s *TemplateUpsert) {
-		s.SetVisibility(v)
-	})
-}
-
-// UpdateVisibility sets the "visibility" field to the value that was provided on create.
-func (u *TemplateUpsertBulk) UpdateVisibility() *TemplateUpsertBulk {
-	return u.Update(func(s *TemplateUpsert) {
-		s.UpdateVisibility()
 	})
 }
 

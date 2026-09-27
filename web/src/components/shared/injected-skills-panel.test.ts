@@ -909,7 +909,6 @@ describe('injected-skills-panel — search-mode picker URI', () => {
       slug: 'security-audit',
       scope: 'core',
       status: 'active',
-      visibility: 'public',
       created: '2026-01-01',
       updated: '2026-01-01',
     };
@@ -937,7 +936,6 @@ describe('injected-skills-panel — search-mode picker URI', () => {
       slug: 'code-review',
       scope: 'core',
       status: 'active',
-      visibility: 'public',
       created: '2026-01-01',
       updated: '2026-01-01',
     };

@@ -16,84 +16,46 @@ package projectcompat
 
 const (
 	ConfigProjectIDKey     = "project_id"
-	ConfigGroveIDKey       = "grove_id"
 	ConfigHubProjectIDKey  = "hub.project_id"
 	ConfigHubProjectIDJSON = "hub.projectId"
-	ConfigHubGroveIDKey    = "hub.grove_id"
-	ConfigHubGroveIDJSON   = "hub.groveId"
 
 	EnvProjectID    = "SCION_PROJECT_ID"
-	EnvGroveID      = "SCION_GROVE_ID"
 	EnvHubProjectID = "SCION_HUB_PROJECT_ID"
-	EnvHubGroveID   = "SCION_HUB_GROVE_ID"
 
 	ProjectIDFile = "project-id"
-	GroveIDFile   = "grove-id"
 
 	ProjectConfigsDir = "project-configs"
 	GroveConfigsDir   = "grove-configs"
 	ProjectsDir       = "projects"
 	GrovesDir         = "groves"
-
-	// LegacyTelemetryProjectIdentityKeys are historic resource attribute keys
-	// which the telemetry receiver must strip before adding trusted identity.
-	LegacyTelemetryGroveKey   = "scion.grove"
-	LegacyTelemetryGroveIDKey = "scion.grove.id"
-	LegacyTelemetryGroveIDAlt = "scion.grove_id"
 )
 
-// LegacyTelemetryIdentityKeys returns the supported legacy resource identity
-// aliases. Callers remove these instead of treating them as trusted values.
-func LegacyTelemetryIdentityKeys() []string {
-	return []string{LegacyTelemetryGroveKey, LegacyTelemetryGroveIDKey, LegacyTelemetryGroveIDAlt}
-}
-
-func IsLegacyTelemetryIdentityKey(key string) bool {
-	for _, alias := range LegacyTelemetryIdentityKeys() {
-		if key == alias {
-			return true
-		}
-	}
-	return false
-}
-
+// IsProjectIDConfigKey reports whether key is the canonical top-level
+// project-id config key name. The legacy grove_id key name is no longer
+// accepted as CLI input.
 func IsProjectIDConfigKey(key string) bool {
-	return key == ConfigProjectIDKey || key == ConfigGroveIDKey
+	return key == ConfigProjectIDKey
 }
 
+// IsHubProjectIDConfigKey reports whether key is a canonical hub project-id
+// config key name. The legacy hub.grove_id / hub.groveId key names are no
+// longer accepted as CLI input.
 func IsHubProjectIDConfigKey(key string) bool {
 	switch key {
-	case ConfigHubProjectIDKey, ConfigHubProjectIDJSON, ConfigHubGroveIDKey, ConfigHubGroveIDJSON:
+	case ConfigHubProjectIDKey, ConfigHubProjectIDJSON:
 		return true
 	default:
 		return false
 	}
 }
 
-func CanonicalConfigKey(key string) (canonical string, legacy bool) {
-	switch {
-	case IsProjectIDConfigKey(key):
-		return ConfigProjectIDKey, key == ConfigGroveIDKey
-	case IsHubProjectIDConfigKey(key):
-		return ConfigHubProjectIDKey, key == ConfigHubGroveIDKey || key == ConfigHubGroveIDJSON
-	default:
-		return CanonicalFieldAliases(key)
-	}
-}
-
 func EnvProjectIDConfigKey(envName string, hubProjectAsTopLevel bool) (string, bool) {
 	switch envName {
-	case EnvProjectID, EnvGroveID:
-		if envName == EnvGroveID && !hubProjectAsTopLevel {
-			return ConfigGroveIDKey, true
-		}
+	case EnvProjectID:
 		return ConfigProjectIDKey, true
-	case EnvHubProjectID, EnvHubGroveID:
+	case EnvHubProjectID:
 		if hubProjectAsTopLevel {
 			return ConfigProjectIDKey, true
-		}
-		if envName == EnvHubGroveID {
-			return ConfigHubGroveIDKey, true
 		}
 		return ConfigHubProjectIDKey, true
 	default:
@@ -102,13 +64,10 @@ func EnvProjectIDConfigKey(envName string, hubProjectAsTopLevel bool) (string, b
 }
 
 // ProjectIDFromEnv returns the canonical project identity from an environment
-// lookup. The canonical name wins when both canonical and legacy aliases exist.
+// lookup.
 func ProjectIDFromEnv(getenv func(string) string) string {
 	if getenv == nil {
 		return ""
 	}
-	if projectID := getenv(EnvProjectID); projectID != "" {
-		return projectID
-	}
-	return getenv(EnvGroveID)
+	return getenv(EnvProjectID)
 }

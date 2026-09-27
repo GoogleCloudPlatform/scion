@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -51,10 +52,25 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	webhookSecret := s.config.GitHubAppConfig.WebhookSecret
 	s.mu.RUnlock()
+	var secretLookupErr error
 	if webhookSecret == "" {
 		if sec, err := s.loadGitHubAppSecret(r.Context(), GitHubAppSecretWebhookSecret); err == nil {
 			webhookSecret = sec
+		} else if !errors.Is(err, store.ErrNotFound) {
+			secretLookupErr = err
 		}
+	}
+
+	// SECURITY-GATE: webhook signature — unauthenticated route; reject unless a webhook secret resolves and the signature verifies.
+	if webhookSecret == "" {
+		if secretLookupErr != nil {
+			slog.Warn("GitHub webhook secret lookup failed", "error", secretLookupErr)
+		}
+		s.githubWebhookNoSecretWarnOnce.Do(func() {
+			slog.Warn("GitHub webhook received but no webhook secret is configured; rejecting")
+		})
+		writeError(w, http.StatusServiceUnavailable, ErrCodeInternalError, "GitHub webhook is not configured", nil)
+		return
 	}
 
 	signature := r.Header.Get("X-Hub-Signature-256")

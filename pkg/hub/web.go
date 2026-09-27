@@ -166,6 +166,11 @@ type WebServerConfig struct {
 	// ProxyAuthenticator verifies proxy-supplied assertions (e.g., IAP JWT).
 	// Required when AuthMode == "proxy".
 	ProxyAuthenticator ProxyAuthenticator
+	// PlatformAuthSA is the hub's configured platform/transport auth service
+	// account email (cfg.Auth.Transport.PlatformAuthSA). The web proxy-auth
+	// path does not create or authenticate a user account for this identity.
+	// Empty when no transport service account is configured.
+	PlatformAuthSA string
 	// SSEMaxConnectionAge is the maximum lifetime of an SSE connection before
 	// the server proactively closes it so the client can reconnect cleanly.
 	// Defaults to defaultSSEMaxConnectionAge (3500s) when zero.
@@ -715,6 +720,24 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 			session, _ = ws.sessionStore.New(r, webSessionName)
 		}
 
+		// See isReservedPlatformIdentity: a session for the reserved identity
+		// must not have a hub token minted or refreshed from it — including
+		// an existing session, whether or not it currently holds an access
+		// token (both the overflow-mint branch and the refresh branches
+		// below). Clear it and continue with no Authorization header so the
+		// request falls through the normal auth flow instead.
+		if email, _ := session.Values[sessKeyUserEmail].(string); isReservedPlatformIdentity(email, ws.config.PlatformAuthSA) {
+			for key := range session.Values {
+				delete(session.Values, key)
+			}
+			session.Options.MaxAge = -1
+			if err := session.Save(r, w); err != nil {
+				ws.logger().Warn("Failed to clear session for the configured service account", "error", err)
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		accessToken, _ := session.Values[sessKeyHubAccessToken].(string)
 		if accessToken == "" {
 			// Session has no Hub token — this happens when the OAuth callback's
@@ -985,7 +1008,7 @@ func resolveAPIPath(urlPath string) string {
 	switch {
 	case p == "/agents":
 		return "/api/v1/agents"
-	case p == "/projects", p == "/groves":
+	case p == "/projects":
 		return "/api/v1/projects"
 	case strings.HasPrefix(p, "/agents/") && strings.Count(p, "/") == 2:
 		// /agents/{id} -> /api/v1/agents/{id}
@@ -1355,9 +1378,17 @@ func validateSSESubjects(subjects []string) string {
 // resource-scoped subjects. For example, "project.>" (meaning "all my
 // projects") is expanded to "project.<uuid>.>" for each project the caller
 // has ActionRead access to. Subjects that don't contain wildcards in a
-// resource-ID position pass through unchanged. Subjects whose category
-// passes through authorization without resource checks (notification, broker)
-// also pass through unchanged.
+// resource-ID position pass through unchanged. "notification" and "broker"
+// wildcards pass through unchanged too, since authorizeSSESubjects does not
+// apply a per-resource check to those two categories. Every other category —
+// including "admin" and "system", and any namespace this function does not
+// recognize — also passes through unchanged rather than being dropped here:
+// authorizeSSESubjects is the single place that decides whether a category is
+// allowed, and its default case denies anything not explicitly allow-listed.
+// Dropping unknown categories at this stage instead would make a mixed
+// request (e.g. an unknown subject alongside an allowed one) silently narrow
+// to the allowed subset instead of failing the whole request closed with a
+// deny reason.
 //
 // This expansion must run before authorizeSSESubjects so the authorization
 // check sees concrete resource IDs, and before Subscribe so the event
@@ -1411,8 +1442,10 @@ func (ws *WebServer) expandSSEWildcards(r *http.Request, subjects []string) []st
 			expanded = append(expanded, sub)
 
 		default:
-			// Unknown category with wildcard in ID position — keep
-			// as-is and let authorizeSSESubjects decide.
+			// "admin", "system", and any unrecognized category: keep the
+			// subject as-is. authorizeSSESubjects — not this function — is
+			// what denies it, so it shows up as a denied_subjects entry
+			// rather than silently vanishing from the subscription.
 			expanded = append(expanded, sub)
 		}
 	}
@@ -1525,9 +1558,11 @@ func isNATSWildcard(token string) bool {
 // authorized. For project-scoped subjects (project.<id>.*) the caller must
 // have ActionRead on the project. Agent subjects require a concrete canonical
 // UUID and ActionRead on the resolved agent, matching the metadata endpoint.
-// For user-scoped subjects (user.<id>.*)
-// the caller's identity must match the user ID. Other subjects (notification,
-// broker, etc.) pass through without additional checks.
+// For user-scoped subjects (user.<id>.*) the caller's identity must match the
+// user ID. notification.* and broker.* are an explicit, deliberate pass-through
+// (see the switch below). system.images.<jobId> requires a concrete job ID,
+// and admin.* requires the admin role. Every other first token — including
+// any unknown or future namespace — is denied by default.
 func (ws *WebServer) authorizeSSESubjects(r *http.Request, subjects []string) []string {
 	if ws.authzService == nil {
 		// No authz service configured — fail closed. Callers that need
@@ -1564,10 +1599,11 @@ func (ws *WebServer) authorizeSSESubjects(r *http.Request, subjects []string) []
 	)
 
 	// Collect unique resource IDs from subjects. Wildcard tokens (> or *)
-	// in resource-ID positions are rejected for resource-checked categories
-	// (project, user, agent) — expandSSEWildcards should have replaced them
-	// with concrete IDs. If one slips through, it is denied. Passthrough
-	// categories (notification, broker, etc.) are unaffected.
+	// in resource-ID positions are rejected for the three categories that
+	// carry a per-resource check (project, user, agent) — expandSSEWildcards
+	// should have replaced them with concrete IDs. If one slips through, it
+	// is denied. broker, notification, system and admin have no resource ID
+	// to collect here; the final switch below decides them directly.
 	projectIDs := map[string]bool{}
 	userIDs := map[string]bool{}
 	agentIDs := map[string]bool{}
@@ -1598,9 +1634,10 @@ func (ws *WebServer) authorizeSSESubjects(r *http.Request, subjects []string) []
 					agentIDs[tokens[1]] = true
 				}
 			}
-			// Other categories (notification, broker, etc.) pass through —
-			// wildcards in their resource-ID position are fine because
-			// these categories have no per-resource authorization checks.
+			// broker, notification, system and admin pass through this loop
+			// untouched — none of them has a per-resource authorization
+			// check here, so there is no ID to collect. The final switch
+			// below applies whatever check each of those does need.
 		}
 	}
 
@@ -1645,7 +1682,9 @@ func (ws *WebServer) authorizeSSESubjects(r *http.Request, subjects []string) []
 		}
 	}
 
-	// Build denied list.
+	// Build denied list. Every category must be explicitly allow-listed
+	// here; anything else is denied by default so a new or duplicated
+	// publish namespace cannot bypass authorization by accident.
 	var denied []string
 	for _, sub := range subjects {
 		// Deny any subject with an unresolved wildcard in resource-ID position.
@@ -1654,23 +1693,42 @@ func (ws *WebServer) authorizeSSESubjects(r *http.Request, subjects []string) []
 			continue
 		}
 		tokens := strings.Split(sub, ".")
-		if tokens[0] == "agent" {
+		switch tokens[0] {
+		case "agent":
 			if len(tokens) < 3 || !allowedAgents[tokens[1]] {
 				denied = append(denied, sub)
 			}
-			continue
-		}
-		if len(tokens) >= 2 {
-			switch tokens[0] {
-			case "project":
-				if deniedProjects[tokens[1]] {
-					denied = append(denied, sub)
-				}
-			case "user":
-				if deniedUsers[tokens[1]] {
-					denied = append(denied, sub)
-				}
+		case "project":
+			if len(tokens) < 2 || deniedProjects[tokens[1]] {
+				denied = append(denied, sub)
 			}
+		case "user":
+			if len(tokens) < 2 || deniedUsers[tokens[1]] {
+				denied = append(denied, sub)
+			}
+		case "broker", "notification":
+			// Explicit, deliberate pass-through: neither category carries a
+			// per-resource authorization check today. notification.* is
+			// already known to over-share across projects (see
+			// PublishChatNotification in events.go) — narrowing it to
+			// user.<subscriberId>.notification is left for a follow-up.
+			// TODO(ptone/scion#1934): scope notification.created per-user
+			// and drop this pass-through.
+		case "system":
+			// Only a concrete image-build job ID is allowed; no wildcards
+			// and no trailing tokens past the job ID.
+			if len(tokens) != 3 || tokens[1] != "images" || isNATSWildcard(tokens[2]) {
+				denied = append(denied, sub)
+			}
+		case "admin":
+			// Admin-only namespace. No web client subscribes to this today.
+			if sessionUser.Role != "admin" {
+				denied = append(denied, sub)
+			}
+		default:
+			// Unknown namespace: deny. Only categories explicitly handled
+			// above may bypass per-resource checks.
+			denied = append(denied, sub)
 		}
 	}
 	return denied
@@ -1888,6 +1946,14 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 					storedRole = u.Role
 					// Refresh email from authoritative record in case it changed.
 					email = u.Email
+					// See isReservedPlatformIdentity: every path that provisions a
+					// user or mints/re-mints a hub token checks this, including an
+					// existing session for the configured service account.
+					if isReservedPlatformIdentity(email, ws.config.PlatformAuthSA) {
+						ws.logger().Warn("Proxy auth: clearing stale session for the configured service account", "user_id", u.ID)
+						ws.clearStaleSession(w, r)
+						return
+					}
 				case errors.Is(err, store.ErrNotFound):
 					// Definitive answer: the account is gone. Unlike a
 					// transient read failure, this must not fall back to
@@ -1974,6 +2040,18 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 
 		// Verified proxy identity — check authorization and provision/lookup user
 		ctx := r.Context()
+
+		// The hub does not create or authenticate user accounts for its
+		// configured transport service account; this path does its own
+		// find-or-create (it does not go through Server.provisionUser), so it
+		// carries the same check independently. Checked before authorization,
+		// before find-or-create, and before any session/token is issued.
+		if isReservedPlatformIdentity(proxyUser.Email, ws.config.PlatformAuthSA) {
+			ws.logger().Warn("Proxy auth: rejecting configured service account identity", "email", proxyUser.Email)
+			http.Error(w, "access denied", http.StatusForbidden)
+			return
+		}
+
 		if ws.store == nil {
 			ws.logger().Error("Proxy auth: store not configured")
 			http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -2354,6 +2432,16 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		ws.logger().Error("OAuth code exchange failed", "provider", provider, "error", err)
 		http.Redirect(w, r, "/login?error=exchange_failed", http.StatusFound)
+		return
+	}
+
+	// See isReservedPlatformIdentity: every path that provisions a user or
+	// mints/re-mints a hub token checks this. A service account cannot
+	// complete interactive OAuth, so this is not reachable in practice; kept
+	// for consistency with the other find-or-create paths.
+	if isReservedPlatformIdentity(userInfo.Email, ws.config.PlatformAuthSA) {
+		ws.logger().Warn("OAuth callback: rejecting configured service account identity", "email", userInfo.Email)
+		http.Redirect(w, r, "/login?error=unauthorized_domain", http.StatusFound)
 		return
 	}
 

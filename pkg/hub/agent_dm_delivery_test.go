@@ -95,7 +95,6 @@ func deliverySetup(t *testing.T) (
 		Slug:            "delivery-sender",
 		ProjectID:       project.ID,
 		Phase:           "running",
-		Visibility:      store.VisibilityPrivate,
 		RuntimeBrokerID: brokerID,
 		MessageMode:     store.MessageModeProject,
 		Ancestry:        []string{owner.ID},
@@ -108,7 +107,6 @@ func deliverySetup(t *testing.T) (
 		Slug:            "delivery-target",
 		ProjectID:       project.ID,
 		Phase:           "running",
-		Visibility:      store.VisibilityPrivate,
 		RuntimeBrokerID: brokerID,
 		MessageMode:     store.MessageModeProject,
 		Ancestry:        []string{owner.ID},
@@ -167,6 +165,10 @@ func (d *spyStateDispatcher) DispatchAgentCreate(_ context.Context, _ *store.Age
 	return nil
 }
 func (d *spyStateDispatcher) DispatchAgentProvision(_ context.Context, _ *store.Agent) error {
+	return nil
+}
+
+func (d *spyStateDispatcher) DispatchAgentReprovision(_ context.Context, _ *store.Agent) error {
 	return nil
 }
 func (d *spyStateDispatcher) DispatchAgentStart(_ context.Context, _ *store.Agent, _ string, _ bool) error {

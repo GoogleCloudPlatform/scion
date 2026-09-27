@@ -145,6 +145,7 @@ Use these commands to manage schedules and events in your project:
 To ensure platform security and isolate team activities, schedules and scheduled events are protected using **Owner-Based Access Control** (OBAC) and project-scoped policy structures:
 
 - **Owner-Based Access Control**: Only the creator (the owner) of a schedule or scheduled event, or a system-wide administrator, has the authority to retrieve, update, pause, resume, cancel, or delete a schedule/event. If another user or agent attempts to modify or view a schedule they do not own, the Hub API denies access immediately.
+- **Scheduled Agent Identity**: An agent created by a schedule is attributed to the schedule's creator: `CreatorName` is set to the creator's agent name or user email, as with manual creation. It also receives the project's default GCP identity. The same service-account authorization checks as manual agent creation run against the creator, and agent creation fails if they do not pass.
 - **Project-Scoped Group Policies**: Scheduled events require project-scoped policies. During project creation or template synchronization, Scion automatically backfills and seeds scheduled event policies bound directly to the project's members group (i.e. `project:<slug>:members`).
 - **Required Permissions**: To perform scheduler actions, the caller's token must have the appropriate permission in the project scope:
   - **Creating/Scheduling**: Requires `scheduled_event.create`

@@ -34,8 +34,8 @@ func TestAgentService_List_QueryParameters(t *testing.T) {
 		if query.Get("projectId") != projectID {
 			t.Errorf("expected projectId %q, got %q", projectID, query.Get("projectId"))
 		}
-		if query.Get("groveId") != projectID {
-			t.Errorf("expected groveId %q, got %q", projectID, query.Get("groveId"))
+		if query.Get("groveId") != "" {
+			t.Errorf("expected no groveId query param, got %q", query.Get("groveId"))
 		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"agents": []}`))
@@ -108,8 +108,8 @@ func TestSubscriptionService_List_QueryParameters(t *testing.T) {
 		if query.Get("projectId") != projectID {
 			t.Errorf("expected projectId %q, got %q", projectID, query.Get("projectId"))
 		}
-		if query.Get("groveId") != projectID {
-			t.Errorf("expected groveId %q, got %q", projectID, query.Get("groveId"))
+		if query.Get("groveId") != "" {
+			t.Errorf("expected no groveId query param, got %q", query.Get("groveId"))
 		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`[]`))
@@ -136,8 +136,8 @@ func TestSubscriptionTemplateService_List_QueryParameters(t *testing.T) {
 		if query.Get("projectId") != projectID {
 			t.Errorf("expected projectId %q, got %q", projectID, query.Get("projectId"))
 		}
-		if query.Get("groveId") != projectID {
-			t.Errorf("expected groveId %q, got %q", projectID, query.Get("groveId"))
+		if query.Get("groveId") != "" {
+			t.Errorf("expected no groveId query param, got %q", query.Get("groveId"))
 		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`[]`))
@@ -149,6 +149,34 @@ func TestSubscriptionTemplateService_List_QueryParameters(t *testing.T) {
 		t.Fatalf("New failed: %v", err)
 	}
 	_, err = client.SubscriptionTemplates().List(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+}
+
+func TestRuntimeBrokerService_List_QueryParameters(t *testing.T) {
+	projectID := "project-123"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		if query.Get("projectId") != projectID {
+			t.Errorf("expected projectId %q, got %q", projectID, query.Get("projectId"))
+		}
+		if query.Get("groveId") != "" {
+			t.Errorf("expected no groveId query param, got %q", query.Get("groveId"))
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"brokers": []}`))
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	_, err = client.RuntimeBrokers().List(context.Background(), &ListBrokersOptions{
+		ProjectID: projectID,
+	})
 	if err != nil {
 		t.Fatalf("List failed: %v", err)
 	}

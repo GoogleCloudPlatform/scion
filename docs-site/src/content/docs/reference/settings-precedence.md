@@ -100,7 +100,7 @@ existing value.
 | Variable | Meaning | Injection |
 | --- | --- | --- |
 | `SCION_AGENT_NAME` | agent name | **Unconditional** — overwrites |
-| `SCION_PROJECT`, `SCION_GROVE` | project name | **Unconditional** — overwrites |
+| `SCION_PROJECT` | project name | **Unconditional** — overwrites |
 | `SCION_TEMPLATE_NAME` | resolved template slug, or `custom` | **Unconditional** — overwrites |
 | `SCION_CLI_MODE` | always `agent` inside a container | **Unconditional** — overwrites |
 | `SCION_MAX_TURNS` | from the resolved `ScionConfig` | **Unconditional** — overwrites the hub-supplied value |
@@ -859,3 +859,5 @@ of a settings change.
 - [Admin Settings](/scion/reference/admin-settings/) — where hub `agent_defaults` are configured.
 - [Harness-Specific Settings](/scion/reference/harness-settings/) — configuration consumed by the tools
   running inside the container.
+- [Migrating from grove names](/scion/reference/grove-removal/) — the removed `grove`-named flags,
+  environment variables, and config keys, and their `project`-named replacements.

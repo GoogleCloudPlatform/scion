@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
@@ -1099,4 +1100,191 @@ func TestAgentStore_AuthorizedProjectIDs(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 2, result.TotalCount, "both projects' agents should be returned")
 	})
+}
+
+// TestAgentStore_AppliedConfigEnvSurvivesPersistence guards marshalAppliedConfig's
+// alias bypass (agent_store.go): the DB column must keep storing every field of
+// AppliedConfig, including Env and GITHUB_TOKEN, exactly as held in memory. The
+// response-only visibility gate added to AgentAppliedConfig's own MarshalJSON
+// (pkg/store/models.go) must never reach this path -- if it did, a fresh
+// AgentAppliedConfig (whose gate defaults closed) would silently lose its Env
+// on the next write.
+func TestAgentStore_AppliedConfigEnvSurvivesPersistence(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	a := makeAgent(projectID, "env-persist-1")
+	a.AppliedConfig = &store.AgentAppliedConfig{
+		Image: "img:1",
+		Env: map[string]string{
+			"PLAIN_VAR":    "plain-value",
+			"GITHUB_TOKEN": "ghp_must_survive_the_round_trip",
+		},
+	}
+	require.NoError(t, s.CreateAgent(ctx, a))
+
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.AppliedConfig)
+	assert.Equal(t, "plain-value", got.AppliedConfig.Env["PLAIN_VAR"])
+	assert.Equal(t, "ghp_must_survive_the_round_trip", got.AppliedConfig.Env["GITHUB_TOKEN"],
+		"the DB column must keep the full env regardless of the response-only visibility gate")
+
+	// UpdateAgent goes through the identical marshal path; confirm it too.
+	got.AppliedConfig.Env["NEW_VAR"] = "new-value"
+	require.NoError(t, s.UpdateAgent(ctx, got))
+
+	reGot, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	require.NotNil(t, reGot.AppliedConfig)
+	assert.Equal(t, "new-value", reGot.AppliedConfig.Env["NEW_VAR"])
+	assert.Equal(t, "ghp_must_survive_the_round_trip", reGot.AppliedConfig.Env["GITHUB_TOKEN"])
+}
+
+// TestAgentStore_InlineConfigEnvAndTelemetrySurvivePersistence extends the
+// guard above to the fields that got the same default-closed response-view
+// treatment as Env: InlineConfig.Env and the Telemetry cloud-export header
+// map (pkg/store/models.go's redactInlineConfigForResponse). Both are nested
+// inside InlineConfig (*api.ScionConfig), not on AgentAppliedConfig directly,
+// so marshalAppliedConfig's alias-bypass trick has to actually reach them --
+// if a nested MarshalJSON were ever added to api.ScionConfig or
+// api.TelemetryConfig to do the response gating, this would catch it: that
+// approach hides data from the DB column too, alias or no alias, because
+// encoding/json invokes a nested type's own MarshalJSON regardless of what
+// the outer type is aliased to.
+func TestAgentStore_InlineConfigEnvAndTelemetrySurvivePersistence(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	a := makeAgent(projectID, "inline-env-persist-1")
+	a.AppliedConfig = &store.AgentAppliedConfig{
+		Image: "img:1",
+		Env: map[string]string{
+			"PLAIN_VAR": "plain-value",
+		},
+		InlineConfig: &api.ScionConfig{
+			Env: map[string]string{
+				"INLINE_PLAIN_VAR": "inline-plain-value",
+				"GITHUB_TOKEN":     "ghp_must_survive_the_round_trip",
+			},
+			Telemetry: &api.TelemetryConfig{
+				Cloud: &api.TelemetryCloudConfig{
+					Endpoint: "https://collector.example.com",
+					Headers: map[string]string{
+						"Authorization": "Bearer must-survive-the-round-trip",
+					},
+				},
+			},
+		},
+	}
+	require.NoError(t, s.CreateAgent(ctx, a))
+
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.AppliedConfig)
+	require.NotNil(t, got.AppliedConfig.InlineConfig)
+	assert.Equal(t, "inline-plain-value", got.AppliedConfig.InlineConfig.Env["INLINE_PLAIN_VAR"])
+	assert.Equal(t, "ghp_must_survive_the_round_trip", got.AppliedConfig.InlineConfig.Env["GITHUB_TOKEN"],
+		"the DB column must keep InlineConfig.Env in full, regardless of the response-only visibility gate")
+	require.NotNil(t, got.AppliedConfig.InlineConfig.Telemetry)
+	require.NotNil(t, got.AppliedConfig.InlineConfig.Telemetry.Cloud)
+	assert.Equal(t, "Bearer must-survive-the-round-trip", got.AppliedConfig.InlineConfig.Telemetry.Cloud.Headers["Authorization"],
+		"the DB column must keep the telemetry header map in full, regardless of the response-only visibility gate")
+
+	// UpdateAgent goes through the identical marshal path; confirm it too.
+	got.AppliedConfig.InlineConfig.Env["NEW_INLINE_VAR"] = "new-inline-value"
+	require.NoError(t, s.UpdateAgent(ctx, got))
+
+	reGot, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	require.NotNil(t, reGot.AppliedConfig)
+	require.NotNil(t, reGot.AppliedConfig.InlineConfig)
+	assert.Equal(t, "new-inline-value", reGot.AppliedConfig.InlineConfig.Env["NEW_INLINE_VAR"])
+	assert.Equal(t, "ghp_must_survive_the_round_trip", reGot.AppliedConfig.InlineConfig.Env["GITHUB_TOKEN"])
+	require.NotNil(t, reGot.AppliedConfig.InlineConfig.Telemetry)
+	require.NotNil(t, reGot.AppliedConfig.InlineConfig.Telemetry.Cloud)
+	assert.Equal(t, "Bearer must-survive-the-round-trip", reGot.AppliedConfig.InlineConfig.Telemetry.Cloud.Headers["Authorization"])
+}
+
+// TestAgentStore_GenerationAndReincarnationState covers the agent-reincarnate
+// schema addition (design ptone/scion#1821): a new agent always starts at
+// generation 1 with no reincarnation in flight, and both fields round-trip
+// through UpdateAgent — the reincarnate worker's persistence path.
+func TestAgentStore_GenerationAndReincarnationState(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	a := makeAgent(projectID, "reincarnate-1")
+	// A caller-supplied Generation must not survive create: a freshly
+	// created agent is always generation 1.
+	a.Generation = 99
+	require.NoError(t, s.CreateAgent(ctx, a))
+	assert.Equal(t, 1, a.Generation, "a new agent must always start at generation 1")
+
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, got.Generation)
+	assert.Equal(t, "", got.ReincarnationState, "no reincarnation in flight for a new agent")
+
+	// The reincarnate worker marks a reincarnation in flight...
+	got.ReincarnationState = store.ReincarnationStatePending
+	require.NoError(t, s.UpdateAgent(ctx, got))
+
+	reread, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ReincarnationStatePending, reread.ReincarnationState)
+	assert.Equal(t, 1, reread.Generation, "generation is untouched while a reincarnation is only pending")
+
+	// ...and on completion, increments Generation and clears the state.
+	reread.Generation = 2
+	reread.ReincarnationState = store.ReincarnationStateNone
+	require.NoError(t, s.UpdateAgent(ctx, reread))
+
+	final, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, final.Generation)
+	assert.Equal(t, "", final.ReincarnationState)
+}
+
+// TestListAgentsWithStaleNonTerminalReincarnationState_ExcludesAgentWithNonTerminalRecord
+// is the design §3.4 Amendment A6.6/A7 regression test for the
+// backstop's "no non-terminal record" condition: an agent that LOOKS
+// orphaned by its own stale clock must still be excluded if it has a fresh,
+// genuinely in-flight AgentReincarnation record — that agent belongs to the
+// main record-side sweep (and sweepFailStaleRecord's rec.State-based restore
+// decision), not this fallback. Only a stale agent with NO matching
+// non-terminal record at all is a true orphan.
+func TestListAgentsWithStaleNonTerminalReincarnationState_ExcludesAgentWithNonTerminalRecord(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	recStore := NewAgentReincarnationStore(s.client)
+	cutoff := time.Now()
+
+	// Orphan: stale clock, no record at all — must be included.
+	orphan := makeAgent(projectID, "backstop-orphan")
+	orphan.ReincarnationState = store.ReincarnationStateStarting
+	require.NoError(t, s.CreateAgent(ctx, orphan))
+	staleClock := time.Now().Add(-time.Hour)
+	orphan.ReincarnationUpdatedAt = &staleClock
+	require.NoError(t, s.UpdateAgent(ctx, orphan))
+
+	// Not an orphan: an equally stale clock, but a FRESH non-terminal record
+	// still exists — the main record-side sweep owns this one.
+	owned := makeAgent(projectID, "backstop-owned-by-record")
+	owned.ReincarnationState = store.ReincarnationStateProvisioning
+	require.NoError(t, s.CreateAgent(ctx, owned))
+	owned.ReincarnationUpdatedAt = &staleClock
+	require.NoError(t, s.UpdateAgent(ctx, owned))
+	require.NoError(t, recStore.CreateAgentReincarnation(ctx, &store.AgentReincarnation{
+		AgentID: owned.ID, FromGeneration: 1, ToGeneration: 2, State: store.AgentReincarnationStateProvisioning,
+	}))
+
+	got, err := s.ListAgentsWithStaleNonTerminalReincarnationState(ctx, cutoff)
+	require.NoError(t, err)
+	ids := make(map[string]bool, len(got))
+	for _, a := range got {
+		ids[a.ID] = true
+	}
+	assert.True(t, ids[orphan.ID], "a stale agent with no matching record must be included")
+	assert.False(t, ids[owned.ID], "a stale agent with a fresh non-terminal record must be excluded")
 }

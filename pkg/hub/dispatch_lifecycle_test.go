@@ -49,13 +49,13 @@ func TestHybridBrokerClient_StartAgent_RouteGate(t *testing.T) {
 
 	t.Run("routeForward returns ErrLifecycleDeferred", func(t *testing.T) {
 		c.SetAffinityLookup(func(context.Context, string) (string, bool) { return "hubA", true })
-		_, err := c.StartAgent(context.Background(), remoteBroker, "", "a1", "p1", "", "", "", "", "", "", nil, nil, nil, nil, false, false)
+		_, err := c.StartAgent(context.Background(), remoteBroker, "", "a1", "p1", "", "", "", "", "", "", nil, nil, nil, nil, false, false, StartExtras{})
 		assert.ErrorIs(t, err, ErrLifecycleDeferred)
 	})
 
 	t.Run("routeUndeliverable returns ErrLifecycleDeferred", func(t *testing.T) {
 		c.SetAffinityLookup(func(context.Context, string) (string, bool) { return "", false })
-		_, err := c.StartAgent(context.Background(), remoteBroker, "", "a1", "p1", "", "", "", "", "", "", nil, nil, nil, nil, false, false)
+		_, err := c.StartAgent(context.Background(), remoteBroker, "", "a1", "p1", "", "", "", "", "", "", nil, nil, nil, nil, false, false, StartExtras{})
 		assert.ErrorIs(t, err, ErrLifecycleDeferred)
 	})
 }
@@ -87,13 +87,13 @@ func TestHybridBrokerClient_RestartAgent_RouteGate(t *testing.T) {
 
 	t.Run("routeForward returns ErrLifecycleDeferred", func(t *testing.T) {
 		c.SetAffinityLookup(func(context.Context, string) (string, bool) { return "hubA", true })
-		err := c.RestartAgent(context.Background(), remoteBroker, "", "a1", "p1", nil)
+		err := c.RestartAgent(context.Background(), remoteBroker, "", "a1", "p1", nil, StartExtras{})
 		assert.ErrorIs(t, err, ErrLifecycleDeferred)
 	})
 
 	t.Run("routeUndeliverable returns ErrLifecycleDeferred", func(t *testing.T) {
 		c.SetAffinityLookup(func(context.Context, string) (string, bool) { return "", false })
-		err := c.RestartAgent(context.Background(), remoteBroker, "", "a1", "p1", nil)
+		err := c.RestartAgent(context.Background(), remoteBroker, "", "a1", "p1", nil, StartExtras{})
 		assert.ErrorIs(t, err, ErrLifecycleDeferred)
 	})
 }

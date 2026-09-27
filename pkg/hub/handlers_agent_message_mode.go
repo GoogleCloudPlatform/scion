@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -167,13 +168,18 @@ func (s *Server) handleSetMessageMode(w http.ResponseWriter, r *http.Request, id
 		// super-admins. Project admins who are NOT super-admins must be denied.
 		if userIdent, ok := identity.(UserIdentity); ok && !IsUnscopedLocalPlatformAdmin(userIdent) {
 			membership, err := s.store.GetProjectMembership(ctx, agent.ProjectID, userIdent.ID())
-			if err != nil {
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
 				// Fail closed: if we can't verify role, deny rather than skip the check.
 				slog.Error("failed to check project membership for set_message_mode",
 					"user_id", userIdent.ID(), "project_id", agent.ProjectID, "error", err)
 				RuntimeError(w, "Failed to verify project membership")
 				return
 			}
+			// ErrNotFound means the caller has no project membership row at
+			// all (a non-member) -- membership stays nil and falls through
+			// to the same authorize() call every other caller goes through
+			// below, which denies with 403 rather than the 500-class error
+			// above. Only an actual lookup failure hits that error path.
 			// Also check ancestry before denying admins — a user who is both admin
 			// AND lineage owner should be allowed via lineage ownership (LOW-3).
 			isLineageOwner := false

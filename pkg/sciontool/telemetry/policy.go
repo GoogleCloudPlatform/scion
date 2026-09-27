@@ -32,6 +32,12 @@ var nativeEventNameAliases = map[string]string{
 	"gemini_cli.user_prompt": "agent.user.prompt",
 }
 
+// reservedIdentityAttributes are resource attribute keys the telemetry
+// receiver treats as identity: user-supplied values are always dropped
+// before the trusted replacement is added. This includes the retired
+// grove-named identity keys (scion.grove, scion.grove.id, scion.grove_id),
+// which are kept here on a denylist so they are still stripped even though
+// the receiver no longer treats them as valid identity sources.
 var reservedIdentityAttributes = map[string]struct{}{
 	"scion.agent":       {},
 	"scion.agent.id":    {},
@@ -39,6 +45,9 @@ var reservedIdentityAttributes = map[string]struct{}{
 	"scion.project":     {},
 	"scion.project.id":  {},
 	"scion.project_id":  {},
+	"scion.grove":       {},
+	"scion.grove.id":    {},
+	"scion.grove_id":    {},
 	"scion.harness":     {},
 	"scion.model":       {},
 	"scion.broker":      {},
@@ -412,9 +421,6 @@ func removeReservedIdentityAttributes(attrs []*commonpb.KeyValue) []*commonpb.Ke
 			continue
 		}
 		if _, reserved := reservedIdentityAttributes[attr.Key]; !reserved {
-			if projectcompat.IsLegacyTelemetryIdentityKey(attr.Key) {
-				continue
-			}
 			result = append(result, attr)
 		}
 	}

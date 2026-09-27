@@ -21,11 +21,9 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/google/uuid"
 )
 
 // ---------------------------------------------------------------------------
@@ -79,31 +77,27 @@ type ExternalIdentityStore = store.ExternalIdentityStore
 // GEExchangeService — the core exchange logic.
 // ---------------------------------------------------------------------------
 
-// UserAuthChecker checks whether a user email is authorized to access the Hub
-// per the configured domain restrictions, invite-only mode, and admin list.
-// Returns true if the user is authorized.
-type UserAuthChecker func(ctx context.Context, email string) bool
-
 // GEExchangeService handles the credential exchange flow.
 type GEExchangeService struct {
 	config           GEGoogleExchangeConfig
 	validator        GoogleCredentialValidator
 	userTokenService *UserTokenService
-	extIDStore       ExternalIdentityStore
-	userStore        store.Store
-	authChecker      UserAuthChecker
+	resolver         *GoogleIdentityResolver
 	logger           *slog.Logger
 	nowFunc          func() time.Time
 }
 
-// NewGEExchangeService creates a new GE exchange service.
+// NewGEExchangeService creates a new GE exchange service. resolver is shared
+// with the external-bearer auth path (server.go's New constructs one
+// GoogleIdentityResolver and passes the same instance to both), so the
+// exchange endpoint and external-bearer authentication reach identical
+// resolution decisions — including the admin_emails-aware role for newly
+// provisioned users — during the soak between the two mechanisms.
 func NewGEExchangeService(
 	config GEGoogleExchangeConfig,
 	validator GoogleCredentialValidator,
 	userTokenService *UserTokenService,
-	extIDStore ExternalIdentityStore,
-	userStore store.Store,
-	authChecker UserAuthChecker,
+	resolver *GoogleIdentityResolver,
 	logger *slog.Logger,
 ) *GEExchangeService {
 	if config.TokenTTL == 0 {
@@ -112,17 +106,11 @@ func NewGEExchangeService(
 	if config.TokenTTL > MaxGETokenTTL {
 		config.TokenTTL = MaxGETokenTTL
 	}
-	if authChecker == nil {
-		// Fail closed: if no auth checker is provided, reject all provisioning.
-		authChecker = func(ctx context.Context, email string) bool { return false }
-	}
 	return &GEExchangeService{
 		config:           config,
 		validator:        validator,
 		userTokenService: userTokenService,
-		extIDStore:       extIDStore,
-		userStore:        userStore,
-		authChecker:      authChecker,
+		resolver:         resolver,
 		logger:           logger,
 		nowFunc:          time.Now,
 	}
@@ -186,6 +174,12 @@ func (s *GEExchangeService) Exchange(ctx context.Context, req *ExchangeRequest) 
 		case errors.Is(err, ErrGoogleUntrustedAudience),
 			errors.Is(err, ErrGoogleUntrustedIssuer):
 			return nil, http.StatusUnauthorized, fmt.Errorf("credential not trusted")
+		// Must be checked before ErrGoogleFieldDisagreement: a
+		// service-account ID token with a disagreeing azp is wrapped with
+		// both (google_credential_validator.go's SA azp/sub check), and this
+		// case must win so the exchange keeps its SA rejection contract
+		// (403) for that shape too, instead of the generic 401 the
+		// disagreement case below would otherwise give it.
 		case errors.Is(err, ErrGoogleServiceAccount):
 			return nil, http.StatusForbidden, fmt.Errorf("service account credentials not accepted for user exchange")
 		case errors.Is(err, ErrGoogleUnverifiedEmail):
@@ -199,8 +193,30 @@ func (s *GEExchangeService) Exchange(ctx context.Context, req *ExchangeRequest) 
 		}
 	}
 
+	if identity == nil {
+		// A GoogleCredentialValidator that returns (nil, nil) is a contract
+		// violation, not a verification failure — treat it as a generic
+		// internal error rather than reaching the nil pointer dereference on
+		// identity.IsServiceAccount below.
+		s.logger.Error("GE exchange: validator returned no identity",
+			"credential_type", credType)
+		return nil, http.StatusInternalServerError, fmt.Errorf("credential validation failed")
+	}
+
+	// Step 1.5: reject service-account credentials for user exchange. The
+	// validator only classifies IsServiceAccount and each caller decides
+	// whether to admit it; the exchange endpoint rejects SA credentials
+	// outright.
+	if identity.IsServiceAccount {
+		s.logger.Warn("GE exchange: rejecting service account credential",
+			"credential_type", credType,
+			"sub", identity.Subject,
+			"email", identity.Email)
+		return nil, http.StatusForbidden, fmt.Errorf("service account credentials not accepted for user exchange")
+	}
+
 	// Step 2: Resolve to a local Hub user via external identity binding.
-	user, err := s.resolveLocalUser(ctx, identity)
+	user, err := s.resolver.Resolve(ctx, identity, ResolvePolicy{})
 	if err != nil {
 		s.logger.Warn("GE exchange: user resolution failed",
 			"sub", identity.Subject,
@@ -261,280 +277,6 @@ func (s *GEExchangeService) Exchange(ctx context.Context, req *ExchangeRequest) 
 }
 
 // ---------------------------------------------------------------------------
-// User resolution — external identity binding with local user provisioning.
-// ---------------------------------------------------------------------------
-
-var (
-	errBindingConflict       = errors.New("external identity binding conflicts with existing user")
-	errAmbiguousLinkage      = errors.New("ambiguous email-to-user linkage")
-	errNonAuthoritativeEmail = errors.New("email domain not authoritative for automatic linkage")
-)
-
-// resolveLocalUser resolves a validated Google identity to a local Hub user
-// via the external identity binding system. The flow is:
-//
-//  1. Look up existing binding by (provider, canonical issuer, sub).
-//  2. If found: verify the bound user exists and is not suspended, update
-//     email if changed. Return the user.
-//  3. If not found: attempt first-time bootstrap via email, guarded by
-//     authoritative email domain requirement.
-//  4. Create atomic binding and return user.
-func (s *GEExchangeService) resolveLocalUser(ctx context.Context, identity *ValidatedGoogleIdentity) (*store.User, error) {
-	canonicalIssuer := canonicalizeGoogleIssuer(identity.Issuer)
-
-	// Step 1: Look up existing binding.
-	binding, err := s.extIDStore.GetExternalIdentity(ctx, "google", canonicalIssuer, identity.Subject)
-	if err == nil {
-		// Binding exists — verify the bound user.
-		user, err := s.userStore.GetUser(ctx, binding.UserID)
-		if err != nil {
-			s.logger.Error("GE exchange: bound user not found",
-				"binding_id", binding.ID,
-				"user_id", binding.UserID,
-				"sub", identity.Subject)
-			return nil, fmt.Errorf("bound user not found: %w", err)
-		}
-
-		if user.Status == "suspended" {
-			return nil, ErrUserSuspended
-		}
-
-		// Update email if it changed (informational, does not relink).
-		normalizedEmail := strings.ToLower(identity.Email)
-		if strings.ToLower(binding.Email) != normalizedEmail {
-			s.logger.Info("GE exchange: updating binding email",
-				"old", binding.Email, "new", normalizedEmail,
-				"sub", identity.Subject, "user_id", user.ID)
-			_ = s.extIDStore.UpdateExternalIdentityEmail(ctx, binding.ID, normalizedEmail)
-			// Also update the user's profile email if it matches the old binding email.
-			if strings.EqualFold(user.Email, binding.Email) {
-				user.Email = normalizedEmail
-				_ = s.userStore.UpdateUser(ctx, user)
-			}
-		}
-
-		// Update display name / avatar if missing.
-		updated := false
-		if identity.DisplayName != "" && user.DisplayName == "" {
-			user.DisplayName = identity.DisplayName
-			updated = true
-		}
-		if identity.AvatarURL != "" && user.AvatarURL == "" {
-			user.AvatarURL = identity.AvatarURL
-			updated = true
-		}
-		if updated {
-			_ = s.userStore.UpdateUser(ctx, user)
-		}
-
-		return user, nil
-	}
-
-	// Step 2: No existing binding — attempt first-time bootstrap.
-	// Per contract-review point 1: automatic bootstrap only for authoritative
-	// email domains (Gmail or verified Workspace hd).
-	if !isAuthoritativeEmailDomain(identity.Email, identity.HostedDomain) {
-		s.logger.Warn("GE exchange: non-authoritative email, cannot auto-link",
-			"email", identity.Email,
-			"hd", identity.HostedDomain,
-			"sub", identity.Subject)
-		return nil, errNonAuthoritativeEmail
-	}
-
-	// Look up existing user by email.
-	normalizedEmail := strings.ToLower(identity.Email)
-	existingUser, err := s.userStore.GetUserByEmail(ctx, normalizedEmail)
-	if err == nil {
-		// Found a user by email. Verify no conflicting binding exists.
-		existingBindings, _ := s.extIDStore.GetExternalIdentitiesByUserID(ctx, existingUser.ID)
-		for _, eb := range existingBindings {
-			if eb.Provider == "google" && eb.Issuer == canonicalIssuer && eb.Subject != identity.Subject {
-				// Another Google subject is already bound to this user.
-				s.logger.Error("GE exchange: conflicting Google binding",
-					"existing_sub", eb.Subject,
-					"new_sub", identity.Subject,
-					"user_id", existingUser.ID)
-				return nil, errBindingConflict
-			}
-		}
-
-		if existingUser.Status == "suspended" {
-			return nil, ErrUserSuspended
-		}
-
-		// Create the binding atomically. If a concurrent exchange already
-		// created it (unique constraint violation), fall back to the winner's
-		// binding — this is the conflict-safe race-resolution path.
-		now := time.Now()
-		if err := s.extIDStore.CreateExternalIdentity(ctx, &ExternalIdentityBinding{
-			ID:        uuid.New().String(),
-			Provider:  "google",
-			Issuer:    canonicalIssuer,
-			Subject:   identity.Subject,
-			UserID:    existingUser.ID,
-			Email:     normalizedEmail,
-			CreatedAt: now,
-			UpdatedAt: now,
-		}); err != nil {
-			return s.resolveAfterConflict(ctx, canonicalIssuer, identity, existingUser.ID, err)
-		}
-
-		s.logger.Info("GE exchange: created new binding for existing user",
-			"sub", identity.Subject,
-			"email", normalizedEmail,
-			"user_id", existingUser.ID)
-		return existingUser, nil
-	}
-
-	// No existing user by email — provision a new user through the normal path.
-	// This requires the same authorization checks as regular login.
-	//
-	// provisionNewUser may return an existing user instead of a newly created
-	// one when a concurrent exchange wins the unique-email race. The
-	// provisioned flag distinguishes the two cases for orphan cleanup below.
-	user, provisioned, err := s.provisionNewUser(ctx, identity)
-	if err != nil {
-		return nil, err
-	}
-
-	// Create the binding. If a concurrent exchange already created it
-	// (unique constraint violation), resolve via the winning binding and
-	// clean up the orphaned user only if we actually provisioned a NEW user
-	// that differs from the winner's user.
-	now := time.Now()
-	if err := s.extIDStore.CreateExternalIdentity(ctx, &ExternalIdentityBinding{
-		ID:        uuid.New().String(),
-		Provider:  "google",
-		Issuer:    canonicalIssuer,
-		Subject:   identity.Subject,
-		UserID:    user.ID,
-		Email:     normalizedEmail,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}); err != nil {
-		winner, resolveErr := s.resolveAfterConflict(ctx, canonicalIssuer, identity, "", err)
-		// Orphan cleanup: only delete if we provisioned a new user AND the
-		// winner resolved to a different user. When all concurrent exchanges
-		// converge on the same user (via email-collision resolution), the
-		// user is NOT an orphan even if we lose the binding race.
-		if provisioned && resolveErr == nil && winner != nil && winner.ID != user.ID {
-			if delErr := s.userStore.DeleteUser(ctx, user.ID); delErr != nil {
-				s.logger.Warn("GE exchange: failed to clean up orphaned user after conflict",
-					"user_id", user.ID, "error", delErr)
-			}
-		}
-		return winner, resolveErr
-	}
-
-	return user, nil
-}
-
-// resolveAfterConflict handles the case where CreateExternalIdentity failed
-// due to a unique constraint violation (race between concurrent exchanges).
-// It looks up the winning binding and resolves to the winner's user.
-//
-// If expectedUserID is non-empty (linking to an existing user), the winner's
-// binding must point to the same user — otherwise it fails closed with
-// errBindingConflict to prevent silently adopting a mismatched user.
-func (s *GEExchangeService) resolveAfterConflict(ctx context.Context, canonicalIssuer string, identity *ValidatedGoogleIdentity, expectedUserID string, createErr error) (*store.User, error) {
-	// Retry by looking up the binding the winner created.
-	winner, err := s.extIDStore.GetExternalIdentity(ctx, "google", canonicalIssuer, identity.Subject)
-	if err != nil {
-		// Binding still not found: this was a genuine error, not a race.
-		s.logger.Error("GE exchange: binding creation failed and no winning binding found",
-			"create_error", createErr, "lookup_error", err, "sub", identity.Subject)
-		return nil, fmt.Errorf("failed to create identity binding: %w", createErr)
-	}
-
-	// If we expected a specific user (existing-user linkage path), validate
-	// the winner bound to the same user. Fail closed otherwise.
-	if expectedUserID != "" && winner.UserID != expectedUserID {
-		s.logger.Error("GE exchange: conflict resolution mismatch — winner bound to different user",
-			"expected_user_id", expectedUserID, "winner_user_id", winner.UserID,
-			"sub", identity.Subject)
-		return nil, errBindingConflict
-	}
-
-	// Found the winner's binding — resolve to the winner's user.
-	user, err := s.userStore.GetUser(ctx, winner.UserID)
-	if err != nil {
-		return nil, fmt.Errorf("bound user not found after conflict resolution: %w", err)
-	}
-	if user.Status == "suspended" {
-		return nil, ErrUserSuspended
-	}
-
-	s.logger.Info("GE exchange: resolved to existing binding after race",
-		"sub", identity.Subject, "user_id", user.ID)
-	return user, nil
-}
-
-// provisionNewUser creates a new user via the normal Hub provisioning path.
-// Enforces the same domain/invite/allow-registration policy as the normal
-// Hub login flow via the injected authChecker.
-//
-// Returns (user, true, nil) when a new user was created, or
-// (winner, false, nil) when CreateUser lost a unique-email race and the
-// winning user was found. The caller uses the provisioned flag to decide
-// whether orphan cleanup is appropriate.
-//
-// When CreateUser fails with a unique-email constraint violation (concurrent
-// exchange race), re-queries by normalized email. If the winning user is found
-// and passes suspension checks, returns the winner with provisioned=false;
-// otherwise returns the original create error to fail closed.
-func (s *GEExchangeService) provisionNewUser(ctx context.Context, identity *ValidatedGoogleIdentity) (user *store.User, provisioned bool, err error) {
-	normalizedEmail := strings.ToLower(identity.Email)
-
-	// Enforce Hub registration policy (domain, invite-only, allow-list).
-	// Fail closed: authChecker defaults to rejecting all if not provided.
-	if !s.authChecker(ctx, normalizedEmail) {
-		s.logger.Warn("GE exchange: user not authorized for auto-provisioning",
-			"email", normalizedEmail, "sub", identity.Subject)
-		return nil, false, fmt.Errorf("%w: user not authorized for auto-provisioning", ErrAccessDenied)
-	}
-
-	newUser := &store.User{
-		ID:          uuid.New().String(),
-		Email:       normalizedEmail,
-		DisplayName: identity.DisplayName,
-		AvatarURL:   identity.AvatarURL,
-		Role:        "member",
-		Status:      store.UserStatusActive,
-		Created:     time.Now(),
-		LastLogin:   time.Now(),
-	}
-
-	if createErr := s.userStore.CreateUser(ctx, newUser); createErr != nil {
-		// Unique-email collision: another concurrent exchange won the race
-		// and created the user first. Re-query by email to find the winner.
-		if errors.Is(createErr, store.ErrAlreadyExists) {
-			winner, lookupErr := s.userStore.GetUserByEmail(ctx, normalizedEmail)
-			if lookupErr != nil {
-				// No winner found — return the original create error (fail closed).
-				s.logger.Error("GE exchange: user creation conflict but no winner found",
-					"email", normalizedEmail, "create_error", createErr, "lookup_error", lookupErr)
-				return nil, false, fmt.Errorf("create user: %w", createErr)
-			}
-			if winner.Status == "suspended" {
-				return nil, false, ErrUserSuspended
-			}
-			s.logger.Info("GE exchange: resolved to existing user after email collision",
-				"email", normalizedEmail, "winner_user_id", winner.ID,
-				"sub", identity.Subject)
-			return winner, false, nil
-		}
-		return nil, false, fmt.Errorf("create user: %w", createErr)
-	}
-
-	s.logger.Info("GE exchange: provisioned new user",
-		"email", normalizedEmail,
-		"user_id", newUser.ID,
-		"sub", identity.Subject)
-
-	return newUser, true, nil
-}
-
-// ---------------------------------------------------------------------------
 // HTTP handler
 // ---------------------------------------------------------------------------
 
@@ -560,6 +302,7 @@ func (s *Server) handleGEGoogleExchange(w http.ResponseWriter, r *http.Request) 
 		clientIP := geExchangeClientIP(r, trustedNets)
 		allowed, retryAfter := s.geExchangeRateLimiter.Allow(clientIP)
 		if !allowed {
+			s.recordGEExchange(GEExchangeOutcomeRateLimited)
 			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 			writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited,
 				fmt.Sprintf("rate limit exceeded; retry in %ds", retryAfter), nil)
@@ -568,6 +311,7 @@ func (s *Server) handleGEGoogleExchange(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if s.geExchangeService == nil {
+		s.recordGEExchange(GEExchangeOutcomeNotConfigured)
 		writeError(w, http.StatusUnauthorized, "not_configured",
 			"GE Google exchange is not configured", nil)
 		return
@@ -578,6 +322,7 @@ func (s *Server) handleGEGoogleExchange(w http.ResponseWriter, r *http.Request) 
 
 	var req ExchangeRequest
 	if err := readJSON(r, &req); err != nil {
+		s.recordGEExchange(GEExchangeOutcomeInvalidRequest)
 		if isMaxBytesError(err) {
 			writeError(w, http.StatusRequestEntityTooLarge, ErrCodeInvalidRequest,
 				"request body too large", nil)
@@ -590,21 +335,43 @@ func (s *Server) handleGEGoogleExchange(w http.ResponseWriter, r *http.Request) 
 	resp, statusCode, err := s.geExchangeService.Exchange(r.Context(), &req)
 	if err != nil {
 		code := "exchange_failed"
+		outcome := GEExchangeOutcomeExchangeFailed
 		switch statusCode {
 		case http.StatusBadRequest:
-			code = "bad_request"
+			code, outcome = "bad_request", GEExchangeOutcomeBadRequest
 		case http.StatusUnauthorized:
-			code = "invalid_credential"
+			code, outcome = "invalid_credential", GEExchangeOutcomeInvalidCredential
 		case http.StatusForbidden:
-			code = "forbidden"
+			code, outcome = "forbidden", GEExchangeOutcomeForbidden
 		case http.StatusTooManyRequests:
-			code = "rate_limited"
+			code, outcome = "rate_limited", GEExchangeOutcomeRateLimited
 		}
+		s.recordGEExchange(outcome)
 		writeError(w, statusCode, code, err.Error(), nil)
 		return
 	}
 
+	s.recordGEExchange(GEExchangeOutcomeOK)
 	writeJSON(w, statusCode, resp)
+}
+
+// recordGEExchange records one exchange-endpoint outcome, nil-safe against
+// s.geExchangeMetrics never having been wired — true only for a Server not
+// built through New() (most hand-built `&Server{}` tests in this package);
+// New() always wires the in-process default (the snapshot recorder),
+// optionally replaced later by SetGEExchangeMetrics with an OTel-backed one.
+// It also enforces the closed label set at this boundary: an invalid outcome
+// is dropped (with a warning naming only the label and its type, never the
+// value) rather than reaching any recorder.
+func (s *Server) recordGEExchange(outcome GEExchangeOutcome) {
+	if !outcome.valid() {
+		slog.Warn("ge exchange: dropping metric record: invalid label", "label", "outcome", "type", fmt.Sprintf("%T", outcome))
+		return
+	}
+	if s.geExchangeMetrics == nil {
+		return
+	}
+	s.geExchangeMetrics.RecordGEExchangeRequest(outcome)
 }
 
 // isMaxBytesError checks whether an error is an *http.MaxBytesError (body

@@ -145,7 +145,6 @@ type AgentDetail struct {
 type AgentStatusEvent struct {
 	AgentID           string       `json:"agentId"`
 	ProjectID         string       `json:"projectId"`
-	GroveID           string       `json:"groveId"`
 	Phase             string       `json:"phase,omitempty"`
 	Activity          string       `json:"activity,omitempty"`
 	Detail            *AgentDetail `json:"detail,omitempty"`
@@ -159,7 +158,6 @@ type AgentStatusEvent struct {
 type AgentCreatedEvent struct {
 	AgentID         string   `json:"agentId"`
 	ProjectID       string   `json:"projectId"`
-	GroveID         string   `json:"groveId"`
 	Name            string   `json:"name"`
 	Slug            string   `json:"slug"`
 	Template        string   `json:"template,omitempty"`
@@ -170,7 +168,6 @@ type AgentCreatedEvent struct {
 	Runtime         string   `json:"runtime,omitempty"`
 	RuntimeBrokerID string   `json:"runtimeBrokerId,omitempty"`
 	CreatedBy       string   `json:"createdBy,omitempty"`
-	Visibility      string   `json:"visibility,omitempty"`
 	TaskSummary     string   `json:"taskSummary,omitempty"`
 	Created         string   `json:"created,omitempty"`
 	Ancestry        []string `json:"ancestry,omitempty"`
@@ -180,21 +177,18 @@ type AgentCreatedEvent struct {
 type AgentDeletedEvent struct {
 	AgentID   string `json:"agentId"`
 	ProjectID string `json:"projectId"`
-	GroveID   string `json:"groveId"`
 }
 
 // AgentPortsEvent is published when an agent's exposed ports change.
 type AgentPortsEvent struct {
 	AgentID   string              `json:"agentId"`
 	ProjectID string              `json:"projectId"`
-	GroveID   string              `json:"groveId"`
 	Ports     []store.ExposedPort `json:"ports"`
 }
 
 // ProjectCreatedEvent is published when a project is created.
 type ProjectCreatedEvent struct {
 	ProjectID string `json:"projectId"`
-	GroveID   string `json:"groveId"`
 	Name      string `json:"name"`
 	Slug      string `json:"slug"`
 }
@@ -202,14 +196,12 @@ type ProjectCreatedEvent struct {
 // ProjectUpdatedEvent is published when a project is updated.
 type ProjectUpdatedEvent struct {
 	ProjectID string `json:"projectId"`
-	GroveID   string `json:"groveId"`
 	Name      string `json:"name"`
 }
 
 // ProjectDeletedEvent is published when a project is deleted.
 type ProjectDeletedEvent struct {
 	ProjectID string `json:"projectId"`
-	GroveID   string `json:"groveId"`
 }
 
 // BrokerProjectEvent is published when a broker connects or disconnects,
@@ -218,7 +210,6 @@ type BrokerProjectEvent struct {
 	BrokerID   string `json:"brokerId"`
 	BrokerName string `json:"brokerName,omitempty"`
 	ProjectID  string `json:"projectId"`
-	GroveID    string `json:"groveId"`
 	Status     string `json:"status"` // "online" or "offline"
 }
 
@@ -233,7 +224,6 @@ type BrokerStatusEvent struct {
 type UserMessageEvent struct {
 	ID            string          `json:"id"`
 	ProjectID     string          `json:"projectId"`
-	GroveID       string          `json:"groveId"`
 	Sender        string          `json:"sender"`
 	SenderID      string          `json:"senderId"`
 	Recipient     string          `json:"recipient"`
@@ -250,6 +240,17 @@ type UserMessageEvent struct {
 	Read          bool            `json:"read"`
 	DispatchState string          `json:"dispatchState,omitempty"`
 	Attachments   []AttachmentRef `json:"attachments,omitempty"`
+
+	// DispatchFailureReason and DispatchFailureCode carry the same failure
+	// detail as chatMessageResponse (nc-delivery-unreachable review R2), so
+	// live SSE viewers — including the sending tab, when the SSE echo
+	// resolves before the HTTP response — see "Agent unreachable" instead of
+	// a bare "Failed". Populated only for a failed row whose reason was
+	// already known at publish time (see PublishUserMessage); the
+	// synchronous dispatch_error branch publishes before that reason is set,
+	// which is pre-existing ordering, unchanged here.
+	DispatchFailureReason string `json:"dispatchFailureReason,omitempty"`
+	DispatchFailureCode   string `json:"dispatchFailureCode,omitempty"`
 }
 
 // NotificationCreatedEvent is published when a user notification is created.
@@ -257,7 +258,6 @@ type NotificationCreatedEvent struct {
 	ID        string `json:"id"`
 	AgentID   string `json:"agentId"`
 	ProjectID string `json:"projectId"`
-	GroveID   string `json:"groveId"`
 	Status    string `json:"status"`
 	Message   string `json:"message"`
 	CreatedAt string `json:"createdAt"`
@@ -465,7 +465,6 @@ func (p *eventBuilder) PublishAgentStatus(_ context.Context, agent *store.Agent)
 	evt := AgentStatusEvent{
 		AgentID:         agent.ID,
 		ProjectID:       agent.ProjectID,
-		GroveID:         agent.ProjectID,
 		Phase:           agent.Phase,
 		Activity:        agent.Activity,
 		ContainerStatus: agent.ContainerStatus,
@@ -490,7 +489,6 @@ func (p *eventBuilder) PublishAgentStatus(_ context.Context, agent *store.Agent)
 	p.sink("agent."+agent.ID+".status", evt)
 	if agent.ProjectID != "" {
 		p.sink("project."+agent.ProjectID+".agent.status", evt)
-		p.sink("grove."+agent.ProjectID+".agent.status", evt)
 	}
 }
 
@@ -500,7 +498,6 @@ func (p *eventBuilder) PublishAgentCreated(_ context.Context, agent *store.Agent
 	evt := AgentCreatedEvent{
 		AgentID:         agent.ID,
 		ProjectID:       agent.ProjectID,
-		GroveID:         agent.ProjectID,
 		Name:            agent.Name,
 		Slug:            agent.Slug,
 		Template:        agent.Template,
@@ -511,7 +508,6 @@ func (p *eventBuilder) PublishAgentCreated(_ context.Context, agent *store.Agent
 		Runtime:         agent.Runtime,
 		RuntimeBrokerID: agent.RuntimeBrokerID,
 		CreatedBy:       agent.CreatedBy,
-		Visibility:      agent.Visibility,
 		TaskSummary:     agent.TaskSummary,
 		Ancestry:        agent.Ancestry,
 	}
@@ -521,7 +517,6 @@ func (p *eventBuilder) PublishAgentCreated(_ context.Context, agent *store.Agent
 	p.sink("agent."+agent.ID+".created", evt)
 	if agent.ProjectID != "" {
 		p.sink("project."+agent.ProjectID+".agent.created", evt)
-		p.sink("grove."+agent.ProjectID+".agent.created", evt)
 	}
 }
 
@@ -531,12 +526,10 @@ func (p *eventBuilder) PublishAgentDeleted(_ context.Context, agentID, projectID
 	evt := AgentDeletedEvent{
 		AgentID:   agentID,
 		ProjectID: projectID,
-		GroveID:   projectID,
 	}
 	p.sink("agent."+agentID+".deleted", evt)
 	if projectID != "" {
 		p.sink("project."+projectID+".agent.deleted", evt)
-		p.sink("grove."+projectID+".agent.deleted", evt)
 	}
 }
 
@@ -545,13 +538,11 @@ func (p *eventBuilder) PublishAgentPorts(_ context.Context, agent *store.Agent) 
 	evt := AgentPortsEvent{
 		AgentID:   agent.ID,
 		ProjectID: agent.ProjectID,
-		GroveID:   agent.ProjectID,
 		Ports:     agent.ExposedPorts,
 	}
 	p.sink("agent."+agent.ID+".ports", evt)
 	if agent.ProjectID != "" {
 		p.sink("project."+agent.ProjectID+".agent.ports", evt)
-		p.sink("grove."+agent.ProjectID+".agent.ports", evt)
 	}
 }
 
@@ -559,33 +550,27 @@ func (p *eventBuilder) PublishAgentPorts(_ context.Context, agent *store.Agent) 
 func (p *eventBuilder) PublishProjectCreated(_ context.Context, project *store.Project) {
 	evt := ProjectCreatedEvent{
 		ProjectID: project.ID,
-		GroveID:   project.ID,
 		Name:      project.Name,
 		Slug:      project.Slug,
 	}
 	p.sink("project."+project.ID+".created", evt)
-	p.sink("grove."+project.ID+".created", evt)
 }
 
 // PublishProjectUpdated publishes a project updated event.
 func (p *eventBuilder) PublishProjectUpdated(_ context.Context, project *store.Project) {
 	evt := ProjectUpdatedEvent{
 		ProjectID: project.ID,
-		GroveID:   project.ID,
 		Name:      project.Name,
 	}
 	p.sink("project."+project.ID+".updated", evt)
-	p.sink("grove."+project.ID+".updated", evt)
 }
 
 // PublishProjectDeleted publishes a project deleted event.
 func (p *eventBuilder) PublishProjectDeleted(_ context.Context, projectID string) {
 	evt := ProjectDeletedEvent{
 		ProjectID: projectID,
-		GroveID:   projectID,
 	}
 	p.sink("project."+projectID+".deleted", evt)
-	p.sink("grove."+projectID+".deleted", evt)
 }
 
 // PublishBrokerConnected publishes broker connection events, one per project the broker serves.
@@ -595,11 +580,9 @@ func (p *eventBuilder) PublishBrokerConnected(_ context.Context, brokerID, broke
 			BrokerID:   brokerID,
 			BrokerName: brokerName,
 			ProjectID:  pid,
-			GroveID:    pid,
 			Status:     "online",
 		}
 		p.sink("project."+pid+".broker.status", evt)
-		p.sink("grove."+pid+".broker.status", evt)
 	}
 }
 
@@ -609,11 +592,9 @@ func (p *eventBuilder) PublishBrokerDisconnected(_ context.Context, brokerID str
 		evt := BrokerProjectEvent{
 			BrokerID:  brokerID,
 			ProjectID: pid,
-			GroveID:   pid,
 			Status:    "offline",
 		}
 		p.sink("project."+pid+".broker.status", evt)
-		p.sink("grove."+pid+".broker.status", evt)
 	}
 }
 
@@ -632,7 +613,6 @@ func (p *eventBuilder) PublishNotification(_ context.Context, notif *store.Notif
 		ID:        notif.ID,
 		AgentID:   notif.AgentID,
 		ProjectID: notif.ProjectID,
-		GroveID:   notif.ProjectID,
 		Status:    notif.Status,
 		Message:   notif.Message,
 		CreatedAt: notif.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
@@ -640,7 +620,6 @@ func (p *eventBuilder) PublishNotification(_ context.Context, notif *store.Notif
 	p.sink("notification.created", evt)
 	if notif.ProjectID != "" {
 		p.sink("project."+notif.ProjectID+".notification", evt)
-		p.sink("grove."+notif.ProjectID+".notification", evt)
 	}
 }
 
@@ -648,12 +627,11 @@ func (p *eventBuilder) PublishNotification(_ context.Context, notif *store.Notif
 // on user.<subscriberID>.notification and on no other subject.
 //
 // Chat notification messages contain the sender's display name and a preview of
-// the message body. authorizeSSESubjects (web.go) only constrains subjects whose
-// first token is "project" or "user": a subscription to "notification.>" is
-// granted to every logged-in session, so publishing chat payloads there hands
-// every browser on the deployment a copy. project.<id>.notification is narrower
-// but still wrong — project membership is not conversation membership, and a DM
-// has no project at all.
+// the message body. notification.* is an explicit pass-through in
+// authorizeSSESubjects (web.go), granted to every logged-in session, so
+// publishing chat payloads there hands every browser on the deployment a
+// copy. project.<id>.notification is narrower but still wrong — project
+// membership is not conversation membership, and a DM has no project at all.
 //
 // A notification with no SubscriberID has no subject that can be scoped to it,
 // so it is dropped rather than broadcast. Agent-status notifications keep using
@@ -667,7 +645,6 @@ func (p *eventBuilder) PublishChatNotification(_ context.Context, notif *store.N
 			ID:        notif.ID,
 			AgentID:   notif.AgentID,
 			ProjectID: notif.ProjectID,
-			GroveID:   notif.ProjectID,
 			Status:    notif.Status,
 			Message:   notif.Message,
 			CreatedAt: notif.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
@@ -717,7 +694,6 @@ func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message,
 	evt := UserMessageEvent{
 		ID:            msg.ID,
 		ProjectID:     msg.ProjectID,
-		GroveID:       msg.ProjectID,
 		Sender:        msg.Sender,
 		SenderID:      msg.SenderID,
 		Recipient:     msg.Recipient,
@@ -735,6 +711,16 @@ func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message,
 		DispatchState: msg.DispatchState,
 		Attachments:   attachments,
 	}
+	// nc-delivery-unreachable review R2: carry the failure reason/code onto
+	// the event for a row that is already known to be failed at publish
+	// time (the phase gate and the unreachable-default override both set
+	// DispatchFailureReason before calling PublishUserMessage). The code is
+	// derived from the reason the same way the frontend's history-row
+	// fallback does, because store.Message has no dedicated code column.
+	if msg.DispatchState == store.MessageDispatchFailed && msg.DispatchFailureReason != nil {
+		evt.DispatchFailureReason = *msg.DispatchFailureReason
+		evt.DispatchFailureCode = dispatchFailureCodeFromReason(*msg.DispatchFailureReason)
+	}
 	// Only fan out to user-inbox and project-level subjects when the
 	// recipient is actually a human user. For user→agent messages the
 	// RecipientID is the agent UUID, so publishing to user.<agentID>
@@ -746,7 +732,6 @@ func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message,
 	}
 	if recipientIsUser && msg.ProjectID != "" {
 		p.sink("project."+msg.ProjectID+".user.message", evt)
-		p.sink("grove."+msg.ProjectID+".user.message", evt)
 	}
 	if msg.AgentID != "" {
 		p.sink("agent."+msg.AgentID+".message", evt)

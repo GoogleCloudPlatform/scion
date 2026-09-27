@@ -560,38 +560,6 @@ func TestJSONRPCDeniesNonExposedAgent(t *testing.T) {
 	}
 }
 
-func TestLegacyGrovePath(t *testing.T) {
-	_, ts, _ := newTestServer(t)
-
-	// Test legacy .well-known path (public access)
-	resp, err := http.Get(ts.URL + "/groves/test-grove/agents/test-agent/.well-known/agent-card.json")
-	if err != nil {
-		t.Fatalf("GET legacy agent card: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("status = %d, want 200", resp.StatusCode)
-	}
-
-	// Test legacy JSON-RPC path (requires auth)
-	rpcReq, _ := json.Marshal(jsonRPCRequest{JSONRPC: "2.0", ID: 1, Method: "tasks/get", Params: json.RawMessage(`{"id":"x"}`)})
-	httpReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/groves/test-grove/agents/test-agent/jsonrpc", bytes.NewReader(rpcReq))
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("X-API-Key", "test-api-key")
-
-	resp, err = http.DefaultClient.Do(httpReq)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-
-	// Should be 200 OK (the actual RPC might fail with "task not found" but the route should be authorized)
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("legacy RPC: status = %d, want 200", resp.StatusCode)
-	}
-}
-
 func TestAuthorizeTaskReturnsNilNil(t *testing.T) {
 	dir := t.TempDir()
 	s, err := state.NewSQLite(filepath.Join(dir, "auth-test.db"))

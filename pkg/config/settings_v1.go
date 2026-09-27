@@ -297,6 +297,15 @@ type VersionedSettings struct {
 	// first-class timezone field nor a raw TZ in the profile env is set.
 	DefaultTimezone string `json:"default_timezone,omitempty" yaml:"default_timezone,omitempty" koanf:"default_timezone"`
 
+	// DefaultGCPIdentityMode is the hub-level default GCP metadata mode
+	// ("block", "passthrough", "assign") applied to new agents whose project
+	// has no default of its own. Empty means no hub default (block).
+	DefaultGCPIdentityMode string `json:"default_gcp_identity_mode,omitempty" yaml:"default_gcp_identity_mode,omitempty" koanf:"default_gcp_identity_mode"`
+
+	// DefaultGCPIdentityServiceAccountID is the hub-scoped service account
+	// assigned when DefaultGCPIdentityMode is "assign".
+	DefaultGCPIdentityServiceAccountID string `json:"default_gcp_identity_service_account_id,omitempty" yaml:"default_gcp_identity_service_account_id,omitempty" koanf:"default_gcp_identity_service_account_id"`
+
 	// AutoInjectGcloudADC controls whether the host's gcloud Application Default
 	// Credentials file is automatically injected into agent containers in
 	// co-located (workstation) mode.
@@ -449,6 +458,14 @@ type V1TrustedIssuerConfig struct {
 	IssuerType       string   `json:"issuer_type,omitempty" yaml:"issuer_type,omitempty" koanf:"issuer_type"`
 	DefaultRole      string   `json:"default_role,omitempty" yaml:"default_role,omitempty" koanf:"default_role"`
 	AllowedEmails    []string `json:"allowed_emails,omitempty" yaml:"allowed_emails,omitempty" koanf:"allowed_emails"`
+	// AllowedGCPProjects and AllowedDomains must stay the last two fields, in
+	// the same position and order as on TrustedIssuerConfig
+	// (federation_config.go): this file's own GlobalConfig<->V1Settings
+	// conversions do a direct struct type conversion between the two
+	// (TrustedIssuerConfig(vi) and V1TrustedIssuerConfig(ti), below), which
+	// requires identical field name/type/order (struct tags aside).
+	AllowedGCPProjects []string `json:"allowed_gcp_projects,omitempty" yaml:"allowed_gcp_projects,omitempty" koanf:"allowed_gcp_projects"`
+	AllowedDomains     []string `json:"allowed_domains,omitempty" yaml:"allowed_domains,omitempty" koanf:"allowed_domains"`
 }
 
 // V1NotificationChannelConfig holds configuration for an external notification channel.
@@ -543,15 +560,22 @@ type V1PluginEntry struct {
 
 // V1ServerHubConfig holds the Hub API server settings (when running scion-server).
 type V1ServerHubConfig struct {
-	Port         int           `json:"port,omitempty" yaml:"port,omitempty" koanf:"port"`
-	Host         string        `json:"host,omitempty" yaml:"host,omitempty" koanf:"host"`
-	HubID        string        `json:"hub_id,omitempty" yaml:"hub_id,omitempty" koanf:"hub_id"`
-	HubName      string        `json:"hub_name,omitempty" yaml:"hub_name,omitempty" koanf:"hub_name"`
-	PublicURL    string        `json:"public_url,omitempty" yaml:"public_url,omitempty" koanf:"public_url"`
-	ReadTimeout  string        `json:"read_timeout,omitempty" yaml:"read_timeout,omitempty" koanf:"read_timeout"`
-	WriteTimeout string        `json:"write_timeout,omitempty" yaml:"write_timeout,omitempty" koanf:"write_timeout"`
-	CORS         *V1CORSConfig `json:"cors,omitempty" yaml:"cors,omitempty" koanf:"cors"`
-	AdminEmails  []string      `json:"admin_emails,omitempty" yaml:"admin_emails,omitempty" koanf:"admin_emails"`
+	Port      int    `json:"port,omitempty" yaml:"port,omitempty" koanf:"port"`
+	Host      string `json:"host,omitempty" yaml:"host,omitempty" koanf:"host"`
+	HubID     string `json:"hub_id,omitempty" yaml:"hub_id,omitempty" koanf:"hub_id"`
+	HubName   string `json:"hub_name,omitempty" yaml:"hub_name,omitempty" koanf:"hub_name"`
+	PublicURL string `json:"public_url,omitempty" yaml:"public_url,omitempty" koanf:"public_url"`
+	// AgentEndpoint optionally overrides the Hub URL injected into agents as
+	// SCION_HUB_ENDPOINT, without changing PublicURL's other uses (invite
+	// links, chat-bridge links, the OIDC issuer default, the cloudrun_invoker
+	// audience default). Must be scheme://host[:port] only when set — see
+	// config.ValidateAgentEndpoint for the exact rules and the normalized
+	// form this field should hold.
+	AgentEndpoint string        `json:"agent_endpoint,omitempty" yaml:"agent_endpoint,omitempty" koanf:"agent_endpoint"`
+	ReadTimeout   string        `json:"read_timeout,omitempty" yaml:"read_timeout,omitempty" koanf:"read_timeout"`
+	WriteTimeout  string        `json:"write_timeout,omitempty" yaml:"write_timeout,omitempty" koanf:"write_timeout"`
+	CORS          *V1CORSConfig `json:"cors,omitempty" yaml:"cors,omitempty" koanf:"cors"`
+	AdminEmails   []string      `json:"admin_emails,omitempty" yaml:"admin_emails,omitempty" koanf:"admin_emails"`
 
 	// SoftDeleteRetention is how long soft-deleted agents are retained (e.g., "72h").
 	SoftDeleteRetention string `json:"soft_delete_retention,omitempty" yaml:"soft_delete_retention,omitempty" koanf:"soft_delete_retention"`
@@ -902,6 +926,61 @@ func validateSubPathRoot(subPathRoot string) error {
 	return nil
 }
 
+// sharedDirStorageIgnoredNFSFields lists the V1NFSConfig fields that are
+// meaningful for workspace_storage but never consulted by shared_dir_storage
+// (design deploy-config-explore §3.2.1's "warned and ignored if set").
+var sharedDirStorageIgnoredNFSFields = []struct {
+	name string
+	set  func(nfs *V1NFSConfig) bool
+}{
+	{"uid", func(nfs *V1NFSConfig) bool { return nfs.UID != 0 }},
+	{"gid", func(nfs *V1NFSConfig) bool { return nfs.GID != 0 }},
+	{"mount_options", func(nfs *V1NFSConfig) bool { return nfs.MountOptions != "" }},
+	{"storage_class", func(nfs *V1NFSConfig) bool { return nfs.StorageClass != "" }},
+}
+
+// IgnoredNFSFields returns the names of the workspace-storage-only NFS
+// fields (uid, gid, mount_options, storage_class) that are set on s but
+// never used by shared_dir_storage, for a one-time startup warning (Phase 2
+// item 5, design §7 Phase 2: "startup validation warns about ignored
+// fields"). Returns nil if s is nil, s.NFS is nil, or backend isn't "nfs" —
+// there is nothing to warn about in any of those cases.
+func (s *V1SharedDirStorageConfig) IgnoredNFSFields() []string {
+	if s == nil || s.NFS == nil || s.Backend != "nfs" {
+		return nil
+	}
+	var ignored []string
+	for _, f := range sharedDirStorageIgnoredNFSFields {
+		if f.set(s.NFS) {
+			ignored = append(ignored, f.name)
+		}
+	}
+	return ignored
+}
+
+// ResolvedLayoutSummary returns a one-line, human-readable summary of the
+// resolved shared_dir_storage layout — backend, host base, subpath_root,
+// pv_name — for the single startup log line design §7 Phase 2 calls for.
+// Returns "" if s is nil, s.NFS is nil, or backend isn't "nfs" (nothing to
+// log: the unset/local case is unchanged Phase 1 behavior, not a new
+// resolved layout).
+func (s *V1SharedDirStorageConfig) ResolvedLayoutSummary() string {
+	if s == nil || s.NFS == nil || s.Backend != "nfs" {
+		return ""
+	}
+	hostBase := ""
+	pvName := ""
+	if len(s.NFS.Shares) > 0 {
+		hostBase = filepath.Join(s.NFS.MountRoot, s.NFS.Shares[0].ID)
+		pvName = s.NFS.Shares[0].PVName
+	}
+	subPathRoot := s.NFS.SubPathRoot
+	if subPathRoot == "" {
+		subPathRoot = "projects"
+	}
+	return fmt.Sprintf("backend=nfs host_base=%s subpath_root=%s pv_name=%s", hostBase, subPathRoot, pvName)
+}
+
 // V1SecretsConfig holds secrets backend settings.
 type V1SecretsConfig struct {
 	Backend                 string   `json:"backend,omitempty" yaml:"backend,omitempty" koanf:"backend"`
@@ -1243,25 +1322,46 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 
 	// 2. Load global settings (~/.scion/settings.yaml or .json)
 	globalDir, _ := GetGlobalDir()
+	var globalMigratedHub bool
 	if globalDir != "" {
-		if err := loadSettingsFile(k, globalDir); err != nil {
+		var err error
+		globalMigratedHub, err = loadSettingsFile(k, globalDir)
+		if err != nil {
 			return nil, err
 		}
+	}
+	// Captured once, right after the global layer loads — see
+	// LoadSettingsKoanf's identical comment for why both step 3 and step 4
+	// compare against this same value, and why a migrated global value is
+	// not compared against at all.
+	globalHubProjectID := k.String(projectcompat.ConfigHubProjectIDKey)
+	if globalMigratedHub {
+		globalHubProjectID = ""
 	}
 
 	// 3. Load in-repo project settings (.scion/settings.yaml)
 	effectiveProjectPath := resolveEffectiveProjectPath(projectPath)
 	if projectPath != "" && projectPath != globalDir {
-		if err := loadSettingsFile(k, projectPath); err != nil {
+		migratedHub, err := loadSettingsFile(k, projectPath)
+		if err != nil {
 			return nil, err
+		}
+		if migratedHub {
+			logHubProjectIDPrecedenceChange(k, projectPath, globalHubProjectID)
 		}
 		warnIfInRepoHasGlobalKeys(projectPath, effectiveProjectPath)
 	}
 
-	// 4. Load external project config settings (overrides in-repo for split storage)
+	// 4. Load external project config settings (overrides in-repo for split
+	// storage), and where a plain project's settings.yaml is actually loaded
+	// when projectPath is "" (cwd-resolved) — see LoadSettingsKoanf's step 4.
 	if effectiveProjectPath != "" && effectiveProjectPath != globalDir && effectiveProjectPath != projectPath {
-		if err := loadSettingsFile(k, effectiveProjectPath); err != nil {
+		migratedHub, err := loadSettingsFile(k, effectiveProjectPath)
+		if err != nil {
 			return nil, err
+		}
+		if migratedHub {
+			logHubProjectIDPrecedenceChange(k, effectiveProjectPath, globalHubProjectID)
 		}
 	}
 
@@ -1298,15 +1398,6 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 		}
 	}
 
-	// Remap hub.grove_id to hub.project_id for backward compatibility.
-	// Old settings files may still use grove_id; the V1HubClientConfig struct
-	// now uses koanf:"project_id", so grove_id values must be copied across.
-	if k.Exists(projectcompat.ConfigHubGroveIDKey) && !k.Exists(projectcompat.ConfigHubProjectIDKey) {
-		_ = k.Load(confmap.Provider(map[string]interface{}{
-			projectcompat.ConfigHubProjectIDKey: k.String(projectcompat.ConfigHubGroveIDKey),
-		}, "."), nil)
-	}
-
 	// Unmarshal into VersionedSettings struct
 	settings := &VersionedSettings{
 		Runtimes:       make(map[string]V1RuntimeConfig),
@@ -1332,6 +1423,15 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 func versionedEnvKeyMapper(s string) string {
 	if mapped, ok := projectcompat.EnvProjectIDConfigKey(s, false); ok {
 		return mapped
+	}
+	if isRemovedLegacyEnv(s) {
+		// SCION_HUB_GROVE_ID is no longer read, not even via the generic
+		// "hub_" mapping below, which would otherwise land on the
+		// unrecognised key hub.grove_id. Returning "" makes the env
+		// provider drop the variable entirely, the same idiom used for
+		// SCION_OTEL_INSECURE above. WarnRemovedLegacyEnv reports it
+		// separately.
+		return ""
 	}
 	key := strings.ToLower(strings.TrimPrefix(s, "SCION_"))
 
@@ -1382,6 +1482,7 @@ var knownCompoundFields = []string{
 	"allowed_methods",
 	"allowed_headers",
 	"dev_token_file",
+	"agent_endpoint",
 	"gcp_project_id",
 	"gcp_credentials",
 	"client_secret",
@@ -1609,6 +1710,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		}
 		if v1.Hub.PublicURL != "" {
 			gc.Hub.Endpoint = v1.Hub.PublicURL
+		}
+		if v1.Hub.AgentEndpoint != "" {
+			gc.Hub.AgentEndpoint = v1.Hub.AgentEndpoint
 		}
 		if v1.Hub.ReadTimeout != "" {
 			if d, err := time.ParseDuration(v1.Hub.ReadTimeout); err == nil {
@@ -1956,14 +2060,15 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 
 	// Hub server config
 	v1Hub := &V1ServerHubConfig{
-		Port:         gc.Hub.Port,
-		Host:         gc.Hub.Host,
-		HubID:        gc.Hub.HubID,
-		HubName:      gc.Hub.HubName,
-		PublicURL:    gc.Hub.Endpoint,
-		ReadTimeout:  gc.Hub.ReadTimeout.String(),
-		WriteTimeout: gc.Hub.WriteTimeout.String(),
-		AdminEmails:  gc.Hub.AdminEmails,
+		Port:          gc.Hub.Port,
+		Host:          gc.Hub.Host,
+		HubID:         gc.Hub.HubID,
+		HubName:       gc.Hub.HubName,
+		PublicURL:     gc.Hub.Endpoint,
+		AgentEndpoint: gc.Hub.AgentEndpoint,
+		ReadTimeout:   gc.Hub.ReadTimeout.String(),
+		WriteTimeout:  gc.Hub.WriteTimeout.String(),
+		AdminEmails:   gc.Hub.AdminEmails,
 		CORS: &V1CORSConfig{
 			Enabled:        gc.Hub.CORSEnabled,
 			AllowedOrigins: gc.Hub.CORSAllowedOrigins,
@@ -2735,6 +2840,12 @@ func LoadSingleFileVersioned(dir string) (*VersionedSettings, error) {
 		return &VersionedSettings{SchemaVersion: "1"}, nil
 	}
 
+	// Migrate any legacy hub.grove_id key to hub.project_id in place before
+	// reading, so the parse below sees the canonical key directly. override
+	// covers the case where the rewrite could not happen (read-only
+	// filesystem, not owner): the value to use in memory for this call.
+	_, override := migrateProjectSettingsFile(settingsPath)
+
 	data, err := os.ReadFile(settingsPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read %s: %w", settingsPath, err)
@@ -2757,21 +2868,11 @@ func LoadSingleFileVersioned(dir string) (*VersionedSettings, error) {
 		vs.SchemaVersion = "1"
 	}
 
-	// Backward compatibility: old settings files may use hub.grove_id instead of
-	// hub.project_id. Since the struct yaml tag is now "project_id", grove_id
-	// values are not unmarshaled automatically. Check the raw YAML and remap.
-	if vs.Hub == nil || vs.Hub.ProjectID == "" {
-		var raw map[string]interface{}
-		if err := yamlv3.Unmarshal(data, &raw); err == nil {
-			if hub, ok := raw["hub"].(map[string]interface{}); ok {
-				if gid, ok := hub["grove_id"].(string); ok && gid != "" {
-					if vs.Hub == nil {
-						vs.Hub = &V1HubClientConfig{}
-					}
-					vs.Hub.ProjectID = gid
-				}
-			}
+	if override != "" && (vs.Hub == nil || vs.Hub.ProjectID == "") {
+		if vs.Hub == nil {
+			vs.Hub = &V1HubClientConfig{}
 		}
+		vs.Hub.ProjectID = override
 	}
 
 	return &vs, nil

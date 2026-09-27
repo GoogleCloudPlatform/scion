@@ -13,7 +13,9 @@
     "terminal-coordinator-teardown.test.ts",
     "terminal-coordinator-ownership.test.ts",
     "terminal-reconnect.test.ts",
-    "terminal-workspace-root.test.ts"
+    "terminal-close-codes.test.ts",
+    "terminal-workspace-root.test.ts",
+    "terminal-foreground-reconnect.test.ts"
   ],
   "exclude": []
 }

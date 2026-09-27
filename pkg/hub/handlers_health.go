@@ -270,8 +270,9 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 
 	// Build a combined metrics response
 	type combinedMetrics struct {
-		Broker *MetricsSnapshot         `json:"broker,omitempty"`
-		GCP    *GCPTokenMetricsSnapshot `json:"gcp,omitempty"`
+		Broker         *MetricsSnapshot               `json:"broker,omitempty"`
+		GCP            *GCPTokenMetricsSnapshot       `json:"gcp,omitempty"`
+		ExternalBearer *ExternalBearerMetricsSnapshot `json:"externalBearer,omitempty"`
 	}
 
 	var combined combinedMetrics
@@ -282,8 +283,16 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if s.gcpTokenMetrics != nil {
 		combined.GCP = s.gcpTokenMetrics.GetSnapshot()
 	}
+	// Like gcpTokenMetrics above (and unlike Broker, which only exists when
+	// broker auth is enabled), externalBearerSnapshot is always constructed
+	// by New(): the exchange-deletion soak gate must not
+	// depend on GCP export being configured, so this section is always
+	// present on a Server built through New().
+	if s.externalBearerSnapshot != nil {
+		combined.ExternalBearer = s.externalBearerSnapshot.GetSnapshot()
+	}
 
-	if combined.Broker == nil && combined.GCP == nil {
+	if combined.Broker == nil && combined.GCP == nil && combined.ExternalBearer == nil {
 		writeJSON(w, http.StatusOK, map[string]string{
 			"status": "no_metrics",
 			"reason": "metrics not configured",

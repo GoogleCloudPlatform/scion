@@ -44,7 +44,7 @@ When starting an agent, the Hub resolves a broker through a priority cascade:
 
 | Priority | Source | Condition |
 | :--- | :--- | :--- |
-| 1 | **Explicit `--broker` flag** | The named broker must be a provider for the project (auto-linked if not). |
+| 1 | **Explicit `--broker` flag** | The named broker must be a provider for the project (auto-linked if not; auto-linking requires update access to the project). |
 | 2 | **Project default broker** | Set in project settings; must be online. |
 | 3 | **Hub-level default broker** | Set in [Agent Defaults](/scion/reference/admin-settings/#layout-structure) (`default_runtime_broker`); used when the project has no default. Must be a provider, online, and dispatchable. |
 | 4 | **Single-provider auto-select** | If exactly one broker provides the project and it is online, it is used automatically. |
@@ -74,6 +74,7 @@ See [Brokers behind IAP](/scion/hosted/ha/auth-proxy-iap/#brokers-behind-iap) fo
 ## Considerations
 
 - Each broker manages its own **port pools, container images, and local storage**. Images must be available on each broker independently.
-- **Shared directories** (mounted volumes) only work within a single broker — agents on different brokers cannot share a local directory.
+- **Shared directories** (mounted volumes) only work within a single broker by default. Agents on different brokers cannot share a local directory. To share them across brokers, set [`server.shared_dir_storage.backend`](/scion/reference/server-config/#shared-directory-storage-servershared_dir_storage) to `nfs` in every broker's global settings, pointing at the same NFS export.
 - **Workspace strategy** may differ per broker: local brokers typically use git worktrees (`.scion_worktrees/`), while hub-hosted git projects use a single workspace checkout.
-- Broker capacity is determined by the machine's resources. The Hub does not enforce cross-broker resource limits.
+- **Per-broker agent limit.** The Hub caps how many agents can be running on each broker with the `max_agents_per_broker` limit (default **12**). The limit is checked before an agent is created and again when it is started, resumed, or restarted. A request over the limit fails with `429 Too Many Requests` (`quota_exceeded`) instead of overloading the broker's host. Only running agents count: stopping, suspending, or exiting an agent frees its slot. Admins can change the default, or override it for a single broker, through the admin limits API (see [Admin API](/scion/reference/api/#admin-apiv1admin)). The Hub does not balance load across brokers; size the limit to each machine's resources.
+- **Global project on multi-hub brokers.** A broker connected to more than one Hub rejects agents in the global project with `409 Conflict` and the error code `global_project_disabled` (formerly `global_grove_disabled`).

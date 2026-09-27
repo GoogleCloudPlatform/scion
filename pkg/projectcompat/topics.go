@@ -25,14 +25,10 @@ import (
 
 const (
 	CanonicalTopicPrefix = "scion.project"
-	LegacyTopicPrefix    = "scion.grove"
 
 	LabelProjectID   = "scion.project_id"
-	LabelGroveID     = "scion.grove_id"
 	LabelProject     = "scion.project"
-	LabelGrove       = "scion.grove"
 	LabelProjectPath = "scion.project_path"
-	LabelGrovePath   = "scion.grove_path"
 )
 
 type TopicKind string
@@ -47,7 +43,6 @@ type Topic struct {
 	ProjectID string
 	Kind      TopicKind
 	Actor     string
-	Legacy    bool
 }
 
 func AgentTopic(projectID, agentSlug string) string {
@@ -78,26 +73,17 @@ func AllProjectsPattern() string {
 	return CanonicalTopicPrefix + ".>"
 }
 
-func LegacyUserTopic(projectID, userID string) string {
-	return LegacyTopicPrefix + "." + projectID + ".user." + userID + ".messages"
-}
-
 func ParseTopic(topic string) (Topic, error) {
 	parts := strings.Split(topic, ".")
 	if len(parts) < 4 || parts[0] != "scion" {
 		return Topic{}, fmt.Errorf("malformed topic %q", topic)
 	}
 
-	var legacy bool
-	switch parts[1] {
-	case "project":
-	case "grove":
-		legacy = true
-	default:
-		return Topic{}, fmt.Errorf("expected project or legacy grove topic, got %q", topic)
+	if parts[1] != "project" {
+		return Topic{}, fmt.Errorf("expected project topic, got %q", topic)
 	}
 
-	t := Topic{ProjectID: parts[2], Legacy: legacy}
+	t := Topic{ProjectID: parts[2]}
 	if t.ProjectID == "" {
 		return Topic{}, fmt.Errorf("missing project id in topic %q", topic)
 	}

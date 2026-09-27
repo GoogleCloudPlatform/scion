@@ -91,14 +91,18 @@ func TestBuildStartContext_BasicFields(t *testing.T) {
 
 	srv := newTestServerForStartContext(t, cfg)
 
+	projectPath := filepath.Join(t.TempDir(), "my-project")
+
 	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
 	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
 		Name:        "my-agent",
 		AgentID:     "uuid-1",
 		Slug:        "my-agent-slug",
 		ProjectID:   "grove-1",
+		ProjectPath: projectPath,
 		Attach:      false,
 		HTTPRequest: r,
+		Operation:   opCreate,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -127,8 +131,17 @@ func TestBuildStartContext_BasicFields(t *testing.T) {
 	if sc.Opts.Env["SCION_AGENT_SLUG"] != "my-agent-slug" {
 		t.Errorf("expected SCION_AGENT_SLUG='my-agent-slug', got %q", sc.Opts.Env["SCION_AGENT_SLUG"])
 	}
-	if sc.Opts.Env["SCION_GROVE_ID"] != "grove-1" {
-		t.Errorf("expected SCION_GROVE_ID='grove-1', got %q", sc.Opts.Env["SCION_GROVE_ID"])
+	if sc.Opts.Env["SCION_PROJECT_ID"] != "grove-1" {
+		t.Errorf("expected SCION_PROJECT_ID='grove-1', got %q", sc.Opts.Env["SCION_PROJECT_ID"])
+	}
+	if _, ok := sc.Opts.Env["SCION_GROVE_ID"]; ok {
+		t.Errorf("expected SCION_GROVE_ID to be absent, got %q", sc.Opts.Env["SCION_GROVE_ID"])
+	}
+	if sc.Opts.Env["SCION_PROJECT_PATH"] != projectPath {
+		t.Errorf("expected SCION_PROJECT_PATH=%q, got %q", projectPath, sc.Opts.Env["SCION_PROJECT_PATH"])
+	}
+	if _, ok := sc.Opts.Env["SCION_GROVE_PATH"]; ok {
+		t.Errorf("expected SCION_GROVE_PATH to be absent, got %q", sc.Opts.Env["SCION_GROVE_PATH"])
 	}
 	if sc.Opts.Env["SCION_DEBUG"] != "1" {
 		t.Errorf("expected SCION_DEBUG='1', got %q", sc.Opts.Env["SCION_DEBUG"])
@@ -151,6 +164,7 @@ func TestBuildStartContext_EnvMerging(t *testing.T) {
 			Env: []string{"KEY_B=from-config", "KEY_C=from-config"},
 		},
 		HTTPRequest: r,
+		Operation:   opCreate,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -199,6 +213,7 @@ func TestBuildStartContext_AuthTokenPrecedence(t *testing.T) {
 			},
 			// AgentToken intentionally empty (start/resume path).
 			HTTPRequest: r,
+			Operation:   opCreate,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -223,6 +238,7 @@ func TestBuildStartContext_AuthTokenPrecedence(t *testing.T) {
 				"SCION_AUTH_TOKEN": hubToken,
 			},
 			HTTPRequest: r,
+			Operation:   opCreate,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -244,6 +260,7 @@ func TestBuildStartContext_AuthTokenPrecedence(t *testing.T) {
 			Name: "agent-plain-broker",
 			// No AgentToken and no SCION_AUTH_TOKEN in resolvedEnv.
 			HTTPRequest: r,
+			Operation:   opCreate,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -266,6 +283,7 @@ func TestBuildStartContext_TelemetryOverride(t *testing.T) {
 			"SCION_TELEMETRY_ENABLED": "true",
 		},
 		HTTPRequest: r,
+		Operation:   opCreate,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -289,6 +307,7 @@ func TestBuildStartContext_ResolvedSecrets(t *testing.T) {
 		Name:            "agent-1",
 		ResolvedSecrets: secrets,
 		HTTPRequest:     r,
+		Operation:       opCreate,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -318,6 +337,7 @@ func TestBuildStartContext_ConfigFields(t *testing.T) {
 			Branch:        "feature-1",
 		},
 		HTTPRequest: r,
+		Operation:   opCreate,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -358,6 +378,7 @@ func TestBuildStartContext_GitClone(t *testing.T) {
 			},
 		},
 		HTTPRequest: r,
+		Operation:   opCreate,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -392,7 +413,8 @@ func TestBuildStartContext_NilHTTPRequest(t *testing.T) {
 
 	// Should not panic with nil HTTPRequest
 	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
-		Name: "agent-1",
+		Name:      "agent-1",
+		Operation: opCreate,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -402,14 +424,72 @@ func TestBuildStartContext_NilHTTPRequest(t *testing.T) {
 	}
 }
 
+// TestBuildStartContext_RequiresOperation proves buildStartContext rejects a
+// missing Operation with a clear error rather than inferring one from
+// whether HTTPRequest happens to be set (GoogleCloudPlatform/scion#1931).
+func TestBuildStartContext_RequiresOperation(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+
+	_, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name: "agent-1",
+		// Operation intentionally omitted.
+	})
+	if err == nil {
+		t.Fatal("expected an error when Operation is not set")
+	}
+	if !strings.Contains(err.Error(), "Operation not set") {
+		t.Errorf("error = %q, want it to contain %q", err.Error(), "Operation not set")
+	}
+}
+
+// TestBuildStartContext_InvalidOperationCreatesNothing proves the Operation
+// precondition runs before any directory or file side effect: given a
+// ProjectPath/ProjectID combination that would otherwise create a project
+// directory and write a marker file, an invalid Operation still leaves the
+// filesystem untouched.
+func TestBuildStartContext_InvalidOperationCreatesNothing(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+
+	projectPath := filepath.Join(t.TempDir(), "not-yet-created")
+
+	for _, tt := range []struct {
+		name string
+		op   startOperation
+	}{
+		{name: "empty", op: ""},
+		{name: "unrecognized", op: startOperation("bogus")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := srv.buildStartContext(context.Background(), startContextInputs{
+				Name:        "agent-1",
+				ProjectPath: projectPath,
+				ProjectSlug: "some-project",
+				ProjectID:   "project-uuid-1",
+				Operation:   tt.op,
+			})
+			if err == nil {
+				t.Fatal("expected an error for an invalid Operation")
+			}
+			if _, statErr := os.Stat(projectPath); !os.IsNotExist(statErr) {
+				t.Errorf("expected %q not to be created, but os.Stat returned: %v", projectPath, statErr)
+			}
+		})
+	}
+}
+
 func TestBuildStartContext_AttachMode(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
 	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
-		Name:   "agent-1",
-		Attach: true,
+		Name:      "agent-1",
+		Attach:    true,
+		Operation: opCreate,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -434,6 +514,7 @@ func TestBuildStartContext_HubManagedProjectWritesMarker(t *testing.T) {
 		ProjectSlug: "web-demo",
 		ProjectPath: projectPath,
 		ProjectID:   "6d868c0f-b862-49e0-a44b-3555a3887ee3",
+		Operation:   opCreate,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -489,6 +570,7 @@ func TestBuildStartContext_HubManagedProjectSlugResolution(t *testing.T) {
 		Name:        "agent-1",
 		ProjectSlug: "my-project",
 		ProjectID:   "aabbccdd-1234-5678-9012-abcdef123456",
+		Operation:   opCreate,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -536,6 +618,7 @@ func TestBuildStartContext_HubManagedProjectPreservesExistingProjectID(t *testin
 			ProjectSlug: "existing-grove",
 			ProjectPath: projectPath,
 			ProjectID:   "new-id-from-hub",
+			Operation:   opCreate,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -574,6 +657,7 @@ func TestBuildStartContext_HubManagedProjectPreservesExistingProjectID(t *testin
 			ProjectSlug: "existing-grove",
 			ProjectPath: projectPath,
 			ProjectID:   newID,
+			Operation:   opCreate,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -626,6 +710,7 @@ func TestBuildStartContext_HubManagedProjectPreservesExistingMarker(t *testing.T
 			ProjectSlug: "existing-grove",
 			ProjectPath: projectPath,
 			ProjectID:   "new-id-from-hub",
+			Operation:   opCreate,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -668,6 +753,7 @@ func TestBuildStartContext_HubManagedProjectPreservesExistingMarker(t *testing.T
 			ProjectSlug: "existing-grove",
 			ProjectPath: projectPath,
 			ProjectID:   newID,
+			Operation:   opCreate,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -712,6 +798,7 @@ func TestBuildStartContext_LinkedGitProjectUpdatesStaleProjectID(t *testing.T) {
 		ProjectID:   newID,
 		// ProjectSlug intentionally empty — linked git project path
 		// (hub dispatcher omits slug when provider has LocalPath).
+		Operation: opCreate,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -733,9 +820,11 @@ func TestBuildStartContext_HubEndpoint(t *testing.T) {
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
-	// Without HTTPRequest, uses resolveHubEndpointForStart path
+	// Without HTTPRequest, the connection endpoint is empty, so the broker's
+	// own HubEndpoint is used.
 	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
-		Name: "agent-1",
+		Name:      "agent-1",
+		Operation: opCreate,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -759,6 +848,7 @@ func TestBuildStartContext_GCPMetadataDefaultBlock(t *testing.T) {
 	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
 		Name:        "agent-no-gcp",
 		HTTPRequest: r,
+		Operation:   opCreate,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -798,13 +888,19 @@ func TestBuildStartContext_GCPMetadataPassthrough(t *testing.T) {
 			},
 		},
 		HTTPRequest: r,
+		Operation:   opCreate,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if sc.Opts.Env["SCION_METADATA_MODE"] != "" {
-		t.Errorf("expected no SCION_METADATA_MODE for passthrough, got %q", sc.Opts.Env["SCION_METADATA_MODE"])
+	// SCION_METADATA_MODE is still recorded for passthrough (unlike the
+	// redirect vars below) — it is the only channel through which
+	// downstream auth-type auto-detection (e.g. antigravity's vertex-ai
+	// selection, ptone/scion#1873) can tell a GCP SA is reachable via
+	// passthrough on a freshly created agent.
+	if sc.Opts.Env["SCION_METADATA_MODE"] != "passthrough" {
+		t.Errorf("expected SCION_METADATA_MODE='passthrough', got %q", sc.Opts.Env["SCION_METADATA_MODE"])
 	}
 	if sc.Opts.Env["GCE_METADATA_HOST"] != "" {
 		t.Errorf("expected no GCE_METADATA_HOST for passthrough, got %q", sc.Opts.Env["GCE_METADATA_HOST"])
@@ -829,6 +925,7 @@ func TestBuildStartContext_GCPMetadataExplicitBlock(t *testing.T) {
 			},
 		},
 		HTTPRequest: r,
+		Operation:   opCreate,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -881,6 +978,7 @@ func TestBuildStartContext_GCPMetadataUnknownModeRejected(t *testing.T) {
 					},
 				},
 				HTTPRequest: r,
+				Operation:   opCreate,
 			})
 			if err == nil {
 				t.Fatalf("expected an error for metadata mode %q, got nil (env: %v)", mode, sc.Opts.Env)
@@ -913,6 +1011,7 @@ func TestBuildStartContext_GCPMetadataUnknownModeFromResolvedEnv(t *testing.T) {
 		Name:        "agent-bad-env-mode",
 		ResolvedEnv: map[string]string{"SCION_METADATA_MODE": "blocked"},
 		HTTPRequest: r,
+		Operation:   opCreate,
 	})
 	if err == nil {
 		t.Fatalf("expected an error for hub-injected mode 'blocked', got nil (env: %v)", sc.Opts.Env)
@@ -938,6 +1037,7 @@ func TestBuildStartContext_GCPMetadataModeFromResolvedEnvStillAccepted(t *testin
 				Name:        "agent-env-mode",
 				ResolvedEnv: map[string]string{"SCION_METADATA_MODE": mode},
 				HTTPRequest: r,
+				Operation:   opCreate,
 			})
 			if err != nil {
 				t.Fatalf("expected mode %q to be accepted, got %v", mode, err)
@@ -972,6 +1072,7 @@ func TestBuildStartContext_GCPMetadataFromResolvedEnv(t *testing.T) {
 			"SCION_METADATA_PROJECT_ID": "my-project",
 		},
 		HTTPRequest: r,
+		Operation:   opCreate,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1005,6 +1106,7 @@ func TestBuildStartContext_GCPMetadataPassthroughFromResolvedEnv(t *testing.T) {
 			"SCION_METADATA_MODE": "passthrough",
 		},
 		HTTPRequest: r,
+		Operation:   opCreate,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1074,53 +1176,34 @@ runtimes:
 }
 
 // TestBuildStartContext_CloudrunSandboxHubEndpoint verifies hub endpoint
-// behaviour for the cloudrun-sandbox runtime. In CI (no link-local interface),
-// the start must fail rather than fall back to the public IAP URL — a 302
-// from the IAP edge is exactly the failure that this fix prevents.
-//
-// When a link-local address IS available (real Cloud Run Instance), the
-// endpoint must be http://<link-local>:<port> with the port read from the
-// broker's own hub endpoint config.
+// behaviour for the cloudrun-sandbox runtime. SCION_METADATA_BIND_ADDRESS
+// pins an explicit TEST-NET-3 (RFC 5737) documentation address so the result
+// is deterministic instead of depending on interface discovery (unavailable
+// in CI). The endpoint must be http://<bind-address>:<port> with the port
+// read from the broker's own HubListenPort config — not a public
+// IAP-fronted URL, which the sandbox cannot authenticate against.
 func TestBuildStartContext_CloudrunSandboxHubEndpoint(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	cfg.HubListenPort = 8080
 	srv := newTestServerWithRuntime(t, cfg, "cloudrun-sandbox")
 
+	t.Setenv("SCION_METADATA_BIND_ADDRESS", "203.0.113.5")
+
 	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
 
 	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
 		Name:        "agent-sandbox",
 		HTTPRequest: r,
+		Operation:   opCreate,
 	})
-
 	if err != nil {
-		// Expected in CI: no link-local address → start fails.
-		// Verify it is the right error and not some other failure.
-		if !strings.Contains(err.Error(), "hub endpoint") && !strings.Contains(err.Error(), "link-local") {
-			t.Fatalf("expected hub-endpoint/link-local error for cloudrun-sandbox, got: %v", err)
-		}
-		return
+		t.Fatalf("buildStartContext() unexpected error: %v", err)
 	}
 
-	// If we get here, a link-local address was found (real Instance).
-	ep := sc.Opts.Env["SCION_HUB_ENDPOINT"]
-
-	// Guard: SCION_HUB_ENDPOINT must never contain a run.app URL for
-	// cloudrun-sandbox — that would route through IAP, which the sandbox
-	// cannot authenticate against.
-	if strings.Contains(ep, "run.app") {
-		t.Fatalf("SCION_HUB_ENDPOINT must never be a run.app URL for cloudrun-sandbox, got %q", ep)
-	}
-
-	// Must be http (not https) on the link-local address.
-	if !strings.HasPrefix(ep, "http://169.254.") {
-		t.Fatalf("expected http://169.254.x.x:<port>, got %q", ep)
-	}
-
-	// Port must come from the broker config, not hardcoded.
-	if !strings.HasSuffix(ep, ":8080") {
-		t.Fatalf("expected port 8080 from broker hub endpoint, got %q", ep)
+	const want = "http://203.0.113.5:8080"
+	if ep := sc.Opts.Env["SCION_HUB_ENDPOINT"]; ep != want {
+		t.Fatalf("SCION_HUB_ENDPOINT = %q, want %q (bind address plus HubListenPort)", ep, want)
 	}
 
 	// Metadata vars must still be localhost — emulator runs inside sandbox.
@@ -1151,6 +1234,7 @@ func TestBuildStartContext_CloudrunSandboxHubNeverRunApp(t *testing.T) {
 		Name:        "agent-sandbox-iap",
 		ResolvedEnv: map[string]string{"SCION_HUB_ENDPOINT": "https://my-instance-xyz.run.app"},
 		HTTPRequest: r,
+		Operation:   opCreate,
 	})
 	if err != nil {
 		// In CI this fails (no link-local) — that is correct.
@@ -1177,6 +1261,7 @@ func TestBuildStartContext_GCPMetadataBothVarsAlwaysMatch(t *testing.T) {
 	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
 		Name:        "agent-both-vars",
 		HTTPRequest: r,
+		Operation:   opCreate,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1652,6 +1737,7 @@ func TestBuildStartContext_NoAuth(t *testing.T) {
 			ResolvedSecrets: secrets,
 			NoAuth:          true,
 			HTTPRequest:     r,
+			Operation:       opCreate,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -1672,6 +1758,7 @@ func TestBuildStartContext_NoAuth(t *testing.T) {
 			ResolvedSecrets: secrets,
 			NoAuth:          false,
 			HTTPRequest:     r,
+			Operation:       opCreate,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -1732,6 +1819,7 @@ func TestBuildStartContext_WorkspaceMode(t *testing.T) {
 				Name:          "agent-1",
 				WorkspaceMode: tc.wireLabel,
 				HTTPRequest:   r,
+				Operation:     opCreate,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -1762,6 +1850,7 @@ func TestBuildStartContext_WorkspaceMode_StartPathFallback(t *testing.T) {
 		},
 		// WorkspaceMode intentionally empty (start/restart path).
 		HTTPRequest: r,
+		Operation:   opCreate,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1800,6 +1889,7 @@ func TestBuildStartContext_WorkspaceGit(t *testing.T) {
 				},
 			},
 			HTTPRequest: r,
+			Operation:   opCreate,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -1819,6 +1909,7 @@ func TestBuildStartContext_WorkspaceGit(t *testing.T) {
 			Name:        "agent-plain",
 			Config:      &CreateAgentConfig{},
 			HTTPRequest: r,
+			Operation:   opCreate,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -1840,6 +1931,7 @@ func TestBuildStartContext_WorkspaceGit(t *testing.T) {
 				"SCION_WORKSPACE_GIT": "true",
 			},
 			HTTPRequest: r,
+			Operation:   opCreate,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -1868,6 +1960,7 @@ func TestBuildStartContext_WorkspaceGit(t *testing.T) {
 				Workspace: gitDir,
 			},
 			HTTPRequest: r,
+			Operation:   opCreate,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -1907,6 +2000,7 @@ func TestBuildStartContext_EnvClassificationsCarried(t *testing.T) {
 			Name:               "agent-cls",
 			EnvClassifications: hubCls,
 			HTTPRequest:        r,
+			Operation:          opCreate,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -1945,6 +2039,7 @@ func TestBuildStartContext_EnvClassificationsCarried(t *testing.T) {
 			// EnvClassifications intentionally nil — simulates an old hub
 			// that does not send classification data.
 			HTTPRequest: r,
+			Operation:   opCreate,
 		})
 		if err != nil {
 			t.Fatal(err)

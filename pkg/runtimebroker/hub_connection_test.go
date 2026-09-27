@@ -535,8 +535,8 @@ func TestGlobalProjectRejection_MultiHub(t *testing.T) {
 	if !ok {
 		t.Fatal("expected error object in response")
 	}
-	if errObj["code"] != "global_grove_disabled" {
-		t.Errorf("expected error code 'global_grove_disabled', got %q", errObj["code"])
+	if errObj["code"] != "global_project_disabled" {
+		t.Errorf("expected error code 'global_project_disabled', got %q", errObj["code"])
 	}
 }
 
@@ -575,8 +575,8 @@ func TestGlobalProjectRejection_WithProjectID_MultiHub(t *testing.T) {
 
 	body := `{
 		"name": "scoped-agent",
-		"groveId": "my-project",
-		"grovePath": "/some/path/.scion",
+		"projectId": "my-project",
+		"projectPath": "/some/path/.scion",
 		"config": {"template": "claude"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -606,8 +606,8 @@ func TestGlobalProjectRejection_GitProjectWithProjectID_NoPath_MultiHub(t *testi
 	srv.hubMu.Unlock()
 
 	body := `{
-		"name": "git-grove-agent",
-		"groveId": "abc-123-grove-id",
+		"name": "git-project-agent",
+		"projectId": "abc-123-project-id",
 		"config": {"template": "claude"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))

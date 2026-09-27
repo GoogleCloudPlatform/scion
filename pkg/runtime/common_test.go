@@ -695,6 +695,26 @@ func TestBuildCommonRunArgs(t *testing.T) {
 				"-e SCION_START_CMD=",
 			},
 		},
+		{
+			name: "project identity",
+			config: RunConfig{
+				Harness:      &harness.Generic{},
+				Name:         "test-agent",
+				UnixUsername: "scion",
+				Image:        "scion-agent:latest",
+				Task:         "hello",
+				Project:      "p",
+				ProjectID:    "pid",
+			},
+			wantIn: []string{
+				"-e SCION_PROJECT=p",
+				"-e SCION_PROJECT_ID=pid",
+			},
+			wantOut: []string{
+				"SCION_GROVE=",
+				"SCION_GROVE_ID=",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1617,6 +1637,41 @@ func TestBuildCommonRunArgs_ExtraHosts(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected --add-host host.docker.internal:host-gateway in args, got: %v", args)
+	}
+}
+
+// TestBuildCommonRunArgs_ProjectLabels_ExactSet asserts that a config with
+// Project and ProjectID set emits exactly the canonical scion.* labels and
+// nothing else — in particular, no extra legacy label sneaks in alongside
+// them.
+func TestBuildCommonRunArgs_ProjectLabels_ExactSet(t *testing.T) {
+	config := RunConfig{
+		Harness:      &harness.Generic{},
+		Name:         "test-agent",
+		UnixUsername: "scion",
+		Image:        "scion-agent:latest",
+		Project:      "p",
+		ProjectID:    "id",
+	}
+
+	args, err := buildCommonRunArgs(config)
+	if err != nil {
+		t.Fatalf("buildCommonRunArgs failed: %v", err)
+	}
+
+	var scionLabels []string
+	for i, arg := range args {
+		if arg == "--label" && i+1 < len(args) {
+			if v := args[i+1]; strings.HasPrefix(v, "scion.") {
+				scionLabels = append(scionLabels, v)
+			}
+		}
+	}
+	slices.Sort(scionLabels)
+
+	want := []string{"scion.project=p", "scion.project_id=id"}
+	if !slices.Equal(scionLabels, want) {
+		t.Fatalf("scion.* --label values = %v, want %v", scionLabels, want)
 	}
 }
 

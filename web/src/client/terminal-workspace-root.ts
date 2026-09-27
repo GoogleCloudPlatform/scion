@@ -1,6 +1,7 @@
 import type { User } from '../shared/types.js';
 import {
   TerminalSessionRegistry,
+  AGENT_UNAVAILABLE_REASONS,
   type TerminalConnectionState,
   type TerminalSession,
   type TerminalSessionState,
@@ -412,6 +413,21 @@ export class TerminalWorkspaceRoot {
             entry.session.state.connection !== 'unavailable'
           ) {
             entry.session.markUnavailable('agent-stopped', 'Agent has stopped.');
+          } else if (
+            // An agent that stops and restarts re-arms auto-reconnect once
+            // it is confirmed running again. The WebSocket drop usually
+            // reaches the client before this SSE update does, so the
+            // session's own attempt often already classified itself as
+            // agent-phase/agent-offline rather than markUnavailable's
+            // agent-stopped — accept any agent-state unavailability reason.
+            // Gate on activity too, so an offline-but-running agent does not
+            // burn the single attempt.
+            next.agent?.phase === 'running' &&
+            next.agent?.activity !== 'offline' &&
+            entry.session.state.connection === 'unavailable' &&
+            AGENT_UNAVAILABLE_REASONS.has(entry.session.state.disconnectReason)
+          ) {
+            entry.session.noteAgentAvailable();
           }
         } catch {
           // markUnavailable should not throw, but guard the subscription callback
@@ -1445,6 +1461,10 @@ function disconnectLabel(state: TerminalConnectionState, reason: TerminalDisconn
       return 'Access denied';
     case 'not-found':
       return 'Not found';
+    case 'session-ended':
+      return 'Session ended';
+    case 'detached':
+      return 'Detached';
     case 'agent-offline':
     case 'agent-phase':
     case 'agent-stopped':

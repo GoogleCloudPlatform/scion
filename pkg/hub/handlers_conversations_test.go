@@ -46,12 +46,11 @@ func setupConvTestData(t *testing.T, s store.Store) (project *store.Project, age
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	agent = &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "conv-test-agent",
-		Slug:       "conv-test-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "conv-test-agent",
+		Slug:      "conv-test-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -415,12 +414,11 @@ func TestGetConversationMessage_DMAuth(t *testing.T) {
 	srv, s := testServer(t)
 	project, agentA, _ := setupConvTestData(t, s)
 	agentB := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "get-message-dm-agent-b",
-		Slug:       "get-message-dm-agent-b",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "get-message-dm-agent-b",
+		Slug:      "get-message-dm-agent-b",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(context.Background(), agentB))
 
@@ -661,12 +659,11 @@ func TestSetDefaultAgent_HappyPath(t *testing.T) {
 
 	// Create a second agent to set as the default (must exist in the store per N-1 validation).
 	newAgent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "new-default-agent",
-		Slug:       "new-default-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "new-default-agent",
+		Slug:      "new-default-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(context.Background(), newAgent))
 
@@ -876,13 +873,12 @@ func TestSetDefaultAgent_SoftDeletedAgentRejected(t *testing.T) {
 	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
 	deletedAgent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "soft-deleted-agent",
-		Slug:       "soft-deleted-agent",
-		ProjectID:  project.ID,
-		Phase:      "terminated",
-		DeletedAt:  time.Now().UTC(),
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "soft-deleted-agent",
+		Slug:      "soft-deleted-agent",
+		ProjectID: project.ID,
+		Phase:     "terminated",
+		DeletedAt: time.Now().UTC(),
 	}
 	require.NoError(t, s.CreateAgent(context.Background(), deletedAgent))
 
@@ -931,7 +927,7 @@ func TestSetDefaultAgent_ProjectlessGroup_AgentNotFound_ReturnsValidationError(t
 
 	participant := &store.Agent{
 		ID: api.NewUUID(), Name: "phase3-legacy-def-agent-participant", Slug: "phase3-legacy-def-agent-participant",
-		ProjectID: project.ID, Phase: "running", Visibility: store.VisibilityPrivate,
+		ProjectID: project.ID, Phase: "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, participant))
 	addConvParticipant(t, s, legacyConv.ID, "agent", participant.ID)
@@ -997,7 +993,7 @@ func TestSetDefaultAgent_ProjectlessGroup_NilAgentNoPanic(t *testing.T) {
 
 	participant := &store.Agent{
 		ID: api.NewUUID(), Name: "phase3-legacy-nil-agent-participant", Slug: "phase3-legacy-nil-agent-participant",
-		ProjectID: project.ID, Phase: "running", Visibility: store.VisibilityPrivate,
+		ProjectID: project.ID, Phase: "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, participant))
 	addConvParticipant(t, s, legacyConv.ID, "agent", participant.ID)
@@ -1215,12 +1211,11 @@ func TestAddParticipant_HappyPath(t *testing.T) {
 
 	// Create another agent to add.
 	newAgent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "new-participant",
-		Slug:       "new-participant",
-		ProjectID:  *conv.ProjectID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "new-participant",
+		Slug:      "new-participant",
+		ProjectID: *conv.ProjectID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(context.Background(), newAgent))
 
@@ -1320,12 +1315,11 @@ func TestAddParticipant_CrossProjectAgent(t *testing.T) {
 	require.NoError(t, s.CreateProject(context.Background(), otherProject))
 
 	crossProjectAgent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "cross-project-agent",
-		Slug:       "cross-project-agent",
-		ProjectID:  otherProject.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "cross-project-agent",
+		Slug:      "cross-project-agent",
+		ProjectID: otherProject.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(context.Background(), crossProjectAgent))
 
@@ -1410,12 +1404,11 @@ func TestHandleCreateConversation_ProjectAuthorizationDenied(t *testing.T) {
 	require.NoError(t, s.CreateProject(context.Background(), otherProject))
 
 	otherAgent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "other-agent",
-		Slug:       "other-agent",
-		ProjectID:  otherProject.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "other-agent",
+		Slug:      "other-agent",
+		ProjectID: otherProject.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(context.Background(), otherAgent))
 
@@ -1462,12 +1455,11 @@ func TestHandleSetDefaultAgent_AgentProjectUnauthorized(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, participantProject))
 
 	participantAgent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "participant-agent",
-		Slug:       "participant-agent",
-		ProjectID:  participantProject.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "participant-agent",
+		Slug:      "participant-agent",
+		ProjectID: participantProject.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, participantAgent))
 	addConvParticipant(t, s, globalConv.ID, "agent", participantAgent.ID)
@@ -1481,12 +1473,11 @@ func TestHandleSetDefaultAgent_AgentProjectUnauthorized(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, restrictedProject))
 
 	restrictedAgent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "restricted-agent",
-		Slug:       "restricted-agent",
-		ProjectID:  restrictedProject.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "restricted-agent",
+		Slug:      "restricted-agent",
+		ProjectID: restrictedProject.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, restrictedAgent))
 
@@ -1519,12 +1510,11 @@ func TestHandleSetDefaultAgent_CrossProjectDenied(t *testing.T) {
 	require.NoError(t, s.CreateProject(context.Background(), otherProject))
 
 	crossAgent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "cross-project-agent",
-		Slug:       "cross-project-agent",
-		ProjectID:  otherProject.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "cross-project-agent",
+		Slug:      "cross-project-agent",
+		ProjectID: otherProject.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(context.Background(), crossAgent))
 

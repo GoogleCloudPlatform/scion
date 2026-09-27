@@ -14,6 +14,8 @@ package_upgrade: true
 packages:
   - ca-certificates
   - curl
+  # deploy.sh writes hub-scoped env vars into hub.db with sqlite3.
+  - sqlite3
 
 runcmd:
   # runcmd executes under /bin/sh (dash on Ubuntu) -- POSIX only, no
