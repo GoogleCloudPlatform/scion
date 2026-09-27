@@ -836,7 +836,7 @@ func BackfillRoleBindings(ctx context.Context, s store.Store) error {
 }
 
 // backfillUserRoleBindings brings hub-level grants in line with User.Role for
-// every active user at startup:
+// every non-invited user (active and suspended) at startup:
 //   - admin → system-scoped super-admin role binding (created here; the
 //     hub role grant helper does not own super-admin).
 //   - every role → syncHubRoleGrants, which ensures hub-members membership for
@@ -1451,14 +1451,6 @@ func CleanupRedundantHubMemberBindings(ctx context.Context, s store.Store) error
 
 	slog.Info("cleaned up redundant direct hub-member bindings", "deleted", len(targets))
 	return nil
-}
-
-// ensureHubMembership adds the given user to the hub-members group.
-// This is best-effort; errors are logged at debug level and ignored.
-func ensureHubMembership(ctx context.Context, s store.Store, userID string) {
-	if err := ensureHubMembershipTx(ctx, s, userID); err != nil {
-		slog.Debug("failed to ensure hub-members group membership", "userID", userID, "error", err)
-	}
 }
 
 // ensureHubMembershipTx idempotently adds the given user to the canonical
