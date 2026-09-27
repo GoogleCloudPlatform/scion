@@ -198,7 +198,7 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Design §3.4 Amendments A2/A4/A23/A23.1: eligible workspaces are
+	// Design §3.4 Amendments A2/A4/A23/A23.1/A23.2: eligible workspaces are
 	// clone-per-agent (a real GitClone, on a project that is neither
 	// worktree-per-agent nor shared — A23.1 R3: a project can be switched to
 	// shared after an agent was created as clone-per-agent, via a project
@@ -226,6 +226,19 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// effective value the dispatcher will actually send keeps the two from
 	// disagreeing.
 	//
+	// A23.2 FYI-b: the mirror of R3, for the reverse switch. A project can
+	// also switch TO clone-per-agent after an agent was created as
+	// shared-workspace or hub-managed: the agent's stored GitClone is still
+	// nil, but a fresh reincarnation would derive a GitClone from the
+	// project's CURRENT mode — and this agent has no existing real clone on
+	// disk for the broker's GitClone branch to find, so (without this
+	// check) it would be stopped and then refused by the broker's own "no
+	// existing git clone" 409, the same stop-then-refuse shape R1 fixed for
+	// the other direction. The linked-provider case is excluded here
+	// (linkedProjectPath == "") because when a provider IS linked,
+	// effectiveDispatchWorkspace already clears the workspace to "" and the
+	// generic ReincarnateEligible check below catches it as "neither".
+	//
 	// Checked before any plan is computed or anything persisted, as defense
 	// in depth alongside the broker's own refusal (Reprovision refuses to
 	// touch a workspace it did not find already on disk): this is what
@@ -233,11 +246,16 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// showing a plan that a real request could not safely execute.
 	hasGitClone := agent.AppliedConfig != nil && agent.AppliedConfig.GitClone != nil
 	var effectiveWorkspace string
+	var linkedProjectPath string
 	if agent.AppliedConfig != nil {
-		effectiveWorkspace = effectiveDispatchWorkspace(agent.AppliedConfig.Workspace, s.linkedProjectPath(ctx, agent))
+		linkedProjectPath = s.linkedProjectPath(ctx, agent)
+		effectiveWorkspace = effectiveDispatchWorkspace(agent.AppliedConfig.Workspace, linkedProjectPath)
 	}
+	switchedToCloneOnly := !hasGitClone && project.GitRemote != "" && !project.IsSharedWorkspace() &&
+		linkedProjectPath == "" && effectiveWorkspace != ""
 	if agent.AppliedConfig == nil || project.IsWorktreePerAgent() ||
 		(hasGitClone && project.IsSharedWorkspace()) ||
+		switchedToCloneOnly ||
 		!api.ReincarnateEligible(hasGitClone, effectiveWorkspace) {
 		// FYI-6 (review p1b-r1): the generic message now covers every
 		// eligible mode, not just clone-per-agent.

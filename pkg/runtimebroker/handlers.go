@@ -825,7 +825,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// tryProvisionWorktree off the reprovision path entirely.
 	if req.Reprovision && req.WorkspaceMode == store.WorkspaceModeWorktreePerAgent {
 		const msg = "reprovision refused: worktree-per-agent workspaces are not supported by reincarnate"
-		markAttemptFailed(http.StatusConflict, msg)
+		// O-a (review p1b-r2): use the same dispatch-attempt message as the
+		// sibling A4.2 refusal below, so dispatch-attempt consumers can match
+		// one string regardless of which precondition refused the request.
+		markAttemptFailed(http.StatusConflict, "reprovision refused")
 		span.SetStatus(codes.Error, msg)
 		Conflict(w, "Failed to provision agent: "+msg)
 		return
