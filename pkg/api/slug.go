@@ -143,6 +143,34 @@ func ValidateDisplayName(name string) (key string, err error) {
 	return key, nil
 }
 
+// IdentityKeysFor returns the distinct, non-empty identity keys an agent's
+// slug and display name resolve to: the slug itself, plus the display
+// name's slugified key when that differs from the slug and is non-empty.
+// The slug is always keys[0]; the display-name key, when present, is
+// always keys[1] -- callers that need to treat the two differently (for
+// example, inserting every agent's slug before any agent's display-name
+// key) may rely on that order.
+//
+// The slug key is always present -- a valid Slug can never itself slugify to
+// "", or the agent could not have been created. The display-name key is
+// omitted when Slugify(name) is empty: new display names cannot produce this
+// (ValidateDisplayName rejects an empty key), but a legacy Name predating
+// that validation can. agent_identity_keys.key has a NotEmpty schema
+// validator, so writing an empty key would be a permanent failure for every
+// future write involving that agent.
+//
+// Every writer of agent_identity_keys -- create, rename, restore, and the
+// backfill migration -- computes the key set with this exact function, so
+// the identity-key set for a given (slug, name) pair is identical no matter
+// which writer computed it.
+func IdentityKeysFor(slug, name string) []string {
+	keys := []string{slug}
+	if nameKey := Slugify(name); nameKey != "" && nameKey != slug {
+		keys = append(keys, nameKey)
+	}
+	return keys
+}
+
 // SlugifyWithSuffix creates a slug with a collision-avoidance suffix.
 // The suffix is appended with a dash separator.
 func SlugifyWithSuffix(s, suffix string) string {

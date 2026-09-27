@@ -26,6 +26,7 @@ import (
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentidentitykey"
@@ -45,6 +46,7 @@ const projectAgentsGroupMarkerBackfillSection = "migration_project_agents_group_
 const systemProjectAgentsGroupAnnotation = "scion.io/project-agents-group"
 const adoptionReviewRequiredAnnotation = "scion.io/adoption-review-required"
 const githubTokenInjectionModeMarkerSection = "migration_github_token_injection_mode_always"
+const agentIdentityKeyBackfillMarkerSection = "migration_agent_identity_keys_backfilled"
 
 // CompositeStore is a fully Ent-backed implementation of store.Store. Every
 // domain is served by a dedicated Ent sub-store; CompositeStore embeds them so
@@ -458,6 +460,9 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 	if err := c.BackfillProjectAgentsGroupMarkers(ctx); err != nil {
 		return fmt.Errorf("project agents group marker backfill: %w", err)
 	}
+	if err := c.BackfillAgentIdentityKeys(ctx); err != nil {
+		return fmt.Errorf("agent identity key backfill: %w", err)
+	}
 
 	// Migrate AllowListEntry records to User(status=invited) records.
 	// Runs after schema migration (which adds the "invited" status enum value)
@@ -867,6 +872,121 @@ func (c *CompositeStore) BackfillProjectAgentsGroupMarkers(ctx context.Context) 
 		"rows_updated", updated, "rows_skipped", skipped)
 
 	_, err = c.UpsertHubSetting(ctx, projectAgentsGroupMarkerBackfillSection,
+		json.RawMessage(`{"schema_version":1,"completed":true}`), "migration", 0, "seeded")
+	if errors.Is(err, store.ErrRevisionConflict) {
+		return nil
+	}
+	return err
+}
+
+// BackfillAgentIdentityKeys populates agent_identity_keys for every
+// pre-existing agent, including soft-deleted ones, so the identity-key
+// uniqueness invariant covers agents created before this feature existed,
+// not just ones created through the create/rename/restore paths that already
+// write their own keys.
+//
+// Agents are processed in a deterministic order (created ASC, then id ASC):
+// slug keys take precedence, and created order decides among display-name
+// keys, no matter how many times this runs. A collision does not fail the
+// migration -- pre-existing data can hold inconsistencies that predate any
+// uniqueness invariant, and a clean backfill cannot be guaranteed
+// retroactively. The losing agent's key is logged, not silently dropped.
+//
+// This runs in two passes over that same order, not one pass writing each
+// agent's full key set together: pass one inserts every agent's own slug
+// key, pass two inserts display-name keys. A Slug is already unique per
+// (project_id, slug) at the Agent table level, so no two agents can ever
+// collide on their own slug -- pass one alone can never lose a collision.
+// Interleaving slug and display-name inserts per-agent, in created order,
+// would let an EARLIER agent's display-name key claim a LATER agent's own
+// slug before that later agent ever gets to insert it, leaving a live agent
+// with no key for its own immutable identifier: it could not be renamed or
+// restored (both re-assert the slug key and would find it already
+// reserved). Guaranteeing every slug is claimed before any display-name key
+// is attempted keeps each live agent's own slug key intact.
+//
+// Uses api.IdentityKeysFor, the same function restore and rename use, so a
+// legacy Name that slugifies to "" is skipped identically everywhere
+// (agent_identity_keys.key is NotEmpty; an empty insert would be a
+// permanent failure for that agent's every future write). IdentityKeysFor
+// is documented to return the slug first and, when present, the
+// display-name key second; this function's two passes rely on that order.
+//
+// The per-agent, per-key insert is idempotent independent of the completion
+// marker below: a (project_id, key) row that already belongs to the agent
+// currently being processed is left alone (a re-run after a partial
+// failure, or the marker manually cleared, inserts nothing new); one that
+// belongs to a DIFFERENT agent is treated as a collision, the same as a
+// same-run collision.
+func (c *CompositeStore) BackfillAgentIdentityKeys(ctx context.Context) error {
+	if _, err := c.GetHubSetting(ctx, agentIdentityKeyBackfillMarkerSection); err == nil {
+		return nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+
+	agents, err := c.client.Agent.Query().
+		Order(ent.Asc(agent.FieldCreated), ent.Asc(agent.FieldID)).
+		All(ctx)
+	if err != nil {
+		return err
+	}
+
+	var inserted, collisions int
+	insertKey := func(a *ent.Agent, key string) error {
+		_, err := c.client.AgentIdentityKey.Create().
+			SetProjectID(a.ProjectID).
+			SetKey(key).
+			SetAgentID(a.ID).
+			Save(ctx)
+		if err == nil {
+			inserted++
+			return nil
+		}
+		if !ent.IsConstraintError(err) {
+			return fmt.Errorf("backfill identity key %q for agent %s: %w", key, a.ID, err)
+		}
+		existing, qErr := c.client.AgentIdentityKey.Query().
+			Where(agentidentitykey.ProjectIDEQ(a.ProjectID), agentidentitykey.KeyEQ(key)).
+			Only(ctx)
+		if qErr != nil {
+			return fmt.Errorf("resolve identity key conflict %q for agent %s: %w", key, a.ID, qErr)
+		}
+		if existing.AgentID == a.ID {
+			// Already backfilled this exact (agent, key) pair: a re-run
+			// after a partial failure, or the marker was cleared.
+			return nil
+		}
+		collisions++
+		slog.Warn("agent identity key backfill: key already held by another agent, skipped",
+			"key", key, "project_id", a.ProjectID,
+			"kept_agent_id", existing.AgentID, "dropped_agent_id", a.ID)
+		return nil
+	}
+
+	// Pass 1: every agent's own slug key first, so a later-created agent's
+	// slug is always claimed before any earlier-created agent's
+	// display-name key could otherwise pre-empt it.
+	for _, a := range agents {
+		if err := insertKey(a, a.Slug); err != nil {
+			return err
+		}
+	}
+	// Pass 2: display-name keys, keep-first by the same created order.
+	for _, a := range agents {
+		keys := api.IdentityKeysFor(a.Slug, a.Name)
+		if len(keys) < 2 {
+			continue // no display-name key distinct from the slug
+		}
+		if err := insertKey(a, keys[1]); err != nil {
+			return err
+		}
+	}
+	if inserted > 0 || collisions > 0 {
+		slog.Info("backfilled agent identity keys", "rows_inserted", inserted, "collisions_logged", collisions)
+	}
+
+	_, err = c.UpsertHubSetting(ctx, agentIdentityKeyBackfillMarkerSection,
 		json.RawMessage(`{"schema_version":1,"completed":true}`), "migration", 0, "seeded")
 	if errors.Is(err, store.ErrRevisionConflict) {
 		return nil

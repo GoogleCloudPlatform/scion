@@ -330,7 +330,7 @@ func TestCompositeStore_PurgeDeletedAgents_ScopesRemovedSetToBatch(t *testing.T)
 	// absent from that batch's own candidate list -- with batch size 2 and 5
 	// candidates, at least 3 of the 5 are necessarily in a later batch,
 	// regardless of the DB's actual row-return order.
-	var victim uuid.UUID
+	var survivor uuid.UUID
 	batchCalls := 0
 	purgeDeletedAgentsTestHook = func(tx *ent.Tx, batchCandidateIDs []uuid.UUID) {
 		batchCalls++
@@ -344,12 +344,12 @@ func TestCompositeStore_PurgeDeletedAgents_ScopesRemovedSetToBatch(t *testing.T)
 		for _, idStr := range ids {
 			id := uuid.MustParse(idStr)
 			if !inFirstBatch[id] {
-				victim = id
+				survivor = id
 				break
 			}
 		}
-		require.NotEqual(t, uuid.Nil, victim, "expected at least one candidate outside the first batch")
-		require.NoError(t, tx.Agent.UpdateOneID(victim).ClearDeletedAt().Exec(ctx))
+		require.NotEqual(t, uuid.Nil, survivor, "expected at least one candidate outside the first batch")
+		require.NoError(t, tx.Agent.UpdateOneID(survivor).ClearDeletedAt().Exec(ctx))
 	}
 	t.Cleanup(func() { purgeDeletedAgentsTestHook = nil })
 
@@ -358,8 +358,8 @@ func TestCompositeStore_PurgeDeletedAgents_ScopesRemovedSetToBatch(t *testing.T)
 	require.Equal(t, 3, batchCalls, "5 candidates at batch size 2 must span 3 batches (2, 2, 1)")
 	assert.Equal(t, agentCount-1, purged, "exactly the untouched agents must be purged")
 
-	victimIDStr := victim.String()
-	got, err := cs.GetAgent(ctx, victimIDStr)
+	survivorIDStr := survivor.String()
+	got, err := cs.GetAgent(ctx, survivorIDStr)
 	require.NoError(t, err, "the agent restored mid-purge, from a later batch, must still exist")
 	assert.True(t, got.DeletedAt.IsZero(), "the restored agent must remain live")
 
@@ -367,7 +367,7 @@ func TestCompositeStore_PurgeDeletedAgents_ScopesRemovedSetToBatch(t *testing.T)
 	require.NoError(t, err)
 	for _, idStr := range ids {
 		key := findIdentityKey(keys, idStr, slugOf[idStr])
-		if idStr == victimIDStr {
+		if idStr == survivorIDStr {
 			assert.NotNil(t, key, "the restored agent's identity key must survive the purge, "+
 				"not be pre-freed by an earlier batch that scoped its removed-set too broadly")
 		} else {

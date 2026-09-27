@@ -15,6 +15,7 @@
 package api
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -347,6 +348,50 @@ func TestIsHostedProjectID(t *testing.T) {
 		t.Run(tt.projectID, func(t *testing.T) {
 			if got := IsHostedProjectID(tt.projectID); got != tt.want {
 				t.Errorf("IsHostedProjectID(%q) = %v, want %v", tt.projectID, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIdentityKeysFor(t *testing.T) {
+	tests := []struct {
+		name      string
+		slug      string
+		agentName string
+		want      []string
+	}{
+		{
+			name: "name equals slug: single key (the common case at create)",
+			slug: "worker-bee", agentName: "worker-bee",
+			want: []string{"worker-bee"},
+		},
+		{
+			name: "display name differs: both keys, slug first",
+			slug: "worker-bee", agentName: "Worker Bee Supreme",
+			want: []string{"worker-bee", "worker-bee-supreme"},
+		},
+		{
+			name: "display name slugifies to slug despite different casing/spacing: single key",
+			slug: "worker-bee", agentName: "Worker   Bee",
+			want: []string{"worker-bee"},
+		},
+		{
+			name: "legacy name slugifies to empty: display-name key omitted",
+			slug: "legacy-agent", agentName: "!!!",
+			want: []string{"legacy-agent"},
+		},
+		{
+			name: "empty name: display-name key omitted",
+			slug: "no-name-agent", agentName: "",
+			want: []string{"no-name-agent"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IdentityKeysFor(tt.slug, tt.agentName)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("IdentityKeysFor(%q, %q) = %v, want %v", tt.slug, tt.agentName, got, tt.want)
 			}
 		})
 	}

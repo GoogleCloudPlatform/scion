@@ -771,7 +771,11 @@ func (s *Server) createAgentWithIdentityKey(ctx context.Context, agent *store.Ag
 		if err := tx.CreateAgent(ctx, agent); err != nil {
 			return err
 		}
-		return tx.ReplaceAgentIdentityKeys(ctx, agent.ID, agent.ProjectID, []string{slug})
+		// Both production callers set Name to slug before calling this, so
+		// api.IdentityKeysFor(slug, agent.Name) collapses to the single
+		// {slug} row -- the same function rename, restore, and the backfill
+		// migration use, rather than a separately-maintained literal here.
+		return tx.ReplaceAgentIdentityKeys(ctx, agent.ID, agent.ProjectID, api.IdentityKeysFor(slug, agent.Name))
 	})
 }
 
@@ -2430,14 +2434,11 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 	}
 
 	// Apply updates
-	var newDisplayNameKey string
 	if updates.Name != "" {
-		key, err := api.ValidateDisplayName(updates.Name)
-		if err != nil {
+		if _, err := api.ValidateDisplayName(updates.Name); err != nil {
 			ValidationError(w, "Invalid name: "+err.Error(), nil)
 			return
 		}
-		newDisplayNameKey = key
 		agent.Name = updates.Name
 	}
 	if updates.Labels != nil {
@@ -2611,14 +2612,13 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		// Name and its identity key are written in the same transaction:
 		// the key row is what makes the key's per-project uniqueness a
 		// database invariant, so it must never be able to drift from the
-		// Name it was computed from. Only append newDisplayNameKey when it
-		// differs from Slug, so the common case -- the display name's key
-		// already equals Slug (e.g. a freshly created agent) -- writes a
-		// single row instead of a self-collision.
-		keys := []string{agent.Slug}
-		if newDisplayNameKey != agent.Slug {
-			keys = append(keys, newDisplayNameKey)
-		}
+		// Name it was computed from. agent.Name is already updates.Name at
+		// this point (set above), so this is {Slug, the display name's key}
+		// when they differ, or the single row {Slug} when the display name's
+		// key already equals it (e.g. a freshly created agent) -- the same
+		// api.IdentityKeysFor create and restore use, so all three writers
+		// agree on this set byte-for-byte.
+		keys := api.IdentityKeysFor(agent.Slug, agent.Name)
 		err := s.store.WithTx(ctx, func(tx store.Store) error {
 			if err := tx.UpdateAgent(ctx, agent); err != nil {
 				return err

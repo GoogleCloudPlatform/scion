@@ -1216,21 +1216,10 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 	// revalidation: a genuine collision surfaces as the same
 	// store.ErrIdentityKeyConflict (409) a create or rename would get, rather
 	// than silently restoring an agent whose key now belongs to someone else.
-	// The slug key is always non-empty (Slug itself can never Slugify to "",
-	// or the agent could never have been created). The display-name key can
-	// be empty on a legacy row whose Name predates api.ValidateDisplayName --
-	// which rejects an empty key today, but never retroactively validated
-	// what a pre-existing Name already held. agent_identity_keys.key has a
-	// NotEmpty schema validator, so appending an empty key here would turn
-	// every future restore of that agent into a permanent failure. Skip it:
-	// legacy tolerance for an empty display-name key on restore. Any future
-	// backfill of pre-existing agents must apply this same rule -- always
-	// write the slug key, skip an empty display-name key -- to stay
-	// consistent with what restore already does.
-	keys := []string{agent.Slug}
-	if nameKey := api.Slugify(agent.Name); nameKey != "" && nameKey != agent.Slug {
-		keys = append(keys, nameKey)
-	}
+	// api.IdentityKeysFor is also what the backfill migration uses, so a
+	// legacy row's empty-display-name-key tolerance is handled identically
+	// by both.
+	keys := api.IdentityKeysFor(agent.Slug, agent.Name)
 	if err := s.store.WithTx(ctx, func(tx store.Store) error {
 		if err := tx.UpdateAgent(ctx, agent); err != nil {
 			return err
