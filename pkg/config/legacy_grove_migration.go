@@ -661,10 +661,7 @@ func unwrapErrno(err error) string {
 // names of the two global ~/.scion directories migrated by
 // MigrateLegacyGlobalLayout. Once migrated to their projectcompat.ProjectsDir
 // / ProjectConfigsDir replacements, these names are never read again outside
-// this file, with one exception: pkg/runtimebroker still reads
-// config.GroveConfigsDir (which re-exports projectcompat.GroveConfigsDir)
-// directly, so that constant stays exported. projectcompat.GrovesDir has no
-// other reader left, but is kept alongside it for symmetry.
+// this file.
 const (
 	legacyProjectsDirName       = "groves"
 	legacyProjectConfigsDirName = "grove-configs"

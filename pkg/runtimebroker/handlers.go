@@ -614,15 +614,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			RuntimeError(w, "Failed to get global dir: "+err.Error())
 			return
 		}
-		projectsPath := filepath.Join(globalDir, "projects", req.ProjectSlug)
-		if !hasWorkspaceContent(projectsPath) {
-			// fallback to groves/ for backward compatibility
-			legacyPath := filepath.Join(globalDir, "groves", req.ProjectSlug)
-			if hasWorkspaceContent(legacyPath) {
-				projectsPath = legacyPath
-			}
-		}
-		req.ProjectPath = projectsPath
+		req.ProjectPath = filepath.Join(globalDir, "projects", req.ProjectSlug)
 	}
 
 	// Env-gather: if GatherEnv is true, evaluate env completeness before building full context.
@@ -855,7 +847,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// If WorkspaceStoragePath is set, download workspace from GCS (non-git bootstrap)
 	if req.WorkspaceStoragePath != "" {
 		// For hub-managed projects (ProjectSlug set), use the conventional path
-		// ~/.scion.groves/<slug>/ instead of the worktree-based path.
+		// ~/.scion/projects/<slug>/ instead of the worktree-based path.
 		var workspaceDir string
 		if req.ProjectSlug != "" {
 			globalDir, err := config.GetGlobalDir()
@@ -866,13 +858,6 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			workspaceDir = filepath.Join(globalDir, "projects", req.ProjectSlug)
-			if !hasWorkspaceContent(workspaceDir) {
-				// fallback to groves/ for backward compatibility
-				legacyPath := filepath.Join(globalDir, "groves", req.ProjectSlug)
-				if hasWorkspaceContent(legacyPath) {
-					workspaceDir = legacyPath
-				}
-			}
 		} else {
 			workspaceDir = filepath.Join(s.config.WorktreeBase, req.Name, "workspace")
 		}
@@ -3048,18 +3033,10 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 	}
 
 	projectPath := filepath.Join(globalDir, "projects", slug)
-	if !hasWorkspaceContent(projectPath) {
-		// fallback to groves/ for backward compatibility
-		oldPath := filepath.Join(globalDir, "groves", slug)
-		if hasWorkspaceContent(oldPath) {
-			projectPath = oldPath
-		}
-	}
 
-	// Path traversal protection: ensure the resolved path stays inside
-	// one of the two allowed base directories.
+	// Path traversal protection: ensure the resolved path stays inside the
+	// projects base directory.
 	projectsBase := filepath.Join(globalDir, "projects")
-	legacyBase := filepath.Join(globalDir, "groves")
 	absProject, err := filepath.Abs(projectPath)
 	if err != nil {
 		RuntimeError(w, "Failed to resolve project path: "+err.Error())
@@ -3070,13 +3047,7 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 		RuntimeError(w, "Failed to resolve base path: "+err.Error())
 		return
 	}
-	absLegacyBase, err := filepath.Abs(legacyBase)
-	if err != nil {
-		RuntimeError(w, "Failed to resolve base path: "+err.Error())
-		return
-	}
-	if !strings.HasPrefix(absProject, absProjectsBase+string(filepath.Separator)) &&
-		!strings.HasPrefix(absProject, absLegacyBase+string(filepath.Separator)) {
+	if !strings.HasPrefix(absProject, absProjectsBase+string(filepath.Separator)) {
 		s.agentLifecycleLog.Warn("project cleanup path traversal blocked", "slug", slug, "resolved", absProject)
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -3385,9 +3356,9 @@ func projectIDAtPath(path string) string {
 // pathIdentifiesAs reports whether the project at path verifiably belongs to
 // projectID: either its recorded identity (projectIDAtPath) equals projectID,
 // or path is the project's external config dir
-// ~/.scion/{project-configs,grove-configs}/<slug>__<short-id>/.scion, whose
-// name encodes the project ID (non-git linked projects record that dir as
-// the agent's project path).
+// ~/.scion/project-configs/<slug>__<short-id>/.scion, whose name encodes the
+// project ID (non-git linked projects record that dir as the agent's project
+// path).
 func pathIdentifiesAs(path, projectID string) bool {
 	if path == "" || projectID == "" {
 		return false
@@ -3400,11 +3371,20 @@ func pathIdentifiesAs(path, projectID string) bool {
 }
 
 // externalConfigShortID returns the short project ID encoded in path if path
-// is an external project config dir
-// ~/.scion/{project-configs,grove-configs}/<slug>__<short-id>/.scion.
+// is an external project config dir ~/.scion/project-configs/<slug>__<short-id>/.scion.
+// path is resolved through symlinks before it is split, so a path reached
+// through a pre-rename entry (config.MigrateLegacyGlobalLayout leaves a
+// symlink at each individual entry it moves, e.g.
+// ~/.scion/grove-configs/<name> -> ../project-configs/<name>, while the
+// legacy root itself stays a real directory) still identifies as this
+// project's external config dir.
 func externalConfigShortID(path string) (string, bool) {
 	abs, err := filepath.Abs(path)
-	if err != nil || filepath.Base(abs) != config.DotScion {
+	if err != nil {
+		return "", false
+	}
+	abs = projectcompat.ResolvePathForCompare(abs)
+	if filepath.Base(abs) != config.DotScion {
 		return "", false
 	}
 	globalDir, err := config.GetGlobalDir()
@@ -3413,7 +3393,7 @@ func externalConfigShortID(path string) (string, bool) {
 	}
 	projectDir := filepath.Dir(abs)
 	parent := filepath.Dir(projectDir)
-	if parent != filepath.Join(globalDir, config.ProjectConfigsDir) && parent != filepath.Join(globalDir, config.GroveConfigsDir) {
+	if !projectcompat.ResolvedPathEqual(parent, filepath.Join(globalDir, config.ProjectConfigsDir)) {
 		return "", false
 	}
 	name := filepath.Base(projectDir)
@@ -3448,17 +3428,20 @@ func trustedEntryProjectPath(path, projectID string) bool {
 }
 
 // findAgentInHubManagedProjects scans hub-managed project directories
-// (~/.scion/{projects,groves}/<slug>/.scion/) for an agent directory matching
-// the given name and returns that project's .scion dir path, or "" if none.
+// (~/.scion/projects/<slug>/.scion/) for an agent directory matching the
+// given name and returns that project's .scion dir path, or "" if none. A
+// project moved from its pre-rename location by config.MigrateLegacyGlobalLayout
+// is found here directly, since the migration runs at broker boot, before this
+// function is ever reached.
 //
 // When projectID is set, only a project directory whose recorded project ID
-// (the project-id / grove-id file) equals projectID is considered, so a
-// same-named agent in another project is never returned (ptone/scion#1819).
-// When projectID is empty, the name must be found in exactly one project;
-// more than one is reported as an ambiguity error rather than a guess.
+// (the project-id file) equals projectID is considered, so a same-named
+// agent in another project is never returned (ptone/scion#1819). When
+// projectID is empty, the name must be found in exactly one project; more
+// than one is reported as an ambiguity error rather than a guess.
 //
 // Probes both the in-project location (worktree-mode agents) and the external
-// per-agent state dir under ~/.scion.project-configs/ (shared-workspace agents,
+// per-agent state dir under ~/.scion/project-configs/ (shared-workspace agents,
 // whose state lives external to the shared checkout).
 func findAgentInHubManagedProjects(agentName, projectID string) (string, error) {
 	globalDir, err := config.GetGlobalDir()
@@ -3468,12 +3451,9 @@ func findAgentInHubManagedProjects(agentName, projectID string) (string, error) 
 		return "", fmt.Errorf("%w: resolve global dir: %v", errDeleteTargetUnknown, err)
 	}
 	var found []string
-	for _, dirName := range []string{"projects", "groves"} {
-		baseDir := filepath.Join(globalDir, dirName)
-		entries, err := os.ReadDir(baseDir)
-		if err != nil {
-			continue
-		}
+	baseDir := filepath.Join(globalDir, "projects")
+	entries, err := os.ReadDir(baseDir)
+	if err == nil {
 		for _, entry := range entries {
 			if !entry.IsDir() {
 				continue

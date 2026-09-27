@@ -1066,15 +1066,12 @@ func (s *Server) discoverAuxiliaryRuntimes() {
 	// Collect project paths to scan
 	var projectPaths []string
 
-	// Hub-managed projects: ~/.scion/{projects,groves}/<slug>/.scion/
+	// Hub-managed projects: ~/.scion/projects/<slug>/.scion/
 	globalDir, err := config.GetGlobalDir()
 	if err == nil {
-		for _, dirName := range []string{"projects", "groves"} {
-			projectsDir := filepath.Join(globalDir, dirName)
-			entries, err := os.ReadDir(projectsDir)
-			if err != nil {
-				continue
-			}
+		projectsDir := filepath.Join(globalDir, "projects")
+		entries, err := os.ReadDir(projectsDir)
+		if err == nil {
 			for _, e := range entries {
 				if !e.IsDir() {
 					continue

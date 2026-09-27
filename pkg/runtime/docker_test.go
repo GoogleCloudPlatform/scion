@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 )
 
@@ -208,6 +209,60 @@ echo '{"ID":"abc123","Names":"proj--agent1","Status":"Up 5 minutes","Image":"sci
 	if a.ContainerID != "abc123" || a.Name != "agent1" || a.Image != "scion-claude:latest" ||
 		a.ContainerStatus != "Up 5 minutes" || a.Template != "developer" {
 		t.Errorf("unexpected parsed agent: %+v", a)
+	}
+}
+
+// TestDockerRuntime_List_LabelFiltering_ProjectPathThroughMigratedSymlink
+// proves that, for the docker runtime, an agent whose scion.project_path
+// label still holds a project's pre-rename path (recorded
+// on the container before config.MigrateLegacyGlobalLayout moved that
+// project) is still found when listing filters by the project's current,
+// canonical path. The legacy layout is built with the real migrator, which
+// symlinks each entry it moves individually — the legacy root itself stays a
+// real directory — not with a hand-made root-level symlink.
+func TestDockerRuntime_List_LabelFiltering_ProjectPathThroughMigratedSymlink(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	legacyProjectPath := filepath.Join(home, ".scion", "groves", "proj")
+	if err := os.MkdirAll(legacyProjectPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	config.MigrateLegacyGlobalLayout(filepath.Join(home, ".scion"), noopGlobalLayoutReporter{})
+
+	canonicalProjectPath := filepath.Join(home, ".scion", "projects", "proj")
+	if _, err := os.Stat(canonicalProjectPath); err != nil {
+		t.Fatalf("migration did not create the canonical project dir: %v", err)
+	}
+	siblingPath := filepath.Join(home, ".scion", "projects", "proj-2")
+	if err := os.MkdirAll(siblingPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	tmpDir := t.TempDir()
+	mockDocker := filepath.Join(tmpDir, "mock-docker")
+	script := `#!/bin/sh
+echo '{"ID":"aaa","Names":"agent-a","Status":"Up","Image":"img","Labels":"scion.project_path=` + legacyProjectPath + `"}'
+`
+	if err := os.WriteFile(mockDocker, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock docker: %v", err)
+	}
+	rt := &DockerRuntime{Command: mockDocker}
+
+	agents, err := rt.List(context.Background(), map[string]string{"scion.project_path": canonicalProjectPath})
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+	if len(agents) != 1 || agents[0].Name != "agent-a" {
+		t.Fatalf("expected agent-a to match through the migrated symlink, got %+v", agents)
+	}
+
+	agents, err = rt.List(context.Background(), map[string]string{"scion.project_path": siblingPath})
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+	if len(agents) != 0 {
+		t.Fatalf("expected no match against a sibling project path, got %+v", agents)
 	}
 }
 

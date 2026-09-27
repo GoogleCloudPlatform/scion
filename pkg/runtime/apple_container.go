@@ -211,7 +211,7 @@ func (r *AppleContainerRuntime) List(ctx context.Context, labelFilter map[string
 						actual = projectcompat.ProjectPathFromLabels(c.Configuration.Labels)
 					}
 				}
-				if actual != v {
+				if !projectcompat.LabelValuesMatch(k, actual, v) {
 					match = false
 					break
 				}

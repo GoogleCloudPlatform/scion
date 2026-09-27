@@ -277,7 +277,7 @@ func (r *PodmanRuntime) List(ctx context.Context, labelFilter map[string]string)
 					actual = projectcompat.ProjectPathFromLabels(labels)
 				}
 			}
-			if actual != v {
+			if !projectcompat.LabelValuesMatch(k, actual, v) {
 				match = false
 				break
 			}

@@ -598,6 +598,46 @@ func TestDeleteAgent_ExternalConfigDirProjectPath(t *testing.T) {
 	}
 }
 
+// A legacy container's recorded external config dir may still name an entry
+// moved out of the pre-rename ~/.scion/grove-configs root:
+// MigrateLegacyGlobalLayout leaves a per-entry symlink at the old name
+// (grove-configs/<name> -> ../project-configs/<name>), so
+// externalConfigShortID (via pathIdentifiesAs) must still recognise it.
+func TestDeleteAgent_ExternalConfigDirProjectPath_ThroughLegacySymlink(t *testing.T) {
+	mgr := &filteringMockManager{}
+	srv, home := newScopeTestServer(t, mgr)
+
+	marker := config.ProjectMarker{ProjectID: scopeProjB, ProjectSlug: "linked"}
+
+	// Build the pre-migration layout directly under the legacy root, then
+	// run the real migrator. config.MigrateLegacyGlobalLayout symlinks each
+	// entry it moves individually (grove-configs/<name> ->
+	// ../project-configs/<name>); the legacy root itself stays a real
+	// directory, so the agent's recorded path below is reached through a
+	// per-entry symlink, not a symlinked root.
+	legacyEntryScionDir := filepath.Join(home, ".scion", "grove-configs", marker.DirName(), config.DotScion)
+	if err := os.MkdirAll(filepath.Join(legacyEntryScionDir, "agents", "dev"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	config.MigrateLegacyGlobalLayout(filepath.Join(home, ".scion"), noopMigrationReporter{})
+
+	realDir, err := marker.ExternalProjectPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(realDir); err != nil {
+		t.Fatalf("migration did not create the canonical external config dir: %v", err)
+	}
+
+	mgr.agents = []api.AgentInfo{legacyEntry("dev", "cid-legacy", legacyEntryScionDir)}
+	if rec := doDelete(t, srv, "dev", "projectId="+scopeProjB); rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if mgr.lastDeleteContainerID != "cid-legacy" {
+		t.Errorf("deleted container %q, want cid-legacy", mgr.lastDeleteContainerID)
+	}
+}
+
 // Upstream review (#1875): a soft delete without deleteFiles must still
 // resolve the project path so agent-info.json is marked deleted, while
 // leaving the files in place.

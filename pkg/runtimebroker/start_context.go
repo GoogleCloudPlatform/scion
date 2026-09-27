@@ -142,15 +142,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 			span.SetStatus(codes.Error, err.Error())
 			return nil, &startContextError{Status: http.StatusInternalServerError, Message: "Failed to get global dir: " + err.Error()}
 		}
-		projectsPath := filepath.Join(globalDir, "projects", in.ProjectSlug)
-		if !hasWorkspaceContent(projectsPath) {
-			// fallback to groves/ for backward compatibility
-			legacyPath := filepath.Join(globalDir, "groves", in.ProjectSlug)
-			if hasWorkspaceContent(legacyPath) {
-				projectsPath = legacyPath
-			}
-		}
-		in.ProjectPath = projectsPath
+		in.ProjectPath = filepath.Join(globalDir, "projects", in.ProjectSlug)
 		if s.config.Debug {
 			s.agentLifecycleLog.Debug("Resolved hub-managed project path from slug",
 				"agent_id", in.AgentID, "slug", in.ProjectSlug, "path", in.ProjectPath)
@@ -1011,24 +1003,6 @@ func isStaleExternalDir(extDir string) bool {
 	}
 	_, statErr := os.Stat(extDir)
 	return os.IsNotExist(statErr)
-}
-
-// hasWorkspaceContent returns true if dir exists and contains meaningful
-// workspace files beyond just infrastructure directories.
-func hasWorkspaceContent(dir string) bool {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return false
-	}
-	for _, e := range entries {
-		switch e.Name() {
-		case "shared-dirs", ".scion":
-			continue
-		default:
-			return true
-		}
-	}
-	return false
 }
 
 // withHubAgentDefaults attaches the hub's operational agent_defaults from a

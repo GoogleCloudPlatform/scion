@@ -18,6 +18,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 )
 
 // ProjectType indicates the kind of project.
@@ -356,24 +358,88 @@ func FindOrphanedProjectConfigs() ([]ProjectInfo, error) {
 // RemoveProjectConfig removes an external project config directory.
 func RemoveProjectConfig(configPath string) error {
 	// The configPath points to the .scion subdirectory or the project-configs/<slug__uuid> directory.
-	// We want to remove the project-configs/<slug__uuid> directory.
-	parent := configPath
+	// We want to remove the project-configs/<slug__uuid> directory. Cleaned
+	// first, so that a raw, uncleaned path (e.g. containing "..") is judged
+	// and acted on consistently: filepath.Dir below is a lexical operation,
+	// while the os calls that follow resolve the path physically, and an
+	// uncleaned "a/../b" would let those two disagree.
+	parent := filepath.Clean(configPath)
 	if filepath.Base(parent) == DotScion {
 		parent = filepath.Dir(parent)
 	}
 
-	// Safety: only remove if it's under project-configs/
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
 	}
 	projectConfigsDir := filepath.Join(home, GlobalDir, ProjectConfigsDir)
 
-	if !strings.HasPrefix(parent, projectConfigsDir) {
-		return os.ErrPermission
+	// A missing entry is nothing to remove, matching os.RemoveAll's own
+	// contract, not an error. Lstat, not Stat, so this doesn't itself follow
+	// a symlink: a dangling link still goes through the safety checks below
+	// rather than being reported as already gone.
+	parentInfo, err := os.Lstat(parent)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
 	}
 
-	return os.RemoveAll(parent)
+	root := projectcompat.ResolvePathForCompare(projectConfigsDir)
+	isSymlink := parentInfo.Mode()&os.ModeSymlink != 0
+
+	if !isSymlink {
+		// A real directory: safe only when it is itself a direct child of
+		// the canonical root — never root itself, and never anything a
+		// literal prefix match alone would have let through.
+		resolved := projectcompat.ResolvePathForCompare(parent)
+		if filepath.Dir(resolved) != root {
+			return os.ErrPermission
+		}
+		return os.RemoveAll(resolved)
+	}
+
+	// parent is a symlink. What is safe to do with it is governed by where
+	// the link itself LIVES, not just where it points: an entry that lives
+	// in the resolved root is always at least unlinked, because nothing
+	// about a stray, dangling or out-of-root target changes the fact that
+	// the link itself is this project's own leftover entry to clean up. A
+	// recursive delete of the link's target only ever happens for a link
+	// living in exactly the one directory MigrateLegacyGlobalLayout's own
+	// per-entry legacy links live in, and only when that link additionally
+	// has the exact shape the migrator produces. Anywhere else under
+	// ~/.scion — not just outside it — is refused rather than guessed at.
+	linkDir := projectcompat.ResolvePathForCompare(filepath.Dir(parent))
+	switch {
+	case linkDir == root:
+		// The migrator never creates a link directly inside project-configs/
+		// itself, so any link found there is unlinked outright, regardless
+		// of its target: missing, outside ~/.scion, a sibling entry, or "."
+		// meaning root itself. Only the link goes; nothing it points at is
+		// ever touched.
+		return os.Remove(parent)
+	case filepath.Dir(linkDir) == filepath.Dir(root) && filepath.Base(linkDir) == legacyProjectConfigsDirName:
+		resolved := projectcompat.ResolvePathForCompare(parent)
+		if filepath.Dir(resolved) == root && filepath.Base(resolved) == filepath.Base(parent) {
+			if err := os.RemoveAll(resolved); err != nil {
+				return err
+			}
+			if err := os.Remove(parent); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			return nil
+		}
+		return os.Remove(parent)
+	default:
+		// The link itself doesn't live anywhere scion's own layout would
+		// ever put it (inside project-configs/, or in the legacy directory
+		// beside it). Refuse rather than guess — this also covers
+		// configPath naming project-configs/ itself when that path happens
+		// to be a symlink: never touched, exactly like the real-directory
+		// case above.
+		return os.ErrPermission
+	}
 }
 
 // ReconnectProject updates the workspace_path in an external project's settings

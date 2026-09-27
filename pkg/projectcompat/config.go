@@ -25,9 +25,7 @@ const (
 	ProjectIDFile = "project-id"
 
 	ProjectConfigsDir = "project-configs"
-	GroveConfigsDir   = "grove-configs"
 	ProjectsDir       = "projects"
-	GrovesDir         = "groves"
 )
 
 // IsProjectIDConfigKey reports whether key is the canonical top-level

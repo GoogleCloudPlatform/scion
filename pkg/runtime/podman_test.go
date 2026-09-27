@@ -21,6 +21,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 )
 
@@ -279,6 +280,70 @@ echo '` + jsonOutput + `'
 	}
 	if agents[0].Name != "agent-a" {
 		t.Errorf("expected filtered agent 'agent-a', got %q", agents[0].Name)
+	}
+}
+
+// noopGlobalLayoutReporter discards every config.MigrateLegacyGlobalLayout
+// report; these tests only care about the resulting filesystem state.
+type noopGlobalLayoutReporter struct{}
+
+func (noopGlobalLayoutReporter) Migrated(old, new string, tracked bool)      {}
+func (noopGlobalLayoutReporter) Conflict(old, new, detail string)            {}
+func (noopGlobalLayoutReporter) Skipped(old, reason, manual string)          {}
+func (noopGlobalLayoutReporter) EnvIgnored(name, replacement string)         {}
+func (noopGlobalLayoutReporter) PrecedenceChanged(path, value, other string) {}
+
+// TestPodmanRuntime_List_LabelFiltering_ProjectPathThroughMigratedSymlink
+// proves that, for the podman runtime, an agent whose scion.project_path
+// label still holds a project's pre-rename path (recorded
+// on the container before config.MigrateLegacyGlobalLayout moved that
+// project) is still found when listing filters by the project's current,
+// canonical path. The legacy layout is built with the real migrator, which
+// symlinks each entry it moves individually — the legacy root itself stays a
+// real directory — not with a hand-made root-level symlink.
+func TestPodmanRuntime_List_LabelFiltering_ProjectPathThroughMigratedSymlink(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	legacyProjectPath := filepath.Join(home, ".scion", "groves", "proj")
+	if err := os.MkdirAll(legacyProjectPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	config.MigrateLegacyGlobalLayout(filepath.Join(home, ".scion"), noopGlobalLayoutReporter{})
+
+	canonicalProjectPath := filepath.Join(home, ".scion", "projects", "proj")
+	if _, err := os.Stat(canonicalProjectPath); err != nil {
+		t.Fatalf("migration did not create the canonical project dir: %v", err)
+	}
+	siblingPath := filepath.Join(home, ".scion", "projects", "proj-2")
+	if err := os.MkdirAll(siblingPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	tmpDir := t.TempDir()
+	mockPodman := filepath.Join(tmpDir, "mock-podman")
+	jsonOutput := `[{"Id":"aaa","Names":["agent-a"],"Status":"Up","Image":"img","Labels":{"scion.project_path":"` +
+		legacyProjectPath + `"}}]`
+	script := "#!/bin/sh\necho '" + jsonOutput + "'\n"
+	if err := os.WriteFile(mockPodman, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock podman: %v", err)
+	}
+	rt := &PodmanRuntime{Command: mockPodman}
+
+	agents, err := rt.List(context.Background(), map[string]string{"scion.project_path": canonicalProjectPath})
+	if err != nil {
+		t.Fatalf("runtime.List failed: %v", err)
+	}
+	if len(agents) != 1 || agents[0].Name != "agent-a" {
+		t.Fatalf("expected agent-a to match through the migrated symlink, got %+v", agents)
+	}
+
+	agents, err = rt.List(context.Background(), map[string]string{"scion.project_path": siblingPath})
+	if err != nil {
+		t.Fatalf("runtime.List failed: %v", err)
+	}
+	if len(agents) != 0 {
+		t.Fatalf("expected no match against a sibling project path, got %+v", agents)
 	}
 }
 
