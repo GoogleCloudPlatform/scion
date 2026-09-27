@@ -319,22 +319,11 @@ warn_if_scion_base_not_in_run() {
   echo "  telemetry), rebuild it first: --target scion-base, then re-run" >&2
   echo "  this build." >&2
 
-  # Best-effort only, and only where a local store is actually authoritative
-  # for what the build will use:
-  #   - cloud-build always resolves BASE_IMAGE from the registry, never a
-  #     local store, so there is nothing useful to inspect locally;
-  #   - a pushing/multi-arch local-docker build resolves BASE_IMAGE through a
-  #     `docker buildx create` (docker-container driver) instance, which also
-  #     reads from the registry, not the daemon's local image store -- so
-  #     skip there too, the same as cloud-build;
-  #   - a plain, non-push local-docker/local-podman build resolves it from
-  #     whichever local store the builder itself writes to and reads from
-  #     (the `default` docker builder, or podman's store), so ask that store,
-  #     not the other one.
-  # A hit here is a *local copy*, which can still be stale even in the cases
-  # above (e.g. pushed from another machine); it is a convenience for the
-  # common single-machine case, not a check, so any miss (image absent, tool
-  # missing) is silently swallowed.
+  # Best-effort only: skip when there's no local store to trust -- cloud-build
+  # and any push/multi-arch local-docker build (buildx docker-container
+  # driver) both resolve BASE_IMAGE from the registry, not a local store.
+  # Otherwise inspect the store the selected builder actually uses. A hit is
+  # a local copy that can still be stale; any miss is silently swallowed.
   if [[ "${BUILDER_MODE}" != "target" && "${PUSH}" != "true" ]]; then
     local inspect_tool=""
     case "${BUILDER}" in
