@@ -771,6 +771,15 @@ export class ScionPageAdminServerConfig extends LitElement {
       color: var(--scion-text-muted, #64748b);
     }
 
+    .default-user-role-help p,
+    .default-user-role-help ul {
+      margin: 0 0 0.375rem 0;
+    }
+
+    .default-user-role-help ul {
+      padding-left: 1.25rem;
+    }
+
     .agent-defaults-tabs sl-tab-group {
       --indicator-color: var(--scion-primary, #3b82f6);
     }
@@ -4752,9 +4761,28 @@ export class ScionPageAdminServerConfig extends LitElement {
           </div>
           <div class="form-field full-width">
             <label>Default User Role</label>
-            <span class="hint"
-              >Role assigned to new users who are not in the admin emails list. Takes effect immediately (hot-reloaded).</span
-            >
+            <div class="hint default-user-role-help">
+              <p>
+                <strong>Default role for new users.</strong> Applies when a user record is first
+                created: first sign-in, invite, or allow-list entry. Changing it does not affect
+                existing users. Users listed in Admin Emails are always admins.
+              </p>
+              <ul>
+                <li>
+                  <strong>Member:</strong> can create projects, and works in any project they are
+                  added to.
+                </li>
+                <li>
+                  <strong>Viewer:</strong> the same as Member, but
+                  <strong>cannot create projects</strong> (including cloning). Viewers can still be
+                  added to projects and work there according to their project role.
+                </li>
+              </ul>
+              <p>
+                This is also the role given to an admin who is removed from Admin Emails. Change an
+                individual user's role on <a href="/admin/users">Admin &gt; Users</a>.
+              </p>
+            </div>
             ${this.renderFieldValue(
               'server.auth.default_user_role',
               this.authDefaultUserRole,
