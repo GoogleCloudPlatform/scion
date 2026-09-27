@@ -144,7 +144,7 @@ reject() {
   # produces. Normalise; never loosen.
   #
   # The colon: without it, want="-c" MATCHES a message reading "-config:".
-  # THREE such pairs are live, all three inside $neverPassed, all three measured:
+  # THREE such pairs are live, all three measured (grove is in $removedFlags, its partner g and the other four in $neverPassed):
   #
   #     sends -config   matcher -c   with colon: no match   without: MATCHES
   #     sends -grove    matcher -g   with colon: no match   without: MATCHES
@@ -159,7 +159,7 @@ reject() {
   # consistent with a matcher that never matches anything.
   #
   # All three pairs are already explicit cases - c, config, g, grove, p and
-  # profile each appear in the $neverPassed loop below and each asserts its own
+  # profile each appear in the $neverPassed or $removedFlags loop below and each asserts its own
   # name - so a misattribution in either direction fails one of them. No case
   # was added for them and EXPECTED_TOTAL is unchanged at 31.
   want="hub.args may not contain -${lower}:"
@@ -291,7 +291,9 @@ accept() {  # POSITIVE TWIN: a benign flag the chart must still allow.
 for f in foreground hosted host web-port enable-hub enable-runtime-broker \
          enable-web auto-provide global; do reject "$f"; done
 # $neverPassed - config selection.
-for f in config c project g grove profile p; do reject "$f"; done
+for f in config c project g profile p; do reject "$f"; done
+# $removedFlags - the flag no longer exists at all.
+reject grove
 # $aliasOrIgnored - not the lever they appear to be.
 for f in production port; do reject "$f"; done
 # $ownedByConfig - delivered through another channel.
