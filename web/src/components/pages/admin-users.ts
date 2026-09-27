@@ -82,6 +82,24 @@ const EXPIRY_PRESETS = [
 
 const PAGE_SIZE = 50;
 
+/** Hub roles offered in the "Change role" submenu, in display order. */
+export const HUB_ROLE_OPTIONS: readonly UserRole[] = ['admin', 'member', 'viewer'];
+
+/** Display labels for hub roles. */
+export const HUB_ROLE_LABELS: Record<UserRole, string> = {
+  admin: 'Admin',
+  member: 'Member',
+  viewer: 'Viewer',
+};
+
+/** One-line meaning of each hub role, shown when confirming a role change. */
+export const HUB_ROLE_DESCRIPTIONS: Record<UserRole, string> = {
+  admin: 'Full administrative access to this hub.',
+  member: 'Can create projects, and works in any project they are added to.',
+  viewer:
+    'The same as Member, but cannot create projects (including cloning). Viewers can still be added to projects and work there according to their project role.',
+};
+
 @customElement('scion-page-admin-users')
 export class ScionPageAdminUsers extends LitElement {
   @state()
@@ -890,23 +908,54 @@ export class ScionPageAdminUsers extends LitElement {
   }
 
   private promptChangeRole(user: AdminUser, newRole: UserRole): void {
-    const action = newRole === 'admin' ? 'Promote' : 'Change role';
-    const roleLabel = newRole === 'admin' ? 'an admin' : `a ${newRole}`;
+    const label = HUB_ROLE_LABELS[newRole];
+    const currentLabel = HUB_ROLE_LABELS[user.role] ?? user.role;
+    const name = user.displayName || user.email;
     this.confirmAction = {
-      title: `${action} to ${newRole}`,
-      message: `Are you sure you want to make this user ${roleLabel}?`,
+      title: `Change role to ${label}`,
+      message: `Change ${name}'s hub role from ${currentLabel} to ${label}? ${label}: ${HUB_ROLE_DESCRIPTIONS[newRole]} Permissions change immediately.`,
       variant: newRole === 'admin' ? 'warning' : 'primary',
-      confirmLabel: action,
+      confirmLabel: `Make ${label}`,
       user,
       action: async () => {
-        const result = await this.updateUser(user.id, { role: newRole });
+        const result = await this.updateUser(user.id, { role: newRole }, name);
         if (result.securityReview) return;
-        this.showFeedback('success', `${user.displayName || user.email} is now ${roleLabel}.`);
+        this.showFeedback(
+          'success',
+          `${name} is now ${newRole === 'admin' ? 'an' : 'a'} ${label}.`
+        );
         void this.loadUsers(
           this.currentPage > 1 ? this.cursorHistory[this.cursorHistory.length - 1] : undefined
         );
       },
     };
+  }
+
+  private renderChangeRoleMenu(user: AdminUser) {
+    return html`<sl-menu-item class="change-role-item">
+      <sl-icon slot="prefix" name="people"></sl-icon>
+      Change role
+      <sl-menu slot="submenu" class="change-role-menu">
+        ${HUB_ROLE_OPTIONS.map((role) => {
+          const current = user.role === role;
+          return html`<sl-menu-item
+            data-role=${role}
+            aria-checked=${current ? 'true' : 'false'}
+            ?disabled=${current}
+            @click=${() => {
+              if (!current) this.promptChangeRole(user, role);
+            }}
+          >
+            <sl-icon
+              slot="prefix"
+              name="check2"
+              style=${current ? '' : 'visibility: hidden'}
+            ></sl-icon>
+            ${HUB_ROLE_LABELS[role]}
+          </sl-menu-item>`;
+        })}
+      </sl-menu>
+    </sl-menu-item>`;
   }
 
   private promptToggleSuspend(user: AdminUser): void {
@@ -1619,7 +1668,7 @@ export class ScionPageAdminUsers extends LitElement {
       `;
     }
 
-    // Active users: View Roles, Promote/Demote, Suspend, Delete
+    // Active users: View Roles, Change role, Suspend, Delete
     // — each action gated by its capability. View Roles requires at least
     // one admin-level capability since the role-bindings endpoint requires
     // admin access (R4-R1: don't show dead controls to regular members).
@@ -1641,18 +1690,7 @@ export class ScionPageAdminUsers extends LitElement {
             View Roles
           </sl-menu-item>
           ${canPromote || canSuspend || canDelete ? html`<sl-divider></sl-divider>` : nothing}
-          ${canPromote && user.role !== 'admin'
-            ? html`<sl-menu-item @click=${() => this.promptChangeRole(user, 'admin')}>
-                <sl-icon slot="prefix" name="shield-check"></sl-icon>
-                Promote to Admin
-              </sl-menu-item>`
-            : nothing}
-          ${canPromote && user.role === 'admin'
-            ? html`<sl-menu-item @click=${() => this.promptChangeRole(user, 'member')}>
-                <sl-icon slot="prefix" name="person"></sl-icon>
-                Demote to Member
-              </sl-menu-item>`
-            : nothing}
+          ${canPromote ? this.renderChangeRoleMenu(user) : nothing}
           ${canSuspend
             ? html`${canPromote ? html`<sl-divider></sl-divider>` : nothing}
                 <sl-menu-item @click=${() => this.promptToggleSuspend(user)}>
