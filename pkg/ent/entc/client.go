@@ -258,13 +258,29 @@ func skipExistingRelations(next entschema.Applier) entschema.Applier {
 // subsequent runs when the column is already jsonb.
 func normalizeBrokerLabels(next entschema.Applier) entschema.Applier {
 	return entschema.ApplyFunc(func(ctx context.Context, conn dialect.ExecQuerier, plan *atlasmigrate.Plan) error {
-		for _, stmt := range []string{
+		for i, stmt := range []string{
 			`UPDATE runtime_brokers SET labels = NULL WHERE labels::text = ''`,
 			`UPDATE runtime_brokers SET annotations = NULL WHERE annotations::text = ''`,
 		} {
+			// Wrap in a SAVEPOINT so a failure (e.g. 42P01 on a fresh DB,
+			// where runtime_brokers doesn't exist yet) doesn't abort the
+			// surrounding migration transaction; see skipExistingRelations.
+			sp := fmt.Sprintf("normalize_broker_labels_%d", i)
+			if err := conn.Exec(ctx, fmt.Sprintf("SAVEPOINT %s", sp), []any{}, nil); err != nil {
+				return fmt.Errorf("creating savepoint: %w", err)
+			}
 			if err := conn.Exec(ctx, stmt, []any{}, nil); err != nil {
-				// Table may not exist yet on a fresh database — that is fine.
+				// Table may not exist yet on a fresh database — that is
+				// fine, but the transaction is now aborted and must be
+				// rolled back to the savepoint before continuing.
 				slog.Debug("normalizeBrokerLabels: skipping", "stmt", stmt, "err", err)
+				if rbErr := conn.Exec(ctx, fmt.Sprintf("ROLLBACK TO SAVEPOINT %s", sp), []any{}, nil); rbErr != nil {
+					return fmt.Errorf("rolling back savepoint after normalizeBrokerLabels statement failure: %w", rbErr)
+				}
+				continue
+			}
+			if err := conn.Exec(ctx, fmt.Sprintf("RELEASE SAVEPOINT %s", sp), []any{}, nil); err != nil {
+				return fmt.Errorf("releasing savepoint: %w", err)
 			}
 		}
 		// Patch the plan to add USING clauses for varchar→jsonb column casts
