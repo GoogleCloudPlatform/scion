@@ -111,7 +111,7 @@ func TestNormalizeBrokerLabels_ExistingDatabase_NormalizesVarcharRows(t *testing
 	if err != nil {
 		t.Fatalf("opening raw connection: %v", err)
 	}
-	defer db.Close()
+	t.Cleanup(func() { _ = db.Close() })
 
 	// Downgrade to the pre-jsonb representation and insert a row holding
 	// the legacy empty-string value, simulating a database that predates
@@ -139,7 +139,7 @@ func TestNormalizeBrokerLabels_ExistingDatabase_NormalizesVarcharRows(t *testing
 	if err != nil {
 		t.Fatalf("opening postgres ent client: %v", err)
 	}
-	defer client.Close()
+	t.Cleanup(func() { _ = client.Close() })
 	if err := entc.AutoMigrate(context.Background(), client); err != nil {
 		t.Fatalf("AutoMigrate against an existing varchar schema with a legacy empty-string row failed: %v", err)
 	}
