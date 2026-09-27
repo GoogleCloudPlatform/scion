@@ -485,11 +485,16 @@ func (s *Server) attachSkillResolver(ctx context.Context, r *http.Request, in sk
 // string). Every agent-addressing path built from a request-supplied name
 // in this package and in pkg/agent joins that name onto a root this way, so
 // an identifier that fails this check must never reach one of those joins.
+//
+// Both '/' and '\' are rejected explicitly and unconditionally, regardless
+// of GOOS: relying on os.PathSeparator would only reject '\' when built for
+// Windows, letting a name containing '\' slip through on every other
+// platform even though it is a path separator there.
 func isSingleCleanPathElement(name string) bool {
 	if name == "" || name == "." || name == ".." {
 		return false
 	}
-	if strings.ContainsRune(name, '/') || strings.ContainsRune(name, os.PathSeparator) {
+	if strings.ContainsRune(name, '/') || strings.ContainsRune(name, '\\') {
 		return false
 	}
 	return filepath.Clean(name) == name

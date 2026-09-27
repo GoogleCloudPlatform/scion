@@ -494,10 +494,16 @@ func TestCreateAgentMissingName(t *testing.T) {
 // stale-directory removal branch; this covers the same shape earlier, at
 // the request boundary, for every name this check can see regardless of
 // what a caller intended.
+//
+// "a\\b" covers backslash specifically: isSingleCleanPathElement must
+// reject it on every platform, not only when os.PathSeparator is '\' (i.e.
+// on Windows). '\' is a path separator on Windows and a general
+// path-injection vector everywhere else, so it must be rejected regardless
+// of GOOS.
 func TestCreateAgentRejectsMultiSegmentName(t *testing.T) {
 	srv := newTestServer(t)
 
-	for _, name := range []string{"../sibling", "a/../..", "..", ".", "a/b", "/etc"} {
+	for _, name := range []string{"../sibling", "a/../..", "..", ".", "a/b", "/etc", `a\b`} {
 		t.Run(name, func(t *testing.T) {
 			body, err := json.Marshal(CreateAgentRequest{Name: name})
 			if err != nil {
