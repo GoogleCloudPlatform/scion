@@ -27,6 +27,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -425,7 +426,7 @@ func TestProjectWorkspaceDownload_InlineView(t *testing.T) {
 func assertSandboxed(t *testing.T, rec *httptest.ResponseRecorder) {
 	t.Helper()
 	csp := rec.Header().Get("Content-Security-Policy")
-	assert.Equal(t, workspaceFileSandboxCSP, csp)
+	assert.Equal(t, untrustedContentSandboxCSP, csp)
 	assert.True(t, strings.HasPrefix(csp, "sandbox"), "CSP must start with the sandbox directive: %q", csp)
 	assert.Contains(t, csp, "allow-scripts", "scripts stay enabled so generated reports keep working")
 	assert.NotContains(t, csp, "allow-same-origin", "allow-same-origin would undo the isolation")
@@ -471,6 +472,27 @@ func TestSharedDirFiles_InlineHTMLIsSandboxed(t *testing.T) {
 		assert.Contains(t, rec.Header().Get("Content-Disposition"), "inline", name)
 		assertSandboxed(t, rec)
 	}
+}
+
+// A filename containing a double quote must not be able to close the quoted
+// filename parameter and append its own parameters to Content-Disposition.
+func TestProjectWorkspaceDownload_ContentDispositionEscapesFilename(t *testing.T) {
+	srv, _ := testServer(t)
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS Download Quote")
+
+	name := `a"; x=y.html`
+	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, name), []byte("<p>x</p>"), 0644))
+
+	rec := doRequest(t, srv, http.MethodGet,
+		fmt.Sprintf("/api/v1/projects/%s/workspace/files/%s?view=true", project.ID, url.PathEscape(name)), nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, `inline; filename="a\"; x=y.html"`, rec.Header().Get("Content-Disposition"))
+	assertSandboxed(t, rec)
+}
+
+func TestContentDisposition(t *testing.T) {
+	assert.Equal(t, `attachment; filename="plain.txt"`, contentDisposition("attachment", "plain.txt"))
+	assert.Equal(t, `inline; filename="a\\b\"c"`, contentDisposition("inline", `a\b"c`))
 }
 
 func TestProjectWorkspaceDownload_FormatJSON(t *testing.T) {
