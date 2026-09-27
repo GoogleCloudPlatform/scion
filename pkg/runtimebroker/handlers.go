@@ -490,6 +490,9 @@ func (s *Server) attachSkillResolver(ctx context.Context, r *http.Request, in sk
 // of GOOS: relying on os.PathSeparator would only reject '\' when built for
 // Windows, letting a name containing '\' slip through on every other
 // platform even though it is a path separator there.
+//
+// It does not decode or interpret name in any way — a value like "%2e%2e"
+// is a literal, ordinary-looking directory name, and passes.
 func isSingleCleanPathElement(name string) bool {
 	if name == "" || name == "." || name == ".." {
 		return false
@@ -535,7 +538,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// block in buildStartContext, and worktree provisioning); an empty
 	// value is a normal, valid case (not every deployment sends one), but a
 	// non-empty value must be a single path element.
-	if req.ProjectID != "" && !isValidPathComponent(req.ProjectID) {
+	if req.ProjectID != "" && !isSingleCleanPathElement(req.ProjectID) {
 		ValidationError(w, "invalid projectId", nil)
 		return
 	}
@@ -1351,7 +1354,7 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 	// id, and deleteAgent's own gate still applies whenever a file operation
 	// is requested.
 	isBareDelete := action == "" && r.Method == http.MethodDelete
-	if !isBareDelete && !isValidPathComponent(id) {
+	if !isBareDelete && !isSingleCleanPathElement(id) {
 		BadRequest(w, "invalid agent id")
 		return
 	}
@@ -1571,7 +1574,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	// block in buildStartContext, and worktree provisioning); an empty
 	// value is a normal, valid case, but a non-empty value must be a single
 	// path element.
-	if projectID != "" && !isValidPathComponent(projectID) {
+	if projectID != "" && !isSingleCleanPathElement(projectID) {
 		BadRequest(w, "invalid projectId")
 		return
 	}

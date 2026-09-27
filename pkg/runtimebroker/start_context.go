@@ -828,7 +828,7 @@ func sanitizeCloneErrorText(errText, rawURL string) string {
 		return strings.ReplaceAll(errText, rawURL, "<unparseable>")
 	}
 	out := strings.ReplaceAll(errText, rawURL, redactCloneURL(rawURL))
-	if u.User != nil {
+	if u.User != nil && u.User.String() != "" {
 		out = strings.ReplaceAll(out, u.User.String()+"@", "")
 	}
 	if u.RawQuery != "" {
@@ -838,22 +838,6 @@ func sanitizeCloneErrorText(errText, rawURL string) string {
 		out = strings.ReplaceAll(out, "#"+u.Fragment, "")
 	}
 	return out
-}
-
-// isValidPathComponent reports whether s is safe to use as a single path
-// segment: non-empty, containing neither a path separator nor a NUL byte,
-// not "." or "..", and unchanged by filepath.Clean (which also catches a
-// trailing separator). It does not decode or interpret s in any way — a
-// value like "%2e%2e" is a literal, ordinary-looking directory name, and
-// passes.
-func isValidPathComponent(s string) bool {
-	if s == "" || s == "." || s == ".." {
-		return false
-	}
-	if strings.ContainsAny(s, "/\\") || strings.ContainsRune(s, 0) {
-		return false
-	}
-	return filepath.Clean(s) == s
 }
 
 // isStrictWorktreeChild reports whether path is a real descendant of
@@ -1245,7 +1229,7 @@ func resolveWorktreeProvision(in worktreeProvisionInput) worktreeProvisionResult
 	// clone-per-agent instead, the same as any other ineligibility reason
 	// below (MissingIdentity distinguishes this case for the caller, which
 	// treats it as fatal on a start dispatch instead of falling back).
-	if !isValidPathComponent(in.AgentID) || !isValidPathComponent(in.ProjectID) {
+	if !isSingleCleanPathElement(in.AgentID) || !isSingleCleanPathElement(in.ProjectID) {
 		return worktreeProvisionResult{
 			Reason:          "AgentID and ProjectID must both be present and valid for worktree-per-agent provisioning",
 			MissingIdentity: true,

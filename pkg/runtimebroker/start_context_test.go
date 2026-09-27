@@ -551,6 +551,19 @@ func TestSanitizeCloneErrorText(t *testing.T) {
 		}
 	})
 
+	t.Run("an empty userinfo does not strip unrelated @ signs", func(t *testing.T) {
+		// A URL with an empty userinfo section (e.g. "https://@host/...")
+		// parses with a non-nil but empty u.User. u.User.String() is then
+		// "", so the naive strip pattern would be just "@" and remove every
+		// "@" in the text, not only a genuine credential.
+		rawURL := "https://@example.com/r.git"
+		errText := "fatal: could not read from remote repository, please check access rights: ssh git@other.example and try again"
+		got := sanitizeCloneErrorText(errText, rawURL)
+		if !strings.Contains(got, "git@other.example") {
+			t.Errorf("sanitized error text lost an unrelated @, got: %q", got)
+		}
+	})
+
 	t.Run("an unparseable URL still strips the exact raw text", func(t *testing.T) {
 		rawURL := "https://user:TOKEN@host/%zz"
 		errText := "git clone " + rawURL + ": exit status 128"
@@ -774,7 +787,7 @@ func TestShouldCleanupPartialWorktree_NeverTheSharedWorktreesDir(t *testing.T) {
 // filepath.Join(base, "worktrees", agentID), an AgentID of ".." would
 // otherwise resolve to base itself (filepath.Join cleans "worktrees/.."
 // away) — the shared clone root holding the common .git and every other
-// agent's worktrees. isValidPathComponent rejects this AgentID outright,
+// agent's worktrees. isSingleCleanPathElement rejects this AgentID outright,
 // before anything is resolved or created on disk; validateMountedWorktree
 // is a second, independent check on whatever path is finally about to be
 // mounted.
@@ -2545,7 +2558,7 @@ func TestResolveWorktreeProvision_InvalidIDsRejected(t *testing.T) {
 	// A literal-looking "%2e%2e" is an ordinary, if unusual, directory
 	// name, since nothing decodes it, and must be accepted like any other
 	// opaque ID.
-	if !isValidPathComponent("%2e%2e") {
+	if !isSingleCleanPathElement("%2e%2e") {
 		t.Error(`expected "%2e%2e" to be a valid path component (a literal name, not interpreted)`)
 	}
 }
