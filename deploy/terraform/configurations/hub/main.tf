@@ -135,10 +135,10 @@ module "hub_cloudrun" {
   network_name = module.shared_lookup.shared.network.name
   subnet_name  = module.shared_lookup.shared.network.subnet_name
 
-  sql_connection_name   = module.shared_lookup.shared.sql.connection_name
-  db_name               = module.cloudsql_database.db_name
-  db_user               = module.cloudsql_database.db_user
-  db_password_secret_id = module.cloudsql_database.password_secret_id
+  sql_connection_name = module.shared_lookup.shared.sql.connection_name
+  db_name             = module.cloudsql_database.db_name
+  db_user             = module.cloudsql_database.db_user
+  db_password         = module.cloudsql_database.db_password
 
   nfs_server = module.shared_lookup.shared.nfs.server
   nfs_export = module.agent_runtime_k8s.nfs_export
@@ -177,13 +177,15 @@ module "hub_cloudrun" {
   # IAM propagating, all before the first revision boots) that
   # boot_prerequisites above now covers — but a module-level depends_on defers
   # every resource AND data source inside hub-cloudrun, including
-  # data.google_secret_manager_secret_version.db_password, which has no
-  # actual ordering need on these three modules. That made the settings
-  # secret's secret_data unknown at plan time, forcing a spurious replace of
-  # the settings secret version on every unrelated change to agent-runtime-k8s,
-  # cloudsql-database or hub-identity (vm-deploy, real apply: an IAM-only
-  # change came out 2 add / 0 change / 1 destroy instead of 2/0/0). Do not
-  # reintroduce a depends_on on this module block for this purpose — express
-  # any new B2-class ordering need as another real resource attribute in
-  # boot_prerequisites instead.
+  # hub-cloudrun's old data.google_secret_manager_secret_version.db_password
+  # (removed in F-112 — db_password above is now a plain sensitive module
+  # input, not a data source read), which had no actual ordering need on
+  # these three modules. That made the settings secret's secret_data unknown
+  # at plan time, forcing a spurious replace of the settings secret version
+  # on every unrelated change to agent-runtime-k8s, cloudsql-database or
+  # hub-identity (vm-deploy, real apply: an IAM-only change came out 2 add /
+  # 0 change / 1 destroy instead of 2/0/0). Do not reintroduce a depends_on
+  # on this module block for this purpose — express any new B2-class
+  # ordering need as another real resource attribute in boot_prerequisites
+  # instead.
 }

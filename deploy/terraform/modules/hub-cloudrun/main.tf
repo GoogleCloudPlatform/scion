@@ -81,15 +81,18 @@ resource "google_secret_manager_secret_iam_member" "hub_reads_session_secret" {
   member    = "serviceAccount:${var.hub_sa_email}"
 }
 
-# --- Database password (created by cloudsql-database; read here to render
-# the DSN directly into settings.yaml — the Alt-F secret-env-var end state
-# is deferred to phase 3) ---
-
-data "google_secret_manager_secret_version" "db_password" {
-  project           = var.project_id
-  secret            = var.db_password_secret_id
-  fetch_secret_data = true
-}
+# --- Database password: passed in as a sensitive module input (F-112), not
+# read back via a data source. cloudsql-database already outputs db_password
+# (random_password.db.result, sensitive) — the value the SQL user was
+# actually created with — so var.db_password embeds it directly into
+# settings.yaml's DSN below with no Secret Manager read at all. This used to
+# be data.google_secret_manager_secret_version.db_password, keyed on
+# var.db_password_secret_id: a data source's read runs at plan time, before
+# cloudsql-database has necessarily created the secret version it would
+# read, and nothing defers that read (F-106, design §9). A brand-new hub's
+# very first plan 404'd on a secret that doesn't exist yet; h1 only ever
+# worked because its secret already existed. The Alt-F secret-env-var end
+# state is deferred to phase 3. ---
 
 # --- Rendered settings.yaml ---
 
@@ -112,7 +115,7 @@ resource "google_secret_manager_secret_version" "settings" {
     iap_audience         = local.iap_audience
     admin_emails         = var.admin_emails
     db_user              = var.db_user
-    db_password          = data.google_secret_manager_secret_version.db_password.secret_data
+    db_password          = var.db_password
     db_name              = var.db_name
     sql_connection_name  = var.sql_connection_name
     bucket               = google_storage_bucket.artifacts.name
@@ -266,20 +269,23 @@ resource "google_secret_manager_secret_version" "oidc_signing_key" {
 # requirements (agent-runtime-k8s's nfs-init Job, cloudsql-database's DB/
 # user, hub-identity's IAM grants) as a module-level depends_on on the
 # `module "hub_cloudrun"` block itself. A module-level depends_on defers
-# EVERY resource and data source inside the module — including
-# data.google_secret_manager_secret_version.db_password above, which has no
-# actual ordering need on those modules — whenever anything in them has a
-# pending change. That made db_password's secret_data unknown at plan time,
-# which made settings' secret_data (which embeds it) unknown too, forcing a
-# spurious replace of the settings secret version on every unrelated change
-# to those three modules (vm-deploy caught this on a real apply: a plan that
-# should have been a pure IAM-member add came out 2 add / 0 change / 1
-# destroy). terraform_data.boot_prerequisites below is the replacement:
-# var.boot_prerequisites carries only real resource attributes (never a
-# module reference), so only the one resource that actually needs to
-# wait — the Cloud Run service, via its own depends_on below — is affected.
-# No data source may depend on terraform_data.boot_prerequisites, or this
-# regresses right back to the same bug for whatever data source does.
+# EVERY resource and data source inside the module — including this
+# module's old data.google_secret_manager_secret_version.db_password, which
+# had no actual ordering need on those modules — whenever anything in them
+# has a pending change. That made db_password's secret_data unknown at plan
+# time, which made settings' secret_data (which embeds it) unknown too,
+# forcing a spurious replace of the settings secret version on every
+# unrelated change to those three modules (vm-deploy caught this on a real
+# apply: a plan that should have been a pure IAM-member add came out 2 add /
+# 0 change / 1 destroy). terraform_data.boot_prerequisites below is the
+# replacement: var.boot_prerequisites carries only real resource attributes
+# (never a module reference), so only the one resource that actually needs
+# to wait — the Cloud Run service, via its own depends_on below — is
+# affected. No data source may depend on terraform_data.boot_prerequisites,
+# or this regresses right back to the same bug for whatever data source
+# does. (That specific data source is gone now — F-112 replaced it with
+# var.db_password, a sensitive module input with no read of its own — but
+# the rule stands for any data source this module gains in the future.)
 resource "terraform_data" "boot_prerequisites" {
   input = var.boot_prerequisites
 }
@@ -299,8 +305,10 @@ resource "time_sleep" "iam_propagation" {
   # as much as the project-level grants passed in from hub-identity.
   # cloudsql-database's db-password accessor is deliberately NOT included:
   # the DSN is embedded directly into the rendered settings secret by
-  # Terraform's own identity (the data source above), so the running
-  # container never reads db-password itself — nothing to wait on there.
+  # Terraform's own identity (var.db_password, a sensitive module input as
+  # of F-112 — see the comment above google_secret_manager_secret_version.
+  # settings), so the running container never reads db-password itself —
+  # nothing to wait on there.
   depends_on = [
     var.hub_iam_grants,
     google_secret_manager_secret_iam_member.hub_reads_settings,

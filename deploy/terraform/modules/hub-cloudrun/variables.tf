@@ -54,7 +54,7 @@ variable "hub_iam_condition_expression" {
 }
 
 variable "boot_prerequisites" {
-  description = "F-106 (design §9): map of real resource attributes (never bare input variables or computed strings) that the Cloud Run service must not boot before — the nfs-init Job's own identity (its Job actually finished, not just that its export path string is known), and the cloudsql-database/hub-identity resources this module doesn't otherwise reference directly. Consumed only by terraform_data.boot_prerequisites below, which google_cloud_run_v2_service.hub depends on; no data source may depend on it (see that resource's comment). Replaces a module-level depends_on that used to sit on this module's caller (configurations/hub/main.tf) — that forced Terraform to defer *every* resource and data source inside this module, including data.google_secret_manager_secret_version.db_password, whenever hub-identity/agent-runtime-k8s/cloudsql-database had any pending change, which made the settings secret_data unknown at plan time and forced a spurious replace of the settings secret version (F-106, vm-deploy caught this on a real apply)."
+  description = "F-106 (design §9): map of real resource attributes (never bare input variables or computed strings) that the Cloud Run service must not boot before — the nfs-init Job's own identity (its Job actually finished, not just that its export path string is known), and the cloudsql-database/hub-identity resources this module doesn't otherwise reference directly. Consumed only by terraform_data.boot_prerequisites below, which google_cloud_run_v2_service.hub depends on; no data source may depend on it (see that resource's comment). Replaces a module-level depends_on that used to sit on this module's caller (configurations/hub/main.tf) — that forced Terraform to defer *every* resource and data source inside this module, including this module's old data.google_secret_manager_secret_version.db_password (removed in F-112; see var.db_password), whenever hub-identity/agent-runtime-k8s/cloudsql-database had any pending change, which made the settings secret_data unknown at plan time and forced a spurious replace of the settings secret version (F-106, vm-deploy caught this on a real apply)."
   type        = map(string)
 }
 
@@ -88,9 +88,11 @@ variable "db_user" {
   type        = string
 }
 
-variable "db_password_secret_id" {
-  description = "Secret Manager secret ID holding the database password (cloudsql-database output). The value is read via a data source and embedded directly in the rendered settings.yaml DSN — Alt-F's secret-env-var end state is phase 3."
+variable "db_password" {
+  description = "Per-hub database password (cloudsql-database output db_password, itself random_password.db.result — the value the SQL user was actually created with). Embedded directly in the rendered settings.yaml DSN. Sensitive module input, not a Secret Manager data source (F-112): a data source's read runs at plan time, before cloudsql-database has necessarily created the secret version it would read, and nothing defers that read (F-106, design §9) — a brand-new hub's first plan 404'd on a secret that didn't exist yet. The value is already in state via random_password and the secret version cloudsql-database still writes for operator access, so passing it here directly has no new exposure. Alt-F's secret-env-var end state is phase 3."
   type        = string
+  sensitive   = true
+  nullable    = false
 }
 
 variable "nfs_server" {
