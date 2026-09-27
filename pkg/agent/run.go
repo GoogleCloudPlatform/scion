@@ -1057,8 +1057,16 @@ authDone:
 	// authoritative whenever the hub dispatched this agent, and correctly
 	// empty otherwise — project settings cannot choose which project's
 	// shared tree an nfs-backed agent mounts (round 2 review finding S-F4).
+	//
+	// F-111 review (BLOCKING): resolveSharedDirs needs to know whether
+	// server.workspace_storage.backend is "nfs" — a different config block
+	// from sharedDirStorageCfg (server.shared_dir_storage) — so its local/
+	// default branch can validate shared-dir names when they're about to
+	// become NFS subPaths via the k8s runtime's nfsSharedDirs path.
+	nfsWorkspaceBackend := settings != nil && settings.Server != nil &&
+		settings.Server.WorkspaceStorage != nil && settings.Server.WorkspaceStorage.Backend == "nfs"
 	sharedDirVolumes, sharedDirStorage, err := resolveSharedDirs(
-		sharedDirStorageCfg, projectDir, hubDispatchedProjectID, m.Runtime.Name(), effectiveSharedDirs, containerWorkspace)
+		sharedDirStorageCfg, projectDir, hubDispatchedProjectID, m.Runtime.Name(), effectiveSharedDirs, containerWorkspace, nfsWorkspaceBackend)
 	if err != nil {
 		return nil, err
 	}
@@ -1140,7 +1148,18 @@ authDone:
 		NFSPVClaimName:       nfsPVClaimName,
 		NFSSubPath:           nfsSubPath,
 		NFSStorageClass:      nfsStorageClass,
-		TelemetryEnabled:     telemetryEnabled,
+		// F-111 (design §9): drives the k8s runtime's NFS init container's
+		// clone-vs-plain-provision choice (nfsProvisionCommand), not whether
+		// provisioning happens at all — the init container is now gated
+		// solely on WorkspaceBackendName=="nfs" && NFSPVClaimName != ""
+		// (k8s_runtime.go's nfsInitContainerInjected), so a nil GitClone here
+		// (a non-git, shared-plain project) still gets mkdir+chown, just no
+		// clone. Mirrors the existing GitClone field above/below, which this
+		// package already sets from the same opts.GitClone for other
+		// purposes; previously nothing set GitCloneForInit at all, so the
+		// k8s init container never ran for ANY project, git or not.
+		GitCloneForInit:  opts.GitClone,
+		TelemetryEnabled: telemetryEnabled,
 		Task: func() string {
 			// When task_flag is set, task is delivered via CommandArgs instead
 			if finalScionCfg != nil && finalScionCfg.TaskFlag != "" {

@@ -180,6 +180,49 @@ func TestProvisionCmd_Clone_Idempotent(t *testing.T) {
 	}
 }
 
+// TestProvisionCmd_SharedDirPaths_ParsedAndProvisioned pins the F-111 review
+// fix (tf-lead nit): SCION_SHARED_DIR_PATHS carries "name=mountPath" pairs,
+// keyed explicitly, not bare paths keyed by filepath.Base on this side. Two
+// entries with the SAME basename but different full paths (the exact
+// collision risk named in review — InWorkspace vs not can produce this) must
+// both still be mkdir'd, proving the key actually came from the name field,
+// not a re-derived basename that would have collided.
+func TestProvisionCmd_SharedDirPaths_ParsedAndProvisioned(t *testing.T) {
+	dir := t.TempDir()
+	sharedRootA := filepath.Join(dir, "a", "scratchpad")
+	sharedRootB := filepath.Join(dir, "b", "scratchpad") // same basename as A, different path
+
+	oldWorkspace := provisionWorkspace
+	oldMode := provisionMode
+	oldUID := provisionUID
+	oldGID := provisionGID
+	defer func() {
+		provisionWorkspace = oldWorkspace
+		provisionMode = oldMode
+		provisionUID = oldUID
+		provisionGID = oldGID
+	}()
+
+	provisionWorkspace = filepath.Join(dir, "workspace")
+	provisionMode = "shared-plain"
+	provisionUID = os.Getuid()
+	provisionGID = os.Getgid()
+
+	t.Setenv("SCION_CLONE_URL", "")
+	t.Setenv("SCION_PROJECT_ID", "test-proj-shared-dirs")
+	t.Setenv("SCION_SHARED_DIR_PATHS", "scratchpad="+sharedRootA+",other-scratchpad="+sharedRootB)
+
+	if err := runProvision(context.Background()); err != nil {
+		t.Fatalf("provision with shared dirs should succeed, got: %v", err)
+	}
+
+	for _, p := range []string{sharedRootA, sharedRootB} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("shared dir %s was not created: %v", p, err)
+		}
+	}
+}
+
 func TestProvisionCmd_Clone_NoURL(t *testing.T) {
 	dir := t.TempDir()
 

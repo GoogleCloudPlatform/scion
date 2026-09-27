@@ -813,6 +813,138 @@ profiles:
 	if capturedConfig.Labels["agent_id"] != "agent-456" {
 		t.Fatalf("agent_id label = %q", capturedConfig.Labels["agent_id"])
 	}
+	// F-111 (design §9): GitCloneForInit must carry the same GitClone config
+	// passed to Start — this is what the k8s runtime's NFS init container
+	// uses to decide clone-vs-plain-provision (nfsProvisionCommand). Before
+	// this fix nothing set this field at all, for git or non-git projects,
+	// so the init container never ran for anyone.
+	if capturedConfig.GitCloneForInit == nil {
+		t.Fatal("GitCloneForInit is nil, want the GitClone config passed to Start")
+	}
+	if capturedConfig.GitCloneForInit.URL != "https://example.com/repo.git" {
+		t.Fatalf("GitCloneForInit.URL = %q, want %q", capturedConfig.GitCloneForInit.URL, "https://example.com/repo.git")
+	}
+}
+
+// TestStartPropagatesNFSWorkspaceBackend_NonGit_StillRequestsProvisioning is
+// the F-111 (design §9) regression test: a non-git, shared-plain NFS project
+// must still get NFSPVClaimName/NFSSubPath populated (so the k8s runtime
+// still injects its provisioning init container) even though there is no
+// GitClone config to carry. Before this fix, the k8s runtime's init
+// container was gated on GitCloneForInit != nil, so a nil value here — which
+// is correct, there's nothing to clone — silently meant "no provisioning at
+// all" instead of "provision, but don't clone." The gate is now independent
+// of this field (k8s_runtime.go's nfsInitContainerInjected); this test pins
+// the pkg/agent half of that fix: RunConfig must still carry everything the
+// gate itself needs, whether or not the project is git-backed.
+func TestStartPropagatesNFSWorkspaceBackend_NonGit_StillRequestsProvisioning(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("failed to chdir to tmpDir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	if err := os.Setenv("HOME", tmpDir); err != nil {
+		t.Fatalf("failed to set HOME: %v", err)
+	}
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
+		t.Fatalf("failed to create project .scion dir: %v", err)
+	}
+
+	nfsMountRoot := filepath.Join(tmpDir, "nfs")
+	settingsYAML := fmt.Sprintf(`schema_version: "1"
+active_profile: local
+server:
+  workspace_storage:
+    backend: nfs
+    nfs:
+      mount_root: %s
+      uid: 2000
+      gid: 2001
+      storage_class: filestore-sc
+      shares:
+        - id: share-1
+          server: 10.0.0.2
+          export: /scion-workspaces
+          pv_name: scion-workspaces-pv
+harness_configs:
+  test-harness:
+    harness: gemini
+    user: scion
+    image: test-image:latest
+profiles:
+  local:
+    runtime: docker
+`, nfsMountRoot)
+	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
+		t.Fatalf("failed to write settings: %v", err)
+	}
+
+	hcDir := filepath.Join(projectScionDir, "harness-configs", "test-harness")
+	if err := os.MkdirAll(hcDir, 0755); err != nil {
+		t.Fatalf("failed to create harness-config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644); err != nil {
+		t.Fatalf("failed to write harness config: %v", err)
+	}
+
+	tplDir := filepath.Join(projectScionDir, "templates", "default")
+	if err := os.MkdirAll(tplDir, 0755); err != nil {
+		t.Fatalf("failed to create template dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644); err != nil {
+		t.Fatalf("failed to write template: %v", err)
+	}
+
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			capturedConfig = config
+			return "mock-id", nil
+		},
+	}
+
+	mgr := NewManager(mockRT)
+	_, err = mgr.Start(context.Background(), api.StartOptions{
+		Name:            "test-agent",
+		ProjectPath:     projectScionDir,
+		NoAuth:          true,
+		SharedWorkspace: true, // non-git shared-plain: no GitClone at all
+		Env: map[string]string{
+			"SCION_AGENT_ID":   "agent-789",
+			"SCION_PROJECT_ID": "proj-456",
+		},
+		// GitClone intentionally omitted — this is the non-git case.
+	})
+	if err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	if capturedConfig.WorkspaceBackendName != "nfs" {
+		t.Fatalf("WorkspaceBackendName = %q, want nfs", capturedConfig.WorkspaceBackendName)
+	}
+	if capturedConfig.NFSPVClaimName != "scion-workspaces-pv" {
+		t.Fatalf("NFSPVClaimName = %q, want scion-workspaces-pv (provisioning must still be requested)", capturedConfig.NFSPVClaimName)
+	}
+	if capturedConfig.NFSSubPath == "" {
+		t.Fatal("NFSSubPath is empty, want a resolved subPath (provisioning must still be requested)")
+	}
+	if capturedConfig.GitCloneForInit != nil {
+		t.Fatalf("GitCloneForInit = %+v, want nil (nothing to clone)", capturedConfig.GitCloneForInit)
+	}
 }
 
 func TestStartResolvesHarnessConfigUserSettingsOverride(t *testing.T) {

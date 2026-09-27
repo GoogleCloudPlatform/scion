@@ -128,6 +128,19 @@ type ProvisionInput struct {
 	// itself is mounted (not its parent), so the sentinel must live inside the
 	// workspace mount.
 	SentinelDir string
+
+	// RequireChownSuccess makes a chown failure fatal (returns an error,
+	// before the sentinel is written) instead of the default warn-and-continue
+	// behavior (F-111, design §9). The default tolerates "an operator may
+	// have pre-chowned" for the broker's own host-side worktree-per-agent
+	// flow. The k8s init container (cmd/sciontool/commands/provision.go) sets
+	// this true: its entire purpose IS the chown, so a silent failure there
+	// reproduces the exact "workspace stuck root:root" bug this mechanism
+	// exists to fix — and does so invisibly, since without this flag the
+	// sentinel would still be written, masking the failure from every future
+	// pod that starts for this project (they'd all see the sentinel and skip
+	// provisioning, forever).
+	RequireChownSuccess bool
 }
 
 // ProvisionShared is the universal, vendor-agnostic workspace provisioning
@@ -232,13 +245,38 @@ func ProvisionShared(in ProvisionInput) error {
 
 	// Chown to stable NFS UID/GID (design §9.1). This is a ONE-TIME operation
 	// under the advisory lock — per-start chown is skipped for NFS (see N1-5).
-	//
+	// chown -R on an existing, differently-owned directory (e.g. one kubelet
+	// auto-created as root:root before this mechanism ran) re-owns it and
+	// everything already inside it — self-healing on the next start needs no
+	// separate repair step, as long as no sentinel was ever written for it
+	// (F-111, design §9).
 	chownRoot := chownTarget(in.Resolved.HostPath)
 	uid, gid := resolveUID(in), resolveGID(in)
 	if err := chownProjectTree(ctx, chownRoot, uid, gid); err != nil {
+		if in.RequireChownSuccess {
+			return fmt.Errorf("ProvisionShared: chown %s to %d:%d: %w", chownRoot, uid, gid, err)
+		}
 		slog.Warn("ProvisionShared: chown failed (non-fatal, may lack privileges)",
 			"project_id", in.ProjectID, "path", chownRoot, "uid", uid, "gid", gid, "error", err)
 		// Non-fatal: operator may have pre-chowned. Continue to write sentinel.
+	}
+
+	// Shared dirs are siblings of the workspace dir under the project root
+	// on the broker's own host-side flow, so chownRoot above (the project
+	// root there) already recurses into them — this loop is a no-op there
+	// beyond a second, redundant chown -R. In the k8s init container,
+	// chownRoot is scoped to the workspace subPath mount alone (chownTarget's
+	// "/" fallback), which does NOT reach a shared dir mounted at its own,
+	// separate subPath (F-111, design §9) — chown each one explicitly so it
+	// isn't missed there.
+	for name, sd := range in.Resolved.SharedDirs {
+		if err := chownProjectTree(ctx, sd.HostPath, uid, gid); err != nil {
+			if in.RequireChownSuccess {
+				return fmt.Errorf("ProvisionShared: chown shared-dir %q %s to %d:%d: %w", name, sd.HostPath, uid, gid, err)
+			}
+			slog.Warn("ProvisionShared: chown shared-dir failed (non-fatal, may lack privileges)",
+				"project_id", in.ProjectID, "name", name, "path", sd.HostPath, "uid", uid, "gid", gid, "error", err)
+		}
 	}
 
 	// Write sentinel atomically.
@@ -757,12 +795,33 @@ func chownTarget(hostPath string) string {
 // given UID/GID. This is a ONE-TIME operation done under the advisory lock
 // during first provisioning (design §9.1). Per-start chown is NOT done for
 // NFS (slow/racy over the network).
+//
+// -h (--no-dereference), not plain -R (F-111 review, tf-lead): GNU chown's
+// non-recursive default is to dereference a symlink argument, and this now
+// runs as root with CAP_DAC_OVERRIDE in the k8s init container — without -h,
+// a symlink inside a cloned (possibly untrusted) repo pointing outside the
+// chowned tree (elsewhere in the init container's own filesystem view, or
+// another mounted shared dir) risks having its REFERENT re-owned instead of
+// just the link itself. -h makes chown re-own the link and never follow it.
+// Confirmed the chown binary in scion-base supports -h: its runtime layer is
+// node:24-trixie-slim (Debian, GNU coreutils, not BusyBox), and GNU chown
+// --help lists "-h, --no-dereference"; BusyBox chown also supports -h.
+//
+// TestChownProjectTree_SymlinkOutsideTree_TargetOwnershipUnchanged exercises
+// this with a same-uid chown (this sandbox has no CAP_CHOWN, so it cannot
+// chown to a different uid at all) and checks the outside target's ctime is
+// untouched. That is evidence -h behaves as documented here, not proof that
+// the real scenario (root, a different target uid, CAP_DAC_OVERRIDE) is
+// safe — it cannot exercise that scenario in this environment. Treat it as
+// a regression guard on -h's own behavior, not as a substitute for
+// verifying the real k8s init container against a live cluster.
+
 func chownProjectTree(ctx context.Context, projectRoot string, uid, gid int) error {
-	// Use chown -R for recursive ownership change.
-	cmd := exec.CommandContext(ctx, "chown", "-R", fmt.Sprintf("%d:%d", uid, gid), projectRoot)
+	// Use chown -R -h for recursive ownership change without following symlinks.
+	cmd := exec.CommandContext(ctx, "chown", "-R", "-h", fmt.Sprintf("%d:%d", uid, gid), projectRoot)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("chown -R %d:%d %s: %s", uid, gid, projectRoot, strings.TrimSpace(string(output)))
+		return fmt.Errorf("chown -R -h %d:%d %s: %s", uid, gid, projectRoot, strings.TrimSpace(string(output)))
 	}
 	return nil
 }

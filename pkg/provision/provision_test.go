@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -217,6 +218,256 @@ func TestChownTarget(t *testing.T) {
 				t.Errorf("chownTarget(%q) = %q, want %q", tt.hostPath, got, tt.want)
 			}
 		})
+	}
+}
+
+// --- F-111 (design §9): chown fatal-vs-tolerant, self-healing, shared dirs ---
+
+// TestProvisionShared_SelfHeals_ExistingRootOwnedDirectory is the reasoning
+// note tf-lead's addendum asked for, turned into an executable test: an
+// existing project directory with NO sentinel — exactly project be2d6fe3's
+// state, per vm-deploy's live evidence — must be repaired by the next
+// provisioning attempt with no separate manual step. os.MkdirAll on an
+// already-existing directory is a documented no-op (it does not chmod an
+// existing dir to the requested mode), so the self-healing guarantee rests
+// entirely on chownProjectTree running unconditionally whenever no sentinel
+// is found, regardless of whether the directory pre-existed. This test
+// proves exactly that: a file placed in the directory *before* calling
+// ProvisionShared is still there afterwards (MkdirAll didn't touch/recreate
+// it), and provisioning still completes and writes the sentinel (chown ran
+// on the pre-existing tree, not just a freshly-created one).
+//
+// This test cannot chown to a UID other than its own process (chown-to-
+// another-uid requires CAP_CHOWN, which this sandbox does not have — see
+// TestProvisionShared_RequireChownSuccess_FailsOnChownError below, which
+// uses exactly that restriction to force a *real* chown failure). Using
+// NFSUID/GID equal to the test process's own uid/gid still exercises the
+// real code path (MkdirAll-is-no-op-on-existing-dir, then chown -R runs
+// unconditionally) — it just can't observe an ownership *change*, only that
+// the flow completes without shortcutting via mkdir.
+func TestProvisionShared_SelfHeals_ExistingRootOwnedDirectory(t *testing.T) {
+	projectDir := t.TempDir()
+	hostPath := filepath.Join(projectDir, "workspace")
+
+	// Simulate kubelet having already auto-created the directory (no
+	// sentinel was ever written for it — the exact be2d6fe3 state).
+	if err := os.MkdirAll(hostPath, 0755); err != nil {
+		t.Fatalf("pre-create workspace dir: %v", err)
+	}
+	marker := filepath.Join(hostPath, "pre-existing-file")
+	if err := os.WriteFile(marker, []byte("pre-existing"), 0644); err != nil {
+		t.Fatalf("write marker file: %v", err)
+	}
+
+	err := ProvisionShared(ProvisionInput{
+		Resolved:            ResolvedWorkspace{HostPath: hostPath},
+		ProjectID:           "proj-selfheal",
+		Mode:                store.SharingModeSharedPlain,
+		NFSUID:              os.Getuid(),
+		NFSGID:              os.Getgid(),
+		SentinelDir:         hostPath,
+		RequireChownSuccess: true,
+	})
+	if err != nil {
+		t.Fatalf("ProvisionShared on a pre-existing, sentinel-less directory: %v", err)
+	}
+
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("pre-existing file was lost: %v (MkdirAll should be a no-op on an existing dir)", err)
+	}
+	if _, err := os.Stat(filepath.Join(hostPath, ProvisionSentinelFile)); err != nil {
+		t.Errorf("sentinel not written after successful provisioning: %v", err)
+	}
+}
+
+// TestProvisionShared_RequireChownSuccess_FailsOnChownError proves the
+// "chown failure must become fatal to the init container" requirement using
+// a *real* chown failure, not a mock: this sandbox process has no CAP_CHOWN,
+// so chowning to any UID other than its own genuinely fails with "operation
+// not permitted" (verified once, directly, before writing this test). With
+// RequireChownSuccess, ProvisionShared must return an error and must NOT
+// write the sentinel — if it did, a lock-loser pod polling for the sentinel
+// would see it and proceed believing the workspace was properly provisioned.
+func TestProvisionShared_RequireChownSuccess_FailsOnChownError(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("running as root: chown-to-other-uid would succeed, defeating this test's premise")
+	}
+
+	projectDir := t.TempDir()
+	hostPath := filepath.Join(projectDir, "workspace")
+
+	err := ProvisionShared(ProvisionInput{
+		Resolved:            ResolvedWorkspace{HostPath: hostPath},
+		ProjectID:           "proj-chownfail",
+		Mode:                store.SharingModeSharedPlain,
+		NFSUID:              os.Getuid() + 1, // guaranteed not our own uid
+		NFSGID:              os.Getgid(),
+		SentinelDir:         hostPath,
+		RequireChownSuccess: true,
+	})
+	if err == nil {
+		t.Fatal("expected ProvisionShared to fail when chown fails and RequireChownSuccess is true")
+	}
+	if !strings.Contains(err.Error(), "chown") {
+		t.Errorf("error should mention chown, got: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(hostPath, ProvisionSentinelFile)); statErr == nil {
+		t.Error("sentinel must NOT be written when a required chown fails")
+	}
+}
+
+// TestProvisionShared_ChownFailure_NonFatal_ByDefault confirms the broker's
+// own worktree-per-agent flow keeps its existing tolerant behavior — this is
+// the negative control for the test above: same forced chown failure,
+// RequireChownSuccess left at its zero value (false), and provisioning must
+// still succeed (an operator may have pre-chowned).
+func TestProvisionShared_ChownFailure_NonFatal_ByDefault(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("running as root: chown-to-other-uid would succeed, defeating this test's premise")
+	}
+
+	projectDir := t.TempDir()
+	hostPath := filepath.Join(projectDir, "workspace")
+
+	err := ProvisionShared(ProvisionInput{
+		Resolved:    ResolvedWorkspace{HostPath: hostPath},
+		ProjectID:   "proj-chownfail-tolerant",
+		Mode:        store.SharingModeSharedPlain,
+		NFSUID:      os.Getuid() + 1,
+		NFSGID:      os.Getgid(),
+		SentinelDir: hostPath,
+		// RequireChownSuccess not set — defaults to false.
+	})
+	if err != nil {
+		t.Fatalf("ProvisionShared should tolerate a chown failure by default, got: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(hostPath, ProvisionSentinelFile)); statErr != nil {
+		t.Errorf("sentinel should still be written when chown is non-fatal: %v", statErr)
+	}
+}
+
+// TestProvisionShared_ChownsSharedDirsIndependently proves the F-111 gap
+// tf-lead's addendum flagged: a shared dir on its own, separate mount (a
+// different tree entirely from the workspace dir, standing in for a distinct
+// k8s subPath volume mount) is not reachable by chownRoot's recursion —
+// mkdir+chown must be applied to it explicitly, not assumed to be covered by
+// the workspace's own chown.
+func TestProvisionShared_ChownsSharedDirsIndependently(t *testing.T) {
+	workspaceRoot := t.TempDir()
+	hostPath := filepath.Join(workspaceRoot, "workspace")
+
+	// A completely separate directory tree — NOT a subdirectory of hostPath
+	// or its parent, standing in for a shared dir mounted at its own subPath
+	// (e.g. /scion-volumes/scratchpad, not nested under /workspace).
+	sharedRoot := t.TempDir()
+	sharedPath := filepath.Join(sharedRoot, "scratchpad")
+
+	err := ProvisionShared(ProvisionInput{
+		Resolved: ResolvedWorkspace{
+			HostPath: hostPath,
+			SharedDirs: map[string]ResolvedSharedDir{
+				"scratchpad": {HostPath: sharedPath},
+			},
+		},
+		ProjectID:           "proj-shareddirs",
+		Mode:                store.SharingModeSharedPlain,
+		NFSUID:              os.Getuid(),
+		NFSGID:              os.Getgid(),
+		SentinelDir:         hostPath,
+		RequireChownSuccess: true,
+	})
+	if err != nil {
+		t.Fatalf("ProvisionShared: %v", err)
+	}
+
+	if _, statErr := os.Stat(sharedPath); statErr != nil {
+		t.Errorf("shared dir was not created: %v", statErr)
+	}
+	// RequireChownSuccess: true would have failed the whole call (asserted
+	// above) if chowning sharedPath had errored — success here is the
+	// positive proof that the shared-dir chown loop actually ran and
+	// reported success, not just that mkdir happened to work.
+}
+
+// TestChownProjectTree_SymlinkOutsideTree_TargetOwnershipUnchanged is the
+// F-111 review fix (tf-lead): chownProjectTree now runs `chown -R -h`, not
+// plain `-R` — as root with CAP_DAC_OVERRIDE (the k8s init container's
+// winner security context), a symlink inside a cloned/possibly-untrusted
+// tree pointing OUTSIDE it (elsewhere in the init container's filesystem
+// view, or another mounted shared dir) must never have its REFERENT
+// re-owned, only the link itself.
+//
+// This sandbox has no CAP_CHOWN (verified directly, matching the pattern in
+// cloudrun_sandbox_runtime_test.go's TestPrepareScionLayout_ChownsDirectories),
+// so this cannot chown to a different uid at all, let alone reproduce the
+// real k8s init container (root, CAP_DAC_OVERRIDE, a target uid that
+// actually differs from the caller's). This test is a same-uid chown, and
+// checks that ctime — which chown/lchown update unconditionally, even when
+// the new owner equals the old one — is untouched on the outside target
+// (verified empirically before writing this test: a `chown -R -h` to the
+// process's own uid:gid left the outside target's ctime byte-for-byte
+// identical down to the nanosecond). That is a real regression guard on
+// -h's dereference behavior specifically, and the best this environment can
+// exercise — it is NOT proof that the real root/CAP_DAC_OVERRIDE scenario
+// is safe, only that -h itself does what it's documented to do here.
+func TestChownProjectTree_SymlinkOutsideTree_TargetOwnershipUnchanged(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("ctime/uid check uses syscall.Stat_t (Linux only)")
+	}
+
+	// A tree we're about to chown -R -h...
+	treeRoot := t.TempDir()
+	// ...containing a symlink to a file in a completely separate directory
+	// (standing in for "elsewhere in the container's filesystem view" or
+	// "another mounted shared dir" — not a subdirectory of treeRoot at all).
+	outsideDir := t.TempDir()
+	outsideTarget := filepath.Join(outsideDir, "outside-target.txt")
+	if err := os.WriteFile(outsideTarget, []byte("do not touch"), 0644); err != nil {
+		t.Fatalf("write outside target: %v", err)
+	}
+	linkPath := filepath.Join(treeRoot, "link-to-outside")
+	if err := os.Symlink(outsideTarget, linkPath); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	before, err := os.Lstat(outsideTarget)
+	if err != nil {
+		t.Fatalf("lstat outside target before: %v", err)
+	}
+	beforeStat := before.Sys().(*syscall.Stat_t)
+
+	if err := chownProjectTree(context.Background(), treeRoot, os.Getuid(), os.Getgid()); err != nil {
+		t.Fatalf("chownProjectTree: %v", err)
+	}
+
+	after, err := os.Lstat(outsideTarget)
+	if err != nil {
+		t.Fatalf("lstat outside target after: %v", err)
+	}
+	afterStat := after.Sys().(*syscall.Stat_t)
+
+	if afterStat.Uid != beforeStat.Uid || afterStat.Gid != beforeStat.Gid {
+		t.Errorf("outside target ownership changed: before uid=%d gid=%d, after uid=%d gid=%d",
+			beforeStat.Uid, beforeStat.Gid, afterStat.Uid, afterStat.Gid)
+	}
+	beforeCtime := beforeStat.Ctim
+	afterCtime := afterStat.Ctim
+	if beforeCtime != afterCtime {
+		t.Errorf("outside target ctime changed (target was touched, meaning the symlink was dereferenced): before %+v, after %+v",
+			beforeCtime, afterCtime)
+	}
+
+	// Positive control: the symlink itself (not the target) must actually
+	// have been (l)chowned — proves chown -R -h did something, not that it
+	// silently no-op'd on everything including the link.
+	linkInfo, err := os.Lstat(linkPath)
+	if err != nil {
+		t.Fatalf("lstat link: %v", err)
+	}
+	linkStat := linkInfo.Sys().(*syscall.Stat_t)
+	if int(linkStat.Uid) != os.Getuid() || int(linkStat.Gid) != os.Getgid() {
+		t.Errorf("link itself not chowned: uid=%d gid=%d, want %d:%d",
+			linkStat.Uid, linkStat.Gid, os.Getuid(), os.Getgid())
 	}
 }
 

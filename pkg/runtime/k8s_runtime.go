@@ -311,18 +311,19 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 
 	// --- N2-2b: Per-project advisory lock for NFS init-container provisioning ---
 	//
-	// When backend=nfs with a git clone configured AND an advisory locker is
-	// available, acquire the per-project lock before building the pod spec.
-	// This prevents concurrent first-clone corruption (risk RN1, design §7):
-	//   - Lock winner: injects the cloning init container (existing N2-2 script)
+	// When backend=nfs with a bound PV claim, acquire the per-project lock
+	// before building the pod spec (F-111: no longer gated on a git clone
+	// being configured — see nfsInitContainerInjected). This prevents
+	// concurrent first-provision corruption (risk RN1, design §7):
+	//   - Lock winner: injects the provisioning init container (existing N2-2 script)
 	//   - Lock loser:  injects a wait-for-sentinel init container (polls for
-	//                  .scion-provisioned without cloning)
+	//                  .scion-provisioned without provisioning)
 	//
 	// The lock is held until waitForPodReady returns (all init containers
 	// complete), mirroring N1-4's "hold during clone" lifetime. On error
 	// paths the deferred release ensures no lock leak.
 	var nfsProvisionLockRelease func() error
-	if config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != "" && config.GitCloneForInit != nil {
+	if nfsInitContainerInjected(config) {
 		if config.Locker != nil {
 			objID := store.StableProjectHash(config.ProjectID)
 			acquired, release, err := config.Locker.TryAdvisoryLockObject(
@@ -405,9 +406,17 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 	// redundantly copying workspace contents that already exist on the shared
 	// NFS volume. Local-backend pods RETAIN the existing workspace sync.
 	//
+	// F-111 (design §9): the skip used to fire for ANY WorkspaceBackendName ==
+	// "nfs", unconditionally claiming the workspace was "pre-populated by
+	// init container" — but whether that container actually got injected is
+	// its own condition (nfsInitContainerInjected). Recomputed here rather
+	// than threaded through buildPod's return value, since it's the exact
+	// same two fields already on config.
+	//
 	// Home-dir sync and the startup gate (/tmp/.scion-home-ready) are RETAINED
 	// for both backends — they carry agent dotfiles and secrets, not workspace code.
-	if config.Workspace != "" && config.WorkspaceBackendName != "nfs" {
+	nfsProvisioned := nfsInitContainerInjected(config)
+	if config.Workspace != "" && (config.WorkspaceBackendName != "nfs" || !nfsProvisioned) {
 		runtimeLog.Info("Syncing workspace", "agent", config.Name, "source", config.Workspace, "phase", "workspace-sync")
 		fmt.Printf("  Syncing workspace (%s -> /workspace)...\n", config.Workspace)
 		err = r.syncWithRetry(ctx, func() error {
@@ -421,7 +430,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 		if _, err := r.execInPod(ctx, namespace, createdPod.Name, []string{"sh", "-c", chownCmd}); err != nil {
 			runtimeLog.Debug("Failed to chown workspace (non-fatal)", "error", err)
 		}
-	} else if config.WorkspaceBackendName == "nfs" {
+	} else if config.WorkspaceBackendName == "nfs" && nfsProvisioned {
 		runtimeLog.Info("Skipping workspace sync (NFS backend: workspace pre-populated by init container)",
 			"agent", config.Name, "phase", "workspace-sync-skip")
 	}
@@ -1264,49 +1273,120 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		},
 	}
 
-	// NFS init container: when backend=nfs and git clone config is set, add an
-	// init container that provisions the workspace before the main container
-	// starts. The init container mounts the same workspace PVC+subPath so
-	// provisioned files are visible to the main container.
+	// NFS init container: when backend=nfs and a workspace PVC is bound, add
+	// an init container that provisions the workspace before the main
+	// container starts. The init container mounts the same workspace
+	// PVC+subPath so provisioned files are visible to the main container.
+	//
+	// F-111 (design §9): this used to also require config.GitCloneForInit !=
+	// nil, which meant non-git projects got no init container at all and no
+	// mkdir/chown ever ran — the per-project subPath then didn't exist when
+	// the main container mounted it, and kubelet created it as root:root.
+	// The gate now keys only on nfs backend + a bound PV claim, matching
+	// nfsProvisionCommand's own nil-safety (it already emits a plain
+	// `sciontool provision` when gc == nil); GitCloneForInit continues to
+	// select clone-vs-plain-provision behavior, not whether provisioning
+	// happens at all.
 	//
 	// Advisory lock integration (N2-2b, design §7, risk RN1): the Go-side
 	// Run() method acquires a per-project advisory lock (via TryAdvisoryLockObject)
 	// BEFORE reaching this point. The lock result determines the init container
 	// behavior:
-	//   - Lock winner (nfsProvisionLockLost=false): injects the CLONING init
-	//     container that checks the sentinel and clones if absent (N2-2 script).
+	//   - Lock winner (nfsProvisionLockLost=false): injects the PROVISIONING
+	//     init container that checks the sentinel and provisions (mkdir+chown,
+	//     plus clone when GitCloneForInit is set) if absent (N2-2 script).
 	//   - Lock loser  (nfsProvisionLockLost=true): injects a WAIT-for-sentinel
 	//     init container that polls for .scion-provisioned without cloning.
 	//
 	// When no advisory locker is available (Locker nil / single-node deploy),
-	// nfsProvisionLockLost stays false and the cloning init container is
+	// nfsProvisionLockLost stays false and the provisioning init container is
 	// injected — the sentinel provides idempotent protection but NOT
 	// cross-node mutual exclusion.
-	if config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != "" && config.GitCloneForInit != nil {
+	if nfsInitContainerInjected(config) {
 		var initCommand []string
 		if config.nfsProvisionLockLost {
 			// Lock loser: wait for the sentinel written by the winning node's
-			// cloning init container. Does NOT clone.
+			// provisioning init container. Does NOT provision.
 			initCommand = []string{"sciontool", "provision", "--wait-for-sentinel"}
 		} else {
-			// Lock winner (or no locker available): clone if sentinel is absent,
+			// Lock winner (or no locker available): provision (mkdir+chown,
+			// plus clone if GitCloneForInit is set) if sentinel is absent,
 			// skip if already provisioned. The command is idempotent.
 			initCommand = nfsProvisionCommand(config.GitCloneForInit)
 		}
+
+		// F-111: shared dirs served from the workspace PVC by subPath
+		// (nfsSharedDirs below) are siblings of the workspace under the
+		// project root, but each is its OWN volume mount at the container
+		// level — the workspace mount alone doesn't give this init container
+		// filesystem access to them. Mirror the same volumes/targets the main
+		// container gets (by index, so the names match what the loop below
+		// creates) so `sciontool provision` can mkdir+chown them too. Out of
+		// scope here: server.shared_dir_storage's own NFS mechanism
+		// (sharedDirStorageNFS below) — a separate subsystem, not implicated
+		// in F-111.
+		initVolumeMounts := []corev1.VolumeMount{workspaceVolumeMount}
+		// F-111 review (tf-lead nit): SCION_SHARED_DIR_PATHS carries
+		// "name=mountPath" pairs, comma-joined — keyed explicitly by each
+		// shared dir's own name (nfsSharedDirMount.Name), not derived from
+		// the path via filepath.Base on the consuming side. Basenames are
+		// unique today, but two shared dirs could produce the same basename
+		// through different target shapes (one InWorkspace, one not); naming
+		// the key here instead of reconstructing it there removes that risk
+		// rather than relying on it never happening.
+		var sharedDirPairs []string
+		sharedMounts, err := nfsSharedDirInitMounts(config)
+		if err != nil {
+			return nil, fmt.Errorf("workspace-provision init container: %w", err)
+		}
+		for _, sm := range sharedMounts {
+			initVolumeMounts = append(initVolumeMounts, sm.Mount)
+			sharedDirPairs = append(sharedDirPairs, sm.Name+"="+sm.Mount.MountPath)
+		}
+
+		initEnv := nfsProvisionEnv(config.GitCloneForInit)
+		if len(sharedDirPairs) > 0 {
+			initEnv = append(initEnv, corev1.EnvVar{
+				Name:  "SCION_SHARED_DIR_PATHS",
+				Value: strings.Join(sharedDirPairs, ","),
+			})
+		}
+
+		// F-111: chown needs CAP_CHOWN, and fixing a root-owned directory
+		// left by a prior kubelet auto-create needs CAP_DAC_OVERRIDE/
+		// CAP_FOWNER too — none of which a uid-1000, Drop:ALL container has.
+		// The pod's own securityContext sets RunAsUser=1000/RunAsNonRoot=true
+		// (design §9.1), so this container must override both at the
+		// container level to run as root at all. All three capabilities
+		// (CHOWN, FOWNER, DAC_OVERRIDE) are in GKE Autopilot's default
+		// allowed set, as is running a container as root — Autopilot's
+		// warden rejects capabilities outside that set, not root itself
+		// (https://docs.cloud.google.com/kubernetes-engine/docs/concepts/autopilot-security,
+		// "Security context and workload identity" — allowed capabilities
+		// include chown/dac_override/fowner; "Autopilot allows running as
+		// root to enable most workloads"). Only the WINNER container needs
+		// this: the wait-for-sentinel (loser) container only os.Stats a
+		// file, so it keeps the minimal, fully-dropped, non-root default.
+		initSecurityContext := &corev1.SecurityContext{
+			AllowPrivilegeEscalation: &allowPrivilegeEscalation,
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{"ALL"},
+			},
+		}
+		if !config.nfsProvisionLockLost {
+			initSecurityContext.RunAsUser = int64Ptr(0)
+			initSecurityContext.RunAsGroup = int64Ptr(0)
+			initSecurityContext.RunAsNonRoot = boolPtr(false)
+			initSecurityContext.Capabilities.Add = []corev1.Capability{"CHOWN", "FOWNER", "DAC_OVERRIDE"}
+		}
+
 		initContainer := corev1.Container{
-			Name:    "workspace-provision",
-			Image:   config.Image,
-			Command: initCommand,
-			Env:     nfsProvisionEnv(config.GitCloneForInit),
-			VolumeMounts: []corev1.VolumeMount{
-				workspaceVolumeMount,
-			},
-			SecurityContext: &corev1.SecurityContext{
-				AllowPrivilegeEscalation: &allowPrivilegeEscalation,
-				Capabilities: &corev1.Capabilities{
-					Drop: []corev1.Capability{"ALL"},
-				},
-			},
+			Name:            "workspace-provision",
+			Image:           config.Image,
+			Command:         initCommand,
+			Env:             initEnv,
+			VolumeMounts:    initVolumeMounts,
+			SecurityContext: initSecurityContext,
 		}
 		pod.Spec.InitContainers = append(pod.Spec.InitContainers, initContainer)
 	}
@@ -1459,7 +1539,13 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			// NFS backend: mount from the workspace PVC with a shared-dir subPath.
 			// SubPath root mirrors the nfsBackend.Resolve layout:
 			//   <SubPathRoot>/<projectID>/shared-dirs/<name>
-			sdSubPath := nfsSharedDirSubPath(config.NFSSubPath, sd.Name)
+			// F-111 review (BLOCKING): nfsSharedDirSubPath validates sd.Name and
+			// the resulting path itself now — reject here too, independent of
+			// pkg/agent/shared_dir_storage.go's own gate.
+			sdSubPath, err := nfsSharedDirSubPath(config.NFSSubPath, sd.Name)
+			if err != nil {
+				return nil, err
+			}
 			volName := fmt.Sprintf("shared-dir-%d", i)
 
 			// The volume source is the SAME NFS PVC as the workspace — but K8s
@@ -1592,6 +1678,35 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	return pod, nil
 }
 
+// classifyTerminalWaitingReason turns a terminal (non-retryable)
+// ContainerStateWaiting reason into an error, or returns nil if reason is
+// not one of the terminal reasons. initContainerName should be the empty
+// string for the main agent container, and the container's name for init
+// containers — the resulting error names the init container so it can be
+// told apart from the main container in logs. Shared by the init-container
+// and main-container checks in waitForPodReady so their wording can't drift.
+func classifyTerminalWaitingReason(podName, initContainerName, reason, message string) error {
+	container := fmt.Sprintf("pod %q", podName)
+	if initContainerName != "" {
+		container = fmt.Sprintf("init container %q in pod %q", initContainerName, podName)
+	}
+	switch reason {
+	case "ImagePullBackOff", "ErrImagePull":
+		return fmt.Errorf("image pull failed for %s: %s — verify the image name and registry access (image pull policy: check kubernetes.imagePullPolicy)", container, message)
+	case "InvalidImageName":
+		return fmt.Errorf("invalid image name for %s: %s", container, message)
+	case "CreateContainerConfigError":
+		return fmt.Errorf("container configuration error for %s: %s — check secret references and volume mounts", container, message)
+	case "CrashLoopBackOff":
+		if initContainerName != "" {
+			return fmt.Errorf("init container %q is crash-looping in pod %q: %s — check container logs with 'scion logs'", initContainerName, podName, message)
+		}
+		return fmt.Errorf("container is crash-looping in pod %q: %s — check container logs with 'scion logs'", podName, message)
+	default:
+		return nil
+	}
+}
+
 func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podName string) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute) // GKE Autopilot can be slow
 	defer cancel()
@@ -1611,6 +1726,31 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 			pod, err := r.Client.Clientset.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
 			if err != nil {
 				return err
+			}
+
+			// F-111 review (tf-lead): init container failures (most notably
+			// workspace-provision, whose whole job is now a fatal chown —
+			// RequireChownSuccess, F-111) were invisible here: this function
+			// only ever inspected the MAIN container's status, so a failed
+			// init container just sat as "PodInitializing" until the full
+			// 10-minute timeout above fired with a generic, unhelpful error.
+			// Name the failed init container and its actual exit reason
+			// immediately instead.
+			for _, ics := range pod.Status.InitContainerStatuses {
+				if ics.State.Terminated != nil && ics.State.Terminated.ExitCode != 0 {
+					runtimeLog.Error("Init container failed", "pod", podName, "container", ics.Name,
+						"exitCode", ics.State.Terminated.ExitCode, "reason", ics.State.Terminated.Reason,
+						"message", ics.State.Terminated.Message, "phase", "init-container")
+					return fmt.Errorf("init container %q failed in pod %q: exit code %d (%s): %s",
+						ics.Name, podName, ics.State.Terminated.ExitCode, ics.State.Terminated.Reason, ics.State.Terminated.Message)
+				}
+				if ics.State.Waiting != nil {
+					if err := classifyTerminalWaitingReason(podName, ics.Name, ics.State.Waiting.Reason, ics.State.Waiting.Message); err != nil {
+						runtimeLog.Error("Init container failed", "pod", podName, "container", ics.Name,
+							"reason", ics.State.Waiting.Reason, "message", ics.State.Waiting.Message, "phase", "init-container")
+						return err
+					}
+				}
 			}
 
 			// Check container statuses for more detail
@@ -1639,16 +1779,16 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 				switch reason {
 				case "ImagePullBackOff", "ErrImagePull":
 					runtimeLog.Error("Image pull failed", "pod", podName, "reason", reason, "message", message, "phase", "image-pull")
-					return fmt.Errorf("image pull failed for pod %q: %s — verify the image name and registry access (image pull policy: check kubernetes.imagePullPolicy)", podName, message)
+					return classifyTerminalWaitingReason(podName, "", reason, message)
 				case "InvalidImageName":
 					runtimeLog.Error("Invalid image name", "pod", podName, "message", message, "phase", "image-pull")
-					return fmt.Errorf("invalid image name for pod %q: %s", podName, message)
+					return classifyTerminalWaitingReason(podName, "", reason, message)
 				case "CreateContainerConfigError":
 					runtimeLog.Error("Container config error", "pod", podName, "message", message, "phase", "container-config")
-					return fmt.Errorf("container configuration error for pod %q: %s — check secret references and volume mounts", podName, message)
+					return classifyTerminalWaitingReason(podName, "", reason, message)
 				case "CrashLoopBackOff":
 					runtimeLog.Error("Container crash loop", "pod", podName, "message", message, "phase", "crash-loop")
-					return fmt.Errorf("container is crash-looping in pod %q: %s — check container logs with 'scion logs'", podName, message)
+					return classifyTerminalWaitingReason(podName, "", reason, message)
 				case "Unschedulable":
 					if r.isGKEScheduling() {
 						runtimeLog.Info("Pod unschedulable (GKE Autopilot will auto-provision nodes)", "pod", podName, "message", message, "phase", "scheduling")
@@ -2442,11 +2582,103 @@ func (r *KubernetesRuntime) GetWorkspacePath(ctx context.Context, id string) (st
 // shared dirs are siblings: "projects/<pid>/shared-dirs/<name>".
 //
 // This mirrors the nfsBackend.Resolve layout (design §5.3).
-func nfsSharedDirSubPath(workspaceSubPath, sharedDirName string) string {
+//
+// F-111 review (tf-lead/tf-review-nfsfix, BLOCKING): sharedDirName is data —
+// it can come from a cloned repo's in-repo settings.yaml — and
+// filepath.Join silently collapses ".." segments before Kubernetes' own
+// subPath escape check ever sees the resulting string. A name like
+// "../../<other-project>/workspace" would resolve to another project's real
+// workspace directory; since F-111 gave the winner init container CHOWN/
+// FOWNER/DAC_OVERRIDE, that's not just a data leak, it's a cross-project
+// ownership hijack (chown -R -h on someone else's tree). This is defense in
+// depth alongside pkg/agent/shared_dir_storage.go's own validation gate
+// (resolveSharedDirs, fails closed when workspace_storage.backend is nfs):
+// this function refuses to build a bad subPath at all, independently, in
+// case anything else ever reaches buildPod with unvalidated SharedDirs.
+//
+// Two independent checks, not one: api.ValidateSharedDirs rejects anything
+// that isn't a valid slug (lowercase alphanumeric + internal hyphens only —
+// which cannot produce a path separator or ".." by construction), and the
+// joined-path-prefix check below is a second, structurally different gate
+// that doesn't depend on the slug regex ever staying correct.
+func nfsSharedDirSubPath(workspaceSubPath, sharedDirName string) (string, error) {
+	if err := api.ValidateSharedDirs([]api.SharedDir{{Name: sharedDirName}}); err != nil {
+		return "", fmt.Errorf("shared dir name %q: %w", sharedDirName, err)
+	}
 	// workspaceSubPath is "projects/<pid>/workspace"
 	// We need "projects/<pid>/shared-dirs/<name>"
 	parent := filepath.Dir(workspaceSubPath) // "projects/<pid>"
-	return filepath.Join(parent, "shared-dirs", sharedDirName)
+	wantDir := filepath.Join(parent, "shared-dirs")
+	joined := filepath.Join(wantDir, sharedDirName)
+	if !strings.HasPrefix(joined, wantDir+string(filepath.Separator)) {
+		return "", fmt.Errorf("shared dir name %q: resolved subPath %q escapes %s", sharedDirName, joined, wantDir)
+	}
+	return joined, nil
+}
+
+// nfsSharedDirMount pairs a shared dir's own name (config.SharedDirs[i].Name,
+// e.g. "scratchpad") with its init-container VolumeMount — kept together so
+// callers never have to re-derive the name from the mount's k8s volume name
+// or its MountPath (F-111 review, tf-lead: keying SCION_SHARED_DIR_PATHS off
+// filepath.Base(mountPath) works today but silently collides if two shared
+// dirs ever produced the same basename via different target shapes, e.g. one
+// InWorkspace and one not; carrying the real name explicitly removes that
+// risk rather than reconstructing it from a path).
+type nfsSharedDirMount struct {
+	Name  string
+	Mount corev1.VolumeMount
+}
+
+// nfsSharedDirInitMounts returns the workspace-provision init container's
+// additional VolumeMounts for shared dirs served from the workspace NFS PVC
+// by subPath (F-111, design §9) — mirrors buildPod's own nfsSharedDirs branch
+// below exactly (same volume names, by index, same subPath/target
+// computation), so the volumes these mounts reference are guaranteed to
+// exist in pod.Spec.Volumes once that branch runs later in the same buildPod
+// call. Returns nil for any other shared-dir mechanism
+// (server.shared_dir_storage's own NFS backend, or the local per-dir-PVC
+// backend) — those are separate subsystems, not implicated in F-111.
+func nfsSharedDirInitMounts(config RunConfig) ([]nfsSharedDirMount, error) {
+	sharedDirStorageNFS := config.SharedDirStorage != nil && config.SharedDirStorage.Backend == "nfs"
+	nfsSharedDirs := !sharedDirStorageNFS && config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != ""
+	if !nfsSharedDirs || len(config.SharedDirs) == 0 {
+		return nil, nil
+	}
+
+	k8sContainerWorkspace := config.ContainerWorkspace
+	if k8sContainerWorkspace == "" {
+		k8sContainerWorkspace = "/workspace"
+	}
+
+	mounts := make([]nfsSharedDirMount, 0, len(config.SharedDirs))
+	for i, sd := range config.SharedDirs {
+		target := fmt.Sprintf("/scion-volumes/%s", sd.Name)
+		if sd.InWorkspace {
+			target = fmt.Sprintf("%s/.scion-volumes/%s", k8sContainerWorkspace, sd.Name)
+		}
+		subPath, err := nfsSharedDirSubPath(config.NFSSubPath, sd.Name)
+		if err != nil {
+			return nil, err
+		}
+		mounts = append(mounts, nfsSharedDirMount{
+			Name: sd.Name,
+			Mount: corev1.VolumeMount{
+				Name:      fmt.Sprintf("shared-dir-%d", i),
+				MountPath: target,
+				SubPath:   subPath,
+			},
+		})
+	}
+	return mounts, nil
+}
+
+// nfsInitContainerInjected reports whether buildPod would add the
+// workspace-provision init container for this config — the same gate used
+// there (F-111: nfs backend + a bound PV claim, independent of git config).
+// Used by Run() to decide whether it's safe to skip the tar-based workspace
+// sync (only true when something actually pre-populates the workspace).
+func nfsInitContainerInjected(config RunConfig) bool {
+	return config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != ""
 }
 
 // nfsProvisionCommand builds the Command slice for the lock-winner init

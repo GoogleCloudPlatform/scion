@@ -52,6 +52,7 @@ func resolveSharedDirs(
 	runtimeName string,
 	dirs []api.SharedDir,
 	containerWorkspace string,
+	nfsWorkspaceBackend bool,
 ) ([]api.VolumeMount, *runtime.SharedDirRealization, error) {
 	if len(dirs) == 0 {
 		return nil, nil, nil
@@ -68,6 +69,28 @@ func resolveSharedDirs(
 	}
 
 	if sdCfg == nil || sdCfg.Backend == "" || sdCfg.Backend == "local" {
+		// F-111 review (tf-lead/tf-review-nfsfix, BLOCKING): this branch also
+		// fires when server.shared_dir_storage is unset/"local" but
+		// server.workspace_storage.backend IS "nfs" — the OLDER, separate NFS
+		// mechanism the k8s runtime's nfsSharedDirs path (k8s_runtime.go)
+		// consumes directly from RunConfig.SharedDirs. Names there become NFS
+		// subPaths (nfsSharedDirSubPath) exactly the way names under
+		// server.shared_dir_storage=nfs do — and dirs can come from a cloned
+		// repo's in-repo settings.yaml — so the same path-escape risk that
+		// round 2's security review (F1, HIGH) fixed for the newer mechanism
+		// applied here too, unfixed, until now. Validate and fail closed when
+		// nfsWorkspaceBackend, since an invalid name there is a real subPath
+		// escape risk (F-111 additionally gave the winner init container
+		// CHOWN/FOWNER/DAC_OVERRIDE, turning an escape into a cross-project
+		// ownership hijack, not just a leak) — but keep the existing
+		// swallow-and-log behavior for every other case (local-container
+		// runtimes, or nfs disabled), to preserve design AC1 exactly as
+		// before for configurations this bug never affected.
+		if nfsWorkspaceBackend {
+			if err := api.ValidateSharedDirs(dirs); err != nil {
+				return nil, nil, fmt.Errorf("shared_dirs: %w", err)
+			}
+		}
 		// Default/unset/"local": today's local layout. Errors here are
 		// logged and swallowed, not propagated — this preserves exact
 		// pre-existing behaviour (design AC1).
