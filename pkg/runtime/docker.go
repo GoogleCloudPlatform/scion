@@ -225,7 +225,7 @@ func (r *DockerRuntime) List(ctx context.Context, labelFilter map[string]string)
 				}
 			}
 
-			if actual != v {
+			if !projectcompat.LabelValuesMatch(k, actual, v) {
 				match = false
 				break
 			}

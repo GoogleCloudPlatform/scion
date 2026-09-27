@@ -807,9 +807,8 @@ func (s *Server) createProjectMembersGroup(ctx context.Context, project *store.P
 	// All authorization routes through AK1 kernel using RoleBindings.
 }
 
-// hubManagedProjectPath returns the filesystem path for a hub-managed project workspace.
-// It prefers projects/<slug> and falls back to groves/<slug> for backward compatibility
-// with workspaces created before the grove-to-project rename.
+// hubManagedProjectPath returns the filesystem path for a hub-managed project workspace,
+// under projects/<slug>.
 //
 // When the server has a workspace storage config with backend "nfs",
 // "cloudrun-volume" or "gke-shared-volume", the durable volume-backed path is
@@ -910,8 +909,8 @@ func validateProjectSlug(slug string) error {
 	return nil
 }
 
-// localProjectPath returns the legacy local filesystem path for a hub-managed
-// project workspace under ~/.scion/projects/<slug>, with groves/<slug> fallback.
+// localProjectPath returns the local filesystem path for a hub-managed
+// project workspace under ~/.scion/projects/<slug>.
 func localProjectPath(slug string) (string, error) {
 	if err := validateProjectSlug(slug); err != nil {
 		return "", err
@@ -920,15 +919,7 @@ func localProjectPath(slug string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to get global dir: %w", err)
 	}
-	projectsPath := filepath.Join(globalDir, "projects", slug)
-	if hasWorkspaceContent(projectsPath) {
-		return projectsPath, nil
-	}
-	grovesPath := filepath.Join(globalDir, "groves", slug)
-	if hasWorkspaceContent(grovesPath) {
-		return grovesPath, nil
-	}
-	return projectsPath, nil
+	return filepath.Join(globalDir, "projects", slug), nil
 }
 
 // hasWorkspaceContent returns true if dir exists and contains meaningful
@@ -2682,7 +2673,8 @@ func (s *Server) migrateProjectSlug(ctx context.Context, project *store.Project,
 	// project ID (not slug), so no rename is needed.
 
 	// Migrate hub-managed project filesystem paths (best-effort).
-	// Derive newPath from oldPath's parent to preserve the directory type (groves/ vs projects/).
+	// Derive newPath from oldPath's parent so the renamed workspace stays
+	// alongside the original.
 	if oldPath, err := s.hubManagedProjectPath(oldSlug); err == nil {
 		if _, statErr := os.Stat(oldPath); statErr == nil {
 			newPath := filepath.Join(filepath.Dir(oldPath), newSlug)

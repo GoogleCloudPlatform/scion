@@ -164,11 +164,25 @@ allowed_paths=(
   # output alongside a SCION_PROJECT/SCION_PROJECT_ID presence check. The
   # literal is the point of the negative assertion.
   "^pkg/runtime/common_test.go$"
+  # Builds a legacy ".scion/groves/<name>" path to prove an agent's recorded
+  # project-path label is still found after config.MigrateLegacyGlobalLayout
+  # moves the project and leaves a per-entry symlink behind. The literal is
+  # the point of the test. Same test and reason as pkg/runtime/podman_test.go
+  # below.
+  "^pkg/runtime/docker_test.go$"
   "^pkg/runtime/k8s_runtime_test.go$"
+  # Builds a legacy ".scion/groves/<name>" path to prove an agent's recorded
+  # project-path label is still found after config.MigrateLegacyGlobalLayout
+  # moves the project and leaves a per-entry symlink behind. The literal is
+  # the point of the test. Same test and reason as pkg/runtime/docker_test.go
+  # above.
+  "^pkg/runtime/podman_test.go$"
+  "^pkg/runtimebroker/delete_project_scope_test.go$"
   "^pkg/runtimebroker/handlers_envgather_test.go$"
   "^pkg/runtimebroker/handlers_test.go$"
   "^pkg/runtimebroker/heartbeat_test.go$"
   "^pkg/runtimebroker/hub_connection_test.go$"
+  "^pkg/runtimebroker/legacy_layout_migration_test.go$"
   "^pkg/runtimebroker/protocol_mismatch_test.go$"
   # Asserts that a groveId-only PTY attach query no longer scopes the lookup
   # (two same-slug agents in different projects become ambiguous). The
@@ -202,11 +216,8 @@ allowed_paths=(
   # Core compatibility adapters and bounded legacy protocol/storage surfaces.
   "^pkg/config/koanf.go$"
   "^pkg/config/legacy_grove_migration.go$"
-  "^pkg/config/paths.go$"
   "^pkg/config/project_marker.go$"
   "^pkg/config/settings_v1.go$"
-  "^pkg/hub/fs_safety.go$"
-  "^pkg/hub/handlers_projects_core.go$"
   "^pkg/hub/system_handlers.go$"
   "^pkg/hubclient/agents.go$"
   "^pkg/hubclient/notifications.go$"
@@ -215,7 +226,6 @@ allowed_paths=(
   "^pkg/projectcompat/.*\\.go$"
   "^pkg/runtimebroker/handlers.go$"
   "^pkg/runtimebroker/server.go$"
-  "^pkg/runtimebroker/start_context.go$"
   "^pkg/runtimebroker/workspace_handlers.go$"
   # Reserved-identity-attribute denylist: the three retired grove-named
   # telemetry keys (scion.grove, scion.grove.id, scion.grove_id) are kept

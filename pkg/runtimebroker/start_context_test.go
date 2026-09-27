@@ -587,6 +587,47 @@ func TestBuildStartContext_HubManagedProjectSlugResolution(t *testing.T) {
 	}
 }
 
+// TestBuildStartContext_NeverFallsBackToLegacyGrovesDir is the negative test
+// for the deleted groves/ fallback: even when a legacy
+// ~/.scion/groves/<slug> directory holds real content (a migrator-conflict
+// leftover, or a project that predates the migrator ever running) and
+// ~/.scion/projects/<slug> holds only infrastructure, buildStartContext must
+// always resolve to the canonical projects/ path.
+func TestBuildStartContext_NeverFallsBackToLegacyGrovesDir(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	slug := "no-legacy-fallback"
+	projectsDir := filepath.Join(home, ".scion", "projects", slug)
+	if err := os.MkdirAll(filepath.Join(projectsDir, ".scion"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	grovesDir := filepath.Join(home, ".scion", "groves", slug)
+	if err := os.MkdirAll(grovesDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(grovesDir, "README.md"), []byte("# workspace"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:        "agent-1",
+		ProjectSlug: slug,
+		ProjectID:   "aabbccdd-1234-5678-9012-abcdef123456",
+		Operation:   opCreate,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sc.Opts.ProjectPath != projectsDir {
+		t.Errorf("ProjectPath = %q, want %q (must never fall back to the legacy groves dir)", sc.Opts.ProjectPath, projectsDir)
+	}
+}
+
 func TestBuildStartContext_HubManagedProjectPreservesExistingProjectID(t *testing.T) {
 	t.Run("preserves when external config dir exists", func(t *testing.T) {
 		cfg := DefaultServerConfig()

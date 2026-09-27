@@ -50,68 +50,44 @@ func TestHubManagedProjectPath(t *testing.T) {
 	assert.Equal(t, expected, path)
 }
 
-func TestHubManagedProjectPath_PrefersProjectsOverGroves(t *testing.T) {
+func TestHubManagedProjectPath_NeverFallsBackToLegacyDir(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
 	slug := "both-dirs-exist"
 	globalDir := filepath.Join(tmpHome, ".scion")
 
-	// Create both directories with workspace content
-	projectsDir := filepath.Join(globalDir, "projects", slug)
-	require.NoError(t, os.MkdirAll(projectsDir, 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(projectsDir, "metadata.json"), []byte("{}"), 0644))
-
-	grovesDir := filepath.Join(globalDir, "groves", slug)
-	require.NoError(t, os.MkdirAll(grovesDir, 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(grovesDir, "README.md"), []byte("# workspace"), 0644))
-
-	// hubManagedProjectPath should prefer projects/ over legacy groves/
-	path, err := hubManagedProjectPath(slug)
-	require.NoError(t, err)
-	assert.Equal(t, projectsDir, path, "should prefer projects path over groves path")
-}
-
-func TestHubManagedProjectPath_FallsBackToGrovesWhenProjectsEmpty(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-
-	slug := "projects-empty-groves-has-content"
-	globalDir := filepath.Join(tmpHome, ".scion")
-
-	// Create projects/{slug} with only infrastructure dirs (no real content)
+	// projects/{slug} has no real content yet, and a pre-migration
+	// ~/.scion/groves/{slug} still holds real workspace content. Before this
+	// project resolved a legacy fallback here; now MigrateLegacyGlobalLayout
+	// is responsible for moving any such content into projects/ at boot,
+	// before this function is ever reached, so it must always resolve to
+	// projects/ and never read groves/ itself.
 	projectsDir := filepath.Join(globalDir, "projects", slug)
 	require.NoError(t, os.MkdirAll(filepath.Join(projectsDir, ".scion"), 0755))
 
-	// Create groves/{slug} with actual workspace content (legacy)
 	grovesDir := filepath.Join(globalDir, "groves", slug)
 	require.NoError(t, os.MkdirAll(grovesDir, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(grovesDir, "README.md"), []byte("# workspace"), 0644))
 
-	// hubManagedProjectPath should fall back to groves/ for backward compatibility
 	path, err := hubManagedProjectPath(slug)
 	require.NoError(t, err)
-	assert.Equal(t, grovesDir, path, "should fall back to legacy groves path when projects dir only contains infrastructure dirs")
+	assert.Equal(t, projectsDir, path, "should always resolve to the projects path, never the legacy directory")
 }
 
-func TestHubManagedProjectPath_DefaultsToProjectsWhenNeitherHasContent(t *testing.T) {
+func TestHubManagedProjectPath_UsesProjectsDirWhenEmpty(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
 	slug := "neither-has-content"
 	globalDir := filepath.Join(tmpHome, ".scion")
 
-	// Create both directories with only infrastructure dirs
-	grovesDir := filepath.Join(globalDir, "groves", slug)
-	require.NoError(t, os.MkdirAll(filepath.Join(grovesDir, ".scion"), 0755))
-
 	projectsDir := filepath.Join(globalDir, "projects", slug)
 	require.NoError(t, os.MkdirAll(filepath.Join(projectsDir, "shared-dirs"), 0755))
 
-	// When neither has content, should default to projects/
 	path, err := hubManagedProjectPath(slug)
 	require.NoError(t, err)
-	assert.Equal(t, projectsDir, path, "should default to projects path when neither dir has workspace content")
+	assert.Equal(t, projectsDir, path, "should resolve to the projects path even when it only contains infrastructure dirs")
 }
 
 func TestHubManagedProjectPath_EmptySlug(t *testing.T) {

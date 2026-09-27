@@ -30,8 +30,6 @@ const (
 
 	ProjectConfigsDir = projectcompat.ProjectConfigsDir
 	ProjectsDir       = projectcompat.ProjectsDir
-	GroveConfigsDir   = projectcompat.GroveConfigsDir
-	GrovesDir         = projectcompat.GrovesDir
 )
 
 // FindProjectRoot walks up the directory tree to find the .scion directory or marker file.
