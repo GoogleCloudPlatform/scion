@@ -1614,10 +1614,7 @@ func determineUserRole(email string, adminEmails []string, currentRole string, d
 	// ran), refuse login-time demotion too — the same condition that prevents
 	// mass demotion at startup must prevent one-at-a-time demotion at login.
 	if currentRole == "admin" && len(adminEmails) > 0 && demotionSafe && !isUIPromoted {
-		if defaultRole == "viewer" {
-			return "viewer"
-		}
-		return "member"
+		return normalizedDefaultRole(defaultRole)
 	}
 	if currentRole != "" {
 		return currentRole
@@ -1625,10 +1622,19 @@ func determineUserRole(email string, adminEmails []string, currentRole string, d
 	// New user: use the configured default role. Only "member" and "viewer"
 	// are accepted; anything else (including "admin") falls back to "member"
 	// to prevent config-driven admin escalation.
-	if defaultRole == "viewer" {
-		return "viewer"
+	return normalizedDefaultRole(defaultRole)
+}
+
+// normalizedDefaultRole maps the configured default_user_role to the role a
+// user actually gets when it applies (new user, invite activation, or admin
+// demotion at login or at startup reconciliation): "viewer" stays "viewer",
+// anything else (including "" and "admin") is "member". It is the single
+// place this rule lives, so login-time and startup demotion cannot disagree.
+func normalizedDefaultRole(defaultRole string) string {
+	if defaultRole == store.UserRoleViewer {
+		return store.UserRoleViewer
 	}
-	return "member"
+	return store.UserRoleMember
 }
 
 // (s *Server) getUserRole is a convenience method to determine role using server config.

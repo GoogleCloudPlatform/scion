@@ -1028,12 +1028,9 @@ func backfillProjectOwnerRoleBindings(ctx context.Context, s store.Store) error 
 //
 // This is called after BackfillRoleBindings and is idempotent.
 func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails []string, defaultRole string) (demotionSafe bool, err error) {
-	// Demotion lands on the configured default role, like login-time
-	// demotion in determineUserRole; anything but "viewer" means "member".
-	demoteTo := store.UserRoleMember
-	if defaultRole == store.UserRoleViewer {
-		demoteTo = store.UserRoleViewer
-	}
+	// Demotion lands on the configured default role, exactly like login-time
+	// demotion in determineUserRole.
+	demoteTo := normalizedDefaultRole(defaultRole)
 
 	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
 	if err != nil {
