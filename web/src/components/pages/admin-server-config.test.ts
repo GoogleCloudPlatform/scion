@@ -884,9 +884,11 @@ describe('scion-page-admin-server-config', () => {
       const text = helpText(element);
       expect(text).toContain('Default role for new users.');
       expect(text).toContain(
-        'Applies when a user record is first created: first sign-in, invite, or allow-list entry.'
+        'Applies when a user first signs in, including invited and allow-listed users ' +
+          '(their role is assigned at first sign-in, not when the invite is created).'
       );
-      expect(text).toContain('Changing it does not affect existing users.');
+      expect(text).toContain('Changing it does not affect users who have already signed in.');
+      expect(text).not.toContain('invite, or allow-list entry');
       expect(text).toContain('Users listed in Admin Emails are always admins.');
       expect(text).toContain(
         'Member: can create projects, and works in any project they are added to.'

@@ -4763,9 +4763,10 @@ export class ScionPageAdminServerConfig extends LitElement {
             <label>Default User Role</label>
             <div class="hint default-user-role-help">
               <p>
-                <strong>Default role for new users.</strong> Applies when a user record is first
-                created: first sign-in, invite, or allow-list entry. Changing it does not affect
-                existing users. Users listed in Admin Emails are always admins.
+                <strong>Default role for new users.</strong> Applies when a user first signs in,
+                including invited and allow-listed users (their role is assigned at first sign-in,
+                not when the invite is created). Changing it does not affect users who have already
+                signed in. Users listed in Admin Emails are always admins.
               </p>
               <ul>
                 <li>
