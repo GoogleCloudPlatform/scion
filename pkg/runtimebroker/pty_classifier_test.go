@@ -145,6 +145,35 @@ func TestIsCleanExit(t *testing.T) {
 	}
 }
 
+// TestCleanExitFromCmd covers the wrapper both Run() implementations' final
+// defers use to populate cleanExit: it must not panic on a nil *exec.Cmd
+// (treating that the same as never having reaped a process), and must
+// otherwise match isCleanExit exactly.
+func TestCleanExitFromCmd(t *testing.T) {
+	if cleanExitFromCmd(nil) {
+		t.Error("nil *exec.Cmd must not be treated as clean")
+	}
+
+	cleanCmd := exec.Command("true")
+	if err := cleanCmd.Run(); err != nil {
+		t.Fatalf("unexpected error running `true`: %v", err)
+	}
+	if !cleanExitFromCmd(cleanCmd) {
+		t.Error("a reaped, exit-0 cmd must be treated as clean")
+	}
+
+	dirtyCmd := exec.Command("false")
+	_ = dirtyCmd.Run()
+	if cleanExitFromCmd(dirtyCmd) {
+		t.Error("a reaped, non-zero-exit cmd must not be treated as clean")
+	}
+
+	unreapedCmd := exec.Command("true") // never Run/Start: ProcessState is nil
+	if cleanExitFromCmd(unreapedCmd) {
+		t.Error("a non-nil cmd with a nil ProcessState must not be treated as clean")
+	}
+}
+
 // TestClassifyProbeErr covers the tri-state mapping tmuxHasSession relies on.
 func TestClassifyProbeErr(t *testing.T) {
 	ctx := context.Background()
