@@ -496,7 +496,8 @@ def _harden_config(ctx: scion_harness.ProvisionContext) -> None:
 # left to a follow-up, alongside grok-build usage derivation (out of scope,
 # D6/D8).
 
-_DEFAULT_OTEL_PROTOCOL = "grpc"
+_OTEL_PROTOCOL = "grpc"
+_DEFAULT_OTEL_GRPC_PORT = "4317"
 
 
 def _telemetry_enabled(telemetry: dict[str, Any] | None) -> bool:
@@ -523,7 +524,7 @@ def _resolve_endpoint(env: dict[str, str] | None) -> str:
     override = (env.get("SCION_GROK_BUILD_OTEL_ENDPOINT") or os.environ.get("SCION_GROK_BUILD_OTEL_ENDPOINT") or "").strip()
     if override:
         return override
-    port = str(env.get("SCION_OTEL_GRPC_PORT") or os.environ.get("SCION_OTEL_GRPC_PORT") or "4317")
+    port = str(env.get("SCION_OTEL_GRPC_PORT") or os.environ.get("SCION_OTEL_GRPC_PORT") or _DEFAULT_OTEL_GRPC_PORT)
     if not port.isdecimal() or not 1 <= int(port) <= 65535:
         raise scion_harness.ProvisionError("invalid local telemetry gRPC port")
     return f"http://127.0.0.1:{port}"
@@ -541,7 +542,7 @@ def _build_telemetry_env(env: dict[str, str] | None) -> dict[str, str]:
         "GROK_TELEMETRY_ENABLED": "true",
         "GROK_EXTERNAL_OTEL": "true",
         "OTEL_EXPORTER_OTLP_ENDPOINT": _resolve_endpoint(env),
-        "OTEL_EXPORTER_OTLP_PROTOCOL": _DEFAULT_OTEL_PROTOCOL,
+        "OTEL_EXPORTER_OTLP_PROTOCOL": _OTEL_PROTOCOL,
         "OTEL_METRICS_EXPORTER": "otlp",
         "OTEL_LOGS_EXPORTER": "otlp",
         "OTEL_METRIC_EXPORT_INTERVAL": "30000",

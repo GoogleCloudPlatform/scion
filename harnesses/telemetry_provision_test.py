@@ -15,7 +15,8 @@ ROOT = Path(__file__).parent
 class TelemetryProvisionTest(unittest.TestCase):
     def _invoke(self, harness, enabled, port, provider=None, extra_env=None,
                 well_known_gcp_credentials=False, cloud_endpoint=None,
-                port_env_key='SCION_OTEL_GRPC_PORT'):
+                port_env_key='SCION_OTEL_GRPC_PORT',
+                cloud_headers=None, cloud_ca_file=None):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             bundle = home / '.scion' / 'harness'
@@ -31,12 +32,16 @@ class TelemetryProvisionTest(unittest.TestCase):
                     'harness_config': {'no_auth': {'behavior': 'allow'}},
                 })
                 telemetry = {'enabled': enabled}
-                if provider is not None or cloud_endpoint is not None:
+                if provider is not None or cloud_endpoint is not None or cloud_headers is not None or cloud_ca_file is not None:
                     telemetry['cloud'] = {}
                     if provider is not None:
                         telemetry['cloud']['provider'] = provider
                     if cloud_endpoint is not None:
                         telemetry['cloud']['endpoint'] = cloud_endpoint
+                    if cloud_headers is not None:
+                        telemetry['cloud']['headers'] = cloud_headers
+                    if cloud_ca_file is not None:
+                        telemetry['cloud']['tls'] = {'ca_file': cloud_ca_file}
                 source_env = {port_env_key: str(port)}
                 source_env.update(extra_env or {})
                 (bundle / 'inputs' / 'telemetry.json').write_text(json.dumps({
@@ -152,11 +157,21 @@ class TelemetryProvisionTest(unittest.TestCase):
 
     def test_copilot_never_reaches_cloud_endpoint(self):
         # #2053: copilot used to resolve SCION_OTEL_ENDPOINT (the generic
-        # cloud-config alias) ahead of the local receiver. It must not.
+        # cloud-config alias) ahead of the local receiver, and to copy cloud
+        # headers/CA into the harness env. Seed all of those inputs -- from
+        # both the telemetry.cloud config and the env overlay -- so these
+        # assertions would actually catch a regression, not just pass because
+        # nothing was ever offered to copy.
         env, _ = self._invoke(
             'copilot', True, 14318, port_env_key='SCION_OTEL_HTTP_PORT',
             cloud_endpoint='https://generic.invalid/v1',
-            extra_env={'SCION_OTEL_ENDPOINT': 'cloudtrace.googleapis.com:443'},
+            cloud_headers={'authorization': 'Bearer cloud-token'},
+            cloud_ca_file='/cloud/ca.pem',
+            extra_env={
+                'SCION_OTEL_ENDPOINT': 'cloudtrace.googleapis.com:443',
+                'SCION_OTEL_HEADERS': json.dumps({'authorization': 'Bearer env-token'}),
+                'SCION_OTEL_CA_FILE': '/env/ca.pem',
+            },
         )
         self.assertEqual(env['OTEL_EXPORTER_OTLP_ENDPOINT'], 'http://127.0.0.1:14318')
         self.assertNotIn('OTEL_EXPORTER_OTLP_HEADERS', env)
@@ -178,11 +193,19 @@ class TelemetryProvisionTest(unittest.TestCase):
                 self.assertNotIn('OTEL_EXPORTER_OTLP_CERTIFICATE', env)
 
     def test_grok_build_never_reaches_cloud_endpoint(self):
-        # #2053: grok-build had the same cloud-endpoint bypass as copilot.
+        # #2053: grok-build had the same cloud-endpoint/header/CA bypass as
+        # copilot. Seed all of those inputs (see test_copilot_never_reaches_
+        # cloud_endpoint) so the assertions are meaningful.
         env, _ = self._invoke(
             'grok-build', True, 14317,
             cloud_endpoint='https://generic.invalid/v1',
-            extra_env={'SCION_OTEL_ENDPOINT': 'cloudtrace.googleapis.com:443'},
+            cloud_headers={'authorization': 'Bearer cloud-token'},
+            cloud_ca_file='/cloud/ca.pem',
+            extra_env={
+                'SCION_OTEL_ENDPOINT': 'cloudtrace.googleapis.com:443',
+                'SCION_OTEL_HEADERS': json.dumps({'authorization': 'Bearer env-token'}),
+                'SCION_OTEL_CA_FILE': '/env/ca.pem',
+            },
         )
         self.assertEqual(env['OTEL_EXPORTER_OTLP_ENDPOINT'], 'http://127.0.0.1:14317')
         self.assertNotIn('OTEL_EXPORTER_OTLP_HEADERS', env)

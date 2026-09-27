@@ -203,10 +203,15 @@ func TestValidateNativeTelemetryEnv(t *testing.T) {
 		{"alternate protocol", []string{"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf"}, nil, true},
 		{"SDK disabled", []string{"OTEL_SDK_DISABLED=true"}, nil, true},
 		{"gemini alias", []string{"GEMINI_TELEMETRY_OUTFILE=/tmp/out"}, nil, true},
+		{"copilot alias", []string{"COPILOT_OTEL_EXPORTER_TYPE=file"}, nil, true},
+		{"grok telemetry alias", []string{"GROK_TELEMETRY_ENABLED=false"}, nil, true},
+		{"grok external otel alias", []string{"GROK_EXTERNAL_OTEL=false"}, nil, true},
 		{"claude disabled", []string{"CLAUDE_CODE_ENABLE_TELEMETRY=0"}, nil, true},
 		{"codex redirect", []string{"CODEX_HOME=/tmp/other"}, nil, true},
 		{"secret override", nil, map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "https://external.invalid"}, true},
 		{"secret alias", nil, map[string]string{"GEMINI_TELEMETRY_TARGET": "gcp"}, true},
+		{"secret copilot alias", nil, map[string]string{"COPILOT_OTEL_ENABLED": "false"}, true},
+		{"secret grok alias", nil, map[string]string{"GROK_TELEMETRY_ENABLED": "false"}, true},
 		{"marker", []string{NativeTelemetryPolicyKey + "=disabled"}, nil, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -221,6 +226,19 @@ func TestValidateNativeTelemetryEnv(t *testing.T) {
 	}
 	if err := ValidateNativeTelemetryEnv("disabled", []string{"OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317"}, map[string]string{"CLAUDE_CODE_ENABLE_TELEMETRY": "0"}, nil); err == nil {
 		t.Fatal("disabled policy accepted inherited exporter endpoint")
+	}
+	// With telemetry disabled, provision.py never emits COPILOT_OTEL_* or
+	// GROK_TELEMETRY_*/GROK_EXTERNAL_OTEL (see harnesses/telemetry_provision_test.py),
+	// so an inherited copy of one of these must still be rejected, the same
+	// as an inherited OTEL_* var.
+	if err := ValidateNativeTelemetryEnv("disabled", []string{"COPILOT_OTEL_ENABLED=true"}, nil, nil); err == nil {
+		t.Fatal("disabled policy accepted inherited COPILOT_OTEL_ENABLED")
+	}
+	if err := ValidateNativeTelemetryEnv("disabled", []string{"GROK_TELEMETRY_ENABLED=true"}, nil, nil); err == nil {
+		t.Fatal("disabled policy accepted inherited GROK_TELEMETRY_ENABLED")
+	}
+	if err := ValidateNativeTelemetryEnv("disabled", []string{"GROK_EXTERNAL_OTEL=true"}, nil, nil); err == nil {
+		t.Fatal("disabled policy accepted inherited GROK_EXTERNAL_OTEL")
 	}
 }
 

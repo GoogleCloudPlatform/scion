@@ -67,9 +67,13 @@ python3 /home/scion/.scion/harness/capture_auth.py
   native metrics (`gen_ai.client.token.usage` and friends) are still rejected
   on the GCP provider until sciontool's usage deriver ships (a later phase);
   logs are forwarded and redacted like any other harness's. `SCION_COPILOT_OTEL_ENDPOINT`
-  / `SCION_COPILOT_OTEL_PROTOCOL` remain as a **local-debugging escape hatch**
-  only — setting either bypasses sciontool's redaction and identity stamping
-  entirely, so they must never point anywhere but a local collector.
+  is a **local-debugging escape hatch** only: setting it bypasses sciontool's
+  redaction and identity stamping entirely, so it must never point anywhere
+  but a local collector. `SCION_COPILOT_OTEL_PROTOCOL` does not bypass
+  anything by itself — it only changes the wire format used to reach
+  whichever endpoint is in effect, and exists so that a debug endpoint
+  pointed at a non-protobuf collector can still be reached (the sciontool
+  receiver itself accepts only `http/protobuf`).
 - **System prompt is approximate** — system prompt content is prepended to
   `~/.copilot/copilot-instructions.md`; there is no native `--system-prompt` flag.
 - **No project-scoped MCP** — project-scoped MCP server entries are demoted to

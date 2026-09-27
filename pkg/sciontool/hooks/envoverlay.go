@@ -81,9 +81,16 @@ func MergeEnvOverlayWithNativeTelemetryPolicy(policy string, env []string, overl
 
 // OTEL_ keys can change SDK behavior, including OTEL_SDK_DISABLED. Under an
 // active policy, unknown inherited aliases are rejected rather than allowed
-// to silently change the generated configuration.
+// to silently change the generated configuration. COPILOT_OTEL_* and
+// GROK_TELEMETRY_*/GROK_EXTERNAL_OTEL are the copilot/grok-build equivalents
+// of CLAUDE_CODE_ENABLE_TELEMETRY and GEMINI_TELEMETRY_*: they switch native
+// telemetry on/off and pick the exporter, so they get the same protection
+// (harnesses/copilot/provision.py, harnesses/grok-build/provision.py).
 func reservedNativeTelemetryKey(key string) bool {
-	if key == "CLAUDE_CODE_ENABLE_TELEMETRY" || strings.HasPrefix(key, "GEMINI_TELEMETRY_") {
+	if key == "CLAUDE_CODE_ENABLE_TELEMETRY" || key == "GROK_EXTERNAL_OTEL" {
+		return true
+	}
+	if strings.HasPrefix(key, "GEMINI_TELEMETRY_") || strings.HasPrefix(key, "COPILOT_OTEL_") || strings.HasPrefix(key, "GROK_TELEMETRY_") {
 		return true
 	}
 	if strings.HasPrefix(key, "OTEL_") {

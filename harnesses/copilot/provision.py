@@ -177,8 +177,11 @@ def _resolve_protocol(env: dict[str, str] | None) -> str:
     """Resolve the OTLP protocol.
 
     Always http/protobuf -- the only protocol the local receiver's HTTP
-    endpoint accepts -- unless SCION_COPILOT_OTEL_PROTOCOL is set. See
-    _resolve_endpoint for why that override exists and its risk.
+    endpoint accepts -- unless SCION_COPILOT_OTEL_PROTOCOL is set. Unlike
+    SCION_COPILOT_OTEL_ENDPOINT (_resolve_endpoint), this override does not
+    itself bypass redaction or identity stamping: it only changes the wire
+    format used to reach whichever endpoint is in effect, so a debug
+    endpoint pointed at a non-protobuf collector can still be reached.
     """
     env = env or {}
     override = (env.get("SCION_COPILOT_OTEL_PROTOCOL") or os.environ.get("SCION_COPILOT_OTEL_PROTOCOL") or "").strip()
