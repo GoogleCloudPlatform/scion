@@ -508,6 +508,25 @@ func (m *mockScheduledEventStore) CreateAgent(_ context.Context, agent *store.Ag
 	return nil
 }
 
+// WithTx runs fn directly against m: this mock has no real transactions, and
+// none of the tests that use it exercise rollback behavior. Needed because
+// the scheduler's create path now writes the agent row and its identity-key
+// row inside WithTx (createAgentWithIdentityKey); without this override that
+// call panics on the embedded nil store.Store, same as any other unhandled
+// method here.
+func (m *mockScheduledEventStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return fn(m)
+}
+
+// ReplaceAgentIdentityKeys is a no-op: this mock has no identity-key
+// storage, and the tests that use it exercise dispatch mechanics (template
+// resolution, applied-config precedence), not the identity-key invariant
+// itself -- that invariant is covered separately against the real ent-backed
+// store (scheduler_identity_key_test.go).
+func (m *mockScheduledEventStore) ReplaceAgentIdentityKeys(_ context.Context, _, _ string, _ []string) error {
+	return nil
+}
+
 func (m *mockScheduledEventStore) CreateDelegationEdge(_ context.Context, _ *store.DelegationEdge) error {
 	return nil // no-op for mock
 }

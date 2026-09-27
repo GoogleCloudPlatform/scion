@@ -2513,6 +2513,22 @@ type AgentCredential struct {
 }
 
 // =============================================================================
+// Agent Identity Keys (per-project display-name / slug uniqueness)
+// =============================================================================
+
+// AgentIdentityKey is one reserved identity key for an agent within a
+// project. Each agent reserves a row for every distinct value in
+// {slug, slugify(displayName)}; the store enforces UNIQUE(project_id, key)
+// as a database invariant. Rows persist while the owning agent is
+// soft-deleted and are removed only on hard delete.
+type AgentIdentityKey struct {
+	ID        string `json:"id"`
+	ProjectID string `json:"project_id"`
+	Key       string `json:"key"`
+	AgentID   string `json:"agent_id"`
+}
+
+// =============================================================================
 // Decision Audit (Authorization Decision Audit Phase 1I)
 // =============================================================================
 

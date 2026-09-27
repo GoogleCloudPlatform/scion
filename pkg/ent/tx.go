@@ -20,6 +20,8 @@ type Tx struct {
 	Agent *AgentClient
 	// AgentCredential is the client for interacting with the AgentCredential builders.
 	AgentCredential *AgentCredentialClient
+	// AgentIdentityKey is the client for interacting with the AgentIdentityKey builders.
+	AgentIdentityKey *AgentIdentityKeyClient
 	// AgentReincarnation is the client for interacting with the AgentReincarnation builders.
 	AgentReincarnation *AgentReincarnationClient
 	// AgentSessionMetrics is the client for interacting with the AgentSessionMetrics builders.
@@ -267,6 +269,7 @@ func (tx *Tx) init() {
 	tx.AccessPolicy = NewAccessPolicyClient(tx.config)
 	tx.Agent = NewAgentClient(tx.config)
 	tx.AgentCredential = NewAgentCredentialClient(tx.config)
+	tx.AgentIdentityKey = NewAgentIdentityKeyClient(tx.config)
 	tx.AgentReincarnation = NewAgentReincarnationClient(tx.config)
 	tx.AgentSessionMetrics = NewAgentSessionMetricsClient(tx.config)
 	tx.AllowListEntry = NewAllowListEntryClient(tx.config)

@@ -20,6 +20,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/accesspolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentcredential"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentidentitykey"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentreincarnation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentsessionmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/allowlistentry"
@@ -91,6 +92,8 @@ type Client struct {
 	Agent *AgentClient
 	// AgentCredential is the client for interacting with the AgentCredential builders.
 	AgentCredential *AgentCredentialClient
+	// AgentIdentityKey is the client for interacting with the AgentIdentityKey builders.
+	AgentIdentityKey *AgentIdentityKeyClient
 	// AgentReincarnation is the client for interacting with the AgentReincarnation builders.
 	AgentReincarnation *AgentReincarnationClient
 	// AgentSessionMetrics is the client for interacting with the AgentSessionMetrics builders.
@@ -218,6 +221,7 @@ func (c *Client) init() {
 	c.AccessPolicy = NewAccessPolicyClient(c.config)
 	c.Agent = NewAgentClient(c.config)
 	c.AgentCredential = NewAgentCredentialClient(c.config)
+	c.AgentIdentityKey = NewAgentIdentityKeyClient(c.config)
 	c.AgentReincarnation = NewAgentReincarnationClient(c.config)
 	c.AgentSessionMetrics = NewAgentSessionMetricsClient(c.config)
 	c.AllowListEntry = NewAllowListEntryClient(c.config)
@@ -370,6 +374,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		AccessPolicy:             NewAccessPolicyClient(cfg),
 		Agent:                    NewAgentClient(cfg),
 		AgentCredential:          NewAgentCredentialClient(cfg),
+		AgentIdentityKey:         NewAgentIdentityKeyClient(cfg),
 		AgentReincarnation:       NewAgentReincarnationClient(cfg),
 		AgentSessionMetrics:      NewAgentSessionMetricsClient(cfg),
 		AllowListEntry:           NewAllowListEntryClient(cfg),
@@ -449,6 +454,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		AccessPolicy:             NewAccessPolicyClient(cfg),
 		Agent:                    NewAgentClient(cfg),
 		AgentCredential:          NewAgentCredentialClient(cfg),
+		AgentIdentityKey:         NewAgentIdentityKeyClient(cfg),
 		AgentReincarnation:       NewAgentReincarnationClient(cfg),
 		AgentSessionMetrics:      NewAgentSessionMetricsClient(cfg),
 		AllowListEntry:           NewAllowListEntryClient(cfg),
@@ -535,13 +541,14 @@ func (c *Client) Close() error {
 func (c *Client) Use(hooks ...Hook) {
 	for _, n := range []interface{ Use(...Hook) }{
 		c.AccessConstraint, c.AccessPolicy, c.Agent, c.AgentCredential,
-		c.AgentReincarnation, c.AgentSessionMetrics, c.AllowListEntry, c.ApiKey,
-		c.BrokerDispatch, c.BrokerJoinToken, c.BrokerSecret, c.ChatLinkCode,
-		c.Conversation, c.ConversationParticipant, c.DecisionAudit, c.DelegationEdge,
-		c.EntitlementBinding, c.EnvVar, c.ExternalIdentity, c.GCPServiceAccount,
-		c.GitHubResolutionCache, c.GithubInstallation, c.Group, c.GroupMembership,
-		c.HarnessConfig, c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate,
-		c.InviteCode, c.LifecycleHook, c.LifecycleHookAgentPhase, c.LimitDefinition,
+		c.AgentIdentityKey, c.AgentReincarnation, c.AgentSessionMetrics,
+		c.AllowListEntry, c.ApiKey, c.BrokerDispatch, c.BrokerJoinToken,
+		c.BrokerSecret, c.ChatLinkCode, c.Conversation, c.ConversationParticipant,
+		c.DecisionAudit, c.DelegationEdge, c.EntitlementBinding, c.EnvVar,
+		c.ExternalIdentity, c.GCPServiceAccount, c.GitHubResolutionCache,
+		c.GithubInstallation, c.Group, c.GroupMembership, c.HarnessConfig,
+		c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate, c.InviteCode,
+		c.LifecycleHook, c.LifecycleHookAgentPhase, c.LimitDefinition,
 		c.MaintenanceOperation, c.MaintenanceOperationRun, c.Message,
 		c.MessageAddressee, c.MutationAudit, c.NonceCache, c.Notification,
 		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
@@ -559,13 +566,14 @@ func (c *Client) Use(hooks ...Hook) {
 func (c *Client) Intercept(interceptors ...Interceptor) {
 	for _, n := range []interface{ Intercept(...Interceptor) }{
 		c.AccessConstraint, c.AccessPolicy, c.Agent, c.AgentCredential,
-		c.AgentReincarnation, c.AgentSessionMetrics, c.AllowListEntry, c.ApiKey,
-		c.BrokerDispatch, c.BrokerJoinToken, c.BrokerSecret, c.ChatLinkCode,
-		c.Conversation, c.ConversationParticipant, c.DecisionAudit, c.DelegationEdge,
-		c.EntitlementBinding, c.EnvVar, c.ExternalIdentity, c.GCPServiceAccount,
-		c.GitHubResolutionCache, c.GithubInstallation, c.Group, c.GroupMembership,
-		c.HarnessConfig, c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate,
-		c.InviteCode, c.LifecycleHook, c.LifecycleHookAgentPhase, c.LimitDefinition,
+		c.AgentIdentityKey, c.AgentReincarnation, c.AgentSessionMetrics,
+		c.AllowListEntry, c.ApiKey, c.BrokerDispatch, c.BrokerJoinToken,
+		c.BrokerSecret, c.ChatLinkCode, c.Conversation, c.ConversationParticipant,
+		c.DecisionAudit, c.DelegationEdge, c.EntitlementBinding, c.EnvVar,
+		c.ExternalIdentity, c.GCPServiceAccount, c.GitHubResolutionCache,
+		c.GithubInstallation, c.Group, c.GroupMembership, c.HarnessConfig,
+		c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate, c.InviteCode,
+		c.LifecycleHook, c.LifecycleHookAgentPhase, c.LimitDefinition,
 		c.MaintenanceOperation, c.MaintenanceOperationRun, c.Message,
 		c.MessageAddressee, c.MutationAudit, c.NonceCache, c.Notification,
 		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
@@ -589,6 +597,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.Agent.mutate(ctx, m)
 	case *AgentCredentialMutation:
 		return c.AgentCredential.mutate(ctx, m)
+	case *AgentIdentityKeyMutation:
+		return c.AgentIdentityKey.mutate(ctx, m)
 	case *AgentReincarnationMutation:
 		return c.AgentReincarnation.mutate(ctx, m)
 	case *AgentSessionMetricsMutation:
@@ -1299,6 +1309,139 @@ func (c *AgentCredentialClient) mutate(ctx context.Context, m *AgentCredentialMu
 		return (&AgentCredentialDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown AgentCredential mutation op: %q", m.Op())
+	}
+}
+
+// AgentIdentityKeyClient is a client for the AgentIdentityKey schema.
+type AgentIdentityKeyClient struct {
+	config
+}
+
+// NewAgentIdentityKeyClient returns a client for the AgentIdentityKey from the given config.
+func NewAgentIdentityKeyClient(c config) *AgentIdentityKeyClient {
+	return &AgentIdentityKeyClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `agentidentitykey.Hooks(f(g(h())))`.
+func (c *AgentIdentityKeyClient) Use(hooks ...Hook) {
+	c.hooks.AgentIdentityKey = append(c.hooks.AgentIdentityKey, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `agentidentitykey.Intercept(f(g(h())))`.
+func (c *AgentIdentityKeyClient) Intercept(interceptors ...Interceptor) {
+	c.inters.AgentIdentityKey = append(c.inters.AgentIdentityKey, interceptors...)
+}
+
+// Create returns a builder for creating a AgentIdentityKey entity.
+func (c *AgentIdentityKeyClient) Create() *AgentIdentityKeyCreate {
+	mutation := newAgentIdentityKeyMutation(c.config, OpCreate)
+	return &AgentIdentityKeyCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of AgentIdentityKey entities.
+func (c *AgentIdentityKeyClient) CreateBulk(builders ...*AgentIdentityKeyCreate) *AgentIdentityKeyCreateBulk {
+	return &AgentIdentityKeyCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *AgentIdentityKeyClient) MapCreateBulk(slice any, setFunc func(*AgentIdentityKeyCreate, int)) *AgentIdentityKeyCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &AgentIdentityKeyCreateBulk{err: fmt.Errorf("calling to AgentIdentityKeyClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*AgentIdentityKeyCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &AgentIdentityKeyCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for AgentIdentityKey.
+func (c *AgentIdentityKeyClient) Update() *AgentIdentityKeyUpdate {
+	mutation := newAgentIdentityKeyMutation(c.config, OpUpdate)
+	return &AgentIdentityKeyUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *AgentIdentityKeyClient) UpdateOne(_m *AgentIdentityKey) *AgentIdentityKeyUpdateOne {
+	mutation := newAgentIdentityKeyMutation(c.config, OpUpdateOne, withAgentIdentityKey(_m))
+	return &AgentIdentityKeyUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *AgentIdentityKeyClient) UpdateOneID(id uuid.UUID) *AgentIdentityKeyUpdateOne {
+	mutation := newAgentIdentityKeyMutation(c.config, OpUpdateOne, withAgentIdentityKeyID(id))
+	return &AgentIdentityKeyUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for AgentIdentityKey.
+func (c *AgentIdentityKeyClient) Delete() *AgentIdentityKeyDelete {
+	mutation := newAgentIdentityKeyMutation(c.config, OpDelete)
+	return &AgentIdentityKeyDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *AgentIdentityKeyClient) DeleteOne(_m *AgentIdentityKey) *AgentIdentityKeyDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *AgentIdentityKeyClient) DeleteOneID(id uuid.UUID) *AgentIdentityKeyDeleteOne {
+	builder := c.Delete().Where(agentidentitykey.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &AgentIdentityKeyDeleteOne{builder}
+}
+
+// Query returns a query builder for AgentIdentityKey.
+func (c *AgentIdentityKeyClient) Query() *AgentIdentityKeyQuery {
+	return &AgentIdentityKeyQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeAgentIdentityKey},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a AgentIdentityKey entity by its id.
+func (c *AgentIdentityKeyClient) Get(ctx context.Context, id uuid.UUID) (*AgentIdentityKey, error) {
+	return c.Query().Where(agentidentitykey.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *AgentIdentityKeyClient) GetX(ctx context.Context, id uuid.UUID) *AgentIdentityKey {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *AgentIdentityKeyClient) Hooks() []Hook {
+	return c.hooks.AgentIdentityKey
+}
+
+// Interceptors returns the client interceptors.
+func (c *AgentIdentityKeyClient) Interceptors() []Interceptor {
+	return c.inters.AgentIdentityKey
+}
+
+func (c *AgentIdentityKeyClient) mutate(ctx context.Context, m *AgentIdentityKeyMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&AgentIdentityKeyCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&AgentIdentityKeyUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&AgentIdentityKeyUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&AgentIdentityKeyDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown AgentIdentityKey mutation op: %q", m.Op())
 	}
 }
 
@@ -9137,35 +9280,35 @@ func (c *UserAccessTokenClient) mutate(ctx context.Context, m *UserAccessTokenMu
 // hooks and interceptors per client, for fast access.
 type (
 	hooks struct {
-		AccessConstraint, AccessPolicy, Agent, AgentCredential, AgentReincarnation,
-		AgentSessionMetrics, AllowListEntry, ApiKey, BrokerDispatch, BrokerJoinToken,
-		BrokerSecret, ChatLinkCode, Conversation, ConversationParticipant,
-		DecisionAudit, DelegationEdge, EntitlementBinding, EnvVar, ExternalIdentity,
-		GCPServiceAccount, GitHubResolutionCache, GithubInstallation, Group,
-		GroupMembership, HarnessConfig, HubSetting, IntegrationConfig,
-		IntegrationUpdate, InviteCode, LifecycleHook, LifecycleHookAgentPhase,
-		LimitDefinition, MaintenanceOperation, MaintenanceOperationRun, Message,
-		MessageAddressee, MutationAudit, NonceCache, Notification,
-		NotificationSubscription, PolicyBinding, Project, ProjectContributor,
-		ProjectPreStartHook, ProjectSyncState, RoleBinding, RoleDefinition,
-		RuntimeBroker, Schedule, ScheduledEvent, Secret, Skill, SkillInjection,
-		SkillRegistry, SkillVersion, SubscriptionTemplate, Template, UsageReservation,
-		User, UserAccessToken []ent.Hook
+		AccessConstraint, AccessPolicy, Agent, AgentCredential, AgentIdentityKey,
+		AgentReincarnation, AgentSessionMetrics, AllowListEntry, ApiKey,
+		BrokerDispatch, BrokerJoinToken, BrokerSecret, ChatLinkCode, Conversation,
+		ConversationParticipant, DecisionAudit, DelegationEdge, EntitlementBinding,
+		EnvVar, ExternalIdentity, GCPServiceAccount, GitHubResolutionCache,
+		GithubInstallation, Group, GroupMembership, HarnessConfig, HubSetting,
+		IntegrationConfig, IntegrationUpdate, InviteCode, LifecycleHook,
+		LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
+		MaintenanceOperationRun, Message, MessageAddressee, MutationAudit, NonceCache,
+		Notification, NotificationSubscription, PolicyBinding, Project,
+		ProjectContributor, ProjectPreStartHook, ProjectSyncState, RoleBinding,
+		RoleDefinition, RuntimeBroker, Schedule, ScheduledEvent, Secret, Skill,
+		SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate, Template,
+		UsageReservation, User, UserAccessToken []ent.Hook
 	}
 	inters struct {
-		AccessConstraint, AccessPolicy, Agent, AgentCredential, AgentReincarnation,
-		AgentSessionMetrics, AllowListEntry, ApiKey, BrokerDispatch, BrokerJoinToken,
-		BrokerSecret, ChatLinkCode, Conversation, ConversationParticipant,
-		DecisionAudit, DelegationEdge, EntitlementBinding, EnvVar, ExternalIdentity,
-		GCPServiceAccount, GitHubResolutionCache, GithubInstallation, Group,
-		GroupMembership, HarnessConfig, HubSetting, IntegrationConfig,
-		IntegrationUpdate, InviteCode, LifecycleHook, LifecycleHookAgentPhase,
-		LimitDefinition, MaintenanceOperation, MaintenanceOperationRun, Message,
-		MessageAddressee, MutationAudit, NonceCache, Notification,
-		NotificationSubscription, PolicyBinding, Project, ProjectContributor,
-		ProjectPreStartHook, ProjectSyncState, RoleBinding, RoleDefinition,
-		RuntimeBroker, Schedule, ScheduledEvent, Secret, Skill, SkillInjection,
-		SkillRegistry, SkillVersion, SubscriptionTemplate, Template, UsageReservation,
-		User, UserAccessToken []ent.Interceptor
+		AccessConstraint, AccessPolicy, Agent, AgentCredential, AgentIdentityKey,
+		AgentReincarnation, AgentSessionMetrics, AllowListEntry, ApiKey,
+		BrokerDispatch, BrokerJoinToken, BrokerSecret, ChatLinkCode, Conversation,
+		ConversationParticipant, DecisionAudit, DelegationEdge, EntitlementBinding,
+		EnvVar, ExternalIdentity, GCPServiceAccount, GitHubResolutionCache,
+		GithubInstallation, Group, GroupMembership, HarnessConfig, HubSetting,
+		IntegrationConfig, IntegrationUpdate, InviteCode, LifecycleHook,
+		LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
+		MaintenanceOperationRun, Message, MessageAddressee, MutationAudit, NonceCache,
+		Notification, NotificationSubscription, PolicyBinding, Project,
+		ProjectContributor, ProjectPreStartHook, ProjectSyncState, RoleBinding,
+		RoleDefinition, RuntimeBroker, Schedule, ScheduledEvent, Secret, Skill,
+		SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate, Template,
+		UsageReservation, User, UserAccessToken []ent.Interceptor
 	}
 )

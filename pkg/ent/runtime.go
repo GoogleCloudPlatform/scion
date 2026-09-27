@@ -9,6 +9,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/accesspolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentcredential"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentidentitykey"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentreincarnation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentsessionmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/allowlistentry"
@@ -225,6 +226,16 @@ func init() {
 	agentcredentialDescID := agentcredentialFields[0].Descriptor()
 	// agentcredential.DefaultID holds the default value on creation for the id field.
 	agentcredential.DefaultID = agentcredentialDescID.Default.(func() uuid.UUID)
+	agentidentitykeyFields := schema.AgentIdentityKey{}.Fields()
+	_ = agentidentitykeyFields
+	// agentidentitykeyDescKey is the schema descriptor for key field.
+	agentidentitykeyDescKey := agentidentitykeyFields[2].Descriptor()
+	// agentidentitykey.KeyValidator is a validator for the "key" field. It is called by the builders before save.
+	agentidentitykey.KeyValidator = agentidentitykeyDescKey.Validators[0].(func(string) error)
+	// agentidentitykeyDescID is the schema descriptor for id field.
+	agentidentitykeyDescID := agentidentitykeyFields[0].Descriptor()
+	// agentidentitykey.DefaultID holds the default value on creation for the id field.
+	agentidentitykey.DefaultID = agentidentitykeyDescID.Default.(func() uuid.UUID)
 	agentreincarnationFields := schema.AgentReincarnation{}.Fields()
 	_ = agentreincarnationFields
 	// agentreincarnationDescAgentID is the schema descriptor for agent_id field.
