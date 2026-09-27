@@ -18,15 +18,19 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/dynamic/fake"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 func TestKubernetesRuntime_List(t *testing.T) {
@@ -89,6 +93,42 @@ func TestKubernetesRuntime_List(t *testing.T) {
 
 	if agents[0].Image != "test-image" {
 		t.Errorf("expected image test-image, got %s", agents[0].Image)
+	}
+}
+
+func TestKubernetesRuntime_List_SelectorUsesProjectLabels(t *testing.T) {
+	clientset := k8sfake.NewClientset()
+
+	var capturedSelector string
+	clientset.PrependReactor("list", "pods", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		if listAction, ok := action.(k8stesting.ListActionImpl); ok {
+			capturedSelector = listAction.GetListOptions().LabelSelector
+		}
+		return false, nil, nil
+	})
+
+	scheme := k8sruntime.NewScheme()
+	fc := fake.NewSimpleDynamicClient(scheme)
+	client := k8s.NewTestClient(fc, clientset)
+	r := NewKubernetesRuntime(client)
+
+	_, err := r.List(context.Background(), map[string]string{
+		projectcompat.LabelProject:   "myproject",
+		projectcompat.LabelProjectID: "proj-123",
+	})
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+
+	wantParts := []string{"scion.project=myproject", "scion.project_id=proj-123"}
+	gotParts := strings.Split(capturedSelector, ",")
+	sort.Strings(gotParts)
+	sort.Strings(wantParts)
+	if strings.Join(gotParts, ",") != strings.Join(wantParts, ",") {
+		t.Errorf("selector = %q, want (in any order) %q", capturedSelector, strings.Join(wantParts, ","))
+	}
+	if strings.Contains(capturedSelector, "grove") {
+		t.Errorf("selector %q must not reference grove labels", capturedSelector)
 	}
 }
 

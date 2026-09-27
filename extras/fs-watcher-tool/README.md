@@ -30,14 +30,14 @@ The watcher must run as root (or with `CAP_SYS_ADMIN`) on the host machine, not 
 
 ### Watch a project
 
-The simplest way to use the watcher is with `--project`, which automatically discovers all agent worktree directories by inspecting Docker containers with the matching `scion.grove` label:
+The simplest way to use the watcher is with `--project`, which automatically discovers all agent worktree directories by inspecting Docker containers with the matching `scion.project` label:
 
 ```bash
 sudo ./scion-fs-watcher --project my-project
 ```
 
 This will:
-1. Query Docker for all containers labeled `scion.grove=my-project`
+1. Query Docker for all containers labeled `scion.project=my-project`
 2. Inspect their bind mounts to find workspace directories
 3. Start monitoring those directories with fanotify
 4. Output NDJSON events to stdout as agents create, modify, or delete files
