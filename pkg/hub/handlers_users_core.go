@@ -312,10 +312,10 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 	// role matches the current value.
 	if updates.Role != nil {
 		switch *updates.Role {
-		case "admin", "member":
+		case store.UserRoleAdmin, store.UserRoleMember, store.UserRoleViewer:
 			// valid canonical roles
 		default:
-			BadRequest(w, fmt.Sprintf("unsupported role %q; valid values are \"admin\" and \"member\"", *updates.Role))
+			BadRequest(w, fmt.Sprintf("unsupported role %q; valid values are \"admin\", \"member\" and \"viewer\"", *updates.Role))
 			return
 		}
 	}
@@ -688,7 +688,7 @@ var errBindingStateDrift = errors.New("binding state changed since authorization
 // NOT from User.Role which may be stale.
 //
 // Lifecycle handling (R4-fix lifecycle):
-//   - member: removes ALL matching bindings (active, scheduled, expired)
+//   - member/viewer: removes ALL matching bindings (active, scheduled, expired)
 //   - admin: ensures exactly one active binding exists; stale rows are
 //     deleted then a fresh active binding is created
 //
@@ -697,6 +697,10 @@ var errBindingStateDrift = errors.New("binding state changed since authorization
 // weren't present at preauth (txState.HasAny && !preAuthState.HasAny), the
 // operation is rejected to prevent concurrent promotion from creating a
 // binding that is then silently removed without CanDelegate verification.
+//
+// After the super-admin bookkeeping, syncHubRoleGrants makes the hub-members
+// group membership and hub-viewer binding match newRole in the same
+// transaction (fail closed).
 //
 // Returns what binding mutation occurred for truthful audit (R4-fix audit).
 func (s *Server) executeRoleTransition(
@@ -770,17 +774,11 @@ func (s *Server) executeRoleTransition(
 		// !wantsBinding && !txState.HasAny: nothing to do.
 	}
 
-	// Manage hub-members group membership based on the target role.
-	// Members get added; viewers (and other non-admin, non-member roles) get removed.
-	switch newRole {
-	case "member":
-		if err := s.ensureHubMembershipTx(ctx, tx, user.ID); err != nil {
-			return bindingMutationNone, fmt.Errorf("ensure hub-member group membership: %w", err)
-		}
-	case "viewer":
-		if err := s.removeHubMembershipTx(ctx, tx, user.ID); err != nil {
-			return bindingMutationNone, fmt.Errorf("remove hub-member group membership: %w", err)
-		}
+	// Make hub-level grants (hub-members group, hub-viewer binding) match
+	// the target role inside the same transaction. Fails closed: any error
+	// rolls back the role change.
+	if err := syncHubRoleGrants(ctx, tx, user.ID, newRole, store.AdminAPICreatedBy); err != nil {
+		return bindingMutationNone, fmt.Errorf("sync hub role grants: %w", err)
 	}
 
 	user.Role = newRole
@@ -907,50 +905,6 @@ func (s *Server) checkLastSuperAdminTx(
 		return errLastSuperAdmin
 	}
 
-	return nil
-}
-
-// ensureHubMembershipTx idempotently adds the given user to the canonical
-// Hub Members group within the provided transaction. This is the canonical
-// path for granting hub-member permissions on demotion from admin to member.
-// Returns an error if the group cannot be found (fail-closed).
-func (s *Server) ensureHubMembershipTx(ctx context.Context, tx store.Store, userID string) error {
-	group, err := tx.GetGroupBySlug(ctx, "hub-members")
-	if err != nil {
-		return fmt.Errorf("hub-members group lookup: %w", err)
-	}
-
-	err = tx.AddGroupMember(ctx, &store.GroupMember{
-		GroupID:    group.ID,
-		MemberType: store.GroupMemberTypeUser,
-		MemberID:   userID,
-		Role:       store.GroupMemberRoleMember,
-	})
-	if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
-		return fmt.Errorf("add user to hub-members group: %w", err)
-	}
-	return nil
-}
-
-// removeHubMembershipTx removes the given user from the canonical Hub Members
-// group within the provided transaction. This is the counterpart to
-// ensureHubMembershipTx — used when a user's role changes to viewer so they
-// no longer carry hub-member permissions.
-// A missing group or membership is not an error (idempotent).
-func (s *Server) removeHubMembershipTx(ctx context.Context, tx store.Store, userID string) error {
-	group, err := tx.GetGroupBySlug(ctx, "hub-members")
-	if err != nil {
-		// Group doesn't exist yet — nothing to remove.
-		if errors.Is(err, store.ErrNotFound) {
-			return nil
-		}
-		return fmt.Errorf("hub-members group lookup: %w", err)
-	}
-
-	err = tx.RemoveGroupMember(ctx, group.ID, store.GroupMemberTypeUser, userID)
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		return fmt.Errorf("remove user from hub-members group: %w", err)
-	}
 	return nil
 }
 

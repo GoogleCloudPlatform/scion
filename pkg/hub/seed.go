@@ -1487,19 +1487,165 @@ func CleanupRedundantHubMemberBindings(ctx context.Context, s store.Store) error
 // ensureHubMembership adds the given user to the hub-members group.
 // This is best-effort; errors are logged at debug level and ignored.
 func ensureHubMembership(ctx context.Context, s store.Store, userID string) {
-	group, err := s.GetGroupBySlug(ctx, "hub-members")
+	if err := ensureHubMembershipTx(ctx, s, userID); err != nil {
+		slog.Debug("failed to ensure hub-members group membership", "userID", userID, "error", err)
+	}
+}
+
+// ensureHubMembershipTx idempotently adds the given user to the canonical
+// Hub Members group using the provided store (which may be a transaction).
+// This is the single implementation of hub-members membership grants.
+// Returns an error if the group cannot be found (fail-closed).
+func ensureHubMembershipTx(ctx context.Context, tx store.Store, userID string) error {
+	group, err := tx.GetGroupBySlug(ctx, hubMembersSlug)
 	if err != nil {
-		slog.Debug("hub-members group not found, skipping membership", "error", err)
-		return
+		return fmt.Errorf("hub-members group lookup: %w", err)
 	}
 
-	err = s.AddGroupMember(ctx, &store.GroupMember{
+	err = tx.AddGroupMember(ctx, &store.GroupMember{
 		GroupID:    group.ID,
 		MemberType: store.GroupMemberTypeUser,
 		MemberID:   userID,
 		Role:       store.GroupMemberRoleMember,
 	})
 	if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
-		slog.Debug("failed to add user to hub-members group", "userID", userID, "error", err)
+		return fmt.Errorf("add user to hub-members group: %w", err)
 	}
+	return nil
+}
+
+// removeHubMembershipTx removes the given user from the canonical Hub Members
+// group using the provided store (which may be a transaction). This is the
+// counterpart to ensureHubMembershipTx, used when a user's role changes to
+// viewer so they no longer carry hub-member permissions.
+// A missing group or membership is not an error (idempotent).
+func removeHubMembershipTx(ctx context.Context, tx store.Store, userID string) error {
+	group, err := tx.GetGroupBySlug(ctx, hubMembersSlug)
+	if err != nil {
+		// Group doesn't exist yet — nothing to remove.
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		return fmt.Errorf("hub-members group lookup: %w", err)
+	}
+
+	err = tx.RemoveGroupMember(ctx, group.ID, store.GroupMemberTypeUser, userID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("remove user from hub-members group: %w", err)
+	}
+	return nil
+}
+
+// syncHubRoleGrants makes the hub-level grants for a user match their hub
+// role (User.Role). It is the single place that reconciles the hub-members
+// group membership and the system-scoped hub-viewer role binding with the
+// role, and is idempotent. Call it after (or in the same transaction as)
+// persisting User.Role. st may be a transaction store.
+//
+//	member → ensure hub-members membership; delete hub-viewer binding(s)
+//	viewer → remove hub-members membership; ensure an active hub-viewer binding
+//	admin  → delete hub-viewer binding(s); hub-members membership is left as-is
+//
+// The super-admin binding is NOT handled here; the existing super-admin
+// ensure/delete paths own it. createdBy records provenance on a newly created
+// hub-viewer binding (store.AdminAPICreatedBy for the admin API,
+// store.SystemReconcileCreatedBy for login paths).
+//
+// Any other role value is an error. Errors are returned to the caller, which
+// decides whether to fail closed (transactions) or log and continue (login).
+func syncHubRoleGrants(ctx context.Context, st store.Store, userID, role, createdBy string) error {
+	switch role {
+	case store.UserRoleMember:
+		if err := ensureHubMembershipTx(ctx, st, userID); err != nil {
+			return err
+		}
+		return deleteHubViewerBindingsTx(ctx, st, userID)
+	case store.UserRoleViewer:
+		if err := removeHubMembershipTx(ctx, st, userID); err != nil {
+			return err
+		}
+		return ensureHubViewerBindingTx(ctx, st, userID, createdBy)
+	case store.UserRoleAdmin:
+		return deleteHubViewerBindingsTx(ctx, st, userID)
+	default:
+		return fmt.Errorf("sync hub role grants: unsupported role %q", role)
+	}
+}
+
+// hubViewerBindingsForUser returns the user's system-scoped hub-viewer role
+// bindings in every lifecycle state, and whether one of them is active now.
+func hubViewerBindingsForUser(ctx context.Context, st store.Store, userID string) (*store.RoleDefinition, []*store.RoleBinding, bool, error) {
+	rd, err := st.GetRoleDefinitionByName(ctx, store.SystemRoleHubViewer, store.RoleScopeSystem)
+	if err != nil {
+		return nil, nil, false, fmt.Errorf("hub-viewer role definition lookup: %w", err)
+	}
+	if rd == nil {
+		return nil, nil, false, fmt.Errorf("hub-viewer role definition not found")
+	}
+	bindings, err := st.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	if err != nil {
+		return nil, nil, false, fmt.Errorf("list role bindings for user: %w", err)
+	}
+	now := time.Now()
+	var matched []*store.RoleBinding
+	active := false
+	for _, b := range bindings {
+		if b.ScopeType != store.RoleScopeSystem || b.RoleDefinitionID != rd.ID {
+			continue
+		}
+		matched = append(matched, b)
+		if b.ExpiresAt != nil && now.After(*b.ExpiresAt) {
+			continue
+		}
+		if b.NotBefore != nil && now.Before(*b.NotBefore) {
+			continue
+		}
+		active = true
+	}
+	return rd, matched, active, nil
+}
+
+// ensureHubViewerBindingTx ensures the user has an active system-scoped
+// hub-viewer role binding. Expired or scheduled bindings are replaced, since
+// the (role, principal, scope) tuple is unique regardless of lifecycle.
+func ensureHubViewerBindingTx(ctx context.Context, st store.Store, userID, createdBy string) error {
+	rd, existing, active, err := hubViewerBindingsForUser(ctx, st, userID)
+	if err != nil {
+		return err
+	}
+	if active {
+		return nil
+	}
+	for _, b := range existing {
+		if err := st.DeleteRoleBinding(ctx, b.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("delete stale hub-viewer binding %s: %w", b.ID, err)
+		}
+	}
+	_, err = st.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeSystem,
+		ScopeID:          "",
+		CreatedBy:        createdBy,
+	})
+	if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+		return fmt.Errorf("create hub-viewer binding: %w", err)
+	}
+	return nil
+}
+
+// deleteHubViewerBindingsTx removes all system-scoped hub-viewer role
+// bindings for the user (any lifecycle state). Idempotent.
+func deleteHubViewerBindingsTx(ctx context.Context, st store.Store, userID string) error {
+	_, existing, _, err := hubViewerBindingsForUser(ctx, st, userID)
+	if err != nil {
+		return err
+	}
+	for _, b := range existing {
+		if err := st.DeleteRoleBinding(ctx, b.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("delete hub-viewer binding %s: %w", b.ID, err)
+		}
+	}
+	return nil
 }
