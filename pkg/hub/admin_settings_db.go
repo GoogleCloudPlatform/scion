@@ -85,7 +85,7 @@ type DeprecatedEnvKeyInfo struct {
 // ServerConfigUpdateDBRequest extends the update request with optional CAS
 // support via expected_revisions. The body shape is additive — the web UI
 // sends ServerConfigUpdateRequest today, and expected_revisions is optional
-// (omitted = last-writer-wins, preserving current UI behavior).
+// (omitted = last-writer-wins, except the access section; see handlePutServerConfigDB).
 //
 // We chose an in-body map over If-Match headers because:
 //   - A single PUT can touch multiple sections, each with its own revision.
@@ -95,7 +95,8 @@ type ServerConfigUpdateDBRequest struct {
 	ServerConfigUpdateRequest
 
 	// ExpectedRevisions maps section name → expected revision for CAS.
-	// Omitted sections use last-writer-wins semantics.
+	// Omitted sections use last-writer-wins semantics, except access, which
+	// uses the revision the handler read as an implicit CAS (see accessBaseRev).
 	ExpectedRevisions map[string]int64 `json:"expected_revisions,omitempty"`
 }
 
