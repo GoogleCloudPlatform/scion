@@ -105,6 +105,9 @@ func TestStorageURIForPath(t *testing.T) {
 		{"plain path", "templates/global/my-template", "gs://my-bucket/templates/global/my-template/"},
 		{"one trailing slash", "templates/global/my-template/", "gs://my-bucket/templates/global/my-template/"},
 		{"multiple trailing slashes", "templates/global/my-template///", "gs://my-bucket/templates/global/my-template/"},
+		// No caller produces an empty or all-slash path; these rows pin current behaviour.
+		{"empty path", "", "gs://my-bucket//"},
+		{"all-slash path", "///", "gs://my-bucket//"},
 	}
 
 	for _, tt := range tests {
