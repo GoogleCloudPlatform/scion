@@ -172,14 +172,14 @@ func TestProject_JSON(t *testing.T) {
 }
 
 func TestRuntimeBroker_JSON(t *testing.T) {
-	t.Run("unmarshal legacy groves key", func(t *testing.T) {
+	t.Run("ignores bare legacy groves key", func(t *testing.T) {
 		jsonData := `{"id": "b1", "groves": [{"projectId": "p1", "projectName": "Project 1"}]}`
 		var b RuntimeBroker
 		if err := json.Unmarshal([]byte(jsonData), &b); err != nil {
 			t.Fatalf("Unmarshal failed: %v", err)
 		}
-		if len(b.Projects) != 1 || b.Projects[0].ProjectID != "p1" {
-			t.Errorf("Projects = %+v, want one project with ProjectID p1", b.Projects)
+		if len(b.Projects) != 0 {
+			t.Errorf("Projects = %+v, want empty (legacy 'groves' key must not be honored)", b.Projects)
 		}
 	})
 
@@ -208,14 +208,14 @@ func TestRuntimeBroker_JSON(t *testing.T) {
 }
 
 func TestBrokerProjectInfo_JSON(t *testing.T) {
-	t.Run("unmarshal legacy grove fields", func(t *testing.T) {
+	t.Run("ignores bare legacy grove fields", func(t *testing.T) {
 		jsonData := `{"groveId": "p1", "groveName": "Project 1"}`
 		var i BrokerProjectInfo
 		if err := json.Unmarshal([]byte(jsonData), &i); err != nil {
 			t.Fatalf("Unmarshal failed: %v", err)
 		}
-		if i.ProjectID != "p1" || i.ProjectName != "Project 1" {
-			t.Errorf("ProjectID/ProjectName = %q/%q, want p1/Project 1", i.ProjectID, i.ProjectName)
+		if i.ProjectID != "" || i.ProjectName != "" {
+			t.Errorf("ProjectID/ProjectName = %q/%q, want empty/empty (legacy keys must not be honored)", i.ProjectID, i.ProjectName)
 		}
 	})
 
@@ -276,14 +276,14 @@ func TestTemplate_JSON(t *testing.T) {
 }
 
 func TestResolvedSecret_JSON(t *testing.T) {
-	t.Run("unmarshal legacy grove source", func(t *testing.T) {
+	t.Run("does not translate a bare legacy grove source", func(t *testing.T) {
 		jsonData := `{"name": "MY_SECRET", "source": "grove"}`
 		var secret ResolvedSecret
 		if err := json.Unmarshal([]byte(jsonData), &secret); err != nil {
 			t.Fatalf("Unmarshal failed: %v", err)
 		}
-		if secret.Source != "project" {
-			t.Errorf("Source = %q, want %q", secret.Source, "project")
+		if secret.Source != "grove" {
+			t.Errorf("Source = %q, want %q (legacy source value is no longer translated)", secret.Source, "grove")
 		}
 	})
 

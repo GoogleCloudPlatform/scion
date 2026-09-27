@@ -95,18 +95,18 @@ func TestAgentInfo_JSON(t *testing.T) {
 }
 
 func TestResolvedSecret_JSON(t *testing.T) {
-	t.Run("unmarshal legacy grove source", func(t *testing.T) {
+	t.Run("does not translate a bare legacy grove source", func(t *testing.T) {
 		jsonData := `{"name": "MY_SECRET", "source": "grove"}`
 		var secret ResolvedSecret
 		if err := json.Unmarshal([]byte(jsonData), &secret); err != nil {
 			t.Fatalf("Unmarshal failed: %v", err)
 		}
-		if secret.Source != "project" {
-			t.Errorf("Source = %q, want %q", secret.Source, "project")
+		if secret.Source != "grove" {
+			t.Errorf("Source = %q, want %q (legacy source value is no longer translated)", secret.Source, "grove")
 		}
 	})
 
-	t.Run("marshal project source", func(t *testing.T) {
+	t.Run("marshal emits only canonical fields", func(t *testing.T) {
 		secret := ResolvedSecret{
 			Name:   "MY_SECRET",
 			Source: "project",
@@ -117,6 +117,14 @@ func TestResolvedSecret_JSON(t *testing.T) {
 		}
 		if !strings.Contains(string(data), `"source":"project"`) {
 			t.Errorf("Marshal output missing source:project: %s", string(data))
+		}
+
+		var m map[string]interface{}
+		if err := json.Unmarshal(data, &m); err != nil {
+			t.Fatalf("Unmarshal back failed: %v", err)
+		}
+		if _, ok := m["grove"]; ok {
+			t.Errorf("legacy 'grove' key present in marshal output, want absent: %v", m["grove"])
 		}
 	})
 }

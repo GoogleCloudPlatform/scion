@@ -172,18 +172,6 @@ type TokenResponse struct {
 	Created   time.Time  `json:"created"`
 }
 
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (t TokenResponse) MarshalJSON() ([]byte, error) {
-	type Alias TokenResponse
-	return json.Marshal(&struct {
-		Alias
-		ProjectID string `json:"groveId"`
-	}{
-		Alias:     Alias(t),
-		ProjectID: t.ProjectID,
-	})
-}
-
 // ExternalUserInfo carries the provider-verified identity fields needed to
 // provision a user. It is a subset of OAuthUserInfo, decoupled from the
 // OAuth layer so that provisionUser can serve both OAuth and proxy callers.

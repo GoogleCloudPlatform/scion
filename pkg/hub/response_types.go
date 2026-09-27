@@ -41,7 +41,6 @@ func (a AgentWithCapabilities) MarshalJSON() ([]byte, error) {
 		ResolvedHarness     string                           `json:"resolvedHarness,omitempty"`
 		HarnessCapabilities *api.HarnessAdvancedCapabilities `json:"harnessCapabilities,omitempty"`
 		CloudLogging        bool                             `json:"cloudLogging,omitempty"`
-		GroveID             string                           `json:"groveId"`
 	}{
 		AgentAlias:          AgentAlias(a.Agent),
 		Cap:                 a.Cap,
@@ -49,11 +48,10 @@ func (a AgentWithCapabilities) MarshalJSON() ([]byte, error) {
 		ResolvedHarness:     a.ResolvedHarness,
 		HarnessCapabilities: a.HarnessCapabilities,
 		CloudLogging:        a.CloudLogging,
-		GroveID:             a.ProjectID,
 	})
 }
 
-// UnmarshalJSON implements custom unmarshaling to handle embedded store.Agent and legacy fields.
+// UnmarshalJSON implements custom unmarshaling to handle the embedded store.Agent.
 func (a *AgentWithCapabilities) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &a.Agent); err != nil {
 		return err
@@ -91,20 +89,14 @@ func (p ProjectWithCapabilities) MarshalJSON() ([]byte, error) {
 		ProjectAlias
 		Cap          *Capabilities `json:"_capabilities,omitempty"`
 		CloudLogging bool          `json:"cloudLogging,omitempty"`
-		GroveID      string        `json:"groveId"`
-		GroveName    string        `json:"groveName"`
-		Grove        string        `json:"grove"`
 	}{
 		ProjectAlias: ProjectAlias(p.Project),
 		Cap:          p.Cap,
 		CloudLogging: p.CloudLogging,
-		GroveID:      p.ID,
-		GroveName:    p.Name,
-		Grove:        p.Slug,
 	})
 }
 
-// UnmarshalJSON implements custom unmarshaling to handle embedded store.Project and legacy fields.
+// UnmarshalJSON implements custom unmarshaling to handle the embedded store.Project.
 func (p *ProjectWithCapabilities) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &p.Project); err != nil {
 		return err
@@ -129,8 +121,8 @@ type TemplateWithCapabilities struct {
 }
 
 // HarnessConfigWithCapabilities wraps a store.HarnessConfig with capability annotations.
-// Unlike templates there is no legacy field aliasing, so the embedded struct's default
-// JSON marshaling is sufficient.
+// Unlike the other With-Capabilities wrapper types, this one has no field naming
+// conflicts, so the embedded struct's default JSON marshaling is sufficient.
 type HarnessConfigWithCapabilities struct {
 	store.HarnessConfig
 	Cap *Capabilities `json:"_capabilities,omitempty"`
@@ -141,24 +133,21 @@ func (t TemplateWithCapabilities) MarshalJSON() ([]byte, error) {
 	type TemplateAlias store.Template
 	return json.Marshal(&struct {
 		TemplateAlias
-		Cap     *Capabilities `json:"_capabilities,omitempty"`
-		GroveID string        `json:"groveId,omitempty"`
+		Cap *Capabilities `json:"_capabilities,omitempty"`
 	}{
 		TemplateAlias: TemplateAlias(t.Template),
 		Cap:           t.Cap,
-		GroveID:       t.ProjectID,
 	})
 }
 
-// UnmarshalJSON implements custom unmarshaling to handle embedded store.Template and legacy fields.
+// UnmarshalJSON implements custom unmarshaling to handle embedded store.Template.
 func (t *TemplateWithCapabilities) UnmarshalJSON(data []byte) error {
 	// store.Template doesn't have UnmarshalJSON, but we call it anyway for consistency
 	// and to handle future-proofing if it gets one.
 	type TemplateAlias store.Template
 	aux := &struct {
 		*TemplateAlias
-		Cap     *Capabilities `json:"_capabilities,omitempty"`
-		GroveID string        `json:"groveId,omitempty"`
+		Cap *Capabilities `json:"_capabilities,omitempty"`
 	}{
 		TemplateAlias: (*TemplateAlias)(&t.Template),
 	}
@@ -166,9 +155,6 @@ func (t *TemplateWithCapabilities) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	t.Cap = aux.Cap
-	if t.ProjectID == "" && aux.GroveID != "" {
-		t.ProjectID = aux.GroveID
-	}
 	return nil
 }
 
@@ -183,22 +169,19 @@ func (g GroupWithCapabilities) MarshalJSON() ([]byte, error) {
 	type GroupAlias store.Group
 	return json.Marshal(&struct {
 		GroupAlias
-		Cap     *Capabilities `json:"_capabilities,omitempty"`
-		GroveID string        `json:"groveId,omitempty"`
+		Cap *Capabilities `json:"_capabilities,omitempty"`
 	}{
 		GroupAlias: GroupAlias(g.Group),
 		Cap:        g.Cap,
-		GroveID:    g.ProjectID,
 	})
 }
 
-// UnmarshalJSON implements custom unmarshaling to handle embedded store.Group and legacy fields.
+// UnmarshalJSON implements custom unmarshaling to handle embedded store.Group.
 func (g *GroupWithCapabilities) UnmarshalJSON(data []byte) error {
 	type GroupAlias store.Group
 	aux := &struct {
 		*GroupAlias
-		Cap     *Capabilities `json:"_capabilities,omitempty"`
-		GroveID string        `json:"groveId,omitempty"`
+		Cap *Capabilities `json:"_capabilities,omitempty"`
 	}{
 		GroupAlias: (*GroupAlias)(&g.Group),
 	}
@@ -206,9 +189,6 @@ func (g *GroupWithCapabilities) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	g.Cap = aux.Cap
-	if g.ProjectID == "" && aux.GroveID != "" {
-		g.ProjectID = aux.GroveID
-	}
 	return nil
 }
 

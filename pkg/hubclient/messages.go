@@ -16,11 +16,9 @@ package hubclient
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"strconv"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -71,41 +69,6 @@ type Message = store.Message
 
 // MessageListResult is a local alias for list results.
 type MessageListResult = store.ListResult[store.Message]
-
-// AgentMessage is a lightweight view of a message used in agent-scoped listings.
-type AgentMessage struct {
-	ID          string    `json:"id"`
-	ProjectID   string    `json:"projectId"`
-	Sender      string    `json:"sender"`
-	SenderID    string    `json:"senderId"`
-	Recipient   string    `json:"recipient"`
-	RecipientID string    `json:"recipientId"`
-	Msg         string    `json:"msg"`
-	Type        string    `json:"type"`
-	Urgent      bool      `json:"urgent,omitempty"`
-	Broadcasted bool      `json:"broadcasted,omitempty"`
-	Read        bool      `json:"read"`
-	AgentID     string    `json:"agentId"`
-	CreatedAt   time.Time `json:"createdAt"`
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (m *AgentMessage) UnmarshalJSON(data []byte) error {
-	type Alias AgentMessage
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(m),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if m.ProjectID == "" && aux.GroveID != "" {
-		m.ProjectID = aux.GroveID
-	}
-	return nil
-}
 
 // List returns messages for the authenticated user.
 func (s *messageService) List(ctx context.Context, opts *ListMessagesOptions) (*store.ListResult[store.Message], error) {

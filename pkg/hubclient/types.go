@@ -262,24 +262,6 @@ type RuntimeBroker struct {
 	CreatedBy       string              `json:"createdBy,omitempty"` // User ID who registered this broker
 }
 
-// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
-func (b *RuntimeBroker) UnmarshalJSON(data []byte) error {
-	type Alias RuntimeBroker
-	aux := &struct {
-		Groves []BrokerProjectInfo `json:"groves"`
-		*Alias
-	}{
-		Alias: (*Alias)(b),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if len(b.Projects) == 0 && len(aux.Groves) > 0 {
-		b.Projects = aux.Groves
-	}
-	return nil
-}
-
 // BrokerCapabilities describes runtime broker capabilities.
 type BrokerCapabilities struct {
 	WebPTY bool `json:"webPty"`
@@ -307,28 +289,6 @@ type BrokerProjectInfo struct {
 	GitRemote   string `json:"gitRemote,omitempty"`
 	AgentCount  int    `json:"agentCount"`
 	LocalPath   string `json:"localPath,omitempty"`
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
-func (i *BrokerProjectInfo) UnmarshalJSON(data []byte) error {
-	type Alias BrokerProjectInfo
-	aux := &struct {
-		GroveID   string `json:"groveId"`
-		GroveName string `json:"groveName"`
-		*Alias
-	}{
-		Alias: (*Alias)(i),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if i.ProjectID == "" && aux.GroveID != "" {
-		i.ProjectID = aux.GroveID
-	}
-	if i.ProjectName == "" && aux.GroveName != "" {
-		i.ProjectName = aux.GroveName
-	}
-	return nil
 }
 
 // Template represents a template from the Hub API.
@@ -456,19 +416,6 @@ type ResolvedSecret struct {
 	Value  string `json:"value"`         // Decrypted secret value
 	Source string `json:"source"`        // Scope that provided this secret (user, project, runtime_broker)
 	Ref    string `json:"ref,omitempty"` // External secret reference (e.g., "gcpsm:projects/123/secrets/name")
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy "grove" source.
-func (s *ResolvedSecret) UnmarshalJSON(data []byte) error {
-	type Alias ResolvedSecret
-	aux := (*Alias)(s)
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if s.Source == "grove" {
-		s.Source = "project"
-	}
-	return nil
 }
 
 // HarnessConfig represents a harness config from the Hub API.

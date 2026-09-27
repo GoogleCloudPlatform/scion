@@ -16,7 +16,6 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -482,36 +481,6 @@ type ProjectSyncStatusResponse struct {
 	States     []store.ProjectSyncState `json:"states"`
 	TotalFiles int                      `json:"totalFiles"`
 	TotalBytes int64                    `json:"totalBytes"`
-}
-
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (r ProjectSyncStatusResponse) MarshalJSON() ([]byte, error) {
-	type Alias ProjectSyncStatusResponse
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId"`
-	}{
-		Alias:   Alias(r),
-		GroveID: r.ProjectID,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (r *ProjectSyncStatusResponse) UnmarshalJSON(data []byte) error {
-	type Alias ProjectSyncStatusResponse
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(r),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if r.ProjectID == "" && aux.GroveID != "" {
-		r.ProjectID = aux.GroveID
-	}
-	return nil
 }
 
 // handleProjectSyncStatus returns the sync status for a project.

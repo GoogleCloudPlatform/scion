@@ -66,17 +66,14 @@ func TestListBrokerProjectsResponse_UnmarshalJSON(t *testing.T) {
 		}
 	})
 
-	t.Run("HandleGrovesKey", func(t *testing.T) {
+	t.Run("IgnoresLegacyGrovesKey", func(t *testing.T) {
 		data := `{"groves":[{"projectId":"p1","projectName":"Project 1"}]}`
 		var resp ListBrokerProjectsResponse
 		if err := json.Unmarshal([]byte(data), &resp); err != nil {
 			t.Fatalf("Unmarshal failed: %v", err)
 		}
-		if len(resp.Projects) != 1 {
-			t.Errorf("Expected 1 project, got %d", len(resp.Projects))
-		}
-		if resp.Projects[0].ProjectID != "p1" {
-			t.Errorf("Expected project ID 'p1', got '%s'", resp.Projects[0].ProjectID)
+		if len(resp.Projects) != 0 {
+			t.Errorf("Projects = %+v, want empty (legacy 'groves' key must not be honored)", resp.Projects)
 		}
 	})
 }
