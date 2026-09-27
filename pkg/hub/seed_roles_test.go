@@ -644,6 +644,27 @@ func TestReconcileSuperAdmin_DemotesToViewerDefault(t *testing.T) {
 		"demoted viewer: hub-viewer binding, no hub-members, no super-admin")
 }
 
+// TestNew_ReconcileDemotesToConfiguredDefaultRole pins the server.go wiring:
+// New must hand ServerConfig.DefaultUserRole to the startup reconciler, so a
+// config admin removed from admin_emails restarts as a viewer (with viewer
+// grants) when default_user_role is viewer.
+func TestNew_ReconcileDemotesToConfiguredDefaultRole(t *testing.T) {
+	_, s := testServer(t)
+	anchor, demoted := setupReconcileDemotion(t, s)
+
+	cfg := DefaultServerConfig()
+	cfg.AdminEmails = []string{anchor.Email}
+	cfg.DefaultUserRole = store.UserRoleViewer
+	srv, err := New(cfg, s)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+
+	u, err := s.GetUser(context.Background(), demoted.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.UserRoleViewer, u.Role)
+	assert.Equal(t, hubRoleGrantState{HubViewerBindings: 1}, observeHubRoleGrants(t, s, demoted.ID))
+}
+
 func TestReconcileSuperAdmin_EmptyDefaultDemotesToMember(t *testing.T) {
 	_, s := testServer(t)
 	ctx := context.Background()
@@ -1489,4 +1510,17 @@ func TestSyncHubRoleGrants_UnsupportedRole(t *testing.T) {
 		assert.Error(t, err, "role %q should be rejected", role)
 	}
 	assert.Equal(t, before, observeHubRoleGrants(t, s, u.ID), "unsupported role must not change grants")
+}
+
+func TestNormalizedDefaultRole(t *testing.T) {
+	for in, want := range map[string]string{
+		"":                   store.UserRoleMember,
+		store.UserRoleMember: store.UserRoleMember,
+		store.UserRoleViewer: store.UserRoleViewer,
+		store.UserRoleAdmin:  store.UserRoleMember,
+		"Viewer":             store.UserRoleMember,
+		"not-a-role":         store.UserRoleMember,
+	} {
+		assert.Equal(t, want, normalizedDefaultRole(in), "input %q", in)
+	}
 }
