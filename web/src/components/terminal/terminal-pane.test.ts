@@ -622,6 +622,35 @@ describe('theme', () => {
     expect(bg?.toLowerCase()).toBe(TERMINAL_BACKGROUND.toLowerCase());
   });
 
+  // The colour denylist cannot see a control with no rule at all: an
+  // unstyled <button> falls back to the browser's native palette in both
+  // themes (GoogleCloudPlatform/scion#2011 review). Every chrome button must
+  // be matched by at least one static style rule.
+  it('styles every chrome button outside the terminal viewport', async () => {
+    await mountConnected();
+    const state = page as unknown as { error: string | null; metadataError: string | null };
+    state.error = 'metadata unavailable';
+    state.metadataError = 'metadata unavailable';
+    await page.updateComplete;
+    const root = page.shadowRoot!;
+    // Base selectors: drop pseudo-classes/elements (:hover, :not(...), ...)
+    // and skip :host rules, which cannot be matched from inside the root.
+    const selectors = styleRules(paneStyles())
+      .flatMap((r) => r.selector.split(','))
+      .map((p) => p.trim())
+      .filter((p) => p && !p.startsWith(':'))
+      .map((p) => p.replace(/:[\w-]+(\([^)]*\))?/g, '').trim())
+      .filter(Boolean);
+    const buttons = Array.from(root.querySelectorAll<HTMLElement>('button')).filter(
+      (el) => !el.closest('.terminal-wrapper')
+    );
+    expect(buttons.some((b) => b.classList.contains('metadata-retry'))).toBe(true);
+    const unstyled = buttons
+      .filter((b) => !selectors.some((sel) => b.matches(sel)))
+      .map((b) => b.outerHTML.slice(0, 80));
+    expect(unstyled).toEqual([]);
+  });
+
   // Inline style attributes are not in static styles, so check the rendered
   // chrome too, with the metadata error banner (the one conditional
   // strip outside the viewport) showing.

@@ -587,6 +587,27 @@ export class ScionTerminalPane extends LitElement {
       font-size: 0.75rem;
     }
 
+    /* Inline text-link action inside the themed banner; inherits its colour. */
+    .metadata-retry {
+      background: transparent;
+      border: none;
+      padding: 0;
+      margin-left: 0.5rem;
+      color: inherit;
+      font: inherit;
+      text-decoration: underline;
+      cursor: pointer;
+    }
+
+    .metadata-retry:hover {
+      text-decoration: none;
+    }
+
+    .metadata-retry:focus-visible {
+      outline: 2px solid currentColor;
+      outline-offset: 2px;
+    }
+
     /* Port forwarding buttons */
     .port-btn {
       display: inline-flex;
