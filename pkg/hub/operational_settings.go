@@ -1023,12 +1023,15 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	// explicit check in the file-mode PUT), but a hand-edited settings.yaml
 	// or DB row can still hold garbage. Normalize anything other than
 	// member/viewer to member so the live config never grants an
-	// unexpected role at user creation (design D6).
+	// unexpected role at user creation (design D6). The rule itself lives in
+	// normalizedDefaultRole; "" stays unset here (clear semantics).
 	defaultRole := snap.DefaultUserRole
-	if defaultRole != "" && defaultRole != store.UserRoleMember && defaultRole != store.UserRoleViewer {
-		slog.Warn("invalid default_user_role, using member",
-			"configured", defaultRole, "allowed", []string{store.UserRoleMember, store.UserRoleViewer})
-		defaultRole = store.UserRoleMember
+	if defaultRole != "" {
+		if n := normalizedDefaultRole(defaultRole); n != defaultRole {
+			slog.Warn("invalid default_user_role, using member",
+				"configured", defaultRole, "allowed", []string{store.UserRoleMember, store.UserRoleViewer})
+			defaultRole = n
+		}
 	}
 	if defaultRole != "" {
 		s.config.DefaultUserRole = defaultRole
