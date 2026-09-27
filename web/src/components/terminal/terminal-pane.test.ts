@@ -538,28 +538,76 @@ describe('overlay strings', () => {
   });
 });
 
-// miller79/scion#125: the pane chrome must follow the app theme; only the
-// terminal viewport (and overlays drawn on it) may pin a dark palette.
-it('themes the pane chrome with --scion-* tokens and keeps the viewport dark', () => {
-  const ctor = customElements.get('scion-terminal-pane') as unknown as {
-    styles: { cssText: string };
-  };
-  const cssText = ctor.styles.cssText;
-  const chrome =
-    /^\s*(:host|\.toolbar|\.back-link|\.separator|\.agent-name|\.status-(indicator|dot)|\.reconnect-btn|\.pane-action-btn|\.capture-auth-btn|\.toggle-group|\.loading-state|\.spinner|\.error-state \.error-detail|\.port-(btn|dropdown))/;
-  const offenders: string[] = [];
-  for (const block of cssText.split('}')) {
-    const [selector, body = ''] = block.split('{');
-    if (!selector || !chrome.test(selector.trim())) continue;
-    for (const m of body.matchAll(/(color|background|border(?:-[a-z]+)?)\s*:\s*([^;]+)/g)) {
-      const value = m[2].trim();
-      if (/#[0-9a-f]{3,8}\b|rgba?\(/i.test(value) && !value.includes('var(--scion-')) {
-        offenders.push(`${selector.trim()} { ${m[1]}: ${value} }`);
+// The pane chrome (toolbar, buttons, dialogs, loading/error states) must
+// follow the app theme; only the terminal viewport and the overlays drawn on
+// it may pin a literal (dark) palette. This is a denylist over every rule, so
+// new chrome rules are covered without updating a selector list.
+// See miller79/scion#133.
+describe('theme', () => {
+  const VIEWPORT = /^\.(terminal-wrapper|terminal-container|disconnected-overlay|drop-overlay)\b/;
+  const COLOR_PROPS =
+    /^(color|background(-color)?|border(-(top|right|bottom|left))?(-color)?|outline(-color)?|fill|stroke)$/;
+  const LITERAL_COLOR = /#[0-9a-f]{3,8}\b|\b(rgba?|hsla?)\(|\b(white|black)\b/i;
+  // var(--scion-x) and var(--scion-x, <fallback>), including one level of
+  // nested parentheses in the fallback (for example rgba(...)).
+  const SCION_VAR = /var\(--scion-[\w-]+(?:,(?:[^()]|\([^()]*\))*)?\)/g;
+
+  /** Leaf style rules from Lit cssText, skipping @keyframes contents. */
+  function styleRules(cssText: string): Array<{ selector: string; body: string }> {
+    const rules: Array<{ selector: string; body: string }> = [];
+    const stack: string[] = [];
+    let buf = '';
+    for (const ch of cssText.replace(/\/\*[\s\S]*?\*\//g, '')) {
+      if (ch === '{') {
+        stack.push(buf.trim());
+        buf = '';
+      } else if (ch === '}') {
+        const selector = stack.pop() ?? '';
+        if (!selector.startsWith('@') && !stack.some((s) => s.startsWith('@keyframes'))) {
+          rules.push({ selector, body: buf });
+        }
+        buf = '';
+      } else {
+        buf += ch;
       }
     }
+    return rules;
   }
-  expect(offenders).toEqual([]);
-  expect(cssText).toMatch(/:host\s*\{[^}]*background:\s*var\(--scion-surface/);
-  expect(cssText).toMatch(/:host\s*\{[^}]*color:\s*var\(--scion-text/);
-  expect(cssText).toMatch(/\.terminal-wrapper\s*\{[^}]*background:\s*#1a1a1a/);
+
+  function paneStyles(): string {
+    const ctor = customElements.get('scion-terminal-pane') as unknown as {
+      styles: { cssText: string };
+    };
+    return ctor.styles.cssText;
+  }
+
+  it('uses only --scion-* tokens for colours outside the terminal viewport', () => {
+    const rules = styleRules(paneStyles());
+    expect(rules.length).toBeGreaterThan(20);
+    const offenders: string[] = [];
+    for (const { selector, body } of rules) {
+      const parts = selector.split(',').map((p) => p.trim());
+      if (parts.every((p) => VIEWPORT.test(p))) continue;
+      for (const decl of body.split(';')) {
+        const idx = decl.indexOf(':');
+        if (idx < 0) continue;
+        const prop = decl.slice(0, idx).trim();
+        const value = decl.slice(idx + 1).trim();
+        if (!COLOR_PROPS.test(prop)) continue;
+        if (LITERAL_COLOR.test(value.replace(SCION_VAR, ''))) {
+          offenders.push(`${selector} { ${prop}: ${value} }`);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('themes the host and keeps the viewport on the xterm background', () => {
+    const rules = styleRules(paneStyles());
+    const host = rules.find((r) => r.selector === ':host')?.body ?? '';
+    expect(host).toMatch(/background:\s*var\(--scion-surface\b/);
+    expect(host).toMatch(/(^|;)\s*color:\s*var\(--scion-text\b/);
+    const wrapper = rules.find((r) => r.selector === '.terminal-wrapper')?.body ?? '';
+    expect(wrapper).toMatch(/background:\s*#1a1a1a/);
+  });
 });
