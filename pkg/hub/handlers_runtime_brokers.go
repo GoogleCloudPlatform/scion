@@ -16,7 +16,6 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -572,47 +571,11 @@ type brokerHeartbeatRequest struct {
 	Capabilities *store.BrokerCapabilities `json:"capabilities,omitempty"`
 }
 
-// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
-func (h *brokerHeartbeatRequest) UnmarshalJSON(data []byte) error {
-	type Alias brokerHeartbeatRequest
-	aux := &struct {
-		Groves []brokerProjectHeartbeat `json:"groves,omitempty"`
-		*Alias
-	}{
-		Alias: (*Alias)(h),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if len(h.Projects) == 0 && len(aux.Groves) > 0 {
-		h.Projects = aux.Groves
-	}
-	return nil
-}
-
 // brokerProjectHeartbeat is per-project status in a heartbeat.
 type brokerProjectHeartbeat struct {
 	ProjectID  string                 `json:"projectId"`
 	AgentCount int                    `json:"agentCount"`
 	Agents     []brokerAgentHeartbeat `json:"agents,omitempty"`
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
-func (p *brokerProjectHeartbeat) UnmarshalJSON(data []byte) error {
-	type Alias brokerProjectHeartbeat
-	aux := &struct {
-		GroveID string `json:"groveId,omitempty"`
-		*Alias
-	}{
-		Alias: (*Alias)(p),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if p.ProjectID == "" && aux.GroveID != "" {
-		p.ProjectID = aux.GroveID
-	}
-	return nil
 }
 
 // brokerAgentHeartbeat is per-agent status in a heartbeat.
