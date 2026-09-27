@@ -1,0 +1,41 @@
+# Release Notes (2026-09-26)
+
+The grove→project rename removed nearly every remaining grove alias in the API, CLI, event topics, and extras, and on-disk grove state now migrates automatically. A cross-project SSE leak was closed, terminals gained auto-reconnect, and broker quota accounting was corrected across failed starts and wakes.
+
+## ⚠️ BREAKING CHANGES
+* **Hub API grove keys removed** (#1999, #1997, #1958, #1968): The Hub no longer emits or accepts `groveId`, `groveName`, `grove`, or `groves` in responses and requests. This covers projects, agents, templates, groups, tokens, cache, sync status, store models (including messages), and SSE event payloads. Resolved secrets report `source: "project"` instead of `"grove"`. `"grove"` is rejected as a scope with 400 on template, harness-config, and subscription-template create and clone. The event metric attribute `scope="grove"` is now `scope="project"`. Clients must use `projectId`/`name`/`slug`/`projects`. Existing stored `scope='grove'` rows are normalized on boot.
+* **`scion.grove.*` topics dropped** (#2001): The hub broker-inbound endpoint, chat-app, and a2a-bridge drop messages on `scion.grove.*` topics. Discord, Slack, and Telegram no longer route project broadcasts from them. Only `scion.project.*` is recognized.
+* **Grove CLI aliases and output keys removed** (#1957, #1954, #1960, #1961, #1971): `scion grove`, `scion hub groves`, and `scion config cd-grove` now fail with "unknown command". Use `scion project`, `scion hub projects`, and `scion config cd-project`. The `grove:` template-scope prefix and `--template-scope grove` no longer work; use `project:`. The `grove_id`/`hub.grove_id` config key names and the `grove_id` field in `scion project list` are gone; use `project_id`. JSON output from `scion list` and other `--json` commands emits only `project*` keys.
+* **`SCION_HUB_GROVE_ID` ignored** (#1962): Set `SCION_HUB_PROJECT_ID` instead. The old variable triggers a one-time warning.
+* **a2a-bridge and fs-watcher grove aliases removed** (#1990): The a2a-bridge ignores a `groves:` config key without warning, so a config that uses only `groves:` starts with zero projects. Rename it to `projects:`. The bridge's `/groves/...` routes and `SCION_GROVE_ID` fallback are removed, and fs-watcher rejects `--grove`.
+* **Legacy-labelled containers no longer listed** (#1995): The Kubernetes runtime, fs-watcher, and broker client now list agents by `scion.project*` labels. Pods and containers created before the rename that carry only grove labels won't appear; restart those agents.
+
+## 🚀 Features
+* **Terminal auto-reconnect** (#1953, #1973, #1984, #1959, #1993): Adds a PTY close-code contract so clients can tell a clean detach (1000) from an ended session (4410), a missing agent (4404), or a retriable drop (4503). The broker classifies why each attach ended across runtimes. The direct-attach connection now sends keepalive pings, so a dead peer is detected instead of hanging. When a pane drops for a retriable reason, the web client makes one reconnect attempt the next time the pane is in front, with a "Reconnecting..." overlay.
+* **Automatic grove→project on-disk migration** (#2006, #2005, #1989): On startup, the CLI, hub, and broker move `~/.scion/groves` and `~/.scion/grove-configs` to `projects` and `project-configs`, leaving relative symlinks so worktrees and mounts keep working. The marker file `.scion/grove-id` becomes `.scion/project-id`, and marker keys and `hub.grove_id` are rewritten in place (with a backup on conflict). Entries that can't be moved safely are left alone with printed instructions. A project's own `hub.project_id` now correctly takes precedence over the global value.
+* **Agents can read catalog and project skills** (#1950): Agents can list and read hub-catalog and own-project skills, within the agent's project scope and the creator's skill read access. Agent-mode CLI allows `skills list` and `skills show`.
+* **Single-node VM in hardened GCP orgs** (#2004, #1980): `deploy.sh` works with common org hardening policies (no default VPC, Shielded VM required, default compute SA disabled, domain-restricted sharing), using a dedicated zero-role proxy service account. It reuses an existing Cloud NAT that covers the subnet instead of failing, or creates a subnet-scoped one.
+
+## 🔒 Security
+* **Cross-project SSE leak** (#1970): Duplicate legacy `grove.<projectId>.*` publish subjects bypassed project-membership checks, so any authenticated session could read every project's live events, including full message bodies. The grove subjects are removed, and SSE subject authorization now uses an explicit allowlist that denies anything not listed.
+* **Broker ownership authorization** (#1982): Broker re-registration and secret rotation, including the embedded-broker project-register path, now require ownership of the broker. A boot migration backfills owners for legacy ownerless brokers.
+* **Project update authorization on implicit mutations** (#1969, #1949, #1945): Registering or creating a project that resolves to an existing one, linking a provider, and agent-create provider auto-link all require update access to that project before changing anything. Project shared-dir routes are now authorized at a single entry point.
+* **Transport service account isolation** (#1966): The configured `auth.transport.platform_auth_sa` is never provisioned as a hub user or issued user credentials. This is enforced on every provisioning, re-mint, and validation path.
+* **GitHub webhook secret required** (#1942): GitHub App webhook events are rejected with 503 when no webhook secret is configured, instead of being processed unsigned.
+* **IAP SSH firewall scoped** (#1979): The single-node VM's IAP SSH rule now targets only the tagged hub VM instead of every VM on the network. Re-runs narrow an existing rule only after the tag is in place.
+
+## 🐛 Fixes
+* **Broker quota accounting** (#1951, #1967, #1975, #1978): A failed start releases only the reservation it created, and stop and suspend no longer free project-quota slots. Failed creates release their reservations when they delete the agent. A DM wake that times out keeps its slot until the container's exit is confirmed. The hourly reconcile no longer releases reservations still in dispatch.
+* **Broker start and restart correctness** (#1964, #1976, #1972, #1988): HTTP start and restart use the Hub-dispatched endpoint, and resolve skills as the agent's creator regardless of who issued the call. When the container lookup itself fails, stop and restart now return 5xx instead of false success. Restart of an agent with no container proceeds to start.
+* **Template and harness-config clones** (#2003, #1955, #1986): Concurrent same-name clones are atomic: the loser gets 409 and cleans up only its own files. Template clone validates the destination scope and normalizes legacy scope names. User-scope template create had returned 403 for every request since a recent scope change; it works again.
+* **List endpoint errors** (#1956, #1943): Paginated template, harness-config, and group lists no longer skip a row at each page boundary. Skill list and resolve return 400 for a malformed cursor instead of 500, and no longer return 500 for federated identities or show empty pages with a nonzero total for agents.
+* **Helm reserved-flag message** (#1991): The scion-hub chart now reports `--grove` as removed instead of describing it as deprecated, so operators get a render-time error rather than a crash-looping pod.
+
+## 🧪 Tests
+* **deploy.sh test harness** (#1977): Adds an offline, stateful gcloud stub and test runner for `scripts/single-node-vm/deploy.sh`, wired into CI.
+* **Grove regression guards** (#2000, #1948): A test walks the full CLI command tree and fails on any "grove" term in commands or flags. The compat-literal guard is now case-insensitive and fails on stale allowlist entries.
+
+## 📖 Docs
+* **Grove removal migration guide** (#1962, #1996): Adds a migration guide page and fills in rows for changes that had already merged.
+* **chat-app slash commands** (#1952): Corrects the README to list admin commands under `/scionAdmin`.
+* **Nightly doc update** (#1985): Nightly update for 2026-09-25.
