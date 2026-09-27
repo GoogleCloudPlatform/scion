@@ -149,7 +149,7 @@ func TestNormalizeBrokerLabels_ExistingDatabase_NormalizesVarcharRows(t *testing
 	var dataType string
 	if err := db.QueryRowContext(context.Background(),
 		`SELECT data_type FROM information_schema.columns
-		 WHERE table_name = 'runtime_brokers' AND column_name = 'labels'`,
+		 WHERE table_schema = current_schema() AND table_name = 'runtime_brokers' AND column_name = 'labels'`,
 	).Scan(&dataType); err != nil {
 		t.Fatalf("querying labels column type: %v", err)
 	}
