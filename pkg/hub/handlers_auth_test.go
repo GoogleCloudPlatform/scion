@@ -2062,3 +2062,39 @@ func TestHandleTestLogin_GrantsFollowRole(t *testing.T) {
 	webTestLogin(t, s, email, store.UserRoleViewer)
 	assertViewerGrants(t, srv, s, email)
 }
+
+// failingUpdateUserStore wraps a real store and fails every UpdateUser call,
+// so tests can exercise the login paths' "UpdateUser failed" branches.
+type failingUpdateUserStore struct {
+	store.Store
+}
+
+func (f *failingUpdateUserStore) UpdateUser(context.Context, *store.User) error {
+	return errors.New("injected UpdateUser failure")
+}
+
+// When UpdateUser fails, the web login paths must skip the grant sync (and
+// the super-admin change) so hub grants keep following the persisted role,
+// and the login itself must still complete.
+func TestWebLogin_UpdateUserFailure_SkipsGrantSync(t *testing.T) {
+	for _, p := range webLoginPaths {
+		t.Run(p.name, func(t *testing.T) {
+			_, s := newLoginGrantServer(t, store.UserRoleViewer, nil)
+			u := createLoginGrantUser(t, s, "web-upd-fail", "web-upd-fail@example.com", store.UserRoleAdmin, store.UserStatusActive)
+			createSystemBinding(t, s, u.ID, store.SystemRoleSuperAdmin, store.SystemReconcileCreatedBy)
+			require.NoError(t, ensureHubMembershipTx(context.Background(), s, u.ID))
+			before := observeHubRoleGrants(t, s, u.ID)
+			require.Equal(t, hubRoleGrantState{InHubMembers: true, SuperAdminBinding: 1}, before)
+
+			// Admin not in admin_emails with default viewer: the login computes a
+			// demotion to viewer, but persisting it fails.
+			p.login(t, &failingUpdateUserStore{Store: s}, webLoginSettings(store.UserRoleViewer, "boss@example.com"), "web-upd-fail@example.com")
+
+			stored, err := s.GetUser(context.Background(), u.ID)
+			require.NoError(t, err)
+			assert.Equal(t, store.UserRoleAdmin, stored.Role, "role update was injected to fail")
+			assert.Equal(t, before, observeHubRoleGrants(t, s, u.ID),
+				"grants must follow the persisted role when UpdateUser fails")
+		})
+	}
+}

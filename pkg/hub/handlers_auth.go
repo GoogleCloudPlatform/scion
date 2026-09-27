@@ -1423,10 +1423,11 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 			// carve-out is a pending invite that was already promoted through
 			// the admin UI; keep that admin.
 			activationRole := ""
-			if user.Role == store.UserRoleAdmin && hasUIPromotedBinding(ctx, s.store, user.ID) {
+			uiPromoted := user.Role == store.UserRoleAdmin && hasUIPromotedBinding(ctx, s.store, user.ID)
+			if uiPromoted {
 				activationRole = user.Role
 			}
-			user.Role = s.getUserRole(ctx, info.Email, activationRole, user.ID)
+			user.Role = determineUserRole(info.Email, s.AdminEmails(), activationRole, s.demotionSafe.Load(), uiPromoted, s.DefaultUserRole())
 			if oldRole == "admin" && user.Role != "admin" {
 				bindingSuperAdmin = "delete"
 			} else if user.Role == "admin" && oldRole != "admin" {
