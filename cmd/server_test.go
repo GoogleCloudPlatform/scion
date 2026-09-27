@@ -41,7 +41,7 @@ func newTestStore(t *testing.T) store.Store {
 	return s
 }
 
-func TestRegisterGlobalGroveAndBroker_DedupByName(t *testing.T) {
+func TestRegisterGlobalProjectAndBroker_DedupByName(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	settings := &config.Settings{}
@@ -76,7 +76,7 @@ func TestRegisterGlobalGroveAndBroker_DedupByName(t *testing.T) {
 	assert.Equal(t, store.BrokerStatusOnline, broker.Status)
 }
 
-func TestRegisterGlobalGroveAndBroker_SameIDNoDedup(t *testing.T) {
+func TestRegisterGlobalProjectAndBroker_SameIDNoDedup(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	settings := &config.Settings{}
@@ -98,7 +98,7 @@ func TestRegisterGlobalGroveAndBroker_SameIDNoDedup(t *testing.T) {
 	assert.Equal(t, false, broker.AutoProvide, "auto-provide should be updated to false")
 }
 
-func TestRegisterGlobalGroveAndBroker_NewBrokerNewName(t *testing.T) {
+func TestRegisterGlobalProjectAndBroker_NewBrokerNewName(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	settings := &config.Settings{}
@@ -120,7 +120,7 @@ func TestRegisterGlobalGroveAndBroker_NewBrokerNewName(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestRegisterGlobalGroveAndBroker_DedupCaseInsensitive(t *testing.T) {
+func TestRegisterGlobalProjectAndBroker_DedupCaseInsensitive(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	settings := &config.Settings{}
@@ -266,7 +266,7 @@ func TestBuildStoreBrokerProfiles_StarterHubKeepsDockerProfiles(t *testing.T) {
 	assert.True(t, types["kubernetes"], "kubernetes profile should be present")
 }
 
-func TestRegisterGlobalGroveAndBroker_CloudRunSuppressesDockerProfile(t *testing.T) {
+func TestRegisterGlobalProjectAndBroker_CloudRunSuppressesDockerProfile(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	settings := &config.Settings{
@@ -290,7 +290,7 @@ func TestRegisterGlobalGroveAndBroker_CloudRunSuppressesDockerProfile(t *testing
 	assert.Equal(t, "kubernetes", broker.Profiles[0].Type)
 }
 
-func TestRegisterGlobalGroveAndBroker_StarterHubKeepsDockerProfile(t *testing.T) {
+func TestRegisterGlobalProjectAndBroker_StarterHubKeepsDockerProfile(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	settings := &config.Settings{

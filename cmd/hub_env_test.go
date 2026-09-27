@@ -65,7 +65,7 @@ func setupEnvProject(t *testing.T, home, endpoint string) string {
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
 	settings := map[string]interface{}{
-		"grove_id": "test-grove",
+		"project_id": "test-project",
 		"hub": map[string]interface{}{
 			"enabled":  true,
 			"endpoint": endpoint,
@@ -221,7 +221,7 @@ func setupEnvProjectWithHubProjectID(t *testing.T, home, endpoint, projectID str
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
 	settings := map[string]interface{}{
-		"grove_id": "test-grove",
+		"project_id": "test-project",
 		"hub": map[string]interface{}{
 			"enabled":   true,
 			"endpoint":  endpoint,

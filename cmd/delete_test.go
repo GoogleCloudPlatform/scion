@@ -159,7 +159,7 @@ func TestDeleteAgentsViaHub_CleansUpLocalFiles(t *testing.T) {
 	_ = os.Setenv("HOME", tmpHome)
 	preserveBranch = true // skip branch operations since there's no real git repo
 
-	projectID := "grove-del-123"
+	projectID := "project-del-123"
 	server, deletedAgents := newDeleteMockHubServer(t, projectID)
 	defer server.Close()
 
@@ -205,7 +205,7 @@ func TestDeleteAgentsViaHub_MultipleAgents(t *testing.T) {
 	_ = os.Setenv("HOME", tmpHome)
 	preserveBranch = true
 
-	projectID := "grove-multi-456"
+	projectID := "project-multi-456"
 	server, deletedAgents := newDeleteMockHubServer(t, projectID)
 	defer server.Close()
 
@@ -246,7 +246,7 @@ func TestDeleteAgentsViaHub_HubFailsSkipsLocalCleanup(t *testing.T) {
 	_ = os.Setenv("HOME", tmpHome)
 	preserveBranch = true
 
-	projectID := "grove-fail-789"
+	projectID := "project-fail-789"
 
 	// Server that returns 404 for all agent deletes
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -296,7 +296,7 @@ func TestDeleteAgentsViaHub_NoLocalFiles(t *testing.T) {
 	_ = os.Setenv("HOME", tmpHome)
 	preserveBranch = true
 
-	projectID := "grove-nolocal-101"
+	projectID := "project-nolocal-101"
 	server, deletedAgents := newDeleteMockHubServer(t, projectID)
 	defer server.Close()
 
@@ -331,7 +331,7 @@ func TestDeleteAgentsViaHub_LocalCleanupFailureCreatesStaleLocalNotToRegister(t 
 	_ = os.Setenv("HOME", tmpHome)
 	preserveBranch = true
 
-	projectID := "grove-stale-202"
+	projectID := "project-stale-202"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -392,7 +392,7 @@ func TestDeleteAgentsViaHub_LocalCleanupFailureCreatesStaleLocalNotToRegister(t 
 	assert.True(t, result.IsInSync(), "stale-local-only result should still be in sync")
 }
 
-func TestDeleteStopped_RequiresGroveContext(t *testing.T) {
+func TestDeleteStopped_RequiresProjectContext(t *testing.T) {
 	// Unset Hub context to avoid synthetic project root detection
 	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_PROJECT_ID"} {
 		if val, ok := os.LookupEnv(e); ok {
