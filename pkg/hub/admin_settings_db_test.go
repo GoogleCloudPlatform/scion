@@ -3147,3 +3147,144 @@ func TestGetServerConfigDB_DefaultUserRoleFromSnapshot(t *testing.T) {
 		t.Errorf("GET default_user_role: want viewer (DB), got %q", resp.Server.Auth.DefaultUserRole)
 	}
 }
+
+// casRaceNoRowStore reports the access row as missing on the first read and
+// then simulates another replica creating it before the PUT's write.
+type casRaceNoRowStore struct {
+	*fakeHubSettingStore
+	once sync.Once
+}
+
+func (c *casRaceNoRowStore) GetHubSetting(ctx context.Context, section string) (*store.HubSetting, error) {
+	if section == "access" {
+		raced := false
+		c.once.Do(func() {
+			raced = true
+			_, _ = c.fakeHubSettingStore.UpsertHubSetting(ctx, "access",
+				json.RawMessage(`{"default_user_role":"member"}`), "other-replica", -1, "managed")
+		})
+		if raced {
+			return nil, store.ErrNotFound
+		}
+	}
+	return c.fakeHubSettingStore.GetHubSetting(ctx, section)
+}
+
+// With no access row, the carry-forward write is create-only (revision 0),
+// so a concurrent insert yields 409 rather than being overwritten.
+func TestPutServerConfigDB_AccessCarryForward_NoRowConcurrentCreate409(t *testing.T) {
+	fake := newFakeHubSettingStore()
+	raceStore := &casRaceNoRowStore{fakeHubSettingStore: fake}
+	ops := NewOperationalSettings(raceStore, emptyKoanf(), emptyKoanf())
+	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	srv.SetOperationalSettings(ops)
+
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"auth":{"default_user_role":"viewer"}}}`)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", rr.Code, rr.Body.String())
+	}
+	access, _ := readAccessRow(t, fake)
+	if access.DefaultUserRole != "member" {
+		t.Errorf("the concurrent creator's row must stand, got %+v", access)
+	}
+}
+
+// newEnvDBServer builds a postgres-mode server whose node has the given
+// SCION_SERVER_* overrides (flat opsettings keys) in its env koanf.
+func newEnvDBServer(t *testing.T, env map[string]interface{}) (*Server, *fakeHubSettingStore, *OperationalSettings) {
+	t.Helper()
+	fakeStore := newFakeHubSettingStore()
+	ops := NewOperationalSettings(fakeStore, emptyKoanf(), newEnvKoanf(t, env))
+	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	srv.SetOperationalSettings(ops)
+	return srv, fakeStore, ops
+}
+
+// du-rev-3a finding 1: a seeded access row carries node-local SCION_SERVER_*
+// values (bootstrap puts env on top). A PUT that omits such a field must not
+// pin the env value into the shared row as managed.
+func TestPutServerConfigDB_SeededRow_EnvOverriddenFieldNotCarried(t *testing.T) {
+	srv, fakeStore, ops := newEnvDBServer(t, map[string]interface{}{
+		"server.hub.admin_emails": []interface{}{"env-only@x.com"},
+	})
+	fakeStore.seedWithOrigin("access",
+		json.RawMessage(`{"admin_emails":["env-only@x.com"],"user_access_mode":"open"}`), "seeded")
+	_, _ = ops.Refresh(context.Background())
+
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"auth":{"default_user_role":"viewer"}}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	access, _ := readAccessRow(t, fakeStore)
+	if len(access.AdminEmails) != 0 {
+		t.Errorf("env-derived admin_emails must not be carried into the shared row, got %v", access.AdminEmails)
+	}
+	if access.UserAccessMode != "open" {
+		t.Errorf("non-env field user_access_mode must still be carried, got %q", access.UserAccessMode)
+	}
+	if access.DefaultUserRole != "viewer" {
+		t.Errorf("default_user_role: want viewer, got %q", access.DefaultUserRole)
+	}
+	fakeStore.mu.Lock()
+	origin := fakeStore.settings["access"].Origin
+	fakeStore.mu.Unlock()
+	if origin != "managed" {
+		t.Errorf("row origin after PUT: want managed, got %q", origin)
+	}
+}
+
+// An explicit request value for an env-overridden field is still written.
+func TestPutServerConfigDB_SeededRow_EnvOverriddenFieldExplicitWritten(t *testing.T) {
+	srv, fakeStore, ops := newEnvDBServer(t, map[string]interface{}{
+		"server.hub.admin_emails": []interface{}{"env-only@x.com"},
+	})
+	fakeStore.seedWithOrigin("access", json.RawMessage(`{"admin_emails":["env-only@x.com"]}`), "seeded")
+	_, _ = ops.Refresh(context.Background())
+
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"admin_emails":["chosen@x.com"]}}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	access, _ := readAccessRow(t, fakeStore)
+	if len(access.AdminEmails) != 1 || access.AdminEmails[0] != "chosen@x.com" {
+		t.Errorf("explicit admin_emails must be written, got %v", access.AdminEmails)
+	}
+}
+
+// A managed row's values came from an admin write, not env, so they are
+// carried forward even when the same key is env-overridden on this node.
+func TestPutServerConfigDB_ManagedRow_EnvOverriddenFieldCarried(t *testing.T) {
+	srv, fakeStore, ops := newEnvDBServer(t, map[string]interface{}{
+		"server.hub.admin_emails": []interface{}{"env-only@x.com"},
+	})
+	fakeStore.seedWithOrigin("access",
+		json.RawMessage(`{"admin_emails":["admin-set@x.com"],"user_access_mode":"open"}`), "managed")
+	_, _ = ops.Refresh(context.Background())
+
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"auth":{"default_user_role":"viewer"}}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	access, _ := readAccessRow(t, fakeStore)
+	if len(access.AdminEmails) != 1 || access.AdminEmails[0] != "admin-set@x.com" {
+		t.Errorf("managed admin_emails must be carried forward, got %v", access.AdminEmails)
+	}
+}
+
+func TestDropEnvOverriddenAccessFields(t *testing.T) {
+	base := &opsettings.AccessSettings{
+		AdminEmails:       []string{"a@x.com"},
+		UserAccessMode:    "open",
+		DefaultUserRole:   "viewer",
+		AuthorizedDomains: []string{"x.com"},
+	}
+	dropEnvOverriddenAccessFields(base, []string{
+		"server.auth.default_user_role", "server.auth.authorized_domains", "telemetry.enabled",
+	})
+	if base.DefaultUserRole != "" || base.AuthorizedDomains != nil {
+		t.Errorf("env-overridden fields should be dropped, got %+v", base)
+	}
+	if len(base.AdminEmails) != 1 || base.UserAccessMode != "open" {
+		t.Errorf("other fields must be untouched, got %+v", base)
+	}
+}

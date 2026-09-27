@@ -1193,8 +1193,17 @@ func overlayAccessRequest(d *opsettings.AccessSettings, req *ServerConfigUpdateR
 //
 // The base is read fresh from the store (the ops cache can be stale in HA).
 // When no access row exists yet, the base is the effective snapshot's access
-// values (bootstrap/file), excluding keys satisfied by a node-local env
-// override so a per-node SCION_SERVER_* value is not baked into shared state.
+// values (bootstrap/file).
+//
+// Env guard: bootstrap material (and therefore a "seeded" row, which
+// syncHubSettings rewrites on every boot, or the no-row snapshot) carries
+// node-local SCION_SERVER_* values at the highest precedence. Carrying those
+// forward would pin one node's env value into the shared row as "managed".
+// So for a non-managed base, fields overridden by env on this node are
+// dropped (dropEnvOverriddenAccessFields). The written field is then empty,
+// the same as the old replace behaviour; the settings.yaml / SCION_SEED_*
+// value beneath the env value is not recoverable here (ptone/scion#2068).
+// A "managed" base came from an admin write, not env, and is carried as is.
 //
 // It returns the revision the base was read at (0 when no row exists), for
 // use as the CAS expected revision: 0 means create-only, so a concurrent
@@ -1216,24 +1225,16 @@ func buildAccessDocOnCurrent(ctx context.Context, ops *OperationalSettings, req 
 			}
 		}
 		baseRev = row.Revision
+		if row.Origin != "managed" {
+			dropEnvOverriddenAccessFields(base, ops.EnvOverriddenKeys())
+		}
 	case errors.Is(err, store.ErrNotFound):
 		snap := ops.Snapshot()
-		envKeys := make(map[string]bool)
-		for _, k := range ops.EnvOverriddenKeys() {
-			envKeys[k] = true
-		}
-		if !envKeys["server.hub.admin_emails"] {
-			base.AdminEmails = snap.AdminEmails
-		}
-		if !envKeys["server.auth.user_access_mode"] {
-			base.UserAccessMode = snap.UserAccessMode
-		}
-		if !envKeys["server.auth.default_user_role"] {
-			base.DefaultUserRole = snap.DefaultUserRole
-		}
-		if !envKeys["server.auth.authorized_domains"] {
-			base.AuthorizedDomains = snap.AuthorizedDomains
-		}
+		base.AdminEmails = snap.AdminEmails
+		base.UserAccessMode = snap.UserAccessMode
+		base.DefaultUserRole = snap.DefaultUserRole
+		base.AuthorizedDomains = snap.AuthorizedDomains
+		dropEnvOverriddenAccessFields(base, ops.EnvOverriddenKeys())
 	default:
 		return nil, 0, fmt.Errorf("reading current access row: %w", err)
 	}
@@ -1244,6 +1245,25 @@ func buildAccessDocOnCurrent(ctx context.Context, ops *OperationalSettings, req 
 		return nil, 0, fmt.Errorf("marshalling access doc: %w", err)
 	}
 	return doc, baseRev, nil
+}
+
+// dropEnvOverriddenAccessFields clears access fields whose koanf key is
+// overridden by a node-local env var, so an env-derived value in a
+// non-managed base is not carried into the shared row. Explicit request
+// values are applied afterwards and are unaffected.
+func dropEnvOverriddenAccessFields(base *opsettings.AccessSettings, envKeys []string) {
+	for _, k := range envKeys {
+		switch k {
+		case "server.hub.admin_emails":
+			base.AdminEmails = nil
+		case "server.auth.user_access_mode":
+			base.UserAccessMode = ""
+		case "server.auth.default_user_role":
+			base.DefaultUserRole = ""
+		case "server.auth.authorized_domains":
+			base.AuthorizedDomains = nil
+		}
+	}
 }
 
 // buildSingleSectionDoc extracts the fields for a single section from the
