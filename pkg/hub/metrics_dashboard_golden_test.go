@@ -19,12 +19,14 @@ import (
 	"encoding/json"
 	"os"
 	"testing"
+	"time"
 
 	"cloud.google.com/go/monitoring/apiv3/v2/monitoringpb"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // usageGoldenRelPath is pkg/sciontool/telemetry's captured-emitter-output
@@ -45,43 +47,84 @@ type usageGoldenFixture struct {
 	Flushes          [][]json.RawMessage `json:"flushes"`
 }
 
-// loadUsageGoldenFlush loads one flush (a []*monitoringpb.TimeSeries) from
-// the shared golden fixture.
-func loadUsageGoldenFlush(t *testing.T, flushIndex int) []*monitoringpb.TimeSeries {
+// usageGoldenRecency is how far before "now" the fixture's latest point
+// lands after shiftUsageGoldenTimestamps, well inside the dashboard's
+// default lookback window regardless of when this test runs.
+const usageGoldenRecency = time.Hour
+
+// loadUsageGoldenFlushes loads every flush from the shared golden fixture,
+// then shifts every Interval timestamp in the whole fixture by one constant
+// offset so the latest end time lands usageGoldenRecency before the real
+// wall clock (the dashboard windows against time.Now(), and there is no
+// "now" override on the production QueryOption API). A single constant
+// offset applied uniformly preserves every relative spacing the fixture
+// pins — the collector-epoch start within a series, and the gap between the
+// two captured flushes — so this only defeats staleness, not the shape F7's
+// two-flush capture exists to pin.
+func loadUsageGoldenFlushes(t *testing.T) [][]*monitoringpb.TimeSeries {
 	t.Helper()
 	data, err := os.ReadFile(usageGoldenRelPath)
 	require.NoError(t, err, "reading golden fixture %s (produced by pkg/sciontool/telemetry's TestPipelineDerivesClaudeUsageEndToEnd; rerun that test with -update if it's missing or stale)", usageGoldenRelPath)
 	var fixture usageGoldenFixture
 	require.NoError(t, json.Unmarshal(data, &fixture))
-	require.Greater(t, len(fixture.Flushes), flushIndex, "golden fixture %s has %d flushes, want more than %d", usageGoldenRelPath, len(fixture.Flushes), flushIndex)
-	out := make([]*monitoringpb.TimeSeries, len(fixture.Flushes[flushIndex]))
-	for i, raw := range fixture.Flushes[flushIndex] {
-		var ts monitoringpb.TimeSeries
-		require.NoError(t, protojson.Unmarshal(raw, &ts))
-		out[i] = &ts
+
+	flushes := make([][]*monitoringpb.TimeSeries, len(fixture.Flushes))
+	var latestEnd time.Time
+	for i, raw := range fixture.Flushes {
+		flushes[i] = make([]*monitoringpb.TimeSeries, len(raw))
+		for j, r := range raw {
+			var ts monitoringpb.TimeSeries
+			require.NoError(t, protojson.Unmarshal(r, &ts))
+			flushes[i][j] = &ts
+			for _, p := range ts.GetPoints() {
+				if end := p.GetInterval().GetEndTime().AsTime(); end.After(latestEnd) {
+					latestEnd = end
+				}
+			}
+		}
 	}
-	return out
+	require.False(t, latestEnd.IsZero(), "golden fixture %s has no points with an end time", usageGoldenRelPath)
+
+	offset := time.Now().Add(-usageGoldenRecency).Sub(latestEnd)
+	for _, series := range flushes {
+		for _, ts := range series {
+			for _, p := range ts.GetPoints() {
+				interval := p.GetInterval()
+				if interval == nil {
+					continue
+				}
+				if interval.StartTime != nil {
+					interval.StartTime = timestamppb.New(interval.StartTime.AsTime().Add(offset))
+				}
+				if interval.EndTime != nil {
+					interval.EndTime = timestamppb.New(interval.EndTime.AsTime().Add(offset))
+				}
+			}
+		}
+	}
+	return flushes
 }
 
 // TestDashboardGoldenClaudeUsagePoints pins emitter → dashboard (design
-// §7.6). Unlike a hand-built fixture, every series here is loaded, unedited,
-// from the golden file pkg/sciontool/telemetry's own end-to-end test
+// §7.6). Unlike a hand-built fixture, every series here is loaded, unedited
+// except for the timestamp shift loadUsageGoldenFlushes applies, from the
+// golden file pkg/sciontool/telemetry's own end-to-end test
 // (TestPipelineDerivesClaudeUsageEndToEnd) captured and checked in — so a
 // rename of a metric, a label, or a token_type value on either side shows up
 // as a diff here or a failure there, not as two hand-maintained fixtures that
 // silently drift apart (design §7.6, F7).
 //
-// Staleness caveat: the fixture's Interval timestamps are a fixed date near
-// its capture time (see that test's own comment), while this test's queries
-// window against the real wall clock (metricsQueryWindowFor(time.Now(), ...)
-// in metrics_dashboard.go — there is no "now" override on the production
-// QueryOption API, and adding one only for this test is not this fix's
-// scope). The fixture must be regenerated (`go test
-// ./pkg/sciontool/telemetry/... -run TestPipelineDerivesClaudeUsageEndToEnd
-// -update`) if it ever falls outside the dashboard's default lookback
-// window relative to whenever CI actually runs this test.
+// The fixture's checked-in Interval timestamps are a fixed date near its
+// capture time (see that test's own comment, needed there for a
+// byte-for-byte golden comparison), but this test's queries window against
+// the real wall clock (metricsQueryWindowFor(time.Now(), ...) in
+// metrics_dashboard.go), and there is no "now" override on the production
+// QueryOption API. loadUsageGoldenFlushes shifts every timestamp by one
+// constant offset so the latest point always lands inside that window,
+// regardless of how long ago the fixture was captured — this test does not
+// go stale.
 func TestDashboardGoldenClaudeUsagePoints(t *testing.T) {
-	series := loadUsageGoldenFlush(t, 0)
+	series := loadUsageGoldenFlushes(t)[0]
 
 	var callsSeries, tokenSeries []*monitoringpb.TimeSeries
 	for _, ts := range series {
