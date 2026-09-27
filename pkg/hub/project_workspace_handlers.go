@@ -61,7 +61,8 @@ const maxPreviewFileSize = 50 * 1024 * 1024
 // untrustedContentSandboxCSP is sent on hub responses whose bytes are written
 // by users or agents rather than by the hub: workspace and shared-dir files
 // (above all ?view=true HTML and SVG, which would otherwise render on the
-// hub's origin with the viewer's session) and chat attachments. Anything that
+// hub's origin with the viewer's session), the project WebDAV endpoint that
+// serves the same workspace, and chat attachments. Anything that
 // can write into a project, including its agents, could otherwise act as
 // whoever opens the file. A sandboxed document gets an opaque origin: its
 // scripts still run, so generated reports and visualisations keep working,
@@ -71,11 +72,18 @@ const maxPreviewFileSize = 50 * 1024 * 1024
 // subresource such as an <img>, so inline image previews are unaffected.
 const untrustedContentSandboxCSP = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads"
 
-// contentDisposition builds a Content-Disposition header value, escaping
-// backslash and double-quote in the filename so a crafted name cannot close
-// the quoted string and append parameters (RFC 6266 §4.3). Go's header writer
-// already neutralises CR and LF.
+// contentDisposition builds a Content-Disposition header value with
+// mime.FormatMediaType, as the skill and template handlers do, so non-ASCII
+// filenames get the RFC 2231 filename* form. FormatMediaType returns "" for
+// input it cannot encode; rather than drop the header (and with it the
+// attachment disposition), fall back to a quoted filename with backslash and
+// double-quote escaped so a crafted name cannot close the quoted string and
+// append parameters (RFC 6266 §4.3). Go's header writer already neutralises
+// CR and LF.
 func contentDisposition(disposition, filename string) string {
+	if v := mime.FormatMediaType(disposition, map[string]string{"filename": filename}); v != "" {
+		return v
+	}
 	safeName := strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(filename)
 	return fmt.Sprintf(`%s; filename="%s"`, disposition, safeName)
 }

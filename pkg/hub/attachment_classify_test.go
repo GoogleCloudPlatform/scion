@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -629,9 +630,10 @@ func TestAttachmentDownload_SetsNosniffAndDisposition(t *testing.T) {
 		if h := got.Header().Get("Content-Type"); h != expected.mime {
 			t.Errorf("%s: Content-Type = %q, want %q", att.Name, h, expected.mime)
 		}
-		wantCD := expected.disposition + `; filename="` + att.Name + `"`
-		if h := got.Header().Get("Content-Disposition"); h != wantCD {
-			t.Errorf("%s: Content-Disposition = %q, want %q", att.Name, h, wantCD)
+		cd := got.Header().Get("Content-Disposition")
+		disp, params, err := mime.ParseMediaType(cd)
+		if err != nil || disp != expected.disposition || params["filename"] != att.Name {
+			t.Errorf("%s: Content-Disposition = %q, want %s with filename %q", att.Name, cd, expected.disposition, att.Name)
 		}
 	}
 }

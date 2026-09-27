@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -420,8 +421,8 @@ func TestProjectWorkspaceDownload_InlineView(t *testing.T) {
 	assert.Equal(t, "inline content", rec.Body.String())
 }
 
-// assertSandboxed checks that a served workspace file carries the sandbox
-// CSP (miller79/scion#131) and never allow-same-origin, which would let the
+// assertSandboxed checks that a response carrying user- or agent-written
+// bytes has the sandbox CSP and never allow-same-origin, which would let the
 // document act with the viewer's session on the hub's origin.
 func assertSandboxed(t *testing.T, rec *httptest.ResponseRecorder) {
 	t.Helper()
@@ -474,6 +475,41 @@ func TestSharedDirFiles_InlineHTMLIsSandboxed(t *testing.T) {
 	}
 }
 
+// The project WebDAV endpoint serves the same workspace directory as
+// workspace/files, so browsers must get the same isolation from it: the
+// sandbox CSP, nosniff (it sniffs extensionless files) and an attachment
+// disposition on GET/HEAD.
+func TestProjectWebDAV_GetIsSandboxed(t *testing.T) {
+	srv, _ := testServer(t)
+	project, workspacePath := createTestHubManagedProject(t, srv, "DAV Sandbox")
+	require.NoError(t, os.MkdirAll(workspacePath, 0755))
+
+	page := "<!doctype html><p>report</p><script>document.title = 'x'</script>"
+	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "report.html"), []byte(page), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "noext"), []byte(page), 0644))
+	davURL := fmt.Sprintf("/api/v1/projects/%s/dav", project.ID)
+
+	for _, name := range []string{"report.html", "noext"} {
+		for _, method := range []string{http.MethodGet, http.MethodHead} {
+			rec := doDavRequest(t, srv, method, davURL+"/"+name, nil, nil)
+			require.Equal(t, http.StatusOK, rec.Code, "%s %s: %s", method, name, rec.Body.String())
+			assertSandboxed(t, rec)
+			assert.Equal(t, "nosniff", rec.Header().Get("X-Content-Type-Options"), "%s %s", method, name)
+			assert.Equal(t, "attachment", rec.Header().Get("Content-Disposition"), "%s %s", method, name)
+		}
+	}
+
+	// Content is still served unchanged to DAV clients.
+	rec := doDavRequest(t, srv, http.MethodGet, davURL+"/report.html", nil, nil)
+	assert.Equal(t, page, rec.Body.String())
+
+	// PROPFIND still works and carries no attachment disposition.
+	rec = doDavRequest(t, srv, "PROPFIND", davURL+"/", nil, map[string]string{"Depth": "1"})
+	require.Equal(t, http.StatusMultiStatus, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "report.html")
+	assert.Empty(t, rec.Header().Get("Content-Disposition"))
+}
+
 // A filename containing a double quote must not be able to close the quoted
 // filename parameter and append its own parameters to Content-Disposition.
 func TestProjectWorkspaceDownload_ContentDispositionEscapesFilename(t *testing.T) {
@@ -486,13 +522,32 @@ func TestProjectWorkspaceDownload_ContentDispositionEscapesFilename(t *testing.T
 	rec := doRequest(t, srv, http.MethodGet,
 		fmt.Sprintf("/api/v1/projects/%s/workspace/files/%s?view=true", project.ID, url.PathEscape(name)), nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.Equal(t, `inline; filename="a\"; x=y.html"`, rec.Header().Get("Content-Disposition"))
+	cd := rec.Header().Get("Content-Disposition")
+	assert.Equal(t, `inline; filename="a\"; x=y.html"`, cd)
+	disp, params, err := mime.ParseMediaType(cd)
+	require.NoError(t, err)
+	assert.Equal(t, "inline", disp)
+	assert.Equal(t, map[string]string{"filename": name}, params, "the quote must not introduce extra parameters")
 	assertSandboxed(t, rec)
 }
 
 func TestContentDisposition(t *testing.T) {
-	assert.Equal(t, `attachment; filename="plain.txt"`, contentDisposition("attachment", "plain.txt"))
+	assert.Equal(t, `attachment; filename=plain.txt`, contentDisposition("attachment", "plain.txt"))
+	assert.Equal(t, `inline; filename="report 1.html"`, contentDisposition("inline", "report 1.html"))
 	assert.Equal(t, `inline; filename="a\\b\"c"`, contentDisposition("inline", `a\b"c`))
+	// Non-ASCII names use the RFC 2231 filename* form, as the skill and
+	// template handlers already do via mime.FormatMediaType.
+	assert.Equal(t, `attachment; filename*=utf-8''r%C3%A9sum%C3%A9.html`, contentDisposition("attachment", "résumé.html"))
+	for _, name := range []string{"plain.txt", `a\b"c`, "résumé.html", "a\nb"} {
+		disp, params, err := mime.ParseMediaType(contentDisposition("attachment", name))
+		require.NoError(t, err, name)
+		assert.Equal(t, "attachment", disp, name)
+		assert.Equal(t, name, params["filename"], name)
+	}
+	// FormatMediaType returns "" when it cannot encode its input (here, a
+	// disposition that is not a valid token); the header must still be
+	// produced, with the filename escaped, rather than dropped.
+	assert.Equal(t, `in line; filename="a\"b"`, contentDisposition("in line", `a"b`))
 }
 
 func TestProjectWorkspaceDownload_FormatJSON(t *testing.T) {
