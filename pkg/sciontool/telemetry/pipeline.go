@@ -65,7 +65,7 @@ type Pipeline struct {
 	exportErrors     otelmetric.Int64Counter
 	meter            otelmetric.Meter
 	retryConfig      RetryConfig
-	usageDeriver     *UsageDeriver
+	usageDeriver     atomic.Pointer[UsageDeriver]
 	intakeMu         sync.Mutex
 	intakeClosed     bool
 	intakeActive     int
@@ -242,10 +242,13 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	// exports over loopback back into this same receiver (design §3.3). A
 	// harness with no matching rule, or SCION_USAGE_SOURCE unset, yields a
 	// cheap no-op deriver (D4/D10); only a construction failure is logged.
+	// p.usageDeriver is an atomic.Pointer (F10): a log request can arrive
+	// concurrently with this Store, between receiver.Start returning above
+	// and this assignment running, and handleLogs's Load must never race it.
 	if deriver, err := NewUsageDeriver(ctx, p.config); err != nil {
 		log.Error("Failed to create usage deriver: %v", err)
 	} else {
-		p.usageDeriver = deriver
+		p.usageDeriver.Store(deriver)
 	}
 
 	p.running = true
@@ -409,11 +412,10 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 		}
 	}
 
-	if p.usageDeriver != nil {
-		if err := p.usageDeriver.Shutdown(ctx); err != nil {
+	if deriver := p.usageDeriver.Swap(nil); deriver != nil {
+		if err := deriver.Shutdown(ctx); err != nil {
 			log.Error("Usage deriver shutdown error: %v", err)
 		}
-		p.usageDeriver = nil
 	}
 
 	p.running = false
@@ -1055,11 +1057,16 @@ func (p *Pipeline) handleLogs(ctx context.Context, resourceLogs []*logspb.Resour
 	if logCount == 0 {
 		return nil
 	}
-	// The usage deriver sees every accepted log request before the policy's
+	// The usage deriver sees every request the policy admits, before its
 	// event filter can drop a record (design §3.3, AC-1.4): it must not
 	// depend on Filter.Include, and derivation happens independently of
-	// whether the raw logs go on to export successfully.
-	p.usageDeriver.ProcessResourceLogs(ctx, resourceLogs)
+	// whether the raw logs go on to export successfully. It runs after
+	// validateLogs so a request the policy would reject outright is never
+	// derived from (F8) — policy.processLogs re-validates below, which is
+	// deterministic and cheap on typical log batch sizes.
+	if err := validateLogs(resourceLogs); err == nil {
+		p.usageDeriver.Load().ProcessResourceLogs(ctx, resourceLogs)
+	}
 	if err := p.budget.reserve(bytes, logCount); err != nil {
 		p.logDiagnostics.rejected.Add(int64(logCount))
 		return err

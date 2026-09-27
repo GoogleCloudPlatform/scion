@@ -314,6 +314,8 @@ func (s *metricStreams) add(rms []*metricpb.ResourceMetrics) error {
 							if err := s.validateCloudIdentity(rm, sm, m, kind, temporal, monotonic, point.Attributes); err != nil {
 								return err
 							}
+						} else if err := rejectReservedIdentityPointLabel(point.Attributes); err != nil {
+							return s.reject(err.Error())
 						}
 						key, err := canonicalAttrs(point.Attributes)
 						if err != nil {
@@ -357,6 +359,8 @@ func (s *metricStreams) add(rms []*metricpb.ResourceMetrics) error {
 							if err := s.validateCloudIdentity(rm, sm, m, kind, temporal, monotonic, point.Attributes); err != nil {
 								return err
 							}
+						} else if err := rejectReservedIdentityPointLabel(point.Attributes); err != nil {
+							return s.reject(err.Error())
 						}
 						key, err := canonicalAttrs(point.Attributes)
 						if err != nil {
@@ -521,6 +525,9 @@ func (s *metricStreams) validateDescriptor(rm *metricpb.ResourceMetrics, sm *met
 		if cloudPointFieldsFor(sm.GetScope().GetName(), m.Name)[kv.Key] {
 			if proto.Size(kv.Value) > 256 {
 				return s.reject("Cloud Monitoring point label too long")
+			}
+			if err := checkTokenTypeField(kv); err != nil {
+				return s.reject(err.Error())
 			}
 			if err := add(kv.Key); err != nil {
 				return err

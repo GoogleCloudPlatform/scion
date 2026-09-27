@@ -7,15 +7,21 @@ package telemetry
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net"
 	"net/http/httptest"
 	"os"
 	"sort"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"cloud.google.com/go/monitoring/apiv3/v2/monitoringpb"
 	mexporter "github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric"
+	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
@@ -136,12 +142,20 @@ func TestClaudeUsageRuleMalformedTokenField(t *testing.T) {
 		{Key: "model", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "claude-sonnet-5"}}},
 		{Key: "input_tokens", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "not-a-number"}}},
 	}}
-	_, matched, err := claudeUsageRule{}.MatchLog(claudeUsageScope, record)
+	increment, matched, err := claudeUsageRule{}.MatchLog(claudeUsageScope, record)
 	if !matched {
 		t.Fatal("expected the malformed api_request to still match (so it counts as usage_malformed, not silently ignored)")
 	}
 	if err == nil {
 		t.Fatal("expected a malformed-field error")
+	}
+	// F6(b): the call itself is still counted, with no tokens at all (not a
+	// partial total) for this event.
+	if increment.Calls != 1 || increment.Status != telemetrycontract.StatusSuccess {
+		t.Fatalf("increment = %+v, want Calls=1 Status=success even when malformed", increment)
+	}
+	if len(increment.Tokens) != 0 {
+		t.Fatalf("increment.Tokens = %+v, want none when any token field is malformed", increment.Tokens)
 	}
 }
 
@@ -150,8 +164,61 @@ func TestClaudeUsageRuleNegativeTokenField(t *testing.T) {
 		{Key: "event.name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "api_request"}}},
 		{Key: "output_tokens", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_IntValue{IntValue: -1}}},
 	}}
-	if _, matched, err := (claudeUsageRule{}).MatchLog(claudeUsageScope, record); !matched || err == nil {
+	increment, matched, err := (claudeUsageRule{}).MatchLog(claudeUsageScope, record)
+	if !matched || err == nil {
 		t.Fatalf("matched=%v err=%v, want matched=true err!=nil", matched, err)
+	}
+	if increment.Calls != 1 {
+		t.Fatalf("increment.Calls = %d, want 1 even when malformed", increment.Calls)
+	}
+}
+
+// TestClaudeUsageRuleTokenFieldTypeTolerance pins F6(a): the fixture itself
+// mixes value types across attributes on the same event, and an unpinned
+// CLI (harnesses/claude installs @latest) can change encodings across
+// releases. A string-encoded non-negative integer and an integral double
+// must both be accepted, not treated as malformed.
+func TestClaudeUsageRuleTokenFieldTypeTolerance(t *testing.T) {
+	record := &logspb.LogRecord{Attributes: []*commonpb.KeyValue{
+		{Key: "event.name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "api_request"}}},
+		{Key: "input_tokens", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "5"}}},
+		{Key: "output_tokens", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_DoubleValue{DoubleValue: 7}}},
+	}}
+	increment, matched, err := (claudeUsageRule{}).MatchLog(claudeUsageScope, record)
+	if !matched || err != nil {
+		t.Fatalf("matched=%v err=%v, want matched=true err=nil", matched, err)
+	}
+	if increment.Tokens["input"] != 5 || increment.Tokens["output"] != 7 {
+		t.Fatalf("increment.Tokens = %+v, want input=5 output=7", increment.Tokens)
+	}
+}
+
+// TestClaudeUsageRuleFractionalDoubleTokenFieldIsMalformed complements the
+// tolerance test: a non-integral double is still malformed, not silently
+// truncated.
+func TestClaudeUsageRuleFractionalDoubleTokenFieldIsMalformed(t *testing.T) {
+	record := &logspb.LogRecord{Attributes: []*commonpb.KeyValue{
+		{Key: "event.name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "api_request"}}},
+		{Key: "input_tokens", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_DoubleValue{DoubleValue: 1.5}}},
+	}}
+	if _, matched, err := (claudeUsageRule{}).MatchLog(claudeUsageScope, record); !matched || err == nil {
+		t.Fatalf("matched=%v err=%v, want matched=true err!=nil for a fractional double", matched, err)
+	}
+}
+
+// TestClaudeUsageRuleMatchesEventNameField pins F6(c): a native SDK may
+// carry the event name in LogRecord's own EventName field instead of the
+// event.name attribute. The rule must recognize either.
+func TestClaudeUsageRuleMatchesEventNameField(t *testing.T) {
+	record := &logspb.LogRecord{
+		EventName: "api_error",
+	}
+	increment, matched, err := (claudeUsageRule{}).MatchLog(claudeUsageScope, record)
+	if !matched || err != nil {
+		t.Fatalf("matched=%v err=%v, want matched=true err=nil for a native EventName field", matched, err)
+	}
+	if increment.Calls != 1 || increment.Status != telemetrycontract.StatusError {
+		t.Fatalf("increment = %+v, want Calls=1 Status=error", increment)
 	}
 }
 
@@ -176,6 +243,80 @@ func TestBoundedLRUDedupeCapacityAndTTL(t *testing.T) {
 	now = now.Add(2 * time.Minute)
 	if l.SeenBefore("b") {
 		t.Fatal("b should have expired via TTL")
+	}
+}
+
+// TestBoundedLRUSeenBeforeConcurrent is the F1 regression test: the receiver
+// runs each OTLP export request on its own goroutine (Pipeline.handleLogs is
+// not serialized), so SeenBefore must be safe under concurrent callers. Run
+// with -race; before the mutex fix this both raced and could panic with
+// "concurrent map read and map write".
+func TestBoundedLRUSeenBeforeConcurrent(t *testing.T) {
+	const goroutines = 16
+	const perGoroutine = 200
+	// Capacity comfortably above the total number of distinct keys this test
+	// inserts, so capacity-driven eviction of "shared" cannot itself cause a
+	// second "not seen before" and confound the atomicity assertion below.
+	l := newBoundedLRU(goroutines*perGoroutine+8, time.Minute)
+	var wg sync.WaitGroup
+	var seenBefore atomic.Int64
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < perGoroutine; i++ {
+				// A shared key, replayed from every goroutine, exercises the
+				// check-and-insert race directly.
+				if l.SeenBefore("shared") {
+					seenBefore.Add(1)
+				}
+				// Distinct keys exercise concurrent eviction bookkeeping.
+				l.SeenBefore(fmt.Sprintf("g%d-%d", g, i))
+			}
+		}(g)
+	}
+	wg.Wait()
+	// Exactly one caller, across every goroutine, can be the first to see
+	// "shared"; every other observation (goroutines*perGoroutine - 1) must
+	// report it was seen before. Atomicity of check-and-insert is what
+	// guarantees this count, not just the absence of a crash.
+	if want := int64(goroutines*perGoroutine - 1); seenBefore.Load() != want {
+		t.Fatalf("seenBefore count = %d, want %d (check-and-insert must be atomic)", seenBefore.Load(), want)
+	}
+}
+
+// TestUsageDeriverObserveConcurrent exercises the same race at the
+// UsageDeriver level, through ProcessResourceLogs and observe, which is what
+// the receiver actually calls concurrently (F1).
+func TestUsageDeriverObserveConcurrent(t *testing.T) {
+	d := bareUsageDeriver(claudeUsageRule{})
+	const goroutines = 16
+	const perGoroutine = 50
+	var wg sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < perGoroutine; i++ {
+				distinct := &logspb.LogRecord{
+					TimeUnixNano: uint64(g*perGoroutine + i + 1),
+					Attributes: []*commonpb.KeyValue{
+						{Key: "event.name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "api_error"}}},
+					},
+				}
+				d.observe(context.Background(), claudeUsageScope, distinct)
+				shared := &logspb.LogRecord{Attributes: []*commonpb.KeyValue{
+					{Key: "event.name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "api_error"}}},
+				}}
+				d.observe(context.Background(), claudeUsageScope, shared)
+			}
+		}(g)
+	}
+	wg.Wait()
+	diag := d.Diagnostics()
+	wantTotal := int64(goroutines * perGoroutine * 2)
+	if diag.Derived+diag.Duplicate != wantTotal {
+		t.Fatalf("derived(%d)+duplicate(%d) = %d, want %d", diag.Derived, diag.Duplicate, diag.Derived+diag.Duplicate, wantTotal)
 	}
 }
 
@@ -206,18 +347,37 @@ func TestUsageDeriverObserveDedupesReplayedRequest(t *testing.T) {
 	}
 }
 
+// TestUsageDeriverObserveCountsMalformed pins F6(b): a call is a completed
+// response, so it is still counted even when one of its token fields could
+// not be parsed. Only the tokens for that event are dropped.
 func TestUsageDeriverObserveCountsMalformed(t *testing.T) {
 	d := bareUsageDeriver(claudeUsageRule{})
 	record := &logspb.LogRecord{Attributes: []*commonpb.KeyValue{
 		{Key: "event.name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "api_request"}}},
 		{Key: "input_tokens", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "bogus"}}},
 	}}
-	if d.observe(context.Background(), claudeUsageScope, record) {
-		t.Fatal("malformed event must not be recorded")
+	if !d.observe(context.Background(), claudeUsageScope, record) {
+		t.Fatal("the call must still be recorded even though a token field is malformed")
 	}
 	diag := d.Diagnostics()
-	if diag.Malformed != 1 || diag.Derived != 0 {
-		t.Fatalf("diagnostics = %+v", diag)
+	if diag.Malformed != 1 || diag.Derived != 1 {
+		t.Fatalf("diagnostics = %+v, want Malformed=1 Derived=1", diag)
+	}
+	// A second malformed event must still be counted (only the Warn log is
+	// deduplicated, not the diagnostic counter or the derivation itself).
+	record2 := &logspb.LogRecord{
+		TimeUnixNano: 1,
+		Attributes: []*commonpb.KeyValue{
+			{Key: "event.name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "api_request"}}},
+			{Key: "output_tokens", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "also-bogus"}}},
+		},
+	}
+	if !d.observe(context.Background(), claudeUsageScope, record2) {
+		t.Fatal("a second, distinct malformed event must also be recorded")
+	}
+	diag = d.Diagnostics()
+	if diag.Malformed != 2 || diag.Derived != 2 {
+		t.Fatalf("diagnostics after second malformed event = %+v, want Malformed=2 Derived=2", diag)
 	}
 }
 
@@ -302,6 +462,25 @@ func TestPipelineDerivesClaudeUsageEndToEnd(t *testing.T) {
 	}
 	p := NewWithConfig(cfg)
 	p.exporter = &CloudExporter{gcpExporter: &GCPExporter{metricExporter: sdkExporter}}
+	// A controllable, fixed clock, rather than real sleeps or time.Now, drives
+	// the collector's own admission bookkeeping (metric_streams.go):
+	// snapshotGCP requires at least 2ms between a hook-style point's
+	// collector epoch and its observed end (so the pinned Monitoring SDK
+	// never has to rewrite a near-zero interval), and at least 5s between two
+	// exports of the same GCP identity (metricPossibleEnds' sampling-interval
+	// floor). F9(a) exercises the second guard, which a short real sleep
+	// cannot satisfy without slowing every test run.
+	//
+	// The base is a fixed date, not time.Now(): the golden fixture below
+	// (F7) is checked in, so its own comparison (this package, this test)
+	// must reproduce byte-identical Interval timestamps on every run, not
+	// only the run that captured it. It is pinned near "today" rather than
+	// an arbitrary date because pkg/hub's golden test (which loads the same
+	// file) evaluates it against the dashboard's real, wall-clock query
+	// window — see that test's own comment for the resulting staleness
+	// caveat.
+	now := time.Date(2026, 9, 27, 0, 0, 0, 0, time.UTC)
+	p.metricNow = func() time.Time { return now }
 
 	receiver := NewReceiver(cfg, nil, WithLogHandler(p.handleLogs), WithMetricHandler(p.handleMetrics))
 	if err := receiver.Start(context.Background()); err != nil {
@@ -316,28 +495,28 @@ func TestPipelineDerivesClaudeUsageEndToEnd(t *testing.T) {
 	if len(deriver.rules) == 0 {
 		t.Fatal("expected the claude usage rule to be active")
 	}
-	p.usageDeriver = deriver
+	p.usageDeriver.Store(deriver)
 	defer func() { _ = deriver.Shutdown(context.Background()) }()
 
-	postFixture := func() {
+	postResourceLogs := func(resourceLogs []*logspb.ResourceLogs) {
 		t.Helper()
-		body, err := proto.Marshal(&collogspb.ExportLogsServiceRequest{ResourceLogs: loadClaudeUsageFixture(t)})
+		body, err := proto.Marshal(&collogspb.ExportLogsServiceRequest{ResourceLogs: resourceLogs})
 		if err != nil {
 			t.Fatal(err)
 		}
 		rec := httptest.NewRecorder()
 		receiver.handleHTTPLogs(rec, otlpHTTPRequest("/v1/logs", bytes.NewReader(body)))
 		if rec.Code != 200 {
-			t.Fatalf("post fixture status = %d: %s", rec.Code, rec.Body.String())
+			t.Fatalf("post status = %d: %s", rec.Code, rec.Body.String())
 		}
+	}
+	postFixture := func() {
+		t.Helper()
+		postResourceLogs(loadClaudeUsageFixture(t))
 	}
 
 	postFixture()
-	// snapshotGCP requires at least 2ms between a hook-style point's
-	// collector epoch and its observed end, so the pinned Monitoring SDK
-	// never has to rewrite a near-zero interval (metric_streams.go
-	// snapshotGCP). The points were just admitted, so give it a moment.
-	time.Sleep(10 * time.Millisecond)
+	now = now.Add(10 * time.Millisecond)
 	if !p.flushMetricBuffer(context.Background(), true) {
 		t.Fatal("first metric flush not confirmed")
 	}
@@ -350,15 +529,183 @@ func TestPipelineDerivesClaudeUsageEndToEnd(t *testing.T) {
 	series := allCapturedSeries(capture)
 	assertUsageSeries(t, series)
 
-	// Replay: a retried request must not double count (AC-1.4).
+	firstSuccessCalls := latestSeries(t, series, "workload.googleapis.com/gen_ai.api.calls", "success")
+
+	// Replay: a retried request must not double count (AC-1.4). F9(b): assert
+	// this explicitly — no new series, and the already-exported values are
+	// unchanged — rather than relying on the replay simply exporting nothing
+	// to make the assertion below trivially pass.
 	postFixture()
-	time.Sleep(10 * time.Millisecond)
+	now = now.Add(10 * time.Millisecond)
 	p.flushMetricBuffer(context.Background(), true)
 	diag = p.UsageDiagnostics()
 	if diag.Derived != 2 || diag.Duplicate != 2 {
 		t.Fatalf("diagnostics after replay = %+v, want Derived=2 Duplicate=2", diag)
 	}
-	assertUsageSeries(t, allCapturedSeries(capture))
+	afterReplay := allCapturedSeries(capture)
+	if len(afterReplay) != len(series) {
+		t.Fatalf("replay exported %d series (total captured), want %d unchanged (a duplicate request must export nothing new)", len(afterReplay), len(series))
+	}
+	assertUsageSeries(t, afterReplay)
+	if got := latestSeries(t, afterReplay, "workload.googleapis.com/gen_ai.api.calls", "success"); got.Points[0].Value.GetInt64Value() != firstSuccessCalls.Points[0].Value.GetInt64Value() {
+		t.Fatalf("gen_ai.api.calls/success value changed after a deduped replay: %d -> %d", firstSuccessCalls.Points[0].Value.GetInt64Value(), got.Points[0].Value.GetInt64Value())
+	}
+
+	// F9(a): a genuinely new event (distinct request_id, so not deduped) that
+	// maps to the same stream must be cumulative, not reset — same
+	// collector-epoch StartTime as the first flush, EndTime strictly later,
+	// value accumulated rather than replaced (design §7.5).
+	secondRequest := loadClaudeUsageFixture(t)
+	mutateRequestID(t, secondRequest, "api_request", "synthetic-request-2")
+	// The same GCP identity cannot be exported twice within 5s (the
+	// sampling-interval floor above); advance past it.
+	now = now.Add(5*time.Second + 100*time.Millisecond)
+	postResourceLogs(secondRequest)
+	now = now.Add(10 * time.Millisecond)
+	if !p.flushMetricBuffer(context.Background(), true) {
+		t.Fatal("third metric flush not confirmed")
+	}
+	diag = p.UsageDiagnostics()
+	if diag.Derived != 3 {
+		t.Fatalf("diagnostics after a genuinely new request = %+v, want Derived=3", diag)
+	}
+	secondSuccessCalls := latestSeries(t, allCapturedSeries(capture), "workload.googleapis.com/gen_ai.api.calls", "success")
+	if !secondSuccessCalls.Points[0].Interval.StartTime.AsTime().Equal(firstSuccessCalls.Points[0].Interval.StartTime.AsTime()) {
+		t.Fatalf("gen_ai.api.calls/success StartTime moved: %v -> %v, want the collector epoch stable across flushes",
+			firstSuccessCalls.Points[0].Interval.StartTime.AsTime(), secondSuccessCalls.Points[0].Interval.StartTime.AsTime())
+	}
+	if !secondSuccessCalls.Points[0].Interval.EndTime.AsTime().After(firstSuccessCalls.Points[0].Interval.EndTime.AsTime()) {
+		t.Fatalf("gen_ai.api.calls/success EndTime did not advance: %v -> %v",
+			firstSuccessCalls.Points[0].Interval.EndTime.AsTime(), secondSuccessCalls.Points[0].Interval.EndTime.AsTime())
+	}
+	if want := firstSuccessCalls.Points[0].Value.GetInt64Value() + 1; secondSuccessCalls.Points[0].Value.GetInt64Value() != want {
+		t.Fatalf("gen_ai.api.calls/success value = %d, want %d (cumulative, not reset)", secondSuccessCalls.Points[0].Value.GetInt64Value(), want)
+	}
+
+	// F7: pin emitter -> dashboard against a golden file of exactly what was
+	// captured above (not hand-built), covering two flushes so the
+	// epoch-stable/cumulative shape (StartTime fixed, EndTime advancing,
+	// value accumulating — just asserted above) is part of what the fixture
+	// pins. pkg/hub's golden dashboard test loads this same file by relative
+	// path, without importing this package.
+	newInThirdFlush := allCapturedSeries(capture)[len(series):]
+	checkOrUpdateUsageGolden(t, [][]*monitoringpb.TimeSeries{series, newInThirdFlush})
+}
+
+// TestPipelineStartConstructsUsageDeriverFromEnv is F9(c): it exercises the
+// deriver's construction inside Pipeline.Start itself — including the
+// SCION_USAGE_SOURCE/SCION_HARNESS env gating design §3.3/D4/D10 require —
+// rather than only through a deriver built by hand and assigned directly, as
+// TestPipelineDerivesClaudeUsageEndToEnd above does (that test needs a fake
+// GCP exporter and a controllable clock neither of which Start's own
+// construction path accepts as an override).
+func TestPipelineStartConstructsUsageDeriverFromEnv(t *testing.T) {
+	t.Run("native_and_known_harness_is_active", func(t *testing.T) {
+		t.Setenv("SCION_HARNESS", "claude")
+		t.Setenv("SCION_USAGE_SOURCE", "native")
+		cfg := &Config{Enabled: true, GRPCPort: availableTCPPort(t)}
+		p := NewWithConfig(cfg)
+		if err := p.Start(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		// A short deadline, not context.Background(): on Stop, the deriver's
+		// own MeterProvider attempts one last flush over its loopback
+		// connection, which by then the receiver has already stopped
+		// accepting — that flush would otherwise retry for the SDK's full
+		// default export timeout before giving up.
+		defer func() {
+			stopCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			defer cancel()
+			_ = p.Stop(stopCtx)
+		}()
+		deriver := p.usageDeriver.Load()
+		if deriver == nil || len(deriver.rules) == 0 {
+			t.Fatal("Pipeline.Start must construct an active claude usage deriver when SCION_USAGE_SOURCE=native and SCION_HARNESS=claude")
+		}
+	})
+	t.Run("not_native_is_a_noop", func(t *testing.T) {
+		t.Setenv("SCION_HARNESS", "claude")
+		t.Setenv("SCION_USAGE_SOURCE", "hooks") // not "native" (D4/D10)
+		cfg := &Config{Enabled: true, GRPCPort: availableTCPPort(t)}
+		p := NewWithConfig(cfg)
+		if err := p.Start(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		// A short deadline, not context.Background(): on Stop, the deriver's
+		// own MeterProvider attempts one last flush over its loopback
+		// connection, which by then the receiver has already stopped
+		// accepting — that flush would otherwise retry for the SDK's full
+		// default export timeout before giving up.
+		defer func() {
+			stopCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			defer cancel()
+			_ = p.Stop(stopCtx)
+		}()
+		deriver := p.usageDeriver.Load()
+		if deriver == nil {
+			t.Fatal("Start must still store a (no-op) deriver, never a nil pointer")
+		}
+		if len(deriver.rules) != 0 {
+			t.Fatal("Pipeline.Start must not activate usage derivation unless SCION_USAGE_SOURCE=native")
+		}
+	})
+}
+
+// mutateRequestID rewrites the request_id attribute (and bumps
+// time_unix_nano, so the fingerprint changes even if request_id were
+// ignored) on every record of the given event name, so a repost of an
+// otherwise-identical fixture is a genuinely new event rather than a
+// duplicate (design §3.3 dedupe key).
+func mutateRequestID(t *testing.T, resourceLogs []*logspb.ResourceLogs, eventName, newRequestID string) {
+	t.Helper()
+	found := false
+	for _, rl := range resourceLogs {
+		for _, sl := range rl.ScopeLogs {
+			for _, record := range sl.LogRecords {
+				if logAttrString(record.Attributes, "event.name") != eventName {
+					continue
+				}
+				found = true
+				record.TimeUnixNano++
+				replaced := false
+				for _, kv := range record.Attributes {
+					if kv.Key == "request_id" {
+						kv.Value = &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: newRequestID}}
+						replaced = true
+					}
+				}
+				if !replaced {
+					record.Attributes = append(record.Attributes, &commonpb.KeyValue{
+						Key:   "request_id",
+						Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: newRequestID}},
+					})
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("mutateRequestID: no %q record found in fixture", eventName)
+	}
+}
+
+// latestSeries returns the most recently captured TimeSeries matching
+// metricType and a "status" label (used for gen_ai.api.calls), failing the
+// test if none matched. Cumulative GCP series are re-exported on every
+// flush that touches them, so allCapturedSeries can contain several matches
+// for the same identity across a test; callers that want the current value
+// need the last one.
+func latestSeries(t *testing.T, series []*monitoringpb.TimeSeries, metricType, status string) *monitoringpb.TimeSeries {
+	t.Helper()
+	var latest *monitoringpb.TimeSeries
+	for _, ts := range series {
+		if ts.Metric.Type == metricType && ts.Metric.Labels["status"] == status {
+			latest = ts
+		}
+	}
+	if latest == nil {
+		t.Fatalf("no captured series for type=%q status=%q", metricType, status)
+	}
+	return latest
 }
 
 func allCapturedSeries(capture *monitoringCapture) []*monitoringpb.TimeSeries {
@@ -440,6 +787,25 @@ func assertLabelKeys(t *testing.T, labels map[string]string, want ...string) {
 		if _, ok := labels[k]; !ok {
 			t.Errorf("missing expected label %q in %+v", k, labels)
 		}
+	}
+}
+
+// TestTruncateUTF8DoesNotSplitRune pins F12: truncating a model name to the
+// 128-byte label limit must never cut a multi-byte rune in half, which would
+// produce an invalid UTF-8 label value.
+func TestTruncateUTF8DoesNotSplitRune(t *testing.T) {
+	// Each "é" is 2 bytes; 64 of them is exactly 128 bytes, so appending one
+	// more forces a cut that would otherwise land mid-rune.
+	s := strings.Repeat("é", 65)
+	got := truncateUTF8(s, 128)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncateUTF8(%d runes, 128) = %q, not valid UTF-8", 65, got)
+	}
+	if len(got) > 128 {
+		t.Fatalf("truncateUTF8 result is %d bytes, want <= 128", len(got))
+	}
+	if len(got) != 128 {
+		t.Fatalf("truncateUTF8 result is %d bytes, want exactly 128 (64 whole runes)", len(got))
 	}
 }
 

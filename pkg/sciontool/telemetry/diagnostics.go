@@ -113,7 +113,7 @@ func (p *Pipeline) UsageDiagnostics() UsageDiagnostics {
 	if p == nil {
 		return UsageDiagnostics{}
 	}
-	return p.usageDeriver.Diagnostics()
+	return p.usageDeriver.Load().Diagnostics()
 }
 
 // Snapshots use the local logger only. They are fixed-cardinality and do not

@@ -29,6 +29,27 @@ const (
 // only from the receiver's authoritative resource identity.
 var identityLabelKeys = []string{gcpAgentLabel, gcpProjectLabel, gcpAgentSlugLabel}
 
+// rejectReservedIdentityPointLabel enforces, at admission, that a producer
+// never sets one of the exporter-reserved canonical identity labels itself
+// (design D3/D7, F3). The GCP path already rejects these per point through
+// validateDescriptor/validateCloudIdentity; this is the same rule for the
+// generic OTLP path, which used to defer the check to export time
+// (stampIdentityLabels), too late to fail only the offending request rather
+// than poisoning the whole batch on a retry loop.
+func rejectReservedIdentityPointLabel(attrs []*commonpb.KeyValue) error {
+	for _, kv := range attrs {
+		if kv == nil {
+			continue
+		}
+		for _, reserved := range identityLabelKeys {
+			if kv.Key == reserved {
+				return fmt.Errorf("reserved canonical identity metric label")
+			}
+		}
+	}
+	return nil
+}
+
 var cloudResourceFields = map[string]bool{
 	"service.name": true, "service.namespace": true, "service.instance.id": true,
 	"scion.agent.id": true, "scion.project.id": true, "scion.agent.slug": true,
@@ -36,10 +57,24 @@ var cloudResourceFields = map[string]bool{
 	"gcp.project_id": true,
 }
 var cloudScopeFields = map[string]bool{"component": true, "scope.kind": true, "scope.variant": true}
+
+// cloudPointFields is the general point-label allowlist shared by every
+// reserved counter and hook metric except scion.usage.tokens (F2): token_type
+// is a closed enum meaningful only on that one metric, so it is not a member
+// of this set. cloudPointFieldsFor routes scion.usage.tokens to
+// cloudUsageTokenFields instead.
 var cloudPointFields = map[string]bool{
 	"agent_id": true, "project_id": true, "harness": true, "model": true,
 	"tool_name": true, "status": true, "operation": true, "sensor": true,
-	"phase": true, "run": true, telemetrycontract.TokenTypeLabel: true,
+	"phase": true, "run": true,
+}
+
+// cloudUsageTokenFields is the point-label allowlist for scion.usage.tokens
+// only (design §3.2, F2): harness and model as usual, plus the closed
+// token_type enum. checkTokenTypeField enforces the enum's membership; being
+// listed here only admits the label, it does not validate its value.
+var cloudUsageTokenFields = map[string]bool{
+	"harness": true, "model": true, telemetrycontract.TokenTypeLabel: true,
 }
 
 const pipelineMetricScope = "github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
@@ -56,7 +91,25 @@ func cloudPointFieldsFor(scopeName, metricName string) map[string]bool {
 			return cloudExportErrorFields
 		}
 	}
+	if metricName == telemetrycontract.MetricUsageTokens {
+		return cloudUsageTokenFields
+	}
 	return cloudPointFields
+}
+
+// checkTokenTypeField enforces the closed token_type enum (design §3.2:
+// "Any other value is an admission error") wherever the label is allowed at
+// all (only scion.usage.tokens, via cloudPointFieldsFor/cloudUsageTokenFields
+// above). It is a no-op for every other point label.
+func checkTokenTypeField(kv *commonpb.KeyValue) error {
+	if kv == nil || kv.Key != telemetrycontract.TokenTypeLabel {
+		return nil
+	}
+	value, ok := kv.GetValue().GetValue().(*commonpb.AnyValue_StringValue)
+	if !ok || !telemetrycontract.ValidTokenType(value.StringValue) {
+		return fmt.Errorf("invalid Cloud Monitoring token_type")
+	}
+	return nil
 }
 
 func checkCloudSelfMetricFields(scopeName, metricName string, attrs []*commonpb.KeyValue) error {

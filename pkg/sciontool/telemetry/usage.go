@@ -10,10 +10,15 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
+	"math"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
@@ -46,9 +51,10 @@ type usageIncrement struct {
 // usageRule matches one per-request native event to a usageIncrement. Rules
 // are filtered to SCION_HARNESS at construction (design §3.3). MatchLog
 // returns matched=false when the record isn't one this rule recognizes, and
-// a non-nil error when it recognizes the event but its fields are malformed
-// (non-numeric or negative token counts); the caller counts that as
-// usage_malformed and emits nothing.
+// a non-nil error when it recognizes the event but one or more of its token
+// fields are malformed (non-numeric or negative); the caller counts that as
+// usage_malformed but still records the returned increment (a call is a
+// completed response, even when its token fields could not be parsed).
 type usageRule interface {
 	// Harness is the SCION_HARNESS value this rule applies to.
 	Harness() string
@@ -82,24 +88,38 @@ func (claudeUsageRule) MatchLog(scopeName string, record *logspb.LogRecord) (usa
 	if scopeName != claudeUsageScope || record == nil {
 		return usageIncrement{}, false, nil
 	}
-	switch logAttrString(record.Attributes, normalizedEventNameAttribute) {
+	eventName, err := normalizedLogEventName(record, scopeName)
+	if err != nil || eventName == "" {
+		return usageIncrement{}, false, nil
+	}
+	switch eventName {
 	case "api_request":
 		tokens := make(map[string]int64, len(claudeTokenFields))
+		var malformed error
 		for attrKey, tokenType := range claudeTokenFields {
 			n, err := logAttrInt(record.Attributes, attrKey)
 			if err != nil {
-				return usageIncrement{}, true, fmt.Errorf("claude api_request %s: %w", attrKey, err)
+				// Keep checking the remaining fields (for a call still worth
+				// counting), but drop every token for this event rather than
+				// reporting a partial, misleading total (design §3.3 F6).
+				if malformed == nil {
+					malformed = fmt.Errorf("claude api_request %s: %w", attrKey, err)
+				}
+				continue
 			}
 			if n > 0 {
 				tokens[tokenType] = n
 			}
 		}
-		return usageIncrement{
+		increment := usageIncrement{
 			Model:  logAttrString(record.Attributes, "model"),
 			Status: telemetrycontract.StatusSuccess,
 			Calls:  1,
-			Tokens: tokens,
-		}, true, nil
+		}
+		if malformed == nil {
+			increment.Tokens = tokens
+		}
+		return increment, true, malformed
 	case "api_error":
 		return usageIncrement{
 			Model:  logAttrString(record.Attributes, "model"),
@@ -143,6 +163,7 @@ type UsageDeriver struct {
 	resourceIdentity string
 
 	derived, duplicate, malformed atomic.Int64
+	malformedWarnOnce             sync.Once
 }
 
 // UsageDiagnostics are fixed-cardinality usage-derivation counters, exposed
@@ -254,9 +275,13 @@ func (d *UsageDeriver) ProcessResourceLogs(ctx context.Context, resourceLogs []*
 
 // observe matches one record against every rule and records at most one
 // increment. It reports whether anything was recorded.
+//
+// The event name comes from normalizedLogEventName, not a bare "event.name"
+// attribute read: a native SDK may carry the event name in LogRecord's own
+// EventName field instead (design §3.3 F6), and this must recognize either.
 func (d *UsageDeriver) observe(ctx context.Context, scopeName string, record *logspb.LogRecord) bool {
-	eventName := logAttrString(record.Attributes, normalizedEventNameAttribute)
-	if eventName == "" {
+	eventName, err := normalizedLogEventName(record, scopeName)
+	if err != nil || eventName == "" {
 		return false
 	}
 	for _, rule := range d.rules {
@@ -266,7 +291,17 @@ func (d *UsageDeriver) observe(ctx context.Context, scopeName string, record *lo
 		}
 		if err != nil {
 			d.malformed.Add(1)
-			log.Debug("Usage deriver malformed event=%s: %v", eventName, err)
+			// One malformed event tells the operator everything they need;
+			// logging every occurrence at Warn would be noisy on a chatty,
+			// unpinned CLI. Never includes the offending value, only the
+			// (fixed-cardinality) event name.
+			d.malformedWarnOnce.Do(func() {
+				slog.Warn("usage deriver observed a malformed native usage event; its token fields were dropped, the call is still counted", "event", eventName)
+			})
+		}
+		// A rule that recognizes the event but derives nothing usable from it
+		// (no call, no tokens) has nothing to record or dedupe.
+		if increment.Calls == 0 && len(increment.Tokens) == 0 {
 			return false
 		}
 		fingerprint := d.fingerprint(scopeName, eventName, record)
@@ -316,9 +351,7 @@ func (d *UsageDeriver) record(ctx context.Context, increment usageIncrement) {
 	if model == "" {
 		model = "unknown"
 	}
-	if len(model) > 128 {
-		model = model[:128]
-	}
+	model = truncateUTF8(model, 128)
 	harness := os.Getenv("SCION_HARNESS")
 
 	if increment.Calls != 0 && d.calls != nil {
@@ -372,6 +405,20 @@ func (d *UsageDeriver) Shutdown(ctx context.Context) error {
 	return d.providers.Shutdown(ctx)
 }
 
+// truncateUTF8 truncates s to at most maxBytes bytes without splitting a
+// multi-byte rune (F12): it walks back from maxBytes to the nearest rune
+// boundary rather than cutting mid-rune, which would produce an invalid
+// UTF-8 label value.
+func truncateUTF8(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	for maxBytes > 0 && !utf8.RuneStart(s[maxBytes]) {
+		maxBytes--
+	}
+	return s[:maxBytes]
+}
+
 func logAttrString(attrs []*commonpb.KeyValue, key string) string {
 	for _, kv := range attrs {
 		if kv != nil && kv.Key == key {
@@ -383,30 +430,61 @@ func logAttrString(attrs []*commonpb.KeyValue, key string) string {
 
 // logAttrInt reads a token count attribute. Absence is not malformed (it
 // returns 0, nil): Claude only reports fields with a nonzero value in some
-// payload shapes. A present but non-integer or negative value is malformed.
+// payload shapes. A present but non-numeric or negative value is malformed.
+//
+// The captured fixture itself mixes value types across attributes on the
+// same event (some numeric fields arrive as intValue, others as
+// stringValue), and an unpinned CLI (harnesses/claude installs @latest) can
+// change which encoding a given field uses from one release to the next.
+// So besides IntValue, this also accepts a string that parses as a
+// non-negative base-10 integer, and an integral DoubleValue — anything else
+// (non-numeric string, fractional double) is malformed.
 func logAttrInt(attrs []*commonpb.KeyValue, key string) (int64, error) {
 	for _, kv := range attrs {
 		if kv == nil || kv.Key != key {
 			continue
 		}
-		intValue, ok := kv.GetValue().GetValue().(*commonpb.AnyValue_IntValue)
-		if !ok {
+		switch v := kv.GetValue().GetValue().(type) {
+		case *commonpb.AnyValue_IntValue:
+			if v.IntValue < 0 {
+				return 0, fmt.Errorf("attribute %q is negative", key)
+			}
+			return v.IntValue, nil
+		case *commonpb.AnyValue_DoubleValue:
+			if v.DoubleValue < 0 {
+				return 0, fmt.Errorf("attribute %q is negative", key)
+			}
+			if math.Trunc(v.DoubleValue) != v.DoubleValue {
+				return 0, fmt.Errorf("attribute %q is not an integer", key)
+			}
+			return int64(v.DoubleValue), nil
+		case *commonpb.AnyValue_StringValue:
+			n, err := strconv.ParseInt(v.StringValue, 10, 64)
+			if err != nil {
+				return 0, fmt.Errorf("attribute %q is not an integer", key)
+			}
+			if n < 0 {
+				return 0, fmt.Errorf("attribute %q is negative", key)
+			}
+			return n, nil
+		default:
 			return 0, fmt.Errorf("attribute %q is not an integer", key)
 		}
-		if intValue.IntValue < 0 {
-			return 0, fmt.Errorf("attribute %q is negative", key)
-		}
-		return intValue.IntValue, nil
 	}
 	return 0, nil
 }
 
 // boundedLRU is a fixed-capacity, time-windowed "seen before" set used for
-// dedupe (design §3.3: "16k entries / 15 min"). It intentionally duplicates
-// nothing from metricStreams.remember: that dedupes points within one
-// metric stream, keyed on interval end; this dedupes discrete events across
-// the whole process, keyed on a content fingerprint.
+// dedupe (design §3.3: "16k entries / 15 min"). It dedupes discrete events
+// across the whole process, keyed on a content fingerprint, which is a
+// different problem from metricStreams.remember (that dedupes points within
+// one metric stream, keyed on interval end).
+//
+// SeenBefore is called concurrently: the receiver runs each OTLP gRPC/HTTP
+// export request on its own goroutine (Pipeline.handleLogs is not
+// serialized), so the map and the eviction order slice are guarded by mu.
 type boundedLRU struct {
+	mu       sync.Mutex
 	capacity int
 	ttl      time.Duration
 	now      func() time.Time
@@ -424,9 +502,12 @@ func newBoundedLRU(capacity int, ttl time.Duration) *boundedLRU {
 }
 
 // SeenBefore records fingerprint and reports whether it was already present
-// within the TTL window. Not safe for concurrent use: callers serialize
-// through Pipeline.handleLogs today.
+// within the TTL window. The check and the insert happen atomically under
+// mu, so two concurrent replays of the same request cannot both observe
+// "not seen before".
 func (l *boundedLRU) SeenBefore(fingerprint string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	now := l.now()
 	l.evictExpired(now)
 	if at, ok := l.seen[fingerprint]; ok && now.Sub(at) < l.ttl {
