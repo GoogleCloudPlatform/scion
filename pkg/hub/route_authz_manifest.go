@@ -47,16 +47,17 @@ var routeAuthzManifest = map[string]string{
 	"/metrics": "authenticated", // Prometheus metrics — requires session
 
 	// ── Authentication flow (skipped by UnifiedAuthMiddleware) ──────────
-	"/api/v1/auth/login":            "auth-flow", // Web frontend OAuth token exchange
-	"/api/v1/auth/token":            "auth-flow", // OAuth code exchange (unified)
-	"/api/v1/auth/refresh":          "auth-flow", // Token refresh
-	"/api/v1/auth/validate":         "auth-flow", // Token validation
-	"/api/v1/auth/logout":           "auth-flow", // Logout
-	"/api/v1/auth/providers":        "auth-flow", // OAuth provider discovery for CLI login
-	"/api/v1/auth/cli/authorize":    "auth-flow", // CLI OAuth authorization URL
-	"/api/v1/auth/cli/token":        "auth-flow", // CLI OAuth token exchange
-	"/api/v1/auth/cli/device":       "auth-flow", // CLI device flow initiation
-	"/api/v1/auth/cli/device/token": "auth-flow", // CLI device flow token polling
+	"/api/v1/auth/login":                        "auth-flow", // Web frontend OAuth token exchange
+	"/api/v1/auth/token":                        "auth-flow", // OAuth code exchange (unified)
+	"/api/v1/auth/refresh":                      "auth-flow", // Token refresh
+	"/api/v1/auth/validate":                     "auth-flow", // Token validation
+	"/api/v1/auth/logout":                       "auth-flow", // Logout
+	"/api/v1/auth/providers":                    "auth-flow", // OAuth provider discovery for CLI login
+	"/api/v1/auth/cli/authorize":                "auth-flow", // CLI OAuth authorization URL
+	"/api/v1/auth/cli/token":                    "auth-flow", // CLI OAuth token exchange
+	"/api/v1/auth/cli/device":                   "auth-flow", // CLI device flow initiation
+	"/api/v1/auth/cli/device/token":             "auth-flow", // CLI device flow token polling
+	"/api/v1/auth/integrations/google/exchange": "auth-flow", // GE Google credential exchange — unauthenticated
 
 	// ── Auth-adjacent (require session despite living under /auth) ──────
 	"/api/v1/auth/me":            "authenticated", // "Who am I?" — requires valid session

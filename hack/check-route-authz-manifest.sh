@@ -66,8 +66,8 @@ MANIFEST
   manifested=$(sed -n 's/^[[:blank:]]*"\([^"]*\)".*/\1/p' "$manifest_file" | sort -u)
 
   # Compute missing (in registered but not manifest) and stale (in manifest but not registered)
-  missing=$(comm -23 <(echo "$registered") <(echo "$manifested"))
-  stale=$(comm -13 <(echo "$registered") <(echo "$manifested"))
+  missing=$(comm -23 <(printf '%s\n' "$registered") <(printf '%s\n' "$manifested"))
+  stale=$(comm -13 <(printf '%s\n' "$registered") <(printf '%s\n' "$manifested"))
 
   errors=0
 
@@ -156,8 +156,8 @@ fi
 manifest_count=$(echo "$manifested" | wc -l)
 
 # ── Compare ─────────────────────────────────────────────────────────────────
-missing=$(comm -23 <(echo "$registered") <(echo "$manifested"))
-stale=$(comm -13 <(echo "$registered") <(echo "$manifested"))
+missing=$(comm -23 <(printf '%s\n' "$registered") <(printf '%s\n' "$manifested"))
+stale=$(comm -13 <(printf '%s\n' "$registered") <(printf '%s\n' "$manifested"))
 
 exit_code=0
 
