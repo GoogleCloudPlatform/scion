@@ -2904,3 +2904,100 @@ func TestUpdateUser_ViewerAuditRecorded(t *testing.T) {
 	}
 	assert.True(t, found, "user_role_change audit record should exist for member→viewer")
 }
+
+// ---------------------------------------------------------------------------
+// Invited users: role is assigned at first sign-in
+// ---------------------------------------------------------------------------
+
+func createInvitedUser(t *testing.T, s store.Store, suffix string) *store.User {
+	t.Helper()
+	user := &store.User{
+		ID:          tid("invited-" + suffix),
+		Email:       "invited-" + suffix + "@example.com",
+		DisplayName: "Invited " + suffix,
+		Role:        store.UserRoleMember, // placeholder
+		Status:      store.UserStatusInvited,
+	}
+	require.NoError(t, s.CreateUser(context.Background(), user))
+	return user
+}
+
+// TestUpdateUser_RoleOnInvitedUserConflict verifies PATCH role on an invited
+// user returns 409 for every role (including the placeholder) and leaves the
+// user and its grants untouched.
+func TestUpdateUser_RoleOnInvitedUserConflict(t *testing.T) {
+	for _, role := range []string{store.UserRoleAdmin, store.UserRoleMember, store.UserRoleViewer} {
+		t.Run(role, func(t *testing.T) {
+			srv, s := testServer(t)
+			ctx := context.Background()
+			user := createInvitedUser(t, s, role)
+
+			rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user.ID,
+				map[string]string{"role": role})
+			require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "role is assigned when the user first signs in")
+
+			got, err := s.GetUser(ctx, user.ID)
+			require.NoError(t, err)
+			assert.Equal(t, store.UserStatusInvited, got.Status)
+			assert.Equal(t, store.UserRoleMember, got.Role)
+			assert.Equal(t, 0, superAdminBindingCount(t, s, user.ID))
+			grants := observeHubRoleGrants(t, s, user.ID)
+			assert.False(t, grants.InHubMembers)
+			assert.Equal(t, 0, grants.HubViewerBindings)
+		})
+	}
+}
+
+// TestUpdateUser_RoleAndStatusOnInvitedUserConflict verifies a mixed PATCH
+// carrying a role is rejected as a whole, so the status is not changed either.
+func TestUpdateUser_RoleAndStatusOnInvitedUserConflict(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	user := createInvitedUser(t, s, "mixed")
+
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user.ID,
+		map[string]string{"role": "viewer", "status": "suspended"})
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+
+	got, err := s.GetUser(ctx, user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.UserStatusInvited, got.Status)
+}
+
+// TestSuspendUser_InvitedUserAllowed verifies status changes on invited users
+// remain allowed.
+func TestSuspendUser_InvitedUserAllowed(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	user := createInvitedUser(t, s, "suspend")
+
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user.ID,
+		map[string]string{"status": "suspended"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	got, err := s.GetUser(ctx, user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "suspended", got.Status)
+}
+
+// TestUpdateUser_RoleOnInvitedUserNonAdminDenied verifies authorization runs
+// before the invited guard: an actor without user.promote gets 403, not 409.
+func TestUpdateUser_RoleOnInvitedUserNonAdminDenied(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	user := createInvitedUser(t, s, "nonadmin")
+
+	actor := &store.User{
+		ID:          tid("invited-guard-actor"),
+		Email:       "invitedguardactor@example.com",
+		DisplayName: "Plain Member",
+		Role:        "member",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, actor))
+
+	rec := doRequestAsUser(t, srv, actor, http.MethodPatch, "/api/v1/users/"+user.ID,
+		map[string]string{"role": "viewer"})
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+}

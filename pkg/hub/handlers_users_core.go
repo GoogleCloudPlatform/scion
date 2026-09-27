@@ -415,6 +415,15 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
+	// Invited users have no real role yet: the stored role is a placeholder and
+	// the role is assigned at first sign-in (see determineUserRole). Reject role
+	// changes so an admin cannot set a role that activation would silently
+	// overwrite. Status changes on invited users remain allowed.
+	if needsPromote && user.Status == store.UserStatusInvited {
+		writeError(w, http.StatusConflict, ErrCodeConflict, errRoleOnInvitedUser.Error(), nil)
+		return
+	}
+
 	// ── Execute ALL mutations in a single atomic transaction (R4-C1) ──
 
 	// Build actor audit metadata outside the transaction.
@@ -431,6 +440,11 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 		// truthful audit records and change detection (R4-fix: not stale pre-tx).
 		beforeRole := txUser.Role
 		beforeStatus := txUser.Status
+
+		// Re-check the invited guard against the transactional read.
+		if needsPromote && beforeStatus == store.UserStatusInvited {
+			return errRoleOnInvitedUser
+		}
 
 		// Role transition: derives classification from canonical binding state
 		// inside the transaction, not from User.Role (R4-fix).
@@ -519,7 +533,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 	})
 
 	if err != nil {
-		if errors.Is(err, errLastSuperAdmin) || errors.Is(err, errSelfDemotion) {
+		if errors.Is(err, errLastSuperAdmin) || errors.Is(err, errSelfDemotion) || errors.Is(err, errRoleOnInvitedUser) {
 			writeError(w, http.StatusConflict, ErrCodeConflict, err.Error(), nil)
 		} else if errors.Is(err, errBindingStateDrift) {
 			writeError(w, http.StatusConflict, "binding_state_drift", err.Error(), nil)
@@ -663,6 +677,9 @@ var errLastSuperAdmin = errors.New("cannot remove the last super-admin; promote 
 // the TOCTOU window between the pre-tx self-lockout guard and the in-tx
 // binding mutation.
 var errSelfDemotion = errors.New("cannot demote yourself; ask another admin to change your role")
+
+// errRoleOnInvitedUser is returned when PATCH sets a role on an invited user.
+var errRoleOnInvitedUser = errors.New("role is assigned when the user first signs in")
 
 // bindingMutationKind describes what happened to super-admin bindings during
 // a role transition. Used for truthful audit records even when User.Role
