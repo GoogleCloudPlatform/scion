@@ -52,10 +52,10 @@ type Attachment struct {
 
 // AgentIdentity represents the visual identity of an agent in chat.
 type AgentIdentity struct {
-	Slug    string
-	Name    string
-	IconURL string
-	GroveID string
+	Slug      string
+	Name      string
+	IconURL   string
+	ProjectID string
 }
 
 // ChatUser represents a user on a chat platform.

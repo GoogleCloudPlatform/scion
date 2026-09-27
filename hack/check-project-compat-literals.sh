@@ -57,10 +57,6 @@ allowed_paths=(
   # Asserts a scion.grove.* user topic yields no user ID from
   # extractUserIDFromTopic. The literal is the point of the negative test.
   "^extras/scion-a2a-bridge/internal/bridge/pgstore_crossprocess_test.go$"
-  "^extras/scion-a2a-bridge/internal/bridge/server_test.go$"
-  "^extras/scion-a2a-bridge/internal/bridge/stream_test.go$"
-  "^extras/scion-a2a-bridge/internal/state/state_test.go$"
-  "^extras/scion-chat-app/internal/chatapp/commands_test.go$"
   "^extras/scion-chat-app/internal/chatapp/notifications_test.go$"
   "^extras/scion-chat-app/internal/state/state_test.go$"
   # Asserts parseTopicComponents does not treat a scion.grove.* prefix as a
@@ -195,7 +191,6 @@ allowed_paths=(
 
   # First-party integration compatibility boundaries.
   "^extras/agent-viz/internal/logparser/parser.go$"
-  "^extras/scion-chat-app/internal/chatapp/messenger.go$"
   "^extras/scion-chat-app/internal/state/state.go$"
   "^extras/scion-telegram/internal/telegram/broker_v2.go$"
 

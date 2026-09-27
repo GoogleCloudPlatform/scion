@@ -110,7 +110,7 @@ func TestHandleEvent_CommandRouting(t *testing.T) {
 }
 
 // TestCmdStart_RequiresSpaceLink verifies that /scion start now requires a
-// space link (grove context) before attempting to start an agent.
+// space link (project context) before attempting to start an agent.
 func TestCmdStart_RequiresSpaceLink(t *testing.T) {
 	router, _ := newTestRouter(t)
 	event := &ChatEvent{
@@ -133,7 +133,7 @@ func TestCmdStart_RequiresSpaceLink(t *testing.T) {
 }
 
 // TestCmdStop_RequiresSpaceLink verifies that /scion stop now requires a
-// space link (grove context) before attempting to stop an agent.
+// space link (project context) before attempting to stop an agent.
 func TestCmdStop_RequiresSpaceLink(t *testing.T) {
 	router, _ := newTestRouter(t)
 	event := &ChatEvent{
@@ -156,7 +156,7 @@ func TestCmdStop_RequiresSpaceLink(t *testing.T) {
 }
 
 // TestCmdUnsubscribe_RequiresSpaceLink verifies that /scion unsubscribe now
-// requires a space link to scope the deletion to the correct grove.
+// requires a space link to scope the deletion to the correct project.
 func TestCmdUnsubscribe_RequiresSpaceLink(t *testing.T) {
 	router, _ := newTestRouter(t)
 	event := &ChatEvent{
@@ -179,7 +179,7 @@ func TestCmdUnsubscribe_RequiresSpaceLink(t *testing.T) {
 }
 
 // TestHandleAgentAction_RequiresSpaceLink verifies that agent button actions
-// (start, stop, logs) now require a space link for grove scoping.
+// (start, stop, logs) now require a space link for project scoping.
 func TestHandleAgentAction_RequiresSpaceLink(t *testing.T) {
 	router, fm := newTestRouter(t)
 	event := &ChatEvent{
@@ -207,7 +207,7 @@ func TestHandleAgentAction_RequiresSpaceLink(t *testing.T) {
 }
 
 // TestExecuteDelete_RequiresSpaceLink verifies that the delete confirmation
-// handler requires a space link for grove scoping.
+// handler requires a space link for project scoping.
 func TestExecuteDelete_RequiresSpaceLink(t *testing.T) {
 	router, _ := newTestRouter(t)
 	event := &ChatEvent{
@@ -231,7 +231,7 @@ func TestExecuteDelete_RequiresSpaceLink(t *testing.T) {
 }
 
 // TestDialogSubmitRespond_RequiresSpaceLink verifies that the agent.respond
-// dialog handler requires a space link for grove scoping.
+// dialog handler requires a space link for project scoping.
 func TestDialogSubmitRespond_RequiresSpaceLink(t *testing.T) {
 	router, fm := newTestRouter(t)
 	event := &ChatEvent{
