@@ -533,7 +533,7 @@ func TestCreateAgentMissingName(t *testing.T) {
 func TestCreateAgentRejectsMultiSegmentName(t *testing.T) {
 	srv := newTestServer(t)
 
-	for _, name := range []string{"../sibling", "a/../..", "..", ".", "a/b", "/etc", `a\b`} {
+	for _, name := range []string{"../sibling", "a/../..", "..", ".", "a/b", "/etc", `a\b`, "a\x00b"} {
 		t.Run(name, func(t *testing.T) {
 			body, err := json.Marshal(CreateAgentRequest{Name: name})
 			if err != nil {
@@ -1319,6 +1319,64 @@ func TestCreateAgentProvisionOnly_Reprovision_CallsReprovisionNotProvision(t *te
 	}
 	if !resp.Reprovisioned {
 		t.Error("expected Reprovisioned=true in the response")
+	}
+}
+
+// TestCreateAgentProvisionOnly_SetsFreshProvision proves a plain
+// provisionOnly create (no reprovision) sets opts.FreshProvision, so
+// Manager.Provision -> GetAgent clears a leftover populated workspace from a
+// same-named agent, extending GoogleCloudPlatform/scion#1931's create-only
+// wipe gate to the ProvisionOnly path.
+func TestCreateAgentProvisionOnly_SetsFreshProvision(t *testing.T) {
+	srv, mgr := newTestServerWithProvisionCapture()
+
+	body := `{
+		"name": "provisioned-agent",
+		"id": "agent-uuid-456",
+		"slug": "provisioned-agent",
+		"provisionOnly": true,
+		"config": {"template": "claude"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, w.Code, w.Body.String())
+	}
+	if !mgr.lastOpts.FreshProvision {
+		t.Error("expected opts.FreshProvision to be true for a plain provisionOnly create")
+	}
+}
+
+// TestCreateAgentProvisionOnly_Reprovision_NeverSetsFreshProvision proves a
+// reprovision (reincarnation) create never sets opts.FreshProvision, even
+// though it is still an opCreate dispatch: reincarnation targets an existing
+// agent's workspace, and FreshProvision would let GetAgent wipe it.
+func TestCreateAgentProvisionOnly_Reprovision_NeverSetsFreshProvision(t *testing.T) {
+	srv, mgr := newTestServerWithProvisionCapture()
+
+	body := `{
+		"name": "reprovisioned-agent",
+		"id": "agent-uuid-reprov",
+		"slug": "reprovisioned-agent",
+		"provisionOnly": true,
+		"reprovision": true,
+		"config": {"template": "claude"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, w.Code, w.Body.String())
+	}
+	if mgr.lastOpts.FreshProvision {
+		t.Error("expected opts.FreshProvision to be false for a reprovision create")
 	}
 }
 
@@ -2284,10 +2342,12 @@ func TestCreateAgentConnectionHubEndpoint(t *testing.T) {
 // gitCloneCapturingManager captures env and GitClone from Start options.
 type gitCloneCapturingManager struct {
 	mockManager
-	lastEnv         map[string]string
-	lastGitClone    *api.GitCloneConfig
-	lastWorkspace   string
-	lastProjectPath string
+	lastEnv            map[string]string
+	lastGitClone       *api.GitCloneConfig
+	lastWorkspace      string
+	lastProjectPath    string
+	lastBranch         string
+	lastFreshProvision bool
 }
 
 func (m *gitCloneCapturingManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
@@ -2295,6 +2355,8 @@ func (m *gitCloneCapturingManager) Start(ctx context.Context, opts api.StartOpti
 	m.lastGitClone = opts.GitClone
 	m.lastWorkspace = opts.Workspace
 	m.lastProjectPath = opts.ProjectPath
+	m.lastBranch = opts.Branch
+	m.lastFreshProvision = opts.FreshProvision
 	return m.mockManager.Start(ctx, opts)
 }
 
@@ -2431,6 +2493,241 @@ func TestCreateAgentWithoutGitClone(t *testing.T) {
 	// Verify GitClone is nil
 	if mgr.lastGitClone != nil {
 		t.Error("expected GitClone to be nil for regular agent")
+	}
+}
+
+// TestStartAgentWithGitCloneOnly proves the start handler decodes a
+// top-level gitClone field the same way create's config.gitClone is decoded
+// (GoogleCloudPlatform/scion#1931), so a workspace that did not survive a
+// stop can be recreated on start.
+func TestStartAgentWithGitCloneOnly(t *testing.T) {
+	srv, mgr := newTestServerWithGitCloneCapture()
+
+	body := `{
+		"gitClone": {
+			"url": "https://github.com/example/repo.git",
+			"branch": "develop",
+			"depth": 1
+		}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/git-clone-agent/start", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+	}
+	if mgr.lastEnv == nil {
+		t.Fatal("expected environment variables to be set, got nil")
+	}
+	if got := mgr.lastEnv["SCION_GIT_CLONE_URL"]; got != "https://github.com/example/repo.git" {
+		t.Errorf("expected SCION_GIT_CLONE_URL='https://github.com/example/repo.git', got %q", got)
+	}
+	if got := mgr.lastEnv["SCION_GIT_BRANCH"]; got != "develop" {
+		t.Errorf("expected SCION_GIT_BRANCH='develop', got %q", got)
+	}
+	if got := mgr.lastEnv["SCION_GIT_DEPTH"]; got != "1" {
+		t.Errorf("expected SCION_GIT_DEPTH='1', got %q", got)
+	}
+	if _, ok := mgr.lastEnv["SCION_AGENT_BRANCH"]; ok {
+		t.Errorf("expected SCION_AGENT_BRANCH to be unset when no top-level branch is sent, got %q", mgr.lastEnv["SCION_AGENT_BRANCH"])
+	}
+	if mgr.lastGitClone == nil || mgr.lastGitClone.URL != "https://github.com/example/repo.git" {
+		t.Errorf("expected GitClone to be passed through to StartOptions, got %+v", mgr.lastGitClone)
+	}
+	// A start dispatch must never set FreshProvision: GitClone being present
+	// means the workspace may need recreating on a runtime that dropped it,
+	// not that a same-named leftover should be wiped (GoogleCloudPlatform/scion#1931).
+	if mgr.lastFreshProvision {
+		t.Error("expected opts.FreshProvision=false for a start dispatch, got true")
+	}
+}
+
+// TestStartAgentWithGitCloneAndBranch mirrors TestCreateAgentWithGitCloneAndBranch
+// for the start path: the top-level branch (agent's checkout branch) and the
+// gitClone's own branch (the clone source ref) are independent.
+func TestStartAgentWithGitCloneAndBranch(t *testing.T) {
+	srv, mgr := newTestServerWithGitCloneCapture()
+
+	body := `{
+		"branch": "my-feature",
+		"gitClone": {
+			"url": "https://github.com/example/repo.git",
+			"branch": "main",
+			"depth": 1
+		}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/branch-agent/start", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+	}
+	if mgr.lastEnv == nil {
+		t.Fatal("expected environment variables to be set, got nil")
+	}
+	if got := mgr.lastEnv["SCION_AGENT_BRANCH"]; got != "my-feature" {
+		t.Errorf("expected SCION_AGENT_BRANCH='my-feature', got %q", got)
+	}
+	if got := mgr.lastEnv["SCION_GIT_BRANCH"]; got != "main" {
+		t.Errorf("expected SCION_GIT_BRANCH='main', got %q", got)
+	}
+}
+
+// TestStartAgentOldHubPayloadHasNoWorkspaceFields proves a start request
+// without gitClone/branch/workspaceMode (an older Hub, or a non-git project)
+// behaves exactly as it did before those fields existed: no git-clone env is
+// injected and the request still succeeds.
+func TestStartAgentOldHubPayloadHasNoWorkspaceFields(t *testing.T) {
+	srv, mgr := newTestServerWithGitCloneCapture()
+
+	body := `{
+		"resolvedEnv": {"SCION_HUB_ENDPOINT": "https://hub.example.com"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/old-payload-agent/start", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+	}
+	if mgr.lastGitClone != nil {
+		t.Errorf("expected GitClone to be nil for an old-shape payload, got %+v", mgr.lastGitClone)
+	}
+	if mgr.lastBranch != "" {
+		t.Errorf("expected opts.Branch to be empty for an old-shape payload, got %q", mgr.lastBranch)
+	}
+	// SCION_WORKSPACE_MODE is excluded: it always defaults to shared-plain
+	// when no workspace mode is supplied, independent of gitClone/branch.
+	for _, key := range []string{"SCION_GIT_CLONE_URL", "SCION_GIT_BRANCH", "SCION_GIT_DEPTH", "SCION_AGENT_BRANCH"} {
+		if _, ok := mgr.lastEnv[key]; ok {
+			t.Errorf("expected %s to be unset for an old-shape payload, got %q", key, mgr.lastEnv[key])
+		}
+	}
+}
+
+// TestStartAgentIgnoresUnknownJSONKey proves an unrecognized top-level key in
+// the start request body (e.g. from a newer Hub sending a field this broker
+// version doesn't know about yet) does not break decoding of the fields this
+// broker does recognize. The unknown key is placed BEFORE the recognized
+// fields in the JSON object. The assertions check that gitClone and
+// workspaceMode — sent in the same payload — were actually applied, not
+// just that the response status was 202: a vacuous assertion (e.g. only
+// checking GitClone is nil) would pass even if decoding silently stopped
+// after the unknown key.
+func TestStartAgentIgnoresUnknownJSONKey(t *testing.T) {
+	srv, mgr := newTestServerWithGitCloneCapture()
+
+	body := `{
+		"someFutureField": {"nested": "value"},
+		"gitClone": {"url": "https://github.com/example/repo.git", "branch": "main"},
+		"workspaceMode": "clone-per-agent"
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/unknown-key-agent/start", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+	}
+	if mgr.lastGitClone == nil || mgr.lastGitClone.URL != "https://github.com/example/repo.git" {
+		t.Errorf("expected GitClone to be applied despite the preceding unknown key, got %+v", mgr.lastGitClone)
+	}
+	if got := mgr.lastEnv["SCION_WORKSPACE_MODE"]; got != "clone-per-agent" {
+		t.Errorf("expected SCION_WORKSPACE_MODE='clone-per-agent' despite the preceding unknown key, got %q", got)
+	}
+}
+
+// TestStartAgentBranchOnlyPropagatesToOpts proves a start request carrying
+// only a top-level branch (no gitClone) still reaches opts.Branch: the
+// broker-side cfg-building condition includes startReq.Branch != "" as one
+// of its triggers, not only GitClone.
+func TestStartAgentBranchOnlyPropagatesToOpts(t *testing.T) {
+	srv, mgr := newTestServerWithGitCloneCapture()
+
+	body := `{"branch": "my-feature"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/branch-only-agent/start", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+	}
+	if mgr.lastBranch != "my-feature" {
+		t.Errorf("expected opts.Branch='my-feature', got %q", mgr.lastBranch)
+	}
+	if mgr.lastGitClone != nil {
+		t.Errorf("expected GitClone to remain nil for a branch-only start, got %+v", mgr.lastGitClone)
+	}
+}
+
+// TestStartAndCreate_GitWorkspaceEnvParity proves create and start inject the
+// identical set of SCION_GIT_*, SCION_AGENT_BRANCH, and SCION_WORKSPACE_*
+// keys and values for equivalent GitClone/Branch/WorkspaceMode inputs
+// (GoogleCloudPlatform/scion#1931) — the two paths must not drift.
+func TestStartAndCreate_GitWorkspaceEnvParity(t *testing.T) {
+	const parityKeys = "SCION_GIT_CLONE_URL,SCION_GIT_BRANCH,SCION_GIT_DEPTH,SCION_AGENT_BRANCH,SCION_WORKSPACE_MODE,SCION_WORKSPACE_GIT"
+	keys := strings.Split(parityKeys, ",")
+
+	createSrv, createMgr := newTestServerWithGitCloneCapture()
+	createBody := `{
+		"name": "parity-agent",
+		"workspaceMode": "clone-per-agent",
+		"config": {
+			"template": "claude",
+			"branch": "my-feature",
+			"gitClone": {"url": "https://github.com/example/repo.git", "branch": "main", "depth": 1}
+		}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(createBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	createSrv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create: expected status %d, got %d: %s", http.StatusCreated, w.Code, w.Body.String())
+	}
+
+	startSrv, startMgr := newTestServerWithGitCloneCapture()
+	startBody := `{
+		"branch": "my-feature",
+		"workspaceMode": "clone-per-agent",
+		"gitClone": {"url": "https://github.com/example/repo.git", "branch": "main", "depth": 1}
+	}`
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/agents/parity-agent/start", strings.NewReader(startBody))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	startSrv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("start: expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+	}
+
+	for _, key := range keys {
+		createVal, createOK := createMgr.lastEnv[key]
+		startVal, startOK := startMgr.lastEnv[key]
+		if createOK != startOK || createVal != startVal {
+			t.Errorf("%s: create=%q(present=%v) start=%q(present=%v), want identical", key, createVal, createOK, startVal, startOK)
+		}
+	}
+
+	// FreshProvision is the one input that must NOT be at parity: create
+	// dispatches it true (safe to wipe a same-named leftover), start leaves
+	// it false (must preserve a workspace that survived a stop).
+	if !createMgr.lastFreshProvision {
+		t.Error("expected opts.FreshProvision=true for a create dispatch, got false")
+	}
+	if startMgr.lastFreshProvision {
+		t.Error("expected opts.FreshProvision=false for a start dispatch, got true")
 	}
 }
 
@@ -4003,6 +4300,34 @@ func TestDeleteAgent_ContainerOnlyRemovalSurvivesBadName(t *testing.T) {
 	}
 	if mgr.lastDeleteFiles {
 		t.Fatal("expected deleteFiles to be false for a container-only removal")
+	}
+}
+
+// TestDeleteAgent_InvalidIDWithDeleteFilesRejected proves that a DELETE with
+// deleteFiles=true and an id that is not a single valid path element is
+// still rejected: deleteAgent's own gate (isSingleCleanPathElement plus
+// containment) is reached and enforced even though handleAgentByID exempts
+// a bare DELETE from its own gate. Unlike
+// TestDeleteAgent_ContainerOnlyRemovalSurvivesBadName, this request does
+// touch files, so deleteAgent's own validation must still apply.
+func TestDeleteAgent_InvalidIDWithDeleteFilesRejected(t *testing.T) {
+	mgr := &mockManager{
+		agents: []api.AgentInfo{
+			{Name: `a\b`, ContainerID: "bad-name-container"},
+		},
+	}
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/agents/a%5Cb?deleteFiles=true", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, rec.Code, rec.Body.String())
+	}
+	if mgr.deleteCalls != 0 {
+		t.Fatalf("expected no Delete call for a rejected id, got %d", mgr.deleteCalls)
 	}
 }
 

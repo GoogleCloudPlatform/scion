@@ -477,9 +477,9 @@ func (s *Server) attachSkillResolver(ctx context.Context, r *http.Request, in sk
 }
 
 // isSingleCleanPathElement reports whether name is safe to join onto a
-// directory as exactly one path segment: no path separator, not "." or
-// "..", and unchanged by filepath.Clean (which also rejects an empty
-// string). Every agent-addressing path built from a request-supplied name
+// directory as exactly one path segment: no path separator or NUL byte,
+// not "." or "..", and unchanged by filepath.Clean (which also rejects an
+// empty string). Every agent-addressing path built from a request-supplied name
 // in this package and in pkg/agent joins that name onto a root this way, so
 // an identifier that fails this check must never reach one of those joins.
 //
@@ -487,11 +487,14 @@ func (s *Server) attachSkillResolver(ctx context.Context, r *http.Request, in sk
 // of GOOS: relying on os.PathSeparator would only reject '\' when built for
 // Windows, letting a name containing '\' slip through on every other
 // platform even though it is a path separator there.
+//
+// It does not decode or interpret name in any way — a value like "%2e%2e"
+// is a literal, ordinary-looking directory name, and passes.
 func isSingleCleanPathElement(name string) bool {
 	if name == "" || name == "." || name == ".." {
 		return false
 	}
-	if strings.ContainsRune(name, '/') || strings.ContainsRune(name, '\\') {
+	if strings.ContainsRune(name, '/') || strings.ContainsRune(name, '\\') || strings.ContainsRune(name, 0) {
 		return false
 	}
 	return filepath.Clean(name) == name
@@ -525,6 +528,15 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// rejects the same shape earlier, at the request boundary.
 	if !isSingleCleanPathElement(req.Name) {
 		ValidationError(w, "name must be a single path element", nil)
+		return
+	}
+
+	// ProjectID reaches filesystem paths further on (the project-marker
+	// block in buildStartContext, and worktree provisioning); an empty
+	// value is a normal, valid case (not every deployment sends one), but a
+	// non-empty value must be a single path element.
+	if req.ProjectID != "" && !isSingleCleanPathElement(req.ProjectID) {
+		ValidationError(w, "invalid projectId", nil)
 		return
 	}
 
@@ -841,6 +853,13 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	opts := sc.Opts
+	// Reincarnation (Reprovision) targets an existing agent's workspace, so
+	// FreshProvision — which permits GetAgent to wipe and re-clone a leftover
+	// populated workspace — must never be set for it, regardless of what
+	// buildStartContext computed for opCreate.
+	if req.Reprovision {
+		opts.FreshProvision = false
+	}
 	s.agentLifecycleLog.Info("Agent dispatch: buildStartContext complete",
 		"agent_id", req.ID, "name", req.Name, "elapsed", time.Since(buildCtxStart).String())
 
@@ -1304,6 +1323,23 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 		NotFound(w, "Agent")
 		return
 	}
+	// The ID is a single path segment (the agent's slug) that reaches
+	// filesystem, container-name, and git-branch identity downstream, for
+	// every action this handler dispatches to. Reject anything else here,
+	// once, rather than at each individual action.
+	//
+	// Exception: a bare DELETE (no action sub-path) is exempted from this
+	// gate. deleteAgent performs its own validation, gating only deletes
+	// that actually touch files (deleteFiles or a soft delete); a
+	// container-only removal (the default) never joins id onto a path, so
+	// it must stay possible even for an existing agent recorded under a bad
+	// id, and deleteAgent's own gate still applies whenever a file operation
+	// is requested.
+	isBareDelete := action == "" && r.Method == http.MethodDelete
+	if !isBareDelete && !isSingleCleanPathElement(id) {
+		BadRequest(w, "invalid agent id")
+		return
+	}
 
 	// Extract projectId from query params for project-scoped agent resolution.
 	// This prevents cross-project agent collision when two agents with the same
@@ -1513,6 +1549,15 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, p
 func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	ctx := r.Context()
 
+	// ProjectID reaches filesystem paths further on (the project-marker
+	// block in buildStartContext, and worktree provisioning); an empty
+	// value is a normal, valid case, but a non-empty value must be a single
+	// path element.
+	if projectID != "" && !isSingleCleanPathElement(projectID) {
+		BadRequest(w, "invalid projectId")
+		return
+	}
+
 	ctx, span := tracer.Start(ctx, "broker.agent.start")
 	defer span.End()
 	span.SetAttributes(
@@ -1563,6 +1608,15 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		UserID               string                           `json:"userId,omitempty"`
 		ProvisionCredentials map[string]string                `json:"provisionCredentials,omitempty"`
 		PreResolvedSkills    *hubclient.ResolveSkillsResponse `json:"preResolvedSkills,omitempty"`
+		// GitClone, Branch, and WorkspaceMode carry the workspace-recreation
+		// inputs the Hub sends on start (GoogleCloudPlatform/scion#1931), so
+		// an agent's workspace can be recreated on a runtime that does not
+		// keep it between stops. Threaded into cfg the same way create's
+		// Config.GitClone and Config.Branch are, and into WorkspaceMode the
+		// same way create's RemoteCreateAgentRequest.WorkspaceMode is.
+		GitClone      *api.GitCloneConfig `json:"gitClone,omitempty"`
+		Branch        string              `json:"branch,omitempty"`
+		WorkspaceMode string              `json:"workspaceMode,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&startReq); err != nil {
@@ -1585,7 +1639,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 
 	// Build config for buildStartContext (startAgent uses a subset of CreateAgentConfig)
 	var cfg *CreateAgentConfig
-	if startReq.Task != "" || startReq.HarnessConfig != "" || startReq.HarnessConfigID != "" || startReq.HarnessConfigHash != "" || len(startReq.SharedDirs) > 0 || startReq.SharedWorkspace {
+	if startReq.Task != "" || startReq.HarnessConfig != "" || startReq.HarnessConfigID != "" || startReq.HarnessConfigHash != "" || len(startReq.SharedDirs) > 0 || startReq.SharedWorkspace || startReq.GitClone != nil || startReq.Branch != "" {
 		cfg = &CreateAgentConfig{
 			Task:              startReq.Task,
 			HarnessConfig:     startReq.HarnessConfig,
@@ -1593,6 +1647,8 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			HarnessConfigHash: startReq.HarnessConfigHash,
 			SharedDirs:        startReq.SharedDirs,
 			SharedWorkspace:   startReq.SharedWorkspace,
+			GitClone:          startReq.GitClone,
+			Branch:            startReq.Branch,
 		}
 	}
 
@@ -1603,8 +1659,25 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	// setting it here makes the start path behave like create.
 	startContextAgentToken := startReq.ResolvedEnv["SCION_AUTH_TOKEN"]
 
+	// The URL path segment (id) is the agent's slug, not the Hub UUID: the
+	// broker's own dispatch client sends agent.Slug there. It is also the
+	// stable on-disk identity: create keys the agent directory, container
+	// name, and worktree branch/sharer-registry entry on the slug, so start
+	// must use the same value — never a hub-editable display name, which can
+	// change independently of the slug and is not safe to use as a
+	// filesystem path component. The Hub UUID is only available via the
+	// resolvedEnv the Hub injects on every start dispatch
+	// (pkg/hub/httpdispatcher.go's DispatchAgentStart), which sets
+	// SCION_AGENT_ID/SCION_PROJECT_ID. AgentID and ProjectID must reach
+	// buildStartContext so a worktree-per-agent start resolves this agent's
+	// own worktree path, not the shared "worktrees" parent directory every
+	// agent's worktree lives under.
+	startAgentID := startReq.ResolvedEnv["SCION_AGENT_ID"]
+
 	sc, err := s.buildStartContext(ctx, startContextInputs{
 		Name:               id,
+		AgentID:            startAgentID,
+		ProjectID:          projectID,
 		ProjectPath:        startReq.ProjectPath,
 		ProjectSlug:        startReq.ProjectSlug,
 		Config:             cfg,
@@ -1615,6 +1688,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		ResolvedSecrets:    startReq.ResolvedSecrets,
 		SharedDirs:         startReq.SharedDirs,
 		AgentToken:         startContextAgentToken,
+		WorkspaceMode:      startReq.WorkspaceMode,
 		HTTPRequest:        r,
 		Operation:          opHTTPStart,
 	})

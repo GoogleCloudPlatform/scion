@@ -606,7 +606,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 	// Add configuration if available
 	if agent.AppliedConfig != nil {
 		workspace := agent.AppliedConfig.Workspace
-		gitClone := agent.AppliedConfig.GitClone
+		wsSpec := workspaceSpecFor(agent, projectInfo.workspaceMode)
 		// When the broker has a local provider path for this project, clear
 		// the hub-native workspace path — the broker will derive its own
 		// workspace location from the project path. However, keep GitClone
@@ -640,12 +640,12 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 			Task:                      agent.AppliedConfig.Task,
 			Workspace:                 workspace,
 			Profile:                   agent.AppliedConfig.Profile,
-			Branch:                    agent.AppliedConfig.Branch,
+			Branch:                    wsSpec.Branch,
 			TemplateID:                agent.AppliedConfig.TemplateID,
 			TemplateHash:              agent.AppliedConfig.TemplateHash,
 			HarnessConfigID:           agent.AppliedConfig.HarnessConfigID,
 			HarnessConfigHash:         agent.AppliedConfig.HarnessConfigHash,
-			GitClone:                  gitClone,
+			GitClone:                  wsSpec.GitClone,
 			SharedWorkspace:           projectInfo.sharedWorkspace,
 			GCPIdentity:               remoteGCPIdentity,
 			ProjectPreStartHookScript: agent.AppliedConfig.ProjectPreStartHookScript,
@@ -2258,6 +2258,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		resolvedEnv["SCION_WORKSPACE_MODE"] = string(resolvedMode)
 		classifyEnv(&envClassifications, "SCION_WORKSPACE_MODE", api.EnvKindPlain)
 	}
+	wsSpec := workspaceSpecFor(agent, projectInfo.workspaceMode)
 	switch resolvedMode {
 	case store.SharingModeClonePerAgent, store.SharingModeWorktreePerAgent:
 		resolvedEnv["SCION_WORKSPACE_GIT"] = "true"
@@ -2270,7 +2271,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		// buildStartContext covers this for the create path; on start/restart paths
 		// SCION_WORKSPACE_GIT will be absent for such workspaces. This is an
 		// acknowledged limitation noted in the design doc.
-		if agent.AppliedConfig != nil && agent.AppliedConfig.GitClone != nil {
+		if wsSpec.GitClone != nil {
 			resolvedEnv["SCION_WORKSPACE_GIT"] = "true"
 			classifyEnv(&envClassifications, "SCION_WORKSPACE_GIT", api.EnvKindPlain)
 		}
@@ -2374,6 +2375,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	// PRECONDITION for P3b: without this, the broker receives nil (state 3,
 	// "classification unavailable") on the start path. P3b must not land
 	// until #1350 is done — otherwise fail-closed + nil map = total outage.
+	// This includes SCION_GIT_CLONE_URL: the broker classifies it as
+	// EnvKindSecretInjected on its own side (start_context.go), but that
+	// classification does not reach the Hub until #1350 wires it back.
 	_ = envClassifications // avoid unused-variable error until #1350 wire threading
 
 	// Carry the same dispatch metadata the create path sends so that a
@@ -2391,6 +2395,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		HubEndpoint:          d.effectiveAgentHubEndpoint(),
 		UserID:               agent.OwnerID,
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentStart"),
+		Workspace:            wsSpec,
 	}
 	if d.creatorSkillPreResolver != nil {
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)
@@ -2545,6 +2550,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		resolvedEnv["SCION_WORKSPACE_MODE"] = string(resolvedMode)
 		classifyEnv(&envClassifications, "SCION_WORKSPACE_MODE", api.EnvKindPlain)
 	}
+	wsSpec := workspaceSpecFor(agent, projectInfo.workspaceMode)
 	switch resolvedMode {
 	case store.SharingModeClonePerAgent, store.SharingModeWorktreePerAgent:
 		resolvedEnv["SCION_WORKSPACE_GIT"] = "true"
@@ -2553,7 +2559,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		// See DispatchAgentStart for the acknowledged limitation: broker-local
 		// linked projects without a GitClone config cannot be detected as
 		// git-backed here.
-		if agent.AppliedConfig != nil && agent.AppliedConfig.GitClone != nil {
+		if wsSpec.GitClone != nil {
 			resolvedEnv["SCION_WORKSPACE_GIT"] = "true"
 			classifyEnv(&envClassifications, "SCION_WORKSPACE_GIT", api.EnvKindPlain)
 		}
