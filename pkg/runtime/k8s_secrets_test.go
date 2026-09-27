@@ -356,9 +356,9 @@ func TestCreateAgentSecret(t *testing.T) {
 	}
 
 	labels := map[string]string{
-		"scion.name":  "test-agent",
-		"scion.grove": "test-project",
-		"app":         "other", // Non-scion label should not be copied
+		"scion.name":    "test-agent",
+		"scion.project": "test-project",
+		"app":           "other", // Non-scion label should not be copied
 	}
 
 	name, err := rt.createAgentSecret(ctx, "default", "test-agent", secrets, labels)
@@ -402,8 +402,8 @@ func TestCreateAgentSecret(t *testing.T) {
 	if secret.Labels["scion.name"] != "test-agent" {
 		t.Errorf("expected scion.name label propagated")
 	}
-	if secret.Labels["scion.grove"] != "test-project" {
-		t.Errorf("expected scion.grove label propagated")
+	if secret.Labels["scion.project"] != "test-project" {
+		t.Errorf("expected scion.project label propagated")
 	}
 	if _, ok := secret.Labels["app"]; ok {
 		t.Error("non-scion label should not be copied to secret")

@@ -807,7 +807,7 @@ func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace s
 
 	projectName := projectcompat.ProjectNameFromLabels(config.Labels)
 	if projectName == "" {
-		return fmt.Errorf("cannot create shared dir PVCs: missing scion.project or scion.grove label")
+		return fmt.Errorf("cannot create shared dir PVCs: missing scion.project label")
 	}
 
 	storageClass := ""
@@ -870,11 +870,11 @@ func (r *KubernetesRuntime) ensureProjectRWXClaim(
 		},
 	}
 
-	for k, v := range projectcompat.ProjectNameLabels(projectName, true) {
+	for k, v := range projectcompat.ProjectNameLabels(projectName) {
 		pvc.Labels[k] = v
 	}
 	if projectID != "" {
-		for k, v := range projectcompat.ProjectIDLabels(projectID, true) {
+		for k, v := range projectcompat.ProjectIDLabels(projectID) {
 			pvc.Labels[k] = v
 		}
 	}

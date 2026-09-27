@@ -40,12 +40,12 @@ func TestExecCommand_ProjectScopedDisambiguation(t *testing.T) {
 		{
 			ContainerID: "container-A",
 			Name:        "coordinator",
-			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
 		},
 		{
 			ContainerID: "container-B",
 			Name:        "coordinator",
-			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-B"},
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-B"},
 		},
 	}
 
@@ -72,23 +72,23 @@ func TestExecCommand_ProjectScopedDisambiguation(t *testing.T) {
 		return w.Body.String(), w.Code
 	}
 
-	// Exec scoped to grove-A must target container-A.
-	respA, codeA := doExec("grove-A")
+	// Exec scoped to project-A must target container-A.
+	respA, codeA := doExec("project-A")
 	if codeA != http.StatusOK {
-		t.Fatalf("grove-A exec: expected 200, got %d (%s)", codeA, respA)
+		t.Fatalf("project-A exec: expected 200, got %d (%s)", codeA, respA)
 	}
 	if execedID != "container-A" {
-		t.Errorf("grove-A exec targeted %q, want container-A", execedID)
+		t.Errorf("project-A exec targeted %q, want container-A", execedID)
 	}
 
-	// Exec scoped to grove-B must target container-B — not whichever the
+	// Exec scoped to project-B must target container-B — not whichever the
 	// slug-only lookup happened to find first.
-	respB, codeB := doExec("grove-B")
+	respB, codeB := doExec("project-B")
 	if codeB != http.StatusOK {
-		t.Fatalf("grove-B exec: expected 200, got %d (%s)", codeB, respB)
+		t.Fatalf("project-B exec: expected 200, got %d (%s)", codeB, respB)
 	}
 	if execedID != "container-B" {
-		t.Errorf("grove-B exec targeted %q, want container-B (cross-project slug collision)", execedID)
+		t.Errorf("project-B exec targeted %q, want container-B (cross-project slug collision)", execedID)
 	}
 }
 
@@ -101,18 +101,18 @@ func TestStopAgent_ProjectScopedDisambiguation(t *testing.T) {
 		{
 			ContainerID: "container-A",
 			Name:        "coordinator",
-			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
 		},
 		{
 			ContainerID: "container-B",
 			Name:        "coordinator",
-			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-B"},
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-B"},
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(DefaultServerConfig(), mgr, rt)
 
-	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/stop?projectId=grove-B", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/stop?projectId=project-B", nil)
 	w := httptest.NewRecorder()
 	srv.handleAgentByID(w, r)
 
@@ -126,7 +126,7 @@ func TestStopAgent_ProjectScopedDisambiguation(t *testing.T) {
 
 // TestExecCommand_NotFoundWhenOnlyInOtherProject verifies that exec does NOT
 // fall back to a same-slug agent in a different project. Asking to exec
-// "coordinator" in grove-B when only grove-A has one must 404 and never invoke
+// "coordinator" in project-B when only project-A has one must 404 and never invoke
 // the runtime — the core cross-project collision the review feedback targeted.
 func TestExecCommand_NotFoundWhenOnlyInOtherProject(t *testing.T) {
 	mgr := &filteringMockManager{}
@@ -134,7 +134,7 @@ func TestExecCommand_NotFoundWhenOnlyInOtherProject(t *testing.T) {
 		{
 			ContainerID: "container-A",
 			Name:        "coordinator",
-			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
 		},
 	}
 	execCalled := false
@@ -148,7 +148,7 @@ func TestExecCommand_NotFoundWhenOnlyInOtherProject(t *testing.T) {
 	srv := New(DefaultServerConfig(), mgr, rt)
 
 	body, _ := json.Marshal(map[string]any{"command": []string{"echo", "hi"}})
-	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/exec?projectId=grove-B", bytes.NewReader(body))
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/exec?projectId=project-B", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	srv.handleAgentByID(w, r)
 
@@ -169,13 +169,13 @@ func TestStopAgent_NotFoundInProjectIsNoOp(t *testing.T) {
 		{
 			ContainerID: "container-A",
 			Name:        "coordinator",
-			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(DefaultServerConfig(), mgr, rt)
 
-	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/stop?projectId=grove-B", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/stop?projectId=project-B", nil)
 	w := httptest.NewRecorder()
 	srv.handleAgentByID(w, r)
 
@@ -199,14 +199,14 @@ func TestStopAgent_LookupErrorReturns5xx(t *testing.T) {
 		{
 			ContainerID: "container-A",
 			Name:        "coordinator",
-			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
 		},
 	}
 	mgr.listErr = fmt.Errorf("docker ps failed: exit status 1")
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(DefaultServerConfig(), mgr, rt)
 
-	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/stop?projectId=grove-A", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/stop?projectId=project-A", nil)
 	w := httptest.NewRecorder()
 	srv.handleAgentByID(w, r)
 
@@ -292,7 +292,7 @@ func TestExecCommand_NotFoundInProject(t *testing.T) {
 		{
 			ContainerID: "container-A",
 			Name:        "coordinator",
-			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
 		},
 	}
 	rt := &runtime.MockRuntime{
@@ -302,7 +302,7 @@ func TestExecCommand_NotFoundInProject(t *testing.T) {
 	srv := New(DefaultServerConfig(), mgr, rt)
 
 	body, _ := json.Marshal(map[string]any{"command": []string{"echo", "hi"}})
-	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/ghost/exec?projectId=grove-A", bytes.NewReader(body))
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/ghost/exec?projectId=project-A", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	srv.handleAgentByID(w, r)
 
@@ -323,13 +323,13 @@ func TestRestartAgent_LookupErrorAbortsWithoutStart(t *testing.T) {
 		{
 			ContainerID: "container-A",
 			Name:        "coordinator",
-			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
 		},
 	}
 	mgr.listErr = fmt.Errorf("docker ps failed: exit status 1")
 	srv := newTestServerWithManager(t, mgr)
 
-	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/restart?projectId=grove-A", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/restart?projectId=project-A", nil)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, r)
 
@@ -354,13 +354,13 @@ func TestRestartAgent_NotFoundInProjectProceedsWithStart(t *testing.T) {
 		{
 			ContainerID: "container-A",
 			Name:        "coordinator",
-			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
 		},
 	}
 	srv := newTestServerWithManager(t, mgr)
 
-	// grove-B has no "coordinator" agent — a genuine not-found, not a lookup error.
-	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/restart?projectId=grove-B", nil)
+	// project-B has no "coordinator" agent — a genuine not-found, not a lookup error.
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/restart?projectId=project-B", nil)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, r)
 

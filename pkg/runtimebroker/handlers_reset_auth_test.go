@@ -37,7 +37,7 @@ func resetAuthAgents() *filteringMockManager {
 		{
 			ContainerID: "container-A",
 			Name:        "coordinator",
-			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
 		},
 	}
 	return mgr
@@ -47,7 +47,7 @@ func doResetAuth(t *testing.T, srv *Server, token string) *httptest.ResponseReco
 	t.Helper()
 	body, _ := json.Marshal(ResetAuthRequest{Token: token})
 	r := httptest.NewRequest(http.MethodPost,
-		"/api/v1/agents/coordinator/reset-auth?projectId=grove-A", bytes.NewReader(body))
+		"/api/v1/agents/coordinator/reset-auth?projectId=project-A", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	srv.handleAgentByID(w, r)
 	return w
