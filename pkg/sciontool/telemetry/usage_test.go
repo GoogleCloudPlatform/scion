@@ -426,10 +426,27 @@ func TestNewUsageDeriverIsNoOpForUnknownHarness(t *testing.T) {
 // filter (AC-1.4), and the fixture is replayed to prove a repeat doesn't
 // double count (AC-1.4).
 func TestPipelineDerivesClaudeUsageEndToEnd(t *testing.T) {
+	// The exported gen_ai.api.calls/scion.usage.tokens resource is built from
+	// every env var authoritativeIdentity() (policy.go) and buildResource()
+	// (providers.go) read — SCION_AGENT_ID, SCION_AGENT_SLUG, SCION_PROJECT_ID
+	// (via projectkeys.ProjectIDFromEnv), SCION_HARNESS, SCION_MODEL,
+	// SCION_BROKER_ID, SCION_BROKER_NAME, and SCION_GCP_PROJECT_ID
+	// (config.EnvProjectID) — and scion_metric_resource_id (part of the F7
+	// golden comparison below) is a digest of that whole resource. Every one
+	// of those must be pinned, not just the ones this test's own assertions
+	// name, or an ambient value for any of them (this container sets several,
+	// e.g. SCION_BROKER_NAME/SCION_BROKER_ID/SCION_MODEL for its own agent
+	// identity) leaks into the digest and makes the golden comparison
+	// non-hermetic — it can pass here and fail in CI or under env -i for a
+	// reason with no visible connection to this test's inputs.
 	t.Setenv("SCION_AGENT_ID", "agent-usage-1")
 	t.Setenv("SCION_AGENT_SLUG", "usage-agent-slug")
 	t.Setenv("SCION_PROJECT_ID", "project-usage-1")
 	t.Setenv("SCION_HARNESS", "claude")
+	t.Setenv("SCION_MODEL", "")
+	t.Setenv("SCION_BROKER_ID", "")
+	t.Setenv("SCION_BROKER_NAME", "")
+	t.Setenv("SCION_GCP_PROJECT_ID", "")
 	t.Setenv("SCION_USAGE_SOURCE", "native")
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
