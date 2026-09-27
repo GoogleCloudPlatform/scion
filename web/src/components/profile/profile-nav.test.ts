@@ -79,6 +79,7 @@ describe('scion-profile-nav — hub role badge', () => {
     element?.remove();
     element = null;
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it.each([

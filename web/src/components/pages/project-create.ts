@@ -63,9 +63,13 @@ export class ScionPageProjectCreate extends LitElement {
   @property({ type: Object })
   pageData: PageData | null = null;
 
-  /** Hub-scope project.create check: pending, granted, or not granted. */
+  /**
+   * Hub-scope project.create check: pending, granted, not granted, or not
+   * determinable (capabilities could not be loaded). Only 'allowed' shows
+   * the form.
+   */
   @state()
-  private createAccess: 'checking' | 'allowed' | 'denied' = 'checking';
+  private createAccess: 'checking' | 'allowed' | 'denied' | 'unknown' = 'checking';
 
   @state()
   private submitting = false;
@@ -149,10 +153,15 @@ export class ScionPageProjectCreate extends LitElement {
   /**
    * Gate the form on hub-scope `project.create` (the same `_capabilities`
    * the Projects list uses), not on the role string. Fail-closed: if the
-   * capabilities cannot be loaded the notice is shown.
+   * capabilities cannot be loaded the form stays hidden, with a neutral
+   * notice rather than one that blames the user's role.
    */
   private async checkCreateCapability(): Promise<void> {
     const caps = await fetchHubProjectCapabilities();
+    if (!caps) {
+      this.createAccess = 'unknown';
+      return;
+    }
     this.createAccess = can(caps, 'create') ? 'allowed' : 'denied';
   }
 
@@ -776,9 +785,11 @@ export class ScionPageProjectCreate extends LitElement {
 
       ${this.createAccess === 'checking'
         ? html`<div class="capability-loading"><sl-spinner></sl-spinner></div>`
-        : this.createAccess === 'denied'
-          ? this.renderCreateDeniedNotice()
-          : this.renderForm()}
+        : this.createAccess === 'allowed'
+          ? this.renderForm()
+          : this.createAccess === 'denied'
+            ? this.renderCreateDeniedNotice()
+            : this.renderCreateUnknownNotice()}
     `;
   }
 
@@ -799,6 +810,27 @@ export class ScionPageProjectCreate extends LitElement {
           >
           <p>
             Ask a hub admin to change your role, or to add you to an existing project.
+            <a href="/projects">Browse projects</a>
+          </p>
+        </div>
+      </div>
+    `;
+  }
+
+  /**
+   * Shown when the capability check itself failed. Still fail-closed (no
+   * form), but it does not claim the user's role lacks permission.
+   */
+  private renderCreateUnknownNotice(): TemplateResult {
+    return html`
+      <div class="create-denied-notice create-unknown-notice" role="status">
+        <sl-icon name="exclamation-circle"></sl-icon>
+        <div>
+          <strong class="create-denied-title"
+            >Couldn't check whether you can create projects.</strong
+          >
+          <p>
+            Reload the page to try again.
             <a href="/projects">Browse projects</a>
           </p>
         </div>

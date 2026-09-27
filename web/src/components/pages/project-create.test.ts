@@ -148,11 +148,32 @@ describe('scion-page-project-create — hub project.create gate', () => {
     expect(text).not.toContain('(');
   });
 
-  it('fails closed: shows the notice when capabilities cannot be loaded', async () => {
+  it('fails closed with a neutral notice when capabilities cannot be loaded', async () => {
     element = await createComponent({ projectsStatus: 500 }, 'member');
 
-    expect(q(element, '.create-denied-notice')).not.toBeNull();
     expect(q(element, '.form-card')).toBeNull();
+    const notice = q(element, '.create-unknown-notice');
+    expect(notice).not.toBeNull();
+    const text = notice?.textContent?.replace(/\s+/g, ' ') ?? '';
+    expect(text).toContain("Couldn't check whether you can create projects.");
+    expect(text).toContain('Reload the page to try again.');
+    // It must not claim the user's role lacks permission.
+    expect(text).not.toContain("can't create projects");
+    expect(q(element, '.create-unknown-notice a[href="/projects"]')).not.toBeNull();
+  });
+
+  it('fails closed with the neutral notice when the response has no capabilities', async () => {
+    element = await createComponent({}, 'member');
+
+    expect(q(element, '.form-card')).toBeNull();
+    expect(q(element, '.create-unknown-notice')).not.toBeNull();
+  });
+
+  it('shows the role notice (not the neutral one) when caps load without create', async () => {
+    element = await createComponent({ caps: { actions: ['list'] } }, 'viewer');
+
+    expect(q(element, '.create-unknown-notice')).toBeNull();
+    expect(q(element, '.create-denied-notice')).not.toBeNull();
   });
 
   it('does not redirect away from /projects/new', async () => {
