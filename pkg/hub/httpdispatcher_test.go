@@ -1779,11 +1779,14 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_IncludesAgentIdentity(t *testing
 		t.Errorf("expected SCION_AGENT_SLUG='test-agent-slug', got %q", v)
 	}
 
-	// Verify SCION_GROVE_ID is included in resolvedEnv
-	if v, ok := mockClient.lastResolvedEnv["SCION_GROVE_ID"]; !ok {
-		t.Error("expected SCION_GROVE_ID in resolvedEnv, but not found")
+	// Verify SCION_PROJECT_ID is included in resolvedEnv
+	if v, ok := mockClient.lastResolvedEnv["SCION_PROJECT_ID"]; !ok {
+		t.Error("expected SCION_PROJECT_ID in resolvedEnv, but not found")
 	} else if v != tid("project-1") {
-		t.Errorf("expected SCION_GROVE_ID='project-1', got %q", v)
+		t.Errorf("expected SCION_PROJECT_ID='project-1', got %q", v)
+	}
+	if _, ok := mockClient.lastResolvedEnv["SCION_GROVE_ID"]; ok {
+		t.Error("expected SCION_GROVE_ID to be absent from resolvedEnv")
 	}
 }
 
@@ -3619,8 +3622,11 @@ func TestDispatchAgentStart_IncludesHubEndpoint(t *testing.T) {
 	if mockClient.lastResolvedEnv["SCION_AGENT_ID"] != tid("agent-1") {
 		t.Errorf("SCION_AGENT_ID = %q, want %q", mockClient.lastResolvedEnv["SCION_AGENT_ID"], tid("agent-1"))
 	}
-	if mockClient.lastResolvedEnv["SCION_GROVE_ID"] != tid("project-1") {
-		t.Errorf("SCION_GROVE_ID = %q, want %q", mockClient.lastResolvedEnv["SCION_GROVE_ID"], tid("project-1"))
+	if mockClient.lastResolvedEnv["SCION_PROJECT_ID"] != tid("project-1") {
+		t.Errorf("SCION_PROJECT_ID = %q, want %q", mockClient.lastResolvedEnv["SCION_PROJECT_ID"], tid("project-1"))
+	}
+	if _, ok := mockClient.lastResolvedEnv["SCION_GROVE_ID"]; ok {
+		t.Error("expected SCION_GROVE_ID to be absent from resolvedEnv")
 	}
 }
 
@@ -5311,6 +5317,12 @@ func TestDispatchAgentRestart_IncludesHubName(t *testing.T) {
 		t.Error("SCION_HUB_NAME missing from restart resolvedEnv — hubName not injected on restart path")
 	} else if got != "restart-hub" {
 		t.Errorf("SCION_HUB_NAME = %q, want %q", got, "restart-hub")
+	}
+	if got := env["SCION_PROJECT_ID"]; got != agent.ProjectID {
+		t.Errorf("SCION_PROJECT_ID = %q, want %q", got, agent.ProjectID)
+	}
+	if _, ok := env["SCION_GROVE_ID"]; ok {
+		t.Errorf("expected SCION_GROVE_ID to be absent from restart resolvedEnv, got %q", env["SCION_GROVE_ID"])
 	}
 }
 

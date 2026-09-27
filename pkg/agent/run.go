@@ -102,14 +102,11 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			agentID = opts.Env["SCION_AGENT_ID"]
 		}
 		projectID = opts.Env["SCION_PROJECT_ID"]
-		if projectID == "" {
-			projectID = opts.Env["SCION_GROVE_ID"]
-		}
 	}
 	// Snapshot the dispatch-provided project ID now, before any
 	// settings-driven env merging (resolveAuthEnvOverlay copying
 	// harness-config env into opts.Env for absent keys, telemetry env, etc.)
-	// can inject a project-controlled SCION_PROJECT_ID/SCION_GROVE_ID.
+	// can inject a project-controlled SCION_PROJECT_ID.
 	// Used only by the nfs shared_dir_storage branch below (round 3 review
 	// finding C1/S-L1): a project's harness_configs.<name>.env can set
 	// these keys, and since resolveAuthEnvOverlay only fills in *absent*
@@ -680,7 +677,6 @@ authDone:
 		opts.Env = make(map[string]string)
 	}
 	opts.Env["SCION_AGENT_NAME"] = opts.Name
-	opts.Env["SCION_GROVE"] = projectName
 	opts.Env["SCION_PROJECT"] = projectName
 	if template != "" {
 		opts.Env["SCION_TEMPLATE_NAME"] = template
@@ -1048,10 +1044,10 @@ authDone:
 	// and NOT a fresh read of opts.Env here. By this point opts.Env may
 	// already have been filled in from project-level harness-config env by
 	// resolveAuthEnvOverlay (it only fills *absent* keys, but that includes
-	// SCION_PROJECT_ID/SCION_GROVE_ID when the hub didn't dispatch this
+	// SCION_PROJECT_ID when the hub didn't dispatch this
 	// start), so re-reading opts.Env at this line would reopen exactly the
 	// hole this snapshot closes (round 3 review finding C1/S-L1). The hub
-	// sets SCION_PROJECT_ID/SCION_GROVE_ID unconditionally after merging any
+	// sets SCION_PROJECT_ID unconditionally after merging any
 	// user-supplied env for hub-dispatched starts
 	// (pkg/hub/httpdispatcher.go DispatchAgentStart/DispatchAgentRestart,
 	// "Identity vars at highest precedence"), so hubDispatchedProjectID is

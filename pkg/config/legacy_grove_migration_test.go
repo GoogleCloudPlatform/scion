@@ -143,6 +143,38 @@ func TestWarnRemovedLegacyEnv(t *testing.T) {
 		}
 	})
 
+	t.Run("reports SCION_GROVE_ID, SCION_GROVE and SCION_GROVE_PATH when set", func(t *testing.T) {
+		env := map[string]string{
+			"SCION_GROVE_ID":   "some-uuid",
+			"SCION_GROVE":      "some-project",
+			"SCION_GROVE_PATH": "/some/path",
+		}
+		r := &fakeReporter{}
+
+		WarnRemovedLegacyEnv(func(k string) string { return env[k] }, r)
+
+		if len(r.envIgnored) != 3 {
+			t.Fatalf("EnvIgnored called %d times, want 3", len(r.envIgnored))
+		}
+		want := map[string]string{
+			"SCION_GROVE_ID":   "SCION_PROJECT_ID",
+			"SCION_GROVE":      "SCION_PROJECT",
+			"SCION_GROVE_PATH": "SCION_PROJECT_PATH",
+		}
+		got := map[string]string{}
+		for _, e := range r.envIgnored {
+			got[e.name] = e.replacement
+		}
+		for name, replacement := range want {
+			if got[name] != replacement {
+				t.Fatalf("EnvIgnored(%q) replacement = %q, want %q", name, got[name], replacement)
+			}
+		}
+		if r.migrated != 0 || r.conflicts != 0 || r.skipped != 0 {
+			t.Fatalf("unexpected non-env reports: migrated=%d conflicts=%d skipped=%d", r.migrated, r.conflicts, r.skipped)
+		}
+	})
+
 	t.Run("nil getenv or report is a no-op", func(t *testing.T) {
 		WarnRemovedLegacyEnv(nil, &fakeReporter{})
 		WarnRemovedLegacyEnv(func(string) string { return "x" }, nil)

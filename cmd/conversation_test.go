@@ -274,19 +274,17 @@ func (s conversationCreateTestState) restore() {
 // isolateHubEnvForTest overrides every SCION_ env var that
 // config.LoadSettingsKoanf's env layer (pkg/config/koanf.go) merges over
 // project settings — SCION_HUB_ENDPOINT (-> hub.endpoint), SCION_HUB_URL
-// (cmd.GetHubEndpoint's secondary fallback), and SCION_PROJECT_ID /
-// SCION_GROVE_ID (-> the top-level, last-resort project ID resolveProjectID
-// falls back to). Without this, these tests are not hermetic when run
-// inside a live Scion agent container, which sets all four to point at the
-// real orchestration hub and project — silently defeating the "nothing
-// resolves" case and masking which value actually won. t.Setenv restores
-// the originals automatically.
+// (cmd.GetHubEndpoint's secondary fallback), and SCION_PROJECT_ID (-> the
+// top-level, last-resort project ID resolveProjectID falls back to). Without
+// this, these tests are not hermetic when run inside a live Scion agent
+// container, which sets all three to point at the real orchestration hub and
+// project — silently defeating the "nothing resolves" case and masking which
+// value actually won. t.Setenv restores the originals automatically.
 func isolateHubEnvForTest(t *testing.T, hubEndpoint, projectID string) {
 	t.Helper()
 	t.Setenv("SCION_HUB_ENDPOINT", hubEndpoint)
 	t.Setenv("SCION_HUB_URL", hubEndpoint)
 	t.Setenv("SCION_PROJECT_ID", projectID)
-	t.Setenv("SCION_GROVE_ID", projectID)
 }
 
 // setupConversationCreateProject creates a project directory with hub

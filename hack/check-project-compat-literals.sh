@@ -34,13 +34,11 @@ fi
 allowed_paths=(
   # CLI compatibility adapters, hidden deprecated aliases, and examples.
   "^cmd/delete.go$"
-  "^cmd/notifications.go$"
 
   # Current compatibility and migration tests/fixtures.
   "^cmd/command_tree_grove_guard_test.go$"
   "^cmd/common_envgather_test.go$"
   "^cmd/config_test.go$"
-  "^cmd/conversation_test.go$"
   "^cmd/delete_test.go$"
   "^cmd/harness_config_install_test.go$"
   "^cmd/hub_env_test.go$"
@@ -73,6 +71,9 @@ allowed_paths=(
   "^extras/scion-telegram/internal/telegram/broker_v2_test.go$"
   "^pkg/agent/list_test.go$"
   "^pkg/agent/provision_test.go$"
+  # Asserts SCION_GROVE is absent from RunConfig.Env alongside a SCION_PROJECT
+  # presence check. The literal is the point of the negative assertion.
+  "^pkg/agent/run_test.go$"
   "^pkg/agent/run_shared_dir_storage_test.go$"
   "^pkg/agent/stop_project_containers_test.go$"
   "^pkg/api/types_test.go$"
@@ -80,7 +81,6 @@ allowed_paths=(
   "^pkg/config/harness_config_test.go$"
   "^pkg/config/init_project_test.go$"
   "^pkg/config/init_test.go$"
-  "^pkg/config/koanf_hubcontext_test.go$"
   "^pkg/config/koanf_test.go$"
   "^pkg/config/legacy_grove_migration_test.go$"
   "^pkg/config/paths_test.go$"
@@ -159,9 +159,11 @@ allowed_paths=(
   "^pkg/projectcompat/config_test.go$"
   "^pkg/projectcompat/labels_test.go$"
   "^pkg/projectcompat/topics_test.go$"
-  "^pkg/runtime/cloudrun_runtime_test.go$"
   "^pkg/runtime/cloudrun_sandbox_runtime_test.go$"
-  "^pkg/runtime/factory_test.go$"
+  # Asserts SCION_GROVE and SCION_GROVE_ID are absent from buildCommonRunArgs
+  # output alongside a SCION_PROJECT/SCION_PROJECT_ID presence check. The
+  # literal is the point of the negative assertion.
+  "^pkg/runtime/common_test.go$"
   "^pkg/runtime/k8s_nfs_test.go$"
   "^pkg/runtime/k8s_runtime_test.go$"
   "^pkg/runtime/k8s_secrets_test.go$"
@@ -199,7 +201,6 @@ allowed_paths=(
 
   # Core compatibility adapters and bounded legacy protocol/storage surfaces.
   "^pkg/agent/list.go$"
-  "^pkg/agent/run.go$"
   "^pkg/api/types.go$"
   "^pkg/config/koanf.go$"
   "^pkg/config/legacy_grove_migration.go$"
@@ -209,26 +210,21 @@ allowed_paths=(
   "^pkg/hub/fs_safety.go$"
   "^pkg/hub/handlers_projects_core.go$"
   "^pkg/hub/handlers_runtime_brokers.go$"
-  "^pkg/hub/httpdispatcher.go$"
   "^pkg/hub/system_handlers.go$"
   "^pkg/hubclient/agents.go$"
   "^pkg/hubclient/notifications.go$"
   "^pkg/hubclient/runtime_brokers.go$"
   "^pkg/hubclient/templates.go$"
   "^pkg/hubclient/tokens.go$"
-  "^pkg/hubsync/sync.go$"
   "^pkg/projectcompat/.*\\.go$"
-  "^pkg/runtime/cloudrun_sandbox_runtime.go$"
   "^pkg/runtime/common.go$"
   "^pkg/runtime/k8s_runtime.go$"
   "^pkg/runtimebroker/handlers.go$"
-  "^pkg/runtimebroker/hubenv.go$"
   "^pkg/runtimebroker/pty_handlers.go$"
   "^pkg/runtimebroker/server.go$"
   "^pkg/runtimebroker/start_context.go$"
   "^pkg/runtimebroker/types.go$"
   "^pkg/runtimebroker/workspace_handlers.go$"
-  "^pkg/sciontool/telemetry/aggregator.go$"
   # Reserved-identity-attribute denylist: the three retired grove-named
   # telemetry keys (scion.grove, scion.grove.id, scion.grove_id) are kept
   # here so the receiver still strips them from user-supplied attributes,

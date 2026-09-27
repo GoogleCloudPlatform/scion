@@ -680,6 +680,20 @@ profiles:
 	if capturedConfig.UnixUsername != "scion" {
 		t.Errorf("expected UnixUsername = %q, got %q", "scion", capturedConfig.UnixUsername)
 	}
+
+	envMap := make(map[string]string)
+	for _, e := range capturedConfig.Env {
+		parts := strings.SplitN(e, "=", 2)
+		if len(parts) == 2 {
+			envMap[parts[0]] = parts[1]
+		}
+	}
+	if got := envMap["SCION_PROJECT"]; got != "project" {
+		t.Errorf("expected SCION_PROJECT=%q, got %q", "project", got)
+	}
+	if _, ok := envMap["SCION_GROVE"]; ok {
+		t.Errorf("expected SCION_GROVE to be absent from RunConfig.Env, got %q", envMap["SCION_GROVE"])
+	}
 }
 
 func TestStartPropagatesNFSWorkspaceBackendToRunConfig(t *testing.T) {

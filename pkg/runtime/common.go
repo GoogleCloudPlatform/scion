@@ -332,9 +332,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 
 	// Phase 3 & 5: Project identity injection
 	addEnv("SCION_PROJECT", config.Project)
-	addEnv("SCION_GROVE", config.Project)
 	addEnv("SCION_PROJECT_ID", config.ProjectID)
-	addEnv("SCION_GROVE_ID", config.ProjectID)
 
 	// Mount gcloud config if it exists on the host (local mode only).
 	// In broker mode, credentials are projected via ResolvedSecrets;

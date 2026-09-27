@@ -38,7 +38,7 @@ func TestLoadSettings_HubEndpointFromEnvOnly(t *testing.T) {
 
 	// Set hub env vars like a container would have
 	t.Setenv("SCION_HUB_ENDPOINT", "http://hub.test:8080")
-	t.Setenv("SCION_GROVE_ID", "test-grove-id")
+	t.Setenv("SCION_PROJECT_ID", "test-project-id")
 	t.Setenv("HOME", tmpDir)
 
 	settings, err := LoadSettings(scionDir)
@@ -60,8 +60,8 @@ func TestLoadSettings_HubEndpointFromEnvOnly(t *testing.T) {
 	if settings.Hub.Endpoint != "http://hub.test:8080" {
 		t.Errorf("Hub.Endpoint = %q, want %q", settings.Hub.Endpoint, "http://hub.test:8080")
 	}
-	if settings.ProjectID != "test-grove-id" {
-		t.Errorf("ProjectID = %q, want %q", settings.ProjectID, "test-grove-id")
+	if settings.ProjectID != "test-project-id" {
+		t.Errorf("ProjectID = %q, want %q", settings.ProjectID, "test-project-id")
 	}
 }
 
@@ -74,7 +74,7 @@ func TestLoadSettings_HubEndpointFromEnvNoSettingsFile(t *testing.T) {
 	nonExistentPath := filepath.Join(tmpDir, "nonexistent", ".scion")
 
 	t.Setenv("SCION_HUB_ENDPOINT", "http://hub.test:9090")
-	t.Setenv("SCION_GROVE_ID", "env-grove-id")
+	t.Setenv("SCION_PROJECT_ID", "env-project-id")
 	t.Setenv("HOME", tmpDir)
 
 	settings, err := LoadSettings(nonExistentPath)
@@ -88,7 +88,7 @@ func TestLoadSettings_HubEndpointFromEnvNoSettingsFile(t *testing.T) {
 	if settings.Hub.Endpoint != "http://hub.test:9090" {
 		t.Errorf("Hub.Endpoint = %q, want %q", settings.Hub.Endpoint, "http://hub.test:9090")
 	}
-	if settings.ProjectID != "env-grove-id" {
-		t.Errorf("ProjectID = %q, want %q", settings.ProjectID, "env-grove-id")
+	if settings.ProjectID != "env-project-id" {
+		t.Errorf("ProjectID = %q, want %q", settings.ProjectID, "env-project-id")
 	}
 }

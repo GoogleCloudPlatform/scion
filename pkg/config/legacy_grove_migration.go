@@ -101,11 +101,12 @@ type legacyRemovedEnv struct {
 }
 
 // removedLegacyEnvVars lists the legacy environment variables that are no
-// longer read anywhere in scion. This currently covers SCION_HUB_GROVE_ID;
-// SCION_GROVE_ID, SCION_GROVE and SCION_GROVE_PATH join it once agent
-// containers stop needing them.
+// longer read anywhere in scion.
 var removedLegacyEnvVars = []legacyRemovedEnv{
 	{name: "SCION_HUB_GROVE_ID", replacement: "SCION_HUB_PROJECT_ID"},
+	{name: "SCION_GROVE_ID", replacement: "SCION_PROJECT_ID"},
+	{name: "SCION_GROVE", replacement: "SCION_PROJECT"},
+	{name: "SCION_GROVE_PATH", replacement: "SCION_PROJECT_PATH"},
 }
 
 // isRemovedLegacyEnv reports whether name is one of removedLegacyEnvVars.

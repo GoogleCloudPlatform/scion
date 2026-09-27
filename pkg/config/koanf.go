@@ -123,9 +123,9 @@ func LoadSettingsKoanf(projectPath string) (*Settings, error) {
 	}
 
 	// Check for unrecognized keys BEFORE environment variables are loaded.
-	// Environment variables like SCION_PROJECT, SCION_GROVE, SCION_CREATOR
-	// do not map to Settings struct fields and would produce false-positive
-	// warnings if the check ran on the merged koanf instance.
+	// Environment variables like SCION_PROJECT, SCION_CREATOR do not map to
+	// Settings struct fields and would produce false-positive warnings if the
+	// check ran on the merged koanf instance.
 	{
 		var probe Settings
 		_ = unmarshalWithUnusedKeyCheck(k, &probe, "settings")

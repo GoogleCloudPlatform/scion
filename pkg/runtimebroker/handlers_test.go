@@ -987,9 +987,12 @@ func TestCreateAgentWithHubCredentials(t *testing.T) {
 		t.Errorf("expected SCION_AGENT_ID='agent-uuid-123', got %q", got)
 	}
 
-	// Check SCION_GROVE_ID
-	if got := mgr.lastEnv["SCION_GROVE_ID"]; got != "grove-uuid-456" {
-		t.Errorf("expected SCION_GROVE_ID='grove-uuid-456', got %q", got)
+	// Check SCION_PROJECT_ID
+	if got := mgr.lastEnv["SCION_PROJECT_ID"]; got != "grove-uuid-456" {
+		t.Errorf("expected SCION_PROJECT_ID='grove-uuid-456', got %q", got)
+	}
+	if _, ok := mgr.lastEnv["SCION_GROVE_ID"]; ok {
+		t.Errorf("expected SCION_GROVE_ID to be absent, got %q", mgr.lastEnv["SCION_GROVE_ID"])
 	}
 }
 
@@ -2838,7 +2841,7 @@ func TestStartAgentResolvedEnvHubEndpointFallback(t *testing.T) {
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(cfg, mgr, rt)
 
-	body := `{"resolvedEnv": {"SCION_HUB_ENDPOINT": "http://hub.example.com:8080", "SCION_GROVE_ID": "grove-1"}}`
+	body := `{"resolvedEnv": {"SCION_HUB_ENDPOINT": "http://hub.example.com:8080", "SCION_PROJECT_ID": "project-1"}}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent/start", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()

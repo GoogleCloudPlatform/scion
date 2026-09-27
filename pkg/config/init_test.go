@@ -244,7 +244,7 @@ func TestGenerateProjectID(t *testing.T) {
 
 func TestIsInsideProject(t *testing.T) {
 	// Unset Hub context to avoid synthetic project root detection
-	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_GROVE_ID", "SCION_PROJECT_ID"} {
+	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_PROJECT_ID"} {
 		if val, ok := os.LookupEnv(e); ok {
 			_ = os.Unsetenv(e)
 			defer func() { _ = os.Setenv(e, val) }()

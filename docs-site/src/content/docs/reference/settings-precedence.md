@@ -100,7 +100,7 @@ existing value.
 | Variable | Meaning | Injection |
 | --- | --- | --- |
 | `SCION_AGENT_NAME` | agent name | **Unconditional** — overwrites |
-| `SCION_PROJECT`, `SCION_GROVE` | project name | **Unconditional** — overwrites |
+| `SCION_PROJECT` | project name | **Unconditional** — overwrites |
 | `SCION_TEMPLATE_NAME` | resolved template slug, or `custom` | **Unconditional** — overwrites |
 | `SCION_CLI_MODE` | always `agent` inside a container | **Unconditional** — overwrites |
 | `SCION_MAX_TURNS` | from the resolved `ScionConfig` | **Unconditional** — overwrites the hub-supplied value |

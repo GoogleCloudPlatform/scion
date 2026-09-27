@@ -163,11 +163,10 @@ func IsOldStyleNonGitProject(scionPath string) bool {
 // indicating the CLI is running inside a hub-connected agent container where
 // project data should be accessed via the Hub API rather than the local filesystem.
 // Checks SCION_HUB_ENDPOINT (primary), SCION_HUB_URL (legacy), and
-// SCION_GROVE_ID (always set for broker-dispatched agents).
+// SCION_PROJECT_ID (always set for broker-dispatched agents).
 func IsHubContext() bool {
 	return os.Getenv("SCION_HUB_ENDPOINT") != "" ||
 		os.Getenv("SCION_HUB_URL") != "" ||
-		os.Getenv(projectcompat.EnvGroveID) != "" ||
 		os.Getenv(projectcompat.EnvProjectID) != ""
 }
 
