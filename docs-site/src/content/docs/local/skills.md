@@ -284,6 +284,16 @@ Most commands accept either a skill **name** or **ID**. Add the global `--format
 `scion skill` (singular) is an alias for `scion skills`.
 :::
 
+### From inside an agent
+
+Agents can browse skills too. In agent mode, the CLI allows `scion skills list` and `scion skills show`, but not `versions`, `resolve`, or `delete`. Access is read-only. An agent can see:
+
+- The Hub's global skill catalog
+- Skills scoped to the agent's own project
+- The personal (user-scoped) skills of the user at the root of the agent's creation chain
+
+Other projects' skills and other users' personal skills are not visible. Agent project scope and the creator's delegated permissions still apply on top of these grants.
+
 ## Auto-Injected Skills (Multi-Scope)
 
 While you can manually reference skills inside templates or agent configurations, Scion also supports **auto-injection**. This allows you to configure skills that are automatically injected into every provisioned agent, without needing to modify your templates or configurations.
