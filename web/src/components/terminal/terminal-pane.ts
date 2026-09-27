@@ -54,8 +54,8 @@ type TmuxWindow = 'agent' | 'shell';
 // The terminal viewport stays dark in both app themes: it renders TUI output
 // that is generally authored against a dark background. The viewport wrapper
 // and the xterm theme share these so they cannot drift apart.
-const TERMINAL_BACKGROUND = '#1a1a1a';
-const TERMINAL_FOREGROUND = '#eaeaea';
+export const TERMINAL_BACKGROUND = '#1a1a1a';
+export const TERMINAL_FOREGROUND = '#eaeaea';
 
 @customElement('scion-terminal-pane')
 export class ScionTerminalPane extends LitElement {
@@ -556,7 +556,7 @@ export class ScionTerminalPane extends LitElement {
     }
 
     .error-state p {
-      color: var(--scion-status-danger, #ef4444);
+      color: var(--scion-badge-danger-text, #991b1b);
       margin: 0 0 1rem 0;
     }
 
@@ -578,6 +578,13 @@ export class ScionTerminalPane extends LitElement {
 
     .error-state button:hover {
       background: var(--scion-primary-hover, #2563eb);
+    }
+
+    .error-banner {
+      padding: 0.375rem 1rem;
+      background: var(--scion-badge-danger-bg, #fee2e2);
+      color: var(--scion-badge-danger-text, #991b1b);
+      font-size: 0.75rem;
     }
 
     /* Port forwarding buttons */
@@ -653,7 +660,11 @@ export class ScionTerminalPane extends LitElement {
       padding: 0.25rem 0;
       min-width: 180px;
       z-index: 100;
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+      box-shadow: var(
+        --scion-shadow-md,
+        0 4px 6px -1px rgb(0 0 0 / 0.1),
+        0 2px 4px -2px rgb(0 0 0 / 0.1)
+      );
     }
 
     .port-dropdown.open .port-dropdown-menu {
@@ -1964,9 +1975,7 @@ export class ScionTerminalPane extends LitElement {
       </div>
       ${this.error
         ? html`
-            <div
-              style="padding: 0.375rem 1rem; background: var(--scion-badge-danger-bg, #fee2e2); color: var(--scion-badge-danger-text, #991b1b); font-size: 0.75rem;"
-            >
+            <div class="error-banner">
               ${this.error}
               ${this.metadataError
                 ? html`<button class="metadata-retry" @click=${() => void this.refreshAgentData()}>

@@ -544,13 +544,23 @@ describe('overlay strings', () => {
 // new chrome rules are covered without updating a selector list.
 // See miller79/scion#133.
 describe('theme', () => {
-  const VIEWPORT = /^\.(terminal-wrapper|terminal-container|disconnected-overlay|drop-overlay)\b/;
+  let TERMINAL_BACKGROUND = '';
+  beforeAll(async () => {
+    ({ TERMINAL_BACKGROUND } = await import('./terminal-pane.js'));
+  });
+  // A viewport selector must end the class name exactly (so, for example,
+  // .terminal-wrapper-foo is not exempt).
+  const VIEWPORT =
+    /^\.(terminal-wrapper|terminal-container|disconnected-overlay|drop-overlay)(?=[\s.:#[>+~]|$)/;
+  // Colour-bearing properties, including shadows and every custom property
+  // (for example --sl-panel-background-color or --indicator-color); custom
+  // properties with non-colour values never match LITERAL_COLOR.
   const COLOR_PROPS =
-    /^(color|background(-color)?|border(-(top|right|bottom|left))?(-color)?|outline(-color)?|fill|stroke)$/;
+    /^(color|background(-color)?|border(-(top|right|bottom|left))?(-color)?|outline(-color)?|fill|stroke|box-shadow|text-shadow|--[\w-]+)$/;
   const LITERAL_COLOR = /#[0-9a-f]{3,8}\b|\b(rgba?|hsla?)\(|\b(white|black)\b/i;
   // var(--scion-x) and var(--scion-x, <fallback>), including one level of
   // nested parentheses in the fallback (for example rgba(...)).
-  const SCION_VAR = /var\(--scion-[\w-]+(?:,(?:[^()]|\([^()]*\))*)?\)/g;
+  const SCION_VAR = /var\(\s*--scion-[\w-]+\s*(?:,(?:[^()]|\([^()]*\))*)?\)/g;
 
   /** Leaf style rules from Lit cssText, skipping @keyframes contents. */
   function styleRules(cssText: string): Array<{ selector: string; body: string }> {
@@ -608,6 +618,25 @@ describe('theme', () => {
     expect(host).toMatch(/background:\s*var\(--scion-surface\b/);
     expect(host).toMatch(/(^|;)\s*color:\s*var\(--scion-text\b/);
     const wrapper = rules.find((r) => r.selector === '.terminal-wrapper')?.body ?? '';
-    expect(wrapper).toMatch(/background:\s*#1a1a1a/);
+    const bg = /(^|;)\s*background:\s*([^;]+)/.exec(wrapper)?.[2].trim();
+    expect(bg?.toLowerCase()).toBe(TERMINAL_BACKGROUND.toLowerCase());
+  });
+
+  // Inline style attributes are not in static styles, so check the rendered
+  // chrome too, with the metadata error banner (the one conditional
+  // strip outside the viewport) showing.
+  it('renders no literal colours in inline styles outside the terminal viewport', async () => {
+    await mountConnected();
+    const state = page as unknown as { error: string | null; metadataError: string | null };
+    state.error = 'metadata unavailable';
+    state.metadataError = 'metadata unavailable';
+    await page.updateComplete;
+    const root = page.shadowRoot!;
+    expect(root.querySelector('.error-banner')).not.toBeNull();
+    const offenders = Array.from(root.querySelectorAll<HTMLElement>('[style]'))
+      .filter((el) => !el.closest('.terminal-wrapper'))
+      .map((el) => el.getAttribute('style') ?? '')
+      .filter((style) => LITERAL_COLOR.test(style.replace(SCION_VAR, '')));
+    expect(offenders).toEqual([]);
   });
 });
