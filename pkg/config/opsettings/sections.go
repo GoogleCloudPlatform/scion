@@ -27,6 +27,7 @@ import (
 type AccessSettings struct {
 	AdminEmails       []string `json:"admin_emails,omitempty"`
 	UserAccessMode    string   `json:"user_access_mode,omitempty"`
+	DefaultUserRole   string   `json:"default_user_role,omitempty"`
 	AuthorizedDomains []string `json:"authorized_domains,omitempty"`
 }
 

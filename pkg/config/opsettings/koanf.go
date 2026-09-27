@@ -89,6 +89,7 @@ var koanfPathToJSONField = map[string]map[string]string{
 	"access": {
 		"server.hub.admin_emails":        "admin_emails",
 		"server.auth.user_access_mode":   "user_access_mode",
+		"server.auth.default_user_role":  "default_user_role",
 		"server.auth.authorized_domains": "authorized_domains",
 	},
 	"lifecycle": {
@@ -129,6 +130,7 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 	"access": {
 		"admin_emails":       "server.hub.admin_emails",
 		"user_access_mode":   "server.auth.user_access_mode",
+		"default_user_role":  "server.auth.default_user_role",
 		"authorized_domains": "server.auth.authorized_domains",
 	},
 	"lifecycle": {

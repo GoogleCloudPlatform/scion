@@ -133,6 +133,9 @@ type AccessSettingsProvider interface {
 	// UserAccessMode returns the current login-time access mode
 	// ("open", "domain_restricted", "invite_only").
 	UserAccessMode() string
+	// DefaultUserRole returns the configured default role for new users
+	// ("member" or "viewer"). Returns "member" when unconfigured.
+	DefaultUserRole() string
 }
 
 // WebServerConfig holds configuration for the web frontend server.
@@ -649,6 +652,15 @@ func (ws *WebServer) userAccessMode() string {
 		return ""
 	}
 	return ws.accessSettings.UserAccessMode()
+}
+
+// defaultUserRole returns the live default user role from the access settings
+// provider. Returns "member" when no provider is configured.
+func (ws *WebServer) defaultUserRole() string {
+	if ws.accessSettings == nil {
+		return "member"
+	}
+	return ws.accessSettings.DefaultUserRole()
 }
 
 // SetAccessSettingsProvider sets the live operational access settings provider.
@@ -1975,7 +1987,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 				if storedRole == "admin" && ws.store != nil {
 					uiPromoted = hasUIPromotedBinding(r.Context(), ws.store, uid)
 				}
-				expectedRole := determineUserRole(email, ws.adminEmails(), storedRole, ws.isDemotionSafe(), uiPromoted)
+				expectedRole := determineUserRole(email, ws.adminEmails(), storedRole, ws.isDemotionSafe(), uiPromoted, ws.defaultUserRole())
 				if currentRole == expectedRole {
 					// Role unchanged — inject user into context and proceed
 					// without saving session (avoids redundant write).
@@ -2066,6 +2078,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 
 		// Find or create user (same pattern as handleOAuthCallback)
 		user, err := ws.store.GetUserByEmail(ctx, proxyUser.Email)
+		syncGrants := true
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			// Genuine DB error — don't treat as "create new user"
 			ws.logger().Error("Proxy auth: failed to look up user", "email", proxyUser.Email, "error", err)
@@ -2074,7 +2087,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 		}
 		if err != nil {
 			// User not found — create new user
-			role := determineUserRole(proxyUser.Email, ws.adminEmails(), "", ws.isDemotionSafe(), false)
+			role := determineUserRole(proxyUser.Email, ws.adminEmails(), "", ws.isDemotionSafe(), false, ws.defaultUserRole())
 			user = &store.User{
 				ID:          generateID(),
 				Email:       proxyUser.Email,
@@ -2122,7 +2135,14 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 				user.LastLogin = time.Now()
 				oldRole := user.Role
 				proxyUIPromoted := hasUIPromotedBinding(ctx, ws.store, user.ID)
-				user.Role = determineUserRole(proxyUser.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe(), proxyUIPromoted)
+				// The stored role on an invited row is a placeholder (invites carry
+				// no role): evaluate as a brand-new user, except keep an admin that
+				// was already promoted through the admin UI.
+				activationRole := ""
+				if user.Role == store.UserRoleAdmin && proxyUIPromoted {
+					activationRole = user.Role
+				}
+				user.Role = determineUserRole(proxyUser.Email, ws.adminEmails(), activationRole, ws.isDemotionSafe(), proxyUIPromoted, ws.defaultUserRole())
 				if oldRole == "admin" && user.Role != "admin" {
 					bindingSuperAdmin = "delete"
 				} else if user.Role == "admin" {
@@ -2137,7 +2157,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 				}
 				// Re-evaluate admin status on every login (matches handleOAuthCallback / provisionUser)
 				proxyUIPromoted := hasUIPromotedBinding(ctx, ws.store, user.ID)
-				if newRole := determineUserRole(proxyUser.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe(), proxyUIPromoted); user.Role != newRole {
+				if newRole := determineUserRole(proxyUser.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe(), proxyUIPromoted, ws.defaultUserRole()); user.Role != newRole {
 					oldRole := user.Role
 					ws.logger().Info("User role changed on proxy login", "email", proxyUser.Email, "old_role", oldRole, "new_role", newRole)
 					user.Role = newRole
@@ -2150,6 +2170,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 			}
 			if err := ws.store.UpdateUser(ctx, user); err != nil {
 				ws.logger().Warn("Failed to update user via proxy auth", "email", proxyUser.Email, "error", err)
+				syncGrants = false
 			} else {
 				// Apply binding changes only after UpdateUser has succeeded.
 				switch bindingSuperAdmin {
@@ -2161,9 +2182,14 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 			}
 		}
 
-		// Only members (not viewers) get hub-members group membership.
-		if user.Role == "member" {
-			ensureHubMembership(ctx, ws.store, user.ID)
+		// Make the hub-members group and hub-viewer binding match the stored
+		// role (mirrors provisionUser). Skipped when UpdateUser failed, so the
+		// grants keep following the persisted role. Best-effort: a failure is
+		// logged and the login continues; the startup backfill repairs it.
+		if syncGrants {
+			if err := syncHubRoleGrants(ctx, ws.store, user.ID, user.Role, store.SystemReconcileCreatedBy); err != nil {
+				ws.logger().Warn("Proxy auth: failed to sync hub role grants", "email", proxyUser.Email, "user_id", user.ID, "role", user.Role, "error", err)
+			}
 		}
 
 		// Generate Hub JWT tokens (mirrors devAuthMiddleware / handleOAuthCallback)
@@ -2454,10 +2480,11 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 
 	// Find or create user
 	user, err := ws.store.GetUserByEmail(ctx, userInfo.Email)
+	syncGrants := true
 	if err != nil {
 		// Create new user (only reachable in open/domain_restricted modes;
 		// in invite_only mode, checkUserAuthorized already confirmed a User record exists)
-		role := determineUserRole(userInfo.Email, ws.adminEmails(), "", ws.isDemotionSafe(), false)
+		role := determineUserRole(userInfo.Email, ws.adminEmails(), "", ws.isDemotionSafe(), false, ws.defaultUserRole())
 		user = &store.User{
 			ID:          generateID(),
 			Email:       userInfo.Email,
@@ -2508,7 +2535,14 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 			user.LastLogin = time.Now()
 			oldRole := user.Role
 			oauthUIPromoted := hasUIPromotedBinding(ctx, ws.store, user.ID)
-			user.Role = determineUserRole(userInfo.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe(), oauthUIPromoted)
+			// The stored role on an invited row is a placeholder (invites carry
+			// no role): evaluate as a brand-new user, except keep an admin that
+			// was already promoted through the admin UI.
+			activationRole := ""
+			if user.Role == store.UserRoleAdmin && oauthUIPromoted {
+				activationRole = user.Role
+			}
+			user.Role = determineUserRole(userInfo.Email, ws.adminEmails(), activationRole, ws.isDemotionSafe(), oauthUIPromoted, ws.defaultUserRole())
 			if oldRole == "admin" && user.Role != "admin" {
 				bindingSuperAdmin = "delete"
 			} else if user.Role == "admin" {
@@ -2528,7 +2562,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 			}
 			// Re-evaluate admin status on every login
 			oauthUIPromoted := hasUIPromotedBinding(ctx, ws.store, user.ID)
-			newRole := determineUserRole(userInfo.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe(), oauthUIPromoted)
+			newRole := determineUserRole(userInfo.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe(), oauthUIPromoted, ws.defaultUserRole())
 			if user.Role != newRole {
 				oldRole := user.Role
 				ws.logger().Info("User role changed on login", "email", userInfo.Email, "old_role", oldRole, "new_role", newRole)
@@ -2542,6 +2576,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 		}
 		if err := ws.store.UpdateUser(ctx, user); err != nil {
 			ws.logger().Warn("Failed to update user on login", "email", userInfo.Email, "error", err)
+			syncGrants = false
 		} else {
 			// Apply binding changes only after UpdateUser has succeeded.
 			switch bindingSuperAdmin {
@@ -2553,9 +2588,14 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	// Only members (not viewers) get hub-members group membership.
-	if user.Role == "member" {
-		ensureHubMembership(ctx, ws.store, user.ID)
+	// Make the hub-members group and hub-viewer binding match the stored
+	// role (mirrors provisionUser). Skipped when UpdateUser failed, so the
+	// grants keep following the persisted role. Best-effort: a failure is
+	// logged and the login continues; the startup backfill repairs it.
+	if syncGrants {
+		if err := syncHubRoleGrants(ctx, ws.store, user.ID, user.Role, store.SystemReconcileCreatedBy); err != nil {
+			ws.logger().Warn("OAuth login: failed to sync hub role grants", "email", userInfo.Email, "user_id", user.ID, "role", user.Role, "error", err)
+		}
 	}
 
 	// Generate Hub tokens if token service is available

@@ -74,6 +74,7 @@ type Layer1Snapshot struct {
 	// Access
 	AdminEmails       []string
 	UserAccessMode    string
+	DefaultUserRole   string
 	AuthorizedDomains []string
 
 	// Lifecycle
@@ -755,6 +756,7 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	// Access
 	snap.AdminEmails = k.Strings("server.hub.admin_emails")
 	snap.UserAccessMode = k.String("server.auth.user_access_mode")
+	snap.DefaultUserRole = k.String("server.auth.default_user_role")
 	snap.AuthorizedDomains = k.Strings("server.auth.authorized_domains")
 
 	// Lifecycle
@@ -898,6 +900,7 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 	snap := Layer1Snapshot{
 		AdminEmails:        gc.Hub.AdminEmails,
 		UserAccessMode:     gc.Auth.UserAccessMode,
+		DefaultUserRole:    gc.Auth.DefaultUserRole,
 		AuthorizedDomains:  gc.Auth.AuthorizedDomains,
 		AutoSuspendStalled: gc.Hub.AutoSuspendStalled,
 		TelemetryEnabled:   gc.TelemetryEnabled,
@@ -1014,6 +1017,28 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	} else if s.config.UserAccessMode != "" {
 		s.config.UserAccessMode = ""
 		applied = append(applied, "user_access_mode")
+	}
+
+	// Default user role. Writes are validated (schema enum in DB mode,
+	// explicit check in the file-mode PUT), but a hand-edited settings.yaml
+	// or DB row can still hold garbage. Normalize anything other than
+	// member/viewer to member so the live config never grants an
+	// unexpected role at user creation (design D6). The rule itself lives in
+	// normalizedDefaultRole; "" stays unset here (clear semantics).
+	defaultRole := snap.DefaultUserRole
+	if defaultRole != "" {
+		if n := normalizedDefaultRole(defaultRole); n != defaultRole {
+			slog.Warn("invalid default_user_role, using member",
+				"configured", defaultRole, "allowed", []string{store.UserRoleMember, store.UserRoleViewer})
+			defaultRole = n
+		}
+	}
+	if defaultRole != "" {
+		s.config.DefaultUserRole = defaultRole
+		applied = append(applied, "default_user_role")
+	} else if s.config.DefaultUserRole != "" {
+		s.config.DefaultUserRole = ""
+		applied = append(applied, "default_user_role")
 	}
 
 	// GitHub App non-sensitive config

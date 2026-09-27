@@ -18,7 +18,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+
+	yamlv3 "gopkg.in/yaml.v3"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
@@ -308,5 +313,68 @@ func serverConfigForMaskTest() config.V1ServerConfig {
 			Driver: "sqlite",
 			URL:    "/path/to/db",
 		},
+	}
+}
+
+// fileModePutServerConfig issues a file-mode PUT with HOME pointed at a temp
+// dir and returns the recorder and the settings.yaml path.
+func fileModePutServerConfig(t *testing.T, srv *Server, body string) (*httptest.ResponseRecorder, string) {
+	t.Helper()
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	if err := os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	rr := httptest.NewRecorder()
+	srv.handleAdminServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body))
+	return rr, filepath.Join(tmpHome, ".scion", "settings.yaml")
+}
+
+// Design D6: file-mode PUT rejects default_user_role values outside the
+// schema enum with 400 and writes nothing.
+func TestHandlePutServerConfig_DefaultUserRole_InvalidRejected(t *testing.T) {
+	for _, v := range []string{"superuser", "admin", "Viewer"} {
+		t.Run(v, func(t *testing.T) {
+			srv := &Server{}
+			rr, settingsPath := fileModePutServerConfig(t, srv,
+				`{"server":{"auth":{"default_user_role":"`+v+`"}}}`)
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), "default_user_role") {
+				t.Errorf("400 body should name default_user_role, got: %s", rr.Body.String())
+			}
+			if _, err := os.Stat(settingsPath); !os.IsNotExist(err) {
+				data, _ := os.ReadFile(settingsPath)
+				t.Errorf("nothing should be persisted for an invalid value, got settings.yaml: %s", data)
+			}
+		})
+	}
+}
+
+// File-mode PUT of a valid default_user_role persists it to settings.yaml and
+// applies it live via reloadSettings.
+func TestHandlePutServerConfig_DefaultUserRole_ViewerPersistedAndApplied(t *testing.T) {
+	srv := &Server{}
+	rr, settingsPath := fileModePutServerConfig(t, srv,
+		`{"server":{"auth":{"default_user_role":"viewer"}}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("settings.yaml not written: %v", err)
+	}
+	var raw map[string]interface{}
+	if err := yamlv3.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("parse settings.yaml: %v", err)
+	}
+	server, _ := raw["server"].(map[string]interface{})
+	auth, _ := server["auth"].(map[string]interface{})
+	if got, _ := auth["default_user_role"].(string); got != "viewer" {
+		t.Errorf("persisted default_user_role = %q, want viewer (settings.yaml: %s)", got, data)
+	}
+	if got := srv.DefaultUserRole(); got != "viewer" {
+		t.Errorf("live DefaultUserRole() = %q after reload, want viewer", got)
 	}
 }

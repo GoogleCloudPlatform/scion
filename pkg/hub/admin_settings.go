@@ -15,7 +15,9 @@
 package hub
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -374,6 +376,21 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		req.Server.Hub.AgentEndpoint = normalized
+	}
+
+	// server.auth.default_user_role must be one of the schema enum values
+	// (design D6). The DB path validates section docs against the schema;
+	// file mode has no schema pass, so validate this key against the same
+	// access-section schema here rather than writing garbage to settings.yaml.
+	if req.Server != nil && req.Server.Auth != nil && req.Server.Auth.DefaultUserRole != "" {
+		doc, err := json.Marshal(opsettings.AccessSettings{DefaultUserRole: req.Server.Auth.DefaultUserRole})
+		if err == nil {
+			if errs := opsettings.Validate("access", doc); len(errs) > 0 {
+				writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+					fmt.Sprintf("invalid server.auth.default_user_role %q: must be \"member\" or \"viewer\"", req.Server.Auth.DefaultUserRole), nil)
+				return
+			}
+		}
 	}
 
 	globalDir, err := config.GetGlobalDir()

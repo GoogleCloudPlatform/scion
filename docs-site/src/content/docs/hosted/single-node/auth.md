@@ -46,6 +46,20 @@ is reserved for organizational isolation, a different concern. See the
 [Glossary](/scion/glossary/).
 :::
 
+### Default role for new users
+
+In a multi-user deployment, each user has a hub role: `admin`, `member` or `viewer`. Users listed in `admin_emails` are always admins. Everyone else gets the role set by `server.auth.default_user_role` (`member` by default) when their account is first created or activated. This includes the first sign-in of an invited or allow-listed user. Set it to `viewer` if new users should be able to work in projects they are added to, but not create projects of their own:
+
+```yaml
+server:
+  auth:
+    default_user_role: viewer   # member (default) | viewer
+```
+
+You can also set it from **Admin > Server Config**, or seed it with `SCION_SEED_SERVER_AUTH_DEFAULTUSERROLE=viewer`. Changing it does not affect existing users; change an individual user's role on **Admin > Users**. See [Hub roles](/scion/hosted/ha/permissions/#hub-roles) for what each role allows and how demotion from `admin_emails` works, and the [server configuration reference](/scion/reference/server-config/#authentication-serverauth) for the setting.
+
+`server.auth.default_user_role` is a different setting from the federation `default_role` described under [OIDC-Based Federation](#oidc-based-federation) below, which only applies to users who authenticate with federated OIDC tokens.
+
 ## OAuth Authentication
 
 Scion supports OAuth authentication via Google and GitHub. OAuth credentials are configured separately for web and CLI clients due to different redirect URI requirements.
@@ -263,7 +277,7 @@ server:
 - **Identity Types**:
   - `hub`: Identifies requests originating from federated partner Hubs.
   - `service_account`: Authenticates automated workloads via GCP Service Accounts.
-  - `user`: Maps OIDC tokens to standard user identities, with configurable `default_role` (defaults to `viewer`) and domain restrictions using wildcards (e.g. `allowed_emails: ["*@example.com"]`).
+  - `user`: Maps OIDC tokens to standard user identities, with configurable `default_role` (defaults to `viewer`; this is separate from `server.auth.default_user_role`, which applies to users who sign in through OAuth, OIDC login or an auth proxy) and domain restrictions using wildcards (e.g. `allowed_emails: ["*@example.com"]`).
 
 ### External Bearer Tokens (Google credential pass-through)
 

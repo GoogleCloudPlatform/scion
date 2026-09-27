@@ -129,6 +129,9 @@ type ServerConfig struct {
 	// UserAccessMode controls how user access is evaluated at login time.
 	// Values: "open" (default), "domain_restricted", "invite_only".
 	UserAccessMode string
+	// DefaultUserRole is the role assigned to new users who are not in the
+	// admin_emails list. Values: "member" (default), "viewer".
+	DefaultUserRole string
 	// BrokerAuthConfig holds configuration for Runtime Broker HMAC authentication.
 	BrokerAuthConfig BrokerAuthConfig
 	// HubEndpoint is the public endpoint URL for this Hub (used in broker join responses).
@@ -1582,7 +1585,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// Must run after BackfillRoleBindings.
 	// D11: pass AdminEmails to enable bidirectional convergence (demotion).
 	// Revocation latency: takes effect on this restart; documented in commit.
-	if demotionSafe, err := ReconcileSuperAdminBindings(ctx, s, cfg.AdminEmails); err != nil {
+	if demotionSafe, err := ReconcileSuperAdminBindings(ctx, s, cfg.AdminEmails, cfg.DefaultUserRole); err != nil {
 		slog.Error("failed to reconcile super-admin bindings — revocation may be incomplete", "error", err)
 	} else {
 		srv.demotionSafe.Store(demotionSafe)
@@ -2621,6 +2624,17 @@ func (s *Server) UserAccessMode() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.config.UserAccessMode
+}
+
+// DefaultUserRole returns the configured default role for new users.
+// Thread-safe. Returns "member" when unconfigured.
+func (s *Server) DefaultUserRole() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.config.DefaultUserRole == "" {
+		return "member"
+	}
+	return s.config.DefaultUserRole
 }
 
 // SetSecretBackend sets the secret backend for pluggable secret storage.

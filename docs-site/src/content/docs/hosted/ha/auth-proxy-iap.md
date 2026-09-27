@@ -126,7 +126,7 @@ Provisioning in proxy mode works identically to OAuth — lazy, allow-list-gated
 - **`open`**: any verified email is allowed.
 - **`domain_restricted`**: email domain must be in `authorized_domains`.
 - **`invite_only`**: email must be pre-registered (via admin invite-code flow).
-- **Additive-Only `admin_emails` Floor**: Emails in the `admin_emails` configuration are granted the `admin` role automatically. This setting is strictly additive (acts as a floor, not a ceiling): it never overwrites or demotes roles that have been explicitly promoted or changed via the Admin UI/API, which are stored in the database and preserved verbatim across logins/refreshes.
+- **Roles**: Emails in `admin_emails` are granted the `admin` role automatically. Other new users get `server.auth.default_user_role` (`member` or `viewer`). An admin granted by `admin_emails` who is removed from the list is demoted to the default role; admins promoted through the Admin UI/API are not. See [Hub roles](/scion/hosted/ha/permissions/#hub-roles) and [AdminEmails and UI-promoted admins](/scion/hosted/ha/permissions/#adminemails-and-ui-promoted-admins).
 - If not permitted, the request returns **403**. Deleted users are rejected with **401** or **403**, and suspended users are rejected with **403** (even though upstream IAP may authenticate them).
 - **Database-Backed Token Refresh**: The token refresh endpoint reads the user's active role directly from the database rather than relying on stale session cache, ensuring UI-based role promotions take effect immediately.
 

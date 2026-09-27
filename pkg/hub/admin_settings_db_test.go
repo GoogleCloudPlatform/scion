@@ -19,12 +19,15 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/knadh/koanf/providers/confmap"
 	"github.com/knadh/koanf/v2"
@@ -1710,8 +1713,8 @@ func TestPutServerConfigDB_ExplicitEmptyUserAccessMode_ClearsField(t *testing.T)
 
 func TestPutServerConfigDB_OmittedFieldsPreserved(t *testing.T) {
 	// N6: Omitting a field from the PUT payload should NOT clear it.
-	// When admin_emails is omitted, the section doc should not contain it,
-	// and on refresh the existing DB value is preserved.
+	// When admin_emails is omitted, the access doc is built on the current
+	// row, so the existing value is written back unchanged.
 	srv, fakeStore, ops := newTestDBServer(t)
 
 	fakeStore.seed("access", json.RawMessage(`{"admin_emails":["existing@admin.com"],"user_access_mode":"open"}`))
@@ -1744,8 +1747,11 @@ func TestPutServerConfigDB_OmittedFieldsPreserved(t *testing.T) {
 	if access.UserAccessMode != "invite_only" {
 		t.Errorf("N6: expected user_access_mode=invite_only, got %q", access.UserAccessMode)
 	}
-	// admin_emails was omitted — should be nil/empty in the section doc
-	// (the existing DB value is preserved by the OperationalSettings merge).
+	// admin_emails was omitted: the access doc is rebuilt on the current row
+	// (design §5.A item 3a), so the existing value must survive the write.
+	if len(access.AdminEmails) != 1 || access.AdminEmails[0] != "existing@admin.com" {
+		t.Errorf("N6: omitted admin_emails must be preserved, got %v", access.AdminEmails)
+	}
 }
 
 func TestPutServerConfigDB_ExplicitEmptyNotificationChannels_ClearsField(t *testing.T) {
@@ -2841,5 +2847,444 @@ func TestPutServerConfigDB_DefaultTimezone_Invalid(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), "Not/A/Timezone") {
 		t.Errorf("error message should mention the invalid timezone: %s", rr.Body.String())
+	}
+}
+
+// ---- default_user_role (design §5.A) ----
+
+// readAccessRow returns the persisted access section doc from the fake store.
+func readAccessRow(t *testing.T, fakeStore *fakeHubSettingStore) (opsettings.AccessSettings, map[string]json.RawMessage) {
+	t.Helper()
+	fakeStore.mu.Lock()
+	row, ok := fakeStore.settings["access"]
+	fakeStore.mu.Unlock()
+	if !ok {
+		t.Fatal("expected an access row to be written")
+	}
+	var access opsettings.AccessSettings
+	if err := json.Unmarshal(row.Value, &access); err != nil {
+		t.Fatalf("json.Unmarshal access: %v", err)
+	}
+	var rawDoc map[string]json.RawMessage
+	if err := json.Unmarshal(row.Value, &rawDoc); err != nil {
+		t.Fatalf("json.Unmarshal access raw: %v", err)
+	}
+	return access, rawDoc
+}
+
+func putServerConfigDB(t *testing.T, srv *Server, ops *OperationalSettings, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body), ops)
+	return rr
+}
+
+func TestExtractKoanfKeys_DefaultUserRole(t *testing.T) {
+	req := &ServerConfigUpdateRequest{
+		Server: &config.V1ServerConfig{
+			Auth: &config.V1AuthConfig{DefaultUserRole: "viewer"},
+		},
+	}
+	keys := extractKoanfKeysFromRequest(req)
+	found := false
+	for _, k := range keys {
+		if k == "server.auth.default_user_role" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected server.auth.default_user_role in keys, got %v", keys)
+	}
+	layer1, layer0, unclassified := opsettings.ClassifyKeys(keys)
+	if len(layer0) != 0 || len(unclassified) != 0 {
+		t.Errorf("default_user_role must be Layer-1 only; layer0=%v unclassified=%v", layer0, unclassified)
+	}
+	if _, ok := layer1["access"]; !ok {
+		t.Errorf("default_user_role must classify into the access section, got %v", layer1)
+	}
+}
+
+func TestAppendPresenceAwareKeys_ExplicitEmptyDefaultUserRole(t *testing.T) {
+	keys := appendPresenceAwareKeys(nil, []byte(`{"server":{"auth":{"default_user_role":""}}}`))
+	if len(keys) != 1 || keys[0] != "server.auth.default_user_role" {
+		t.Errorf("explicit empty default_user_role should add its key, got %v", keys)
+	}
+	keys = appendPresenceAwareKeys(nil, []byte(`{"server":{"auth":{"user_access_mode":"open"}}}`))
+	for _, k := range keys {
+		if k == "server.auth.default_user_role" {
+			t.Errorf("omitted default_user_role must not add its key, got %v", keys)
+		}
+	}
+}
+
+func TestBuildSingleSectionDoc_AccessDefaultUserRole(t *testing.T) {
+	req := &ServerConfigUpdateRequest{
+		Server: &config.V1ServerConfig{
+			Auth: &config.V1AuthConfig{DefaultUserRole: "viewer"},
+		},
+	}
+	doc, err := buildSingleSectionDoc(req, "access", nil)
+	if err != nil {
+		t.Fatalf("error: %v", err)
+	}
+	var access opsettings.AccessSettings
+	if err := json.Unmarshal(doc, &access); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if access.DefaultUserRole != "viewer" {
+		t.Errorf("default_user_role: want viewer, got %q", access.DefaultUserRole)
+	}
+}
+
+// AC5: saving only Default User Role persists it and the snapshot follows.
+func TestPutServerConfigDB_DefaultUserRoleOnly_PersistedAndSnapshot(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"auth":{"default_user_role":"viewer"}}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	access, _ := readAccessRow(t, fakeStore)
+	if access.DefaultUserRole != "viewer" {
+		t.Errorf("access doc default_user_role: want viewer, got %q", access.DefaultUserRole)
+	}
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if got := ops.Snapshot().DefaultUserRole; got != "viewer" {
+		t.Errorf("snapshot DefaultUserRole after refresh: want viewer, got %q", got)
+	}
+}
+
+// Invalid values are rejected by the access-section schema in DB mode.
+func TestPutServerConfigDB_DefaultUserRoleInvalid_400NothingWritten(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+	fakeStore.seed("access", json.RawMessage(`{"default_user_role":"viewer"}`))
+	_, _ = ops.Refresh(context.Background())
+
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"auth":{"default_user_role":"superuser"}}}`)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+	access, _ := readAccessRow(t, fakeStore)
+	if access.DefaultUserRole != "viewer" {
+		t.Errorf("existing value must be untouched, got %q", access.DefaultUserRole)
+	}
+}
+
+// §5.A item 3a: a PUT carrying only user_access_mode keeps the existing
+// default_user_role (the old wipe-on-save bug).
+func TestPutServerConfigDB_UserAccessModeOnly_PreservesDefaultUserRole(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+	fakeStore.seed("access", json.RawMessage(`{"admin_emails":["a@b.com"],"user_access_mode":"open","default_user_role":"viewer"}`))
+	_, _ = ops.Refresh(context.Background())
+
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"auth":{"user_access_mode":"invite_only"}}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	access, _ := readAccessRow(t, fakeStore)
+	if access.UserAccessMode != "invite_only" {
+		t.Errorf("user_access_mode: want invite_only, got %q", access.UserAccessMode)
+	}
+	if access.DefaultUserRole != "viewer" {
+		t.Errorf("default_user_role must be preserved, got %q", access.DefaultUserRole)
+	}
+	if len(access.AdminEmails) != 1 || access.AdminEmails[0] != "a@b.com" {
+		t.Errorf("admin_emails must be preserved, got %v", access.AdminEmails)
+	}
+	if got := ops.Snapshot().DefaultUserRole; got != "viewer" {
+		t.Errorf("snapshot DefaultUserRole: want viewer, got %q", got)
+	}
+}
+
+// Explicit "" clears default_user_role; the live default falls back to member.
+func TestPutServerConfigDB_ExplicitEmptyDefaultUserRole_ClearsField(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+	fakeStore.seed("access", json.RawMessage(`{"user_access_mode":"open","default_user_role":"viewer"}`))
+	_, _ = ops.Refresh(context.Background())
+
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"auth":{"user_access_mode":"open","default_user_role":""}}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	access, _ := readAccessRow(t, fakeStore)
+	if access.DefaultUserRole != "" {
+		t.Errorf("default_user_role should be cleared by explicit \"\", got %q", access.DefaultUserRole)
+	}
+	if access.UserAccessMode != "open" {
+		t.Errorf("user_access_mode: want open, got %q", access.UserAccessMode)
+	}
+	ApplySnapshot(srv, ops.Snapshot())
+	if got := srv.DefaultUserRole(); got != "member" {
+		t.Errorf("DefaultUserRole() after clear: want member, got %q", got)
+	}
+}
+
+// With no access row yet, omitted fields carry forward from the effective
+// (bootstrap/file) snapshot, so the first UI save does not wipe a
+// file-seeded default_user_role.
+func TestPutServerConfigDB_NoAccessRow_CarriesBootstrapValues(t *testing.T) {
+	fakeStore := newFakeHubSettingStore()
+	fileK := newFileKoanf(t, map[string]interface{}{
+		"server.auth.default_user_role": "viewer",
+		"server.hub.admin_emails":       []interface{}{"file@admin.com"},
+	})
+	ops := NewOperationalSettings(fakeStore, fileK, emptyKoanf())
+	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	srv.SetOperationalSettings(ops)
+
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"auth":{"user_access_mode":"invite_only"}}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	access, _ := readAccessRow(t, fakeStore)
+	if access.DefaultUserRole != "viewer" {
+		t.Errorf("default_user_role should carry forward from bootstrap, got %q", access.DefaultUserRole)
+	}
+	if len(access.AdminEmails) != 1 || access.AdminEmails[0] != "file@admin.com" {
+		t.Errorf("admin_emails should carry forward from bootstrap, got %v", access.AdminEmails)
+	}
+	if access.UserAccessMode != "invite_only" {
+		t.Errorf("user_access_mode: want invite_only, got %q", access.UserAccessMode)
+	}
+}
+
+// A node-local env override is not baked into the shared access row when
+// the row is first created from the effective snapshot.
+func TestPutServerConfigDB_NoAccessRow_EnvOverrideNotBakedIn(t *testing.T) {
+	fakeStore := newFakeHubSettingStore()
+	envK := newEnvKoanf(t, map[string]interface{}{
+		"server.auth.default_user_role": "viewer",
+	})
+	bootstrapK := newFileKoanf(t, map[string]interface{}{
+		"server.auth.default_user_role": "viewer", // bootstrap merge includes SERVER env
+	})
+	ops := NewOperationalSettings(fakeStore, bootstrapK, envK)
+	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	srv.SetOperationalSettings(ops)
+
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"auth":{"user_access_mode":"open"}}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	access, _ := readAccessRow(t, fakeStore)
+	if access.DefaultUserRole != "" {
+		t.Errorf("env-overridden default_user_role must not be written to the shared row, got %q", access.DefaultUserRole)
+	}
+}
+
+// casRaceStore simulates another replica writing the access row between the
+// PUT handler's read of the current row and its write.
+type casRaceStore struct {
+	*fakeHubSettingStore
+	once sync.Once
+}
+
+func (c *casRaceStore) GetHubSetting(ctx context.Context, section string) (*store.HubSetting, error) {
+	row, err := c.fakeHubSettingStore.GetHubSetting(ctx, section)
+	if err == nil && section == "access" {
+		snapshot := *row
+		c.once.Do(func() {
+			_, _ = c.UpsertHubSetting(ctx, "access",
+				json.RawMessage(`{"default_user_role":"member"}`), "other-replica", -1, "managed")
+		})
+		return &snapshot, nil
+	}
+	return row, err
+}
+
+// The carry-forward write is CAS-guarded on the revision it read, so a
+// concurrent access write yields 409 instead of a silent lost update.
+func TestPutServerConfigDB_AccessCarryForward_ConcurrentWrite409(t *testing.T) {
+	fake := newFakeHubSettingStore()
+	fake.seed("access", json.RawMessage(`{"default_user_role":"viewer"}`))
+	raceStore := &casRaceStore{fakeHubSettingStore: fake}
+	ops := NewOperationalSettings(raceStore, emptyKoanf(), emptyKoanf())
+	_, _ = ops.Refresh(context.Background())
+	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	srv.SetOperationalSettings(ops)
+
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"auth":{"user_access_mode":"open"}}}`)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", rr.Code, rr.Body.String())
+	}
+	access, _ := readAccessRow(t, fake)
+	if access.DefaultUserRole != "member" || access.UserAccessMode != "" {
+		t.Errorf("the concurrent writer's row must stand, got %+v", access)
+	}
+}
+
+// GET returns the DB snapshot value, not the settings.yaml value.
+func TestGetServerConfigDB_DefaultUserRoleFromSnapshot(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	if err := os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	yaml := "schema_version: \"1\"\nserver:\n  auth:\n    default_user_role: member\n"
+	if err := os.WriteFile(filepath.Join(tmpHome, ".scion", "settings.yaml"), []byte(yaml), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	srv, fakeStore, ops := newTestDBServer(t)
+	fakeStore.seed("access", json.RawMessage(`{"default_user_role":"viewer"}`))
+	_, _ = ops.Refresh(context.Background())
+
+	rr := httptest.NewRecorder()
+	srv.handleGetServerConfigDB(rr, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var resp ServerConfigDBResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Server == nil || resp.Server.Auth == nil {
+		t.Fatal("expected server.auth in response")
+	}
+	if resp.Server.Auth.DefaultUserRole != "viewer" {
+		t.Errorf("GET default_user_role: want viewer (DB), got %q", resp.Server.Auth.DefaultUserRole)
+	}
+}
+
+// casRaceNoRowStore reports the access row as missing on the first read and
+// then simulates another replica creating it before the PUT's write.
+type casRaceNoRowStore struct {
+	*fakeHubSettingStore
+	once sync.Once
+}
+
+func (c *casRaceNoRowStore) GetHubSetting(ctx context.Context, section string) (*store.HubSetting, error) {
+	if section == "access" {
+		raced := false
+		c.once.Do(func() {
+			raced = true
+			_, _ = c.UpsertHubSetting(ctx, "access",
+				json.RawMessage(`{"default_user_role":"member"}`), "other-replica", -1, "managed")
+		})
+		if raced {
+			return nil, store.ErrNotFound
+		}
+	}
+	return c.fakeHubSettingStore.GetHubSetting(ctx, section)
+}
+
+// With no access row, the carry-forward write is create-only (revision 0),
+// so a concurrent insert yields 409 rather than being overwritten.
+func TestPutServerConfigDB_AccessCarryForward_NoRowConcurrentCreate409(t *testing.T) {
+	fake := newFakeHubSettingStore()
+	raceStore := &casRaceNoRowStore{fakeHubSettingStore: fake}
+	ops := NewOperationalSettings(raceStore, emptyKoanf(), emptyKoanf())
+	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	srv.SetOperationalSettings(ops)
+
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"auth":{"default_user_role":"viewer"}}}`)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", rr.Code, rr.Body.String())
+	}
+	access, _ := readAccessRow(t, fake)
+	if access.DefaultUserRole != "member" {
+		t.Errorf("the concurrent creator's row must stand, got %+v", access)
+	}
+}
+
+// newEnvDBServer builds a postgres-mode server whose node has the given
+// SCION_SERVER_* overrides (flat opsettings keys) in its env koanf.
+func newEnvDBServer(t *testing.T, env map[string]interface{}) (*Server, *fakeHubSettingStore, *OperationalSettings) {
+	t.Helper()
+	fakeStore := newFakeHubSettingStore()
+	ops := NewOperationalSettings(fakeStore, emptyKoanf(), newEnvKoanf(t, env))
+	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	srv.SetOperationalSettings(ops)
+	return srv, fakeStore, ops
+}
+
+// du-rev-3a finding 1: a seeded access row carries node-local SCION_SERVER_*
+// values (bootstrap puts env on top). A PUT that omits such a field must not
+// pin the env value into the shared row as managed.
+func TestPutServerConfigDB_SeededRow_EnvOverriddenFieldNotCarried(t *testing.T) {
+	srv, fakeStore, ops := newEnvDBServer(t, map[string]interface{}{
+		"server.hub.admin_emails": []interface{}{"env-only@x.com"},
+	})
+	fakeStore.seedWithOrigin("access",
+		json.RawMessage(`{"admin_emails":["env-only@x.com"],"user_access_mode":"open"}`), "seeded")
+	_, _ = ops.Refresh(context.Background())
+
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"auth":{"default_user_role":"viewer"}}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	access, _ := readAccessRow(t, fakeStore)
+	if len(access.AdminEmails) != 0 {
+		t.Errorf("env-derived admin_emails must not be carried into the shared row, got %v", access.AdminEmails)
+	}
+	if access.UserAccessMode != "open" {
+		t.Errorf("non-env field user_access_mode must still be carried, got %q", access.UserAccessMode)
+	}
+	if access.DefaultUserRole != "viewer" {
+		t.Errorf("default_user_role: want viewer, got %q", access.DefaultUserRole)
+	}
+	fakeStore.mu.Lock()
+	origin := fakeStore.settings["access"].Origin
+	fakeStore.mu.Unlock()
+	if origin != "managed" {
+		t.Errorf("row origin after PUT: want managed, got %q", origin)
+	}
+}
+
+// An explicit request value for an env-overridden field is still written.
+func TestPutServerConfigDB_SeededRow_EnvOverriddenFieldExplicitWritten(t *testing.T) {
+	srv, fakeStore, ops := newEnvDBServer(t, map[string]interface{}{
+		"server.hub.admin_emails": []interface{}{"env-only@x.com"},
+	})
+	fakeStore.seedWithOrigin("access", json.RawMessage(`{"admin_emails":["env-only@x.com"]}`), "seeded")
+	_, _ = ops.Refresh(context.Background())
+
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"admin_emails":["chosen@x.com"]}}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	access, _ := readAccessRow(t, fakeStore)
+	if len(access.AdminEmails) != 1 || access.AdminEmails[0] != "chosen@x.com" {
+		t.Errorf("explicit admin_emails must be written, got %v", access.AdminEmails)
+	}
+}
+
+// A managed row's values came from an admin write, not env, so they are
+// carried forward even when the same key is env-overridden on this node.
+func TestPutServerConfigDB_ManagedRow_EnvOverriddenFieldCarried(t *testing.T) {
+	srv, fakeStore, ops := newEnvDBServer(t, map[string]interface{}{
+		"server.hub.admin_emails": []interface{}{"env-only@x.com"},
+	})
+	fakeStore.seedWithOrigin("access",
+		json.RawMessage(`{"admin_emails":["admin-set@x.com"],"user_access_mode":"open"}`), "managed")
+	_, _ = ops.Refresh(context.Background())
+
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"auth":{"default_user_role":"viewer"}}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	access, _ := readAccessRow(t, fakeStore)
+	if len(access.AdminEmails) != 1 || access.AdminEmails[0] != "admin-set@x.com" {
+		t.Errorf("managed admin_emails must be carried forward, got %v", access.AdminEmails)
+	}
+}
+
+func TestDropEnvOverriddenAccessFields(t *testing.T) {
+	base := &opsettings.AccessSettings{
+		AdminEmails:       []string{"a@x.com"},
+		UserAccessMode:    "open",
+		DefaultUserRole:   "viewer",
+		AuthorizedDomains: []string{"x.com"},
+	}
+	dropEnvOverriddenAccessFields(base, []string{
+		"server.auth.default_user_role", "server.auth.authorized_domains", "telemetry.enabled",
+	})
+	if base.DefaultUserRole != "" || base.AuthorizedDomains != nil {
+		t.Errorf("env-overridden fields should be dropped, got %+v", base)
+	}
+	if len(base.AdminEmails) != 1 || base.UserAccessMode != "open" {
+		t.Errorf("other fields must be untouched, got %+v", base)
 	}
 }

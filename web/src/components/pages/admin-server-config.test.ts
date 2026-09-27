@@ -46,6 +46,7 @@ const SCHEMA_RESPONSE = {
       koanf_paths: [
         'server.hub.admin_emails',
         'server.auth.user_access_mode',
+        'server.auth.default_user_role',
         'server.auth.authorized_domains',
       ],
     },
@@ -867,6 +868,53 @@ describe('scion-page-admin-server-config', () => {
       expect(putCallCount).toBe(1);
       // Error message should indicate conflict
       expect((element as any).crossProjectMessagingError).toContain('another administrator');
+    });
+  });
+
+  // ── Default User Role help text (default_user_role, design §5.F) ──
+
+  describe('Default User Role help text', () => {
+    function helpText(el: HTMLElement): string {
+      return (query(el, '.default-user-role-help')?.textContent ?? '').replace(/\s+/g, ' ').trim();
+    }
+
+    it('renders the final explanation of the setting', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig()));
+
+      const text = helpText(element);
+      expect(text).toContain('Default role for new users.');
+      expect(text).toContain(
+        'Applies when a user first signs in, including invited and allow-listed users ' +
+          '(their role is assigned at first sign-in, not when the invite is created).'
+      );
+      expect(text).toContain('Changing it does not affect users who have already signed in.');
+      expect(text).not.toContain('invite, or allow-list entry');
+      expect(text).toContain('Users listed in Admin Emails are always admins.');
+      expect(text).toContain(
+        'Member: can create projects, and works in any project they are added to.'
+      );
+      expect(text).toContain(
+        'Viewer: the same as Member, but cannot create projects (including cloning). ' +
+          'Viewers can still be added to projects and work there according to their project role.'
+      );
+      expect(text).toContain(
+        'This is also the role given to an admin who is removed from Admin Emails.'
+      );
+      expect(text).toContain("Change an individual user's role on Admin > Users.");
+    });
+
+    it('links to Admin > Users', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig()));
+
+      expect(query(element, '.default-user-role-help a[href="/admin/users"]')).not.toBeNull();
+    });
+
+    it('no longer shows the old one-line hint', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig()));
+
+      expect(shadowText(element)).not.toContain(
+        'Role assigned to new users who are not in the admin emails list.'
+      );
     });
   });
 });

@@ -231,6 +231,24 @@ These built-in roles bundle common permissions for human users:
 The `project-owner` and `project-admin` roles are at revision 3. On upgrade, existing Hubs reconcile these roles automatically: `agent.attach` and `agent.port_access` are removed and `agent.lifecycle` is added. Owners and admins who previously attached to other members' agents can no longer do so. User access tokens minted before the split that hold `agent:attach` keep lifecycle authority so existing automation continues to work. See [Personal Access Tokens](/scion/hosted/user/personal-access-tokens/) for the current scope list.
 :::
 
+### Hub Roles
+
+Every user has one **hub role**: `admin`, `member` or `viewer`. It is shown in **Admin > Users** and as a badge on the user's own profile page. The hub role decides what a user can do across the whole hub. The hub grants it through the system roles above:
+
+| Hub role | Granted through | What it allows |
+|----------|-----------------|----------------|
+| `admin` | A system-scope `super-admin` binding | Full administrative access to the hub. |
+| `member` | Membership of the `hub-members` group, which holds the `hub-member` role | Read the hub directory and catalogs (users, groups, templates, harness configs, brokers, skills, and so on) and **create projects**. |
+| `viewer` | A system-scope `hub-viewer` binding | The same as `member`, but **cannot create projects**. This includes cloning a project. |
+
+- **Project roles are independent of the hub role.** A viewer can still be added to a project, and then works in it according to their project role (`project-member`, `project-admin` or `project-owner`). The hub role only controls hub-level actions, such as creating a project.
+- **New users** get the hub role set by [`server.auth.default_user_role`](/scion/reference/server-config/#authentication-serverauth) (`member` unless configured otherwise). It is applied when the account is first created or activated, which includes the first sign-in of an invited or allow-listed user. Invites and allow-list entries carry no role of their own. Users listed in `admin_emails` are always admins.
+- **Changing the default does not change existing users.** To change an individual user's role, use **Change role** in the actions menu on **Admin > Users**, or `PATCH /api/v1/users/{id}` with `{"role": "viewer"}` (`admin`, `member` or `viewer`). A pending invite has no role yet, so its role cannot be changed until the user has signed in.
+- **Role changes take effect immediately.** The hub updates the user's group membership and role bindings when the role changes, whether an admin changes it or it changes at sign-in. No hub restart is needed.
+- The UI hides controls the user's hub role does not allow. For example, a viewer does not see **Create Project**.
+
+`server.auth.default_user_role` is not the same setting as `server.federation.trusted_issuers[].default_role`, which sets the role for users who authenticate with federated OIDC tokens.
+
 ### Tiered Agent Authorization Roles
 
 Scion implements a dedicated, tiered authorization model for **agents**. This ensures that running agents only possess the specific permissions they need to interact with the Hub API.
@@ -349,4 +367,9 @@ This command modifies the database directly. Use it only when normal admin acces
 
 ### AdminEmails and UI-Promoted Admins
 
-The `admin_emails` server setting is additive only: users listed in `admin_emails` are promoted to admin on login, but the list never demotes or overwrites a role that was set through the Web Dashboard (e.g., a user promoted to admin via the Users list). Changing a user's role is always an explicit admin action — removing an email from `admin_emails` does not revoke admin access that was granted through the UI.
+Users listed in the `admin_emails` server setting are always admins: they are promoted to admin when they sign in. When the list is non-empty, removing an email from it demotes that admin to the hub's [default role for new users](#hub-roles) (`server.auth.default_user_role`) at the next hub restart or their next sign-in, whichever comes first. Their permissions change at once. At restart, both `admin_emails` and the default role come from `settings.yaml` or the environment, so a change made only in the Admin UI (Postgres mode) takes effect at the user's next sign-in. If the default role was set only in the Admin UI, a user demoted at restart becomes Member.
+
+There are two exceptions:
+
+- **UI-promoted admins keep admin.** A user promoted to admin through the Web Dashboard (the Users list) or the users API holds admin because of that explicit action, not because of `admin_emails`. Removing their email from `admin_emails` does not demote them. To remove their admin role, change it on **Admin > Users**.
+- **The startup safety check must have passed.** When the hub starts, it checks that the `admin_emails` from its startup configuration (`settings.yaml` or the environment) matches at least one existing user, or that at least one UI-promoted admin exists. If not, the hub refuses all demotions, both at startup and at sign-in, until the configuration is fixed **and the hub is restarted**. This stops a configuration mistake from removing every administrator.
