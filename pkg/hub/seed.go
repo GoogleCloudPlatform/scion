@@ -1543,7 +1543,7 @@ func removeHubMembershipTx(ctx context.Context, tx store.Store, userID string) e
 // persisting User.Role. st may be a transaction store.
 //
 //	member → ensure hub-members membership; delete hub-viewer binding(s)
-//	viewer → remove hub-members membership; ensure an active hub-viewer binding
+//	viewer → remove hub-members membership; ensure an unconditional hub-viewer binding
 //	admin  → delete hub-viewer binding(s); hub-members membership is left as-is
 //
 // The super-admin binding is NOT handled here; the existing super-admin
@@ -1573,7 +1573,8 @@ func syncHubRoleGrants(ctx context.Context, st store.Store, userID, role, create
 }
 
 // hubViewerBindingsForUser returns the user's system-scoped hub-viewer role
-// bindings in every lifecycle state, and whether one of them is active now.
+// bindings in every lifecycle state, and whether one of them is
+// unconditional (no NotBefore and no ExpiresAt).
 func hubViewerBindingsForUser(ctx context.Context, st store.Store, userID string) (*store.RoleDefinition, []*store.RoleBinding, bool, error) {
 	rd, err := st.GetRoleDefinitionByName(ctx, store.SystemRoleHubViewer, store.RoleScopeSystem)
 	if err != nil {
@@ -1586,39 +1587,37 @@ func hubViewerBindingsForUser(ctx context.Context, st store.Store, userID string
 	if err != nil {
 		return nil, nil, false, fmt.Errorf("list role bindings for user: %w", err)
 	}
-	now := time.Now()
 	var matched []*store.RoleBinding
-	active := false
+	unconditional := false
 	for _, b := range bindings {
 		if b.ScopeType != store.RoleScopeSystem || b.RoleDefinitionID != rd.ID {
 			continue
 		}
 		matched = append(matched, b)
-		if b.ExpiresAt != nil && now.After(*b.ExpiresAt) {
-			continue
+		if b.NotBefore == nil && b.ExpiresAt == nil {
+			unconditional = true
 		}
-		if b.NotBefore != nil && now.Before(*b.NotBefore) {
-			continue
-		}
-		active = true
 	}
-	return rd, matched, active, nil
+	return rd, matched, unconditional, nil
 }
 
-// ensureHubViewerBindingTx ensures the user has an active system-scoped
-// hub-viewer role binding. Expired or scheduled bindings are replaced, since
-// the (role, principal, scope) tuple is unique regardless of lifecycle.
+// ensureHubViewerBindingTx ensures the user has an unconditional
+// system-scoped hub-viewer role binding. The viewer role is permanent, so the
+// grant is too: a time-limited binding (expired, scheduled, or active with a
+// future ExpiresAt) does not satisfy it and is replaced. The replacement is
+// delete-then-create because the (role, principal, scope) tuple is unique
+// regardless of lifecycle.
 func ensureHubViewerBindingTx(ctx context.Context, st store.Store, userID, createdBy string) error {
-	rd, existing, active, err := hubViewerBindingsForUser(ctx, st, userID)
+	rd, existing, unconditional, err := hubViewerBindingsForUser(ctx, st, userID)
 	if err != nil {
 		return err
 	}
-	if active {
+	if unconditional {
 		return nil
 	}
 	for _, b := range existing {
 		if err := st.DeleteRoleBinding(ctx, b.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("delete stale hub-viewer binding %s: %w", b.ID, err)
+			return fmt.Errorf("delete time-limited hub-viewer binding %s: %w", b.ID, err)
 		}
 	}
 	_, err = st.CreateRoleBinding(ctx, &store.RoleBinding{

@@ -1186,38 +1186,99 @@ func TestSyncHubRoleGrants_ViewerBindingProvenance(t *testing.T) {
 	assert.True(t, found, "hub-viewer binding should exist")
 }
 
-func TestSyncHubRoleGrants_ViewerReplacesExpiredBinding(t *testing.T) {
-	_, s := testServer(t)
+// createTimeLimitedHubViewerBinding seeds a hub-viewer binding with the given
+// lifecycle window for the user.
+func createTimeLimitedHubViewerBinding(t *testing.T, s store.Store, userID string, notBefore, expiresAt *time.Time) *store.RoleBinding {
+	t.Helper()
 	ctx := context.Background()
-
-	u := setupHubRoleGrantState(t, s, "sync-expired", "none")
 	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubViewer, store.RoleScopeSystem)
 	require.NoError(t, err)
-	expired := time.Now().Add(-time.Hour)
-	stale, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+	b, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
 		RoleDefinitionID: rd.ID,
 		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      u.ID,
+		PrincipalID:      userID,
 		ScopeType:        store.RoleScopeSystem,
 		CreatedBy:        store.SystemBackfillCreatedBy,
-		ExpiresAt:        &expired,
+		NotBefore:        notBefore,
+		ExpiresAt:        expiresAt,
 	})
 	require.NoError(t, err)
+	return b
+}
 
-	require.NoError(t, syncHubRoleGrants(ctx, s, u.ID, store.UserRoleViewer, store.AdminAPICreatedBy))
-
-	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, u.ID)
-	require.NoError(t, err)
-	var active int
-	for _, b := range bindings {
-		if b.RoleDefinitionID != rd.ID || b.ScopeType != store.RoleScopeSystem {
-			continue
-		}
-		assert.NotEqual(t, stale.ID, b.ID, "expired binding should have been replaced")
-		assert.Nil(t, b.ExpiresAt, "replacement binding should be active")
-		active++
+func hubViewerBindingLifecycles() map[string]func() (*time.Time, *time.Time) {
+	return map[string]func() (*time.Time, *time.Time){
+		"expired": func() (*time.Time, *time.Time) {
+			past := time.Now().Add(-time.Hour)
+			return nil, &past
+		},
+		"scheduled": func() (*time.Time, *time.Time) {
+			future := time.Now().Add(time.Hour)
+			return &future, nil
+		},
+		"active_time_limited": func() (*time.Time, *time.Time) {
+			future := time.Now().Add(time.Hour)
+			return nil, &future
+		},
 	}
-	assert.Equal(t, 1, active)
+}
+
+// TestSyncHubRoleGrants_ViewerReplacesTimeLimitedBinding verifies that the
+// viewer role (permanent) is backed by an unconditional hub-viewer binding:
+// expired, scheduled and active-but-expiring bindings are all replaced.
+func TestSyncHubRoleGrants_ViewerReplacesTimeLimitedBinding(t *testing.T) {
+	for name, window := range hubViewerBindingLifecycles() {
+		t.Run(name, func(t *testing.T) {
+			_, s := testServer(t)
+			ctx := context.Background()
+
+			u := setupHubRoleGrantState(t, s, "sync-tl-"+name, "none")
+			nb, exp := window()
+			stale := createTimeLimitedHubViewerBinding(t, s, u.ID, nb, exp)
+
+			require.NoError(t, syncHubRoleGrants(ctx, s, u.ID, store.UserRoleViewer, store.AdminAPICreatedBy))
+			// Idempotent once unconditional.
+			require.NoError(t, syncHubRoleGrants(ctx, s, u.ID, store.UserRoleViewer, store.AdminAPICreatedBy))
+
+			rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubViewer, store.RoleScopeSystem)
+			require.NoError(t, err)
+			bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, u.ID)
+			require.NoError(t, err)
+			var count int
+			for _, b := range bindings {
+				if b.RoleDefinitionID != rd.ID || b.ScopeType != store.RoleScopeSystem {
+					continue
+				}
+				count++
+				assert.NotEqual(t, stale.ID, b.ID, "time-limited binding should have been replaced")
+				assert.Nil(t, b.NotBefore, "replacement binding should be unconditional")
+				assert.Nil(t, b.ExpiresAt, "replacement binding should be unconditional")
+				assert.Equal(t, store.AdminAPICreatedBy, b.CreatedBy)
+			}
+			assert.Equal(t, 1, count)
+		})
+	}
+}
+
+// TestSyncHubRoleGrants_NonViewerRemovesTimeLimitedBinding verifies that
+// member and admin remove hub-viewer bindings in every lifecycle state.
+func TestSyncHubRoleGrants_NonViewerRemovesTimeLimitedBinding(t *testing.T) {
+	for name, window := range hubViewerBindingLifecycles() {
+		for _, to := range []string{store.UserRoleMember, store.UserRoleAdmin} {
+			t.Run(name+"_to_"+to, func(t *testing.T) {
+				_, s := testServer(t)
+				ctx := context.Background()
+
+				u := setupHubRoleGrantState(t, s, "sync-rm-"+name+"-"+to, "none")
+				nb, exp := window()
+				createTimeLimitedHubViewerBinding(t, s, u.ID, nb, exp)
+				require.Equal(t, 1, observeHubRoleGrants(t, s, u.ID).HubViewerBindings)
+
+				require.NoError(t, syncHubRoleGrants(ctx, s, u.ID, to, store.AdminAPICreatedBy))
+				assert.Equal(t, 0, observeHubRoleGrants(t, s, u.ID).HubViewerBindings)
+			})
+		}
+	}
 }
 
 func TestSyncHubRoleGrants_UnsupportedRole(t *testing.T) {

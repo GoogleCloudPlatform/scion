@@ -289,7 +289,11 @@ func TestUpdateUser_UnsupportedRoleRejected(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code, "unsupported role should be rejected")
 }
 
-func TestUpdateUser_UnsupportedRoleRejectedEvenIfMatching(t *testing.T) {
+// TestUpdateUser_UnsupportedRoleRejectedWithAllValidRolesListed replaces the
+// former "rejected even if matching" test: every storable role (the ent enum
+// admin|member|viewer) is now a valid PATCH value, so a PATCH that matches the
+// stored role can no longer be unsupported.
+func TestUpdateUser_UnsupportedRoleRejectedWithAllValidRolesListed(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
