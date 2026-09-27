@@ -47,6 +47,7 @@ import type { StatusType } from '../shared/status-badge.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
+import { fetchHubProjectCapabilities } from '../../client/hub-capabilities.js';
 import '../shared/git-remote-display.js';
 import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
@@ -124,6 +125,14 @@ export class ScionPageProjectDetail extends LitElement {
    */
   @state()
   private agentScopeCapabilities: Capabilities | undefined;
+
+  /**
+   * Hub-scope project capabilities (`_capabilities` of GET /api/v1/projects).
+   * Clone and Create Template make a new project, which needs hub
+   * `project.create` (project_clone.go), so they are hidden without it.
+   */
+  @state()
+  private hubProjectCapabilities: Capabilities | undefined;
 
   /**
    * Active file tab key ('workspace' or shared dir name)
@@ -942,6 +951,7 @@ export class ScionPageProjectDetail extends LitElement {
     }
 
     void this.loadData();
+    void this.loadHubProjectCapabilities();
 
     // Set SSE scope to this project (receives all agent events within project)
     if (this.projectId) {
@@ -1004,6 +1014,12 @@ export class ScionPageProjectDetail extends LitElement {
     if (updatedProject && this.project) {
       this.project = { ...this.project, ...updatedProject };
     }
+  }
+
+  private async loadHubProjectCapabilities(): Promise<void> {
+    const caps = await fetchHubProjectCapabilities();
+    if (!this.isConnected) return;
+    this.hubProjectCapabilities = caps;
   }
 
   private async loadData(): Promise<void> {
@@ -1861,7 +1877,7 @@ export class ScionPageProjectDetail extends LitElement {
                 </sl-button>
               `
             : nothing}
-          ${can(this.project?._capabilities, 'read')
+          ${can(this.project?._capabilities, 'read') && can(this.hubProjectCapabilities, 'create')
             ? this.pageData?.user?.role === 'admin'
               ? html`
                   <sl-dropdown>

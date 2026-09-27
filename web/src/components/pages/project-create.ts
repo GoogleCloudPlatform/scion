@@ -20,10 +20,13 @@
  * Form for creating a new project, supporting both git-backed and hub-managed modes.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
-import { customElement, state } from 'lit/decorators.js';
+import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
+import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { fetchHubProjectCapabilities } from '../../client/hub-capabilities.js';
+import type { PageData } from '../../shared/types.js';
+import { can } from '../../shared/types.js';
 import '../shared/status-badge.js';
 import '../shared/dir-browser.js';
 
@@ -40,8 +43,30 @@ interface ValidatePathResponse {
   error?: string;
 }
 
+/** Display label for a hub role. Display only; never used for gating. */
+function hubRoleLabel(role: string | undefined): string | null {
+  switch (role) {
+    case 'admin':
+      return 'Admin';
+    case 'member':
+      return 'Member';
+    case 'viewer':
+      return 'Viewer';
+    default:
+      return null;
+  }
+}
+
 @customElement('scion-page-project-create')
 export class ScionPageProjectCreate extends LitElement {
+  /** Page data from the router; used only for the role name in the notice. */
+  @property({ type: Object })
+  pageData: PageData | null = null;
+
+  /** Hub-scope project.create check: pending, granted, or not granted. */
+  @state()
+  private createAccess: 'checking' | 'allowed' | 'denied' = 'checking';
+
   @state()
   private submitting = false;
 
@@ -116,8 +141,19 @@ export class ScionPageProjectCreate extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    void this.checkCreateCapability();
     this.checkGitHubApp();
     void this.loadEmbeddedBrokerID();
+  }
+
+  /**
+   * Gate the form on hub-scope `project.create` (the same `_capabilities`
+   * the Projects list uses), not on the role string. Fail-closed: if the
+   * capabilities cannot be loaded the notice is shown.
+   */
+  private async checkCreateCapability(): Promise<void> {
+    const caps = await fetchHubProjectCapabilities();
+    this.createAccess = can(caps, 'create') ? 'allowed' : 'denied';
   }
 
   private async checkGitHubApp(): Promise<void> {
@@ -246,6 +282,44 @@ export class ScionPageProjectCreate extends LitElement {
       color: var(--scion-text-muted, #64748b);
       margin: 0;
       font-size: 0.875rem;
+    }
+
+    .capability-loading {
+      display: flex;
+      justify-content: center;
+      padding: 2rem;
+      max-width: 640px;
+    }
+
+    .create-denied-notice {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.75rem;
+      background: var(--scion-surface, #ffffff);
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-top: 3px solid var(--scion-text-muted, #64748b);
+      border-radius: var(--scion-radius-lg, 0.75rem);
+      padding: 1.25rem 1.5rem;
+      max-width: 640px;
+      color: var(--scion-text, #1e293b);
+      font-size: 0.875rem;
+    }
+
+    .create-denied-notice sl-icon {
+      flex-shrink: 0;
+      font-size: 1.25rem;
+      color: var(--scion-text-muted, #64748b);
+      margin-top: 0.0625rem;
+    }
+
+    .create-denied-notice p {
+      margin: 0.25rem 0 0 0;
+      color: var(--scion-text-muted, #64748b);
+      line-height: 1.5;
+    }
+
+    .create-denied-notice a {
+      color: var(--scion-primary, #3b82f6);
     }
 
     .form-card {
@@ -700,6 +774,40 @@ export class ScionPageProjectCreate extends LitElement {
         <p>Set up a new project workspace for your agents.</p>
       </div>
 
+      ${this.createAccess === 'checking'
+        ? html`<div class="capability-loading"><sl-spinner></sl-spinner></div>`
+        : this.createAccess === 'denied'
+          ? this.renderCreateDeniedNotice()
+          : this.renderForm()}
+    `;
+  }
+
+  /**
+   * Shown instead of the form when the hub does not grant project.create.
+   * A deep link to /projects/new explains itself rather than redirecting.
+   */
+  private renderCreateDeniedNotice(): TemplateResult {
+    const roleLabel = hubRoleLabel(this.pageData?.user?.role);
+    return html`
+      <div class="create-denied-notice" role="status">
+        <sl-icon name="info-circle"></sl-icon>
+        <div>
+          <strong class="create-denied-title"
+            >${roleLabel
+              ? `Your hub role (${roleLabel}) can't create projects.`
+              : "Your hub role can't create projects."}</strong
+          >
+          <p>
+            Ask a hub admin to change your role, or to add you to an existing project.
+            <a href="/projects">Browse projects</a>
+          </p>
+        </div>
+      </div>
+    `;
+  }
+
+  private renderForm(): TemplateResult {
+    return html`
       <div class="form-card">
         ${this.error
           ? html`
