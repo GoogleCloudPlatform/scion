@@ -364,6 +364,10 @@ func (s *MetricsDashboardService) QuerySessions(ctx context.Context, periodDays 
 	view := &SessionsView{PeriodDays: periodDays}
 	var queryErrors []string
 
+	// DailyCounts is a sum of session-count deltas, so it goes through
+	// queryDailyTimeSeries -> seriesIncreases, the cumulative-math fix
+	// (design §3.6). ActiveAgents below is presence, not a sum, so it stays
+	// on queryDailyUniqueCount instead (see that function's comment).
 	dailyCounts, err := s.queryDailyTimeSeries(ctx, telemetrycontract.MetricSessionCount, window.start, window.end, window.extraFilter)
 	if err != nil {
 		queryErrors = append(queryErrors, fmt.Sprintf("daily sessions: %v", err))
@@ -468,11 +472,15 @@ type seriesIncrement struct {
 // is the delta from the previous point in that partition. A partition's
 // first point contributes its full value only if its epoch began at or after
 // fetchStart (the epoch began inside the fetched window); otherwise it is a
-// pre-window baseline and contributes 0. An epoch that began more than
-// cumulativeLookback before the window and wrote no point in the lookback
-// therefore loses at most its pre-window tail — accepted, and documented
-// here rather than hidden. Only Int64Value and DoubleValue (rounded) points
-// are read; canonical usage metrics are never distributions.
+// pre-window baseline and contributes 0. A stream is exported only when
+// dirty (metric_streams.go), so an epoch that began before fetchStart and
+// stayed idle through the whole lookback window has no point before its
+// first in-window flush — that first flush is then treated as the baseline
+// and its own increment is the one that goes uncounted, not some proportional
+// share of the epoch's value. This undercount is bounded to one increment
+// per idle-then-active stream — accepted, and documented here rather than
+// hidden. Only Int64Value and DoubleValue (rounded) points are read;
+// canonical usage metrics are never distributions.
 func seriesIncreases(points []*monitoringpb.Point, fetchStart time.Time) []seriesIncrement {
 	type observedPoint struct {
 		start, end time.Time
@@ -658,7 +666,15 @@ func (s *MetricsDashboardService) queryUniqueLabels(ctx context.Context, metricN
 	return unique, nil
 }
 
-// queryDailyUniqueCount returns per-day counts of unique label values.
+// queryDailyUniqueCount returns per-day counts of unique label values —
+// presence, like queryUniqueLabels, not seriesIncreases' delta math: an
+// agent counts as active on a day if its stream has any positive point that
+// day, regardless of the stream's running total. It is not cumulative-
+// corrected for a second reason beyond queryUniqueLabels' "membership
+// doesn't need a delta": a hook-sourced stream exports only when dirty
+// (metric_streams.go), so presence already approximates "had activity" as
+// well as a delta would, without needing a baseline point before the
+// window.
 func (s *MetricsDashboardService) queryDailyUniqueCount(ctx context.Context, metricName, groupByLabel string, start, end time.Time, extraFilter []string) ([]TimeSeriesPoint, error) {
 	series, err := s.fetchTimeSeries(ctx, metricName, start, end, extraFilter)
 	if err != nil {
