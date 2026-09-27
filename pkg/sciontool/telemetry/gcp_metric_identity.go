@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	"google.golang.org/protobuf/proto"
@@ -18,9 +19,15 @@ const (
 	gcpResourceIDLabel = "scion_metric_resource_id"
 	gcpScopeIDLabel    = "scion_metric_scope_id"
 	gcpPointIDLabel    = "scion_metric_point_id"
-	gcpAgentLabel      = "scion_agent_id"
-	gcpProjectLabel    = "scion_project_id"
+	gcpAgentLabel      = telemetrycontract.AgentLabel
+	gcpProjectLabel    = telemetrycontract.ProjectLabel
+	gcpAgentSlugLabel  = telemetrycontract.AgentSlugLabel
 )
+
+// identityLabelKeys are the exporter-reserved canonical identity labels
+// (design D3/D7): a producer may never set these itself. They are stamped
+// only from the receiver's authoritative resource identity.
+var identityLabelKeys = []string{gcpAgentLabel, gcpProjectLabel, gcpAgentSlugLabel}
 
 var cloudResourceFields = map[string]bool{
 	"service.name": true, "service.namespace": true, "service.instance.id": true,
@@ -32,7 +39,7 @@ var cloudScopeFields = map[string]bool{"component": true, "scope.kind": true, "s
 var cloudPointFields = map[string]bool{
 	"agent_id": true, "project_id": true, "harness": true, "model": true,
 	"tool_name": true, "status": true, "operation": true, "sensor": true,
-	"phase": true, "run": true,
+	"phase": true, "run": true, telemetrycontract.TokenTypeLabel: true,
 }
 
 const pipelineMetricScope = "github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
@@ -173,6 +180,7 @@ func gcpIdentityMetrics(input []*metricpb.ResourceMetrics) ([]*metricpb.Resource
 		resourceID := identityDigest(rkey)
 		agentID := metricAttrString(source.GetResource().GetAttributes(), "scion.agent.id")
 		projectID := metricAttrString(source.GetResource().GetAttributes(), "scion.project.id")
+		agentSlug := metricAttrString(source.GetResource().GetAttributes(), "scion.agent.slug")
 		if rm.Resource != nil {
 			rm.Resource.Attributes = allowedMetricAttrs(rm.Resource.Attributes, cloudResourceFields)
 		}
@@ -203,17 +211,17 @@ func gcpIdentityMetrics(input []*metricpb.ResourceMetrics) ([]*metricpb.Resource
 				}
 				allowed := cloudPointFieldsFor(sm.GetScope().GetName(), metric.Name)
 				for _, point := range metric.GetSum().GetDataPoints() {
-					if err := addGCPIdentityLabels(&point.Attributes, allowed, sm.GetScope().GetName(), metric.Name, resourceID, scopeID, agentID, projectID); err != nil {
+					if err := addGCPIdentityLabels(&point.Attributes, allowed, sm.GetScope().GetName(), metric.Name, resourceID, scopeID, agentID, projectID, agentSlug); err != nil {
 						return nil, err
 					}
 				}
 				for _, point := range metric.GetGauge().GetDataPoints() {
-					if err := addGCPIdentityLabels(&point.Attributes, allowed, sm.GetScope().GetName(), metric.Name, resourceID, scopeID, agentID, projectID); err != nil {
+					if err := addGCPIdentityLabels(&point.Attributes, allowed, sm.GetScope().GetName(), metric.Name, resourceID, scopeID, agentID, projectID, agentSlug); err != nil {
 						return nil, err
 					}
 				}
 				for _, point := range metric.GetHistogram().GetDataPoints() {
-					if err := addGCPIdentityLabels(&point.Attributes, allowed, sm.GetScope().GetName(), metric.Name, resourceID, scopeID, agentID, projectID); err != nil {
+					if err := addGCPIdentityLabels(&point.Attributes, allowed, sm.GetScope().GetName(), metric.Name, resourceID, scopeID, agentID, projectID, agentSlug); err != nil {
 						return nil, err
 					}
 				}
@@ -224,7 +232,7 @@ func gcpIdentityMetrics(input []*metricpb.ResourceMetrics) ([]*metricpb.Resource
 	return output, nil
 }
 
-func addGCPIdentityLabels(attrs *[]*commonpb.KeyValue, allowed map[string]bool, scopeName, metricName, resourceID, scopeID, agentID, projectID string) error {
+func addGCPIdentityLabels(attrs *[]*commonpb.KeyValue, allowed map[string]bool, scopeName, metricName, resourceID, scopeID, agentID, projectID, agentSlug string) error {
 	if err := checkCloudMetricFields(*attrs, allowed, "point"); err != nil {
 		return err
 	}
@@ -232,7 +240,7 @@ func addGCPIdentityLabels(attrs *[]*commonpb.KeyValue, allowed map[string]bool, 
 		return err
 	}
 	for _, kv := range *attrs {
-		for _, reserved := range []string{gcpResourceIDLabel, gcpScopeIDLabel, gcpPointIDLabel, gcpAgentLabel, gcpProjectLabel, "service_name", "service_namespace", "service_instance_id"} {
+		for _, reserved := range []string{gcpResourceIDLabel, gcpScopeIDLabel, gcpPointIDLabel, gcpAgentLabel, gcpProjectLabel, gcpAgentSlugLabel, "service_name", "service_namespace", "service_instance_id"} {
 			if cloudLabelKey(kv.Key) == reserved {
 				return fmt.Errorf("reserved Cloud Monitoring metric label")
 			}
@@ -248,13 +256,25 @@ func addGCPIdentityLabels(attrs *[]*commonpb.KeyValue, allowed map[string]bool, 
 		metricStringLabel(gcpScopeIDLabel, scopeID),
 		metricStringLabel(gcpPointIDLabel, identityDigest(key)),
 	)
+	appendCanonicalIdentity(attrs, agentID, projectID, agentSlug)
+	return nil
+}
+
+// appendCanonicalIdentity appends the canonical scion_agent_id,
+// scion_project_id and scion_agent_slug labels (whichever are non-empty)
+// from authoritative resource identity. Shared by the GCP and generic OTLP
+// identity-stamping paths (design §3.4) so both exporters produce the same
+// labels.
+func appendCanonicalIdentity(attrs *[]*commonpb.KeyValue, agentID, projectID, agentSlug string) {
 	if agentID != "" {
 		*attrs = append(*attrs, metricStringLabel(gcpAgentLabel, agentID))
 	}
 	if projectID != "" {
 		*attrs = append(*attrs, metricStringLabel(gcpProjectLabel, projectID))
 	}
-	return nil
+	if agentSlug != "" {
+		*attrs = append(*attrs, metricStringLabel(gcpAgentSlugLabel, agentSlug))
+	}
 }
 
 func metricStringLabel(key, value string) *commonpb.KeyValue {
