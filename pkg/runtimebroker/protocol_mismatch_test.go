@@ -49,8 +49,12 @@ func TestHandleAgentByID_QueryParameters(t *testing.T) {
 			wantStatus: http.StatusOK,
 		},
 		{
-			name:       "groveId query param (legacy)",
-			query:      fmt.Sprintf("groveId=%s", projectID),
+			// groveId is no longer read, so this request carries no project
+			// scope at all and falls back to an unscoped match — it would
+			// 404 if groveId still scoped the lookup, since this project
+			// does not exist.
+			name:       "groveId query param is not honoured",
+			query:      "groveId=nonexistent-project",
 			wantStatus: http.StatusOK,
 		},
 		{
@@ -119,14 +123,35 @@ func (m *protocolMockManager) Watch(ctx context.Context, agentID string) (<-chan
 func (m *protocolMockManager) Close() {}
 
 func TestProjectWorkspaceUploadRequest_JSON(t *testing.T) {
-	t.Run("unmarshal legacy groveId", func(t *testing.T) {
-		jsonData := `{"groveId": "p1", "storagePath": "/s", "workspacePath": "/w"}`
-		var req ProjectWorkspaceUploadRequest
-		if err := json.Unmarshal([]byte(jsonData), &req); err != nil {
+	t.Run("canonical round-trip", func(t *testing.T) {
+		req := ProjectWorkspaceUploadRequest{
+			ProjectID:     "p1",
+			StoragePath:   "/s",
+			WorkspacePath: "/w",
+		}
+		data, err := json.Marshal(req)
+		if err != nil {
+			t.Fatalf("Marshal failed: %v", err)
+		}
+
+		var m map[string]interface{}
+		if err := json.Unmarshal(data, &m); err != nil {
+			t.Fatalf("Unmarshal back failed: %v", err)
+		}
+
+		if m["projectId"] != "p1" || m["storagePath"] != "/s" || m["workspacePath"] != "/w" {
+			t.Errorf("canonical fields mismatch: %v", m)
+		}
+		if _, ok := m["groveId"]; ok {
+			t.Errorf("legacy 'groveId' field present in marshal output")
+		}
+
+		var roundTripped ProjectWorkspaceUploadRequest
+		if err := json.Unmarshal(data, &roundTripped); err != nil {
 			t.Fatalf("Unmarshal failed: %v", err)
 		}
-		if req.ProjectID != "p1" {
-			t.Errorf("ProjectID = %q, want %q", req.ProjectID, "p1")
+		if roundTripped.ProjectID != req.ProjectID || roundTripped.StoragePath != req.StoragePath || roundTripped.WorkspacePath != req.WorkspacePath {
+			t.Errorf("round-trip = %+v, want %+v", roundTripped, req)
 		}
 	})
 
@@ -138,6 +163,17 @@ func TestProjectWorkspaceUploadRequest_JSON(t *testing.T) {
 		}
 		if req.ProjectID != "p1" {
 			t.Errorf("ProjectID = %q, want %q", req.ProjectID, "p1")
+		}
+	})
+
+	t.Run("legacy groveId field is not honoured", func(t *testing.T) {
+		jsonData := `{"groveId": "p1", "storagePath": "/s", "workspacePath": "/w"}`
+		var req ProjectWorkspaceUploadRequest
+		if err := json.Unmarshal([]byte(jsonData), &req); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if req.ProjectID != "" {
+			t.Errorf("legacy groveId field was honoured: ProjectID = %q", req.ProjectID)
 		}
 	})
 }

@@ -16,7 +16,10 @@ package runtimebroker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -638,6 +641,50 @@ func TestLookupContainerID_DifferentProjectNotMatchedViaFallback(t *testing.T) {
 
 	if _, err := srv.LookupAgent(context.Background(), "coordinator", "project-bbb"); err == nil {
 		t.Error("expected error from LookupAgent: different project's labeled agent must not match via fallback")
+	}
+}
+
+// TestHandleAgentAttach_GroveIDQueryParamNotHonoured verifies that a
+// groveId-only query no longer scopes the PTY attach lookup: two same-slug
+// agents in different projects are ambiguous (unscoped) rather than the
+// groveId value picking out just one of them.
+func TestHandleAgentAttach_GroveIDQueryParamNotHonoured(t *testing.T) {
+	mgr := &filteringMockManager{}
+	mgr.agents = []api.AgentInfo{
+		{
+			ContainerID: "container-a",
+			Name:        "shared-agent",
+			Labels:      map[string]string{"scion.name": "shared-agent", "scion.project_id": "project-a"},
+		},
+		{
+			ContainerID: "container-b",
+			Name:        "shared-agent",
+			Labels:      map[string]string{"scion.name": "shared-agent", "scion.project_id": "project-b"},
+		},
+	}
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/shared-agent/attach?groveId=project-a", nil)
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Connection", "Upgrade")
+
+	rec := httptest.NewRecorder()
+	srv.handleAgentAttach(rec, req)
+
+	// If groveId still scoped the lookup, only the project-a agent would
+	// match and the handler would proceed past LookupAgent. Since it doesn't,
+	// both agents match by slug alone and LookupAgent fails closed on the
+	// ambiguity, which surfaces here as Not Found.
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 (ambiguous match proves groveId did not scope the lookup), got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode error response %q: %v", rec.Body.String(), err)
+	}
+	if resp.Error.Code != ErrCodeAgentNotFound {
+		t.Errorf("expected code %q, got %q", ErrCodeAgentNotFound, resp.Error.Code)
 	}
 }
 

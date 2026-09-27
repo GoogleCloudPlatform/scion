@@ -167,6 +167,10 @@ allowed_paths=(
   "^pkg/runtimebroker/heartbeat_test.go$"
   "^pkg/runtimebroker/hub_connection_test.go$"
   "^pkg/runtimebroker/protocol_mismatch_test.go$"
+  # Asserts that a groveId-only PTY attach query no longer scopes the lookup
+  # (two same-slug agents in different projects become ambiguous). The
+  # literal is the point of the negative test.
+  "^pkg/runtimebroker/server_lookup_test.go$"
   "^pkg/runtimebroker/start_context_test.go$"
   "^pkg/runtimebroker/types_test.go$"
   "^pkg/runtimebroker/workspace_handlers_test.go$"
@@ -190,7 +194,6 @@ allowed_paths=(
   "^extras/scion-telegram/internal/telegram/broker_v2.go$"
 
   # Core compatibility adapters and bounded legacy protocol/storage surfaces.
-  "^pkg/api/types.go$"
   "^pkg/config/koanf.go$"
   "^pkg/config/legacy_grove_migration.go$"
   "^pkg/config/paths.go$"
@@ -207,10 +210,8 @@ allowed_paths=(
   "^pkg/hubclient/tokens.go$"
   "^pkg/projectcompat/.*\\.go$"
   "^pkg/runtimebroker/handlers.go$"
-  "^pkg/runtimebroker/pty_handlers.go$"
   "^pkg/runtimebroker/server.go$"
   "^pkg/runtimebroker/start_context.go$"
-  "^pkg/runtimebroker/types.go$"
   "^pkg/runtimebroker/workspace_handlers.go$"
   # Reserved-identity-attribute denylist: the three retired grove-named
   # telemetry keys (scion.grove, scion.grove.id, scion.grove_id) are kept
