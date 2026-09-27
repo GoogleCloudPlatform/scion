@@ -40,8 +40,8 @@ func TestHandleBrokerMessage_UserTopicAcceptance(t *testing.T) {
 		topic          string
 		wantDeliveries int
 	}{
-		{"canonical", "scion.project.grove-abc.user.hub-user-1.messages", 1},
-		{"legacy prefix rejected", "scion.grove.grove-abc.user.hub-user-1.messages", 0},
+		{"canonical", "scion.project.project-abc.user.hub-user-1.messages", 1},
+		{"legacy prefix rejected", "scion.grove.project-abc.user.hub-user-1.messages", 0},
 	}
 
 	for _, tc := range tests {
@@ -61,8 +61,8 @@ func TestHandleBrokerMessage_UserTopicAcceptance(t *testing.T) {
 			if err := store.SetSpaceLink(&state.SpaceLink{
 				SpaceID:     "spaces/AAQAx",
 				Platform:    "googlechat",
-				ProjectID:   "grove-abc",
-				ProjectSlug: "my-grove",
+				ProjectID:   "project-abc",
+				ProjectSlug: "my-project",
 				LinkedBy:    "test",
 			}); err != nil {
 				t.Fatalf("setting space link: %v", err)
@@ -168,8 +168,8 @@ func TestHandleUserMessage_NoSubscriptionRequired(t *testing.T) {
 	if err := store.SetSpaceLink(&state.SpaceLink{
 		SpaceID:     "spaces/AAQAx",
 		Platform:    "googlechat",
-		ProjectID:   "grove-abc",
-		ProjectSlug: "my-grove",
+		ProjectID:   "project-abc",
+		ProjectSlug: "my-project",
 		LinkedBy:    "test",
 	}); err != nil {
 		t.Fatalf("setting space link: %v", err)
@@ -187,7 +187,7 @@ func TestHandleUserMessage_NoSubscriptionRequired(t *testing.T) {
 	}
 
 	err := relay.HandleBrokerMessage(context.Background(),
-		"scion.project.grove-abc.user.hub-user-1.messages", msg)
+		"scion.project.project-abc.user.hub-user-1.messages", msg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -240,8 +240,8 @@ func TestHandleUserMessage_RoutesNonInstructionToNotification(t *testing.T) {
 	if err := store.SetSpaceLink(&state.SpaceLink{
 		SpaceID:     "spaces/AAQAx",
 		Platform:    "googlechat",
-		ProjectID:   "grove-abc",
-		ProjectSlug: "my-grove",
+		ProjectID:   "project-abc",
+		ProjectSlug: "my-project",
 		LinkedBy:    "test",
 	}); err != nil {
 		t.Fatalf("setting space link: %v", err)
@@ -268,7 +268,7 @@ func TestHandleUserMessage_RoutesNonInstructionToNotification(t *testing.T) {
 			}
 
 			err := relay.HandleBrokerMessage(context.Background(),
-				"scion.project.grove-abc.user.hub-user-1.messages", msg)
+				"scion.project.project-abc.user.hub-user-1.messages", msg)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -347,8 +347,8 @@ func TestHandleUserMessage_AssistantReplyTruncated(t *testing.T) {
 	if err := store.SetSpaceLink(&state.SpaceLink{
 		SpaceID:     "spaces/AAQAx",
 		Platform:    "googlechat",
-		ProjectID:   "grove-abc",
-		ProjectSlug: "my-grove",
+		ProjectID:   "project-abc",
+		ProjectSlug: "my-project",
 		LinkedBy:    "test",
 	}); err != nil {
 		t.Fatalf("setting space link: %v", err)
@@ -367,7 +367,7 @@ func TestHandleUserMessage_AssistantReplyTruncated(t *testing.T) {
 	}
 
 	err := relay.HandleBrokerMessage(context.Background(),
-		"scion.project.grove-abc.user.hub-user-1.messages", msg)
+		"scion.project.project-abc.user.hub-user-1.messages", msg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -417,8 +417,8 @@ func TestHandleUserMessage_ShortAssistantReplyNotTruncated(t *testing.T) {
 	if err := store.SetSpaceLink(&state.SpaceLink{
 		SpaceID:     "spaces/AAQAx",
 		Platform:    "googlechat",
-		ProjectID:   "grove-abc",
-		ProjectSlug: "my-grove",
+		ProjectID:   "project-abc",
+		ProjectSlug: "my-project",
 		LinkedBy:    "test",
 	}); err != nil {
 		t.Fatalf("setting space link: %v", err)
@@ -437,7 +437,7 @@ func TestHandleUserMessage_ShortAssistantReplyNotTruncated(t *testing.T) {
 	}
 
 	err := relay.HandleBrokerMessage(context.Background(),
-		"scion.project.grove-abc.user.hub-user-1.messages", msg)
+		"scion.project.project-abc.user.hub-user-1.messages", msg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
