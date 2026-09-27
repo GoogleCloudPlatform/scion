@@ -79,11 +79,6 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/projects/register": "authenticated", // Project registration
 	"/api/v1/projects/":         "authenticated", // Project routes (by-id, nested resources)
 
-	// ── Legacy grove aliases ───────────────────────────────────────────
-	"/api/v1/groves":          "authenticated", // Legacy alias for /projects
-	"/api/v1/groves/register": "authenticated", // Legacy alias for /projects/register
-	"/api/v1/groves/":         "authenticated", // Legacy alias for /projects/
-
 	// ── Runtime brokers ────────────────────────────────────────────────
 	"/api/v1/runtime-brokers":         "authenticated", // List/create runtime brokers
 	"/api/v1/runtime-brokers/":        "authenticated", // Runtime broker routes
@@ -162,53 +157,54 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/broker/projects":       "broker-hmac", // Broker project listing — broker HMAC
 
 	// ── Admin system endpoints ─────────────────────────────────────────
-	"/api/v1/admin/maintenance":                 "admin", // Maintenance mode — requires admin role
-	"/api/v1/admin/maintenance/operations":      "admin", // Maintenance operations
-	"/api/v1/admin/maintenance/operations/":     "admin", // Maintenance operation by ID
-	"/api/v1/admin/maintenance/migrations/":     "admin", // Maintenance migrations
-	"/api/v1/admin/maintenance/check-updates":   "admin", // Check for updates
-	"/api/v1/admin/maintenance/restart":         "admin", // Restart hub
-	"/api/v1/admin/scheduler":                   "admin", // Scheduler status
-	"/api/v1/admin/allow-list":                  "admin", // Allow list management
-	"/api/v1/admin/allow-list/":                 "admin", // Allow list by email
-	"/api/v1/admin/users/invite/bulk":           "admin", // Bulk user invite
-	"/api/v1/admin/users/invite":                "admin", // User invite
-	"/api/v1/admin/invites":                     "admin", // List invites
-	"/api/v1/admin/invites/":                    "admin", // Invite by ID
-	"/api/v1/admin/server-config/schema":        "admin", // Server config schema
-	"/api/v1/admin/server-config/sections/":     "admin", // Server config section reset
-	"/api/v1/admin/server-config":               "admin", // Server config
-	"/api/v1/admin/project-defaults":            "admin", // Project defaults
-	"/api/v1/admin/agents/reset-auth-all":       "admin", // Reset all agent auth
-	"/api/v1/admin/gcp-quota":                   "admin", // GCP quota management
-	"/api/v1/admin/lifecycle-hooks":             "admin", // Lifecycle hooks
-	"/api/v1/admin/lifecycle-hooks/":            "admin", // Lifecycle hook by ID
-	"/api/v1/admin/validate-resources":          "admin", // Validate resources
-	"/api/v1/admin/integrations":                "admin", // Integrations management
-	"/api/v1/admin/integrations/teams/manifest": "admin", // Teams manifest download
-	"/api/v1/admin/integrations/":               "admin", // Integration by name
-	"/api/v1/admin/diagnostics/logs/stream":     "admin", // Diagnostics log stream
-	"/api/v1/admin/diagnostics/logs":            "admin", // Diagnostics logs
-	"/api/v1/admin/health/summary":              "admin", // Health summary
-	"/api/v1/admin/messaging":                   "admin", // Admin messaging
-	"/api/v1/admin/messaging/divergence":        "admin", // Admin messaging divergence check
-	"/api/v1/admin/limits":                      "admin", // Admin limits
-	"/api/v1/admin/limits/":                     "admin", // Admin limit by ID
-	"/api/v1/admin/entitlements/":               "admin", // Admin entitlement by ID
-	"/api/v1/admin/usage":                       "admin", // Admin usage
-	"/api/v1/admin/usage/":                      "admin", // Admin usage by limit
-	"/api/v1/admin/roles":                       "admin", // Admin roles
-	"/api/v1/admin/roles/":                      "admin", // Admin role by ID
-	"/api/v1/admin/roles/export":                "admin", // Admin roles export
-	"/api/v1/admin/roles/import":                "admin", // Admin roles import
-	"/api/v1/admin/role-bindings":               "admin", // Admin role bindings
-	"/api/v1/admin/role-bindings/":              "admin", // Admin role binding by ID
-	"/api/v1/admin/permissions":                 "admin", // Admin permissions
-	"/api/v1/admin/access-constraints":          "admin", // Admin access constraints
-	"/api/v1/admin/access-constraints/":         "admin", // Admin access constraint by ID
-	"/api/v1/admin/access-constraint-previews":  "admin", // Admin access constraint previews
-	"/api/v1/admin/access-constraint-previews/": "admin", // Admin access constraint preview by ID
-	"/api/v1/admin/effective-access":            "admin", // Admin effective access
+	"/api/v1/admin/maintenance":                  "admin", // Maintenance mode — requires admin role
+	"/api/v1/admin/maintenance/operations":       "admin", // Maintenance operations
+	"/api/v1/admin/maintenance/operations/":      "admin", // Maintenance operation by ID
+	"/api/v1/admin/maintenance/migrations/":      "admin", // Maintenance migrations
+	"/api/v1/admin/maintenance/check-updates":    "admin", // Check for updates
+	"/api/v1/admin/maintenance/update-available": "admin", // Update availability status
+	"/api/v1/admin/maintenance/restart":          "admin", // Restart hub
+	"/api/v1/admin/scheduler":                    "admin", // Scheduler status
+	"/api/v1/admin/allow-list":                   "admin", // Allow list management
+	"/api/v1/admin/allow-list/":                  "admin", // Allow list by email
+	"/api/v1/admin/users/invite/bulk":            "admin", // Bulk user invite
+	"/api/v1/admin/users/invite":                 "admin", // User invite
+	"/api/v1/admin/invites":                      "admin", // List invites
+	"/api/v1/admin/invites/":                     "admin", // Invite by ID
+	"/api/v1/admin/server-config/schema":         "admin", // Server config schema
+	"/api/v1/admin/server-config/sections/":      "admin", // Server config section reset
+	"/api/v1/admin/server-config":                "admin", // Server config
+	"/api/v1/admin/project-defaults":             "admin", // Project defaults
+	"/api/v1/admin/agents/reset-auth-all":        "admin", // Reset all agent auth
+	"/api/v1/admin/gcp-quota":                    "admin", // GCP quota management
+	"/api/v1/admin/lifecycle-hooks":              "admin", // Lifecycle hooks
+	"/api/v1/admin/lifecycle-hooks/":             "admin", // Lifecycle hook by ID
+	"/api/v1/admin/validate-resources":           "admin", // Validate resources
+	"/api/v1/admin/integrations":                 "admin", // Integrations management
+	"/api/v1/admin/integrations/teams/manifest":  "admin", // Teams manifest download
+	"/api/v1/admin/integrations/":                "admin", // Integration by name
+	"/api/v1/admin/diagnostics/logs/stream":      "admin", // Diagnostics log stream
+	"/api/v1/admin/diagnostics/logs":             "admin", // Diagnostics logs
+	"/api/v1/admin/health/summary":               "admin", // Health summary
+	"/api/v1/admin/messaging":                    "admin", // Admin messaging
+	"/api/v1/admin/messaging/divergence":         "admin", // Admin messaging divergence check
+	"/api/v1/admin/limits":                       "admin", // Admin limits
+	"/api/v1/admin/limits/":                      "admin", // Admin limit by ID
+	"/api/v1/admin/entitlements/":                "admin", // Admin entitlement by ID
+	"/api/v1/admin/usage":                        "admin", // Admin usage
+	"/api/v1/admin/usage/":                       "admin", // Admin usage by limit
+	"/api/v1/admin/roles":                        "admin", // Admin roles
+	"/api/v1/admin/roles/":                       "admin", // Admin role by ID
+	"/api/v1/admin/roles/export":                 "admin", // Admin roles export
+	"/api/v1/admin/roles/import":                 "admin", // Admin roles import
+	"/api/v1/admin/role-bindings":                "admin", // Admin role bindings
+	"/api/v1/admin/role-bindings/":               "admin", // Admin role binding by ID
+	"/api/v1/admin/permissions":                  "admin", // Admin permissions
+	"/api/v1/admin/access-constraints":           "admin", // Admin access constraints
+	"/api/v1/admin/access-constraints/":          "admin", // Admin access constraint by ID
+	"/api/v1/admin/access-constraint-previews":   "admin", // Admin access constraint previews
+	"/api/v1/admin/access-constraint-previews/":  "admin", // Admin access constraint preview by ID
+	"/api/v1/admin/effective-access":             "admin", // Admin effective access
 
 	// ── Metrics dashboard (intentionally not admin-only) ───────────────
 	"/api/v1/metrics/":                "authenticated", // Metrics dashboard — any session
