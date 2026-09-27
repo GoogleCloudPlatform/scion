@@ -372,7 +372,7 @@ func TestNewCloudHandler_NoProject(t *testing.T) {
 func TestMapToCloudHTTPRequest(t *testing.T) {
 	m := map[string]any{
 		"requestMethod": "POST",
-		"requestUrl":    "/api/v1/groves",
+		"requestUrl":    "/api/v1/projects",
 		"requestSize":   int64(256),
 		"status":        int64(201),
 		"responseSize":  int64(128),
@@ -390,8 +390,8 @@ func TestMapToCloudHTTPRequest(t *testing.T) {
 	if req.Request.Method != "POST" {
 		t.Errorf("expected method POST, got %s", req.Request.Method)
 	}
-	if req.Request.URL.String() != "/api/v1/groves" {
-		t.Errorf("expected URL /api/v1/groves, got %s", req.Request.URL.String())
+	if req.Request.URL.String() != "/api/v1/projects" {
+		t.Errorf("expected URL /api/v1/projects, got %s", req.Request.URL.String())
 	}
 	if req.RequestSize != 256 {
 		t.Errorf("expected requestSize=256, got %d", req.RequestSize)

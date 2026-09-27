@@ -153,10 +153,6 @@ allowed_paths=(
   "^pkg/hubclient/workspace_test.go$"
   "^pkg/hubsync/resolve_test.go$"
   "^pkg/hubsync/sync_test.go$"
-  "^pkg/plugin/broker_plugin_test.go$"
-  "^pkg/plugin/manager_test.go$"
-  "^pkg/plugin/refbroker/plugin_integration_test.go$"
-  "^pkg/plugin/refbroker/refbroker_test.go$"
   "^pkg/projectcompat/config_test.go$"
   "^pkg/projectcompat/topics_test.go$"
   "^pkg/runtime/cloudrun_sandbox_runtime_test.go$"
@@ -187,7 +183,6 @@ allowed_paths=(
   # test.
   "^pkg/store/entadapter/legacy_scope_migration_test.go$"
   "^pkg/store/models_json_test.go$"
-  "^pkg/util/logging/cloud_handler_test.go$"
   # Asserts ConnectMessage/StreamOpenMessage no longer emit or decode the
   # removed "groves"/"groveId" names. The literal is the point of the
   # negative tests.

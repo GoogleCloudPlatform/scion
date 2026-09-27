@@ -70,17 +70,17 @@ func TestRPCIntegration_ConfigurePublishSubscribe(t *testing.T) {
 	require.NoError(t, err)
 
 	// Subscribe
-	err = client.Subscribe("scion.grove.g1.agent.*.messages")
+	err = client.Subscribe("scion.project.g1.agent.*.messages")
 	require.NoError(t, err)
 
 	// Publish (from external source, no echo marker)
 	msg := messages.NewInstruction("user:alice", "agent:coder", "hello via rpc")
-	err = client.Publish(context.Background(), "scion.grove.g1.agent.coder.messages", msg)
+	err = client.Publish(context.Background(), "scion.project.g1.agent.coder.messages", msg)
 	require.NoError(t, err)
 
 	// Wait for delivery
 	<-done
-	assert.Equal(t, "scion.grove.g1.agent.coder.messages", deliveredTopic)
+	assert.Equal(t, "scion.project.g1.agent.coder.messages", deliveredTopic)
 	assert.Equal(t, "hello via rpc", deliveredMsg.Msg)
 }
 
@@ -179,19 +179,19 @@ func TestRPCIntegration_FullLifecycle(t *testing.T) {
 	impl.InboundHandler = func(topic string, _ *messages.StructuredMessage) {
 		deliveries <- topic
 	}
-	err = client.Subscribe("scion.grove.*.>")
+	err = client.Subscribe("scion.project.*.>")
 	require.NoError(t, err)
 
 	// 4. Publish
 	msg := messages.NewInstruction("user:bob", "agent:reviewer", "review this")
-	err = client.Publish(context.Background(), "scion.grove.g1.agent.reviewer.messages", msg)
+	err = client.Publish(context.Background(), "scion.project.g1.agent.reviewer.messages", msg)
 	require.NoError(t, err)
 
 	topic := <-deliveries
-	assert.Equal(t, "scion.grove.g1.agent.reviewer.messages", topic)
+	assert.Equal(t, "scion.project.g1.agent.reviewer.messages", topic)
 
 	// 5. Unsubscribe
-	err = client.Unsubscribe("scion.grove.*.>")
+	err = client.Unsubscribe("scion.project.*.>")
 	require.NoError(t, err)
 
 	// 6. Close
