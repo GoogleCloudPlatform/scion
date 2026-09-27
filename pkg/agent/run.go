@@ -1222,18 +1222,18 @@ authDone:
 				"scion.harness_auth":   opts.HarnessAuth,
 				"agent_id":             agentID,
 			}
-			for k, v := range projectcompat.ProjectNameLabels(projectName, true) {
+			for k, v := range projectcompat.ProjectNameLabels(projectName) {
 				l[k] = v
 			}
 			// Add project_id label for project-scoped agent isolation.
 			if projectID != "" {
-				for k, v := range projectcompat.ProjectIDLabels(projectID, true) {
+				for k, v := range projectcompat.ProjectIDLabels(projectID) {
 					l[k] = v
 				}
 			}
 			return l
 		}(),
-		Annotations: projectcompat.ProjectPathLabels(projectDir, true),
+		Annotations: projectcompat.ProjectPathLabels(projectDir),
 	}
 	id, err := m.Runtime.Run(ctx, runCfg)
 	if err != nil {

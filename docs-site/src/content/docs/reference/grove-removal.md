@@ -49,6 +49,7 @@ agents and make sure hub and broker are on the same release.
 | --- | --- |
 | listing agents whose pods/containers carry only `scion.grove*` labels (created before the rename) | restart those agents |
 | env `SCION_GROVE_ID`, `SCION_GROVE`, `SCION_GROVE_PATH` inside agent containers (now ignored, with a warning) | `SCION_PROJECT_ID`, `SCION_PROJECT`, `SCION_PROJECT_PATH`. Restart running agents. Update harness scripts that read the old names. |
+| container/pod labels `scion.grove`, `scion.grove_id`; annotation `scion.grove_path` | `scion.project`, `scion.project_id`, `scion.project_path`. Update external tooling that filters on the old labels. Restart any agent created before the grove→project rename before upgrading. Its container carries only `scion.grove*` labels and is otherwise treated as unlabelled, so a same-named agent lookup in any project can match it. |
 <!-- Rows are appended here as later changes merge. -->
 
 ## Hub API

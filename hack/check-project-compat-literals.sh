@@ -69,13 +69,11 @@ allowed_paths=(
   "^extras/scion-discord/internal/discord/broker_test.go$"
   "^extras/scion-slack/internal/slack/broker_test.go$"
   "^extras/scion-telegram/internal/telegram/broker_v2_test.go$"
-  "^pkg/agent/list_test.go$"
   "^pkg/agent/provision_test.go$"
   # Asserts SCION_GROVE is absent from RunConfig.Env alongside a SCION_PROJECT
   # presence check. The literal is the point of the negative assertion.
   "^pkg/agent/run_test.go$"
   "^pkg/agent/run_shared_dir_storage_test.go$"
-  "^pkg/agent/stop_project_containers_test.go$"
   "^pkg/api/types_test.go$"
   "^pkg/brokerclient/agents_test.go$"
   "^pkg/config/harness_config_test.go$"
@@ -157,26 +155,18 @@ allowed_paths=(
   "^pkg/plugin/refbroker/plugin_integration_test.go$"
   "^pkg/plugin/refbroker/refbroker_test.go$"
   "^pkg/projectcompat/config_test.go$"
-  "^pkg/projectcompat/labels_test.go$"
   "^pkg/projectcompat/topics_test.go$"
   "^pkg/runtime/cloudrun_sandbox_runtime_test.go$"
   # Asserts SCION_GROVE and SCION_GROVE_ID are absent from buildCommonRunArgs
   # output alongside a SCION_PROJECT/SCION_PROJECT_ID presence check. The
   # literal is the point of the negative assertion.
   "^pkg/runtime/common_test.go$"
-  "^pkg/runtime/k8s_nfs_test.go$"
   "^pkg/runtime/k8s_runtime_test.go$"
-  "^pkg/runtime/k8s_secrets_test.go$"
-  "^pkg/runtime/k8s_shared_dirs_test.go$"
-  "^pkg/runtime/podman_test.go$"
   "^pkg/runtimebroker/handlers_envgather_test.go$"
-  "^pkg/runtimebroker/handlers_exec_test.go$"
-  "^pkg/runtimebroker/handlers_reset_auth_test.go$"
   "^pkg/runtimebroker/handlers_test.go$"
   "^pkg/runtimebroker/heartbeat_test.go$"
   "^pkg/runtimebroker/hub_connection_test.go$"
   "^pkg/runtimebroker/protocol_mismatch_test.go$"
-  "^pkg/runtimebroker/server_lookup_test.go$"
   "^pkg/runtimebroker/start_context_test.go$"
   "^pkg/runtimebroker/types_test.go$"
   "^pkg/runtimebroker/workspace_handlers_test.go$"
@@ -200,7 +190,6 @@ allowed_paths=(
   "^extras/scion-telegram/internal/telegram/broker_v2.go$"
 
   # Core compatibility adapters and bounded legacy protocol/storage surfaces.
-  "^pkg/agent/list.go$"
   "^pkg/api/types.go$"
   "^pkg/config/koanf.go$"
   "^pkg/config/legacy_grove_migration.go$"
@@ -217,8 +206,6 @@ allowed_paths=(
   "^pkg/hubclient/templates.go$"
   "^pkg/hubclient/tokens.go$"
   "^pkg/projectcompat/.*\\.go$"
-  "^pkg/runtime/common.go$"
-  "^pkg/runtime/k8s_runtime.go$"
   "^pkg/runtimebroker/handlers.go$"
   "^pkg/runtimebroker/pty_handlers.go$"
   "^pkg/runtimebroker/server.go$"

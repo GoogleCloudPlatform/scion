@@ -65,8 +65,7 @@ func matchesAgent(a api.AgentInfo, id, projectID string) bool {
 }
 
 func matchesAgentProject(a api.AgentInfo, projectID string) bool {
-	// Check runtime labels first (canonical project_id, then legacy grove_id),
-	// then ProjectID field.
+	// Check the runtime's project_id label first, then the ProjectID field.
 	if labelProjectID := projectcompat.ProjectIDFromLabels(a.Labels); labelProjectID != "" {
 		return labelProjectID == projectID
 	}
@@ -1825,17 +1824,17 @@ func isContainerStopTolerable(err error) bool {
 // no-match. The solo/CLI
 // fallback above predates project scoping and is left unchanged: it already
 // tolerates lookup failures by degrading to the bare id.
-// agentsWithoutProjectLabel returns the subset of agents that carry no project
-// label (neither scion.grove_id nor scion.project_id). The project-scoped
-// lookups fall back to a slug-only search for backward compatibility with
-// pre-existing / solo-mode containers that predate project labels; that
-// fallback must only match such genuinely unlabeled containers. A container
-// labeled for a *different* project must never satisfy a project-scoped
-// request, or same-slug agents across projects would collide.
+// agentsWithoutProjectLabel returns the subset of agents that carry no
+// scion.project_id label. The project-scoped lookups fall back to a
+// slug-only search for backward compatibility with pre-existing / solo-mode
+// containers that predate project labels; that fallback must only match such
+// genuinely unlabeled containers. A container labeled for a *different*
+// project must never satisfy a project-scoped request, or same-slug agents
+// across projects would collide.
 func agentsWithoutProjectLabel(agents []api.AgentInfo) []api.AgentInfo {
 	filtered := make([]api.AgentInfo, 0, len(agents))
 	for _, a := range agents {
-		if a.Labels["scion.grove_id"] == "" && a.Labels["scion.project_id"] == "" {
+		if a.Labels["scion.project_id"] == "" {
 			filtered = append(filtered, a)
 		}
 	}

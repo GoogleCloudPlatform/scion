@@ -38,9 +38,6 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 	// project path identifies which local project directory to scan.
 	var projectsToScan []string
 	projectPath := filter["scion.project_path"]
-	if projectPath == "" {
-		projectPath = filter["scion.grove_path"]
-	}
 	if projectPath != "" {
 		projectsToScan = append(projectsToScan, projectPath)
 	} else if len(filter) == 0 || (len(filter) == 1 && filter["scion.agent"] == "true") {

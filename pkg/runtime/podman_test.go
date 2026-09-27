@@ -180,7 +180,7 @@ func TestPodmanRuntime_List_JSONArray(t *testing.T) {
 	tmpDir := t.TempDir()
 	mockPodman := filepath.Join(tmpDir, "mock-podman")
 
-	jsonOutput := `[{"Id":"abc123def456","Names":["test-agent"],"Status":"Up 2 hours","Image":"scion-agent:latest","Labels":{"scion.grove":"mygrove","scion.template":"default"}}]`
+	jsonOutput := `[{"Id":"abc123def456","Names":["test-agent"],"Status":"Up 2 hours","Image":"scion-agent:latest","Labels":{"scion.project":"myproject","scion.template":"default"}}]`
 
 	script := `#!/bin/sh
 echo '` + jsonOutput + `'
@@ -215,8 +215,8 @@ echo '` + jsonOutput + `'
 	if a.Image != "scion-agent:latest" {
 		t.Errorf("expected Image 'scion-agent:latest', got %q", a.Image)
 	}
-	if a.Labels["scion.grove"] != "mygrove" {
-		t.Errorf("expected label scion.grove='mygrove', got %q", a.Labels["scion.grove"])
+	if a.Labels["scion.project"] != "myproject" {
+		t.Errorf("expected label scion.project='myproject', got %q", a.Labels["scion.project"])
 	}
 	if a.Template != "default" {
 		t.Errorf("expected Template 'default', got %q", a.Template)
@@ -255,7 +255,7 @@ func TestPodmanRuntime_List_LabelFiltering(t *testing.T) {
 	tmpDir := t.TempDir()
 	mockPodman := filepath.Join(tmpDir, "mock-podman")
 
-	jsonOutput := `[{"Id":"aaa","Names":["agent-a"],"Status":"Up","Image":"img","Labels":{"scion.grove":"grove1","scion.template":"default"}},{"Id":"bbb","Names":["agent-b"],"Status":"Up","Image":"img","Labels":{"scion.grove":"grove2","scion.template":"custom"}}]`
+	jsonOutput := `[{"Id":"aaa","Names":["agent-a"],"Status":"Up","Image":"img","Labels":{"scion.project":"project1","scion.template":"default"}},{"Id":"bbb","Names":["agent-b"],"Status":"Up","Image":"img","Labels":{"scion.project":"project2","scion.template":"custom"}}]`
 
 	script := `#!/bin/sh
 echo '` + jsonOutput + `'
@@ -269,7 +269,7 @@ echo '` + jsonOutput + `'
 	}
 
 	// Filter for project1 only
-	agents, err := rt.List(context.Background(), map[string]string{"scion.grove": "grove1"})
+	agents, err := rt.List(context.Background(), map[string]string{"scion.project": "project1"})
 	if err != nil {
 		t.Fatalf("runtime.List failed: %v", err)
 	}

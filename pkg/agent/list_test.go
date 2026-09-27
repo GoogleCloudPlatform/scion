@@ -249,7 +249,7 @@ func TestListNonRunningAgentIncludesHarnessConfig(t *testing.T) {
 
 	mgr := NewManager(mock)
 	agents, err := mgr.List(context.Background(), map[string]string{
-		"scion.grove_path": projectPath,
+		"scion.project_path": projectPath,
 	})
 	if err != nil {
 		t.Fatalf("List() error: %v", err)
@@ -479,7 +479,7 @@ func TestListPreservesRuntimeTerminalStateForKubernetes(t *testing.T) {
 
 			mgr := NewManager(mock)
 			agents, err := mgr.List(context.Background(), map[string]string{
-				"scion.grove_path": projectPath,
+				"scion.project_path": projectPath,
 			})
 			if err != nil {
 				t.Fatalf("List() error: %v", err)
@@ -804,7 +804,7 @@ func TestListLegacyEndedWithExitCode(t *testing.T) {
 
 			mgr := NewManager(mock)
 			agents, err := mgr.List(context.Background(), map[string]string{
-				"scion.grove_path": projectPath,
+				"scion.project_path": projectPath,
 			})
 			if err != nil {
 				t.Fatalf("List() error: %v", err)

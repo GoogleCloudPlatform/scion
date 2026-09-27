@@ -42,13 +42,7 @@ func (m *filteringMockManager) List(ctx context.Context, filter map[string]strin
 	for _, a := range m.agents {
 		match := true
 		for k, v := range filter {
-			actual := a.Labels[k]
-			// Mirror every real runtime's List: the project_id filter key
-			// also matches the legacy grove_id label.
-			if actual == "" && k == projectcompat.LabelProjectID {
-				actual = projectcompat.ProjectIDFromLabels(a.Labels)
-			}
-			if actual != v {
+			if a.Labels[k] != v {
 				match = false
 				break
 			}
@@ -469,9 +463,9 @@ func TestResolveAgentRuntimeTarget_ProjectFallbackSkipsOtherProjects(t *testing.
 		{Name: "shared-name", Labels: map[string]string{"scion.name": "shared-name", "scion.project_id": "project-a"}},
 	}}}
 	auxMgr := &filteringMockManager{mockManager: mockManager{agents: []api.AgentInfo{
-		// Legacy project metadata does not match the canonical filter, so this
-		// backend is discovered only by the compatibility fallback.
-		{Name: "shared-name", Labels: map[string]string{"scion.name": "shared-name", "scion.grove_id": "project-b"}},
+		// No project_id label at all, so this backend is discovered only by
+		// the unlabeled-compatibility fallback.
+		{Name: "shared-name", Labels: map[string]string{"scion.name": "shared-name"}},
 	}}}
 	defaultRuntime := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	auxRuntime := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
@@ -511,9 +505,9 @@ func TestHasAgentInProjectOrUnlabeled(t *testing.T) {
 			match: true,
 		},
 		{
-			name:  "legacy label matches",
-			agent: api.AgentInfo{Labels: map[string]string{"scion.grove_id": "project-a"}},
-			match: true,
+			name:  "canonical label mismatch",
+			agent: api.AgentInfo{Labels: map[string]string{"scion.project_id": "project-b"}},
+			match: false,
 		},
 		{
 			name:  "agent field matches without label",
@@ -567,19 +561,19 @@ func TestLookupContainerID_ProjectScopedDisambiguation(t *testing.T) {
 		{
 			ContainerID: "container-ggcloud",
 			Name:        "foobar",
-			Labels:      map[string]string{"scion.name": "foobar", "scion.grove_id": "grove-aaa"},
+			Labels:      map[string]string{"scion.name": "foobar", "scion.project_id": "project-aaa"},
 		},
 		{
 			ContainerID: "container-muskateers",
 			Name:        "foobar",
-			Labels:      map[string]string{"scion.name": "foobar", "scion.grove_id": "grove-bbb"},
+			Labels:      map[string]string{"scion.name": "foobar", "scion.project_id": "project-bbb"},
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(DefaultServerConfig(), mgr, rt)
 
-	// With grove scoping, should get the correct container
-	id, err := srv.LookupContainerID(context.Background(), "foobar", "grove-aaa")
+	// With project scoping, should get the correct container
+	id, err := srv.LookupContainerID(context.Background(), "foobar", "project-aaa")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -587,7 +581,7 @@ func TestLookupContainerID_ProjectScopedDisambiguation(t *testing.T) {
 		t.Errorf("expected container-ggcloud, got %s", id)
 	}
 
-	id, err = srv.LookupContainerID(context.Background(), "foobar", "grove-bbb")
+	id, err = srv.LookupContainerID(context.Background(), "foobar", "project-bbb")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -602,18 +596,18 @@ func TestLookupAgent_ProjectScopedDisambiguation(t *testing.T) {
 		{
 			ContainerID: "container-ggcloud",
 			Name:        "foobar",
-			Labels:      map[string]string{"scion.name": "foobar", "scion.grove_id": "grove-aaa"},
+			Labels:      map[string]string{"scion.name": "foobar", "scion.project_id": "project-aaa"},
 		},
 		{
 			ContainerID: "container-storytree",
 			Name:        "foobar",
-			Labels:      map[string]string{"scion.name": "foobar", "scion.grove_id": "grove-ccc"},
+			Labels:      map[string]string{"scion.name": "foobar", "scion.project_id": "project-ccc"},
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(DefaultServerConfig(), mgr, rt)
 
-	result, err := srv.LookupAgent(context.Background(), "foobar", "grove-ccc")
+	result, err := srv.LookupAgent(context.Background(), "foobar", "project-ccc")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -623,25 +617,26 @@ func TestLookupAgent_ProjectScopedDisambiguation(t *testing.T) {
 }
 
 func TestLookupContainerID_DifferentProjectNotMatchedViaFallback(t *testing.T) {
-	// A labeled container in grove-aaa must NOT be returned for a grove-bbb
-	// request via the backward-compat fallback — that would be a cross-project
-	// collision. The fallback is only for genuinely unlabeled containers.
+	// A labeled container in project-aaa must NOT be returned for a
+	// project-bbb request via the backward-compat fallback — that would be a
+	// cross-project collision. The fallback is only for genuinely unlabeled
+	// containers.
 	mgr := &filteringMockManager{}
 	mgr.agents = []api.AgentInfo{
 		{
 			ContainerID: "container-aaa",
 			Name:        "coordinator",
-			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-aaa"},
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-aaa"},
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(DefaultServerConfig(), mgr, rt)
 
-	if _, err := srv.LookupContainerID(context.Background(), "coordinator", "grove-bbb"); err == nil {
+	if _, err := srv.LookupContainerID(context.Background(), "coordinator", "project-bbb"); err == nil {
 		t.Error("expected error: a different project's labeled agent must not match via fallback")
 	}
 
-	if _, err := srv.LookupAgent(context.Background(), "coordinator", "grove-bbb"); err == nil {
+	if _, err := srv.LookupAgent(context.Background(), "coordinator", "project-bbb"); err == nil {
 		t.Error("expected error from LookupAgent: different project's labeled agent must not match via fallback")
 	}
 }
@@ -780,8 +775,8 @@ func TestLookupAgent_ProjectFallbackForLegacyContainers(t *testing.T) {
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(DefaultServerConfig(), mgr, rt)
 
-	// Should still find agents without scion.grove_id via fallback
-	result, err := srv.LookupAgent(context.Background(), "oldagent", "some-grove-id")
+	// Should still find agents without scion.project_id via fallback
+	result, err := srv.LookupAgent(context.Background(), "oldagent", "some-project-id")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
