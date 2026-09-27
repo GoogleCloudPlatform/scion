@@ -3086,7 +3086,7 @@ func (c *casRaceStore) GetHubSetting(ctx context.Context, section string) (*stor
 	if err == nil && section == "access" {
 		snapshot := *row
 		c.once.Do(func() {
-			_, _ = c.fakeHubSettingStore.UpsertHubSetting(ctx, "access",
+			_, _ = c.UpsertHubSetting(ctx, "access",
 				json.RawMessage(`{"default_user_role":"member"}`), "other-replica", -1, "managed")
 		})
 		return &snapshot, nil
@@ -3160,7 +3160,7 @@ func (c *casRaceNoRowStore) GetHubSetting(ctx context.Context, section string) (
 		raced := false
 		c.once.Do(func() {
 			raced = true
-			_, _ = c.fakeHubSettingStore.UpsertHubSetting(ctx, "access",
+			_, _ = c.UpsertHubSetting(ctx, "access",
 				json.RawMessage(`{"default_user_role":"member"}`), "other-replica", -1, "managed")
 		})
 		if raced {
