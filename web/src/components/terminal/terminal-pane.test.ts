@@ -626,28 +626,82 @@ describe('theme', () => {
   // unstyled <button> falls back to the browser's native palette in both
   // themes (GoogleCloudPlatform/scion#2011 review). Every chrome button must
   // be matched by at least one static style rule.
-  it('styles every chrome button outside the terminal viewport', async () => {
-    await mountConnected();
-    const state = page as unknown as { error: string | null; metadataError: string | null };
-    state.error = 'metadata unavailable';
-    state.metadataError = 'metadata unavailable';
-    await page.updateComplete;
-    const root = page.shadowRoot!;
-    // Base selectors: drop pseudo-classes/elements (:hover, :not(...), ...)
-    // and skip :host rules, which cannot be matched from inside the root.
+  it('styles every chrome button outside the terminal viewport, in every render branch', async () => {
+    // Base selectors: a button must have a rule that applies at rest, so
+    // interaction-state rules (:hover, :focus, :active, :disabled) do not
+    // count. Remaining structural pseudo-classes (:first-child, ...) are
+    // stripped, and :host rules are skipped (not matchable from inside).
     const selectors = styleRules(paneStyles())
       .flatMap((r) => r.selector.split(','))
       .map((p) => p.trim())
       .filter((p) => p && !p.startsWith(':'))
+      .filter((p) => !/:(hover|focus|focus-visible|focus-within|active|disabled)\b/.test(p))
       .map((p) => p.replace(/:[\w-]+(\([^)]*\))?/g, '').trim())
       .filter(Boolean);
-    const buttons = Array.from(root.querySelectorAll<HTMLElement>('button')).filter(
-      (el) => !el.closest('.terminal-wrapper')
-    );
-    expect(buttons.some((b) => b.classList.contains('metadata-retry'))).toBe(true);
-    const unstyled = buttons
-      .filter((b) => !selectors.some((sel) => b.matches(sel)))
-      .map((b) => b.outerHTML.slice(0, 80));
+    const seen = new Set<string>();
+    const unstyled: string[] = [];
+    const collect = async () => {
+      await page.updateComplete;
+      for (const b of Array.from(page.shadowRoot!.querySelectorAll<HTMLElement>('button'))) {
+        if (b.closest('.terminal-wrapper')) continue;
+        const label = b.className || `${b.parentElement?.className ?? ''} > button`;
+        seen.add(label.trim());
+        if (!selectors.some((sel) => b.matches(sel))) unstyled.push(b.outerHTML.slice(0, 80));
+      }
+    };
+    const pane = page as unknown as {
+      error: string | null;
+      metadataError: string | null;
+      projectId: string;
+      agent: Record<string, unknown> | null;
+      terminal: unknown;
+    };
+
+    // 1. Connected, with every optional toolbar control and the metadata
+    //    banner: toggles, graph action, capture auth, ports, metadata retry.
+    await mountConnected();
+    pane.projectId = 'project-1';
+    pane.agent = {
+      ...(pane.agent ?? {}),
+      id: agentId,
+      phase: 'running',
+      harnessAuth: 'none',
+      resolvedHarness: 'claude',
+    };
+    pane.error = 'metadata unavailable';
+    pane.metadataError = 'metadata unavailable';
+    await collect();
+
+    // 2. Disconnected (detached): the toolbar Reconnect button.
+    FakeSocket.instances[0].readyState = 3;
+    FakeSocket.instances[0].onclose?.({ code: 1000 });
+    await collect();
+
+    // 3. The session-error branch (no terminal host): the error-state Retry.
+    const realSession = page.session!;
+    Object.defineProperty(page, 'session', {
+      configurable: true,
+      get: () => ({ ...realSession, state: { ...realSession.state, error: 'boom' } }),
+    });
+    const realTerminal = pane.terminal;
+    pane.terminal = null;
+    page.requestUpdate();
+    await collect();
+    pane.terminal = realTerminal;
+    delete (page as unknown as { session?: unknown }).session;
+
+    // The 8 chrome buttons across the three branches (the inactive window
+    // toggle has no class, so it is labelled by its parent).
+    expect([...seen].sort()).toEqual([
+      'active',
+      'capture-auth-btn',
+      'error-state > button',
+      'metadata-retry',
+      'pane-action-btn',
+      'port-dropdown-trigger',
+      'reconnect-btn',
+      'toggle-group > button',
+    ]);
     expect(unstyled).toEqual([]);
   });
 
