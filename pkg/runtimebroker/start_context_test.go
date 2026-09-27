@@ -567,7 +567,7 @@ func TestSanitizeCloneErrorText(t *testing.T) {
 	t.Run("a userinfo of just a colon does not strip unrelated :@ text", func(t *testing.T) {
 		// A URL with an empty username and an empty password separated by a
 		// colon (e.g. "https://:@host/...") also parses with a non-nil
-		// u.User, and u.User.String() is ":" -- carrying no credential --
+		// u.User, and u.User.String() is ":" — carrying no credential —
 		// but the naive strip pattern would still remove every ":@" in the
 		// text.
 		rawURL := "https://:@example.com/r.git"
@@ -575,6 +575,21 @@ func TestSanitizeCloneErrorText(t *testing.T) {
 		got := sanitizeCloneErrorText(errText, rawURL)
 		if !strings.Contains(got, "a:@b") {
 			t.Errorf("sanitized error text lost unrelated \":@\" text, got: %q", got)
+		}
+	})
+
+	t.Run("a differently formatted echo carrying only a password", func(t *testing.T) {
+		// An empty username with a non-empty password still has to be
+		// stripped: the port differs, so only the individual userinfo strip
+		// can remove it.
+		rawURL := "https://:PWONLY@127.0.0.1:1/x.git"
+		errText := "fatal: Authentication failed for 'https://:PWONLY@127.0.0.1/x.git'"
+		got := sanitizeCloneErrorText(errText, rawURL)
+		if strings.Contains(got, rawURL) {
+			t.Fatalf("test setup error: errText must not contain the exact raw URL, got %q", got)
+		}
+		if strings.Contains(got, "PWONLY") {
+			t.Errorf("sanitized error text still contains the password from a reformatted echo: %q", got)
 		}
 	})
 
