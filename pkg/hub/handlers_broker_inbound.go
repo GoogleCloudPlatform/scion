@@ -54,9 +54,8 @@ type inboundMessageRequest struct {
 // Authentication: Requires broker HMAC authentication (X-Scion-Broker-ID header
 // validated by BrokerAuthMiddleware).
 //
-// The topic string is parsed to extract the project ID and agent slug. Canonical
-// broker topics use scion.project; legacy scion.grove topics are accepted here
-// as an external compatibility adapter.
+// The topic string is parsed to extract the project ID and agent slug. Broker
+// topics use scion.project.
 func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
@@ -557,8 +556,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 }
 
 // parseAgentMessageTopic extracts the project ID and agent slug from a topic string.
-// Expected canonical format: scion.project.<projectID>.agent.<agentSlug>.messages.
-// Legacy scion.grove topics are accepted at this adapter boundary.
+// Expected format: scion.project.<projectID>.agent.<agentSlug>.messages.
 func parseAgentMessageTopic(topic string) (projectID, agentSlug string, err error) {
 	parsed, err := projectcompat.ParseTopic(topic)
 	if err != nil {

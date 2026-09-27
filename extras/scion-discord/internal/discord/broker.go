@@ -2480,7 +2480,6 @@ func (b *DiscordBroker) downloadDiscordAttachment(ctx context.Context, att *disc
 // --- Topic parsing ---
 
 // parseTopicComponents extracts projectID and agentSlug from a broker topic.
-// Legacy scion.grove topics are accepted by projectcompat at this adapter boundary.
 func parseTopicComponents(topic string) (projectID, agentSlug string) {
 	parsed, err := projectcompat.ParseTopic(topic)
 	if err == nil {
@@ -2491,7 +2490,7 @@ func parseTopicComponents(topic string) (projectID, agentSlug string) {
 	} else {
 		parts := strings.Split(topic, ".")
 		for i, part := range parts {
-			if (part == "grove" || part == "project") && i+1 < len(parts) {
+			if part == "project" && i+1 < len(parts) {
 				projectID = parts[i+1]
 			}
 			if part == "agent" && i+1 < len(parts) {

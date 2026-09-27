@@ -62,9 +62,6 @@ func (n *NotificationRelay) SetSendQueue(sq *SendQueue) {
 //
 //	scion.project.<projectID>.user.<userID>.messages  — user-targeted message
 //	scion.project.<projectID>.agent.<agentID>.messages — agent-targeted message
-//
-// Legacy scion.grove.<projectID>.... topics are still accepted for
-// compatibility with older publishers.
 func (n *NotificationRelay) HandleBrokerMessage(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
 	parsed, err := projectcompat.ParseTopic(topic)
 	if err != nil {
