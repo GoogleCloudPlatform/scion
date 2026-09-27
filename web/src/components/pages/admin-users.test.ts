@@ -424,7 +424,12 @@ describe('scion-page-admin-users — role filter across pages', () => {
   }
 
   /** Serves two cursor pages; the server total counts invited placeholder rows. */
-  async function createPaged(page1: AdminUser[], page2: AdminUser[], total: number) {
+  async function createPaged(
+    page1: AdminUser[],
+    page2: AdminUser[],
+    total: number,
+    page1Cursor: string | null = 'c2'
+  ) {
     vi.stubGlobal(
       'fetch',
       vi.fn((url: string | URL | Request) => {
@@ -437,7 +442,7 @@ describe('scion-page-admin-users — role filter across pages', () => {
           const body =
             cursor === 'c2'
               ? { users: page2, totalCount: total }
-              : { users: page1, totalCount: total, nextCursor: 'c2' };
+              : { users: page1, totalCount: total, nextCursor: page1Cursor ?? undefined };
           return Promise.resolve(jsonResponse(body));
         }
         return Promise.resolve(jsonResponse([]));
@@ -461,6 +466,10 @@ describe('scion-page-admin-users — role filter across pages', () => {
     return el.shadowRoot?.querySelector(selector)?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
   }
 
+  function usersTab(el: HTMLElement): string {
+    return text(el, '.tab-btn[aria-controls="panel-users"]');
+  }
+
   it('keeps the pager and Next when invited rows are filtered out of page 1', async () => {
     element = await createPaged(
       [...members('m1', 40), ...invitedRows('i1', 10)],
@@ -469,6 +478,7 @@ describe('scion-page-admin-users — role filter across pages', () => {
     );
     expect(nextButton(element)).toBeTruthy();
     expect(text(element, '.user-count')).toBe('60 users');
+    expect(usersTab(element)).toBe('Users (60)');
 
     const select = element.shadowRoot!.querySelector<HTMLElement>('sl-select.role-filter')!;
     await chooseSelect(element, select, 'member');
@@ -479,6 +489,7 @@ describe('scion-page-admin-users — role filter across pages', () => {
     expect(next!.hasAttribute('disabled')).toBe(false);
     // The server total includes invited rows, so it is shown as an upper bound.
     expect(text(element, '.user-count')).toBe('up to 60 users');
+    expect(usersTab(element)).toBe('Users (up to 60)');
     expect(text(element, '.page-indicator')).toBe('Page 1');
     expect(text(element, '.pagination-info')).toBe('Showing 40 on this page');
 
@@ -523,8 +534,21 @@ describe('scion-page-admin-users — role filter across pages', () => {
     expect(last.searchParams.get('status')).toBe('active');
     expect(last.searchParams.get('role')).toBe('member');
     expect(text(element, '.user-count')).toBe('60 users');
+    expect(usersTab(element)).toBe('Users (60)');
     expect(text(element, '.page-indicator')).toBe('Page 1 of 2');
     expect(text(element, '.pagination-info')).toBe('Showing 1-50 of 60');
+  });
+
+  it('shows the client-side count in the toolbar and the Users tab on a single page', async () => {
+    element = await createPaged([...members('m1', 3), ...invitedRows('i1', 2)], [], 5, null);
+    expect(usersTab(element)).toBe('Users (5)');
+
+    const select = element.shadowRoot!.querySelector<HTMLElement>('sl-select.role-filter')!;
+    await chooseSelect(element, select, 'member');
+
+    expect(queryAll(element, 'tbody tr')).toHaveLength(3);
+    expect(text(element, '.user-count')).toBe('3 users');
+    expect(usersTab(element)).toBe('Users (3)');
   });
 
   it('shows the exact server count and "Page a of b" without the role filter', async () => {

@@ -1186,11 +1186,23 @@ export class ScionPageAdminUsers extends LitElement {
     return !this.invitedDroppedClientSide || !this.hasMultiplePages;
   }
 
+  /** The exact user count, or null when only an upper bound is known. */
+  private get exactUserCount(): number | null {
+    if (!this.countIsExact) return null;
+    return this.invitedDroppedClientSide ? this.users.length : this.totalCount;
+  }
+
   /** Count shown in the toolbar. */
   private get displayedCount(): string {
-    if (!this.countIsExact) return `up to ${this.totalCount} users`;
-    const n = this.invitedDroppedClientSide ? this.users.length : this.totalCount;
+    const n = this.exactUserCount;
+    if (n === null) return `up to ${this.totalCount} users`;
     return `${n} user${n !== 1 ? 's' : ''}`;
+  }
+
+  /** Count shown in the Users tab label; same source as the toolbar. */
+  private get tabCount(): string {
+    const n = this.exactUserCount;
+    return n === null ? `up to ${this.totalCount}` : `${n}`;
   }
 
   private get totalPages(): number {
@@ -1450,7 +1462,7 @@ export class ScionPageAdminUsers extends LitElement {
             this.activeTab = 'users';
           }}
         >
-          Users ${!this.loading ? `(${this.totalCount})` : ''}
+          Users ${!this.loading ? `(${this.tabCount})` : ''}
         </button>
         <button
           role="tab"
