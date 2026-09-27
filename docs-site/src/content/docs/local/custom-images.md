@@ -354,7 +354,7 @@ The `cloud-build` builder maps each `--target` to a static YAML file in `image-b
 | `harnesses` | `cloudbuild-harnesses.yaml` |
 | `hub` | `cloudbuild-hub.yaml` |
 
-These YAMLs reference `$_TAG`, `$_SHORT_SHA`, `$_COMMIT_SHA`, `$_VERSION`, and `$_REGISTRY` substitutions, all forwarded by the orchestrator. `_TAG` defaults to `latest` and `_VERSION` defaults to `''` in each YAML's `substitutions:` block, preserving the prior behavior when `--tag` or a version tag is omitted.
+These YAMLs reference `$_TAG`, `$_SHORT_SHA`, `$_COMMIT_SHA`, `$_REGISTRY`, and (in the five that build `scion-base`: `all`, `common`, `scion-base`, `thick`/`thick-prep`, `omni`) `$_VERSION`, all forwarded by the orchestrator. `_TAG` defaults to `latest` in every YAML's `substitutions:` block; `_VERSION` defaults to `''` in the YAMLs that declare it, preserving the prior behavior when `--tag` or a version tag is omitted. The orchestrator only forwards a non-empty `_VERSION` when `HEAD` is on an exact git tag; off-tag, it relies on that default.
 
 ### Initial Setup
 

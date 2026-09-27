@@ -130,8 +130,13 @@ builder_run_target() {
   # (unverified server-side behavior) for the common off-tag case. The
   # pattern is tightened (vs. the plain `_SHORT_SHA`/`_COMMIT_SHA` greps
   # above) because `_VERSION` is a materially more collision-prone substring
-  # (e.g. a future `GO_VERSION` build-arg) than the SHA names.
-  if [[ -n "${version_val}" ]] && grep -qE '\$\{?_VERSION\b' "${config}"; then
+  # (e.g. a future `GO_VERSION` build-arg) than the SHA names. Written in
+  # portable ERE (no `\b`, a GNU extension not guaranteed on macOS/BSD grep,
+  # which this script otherwise targets) as "$_VERSION not immediately
+  # followed by another identifier character" -- matches `$_VERSION` and
+  # `${_VERSION`, not `GO_VERSION` (no leading `$`) and not the `_VERSION: ''`
+  # substitutions-block declaration (no leading `$` either).
+  if [[ -n "${version_val}" ]] && grep -qE '\$\{?_VERSION([^A-Za-z0-9_]|$)' "${config}"; then
     subs="${subs},_VERSION=${version_val}"
   fi
   if [[ -n "${registry}" ]]; then

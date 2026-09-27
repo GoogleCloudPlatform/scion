@@ -31,10 +31,16 @@
 #     gcloud builds submit \
 #       --project=<your-project> \
 #       --config=image-build/cloudbuild-omni.yaml \
-#       --substitutions="_TAG=dev-$(git rev-parse --short HEAD),_SHORT_SHA=$(git rev-parse --short HEAD),_COMMIT_SHA=$(git rev-parse HEAD),_VERSION=$(git describe --tags --exact-match 2>/dev/null || true),_REGISTRY=us-central1-docker.pkg.dev/<your-project>/scion" \
+#       --substitutions="_TAG=dev-$(git rev-parse --short HEAD),_SHORT_SHA=$(git rev-parse --short HEAD),_COMMIT_SHA=$(git rev-parse HEAD),_REGISTRY=us-central1-docker.pkg.dev/<your-project>/scion" \
 #       --ignore-file=image-build/gcloudignore-omni \
 #       --gcs-source-staging-dir=gs://<your-project>_cloudbuild/source \
 #       --async .
+#
+#   _VERSION is intentionally omitted above: it defaults to '' in the
+#   substitutions: block below, which is correct off a release tag (the
+#   embedded sciontool/scion report Version "dev", same as an off-tag local
+#   build). Cutting an actual release from this yaml manually, append
+#   ,_VERSION=<tag> (e.g. v1.2.3) to the --substitutions string above.
 #
 # WHY CLOUDSDK_BILLING_QUOTA_PROJECT: When impersonating a SA from a
 #   different project, gcloud checks API enablement on the caller's

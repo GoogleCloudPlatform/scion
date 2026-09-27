@@ -323,14 +323,19 @@ warn_if_scion_base_not_in_run() {
   # for what the build will use:
   #   - cloud-build always resolves BASE_IMAGE from the registry, never a
   #     local store, so there is nothing useful to inspect locally;
-  #   - local-docker/local-podman resolve it from whichever local store the
-  #     builder itself writes to and reads from, so ask that store, not the
-  #     other one.
-  # A hit here is a *local copy*, which can be stale or simply absent even
-  # when the registry has a newer image (e.g. pushed from another machine);
-  # it is a convenience for the common single-machine case, not a check, so
-  # any miss (image absent, tool missing) is silently swallowed.
-  if [[ "${BUILDER_MODE}" != "target" ]]; then
+  #   - a pushing/multi-arch local-docker build resolves BASE_IMAGE through a
+  #     `docker buildx create` (docker-container driver) instance, which also
+  #     reads from the registry, not the daemon's local image store -- so
+  #     skip there too, the same as cloud-build;
+  #   - a plain, non-push local-docker/local-podman build resolves it from
+  #     whichever local store the builder itself writes to and reads from
+  #     (the `default` docker builder, or podman's store), so ask that store,
+  #     not the other one.
+  # A hit here is a *local copy*, which can still be stale even in the cases
+  # above (e.g. pushed from another machine); it is a convenience for the
+  # common single-machine case, not a check, so any miss (image absent, tool
+  # missing) is silently swallowed.
+  if [[ "${BUILDER_MODE}" != "target" && "${PUSH}" != "true" ]]; then
     local inspect_tool=""
     case "${BUILDER}" in
       local-podman) command -v podman >/dev/null 2>&1 && inspect_tool="podman" ;;
