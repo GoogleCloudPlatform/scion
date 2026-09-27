@@ -91,37 +91,8 @@ type ConnectMessage struct {
 	Type      string   `json:"type"` // Always "connect"
 	BrokerID  string   `json:"brokerId"`
 	Version   string   `json:"version"`
-	Groves    []string `json:"groves,omitempty"`    // Legacy
-	Projects  []string `json:"projects,omitempty"`  // New
+	Projects  []string `json:"projects,omitempty"`
 	Timestamp int64    `json:"timestamp,omitempty"` // Unix timestamp
-}
-
-// MarshalJSON implements custom marshaling for ConnectMessage to handle dual fields.
-func (m *ConnectMessage) MarshalJSON() ([]byte, error) {
-	type Alias ConnectMessage
-	copy := *m
-	if len(copy.Projects) == 0 && len(copy.Groves) > 0 {
-		copy.Projects = copy.Groves
-	} else if len(copy.Groves) == 0 && len(copy.Projects) > 0 {
-		copy.Groves = copy.Projects
-	}
-	return json.Marshal((*Alias)(&copy))
-}
-
-// UnmarshalJSON implements custom unmarshaling for ConnectMessage to handle dual fields.
-func (m *ConnectMessage) UnmarshalJSON(data []byte) error {
-	type Alias ConnectMessage
-	var aux Alias
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	*m = ConnectMessage(aux)
-	if len(m.Projects) == 0 && len(m.Groves) > 0 {
-		m.Projects = m.Groves
-	} else if len(m.Groves) == 0 && len(m.Projects) > 0 {
-		m.Groves = m.Projects
-	}
-	return nil
 }
 
 // ConnectedMessage is sent by Hub to confirm successful connection.
@@ -169,39 +140,9 @@ type StreamOpenMessage struct {
 	StreamID   string `json:"streamId"`
 	StreamType string `json:"streamType"` // "pty", "events", "logs"
 	Slug       string `json:"slug,omitempty"`
-	GroveID    string `json:"groveId,omitempty"`   // Legacy
-	ProjectID  string `json:"projectId,omitempty"` // New
-	Cols       int    `json:"cols,omitempty"`      // For PTY streams
-	Rows       int    `json:"rows,omitempty"`      // For PTY streams
-}
-
-// MarshalJSON implements custom marshaling for StreamOpenMessage to handle dual fields.
-func (m *StreamOpenMessage) MarshalJSON() ([]byte, error) {
-	type Alias StreamOpenMessage
-	copy := *m
-	if copy.ProjectID == "" && copy.GroveID != "" {
-		copy.ProjectID = copy.GroveID
-	} else if copy.GroveID == "" && copy.ProjectID != "" {
-		copy.GroveID = copy.ProjectID
-	}
-	return json.Marshal((*Alias)(&copy))
-}
-
-// UnmarshalJSON implements custom unmarshaling for StreamOpenMessage to handle dual fields.
-func (m *StreamOpenMessage) UnmarshalJSON(data []byte) error {
-	type Alias StreamOpenMessage
-	var aux Alias
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	*m = StreamOpenMessage(aux)
-
-	if m.ProjectID == "" && m.GroveID != "" {
-		m.ProjectID = m.GroveID
-	} else if m.GroveID == "" && m.ProjectID != "" {
-		m.GroveID = m.ProjectID
-	}
-	return nil
+	ProjectID  string `json:"projectId,omitempty"`
+	Cols       int    `json:"cols,omitempty"` // For PTY streams
+	Rows       int    `json:"rows,omitempty"` // For PTY streams
 }
 
 // StreamFrame carries data for a multiplexed stream.
@@ -313,7 +254,6 @@ func NewConnectMessage(brokerID, version string, projectIDs []string) *ConnectMe
 		Type:      TypeConnect,
 		BrokerID:  brokerID,
 		Version:   version,
-		Groves:    projectIDs,
 		Projects:  projectIDs,
 		Timestamp: time.Now().Unix(),
 	}
@@ -369,7 +309,6 @@ func NewStreamOpenMessage(streamID, streamType, slug, projectID string, cols, ro
 		StreamID:   streamID,
 		StreamType: streamType,
 		Slug:       slug,
-		GroveID:    projectID,
 		ProjectID:  projectID,
 		Cols:       cols,
 		Rows:       rows,

@@ -113,11 +113,14 @@ allowed_paths=(
   # literal is the point of the negative test.
   "^pkg/hub/handlers_notifications_test.go$"
   "^pkg/hub/handlers_project_test.go$"
+  # Asserts a broker heartbeat body keyed by the removed "groves"/"groveId"
+  # names decodes to zero projects and never updates agent state. The
+  # literal is the point of the negative test.
+  "^pkg/hub/handlers_runtime_brokers_test.go$"
   # Asserts the hub rejects the removed "grove" harness-config scope (and
   # other unrecognized scopes) with 400 instead of storing it and flattening
   # its storage path. The literal is the point of the negative tests.
   "^pkg/hub/harness_config_scope_validation_test.go$"
-  "^pkg/hub/heartbeat_legacy_test.go$"
   "^pkg/hub/httpdispatcher_test.go$"
   # Asserts the project cache/sync-status responses no longer emit a groveId
   # key alongside projectId. The literal is the point of the negative tests.
@@ -185,6 +188,9 @@ allowed_paths=(
   "^pkg/store/entadapter/legacy_scope_migration_test.go$"
   "^pkg/store/models_json_test.go$"
   "^pkg/util/logging/cloud_handler_test.go$"
+  # Asserts ConnectMessage/StreamOpenMessage no longer emit or decode the
+  # removed "groves"/"groveId" names. The literal is the point of the
+  # negative tests.
   "^pkg/wsprotocol/protocol_test.go$"
 
   # First-party integration compatibility boundaries.
@@ -201,11 +207,9 @@ allowed_paths=(
   "^pkg/config/settings_v1.go$"
   "^pkg/hub/fs_safety.go$"
   "^pkg/hub/handlers_projects_core.go$"
-  "^pkg/hub/handlers_runtime_brokers.go$"
   "^pkg/hub/system_handlers.go$"
   "^pkg/hubclient/agents.go$"
   "^pkg/hubclient/notifications.go$"
-  "^pkg/hubclient/runtime_brokers.go$"
   "^pkg/hubclient/templates.go$"
   "^pkg/hubclient/tokens.go$"
   "^pkg/projectcompat/.*\\.go$"
@@ -225,7 +229,6 @@ allowed_paths=(
   # removed once no hub can have a pre-migration row left to normalize.
   "^pkg/store/entadapter/legacy_scope_migration.go$"
   "^pkg/store/storetest/domains_project_broker.go$"
-  "^pkg/wsprotocol/protocol.go$"
 )
 
 allowlist="$(printf '%s\n' "${allowed_paths[@]}" | sed 's/\$$/:/' | paste -sd '|' -)"

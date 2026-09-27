@@ -309,3 +309,89 @@ func TestBrokerAuthGates(t *testing.T) {
 		})
 	}
 }
+
+// ============================================================================
+// Broker heartbeat request decoding.
+// ============================================================================
+
+func TestBrokerHeartbeatRequest_UnmarshalJSON(t *testing.T) {
+	data := `{"status":"online","projects":[{"projectId":"p1","agentCount":1}]}`
+	var hb brokerHeartbeatRequest
+	err := json.Unmarshal([]byte(data), &hb)
+	require.NoError(t, err)
+	assert.Equal(t, "online", hb.Status)
+	require.Len(t, hb.Projects, 1)
+	assert.Equal(t, "p1", hb.Projects[0].ProjectID)
+}
+
+func TestBrokerProjectHeartbeat_UnmarshalJSON(t *testing.T) {
+	data := `{"projectId":"p1","agentCount":1}`
+	var p brokerProjectHeartbeat
+	err := json.Unmarshal([]byte(data), &p)
+	require.NoError(t, err)
+	assert.Equal(t, "p1", p.ProjectID)
+}
+
+func TestBrokerProjectHeartbeat_UnmarshalJSON_GroveIdKeyIgnored(t *testing.T) {
+	// The removed "groveId" name must not populate ProjectID: only
+	// "projectId" is decoded.
+	data := `{"groveId":"p1","agentCount":1}`
+	var p brokerProjectHeartbeat
+	err := json.Unmarshal([]byte(data), &p)
+	require.NoError(t, err)
+	assert.Empty(t, p.ProjectID)
+}
+
+func TestBrokerHeartbeatRequest_UnmarshalJSON_GrovesKeyIgnored(t *testing.T) {
+	// The removed "groves" name must not populate Projects: only "projects"
+	// is decoded. The project entry uses the canonical "projectId" key so
+	// this test isolates the outer "groves" decoder from the inner one.
+	data := `{"status":"online","groves":[{"projectId":"p1","agentCount":1}]}`
+	var hb brokerHeartbeatRequest
+	err := json.Unmarshal([]byte(data), &hb)
+	require.NoError(t, err)
+	assert.Equal(t, "online", hb.Status)
+	assert.Empty(t, hb.Projects)
+}
+
+// TestBrokerHeartbeat_GroveOnlyPayloadDoesNotRegisterProjects proves that a
+// heartbeat body keyed by the removed outer "groves" name no longer updates
+// any agent: brokerHeartbeatRequest decodes it into zero projects, so the
+// per-project agent loop never runs. The project entry uses the canonical
+// "projectId" key so this test isolates the outer "groves" decoder from the
+// inner "groveId" decoder (covered separately by
+// TestBrokerHeartbeat_ProjectEntryGroveIdFieldIgnored).
+func TestBrokerHeartbeat_GroveOnlyPayloadDoesNotRegisterProjects(t *testing.T) {
+	srv, s, brokerID, projectID, agentSlug := setupHeartbeatExitCodeTest(t)
+
+	before := getAgentState(t, s, agentSlug, projectID)
+
+	body := []byte(`{"status":"online","groves":[{"projectId":"` + projectID + `","agentCount":1,"agents":[{"slug":"` + agentSlug + `","status":"WORKING","phase":"stopped","activity":"crashed"}]}]}`)
+	rec := doRequestRaw(t, srv, http.MethodPost,
+		"/api/v1/runtime-brokers/"+brokerID+"/heartbeat", body, "application/json")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	after := getAgentState(t, s, agentSlug, projectID)
+	assert.Equal(t, before.Phase, after.Phase, "a grove-only heartbeat must not change agent phase")
+	assert.Equal(t, before.Activity, after.Activity, "a grove-only heartbeat must not change agent activity")
+}
+
+// TestBrokerHeartbeat_ProjectEntryGroveIdFieldIgnored proves the same for a
+// project entry that uses the canonical outer "projects" key but the removed
+// "groveId" name on the entry itself: it decodes to an empty ProjectID, so
+// the agent lookup inside the per-project loop fails silently and no agent
+// state changes.
+func TestBrokerHeartbeat_ProjectEntryGroveIdFieldIgnored(t *testing.T) {
+	srv, s, brokerID, projectID, agentSlug := setupHeartbeatExitCodeTest(t)
+
+	before := getAgentState(t, s, agentSlug, projectID)
+
+	body := []byte(`{"status":"online","projects":[{"groveId":"` + projectID + `","agentCount":1,"agents":[{"slug":"` + agentSlug + `","status":"WORKING","phase":"stopped","activity":"crashed"}]}]}`)
+	rec := doRequestRaw(t, srv, http.MethodPost,
+		"/api/v1/runtime-brokers/"+brokerID+"/heartbeat", body, "application/json")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	after := getAgentState(t, s, agentSlug, projectID)
+	assert.Equal(t, before.Phase, after.Phase, "a project entry keyed by the removed groveId name must not change agent phase")
+	assert.Equal(t, before.Activity, after.Activity, "a project entry keyed by the removed groveId name must not change agent activity")
+}

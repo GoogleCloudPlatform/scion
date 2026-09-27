@@ -71,23 +71,29 @@ func TestParseEnvelope(t *testing.T) {
 }
 
 func TestConnectMessage(t *testing.T) {
-	msg := NewConnectMessage("host-123", "1.0.0", []string{"grove-1", "grove-2"})
+	msg := NewConnectMessage("host-123", "1.0.0", []string{"project-1", "project-2"})
 
 	assert.Equal(t, TypeConnect, msg.Type)
 	assert.Equal(t, "host-123", msg.BrokerID)
 	assert.Equal(t, "1.0.0", msg.Version)
-	assert.Equal(t, []string{"grove-1", "grove-2"}, msg.Projects)
+	assert.Equal(t, []string{"project-1", "project-2"}, msg.Projects)
 	assert.Greater(t, msg.Timestamp, int64(0))
 
 	// Test JSON marshaling
 	data, err := json.Marshal(msg)
 	require.NoError(t, err)
 
+	var m map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &m))
+	_, hasGroves := m["groves"]
+	assert.False(t, hasGroves, "'groves' field should not be emitted, got %v", m["groves"])
+
 	var parsed ConnectMessage
 	err = json.Unmarshal(data, &parsed)
 	require.NoError(t, err)
 	assert.Equal(t, msg.BrokerID, parsed.BrokerID)
 	assert.Equal(t, msg.Version, parsed.Version)
+	assert.Equal(t, msg.Projects, parsed.Projects)
 }
 
 func TestConnectedMessage(t *testing.T) {
@@ -103,13 +109,13 @@ func TestRequestEnvelope(t *testing.T) {
 	headers := map[string]string{"Content-Type": "application/json"}
 	body := []byte(`{"key":"value"}`)
 
-	msg := NewRequestEnvelope("req-1", "POST", "/api/v1/agents", "grove=test", headers, body)
+	msg := NewRequestEnvelope("req-1", "POST", "/api/v1/agents", "project=test", headers, body)
 
 	assert.Equal(t, TypeRequest, msg.Type)
 	assert.Equal(t, "req-1", msg.RequestID)
 	assert.Equal(t, "POST", msg.Method)
 	assert.Equal(t, "/api/v1/agents", msg.Path)
-	assert.Equal(t, "grove=test", msg.Query)
+	assert.Equal(t, "project=test", msg.Query)
 	assert.Equal(t, headers, msg.Headers)
 	assert.Equal(t, body, msg.Body)
 
@@ -161,15 +167,28 @@ func TestCancelMessage(t *testing.T) {
 }
 
 func TestStreamOpenMessage(t *testing.T) {
-	msg := NewStreamOpenMessage("stream-1", StreamTypePTY, "agent-123", "grove-456", 120, 40)
+	msg := NewStreamOpenMessage("stream-1", StreamTypePTY, "agent-123", "project-456", 120, 40)
 
 	assert.Equal(t, TypeStreamOpen, msg.Type)
 	assert.Equal(t, "stream-1", msg.StreamID)
 	assert.Equal(t, StreamTypePTY, msg.StreamType)
 	assert.Equal(t, "agent-123", msg.Slug)
-	assert.Equal(t, "grove-456", msg.ProjectID)
+	assert.Equal(t, "project-456", msg.ProjectID)
 	assert.Equal(t, 120, msg.Cols)
 	assert.Equal(t, 40, msg.Rows)
+
+	// Test JSON marshaling: the removed "groveId" alias must not be emitted.
+	data, err := json.Marshal(msg)
+	require.NoError(t, err)
+
+	var m map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &m))
+	_, hasGroveID := m["groveId"]
+	assert.False(t, hasGroveID, "'groveId' field should not be emitted, got %v", m["groveId"])
+
+	var parsed StreamOpenMessage
+	require.NoError(t, json.Unmarshal(data, &parsed))
+	assert.Equal(t, msg.ProjectID, parsed.ProjectID)
 }
 
 func TestStreamFrame(t *testing.T) {
@@ -242,37 +261,39 @@ func TestPTYMessages(t *testing.T) {
 	})
 }
 
-func TestDualFieldSupport(t *testing.T) {
-	t.Run("ConnectMessage legacy groves", func(t *testing.T) {
-		data := []byte(`{"type":"connect","brokerId":"host-1","groves":["g1","g2"]}`)
-		msg, err := ParseMessage[ConnectMessage](data)
-		require.NoError(t, err)
-		assert.Equal(t, []string{"g1", "g2"}, msg.Groves)
-		assert.Equal(t, []string{"g1", "g2"}, msg.Projects)
-	})
-
-	t.Run("ConnectMessage new projects", func(t *testing.T) {
+func TestConnectMessage_UnmarshalJSON(t *testing.T) {
+	t.Run("ProjectsKey", func(t *testing.T) {
 		data := []byte(`{"type":"connect","brokerId":"host-1","projects":["p1","p2"]}`)
 		msg, err := ParseMessage[ConnectMessage](data)
 		require.NoError(t, err)
 		assert.Equal(t, []string{"p1", "p2"}, msg.Projects)
-		assert.Equal(t, []string{"p1", "p2"}, msg.Groves)
 	})
 
-	t.Run("StreamOpenMessage legacy groveId", func(t *testing.T) {
-		data := []byte(`{"type":"stream_open","streamId":"s1","streamType":"pty","groveId":"g1"}`)
-		msg, err := ParseMessage[StreamOpenMessage](data)
+	t.Run("RemovedGrovesKeyIgnored", func(t *testing.T) {
+		// The "groves" name is gone: a payload keyed by it no longer
+		// populates Projects.
+		data := []byte(`{"type":"connect","brokerId":"host-1","groves":["g1","g2"]}`)
+		msg, err := ParseMessage[ConnectMessage](data)
 		require.NoError(t, err)
-		assert.Equal(t, "g1", msg.GroveID)
-		assert.Equal(t, "g1", msg.ProjectID)
+		assert.Empty(t, msg.Projects)
 	})
+}
 
-	t.Run("StreamOpenMessage new projectId", func(t *testing.T) {
+func TestStreamOpenMessage_UnmarshalJSON(t *testing.T) {
+	t.Run("ProjectIdKey", func(t *testing.T) {
 		data := []byte(`{"type":"stream_open","streamId":"s1","streamType":"pty","projectId":"p1"}`)
 		msg, err := ParseMessage[StreamOpenMessage](data)
 		require.NoError(t, err)
 		assert.Equal(t, "p1", msg.ProjectID)
-		assert.Equal(t, "p1", msg.GroveID)
+	})
+
+	t.Run("RemovedGroveIdKeyIgnored", func(t *testing.T) {
+		// The "groveId" name is gone: a payload keyed by it no longer
+		// populates ProjectID.
+		data := []byte(`{"type":"stream_open","streamId":"s1","streamType":"pty","groveId":"g1"}`)
+		msg, err := ParseMessage[StreamOpenMessage](data)
+		require.NoError(t, err)
+		assert.Empty(t, msg.ProjectID)
 	})
 }
 

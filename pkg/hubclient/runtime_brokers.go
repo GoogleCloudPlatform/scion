@@ -16,7 +16,6 @@ package hubclient
 
 import (
 	"context"
-	"encoding/json"
 	"net/url"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -117,71 +116,11 @@ type BrokerHeartbeat struct {
 	Capabilities *BrokerCapabilities `json:"capabilities,omitempty"`
 }
 
-// MarshalJSON implements custom marshaling to support legacy grove fields.
-func (h BrokerHeartbeat) MarshalJSON() ([]byte, error) {
-	type Alias BrokerHeartbeat
-	return json.Marshal(&struct {
-		Alias
-		Groves []ProjectHeartbeat `json:"groves,omitempty"`
-	}{
-		Alias:  Alias(h),
-		Groves: h.Projects,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
-func (h *BrokerHeartbeat) UnmarshalJSON(data []byte) error {
-	type Alias BrokerHeartbeat
-	aux := &struct {
-		Groves []ProjectHeartbeat `json:"groves,omitempty"`
-		*Alias
-	}{
-		Alias: (*Alias)(h),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if len(h.Projects) == 0 && len(aux.Groves) > 0 {
-		h.Projects = aux.Groves
-	}
-	return nil
-}
-
 // ProjectHeartbeat is per-project status in a heartbeat.
 type ProjectHeartbeat struct {
 	ProjectID  string           `json:"projectId"`
 	AgentCount int              `json:"agentCount"`
 	Agents     []AgentHeartbeat `json:"agents,omitempty"`
-}
-
-// MarshalJSON implements custom marshaling to support legacy grove fields.
-func (h ProjectHeartbeat) MarshalJSON() ([]byte, error) {
-	type Alias ProjectHeartbeat
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId,omitempty"`
-	}{
-		Alias:   Alias(h),
-		GroveID: h.ProjectID,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (h *ProjectHeartbeat) UnmarshalJSON(data []byte) error {
-	type Alias ProjectHeartbeat
-	aux := &struct {
-		GroveID string `json:"groveId,omitempty"`
-		*Alias
-	}{
-		Alias: (*Alias)(h),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if h.ProjectID == "" && aux.GroveID != "" {
-		h.ProjectID = aux.GroveID
-	}
-	return nil
 }
 
 // AgentHeartbeat is per-agent status in a heartbeat.
