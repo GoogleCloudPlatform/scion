@@ -2027,3 +2027,38 @@ func TestWebLogin_Invited_ConfigAdminPlaceholder_GetsDefault(t *testing.T) {
 		})
 	}
 }
+
+// --- dev test-login endpoint (real store) ---
+
+// webTestLogin calls the dev-only test-login endpoint for email with role
+// against a WebServer backed by s.
+func webTestLogin(t *testing.T, s store.Store, email, role string) {
+	t.Helper()
+	ws := NewWebServer(WebServerConfig{EnableTestLogin: true})
+	tokenSvc, err := NewUserTokenService(UserTokenConfig{})
+	require.NoError(t, err)
+	ws.SetUserTokenService(tokenSvc)
+	ws.SetStore(s)
+
+	body := `{"email":"` + email + `","role":"` + role + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/test-login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", testLoginAuthHeader(t, tokenSvc))
+	rec := httptest.NewRecorder()
+	ws.handleTestLogin(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+func TestHandleTestLogin_GrantsFollowRole(t *testing.T) {
+	srv, s := newLoginGrantServer(t, store.UserRoleMember, nil)
+	const email = "testlogin@example.com"
+
+	webTestLogin(t, s, email, store.UserRoleViewer)
+	assertViewerGrants(t, srv, s, email)
+
+	webTestLogin(t, s, email, store.UserRoleMember)
+	assertMemberGrants(t, srv, s, email)
+
+	webTestLogin(t, s, email, store.UserRoleViewer)
+	assertViewerGrants(t, srv, s, email)
+}
