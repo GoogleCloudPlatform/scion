@@ -25,6 +25,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -580,22 +581,27 @@ func TestReincarnateAgent_AC9_NilCapabilities_Returns412(t *testing.T) {
 // absence) the same way populateAgentConfig actually would, for a project
 // carrying the real workspace-mode label.
 func TestReincarnateAgent_WorktreePerAgentOrNeitherWorkspace_Returns400(t *testing.T) {
+	const genericMsg = "reincarnate requires a clone-per-agent, shared-workspace or hub-managed workspace"
+	const worktreeMsg = "reincarnate does not yet support worktree-per-agent workspaces"
 	cases := []struct {
 		name           string
 		workspaceMode  string // "" = clone-per-agent (the default for a git-remote project)
 		clearWorkspace bool   // force the "neither GitClone nor Workspace" edge case
 		wantRejected   bool
+		wantBodyText   string // O1 (review p1b-r1): pin the exact 400 message
 	}{
 		{
 			name:          "worktree-per-agent: GitClone is set, but this is not clone-per-agent",
 			workspaceMode: store.WorkspaceModeWorktreePerAgent,
 			wantRejected:  true,
+			wantBodyText:  worktreeMsg,
 		},
 		{
 			name:           "neither GitClone nor Workspace",
 			workspaceMode:  store.WorkspaceModeShared,
 			clearWorkspace: true,
 			wantRejected:   true,
+			wantBodyText:   genericMsg,
 		},
 		{
 			name:          "clone-per-agent: eligible",
@@ -647,6 +653,9 @@ func TestReincarnateAgent_WorktreePerAgentOrNeitherWorkspace_Returns400(t *testi
 				rec := httptest.NewRecorder()
 				srv.handleReincarnateAgent(rec, req, agent.ID)
 				assert.Equal(t, wantCode, rec.Code, "dryRun=%v: body: %s", dryRun, rec.Body.String())
+				if tc.wantBodyText != "" {
+					assert.Contains(t, rec.Body.String(), tc.wantBodyText, "dryRun=%v", dryRun)
+				}
 			}
 
 			if !tc.wantRejected {
@@ -678,11 +687,13 @@ func TestReincarnateAgent_ExplicitMountWorkspace_Eligible(t *testing.T) {
 		name          string
 		gitRemote     string
 		workspaceMode string
+		wantBranch    string // O1 (review p1b-r1): the plan's Branch for a shared agent is the project default, not scion/<slug>
 	}{
 		{
 			name:          "shared-workspace git project",
 			gitRemote:     "https://example.com/repo.git",
 			workspaceMode: store.WorkspaceModeShared,
+			wantBranch:    "develop",
 		},
 		{
 			name:      "hub-managed project (no git remote)",
@@ -700,6 +711,12 @@ func TestReincarnateAgent_ExplicitMountWorkspace_Eligible(t *testing.T) {
 			if tc.workspaceMode != "" {
 				project.Labels = map[string]string{store.LabelWorkspaceMode: tc.workspaceMode}
 			}
+			if tc.wantBranch != "" {
+				if project.Labels == nil {
+					project.Labels = map[string]string{}
+				}
+				project.Labels["scion.dev/default-branch"] = tc.wantBranch
+			}
 			require.NoError(t, s.UpdateProject(ctx, project))
 
 			probe := &store.Agent{AppliedConfig: &store.AgentAppliedConfig{}}
@@ -711,6 +728,7 @@ func TestReincarnateAgent_ExplicitMountWorkspace_Eligible(t *testing.T) {
 				a.AppliedConfig.GitClone = nil
 				a.AppliedConfig.Workspace = probe.AppliedConfig.Workspace
 				a.AppliedConfig.CreateInputs.Workspace = probe.AppliedConfig.Workspace
+				a.AppliedConfig.Branch = probe.AppliedConfig.Branch
 			})
 			self := agentIdentityFor(agent.ID, project.ID)
 
@@ -718,6 +736,11 @@ func TestReincarnateAgent_ExplicitMountWorkspace_Eligible(t *testing.T) {
 			dryRec := httptest.NewRecorder()
 			srv.handleReincarnateAgent(dryRec, dryReq, agent.ID)
 			assert.Equal(t, http.StatusOK, dryRec.Code, "dry run: body: %s", dryRec.Body.String())
+			if tc.wantBranch != "" {
+				var dryResp ReincarnateAgentResponse
+				require.NoError(t, json.Unmarshal(dryRec.Body.Bytes(), &dryResp))
+				assert.Equal(t, tc.wantBranch, dryResp.Plan.Branch, "shared agent's plan branch must be the project default, not scion/<slug>")
+			}
 
 			realReq := reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h", DryRun: false})
 			realRec := httptest.NewRecorder()
@@ -725,6 +748,121 @@ func TestReincarnateAgent_ExplicitMountWorkspace_Eligible(t *testing.T) {
 			assert.Equal(t, http.StatusAccepted, realRec.Code, "real request: body: %s", realRec.Body.String())
 		})
 	}
+}
+
+// TestReincarnateAgent_ModeSwitchedToShared_Returns400 is the design §3.4
+// Amendment A23.1 (review p1b-r1) R3 regression test: A23 contract (a) keeps
+// "not shared" as a condition for the clone-per-agent case, unchanged from
+// Phase 1. A project can be switched from clone-per-agent to shared-workspace
+// after an agent already exists (a project label update — see
+// handlers_projects_core.go), so an agent whose AppliedConfig.GitClone still
+// reflects the old mode must still be rejected: reincarnating it would
+// silently abandon its own clone (still on disk, possibly holding unpushed
+// work) in favor of the newly-mounted shared checkout.
+func TestReincarnateAgent_ModeSwitchedToShared_Returns400(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	ctx := context.Background()
+
+	project.GitRemote = "https://example.com/repo.git"
+	require.NoError(t, s.UpdateProject(ctx, project))
+
+	// Build the agent's config the way create actually would, while the
+	// project was still clone-per-agent.
+	probe := &store.Agent{AppliedConfig: &store.AgentAppliedConfig{}}
+	srv.populateAgentConfig(ctx, probe, project, nil)
+	require.NotNil(t, probe.AppliedConfig.GitClone, "fixture check: a clone-per-agent project must produce a GitClone")
+
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.AppliedConfig.GitClone = probe.AppliedConfig.GitClone
+		a.AppliedConfig.Workspace = ""
+		a.AppliedConfig.CreateInputs.Workspace = ""
+	})
+	beforeVersion := agent.StateVersion
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	// The mode switch, after the agent already exists.
+	project.Labels = map[string]string{store.LabelWorkspaceMode: store.WorkspaceModeShared}
+	require.NoError(t, s.UpdateProject(ctx, project))
+
+	for _, dryRun := range []bool{true, false} {
+		req := reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h", DryRun: dryRun})
+		rec := httptest.NewRecorder()
+		srv.handleReincarnateAgent(rec, req, agent.ID)
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "dryRun=%v: body: %s", dryRun, rec.Body.String())
+	}
+
+	after, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, beforeVersion, after.StateVersion, "agent must be untouched")
+	assert.Equal(t, "", after.ReincarnationState)
+
+	list, err := s.ListAgentReincarnations(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Empty(t, list, "no reincarnation record should be created")
+}
+
+// TestReincarnateAgent_LinkedSharedProject_ClearedWorkspace_Returns400 is the
+// design §3.4 Amendment A23.1 (review p1b-r1) R1 regression test: a
+// shared-workspace project linked to the agent's broker via a
+// store.ProjectProvider{LocalPath} has its AppliedConfig.Workspace cleared by
+// buildCreateRequest at dispatch time (the broker derives its own workspace
+// location from the linked path instead) — see effectiveDispatchWorkspace.
+// Before the fix, the Hub's gate evaluated the raw (non-empty) Workspace,
+// judged the agent eligible, stopped it, and only then discovered — via the
+// broker's 409 refusal — that the dispatched request had Workspace="" and
+// GitClone=nil. The gate must now refuse up front, with nothing stopped and
+// no dispatch call made at all.
+func TestReincarnateAgent_LinkedSharedProject_ClearedWorkspace_Returns400(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	ctx := context.Background()
+
+	project.GitRemote = "https://example.com/repo.git"
+	project.Labels = map[string]string{store.LabelWorkspaceMode: store.WorkspaceModeShared}
+	require.NoError(t, s.UpdateProject(ctx, project))
+
+	// Link the agent's broker to a local path for this project — the
+	// condition effectiveDispatchWorkspace/buildCreateRequest key off.
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  project.ID,
+		BrokerID:   broker.ID,
+		BrokerName: broker.Name,
+		LocalPath:  "/home/broker/projects/shared-ws",
+		Status:     store.BrokerStatusOnline,
+	}))
+
+	probe := &store.Agent{AppliedConfig: &store.AgentAppliedConfig{}}
+	srv.populateAgentConfig(ctx, probe, project, nil)
+	require.Nil(t, probe.AppliedConfig.GitClone, "fixture check: a shared-workspace project must produce no GitClone")
+	require.True(t, filepath.IsAbs(probe.AppliedConfig.Workspace), "fixture check: populateAgentConfig's Workspace for a shared project must be absolute")
+
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.AppliedConfig.GitClone = nil
+		a.AppliedConfig.Workspace = probe.AppliedConfig.Workspace
+		a.AppliedConfig.CreateInputs.Workspace = probe.AppliedConfig.Workspace
+	})
+	beforeVersion := agent.StateVersion
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	for _, dryRun := range []bool{true, false} {
+		req := reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h", DryRun: dryRun})
+		rec := httptest.NewRecorder()
+		srv.handleReincarnateAgent(rec, req, agent.ID)
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "dryRun=%v: body: %s", dryRun, rec.Body.String())
+	}
+
+	after, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, beforeVersion, after.StateVersion, "agent must be untouched")
+	assert.Equal(t, "", after.ReincarnationState)
+
+	list, err := s.ListAgentReincarnations(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Empty(t, list, "no reincarnation record should be created")
+
+	assert.Zero(t, disp.stopCalls, "the agent must never be stopped for a request the gate refuses up front")
+	assert.Zero(t, disp.reprovisionCalls, "the broker must never be dispatched for a request the gate refuses up front")
 }
 
 // =============================================================================

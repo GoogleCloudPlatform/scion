@@ -605,21 +605,18 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 
 	// Add configuration if available
 	if agent.AppliedConfig != nil {
-		workspace := agent.AppliedConfig.Workspace
+		// effectiveDispatchWorkspace applies the "a linked local provider
+		// clears an absolute workspace" rule -- see its doc comment. GitClone
+		// and Branch are threaded through workspaceSpecFor instead (#1931),
+		// so create and start dispatch from the single shared builder and
+		// cannot drift from each other; GitClone is kept regardless of
+		// whether the workspace was cleared: all hub-linked projects with a
+		// git remote use clone-based provisioning (HTTPS + GitHub token)
+		// rather than worktree-based, ensuring a consistent workspace
+		// strategy regardless of whether the broker happens to have the
+		// repo locally.
+		workspace := effectiveDispatchWorkspace(agent.AppliedConfig.Workspace, projectInfo.projectPath)
 		wsSpec := workspaceSpecFor(agent, projectInfo.workspaceMode)
-		// When the broker has a local provider path for this project, clear
-		// the hub-native workspace path — the broker will derive its own
-		// workspace location from the project path. However, keep GitClone
-		// config: all hub-linked projects with a git remote use clone-based
-		// provisioning (HTTPS + GitHub token) rather than worktree-based,
-		// ensuring a consistent workspace strategy regardless of whether
-		// the broker happens to have the repo locally.
-		if projectInfo.projectPath != "" {
-			if workspace == "" || filepath.IsAbs(workspace) {
-				workspace = ""
-			}
-			// else: relative workspace -- keep it; broker joins with its own project root
-		}
 		var remoteGCPIdentity *RemoteGCPIdentityConfig
 		if gcpID := agent.AppliedConfig.GCPIdentity; gcpID != nil {
 			remoteGCPIdentity = &RemoteGCPIdentityConfig{
@@ -1005,6 +1002,34 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 	}
 
 	return req, nil
+}
+
+// effectiveDispatchWorkspace applies the rule buildCreateRequest has always
+// used for the wire request's Workspace field, factored out so the Hub's
+// reincarnate eligibility gate (handleReincarnateAgent) can evaluate the
+// same effective value instead of the raw AppliedConfig.Workspace (design
+// §3.4 Amendment A23.1, review p1b-r1 R1): when the target broker has a
+// registered local provider path for the project (linkedProjectPath, from
+// resolveDispatchProjectInfo's ProjectProvider.LocalPath lookup), the broker
+// derives its own workspace location from that path, so an absolute
+// AppliedConfig.Workspace is never actually sent — it is cleared here,
+// exactly as it always was inline in buildCreateRequest. A relative
+// workspace is kept: the broker joins it with its own project root.
+//
+// Without this, the Hub's gate and the broker's actual dispatched request
+// could disagree — a shared-workspace project linked to a broker via a
+// ProjectProvider looks eligible to the Hub (Workspace is non-empty) but
+// arrives at the broker as Workspace="", GitClone=nil, which
+// Manager.Reprovision correctly refuses only after the agent has already
+// been stopped.
+func effectiveDispatchWorkspace(workspace, linkedProjectPath string) string {
+	if linkedProjectPath != "" {
+		if workspace == "" || filepath.IsAbs(workspace) {
+			return ""
+		}
+		// else: relative workspace -- keep it; broker joins with its own project root
+	}
+	return workspace
 }
 
 // projectDispatchInfo contains resolved project information for dispatching agent requests.

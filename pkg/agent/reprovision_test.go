@@ -417,9 +417,19 @@ func TestReprovision_StoppedContainer_Proceeds(t *testing.T) {
 // scion-agent.json and home, and must leave the sibling agent's directory
 // (config and home) completely untouched.
 func TestReprovision_ExplicitMount_CheckoutByteIdenticalAndSiblingUntouched(t *testing.T) {
-	scionDir, _ := reprovisionSetup(t)
+	scionDir, globalScionDir := reprovisionSetup(t)
 	agentName := "shared-agent"
 	siblingName := "shared-agent-sibling"
+
+	// R4 (review p1b-r1): write a project-id so GetAgentDir/GetAgentHomePath
+	// resolve to the EXTERNAL agents root (design §3.4 Amendment A23: "In
+	// shared mode the per-agent dir lives under the external agents root").
+	// Without this, config.GetAgentDir silently falls back to the in-project
+	// path, and the isolation this test claims to check would never actually
+	// be exercised.
+	if err := config.WriteProjectID(scionDir, "11111111-1111-1111-1111-111111111111"); err != nil {
+		t.Fatalf("WriteProjectID: %v", err)
+	}
 
 	// The shared checkout: a real git repo mounted directly for every agent
 	// in the project — not a per-agent worktree or clone.
@@ -444,20 +454,39 @@ func TestReprovision_ExplicitMount_CheckoutByteIdenticalAndSiblingUntouched(t *t
 		t.Fatalf("initial ProvisionAgent (sibling): %v", err)
 	}
 
-	agentHomeFile := filepath.Join(config.GetAgentHomePath(scionDir, agentName), "notes.txt")
-	if err := os.WriteFile(agentHomeFile, []byte("agent note"), 0644); err != nil {
+	agentDir := config.GetAgentDir(scionDir, agentName, true)
+	agentHome := config.GetAgentHomePath(scionDir, agentName)
+	siblingDir := config.GetAgentDir(scionDir, siblingName, true)
+	siblingHome := config.GetAgentHomePath(scionDir, siblingName)
+	if agentDir == filepath.Join(scionDir, "agents", agentName) {
+		t.Fatal("fixture check: WriteProjectID must route agentDir to the external root, not the in-project fallback")
+	}
+
+	if err := os.WriteFile(filepath.Join(agentHome, "notes.txt"), []byte("agent note"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	siblingHomeFile := filepath.Join(config.GetAgentHomePath(scionDir, siblingName), "notes.txt")
-	if err := os.WriteFile(siblingHomeFile, []byte("sibling note"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	siblingCfgPath := filepath.Join(config.GetAgentDir(scionDir, siblingName, true), "scion-agent.json")
-	siblingBefore, err := os.ReadFile(siblingCfgPath)
-	if err != nil {
+	if err := os.WriteFile(filepath.Join(siblingHome, "notes.txt"), []byte("sibling note"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
+	// A real content change between provision and reprovision (R4): bump the
+	// harness-config image, as TestReprovision_HarnessConfigImageBumpReplacesFrozenImage
+	// does, and delete home/agent-info.json so its re-appearance proves
+	// re-rendering rather than "it was already there from the initial
+	// provision".
+	if err := os.WriteFile(filepath.Join(globalScionDir, "harness-configs", "generic", "config.yaml"),
+		[]byte("harness: generic\nimage: test-image:v2\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	agentInfoPath := filepath.Join(agentHome, "agent-info.json")
+	if err := os.Remove(agentInfoPath); err != nil {
+		t.Fatalf("failed to remove agent-info.json fixture: %v", err)
+	}
+
+	// Whole-tree snapshots (R4), not spot checks of one file: the sibling's
+	// entire agentDir and home must be provably untouched.
+	siblingDirBefore := snapshotTree(t, siblingDir)
+	siblingHomeBefore := snapshotTree(t, siblingHome)
 	checkoutBefore := snapshotTree(t, sharedCheckout)
 	gitDirBefore := snapshotTree(t, filepath.Join(sharedCheckout, ".git"))
 
@@ -478,25 +507,111 @@ func TestReprovision_ExplicitMount_CheckoutByteIdenticalAndSiblingUntouched(t *t
 		t.Fatalf(".git directory was written to during Reprovision:\nbefore=%v\nafter=%v", gitDirBefore, gitDirAfter)
 	}
 
-	// The reprovisioned agent's own state survives and is re-rendered.
-	if _, err := os.Stat(agentHomeFile); err != nil {
+	// The reprovisioned agent's own state is genuinely RE-RENDERED (R4), not
+	// merely still present from the initial provision.
+	cfgData, err := os.ReadFile(filepath.Join(agentDir, "scion-agent.json"))
+	if err != nil {
+		t.Fatalf("expected scion-agent.json to exist: %v", err)
+	}
+	var cfg api.ScionConfig
+	if err := json.Unmarshal(cfgData, &cfg); err != nil {
+		t.Fatalf("failed to parse scion-agent.json: %v", err)
+	}
+	if cfg.Image != "test-image:v2" {
+		t.Fatalf("expected the bumped harness-config image to be re-rendered into scion-agent.json, got %q", cfg.Image)
+	}
+	if _, err := os.Stat(agentInfoPath); err != nil {
+		t.Fatalf("expected agent-info.json (deleted before Reprovision) to be re-rendered: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(agentHome, "notes.txt")); err != nil {
 		t.Fatalf("agent home file lost: %v", err)
 	}
-	agentCfgPath := filepath.Join(config.GetAgentDir(scionDir, agentName, true), "scion-agent.json")
-	if _, err := os.Stat(agentCfgPath); err != nil {
-		t.Fatalf("expected scion-agent.json to be re-rendered: %v", err)
-	}
 
-	// The sibling agent, sharing the same mount, must be completely untouched.
-	siblingAfter, err := os.ReadFile(siblingCfgPath)
-	if err != nil {
+	// The sibling agent, sharing the same mount, must be completely
+	// untouched: a whole-tree snapshot of both its agentDir and its home.
+	siblingDirAfter := snapshotTree(t, siblingDir)
+	if !mapsEqual(siblingDirBefore, siblingDirAfter) {
+		t.Fatalf("sibling agentDir changed after Reprovision:\nbefore=%v\nafter=%v", siblingDirBefore, siblingDirAfter)
+	}
+	siblingHomeAfter := snapshotTree(t, siblingHome)
+	if !mapsEqual(siblingHomeBefore, siblingHomeAfter) {
+		t.Fatalf("sibling home changed after Reprovision:\nbefore=%v\nafter=%v", siblingHomeBefore, siblingHomeAfter)
+	}
+}
+
+// TestReprovision_ExplicitMount_HubManaged_Positive is the design §3.4
+// Amendment A23.1 (review p1b-r1) R4 positive case for a hub-managed project
+// (SharedWorkspace=false): the explicit-mount branch must also work for an
+// agent whose Workspace is not under the external shared-workspace agents
+// root at all (config.GetAgentDir's in-project fallback), the same as for a
+// shared-workspace git project.
+func TestReprovision_ExplicitMount_HubManaged_Positive(t *testing.T) {
+	scionDir, _ := reprovisionSetup(t)
+	agentName := "hub-managed-agent"
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("hub-managed project"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if string(siblingBefore) != string(siblingAfter) {
-		t.Fatalf("sibling agent's scion-agent.json changed:\nbefore=%s\nafter=%s", siblingBefore, siblingAfter)
+
+	if _, _, _, err := ProvisionAgent(context.Background(), agentName, "default", "", "", scionDir, "", "created", "", workspace); err != nil {
+		t.Fatalf("initial ProvisionAgent: %v", err)
 	}
-	if _, err := os.Stat(siblingHomeFile); err != nil {
-		t.Fatalf("sibling home file lost: %v", err)
+	agentDir := config.GetAgentDir(scionDir, agentName, false)
+	agentHome := config.GetAgentHomePath(scionDir, agentName)
+	if err := os.WriteFile(filepath.Join(agentHome, "notes.txt"), []byte("hub-managed note"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	workspaceBefore := snapshotTree(t, workspace)
+
+	mgr := NewManager(&runtime.MockRuntime{})
+	if _, err := mgr.Reprovision(context.Background(), api.StartOptions{
+		Name: agentName, Template: "default", ProjectPath: scionDir, BrokerMode: true,
+		Workspace: workspace, SharedWorkspace: false,
+	}); err != nil {
+		t.Fatalf("Reprovision: %v", err)
+	}
+
+	workspaceAfter := snapshotTree(t, workspace)
+	if !mapsEqual(workspaceBefore, workspaceAfter) {
+		t.Fatalf("hub-managed workspace changed after Reprovision:\nbefore=%v\nafter=%v", workspaceBefore, workspaceAfter)
+	}
+	if _, err := os.Stat(filepath.Join(agentDir, "scion-agent.json")); err != nil {
+		t.Fatalf("expected scion-agent.json to exist: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(agentHome, "notes.txt")); err != nil {
+		t.Fatalf("agent home file lost: %v", err)
+	}
+}
+
+// TestReprovision_ExplicitMount_NoAgentDir_Refused is the design §3.4
+// Amendment A23.1 (review p1b-r1) R4 regression test for the "agent dir must
+// already exist" precondition (added deliberately in the initial A23 PR,
+// but previously untested): Reprovision must refuse a name that was never
+// actually provisioned, rather than letting ProvisionAgent's unconditional
+// os.MkdirAll silently stand up a fresh, empty agent directory for it.
+func TestReprovision_ExplicitMount_NoAgentDir_Refused(t *testing.T) {
+	scionDir, _ := reprovisionSetup(t)
+	agentName := "never-provisioned-agent"
+	workspace := t.TempDir()
+
+	agentDir := config.GetAgentDir(scionDir, agentName, true)
+	if _, statErr := os.Stat(agentDir); !os.IsNotExist(statErr) {
+		t.Fatalf("fixture check: agentDir must not exist yet: %v", statErr)
+	}
+
+	mgr := NewManager(&runtime.MockRuntime{})
+	_, err := mgr.Reprovision(context.Background(), api.StartOptions{
+		Name: agentName, Template: "default", ProjectPath: scionDir, BrokerMode: true,
+		Workspace: workspace, SharedWorkspace: true,
+	})
+	if err == nil {
+		t.Fatal("expected Reprovision to refuse an agent with no existing agent directory, got nil error")
+	}
+	if !errors.Is(err, ErrReprovisionRefused) {
+		t.Fatalf("expected ErrReprovisionRefused, got %v", err)
+	}
+	if _, statErr := os.Stat(agentDir); !os.IsNotExist(statErr) {
+		t.Fatalf("DATA INTEGRITY: Reprovision must never create the agent directory for a name that was never provisioned: %v", statErr)
 	}
 }
 

@@ -535,8 +535,16 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 		} else {
 			settings, _, _ := config.LoadEffectiveSettings(projectDir)
 			projectRoot := resolveProjectRoot(settings, projectDir)
-			if _, err := resolveWorkspaceSubdir(projectRoot, opts.Workspace); err != nil {
+			resolved, err := resolveWorkspaceSubdir(projectRoot, opts.Workspace)
+			if err != nil {
 				return nil, fmt.Errorf("%w: %v", ErrReprovisionRefused, err)
+			}
+			// O2 (review p1b-r1): resolveWorkspaceSubdir already confirms
+			// the resolved path exists, but not that it is a directory —
+			// unlike the absolute-path branch above. A relative workspace
+			// that resolves to a regular file must be refused the same way.
+			if info, statErr := os.Stat(resolved); statErr != nil || !info.IsDir() {
+				return nil, fmt.Errorf("%w: agent %q workspace path is not a directory: %s", ErrReprovisionRefused, opts.Name, resolved)
 			}
 		}
 	}

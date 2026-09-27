@@ -1494,6 +1494,80 @@ func TestCreateAgentProvisionOnly_ReprovisionRefused_Returns409(t *testing.T) {
 	}
 }
 
+// TestCreateAgentProvisionOnly_Reprovision_WorktreePerAgent_Returns409 is the
+// design §3.4 Amendment A23.1 (review p1b-r1) R2 regression test: a
+// reprovision request for a worktree-per-agent project must be refused with
+// 409 before buildStartContext ever runs — buildStartContext's
+// tryProvisionWorktree finds or creates the agent's worktree and hands
+// Manager.Reprovision an explicit-mount-shaped StartOptions (GitClone=nil,
+// Workspace=<worktree path>), a mode reincarnate has neither designed for nor
+// reviewed. Manager.Provision/Reprovision must never be called at all for
+// this request — proving the refusal happens strictly before
+// buildStartContext (and therefore before tryProvisionWorktree), not merely
+// before some later step inside it.
+func TestCreateAgentProvisionOnly_Reprovision_WorktreePerAgent_Returns409(t *testing.T) {
+	srv, mgr := newTestServerWithProvisionCapture()
+
+	body := `{
+		"name": "worktree-reprov-agent",
+		"id": "agent-uuid-worktree-reprov",
+		"slug": "worktree-reprov-agent",
+		"provisionOnly": true,
+		"reprovision": true,
+		"workspaceMode": "worktree-per-agent",
+		"config": {"template": "claude"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 Conflict for a worktree-per-agent reprovision, got %d: %s", w.Code, w.Body.String())
+	}
+	if mgr.reprovisionCalled {
+		t.Error("expected Manager.Reprovision NOT to be called: the refusal must happen before buildStartContext, which is what would otherwise call it")
+	}
+	if mgr.provisionCalled {
+		t.Error("expected Manager.Provision NOT to be called either")
+	}
+	if !strings.Contains(w.Body.String(), "worktree-per-agent") {
+		t.Errorf("expected the error body to name the worktree-per-agent refusal, got: %s", w.Body.String())
+	}
+}
+
+// TestCreateAgentProvisionOnly_Reprovision_SharedWorkspace_StillCallsReprovision
+// is the companion negative control for the R2 fix above: a reprovision
+// request for a shared-workspace (not worktree-per-agent) project must still
+// reach Manager.Reprovision as normal — the new gate must not over-refuse
+// every WorkspaceMode.
+func TestCreateAgentProvisionOnly_Reprovision_SharedWorkspace_StillCallsReprovision(t *testing.T) {
+	srv, mgr := newTestServerWithProvisionCapture()
+
+	body := `{
+		"name": "shared-reprov-agent",
+		"id": "agent-uuid-shared-reprov",
+		"slug": "shared-reprov-agent",
+		"provisionOnly": true,
+		"reprovision": true,
+		"workspaceMode": "shared",
+		"config": {"template": "claude"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for a shared-workspace reprovision, got %d: %s", w.Code, w.Body.String())
+	}
+	if !mgr.reprovisionCalled {
+		t.Error("expected Manager.Reprovision to be called for a shared-workspace reprovision")
+	}
+}
+
 func TestCreateAgentProvisionOnlyHarnessConfig(t *testing.T) {
 	srv, _ := newTestServerWithProvisionCapture()
 
