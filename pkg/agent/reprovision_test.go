@@ -674,6 +674,42 @@ func TestReprovision_ExplicitMount_RelativeWorkspaceEscapesRoot_Refused(t *testi
 	}
 }
 
+// TestReprovision_ExplicitMount_RelativeWorkspaceResolvesToFile_Refused is
+// the design §3.4 Amendment A23.1 (review p1b-r1) O2 regression test:
+// resolveWorkspaceSubdir confirms a relative workspace exists and is
+// contained under the project root, but not that it is a directory —
+// unlike the absolute-path branch. A relative workspace that resolves to a
+// regular file must be refused the same way a missing path is.
+func TestReprovision_ExplicitMount_RelativeWorkspaceResolvesToFile_Refused(t *testing.T) {
+	scionDir, _ := reprovisionSetup(t)
+	agentName := "relative-file-ws-agent"
+	validWorkspace := t.TempDir()
+
+	ctx := api.ContextWithSharedWorkspace(context.Background())
+	if _, _, _, err := ProvisionAgent(ctx, agentName, "default", "", "", scionDir, "", "created", "", validWorkspace); err != nil {
+		t.Fatalf("initial ProvisionAgent: %v", err)
+	}
+
+	// resolveProjectRoot treats the parent of a ".scion" projectDir as the
+	// project root a relative --workspace resolves against.
+	projectRoot := filepath.Dir(scionDir)
+	if err := os.WriteFile(filepath.Join(projectRoot, "not-a-dir.txt"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := NewManager(&runtime.MockRuntime{})
+	_, err := mgr.Reprovision(context.Background(), api.StartOptions{
+		Name: agentName, Template: "default", ProjectPath: scionDir, BrokerMode: true,
+		Workspace: "not-a-dir.txt", SharedWorkspace: true,
+	})
+	if err == nil {
+		t.Fatal("expected Reprovision to refuse a relative workspace that resolves to a regular file, got nil error")
+	}
+	if !errors.Is(err, ErrReprovisionRefused) {
+		t.Fatalf("expected ErrReprovisionRefused, got %v", err)
+	}
+}
+
 // TestReprovision_NeitherGitCloneNorWorkspace_Refused covers the remaining
 // api.ReincarnateEligible case: an agent with no GitClone and no Workspace at
 // all must be refused, the same as today, rather than silently falling
