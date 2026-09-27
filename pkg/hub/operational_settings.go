@@ -1019,9 +1019,19 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		applied = append(applied, "user_access_mode")
 	}
 
-	// Default user role
-	if snap.DefaultUserRole != "" {
-		s.config.DefaultUserRole = snap.DefaultUserRole
+	// Default user role. Writes are validated (schema enum in DB mode,
+	// explicit check in the file-mode PUT), but a hand-edited settings.yaml
+	// or DB row can still hold garbage. Normalize anything other than
+	// member/viewer to member so the live config never grants an
+	// unexpected role at user creation (design D6).
+	defaultRole := snap.DefaultUserRole
+	if defaultRole != "" && defaultRole != store.UserRoleMember && defaultRole != store.UserRoleViewer {
+		slog.Warn("invalid default_user_role, using member",
+			"configured", defaultRole, "allowed", []string{store.UserRoleMember, store.UserRoleViewer})
+		defaultRole = store.UserRoleMember
+	}
+	if defaultRole != "" {
+		s.config.DefaultUserRole = defaultRole
 		applied = append(applied, "default_user_role")
 	} else if s.config.DefaultUserRole != "" {
 		s.config.DefaultUserRole = ""

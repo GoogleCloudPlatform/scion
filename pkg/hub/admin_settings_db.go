@@ -218,6 +218,7 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 	// Access fields
 	resp.Server.Hub.AdminEmails = snap.AdminEmails
 	resp.Server.Auth.UserAccessMode = snap.UserAccessMode
+	resp.Server.Auth.DefaultUserRole = snap.DefaultUserRole
 	resp.Server.Auth.AuthorizedDomains = snap.AuthorizedDomains
 
 	// Lifecycle — always set booleans from the snapshot, regardless of
@@ -528,6 +529,23 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// Access section: carry omitted fields forward from the current row
+	// instead of wiping them (design §5.A item 3a). Other sections keep
+	// replace semantics. accessBaseRev is used as the CAS revision when the
+	// client did not supply one, so a concurrent access write between our
+	// read and our write yields a 409 rather than a lost update.
+	accessBaseRev := int64(-1)
+	if _, ok := sectionDocs["access"]; ok {
+		doc, rev, err := buildAccessDocOnCurrent(r.Context(), ops, &req.ServerConfigUpdateRequest, rawBody)
+		if err != nil {
+			slog.Error("PUT server-config: failed to build access document", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+			return
+		}
+		sectionDocs["access"] = doc
+		accessBaseRev = rev
+	}
+
 	// Validate federation semantics (beyond JSON schema).
 	if doc, ok := sectionDocs["federation"]; ok {
 		var fedSettings opsettings.FederationSettings
@@ -636,6 +654,8 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		expectedRev := int64(-1) // last-writer-wins by default
 		if rev, ok := req.ExpectedRevisions[secName]; ok {
 			expectedRev = rev
+		} else if secName == "access" && accessBaseRev >= 0 {
+			expectedRev = accessBaseRev
 		}
 
 		newRev, err := ops.Update(r.Context(), secName, doc, updatedBy, expectedRev, "managed")
@@ -934,6 +954,9 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			if auth.UserAccessMode != "" {
 				keys = append(keys, "server.auth.user_access_mode")
 			}
+			if auth.DefaultUserRole != "" {
+				keys = append(keys, "server.auth.default_user_role")
+			}
 			if len(auth.AuthorizedDomains) > 0 {
 				keys = append(keys, "server.auth.authorized_domains")
 			}
@@ -1036,8 +1059,8 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 // make them invisible.
 //
 // Only the clearable Layer-1 fields are checked here:
-// admin_emails, user_access_mode, notification_channels, public_url,
-// runtimes, profiles, harness_configs.
+// admin_emails, user_access_mode, default_user_role, notification_channels,
+// public_url, runtimes, profiles, harness_configs.
 func appendPresenceAwareKeys(keys []string, rawBody []byte) []string {
 	fp, err := parseFieldPresence(rawBody)
 	if err != nil {
@@ -1063,6 +1086,10 @@ func appendPresenceAwareKeys(keys []string, rawBody []byte) []string {
 	// user_access_mode: present in auth but empty → add the key.
 	if !keySet["server.auth.user_access_mode"] && authFP.has("user_access_mode") {
 		keys = append(keys, "server.auth.user_access_mode")
+	}
+	// default_user_role: present in auth but empty → add the key.
+	if !keySet["server.auth.default_user_role"] && authFP.has("default_user_role") {
+		keys = append(keys, "server.auth.default_user_role")
 	}
 	// authorized_domains: present in auth but empty → add the key.
 	if !keySet["server.auth.authorized_domains"] && authFP.has("authorized_domains") {
@@ -1117,6 +1144,108 @@ func buildSectionDocsFromRequest(req *ServerConfigUpdateRequest, layer1BySec map
 	return docs, nil
 }
 
+// overlayAccessRequest applies the access fields present in the request onto
+// d, presence-aware (N6):
+//   - non-empty value in the request → set
+//   - explicitly sent empty ("", [], null) → cleared
+//   - omitted → d keeps whatever it already holds
+//
+// With an empty d this yields the replace-semantics doc; with d loaded from
+// the current row it yields the carry-forward doc (design §5.A item 3a).
+func overlayAccessRequest(d *opsettings.AccessSettings, req *ServerConfigUpdateRequest, fp *fieldPresence) {
+	serverFP := fp.nestedPresence("server")
+	hubFP := serverFP.nestedPresence("hub")
+	authFP := serverFP.nestedPresence("auth")
+
+	if req.Server != nil && req.Server.Hub != nil {
+		if len(req.Server.Hub.AdminEmails) > 0 {
+			d.AdminEmails = req.Server.Hub.AdminEmails
+		} else if hubFP.has("admin_emails") {
+			// Explicitly sent as [] or null → clear to empty slice.
+			d.AdminEmails = []string{}
+		}
+	}
+	if req.Server != nil && req.Server.Auth != nil {
+		if req.Server.Auth.UserAccessMode != "" {
+			d.UserAccessMode = req.Server.Auth.UserAccessMode
+		} else if authFP.has("user_access_mode") {
+			d.UserAccessMode = "" // explicitly cleared
+		}
+		// Explicit "" clears default_user_role; the server then falls back
+		// to "member" (Server.DefaultUserRole).
+		if req.Server.Auth.DefaultUserRole != "" {
+			d.DefaultUserRole = req.Server.Auth.DefaultUserRole
+		} else if authFP.has("default_user_role") {
+			d.DefaultUserRole = "" // explicitly cleared
+		}
+		if len(req.Server.Auth.AuthorizedDomains) > 0 {
+			d.AuthorizedDomains = req.Server.Auth.AuthorizedDomains
+		} else if authFP.has("authorized_domains") {
+			d.AuthorizedDomains = []string{}
+		}
+	}
+}
+
+// buildAccessDocOnCurrent builds the access section doc for a Postgres-mode
+// PUT with carry-forward semantics (design §5.A item 3a): fields omitted from
+// the request keep their current value instead of being wiped by the
+// full-row replace in UpsertHubSetting.
+//
+// The base is read fresh from the store (the ops cache can be stale in HA).
+// When no access row exists yet, the base is the effective snapshot's access
+// values (bootstrap/file), excluding keys satisfied by a node-local env
+// override so a per-node SCION_SERVER_* value is not baked into shared state.
+//
+// It returns the revision the base was read at (0 when no row exists), for
+// use as the CAS expected revision: 0 means create-only, so a concurrent
+// writer turns a lost update into a 409 instead of silently dropping fields.
+func buildAccessDocOnCurrent(ctx context.Context, ops *OperationalSettings, req *ServerConfigUpdateRequest, rawBody []byte) (json.RawMessage, int64, error) {
+	fp, err := parseFieldPresence(rawBody)
+	if err != nil {
+		fp = nil // omitted-semantics; the typed decode already succeeded
+	}
+
+	base := &opsettings.AccessSettings{}
+	var baseRev int64
+	row, err := ops.store.GetHubSetting(ctx, "access")
+	switch {
+	case err == nil:
+		if len(row.Value) > 0 {
+			if err := json.Unmarshal(row.Value, base); err != nil {
+				return nil, 0, fmt.Errorf("decoding current access row: %w", err)
+			}
+		}
+		baseRev = row.Revision
+	case errors.Is(err, store.ErrNotFound):
+		snap := ops.Snapshot()
+		envKeys := make(map[string]bool)
+		for _, k := range ops.EnvOverriddenKeys() {
+			envKeys[k] = true
+		}
+		if !envKeys["server.hub.admin_emails"] {
+			base.AdminEmails = snap.AdminEmails
+		}
+		if !envKeys["server.auth.user_access_mode"] {
+			base.UserAccessMode = snap.UserAccessMode
+		}
+		if !envKeys["server.auth.default_user_role"] {
+			base.DefaultUserRole = snap.DefaultUserRole
+		}
+		if !envKeys["server.auth.authorized_domains"] {
+			base.AuthorizedDomains = snap.AuthorizedDomains
+		}
+	default:
+		return nil, 0, fmt.Errorf("reading current access row: %w", err)
+	}
+
+	overlayAccessRequest(base, req, fp)
+	doc, err := json.Marshal(base)
+	if err != nil {
+		return nil, 0, fmt.Errorf("marshalling access doc: %w", err)
+	}
+	return doc, baseRev, nil
+}
+
 // buildSingleSectionDoc extracts the fields for a single section from the
 // update request and marshals them into a section document.
 //
@@ -1124,46 +1253,31 @@ func buildSectionDocsFromRequest(req *ServerConfigUpdateRequest, layer1BySec map
 //
 // The fp (fieldPresence) parameter carries the raw JSON structure so we can
 // distinguish OMITTED fields from EXPLICITLY-SENT empty values:
-//   - OMITTED → field not in raw JSON → do NOT include in section doc
-//     (the current DB value is preserved on Refresh)
+//   - OMITTED → field not in raw JSON → do NOT include in section doc.
+//     The write replaces the whole row, so for most sections an omitted
+//     field is dropped from the DB. The access section is the exception:
+//     handlePutServerConfigDB rebuilds it on the current row
+//     (buildAccessDocOnCurrent), so omitted access fields are kept.
 //   - EXPLICIT empty ("", [], null) → field IS in raw JSON → include the
 //     zero value in the section doc, which CLEARS it in the DB
 //
-// This applies to: admin_emails, user_access_mode, notification_channels,
-// public_url. File-mode behavior is untouched.
+// This applies to: admin_emails, user_access_mode, default_user_role,
+// notification_channels, public_url. File-mode behavior is untouched.
 func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *fieldPresence) (json.RawMessage, error) {
 	var doc interface{}
 
-	// N6/N7: Derive nested presence maps for the server, hub, and auth sub-objects.
+	// N6/N7: Derive nested presence maps for the server and hub sub-objects.
+	// (The access section's auth presence is handled in overlayAccessRequest.)
 	serverFP := fp.nestedPresence("server")
 	hubFP := serverFP.nestedPresence("hub")
-	authFP := serverFP.nestedPresence("auth")
 
 	switch secName {
 	case "access":
+		// Standalone callers get replace semantics (omitted fields are
+		// absent from the doc). handlePutServerConfigDB rebuilds the access
+		// doc on top of the current row via buildAccessDocOnCurrent.
 		d := &opsettings.AccessSettings{}
-		if req.Server != nil && req.Server.Hub != nil {
-			// N6: presence-aware — explicit empty [] clears admin_emails.
-			if len(req.Server.Hub.AdminEmails) > 0 {
-				d.AdminEmails = req.Server.Hub.AdminEmails
-			} else if hubFP.has("admin_emails") {
-				// Explicitly sent as [] or null → clear to empty slice.
-				d.AdminEmails = []string{}
-			}
-		}
-		if req.Server != nil && req.Server.Auth != nil {
-			// N6: presence-aware — explicit empty "" clears user_access_mode.
-			if req.Server.Auth.UserAccessMode != "" {
-				d.UserAccessMode = req.Server.Auth.UserAccessMode
-			} else if authFP.has("user_access_mode") {
-				d.UserAccessMode = "" // explicitly cleared
-			}
-			if len(req.Server.Auth.AuthorizedDomains) > 0 {
-				d.AuthorizedDomains = req.Server.Auth.AuthorizedDomains
-			} else if authFP.has("authorized_domains") {
-				d.AuthorizedDomains = []string{}
-			}
-		}
+		overlayAccessRequest(d, req, fp)
 		doc = d
 
 	case "lifecycle":

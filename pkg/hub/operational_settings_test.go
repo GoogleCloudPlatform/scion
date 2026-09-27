@@ -1110,3 +1110,35 @@ func TestConversationEnvelopeSwitch_TypeMismatch_DetectedAtRefresh(t *testing.T)
 		t.Error("expected Malformed=true for type-mismatch document")
 	}
 }
+
+// Design D6: ApplySnapshot normalizes any default_user_role other than
+// member/viewer to member, so the live config never holds garbage.
+func TestApplySnapshot_DefaultUserRoleNormalized(t *testing.T) {
+	tests := []struct {
+		in       string
+		wantCfg  string
+		wantRole string
+	}{
+		{in: "superuser", wantCfg: "member", wantRole: "member"},
+		{in: "admin", wantCfg: "member", wantRole: "member"},
+		{in: "VIEWER", wantCfg: "member", wantRole: "member"},
+		{in: "viewer", wantCfg: "viewer", wantRole: "viewer"},
+		{in: "member", wantCfg: "member", wantRole: "member"},
+		{in: "", wantCfg: "", wantRole: "member"},
+	}
+	for _, tt := range tests {
+		t.Run("in="+tt.in, func(t *testing.T) {
+			srv := &Server{
+				config:      ServerConfig{DefaultUserRole: "viewer"},
+				maintenance: NewMaintenanceState(false, ""),
+			}
+			ApplySnapshot(srv, Layer1Snapshot{DefaultUserRole: tt.in})
+			if srv.config.DefaultUserRole != tt.wantCfg {
+				t.Errorf("config.DefaultUserRole = %q, want %q", srv.config.DefaultUserRole, tt.wantCfg)
+			}
+			if got := srv.DefaultUserRole(); got != tt.wantRole {
+				t.Errorf("DefaultUserRole() = %q, want %q", got, tt.wantRole)
+			}
+		})
+	}
+}
