@@ -101,8 +101,8 @@ func TestAgentsList(t *testing.T) {
 		}
 
 		// Check query params
-		if r.URL.Query().Get("projectId") != "grove-123" {
-			t.Errorf("expected projectId=grove-123, got %s", r.URL.Query().Get("projectId"))
+		if r.URL.Query().Get("projectId") != "project-123" {
+			t.Errorf("expected projectId=project-123, got %s", r.URL.Query().Get("projectId"))
 		}
 		if r.URL.Query().Get("groveId") != "" {
 			t.Errorf("expected no groveId query param, got %s", r.URL.Query().Get("groveId"))
@@ -131,7 +131,7 @@ func TestAgentsList(t *testing.T) {
 
 	client, _ := New(server.URL)
 	resp, err := client.Agents().List(context.Background(), &ListAgentsOptions{
-		ProjectID: "grove-123",
+		ProjectID: "project-123",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -187,8 +187,8 @@ func TestAgentsCreate(t *testing.T) {
 		if req.Name != "new-agent" {
 			t.Errorf("expected name 'new-agent', got %q", req.Name)
 		}
-		if req.ProjectID != "grove-123" {
-			t.Errorf("expected groveId 'grove-123', got %q", req.ProjectID)
+		if req.ProjectID != "project-123" {
+			t.Errorf("expected projectId 'project-123', got %q", req.ProjectID)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -198,7 +198,7 @@ func TestAgentsCreate(t *testing.T) {
 				ID:        "uuid-new",
 				Slug:      "new-agent",
 				Name:      "new-agent",
-				ProjectID: "grove-123",
+				ProjectID: "project-123",
 				Status:    "provisioning",
 			},
 		})
@@ -208,7 +208,7 @@ func TestAgentsCreate(t *testing.T) {
 	client, _ := New(server.URL)
 	resp, err := client.Agents().Create(context.Background(), &CreateAgentRequest{
 		Name:      "new-agent",
-		ProjectID: "grove-123",
+		ProjectID: "project-123",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -416,18 +416,18 @@ func TestEnvList(t *testing.T) {
 		if r.URL.Query().Get("scope") != "project" {
 			t.Errorf("expected scope=project, got %s", r.URL.Query().Get("scope"))
 		}
-		if r.URL.Query().Get("scopeId") != "grove-123" {
-			t.Errorf("expected scopeId=grove-123, got %s", r.URL.Query().Get("scopeId"))
+		if r.URL.Query().Get("scopeId") != "project-123" {
+			t.Errorf("expected scopeId=project-123, got %s", r.URL.Query().Get("scopeId"))
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(ListEnvResponse{
 			EnvVars: []EnvVar{
-				{ID: "1", Key: "API_URL", Value: "https://api.example.com", Scope: "project", ScopeID: "grove-123"},
-				{ID: "2", Key: "LOG_LEVEL", Value: "debug", Scope: "project", ScopeID: "grove-123"},
+				{ID: "1", Key: "API_URL", Value: "https://api.example.com", Scope: "project", ScopeID: "project-123"},
+				{ID: "2", Key: "LOG_LEVEL", Value: "debug", Scope: "project", ScopeID: "project-123"},
 			},
 			Scope:   "project",
-			ScopeID: "grove-123",
+			ScopeID: "project-123",
 		})
 	}))
 	defer server.Close()
@@ -435,7 +435,7 @@ func TestEnvList(t *testing.T) {
 	client, _ := New(server.URL)
 	resp, err := client.Env().List(context.Background(), &ListEnvOptions{
 		Scope:   "project",
-		ScopeID: "grove-123",
+		ScopeID: "project-123",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -505,7 +505,7 @@ func TestEnvSet(t *testing.T) {
 				Key:     "LOG_LEVEL",
 				Value:   "debug",
 				Scope:   "project",
-				ScopeID: "grove-123",
+				ScopeID: "project-123",
 			},
 			Created: true,
 		})
@@ -516,7 +516,7 @@ func TestEnvSet(t *testing.T) {
 	resp, err := client.Env().Set(context.Background(), "LOG_LEVEL", &SetEnvRequest{
 		Value:   "debug",
 		Scope:   "project",
-		ScopeID: "grove-123",
+		ScopeID: "project-123",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -754,8 +754,8 @@ func TestTokenCreate(t *testing.T) {
 		if req.Name != "ci-token" {
 			t.Errorf("expected name 'ci-token', got %q", req.Name)
 		}
-		if req.ProjectID != "grove-123" {
-			t.Errorf("expected groveId 'grove-123', got %q", req.ProjectID)
+		if req.ProjectID != "project-123" {
+			t.Errorf("expected projectId 'project-123', got %q", req.ProjectID)
 		}
 		if len(req.Scopes) != 2 {
 			t.Errorf("expected 2 scopes, got %d", len(req.Scopes))
@@ -769,7 +769,7 @@ func TestTokenCreate(t *testing.T) {
 				ID:        "token-uuid",
 				Name:      "ci-token",
 				Prefix:    "scion_pat_abc1",
-				ProjectID: "grove-123",
+				ProjectID: "project-123",
 				Scopes:    []string{"agent:dispatch", "agent:read"},
 				ExpiresAt: &expires,
 				Created:   time.Now(),
@@ -781,7 +781,7 @@ func TestTokenCreate(t *testing.T) {
 	client, _ := New(server.URL)
 	resp, err := client.Tokens().Create(context.Background(), &CreateTokenRequest{
 		Name:      "ci-token",
-		ProjectID: "grove-123",
+		ProjectID: "project-123",
 		Scopes:    []string{"agent:dispatch", "agent:read"},
 		ExpiresAt: &expires,
 	})
@@ -794,8 +794,8 @@ func TestTokenCreate(t *testing.T) {
 	if resp.AccessToken.Name != "ci-token" {
 		t.Errorf("expected name 'ci-token', got %q", resp.AccessToken.Name)
 	}
-	if resp.AccessToken.ProjectID != "grove-123" {
-		t.Errorf("expected groveId 'grove-123', got %q", resp.AccessToken.ProjectID)
+	if resp.AccessToken.ProjectID != "project-123" {
+		t.Errorf("expected projectId 'project-123', got %q", resp.AccessToken.ProjectID)
 	}
 }
 
@@ -811,8 +811,8 @@ func TestTokenList(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(ListTokensResponse{
 			Items: []TokenInfo{
-				{ID: "t1", Name: "ci-token", Prefix: "scion_pat_abc1", ProjectID: "grove-1", Scopes: []string{"agent:dispatch"}},
-				{ID: "t2", Name: "deploy", Prefix: "scion_pat_def2", ProjectID: "grove-2", Scopes: []string{"agent:manage"}},
+				{ID: "t1", Name: "ci-token", Prefix: "scion_pat_abc1", ProjectID: "project-1", Scopes: []string{"agent:dispatch"}},
+				{ID: "t2", Name: "deploy", Prefix: "scion_pat_def2", ProjectID: "project-2", Scopes: []string{"agent:manage"}},
 			},
 		})
 	}))
@@ -842,7 +842,7 @@ func TestTokenGet(t *testing.T) {
 			ID:        "token-123",
 			Name:      "ci-token",
 			Prefix:    "scion_pat_abc1",
-			ProjectID: "grove-1",
+			ProjectID: "project-1",
 			Scopes:    []string{"agent:dispatch"},
 			Created:   time.Now(),
 		})

@@ -150,7 +150,6 @@ allowed_paths=(
   "^pkg/hubclient/templates_test.go$"
   "^pkg/hubclient/tokens_test.go$"
   "^pkg/hubclient/types_test.go$"
-  "^pkg/hubclient/workspace_test.go$"
   "^pkg/hubsync/resolve_test.go$"
   "^pkg/hubsync/sync_test.go$"
   "^pkg/projectcompat/config_test.go$"
