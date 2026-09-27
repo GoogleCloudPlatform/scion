@@ -298,10 +298,8 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		"scion.agent": "true",
 	}
 
-	// Add optional filters — support both projectId and legacy groveId.
+	// Add an optional project filter.
 	if projectID := query.Get("projectId"); projectID != "" {
-		filter["scion.project_id"] = projectID
-	} else if projectID := query.Get("groveId"); projectID != "" {
 		filter["scion.project_id"] = projectID
 	}
 	if status := query.Get("status"); status != "" {
@@ -1322,13 +1320,10 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract projectId (or legacy groveId) from query params for project-scoped agent resolution.
+	// Extract projectId from query params for project-scoped agent resolution.
 	// This prevents cross-project agent collision when two agents with the same
 	// name exist in different projects on the same broker.
 	projectID := r.URL.Query().Get("projectId")
-	if projectID == "" {
-		projectID = r.URL.Query().Get("groveId")
-	}
 
 	// Handle WebSocket attach for PTY
 	if action == "attach" && isPTYWebSocketUpgrade(r) {
@@ -1556,8 +1551,6 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		Task               string                 `json:"task"`
 		ProjectPath        string                 `json:"projectPath"`
 		ProjectSlug        string                 `json:"projectSlug"`
-		GrovePath          string                 `json:"grovePath"`
-		GroveSlug          string                 `json:"groveSlug"`
 		HarnessConfig      string                 `json:"harnessConfig"`
 		HarnessConfigID    string                 `json:"harnessConfigId"`
 		HarnessConfigHash  string                 `json:"harnessConfigHash"`
@@ -1591,13 +1584,6 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			s.agentLifecycleLog.Debug("No task in start request body (ignoring decode error)", "agent_id", id, "error", err)
 		}
 	}
-	if startReq.ProjectPath == "" && startReq.GrovePath != "" {
-		startReq.ProjectPath = startReq.GrovePath
-	}
-	if startReq.ProjectSlug == "" && startReq.GroveSlug != "" {
-		startReq.ProjectSlug = startReq.GroveSlug
-	}
-
 	// Inject skill resolver from Hub connection for skill provisioning, same
 	// as createAgent (#1960). ProjectID comes from the URL-scoped function
 	// argument since start doesn't repeat it in the body.

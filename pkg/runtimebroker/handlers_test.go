@@ -53,6 +53,9 @@ type mockManager struct {
 	// on what was attached to it (e.g. a skill resolver, #1960) without a
 	// real container runtime or ProvisionAgent call.
 	lastStartCtx context.Context
+	// lastListFilter captures the filter map passed to List, so tests can
+	// assert on which keys the handler builds from query parameters.
+	lastListFilter map[string]string
 }
 
 func (m *mockManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
@@ -105,6 +108,7 @@ func (m *mockManager) DeleteTarget(ctx context.Context, agentName, containerID s
 }
 
 func (m *mockManager) List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+	m.lastListFilter = filter
 	if m.listErr != nil {
 		return nil, m.listErr
 	}
@@ -317,6 +321,32 @@ func TestListAgents(t *testing.T) {
 
 	if resp.TotalCount != 2 {
 		t.Errorf("expected totalCount 2, got %d", resp.TotalCount)
+	}
+}
+
+// TestListAgents_GroveIDQueryParamNotHonoured verifies that a groveId-only
+// query no longer scopes the agent list: the filter built for the manager
+// must carry no scion.project_id key, so the list falls back to unscoped
+// (matching every agent) rather than silently re-honouring the legacy alias.
+func TestListAgents_GroveIDQueryParamNotHonoured(t *testing.T) {
+	mgr := &mockManager{
+		agents: []api.AgentInfo{
+			{ID: "container-1", Name: "test-agent-1", Phase: "running"},
+		},
+	}
+	srv := newTestServerWithManager(t, mgr)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents?groveId=p1", nil)
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	if v, ok := mgr.lastListFilter["scion.project_id"]; ok {
+		t.Errorf("groveId-only query must not scope the list filter, got scion.project_id=%q", v)
 	}
 }
 
@@ -947,7 +977,7 @@ func TestCreateAgentWithHubCredentials(t *testing.T) {
 	body := `{
 		"name": "test-agent",
 		"id": "agent-uuid-123",
-		"groveId": "grove-uuid-456",
+		"projectId": "project-uuid-456",
 		"hubEndpoint": "https://hub.example.com",
 		"agentToken": "secret-token-xyz",
 		"config": {"template": "claude"}
@@ -988,8 +1018,8 @@ func TestCreateAgentWithHubCredentials(t *testing.T) {
 	}
 
 	// Check SCION_PROJECT_ID
-	if got := mgr.lastEnv["SCION_PROJECT_ID"]; got != "grove-uuid-456" {
-		t.Errorf("expected SCION_PROJECT_ID='grove-uuid-456', got %q", got)
+	if got := mgr.lastEnv["SCION_PROJECT_ID"]; got != "project-uuid-456" {
+		t.Errorf("expected SCION_PROJECT_ID='project-uuid-456', got %q", got)
 	}
 	if _, ok := mgr.lastEnv["SCION_GROVE_ID"]; ok {
 		t.Errorf("expected SCION_GROVE_ID to be absent, got %q", mgr.lastEnv["SCION_GROVE_ID"])
@@ -1687,7 +1717,7 @@ func TestCreateAgentHubEndpointFromProjectSettings(t *testing.T) {
 		body := `{
 			"name": "grove-endpoint-agent",
 			"hubEndpoint": "http://localhost:9810",
-			"grovePath": "` + projectDir + `",
+			"projectPath": "` + projectDir + `",
 			"config": {"template": "claude"}
 		}`
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -1730,7 +1760,7 @@ func TestCreateAgentHubEndpointFromProjectSettings(t *testing.T) {
 
 		body := `{
 			"name": "grove-fallback-agent",
-			"grovePath": "` + projectDir + `",
+			"projectPath": "` + projectDir + `",
 			"config": {"template": "claude"}
 		}`
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -1793,7 +1823,7 @@ func TestCreateAgentProjectHubEndpointSuppressedWhenDisabled(t *testing.T) {
 
 		body := `{
 			"name": "grove-disabled-agent",
-			"grovePath": "` + projectDir + `",
+			"projectPath": "` + projectDir + `",
 			"config": {"template": "claude"}
 		}`
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -1839,7 +1869,7 @@ func TestCreateAgentProjectHubEndpointSuppressedWhenDisabled(t *testing.T) {
 		body := `{
 			"name": "dispatcher-endpoint-agent",
 			"hubEndpoint": "https://hub.authoritative.com",
-			"grovePath": "` + projectDir + `",
+			"projectPath": "` + projectDir + `",
 			"config": {"template": "claude"}
 		}`
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -1899,7 +1929,7 @@ func TestCreateAgentHubManagedProjectSettingsEndpoint(t *testing.T) {
 	// Send createAgent request with projectSlug but no projectPath
 	body := `{
 		"name": "hub-managed-agent",
-		"groveSlug": "settings-test-grove",
+		"projectSlug": "settings-test-grove",
 		"hubEndpoint": "http://localhost:9810",
 		"config": {"template": "claude"}
 	}`
@@ -2043,7 +2073,7 @@ hub:
 		body := fmt.Sprintf(`{
 			"name": "test-agent",
 			"hubEndpoint": "http://localhost:8080",
-			"grovePath": %q
+			"projectPath": %q
 		}`, projectDir)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
@@ -2146,7 +2176,7 @@ runtimes:
 		body := fmt.Sprintf(`{
 			"name": "test-agent",
 			"hubEndpoint": "http://localhost:8080",
-			"grovePath": %q
+			"projectPath": %q
 		}`, projectDir)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
@@ -2591,9 +2621,9 @@ func TestProjectSlugWorkspacePath(t *testing.T) {
 func TestCreateAgentRequest_ProjectSlugField(t *testing.T) {
 	// Verify ProjectSlug is properly serialized/deserialized in CreateAgentRequest.
 	reqJSON := `{
-		"name": "grove-agent",
-		"groveSlug": "my-hub-grove",
-		"workspaceStoragePath": "workspaces/grove-123/grove-workspace"
+		"name": "project-agent",
+		"projectSlug": "my-hub-project",
+		"workspaceStoragePath": "workspaces/project-123/project-workspace"
 	}`
 
 	var req CreateAgentRequest
@@ -2601,18 +2631,18 @@ func TestCreateAgentRequest_ProjectSlugField(t *testing.T) {
 		t.Fatalf("failed to unmarshal: %v", err)
 	}
 
-	if req.ProjectSlug != "my-hub-grove" {
-		t.Errorf("expected ProjectSlug 'my-hub-grove', got '%s'", req.ProjectSlug)
+	if req.ProjectSlug != "my-hub-project" {
+		t.Errorf("expected ProjectSlug 'my-hub-project', got '%s'", req.ProjectSlug)
 	}
-	if req.WorkspaceStoragePath != "workspaces/grove-123/grove-workspace" {
-		t.Errorf("expected WorkspaceStoragePath 'workspaces/grove-123/grove-workspace', got '%s'", req.WorkspaceStoragePath)
+	if req.WorkspaceStoragePath != "workspaces/project-123/project-workspace" {
+		t.Errorf("expected WorkspaceStoragePath 'workspaces/project-123/project-workspace', got '%s'", req.WorkspaceStoragePath)
 	}
 }
 
 func TestCreateAgentProjectSlugResolvesProjectPath(t *testing.T) {
 	// When ProjectSlug is set and ProjectPath is empty (hub-managed project with no
 	// local provider path), the handler should resolve ProjectPath to the
-	// conventional ~/.scion.groves/<slug>/ path so the agent is created in the
+	// conventional ~/.scion/projects/<slug>/ path so the agent is created in the
 	// correct project instead of the broker's local project.
 	srv, mgr := newTestServerWithProvisionCapture()
 
@@ -2620,8 +2650,8 @@ func TestCreateAgentProjectSlugResolvesProjectPath(t *testing.T) {
 		"name": "hub-managed-agent",
 		"id": "agent-uuid-123",
 		"slug": "hub-managed-agent",
-		"groveId": "grove-abc",
-		"groveSlug": "my-hub-grove",
+		"projectId": "project-abc",
+		"projectSlug": "my-hub-project",
 		"provisionOnly": true,
 		"config": {"template": "claude"}
 	}`
@@ -2644,7 +2674,7 @@ func TestCreateAgentProjectSlugResolvesProjectPath(t *testing.T) {
 		t.Fatalf("failed to get global dir: %v", err)
 	}
 
-	expectedPath := filepath.Join(globalDir, "projects", "my-hub-grove")
+	expectedPath := filepath.Join(globalDir, "projects", "my-hub-project")
 	if mgr.lastOpts.ProjectPath != expectedPath {
 		t.Errorf("expected ProjectPath %q, got %q", expectedPath, mgr.lastOpts.ProjectPath)
 	}
@@ -2656,12 +2686,12 @@ func TestCreateAgentProjectSlugNotUsedWhenProjectPathSet(t *testing.T) {
 	srv, mgr := newTestServerWithProvisionCapture()
 
 	body := `{
-		"name": "local-grove-agent",
+		"name": "local-project-agent",
 		"id": "agent-uuid-456",
-		"slug": "local-grove-agent",
-		"groveId": "grove-def",
-		"groveSlug": "my-hub-grove",
-		"grovePath": "/projects/my-local-grove/.scion",
+		"slug": "local-project-agent",
+		"projectId": "project-def",
+		"projectSlug": "my-hub-project",
+		"projectPath": "/projects/my-local-project/.scion",
 		"provisionOnly": true,
 		"config": {"template": "claude"}
 	}`
@@ -2680,8 +2710,8 @@ func TestCreateAgentProjectSlugNotUsedWhenProjectPathSet(t *testing.T) {
 	}
 
 	// ProjectPath should remain as explicitly provided, not overridden by ProjectSlug
-	if mgr.lastOpts.ProjectPath != "/projects/my-local-grove/.scion" {
-		t.Errorf("expected ProjectPath %q, got %q", "/projects/my-local-grove/.scion", mgr.lastOpts.ProjectPath)
+	if mgr.lastOpts.ProjectPath != "/projects/my-local-project/.scion" {
+		t.Errorf("expected ProjectPath %q, got %q", "/projects/my-local-project/.scion", mgr.lastOpts.ProjectPath)
 	}
 }
 
@@ -2711,7 +2741,7 @@ func TestStartAgentProjectSettingsFallbackHubEndpoint(t *testing.T) {
 			t.Fatalf("failed to write settings.yaml: %v", err)
 		}
 
-		body := fmt.Sprintf(`{"grovePath": %q}`, projectDir)
+		body := fmt.Sprintf(`{"projectPath": %q}`, projectDir)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent/start", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
@@ -2759,7 +2789,7 @@ func TestStartAgentProjectSettingsFallbackHubEndpoint(t *testing.T) {
 			t.Fatalf("failed to write settings.yaml: %v", err)
 		}
 
-		body := fmt.Sprintf(`{"grovePath": %q}`, projectDir)
+		body := fmt.Sprintf(`{"projectPath": %q}`, projectDir)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent/start", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
@@ -2805,7 +2835,7 @@ func TestStartAgentBrokerConfigUsedWhenNoProjectSettings(t *testing.T) {
 		t.Fatalf("failed to write settings.yaml: %v", err)
 	}
 
-	body := fmt.Sprintf(`{"grovePath": %q}`, projectDir)
+	body := fmt.Sprintf(`{"projectPath": %q}`, projectDir)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent/start", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -3395,100 +3425,89 @@ func TestStartAgentBrokerIDEnv(t *testing.T) {
 }
 
 func TestStartAgentProjectSlugResolvesProjectPath(t *testing.T) {
-	tests := []struct {
-		name string
-		body string
-	}{
-		{
-			name: "projectSlug",
-			body: `{"projectSlug": "my-hub-project"}`,
-		},
-		{
-			name: "legacy groveSlug",
-			body: `{"groveSlug": "my-hub-project"}`,
-		},
+	// When the startAgent handler receives projectSlug with no projectPath
+	// (hub-managed project), it should resolve ProjectPath from the slug.
+	srv, mgr := newTestServerWithProvisionCapture()
+
+	body := `{"projectSlug": "my-hub-project"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/hub-managed-agent/start", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// When the startAgent handler receives projectSlug with no projectPath
-			// (hub-managed project), it should resolve ProjectPath from the slug.
-			srv, mgr := newTestServerWithProvisionCapture()
+	if !mgr.startCalled {
+		t.Fatal("expected Start to be called")
+	}
 
-			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/hub-managed-agent/start", strings.NewReader(tt.body))
-			req.Header.Set("Content-Type", "application/json")
-			w := httptest.NewRecorder()
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		t.Fatalf("failed to get global dir: %v", err)
+	}
 
-			srv.Handler().ServeHTTP(w, req)
-
-			if w.Code != http.StatusAccepted {
-				t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
-			}
-
-			if !mgr.startCalled {
-				t.Fatal("expected Start to be called")
-			}
-
-			globalDir, err := config.GetGlobalDir()
-			if err != nil {
-				t.Fatalf("failed to get global dir: %v", err)
-			}
-
-			expectedPath := filepath.Join(globalDir, "projects", "my-hub-project")
-			if mgr.lastOpts.ProjectPath != expectedPath {
-				t.Errorf("expected ProjectPath %q, got %q", expectedPath, mgr.lastOpts.ProjectPath)
-			}
-		})
+	expectedPath := filepath.Join(globalDir, "projects", "my-hub-project")
+	if mgr.lastOpts.ProjectPath != expectedPath {
+		t.Errorf("expected ProjectPath %q, got %q", expectedPath, mgr.lastOpts.ProjectPath)
 	}
 }
 
 func TestStartAgentProjectSlugNotUsedWhenProjectPathSet(t *testing.T) {
-	tests := []struct {
-		name         string
-		body         string
-		expectedPath string
-	}{
-		{
-			name:         "legacy grovePath wins over legacy groveSlug",
-			body:         `{"grovePath": "/projects/my-local-project/.scion", "groveSlug": "my-hub-project"}`,
-			expectedPath: "/projects/my-local-project/.scion",
-		},
-		{
-			name: "projectPath wins over projectSlug and legacy keys",
-			body: `{
-				"projectPath": "/projects/my-local-project/.scion",
-				"projectSlug": "my-hub-project",
-				"grovePath": "/projects/legacy-project/.scion",
-				"groveSlug": "legacy-hub-project"
-			}`,
-			expectedPath: "/projects/my-local-project/.scion",
-		},
+	// When startAgent receives both projectPath and projectSlug,
+	// projectPath takes precedence.
+	srv, mgr := newTestServerWithProvisionCapture()
+
+	body := `{
+		"projectPath": "/projects/my-local-project/.scion",
+		"projectSlug": "my-hub-project"
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/local-project-agent/start", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// When startAgent receives both projectPath and projectSlug,
-			// projectPath takes precedence.
-			srv, mgr := newTestServerWithProvisionCapture()
+	if !mgr.startCalled {
+		t.Fatal("expected Start to be called")
+	}
 
-			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/local-project-agent/start", strings.NewReader(tt.body))
-			req.Header.Set("Content-Type", "application/json")
-			w := httptest.NewRecorder()
+	expectedPath := "/projects/my-local-project/.scion"
+	if mgr.lastOpts.ProjectPath != expectedPath {
+		t.Errorf("expected ProjectPath %q, got %q", expectedPath, mgr.lastOpts.ProjectPath)
+	}
+}
 
-			srv.Handler().ServeHTTP(w, req)
+// TestStartAgentLegacyGroveFieldsNotHonoured verifies that a start request
+// carrying only the retired grovePath/groveSlug fields resolves no project
+// path: the legacy fallback that used to promote them into
+// ProjectPath/ProjectSlug is gone.
+func TestStartAgentLegacyGroveFieldsNotHonoured(t *testing.T) {
+	srv, mgr := newTestServerWithProvisionCapture()
 
-			if w.Code != http.StatusAccepted {
-				t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
-			}
+	body := `{"grovePath": "/projects/my-local-project/.scion", "groveSlug": "my-hub-project"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/legacy-fields-agent/start", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
 
-			if !mgr.startCalled {
-				t.Fatal("expected Start to be called")
-			}
+	srv.Handler().ServeHTTP(w, req)
 
-			if mgr.lastOpts.ProjectPath != tt.expectedPath {
-				t.Errorf("expected ProjectPath %q, got %q", tt.expectedPath, mgr.lastOpts.ProjectPath)
-			}
-		})
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+	}
+
+	if !mgr.startCalled {
+		t.Fatal("expected Start to be called")
+	}
+
+	if mgr.lastOpts.ProjectPath != "" {
+		t.Errorf("expected legacy grovePath to be ignored, got ProjectPath %q", mgr.lastOpts.ProjectPath)
 	}
 }
 
@@ -4041,7 +4060,7 @@ func TestCreateAgentStartFailure_CleansUpFiles(t *testing.T) {
 
 	body := fmt.Sprintf(`{
 		"name": "fail-agent",
-		"grovePath": %q,
+		"projectPath": %q,
 		"config": {"task": "do something"}
 	}`, projectPath)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))

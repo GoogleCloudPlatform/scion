@@ -22,43 +22,7 @@ import (
 )
 
 func TestAgentInfo_JSON(t *testing.T) {
-	t.Run("unmarshal legacy grove fields", func(t *testing.T) {
-		jsonData := `{
-			"id": "agent-1",
-			"grove": "legacy-grove",
-			"groveId": "legacy-id",
-			"grovePath": "/legacy/path"
-		}`
-		var info AgentInfo
-		if err := json.Unmarshal([]byte(jsonData), &info); err != nil {
-			t.Fatalf("Unmarshal failed: %v", err)
-		}
-		if info.Project != "legacy-grove" {
-			t.Errorf("Project = %q, want %q", info.Project, "legacy-grove")
-		}
-		if info.ProjectID != "legacy-id" {
-			t.Errorf("ProjectID = %q, want %q", info.ProjectID, "legacy-id")
-		}
-		if info.ProjectPath != "/legacy/path" {
-			t.Errorf("ProjectPath = %q, want %q", info.ProjectPath, "/legacy/path")
-		}
-	})
-
-	t.Run("unmarshal project priority", func(t *testing.T) {
-		jsonData := `{
-			"project": "new-project",
-			"grove": "old-grove"
-		}`
-		var info AgentInfo
-		if err := json.Unmarshal([]byte(jsonData), &info); err != nil {
-			t.Fatalf("Unmarshal failed: %v", err)
-		}
-		if info.Project != "new-project" {
-			t.Errorf("Project = %q, want %q (project should win)", info.Project, "new-project")
-		}
-	})
-
-	t.Run("marshal emits only canonical fields", func(t *testing.T) {
+	t.Run("canonical round-trip", func(t *testing.T) {
 		info := AgentInfo{
 			Project:     "my-project",
 			ProjectID:   "my-id",
@@ -90,6 +54,30 @@ func TestAgentInfo_JSON(t *testing.T) {
 			if _, ok := m[legacyKey]; ok {
 				t.Errorf("legacy key %q present in marshal output, want absent: %v", legacyKey, m[legacyKey])
 			}
+		}
+
+		var roundTripped AgentInfo
+		if err := json.Unmarshal(data, &roundTripped); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if roundTripped.Project != info.Project || roundTripped.ProjectID != info.ProjectID || roundTripped.ProjectPath != info.ProjectPath {
+			t.Errorf("round-trip = %+v, want %+v", roundTripped, info)
+		}
+	})
+
+	t.Run("unmarshal ignores unknown legacy fields", func(t *testing.T) {
+		jsonData := `{
+			"id": "agent-1",
+			"grove": "legacy-grove",
+			"groveId": "legacy-id",
+			"grovePath": "/legacy/path"
+		}`
+		var info AgentInfo
+		if err := json.Unmarshal([]byte(jsonData), &info); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if info.Project != "" || info.ProjectID != "" || info.ProjectPath != "" {
+			t.Errorf("legacy grove keys were honoured: %+v", info)
 		}
 	})
 }

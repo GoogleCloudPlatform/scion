@@ -16,7 +16,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -614,32 +613,6 @@ type AgentInfo struct {
 
 	// Optimistic locking
 	StateVersion int64 `json:"stateVersion,omitempty"` // Version for concurrent update detection
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
-func (a *AgentInfo) UnmarshalJSON(data []byte) error {
-	type Alias AgentInfo
-	aux := &struct {
-		Grove     string `json:"grove"`
-		GroveID   string `json:"groveId"`
-		GrovePath string `json:"grovePath"`
-		*Alias
-	}{
-		Alias: (*Alias)(a),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if a.Project == "" && aux.Grove != "" {
-		a.Project = aux.Grove
-	}
-	if a.ProjectID == "" && aux.GroveID != "" {
-		a.ProjectID = aux.GroveID
-	}
-	if a.ProjectPath == "" && aux.GrovePath != "" {
-		a.ProjectPath = aux.GrovePath
-	}
-	return nil
 }
 
 // AgentDetail provides freeform context about the current activity.
