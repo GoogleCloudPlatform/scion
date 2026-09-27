@@ -395,3 +395,125 @@ describe('scion-page-admin-users — invited users and role filter', () => {
     expect(dialog!.textContent).not.toContain('Viewer');
   });
 });
+
+describe('scion-page-admin-users — role filter across pages', () => {
+  let element: PageEl | null = null;
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+  });
+
+  function members(prefix: string, n: number): AdminUser[] {
+    return Array.from({ length: n }, (_, i) =>
+      makeUser({ id: `${prefix}-${i}`, email: `${prefix}-${i}@example.com`, role: 'member' })
+    );
+  }
+
+  function invitedRows(prefix: string, n: number): AdminUser[] {
+    return Array.from({ length: n }, (_, i) =>
+      makeUser({
+        id: `${prefix}-${i}`,
+        email: `${prefix}-${i}@example.com`,
+        displayName: '',
+        role: 'member',
+        status: 'invited',
+      })
+    );
+  }
+
+  /** Serves two cursor pages; the server total counts invited placeholder rows. */
+  async function createPaged(page1: AdminUser[], page2: AdminUser[], total: number) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string | URL | Request) => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+        if (path.includes('/auth/me')) {
+          return Promise.resolve(jsonResponse({ id: SELF_ID, role: 'admin' }));
+        }
+        if (path.includes('/api/v1/users?')) {
+          const cursor = new URL(path, 'http://localhost').searchParams.get('cursor');
+          const body =
+            cursor === 'c2'
+              ? { users: page2, totalCount: total }
+              : { users: page1, totalCount: total, nextCursor: 'c2' };
+          return Promise.resolve(jsonResponse(body));
+        }
+        return Promise.resolve(jsonResponse([]));
+      })
+    );
+    const el = document.createElement('scion-page-admin-users') as PageEl;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await el.updateComplete;
+    return el;
+  }
+
+  function nextButton(el: HTMLElement): HTMLElement | undefined {
+    return Array.from(
+      el.shadowRoot?.querySelectorAll<HTMLElement>('.pagination sl-button') ?? []
+    ).find((b) => b.textContent?.trim() === 'Next');
+  }
+
+  function text(el: HTMLElement, selector: string): string {
+    return el.shadowRoot?.querySelector(selector)?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+  }
+
+  it('keeps the pager and Next when invited rows are filtered out of page 1', async () => {
+    element = await createPaged(
+      [...members('m1', 40), ...invitedRows('i1', 10)],
+      members('m2', 10),
+      60
+    );
+    expect(nextButton(element)).toBeTruthy();
+    expect(text(element, '.user-count')).toBe('60 users');
+
+    const select = element.shadowRoot!.querySelector<HTMLElement>('sl-select.role-filter')!;
+    await chooseSelect(element, select, 'member');
+
+    expect(queryAll(element, 'tbody tr')).toHaveLength(40);
+    const next = nextButton(element);
+    expect(next).toBeTruthy();
+    expect(next!.hasAttribute('disabled')).toBe(false);
+    // The server total includes invited rows, so it is shown as an upper bound.
+    expect(text(element, '.user-count')).toBe('up to 60 users');
+    expect(text(element, '.page-indicator')).toBe('Page 1');
+    expect(text(element, '.pagination-info')).toBe('Showing 40 on this page');
+
+    next!.click();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await element.updateComplete;
+
+    const last = listCalls().at(-1)!;
+    expect(last.searchParams.get('cursor')).toBe('c2');
+    expect(last.searchParams.get('role')).toBe('member');
+    expect(queryAll(element, 'tbody tr')).toHaveLength(10);
+    expect(text(element, '.page-indicator')).toBe('Page 2');
+  });
+
+  it('still offers Next on a page made up only of invited rows', async () => {
+    element = await createPaged(invitedRows('i1', 50), members('m2', 5), 55);
+    const select = element.shadowRoot!.querySelector<HTMLElement>('sl-select.role-filter')!;
+    await chooseSelect(element, select, 'member');
+
+    expect(queryAll(element, 'tbody tr')).toHaveLength(0);
+    expect(text(element, '.empty-state p')).toBe('No matching users on this page.');
+    const next = nextButton(element);
+    expect(next).toBeTruthy();
+    expect(next!.hasAttribute('disabled')).toBe(false);
+
+    next!.click();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await element.updateComplete;
+    expect(queryAll(element, 'tbody tr')).toHaveLength(5);
+  });
+
+  it('shows the exact server count and "Page a of b" without the role filter', async () => {
+    element = await createPaged(members('m1', 50), members('m2', 10), 60);
+    expect(text(element, '.user-count')).toBe('60 users');
+    expect(text(element, '.page-indicator')).toBe('Page 1 of 2');
+    expect(text(element, '.pagination-info')).toBe('Showing 1-50 of 60');
+  });
+});

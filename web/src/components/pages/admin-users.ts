@@ -801,7 +801,7 @@ export class ScionPageAdminUsers extends LitElement {
       if (this.statusFilter !== 'all') {
         params.set('status', this.statusFilter);
       }
-      const roleFilterActive = this.roleFilter !== 'all' && this.statusFilter !== 'invited';
+      const roleFilterActive = this.roleFilterActive;
       if (roleFilterActive) {
         params.set('role', this.roleFilter);
       }
@@ -820,18 +820,17 @@ export class ScionPageAdminUsers extends LitElement {
         totalCount?: number;
       };
       let users: AdminUser[] = Array.isArray(data) ? (data as AdminUser[]) : data.users || [];
-      let totalCount = (data as { totalCount?: number }).totalCount ?? users.length;
       if (roleFilterActive) {
         // The stored role on an invited row is a placeholder, so invited
         // users never belong to a role bucket. The backend only filters by
-        // equality, so drop them here.
-        const kept = users.filter((u) => u.status !== 'invited');
-        totalCount = Math.max(0, totalCount - (users.length - kept.length));
-        users = kept;
+        // equality, so drop them here. The server's totalCount still
+        // includes invited rows, so it is only an upper bound; see
+        // countIsExact. Paging stays cursor-driven.
+        users = users.filter((u) => u.status !== 'invited');
       }
       this.users = users;
       this.nextCursor = (data as { nextCursor?: string }).nextCursor || null;
-      this.totalCount = totalCount;
+      this.totalCount = (data as { totalCount?: number }).totalCount ?? users.length;
     } catch (err) {
       console.error('Failed to load users:', err);
       this.error = err instanceof Error ? err.message : 'Failed to load users';
@@ -1157,6 +1156,32 @@ export class ScionPageAdminUsers extends LitElement {
 
   private sortIndicator(field: SortField): string {
     return this.sortField === field ? (this.sortDir === 'asc' ? '▲' : '▼') : '▲';
+  }
+
+  /** True when the role filter applies to the loaded list (never for Status: Invited). */
+  private get roleFilterActive(): boolean {
+    return this.roleFilter !== 'all' && this.statusFilter !== 'invited';
+  }
+
+  /** True when there is more than one page, judged from the cursors as well as the total. */
+  private get hasMultiplePages(): boolean {
+    return this.totalCount > PAGE_SIZE || this.currentPage > 1 || !!this.nextCursor;
+  }
+
+  /**
+   * Whether the user count can be shown as exact. Under the role filter,
+   * invited rows are dropped client-side, so the server total over-counts
+   * unless the whole result fits on this one page.
+   */
+  private get countIsExact(): boolean {
+    return !this.roleFilterActive || !this.hasMultiplePages;
+  }
+
+  /** Count shown in the toolbar. */
+  private get displayedCount(): string {
+    if (!this.countIsExact) return `up to ${this.totalCount} users`;
+    const n = this.roleFilterActive ? this.users.length : this.totalCount;
+    return `${n} user${n !== 1 ? 's' : ''}`;
   }
 
   private get totalPages(): number {
@@ -1544,13 +1569,13 @@ export class ScionPageAdminUsers extends LitElement {
       `;
     }
 
-    const hasPagination = this.totalCount > PAGE_SIZE;
+    const hasPagination = this.hasMultiplePages;
 
     return html`
       <div class="users-toolbar">
         <div class="users-toolbar-left">
           ${this.renderStatusFilter()} ${this.renderRoleFilter()}
-          <span class="meta-text">${this.totalCount} user${this.totalCount !== 1 ? 's' : ''}</span>
+          <span class="meta-text user-count">${this.displayedCount}</span>
         </div>
         <div class="users-toolbar-right">
           <sl-button
@@ -1581,8 +1606,13 @@ export class ScionPageAdminUsers extends LitElement {
             <div class="empty-state">
               <sl-icon name="people"></sl-icon>
               <h2>No Users Found</h2>
-              <p>No users match the selected filter.</p>
+              <p>
+                ${hasPagination
+                  ? 'No matching users on this page.'
+                  : 'No users match the selected filter.'}
+              </p>
             </div>
+            ${hasPagination ? this.renderPagination() : ''}
           `
         : html`
             <div class="table-container">
@@ -1620,10 +1650,13 @@ export class ScionPageAdminUsers extends LitElement {
   }
 
   private renderPagination() {
+    const exact = this.countIsExact;
     return html`
       <div class="pagination">
         <span class="pagination-info">
-          Showing ${this.rangeStart}-${this.rangeEnd} of ${this.totalCount}
+          ${exact
+            ? `Showing ${this.rangeStart}-${this.rangeEnd} of ${this.totalCount}`
+            : `Showing ${this.users.length} on this page`}
         </span>
         <div class="pagination-controls">
           <sl-button
@@ -1635,7 +1668,11 @@ export class ScionPageAdminUsers extends LitElement {
             <sl-icon slot="prefix" name="chevron-left"></sl-icon>
             Previous
           </sl-button>
-          <span class="page-indicator">Page ${this.currentPage} of ${this.totalPages}</span>
+          <span class="page-indicator"
+            >${exact
+              ? `Page ${this.currentPage} of ${this.totalPages}`
+              : `Page ${this.currentPage}`}</span
+          >
           <sl-button
             size="small"
             variant="default"
