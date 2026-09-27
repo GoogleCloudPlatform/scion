@@ -7,6 +7,7 @@ package telemetry
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	colmetricpb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
@@ -110,19 +111,42 @@ func TestGenericOTLPIdentityStampingCoversEveryPointKind(t *testing.T) {
 // on both the GCP and the generic OTLP path — not deferred to export time,
 // where a single offending point would otherwise poison the whole batch
 // (F3).
+//
+// Each reserved key is tried under its canonical (underscore) spelling and
+// the dotted/dashed variants cloudLabelKey normalizes to the same key
+// (round-3 review N4): the GCP path already rejects those via
+// validateDescriptor's use of cloudLabelKey, and
+// rejectReservedIdentityPointLabel now does the same for the generic path,
+// closing a gap where a producer label like scion.agent.id could otherwise
+// collide with the stamped scion_agent_id after a backend's own
+// dot-to-underscore translation (for example Prometheus/Mimir).
+//
+// N5: the rejection reason must actually name the reserved-key check, not
+// merely be non-nil — a stray extra label would also be rejected on the GCP
+// path (as an unsupported dimension), which would let this test pass even
+// if the reserved-key check itself broke.
 func TestReservedIdentityPointLabelRejectedAtAdmissionBothPaths(t *testing.T) {
+	spellingVariants := func(canonical string) []string {
+		return []string{canonical, strings.ReplaceAll(canonical, "_", "."), strings.ReplaceAll(canonical, "_", "-")}
+	}
 	for _, gcp := range []bool{true, false} {
 		for _, reserved := range identityLabelKeys {
-			t.Run(fmt.Sprintf("gcp=%v/%s", gcp, reserved), func(t *testing.T) {
-				metric := testNumber("agent.tool.calls", metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE, 1, 2, 1,
-					metricStringLabel(reserved, "producer-supplied"))
-				input := testMetricResource("native", "scope", "", "", metric)
-				s := newMetricStreams()
-				s.gcp = gcp
-				if err := s.add([]*metricpb.ResourceMetrics{input}); err == nil {
-					t.Fatalf("producer-supplied %s admitted with gcp=%v, want rejection", reserved, gcp)
-				}
-			})
+			for _, spelling := range spellingVariants(reserved) {
+				t.Run(fmt.Sprintf("gcp=%v/%s", gcp, spelling), func(t *testing.T) {
+					metric := testNumber("agent.tool.calls", metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE, 1, 2, 1,
+						metricStringLabel(spelling, "producer-supplied"))
+					input := testMetricResource("native", "scope", "", "", metric)
+					s := newMetricStreams()
+					s.gcp = gcp
+					err := s.add([]*metricpb.ResourceMetrics{input})
+					if err == nil {
+						t.Fatalf("producer-supplied %s admitted with gcp=%v, want rejection", spelling, gcp)
+					}
+					if !strings.Contains(err.Error(), "reserved") {
+						t.Fatalf("rejection reason = %q, want it to contain %q (a different, unrelated rejection would also make this test pass)", err.Error(), "reserved")
+					}
+				})
+			}
 		}
 	}
 }

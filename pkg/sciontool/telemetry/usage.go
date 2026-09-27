@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"math"
 	"os"
 	"strconv"
@@ -292,14 +293,19 @@ func (d *UsageDeriver) observe(ctx context.Context, scopeName string, record *lo
 		}
 		if err != nil {
 			d.malformed.Add(1)
-			// One malformed event tells the operator everything they need;
+			// Warn, not Error: this is a data-quality degradation (tokens
+			// dropped, the call is still counted), not a failure of
+			// sciontool itself — matching pipeline.go's own slog.Warn calls
+			// for comparable operator-visible degradations. log.Init installs
+			// the package handler as slog.Default (pkg/sciontool/log), so
+			// this lands in the same agent.log sink as everything logged
+			// through the log package, just tagged [WARN] [slog]. One
+			// malformed event tells the operator everything they need;
 			// logging every occurrence would be noisy on a chatty, unpinned
 			// CLI. Never includes the offending value, only the
-			// (fixed-cardinality) event name. Through the package logger
-			// (not slog directly), so it lands in the same sink and format
-			// as every other telemetry log line.
+			// (fixed-cardinality) event name.
 			d.malformedWarnOnce.Do(func() {
-				log.Error("Usage deriver observed a malformed native usage event=%s; its token fields were dropped, the call is still counted", eventName)
+				slog.Warn("usage deriver observed a malformed native usage event; its token fields were dropped, the call is still counted", "event", eventName)
 			})
 		}
 		// A rule that recognizes the event but derives nothing usable from it

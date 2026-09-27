@@ -36,13 +36,23 @@ var identityLabelKeys = []string{gcpAgentLabel, gcpProjectLabel, gcpAgentSlugLab
 // generic OTLP path, which used to defer the check to export time
 // (stampIdentityLabels), too late to fail only the offending request rather
 // than poisoning the whole batch on a retry loop.
+//
+// Compares cloudLabelKey(kv.Key), not kv.Key directly (round-3 review N4):
+// the GCP path normalizes dots and dashes to underscores before comparing,
+// so a producer label spelled scion.agent.id or scion-agent-id is rejected
+// there too. Some generic-OTLP backends (for example a Prometheus/Mimir
+// translation layer) apply the same dot-to-underscore mapping, so without
+// this a producer using the dotted spelling could still collide with the
+// stamped scion_agent_id after translation. Matching the GCP path's
+// normalization here closes that gap for the same spoofing concern.
 func rejectReservedIdentityPointLabel(attrs []*commonpb.KeyValue) error {
 	for _, kv := range attrs {
 		if kv == nil {
 			continue
 		}
+		normalized := cloudLabelKey(kv.Key)
 		for _, reserved := range identityLabelKeys {
-			if kv.Key == reserved {
+			if normalized == reserved {
 				return fmt.Errorf("reserved canonical identity metric label")
 			}
 		}

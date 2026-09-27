@@ -703,15 +703,7 @@ func TestPipelineStopFlushesFinalUsageIncrementQuickly(t *testing.T) {
 	}
 	defer func() { _ = sdkExporter.Shutdown(context.Background()) }()
 
-	cfg := &Config{
-		Enabled: true, CloudProvider: "gcp", GRPCPort: availableTCPPort(t), HTTPPort: 0,
-		// This test's fake exporter only has a metric exporter configured
-		// (below); excluding every real event name keeps the raw Claude log
-		// records from being forwarded (which would otherwise fail with "log
-		// exporter unavailable"). Derivation runs before this filter either
-		// way (AC-1.4, exercised elsewhere), so it doesn't affect this test.
-		Filter: FilterConfig{Include: []string{"nonexistent_event"}},
-	}
+	cfg := &Config{Enabled: true, CloudProvider: "gcp", GRPCPort: availableTCPPort(t), HTTPPort: 0}
 	p := NewWithConfig(cfg)
 	if err := p.Start(context.Background()); err != nil {
 		t.Fatal(err)
@@ -721,26 +713,24 @@ func TestPipelineStopFlushesFinalUsageIncrementQuickly(t *testing.T) {
 	// test in this file does.
 	p.exporter = &CloudExporter{gcpExporter: &GCPExporter{metricExporter: sdkExporter}}
 
-	if deriver := p.usageDeriver.Load(); deriver == nil || len(deriver.rules) == 0 {
+	deriver := p.usageDeriver.Load()
+	if deriver == nil || len(deriver.rules) == 0 {
 		t.Fatal("expected an active claude usage deriver")
 	}
 
-	body, err := proto.Marshal(&collogspb.ExportLogsServiceRequest{ResourceLogs: loadClaudeUsageFixture(t)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	rec := httptest.NewRecorder()
-	p.receiver.handleHTTPLogs(rec, otlpHTTPRequest("/v1/logs", bytes.NewReader(body)))
-	if rec.Code != 200 {
-		t.Fatalf("post fixture status = %d: %s", rec.Code, rec.Body.String())
-	}
-	if diag := p.UsageDiagnostics(); diag.Derived == 0 {
-		t.Fatalf("expected at least one derived increment before Stop, diagnostics = %+v", diag)
-	}
-	// Comfortably clears snapshotGCP's 2ms collector-epoch guard
-	// (metric_streams.go) before Stop's own flush; unrelated to the R-2
-	// property this test pins.
-	time.Sleep(10 * time.Millisecond)
+	// Record directly, rather than posting a log request through the
+	// receiver (round-3 review N2): ProcessResourceLogs does its own
+	// ForceFlush after every matched request, which would let this
+	// increment reach the exporter regardless of whether Stop's own final
+	// flush works at all. Recording without flushing isolates the property
+	// this test exists to pin: the increment must still arrive because
+	// Stop's shutdown does the flush, not because something upstream
+	// already did.
+	deriver.record(context.Background(), usageIncrement{
+		Model:  "claude-sonnet-5",
+		Status: telemetrycontract.StatusSuccess,
+		Calls:  1,
+	})
 
 	stopStart := time.Now()
 	if err := p.Stop(context.Background()); err != nil {
