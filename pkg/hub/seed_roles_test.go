@@ -22,7 +22,9 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -1031,4 +1033,203 @@ func TestR2_EffectiveGrantsProjectMember(t *testing.T) {
 		assert.False(t, decision.Allowed,
 			"project-member should NOT have %s after R2 cleanup", tc.permission)
 	}
+}
+
+// =============================================================================
+// syncHubRoleGrants: hub-level grants follow User.Role (design §5.D)
+// =============================================================================
+
+// hubRoleGrantState is the observable hub-level grant state for a user.
+type hubRoleGrantState struct {
+	InHubMembers      bool
+	HubViewerBindings int
+	SuperAdminBinding int
+}
+
+func observeHubRoleGrants(t *testing.T, s store.Store, userID string) hubRoleGrantState {
+	t.Helper()
+	ctx := context.Background()
+
+	group, err := s.GetGroupBySlug(ctx, "hub-members")
+	require.NoError(t, err)
+	_, err = s.GetGroupMembership(ctx, group.ID, store.GroupMemberTypeUser, userID)
+	inGroup := err == nil
+
+	viewerRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubViewer, store.RoleScopeSystem)
+	require.NoError(t, err)
+	superRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	require.NoError(t, err)
+	st := hubRoleGrantState{InHubMembers: inGroup}
+	for _, b := range bindings {
+		if b.ScopeType != store.RoleScopeSystem {
+			continue
+		}
+		switch b.RoleDefinitionID {
+		case viewerRD.ID:
+			st.HubViewerBindings++
+		case superRD.ID:
+			st.SuperAdminBinding++
+		}
+	}
+	return st
+}
+
+// setupHubRoleGrantState creates a user whose hub-level grants match the
+// given starting role: "none" (no grants), "member" (hub-members group),
+// "viewer" (hub-viewer binding) or "admin" (super-admin binding plus
+// hub-members membership, as for a member who was promoted).
+func setupHubRoleGrantState(t *testing.T, s store.Store, name, from string) *store.User {
+	t.Helper()
+	ctx := context.Background()
+
+	role := from
+	if from == "none" {
+		role = store.UserRoleMember
+	}
+	u := &store.User{
+		ID:          tid(name),
+		Email:       name + "@example.com",
+		DisplayName: name,
+		Role:        role,
+		Status:      store.UserStatusActive,
+	}
+	require.NoError(t, s.CreateUser(ctx, u))
+
+	createBinding := func(roleName string) {
+		rd, err := s.GetRoleDefinitionByName(ctx, roleName, store.RoleScopeSystem)
+		require.NoError(t, err)
+		_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: rd.ID,
+			PrincipalType:    store.RoleBindingPrincipalUser,
+			PrincipalID:      u.ID,
+			ScopeType:        store.RoleScopeSystem,
+			CreatedBy:        store.SystemBackfillCreatedBy,
+		})
+		require.NoError(t, err)
+	}
+
+	switch from {
+	case "none":
+	case store.UserRoleMember:
+		require.NoError(t, ensureHubMembershipTx(ctx, s, u.ID))
+	case store.UserRoleViewer:
+		createBinding(store.SystemRoleHubViewer)
+	case store.UserRoleAdmin:
+		createBinding(store.SystemRoleSuperAdmin)
+		require.NoError(t, ensureHubMembershipTx(ctx, s, u.ID))
+	default:
+		t.Fatalf("unknown starting state %q", from)
+	}
+	return u
+}
+
+func TestSyncHubRoleGrants_Matrix(t *testing.T) {
+	froms := []string{"none", store.UserRoleMember, store.UserRoleViewer, store.UserRoleAdmin}
+	tos := []string{store.UserRoleMember, store.UserRoleViewer, store.UserRoleAdmin}
+
+	for _, from := range froms {
+		for _, to := range tos {
+			t.Run(fmt.Sprintf("%s_to_%s", from, to), func(t *testing.T) {
+				_, s := testServer(t)
+				ctx := context.Background()
+
+				u := setupHubRoleGrantState(t, s, "sync-"+from+"-"+to, from)
+				before := observeHubRoleGrants(t, s, u.ID)
+
+				var want hubRoleGrantState
+				switch to {
+				case store.UserRoleMember:
+					want = hubRoleGrantState{InHubMembers: true, HubViewerBindings: 0}
+				case store.UserRoleViewer:
+					want = hubRoleGrantState{InHubMembers: false, HubViewerBindings: 1}
+				case store.UserRoleAdmin:
+					// hub-members membership is left as-is for admins.
+					want = hubRoleGrantState{InHubMembers: before.InHubMembers, HubViewerBindings: 0}
+				}
+				// The super-admin binding is never touched by the helper.
+				want.SuperAdminBinding = before.SuperAdminBinding
+
+				require.NoError(t, syncHubRoleGrants(ctx, s, u.ID, to, store.AdminAPICreatedBy))
+				assert.Equal(t, want, observeHubRoleGrants(t, s, u.ID), "after first sync")
+
+				// Idempotent: repeated calls converge on the same state.
+				require.NoError(t, syncHubRoleGrants(ctx, s, u.ID, to, store.AdminAPICreatedBy))
+				require.NoError(t, syncHubRoleGrants(ctx, s, u.ID, to, store.SystemReconcileCreatedBy))
+				assert.Equal(t, want, observeHubRoleGrants(t, s, u.ID), "after repeated sync")
+			})
+		}
+	}
+}
+
+func TestSyncHubRoleGrants_ViewerBindingProvenance(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	u := setupHubRoleGrantState(t, s, "sync-provenance", "none")
+	require.NoError(t, syncHubRoleGrants(ctx, s, u.ID, store.UserRoleViewer, store.AdminAPICreatedBy))
+
+	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubViewer, store.RoleScopeSystem)
+	require.NoError(t, err)
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, u.ID)
+	require.NoError(t, err)
+	var found bool
+	for _, b := range bindings {
+		if b.RoleDefinitionID == rd.ID && b.ScopeType == store.RoleScopeSystem {
+			found = true
+			assert.Equal(t, store.AdminAPICreatedBy, b.CreatedBy)
+			assert.Equal(t, "", b.ScopeID)
+		}
+	}
+	assert.True(t, found, "hub-viewer binding should exist")
+}
+
+func TestSyncHubRoleGrants_ViewerReplacesExpiredBinding(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	u := setupHubRoleGrantState(t, s, "sync-expired", "none")
+	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubViewer, store.RoleScopeSystem)
+	require.NoError(t, err)
+	expired := time.Now().Add(-time.Hour)
+	stale, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      u.ID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        store.SystemBackfillCreatedBy,
+		ExpiresAt:        &expired,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, syncHubRoleGrants(ctx, s, u.ID, store.UserRoleViewer, store.AdminAPICreatedBy))
+
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, u.ID)
+	require.NoError(t, err)
+	var active int
+	for _, b := range bindings {
+		if b.RoleDefinitionID != rd.ID || b.ScopeType != store.RoleScopeSystem {
+			continue
+		}
+		assert.NotEqual(t, stale.ID, b.ID, "expired binding should have been replaced")
+		assert.Nil(t, b.ExpiresAt, "replacement binding should be active")
+		active++
+	}
+	assert.Equal(t, 1, active)
+}
+
+func TestSyncHubRoleGrants_UnsupportedRole(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	u := setupHubRoleGrantState(t, s, "sync-bogus", store.UserRoleMember)
+	before := observeHubRoleGrants(t, s, u.ID)
+
+	for _, role := range []string{"", "bogus", "superuser"} {
+		err := syncHubRoleGrants(ctx, s, u.ID, role, store.AdminAPICreatedBy)
+		assert.Error(t, err, "role %q should be rejected", role)
+	}
+	assert.Equal(t, before, observeHubRoleGrants(t, s, u.ID), "unsupported role must not change grants")
 }
