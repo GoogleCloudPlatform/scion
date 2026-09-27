@@ -119,6 +119,15 @@ allowed_paths=(
   # Passthrough gate: checks scion.io/broker-role label on embedded brokers.
   "^pkg/hub/passthrough_gate.go$"
 
+  # Default GCP identity: documents that identity resolution does not trust
+  # the scion.io/broker-role label, since broker labels are writable.
+  "^pkg/hub/default_gcp_identity.go$"
+
+  # --- pkg/brokerownership/ ---
+  # Backfill attribution: defines LabelBrokerRole = "scion.io/broker-role" to
+  # exclude operator-owned (embedded) brokers from CreatedBy attribution.
+  "^pkg/brokerownership/backfill.go$"
+
   # --- deploy/helm/ ---
   # Helm chart templates and values: uses scion.io/hub-id pod annotation for
   # hub identity. Golden test files mirror the rendered output.
