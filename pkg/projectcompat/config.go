@@ -36,7 +36,6 @@ const (
 	EnvHubProjectID = "SCION_HUB_PROJECT_ID"
 
 	ProjectIDFile = "project-id"
-	GroveIDFile   = "grove-id"
 
 	ProjectConfigsDir = "project-configs"
 	GroveConfigsDir   = "grove-configs"

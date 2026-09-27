@@ -39,6 +39,11 @@ var warnRemovedLegacyEnvOnce sync.Once
 // pkg/runtimebroker/server.go:(*Server).Start).
 func warnRemovedLegacyEnv() {
 	warnRemovedLegacyEnvOnce.Do(func() {
+		// Also switch per-project on-disk migration (config.ReadProjectID,
+		// via config.MigrateLegacyProject) from its slog default — right for
+		// hub, runtime broker, and sciontool — to stderr lines, matching
+		// this process's own reporting.
+		config.SetProjectMigrationReporter(stderrReporter{})
 		config.WarnRemovedLegacyEnv(os.Getenv, stderrReporter{})
 	})
 }

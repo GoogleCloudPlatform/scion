@@ -193,7 +193,6 @@ allowed_paths=(
   "^pkg/config/paths.go$"
   "^pkg/config/project_discovery.go$"
   "^pkg/config/project_marker.go$"
-  "^pkg/config/settings.go$"
   "^pkg/config/settings_v1.go$"
   "^pkg/config/shared_dirs.go$"
   "^pkg/hub/events.go$"
