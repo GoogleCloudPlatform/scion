@@ -18,6 +18,8 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,6 +28,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -105,14 +108,92 @@ func loadUsageGoldenFlushes(t *testing.T) [][]*monitoringpb.TimeSeries {
 	return flushes
 }
 
+// canonicalSeriesLabelKey identifies a TimeSeries by its metric type and its
+// full label set (sorted), independent of point order or values. Two
+// captured flushes of the same identity carry identical labels, including
+// scion_metric_point_id (a digest of the point's own label values), so this
+// is exactly "the same series" in GCP's sense — good enough to merge on,
+// without needing to special-case which labels are identity-bearing.
+func canonicalSeriesLabelKey(ts *monitoringpb.TimeSeries) string {
+	labels := ts.GetMetric().GetLabels()
+	keys := make([]string, 0, len(labels))
+	for k := range labels {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	b.WriteString(ts.GetMetric().GetType())
+	for _, k := range keys {
+		b.WriteByte('\x00')
+		b.WriteString(k)
+		b.WriteByte('=')
+		b.WriteString(labels[k])
+	}
+	return b.String()
+}
+
+// mergeUsageGoldenFlushes merges every flush's points into one TimeSeries
+// per identity (O-1, design §7.6): each captured flush is its own
+// CreateTimeSeries wire call — one point each — mirroring what sciontool
+// sends, but a dashboard query reads back one ListTimeSeries response per
+// identity carrying every point across the queried window. Without this
+// merge, the second flush's cumulative point is simply never seen, and a
+// naive sum-of-flush-0-only fixture can't catch a regression that
+// over-counts by re-summing every flush instead of taking deltas.
+func mergeUsageGoldenFlushes(flushes [][]*monitoringpb.TimeSeries) []*monitoringpb.TimeSeries {
+	var order []string
+	merged := map[string]*monitoringpb.TimeSeries{}
+	for _, flush := range flushes {
+		for _, ts := range flush {
+			key := canonicalSeriesLabelKey(ts)
+			existing, ok := merged[key]
+			if !ok {
+				merged[key] = proto.Clone(ts).(*monitoringpb.TimeSeries)
+				order = append(order, key)
+				continue
+			}
+			existing.Points = append(existing.Points, ts.GetPoints()...)
+		}
+	}
+	out := make([]*monitoringpb.TimeSeries, len(order))
+	for i, key := range order {
+		out[i] = merged[key]
+	}
+	return out
+}
+
+// lastPointValue returns the value of ts's point with the latest interval
+// end time — the cumulative total a real Cloud Monitoring series converges
+// to, which seriesIncreases' per-flush deltas must sum back up to.
+func lastPointValue(t *testing.T, ts *monitoringpb.TimeSeries) int64 {
+	t.Helper()
+	require.NotEmpty(t, ts.GetPoints(), "series has no points: %v", ts)
+	latest := ts.GetPoints()[0]
+	for _, p := range ts.GetPoints()[1:] {
+		if p.GetInterval().GetEndTime().AsTime().After(latest.GetInterval().GetEndTime().AsTime()) {
+			latest = p
+		}
+	}
+	return latest.GetValue().GetInt64Value()
+}
+
 // TestDashboardGoldenClaudeUsagePoints pins emitter → dashboard (design
 // §7.6). Unlike a hand-built fixture, every series here is loaded, unedited
-// except for the timestamp shift loadUsageGoldenFlushes applies, from the
-// golden file pkg/sciontool/telemetry's own end-to-end test
+// except for the timestamp shift loadUsageGoldenFlushes applies and the
+// merge mergeUsageGoldenFlushes applies, from the golden file
+// pkg/sciontool/telemetry's own end-to-end test
 // (TestPipelineDerivesClaudeUsageEndToEnd) captured and checked in — so a
 // rename of a metric, a label, or a token_type value on either side shows up
 // as a diff here or a failure there, not as two hand-maintained fixtures that
 // silently drift apart (design §7.6, F7).
+//
+// Both captured flushes are used (O-1), merged into one TimeSeries per
+// identity so each carries both cumulative points the way a real
+// ListTimeSeries response would, not the one-point-per-CreateTimeSeries-call
+// shape sciontool's own export wire format captures them in. The dashboard
+// totals asserted below are each series' *last* cumulative value — what
+// seriesIncreases' per-flush deltas must telescope back up to — not the sum
+// of both flushes' raw points, which would double-count.
 //
 // The fixture's checked-in Interval timestamps are a fixed date near its
 // capture time (see that test's own comment, needed there for a
@@ -124,7 +205,9 @@ func loadUsageGoldenFlushes(t *testing.T) [][]*monitoringpb.TimeSeries {
 // regardless of how long ago the fixture was captured — this test does not
 // go stale.
 func TestDashboardGoldenClaudeUsagePoints(t *testing.T) {
-	series := loadUsageGoldenFlushes(t)[0]
+	flushes := loadUsageGoldenFlushes(t)
+	require.GreaterOrEqual(t, len(flushes), 2, "golden fixture must carry at least two flushes to pin the cumulative shape (design §7.6, O-1)")
+	series := mergeUsageGoldenFlushes(flushes)
 
 	var callsSeries, tokenSeries []*monitoringpb.TimeSeries
 	for _, ts := range series {
@@ -138,6 +221,19 @@ func TestDashboardGoldenClaudeUsagePoints(t *testing.T) {
 	require.Len(t, callsSeries, 2, "golden fixture gen_ai.api.calls series (one success, one error)")
 	require.Len(t, tokenSeries, 3, "golden fixture scion.usage.tokens series (input, output, cache_write; cache_read was 0)")
 
+	// The success-calls and all three token series were re-exported in the
+	// second flush (a genuinely new event, not a duplicate — see the
+	// sciontool test); the error-calls series was not (its request was a
+	// duplicate). Confirms the merge actually merged, rather than every
+	// series accidentally having exactly one point regardless.
+	var multiPointSeries int
+	for _, ts := range series {
+		if len(ts.GetPoints()) > 1 {
+			multiPointSeries++
+		}
+	}
+	require.Equal(t, 4, multiPointSeries, "expected 4 series (success calls + 3 token types) to carry both flushes' points after the merge")
+
 	client := newFakeMetricsClient()
 	svc := newContractTestService(client)
 	svc.projectID = "test-project"
@@ -148,21 +244,26 @@ func TestDashboardGoldenClaudeUsagePoints(t *testing.T) {
 	tokensAllFilter := `metric.type = "` + metricPrefix + telemetrycontract.MetricUsageTokens + `" AND metric.labels.` + telemetrycontract.TokenTypeLabel + ` != "` + telemetrycontract.TokenTypeReasoning + `"`
 	client.seriesByFilter[tokensAllFilter] = tokenSeries
 
-	var wantTotalTokens int64
+	var wantTotalCalls, wantTotalTokens int64
+	for _, ts := range callsSeries {
+		wantTotalCalls += lastPointValue(t, ts)
+	}
+	byTokenType := map[string]int64{}
 	for _, ts := range tokenSeries {
 		tokenType := ts.GetMetric().GetLabels()[telemetrycontract.TokenTypeLabel]
 		require.NotEmpty(t, tokenType, "golden token series missing token_type label: %v", ts)
 		filter := `metric.type = "` + metricPrefix + telemetrycontract.MetricUsageTokens + `" AND metric.labels.` + telemetrycontract.TokenTypeLabel + ` = "` + tokenType + `"`
 		client.seriesByFilter[filter] = []*monitoringpb.TimeSeries{ts}
-		require.NotEmpty(t, ts.Points, "golden token series has no points: %v", ts)
-		wantTotalTokens += ts.Points[0].GetValue().GetInt64Value()
+		last := lastPointValue(t, ts)
+		byTokenType[tokenType] = last
+		wantTotalTokens += last
 	}
 
 	ctx := context.Background()
 	summary, err := svc.QuerySummary(ctx, 7)
 	require.NoError(t, err)
-	assert.Equal(t, int64(len(callsSeries)), summary.TotalAPICalls)
-	assert.Equal(t, wantTotalTokens, summary.TotalTokens)
+	assert.Equal(t, wantTotalCalls, summary.TotalAPICalls, "QuerySummary must sum each series' last cumulative value, not the raw point sum")
+	assert.Equal(t, wantTotalTokens, summary.TotalTokens, "QuerySummary must sum each series' last cumulative value, not the raw point sum")
 
 	model := callsSeries[0].GetMetric().GetLabels()[telemetrycontract.ModelLabel]
 	require.NotEmpty(t, model, "golden calls series missing model label")
@@ -175,7 +276,7 @@ func TestDashboardGoldenClaudeUsagePoints(t *testing.T) {
 	for _, p := range calls.ByModel[0].Points {
 		callsTotal += p.Value
 	}
-	assert.Equal(t, int64(len(callsSeries)), callsTotal)
+	assert.Equal(t, wantTotalCalls, callsTotal, "QueryModelCalls must sum to the last cumulative value, not the raw point sum")
 
 	tokens, err := svc.QueryTokens(ctx, 7)
 	require.NoError(t, err)
@@ -183,13 +284,12 @@ func TestDashboardGoldenClaudeUsagePoints(t *testing.T) {
 	require.Len(t, tokens.Output, 1)
 	require.Empty(t, tokens.CacheRead, "cache_read was never emitted (its value was 0)")
 	require.Len(t, tokens.CacheWrite, 1)
-	byType := map[string]int64{
+	dashboardByType := map[string]int64{
 		telemetrycontract.TokenTypeInput:      tokens.Input[0].Points[0].Value,
 		telemetrycontract.TokenTypeOutput:     tokens.Output[0].Points[0].Value,
 		telemetrycontract.TokenTypeCacheWrite: tokens.CacheWrite[0].Points[0].Value,
 	}
-	for _, ts := range tokenSeries {
-		tokenType := ts.GetMetric().GetLabels()[telemetrycontract.TokenTypeLabel]
-		assert.Equal(t, ts.Points[0].GetValue().GetInt64Value(), byType[tokenType], "dashboard token_type=%s value", tokenType)
+	for tokenType, want := range byTokenType {
+		assert.Equal(t, want, dashboardByType[tokenType], "dashboard token_type=%s value must equal the last cumulative value, not the raw point sum", tokenType)
 	}
 }
