@@ -35,9 +35,9 @@ func TestTemplateStoragePath(t *testing.T) {
 		{
 			name:         "project scope",
 			scope:        "project",
-			scopeID:      "grove-123",
+			scopeID:      "project-123",
 			templateSlug: "my-template",
-			want:         "templates/groves/grove-123/my-template",
+			want:         "templates/groves/project-123/my-template",
 		},
 		{
 			name:         "user scope",
@@ -65,9 +65,9 @@ func TestTemplateStoragePath(t *testing.T) {
 			name:         "hub-scoped project",
 			hubID:        "my-hub",
 			scope:        "project",
-			scopeID:      "grove-123",
+			scopeID:      "project-123",
 			templateSlug: "my-template",
-			want:         "hubs/my-hub/templates/groves/grove-123/my-template",
+			want:         "hubs/my-hub/templates/groves/project-123/my-template",
 		},
 	}
 
@@ -83,14 +83,14 @@ func TestTemplateStoragePath(t *testing.T) {
 
 func TestTemplateStorageURI(t *testing.T) {
 	bucket := "my-bucket"
-	uri := TemplateStorageURI("", bucket, "project", "grove-123", "my-template")
-	want := "gs://my-bucket/templates/groves/grove-123/my-template/"
+	uri := TemplateStorageURI("", bucket, "project", "project-123", "my-template")
+	want := "gs://my-bucket/templates/groves/project-123/my-template/"
 	if uri != want {
 		t.Errorf("TemplateStorageURI() = %q, want %q", uri, want)
 	}
 
-	uri = TemplateStorageURI("my-hub", bucket, "project", "grove-123", "my-template")
-	want = "gs://my-bucket/hubs/my-hub/templates/groves/grove-123/my-template/"
+	uri = TemplateStorageURI("my-hub", bucket, "project", "project-123", "my-template")
+	want = "gs://my-bucket/hubs/my-hub/templates/groves/project-123/my-template/"
 	if uri != want {
 		t.Errorf("TemplateStorageURI(hub-scoped) = %q, want %q", uri, want)
 	}
@@ -175,22 +175,22 @@ func TestWorkspaceStoragePath(t *testing.T) {
 	}{
 		{
 			name:      "basic path",
-			projectID: "grove-abc",
+			projectID: "project-abc",
 			agentID:   "agent-123",
-			want:      "workspaces/grove-abc/agent-123",
+			want:      "workspaces/project-abc/agent-123",
 		},
 		{
 			name:      "with special characters in IDs",
-			projectID: "grove_xyz",
+			projectID: "project_xyz",
 			agentID:   "agent_456",
-			want:      "workspaces/grove_xyz/agent_456",
+			want:      "workspaces/project_xyz/agent_456",
 		},
 		{
 			name:      "hub-scoped path",
 			hubID:     "my-hub",
-			projectID: "grove-abc",
+			projectID: "project-abc",
 			agentID:   "agent-123",
-			want:      "hubs/my-hub/workspaces/grove-abc/agent-123",
+			want:      "hubs/my-hub/workspaces/project-abc/agent-123",
 		},
 	}
 
@@ -216,24 +216,24 @@ func TestWorkspaceStorageURI(t *testing.T) {
 		{
 			name:      "basic URI",
 			bucket:    "scion-hub-dev",
-			projectID: "grove-abc",
+			projectID: "project-abc",
 			agentID:   "agent-123",
-			want:      "gs://scion-hub-dev/workspaces/grove-abc/agent-123/",
+			want:      "gs://scion-hub-dev/workspaces/project-abc/agent-123/",
 		},
 		{
 			name:      "production bucket",
 			bucket:    "scion-hub-prod",
-			projectID: "grove-xyz",
+			projectID: "project-xyz",
 			agentID:   "agent-456",
-			want:      "gs://scion-hub-prod/workspaces/grove-xyz/agent-456/",
+			want:      "gs://scion-hub-prod/workspaces/project-xyz/agent-456/",
 		},
 		{
 			name:      "hub-scoped URI",
 			hubID:     "my-hub",
 			bucket:    "scion-hub-dev",
-			projectID: "grove-abc",
+			projectID: "project-abc",
 			agentID:   "agent-123",
-			want:      "gs://scion-hub-dev/hubs/my-hub/workspaces/grove-abc/agent-123/",
+			want:      "gs://scion-hub-dev/hubs/my-hub/workspaces/project-abc/agent-123/",
 		},
 	}
 
@@ -255,20 +255,20 @@ func TestProjectWorkspaceStoragePath(t *testing.T) {
 		want      string
 	}{
 		{
-			name:      "basic grove path",
-			projectID: "grove-abc",
-			want:      "workspaces/grove-abc/grove-workspace",
+			name:      "basic project path",
+			projectID: "project-abc",
+			want:      "workspaces/project-abc/grove-workspace",
 		},
 		{
-			name:      "with UUID grove ID",
+			name:      "with UUID project ID",
 			projectID: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
 			want:      "workspaces/a1b2c3d4-e5f6-7890-abcd-ef1234567890/grove-workspace",
 		},
 		{
-			name:      "hub-scoped grove path",
+			name:      "hub-scoped project path",
 			hubID:     "my-hub",
-			projectID: "grove-abc",
-			want:      "hubs/my-hub/workspaces/grove-abc/grove-workspace",
+			projectID: "project-abc",
+			want:      "hubs/my-hub/workspaces/project-abc/grove-workspace",
 		},
 	}
 

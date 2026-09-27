@@ -163,7 +163,6 @@ allowed_paths=(
   "^pkg/sciontool/hooks/handlers/status_test.go$"
   "^pkg/sciontool/telemetry/aggregator_test.go$"
   "^pkg/secret/gcpbackend_test.go$"
-  "^pkg/secret/localbackend_test.go$"
   "^pkg/storage/storage_test.go$"
   "^pkg/store/entadapter/agent_session_metrics_projectid_test.go$"
   # Seeds scope='grove' rows with raw SQL to prove the data migration in
