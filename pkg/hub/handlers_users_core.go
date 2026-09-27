@@ -423,6 +423,13 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 		writeError(w, http.StatusConflict, ErrCodeConflict, errRoleOnInvitedUser.Error(), nil)
 		return
 	}
+	// Likewise, activating an invited user directly would leave the placeholder
+	// role in place and skip the invited->active branch at first sign-in, so
+	// the hub default would never be applied. Suspending remains allowed.
+	if activatesInvitedUser(updates.Status, user.Status) {
+		writeError(w, http.StatusConflict, ErrCodeConflict, errActivateInvitedUser.Error(), nil)
+		return
+	}
 
 	// ── Execute ALL mutations in a single atomic transaction (R4-C1) ──
 
@@ -444,6 +451,9 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 		// Re-check the invited guard against the transactional read.
 		if needsPromote && beforeStatus == store.UserStatusInvited {
 			return errRoleOnInvitedUser
+		}
+		if activatesInvitedUser(updates.Status, beforeStatus) {
+			return errActivateInvitedUser
 		}
 
 		// Role transition: derives classification from canonical binding state
@@ -533,7 +543,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 	})
 
 	if err != nil {
-		if errors.Is(err, errLastSuperAdmin) || errors.Is(err, errSelfDemotion) || errors.Is(err, errRoleOnInvitedUser) {
+		if errors.Is(err, errLastSuperAdmin) || errors.Is(err, errSelfDemotion) || errors.Is(err, errRoleOnInvitedUser) || errors.Is(err, errActivateInvitedUser) {
 			writeError(w, http.StatusConflict, ErrCodeConflict, err.Error(), nil)
 		} else if errors.Is(err, errBindingStateDrift) {
 			writeError(w, http.StatusConflict, "binding_state_drift", err.Error(), nil)
@@ -680,6 +690,16 @@ var errSelfDemotion = errors.New("cannot demote yourself; ask another admin to c
 
 // errRoleOnInvitedUser is returned when PATCH sets a role on an invited user.
 var errRoleOnInvitedUser = errors.New("role is assigned when the user first signs in")
+
+// errActivateInvitedUser is returned when PATCH sets status=active on an
+// invited user.
+var errActivateInvitedUser = errors.New("invited users are activated at first sign-in")
+
+// activatesInvitedUser reports whether a PATCH status would move an invited
+// user straight to active, bypassing first sign-in.
+func activatesInvitedUser(newStatus *string, currentStatus string) bool {
+	return newStatus != nil && *newStatus == "active" && currentStatus == store.UserStatusInvited
+}
 
 // bindingMutationKind describes what happened to super-admin bindings during
 // a role transition. Used for truthful audit records even when User.Role

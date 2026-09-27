@@ -3001,3 +3001,63 @@ func TestUpdateUser_RoleOnInvitedUserNonAdminDenied(t *testing.T) {
 		map[string]string{"role": "viewer"})
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 }
+
+// TestUpdateUser_ActivateInvitedUserConflict verifies PATCH status=active on
+// an invited user returns 409: activation happens at first sign-in, where the
+// hub default role is applied. The user and its grants are left untouched.
+func TestUpdateUser_ActivateInvitedUserConflict(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	user := createInvitedUser(t, s, "activate")
+
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user.ID,
+		map[string]string{"status": "active"})
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "invited users are activated at first sign-in")
+
+	got, err := s.GetUser(ctx, user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.UserStatusInvited, got.Status)
+	assert.Equal(t, store.UserRoleMember, got.Role)
+	grants := observeHubRoleGrants(t, s, user.ID)
+	assert.False(t, grants.InHubMembers)
+	assert.Equal(t, 0, grants.HubViewerBindings)
+}
+
+// TestUpdateUser_ActivateInvitedUserNonAdminDenied verifies authorization
+// runs before the activation guard: without user.suspend the caller gets 403.
+func TestUpdateUser_ActivateInvitedUserNonAdminDenied(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	user := createInvitedUser(t, s, "activate-nonadmin")
+
+	actor := &store.User{
+		ID:          tid("invited-activate-actor"),
+		Email:       "invitedactivateactor@example.com",
+		DisplayName: "Plain Member",
+		Role:        "member",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, actor))
+
+	rec := doRequestAsUser(t, srv, actor, http.MethodPatch, "/api/v1/users/"+user.ID,
+		map[string]string{"status": "active"})
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+}
+
+// TestUpdateUser_ActivateInvitedUserWithMetadataConflict verifies a PATCH
+// that combines status=active with profile fields is rejected as a whole.
+func TestUpdateUser_ActivateInvitedUserWithMetadataConflict(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	user := createInvitedUser(t, s, "activate-mixed")
+
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user.ID,
+		map[string]string{"status": "active", "displayName": "Renamed"})
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+
+	got, err := s.GetUser(ctx, user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.UserStatusInvited, got.Status)
+	assert.Equal(t, "Invited activate-mixed", got.DisplayName)
+}
