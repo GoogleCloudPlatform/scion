@@ -2809,8 +2809,9 @@ func (s *Server) cancelScheduledEventsForAgent(ctx context.Context, agent *store
 	}
 }
 
-// eventTargetsAgent checks whether a scheduled event's payload targets the
-// given agent by matching agent ID or name/slug.
+// eventTargetsAgent reports whether a scheduled event's payload targets
+// agent, by ID or Slug only. Name is a mutable display field, not an
+// identifier, so it must not be used to select an agent's scheduled events.
 func eventTargetsAgent(evt store.ScheduledEvent, agent *store.Agent) bool {
 	var payload struct {
 		AgentID   string `json:"agentId"`
@@ -2822,7 +2823,7 @@ func eventTargetsAgent(evt store.ScheduledEvent, agent *store.Agent) bool {
 	if payload.AgentID != "" && payload.AgentID == agent.ID {
 		return true
 	}
-	if payload.AgentName != "" && (payload.AgentName == agent.Name || payload.AgentName == agent.Slug) {
+	if payload.AgentName != "" && payload.AgentName == agent.Slug {
 		return true
 	}
 	return false

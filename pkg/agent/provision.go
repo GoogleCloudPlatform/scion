@@ -40,6 +40,20 @@ import (
 )
 
 func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (bool, error) {
+	// Every path built below joins agentName onto some directory -- the
+	// project's agents dir, the global agents dir, the external per-agent
+	// state dir, or the shared worktree base -- so an unvalidated name could
+	// otherwise resolve outside all of them (e.g. "../sibling"). Containment
+	// under checkAgentDirContained is invariant of which root and
+	// sharedWorkspace value is passed: a name it accepts is a direct,
+	// single-element child of every root; a name it rejects escapes every
+	// root the same way. Validating once here, before any of the joins or
+	// filesystem operations below, is therefore sufficient to guard every
+	// branch regardless of which directory ends up being touched.
+	if _, err := checkAgentDirContained(projectPath, agentName, false); err != nil {
+		return false, fmt.Errorf("delete: %w", err)
+	}
+
 	var agentsDirs []string
 	branchDeleted := false
 	var repoRoot string
@@ -587,6 +601,53 @@ func resolveWorkspaceSubdir(projectRoot, subdir string) (string, error) {
 	return realJoined, nil
 }
 
+// checkAgentDirContained computes the on-disk directory for agentName under
+// projectDir exactly as config.GetAgentDir does, and confirms the result is
+// still a direct child of the same root config.SelectAgentsRoot selected --
+// the external agents dir when sharedWorkspace is true and one is
+// configured, else <projectDir>/agents (GetAgentDir is defined in terms of
+// SelectAgentsRoot, so the two roots can never drift apart).
+//
+// Both ProvisionAgent and GetAgent call this immediately after resolving
+// agentName into a directory, before either one creates, removes, or
+// otherwise acts on it: ProvisionAgent's git-clone and worktree branches
+// clear an existing workspace under agentDir, and GetAgent's stale-
+// directory branch removes agentDir outright. agentName is expected to be a
+// single path element by the time it reaches either function (see
+// runtimebroker's isSingleCleanPathElement, the other half of this
+// defense-in-depth pair), but neither caller is guaranteed to have gone
+// through that check -- Reprovision calls ProvisionAgent directly, not
+// through GetAgent -- so this fails closed on its own rather than trust the
+// caller.
+func checkAgentDirContained(projectDir, agentName string, sharedWorkspace bool) (string, error) {
+	agentDir := config.GetAgentDir(projectDir, agentName, sharedWorkspace)
+	agentsRoot := filepath.Clean(config.SelectAgentsRoot(projectDir, sharedWorkspace))
+	cleanAgentDir := filepath.Clean(agentDir)
+	// Both conditions matter: Dir(...) != root catches a name that is
+	// outside the root entirely (e.g. "../sibling"); Base(...) != agentName
+	// catches a name that cleans down to a direct child of the root but
+	// isn't the single path element it claims to be (e.g. "x/../y" cleans
+	// to <root>/y, a direct child, even though agentName itself is not
+	// "y"). The broker's isSingleCleanPathElement enforces the same
+	// single-element rule at the request boundary; this enforces it again
+	// here, independently, for every caller.
+	if filepath.Dir(cleanAgentDir) != agentsRoot || filepath.Base(cleanAgentDir) != agentName {
+		return "", fmt.Errorf("agent %q is not a single path element under %s", agentName, agentsRoot)
+	}
+	return agentDir, nil
+}
+
+// CheckAgentDirContained is the exported form of checkAgentDirContained, for
+// callers outside this package that resolve an agent directory from a
+// request-supplied name and need to verify containment before their own file
+// operations -- e.g. runtimebroker's deleteAgent and startAgent handlers,
+// which run this alongside their own isSingleCleanPathElement check at the
+// request boundary, the same defense-in-depth pairing ProvisionAgent and
+// GetAgent already use within this package.
+func CheckAgentDirContained(projectDir, agentName string, sharedWorkspace bool) (string, error) {
+	return checkAgentDirContained(projectDir, agentName, sharedWorkspace)
+}
+
 func ProvisionAgent(ctx context.Context, agentName string, templateName string, agentImage string, harnessConfig string, projectPath string, profileName string, optionalStatus string, branch string, workspace string, inlineConfig ...*api.ScionConfig) (string, string, *api.ScionConfig, error) {
 	provisionStart := time.Now()
 	// 1. Prepare agent directories
@@ -630,7 +691,10 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 	}
 	sharedWorkspace := api.IsSharedWorkspaceFromContext(ctx)
-	agentDir := config.GetAgentDir(projectDir, agentName, sharedWorkspace)
+	agentDir, err := checkAgentDirContained(projectDir, agentName, sharedWorkspace)
+	if err != nil {
+		return "", "", nil, err
+	}
 	agentHome := config.GetAgentHomePath(projectDir, agentName)
 	// In worktree mode the workspace lives under agentDir so git's relative
 	// worktree pointers resolve correctly. In shared-workspace mode there is
@@ -1884,7 +1948,11 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 		agentName, templateName, harnessConfig, projectPath, projectDir)
 
 	sharedWorkspace := api.IsSharedWorkspaceFromContext(ctx)
-	agentDir := config.GetAgentDir(projectDir, agentName, sharedWorkspace)
+	agentDir, err := checkAgentDirContained(projectDir, agentName, sharedWorkspace)
+	if err != nil {
+		return "", "", "", nil, err
+	}
+
 	agentHome := config.GetAgentHomePath(projectDir, agentName)
 	var agentWorkspace string
 	if !sharedWorkspace {

@@ -288,6 +288,24 @@ func GetAgentHomePath(projectDir, agentName string) string {
 	return filepath.Join(projectDir, "agents", agentName, "home")
 }
 
+// SelectAgentsRoot returns the directory GetAgentDir addresses a given
+// agent's directory under, for the same (projectDir, sharedWorkspace)
+// inputs: the external agents directory when sharedWorkspace is true and one
+// is configured, otherwise <projectDir>/agents. GetAgentDir is defined in
+// terms of this function so the two can never select different roots; a
+// caller that needs to confirm a computed agent directory is still under
+// the intended root (for example, before a directory removal) should
+// recompute the root with this function rather than assuming
+// <projectDir>/agents.
+func SelectAgentsRoot(projectDir string, sharedWorkspace bool) string {
+	if sharedWorkspace {
+		if externalDir, err := GetGitProjectExternalAgentsDir(projectDir); err == nil && externalDir != "" {
+			return externalDir
+		}
+	}
+	return filepath.Join(projectDir, "agents")
+}
+
 // GetAgentDir returns the broker-side directory for an agent's per-agent state
 // files (prompt.md, scion-agent.json, and — in worktree mode — the workspace
 // subdir).
@@ -303,12 +321,7 @@ func GetAgentHomePath(projectDir, agentName string) string {
 // <projectDir>/agents/<name>/ — preserving the worktree-relative layout that
 // git's worktree pointers depend on.
 func GetAgentDir(projectDir, agentName string, sharedWorkspace bool) string {
-	if sharedWorkspace {
-		if externalDir, err := GetGitProjectExternalAgentsDir(projectDir); err == nil && externalDir != "" {
-			return filepath.Join(externalDir, agentName)
-		}
-	}
-	return filepath.Join(projectDir, "agents", agentName)
+	return filepath.Join(SelectAgentsRoot(projectDir, sharedWorkspace), agentName)
 }
 
 // ResolveAgentDir returns the broker-side per-agent state directory when the
