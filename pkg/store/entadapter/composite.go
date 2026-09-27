@@ -21,8 +21,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	entsql "entgo.io/ent/dialect/sql"
+	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
@@ -246,6 +248,133 @@ func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 		return err
 	}
 	return c.ProjectStore.DeleteProject(ctx, id)
+}
+
+// purgeDeletedAgentsBatchSize caps how many agent IDs a single purge
+// statement's IN(...) clause covers, so a large purge-eligible set is
+// processed in bounded chunks rather than one unbounded IN(...) list. A var,
+// not a const, so a test can force multi-batch behavior with a small
+// purge-eligible set instead of needing hundreds of rows to exercise it.
+var purgeDeletedAgentsBatchSize = 500
+
+// purgeDeletedAgentsTestHook, when non-nil, is invoked by PurgeDeletedAgents
+// once per batch, after the candidate IDs for that batch are resolved but
+// before they are deleted, and is passed the same in-flight transaction the
+// purge itself is using. It exists so a test can deterministically write a
+// restore into the exact window the eligibility-predicate re-check on the
+// delete itself (below) must close. That window is a Postgres-specific
+// concern: under READ COMMITTED, a separate connection's restore can commit
+// after this purge's candidate query but before its delete, so the delete
+// must re-check the predicate itself rather than trust the candidate list.
+// SQLite has no such window in this codebase's production configuration --
+// applyDatabasePoolDefaults forces MaxOpenConns to 1 for a sqlite driver
+// (pkg/config/hub_config.go; load-bearing there for the same reason it is
+// here), so no second, independent connection -- let alone transaction --
+// can exist at the same time as this one to interleave with it. This hook
+// writes through the purge's own transaction instead of a second, genuinely
+// concurrent one for exactly that reason: on this package's
+// single-connection SQLite test setup, a second connection attempting to
+// write while this transaction is still open would deadlock against it, not
+// race it. A write made through the given tx is visible to
+// every statement the purge issues afterward on that same tx, which is what
+// a Postgres restore's write would also be, once committed, to a subsequent
+// statement in this transaction under READ COMMITTED. Always nil in
+// production.
+var purgeDeletedAgentsTestHook func(tx *ent.Tx, batchCandidateIDs []uuid.UUID)
+
+// PurgeDeletedAgents permanently removes soft-deleted agents older than
+// cutoff, and their identity-key rows, in one transaction. This overrides
+// the embedded AgentStore's implementation, which bulk-deletes agent rows
+// directly with no re-applied eligibility check and no transaction --
+// splitting the original single-predicate DELETE into a separate select and
+// delete reopened a window where an agent restored in between the two would
+// be hard-deleted anyway, taking its keys with it. That is closed here two
+// ways: the whole purge runs in one transaction, and the eligibility
+// predicate (deleted_at IS NOT NULL AND deleted_at < cutoff) is re-applied
+// directly on the agent delete itself, not just the initial candidate query
+// -- a candidate restored in between no longer matches it at delete time and
+// is excluded, regardless of how stale the candidate list has become.
+// Because a bulk delete reports only a count, not which rows it removed,
+// identity keys are freed only for the subset of candidates that no longer
+// exist afterward (a diff against which of them survived), never for one the
+// predicate excluded.
+//
+// agent_identity_keys has no DB-level FK to agents (see
+// agent_identity_key.go), so this cascade must be explicit, the same as
+// DeleteAgent and DeleteProject, or a purged agent's keys -- including its
+// own slug -- stay reserved forever, blocking any later agent from taking
+// them.
+func (c *CompositeStore) PurgeDeletedAgents(ctx context.Context, cutoff time.Time) (int, error) {
+	tx, err := c.client.Tx(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	candidateIDs, err := tx.Agent.Query().
+		Where(agent.DeletedAtNotNil(), agent.DeletedAtLT(cutoff)).
+		IDs(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	var totalDeleted int
+	for _, batch := range chunkUUIDs(candidateIDs, purgeDeletedAgentsBatchSize) {
+		if purgeDeletedAgentsTestHook != nil {
+			purgeDeletedAgentsTestHook(tx, batch)
+		}
+
+		deleted, err := tx.Agent.Delete().
+			Where(agent.IDIn(batch...), agent.DeletedAtNotNil(), agent.DeletedAtLT(cutoff)).
+			Exec(ctx)
+		if err != nil {
+			return 0, err
+		}
+		totalDeleted += deleted
+
+		survivorIDs, err := tx.Agent.Query().Where(agent.IDIn(batch...)).IDs(ctx)
+		if err != nil {
+			return 0, err
+		}
+		survived := make(map[uuid.UUID]bool, len(survivorIDs))
+		for _, id := range survivorIDs {
+			survived[id] = true
+		}
+		removedIDs := make([]uuid.UUID, 0, len(batch)-len(survivorIDs))
+		for _, id := range batch {
+			if !survived[id] {
+				removedIDs = append(removedIDs, id)
+			}
+		}
+		if len(removedIDs) > 0 {
+			if _, err := tx.AgentIdentityKey.Delete().
+				Where(agentidentitykey.AgentIDIn(removedIDs...)).Exec(ctx); err != nil {
+				return 0, err
+			}
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return totalDeleted, nil
+}
+
+// chunkUUIDs splits ids into slices of at most size, preserving order. A nil
+// or empty ids yields no chunks, so a range over the result is a no-op.
+func chunkUUIDs(ids []uuid.UUID, size int) [][]uuid.UUID {
+	if len(ids) == 0 {
+		return nil
+	}
+	chunks := make([][]uuid.UUID, 0, (len(ids)+size-1)/size)
+	for i := 0; i < len(ids); i += size {
+		end := i + size
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunks = append(chunks, ids[i:end])
+	}
+	return chunks
 }
 
 // Close closes the underlying Ent client.

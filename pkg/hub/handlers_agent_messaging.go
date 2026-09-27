@@ -1205,7 +1205,38 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 	agent.DeletedAt = time.Time{}
 	agent.Updated = time.Now()
 
-	if err := s.store.UpdateAgent(ctx, agent); err != nil {
+	// Identity-key rows persist through soft-delete (only a hard delete or
+	// purge frees them -- see composite.go's DeleteAgent/DeleteProject/
+	// PurgeDeletedAgents), so restoring an agent should normally find its own
+	// keys already reserved and in place. But an agent soft-deleted before
+	// this invariant existed, or before a backfill of it, may have no key
+	// rows at all, leaving a window where another agent could since have
+	// taken its slug or display-name key. Re-asserting the keys in the same
+	// transaction as the restore turns that window into a defensive
+	// revalidation: a genuine collision surfaces as the same
+	// store.ErrIdentityKeyConflict (409) a create or rename would get, rather
+	// than silently restoring an agent whose key now belongs to someone else.
+	// The slug key is always non-empty (Slug itself can never Slugify to "",
+	// or the agent could never have been created). The display-name key can
+	// be empty on a legacy row whose Name predates api.ValidateDisplayName --
+	// which rejects an empty key today, but never retroactively validated
+	// what a pre-existing Name already held. agent_identity_keys.key has a
+	// NotEmpty schema validator, so appending an empty key here would turn
+	// every future restore of that agent into a permanent failure. Skip it:
+	// legacy tolerance for an empty display-name key on restore. Any future
+	// backfill of pre-existing agents must apply this same rule -- always
+	// write the slug key, skip an empty display-name key -- to stay
+	// consistent with what restore already does.
+	keys := []string{agent.Slug}
+	if nameKey := api.Slugify(agent.Name); nameKey != "" && nameKey != agent.Slug {
+		keys = append(keys, nameKey)
+	}
+	if err := s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := tx.UpdateAgent(ctx, agent); err != nil {
+			return err
+		}
+		return tx.ReplaceAgentIdentityKeys(ctx, agent.ID, agent.ProjectID, keys)
+	}); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
