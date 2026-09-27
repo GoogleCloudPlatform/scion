@@ -588,11 +588,11 @@ func TestFindTemplateInProjectPath(t *testing.T) {
 	})
 }
 
-func TestFindTemplateInProjectPath_GitGroveInRepoTemplates(t *testing.T) {
+func TestFindTemplateInProjectPath_GitProjectInRepoTemplates(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
-	// Simulate a git project: in-repo .scion/ with grove-id and templates/ in-repo.
+	// Simulate a git project: in-repo .scion/ with project-id and templates/ in-repo.
 	// Templates live in-repo so they can be committed to the repository.
 	projectDir := filepath.Join(t.TempDir(), "my-git-project", ".scion")
 	_ = os.MkdirAll(projectDir, 0755)

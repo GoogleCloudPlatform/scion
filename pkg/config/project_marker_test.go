@@ -309,7 +309,7 @@ func TestReadProjectID_NotExist(t *testing.T) {
 	tmpDir := t.TempDir()
 	_, err := ReadProjectID(tmpDir)
 	if err == nil {
-		t.Fatal("expected error for missing grove-id")
+		t.Fatal("expected error for missing project-id")
 	}
 	if !os.IsNotExist(err) {
 		t.Errorf("expected os.IsNotExist error, got: %v", err)
@@ -347,7 +347,7 @@ func TestGetGitProjectExternalConfigDir_NoProjectID(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if got != "" {
-		t.Errorf("expected empty string for missing grove-id, got %q", got)
+		t.Errorf("expected empty string for missing project-id, got %q", got)
 	}
 }
 
@@ -355,7 +355,7 @@ func TestGetGitProjectExternalAgentsDir(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
-	// Create a simulated git project .scion dir with grove-id
+	// Create a simulated git project .scion dir with project-id
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
 	_ = os.MkdirAll(projectDir, 0755)
 	_ = WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
@@ -375,7 +375,7 @@ func TestGetGitProjectExternalAgentsDir_NoProjectID(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
-	// Create a .scion dir without grove-id
+	// Create a .scion dir without project-id
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
 	_ = os.MkdirAll(projectDir, 0755)
 
@@ -384,7 +384,7 @@ func TestGetGitProjectExternalAgentsDir_NoProjectID(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if got != "" {
-		t.Errorf("expected empty string for missing grove-id, got %q", got)
+		t.Errorf("expected empty string for missing project-id, got %q", got)
 	}
 }
 
@@ -392,7 +392,7 @@ func TestGetAgentHomePath_GitProjectSplitStorage(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
-	// Create a git project with grove-id (split storage)
+	// Create a git project with project-id (split storage)
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
 	_ = os.MkdirAll(projectDir, 0755)
 	_ = WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
@@ -408,7 +408,7 @@ func TestGetAgentHomePath_NoProjectID(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
-	// Create a .scion dir without grove-id (fallback to in-repo)
+	// Create a .scion dir without project-id (fallback to in-repo)
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
 	_ = os.MkdirAll(projectDir, 0755)
 
@@ -423,7 +423,7 @@ func TestGetAgentDir_SharedWorkspaceUsesExternal(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
-	// Git project with grove-id (split storage)
+	// Git project with project-id (split storage)
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
 	_ = os.MkdirAll(projectDir, 0755)
 	_ = WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
@@ -439,7 +439,7 @@ func TestGetAgentDir_WorktreeModeStaysInProject(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
-	// Git project with grove-id (split storage), but caller is NOT shared-workspace
+	// Git project with project-id (split storage), but caller is NOT shared-workspace
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
 	_ = os.MkdirAll(projectDir, 0755)
 	_ = WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
@@ -455,14 +455,14 @@ func TestGetAgentDir_SharedWorkspaceWithoutProjectIDFallsBack(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
-	// .scion dir without grove-id — split storage not initialized
+	// .scion dir without project-id — split storage not initialized
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
 	_ = os.MkdirAll(projectDir, 0755)
 
 	got := GetAgentDir(projectDir, "test-agent", true)
 	want := filepath.Join(projectDir, "agents", "test-agent")
 	if got != want {
-		t.Errorf("GetAgentDir(sharedWorkspace=true, no grove-id) = %q, want %q", got, want)
+		t.Errorf("GetAgentDir(sharedWorkspace=true, no project-id) = %q, want %q", got, want)
 	}
 }
 
@@ -549,7 +549,7 @@ func TestWriteWorkspaceMarker(t *testing.T) {
 	workspaceDir := filepath.Join(tmpDir, "workspace")
 	_ = os.MkdirAll(workspaceDir, 0755)
 
-	err := WriteWorkspaceMarker(workspaceDir, "grove-id-123", "my-project", "my-project")
+	err := WriteWorkspaceMarker(workspaceDir, "project-id-123", "my-project", "my-project")
 	if err != nil {
 		t.Fatalf("WriteWorkspaceMarker failed: %v", err)
 	}
@@ -561,8 +561,8 @@ func TestWriteWorkspaceMarker(t *testing.T) {
 		t.Fatalf("ReadProjectMarker failed: %v", err)
 	}
 
-	if marker.ProjectID != "grove-id-123" {
-		t.Errorf("ProjectID = %q, want %q", marker.ProjectID, "grove-id-123")
+	if marker.ProjectID != "project-id-123" {
+		t.Errorf("ProjectID = %q, want %q", marker.ProjectID, "project-id-123")
 	}
 	if marker.ProjectName != "my-project" {
 		t.Errorf("ProjectName = %q, want %q", marker.ProjectName, "my-project")
@@ -575,16 +575,16 @@ func TestWriteWorkspaceMarker(t *testing.T) {
 func TestWriteWorkspaceMarker_MissingRequiredFields(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	// Missing grove-id
+	// Missing project-id
 	err := WriteWorkspaceMarker(tmpDir, "", "name", "slug")
 	if err == nil {
-		t.Error("expected error when grove-id is empty")
+		t.Error("expected error when project-id is empty")
 	}
 
-	// Missing grove-slug
+	// Missing project-slug
 	err = WriteWorkspaceMarker(tmpDir, "id", "name", "")
 	if err == nil {
-		t.Error("expected error when grove-slug is empty")
+		t.Error("expected error when project-slug is empty")
 	}
 }
 

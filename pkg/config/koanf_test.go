@@ -353,9 +353,9 @@ func TestLoadSettingsKoanfV1ProjectIDHubWinsOverTopLevel(t *testing.T) {
 	}
 
 	// Create a settings file with both top-level grove_id and hub.grove_id.
-	// hub.grove_id is the canonical v1 location and should always take
+	// hub.grove_id (the legacy v1 hub key, migrated to hub.project_id) should always take
 	// precedence — this is critical for the merge scenario where global
-	// sets top-level grove_id and the grove sets hub.grove_id.
+	// sets top-level grove_id and the project sets hub.grove_id.
 	legacySettings := `grove_id: "top-level-id"
 hub:
   enabled: true
@@ -370,7 +370,7 @@ hub:
 		t.Fatalf("LoadSettingsKoanf failed: %v", err)
 	}
 
-	// hub.grove_id (canonical v1 location) should win
+	// hub.grove_id (legacy v1 hub key) should win
 	if s.ProjectID != "hub-level-id" {
 		t.Errorf("expected ProjectID 'hub-level-id' (from hub.grove_id), got '%s'", s.ProjectID)
 	}
@@ -599,7 +599,7 @@ func TestLoadSettingsKoanfWithJSONFallback(t *testing.T) {
 	}
 }
 
-// TestV1ProjectIDSurvivesUpdateSetting verifies that grove_id written by
+// TestV1ProjectIDSurvivesUpdateSetting verifies that a project ID written by
 // writeProjectSettings in v1 format survives UpdateVersionedSetting round-trips.
 // This is a regression test for the bug where grove_id was written at the
 // top level (which VersionedSettings drops on unmarshal), then the first
@@ -632,7 +632,7 @@ hub:
 	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(globalSettings), 0644))
 
 	// Simulate writeProjectSettings: create a v1 project settings file with
-	// grove_id under hub.grove_id (the correct v1 location).
+	// the legacy hub.grove_id key (migrated to hub.project_id on load).
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 	projectSettings := `schema_version: "1"
@@ -662,7 +662,7 @@ workspace_path: /tmp/my-project
 }
 
 func TestLoadSettingsKoanf_ProjectIDFileOverridesGlobal(t *testing.T) {
-	// Simulates a git project where grove_id is stored in a grove-id file
+	// Simulates a git project where the project ID is stored in a project-id file
 	// rather than in the settings file. The global settings have a different
 	// hub.grove_id that should NOT bleed into the project.
 	tmpDir := t.TempDir()
@@ -690,15 +690,15 @@ hub:
 `
 	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(globalSettings), 0644))
 
-	// Git project .scion directory with grove-id file but NO grove_id in settings
+	// Git project .scion directory with a project-id file but no project ID in settings
 	projectScionDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectScionDir, 0755))
 
-	// Write the grove-id file (as initInRepoProject does)
-	require.NoError(t, WriteProjectID(projectScionDir, "project-grove-id-from-file"))
+	// Write the project-id file (as initInRepoProject does)
+	require.NoError(t, WriteProjectID(projectScionDir, "project-id-from-file"))
 
 	// Create a minimal project settings file in the external config dir
-	// (simulating ensureProjectSettingsFile which doesn't include grove_id)
+	// (simulating ensureProjectSettingsFile which doesn't include a project ID)
 	projectConfigDir, err := GetGitProjectExternalConfigDir(projectScionDir)
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(projectConfigDir, 0755))
@@ -711,9 +711,9 @@ active_profile: local
 	s, err := LoadSettingsKoanf(projectScionDir)
 	require.NoError(t, err)
 
-	// The grove-id file should take precedence over global hub.grove_id
-	assert.Equal(t, "project-grove-id-from-file", s.ProjectID,
-		"grove_id should come from grove-id file, not global settings")
+	// The project-id file should take precedence over global hub.grove_id
+	assert.Equal(t, "project-id-from-file", s.ProjectID,
+		"project ID should come from the project-id file, not global settings")
 }
 
 func TestLoadSettingsKoanf_GlobalProjectIDDoesNotBleedIntoProject(t *testing.T) {
@@ -762,9 +762,9 @@ hub:
 
 func TestLoadSettingsKoanf_V1HubProjectIDPopulatesGetHubProjectID(t *testing.T) {
 	// Verifies that hub.grove_id (snake_case, V1 format) is remapped to
-	// hub.groveId (camelCase) so that GetHubProjectID() returns the correct
+	// Hub.ProjectID so that GetHubProjectID() returns the correct
 	// value. Without this remapping, EnsureHubReady falls back to the local
-	// grove_id and loops on project registration when the IDs differ.
+	// project ID and loops on project registration when the IDs differ.
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
@@ -785,7 +785,7 @@ func TestLoadSettingsKoanf_V1HubProjectIDPopulatesGetHubProjectID(t *testing.T) 
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
-	// V1 format settings with hub.grove_id set (the hub grove ID)
+	// V1 format settings with hub.grove_id set (the hub project ID)
 	projectSettings := `schema_version: "1"
 hub:
   enabled: true
@@ -797,14 +797,14 @@ hub:
 	s, err := LoadSettingsKoanf(projectDir)
 	require.NoError(t, err)
 
-	// GetHubProjectID() must return the hub grove ID from V1's hub.grove_id
+	// GetHubProjectID() must return the hub project ID from V1's hub.grove_id
 	assert.Equal(t, "hub-grove-uuid-972dd7f5", s.GetHubProjectID(),
 		"GetHubProjectID() should return the value from V1 hub.grove_id")
 }
 
 func TestLoadSettingsKoanf_V1HubProjectIDWithMarkerFile(t *testing.T) {
-	// When a git project has both a grove-id marker file (local deterministic ID)
-	// and hub.grove_id in V1 settings (hub grove ID), the two must be distinct:
+	// When a git project has both a project-id file (local deterministic ID)
+	// and hub.grove_id in V1 settings (hub project ID), the two must be distinct:
 	// - settings.ProjectID should be the local ID (from the marker file)
 	// - settings.GetHubProjectID() should be the hub ID (from hub.grove_id)
 	tmpDir := t.TempDir()
@@ -827,11 +827,11 @@ func TestLoadSettingsKoanf_V1HubProjectIDWithMarkerFile(t *testing.T) {
 	projectScionDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectScionDir, 0755))
 
-	// Write grove-id marker file with local deterministic ID
+	// Write the project-id file with local deterministic ID
 	require.NoError(t, WriteProjectID(projectScionDir, "local-deterministic-id"))
 
 	// For git projects, settings are stored in the external config dir.
-	// Write V1 settings with hub.grove_id pointing to a different hub grove.
+	// Write V1 settings with hub.grove_id pointing to a different hub project.
 	projectConfigDir, err := GetGitProjectExternalConfigDir(projectScionDir)
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(projectConfigDir, 0755))
@@ -848,11 +848,11 @@ hub:
 
 	// ProjectID should come from the marker file (local deterministic ID)
 	assert.Equal(t, "local-deterministic-id", s.ProjectID,
-		"ProjectID should come from grove-id marker file")
+		"ProjectID should come from the project-id file")
 
 	// GetHubProjectID() should return the hub project ID from V1 settings
 	assert.Equal(t, "hub-grove-uuid-different", s.GetHubProjectID(),
-		"GetHubProjectID() should return the hub project ID, distinct from local grove_id")
+		"GetHubProjectID() should return the hub project ID, distinct from the local project ID")
 }
 
 func TestLoadSettingsKoanf_InRepoSettingsLayered(t *testing.T) {

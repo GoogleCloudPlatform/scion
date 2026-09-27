@@ -447,8 +447,8 @@ func TestFindHarnessConfigDir_FallsThrough_BrokenDirectory(t *testing.T) {
 
 	// Project has harness-configs/opencode/ directory but NO config.yaml
 	projectPath := filepath.Join(tmpDir, "project")
-	brokenGroveHCDir := filepath.Join(projectPath, harnessConfigsDirName, "opencode")
-	if err := os.MkdirAll(brokenGroveHCDir, 0755); err != nil {
+	brokenProjectHCDir := filepath.Join(projectPath, harnessConfigsDirName, "opencode")
+	if err := os.MkdirAll(brokenProjectHCDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
