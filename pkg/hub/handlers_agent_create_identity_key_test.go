@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -85,7 +86,9 @@ func TestCreateAgentInProject_WritesSlugIdentityKey(t *testing.T) {
 
 // TestCreateAgentInProject_RejectsReservedSlug: a create whose slug is
 // itself a reserved word is rejected the same way applyAgentUpdate rejects
-// a PATCH to a reserved display name.
+// a PATCH to a reserved display name. Asserts the specific error code, not
+// just the status, so the errInvalidDisplayName -> invalid_name mapping is
+// pinned end-to-end at the HTTP layer too.
 func TestCreateAgentInProject_RejectsReservedSlug(t *testing.T) {
 	f := projectAgentAuthzSetup(t)
 	attachAutoProvideBroker(t, f)
@@ -94,6 +97,9 @@ func TestCreateAgentInProject_RejectsReservedSlug(t *testing.T) {
 	rec := doRequestAsUser(t, f.srv, f.member, http.MethodPost, createAgentPath(f),
 		CreateAgentRequest{Name: "Admin"})
 	require.Equal(t, http.StatusBadRequest, rec.Code, "create body: %s", rec.Body.String())
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+	require.Equal(t, "invalid_name", errResp.Error.Code, "create body: %s", rec.Body.String())
 
 	_, err := f.store.GetAgentBySlug(ctx, f.project.ID, "admin")
 	require.ErrorIs(t, err, store.ErrNotFound, "no agent may have been created")
@@ -186,4 +192,30 @@ func TestCreateAgentWithIdentityKey_FKViolationIsNotDisplayNameError(t *testing.
 		"a foreign-key violation must not be reported as a display-name validation failure: %v", err)
 	require.True(t, errors.Is(err, store.ErrInvalidInput),
 		"expected the store layer's existing foreign-key-violation mapping to still apply: %v", err)
+}
+
+// TestCreateAgentInProject_AcceptsDiacriticsDigitsAndSeparators confirms a
+// name built from characters outside plain ASCII letters -- Latin letters
+// with diacritics, digits, space, and '-_.' -- still succeeds at create.
+// Unlike PATCH, a create's req.Name is only ever used to derive Slug (Name
+// is set to the resulting Slug, not to the raw input -- see
+// createAgentInProject), so create has no separate raw display value for
+// the charset/length/control-character rules to apply to; this test exists
+// to confirm that collapsing step itself doesn't reject legitimate
+// non-ASCII input along the way.
+func TestCreateAgentInProject_AcceptsDiacriticsDigitsAndSeparators(t *testing.T) {
+	f := projectAgentAuthzSetup(t)
+	attachAutoProvideBroker(t, f)
+	ctx := context.Background()
+
+	rec := doRequestAsUser(t, f.srv, f.member, http.MethodPost, createAgentPath(f),
+		CreateAgentRequest{Name: "Café Böt_1.2 Prime"})
+	require.Equal(t, http.StatusCreated, rec.Code, "create body: %s", rec.Body.String())
+
+	created, err := f.store.GetAgentBySlug(ctx, f.project.ID, "cafe-bot-1-2-prime")
+	require.NoError(t, err)
+
+	keys, err := f.store.ListAgentIdentityKeys(ctx, f.project.ID)
+	require.NoError(t, err)
+	require.NotNil(t, findIdentityKey(keys, created.ID, "cafe-bot-1-2-prime"))
 }

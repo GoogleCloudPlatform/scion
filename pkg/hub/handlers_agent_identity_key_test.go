@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -205,6 +206,112 @@ func TestApplyAgentUpdate_RejectsInvalidDisplayNameCharset(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, findIdentityKey(keys, f.target.ID, "dmin"),
 		"no identity-key row must have been written for the rejected PATCH")
+}
+
+// TestApplyAgentUpdate_RejectsLookalikeUnicodeDisplayName pins the charset
+// allowlist's Unicode boundary: a Cyrillic "а" is not a rune Slugify keeps
+// or folds to a single ASCII letter (Slugify strips it entirely, the same
+// as punctuation), so a rename to a name built from it must be rejected --
+// it would otherwise slugify to a key that reads like "agent-1" but isn't,
+// since the allowlist's whole purpose is to keep the persisted key visibly
+// tied to what the name displays.
+func TestApplyAgentUpdate_RejectsLookalikeUnicodeDisplayName(t *testing.T) {
+	f := projectAgentAuthzSetup(t)
+	ctx := context.Background()
+	originalName := f.target.Name
+
+	rec := doRequestAsUser(t, f.srv, f.member, http.MethodPatch, f.targetPath(),
+		map[string]interface{}{"name": "аgent-1"}) // Cyrillic а, not Latin a
+	require.Equal(t, http.StatusBadRequest, rec.Code, "PATCH body: %s", rec.Body.String())
+
+	got, err := f.store.GetAgent(ctx, f.target.ID)
+	require.NoError(t, err)
+	require.Equal(t, originalName, got.Name, "the rejected Name must not have been persisted")
+
+	keys, err := f.store.ListAgentIdentityKeys(ctx, f.project.ID)
+	require.NoError(t, err)
+	require.Nil(t, findIdentityKey(keys, f.target.ID, "gent-1"),
+		"no identity-key row must have been written for the rejected PATCH")
+}
+
+// TestApplyAgentUpdate_RejectsOverLengthDisplayName pins the length cap: a
+// rename to a name longer than api.MaxDisplayNameLength runes is rejected.
+func TestApplyAgentUpdate_RejectsOverLengthDisplayName(t *testing.T) {
+	f := projectAgentAuthzSetup(t)
+	ctx := context.Background()
+	originalName := f.target.Name
+
+	tooLong := strings.Repeat("a", api.MaxDisplayNameLength+1)
+	rec := doRequestAsUser(t, f.srv, f.member, http.MethodPatch, f.targetPath(),
+		map[string]interface{}{"name": tooLong})
+	require.Equal(t, http.StatusBadRequest, rec.Code, "PATCH body: %s", rec.Body.String())
+
+	got, err := f.store.GetAgent(ctx, f.target.ID)
+	require.NoError(t, err)
+	require.Equal(t, originalName, got.Name, "the rejected Name must not have been persisted")
+}
+
+// TestApplyAgentUpdate_RejectsControlCharacterDisplayName pins the
+// control-character/newline rejection: a rename to a name containing a
+// newline is rejected, so it can never reach a surface (like DM
+// notification text) that renders it as prose.
+func TestApplyAgentUpdate_RejectsControlCharacterDisplayName(t *testing.T) {
+	f := projectAgentAuthzSetup(t)
+	ctx := context.Background()
+	originalName := f.target.Name
+
+	rec := doRequestAsUser(t, f.srv, f.member, http.MethodPatch, f.targetPath(),
+		map[string]interface{}{"name": "Bad\nName"})
+	require.Equal(t, http.StatusBadRequest, rec.Code, "PATCH body: %s", rec.Body.String())
+
+	got, err := f.store.GetAgent(ctx, f.target.ID)
+	require.NoError(t, err)
+	require.Equal(t, originalName, got.Name, "the rejected Name must not have been persisted")
+}
+
+// TestApplyAgentUpdate_RejectsReservedDisplayName is the PATCH-path
+// counterpart to TestCreateAgentInProject_RejectsReservedSlug: a rename to a
+// reserved word is rejected, the same way a create whose slug is itself a
+// reserved word already is.
+func TestApplyAgentUpdate_RejectsReservedDisplayName(t *testing.T) {
+	f := projectAgentAuthzSetup(t)
+	ctx := context.Background()
+	originalName := f.target.Name
+
+	rec := doRequestAsUser(t, f.srv, f.member, http.MethodPatch, f.targetPath(),
+		map[string]interface{}{"name": "Admin"})
+	require.Equal(t, http.StatusBadRequest, rec.Code, "PATCH body: %s", rec.Body.String())
+
+	got, err := f.store.GetAgent(ctx, f.target.ID)
+	require.NoError(t, err)
+	require.Equal(t, originalName, got.Name, "the rejected Name must not have been persisted")
+
+	keys, err := f.store.ListAgentIdentityKeys(ctx, f.project.ID)
+	require.NoError(t, err)
+	require.Nil(t, findIdentityKey(keys, f.target.ID, "admin"),
+		"no identity-key row must have been written for the rejected PATCH")
+}
+
+// TestApplyAgentUpdate_AcceptsDiacriticsDigitsAndSeparators is the positive
+// complement to the PATCH rejection tests above: a rename to a name built
+// entirely from the allowlist -- Latin letters with diacritics, digits,
+// space, and '-_.' -- is accepted, proving the allowlist rejects what it
+// must without being overly strict about what it allows.
+func TestApplyAgentUpdate_AcceptsDiacriticsDigitsAndSeparators(t *testing.T) {
+	f := projectAgentAuthzSetup(t)
+	ctx := context.Background()
+
+	rec := doRequestAsUser(t, f.srv, f.member, http.MethodPatch, f.targetPath(),
+		map[string]interface{}{"name": "Café Böt_1.2 Prime"})
+	require.Equal(t, http.StatusOK, rec.Code, "PATCH body: %s", rec.Body.String())
+
+	got, err := f.store.GetAgent(ctx, f.target.ID)
+	require.NoError(t, err)
+	require.Equal(t, "Café Böt_1.2 Prime", got.Name)
+
+	keys, err := f.store.ListAgentIdentityKeys(ctx, f.project.ID)
+	require.NoError(t, err)
+	require.NotNil(t, findIdentityKey(keys, f.target.ID, "cafe-bot-1-2-prime"))
 }
 
 // TestDeleteProject_FreesIdentityKeys is the regression test for the
