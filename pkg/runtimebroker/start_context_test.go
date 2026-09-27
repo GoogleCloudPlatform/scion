@@ -489,10 +489,10 @@ func TestSanitizeCloneErrorText(t *testing.T) {
 		// only the individual userinfo strip can remove the token.
 		rawURL := "https://SECRETUSER@127.0.0.1:1/x.git"
 		errText := "fatal: Authentication failed for 'https://SECRETUSER@127.0.0.1/x.git'"
-		got := sanitizeCloneErrorText(errText, rawURL)
-		if strings.Contains(got, rawURL) {
-			t.Fatalf("test setup error: errText must not contain the exact raw URL, got %q", got)
+		if strings.Contains(errText, rawURL) {
+			t.Fatalf("test setup error: errText must not contain the exact raw URL %q", rawURL)
 		}
+		got := sanitizeCloneErrorText(errText, rawURL)
 		if strings.Contains(got, "SECRETUSER") {
 			t.Errorf("sanitized error text still contains the userinfo token from a reformatted echo: %q", got)
 		}
@@ -584,10 +584,10 @@ func TestSanitizeCloneErrorText(t *testing.T) {
 		// can remove it.
 		rawURL := "https://:PWONLY@127.0.0.1:1/x.git"
 		errText := "fatal: Authentication failed for 'https://:PWONLY@127.0.0.1/x.git'"
-		got := sanitizeCloneErrorText(errText, rawURL)
-		if strings.Contains(got, rawURL) {
-			t.Fatalf("test setup error: errText must not contain the exact raw URL, got %q", got)
+		if strings.Contains(errText, rawURL) {
+			t.Fatalf("test setup error: errText must not contain the exact raw URL %q", rawURL)
 		}
+		got := sanitizeCloneErrorText(errText, rawURL)
 		if strings.Contains(got, "PWONLY") {
 			t.Errorf("sanitized error text still contains the password from a reformatted echo: %q", got)
 		}
