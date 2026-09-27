@@ -149,6 +149,7 @@ The deploy script creates the following GCP resources:
 | Service account | `scion-hub-<hub-name>@<project>.iam.gserviceaccount.com` | VM identity with logging/monitoring roles |
 | Service account | `scion-hub-<hub-name>-proxy@<project>.iam.gserviceaccount.com` (truncated and hashed for long hub names) | Cloud Run proxy identity, with no project IAM roles |
 | Cloud Run service | `scion-hub-<hub-name>-iap-proxy` | IAP-authenticated reverse proxy to the VM |
+| Firewall rule | `scion-hub-<hub-name>-allow-proxy` | Allows the Cloud Run proxy (Direct VPC egress) to reach the VM on tcp:8080 |
 | IAM bindings | IAP `httpsResourceAccessor` for the deployer; `roles/run.invoker` for the IAP service agent on the Cloud Run proxy | Grants the deployer browser access through IAP; lets IAP itself invoke the proxy service |
 
 On the VM itself:
@@ -374,7 +375,11 @@ The teardown flow prompts for the hub name and region, then deletes:
 
 1. The Cloud Run IAP proxy service
 2. The GCE VM instance
-3. The service account
+3. The Cloud NAT and Cloud Router (unless they were reused from a pre-existing gateway on the network/region)
+4. The hub VM's service account
+5. The Cloud Run proxy's service account
+6. The IAP SSH firewall rule
+7. The proxy-to-VM firewall rule (tcp:8080)
 
 **Note:** IAP access bindings are scoped to the region, not to the service.
 Teardown does not remove them. To clean up IAP bindings manually:

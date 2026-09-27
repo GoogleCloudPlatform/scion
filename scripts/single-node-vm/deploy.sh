@@ -106,6 +106,44 @@ readonly HEALTH_CHECK_RETRY_SECS=5
 readonly BUILD_POLL_MAX_ATTEMPTS=180
 readonly BUILD_POLL_INTERVAL_SECS=15
 readonly IAP_ENFORCEMENT_WAIT_SECS=60
+# The default VPC network's creation (triggered by enabling
+# compute.googleapis.com in an ordinary org) is asynchronous but usually
+# visible within a few seconds; ~60s total gives real propagation room to
+# clear (including a brand-new project's compute.googleapis.com itself
+# still settling right after being enabled -- see the SERVICE_DISABLED
+# retry below) without making a genuinely-missing-network failure (the
+# hardened-org case) too slow to report. The interval is overridable via
+# SCION_TEST_NETWORK_RETRY_SECS so the test suite doesn't have to sleep
+# through the real budget; unset (the normal case) it's just 5.
+readonly NETWORK_CHECK_MAX_ATTEMPTS=12
+readonly NETWORK_CHECK_DEFAULT_RETRY_SECS=5
+# Validated, not trusted verbatim: this is the one place a non-numeric,
+# negative, or implausibly large override (a typo, a stray shell fragment
+# in the environment, or a fat-fingered value) would otherwise reach
+# `sleep` directly -- a non-numeric one kills the deploy with a bare
+# "invalid time interval" under set -e, on the retry path only, which
+# would be a confusing way to fail; a huge one is effectively a hang on
+# that same path. Capped at 60s (already well beyond what any legitimate
+# test needs) rather than left unbounded. The integer-part length check
+# runs before any arithmetic, so an arbitrarily long digit string can't
+# reach bash's 64-bit `-gt` and silently wrap around into something
+# small enough to be accepted; the `10#` prefix on that comparison forces
+# base 10, so a leading zero (e.g. "08") isn't misread as octal, which
+# `-gt` would otherwise reject with a bash error of its own.
+if [[ -n "${SCION_TEST_NETWORK_RETRY_SECS:-}" ]]; then
+  if [[ ! "${SCION_TEST_NETWORK_RETRY_SECS}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    warn "SCION_TEST_NETWORK_RETRY_SECS='${SCION_TEST_NETWORK_RETRY_SECS}' is not a valid non-negative number; using the default."
+    SCION_TEST_NETWORK_RETRY_SECS=""
+  else
+    NETWORK_RETRY_SECS_INT_PART="${SCION_TEST_NETWORK_RETRY_SECS%%.*}"
+    if [[ ${#NETWORK_RETRY_SECS_INT_PART} -gt 2 || "$((10#$NETWORK_RETRY_SECS_INT_PART))" -gt 60 ]]; then
+      warn "SCION_TEST_NETWORK_RETRY_SECS='${SCION_TEST_NETWORK_RETRY_SECS}' is out of range; using the default."
+      SCION_TEST_NETWORK_RETRY_SECS=""
+    fi
+    unset NETWORK_RETRY_SECS_INT_PART
+  fi
+fi
+readonly NETWORK_CHECK_RETRY_SECS="${SCION_TEST_NETWORK_RETRY_SECS:-$NETWORK_CHECK_DEFAULT_RETRY_SECS}"
 
 # ---------------------------------------------------------------------------
 # Parse flags
@@ -271,6 +309,7 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   ROUTER_NAME="scion-hub-${HUB_NAME}-router"
   NAT_NAME="scion-hub-${HUB_NAME}-nat"
   FW_RULE_NAME="scion-hub-${HUB_NAME}-allow-iap-ssh"
+  FW_8080_RULE_NAME="scion-hub-${HUB_NAME}-allow-proxy"
 
   # Discover the actual zone of the instance (if it still exists)
   ZONE="$(gcloud compute instances list \
@@ -305,6 +344,7 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   echo "  Service account:   ${SA_EMAIL}"
   echo "  Proxy SA:          ${PROXY_SA_EMAIL}"
   echo "  Firewall rule:     ${FW_RULE_NAME}"
+  echo "  Firewall rule:     ${FW_8080_RULE_NAME}"
   echo ""
   if [[ -n "$CONFIG_FILE" && ! -t 0 ]]; then
     info "Non-interactive mode: proceeding with teardown."
@@ -379,6 +419,14 @@ if [[ "$DELETE_MODE" == "true" ]]; then
     warn "Firewall rule ${FW_RULE_NAME} not found or already deleted."
   fi
 
+  info "Deleting proxy-to-VM firewall rule..."
+  if gcloud compute firewall-rules delete "${FW_8080_RULE_NAME}" \
+      --project="${PROJECT_ID}" --quiet 2>/dev/null; then
+    echo "  Deleted: ${FW_8080_RULE_NAME}"
+  else
+    warn "Firewall rule ${FW_8080_RULE_NAME} not found or already deleted."
+  fi
+
   echo ""
   echo -e "${BOLD}=== Teardown Complete ===${RESET}"
   echo ""
@@ -389,6 +437,7 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   echo "  Deleted service account:   ${SA_EMAIL}"
   echo "  Deleted proxy SA:          ${PROXY_SA_EMAIL}"
   echo "  Deleted firewall rule:     ${FW_RULE_NAME}"
+  echo "  Deleted firewall rule:     ${FW_8080_RULE_NAME}"
   exit 0
 fi
 
@@ -782,6 +831,78 @@ gcloud services enable \
 gcloud beta services identity create \
   --service=iap.googleapis.com \
   --project="${PROJECT_ID}" --quiet 2>/dev/null || true
+
+# --- Default VPC network must already exist ---
+# Organizations enforcing constraints/compute.skipDefaultNetworkCreation
+# get no "default" network on new projects, and this script relies on
+# --network=default / --subnet=default throughout (Cloud Router, Cloud
+# NAT, the hub VM, both firewall rules below, and the Cloud Run proxy's
+# Direct VPC egress). Creating a VPC network is a network-design decision
+# for the operator to make explicitly, not something to do silently on
+# their behalf -- so this fails fast, before any resource in this script
+# is created, rather than creating one itself. See the hardened-org
+# addendum doc for the exact command to create it (an auto-mode network,
+# which is all this script needs).
+#
+# Runs AFTER "Enable APIs" above, not before: on a brand-new project in an
+# ordinary (non-hardened) org, compute.googleapis.com has never been
+# enabled yet, and enabling it (just above) is what triggers the default
+# network's creation. Checking beforehand would report a false "missing
+# network" on every fresh project, hardened org or not. That creation is
+# asynchronous, so this polls for a bounded time instead of failing on
+# the very first check. Enabling APIs is not itself a resource this
+# script would need to tear down, so the "before any resource is created"
+# contract still holds for everything from here on.
+info "Checking for the default VPC network..."
+NETWORK_FOUND=false
+NETWORK_CHECK_ERROR=""
+for attempt in $(seq 1 "$NETWORK_CHECK_MAX_ATTEMPTS"); do
+  # --quiet is required here, not cosmetic: without it, gcloud may ask on
+  # stderr whether to enable the API and then read stdin. stderr is
+  # captured here, so on an interactive terminal the deploy appears to
+  # freeze at this step while waiting for an answer the operator cannot
+  # see. An open, non-TTY stdin (a pipe held without EOF) blocks the same
+  # way. --quiet takes the default answer ("no") immediately, so the
+  # SERVICE_DISABLED error reaches the retry check below instead.
+  if NETWORK_CHECK_ERROR="$(gcloud compute networks describe default \
+      --project="${PROJECT_ID}" --quiet 2>&1 >/dev/null)"; then
+    NETWORK_FOUND=true
+    break
+  fi
+  # A genuine "not found" is worth retrying -- the network can still be
+  # propagating from the services-enable call above. So is
+  # SERVICE_DISABLED -- on a truly fresh project, compute.googleapis.com
+  # itself can still be settling right after being enabled, and describe
+  # calls against it fail with the same "has not been used in project"
+  # error enabling the API is meant to fix. Matched on both the
+  # machine-readable reason (present in the error's details block) and
+  # the message fragment (present even when the API-enablement prompt is
+  # disabled and gcloud never renders a details block at all), since
+  # either form can be all that's available depending on gcloud's
+  # configuration. Any other error (permission denied, a genuinely
+  # transient API error, ...) is something a retry can't fix, so it's
+  # reported immediately instead of spending the whole budget on it.
+  if [[ "$NETWORK_CHECK_ERROR" != *"was not found"* \
+        && "$NETWORK_CHECK_ERROR" != *"SERVICE_DISABLED"* \
+        && "$NETWORK_CHECK_ERROR" != *"has not been used in project"* ]]; then
+    break
+  fi
+  if [[ "$attempt" -lt "$NETWORK_CHECK_MAX_ATTEMPTS" ]]; then
+    sleep "$NETWORK_CHECK_RETRY_SECS"
+  fi
+done
+if [[ "$NETWORK_FOUND" != "true" ]]; then
+  if [[ "$NETWORK_CHECK_ERROR" == *"was not found"* ]]; then
+    err "No 'default' VPC network found in project ${PROJECT_ID}."
+    err "Organizations with the compute.skipDefaultNetworkCreation org policy do not get one automatically, and this script does not create one on your behalf."
+    err "See https://googlecloudplatform.github.io/scion/hosted/single-node/hub-setup-gce-hardened-org/ (docs-site/src/content/docs/hosted/single-node/hub-setup-gce-hardened-org.md in a checkout) for the one command needed to create it."
+  else
+    err "Could not verify the default VPC network in project ${PROJECT_ID}:"
+    err "$NETWORK_CHECK_ERROR"
+  fi
+  exit 1
+fi
+echo "  Default VPC network found."
 
 # --- Cross-org IAP warning (best-effort; never blocks the deploy) ---
 # IAP's default (Google-managed) OAuth client only covers same-organization
@@ -1187,6 +1308,70 @@ else
     --description="Allow SSH via IAP tunneling for Scion Hub" \
     --quiet
   echo "  Created firewall rule: ${FW_RULE_NAME} (target tags: ${HUB_TAG})"
+fi
+
+# --- Proxy-to-VM firewall rule (tcp:8080) ---
+# The Cloud Run proxy reaches the hub VM's internal IP on :8080 via Direct
+# VPC egress (--vpc-egress=all-traffic in Phase 4), which sources traffic
+# from the region's "default" subnet range. Rather than depend on the
+# network's own default-allow-internal rule -- broad (all protocols, all
+# of 10.128.0.0/9, every VM on the network) and not guaranteed to exist at
+# all in a hardened org (creating the default network via CLI does not
+# create it) -- this scopes a dedicated rule to exactly what's needed:
+# tcp:8080, from just the default subnet's own range, to just the hub VM.
+info "Looking up the default subnet's IP range (${REGION})..."
+DEFAULT_SUBNET_CIDR="$(gcloud compute networks subnets describe default \
+  --region="${REGION}" --project="${PROJECT_ID}" \
+  --format="value(ipCidrRange)" 2>/dev/null)" || true
+if [[ -z "$DEFAULT_SUBNET_CIDR" ]]; then
+  err "Could not determine the IP range of the 'default' subnet in ${REGION}."
+  err "An auto-mode default network creates one subnet per region automatically; see https://googlecloudplatform.github.io/scion/hosted/single-node/hub-setup-gce-hardened-org/ (docs-site/src/content/docs/hosted/single-node/hub-setup-gce-hardened-org.md in a checkout)."
+  exit 1
+fi
+echo "  Default subnet CIDR (${REGION}): ${DEFAULT_SUBNET_CIDR}"
+
+FW_8080_RULE_NAME="scion-hub-${HUB_NAME}-allow-proxy"
+info "Creating proxy-to-VM firewall rule (if needed)..."
+# A single combined describe covers both the existence check and all three
+# drift fields, instead of four separate gcloud calls. gcloud's value()
+# printer joins multiple requested fields with a single tab, and joins a
+# repeated field's own values (sourceRanges, targetTags) with ";" --
+# verified by rendering synthetic firewall-rule resources through the
+# installed Cloud SDK's own csv_printer.ValuePrinter, including the empty-
+# field case (an empty or absent field renders as nothing between the
+# tabs on either side of it, never omitted or reflowed). Split with plain
+# parameter expansion, not `read -d $'\t'`/`IFS=$'\t' read`: bash's `read`
+# classifies tab as "IFS whitespace" and silently strips/collapses a
+# leading or trailing empty field (verified by hand), which would shift
+# every field after it instead of just leaving one blank.
+if FW_8080_DESCRIBE="$(gcloud compute firewall-rules describe "${FW_8080_RULE_NAME}" \
+    --project="${PROJECT_ID}" \
+    --format="value(sourceRanges,allowed[].map().firewall_rule().list(),targetTags)" \
+    2>/dev/null)"; then
+  EXISTING_8080_SOURCE="${FW_8080_DESCRIBE%%$'\t'*}"
+  FW_8080_REST="${FW_8080_DESCRIBE#*$'\t'}"
+  EXISTING_8080_ALLOWED="${FW_8080_REST%%$'\t'*}"
+  EXISTING_8080_TARGET_TAGS="${FW_8080_REST#*$'\t'}"
+  unset FW_8080_DESCRIBE FW_8080_REST
+  if [[ "$EXISTING_8080_SOURCE" == "$DEFAULT_SUBNET_CIDR" \
+        && "$EXISTING_8080_ALLOWED" == "tcp:8080" \
+        && "$EXISTING_8080_TARGET_TAGS" == "$HUB_TAG" ]]; then
+    echo "  Firewall rule already exists: ${FW_8080_RULE_NAME} (source: ${EXISTING_8080_SOURCE})"
+  else
+    warn "Firewall rule ${FW_8080_RULE_NAME} exists but drifted from what this script expects (source: ${EXISTING_8080_SOURCE}, allowed: ${EXISTING_8080_ALLOWED}, target tags: ${EXISTING_8080_TARGET_TAGS}; expected source: ${DEFAULT_SUBNET_CIDR}, allowed: tcp:8080, target tags: ${HUB_TAG}). Not auto-updating it -- delete the rule and re-run, or update it manually, if this is unintentional."
+  fi
+else
+  gcloud compute firewall-rules create "${FW_8080_RULE_NAME}" \
+    --project="${PROJECT_ID}" \
+    --network=default \
+    --direction=INGRESS \
+    --action=ALLOW \
+    --rules=tcp:8080 \
+    --source-ranges="${DEFAULT_SUBNET_CIDR}" \
+    --target-tags="${HUB_TAG}" \
+    --description="Allow the Cloud Run IAP proxy (Direct VPC egress) to reach the Scion Hub VM on 8080" \
+    --quiet
+  echo "  Created firewall rule: ${FW_8080_RULE_NAME} (source: ${DEFAULT_SUBNET_CIDR}, target tags: ${HUB_TAG})"
 fi
 
 # --- Create VM ---

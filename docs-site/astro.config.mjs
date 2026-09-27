@@ -157,6 +157,7 @@ export default defineConfig({
 							        { label: 'Single-node Overview', slug: 'hosted/single-node/overview' },
 							        { label: 'Hub Setup', slug: 'hosted/single-node/hub-server' },
 							        { label: 'Deploy on a VM (GCE)', slug: 'hosted/single-node/hub-setup-gce' },
+							        { label: 'Deploy on a VM (Hardened Org)', slug: 'hosted/single-node/hub-setup-gce-hardened-org' },
 							        { label: 'Deploy on Cloud Run (Sandbox)', slug: 'hosted/single-node/hub-setup-cloudrun' },
 							        { label: 'Auth & Tenancy', slug: 'hosted/single-node/auth' },
 							        { label: 'Managed Agents', slug: 'hosted/single-node/managed-agents' },

@@ -206,12 +206,14 @@ test_deploy_base_rerun_is_idempotent() {
   assert_eq "1" "$(echo "$log" | grep -c '^compute routers nats create' || true)" \
     "a re-run against an already-existing NAT must not create a second one"
   # Name-scoped, not a blanket count: two service accounts (hub + proxy)
-  # now exist per hub, so an unscoped count would no longer distinguish
-  # "created once" from "created twice" -- see test_proxy_hardening.sh for
-  # coverage of the proxy SA specifically.
+  # and two firewall rules (IAP SSH + proxy-to-VM tcp:8080) now exist per
+  # hub, so an unscoped count would no longer distinguish "created once"
+  # from "created twice" -- see test_proxy_hardening.sh and
+  # test_hardened_org.sh for coverage of the proxy SA and the 8080 rule
+  # specifically.
   assert_eq "1" "$(echo "$log" | grep -c "^iam service-accounts create scion-hub-${HUB} " || true)" \
     "a re-run against an already-existing service account must not create a second one"
-  assert_eq "1" "$(echo "$log" | grep -c '^compute firewall-rules create' || true)" \
+  assert_eq "1" "$(echo "$log" | grep -c "^compute firewall-rules create ${FW_RULE_NAME} " || true)" \
     "a re-run against an already-existing firewall rule must not create a second one"
 
   # DEPLOY_LOG is the second run's own output (run_deploy_create

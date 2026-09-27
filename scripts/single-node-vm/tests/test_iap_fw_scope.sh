@@ -179,7 +179,7 @@ test_iap_fw_scope_rerun_against_untagged_deploy_tags_then_narrows() {
   update_line="$(echo "$log" | grep "^compute firewall-rules update ${FW_RULE_NAME} " | head -1)"
   assert_contains "$update_line" "--target-tags=${HUB_TAG}" \
     "the pre-existing unscoped rule must be narrowed to the hub tag"
-  assert_eq "0" "$(echo "$log" | grep -c '^compute firewall-rules create' || true)" \
+  assert_eq "0" "$(echo "$log" | grep -c "^compute firewall-rules create ${FW_RULE_NAME} " || true)" \
     "an existing rule must not also be created"
   assert_eq "0" "$(echo "$log" | grep -c '^compute instances create' || true)" \
     "an existing VM must not also be created"
@@ -211,7 +211,7 @@ test_iap_fw_scope_idempotent_rerun_leaves_scoped_rule_alone() {
 
   assert_eq "1" "$(echo "$log" | grep -c '^compute instances add-tags' || true)" \
     "the tag comes from --tags at create time on the first run; add-tags only fires once the VM already exists, on the second"
-  assert_eq "1" "$(echo "$log" | grep -c '^compute firewall-rules create' || true)" \
+  assert_eq "1" "$(echo "$log" | grep -c "^compute firewall-rules create ${FW_RULE_NAME} " || true)" \
     "only the first run creates the rule"
   assert_eq "0" "$(echo "$log" | grep -c '^compute firewall-rules update' || true)" \
     "a rule already scoped to the hub tag must not be updated again"
@@ -243,7 +243,7 @@ test_iap_fw_scope_describe_not_found_does_not_narrow_unscoped_rule() {
     "no VM was found to add-tags to"
   assert_eq "0" "$(echo "$log" | grep -c '^compute firewall-rules update' || true)" \
     "must not narrow the rule while the VM's tag could not be confirmed"
-  assert_eq "0" "$(echo "$log" | grep -c '^compute firewall-rules create' || true)" \
+  assert_eq "0" "$(echo "$log" | grep -c "^compute firewall-rules create ${FW_RULE_NAME} " || true)" \
     "an existing rule must not also be created"
   assert_contains "$DEPLOY_LOG" "could not be confirmed this run" \
     "deploy.sh should explain why it left the rule unscoped"
@@ -270,7 +270,7 @@ test_iap_fw_scope_foreign_target_tags_are_left_alone_with_a_warning() {
     "the VM still gets the hub tag even though the rule has foreign tags"
   assert_eq "0" "$(echo "$log" | grep -c '^compute firewall-rules update' || true)" \
     "a rule with foreign target tags must not be auto-modified"
-  assert_eq "0" "$(echo "$log" | grep -c '^compute firewall-rules create' || true)" \
+  assert_eq "0" "$(echo "$log" | grep -c "^compute firewall-rules create ${FW_RULE_NAME} " || true)" \
     "an existing rule must not also be created"
   assert_contains "$DEPLOY_LOG" "do not include ${HUB_TAG}" \
     "deploy.sh should warn that the existing rule's tags don't cover the hub VM"
@@ -377,7 +377,7 @@ test_iap_fw_scope_target_tags_describe_failure_does_not_narrow() {
     "the VM still gets tagged even though the rule's tags couldn't be read"
   assert_eq "0" "$(echo "$log" | grep -c '^compute firewall-rules update' || true)" \
     "must not narrow the rule while its target tags are unknown -- doing so would silently replace whatever foreign tags it actually has"
-  assert_eq "0" "$(echo "$log" | grep -c '^compute firewall-rules create' || true)" \
+  assert_eq "0" "$(echo "$log" | grep -c "^compute firewall-rules create ${FW_RULE_NAME} " || true)" \
     "an existing rule must not also be created"
   assert_contains "$DEPLOY_LOG" "the read failed" \
     "deploy.sh should explain that the rule's target tags could not be read"
