@@ -695,6 +695,26 @@ func TestBuildCommonRunArgs(t *testing.T) {
 				"-e SCION_START_CMD=",
 			},
 		},
+		{
+			name: "project identity",
+			config: RunConfig{
+				Harness:      &harness.Generic{},
+				Name:         "test-agent",
+				UnixUsername: "scion",
+				Image:        "scion-agent:latest",
+				Task:         "hello",
+				Project:      "p",
+				ProjectID:    "pid",
+			},
+			wantIn: []string{
+				"-e SCION_PROJECT=p",
+				"-e SCION_PROJECT_ID=pid",
+			},
+			wantOut: []string{
+				"SCION_GROVE=",
+				"SCION_GROVE_ID=",
+			},
+		},
 	}
 
 	for _, tt := range tests {

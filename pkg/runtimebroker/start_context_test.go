@@ -91,12 +91,15 @@ func TestBuildStartContext_BasicFields(t *testing.T) {
 
 	srv := newTestServerForStartContext(t, cfg)
 
+	projectPath := filepath.Join(t.TempDir(), "my-project")
+
 	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
 	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
 		Name:        "my-agent",
 		AgentID:     "uuid-1",
 		Slug:        "my-agent-slug",
 		ProjectID:   "grove-1",
+		ProjectPath: projectPath,
 		Attach:      false,
 		HTTPRequest: r,
 		Operation:   opCreate,
@@ -128,8 +131,17 @@ func TestBuildStartContext_BasicFields(t *testing.T) {
 	if sc.Opts.Env["SCION_AGENT_SLUG"] != "my-agent-slug" {
 		t.Errorf("expected SCION_AGENT_SLUG='my-agent-slug', got %q", sc.Opts.Env["SCION_AGENT_SLUG"])
 	}
-	if sc.Opts.Env["SCION_GROVE_ID"] != "grove-1" {
-		t.Errorf("expected SCION_GROVE_ID='grove-1', got %q", sc.Opts.Env["SCION_GROVE_ID"])
+	if sc.Opts.Env["SCION_PROJECT_ID"] != "grove-1" {
+		t.Errorf("expected SCION_PROJECT_ID='grove-1', got %q", sc.Opts.Env["SCION_PROJECT_ID"])
+	}
+	if _, ok := sc.Opts.Env["SCION_GROVE_ID"]; ok {
+		t.Errorf("expected SCION_GROVE_ID to be absent, got %q", sc.Opts.Env["SCION_GROVE_ID"])
+	}
+	if sc.Opts.Env["SCION_PROJECT_PATH"] != projectPath {
+		t.Errorf("expected SCION_PROJECT_PATH=%q, got %q", projectPath, sc.Opts.Env["SCION_PROJECT_PATH"])
+	}
+	if _, ok := sc.Opts.Env["SCION_GROVE_PATH"]; ok {
+		t.Errorf("expected SCION_GROVE_PATH to be absent, got %q", sc.Opts.Env["SCION_GROVE_PATH"])
 	}
 	if sc.Opts.Env["SCION_DEBUG"] != "1" {
 		t.Errorf("expected SCION_DEBUG='1', got %q", sc.Opts.Env["SCION_DEBUG"])

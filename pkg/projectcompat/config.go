@@ -18,14 +18,8 @@ const (
 	ConfigProjectIDKey     = "project_id"
 	ConfigHubProjectIDKey  = "hub.project_id"
 	ConfigHubProjectIDJSON = "hub.projectId"
-	// ConfigGroveIDKey is the legacy top-level grove_id key name. It is no
-	// longer accepted as CLI key-name input (see IsProjectIDConfigKey), but
-	// it is still used to map SCION_GROVE_ID onto the versioned settings
-	// loader's raw field name (see EnvProjectIDConfigKey).
-	ConfigGroveIDKey = "grove_id"
 
 	EnvProjectID    = "SCION_PROJECT_ID"
-	EnvGroveID      = "SCION_GROVE_ID"
 	EnvHubProjectID = "SCION_HUB_PROJECT_ID"
 
 	ProjectIDFile = "project-id"
@@ -38,8 +32,7 @@ const (
 
 // IsProjectIDConfigKey reports whether key is the canonical top-level
 // project-id config key name. The legacy grove_id key name is no longer
-// accepted as CLI input (see ConfigGroveIDKey for the settings-file fallback
-// that still exists).
+// accepted as CLI input.
 func IsProjectIDConfigKey(key string) bool {
 	return key == ConfigProjectIDKey
 }
@@ -58,10 +51,7 @@ func IsHubProjectIDConfigKey(key string) bool {
 
 func EnvProjectIDConfigKey(envName string, hubProjectAsTopLevel bool) (string, bool) {
 	switch envName {
-	case EnvProjectID, EnvGroveID:
-		if envName == EnvGroveID && !hubProjectAsTopLevel {
-			return ConfigGroveIDKey, true
-		}
+	case EnvProjectID:
 		return ConfigProjectIDKey, true
 	case EnvHubProjectID:
 		if hubProjectAsTopLevel {
@@ -74,13 +64,10 @@ func EnvProjectIDConfigKey(envName string, hubProjectAsTopLevel bool) (string, b
 }
 
 // ProjectIDFromEnv returns the canonical project identity from an environment
-// lookup. The canonical name wins when both canonical and legacy aliases exist.
+// lookup.
 func ProjectIDFromEnv(getenv func(string) string) string {
 	if getenv == nil {
 		return ""
 	}
-	if projectID := getenv(EnvProjectID); projectID != "" {
-		return projectID
-	}
-	return getenv(EnvGroveID)
+	return getenv(EnvProjectID)
 }

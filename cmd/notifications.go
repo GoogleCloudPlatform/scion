@@ -182,7 +182,7 @@ func init() {
 // In addition to settings.IsHubEnabled(), this also accepts the in-container
 // fallback that hubsync.EnsureHubReady uses: when running inside a hub-connected
 // agent container, hub.enabled is never written to settings, but the hub context
-// env vars (SCION_HUB_ENDPOINT/SCION_HUB_URL/SCION_GROVE_ID/SCION_PROJECT_ID) are
+// env vars (SCION_HUB_ENDPOINT/SCION_HUB_URL/SCION_PROJECT_ID) are
 // always set. Without this fallback, every conversation and notifications
 // subcommand fails with "requires Hub mode" inside an agent, even though the
 // hub handlers already accept agent-scoped auth (SCION_AUTH_TOKEN) and the

@@ -413,7 +413,6 @@ func TestReceiverPolicy_StripsSpoofedIdentityBeforeAuthoritativeReplacement(t *t
 	t.Setenv("SCION_AGENT_ID", "trusted-agent")
 	t.Setenv("SCION_AGENT_SLUG", "")
 	t.Setenv("SCION_PROJECT_ID", "trusted-project")
-	t.Setenv("SCION_GROVE_ID", "legacy-project")
 	t.Setenv("SCION_HARNESS", "trusted-harness")
 	t.Setenv("SCION_MODEL", "")
 	t.Setenv("SCION_BROKER_ID", "")

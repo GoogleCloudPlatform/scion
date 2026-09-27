@@ -355,7 +355,6 @@ func TestGetRuntime_CloudRun_DirectProfileName(t *testing.T) {
 
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
-	t.Setenv("SCION_GROVE", "")
 
 	globalDir := filepath.Join(tmpHome, ".scion")
 	if err := os.MkdirAll(globalDir, 0755); err != nil {

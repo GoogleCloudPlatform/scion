@@ -2214,9 +2214,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		classifyEnv(&envClassifications, "SCION_AGENT_ID", api.EnvKindPlain)
 	}
 	if agent.ProjectID != "" {
-		resolvedEnv["SCION_GROVE_ID"] = agent.ProjectID
 		resolvedEnv["SCION_PROJECT_ID"] = agent.ProjectID
-		classifyEnv(&envClassifications, "SCION_GROVE_ID", api.EnvKindPlain)
 		classifyEnv(&envClassifications, "SCION_PROJECT_ID", api.EnvKindPlain)
 	}
 	if agent.Slug != "" {
@@ -2511,9 +2509,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		classifyEnv(&envClassifications, "SCION_AGENT_ID", api.EnvKindPlain)
 	}
 	if agent.ProjectID != "" {
-		resolvedEnv["SCION_GROVE_ID"] = agent.ProjectID
 		resolvedEnv["SCION_PROJECT_ID"] = agent.ProjectID
-		classifyEnv(&envClassifications, "SCION_GROVE_ID", api.EnvKindPlain)
 		classifyEnv(&envClassifications, "SCION_PROJECT_ID", api.EnvKindPlain)
 	}
 	if agent.Slug != "" {

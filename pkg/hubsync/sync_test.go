@@ -48,7 +48,7 @@ func setOrUnsetEnv(t *testing.T, key, val string) {
 
 func TestEnsureHubReady_GlobalFallbackWithHubEnabled(t *testing.T) {
 	// Unset Hub context to avoid synthetic project root detection
-	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_GROVE_ID", "SCION_PROJECT_ID"} {
+	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_PROJECT_ID"} {
 		if val, ok := os.LookupEnv(e); ok {
 			_ = os.Unsetenv(e)
 			defer func() { _ = os.Setenv(e, val) }()
@@ -203,7 +203,7 @@ hub:
 
 func TestEnsureHubReady_GlobalFallbackWithHubDisabled(t *testing.T) {
 	// Unset Hub context to avoid synthetic project root detection
-	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_GROVE_ID", "SCION_PROJECT_ID"} {
+	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_PROJECT_ID"} {
 		if val, ok := os.LookupEnv(e); ok {
 			_ = os.Unsetenv(e)
 			defer func() { _ = os.Setenv(e, val) }()
@@ -284,10 +284,7 @@ func TestEnsureHubReady_HubContextEnvVars(t *testing.T) {
 	// Simulate container env vars
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 	t.Setenv("SCION_HUB_URL", "")
-	// Clear SCION_PROJECT_ID so it can't shadow the legacy var this test is
-	// exercising — ambient env in Scion agent containers commonly sets it.
-	setOrUnsetEnv(t, "SCION_PROJECT_ID", "")
-	t.Setenv("SCION_GROVE_ID", projectID)
+	t.Setenv("SCION_PROJECT_ID", projectID)
 	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
 	t.Setenv("SCION_DEV_TOKEN", "")
 
@@ -362,10 +359,7 @@ func TestEnsureHubReady_HubContextSkipsSyncAndRegistration(t *testing.T) {
 	t.Setenv("HOME", tmpHome)
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 	t.Setenv("SCION_HUB_URL", "")
-	// Clear SCION_PROJECT_ID so it can't shadow the legacy var this test is
-	// exercising — ambient env in Scion agent containers commonly sets it.
-	setOrUnsetEnv(t, "SCION_PROJECT_ID", "")
-	t.Setenv("SCION_GROVE_ID", projectID)
+	t.Setenv("SCION_PROJECT_ID", projectID)
 	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
 	t.Setenv("SCION_DEV_TOKEN", "")
 
@@ -399,11 +393,6 @@ func TestEnsureHubReady_HubContextProjectIDEnvPriority(t *testing.T) {
 	// context, the env var should take priority. This is important for
 	// template-sync agents that clone an external repo whose .scion/settings
 	// contains the source repo's project_id.
-	//
-	// This also covers the precedence between the two env vars themselves:
-	// SCION_PROJECT_ID is canonical and wins; SCION_GROVE_ID is the legacy
-	// alias and is only consulted as a fallback when SCION_PROJECT_ID is
-	// unset.
 
 	settingsProjectID := "settings-project-id-source"
 
@@ -421,13 +410,10 @@ func TestEnsureHubReady_HubContextProjectIDEnvPriority(t *testing.T) {
 	tests := []struct {
 		name      string
 		projectID string
-		groveID   string
 		want      string
 	}{
-		{name: "project id only", projectID: "env-project-id-target", groveID: "", want: "env-project-id-target"},
-		{name: "grove id only (legacy alias still works)", projectID: "", groveID: "env-grove-id-target", want: "env-grove-id-target"},
-		{name: "both set, project id wins", projectID: "env-project-id-target", groveID: "env-grove-id-target", want: "env-project-id-target"},
-		{name: "neither set, falls back to settings", projectID: "", groveID: "", want: settingsProjectID},
+		{name: "env set, wins over settings", projectID: "env-project-id-target", want: "env-project-id-target"},
+		{name: "env unset, falls back to settings", projectID: "", want: settingsProjectID},
 	}
 
 	for _, tt := range tests {
@@ -455,13 +441,12 @@ func TestEnsureHubReady_HubContextProjectIDEnvPriority(t *testing.T) {
 			t.Setenv("HOME", tmpHome)
 			t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 			t.Setenv("SCION_HUB_URL", "")
-			// Unset (rather than set-to-empty) the vars this test isn't
+			// Unset (rather than set-to-empty) the var this test isn't
 			// exercising, for hygiene: the .scion/project-id fixture above is
-			// what actually makes settings.ProjectID resist the env vars, so
+			// what actually makes settings.ProjectID resist the env var, so
 			// this isn't load-bearing for the precedence check itself, but
 			// leaving a var truly absent is clearer than leaving it empty.
 			setOrUnsetEnv(t, "SCION_PROJECT_ID", tt.projectID)
-			setOrUnsetEnv(t, "SCION_GROVE_ID", tt.groveID)
 			t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
 			t.Setenv("SCION_DEV_TOKEN", "")
 

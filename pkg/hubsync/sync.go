@@ -254,8 +254,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	// settings.ProjectID because the dispatcher sets it to the authoritative
 	// project for this agent. The workspace may contain a cloned repo whose
 	// .scion/settings has a different project_id (e.g. template-sync from an
-	// external repo). SCION_PROJECT_ID wins when both it and the legacy
-	// SCION_GROVE_ID alias are set.
+	// external repo).
 	var projectID string
 	if hubContext {
 		projectID = projectcompat.ProjectIDFromEnv(os.Getenv)

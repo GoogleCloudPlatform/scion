@@ -575,11 +575,9 @@ func envFor(cfg RunConfig, paths scionPaths) map[string]string {
 	// Project identity.
 	if cfg.Project != "" {
 		env["SCION_PROJECT"] = cfg.Project
-		env["SCION_GROVE"] = cfg.Project
 	}
 	if cfg.ProjectID != "" {
 		env["SCION_PROJECT_ID"] = cfg.ProjectID
-		env["SCION_GROVE_ID"] = cfg.ProjectID
 	}
 
 	// Workspace path: tell sciontool init where the writable workspace is

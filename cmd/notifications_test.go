@@ -338,7 +338,7 @@ func (s requireHubClientTestState) restore() {
 func clearHubContextEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
-		"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_GROVE_ID", "SCION_PROJECT_ID",
+		"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_PROJECT_ID",
 		"SCION_AUTH_TOKEN", "SCION_HUB_TOKEN", "SCION_DEV_TOKEN",
 	} {
 		t.Setenv(key, "")
@@ -385,7 +385,7 @@ func TestRequireHubClient_AgentHubContext_HubNotEnabledInSettings(t *testing.T) 
 	clearHubContextEnv(t)
 
 	t.Setenv("SCION_HUB_ENDPOINT", "http://hub.internal.example")
-	t.Setenv("SCION_GROVE_ID", "agent-project-id")
+	t.Setenv("SCION_PROJECT_ID", "agent-project-id")
 	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
 
 	tmpHome := t.TempDir()
@@ -440,7 +440,7 @@ func TestRunNotificationsList_AgentHubContext_HubNotEnabledInSettings(t *testing
 	defer server.Close()
 
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
-	t.Setenv("SCION_GROVE_ID", "agent-project-id")
+	t.Setenv("SCION_PROJECT_ID", "agent-project-id")
 	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
 
 	tmpHome := t.TempDir()

@@ -412,14 +412,10 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		classifyBrokerEnv("SCION_AGENT_ID", api.EnvKindPlain)
 	}
 	if in.ProjectID != "" {
-		env["SCION_GROVE_ID"] = in.ProjectID
-		classifyBrokerEnv("SCION_GROVE_ID", api.EnvKindPlain)
 		env["SCION_PROJECT_ID"] = in.ProjectID
 		classifyBrokerEnv("SCION_PROJECT_ID", api.EnvKindPlain)
 	}
 	if in.ProjectPath != "" {
-		env["SCION_GROVE_PATH"] = in.ProjectPath
-		classifyBrokerEnv("SCION_GROVE_PATH", api.EnvKindPlain)
 		env["SCION_PROJECT_PATH"] = in.ProjectPath
 		classifyBrokerEnv("SCION_PROJECT_PATH", api.EnvKindPlain)
 	}
