@@ -363,10 +363,17 @@ func (c *CompositeStore) PurgeDeletedAgents(ctx context.Context, cutoff time.Tim
 }
 
 // chunkUUIDs splits ids into slices of at most size, preserving order. A nil
-// or empty ids yields no chunks, so a range over the result is a no-op.
+// or empty ids yields no chunks, so a range over the result is a no-op. A
+// non-positive size yields a single chunk containing all ids.
 func chunkUUIDs(ids []uuid.UUID, size int) [][]uuid.UUID {
 	if len(ids) == 0 {
 		return nil
+	}
+	if size <= 0 {
+		// A non-positive batch size would divide by zero in the capacity hint
+		// below and never advance the loop; treat it as "no batching" and
+		// return all ids as a single chunk.
+		return [][]uuid.UUID{ids}
 	}
 	chunks := make([][]uuid.UUID, 0, (len(ids)+size-1)/size)
 	for i := 0; i < len(ids); i += size {

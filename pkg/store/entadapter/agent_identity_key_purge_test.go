@@ -54,6 +54,12 @@ func TestChunkUUIDs(t *testing.T) {
 		{name: "off-by-one remainder", count: 5, size: 2, wantChunks: []int{2, 2, 1}},
 		{name: "size larger than input", count: 3, size: 10, wantChunks: []int{3}},
 		{name: "size of 1", count: 3, size: 1, wantChunks: []int{1, 1, 1}},
+		// A non-positive size must not panic (it previously divided by zero
+		// in the capacity hint) and instead degrades to a single chunk
+		// holding every id.
+		{name: "size of 0", count: 3, size: 0, wantChunks: []int{3}},
+		{name: "negative size", count: 3, size: -1, wantChunks: []int{3}},
+		{name: "negative size with empty ids", count: 0, size: -1, wantChunks: nil},
 	}
 
 	for _, tt := range tests {
@@ -64,7 +70,9 @@ func TestChunkUUIDs(t *testing.T) {
 			require.Len(t, chunks, len(tt.wantChunks))
 			var reassembled []uuid.UUID
 			for i, chunk := range chunks {
-				assert.LessOrEqual(t, len(chunk), tt.size, "chunk %d exceeds size", i)
+				if tt.size > 0 {
+					assert.LessOrEqual(t, len(chunk), tt.size, "chunk %d exceeds size", i)
+				}
 				assert.Equal(t, tt.wantChunks[i], len(chunk), "chunk %d length", i)
 				reassembled = append(reassembled, chunk...)
 			}
