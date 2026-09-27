@@ -284,10 +284,25 @@ func TestDashboardGoldenClaudeUsagePoints(t *testing.T) {
 	require.Len(t, tokens.Output, 1)
 	require.Empty(t, tokens.CacheRead, "cache_read was never emitted (its value was 0)")
 	require.Len(t, tokens.CacheWrite, 1)
+	// Sum every day bucket, not just Points[0] (N1): queryGroupedTimeSeries
+	// buckets increments by the end time's UTC calendar day, and the
+	// fixture's two flushes are only ~5s apart (loadUsageGoldenFlushes
+	// shifts both by the same offset), so a run that happens to start in the
+	// few seconds before UTC midnight puts them in different day buckets.
+	// QueryModelCalls' callsTotal above already sums this way; token_type
+	// totals need the same treatment to avoid a rare, real day-boundary
+	// flake.
+	sumPoints := func(series LabeledTimeSeries) int64 {
+		var total int64
+		for _, p := range series.Points {
+			total += p.Value
+		}
+		return total
+	}
 	dashboardByType := map[string]int64{
-		telemetrycontract.TokenTypeInput:      tokens.Input[0].Points[0].Value,
-		telemetrycontract.TokenTypeOutput:     tokens.Output[0].Points[0].Value,
-		telemetrycontract.TokenTypeCacheWrite: tokens.CacheWrite[0].Points[0].Value,
+		telemetrycontract.TokenTypeInput:      sumPoints(tokens.Input[0]),
+		telemetrycontract.TokenTypeOutput:     sumPoints(tokens.Output[0]),
+		telemetrycontract.TokenTypeCacheWrite: sumPoints(tokens.CacheWrite[0]),
 	}
 	for tokenType, want := range byTokenType {
 		assert.Equal(t, want, dashboardByType[tokenType], "dashboard token_type=%s value must equal the last cumulative value, not the raw point sum", tokenType)
