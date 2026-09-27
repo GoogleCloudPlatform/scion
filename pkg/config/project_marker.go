@@ -35,34 +35,6 @@ type ProjectMarker struct {
 	Type        string `yaml:"type,omitempty"` // "shadow" for shadowed projects
 }
 
-// UnmarshalYAML implements custom unmarshaling to handle legacy "grove-" tags.
-func (m *ProjectMarker) UnmarshalYAML(value *yaml.Node) error {
-	type Alias ProjectMarker
-	var aux struct {
-		GroveID   string `yaml:"grove-id"`
-		GroveName string `yaml:"grove-name"`
-		GroveSlug string `yaml:"grove-slug"`
-		Alias     Alias  `yaml:",inline"`
-	}
-
-	if err := value.Decode(&aux); err != nil {
-		return err
-	}
-
-	*m = ProjectMarker(aux.Alias)
-
-	if m.ProjectID == "" {
-		m.ProjectID = aux.GroveID
-	}
-	if m.ProjectName == "" {
-		m.ProjectName = aux.GroveName
-	}
-	if m.ProjectSlug == "" {
-		m.ProjectSlug = aux.GroveSlug
-	}
-	return nil
-}
-
 // IsShadow returns true if this marker represents a shadowed project.
 func (m *ProjectMarker) IsShadow() bool {
 	return m.Type == "shadow"
@@ -107,8 +79,15 @@ func (m ProjectMarker) ExternalProjectPath() (string, error) {
 	return projectPath, nil
 }
 
-// ReadProjectMarker reads and parses a .scion marker file.
+// ReadProjectMarker reads and parses a .scion marker file. A legacy
+// grove-id/grove-name/grove-slug key is migrated to project-id/project-name/
+// project-slug as a side effect on every call (see migrateLegacyMarkerFile;
+// each migration event is reported at most once per process, but the
+// filesystem is always re-checked): when the rewrite cannot happen (e.g. a
+// read-only filesystem), the legacy value is used for this call only.
 func ReadProjectMarker(path string) (*ProjectMarker, error) {
+	overrides := migrateLegacyMarkerFile(path)
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -116,6 +95,15 @@ func ReadProjectMarker(path string) (*ProjectMarker, error) {
 	var marker ProjectMarker
 	if err := yaml.Unmarshal(data, &marker); err != nil {
 		return nil, fmt.Errorf("invalid project marker at %s: %w", path, err)
+	}
+	if marker.ProjectID == "" {
+		marker.ProjectID = overrides["project-id"]
+	}
+	if marker.ProjectName == "" {
+		marker.ProjectName = overrides["project-name"]
+	}
+	if marker.ProjectSlug == "" {
+		marker.ProjectSlug = overrides["project-slug"]
 	}
 	if marker.ProjectID == "" || marker.ProjectSlug == "" {
 		return nil, fmt.Errorf("invalid project marker at %s: missing project-id or project-slug", path)

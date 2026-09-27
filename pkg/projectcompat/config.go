@@ -23,13 +23,6 @@ const (
 	// it is still used to map SCION_GROVE_ID onto the versioned settings
 	// loader's raw field name (see EnvProjectIDConfigKey).
 	ConfigGroveIDKey = "grove_id"
-	// ConfigHubGroveIDKey is the legacy hub.grove_id settings-FILE key. It
-	// keeps working as a read-only fallback when a settings file still has
-	// a `hub: grove_id:` entry; it is not accepted as `config get/set`
-	// key-name input. Do not delete: pkg/config/koanf.go and
-	// pkg/config/settings_v1.go still read it, and a follow-up change
-	// migrates settings files that still use it.
-	ConfigHubGroveIDKey = "hub.grove_id"
 
 	EnvProjectID    = "SCION_PROJECT_ID"
 	EnvGroveID      = "SCION_GROVE_ID"

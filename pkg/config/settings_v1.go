@@ -1322,25 +1322,46 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 
 	// 2. Load global settings (~/.scion/settings.yaml or .json)
 	globalDir, _ := GetGlobalDir()
+	var globalMigratedHub bool
 	if globalDir != "" {
-		if err := loadSettingsFile(k, globalDir); err != nil {
+		var err error
+		globalMigratedHub, err = loadSettingsFile(k, globalDir)
+		if err != nil {
 			return nil, err
 		}
+	}
+	// Captured once, right after the global layer loads — see
+	// LoadSettingsKoanf's identical comment for why both step 3 and step 4
+	// compare against this same value, and why a migrated global value is
+	// not compared against at all.
+	globalHubProjectID := k.String(projectcompat.ConfigHubProjectIDKey)
+	if globalMigratedHub {
+		globalHubProjectID = ""
 	}
 
 	// 3. Load in-repo project settings (.scion/settings.yaml)
 	effectiveProjectPath := resolveEffectiveProjectPath(projectPath)
 	if projectPath != "" && projectPath != globalDir {
-		if err := loadSettingsFile(k, projectPath); err != nil {
+		migratedHub, err := loadSettingsFile(k, projectPath)
+		if err != nil {
 			return nil, err
+		}
+		if migratedHub {
+			logHubProjectIDPrecedenceChange(k, projectPath, globalHubProjectID)
 		}
 		warnIfInRepoHasGlobalKeys(projectPath, effectiveProjectPath)
 	}
 
-	// 4. Load external project config settings (overrides in-repo for split storage)
+	// 4. Load external project config settings (overrides in-repo for split
+	// storage), and where a plain project's settings.yaml is actually loaded
+	// when projectPath is "" (cwd-resolved) — see LoadSettingsKoanf's step 4.
 	if effectiveProjectPath != "" && effectiveProjectPath != globalDir && effectiveProjectPath != projectPath {
-		if err := loadSettingsFile(k, effectiveProjectPath); err != nil {
+		migratedHub, err := loadSettingsFile(k, effectiveProjectPath)
+		if err != nil {
 			return nil, err
+		}
+		if migratedHub {
+			logHubProjectIDPrecedenceChange(k, effectiveProjectPath, globalHubProjectID)
 		}
 	}
 
@@ -1377,15 +1398,6 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 		}
 	}
 
-	// Remap hub.grove_id to hub.project_id for backward compatibility.
-	// Old settings files may still use grove_id; the V1HubClientConfig struct
-	// now uses koanf:"project_id", so grove_id values must be copied across.
-	if k.Exists(projectcompat.ConfigHubGroveIDKey) && !k.Exists(projectcompat.ConfigHubProjectIDKey) {
-		_ = k.Load(confmap.Provider(map[string]interface{}{
-			projectcompat.ConfigHubProjectIDKey: k.String(projectcompat.ConfigHubGroveIDKey),
-		}, "."), nil)
-	}
-
 	// Unmarshal into VersionedSettings struct
 	settings := &VersionedSettings{
 		Runtimes:       make(map[string]V1RuntimeConfig),
@@ -1413,11 +1425,10 @@ func versionedEnvKeyMapper(s string) string {
 		return mapped
 	}
 	if isRemovedLegacyEnv(s) {
-		// SCION_HUB_GROVE_ID is no longer read, not even via the
-		// generic "hub_" mapping below, which would otherwise land on
-		// hub.grove_id and get remapped to hub.project_id below (a file
-		// fallback). Returning "" makes the env provider
-		// drop the variable entirely, the same idiom used for
+		// SCION_HUB_GROVE_ID is no longer read, not even via the generic
+		// "hub_" mapping below, which would otherwise land on the
+		// unrecognised key hub.grove_id. Returning "" makes the env
+		// provider drop the variable entirely, the same idiom used for
 		// SCION_OTEL_INSECURE above. WarnRemovedLegacyEnv reports it
 		// separately.
 		return ""
@@ -2829,6 +2840,12 @@ func LoadSingleFileVersioned(dir string) (*VersionedSettings, error) {
 		return &VersionedSettings{SchemaVersion: "1"}, nil
 	}
 
+	// Migrate any legacy hub.grove_id key to hub.project_id in place before
+	// reading, so the parse below sees the canonical key directly. override
+	// covers the case where the rewrite could not happen (read-only
+	// filesystem, not owner): the value to use in memory for this call.
+	_, override := migrateProjectSettingsFile(settingsPath)
+
 	data, err := os.ReadFile(settingsPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read %s: %w", settingsPath, err)
@@ -2851,21 +2868,11 @@ func LoadSingleFileVersioned(dir string) (*VersionedSettings, error) {
 		vs.SchemaVersion = "1"
 	}
 
-	// Backward compatibility: old settings files may use hub.grove_id instead of
-	// hub.project_id. Since the struct yaml tag is now "project_id", grove_id
-	// values are not unmarshaled automatically. Check the raw YAML and remap.
-	if vs.Hub == nil || vs.Hub.ProjectID == "" {
-		var raw map[string]interface{}
-		if err := yamlv3.Unmarshal(data, &raw); err == nil {
-			if hub, ok := raw["hub"].(map[string]interface{}); ok {
-				if gid, ok := hub["grove_id"].(string); ok && gid != "" {
-					if vs.Hub == nil {
-						vs.Hub = &V1HubClientConfig{}
-					}
-					vs.Hub.ProjectID = gid
-				}
-			}
+	if override != "" && (vs.Hub == nil || vs.Hub.ProjectID == "") {
+		if vs.Hub == nil {
+			vs.Hub = &V1HubClientConfig{}
 		}
+		vs.Hub.ProjectID = override
 	}
 
 	return &vs, nil

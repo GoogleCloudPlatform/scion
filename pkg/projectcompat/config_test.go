@@ -42,7 +42,7 @@ func TestIsHubProjectIDConfigKey(t *testing.T) {
 	}{
 		{ConfigHubProjectIDKey, true},
 		{ConfigHubProjectIDJSON, true},
-		{ConfigHubGroveIDKey, false},
+		{"hub.grove_id", false},
 		{"hub.groveId", false},
 		{"hub.endpoint", false},
 	}

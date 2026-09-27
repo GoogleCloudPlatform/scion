@@ -159,7 +159,7 @@ cli:
 hub:
   enabled: true
   endpoint: "https://hub.example.com"
-  grove_id: "abc-123"
+  project_id: "abc-123"
   local_only: false
 runtimes:
   docker:
@@ -663,7 +663,7 @@ server:
 hub:
   enabled: true
   endpoint: "https://hub.example.com"
-  grove_id: "grove-abc-123"
+  project_id: "grove-abc-123"
   local_only: false
 
 cli:

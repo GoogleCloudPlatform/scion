@@ -1364,7 +1364,7 @@ func LoadFileOnlyKoanf() *koanf.Koanf {
 		slog.Warn("LoadFileOnlyKoanf: failed to resolve global settings directory", "error", err)
 	}
 	if globalDir != "" {
-		if err := loadSettingsFile(k, globalDir); err != nil {
+		if _, err := loadSettingsFile(k, globalDir); err != nil {
 			slog.Warn("LoadFileOnlyKoanf: failed to load settings file", "dir", globalDir, "error", err)
 		}
 	}
@@ -1462,7 +1462,7 @@ func LoadBootstrapKoanf() *koanf.Koanf {
 		slog.Warn("LoadBootstrapKoanf: failed to resolve global settings directory", "error", err)
 	}
 	if globalDir != "" {
-		if err := loadSettingsFile(k, globalDir); err != nil {
+		if _, err := loadSettingsFile(k, globalDir); err != nil {
 			slog.Warn("LoadBootstrapKoanf: failed to load settings file", "dir", globalDir, "error", err)
 		}
 		loadServerConfigFile(k, globalDir)
