@@ -45,6 +45,16 @@ func warnRemovedLegacyEnv() {
 		// this process's own reporting.
 		config.SetProjectMigrationReporter(stderrReporter{})
 		config.WarnRemovedLegacyEnv(os.Getenv, stderrReporter{})
+
+		// Migrate the global ~/.scion layout before any command scans
+		// ~/.scion/projects or ~/.scion/project-configs: this Once-guarded
+		// hook already runs before Execute()'s early config.LoadSettings
+		// call and before PersistentPreRunE's own project/settings
+		// resolution, so every discovery and project-load path downstream
+		// sees the canonical layout already in place.
+		if globalDir, err := config.GetGlobalDir(); err == nil {
+			config.MigrateLegacyGlobalLayout(globalDir, stderrReporter{})
+		}
 	})
 }
 

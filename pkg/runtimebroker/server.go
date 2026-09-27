@@ -947,6 +947,12 @@ func (s *Server) Start(ctx context.Context) error {
 	// explicitly so all three boot hooks (CLI, hub, broker) are visible at
 	// their call sites.
 	config.SetProjectMigrationReporter(config.NewSlogReporter())
+	// Migrate the global ~/.scion layout before scanning projects/ below.
+	if globalDir, err := config.GetGlobalDir(); err == nil {
+		config.MigrateLegacyGlobalLayoutOnce(globalDir, config.NewSlogReporter())
+	} else {
+		slog.Warn("skipping legacy layout migration: could not resolve global directory", "error", err)
+	}
 
 	// Discover auxiliary runtimes (e.g. Kubernetes) from project settings
 	// so that agents running on non-default runtimes can be found after

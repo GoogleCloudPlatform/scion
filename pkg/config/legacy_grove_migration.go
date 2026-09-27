@@ -633,9 +633,11 @@ func readTrimmed(path string) string {
 }
 
 // manualRenameCommand returns the copy-pasteable command a Skipped report
-// suggests the user run by hand.
+// suggests the user run by hand. Both paths are shell-quoted: they can come
+// from a project directory, a HOME, or an entry name containing a space or
+// another shell metacharacter, none of which scion controls.
 func manualRenameCommand(old, newPath string) string {
-	return fmt.Sprintf("mv %s %s", old, newPath)
+	return fmt.Sprintf("mv %s %s", shellQuote(old), shellQuote(newPath))
 }
 
 // unwrapErrno returns the innermost errno-level message from a link or path
@@ -652,6 +654,358 @@ func unwrapErrno(err error) string {
 		return pathErr.Err.Error()
 	}
 	return err.Error()
+}
+
+// legacyProjectsDirName and legacyProjectConfigsDirName are the pre-rename
+// names of the two global ~/.scion directories migrated by
+// MigrateLegacyGlobalLayout. Once migrated to their projectcompat.ProjectsDir
+// / ProjectConfigsDir replacements, these names are never read again outside
+// this file, with one exception: pkg/runtimebroker still reads
+// config.GroveConfigsDir (which re-exports projectcompat.GroveConfigsDir)
+// directly, so that constant stays exported. projectcompat.GrovesDir has no
+// other reader left, but is kept alongside it for symmetry.
+const (
+	legacyProjectsDirName       = "groves"
+	legacyProjectConfigsDirName = "grove-configs"
+)
+
+// legacyGlobalRoot pairs one legacy global ~/.scion directory with its
+// canonical replacement.
+type legacyGlobalRoot struct {
+	legacyName    string
+	canonicalName string
+}
+
+// legacyGlobalRoots lists the directories MigrateLegacyGlobalLayout moves,
+// in order.
+var legacyGlobalRoots = []legacyGlobalRoot{
+	{legacyName: legacyProjectsDirName, canonicalName: projectcompat.ProjectsDir},
+	{legacyName: legacyProjectConfigsDirName, canonicalName: projectcompat.ProjectConfigsDir},
+}
+
+// renameDir renames one legacy global-root entry to its canonical
+// destination for migrateLegacyGlobalEntry. It calls syscall.Rename
+// directly rather than os.Rename: os.Rename deliberately refuses to ever
+// replace an existing directory (see the newname-is-a-directory check in the
+// standard library's os.rename), but this migration relies on the underlying
+// rename(2) semantics it deliberately routes around — the destination may
+// already exist as an *empty* directory, which rename(2) replaces
+// atomically the same as if it were absent. The result is wrapped in an
+// os.LinkError so the same errno-classification helpers used elsewhere in
+// this file work unchanged (isDirConflictError, isCrossDeviceError,
+// unwrapErrno, and errors.Is(_, fs.ErrNotExist)).
+//
+// Tests override this var directly to simulate a cross-device move (EXDEV)
+// without needing an actual such filesystem.
+var renameDir = func(oldname, newname string) error {
+	if err := syscall.Rename(oldname, newname); err != nil {
+		return &os.LinkError{Op: "rename", Old: oldname, New: newname, Err: err}
+	}
+	return nil
+}
+
+// MigrateLegacyGlobalLayout moves the legacy ~/.scion/groves and
+// ~/.scion/grove-configs directories into their canonical replacements,
+// ~/.scion/projects and ~/.scion/project-configs, leaving a relative symlink
+// at each old entry so that anything holding the old absolute path outside
+// scion's control — git worktree gitdir pointers, container bind-mount
+// sources, hub LocalPath fields, a user's shell — keeps resolving. Neither
+// legacy root itself is ever removed, since it now holds those symlinks.
+//
+// Callers are expected to run this once per process, before anything scans
+// the canonical directories: the CLI from its Once-guarded boot hook, and
+// the hub and runtime broker from their own boot hooks, all before
+// discovery or project resolution. A second call in the same process is
+// silent, because by then every entry under the legacy roots is either
+// already a symlink (migrated, or user-managed) or gone.
+//
+// Safe to call concurrently, from multiple goroutines in this process and
+// from multiple processes on a shared filesystem: entries move with
+// syscall.Rename, which is atomic, so exactly one caller wins each entry.
+// Every other caller either finds the entry already gone, or — having
+// raced past its own checks — finds it already turned into this migration's
+// own symlink, and moves on without reporting anything either way. Never
+// returns an error that should abort startup; every problem is reported via
+// report instead.
+func MigrateLegacyGlobalLayout(scionHome string, report Reporter) {
+	for _, root := range legacyGlobalRoots {
+		migrateLegacyGlobalRoot(scionHome, root, report)
+	}
+}
+
+// migrateLegacyGlobalLayoutOnce guards MigrateLegacyGlobalLayoutOnce so that
+// a single process migrates the global layout at most once, no matter how
+// many boot hooks call it. This matters for a combined
+// `scion server start --enable-hub --enable-runtime-broker` process: both
+// the hub and the runtime broker boot hooks call MigrateLegacyGlobalLayoutOnce,
+// and without a shared guard each would run the whole migration
+// independently — harmless for a successful migration, which is naturally
+// idempotent, but every Conflict or Skipped would then be reported twice.
+var migrateLegacyGlobalLayoutOnce sync.Once
+
+// MigrateLegacyGlobalLayoutOnce is the boot-hook entry point for hub server
+// boot (cmd/server_foreground.go) and runtime broker boot
+// (pkg/runtimebroker/server.go): it behaves like MigrateLegacyGlobalLayout,
+// but only the first call in the process has any effect. Mirrors
+// WarnRemovedLegacyEnvOnce, which the same two boot hooks already share for
+// the same reason.
+func MigrateLegacyGlobalLayoutOnce(scionHome string, report Reporter) {
+	migrateLegacyGlobalLayoutOnce.Do(func() {
+		MigrateLegacyGlobalLayout(scionHome, report)
+	})
+}
+
+// migrateLegacyGlobalRoot migrates one legacy root (either ~/.scion/groves or
+// ~/.scion/grove-configs) into its canonical replacement.
+func migrateLegacyGlobalRoot(scionHome string, root legacyGlobalRoot, report Reporter) {
+	legacyRoot := filepath.Join(scionHome, root.legacyName)
+	canonicalRoot := filepath.Join(scionHome, root.canonicalName)
+
+	info, err := os.Lstat(legacyRoot)
+	if err != nil {
+		// Covers the common case (ENOENT) and any other Lstat failure: there
+		// is nothing this process can usefully migrate either way.
+		return
+	}
+
+	if info.Mode()&os.ModeSymlink != 0 {
+		if legacyRootAlreadyMigrated(legacyRoot, canonicalRoot) {
+			// Already migrated: the legacy root is a symlink that resolves
+			// to the canonical root itself — exactly what a successful
+			// root-symlink migration (or the manual command below) leaves
+			// behind. Nothing left to report, the same as a migrated
+			// per-entry symlink.
+			return
+		}
+		// User-managed: something else points the legacy name somewhere
+		// specific. Leave it alone rather than guessing. The suggested
+		// command renames the symlink itself (never its target's content),
+		// so it is O(1) regardless of what the link points at, works for an
+		// empty or dotfile-only target, and never crosses filesystems. It
+		// then leaves a symlink at the old name pointing at the new one, the
+		// same way a migrated entry does — recognised as such by the check
+		// above on every later run — so old absolute references to
+		// legacyRoot keep resolving.
+		report.Skipped(legacyRoot,
+			"the legacy directory is a symlink",
+			fmt.Sprintf("{ [ ! -e %s ] || rmdir %s; } && mv %s %s && ln -s %s %s",
+				shellQuote(canonicalRoot), shellQuote(canonicalRoot), shellQuote(legacyRoot), shellQuote(canonicalRoot),
+				shellQuote(filepath.Base(canonicalRoot)), shellQuote(legacyRoot)))
+		return
+	}
+
+	if err := os.MkdirAll(canonicalRoot, info.Mode().Perm()); err != nil {
+		report.Skipped(legacyRoot, unwrapErrno(err), manualRenameCommand(legacyRoot, canonicalRoot))
+		return
+	}
+
+	entries, err := os.ReadDir(legacyRoot)
+	if err != nil {
+		// canonicalRoot already exists at this point (MkdirAll above
+		// succeeded), so a bare "mv legacyRoot canonicalRoot" would nest the
+		// legacy root inside it instead of merging entries. Fixing
+		// permissions and letting the automated per-entry path run also
+		// creates the per-entry symlinks, which a manual move would not.
+		report.Skipped(legacyRoot, unwrapErrno(err),
+			fmt.Sprintf("chmod u+rwx %s, then re-run scion", shellQuote(legacyRoot)))
+		return
+	}
+
+	for _, entry := range entries {
+		migrateLegacyGlobalEntry(legacyRoot, canonicalRoot, root.canonicalName, entry, report)
+	}
+}
+
+// migrateLegacyGlobalEntry migrates one entry of a legacy global root.
+func migrateLegacyGlobalEntry(legacyRoot, canonicalRoot, canonicalRootName string, entry os.DirEntry, report Reporter) {
+	name := entry.Name()
+	src := filepath.Join(legacyRoot, name)
+	dst := filepath.Join(canonicalRoot, name)
+	relLink := filepath.Join("..", canonicalRootName, name)
+
+	if entry.Type()&os.ModeSymlink != 0 {
+		removeDanglingOwnGlobalSymlink(src, relLink)
+		// Already migrated (the symlink points at the canonical entry), or
+		// user-managed (it points somewhere else): either way, leave it.
+		return
+	}
+
+	srcInfo, err := os.Lstat(src)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			// A concurrent process already moved it.
+			return
+		}
+		// A real failure (e.g. EACCES on an unsearchable legacy root):
+		// report it. Returning silently here would drop the entry from
+		// migration — and, since the pkg/config fallbacks that used to read
+		// the legacy directory are gone, from discovery too — with no
+		// warning at all.
+		report.Skipped(src, unwrapErrno(err), manualDirMoveAndLinkCommand(src, dst, relLink))
+		return
+	}
+	if srcInfo.Mode()&os.ModeSymlink != 0 {
+		// A concurrent process finished migrating this entry — renamed it
+		// and created the symlink this migration leaves behind — between
+		// the caller's ReadDir snapshot (which still saw a plain directory)
+		// and this Lstat. Nothing left for this caller to do.
+		return
+	}
+	if !srcInfo.IsDir() {
+		// Not a directory. rename(2) would otherwise replace a same-named
+		// canonical *file* silently — the ENOTEMPTY/EEXIST no-clobber
+		// guard below only ever fires when the source is a directory too —
+		// so a stray non-directory entry is left alone rather than risking
+		// that clobber. This is not expected in practice: every entry
+		// under these roots is normally a project directory.
+		report.Skipped(src, "not a directory", manualDirMoveAndLinkCommand(src, dst, relLink))
+		return
+	}
+	if uid, ok := fileOwnerUID(srcInfo); ok && uid != geteuid() {
+		report.Skipped(src, "owned by another user", manualDirMoveAndLinkCommand(src, dst, relLink))
+		return
+	}
+
+	err = renameDir(src, dst)
+	switch {
+	case err == nil:
+		// EEXIST here means a concurrent process already created the
+		// symlink; ignore it rather than fail a migration that otherwise
+		// fully succeeded.
+		if linkErr := os.Symlink(relLink, src); linkErr != nil && !errors.Is(linkErr, fs.ErrExist) {
+			report.Skipped(src, unwrapErrno(linkErr), manualSymlinkCommand(src, relLink))
+			return
+		}
+		report.Migrated(src, dst, false)
+	case errors.Is(err, fs.ErrNotExist):
+		// A concurrent process already migrated it.
+	case raceLostAfterConcurrentMigration(src):
+		// A concurrent process finished migrating this same entry between
+		// our Lstat above and this rename call: src is no longer the plain
+		// directory we just confirmed it to be, so the rename failed
+		// (typically EISDIR, since dst is now a non-empty directory and
+		// src is a symlink). Treat it exactly like the ENOENT case above:
+		// nothing left for this caller to do or report. A bare Skipped
+		// here would be actively harmful — its manual mv would move this
+		// migration's own symlink into the project and break every old
+		// absolute path pointing at it.
+	case isDirConflictError(err):
+		report.Conflict(src, dst, fmt.Sprintf(
+			"both %s and %s exist; using %s. Inspect %s and remove it or merge manually.",
+			src, dst, dst, src))
+	case isCrossDeviceError(err):
+		// Never copy: workspaces under these directories can be many GB.
+		report.Skipped(src, "on a different filesystem", manualDirMoveAndLinkCommand(src, dst, relLink))
+	default:
+		report.Skipped(src, unwrapErrno(err), manualDirMoveAndLinkCommand(src, dst, relLink))
+	}
+}
+
+// raceLostAfterConcurrentMigration reports whether src is now gone or a
+// symlink, which can only be true here because a concurrent process finished
+// migrating this same entry between the caller's own Lstat (which confirmed
+// a plain directory) and its rename call: nothing else ever turns that
+// directory into a symlink, or removes it, at the same path. A different
+// Lstat error (e.g. EACCES) is a real failure, not a lost race, so it
+// returns false and lets the caller's switch fall through to classify the
+// original rename error instead of masking it.
+func raceLostAfterConcurrentMigration(src string) bool {
+	info, err := os.Lstat(src)
+	if err != nil {
+		return errors.Is(err, fs.ErrNotExist)
+	}
+	return info.Mode()&os.ModeSymlink != 0
+}
+
+// legacyRootAlreadyMigrated reports whether legacyRoot, already known to be a
+// symlink, resolves to the same place as canonicalRoot: the state left
+// behind by a successful root-symlink migration (this migrator's own
+// suggested command, or the equivalent by hand), regardless of whether the
+// link was written as a relative or an absolute path. Comparing the fully
+// resolved paths (rather than the raw link text) means it also recognises
+// the state after further symlinks are layered on top. canonicalRoot not
+// existing, or the link resolving anywhere else, means "not recognised as
+// already migrated" — report normally rather than guessing.
+func legacyRootAlreadyMigrated(legacyRoot, canonicalRoot string) bool {
+	resolvedLegacy, err := filepath.EvalSymlinks(legacyRoot)
+	if err != nil {
+		return false
+	}
+	resolvedCanonical, err := filepath.EvalSymlinks(canonicalRoot)
+	if err != nil {
+		return false
+	}
+	return resolvedLegacy == resolvedCanonical
+}
+
+// removeDanglingOwnGlobalSymlink removes the per-entry symlink this migration
+// leaves behind, once its target has been deleted: a leftover from an
+// earlier migration whose destination was later removed. A symlink whose
+// target still exists, or one that points anywhere other than wantTarget, is
+// left alone — the latter means something other than this migration manages
+// it. Only a target Stat failing with "not exist" proves the link is
+// dangling; any other Stat error (e.g. a permission error on the target's
+// parent) is not proof of anything and leaves the link untouched.
+func removeDanglingOwnGlobalSymlink(src, wantTarget string) {
+	if _, err := os.Stat(src); err == nil || !errors.Is(err, fs.ErrNotExist) {
+		return // target exists, or the check failed for some other reason.
+	}
+	target, err := os.Readlink(src)
+	if err != nil || target != wantTarget {
+		return
+	}
+	_ = os.Remove(src)
+}
+
+// isDirConflictError reports whether err from renameDir indicates the
+// destination is a non-empty directory (ENOTEMPTY) or otherwise occupied
+// (EEXIST) — i.e. both the legacy and canonical entries exist and need a
+// human decision, as opposed to some other failure that should be reported
+// as Skipped outright.
+func isDirConflictError(err error) bool {
+	var linkErr *os.LinkError
+	if !errors.As(err, &linkErr) {
+		return false
+	}
+	return errors.Is(linkErr.Err, syscall.ENOTEMPTY) || errors.Is(linkErr.Err, syscall.EEXIST)
+}
+
+// isCrossDeviceError reports whether err from renameDir indicates the
+// legacy and canonical roots live on different filesystems (EXDEV).
+func isCrossDeviceError(err error) bool {
+	var linkErr *os.LinkError
+	if !errors.As(err, &linkErr) {
+		return false
+	}
+	return errors.Is(linkErr.Err, syscall.EXDEV)
+}
+
+// manualDirMoveAndLinkCommand returns the copy-pasteable command a Skipped
+// report suggests when a human needs to both move a directory by hand and
+// leave the same relative symlink an automated run would have created, so a
+// later automated run still finds a migrated entry there. Every path operand
+// is shell-quoted: entry names come from the filesystem, not from scion, so
+// they can contain spaces or other shell metacharacters.
+func manualDirMoveAndLinkCommand(src, dst, relLink string) string {
+	return fmt.Sprintf("mv %s %s && ln -s %s %s",
+		shellQuote(src), shellQuote(dst), shellQuote(relLink), shellQuote(src))
+}
+
+// manualSymlinkCommand returns the copy-pasteable command a Skipped report
+// suggests when a directory move succeeded but leaving the symlink behind
+// failed.
+func manualSymlinkCommand(src, relLink string) string {
+	return fmt.Sprintf("ln -s %s %s", shellQuote(relLink), shellQuote(src))
+}
+
+// shellQuote wraps s in single quotes for safe inclusion in the
+// copy-pasteable commands a Skipped report suggests, so a path containing a
+// space or another shell metacharacter (e.g. a HOME of "/Users/Jane Doe")
+// doesn't silently split into extra operands when a user copy-pastes the
+// command. A literal single quote in s is escaped the standard POSIX way:
+// close the quoted string, emit an escaped quote, and reopen it.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // gitTrackedTimeout bounds how long gitTracked waits for git before giving

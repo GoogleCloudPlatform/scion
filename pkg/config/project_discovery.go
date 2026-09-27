@@ -61,8 +61,8 @@ func (g ProjectInfo) AgentsDir() string {
 }
 
 // DiscoverProjects scans for all known projects on this machine.
-// It checks the global project, then scans ~/.scion/project-configs/ and
-// the legacy ~/.scion/grove-configs/ for external and git project configs.
+// It checks the global project, then scans ~/.scion/project-configs/ for
+// external and git project configs.
 func DiscoverProjects() ([]ProjectInfo, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -89,13 +89,9 @@ func DiscoverProjects() ([]ProjectInfo, error) {
 		seenSlugs["global"] = true
 	}
 
-	// 2. Scan project-configs directory (preferred)
+	// 2. Scan project-configs directory
 	projectConfigsDir := filepath.Join(home, GlobalDir, ProjectConfigsDir)
 	projects = scanConfigDir(projects, projectConfigsDir, seenSlugs)
-
-	// 3. Scan legacy grove-configs directory
-	legacyConfigsDir := filepath.Join(home, GlobalDir, GroveConfigsDir)
-	projects = scanConfigDir(projects, legacyConfigsDir, seenSlugs)
 
 	return projects, nil
 }
@@ -241,16 +237,8 @@ func readWorkspaceMarkerForSlug(slug string) (*ProjectMarker, string, error) {
 		return nil, "", err
 	}
 
-	// 1. Try projects/
 	workspacePath := filepath.Join(home, GlobalDir, ProjectsDir, slug)
 	markerPath := filepath.Join(workspacePath, DotScion)
-	if marker, err := ReadProjectMarker(markerPath); err == nil {
-		return marker, workspacePath, nil
-	}
-
-	// 2. Fallback to legacy groves/
-	workspacePath = filepath.Join(home, GlobalDir, GrovesDir, slug)
-	markerPath = filepath.Join(workspacePath, DotScion)
 	if marker, err := ReadProjectMarker(markerPath); err == nil {
 		return marker, workspacePath, nil
 	}
@@ -374,15 +362,14 @@ func RemoveProjectConfig(configPath string) error {
 		parent = filepath.Dir(parent)
 	}
 
-	// Safety: only remove if it's under project-configs/ or legacy grove-configs/
+	// Safety: only remove if it's under project-configs/
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
 	}
 	projectConfigsDir := filepath.Join(home, GlobalDir, ProjectConfigsDir)
-	legacyConfigsDir := filepath.Join(home, GlobalDir, GroveConfigsDir)
 
-	if !strings.HasPrefix(parent, projectConfigsDir) && !strings.HasPrefix(parent, legacyConfigsDir) {
+	if !strings.HasPrefix(parent, projectConfigsDir) {
 		return os.ErrPermission
 	}
 
