@@ -478,7 +478,7 @@ func TestSharedDirFiles_InlineHTMLIsSandboxed(t *testing.T) {
 // The project WebDAV endpoint serves the same workspace directory as
 // workspace/files, so browsers must get the same isolation from it: the
 // sandbox CSP, nosniff (it sniffs extensionless files) and an attachment
-// disposition on GET/HEAD.
+// disposition on every method that returns file bytes (GET, HEAD, POST).
 func TestProjectWebDAV_GetIsSandboxed(t *testing.T) {
 	srv, _ := testServer(t)
 	project, workspacePath := createTestHubManagedProject(t, srv, "DAV Sandbox")
@@ -490,7 +490,7 @@ func TestProjectWebDAV_GetIsSandboxed(t *testing.T) {
 	davURL := fmt.Sprintf("/api/v1/projects/%s/dav", project.ID)
 
 	for _, name := range []string{"report.html", "noext"} {
-		for _, method := range []string{http.MethodGet, http.MethodHead} {
+		for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodPost} {
 			rec := doDavRequest(t, srv, method, davURL+"/"+name, nil, nil)
 			require.Equal(t, http.StatusOK, rec.Code, "%s %s: %s", method, name, rec.Body.String())
 			assertSandboxed(t, rec)
@@ -499,12 +499,15 @@ func TestProjectWebDAV_GetIsSandboxed(t *testing.T) {
 		}
 	}
 
-	// Content is still served unchanged to DAV clients.
-	rec := doDavRequest(t, srv, http.MethodGet, davURL+"/report.html", nil, nil)
-	assert.Equal(t, page, rec.Body.String())
+	// Content is still served unchanged to DAV clients, and POST returns
+	// the same bytes as GET.
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		rec := doDavRequest(t, srv, method, davURL+"/report.html", nil, nil)
+		assert.Equal(t, page, rec.Body.String(), method)
+	}
 
 	// PROPFIND still works and carries no attachment disposition.
-	rec = doDavRequest(t, srv, "PROPFIND", davURL+"/", nil, map[string]string{"Depth": "1"})
+	rec := doDavRequest(t, srv, "PROPFIND", davURL+"/", nil, map[string]string{"Depth": "1"})
 	require.Equal(t, http.StatusMultiStatus, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "report.html")
 	assert.Empty(t, rec.Header().Get("Content-Disposition"))
