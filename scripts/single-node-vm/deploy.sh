@@ -1965,9 +1965,10 @@ info "Creating proxy-to-VM firewall rule (if needed)..."
 # field case (an empty or absent field renders as nothing between the
 # tabs on either side of it, never omitted or reflowed). Split with plain
 # parameter expansion, not `read -d $'\t'`/`IFS=$'\t' read`: bash's `read`
-# classifies tab as "IFS whitespace" and silently strips/collapses a
-# leading or trailing empty field (verified by hand), which would shift
-# every field after it instead of just leaving one blank.
+# classifies tab as "IFS whitespace" and silently collapses a leading
+# empty field, or adjacent tabs around an empty middle field (verified by
+# hand), which would shift every field after it instead of just leaving
+# one blank. A trailing empty field alone splits fine.
 if FW_8080_DESCRIBE="$(gcloud compute firewall-rules describe "${FW_8080_RULE_NAME}" \
     --project="${PROJECT_ID}" \
     --format="value(sourceRanges,allowed[].map().firewall_rule().list(),targetTags)" \
