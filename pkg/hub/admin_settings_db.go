@@ -1203,6 +1203,8 @@ func overlayAccessRequest(d *opsettings.AccessSettings, req *ServerConfigUpdateR
 // dropped (dropEnvOverriddenAccessFields). The written field is then empty,
 // the same as the old replace behaviour; the settings.yaml / SCION_SEED_*
 // value beneath the env value is not recoverable here (ptone/scion#2068).
+// Only this node's env keys are known, so a row seeded by another node may
+// still carry that node's env values.
 // A "managed" base came from an admin write, not env, and is carried as is.
 //
 // It returns the revision the base was read at (0 when no row exists), for
