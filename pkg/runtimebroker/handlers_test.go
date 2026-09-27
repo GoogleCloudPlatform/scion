@@ -3543,6 +3543,55 @@ func TestStartAgentInlineConfigModelUpdatesExistingAgentConfig(t *testing.T) {
 	}
 }
 
+// TestStartAgent_RejectsTraversalName is the regression anchor for
+// startAgent's containment check: id must be a single, clean path element
+// that resolves under the project's agents root before any of
+// applyInlineConfigUpdate, GetSavedProfile, GetSavedPhase, or mgr.Start runs,
+// checked independently of whatever the request routing already filtered.
+func TestStartAgent_RejectsTraversalName(t *testing.T) {
+	srv, mgr := newTestServerWithProvisionCapture()
+
+	projectDir := filepath.Join(t.TempDir(), ".scion")
+	if err := os.MkdirAll(filepath.Join(projectDir, "agents"), 0755); err != nil {
+		t.Fatalf("failed to create projectDir/agents: %v", err)
+	}
+	// Sentinel representing project-level state that must remain untouched
+	// when the request's agent id fails containment.
+	sentinelPath := filepath.Join(projectDir, "scion-agent.json")
+	const sentinelContent = `{"harness":"sentinel-do-not-touch"}`
+	if err := os.WriteFile(sentinelPath, []byte(sentinelContent), 0644); err != nil {
+		t.Fatalf("failed to write sentinel: %v", err)
+	}
+
+	body := fmt.Sprintf(`{
+		"projectPath": %q,
+		"inlineConfig": {
+			"model": "gemini-2.5-pro"
+		}
+	}`, projectDir)
+	// Decodes to id="..", action="start".
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/..%2Fstart", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+	if mgr.startCalled {
+		t.Fatal("expected Start not to be called")
+	}
+
+	data, err := os.ReadFile(sentinelPath)
+	if err != nil {
+		t.Fatalf("sentinel must survive untouched, but read failed: %v", err)
+	}
+	if string(data) != sentinelContent {
+		t.Fatalf("sentinel must survive unmodified, got: %s", data)
+	}
+}
+
 func TestStartAgentInlineConfigPassedForProvisionOnStart(t *testing.T) {
 	srv, mgr := newTestServerWithProvisionCapture()
 
@@ -3846,6 +3895,92 @@ func TestDeleteAgent_HubManagedProject_NoContainer(t *testing.T) {
 	}
 	if mgr.lastDeleteAgentID != agentName {
 		t.Errorf("expected agentID %q, got %q", agentName, mgr.lastDeleteAgentID)
+	}
+}
+
+// TestDeleteAgent_RejectsTraversalName is the regression anchor for
+// deleteAgent's containment check: an agent id must be a single, clean path
+// element that resolves under the project's agents root before any file
+// operation runs, checked independently of whatever the request routing
+// already filtered.
+func TestDeleteAgent_RejectsTraversalName(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.BrokerID = "test-broker-id"
+	cfg.BrokerName = "test-host"
+
+	mgr := &mockManager{agents: []api.AgentInfo{}}
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	srv := New(cfg, mgr, rt)
+
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	projectSlug := "hub-grove"
+	scionDir := filepath.Join(tmpHome, ".scion", "projects", projectSlug, ".scion")
+	if err := os.MkdirAll(filepath.Join(scionDir, "agents"), 0o755); err != nil {
+		t.Fatalf("failed to create scionDir/agents: %v", err)
+	}
+	// Sentinel representing project-level state that must remain untouched
+	// when the request's agent id fails containment.
+	markerPath := filepath.Join(scionDir, "marker.txt")
+	if err := os.WriteFile(markerPath, []byte("keep"), 0o644); err != nil {
+		t.Fatalf("failed to write marker: %v", err)
+	}
+
+	// Decodes to id="..", action="".
+	req := httptest.NewRequest(http.MethodDelete,
+		"/api/v1/agents/..%2F?deleteFiles=true&removeBranch=false", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, rec.Code, rec.Body.String())
+	}
+	if mgr.deleteCalls != 0 {
+		t.Fatalf("expected no Delete calls, got %d", mgr.deleteCalls)
+	}
+	if _, err := os.Stat(markerPath); err != nil {
+		t.Fatalf("project directory must survive untouched, but stat failed: %v", err)
+	}
+	if _, err := os.Stat(scionDir); err != nil {
+		t.Fatalf("project .scion directory must survive untouched, but stat failed: %v", err)
+	}
+}
+
+// TestDeleteAgent_ContainerOnlyRemovalSurvivesBadName is the converse of
+// TestDeleteAgent_RejectsTraversalName: a request that never asks for file
+// cleanup (the default -- no deleteFiles, no softDelete) must still remove a
+// legacy agent recorded under a bad name, by container ID alone, with the
+// containment check never entering the picture. Runtime.Delete acts on
+// containerID, not on any path built from the name, so nothing here is
+// unsafe to allow. This is the independent, non-file-touching removal path
+// that keeps the containment fix from stranding a pre-existing bad-named
+// agent: the check added for the traversal case above must gate only
+// requests that actually touch a file, not every request naming a bad
+// agent.
+func TestDeleteAgent_ContainerOnlyRemovalSurvivesBadName(t *testing.T) {
+	mgr := &mockManager{
+		agents: []api.AgentInfo{
+			{Name: "..", ContainerID: "legacy-bad-name-container"},
+		},
+	}
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	// No deleteFiles, no softDelete: a plain container-record removal.
+	// Decodes to id="..", action="".
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/agents/..%2F", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusNoContent, rec.Code, rec.Body.String())
+	}
+	if mgr.deleteCalls != 1 {
+		t.Fatalf("expected 1 Delete call (container-only removal must still succeed), got %d", mgr.deleteCalls)
+	}
+	if mgr.lastDeleteFiles {
+		t.Fatal("expected deleteFiles to be false for a container-only removal")
 	}
 }
 

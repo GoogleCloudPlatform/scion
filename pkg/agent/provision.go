@@ -40,6 +40,20 @@ import (
 )
 
 func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (bool, error) {
+	// Every path built below joins agentName onto some directory -- the
+	// project's agents dir, the global agents dir, the external per-agent
+	// state dir, or the shared worktree base -- so an unvalidated name could
+	// otherwise resolve outside all of them (e.g. "../sibling"). Containment
+	// under checkAgentDirContained is invariant of which root and
+	// sharedWorkspace value is passed: a name it accepts is a direct,
+	// single-element child of every root; a name it rejects escapes every
+	// root the same way. Validating once here, before any of the joins or
+	// filesystem operations below, is therefore sufficient to guard every
+	// branch regardless of which directory ends up being touched.
+	if _, err := checkAgentDirContained(projectPath, agentName, false); err != nil {
+		return false, fmt.Errorf("delete: %w", err)
+	}
+
 	var agentsDirs []string
 	branchDeleted := false
 	var repoRoot string
@@ -621,6 +635,17 @@ func checkAgentDirContained(projectDir, agentName string, sharedWorkspace bool) 
 		return "", fmt.Errorf("agent %q is not a single path element under %s", agentName, agentsRoot)
 	}
 	return agentDir, nil
+}
+
+// CheckAgentDirContained is the exported form of checkAgentDirContained, for
+// callers outside this package that resolve an agent directory from a
+// request-supplied name and need to verify containment before their own file
+// operations -- e.g. runtimebroker's deleteAgent and startAgent handlers,
+// which run this alongside their own isSingleCleanPathElement check at the
+// request boundary, the same defense-in-depth pairing ProvisionAgent and
+// GetAgent already use within this package.
+func CheckAgentDirContained(projectDir, agentName string, sharedWorkspace bool) (string, error) {
+	return checkAgentDirContained(projectDir, agentName, sharedWorkspace)
 }
 
 func ProvisionAgent(ctx context.Context, agentName string, templateName string, agentImage string, harnessConfig string, projectPath string, profileName string, optionalStatus string, branch string, workspace string, inlineConfig ...*api.ScionConfig) (string, string, *api.ScionConfig, error) {

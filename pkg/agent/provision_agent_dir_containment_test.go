@@ -234,3 +234,47 @@ func TestCheckAgentDirContained_RejectsNameThatCleansToADirectChild(t *testing.T
 		t.Fatalf("expected agentDir %q, got %q", want, agentDir)
 	}
 }
+
+// TestDeleteAgentFiles_RejectsNameOutsideProjectRoot is the regression anchor
+// for DeleteAgentFiles's containment check: unlike GetAgent and
+// ProvisionAgent, DeleteAgentFiles joined agentName onto its candidate
+// directories (the project's agents dir, the global agents dir, the
+// external per-agent state dir, and the shared worktree base) without ever
+// confirming the join stayed a direct, single-element child of the root it
+// was joined onto. This creates a sentinel directory exactly where
+// "../sibling" would land, and confirms DeleteAgentFiles rejects the call --
+// and leaves the sentinel untouched -- before doing anything to the
+// filesystem.
+func TestDeleteAgentFiles_RejectsNameOutsideProjectRoot(t *testing.T) {
+	const outOfRootName = "../sibling"
+
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	scionDir := filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(filepath.Join(scionDir, "agents"), 0755); err != nil {
+		t.Fatalf("MkdirAll scionDir/agents: %v", err)
+	}
+
+	// A "../sibling" name joined onto <scionDir>/agents lands here, a
+	// sibling of "agents" under scionDir.
+	sentinel := filepath.Join(scionDir, "sibling")
+	if err := os.MkdirAll(sentinel, 0755); err != nil {
+		t.Fatalf("MkdirAll sentinel: %v", err)
+	}
+	markerPath := filepath.Join(sentinel, "marker.txt")
+	if err := os.WriteFile(markerPath, []byte("keep"), 0644); err != nil {
+		t.Fatalf("WriteFile marker: %v", err)
+	}
+
+	if _, err := DeleteAgentFiles(outOfRootName, scionDir, false); err == nil {
+		t.Fatal("expected DeleteAgentFiles to reject a name resolving outside the agents root, got nil error")
+	} else if !strings.Contains(err.Error(), "is not a single path element under") {
+		t.Fatalf("expected error to mention 'is not a single path element under' (the containment check), got: %v", err)
+	}
+
+	if _, statErr := os.Stat(markerPath); statErr != nil {
+		t.Fatalf("sentinel must survive untouched, but stat failed: %v", statErr)
+	}
+}

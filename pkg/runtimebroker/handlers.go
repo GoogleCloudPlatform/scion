@@ -1423,6 +1423,44 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 	projectPath := target.projectPath
 	agentProjectID := target.projectID
 
+	filesToDelete := deleteFiles
+	if deleteFiles && projectPath == "" && projectID != "" {
+		// The matched entry has no project path and none could be resolved
+		// for this project. Do not let DeleteAgentFiles fall back to the
+		// broker's CWD project, which may belong to someone else.
+		s.agentLifecycleLog.Warn("Agent delete: no project path for matched agent; skipping file cleanup",
+			"agent_id", id, "project_id", projectID)
+		filesToDelete = false
+	}
+
+	// target.name is joined onto a project directory as a single path
+	// segment by every file operation below -- the soft-delete
+	// agent-info.json update and DeleteTarget's eventual filesystem cleanup
+	// -- so before either one runs it must be exactly that, and the
+	// resolved directory must still be contained under this project's
+	// agents root. A delete that touches no files at all (deleteFiles=false
+	// and not a soft-delete, the default) never joins target.name onto
+	// anything, so it is intentionally left ungated here: rejecting it too
+	// would make a legacy agent with a bad name impossible to remove by
+	// container ID alone, when nothing about that request ever touches the
+	// filesystem.
+	if (softDelete && projectPath != "") || filesToDelete {
+		if !isSingleCleanPathElement(target.name) {
+			span.SetStatus(codes.Error, "invalid agent name")
+			ValidationError(w, "agent id must be a single path element", nil)
+			return
+		}
+		if projectPath != "" {
+			if projectDir, dirErr := config.GetResolvedProjectDir(projectPath); dirErr == nil {
+				if _, containErr := agent.CheckAgentDirContained(projectDir, target.name, false); containErr != nil {
+					span.SetStatus(codes.Error, containErr.Error())
+					ValidationError(w, "agent id resolves outside the project's agent directory", nil)
+					return
+				}
+			}
+		}
+	}
+
 	// If this is a soft-delete, mark agent-info.json with deleted status before cleanup
 	if softDelete && projectPath != "" {
 		deletedAtStr := query.Get("deletedAt")
@@ -1436,16 +1474,6 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 				}
 			}
 		}
-	}
-
-	filesToDelete := deleteFiles
-	if deleteFiles && projectPath == "" && projectID != "" {
-		// The matched entry has no project path and none could be resolved
-		// for this project. Do not let DeleteAgentFiles fall back to the
-		// broker's CWD project, which may belong to someone else.
-		s.agentLifecycleLog.Warn("Agent delete: no project path for matched agent; skipping file cleanup",
-			"agent_id", id, "project_id", projectID)
-		filesToDelete = false
 	}
 
 	_, err = target.mgr.DeleteTarget(ctx, target.name, target.containerID, filesToDelete, projectPath, removeBranch)
@@ -1512,6 +1540,17 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		attribute.String("scion.agent.id", id),
 		attribute.String("scion.project.id", projectID),
 	)
+
+	// id is joined onto a project directory as a single path segment by
+	// every file operation below (applyInlineConfigUpdate, GetSavedProfile,
+	// GetSavedPhase, and ultimately GetAgentDir via mgr.Start), so it must be
+	// exactly that: reject anything that would join as more than one
+	// segment, or as ".." / ".", before any of those joins happens.
+	if !isSingleCleanPathElement(id) {
+		span.SetStatus(codes.Error, "invalid agent id")
+		ValidationError(w, "agent id must be a single path element", nil)
+		return
+	}
 
 	// Read optional task, projectPath, projectSlug, harnessConfig, and resolvedEnv from request body
 	var startReq struct {
@@ -1630,6 +1669,21 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 					opts.ProjectPath = agents[i].ProjectPath
 				}
 				break
+			}
+		}
+	}
+
+	// Once ProjectPath is resolved, confirm id's agent directory actually
+	// resolves under this project's agents root before applyInlineConfigUpdate,
+	// GetSavedProfile, or GetSavedPhase touch it below -- the same
+	// defense-in-depth pairing checkAgentDirContained already provides
+	// against isSingleCleanPathElement inside ProvisionAgent and GetAgent.
+	if opts.ProjectPath != "" {
+		if projectDir, dirErr := config.GetResolvedProjectDir(opts.ProjectPath); dirErr == nil {
+			if _, containErr := agent.CheckAgentDirContained(projectDir, id, startReq.SharedWorkspace); containErr != nil {
+				span.SetStatus(codes.Error, containErr.Error())
+				ValidationError(w, "agent id resolves outside the project's agent directory", nil)
+				return
 			}
 		}
 	}
