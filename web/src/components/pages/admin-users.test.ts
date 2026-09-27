@@ -88,7 +88,23 @@ function queryAll(el: HTMLElement, selector: string): HTMLElement[] {
 }
 
 function roleItems(el: HTMLElement): HTMLElement[] {
-  return queryAll(el, '.change-role-menu sl-menu-item[data-role]');
+  return queryAll(el, '.change-role-menu sl-menu-item');
+}
+
+/** Simulates Shoelace's sl-menu selection: toggle a checkbox item, then emit sl-select. */
+function selectRole(item: HTMLElement): void {
+  const it = item as HTMLElement & { checked: boolean; value: string };
+  // Shoelace is not registered under happy-dom; mirror the properties a
+  // registered sl-menu-item exposes from its attributes.
+  it.value = item.getAttribute('value') ?? '';
+  it.checked = !item.hasAttribute('checked');
+  item.dispatchEvent(
+    new CustomEvent('sl-select', { detail: { item }, bubbles: true, composed: true })
+  );
+}
+
+function roleOf(item: HTMLElement): string | null {
+  return item.getAttribute('value');
 }
 
 function patchCalls() {
@@ -115,7 +131,7 @@ describe('scion-page-admin-users — Change role submenu', () => {
     element = await createComponent([makeUser({ role: 'member' })]);
 
     const items = roleItems(element);
-    expect(items.map((i) => i.dataset.role)).toEqual(['admin', 'member', 'viewer']);
+    expect(items.map(roleOf)).toEqual(['admin', 'member', 'viewer']);
     expect(items.map((i) => i.textContent?.trim())).toEqual(['Admin', 'Member', 'Viewer']);
     expect(queryAll(element, '.change-role-item').length).toBe(1);
   });
@@ -136,12 +152,11 @@ describe('scion-page-admin-users — Change role submenu', () => {
       element = await createComponent([makeUser({ role: current })]);
 
       for (const item of roleItems(element)) {
-        const isCurrent = item.dataset.role === current;
-        expect(item.hasAttribute('disabled'), `${item.dataset.role} disabled`).toBe(isCurrent);
-        expect(item.getAttribute('aria-checked')).toBe(isCurrent ? 'true' : 'false');
-        const check = item.querySelector('sl-icon[name="check2"]') as HTMLElement | null;
-        expect(check).not.toBeNull();
-        expect(check!.getAttribute('style') ?? '').toBe(isCurrent ? '' : 'visibility: hidden');
+        const isCurrent = roleOf(item) === current;
+        expect(item.getAttribute('type'), `${roleOf(item)} type`).toBe('checkbox');
+        expect(item.hasAttribute('disabled'), `${roleOf(item)} disabled`).toBe(isCurrent);
+        expect(item.hasAttribute('checked'), `${roleOf(item)} checked`).toBe(isCurrent);
+        expect(item.hasAttribute('aria-checked')).toBe(false);
       }
     });
   }
@@ -162,12 +177,14 @@ describe('scion-page-admin-users — Change role submenu', () => {
     const user = makeUser({ role: 'member' });
     element = await createComponent([user]);
 
-    const viewer = roleItems(element).find((i) => i.dataset.role === 'viewer')!;
-    viewer.click();
+    const viewer = roleItems(element).find((i) => roleOf(i) === 'viewer')!;
+    selectRole(viewer);
     await (element as HTMLElement & { updateComplete: Promise<boolean> }).updateComplete;
 
-    // Nothing is sent until the change is confirmed.
+    // Nothing is sent until the change is confirmed, and the check mark
+    // stays on the current role (the sl-menu toggle is undone).
     expect(patchCalls()).toHaveLength(0);
+    expect((viewer as HTMLElement & { checked: boolean }).checked).toBe(false);
 
     const dialog = element.shadowRoot?.querySelector('sl-dialog');
     expect(dialog).not.toBeNull();
@@ -191,13 +208,33 @@ describe('scion-page-admin-users — Change role submenu', () => {
     expect(JSON.parse(String((init as RequestInit).body))).toEqual({ role: 'viewer' });
   });
 
-  it('clicking the current (disabled) role does nothing', async () => {
+  it('cancelling the confirmation sends nothing and keeps the current role checked', async () => {
+    element = await createComponent([makeUser({ role: 'member' })]);
+    const admin = roleItems(element).find((i) => roleOf(i) === 'admin')!;
+    selectRole(admin);
+    await (element as HTMLElement & { updateComplete: Promise<boolean> }).updateComplete;
+
+    const dialog = element.shadowRoot?.querySelector('sl-dialog');
+    expect(dialog).not.toBeNull();
+    const cancel = Array.from(dialog!.querySelectorAll('sl-button')).find(
+      (b) => b.textContent?.trim() === 'Cancel'
+    ) as HTMLElement;
+    cancel.click();
+    await (element as HTMLElement & { updateComplete: Promise<boolean> }).updateComplete;
+
+    expect(element.shadowRoot?.querySelector('sl-dialog')).toBeNull();
+    expect(patchCalls()).toHaveLength(0);
+    expect((admin as HTMLElement & { checked: boolean }).checked).toBe(false);
+  });
+
+  it('selecting the current role does nothing', async () => {
     element = await createComponent([makeUser({ role: 'viewer' })]);
-    const viewer = roleItems(element).find((i) => i.dataset.role === 'viewer')!;
-    viewer.click();
+    const viewer = roleItems(element).find((i) => roleOf(i) === 'viewer')!;
+    selectRole(viewer);
     await (element as HTMLElement & { updateComplete: Promise<boolean> }).updateComplete;
     expect(element.shadowRoot?.querySelector('sl-dialog')).toBeNull();
     expect(patchCalls()).toHaveLength(0);
+    expect((viewer as HTMLElement & { checked: boolean }).checked).toBe(true);
   });
 
   it('describes every role', () => {

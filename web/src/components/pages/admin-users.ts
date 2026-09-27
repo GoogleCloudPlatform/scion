@@ -935,27 +935,41 @@ export class ScionPageAdminUsers extends LitElement {
     return html`<sl-menu-item class="change-role-item">
       <sl-icon slot="prefix" name="people"></sl-icon>
       Change role
-      <sl-menu slot="submenu" class="change-role-menu">
+      <sl-menu
+        slot="submenu"
+        class="change-role-menu"
+        @sl-select=${(
+          e: CustomEvent<{ item: HTMLElement & { value: string; checked: boolean } }>
+        ) => this.handleChangeRoleSelect(user, e)}
+      >
         ${HUB_ROLE_OPTIONS.map((role) => {
           const current = user.role === role;
           return html`<sl-menu-item
-            data-role=${role}
-            aria-checked=${current ? 'true' : 'false'}
+            type="checkbox"
+            value=${role}
+            ?checked=${current}
             ?disabled=${current}
-            @click=${() => {
-              if (!current) this.promptChangeRole(user, role);
-            }}
           >
-            <sl-icon
-              slot="prefix"
-              name="check2"
-              style=${current ? '' : 'visibility: hidden'}
-            ></sl-icon>
             ${HUB_ROLE_LABELS[role]}
           </sl-menu-item>`;
         })}
       </sl-menu>
     </sl-menu-item>`;
+  }
+
+  private handleChangeRoleSelect(
+    user: AdminUser,
+    e: CustomEvent<{ item: HTMLElement & { value: string; checked: boolean } }>
+  ): void {
+    const item = e.detail.item;
+    const role = item.value as UserRole;
+    // sl-menu toggles checkbox items before emitting sl-select. The check
+    // mark must keep showing the user's current role until the change is
+    // confirmed and the list reloads, so undo the toggle.
+    item.checked = role === user.role;
+    if (role !== user.role && HUB_ROLE_OPTIONS.includes(role)) {
+      this.promptChangeRole(user, role);
+    }
   }
 
   private promptToggleSuspend(user: AdminUser): void {
