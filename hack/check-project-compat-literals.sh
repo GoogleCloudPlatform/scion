@@ -37,6 +37,7 @@ allowed_paths=(
   "^cmd/notifications.go$"
 
   # Current compatibility and migration tests/fixtures.
+  "^cmd/command_tree_grove_guard_test.go$"
   "^cmd/common_envgather_test.go$"
   "^cmd/config_test.go$"
   "^cmd/conversation_test.go$"
