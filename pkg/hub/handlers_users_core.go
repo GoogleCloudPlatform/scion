@@ -418,7 +418,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 	// Invited users have no real role yet: the stored role is a placeholder and
 	// the role is assigned at first sign-in (see determineUserRole). Reject role
 	// changes so an admin cannot set a role that activation would silently
-	// overwrite. Status changes on invited users remain allowed.
+	// overwrite. Suspending an invited user remains allowed; activation is rejected below.
 	if needsPromote && user.Status == store.UserStatusInvited {
 		writeError(w, http.StatusConflict, ErrCodeConflict, errRoleOnInvitedUser.Error(), nil)
 		return
@@ -698,7 +698,7 @@ var errActivateInvitedUser = errors.New("invited users are activated at first si
 // activatesInvitedUser reports whether a PATCH status would move an invited
 // user straight to active, bypassing first sign-in.
 func activatesInvitedUser(newStatus *string, currentStatus string) bool {
-	return newStatus != nil && *newStatus == "active" && currentStatus == store.UserStatusInvited
+	return newStatus != nil && *newStatus == store.UserStatusActive && currentStatus == store.UserStatusInvited
 }
 
 // bindingMutationKind describes what happened to super-admin bindings during
