@@ -33,7 +33,7 @@ import (
 
 func TestResolveAgentIDForSubscription_Found(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/projects/grove-1/agents" && r.Method == http.MethodGet {
+		if r.URL.Path == "/api/v1/projects/project-1/agents" && r.Method == http.MethodGet {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents": []map[string]interface{}{
@@ -52,7 +52,7 @@ func TestResolveAgentIDForSubscription_Found(t *testing.T) {
 		t.Fatalf("failed to create client: %v", err)
 	}
 
-	agentID, err := resolveAgentIDForSubscription(context.Background(), client, "grove-1", "my-agent")
+	agentID, err := resolveAgentIDForSubscription(context.Background(), client, "project-1", "my-agent")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestResolveAgentIDForSubscription_Found(t *testing.T) {
 
 func TestResolveAgentIDForSubscription_NotFound(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/projects/grove-1/agents" && r.Method == http.MethodGet {
+		if r.URL.Path == "/api/v1/projects/project-1/agents" && r.Method == http.MethodGet {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents": []map[string]interface{}{
@@ -81,7 +81,7 @@ func TestResolveAgentIDForSubscription_NotFound(t *testing.T) {
 		t.Fatalf("failed to create client: %v", err)
 	}
 
-	_, err = resolveAgentIDForSubscription(context.Background(), client, "grove-1", "missing-agent")
+	_, err = resolveAgentIDForSubscription(context.Background(), client, "project-1", "missing-agent")
 	if err == nil {
 		t.Fatal("expected error for missing agent, got nil")
 	}
@@ -89,7 +89,7 @@ func TestResolveAgentIDForSubscription_NotFound(t *testing.T) {
 
 func TestResolveAgentIDForSubscription_BySlugified(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/projects/grove-1/agents" && r.Method == http.MethodGet {
+		if r.URL.Path == "/api/v1/projects/project-1/agents" && r.Method == http.MethodGet {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents": []map[string]interface{}{
@@ -108,7 +108,7 @@ func TestResolveAgentIDForSubscription_BySlugified(t *testing.T) {
 	}
 
 	// Should find by name match
-	agentID, err := resolveAgentIDForSubscription(context.Background(), client, "grove-1", "My Agent")
+	agentID, err := resolveAgentIDForSubscription(context.Background(), client, "project-1", "My Agent")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestSubscriptionsListEndToEnd(t *testing.T) {
 			AgentID:           "agent-1",
 			SubscriberType:    store.SubscriberTypeUser,
 			SubscriberID:      "user-1",
-			ProjectID:         "grove-1",
+			ProjectID:         "project-1",
 			TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT"},
 			CreatedAt:         time.Date(2026, 3, 18, 0, 0, 0, 0, time.UTC),
 			CreatedBy:         "user-1",
@@ -135,7 +135,7 @@ func TestSubscriptionsListEndToEnd(t *testing.T) {
 			Scope:             store.SubscriptionScopeProject,
 			SubscriberType:    store.SubscriberTypeUser,
 			SubscriberID:      "user-1",
-			ProjectID:         "grove-1",
+			ProjectID:         "project-1",
 			TriggerActivities: []string{"COMPLETED"},
 			CreatedAt:         time.Date(2026, 3, 17, 0, 0, 0, 0, time.UTC),
 			CreatedBy:         "user-1",
@@ -158,7 +158,7 @@ func TestSubscriptionsListEndToEnd(t *testing.T) {
 	}
 
 	result, err := client.Subscriptions().List(context.Background(), &hubclient.ListSubscriptionsOptions{
-		ProjectID: "grove-1",
+		ProjectID: "project-1",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -188,8 +188,8 @@ func TestSubscriptionCreateEndToEnd(t *testing.T) {
 			if req.Scope != store.SubscriptionScopeProject {
 				t.Errorf("expected scope %q, got %q", store.SubscriptionScopeProject, req.Scope)
 			}
-			if req.ProjectID != "grove-1" {
-				t.Errorf("expected groveId %q, got %q", "grove-1", req.ProjectID)
+			if req.ProjectID != "project-1" {
+				t.Errorf("expected projectId %q, got %q", "project-1", req.ProjectID)
 			}
 			if req.AgentID != "" {
 				t.Errorf("expected empty agentId for project scope, got %q", req.AgentID)
@@ -220,7 +220,7 @@ func TestSubscriptionCreateEndToEnd(t *testing.T) {
 
 	sub, err := client.Subscriptions().Create(context.Background(), &hubclient.CreateSubscriptionRequest{
 		Scope:             store.SubscriptionScopeProject,
-		ProjectID:         "grove-1",
+		ProjectID:         "project-1",
 		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT"},
 	})
 	if err != nil {

@@ -270,7 +270,7 @@ func TestSendMessageViaHub_SingleAgent(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-msg-single"
+	projectID := "project-msg-single"
 	server, sent := newMessageMockHubServer(t, projectID, nil)
 	defer server.Close()
 
@@ -300,7 +300,7 @@ func TestSendMessageViaHub_SingleAgentInterrupt(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-msg-int"
+	projectID := "project-msg-int"
 	server, sent := newMessageMockHubServer(t, projectID, nil)
 	defer server.Close()
 
@@ -333,7 +333,7 @@ func TestSendMessageViaHub_SingleAgentError(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-msg-err"
+	projectID := "project-msg-err"
 
 	// Server that returns 500 for message requests
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -457,7 +457,7 @@ func TestSendMessageViaHub_NotifyFlag(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-msg-notify"
+	projectID := "project-msg-notify"
 
 	var notifyReceived bool
 	var mu sync.Mutex
@@ -505,7 +505,7 @@ func TestSendMessageViaHub_NoNotifyFlag(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-msg-no-notify"
+	projectID := "project-msg-no-notify"
 
 	var notifyReceived bool
 	var mu sync.Mutex
@@ -555,7 +555,7 @@ func TestSendOutboundMessageViaHub(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-msg-outbound"
+	projectID := "project-msg-outbound"
 
 	var receivedMsg *hubclient.OutboundMessageRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -618,7 +618,7 @@ func TestSendOutboundMessageViaHub_RequiresAgentContext(t *testing.T) {
 	hubCtx := &HubContext{
 		Client:    client,
 		Endpoint:  server.URL,
-		ProjectID: "grove-test",
+		ProjectID: "project-test",
 	}
 
 	t.Setenv("SCION_AGENT_NAME", "")
@@ -879,7 +879,7 @@ func TestSendGroupMessageViaHub(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-msg-group"
+	projectID := "project-msg-group"
 	agents := []hubclient.Agent{
 		{Name: "agent-a", Status: "running"},
 		{Name: "agent-b", Status: "running"},
@@ -923,7 +923,7 @@ func TestSendGroupMessageViaHub_UserRecipientType(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-msg-group-user"
+	projectID := "project-msg-group-user"
 	t.Setenv("SCION_AGENT_NAME", "my-agent")
 
 	var receivedMsg *hubclient.OutboundMessageRequest
@@ -992,7 +992,7 @@ func TestSendMessageViaHub_WakePassedThrough(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-msg-wake"
+	projectID := "project-msg-wake"
 
 	var wakeReceived bool
 	var mu sync.Mutex
@@ -1613,7 +1613,7 @@ func TestSendMessageViaHub_MentionFanOut(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-msg-mention"
+	projectID := "project-msg-mention"
 	agents := []hubclient.Agent{
 		{Name: "primary-agent", Status: "running"},
 		{Name: "mentioned-agent", Status: "running"},
@@ -1659,7 +1659,7 @@ func TestSendMessageViaHub_MentionDedup(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-msg-mention-dedup"
+	projectID := "project-msg-mention-dedup"
 	agents := []hubclient.Agent{
 		{Name: "my-agent", Status: "running"},
 		{Name: "other-agent", Status: "running"},
@@ -1695,7 +1695,7 @@ func TestSendMessageViaHub_UnknownMentionWarns(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-msg-mention-unknown"
+	projectID := "project-msg-mention-unknown"
 	agents := []hubclient.Agent{
 		{Name: "my-agent", Status: "running"},
 	}
@@ -1728,7 +1728,7 @@ func TestSendMessageViaHub_CCFlag(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-msg-cc"
+	projectID := "project-msg-cc"
 	agents := []hubclient.Agent{
 		{Name: "primary-agent", Status: "running"},
 		{Name: "cc-agent-1", Status: "running"},
@@ -1771,7 +1771,7 @@ func TestSendMessageViaHub_CCAndMentionCombined(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-msg-cc-mention"
+	projectID := "project-msg-cc-mention"
 	agents := []hubclient.Agent{
 		{Name: "primary-agent", Status: "running"},
 		{Name: "mention-agent", Status: "running"},
@@ -1809,7 +1809,7 @@ func TestSendMessageViaHub_CCDedupWithMention(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-msg-cc-dedup"
+	projectID := "project-msg-cc-dedup"
 	agents := []hubclient.Agent{
 		{Name: "primary-agent", Status: "running"},
 		{Name: "shared-agent", Status: "running"},
@@ -1844,7 +1844,7 @@ func TestSendMessageViaHub_NoMentionsInBody(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-msg-no-mention"
+	projectID := "project-msg-no-mention"
 	agents := []hubclient.Agent{
 		{Name: "my-agent", Status: "running"},
 		{Name: "other-agent", Status: "running"},
@@ -1877,7 +1877,7 @@ func TestSendGroupMessageViaHub_MentionFanOut(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-msg-group-mention"
+	projectID := "project-msg-group-mention"
 	agents := []hubclient.Agent{
 		{Name: "agent-a", Status: "running"},
 		{Name: "agent-b", Status: "running"},

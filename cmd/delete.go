@@ -81,7 +81,7 @@ var deleteCmd = &cobra.Command{
 			}
 
 			// Require an explicit project context — error if not in a project (unless --global)
-			resolvedGrove, _, err := config.RequireProjectPath(projectPath)
+			resolvedProjectPath, _, err := config.RequireProjectPath(projectPath)
 			if err != nil {
 				return err
 			}
@@ -91,8 +91,8 @@ var deleteCmd = &cobra.Command{
 
 			filters := map[string]string{
 				"scion.agent":        "true",
-				"scion.project_path": resolvedGrove,
-				"scion.project":      config.GetProjectName(resolvedGrove),
+				"scion.project_path": resolvedProjectPath,
+				"scion.project":      config.GetProjectName(resolvedProjectPath),
 			}
 
 			agents, err := mgr.List(context.Background(), filters)
@@ -121,7 +121,7 @@ var deleteCmd = &cobra.Command{
 
 				targetProjectPath := a.ProjectPath
 				if targetProjectPath == "" {
-					targetProjectPath = resolvedGrove
+					targetProjectPath = resolvedProjectPath
 				}
 
 				branchDeleted, err := mgr.Delete(context.Background(), agentName, true, targetProjectPath, !preserveBranch)

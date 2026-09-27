@@ -32,26 +32,15 @@ if (( rc > 1 )); then
 fi
 
 allowed_paths=(
-  # CLI compatibility adapters, hidden deprecated aliases, and examples.
-  "^cmd/delete.go$"
-
   # Current compatibility and migration tests/fixtures.
   "^cmd/command_tree_grove_guard_test.go$"
-  "^cmd/common_envgather_test.go$"
   "^cmd/config_test.go$"
-  "^cmd/delete_test.go$"
-  "^cmd/harness_config_install_test.go$"
-  "^cmd/hub_env_test.go$"
   "^cmd/hub_test.go$"
   "^cmd/legacy_grove_migration_test.go$"
   "^cmd/list_test.go$"
   "^cmd/message_project_json_test.go$"
   "^cmd/message_test.go$"
-  "^cmd/notifications_test.go$"
-  "^cmd/server_test.go$"
-  "^cmd/sync_test.go$"
   "^cmd/template_resolution_test.go$"
-  "^cmd/templates_test.go$"
   "^extras/agent-viz/internal/logparser/parser_test.go$"
   "^extras/fs-watcher-tool/pkg/fswatcher/project_test.go$"
   # Asserts a scion.grove.* user topic yields no user ID from
