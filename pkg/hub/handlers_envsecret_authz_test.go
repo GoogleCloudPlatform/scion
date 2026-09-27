@@ -257,7 +257,7 @@ func TestEnvVar_ProjectScope_OwnerAccess(t *testing.T) {
 
 	// Owner should be able to set project env vars
 	body := SetEnvVarRequest{Value: "project-val"}
-	rec2 := doRequestAsUser(t, srv, owner, http.MethodPut, "/api/v1/projects/"+project.ID+"/env/GROVE_VAR", body)
+	rec2 := doRequestAsUser(t, srv, owner, http.MethodPut, "/api/v1/projects/"+project.ID+"/env/PROJECT_VAR", body)
 	if rec2.Code != http.StatusOK {
 		t.Errorf("expected 200 for project owner write, got %d: %s", rec2.Code, rec2.Body.String())
 	}
@@ -1088,7 +1088,7 @@ func TestEnvVar_ProjectScope_SecretPromotion_Succeeds(t *testing.T) {
 	}
 
 	body := SetEnvVarRequest{Value: "secret-val", Secret: true}
-	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/env/GROVE_SECRET", body)
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/env/PROJECT_SECRET", body)
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected 200 for project secret promotion with LocalBackend, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -1109,7 +1109,7 @@ func TestEnvVar_ProjectScope_UnifiedList(t *testing.T) {
 
 	// Create a plain project env var
 	plainBody := SetEnvVarRequest{Value: "project-plain"}
-	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/env/GROVE_PLAIN", plainBody)
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/env/PROJECT_PLAIN", plainBody)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("failed to create project env var: %d: %s", rec.Code, rec.Body.String())
 	}
@@ -1117,10 +1117,10 @@ func TestEnvVar_ProjectScope_UnifiedList(t *testing.T) {
 	// Create an environment secret in the project scope directly
 	if err := s.CreateSecret(ctx, &store.Secret{
 		ID:             tid("sec-project-env-1"),
-		Key:            "GROVE_SECRET_VAR",
+		Key:            "PROJECT_SECRET_VAR",
 		EncryptedValue: "project-secret-val",
 		SecretType:     store.SecretTypeEnvironment,
-		Target:         "GROVE_SECRET_VAR",
+		Target:         "PROJECT_SECRET_VAR",
 		Scope:          store.ScopeProject,
 		ScopeID:        project.ID,
 	}); err != nil {
@@ -1142,7 +1142,7 @@ func TestEnvVar_ProjectScope_UnifiedList(t *testing.T) {
 
 	var foundSecret bool
 	for _, ev := range resp.EnvVars {
-		if ev.Key == "GROVE_SECRET_VAR" {
+		if ev.Key == "PROJECT_SECRET_VAR" {
 			foundSecret = true
 			if !ev.Secret {
 				t.Error("expected secret=true")
@@ -1150,7 +1150,7 @@ func TestEnvVar_ProjectScope_UnifiedList(t *testing.T) {
 		}
 	}
 	if !foundSecret {
-		t.Error("GROVE_SECRET_VAR not found in project unified list")
+		t.Error("PROJECT_SECRET_VAR not found in project unified list")
 	}
 }
 
@@ -1169,17 +1169,17 @@ func TestEnvVar_ProjectScope_FallbackGet(t *testing.T) {
 
 	if err := s.CreateSecret(ctx, &store.Secret{
 		ID:             tid("sec-project-fb-1"),
-		Key:            "GROVE_ONLY_SEC",
+		Key:            "PROJECT_ONLY_SEC",
 		EncryptedValue: "secret-val",
 		SecretType:     store.SecretTypeEnvironment,
-		Target:         "GROVE_ONLY_SEC",
+		Target:         "PROJECT_ONLY_SEC",
 		Scope:          store.ScopeProject,
 		ScopeID:        project.ID,
 	}); err != nil {
 		t.Fatalf("failed to create secret: %v", err)
 	}
 
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+project.ID+"/env/GROVE_ONLY_SEC", nil)
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+project.ID+"/env/PROJECT_ONLY_SEC", nil)
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected 200 for project fallback get, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -1206,17 +1206,17 @@ func TestEnvVar_ProjectScope_FallbackDelete(t *testing.T) {
 
 	if err := s.CreateSecret(ctx, &store.Secret{
 		ID:             tid("sec-project-del-1"),
-		Key:            "GROVE_DEL_SEC",
+		Key:            "PROJECT_DEL_SEC",
 		EncryptedValue: "secret-val",
 		SecretType:     store.SecretTypeEnvironment,
-		Target:         "GROVE_DEL_SEC",
+		Target:         "PROJECT_DEL_SEC",
 		Scope:          store.ScopeProject,
 		ScopeID:        project.ID,
 	}); err != nil {
 		t.Fatalf("failed to create secret: %v", err)
 	}
 
-	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID+"/env/GROVE_DEL_SEC", nil)
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID+"/env/PROJECT_DEL_SEC", nil)
 	if rec.Code != http.StatusNoContent {
 		t.Errorf("expected 204 for project fallback delete, got %d: %s", rec.Code, rec.Body.String())
 	}

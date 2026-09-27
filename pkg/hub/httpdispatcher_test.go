@@ -3434,7 +3434,7 @@ func TestBuildCreateRequest_ResolvesProjectAndUserScopes(t *testing.T) {
 	// Store a project-only env var
 	projectOnly := &store.EnvVar{
 		ID:            tid("ev-project-only"),
-		Key:           "GROVE_ONLY_KEY",
+		Key:           "PROJECT_ONLY_KEY",
 		Value:         "project-only-value",
 		Scope:         "project",
 		ScopeID:       tid("project-1"),
@@ -3468,8 +3468,8 @@ func TestBuildCreateRequest_ResolvesProjectAndUserScopes(t *testing.T) {
 	}
 
 	// Project-only key should also be present
-	if req.ResolvedEnv["GROVE_ONLY_KEY"] != "project-only-value" {
-		t.Errorf("expected GROVE_ONLY_KEY='project-only-value', got %q", req.ResolvedEnv["GROVE_ONLY_KEY"])
+	if req.ResolvedEnv["PROJECT_ONLY_KEY"] != "project-only-value" {
+		t.Errorf("expected PROJECT_ONLY_KEY='project-only-value', got %q", req.ResolvedEnv["PROJECT_ONLY_KEY"])
 	}
 }
 

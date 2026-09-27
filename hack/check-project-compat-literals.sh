@@ -80,8 +80,6 @@ allowed_paths=(
   # for the same destination; the literal is the point of the negative
   # assertion (every "grove" request must be rejected with 400).
   "^pkg/hub/clone_concurrency_test.go$"
-  "^pkg/hub/envgather_resolution_test.go$"
-  "^pkg/hub/envgather_test.go$"
   # Regression test proving grove.<projectId>.* duplicate SSE subjects are
   # never published by pkg/hub/events.go. The literal is the point of the
   # test: it subscribes to the legacy wildcard and asserts nothing is ever
@@ -92,7 +90,6 @@ allowed_paths=(
   # The literal is the point of the negative test.
   "^pkg/hub/handlers_auth_test.go$"
   "^pkg/hub/handlers_broker_inbound_test.go$"
-  "^pkg/hub/handlers_envsecret_authz_test.go$"
   # Asserts groveId is no longer a recognized notification filter alias: an
   # unrecognized query param is ignored rather than treated as projectId. The
   # literal is the point of the negative test.
@@ -193,7 +190,6 @@ allowed_paths=(
   "^pkg/config/legacy_grove_migration.go$"
   "^pkg/config/project_marker.go$"
   "^pkg/config/settings_v1.go$"
-  "^pkg/hub/system_handlers.go$"
   "^pkg/hubclient/agents.go$"
   "^pkg/hubclient/notifications.go$"
   "^pkg/hubclient/templates.go$"
