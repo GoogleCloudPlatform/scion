@@ -65,6 +65,7 @@ type Pipeline struct {
 	exportErrors     otelmetric.Int64Counter
 	meter            otelmetric.Meter
 	retryConfig      RetryConfig
+	usageDeriver     *UsageDeriver
 	intakeMu         sync.Mutex
 	intakeClosed     bool
 	intakeActive     int
@@ -237,6 +238,16 @@ func (p *Pipeline) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to start receiver: %w", err)
 	}
 
+	// Construct the usage deriver after the receiver is listening, since it
+	// exports over loopback back into this same receiver (design §3.3). A
+	// harness with no matching rule, or SCION_USAGE_SOURCE unset, yields a
+	// cheap no-op deriver (D4/D10); only a construction failure is logged.
+	if deriver, err := NewUsageDeriver(ctx, p.config); err != nil {
+		log.Error("Failed to create usage deriver: %v", err)
+	} else {
+		p.usageDeriver = deriver
+	}
+
 	p.running = true
 	p.deliveryState.Store("running")
 	p.startDiagnosticSnapshots(ctx)
@@ -396,6 +407,13 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 			p.logDeliverySnapshot(true)
 			return fmt.Errorf("telemetry shutdown incomplete: %w", p.shutdownErr)
 		}
+	}
+
+	if p.usageDeriver != nil {
+		if err := p.usageDeriver.Shutdown(ctx); err != nil {
+			log.Error("Usage deriver shutdown error: %v", err)
+		}
+		p.usageDeriver = nil
 	}
 
 	p.running = false
@@ -1037,6 +1055,11 @@ func (p *Pipeline) handleLogs(ctx context.Context, resourceLogs []*logspb.Resour
 	if logCount == 0 {
 		return nil
 	}
+	// The usage deriver sees every accepted log request before the policy's
+	// event filter can drop a record (design §3.3, AC-1.4): it must not
+	// depend on Filter.Include, and derivation happens independently of
+	// whether the raw logs go on to export successfully.
+	p.usageDeriver.ProcessResourceLogs(ctx, resourceLogs)
 	if err := p.budget.reserve(bytes, logCount); err != nil {
 		p.logDiagnostics.rejected.Add(int64(logCount))
 		return err
