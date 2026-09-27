@@ -1819,7 +1819,7 @@ profiles:
 			"GOOGLE_CLOUD_LOCATION": "us-central1"
 		},
 		"resolvedSecrets": [
-			{"name": "GEMINI_API_KEY", "type": "environment", "target": "GEMINI_API_KEY", "value": "sk-test", "source": "grove"},
+			{"name": "GEMINI_API_KEY", "type": "environment", "target": "GEMINI_API_KEY", "value": "sk-test", "source": "project"},
 			{"name": "GOOGLE_APPLICATION_CREDENTIALS", "type": "file", "target": "/tmp/adc.json", "value": "{}", "source": "user"}
 		],
 		"config": {"template": "gemini", "profile": "default"}
@@ -1862,7 +1862,7 @@ profiles:
 			"GOOGLE_CLOUD_REGION": "us-central1"
 		},
 		"resolvedSecrets": [
-			{"name": "ANTHROPIC_API_KEY", "type": "environment", "target": "ANTHROPIC_API_KEY", "value": "sk-ant-test", "source": "grove"}
+			{"name": "ANTHROPIC_API_KEY", "type": "environment", "target": "ANTHROPIC_API_KEY", "value": "sk-ant-test", "source": "project"}
 		],
 		"config": {"template": "claude", "profile": "default"}
 	}`
@@ -1988,10 +1988,10 @@ profiles:
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(cfg, mgr, rt)
 
-	// Send create request with NO projectPath — simulates hub-only git grove
+	// Send create request with NO projectPath — simulates a hub-only git project
 	body := `{
-		"name": "test-agent-no-grove",
-		"id": "agent-uuid-no-grove",
+		"name": "test-agent-no-project",
+		"id": "agent-uuid-no-project",
 		"gatherEnv": true,
 		"config": {"profile": "default"}
 	}`

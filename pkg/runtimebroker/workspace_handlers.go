@@ -39,7 +39,7 @@ type WorkspaceUploadRequest struct {
 	// Slug is the identifier of the agent whose workspace to upload.
 	Slug string `json:"slug"`
 	// StoragePath is the path within the bucket where files should be uploaded.
-	// Format: "workspaces/{groveId}/{slug}"
+	// Format: "workspaces/{projectId}/{slug}"
 	StoragePath string `json:"storagePath"`
 	// Bucket is the GCS bucket name for storage.
 	Bucket string `json:"bucket,omitempty"`
@@ -62,7 +62,7 @@ type WorkspaceApplyRequest struct {
 	// Slug is the identifier of the agent whose workspace to update.
 	Slug string `json:"slug"`
 	// StoragePath is the path within the bucket where files are stored.
-	// Format: "workspaces/{groveId}/{slug}"
+	// Format: "workspaces/{projectId}/{slug}"
 	StoragePath string `json:"storagePath"`
 	// Bucket is the GCS bucket name for storage.
 	Bucket string `json:"bucket,omitempty"`

@@ -907,8 +907,8 @@ runtimes:
 	mgr := &mockManager{
 		agents: []api.AgentInfo{
 			{
-				ID:          "mygrove--foo", // project-prefixed container name
-				ContainerID: "mygrove--foo",
+				ID:          "myproject--foo", // project-prefixed container name
+				ContainerID: "myproject--foo",
 				Name:        "foo",
 				Slug:        "",
 				Phase:       "running",
@@ -930,8 +930,8 @@ runtimes:
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d; body: %s", http.StatusOK, w.Code, w.Body.String())
 	}
-	if receivedID != "mygrove--foo" {
-		t.Fatalf("expected GetLogs to receive container ID %q, got %q", "mygrove--foo", receivedID)
+	if receivedID != "myproject--foo" {
+		t.Fatalf("expected GetLogs to receive container ID %q, got %q", "myproject--foo", receivedID)
 	}
 	if body := w.Body.String(); body != "container log output" {
 		t.Fatalf("expected body %q, got %q", "container log output", body)
@@ -1715,7 +1715,7 @@ func TestCreateAgentHubEndpointFromProjectSettings(t *testing.T) {
 		}
 
 		body := `{
-			"name": "grove-endpoint-agent",
+			"name": "project-endpoint-agent",
 			"hubEndpoint": "http://localhost:9810",
 			"projectPath": "` + projectDir + `",
 			"config": {"template": "claude"}
@@ -1759,7 +1759,7 @@ func TestCreateAgentHubEndpointFromProjectSettings(t *testing.T) {
 		}
 
 		body := `{
-			"name": "grove-fallback-agent",
+			"name": "project-fallback-agent",
 			"projectPath": "` + projectDir + `",
 			"config": {"template": "claude"}
 		}`
@@ -1782,7 +1782,7 @@ func TestCreateAgentHubEndpointFromProjectSettings(t *testing.T) {
 		srv, mgr := newTestServerWithEnvCapture()
 
 		body := `{
-			"name": "no-grove-agent",
+			"name": "no-project-agent",
 			"hubEndpoint": "https://hub.direct.com",
 			"config": {"template": "claude"}
 		}`
@@ -1822,7 +1822,7 @@ func TestCreateAgentProjectHubEndpointSuppressedWhenDisabled(t *testing.T) {
 		}
 
 		body := `{
-			"name": "grove-disabled-agent",
+			"name": "project-disabled-agent",
 			"projectPath": "` + projectDir + `",
 			"config": {"template": "claude"}
 		}`
@@ -1913,7 +1913,7 @@ func TestCreateAgentHubManagedProjectSettingsEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get global dir: %v", err)
 	}
-	projectPath := filepath.Join(globalDir, "projects", "settings-test-grove")
+	projectPath := filepath.Join(globalDir, "projects", "settings-test-project")
 	scionDir := filepath.Join(projectPath, ".scion")
 	if err := os.MkdirAll(scionDir, 0755); err != nil {
 		t.Fatalf("failed to create .scion dir: %v", err)
@@ -1929,7 +1929,7 @@ func TestCreateAgentHubManagedProjectSettingsEndpoint(t *testing.T) {
 	// Send createAgent request with projectSlug but no projectPath
 	body := `{
 		"name": "hub-managed-agent",
-		"projectSlug": "settings-test-grove",
+		"projectSlug": "settings-test-project",
 		"hubEndpoint": "http://localhost:9810",
 		"config": {"template": "claude"}
 	}`
@@ -1977,7 +1977,7 @@ func TestResolveProjectSettingsDir(t *testing.T) {
 	})
 
 	t.Run("hub-managed project - settings in .scion subdirectory", func(t *testing.T) {
-		// Hub-managed project: projectPath = ~/.scion.groves/<slug>, settings in .scion/
+		// Hub-managed project: projectPath = ~/.scion/projects/<slug>, settings in .scion/
 		projectDir := t.TempDir()
 		scionDir := filepath.Join(projectDir, ".scion")
 		if err := os.MkdirAll(scionDir, 0755); err != nil {
@@ -2591,17 +2591,17 @@ func TestCreateAgentWithoutProfile(t *testing.T) {
 
 func TestProjectSlugWorkspacePath(t *testing.T) {
 	// Verify the workspace directory path for hub-managed projects uses
-	// ~/.scion.groves/<slug>/ instead of the worktree-based path.
+	// ~/.scion/projects/<slug>/ instead of the worktree-based path.
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		t.Fatalf("failed to get global dir: %v", err)
 	}
 
-	expected := filepath.Join(globalDir, "projects", "my-test-grove")
+	expected := filepath.Join(globalDir, "projects", "my-test-project")
 
 	// Simulate the logic from the handler: when ProjectSlug is set,
 	// use the conventional path.
-	projectSlug := "my-test-grove"
+	projectSlug := "my-test-project"
 	workspaceDir := filepath.Join(globalDir, "projects", projectSlug)
 
 	if workspaceDir != expected {
@@ -2777,7 +2777,7 @@ func TestStartAgentProjectSettingsFallbackHubEndpoint(t *testing.T) {
 		rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 		srv := New(cfg, mgr, rt)
 
-		// Hub-managed project: projectPath is the workspace parent (~/.scion.groves/<slug>),
+		// Hub-managed project: projectPath is the workspace parent (~/.scion/projects/<slug>),
 		// settings.yaml lives in the .scion subdirectory
 		projectDir := t.TempDir()
 		scionDir := filepath.Join(projectDir, ".scion")
@@ -3718,7 +3718,7 @@ func TestCreateAgentProjectSlugInitializesScionDir(t *testing.T) {
 
 	// Use a temporary directory to simulate the project workspace.
 	tmpDir := t.TempDir()
-	projectPath := filepath.Join(tmpDir, "test-grove")
+	projectPath := filepath.Join(tmpDir, "test-project")
 	if err := os.MkdirAll(projectPath, 0755); err != nil {
 		t.Fatalf("failed to create test project dir: %v", err)
 	}
@@ -3768,7 +3768,7 @@ func TestDeleteProject_RemovesDirectory(t *testing.T) {
 	// Create a temporary projects directory structure
 	tmpHome := t.TempDir()
 	projectsDir := filepath.Join(tmpHome, ".scion", "projects")
-	projectDir := filepath.Join(projectsDir, "test-grove")
+	projectDir := filepath.Join(projectsDir, "test-project")
 	scionDir := filepath.Join(projectDir, ".scion")
 
 	if err := os.MkdirAll(scionDir, 0o755); err != nil {
@@ -3784,7 +3784,7 @@ func TestDeleteProject_RemovesDirectory(t *testing.T) {
 	// Override HOME so config.GetGlobalDir resolves to our temp dir
 	t.Setenv("HOME", tmpHome)
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/projects/test-grove", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/projects/test-project", nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
@@ -3810,7 +3810,7 @@ func TestDeleteProject_NonExistent_Returns204(t *testing.T) {
 
 	t.Setenv("HOME", tmpHome)
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/projects/nonexistent-grove", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/projects/nonexistent-project", nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
@@ -3885,7 +3885,7 @@ func TestDeleteAgent_HubManagedProject_NoContainer(t *testing.T) {
 	t.Setenv("HOME", tmpHome)
 
 	// Create hub-managed project with an agent directory and config file
-	projectSlug := "hub-grove"
+	projectSlug := "hub-project"
 	scionDir := filepath.Join(tmpHome, ".scion", "projects", projectSlug, ".scion")
 	agentName := "orphaned-agent"
 	agentDir := filepath.Join(scionDir, "agents", agentName)
@@ -3937,7 +3937,7 @@ func TestDeleteAgent_RejectsTraversalName(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
-	projectSlug := "hub-grove"
+	projectSlug := "hub-project"
 	scionDir := filepath.Join(tmpHome, ".scion", "projects", projectSlug, ".scion")
 	if err := os.MkdirAll(filepath.Join(scionDir, "agents"), 0o755); err != nil {
 		t.Fatalf("failed to create scionDir/agents: %v", err)

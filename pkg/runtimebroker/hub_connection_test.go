@@ -328,16 +328,16 @@ func TestHeartbeatService_ProjectFilter(t *testing.T) {
 	client := &mockRuntimeBrokerService{}
 	manager := &heartbeatMockManager{
 		agents: []api.AgentInfo{
-			{Name: "agent-1", ProjectID: "grove-hub1", Phase: "running"},
-			{Name: "agent-2", ProjectID: "grove-hub1", Phase: "running"},
-			{Name: "agent-3", ProjectID: "grove-hub2", Phase: "running"},
-			{Name: "agent-4", ProjectID: "grove-shared", Phase: "running"},
+			{Name: "agent-1", ProjectID: "project-hub1", Phase: "running"},
+			{Name: "agent-2", ProjectID: "project-hub1", Phase: "running"},
+			{Name: "agent-3", ProjectID: "project-hub2", Phase: "running"},
+			{Name: "agent-4", ProjectID: "project-shared", Phase: "running"},
 		},
 	}
 
-	// Filter: only include grove-hub1 projects
+	// Filter: only include project-hub1 projects
 	projectFilter := func(projectID string) bool {
-		return projectID == "grove-hub1"
+		return projectID == "project-hub1"
 	}
 
 	svc := NewHeartbeatService(client, "test-host", time.Hour, manager, projectFilter, slog.Default())
@@ -353,17 +353,17 @@ func TestHeartbeatService_ProjectFilter(t *testing.T) {
 
 	heartbeat := calls[0].Heartbeat
 
-	// Should only include grove-hub1 (2 agents), not grove-hub2 or grove-shared
+	// Should only include project-hub1 (2 agents), not project-hub2 or project-shared
 	if len(heartbeat.Projects) != 1 {
 		t.Errorf("Expected 1 project in heartbeat (filtered), got %d", len(heartbeat.Projects))
 	}
 
-	if len(heartbeat.Projects) > 0 && heartbeat.Projects[0].ProjectID != "grove-hub1" {
-		t.Errorf("Expected grove-hub1, got %q", heartbeat.Projects[0].ProjectID)
+	if len(heartbeat.Projects) > 0 && heartbeat.Projects[0].ProjectID != "project-hub1" {
+		t.Errorf("Expected project-hub1, got %q", heartbeat.Projects[0].ProjectID)
 	}
 
 	if len(heartbeat.Projects) > 0 && heartbeat.Projects[0].AgentCount != 2 {
-		t.Errorf("Expected 2 agents in grove-hub1, got %d", heartbeat.Projects[0].AgentCount)
+		t.Errorf("Expected 2 agents in project-hub1, got %d", heartbeat.Projects[0].AgentCount)
 	}
 }
 
@@ -371,8 +371,8 @@ func TestHeartbeatService_NilProjectFilter(t *testing.T) {
 	client := &mockRuntimeBrokerService{}
 	manager := &heartbeatMockManager{
 		agents: []api.AgentInfo{
-			{Name: "agent-1", ProjectID: "grove-1", Phase: "running"},
-			{Name: "agent-2", ProjectID: "grove-2", Phase: "running"},
+			{Name: "agent-1", ProjectID: "project-1", Phase: "running"},
+			{Name: "agent-2", ProjectID: "project-2", Phase: "running"},
 		},
 	}
 

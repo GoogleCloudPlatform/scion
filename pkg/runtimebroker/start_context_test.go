@@ -98,7 +98,7 @@ func TestBuildStartContext_BasicFields(t *testing.T) {
 		Name:        "my-agent",
 		AgentID:     "uuid-1",
 		Slug:        "my-agent-slug",
-		ProjectID:   "grove-1",
+		ProjectID:   "project-1",
 		ProjectPath: projectPath,
 		Attach:      false,
 		HTTPRequest: r,
@@ -131,8 +131,8 @@ func TestBuildStartContext_BasicFields(t *testing.T) {
 	if sc.Opts.Env["SCION_AGENT_SLUG"] != "my-agent-slug" {
 		t.Errorf("expected SCION_AGENT_SLUG='my-agent-slug', got %q", sc.Opts.Env["SCION_AGENT_SLUG"])
 	}
-	if sc.Opts.Env["SCION_PROJECT_ID"] != "grove-1" {
-		t.Errorf("expected SCION_PROJECT_ID='grove-1', got %q", sc.Opts.Env["SCION_PROJECT_ID"])
+	if sc.Opts.Env["SCION_PROJECT_ID"] != "project-1" {
+		t.Errorf("expected SCION_PROJECT_ID='project-1', got %q", sc.Opts.Env["SCION_PROJECT_ID"])
 	}
 	if _, ok := sc.Opts.Env["SCION_GROVE_ID"]; ok {
 		t.Errorf("expected SCION_GROVE_ID to be absent, got %q", sc.Opts.Env["SCION_GROVE_ID"])
@@ -635,7 +635,7 @@ func TestBuildStartContext_HubManagedProjectPreservesExistingProjectID(t *testin
 		srv := newTestServerForStartContext(t, cfg)
 
 		// Pre-create .scion as a directory with an existing project-id (git project)
-		projectPath := filepath.Join(t.TempDir(), "existing-grove")
+		projectPath := filepath.Join(t.TempDir(), "existing-project")
 		scionDir := filepath.Join(projectPath, ".scion")
 		if err := os.MkdirAll(scionDir, 0755); err != nil {
 			t.Fatal(err)
@@ -656,7 +656,7 @@ func TestBuildStartContext_HubManagedProjectPreservesExistingProjectID(t *testin
 
 		_, err = srv.buildStartContext(context.Background(), startContextInputs{
 			Name:        "agent-1",
-			ProjectSlug: "existing-grove",
+			ProjectSlug: "existing-project",
 			ProjectPath: projectPath,
 			ProjectID:   "new-id-from-hub",
 			Operation:   opCreate,
@@ -681,7 +681,7 @@ func TestBuildStartContext_HubManagedProjectPreservesExistingProjectID(t *testin
 		srv := newTestServerForStartContext(t, cfg)
 
 		// Pre-create .scion as a directory with an existing project-id (git project)
-		projectPath := filepath.Join(t.TempDir(), "existing-grove")
+		projectPath := filepath.Join(t.TempDir(), "existing-project")
 		scionDir := filepath.Join(projectPath, ".scion")
 		if err := os.MkdirAll(scionDir, 0755); err != nil {
 			t.Fatal(err)
@@ -695,7 +695,7 @@ func TestBuildStartContext_HubManagedProjectPreservesExistingProjectID(t *testin
 		newID := "new-id-from-hub"
 		_, err := srv.buildStartContext(context.Background(), startContextInputs{
 			Name:        "agent-1",
-			ProjectSlug: "existing-grove",
+			ProjectSlug: "existing-project",
 			ProjectPath: projectPath,
 			ProjectID:   newID,
 			Operation:   opCreate,
@@ -722,7 +722,7 @@ func TestBuildStartContext_HubManagedProjectPreservesExistingMarker(t *testing.T
 		srv := newTestServerForStartContext(t, cfg)
 
 		// Pre-create .scion as a marker file (hub-managed project)
-		projectPath := filepath.Join(t.TempDir(), "existing-grove")
+		projectPath := filepath.Join(t.TempDir(), "existing-project")
 		if err := os.MkdirAll(projectPath, 0755); err != nil {
 			t.Fatal(err)
 		}
@@ -730,8 +730,8 @@ func TestBuildStartContext_HubManagedProjectPreservesExistingMarker(t *testing.T
 		scionPath := filepath.Join(projectPath, ".scion")
 		existingMarker := &config.ProjectMarker{
 			ProjectID:   existingID,
-			ProjectName: "existing-grove",
-			ProjectSlug: "existing-grove",
+			ProjectName: "existing-project",
+			ProjectSlug: "existing-project",
 		}
 		if err := config.WriteProjectMarker(scionPath, existingMarker); err != nil {
 			t.Fatal(err)
@@ -748,7 +748,7 @@ func TestBuildStartContext_HubManagedProjectPreservesExistingMarker(t *testing.T
 
 		_, err = srv.buildStartContext(context.Background(), startContextInputs{
 			Name:        "agent-1",
-			ProjectSlug: "existing-grove",
+			ProjectSlug: "existing-project",
 			ProjectPath: projectPath,
 			ProjectID:   "new-id-from-hub",
 			Operation:   opCreate,
@@ -773,7 +773,7 @@ func TestBuildStartContext_HubManagedProjectPreservesExistingMarker(t *testing.T
 		srv := newTestServerForStartContext(t, cfg)
 
 		// Pre-create .scion as a marker file (hub-managed project)
-		projectPath := filepath.Join(t.TempDir(), "existing-grove")
+		projectPath := filepath.Join(t.TempDir(), "existing-project")
 		if err := os.MkdirAll(projectPath, 0755); err != nil {
 			t.Fatal(err)
 		}
@@ -781,8 +781,8 @@ func TestBuildStartContext_HubManagedProjectPreservesExistingMarker(t *testing.T
 		scionPath := filepath.Join(projectPath, ".scion")
 		if err := config.WriteProjectMarker(scionPath, &config.ProjectMarker{
 			ProjectID:   existingID,
-			ProjectName: "existing-grove",
-			ProjectSlug: "existing-grove",
+			ProjectName: "existing-project",
+			ProjectSlug: "existing-project",
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -791,7 +791,7 @@ func TestBuildStartContext_HubManagedProjectPreservesExistingMarker(t *testing.T
 		newID := "new-id-from-hub"
 		_, err := srv.buildStartContext(context.Background(), startContextInputs{
 			Name:        "agent-1",
-			ProjectSlug: "existing-grove",
+			ProjectSlug: "existing-project",
 			ProjectPath: projectPath,
 			ProjectID:   newID,
 			Operation:   opCreate,
