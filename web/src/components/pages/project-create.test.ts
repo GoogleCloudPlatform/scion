@@ -154,6 +154,8 @@ describe('scion-page-project-create — hub project.create gate', () => {
     expect(q(element, '.form-card')).toBeNull();
     const notice = q(element, '.create-unknown-notice');
     expect(notice).not.toBeNull();
+    // The role notice is a distinct state; its class must not match here.
+    expect(q(element, '.create-denied-notice')).toBeNull();
     const text = notice?.textContent?.replace(/\s+/g, ' ') ?? '';
     expect(text).toContain("Couldn't check whether you can create projects.");
     expect(text).toContain('Reload the page to try again.');

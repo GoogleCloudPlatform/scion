@@ -414,6 +414,8 @@ export class ScionProjectTemplateList extends LitElement {
       return html`<div class="error-banner">${this.error}</div>`;
     }
 
+    const emptyHint = this.canCreateProjects ? ' Create one from an existing project.' : '';
+
     return html`
       ${this.canCreateProjects
         ? html`
@@ -429,10 +431,7 @@ export class ScionProjectTemplateList extends LitElement {
         ? html`
             <div class="empty">
               <sl-icon name="file-earmark-plus"></sl-icon>
-              <p>
-                No project templates
-                yet.${this.canCreateProjects ? ' Create one from an existing project.' : ''}
-              </p>
+              <p>No project templates yet.${emptyHint}</p>
             </div>
           `
         : html`

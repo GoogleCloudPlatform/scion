@@ -300,7 +300,7 @@ export class ScionPageProjectCreate extends LitElement {
       max-width: 640px;
     }
 
-    .create-denied-notice {
+    .create-notice {
       display: flex;
       align-items: flex-start;
       gap: 0.75rem;
@@ -314,20 +314,20 @@ export class ScionPageProjectCreate extends LitElement {
       font-size: 0.875rem;
     }
 
-    .create-denied-notice sl-icon {
+    .create-notice sl-icon {
       flex-shrink: 0;
       font-size: 1.25rem;
       color: var(--scion-text-muted, #64748b);
       margin-top: 0.0625rem;
     }
 
-    .create-denied-notice p {
+    .create-notice p {
       margin: 0.25rem 0 0 0;
       color: var(--scion-text-muted, #64748b);
       line-height: 1.5;
     }
 
-    .create-denied-notice a {
+    .create-notice a {
       color: var(--scion-primary, #3b82f6);
     }
 
@@ -800,10 +800,10 @@ export class ScionPageProjectCreate extends LitElement {
   private renderCreateDeniedNotice(): TemplateResult {
     const roleLabel = hubRoleLabel(this.pageData?.user?.role);
     return html`
-      <div class="create-denied-notice" role="status">
+      <div class="create-notice create-denied-notice" role="status">
         <sl-icon name="info-circle"></sl-icon>
         <div>
-          <strong class="create-denied-title"
+          <strong class="create-notice-title"
             >${roleLabel
               ? `Your hub role (${roleLabel}) can't create projects.`
               : "Your hub role can't create projects."}</strong
@@ -823,10 +823,10 @@ export class ScionPageProjectCreate extends LitElement {
    */
   private renderCreateUnknownNotice(): TemplateResult {
     return html`
-      <div class="create-denied-notice create-unknown-notice" role="status">
+      <div class="create-notice create-unknown-notice" role="status">
         <sl-icon name="exclamation-circle"></sl-icon>
         <div>
-          <strong class="create-denied-title"
+          <strong class="create-notice-title"
             >Couldn't check whether you can create projects.</strong
           >
           <p>
