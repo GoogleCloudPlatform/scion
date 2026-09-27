@@ -480,9 +480,9 @@ func (s *Server) attachSkillResolver(ctx context.Context, r *http.Request, in sk
 }
 
 // isSingleCleanPathElement reports whether name is safe to join onto a
-// directory as exactly one path segment: no path separator, not "." or
-// "..", and unchanged by filepath.Clean (which also rejects an empty
-// string). Every agent-addressing path built from a request-supplied name
+// directory as exactly one path segment: no path separator or NUL byte,
+// not "." or "..", and unchanged by filepath.Clean (which also rejects an
+// empty string). Every agent-addressing path built from a request-supplied name
 // in this package and in pkg/agent joins that name onto a root this way, so
 // an identifier that fails this check must never reach one of those joins.
 //

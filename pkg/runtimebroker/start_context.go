@@ -828,8 +828,10 @@ func sanitizeCloneErrorText(errText, rawURL string) string {
 		return strings.ReplaceAll(errText, rawURL, "<unparseable>")
 	}
 	out := strings.ReplaceAll(errText, rawURL, redactCloneURL(rawURL))
-	if u.User != nil && u.User.String() != "" {
-		out = strings.ReplaceAll(out, u.User.String()+"@", "")
+	if u.User != nil {
+		if pw, _ := u.User.Password(); u.User.Username() != "" || pw != "" {
+			out = strings.ReplaceAll(out, u.User.String()+"@", "")
+		}
 	}
 	if u.RawQuery != "" {
 		out = strings.ReplaceAll(out, "?"+u.RawQuery, "")

@@ -564,6 +564,20 @@ func TestSanitizeCloneErrorText(t *testing.T) {
 		}
 	})
 
+	t.Run("a userinfo of just a colon does not strip unrelated :@ text", func(t *testing.T) {
+		// A URL with an empty username and an empty password separated by a
+		// colon (e.g. "https://:@host/...") also parses with a non-nil
+		// u.User, and u.User.String() is ":" -- carrying no credential --
+		// but the naive strip pattern would still remove every ":@" in the
+		// text.
+		rawURL := "https://:@example.com/r.git"
+		errText := "unrelated text containing a:@b elsewhere"
+		got := sanitizeCloneErrorText(errText, rawURL)
+		if !strings.Contains(got, "a:@b") {
+			t.Errorf("sanitized error text lost unrelated \":@\" text, got: %q", got)
+		}
+	})
+
 	t.Run("an unparseable URL still strips the exact raw text", func(t *testing.T) {
 		rawURL := "https://user:TOKEN@host/%zz"
 		errText := "git clone " + rawURL + ": exit status 128"
@@ -2559,7 +2573,7 @@ func TestResolveWorktreeProvision_InvalidIDsRejected(t *testing.T) {
 	// name, since nothing decodes it, and must be accepted like any other
 	// opaque ID.
 	if !isSingleCleanPathElement("%2e%2e") {
-		t.Error(`expected "%2e%2e" to be a valid path component (a literal name, not interpreted)`)
+		t.Error(`expected "%2e%2e" to be a single clean path element (a literal name, not interpreted)`)
 	}
 }
 
