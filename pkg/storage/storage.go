@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"time"
 )
 
@@ -252,7 +253,17 @@ func ResourceStoragePath(hubID string, kind ResourceKind, scope, scopeID, slug s
 
 // ResourceStorageURI returns the full bucket URI for a file-based resource.
 func ResourceStorageURI(hubID, bucket string, kind ResourceKind, scope, scopeID, slug string) string {
-	return "gs://" + bucket + "/" + ResourceStoragePath(hubID, kind, scope, scopeID, slug) + "/"
+	return StorageURIForPath(bucket, ResourceStoragePath(hubID, kind, scope, scopeID, slug))
+}
+
+// StorageURIForPath returns the full bucket URI for an already-computed
+// storage path, e.g. one made request-unique with a suffix the per-kind
+// path helpers above don't know about. Callers that can express their path
+// as (hubID, kind, scope, scopeID, slug) should use ResourceStorageURI (or
+// one of its per-kind wrappers) instead, so the URI format stays defined in
+// this one place either way.
+func StorageURIForPath(bucket, path string) string {
+	return "gs://" + bucket + "/" + strings.TrimRight(path, "/") + "/"
 }
 
 // TemplateStoragePath returns the storage path for a template.

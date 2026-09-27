@@ -96,6 +96,40 @@ func TestTemplateStorageURI(t *testing.T) {
 	}
 }
 
+func TestStorageURIForPath(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{"plain path", "templates/global/my-template", "gs://my-bucket/templates/global/my-template/"},
+		{"one trailing slash", "templates/global/my-template/", "gs://my-bucket/templates/global/my-template/"},
+		{"multiple trailing slashes", "templates/global/my-template///", "gs://my-bucket/templates/global/my-template/"},
+		// No caller produces an empty or all-slash path; these rows pin current behaviour.
+		{"empty path", "", "gs://my-bucket//"},
+		{"all-slash path", "///", "gs://my-bucket//"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := StorageURIForPath("my-bucket", tt.path); got != tt.want {
+				t.Errorf("StorageURIForPath(%q) = %q, want %q", tt.path, got, tt.want)
+			}
+		})
+	}
+
+	// ResourceStorageURI computes its path internally and never produces a
+	// trailing slash on the slug, so the trim must be a no-op for it: normal
+	// inputs keep producing exactly the same URI as before.
+	t.Run("ResourceStorageURI unchanged for normal inputs", func(t *testing.T) {
+		got := ResourceStorageURI("", "my-bucket", ResourceKindTemplate, "project", "grove-123", "my-template")
+		want := "gs://my-bucket/templates/groves/grove-123/my-template/"
+		if got != want {
+			t.Errorf("ResourceStorageURI() = %q, want %q", got, want)
+		}
+	})
+}
+
 func TestResourceStoragePath(t *testing.T) {
 	tests := []struct {
 		name    string

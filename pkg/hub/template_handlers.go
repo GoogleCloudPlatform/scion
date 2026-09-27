@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -458,7 +459,7 @@ func (s *Server) getTemplateV2(w http.ResponseWriter, r *http.Request, id string
 	ctx := r.Context()
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		writeStoreErr(w, err, "Template")
 		return
 	}
 
@@ -673,7 +674,7 @@ func (s *Server) handleTemplateUpload(w http.ResponseWriter, r *http.Request, id
 
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		writeStoreErr(w, err, "Template")
 		return
 	}
 
@@ -741,7 +742,7 @@ func (s *Server) handleTemplateFinalize(w http.ResponseWriter, r *http.Request, 
 
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		writeStoreErr(w, err, "Template")
 		return
 	}
 
@@ -798,7 +799,7 @@ func (s *Server) handleTemplateDownload(w http.ResponseWriter, r *http.Request, 
 
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		writeStoreErr(w, err, "Template")
 		return
 	}
 
@@ -855,7 +856,7 @@ func (s *Server) handleTemplateValidate(w http.ResponseWriter, r *http.Request, 
 	ctx := r.Context()
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		writeStoreErr(w, err, "Template")
 		return
 	}
 
@@ -890,11 +891,7 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		// A genuinely missing source uses the same "Template not found"
 		// message authorizeRead below writes on denial (ptone/scion#1916),
 		// so the two outcomes cannot be told apart by message text either.
-		if err == store.ErrNotFound {
-			NotFound(w, "Template")
-		} else {
-			writeErrorFromErr(w, err, "")
-		}
+		writeStoreErr(w, err, "Template")
 		return
 	}
 
@@ -1020,13 +1017,14 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 	}
 
 	// Detect a name collision at the destination BEFORE any storage write.
-	// The clone below copies files to a path derived from (scope, scopeID,
-	// slug); if a record already occupies that path, copying into it first
-	// and only checking for the collision at CreateTemplate time would
-	// silently overwrite the existing record's files ahead of ever reporting
-	// the conflict — and the failure-path cleanup a few lines down would
-	// then delete a prefix this request never owned.
-	if existing, err := s.store.GetTemplateBySlug(ctx, clone.Slug, clone.Scope, clone.ScopeID); err != nil && err != store.ErrNotFound {
+	// This is a fast path for the common, non-concurrent case: it lets an
+	// ordinary colliding request fail with 409 before touching storage at
+	// all. It is not sufficient on its own — two requests can both pass this
+	// check before either has written a record — so the storage path below
+	// is also made request-unique, and CreateTemplate's own uniqueness
+	// constraint (handled further down) is what actually guarantees exactly
+	// one request wins a given (scope, slug) destination.
+	if existing, err := s.store.GetTemplateBySlug(ctx, clone.Slug, clone.Scope, clone.ScopeID); err != nil && !errors.Is(err, store.ErrNotFound) {
 		writeErrorFromErr(w, err, "")
 		return
 	} else if existing != nil {
@@ -1034,14 +1032,21 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 
-	// Generate storage path for the clone
-	storagePath := storage.TemplateStoragePath(s.HubID(), clone.Scope, clone.ScopeID, clone.Slug)
+	// Generate a storage path for the clone that is unique to this request
+	// (suffixed with the clone's own ID) rather than deterministic from
+	// (scope, scopeID, slug) alone. Two concurrent requests cloning into the
+	// same destination name would otherwise compute the identical path; if
+	// one of them then loses the race below and runs its failure-path
+	// DeletePrefix, it would delete the files the other just copied. A
+	// request-unique path means the failure cleanup below can only ever
+	// remove a subtree this request itself created.
+	storagePath := storage.TemplateStoragePath(s.HubID(), clone.Scope, clone.ScopeID, clone.Slug) + "/" + clone.ID
 	clone.StoragePath = storagePath
 
 	stor := s.GetStorage()
 	if stor != nil {
 		clone.StorageBucket = stor.Bucket()
-		clone.StorageURI = storage.TemplateStorageURI(s.HubID(), stor.Bucket(), clone.Scope, clone.ScopeID, clone.Slug)
+		clone.StorageURI = storage.StorageURIForPath(stor.Bucket(), storagePath)
 	}
 
 	// Copy files from source to clone location
@@ -1064,7 +1069,7 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		if stor != nil {
 			_ = stor.DeletePrefix(ctx, storagePath)
 		}
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+		if errors.Is(err, store.ErrAlreadyExists) {
 			writeError(w, http.StatusConflict, "conflict", "A resource with this slug already exists in the target scope. Choose a different name.", nil)
 			return
 		}

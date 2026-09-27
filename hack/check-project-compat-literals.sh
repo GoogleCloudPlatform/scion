@@ -84,6 +84,10 @@ allowed_paths=(
   "^pkg/config/templates_test.go$"
   "^pkg/config/v7_fixes_test.go$"
   "^pkg/hub/capability_marshal_test.go$"
+  # Mixes concurrent legacy "grove" and canonical "project" clone requests
+  # for the same destination; the literal is the point of the negative
+  # assertion (every "grove" request must be rejected with 400).
+  "^pkg/hub/clone_concurrency_test.go$"
   "^pkg/hub/envgather_resolution_test.go$"
   "^pkg/hub/envgather_test.go$"
   # Regression test proving grove.<projectId>.* duplicate SSE subjects are

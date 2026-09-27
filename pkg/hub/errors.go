@@ -307,6 +307,20 @@ func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
+// writeStoreErr maps a store lookup error to an HTTP response: a
+// store.ErrNotFound gets the resource-specific "<resource> not found" body
+// via NotFound, and anything else falls through to writeErrorFromErr's
+// generic mapping. This is the common shape of the not-found check that
+// precedes authorization in the get/upload/finalize/download/validate/clone
+// handlers, so callers don't each repeat the branch.
+func writeStoreErr(w http.ResponseWriter, err error, resource string) {
+	if errors.Is(err, store.ErrNotFound) {
+		NotFound(w, resource)
+		return
+	}
+	writeErrorFromErr(w, err, "")
+}
+
 // NotFound writes a 404 Not Found response.
 func NotFound(w http.ResponseWriter, resource string) {
 	writeError(w, http.StatusNotFound, ErrCodeNotFound,

@@ -162,6 +162,12 @@ func createSourceProject(t *testing.T, srv *Server, s store.Store) *store.Projec
 // cloneMockStorage wraps mockStorage with a working Copy implementation.
 type cloneMockStorage struct {
 	mockStorage
+
+	// raceBarrier, when set, makes Copy block the calling goroutine until a
+	// fixed number of distinct concurrent requests have all reached their
+	// first Copy call — see copyBarrier in clone_concurrency_test.go. Nil by
+	// default, so every other test using cloneMockStorage is unaffected.
+	raceBarrier *copyBarrier
 }
 
 func newCloneMockStorage(bucket string) *cloneMockStorage {
@@ -174,7 +180,17 @@ func newCloneMockStorage(bucket string) *cloneMockStorage {
 	}
 }
 
-func (m *cloneMockStorage) Copy(_ context.Context, srcPath, dstPath string) (*storage.Object, error) {
+func (m *cloneMockStorage) Copy(ctx context.Context, srcPath, dstPath string) (*storage.Object, error) {
+	if m.raceBarrier != nil {
+		// Must run before the mutex below: every racing goroutine needs to
+		// reach the barrier on its own, so none of them can be holding m.mu
+		// while waiting. Identified by the request's raceRequestID rather
+		// than dstPath: see copyBarrier's doc comment in
+		// clone_concurrency_test.go for why.
+		if id, ok := raceRequestIDFromContext(ctx); ok {
+			m.raceBarrier.arrive(id)
+		}
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	srcObj, ok := m.objects[srcPath]
