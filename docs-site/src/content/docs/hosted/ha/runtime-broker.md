@@ -100,6 +100,10 @@ When you register your machine as a broker:
 *   **Safe Secrets**: Sensitive API keys and environment variables managed in the Hub are injected directly into the agent container's memory at runtime. They are not saved to your local disk.
 *   **Mutual Authentication**: All communication over the Control Channel uses HMAC-SHA256 signatures, ensuring that only the authorized Hub can send commands to your machine.
 
+## Broker Ownership
+
+The user who registers a broker becomes its owner. Re-registering an existing broker and rotating its HMAC secret are ownership-gated actions. This includes the embedded broker's registration path. These actions are allowed only for the broker's owner, the broker itself (authenticated via HMAC), or a system super-admin. Brokers registered before ownership was recorded get an owner assigned automatically when the Hub boots.
+
 ## Broker Health Monitoring
 
 The Hub monitors broker health via a recurring heartbeat timeout scheduler. If a broker's WebSocket control channel disconnects and the disconnect event is not received (for example, due to a Hub crash or network partition), the Hub automatically marks the broker as **offline** after approximately five minutes of missed heartbeats. This mirrors the existing agent heartbeat timeout pattern and ensures the broker selection cascade does not dispatch work to unreachable brokers.

@@ -149,7 +149,7 @@ Transport auth configuration for the platform guard (IAP or Cloud Run invoker). 
 | :--- | :--- | :--- | :--- |
 | `mode` | string | `"none"` | Transport auth mode: `none`, `iap`, or `cloudrun_invoker`. |
 | `oidc_audience` | string | | OIDC audience for transport tokens. For `iap`: the IAP OAuth client ID. For `cloudrun_invoker`: the Hub URL (auto-derived from `hub.public_url` if empty). |
-| `platform_auth_sa` | string | | Dedicated service account the Hub impersonates to mint OIDC ID tokens for agents. |
+| `platform_auth_sa` | string | | Dedicated service account the Hub impersonates to mint OIDC ID tokens for agents. This account is never provisioned as a Hub user and is never issued user credentials, even if it signs in. |
 
 #### Agent transport environment variables
 

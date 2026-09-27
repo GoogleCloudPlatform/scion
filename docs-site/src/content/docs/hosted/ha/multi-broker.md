@@ -44,7 +44,7 @@ When starting an agent, the Hub resolves a broker through a priority cascade:
 
 | Priority | Source | Condition |
 | :--- | :--- | :--- |
-| 1 | **Explicit `--broker` flag** | The named broker must be a provider for the project (auto-linked if not). |
+| 1 | **Explicit `--broker` flag** | The named broker must be a provider for the project (auto-linked if not; auto-linking requires update access to the project). |
 | 2 | **Project default broker** | Set in project settings; must be online. |
 | 3 | **Hub-level default broker** | Set in [Agent Defaults](/scion/reference/admin-settings/#layout-structure) (`default_runtime_broker`); used when the project has no default. Must be a provider, online, and dispatchable. |
 | 4 | **Single-provider auto-select** | If exactly one broker provides the project and it is online, it is used automatically. |

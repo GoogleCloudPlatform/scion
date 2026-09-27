@@ -26,6 +26,7 @@ Most endpoints require a `Bearer` token in the `Authorization` header.
 - `POST /:id/reincarnate`: Migrate the agent to a new generation with the same ID and slug and a freshly resolved config (see [`scion reincarnate`](/scion/reference/cli/#scion-reincarnate)). Body: `handoff` (optional text for the new generation's first task, max 256 KiB) and `dryRun`. Returns `202 Accepted` with the pending plan, or `200 OK` with the plan only for a dry run. The migration runs in the background. Also available as `POST /api/v1/projects/:projectId/agents/:agentIdOrSlug/reincarnate`.
 - `DELETE /:id`: Stop and remove an agent.
 - `GET /:id/logs`: Stream agent logs (WebSocket).
+- `GET /:id/pty`: Interactive terminal (WebSocket). The Hub relays the stream to the agent's Runtime Broker and sends keepalive pings every 30 seconds, so a dead peer is detected instead of leaving the connection hanging. See [PTY close codes](#pty-close-codes).
 
 There is no separate resume endpoint: resuming is the **start** action applied to a `suspended` agent. A `suspended` agent is also resumed automatically when a message is delivered to it with the `wake` option set.
 
@@ -43,7 +44,7 @@ Agent state uses a layered model:
 The legacy `/api/v1/groves` aliases have been removed. Requests to `/api/v1/groves` or any path under it now return `404 Not Found`; use `/api/v1/projects`.
 
 - `GET /`: List projects you have access to.
-- `POST /register`: Register or link a project repository.
+- `POST /register`: Register or link a project repository. If the request resolves to an existing project, the caller needs update access to that project; without it, the request is rejected before anything changes. The same check applies to creating a project that resolves to an existing one and to linking a provider.
 - `GET /:id`: Get project metadata and statistics.
 - `GET /:id/secrets`: Manage environment secrets for the project.
 - `GET /:id/settings/resolved`: Get project settings indicating whether a Hub default exists per-setting (non-admin gated).
@@ -51,7 +52,7 @@ The legacy `/api/v1/groves` aliases have been removed. Requests to `/api/v1/grov
 
 #### Runtime Brokers (`/api/v1/brokers`)
 - `GET /`: List registered runtime brokers.
-- `POST /register`: Register a new compute node.
+- `POST /register`: Register a new compute node. The caller becomes the broker's owner. Re-registering an existing broker requires ownership (see [Broker Ownership](/scion/hosted/ha/runtime-broker/#broker-ownership)).
 - `POST /join`: Complete the two-phase broker registration.
 - `GET /:id`: Get broker status and capacity.
 
@@ -120,6 +121,20 @@ Brokers maintain a persistent outbound WebSocket connection to the Hub. The Hub 
 - `GET /healthz`: Basic liveness and readiness check. In multi-node or hosted setups, if a reverse proxy (like GFE) intercepts this endpoint and returns a non-JSON body, the client detects this and returns a precise error naming the likely cause (rather than a generic JSON-decoding failure) to assist with troubleshooting.
 - `POST /api/v1/agents`: (Internal) The Hub dispatches agents to this endpoint.
 - `GET /api/v1/agents/:id/attach`: (WebSocket) Provides a terminal stream for interactive sessions.
+
+### PTY close codes
+
+The WebSocket close frame that ends a terminal attach carries a code that tells the client why the attach ended. The hop that knows the cause picks the code, and every later hop passes it through unchanged. The Runtime Broker classifies the cause the same way on every runtime. The close reason is a machine-readable `snake_case` string (for example `session_ended`, `container_removed`, `runtime_stream_dropped`, or `broker_disconnected`).
+
+| Code | Meaning | Client should |
+| :--- | :--- | :--- |
+| `1000` | Clean detach. The tmux session still exists. | Not retry |
+| `4404` | The Runtime Broker cannot find the agent or its container. | Not retry |
+| `4410` | The tmux session is gone (agent exited, container stopped or removed). | Not retry |
+| `4503` | A hop behind this one is temporarily unavailable (Hub-to-broker control channel dropped, stream failed to open, exec transport dropped while the session is still alive). | Retry |
+| `1006`, `1011` | Connection dropped without a close frame, or an unexpected server error. | Retry |
+
+`4401`, `4403`, and `4504` are reserved. Authentication and permission failures currently surface as HTTP `401`/`403` on the handshake.
 
 ## System Health Endpoints (Hub)
 - `GET /healthz`: Basic liveness check. If a reverse proxy intercepts this with a non-JSON response, the client gracefully falls back to `/health`.

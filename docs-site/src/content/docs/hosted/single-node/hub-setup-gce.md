@@ -83,6 +83,8 @@ For ongoing Hub administration (auth, permissions, observability), see the other
 
 If you don't need to build from source, `scripts/single-node-vm/deploy.sh` stands up a Hub from a published GitHub Release instead. It creates a GCE VM with no public IP that runs the `scion` binary under systemd with embedded SQLite, plus a Cloud Run reverse proxy protected by Identity-Aware Proxy (IAP). The proxy image is built on the VM, pushed to the `cloud-run-source-deploy` Artifact Registry repository, and deployed with `--image`. The deployment does not upload source to Cloud Storage, so it works in organizations whose policies block `storage.googleapis.com`. Re-running the script is idempotent.
 
+**IAP SSH firewall rule.** The `scion-hub-HUB_NAME-allow-iap-ssh` rule targets only the hub VM's network tag, not every VM on the network. Deployments made before this scoping have an unscoped rule. Re-running `deploy.sh` narrows that rule in place, but only once it confirms the tag is on the hub VM. Any other VM that relied on the old rule for IAP SSH loses that access and needs its own firewall rule.
+
 ```bash
 ./scripts/single-node-vm/deploy.sh                    # interactive wizard
 ./scripts/single-node-vm/deploy.sh --version v0.5.0   # pin a release

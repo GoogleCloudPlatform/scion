@@ -436,6 +436,9 @@ Scion supports native GitHub App integration for secure, automated agent authent
 ### Project Association
 Projects can be linked to specific GitHub App installations. The system automatically associates GitHub App installations at project creation time, streamlining the authentication flow for private repositories. Project settings provide visual indicators and permission badges for real-time feedback on integration health.
 
+### Webhook Secret
+GitHub App webhook deliveries must be signed. Set the webhook secret in the "GitHub App" tab of the Admin Server Config UI; the Hub stores it as a hub-scoped secret. Use the same value as the webhook secret in your GitHub App's settings. If no webhook secret is configured, the Hub rejects every webhook event with `503 Service Unavailable` instead of processing it unsigned.
+
 
 ## Session Revocation
 
