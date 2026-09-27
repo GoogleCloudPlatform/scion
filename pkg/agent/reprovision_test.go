@@ -17,6 +17,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,6 +27,52 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
+
+// runGit runs a git command in dir, failing the test on error.
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, out)
+	}
+}
+
+// snapshotTree walks dir and returns a map of relative path -> file content,
+// for a byte-identical before/after comparison. Missing dir snapshots as an
+// empty map (useful for a ".git" subdirectory that must not be touched).
+func snapshotTree(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(dir, path)
+		if relErr != nil {
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return nil
+		}
+		out[rel] = string(data)
+		return nil
+	})
+	return out
+}
+
+func mapsEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
+}
 
 // reprovisionSetup builds a git project with a gitignored .scion/agents and a
 // global generic harness-config + default template. CWD is set OUTSIDE the
@@ -354,5 +401,180 @@ func TestReprovision_StoppedContainer_Proceeds(t *testing.T) {
 		Name: agentName, Template: "default", ProjectPath: scionDir, BrokerMode: true, GitClone: gc,
 	}); err != nil {
 		t.Fatalf("Reprovision must proceed for a stopped container: %v", err)
+	}
+}
+
+// =============================================================================
+// Design §3.4 Amendment A23: explicit-mount (shared-workspace / hub-managed)
+// =============================================================================
+
+// TestReprovision_ExplicitMount_CheckoutByteIdenticalAndSiblingUntouched is
+// the design §3.4 Amendment A23 positive-control test for the explicit-mount
+// case: two agents share one external workspace mount (as shared-workspace
+// projects do). Reprovision on one of them must leave the shared checkout
+// byte-identical (including an untracked file) and must never write into
+// its .git directory, must re-render the reprovisioned agent's own
+// scion-agent.json and home, and must leave the sibling agent's directory
+// (config and home) completely untouched.
+func TestReprovision_ExplicitMount_CheckoutByteIdenticalAndSiblingUntouched(t *testing.T) {
+	scionDir, _ := reprovisionSetup(t)
+	agentName := "shared-agent"
+	siblingName := "shared-agent-sibling"
+
+	// The shared checkout: a real git repo mounted directly for every agent
+	// in the project — not a per-agent worktree or clone.
+	sharedCheckout := t.TempDir()
+	runGit(t, sharedCheckout, "init")
+	runGit(t, sharedCheckout, "config", "user.email", "test@example.com")
+	runGit(t, sharedCheckout, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(sharedCheckout, "tracked.txt"), []byte("v1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, sharedCheckout, "add", "tracked.txt")
+	runGit(t, sharedCheckout, "commit", "-m", "initial")
+	if err := os.WriteFile(filepath.Join(sharedCheckout, "untracked.txt"), []byte("scratch work"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := api.ContextWithSharedWorkspace(context.Background())
+	if _, _, _, err := ProvisionAgent(ctx, agentName, "default", "", "", scionDir, "", "created", "", sharedCheckout); err != nil {
+		t.Fatalf("initial ProvisionAgent (agent): %v", err)
+	}
+	if _, _, _, err := ProvisionAgent(ctx, siblingName, "default", "", "", scionDir, "", "created", "", sharedCheckout); err != nil {
+		t.Fatalf("initial ProvisionAgent (sibling): %v", err)
+	}
+
+	agentHomeFile := filepath.Join(config.GetAgentHomePath(scionDir, agentName), "notes.txt")
+	if err := os.WriteFile(agentHomeFile, []byte("agent note"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	siblingHomeFile := filepath.Join(config.GetAgentHomePath(scionDir, siblingName), "notes.txt")
+	if err := os.WriteFile(siblingHomeFile, []byte("sibling note"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	siblingCfgPath := filepath.Join(config.GetAgentDir(scionDir, siblingName, true), "scion-agent.json")
+	siblingBefore, err := os.ReadFile(siblingCfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	checkoutBefore := snapshotTree(t, sharedCheckout)
+	gitDirBefore := snapshotTree(t, filepath.Join(sharedCheckout, ".git"))
+
+	mgr := NewManager(&runtime.MockRuntime{})
+	if _, err := mgr.Reprovision(context.Background(), api.StartOptions{
+		Name: agentName, Template: "default", ProjectPath: scionDir, BrokerMode: true,
+		Workspace: sharedCheckout, SharedWorkspace: true,
+	}); err != nil {
+		t.Fatalf("Reprovision: %v", err)
+	}
+
+	checkoutAfter := snapshotTree(t, sharedCheckout)
+	if !mapsEqual(checkoutBefore, checkoutAfter) {
+		t.Fatalf("shared checkout changed after Reprovision:\nbefore=%v\nafter=%v", checkoutBefore, checkoutAfter)
+	}
+	gitDirAfter := snapshotTree(t, filepath.Join(sharedCheckout, ".git"))
+	if !mapsEqual(gitDirBefore, gitDirAfter) {
+		t.Fatalf(".git directory was written to during Reprovision:\nbefore=%v\nafter=%v", gitDirBefore, gitDirAfter)
+	}
+
+	// The reprovisioned agent's own state survives and is re-rendered.
+	if _, err := os.Stat(agentHomeFile); err != nil {
+		t.Fatalf("agent home file lost: %v", err)
+	}
+	agentCfgPath := filepath.Join(config.GetAgentDir(scionDir, agentName, true), "scion-agent.json")
+	if _, err := os.Stat(agentCfgPath); err != nil {
+		t.Fatalf("expected scion-agent.json to be re-rendered: %v", err)
+	}
+
+	// The sibling agent, sharing the same mount, must be completely untouched.
+	siblingAfter, err := os.ReadFile(siblingCfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(siblingBefore) != string(siblingAfter) {
+		t.Fatalf("sibling agent's scion-agent.json changed:\nbefore=%s\nafter=%s", siblingBefore, siblingAfter)
+	}
+	if _, err := os.Stat(siblingHomeFile); err != nil {
+		t.Fatalf("sibling home file lost: %v", err)
+	}
+}
+
+// TestReprovision_ExplicitMount_MissingWorkspacePath_Refused is the design
+// §3.4 Amendment A23 regression test for the "an absolute workspace path
+// exists and is a directory" precondition: Reprovision must refuse — not
+// create — a missing explicit-mount workspace path.
+func TestReprovision_ExplicitMount_MissingWorkspacePath_Refused(t *testing.T) {
+	scionDir, _ := reprovisionSetup(t)
+	agentName := "missing-ws-agent"
+	validWorkspace := t.TempDir()
+
+	ctx := api.ContextWithSharedWorkspace(context.Background())
+	if _, _, _, err := ProvisionAgent(ctx, agentName, "default", "", "", scionDir, "", "created", "", validWorkspace); err != nil {
+		t.Fatalf("initial ProvisionAgent: %v", err)
+	}
+
+	missingWorkspace := filepath.Join(t.TempDir(), "gone")
+	mgr := NewManager(&runtime.MockRuntime{})
+	_, err := mgr.Reprovision(context.Background(), api.StartOptions{
+		Name: agentName, Template: "default", ProjectPath: scionDir, BrokerMode: true,
+		Workspace: missingWorkspace, SharedWorkspace: true,
+	})
+	if err == nil {
+		t.Fatal("expected Reprovision to refuse a missing explicit workspace path, got nil error")
+	}
+	if !errors.Is(err, ErrReprovisionRefused) {
+		t.Fatalf("expected ErrReprovisionRefused, got %v", err)
+	}
+	if _, statErr := os.Stat(missingWorkspace); statErr == nil {
+		t.Fatal("DATA INTEGRITY: Reprovision must never create the missing workspace path")
+	}
+}
+
+// TestReprovision_ExplicitMount_RelativeWorkspaceEscapesRoot_Refused is the
+// design §3.4 Amendment A23 regression test for the relative-workspace case:
+// Reprovision reuses resolveWorkspaceSubdir's containment check, so a
+// relative workspace that escapes the project root is refused rather than
+// resolved to a path outside it.
+func TestReprovision_ExplicitMount_RelativeWorkspaceEscapesRoot_Refused(t *testing.T) {
+	scionDir, _ := reprovisionSetup(t)
+	agentName := "escape-ws-agent"
+	validWorkspace := t.TempDir()
+
+	ctx := api.ContextWithSharedWorkspace(context.Background())
+	if _, _, _, err := ProvisionAgent(ctx, agentName, "default", "", "", scionDir, "", "created", "", validWorkspace); err != nil {
+		t.Fatalf("initial ProvisionAgent: %v", err)
+	}
+
+	mgr := NewManager(&runtime.MockRuntime{})
+	_, err := mgr.Reprovision(context.Background(), api.StartOptions{
+		Name: agentName, Template: "default", ProjectPath: scionDir, BrokerMode: true,
+		Workspace: "../../etc", SharedWorkspace: true,
+	})
+	if err == nil {
+		t.Fatal("expected Reprovision to refuse a relative workspace escaping the project root, got nil error")
+	}
+	if !errors.Is(err, ErrReprovisionRefused) {
+		t.Fatalf("expected ErrReprovisionRefused, got %v", err)
+	}
+}
+
+// TestReprovision_NeitherGitCloneNorWorkspace_Refused covers the remaining
+// api.ReincarnateEligible case: an agent with no GitClone and no Workspace at
+// all must be refused, the same as today, rather than silently falling
+// through to some other ProvisionAgent branch.
+func TestReprovision_NeitherGitCloneNorWorkspace_Refused(t *testing.T) {
+	scionDir, _ := reprovisionSetup(t)
+	agentName := "neither-agent"
+
+	mgr := NewManager(&runtime.MockRuntime{})
+	_, err := mgr.Reprovision(context.Background(), api.StartOptions{
+		Name: agentName, Template: "default", ProjectPath: scionDir, BrokerMode: true,
+	})
+	if err == nil {
+		t.Fatal("expected Reprovision to refuse an agent with neither GitClone nor Workspace, got nil error")
+	}
+	if !errors.Is(err, ErrReprovisionRefused) {
+		t.Fatalf("expected ErrReprovisionRefused, got %v", err)
 	}
 }

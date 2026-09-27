@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -197,22 +198,29 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Design §3.4 Amendments A2/A4: Phase 1 targets clone-per-agent
-	// workspaces only (design §7). GitClone alone does NOT
-	// identify that mode: populateAgentConfig
+	// Design §3.4 Amendments A2/A4/A23: eligible workspaces are
+	// clone-per-agent (a real GitClone) or an explicit mount (no GitClone,
+	// but a non-empty Workspace — shared-workspace and hub-managed
+	// projects), via the shared api.ReincarnateEligible predicate. GitClone
+	// alone does NOT identify clone-per-agent mode: populateAgentConfig
 	// (handlers_agent_create_helpers.go) sets GitClone for every git-remote
 	// project that is not shared-workspace, and that includes
 	// worktree-per-agent — so a worktree-per-agent agent has a non-nil
-	// GitClone and used to pass this gate. Checked here, before any plan is
-	// computed or anything persisted, as defense in depth alongside the
-	// broker's own refusal (Reprovision refuses to touch a non-clone
-	// workspace): this is what makes --dry-run report the restriction too,
-	// instead of a dry run showing a plan that a real request could not
-	// safely execute.
-	if agent.AppliedConfig == nil || agent.AppliedConfig.GitClone == nil ||
-		project.IsWorktreePerAgent() || project.IsSharedWorkspace() {
-		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
-			"reincarnate currently supports clone-per-agent workspaces only", nil)
+	// GitClone and would otherwise pass the predicate. It is excluded here,
+	// separately, because only the Hub has the project record the predicate
+	// itself cannot see (api.ReincarnateEligible's doc comment). Checked
+	// before any plan is computed or anything persisted, as defense in depth
+	// alongside the broker's own refusal (Reprovision refuses to touch a
+	// workspace it did not find already on disk): this is what makes
+	// --dry-run report the restriction too, instead of a dry run showing a
+	// plan that a real request could not safely execute.
+	if agent.AppliedConfig == nil || project.IsWorktreePerAgent() ||
+		!api.ReincarnateEligible(agent.AppliedConfig.GitClone != nil, agent.AppliedConfig.Workspace) {
+		msg := "reincarnate currently supports clone-per-agent workspaces only"
+		if project.IsWorktreePerAgent() {
+			msg = "reincarnate does not yet support worktree-per-agent workspaces"
+		}
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError, msg, nil)
 		return
 	}
 

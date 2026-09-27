@@ -561,11 +561,14 @@ func TestReincarnateAgent_AC9_NilCapabilities_Returns412(t *testing.T) {
 	assert.Equal(t, http.StatusPreconditionFailed, rec.Code)
 }
 
-// TestReincarnateAgent_NonCloneWorkspace_Returns400 is the design §3.4
-// Amendment A2/A4 regression test: Phase 1 targets clone-per-agent workspaces
-// only (design §7). An agent with no GitClone (worktree-per-agent or
-// shared-workspace) must be rejected before anything is persisted or
-// computed — including on a dry run, so --dry-run reports the restriction
+// TestReincarnateAgent_WorktreePerAgentOrNeitherWorkspace_Returns400 is the
+// design §3.4 Amendment A2/A4/A23 regression test: worktree-per-agent is
+// still rejected, and so is the "neither GitClone nor Workspace" case A23
+// explicitly keeps a 400 for. (Shared-workspace and hub-managed agents are
+// now ELIGIBLE via the explicit-mount case — see
+// TestReincarnateAgent_ExplicitMountWorkspace_Eligible — so they are no
+// longer covered here.) Rejection must happen before anything is persisted
+// or computed — including on a dry run, so --dry-run reports the restriction
 // instead of showing a plan a real request could not safely execute.
 //
 // A fabricated predecessor of this test set AppliedConfig.GitClone = nil
@@ -576,11 +579,12 @@ func TestReincarnateAgent_AC9_NilCapabilities_Returns412(t *testing.T) {
 // gate that only checked for nil. Each case here derives GitClone (or its
 // absence) the same way populateAgentConfig actually would, for a project
 // carrying the real workspace-mode label.
-func TestReincarnateAgent_NonCloneWorkspace_Returns400(t *testing.T) {
+func TestReincarnateAgent_WorktreePerAgentOrNeitherWorkspace_Returns400(t *testing.T) {
 	cases := []struct {
-		name          string
-		workspaceMode string // "" = clone-per-agent (the default for a git-remote project)
-		wantRejected  bool
+		name           string
+		workspaceMode  string // "" = clone-per-agent (the default for a git-remote project)
+		clearWorkspace bool   // force the "neither GitClone nor Workspace" edge case
+		wantRejected   bool
 	}{
 		{
 			name:          "worktree-per-agent: GitClone is set, but this is not clone-per-agent",
@@ -588,12 +592,13 @@ func TestReincarnateAgent_NonCloneWorkspace_Returns400(t *testing.T) {
 			wantRejected:  true,
 		},
 		{
-			name:          "shared-workspace",
-			workspaceMode: store.WorkspaceModeShared,
-			wantRejected:  true,
+			name:           "neither GitClone nor Workspace",
+			workspaceMode:  store.WorkspaceModeShared,
+			clearWorkspace: true,
+			wantRejected:   true,
 		},
 		{
-			name:          "clone-per-agent: the one mode Phase 1 supports",
+			name:          "clone-per-agent: eligible",
 			workspaceMode: "",
 			wantRejected:  false,
 		},
@@ -613,15 +618,19 @@ func TestReincarnateAgent_NonCloneWorkspace_Returns400(t *testing.T) {
 
 			// What the create path actually produces for this project —
 			// not a hand-set field — so this test breaks if
-			// populateAgentConfig's GitClone condition ever changes shape
-			// again without a matching gate update.
+			// populateAgentConfig's GitClone/Workspace conditions ever
+			// change shape again without a matching gate update.
 			probe := &store.Agent{AppliedConfig: &store.AgentAppliedConfig{}}
 			srv.populateAgentConfig(ctx, probe, project, nil)
 
 			agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
 				a.AppliedConfig.GitClone = probe.AppliedConfig.GitClone
-				a.AppliedConfig.Workspace = ""
-				a.AppliedConfig.CreateInputs.Workspace = ""
+				a.AppliedConfig.Workspace = probe.AppliedConfig.Workspace
+				a.AppliedConfig.CreateInputs.Workspace = probe.AppliedConfig.Workspace
+				if tc.clearWorkspace {
+					a.AppliedConfig.Workspace = ""
+					a.AppliedConfig.CreateInputs.Workspace = ""
+				}
 			})
 			beforeVersion := agent.StateVersion
 			self := agentIdentityFor(agent.ID, project.ID)
@@ -652,6 +661,68 @@ func TestReincarnateAgent_NonCloneWorkspace_Returns400(t *testing.T) {
 			list, err := s.ListAgentReincarnations(ctx, agent.ID)
 			require.NoError(t, err)
 			assert.Empty(t, list, "no reincarnation record should be created")
+		})
+	}
+}
+
+// TestReincarnateAgent_ExplicitMountWorkspace_Eligible is the design §3.4
+// Amendment A23 regression test: a shared-workspace or hub-managed agent —
+// no GitClone, but populateAgentConfig gives it a non-empty Workspace — is
+// now eligible for reincarnate, where Phase 1 (Amendments A2/A4) rejected
+// every non-clone-per-agent workspace outright. Both --dry-run and a real
+// request must be accepted, and neither writes anything the caller did not
+// ask for. Worktree-per-agent is unaffected by this change — see
+// TestReincarnateAgent_WorktreePerAgentOrNeitherWorkspace_Returns400.
+func TestReincarnateAgent_ExplicitMountWorkspace_Eligible(t *testing.T) {
+	cases := []struct {
+		name          string
+		gitRemote     string
+		workspaceMode string
+	}{
+		{
+			name:          "shared-workspace git project",
+			gitRemote:     "https://example.com/repo.git",
+			workspaceMode: store.WorkspaceModeShared,
+		},
+		{
+			name:      "hub-managed project (no git remote)",
+			gitRemote: "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			disp := newReincarnateTestDispatcher()
+			srv, s, project, broker := setupReincarnateTestServer(t, disp)
+			ctx := context.Background()
+
+			project.GitRemote = tc.gitRemote
+			if tc.workspaceMode != "" {
+				project.Labels = map[string]string{store.LabelWorkspaceMode: tc.workspaceMode}
+			}
+			require.NoError(t, s.UpdateProject(ctx, project))
+
+			probe := &store.Agent{AppliedConfig: &store.AgentAppliedConfig{}}
+			srv.populateAgentConfig(ctx, probe, project, nil)
+			require.Nil(t, probe.AppliedConfig.GitClone, "fixture check: an explicit-mount agent must have no GitClone")
+			require.NotEmpty(t, probe.AppliedConfig.Workspace, "fixture check: populateAgentConfig must set an explicit Workspace")
+
+			agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+				a.AppliedConfig.GitClone = nil
+				a.AppliedConfig.Workspace = probe.AppliedConfig.Workspace
+				a.AppliedConfig.CreateInputs.Workspace = probe.AppliedConfig.Workspace
+			})
+			self := agentIdentityFor(agent.ID, project.ID)
+
+			dryReq := reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h", DryRun: true})
+			dryRec := httptest.NewRecorder()
+			srv.handleReincarnateAgent(dryRec, dryReq, agent.ID)
+			assert.Equal(t, http.StatusOK, dryRec.Code, "dry run: body: %s", dryRec.Body.String())
+
+			realReq := reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h", DryRun: false})
+			realRec := httptest.NewRecorder()
+			srv.handleReincarnateAgent(realRec, realReq, agent.ID)
+			assert.Equal(t, http.StatusAccepted, realRec.Code, "real request: body: %s", realRec.Body.String())
 		})
 	}
 }
