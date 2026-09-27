@@ -40,6 +40,7 @@ type SortField = 'name' | 'created';
 type SortDir = 'asc' | 'desc';
 type AdminTab = 'users' | 'invites';
 type StatusFilter = 'all' | 'invited' | 'active' | 'suspended';
+type RoleFilter = 'all' | UserRole;
 
 interface ConfirmAction {
   title: string;
@@ -146,6 +147,13 @@ export class ScionPageAdminUsers extends LitElement {
 
   @state()
   private statusFilter: StatusFilter = 'all';
+
+  /**
+   * Hub role filter. Invited users have no real role yet (it is assigned at
+   * first sign-in), so they are excluded from every role bucket.
+   */
+  @state()
+  private roleFilter: RoleFilter = 'all';
 
   // Invite user dialog state
   @state()
@@ -438,6 +446,18 @@ export class ScionPageAdminUsers extends LitElement {
     }
 
     .meta-text {
+      font-size: 0.8125rem;
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .role-pending {
+      font-size: 0.75rem;
+      font-style: italic;
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .invite-role-hint {
+      margin: 0;
       font-size: 0.8125rem;
       color: var(--scion-text-muted, #64748b);
     }
@@ -781,6 +801,10 @@ export class ScionPageAdminUsers extends LitElement {
       if (this.statusFilter !== 'all') {
         params.set('status', this.statusFilter);
       }
+      const roleFilterActive = this.roleFilter !== 'all' && this.statusFilter !== 'invited';
+      if (roleFilterActive) {
+        params.set('role', this.roleFilter);
+      }
 
       const response = await apiFetch(`/api/v1/users?${params.toString()}`);
 
@@ -795,9 +819,19 @@ export class ScionPageAdminUsers extends LitElement {
         nextCursor?: string;
         totalCount?: number;
       };
-      this.users = Array.isArray(data) ? data : data.users || [];
+      let users: AdminUser[] = Array.isArray(data) ? (data as AdminUser[]) : data.users || [];
+      let totalCount = (data as { totalCount?: number }).totalCount ?? users.length;
+      if (roleFilterActive) {
+        // The stored role on an invited row is a placeholder, so invited
+        // users never belong to a role bucket. The backend only filters by
+        // equality, so drop them here.
+        const kept = users.filter((u) => u.status !== 'invited');
+        totalCount = Math.max(0, totalCount - (users.length - kept.length));
+        users = kept;
+      }
+      this.users = users;
       this.nextCursor = (data as { nextCursor?: string }).nextCursor || null;
-      this.totalCount = (data as { totalCount?: number }).totalCount ?? this.users.length;
+      this.totalCount = totalCount;
     } catch (err) {
       console.error('Failed to load users:', err);
       this.error = err instanceof Error ? err.message : 'Failed to load users';
@@ -1140,6 +1174,18 @@ export class ScionPageAdminUsers extends LitElement {
   private setStatusFilter(filter: StatusFilter): void {
     if (this.statusFilter === filter) return;
     this.statusFilter = filter;
+    // Invited users have no role, so a role filter cannot apply to them.
+    if (filter === 'invited') this.roleFilter = 'all';
+    this.resetPagingAndReload();
+  }
+
+  private setRoleFilter(filter: RoleFilter): void {
+    if (this.roleFilter === filter) return;
+    this.roleFilter = filter;
+    this.resetPagingAndReload();
+  }
+
+  private resetPagingAndReload(): void {
     this.currentPage = 1;
     this.cursorHistory = [];
     this.nextCursor = null;
@@ -1452,8 +1498,33 @@ export class ScionPageAdminUsers extends LitElement {
     `;
   }
 
+  private renderRoleFilter() {
+    const filters: { label: string; value: RoleFilter }[] = [
+      { label: 'All roles', value: 'all' },
+      ...HUB_ROLE_OPTIONS.map((role) => ({ label: HUB_ROLE_LABELS[role], value: role })),
+    ];
+    const disabled = this.statusFilter === 'invited';
+    return html`
+      <sl-select
+        class="role-filter"
+        size="small"
+        value=${this.roleFilter}
+        ?disabled=${disabled}
+        title=${disabled
+          ? 'Invited users are assigned a role at first sign-in'
+          : 'Filter by hub role'}
+        @sl-change=${(e: Event) => {
+          this.setRoleFilter((e.target as HTMLSelectElement).value as RoleFilter);
+        }}
+        style="min-width: 8rem"
+      >
+        ${filters.map((f) => html`<sl-option value=${f.value}>${f.label}</sl-option>`)}
+      </sl-select>
+    `;
+  }
+
   private renderUsers() {
-    if (this.users.length === 0 && this.statusFilter === 'all') {
+    if (this.users.length === 0 && this.statusFilter === 'all' && this.roleFilter === 'all') {
       return html`
         <div class="empty-state">
           <sl-icon name="people"></sl-icon>
@@ -1478,7 +1549,7 @@ export class ScionPageAdminUsers extends LitElement {
     return html`
       <div class="users-toolbar">
         <div class="users-toolbar-left">
-          ${this.renderStatusFilter()}
+          ${this.renderStatusFilter()} ${this.renderRoleFilter()}
           <span class="meta-text">${this.totalCount} user${this.totalCount !== 1 ? 's' : ''}</span>
         </div>
         <div class="users-toolbar-right">
@@ -1613,7 +1684,13 @@ export class ScionPageAdminUsers extends LitElement {
           </div>
         </td>
         <td>
-          <span class="role-badge ${user.role}">${user.role}</span>
+          ${isInvited
+            ? html`<span
+                class="role-pending"
+                title="The hub default role is applied at first sign-in"
+                >Assigned at sign-in</span
+              >`
+            : html`<span class="role-badge ${user.role}">${user.role}</span>`}
         </td>
         <td>
           <span class="status-badge ${user.status}">${user.status}</span>
@@ -1638,7 +1715,8 @@ export class ScionPageAdminUsers extends LitElement {
     const canDelete = can(caps, 'delete');
 
     if (user.status === 'invited') {
-      // Invited users: only Remove action (requires delete capability)
+      // Invited users: only Remove action (requires delete capability). No
+      // Change role: the role is assigned at first sign-in (PATCH role → 409).
       if (!canDelete) return nothing;
       return html`
         <sl-dropdown placement="bottom-end" hoist>
@@ -1810,6 +1888,9 @@ export class ScionPageAdminUsers extends LitElement {
               this.inviteUserNote = (e.target as HTMLInputElement).value;
             }}
           ></sl-input>
+          <p class="invite-role-hint">
+            Role is assigned at first sign-in using the hub default (Admin &gt; Server Config).
+          </p>
         </div>
         <sl-button
           slot="footer"

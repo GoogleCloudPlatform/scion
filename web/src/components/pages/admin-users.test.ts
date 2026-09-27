@@ -16,7 +16,8 @@
 
 /**
  * Tests for admin-users.ts: the per-user "Change role" submenu
- * (Admin / Member / Viewer).
+ * (Admin / Member / Viewer), invited-user display, the role filter and the
+ * invite dialog hint.
  */
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
@@ -242,5 +243,155 @@ describe('scion-page-admin-users — Change role submenu', () => {
       expect(mod.HUB_ROLE_DESCRIPTIONS[role]).toBeTruthy();
       expect(mod.HUB_ROLE_LABELS[role]).toBeTruthy();
     }
+  });
+});
+
+function listCalls(): URL[] {
+  return vi
+    .mocked(fetch)
+    .mock.calls.map(([url, init]) => ({
+      url: String(url),
+      method: (init as RequestInit | undefined)?.method ?? 'GET',
+    }))
+    .filter((c) => c.method === 'GET' && c.url.includes('/api/v1/users?'))
+    .map((c) => new URL(c.url, 'http://localhost'));
+}
+
+/** Simulates choosing an option in an sl-select (Shoelace is not registered under happy-dom). */
+async function chooseSelect(
+  el: HTMLElement & { updateComplete: Promise<boolean> },
+  select: HTMLElement,
+  value: string
+): Promise<void> {
+  (select as HTMLElement & { value: string }).value = value;
+  select.dispatchEvent(new Event('sl-change', { bubbles: true, composed: true }));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  await el.updateComplete;
+}
+
+type PageEl = HTMLElement & { updateComplete: Promise<boolean> };
+
+describe('scion-page-admin-users — invited users and role filter', () => {
+  let element: PageEl | null = null;
+
+  beforeAll(async () => {
+    vi.stubGlobal('fetch', vi.fn(createFetchHandler([])));
+    mod = await import('./admin-users.js');
+  });
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+  });
+
+  const invited = makeUser({
+    id: 'u-invited',
+    email: 'invited@example.com',
+    displayName: '',
+    role: 'member', // placeholder stored on invited rows
+    status: 'invited',
+  });
+
+  it('shows "Assigned at sign-in" instead of a role badge for invited users', async () => {
+    element = (await createComponent([invited])) as PageEl;
+    const rows = queryAll(element, 'tbody tr');
+    expect(rows).toHaveLength(1);
+    const pending = rows[0].querySelector('.role-pending');
+    expect(pending?.textContent?.trim()).toBe('Assigned at sign-in');
+    expect(rows[0].querySelector('.role-badge')).toBeNull();
+  });
+
+  it('keeps the role badge for active users', async () => {
+    element = (await createComponent([makeUser({ role: 'viewer' })])) as PageEl;
+    const row = queryAll(element, 'tbody tr')[0];
+    expect(row.querySelector('.role-badge.viewer')?.textContent?.trim()).toBe('viewer');
+    expect(row.querySelector('.role-pending')).toBeNull();
+  });
+
+  it('offers no Change role for invited users, even with the promote capability', async () => {
+    element = (await createComponent([invited])) as PageEl;
+    expect(queryAll(element, '.change-role-item')).toHaveLength(0);
+    expect(roleItems(element)).toHaveLength(0);
+    const text = element.shadowRoot?.textContent ?? '';
+    expect(text).toContain('Remove');
+  });
+
+  it('renders a role filter with All / Admin / Member / Viewer', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    const select = element.shadowRoot?.querySelector('sl-select.role-filter');
+    expect(select).not.toBeNull();
+    const options = Array.from(select!.querySelectorAll('sl-option'));
+    expect(options.map((o) => o.getAttribute('value'))).toEqual([
+      'all',
+      'admin',
+      'member',
+      'viewer',
+    ]);
+    expect(select!.getAttribute('value')).toBe('all');
+    // Initial load sends no role parameter.
+    const calls = listCalls();
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls[calls.length - 1].searchParams.has('role')).toBe(false);
+  });
+
+  it('choosing Viewer sends ?role=viewer', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    const select = element.shadowRoot!.querySelector<HTMLElement>('sl-select.role-filter')!;
+    await chooseSelect(element, select, 'viewer');
+
+    const calls = listCalls();
+    const last = calls[calls.length - 1];
+    expect(last.searchParams.get('role')).toBe('viewer');
+  });
+
+  it('excludes invited users from role buckets', async () => {
+    const active = makeUser({ id: 'u-active', email: 'active@example.com', role: 'member' });
+    element = (await createComponent([active, invited])) as PageEl;
+    expect(queryAll(element, 'tbody tr')).toHaveLength(2);
+
+    const select = element.shadowRoot!.querySelector<HTMLElement>('sl-select.role-filter')!;
+    await chooseSelect(element, select, 'member');
+
+    const rows = queryAll(element, 'tbody tr');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].textContent).toContain('active@example.com');
+    expect(element.shadowRoot?.textContent).toContain('1 user');
+  });
+
+  it('disables the role filter and drops ?role= when the status filter is Invited', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    const roleSelect = element.shadowRoot!.querySelector<HTMLElement>('sl-select.role-filter')!;
+    await chooseSelect(element, roleSelect, 'viewer');
+
+    const statusSelect = Array.from(
+      element.shadowRoot!.querySelectorAll<HTMLElement>('sl-select')
+    ).find((s) => !s.classList.contains('role-filter'))!;
+    await chooseSelect(element, statusSelect, 'invited');
+
+    const last = listCalls().at(-1)!;
+    expect(last.searchParams.get('status')).toBe('invited');
+    expect(last.searchParams.has('role')).toBe(false);
+    const roleAfter = element.shadowRoot!.querySelector<HTMLElement>('sl-select.role-filter')!;
+    expect(roleAfter.hasAttribute('disabled')).toBe(true);
+    expect(roleAfter.getAttribute('value')).toBe('all');
+  });
+
+  it('invite dialog explains the role is assigned at first sign-in, with no role picker', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    const inviteBtn = Array.from(element.shadowRoot!.querySelectorAll('sl-button')).find(
+      (b) => b.textContent?.trim() === 'Invite User'
+    ) as HTMLElement;
+    expect(inviteBtn).toBeTruthy();
+    inviteBtn.click();
+    await element.updateComplete;
+
+    const dialog = element.shadowRoot!.querySelector('sl-dialog[label="Invite User"]');
+    expect(dialog).not.toBeNull();
+    expect(
+      dialog!.querySelector('.invite-role-hint')?.textContent?.replace(/\s+/g, ' ').trim()
+    ).toBe('Role is assigned at first sign-in using the hub default (Admin > Server Config).');
+    expect(dialog!.querySelector('sl-select, sl-radio-group')).toBeNull();
+    expect(dialog!.textContent).not.toContain('Viewer');
   });
 });
