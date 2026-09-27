@@ -246,8 +246,8 @@ The Hub dashboard reads exactly two usage metrics, regardless of source:
 
 | Metric | Point labels | Meaning |
 |--------|--------------|---------|
-| `gen_ai.api.calls` | `harness`, `model`, `status` (`success`\|`error`), plus the canonical identity labels above | One completed model response, or a failed request where the source reports it. |
-| `scion.usage.tokens` | `harness`, `model`, `token_type`, plus the canonical identity labels above | Tokens attributed to model requests. |
+| `gen_ai.api.calls` | `harness`, `model`, `status` (`success`\|`error`), `scion_agent_id`, `scion_project_id`, `scion_agent_slug` | One completed model response, or a failed request where the source reports it. |
+| `scion.usage.tokens` | `harness`, `model`, `token_type`, `scion_agent_id`, `scion_project_id`, `scion_agent_slug` | Tokens attributed to model requests. |
 
 `token_type` is a closed enum: `input` (non-cached prompt tokens), `output` (generated tokens, including reasoning), `cache_read`, `cache_write`, and `reasoning` (an informational subset of `output`, already counted there — never add it to a total alongside `output`). `scion.usage.tokens` replaces the `scion.hook.tokens.*` family for any source that has been migrated to it; both a harness's native events and its hooks can in principle populate it, but never both at once for the same harness (see "Usage source" below).
 
