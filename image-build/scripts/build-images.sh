@@ -327,11 +327,8 @@ warn_if_scion_base_not_in_run() {
   if [[ "${BUILDER_MODE}" != "target" && "${PUSH}" != "true" ]]; then
     local inspect_tool=""
     case "${BUILDER}" in
-      # An explicit if guards the assignment: under `set -e`, "cmd &&
-      # assignment" as the last command of a case clause depends on that
-      # clause never being the last thing evaluated in an unguarded context
-      # to stay safe, and this script deliberately supports Bash 3.2, where
-      # that guarantee is not worth relying on.
+      # if-guarded, not "cmd && x": a failing && list that ends up as the
+      # function's return status would trip set -e.
       local-podman) if command -v podman >/dev/null 2>&1; then inspect_tool="podman"; fi ;;
       *)            if command -v docker >/dev/null 2>&1; then inspect_tool="docker"; fi ;;
     esac
