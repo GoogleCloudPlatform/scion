@@ -38,7 +38,6 @@ import os
 import re as _re
 import sys
 from typing import Any
-from urllib.parse import quote
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -482,8 +481,21 @@ def _harden_config(ctx: scion_harness.ProvisionContext) -> None:
 # ---------------------------------------------------------------------------
 # Telemetry – native OTel export
 # ---------------------------------------------------------------------------
+#
+# Grok's native OTel export always targets sciontool's local receiver.
+# Previously this fell back to the shared SCION_OTEL_ENDPOINT (the cloud
+# telemetry config alias) and copied cloud headers/CA into the harness env,
+# which sent native telemetry straight to the cloud endpoint, bypassing
+# sciontool's redaction and identity stamping entirely (fork issue #2053,
+# phase 0). Grok's own OTel env vars (GROK_TELEMETRY_ENABLED,
+# GROK_EXTERNAL_OTEL) and its exact protocol support are unverified against
+# primary docs (findings-q4-harness-matrix.md); this phase keeps the
+# pre-existing gRPC-on-4317 assumption, which already matches sciontool's
+# local gRPC receiver default (the same one claude/codex use), and fixes only
+# the endpoint/header/CA bypass. Verifying Grok's actual OTel wire support is
+# left to a follow-up, alongside grok-build usage derivation (out of scope,
+# D6/D8).
 
-_DEFAULT_OTEL_ENDPOINT = "http://localhost:4317"
 _DEFAULT_OTEL_PROTOCOL = "grpc"
 
 
@@ -497,90 +509,43 @@ def _telemetry_enabled(telemetry: dict[str, Any] | None) -> bool:
     return bool(enabled)
 
 
-def _resolve_endpoint(telemetry: dict[str, Any] | None, env: dict[str, str] | None) -> str:
-    """Resolve the OTLP endpoint from env overrides or telemetry config."""
+def _resolve_endpoint(env: dict[str, str] | None) -> str:
+    """Resolve the OTLP endpoint Grok's native exporter is pointed at.
+
+    Always the local sciontool receiver, unless SCION_GROK_BUILD_OTEL_ENDPOINT
+    is set. That override is a local-debugging escape hatch only: it bypasses
+    sciontool's redaction and identity stamping entirely, so it must never be
+    pointed at anything but a local collector. The generic SCION_OTEL_ENDPOINT
+    (the shared cloud-config alias) and telemetry.cloud.endpoint are
+    deliberately NOT honored here anymore.
+    """
     env = env or {}
-    for key in ("SCION_GROK_BUILD_OTEL_ENDPOINT", "SCION_OTEL_ENDPOINT"):
-        v = (env.get(key) or os.environ.get(key) or "").strip()
-        if v:
-            return v
-    if telemetry and isinstance(telemetry.get("cloud"), dict):
-        ep = (telemetry["cloud"].get("endpoint") or "").strip()
-        if ep:
-            return ep
-    return _DEFAULT_OTEL_ENDPOINT
+    override = (env.get("SCION_GROK_BUILD_OTEL_ENDPOINT") or os.environ.get("SCION_GROK_BUILD_OTEL_ENDPOINT") or "").strip()
+    if override:
+        return override
+    port = str(env.get("SCION_OTEL_GRPC_PORT") or os.environ.get("SCION_OTEL_GRPC_PORT") or "4317")
+    if not port.isdecimal() or not 1 <= int(port) <= 65535:
+        raise scion_harness.ProvisionError("invalid local telemetry gRPC port")
+    return f"http://127.0.0.1:{port}"
 
 
-def _resolve_protocol(telemetry: dict[str, Any] | None, env: dict[str, str] | None) -> str:
-    """Resolve the OTLP protocol from env overrides or telemetry config."""
-    env = env or {}
-    for key in ("SCION_GROK_BUILD_OTEL_PROTOCOL", "SCION_OTEL_PROTOCOL"):
-        v = (env.get(key) or os.environ.get(key) or "").strip()
-        if v:
-            return v
-    if telemetry and isinstance(telemetry.get("cloud"), dict):
-        proto = (telemetry["cloud"].get("protocol") or "").strip()
-        if proto:
-            return proto
-    return _DEFAULT_OTEL_PROTOCOL
-
-
-def _build_telemetry_env(telemetry: dict[str, Any], env: dict[str, str] | None) -> dict[str, str]:
+def _build_telemetry_env(env: dict[str, str] | None) -> dict[str, str]:
     """Build env vars that direct Grok's native OTel emitter to sciontool.
 
     Grok's OTel export honours standard OpenTelemetry SDK environment
     variables (OTEL_*) and the grok-specific GROK_TELEMETRY_ENABLED and
-    GROK_EXTERNAL_OTEL flags.
+    GROK_EXTERNAL_OTEL flags. This always targets the local receiver -- see
+    _resolve_endpoint.
     """
-    env = env or {}
-    endpoint = _resolve_endpoint(telemetry, env)
-    protocol = _resolve_protocol(telemetry, env)
-
-    otel_env: dict[str, str] = {
+    return {
         "GROK_TELEMETRY_ENABLED": "true",
         "GROK_EXTERNAL_OTEL": "true",
-        "OTEL_EXPORTER_OTLP_ENDPOINT": endpoint,
-        "OTEL_EXPORTER_OTLP_PROTOCOL": protocol,
+        "OTEL_EXPORTER_OTLP_ENDPOINT": _resolve_endpoint(env),
+        "OTEL_EXPORTER_OTLP_PROTOCOL": _DEFAULT_OTEL_PROTOCOL,
         "OTEL_METRICS_EXPORTER": "otlp",
         "OTEL_LOGS_EXPORTER": "otlp",
         "OTEL_METRIC_EXPORT_INTERVAL": "30000",
     }
-
-    # Propagate custom headers when present.
-    headers: dict[str, str] = {}
-    for key in ("SCION_GROK_BUILD_OTEL_HEADERS", "SCION_OTEL_HEADERS"):
-        v = (env.get(key) or os.environ.get(key) or "").strip()
-        if v:
-            try:
-                parsed = json.loads(v)
-                if isinstance(parsed, dict):
-                    headers = parsed
-                    break
-            except json.JSONDecodeError:
-                pass
-    if not headers:
-        cloud = telemetry.get("cloud") or {}
-        if isinstance(cloud, dict) and isinstance(cloud.get("headers"), dict):
-            headers = cloud["headers"]
-    if headers:
-        parts = [f"{k}={quote(str(v), safe='')}" for k, v in headers.items()]
-        otel_env["OTEL_EXPORTER_OTLP_HEADERS"] = ",".join(sorted(parts))
-
-    # TLS CA file for non-localhost collectors.
-    ca_file = ""
-    for key in ("SCION_GROK_BUILD_OTEL_CA_FILE", "SCION_OTEL_CA_FILE"):
-        v = (env.get(key) or os.environ.get(key) or "").strip()
-        if v:
-            ca_file = v
-            break
-    if not ca_file:
-        cloud = telemetry.get("cloud") or {}
-        if isinstance(cloud, dict) and isinstance(cloud.get("tls"), dict):
-            ca_file = str(cloud["tls"].get("ca_file") or "").strip()
-    if ca_file:
-        otel_env["OTEL_EXPORTER_OTLP_CERTIFICATE"] = ca_file
-
-    return otel_env
 
 
 # ---------------------------------------------------------------------------
@@ -712,10 +677,14 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     if not isinstance(env_overlay, dict):
         env_overlay = None
 
-    if _telemetry_enabled(telemetry if isinstance(telemetry, dict) else None):
-        otel_env = _build_telemetry_env(telemetry or {}, env_overlay)
+    telemetry_enabled = _telemetry_enabled(telemetry if isinstance(telemetry, dict) else None)
+    if telemetry_enabled:
+        otel_env = _build_telemetry_env(env_overlay)
         env.update(otel_env)
         ctx.info(f"telemetry: injected {len(otel_env)} OTel env var(s)")
+    # SCION_NATIVE_TELEMETRY_POLICY lets the env guard (hooks/envoverlay.go)
+    # protect the OTEL_* vars above from being overridden at runtime.
+    env["SCION_NATIVE_TELEMETRY_POLICY"] = "enabled" if telemetry_enabled else "disabled"
     # --- end telemetry ------------------------------------------------------
 
     ctx.write_outputs(resolved, env=env, extra=extra)

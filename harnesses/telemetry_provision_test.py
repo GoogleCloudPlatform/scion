@@ -14,7 +14,8 @@ ROOT = Path(__file__).parent
 
 class TelemetryProvisionTest(unittest.TestCase):
     def _invoke(self, harness, enabled, port, provider=None, extra_env=None,
-                well_known_gcp_credentials=False, cloud_endpoint=None):
+                well_known_gcp_credentials=False, cloud_endpoint=None,
+                port_env_key='SCION_OTEL_GRPC_PORT'):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             bundle = home / '.scion' / 'harness'
@@ -36,7 +37,7 @@ class TelemetryProvisionTest(unittest.TestCase):
                         telemetry['cloud']['provider'] = provider
                     if cloud_endpoint is not None:
                         telemetry['cloud']['endpoint'] = cloud_endpoint
-                source_env = {'SCION_OTEL_GRPC_PORT': str(port)}
+                source_env = {port_env_key: str(port)}
                 source_env.update(extra_env or {})
                 (bundle / 'inputs' / 'telemetry.json').write_text(json.dumps({
                     'telemetry': telemetry, 'env': source_env,
@@ -133,6 +134,60 @@ class TelemetryProvisionTest(unittest.TestCase):
                 self.assertNotIn('statsig', config)
                 self.assertNotIn('cloudtrace.googleapis.com', config)
 
+    def test_copilot_default_custom_and_disabled(self):
+        for enabled, port in ((True, 4318), (True, 14318), (False, 14318)):
+            with self.subTest(enabled=enabled, port=port):
+                env, _ = self._invoke('copilot', enabled, port, port_env_key='SCION_OTEL_HTTP_PORT')
+                if enabled:
+                    self.assertEqual(env['COPILOT_OTEL_ENABLED'], 'true')
+                    self.assertEqual(env['COPILOT_OTEL_EXPORTER_TYPE'], 'otlp-http')
+                    self.assertEqual(env['OTEL_EXPORTER_OTLP_ENDPOINT'], f'http://127.0.0.1:{port}')
+                    self.assertEqual(env['OTEL_EXPORTER_OTLP_PROTOCOL'], 'http/protobuf')
+                    self.assertEqual(env['OTEL_METRICS_EXPORTER'], 'otlp')
+                    self.assertEqual(env['OTEL_LOGS_EXPORTER'], 'otlp')
+                else:
+                    self.assertNotIn('COPILOT_OTEL_ENABLED', env)
+                self.assertNotIn('OTEL_EXPORTER_OTLP_HEADERS', env)
+                self.assertNotIn('OTEL_EXPORTER_OTLP_CERTIFICATE', env)
+
+    def test_copilot_never_reaches_cloud_endpoint(self):
+        # #2053: copilot used to resolve SCION_OTEL_ENDPOINT (the generic
+        # cloud-config alias) ahead of the local receiver. It must not.
+        env, _ = self._invoke(
+            'copilot', True, 14318, port_env_key='SCION_OTEL_HTTP_PORT',
+            cloud_endpoint='https://generic.invalid/v1',
+            extra_env={'SCION_OTEL_ENDPOINT': 'cloudtrace.googleapis.com:443'},
+        )
+        self.assertEqual(env['OTEL_EXPORTER_OTLP_ENDPOINT'], 'http://127.0.0.1:14318')
+        self.assertNotIn('OTEL_EXPORTER_OTLP_HEADERS', env)
+        self.assertNotIn('OTEL_EXPORTER_OTLP_CERTIFICATE', env)
+
+    def test_grok_build_default_custom_and_disabled(self):
+        for enabled, port in ((True, 4317), (True, 14317), (False, 14317)):
+            with self.subTest(enabled=enabled, port=port):
+                env, _ = self._invoke('grok-build', enabled, port)
+                if enabled:
+                    self.assertEqual(env['GROK_TELEMETRY_ENABLED'], 'true')
+                    self.assertEqual(env['GROK_EXTERNAL_OTEL'], 'true')
+                    self.assertEqual(env['OTEL_EXPORTER_OTLP_ENDPOINT'], f'http://127.0.0.1:{port}')
+                    self.assertEqual(env['OTEL_METRICS_EXPORTER'], 'otlp')
+                    self.assertEqual(env['OTEL_LOGS_EXPORTER'], 'otlp')
+                else:
+                    self.assertNotIn('GROK_TELEMETRY_ENABLED', env)
+                self.assertNotIn('OTEL_EXPORTER_OTLP_HEADERS', env)
+                self.assertNotIn('OTEL_EXPORTER_OTLP_CERTIFICATE', env)
+
+    def test_grok_build_never_reaches_cloud_endpoint(self):
+        # #2053: grok-build had the same cloud-endpoint bypass as copilot.
+        env, _ = self._invoke(
+            'grok-build', True, 14317,
+            cloud_endpoint='https://generic.invalid/v1',
+            extra_env={'SCION_OTEL_ENDPOINT': 'cloudtrace.googleapis.com:443'},
+        )
+        self.assertEqual(env['OTEL_EXPORTER_OTLP_ENDPOINT'], 'http://127.0.0.1:14317')
+        self.assertNotIn('OTEL_EXPORTER_OTLP_HEADERS', env)
+        self.assertNotIn('OTEL_EXPORTER_OTLP_CERTIFICATE', env)
+
     def test_installed_codex_0154_loads_generated_config(self):
         binary = shutil.which('codex')
         if not binary or subprocess.run([binary, '--version'], capture_output=True, text=True).stdout.strip() != 'codex-cli 0.154.0':
@@ -155,17 +210,22 @@ class TelemetryProvisionTest(unittest.TestCase):
             'GEMINI_TELEMETRY_OUTFILE': '/tmp/bypass.json',
             'CODEX_HOME': '/tmp/bypass-codex',
             'SCION_CODEX_OTEL_ENDPOINT': 'https://external.invalid:443',
+            'SCION_OTEL_ENDPOINT': 'https://external.invalid:443',
         }
         with patch.dict(os.environ, inherited):
             claude_env, _ = self._invoke('claude', True, 14317, provider='otlp')
             gemini_env, gemini_config = self._invoke('gemini-cli', True, 14317)
             codex_env, codex_config = self._invoke('codex', True, 14317)
+            copilot_env, _ = self._invoke('copilot', True, 14318, port_env_key='SCION_OTEL_HTTP_PORT')
+            grok_env, _ = self._invoke('grok-build', True, 14317)
         self.assertEqual(claude_env['OTEL_EXPORTER_OTLP_ENDPOINT'], 'http://127.0.0.1:14317')
         self.assertEqual(gemini_env['GEMINI_TELEMETRY_OTLP_ENDPOINT'], 'http://127.0.0.1:14317')
         self.assertEqual(gemini_config['otlpEndpoint'], 'http://127.0.0.1:14317')
         self.assertEqual(gemini_env['GEMINI_TELEMETRY_OUTFILE'], '')
         self.assertNotEqual(codex_env['CODEX_HOME'], inherited['CODEX_HOME'])
         self.assertIn('http://127.0.0.1:14317', codex_config)
+        self.assertEqual(copilot_env['OTEL_EXPORTER_OTLP_ENDPOINT'], 'http://127.0.0.1:14318')
+        self.assertEqual(grok_env['OTEL_EXPORTER_OTLP_ENDPOINT'], 'http://127.0.0.1:14317')
 
 
 if __name__ == '__main__':
