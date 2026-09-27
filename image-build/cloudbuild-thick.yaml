@@ -44,7 +44,7 @@ steps:
   # Stage 2: Build scion-base on top of thick-prep (replaces core-base)
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-scion-base'
-    args: ['buildx', 'build', '--platform', 'linux/amd64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/thick-prep:$_SHORT_SHA', '--build-arg', 'GIT_COMMIT=$_COMMIT_SHA', '-t', '$_REGISTRY/scion-base:$_SHORT_SHA', '-t', '$_REGISTRY/scion-base:$_TAG', '-f', 'image-build/scion-base/Dockerfile', '--pull', '--push', '.']
+    args: ['buildx', 'build', '--platform', 'linux/amd64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/thick-prep:$_SHORT_SHA', '--build-arg', 'GIT_COMMIT=$_COMMIT_SHA', '--build-arg', 'VERSION=$_VERSION', '-t', '$_REGISTRY/scion-base:$_SHORT_SHA', '-t', '$_REGISTRY/scion-base:$_TAG', '-f', 'image-build/scion-base/Dockerfile', '--pull', '--push', '.']
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
 
@@ -115,6 +115,7 @@ steps:
 substitutions:
   _REGISTRY: 'us-central1-docker.pkg.dev/${PROJECT_ID}/public-docker'
   _TAG: 'latest'
+  _VERSION: ''
 options:
   dynamicSubstitutions: true
   machineType: 'E2_HIGHCPU_8'

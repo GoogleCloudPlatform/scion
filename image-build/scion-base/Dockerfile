@@ -26,6 +26,7 @@ ENV CGO_ENABLED=1
 
 # Build arguments for version info
 ARG GIT_COMMIT
+ARG VERSION
 ARG BUILD_TIME
 
 # Copy go.mod and go.sum first for better layer caching
@@ -42,7 +43,10 @@ COPY web/*.go ./web/
 
 # Build with version info injected via ldflags
 # VCS stamping is disabled since .git is not in the build context;
-# commit info is passed explicitly via the GIT_COMMIT build arg
+# commit and version info are passed explicitly via the GIT_COMMIT and
+# VERSION build args (the same values hack/version.sh derives on the host:
+# VERSION is only non-empty on an exact git tag, otherwise both binaries
+# fall back to "dev" at runtime, same as a local `make build`).
 RUN BUILD_TIME="${BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" && \
     SCION_PKG="github.com/GoogleCloudPlatform/scion/pkg/version" && \
     SCIONTOOL_PKG="github.com/GoogleCloudPlatform/scion/cmd/sciontool/commands" && \
@@ -52,12 +56,28 @@ RUN BUILD_TIME="${BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" && \
         SCION_LDFLAGS="${SCION_LDFLAGS} -X ${SCION_PKG}.Commit=${GIT_COMMIT}"; \
         SCIONTOOL_LDFLAGS="${SCIONTOOL_LDFLAGS} -X ${SCIONTOOL_PKG}.Commit=${GIT_COMMIT}"; \
     fi && \
+    if [ -n "${VERSION}" ]; then \
+        SCION_LDFLAGS="${SCION_LDFLAGS} -X ${SCION_PKG}.Version=${VERSION}"; \
+        SCIONTOOL_LDFLAGS="${SCIONTOOL_LDFLAGS} -X ${SCIONTOOL_PKG}.Version=${VERSION}"; \
+    fi && \
     go build -buildvcs=false -tags no_embed_web -ldflags="${SCION_LDFLAGS}" -o /usr/local/bin/scion ./cmd/scion/ && \
     go build -buildvcs=false -tags no_embed_web -ldflags="${SCIONTOOL_LDFLAGS}" -o /usr/local/bin/sciontool ./cmd/sciontool/
 
 # Final stage
 FROM base
 USER root
+
+# Build-provenance label (D5, usage-telemetry #2053 phase 4). ARGs are
+# stage-scoped in Docker, so GIT_COMMIT is re-declared here even though the
+# builder stage above already consumed it for the ldflags. This is the only
+# label operators need to answer "which sciontool commit is in this image?"
+# without running the binary: `docker inspect --format
+# '{{index .Config.Labels "org.opencontainers.image.revision"}}' <image>`.
+# It is inherited by every image that does `FROM scion-base` (harnesses,
+# hub) unless they set their own, so no per-harness Dockerfile change is
+# needed for the label to show up there too.
+ARG GIT_COMMIT
+LABEL org.opencontainers.image.revision="${GIT_COMMIT}"
 
 # Copy scion and sciontool from builder
 COPY --from=builder /usr/local/bin/scion /usr/local/bin/scion
