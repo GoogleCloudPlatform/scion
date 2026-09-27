@@ -16,11 +16,16 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // TestDoRequest_PropagatesContextCancellation confirms, for ptone/scion#1886,
@@ -85,4 +90,74 @@ func TestDoRequest_PropagatesContextCancellation(t *testing.T) {
 	}
 
 	wg.Wait()
+}
+
+// TestBrokerHTTPTransport_StartAgentSendsWorkspaceDispatchFields proves the
+// HTTP transport writes StartExtras.Workspace's fields onto the wire,
+// including the nested Depth on GitClone (GoogleCloudPlatform/scion#1931),
+// via the shared applyStartExtras builder.
+func TestBrokerHTTPTransport_StartAgentSendsWorkspaceDispatchFields(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		gotBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("failed to read request body: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	transport := newBrokerHTTPTransport(false, nil)
+
+	depth := 3
+	extras := StartExtras{
+		HubEndpoint: "https://hub.example.com",
+		Workspace: WorkspaceDispatchSpec{
+			GitClone:      &api.GitCloneConfig{URL: "https://github.com/example/repo.git", Branch: "main", Depth: &depth},
+			Branch:        "feature-branch",
+			WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		},
+	}
+
+	_, err := transport.StartAgent(
+		context.Background(), "broker-1", srv.URL, "agent-1", "project-id-1",
+		"", "", "", "", "", "", nil, nil, nil, nil, false, false, extras,
+	)
+	if err != nil {
+		t.Fatalf("StartAgent returned error: %v", err)
+	}
+
+	var wire struct {
+		HubEndpoint string `json:"hubEndpoint"`
+		GitClone    struct {
+			URL    string `json:"url"`
+			Branch string `json:"branch"`
+			Depth  int    `json:"depth"`
+		} `json:"gitClone"`
+		Branch        string `json:"branch"`
+		WorkspaceMode string `json:"workspaceMode"`
+	}
+	if err := json.Unmarshal(gotBody, &wire); err != nil {
+		t.Fatalf("failed to unmarshal request body %s: %v", gotBody, err)
+	}
+	if wire.HubEndpoint != extras.HubEndpoint {
+		t.Errorf("hubEndpoint = %q, want %q", wire.HubEndpoint, extras.HubEndpoint)
+	}
+	if wire.GitClone.URL != extras.Workspace.GitClone.URL {
+		t.Errorf("gitClone.url = %q, want %q", wire.GitClone.URL, extras.Workspace.GitClone.URL)
+	}
+	if wire.GitClone.Branch != extras.Workspace.GitClone.Branch {
+		t.Errorf("gitClone.branch = %q, want %q", wire.GitClone.Branch, extras.Workspace.GitClone.Branch)
+	}
+	if wire.GitClone.Depth != depth {
+		t.Errorf("gitClone.depth = %d, want %d", wire.GitClone.Depth, depth)
+	}
+	if wire.Branch != extras.Workspace.Branch {
+		t.Errorf("branch = %q, want %q", wire.Branch, extras.Workspace.Branch)
+	}
+	if wire.WorkspaceMode != extras.Workspace.WorkspaceMode {
+		t.Errorf("workspaceMode = %q, want %q", wire.WorkspaceMode, extras.Workspace.WorkspaceMode)
+	}
 }

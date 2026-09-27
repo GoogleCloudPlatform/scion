@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"testing"
 	"time"
@@ -58,6 +59,57 @@ func TestHybridBrokerClient_StartAgent_RouteGate(t *testing.T) {
 		_, err := c.StartAgent(context.Background(), remoteBroker, "", "a1", "p1", "", "", "", "", "", "", nil, nil, nil, nil, false, false, StartExtras{})
 		assert.ErrorIs(t, err, ErrLifecycleDeferred)
 	})
+}
+
+// TestHybridBrokerClient_StartAgent_PassesWorkspaceExtrasThroughUnchanged
+// proves the Hybrid client's routeHTTP path (used when the broker has no
+// live control-channel connection) hands StartExtras.Workspace to the HTTP
+// client exactly as received (GoogleCloudPlatform/scion#1931) — the field
+// does not get dropped or altered by the routing layer.
+func TestHybridBrokerClient_StartAgent_PassesWorkspaceExtrasThroughUnchanged(t *testing.T) {
+	const remoteBroker = "broker-remote"
+
+	mgr := NewControlChannelManager(DefaultControlChannelConfig(), slog.Default())
+	httpClient := &fakeHTTPClient{}
+	c := NewHybridBrokerClient(mgr, httpClient, nil, false)
+
+	extras := StartExtras{
+		Workspace: WorkspaceDispatchSpec{
+			Branch:        "feature-branch",
+			WorkspaceMode: "worktree-per-agent",
+		},
+	}
+	_, err := c.StartAgent(context.Background(), remoteBroker, "http://broker", "a1", "p1", "", "", "", "", "", "", nil, nil, nil, nil, false, false, extras)
+	require.NoError(t, err)
+	assert.Equal(t, extras.Workspace, httpClient.lastStartExtras.Workspace)
+}
+
+// TestHybridBrokerClient_StartAgent_RouteLocalPassesWorkspaceExtrasThroughUnchanged
+// is the routeLocal counterpart of the routeHTTP test above: when the broker
+// has a live control-channel connection, the Hybrid client's control-channel
+// path also hands StartExtras.Workspace through unchanged, all the way onto
+// the tunneled request body.
+func TestHybridBrokerClient_StartAgent_RouteLocalPassesWorkspaceExtrasThroughUnchanged(t *testing.T) {
+	tunnel := &mockControlChannelTunnel{connected: true}
+	c := &HybridBrokerClient{
+		controlChannel: &ControlChannelBrokerClient{manager: tunnel},
+		httpClient:     &fakeHTTPClient{},
+	}
+
+	extras := StartExtras{
+		Workspace: WorkspaceDispatchSpec{
+			Branch:        "feature-branch",
+			WorkspaceMode: "worktree-per-agent",
+		},
+	}
+	_, err := c.StartAgent(context.Background(), "broker-1", "unused", "a1", "p1", "", "", "", "", "", "", nil, nil, nil, nil, false, false, extras)
+	require.NoError(t, err)
+	require.NotNil(t, tunnel.lastRequest)
+
+	var wire map[string]interface{}
+	require.NoError(t, json.Unmarshal(tunnel.lastRequest.Body, &wire))
+	assert.Equal(t, "feature-branch", wire["branch"])
+	assert.Equal(t, "worktree-per-agent", wire["workspaceMode"])
 }
 
 func TestHybridBrokerClient_StopAgent_RouteGate(t *testing.T) {

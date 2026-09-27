@@ -37,6 +37,8 @@ type fakeHTTPClient struct {
 	startAgentCalled   bool
 	stopAgentCalled    bool
 	deleteAgentCalled  bool
+	lastStartExtras    StartExtras
+	lastRestartExtras  StartExtras
 }
 
 func (f *fakeHTTPClient) MessageAgent(context.Context, string, string, string, string, string, bool, *messages.StructuredMessage) error {
@@ -48,15 +50,17 @@ func (f *fakeHTTPClient) MessageAgent(context.Context, string, string, string, s
 func (f *fakeHTTPClient) CreateAgent(context.Context, string, string, *RemoteCreateAgentRequest) (*RemoteAgentResponse, error) {
 	return nil, nil
 }
-func (f *fakeHTTPClient) StartAgent(context.Context, string, string, string, string, string, string, string, string, string, string, map[string]string, []ResolvedSecret, *api.ScionConfig, []api.SharedDir, bool, bool, StartExtras) (*RemoteAgentResponse, error) {
+func (f *fakeHTTPClient) StartAgent(_ context.Context, _, _, _, _, _, _, _, _, _, _ string, _ map[string]string, _ []ResolvedSecret, _ *api.ScionConfig, _ []api.SharedDir, _, _ bool, extras StartExtras) (*RemoteAgentResponse, error) {
 	f.startAgentCalled = true
+	f.lastStartExtras = extras
 	return nil, nil
 }
 func (f *fakeHTTPClient) StopAgent(context.Context, string, string, string, string) error {
 	f.stopAgentCalled = true
 	return nil
 }
-func (f *fakeHTTPClient) RestartAgent(context.Context, string, string, string, string, map[string]string, StartExtras) error {
+func (f *fakeHTTPClient) RestartAgent(_ context.Context, _, _, _, _ string, _ map[string]string, extras StartExtras) error {
+	f.lastRestartExtras = extras
 	return nil
 }
 func (f *fakeHTTPClient) ResetAuthAgent(context.Context, string, string, string, string, string) error {

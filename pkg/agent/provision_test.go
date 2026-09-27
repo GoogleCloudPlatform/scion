@@ -1049,7 +1049,9 @@ func TestGetAgentGitClone_ClearsExistingWorkspace(t *testing.T) {
 		Branch: "main",
 		Depth:  intPtr(1),
 	}
-	ctx := api.ContextWithGitClone(context.Background(), gitClone)
+	// A fresh provision (create): the leftover workspace from a same-named
+	// agent that the hub deleted without cleaning up local files is cleared.
+	ctx := api.ContextWithFreshProvision(api.ContextWithGitClone(context.Background(), gitClone))
 
 	_, _, wsPath, _, err := GetAgent(ctx, "reused-agent", "claude", "", "", projectScionDir, "", "", "", "")
 	if err != nil {
@@ -1067,6 +1069,79 @@ func TestGetAgentGitClone_ClearsExistingWorkspace(t *testing.T) {
 			names[i] = e.Name()
 		}
 		t.Errorf("expected empty workspace after clearing stale content, got: %v", names)
+	}
+}
+
+// TestGetAgentGitClone_StartPreservesExistingWorkspace proves that on start
+// (no FreshProvision), GetAgent never clears a populated workspace even when
+// GitClone is set, since start also carries GitClone (so a workspace that
+// did not survive a stop can be recreated) but must not discard un-pushed
+// work in one that did (GoogleCloudPlatform/scion#1931).
+func TestGetAgentGitClone_StartPreservesExistingWorkspace(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	_ = os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
+	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
+	tplDir := filepath.Join(globalScionDir, "templates", "claude")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"claude"}`), 0644)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+
+	// A fully provisioned agent directory with a populated, real-looking
+	// workspace: a .git pointer and an un-pushed file.
+	agentDir := filepath.Join(projectScionDir, "agents", "existing-agent")
+	agentWorkspace := filepath.Join(agentDir, "workspace")
+	agentHome := filepath.Join(agentDir, "home")
+	if err := os.MkdirAll(agentWorkspace, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(agentHome, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "scion-agent.json"),
+		[]byte(`{"harness":"claude","default_harness_config":"claude"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentWorkspace, ".git"),
+		[]byte("gitdir: ../../../.git/worktrees/existing-agent\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	const unpushedContent = "package main // un-pushed change\n"
+	if err := os.WriteFile(filepath.Join(agentWorkspace, "unpushed.go"), []byte(unpushedContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	gitClone := &api.GitCloneConfig{
+		URL:    "https://github.com/example/repo.git",
+		Branch: "main",
+		Depth:  intPtr(1),
+	}
+	// Start: GitClone is set, but FreshProvision is not.
+	ctx := api.ContextWithGitClone(context.Background(), gitClone)
+
+	_, _, wsPath, _, err := GetAgent(ctx, "existing-agent", "claude", "", "", projectScionDir, "", "", "", "")
+	if err != nil {
+		t.Fatalf("GetAgent failed: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(wsPath, "unpushed.go"))
+	if err != nil {
+		t.Fatalf("un-pushed file must survive a start dispatch, but reading it failed: %v", err)
+	}
+	if string(got) != unpushedContent {
+		t.Errorf("un-pushed file content = %q, want %q", got, unpushedContent)
 	}
 }
 

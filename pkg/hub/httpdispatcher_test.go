@@ -82,6 +82,11 @@ type mockRuntimeBrokerClient struct {
 	cleanupCalls               int
 	cleanupSlugs               []string
 	createWithGatherFunc       func(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error)
+	// startCallCount and failFirstStartWith let a test simulate a
+	// hash-mismatch-then-retry sequence: the first StartAgent call fails with
+	// failFirstStartWith, and the second (and later) calls succeed.
+	startCallCount     int
+	failFirstStartWith error
 }
 
 func (m *mockRuntimeBrokerClient) CreateAgent(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, error) {
@@ -116,6 +121,10 @@ func (m *mockRuntimeBrokerClient) StartAgent(ctx context.Context, brokerID, brok
 	m.lastResolvedEnv = resolvedEnv
 	m.lastInlineConfig = inlineConfig
 	m.lastStartExtras = extras
+	m.startCallCount++
+	if m.startCallCount == 1 && m.failFirstStartWith != nil {
+		return nil, m.failFirstStartWith
+	}
 	if m.returnErr != nil {
 		return nil, m.returnErr
 	}
@@ -1960,6 +1969,197 @@ func TestHTTPAgentDispatcher_DispatchAgentRestart_CarriesSkillDispatchMetadata(t
 	assert.Equal(t, map[string]string{"GH_EXAMPLE": "value-1"}, mockClient.lastRestartExtras.ProvisionCredentials)
 }
 
+// TestHTTPAgentDispatcher_DispatchAgentStart_CarriesWorkspaceDispatchMetadata
+// proves DispatchAgentStart populates StartExtras.Workspace from the agent's
+// AppliedConfig and the project's resolved workspace mode via workspaceSpecFor
+// — the same builder buildCreateRequest uses — so start dispatch carries the
+// inputs needed to recreate a workspace that did not survive a stop
+// (GoogleCloudPlatform/scion#1931).
+func TestHTTPAgentDispatcher_DispatchAgentStart_CarriesWorkspaceDispatchMetadata(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	project := &store.Project{
+		ID:        tid("project-ws"),
+		Name:      "workspace-project",
+		Slug:      "workspace-project",
+		GitRemote: "https://github.com/example/repo.git",
+		Labels: map[string]string{
+			store.LabelWorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		},
+	}
+	if err := memStore.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	broker := &store.RuntimeBroker{
+		ID:       tid("broker-ws"),
+		Name:     "test-broker",
+		Slug:     "test-broker",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	gitClone := &api.GitCloneConfig{URL: "https://github.com/example/repo.git"}
+	agent := &store.Agent{
+		ID:              tid("agent-ws"),
+		Name:            "test-agent",
+		Slug:            "test-agent",
+		ProjectID:       tid("project-ws"),
+		RuntimeBrokerID: tid("broker-ws"),
+		AppliedConfig: &store.AgentAppliedConfig{
+			GitClone: gitClone,
+			Branch:   "feature-branch",
+		},
+	}
+
+	if err := dispatcher.DispatchAgentStart(ctx, agent, "", false); err != nil {
+		t.Fatalf("DispatchAgentStart failed: %v", err)
+	}
+
+	ws := mockClient.lastStartExtras.Workspace
+	if ws.GitClone != gitClone {
+		t.Errorf("expected StartExtras.Workspace.GitClone=%+v, got %+v", gitClone, ws.GitClone)
+	}
+	if ws.Branch != "feature-branch" {
+		t.Errorf("expected StartExtras.Workspace.Branch=%q, got %q", "feature-branch", ws.Branch)
+	}
+	if ws.WorkspaceMode != store.WorkspaceModeWorktreePerAgent {
+		t.Errorf("expected StartExtras.Workspace.WorkspaceMode=%q, got %q", store.WorkspaceModeWorktreePerAgent, ws.WorkspaceMode)
+	}
+}
+
+// TestHTTPAgentDispatcher_DispatchAgentStart_RetryAfterHashMismatchCarriesWorkspace
+// proves the hash-mismatch-then-retry sequence in DispatchAgentStart still
+// carries StartExtras.Workspace on the retry call: the retry reuses the same
+// extras value built before the first attempt, so it cannot drop the
+// Workspace field.
+func TestHTTPAgentDispatcher_DispatchAgentStart_RetryAfterHashMismatchCarriesWorkspace(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	project := &store.Project{
+		ID:        tid("project-hm"),
+		Name:      "hash-mismatch-project",
+		Slug:      "hash-mismatch-project",
+		GitRemote: "https://github.com/example/repo.git",
+		Labels: map[string]string{
+			store.LabelWorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		},
+	}
+	if err := memStore.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	broker := &store.RuntimeBroker{
+		ID:       tid("broker-hm"),
+		Name:     "test-broker",
+		Slug:     "test-broker",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{
+		failFirstStartWith: errors.New("Failed to hydrate harness-config: hash mismatch for file config.yaml"),
+	}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	dispatcher.SetHarnessConfigRepairer(func(ctx context.Context, name string) error { return nil })
+
+	gitClone := &api.GitCloneConfig{URL: "https://github.com/example/repo.git"}
+	agent := &store.Agent{
+		ID:              tid("agent-hm"),
+		Name:            "test-agent",
+		Slug:            "test-agent",
+		ProjectID:       tid("project-hm"),
+		RuntimeBrokerID: tid("broker-hm"),
+		AppliedConfig: &store.AgentAppliedConfig{
+			HarnessConfig: "claude",
+			GitClone:      gitClone,
+			Branch:        "feature-branch",
+		},
+	}
+
+	if err := dispatcher.DispatchAgentStart(ctx, agent, "", false); err != nil {
+		t.Fatalf("DispatchAgentStart failed: %v", err)
+	}
+
+	if mockClient.startCallCount != 2 {
+		t.Fatalf("expected StartAgent to be called twice (fail then retry), got %d calls", mockClient.startCallCount)
+	}
+	ws := mockClient.lastStartExtras.Workspace
+	if ws.GitClone != gitClone {
+		t.Errorf("expected the retry's StartExtras.Workspace.GitClone=%+v, got %+v", gitClone, ws.GitClone)
+	}
+	if ws.Branch != "feature-branch" {
+		t.Errorf("expected the retry's StartExtras.Workspace.Branch=%q, got %q", "feature-branch", ws.Branch)
+	}
+}
+
+// TestHTTPAgentDispatcher_DispatchAgentRestart_DoesNotCarryWorkspaceDispatchMetadata
+// pins that restart leaves StartExtras.Workspace at its zero value: only
+// start sends the workspace-recreation inputs.
+func TestHTTPAgentDispatcher_DispatchAgentRestart_DoesNotCarryWorkspaceDispatchMetadata(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	project := &store.Project{
+		ID:        tid("project-ws-r"),
+		Name:      "workspace-project-restart",
+		Slug:      "workspace-project-restart",
+		GitRemote: "https://github.com/example/repo.git",
+		Labels: map[string]string{
+			store.LabelWorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		},
+	}
+	if err := memStore.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	broker := &store.RuntimeBroker{
+		ID:       tid("broker-ws-r"),
+		Name:     "test-broker",
+		Slug:     "test-broker",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	agent := &store.Agent{
+		ID:              tid("agent-ws-r"),
+		Name:            "test-agent",
+		Slug:            "test-agent",
+		ProjectID:       tid("project-ws-r"),
+		RuntimeBrokerID: tid("broker-ws-r"),
+		AppliedConfig: &store.AgentAppliedConfig{
+			GitClone: &api.GitCloneConfig{URL: "https://github.com/example/repo.git"},
+			Branch:   "feature-branch",
+		},
+	}
+
+	if err := dispatcher.DispatchAgentRestart(ctx, agent); err != nil {
+		t.Fatalf("DispatchAgentRestart failed: %v", err)
+	}
+
+	ws := mockClient.lastRestartExtras.Workspace
+	if ws.GitClone != nil || ws.Branch != "" || ws.WorkspaceMode != "" {
+		t.Errorf("expected StartExtras.Workspace to be the zero value on restart, got %+v", ws)
+	}
+}
+
 func TestHTTPAgentDispatcher_DispatchAgentStart_HubManagedProject(t *testing.T) {
 	ctx := context.Background()
 	memStore := createTestStore(t)
@@ -2573,6 +2773,106 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesGitClone(t *testing.T
 	if mockClient.lastCreateReq.Config.GitClone.Depth == nil || *mockClient.lastCreateReq.Config.GitClone.Depth != 1 {
 		t.Errorf("expected GitClone Depth 1, got %v",
 			mockClient.lastCreateReq.Config.GitClone.Depth)
+	}
+}
+
+// TestBuildCreateRequest_GoldenPayload guards the full create payload against
+// unintended change from routing Config.Branch and Config.GitClone through
+// workspaceSpecFor (GoogleCloudPlatform/scion#1931): workspaceSpecFor reads
+// exactly the same two AppliedConfig fields buildCreateRequest read directly
+// before, so the create payload is unaffected by that refactor. RequestID is
+// a fresh UUID per call and is normalized before comparison.
+func TestBuildCreateRequest_GoldenPayload(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	project := &store.Project{
+		ID:        tid("golden-project"),
+		Name:      "golden-project",
+		Slug:      "golden-project",
+		GitRemote: "https://github.com/example/repo.git",
+		SharedDirs: []api.SharedDir{
+			{Name: "cache", ReadOnly: true},
+		},
+		Labels: map[string]string{
+			store.LabelWorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		},
+	}
+	if err := memStore.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	agent := &store.Agent{
+		ID:        tid("golden-agent"),
+		Slug:      "golden-agent",
+		Name:      "golden-agent",
+		ProjectID: project.ID,
+		OwnerID:   tid("golden-owner"),
+		AppliedConfig: &store.AgentAppliedConfig{
+			HarnessConfig:     "claude",
+			Task:              "implement feature",
+			Profile:           "default",
+			Branch:            "feature-branch",
+			TemplateID:        "tmpl-1",
+			TemplateHash:      "sha256:abc",
+			HarnessConfigID:   "hc-1",
+			HarnessConfigHash: "sha256:def",
+			GitClone: &api.GitCloneConfig{
+				URL:    "https://github.com/example/repo.git",
+				Branch: "main",
+				Depth:  intPtr(1),
+			},
+		},
+	}
+
+	d := NewHTTPAgentDispatcherWithClient(memStore, nil, false, slog.Default())
+	req, err := d.buildCreateRequest(ctx, agent, "test")
+	if err != nil {
+		t.Fatalf("buildCreateRequest failed: %v", err)
+	}
+
+	// RequestID is api.NewUUID() on every call; normalize before comparing.
+	req.RequestID = "REQUEST_ID"
+
+	got, err := json.MarshalIndent(req, "", "  ")
+	if err != nil {
+		t.Fatalf("failed to marshal request: %v", err)
+	}
+
+	want := `{
+  "requestId": "REQUEST_ID",
+  "id": "` + tid("golden-agent") + `",
+  "slug": "golden-agent",
+  "name": "golden-agent",
+  "projectId": "` + tid("golden-project") + `",
+  "userId": "` + tid("golden-owner") + `",
+  "config": {
+    "task": "implement feature",
+    "harnessConfig": "claude",
+    "profile": "default",
+    "branch": "feature-branch",
+    "templateId": "tmpl-1",
+    "templateHash": "sha256:abc",
+    "harnessConfigId": "hc-1",
+    "harnessConfigHash": "sha256:def",
+    "gitClone": {
+      "url": "https://github.com/example/repo.git",
+      "branch": "main",
+      "depth": 1
+    }
+  },
+  "projectSlug": "golden-project",
+  "sharedDirs": [
+    {
+      "name": "cache",
+      "read_only": true
+    }
+  ],
+  "workspaceMode": "worktree-per-agent"
+}`
+
+	if strings.TrimSpace(string(got)) != strings.TrimSpace(want) {
+		t.Errorf("buildCreateRequest payload drifted from the golden fixture.\ngot:\n%s\n\nwant:\n%s", got, want)
 	}
 }
 

@@ -16,13 +16,16 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 )
 
@@ -146,6 +149,102 @@ func TestControlChannelBrokerClient_StartAgentSignsTunneledRequest(t *testing.T)
 	expectedPath := "/api/v1/agents/agent-1/start?projectId=project-id-1"
 	if got := tunnel.lastRequest.Path; got != expectedPath {
 		t.Fatalf("unexpected path: %s (expected %s)", got, expectedPath)
+	}
+}
+
+// TestControlChannelBrokerClient_StartAgentSendsWorkspaceDispatchFields proves
+// the control-channel transport writes StartExtras.Workspace's fields onto
+// the wire the same way the HTTP transport does (GoogleCloudPlatform/scion#1931):
+// gitClone (including its nested depth), branch, and workspaceMode, all via
+// the shared applyStartExtras builder.
+func TestControlChannelBrokerClient_StartAgentSendsWorkspaceDispatchFields(t *testing.T) {
+	tunnel := &mockControlChannelTunnel{connected: true}
+	signer := &mockBrokerSigner{}
+	client := &ControlChannelBrokerClient{
+		manager: tunnel,
+		signer:  signer,
+	}
+
+	depth := 1
+	extras := StartExtras{
+		HubEndpoint: "https://hub.example.com",
+		Workspace: WorkspaceDispatchSpec{
+			GitClone:      &api.GitCloneConfig{URL: "https://github.com/example/repo.git", Branch: "main", Depth: &depth},
+			Branch:        "feature-branch",
+			WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		},
+	}
+
+	_, err := client.StartAgent(
+		context.Background(), "broker-1", "unused", "agent-1", "project-id-1",
+		"", "", "", "", "", "", nil, nil, nil, nil, false, false, extras,
+	)
+	if err != nil {
+		t.Fatalf("StartAgent returned error: %v", err)
+	}
+
+	if tunnel.lastRequest == nil {
+		t.Fatal("expected tunneled request to be captured")
+	}
+	var wire struct {
+		HubEndpoint string `json:"hubEndpoint"`
+		GitClone    struct {
+			URL    string `json:"url"`
+			Branch string `json:"branch"`
+			Depth  int    `json:"depth"`
+		} `json:"gitClone"`
+		Branch        string `json:"branch"`
+		WorkspaceMode string `json:"workspaceMode"`
+	}
+	if err := json.Unmarshal(tunnel.lastRequest.Body, &wire); err != nil {
+		t.Fatalf("failed to unmarshal tunneled body: %v", err)
+	}
+	if wire.HubEndpoint != extras.HubEndpoint {
+		t.Errorf("hubEndpoint = %q, want %q", wire.HubEndpoint, extras.HubEndpoint)
+	}
+	if wire.GitClone.URL != extras.Workspace.GitClone.URL {
+		t.Errorf("gitClone.url = %q, want %q", wire.GitClone.URL, extras.Workspace.GitClone.URL)
+	}
+	if wire.GitClone.Branch != extras.Workspace.GitClone.Branch {
+		t.Errorf("gitClone.branch = %q, want %q", wire.GitClone.Branch, extras.Workspace.GitClone.Branch)
+	}
+	if wire.GitClone.Depth != depth {
+		t.Errorf("gitClone.depth = %d, want %d", wire.GitClone.Depth, depth)
+	}
+	if wire.Branch != extras.Workspace.Branch {
+		t.Errorf("branch = %q, want %q", wire.Branch, extras.Workspace.Branch)
+	}
+	if wire.WorkspaceMode != extras.Workspace.WorkspaceMode {
+		t.Errorf("workspaceMode = %q, want %q", wire.WorkspaceMode, extras.Workspace.WorkspaceMode)
+	}
+}
+
+// TestControlChannelBrokerClient_RestartAgentOmitsWorkspaceFieldsWhenZero
+// pins that a zero-value StartExtras.Workspace (restart does not populate it)
+// sends no gitClone/branch/workspaceMode keys at all, rather than empty ones.
+func TestControlChannelBrokerClient_RestartAgentOmitsWorkspaceFieldsWhenZero(t *testing.T) {
+	tunnel := &mockControlChannelTunnel{connected: true}
+	signer := &mockBrokerSigner{}
+	client := &ControlChannelBrokerClient{
+		manager: tunnel,
+		signer:  signer,
+	}
+
+	err := client.RestartAgent(context.Background(), "broker-1", "unused", "agent-1", "project-id-1", nil, StartExtras{HubEndpoint: "https://hub.example.com"})
+	if err != nil {
+		t.Fatalf("RestartAgent returned error: %v", err)
+	}
+	if tunnel.lastRequest == nil {
+		t.Fatal("expected tunneled request to be captured")
+	}
+	var wire map[string]interface{}
+	if err := json.Unmarshal(tunnel.lastRequest.Body, &wire); err != nil {
+		t.Fatalf("failed to unmarshal tunneled body: %v", err)
+	}
+	for _, key := range []string{"gitClone", "branch", "workspaceMode"} {
+		if _, ok := wire[key]; ok {
+			t.Errorf("wire payload should not contain %q when Workspace is the zero value, got %v", key, wire[key])
+		}
 	}
 }
 
