@@ -537,3 +537,189 @@ describe('overlay strings', () => {
     expect(FakeSocket.instances).toHaveLength(1); // preflight failed before a new socket
   });
 });
+
+// The pane chrome (toolbar, buttons, dialogs, loading/error states) must
+// follow the app theme; only the terminal viewport and the overlays drawn on
+// it may pin a literal (dark) palette. This is a denylist over every rule, so
+// new chrome rules are covered without updating a selector list.
+// See miller79/scion#133.
+describe('theme', () => {
+  let TERMINAL_BACKGROUND = '';
+  beforeAll(async () => {
+    ({ TERMINAL_BACKGROUND } = await import('./terminal-pane.js'));
+  });
+  // A viewport selector must end the class name exactly (so, for example,
+  // .terminal-wrapper-foo is not exempt).
+  const VIEWPORT =
+    /^\.(terminal-wrapper|terminal-container|disconnected-overlay|drop-overlay)(?=[\s.:#[>+~]|$)/;
+  // Colour-bearing properties, including shadows and every custom property
+  // (for example --sl-panel-background-color or --indicator-color); custom
+  // properties with non-colour values never match LITERAL_COLOR.
+  const COLOR_PROPS =
+    /^(color|background(-color)?|border(-(top|right|bottom|left))?(-color)?|outline(-color)?|fill|stroke|box-shadow|text-shadow|--[\w-]+)$/;
+  const LITERAL_COLOR = /#[0-9a-f]{3,8}\b|\b(rgba?|hsla?)\(|\b(white|black)\b/i;
+  // var(--scion-x) and var(--scion-x, <fallback>), including one level of
+  // nested parentheses in the fallback (for example rgba(...)).
+  const SCION_VAR = /var\(\s*--scion-[\w-]+\s*(?:,(?:[^()]|\([^()]*\))*)?\)/g;
+
+  /** Leaf style rules from Lit cssText, skipping @keyframes contents. */
+  function styleRules(cssText: string): Array<{ selector: string; body: string }> {
+    const rules: Array<{ selector: string; body: string }> = [];
+    const stack: string[] = [];
+    let buf = '';
+    for (const ch of cssText.replace(/\/\*[\s\S]*?\*\//g, '')) {
+      if (ch === '{') {
+        stack.push(buf.trim());
+        buf = '';
+      } else if (ch === '}') {
+        const selector = stack.pop() ?? '';
+        if (!selector.startsWith('@') && !stack.some((s) => s.startsWith('@keyframes'))) {
+          rules.push({ selector, body: buf });
+        }
+        buf = '';
+      } else {
+        buf += ch;
+      }
+    }
+    return rules;
+  }
+
+  function paneStyles(): string {
+    const ctor = customElements.get('scion-terminal-pane') as unknown as {
+      styles: { cssText: string };
+    };
+    return ctor.styles.cssText;
+  }
+
+  it('uses only --scion-* tokens for colours outside the terminal viewport', () => {
+    const rules = styleRules(paneStyles());
+    expect(rules.length).toBeGreaterThan(20);
+    const offenders: string[] = [];
+    for (const { selector, body } of rules) {
+      const parts = selector.split(',').map((p) => p.trim());
+      if (parts.every((p) => VIEWPORT.test(p))) continue;
+      for (const decl of body.split(';')) {
+        const idx = decl.indexOf(':');
+        if (idx < 0) continue;
+        const prop = decl.slice(0, idx).trim();
+        const value = decl.slice(idx + 1).trim();
+        if (!COLOR_PROPS.test(prop)) continue;
+        if (LITERAL_COLOR.test(value.replace(SCION_VAR, ''))) {
+          offenders.push(`${selector} { ${prop}: ${value} }`);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('themes the host and keeps the viewport on the xterm background', () => {
+    const rules = styleRules(paneStyles());
+    const host = rules.find((r) => r.selector === ':host')?.body ?? '';
+    expect(host).toMatch(/background:\s*var\(--scion-surface\b/);
+    expect(host).toMatch(/(^|;)\s*color:\s*var\(--scion-text\b/);
+    const wrapper = rules.find((r) => r.selector === '.terminal-wrapper')?.body ?? '';
+    const bg = /(^|;)\s*background:\s*([^;]+)/.exec(wrapper)?.[2].trim();
+    expect(bg?.toLowerCase()).toBe(TERMINAL_BACKGROUND.toLowerCase());
+  });
+
+  // The colour denylist cannot see a control with no rule at all: an
+  // unstyled <button> falls back to the browser's native palette in both
+  // themes (GoogleCloudPlatform/scion#2011 review). Every chrome button must
+  // be matched by at least one static style rule.
+  it('styles every chrome button outside the terminal viewport, in every render branch', async () => {
+    // Base selectors: a button must have a rule that applies at rest, so
+    // interaction-state rules (:hover, :focus, :active, :disabled) do not
+    // count. Remaining structural pseudo-classes (:first-child, ...) are
+    // stripped, and :host rules are skipped (not matchable from inside).
+    const selectors = styleRules(paneStyles())
+      .flatMap((r) => r.selector.split(','))
+      .map((p) => p.trim())
+      .filter((p) => p && !p.startsWith(':'))
+      .filter((p) => !/:(hover|focus|focus-visible|focus-within|active|disabled)\b/.test(p))
+      .map((p) => p.replace(/:[\w-]+(\([^)]*\))?/g, '').trim())
+      .filter(Boolean);
+    const seen = new Set<string>();
+    const unstyled: string[] = [];
+    const collect = async () => {
+      await page.updateComplete;
+      for (const b of Array.from(page.shadowRoot!.querySelectorAll<HTMLElement>('button'))) {
+        if (b.closest('.terminal-wrapper')) continue;
+        const label = b.className || `${b.parentElement?.className ?? ''} > button`;
+        seen.add(label.trim());
+        if (!selectors.some((sel) => b.matches(sel))) unstyled.push(b.outerHTML.slice(0, 80));
+      }
+    };
+    const pane = page as unknown as {
+      error: string | null;
+      metadataError: string | null;
+      projectId: string;
+      agent: Record<string, unknown> | null;
+      terminal: unknown;
+    };
+
+    // 1. Connected, with every optional toolbar control and the metadata
+    //    banner: toggles, graph action, capture auth, ports, metadata retry.
+    await mountConnected();
+    pane.projectId = 'project-1';
+    pane.agent = {
+      ...(pane.agent ?? {}),
+      id: agentId,
+      phase: 'running',
+      harnessAuth: 'none',
+      resolvedHarness: 'claude',
+    };
+    pane.error = 'metadata unavailable';
+    pane.metadataError = 'metadata unavailable';
+    await collect();
+
+    // 2. Disconnected (detached): the toolbar Reconnect button.
+    FakeSocket.instances[0].readyState = 3;
+    FakeSocket.instances[0].onclose?.({ code: 1000 });
+    await collect();
+
+    // 3. The session-error branch (no terminal host): the error-state Retry.
+    const realSession = page.session!;
+    Object.defineProperty(page, 'session', {
+      configurable: true,
+      get: () => ({ ...realSession, state: { ...realSession.state, error: 'boom' } }),
+    });
+    const realTerminal = pane.terminal;
+    pane.terminal = null;
+    page.requestUpdate();
+    await collect();
+    pane.terminal = realTerminal;
+    delete (page as unknown as { session?: unknown }).session;
+
+    // The 8 chrome buttons across the three branches (the inactive window
+    // toggle has no class, so it is labelled by its parent).
+    expect([...seen].sort()).toEqual([
+      'active',
+      'capture-auth-btn',
+      'error-state > button',
+      'metadata-retry',
+      'pane-action-btn',
+      'port-dropdown-trigger',
+      'reconnect-btn',
+      'toggle-group > button',
+    ]);
+    expect(unstyled).toEqual([]);
+  });
+
+  // Inline style attributes are not in static styles, so check the rendered
+  // chrome too, with the metadata error banner (the one conditional
+  // strip outside the viewport) showing.
+  it('renders no literal colours in inline styles outside the terminal viewport', async () => {
+    await mountConnected();
+    const state = page as unknown as { error: string | null; metadataError: string | null };
+    state.error = 'metadata unavailable';
+    state.metadataError = 'metadata unavailable';
+    await page.updateComplete;
+    const root = page.shadowRoot!;
+    expect(root.querySelector('.error-banner')).not.toBeNull();
+    const offenders = Array.from(root.querySelectorAll<HTMLElement>('[style]'))
+      .filter((el) => !el.closest('.terminal-wrapper'))
+      .map((el) => el.getAttribute('style') ?? '')
+      .filter((style) => LITERAL_COLOR.test(style.replace(SCION_VAR, '')));
+    expect(offenders).toEqual([]);
+  });
+});

@@ -21,7 +21,7 @@
  * via the session registry and Hub PTY endpoint.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
+import { LitElement, html, css, nothing, unsafeCSS } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import type { Agent, AgentPhase, AgentActivity, ExposedPort } from '../../shared/types.js';
@@ -50,6 +50,12 @@ type FitAddon = import('@xterm/addon-fit').FitAddon;
 
 /** Which tmux window is active */
 type TmuxWindow = 'agent' | 'shell';
+
+// The terminal viewport stays dark in both app themes: it renders TUI output
+// that is generally authored against a dark background. The viewport wrapper
+// and the xterm theme share these so they cannot drift apart.
+export const TERMINAL_BACKGROUND = '#1a1a1a';
+export const TERMINAL_FOREGROUND = '#eaeaea';
 
 @customElement('scion-terminal-pane')
 export class ScionTerminalPane extends LitElement {
@@ -186,14 +192,18 @@ export class ScionTerminalPane extends LitElement {
   private _windowDragOver: ((e: DragEvent) => void) | null = null;
   private _windowDrop: ((e: DragEvent) => void) | null = null;
 
+  // Theme: the pane chrome (toolbar, buttons, dialogs, loading/error states)
+  // follows the app theme through --scion-* tokens. The terminal viewport and
+  // the overlays drawn on it stay dark in both themes, matching the xterm
+  // palette set in initTerminal (TERMINAL_BACKGROUND / TERMINAL_FOREGROUND).
   static override styles = css`
     :host {
       display: flex;
       flex-direction: column;
       flex: 1;
       min-height: 0;
-      background: #1a1a1a;
-      color: #eaeaea;
+      background: var(--scion-surface, #ffffff);
+      color: var(--scion-text, #1e293b);
       overflow: hidden;
     }
 
@@ -206,8 +216,8 @@ export class ScionTerminalPane extends LitElement {
       align-items: center;
       gap: 0.75rem;
       padding: 0.5rem 1rem;
-      background: #141414;
-      border-bottom: 1px solid #2a2a2a;
+      background: var(--scion-bg-subtle, #f1f5f9);
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
       flex-shrink: 0;
       min-height: 40px;
     }
@@ -216,26 +226,26 @@ export class ScionTerminalPane extends LitElement {
       display: inline-flex;
       align-items: center;
       gap: 0.25rem;
-      color: #94a3b8;
+      color: var(--scion-text-muted, #64748b);
       text-decoration: none;
       font-size: 0.8125rem;
       white-space: nowrap;
     }
 
     .back-link:hover {
-      color: #60a5fa;
+      color: var(--scion-primary, #3b82f6);
     }
 
     .separator {
       width: 1px;
       height: 20px;
-      background: #2a2a2a;
+      background: var(--scion-border, #e2e8f0);
     }
 
     .agent-name {
       font-size: 0.875rem;
       font-weight: 500;
-      color: #eaeaea;
+      color: var(--scion-text, #1e293b);
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -250,24 +260,24 @@ export class ScionTerminalPane extends LitElement {
       align-items: center;
       gap: 0.375rem;
       font-size: 0.75rem;
-      color: #94a3b8;
+      color: var(--scion-text-muted, #64748b);
     }
 
     .status-dot {
       width: 8px;
       height: 8px;
       border-radius: 50%;
-      background: #ef4444;
+      background: var(--scion-status-danger, #ef4444);
     }
 
     .status-dot.connected {
-      background: #22c55e;
+      background: var(--scion-status-success, #22c55e);
     }
 
     .reconnect-btn {
       background: transparent;
-      border: 1px solid #2a2a2a;
-      color: #94a3b8;
+      border: 1px solid var(--scion-border, #e2e8f0);
+      color: var(--scion-text-muted, #64748b);
       padding: 0.25rem 0.75rem;
       border-radius: 4px;
       cursor: pointer;
@@ -275,8 +285,8 @@ export class ScionTerminalPane extends LitElement {
     }
 
     .reconnect-btn:hover:not(:disabled) {
-      border-color: #60a5fa;
-      color: #60a5fa;
+      border-color: var(--scion-primary, #3b82f6);
+      color: var(--scion-primary, #3b82f6);
     }
 
     .reconnect-btn:disabled {
@@ -289,8 +299,8 @@ export class ScionTerminalPane extends LitElement {
       align-items: center;
       justify-content: center;
       background: transparent;
-      border: 1px solid #2a2a2a;
-      color: #94a3b8;
+      border: 1px solid var(--scion-border, #e2e8f0);
+      color: var(--scion-text-muted, #64748b);
       width: 32px;
       height: 32px;
       border-radius: 4px;
@@ -300,15 +310,15 @@ export class ScionTerminalPane extends LitElement {
     }
 
     .pane-action-btn:hover {
-      border-color: #60a5fa;
-      color: #60a5fa;
-      background: rgba(96, 165, 250, 0.1);
+      border-color: var(--scion-primary, #3b82f6);
+      color: var(--scion-primary, #3b82f6);
+      background: var(--scion-badge-primary-bg, #dbeafe);
     }
 
     .capture-auth-btn {
       background: transparent;
-      border: 1px solid #2a2a2a;
-      color: #f59e0b;
+      border: 1px solid var(--scion-border, #e2e8f0);
+      color: var(--scion-badge-warning-text, #92400e);
       padding: 0.25rem 0.75rem;
       border-radius: 4px;
       cursor: pointer;
@@ -319,8 +329,8 @@ export class ScionTerminalPane extends LitElement {
     }
 
     .capture-auth-btn:hover {
-      border-color: #f59e0b;
-      background: rgba(245, 158, 11, 0.1);
+      border-color: var(--scion-status-warning, #f59e0b);
+      background: var(--scion-badge-warning-bg, #fef3c7);
     }
 
     .capture-auth-btn:disabled {
@@ -343,7 +353,7 @@ export class ScionTerminalPane extends LitElement {
     /* Window switcher toggle group: two rectangular icon buttons */
     .toggle-group {
       display: inline-flex;
-      border: 1px solid #2a2a2a;
+      border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: 4px;
       overflow: hidden;
     }
@@ -354,7 +364,7 @@ export class ScionTerminalPane extends LitElement {
       justify-content: center;
       background: transparent;
       border: none;
-      color: #555;
+      color: var(--scion-text-muted, #64748b);
       width: 44px;
       height: 32px;
       cursor: pointer;
@@ -366,17 +376,17 @@ export class ScionTerminalPane extends LitElement {
     }
 
     .toggle-group button:first-child {
-      border-right: 1px solid #2a2a2a;
+      border-right: 1px solid var(--scion-border, #e2e8f0);
     }
 
     .toggle-group button:hover {
-      color: #94a3b8;
-      background: #1e1e1e;
+      color: var(--scion-text, #1e293b);
+      background: var(--scion-badge-neutral-bg, #e2e8f0);
     }
 
     .toggle-group button.active {
-      color: #22c55e;
-      background: #1a2e1a;
+      color: var(--scion-badge-success-text, #166534);
+      background: var(--scion-badge-success-bg, #dcfce7);
     }
 
     .toggle-group button:disabled {
@@ -384,10 +394,20 @@ export class ScionTerminalPane extends LitElement {
       opacity: 0.4;
     }
 
+    /* The capture-auth dialogs inherit :host text colour, so their panel must
+       come from the same theme tokens (as shared/confirm-dialog.ts does);
+       otherwise dark mode renders light text on Shoelace's light panel. */
+    sl-dialog {
+      --sl-panel-background-color: var(--scion-surface-raised, #ffffff);
+      --sl-panel-border-color: var(--scion-border, #e2e8f0);
+    }
+
     .terminal-wrapper {
       flex: 1;
       position: relative;
       overflow: hidden;
+      background: ${unsafeCSS(TERMINAL_BACKGROUND)};
+      color: ${unsafeCSS(TERMINAL_FOREGROUND)};
     }
 
     .terminal-container {
@@ -516,15 +536,15 @@ export class ScionTerminalPane extends LitElement {
     }
 
     .loading-state p {
-      color: #94a3b8;
+      color: var(--scion-text-muted, #64748b);
       margin-top: 1rem;
     }
 
     .spinner {
       width: 32px;
       height: 32px;
-      border: 3px solid #2a2a2a;
-      border-top-color: #60a5fa;
+      border: 3px solid var(--scion-border, #e2e8f0);
+      border-top-color: var(--scion-primary, #3b82f6);
       border-radius: 50%;
       animation: spin 0.8s linear infinite;
     }
@@ -536,19 +556,19 @@ export class ScionTerminalPane extends LitElement {
     }
 
     .error-state p {
-      color: #ef4444;
+      color: var(--scion-badge-danger-text, #991b1b);
       margin: 0 0 1rem 0;
     }
 
     .error-state .error-detail {
-      color: #94a3b8;
+      color: var(--scion-text-muted, #64748b);
       font-size: 0.875rem;
       margin-bottom: 1rem;
     }
 
     .error-state button {
-      background: #3b82f6;
-      color: #fff;
+      background: var(--scion-primary, #3b82f6);
+      color: var(--scion-primary-text, #ffffff);
       border: none;
       padding: 0.5rem 1.5rem;
       border-radius: 6px;
@@ -557,7 +577,35 @@ export class ScionTerminalPane extends LitElement {
     }
 
     .error-state button:hover {
-      background: #2563eb;
+      background: var(--scion-primary-hover, #2563eb);
+    }
+
+    .error-banner {
+      padding: 0.375rem 1rem;
+      background: var(--scion-badge-danger-bg, #fee2e2);
+      color: var(--scion-badge-danger-text, #991b1b);
+      font-size: 0.75rem;
+    }
+
+    /* Inline text-link action inside the themed banner; inherits its colour. */
+    .metadata-retry {
+      background: transparent;
+      border: none;
+      padding: 0;
+      margin-left: 0.5rem;
+      color: inherit;
+      font: inherit;
+      text-decoration: underline;
+      cursor: pointer;
+    }
+
+    .metadata-retry:hover {
+      text-decoration: none;
+    }
+
+    .metadata-retry:focus-visible {
+      outline: 2px solid currentColor;
+      outline-offset: 2px;
     }
 
     /* Port forwarding buttons */
@@ -566,8 +614,8 @@ export class ScionTerminalPane extends LitElement {
       align-items: center;
       gap: 0.375rem;
       background: transparent;
-      border: 1px solid #2a5d2a;
-      color: #4ade80;
+      border: 1px solid var(--scion-status-success, #22c55e);
+      color: var(--scion-badge-success-text, #166534);
       padding: 0.25rem 0.75rem;
       border-radius: 4px;
       font-size: 0.75rem;
@@ -581,9 +629,8 @@ export class ScionTerminalPane extends LitElement {
     }
 
     .port-btn:hover {
-      border-color: #22c55e;
-      background: rgba(34, 197, 94, 0.1);
-      color: #22c55e;
+      border-color: var(--scion-status-success, #22c55e);
+      background: var(--scion-badge-success-bg, #dcfce7);
     }
 
     @keyframes port-appear {
@@ -608,8 +655,8 @@ export class ScionTerminalPane extends LitElement {
       align-items: center;
       gap: 0.375rem;
       background: transparent;
-      border: 1px solid #2a5d2a;
-      color: #4ade80;
+      border: 1px solid var(--scion-status-success, #22c55e);
+      color: var(--scion-badge-success-text, #166534);
       padding: 0.25rem 0.75rem;
       border-radius: 4px;
       font-size: 0.75rem;
@@ -618,9 +665,8 @@ export class ScionTerminalPane extends LitElement {
     }
 
     .port-dropdown-trigger:hover {
-      border-color: #22c55e;
-      background: rgba(34, 197, 94, 0.1);
-      color: #22c55e;
+      border-color: var(--scion-status-success, #22c55e);
+      background: var(--scion-badge-success-bg, #dcfce7);
     }
 
     .port-dropdown-menu {
@@ -629,13 +675,17 @@ export class ScionTerminalPane extends LitElement {
       top: 100%;
       right: 0;
       margin-top: 4px;
-      background: var(--card-bg, #1a1a2e);
-      border: 1px solid var(--border-color, #333);
+      background: var(--scion-surface-raised, #ffffff);
+      border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: 6px;
       padding: 0.25rem 0;
       min-width: 180px;
       z-index: 100;
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+      box-shadow: var(
+        --scion-shadow-md,
+        0 4px 6px -1px rgb(0 0 0 / 0.1),
+        0 2px 4px -2px rgb(0 0 0 / 0.1)
+      );
     }
 
     .port-dropdown.open .port-dropdown-menu {
@@ -645,14 +695,14 @@ export class ScionTerminalPane extends LitElement {
     .port-dropdown-menu a {
       display: block;
       padding: 0.5rem 0.75rem;
-      color: #4ade80;
+      color: var(--scion-badge-success-text, #166534);
       text-decoration: none;
       font-size: 0.8rem;
       white-space: nowrap;
     }
 
     .port-dropdown-menu a:hover {
-      background: rgba(34, 197, 94, 0.1);
+      background: var(--scion-badge-success-bg, #dcfce7);
     }
   `;
 
@@ -916,10 +966,10 @@ export class ScionTerminalPane extends LitElement {
 
     this.terminal = new Terminal({
       theme: {
-        background: '#1a1a1a',
-        foreground: '#eaeaea',
+        background: TERMINAL_BACKGROUND,
+        foreground: TERMINAL_FOREGROUND,
         cursor: '#f39c12',
-        cursorAccent: '#1a1a1a',
+        cursorAccent: TERMINAL_BACKGROUND,
         selectionBackground: 'rgba(255, 255, 255, 0.3)',
         black: '#1a1a1a',
         red: '#e74c3c',
@@ -1946,9 +1996,7 @@ export class ScionTerminalPane extends LitElement {
       </div>
       ${this.error
         ? html`
-            <div
-              style="padding: 0.375rem 1rem; background: #7f1d1d; color: #fecaca; font-size: 0.75rem;"
-            >
+            <div class="error-banner">
               ${this.error}
               ${this.metadataError
                 ? html`<button class="metadata-retry" @click=${() => void this.refreshAgentData()}>
