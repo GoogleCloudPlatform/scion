@@ -119,6 +119,42 @@ func TestRedactDatabaseURL(t *testing.T) {
 			want:   "host=localhost user=scion sslpassword=xxxxx dbname=scion",
 		},
 		{
+			// libpq's unquoted value grammar has no escape for "=": an
+			// unquoted password runs up to the next whitespace and may
+			// itself contain "=". The narrower [^=\s]+ alternative some
+			// reviewers suggest would stop at the first "=" and leak the
+			// tail, e.g. password=ab=cd would redact to password=xxxxx=cd.
+			// \S+ is required to mask the value in full.
+			name:   "libpq unquoted password containing = is masked in full",
+			driver: "postgres",
+			dsn:    "host=localhost user=scion password=" + fakePassword + "=tail dbname=scion",
+			want:   "host=localhost user=scion password=xxxxx dbname=scion",
+		},
+		{
+			// Same leak risk as above, but for a credential carried in a
+			// URL query parameter rather than the libpq keyword/value form.
+			name:   "url query password containing = is masked in full, sslmode preserved",
+			driver: "postgres",
+			dsn:    "postgres://db.example.com/scion?password=" + fakePassword + "=tail&sslmode=disable",
+			want:   "postgres://db.example.com/scion?password=xxxxx&sslmode=disable",
+		},
+		{
+			// pgx's parseKeywordValueSettings (pgconn/config.go:627-662) and
+			// libpq's conninfo_parse agree: after "=" the parser trims
+			// leading whitespace, then reads an unquoted value up to the
+			// next whitespace, with "=" permitted inside that value. So for
+			// "password= dbname=scion" the driver itself parses the
+			// password as the literal string "dbname=scion" -- there is no
+			// separate dbname keyword here. Masking the whole span is
+			// correct, not a bug: a narrower pattern that stopped at the
+			// first "=" would incorrectly leave "dbname=scion" visible even
+			// though the driver treats it as (part of) the password.
+			name:   "libpq empty-looking password consumes trailing dbname per driver grammar",
+			driver: "postgres",
+			dsn:    "host=localhost password= dbname=scion",
+			want:   "host=localhost password=xxxxx",
+		},
+		{
 			name:   "unparseable dsn is fully masked",
 			driver: "postgres",
 			dsn:    "definitely not a connection string",
