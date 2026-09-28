@@ -56,6 +56,41 @@ resource "google_storage_bucket" "artifacts" {
   versioning {
     enabled = true
   }
+
+  # Phase 2 hardening: this bucket holds templates, skills and harness
+  # configs (pkg/storage's ResourceStorageURI family) referenced by live DB
+  # rows, plus per-agent workspace files (WorkspaceStorageURI) that an
+  # in-flight agent may still be reading or writing — none of that is safe
+  # to expire on a blanket age/prefix rule, so no rule targets CURRENT
+  # objects. Versioning is on (above), so overwriting or deleting a live
+  # object leaves its prior content as a NONCURRENT (ARCHIVED) version
+  # instead of freeing it — those accumulate forever with no rule. This
+  # only ever touches ARCHIVED (non-live) versions, so it cannot delete live
+  # data: the current version of every object is untouched regardless of
+  # age. In-place update (lifecycle_rule is a normal, non-ForceNew field on
+  # google_storage_bucket) — no bucket replace.
+  lifecycle_rule {
+    condition {
+      with_state = "ARCHIVED"
+      age        = 30
+    }
+    action {
+      type = "Delete"
+    }
+  }
+
+  # Belt-and-suspenders, also in-place and also CURRENT-object-safe: an
+  # interrupted resumable/multipart upload has no live reader by
+  # definition, so aborting it after a week reclaims storage with zero risk
+  # to anything the hub or an agent might still be using.
+  lifecycle_rule {
+    condition {
+      age = 7
+    }
+    action {
+      type = "AbortIncompleteMultipartUpload"
+    }
+  }
 }
 
 resource "google_storage_bucket_iam_member" "hub_object_admin" {
