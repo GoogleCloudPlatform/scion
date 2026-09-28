@@ -74,8 +74,6 @@ type AgentDMInput struct {
 	// Raw requests that the target agent's runtime receive the message body
 	// verbatim via keystroke injection (no envelope, no automatic Enter).
 	// Deprecated client flag (`scion message --raw`), still functional.
-	// Propagated through unchanged so agent-sender DMs match the delivery
-	// behavior of the non-DM (human-sender) path (#1808 regression fix).
 	Raw bool
 
 	// Plain requests that the target agent's runtime receive the message
