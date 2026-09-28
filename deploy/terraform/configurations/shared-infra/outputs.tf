@@ -35,6 +35,11 @@ output "sql_connection_name" {
   value = module.cloudsql_instance.connection_name
 }
 
+output "sql_availability_type" {
+  description = "The Cloud SQL instance's actual availability_type. Exposed so fresh_shared_infra_plan.tftest.hcl (phase 2 hardening item 6) can assert the REGIONAL default reaches the resource, not just var.sql_availability_type's default. Not reachable from the hub root (shared-lookup's shared.sql contract exposes only instance_name/connection_name), so this coverage lives here per the brief."
+  value       = module.cloudsql_instance.availability_type
+}
+
 output "filestore_server_ip" {
   value = module.filestore.server_ip
 }

@@ -12,3 +12,8 @@ output "private_ip" {
   description = "Private IP address of the instance."
   value       = google_sql_database_instance.this.private_ip_address
 }
+
+output "availability_type" {
+  description = "The instance's actual settings.availability_type (ZONAL or REGIONAL), for shared-infra's tftest coverage of the phase 2 REGIONAL default (design §3.7 hardening item 1/6)."
+  value       = google_sql_database_instance.this.settings[0].availability_type
+}

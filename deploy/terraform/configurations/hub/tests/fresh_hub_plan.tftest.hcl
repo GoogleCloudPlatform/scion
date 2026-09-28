@@ -119,6 +119,27 @@ run "fresh_h2_plans_clean" {
     condition     = output.iap_audience == "/projects/123456789012/locations/us-central1/services/tfha-h2"
     error_message = "iap_audience should be deterministically computed from project_number/region/hub_name at plan time — if this is unknown or wrong, something upstream of hub-cloudrun stopped being plan-time-known."
   }
+
+  # Phase 2 hardening item 6: liveness probe path. Must be /healthz, not
+  # /readyz — see hub-cloudrun/main.tf's liveness_probe comment (item 2) for
+  # why a DB-dependent liveness check would restart every hub instance at
+  # once on a single Cloud SQL blip.
+  assert {
+    condition     = output.liveness_probe_path == "/healthz"
+    error_message = "the hub container's liveness probe must target /healthz (DB-independent), not /readyz — a DB blip must not restart every instance at once."
+  }
+
+  # Phase 2 hardening item 6: the artifacts bucket's noncurrent-version
+  # lifecycle rule (item 4) exists and is scoped to ARCHIVED (noncurrent)
+  # object versions only. tolist() on condition/action is required because
+  # the provider schema nests both as sets (max 1 item), not lists.
+  assert {
+    condition = anytrue([
+      for r in output.bucket_lifecycle_rules :
+      tolist(r.condition)[0].with_state == "ARCHIVED" && tolist(r.action)[0].type == "Delete"
+    ])
+    error_message = "expected a Delete lifecycle rule on the artifacts bucket scoped to with_state = ARCHIVED (noncurrent versions only) — a rule without that scope could delete live/CURRENT data."
+  }
 }
 
 # Alt-F (design §6 OQ-11, briefs/tf-dev-dsn-secret.md) asked this test to

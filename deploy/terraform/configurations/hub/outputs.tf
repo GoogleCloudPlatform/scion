@@ -10,6 +10,14 @@ output "bucket_name" {
   value = module.hub_cloudrun.bucket_name
 }
 
+output "liveness_probe_path" {
+  value = module.hub_cloudrun.liveness_probe_path
+}
+
+output "bucket_lifecycle_rules" {
+  value = module.hub_cloudrun.bucket_lifecycle_rules
+}
+
 output "namespace" {
   value = module.agent_runtime_k8s.namespace
 }
