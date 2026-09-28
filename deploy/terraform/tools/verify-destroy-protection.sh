@@ -45,7 +45,7 @@
 #       --project P --sql-instance tfha-pg \
 #       --filestore tfha-nfs --filestore-zone us-central1-a \
 #       [--tf-dir /path/to/shared/root] [--expect-commit <sha>] \
-#       [--out phase1-validation-a9.md]
+#       [--out destroy-protection-report.md]
 #
 # Exit codes
 #   0  every required row passed (row 4 is informational and never fails)
@@ -76,8 +76,8 @@ EXPECT_COMMIT="" # if set, --tf-dir's HEAD must match or the run refuses
 RED=0            # count of failing / inconclusive rows
 SWEEP_ERRORS=0   # sweeps that could not run — blind spots, not clean results
 # Initialised, not merely declared. `declare -a ROWS` leaves the array UNSET,
-# and under `set -u` the first `${#ROWS[@]}` is "unbound variable". On the A9
-# live run (2026-09-27) that exact expansion, inside a stop function, aborted
+# and under `set -u` the first `${#ROWS[@]}` is "unbound variable". On a live
+# run (2026-09-27) that exact expansion, inside a stop function, aborted
 # the function before its `exit` and the run carried on past a tripped
 # precondition. Selftest row "(b)" pins this.
 ROWS=()          # rendered result rows
@@ -248,7 +248,7 @@ do_selftest() {
   # above a guess is worse than no marker, because it is actively reassuring.
   # Deriving it makes the two physically incapable of disagreeing: delete the
   # tag when you paste in the real text, and the warning updates itself.
-  # CAPTURED 2026-09-23 from tfha-pg and tfha-nfs in ptone-emblem, at the one
+  # CAPTURED 2026-09-23 from tfha-pg and tfha-nfs in example-project, at the one
   # moment when attempting a real delete was free: both instances existed with
   # protection on and held no hub data, so a guard failure would have cost a
   # 10-minute re-apply instead of a hub's database. Both refused; both were
@@ -256,20 +256,20 @@ do_selftest() {
   t "sql: deletion protection refusal (captured)" sql 1 PROTECTED \
     'ERROR: (gcloud.sql.instances.delete) HTTPError 400: The instance is protected. Please disable the deletion protection and try again. To disable deletion protection, update the instance settings with deletionProtectionEnabled set to false.'
   t "filestore: deletion protection refusal (captured)" filestore 1 PROTECTED \
-    'ERROR: (gcloud.filestore.instances.delete) FAILED_PRECONDITION: instance "projects/ptone-emblem/locations/us-central1-a/instances/tfha-nfs" is protected from deletion: Shared Filestore instance; hubs read it via shared-lookup. Set deletion_protection = false to destroy.'
+    'ERROR: (gcloud.filestore.instances.delete) FAILED_PRECONDITION: instance "projects/example-project/locations/us-central1-a/instances/tfha-nfs" is protected from deletion: Shared Filestore instance; hubs read it via shared-lookup. Set deletion_protection = false to destroy.'
   # THE IMPORTANT ONE. Same refusal with our own deletion_protection_reason
   # removed, i.e. only the words the Filestore API guarantees. The previous
   # pattern failed this: it matched the literal `deletion_protection` inside a
   # string WE wrote, so the test was measuring our config, not the guard. A
   # reworded reason would have turned a working guard red.
   t "filestore: refusal minus our own reason string" filestore 1 PROTECTED \
-    'ERROR: (gcloud.filestore.instances.delete) FAILED_PRECONDITION: instance "projects/ptone-emblem/locations/us-central1-a/instances/tfha-nfs" is protected from deletion: .'
+    'ERROR: (gcloud.filestore.instances.delete) FAILED_PRECONDITION: instance "projects/example-project/locations/us-central1-a/instances/tfha-nfs" is protected from deletion: .'
   # And the sql refusal truncated to its first sentence, which is all some
   # gcloud versions print.
   t "sql: refusal, first sentence only" sql 1 PROTECTED \
     'ERROR: (gcloud.sql.instances.delete) HTTPError 400: The instance is protected.'
   # CAPTURED, not reconstructed — hence no UNCONFIRMED tag. terraform 1.9.8,
-  # 2026-09-23, real refusal from a real Cloud SQL instance (ptone-emblem
+  # 2026-09-23, real refusal from a real Cloud SQL instance (example-project
   # scion-hub-db, which holds the non-postgres database "scionhub"), against
   # the destroy_guard block from configurations/shared-infra. Note it refuses
   # at PLAN time and names the offending database, which is what makes the
@@ -463,7 +463,7 @@ destroy_guard: hubs still exist on this shared infra'
   # after-snapshot. Any content that necessarily differs between the two makes
   # that row red on every run. It did: the headers carried "(before)" and
   # "(after)". The selftest never caught it because snapshot() needs gcloud, so
-  # the defect would have surfaced for the first time on a live A9 run, as
+  # the defect would have surfaced for the first time on a live run, as
   # "THE ESTATE CHANGED during attempt 4".
   #
   # So the headers are now pure functions with no arguments to get wrong, and
@@ -607,7 +607,7 @@ destroy_guard: hubs still exist on this shared infra'
       echo "NOTE: ${u} PROTECTED fixture(s) still carry UNCONFIRMED wording —"
       echo "      reconstructed, not captured. On the first real run, paste the"
       echo "      live stderr in and drop the tag; this count follows the tags."
-      echo "      Until then a red A9 may mean GCP reworded, not that the guard"
+      echo "      Until then a red destroy-protection check may mean GCP reworded, not that the guard"
       echo "      is missing. Check the captured stderr before concluding."
     else
       echo
@@ -745,9 +745,9 @@ snapshot() {
   # Each kind is listed by name only and filtered client-side, so a
   # server-side filter typo cannot quietly return nothing.
   #
-  # FIX (a), 2026-09-27. These used to be strings run through `eval`, and the
+  # 2026-09-27: these used to be strings run through `eval`, and the
   # unquoted `--format=value(name)` is a bash syntax error under eval. EVERY
-  # sweep failed on the A9 live run, on both sides, and the "Estate unchanged"
+  # sweep failed on a live run, on both sides, and the "Estate unchanged"
   # row compared two identical blind spots and scored them PASS. Now each is a
   # real argv (sweep_list), with no eval and no string re-parsing.
   local kind_list="network subnet address globaladdress router sql filestore gke artifactrepo serviceaccount secret run bucket"
@@ -833,7 +833,7 @@ do_attempt4() {
 
   local before after
   before="$(mktemp)"; after="$(mktemp)"
-  # FIX (c): fail CLOSED on a blind before-snapshot. Without a trustworthy
+  # Fail CLOSED on a blind before-snapshot. Without a trustworthy
   # "before" there is no way to detect a partial destroy, so the destroy
   # attempts must not run at all.
   if ! snapshot "$before"; then
@@ -870,7 +870,7 @@ do_attempt4() {
   # The postcondition for attempt 4. A partial destroy is the failure mode the
   # per-resource checks cannot see, so this compares the whole estate.
   #
-  # FIX (c): IDENTICAL only counts when neither side is blind. On the A9 live
+  # IDENTICAL only counts when neither side is blind. On a live
   # run both sides were 13 ERROR lines, they diffed identical, and this row
   # said PASS.
   local diffout
@@ -931,10 +931,10 @@ do_run() {
     exit 2
   fi
 
-  OUT="${OUT:-phase1-validation-a9.md}"
+  OUT="${OUT:-destroy-protection-report.md}"
   : > "$OUT"
   {
-    printf '# A9 — destroy protection, captured %s\n\n' "$(date -u +%FT%TZ)"
+    printf '# Destroy-protection check, captured %s\n\n' "$(date -u +%FT%TZ)"
     # Literal backticks for markdown code formatting inside the single-quoted
     # format strings below, not command substitution; double-quoting would
     # make them live and break this.
@@ -959,7 +959,7 @@ do_run() {
     printf '## Raw output\n\n'
   } >> "$OUT"
 
-  # Guard: A9 is only meaningful with a hub present, because the interlock is
+  # Guard: the destroy-protection check is only meaningful with a hub present, because the interlock is
   # "fails WHILE a hub exists". Running it on an empty instance tests nothing
   # and would produce a confident green.
   local dbs
@@ -967,7 +967,7 @@ do_run() {
           --format='value(name)' 2>/dev/null | grep -vx 'postgres' || true)"
   if [[ -z "$dbs" ]]; then
     echo "$PROG: refusing — no non-postgres database on ${SQL_INSTANCE}." >&2
-    echo "  A9 requires a hub present; the interlock is 'fails while a hub exists'." >&2
+    echo "  The destroy-protection check requires a hub present; the interlock is 'fails while a hub exists'." >&2
     echo "  With none, the interlock would pass by vacuum." >&2
     exit 3
   fi
@@ -1016,9 +1016,9 @@ gate_last_row() {
     || stop 1 "row ${#ROWS[@]} is not PASS; no further rows attempted"
 }
 
-# FIX (b): stop() ALWAYS exits. The report is rendered in a SUBSHELL, so an
+# stop() ALWAYS exits. The report is rendered in a SUBSHELL, so an
 # error in rendering (for example an unbound variable under `set -u`, which is
-# exactly what killed the A9 wrapper's stop() before its exit) can only end
+# exactly what killed the wrapper's stop() before its exit) can only end
 # the subshell, never skip the `exit`. stop() itself touches nothing that can
 # be unset.
 stop() { # stop <exit-code> <reason...>
@@ -1091,7 +1091,7 @@ selftest_regressions() {
   tmpd="$(mktemp -d)"
 
   echo
-  echo "=== A9 live-run regressions (a)-(d) ==="
+  echo "=== live-run regressions (a)-(d) ==="
 
   # (a) The sweep must actually run. With a gcloud that answers every list
   # with one tfha name, a snapshot must contain 13 tfha lines and no ERROR.
@@ -1107,7 +1107,7 @@ selftest_regressions() {
   rr "(a) sweep runs gcloud (no eval syntax error)" "tfha=13 error=0" "$got"
 
   # (b) stop() exits, with the given code, even under `set -u` with ROWS
-  # unset and OUT set, which is the state that killed the A9 wrapper's
+  # unset and OUT set, which is the state that killed the wrapper's
   # stop(). And ROWS is initialised, so `${#ROWS[@]}` is safe under -u.
   # "echo CONTINUED" below is deliberately unreachable in the passing case:
   # it only runs if stop() fails to exit, which is exactly the regression

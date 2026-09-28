@@ -20,7 +20,7 @@ and the snapshot comparison against fixtures, including negative controls.
   --project P --sql-instance tfha-pg \
   --filestore tfha-nfs --filestore-zone us-central1-a \
   [--tf-dir /path/to/shared/root] [--expect-commit <sha>] \
-  [--out phase1-validation-a9.md]
+  [--out destroy-protection-report.md]
 ```
 
 ### Always pass `--expect-commit`
