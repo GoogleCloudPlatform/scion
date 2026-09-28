@@ -43,9 +43,14 @@ variable "sql_tier" {
 }
 
 variable "sql_availability_type" {
-  description = "ZONAL for phase 1 / dev; REGIONAL for HA (phase 2)."
+  description = "ZONAL for phase 1 / dev; REGIONAL for HA (phase 2, default)."
   type        = string
-  default     = "ZONAL"
+  default     = "REGIONAL"
+
+  validation {
+    condition     = contains(["ZONAL", "REGIONAL"], var.sql_availability_type)
+    error_message = "sql_availability_type must be ZONAL or REGIONAL."
+  }
 }
 
 variable "sql_max_connections" {

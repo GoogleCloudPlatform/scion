@@ -45,7 +45,7 @@ variable "edition" {
 variable "availability_type" {
   description = "ZONAL for phase 1 / dev stacks; REGIONAL for HA (phase 2)."
   type        = string
-  default     = "ZONAL"
+  default     = "REGIONAL"
 
   validation {
     condition     = contains(["ZONAL", "REGIONAL"], var.availability_type)
