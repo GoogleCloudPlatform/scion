@@ -1957,7 +1957,10 @@ export class ScionChatMessage extends LitElement {
         // "pending" (that's a normal in-flight send, this is a deliberate
         // hold).
         return html`
-          <sl-tooltip content="Agent is reincarnating; message saved and will be seen on catch-up" hoist>
+          <sl-tooltip
+            content="Agent is reincarnating; message saved and will be seen on catch-up"
+            hoist
+          >
             <div class="delivery-state deferred">
               <sl-icon name="pause-circle"></sl-icon>
               Deferred: agent is reincarnating (saved)

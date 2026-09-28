@@ -3842,3 +3842,67 @@ describe('scion-chat-thread path-link project context fallback', () => {
     expect(internals.filePreview).toBeNull();
   });
 });
+
+// O1 (p2a-r3 review, A25.3): deliveryStateFor's "stays visible on every
+// message, like failed" rule was added for 'deferred' (design
+// agent-reincarnate §3.7, F5) but had no test — mutation W1 (dropping the
+// deferred clause) left all 298 chat tests green. Pins both 'deferred' and
+// 'failed' directly against the private deliveryStateFor method, since it
+// is otherwise pure given seenExpired=false (isMessageSeen is never
+// consulted in that branch).
+describe('scion-chat-thread deliveryStateFor visibility (O1, p2a-r3 review)', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  type DeliveryStateInternals = {
+    deliveryStateFor(msg: Message, lastOwnMessageId: string, seenExpired: boolean): string;
+  };
+
+  function makeDeliveryMessage(dispatchState: string): Message {
+    return {
+      id: 'older-message',
+      projectId: '',
+      sender: 'user:me@example.com',
+      senderId: 'user-me',
+      recipient: 'agent:coder',
+      recipientId: 'agent-1',
+      msg: 'an earlier message',
+      type: 'chat',
+      agentId: 'agent-1',
+      createdAt: '2026-01-01T00:00:00Z',
+      dispatchState,
+    };
+  }
+
+  it.each(['deferred', 'failed'])(
+    'keeps dispatchState=%s visible even when it is not the last own message',
+    async (dispatchState) => {
+      const el = document.createElement('scion-chat-thread') as ScionChatThread;
+      document.body.appendChild(el);
+      await el.updateComplete;
+      const internals = el as unknown as DeliveryStateInternals;
+
+      const older = makeDeliveryMessage(dispatchState);
+
+      // Not the last own message, and seen-expiry has already passed:
+      // every other dispatchState value would be hidden here (the whole
+      // point of deferred/failed being an exception to "only show on the
+      // most recent own message").
+      expect(internals.deliveryStateFor(older, 'a-newer-message-id', true)).toBe(dispatchState);
+      // Also visible before seen-expiry, and regardless of lastOwnMessageId.
+      expect(internals.deliveryStateFor(older, 'a-newer-message-id', false)).toBe(dispatchState);
+    }
+  );
+
+  it('hides an ordinary dispatched state once it is no longer the last own message', () => {
+    // Control: proves the test above is actually exercising the
+    // deferred/failed exception, not a bug that shows every dispatchState
+    // unconditionally.
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    document.body.appendChild(el);
+    const internals = el as unknown as DeliveryStateInternals;
+    const older = makeDeliveryMessage('dispatched');
+    expect(internals.deliveryStateFor(older, 'a-newer-message-id', false)).toBe('');
+  });
+});
