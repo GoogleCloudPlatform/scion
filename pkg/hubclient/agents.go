@@ -226,24 +226,6 @@ type GCPIdentityConfig struct {
 	ServiceAccountID string `json:"service_account_id,omitempty"`
 }
 
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (r *CreateAgentRequest) UnmarshalJSON(data []byte) error {
-	type Alias CreateAgentRequest
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(r),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if r.ProjectID == "" && aux.GroveID != "" {
-		r.ProjectID = aux.GroveID
-	}
-	return nil
-}
-
 // CreateAgentResponse is the response from creating an agent.
 type CreateAgentResponse struct {
 	Agent    *Agent   `json:"agent"`

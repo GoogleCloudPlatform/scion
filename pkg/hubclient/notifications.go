@@ -16,7 +16,6 @@ package hubclient
 
 import (
 	"context"
-	"encoding/json"
 	"net/url"
 	"time"
 
@@ -131,24 +130,6 @@ type CreateSubscriptionRequest struct {
 	AgentID           string   `json:"agentId,omitempty"`
 	ProjectID         string   `json:"projectId"`
 	TriggerActivities []string `json:"triggerActivities"`
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (r *CreateSubscriptionRequest) UnmarshalJSON(data []byte) error {
-	type Alias CreateSubscriptionRequest
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(r),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if r.ProjectID == "" && aux.GroveID != "" {
-		r.ProjectID = aux.GroveID
-	}
-	return nil
 }
 
 // UpdateSubscriptionRequest is the request body for updating a subscription.
@@ -271,24 +252,6 @@ type CreateSubscriptionTemplateRequest struct {
 	Scope             string   `json:"scope"`
 	TriggerActivities []string `json:"triggerActivities"`
 	ProjectID         string   `json:"projectId"`
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (r *CreateSubscriptionTemplateRequest) UnmarshalJSON(data []byte) error {
-	type Alias CreateSubscriptionTemplateRequest
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(r),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if r.ProjectID == "" && aux.GroveID != "" {
-		r.ProjectID = aux.GroveID
-	}
-	return nil
 }
 
 // SubscriptionTemplate represents a subscription template from the Hub API.

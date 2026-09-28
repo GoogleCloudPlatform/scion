@@ -68,6 +68,7 @@ agents and make sure hub and broker are on the same release.
 | `groveId` (and `groveName`/`grove` on project records) in hub API responses for notifications, subscriptions, subscription templates, schedules, scheduled events, access tokens, messages, project providers, project sync state and agent session metrics | `projectId` (`name`/`slug` where applicable). |
 | `groveId` in hub event payloads; metric attribute `scope="grove"` | `projectId`; `scope="project"` (update dashboards and alerts) |
 | response fields `groveId`, `groveName`, `grove`, `groves`; `source: "grove"` on resolved secrets; token response `groveId` | `projectId`, `name`, `slug`, `projects`; `source: "project"` |
+| legacy `groveId` key decoded into the hubclient request types (create agent, subscription, subscription template, template, clone template, token) | `projectId`; these types no longer map `groveId` to `ProjectID` when decoded from JSON |
 <!-- Rows are appended here as later changes merge. -->
 
 ## Extras / telemetry

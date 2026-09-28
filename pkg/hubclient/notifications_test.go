@@ -85,6 +85,32 @@ func TestSubscription_JSON(t *testing.T) {
 	})
 }
 
+func TestCreateSubscriptionRequest_UnmarshalJSON(t *testing.T) {
+	t.Run("unmarshal legacy groveId field is not honored", func(t *testing.T) {
+		jsonData := `{"scope": "project", "groveId": "p1"}`
+		var req CreateSubscriptionRequest
+		if err := json.Unmarshal([]byte(jsonData), &req); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if req.ProjectID != "" {
+			t.Errorf("ProjectID = %q, want empty (legacy groveId must not be honored)", req.ProjectID)
+		}
+	})
+}
+
+func TestCreateSubscriptionTemplateRequest_UnmarshalJSON(t *testing.T) {
+	t.Run("unmarshal legacy groveId field is not honored", func(t *testing.T) {
+		jsonData := `{"name": "tmpl", "scope": "project", "groveId": "p1"}`
+		var req CreateSubscriptionTemplateRequest
+		if err := json.Unmarshal([]byte(jsonData), &req); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if req.ProjectID != "" {
+			t.Errorf("ProjectID = %q, want empty (legacy groveId must not be honored)", req.ProjectID)
+		}
+	})
+}
+
 func TestSubscriptionTemplate_JSON(t *testing.T) {
 	t.Run("unmarshal legacy groveId field is not honored", func(t *testing.T) {
 		jsonData := `{"id": "st1", "groveId": "p1"}`

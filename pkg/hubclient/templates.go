@@ -16,7 +16,6 @@ package hubclient
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"net/url"
 	"time"
@@ -96,24 +95,6 @@ type CreateTemplateRequest struct {
 	Config    *TemplateConfig `json:"config,omitempty"`
 }
 
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (r *CreateTemplateRequest) UnmarshalJSON(data []byte) error {
-	type Alias CreateTemplateRequest
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(r),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if r.ProjectID == "" && aux.GroveID != "" {
-		r.ProjectID = aux.GroveID
-	}
-	return nil
-}
-
 // UpdateTemplateRequest is the request for updating a template.
 type UpdateTemplateRequest struct {
 	Name   string          `json:"name,omitempty"`
@@ -125,24 +106,6 @@ type CloneTemplateRequest struct {
 	Name      string `json:"name"`
 	Scope     string `json:"scope"`
 	ProjectID string `json:"projectId"`
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (r *CloneTemplateRequest) UnmarshalJSON(data []byte) error {
-	type Alias CloneTemplateRequest
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(r),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if r.ProjectID == "" && aux.GroveID != "" {
-		r.ProjectID = aux.GroveID
-	}
-	return nil
 }
 
 // FileUploadRequest describes a file to upload.

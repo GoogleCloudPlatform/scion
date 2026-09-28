@@ -16,7 +16,6 @@ package hubclient
 
 import (
 	"context"
-	"encoding/json"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -51,24 +50,6 @@ type CreateTokenRequest struct {
 	ProjectID string     `json:"projectId"`
 	Scopes    []string   `json:"scopes"`
 	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (r *CreateTokenRequest) UnmarshalJSON(data []byte) error {
-	type Alias CreateTokenRequest
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(r),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if r.ProjectID == "" && aux.GroveID != "" {
-		r.ProjectID = aux.GroveID
-	}
-	return nil
 }
 
 // CreateTokenResponse is the response from creating a user access token.

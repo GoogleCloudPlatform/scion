@@ -422,6 +422,19 @@ func TestSendOutboundMessage_NonOKError(t *testing.T) {
 // from within the hubclient package).
 type apiError = apiclient.APIError
 
+func TestCreateAgentRequest_UnmarshalJSON(t *testing.T) {
+	t.Run("unmarshal legacy groveId field is not honored", func(t *testing.T) {
+		data := `{"name":"agent1","groveId":"g1"}`
+		var req CreateAgentRequest
+		if err := json.Unmarshal([]byte(data), &req); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if req.ProjectID != "" {
+			t.Errorf("ProjectID = %q, want empty (legacy groveId must not be honored)", req.ProjectID)
+		}
+	})
+}
+
 func TestCreateAgentRequest_GCPIdentity_JSONRoundTrip(t *testing.T) {
 	req := CreateAgentRequest{
 		GCPIdentity: &GCPIdentityConfig{

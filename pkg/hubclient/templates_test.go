@@ -31,14 +31,14 @@ func TestCreateTemplateRequest_UnmarshalJSON(t *testing.T) {
 		}
 	})
 
-	t.Run("HandleGroveIdKey", func(t *testing.T) {
+	t.Run("IgnoresLegacyGroveIdKey", func(t *testing.T) {
 		data := `{"name":"tmpl","scope":"project","groveId":"g1"}`
 		var req CreateTemplateRequest
 		if err := json.Unmarshal([]byte(data), &req); err != nil {
 			t.Fatalf("Unmarshal failed: %v", err)
 		}
-		if req.ProjectID != "g1" {
-			t.Errorf("Expected project ID 'g1', got '%s'", req.ProjectID)
+		if req.ProjectID != "" {
+			t.Errorf("ProjectID = %q, want empty (legacy groveId must not be honored)", req.ProjectID)
 		}
 	})
 }
@@ -79,25 +79,25 @@ func TestCloneTemplateRequest_UnmarshalJSON(t *testing.T) {
 		}
 	})
 
-	t.Run("HandleGroveIdKey", func(t *testing.T) {
+	t.Run("IgnoresLegacyGroveIdKey", func(t *testing.T) {
 		data := `{"name":"clone","scope":"project","groveId":"g1"}`
 		var req CloneTemplateRequest
 		if err := json.Unmarshal([]byte(data), &req); err != nil {
 			t.Fatalf("Unmarshal failed: %v", err)
 		}
-		if req.ProjectID != "g1" {
-			t.Errorf("Expected project ID 'g1', got '%s'", req.ProjectID)
+		if req.ProjectID != "" {
+			t.Errorf("ProjectID = %q, want empty (legacy groveId must not be honored)", req.ProjectID)
 		}
 	})
 
-	t.Run("ProjectIdTakesPrecedence", func(t *testing.T) {
+	t.Run("IgnoresLegacyGroveIdKeyWhenProjectIdPresent", func(t *testing.T) {
 		data := `{"name":"clone","scope":"project","projectId":"p1","groveId":"g1"}`
 		var req CloneTemplateRequest
 		if err := json.Unmarshal([]byte(data), &req); err != nil {
 			t.Fatalf("Unmarshal failed: %v", err)
 		}
 		if req.ProjectID != "p1" {
-			t.Errorf("Expected project ID 'p1' (projectId takes precedence), got '%s'", req.ProjectID)
+			t.Errorf("ProjectID = %q, want %q (legacy groveId must not be honored)", req.ProjectID, "p1")
 		}
 	})
 }
