@@ -140,13 +140,13 @@ func TestAgentSenderDM_RawFlagReachesDispatcher(t *testing.T) {
 	assert.Equal(t, "RAWPROBE", calls[0].Message)
 }
 
-// TestExecuteAgentDM_RawFlagSuppressesDeliveryText proves the other half of
+// TestExecuteAgentDM_RawFlagDeliveryTextIsBareBody proves the other half of
 // the regression fix: with the envelope switch ON (write-deny enabled), a
 // raw agent-sender DM's dispatched StructuredMessage.DeliveryText equals the
 // bare message body, not a rendered envelope. The broker prefers
 // DeliveryText over the raw body when both are present, so this is the field
 // that actually controls what a raw agent-sender DM delivers in production.
-func TestExecuteAgentDM_RawFlagSuppressesDeliveryText(t *testing.T) {
+func TestExecuteAgentDM_RawFlagDeliveryTextIsBareBody(t *testing.T) {
 	srv, _, _, sender, target, _, dispatcher := deliverySetup(t)
 	enableReadSwitch(t, srv)
 	ctx := context.Background()
@@ -165,9 +165,9 @@ func TestExecuteAgentDM_RawFlagSuppressesDeliveryText(t *testing.T) {
 		"DeliveryText must be the bare body for a raw agent-sender DM, not a rendered envelope")
 }
 
-// TestExecuteAgentDM_PlainFlagSuppressesDeliveryText is the Plain equivalent
-// of TestExecuteAgentDM_RawFlagSuppressesDeliveryText.
-func TestExecuteAgentDM_PlainFlagSuppressesDeliveryText(t *testing.T) {
+// TestExecuteAgentDM_PlainFlagDeliveryTextIsBareBody is the Plain equivalent
+// of TestExecuteAgentDM_RawFlagDeliveryTextIsBareBody.
+func TestExecuteAgentDM_PlainFlagDeliveryTextIsBareBody(t *testing.T) {
 	srv, _, _, sender, target, _, dispatcher := deliverySetup(t)
 	enableReadSwitch(t, srv)
 	ctx := context.Background()
@@ -187,7 +187,7 @@ func TestExecuteAgentDM_PlainFlagSuppressesDeliveryText(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Regression guard: Raw must not widen authorization (rev-1 Optional-2).
+// Regression guard: Raw must not widen authorization.
 //
 // authorizeAgentMessage runs unconditionally in ExecuteAgentDM step 3,
 // before Raw/Plain are ever consulted, so a raw agent-sender DM to a target
@@ -204,19 +204,8 @@ func TestExecuteAgentDM_RawFlagDoesNotBypassMessageModeNoneDenial(t *testing.T) 
 	deniedTarget := *target
 	deniedTarget.MessageMode = store.MessageModeNone
 
-	input := &AgentDMInput{
-		SenderAgent: sender,
-		SenderIdentity: &agentIdentityWrapper{&AgentTokenClaims{
-			Claims:    jwt.Claims{Subject: sender.ID},
-			ProjectID: sender.ProjectID,
-			Ancestry:  sender.Ancestry,
-		}},
-		TargetAgent: &deniedTarget,
-		Msg:         "RAWPROBE-DENIED",
-		Type:        "instruction",
-		ProjectID:   sender.ProjectID,
-		Raw:         true,
-	}
+	input := deliveryDMInput(sender, &deniedTarget, "RAWPROBE-DENIED")
+	input.Raw = true
 
 	_, dmErr := srv.ExecuteAgentDM(ctx, input)
 	require.NotNil(t, dmErr, "raw DM to a message_mode=none target must be rejected")
