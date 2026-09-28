@@ -235,10 +235,12 @@ When harness events occur (via hooks), sciontool automatically records the follo
 | `gen_ai.api.calls` | Counter | calls | Total number of LLM API requests |
 | `gen_ai.api.duration` | Histogram | ms | Model duration when paired start and end events are available in one process |
 
-Token counters appear only when a hook provides token usage, and only when the
-harness's usage source is `hooks` (see "Usage source" below). The retired
-`scion.hook.tokens.{input,output,cached}` names are rejected by the receiver on
-the hook scope, the same way `gen_ai.tokens.*` is.
+Token and API-call counters appear only when a hook provides them, and only
+when the harness's usage source is `hooks` (see "Usage source" below) —
+`gen_ai.api.calls` is gated the same way as `scion.usage.tokens`, not just the
+token counters. The retired `scion.hook.tokens.{input,output,cached}` names
+are rejected by the receiver on the hook scope, the same way `gen_ai.tokens.*`
+is.
 
 #### Canonical usage contract: `gen_ai.api.calls` and `scion.usage.tokens`
 
@@ -254,6 +256,8 @@ The Hub dashboard reads exactly two usage metrics, regardless of source:
 Each harness declares **one** usage source in its `provision.py`, via `SCION_USAGE_SOURCE=native|hooks`. When native, sciontool's receiver derives `gen_ai.api.calls`/`scion.usage.tokens` itself from the harness's own OTLP log events (for example Claude's `api_request`/`api_error`), so no hook needs to carry usage at all. Claude declares `SCION_USAGE_SOURCE=native`.
 
 An unset `SCION_USAGE_SOURCE` means **no usage is published** from hooks for that harness (design D10, the vetting gate) — an unvetted guess is worse than a visible gap. A harness publishes hook-sourced usage only once its `provision.py` declares `SCION_USAGE_SOURCE=hooks`, behind a PR that checks in a captured fixture proving the mapping. As of this phase, no harness has opted in that way; declaring `hooks` for a given harness's `provision.py` is tracked per-harness follow-up work (for example opencode and antigravity). Tool, session, turn and every other hook metric, span and log is unaffected by `SCION_USAGE_SOURCE` in every case (design D4, narrow).
+
+**Known gap: codex.** Codex's `model-end` hook already carries calls and tokens (`dialects/codex.go`), and today it is the harness's only usage source. With `SCION_USAGE_SOURCE` unset, codex's hook usage stops appearing once this gate lands and `scion-base` is rebuilt, and stays at zero until design phase 3c lands `SCION_USAGE_SOURCE=native` for codex (deriving usage from its own OTLP events instead). Until phase 3c, codex shows no calls or tokens on the dashboard. gemini-cli and antigravity have the same unset-by-default gap, but they are already named above (deferred / waiting on a fixture-backed PR); codex is called out separately here because it otherwise reads as fully supported.
 
 All of this — the deriver, the hook vetting gate, and the allowlist changes below — is sciontool-side value: it takes effect only after an operator rebuilds `scion-base` and then the harness images. An unrebuilt `scion-base` keeps today's behavior unchanged; it does not error, and it does not need a `provision.py` workaround.
 
