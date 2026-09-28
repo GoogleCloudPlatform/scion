@@ -107,9 +107,12 @@ resource "google_secret_manager_secret_version" "db_dsn" {
 
 # --- F-115 password rotation runbook ---
 #
-# To rotate this hub's DB password: set -var password_rotation=<new value>
-# (e.g. a date) on this module, wired from the hub root's
-# db_password_rotation variable, and apply. Apply order per hub:
+# To rotate this hub's DB password: set password_rotation to a new value
+# (e.g. a date) in the hub's tfvars file — not with -var — wired from the
+# hub root's db_password_rotation variable, and apply. Keep the marker in
+# the tfvars file permanently; never remove it or reset it to "", either of
+# which takes keepers back to null and triggers another, unplanned
+# rotation on the next apply. Apply order per hub:
 #   random_password.db replace
 #     -> google_sql_user.this password update (in place)
 #     -> google_secret_manager_secret_version.db_password/db_dsn CBD-replaced

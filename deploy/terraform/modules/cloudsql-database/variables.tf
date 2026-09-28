@@ -35,7 +35,7 @@ variable "sql_connection_name" {
 }
 
 variable "password_rotation" {
-  description = "F-115 rotation design (12:35Z): set to any new value (e.g. a date, \"2026-09-28\") to rotate the password; changing it replaces the password, updates the SQL user, writes new secret versions and rolls a new hub revision. Default \"\" is a no-op for existing state (random_password.db's keepers stay null, so no diff)."
+  description = "F-115 rotation design (12:35Z): set in the hub's tfvars file (not -var) to a new value (e.g. a date, \"2026-09-28\") to rotate the password; changing it replaces the password, updates the SQL user, writes new secret versions and rolls a new hub revision. Keep the marker in the tfvars file permanently once set — never remove it or reset it to \"\", either of which takes keepers back to null and triggers another, unplanned rotation. Default \"\" is a no-op for existing state (random_password.db's keepers stay null, so no diff)."
   type        = string
   default     = ""
 }

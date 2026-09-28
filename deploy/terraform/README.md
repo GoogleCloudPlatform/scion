@@ -245,15 +245,24 @@ omissions.
 
 F-115 rotation design (12:35Z): `cloudsql-database` has no imperative
 `-replace` step for rotating a hub's database password. Set
-`db_password_rotation` to any new value (e.g. a date, `"2026-09-28"`) on the
-`hub` root and apply:
+`db_password_rotation` to a new value (e.g. a date, `"2026-09-28"`) **in the
+hub's `<hub_name>.tfvars` file — not with `-var`** — and apply:
 
 ```bash
 terraform -chdir=deploy/terraform/configurations/hub apply \
   -var hub_name=<hub_name> -var state_prefix=<prefix>/hubs/<hub_name> \
-  -var-file=<hub_name>.tfvars \
-  -var db_password_rotation=<new value>
+  -var-file=<hub_name>.tfvars
 ```
+
+**Once set, keep the marker in the tfvars file permanently.** To rotate
+again, change it to a new value. Never remove it or reset it to `""` —
+either one takes `random_password.db`'s `keepers` back to `null`, which
+triggers another, unplanned rotation (a new revision and destroyed secret
+versions) on the next apply — including one that only meant to pass the
+marker with `-var` and omitted it, since `-var` doesn't persist between
+applies the way the tfvars file does. Always review the plan before
+applying: an unexpected `random_password.db` replace means the marker went
+missing or was reset.
 
 The default `""` is a no-op — `random_password.db`'s `keepers` stay `null`,
 so a plan against existing state with the default shows no diff. Changing
