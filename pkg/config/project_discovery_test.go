@@ -739,7 +739,7 @@ func TestRemoveProjectConfig_LinkInOtherScionSubdirRefused(t *testing.T) {
 // configPath being refused outright: the canonical root is always absolute
 // (built from os.UserHomeDir()), so every internal comparison must convert a
 // relative path to absolute before comparing it, or a relative entry would
-// never match. This is covered by projectcompat.ResolvePathForCompare
+// never match. This is covered by projectkeys.ResolvePathForCompare
 // resolving to absolute internally, not by a separate conversion in this
 // function, so this test also pins that behaviour.
 func TestRemoveProjectConfig_RelativeConfigPath(t *testing.T) {

@@ -21,7 +21,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -100,7 +100,7 @@ func ClassifyPath(ctx context.Context, s store.Store, path, managedRoot string) 
 		// managedRoot itself is resolved the same way — not just cleaned —
 		// so a managed root that is itself behind a symlink (a symlinked
 		// home directory, common on macOS) still matches.
-		cleanManaged := projectcompat.ResolvePathForCompare(managedRoot)
+		cleanManaged := projectkeys.ResolvePathForCompare(managedRoot)
 		if pathHasPrefix(resolved, cleanManaged+string(filepath.Separator)) || pathEqual(resolved, cleanManaged) {
 			pc.IsManaged = true
 		}

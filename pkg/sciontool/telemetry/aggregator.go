@@ -19,7 +19,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
 // ToolCallStats tracks per-tool invocation counts.
@@ -71,7 +71,7 @@ type Aggregator struct {
 // IDs from the environment.
 func NewAggregator() *Aggregator {
 	agentID := os.Getenv("SCION_AGENT_ID")
-	projectID := projectcompat.ProjectIDFromEnv(os.Getenv)
+	projectID := projectkeys.ProjectIDFromEnv(os.Getenv)
 	model := os.Getenv("SCION_MODEL")
 
 	return &Aggregator{

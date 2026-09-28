@@ -32,7 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
 
@@ -460,7 +460,7 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 					if hc == nil {
 						continue
 					}
-					if err := hc.RequestSubscription(projectcompat.AllProjectsPattern()); err != nil {
+					if err := hc.RequestSubscription(projectkeys.AllProjectsPattern()); err != nil {
 						b.log.Warn("Failed to request bootstrap subscription", "error", err)
 						continue
 					}
@@ -1574,7 +1574,7 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 	for i, agentSlug := range targets {
 		saveConversationContext(agentSlug)
 
-		topic := projectcompat.AgentTopic(link.ProjectID, agentSlug)
+		topic := projectkeys.AgentTopic(link.ProjectID, agentSlug)
 		recipient := "agent:" + agentSlug
 
 		var msg *messages.StructuredMessage
@@ -1654,7 +1654,7 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 				mentionMsg.Attachments = attachmentPaths
 			}
 
-			mentionTopic := projectcompat.AgentTopic(link.ProjectID, bm.Name)
+			mentionTopic := projectkeys.AgentTopic(link.ProjectID, bm.Name)
 
 			b.log.Debug("Delivering body mention notification",
 				"topic", mentionTopic, "sender", sender, "mentioned_agent", bm.Name)
@@ -2481,10 +2481,10 @@ func (b *DiscordBroker) downloadDiscordAttachment(ctx context.Context, att *disc
 
 // parseTopicComponents extracts projectID and agentSlug from a broker topic.
 func parseTopicComponents(topic string) (projectID, agentSlug string) {
-	parsed, err := projectcompat.ParseTopic(topic)
+	parsed, err := projectkeys.ParseTopic(topic)
 	if err == nil {
 		projectID = parsed.ProjectID
-		if parsed.Kind == projectcompat.TopicKindAgent {
+		if parsed.Kind == projectkeys.TopicKindAgent {
 			agentSlug = parsed.Actor
 		}
 	} else {

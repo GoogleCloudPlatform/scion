@@ -24,7 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-chat-app/internal/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
 // outboundEmailRe matches scion user emails in outbound messages, with optional "user:" prefix.
@@ -63,7 +63,7 @@ func (n *NotificationRelay) SetSendQueue(sq *SendQueue) {
 //	scion.project.<projectID>.user.<userID>.messages  — user-targeted message
 //	scion.project.<projectID>.agent.<agentID>.messages — agent-targeted message
 func (n *NotificationRelay) HandleBrokerMessage(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
-	parsed, err := projectcompat.ParseTopic(topic)
+	parsed, err := projectkeys.ParseTopic(topic)
 	if err != nil {
 		n.log.Debug("ignoring unrecognized topic", "topic", topic, "error", err)
 		return nil
@@ -78,7 +78,7 @@ func (n *NotificationRelay) HandleBrokerMessage(ctx context.Context, topic strin
 
 	// User-targeted messages are always relayed (they were explicitly
 	// sent to a specific user and bypass observe/filter settings).
-	if parsed.Kind == projectcompat.TopicKindUser {
+	if parsed.Kind == projectkeys.TopicKindUser {
 		return n.handleUserMessage(ctx, projectID, msg)
 	}
 

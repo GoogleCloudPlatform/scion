@@ -27,7 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -558,11 +558,11 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 // parseAgentMessageTopic extracts the project ID and agent slug from a topic string.
 // Expected format: scion.project.<projectID>.agent.<agentSlug>.messages.
 func parseAgentMessageTopic(topic string) (projectID, agentSlug string, err error) {
-	parsed, err := projectcompat.ParseTopic(topic)
+	parsed, err := projectkeys.ParseTopic(topic)
 	if err != nil {
 		return "", "", err
 	}
-	if parsed.Kind != projectcompat.TopicKindAgent {
+	if parsed.Kind != projectkeys.TopicKindAgent {
 		return "", "", fmt.Errorf("expected format scion.project.<projectId>.agent.<agentSlug>.messages")
 	}
 	return parsed.ProjectID, parsed.Actor, nil

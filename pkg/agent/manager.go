@@ -26,7 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
@@ -120,8 +120,8 @@ func resolveProjectName(projectPath string) string {
 // agentHasProjectInfo reports whether a runtime entry carries any project
 // identity (label or field) that can be compared against a requested project.
 func agentHasProjectInfo(a api.AgentInfo) bool {
-	return projectcompat.ProjectIDFromLabels(a.Labels) != "" ||
-		projectcompat.ProjectNameFromLabels(a.Labels) != "" ||
+	return projectkeys.ProjectIDFromLabels(a.Labels) != "" ||
+		projectkeys.ProjectNameFromLabels(a.Labels) != "" ||
 		a.ProjectID != "" || a.Project != ""
 }
 

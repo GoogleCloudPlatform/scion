@@ -9,7 +9,7 @@ import (
 	"os"
 	"regexp"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
@@ -88,7 +88,7 @@ func authoritativeIdentity() []*commonpb.KeyValue {
 	}
 	add("scion.agent.id", os.Getenv("SCION_AGENT_ID"))
 	add("scion.agent.slug", os.Getenv("SCION_AGENT_SLUG"))
-	add("scion.project.id", projectcompat.ProjectIDFromEnv(os.Getenv))
+	add("scion.project.id", projectkeys.ProjectIDFromEnv(os.Getenv))
 	add("scion.harness", os.Getenv("SCION_HARNESS"))
 	add("scion.model", os.Getenv("SCION_MODEL"))
 	add("scion.broker.id", os.Getenv("SCION_BROKER_ID"))

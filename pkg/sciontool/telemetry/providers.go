@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
@@ -64,7 +64,7 @@ func buildResource(ctx context.Context) (*resource.Resource, error) {
 			attribute.String("scion.agent.slug", agentSlug),
 		))
 	}
-	projectID := projectcompat.ProjectIDFromEnv(os.Getenv)
+	projectID := projectkeys.ProjectIDFromEnv(os.Getenv)
 	if projectID != "" {
 		attrs = append(attrs, resource.WithAttributes(
 			attribute.String("scion.project.id", projectID),

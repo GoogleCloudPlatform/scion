@@ -35,7 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
 
@@ -1160,11 +1160,11 @@ func (b *Bridge) validateTopicUser(topic, callerUserID, taskID string) error {
 // extractUserIDFromTopic extracts the user ID from a broker topic.
 // Returns "" for non-user topics or parse failures.
 func extractUserIDFromTopic(topic string) string {
-	parsed, err := projectcompat.ParseTopic(topic)
+	parsed, err := projectkeys.ParseTopic(topic)
 	if err != nil {
 		return ""
 	}
-	if parsed.Kind == projectcompat.TopicKindUser {
+	if parsed.Kind == projectkeys.TopicKindUser {
 		return parsed.Actor
 	}
 	return ""
@@ -1444,7 +1444,7 @@ func (b *Bridge) callerHubClient(caller *CallerIdentity) (hubclient.Client, erro
 // The broker's eventbus supports NATS-style * wildcards (confirmed by
 // TestInProcessEventBus_WildcardSubscribe).
 func (b *Bridge) subscribeAllUserTopics(projectID string) {
-	pattern := projectcompat.AllUserTopic(projectID)
+	pattern := projectkeys.AllUserTopic(projectID)
 	if err := b.broker.RequestSubscription(pattern); err != nil {
 		b.log.Warn("failed to request wildcard subscription", "pattern", pattern, "error", err)
 	}
@@ -1452,7 +1452,7 @@ func (b *Bridge) subscribeAllUserTopics(projectID string) {
 
 // subscribeAdminUserTopics subscribes to the bridge admin's user topic (legacy mode).
 func (b *Bridge) subscribeAdminUserTopics(projectID string) {
-	pattern := projectcompat.UserTopic(projectID, b.config.Hub.User)
+	pattern := projectkeys.UserTopic(projectID, b.config.Hub.User)
 	if err := b.broker.RequestSubscription(pattern); err != nil {
 		b.log.Warn("failed to request subscription", "pattern", pattern, "error", err)
 	}
@@ -1731,11 +1731,11 @@ func (b *Bridge) unregisterActiveTask(taskID, aKey string) {
 
 // parseTopic extracts project and agent identifiers from a broker topic string.
 func parseTopic(topic string) (projectID, agentSlug string, err error) {
-	parsed, err := projectcompat.ParseTopic(topic)
+	parsed, err := projectkeys.ParseTopic(topic)
 	if err != nil {
 		return "", "", fmt.Errorf("malformed topic: %s", topic)
 	}
-	if parsed.Kind == projectcompat.TopicKindAgent {
+	if parsed.Kind == projectkeys.TopicKindAgent {
 		agentSlug = parsed.Actor
 	}
 	return parsed.ProjectID, agentSlug, nil

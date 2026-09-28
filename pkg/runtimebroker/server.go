@@ -39,7 +39,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
@@ -1400,7 +1400,7 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 func scopedNameFilter(slug, projectID string) map[string]string {
 	filter := map[string]string{"scion.name": slug}
 	if projectID != "" {
-		filter[projectcompat.LabelProjectID] = projectID
+		filter[projectkeys.LabelProjectID] = projectID
 	}
 	return filter
 }
@@ -1448,7 +1448,7 @@ func agentsForProject(agents []api.AgentInfo, projectID string) []api.AgentInfo 
 	}
 	filtered := make([]api.AgentInfo, 0, len(agents))
 	for _, agent := range agents {
-		if projectcompat.ProjectIDFromLabels(agent.Labels) == projectID {
+		if projectkeys.ProjectIDFromLabels(agent.Labels) == projectID {
 			filtered = append(filtered, agent)
 		}
 	}

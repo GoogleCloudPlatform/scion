@@ -25,7 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -735,7 +735,7 @@ type scopedThenFailManager struct {
 }
 
 func (m *scopedThenFailManager) List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
-	if filter[projectcompat.LabelProjectID] != "" {
+	if filter[projectkeys.LabelProjectID] != "" {
 		return nil, nil
 	}
 	return nil, m.failErr

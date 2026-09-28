@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-chat-app/internal/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
 // newTestRouter creates a CommandRouter backed by an ephemeral store and a
@@ -865,10 +865,10 @@ func (f *fakeHostCallbacks) CancelSubscription(pattern string) error {
 
 // TestProjectSubscriptionPattern_MatchesCanonicalProjectPattern guards the
 // shared helper cmdLink and cmdUnlink both call to build their subscription
-// pattern against drifting from the canonical projectcompat helper.
+// pattern against drifting from the canonical projectkeys helper.
 func TestProjectSubscriptionPattern_MatchesCanonicalProjectPattern(t *testing.T) {
 	got := projectSubscriptionPattern("proj-1")
-	want := projectcompat.ProjectPattern("proj-1")
+	want := projectkeys.ProjectPattern("proj-1")
 	if got != want {
 		t.Errorf("projectSubscriptionPattern(%q) = %q, want %q", "proj-1", got, want)
 	}
@@ -885,7 +885,7 @@ func TestProjectSubscriptionPattern_MatchesCanonicalProjectPattern(t *testing.T)
 // reaches RequestSubscription. It shares projectSubscriptionPattern with
 // cmdUnlink, and TestProjectSubscriptionPattern_MatchesCanonicalProjectPattern
 // pins that shared helper against drifting from the canonical
-// projectcompat.ProjectPattern.
+// projectkeys.ProjectPattern.
 func TestCmdUnlink_CancelsMatchingSubscriptionPattern(t *testing.T) {
 	router, _ := newTestRouter(t)
 
@@ -915,7 +915,7 @@ func TestCmdUnlink_CancelsMatchingSubscriptionPattern(t *testing.T) {
 		t.Fatalf("cmdUnlink: %v", err)
 	}
 
-	want := projectcompat.ProjectPattern("proj-77")
+	want := projectkeys.ProjectPattern("proj-77")
 	if len(hc.cancelled) != 1 || hc.cancelled[0] != want {
 		t.Errorf("expected CancelSubscription(%q) exactly once, got %v", want, hc.cancelled)
 	}

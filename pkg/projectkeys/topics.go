@@ -12,11 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package projectcompat centralizes bounded compatibility for legacy grove
-// strings. New code should use project terminology and call these helpers at
-// explicit adapter points when old clients, config, labels, topics, or routes
-// may still provide grove names.
-package projectcompat
+// Package projectkeys defines the canonical project identity surface: the
+// config and environment key names for a project's ID, the on-disk project
+// file/directory names, the label keys used to record project identity on
+// stored objects, the topic names and builders used for project-scoped
+// messaging, and path-comparison helpers for project paths.
+package projectkeys
 
 import (
 	"fmt"

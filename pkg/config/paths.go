@@ -20,7 +20,7 @@ import (
 	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
@@ -28,8 +28,8 @@ const (
 	DotScion  = ".scion"
 	GlobalDir = ".scion"
 
-	ProjectConfigsDir = projectcompat.ProjectConfigsDir
-	ProjectsDir       = projectcompat.ProjectsDir
+	ProjectConfigsDir = projectkeys.ProjectConfigsDir
+	ProjectsDir       = projectkeys.ProjectsDir
 )
 
 // FindProjectRoot walks up the directory tree to find the .scion directory or marker file.

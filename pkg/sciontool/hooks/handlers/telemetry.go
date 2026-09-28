@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
@@ -485,7 +485,7 @@ func (h *TelemetryHandler) metricAttrs() []attribute.KeyValue {
 	if v := os.Getenv("SCION_HARNESS"); v != "" {
 		attrs = append(attrs, attribute.String("harness", v))
 	}
-	projectID := projectcompat.ProjectIDFromEnv(os.Getenv)
+	projectID := projectkeys.ProjectIDFromEnv(os.Getenv)
 	if projectID != "" {
 		attrs = append(attrs, attribute.String("project_id", projectID))
 	}

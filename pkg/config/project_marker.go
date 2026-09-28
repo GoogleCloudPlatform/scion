@@ -21,7 +21,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"gopkg.in/yaml.v3"
 )
 
@@ -167,7 +167,7 @@ func IsOldStyleNonGitProject(scionPath string) bool {
 func IsHubContext() bool {
 	return os.Getenv("SCION_HUB_ENDPOINT") != "" ||
 		os.Getenv("SCION_HUB_URL") != "" ||
-		os.Getenv(projectcompat.EnvProjectID) != ""
+		os.Getenv(projectkeys.EnvProjectID) != ""
 }
 
 // WriteWorkspaceMarker writes a minimal .scion marker file into a workspace
@@ -205,7 +205,7 @@ func ExtractSlugFromExternalDir(dirName string) string {
 func ReadProjectID(projectDir string) (string, error) {
 	overrides := MigrateLegacyProject(projectDir, currentProjectMigrationReporter())
 
-	data, err := os.ReadFile(filepath.Join(projectDir, projectcompat.ProjectIDFile))
+	data, err := os.ReadFile(filepath.Join(projectDir, projectkeys.ProjectIDFile))
 	if err == nil {
 		return strings.TrimSpace(string(data)), nil
 	}
@@ -220,7 +220,7 @@ func ReadProjectID(projectDir string) (string, error) {
 
 // WriteProjectID writes a project-id file to a git project's .scion directory.
 func WriteProjectID(projectDir string, projectID string) error {
-	return os.WriteFile(filepath.Join(projectDir, projectcompat.ProjectIDFile), []byte(projectID+"\n"), 0644)
+	return os.WriteFile(filepath.Join(projectDir, projectkeys.ProjectIDFile), []byte(projectID+"\n"), 0644)
 }
 
 // GetGitProjectExternalConfigDir returns the external config directory for a git project.

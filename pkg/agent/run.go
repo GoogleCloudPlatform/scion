@@ -34,7 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -1244,18 +1244,18 @@ authDone:
 				"scion.harness_auth":   opts.HarnessAuth,
 				"agent_id":             agentID,
 			}
-			for k, v := range projectcompat.ProjectNameLabels(projectName) {
+			for k, v := range projectkeys.ProjectNameLabels(projectName) {
 				l[k] = v
 			}
 			// Add project_id label for project-scoped agent isolation.
 			if projectID != "" {
-				for k, v := range projectcompat.ProjectIDLabels(projectID) {
+				for k, v := range projectkeys.ProjectIDLabels(projectID) {
 					l[k] = v
 				}
 			}
 			return l
 		}(),
-		Annotations: projectcompat.ProjectPathLabels(projectDir),
+		Annotations: projectkeys.ProjectPathLabels(projectDir),
 	}
 	id, err := m.Runtime.Run(ctx, runCfg)
 	if err != nil {
@@ -1408,7 +1408,7 @@ func filterWorkspaceVolume(volumes []api.VolumeMount) []api.VolumeMount {
 func matchAgentProject(a api.AgentInfo, projectName, projectID string) bool {
 	// If we have a projectID, check the canonical project label first.
 	if projectID != "" {
-		if labelProjectID := projectcompat.ProjectIDFromLabels(a.Labels); labelProjectID != "" {
+		if labelProjectID := projectkeys.ProjectIDFromLabels(a.Labels); labelProjectID != "" {
 			return labelProjectID == projectID
 		}
 		if a.ProjectID != "" {
@@ -1417,7 +1417,7 @@ func matchAgentProject(a api.AgentInfo, projectName, projectID string) bool {
 	}
 	// Fall back to project name matching
 	if projectName != "" {
-		if labelProject := projectcompat.ProjectNameFromLabels(a.Labels); labelProject != "" {
+		if labelProject := projectkeys.ProjectNameFromLabels(a.Labels); labelProject != "" {
 			return labelProject == projectName
 		}
 		if a.Project != "" {

@@ -24,7 +24,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	mapstructure "github.com/go-viper/mapstructure/v2"
 	"github.com/knadh/koanf/parsers/json"
 	"github.com/knadh/koanf/parsers/yaml"
@@ -86,7 +86,7 @@ func LoadSettingsKoanf(projectPath string) (*Settings, error) {
 	// canonical value, so no precedence change is reported against it: two
 	// legacy hub.grove_id values resolve to the same project-over-global
 	// precedence whether or not either side has been migrated yet.
-	globalHubProjectID := k.String(projectcompat.ConfigHubProjectIDKey)
+	globalHubProjectID := k.String(projectkeys.ConfigHubProjectIDKey)
 	if globalMigratedHub {
 		globalHubProjectID = ""
 	}
@@ -143,7 +143,7 @@ func LoadSettingsKoanf(projectPath string) (*Settings, error) {
 	//       SCION_HUB_BROKER_ID -> hub.brokerId
 	//       SCION_HUB_BROKER_TOKEN -> hub.brokerToken
 	_ = k.Load(env.Provider("SCION_", ".", func(s string) string {
-		if mapped, ok := projectcompat.EnvProjectIDConfigKey(s, true); ok {
+		if mapped, ok := projectkeys.EnvProjectIDConfigKey(s, true); ok {
 			return mapped
 		}
 		if isRemovedLegacyEnv(s) {
@@ -189,22 +189,22 @@ func LoadSettingsKoanf(projectPath string) (*Settings, error) {
 	// (project-level) value and must take precedence over any top-level
 	// project_id inherited from global.
 	hubProjectID := ""
-	if k.Exists(projectcompat.ConfigHubProjectIDKey) {
-		hubProjectID = k.String(projectcompat.ConfigHubProjectIDKey)
+	if k.Exists(projectkeys.ConfigHubProjectIDKey) {
+		hubProjectID = k.String(projectkeys.ConfigHubProjectIDKey)
 	}
 
 	if hubProjectID != "" {
 		_ = k.Load(confmap.Provider(map[string]interface{}{
-			projectcompat.ConfigProjectIDKey: hubProjectID,
+			projectkeys.ConfigProjectIDKey: hubProjectID,
 		}, "."), nil)
 		// Also remap to hub.projectId (camelCase) so the legacy
 		// HubClientConfig.ProjectID field (koanf tag "projectId") is populated.
 		// Without this, GetHubProjectID() returns "" for V1 settings, causing
 		// EnsureHubReady to fall back to the local project_id and loop on
 		// project registration when the hub project ID differs from the local ID.
-		if !k.Exists(projectcompat.ConfigHubProjectIDJSON) {
+		if !k.Exists(projectkeys.ConfigHubProjectIDJSON) {
 			_ = k.Load(confmap.Provider(map[string]interface{}{
-				projectcompat.ConfigHubProjectIDJSON: hubProjectID,
+				projectkeys.ConfigHubProjectIDJSON: hubProjectID,
 			}, "."), nil)
 		}
 	}
@@ -217,7 +217,7 @@ func LoadSettingsKoanf(projectPath string) (*Settings, error) {
 	if projectPath != "" && projectPath != globalDir {
 		if projectID, err := ReadProjectID(projectPath); err == nil && projectID != "" {
 			_ = k.Load(confmap.Provider(map[string]interface{}{
-				projectcompat.ConfigProjectIDKey: projectID,
+				projectkeys.ConfigProjectIDKey: projectID,
 			}, "."), nil)
 		}
 	}
@@ -378,7 +378,7 @@ func loadSettingsFile(k *koanf.Koanf, dir string) (migratedHubProjectID bool, er
 			// global) layer set, exactly the way any other project-level
 			// setting does.
 			_ = k.Load(confmap.Provider(map[string]interface{}{
-				projectcompat.ConfigHubProjectIDKey: override,
+				projectkeys.ConfigHubProjectIDKey: override,
 			}, "."), nil)
 		}
 		return migrated, nil
@@ -444,7 +444,7 @@ func logHubProjectIDPrecedenceChange(k *koanf.Koanf, dir, globalValue string) {
 	if globalValue == "" {
 		return
 	}
-	value := k.String(projectcompat.ConfigHubProjectIDKey)
+	value := k.String(projectkeys.ConfigHubProjectIDKey)
 	if value == "" || value == globalValue {
 		return
 	}

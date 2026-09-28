@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Flags legacy grove literals outside known compatibility, test, fixture, and
 # example surfaces. Keep this allowlist explicit: new files with legacy names
-# should either route through pkg/projectcompat or be added here with intent.
+# should either route through pkg/projectkeys or be added here with intent.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -123,8 +123,13 @@ allowed_paths=(
   "^pkg/hubclient/templates_test.go$"
   "^pkg/hubclient/tokens_test.go$"
   "^pkg/hubclient/types_test.go$"
-  "^pkg/projectcompat/config_test.go$"
-  "^pkg/projectcompat/topics_test.go$"
+  # Asserts legacy top-level and hub project-id config key names (and the
+  # SCION_GROVE_ID / SCION_HUB_GROVE_ID env vars) are no longer recognized.
+  # The literal is the point of each negative test.
+  "^pkg/projectkeys/config_test.go$"
+  # Asserts a scion.grove.* topic is rejected as malformed rather than parsed
+  # as a project topic. The literal is the point of the negative test.
+  "^pkg/projectkeys/topics_test.go$"
   "^pkg/runtime/cloudrun_sandbox_runtime_test.go$"
   # Asserts SCION_GROVE and SCION_GROVE_ID are absent from buildCommonRunArgs
   # output alongside a SCION_PROJECT/SCION_PROJECT_ID presence check. The
@@ -177,7 +182,9 @@ allowed_paths=(
   "^pkg/config/legacy_grove_migration.go$"
   "^pkg/config/project_marker.go$"
   "^pkg/config/settings_v1.go$"
-  "^pkg/projectcompat/.*\\.go$"
+  # Accepts the legacy "grove" template-list scope query value and maps it to
+  # "project" before it drives the scope switch or the store filter.
+  "^pkg/hub/template_handlers.go$"
   "^pkg/runtimebroker/handlers.go$"
   # Reserved-identity-attribute denylist: the three retired grove-named
   # telemetry keys (scion.grove, scion.grove.id, scion.grove_id) are kept
@@ -230,7 +237,7 @@ if [[ -n "$violations" ]]; then
   echo "Legacy grove literals found outside the project compatibility allowlist:" >&2
   echo "$violations" >&2
   echo >&2
-  echo "Use project vocabulary for new code, or route legacy handling through pkg/projectcompat." >&2
+  echo "Use project vocabulary for new code, or route legacy handling through pkg/projectkeys." >&2
   failed=1
 fi
 if [[ "$failed" -eq 1 ]]; then
