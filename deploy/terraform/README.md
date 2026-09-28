@@ -529,23 +529,25 @@ prevent (see hub-identity's IAM scope rule comment).
   not a real failure. See "Cold start" above.
 - **Creating a user or project secret fails with** "the Hub service account
   lacks the required Secret Manager permission. Grant
-  `roles/secretmanager.admin` to the Hub Runner service account" — this is
-  the documented limitation (see [What's not here yet](#whats-not-here-yet);
-  tracked upstream as ptone/scion#2152). **Do not follow the hint** in a
-  shared project: an unconditioned project-wide `roles/secretmanager.admin`
-  gives this hub every other hub's and co-tenant workload's secrets,
-  including their signing keys. The fix is upstream: hub-prefixed secret
-  names, after which this module's conditioned grant can cover user and
-  project scope.
+  `roles/secretmanager.admin` to the Hub Runner service account" — this
+  means the hub image doesn't yet carry ptone/scion#2152's hub-prefixed
+  secret names. **Do not follow the hint** in a shared project: an
+  unconditioned project-wide `roles/secretmanager.admin` gives this hub
+  every other hub's and co-tenant workload's secrets, including their
+  signing keys. `hub-identity`'s conditioned grant already covers hub, user,
+  and project scope under the hub-prefixed naming (see [What's not here
+  yet](#whats-not-here-yet)); the fix is rolling a hub image that includes
+  #2152.
 
 ## What's not here yet
 
 - `shared_overrides` for hand-built (non-shared) infra to plug into the hub
   layer instead of `shared-lookup`'s naming-convention data sources.
-- User- and project-scope secrets have no per-hub prefix to condition an
-  IAM grant on (only the hub-scope prefix does — see `hub-identity`'s IAM
-  scope rule), so creating one under the current IAM fails with a 403.
-  Resolving this needs an upstream change to secret naming (hub-prefixed
-  names; tracked as ptone/scion#2152).
+- User- and project-scope secret creation needs a hub image built with
+  ptone/scion#2152 (hub-prefixed secret names). The IAM grant for it already
+  exists (`hub-identity`'s `hub_secretmanager_admin_hub_prefixed`); until a
+  hub runs that image, it still looks up hub-scope secrets under the legacy
+  pre-#2152 name, which only the separate legacy grant covers, and has no
+  prefix to create user/project-scope secrets under at all.
 - Typed `validation` blocks on every remaining variable, and a
   per-module README generated with `terraform-docs`.

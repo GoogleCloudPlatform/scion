@@ -339,8 +339,14 @@ resource "google_secret_manager_secret_iam_member" "hub_reads_kubeconfig" {
 # derivation path, so with no key pre-provisioned no new hub could start.
 # Terraform pre-provisions it instead of the hub generating it.
 #
+# Pinned to the legacy pre-#2152 hash, not the new hub-prefixed one: keep
+# this pre-provision (and hub-identity's legacy secretmanager.admin grant it
+# relies on) until this hub's image carries ptone/scion#2152 and
+# `migrate --delete-legacy` has run — only then does the hub start looking
+# for this secret under the new hub-prefixed name instead.
+#
 # The secret ID is built directly from hub-identity's hub_scope_secret_hash
-# (not recomputed here), so it lands under the hub SA's existing conditioned
+# (not recomputed here), so it lands under the hub SA's legacy conditioned
 # secretmanager.admin grant (scion-hub-<hash>-*) with no new IAM: the hub
 # finds it through GCPBackend.Get's no-DB-record path (computes the name,
 # reads accessLatestVersion), then backs it up to the store. Set() on an
@@ -422,8 +428,9 @@ resource "time_sleep" "iam_propagation" {
   create_duration = "120s"
 
   triggers = {
-    condition = var.hub_iam_condition_expression
-    hub_sa    = var.hub_sa_email
+    condition          = var.hub_iam_condition_expression
+    condition_prefixed = var.hub_iam_condition_expression_prefixed
+    hub_sa             = var.hub_sa_email
     # On an EXISTING hub (an upgrade, not a fresh create), condition/hub_sa
     # above are unchanged by adding the DSN secret, so without this trigger
     # the sleep would not re-arm and the new hub_reads_dsn grant would not be

@@ -98,17 +98,18 @@ module "agent_runtime_k8s" {
 module "hub_cloudrun" {
   source = "../../modules/hub-cloudrun"
 
-  project_id                   = var.project_id
-  project_number               = module.shared_lookup.shared.project_number
-  region                       = var.region
-  hub_name                     = local.hub_id
-  hub_image                    = var.hub_image
-  image_registry               = local.image_registry
-  hub_sa_email                 = module.hub_identity.hub_sa_email
-  transport_sa_email           = module.hub_identity.transport_sa_email
-  hub_iam_grants               = module.hub_identity.hub_iam_grants
-  hub_iam_condition_expression = module.hub_identity.hub_iam_condition_expression
-  hub_scope_secret_hash        = module.hub_identity.hub_scope_secret_hash
+  project_id                            = var.project_id
+  project_number                        = module.shared_lookup.shared.project_number
+  region                                = var.region
+  hub_name                              = local.hub_id
+  hub_image                             = var.hub_image
+  image_registry                        = local.image_registry
+  hub_sa_email                          = module.hub_identity.hub_sa_email
+  transport_sa_email                    = module.hub_identity.transport_sa_email
+  hub_iam_grants                        = module.hub_identity.hub_iam_grants
+  hub_iam_condition_expression          = module.hub_identity.hub_iam_condition_expression
+  hub_iam_condition_expression_prefixed = module.hub_identity.hub_iam_condition_expression_prefixed
+  hub_scope_secret_hash                 = module.hub_identity.hub_scope_secret_hash
 
   # Real resource attributes only, never a module reference or a
   # computed-string output. This map is what forces Cloud Run to wait for the

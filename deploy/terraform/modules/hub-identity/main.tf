@@ -35,9 +35,21 @@ resource "google_service_account" "agent" {
 #  (a) per-secret secretAccessor on this hub's own Terraform-managed secrets
 #      — <hub>-settings/-session-secret/-kubeconfig (hub-cloudrun) and
 #      <hub>-db-password (cloudsql-database), not here;
-#  (b) the conditioned grant below, scoped to exactly the prefix
-#      pkg/secret/gcpbackend.go's gcpSecretName produces for this hub's own
-#      HUB-scope secrets (user_signing_key, agent_signing_key,
+#  (b) two conditioned grants below, both scoped to exactly a resource-name
+#      prefix this hub's own secrets fall under — never another hub's or the
+#      live stack's:
+#
+#      hub_secretmanager_admin_hub_prefixed (current) covers every scope —
+#      hub, user, and project alike — under the hub-prefixed Secret Manager
+#      naming from ptone/scion#2152: scion-<sha256(hub_name)[:12]>-*, hashing
+#      hub_name alone rather than hub_name:scopeID. This is what makes user-
+#      and project-scope secret creation possible at all; before it, those
+#      scopes had no per-hub prefix to condition a grant on and creating one
+#      failed loudly with a 403.
+#
+#      hub_secretmanager_admin_hub_scope (legacy, transitional) is scoped to
+#      pkg/secret/gcpbackend.go's pre-#2152 gcpSecretName output for this
+#      hub's own HUB-scope secrets (user_signing_key, agent_signing_key,
 #      oidc_signing_key/keyset — created via the gcpsm backend at hub
 #      startup, needed for the hub to become healthy at all): for hub scope,
 #      gcpSecretName hashes hubID:scopeID with scopeID == hubID (self-scoped;
@@ -46,23 +58,27 @@ resource "google_service_account" "agent" {
 #      in the rendered settings, so the prefix is computable at plan time.
 #      Cross-checked the substr(sha256(...),0,12) vs. Go's
 #      hex.EncodeToString(sha256.Sum256(...)[:6]) equivalence arithmetically
-#      (both take the first 6 bytes of the same digest, hex-encoded).
-#      User- and project-scope secrets hash hubID:userID / hubID:projectID —
-#      no per-hub prefix exists for those, so this condition can't cover
-#      them and creating one fails loudly with a 403 (a known, accepted gap:
-#      user- and project-scope secrets aren't needed for a hub to function).
+#      (both take the first 6 bytes of the same digest, hex-encoded). KEEP
+#      this grant — and hub-cloudrun's oidc_signing_key pre-provision, which
+#      is pinned to the same hash — until every hub sharing this project has
+#      been rebuilt on a #2152-carrying image and `migrate --delete-legacy`
+#      has run against it: until then, a live hub may still read or write
+#      its HUB-scope secrets under the pre-#2152 name, which only this grant
+#      covers.
+#
 #      Whether an IAM condition on a resource-name prefix covers
 #      `secrets.create` (not just operations on an existing secret) was
 #      verified empirically against the live API: it does, so no
-#      pre-create fallback is needed here.
+#      pre-create fallback is needed for either grant.
 #
 # project_number (below) always comes from the shared-lookup data source via
 # var.project_number, never a literal — a hardcoded project number in this
 # expression would silently stop matching if this Terraform were ever
 # pointed at a different project.
 locals {
-  hub_scope_secret_hash   = substr(sha256("${var.hub_name}:${var.hub_name}"), 0, 12)
-  hub_scope_secret_prefix = "projects/${var.project_number}/secrets/scion-hub-${local.hub_scope_secret_hash}-"
+  hub_scope_secret_hash      = substr(sha256("${var.hub_name}:${var.hub_name}"), 0, 12)
+  hub_scope_secret_prefix    = "projects/${var.project_number}/secrets/scion-hub-${local.hub_scope_secret_hash}-"
+  hub_prefixed_secret_prefix = "projects/${var.project_number}/secrets/scion-${substr(sha256(var.hub_name), 0, 12)}-"
 }
 
 resource "google_project_iam_member" "hub_secretmanager_admin_hub_scope" {
@@ -72,8 +88,20 @@ resource "google_project_iam_member" "hub_secretmanager_admin_hub_scope" {
 
   condition {
     title       = "${var.hub_name}-hub-scope-secrets"
-    description = "Only this hub's own hub-scope secrets (gcpSecretName(scope=hub, scopeID=hub_id)) — never another hub's or the live stack's."
+    description = "Legacy, pre-#2152 hub-scope secret prefix. Only this hub's own hub-scope secrets (gcpSecretName(scope=hub, scopeID=hub_id)) — never another hub's or the live stack's. Transitional: keep until this hub's image carries ptone/scion#2152 and migrate --delete-legacy has run."
     expression  = "resource.name.startsWith(\"${local.hub_scope_secret_prefix}\")"
+  }
+}
+
+resource "google_project_iam_member" "hub_secretmanager_admin_hub_prefixed" {
+  project = var.project_id
+  role    = "roles/secretmanager.admin"
+  member  = "serviceAccount:${google_service_account.hub.email}"
+
+  condition {
+    title       = "${var.hub_name}-hub-prefixed-secrets"
+    description = "This hub's hub-prefixed Secret Manager names (ptone/scion#2152), scion-<sha256(hub_name)[:12]>-* — covers hub, user, and project scope alike under one prefix computed from hub_name alone. Never another hub's or the live stack's."
+    expression  = "resource.name.startsWith(\"${local.hub_prefixed_secret_prefix}\")"
   }
 }
 

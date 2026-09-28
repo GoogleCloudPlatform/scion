@@ -49,7 +49,12 @@ variable "hub_iam_grants" {
 }
 
 variable "hub_iam_condition_expression" {
-  description = "hub-identity's conditioned secretmanager.admin expression, used only as a time_sleep trigger so the propagation wait re-arms if the condition ever changes (e.g. a different hub_name) rather than protecting only the very first apply."
+  description = "hub-identity's legacy conditioned secretmanager.admin expression, used only as a time_sleep trigger so the propagation wait re-arms if the condition ever changes (e.g. a different hub_name) rather than protecting only the very first apply."
+  type        = string
+}
+
+variable "hub_iam_condition_expression_prefixed" {
+  description = "hub-identity's hub-prefixed conditioned secretmanager.admin expression (ptone/scion#2152), used only as a time_sleep trigger alongside hub_iam_condition_expression so the propagation wait re-arms if either condition ever changes."
   type        = string
 }
 
