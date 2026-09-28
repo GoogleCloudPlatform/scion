@@ -56,7 +56,7 @@ func scaCreateSA(t *testing.T, s store.Store, projectID string) *store.GCPServic
 	return sa
 }
 
-const scaGenericDenyMsg = "You don't have permission to assign this GCP service account"
+const scaGenericDenyMsg = saAssignGenericForbiddenMsg
 
 // TestEvaluateSAAssignment_CeilingOrphanedDelegator covers the case that
 // motivated the issue: the agent's delegator (its creator, here a user) no
@@ -89,7 +89,8 @@ func TestEvaluateSAAssignment_CeilingOrphanedDelegator(t *testing.T) {
 	require.NotNil(t, denial, "an orphaned delegator must deny the assignment")
 	assert.Equal(t, saAssignDenyForbiddenStructured, denial.kind)
 	assert.Equal(t,
-		"This agent cannot assign service accounts: the principal that created it no longer exists. "+
+		"This agent cannot assign service accounts: a principal in its delegation chain "+
+			"(the user or agent that created it, or one of their creators) does not exist. "+
 			"Ask an admin to recreate the agent under a current user.",
 		denial.msg)
 	assert.NotContains(t, denial.msg, goneUserID, "the 403 body must not name the missing principal's ID")
@@ -125,8 +126,9 @@ func TestEvaluateSAAssignment_CeilingDelegatorLacksPermission(t *testing.T) {
 	require.NotNil(t, denial, "a delegator that lost the permission must deny the assignment")
 	assert.Equal(t, saAssignDenyForbiddenStructured, denial.kind)
 	assert.Equal(t,
-		"This agent cannot assign service accounts: the principal that created it no longer holds "+
-			"permission to assign this service account.",
+		"This agent cannot assign service accounts: a principal in its delegation chain "+
+			"(the user or agent that created it, or one of their creators) does not hold permission "+
+			"to assign this service account.",
 		denial.msg)
 	assert.NotContains(t, denial.msg, delegatorID, "the 403 body must not name the delegator's ID")
 	assert.NotContains(t, denial.msg, agentID, "the 403 body must not name the agent's ID")
@@ -215,4 +217,106 @@ func TestDelegationCeiling_StoreErrorSetsCeilingErrorCause(t *testing.T) {
 	require.False(t, decision.Allowed, "a ceiling store fault must fail closed")
 	assert.Equal(t, DenyCauseCeilingError, decision.DenyCause,
 		"a genuine store fault must classify as ceiling_error, not orphaned or lacks-permission")
+}
+
+// TestSAAssignForbiddenMessage_AllCauses is the table test finding 4 asked
+// for: it drives saAssignForbiddenMessage (the helper evaluateSAAssignment's
+// Layer 1 calls) directly with every DenyCause value, including one no
+// constant names, rather than relying on the switch's default case being
+// exercised only implicitly through the ceiling_error store-fault test above.
+func TestSAAssignForbiddenMessage_AllCauses(t *testing.T) {
+	tests := []struct {
+		name  string
+		cause DenyCause
+		want  string
+	}{
+		{
+			name:  "no cause falls through to the generic message",
+			cause: "",
+			want:  scaGenericDenyMsg,
+		},
+		{
+			name:  "ceiling_error falls through to the generic message",
+			cause: DenyCauseCeilingError,
+			want:  scaGenericDenyMsg,
+		},
+		{
+			name:  "ceiling_orphaned gets the chain-aware diagnosis",
+			cause: DenyCauseCeilingOrphaned,
+			want: "This agent cannot assign service accounts: a principal in its delegation chain " +
+				"(the user or agent that created it, or one of their creators) does not exist. " +
+				"Ask an admin to recreate the agent under a current user.",
+		},
+		{
+			name:  "ceiling_delegator_lacks_permission gets the chain-aware diagnosis",
+			cause: DenyCauseCeilingDelegatorLacksPermission,
+			want: "This agent cannot assign service accounts: a principal in its delegation chain " +
+				"(the user or agent that created it, or one of their creators) does not hold permission " +
+				"to assign this service account.",
+		},
+		{
+			name:  "an unrecognised cause falls through to the generic message",
+			cause: DenyCause("some_future_cause_nobody_wired_a_message_for"),
+			want:  scaGenericDenyMsg,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, saAssignForbiddenMessage(tt.cause))
+		})
+	}
+}
+
+// TestEvaluateSAAssignment_CeilingOrphanedGrandparent covers finding 5 and
+// pins finding 1's fix: an agent created by an agent, where the FAILING link
+// is the grandparent (a user), not the agent's immediate creator.
+//
+// Chain: user U (never created — orphaned) -> agent A (holds
+// project:agent:create) -> agent B. B requests the SA assignment. Layer 0
+// allows via B's own agent-jwt-scope synthetic binding; Step 10 walks the
+// chain: B's delegator A still holds the permission, so the walk recurses
+// into A's own chain, finds A's delegator U does not resolve, and denies the
+// mint with DenyCauseCeilingOrphaned — propagated back through B's result
+// (authz_delegation_ceiling.go:368, the cause pointer threaded through the
+// recursive call). Before finding 1's fix, the message would have wrongly
+// named B's immediate creator (A, which exists) as the missing principal.
+func TestEvaluateSAAssignment_CeilingOrphanedGrandparent(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("sca-grandparent-proj")
+	goneUserID := tid("sca-grandparent-gone-user")
+	agentAID := tid("sca-grandparent-agent-a")
+	agentBID := tid("sca-grandparent-agent-b")
+
+	createDCProject(t, s, projectID, "sca-grandparent-project")
+	// goneUserID is deliberately never created: GetUser returns ErrNotFound,
+	// the orphaned-delegation branch, when A's chain is walked.
+	createDCAgent(t, s, agentAID, projectID, goneUserID, AgentRoleFull)
+	createDCAgent(t, s, agentBID, projectID, agentAID, AgentRoleFull)
+	sa := scaCreateSA(t, s, projectID)
+
+	createDCEdge(t, s, store.DelegationPrincipalUser, goneUserID,
+		store.DelegationPrincipalAgent, agentAID,
+		store.RoleScopeProject, projectID, string(AgentRoleFull))
+	createDCEdge(t, s, store.DelegationPrincipalAgent, agentAID,
+		store.DelegationPrincipalAgent, agentBID,
+		store.RoleScopeProject, projectID, string(AgentRoleFull))
+
+	agentB := dcAgentIdentity(agentBID, projectID, AgentRoleFull)
+	agentBCtx := contextWithIdentity(ctx, agentB)
+
+	denial := srv.evaluateSAAssignment(agentBCtx, nil, sa, SurfaceProjectDefault)
+	require.NotNil(t, denial, "an orphaned grandparent must deny the assignment")
+	assert.Equal(t, saAssignDenyForbiddenStructured, denial.kind)
+	assert.Equal(t,
+		"This agent cannot assign service accounts: a principal in its delegation chain "+
+			"(the user or agent that created it, or one of their creators) does not exist. "+
+			"Ask an admin to recreate the agent under a current user.",
+		denial.msg,
+		"the message must not claim B's existing immediate creator (A) is the missing principal")
+	assert.NotContains(t, denial.msg, goneUserID, "the 403 body must not name the missing principal's ID")
+	assert.NotContains(t, denial.msg, agentAID, "the 403 body must not name the intermediate agent's ID")
+	assert.NotContains(t, denial.msg, agentBID, "the 403 body must not name the requesting agent's ID")
 }

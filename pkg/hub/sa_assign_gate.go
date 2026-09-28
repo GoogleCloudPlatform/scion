@@ -312,6 +312,45 @@ func (d *saAssignDenial) write(w http.ResponseWriter) {
 	}
 }
 
+// saAssignGenericForbiddenMsg is the response for every SA-assign policy
+// denial that has no more specific diagnosis — ordinary policy denials, a
+// ceiling store fault (DenyCauseCeilingError), and the no-authz-service
+// guard. It must stay byte-identical: it predates DenyCause and callers may
+// already match on it.
+const saAssignGenericForbiddenMsg = "You don't have permission to assign this GCP service account"
+
+// saAssignForbiddenMessage maps a Decision.DenyCause to the 403 body Layer 1
+// of evaluateSAAssignment returns. Pulled out as its own function so a table
+// test can drive every DenyCause value, including one no constant names,
+// without going through the full evaluateSAAssignment call chain.
+//
+// The two ceiling messages name "a principal in its delegation chain" rather
+// than "the principal that created it": cause is set (and propagated) at
+// every depth of walkDelegationChain's recursion (authz_delegation_ceiling.go),
+// so the failing link can be the agent's own creator or any creator further
+// up the chain. Saying "the principal that created it" would be false
+// whenever the failure is a grandparent or higher — see the DenyCause doc
+// comment on authz.go, which already says "directly or transitively".
+//
+// DenyCauseCeilingError and any unrecognised cause (including "", the zero
+// value) fall through to the generic message: a store fault is
+// transient/internal, not a fact about the caller worth surfacing, and an
+// unknown cause is safer treated as no diagnosis than guessed at.
+func saAssignForbiddenMessage(cause DenyCause) string {
+	switch cause {
+	case DenyCauseCeilingOrphaned:
+		return "This agent cannot assign service accounts: a principal in its delegation chain " +
+			"(the user or agent that created it, or one of their creators) does not exist. " +
+			"Ask an admin to recreate the agent under a current user."
+	case DenyCauseCeilingDelegatorLacksPermission:
+		return "This agent cannot assign service accounts: a principal in its delegation chain " +
+			"(the user or agent that created it, or one of their creators) does not hold permission " +
+			"to assign this service account."
+	default:
+		return saAssignGenericForbiddenMsg
+	}
+}
+
 // evaluateSAAssignment is the transport-independent body of
 // authorizeSAAssignment: every check, log line and audit record, with the
 // caller taken from the identity on ctx. It returns nil when the assignment
@@ -355,25 +394,12 @@ func (s *Server) evaluateSAAssignment(ctx context.Context, r *http.Request, sa *
 	if s.authzService == nil {
 		logAuthzDenial(r, identity, resource, ActionAssign, "no authz service")
 		return &saAssignDenial{kind: saAssignDenyForbiddenStructured,
-			msg: "You don't have permission to assign this GCP service account", resourceType: resource.Type}
+			msg: saAssignGenericForbiddenMsg, resourceType: resource.Type}
 	}
 	if decision := s.authzService.CheckAccess(ctx, identity, resource, ActionAssign); !decision.Allowed {
 		logAuthzDenial(r, identity, resource, ActionAssign, decision.Reason)
-		// Ordinary policy denials keep the generic message unchanged. Only
-		// the two delegation-ceiling causes below get a more specific one —
-		// classified structurally via decision.DenyCause, never by matching
-		// substrings of decision.Reason. A ceiling store error (or any other
-		// cause, including none) falls through to the generic message: it is
-		// transient/internal, not a fact about the caller worth surfacing.
-		msg := "You don't have permission to assign this GCP service account"
-		switch decision.DenyCause {
-		case DenyCauseCeilingOrphaned:
-			msg = "This agent cannot assign service accounts: the principal that created it no longer exists. Ask an admin to recreate the agent under a current user."
-		case DenyCauseCeilingDelegatorLacksPermission:
-			msg = "This agent cannot assign service accounts: the principal that created it no longer holds permission to assign this service account."
-		}
 		return &saAssignDenial{kind: saAssignDenyForbiddenStructured,
-			msg: msg, resourceType: resource.Type}
+			msg: saAssignForbiddenMessage(decision.DenyCause), resourceType: resource.Type}
 	}
 
 	// Layer 2: GCP actAs.

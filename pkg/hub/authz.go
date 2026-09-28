@@ -204,9 +204,11 @@ type Decision struct {
 	// DenyCause classifies certain deny decisions structurally, so callers
 	// can react to *why* access was denied without parsing or matching
 	// substrings of Reason (which is prose, for logs and explain, and is
-	// free to change wording). Currently set only by Step 10 (the agent
-	// delegation ceiling) when it flips an allowed decision to a deny.
-	// Empty for every other denial, including ordinary policy denials.
+	// free to change wording). Set by Step 10 (the agent delegation
+	// ceiling) for a SUBSET of ceiling denials only — see the DenyCause
+	// constants for which ones. Other ceiling denials (e.g. max depth, no
+	// edge, duplicate active edges), and all non-ceiling denials, leave it
+	// at its zero value.
 	DenyCause DenyCause `json:"denyCause,omitempty"`
 
 	// Provenance contains the full decision provenance when Explain=true.
