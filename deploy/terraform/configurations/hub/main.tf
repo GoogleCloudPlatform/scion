@@ -61,10 +61,11 @@ locals {
 module "cloudsql_database" {
   source = "../../modules/cloudsql-database"
 
-  project_id    = var.project_id
-  instance_name = module.shared_lookup.shared.sql.instance_name
-  hub_name      = var.hub_name
-  hub_sa_email  = module.hub_identity.hub_sa_email
+  project_id          = var.project_id
+  instance_name       = module.shared_lookup.shared.sql.instance_name
+  hub_name            = var.hub_name
+  hub_sa_email        = module.hub_identity.hub_sa_email
+  sql_connection_name = module.shared_lookup.shared.sql.connection_name
 }
 
 module "hub_identity" {
@@ -117,19 +118,24 @@ module "hub_cloudrun" {
   # it broke the settings secret on every unrelated change to these three
   # modules (vm-deploy, real apply: an IAM-only change came out as an
   # unrelated destroy/replace of the settings secret version). db_name/
-  # db_user and hub_iam_grants above already create real dependency edges on
-  # their own (they're resource attributes, not just variables) — bundled
-  # here too so all of B2's ordering requirements are visible in one place,
-  # not split between incidental variable wiring and this map. The one
-  # requirement that had NO other edge at all was the nfs-init Job: nfs_export
-  # (above) is a plain path string, known before the Job ever runs, so
-  # nfs_init_job_id (a real attribute of the Job resource) is what actually
-  # closes that gap. It is the Job's .id ("<namespace>/<name>"), not its
-  # .metadata[0].uid (F-113): the provider sets .id from the create response
-  # before wait_for_completion runs, but leaves uid null in state until the
-  # next refresh, so keying on uid made this terraform_data show a spurious
-  # 0/1/0 on every fresh hub's second plan even though the graph edge (and
-  # so the ordering) was never actually broken.
+  # db_user (referenced directly in this map) and hub_iam_grants (passed as
+  # a module argument above) already create real dependency edges on their
+  # own (they're resource attributes, not just variables) — bundled here too
+  # so all of B2's ordering requirements are visible in one place, not split
+  # between incidental variable wiring and this map. Note db_name/db_user are
+  # no longer separately passed to hub-cloudrun as module arguments (Alt-F,
+  # design §6 OQ-11, removed them — see hub-cloudrun's variables.tf); they
+  # still appear here purely for this ordering edge, sourced straight from
+  # cloudsql-database's outputs. The one requirement that had NO other edge
+  # at all was the nfs-init Job: nfs_export (above) is a plain path string,
+  # known before the Job ever runs, so nfs_init_job_id (a real attribute of
+  # the Job resource) is what actually closes that gap. It is the Job's .id
+  # ("<namespace>/<name>"), not its .metadata[0].uid (F-113): the provider
+  # sets .id from the create response before wait_for_completion runs, but
+  # leaves uid null in state until the next refresh, so keying on uid made
+  # this terraform_data show a spurious 0/1/0 on every fresh hub's second
+  # plan even though the graph edge (and so the ordering) was never actually
+  # broken.
   boot_prerequisites = {
     nfs_init_job   = module.agent_runtime_k8s.nfs_init_job_id
     db_name        = module.cloudsql_database.db_name
@@ -140,10 +146,14 @@ module "hub_cloudrun" {
   network_name = module.shared_lookup.shared.network.name
   subnet_name  = module.shared_lookup.shared.network.subnet_name
 
+  # sql_connection_name is still needed by hub-cloudrun for the cloudsql
+  # volume's cloud_sql_instance.instances (F-104) even though it's no longer
+  # rendered into settings.yaml. db_name/db_user/db_password are gone (Alt-F,
+  # design §6 OQ-11): the DSN is built entirely inside cloudsql-database now
+  # and reaches hub-cloudrun only as the two secret coordinates below.
   sql_connection_name = module.shared_lookup.shared.sql.connection_name
-  db_name             = module.cloudsql_database.db_name
-  db_user             = module.cloudsql_database.db_user
-  db_password         = module.cloudsql_database.db_password
+  dsn_secret_id       = module.cloudsql_database.dsn_secret_id
+  dsn_secret_version  = module.cloudsql_database.dsn_secret_version
 
   nfs_server = module.shared_lookup.shared.nfs.server
   nfs_export = module.agent_runtime_k8s.nfs_export

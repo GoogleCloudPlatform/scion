@@ -81,18 +81,19 @@ resource "google_secret_manager_secret_iam_member" "hub_reads_session_secret" {
   member    = "serviceAccount:${var.hub_sa_email}"
 }
 
-# --- Database password: passed in as a sensitive module input (F-112), not
-# read back via a data source. cloudsql-database already outputs db_password
-# (random_password.db.result, sensitive) — the value the SQL user was
-# actually created with — so var.db_password embeds it directly into
-# settings.yaml's DSN below with no Secret Manager read at all. This used to
-# be data.google_secret_manager_secret_version.db_password, keyed on
-# var.db_password_secret_id: a data source's read runs at plan time, before
-# cloudsql-database has necessarily created the secret version it would
-# read, and nothing defers that read (F-106, design §9). A brand-new hub's
-# very first plan 404'd on a secret that doesn't exist yet; h1 only ever
-# worked because its secret already existed. The Alt-F secret-env-var end
-# state is deferred to phase 3. ---
+# --- Database DSN (Alt-F, design §6 OQ-11): the full DSN is built and held
+# in cloudsql-database's <hub>-db-dsn secret (the module that owns the DB
+# credential lifecycle) — see var.dsn_secret_id/var.dsn_secret_version and
+# the SCION_SERVER_DATABASE_URL secret env var on google_cloud_run_v2_service
+# .hub below. This module never sees the plaintext DSN or password at all
+# any more, only the two secret coordinates needed to point Cloud Run at
+# cloudsql-database's secret version. (History: F-112 had this module take
+# db_password as a sensitive module input and embed it directly into the
+# settings secret's rendered DSN, to avoid a plan-time data-source read of a
+# not-yet-created secret, F-106. Alt-F removes the embedding altogether
+# rather than fixing that read, so var.db_password/db_user/db_name are gone
+# too — see cloudsql-database's dsn_secret_id/dsn_secret_version outputs
+# instead.) ---
 
 # --- Rendered settings.yaml ---
 
@@ -114,10 +115,6 @@ resource "google_secret_manager_secret_version" "settings" {
     public_url           = local.public_url
     iap_audience         = local.iap_audience
     admin_emails         = var.admin_emails
-    db_user              = var.db_user
-    db_password          = var.db_password
-    db_name              = var.db_name
-    sql_connection_name  = var.sql_connection_name
     bucket               = google_storage_bucket.artifacts.name
     iap_oauth_client_id  = var.iap_oauth_client_id
     transport_sa_email   = var.transport_sa_email
@@ -162,6 +159,23 @@ resource "google_secret_manager_secret_version" "settings" {
 
 resource "google_secret_manager_secret_iam_member" "hub_reads_settings" {
   secret_id = google_secret_manager_secret.settings.secret_id
+  project   = var.project_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${var.hub_sa_email}"
+}
+
+# --- DSN accessor (Alt-F, design §6 OQ-11) ---
+#
+# The DSN secret itself lives in cloudsql-database (the module that owns the
+# DB credential lifecycle); the grant lives here, next to the other three
+# per-secret accessors this container reads directly at boot, which keeps
+# the time_sleep.iam_propagation wiring below in one place (all of it in
+# this module) rather than threading another grant .id up through the hub
+# root and back down. var.dsn_secret_id is a real cloudsql-database output
+# attribute (not a bare string), so this also creates the ordering edge that
+# ensures the secret exists before this grant references it.
+resource "google_secret_manager_secret_iam_member" "hub_reads_dsn" {
+  secret_id = var.dsn_secret_id
   project   = var.project_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${var.hub_sa_email}"
@@ -284,8 +298,11 @@ resource "google_secret_manager_secret_version" "oidc_signing_key" {
 # affected. No data source may depend on terraform_data.boot_prerequisites,
 # or this regresses right back to the same bug for whatever data source
 # does. (That specific data source is gone now — F-112 replaced it with
-# var.db_password, a sensitive module input with no read of its own — but
-# the rule stands for any data source this module gains in the future.)
+# var.db_password, a sensitive module input with no read of its own; Alt-F
+# later removed var.db_password itself too, since the DSN it fed is no
+# longer embedded in settings.yaml at all — see var.dsn_secret_id/
+# var.dsn_secret_version instead. Either way, the rule stands for any data
+# source this module gains in the future.)
 resource "terraform_data" "boot_prerequisites" {
   input = var.boot_prerequisites
 }
@@ -296,24 +313,33 @@ resource "time_sleep" "iam_propagation" {
   triggers = {
     condition = var.hub_iam_condition_expression
     hub_sa    = var.hub_sa_email
+    # Alt-F (design §6 OQ-11): on an EXISTING hub (h1/h2), condition/hub_sa
+    # above are unchanged by this rollout, so without this trigger the sleep
+    # would not re-arm and the new hub_reads_dsn grant would not be waited
+    # for before the revision carrying SCION_SERVER_DATABASE_URL rolls out —
+    # a first-boot 403 on the DSN secret, same failure mode §3.5 exists to
+    # prevent. .id going from nonexistent to a real value on the apply that
+    # introduces this grant is itself a triggers change, which is exactly
+    # what forces this time_sleep to replace (destroy + re-create, sleeping
+    # again) instead of being silently skipped.
+    dsn_accessor = google_secret_manager_secret_iam_member.hub_reads_dsn.id
   }
 
   # §3.5 says ALL hub-SA IAM members, not just hub-identity's project-level
   # ones: Cloud Run checks secret access at revision *create* time, so this
   # module's own per-secret accessor grants (settings/kubeconfig/session
-  # secret — all three read directly by the running container) matter just
-  # as much as the project-level grants passed in from hub-identity.
+  # secret/DSN — all four read directly by the running container) matter
+  # just as much as the project-level grants passed in from hub-identity.
   # cloudsql-database's db-password accessor is deliberately NOT included:
-  # the DSN is embedded directly into the rendered settings secret by
-  # Terraform's own identity (var.db_password, a sensitive module input as
-  # of F-112 — see the comment above google_secret_manager_secret_version.
-  # settings), so the running container never reads db-password itself —
-  # nothing to wait on there.
+  # nothing reads db-password directly at runtime (Alt-F's DSN secret is a
+  # separate, dedicated secret — see cloudsql-database/main.tf's
+  # hub_reads_db_password comment) — nothing to wait on there.
   depends_on = [
     var.hub_iam_grants,
     google_secret_manager_secret_iam_member.hub_reads_settings,
     google_secret_manager_secret_iam_member.hub_reads_kubeconfig,
     google_secret_manager_secret_iam_member.hub_reads_session_secret,
+    google_secret_manager_secret_iam_member.hub_reads_dsn,
   ]
 }
 
@@ -424,6 +450,27 @@ resource "google_cloud_run_v2_service" "hub" {
           }
         }
       }
+      env {
+        # Alt-F (design §6 OQ-11): the full DSN, sourced from cloudsql-
+        # database's dedicated <hub>-db-dsn secret — settings.yaml's
+        # server.database no longer has a url key at all (see
+        # settings.yaml.tftpl). Verified against the real hub loader
+        # (pkg/config/hub_config.go's loadGlobalConfigFromSettings ->
+        # applyEnvOverrides, the path cmd/server_foreground.go's hosted
+        # startup actually uses): this env var fills cfg.Database.URL when
+        # the file has no server.database.url. Pinned to the version NUMBER
+        # cloudsql-database created this apply (not "latest", same reasoning
+        # as the settings/kubeconfig secret volume version pins below) — a
+        # revision's connection string must never silently change without a
+        # new revision.
+        name = "SCION_SERVER_DATABASE_URL"
+        value_source {
+          secret_key_ref {
+            secret  = var.dsn_secret_id
+            version = var.dsn_secret_version
+          }
+        }
+      }
 
       # mount_path is the parent directory; the secret's item path below
       # supplies the filename, so the resulting file lands at exactly
@@ -528,6 +575,13 @@ resource "google_cloud_run_v2_service" "hub" {
   # the nfs-init Job finishing and cloudsql-database/hub-identity being
   # ready — is terraform_data.boot_prerequisites above, not a module-level
   # depends_on on this module's caller (F-106; see that resource's comment).
+  # The DSN secret VERSION doesn't need a matching depends_on entry here the
+  # way settings/kubeconfig's versions do: it lives in a different module
+  # (cloudsql-database), and its version number reaches this resource only
+  # via var.dsn_secret_version, a real cross-module output attribute used
+  # directly in the SCION_SERVER_DATABASE_URL env block above — that
+  # attribute reference alone already creates the graph edge (same reasoning
+  # as boot_prerequisites' db_name/db_user entries).
   depends_on = [
     google_secret_manager_secret_version.settings,
     google_secret_manager_secret_version.kubeconfig,
@@ -536,6 +590,7 @@ resource "google_cloud_run_v2_service" "hub" {
     google_secret_manager_secret_iam_member.hub_reads_settings,
     google_secret_manager_secret_iam_member.hub_reads_kubeconfig,
     google_secret_manager_secret_iam_member.hub_reads_session_secret,
+    google_secret_manager_secret_iam_member.hub_reads_dsn,
     time_sleep.iam_propagation,
     terraform_data.boot_prerequisites,
   ]

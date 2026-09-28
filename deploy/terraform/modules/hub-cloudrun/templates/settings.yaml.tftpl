@@ -26,8 +26,15 @@ server:
     # actually worked.
     write_timeout: ${hub_write_timeout}
   database:
+    # url intentionally omitted (Alt-F, design §6 OQ-11): the DSN is supplied
+    # at Cloud Run boot as the SCION_SERVER_DATABASE_URL secret env var
+    # (hub-cloudrun's google_cloud_run_v2_service.hub), not embedded here.
+    # This secret now holds no credential, so keeping old versions (OQ-11
+    # (a)) is harmless and traffic-shift rollback across a settings change
+    # works. See pkg/config/hub_config.go's loadGlobalConfigFromSettings ->
+    # applyEnvOverrides for the env override (verified: it fills
+    # database.url when the file has none).
     driver: postgres
-    url: postgres://${db_user}:${urlencode(db_password)}@/${db_name}?host=/cloudsql/${sql_connection_name}
     max_open_conns: 10
     max_idle_conns: 5
     conn_max_idle_time: 5m

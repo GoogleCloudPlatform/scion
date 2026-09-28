@@ -36,17 +36,41 @@ resource "google_secret_manager_secret_version" "db_password" {
 }
 
 
-# Unused by the running hub today (the DSN is embedded directly into the
-# settings secret by Terraform's own identity, via the data source in
-# hub-cloudrun) — kept anyway, scoped to this hub's own secret, because
-# phase 3's Alt-F end state (DSN via a secret env var instead of an
-# embedded plaintext DSN) needs the hub SA to read this secret at runtime.
-# When that lands, this grant must also join hub-cloudrun's
-# time_sleep.iam_propagation depends_on list (design §3.5) — it doesn't
-# today because nothing reads it at boot yet.
+# Redundant now that Alt-F has landed (design §6 OQ-11, ptone 09-28 00:03):
+# the anticipated end state here turned out to be a dedicated <hub>-db-dsn
+# secret holding the full DSN (below), not the hub SA reading this
+# password-only secret directly — nothing reads db-password at runtime.
+# Kept anyway per the brief (removing it is a delete, out of scope) — this
+# grant is scoped to this hub's own secret either way, so it's harmless, not
+# a live IAM-scope violation.
 resource "google_secret_manager_secret_iam_member" "hub_reads_db_password" {
   secret_id = google_secret_manager_secret.db_password.secret_id
   project   = var.project_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${var.hub_sa_email}"
+}
+
+# --- DSN secret (Alt-F, design §6 OQ-11) ---
+#
+# The full Postgres DSN, built here (the module that owns the DB credential
+# lifecycle) rather than embedded into hub-cloudrun's settings secret. Same
+# format as the old settings.yaml.tftpl line: postgres://<user>:<urlencoded
+# password>@/<db>?host=/cloudsql/<connection name>. Exposed to the Cloud Run
+# hub container as a pinned secret env var (SCION_SERVER_DATABASE_URL,
+# hub-cloudrun) instead of a plaintext line in a rendered settings file —
+# after this, the settings secret holds no credential, so its old versions
+# (kept, OQ-11 (a)) are harmless to retain, and traffic-shift rollback across
+# a settings change works.
+resource "google_secret_manager_secret" "db_dsn" {
+  project   = var.project_id
+  secret_id = "${var.hub_name}-db-dsn"
+
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret_version" "db_dsn" {
+  secret      = google_secret_manager_secret.db_dsn.id
+  secret_data = "postgres://${google_sql_user.this.name}:${urlencode(random_password.db.result)}@/${google_sql_database.this.name}?host=/cloudsql/${var.sql_connection_name}"
 }

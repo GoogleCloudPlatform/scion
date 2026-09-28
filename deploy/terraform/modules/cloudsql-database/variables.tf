@@ -28,3 +28,8 @@ variable "hub_sa_email" {
   description = "Hub service account email, granted secretAccessor on this hub's db-password secret only (design §3.4 IAM scope rule — one of the 4 per-secret grants replacing the removed project-wide secretmanager.admin)."
   type        = string
 }
+
+variable "sql_connection_name" {
+  description = "Cloud SQL connection name (shared.sql.connection_name from shared-lookup), used to build the DSN's ?host=/cloudsql/<connection name> suffix (Alt-F, design §6 OQ-11)."
+  type        = string
+}

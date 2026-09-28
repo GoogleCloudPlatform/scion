@@ -120,3 +120,27 @@ run "fresh_h2_plans_clean" {
     error_message = "iap_audience should be deterministically computed from project_number/region/hub_name at plan time — if this is unknown or wrong, something upstream of hub-cloudrun stopped being plan-time-known."
   }
 }
+
+# Alt-F (design §6 OQ-11, briefs/tf-dev-dsn-secret.md) asked this test to
+# also assert the rendered settings contain no "postgres://" and the service
+# has the SCION_SERVER_DATABASE_URL secret env, "if mock_provider allows".
+# Tried directly: `module.hub_cloudrun.google_secret_manager_secret_version
+# .settings.secret_data` and `module.hub_cloudrun.google_cloud_run_v2_service
+# .hub.template[0].containers[0].env` from an assert block in this run —
+# both fail with "Unsupported attribute": a `run` block's `module.<name>`
+# reference only exposes that module's declared *outputs* (service_uri,
+# iap_audience, bucket_name — none of which carry this data), never its
+# internal resources' attributes, even under `command = plan`. It doesn't
+# allow it. The alternative, adding new hub-cloudrun/hub-root outputs
+# purely so this test file can read them, is declined as a real production
+# surface change beyond this brief's scope (no other refactors) — for
+# comparatively little gain, since the two facts this would assert are
+# already directly visible by reading the diff: settings.yaml.tftpl's
+# server.database block has no `url:` key any more (see that file), and
+# google_cloud_run_v2_service.hub declares the SCION_SERVER_DATABASE_URL
+# env block explicitly (hub-cloudrun/main.tf). The actual end-to-end proof
+# that this matters — the hub's real config loader takes database.url from
+# this env var when the file has none — is Step 0's Go-level verification
+# (briefs/tf-dev-dsn-secret.md, phase1-validation.md "Round: DSN secret
+# (Alt-F)"), which mock Terraform providers can't reach anyway (see this
+# file's header on what mock_provider can't reproduce).
