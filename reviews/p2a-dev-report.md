@@ -1,8 +1,8 @@
 # Phase 2a dev report: migration gate + catch-up that works
 
 Branch: `scion/agent-reincarnate-2` (from `upstream-main` @ `ec90cb335`)
-Head SHA: `c7b570e83cd81ed80b57905b5458bd9f5a7e6a34`
-Fork PR: <FILLED IN AFTER `gh pr create`, see bottom of this report>
+Head SHA: `3dd53e5` (report commit; gate/F4 code at `c7b570e83cd81ed80b57905b5458bd9f5a7e6a34`)
+Fork PR: https://github.com/ptone/scion/pull/2086 (references ptone/scion#2082)
 Developer: ar-dev-2
 
 ## 1. F4 root cause
@@ -262,6 +262,7 @@ All new tests use the real SQLite store (`testServer`/`newBrokerTestStore`/
 
 ## 6. Head SHA and fork PR
 
-- Head SHA: `c7b570e83cd81ed80b57905b5458bd9f5a7e6a34`
-- Fork PR: opened against `ptone/scion` `main`, referencing `ptone/scion#2082` — URL
-  filled in below after `gh pr create` runs.
+- Gate/F4 code head SHA: `c7b570e83cd81ed80b57905b5458bd9f5a7e6a34`; this report's own
+  commit is `3dd53e5`.
+- Fork PR: https://github.com/ptone/scion/pull/2086, opened against `ptone/scion` `main`,
+  referencing `ptone/scion#2082`.
