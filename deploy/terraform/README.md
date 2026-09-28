@@ -398,8 +398,10 @@ existing pooled connections survive.
 
 **A clean deployment's second `plan` exits 0 — "No changes."** on every
 root (`shared-infra` and each hub). That's the acceptance bar this module
-set is built to, and it's what CI's `terraform plan -detailed-exitcode`
-step checks.
+set is built to. CI cannot check this directly — it never plans against a
+real project — so this is a live-deployment check the operator runs after
+every apply, the same way `terraform test`'s mocked plans are what CI
+checks instead.
 
 A **refresh-only note with no planned action** is benign and does not
 violate that bar — it means Terraform detected drift between state and the
