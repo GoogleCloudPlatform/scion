@@ -395,3 +395,222 @@ func TestBrokerHeartbeat_ProjectEntryGroveIdFieldIgnored(t *testing.T) {
 	assert.Equal(t, before.Phase, after.Phase, "a project entry keyed by the removed groveId name must not change agent phase")
 	assert.Equal(t, before.Activity, after.Activity, "a project entry keyed by the removed groveId name must not change agent activity")
 }
+
+// ============================================================================
+// A plain hub member who registers and auto-provides a broker must be able
+// to read the broker record and its provider list back immediately, through
+// the same user-authenticated path `scion runtime-broker status` uses.
+// ============================================================================
+func TestBrokerAuthz_AutoProvideRegistration_StatusSeesProviderImmediately(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// A plain hub member — not a super-admin, not the broker's HMAC self —
+	// standing in for the operator who ran `scion runtime-broker register
+	// --auto-provide` and then `scion runtime-broker status`.
+	operator := &store.User{
+		ID:          tid("user-status-operator"),
+		Email:       "status-operator@test.com",
+		DisplayName: "Operator",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, operator))
+	ensureHubMembership(ctx, s, operator.ID)
+
+	// Phase 1: POST /api/v1/brokers — create the broker registration with
+	// auto-provide enabled, exactly as `scion runtime-broker register
+	// --auto-provide` does.
+	createRec := doRequestAsUser(t, srv, operator, http.MethodPost, "/api/v1/brokers",
+		CreateBrokerRegistrationRequest{
+			Name:        "status-broker",
+			AutoProvide: true,
+		})
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+	var createResp CreateBrokerRegistrationResponse
+	require.NoError(t, json.NewDecoder(createRec.Body).Decode(&createResp))
+	require.NotEmpty(t, createResp.BrokerID)
+	require.NotEmpty(t, createResp.JoinToken)
+
+	// Phase 2: POST /api/v1/brokers/join — unauthenticated, the join token is
+	// the credential.
+	joinRec := doRequestNoAuth(t, srv, http.MethodPost, "/api/v1/brokers/join",
+		BrokerJoinRequest{
+			BrokerID:  createResp.BrokerID,
+			JoinToken: createResp.JoinToken,
+			Hostname:  "status-broker",
+			Version:   "0.1.0",
+		})
+	require.Equal(t, http.StatusOK, joinRec.Code, joinRec.Body.String())
+
+	// Link the broker to a project, mirroring the CLI's "If project is
+	// linked, offer to add this broker as a provider" step that prints
+	// "Broker added as provider to project 'X'".
+	registerRec := doRequestAsUser(t, srv, operator, http.MethodPost, "/api/v1/projects/register",
+		RegisterProjectRequest{
+			Name:     "Global",
+			BrokerID: createResp.BrokerID,
+		})
+	require.Equal(t, http.StatusOK, registerRec.Code, registerRec.Body.String())
+	var registerResp RegisterProjectResponse
+	require.NoError(t, json.NewDecoder(registerRec.Body).Decode(&registerResp))
+	require.NotNil(t, registerResp.Project)
+
+	// Read path: the same operator immediately runs `scion runtime-broker
+	// status`, which fetches the broker record and its provider list as a
+	// user (never as the broker's own HMAC identity).
+	getRec := doRequestAsUser(t, srv, operator, http.MethodGet,
+		"/api/v1/runtime-brokers/"+createResp.BrokerID, nil)
+	assert.Equal(t, http.StatusOK, getRec.Code,
+		"the broker's own registering user must be able to read it back; got: %s", getRec.Body.String())
+
+	projectsRec := doRequestAsUser(t, srv, operator, http.MethodGet,
+		"/api/v1/runtime-brokers/"+createResp.BrokerID+"/projects", nil)
+	require.Equal(t, http.StatusOK, projectsRec.Code,
+		"the broker's own registering user must be able to list its providers; got: %s", projectsRec.Body.String())
+
+	var projectsResp ListBrokerProjectsResponse
+	require.NoError(t, json.NewDecoder(projectsRec.Body).Decode(&projectsResp))
+	require.Len(t, projectsResp.Projects, 1,
+		"the just-linked project must show up immediately, not '(none)'")
+	assert.Equal(t, registerResp.Project.ID, projectsResp.Projects[0].ProjectID)
+}
+
+// autoProvideBrokerWithProject registers an auto-provide broker as owner and
+// links it to a new, owner-created project via the two-phase register flow
+// (mirroring the CLI's `register --auto-provide` + project-link step). It
+// returns the broker ID and the created project (with its real name and git
+// remote, for cross-project-disclosure checks).
+func autoProvideBrokerWithProject(t *testing.T, srv *Server, owner *store.User, brokerName, projectName, gitRemote string) (brokerID string, project *store.Project) {
+	t.Helper()
+
+	createRec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/brokers",
+		CreateBrokerRegistrationRequest{Name: brokerName, AutoProvide: true})
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+	var createResp CreateBrokerRegistrationResponse
+	require.NoError(t, json.NewDecoder(createRec.Body).Decode(&createResp))
+
+	joinRec := doRequestNoAuth(t, srv, http.MethodPost, "/api/v1/brokers/join",
+		BrokerJoinRequest{
+			BrokerID:  createResp.BrokerID,
+			JoinToken: createResp.JoinToken,
+			Hostname:  brokerName,
+			Version:   "0.1.0",
+		})
+	require.Equal(t, http.StatusOK, joinRec.Code, joinRec.Body.String())
+
+	registerRec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/projects/register",
+		RegisterProjectRequest{
+			Name:      projectName,
+			GitRemote: gitRemote,
+			BrokerID:  createResp.BrokerID,
+		})
+	require.Equal(t, http.StatusOK, registerRec.Code, registerRec.Body.String())
+	var registerResp RegisterProjectResponse
+	require.NoError(t, json.NewDecoder(registerRec.Body).Decode(&registerResp))
+	require.NotNil(t, registerResp.Project)
+
+	return createResp.BrokerID, registerResp.Project
+}
+
+// TestBrokerAuthz_GetBrokerProjects_HidesUnreadableProjects proves that
+// broker.read must not double as project.read for every project an
+// auto-provide broker happens to serve. A hub member with no access to
+// "SecretProj" must not learn its name, slug, or git remote through GET
+// /runtime-brokers/{id}/projects, even though they can read the broker
+// record itself. The owner, who created both the broker and the project,
+// must still see it — that immediate-visibility behavior must keep working
+// under the filter.
+func TestBrokerAuthz_GetBrokerProjects_HidesUnreadableProjects(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	owner := &store.User{
+		ID:          tid("user-provider-filter-owner"),
+		Email:       "provider-filter-owner@test.com",
+		DisplayName: "Owner",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, owner))
+	ensureHubMembership(ctx, s, owner.ID)
+
+	outsider := &store.User{
+		ID:          tid("user-provider-filter-outsider"),
+		Email:       "provider-filter-outsider@test.com",
+		DisplayName: "Outsider",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, outsider))
+	ensureHubMembership(ctx, s, outsider.ID) // hub member, but not a project member
+
+	brokerID, project := autoProvideBrokerWithProject(t, srv, owner,
+		"provider-filter-broker", "SecretProj", "https://github.com/acme/private-repo.git")
+
+	// The owner must still see their own auto-provided project immediately
+	// after registration — the filter must not regress that.
+	ownerRec := doRequestAsUser(t, srv, owner, http.MethodGet,
+		"/api/v1/runtime-brokers/"+brokerID+"/projects", nil)
+	require.Equal(t, http.StatusOK, ownerRec.Code, ownerRec.Body.String())
+	var ownerResp ListBrokerProjectsResponse
+	require.NoError(t, json.NewDecoder(ownerRec.Body).Decode(&ownerResp))
+	require.Len(t, ownerResp.Projects, 1, "the owner must still see their own project")
+	assert.Equal(t, project.ID, ownerResp.Projects[0].ProjectID)
+	assert.Equal(t, "SecretProj", ownerResp.Projects[0].ProjectName)
+
+	// A hub member with no access to the project must get a 200 (broker.read
+	// still allows reading the broker's provider list as a concept), but the
+	// project itself — including its name and git remote — must not appear.
+	outsiderRec := doRequestAsUser(t, srv, outsider, http.MethodGet,
+		"/api/v1/runtime-brokers/"+brokerID+"/projects", nil)
+	require.Equal(t, http.StatusOK, outsiderRec.Code, outsiderRec.Body.String())
+	assert.NotContains(t, outsiderRec.Body.String(), "SecretProj",
+		"an outsider must never see the project name through the broker's provider list")
+	assert.NotContains(t, outsiderRec.Body.String(), "private-repo",
+		"an outsider must never see the project's git remote through the broker's provider list")
+	var outsiderResp ListBrokerProjectsResponse
+	require.NoError(t, json.NewDecoder(outsiderRec.Body).Decode(&outsiderResp))
+	assert.Empty(t, outsiderResp.Projects, "an outsider must not see a project they cannot read")
+}
+
+// TestBrokerAuthz_GetBrokerProjects_AdminSeesAll checks that the
+// project-read filter goes through the normal authz path: a super-admin
+// sees every project a broker serves through the ordinary project.read
+// grant, including projects it never joined, the same way it would through
+// any other project listing.
+func TestBrokerAuthz_GetBrokerProjects_AdminSeesAll(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	owner := &store.User{
+		ID:          tid("user-provider-filter-admin-owner"),
+		Email:       "provider-filter-admin-owner@test.com",
+		DisplayName: "Owner",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, owner))
+	ensureHubMembership(ctx, s, owner.ID)
+
+	adminID := tid("user-provider-filter-admin")
+	createTestUserWithRole(t, s, adminID, "provider-filter-admin@test.com", "admin", store.SystemRoleSuperAdmin)
+	admin, err := s.GetUser(ctx, adminID)
+	require.NoError(t, err)
+	ensureHubMembership(ctx, s, admin.ID)
+
+	brokerID, project := autoProvideBrokerWithProject(t, srv, owner,
+		"provider-filter-admin-broker", "AdminVisibleProj", "https://github.com/acme/admin-repo.git")
+
+	adminRec := doRequestAsUser(t, srv, admin, http.MethodGet,
+		"/api/v1/runtime-brokers/"+brokerID+"/projects", nil)
+	require.Equal(t, http.StatusOK, adminRec.Code, adminRec.Body.String())
+	var adminResp ListBrokerProjectsResponse
+	require.NoError(t, json.NewDecoder(adminRec.Body).Decode(&adminResp))
+	require.Len(t, adminResp.Projects, 1, "a super-admin must keep the usual bypass and see every project")
+	assert.Equal(t, project.ID, adminResp.Projects[0].ProjectID)
+}
