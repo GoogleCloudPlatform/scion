@@ -394,6 +394,14 @@ per-resource acks before applying.
 revision is Ready, the old revision's *new* DB connections fail, while its
 existing pooled connections survive.
 
+## Editing settings.yaml.tftpl
+
+Any edit to `hub-cloudrun`'s `templates/settings.yaml.tftpl` — including a
+comment-only one — changes the rendered `secret_data` that
+`google_secret_manager_secret_version.settings` forces a replace on, which
+rolls a new Cloud Run revision. There is no comment-only, no-op edit to
+this file; plan and review before merging one.
+
 ## Second-plan expectations
 
 **A clean deployment's second `plan` exits 0 — "No changes."** on every

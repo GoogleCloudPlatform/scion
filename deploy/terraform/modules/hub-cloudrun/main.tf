@@ -197,6 +197,30 @@ resource "google_secret_manager_secret" "settings" {
 
 resource "google_secret_manager_secret_version" "settings" {
   secret = google_secret_manager_secret.settings.id
+
+  # deletion_policy = "ABANDON": old settings versions hold no credential
+  # (see the database.url comment in settings.yaml.tftpl), and a Cloud Run
+  # revision pins this secret by version number (the volume item below), so
+  # abandoning an old version on replace — leaving it in Secret Manager but
+  # dropping it from Terraform state, rather than calling :destroy on it —
+  # keeps traffic-shift rollback to an older revision working across a
+  # settings change. This is Terraform-only/client-side: changing
+  # deletion_policy alone is a no-op update (no API call — see
+  # resourceSecretManagerSecretVersionUpdate's clientSideFields in
+  # terraform-provider-google's resource_secret_manager_secret_version.go,
+  # matching this repo's v8.4.0 lock), and on delete/replace the ABANDON
+  # branch in resourceSecretManagerSecretVersionDelete returns without ever
+  # calling the `:destroy` API. Deliberately NOT applied to
+  # cloudsql-database's db_password/db_dsn secret versions: those keep the
+  # default DELETE, because an old DB password is dead (and should be
+  # destroyed) once rotation replaces it.
+  deletion_policy = "ABANDON"
+
+  # Any edit to settings.yaml.tftpl — including a comment-only one — changes
+  # this templatefile() call's rendered result, which forces a replace of
+  # this secret version (see the lifecycle block below) and rolls a new
+  # Cloud Run revision. There is no way to change the template without that
+  # effect; plan accordingly before an edit that's meant to be a no-op.
   secret_data = templatefile("${path.module}/templates/settings.yaml.tftpl", {
     project_id           = var.project_id
     region               = var.region
