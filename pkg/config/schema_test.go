@@ -663,7 +663,7 @@ server:
 hub:
   enabled: true
   endpoint: "https://hub.example.com"
-  project_id: "grove-abc-123"
+  project_id: "project-abc-123"
   local_only: false
 
 cli:

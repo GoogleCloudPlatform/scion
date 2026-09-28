@@ -47,7 +47,7 @@ func TestVersionedSettings_YAMLRoundTrip(t *testing.T) {
 		Hub: &V1HubClientConfig{
 			Enabled:   boolPtr(true),
 			Endpoint:  "https://hub.example.com",
-			ProjectID: "test-grove",
+			ProjectID: "test-project",
 		},
 		CLI: &V1CLIConfig{
 			AutoHelp:            &autoHelp,
@@ -193,7 +193,7 @@ default_template: my-template
 		"global default_template should not be overridden by project defaults")
 }
 
-func TestLoadVersionedSettings_GroveOverride(t *testing.T) {
+func TestLoadVersionedSettings_ProjectOverride(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
@@ -486,7 +486,7 @@ func TestAdaptLegacySettings_FullMapping(t *testing.T) {
 		Hub: &HubClientConfig{
 			Enabled:   &enabled,
 			Endpoint:  "https://hub.example.com",
-			ProjectID: "test-grove",
+			ProjectID: "test-project",
 		},
 		CLI: &CLIConfig{
 			AutoHelp: &autoHelp,
@@ -513,7 +513,7 @@ func TestAdaptLegacySettings_FullMapping(t *testing.T) {
 	// Hub mapping
 	require.NotNil(t, vs.Hub)
 	assert.Equal(t, "https://hub.example.com", vs.Hub.Endpoint)
-	assert.Equal(t, "test-grove", vs.Hub.ProjectID)
+	assert.Equal(t, "test-project", vs.Hub.ProjectID)
 	assert.True(t, *vs.Hub.Enabled)
 
 	// CLI mapping
@@ -638,7 +638,7 @@ func TestConvertVersionedToLegacy(t *testing.T) {
 		Hub: &V1HubClientConfig{
 			Enabled:   boolPtr(true),
 			Endpoint:  "https://hub.example.com",
-			ProjectID: "test-grove",
+			ProjectID: "test-project",
 		},
 		CLI: &V1CLIConfig{
 			AutoHelp:            boolPtr(true),
@@ -680,7 +680,7 @@ func TestConvertVersionedToLegacy(t *testing.T) {
 	// Hub — only v1 fields should be mapped
 	require.NotNil(t, legacy.Hub)
 	assert.Equal(t, "https://hub.example.com", legacy.Hub.Endpoint)
-	assert.Equal(t, "test-grove", legacy.Hub.ProjectID)
+	assert.Equal(t, "test-project", legacy.Hub.ProjectID)
 	assert.True(t, *legacy.Hub.Enabled)
 	assert.Empty(t, legacy.Hub.Token) // Not in v1
 
@@ -1001,7 +1001,7 @@ func TestResolveEffectiveProjectPath_Global(t *testing.T) {
 }
 
 func TestResolveEffectiveProjectPath_Explicit(t *testing.T) {
-	// A plain .scion path with no grove-id → returned as-is (non-git grove)
+	// A plain .scion path with no project-id → returned as-is (non-git project)
 	result := resolveEffectiveProjectPath("/some/path/.scion")
 	assert.Equal(t, "/some/path/.scion", result)
 }
@@ -1010,7 +1010,7 @@ func TestResolveEffectiveProjectPath_GitProject(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
-	// Simulate a git grove with grove-id → should redirect to external config dir
+	// Simulate a git project with project-id → should redirect to external config dir
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
 	_ = os.MkdirAll(projectDir, 0755)
 	_ = WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
@@ -1117,7 +1117,7 @@ func TestDetectHierarchyFormat_NoFiles(t *testing.T) {
 	assert.False(t, missingSchemaVersion)
 }
 
-func TestDetectHierarchyFormat_GroveVersioned(t *testing.T) {
+func TestDetectHierarchyFormat_ProjectVersioned(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
@@ -3055,7 +3055,7 @@ func TestMigrateSettingsFile_HarnessOverrideAuthSelectedType(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	legacyContent := `
-grove_id: github.com/example/project
+project_id: github.com/example/project
 active_profile: local
 default_template: claude
 hub:
@@ -3138,7 +3138,7 @@ hub:
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(v1Content), 0644))
 
 	// Call UpdateSetting with a key that would clobber the format in the old code
-	err := UpdateSetting(projectDir, "project_id", "new-grove-id", false)
+	err := UpdateSetting(projectDir, "project_id", "new-project-id", false)
 	require.NoError(t, err)
 
 	// Read back the file and verify it's still v1 format
@@ -3151,7 +3151,7 @@ hub:
 	// Verify the field was updated
 	var vs VersionedSettings
 	require.NoError(t, yaml.Unmarshal(data, &vs))
-	assert.Equal(t, "new-grove-id", vs.Hub.ProjectID)
+	assert.Equal(t, "new-project-id", vs.Hub.ProjectID)
 
 	// Verify other fields are preserved
 	assert.Equal(t, "local", vs.ActiveProfile)
@@ -3311,7 +3311,7 @@ hub:
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(v1Content), 0644))
 
 	// Simulate what happens during hub operations: multiple sequential updates
-	require.NoError(t, UpdateSetting(projectDir, "project_id", "new-grove-id", false))
+	require.NoError(t, UpdateSetting(projectDir, "project_id", "new-project-id", false))
 	require.NoError(t, UpdateSetting(projectDir, "hub.brokerId", "broker-abc", false))
 	require.NoError(t, UpdateSetting(projectDir, "hub.brokerToken", "token-xyz", false))
 	require.NoError(t, UpdateSetting(projectDir, "hub.enabled", "false", false))
@@ -3327,7 +3327,7 @@ hub:
 	require.NoError(t, yaml.Unmarshal(data, &vs))
 
 	// Verify all updates took effect
-	assert.Equal(t, "new-grove-id", vs.Hub.ProjectID)
+	assert.Equal(t, "new-project-id", vs.Hub.ProjectID)
 	require.NotNil(t, vs.Hub.Enabled)
 	assert.False(t, *vs.Hub.Enabled)
 	assert.Equal(t, "https://hub.example.com", vs.Hub.Endpoint) // preserved
@@ -3361,7 +3361,7 @@ hub:
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(legacyContent), 0644))
 
 	// UpdateSetting should auto-migrate legacy to v1 and apply the update
-	err := UpdateSetting(projectDir, "project_id", "my-grove-id", false)
+	err := UpdateSetting(projectDir, "project_id", "my-project-id", false)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(filepath.Join(projectDir, "settings.yaml"))
@@ -3372,7 +3372,7 @@ hub:
 	assert.Equal(t, "1", version, "legacy file should be migrated to v1 after UpdateSetting")
 
 	// Verify the update was applied (struct tags now use project_id)
-	assert.Contains(t, string(data), "project_id: my-grove-id")
+	assert.Contains(t, string(data), "project_id: my-project-id")
 
 	// Verify original values were preserved
 	assert.Contains(t, string(data), "active_profile: local")
@@ -3645,7 +3645,7 @@ telemetry:
 	projectSettings := `schema_version: "1"
 telemetry:
   cloud:
-    endpoint: "https://grove-otel.example.com"
+    endpoint: "https://project-otel.example.com"
   hub:
     enabled: false
 `
@@ -3662,7 +3662,7 @@ telemetry:
 
 	// Cloud endpoint should be overridden by project
 	require.NotNil(t, vs.Telemetry.Cloud)
-	assert.Equal(t, "https://grove-otel.example.com", vs.Telemetry.Cloud.Endpoint)
+	assert.Equal(t, "https://project-otel.example.com", vs.Telemetry.Cloud.Endpoint)
 
 	// Cloud protocol should come from global
 	assert.Equal(t, "grpc", vs.Telemetry.Cloud.Protocol)
@@ -4035,7 +4035,7 @@ func TestGetVersionedSettingValue(t *testing.T) {
 			Enabled:   &enabled,
 			Linked:    &linked,
 			Endpoint:  "https://hub.example.com",
-			ProjectID: "grove-123",
+			ProjectID: "project-123",
 			LocalOnly: &localOnly,
 		},
 		Server: &V1ServerConfig{
@@ -4056,11 +4056,11 @@ func TestGetVersionedSettingValue(t *testing.T) {
 		{"default_harness_config", "claude"},
 		{"image_registry", "ghcr.io/myorg"},
 		{"cli.autohelp", "true"},
-		{"project_id", "grove-123"},
+		{"project_id", "project-123"},
 		{"hub.enabled", "false"},
 		{"hub.linked", "true"},
 		{"hub.endpoint", "https://hub.example.com"},
-		{"hub.projectId", "grove-123"},
+		{"hub.projectId", "project-123"},
 		{"hub.local_only", "true"},
 		{"hub.brokerId", "broker-1"},
 		{"hub.brokerToken", "tok-secret"},

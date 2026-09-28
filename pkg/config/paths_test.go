@@ -299,7 +299,7 @@ func TestFindProjectRoot_MarkerWithHubFallback(t *testing.T) {
 
 	// Write a valid marker file
 	marker := &ProjectMarker{
-		ProjectID:   "test-grove-id-1234",
+		ProjectID:   "test-project-id-1234",
 		ProjectName: "test-project",
 		ProjectSlug: "test-project",
 	}

@@ -260,13 +260,13 @@ func TestInitProject_GitCreatesProjectIDAndExternalDir(t *testing.T) {
 		t.Fatal("expected .scion to be a directory for git projects")
 	}
 
-	// Verify grove-id file was created
+	// Verify project-id file was created
 	projectID, err := ReadProjectID(scionDir)
 	if err != nil {
 		t.Fatalf("ReadProjectID failed: %v", err)
 	}
 	if projectID == "" {
-		t.Error("grove-id should not be empty")
+		t.Error("project-id should not be empty")
 	}
 
 	// Verify external agents directory was created

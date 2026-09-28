@@ -994,7 +994,7 @@ func TestInitMachine_PreservesSettings(t *testing.T) {
 
 func TestWriteProjectSettings_V1PlacesProjectIDUnderHub(t *testing.T) {
 	tmpDir := t.TempDir()
-	projectID := "test-grove-id-abc123"
+	projectID := "test-project-id-abc123"
 
 	err := writeProjectSettings(tmpDir, "/tmp/project", projectID, InitProjectOpts{SkipRuntimeCheck: true})
 	if err != nil {
