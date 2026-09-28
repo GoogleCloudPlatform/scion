@@ -337,14 +337,11 @@ func TestBrokerProviderSelfHeal_RegisteredNonSingleton(t *testing.T) {
 		"positive control: broker-heartbeat-timeout must be registered via RegisterRecurringSingleton")
 }
 
-// TestMarkBrokerOnline_FailedProviderUpdateExcludedFromConnectedEvent covers
-// review feedback on stampProvidersOnline: a provider whose UpdateProviderStatus
-// call fails must not be reported as online, either in the slice
-// markBrokerOnline receives back or in the PublishBrokerConnected project
-// IDs it publishes from that slice. Before this fix, stampProvidersOnline
-// returned every provider from GetBrokerProjects regardless of whether the
-// per-provider UPDATE actually succeeded, so a caller (or a realtime
-// subscriber) was told a project was online when its row was never touched.
+// TestMarkBrokerOnline_FailedProviderUpdateExcludedFromConnectedEvent asserts
+// that a provider whose UpdateProviderStatus call fails is not reported as
+// online, either in the slice markBrokerOnline receives back from
+// stampProvidersOnline or in the PublishBrokerConnected project IDs it
+// publishes from that slice.
 func TestMarkBrokerOnline_FailedProviderUpdateExcludedFromConnectedEvent(t *testing.T) {
 	ctx := context.Background()
 	srv, s := testServer(t)
@@ -413,13 +410,13 @@ func TestMarkBrokerOnline_FailedProviderUpdateExcludedFromConnectedEvent(t *test
 		"the project whose UpdateProviderStatus failed must not be reported as connected")
 }
 
-// TestBrokerProviderSelfHeal_PublishesBrokerConnectedForHealedProjects covers
-// review feedback on selfHealBrokerProviders: restoring a project-provider
-// row from offline to online must announce the same PublishBrokerConnected
-// event a fresh connect would, one call per broker with exactly the project
-// IDs actually healed on that tick -- mirroring handleBrokerDisconnect's
-// PublishBrokerDisconnected on the way down. A row that was already online
-// before the tick must not appear in the published set.
+// TestBrokerProviderSelfHeal_PublishesBrokerConnectedForHealedProjects asserts
+// that restoring a project-provider row from offline to online announces the
+// same PublishBrokerConnected event a fresh connect would, one call per
+// broker with exactly the project IDs actually healed on that tick --
+// mirroring handleBrokerDisconnect's PublishBrokerDisconnected on the way
+// down. A row that was already online before the tick must not appear in the
+// published set.
 func TestBrokerProviderSelfHeal_PublishesBrokerConnectedForHealedProjects(t *testing.T) {
 	ctx := context.Background()
 	srv, s := testServer(t)
@@ -476,10 +473,110 @@ func TestBrokerProviderSelfHeal_PublishesBrokerConnectedForHealedProjects(t *tes
 		"only the row actually healed from offline should be published, not the row already online")
 }
 
-// TestBrokerProviderSelfHeal_NoPublishWhenNothingHealed is the negative
-// counterpart: a tick that finds every row already online must not publish
-// anything, since nothing changed and an event would still fan out to every
-// realtime subscriber of the project for no reason.
+// TestBrokerProviderSelfHeal_FailedProviderUpdateExcludedFromConnectedEvent
+// asserts that a provider whose UpdateProviderStatus call fails during a
+// self-heal tick is excluded from the healed set: it must not appear in the
+// PublishBrokerConnected project IDs alongside a row that updated
+// successfully on the same broker.
+func TestBrokerProviderSelfHeal_FailedProviderUpdateExcludedFromConnectedEvent(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+
+	broker := &store.RuntimeBroker{
+		ID:     tid("broker-selfheal-partial"),
+		Name:   "Self-Heal Partial Broker",
+		Slug:   "selfheal-partial-broker",
+		Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	okProject := &store.Project{
+		ID:   tid("proj-selfheal-partial-ok"),
+		Name: "Self-Heal Partial OK Project",
+		Slug: "selfheal-partial-ok-project",
+	}
+	require.NoError(t, s.CreateProject(ctx, okProject))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  okProject.ID,
+		BrokerID:   broker.ID,
+		BrokerName: broker.Name,
+		Status:     store.BrokerStatusOffline,
+	}))
+
+	failProject := &store.Project{
+		ID:   tid("proj-selfheal-partial-fail"),
+		Name: "Self-Heal Partial Fail Project",
+		Slug: "selfheal-partial-fail-project",
+	}
+	require.NoError(t, s.CreateProject(ctx, failProject))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  failProject.ID,
+		BrokerID:   broker.ID,
+		BrokerName: broker.Name,
+		Status:     store.BrokerStatusOffline,
+	}))
+
+	updateErr := errors.New("database is locked")
+	srv.store = &failingProviderUpdateStore{Store: s, failProjectID: failProject.ID, err: updateErr}
+
+	const sessionID = "sess-selfheal-partial"
+	srv.controlChannel.mu.Lock()
+	srv.controlChannel.connections[broker.ID] = &BrokerConnection{brokerID: broker.ID, sessionID: sessionID}
+	srv.controlChannel.mu.Unlock()
+
+	spy := &brokerConnectedSpy{}
+	srv.events = spy
+
+	srv.selfHealBrokerProviders(ctx, []string{broker.ID})
+
+	// The provider whose UpdateProviderStatus call succeeded is stamped online.
+	okProvider, err := s.GetProjectProvider(ctx, okProject.ID, broker.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.BrokerStatusOnline, okProvider.Status)
+
+	// The provider whose UpdateProviderStatus call failed keeps its prior
+	// status -- its UPDATE never landed.
+	failProvider, err := s.GetProjectProvider(ctx, failProject.ID, broker.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.BrokerStatusOffline, failProvider.Status)
+
+	calls := spy.getCalls()
+	require.Len(t, calls, 1, "self-heal must publish exactly one BrokerConnected event for the broker")
+	assert.ElementsMatch(t, []string{okProject.ID}, calls[0].projectIDs,
+		"the project whose UpdateProviderStatus failed must not be reported as healed")
+}
+
+// TestBrokerProviderSelfHeal_AllProviderUpdatesFailingPublishesNothing is the
+// all-fail counterpart: when every provider update on a broker fails during a
+// self-heal tick, nothing is healed, so nothing is published.
+func TestBrokerProviderSelfHeal_AllProviderUpdatesFailingPublishesNothing(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+
+	broker, project := newProviderSelfHealFixture(t, s, "allfail")
+
+	updateErr := errors.New("database is locked")
+	srv.store = &failingProviderUpdateStore{Store: s, failProjectID: project.ID, err: updateErr}
+
+	const sessionID = "sess-selfheal-allfail"
+	srv.controlChannel.mu.Lock()
+	srv.controlChannel.connections[broker.ID] = &BrokerConnection{brokerID: broker.ID, sessionID: sessionID}
+	srv.controlChannel.mu.Unlock()
+
+	spy := &brokerConnectedSpy{}
+	srv.events = spy
+
+	srv.selfHealBrokerProviders(ctx, []string{broker.ID})
+
+	provider, err := s.GetProjectProvider(ctx, project.ID, broker.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.BrokerStatusOffline, provider.Status, "the only provider's UPDATE must not have landed")
+	assert.Empty(t, spy.getCalls(), "self-heal must not publish when every provider update on the broker failed")
+}
+
+// TestBrokerProviderSelfHeal_NoPublishWhenNothingHealed asserts that a tick
+// finding every row already online does not publish anything, since nothing
+// changed.
 func TestBrokerProviderSelfHeal_NoPublishWhenNothingHealed(t *testing.T) {
 	ctx := context.Background()
 	srv, s := testServer(t)

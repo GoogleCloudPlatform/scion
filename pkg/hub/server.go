@@ -5446,12 +5446,15 @@ func (s *Server) brokerProviderSelfHealHandler() func(ctx context.Context) {
 // PublishBrokerConnected event markBrokerOnline publishes on a fresh
 // connect, one call per broker with exactly the project IDs healed for that
 // broker — mirroring handleBrokerDisconnect's PublishBrokerDisconnected on
-// the way down, so realtime subscribers don't keep showing a provider as
-// offline after this handler has already restored it. Nothing is published
-// for a broker where no row changed. A duplicate PublishBrokerConnected from
-// two instances healing the same row on the same tick is harmless: it is the
-// same idempotent "online" fact subscribers already coalesce on
-// project.<id>.broker.status.
+// the way down, so the event stream stays an accurate record of provider
+// status for any consumer of project.<id>.broker.status (the in-tree web
+// client does not act on this subject today; see web/src/client/state.ts).
+// Nothing is published for a broker where no row changed. A duplicate
+// PublishBrokerConnected from two instances healing the same row on the same
+// tick is harmless: both carry an identical, stateless status="online"
+// payload for the same project ID, so any consumer that treats the event as
+// a state fact rather than a counted transition sees no difference from a
+// single publish.
 func (s *Server) selfHealBrokerProviders(ctx context.Context, snapshot []string) {
 	for _, brokerID := range snapshot {
 		// snapshot may be stale; re-check right before stamping to narrow the
