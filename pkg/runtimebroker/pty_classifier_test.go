@@ -17,23 +17,47 @@ package runtimebroker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os/exec"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 )
+
+// String makes a lookupResult test failure readable (e.g. "lookupAbsent"
+// instead of a bare "2") without adding a Stringer to the production type.
+// Test-only: fmt's %v honors this automatically wherever a lookupResult is
+// printed in this package's tests.
+func (r lookupResult) String() string {
+	switch r {
+	case lookupUnknown:
+		return "lookupUnknown"
+	case lookupResolves:
+		return "lookupResolves"
+	case lookupAbsent:
+		return "lookupAbsent"
+	default:
+		return fmt.Sprintf("lookupResult(%d)", int(r))
+	}
+}
 
 // fakeAttachProber drives classifyAttachEnd's unit tests without any real
 // runtime exec, so the full decision matrix can be tested directly.
 type fakeAttachProber struct {
-	probe  probeResult
-	lookup lookupResult
+	probe   probeResult
+	lookup  lookupResult
+	running runningResult
 }
 
 func (f fakeAttachProber) probeHasSession(ctx context.Context) probeResult      { return f.probe }
 func (f fakeAttachProber) lookupStillResolves(ctx context.Context) lookupResult { return f.lookup }
+func (f fakeAttachProber) containerRunningState(ctx context.Context) runningResult {
+	return f.running
+}
 
 func TestClassifyAttachEnd(t *testing.T) {
 	tests := []struct {
@@ -59,9 +83,33 @@ func TestClassifyAttachEnd(t *testing.T) {
 			wantReason: wsprotocol.CloseReasonLookupUnavailable,
 		},
 		{
-			name:       "start failed, container still resolves -> session not ready",
+			// ptone/scion#2088: a container that is definitively not running
+			// (Exited/stopped) must end the attach with a terminal 4410, not
+			// the retry class 4503 — the session cannot come back until the
+			// agent is started again.
+			name:       "start failed, container resolves but is stopped -> terminal 4410",
 			startErr:   errors.New("waitForTmuxSession timed out"),
-			prober:     fakeAttachProber{lookup: lookupResolves},
+			prober:     fakeAttachProber{lookup: lookupResolves, running: runningNo},
+			wantCode:   wsprotocol.ClosePTYSessionGone,
+			wantReason: wsprotocol.CloseReasonAgentStopped,
+		},
+		{
+			// The container resolves and is confirmed running (e.g. still
+			// starting up, tmux not launched yet): retry.
+			name:       "start failed, container resolves and running -> session not ready",
+			startErr:   errors.New("waitForTmuxSession timed out"),
+			prober:     fakeAttachProber{lookup: lookupResolves, running: runningYes},
+			wantCode:   wsprotocol.ClosePTYUpstreamUnavailable,
+			wantReason: wsprotocol.CloseReasonSessionNotReady,
+		},
+		{
+			// The container resolves, but whether it's running or stopped
+			// couldn't be determined (the running-state probe itself failed
+			// or the runtime reported no usable phase). An unknown running
+			// state must never be downgraded to the terminal 4410 - retry.
+			name:       "start failed, container resolves but running state unknown -> retries",
+			startErr:   errors.New("waitForTmuxSession timed out"),
+			prober:     fakeAttachProber{lookup: lookupResolves, running: runningUnknown},
 			wantCode:   wsprotocol.ClosePTYUpstreamUnavailable,
 			wantReason: wsprotocol.CloseReasonSessionNotReady,
 		},
@@ -121,6 +169,151 @@ func TestClassifyAttachEnd(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAttachEndProber_ContainerRunningState drives the real
+// attachEndProber.containerRunningState (not fakeAttachProber, which
+// TestClassifyAttachEnd uses) through a fake AgentLookup. TestClassifyAttachEnd
+// alone cannot catch a broken production wiring between LookupAgent's Phase
+// and the classifier's decision, since it never calls attachEndProber or
+// AgentLookup at all.
+func TestAttachEndProber_ContainerRunningState(t *testing.T) {
+	tests := []struct {
+		name   string
+		lookup AgentLookup
+		want   runningResult
+	}{
+		{
+			name:   "stopped container -> runningNo",
+			lookup: &fixedAgentLookup{result: &AgentLookupResult{ContainerID: "c1", Phase: "stopped"}},
+			want:   runningNo,
+		},
+		{
+			name:   "running container -> runningYes",
+			lookup: &fixedAgentLookup{result: &AgentLookupResult{ContainerID: "c1", Phase: "running"}},
+			want:   runningYes,
+		},
+		{
+			name:   "lookup error -> runningUnknown, never guessed stopped",
+			lookup: &fixedAgentLookup{err: errors.New("agent list unavailable")},
+			want:   runningUnknown,
+		},
+		{
+			name:   "nil lookup (no AgentLookup configured) -> runningUnknown",
+			lookup: nil,
+			want:   runningUnknown,
+		},
+		{
+			// A well-behaved AgentLookup never returns (nil, nil), but a
+			// test double or a future implementation might. This must never
+			// dereference the nil result, and must never guess running or
+			// stopped from it.
+			name:   "nil result with nil error -> runningUnknown, never dereferenced",
+			lookup: &fixedAgentLookup{result: nil, err: nil},
+			want:   runningUnknown,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &attachEndProber{lookup: tc.lookup, slug: "agent1", projectID: ""}
+			if got := p.containerRunningState(context.Background()); got != tc.want {
+				t.Errorf("containerRunningState() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAttachEndProber_LookupStillResolves drives attachEndProber.lookupStillResolves
+// through a fake AgentLookup, covering the same tri-state decisions
+// TestClassifyAttachEnd exercises through fakeAttachProber, but against the
+// real prober method. It also covers the (nil, nil) edge case a well-behaved
+// AgentLookup should never produce but a test double or future
+// implementation might: that must map to lookupUnknown (retry), never
+// lookupResolves and never lookupAbsent.
+func TestAttachEndProber_LookupStillResolves(t *testing.T) {
+	tests := []struct {
+		name   string
+		lookup AgentLookup
+		want   lookupResult
+	}{
+		{
+			name:   "resolves",
+			lookup: &fixedAgentLookup{result: &AgentLookupResult{ContainerID: "c1"}},
+			want:   lookupResolves,
+		},
+		{
+			name:   "nil result with nil error -> unknown, never treated as resolves",
+			lookup: &fixedAgentLookup{result: nil, err: nil},
+			want:   lookupUnknown,
+		},
+		{
+			name:   "list unavailable -> unknown, never absent",
+			lookup: &fixedAgentLookup{err: fmt.Errorf("%w: docker ps failed", ErrAgentListUnavailable)},
+			want:   lookupUnknown,
+		},
+		{
+			name:   "genuine not-found -> absent",
+			lookup: &fixedAgentLookup{err: errors.New("agent 'ghost' not found")},
+			want:   lookupAbsent,
+		},
+		{
+			name:   "nil lookup (no AgentLookup configured) -> unknown",
+			lookup: nil,
+			want:   lookupUnknown,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &attachEndProber{lookup: tc.lookup, slug: "agent1", projectID: ""}
+			if got := p.lookupStillResolves(context.Background()); got != tc.want {
+				t.Errorf("lookupStillResolves() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAttachEndProber_LookupStillResolves_RealServerListErrors is a
+// prober-level regression test wired to a real *Server, not a fake
+// AgentLookup: it proves lookupStillResolves inherits LookupAgent's
+// list-unavailable hardening, so a transient auxiliary-runtime or
+// project-fallback List failure gives lookupUnknown (retry), never
+// lookupAbsent — which classifyAttachEnd would otherwise turn into a false
+// terminal 4410 container_removed for a container that was never actually
+// gone, just briefly unreachable. TestLookupAgent_AuxiliaryListErrorSurfacesUnavailable
+// and TestLookupAgent_PrimaryManagerFallbackListErrorSurfacesUnavailable
+// (server_lookup_test.go) cover the same fakes against LookupAgent directly;
+// this test exercises the prober's own call site, the seam that actually
+// matters to the classifier.
+func TestAttachEndProber_LookupStillResolves_RealServerListErrors(t *testing.T) {
+	t.Run("auxiliary runtime List error", func(t *testing.T) {
+		defaultMgr := &filteringMockManager{}
+		defaultMgr.agents = []api.AgentInfo{}
+		auxMgr := &mockManager{listErr: errors.New("docker ps: connection refused")}
+		rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+		auxRt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
+		srv := New(DefaultServerConfig(), defaultMgr, rt)
+		srv.auxiliaryRuntimesMu.Lock()
+		srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{Runtime: auxRt, Manager: auxMgr}
+		srv.auxiliaryRuntimesMu.Unlock()
+
+		p := &attachEndProber{lookup: srv, slug: "ghost", projectID: ""}
+		if got := p.lookupStillResolves(context.Background()); got != lookupUnknown {
+			t.Errorf("lookupStillResolves() = %v, want lookupUnknown", got)
+		}
+	})
+
+	t.Run("primary manager fallback List error", func(t *testing.T) {
+		mgr := &scopedThenFailManager{failErr: errors.New("list: connection reset")}
+		rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+		srv := New(DefaultServerConfig(), mgr, rt)
+
+		p := &attachEndProber{lookup: srv, slug: "ghost", projectID: "some-project"}
+		if got := p.lookupStillResolves(context.Background()); got != lookupUnknown {
+			t.Errorf("lookupStillResolves() = %v, want lookupUnknown", got)
+		}
+	})
 }
 
 // TestIsCleanExit exercises the docker/podman/cloudrun-sandbox exit-status
@@ -197,6 +390,42 @@ func TestClassifyProbeErr(t *testing.T) {
 	cancel()
 	if got := classifyProbeErr(cancelledCtx, errors.New("deadline")); got != probeUnknown {
 		t.Errorf("cancelled probe context -> %v, want probeUnknown", got)
+	}
+}
+
+// TestRunningResultFromPhase covers the mapping classifyAttachEnd's startErr
+// branch relies on to tell a definitively-stopped container (ptone/scion#2088)
+// from one that's merely still starting up or reported no usable phase.
+// "error" is included alongside "stopped" per the same rule
+// pkg/agent/list.go already applies (a crashed container is not running
+// either).
+func TestRunningResultFromPhase(t *testing.T) {
+	cases := []struct {
+		phase string
+		want  runningResult
+	}{
+		{phase: "running", want: runningYes},
+		{phase: "stopped", want: runningNo},
+		{phase: "error", want: runningNo},
+		{phase: "created", want: runningUnknown},
+		{phase: "provisioning", want: runningUnknown},
+		// Deliberately unknown, not runningNo: these are transitional
+		// phases, not confirmed-stopped ones. Listed explicitly (rather
+		// than relying on the "unrecognized phase" default below) so a
+		// future change that adds one of these to the runningNo case is
+		// caught as an intentional, reviewed decision rather than silently
+		// passing this test.
+		{phase: "starting", want: runningUnknown},
+		{phase: "cloning", want: runningUnknown},
+		{phase: "stopping", want: runningUnknown},
+		{phase: "suspended", want: runningUnknown},
+		{phase: "", want: runningUnknown},
+		{phase: "some-future-phase-we-dont-know-about", want: runningUnknown},
+	}
+	for _, tc := range cases {
+		if got := runningResultFromPhase(tc.phase); got != tc.want {
+			t.Errorf("runningResultFromPhase(%q) = %v, want %v", tc.phase, got, tc.want)
+		}
 	}
 }
 

@@ -1361,17 +1361,32 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 	}
 
 	// Determine the exec user from the runtime that owns this agent.
+	// resolvedRuntime is the same one that produced ag: nil matchedRuntime
+	// means the primary s.manager/s.runtime pair matched.
+	resolvedRuntime := matchedRuntime
+	if resolvedRuntime == nil {
+		resolvedRuntime = s.runtime
+	}
 	execUser := "scion"
-	if matchedRuntime != nil {
-		execUser = matchedRuntime.ExecUser()
-	} else if s.runtime != nil {
-		execUser = s.runtime.ExecUser()
+	if resolvedRuntime != nil {
+		execUser = resolvedRuntime.ExecUser()
 	}
 
 	result := &AgentLookupResult{
 		ContainerID: containerID,
 		RuntimeName: runtimeName,
 		ExecUser:    execUser,
+		// Phase is deliberately re-read from the runtime directly
+		// (rawRuntimePhase), not taken from ag.Phase above: ag came from
+		// s.manager.List / aux.Manager.List, which is agent.Manager's merged
+		// view (runtime status overlaid with agent-info.json). That overlay
+		// can keep reporting a stale "stopped"/"error" phase for a
+		// container that has since restarted or is still starting up (see
+		// pkg/agent/list.go's own reconciliation comment). Callers that
+		// need to know the container's actual state right now — like
+		// classifyAttachEnd's stopped check — need the runtime's own
+		// unmerged phase instead.
+		Phase: rawRuntimePhase(ctx, resolvedRuntime, slug, containerID),
 	}
 
 	// Include K8s metadata if available
@@ -1382,16 +1397,49 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 	// For kubernetes agents, include the Go K8s client for direct API access
 	// (avoids needing kubectl in PATH and reuses the broker's auth)
 	if runtimeName == "kubernetes" || runtimeName == "k8s" {
-		if matchedRuntime == nil {
-			matchedRuntime = s.runtime
-		}
-		if k8sRT, ok := matchedRuntime.(*scionrt.KubernetesRuntime); ok && k8sRT.Client != nil {
+		if k8sRT, ok := resolvedRuntime.(*scionrt.KubernetesRuntime); ok && k8sRT.Client != nil {
 			result.K8sConfig = k8sRT.Client.Config
 			result.K8sClientset = k8sRT.Client.Clientset
 		}
 	}
 
 	return result, nil
+}
+
+// rawRuntimePhase best-effort re-resolves containerID's lifecycle phase
+// directly from rt.List, bypassing agent.Manager's agent-info.json overlay
+// entirely (unlike the ag.Phase LookupAgent's caller already has, which came
+// from that merged view). It never errors: a failed list call, a nil
+// runtime, or a containerID that no longer appears in the listing all return
+// "", which runningResultFromPhase (pty_classifier.go) already treats as
+// unknown rather than guessing running or stopped. The name-only filter
+// (matching LookupContainerID/LookupAgent's own backward-compat fallback
+// filter) is intentionally broader than scopedNameFilter's project-scoped
+// one — this runs after LookupAgent has already uniquely resolved
+// containerID by whichever filter matched (the primary, auxiliary, or
+// backward-compat fallback path), so matching back by containerID rather
+// than re-deriving which filter won is both simpler and exact.
+func rawRuntimePhase(ctx context.Context, rt scionrt.Runtime, slug, containerID string) string {
+	if rt == nil || containerID == "" {
+		return ""
+	}
+	agents, err := rt.List(ctx, map[string]string{"scion.name": slug})
+	if err != nil {
+		return ""
+	}
+	for _, a := range agents {
+		id := a.Labels["scion.container.id"]
+		if id == "" {
+			id = a.ContainerID
+		}
+		if id == "" {
+			id = a.ID
+		}
+		if id == containerID {
+			return a.Phase
+		}
+	}
+	return ""
 }
 
 // scopedNameFilter builds the Runtime.List label filter for a slug lookup,

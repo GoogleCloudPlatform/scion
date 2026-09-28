@@ -197,3 +197,53 @@ func TestHandleAgentAttach_IdlePeerClosedWithinDeadline(t *testing.T) {
 	// CloseAbnormalClosure (1006) a bare TCP drop would produce.
 	require.Equal(t, wsprotocol.ClosePTYUpstreamUnavailable, closeErr.Code)
 }
+
+// TestHandleAgentAttach_StoppedContainerSkipsReadinessWait covers
+// ptone/scion#2088's early-detection follow-up: a container the runtime
+// already reports as definitively stopped ends the attach immediately with
+// the terminal 4410 agent_stopped, instead of waiting out the full
+// waitForTmuxSession timeout first and only then reaching the same
+// conclusion via classifyAttachEnd's post-hoc probe. No tmux fixture is
+// needed here — the whole point is that the PTY session (and its tmux exec)
+// never starts.
+func TestHandleAgentAttach_StoppedContainerSkipsReadinessWait(t *testing.T) {
+	const slug = "stopped-attach-fixture"
+	mgr := &filteringMockManager{}
+	mgr.agents = []api.AgentInfo{{
+		ContainerID: "stopped-container",
+		Name:        slug,
+		Labels:      map[string]string{"scion.name": slug},
+	}}
+	rt := &runtime.MockRuntime{
+		NameFunc: func() string { return "docker" },
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			// The runtime's own (unmerged) listing: definitively stopped.
+			return []api.AgentInfo{{
+				ContainerID: "stopped-container",
+				Name:        slug,
+				Labels:      map[string]string{"scion.name": slug},
+				Phase:       "stopped",
+			}}, nil
+		},
+	}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	httpSrv := httptest.NewServer(http.HandlerFunc(srv.handleAgentAttach))
+	t.Cleanup(httpSrv.Close)
+
+	wsURL := "ws" + strings.TrimPrefix(httpSrv.URL, "http") + "/api/v1/agents/" + slug + "/attach"
+
+	start := time.Now()
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
+	_, _, err = conn.ReadMessage()
+	var closeErr *websocket.CloseError
+	require.True(t, errors.As(err, &closeErr), "expected a close frame, got: %v", err)
+	require.Equal(t, wsprotocol.ClosePTYSessionGone, closeErr.Code)
+	require.Equal(t, wsprotocol.CloseReasonAgentStopped, closeErr.Text)
+	require.Less(t, time.Since(start), tmuxSessionWaitTimeout,
+		"a definitively stopped container must not wait out the full tmux readiness timeout")
+}
