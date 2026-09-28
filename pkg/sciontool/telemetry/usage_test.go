@@ -259,6 +259,65 @@ func TestBoundedLRUDedupeCapacityAndTTL(t *testing.T) {
 	}
 }
 
+// TestBoundedLRUCapacityEvictionZeroesSlot is the regression test for the
+// upstream review of PR 2051 (Gemini finding on usage.go:533): capacity
+// eviction in SeenBefore must zero the evicted lruEntry before reslicing, not
+// just drop it from the visible window, because l.order[1:] shares the same
+// backing array as before the reslice -- until a later append forces a
+// reallocation, the evicted entry's string stays reachable (and therefore
+// alive to the GC) through that array. Captures the slice header before the
+// eviction (same backing array, same capacity) and inspects index 0 through
+// that captured header afterward, since the live l.order no longer exposes
+// it once evicted.
+func TestBoundedLRUCapacityEvictionZeroesSlot(t *testing.T) {
+	l := newBoundedLRU(2, time.Minute)
+	// Pre-size with headroom so the append below (which grows l.order to
+	// len 3, one past capacity) reuses this backing array instead of
+	// triggering Go's own growth reallocation -- otherwise the eviction's
+	// zeroing would land on a freshly allocated array that beforeEviction
+	// never pointed at, and the test would pass or fail by accident of the
+	// growth heuristic rather than by testing the fix.
+	l.order = make([]lruEntry, 0, 8)
+	l.SeenBefore("a")
+	l.SeenBefore("b")
+	beforeEviction := l.order // same backing array as after the next call
+	l.SeenBefore("c")         // capacity 2 exceeded: "a" (index 0) is evicted
+	if len(beforeEviction) < 1 {
+		t.Fatal("test setup: expected at least one entry in the pre-eviction slice")
+	}
+	if got := beforeEviction[0]; got != (lruEntry{}) {
+		t.Fatalf("evicted slot = %+v, want zero value (the entry must not stay reachable through the shared backing array)", got)
+	}
+}
+
+// TestBoundedLRUTTLEvictionZeroesSlots is the same regression as
+// TestBoundedLRUCapacityEvictionZeroesSlot, for evictExpired's TTL path
+// (Gemini finding on usage.go:547): the evicted prefix must be zeroed before
+// l.order = l.order[cut:].
+func TestBoundedLRUTTLEvictionZeroesSlots(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	l := newBoundedLRU(8, time.Minute)
+	l.now = func() time.Time { return now }
+	// Pre-size with headroom (see TestBoundedLRUCapacityEvictionZeroesSlot):
+	// evictExpired only reslices, so its own zeroing can't reallocate, but
+	// pre-sizing keeps this test's setup insertions from doing so either,
+	// so beforeEviction is guaranteed to alias the same backing array.
+	l.order = make([]lruEntry, 0, 8)
+	l.SeenBefore("a")
+	l.SeenBefore("b")
+	beforeEviction := l.order // same backing array as after expiry runs
+	now = now.Add(2 * time.Minute)
+	l.SeenBefore("c") // evictExpired runs first and expires "a" and "b"
+	if len(beforeEviction) < 2 {
+		t.Fatal("test setup: expected at least two entries in the pre-eviction slice")
+	}
+	for i, got := range beforeEviction[:2] {
+		if got != (lruEntry{}) {
+			t.Fatalf("evicted slot %d = %+v, want zero value (the entry must not stay reachable through the shared backing array)", i, got)
+		}
+	}
+}
+
 // TestBoundedLRUSeenBeforeConcurrent is the F1 regression test: the receiver
 // runs each OTLP export request on its own goroutine (Pipeline.handleLogs is
 // not serialized), so SeenBefore must be safe under concurrent callers. Run
