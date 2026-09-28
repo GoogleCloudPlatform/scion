@@ -177,10 +177,6 @@ allowed_paths=(
   "^pkg/config/legacy_grove_migration.go$"
   "^pkg/config/project_marker.go$"
   "^pkg/config/settings_v1.go$"
-  "^pkg/hubclient/agents.go$"
-  "^pkg/hubclient/notifications.go$"
-  "^pkg/hubclient/templates.go$"
-  "^pkg/hubclient/tokens.go$"
   "^pkg/projectcompat/.*\\.go$"
   "^pkg/runtimebroker/handlers.go$"
   # Reserved-identity-attribute denylist: the three retired grove-named

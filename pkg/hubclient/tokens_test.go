@@ -19,6 +19,19 @@ import (
 	"testing"
 )
 
+func TestCreateTokenRequest_UnmarshalJSON(t *testing.T) {
+	t.Run("unmarshal legacy groveId field is not honored", func(t *testing.T) {
+		jsonData := `{"name": "tok1", "groveId": "p1"}`
+		var req CreateTokenRequest
+		if err := json.Unmarshal([]byte(jsonData), &req); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if req.ProjectID != "" {
+			t.Errorf("ProjectID = %q, want empty (legacy groveId must not be honored)", req.ProjectID)
+		}
+	})
+}
+
 func TestTokenInfo_JSON(t *testing.T) {
 	t.Run("unmarshal legacy groveId field is not honored", func(t *testing.T) {
 		jsonData := `{"id": "t1", "groveId": "p1"}`
