@@ -488,7 +488,19 @@ func (h *TelemetryHandler) metricAttrs() []attribute.KeyValue {
 // Tool, session, turn and every other hook metric, span and log is
 // unaffected by this gate (D4, narrow).
 func usageHookRecordingEnabled() bool {
-	return os.Getenv("SCION_USAGE_SOURCE") == "hooks"
+	v := os.Getenv("SCION_USAGE_SOURCE")
+	if v == "hooks" {
+		return true
+	}
+	// "native" is the expected value that intentionally suppresses hook usage
+	// (the deriver owns it); anything else non-empty is likely a provision.py
+	// typo (e.g. "HOOKS" or a trailing space) rather than a deliberate choice.
+	// The safe D10 default (no usage) still applies either way; this only
+	// makes an unrecognized value visible for debugging.
+	if v != "" && v != "native" {
+		log.Debug("SCION_USAGE_SOURCE=%q is not a recognized usage source (want \"hooks\" or \"native\"); hook usage stays suppressed", v)
+	}
+	return false
 }
 
 // recordEndMetrics records metrics when a paired end event completes.
@@ -542,7 +554,7 @@ func (h *TelemetryHandler) recordEndMetrics(event *hooks.Event, startEventType s
 		// Record token usage from model-end events, subject to the same
 		// usage-source gate as gen_ai.api.calls above (design §3.5).
 		if usageEnabled {
-			h.recordTokenMetrics(ctx, event, baseAttrs)
+			h.recordTokenMetrics(ctx, event)
 		}
 	}
 }
@@ -587,20 +599,31 @@ func (h *TelemetryHandler) recordUnpairedEndMetrics(event *hooks.Event, startEve
 		// Record token usage from model-end events, subject to the same
 		// usage-source gate as gen_ai.api.calls above (design §3.5).
 		if usageEnabled {
-			h.recordTokenMetrics(ctx, event, baseAttrs)
+			h.recordTokenMetrics(ctx, event)
 		}
 	}
 }
 
-// recordTokenMetrics records token usage counters from an event's token fields.
-func (h *TelemetryHandler) recordTokenMetrics(ctx context.Context, event *hooks.Event, baseAttrs []attribute.KeyValue) {
+// recordTokenMetrics records token usage counters from an event's token
+// fields. Unlike gen_ai.api.calls (which keeps agent_id/project_id for
+// descriptor compatibility, design §3.2), scion.usage.tokens's producer
+// label set is exactly harness, model and token_type -- nothing else. GCP
+// admission's allowlist for this one metric is narrower than the general
+// hook-counter allowlist (cloudUsageTokenFields vs. cloudPointFields in
+// gcp_metric_identity.go), so reusing the caller's baseAttrs (which carries
+// agent_id/project_id from metricAttrs()) got the whole OTLP request
+// rejected on GCP (round 1 review H1). This builds its attribute set from
+// telemetrycontract.UsageTokenPointAttrs instead of taking baseAttrs from
+// the caller -- the same helper the admission regression test in
+// pkg/sciontool/telemetry uses, so the two can't drift apart again.
+func (h *TelemetryHandler) recordTokenMetrics(ctx context.Context, event *hooks.Event) {
 	if h.usageTokens == nil {
 		return
 	}
 
-	attrs := baseAttrs
-	if model := os.Getenv("SCION_MODEL"); model != "" {
-		attrs = append(attrs, attribute.String(telemetrycontract.ModelLabel, model))
+	var attrs []attribute.KeyValue
+	for _, kv := range telemetrycontract.UsageTokenPointAttrs(os.Getenv("SCION_HARNESS"), os.Getenv("SCION_MODEL")) {
+		attrs = append(attrs, attribute.String(kv.Key, kv.Value))
 	}
 
 	recorded := false
@@ -608,7 +631,13 @@ func (h *TelemetryHandler) recordTokenMetrics(ctx context.Context, event *hooks.
 		if n <= 0 {
 			return
 		}
-		pointAttrs := append(attrs, attribute.String(telemetrycontract.TokenTypeLabel, tokenType))
+		// Built fresh on every call (round 1 review N1): appending onto a
+		// shared prefix's spare capacity is safe today only because
+		// metric.WithAttributes copies synchronously before the next call,
+		// and that's an easy invariant to break later.
+		pointAttrs := make([]attribute.KeyValue, len(attrs), len(attrs)+1)
+		copy(pointAttrs, attrs)
+		pointAttrs = append(pointAttrs, attribute.String(telemetrycontract.TokenTypeLabel, tokenType))
 		h.usageTokens.Add(ctx, n, metric.WithAttributes(pointAttrs...))
 		recorded = true
 	}

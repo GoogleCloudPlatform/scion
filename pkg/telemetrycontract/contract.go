@@ -70,6 +70,38 @@ const (
 	TokenTypeLabel = "token_type"
 )
 
+// LabelKV is a plain string key/value pair. It exists so this package can
+// hand callers ordered label sets without taking a dependency on any
+// specific metrics client (this package has none, by design; see the
+// package doc).
+type LabelKV struct{ Key, Value string }
+
+// UsageTokenPointAttrs returns the producer point-label set for
+// MetricUsageTokens (design §3.2): harness and model only, each omitted if
+// empty. token_type is per-point (one of the TokenType* values) and added
+// by the caller alongside these.
+//
+// Unlike MetricAPICalls, which keeps agent_id/project_id for Cloud
+// descriptor compatibility, MetricUsageTokens's allowlist on the GCP
+// exporter does not permit them (round 1 review of ptone/scion#2053 phase
+// 2, finding H1: reusing a shared agent_id/project_id-carrying attribute
+// set for both metrics got every hook-sourced scion.usage.tokens point
+// rejected by GCP admission, taking the rest of that flush with it). This
+// function is the single place the hook handler
+// (pkg/sciontool/hooks/handlers) and its admission regression test
+// (pkg/sciontool/telemetry) build this set from, so the two can't drift
+// apart again.
+func UsageTokenPointAttrs(harness, model string) []LabelKV {
+	var attrs []LabelKV
+	if harness != "" {
+		attrs = append(attrs, LabelKV{HarnessLabel, harness})
+	}
+	if model != "" {
+		attrs = append(attrs, LabelKV{ModelLabel, model})
+	}
+	return attrs
+}
+
 // Status values for StatusLabel.
 const (
 	StatusSuccess = "success"
