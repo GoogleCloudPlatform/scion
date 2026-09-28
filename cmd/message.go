@@ -330,21 +330,29 @@ Examples:
 		var crossProjectTarget string
 		senderProjectPath := projectPath
 		hasAgentTarget := agentName != "" || (convRef != nil && convRef.Kind == messaging.RefAgent)
-		if hasAgentTarget && os.Getenv("SCION_AGENT_NAME") != "" && cmd.Flags().Changed("project") {
-			ownProjectSlug := os.Getenv("SCION_PROJECT")
-			ownProjectID := os.Getenv("SCION_PROJECT_ID")
-			isSameProject := (ownProjectSlug != "" && projectPath == ownProjectSlug) ||
-				(ownProjectID != "" && projectPath == ownProjectID)
-			if !isSameProject {
-				// The --project flag selects a DIFFERENT project.
-				crossProjectTarget = projectPath
+		if hasAgentTarget {
+			crossProjectTarget = detectCrossProjectTarget(cmd)
+			if crossProjectTarget != "" {
 				senderProjectPath = "" // let hub context resolve from agent's own config
 			}
 		}
 
+		// --raw cannot cross a project boundary: the deprecated keystroke
+		// path skips the wrapped envelope, so a cross-project send must
+		// refuse it the same way `scion keys` refuses cross-project targets
+		// outright. This CLI check is UX only; the authoritative refusal is
+		// hub-side (ExecuteAgentDM).
+		if crossProjectTarget != "" && msgRaw {
+			return fmt.Errorf("--raw cannot be used with a cross-project target; message the agent from within its own project")
+		}
+
 		// conv:<id> with explicit --project mismatch in agent mode: reject.
 		// The conversation ID already identifies its project context;
-		// reinterpreting the sender context via --project would be silently wrong.
+		// reinterpreting the sender context via --project would be silently
+		// wrong. This intentionally does NOT reuse detectCrossProjectTarget:
+		// that helper treats an explicitly empty --project ("") as
+		// same-project, but this check must still reject it, matching
+		// pre-existing behavior.
 		if convRef != nil && convRef.Kind == messaging.RefConversation &&
 			os.Getenv("SCION_AGENT_NAME") != "" && cmd.Flags().Changed("project") {
 			ownProjectSlug := os.Getenv("SCION_PROJECT")

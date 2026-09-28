@@ -314,6 +314,31 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		}
 	}
 
+	// 4b. Foreign raw keystroke-injection rejection.
+	//
+	// Raw skips the wrapped envelope and is delivered as literal
+	// keystrokes with no automatic Enter — the same isolation boundary
+	// concern that #1687 raised for attachments. Refuse it cross-project
+	// the same way, rather than downgrading the message or extending
+	// cross-project capabilities.
+	//
+	// This check is intentionally isolated (its own step, its own denial
+	// code) pending confirmation of the final cross-project policy for
+	// keystroke injection; it does not touch Plain, which is unaffected by
+	// this decision.
+	if input.Raw && input.SenderAgent.ProjectID != input.TargetAgent.ProjectID {
+		LogDMAdmission(DMAuditEntryForDenial(input, string(MessageDenialCrossProjectRawUnsupported),
+			"cross-project raw keystroke delivery not supported"))
+		return nil, &AgentDMError{
+			Code:       ErrCodeUnsupportedCapability,
+			Message:    "cross-project raw message delivery is not supported",
+			HTTPStatus: http.StatusUnprocessableEntity,
+			Details: map[string]interface{}{
+				"reason": string(MessageDenialCrossProjectRawUnsupported),
+			},
+		}
+	}
+
 	// 5. Dispatch availability pre-check (#1689).
 	// Verify dispatch infrastructure before persistence so that missing
 	// dispatcher/broker does not leave orphaned pending rows or falsely

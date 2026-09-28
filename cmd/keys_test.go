@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -125,4 +126,26 @@ func TestSendKeysViaHub_UserSender_RawReachesHub(t *testing.T) {
 	assert.False(t, strings.HasPrefix((*sent)[0].StructuredMsg.Sender, "agent:"),
 		"a human/user sender's structured message must not carry an agent: sender identity")
 	assert.Equal(t, "C-c", (*sent)[0].StructuredMsg.Msg)
+}
+
+// ---------------------------------------------------------------------------
+// Cross-project refusal (UX layer): keys must not work as a cross-project
+// command. The authoritative refusal is hub-side (ExecuteAgentDM); this is
+// the CLI-side check that fails fast without a round trip.
+// ---------------------------------------------------------------------------
+
+func TestKeysCmd_RunE_CrossProjectTarget_Refused(t *testing.T) {
+	origProjectPath := projectPath
+	defer func() { projectPath = origProjectPath }()
+
+	t.Setenv("SCION_AGENT_NAME", "sender-agent")
+	t.Setenv("SCION_PROJECT", "own-project")
+
+	cmd := &cobra.Command{Use: "keys"}
+	cmd.Flags().StringVarP(&projectPath, "project", "g", "", "")
+	require.NoError(t, cmd.Flags().Set("project", "other-project"))
+
+	err := keysCmd.RunE(cmd, []string{"target-agent", "Escape"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cross-project")
 }

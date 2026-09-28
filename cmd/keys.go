@@ -59,6 +59,12 @@ Examples:
 		agentName := api.Slugify(strings.TrimPrefix(args[0], "agent:"))
 		keystrokes := strings.Join(args[1:], " ")
 
+		// keys must not work as a cross-project command. This CLI check is
+		// UX only; the authoritative refusal is hub-side (ExecuteAgentDM).
+		if crossProjectTarget := detectCrossProjectTarget(cmd); crossProjectTarget != "" {
+			return fmt.Errorf("scion keys does not support cross-project targets; message the agent from within its own project")
+		}
+
 		hubCtx, err := CheckHubAvailabilityForAgent(projectPath, agentName, true)
 		if err != nil {
 			return err

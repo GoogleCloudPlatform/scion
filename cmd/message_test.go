@@ -38,6 +38,7 @@ type messageTestState struct {
 	bcastChanged bool
 	allChanged   bool
 	bodyFile     string
+	raw          bool
 }
 
 func saveMessageTestState() messageTestState {
@@ -47,6 +48,7 @@ func saveMessageTestState() messageTestState {
 		bcastChanged: messageCmd.Flags().Lookup("broadcast").Changed,
 		allChanged:   messageCmd.Flags().Lookup("all").Changed,
 		bodyFile:     msgBodyFile,
+		raw:          msgRaw,
 	}
 }
 
@@ -56,6 +58,7 @@ func (s messageTestState) restore() {
 	messageCmd.Flags().Lookup("broadcast").Changed = s.bcastChanged
 	messageCmd.Flags().Lookup("all").Changed = s.allChanged
 	msgBodyFile = s.bodyFile
+	msgRaw = s.raw
 }
 
 // messageMockServer creates a mock Hub server that handles project-scoped
@@ -2381,6 +2384,190 @@ func TestCrossProjectMismatchRejection(t *testing.T) {
 	emailRef := &messaging.Reference{Kind: messaging.RefEmail, Value: "user@example.com", Raw: "@user@example.com"}
 	hasAgentTarget = false || (emailRef != nil && emailRef.Kind == messaging.RefAgent)
 	assert.False(t, hasAgentTarget, "email ref should not be detected as agent target")
+}
+
+// TestMessageCmd_RunE_CrossProjectRaw_Refused verifies that `scion message
+// --raw` refuses a cross-project target at the CLI layer, mirroring
+// TestKeysCmd_RunE_CrossProjectTarget_Refused. It is hermetic on unmutated
+// code: the --raw guard returns before any hub work, so it never reaches
+// the network. It still points at a mock hub (rather than the ambient one)
+// so a regression that lets the guard fall through fails on an assertion
+// instead of a real network round trip.
+func TestMessageCmd_RunE_CrossProjectRaw_Refused(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+	clearHubContextEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+
+	server, sent := crossProjectMockServer(t, "target-uuid-raw", "target-agent", "other-project-uuid", "other-project")
+	defer server.Close()
+
+	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+	t.Setenv("SCION_AGENT_NAME", "sender-agent")
+	t.Setenv("SCION_PROJECT", "own-project")
+	t.Setenv("SCION_PROJECT_ID", "own-project-id")
+	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
+
+	cmd := newProjectFlagCommand(t)
+	require.NoError(t, cmd.Flags().Set("project", "other-project"))
+	msgRaw = true
+
+	err := messageCmd.RunE(cmd, []string{"target-agent", "hello"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--raw cannot be used with a cross-project target")
+	assert.Empty(t, *sent, "the --raw refusal must fire before any hub request is made")
+}
+
+// TestMessageCmd_RunE_CrossProjectWithoutRaw_ReachesHub is the companion to
+// TestMessageCmd_RunE_CrossProjectRaw_Refused: with msgRaw=false, the same
+// cross-project target must not trip the --raw refusal. Unlike a plain
+// "no error" check, this asserts positively that the send actually reaches
+// the mock hub's cross-project resolve/send endpoints, proving the guard let
+// it through rather than merely not erroring for an unrelated reason.
+//
+// The test is hermetic: HOME and the working directory are redirected to
+// scratch dirs (so project-root discovery can't find this container's real
+// .scion project) and SCION_HUB_ENDPOINT points at the mock server, so it
+// cannot reach the ambient hub.
+func TestMessageCmd_RunE_CrossProjectWithoutRaw_ReachesHub(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+	clearHubContextEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+
+	targetAgentID := "target-uuid-nonraw"
+	targetAgentSlug := "target-agent"
+	targetProjectID := "other-project-uuid"
+	targetProjectSlug := "other-project"
+
+	server, sent := crossProjectMockServer(t, targetAgentID, targetAgentSlug, targetProjectID, targetProjectSlug)
+	defer server.Close()
+
+	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+	t.Setenv("SCION_AGENT_NAME", "sender-agent")
+	t.Setenv("SCION_PROJECT", "own-project")
+	t.Setenv("SCION_PROJECT_ID", "own-project-id")
+	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
+
+	cmd := newProjectFlagCommand(t)
+	require.NoError(t, cmd.Flags().Set("project", targetProjectSlug))
+	msgRaw = false
+
+	err := messageCmd.RunE(cmd, []string{targetAgentSlug, "hello"})
+	require.NoError(t, err)
+
+	require.Len(t, *sent, 1, "the cross-project send must reach the mock hub")
+	assert.Equal(t, targetAgentID, (*sent)[0].AgentName)
+	assert.Equal(t, "hello", (*sent)[0].Message)
+}
+
+// TestMessageCmd_RunE_ConvRefCrossProjectMismatch pins the conv: + --project
+// mismatch check (message.go, just after the --raw cross-project refusal).
+// This check intentionally keeps its own inline same-project comparison
+// rather than calling detectCrossProjectTarget: that helper treats an
+// explicitly empty --project ("") as same-project, but this branch must
+// still reject it — an explicit --project="" alongside a conv: reference is
+// still an attempt to reinterpret the sender's project context, and this
+// check's behavior must match the pre-existing behavior. Table covers all 7 cases.
+//
+// Hermetic: noHub=true short-circuits before any hub call is attempted, and
+// hub env vars are cleared, so only the conv: error string is asserted.
+func TestMessageCmd_RunE_ConvRefCrossProjectMismatch(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	const convErr = "--project cannot be used with conv: references"
+	const convRef = "conv:11111111-1111-1111-1111-111111111111"
+
+	tests := []struct {
+		name        string
+		agentName   string
+		ownSlug     string
+		ownID       string
+		projectFlag string
+		setProject  bool
+		wantReject  bool
+	}{
+		{
+			name:        "agent, --project other project",
+			agentName:   "sender-agent",
+			ownSlug:     "own-project",
+			projectFlag: "other-project",
+			setProject:  true,
+			wantReject:  true,
+		},
+		{
+			name:        "agent, --project own slug",
+			agentName:   "sender-agent",
+			ownSlug:     "own-project",
+			projectFlag: "own-project",
+			setProject:  true,
+			wantReject:  false,
+		},
+		{
+			name:        "agent, --project own ID",
+			agentName:   "sender-agent",
+			ownID:       "own-project-id",
+			projectFlag: "own-project-id",
+			setProject:  true,
+			wantReject:  false,
+		},
+		{
+			name:        "human caller, --project other project",
+			agentName:   "",
+			projectFlag: "other-project",
+			setProject:  true,
+			wantReject:  false,
+		},
+		{
+			name:       "agent, --project not set",
+			agentName:  "sender-agent",
+			ownSlug:    "own-project",
+			setProject: false,
+			wantReject: false,
+		},
+		{
+			name:        "agent, --project explicitly empty (still rejected)",
+			agentName:   "sender-agent",
+			ownSlug:     "own-project",
+			projectFlag: "",
+			setProject:  true,
+			wantReject:  true,
+		},
+		{
+			name:        "agent, no SCION_PROJECT/_ID set, --project x",
+			agentName:   "sender-agent",
+			projectFlag: "x",
+			setProject:  true,
+			wantReject:  true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SCION_HUB_ENDPOINT", "")
+			t.Setenv("SCION_HUB_URL", "")
+			t.Setenv("SCION_AGENT_NAME", tc.agentName)
+			t.Setenv("SCION_PROJECT", tc.ownSlug)
+			t.Setenv("SCION_PROJECT_ID", tc.ownID)
+			noHub = true
+
+			cmd := newProjectFlagCommand(t)
+			if tc.setProject {
+				require.NoError(t, cmd.Flags().Set("project", tc.projectFlag))
+			}
+
+			err := messageCmd.RunE(cmd, []string{convRef, "hello"})
+			if tc.wantReject {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), convErr)
+			} else if err != nil {
+				assert.NotContains(t, err.Error(), convErr)
+			}
+		})
+	}
 }
 
 // TestCrossProjectSameProjectBypass verifies that --project matching the
