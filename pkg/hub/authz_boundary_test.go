@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/require"
 )
@@ -209,6 +210,78 @@ func TestResolveTargetScope_CollectionEvidenceUnreviewedPermissionDenies(t *test
 	})
 	if got.Kind != TargetScopeUnknown {
 		t.Errorf("collection evidence for an unreviewed permission must resolve Unknown: got %+v", got)
+	}
+}
+
+// TestResolveTargetScope_SkillListSupportsBothCollectionClasses is the R1
+// paired global/project regression: skill.list is reviewed
+// ProjectTargetApplicability=true AND separately, legitimately, resolves
+// Hub-scope collection evidence for the global catalog -- a single boolean
+// cannot represent both, and this must not regress to Unknown for the Hub
+// case.
+func TestResolveTargetScope_SkillListSupportsBothCollectionClasses(t *testing.T) {
+	hub := ResolveTargetScope(Resource{Type: "skill"}, TargetScopeEvidence{
+		IsCollectionLevel: true,
+		CollectionScope:   TargetScopeHub,
+		PermissionID:      "skill.list",
+	})
+	if hub.Kind != TargetScopeHub {
+		t.Errorf("skill.list Hub collection evidence: got %+v, want Hub", hub)
+	}
+
+	proj := ResolveTargetScope(Resource{Type: "skill"}, TargetScopeEvidence{
+		IsCollectionLevel:   true,
+		CollectionScope:     TargetScopeProject,
+		CollectionProjectID: "p1",
+		PermissionID:        "skill.list",
+	})
+	if proj.Kind != TargetScopeProject || proj.ProjectID != "p1" {
+		t.Errorf("skill.list Project collection evidence: got %+v, want Project/p1", proj)
+	}
+}
+
+// TestResolveTargetScope_CollectionEvidenceRejectsMismatchedResourceParent
+// is the R1 exact contradiction case: a resource that already independently
+// names a project parent (project A) cannot be paired with collection
+// evidence naming a DIFFERENT project (B) -- the evidence does not win over
+// a contradictory resource fact.
+func TestResolveTargetScope_CollectionEvidenceRejectsMismatchedResourceParent(t *testing.T) {
+	got := ResolveTargetScope(Resource{Type: "agent", ParentType: "project", ParentID: "project-A"}, TargetScopeEvidence{
+		IsCollectionLevel:   true,
+		CollectionScope:     TargetScopeProject,
+		CollectionProjectID: "project-B",
+		PermissionID:        "agent.create",
+	})
+	if got.Kind != TargetScopeUnknown {
+		t.Errorf("mismatched resource parent (A) vs evidence project (B) must resolve Unknown: got %+v", got)
+	}
+}
+
+// TestResolveTargetScope_CollectionEvidenceRejectsResourceHubMismatch mirrors
+// the above for the Hub-evidence direction: a resource that already
+// independently names a project parent cannot be paired with Hub-scope
+// collection evidence.
+func TestResolveTargetScope_CollectionEvidenceRejectsResourceHubMismatch(t *testing.T) {
+	got := ResolveTargetScope(Resource{Type: "skill", ParentType: "project", ParentID: "project-A"}, TargetScopeEvidence{
+		IsCollectionLevel: true,
+		CollectionScope:   TargetScopeHub,
+		PermissionID:      "skill.list",
+	})
+	if got.Kind != TargetScopeUnknown {
+		t.Errorf("resource with a project parent paired with Hub collection evidence must resolve Unknown: got %+v", got)
+	}
+}
+
+// TestResolveTargetScope_ArbitraryTypeWithUserScopeKindIsUnknown is the R1
+// "restrict scope-kind classification to reviewed resource types"
+// regression: an arbitrary/unexpected resource type that happens to carry
+// ScopeKind="user" (e.g. from an unrelated resource-building bug) must NOT
+// be classified Hub on that basis -- only skill/template/harness_config
+// carry that ScopeKind concept.
+func TestResolveTargetScope_ArbitraryTypeWithUserScopeKindIsUnknown(t *testing.T) {
+	got := ResolveTargetScope(Resource{Type: "widget", ScopeKind: store.SkillScopeUser}, TargetScopeEvidence{})
+	if got.Kind != TargetScopeUnknown {
+		t.Errorf("arbitrary type with ScopeKind=user must resolve Unknown, not Hub: got %+v", got)
 	}
 }
 
@@ -853,7 +926,19 @@ func TestCanMintSelector_RelationshipEligibility_AgentAttach_NoExistingTargetReq
 	}
 }
 
-func TestCanMintSelector_ProjectBoundary_SuperAdminWithoutMembership_EligibleForOwnedPermission(t *testing.T) {
+// TestCanMintSelector_ProjectBoundary_SuperAdminWithoutMembership_AdmittedButFlatIneligible
+// is the pat-refactor R3 correction: flat project mint eligibility remains
+// project-binding-only, even for a super-admin. System authority
+// establishes ADMISSION (the selector's per-permission SystemAuthorityProof
+// check passes -- confirmed indirectly by agent:attach succeeding below,
+// and directly here by the flat agent:delete selector reaching the
+// eligibility stage at all rather than being denied with
+// MintDenialProjectAccessRequired), but a FLAT selector like agent:delete
+// still requires the project's OWN role to carry that permission -- a
+// super-admin's system-scoped role is not a project-scoped role, so
+// hasProjectRoleFlatPermission finds nothing and denies with
+// MintDenialFlatRoleInsufficient, distinct from an admission denial.
+func TestCanMintSelector_ProjectBoundary_SuperAdminWithoutMembership_AdmittedButFlatIneligible(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()
 	adminID := tid("cms-5")
@@ -861,13 +946,35 @@ func TestCanMintSelector_ProjectBoundary_SuperAdminWithoutMembership_EligibleFor
 	createDelegateTestProject(t, s, projectID, "cms-5-proj", "test")
 	createTestUserWithRole(t, s, adminID, "cms5@test.com", "admin", store.SystemRoleSuperAdmin)
 
-	// No membership row, but super-admin's system role authority covers
-	// agent.delete: the selector should be admitted (F-3 ruling).
 	results, err := authz.CanMintSelector(ctx, activeUserPrincipal(adminID), TokenBoundary{Kind: BoundaryKindProject, ProjectID: projectID}, []string{"agent:delete"})
 	require.NoError(t, err)
 	require.Len(t, results, 1)
+	if results[0].OK {
+		t.Errorf("flat agent:delete must stay project-binding-only, even for a super-admin with no project membership: %+v", results[0])
+	}
+	if results[0].Reason != MintDenialFlatRoleInsufficient {
+		t.Errorf("must be denied as flat-role-insufficient (admission passed, eligibility did not), got reason=%q", results[0].Reason)
+	}
+}
+
+// TestCanMintSelector_ProjectBoundary_SuperAdminWithoutMembership_RelationshipEligible
+// confirms the OTHER half of R3: a reviewed RELATIONSHIP-eligible selector
+// (agent:attach) IS mintable for a super-admin with no project membership,
+// via system-authority admission plus RelationshipPolicyMintEligible --
+// which does not require a matching project role.
+func TestCanMintSelector_ProjectBoundary_SuperAdminWithoutMembership_RelationshipEligible(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+	adminID := tid("cms-5b")
+	projectID := tid("cms-5b-proj")
+	createDelegateTestProject(t, s, projectID, "cms-5b-proj", "test")
+	createTestUserWithRole(t, s, adminID, "cms5b@test.com", "admin", store.SystemRoleSuperAdmin)
+
+	results, err := authz.CanMintSelector(ctx, activeUserPrincipal(adminID), TokenBoundary{Kind: BoundaryKindProject, ProjectID: projectID}, []string{"agent:attach"})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
 	if !results[0].OK {
-		t.Errorf("super-admin without membership should be admitted via system authority for agent:delete: %+v", results[0])
+		t.Errorf("reviewed relationship-eligible agent:attach should be mintable for a super-admin without membership: %+v", results[0])
 	}
 }
 
@@ -934,6 +1041,98 @@ func TestMintTimeSystemGrant_UnreviewedPermission_Denied(t *testing.T) {
 	require.NoError(t, err)
 	if ok {
 		t.Error("a permission with no reviewed SupportedTargetClasses entry must deny, never fall back to a guessed class")
+	}
+}
+
+// TestMintTimeSystemGrant_UnknownClassValue_Denied is the pat-refactor R5
+// regression: an actual UNKNOWN TargetClassKind enum value (not merely an
+// absent SupportedTargetClasses entry) must deny rather than silently fall
+// through to an under-specified class and potentially grant on it.
+func TestMintTimeSystemGrant_UnknownClassValue_Denied(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+	adminID := tid("mtsg-3")
+	createTestUserWithRole(t, s, adminID, "mtsg3@test.com", "admin", store.SystemRoleSuperAdmin)
+
+	const testPermID = "test.unknown_target_class_permission"
+	permissions.SupportedTargetClasses[testPermID] = []permissions.TargetClassKind{"totally_bogus_class_value"}
+	defer delete(permissions.SupportedTargetClasses, testPermID)
+
+	ok, err := authz.MintTimeSystemGrant(ctx, activeUserPrincipal(adminID), testPermID)
+	require.NoError(t, err)
+	if ok {
+		t.Error("an unrecognized TargetClassKind value must deny, not fall through to an under-specified class")
+	}
+}
+
+// TestHasAnyProjectBinding_SoleProjectConstrained_Denied is the pat-refactor
+// R2 regression: a project-scoped access constraint governing the ONLY
+// project a permission is granted in must deny -- constraint reduction must
+// be evaluated per-project, not merged/diluted across projects or checked
+// against a system-wide ResourceContext{}.
+func TestHasAnyProjectBinding_SoleProjectConstrained_Denied(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+	userID := tid("hapb-1")
+	projectID := tid("hapb-1-proj")
+	createDelegateTestProject(t, s, projectID, "hapb-1-proj", "test")
+	require.NoError(t, s.CreateUser(ctx, &store.User{ID: userID, Email: "hapb1@test.com", DisplayName: "u", Role: "member", Status: store.UserStatusActive}))
+
+	rd := createTestRoleDefinition(t, s, "hapb-1-role", store.RoleScopeProject, []string{"agent.read"})
+	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: userID,
+		ScopeType: store.RoleScopeProject, ScopeID: projectID, CreatedBy: "test",
+	})
+	require.NoError(t, err)
+	_, err = s.CreateAccessConstraint(ctx, &store.AccessConstraint{
+		Name: "hapb-1-constraint", SubjectKind: store.ConstraintSubjectAllPrincipals,
+		ScopeType: store.RoleScopeProject, ScopeID: projectID,
+		MaximumPermissions: []string{"agent.list"}, // excludes agent.read
+		Purpose:            "R2 test: sole project constrained",
+	})
+	require.NoError(t, err)
+
+	ok, err := authz.hasAnyProjectBinding(ctx, activeUserPrincipal(userID), "agent.read")
+	require.NoError(t, err)
+	if ok {
+		t.Error("the sole project's access constraint excludes agent.read; hasAnyProjectBinding must deny")
+	}
+}
+
+// TestHasAnyProjectBinding_SecondUnconstrainedProject_Allowed confirms the
+// other half of R2: a second, unconstrained project's grant still succeeds
+// even though a first project's grant is constrained away -- each project
+// is evaluated independently.
+func TestHasAnyProjectBinding_SecondUnconstrainedProject_Allowed(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+	userID := tid("hapb-2")
+	constrainedProject := tid("hapb-2-proj-a")
+	openProject := tid("hapb-2-proj-b")
+	createDelegateTestProject(t, s, constrainedProject, "hapb-2-proj-a", "test")
+	createDelegateTestProject(t, s, openProject, "hapb-2-proj-b", "test")
+	require.NoError(t, s.CreateUser(ctx, &store.User{ID: userID, Email: "hapb2@test.com", DisplayName: "u", Role: "member", Status: store.UserStatusActive}))
+
+	rd := createTestRoleDefinition(t, s, "hapb-2-role", store.RoleScopeProject, []string{"agent.read"})
+	for _, pid := range []string{constrainedProject, openProject} {
+		_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: userID,
+			ScopeType: store.RoleScopeProject, ScopeID: pid, CreatedBy: "test",
+		})
+		require.NoError(t, err)
+	}
+	_, err := s.CreateAccessConstraint(ctx, &store.AccessConstraint{
+		Name: "hapb-2-constraint", SubjectKind: store.ConstraintSubjectAllPrincipals,
+		ScopeType: store.RoleScopeProject, ScopeID: constrainedProject,
+		MaximumPermissions: []string{"agent.list"}, // excludes agent.read, only for constrainedProject
+		Purpose:            "R2 test: second project unconstrained",
+	})
+	require.NoError(t, err)
+
+	ok, err := authz.hasAnyProjectBinding(ctx, activeUserPrincipal(userID), "agent.read")
+	require.NoError(t, err)
+	if !ok {
+		t.Error("the second, unconstrained project's grant should still succeed even though the first project is constrained")
 	}
 }
 

@@ -322,3 +322,56 @@ func TestSupportedTargetClasses_UnknownPermissionDeniesRatherThanGuess(t *testin
 		t.Errorf("hub.settings.read has no reviewed entry and must return nil, got %v", classes)
 	}
 }
+
+// TestCollectionTargetClasses_CoversEveryRegistryPermission is the drift
+// coverage for R1: ResolveTargetScope's collection-evidence cross-check
+// needs a reviewed class set for every Registry permission, not just
+// mintable ones (project.create has no UATScope at all).
+func TestCollectionTargetClasses_CoversEveryRegistryPermission(t *testing.T) {
+	for _, p := range Registry {
+		if _, reviewed := CollectionTargetClassesFor(p.ID); !reviewed {
+			t.Errorf("permission %q has no CollectionTargetClasses entry", p.ID)
+		}
+	}
+}
+
+// TestCollectionTargetClasses_NoStaleEntries mirrors
+// TestSupportedTargetClasses_NoStaleEntries for this table.
+func TestCollectionTargetClasses_NoStaleEntries(t *testing.T) {
+	known := make(map[string]bool, len(Registry))
+	for _, p := range Registry {
+		known[p.ID] = true
+	}
+	for id := range CollectionTargetClasses {
+		if !known[id] {
+			t.Errorf("CollectionTargetClasses has a stale entry for %q, which is not a Registry permission ID", id)
+		}
+	}
+}
+
+// TestCollectionTargetClasses_SkillListSupportsBothClasses pins the exact
+// R1 example: skill.list is ProjectTargetApplicability=true AND separately,
+// legitimately, supports Hub-scope collection evidence for the global
+// catalog -- a single boolean cannot represent both.
+func TestCollectionTargetClasses_SkillListSupportsBothClasses(t *testing.T) {
+	applies, reviewed := AppliesToExistingProjectTarget("skill.list")
+	if !reviewed || !applies {
+		t.Fatalf("test assumption broken: skill.list ProjectTargetApplicability = (%v, reviewed=%v), want (true, true)", applies, reviewed)
+	}
+	classes, reviewed := CollectionTargetClassesFor("skill.list")
+	if !reviewed {
+		t.Fatal("skill.list must have a reviewed CollectionTargetClasses entry")
+	}
+	hasProject, hasGlobal := false, false
+	for _, c := range classes {
+		if c == TargetClassKindProjectScoped {
+			hasProject = true
+		}
+		if c == TargetClassKindGlobalCatalog {
+			hasGlobal = true
+		}
+	}
+	if !hasProject || !hasGlobal {
+		t.Errorf("skill.list must support BOTH ProjectScoped and GlobalCatalog collection classes, got %v", classes)
+	}
+}

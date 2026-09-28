@@ -165,23 +165,48 @@ func ResolveTargetScope(r Resource, evidence TargetScopeEvidence) TargetScope {
 			// resource instance.
 			return TargetScope{Kind: TargetScopeUnknown}
 		}
-		applies, reviewed := permissions.AppliesToExistingProjectTarget(evidence.PermissionID)
+		// R1 fix: use the reviewed per-permission CLASS SET
+		// (CollectionTargetClasses), not the coarse ProjectTargetApplicability
+		// boolean — a permission can legitimately support BOTH classes
+		// (skill.list: an existing project's skills AND the hub-wide
+		// catalog), which a mutually-exclusive Hub/Project boolean cannot
+		// represent.
+		classes, reviewed := permissions.CollectionTargetClassesFor(evidence.PermissionID)
 		if !reviewed {
 			return TargetScope{Kind: TargetScopeUnknown}
 		}
 		switch evidence.CollectionScope {
 		case TargetScopeHub:
-			if applies || evidence.CollectionProjectID != "" {
-				// Contradiction: Hub evidence for a project-applicable
-				// permission, or a stray project ID on Hub evidence.
+			if evidence.CollectionProjectID != "" {
+				return TargetScope{Kind: TargetScopeUnknown} // stray project ID on Hub evidence
+			}
+			if !classesInclude(classes, permissions.TargetClassKindGlobalCatalog, permissions.TargetClassKindHubResource) {
+				return TargetScope{Kind: TargetScopeUnknown} // Hub is not a reviewed class for this permission
+			}
+			// Cross-check: the resource's own facts must not contradict a
+			// Hub claim (an agent whose own ParentType/ParentID already
+			// names a project cannot simultaneously be a hub-level
+			// collection target).
+			if r.ParentType == "project" && r.ParentID != "" {
 				return TargetScope{Kind: TargetScopeUnknown}
 			}
 			return TargetScope{Kind: TargetScopeHub}
 		case TargetScopeProject:
-			if !applies || evidence.CollectionProjectID == "" {
-				// Contradiction: Project evidence for a hub-only
-				// permission, or no project named.
+			if evidence.CollectionProjectID == "" {
 				return TargetScope{Kind: TargetScopeUnknown}
+			}
+			if !classesInclude(classes, permissions.TargetClassKindProjectScoped) {
+				return TargetScope{Kind: TargetScopeUnknown} // Project is not a reviewed class for this permission
+			}
+			// Cross-check: if the resource ALSO independently names a
+			// project parent, it must agree with the evidence's claim
+			// (agent parent-project A + evidence project B is a
+			// contradiction, not "evidence wins").
+			if r.ParentType == "project" && r.ParentID != "" && r.ParentID != evidence.CollectionProjectID {
+				return TargetScope{Kind: TargetScopeUnknown}
+			}
+			if hasReviewedGlobalScopeKind(r.Type, r.ScopeKind) {
+				return TargetScope{Kind: TargetScopeUnknown} // resource claims global/user scope, evidence claims project
 			}
 			return TargetScope{Kind: TargetScopeProject, ProjectID: evidence.CollectionProjectID}
 		default:
@@ -199,7 +224,7 @@ func ResolveTargetScope(r Resource, evidence TargetScopeEvidence) TargetScope {
 
 	hasProjectParent := r.ParentType == "project" && r.ParentID != ""
 	hasSystemParent := r.ParentType == "system"
-	hasGlobalScope := isUserOrGlobalScopeKind(r.ScopeKind)
+	hasGlobalScope := hasReviewedGlobalScopeKind(r.Type, r.ScopeKind)
 
 	if hasProjectParent && hasGlobalScope {
 		return TargetScope{Kind: TargetScopeUnknown}
@@ -226,13 +251,34 @@ func ResolveTargetScope(r Resource, evidence TargetScopeEvidence) TargetScope {
 	return TargetScope{Kind: TargetScopeUnknown}
 }
 
-// isUserOrGlobalScopeKind reports whether a ScopeKind value (as used by
-// skill/template/harness_config resources) marks a record as scoped to a
-// user or globally, rather than to a project. store.SkillScopeUser,
+func classesInclude(classes []permissions.TargetClassKind, want ...permissions.TargetClassKind) bool {
+	for _, c := range classes {
+		for _, w := range want {
+			if c == w {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hasReviewedGlobalScopeKind reports whether scopeKind marks resourceType's
+// record as scoped to a user or globally, rather than to a project. RESTRICTED
+// to the reviewed resource types that actually carry this ScopeKind concept
+// (skill/template/harness_config) — an arbitrary/unexpected resource type
+// that happens to have ScopeKind set to "user"/"global"/"core" (e.g. by a
+// bug in an unrelated resource-building call site) must NOT be classified
+// Hub on that basis alone (pat-refactor R1, 2026-09-28). store.SkillScopeUser,
 // store.TemplateScopeUser, and store.HarnessConfigScopeUser are all the
 // literal string "user" (and likewise "global"/"core"), so a single string
-// comparison covers every resource-specific constant.
-func isUserOrGlobalScopeKind(scopeKind string) bool {
+// comparison covers every resource-specific constant once the resource type
+// itself is confirmed reviewed.
+func hasReviewedGlobalScopeKind(resourceType, scopeKind string) bool {
+	switch resourceType {
+	case permissions.ResourceSkill, permissions.ResourceTemplate, permissions.ResourceHarnessConfig:
+	default:
+		return false
+	}
 	switch scopeKind {
 	case store.SkillScopeUser, store.SkillScopeGlobal, store.SkillScopeCore:
 		return true
@@ -514,6 +560,45 @@ func ContemplatedProjectClass(permissionID string) ProjectTargetClass {
 	return class
 }
 
+// validateRealProjectClass rejects a class that cannot represent a REAL
+// project target for permissionID: an empty or mismatched ResourceType
+// (which would route around applyHubWideScopeFilters's curated-catalog
+// dispatch entirely), or — for the three resource types with a genuine
+// curated hub-wide-catalog carve-out (skill/template/harness_config) — any
+// ScopeKind other than that type's own "project" constant. This is an
+// ALLOWLIST, not a blocklist: an unrecognized ScopeKind value for one of
+// those three types is rejected just as surely as a known global/user
+// value (pat-refactor R4, 2026-09-28) — a real project-target proof is
+// never "the global catalog," and never a value the reviewer hasn't seen.
+// Every OTHER resource type (agent, project, scheduled_event,
+// gcp_service_account, and material-delivery types such as secret/env_var/
+// skill_injection) has no curated hub-wide/project ScopeKind concept at
+// all — applyHubWideScopeFilters passes it through unchanged regardless of
+// ScopeKind, so any caller-supplied value is accepted for those types; this
+// validator only restricts the three where ScopeKind is semantically load-
+// bearing.
+func validateRealProjectClass(permissionID string, class ProjectTargetClass) error {
+	expected := registryResourceType(permissionID)
+	if class.ResourceType == "" || class.ResourceType != expected {
+		return fmt.Errorf("%w: class resource type %q does not match permission %q's resource type %q", ErrProjectAccessDenied, class.ResourceType, permissionID, expected)
+	}
+	var wantScopeKind string
+	switch class.ResourceType {
+	case permissions.ResourceSkill:
+		wantScopeKind = store.SkillScopeProject
+	case permissions.ResourceTemplate:
+		wantScopeKind = store.TemplateScopeProject
+	case permissions.ResourceHarnessConfig:
+		wantScopeKind = store.HarnessConfigScopeProject
+	default:
+		return nil
+	}
+	if class.ScopeKind != wantScopeKind {
+		return fmt.Errorf("%w: class scope kind %q is not a valid real-project-target value for resource type %q (want %q)", ErrProjectAccessDenied, class.ScopeKind, class.ResourceType, wantScopeKind)
+	}
+	return nil
+}
+
 func registryResourceType(permissionID string) string {
 	for _, p := range permissions.Registry {
 		if p.ID == permissionID {
@@ -616,18 +701,8 @@ func (a *AuthzService) SystemAuthorityProof(ctx context.Context, principal Princ
 	if applies, reviewed := permissions.AppliesToExistingProjectTarget(permissionID); !reviewed || !applies {
 		return false, nil
 	}
-	// Validate class against permissionID: a real project-target proof must
-	// name the permission's own resource type (never empty, never
-	// mismatched — an empty/wrong ResourceType would route around
-	// applyHubWideScopeFilters's curated-catalog dispatch entirely), and must never
-	// use a global-catalog/user scope kind (a real project target is never
-	// "the global catalog" — that contradiction is MintTimeSystemGrant's
-	// job, not this function's).
-	if expected := registryResourceType(permissionID); class.ResourceType == "" || class.ResourceType != expected {
-		return false, fmt.Errorf("%w: class resource type %q does not match permission %q's resource type %q", ErrProjectAccessDenied, class.ResourceType, permissionID, expected)
-	}
-	if isUserOrGlobalScopeKind(class.ScopeKind) {
-		return false, fmt.Errorf("%w: SystemAuthorityProof cannot use a global-catalog/user-scope class for a real project target", ErrProjectAccessDenied)
+	if err := validateRealProjectClass(permissionID, class); err != nil {
+		return false, err
 	}
 
 	candidates, roleDefs, refs, err := a.activeSystemScopeCandidates(ctx, principal)
@@ -704,6 +779,14 @@ func (a *AuthzService) MintTimeSystemGrant(ctx context.Context, principal Princi
 			// No curated hub-wide/project split for this resource type;
 			// applyHubWideScopeFilters passes candidates through unchanged
 			// regardless of ScopeKind. class stays {ResourceType, ""}.
+		default:
+			// An unrecognized TargetClassKind value (e.g. a future enum
+			// member this switch has not been updated for) must never
+			// silently fall through to an under-specified class and
+			// potentially grant on it — skip it explicitly (pat-refactor
+			// R5, 2026-09-28): fail closed on an unknown class, the same
+			// way an absent SupportedTargetClasses entry already does.
+			continue
 		}
 		filtered := applyHubWideScopeFilters(candidates, roleDefs, class)
 		if !candidateSetHasPermission(filtered, roleDefs, permissionID) {
@@ -738,7 +821,7 @@ func (a *AuthzService) hasAnyProjectBinding(ctx context.Context, principal Princ
 		return false, fmt.Errorf("%w: binding resolution failed: %v", ErrProjectAccessDenied, err)
 	}
 	now := time.Now()
-	var active []*store.RoleBinding
+	byProject := make(map[string][]*store.RoleBinding)
 	for _, b := range bindings {
 		if b.ScopeType != ScopeTypeProject {
 			continue
@@ -746,22 +829,43 @@ func (a *AuthzService) hasAnyProjectBinding(ctx context.Context, principal Princ
 		if !bindingActivationOK(b, now) {
 			continue
 		}
-		active = append(active, b)
+		byProject[b.ScopeID] = append(byProject[b.ScopeID], b)
 	}
-	roleDefs, err := a.loadRoleDefinitions(ctx, collectRoleDefinitionIDs(active))
+	if len(byProject) == 0 {
+		return false, nil
+	}
+
+	var allBindings []*store.RoleBinding
+	for _, bs := range byProject {
+		allBindings = append(allBindings, bs...)
+	}
+	roleDefs, err := a.loadRoleDefinitions(ctx, collectRoleDefinitionIDs(allBindings))
 	if err != nil {
 		return false, fmt.Errorf("%w: role definition resolution failed: %v", ErrProjectAccessDenied, err)
 	}
-	if !candidateSetHasPermission(toCandidateBindings(active), roleDefs, permissionID) {
-		return false, nil
-	}
+
 	closure := make(map[string]struct{}, len(refs))
 	for _, p := range refs {
 		closure[p.Type+":"+p.ID] = struct{}{}
 	}
-	restrictions := a.loadAccessConstraintRestrictions(ctx, closure, ResourceContext{})
-	survivors := applyRestrictions([]string{permissionID}, restrictions)
-	return len(survivors) == 1, nil
+
+	// Evaluate EACH project independently, with that project's own
+	// access-constraint reduction (ResourceContext{ProjectID: thatProject})
+	// — a constraint governing one project must not be diluted by merging
+	// its bindings with an unconstrained second project's, and must not be
+	// evaluated as a system-wide constraint (ResourceContext{}) instead
+	// (pat-refactor R2, 2026-09-28). Succeeds only if at least one actual
+	// project's own constrained grant survives.
+	for projectID, projBindings := range byProject {
+		if !candidateSetHasPermission(toCandidateBindings(projBindings), roleDefs, permissionID) {
+			continue
+		}
+		restrictions := a.loadAccessConstraintRestrictions(ctx, closure, ResourceContext{ProjectID: projectID})
+		if survivors := applyRestrictions([]string{permissionID}, restrictions); len(survivors) == 1 {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // hasAnyProjectMembership reports whether principal has an active
@@ -879,6 +983,14 @@ func (a *AuthzService) ProjectAdmissionForClass(ctx context.Context, principal P
 	}
 	if projectID == "" {
 		return ProjectAdmissionResult{}, fmt.Errorf("%w: empty project ID", ErrProjectAccessDenied)
+	}
+	// Validate class against permissionID BEFORE either branch (pat-refactor
+	// R4, 2026-09-28): a successful membership check must not skip
+	// class/permission coherence entirely — an unknown or mismatched class
+	// denies regardless of which admission path would otherwise have been
+	// tried.
+	if err := validateRealProjectClass(permissionID, class); err != nil {
+		return ProjectAdmissionResult{}, err
 	}
 
 	key := projectAdmissionCacheKey{principalKind: principal.Kind, principalID: principal.ID, projectID: projectID, permissionID: permissionID, class: class}
@@ -1142,28 +1254,28 @@ func (a *AuthzService) hubPermissionEligible(ctx context.Context, principal Prin
 
 // selectorMintEligible evaluates MintEligibilityRegistry for every
 // permission ID in a PROJECT-boundary selector's expansion. A permission
-// absent from the registry defaults to MintEligibilityFlatRole. The extra
-// project-role flat-subset check only applies when admission was
-// established through membershipOK: a project member's OWN role may still
-// lack this specific permission even though they are a member (membership
-// is permission-agnostic by design). When admission was instead established
-// without membership (system authority for this exact permission),
-// selectorAdmitted has ALREADY individually verified every permID in this
-// expansion — re-deriving eligibility from getProjectScopedPermissions alone
-// would incorrectly deny a permission the admission step just proved via a
-// different, equally valid path.
+// absent from the registry defaults to MintEligibilityFlatRole, whose
+// eligibility is ALWAYS the project role's own flat permission subset
+// (hasProjectRoleFlatPermission) — regardless of how admission was
+// established. Flat mint eligibility remains project-binding-only by
+// design (pat-refactor R3, 2026-09-28): a super-admin's system-authority
+// admission for a project they are not a member of lets them pass the
+// admission gate, but it does NOT widen what a flat (non-relationship)
+// selector can mint on a project-scoped token — that ceiling is always the
+// project's own role definition. Only MintEligibilityRelationship
+// selectors (declared resource-relative, e.g. agent.attach/port_access) can
+// be minted without a matching project role, via RelationshipPolicyMintEligible
+// below, which does not depend on membershipOK either.
 func (a *AuthzService) selectorMintEligible(ctx context.Context, principal PrincipalContext, boundary TokenBoundary, membershipOK bool, permIDs []string) (bool, MintDenialReason, error) {
 	for _, permID := range permIDs {
 		descriptor, hasDescriptor := permissions.MintEligibilityRegistry[permID]
 		if !hasDescriptor {
-			if membershipOK {
-				ok, err := a.hasProjectRoleFlatPermission(ctx, principal, boundary.ProjectID, permID)
-				if err != nil {
-					return false, MintDenialNone, err
-				}
-				if !ok {
-					return false, MintDenialFlatRoleInsufficient, nil
-				}
+			ok, err := a.hasProjectRoleFlatPermission(ctx, principal, boundary.ProjectID, permID)
+			if err != nil {
+				return false, MintDenialNone, err
+			}
+			if !ok {
+				return false, MintDenialFlatRoleInsufficient, nil
 			}
 			continue
 		}
