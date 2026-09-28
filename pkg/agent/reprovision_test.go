@@ -18,9 +18,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -40,38 +42,37 @@ func runGit(t *testing.T, dir string, args ...string) {
 
 // snapshotTree walks dir and returns a map of relative path -> file content,
 // for a byte-identical before/after comparison. Missing dir snapshots as an
-// empty map (useful for a ".git" subdirectory that must not be touched).
+// empty map (useful for a ".git" subdirectory that must not be touched) --
+// but any OTHER walk/read error (a permission error, a file that vanishes
+// mid-walk, etc.) fails the test outright rather than silently returning a
+// partial or empty snapshot that could make a before/after comparison pass
+// for the wrong reason (upstream review, GoogleCloudPlatform/scion#2037,
+// comment 4121261329).
 func snapshotTree(t *testing.T, dir string) map[string]string {
 	t.Helper()
 	out := map[string]string{}
-	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
 			return nil
 		}
 		rel, relErr := filepath.Rel(dir, path)
 		if relErr != nil {
-			return nil
+			return relErr
 		}
 		data, readErr := os.ReadFile(path)
 		if readErr != nil {
-			return nil
+			return readErr
 		}
 		out[rel] = string(data)
 		return nil
 	})
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("snapshotTree %s: %v", dir, err)
+	}
 	return out
-}
-
-func mapsEqual(a, b map[string]string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, v := range a {
-		if b[k] != v {
-			return false
-		}
-	}
-	return true
 }
 
 // reprovisionSetup builds a git project with a gitignored .scion/agents and a
@@ -499,11 +500,11 @@ func TestReprovision_ExplicitMount_CheckoutByteIdenticalAndSiblingUntouched(t *t
 	}
 
 	checkoutAfter := snapshotTree(t, sharedCheckout)
-	if !mapsEqual(checkoutBefore, checkoutAfter) {
+	if !maps.Equal(checkoutBefore, checkoutAfter) {
 		t.Fatalf("shared checkout changed after Reprovision:\nbefore=%v\nafter=%v", checkoutBefore, checkoutAfter)
 	}
 	gitDirAfter := snapshotTree(t, filepath.Join(sharedCheckout, ".git"))
-	if !mapsEqual(gitDirBefore, gitDirAfter) {
+	if !maps.Equal(gitDirBefore, gitDirAfter) {
 		t.Fatalf(".git directory was written to during Reprovision:\nbefore=%v\nafter=%v", gitDirBefore, gitDirAfter)
 	}
 
@@ -530,11 +531,11 @@ func TestReprovision_ExplicitMount_CheckoutByteIdenticalAndSiblingUntouched(t *t
 	// The sibling agent, sharing the same mount, must be completely
 	// untouched: a whole-tree snapshot of both its agentDir and its home.
 	siblingDirAfter := snapshotTree(t, siblingDir)
-	if !mapsEqual(siblingDirBefore, siblingDirAfter) {
+	if !maps.Equal(siblingDirBefore, siblingDirAfter) {
 		t.Fatalf("sibling agentDir changed after Reprovision:\nbefore=%v\nafter=%v", siblingDirBefore, siblingDirAfter)
 	}
 	siblingHomeAfter := snapshotTree(t, siblingHome)
-	if !mapsEqual(siblingHomeBefore, siblingHomeAfter) {
+	if !maps.Equal(siblingHomeBefore, siblingHomeAfter) {
 		t.Fatalf("sibling home changed after Reprovision:\nbefore=%v\nafter=%v", siblingHomeBefore, siblingHomeAfter)
 	}
 }
@@ -572,7 +573,7 @@ func TestReprovision_ExplicitMount_HubManaged_Positive(t *testing.T) {
 	}
 
 	workspaceAfter := snapshotTree(t, workspace)
-	if !mapsEqual(workspaceBefore, workspaceAfter) {
+	if !maps.Equal(workspaceBefore, workspaceAfter) {
 		t.Fatalf("hub-managed workspace changed after Reprovision:\nbefore=%v\nafter=%v", workspaceBefore, workspaceAfter)
 	}
 	if _, err := os.Stat(filepath.Join(agentDir, "scion-agent.json")); err != nil {
@@ -707,6 +708,93 @@ func TestReprovision_ExplicitMount_RelativeWorkspaceResolvesToFile_Refused(t *te
 	}
 	if !errors.Is(err, ErrReprovisionRefused) {
 		t.Fatalf("expected ErrReprovisionRefused, got %v", err)
+	}
+}
+
+// TestReprovision_ExplicitMount_AbsoluteWorkspaceIsFile_Refused is the
+// upstream review regression test (GoogleCloudPlatform/scion#2037, comment
+// 4121261313) for the absolute-path counterpart of
+// TestReprovision_ExplicitMount_RelativeWorkspaceResolvesToFile_Refused: an
+// absolute --workspace that exists but is a regular file must be refused
+// with the precise "is not a directory" message, not the "does not exist"
+// message the unsplit check used to produce.
+func TestReprovision_ExplicitMount_AbsoluteWorkspaceIsFile_Refused(t *testing.T) {
+	scionDir, _ := reprovisionSetup(t)
+	agentName := "absolute-file-ws-agent"
+	validWorkspace := t.TempDir()
+
+	ctx := api.ContextWithSharedWorkspace(context.Background())
+	if _, _, _, err := ProvisionAgent(ctx, agentName, "default", "", "", scionDir, "", "created", "", validWorkspace); err != nil {
+		t.Fatalf("initial ProvisionAgent: %v", err)
+	}
+
+	notADir := filepath.Join(t.TempDir(), "not-a-dir.txt")
+	if err := os.WriteFile(notADir, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := NewManager(&runtime.MockRuntime{})
+	_, err := mgr.Reprovision(context.Background(), api.StartOptions{
+		Name: agentName, Template: "default", ProjectPath: scionDir, BrokerMode: true,
+		Workspace: notADir, SharedWorkspace: true,
+	})
+	if err == nil {
+		t.Fatal("expected Reprovision to refuse an absolute workspace that is a regular file, got nil error")
+	}
+	if !errors.Is(err, ErrReprovisionRefused) {
+		t.Fatalf("expected ErrReprovisionRefused, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "is not a directory") {
+		t.Fatalf("expected the precise 'is not a directory' message, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("the path DOES exist (as a file); the message must not claim otherwise: %v", err)
+	}
+}
+
+// TestReprovision_ExplicitMount_RelativeWorkspace_SettingsLoadError_Refused
+// is the upstream review regression test (GoogleCloudPlatform/scion#2037,
+// comment 4121261307): a relative --workspace requires resolveProjectRoot,
+// which reads project settings via config.LoadEffectiveSettings. A genuine
+// load failure (here, a settings.yaml that fails to parse) must surface as
+// an explicit error -- not be silently ignored and left to
+// resolveProjectRoot to run against a nil/stale *VersionedSettings.
+//
+// This is deliberately NOT wrapped in ErrReprovisionRefused (see the
+// production comment at the call site): it is an environment/config
+// failure, not an eligibility refusal, matching how the resolve-project-dir
+// error a few lines above the fix is also left unwrapped.
+func TestReprovision_ExplicitMount_RelativeWorkspace_SettingsLoadError_Refused(t *testing.T) {
+	scionDir, _ := reprovisionSetup(t)
+	agentName := "settings-load-error-agent"
+	validWorkspace := t.TempDir()
+
+	ctx := api.ContextWithSharedWorkspace(context.Background())
+	if _, _, _, err := ProvisionAgent(ctx, agentName, "default", "", "", scionDir, "", "created", "", validWorkspace); err != nil {
+		t.Fatalf("initial ProvisionAgent: %v", err)
+	}
+
+	// A settings.yaml that DetectSettingsFormat/koanf's YAML parser cannot
+	// parse: valid enough to be recognized as a candidate settings file, but
+	// syntactically broken, so config.LoadEffectiveSettings returns a real
+	// error rather than silently falling back to defaults.
+	if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte("not: valid: yaml: [[["), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := NewManager(&runtime.MockRuntime{})
+	_, err := mgr.Reprovision(context.Background(), api.StartOptions{
+		Name: agentName, Template: "default", ProjectPath: scionDir, BrokerMode: true,
+		Workspace: "relative-subdir", SharedWorkspace: true,
+	})
+	if err == nil {
+		t.Fatal("expected Reprovision to fail when project settings cannot be loaded, got nil error")
+	}
+	if errors.Is(err, ErrReprovisionRefused) {
+		t.Fatalf("a settings-load failure is an environment error, not an eligibility refusal; must not be ErrReprovisionRefused: %v", err)
+	}
+	if !strings.Contains(err.Error(), "load effective settings") {
+		t.Fatalf("expected the error to name the settings-load failure, got: %v", err)
 	}
 }
 

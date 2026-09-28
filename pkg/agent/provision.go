@@ -529,11 +529,40 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 		agentDir = dir
 
 		if filepath.IsAbs(opts.Workspace) {
-			if info, statErr := os.Stat(opts.Workspace); statErr != nil || !info.IsDir() {
+			// Upstream review (GoogleCloudPlatform/scion#2037, comment
+			// 4121261313): split the existence check from the directory
+			// check, so a workspace path that exists but is a regular file
+			// gets its own precise message instead of being reported as
+			// "does not exist" -- the same split the relative-path branch
+			// below already makes.
+			info, statErr := os.Stat(opts.Workspace)
+			if statErr != nil {
 				return nil, fmt.Errorf("%w: agent %q workspace path does not exist: %s; reincarnate does not create it", ErrReprovisionRefused, opts.Name, opts.Workspace)
 			}
+			if !info.IsDir() {
+				return nil, fmt.Errorf("%w: agent %q workspace path is not a directory: %s", ErrReprovisionRefused, opts.Name, opts.Workspace)
+			}
 		} else {
-			settings, _, _ := config.LoadEffectiveSettings(projectDir)
+			// Upstream review (GoogleCloudPlatform/scion#2037, comment
+			// 4121261307): LoadEffectiveSettings' error was previously
+			// ignored. A load failure (e.g. a malformed settings.yaml) is a
+			// real environment problem, not a "this reincarnation is
+			// ineligible" refusal -- resolveProjectRoot would otherwise run
+			// against a nil/stale *VersionedSettings and could silently
+			// resolve the wrong project root, misjudging the relative
+			// --workspace containment check below. Returned unwrapped (not
+			// ErrReprovisionRefused), matching the resolve-project-dir error
+			// a few lines above: this surfaces as the broker's generic 500,
+			// not its typed 409 refusal, because it is not a precondition
+			// refusal but an inability to evaluate the request at all. This
+			// runs after the hub has already stopped the agent's container
+			// (§3.7), same as every other precondition here; the
+			// reincarnation is recorded failed with this error as the
+			// reason, and the agent stays stopped until a retry.
+			settings, _, err := config.LoadEffectiveSettings(projectDir)
+			if err != nil {
+				return nil, fmt.Errorf("reprovision: load effective settings: %w", err)
+			}
 			projectRoot := resolveProjectRoot(settings, projectDir)
 			resolved, err := resolveWorkspaceSubdir(projectRoot, opts.Workspace)
 			if err != nil {
