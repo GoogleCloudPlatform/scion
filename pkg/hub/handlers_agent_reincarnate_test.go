@@ -2040,27 +2040,34 @@ func TestReincarnateAgent_EndToEnd_IdentityContinuityAndHandoff(t *testing.T) {
 	assert.GreaterOrEqual(t, disp.stopCalls, 1)
 }
 
-// TestBuildReincarnationPreamble_CatchUpWindow is the Amendment A25 2a.3
-// update of the former TestBuildReincarnationPreamble_DoesNotPromiseRedelivery:
-// now that 2a.1 (catch-up works in agent containers) and 2a.2 (the migration
-// gate persists-and-defers instead of rejecting/dropping) are both true, step
-// 2 is allowed to say messages sent during the migration can be read with
-// catch-up — and must name the window so the new generation knows how far
-// back to look.
+// TestBuildReincarnationPreamble_CatchUpWindow is the Amendment A25
+// 2a.3/R4 (p2a-r1 review) update of the former
+// TestBuildReincarnationPreamble_DoesNotPromiseRedelivery: now that 2a.1
+// (catch-up works in agent containers) and 2a.2/R3 (the migration gate
+// persists-and-defers on every hub delivery path instead of
+// rejecting/dropping) are both true, step 2 is allowed to say messages sent
+// during the migration can be read with catch-up. R4 corrected the window
+// to name only a start (an end would have to be the state-clear instant,
+// not known until long after this text is built) and made the command
+// runnable as written: `scion conversation catch-up` takes `--since
+// <duration>`, not an absolute timestamp.
 func TestBuildReincarnationPreamble_CatchUpWindow(t *testing.T) {
 	srv, _ := testServer(t)
 	agent := &store.Agent{ID: "agent-1", Slug: "arqa-a"}
 
 	start := time.Date(2026, 9, 28, 10, 0, 0, 0, time.UTC)
-	end := time.Date(2026, 9, 28, 10, 5, 0, 0, time.UTC)
-	preamble := srv.buildReincarnationPreamble(agent, 2, "do the thing next", start, end)
+	preamble := srv.buildReincarnationPreamble(agent, 2, "do the thing next", start)
 
 	assert.Contains(t, preamble,
-		"2. Catch up on your conversations (`scion conversation catch-up`) for the migration window 2026-09-28T10:00:00Z to 2026-09-28T10:05:00Z.",
-		"step 2 must name the migration's start and end as the catch-up window")
+		"2. Run `scion conversation list` to find your conversations, then for each run "+
+			"`scion conversation catch-up <ref> --since <duration>`, choosing a duration long enough to reach "+
+			"back to 2026-09-28T10:00:00Z.",
+		"step 2 must be runnable as written: catch-up takes --since <duration>, not an absolute timestamp")
 	assert.Contains(t, preamble,
-		"Messages that arrived during the migration were saved, not dropped, and can be read with catch-up.",
-		"step 2 must reinstate the catch-up claim now that 2a.1/2a.2 make it true")
+		"Messages sent to you since 2026-09-28T10:00:00Z were saved to your conversations, not dropped.",
+		"step 2 must reinstate the catch-up claim now that 2a.1/R3 make it true, naming only a start")
+	assert.NotContains(t, preamble, "to 2026-09-28T10:05",
+		"an end timestamp would be a lower bound the preamble cannot honestly state (R4)")
 	assert.Contains(t, preamble,
 		"If that command is unavailable in this environment, rely on the handoff and on incoming messages.",
 		"the image-lag fallback (#1910) must remain since it is not fixed by this phase")

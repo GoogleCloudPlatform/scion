@@ -755,7 +755,16 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 	// deferring it. Checked with the same reincarnationInFlight predicate
 	// the worker uses (reincarnate_worker.go) — non-terminal states only;
 	// once the migration completes or fails, ordinary delivery resumes.
-	deferred := reincarnationInFlight(agent)
+	//
+	// O2 (p2a-r1 review, accepted in part): broadcasts are excluded.
+	// Broadcast rows are persisted without a conversation (see below,
+	// `!msg.Broadcasted` on the conversation-resolution block) by design —
+	// they are ephemeral, project-wide fan-out, not addressed 1:1 — so a
+	// deferred broadcast could never be found by the new generation's
+	// `scion conversation catch-up`. A broadcast to a migrating agent keeps
+	// the pre-existing #1820 rejection instead of a silently-unreachable
+	// deferred row.
+	deferred := reincarnationInFlight(agent) && !msg.Broadcasted
 
 	// #1820: admission gate — mirror the phase check applied to direct
 	// sends (handleAgentMessage for humans, ExecuteAgentDM for agents).
@@ -891,6 +900,11 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 				"agent_id", agent.ID, "agent_name", agent.Name, "project_id", agent.ProjectID,
 				"message_id", storeMsg.ID, "source", "broker")
 		}
+		// O2 (p2a-r1 review, accepted in part): tell an agent sender their
+		// message was deferred, mirroring publishDeliveryFailed — §3.7's
+		// "sender is told" holds on this path too, not just the two
+		// synchronous (HTTP) paths.
+		p.publishDeliveryDeferred(ctx, agentSlug, msg)
 		return
 	}
 
@@ -1051,6 +1065,47 @@ func (p *MessageBrokerProxy) publishDeliveryFailed(ctx context.Context, projectI
 	}
 	if err := dispatcher.DispatchAgentMessage(ctx, senderAgent, failMsg, false, structuredMsg); err != nil {
 		p.log.Warn("Failed to dispatch DELIVERY_FAILED notification",
+			"senderID", msg.SenderID, "error", err)
+	}
+}
+
+// publishDeliveryDeferred tells an agent sender that their message to
+// agentSlug was deferred by the migration gate (design agent-reincarnate
+// §3.7, O2 p2a-r1 review): the recipient is mid-`scion reincarnate`, so the
+// message was persisted for catch-up but not dispatched. Mirrors
+// publishDeliveryFailed structurally, with a distinct status so a sender
+// cannot mistake this for a failure — the message is saved, not dropped.
+// No-op for non-agent senders and for a nil dispatcher, same as
+// publishDeliveryFailed; a sender that cannot be notified this way still
+// has the persisted row available on its own next catch-up.
+func (p *MessageBrokerProxy) publishDeliveryDeferred(ctx context.Context, agentSlug string, msg *messages.StructuredMessage) {
+	if !strings.HasPrefix(msg.Sender, "agent:") || msg.SenderID == "" {
+		return
+	}
+	senderAgent, err := p.store.GetAgent(ctx, msg.SenderID)
+	if err != nil {
+		p.log.Warn("Could not resolve sender agent for DELIVERY_DEFERRED notification",
+			"senderID", msg.SenderID, "error", err)
+		return
+	}
+
+	deferredMsg := fmt.Sprintf("agent %q is reincarnating; message saved to history and will be seen on catch-up", agentSlug)
+	structuredMsg := &messages.StructuredMessage{
+		Sender:    "system",
+		Recipient: msg.Sender,
+		Msg:       deferredMsg,
+		Type:      messages.TypeSystem,
+		Status:    "DELIVERY_DEFERRED",
+		Metadata:  map[string]string{"system_category": messages.SystemCategoryDeliveryDeferred},
+	}
+	structuredMsg.RecipientID = senderAgent.ID
+
+	dispatcher := p.getDispatcher()
+	if dispatcher == nil {
+		return
+	}
+	if err := dispatcher.DispatchAgentMessage(ctx, senderAgent, deferredMsg, false, structuredMsg); err != nil {
+		p.log.Warn("Failed to dispatch DELIVERY_DEFERRED notification",
 			"senderID", msg.SenderID, "error", err)
 	}
 }

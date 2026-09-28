@@ -420,18 +420,26 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		req.Message.DeliveryText = messaging.RenderDeliveryText(renderInput)
 	}
 
-	retryCtx, retryCancel := context.WithTimeout(r.Context(), 30*time.Second)
-	defer retryCancel()
+	// Migration gate (design agent-reincarnate §3.7, R3 p2a-r1 review): skip
+	// dispatch while the recipient is mid-`scion reincarnate`. This legacy
+	// endpoint dispatches before persisting (unlike every other path in this
+	// package), so the gate here only skips the dispatch call; the
+	// persisted row below is stamped "deferred" via agentReincarnating.
+	agentReincarnating := reincarnationInFlight(agent)
+	if !agentReincarnating {
+		retryCtx, retryCancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer retryCancel()
 
-	if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, req.Message.Msg, req.Message.Urgent, req.Message); errors.Is(err, ErrBrokerTimeout) {
-		GatewayTimeout(w, "Broker unreachable after 30s deadline")
-		return
-	} else if err != nil {
-		log.Error("Failed to dispatch inbound message",
-			"agent_id", agent.ID, "agent_slug", agentSlug, "error", err)
-		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError,
-			"failed to deliver message to agent: "+err.Error(), nil)
-		return
+		if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, req.Message.Msg, req.Message.Urgent, req.Message); errors.Is(err, ErrBrokerTimeout) {
+			GatewayTimeout(w, "Broker unreachable after 30s deadline")
+			return
+		} else if err != nil {
+			log.Error("Failed to dispatch inbound message",
+				"agent_id", agent.ID, "agent_slug", agentSlug, "error", err)
+			writeError(w, http.StatusBadGateway, ErrCodeRuntimeError,
+				"failed to deliver message to agent: "+err.Error(), nil)
+			return
+		}
 	}
 
 	log.Info("Inbound message delivered",
@@ -462,6 +470,9 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		Broadcasted:   req.Message.Broadcasted,
 		DispatchState: store.MessageDispatchDispatched,
 		CreatedAt:     now,
+	}
+	if agentReincarnating {
+		storeMsg.DispatchState = store.MessageDispatchDeferred
 	}
 	if req.Message.Metadata != nil {
 		if gid, ok := req.Message.Metadata["group_id"]; ok {
@@ -549,10 +560,14 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		s.dedicatedMessageLog.Info("inbound broker message delivered", logAttrs...)
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"delivered": true,
+	resp := map[string]interface{}{
+		"delivered": !agentReincarnating,
 		"agentId":   agent.ID,
-	})
+	}
+	if agentReincarnating {
+		resp["deferred"] = "agent is reincarnating"
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // parseAgentMessageTopic extracts the project ID and agent slug from a topic string.

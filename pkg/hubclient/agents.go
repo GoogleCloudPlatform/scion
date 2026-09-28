@@ -561,12 +561,7 @@ type OutboundMessageResult struct {
 	Recipient string `json:"recipient"`
 	// RecipientID is the recipient's UUID.
 	RecipientID string `json:"recipient_id"`
-	// Deferred is set when Status is "deferred": the recipient is
-	// mid-`scion reincarnate` (design agent-reincarnate §3.7). The message
-	// was saved to conversation history but not dispatched. Empty on every
-	// other status; the omitempty comment above the struct refers to the
-	// other fields, which the contract guarantees non-empty — this one is
-	// guaranteed empty except for the deferred case.
+	// Deferred is set only when Status == "deferred".
 	Deferred string `json:"deferred,omitempty"`
 }
 

@@ -2026,134 +2026,130 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		}
 	}
 
-	// Migration gate (design agent-reincarnate §3.7, Amendment A25 2a.2):
-	// the message is already persisted above (visible in conversation
-	// history for the new generation's catch-up); do not dispatch it while
-	// the recipient is mid-`scion reincarnate`. The sender — necessarily
-	// human here, since an agent sender already returned via ExecuteAgentDM
-	// above — is told 202 with the deferred notice.
-	if reincarnating {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusAccepted)
-		_ = json.NewEncoder(w).Encode(MessageDeliveryResponse{
-			MessageID:  persistedMsgID,
-			Status:     "deferred",
-			Agent:      agent.Slug,
-			AgentPhase: agent.Phase,
-			Deferred:   "agent is reincarnating",
-		})
+	// Migration gate (design agent-reincarnate §3.7, Amendment A25 2a.2/R2
+	// p2a-r1 review): the recipient is mid-`scion reincarnate` and
+	// persistence itself failed above — the message is neither saved nor
+	// dispatched, so the sender must NOT be told it is safe on catch-up.
+	// This must be checked before any dispatch attempt below.
+	if reincarnating && persistedMsgID == "" {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"failed to persist message; agent is reincarnating, retry", nil)
 		return
 	}
 
-	// Managed agent path: deliver message directly via backend, bypass broker.
-	if isManagedAgentRuntime(agent.Runtime) {
-		if err := s.managedAgentMessage(ctx, agent, plainMessage, req.Interrupt); err != nil {
-			if persistedMsgID != "" {
-				if markErr := s.store.MarkMessageFailed(ctx, persistedMsgID, err.Error()); markErr != nil {
-					s.messageLog.Error("Failed to mark message as failed", "id", persistedMsgID, "error", markErr)
+	// deliveryStatus is set by whichever dispatch branch below runs; unused
+	// (left "") when reincarnating, since that response always says "deferred".
+	var deliveryStatus string
+
+	// Migration gate (design agent-reincarnate §3.7, Amendment A25 2a.2):
+	// skip the actual dispatch attempt while the recipient is mid-`scion
+	// reincarnate` — the message is already persisted above (visible in
+	// conversation history for the new generation's catch-up). R1 (p2a-r1
+	// review): post-delivery adapter work (notify subscription, @mention
+	// fan-out) below is NOT gated by `reincarnating` — a mentioned agent is
+	// a different, very likely non-migrating recipient, and the sender's
+	// notify subscription is independent of whether this specific message
+	// reached the migrating primary. Gating them here silently dropped both
+	// with no way for the sender to tell.
+	if !reincarnating {
+		// Managed agent path: deliver message directly via backend, bypass broker.
+		if isManagedAgentRuntime(agent.Runtime) {
+			if err := s.managedAgentMessage(ctx, agent, plainMessage, req.Interrupt); err != nil {
+				if persistedMsgID != "" {
+					if markErr := s.store.MarkMessageFailed(ctx, persistedMsgID, err.Error()); markErr != nil {
+						s.messageLog.Error("Failed to mark message as failed", "id", persistedMsgID, "error", markErr)
+					}
+				}
+				RuntimeError(w, "Failed to send message to managed agent: "+err.Error())
+				return
+			}
+
+			agent.Phase = string(state.PhaseRunning)
+			agent.Activity = "working"
+			_ = s.store.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+				Phase:    agent.Phase,
+				Activity: agent.Activity,
+			})
+			s.events.PublishAgentStatus(ctx, agent)
+
+			// B11/B13: reflect persistence failure in the response status.
+			// The request still succeeds (dispatch worked), but the caller
+			// should know the message was not persisted.
+			deliveryStatus = "delivered"
+			if persistedMsgID == "" {
+				deliveryStatus = "delivered_not_persisted"
+			}
+		} else {
+			// If a dispatcher is available, dispatch the message to the runtime broker
+			dispatcher := s.GetDispatcher()
+			if dispatcher == nil {
+				ServiceNotReady(w, "Message dispatch is not available yet — the server may still be starting up")
+				return
+			}
+			if agent.RuntimeBrokerID == "" {
+				ServiceNotReady(w, "Agent has no runtime broker assigned — the server may still be starting up")
+				return
+			}
+
+			// Synchronous delivery with 30s retry deadline for transient broker failures.
+			retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
+			defer retryCancel()
+
+			if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, plainMessage, req.Interrupt, structuredMsg); err != nil {
+				if persistedMsgID != "" {
+					if markErr := s.store.MarkMessageFailed(ctx, persistedMsgID, err.Error()); markErr != nil {
+						s.messageLog.Error("Failed to mark message as failed", "id", persistedMsgID, "error", markErr)
+					}
+				}
+				if errors.Is(err, ErrBrokerTimeout) {
+					GatewayTimeout(w, "Broker unreachable after 30s deadline")
+				} else if req.Wake {
+					RuntimeError(w, "Agent resumed successfully but message delivery failed: "+err.Error())
+				} else {
+					RuntimeError(w, "Failed to send message to runtime broker: "+err.Error())
+				}
+				return
+			}
+			messaging.RecordStep(ctx, "broker_dispatched")
+
+			// Publish agent-to-agent messages through the broker so plugin observers
+			// (Telegram, broker-log) can see them. ObserverOnly prevents the hub's own
+			// subscription from re-dispatching.
+			//
+			// #1687: For cross-project DMs, strip body and attachment metadata from
+			// the observer message so unrelated project members receive no content
+			// through the broker publication sink.
+			if strings.HasPrefix(structuredMsg.Sender, "agent:") &&
+				strings.HasPrefix(structuredMsg.Recipient, "agent:") {
+				if bp := s.GetMessageBrokerProxy(); bp != nil {
+					observerMsg := *structuredMsg
+					observerMsg.ObserverOnly = true
+					isCrossProjectObs := false
+					if senderAgent := GetAgentIdentityFromContext(ctx); senderAgent != nil {
+						isCrossProjectObs = senderAgent.ProjectID() != "" && senderAgent.ProjectID() != agent.ProjectID
+					}
+					if isCrossProjectObs {
+						sanitizeCrossProjectObserver(&observerMsg)
+					}
+					if err := bp.PublishMessage(ctx, agent.ProjectID, &observerMsg); err != nil {
+						s.messageLog.Error("Failed to publish agent-to-agent observer message",
+							"agent_id", agent.ID, "error", err)
+					}
 				}
 			}
-			RuntimeError(w, "Failed to send message to managed agent: "+err.Error())
-			return
-		}
 
-		agent.Phase = string(state.PhaseRunning)
-		agent.Activity = "working"
-		_ = s.store.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
-			Phase:    agent.Phase,
-			Activity: agent.Activity,
-		})
-		s.events.PublishAgentStatus(ctx, agent)
-
-		// Review round 2 finding #2 (see registerGroupPrimary): the
-		// managed-runtime path's primary must also be registered on a
-		// thread-derived group.
-		s.registerGroupPrimary(ctx, groupConversationID, agent)
-
-		// Process @mentions for managed agents too.
-		var managedMentionResults []messages.MentionResult
-		if len(req.Mentions) > 0 && structuredMsg != nil {
-			managedMentionResults = s.processMentions(ctx, req.Mentions, agent, structuredMsg, groupConversationID)
-		}
-
-		// B11/B13: reflect persistence failure in the response status.
-		// The request still succeeds (dispatch worked), but the caller
-		// should know the message was not persisted.
-		managedStatus := "delivered"
-		if persistedMsgID == "" {
-			managedStatus = "delivered_not_persisted"
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(MessageDeliveryResponse{
-			MessageID:      persistedMsgID,
-			Status:         managedStatus,
-			Agent:          agent.Slug,
-			AgentPhase:     agent.Phase,
-			MentionResults: managedMentionResults,
-		})
-		return
-	}
-
-	// If a dispatcher is available, dispatch the message to the runtime broker
-	dispatcher := s.GetDispatcher()
-	if dispatcher == nil {
-		ServiceNotReady(w, "Message dispatch is not available yet — the server may still be starting up")
-		return
-	}
-	if agent.RuntimeBrokerID == "" {
-		ServiceNotReady(w, "Agent has no runtime broker assigned — the server may still be starting up")
-		return
-	}
-
-	// Synchronous delivery with 30s retry deadline for transient broker failures.
-	retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
-	defer retryCancel()
-
-	if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, plainMessage, req.Interrupt, structuredMsg); err != nil {
-		if persistedMsgID != "" {
-			if markErr := s.store.MarkMessageFailed(ctx, persistedMsgID, err.Error()); markErr != nil {
-				s.messageLog.Error("Failed to mark message as failed", "id", persistedMsgID, "error", markErr)
-			}
-		}
-		if errors.Is(err, ErrBrokerTimeout) {
-			GatewayTimeout(w, "Broker unreachable after 30s deadline")
-		} else if req.Wake {
-			RuntimeError(w, "Agent resumed successfully but message delivery failed: "+err.Error())
-		} else {
-			RuntimeError(w, "Failed to send message to runtime broker: "+err.Error())
-		}
-		return
-	}
-	messaging.RecordStep(ctx, "broker_dispatched")
-
-	// Publish agent-to-agent messages through the broker so plugin observers
-	// (Telegram, broker-log) can see them. ObserverOnly prevents the hub's own
-	// subscription from re-dispatching.
-	//
-	// #1687: For cross-project DMs, strip body and attachment metadata from
-	// the observer message so unrelated project members receive no content
-	// through the broker publication sink.
-	if strings.HasPrefix(structuredMsg.Sender, "agent:") &&
-		strings.HasPrefix(structuredMsg.Recipient, "agent:") {
-		if bp := s.GetMessageBrokerProxy(); bp != nil {
-			observerMsg := *structuredMsg
-			observerMsg.ObserverOnly = true
-			isCrossProjectObs := false
-			if senderAgent := GetAgentIdentityFromContext(ctx); senderAgent != nil {
-				isCrossProjectObs = senderAgent.ProjectID() != "" && senderAgent.ProjectID() != agent.ProjectID
-			}
-			if isCrossProjectObs {
-				sanitizeCrossProjectObserver(&observerMsg)
-			}
-			if err := bp.PublishMessage(ctx, agent.ProjectID, &observerMsg); err != nil {
-				s.messageLog.Error("Failed to publish agent-to-agent observer message",
-					"agent_id", agent.ID, "error", err)
+			// B11/B13: reflect persistence failure in the response status.
+			deliveryStatus = "delivered"
+			if persistedMsgID == "" {
+				deliveryStatus = "delivered_not_persisted"
 			}
 		}
 	}
 
-	// Create notification subscription if requested
+	// Create notification subscription if requested. Not gated by
+	// `reincarnating` (R1, p2a-r1 review): this subscribes the sender to
+	// the AGENT's future status changes, independent of whether this one
+	// message was dispatched or deferred.
 	if req.Notify {
 		var notifySubscriberType, notifySubscriberID, createdBy string
 		if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
@@ -2171,21 +2167,38 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	}
 
 	// Review round 2 finding #2 (see registerGroupPrimary): the
-	// broker-dispatched path's primary must also be registered on a
-	// thread-derived group.
-	s.registerGroupPrimary(ctx, groupConversationID, agent)
+	// dispatched path's primary must also be registered on a thread-derived
+	// group. Skipped when deferred (R1, p2a-r1 review, accepted as-is):
+	// registerGroupPrimary's semantics are "participant = dispatched", and
+	// a deferred message was never dispatched to this primary.
+	if !reincarnating {
+		s.registerGroupPrimary(ctx, groupConversationID, agent)
+	}
 
-	// Process @mentions: validate slugs, fan out mention messages to resolved agents.
+	// Process @mentions: validate slugs, fan out mention messages to
+	// resolved agents. Not gated by `reincarnating` (R1, p2a-r1 review): a
+	// mentioned agent is a different recipient from the primary and is very
+	// likely not itself migrating; processMentions (R3, p2a-r1 review)
+	// applies its own migration gate per mentioned recipient.
 	var mentionResults []messages.MentionResult
 	if len(req.Mentions) > 0 && structuredMsg != nil {
 		mentionResults = s.processMentions(ctx, req.Mentions, agent, structuredMsg, groupConversationID)
 	}
 
-	// B11/B13: reflect persistence failure in the response status.
-	deliveryStatus := "delivered"
-	if persistedMsgID == "" {
-		deliveryStatus = "delivered_not_persisted"
+	if reincarnating {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(MessageDeliveryResponse{
+			MessageID:      persistedMsgID,
+			Status:         "deferred",
+			Agent:          agent.Slug,
+			AgentPhase:     agent.Phase,
+			MentionResults: mentionResults,
+			Deferred:       "agent is reincarnating",
+		})
+		return
 	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(MessageDeliveryResponse{
@@ -2316,6 +2329,17 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				continue
 			}
 
+			// Migration gate (design agent-reincarnate §3.7, R3 p2a-r1
+			// review): a group[] agent recipient is gated the same as any
+			// other delivery path — persist as deferred, skip dispatch,
+			// report "deferred" rather than dispatching into a stopped or
+			// absent container and claiming "delivered".
+			recipDeferred := reincarnationInFlight(agent)
+			recipDispatchState := store.MessageDispatchDispatched
+			if recipDeferred {
+				recipDispatchState = store.MessageDispatchDeferred
+			}
+
 			agentMsg := *msg
 			agentMsg.Type = messages.TypeGroupSet
 			agentMsg.Recipient = "agent:" + agent.Slug
@@ -2334,7 +2358,7 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				Urgent:        agentMsg.Urgent,
 				AgentID:       agent.ID,
 				GroupID:       groupID,
-				DispatchState: store.MessageDispatchDispatched,
+				DispatchState: recipDispatchState,
 				CreatedAt:     time.Now(),
 			}
 			// Phase 5 dual-write: resolve-or-create conversation for group set message.
@@ -2409,6 +2433,13 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 					Msg:        &agentMsg,
 					CreatedAt:  storeMsg.CreatedAt,
 				})
+			}
+
+			// Migration gate: the row is already persisted above as
+			// deferred; skip dispatch and report it as such.
+			if recipDeferred {
+				results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "deferred"}
+				continue
 			}
 
 			if dispatcher == nil {
@@ -2991,6 +3022,17 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 		mentionMsg.Channel = originalMsg.Channel
 		mentionMsg.ThreadID = originalMsg.ThreadID
 
+		// Migration gate (design agent-reincarnate §3.7, R3 p2a-r1 review):
+		// a mentioned agent is a recipient in its own right, independent of
+		// the primary. If IT is mid-`scion reincarnate`, persist the
+		// mention as deferred and skip its dispatch, rather than dispatching
+		// into a stopped/absent container and reporting "delivered".
+		mentionDeferred := reincarnationInFlight(mentionAgent)
+		mentionDispatchState := store.MessageDispatchDispatched
+		if mentionDeferred {
+			mentionDispatchState = store.MessageDispatchDeferred
+		}
+
 		// Persist the mention message.
 		storeMsg := &store.Message{
 			ID:            api.NewUUID(),
@@ -3004,7 +3046,7 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 			AgentID:       mentionAgent.ID,
 			Channel:       mentionMsg.Channel,
 			ThreadID:      mentionMsg.ThreadID,
-			DispatchState: store.MessageDispatchDispatched,
+			DispatchState: mentionDispatchState,
 			CreatedAt:     time.Now(),
 		}
 		if mentionMsg.Metadata != nil {
@@ -3040,6 +3082,14 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 				Msg:        mentionMsg,
 				CreatedAt:  storeMsg.CreatedAt,
 			})
+		}
+
+		// Migration gate: the mention is already persisted above as
+		// deferred; skip dispatch and report it as such rather than as
+		// "delivered".
+		if mentionDeferred {
+			results[i].Status = "deferred"
+			continue
 		}
 
 		// Dispatch to the mentioned agent's runtime.

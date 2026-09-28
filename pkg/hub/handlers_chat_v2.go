@@ -1389,6 +1389,16 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	primaryUnreachable, primaryUnreachableReason := isAgentUnreachable(primaryAgent)
 	var dispatchFailureCode string
 
+	// Migration gate (design agent-reincarnate §3.7, R3 p2a-r1 review):
+	// `isAgentUnreachable` only covers suspended/stopping/stopped/error, so
+	// a primary mid-`scion reincarnate` during `pending` (phase still
+	// "running") or `provisioning`/`starting` (neither phase is in
+	// unreachablePhases) fell through and dispatched normally into a
+	// stopped or not-yet-existing container. Checked ahead of
+	// primaryUnreachable so a migrating agent whose phase happens to be
+	// "stopping" is deferred, not marked failed.
+	primaryReincarnating := reincarnationInFlight(primaryAgent)
+
 	// F2b (design doc §3.3): agents actually dispatched into a group
 	// conversation become participants (a listing index, not an ACL —
 	// project membership already gates reads per §3.2). Review round 1
@@ -1423,7 +1433,10 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		DispatchState: store.MessageDispatchDispatched,
 		CreatedAt:     now,
 	}
-	if primaryUnreachable {
+	if primaryReincarnating {
+		// Not a failure: the message is saved for catch-up, not dropped.
+		storeMsg.DispatchState = store.MessageDispatchDeferred
+	} else if primaryUnreachable {
 		unreachableReason := fmt.Sprintf("Agent unreachable (%s)", primaryUnreachableReason)
 		storeMsg.DispatchState = store.MessageDispatchFailed
 		storeMsg.DispatchFailureReason = &unreachableReason
@@ -1533,10 +1546,10 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	}
 
 	// Dispatch to the primary agent — skipped entirely when the phase gate
-	// above already marked the row failed.
+	// above already marked the row failed or deferred.
 	dispatcher := s.GetDispatcher()
 	primaryDispatchOK := true
-	if primaryUnreachable {
+	if primaryReincarnating || primaryUnreachable {
 		primaryDispatchOK = false
 	} else if dispatcher != nil {
 		// withDispatchMessageID carries the hub message ID to the broker so a

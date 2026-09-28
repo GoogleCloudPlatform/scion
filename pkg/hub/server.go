@@ -3486,6 +3486,17 @@ func (s *Server) messageEventHandler() EventHandler {
 			return fmt.Errorf("failed to resolve agent %q: %w", targetName, err)
 		}
 
+		// Migration gate (design agent-reincarnate §3.7, R3 p2a-r1 review):
+		// scheduled messages are not deferred (there is no sender to persist
+		// a "saved to history" row for, and no request to answer 202 to) —
+		// a scheduled message firing mid-`scion reincarnate` fails loudly
+		// instead of dispatching into a stopped or absent container and
+		// silently succeeding. The event records this as a failure so the
+		// blocked-wait pairing agents rely on is not silently lost.
+		if reincarnationInFlight(agent) {
+			return fmt.Errorf("target agent is reincarnating")
+		}
+
 		// ---- C1 containment: fire-time authorization ----
 		// Re-resolve the creator identity and authorize the message through
 		// the production choke point (authorizeAgentMessage, isSystemPlane=false).
