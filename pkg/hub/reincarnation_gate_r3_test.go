@@ -148,7 +148,7 @@ func TestProcessMentions_O2_DeferredMentionDMResolutionFailure(t *testing.T) {
 	assert.Equal(t, "error", res[0].Status)
 	// O-a (p2a-r4 review): pin that this "error" specifically came from the
 	// DM-resolution branch, not some other error path in the loop.
-	assert.Contains(t, res[0].Error, "catch-up conversation")
+	assert.Equal(t, "agent is reincarnating and the catch-up conversation could not be resolved", res[0].Error)
 
 	rows, err := s.ListMessages(context.Background(), store.MessageFilter{AgentID: mentioned.ID}, store.ListOptions{})
 	require.NoError(t, err)
