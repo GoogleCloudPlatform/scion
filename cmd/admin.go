@@ -18,7 +18,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
 	"strings"
 	"time"
 
@@ -111,14 +110,7 @@ func runAdminPromote(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("no database URL configured; provide --db flag or ensure server config exists")
 	}
 
-	printURL := cfg.Database.URL
-	if u, err := url.Parse(printURL); err == nil && u.User != nil {
-		if _, has := u.User.Password(); has {
-			u.User = url.UserPassword(u.User.Username(), "xxxxx")
-			printURL = u.String()
-		}
-	}
-	_, _ = fmt.Fprintf(out, "Database: %s (%s)\n", cfg.Database.Driver, printURL)
+	_, _ = fmt.Fprintf(out, "Database: %s (%s)\n", cfg.Database.Driver, config.RedactDatabaseURL(cfg.Database.Driver, cfg.Database.URL))
 
 	// Open the database
 	s, err := openRecoveryStore(ctx, cfg)
