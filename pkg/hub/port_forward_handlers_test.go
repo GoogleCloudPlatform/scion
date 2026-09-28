@@ -339,6 +339,60 @@ func TestAgentPortProxyThroughTunnel(t *testing.T) {
 	assert.Equal(t, "hello from app", rec.Body.String())
 }
 
+// TestAgentPortProxyResponseIsSandboxed verifies the defensive invariant that
+// content proxied from an agent's exposed port cannot set cookies on the hub
+// origin and is always served under the hub's sandbox CSP, regardless of what
+// the agent's own response headers say.
+func TestAgentPortProxyResponseIsSandboxed(t *testing.T) {
+	srv, s := testServer(t)
+	hubHTTP := httptest.NewServer(srv.Handler())
+	t.Cleanup(hubHTTP.Close)
+
+	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Set-Cookie", "session=agent-set; Path=/")
+		w.Header().Set("Content-Security-Policy", "default-src *")
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("<html>agent content</html>"))
+	}))
+	t.Cleanup(app.Close)
+
+	appURL, err := url.Parse(app.URL)
+	require.NoError(t, err)
+	host, portText, err := net.SplitHostPort(appURL.Host)
+	require.NoError(t, err)
+	port, err := net.LookupPort("tcp", portText)
+	require.NoError(t, err)
+	if strings.TrimSpace(host) == "" {
+		host = "127.0.0.1"
+	}
+
+	agent, token := createPortForwardAgent(t, srv, s)
+	rec := doAgentTokenRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/ports", map[string]any{
+		"port": port,
+		"host": host,
+	}, token)
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	manager := scionportforward.NewManager(scionhub.NewClientWithConfig(hubHTTP.URL, token, agent.ID))
+	go manager.Run(ctx)
+	require.Eventually(t, func() bool {
+		srv.portTunnels.mu.RLock()
+		defer srv.portTunnels.mu.RUnlock()
+		return srv.portTunnels.sessions[agent.ID] != nil
+	}, 5*time.Second, 50*time.Millisecond)
+
+	rec = doAgentTokenRequest(t, srv, http.MethodGet, "/api/v1/agents/"+agent.ID+"/ports/"+portText+"/proxy/", nil, token)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "<html>agent content</html>", rec.Body.String())
+	assert.Equal(t, untrustedContentSandboxCSP, rec.Header().Get("Content-Security-Policy"),
+		"the hub's sandbox CSP must be authoritative; the agent's own CSP must not pass through")
+	assert.Equal(t, "nosniff", rec.Header().Get("X-Content-Type-Options"))
+	assert.Empty(t, rec.Header().Values("Set-Cookie"), "the agent must not be able to set cookies on the hub origin")
+}
+
 func TestAgentPortClearedOnTunnelDisconnect(t *testing.T) {
 	srv, s := testServer(t)
 	agent, token := createPortForwardAgent(t, srv, s)
