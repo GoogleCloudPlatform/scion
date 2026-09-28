@@ -4,7 +4,7 @@ output "hub_sa_email" {
 }
 
 output "hub_sa_unique_id" {
-  description = "Hub SA's numeric unique_id (F-108, design §9). Not secret. The hub's k8s client falls back to pkg/k8s/client.go's fallbackToGCEAuth (the kubeconfig names the gke-gcloud-auth-plugin exec, which the image doesn't have), and that fallback requests only the cloud-platform scope, not userinfo.email — so GKE identifies the caller by this numeric ID instead of the SA's email. agent-runtime-k8s's RoleBinding needs a second subject on this value or every hub API call to the cluster is denied as an unrecognized User."
+  description = "Hub SA's numeric unique_id. Not secret. The hub's k8s client falls back to pkg/k8s/client.go's fallbackToGCEAuth (the kubeconfig names the gke-gcloud-auth-plugin exec, which the image doesn't have), and that fallback requests only the cloud-platform scope, not userinfo.email — so GKE identifies the caller by this numeric ID instead of the SA's email. agent-runtime-k8s's RoleBinding needs a second subject on this value or every hub API call to the cluster is denied as an unrecognized User."
   value       = google_service_account.hub.unique_id
 }
 
@@ -19,7 +19,7 @@ output "agent_sa_email" {
 }
 
 output "hub_iam_grants" {
-  description = "All hub-SA IAM grant resources' .id values, bundled purely as a depends_on handle (design §3.5) — hub-cloudrun's time_sleep.iam_propagation depends on this list, so a Cloud Run revision can't boot before these grants have had time to propagate. Deliberately .id (list(string)), not the whole resource objects: google_project_iam_member and google_service_account_iam_member have different attribute shapes (e.g. project vs. service_account_id), so a list(any) of the full objects fails type unification at the consuming module's typed variable boundary with \"all list elements must have the same type\" — reproduced credential-free with two different hashicorp/random resource types before fixing (tf-review). .id still carries the same dependency edge as the full object would."
+  description = "All hub-SA IAM grant resources' .id values, bundled purely as a depends_on handle — hub-cloudrun's time_sleep.iam_propagation depends on this list, so a Cloud Run revision can't boot before these grants have had time to propagate. Deliberately .id (list(string)), not the whole resource objects: google_project_iam_member and google_service_account_iam_member have different attribute shapes (e.g. project vs. service_account_id), so a list(any) of the full objects fails type unification at the consuming module's typed variable boundary with \"all list elements must have the same type\" — reproduced credential-free with two different hashicorp/random resource types before fixing. .id still carries the same dependency edge as the full object would."
   value = [
     google_project_iam_member.hub_secretmanager_admin_hub_scope.id,
     google_project_iam_member.hub_cloudsql_client.id,

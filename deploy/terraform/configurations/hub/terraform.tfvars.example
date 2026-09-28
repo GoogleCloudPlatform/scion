@@ -22,20 +22,20 @@ hub_image = "us-central1-docker.pkg.dev/ptone-emblem/tfha-scion/hub:latest"
 # Optional — leave unset (default "") for normal applies. Set to a new
 # value (e.g. a date) here, in this tfvars file, only when rotating this
 # hub's DB password; see the README's "Rotating a hub's DB password"
-# section (F-115 rotation design). Once set, keep it here permanently —
-# never remove it or reset it to "", either of which triggers another,
-# unplanned rotation on the next apply.
+# section. Once set, keep it here permanently — never remove it or reset
+# it to "", either of which triggers another, unplanned rotation on the
+# next apply.
 # db_password_rotation = "REPLACE_ME_WITH_ROTATION_MARKER"
 
 iap_members  = []
 admin_emails = []
 
-# Single instance. min_instances=1: OQ-4, multi-replica in-process broker
-# safety is unconfirmed. max_instances=1 (phase 2 hardening, down from 3):
-# C1 (research-f114-oq4.md §C1; upstream issue ptone/scion#2090) — scale-in
-# of the broker-affinity-owning instance leaves the shared broker_id's
-# project providers stamped offline with nothing to bring them back online,
-# and this is already reachable at min=1/max=3 today. Revisit once
-# ptone/scion#2090 is fixed upstream.
+# Single instance. min_instances=1: multi-replica in-process broker safety
+# is unconfirmed for this runtime. max_instances=1, down from 3 (see
+# hub-cloudrun's max_instances description for the upstream defect,
+# ptone/scion#2090, this avoids): scale-in of the broker-affinity-owning
+# instance leaves the shared broker_id's project providers stamped offline
+# with nothing to bring them back online, and this is already reachable at
+# min=1/max=3 today. Revisit once ptone/scion#2090 is fixed upstream.
 min_instances = 1
 max_instances = 1

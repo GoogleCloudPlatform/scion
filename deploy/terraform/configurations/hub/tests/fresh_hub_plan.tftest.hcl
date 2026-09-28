@@ -1,23 +1,26 @@
-# F-112 regression coverage: prove configurations/hub composes and plans
-# end to end, fully offline, for a brand-new hub with NOTHING pre-existing —
-# no shared infra, no prior state, no Secret Manager secret already holding
-# a version. mock_provider replaces every provider this root and its module
+# Regression coverage: prove configurations/hub composes and plans end to
+# end, fully offline, for a brand-new hub with NOTHING pre-existing — no
+# shared infra, no prior state, no Secret Manager secret already holding a
+# version. mock_provider replaces every provider this root and its module
 # tree use (google, google-beta, kubernetes, tls, random, time) with a
 # schema-driven fake that never calls a real API, so there is no GCP project,
 # no credentials, and no registry access needed to run this file.
 #
-# What this test does NOT prove (say so, don't fake it — tf-dev-p2-dbpass
-# brief): the actual F-112 defect was a real Secret Manager API returning 404
-# "not found or has no versions" for data.google_secret_manager_secret_version
-# .db_password, because that data source's read happened at plan time, before
-# cloudsql-database's secret version resource existed. Terraform's mock
+# This guards against a real defect: a fresh hub's first plan used to read
+# `data.google_secret_manager_secret_version.db_password` for a secret that
+# only gets a version once `cloudsql-database` has actually created it. That
+# data source's read happens at plan time, so on any hub that has never been
+# applied before, the real Secret Manager API 404s ("not found or has no
+# versions") before the secret ever exists — no fresh hub could plan.
+#
+# What this test does NOT prove (say so, don't fake it): Terraform's mock
 # providers do not reproduce that failure mode — a mocked data source always
 # synthesizes a schema-shaped value and succeeds, regardless of whether the
 # "real" resource it names would exist. Re-adding a plan-time data source
 # read of a not-yet-created secret would still pass this test unchanged,
 # because the mock has no concept of "not found". This test can only prove
 # the fixed configuration composes and plans cleanly under a fresh, fully
-# mocked environment; the actual guarantee that F-112's hazard is gone is
+# mocked environment; the actual guarantee that the hazard is gone is
 # structural — hub-cloudrun/main.tf no longer contains
 # data.google_secret_manager_secret_version.db_password at all (var.db_password
 # is a plain sensitive module input now — see that variable's description).
@@ -36,9 +39,8 @@ variables {
   shared_prefix     = "tfha"
   shared_share_name = "scion"
 
-  # A genuinely NEW hub, on the existing (mocked) shared infra — the exact
-  # F-112 scenario: tfha-h2's very first plan, nothing about tfha-h2 has
-  # ever been applied before.
+  # A genuinely NEW hub, on the existing (mocked) shared infra — a second
+  # hub's very first plan, with nothing about it ever applied before.
   hub_name     = "tfha-h2"
   state_prefix = "tfha/hubs/tfha-h2"
 
@@ -103,8 +105,8 @@ override_data {
 run "fresh_h2_plans_clean" {
   command = plan
 
-  # The plan must succeed at all — this is the actual F-112 assertion: a
-  # brand-new hub's plan must not error. Before the fix, the real-world
+  # The plan must succeed at all — this is the actual regression assertion:
+  # a brand-new hub's plan must not error. Before the fix, the real-world
   # equivalent of this run 404'd inside modules/hub-cloudrun/main.tf's data
   # source; that specific failure mode can't be reproduced under mock (see
   # the file header), but a clean plan here at least proves nothing else in
@@ -120,14 +122,15 @@ run "fresh_h2_plans_clean" {
     error_message = "iap_audience should be deterministically computed from project_number/region/hub_name at plan time — if this is unknown or wrong, something upstream of hub-cloudrun stopped being plan-time-known."
   }
 
-  # Phase 2 hardening item 6: the artifacts bucket's noncurrent-version
-  # lifecycle rule (item 4) exists and is scoped to ARCHIVED (noncurrent)
-  # object versions only. bucket_lifecycle_rules now returns
-  # local.artifacts_lifecycle_rules (tf-dev-lifecycle-output) — a plain list
-  # of plain objects — rather than the google_storage_bucket.artifacts
-  # .lifecycle_rule resource attribute, so condition/action are read
-  # directly, without the tolist() the provider's set-of-object schema used
-  # to require.
+  # The artifacts bucket's noncurrent-version lifecycle rule exists and is
+  # scoped to ARCHIVED (noncurrent) object versions only. bucket_lifecycle_rules
+  # returns local.artifacts_lifecycle_rules — a plain list of plain objects
+  # driven from the same config local as the actual lifecycle_rule blocks —
+  # rather than reading back google_storage_bucket.artifacts.lifecycle_rule's
+  # provider-normalized resource attribute, so condition/action are read
+  # directly, without the tolist() the provider's set-of-object schema would
+  # otherwise require, and without echoing provider-normalized defaults that
+  # would make the second plan non-empty.
   assert {
     condition = anytrue([
       for r in output.bucket_lifecycle_rules :
@@ -137,26 +140,26 @@ run "fresh_h2_plans_clean" {
   }
 }
 
-# Alt-F (design §6 OQ-11, briefs/tf-dev-dsn-secret.md) asked this test to
-# also assert the rendered settings contain no "postgres://" and the service
-# has the SCION_SERVER_DATABASE_URL secret env, "if mock_provider allows".
-# Tried directly: `module.hub_cloudrun.google_secret_manager_secret_version
-# .settings.secret_data` and `module.hub_cloudrun.google_cloud_run_v2_service
-# .hub.template[0].containers[0].env` from an assert block in this run —
-# both fail with "Unsupported attribute": a `run` block's `module.<name>`
-# reference only exposes that module's declared *outputs* (service_uri,
-# iap_audience, bucket_name — none of which carry this data), never its
-# internal resources' attributes, even under `command = plan`. It doesn't
-# allow it. The alternative, adding new hub-cloudrun/hub-root outputs
-# purely so this test file can read them, is declined as a real production
-# surface change beyond this brief's scope (no other refactors) — for
-# comparatively little gain, since the two facts this would assert are
-# already directly visible by reading the diff: settings.yaml.tftpl's
-# server.database block has no `url:` key any more (see that file), and
-# google_cloud_run_v2_service.hub declares the SCION_SERVER_DATABASE_URL
-# env block explicitly (hub-cloudrun/main.tf). The actual end-to-end proof
-# that this matters — the hub's real config loader takes database.url from
-# this env var when the file has none — is Step 0's Go-level verification
-# (briefs/tf-dev-dsn-secret.md, phase1-validation.md "Round: DSN secret
-# (Alt-F)"), which mock Terraform providers can't reach anyway (see this
-# file's header on what mock_provider can't reproduce).
+# The database DSN (including the password) is passed to the hub as a
+# pinned Secret Manager secret env var (SCION_SERVER_DATABASE_URL), not
+# embedded in the rendered settings.yaml, so a credential never has to sit
+# in the settings file. Ideally this test would also assert the rendered
+# settings contain no "postgres://" and the service has that secret env,
+# but that can't be done here: a `run` block's `module.<name>` reference
+# only exposes that module's declared *outputs* (service_uri, iap_audience,
+# bucket_name — none of which carry this data), never its internal
+# resources' attributes, even under `command = plan`. Tried directly against
+# `module.hub_cloudrun.google_secret_manager_secret_version.settings
+# .secret_data` and `module.hub_cloudrun.google_cloud_run_v2_service.hub
+# .template[0].containers[0].env` — both fail with "Unsupported attribute".
+# Adding new hub-cloudrun/hub-root outputs purely so this test file can read
+# them is declined as a production surface change for comparatively little
+# gain, since the two facts this would assert are already directly visible
+# by reading the diff: settings.yaml.tftpl's server.database block has no
+# `url:` key any more (see that file), and google_cloud_run_v2_service.hub
+# declares the SCION_SERVER_DATABASE_URL env block explicitly
+# (hub-cloudrun/main.tf). The actual end-to-end proof that this matters —
+# the hub's real config loader takes database.url from this env var when the
+# file has none — needs a Go-level test against the real loader, which mock
+# Terraform providers can't reach anyway (see this file's header on what
+# mock_provider can't reproduce).

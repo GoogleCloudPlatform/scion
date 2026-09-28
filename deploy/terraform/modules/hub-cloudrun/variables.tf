@@ -19,7 +19,7 @@ variable "hub_name" {
 
   validation {
     condition     = can(regex("^[a-z][a-z0-9-]{2,15}$", var.hub_name))
-    error_message = "hub_name must match ^[a-z][a-z0-9-]{2,15}$ (design §3.8)."
+    error_message = "hub_name must match ^[a-z][a-z0-9-]{2,15}$."
   }
 }
 
@@ -29,7 +29,7 @@ variable "hub_image" {
 }
 
 variable "image_registry" {
-  description = "Registry the hub rewrites bare agent harness images against, rendered at the TOP LEVEL of settings.yaml (not under server: — design §3.4/§3.6). Without it, bare images like scion-claude:latest are never rewritten, GKE pulls them from Docker Hub where they don't exist, and agent start fails with ImagePullBackOff. Computed by the hub root from shared-lookup's real Artifact Registry resource; this module just renders whatever it's given."
+  description = "Registry the hub rewrites bare agent harness images against, rendered at the TOP LEVEL of settings.yaml (not under server:). Without it, bare images like scion-claude:latest are never rewritten, GKE pulls them from Docker Hub where they don't exist, and agent start fails with ImagePullBackOff. Computed by the hub root from shared-lookup's real Artifact Registry resource; this module just renders whatever it's given."
   type        = string
 }
 
@@ -44,7 +44,7 @@ variable "transport_sa_email" {
 }
 
 variable "hub_iam_grants" {
-  description = "hub-identity's hub-SA IAM grant resources' .id values, passed through purely to create a depends_on ordering (design §3.5) for this module's own time_sleep.iam_propagation: the Cloud Run service must not boot before these grants have had time to propagate, or it gets a 403 with no retry. Deliberately list(string) of .id, not list(any) of the full resource objects: google_project_iam_member and google_service_account_iam_member have different attribute shapes, and a list(any) of the full objects fails type unification at this exact variable boundary with \"all list elements must have the same type\" (tf-review; reproduced credential-free with two different hashicorp/random resource types before fixing). .id still carries the same dependency edge."
+  description = "hub-identity's hub-SA IAM grant resources' .id values, passed through purely to create a depends_on ordering for this module's own time_sleep.iam_propagation: the Cloud Run service must not boot before these grants have had time to propagate, or it gets a 403 with no retry. Deliberately list(string) of .id, not list(any) of the full resource objects: google_project_iam_member and google_service_account_iam_member have different attribute shapes, and a list(any) of the full objects fails type unification at this exact variable boundary with \"all list elements must have the same type\" (reproduced credential-free with two different hashicorp/random resource types before fixing). .id still carries the same dependency edge."
   type        = list(string)
 }
 
@@ -54,7 +54,7 @@ variable "hub_iam_condition_expression" {
 }
 
 variable "boot_prerequisites" {
-  description = "F-106 (design §9): map of real resource attributes (never bare input variables or computed strings) that the Cloud Run service must not boot before — the nfs-init Job's own identity (its Job actually finished, not just that its export path string is known), and the cloudsql-database/hub-identity resources this module doesn't otherwise reference directly. Consumed only by terraform_data.boot_prerequisites below, which google_cloud_run_v2_service.hub depends on; no data source may depend on it (see that resource's comment). Replaces a module-level depends_on that used to sit on this module's caller (configurations/hub/main.tf) — that forced Terraform to defer *every* resource and data source inside this module, including this module's old data.google_secret_manager_secret_version.db_password (removed in F-112, replaced by var.db_password, itself later removed by Alt-F — see var.dsn_secret_id/var.dsn_secret_version), whenever hub-identity/agent-runtime-k8s/cloudsql-database had any pending change, which made the settings secret_data unknown at plan time and forced a spurious replace of the settings secret version (F-106, vm-deploy caught this on a real apply)."
+  description = "Map of real resource attributes (never bare input variables or computed strings) that the Cloud Run service must not boot before — the nfs-init Job's own identity (its Job actually finished, not just that its export path string is known), and the cloudsql-database/hub-identity resources this module doesn't otherwise reference directly. Consumed only by terraform_data.boot_prerequisites below, which google_cloud_run_v2_service.hub depends on; no data source may depend on it (see that resource's comment). Replaces a module-level depends_on that used to sit on this module's caller (configurations/hub/main.tf) — that forced Terraform to defer *every* resource and data source inside this module, including a data source that used to read the DB password (since removed, along with the sensitive var.db_password input it was replaced by, once the DSN moved entirely into a dedicated secret — see var.dsn_secret_id/var.dsn_secret_version), whenever hub-identity/agent-runtime-k8s/cloudsql-database had any pending change. That made the settings secret_data unknown at plan time and forced a spurious replace of the settings secret version on a real apply."
   type        = map(string)
 }
 
@@ -74,18 +74,18 @@ variable "subnet_name" {
 }
 
 variable "sql_connection_name" {
-  description = "Cloud SQL connection name (shared.sql.connection_name). Still needed here for the cloudsql volume's cloud_sql_instance.instances (F-104) even though it's no longer rendered into settings.yaml (Alt-F, design §6 OQ-11)."
+  description = "Cloud SQL connection name (shared.sql.connection_name). Still needed here for the cloudsql volume's cloud_sql_instance.instances even though it's no longer rendered into settings.yaml."
   type        = string
 }
 
-# db_name/db_user/db_password (F-112) are gone: Alt-F (design §6 OQ-11)
-# removed the embedded-DSN-in-settings.yaml approach they existed for. The
-# DSN is now built entirely inside cloudsql-database and reaches this
-# module only as the two secret coordinates below — this module never sees
-# the plaintext password, user or database name at all.
+# db_name/db_user/db_password are gone: an earlier embedded-DSN-in-
+# settings.yaml approach they existed for was removed. The DSN is now built
+# entirely inside cloudsql-database and reaches this module only as the two
+# secret coordinates below — this module never sees the plaintext password,
+# user or database name at all.
 
 variable "dsn_secret_id" {
-  description = "Secret Manager secret ID holding the full DSN (cloudsql-database output dsn_secret_id, Alt-F design §6 OQ-11). Used both for the SCION_SERVER_DATABASE_URL secret env var on google_cloud_run_v2_service.hub and for this module's own hub_reads_dsn accessor grant."
+  description = "Secret Manager secret ID holding the full DSN (cloudsql-database output dsn_secret_id). Used both for the SCION_SERVER_DATABASE_URL secret env var on google_cloud_run_v2_service.hub and for this module's own hub_reads_dsn accessor grant."
   type        = string
 }
 
@@ -105,7 +105,7 @@ variable "nfs_export" {
 }
 
 variable "nfs_mount_root" {
-  description = "Local mount root inside the Cloud Run container. The NFS volume is mounted at \"<nfs_mount_root>/<hub_name>\", which must equal <mount_root>/<share.id> in settings.yaml so NFSMountReconciler takes the already-mounted path (design §3.6, OQ-1)."
+  description = "Local mount root inside the Cloud Run container. The NFS volume is mounted at \"<nfs_mount_root>/<hub_name>\", which must equal <mount_root>/<share.id> in settings.yaml so the runtime broker's NFSMountReconciler treats the volume as already mounted rather than trying (and failing, as a non-root container) to mount it itself."
   type        = string
   default     = "/mnt/nfs"
 }
@@ -147,7 +147,7 @@ variable "gke" {
 }
 
 variable "iap_oauth_client_id" {
-  description = "OAuth client ID, optional (design §3.4 \"IAP and the OAuth client\", ptone 21:55: creating/binding a custom IAP OAuth client is a post-apply console step, not a Terraform input — the IAP OAuth Admin API is shut down for new clients anyway). Not a secret, not managed by Terraform. Feeds exactly one thing: settings.yaml's auth.transport.oidc_audience (design §8: NOT the IAP resource path) — the audience agents' transport tokens must present over IAP. When null, the hub and IAP browser login still work, but agent transport is disabled (transportauth.FromEnv returns a nil token source with no audience) — the check block below warns. Two real values: the project's Google-managed OAuth client ID (read-only discovery, works immediately for in-org users — see the README), or a custom client created by hand in the console for cross-org sign-in."
+  description = "OAuth client ID, optional. Creating/binding a custom IAP OAuth client is a post-apply console step, not a Terraform input — the IAP OAuth Admin API is shut down for new clients anyway. Not a secret, not managed by Terraform. Feeds exactly one thing: settings.yaml's auth.transport.oidc_audience (NOT the IAP resource path) — the audience agents' transport tokens must present over IAP. When null, the hub and IAP browser login still work, but agent transport is disabled (transportauth.FromEnv returns a nil token source with no audience) — the check block below warns. Two real values: the project's Google-managed OAuth client ID (read-only discovery, works immediately for in-org users — see the README), or a custom client created by hand in the console for cross-org sign-in."
   type        = string
   default     = null
 
@@ -170,13 +170,13 @@ variable "admin_emails" {
 }
 
 variable "min_instances" {
-  description = "Cloud Run min instance count. Phase 1 uses 1 (OQ-4: multi-replica in-process broker safety is unconfirmed)."
+  description = "Cloud Run min instance count. Kept at 1: multi-replica safety of the in-process runtime broker is not fully proven — see max_instances below for the one confirmed defect a multi-instance steady state makes worse."
   type        = number
   default     = 1
 }
 
 variable "max_instances" {
-  description = "Cloud Run max instance count. Default 1 (ptone decision, phase 2 hardening), down from 3: C1 (research-f114-oq4.md §C1; upstream issue ptone/scion#2090) — when the instance that owns broker affinity goes away (scale-in, revision retire, graceful shutdown), it stamps every project-provider row for the shared broker_id offline, and nothing on the surviving instances stamps them back online. Agent-create then fails with \"Default runtime broker is unavailable\" until an instance (re)connects. This is already reachable at min=1/max=3 today, and scaling above 1 only makes it more likely (more scale-in events). Revisit once ptone/scion#2090 is fixed upstream. min_instances stays 1 (OQ-4, unrelated: unconfirmed multi-replica in-process broker safety)."
+  description = "Cloud Run max instance count. Default 1, down from 3, to avoid an upstream defect (ptone/scion#2090) — when the instance that owns broker affinity goes away (scale-in, revision retire, graceful shutdown), it stamps every project-provider row for the shared broker_id offline, and nothing on the surviving instances stamps them back online. Agent-create then fails with \"Default runtime broker is unavailable\" until an instance (re)connects. This is already reachable at min=1/max=3, and scaling above 1 only makes it more likely (more scale-in events). Revisit once ptone/scion#2090 is fixed upstream."
   type        = number
   default     = 1
 }
@@ -194,14 +194,15 @@ variable "memory" {
 }
 
 variable "timeout" {
-  description = "Request timeout. 3600s (not the docs' 900s) for long-lived WebSockets/terminals (design §8)."
+  description = "Request timeout. 3600s (not the docs' 900s) for long-lived WebSockets/terminals."
   type        = string
   default     = "3600s"
 }
 
-# F-110: shared bound-check support for hub_write_timeout/broker_write_timeout
-# below, co-located here rather than in main.tf's locals so the whole F-110
-# change (description, default, validation) reads as one unit. Terraform
+# Shared bound-check support for hub_write_timeout/broker_write_timeout
+# below, co-located here rather than in main.tf's locals so the whole
+# write-timeout change (description, default, validation) reads as one unit.
+# Terraform
 # requires each variable's OWN validation condition to reference var.<self>
 # directly (a static check, not just "produces a correct boolean") — so this
 # local only covers the part that's genuinely shared (var.timeout's own
@@ -223,7 +224,7 @@ locals {
 }
 
 variable "hub_write_timeout" {
-  description = "F-110 (design §9): the hub's http.Server WriteTimeout, rendered as server.hub.write_timeout in settings.yaml (pkg/config/settings_v1.go:552, mapped via time.ParseDuration at settings_v1.go:1617-1620). Defaults to 60s in Go (pkg/config/hub_config.go:672) when unset — too short for a slow agent create (cold Autopilot node or cold image pull; vm-deploy observed 89-114s server-side). The create succeeds, but the hub's response is silently discarded once WriteTimeout fires, and Cloud Run reports 503 for a request that actually worked. Must be a plain \"<N>s\" duration string — Cloud Run's own Duration format, and also a valid Go duration (time.ParseDuration accepts it) — and no larger than var.timeout, the Cloud Run request timeout: Cloud Run would cut the connection first otherwise, making a larger value meaningless. 300s (5 min) comfortably covers the observed 89-114s range with real margin. It does NOT reach the full ~10-minute ceiling waitForPodReady allows (pkg/runtime/k8s_runtime.go:1595-1596, GKE Autopilot can be slow) — the hub's own HTTP client to the co-located broker has a separate, hard-coded 120s timeout (pkg/hub/broker_http_transport.go:73, http.Client{Timeout: 120 * time.Second}, not settings-driven) that this variable cannot reach at all. That is a Go-level finding, reported to tf-lead, not fixed here."
+  description = "The hub's http.Server WriteTimeout, rendered as server.hub.write_timeout in settings.yaml (pkg/config/settings_v1.go:552, mapped via time.ParseDuration at settings_v1.go:1617-1620). Defaults to 60s in Go (pkg/config/hub_config.go:672) when unset — too short for a slow agent create (cold Autopilot node or cold image pull; observed 89-114s server-side). The create succeeds, but the hub's response is silently discarded once WriteTimeout fires, and Cloud Run reports 503 for a request that actually worked. Must be a plain \"<N>s\" duration string — Cloud Run's own Duration format, and also a valid Go duration (time.ParseDuration accepts it) — and no larger than var.timeout, the Cloud Run request timeout: Cloud Run would cut the connection first otherwise, making a larger value meaningless. 300s (5 min) comfortably covers the observed 89-114s range with real margin. It does NOT reach the full ~10-minute ceiling waitForPodReady allows (pkg/runtime/k8s_runtime.go:1595-1596, GKE Autopilot can be slow) — the hub's own HTTP client to the co-located broker has a separate, hard-coded 120s timeout (pkg/hub/broker_http_transport.go:73, http.Client{Timeout: 120 * time.Second}, not settings-driven) that this variable cannot reach at all. That is a Go-level limitation this module cannot work around."
   type        = string
   default     = "300s"
 
@@ -243,7 +244,7 @@ variable "hub_write_timeout" {
 }
 
 variable "broker_write_timeout" {
-  description = "F-110 (design §9): the co-located broker's http.Server WriteTimeout, rendered as server.broker.write_timeout in settings.yaml (settings_v1.go:582, mapped at settings_v1.go:1681-1684). Defaults to 120s in Go (hub_config.go:685) when unset. vm-deploy's second observed create (\"foo\") took 113.66s — close enough to this default that a slightly slower create would independently fail here even after hub_write_timeout is raised, since the broker's own response write would be cut off before it ever reaches the hub. Same format/bound rule as hub_write_timeout, and the same 300s default for the same reason (comfortable margin over the observed range, still short of the ~10-minute waitForPodReady ceiling for the same hub_write_timeout reason — the hub-broker HTTP client's hard-coded 120s cap, not this value, is what actually stops mattering past ~120s today)."
+  description = "The co-located broker's http.Server WriteTimeout, rendered as server.broker.write_timeout in settings.yaml (settings_v1.go:582, mapped at settings_v1.go:1681-1684). Defaults to 120s in Go (hub_config.go:685) when unset. An observed agent create took 113.66s — close enough to this default that a slightly slower create would independently fail here even after hub_write_timeout is raised, since the broker's own response write would be cut off before it ever reaches the hub. Same format/bound rule as hub_write_timeout, and the same 300s default for the same reason (comfortable margin over the observed range, still short of the ~10-minute waitForPodReady ceiling for the same hub_write_timeout reason — the hub-broker HTTP client's hard-coded 120s cap, not this value, is what actually stops mattering past ~120s today)."
   type        = string
   default     = "300s"
 
@@ -263,13 +264,13 @@ variable "broker_write_timeout" {
 }
 
 variable "max_connections_budget" {
-  description = "Phase 2 hardening (design §3.7): a per-hub ceiling on this hub's worst-case Postgres connection usage (max_instances * the rendered database.max_open_conns), checked below. The hub root has no visibility into sibling hubs on the same shared Cloud SQL instance (shared-lookup's contract, §3.5, exposes only the instance's own coordinates, not who else is attached to it), so the true design §3.7 budget — sum across every hub on the instance <= the shared instance's max_connections (default 200, configurations/shared-infra's sql_max_connections) — cannot be computed from inside a single hub root. This variable is the operator-supplied stand-in: it is one hub's share of that 200, not the total. Default 40 assumes up to 5 similarly-sized hubs on the shared instance (matching the README's \"roughly 5 dev hubs with headroom\" sizing note). At the module's own max_instances default (1, C1 — see that variable's description) a hub uses at most 10; even at the pre-C1 max_instances=3 some deployments may still run, a hub tops out at 30, still leaving headroom under this 40 budget, and 5 such hubs at the budget's ceiling would use exactly 200. Operators adding more or larger hubs must lower this per-hub or raise the shared instance's max_connections and pass a matching value here."
+  description = "A per-hub ceiling on this hub's worst-case Postgres connection usage (max_instances * the rendered database.max_open_conns), checked below. The hub root has no visibility into sibling hubs on the same shared Cloud SQL instance (shared-lookup's contract exposes only the instance's own coordinates, not who else is attached to it), so the true budget — sum across every hub on the instance <= the shared instance's max_connections (default 200, configurations/shared-infra's sql_max_connections) — cannot be computed from inside a single hub root. This variable is the operator-supplied stand-in: it is one hub's share of that 200, not the total. Default 40 assumes up to 5 similarly-sized hubs on the shared instance (matching the README's \"roughly 5 dev hubs with headroom\" sizing note). At the module's own max_instances default (1 — see that variable's description) a hub uses at most 10; even at a larger max_instances=3 some deployments may still run, a hub tops out at 30, still leaving headroom under this 40 budget, and 5 such hubs at the budget's ceiling would use exactly 200. Operators adding more or larger hubs must lower this per-hub or raise the shared instance's max_connections and pass a matching value here."
   type        = number
   default     = 40
 }
 
 variable "extra_settings" {
-  description = "Escape hatch for variations to deep-merge extra settings.yaml keys. Not wired up in phase 1 (seam reserved for phase 3)."
+  description = "Escape hatch for variations to deep-merge extra settings.yaml keys. Not wired up yet — reserved for a future settings-merge seam."
   type        = any
   default     = {}
 }

@@ -1,6 +1,6 @@
 # Shared GKE Autopilot cluster. One cluster serves every hub, each isolated
-# by its own namespace + namespaced RBAC (design §3.1, §3.4 agent-runtime-k8s).
-# Workload Identity is implicit on Autopilot.
+# by its own namespace and namespaced RBAC (see the agent-runtime-k8s
+# module). Workload Identity is implicit on Autopilot.
 
 resource "google_container_cluster" "this" {
   project  = var.project_id
@@ -45,9 +45,11 @@ resource "google_container_cluster" "this" {
   # needs this guard: without it, nothing in Terraform stops a direct
   # `terraform destroy -var deletion_protection=false`. Real protection
   # against an out-of-band `gcloud container clusters delete` needs an IAM
-  # deny / org policy outside Terraform (ptone's call; residual risk, design
-  # §3.10/§9). Teardown needs a one-line commit removing this on a
-  # never-merged teardown branch (design §3.10 guardrails 5-8, Alt-N).
+  # deny / org policy outside Terraform entirely; that is an operator
+  # decision and a residual risk documented in the README, not something
+  # this module set can enforce. A deliberate teardown of the whole shared
+  # stack needs a one-line commit removing this lifecycle block, applied on
+  # its own short-lived branch, never merged back.
   lifecycle {
     prevent_destroy = true
   }

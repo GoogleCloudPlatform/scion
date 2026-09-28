@@ -2,13 +2,15 @@
 
 Terraform for the Cloud Run hub + IAP, Cloud SQL Postgres, GKE Autopilot
 runtime, Filestore NFS pattern, with multiple hubs sharing one project's
-infra. See the design doc (`conv:5e2bb789-a863-45ec-a45c-b221904f7e1b`,
-fork issue `ptone/scion#1840`) for the full rationale; this README covers
-what an operator needs to actually run it.
+infra. This README covers what an operator needs to actually run it: the
+overall design rationale is tracked in `ptone/scion#1840`.
 
-**Status: phase 1.** This is the minimum vertical slice, validated once
-end-to-end (`tfha` / `ptone-emblem`). Phases 2-4 (HA hardening, modularity
-seams, CI) are not implemented yet — see the design doc §7.
+**Status.** The vertical slice (one shared-infra apply plus one hub) and
+HA hardening (a second hub on the same shared infra, `REGIONAL` Cloud SQL,
+`check` blocks, bucket lifecycle, password rotation) have both been
+validated end-to-end against a real project. Modularity seams
+(`shared_overrides` for hand-built infra, moving every remaining variable
+to typed `validation`, per-module READMEs) are not implemented yet.
 
 ## Layout
 
@@ -30,19 +32,20 @@ reads it, by naming convention, through the `shared-lookup` module (no
 
 ## Prerequisites (manual, once per project)
 
-1. A project with billing enabled. The operator (in `ptone-emblem`, this is
-   **vm-deploy**) needs Owner or an equivalent role set covering: Editor,
+1. A project with billing enabled. The operator applying this Terraform
+   needs Owner or an equivalent role set covering: Editor,
    `roles/compute.networkAdmin`, `roles/container.admin`,
    `roles/run.admin`, `roles/resourcemanager.projectIamAdmin`,
    `roles/iam.serviceAccountAdmin`, `roles/servicenetworking.networksAdmin`,
-   `roles/storage.admin`, `roles/iap.admin`. (`servicenetworking.networksAdmin`,
-   `storage.admin` and `iap.admin` were still pending grant as of the phase 1
-   validation — see `phase1-validation.md`.)
+   `roles/storage.admin`, `roles/iap.admin`. Grant all of these up front —
+   a partial role set surfaces as a plan or apply failure partway through,
+   not as a clean early error.
 2. A GCS state bucket, versioned: `<project>-<name_prefix>-tfstate` (e.g.
    `ptone-emblem-tfha-tfstate`). Access limited to operators.
-3. ~~An IAP OAuth web client~~ — **no longer a prerequisite** (ptone
-   decision, design §3.4/§5.1). See "IAP OAuth client" below: it's a
-   post-apply step, not something you need before the first apply.
+3. ~~An IAP OAuth web client~~ — **not a prerequisite.** `iap_enabled = true`
+   works immediately with the project's Google-managed OAuth client; see
+   "IAP OAuth client" below. It's a post-apply step (to enable agent
+   transport), not something you need before the first apply.
 4. The hub image, built and pushed to the Artifact Registry repo that
    `shared-infra` creates. There is no single-apply bootstrap trick here (the
    two-root split already separates "create the repo" from "use the image"):
@@ -110,9 +113,9 @@ shutdown warning, so don't depend on it as the only way to find the ID; the
 console is where to look if/when it stops working.
 
 This client exists in any project where IAP has ever been enabled —
-including `ptone-emblem` today — so in practice phase 1 can pass it on the
-*first* apply and wait on nothing. In a genuinely fresh project it only
-appears after IAP has been turned on by a first apply, so the flow there is
+including `ptone-emblem` today — so on a project like that, the first apply
+can pass it right away and wait on nothing. In a genuinely fresh project it
+only appears after IAP has been turned on by a first apply, so the flow there is
 apply → discover → re-apply with `-var iap_oauth_client_id=<id>`. Changing
 the value only re-renders the settings secret and rolls a new revision;
 nothing else changes.
@@ -146,15 +149,34 @@ All IAM grants are additive (`google_*_iam_member` only — never
 ## Shared-infra trust domain and sizing
 
 Hubs sharing one project's infra form one trust domain, not a hard
-multi-tenancy boundary — see the design doc §3.7 for the full list of what
-is and isn't isolated. In particular, size Cloud SQL's `max_connections`
-for the sum across hubs: with `max_open_conns = 10` per hub instance, the
-phase 2 default `max_instances = 1` (down from 3 — see `max_instances`'s
-description for the C1 upstream defect, ptone/scion#2090, this avoids) uses
-at most 10 connections per hub; raising `max_instances` back toward 3 lets
-a hub use up to 30. Either way the default `max_connections = 200`
-supports roughly 5 dev hubs with headroom (`hub-cloudrun`'s
-`max_connections_budget`, default 40 per hub, checks this per hub).
+multi-tenancy boundary:
+
+- A hub can create pods in its own namespace with an inline NFS volume
+  mounted at the Filestore share root, so it can reach every other hub's
+  directory on that share. Namespacing and RBAC stop a hub's *service
+  account* from touching another hub's Kubernetes objects, but nothing
+  stops a pod that mounts the raw share.
+- Cloud SQL built-in database users all belong to `cloudsqlsuperuser` on
+  the shared instance.
+- What *is* isolated: separate databases and users, directories,
+  namespaces with namespaced RBAC, service accounts, buckets, Cloud Run
+  services, IAP policies and Terraform states per hub. Each hub's Secret
+  Manager reach is scoped to its own `<hub>-*` secrets plus its own
+  hub-scope prefix (see `hub-identity`'s IAM scope rule) — hubs cannot
+  read each other's secrets or the live stack's.
+
+This is fine for cost-sharing during development. Production multi-tenant
+isolation needs dedicated infra per hub (a variation built from the same
+modules, not yet implemented).
+
+Size Cloud SQL's `max_connections` for the sum across hubs: with
+`max_open_conns = 10` per hub instance, the default `max_instances = 1`
+(down from 3 — see `max_instances`'s description for the upstream defect,
+`ptone/scion#2090`, this avoids) uses at most 10 connections per hub;
+raising `max_instances` back toward 3 lets a hub use up to 30. Either way
+the default `max_connections = 200` supports roughly 5 dev hubs with
+headroom (`hub-cloudrun`'s `max_connections_budget`, default 40 per hub,
+checks this per hub).
 
 ## GKE deletion protection is Terraform-only
 
@@ -169,8 +191,8 @@ for SQL/Filestore.
 ## Destroy runbook
 
 **Order: every hub root first, then shared.** Never the reverse. This is
-enforced by several complementary, deliberately redundant layers (design
-§3.10) — `terraform destroy` skips lifecycle preconditions entirely (see
+enforced by several complementary, deliberately redundant layers —
+`terraform destroy` skips lifecycle preconditions entirely (see
 "Why the interlock alone isn't enough" below), so no single one of these is
 sufficient on its own:
 
@@ -210,9 +232,9 @@ sufficient on its own:
    one-line commit per module. That friction is intended for infra every
    hub depends on.
 4. `terraform -chdir=configurations/shared-infra destroy`, from that branch.
-5. The operator (vm-deploy) compares a before/after `tfha*` resource
-   inventory to confirm nothing outside the prefix was touched, and that
-   nothing was left behind.
+5. The operator compares a before/after `tfha*` resource inventory to
+   confirm nothing outside the prefix was touched, and that nothing was
+   left behind.
 
 **Why the interlock alone isn't enough, and why step 3 exists.** Guardrail
 2 above (`destroy_guard`) only protects the *state transition* from
@@ -239,16 +261,15 @@ the API flags off on live shared resources with hubs still present, after
 which an out-of-band `gcloud … delete` would succeed. This needs two
 deliberate deviations from this runbook to reach; it is prohibited above,
 not enforced in config. GKE deletion protection is also Terraform-only (see
-"GKE deletion protection is Terraform-only" above) — an operator with
-`container.clusters.delete` (which vm-deploy's
-operator SA has today) can delete `tfha-agents` out-of-band regardless of
-any of this. Both are recorded as residual risk in the design doc §9, not
-omissions.
+"GKE deletion protection is Terraform-only" above) — any operator identity
+holding `container.clusters.delete` on the project can delete `tfha-agents`
+out-of-band regardless of any of this. Both are documented here as residual
+risk, not omissions.
 
 ## Rotating a hub's DB password
 
-F-115 rotation design (12:35Z): `cloudsql-database` has no imperative
-`-replace` step for rotating a hub's database password. Set
+`cloudsql-database` has a declarative rotation lever, so rotating a hub's
+database password never needs an imperative `-replace` step. Set
 `db_password_rotation` to a new value (e.g. a date, `"2026-09-28"`) **in the
 hub's `<hub_name>.tfvars` file — not with `-var`** — and apply:
 
@@ -292,14 +313,13 @@ consistent. **Re-apply** — do not widen the IAM condition to work around it.
 Widening it is exactly the mistake this whole scoping exercise exists to
 prevent (see hub-identity's IAM scope rule comment).
 
-## What's not here yet (see design §7)
+## What's not here yet
 
-- Phase 2: a second hub, Cloud SQL `REGIONAL` + backups, `min_instances = 2`
-  (pending an HA broker confirmation), `check` blocks asserting the
-  deterministic URL/audience, bucket lifecycle.
-- Phase 3: `shared_overrides` for hand-built infra, resolving OQ-7 (user-
-  and project-scope secrets have no per-hub prefix to condition on — see
-  hub-identity), moving the DB DSN to a secret env ref, per-module READMEs
-  (terraform-docs), typed `validation` blocks on every remaining variable.
-- Phase 4: this README grows prereq/rollout detail, CI (`fmt`/`validate`/
-  `tflint`), and a link from `docs-site/.../hosted/ha/setup-gcp.md`.
+- `shared_overrides` for hand-built (non-shared) infra to plug into the hub
+  layer instead of `shared-lookup`'s naming-convention data sources.
+- User- and project-scope secrets have no per-hub prefix to condition an
+  IAM grant on (only the hub-scope prefix does — see `hub-identity`'s IAM
+  scope rule), so creating one under the current IAM fails with a 403.
+  Resolving this is a future seams item.
+- Typed `validation` blocks on every remaining variable, and a
+  per-module README generated with `terraform-docs`.

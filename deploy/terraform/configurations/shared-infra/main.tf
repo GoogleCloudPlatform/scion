@@ -78,7 +78,7 @@ module "artifact_registry" {
   depends_on = [module.project_services]
 }
 
-# --- Destroy guardrail (design §3.10 item 4) ---
+# --- Destroy guardrail ---
 #
 # GCP does not refuse to delete a Cloud SQL instance that still has hub
 # databases on it (nor a Filestore instance with active clients, nor a GKE
@@ -92,16 +92,16 @@ module "artifact_registry" {
 # itself (reviewer check: google_sql_database_instance appears only in
 # modules/cloudsql-instance).
 #
-# Required shape (corrected by tf-review, reproduced offline on TF 1.9.8,
-# and confirmed live against ptone-emblem by vm-deploy — including a false
-# alarm on this exact block from a stale checkout, retracted once vm-deploy
-# re-ran against the actual commit: 23-resource plan, exit 0, no 403):
-# evaluated at PLAN, with NO module dependency, tolerant of the instance not
-# existing yet. `instance = module.cloudsql_instance.instance_name` looks
-# more correct (a resource reference instead of a literal), but it is
-# exactly the bug: it defers this read to APPLY time, ordered *after* the
-# instance update. On `apply -var deletion_protection=false` with hubs still
-# present, `settings.deletion_protection_enabled` would flip off *before*
+# Required shape (reproduced offline on TF 1.9.8, and confirmed live against
+# a real project — including a false alarm on this exact block from a stale
+# checkout, retracted once re-run against the actual commit: 23-resource
+# plan, exit 0, no 403): evaluated at PLAN, with NO module dependency,
+# tolerant of the instance not existing yet. `instance =
+# module.cloudsql_instance.instance_name` looks more correct (a resource
+# reference instead of a literal), but it is exactly the bug: it defers this
+# read to APPLY time, ordered *after* the instance update. On `apply -var
+# deletion_protection=false` with hubs still present,
+# `settings.deletion_protection_enabled` would flip off *before*
 # the precondition below fails — precisely the state transition this guard
 # exists to prevent. The literal name plus an existence check first is not a
 # style choice; do not "fix" it back to a module reference.

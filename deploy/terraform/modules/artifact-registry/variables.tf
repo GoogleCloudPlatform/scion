@@ -15,6 +15,6 @@ variable "name_prefix" {
 
   validation {
     condition     = can(regex("^[a-z][a-z0-9]{1,7}$", var.name_prefix))
-    error_message = "name_prefix must match ^[a-z][a-z0-9]{1,7}$ (design §3.8)."
+    error_message = "name_prefix must match ^[a-z][a-z0-9]{1,7}$: it is used verbatim in generated resource names, which have their own length and character-set limits."
   }
 }

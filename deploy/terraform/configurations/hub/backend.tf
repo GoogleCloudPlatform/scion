@@ -1,4 +1,4 @@
-# Partial backend configuration, one state per hub (design §3.9):
+# Partial backend configuration, one state per hub:
 #
 #   terraform -chdir=deploy/terraform/configurations/hub init \
 #     -backend-config="bucket=<project>-<prefix>-tfstate" \

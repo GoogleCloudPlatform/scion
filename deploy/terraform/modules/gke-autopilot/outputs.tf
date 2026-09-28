@@ -15,8 +15,7 @@ output "endpoint" {
 
 output "ca_certificate" {
   description = "Base64-encoded cluster CA certificate."
-  # try(), not a bare [0] index (phase 2 hardening item 6, found while
-  # adding fresh_shared_infra_plan.tftest.hcl): a real GKE cluster always
+  # try(), not a bare [0] index: a real GKE cluster always
   # populates master_auth with exactly one element, so this never returns
   # null against real infra — but google_container_cluster.master_auth is a
   # purely Computed repeated block with no config-driven element count, and

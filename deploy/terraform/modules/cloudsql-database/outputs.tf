@@ -20,7 +20,7 @@ output "password_secret_id" {
 }
 
 output "dsn_secret_id" {
-  description = "Secret Manager secret ID holding the full DSN (Alt-F, design §6 OQ-11). Consumed by hub-cloudrun's SCION_SERVER_DATABASE_URL secret env var."
+  description = "Secret Manager secret ID holding the full DSN. Consumed by hub-cloudrun's SCION_SERVER_DATABASE_URL secret env var."
   value       = google_secret_manager_secret.db_dsn.secret_id
 }
 

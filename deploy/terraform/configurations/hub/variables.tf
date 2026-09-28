@@ -31,12 +31,12 @@ variable "state_prefix" {
 }
 
 variable "hub_name" {
-  description = "This hub's name. Every hub-scoped resource derives from it (design §3.8)."
+  description = "This hub's name. Every hub-scoped resource derives from it."
   type        = string
 
   validation {
     condition     = can(regex("^[a-z][a-z0-9-]{2,15}$", var.hub_name))
-    error_message = "hub_name must match ^[a-z][a-z0-9-]{2,15}$ (design §3.8)."
+    error_message = "hub_name must match ^[a-z][a-z0-9-]{2,15}$."
   }
 
   # Denylist by construction: hub_name must live in this project prefix's
@@ -45,14 +45,14 @@ variable "hub_name" {
   # name or the destroy_guard's literal database filter (found in review).
   validation {
     condition     = startswith(var.hub_name, "${var.shared_prefix}-")
-    error_message = "hub_name (\"${var.hub_name}\") must start with \"${var.shared_prefix}-\" (design §3.8) — this also rules out collisions with the live stack's own resource names."
+    error_message = "hub_name (\"${var.hub_name}\") must start with \"${var.shared_prefix}-\" — this also rules out collisions with the live stack's own resource names."
   }
 
   # Cross-variable validation (needs Terraform >= 1.9, see versions.tf):
-  # state_prefix must exactly match this hub's expected backend prefix.
-  # A `check` block was considered and rejected (tf-review B5) — it only
-  # warns, so a mismatched apply would still proceed and silently apply
-  # hub_name=X's variables onto a different hub's state.
+  # state_prefix must exactly match this hub's expected backend prefix. A
+  # `check` block was considered and rejected: it only warns, so a mismatched
+  # apply would still proceed and silently apply hub_name=X's variables onto
+  # a different hub's state.
   validation {
     condition     = var.state_prefix == "${var.shared_prefix}/hubs/${var.hub_name}"
     error_message = "state_prefix (\"${var.state_prefix}\") does not match \"${var.shared_prefix}/hubs/${var.hub_name}\" for hub_name=\"${var.hub_name}\" — this looks like hub_name's variables are about to be applied onto a different hub's state. Re-run init with the matching -backend-config prefix, or fix -var hub_name/-var state_prefix."
@@ -60,7 +60,7 @@ variable "hub_name" {
 }
 
 variable "db_password_rotation" {
-  description = "F-115 rotation design (12:35Z): passed through to cloudsql-database's password_rotation. Set in this hub's tfvars file (not -var) to a new value (e.g. a date) to rotate this hub's DB password; changing it replaces the password, updates the SQL user, writes new secret versions and rolls a new hub revision. Keep the marker in the tfvars file permanently once set — never remove it or reset it to \"\", either of which triggers another, unplanned rotation. Default \"\" is a no-op for existing state. See the README's \"Rotating a hub's DB password\" section."
+  description = "Passed through to cloudsql-database's password_rotation. Set in this hub's tfvars file (not -var) to a new value (e.g. a date) to rotate this hub's DB password; changing it replaces the password, updates the SQL user, writes new secret versions and rolls a new hub revision. Keep the marker in the tfvars file permanently once set — never remove it or reset it to \"\", either of which triggers another, unplanned rotation. Default \"\" is a no-op for existing state. See the README's \"Rotating a hub's DB password\" section."
   type        = string
   default     = ""
 }
@@ -71,13 +71,13 @@ variable "hub_image" {
 }
 
 variable "image_registry" {
-  description = "Registry the hub rewrites bare agent harness images against (settings.yaml top-level image_registry — design §3.4, found before the tfha-h1 apply: without it, bare images like scion-claude:latest are never rewritten, GKE pulls them from Docker Hub where they don't exist, and phase 1 check 3 fails with ImagePullBackOff). Default null computes to the shared AR repo (<region>-docker.pkg.dev/<project>/<shared_prefix>-scion) from shared-lookup; override only for a variation that publishes agent images elsewhere."
+  description = "Registry the hub rewrites bare agent harness images against (settings.yaml top-level image_registry: without it, bare images like scion-claude:latest are never rewritten, GKE pulls them from Docker Hub where they don't exist, and agent start fails with ImagePullBackOff). Default null computes to the shared AR repo (<region>-docker.pkg.dev/<project>/<shared_prefix>-scion) from shared-lookup; override only for a variation that publishes agent images elsewhere."
   type        = string
   default     = null
 }
 
 variable "iap_oauth_client_id" {
-  description = "OAuth client ID, optional (design §3.4 \"IAP and the OAuth client\"). Not a Terraform-managed prerequisite — see the README's \"IAP OAuth client\" section: discover the project's Google-managed client ID (works immediately for in-org users) or create a custom one in the console for cross-org, then re-apply. Null means the hub and IAP browser login work, but agent transport is disabled."
+  description = "OAuth client ID, optional. Not a Terraform-managed prerequisite — see the README's \"IAP OAuth client\" section: discover the project's Google-managed client ID (works immediately for in-org users) or create a custom one in the console for cross-org, then re-apply. Null means the hub and IAP browser login work, but agent transport is disabled."
   type        = string
   default     = null
 
@@ -100,13 +100,13 @@ variable "admin_emails" {
 }
 
 variable "min_instances" {
-  description = "Cloud Run min instance count. Phase 1 uses 1 (OQ-4)."
+  description = "Cloud Run min instance count. Kept at 1: on the k8s runtime each instance runs its own control-channel client and heartbeat loop, and while dispatch, status and the scheduler are already safe across replicas, a multi-instance steady state makes the ptone/scion#2090 scale-in defect (see max_instances below) fire more often."
   type        = number
   default     = 1
 }
 
 variable "max_instances" {
-  description = "Cloud Run max instance count. Default 1, down from 3 (ptone decision, phase 2 hardening) — see hub-cloudrun's max_instances description for the C1 upstream defect (research-f114-oq4.md §C1; ptone/scion#2090) this default avoids: scale-in of the broker-affinity-owning instance leaves the shared broker_id's project providers stamped offline with nothing to bring them back."
+  description = "Cloud Run max instance count. Default 1, down from 3 — see hub-cloudrun's max_instances description for the upstream defect (ptone/scion#2090) this default avoids: scale-in of the broker-affinity-owning instance leaves the shared broker_id's project providers stamped offline with nothing to bring them back."
   type        = number
   default     = 1
 }
@@ -122,19 +122,19 @@ variable "memory" {
 }
 
 variable "timeout" {
-  description = "Request timeout. 3600s for long-lived WebSockets/terminals (design §8)."
+  description = "Request timeout. 3600s for long-lived WebSockets/terminals."
   type        = string
   default     = "3600s"
 }
 
 variable "hub_write_timeout" {
-  description = "F-110 (design §9): hub http.Server WriteTimeout, rendered into settings.yaml (server.hub.write_timeout). See hub-cloudrun's own variable for the full rationale and its validation (format + bounded by var.timeout) — this is a plain pass-through."
+  description = "Hub http.Server WriteTimeout, rendered into settings.yaml (server.hub.write_timeout). See hub-cloudrun's own variable for the full rationale and its validation (format + bounded by var.timeout) — this is a plain pass-through."
   type        = string
   default     = "300s"
 }
 
 variable "broker_write_timeout" {
-  description = "F-110 (design §9): co-located broker http.Server WriteTimeout, rendered into settings.yaml (server.broker.write_timeout). See hub-cloudrun's own variable for the full rationale and its validation (format + bounded by var.timeout) — this is a plain pass-through."
+  description = "Co-located broker http.Server WriteTimeout, rendered into settings.yaml (server.broker.write_timeout). See hub-cloudrun's own variable for the full rationale and its validation (format + bounded by var.timeout) — this is a plain pass-through."
   type        = string
   default     = "300s"
 }

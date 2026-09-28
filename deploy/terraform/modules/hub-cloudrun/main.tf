@@ -1,10 +1,10 @@
-# Hub's bucket, secrets, settings render, Cloud Run v2 service and IAP
-# (design §3.4, largest module). No provider/backend blocks: the calling
-# configuration configures both `google` and `google-beta`.
+# Hub's bucket, secrets, settings render, Cloud Run v2 service and IAP. No
+# provider/backend blocks: the calling configuration configures both
+# `google` and `google-beta`.
 
 locals {
   # Cloud Run's deterministic URL — computed from inputs, not read back from
-  # the service resource, so there is no "deploy twice" cycle (design §3.6).
+  # the service resource, so there is no "deploy twice" cycle.
   public_url   = "https://${var.hub_name}-${var.project_number}.${var.region}.run.app"
   iap_audience = "/projects/${var.project_number}/locations/${var.region}/services/${var.hub_name}"
 
@@ -20,12 +20,13 @@ locals {
   # is the same value end to end, named at each layer that touches it.
   hub_id = var.hub_name
 
-  # F-107: settings.yaml.tftpl used to render broker_id: ${hub_name}-broker
-  # (e.g. "tfha-h1-broker"), and the Postgres store's runtime_brokers.id
-  # column requires a UUID -- the co-located broker's registration failed
-  # outright ('invalid input: invalid UUID "tfha-h1-broker"'), so no broker
-  # ever registered and every agent start 422'd with "no runtime brokers
-  # available". uuidv5 (not uuidv4/random) because it must be deterministic:
+  # settings.yaml.tftpl renders this into broker_id. A plain "${hub_name}-
+  # broker" string (e.g. "tfha-h1-broker") fails: the Postgres store's
+  # runtime_brokers.id column requires a UUID, so the co-located broker's
+  # registration fails outright ('invalid input: invalid UUID
+  # "tfha-h1-broker"'), no broker ever registers, and every agent start
+  # 422s with "no runtime brokers available". uuidv5 (not uuidv4/random)
+  # because it must be deterministic:
   # resolveBrokerID's fallback path generates a random UUID and persists it
   # to the ephemeral globalDir when none is configured, which races across
   # max_instances = 3 replicas each picking their own -- a config-supplied,
@@ -34,18 +35,16 @@ locals {
   # same hub_name reused in a different project) never collide.
   broker_id = uuidv5("dns", "${local.hub_id}.broker.${var.project_id}.scion")
 
-  # Phase 2 hardening (item 3b, design §3.7 connection budget). Single
-  # source of truth for the per-instance Postgres pool ceiling rendered into
-  # settings.yaml's database.max_open_conns below, so the check block's
-  # assumption can never silently drift from the literal actually shipped —
-  # exactly the split-source-of-truth class of bug this design keeps
-  # re-finding (F-106, F-107). Verified against pkg/config/hub_config.go's
+  # Single source of truth for the per-instance Postgres pool ceiling
+  # rendered into settings.yaml's database.max_open_conns below, so the
+  # connection_budget check block's assumption can never silently drift from
+  # the literal actually shipped. Verified against pkg/config/hub_config.go's
   # applyDatabasePoolDefaults (Postgres default is 5 when unset) — this
   # module has always rendered an explicit 10, overriding that default.
   hub_max_open_conns = 10
 
-  # tf-dev-lifecycle-output: single source of truth for the artifacts
-  # bucket's lifecycle_rule blocks, rendered below via `dynamic
+  # Single source of truth for the artifacts bucket's lifecycle_rule blocks,
+  # rendered below via `dynamic
   # "lifecycle_rule"` and returned verbatim by the bucket_lifecycle_rules
   # output (outputs.tf). Previously that output read
   # google_storage_bucket.artifacts.lifecycle_rule (the resource attribute)
@@ -106,7 +105,7 @@ resource "google_storage_bucket" "artifacts" {
     enabled = true
   }
 
-  # Phase 2 hardening: this bucket holds templates, skills and harness
+  # This bucket holds templates, skills and harness
   # configs (pkg/storage's ResourceStorageURI family) referenced by live DB
   # rows, plus per-agent workspace files (WorkspaceStorageURI) that an
   # in-flight agent may still be reading or writing — none of that is safe
@@ -172,19 +171,18 @@ resource "google_secret_manager_secret_iam_member" "hub_reads_session_secret" {
   member    = "serviceAccount:${var.hub_sa_email}"
 }
 
-# --- Database DSN (Alt-F, design §6 OQ-11): the full DSN is built and held
-# in cloudsql-database's <hub>-db-dsn secret (the module that owns the DB
-# credential lifecycle) — see var.dsn_secret_id/var.dsn_secret_version and
-# the SCION_SERVER_DATABASE_URL secret env var on google_cloud_run_v2_service
-# .hub below. This module never sees the plaintext DSN or password at all
-# any more, only the two secret coordinates needed to point Cloud Run at
-# cloudsql-database's secret version. (History: F-112 had this module take
-# db_password as a sensitive module input and embed it directly into the
-# settings secret's rendered DSN, to avoid a plan-time data-source read of a
-# not-yet-created secret, F-106. Alt-F removes the embedding altogether
-# rather than fixing that read, so var.db_password/db_user/db_name are gone
-# too — see cloudsql-database's dsn_secret_id/dsn_secret_version outputs
-# instead.) ---
+# --- Database DSN: the full DSN is built and held in cloudsql-database's
+# <hub>-db-dsn secret (the module that owns the DB credential lifecycle) —
+# see var.dsn_secret_id/var.dsn_secret_version and the
+# SCION_SERVER_DATABASE_URL secret env var on google_cloud_run_v2_service.hub
+# below. This module never sees the plaintext DSN or password at all, only
+# the two secret coordinates needed to point Cloud Run at cloudsql-database's
+# secret version. (An earlier design had this module take db_password as a
+# sensitive module input and embed it directly into the settings secret's
+# rendered DSN, to avoid a plan-time data-source read of a not-yet-created
+# secret. This design removes the embedding altogether rather than fixing
+# that read, so var.db_password/db_user/db_name are gone too — see
+# cloudsql-database's dsn_secret_id/dsn_secret_version outputs instead.) ---
 
 # --- Rendered settings.yaml ---
 
@@ -225,10 +223,10 @@ resource "google_secret_manager_secret_version" "settings" {
     max_open_conns       = local.hub_max_open_conns
   })
 
-  # F-107: secret_data changing always forces a replace (Secret Manager
-  # versions are add-only in the real API; there is no in-place update of an
-  # existing version's data). Without create_before_destroy, Terraform's
-  # default destroy-then-create order would delete this version before the
+  # secret_data changing always forces a replace (Secret Manager versions are
+  # add-only in the real API; there is no in-place update of an existing
+  # version's data). Without create_before_destroy, Terraform's default
+  # destroy-then-create order would delete this version before the
   # replacement exists, and the running revision (still mounting the old
   # version by number, see the volume item below) would lose it out from
   # under it. create_before_destroy makes the new version exist first; the
@@ -237,14 +235,13 @@ resource "google_secret_manager_secret_version" "settings" {
   lifecycle {
     create_before_destroy = true
 
-    # F-107: a lifecycle precondition, not a top-level check block — check
-    # blocks only warn, they don't fail plan/apply, so they don't actually
-    # stop the "invalid UUID" regression this exists to catch. A
-    # precondition on the resource that renders broker_id into settings.yaml
-    # does fail the plan.
+    # A lifecycle precondition, not a top-level check block — check blocks
+    # only warn, they don't fail plan/apply, so they don't actually stop the
+    # "invalid UUID" regression this exists to catch. A precondition on the
+    # resource that renders broker_id into settings.yaml does fail the plan.
     precondition {
       condition     = can(regex("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", local.broker_id))
-      error_message = "local.broker_id must be a canonical UUID (F-107): the Postgres store's runtime_brokers.id column rejects anything else, and settings.yaml's broker_id is rendered directly from this value."
+      error_message = "local.broker_id must be a canonical UUID: the Postgres store's runtime_brokers.id column rejects anything else, and settings.yaml's broker_id is rendered directly from this value."
     }
   }
 }
@@ -256,7 +253,7 @@ resource "google_secret_manager_secret_iam_member" "hub_reads_settings" {
   member    = "serviceAccount:${var.hub_sa_email}"
 }
 
-# --- DSN accessor (Alt-F, design §6 OQ-11) ---
+# --- DSN accessor ---
 #
 # The DSN secret itself lives in cloudsql-database (the module that owns the
 # DB credential lifecycle); the grant lives here, next to the other three
@@ -295,9 +292,9 @@ resource "google_secret_manager_secret_version" "kubeconfig" {
     ca_certificate = var.gke.ca_certificate
   })
 
-  # F-107: same reasoning as google_secret_manager_secret_version.settings
-  # above — equally trivial to apply here (same templatefile-secret-version
-  # shape), so applied for the same reason, not just for settings.
+  # Same reasoning as google_secret_manager_secret_version.settings above —
+  # equally trivial to apply here (same templatefile-secret-version shape),
+  # so applied for the same reason, not just for settings.
   lifecycle {
     create_before_destroy = true
   }
@@ -310,7 +307,7 @@ resource "google_secret_manager_secret_iam_member" "hub_reads_kubeconfig" {
   member    = "serviceAccount:${var.hub_sa_email}"
 }
 
-# --- OIDC signing key (design §3.4, added 09-25 after tfha-h1's first boot) ---
+# --- OIDC signing key ---
 #
 # SCION_REQUIRE_STABLE_SIGNING_KEY=true (below) makes pkg/hub/oidckeys.go:467
 # refuse to generate the RSA OIDC signing key at boot — the agent and user
@@ -358,7 +355,7 @@ resource "google_secret_manager_secret_version" "oidc_signing_key" {
   secret_data = tls_private_key.oidc_signing_key.private_key_pem_pkcs8
 }
 
-# --- IAM propagation guard (design §3.5, from OQ-8's ~70s measurement) ---
+# --- IAM propagation guard (measured at ~70s for this project) ---
 #
 # IAM changes are eventually consistent, and the hub creates its
 # scion-hub-<h12>-* signing keys AT BOOT. A service created immediately
@@ -371,30 +368,28 @@ resource "google_secret_manager_secret_version" "oidc_signing_key" {
 # See the README troubleshooting note: a 403 on scion-hub-<h12>-... shortly
 # after a first apply is IAM propagation. Re-apply. Do NOT widen the
 # condition to work around it.
-# F-106 (design §9): the caller used to express this module's ordering
-# requirements (agent-runtime-k8s's nfs-init Job, cloudsql-database's DB/
-# user, hub-identity's IAM grants) as a module-level depends_on on the
-# `module "hub_cloudrun"` block itself. A module-level depends_on defers
-# EVERY resource and data source inside the module — including this
-# module's old data.google_secret_manager_secret_version.db_password, which
-# had no actual ordering need on those modules — whenever anything in them
-# has a pending change. That made db_password's secret_data unknown at plan
-# time, which made settings' secret_data (which embeds it) unknown too,
-# forcing a spurious replace of the settings secret version on every
-# unrelated change to those three modules (vm-deploy caught this on a real
-# apply: a plan that should have been a pure IAM-member add came out 2 add /
-# 0 change / 1 destroy). terraform_data.boot_prerequisites below is the
-# replacement: var.boot_prerequisites carries only real resource attributes
-# (never a module reference), so only the one resource that actually needs
-# to wait — the Cloud Run service, via its own depends_on below — is
-# affected. No data source may depend on terraform_data.boot_prerequisites,
-# or this regresses right back to the same bug for whatever data source
-# does. (That specific data source is gone now — F-112 replaced it with
-# var.db_password, a sensitive module input with no read of its own; Alt-F
-# later removed var.db_password itself too, since the DSN it fed is no
-# longer embedded in settings.yaml at all — see var.dsn_secret_id/
-# var.dsn_secret_version instead. Either way, the rule stands for any data
-# source this module gains in the future.)
+# The caller used to express this module's ordering requirements
+# (agent-runtime-k8s's nfs-init Job, cloudsql-database's DB/user,
+# hub-identity's IAM grants) as a module-level depends_on on the `module
+# "hub_cloudrun"` block itself. A module-level depends_on defers EVERY
+# resource and data source inside the module — including a data source that
+# used to read the DB password here, which had no actual ordering need on
+# those modules — whenever anything in them has a pending change. That made
+# the data source's result unknown at plan time, which made settings'
+# secret_data (which embeds it) unknown too, forcing a spurious replace of
+# the settings secret version on every unrelated change to those three
+# modules (observed on a real apply: a plan that should have been a pure
+# IAM-member add came out 2 add / 0 change / 1 destroy). terraform_data
+# .boot_prerequisites below is the replacement: var.boot_prerequisites
+# carries only real resource attributes (never a module reference), so only
+# the one resource that actually needs to wait — the Cloud Run service, via
+# its own depends_on below — is affected. No data source may depend on
+# terraform_data.boot_prerequisites, or this regresses right back to the same
+# bug for whatever data source does. (The DB-password data source is gone
+# now: the DSN it fed is no longer embedded in settings.yaml at all — see
+# var.dsn_secret_id/var.dsn_secret_version instead, which reach this module
+# as plain sensitive inputs and secret coordinates, not data-source reads.
+# The rule stands for any data source this module gains in the future.)
 resource "terraform_data" "boot_prerequisites" {
   input = var.boot_prerequisites
 }
@@ -405,27 +400,28 @@ resource "time_sleep" "iam_propagation" {
   triggers = {
     condition = var.hub_iam_condition_expression
     hub_sa    = var.hub_sa_email
-    # Alt-F (design §6 OQ-11): on an EXISTING hub (h1/h2), condition/hub_sa
-    # above are unchanged by this rollout, so without this trigger the sleep
-    # would not re-arm and the new hub_reads_dsn grant would not be waited
-    # for before the revision carrying SCION_SERVER_DATABASE_URL rolls out —
-    # a first-boot 403 on the DSN secret, same failure mode §3.5 exists to
-    # prevent. .id going from nonexistent to a real value on the apply that
-    # introduces this grant is itself a triggers change, which is exactly
-    # what forces this time_sleep to replace (destroy + re-create, sleeping
-    # again) instead of being silently skipped.
+    # On an EXISTING hub (an upgrade, not a fresh create), condition/hub_sa
+    # above are unchanged by adding the DSN secret, so without this trigger
+    # the sleep would not re-arm and the new hub_reads_dsn grant would not be
+    # waited for before the revision carrying SCION_SERVER_DATABASE_URL rolls
+    # out — a first-boot 403 on the DSN secret, the exact IAM-propagation
+    # failure mode this whole resource exists to prevent. .id going from
+    # nonexistent to a real value on the apply that introduces this grant is
+    # itself a triggers change, which is exactly what forces this time_sleep
+    # to replace (destroy + re-create, sleeping again) instead of being
+    # silently skipped.
     dsn_accessor = google_secret_manager_secret_iam_member.hub_reads_dsn.id
   }
 
-  # §3.5 says ALL hub-SA IAM members, not just hub-identity's project-level
-  # ones: Cloud Run checks secret access at revision *create* time, so this
-  # module's own per-secret accessor grants (settings/kubeconfig/session
-  # secret/DSN — all four read directly by the running container) matter
-  # just as much as the project-level grants passed in from hub-identity.
-  # cloudsql-database's db-password accessor is deliberately NOT included:
-  # nothing reads db-password directly at runtime (Alt-F's DSN secret is a
-  # separate, dedicated secret — see cloudsql-database/main.tf's
-  # hub_reads_db_password comment) — nothing to wait on there.
+  # ALL hub-SA IAM members, not just hub-identity's project-level ones: Cloud
+  # Run checks secret access at revision *create* time, so this module's own
+  # per-secret accessor grants (settings/kubeconfig/session secret/DSN — all
+  # four read directly by the running container) matter just as much as the
+  # project-level grants passed in from hub-identity. cloudsql-database's
+  # db-password accessor is deliberately NOT included: nothing reads
+  # db-password directly at runtime (the DSN secret above is a separate,
+  # dedicated secret — see cloudsql-database/main.tf's hub_reads_db_password
+  # comment) — nothing to wait on there.
   depends_on = [
     var.hub_iam_grants,
     google_secret_manager_secret_iam_member.hub_reads_settings,
@@ -450,17 +446,17 @@ resource "google_cloud_run_v2_service" "hub" {
   launch_stage         = "GA"
   deletion_protection  = false # this is a hub, not shared infra; hub destroy must be able to remove it
 
-  # F-109: SERVICE-level scaling (top-level, sibling of template{}), not
+  # SERVICE-level scaling (top-level, sibling of template{}), not
   # REVISION-level. min_instance_count here is divided among only the
   # revision(s) actually serving traffic — a retired revision at 0% traffic
-  # gets none of it. Before this, min_instance_count lived solely in
-  # template.scaling below (revision-level), which Cloud Run keeps warm
-  # regardless of traffic share: tfha-h1-00001-g5q (broken v1 settings, 0%
-  # traffic after the F-107 rollover) was still running its scheduler
-  # against the shared Postgres, because its own revision-level min kept it
-  # alive. Verified against the pinned google-beta ~> 8.4 schema: top-level
-  # scaling and min_instance_count both exist there (provider schema, not
-  # assumed).
+  # gets none of it. Putting min_instance_count solely in template.scaling
+  # below (revision-level) instead keeps a retired revision warm regardless
+  # of its traffic share: a retired revision at 0% traffic, still holding a
+  # stale settings render from before a broker_id fix, kept running its
+  # scheduler against the shared Postgres, because its own revision-level min
+  # kept it alive even with no traffic. Verified against the pinned
+  # google-beta ~> 8.4 schema: top-level scaling and min_instance_count both
+  # exist there (provider schema, not assumed).
   scaling {
     min_instance_count = var.min_instances
   }
@@ -471,16 +467,16 @@ resource "google_cloud_run_v2_service" "hub" {
     session_affinity      = true
     timeout               = var.timeout
 
-    # F-109: max stays here (per-revision ceiling; unrelated to the
-    # retired-revision problem above). min is pinned to the literal 0, not
-    # left unset: template.scaling.min_instance_count is optional but NOT
-    # computed in the provider schema (unlike max_instance_count, which is
-    # both), so Cloud Run's own "defaults to 0" only applies API-side —
-    # leaving it unset risks the same class of bug F-104 already taught us
-    # (the API echoing a value Terraform never declared, reintroducing a
-    # perpetual diff). Declaring 0 explicitly here makes config and state
-    # agree on every plan. The service-level scaling block above is what
-    # actually governs how many instances are kept warm.
+    # max stays here (per-revision ceiling; unrelated to the retired-revision
+    # problem above). min is pinned to the literal 0, not left unset:
+    # template.scaling.min_instance_count is optional but NOT computed in the
+    # provider schema (unlike max_instance_count, which is both), so Cloud
+    # Run's own "defaults to 0" only applies API-side — leaving it unset
+    # risks the API echoing a value Terraform never declared, reintroducing a
+    # perpetual diff (the same class of bug the cloudsql volume/mount
+    # ordering below already taught us). Declaring 0 explicitly here makes
+    # config and state agree on every plan. The service-level scaling block
+    # above is what actually governs how many instances are kept warm.
     scaling {
       min_instance_count = 0
       max_instance_count = var.max_instances
@@ -523,13 +519,13 @@ resource "google_cloud_run_v2_service" "hub" {
         value = var.namespace
       }
       env {
-        # Pulled forward from phase 2 (design §3.4, 09-25): must equal
-        # settings.yaml's hub_id exactly, from the same local.hub_id value —
-        # two sources of truth for the same identity is exactly the class of
-        # bug this whole project keeps finding. ResolveHubID() prefers
-        # settings hub_id over this env var, so this alone doesn't drive
-        # secret naming, but it must never diverge from it. Also forces the
-        # new revision this change needs.
+        # Must equal settings.yaml's hub_id exactly, from the same
+        # local.hub_id value — two sources of truth for the same identity is
+        # exactly the class of bug this whole module set keeps finding.
+        # ResolveHubID() prefers settings hub_id over this env var, so this
+        # alone doesn't drive secret naming, but it must never diverge from
+        # it. Also makes log labels (which are set before config load, from
+        # this env var alone) match the hub_id the app actually resolves.
         name  = "SCION_SERVER_HUB_HUBID"
         value = local.hub_id
       }
@@ -543,10 +539,10 @@ resource "google_cloud_run_v2_service" "hub" {
         }
       }
       env {
-        # Alt-F (design §6 OQ-11): the full DSN, sourced from cloudsql-
-        # database's dedicated <hub>-db-dsn secret — settings.yaml's
-        # server.database no longer has a url key at all (see
-        # settings.yaml.tftpl). Verified against the real hub loader
+        # The full DSN, sourced from cloudsql-database's dedicated
+        # <hub>-db-dsn secret — settings.yaml's server.database no longer has
+        # a url key at all (see settings.yaml.tftpl). Verified against the
+        # real hub loader
         # (pkg/config/hub_config.go's loadGlobalConfigFromSettings ->
         # applyEnvOverrides, the path cmd/server_foreground.go's hosted
         # startup actually uses): this env var fills cfg.Database.URL when
@@ -583,9 +579,9 @@ resource "google_cloud_run_v2_service" "hub" {
         mount_path = local.nfs_mount_path
       }
       # cloudsql is declared LAST in both this list and volumes{} below, on
-      # purpose (F-104, vm-deploy): the Cloud Run v2 API always returns the
-      # cloud_sql_instance volume/mount last regardless of request order, and
-      # the provider diffs volumes/volume_mounts positionally, not by name —
+      # purpose: the Cloud Run v2 API always returns the cloud_sql_instance
+      # volume/mount last regardless of request order, and the provider
+      # diffs volumes/volume_mounts positionally, not by name —
       # declaring it anywhere else here is a permanent one-item drift on
       # every plan. Not an ignore_changes candidate: this makes the
       # configuration match reality instead of hiding the mismatch.
@@ -609,21 +605,21 @@ resource "google_cloud_run_v2_service" "hub" {
         failure_threshold     = 30
       }
 
-      # Phase 2 hardening (item 2): a liveness probe was proposed here and
-      # deliberately dropped (tf-lead review). /healthz looked DB-independent
-      # at first read — handleHealthz always returns 200 regardless of the
-      # database check's result — but it still CALLS GetHealthInfo
-      # (handlers_health.go:48-80), which does store.Ping, three more List
-      # queries against the same 10-conn pool, and an NFS mount stat (up to a
-      # 2s internal timeout), with no overall request timeout of its own. A
-      # DB stall or pool exhaustion would hang that handler past this probe's
-      # 3s timeout just as surely as it hangs /readyz, and Cloud Run would
-      # restart every instance at once on liveness failure — the exact
-      # thundering-herd a liveness probe must not cause, not avoided by
-      # picking a different path. There is no DB-free endpoint upstream to
-      # point a liveness probe at (no /livez). Upstream follow-up (ee): add
-      # one. Startup probe stays on /readyz above — the DB must be reachable
-      # before Cloud Run ever routes traffic to a fresh revision.
+      # A liveness probe was proposed here and deliberately dropped.
+      # /healthz looked DB-independent at first read — handleHealthz always
+      # returns 200 regardless of the database check's result — but it still
+      # CALLS GetHealthInfo (handlers_health.go:48-80), which does
+      # store.Ping, three more List queries against the same 10-conn pool,
+      # and an NFS mount stat (up to a 2s internal timeout), with no overall
+      # request timeout of its own. A DB stall or pool exhaustion would hang
+      # that handler past this probe's 3s timeout just as surely as it hangs
+      # /readyz, and Cloud Run would restart every instance at once on
+      # liveness failure — the exact thundering-herd a liveness probe must
+      # not cause, not avoided by picking a different path. There is no
+      # DB-free endpoint upstream to point a liveness probe at (no /livez).
+      # Add a liveness probe once one exists. Startup probe stays on
+      # /readyz above — the DB must be reachable before Cloud Run ever
+      # routes traffic to a fresh revision.
     }
 
     volumes {
@@ -632,7 +628,7 @@ resource "google_cloud_run_v2_service" "hub" {
         secret = google_secret_manager_secret.settings.secret_id
         items {
           path = "settings.yaml"
-          # F-107: pinned to the specific version this apply created, not
+          # Pinned to the specific version this apply created, not
           # "latest" — "latest" lets a revision silently start reading a
           # newer settings render with no new revision and no record of
           # which settings.yaml it's actually running. Pinning here is what
@@ -661,7 +657,7 @@ resource "google_cloud_run_v2_service" "hub" {
         path   = var.nfs_export
       }
     }
-    # Declared last — see the matching volume_mounts comment above (F-104).
+    # Declared last — see the matching volume_mounts comment above.
     volumes {
       name = "cloudsql"
       cloud_sql_instance {
@@ -674,16 +670,16 @@ resource "google_cloud_run_v2_service" "hub" {
     ignore_changes = [client, client_version]
   }
 
-  # Explicit ordering (tf-review B2): nothing in the attributes above
-  # actually links the service to the secret *versions* or the hub SA's
-  # *IAM* propagating — only to the secret resources' IDs, which exist as
-  # soon as the (empty) secret is created, version or no version, IAM or no
-  # IAM. A revision that boots before its settings/kubeconfig version exists
-  # or before the hub SA can read them fails with no retry. B2's other half —
-  # the nfs-init Job finishing and cloudsql-database/hub-identity being
-  # ready — is terraform_data.boot_prerequisites above, not a module-level
-  # depends_on on this module's caller (F-106; see that resource's comment).
-  # The DSN secret VERSION doesn't need a matching depends_on entry here the
+  # Explicit ordering: nothing in the attributes above actually links the
+  # service to the secret *versions* or the hub SA's *IAM* propagating — only
+  # to the secret resources' IDs, which exist as soon as the (empty) secret
+  # is created, version or no version, IAM or no IAM. A revision that boots
+  # before its settings/kubeconfig version exists or before the hub SA can
+  # read them fails with no retry. The other ordering requirement — the
+  # nfs-init Job finishing and cloudsql-database/hub-identity being ready —
+  # is terraform_data.boot_prerequisites above, not a module-level depends_on
+  # on this module's caller (see that resource's comment). The DSN secret
+  # VERSION doesn't need a matching depends_on entry here the
   # way settings/kubeconfig's versions do: it lives in a different module
   # (cloudsql-database), and its version number reaches this resource only
   # via var.dsn_secret_version, a real cross-module output attribute used
@@ -722,15 +718,13 @@ resource "google_cloud_run_v2_service_iam_member" "transport_invoker" {
   member   = "serviceAccount:${var.transport_sa_email}"
 }
 
-# --- IAP OAuth client: NOT managed by Terraform (ptone decision, 21:55) ---
+# --- IAP OAuth client: NOT managed by Terraform ---
 #
 # `iap_enabled = true` above turns on direct IAP using the project's
 # Google-managed OAuth client, which works immediately for in-org users —
 # no client to create or bind. Terraform manages no google_iap_settings and
-# reads no OAuth client secret (OQ-2 is moot: this was the "is the
-# API-acceptance risk real" question for a resource that no longer exists
-# in this module — see phase1-validation.md for the retired investigation).
-# iap_oauth_client_id feeds exactly one thing, purely as data: the
+# reads no OAuth client secret. iap_oauth_client_id feeds exactly one thing,
+# purely as data: the
 # settings.yaml transport.oidc_audience agents present over IAP (see the
 # variable's description and the check block below). A custom, console-
 # created OAuth client for cross-org sign-in is a post-apply user step
@@ -743,20 +737,19 @@ check "transport_audience_configured" {
   }
 }
 
-# Phase 2 hardening (item 3a). Warn-level, post-apply sanity: the actual
-# service URI Cloud Run hands back should be https (IAP requires it; a plain
-# http URI would mean IAP/the GFE path is misconfigured) and should equal
-# the deterministic URL this module computed *before* creating the service
-# (local.public_url) — the same identity triple (project_number, region,
-# hub_name) local.iap_audience is built from. If the real URI ever disagreed
-# with local.public_url, it would mean Cloud Run's actual URL-generation
-# scheme diverged from what this module assumes, and local.iap_audience
-# (settings.yaml's auth.proxy.iap.audience, which agents must match) would
-# be assuming the wrong resource. outputs.tf's service_uri description has
-# named this exact check as a phase 2 item since phase 1.
+# Warn-level, post-apply sanity: the actual service URI Cloud Run hands back
+# should be https (IAP requires it; a plain http URI would mean IAP/the GFE
+# path is misconfigured) and should equal the deterministic URL this module
+# computed *before* creating the service (local.public_url) — the same
+# identity triple (project_number, region, hub_name) local.iap_audience is
+# built from. If the real URI ever disagreed with local.public_url, it would
+# mean Cloud Run's actual URL-generation scheme diverged from what this
+# module assumes, and local.iap_audience (settings.yaml's
+# auth.proxy.iap.audience, which agents must match) would be assuming the
+# wrong resource.
 # NOT asserting google_cloud_run_v2_service.hub.uri == local.public_url here,
-# and NOT as a lifecycle{ postcondition {} } either (tf-lead review) — two
-# independent reasons, either one fatal on its own:
+# and NOT as a lifecycle{ postcondition {} } either — two independent
+# reasons, either one fatal on its own:
 #
 # 1. A top-level check block's condition — unlike a resource lifecycle
 #    postcondition, which Terraform explicitly defers to apply time for the
@@ -764,19 +757,19 @@ check "transport_audience_configured" {
 #    moment Terraform evaluates it, and errors the entire plan ("Check block
 #    assertion known after apply") if it isn't, rather than merely warning.
 #    .uri is unknown until apply for any NEWLY CREATED service (every fresh
-#    hub's first plan, e.g. tfha-h3's), so a check block asserting this
-#    would hard-block every future new hub's `terraform plan` — an
-#    F-112-class regression (design doc §9: "no fresh hub can plan").
+#    hub's first plan), so a check block asserting this would hard-block
+#    every future new hub's `terraform plan` — the same class of regression
+#    a stale data-source read once caused ("no fresh hub can plan").
 #    Reproduced credential-free with a throwaway random_pet resource + a
 #    bare check block before touching this module, then confirmed against
-#    this module via fresh_hub_plan.tftest.hcl (item 6), which exists to
-#    catch exactly this and did.
+#    this module via fresh_hub_plan.tftest.hcl, which exists to catch
+#    exactly this and did.
 #
 # 2. The equality doesn't even hold on hubs that already exist, so a
 #    postcondition (which DOES defer to apply, sidestepping #1) would just
 #    trade an unknown-value plan error for a hard apply failure on real
-#    infra. tf-lead: live h2 returns the legacy hash-based form
-#    (https://tfha-h2-4scjcvzjfa-uc.a.run.app), while h1 returns the
+#    infra. One live hub returned the legacy hash-based form
+#    (https://tfha-h2-4scjcvzjfa-uc.a.run.app), while another returned the
 #    deterministic vanity form local.public_url computes
 #    (https://tfha-h1-<project_number>.<region>.run.app) — Cloud Run does
 #    not guarantee which form a given service gets, so this module's own
@@ -794,14 +787,13 @@ check "service_uri_is_https" {
   }
 }
 
-# Phase 2 hardening (item 3b, design §3.7). Warn-level, post-apply sanity
-# for the shared Cloud SQL instance's connection budget. See
-# var.max_connections_budget's description for why this is a per-hub
-# stand-in rather than a true sum-across-hubs check.
+# Warn-level, post-apply sanity for the shared Cloud SQL instance's
+# connection budget. See var.max_connections_budget's description for why
+# this is a per-hub stand-in rather than a true sum-across-hubs check.
 check "connection_budget" {
   assert {
     condition     = var.max_instances * local.hub_max_open_conns <= var.max_connections_budget
-    error_message = "connection budget exceeded: max_instances (${var.max_instances}) * database.max_open_conns (${local.hub_max_open_conns}) = ${var.max_instances * local.hub_max_open_conns}, which is over this hub's max_connections_budget (${var.max_connections_budget}). Lower max_instances, or raise max_connections_budget only after confirming headroom against the shared Cloud SQL instance's max_connections across every hub attached to it (design §3.7)."
+    error_message = "connection budget exceeded: max_instances (${var.max_instances}) * database.max_open_conns (${local.hub_max_open_conns}) = ${var.max_instances * local.hub_max_open_conns}, which is over this hub's max_connections_budget (${var.max_connections_budget}). Lower max_instances, or raise max_connections_budget only after confirming headroom against the shared Cloud SQL instance's max_connections across every hub attached to it."
   }
 }
 
@@ -814,9 +806,9 @@ resource "google_iap_web_cloud_run_service_iam_member" "members" {
   member                 = each.value
 }
 
-# Transport SA's IAP accessor, scoped to this hub's own service only (design
-# §3.4 — moved here from hub-identity's project-wide grant, which reached
-# every IAP-protected resource in the project including the live hubs).
+# Transport SA's IAP accessor, scoped to this hub's own service only (rather
+# than a project-wide grant in hub-identity, which would reach every
+# IAP-protected resource in the project including other, unrelated hubs).
 resource "google_iap_web_cloud_run_service_iam_member" "transport" {
   project                = var.project_id
   location               = var.region

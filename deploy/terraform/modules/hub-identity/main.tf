@@ -1,5 +1,5 @@
-# Per-hub service accounts and additive IAM (design §3.4). All grants use
-# google_*_iam_member exclusively (design §3.8 rule 2): never *_iam_binding or
+# Per-hub service accounts and additive IAM. All grants use
+# google_*_iam_member exclusively: never *_iam_binding or
 # *_iam_policy, which would be authoritative and strip the live stack's or
 # other hubs' existing grants.
 
@@ -23,13 +23,13 @@ resource "google_service_account" "agent" {
 
 # --- Hub SA: project-level grants ---
 #
-# IAM scope rule (design §3.4, added after vm-deploy's second review): §3.8's
-# additive rule governs what we *remove* — this rule governs what we *hand
-# out*. No project-wide grant may reach resources outside this hub's own
-# names. ptone-emblem holds 15 Secret Manager secrets and IAP resources
-# belonging to the live stack, including live hubs' user_signing_key/
-# agent_signing_key — a project-wide roles/secretmanager.admin (the
-# original §3.4/§8 spec) would let this hub's SA read and delete them.
+# IAM scope rule: a separate rule from the "additive grants only" rule above
+# governs what a grant *hands out*, not just how it's expressed. No
+# project-wide grant may reach resources outside this hub's own names. A
+# shared project can hold many hubs' Secret Manager secrets and IAP
+# resources, including other live hubs' user_signing_key/agent_signing_key —
+# a project-wide roles/secretmanager.admin would let this hub's SA read and
+# delete them.
 #
 # Replaced by:
 #  (a) per-secret secretAccessor on this hub's own Terraform-managed secrets
@@ -39,21 +39,21 @@ resource "google_service_account" "agent" {
 #      pkg/secret/gcpbackend.go's gcpSecretName produces for this hub's own
 #      HUB-scope secrets (user_signing_key, agent_signing_key,
 #      oidc_signing_key/keyset — created via the gcpsm backend at hub
-#      startup, needed for phase 1 check 1 to pass at all): for hub scope,
+#      startup, needed for the hub to become healthy at all): for hub scope,
 #      gcpSecretName hashes hubID:scopeID with scopeID == hubID (self-scoped;
 #      confirmed against pkg/hub/oidckeys.go's store.ScopeHub calls, which
 #      all pass hubID as both scope and scopeID). hub_id is set to hub_name
-#      in settings.yaml (§3.6), so the prefix is computable at plan time.
+#      in the rendered settings, so the prefix is computable at plan time.
 #      Cross-checked the substr(sha256(...),0,12) vs. Go's
 #      hex.EncodeToString(sha256.Sum256(...)[:6]) equivalence arithmetically
-#      (both take the first 6 bytes of the same digest, hex-encoded) —
-#      recorded in phase1-validation.md.
+#      (both take the first 6 bytes of the same digest, hex-encoded).
 #      User- and project-scope secrets hash hubID:userID / hubID:projectID —
 #      no per-hub prefix exists for those, so this condition can't cover
-#      them and creating one fails loudly with a 403 (OQ-7, ptone; not a
-#      phase 1 blocker). OQ-8 (whether a name condition covers
-#      `secrets.create`, not just existing-secret operations) is resolved:
-#      vm-deploy's probe confirmed conditions do cover create, so no
+#      them and creating one fails loudly with a 403 (a known, accepted gap:
+#      user- and project-scope secrets aren't needed for a hub to function).
+#      Whether an IAM condition on a resource-name prefix covers
+#      `secrets.create` (not just operations on an existing secret) was
+#      verified empirically against the live API: it does, so no
 #      pre-create fallback is needed here.
 #
 # project_number (below) always comes from the shared-lookup data source via
@@ -118,25 +118,23 @@ resource "google_service_account_iam_member" "hub_mints_own_tokens" {
 
 # --- Transport SA ---
 #
-# NOT granted here: a project-wide roles/iap.httpsResourceAccessor (design
-# §3.4/§8's original spec — reversed after vm-deploy's second review, since
-# it reaches every IAP-protected resource in the project, including the live
-# scion-hub and scion-hub-iap-proxy). Scoped instead to just this hub's own
+# NOT granted here: a project-wide roles/iap.httpsResourceAccessor, since
+# it reaches every IAP-protected resource in the project, including any other
+# live hub. Scoped instead to just this hub's own
 # Cloud Run service, in hub-cloudrun's google_iap_web_cloud_run_service_iam_member
 # (the same resource type already used there for human iap_members).
 
 # --- Agent SA ---
 #
-# No Secret Manager role at all (design §3.4 — reversed after vm-deploy's
-# second review; original spec was a project-wide secretAccessor). The agent
+# No Secret Manager role at all. The agent
 # SA is the Workload Identity binding for agent pods, which run agent- and
 # user-supplied code: a project-wide accessor would let any agent pod read
 # scion-hub-*-user_signing_key/-agent_signing_key for the live hub (or any
 # other hub sharing this project) and mint valid tokens for it — escalation
 # from "runs an agent" to "administers an unrelated production hub", and
 # unfixable with an IAM condition (user/project-scope secret names have no
-# per-hub prefix — same root cause as the hub SA note above, OQ-7). The
-# settings.yaml runtimes.remote.gke is therefore set to false (§3.6): with
+# per-hub prefix — same root cause as the hub SA note above). The
+# rendered settings' runtimes.remote.gke is therefore set to false: with
 # gke: false, k8s_runtime.go puts resolved secrets into namespaced
 # Kubernetes Secrets the hub writes, not a SecretProviderClass the agent
 # pod's own WI identity reads — so Secret Manager access is never in the
@@ -144,8 +142,7 @@ resource "google_service_account_iam_member" "hub_mints_own_tokens" {
 # SA keeps only its Workload Identity binding (agent-runtime-k8s), plus the
 # project-level model-access role(s) below.
 #
-# Found via tfha-h1's agent-LLM-auth investigation (design §9, 2026-09-25):
-# the WI binding lets an agent authenticate AS this SA, but authentication
+# The WI binding lets an agent authenticate AS this SA, but authentication
 # isn't authorization — with no model-access role, Vertex calls 403.
 # var.agent_sa_project_roles defaults to exactly roles/aiplatform.user, the
 # minimum needed to call Vertex, validated against owner/editor/*.admin for

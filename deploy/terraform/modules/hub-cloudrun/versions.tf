@@ -1,5 +1,5 @@
 terraform {
-  # >= 1.9, not >= 1.6 (F-110): hub_write_timeout/broker_write_timeout's
+  # >= 1.9, not >= 1.6: hub_write_timeout/broker_write_timeout's
   # cross-variable validation against var.timeout needs 1.9's relaxed
   # validation-block restrictions — the same reason configurations/hub's
   # root already requires >= 1.9 for its hub_name/state_prefix validation.
@@ -17,7 +17,7 @@ terraform {
     # google_iap_settings.access_settings.oauth_settings.client_id/
     # client_secret, which only exist from 8.0.0 onward (confirmed empty in
     # 6.50.0/7.0.0/7.20.0, present in 8.0.0/8.4.0) — hence pinning ~> 8.4
-    # for the whole module set, not just this module (tf-lead decision).
+    # for the whole module set, not just this module.
     google-beta = {
       source  = "hashicorp/google-beta"
       version = "~> 8.4"

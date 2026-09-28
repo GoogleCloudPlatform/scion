@@ -10,7 +10,7 @@ provider "google-beta" {
 
 # The shared GKE cluster pre-exists (created by configurations/shared-infra),
 # so this is the well-behaved case for the provider-from-cluster problem:
-# nothing in this root creates or replaces the cluster (design §3.5).
+# nothing in this root creates or replaces the cluster.
 data "google_client_config" "me" {}
 
 provider "kubernetes" {
@@ -22,9 +22,8 @@ provider "kubernetes" {
   # (warden-version, resource-adjustment, ...) onto objects it admits —
   # agent pods and the namespace will collect these too, not just the
   # nfs-init Job. Handled provider-wide rather than per-resource
-  # ignore_changes, since it's a cluster-wide Autopilot behavior (design
-  # §3.4/§3.5, added after vm-deploy live-planned this against the real
-  # cluster).
+  # ignore_changes, since it's a cluster-wide Autopilot behavior confirmed
+  # by live-planning against a real cluster.
   ignore_annotations = ["^autopilot\\.gke\\.io/.*"]
 }
 
@@ -39,9 +38,9 @@ module "shared_lookup" {
 }
 
 locals {
-  # image_registry design §3.4: default computes to the shared AR repo from
-  # shared-lookup's real resource data (not a manually reconstructed
-  # string), overridable via var.image_registry for a variation.
+  # Default computes to the shared AR repo from shared-lookup's real resource
+  # data (not a manually reconstructed string), overridable via
+  # var.image_registry for a variation.
   image_registry = coalesce(var.image_registry, module.shared_lookup.shared.artifact_registry.repo_url)
 
   # Single source of truth for this hub's identity, fed to hub-identity (whose
@@ -53,8 +52,7 @@ locals {
   # diverge, or GCPBackend.Get computes a different scion-hub-<hash>-* secret
   # name than the one actually provisioned here (split-brain secret lookup).
   # Routing both module calls through this one local, instead of each
-  # referencing var.hub_name independently, is what keeps them in lockstep
-  # (tf-lead/vm-deploy, OIDC signing key task).
+  # referencing var.hub_name independently, is what keeps them in lockstep.
   hub_id = var.hub_name
 }
 
@@ -112,31 +110,35 @@ module "hub_cloudrun" {
   hub_iam_condition_expression = module.hub_identity.hub_iam_condition_expression
   hub_scope_secret_hash        = module.hub_identity.hub_scope_secret_hash
 
-  # F-106 (design §9): real resource attributes only, never a module
-  # reference or a computed-string output — see hub-cloudrun's
-  # boot_prerequisites variable and terraform_data.boot_prerequisites for why
-  # a module-level depends_on used to sit where this argument now is, and why
-  # it broke the settings secret on every unrelated change to these three
-  # modules (vm-deploy, real apply: an IAM-only change came out as an
-  # unrelated destroy/replace of the settings secret version). db_name/
-  # db_user (referenced directly in this map) and hub_iam_grants (passed as
-  # a module argument above) already create real dependency edges on their
-  # own (they're resource attributes, not just variables) — bundled here too
-  # so all of B2's ordering requirements are visible in one place, not split
-  # between incidental variable wiring and this map. Note db_name/db_user are
-  # no longer separately passed to hub-cloudrun as module arguments (Alt-F,
-  # design §6 OQ-11, removed them — see hub-cloudrun's variables.tf); they
-  # still appear here purely for this ordering edge, sourced straight from
-  # cloudsql-database's outputs. The one requirement that had NO other edge
-  # at all was the nfs-init Job: nfs_export (above) is a plain path string,
-  # known before the Job ever runs, so nfs_init_job_id (a real attribute of
-  # the Job resource) is what actually closes that gap. It is the Job's .id
-  # ("<namespace>/<name>"), not its .metadata[0].uid (F-113): the provider
-  # sets .id from the create response before wait_for_completion runs, but
-  # leaves uid null in state until the next refresh, so keying on uid made
-  # this terraform_data show a spurious 0/1/0 on every fresh hub's second
-  # plan even though the graph edge (and so the ordering) was never actually
-  # broken.
+  # Real resource attributes only, never a module reference or a
+  # computed-string output. This map is what forces Cloud Run to wait for the
+  # nfs-init Job, the database/user, and hub-identity's IAM grants to
+  # propagate before the first revision boots. A module-level depends_on used
+  # to express this instead, and that broke the settings secret on every
+  # unrelated change to these three modules: a depends_on on the whole module
+  # block defers every resource AND data source inside it, so an IAM-only
+  # change under agent-runtime-k8s, cloudsql-database or hub-identity made
+  # the settings secret's secret_data look unknown at plan time and forced a
+  # spurious replace of the settings secret version (observed on a real
+  # apply: an IAM-only change came out as 2 add / 0 change / 1 destroy
+  # instead of 2/0/0). db_name/db_user (referenced directly in this map) and
+  # hub_iam_grants (passed as a module argument above) already create real
+  # dependency edges on their own (they're resource attributes, not just
+  # variables) — bundled here too so all of the ordering requirements are
+  # visible in one place, not split between incidental variable wiring and
+  # this map. db_name/db_user are no longer separately passed to hub-cloudrun
+  # as module arguments (the DSN is built entirely inside cloudsql-database
+  # now — see hub-cloudrun's variables.tf); they still appear here purely for
+  # this ordering edge, sourced straight from cloudsql-database's outputs.
+  # The one requirement that had NO other edge at all was the nfs-init Job:
+  # nfs_export (above) is a plain path string, known before the Job ever
+  # runs, so nfs_init_job_id (a real attribute of the Job resource) is what
+  # actually closes that gap. It is the Job's .id ("<namespace>/<name>"), not
+  # its .metadata[0].uid: the provider sets .id from the create response
+  # before wait_for_completion runs, but leaves uid null in state until the
+  # next refresh, so keying on uid made this terraform_data show a spurious
+  # 0/1/0 on every fresh hub's second plan even though the graph edge (and so
+  # the ordering) was never actually broken.
   boot_prerequisites = {
     nfs_init_job   = module.agent_runtime_k8s.nfs_init_job_id
     db_name        = module.cloudsql_database.db_name
@@ -148,10 +150,10 @@ module "hub_cloudrun" {
   subnet_name  = module.shared_lookup.shared.network.subnet_name
 
   # sql_connection_name is still needed by hub-cloudrun for the cloudsql
-  # volume's cloud_sql_instance.instances (F-104) even though it's no longer
-  # rendered into settings.yaml. db_name/db_user/db_password are gone (Alt-F,
-  # design §6 OQ-11): the DSN is built entirely inside cloudsql-database now
-  # and reaches hub-cloudrun only as the two secret coordinates below.
+  # volume's cloud_sql_instance.instances even though it's no longer rendered
+  # into settings.yaml. db_name/db_user/db_password are gone: the DSN is
+  # built entirely inside cloudsql-database now and reaches hub-cloudrun only
+  # as the two secret coordinates below.
   sql_connection_name = module.shared_lookup.shared.sql.connection_name
   dsn_secret_id       = module.cloudsql_database.dsn_secret_id
   dsn_secret_version  = module.cloudsql_database.dsn_secret_version
@@ -176,32 +178,29 @@ module "hub_cloudrun" {
   memory        = var.memory
   timeout       = var.timeout
 
-  # F-110 (design §9): hub-cloudrun validates both against var.timeout itself.
+  # hub-cloudrun validates both against var.timeout itself.
   hub_write_timeout    = var.hub_write_timeout
   broker_write_timeout = var.broker_write_timeout
 
-  # Single-sourced with agent-runtime-k8s above (design §3.4) — passing the
-  # same three values to both, rather than letting hub-cloudrun default them
+  # Single-sourced with agent-runtime-k8s above — passing the same three
+  # values to both, rather than letting hub-cloudrun default them
   # independently, is what stops the NFS tree being chowned one way while
   # the hub is told another.
   nfs_uid          = var.nfs_uid
   nfs_gid          = var.nfs_gid
   nfs_subpath_root = var.nfs_subpath_root
 
-  # No module-level depends_on here (F-106, design §9): it used to cover the
-  # same B2 ordering requirement (nfs-init Job, database/user, hub-identity's
-  # IAM propagating, all before the first revision boots) that
-  # boot_prerequisites above now covers — but a module-level depends_on defers
-  # every resource AND data source inside hub-cloudrun, including
-  # hub-cloudrun's old data.google_secret_manager_secret_version.db_password
-  # (removed in F-112 — db_password above is now a plain sensitive module
-  # input, not a data source read), which had no actual ordering need on
+  # Deliberately no module-level depends_on here: it used to cover the same
+  # boot-ordering requirement (nfs-init Job, database/user, hub-identity's IAM
+  # propagating, all before the first revision boots) that boot_prerequisites
+  # above now covers — but a module-level depends_on defers every resource
+  # AND data source inside hub-cloudrun, which had no actual ordering need on
   # these three modules. That made the settings secret's secret_data unknown
   # at plan time, forcing a spurious replace of the settings secret version
   # on every unrelated change to agent-runtime-k8s, cloudsql-database or
-  # hub-identity (vm-deploy, real apply: an IAM-only change came out 2 add /
-  # 0 change / 1 destroy instead of 2/0/0). Do not reintroduce a depends_on
-  # on this module block for this purpose — express any new B2-class
-  # ordering need as another real resource attribute in boot_prerequisites
+  # hub-identity (observed on a real apply: an IAM-only change came out 2 add
+  # / 0 change / 1 destroy instead of 2/0/0). Do not reintroduce a depends_on
+  # on this module block for this purpose — express any new ordering
+  # requirement as another real resource attribute in boot_prerequisites
   # instead.
 }

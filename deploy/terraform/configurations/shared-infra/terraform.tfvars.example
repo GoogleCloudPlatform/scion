@@ -6,10 +6,12 @@ region      = "us-central1"
 zone        = "us-central1-a"
 name_prefix = "tfha"
 
-# Phase 1 validation defaults (smallest viable, ZONAL). Flip to REGIONAL only
-# once phase 2 HA hardening is underway (design §7).
+# REGIONAL is the module default (HA). Use ZONAL only for the smallest
+# viable dev/test footprint; converting an existing ZONAL instance to
+# REGIONAL later is an in-place update with an outage of about 7 minutes
+# (see the README).
 sql_availability_type = "ZONAL"
 
 # Leave true always outside a deliberate, documented teardown — see the
-# README's destroy runbook (design §3.10).
+# README's destroy runbook.
 deletion_protection = true

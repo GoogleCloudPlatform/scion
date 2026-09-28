@@ -1,5 +1,5 @@
-# Per-hub Kubernetes resources on the shared GKE Autopilot cluster (design
-# §3.4). The kubernetes provider is configured in the hub root from
+# Per-hub Kubernetes resources on the shared GKE Autopilot cluster. The
+# kubernetes provider is configured in the hub root from
 # shared.gke; this module declares no provider blocks.
 
 resource "kubernetes_namespace" "this" {
@@ -10,8 +10,9 @@ resource "kubernetes_namespace" "this" {
 
 # Minimum RBAC from kubernetes.md L169-215, cross-checked against
 # pkg/runtime/k8s_runtime.go's actual API calls. Namespaced: hub A gets no
-# rights in hub B's namespace (unlike the docs' project-wide
-# container.developer — see design Alt-E).
+# rights in hub B's namespace (a project-wide container.developer role,
+# as used in some non-Terraform deployment docs, would remove that
+# isolation).
 resource "kubernetes_role" "hub" {
   metadata {
     name      = "${var.hub_name}-hub"
@@ -56,7 +57,7 @@ resource "kubernetes_role" "hub" {
 }
 
 # GKE maps the hub SA's Google identity to an RBAC User of the same name —
-# in principle. In practice (F-108, design §9): the hub's k8s client
+# in principle. In practice: the hub's k8s client
 # authenticates via pkg/k8s/client.go's fallbackToGCEAuth (the kubeconfig
 # this module's caller renders names the gke-gcloud-auth-plugin exec, which
 # the hub image doesn't have), and that fallback requests only the
@@ -66,9 +67,9 @@ resource "kubernetes_role" "hub" {
 # heartbeat logged `pods is forbidden: User "115656325337183068810"`, and
 # pod create would have been denied the same way. Two subjects, both kept:
 # the unique_id one is what actually matches today; the email one is kept so
-# this binding needs no further change once the client is fixed upstream to
-# request userinfo.email (design §9 upstream follow-up, item h) — dropping
-# it now would just trade today's outage for a silent one later.
+# this binding needs no further change if the client is ever fixed upstream
+# to request userinfo.email — dropping it now would just trade today's
+# outage for a silent one later.
 resource "kubernetes_role_binding" "hub" {
   metadata {
     name      = "${var.hub_name}-hub"
@@ -81,7 +82,7 @@ resource "kubernetes_role_binding" "hub" {
     name      = kubernetes_role.hub.metadata[0].name
   }
 
-  # F-108: matches nothing today (GKE can't see this email without
+  # Matches nothing today (GKE can't see this email without
   # userinfo.email), but kept for when the upstream client fix lands.
   subject {
     api_group = "rbac.authorization.k8s.io"
@@ -89,7 +90,7 @@ resource "kubernetes_role_binding" "hub" {
     name      = var.hub_sa_email
   }
 
-  # F-108: this is the subject that actually matches while the hub's k8s
+  # This is the subject that actually matches while the hub's k8s
   # client only presents the cloud-platform scope.
   subject {
     api_group = "rbac.authorization.k8s.io"
@@ -129,9 +130,10 @@ resource "google_service_account_iam_member" "agent_workload_identity_user" {
 # Mounts the share ROOT with an inline nfs volume (Autopilot allows this for
 # a Job; no PV needed for the init step itself).
 #
-# Deliberately no ttl_seconds_after_finished (tf-review B4): a TTL garbage-
+# Deliberately no ttl_seconds_after_finished: a TTL garbage-
 # collects the Job, and every later plan would then re-create it, which
-# breaks A2's "second plan shows no changes". The completed Job stays in the
+# breaks the "second plan shows no changes" expectation for a stable
+# deployment. The completed Job stays in the
 # namespace; it costs nothing on Autopilot.
 resource "kubernetes_job_v1" "nfs_init" {
   metadata {
@@ -191,12 +193,13 @@ resource "kubernetes_job_v1" "nfs_init" {
   # allow_privilege_escalation, and an arch toleration) that aren't in this
   # config. Since the pod template is immutable, every subsequent plan sees
   # those injected values as drift and wants to replace the whole Job —
-  # failing A2's "second plan, no changes". Ignore exactly the three spec
+  # breaking the "second plan, no changes" expectation for a stable
+  # deployment. Ignore exactly the three spec
   # paths Autopilot injects into; nothing broader, and none of these values
-  # are declared in config on purpose (design §3.4, updated twice after
-  # vm-deploy live-planned both variants against the real cluster: the
-  # spec-level paths alone are sufficient here — container[0].resources
-  # showed no drift and was dropped from this list).
+  # are declared in config on purpose (live-plan testing against a real
+  # Autopilot cluster confirmed the spec-level paths alone are sufficient
+  # here — container[0].resources showed no drift and was dropped from this
+  # list).
   #
   # The warden also stamps two annotations on the object
   # (autopilot.gke.io/warden-version, .../resource-adjustment), which is
@@ -205,7 +208,7 @@ resource "kubernetes_job_v1" "nfs_init" {
   # Autopilot behavior that will also touch agent pods and the namespace,
   # not something specific to this one Job.
   #
-  # Caveat (vm-deploy): ignoring the whole security_context blocks means
+  # Caveat: ignoring the whole security_context blocks means
   # our own declared run_as_user/run_as_group = 0 is also frozen after
   # first apply — if that ever needs to change, this ignore_changes entry
   # has to be edited (or removed and reapplied) alongside it. Narrower
@@ -223,10 +226,10 @@ resource "kubernetes_job_v1" "nfs_init" {
 
 # storage_class_name = "" does not bind on GKE: the cluster's default-class
 # admission controller sets an unset/empty PVC storage class to the default
-# (standard-rwo), which never matches this static NFS PV. Found in the
-# first hub apply attempt (F-93). A dedicated no-provisioner StorageClass,
-# referenced explicitly by both the PV and the PVC, is the fix — it's the
-# standard pattern for static/pre-provisioned volumes.
+# (standard-rwo), which never matches this static NFS PV. A dedicated
+# no-provisioner StorageClass, referenced explicitly by both the PV and the
+# PVC, is the fix — it's the standard pattern for static/pre-provisioned
+# volumes.
 resource "kubernetes_storage_class_v1" "nfs" {
   metadata {
     name = "${var.hub_name}-nfs"

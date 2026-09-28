@@ -14,13 +14,13 @@ variable "zone" {
 }
 
 variable "name_prefix" {
-  description = "Shared-infra name prefix. Every resource this configuration creates derives its name from this value (design §3.8)."
+  description = "Shared-infra name prefix. Every resource this configuration creates derives its name from this value, so a name collision fails the apply instead of silently adopting an existing resource."
   type        = string
   default     = "tfha"
 
   validation {
     condition     = can(regex("^[a-z][a-z0-9]{1,7}$", var.name_prefix))
-    error_message = "name_prefix must match ^[a-z][a-z0-9]{1,7}$ (design §3.8)."
+    error_message = "name_prefix must match ^[a-z][a-z0-9]{1,7}$."
   }
 }
 
@@ -43,7 +43,7 @@ variable "sql_tier" {
 }
 
 variable "sql_availability_type" {
-  description = "ZONAL for phase 1 / dev; REGIONAL for HA (phase 2, default)."
+  description = "ZONAL for a smallest-viable/dev deployment; REGIONAL for HA (the default)."
   type        = string
   default     = "REGIONAL"
 
@@ -54,7 +54,7 @@ variable "sql_availability_type" {
 }
 
 variable "sql_max_connections" {
-  description = "Postgres max_connections. Must be sized across every hub sharing this instance (design §3.7)."
+  description = "Postgres max_connections. Must be sized across every hub sharing this instance — see the README's shared-infra trust domain and sizing section."
   type        = number
   default     = 200
 }
@@ -84,13 +84,13 @@ variable "gke_release_channel" {
 }
 
 variable "gke_master_authorized_networks" {
-  description = "CIDR blocks allowed to reach the public GKE control-plane endpoint. Empty means Google-auth-only (OQ-3 default)."
+  description = "CIDR blocks allowed to reach the public GKE control-plane endpoint. Empty (the default) means the public endpoint accepts only Google-authenticated callers, with no CIDR allowlist."
   type        = list(string)
   default     = []
 }
 
 variable "deletion_protection" {
-  description = "API-level and Terraform-level deletion protection, applied uniformly to the Cloud SQL instance, Filestore instance and GKE cluster (design §3.10). Leave true always, except for the deliberate, single destroy apply documented in the README's destroy runbook — the destroy_guard interlock refuses to let this go false while any hub database still exists."
+  description = "API-level and Terraform-level deletion protection, applied uniformly to the Cloud SQL instance, Filestore instance and GKE cluster. Leave true always, except for the deliberate, single destroy apply documented in the README's destroy runbook — the destroy_guard interlock refuses to let this go false while any hub database still exists."
   type        = bool
   default     = true
 }

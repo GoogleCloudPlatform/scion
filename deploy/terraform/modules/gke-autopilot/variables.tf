@@ -15,7 +15,7 @@ variable "name_prefix" {
 
   validation {
     condition     = can(regex("^[a-z][a-z0-9]{1,7}$", var.name_prefix))
-    error_message = "name_prefix must match ^[a-z][a-z0-9]{1,7}$ (design §3.8)."
+    error_message = "name_prefix must match ^[a-z][a-z0-9]{1,7}$: it is used verbatim in generated resource names, which have their own length and character-set limits."
   }
 }
 
@@ -36,7 +36,7 @@ variable "release_channel" {
 }
 
 variable "master_authorized_networks" {
-  description = "CIDR blocks allowed to reach the public control-plane endpoint. Empty means Google-auth-only with no extra network restriction (OQ-3 default: public endpoint)."
+  description = "CIDR blocks allowed to reach the public control-plane endpoint. Empty means Google-auth-only with no extra network restriction, which is the default for this module set: the control plane keeps a public endpoint, gated by Google identity rather than a private-endpoint/bastion setup."
   type        = list(string)
   default     = []
 }

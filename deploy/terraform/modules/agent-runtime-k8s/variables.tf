@@ -4,7 +4,7 @@ variable "hub_name" {
 
   validation {
     condition     = can(regex("^[a-z][a-z0-9-]{2,15}$", var.hub_name))
-    error_message = "hub_name must match ^[a-z][a-z0-9-]{2,15}$ (design §3.8)."
+    error_message = "hub_name must match ^[a-z][a-z0-9-]{2,15}$."
   }
 }
 
@@ -19,7 +19,7 @@ variable "hub_sa_email" {
 }
 
 variable "hub_sa_unique_id" {
-  description = "Hub SA's numeric unique_id (F-108, design §9, hub-identity output). Bound as a SECOND subject on the RoleBinding alongside hub_sa_email: the hub's k8s client falls back to pkg/k8s/client.go's fallbackToGCEAuth (the kubeconfig names the gke-gcloud-auth-plugin exec, absent from the image), which requests only the cloud-platform scope, not userinfo.email — so GKE identifies the caller by this numeric ID, not the SA's email, and the email-only subject never matches. Kept alongside the email subject (not replacing it) so the binding still matches once the client is fixed upstream to request userinfo.email (tracked as a design §9 upstream follow-up, item h)."
+  description = "Hub SA's numeric unique_id (hub-identity output). Bound as a SECOND subject on the RoleBinding alongside hub_sa_email: the hub's k8s client falls back to pkg/k8s/client.go's fallbackToGCEAuth (the kubeconfig names the gke-gcloud-auth-plugin exec, absent from the image), which requests only the cloud-platform scope, not userinfo.email — so GKE identifies the caller by this numeric ID, not the SA's email, and the email-only subject never matches. Kept alongside the email subject (not replacing it) so the binding still matches if the client is ever fixed upstream to request userinfo.email."
   type        = string
 
   validation {

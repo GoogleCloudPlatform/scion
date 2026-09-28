@@ -1,8 +1,8 @@
 # Shared Filestore Basic instance with one NFS share. Hubs get subdirectories
 # under this share (created by each hub's nfs-init Job), not separate shares:
 # Basic only supports one share per instance and has a 1 TiB minimum, so a
-# share-per-hub would mean an instance-per-hub, defeating the cost-sharing
-# rationale (design §3.1, Alt-M).
+# share-per-hub would mean an instance-per-hub, defeating the point of
+# sharing one Filestore instance across hubs to keep cost down.
 
 resource "google_filestore_instance" "this" {
   project  = var.project_id
@@ -11,7 +11,7 @@ resource "google_filestore_instance" "this" {
   tier     = var.tier
 
   deletion_protection_enabled = var.deletion_protection
-  deletion_protection_reason  = var.deletion_protection ? "Shared Filestore instance; hubs read it via shared-lookup. Flip deletion_protection to destroy (design §3.10)." : null
+  deletion_protection_reason  = var.deletion_protection ? "Shared Filestore instance; hubs read it via shared-lookup. Set deletion_protection = false to allow destroying it." : null
 
   file_shares {
     capacity_gb = var.capacity_gb
@@ -30,8 +30,9 @@ resource "google_filestore_instance" "this" {
   # preconditions, so deletion_protection_enabled alone can't stop a direct
   # `terraform destroy -var deletion_protection=false` from removing this
   # once the API flag transition were to happen; this guards the operation
-  # itself. Teardown needs a one-line commit removing this on a
-  # never-merged teardown branch (design §3.10 guardrails 5-8, Alt-N).
+  # itself. A deliberate teardown of the whole shared stack needs a one-line
+  # commit removing this lifecycle block, applied on its own short-lived
+  # branch, never merged back.
   lifecycle {
     prevent_destroy = true
   }

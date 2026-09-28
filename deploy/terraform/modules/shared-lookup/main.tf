@@ -1,8 +1,8 @@
-# The hub/shared layer contract (design §3.4, §3.5, Alt-K). This module
-# resolves shared infra purely by naming convention through data sources —
-# never through terraform_remote_state — so the hub root works against any
-# conforming infra, including hand-built infra, and fails loudly (not
-# silently) if a resource is missing. No adoption: this module only reads.
+# The hub/shared layer contract. This module resolves shared infra purely by
+# naming convention through data sources — never through
+# terraform_remote_state — so the hub root works against any conforming
+# infra, including hand-built infra, and fails loudly (not silently) if a
+# resource is missing. No adoption: this module only reads.
 
 data "google_project" "this" {
   project_id = var.project_id
@@ -36,11 +36,10 @@ data "google_container_cluster" "this" {
   name     = "${var.shared_prefix}-agents"
 }
 
-# Added for image_registry (design §3.4/§3.6, found before the tfha-h1
-# apply): without a top-level image_registry in settings.yaml, the hub never
-# rewrites bare harness images (scion-claude:latest etc.) to the shared AR
-# repo, GKE pulls them from Docker Hub where they don't exist, and phase 1
-# check 3 (agent pod) fails with ImagePullBackOff.
+# Without a top-level image_registry in settings.yaml, the hub never rewrites
+# bare harness images (scion-claude:latest etc.) to the shared Artifact
+# Registry repo, so GKE tries to pull them from Docker Hub where they don't
+# exist, and agent pods fail to start with ImagePullBackOff.
 data "google_artifact_registry_repository" "scion" {
   project       = var.project_id
   location      = var.region

@@ -1,6 +1,6 @@
-# One typed object: the stable seam between the shared and hub layers
-# (design §3.4). A future variation (dedicated, non-shared infra) builds the
-# same shape from resources instead of data sources.
+# One typed object: the stable seam between the shared and hub layers. A
+# future variation (dedicated, non-shared infra) builds the same shape from
+# resources instead of data sources.
 output "shared" {
   description = "Typed view of the shared infra, resolved by naming convention."
   value = {

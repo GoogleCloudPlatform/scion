@@ -15,7 +15,7 @@ variable "name_prefix" {
 
   validation {
     condition     = can(regex("^[a-z][a-z0-9]{1,7}$", var.name_prefix))
-    error_message = "name_prefix must match ^[a-z][a-z0-9]{1,7}$ (design §3.8)."
+    error_message = "name_prefix must match ^[a-z][a-z0-9]{1,7}$."
   }
 }
 
@@ -43,7 +43,7 @@ variable "edition" {
 }
 
 variable "availability_type" {
-  description = "ZONAL for phase 1 / dev stacks; REGIONAL for HA (phase 2)."
+  description = "ZONAL for a smallest-viable/dev stack; REGIONAL for HA (the default)."
   type        = string
   default     = "REGIONAL"
 
@@ -54,7 +54,7 @@ variable "availability_type" {
 }
 
 variable "max_connections" {
-  description = "Postgres max_connections database flag. Must be sized for the sum of all hubs' connection pools (design §3.7)."
+  description = "Postgres max_connections database flag. Must be sized for the sum of all hubs' connection pools."
   type        = number
   default     = 200
 }

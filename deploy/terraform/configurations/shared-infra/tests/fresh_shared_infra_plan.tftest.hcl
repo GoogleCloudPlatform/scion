@@ -1,9 +1,9 @@
-# Phase 2 hardening item 6: availability_type REGIONAL by default is not
-# reachable from configurations/hub's tests (fresh_hub_plan.tftest.hcl) —
-# the hub root never touches cloudsql-instance directly, and shared-lookup's
-# shared.sql contract exposes only instance_name/connection_name (design
-# §3.5), not availability_type. Per the brief, that coverage lives here
-# instead, against configurations/shared-infra directly.
+# availability_type REGIONAL by default is not reachable from
+# configurations/hub's tests (fresh_hub_plan.tftest.hcl) — the hub root
+# never touches cloudsql-instance directly, and shared-lookup's shared.sql
+# contract exposes only instance_name/connection_name, not
+# availability_type. That coverage lives here instead, against
+# configurations/shared-infra directly.
 #
 # mock_provider replaces google and google-beta (the only two providers this
 # root and its module tree use — see versions.tf) with a schema-driven fake,
@@ -47,7 +47,7 @@ run "fresh_shared_infra_plans_clean" {
   # use.
   assert {
     condition     = var.sql_availability_type == "REGIONAL"
-    error_message = "sql_availability_type must default to REGIONAL for phase 2 HA hardening (was ZONAL through phase 1)."
+    error_message = "sql_availability_type must default to REGIONAL for HA."
   }
 
   # The value actually reaches the Cloud SQL instance resource, not just the

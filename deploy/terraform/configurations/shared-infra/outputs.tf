@@ -1,7 +1,9 @@
-# These outputs are for humans (the README, and vm-deploy's collision/apply
-# records) — the hub root reads shared infra via shared-lookup's data
-# sources, by naming convention, not via these outputs or remote state
-# (design §3.4, §3.5, Alt-K).
+# These outputs are for humans (the README, and an operator's own
+# collision/apply records) — the hub root reads shared infra via
+# shared-lookup's data sources, by naming convention, not via these outputs
+# or remote state. This is the seam that lets a future variation with
+# dedicated (non-shared) infra plug in by building the same lookup output
+# shape from real resources instead.
 
 output "name_prefix" {
   value = var.name_prefix
@@ -36,7 +38,7 @@ output "sql_connection_name" {
 }
 
 output "sql_availability_type" {
-  description = "The Cloud SQL instance's actual availability_type. Exposed so fresh_shared_infra_plan.tftest.hcl (phase 2 hardening item 6) can assert the REGIONAL default reaches the resource, not just var.sql_availability_type's default. Not reachable from the hub root (shared-lookup's shared.sql contract exposes only instance_name/connection_name), so this coverage lives here per the brief."
+  description = "The Cloud SQL instance's actual availability_type. Exposed so fresh_shared_infra_plan.tftest.hcl can assert the REGIONAL default reaches the resource, not just var.sql_availability_type's default. Not reachable from the hub root (shared-lookup's shared.sql contract exposes only instance_name/connection_name), so this coverage has to live here instead."
   value       = module.cloudsql_instance.availability_type
 }
 

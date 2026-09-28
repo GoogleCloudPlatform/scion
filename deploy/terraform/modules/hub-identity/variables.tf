@@ -14,17 +14,17 @@ variable "hub_name" {
 
   validation {
     condition     = can(regex("^[a-z][a-z0-9-]{2,15}$", var.hub_name))
-    error_message = "hub_name must match ^[a-z][a-z0-9-]{2,15}$ (design §3.8)."
+    error_message = "hub_name must match ^[a-z][a-z0-9-]{2,15}$."
   }
 }
 
 variable "agent_sa_project_roles" {
-  description = "Project-level roles granted additively to the agent SA (design §3.4/§9 agent-LLM-auth gap): with Workload Identity wired but no model-access role, an agent authenticating via the GCE metadata server (GCPIdentity.MetadataMode passthrough/assign, a hub-side setting — Terraform cannot grant it) still gets 403s calling Vertex. Default grants exactly the model-call role, nothing broader — this is the same project the agent SA's WI binding already reaches, so an *.admin/editor/owner role here would be as dangerous as the project-wide secretmanager grants this module deliberately doesn't give the agent SA (see the Agent SA comment above)."
+  description = "Project-level roles granted additively to the agent SA: with Workload Identity wired but no model-access role, an agent authenticating via the GCE metadata server (GCPIdentity.MetadataMode passthrough/assign, a hub-side setting — Terraform cannot grant it) still gets 403s calling Vertex. Default grants exactly the model-call role, nothing broader — this is the same project the agent SA's WI binding already reaches, so an *.admin/editor/owner role here would be as dangerous as the project-wide secretmanager grants this module deliberately doesn't give the agent SA (see the Agent SA comment above)."
   type        = list(string)
   default     = ["roles/aiplatform.user"]
 
   validation {
-    # (?i)admin$ (case-insensitive), not \.admin$ (vm-deploy caught this):
+    # (?i)admin$ (case-insensitive), not \.admin$:
     # the literal-dot-then-"admin" form misses roles whose admin-ness is
     # mid-token, not a dotted suffix — roles/securityAdmin,
     # roles/resourcemanager.projectIamAdmin. Matching "admin" at the end of

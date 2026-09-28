@@ -1,6 +1,6 @@
 # Shared Cloud SQL for PostgreSQL 16 instance, private IP only. Per-hub
 # databases, users and passwords are created by the cloudsql-database module,
-# not here (design §3.1/§3.4).
+# not here.
 
 resource "google_sql_database_instance" "this" {
   project             = var.project_id
@@ -43,12 +43,12 @@ resource "google_sql_database_instance" "this" {
   # Literal, not variable-driven (Terraform doesn't allow that): the
   # deletion_protection variable/attributes above guard the state
   # *transition*, but terraform destroy skips lifecycle preconditions
-  # entirely (confirmed by vm-deploy against the live API), so a direct
+  # entirely (confirmed against the live API), so a direct
   # `terraform destroy -var deletion_protection=false` on the shared root
   # would otherwise partially succeed here. This guards the *operation*:
   # any plan that would destroy this resource errors before anything is
   # applied. Intentional teardown needs a one-line commit removing this on a
-  # teardown branch that is never merged (design §3.10 guardrails 5-8, Alt-N).
+  # teardown branch that is never merged.
   lifecycle {
     prevent_destroy = true
   }

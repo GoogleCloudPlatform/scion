@@ -5,7 +5,9 @@ resource "google_project_service" "this" {
   service = each.value
 
   # Shared project: never disable a service other consumers of the project may
-  # depend on when this stack is destroyed (design §3.8 rule 4).
+  # depend on when this stack is destroyed. The project may host other
+  # workloads beyond this module set, so a `terraform destroy` here must not
+  # turn off APIs (or dependent APIs) that those other consumers rely on.
   disable_on_destroy         = false
   disable_dependent_services = false
 }

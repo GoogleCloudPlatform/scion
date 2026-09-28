@@ -15,7 +15,7 @@ variable "name_prefix" {
 
   validation {
     condition     = can(regex("^[a-z][a-z0-9]{1,7}$", var.name_prefix))
-    error_message = "name_prefix must match ^[a-z][a-z0-9]{1,7}$ (design §3.8)."
+    error_message = "name_prefix must match ^[a-z][a-z0-9]{1,7}$: it is used verbatim in generated resource names, which have their own length and character-set limits."
   }
 }
 
@@ -37,13 +37,13 @@ variable "capacity_gb" {
 }
 
 variable "share_name" {
-  description = "Name of the single NFS share on the instance. Per-hub isolation is by subdirectory under this share (design §3.1/§3.4), not by separate shares."
+  description = "Name of the single NFS share on the instance. Per-hub isolation is by subdirectory under this share, not by separate shares (Filestore Basic only supports one share per instance)."
   type        = string
   default     = "scion"
 }
 
 variable "deletion_protection" {
-  description = "API-level deletion protection (google_filestore_instance.deletion_protection_enabled). This is shared infra: leave true except when intentionally tearing down the whole stack (design §3.10)."
+  description = "API-level deletion protection (google_filestore_instance.deletion_protection_enabled). This is shared infra: leave true except when intentionally tearing down the whole stack."
   type        = bool
   default     = true
 }
