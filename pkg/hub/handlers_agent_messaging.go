@@ -1623,7 +1623,13 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
-	// Log the message dispatch to dedicated message log
+	// Log the inbound message to the dedicated message log. This fires
+	// before persistence and before the migration-gate decision below
+	// (reincarnating), so it must NOT claim a dispatch outcome (A25.6 O6,
+	// report-7-gteam-2a): a message that ends up deferred would otherwise
+	// be misread by anyone grepping logs for "dispatched" as delivered. The
+	// authoritative outcome is logged separately once known (e.g. "dm
+	// dispatch outcome", "agent DM: message dispatched").
 	logAttrs := []any{
 		"agent_id", agent.ID,
 		"agent_name", agent.Name,
@@ -1632,7 +1638,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	if structuredMsg != nil {
 		logAttrs = append(logAttrs, structuredMsg.LogAttrs()...)
 	}
-	s.logMessage("message dispatched", logAttrs...)
+	s.logMessage("message received for delivery", logAttrs...)
 
 	// Persist to message store before delivery attempt. Set dispatch_state
 	// to "dispatched" (no new pending rows per delivery policy).
