@@ -1026,3 +1026,118 @@ func TestSendMessageViaConversation_ConvRef_JSONOutputContent(t *testing.T) {
 	assert.Equal(t, "sent", result.Status, "status should match mock response")
 	assert.Equal(t, "uid-test", result.RecipientID, "recipient_id should match mock response")
 }
+
+// TestSendMessageViaConversation_AgentRef_AgentContext_Deferred is the
+// agent-sender half of the migration gate CLI test (design agent-reincarnate
+// §3.7, Amendment A25 2a.2): @agent from an agent context routes through
+// SendStructuredMessage (DEF-164); when the hub reports status "deferred"
+// (the target is mid-`scion reincarnate`), the CLI must print the deferred
+// notice instead of the generic "delivered" message.
+func TestSendMessageViaConversation_AgentRef_AgentContext_Deferred(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "test-sender-agent")
+
+	projectID := "proj-convref-agent-deferred"
+	projectPrefix := "/api/v1/projects/" + projectID + "/agents/"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, projectPrefix) && strings.HasSuffix(r.URL.Path, "/message"):
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message_id": "msg-deferred-agent-ctx",
+				"status":     "deferred",
+				"deferred":   "agent is reincarnating",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	ref := &messaging.Reference{
+		Kind:  messaging.RefAgent,
+		Value: "builder",
+		Raw:   "@builder",
+	}
+
+	var sendErr error
+	output := captureStdout(t, func() {
+		sendErr = sendMessageViaConversation(hubCtx, ref, "please review", false, false, nil)
+	})
+	require.NoError(t, sendErr, "a deferred delivery must not be reported as a send error")
+	assert.Contains(t, output, "agent builder is reincarnating; message saved to history and will be seen on catch-up")
+	assert.Contains(t, output, "msg-deferred-agent-ctx")
+	assert.NotContains(t, output, "Message delivered to agent")
+}
+
+// TestSendMessageViaConversation_OutboundPath_Deferred covers the
+// conv:/@email/#thread outbound path (agent context) reporting a deferred
+// migration-gate outcome.
+func TestSendMessageViaConversation_OutboundPath_Deferred(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "test-sender-agent")
+
+	projectID := "proj-convref-outbound-deferred"
+	projectPrefix := "/api/v1/projects/" + projectID + "/agents/"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, projectPrefix) && strings.HasSuffix(r.URL.Path, "/outbound-message"):
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message_id":   "msg-deferred-outbound",
+				"status":       "deferred",
+				"deferred":     "agent is reincarnating",
+				"recipient":    "agent:peer",
+				"recipient_id": "uid-peer",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	convID := "conv-uuid-deferred"
+	ref := &messaging.Reference{
+		Kind:  messaging.RefConversation,
+		Value: convID,
+		Raw:   "conv:" + convID,
+	}
+
+	var sendErr error
+	output := captureStdout(t, func() {
+		sendErr = sendMessageViaConversation(hubCtx, ref, "hello during migration", false, false, nil)
+	})
+	require.NoError(t, sendErr, "a deferred delivery must not be reported as a send error")
+	assert.Contains(t, output, "agent conv:"+convID+" is reincarnating; message saved to history and will be seen on catch-up")
+	assert.Contains(t, output, "msg-deferred-outbound")
+}

@@ -180,6 +180,11 @@ const (
 	DispatchFailed DispatchOutcome = "failed"
 	// DispatchSkipped means no dispatcher was available.
 	DispatchSkipped DispatchOutcome = "skipped"
+	// DispatchDeferred means the migration gate (design agent-reincarnate
+	// §3.7) held the message back because the recipient is mid-`scion
+	// reincarnate`. Distinct from DispatchSkipped (infrastructure absent)
+	// and DispatchFailed (a dispatch attempt was made and rejected).
+	DispatchDeferred DispatchOutcome = "deferred"
 )
 
 // LogDMDispatchOutcome emits a separate body-free log entry for the dispatch

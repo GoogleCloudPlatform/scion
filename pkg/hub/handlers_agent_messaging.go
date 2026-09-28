@@ -1556,7 +1556,17 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// checks so that denied requests cannot resume an agent (#1691 AC-2).
 	// For user-to-agent messages, wake is handled inline here using the shared helper.
 	senderIsAgent := GetAgentIdentityFromContext(ctx) != nil
-	if req.Wake && !senderIsAgent {
+
+	// Migration gate (design agent-reincarnate §3.7, Amendment A25 2a.2):
+	// while the recipient is mid-`scion reincarnate`, skip both the wake
+	// attempt and the phase-conflict check below — a migrating agent is
+	// necessarily non-"running" for most of the migration, and neither
+	// waking it nor rejecting the sender with an ordinary 409 is correct.
+	// The message is still persisted below and the deferred short-circuit
+	// right before dispatch takes over.
+	reincarnating := reincarnationInFlight(agent)
+
+	if req.Wake && !senderIsAgent && !reincarnating {
 		wakeResult, wakeErr := s.wakeAgentForDM(ctx, agent)
 		if wakeErr != nil {
 			WriteAgentDMError(w, wakeErr)
@@ -1567,7 +1577,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 
 	// Reject messages to non-running agents when --wake is not set.
 	// For agent-to-agent DMs, phase validation is handled by ExecuteAgentDM.
-	if !req.Wake && !senderIsAgent {
+	if !req.Wake && !senderIsAgent && !reincarnating {
 		switch state.Phase(agent.Phase) {
 		case state.PhaseRunning:
 			// OK — proceed to deliver
@@ -1633,6 +1643,14 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// participant, invariant D-1) or when nothing resolved.
 	var groupConversationID string
 	if structuredMsg != nil {
+		// Migration gate: a human-sender message to a migrating recipient
+		// (reincarnating, computed above) is persisted with DispatchState
+		// "deferred" and short-circuits before dispatch below, instead of
+		// the pre-existing optimistic "dispatched" value.
+		humanMsgDispatchState := store.MessageDispatchDispatched
+		if reincarnating {
+			humanMsgDispatchState = store.MessageDispatchDeferred
+		}
 		storeMsg := &store.Message{
 			ID:            api.NewUUID(),
 			ProjectID:     agent.ProjectID,
@@ -1647,7 +1665,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			AgentID:       agent.ID,
 			Channel:       structuredMsg.Channel,
 			ThreadID:      structuredMsg.ThreadID,
-			DispatchState: store.MessageDispatchDispatched,
+			DispatchState: humanMsgDispatchState,
 			CreatedAt:     time.Now(),
 		}
 
@@ -1951,13 +1969,21 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				mentionResults = s.processMentions(ctx, req.Mentions, agent, structuredMsg, groupConversationID)
 			}
 
-			// Use "dispatched" for accepted, "ambiguous" for ambiguous (#1689).
-			// API wording does not promise harness consumption (AC-1).
+			// Use "dispatched" for accepted, "ambiguous" for ambiguous (#1689),
+			// "deferred" while the recipient is mid-migration (design
+			// agent-reincarnate §3.7). API wording does not promise harness
+			// consumption (AC-1).
 			deliveryStatus := "dispatched"
 			httpStatus := http.StatusOK
-			if dmResult.Outcome == AgentDMAmbiguous {
+			var deferredNote string
+			switch dmResult.Outcome {
+			case AgentDMAmbiguous:
 				deliveryStatus = "ambiguous"
 				httpStatus = http.StatusAccepted
+			case AgentDMDeferred:
+				deliveryStatus = "deferred"
+				httpStatus = http.StatusAccepted
+				deferredNote = "agent is reincarnating"
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(httpStatus)
@@ -1967,6 +1993,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				Agent:          agent.Slug,
 				AgentPhase:     agent.Phase,
 				MentionResults: mentionResults,
+				Deferred:       deferredNote,
 			})
 			return
 		}
@@ -1997,6 +2024,25 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				CreatedAt:  storeMsg.CreatedAt,
 			})
 		}
+	}
+
+	// Migration gate (design agent-reincarnate §3.7, Amendment A25 2a.2):
+	// the message is already persisted above (visible in conversation
+	// history for the new generation's catch-up); do not dispatch it while
+	// the recipient is mid-`scion reincarnate`. The sender — necessarily
+	// human here, since an agent sender already returned via ExecuteAgentDM
+	// above — is told 202 with the deferred notice.
+	if reincarnating {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(MessageDeliveryResponse{
+			MessageID:  persistedMsgID,
+			Status:     "deferred",
+			Agent:      agent.Slug,
+			AgentPhase: agent.Phase,
+			Deferred:   "agent is reincarnating",
+		})
+		return
 	}
 
 	// Managed agent path: deliver message directly via backend, bypass broker.
@@ -2158,6 +2204,11 @@ type MessageDeliveryResponse struct {
 	Agent          string                   `json:"agent"`
 	AgentPhase     string                   `json:"agent_phase"`
 	MentionResults []messages.MentionResult `json:"mention_results,omitempty"`
+	// Deferred is set (design agent-reincarnate §3.7) when Status is
+	// "deferred": the recipient is mid-`scion reincarnate`, the message was
+	// saved to conversation history, and dispatch was deliberately skipped.
+	// The CLI keys on this field to print its deferred notice.
+	Deferred string `json:"deferred,omitempty"`
 }
 
 // GroupMessageRecipientResult represents the delivery status for one recipient in a group[] delivery.

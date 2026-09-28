@@ -161,6 +161,14 @@ const (
 	// must NOT assume delivery and must NOT automatically replay.
 	// No blind retry guidance is returned.
 	AgentDMAmbiguous AgentDMOutcome = "ambiguous"
+
+	// AgentDMDeferred: the target agent is mid-`scion reincarnate` (design
+	// agent-reincarnate §3.7, migration gate). The message was persisted
+	// with DispatchState "deferred" — visible in conversation history and
+	// on the new generation's catch-up — but dispatch was deliberately
+	// never attempted. Not a failure: callers should tell the sender the
+	// message is saved and will be seen on catch-up, not that it failed.
+	AgentDMDeferred AgentDMOutcome = "deferred"
 )
 
 // AgentDMResult is the typed result of the shared agent DM operation.
@@ -348,19 +356,31 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		return nil, dmErr
 	}
 
+	// Migration gate (design agent-reincarnate §3.7, Amendment A25 2a.2):
+	// while the target is mid-`scion reincarnate`, the message is persisted
+	// below (visible on catch-up) but never dispatched — the old container
+	// may already be stopped and the new one may not be listening yet.
+	// Computed here, before Phase 1b, so a migrating target — necessarily
+	// non-"running" for most of the migration — skips both the wake attempt
+	// (resuming a mid-migration agent makes no sense) and the ordinary
+	// phase-conflict error below, in favor of the deferred outcome.
+	deferred := reincarnationInFlight(input.TargetAgent)
+
 	// ── Phase 1b: Wake handling (#1691) ─────────────────────────────────
 	// Wake runs after all admission checks so that denied, oversized, or
 	// unauthorized requests cannot resume an agent (AC-2). Resume failure
 	// or readiness timeout returns an explicit error and no message is
 	// dispatched (AC-4).
-	if input.Wake {
-		_, wakeErr := s.wakeAgentForDM(ctx, input.TargetAgent)
-		if wakeErr != nil {
-			return nil, wakeErr
-		}
-	} else {
-		if phaseErr := validateAgentDeliverable(input.TargetAgent); phaseErr != nil {
-			return nil, phaseErr
+	if !deferred {
+		if input.Wake {
+			_, wakeErr := s.wakeAgentForDM(ctx, input.TargetAgent)
+			if wakeErr != nil {
+				return nil, wakeErr
+			}
+		} else {
+			if phaseErr := validateAgentDeliverable(input.TargetAgent); phaseErr != nil {
+				return nil, phaseErr
+			}
 		}
 	}
 
@@ -372,9 +392,16 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// 7. Build store message.
 	// DispatchState is set to "pending" — the message row is its own
 	// durable dispatch intent. It transitions to "dispatched" only after
-	// broker/managed-runtime acceptance (AC-1, #1689).
+	// broker/managed-runtime acceptance (AC-1, #1689). For a migrating
+	// target it is set to "deferred" instead, since dispatch (step 11
+	// below) is deliberately skipped rather than merely pending.
 	msgID := api.NewUUID()
 	now := time.Now()
+
+	initialDispatchState := store.MessageDispatchPending
+	if deferred {
+		initialDispatchState = store.MessageDispatchDeferred
+	}
 
 	storeMsg := &store.Message{
 		ID:             msgID,
@@ -392,7 +419,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		ConversationID: input.ConversationID,
 		GroupID:        input.GroupID,
 		CreatedAt:      now,
-		DispatchState:  store.MessageDispatchPending,
+		DispatchState:  initialDispatchState,
 	}
 
 	// 7a. Stamp server-derived provenance (#1690).
@@ -475,6 +502,18 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	}
 
 	// 11. Dispatch to target agent runtime (#1689).
+	// Migration gate: skip dispatch entirely for a migrating target — the
+	// message is already persisted (step 8) with DispatchState "deferred".
+	if deferred {
+		LogDMDispatchOutcome(input.SenderAgent, input.TargetAgent, msgID, DispatchDeferred, nil)
+		return &AgentDMResult{
+			Outcome:     AgentDMDeferred,
+			MessageID:   msgID,
+			Recipient:   storeMsg.Recipient,
+			RecipientID: storeMsg.RecipientID,
+		}, nil
+	}
+
 	// Dispatch outcome determines the final message state:
 	//   - Success → CAS pending→dispatched (AC-1)
 	//   - Definite failure → persist failed state, return non-2xx (AC-2)
@@ -622,6 +661,18 @@ func WriteAgentDMResult(w http.ResponseWriter, result *AgentDMResult) {
 		writeJSON(w, http.StatusAccepted, map[string]interface{}{
 			"message_id":   result.MessageID,
 			"status":       "ambiguous",
+			"recipient":    result.Recipient,
+			"recipient_id": result.RecipientID,
+		})
+	case AgentDMDeferred:
+		// Design agent-reincarnate §3.7: the target is mid-migration. The
+		// literal "deferred" field is the contract callers key on; the
+		// envelope also carries message_id/recipient for correlation, same
+		// as every other outcome.
+		writeJSON(w, http.StatusAccepted, map[string]interface{}{
+			"message_id":   result.MessageID,
+			"status":       "deferred",
+			"deferred":     "agent is reincarnating",
 			"recipient":    result.Recipient,
 			"recipient_id": result.RecipientID,
 		})

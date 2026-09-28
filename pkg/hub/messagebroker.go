@@ -744,21 +744,45 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 		}
 	}
 
+	// Migration gate (design agent-reincarnate §3.7, Amendment A25 2a.2):
+	// while the recipient is mid-`scion reincarnate`, the message is
+	// persisted (so it appears in conversation history for the new
+	// generation's catch-up) but never dispatched — the old container may
+	// already be stopped and the new one may not be listening yet. This
+	// check runs BEFORE the #1820 phase gate below: a migrating agent is
+	// necessarily non-"running" for most of the migration, and without this
+	// ordering the #1820 gate would silently drop the message instead of
+	// deferring it. Checked with the same reincarnationInFlight predicate
+	// the worker uses (reincarnate_worker.go) — non-terminal states only;
+	// once the migration completes or fails, ordinary delivery resumes.
+	deferred := reincarnationInFlight(agent)
+
 	// #1820: admission gate — mirror the phase check applied to direct
 	// sends (handleAgentMessage for humans, ExecuteAgentDM for agents).
 	// A non-running agent cannot receive terminal input; accepting the
 	// message would persist a "dispatched" row that the broker then
 	// silently drops. Reject before persistence and tell an agent sender.
 	// Runs after reauthorization so a denied sender learns nothing about
-	// the recipient's phase.
-	if phaseErr := validateAgentDeliverable(agent); phaseErr != nil {
-		p.log.Warn("Rejecting broker message to non-running agent",
-			"agentSlug", agentSlug, "projectID", projectID, "phase", agent.Phase)
-		p.publishDeliveryFailed(ctx, projectID, agentSlug, msg, errors.New(phaseErr.Message))
-		return
+	// the recipient's phase. Skipped for a migrating agent — the migration
+	// gate above already decided this message is deferred, not dropped.
+	if !deferred {
+		if phaseErr := validateAgentDeliverable(agent); phaseErr != nil {
+			p.log.Warn("Rejecting broker message to non-running agent",
+				"agentSlug", agentSlug, "projectID", projectID, "phase", agent.Phase)
+			p.publishDeliveryFailed(ctx, projectID, agentSlug, msg, errors.New(phaseErr.Message))
+			return
+		}
 	}
 
 	// Persist to message store before delivery attempt (no pending rows).
+	// DispatchState reflects the migration gate above: "deferred" for a
+	// migrating recipient (never handed to a dispatcher, see below),
+	// "dispatched" otherwise (the pre-existing optimistic value; a later
+	// dispatch failure below still CASes it to "failed" via MarkMessageFailed).
+	initialDispatchState := store.MessageDispatchDispatched
+	if deferred {
+		initialDispatchState = store.MessageDispatchDeferred
+	}
 	storeMsg := &store.Message{
 		ID:            api.NewUUID(),
 		ProjectID:     projectID,
@@ -771,7 +795,7 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 		Urgent:        msg.Urgent,
 		Broadcasted:   msg.Broadcasted,
 		AgentID:       agent.ID,
-		DispatchState: store.MessageDispatchDispatched,
+		DispatchState: initialDispatchState,
 		CreatedAt:     time.Now(),
 	}
 	// Phase 5 dual-write: resolve-or-create conversation for broker-delivered agent messages.
@@ -856,6 +880,18 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 			Msg:        msg,
 			CreatedAt:  storeMsg.CreatedAt,
 		})
+	}
+
+	// Migration gate: the message is persisted above (visible on catch-up)
+	// but must not be dispatched while the recipient is mid-migration — the
+	// old container may already be gone and the new one may not exist yet.
+	if deferred {
+		if p.messageLog != nil {
+			p.messageLog.Info("broker message deferred: recipient is reincarnating",
+				"agent_id", agent.ID, "agent_name", agent.Name, "project_id", agent.ProjectID,
+				"message_id", storeMsg.ID, "source", "broker")
+		}
+		return
 	}
 
 	// The 30s brokerCallbackTimeout is shared with pre-dispatch work above

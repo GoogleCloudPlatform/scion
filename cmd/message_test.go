@@ -2714,3 +2714,57 @@ func TestConvRefAttachWakeSupported(t *testing.T) {
 	// Verify no messages went through the agent message path
 	assert.Len(t, *sent, 0, "conv: should not go through agent message path")
 }
+
+// TestSendMessageViaHub_ReincarnatingAgent_PrintsDeferredNotice covers the
+// CLI half of the migration gate (design agent-reincarnate §3.7, Amendment
+// A25 2a.2): when the hub responds with status "deferred" (the recipient is
+// mid-`scion reincarnate`), `scion message @agent` must print the deferred
+// notice, not a generic "delivered" message, and must not treat it as an
+// error.
+func TestSendMessageViaHub_ReincarnatingAgent_PrintsDeferredNotice(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	projectID := "project-msg-deferred"
+	projectPrefix := "/api/v1/projects/" + projectID + "/agents/"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, projectPrefix) && strings.HasSuffix(r.URL.Path, "/message"):
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message_id":  "msg-deferred-1",
+				"status":      "deferred",
+				"deferred":    "agent is reincarnating",
+				"agent":       "my-agent",
+				"agent_phase": "starting",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	var sendErr error
+	output := captureStdout(t, func() {
+		sendErr = sendMessageViaHub(hubCtx, "my-agent", "hello during migration", false, false, false)
+	})
+	require.NoError(t, sendErr, "a deferred delivery must not be reported as a send error")
+	assert.Contains(t, output, "agent my-agent is reincarnating; message saved to history and will be seen on catch-up",
+		"the CLI must print the deferred notice, not a generic delivered message")
+	assert.Contains(t, output, "msg-deferred-1", "the message ID must be shown for correlation")
+	assert.NotContains(t, output, "Message delivered to agent",
+		"the generic delivered message must not also print for a deferred outcome")
+}

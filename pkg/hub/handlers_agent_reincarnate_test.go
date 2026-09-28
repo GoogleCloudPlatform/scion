@@ -2040,20 +2040,32 @@ func TestReincarnateAgent_EndToEnd_IdentityContinuityAndHandoff(t *testing.T) {
 	assert.GreaterOrEqual(t, disp.stopCalls, 1)
 }
 
-// TestBuildReincarnationPreamble_DoesNotPromiseRedelivery pins the wording of
-// the preamble's step 2. Messages sent during a migration are rejected, not
-// queued, so the preamble must not claim they are redelivered.
-func TestBuildReincarnationPreamble_DoesNotPromiseRedelivery(t *testing.T) {
+// TestBuildReincarnationPreamble_CatchUpWindow is the Amendment A25 2a.3
+// update of the former TestBuildReincarnationPreamble_DoesNotPromiseRedelivery:
+// now that 2a.1 (catch-up works in agent containers) and 2a.2 (the migration
+// gate persists-and-defers instead of rejecting/dropping) are both true, step
+// 2 is allowed to say messages sent during the migration can be read with
+// catch-up — and must name the window so the new generation knows how far
+// back to look.
+func TestBuildReincarnationPreamble_CatchUpWindow(t *testing.T) {
 	srv, _ := testServer(t)
 	agent := &store.Agent{ID: "agent-1", Slug: "arqa-a"}
 
-	preamble := srv.buildReincarnationPreamble(agent, 2, "do the thing next")
+	start := time.Date(2026, 9, 28, 10, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 9, 28, 10, 5, 0, 0, time.UTC)
+	preamble := srv.buildReincarnationPreamble(agent, 2, "do the thing next", start, end)
 
 	assert.Contains(t, preamble,
-		"2. Catch up on your conversations (`scion conversation catch-up`). If that command is unavailable in this environment, rely on the handoff and on incoming messages.\n",
-		"step 2 must not claim messages sent during the migration window are redelivered — that was never implemented")
+		"2. Catch up on your conversations (`scion conversation catch-up`) for the migration window 2026-09-28T10:00:00Z to 2026-09-28T10:05:00Z.",
+		"step 2 must name the migration's start and end as the catch-up window")
+	assert.Contains(t, preamble,
+		"Messages that arrived during the migration were saved, not dropped, and can be read with catch-up.",
+		"step 2 must reinstate the catch-up claim now that 2a.1/2a.2 make it true")
+	assert.Contains(t, preamble,
+		"If that command is unavailable in this environment, rely on the handoff and on incoming messages.",
+		"the image-lag fallback (#1910) must remain since it is not fixed by this phase")
 	assert.NotContains(t, preamble, "redeliver",
-		"the unverified redelivery claim must not appear anywhere in the preamble")
+		"catch-up is not automatic redelivery — the wording must not claim that")
 	assert.Contains(t, preamble, "do the thing next", "the handoff must still be appended verbatim")
 }
 

@@ -443,7 +443,22 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// input (AC-3), delivered as the task argument to DispatchAgentStart below
 	// and also persisted onto AppliedConfig.Task for restart consistency.
 	toGeneration := agent.Generation + 1
-	preamble := s.buildReincarnationPreamble(agent, toGeneration, handoff)
+	// Migration start/end for the preamble's catch-up window (design §3.7,
+	// Amendment A25 2a.3): start is the record's RequestedAt (when this
+	// migration was requested, before the gate in the three delivery paths
+	// could have started deferring messages); end is provisioningNow, the
+	// timestamp already stamped on this step — a close proxy for when the
+	// gate will lift, a few steps from now. A failure to re-read the record
+	// here is not fatal to the migration: fall back to provisioningNow for
+	// both ends rather than block on a bookkeeping read.
+	migrationStart := provisioningNow
+	if rec, recErr := s.store.GetAgentReincarnation(ctx, reincarnationID); recErr == nil {
+		migrationStart = rec.RequestedAt
+	} else {
+		s.agentLifecycleLog.Warn("reincarnation worker: failed to re-read record for preamble catch-up window, using provisioning time for both ends",
+			"agent_id", agentID, "reincarnation_id", reincarnationID, "error", recErr)
+	}
+	preamble := s.buildReincarnationPreamble(agent, toGeneration, handoff, migrationStart, provisioningNow)
 	fresh.Task = preamble
 	agent, err = s.updateReincarnationStep(ctx, agentID, reincarnationStepUpdate{
 		reincarnationState: store.ReincarnationStateProvisioning,
@@ -737,8 +752,20 @@ func (s *Server) failListedReincarnation(ctx context.Context, rec *store.AgentRe
 // as the new generation's first harness input (design §3.9). Phase 1 ships
 // the wording the design marks as "fine for P1" — the fuller agent-guidance
 // text (help output, --handoff-template, the self-mode blocked status) is
-// Phase 2.
-func (s *Server) buildReincarnationPreamble(agent *store.Agent, toGeneration int, handoff string) string {
+// Phase 2b.
+//
+// migrationStart and migrationEnd bound step 2's catch-up window (design
+// §3.7, Amendment A25 2a.3): the new generation names them so it knows how
+// far back `scion conversation catch-up` needs to look, instead of guessing
+// a --since duration. The redelivery-adjacent wording ("messages ... can be
+// read with catch-up") was dropped in Phase 1 (A11.4 item 4) because it was
+// false then — catch-up did not work inside agent containers (F4) and a
+// message sent during the gap was rejected or silently dropped, not saved.
+// Phase 2a's F4 fix (agent-mode hub-context detection) and migration gate
+// (all three delivery paths persist-and-defer instead of rejecting/dropping
+// while agents.reincarnation_state is non-terminal) make it true again, so
+// it comes back here.
+func (s *Server) buildReincarnationPreamble(agent *store.Agent, toGeneration int, handoff string, migrationStart, migrationEnd time.Time) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[SCION REINCARNATION] You are generation %d of agent %q (id %s).\n",
 		toGeneration, agent.Slug, agent.ID)
@@ -747,9 +774,10 @@ func (s *Server) buildReincarnationPreamble(agent *store.Agent, toGeneration int
 	// shared-workspace and hub-managed agents, whose git state is not "your
 	// branch" the way a clone-per-agent agent's is.
 	b.WriteString(" 1. Verify your environment: `git status` shows the branch and state your handoff describes, and any files your handoff names as canonical are readable.\n")
-	// Messages sent during the migration are rejected, not queued, so step 2
-	// must not promise that they are redelivered.
-	b.WriteString(" 2. Catch up on your conversations (`scion conversation catch-up`). If that command is unavailable in this environment, rely on the handoff and on incoming messages.\n")
+	fmt.Fprintf(&b, " 2. Catch up on your conversations (`scion conversation catch-up`) for the migration window %s to %s. "+
+		"Messages that arrived during the migration were saved, not dropped, and can be read with catch-up. "+
+		"If that command is unavailable in this environment, rely on the handoff and on incoming messages.\n",
+		migrationStart.UTC().Format(time.RFC3339), migrationEnd.UTC().Format(time.RFC3339))
 	b.WriteString(" 3. Message whoever requested this migration that the new generation is up, and state your next action.\n")
 	b.WriteString(" 4. Continue from the handoff below. Do not redo anything it says not to.\n")
 	b.WriteString("The handoff from your previous generation follows.\n---\n")

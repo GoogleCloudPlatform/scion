@@ -573,12 +573,19 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 	if err := messaging.ValidateLegacyMessage(msg); err != nil {
 		return fmt.Errorf("message validation failed: %w", err)
 	}
-	if _, err := agentSvc.SendStructuredMessage(ctx, agentName, msg, interrupt, notify, wake); err != nil {
+	result, err := agentSvc.SendStructuredMessage(ctx, agentName, msg, interrupt, notify, wake)
+	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to send message to agent '%s' via Hub: %w", agentName, err))
 	}
 
 	if !isJSONOutput() {
-		fmt.Printf("Message delivered to agent '%s'.\n", agentName)
+		if result != nil && result.Status == "deferred" {
+			// Design agent-reincarnate §3.7: the recipient is mid-`scion
+			// reincarnate`. The message was saved to history, not dropped.
+			fmt.Printf("agent %s is reincarnating; message saved to history and will be seen on catch-up (message %s).\n", agentName, result.MessageID)
+		} else {
+			fmt.Printf("Message delivered to agent '%s'.\n", agentName)
+		}
 		if notify {
 			fmt.Printf("Subscribed to notifications for agent '%s'.\n", agentName)
 		}
@@ -693,11 +700,19 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 			if err := messaging.ValidateLegacyMessage(agentMsg); err != nil {
 				return fmt.Errorf("message validation failed: %w", err)
 			}
-			if _, err := agentSvc.SendStructuredMessage(ctx, ref.Value, agentMsg, interrupt, false, wake); err != nil {
+			result, err := agentSvc.SendStructuredMessage(ctx, ref.Value, agentMsg, interrupt, false, wake)
+			if err != nil {
 				return wrapHubError(fmt.Errorf("failed to send message to agent '%s' via Hub: %w", ref.Value, err))
 			}
 			if !isJSONOutput() {
-				fmt.Printf("Message delivered to agent '%s'.\n", ref.Value)
+				if result != nil && result.Status == "deferred" {
+					// Design agent-reincarnate §3.7: the recipient is
+					// mid-`scion reincarnate`. The message was saved to
+					// history, not dropped.
+					fmt.Printf("agent %s is reincarnating; message saved to history and will be seen on catch-up (message %s).\n", ref.Value, result.MessageID)
+				} else {
+					fmt.Printf("Message delivered to agent '%s'.\n", ref.Value)
+				}
 			}
 			return nil
 		}
@@ -741,9 +756,14 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		}
 		if !isJSONOutput() {
 			// Distinguish accepted dispatch from confirmed delivery.
-			if result.Status == "sent" {
+			switch result.Status {
+			case "sent":
 				fmt.Printf("Message sent to %s (message %s).\n", ref.Raw, result.MessageID)
-			} else {
+			case "deferred":
+				// Design agent-reincarnate §3.7: the recipient is mid-`scion
+				// reincarnate`. The message was saved to history, not dropped.
+				fmt.Printf("agent %s is reincarnating; message saved to history and will be seen on catch-up (message %s).\n", ref.Raw, result.MessageID)
+			default:
 				fmt.Printf("Message dispatched to %s (message %s, status: %s).\n", ref.Raw, result.MessageID, result.Status)
 			}
 		} else {
