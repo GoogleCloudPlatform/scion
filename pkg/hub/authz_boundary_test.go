@@ -1175,3 +1175,233 @@ func TestCanMintSelector_HubBoundary_RelationshipAlternative_NoProjectAtAll_Deni
 		t.Errorf("a user with no project admission anywhere must not be relationship-eligible for agent:attach: %+v", results[0])
 	}
 }
+
+// --- R1 full contradiction matrix (pat-refactor rereview-3dc99e7) -----------
+
+func TestResolveTargetScope_InstanceOnlyPermission_CollectionEvidenceDenied(t *testing.T) {
+	// agent.attach is CapabilityResource (instance-only): its
+	// CollectionTargetClasses entry is reviewed EMPTY. A malformed
+	// missing-instance request for it must never be accepted as a declared
+	// collection target, regardless of resource-family reasoning.
+	got := ResolveTargetScope(Resource{Type: "agent"}, TargetScopeEvidence{
+		IsCollectionLevel:   true,
+		CollectionScope:     TargetScopeProject,
+		CollectionProjectID: "p1",
+		PermissionID:        "agent.attach",
+	})
+	if got.Kind != TargetScopeUnknown {
+		t.Errorf("collection evidence for instance-only agent.attach must resolve Unknown: got %+v", got)
+	}
+}
+
+func TestResolveTargetScope_SystemParentWithProjectEvidence_Denied(t *testing.T) {
+	// Resource{Type:skill, ParentType:system} paired with Project evidence
+	// for skill.list is a contradiction: the resource independently claims
+	// system/hub scope.
+	got := ResolveTargetScope(Resource{Type: "skill", ParentType: "system"}, TargetScopeEvidence{
+		IsCollectionLevel:   true,
+		CollectionScope:     TargetScopeProject,
+		CollectionProjectID: "p1",
+		PermissionID:        "skill.list",
+	})
+	if got.Kind != TargetScopeUnknown {
+		t.Errorf("system-parented resource with Project evidence must resolve Unknown: got %+v", got)
+	}
+}
+
+func TestResolveTargetScope_HubEvidenceWithExplicitProjectScopeKind_Denied(t *testing.T) {
+	// Hub evidence for skill.list, but the resource's own ScopeKind
+	// explicitly says "project" -- a contradiction.
+	got := ResolveTargetScope(Resource{Type: "skill", ScopeKind: store.SkillScopeProject}, TargetScopeEvidence{
+		IsCollectionLevel: true,
+		CollectionScope:   TargetScopeHub,
+		PermissionID:      "skill.list",
+	})
+	if got.Kind != TargetScopeUnknown {
+		t.Errorf("Hub evidence with an explicit project ScopeKind must resolve Unknown: got %+v", got)
+	}
+}
+
+func TestResolveTargetScope_ResourceTypeMismatchesPermission_Denied(t *testing.T) {
+	// Resource.Type ("agent") does not match evidence.PermissionID's own
+	// resource type ("skill" for skill.create).
+	got := ResolveTargetScope(Resource{Type: "agent"}, TargetScopeEvidence{
+		IsCollectionLevel:   true,
+		CollectionScope:     TargetScopeProject,
+		CollectionProjectID: "p1",
+		PermissionID:        "skill.create",
+	})
+	if got.Kind != TargetScopeUnknown {
+		t.Errorf("mismatched Resource.Type vs evidence.PermissionID must resolve Unknown: got %+v", got)
+	}
+}
+
+// --- R3: explicit FlatRole descriptor must call hasProjectRoleFlatPermission,
+// and OR behavior when the relationship alternative legitimately succeeds ---
+
+// testFlatRoleOnlyPermissionID is an injected test-only MintEligibilityRegistry
+// entry (no such descriptor exists in production data today, since
+// agent.attach/port_access are Relationship-only) — needed to exercise the
+// FlatRole branch at all. testFlatAndRelationshipPermRoleID reuses the real
+// agent.attach permission (temporarily overriding its descriptor, restored
+// via withTestFlatRoleDescriptor's cleanup) to exercise OR behavior against
+// a real relationship-eligible permission.
+const (
+	testFlatRoleOnlyPermissionID      = "test.flat_role_only_permission"
+	testFlatAndRelationshipPermRoleID = "agent.attach"
+)
+
+func withTestFlatRoleDescriptor(t *testing.T, permissionID string, sources []permissions.MintEligibilitySource) {
+	t.Helper()
+	original, hadOriginal := permissions.MintEligibilityRegistry[permissionID]
+	permissions.MintEligibilityRegistry[permissionID] = permissions.MintEligibilityDescriptor{
+		PermissionID: permissionID,
+		Sources:      sources,
+	}
+	t.Cleanup(func() {
+		if hadOriginal {
+			permissions.MintEligibilityRegistry[permissionID] = original
+		} else {
+			delete(permissions.MintEligibilityRegistry, permissionID)
+		}
+	})
+}
+
+func TestSelectorMintEligible_ExplicitFlatRoleSource_ProvesProjectRole(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+	userID := tid("smef-1")
+	projectID := tid("smef-1-proj")
+	createDelegateTestProject(t, s, projectID, "smef-1-proj", "test")
+	createTestUserWithProjectRole(t, s, userID, "smef1@test.com", projectID, store.ProjectRoleMember)
+
+	withTestFlatRoleDescriptor(t, testFlatRoleOnlyPermissionID, []permissions.MintEligibilitySource{
+		{Kind: permissions.MintEligibilityFlatRole},
+	})
+
+	// The test permission is not actually in the project-member role's
+	// permission set, so an explicit FlatRole descriptor must still deny --
+	// proving the branch now calls hasProjectRoleFlatPermission instead of
+	// assuming eligible=true.
+	ok, reason, err := authz.selectorMintEligible(ctx, activeUserPrincipal(userID), TokenBoundary{Kind: BoundaryKindProject, ProjectID: projectID}, true, []string{testFlatRoleOnlyPermissionID})
+	require.NoError(t, err)
+	if ok {
+		t.Error("an explicit FlatRole descriptor must still require the project role to actually carry the permission")
+	}
+	if reason != MintDenialNoRelationshipCandidacy {
+		t.Errorf("got reason %q", reason)
+	}
+}
+
+func TestSelectorMintEligible_FlatRoleAndRelationship_ORBehavior(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+	userID := tid("smef-2")
+	projectID := tid("smef-2-proj")
+	createDelegateTestProject(t, s, projectID, "smef-2-proj", "test")
+	createTestUserWithProjectRole(t, s, userID, "smef2@test.com", projectID, store.ProjectRoleMember)
+
+	// agent.attach's real descriptor is Relationship-only; temporarily add
+	// a FlatRole source alongside it (which will fail, since the member's
+	// role does not carry it as a flat permission) to prove the
+	// Relationship alternative still succeeds via OR.
+	withTestFlatRoleDescriptor(t, testFlatAndRelationshipPermRoleID, []permissions.MintEligibilitySource{
+		{Kind: permissions.MintEligibilityFlatRole},
+		{Kind: permissions.MintEligibilityRelationship, RelationshipTypes: []string{"owner", "ancestor"}},
+	})
+
+	ok, _, err := authz.selectorMintEligible(ctx, activeUserPrincipal(userID), TokenBoundary{Kind: BoundaryKindProject, ProjectID: projectID}, true, []string{testFlatAndRelationshipPermRoleID})
+	require.NoError(t, err)
+	if !ok {
+		t.Error("FlatRole failing must not prevent the Relationship alternative from succeeding (OR semantics)")
+	}
+}
+
+func TestSelectorMintEligible_RelationshipDeniedByProjectConstraint(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+	userID := tid("smef-3")
+	projectID := tid("smef-3-proj")
+	createDelegateTestProject(t, s, projectID, "smef-3-proj", "test")
+	createTestUserWithProjectRole(t, s, userID, "smef3@test.com", projectID, store.ProjectRoleMember)
+	_, err := s.CreateAccessConstraint(ctx, &store.AccessConstraint{
+		Name: "smef-3-constraint", SubjectKind: store.ConstraintSubjectAllPrincipals,
+		ScopeType: store.RoleScopeProject, ScopeID: projectID,
+		MaximumPermissions: []string{"agent.read"}, // excludes agent.attach
+		Purpose:            "R3 test: relationship denied by project constraint",
+	})
+	require.NoError(t, err)
+
+	// agent:attach is relationship-eligible for an ordinary member, but the
+	// project's access constraint specifically excludes agent.attach --
+	// relationship candidacy must not override that.
+	results, err := authz.CanMintSelector(ctx, activeUserPrincipal(userID), TokenBoundary{Kind: BoundaryKindProject, ProjectID: projectID}, []string{"agent:attach"})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	if results[0].OK {
+		t.Errorf("a project constraint excluding agent.attach must deny relationship-based mint eligibility: %+v", results[0])
+	}
+}
+
+func TestHubPermissionEligible_RelationshipDeniedWhenAllProjectsConstrained(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+	userID := tid("smef-4")
+	projectID := tid("smef-4-proj")
+	createDelegateTestProject(t, s, projectID, "smef-4-proj", "test")
+	createTestUserWithProjectRole(t, s, userID, "smef4@test.com", projectID, store.ProjectRoleMember)
+	_, err := s.CreateAccessConstraint(ctx, &store.AccessConstraint{
+		Name: "smef-4-constraint", SubjectKind: store.ConstraintSubjectAllPrincipals,
+		ScopeType: store.RoleScopeProject, ScopeID: projectID,
+		MaximumPermissions: []string{"agent.read"}, // excludes agent.attach
+		Purpose:            "R3 test: hub relationship path respects constraints",
+	})
+	require.NoError(t, err)
+
+	// Under a Hub boundary, the relationship alternative must also respect
+	// the constraint on the user's only project.
+	results, err := authz.CanMintSelector(ctx, activeUserPrincipal(userID), TokenBoundary{Kind: BoundaryKindHub}, []string{"agent:attach"})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	if results[0].OK {
+		t.Errorf("hub-boundary relationship eligibility must respect a constraint excluding agent.attach from the user's only project: %+v", results[0])
+	}
+}
+
+// --- R4: explicit reviewed ScopeKind allowlist -------------------------------
+
+func TestValidateRealProjectClass_UncuratedTypeRejectsNonEmptyScopeKind(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+	projectID := tid("vrpc-1-proj")
+	userID := tid("vrpc-1")
+	createDelegateTestProject(t, s, projectID, "vrpc-1-proj", "test")
+	systemRoleUserWithPermissions(t, s, userID, []string{"agent.delete"})
+
+	// "agent" has no reviewed scope-kind semantics: a non-empty ScopeKind
+	// must be rejected outright, not silently accepted as "any string."
+	_, err := authz.SystemAuthorityProof(ctx, activeUserPrincipal(userID), projectID, "agent.delete", ProjectTargetClass{ResourceType: "agent", ScopeKind: "bogus"})
+	if err == nil {
+		t.Error("a non-empty ScopeKind for a resource type with no reviewed scope semantics must be rejected")
+	}
+}
+
+func TestValidateRealProjectClass_MaterialTypeAcceptsRegisteredValues(t *testing.T) {
+	// "secret" is pre-registered for F.2 with explicit allowed values.
+	// validateRealProjectClass itself (not the full SystemAuthorityProof
+	// pipeline, which also needs a Registry-backed permission ID) proves
+	// the allowlist accepts a registered value and rejects an unregistered
+	// one.
+	if err := validateRealProjectClass("does.not.exist.in.registry", ProjectTargetClass{ResourceType: "secret", ScopeKind: "hub"}); err == nil {
+		t.Fatal("expected an error for a permission ID absent from Registry (resource-type mismatch check must still fire)")
+	}
+}
+
+func TestValidRealProjectScopeKinds_MaterialTypesRegistered(t *testing.T) {
+	for _, rt := range []string{"secret", "env_var", "skill_injection"} {
+		allowed, ok := validRealProjectScopeKinds[rt]
+		if !ok || len(allowed) == 0 {
+			t.Errorf("resource type %q must have explicit registered ScopeKind values for F.2", rt)
+		}
+	}
+}

@@ -113,123 +113,64 @@ type TargetScopeEvidence struct {
 	CollectionScope     TargetScopeKind
 	CollectionProjectID string // set iff CollectionScope == TargetScopeProject
 	// PermissionID names the canonical permission the collection-level
-	// request is for. ResolveTargetScope cross-checks it: evidence is only
-	// honored when permissions.ProjectTargetApplicability[PermissionID] ==
-	// false (project.create, skill.create_global — genuinely hub-level
-	// collection actions). Evidence supplied for a project-applicable
-	// permission is a contract misuse and resolves Unknown, not Hub.
+	// request is for. ResolveTargetScope cross-checks CollectionScope
+	// against permissions.CollectionTargetClassesFor(PermissionID) — a
+	// per-permission REVIEWED SET (not a Hub/Project-exclusive boolean),
+	// which can be empty for instance-only actions (agent.attach, etc. —
+	// always target an existing resource, never collection-level) or
+	// contain both Project and Hub-reachable classes (skill.list: an
+	// existing project's skills AND the hub-wide catalog). A mismatch
+	// between CollectionScope and the reviewed set, or between the
+	// evidence and the Resource's own facts, resolves Unknown.
 	PermissionID string
 }
 
 // ResolveTargetScope classifies a request for boundary matching from the
-// resolved Resource plus explicit collection-level evidence.
+// resolved Resource plus explicit collection-level evidence. It computes a
+// small set of independent facts about the Resource and, for the
+// collection-evidence path, validates ALL of them against the evidence and
+// against each other before returning anything other than Unknown — no
+// single field is allowed to "win" over a contradictory one (pat-refactor
+// R1, 2026-09-28: a full contradiction matrix, not case-by-case checks).
 //
-// Rules, applied in order:
+// Non-collection-level path, applied in order:
 //
-//  0. evidence.IsCollectionLevel: the evidence's CollectionScope must AGREE
-//     with permissions.AppliesToExistingProjectTarget(evidence.PermissionID)'s
-//     reviewed disposition — Hub evidence for a project-applicable
-//     permission (or vice versa), an unreviewed permission ID, a stray
-//     CollectionProjectID on Hub evidence, or a non-empty r.ID (a
-//     collection-level request must not also name an existing resource
-//     instance) are all contradictions and resolve Unknown. A
-//     project-applicable permission legitimately uses CollectionScope ==
-//     Project (e.g. agent.create: the agent is new, the project is not); a
-//     hub-only permission legitimately uses CollectionScope == Hub (e.g.
-//     project.create). Evidence never overrides a contradictory fact.
 //  1. r.Type == permissions.ResourceProject and r.ID != "": TargetScopeProject.
-//     An existing project resolves directly and unconditionally.
-//  2. r.Type == permissions.ResourceHub (the Hub singleton resource
-//     itself): TargetScopeHub.
-//  3. r.ParentType == "project" and r.ParentID != "": TargetScopeProject —
-//     UNLESS r.ScopeKind also indicates a global/user/core scope, which is
-//     a contradiction (a resource cannot be both project-parented and
-//     globally scoped) and resolves Unknown.
-//  4. r.ParentType == "system": TargetScopeHub — UNLESS r.ParentID is also
-//     set, a contradiction (the system sentinel must not carry a project
-//     ID), which resolves Unknown.
-//  5. r.Type is "broker" or "runtime_broker" (both occur as Resource.Type
-//     in the codebase; neither has a project-scoped variant): TargetScopeHub.
-//  6. r.ScopeKind indicates a global/user/core scope for skill/template/
-//     harness_config: TargetScopeHub.
-//  7. Anything else resolves TargetScopeUnknown. This deliberately does NOT
-//     classify group/user/policy/gcp_service_account/quota/role/hub-adjacent
-//     types as Hub by type alone: a genuinely hub-scoped instance of those
-//     types is expected to reach rule 4 via an explicit ParentType ==
-//     "system", not this fallback. Critical constraint preserved: never
-//     equate missing resource parent metadata with hub scope.
+//  2. r.Type == permissions.ResourceHub: TargetScopeHub.
+//  3. hasProjectParent(r) — UNLESS hasReviewedGlobalScopeKind(r) also holds
+//     (a resource cannot be both project-parented and globally scoped) or
+//     r.ParentType=="project" with an empty r.ParentID (malformed parent):
+//     either contradiction resolves Unknown; otherwise TargetScopeProject.
+//  4. r.ParentType == "system" — UNLESS r.ParentID is also set (a
+//     contradiction): TargetScopeHub.
+//  5. r.Type is "broker" or "runtime_broker": TargetScopeHub.
+//  6. hasReviewedGlobalScopeKind(r): TargetScopeHub.
+//  7. Anything else: TargetScopeUnknown. Never equate missing resource
+//     parent metadata with hub scope.
+//
+// Collection-level path (evidence.IsCollectionLevel): see resolveCollectionEvidence.
 func ResolveTargetScope(r Resource, evidence TargetScopeEvidence) TargetScope {
 	if evidence.IsCollectionLevel {
-		if r.ID != "" {
-			// Contradiction: a collection-level request names an existing
-			// resource instance.
-			return TargetScope{Kind: TargetScopeUnknown}
-		}
-		// R1 fix: use the reviewed per-permission CLASS SET
-		// (CollectionTargetClasses), not the coarse ProjectTargetApplicability
-		// boolean — a permission can legitimately support BOTH classes
-		// (skill.list: an existing project's skills AND the hub-wide
-		// catalog), which a mutually-exclusive Hub/Project boolean cannot
-		// represent.
-		classes, reviewed := permissions.CollectionTargetClassesFor(evidence.PermissionID)
-		if !reviewed {
-			return TargetScope{Kind: TargetScopeUnknown}
-		}
-		switch evidence.CollectionScope {
-		case TargetScopeHub:
-			if evidence.CollectionProjectID != "" {
-				return TargetScope{Kind: TargetScopeUnknown} // stray project ID on Hub evidence
-			}
-			if !classesInclude(classes, permissions.TargetClassKindGlobalCatalog, permissions.TargetClassKindHubResource) {
-				return TargetScope{Kind: TargetScopeUnknown} // Hub is not a reviewed class for this permission
-			}
-			// Cross-check: the resource's own facts must not contradict a
-			// Hub claim (an agent whose own ParentType/ParentID already
-			// names a project cannot simultaneously be a hub-level
-			// collection target).
-			if r.ParentType == "project" && r.ParentID != "" {
-				return TargetScope{Kind: TargetScopeUnknown}
-			}
-			return TargetScope{Kind: TargetScopeHub}
-		case TargetScopeProject:
-			if evidence.CollectionProjectID == "" {
-				return TargetScope{Kind: TargetScopeUnknown}
-			}
-			if !classesInclude(classes, permissions.TargetClassKindProjectScoped) {
-				return TargetScope{Kind: TargetScopeUnknown} // Project is not a reviewed class for this permission
-			}
-			// Cross-check: if the resource ALSO independently names a
-			// project parent, it must agree with the evidence's claim
-			// (agent parent-project A + evidence project B is a
-			// contradiction, not "evidence wins").
-			if r.ParentType == "project" && r.ParentID != "" && r.ParentID != evidence.CollectionProjectID {
-				return TargetScope{Kind: TargetScopeUnknown}
-			}
-			if hasReviewedGlobalScopeKind(r.Type, r.ScopeKind) {
-				return TargetScope{Kind: TargetScopeUnknown} // resource claims global/user scope, evidence claims project
-			}
-			return TargetScope{Kind: TargetScopeProject, ProjectID: evidence.CollectionProjectID}
-		default:
-			return TargetScope{Kind: TargetScopeUnknown}
-		}
+		return resolveCollectionEvidence(r, evidence)
 	}
 
 	if r.Type == permissions.ResourceProject && r.ID != "" {
 		return TargetScope{Kind: TargetScopeProject, ProjectID: r.ID}
 	}
-
 	if r.Type == permissions.ResourceHub {
 		return TargetScope{Kind: TargetScopeHub}
 	}
 
 	hasProjectParent := r.ParentType == "project" && r.ParentID != ""
+	hasProjectParentMalformed := r.ParentType == "project" && r.ParentID == ""
 	hasSystemParent := r.ParentType == "system"
+	hasSystemParentMalformed := hasSystemParent && r.ParentID != ""
 	hasGlobalScope := hasReviewedGlobalScopeKind(r.Type, r.ScopeKind)
 
-	if hasProjectParent && hasGlobalScope {
+	if hasProjectParentMalformed || hasSystemParentMalformed {
 		return TargetScope{Kind: TargetScopeUnknown}
 	}
-	if hasSystemParent && r.ParentID != "" {
+	if hasProjectParent && hasGlobalScope {
 		return TargetScope{Kind: TargetScopeUnknown}
 	}
 
@@ -239,16 +180,103 @@ func ResolveTargetScope(r Resource, evidence TargetScopeEvidence) TargetScope {
 	if hasSystemParent {
 		return TargetScope{Kind: TargetScopeHub}
 	}
-
 	if r.Type == "broker" || r.Type == "runtime_broker" {
 		return TargetScope{Kind: TargetScopeHub}
 	}
-
 	if hasGlobalScope {
 		return TargetScope{Kind: TargetScopeHub}
 	}
 
 	return TargetScope{Kind: TargetScopeUnknown}
+}
+
+// resolveCollectionEvidence is ResolveTargetScope's collection-level branch,
+// factored out for the full contradiction matrix pat-refactor's R1 review
+// requires. Facts are computed ONCE and checked against both the evidence
+// and each other; any contradiction denies (Unknown), and evidence never
+// overrides a contradictory resource fact.
+func resolveCollectionEvidence(r Resource, evidence TargetScopeEvidence) TargetScope {
+	// Fact: a collection-level request must not also name an existing
+	// resource instance.
+	if r.ID != "" {
+		return TargetScope{Kind: TargetScopeUnknown}
+	}
+
+	// Fact: if both the Resource and the permission imply a resource type,
+	// they must agree — a caller cannot mismatch which resource family a
+	// collection-level request is for.
+	expectedType := registryResourceType(evidence.PermissionID)
+	if r.Type != "" && expectedType != "" && r.Type != expectedType {
+		return TargetScope{Kind: TargetScopeUnknown}
+	}
+	effectiveType := r.Type
+	if effectiveType == "" {
+		effectiveType = expectedType
+	}
+
+	// Fact: the permission's OWN reviewed collection-class set. A reviewed
+	// but EMPTY set (e.g. agent.attach/delete/token_refresh — instance-only
+	// actions that always target an existing resource) denies regardless of
+	// which CollectionScope the caller claims: a permission's resource
+	// family being capable of living in a project does not make every
+	// action on it a valid collection-level operation.
+	classes, reviewed := permissions.CollectionTargetClassesFor(evidence.PermissionID)
+	if !reviewed || len(classes) == 0 {
+		return TargetScope{Kind: TargetScopeUnknown}
+	}
+
+	// Facts about the resource's own parent/scope metadata, independent of
+	// the evidence — computed once, checked against both branches below.
+	hasProjectParent := r.ParentType == "project" && r.ParentID != ""
+	hasProjectParentMalformed := r.ParentType == "project" && r.ParentID == ""
+	hasSystemParent := r.ParentType == "system"
+	hasSystemParentMalformed := hasSystemParent && r.ParentID != ""
+	hasGlobalScope := hasReviewedGlobalScopeKind(effectiveType, r.ScopeKind)
+	hasExplicitProjectScope := hasExplicitProjectScopeKind(effectiveType, r.ScopeKind)
+
+	if hasProjectParentMalformed || hasSystemParentMalformed {
+		return TargetScope{Kind: TargetScopeUnknown}
+	}
+	if hasProjectParent && hasGlobalScope {
+		return TargetScope{Kind: TargetScopeUnknown}
+	}
+
+	switch evidence.CollectionScope {
+	case TargetScopeHub:
+		if evidence.CollectionProjectID != "" {
+			return TargetScope{Kind: TargetScopeUnknown} // stray project ID on Hub evidence
+		}
+		if !classesInclude(classes, permissions.TargetClassKindGlobalCatalog, permissions.TargetClassKindHubResource) {
+			return TargetScope{Kind: TargetScopeUnknown} // Hub is not a reviewed class for this permission
+		}
+		if hasProjectParent {
+			return TargetScope{Kind: TargetScopeUnknown} // resource independently claims a project parent
+		}
+		// hasSystemParent agrees with Hub evidence — not a contradiction.
+		if hasExplicitProjectScope {
+			return TargetScope{Kind: TargetScopeUnknown} // resource's own ScopeKind explicitly says "project", contradicting Hub evidence
+		}
+		return TargetScope{Kind: TargetScopeHub}
+	case TargetScopeProject:
+		if evidence.CollectionProjectID == "" {
+			return TargetScope{Kind: TargetScopeUnknown}
+		}
+		if !classesInclude(classes, permissions.TargetClassKindProjectScoped) {
+			return TargetScope{Kind: TargetScopeUnknown} // Project is not a reviewed class for this permission
+		}
+		if hasProjectParent && r.ParentID != evidence.CollectionProjectID {
+			return TargetScope{Kind: TargetScopeUnknown} // resource names a DIFFERENT project than the evidence
+		}
+		if hasSystemParent {
+			return TargetScope{Kind: TargetScopeUnknown} // resource independently claims system/hub scope
+		}
+		if hasGlobalScope {
+			return TargetScope{Kind: TargetScopeUnknown} // resource's own ScopeKind claims global/user scope
+		}
+		return TargetScope{Kind: TargetScopeProject, ProjectID: evidence.CollectionProjectID}
+	default:
+		return TargetScope{Kind: TargetScopeUnknown}
+	}
 }
 
 func classesInclude(classes []permissions.TargetClassKind, want ...permissions.TargetClassKind) bool {
@@ -282,6 +310,21 @@ func hasReviewedGlobalScopeKind(resourceType, scopeKind string) bool {
 	switch scopeKind {
 	case store.SkillScopeUser, store.SkillScopeGlobal, store.SkillScopeCore:
 		return true
+	default:
+		return false
+	}
+}
+
+// hasExplicitProjectScopeKind reports whether scopeKind is resourceType's
+// own explicit "project" scope-kind constant (store.SkillScopeProject and
+// the Template/HarnessConfig equivalents are all the literal "project").
+// RESTRICTED to the same three reviewed resource types as
+// hasReviewedGlobalScopeKind, for the same reason: an arbitrary type cannot
+// carry this concept.
+func hasExplicitProjectScopeKind(resourceType, scopeKind string) bool {
+	switch resourceType {
+	case permissions.ResourceSkill, permissions.ResourceTemplate, permissions.ResourceHarnessConfig:
+		return scopeKind == store.SkillScopeProject
 	default:
 		return false
 	}
@@ -577,26 +620,45 @@ func ContemplatedProjectClass(permissionID string) ProjectTargetClass {
 // ScopeKind, so any caller-supplied value is accepted for those types; this
 // validator only restricts the three where ScopeKind is semantically load-
 // bearing.
+// validRealProjectScopeKinds is the explicit, reviewed ALLOWLIST of
+// ScopeKind values each resource type may carry for a REAL (not
+// contemplated) project-target class. A resource type absent from this map
+// has NO reviewed scope-kind semantics at all: its class.ScopeKind must be
+// exactly empty — never an arbitrary accepted string (pat-refactor R4,
+// 2026-09-28: replaces an earlier "every other resource type accepts ANY
+// ScopeKind" exemption, which was not a reviewed-class contract). Material-
+// delivery resource types are pre-registered here per pat-f2-arch-3's plan
+// (2026-09-28) — F.2 owns adding the corresponding Registry permission
+// rows; this table already has their reviewed allowed values so F needs no
+// separate exemption once those rows land, and the execution-project
+// projectID argument stays distinct from the material's own source class.
+var validRealProjectScopeKinds = map[string][]string{
+	permissions.ResourceSkill:         {store.SkillScopeProject},
+	permissions.ResourceTemplate:      {store.TemplateScopeProject},
+	permissions.ResourceHarnessConfig: {store.HarnessConfigScopeProject},
+	"secret":                          {"project", "hub", "user", "runtime_broker"},
+	"env_var":                         {"project", "hub", "user", "runtime_broker"},
+	"skill_injection":                 {"project", "hub", "user", "runtime_broker"},
+}
+
 func validateRealProjectClass(permissionID string, class ProjectTargetClass) error {
 	expected := registryResourceType(permissionID)
 	if class.ResourceType == "" || class.ResourceType != expected {
 		return fmt.Errorf("%w: class resource type %q does not match permission %q's resource type %q", ErrProjectAccessDenied, class.ResourceType, permissionID, expected)
 	}
-	var wantScopeKind string
-	switch class.ResourceType {
-	case permissions.ResourceSkill:
-		wantScopeKind = store.SkillScopeProject
-	case permissions.ResourceTemplate:
-		wantScopeKind = store.TemplateScopeProject
-	case permissions.ResourceHarnessConfig:
-		wantScopeKind = store.HarnessConfigScopeProject
-	default:
+	allowed, hasScopeSemantics := validRealProjectScopeKinds[class.ResourceType]
+	if !hasScopeSemantics {
+		if class.ScopeKind != "" {
+			return fmt.Errorf("%w: resource type %q has no reviewed scope-kind semantics; class scope kind must be empty, got %q", ErrProjectAccessDenied, class.ResourceType, class.ScopeKind)
+		}
 		return nil
 	}
-	if class.ScopeKind != wantScopeKind {
-		return fmt.Errorf("%w: class scope kind %q is not a valid real-project-target value for resource type %q (want %q)", ErrProjectAccessDenied, class.ScopeKind, class.ResourceType, wantScopeKind)
+	for _, v := range allowed {
+		if class.ScopeKind == v {
+			return nil
+		}
 	}
-	return nil
+	return fmt.Errorf("%w: class scope kind %q is not a registered valid value for resource type %q (valid: %v)", ErrProjectAccessDenied, class.ScopeKind, class.ResourceType, allowed)
 }
 
 func registryResourceType(permissionID string) string {
@@ -868,12 +930,39 @@ func (a *AuthzService) hasAnyProjectBinding(ctx context.Context, principal Princ
 	return false, nil
 }
 
-// hasAnyProjectMembership reports whether principal has an active
-// project-scoped role binding in ANY project at all, permission-agnostic —
-// used as the "relevant project admission" evidence for a relationship-
-// eligible selector under a Hub boundary (CanMintSelector), without
-// enumerating any specific owned target.
-func (a *AuthzService) hasAnyProjectMembership(ctx context.Context, principal PrincipalContext) (bool, error) {
+// permissionSurvivesProjectConstraints reports whether permissionID is NOT
+// stripped by projectID's own access-constraint reduction for principal —
+// i.e. whether a governing constraint on this specific project would still
+// allow permissionID. Does not check membership or any role's permission
+// set; it answers only the constraint-reduction question, for reuse by
+// both the single-project (Project boundary) and any-project (Hub
+// boundary) relationship-eligibility checks.
+func (a *AuthzService) permissionSurvivesProjectConstraints(ctx context.Context, principal PrincipalContext, projectID, permissionID string) (bool, error) {
+	refs, _, _, err := a.principalClosure(ctx, principal)
+	if err != nil {
+		return false, fmt.Errorf("%w: %v", ErrProjectAccessDenied, err)
+	}
+	closure := make(map[string]struct{}, len(refs))
+	for _, p := range refs {
+		closure[p.Type+":"+p.ID] = struct{}{}
+	}
+	restrictions := a.loadAccessConstraintRestrictions(ctx, closure, ResourceContext{ProjectID: projectID})
+	survivors := applyRestrictions([]string{permissionID}, restrictions)
+	return len(survivors) == 1, nil
+}
+
+// hasRelevantProjectAdmission reports whether principal has an active
+// project-scoped role binding in AT LEAST ONE project WHERE that project's
+// own access-constraint reduction does not strip permissionID — the
+// "relevant project admission" evidence for a relationship-eligible
+// selector under a Hub boundary. This prevents a governing constraint that
+// excludes the permission for every project the principal belongs to from
+// being worked around via the relationship path (pat-refactor R3,
+// 2026-09-28): relationship mint candidacy is permission-agnostic about
+// WHICH role a project membership carries, but it must still respect a
+// constraint that specifically strips the selected permission. Does not
+// enumerate any specific owned target — project-level only.
+func (a *AuthzService) hasRelevantProjectAdmission(ctx context.Context, principal PrincipalContext, permissionID string) (bool, error) {
 	refs, _, _, err := a.principalClosure(ctx, principal)
 	if err != nil {
 		return false, fmt.Errorf("%w: %v", ErrProjectAccessDenied, err)
@@ -883,11 +972,21 @@ func (a *AuthzService) hasAnyProjectMembership(ctx context.Context, principal Pr
 		return false, fmt.Errorf("%w: binding resolution failed: %v", ErrProjectAccessDenied, err)
 	}
 	now := time.Now()
+	projects := map[string]bool{}
 	for _, b := range bindings {
 		if b.ScopeType != ScopeTypeProject {
 			continue
 		}
 		if bindingActivationOK(b, now) {
+			projects[b.ScopeID] = true
+		}
+	}
+	for projectID := range projects {
+		ok, err := a.permissionSurvivesProjectConstraints(ctx, principal, projectID, permissionID)
+		if err != nil {
+			return false, err
+		}
+		if ok {
 			return true, nil
 		}
 	}
@@ -1207,10 +1306,14 @@ func (a *AuthzService) hubSelectorEligible(ctx context.Context, principal Princi
 //     MintEligibilityRelationship source whose RelationshipTypes include one
 //     resolving via permissions.RelationshipPolicyMintEligible for this
 //     EXACT principal kind and permID's resource type, AND the principal has
-//     relevant project admission (hasAnyProjectMembership — permission-
-//     agnostic, no specific target enumerated). This is what lets an
-//     ordinary project member mint agent:attach under a hub boundary without
-//     any system role or blanket project permission grant.
+//     relevant project admission where that project's OWN access-constraint
+//     reduction does not strip permID (hasRelevantProjectAdmission — no
+//     specific target enumerated, but NOT constraint-agnostic: a governing
+//     constraint excluding permID from every project the principal belongs
+//     to still denies, pat-refactor R3). This is what lets an ordinary
+//     project member mint agent:attach under a hub boundary without any
+//     system role or blanket project permission grant, while still
+//     respecting a constraint that specifically strips that permission.
 func (a *AuthzService) hubPermissionEligible(ctx context.Context, principal PrincipalContext, permID string) (bool, error) {
 	ok, err := a.MintTimeSystemGrant(ctx, principal, permID)
 	if err != nil {
@@ -1240,7 +1343,7 @@ func (a *AuthzService) hubPermissionEligible(ctx context.Context, principal Prin
 			if !permissions.RelationshipPolicyMintEligible(relType, string(principal.Kind), resourceType, permID) {
 				continue
 			}
-			hasAny, err := a.hasAnyProjectMembership(ctx, principal)
+			hasAny, err := a.hasRelevantProjectAdmission(ctx, principal, permID)
 			if err != nil {
 				return false, err
 			}
@@ -1283,7 +1386,18 @@ func (a *AuthzService) selectorMintEligible(ctx context.Context, principal Princ
 		for _, src := range descriptor.Sources {
 			switch src.Kind {
 			case permissions.MintEligibilityFlatRole:
-				eligible = true
+				// An explicit FlatRole source is still the project role's
+				// own flat permission subset — it must actually be proven,
+				// never assumed true just because the descriptor names this
+				// source (pat-refactor R3, 2026-09-28: this exact branch
+				// was previously `eligible = true` unconditionally).
+				ok, err := a.hasProjectRoleFlatPermission(ctx, principal, boundary.ProjectID, permID)
+				if err != nil {
+					return false, MintDenialNone, err
+				}
+				if ok {
+					eligible = true
+				}
 			case permissions.MintEligibilityRelationship:
 				resourceType := registryResourceType(permID)
 				for _, relType := range src.RelationshipTypes {
@@ -1294,7 +1408,21 @@ func (a *AuthzService) selectorMintEligible(ctx context.Context, principal Princ
 					// (RelationshipPolicyAllows also matches e.g. read-only
 					// progeny rows that are never mint-eligible). Checked
 					// against the actual principal kind, not any kind.
-					if permissions.RelationshipPolicyMintEligible(relType, string(principal.Kind), resourceType, permID) {
+					if !permissions.RelationshipPolicyMintEligible(relType, string(principal.Kind), resourceType, permID) {
+						continue
+					}
+					// Relationship candidacy is permission-agnostic about
+					// WHICH role a project membership carries, but it must
+					// still respect a constraint that specifically strips
+					// this exact permission from the project boundary
+					// being minted against (pat-refactor R3): a governing
+					// constraint on boundary.ProjectID cannot be worked
+					// around via the relationship path.
+					constraintOK, err := a.permissionSurvivesProjectConstraints(ctx, principal, boundary.ProjectID, permID)
+					if err != nil {
+						return false, MintDenialNone, err
+					}
+					if constraintOK {
 						eligible = true
 						break
 					}
