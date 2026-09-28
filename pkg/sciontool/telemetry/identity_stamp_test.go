@@ -105,6 +105,64 @@ func TestGenericOTLPIdentityStampingCoversEveryPointKind(t *testing.T) {
 	}
 }
 
+// TestGenericOTLPIdentityStampingToleratesNilDataPointEntries is the
+// verification for the upstream review of PR 2051 (Gemini finding on
+// identity_stamp.go:73, "nil-check point before appendCanonicalIdentity").
+// A nil point can't reach appendCanonicalIdentity: proto.Clone(source), which
+// stampIdentityLabels runs before ever touching a DataPoints slice, replaces
+// a nil element of a repeated message field with a fresh non-nil zero-value
+// message rather than preserving the nil (verified with a standalone
+// proto.Clone repro during review; this test pins that behavior against this
+// package's actual types instead of just asserting it in a comment). So a
+// hand-built nil entry becomes an empty, stampable point, and nothing here
+// panics -- declined the suggested nil-check as literal dead code, backed by
+// this test rather than by the pipeline-admission argument alone (which
+// already covered the real pipeline, see the doc comment above the loops).
+func TestGenericOTLPIdentityStampingToleratesNilDataPointEntries(t *testing.T) {
+	resource := &resourcepb.Resource{Attributes: []*commonpb.KeyValue{
+		metricStringLabel("scion.agent.id", "agent-nil-point-1"),
+		metricStringLabel("scion.project.id", "project-nil-point-1"),
+		metricStringLabel("scion.agent.slug", "nil-point-slug"),
+	}}
+	sum := &metricpb.Metric{Name: "test.sum", Data: &metricpb.Metric_Sum{Sum: &metricpb.Sum{
+		AggregationTemporality: metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE,
+		DataPoints: []*metricpb.NumberDataPoint{
+			nil,
+			{Value: &metricpb.NumberDataPoint_AsInt{AsInt: 1}},
+		},
+	}}}
+	input := &metricpb.ResourceMetrics{
+		Resource: resource,
+		ScopeMetrics: []*metricpb.ScopeMetrics{{
+			Scope:   &commonpb.InstrumentationScope{Name: "test.scope"},
+			Metrics: []*metricpb.Metric{sum},
+		}},
+	}
+
+	output, err := stampIdentityLabels([]*metricpb.ResourceMetrics{input})
+	if err != nil {
+		t.Fatalf("stampIdentityLabels: %v", err)
+	}
+	points := output[0].ScopeMetrics[0].Metrics[0].GetSum().DataPoints
+	if len(points) != 2 {
+		t.Fatalf("points = %+v, want 2 (proto.Clone must not drop the nil entry, only neutralize it)", points)
+	}
+	for i, want := range []string{"the cloned nil entry", "the originally non-nil entry"} {
+		if points[i] == nil {
+			t.Fatalf("points[%d] (%s) is nil after cloning; proto.Clone should always yield a non-nil message for a list element", i, want)
+		}
+		attrs := points[i].Attributes
+		if metricAttrString(attrs, "scion_agent_id") != "agent-nil-point-1" ||
+			metricAttrString(attrs, "scion_project_id") != "project-nil-point-1" ||
+			metricAttrString(attrs, "scion_agent_slug") != "nil-point-slug" {
+			t.Errorf("points[%d] (%s) attributes = %+v, want scion_agent_id/scion_project_id/scion_agent_slug stamped", i, want, attrs)
+		}
+	}
+	if points[1].GetAsInt() != 1 {
+		t.Errorf("points[1].AsInt = %d, want 1 (the originally non-nil entry's value must survive)", points[1].GetAsInt())
+	}
+}
+
 // TestReservedIdentityPointLabelRejectedAtAdmissionBothPaths is F3+F4: a
 // producer-supplied value for any of the three exporter-reserved identity
 // labels must be rejected where the point is admitted (metricStreams.add),
