@@ -18,8 +18,11 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/spf13/cobra"
 )
@@ -34,6 +37,11 @@ with no trailing Enter. Supports control keys like arrows, Escape, etc.
 This is useful for interacting with interactive TUI applications running
 inside an agent's terminal session.
 
+In Hub mode, keys are delivered to the agent's terminal the same way a
+local agent's are — through the hub. When run by an agent, this only
+works within the agent's own project; cross-project targets are refused.
+A human operator using --project can still target other projects.
+
 Examples:
   scion keys my-agent "Escape"
   scion keys my-agent "C-c"
@@ -46,9 +54,22 @@ Examples:
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
-		agentName := args[0]
+		// Resolve the agent exactly as `scion message` does: strip the
+		// optional "agent:" prefix and slugify.
+		agentName := api.Slugify(strings.TrimPrefix(args[0], "agent:"))
 		keystrokes := strings.Join(args[1:], " ")
 
+		hubCtx, err := CheckHubAvailabilityForAgent(projectPath, agentName, true)
+		if err != nil {
+			return err
+		}
+
+		if hubCtx != nil {
+			return sendKeysViaHub(hubCtx, agentName, keystrokes)
+		}
+
+		// Local mode now resolves the agent name the same way `scion
+		// message` does; otherwise unchanged.
 		ctx := context.Background()
 
 		rt := runtime.GetRuntime(projectPath, profile)
@@ -58,6 +79,46 @@ Examples:
 		fmt.Printf("Sending raw keys to agent '%s'...\n", agentName)
 		return mgr.MessageRaw(ctx, agentName, "", keystrokes)
 	},
+}
+
+// sendKeysViaHub delivers keystrokes to a hub-managed agent by reusing the
+// same StructuredMessage-with-Raw=true path `scion message --raw` uses: it
+// resolves the sender identity and project the way `scion message` does,
+// builds the structured message via the shared helper, and sends it through
+// the normal messaging-authorization gate. The broker honours Raw the same
+// way regardless of which command set it.
+func sendKeysViaHub(hubCtx *HubContext, agentName, keystrokes string) error {
+	if !isJSONOutput() {
+		PrintUsingHub(hubCtx.Endpoint)
+	}
+
+	sender := resolveSenderIdentity(hubCtx)
+
+	projectID, err := GetProjectID(hubCtx)
+	if err != nil {
+		return wrapHubError(err)
+	}
+	agentSvc := hubCtx.Client.ProjectAgents(projectID)
+
+	if !isJSONOutput() {
+		fmt.Printf("Sending raw keys to agent '%s'...\n", agentName)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	msg := buildStructuredMessage(sender, "agent:"+agentName, keystrokes, nil, true, false, false)
+	if err := messaging.ValidateLegacyMessage(msg); err != nil {
+		return fmt.Errorf("message validation failed: %w", err)
+	}
+	if _, err := agentSvc.SendStructuredMessage(ctx, agentName, msg, false, false, false); err != nil {
+		return wrapHubError(fmt.Errorf("failed to send keys to agent '%s' via Hub: %w", agentName, err))
+	}
+
+	if !isJSONOutput() {
+		fmt.Printf("Keys delivered to agent '%s'.\n", agentName)
+	}
+	return nil
 }
 
 func init() {

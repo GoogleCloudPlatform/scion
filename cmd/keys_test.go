@@ -15,8 +15,10 @@
 package cmd
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -52,4 +54,75 @@ func TestKeysCmd_IsRegistered(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "keys command should be registered on rootCmd")
+}
+
+// ---------------------------------------------------------------------------
+// Hub-aware keys: Raw=true reaches the hub as a structured message, for both
+// agent and user (human) senders. sendKeysViaHub reuses the same
+// StructuredMessage + SendStructuredMessage path `scion message --raw` uses,
+// so these tests mirror TestSendMessageViaHub_SingleAgent in message_test.go.
+// ---------------------------------------------------------------------------
+
+func TestSendKeysViaHub_AgentSender_RawReachesHub(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+	t.Setenv("SCION_AGENT_NAME", "sender-agent")
+
+	projectID := "project-keys-agent"
+	server, sent := newMessageMockHubServer(t, projectID, nil)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	err = sendKeysViaHub(hubCtx, "target-agent", "Escape")
+	require.NoError(t, err)
+
+	require.Len(t, *sent, 1)
+	assert.Equal(t, "target-agent", (*sent)[0].AgentName)
+	require.NotNil(t, (*sent)[0].StructuredMsg)
+	assert.True(t, (*sent)[0].StructuredMsg.Raw, "keys must set Raw=true on the structured message")
+	assert.False(t, (*sent)[0].StructuredMsg.Plain)
+	assert.Equal(t, "agent:sender-agent", (*sent)[0].StructuredMsg.Sender)
+	assert.Equal(t, "Escape", (*sent)[0].StructuredMsg.Msg)
+}
+
+func TestSendKeysViaHub_UserSender_RawReachesHub(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+	// Explicitly clear SCION_AGENT_NAME so resolveSenderIdentity takes the
+	// human/user path — the test process itself may be running inside an
+	// agent container where the variable is already set in the ambient
+	// environment.
+	t.Setenv("SCION_AGENT_NAME", "")
+
+	projectID := "project-keys-user"
+	server, sent := newMessageMockHubServer(t, projectID, nil)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	err = sendKeysViaHub(hubCtx, "target-agent", "C-c")
+	require.NoError(t, err)
+
+	require.Len(t, *sent, 1)
+	assert.Equal(t, "target-agent", (*sent)[0].AgentName)
+	require.NotNil(t, (*sent)[0].StructuredMsg)
+	assert.True(t, (*sent)[0].StructuredMsg.Raw, "keys must set Raw=true on the structured message")
+	assert.False(t, strings.HasPrefix((*sent)[0].StructuredMsg.Sender, "agent:"),
+		"a human/user sender's structured message must not carry an agent: sender identity")
+	assert.Equal(t, "C-c", (*sent)[0].StructuredMsg.Msg)
 }
