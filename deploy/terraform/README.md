@@ -41,7 +41,7 @@ reads it, by naming convention, through the `shared-lookup` module (no
    a partial role set surfaces as a plan or apply failure partway through,
    not as a clean early error.
 2. A GCS state bucket, versioned: `<project>-<name_prefix>-tfstate` (e.g.
-   `ptone-emblem-tfha-tfstate`). Access limited to operators.
+   `my-project-tfha-tfstate`). Access limited to operators.
 3. ~~An IAP OAuth web client~~ — **not a prerequisite.** `iap_enabled = true`
    works immediately with the project's Google-managed OAuth client; see
    "IAP OAuth client" below. It's a post-apply step (to enable agent
@@ -139,8 +139,9 @@ shutdown warning, so don't depend on it as the only way to find the ID; the
 console is where to look if/when it stops working.
 
 This client exists in any project where IAP has ever been enabled —
-including `ptone-emblem` today — so on a project like that, the first apply
-can pass it right away and wait on nothing. In a genuinely fresh project it
+including a project that already runs a live Scion stack — so on a
+project like that, the first apply can pass it right away and wait on
+nothing. In a genuinely fresh project it
 only appears after IAP has been turned on by a first apply, so the flow there is
 apply → discover → re-apply with `-var iap_oauth_client_id=<id>`. Changing
 the value only re-renders the settings secret and rolls a new revision;
@@ -166,8 +167,8 @@ no longer supports creating clients, so this is a console-only step:
 Every resource name derives from `name_prefix` (shared layer, default
 `tfha`) or `hub_name` (hub layer). There are no unprefixed defaults, no
 `import` blocks, and no create-if-missing logic: a name collision fails the
-apply, which is the desired behavior on a project that also runs live
-Scion infra (`ptone-emblem`: `scion-hub`, `scion-hub-iap-proxy`,
+apply, which is the desired behavior on a project that also runs a live
+Scion stack (e.g. `scion-hub`, `scion-hub-iap-proxy`,
 `scion-a2a-bridge`, `scion-discord`, `scion-hub-runner`, `scion-hub-gke`).
 All IAM grants are additive (`google_*_iam_member` only — never
 `_iam_binding`/`_iam_policy`).
