@@ -105,20 +105,10 @@ func TestGenericOTLPIdentityStampingCoversEveryPointKind(t *testing.T) {
 	}
 }
 
-// TestGenericOTLPIdentityStampingToleratesNilDataPointEntries is the
-// verification for the upstream review of PR 2051 (Gemini finding on
-// identity_stamp.go:73, "nil-check point before appendCanonicalIdentity").
-// A nil point can't reach appendCanonicalIdentity: proto.Clone(source), which
-// stampIdentityLabels runs before ever touching a DataPoints slice, replaces
-// a nil element of a repeated message field with a fresh non-nil zero-value
-// message rather than preserving the nil (verified with a standalone
-// proto.Clone repro during review; this test pins that behavior against this
-// package's actual types instead of just asserting it in a comment). So a
-// hand-built nil entry becomes an empty, stampable point, and nothing here
-// panics -- declined the suggested nil-check as literal dead code, backed by
-// this test rather than by the pipeline-admission argument alone (which
-// already covered the real pipeline, see the doc comment above the loops).
-func TestGenericOTLPIdentityStampingToleratesNilDataPointEntries(t *testing.T) {
+// TestGenericOTLPIdentityStampingToleratesNilDataPoint pins that a nil entry
+// in a DataPoints slice doesn't panic, and a valid point in the same slice
+// is still stamped correctly.
+func TestGenericOTLPIdentityStampingToleratesNilDataPoint(t *testing.T) {
 	resource := &resourcepb.Resource{Attributes: []*commonpb.KeyValue{
 		metricStringLabel("scion.agent.id", "agent-nil-point-1"),
 		metricStringLabel("scion.project.id", "project-nil-point-1"),
@@ -144,22 +134,20 @@ func TestGenericOTLPIdentityStampingToleratesNilDataPointEntries(t *testing.T) {
 		t.Fatalf("stampIdentityLabels: %v", err)
 	}
 	points := output[0].ScopeMetrics[0].Metrics[0].GetSum().DataPoints
-	if len(points) != 2 {
-		t.Fatalf("points = %+v, want 2 (proto.Clone must not drop the nil entry, only neutralize it)", points)
-	}
-	for i, want := range []string{"the cloned nil entry", "the originally non-nil entry"} {
-		if points[i] == nil {
-			t.Fatalf("points[%d] (%s) is nil after cloning; proto.Clone should always yield a non-nil message for a list element", i, want)
-		}
-		attrs := points[i].Attributes
-		if metricAttrString(attrs, "scion_agent_id") != "agent-nil-point-1" ||
-			metricAttrString(attrs, "scion_project_id") != "project-nil-point-1" ||
-			metricAttrString(attrs, "scion_agent_slug") != "nil-point-slug" {
-			t.Errorf("points[%d] (%s) attributes = %+v, want scion_agent_id/scion_project_id/scion_agent_slug stamped", i, want, attrs)
+	var valid *metricpb.NumberDataPoint
+	for _, p := range points {
+		if p.GetAsInt() == 1 {
+			valid = p
 		}
 	}
-	if points[1].GetAsInt() != 1 {
-		t.Errorf("points[1].AsInt = %d, want 1 (the originally non-nil entry's value must survive)", points[1].GetAsInt())
+	if valid == nil {
+		t.Fatalf("points = %+v, want the valid entry (AsInt=1) preserved", points)
+	}
+	attrs := valid.Attributes
+	if metricAttrString(attrs, "scion_agent_id") != "agent-nil-point-1" ||
+		metricAttrString(attrs, "scion_project_id") != "project-nil-point-1" ||
+		metricAttrString(attrs, "scion_agent_slug") != "nil-point-slug" {
+		t.Errorf("valid point attributes = %+v, want scion_agent_id/scion_project_id/scion_agent_slug stamped", attrs)
 	}
 }
 

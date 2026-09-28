@@ -133,13 +133,13 @@ func TestSeriesIncreasesIgnoresDistributionPoints(t *testing.T) {
 	assert.Equal(t, int64(9), incs[0].Value)
 }
 
-// TestSeriesIncreasesSkipsNilPoints pins the defensive nil handling added for
-// the upstream review of PR 2051 (Gemini finding on metrics_dashboard.go:492
-// and :536): a nil point, a point with a nil Value, and a point with a nil
-// Interval are all skipped without panicking, and a valid point mixed in
-// among them still contributes normally. p.GetValue()/p.GetInterval() are
-// nil-safe generated getters, so this was already safe before the explicit
-// check; the test pins the behavior regardless of why it holds.
+// TestSeriesIncreasesSkipsNilPoints pins the nil handling in seriesIncreases:
+// a nil point, a point with a nil Value, and a point with a nil Interval are
+// all skipped without panicking, and a valid point mixed in among them still
+// contributes normally. The nil-Value case is a pure no-op (the getters are
+// nil-safe on their own), but the nil-Interval case is a real behavior fix:
+// without it, such a point bucketed at the Unix epoch instead of being
+// skipped.
 func TestSeriesIncreasesSkipsNilPoints(t *testing.T) {
 	epoch := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	points := []*monitoringpb.Point{

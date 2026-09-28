@@ -526,15 +526,9 @@ func (l *boundedLRU) SeenBefore(fingerprint string) bool {
 	l.order = append(l.order, lruEntry{fingerprint, now})
 	for len(l.order) > l.capacity {
 		oldest := l.order[0]
-		// Zero the evicted slot before reslicing (Gemini finding on upstream
-		// PR 2051): l.order[1:] shares the same backing array, so without
-		// this the evicted entry's string header stays reachable through
-		// that array until enough further appends force a reallocation,
-		// retaining its fingerprint string longer than necessary. A minimal
-		// zero-then-reslice, not a slices.Delete-style compaction: this is
-		// O(1) per eviction (just the swapped word plus a slice-header
-		// move), where compacting into a new backing array on every call
-		// would make it O(n) on what can be a per-event hot path.
+		// Zero the evicted slot before reslicing, so its fingerprint string
+		// isn't held reachable through the shared backing array (one entry
+		// write, versus an O(n) memmove for a slices.Delete-style compaction).
 		l.order[0] = lruEntry{}
 		l.order = l.order[1:]
 		if at, ok := l.seen[oldest.key]; ok && at.Equal(oldest.at) {
@@ -554,10 +548,7 @@ func (l *boundedLRU) evictExpired(now time.Time) {
 	}
 	if cut > 0 {
 		// Zero the evicted prefix before reslicing, same reasoning as
-		// SeenBefore's eviction loop above (Gemini finding on upstream PR
-		// 2051): l.order[cut:] shares the same backing array, so without
-		// this the evicted entries' strings stay reachable through it until
-		// a later append forces a reallocation.
+		// SeenBefore's eviction loop above.
 		for i := range cut {
 			l.order[i] = lruEntry{}
 		}

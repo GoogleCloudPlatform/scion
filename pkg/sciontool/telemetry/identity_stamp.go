@@ -56,40 +56,35 @@ func stampIdentityLabels(input []*metricpb.ResourceMetrics) ([]*metricpb.Resourc
 		agentSlug := metricAttrString(attrs, "scion.agent.slug")
 		for _, sm := range rm.ScopeMetrics {
 			for _, metric := range sm.GetMetrics() {
-				// A nil point cannot reach appendCanonicalIdentity here
-				// (Gemini finding on upstream PR 2051, identity_stamp.go:73):
-				// verified two layers deep, not merely inferred.
-				//   1. Through the real pipeline, admission itself rejects a
-				//      nil point before it is ever stored, and metricStreams
-				//      only ever repopulates DataPoints from a proto.Clone of
-				//      an already-admitted, non-nil point (metric_streams.go,
-				//      e.g. entry.metric.GetSum().DataPoints =
-				//      []*metricpb.NumberDataPoint{copyPoint}).
-				//   2. Even for a direct or future caller that hand-builds a
-				//      ResourceMetrics with an explicit nil entry in a
-				//      DataPoints slice: `rm := proto.Clone(source)` above
-				//      runs first and, verified with a standalone
-				//      proto.Clone repro, replaces a nil element of a
-				//      repeated message field with a fresh non-nil
-				//      zero-value message rather than preserving the nil.
-				//      So `point` is never nil by the time this loop runs,
-				//      regardless of what the caller passed in.
-				// See TestGenericOTLPIdentityStampingToleratesNilDataPointEntries,
-				// which pins point 2 and would fail if a future refactor
-				// stopped cloning before this loop.
+				// Guard against a nil point (unreachable via the real pipeline; admission rejects one first).
 				for _, point := range metric.GetSum().GetDataPoints() {
+					if point == nil {
+						continue
+					}
 					appendCanonicalIdentity(&point.Attributes, agentID, projectID, agentSlug)
 				}
 				for _, point := range metric.GetGauge().GetDataPoints() {
+					if point == nil {
+						continue
+					}
 					appendCanonicalIdentity(&point.Attributes, agentID, projectID, agentSlug)
 				}
 				for _, point := range metric.GetHistogram().GetDataPoints() {
+					if point == nil {
+						continue
+					}
 					appendCanonicalIdentity(&point.Attributes, agentID, projectID, agentSlug)
 				}
 				for _, point := range metric.GetExponentialHistogram().GetDataPoints() {
+					if point == nil {
+						continue
+					}
 					appendCanonicalIdentity(&point.Attributes, agentID, projectID, agentSlug)
 				}
 				for _, point := range metric.GetSummary().GetDataPoints() {
+					if point == nil {
+						continue
+					}
 					appendCanonicalIdentity(&point.Attributes, agentID, projectID, agentSlug)
 				}
 			}

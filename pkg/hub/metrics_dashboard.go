@@ -488,12 +488,9 @@ func seriesIncreases(points []*monitoringpb.Point, fetchStart time.Time) []serie
 	}
 	byStart := make(map[int64][]observedPoint)
 	for _, p := range points {
-		// p, p.GetValue() and p.GetInterval() are all nil-safe getters (they
-		// check their own receiver before dereferencing), so this can't
-		// panic even on a hand-built points slice containing a nil entry or
-		// a point with a nil Value/Interval. Explicit regardless, matching
-		// the upstream review's suggestion (Gemini finding on PR 2051), so
-		// the safety doesn't rely on remembering the getter convention.
+		// p == nil or a nil Value can't panic (the getters are nil-safe), but
+		// a nil Interval is a real fix: GetStartTime().AsTime() on it would
+		// bucket the point at the Unix epoch instead of skipping it.
 		if p == nil || p.GetValue() == nil || p.GetInterval() == nil {
 			continue
 		}
@@ -541,11 +538,8 @@ func seriesIncreases(points []*monitoringpb.Point, fetchStart time.Time) []serie
 // pointValue reads a monitoring point's numeric value. Distribution and
 // other kinds return ok=false: canonical usage metrics are never
 // distributions, and this is defensive against a future double producer.
-// v's own GetValue() is already nil-safe (nil receiver returns a nil oneof,
-// which matches no type case below and falls to the same ok=false default),
-// but the explicit check makes that safety visible at the call site instead
-// of relying on the generated-getter convention (Gemini finding on upstream
-// PR 2051).
+// The nil check below is explicit-for-clarity only: v.GetValue() is already
+// nil-safe and would reach the same ok=false default on its own.
 func pointValue(v *monitoringpb.TypedValue) (int64, bool) {
 	if v == nil {
 		return 0, false

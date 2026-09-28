@@ -259,16 +259,15 @@ func TestBoundedLRUDedupeCapacityAndTTL(t *testing.T) {
 	}
 }
 
-// TestBoundedLRUCapacityEvictionZeroesSlot is the regression test for the
-// upstream review of PR 2051 (Gemini finding on usage.go:533): capacity
-// eviction in SeenBefore must zero the evicted lruEntry before reslicing, not
-// just drop it from the visible window, because l.order[1:] shares the same
-// backing array as before the reslice -- until a later append forces a
-// reallocation, the evicted entry's string stays reachable (and therefore
-// alive to the GC) through that array. Captures the slice header before the
-// eviction (same backing array, same capacity) and inspects index 0 through
-// that captured header afterward, since the live l.order no longer exposes
-// it once evicted.
+// TestBoundedLRUCapacityEvictionZeroesSlot pins that capacity eviction in
+// SeenBefore zeroes the evicted lruEntry before reslicing, not just drops it
+// from the visible window: l.order[1:] shares the same backing array as
+// before the reslice, so until a later append forces a reallocation, the
+// evicted entry's string would otherwise stay reachable (and alive to the
+// GC) through that array. Captures the slice header before the eviction
+// (same backing array, same capacity) and inspects index 0 through that
+// captured header afterward, since the live l.order no longer exposes it
+// once evicted.
 func TestBoundedLRUCapacityEvictionZeroesSlot(t *testing.T) {
 	l := newBoundedLRU(2, time.Minute)
 	// Pre-size with headroom so the append below (which grows l.order to
@@ -290,10 +289,9 @@ func TestBoundedLRUCapacityEvictionZeroesSlot(t *testing.T) {
 	}
 }
 
-// TestBoundedLRUTTLEvictionZeroesSlots is the same regression as
-// TestBoundedLRUCapacityEvictionZeroesSlot, for evictExpired's TTL path
-// (Gemini finding on usage.go:547): the evicted prefix must be zeroed before
-// l.order = l.order[cut:].
+// TestBoundedLRUTTLEvictionZeroesSlots is the same pin as
+// TestBoundedLRUCapacityEvictionZeroesSlot, for evictExpired's TTL path: the
+// evicted prefix must be zeroed before l.order = l.order[cut:].
 func TestBoundedLRUTTLEvictionZeroesSlots(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	l := newBoundedLRU(8, time.Minute)
