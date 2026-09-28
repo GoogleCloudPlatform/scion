@@ -2237,6 +2237,12 @@ type GroupMessageResponse struct {
 	Delivered int                           `json:"delivered"`
 	Failed    int                           `json:"failed"`
 	Results   []GroupMessageRecipientResult `json:"results"`
+	// Deferred counts recipients whose message was saved for catch-up but
+	// not dispatched because they are mid-`scion reincarnate` (design
+	// agent-reincarnate §3.7). F4 (p2a-r2 review): additive field, kept out
+	// of Failed so a truthfully deferred recipient is not reported as a
+	// failure.
+	Deferred int `json:"deferred,omitempty"`
 }
 
 // handleGroupMessage fans out a structured message to multiple recipients parsed from group[].
@@ -2436,8 +2442,15 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 			}
 
 			// Migration gate: the row is already persisted above as
-			// deferred; skip dispatch and report it as such.
+			// deferred; skip dispatch and report it as such. F1 (p2a-r2
+			// review): "deferred" means saved for catch-up — if persistence
+			// itself failed above, report failure instead, never deferred.
 			if recipDeferred {
+				if !persisted {
+					results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed",
+						Error: "failed to persist message; agent is reincarnating, retry"}
+					continue
+				}
 				results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "deferred"}
 				continue
 			}
@@ -2606,18 +2619,33 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 		}
 	}
 
+	// F4 (p2a-r2 review): count failures explicitly (status "failed" or
+	// "unauthorized") instead of "everything that isn't delivered", so a
+	// truthfully deferred recipient is never counted as a failure.
+	var failedCount, deferredCount int
+	for _, r := range results {
+		switch r.Status {
+		case "failed", "unauthorized":
+			failedCount++
+		case "deferred":
+			deferredCount++
+		}
+	}
+
 	s.logMessage("set message dispatched",
 		"project_id", projectID,
 		"group_id", groupID,
 		"total", len(recipients),
 		"delivered", delivered,
-		"failed", len(recipients)-delivered,
+		"failed", failedCount,
+		"deferred", deferredCount,
 	)
 
 	resp := GroupMessageResponse{
 		GroupID:   groupID,
 		Delivered: delivered,
-		Failed:    len(recipients) - delivered,
+		Failed:    failedCount,
+		Deferred:  deferredCount,
 		Results:   results,
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -3033,21 +3061,56 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 			mentionDispatchState = store.MessageDispatchDeferred
 		}
 
+		// F3 (p2a-r2 review, A25.2 option (a)): a deferred mention has no
+		// conversation by default (Phase 9b, see the comment below) — the
+		// preamble tells the new generation "messages ... were saved to
+		// your conversations", which would be false for a mention with no
+		// conversation to find. Give a deferred mention the sender <->
+		// mentioned-agent DM conversation, the same move group[] makes for
+		// its agent recipients. This does not disclose the parent
+		// conversation (D-1 holds): it is a new/existing DM between the
+		// original sender and the mentioned agent, not the primary's
+		// conversation. Non-deferred mentions are unchanged.
+		//
+		// If resolution fails, F1's rule applies: report error, never
+		// deferred — a mention we cannot make reachable by catch-up must
+		// not claim to be saved for it. No row is persisted for this case,
+		// matching every other pre-persist rejection in this loop.
+		var mentionConvID string
+		if mentionDeferred {
+			authKind, authID := authenticatedSender(ctx)
+			if authID == "" {
+				results[i].Status = "error"
+				results[i].Error = "agent is reincarnating and no authenticated sender to link a catch-up conversation"
+				continue
+			}
+			convResult, convErr := messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, authKind, authID, "agent", mentionAgent.ID)
+			if convErr != nil {
+				s.messageLog.Error("processMentions: failed to resolve DM conversation for deferred mention",
+					"slug", r.Slug, "error", convErr)
+				results[i].Status = "error"
+				results[i].Error = "agent is reincarnating and the catch-up conversation could not be resolved"
+				continue
+			}
+			mentionConvID = convResult.ConversationID
+		}
+
 		// Persist the mention message.
 		storeMsg := &store.Message{
-			ID:            api.NewUUID(),
-			ProjectID:     primaryAgent.ProjectID,
-			Sender:        mentionMsg.Sender,
-			SenderID:      mentionMsg.SenderID,
-			Recipient:     mentionMsg.Recipient,
-			RecipientID:   mentionMsg.RecipientID,
-			Msg:           mentionMsg.Msg,
-			Type:          mentionMsg.Type,
-			AgentID:       mentionAgent.ID,
-			Channel:       mentionMsg.Channel,
-			ThreadID:      mentionMsg.ThreadID,
-			DispatchState: mentionDispatchState,
-			CreatedAt:     time.Now(),
+			ID:             api.NewUUID(),
+			ProjectID:      primaryAgent.ProjectID,
+			Sender:         mentionMsg.Sender,
+			SenderID:       mentionMsg.SenderID,
+			Recipient:      mentionMsg.Recipient,
+			RecipientID:    mentionMsg.RecipientID,
+			Msg:            mentionMsg.Msg,
+			Type:           mentionMsg.Type,
+			AgentID:        mentionAgent.ID,
+			Channel:        mentionMsg.Channel,
+			ThreadID:       mentionMsg.ThreadID,
+			ConversationID: mentionConvID,
+			DispatchState:  mentionDispatchState,
+			CreatedAt:      time.Now(),
 		}
 		if mentionMsg.Metadata != nil {
 			storeMsg.GroupID = mentionMsg.Metadata["group_id"]
@@ -3084,10 +3147,17 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 			})
 		}
 
-		// Migration gate: the mention is already persisted above as
-		// deferred; skip dispatch and report it as such rather than as
-		// "delivered".
+		// Migration gate: skip dispatch and report the mention as deferred
+		// rather than "delivered" — unless persistence itself failed above,
+		// in which case F1 (p2a-r2 review) applies: the message is neither
+		// saved nor dispatched, so it must be reported as an error, never
+		// as deferred (which promises catch-up will find it).
 		if mentionDeferred {
+			if !persisted {
+				results[i].Status = "error"
+				results[i].Error = "failed to persist message; agent is reincarnating, retry"
+				continue
+			}
 			results[i].Status = "deferred"
 			continue
 		}

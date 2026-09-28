@@ -513,6 +513,18 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			"conversation_id", storeMsg.ConversationID,
 			"agent_id", agent.ID,
 		)
+		// F1 (p2a-r2 review): while the recipient is mid-`scion
+		// reincarnate`, dispatch was skipped above (agentReincarnating), so
+		// a persist failure here means the message is neither saved nor
+		// dispatched — the "deferred ⇒ persisted" promise the gate makes
+		// would be a lie. Fail loudly instead. This is safe to retry (no
+		// dispatch happened, so a retry cannot double-deliver), unlike the
+		// non-fatal case below where the dispatch already succeeded.
+		if agentReincarnating {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"failed to persist message; agent is reincarnating, retry", nil)
+			return
+		}
 		// Non-fatal: the dispatch already succeeded, so the agent got the
 		// message. The agent now holds identifiers (message_id,
 		// conversation_id) that reference an unpersisted row. Failing the

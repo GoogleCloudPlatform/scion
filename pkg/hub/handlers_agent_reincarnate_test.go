@@ -2041,16 +2041,17 @@ func TestReincarnateAgent_EndToEnd_IdentityContinuityAndHandoff(t *testing.T) {
 }
 
 // TestBuildReincarnationPreamble_CatchUpWindow is the Amendment A25
-// 2a.3/R4 (p2a-r1 review) update of the former
+// 2a.3/R4 (p2a-r1 review), then O-b (p2a-r2 review), update of the former
 // TestBuildReincarnationPreamble_DoesNotPromiseRedelivery: now that 2a.1
 // (catch-up works in agent containers) and 2a.2/R3 (the migration gate
 // persists-and-defers on every hub delivery path instead of
 // rejecting/dropping) are both true, step 2 is allowed to say messages sent
 // during the migration can be read with catch-up. R4 corrected the window
 // to name only a start (an end would have to be the state-clear instant,
-// not known until long after this text is built) and made the command
-// runnable as written: `scion conversation catch-up` takes `--since
-// <duration>`, not an absolute timestamp.
+// not known until long after this text is built). O-b corrected the command
+// itself: plain `scion conversation list` truncates IDs to 12 runes with no
+// `conv:` prefix, which `catch-up` cannot accept — step 2 now says
+// `list --json` and spells out the `conv:<id>` prefix.
 func TestBuildReincarnationPreamble_CatchUpWindow(t *testing.T) {
 	srv, _ := testServer(t)
 	agent := &store.Agent{ID: "agent-1", Slug: "arqa-a"}
@@ -2059,10 +2060,9 @@ func TestBuildReincarnationPreamble_CatchUpWindow(t *testing.T) {
 	preamble := srv.buildReincarnationPreamble(agent, 2, "do the thing next", start)
 
 	assert.Contains(t, preamble,
-		"2. Run `scion conversation list` to find your conversations, then for each run "+
-			"`scion conversation catch-up <ref> --since <duration>`, choosing a duration long enough to reach "+
-			"back to 2026-09-28T10:00:00Z.",
-		"step 2 must be runnable as written: catch-up takes --since <duration>, not an absolute timestamp")
+		"2. Run `scion conversation list --json` and, for each conversation, "+
+			"`scion conversation catch-up conv:<id> --since <duration reaching back to 2026-09-28T10:00:00Z>`.",
+		"step 2 must be runnable as written: --json for full IDs, and the conv:<id> prefix catch-up requires")
 	assert.Contains(t, preamble,
 		"Messages sent to you since 2026-09-28T10:00:00Z were saved to your conversations, not dropped.",
 		"step 2 must reinstate the catch-up claim now that 2a.1/R3 make it true, naming only a start")

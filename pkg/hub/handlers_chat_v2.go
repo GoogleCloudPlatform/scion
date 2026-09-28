@@ -1602,6 +1602,18 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 			mentionMsg.Attachments = msg.Attachments
 			mentionMsg.Metadata = msg.Metadata
 
+			// Migration gate (design agent-reincarnate §3.7, F2 p2a-r2
+			// review): a mentioned (secondary) agent is a recipient in its
+			// own right, independent of the primary gated above. This
+			// mention already gets a real conversation (thread or DM,
+			// below), so — unlike handlers_agent_messaging.go's
+			// processMentions (F3) — no extra linkage work is needed here.
+			mentionDeferred := reincarnationInFlight(mentionAgent)
+			mentionDispatchState := store.MessageDispatchDispatched
+			if mentionDeferred {
+				mentionDispatchState = store.MessageDispatchDeferred
+			}
+
 			mentionStoreMsg := &store.Message{
 				ID:            api.NewUUID(),
 				ProjectID:     projectID,
@@ -1614,7 +1626,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 				AgentID:       mentionAgent.ID,
 				Channel:       "web",
 				ThreadID:      key,
-				DispatchState: store.MessageDispatchDispatched,
+				DispatchState: mentionDispatchState,
 				CreatedAt:     now,
 			}
 			// B15 dual-write: resolve-or-create conversation for web chat mention fan-out.
@@ -1656,8 +1668,10 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 				}
 				mentionConvResult = convResult
 			}
+			mentionPersisted := true
 			if err := s.store.CreateMessage(ctx, mentionStoreMsg); err != nil {
 				s.messageLog.Error("Failed to persist mention message", "slug", mentionAgent.Slug, "error", err)
+				mentionPersisted = false
 			} else {
 				s.events.PublishUserMessage(ctx, mentionStoreMsg, attachmentRefs)
 			}
@@ -1666,7 +1680,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 			// Additive model: fan-out recipients get IsMention=true (type:"mention")
 			// and the same CoAddressees as the primary, so every agent sees the
 			// identical "to" list naming the full group.
-			if s.writeDenyEnabled() {
+			if s.writeDenyEnabled() && mentionPersisted {
 				mentionMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
 					MessageID:    mentionStoreMsg.ID,
 					ConvResult:   mentionConvResult,
@@ -1676,6 +1690,27 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 					CoAddressees: groupCoAddressees(agents),
 					ReplyToID:    replyToID,
 				})
+			}
+
+			// Migration gate: skip dispatch for a migrating secondary — the
+			// row above is already persisted as deferred. F1 (p2a-r2
+			// review): "deferred" means saved for catch-up; if persistence
+			// itself failed, report error instead, never deferred. Either
+			// way this recipient is not appended to dispatchedAgents
+			// (F2b: participant = dispatched).
+			if mentionDeferred {
+				for i, mr := range mentionResults {
+					if strings.EqualFold(mr.Slug, mentionAgent.Slug) {
+						if mentionPersisted {
+							mentionResults[i].Status = "deferred"
+						} else {
+							mentionResults[i].Status = "error"
+							mentionResults[i].Error = "failed to persist message; agent is reincarnating, retry"
+						}
+						break
+					}
+				}
+				continue
 			}
 
 			mentionDispatchOK := true

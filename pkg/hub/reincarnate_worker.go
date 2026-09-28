@@ -756,7 +756,11 @@ func (s *Server) failListedReincarnation(ctx context.Context, rec *store.AgentRe
 // takes a `--since <duration>` flag, not absolute timestamps, so step 2
 // asks the agent to choose a duration reaching back to the stated instant,
 // rather than naming one that would already be wrong by the time this task
-// actually runs (R4).
+// actually runs (R4). O-b (p2a-r2 review): `scion conversation list`'s plain
+// text output truncates the ID to 12 runes with no `conv:` prefix, which
+// `catch-up` cannot accept (it only takes `conv:<full-uuid>`, `@name` or
+// `#name`). Step 2 therefore says `list --json` (full untruncated IDs) and
+// spells out the `conv:<id>` prefix explicitly.
 //
 // The redelivery-adjacent wording ("messages ... can be read with
 // catch-up") was dropped in Phase 1 (A11.4 item 4) because it was false
@@ -775,9 +779,9 @@ func (s *Server) buildReincarnationPreamble(agent *store.Agent, toGeneration int
 	// shared-workspace and hub-managed agents, whose git state is not "your
 	// branch" the way a clone-per-agent agent's is.
 	b.WriteString(" 1. Verify your environment: `git status` shows the branch and state your handoff describes, and any files your handoff names as canonical are readable.\n")
-	fmt.Fprintf(&b, " 2. Run `scion conversation list` to find your conversations, then for each run "+
-		"`scion conversation catch-up <ref> --since <duration>`, choosing a duration long enough to reach "+
-		"back to %s. Messages sent to you since %s were saved to your conversations, not dropped. "+
+	fmt.Fprintf(&b, " 2. Run `scion conversation list --json` and, for each conversation, "+
+		"`scion conversation catch-up conv:<id> --since <duration reaching back to %s>`. "+
+		"Messages sent to you since %s were saved to your conversations, not dropped. "+
 		"If that command is unavailable in this environment, rely on the handoff and on incoming messages.\n",
 		migrationStart.UTC().Format(time.RFC3339), migrationStart.UTC().Format(time.RFC3339))
 	b.WriteString(" 3. Message whoever requested this migration that the new generation is up, and state your next action.\n")

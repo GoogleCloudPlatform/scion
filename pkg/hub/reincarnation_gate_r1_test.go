@@ -436,10 +436,20 @@ func TestMessageEventHandler_R3_MigratingTargetFailsLoudly(t *testing.T) {
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 	project := &store.Project{ID: tid("r3-sched-project"), Slug: "r3-sched-project", Name: "r3-sched-project"}
 	require.NoError(t, s.CreateProject(ctx, project))
+	// O-a (p2a-r2 review): the reincarnation check now runs AFTER fire-time
+	// authorization, so the fixture needs a creator that is actually
+	// authorized to message the target — otherwise the test would pass for
+	// the wrong reason (an authz denial, not the migration gate).
+	creator := &store.Agent{
+		ID: tid("r3-sched-creator"), Slug: "r3-sched-creator", Name: "r3-sched-creator",
+		ProjectID: project.ID, Phase: "running", RuntimeBrokerID: broker.ID,
+		MessageMode: store.MessageModeProject,
+	}
+	require.NoError(t, s.CreateAgent(ctx, creator))
 	target := &store.Agent{
 		ID: tid("r3-sched-target"), Slug: "r3-sched-target", Name: "r3-sched-target",
 		ProjectID: project.ID, Phase: string(state.PhaseStarting),
-		RuntimeBrokerID: broker.ID,
+		RuntimeBrokerID: broker.ID, MessageMode: store.MessageModeProject,
 	}
 	require.NoError(t, s.CreateAgent(ctx, target))
 	setReincarnationState(t, s, target, store.ReincarnationStateStarting)
@@ -451,12 +461,63 @@ func TestMessageEventHandler_R3_MigratingTargetFailsLoudly(t *testing.T) {
 	require.NoError(t, err)
 	evt := store.ScheduledEvent{
 		ID: tid("r3-sched-event"), ProjectID: project.ID, Payload: string(payload),
+		CreatedBy: creator.ID,
 	}
 
 	handler := srv.messageEventHandler()
 	err = handler(ctx, evt)
 	require.Error(t, err, "a scheduled message to a migrating agent must fail, not silently succeed")
 	assert.Contains(t, err.Error(), "reincarnating")
+	assert.Empty(t, dispatcher.getMessages())
+}
+
+// TestMessageEventHandler_OA_AuthzDenialPrecedesReincarnationCheck is the
+// O-a (p2a-r2 review) regression test: a denied creator must see the authz
+// denial, not "target agent is reincarnating" — the same invariant
+// deliverToAgent already states explicitly ("Runs after reauthorization so
+// a denied sender learns nothing about the recipient's phase"). Before the
+// fix, the reincarnation check ran first and would leak the recipient's
+// migration state to a creator who should learn nothing about the target.
+func TestMessageEventHandler_OA_AuthzDenialPrecedesReincarnationCheck(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	broker := &store.RuntimeBroker{ID: tid("oa-sched-broker"), Name: "b", Slug: "b", Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	project := &store.Project{ID: tid("oa-sched-project"), Slug: "oa-sched-project", Name: "oa-sched-project"}
+	require.NoError(t, s.CreateProject(ctx, project))
+	target := &store.Agent{
+		ID: tid("oa-sched-target"), Slug: "oa-sched-target", Name: "oa-sched-target",
+		ProjectID: project.ID, Phase: string(state.PhaseStarting),
+		RuntimeBrokerID: broker.ID, MessageMode: store.MessageModeNone,
+	}
+	require.NoError(t, s.CreateAgent(ctx, target))
+	setReincarnationState(t, s, target, store.ReincarnationStateStarting)
+
+	// A creator with no path to message a message_mode=none target: denied
+	// regardless of the target's migration state.
+	creator := &store.Agent{
+		ID: tid("oa-sched-creator"), Slug: "oa-sched-creator", Name: "oa-sched-creator",
+		ProjectID: project.ID, Phase: "running", RuntimeBrokerID: broker.ID,
+	}
+	require.NoError(t, s.CreateAgent(ctx, creator))
+
+	dispatcher := &brokerMockDispatcher{}
+	srv.SetDispatcher(dispatcher)
+
+	payload, err := json.Marshal(MessageEventPayload{AgentID: target.ID, Message: "wake up"})
+	require.NoError(t, err)
+	evt := store.ScheduledEvent{
+		ID: tid("oa-sched-event"), ProjectID: project.ID, Payload: string(payload),
+		CreatedBy: creator.ID,
+	}
+
+	handler := srv.messageEventHandler()
+	err = handler(ctx, evt)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "reincarnating",
+		"a denied creator must not learn that the target is mid-migration")
+	assert.Contains(t, err.Error(), "scheduled_message_denied")
 	assert.Empty(t, dispatcher.getMessages())
 }
 
@@ -530,4 +591,9 @@ func TestDeliverToAgent_O2_AgentSenderGetsDeferredNotice(t *testing.T) {
 	require.NotNil(t, notice, "the agent sender must receive a DELIVERY_DEFERRED notice")
 	assert.Equal(t, "DELIVERY_DEFERRED", notice.structured.Status)
 	assert.Contains(t, notice.msg, "reincarnating")
+	// O-c (p2a-r2 review): system_category must be present and distinct
+	// from delivery-failed, so mapSystemCategory (pkg/messaging) does not
+	// fall to its default/WARN branch for this notice.
+	require.NotNil(t, notice.structured.Metadata)
+	assert.Equal(t, "delivery-deferred", notice.structured.Metadata["system_category"])
 }
