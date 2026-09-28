@@ -197,7 +197,7 @@ func TestExecuteAgentDM_PlainFlagDeliveryTextIsBareBody(t *testing.T) {
 // authorization path.
 // ---------------------------------------------------------------------------
 
-func TestExecuteAgentDM_RawFlagDoesNotBypassMessageModeNoneDenial(t *testing.T) {
+func TestExecuteAgentDM_RawFlagRespectsMessageModeNone(t *testing.T) {
 	srv, s, _, sender, target, _, dispatcher := deliverySetup(t)
 	ctx := context.Background()
 
@@ -211,7 +211,7 @@ func TestExecuteAgentDM_RawFlagDoesNotBypassMessageModeNoneDenial(t *testing.T) 
 	require.NotNil(t, dmErr, "raw DM to a message_mode=none target must be rejected")
 	assert.Equal(t, ErrCodeMessageDenied, dmErr.Code)
 	assert.Equal(t, http.StatusForbidden, dmErr.HTTPStatus,
-		"Raw must not bypass the message_mode=none authorization denial")
+		"Raw must not widen the message_mode=none authorization denial")
 
 	assert.Empty(t, dispatcher.getCalls(), "nothing must be dispatched when authorization denies the DM")
 
