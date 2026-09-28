@@ -82,7 +82,7 @@ func newMessageMockHubServer(t *testing.T, projectID string, runningAgents []hub
 		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 
-		case r.Method == http.MethodGet && (r.URL.Path == "/api/v1/groves/"+projectID+"/agents" || r.URL.Path == "/api/v1/projects/"+projectID+"/agents" || r.URL.Path == "/api/v1/agents"):
+		case r.Method == http.MethodGet && (r.URL.Path == "/api/v1/projects/"+projectID+"/agents" || r.URL.Path == "/api/v1/agents"):
 			// List agents endpoint
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents": runningAgents,
@@ -116,18 +116,13 @@ func newMessageMockHubServer(t *testing.T, projectID string, runningAgents []hub
 
 		case r.Method == http.MethodPost:
 			// Extract agent name from path: /api/v1/projects/<projectID>/agents/<name>/message
-			// or /api/v1/groves/<projectID>/agents/<name>/message (legacy)
 			// or /api/v1/agents/<name>/message
 			var agentName string
 			projectPrefix := "/api/v1/projects/" + projectID + "/agents/"
-			grovePrefix := "/api/v1/groves/" + projectID + "/agents/"
 			globalPrefix := "/api/v1/agents/"
 			path := r.URL.Path
 			if len(path) > len(projectPrefix) && path[:len(projectPrefix)] == projectPrefix {
 				rest := path[len(projectPrefix):]
-				agentName = rest[:len(rest)-len("/message")]
-			} else if len(path) > len(grovePrefix) && path[:len(grovePrefix)] == grovePrefix {
-				rest := path[len(grovePrefix):]
 				agentName = rest[:len(rest)-len("/message")]
 			} else if len(path) > len(globalPrefix) && path[:len(globalPrefix)] == globalPrefix {
 				rest := path[len(globalPrefix):]
@@ -563,8 +558,7 @@ func TestSendOutboundMessageViaHub(t *testing.T) {
 		switch {
 		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
-		case r.Method == http.MethodPost && (r.URL.Path == "/api/v1/projects/"+projectID+"/agents/my-agent/outbound-message" ||
-			r.URL.Path == "/api/v1/groves/"+projectID+"/agents/my-agent/outbound-message"):
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/"+projectID+"/agents/my-agent/outbound-message":
 			var msg hubclient.OutboundMessageRequest
 			_ = json.NewDecoder(r.Body).Decode(&msg)
 			receivedMsg = &msg

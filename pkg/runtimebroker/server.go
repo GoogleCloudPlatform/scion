@@ -1396,8 +1396,7 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 
 // scopedNameFilter builds the Runtime.List label filter for a slug lookup,
 // including the project scope label when a project is known so that runtimes
-// can narrow the listing themselves (ptone/scion#1819). Every runtime's List
-// also honours the legacy grove_id label for the project_id key.
+// can narrow the listing themselves (ptone/scion#1819).
 func scopedNameFilter(slug, projectID string) map[string]string {
 	filter := map[string]string{"scion.name": slug}
 	if projectID != "" {

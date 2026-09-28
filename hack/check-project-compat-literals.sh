@@ -39,7 +39,6 @@ allowed_paths=(
   "^cmd/legacy_grove_migration_test.go$"
   "^cmd/list_test.go$"
   "^cmd/message_project_json_test.go$"
-  "^cmd/message_test.go$"
   "^cmd/template_resolution_test.go$"
   "^extras/agent-viz/internal/logparser/parser_test.go$"
   "^extras/fs-watcher-tool/pkg/fswatcher/project_test.go$"
@@ -54,7 +53,6 @@ allowed_paths=(
   "^extras/scion-discord/internal/discord/broker_test.go$"
   "^extras/scion-slack/internal/slack/broker_test.go$"
   "^extras/scion-telegram/internal/telegram/broker_v2_test.go$"
-  "^pkg/agent/provision_test.go$"
   # Asserts SCION_GROVE is absent from RunConfig.Env alongside a SCION_PROJECT
   # presence check. The literal is the point of the negative assertion.
   "^pkg/agent/run_test.go$"
@@ -125,8 +123,6 @@ allowed_paths=(
   "^pkg/hubclient/templates_test.go$"
   "^pkg/hubclient/tokens_test.go$"
   "^pkg/hubclient/types_test.go$"
-  "^pkg/hubsync/resolve_test.go$"
-  "^pkg/hubsync/sync_test.go$"
   "^pkg/projectcompat/config_test.go$"
   "^pkg/projectcompat/topics_test.go$"
   "^pkg/runtime/cloudrun_sandbox_runtime_test.go$"
@@ -158,9 +154,7 @@ allowed_paths=(
   "^pkg/runtimebroker/start_context_test.go$"
   "^pkg/runtimebroker/types_test.go$"
   "^pkg/runtimebroker/workspace_handlers_test.go$"
-  "^pkg/sciontool/hooks/handlers/status_test.go$"
   "^pkg/sciontool/telemetry/aggregator_test.go$"
-  "^pkg/secret/gcpbackend_test.go$"
   "^pkg/storage/storage_test.go$"
   "^pkg/store/entadapter/agent_session_metrics_projectid_test.go$"
   # Seeds scope='grove' rows with raw SQL to prove the data migration in
@@ -189,7 +183,6 @@ allowed_paths=(
   "^pkg/hubclient/tokens.go$"
   "^pkg/projectcompat/.*\\.go$"
   "^pkg/runtimebroker/handlers.go$"
-  "^pkg/runtimebroker/server.go$"
   # Reserved-identity-attribute denylist: the three retired grove-named
   # telemetry keys (scion.grove, scion.grove.id, scion.grove_id) are kept
   # here so the receiver still strips them from user-supplied attributes,
@@ -201,7 +194,6 @@ allowed_paths=(
   # One-shot data migration rewriting stored scope='grove' rows to 'project';
   # removed once no hub can have a pre-migration row left to normalize.
   "^pkg/store/entadapter/legacy_scope_migration.go$"
-  "^pkg/store/storetest/domains_project_broker.go$"
 )
 
 allowlist="$(printf '%s\n' "${allowed_paths[@]}" | sed 's/\$$/:/' | paste -sd '|' -)"

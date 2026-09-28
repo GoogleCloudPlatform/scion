@@ -557,9 +557,9 @@ func TestGCPBackend_SecretNameSanitization(t *testing.T) {
 	}
 
 	// Test sanitization of special characters in name (scopeID is hashed, not sanitized)
-	name = backend.gcpSecretName("my.key/with spaces", "grove", "grove@id")
-	expectedHash = hashCombined("grove@id")
-	expectedFull := fmt.Sprintf("scion-grove-%s-my-key-with-spaces", expectedHash)
+	name = backend.gcpSecretName("my.key/with spaces", "project", "project@id")
+	expectedHash = hashCombined("project@id")
+	expectedFull := fmt.Sprintf("scion-project-%s-my-key-with-spaces", expectedHash)
 	if name != expectedFull {
 		t.Errorf("expected sanitized name %q, got %q", expectedFull, name)
 	}

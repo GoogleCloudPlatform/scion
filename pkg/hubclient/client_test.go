@@ -331,10 +331,7 @@ func TestProjectsRegister(t *testing.T) {
 
 // TestProjectsGet_JSONNotFound_ReturnsError covers the application-level 404
 // path for Projects().Get: the route matched but the resource doesn't exist,
-// so the client must surface an error from a single request. Before H-1, this
-// case also proved that a JSON-bodied 404 skipped the (now-removed) /groves
-// fallback; the fallback itself is gone, so only the single-attempt error
-// behavior remains to assert.
+// so the client must surface an error from a single request.
 func TestProjectsGet_JSONNotFound_ReturnsError(t *testing.T) {
 	var attempts []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

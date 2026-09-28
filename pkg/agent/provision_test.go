@@ -610,13 +610,13 @@ func TestProvisionAgentUsesProjectTemplate(t *testing.T) {
 
 	// Create global harness-configs
 	globalScionDir := filepath.Join(tmpDir, ".scion")
-	seedTestHarnessConfig(t, globalScionDir, "grove-harness", "grove-harness")
+	seedTestHarnessConfig(t, globalScionDir, "project-harness", "project-harness")
 
 	// Create a global agnostic template
 	globalTplDir := filepath.Join(globalScionDir, "templates", "my-tpl")
 	_ = os.MkdirAll(globalTplDir, 0755)
 	_ = os.WriteFile(filepath.Join(globalTplDir, "scion-agent.json"), []byte(`{
-		"default_harness_config": "grove-harness",
+		"default_harness_config": "project-harness",
 		"env": {"SOURCE": "global"}
 	}`), 0644)
 
@@ -626,7 +626,7 @@ func TestProvisionAgentUsesProjectTemplate(t *testing.T) {
 	projectTplDir := filepath.Join(projectPath, "templates", "my-tpl")
 	_ = os.MkdirAll(projectTplDir, 0755)
 	_ = os.WriteFile(filepath.Join(projectTplDir, "scion-agent.json"), []byte(`{
-		"default_harness_config": "grove-harness",
+		"default_harness_config": "project-harness",
 		"env": {"SOURCE": "project"}
 	}`), 0644)
 
@@ -638,8 +638,8 @@ func TestProvisionAgentUsesProjectTemplate(t *testing.T) {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
 
-	if cfg.Harness != "grove-harness" {
-		t.Errorf("expected harness 'grove-harness' (from harness-config), got %q", cfg.Harness)
+	if cfg.Harness != "project-harness" {
+		t.Errorf("expected harness 'project-harness' (from harness-config), got %q", cfg.Harness)
 	}
 	if cfg.Env["SOURCE"] != "project" {
 		t.Errorf("expected env[SOURCE] = 'project', got %q", cfg.Env["SOURCE"])
