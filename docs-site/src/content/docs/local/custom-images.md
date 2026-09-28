@@ -278,6 +278,16 @@ Every image is tagged with both `:<tag>` (controlled by `--tag`, defaults to `la
 
 When two steps in the same run depend on each other, the orchestrator threads `BASE_IMAGE=...:<short-sha>` so chained builds are immune to concurrent overwrites of `:latest`. Standalone targets (e.g. `--target harnesses` on its own) reference the parent image as `:<tag>`.
 
+### Build Provenance
+
+When building `scion-base`, the orchestrator stamps `scion` and `sciontool` with the git commit and, when `HEAD` is on an exact git tag, the version. Inside an agent container, `sciontool version` reports both. `scion-base` also carries the OCI `org.opencontainers.image.revision` label, which every image built `FROM scion-base` (harnesses, hub) inherits. To check which commit an image was built from without running it:
+
+```bash
+docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' scion-claude:latest
+```
+
+If a build uses `scion-base` but does not rebuild it in the same run (for example, `--target harnesses`), the orchestrator prints a warning. The resulting images inherit whatever `sciontool` is already baked into the existing `scion-base:<tag>`. The warning also shows that image's revision when a local copy exists. Include `scion-base` in the build (for example, `--target common`) so `sciontool` fixes reach your agents.
+
 ### Authentication
 
 The orchestrator and builders assume the caller is already authenticated to the target registry (via `docker login`, `podman login`, `gcloud auth configure-docker`, etc.) and to any required cloud APIs. No login steps are performed inside the script.

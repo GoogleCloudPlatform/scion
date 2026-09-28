@@ -158,10 +158,12 @@ An active GitHub Copilot subscription is required at runtime.
 - **Instructions**: `agent_instructions` and `system_prompt` are projected into `.github/copilot-instructions.md`. Copilot has no native system-prompt flag, so the system prompt is *prepended to the instructions file*.
 - **MCP**: `~/.copilot/mcp-config.json`. Project-scoped MCP servers are not supported (they are demoted to global).
 - **Model aliases**: `small` → `claude-haiku-4.5`, `medium` → `claude-sonnet-4.5`, `large` → `claude-opus-4.8`.
+- **OpenTelemetry**: When telemetry is enabled, Scion sets `COPILOT_OTEL_ENABLED`, `COPILOT_OTEL_EXPORTER_TYPE=otlp-http`, and standard `OTEL_*` env vars that always point at sciontool's local OTLP/HTTP receiver (port `4318`), so Copilot's logs are redacted and identity-stamped like any other harness's. For local debugging only, `SCION_COPILOT_OTEL_ENDPOINT` overrides the endpoint. It bypasses sciontool's redaction and identity stamping, so never point it at anything but a local collector.
 
 ### Known Limitations
 - **System Prompt**: approximated via the instructions file (no native override).
-- **No hooks / no OpenTelemetry**: Copilot exposes no hook dialect or telemetry surface.
+- **No hooks**: Copilot exposes no hook dialect.
+- **Native metrics on GCP**: Copilot's raw native metrics (such as `gen_ai.client.token.usage`) are rejected by the GCP telemetry provider. Logs are forwarded normally.
 - **No project-scoped MCP**.
 - **OAuth/Vertex AI**: not supported — Copilot uses GitHub auth only.
 
@@ -279,7 +281,7 @@ interactively, then capture the credential with the container's `capture_auth.py
 - **MCP**: `~/.grok/config.toml` under `[mcp_servers.*]` TOML sections (supports `stdio`, `sse`, and `streamable-http` transports). Project-scoped MCP servers are not supported (demoted to global).
 - **Model aliases**: `small` → `grok-3-mini`, `medium` → `grok-4.5`, `large` → `grok-4.6`, `extra-large` → `grok-4.6` (resolved and injected via `GROK_DEFAULT_MODEL`).
 - **Hooks**: 15 Grok lifecycle event hooks are wired to sciontool via `~/.grok/hooks/scion.json` using the `grok-build` dialect, including `PermissionDenied`, `SubagentStart`, `PreCompact`, and `PostCompact`.
-- **OpenTelemetry**: When telemetry is enabled, Scion injects `GROK_TELEMETRY_ENABLED`, `GROK_EXTERNAL_OTEL`, and standard `OTEL_*` env vars pointing at sciontool's local OTLP receiver.
+- **OpenTelemetry**: When telemetry is enabled, Scion injects `GROK_TELEMETRY_ENABLED`, `GROK_EXTERNAL_OTEL`, and standard `OTEL_*` env vars that always point at sciontool's local OTLP gRPC receiver (port `4317`), never directly at the cloud endpoint. For local debugging only, `SCION_GROK_BUILD_OTEL_ENDPOINT` overrides the endpoint and bypasses sciontool's redaction and identity stamping.
 
 ### Known Limitations
 - **No max_model_calls** — Grok hooks do not expose model-call start/end events. `max_turns` and `max_duration` are supported.
@@ -336,7 +338,7 @@ The following table summarizes the capabilities supported by each agent harness 
 | **Enqueue** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Hooks** | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
 | Support | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
-| **OpenTelemetry** | ✅ | ✅  | ❌ | ✅  | ❌ | ❌ | ❌ | ✅ | ❌ |
+| **OpenTelemetry** | ✅ | ✅  | ❌ | ✅  | ✅ | ❌ | ❌ | ✅ | ❌ |
 | **System Prompt Override** | ✅ | ✅ | ❌ | ❌ | ◐ | ◐ | ◐ | ✅ | ◐ |
 | **Auth: API Key** | ✅ | ✅ | ✅ | ✅ | ✅¹ | ✅ | ❌ | ✅ | ✅ |
 | **Auth: OAuth Token** | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
