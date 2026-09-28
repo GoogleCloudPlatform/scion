@@ -1437,6 +1437,105 @@ func TestAgentStore_IDsFilter(t *testing.T) {
 	})
 }
 
+// TestAgentStore_LineageRootIDFilter verifies LineageRootID returns the root
+// itself plus all of its transitive descendants (ptone/scion#2146), backing
+// CLI --lineage. The root is resolved client-side; this only exercises the
+// store's OR(id==root, ancestry contains root) predicate.
+func TestAgentStore_LineageRootIDFilter(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	root := makeAgent(projectID, "lineage-root")
+	require.NoError(t, s.CreateAgent(ctx, root))
+
+	child := makeAgent(projectID, "lineage-child")
+	child.Ancestry = []string{root.ID}
+	require.NoError(t, s.CreateAgent(ctx, child))
+
+	grandchild := makeAgent(projectID, "lineage-grandchild")
+	grandchild.Ancestry = []string{root.ID, child.ID}
+	require.NoError(t, s.CreateAgent(ctx, grandchild))
+
+	unrelated := makeAgent(projectID, "lineage-unrelated")
+	require.NoError(t, s.CreateAgent(ctx, unrelated))
+
+	result, err := s.ListAgents(ctx, store.AgentFilter{LineageRootID: root.ID}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{root.ID, child.ID, grandchild.ID}, ids(result.Items),
+		"lineage must include the root itself plus every transitive descendant, and nothing unrelated")
+
+	t.Run("root with no descendants returns just the root", func(t *testing.T) {
+		lonely := makeAgent(projectID, "lineage-lonely")
+		require.NoError(t, s.CreateAgent(ctx, lonely))
+
+		result, err := s.ListAgents(ctx, store.AgentFilter{LineageRootID: lonely.ID}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{lonely.ID}, ids(result.Items))
+	})
+
+	t.Run("a root ID matching nobody returns zero rows", func(t *testing.T) {
+		result, err := s.ListAgents(ctx, store.AgentFilter{LineageRootID: uuid.NewString()}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Empty(t, result.Items)
+	})
+
+	t.Run("root can be a user ID (never matches IDEQ, only ancestryContains)", func(t *testing.T) {
+		userRoot := uuid.NewString()
+		userChild := makeAgent(projectID, "lineage-user-child")
+		userChild.Ancestry = []string{userRoot}
+		require.NoError(t, s.CreateAgent(ctx, userChild))
+
+		result, err := s.ListAgents(ctx, store.AgentFilter{LineageRootID: userRoot}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{userChild.ID}, ids(result.Items),
+			"a user-ID root never matches any agent's ID, but still surfaces its descendants")
+	})
+}
+
+// TestAgentStore_LineageRootIDFilter_AgreesWithCascadeMessageModeQuery pins
+// ptone's explicit requirement that --lineage's predicate cannot drift from
+// cascadeMessageMode's (pkg/hub/handlers_agent_message_mode.go): both must
+// identify the same descendant set for the same root. cascadeMessageMode
+// queries AgentFilter{ProjectID, AncestorID: root.ID} and handles the root
+// itself separately (skipping it in the loop); LineageRootID is exactly
+// {root} UNION that same AncestorID query. This test proves the union holds
+// exactly, so a future change to either query shape that breaks the
+// agreement fails here first.
+func TestAgentStore_LineageRootIDFilter_AgreesWithCascadeMessageModeQuery(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	root := makeAgent(projectID, "cascade-agree-root")
+	require.NoError(t, s.CreateAgent(ctx, root))
+
+	child := makeAgent(projectID, "cascade-agree-child")
+	child.Ancestry = []string{root.ID}
+	require.NoError(t, s.CreateAgent(ctx, child))
+
+	grandchild := makeAgent(projectID, "cascade-agree-grandchild")
+	grandchild.Ancestry = []string{root.ID, child.ID}
+	require.NoError(t, s.CreateAgent(ctx, grandchild))
+
+	unrelated := makeAgent(projectID, "cascade-agree-unrelated")
+	require.NoError(t, s.CreateAgent(ctx, unrelated))
+
+	// The exact query shape cascadeMessageMode uses to find descendants to
+	// cascade a mode change to (root excluded — it is updated separately by
+	// that function's caller).
+	cascadeDescendants, err := s.ListAgents(ctx, store.AgentFilter{
+		ProjectID:  projectID,
+		AncestorID: root.ID,
+	}, store.ListOptions{Limit: 1000})
+	require.NoError(t, err)
+
+	lineage, err := s.ListAgents(ctx, store.AgentFilter{LineageRootID: root.ID}, store.ListOptions{})
+	require.NoError(t, err)
+
+	wantLineageIDs := append([]string{root.ID}, ids(cascadeDescendants.Items)...)
+	assert.ElementsMatch(t, wantLineageIDs, ids(lineage.Items),
+		"--lineage must equal {root} UNION cascadeMessageMode's descendant query — they must not drift apart")
+}
+
 // TestAgentStore_NoWidening_NewFiltersRespectAuthorizedProjectIDs is the
 // regression test ptone/scion#2146 calls for explicitly: the new ownerId,
 // ancestorId, and IDs (relationship) filters must never widen the listable
@@ -1505,5 +1604,35 @@ func TestAgentStore_NoWidening_NewFiltersRespectAuthorizedProjectIDs(t *testing.
 		require.NoError(t, err)
 		assert.ElementsMatch(t, []string{visible.ID}, ids(result.Items),
 			"IDs must intersect with AuthorizedProjectIDs, never bypass it")
+	})
+
+	t.Run("lineageRootId naming the hidden agent as root does not reveal it", func(t *testing.T) {
+		result, err := s.ListAgents(ctx, store.AgentFilter{
+			AuthorizedProjectIDs: authorizedScope,
+			LineageRootID:        hidden.ID,
+		}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Empty(t, result.Items,
+			"an unauthorized agent used as the lineage root must not be revealed, even as the root itself")
+	})
+
+	t.Run("lineageRootId set to a shared ancestor does not resurrect the hidden descendant", func(t *testing.T) {
+		// Ancestry is fixed at creation (UpdateAgent never touches it), so
+		// this needs its own fixtures rather than mutating visible/hidden.
+		sharedRoot := uuid.NewString()
+		visibleDescendant := makeAgent(authorizedProjectUID.String(), "visible-descendant")
+		visibleDescendant.Ancestry = []string{sharedRoot}
+		require.NoError(t, s.CreateAgent(ctx, visibleDescendant))
+
+		hiddenDescendant := makeAgent(unauthorizedProjectUID.String(), "hidden-descendant")
+		hiddenDescendant.Ancestry = []string{sharedRoot}
+		require.NoError(t, s.CreateAgent(ctx, hiddenDescendant))
+
+		result, err := s.ListAgents(ctx, store.AgentFilter{
+			AuthorizedProjectIDs: authorizedScope,
+			LineageRootID:        sharedRoot,
+		}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{visibleDescendant.ID}, ids(result.Items))
 	})
 }

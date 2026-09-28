@@ -57,10 +57,11 @@ var (
 
 	// Relationship filters (Hub mode only, mutually exclusive with each
 	// other). Empty means unset; scopeInferSentinel (via cobra's
-	// NoOptDefVal) means "use the calling agent" — see
-	// resolveSelfOrExplicitRef. ptone/scion#2146.
+	// NoOptDefVal) means "infer the reference" — see
+	// resolveRelationshipReference. ptone/scion#2146.
 	filterDescendants string
 	filterAncestors   string
+	filterLineage     string
 )
 
 var validSortFields = map[string]bool{
@@ -186,22 +187,33 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 	// at most one of these is non-empty here.
 	switch {
 	case filterDescendants != "":
-		ref, err := resolveSelfOrExplicitRef(filterDescendants, "descendants")
+		agentRef, userID, err := resolveRelationshipReference(ctx, hubCtx.Client, filterDescendants)
 		if err != nil {
 			return err
 		}
-		refAgent, err := resolveReferenceAgent(ctx, agentSvc, ref)
-		if err != nil {
-			return wrapHubError(err)
+		if userID != "" {
+			// A user reference: Ancestry records the creator user directly
+			// (see createAgentInProject), so the same AncestorID predicate
+			// that works for an agent reference works unchanged here.
+			opts.AncestorID = userID
+		} else {
+			refAgent, err := resolveReferenceAgent(ctx, agentSvc, agentRef)
+			if err != nil {
+				return wrapHubError(err)
+			}
+			opts.AncestorID = refAgent.ID
 		}
-		opts.AncestorID = refAgent.ID
 
 	case filterAncestors != "":
-		ref, err := resolveSelfOrExplicitRef(filterAncestors, "ancestors")
+		agentRef, userID, err := resolveRelationshipReference(ctx, hubCtx.Client, filterAncestors)
 		if err != nil {
 			return err
 		}
-		refAgent, err := resolveReferenceAgent(ctx, agentSvc, ref)
+		if userID != "" {
+			// A user has no Ancestry chain of its own — nothing to list.
+			return displayAgents(nil, listAll, true)
+		}
+		refAgent, err := resolveReferenceAgent(ctx, agentSvc, agentRef)
 		if err != nil {
 			return wrapHubError(err)
 		}
@@ -215,6 +227,25 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 			return displayAgents(nil, listAll, true)
 		}
 		opts.IDs = refAgent.Ancestry
+
+	case filterLineage != "":
+		agentRef, userID, err := resolveRelationshipReference(ctx, hubCtx.Client, filterLineage)
+		if err != nil {
+			return err
+		}
+		var root string
+		if userID != "" {
+			// A user has no Ancestry (no parent to walk to), so it is its
+			// own lineage root — see resolveLineageRootID.
+			root = resolveLineageRootID(userID, nil)
+		} else {
+			refAgent, err := resolveReferenceAgent(ctx, agentSvc, agentRef)
+			if err != nil {
+				return wrapHubError(err)
+			}
+			root = resolveLineageRootID(refAgent.ID, refAgent.Ancestry)
+		}
+		opts.LineageRootID = root
 	}
 
 	resp, err := agentSvc.List(ctx, opts)
@@ -288,26 +319,62 @@ func resolveOwnerID(ctx context.Context, client hubclient.Client, ownerRef strin
 	}
 }
 
-// resolveSelfOrExplicitRef interprets a relationship flag's raw value.
+// resolveRelationshipReference interprets a relationship flag's raw value.
 // scopeInferSentinel is what cobra's NoOptDefVal substitutes when the flag is
 // given with no explicit value (bare `--descendants`, as opposed to
-// `--descendants=foo`) — see init() below. That case means "use the calling
-// agent", which only resolves inside an agent container: the agent mode env
-// vars are how the CLI identifies itself there (the same ones `scion whoami`
-// reads). Any other non-empty value is an explicit agent reference (name,
-// slug, or ID) and is returned unchanged.
-func resolveSelfOrExplicitRef(flagValue, flagName string) (string, error) {
+// `--descendants=foo`) — see init() below.
+//
+// An explicit non-sentinel value always names an agent (by ID, slug, or
+// name) and is returned as agentRef unchanged, in every CLI mode.
+//
+// A bare flag infers the reference (ptone/scion#2146 Q2):
+//   - Agent mode: the calling agent, via SCION_AGENT_ID (the same env var
+//     `scion whoami` treats as canonical) — returned as agentRef.
+//   - Human or assistant mode: the calling user, resolved via the Hub's
+//     current-session identity (`client.Auth().Me()`) — returned as userID.
+//     There is no error case for "no calling principal" here: outside an
+//     agent container the CLI is always driven by some authenticated user.
+//
+// Exactly one of agentRef/userID is non-empty on a nil error.
+func resolveRelationshipReference(ctx context.Context, client hubclient.Client, flagValue string) (agentRef, userID string, err error) {
 	if flagValue != scopeInferSentinel {
-		return flagValue, nil
+		return flagValue, "", nil
 	}
-	if resolveMode() != ModeAgent {
-		return "", fmt.Errorf("--%s requires an agent name: there is no calling agent to infer it from outside an agent container", flagName)
+	if resolveMode() == ModeAgent {
+		id := os.Getenv("SCION_AGENT_ID")
+		if id == "" {
+			return "", "", fmt.Errorf("SCION_AGENT_ID is not set; cannot determine the calling agent")
+		}
+		return id, "", nil
 	}
-	id := os.Getenv("SCION_AGENT_ID")
-	if id == "" {
-		return "", fmt.Errorf("--%s: SCION_AGENT_ID is not set; cannot determine the calling agent", flagName)
+	self, err := client.Auth().Me(ctx)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to resolve the calling user: %w", err)
 	}
-	return id, nil
+	return "", self.ID, nil
+}
+
+// resolveLineageRootID computes the --lineage root: the reference's direct
+// parent (the last entry in its Ancestry chain — the same definition
+// isDirectParentChild uses in pkg/hub/authorize_message.go for branch-mode
+// messaging), or the reference itself when it has no recorded ancestry at
+// all (a user reference, which has no Ancestry chain of its own, or an
+// ancestry-less agent).
+//
+// This is a pure, local, structural computation — no network call — kept
+// deliberately small and isolated (ptone flagged the semantics as still
+// possibly subject to change) and so that it can never leak whether an
+// unauthorized ancestor exists: it never asks the Hub "is this ID an
+// agent". Whatever ID it returns — agent or user principal — is handed to
+// store.AgentFilter.LineageRootID (via ListAgentsOptions.LineageRootID),
+// which is itself ANDed with the caller's authorized scope, so an
+// unauthorized or nonexistent root simply yields no matches rather than an
+// error or a disclosure (ptone/scion#2146).
+func resolveLineageRootID(id string, ancestry []string) string {
+	if len(ancestry) == 0 {
+		return id
+	}
+	return ancestry[len(ancestry)-1]
 }
 
 // resolveReferenceAgent resolves ref (an agent ID, slug, or name) to the full
@@ -905,11 +972,13 @@ func init() {
 
 	// Relationship filters (Hub mode only). NoOptDefVal lets both
 	// `--descendants` and `--descendants=<agent>` parse: the bare form
-	// resolves to the calling agent in agent mode (see
-	// resolveSelfOrExplicitRef) and is an error otherwise.
-	listCmd.Flags().StringVar(&filterDescendants, "descendants", "", "List every agent descended from the reference agent (default: self, agent mode only)")
+	// infers the reference (calling agent in agent mode, calling user
+	// otherwise) — see resolveRelationshipReference.
+	listCmd.Flags().StringVar(&filterDescendants, "descendants", "", "List every agent descended from the reference (default: self)")
 	listCmd.Flags().Lookup("descendants").NoOptDefVal = scopeInferSentinel
-	listCmd.Flags().StringVar(&filterAncestors, "ancestors", "", "List the agents in the reference agent's ancestry chain (default: self, agent mode only)")
+	listCmd.Flags().StringVar(&filterAncestors, "ancestors", "", "List the agents in the reference's ancestry chain (default: self)")
 	listCmd.Flags().Lookup("ancestors").NoOptDefVal = scopeInferSentinel
-	listCmd.MarkFlagsMutuallyExclusive("descendants", "ancestors")
+	listCmd.Flags().StringVar(&filterLineage, "lineage", "", "List the reference's direct parent plus all of the parent's descendants (default: self)")
+	listCmd.Flags().Lookup("lineage").NoOptDefVal = scopeInferSentinel
+	listCmd.MarkFlagsMutuallyExclusive("descendants", "ancestors", "lineage")
 }

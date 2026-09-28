@@ -399,6 +399,25 @@ type AgentFilter struct {
 	// caller composed this filter with, and future relationship-based
 	// visibility (ptone/scion#2128) needs a single choke point to widen.
 	IDs []string
+
+	// LineageRootID, when non-empty, restricts results to the agent whose ID
+	// equals this value OR whose Ancestry chain contains it — i.e. the root
+	// agent plus all of its descendants. It is an internal OR of two
+	// sub-conditions, but that OR is itself ANDed with every other filter
+	// (including AuthorizedProjectIDs), the same composition pattern already
+	// used for MemberOrOwnerProjectIDs above: the OR only decides which rows
+	// count as "in the root's lineage", it never widens past the
+	// authorization predicate.
+	//
+	// Backs CLI `--lineage`. The root is resolved client-side (see
+	// resolveLineageRootID in cmd/list.go) as the topmost AGENT in the
+	// reference agent's Ancestry chain — never a user, which only marks the
+	// boundary — or the reference agent itself when its Ancestry contains no
+	// agents. Root resolution is deliberately done through the same
+	// authorized list query this field also drives, not a direct per-ID
+	// fetch, so an agent the caller cannot list is never confirmed to be an
+	// agent at all, let alone used as a lineage root (ptone/scion#2146).
+	LineageRootID string
 }
 
 // AgentHealthAggregate holds pre-computed counts and short lists used by the

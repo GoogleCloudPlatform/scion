@@ -286,9 +286,10 @@ Lists all agents and their status.
     - `--owner <user>` (Hub mode only): Filter by owner — a user name, email, or `me`.
     - `--broker <name|id>` (Hub mode only): Filter by runtime broker name or ID.
     - `--harness <harness-config name>` (Hub mode only): Filter by harness-config name.
-    - `--descendants[=<agent>]` (Hub mode only): List every agent descended from the reference agent. With no value, the reference is the calling agent — only resolvable inside an agent container; from a human or assistant shell, an explicit agent name is required.
-    - `--ancestors[=<agent>]` (Hub mode only): List the agents named in the reference agent's ancestry chain (entries that name a user rather than an agent are skipped). Same reference-resolution rule as `--descendants`.
-    - `--descendants` and `--ancestors` are mutually exclusive with each other. All of the above combine with `--phase`/`--activity`/`--template`/`--label` using AND.
+    - `--descendants[=<agent>]` (Hub mode only): List every agent descended from the reference. With no value, the reference is the calling agent in agent mode, or the calling user otherwise (a user's ID is recorded as the creator in its directly-created agents' ancestry, so this still works).
+    - `--ancestors[=<agent>]` (Hub mode only): List the agents named in the reference's ancestry chain (entries that name a user rather than an agent are skipped). Same reference-resolution rule as `--descendants`. A user reference has no ancestry, so this returns an empty list when the reference defaults to the calling user.
+    - `--lineage[=<agent>]` (Hub mode only): List the reference's direct parent plus all of that parent's descendants (its "lineage neighborhood") — mirrors the same root+subtree relationship the Hub uses internally to cascade a `lineage` message-mode change. Same reference-resolution rule as `--descendants`; when the reference is a user (no parent to walk to), it is its own root, making the result identical to `--descendants` for that user.
+    - `--descendants`, `--ancestors`, and `--lineage` are mutually exclusive with each other. All of the above combine with `--phase`/`--activity`/`--template`/`--label` using AND.
 
 ### `scion delete` (or `rm`)
 

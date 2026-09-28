@@ -1141,7 +1141,7 @@ func TestListJSONAlwaysBareArray(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestListCmd_RelationshipFlagsNoOptDefVal(t *testing.T) {
-	for _, name := range []string{"descendants", "ancestors"} {
+	for _, name := range []string{"descendants", "ancestors", "lineage"} {
 		f := listCmd.Flags().Lookup(name)
 		require.NotNilf(t, f, "list command should have a --%s flag", name)
 		assert.Equalf(t, scopeInferSentinel, f.NoOptDefVal,
@@ -1150,42 +1150,73 @@ func TestListCmd_RelationshipFlagsNoOptDefVal(t *testing.T) {
 }
 
 func TestListCmd_RelationshipFlagsMutuallyExclusive(t *testing.T) {
-	require.NoError(t, listCmd.Flags().Set("descendants", "agent-a"))
-	require.NoError(t, listCmd.Flags().Set("ancestors", "agent-b"))
-	defer func() {
-		_ = listCmd.Flags().Set("descendants", "")
-		_ = listCmd.Flags().Set("ancestors", "")
-		listCmd.Flags().Lookup("descendants").Changed = false
-		listCmd.Flags().Lookup("ancestors").Changed = false
-	}()
+	tests := [][2]string{
+		{"descendants", "ancestors"},
+		{"descendants", "lineage"},
+		{"ancestors", "lineage"},
+	}
+	for _, pair := range tests {
+		t.Run(pair[0]+"+"+pair[1], func(t *testing.T) {
+			require.NoError(t, listCmd.Flags().Set(pair[0], "agent-a"))
+			require.NoError(t, listCmd.Flags().Set(pair[1], "agent-b"))
+			defer func() {
+				for _, name := range []string{"descendants", "ancestors", "lineage"} {
+					_ = listCmd.Flags().Set(name, "")
+					listCmd.Flags().Lookup(name).Changed = false
+				}
+			}()
 
-	err := listCmd.ValidateFlagGroups()
-	require.Error(t, err, "--descendants and --ancestors together must be rejected")
-	assert.Contains(t, err.Error(), "descendants")
-	assert.Contains(t, err.Error(), "ancestors")
+			err := listCmd.ValidateFlagGroups()
+			require.Errorf(t, err, "--%s and --%s together must be rejected", pair[0], pair[1])
+			assert.Contains(t, err.Error(), pair[0])
+			assert.Contains(t, err.Error(), pair[1])
+		})
+	}
 }
 
-func TestResolveSelfOrExplicitRef(t *testing.T) {
+func TestResolveRelationshipReference(t *testing.T) {
+	const meID = "99999999-9999-9999-9999-999999999999"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/auth/me" {
+			_ = json.NewEncoder(w).Encode(hubclient.User{ID: meID, Email: "me@example.com"})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
 	tests := []struct {
-		name      string
-		flagValue string
-		cliMode   string
-		agentID   string
-		wantRef   string
-		wantErr   string
+		name        string
+		flagValue   string
+		cliMode     string
+		agentID     string
+		wantAgentID string
+		wantUserID  string
+		wantErr     string
 	}{
 		{
-			name:      "explicit value passes through regardless of mode",
-			flagValue: "some-agent",
-			cliMode:   "",
-			wantRef:   "some-agent",
+			name:        "explicit value is always an agent reference, regardless of mode",
+			flagValue:   "some-agent",
+			cliMode:     "",
+			wantAgentID: "some-agent",
 		},
 		{
-			name:      "bare flag in agent mode resolves to SCION_AGENT_ID",
-			flagValue: scopeInferSentinel,
-			cliMode:   "agent",
-			agentID:   "agent-self-id",
-			wantRef:   "agent-self-id",
+			name:        "explicit value in agent mode is still an agent reference",
+			flagValue:   "some-agent",
+			cliMode:     "agent",
+			agentID:     "self-id",
+			wantAgentID: "some-agent",
+		},
+		{
+			name:        "bare flag in agent mode resolves to the calling agent via SCION_AGENT_ID",
+			flagValue:   scopeInferSentinel,
+			cliMode:     "agent",
+			agentID:     "agent-self-id",
+			wantAgentID: "agent-self-id",
 		},
 		{
 			name:      "bare flag in agent mode with no SCION_AGENT_ID errors",
@@ -1195,16 +1226,16 @@ func TestResolveSelfOrExplicitRef(t *testing.T) {
 			wantErr:   "SCION_AGENT_ID is not set",
 		},
 		{
-			name:      "bare flag in human mode (unset) errors requiring an agent name",
-			flagValue: scopeInferSentinel,
-			cliMode:   "",
-			wantErr:   "requires an agent name",
+			name:       "bare flag in human mode resolves to the calling user",
+			flagValue:  scopeInferSentinel,
+			cliMode:    "",
+			wantUserID: meID,
 		},
 		{
-			name:      "bare flag in assistant mode errors requiring an agent name",
-			flagValue: scopeInferSentinel,
-			cliMode:   "assistant",
-			wantErr:   "requires an agent name",
+			name:       "bare flag in assistant mode resolves to the calling user",
+			flagValue:  scopeInferSentinel,
+			cliMode:    "assistant",
+			wantUserID: meID,
 		},
 	}
 
@@ -1213,14 +1244,48 @@ func TestResolveSelfOrExplicitRef(t *testing.T) {
 			t.Setenv("SCION_CLI_MODE", tt.cliMode)
 			t.Setenv("SCION_AGENT_ID", tt.agentID)
 
-			ref, err := resolveSelfOrExplicitRef(tt.flagValue, "descendants")
+			agentRef, userID, err := resolveRelationshipReference(context.Background(), client, tt.flagValue)
 			if tt.wantErr != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.wantErr)
 				return
 			}
 			require.NoError(t, err)
-			assert.Equal(t, tt.wantRef, ref)
+			assert.Equal(t, tt.wantAgentID, agentRef)
+			assert.Equal(t, tt.wantUserID, userID)
+		})
+	}
+}
+
+func TestResolveLineageRootID(t *testing.T) {
+	tests := []struct {
+		name     string
+		id       string
+		ancestry []string
+		want     string
+	}{
+		{
+			name: "no ancestry: self is root (covers a user reference, which has no Ancestry at all)",
+			id:   "self-id",
+			want: "self-id",
+		},
+		{
+			name:     "single ancestry entry (a top-level, user-created agent): the user is the direct parent",
+			id:       "child-id",
+			ancestry: []string{"user-id"},
+			want:     "user-id",
+		},
+		{
+			name:     "multi-entry ancestry: the LAST entry is the direct parent, not the topmost ancestor",
+			id:       "grandchild-id",
+			ancestry: []string{"user-id", "parent-id", "immediate-parent-id"},
+			want:     "immediate-parent-id",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, resolveLineageRootID(tt.id, tt.ancestry))
 		})
 	}
 }
@@ -1520,5 +1585,173 @@ func TestListAgentsViaHub_AncestorsFlag(t *testing.T) {
 
 		require.NoError(t, err)
 		assert.False(t, agentsCalled, "an empty ancestry must not fall through to an unrestricted /api/v1/agents query")
+	})
+}
+
+// TestListAgentsViaHub_LineageFlag verifies --lineage=<agent> resolves the
+// reference agent's direct parent (the last Ancestry entry) and sends it as
+// lineageRootId — and that an ancestry-less reference uses itself as the
+// root.
+func TestListAgentsViaHub_LineageFlag(t *testing.T) {
+	const refID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	const rootlessRefID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+	var gotLineageRootID string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/agents/"+refID:
+			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: refID, Slug: "ref-agent", Ancestry: []string{"user-id", "parent-id"}})
+		case r.URL.Path == "/api/v1/agents/"+rootlessRefID:
+			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: rootlessRefID, Slug: "rootless-ref-agent"})
+		case r.URL.Path == "/api/v1/agents":
+			gotLineageRootID = r.URL.Query().Get("lineageRootId")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"agents": []hubclient.Agent{}})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL}
+
+	oldListAll, oldLineage, oldOutputFormat := listAll, filterLineage, outputFormat
+	listAll = true
+	outputFormat = "json"
+	defer func() {
+		listAll, filterLineage, outputFormat = oldListAll, oldLineage, oldOutputFormat
+	}()
+
+	run := func() {
+		t.Helper()
+		oldStdout := os.Stdout
+		_, w, _ := os.Pipe()
+		os.Stdout = w
+		err := listAgentsViaHub(hubCtx)
+		_ = w.Close()
+		os.Stdout = oldStdout
+		require.NoError(t, err)
+	}
+
+	t.Run("root is the direct parent (last ancestry entry), not the topmost ancestor", func(t *testing.T) {
+		gotLineageRootID = ""
+		filterLineage = refID
+		run()
+		assert.Equal(t, "parent-id", gotLineageRootID)
+	})
+
+	t.Run("ancestry-less reference is its own root", func(t *testing.T) {
+		gotLineageRootID = ""
+		filterLineage = rootlessRefID
+		run()
+		assert.Equal(t, rootlessRefID, gotLineageRootID)
+	})
+}
+
+// TestListAgentsViaHub_BareRelationshipFlag_ModeDefaults covers
+// ptone/scion#2146 Q2: a bare relationship flag is never an error. In agent
+// mode it resolves to the calling agent (unchanged); in human/assistant mode
+// it resolves to the calling user, with --ancestors correctly reporting the
+// user-has-no-ancestry case as an empty list rather than an error.
+func TestListAgentsViaHub_BareRelationshipFlag_ModeDefaults(t *testing.T) {
+	const callingUserID = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+	const callingAgentID = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+
+	var gotAncestorID, gotLineageRootID string
+	var agentsCalled bool
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/auth/me":
+			_ = json.NewEncoder(w).Encode(hubclient.User{ID: callingUserID, Email: "me@example.com"})
+		case r.URL.Path == "/api/v1/agents/"+callingAgentID:
+			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: callingAgentID, Slug: "self", Ancestry: []string{"user-id", "parent-id"}})
+		case r.URL.Path == "/api/v1/agents":
+			agentsCalled = true
+			gotAncestorID = r.URL.Query().Get("ancestorId")
+			gotLineageRootID = r.URL.Query().Get("lineageRootId")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"agents": []hubclient.Agent{}})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL}
+
+	oldListAll, oldOutputFormat := listAll, outputFormat
+	oldDescendants, oldAncestors, oldLineage := filterDescendants, filterAncestors, filterLineage
+	listAll = true
+	outputFormat = "json"
+	defer func() {
+		listAll, outputFormat = oldListAll, oldOutputFormat
+		filterDescendants, filterAncestors, filterLineage = oldDescendants, oldAncestors, oldLineage
+	}()
+
+	run := func() error {
+		t.Helper()
+		oldStdout := os.Stdout
+		_, w, _ := os.Pipe()
+		os.Stdout = w
+		err := listAgentsViaHub(hubCtx)
+		_ = w.Close()
+		os.Stdout = oldStdout
+		return err
+	}
+
+	reset := func() {
+		filterDescendants, filterAncestors, filterLineage = "", "", ""
+		gotAncestorID, gotLineageRootID, agentsCalled = "", "", false
+	}
+
+	t.Run("agent mode: bare --descendants resolves to the calling agent (unchanged)", func(t *testing.T) {
+		reset()
+		t.Setenv("SCION_CLI_MODE", "agent")
+		t.Setenv("SCION_AGENT_ID", callingAgentID)
+		filterDescendants = scopeInferSentinel
+
+		require.NoError(t, run())
+		assert.Equal(t, callingAgentID, gotAncestorID)
+	})
+
+	t.Run("human mode: bare --descendants resolves to the calling user, not an error", func(t *testing.T) {
+		reset()
+		t.Setenv("SCION_CLI_MODE", "")
+		filterDescendants = scopeInferSentinel
+
+		require.NoError(t, run())
+		assert.Equal(t, callingUserID, gotAncestorID,
+			"Ancestry records the creator user directly, so ancestorId=<user> works unchanged")
+	})
+
+	t.Run("assistant mode: bare --descendants resolves to the calling user, not an error", func(t *testing.T) {
+		reset()
+		t.Setenv("SCION_CLI_MODE", "assistant")
+		filterDescendants = scopeInferSentinel
+
+		require.NoError(t, run())
+		assert.Equal(t, callingUserID, gotAncestorID)
+	})
+
+	t.Run("human mode: bare --ancestors returns an empty list (a user has no ancestry), not an error", func(t *testing.T) {
+		reset()
+		t.Setenv("SCION_CLI_MODE", "")
+		filterAncestors = scopeInferSentinel
+
+		require.NoError(t, run())
+		assert.False(t, agentsCalled, "a user has no Ancestry chain — nothing to query")
+	})
+
+	t.Run("human mode: bare --lineage roots at the calling user (no parent to walk to)", func(t *testing.T) {
+		reset()
+		t.Setenv("SCION_CLI_MODE", "")
+		filterLineage = scopeInferSentinel
+
+		require.NoError(t, run())
+		assert.Equal(t, callingUserID, gotLineageRootID)
 	})
 }

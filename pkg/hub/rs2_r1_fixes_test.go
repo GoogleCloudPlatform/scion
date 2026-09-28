@@ -1838,6 +1838,7 @@ func TestRS2_AgentList_NewFiltersDoNotWiden(t *testing.T) {
 		{"ownerId", "/api/v1/agents?ownerId=" + sharedOwner},
 		{"ancestorId", "/api/v1/agents?ancestorId=" + sharedAncestor},
 		{"id relationship filter", "/api/v1/agents?id=" + visible.ID + "&id=" + hidden.ID},
+		{"lineageRootId", "/api/v1/agents?lineageRootId=" + sharedAncestor},
 	}
 
 	for _, tc := range cases {
@@ -1857,6 +1858,17 @@ func TestRS2_AgentList_NewFiltersDoNotWiden(t *testing.T) {
 			assert.Equal(t, 1, resp.TotalCount)
 		})
 	}
+
+	t.Run("lineageRootId naming the hidden agent itself as root reveals nothing", func(t *testing.T) {
+		rec := doRequestAsUser(t, srv, user, http.MethodGet, "/api/v1/agents?lineageRootId="+hidden.ID, nil)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+		var resp ListAgentsResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		assert.Empty(t, resp.Agents,
+			"an unauthorized agent used as the lineage root must not be revealed, even as the root itself")
+		assert.Equal(t, 0, resp.TotalCount)
+	})
 }
 
 // TestListAgents_AttributeFiltersNarrowCorrectly is the positive-path
@@ -1925,6 +1937,8 @@ func TestListAgents_AttributeFiltersNarrowCorrectly(t *testing.T) {
 		{"ownerId", "ownerId=" + target},
 		{"ancestorId", "ancestorId=" + ancestor},
 		{"harnessConfig", "harnessConfig=claude"},
+		{"lineageRootId via ancestry", "lineageRootId=" + ancestor},
+		{"lineageRootId via the agent's own ID", "lineageRootId=" + match.ID},
 	}
 
 	for _, ep := range endpoints {

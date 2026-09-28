@@ -122,7 +122,7 @@ func parseLabelFilters(params []string) (map[string]string, error) {
 }
 
 // applyAgentAttributeAndRelationshipFilters reads the ownerId, ancestorId,
-// harnessConfig, and id query params shared by listAgents and
+// harnessConfig, id, and lineageRootId query params shared by listAgents and
 // listProjectAgents into filter. Factored into one place so the two list
 // endpoints cannot drift on these narrowing-only filters (ptone/scion#2146).
 //
@@ -137,6 +137,7 @@ func applyAgentAttributeAndRelationshipFilters(filter *store.AgentFilter, query 
 	if ids := query["id"]; len(ids) > 0 {
 		filter.IDs = ids
 	}
+	filter.LineageRootID = query.Get("lineageRootId")
 }
 
 type ListAgentsResponse struct {

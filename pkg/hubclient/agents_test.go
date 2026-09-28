@@ -112,6 +112,7 @@ func TestAgentService_List_NewFilterQueryEncoding(t *testing.T) {
 		assert.Equal(t, "ancestor-1", query.Get("ancestorId"))
 		assert.Equal(t, "claude", query.Get("harnessConfig"))
 		assert.ElementsMatch(t, []string{"id-1", "id-2"}, query["id"])
+		assert.Equal(t, "root-1", query.Get("lineageRootId"))
 
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"agents": []}`))
@@ -126,6 +127,7 @@ func TestAgentService_List_NewFilterQueryEncoding(t *testing.T) {
 		AncestorID:    "ancestor-1",
 		HarnessConfig: "claude",
 		IDs:           []string{"id-1", "id-2"},
+		LineageRootID: "root-1",
 	})
 	require.NoError(t, err)
 }
@@ -141,6 +143,7 @@ func TestAgentService_List_NewFiltersOmittedWhenUnset(t *testing.T) {
 		assert.Empty(t, query.Get("ownerId"))
 		assert.Empty(t, query.Get("ancestorId"))
 		assert.Empty(t, query.Get("harnessConfig"))
+		assert.Empty(t, query.Get("lineageRootId"))
 		_, hasID := query["id"]
 		assert.False(t, hasID, "id param must be entirely absent, not present-but-empty")
 
@@ -167,6 +170,7 @@ func TestProjectAgentService_List_NewFilterQueryEncoding(t *testing.T) {
 		assert.Equal(t, "ancestor-1", query.Get("ancestorId"))
 		assert.Equal(t, "claude", query.Get("harnessConfig"))
 		assert.ElementsMatch(t, []string{"id-1", "id-2"}, query["id"])
+		assert.Equal(t, "root-1", query.Get("lineageRootId"))
 
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"agents": []}`))
@@ -181,6 +185,7 @@ func TestProjectAgentService_List_NewFilterQueryEncoding(t *testing.T) {
 		AncestorID:    "ancestor-1",
 		HarnessConfig: "claude",
 		IDs:           []string{"id-1", "id-2"},
+		LineageRootID: "root-1",
 	})
 	require.NoError(t, err)
 }

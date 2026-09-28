@@ -160,6 +160,11 @@ type ListAgentsOptions struct {
 	// them to the caller's authorized, currently-existing agents.
 	IDs []string
 
+	// LineageRootID, when set, restricts results to the agent whose ID
+	// equals this value OR whose Ancestry contains it — the root agent plus
+	// all its descendants. Used by CLI --lineage.
+	LineageRootID string
+
 	Page apiclient.PageOptions
 }
 
@@ -348,6 +353,9 @@ func (s *agentService) List(ctx context.Context, opts *ListAgentsOptions) (*List
 		}
 		for _, id := range opts.IDs {
 			query.Add("id", id)
+		}
+		if opts.LineageRootID != "" {
+			query.Set("lineageRootId", opts.LineageRootID)
 		}
 		opts.Page.ToQuery(query)
 	}

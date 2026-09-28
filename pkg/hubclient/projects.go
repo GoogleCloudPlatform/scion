@@ -309,6 +309,9 @@ func (s *projectService) ListAgents(ctx context.Context, projectID string, opts 
 		for _, id := range opts.IDs {
 			query.Add("id", id)
 		}
+		if opts.LineageRootID != "" {
+			query.Set("lineageRootId", opts.LineageRootID)
+		}
 		opts.Page.ToQuery(query)
 	}
 

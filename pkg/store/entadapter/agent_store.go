@@ -722,6 +722,17 @@ func agentFilterPredicates(filter store.AgentFilter) ([]predicate.Agent, error) 
 		}
 	}
 
+	// LineageRootID: the root agent plus all its descendants, as one OR
+	// sub-predicate that is itself ANDed with everything else in preds
+	// (ptone/scion#2146 — see the field doc in pkg/store/store.go).
+	if filter.LineageRootID != "" {
+		rootUID, err := parseUUID(filter.LineageRootID)
+		if err != nil {
+			return nil, err
+		}
+		preds = append(preds, agent.Or(agent.IDEQ(rootUID), ancestryContains(filter.LineageRootID)))
+	}
+
 	// AuthorizedProjectIDs: scope-aware authorization filter applied at the SQL
 	// level so pagination and totals reflect only the authorized set.
 	// Fail-closed: if all IDs fail UUID parsing, match nothing rather than
