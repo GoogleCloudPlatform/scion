@@ -460,29 +460,16 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 		}
 	}
 
-	// ── Step 5c: Skill scope containment (ptone/scion#1901) ───────────
-	// The curated hub-member/hub-viewer roles carry skill.read/skill.list at
-	// system scope purely so every hub member can browse the hub-wide
-	// (global/core) skill catalog. That grant must not leak into user- or
-	// project-scoped skills; see filterHubWideSkillGrants.
-	if request.Resource.Type == "skill" {
-		candidates = filterHubWideSkillGrants(candidates, roleDefs, request.Resource.ScopeKind)
-	}
-
-	// ── Step 5d/5e: Template and harness-config scope containment
-	// (ptone/scion#1916) ────────────────────────────────────────────────
-	// Same shape as step 5c: the curated hub-member/hub-viewer roles also
-	// carry template.read/list and harness_config.read/list at system
-	// scope, purely so every hub member can browse the hub-wide (global)
-	// catalog. That grant must not leak into user- or project-scoped
-	// records; see filterHubWideTemplateGrants and
-	// filterHubWideHarnessConfigGrants.
-	if request.Resource.Type == "template" {
-		candidates = filterHubWideTemplateGrants(candidates, roleDefs, request.Resource.ScopeKind)
-	}
-	if request.Resource.Type == "harness_config" {
-		candidates = filterHubWideHarnessConfigGrants(candidates, roleDefs, request.Resource.ScopeKind)
-	}
+	// ── Step 5c/5d/5e: Hub-wide catalog scope containment (ptone/scion#1901,
+	// #1916) ───────────────────────────────────────────────────────────
+	// The curated hub-member/hub-viewer roles carry skill/template/
+	// harness_config read/list at system scope purely so every hub member
+	// can browse the hub-wide (global/core) catalog. That grant must not
+	// leak into user- or project-scoped records. applyHubWideScopeFilters
+	// (authz_boundary.go) is the single shared dispatcher for this rule —
+	// ptone/scion#2117's SystemAuthorityProof/MintTimeSystemGrant call the
+	// exact same function, so the two paths cannot drift apart.
+	candidates = applyHubWideScopeFilters(candidates, roleDefs, ProjectTargetClass{ResourceType: request.Resource.Type, ScopeKind: request.Resource.ScopeKind})
 
 	// ── Step 6: Build resource context ────────────────────────────────
 	resourceCtx := ResourceContext{
@@ -1842,71 +1829,18 @@ func (a *AuthzService) getProjectScopedPermissions(ctx context.Context, principa
 		return nil, err
 	}
 
-	now := time.Now()
-	seen := make(map[string]bool)
-	var result []string
-	for _, b := range bindings {
-		// A2: Only project-scoped bindings for the target project.
-		if b.ScopeType != store.RoleScopeProject || b.ScopeID != projectID {
-			continue
-		}
-
-		// Activation window filtering (R-2 pattern).
-		cb := &CandidateBinding{BindingID: b.ID}
-		if b.NotBefore != nil {
-			cb.NotBefore = *b.NotBefore
-		}
-		if b.ExpiresAt != nil {
-			cb.ExpiresAt = *b.ExpiresAt
-		}
-		if activation := evaluateActivation(cb, now); !activation.Active {
-			continue
-		}
-
-		rd, rdErr := a.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
-		if rdErr != nil {
-			a.logger.Warn("failed to resolve role definition for project-scoped binding",
-				"binding_id", b.ID, "role_definition_id", b.RoleDefinitionID, "error", rdErr)
-			continue
-		}
-		if rd == nil {
-			a.logger.Warn("role definition not found for project-scoped binding",
-				"binding_id", b.ID, "role_definition_id", b.RoleDefinitionID)
-			continue
-		}
-		for _, permID := range rd.Permissions {
-			if !seen[permID] {
-				seen[permID] = true
-				result = append(result, permID)
-			}
-		}
+	// A2: project-scoped bindings for the target project, active-window
+	// filtered, permissions unioned, then access-constraint reduced.
+	// scopedRoleBindingPermissions (authz_boundary.go) is the shared
+	// building block behind this query and the system-scope queries in
+	// ProjectMembershipEvidence/SystemAuthorityProof/MintTimeSystemGrant, so
+	// the two cannot silently drift apart (design review for
+	// ptone/scion#2117).
+	closure := make(map[string]struct{}, len(principals))
+	for _, p := range principals {
+		closure[p.Type+":"+p.ID] = struct{}{}
 	}
-
-	// Apply AccessConstraint intersection (same pattern as getEffectivePermissions).
-	if len(result) > 0 {
-		closure := make(map[string]struct{}, len(principals))
-		for _, p := range principals {
-			closure[p.Type+":"+p.ID] = struct{}{}
-		}
-		resourceCtx := ResourceContext{ProjectID: projectID}
-		restrictions := a.loadAccessConstraintRestrictions(ctx, closure, resourceCtx)
-		if len(restrictions) > 0 {
-			var filtered []string
-			for _, permID := range result {
-				blocked := false
-				for _, r := range restrictions {
-					if r.Check == nil || !r.Check(permID) {
-						blocked = true
-						break
-					}
-				}
-				if !blocked {
-					filtered = append(filtered, permID)
-				}
-			}
-			result = filtered
-		}
-	}
+	result := a.scopedRoleBindingPermissions(ctx, bindings, store.RoleScopeProject, projectID, closure, ResourceContext{ProjectID: projectID}, time.Now())
 
 	return result, nil
 }

@@ -1269,7 +1269,13 @@ var Catalog = []OperationSpec{
 		Description: "Read diagnostic logs and messaging divergence data",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/diagnostics/logs", Method: "GET"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/diagnostics/logs/stream", Method: "GET"},
+			// The live handler (handleDiagnosticsLogsStream,
+			// pkg/hub/handlers_diagnostics.go) sets
+			// "Content-Type: text/event-stream" and streams incrementally;
+			// it is an SSE entry point, not a plain HTTP route. Pinned by
+			// TestDiagnosticsLogsStreamCatalogMatchesRoute
+			// (authzop/drift_test.go).
+			{Kind: EntryPointSSE, Pattern: "/api/v1/admin/diagnostics/logs/stream", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/messaging/divergence", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
@@ -1536,7 +1542,12 @@ var Catalog = []OperationSpec{
 		Domain:      "agent",
 		Description: "Attach to an agent session via WebSocket",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointWebSocket, Pattern: "/api/v1/agents/{id}/attach", Method: "GET"},
+			// The live route dispatches on /pty (pkg/hub/pty_handlers.go
+			// handleAgentPTY, invoked from handlers_agents_core.go's
+			// action == "pty" branch), not /attach. Pinned against that
+			// route by TestAgentAttachCatalogMatchesRoute
+			// (authzop/drift_test.go) so it cannot silently drift again.
+			{Kind: EntryPointWebSocket, Pattern: "/api/v1/agents/{id}/pty", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
@@ -1554,6 +1565,10 @@ var Catalog = []OperationSpec{
 		Description: "Access forwarded ports on an agent",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/ports", Method: "GET"},
+			// web.go:1808 also routes the actual port proxy under the same
+			// permission; the catalog previously declared only the list
+			// route.
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/ports/{port}/proxy", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
