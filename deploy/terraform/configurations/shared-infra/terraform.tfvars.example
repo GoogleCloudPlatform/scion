@@ -1,7 +1,7 @@
 # Copy to terraform.tfvars (or pass -var-file) and fill in. See
 # deploy/terraform/README.md for the full prerequisite list.
 
-project_id  = "ptone-emblem"
+project_id  = "my-project"
 region      = "us-central1"
 zone        = "us-central1-a"
 name_prefix = "tfha"

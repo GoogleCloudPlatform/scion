@@ -2,7 +2,7 @@
 # deploy/terraform/README.md for the full instantiation sequence, including
 # the required -backend-config prefix and matching state_prefix.
 
-project_id    = "ptone-emblem"
+project_id    = "my-project"
 region        = "us-central1"
 zone          = "us-central1-a"
 shared_prefix = "tfha"
@@ -10,7 +10,7 @@ shared_prefix = "tfha"
 hub_name     = "tfha-h1"
 state_prefix = "tfha/hubs/tfha-h1"
 
-hub_image = "us-central1-docker.pkg.dev/ptone-emblem/tfha-scion/hub:latest"
+hub_image = "us-central1-docker.pkg.dev/my-project/tfha-scion/hub:v1.2.3"
 
 # Optional — not a prerequisite. Leave unset (null) for the first apply;
 # the hub and IAP browser login work regardless. See the README's "IAP
