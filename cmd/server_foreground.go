@@ -2079,7 +2079,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	go hubSrv.SyncAllHarnessConfigsFromStorage(ctx)
 	go hubSrv.SyncAllTemplatesFromStorage(ctx)
 
-	log.Printf("Database: %s (%s)", cfg.Database.Driver, cfg.Database.URL)
+	log.Printf("Database: %s (%s)", cfg.Database.Driver, config.RedactDatabaseURL(cfg.Database.Driver, cfg.Database.URL))
 
 	// --- Settings-DB Phase 3: OperationalSettings wiring (§3.9) ---
 	// Driver-agnostic: initOperationalSettings handles both postgres (advisory

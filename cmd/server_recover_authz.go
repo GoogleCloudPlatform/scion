@@ -156,7 +156,7 @@ func runRecoverAuthz(cmd *cobra.Command, _ []string) error {
 		_, _ = fmt.Fprintln(out, "WARNING: --force flag set, skipping running-server check.")
 	}
 
-	_, _ = fmt.Fprintf(out, "Database: %s (%s)\n", cfg.Database.Driver, cfg.Database.URL)
+	_, _ = fmt.Fprintf(out, "Database: %s (%s)\n", cfg.Database.Driver, config.RedactDatabaseURL(cfg.Database.Driver, cfg.Database.URL))
 	_, _ = fmt.Fprintf(out, "Operator: %s\n\n", operator)
 
 	// Open the database
