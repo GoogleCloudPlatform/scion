@@ -300,6 +300,23 @@ function createJsonFile(content: string, name = 'roles.json'): File {
   return new File([content], name, { type: 'application/json' });
 }
 
+/**
+ * The export buttons are `<sl-button href=... target="_blank">`. Shoelace's
+ * `click()` forwards to the internal native `<a>` (exposed as `.button`), and
+ * happy-dom's anchor click handler responds to a real, un-prevented click by
+ * calling `window.open(href)` — which navigates and fetches the href for
+ * real. There's no server listening on that origin in this test, and the
+ * connection failure surfaces asynchronously (after this function returns),
+ * which is exactly the kind of late console noise that races vitest's worker
+ * teardown. `preventDefault` on the underlying anchor's click event stops
+ * happy-dom from doing that, without touching the "not JS-driven" assertion
+ * these tests exist to make.
+ */
+function preventLinkNavigation(button: Element | undefined): void {
+  const anchor = (button as unknown as { button?: HTMLAnchorElement })?.button;
+  anchor?.addEventListener('click', (e) => e.preventDefault());
+}
+
 // ---------------------------------------------------------------------------
 // Tests: Export (roles list page) — native anchor download
 // ---------------------------------------------------------------------------
@@ -385,11 +402,13 @@ describe('admin-roles: export', () => {
     // Verify no Blob/createObjectURL references in the component's export path
     const createObjectURLSpy = vi.spyOn(URL, 'createObjectURL');
 
-    // Click the export button — since it's a native link, no JS export method fires
+    // Click the export button — since it's a native link, no JS export method
+    // fires. See preventLinkNavigation() for why the click needs guarding.
     const buttons = el.shadowRoot?.querySelectorAll('.header-right sl-button');
     const exportBtn = [...(buttons ?? [])].find(
       (b) => b.textContent?.trim() === 'Export Custom Roles'
     );
+    preventLinkNavigation(exportBtn);
     exportBtn?.click();
     await new Promise((r) => setTimeout(r, 50));
 
@@ -771,9 +790,11 @@ describe('admin-role-detail: single role export', () => {
 
     const createObjectURLSpy = vi.spyOn(URL, 'createObjectURL');
 
-    // Click the export button — native link, no JS handler
+    // Click the export button — native link, no JS handler. See
+    // preventLinkNavigation() for why the click needs guarding.
     const buttons = el.shadowRoot?.querySelectorAll('.header-actions sl-button');
     const exportBtn = [...(buttons ?? [])].find((b) => b.textContent?.trim() === 'Export');
+    preventLinkNavigation(exportBtn);
     exportBtn?.click();
     await new Promise((r) => setTimeout(r, 50));
 
