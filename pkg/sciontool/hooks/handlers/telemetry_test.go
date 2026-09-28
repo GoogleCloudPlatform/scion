@@ -744,6 +744,7 @@ func TestTelemetryHandler_UsageSourceGate(t *testing.T) {
 
 			h := NewTelemetryHandler(nil, nil, nil, mp)
 
+			// Paired model-start/model-end.
 			if err := h.Handle(&hooks.Event{Name: hooks.EventModelStart, Data: hooks.EventData{}}); err != nil {
 				t.Fatalf("Handle model-start error: %v", err)
 			}
@@ -753,11 +754,26 @@ func TestTelemetryHandler_UsageSourceGate(t *testing.T) {
 			}); err != nil {
 				t.Fatalf("Handle model-end error: %v", err)
 			}
+			// Unpaired model-end (round 1 review L1): the normal
+			// hook-per-process case (recordUnpairedEndMetrics), gated the
+			// same way as the paired path above.
+			if err := h.Handle(&hooks.Event{
+				Name: hooks.EventModelEnd,
+				Data: hooks.EventData{Success: true, InputTokens: 10, OutputTokens: 5},
+			}); err != nil {
+				t.Fatalf("Handle unpaired model-end error: %v", err)
+			}
 			if err := h.Handle(&hooks.Event{Name: hooks.EventToolStart, Data: hooks.EventData{ToolName: "Bash"}}); err != nil {
 				t.Fatalf("Handle tool-start error: %v", err)
 			}
 			if err := h.Handle(&hooks.Event{Name: hooks.EventToolEnd, Data: hooks.EventData{ToolName: "Bash", Success: true}}); err != nil {
 				t.Fatalf("Handle tool-end error: %v", err)
+			}
+			// session-end (round 1 review L1): agent.session.count must be
+			// recorded in every state, since the gate is scoped to usage
+			// only (D4, narrow).
+			if err := h.Handle(&hooks.Event{Name: hooks.EventSessionEnd, Data: hooks.EventData{Reason: "user_exit"}}); err != nil {
+				t.Fatalf("Handle session-end error: %v", err)
 			}
 
 			var rm metricdata.ResourceMetrics
@@ -790,6 +806,9 @@ func TestTelemetryHandler_UsageSourceGate(t *testing.T) {
 			// Tool and session metrics are unaffected either way (D4, narrow).
 			if !found["agent.tool.calls"] {
 				t.Error("expected agent.tool.calls to be recorded regardless of SCION_USAGE_SOURCE")
+			}
+			if !found[telemetrycontract.MetricSessionCount] {
+				t.Error("expected agent.session.count to be recorded regardless of SCION_USAGE_SOURCE")
 			}
 		})
 	}
