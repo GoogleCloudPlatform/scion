@@ -852,6 +852,28 @@ var ErrProjectMismatch = errors.New("target project does not match requested pro
 // since a real instance never needs collection-level evidence) does not
 // equal projectID. Any error denies. Local user principals only.
 func (a *AuthzService) ProjectTargetAdmission(ctx context.Context, principal PrincipalContext, projectID, permissionID string, target Resource, memo *ProjectAdmissionCache) (ProjectAdmissionResult, error) {
+	targetScope := ResolveTargetScope(target, TargetScopeEvidence{})
+	if targetScope.Kind != TargetScopeProject || targetScope.ProjectID != projectID {
+		return ProjectAdmissionResult{}, fmt.Errorf("%w: target resolves to %q, requested %q", ErrProjectMismatch, targetScope.ProjectID, projectID)
+	}
+	class := ProjectTargetClass{ResourceType: target.Type, ScopeKind: target.ScopeKind}
+	return a.ProjectAdmissionForClass(ctx, principal, projectID, permissionID, class, memo)
+}
+
+// ProjectAdmissionForClass is the class-explicit form of ProjectTargetAdmission,
+// for a caller that already knows the target class without needing to
+// resolve it from a full Resource — e.g. F.2's material delivery, where the
+// material's own scope class can differ from the execution project's
+// resource type/scope. ProjectTargetAdmission delegates to this after
+// resolving class from target.
+//
+// Composes ProjectMembershipEvidence(ctx, principal, projectID) OR
+// SystemAuthorityProof(ctx, principal, projectID, permissionID, class). Any
+// error denies. The memo (nil-safe) is keyed on
+// (principal, projectID, permissionID, class); errors are NEVER memoized —
+// a failed lookup is recomputed on the next call, never remembered as a
+// denial or an allow.
+func (a *AuthzService) ProjectAdmissionForClass(ctx context.Context, principal PrincipalContext, projectID, permissionID string, class ProjectTargetClass, memo *ProjectAdmissionCache) (ProjectAdmissionResult, error) {
 	if err := requireLocalUserPrincipal(principal); err != nil {
 		return ProjectAdmissionResult{}, err
 	}
@@ -859,17 +881,9 @@ func (a *AuthzService) ProjectTargetAdmission(ctx context.Context, principal Pri
 		return ProjectAdmissionResult{}, fmt.Errorf("%w: empty project ID", ErrProjectAccessDenied)
 	}
 
-	targetScope := ResolveTargetScope(target, TargetScopeEvidence{})
-	if targetScope.Kind != TargetScopeProject || targetScope.ProjectID != projectID {
-		return ProjectAdmissionResult{}, fmt.Errorf("%w: target resolves to %q, requested %q", ErrProjectMismatch, targetScope.ProjectID, projectID)
-	}
-
-	class := ProjectTargetClass{ResourceType: target.Type, ScopeKind: target.ScopeKind}
 	key := projectAdmissionCacheKey{principalKind: principal.Kind, principalID: principal.ID, projectID: projectID, permissionID: permissionID, class: class}
-	if memo != nil {
-		if cached, ok := memo.get(key); ok {
-			return cached, nil
-		}
+	if cached, ok := memo.get(key); ok {
+		return cached, nil
 	}
 
 	if ok, source, err := a.ProjectMembershipEvidence(ctx, principal, projectID); err != nil {

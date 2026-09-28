@@ -696,6 +696,60 @@ func TestProjectTargetAdmission_MemoReusesResult(t *testing.T) {
 	}
 }
 
+func TestProjectAdmissionForClass_MembershipPath(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+
+	projectID := tid("pafc-proj-1")
+	userID := tid("pafc-user-1")
+	createDelegateTestProject(t, s, projectID, "pafc-proj-1", "test")
+	createTestUserWithProjectRole(t, s, userID, "pafc1@test.com", projectID, store.ProjectRoleMember)
+
+	class := ProjectTargetClass{ResourceType: "agent"}
+	result, err := authz.ProjectAdmissionForClass(ctx, activeUserPrincipal(userID), projectID, "agent.read", class, nil)
+	require.NoError(t, err)
+	if !result.Admitted || result.Source != ProjectAccessSourceMembership {
+		t.Errorf("got %+v, want Admitted via membership", result)
+	}
+}
+
+// TestProjectAdmissionForClass_MaterialScopeDiffersFromExecutionProject is
+// F.2's motivating case: the material's own class can differ from the
+// execution project's resource type/scope (e.g. checking a user-scoped
+// material's project-scoped delivery class explicitly, rather than deriving
+// it from a Resource that describes the executing agent).
+func TestProjectAdmissionForClass_MaterialScopeDiffersFromExecutionProject(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+
+	projectID := tid("pafc-proj-2")
+	userID := tid("pafc-user-2")
+	createDelegateTestProject(t, s, projectID, "pafc-proj-2", "test")
+	systemRoleUserWithPermissions(t, s, userID, []string{"skill.read"})
+
+	// A class naming "skill" explicitly, independent of any agent Resource.
+	class := ProjectTargetClass{ResourceType: "skill", ScopeKind: store.SkillScopeProject}
+	result, err := authz.ProjectAdmissionForClass(ctx, activeUserPrincipal(userID), projectID, "skill.read", class, nil)
+	require.NoError(t, err)
+	if !result.Admitted || result.Source != ProjectAccessSourceSystemRole {
+		t.Errorf("got %+v, want Admitted via system_role for the explicit skill class", result)
+	}
+}
+
+func TestProjectAdmissionForClass_ErrorsNeverMemoized(t *testing.T) {
+	authz, _ := authzTestSetup(t)
+	ctx := context.Background()
+	memo := NewProjectAdmissionCache()
+	class := ProjectTargetClass{ResourceType: "agent"}
+
+	// Empty projectID errors both times -- never cached as a denial.
+	_, err1 := authz.ProjectAdmissionForClass(ctx, activeUserPrincipal(tid("pafc-3")), "", "agent.read", class, memo)
+	_, err2 := authz.ProjectAdmissionForClass(ctx, activeUserPrincipal(tid("pafc-3")), "", "agent.read", class, memo)
+	if err1 == nil || err2 == nil {
+		t.Fatal("expected an error both times for an empty projectID")
+	}
+}
+
 // --- CanMintSelector ---------------------------------------------------------
 
 func TestCanMintSelector_EmptySelectors_RejectedExplicitly(t *testing.T) {
