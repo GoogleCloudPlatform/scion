@@ -227,24 +227,34 @@ probe.**
 
 ## Scaling
 
-`max_instances` defaults to **1**, down from an earlier default of 3,
-because of an upstream defect: when the Cloud Run instance that owns
-*broker affinity* goes away (scale-in, revision retirement, or graceful
-shutdown), it marks every project's runtime-broker provider **offline** for
-the shared `broker_id`, and nothing on the surviving instances brings them
-back online. The next agent-create on an affected project fails with
+`max_instances` defaults to **3** (`min_instances` stays at **1**).
+Multi-instance operation needs a hub image built from a commit that
+contains `GoogleCloudPlatform/scion#2046`, which fixes
+`ptone/scion#2090`: when the Cloud Run instance that owns *broker
+affinity* goes away (scale-in, revision retirement, or graceful
+shutdown), it marks every project's runtime-broker provider **offline**
+for the shared `broker_id`. `#2046` adds a per-instance recurring
+handler that re-marks a broker's provider rows **online** on every
+scheduler tick (default 1 minute) for any broker that instance still
+holds a live control-channel connection to, so there can be a short
+window — up to about a minute, plus up to 30s of scheduler jitter —
+after an affinity-owner scale-in before providers are restored on the
+surviving instances.
+
+On a hub image built **before** `#2046`, set `max_instances = 1`:
+without the self-heal handler, an affinity-owner scale-in leaves the
+shared `broker_id`'s providers stamped offline with nothing to bring
+them back, and the next agent-create on an affected project fails with
 "Default runtime broker is unavailable" until some instance reconnects
-(often requiring a manual restart). This is tracked upstream as
-`ptone/scion#2090`; raise `max_instances` back up only once that lands in
-the hub image you're running. `min_instances` stays at 1 for the same
-reason: a multi-instance steady state only makes the scale-in case more
-frequent, not more likely to matter — the underlying defect is present at
-`min=1/max=3` too.
+(often requiring a manual restart). `min_instances` stays at 1
+regardless: broader multi-replica safety of the in-process runtime
+broker beyond this one defect is not fully proven yet.
 
 Whatever `max_instances` you run, `hub-cloudrun` checks a per-hub
 **connection budget**: `max_instances × database.max_open_conns` (10,
 single-sourced with the rendered settings) must not exceed
-`max_connections_budget` (default 40). The shared Cloud SQL instance's own
+`max_connections_budget` (default 40) — at the new default that's
+`3 × 10 = 30`, within budget. The shared Cloud SQL instance's own
 `max_connections` (default 200, `shared-infra`'s `sql_max_connections`)
 must in turn cover the sum of every hub's budget attached to it — see
 "Shared-infra trust domain and sizing" above.

@@ -106,9 +106,9 @@ variable "min_instances" {
 }
 
 variable "max_instances" {
-  description = "Cloud Run max instance count. Default 1, down from 3 — see hub-cloudrun's max_instances description for the upstream defect (ptone/scion#2090) this default avoids: scale-in of the broker-affinity-owning instance leaves the shared broker_id's project providers stamped offline with nothing to bring them back."
+  description = "Cloud Run max instance count. Default 3 — see hub-cloudrun's max_instances description: multi-instance operation needs a hub image built from a commit containing GoogleCloudPlatform/scion#2046 (fixes ptone/scion#2090). On an older hub image without that fix, set max_instances = 1."
   type        = number
-  default     = 1
+  default     = 3
 }
 
 variable "cpu" {
