@@ -269,6 +269,11 @@ variable "max_connections_budget" {
   default     = 40
 }
 
+# Declared ahead of the seam that will consume it (a future settings-merge
+# feature is not implemented yet), not dead code left behind by a removal.
+# Kept so the module's variable interface already matches the design
+# without a breaking change later.
+# tflint-ignore: terraform_unused_declarations
 variable "extra_settings" {
   description = "Escape hatch for variations to deep-merge extra settings.yaml keys. Not wired up yet — reserved for a future settings-merge seam."
   type        = any
