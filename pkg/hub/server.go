@@ -5268,21 +5268,27 @@ func (s *Server) handleRuntimeBrokerConnect(w http.ResponseWriter, r *http.Reque
 }
 
 // stampProvidersOnline sets status=online on every project-provider row linked
-// to brokerID and returns the providers it touched, so its only caller,
-// markBrokerOnline, doesn't have to query the project list twice for event
-// publishing. Errors updating an individual provider are logged, not
-// returned — a partial stamp is still strictly better than none.
+// to brokerID and returns only the providers it actually stamped online, so
+// its only caller, markBrokerOnline, doesn't have to query the project list
+// twice for event publishing and doesn't announce a project as online when
+// its row was never updated. A failed UpdateProviderStatus for one provider
+// is logged and excluded from the result — a partial stamp is still strictly
+// better than none, but the caller must not treat an excluded provider as
+// online.
 func (s *Server) stampProvidersOnline(ctx context.Context, brokerID string) ([]store.ProjectProvider, error) {
 	providers, err := s.store.GetBrokerProjects(ctx, brokerID)
 	if err != nil {
 		return nil, err
 	}
+	online := make([]store.ProjectProvider, 0, len(providers))
 	for _, provider := range providers {
 		if err := s.store.UpdateProviderStatus(ctx, provider.ProjectID, brokerID, store.BrokerStatusOnline); err != nil {
 			slog.Error("Failed to update provider status", "brokerID", brokerID, "project_id", provider.ProjectID, "error", err)
+			continue
 		}
+		online = append(online, provider)
 	}
-	return providers, nil
+	return online, nil
 }
 
 // markBrokerOnline updates broker and provider statuses to online after a successful WebSocket connection.
@@ -5435,6 +5441,17 @@ func (s *Server) brokerProviderSelfHealHandler() func(ctx context.Context) {
 // caller; it is accepted as a parameter (rather than read here) so tests can
 // drive the loop with a snapshot that is already stale with respect to
 // s.controlChannel.connections.
+//
+// Every row this heals from offline to online is announced with the same
+// PublishBrokerConnected event markBrokerOnline publishes on a fresh
+// connect, one call per broker with exactly the project IDs healed for that
+// broker — mirroring handleBrokerDisconnect's PublishBrokerDisconnected on
+// the way down, so realtime subscribers don't keep showing a provider as
+// offline after this handler has already restored it. Nothing is published
+// for a broker where no row changed. A duplicate PublishBrokerConnected from
+// two instances healing the same row on the same tick is harmless: it is the
+// same idempotent "online" fact subscribers already coalesce on
+// project.<id>.broker.status.
 func (s *Server) selfHealBrokerProviders(ctx context.Context, snapshot []string) {
 	for _, brokerID := range snapshot {
 		// snapshot may be stale; re-check right before stamping to narrow the
@@ -5453,6 +5470,7 @@ func (s *Server) selfHealBrokerProviders(ctx context.Context, snapshot []string)
 			slog.Error("Scheduler: broker provider self-heal failed to list projects", "brokerID", brokerID, "error", err)
 			continue
 		}
+		var healedProjectIDs []string
 		for _, provider := range providers {
 			// Skip rows already online. Unlike stampProvidersOnline (used by
 			// markBrokerOnline on connect, which must keep refreshing
@@ -5465,8 +5483,19 @@ func (s *Server) selfHealBrokerProviders(ctx context.Context, snapshot []string)
 			}
 			if err := s.store.UpdateProviderStatus(ctx, provider.ProjectID, brokerID, store.BrokerStatusOnline); err != nil {
 				slog.Error("Failed to update provider status", "brokerID", brokerID, "project_id", provider.ProjectID, "error", err)
+				continue
 			}
+			healedProjectIDs = append(healedProjectIDs, provider.ProjectID)
 		}
+		if len(healedProjectIDs) == 0 {
+			continue
+		}
+		broker, err := s.store.GetRuntimeBroker(ctx, brokerID)
+		var brokerName string
+		if err == nil {
+			brokerName = broker.Name
+		}
+		s.events.PublishBrokerConnected(ctx, brokerID, brokerName, healedProjectIDs)
 	}
 }
 
