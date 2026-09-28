@@ -271,6 +271,14 @@ func (s *metricStreams) add(rms []*metricpb.ResourceMetrics) error {
 				if sm.GetScope().GetName() == hookMetricScope && strings.HasPrefix(m.Name, "gen_ai.tokens.") {
 					return s.reject("unsupported normalized hook token name")
 				}
+				// scion.hook.tokens.* is retired (design §3.5 "Retired names"):
+				// the hook handler now emits scion.usage.tokens{token_type}
+				// instead, the same way gen_ai.tokens.* was retired above. An
+				// old hook binary talking to a new receiver can't happen,
+				// because they are the same binary in one image.
+				if sm.GetScope().GetName() == hookMetricScope && strings.HasPrefix(m.Name, "scion.hook.tokens.") {
+					return s.reject("retired hook token name")
+				}
 				if kind != "gauge" && temporal != metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE && temporal != metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA {
 					return s.reject("unsupported metric temporality")
 				}
@@ -601,7 +609,6 @@ func cloudLabelKey(key string) string {
 func isHookCounter(name string) bool {
 	switch name {
 	case "agent.tool.calls", telemetrycontract.MetricSessionCount, telemetrycontract.MetricAPICalls,
-		"scion.hook.tokens.input", "scion.hook.tokens.output", "scion.hook.tokens.cached",
 		telemetrycontract.MetricUsageTokens:
 		return true
 	default:

@@ -289,6 +289,13 @@ func gcpIdentityMetrics(input []*metricpb.ResourceMetrics) ([]*metricpb.Resource
 				if sm.GetScope().GetName() == hookMetricScope && strings.HasPrefix(metric.Name, "gen_ai.tokens.") {
 					return nil, fmt.Errorf("unsupported normalized hook token name")
 				}
+				// scion.hook.tokens.* is retired (design §3.5): rejected here
+				// too, the same way the streams admission path rejects it in
+				// metric_streams.go, so the Cloud adapter can't be reached
+				// with a retired name via a path that bypasses s.add.
+				if sm.GetScope().GetName() == hookMetricScope && strings.HasPrefix(metric.Name, "scion.hook.tokens.") {
+					return nil, fmt.Errorf("retired hook token name")
+				}
 				if _, _, _, err := metricKind(metric); err != nil {
 					return nil, err
 				}
