@@ -1840,7 +1840,10 @@ func (a *AuthzService) getProjectScopedPermissions(ctx context.Context, principa
 	for _, p := range principals {
 		closure[p.Type+":"+p.ID] = struct{}{}
 	}
-	result := a.scopedRoleBindingPermissions(ctx, bindings, store.RoleScopeProject, projectID, closure, ResourceContext{ProjectID: projectID}, time.Now())
+	result, err := a.scopedRoleBindingPermissions(ctx, bindings, store.RoleScopeProject, projectID, closure, ResourceContext{ProjectID: projectID}, time.Now())
+	if err != nil {
+		return nil, err
+	}
 
 	return result, nil
 }

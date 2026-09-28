@@ -258,3 +258,67 @@ func TestMintEligibilityRegistry_AttachAndPortAccess(t *testing.T) {
 		}
 	}
 }
+
+// TestSupportedTargetClasses_CoversEveryUATScope is the drift coverage
+// pat-refactor's blocker #8 requires: every mintable permission (non-empty
+// UATScope) must have an explicit, reviewed SupportedTargetClasses entry --
+// never a guessed default from ProjectTargetApplicability or
+// PermissionAllowedBoundaries.
+func TestSupportedTargetClasses_CoversEveryUATScope(t *testing.T) {
+	for _, p := range Registry {
+		if p.UATScope == "" {
+			continue
+		}
+		if classes := SupportedTargetClassesFor(p.ID); len(classes) == 0 {
+			t.Errorf("permission %q (UATScope %q) has no SupportedTargetClasses entry", p.ID, p.UATScope)
+		}
+	}
+}
+
+// TestSupportedTargetClasses_NoStaleEntries ensures every key in
+// SupportedTargetClasses still names a real Registry permission ID --
+// catching a renamed or removed permission the table wasn't updated for.
+func TestSupportedTargetClasses_NoStaleEntries(t *testing.T) {
+	known := make(map[string]bool, len(Registry))
+	for _, p := range Registry {
+		known[p.ID] = true
+	}
+	for id := range SupportedTargetClasses {
+		if !known[id] {
+			t.Errorf("SupportedTargetClasses has a stale entry for %q, which is not a Registry permission ID", id)
+		}
+	}
+}
+
+// TestSupportedTargetClasses_HubOnlyMintablePermissionReviewed is the
+// explicit super-admin hub-only mint case pat-refactor required: user.invite
+// (hub-only, ProjectTargetApplicability false) must still have a reviewed
+// SupportedTargetClasses entry so a super-admin can mint it under a hub
+// boundary.
+func TestSupportedTargetClasses_HubOnlyMintablePermissionReviewed(t *testing.T) {
+	applies, reviewed := AppliesToExistingProjectTarget("user.invite")
+	if !reviewed || applies {
+		t.Fatalf("test assumption broken: user.invite ProjectTargetApplicability = (%v, reviewed=%v), want (false, true)", applies, reviewed)
+	}
+	classes := SupportedTargetClassesFor("user.invite")
+	if len(classes) == 0 {
+		t.Fatal("user.invite must have a reviewed SupportedTargetClasses entry despite being hub-only")
+	}
+}
+
+// TestSupportedTargetClasses_UnknownPermissionDeniesRatherThanGuess proves
+// blocker #8's core requirement: an unreviewed permission ID returns no
+// classes at all (deny), never a class inferred from ProjectTargetApplicability
+// or PermissionAllowedBoundaries.
+func TestSupportedTargetClasses_UnknownPermissionDeniesRatherThanGuess(t *testing.T) {
+	if classes := SupportedTargetClassesFor("totally.unreviewed.permission"); classes != nil {
+		t.Errorf("unreviewed permission must return nil classes, got %v", classes)
+	}
+	// hub.settings.read is project-applicable=false AND has no
+	// SupportedTargetClasses entry (it has no UATScope, so it is outside
+	// today's mintable universe) -- confirms absence denies rather than
+	// falling back to a guessed hub_resource class.
+	if classes := SupportedTargetClassesFor("hub.settings.read"); classes != nil {
+		t.Errorf("hub.settings.read has no reviewed entry and must return nil, got %v", classes)
+	}
+}

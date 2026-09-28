@@ -126,63 +126,61 @@ type TargetScopeEvidence struct {
 //
 // Rules, applied in order:
 //
-//  1. evidence.IsCollectionLevel: honored only when permissions.
-//     ProjectTargetApplicability[evidence.PermissionID] is reviewed false
-//     (a genuinely hub-level collection action). A mismatch — evidence
-//     supplied for a project-applicable permission, or an unrecognized
-//     CollectionScope — resolves Unknown, never Hub: evidence never
-//     overrides a contradictory fact.
+//  0. evidence.IsCollectionLevel: the evidence's CollectionScope must AGREE
+//     with permissions.AppliesToExistingProjectTarget(evidence.PermissionID)'s
+//     reviewed disposition — Hub evidence for a project-applicable
+//     permission (or vice versa), an unreviewed permission ID, a stray
+//     CollectionProjectID on Hub evidence, or a non-empty r.ID (a
+//     collection-level request must not also name an existing resource
+//     instance) are all contradictions and resolve Unknown. A
+//     project-applicable permission legitimately uses CollectionScope ==
+//     Project (e.g. agent.create: the agent is new, the project is not); a
+//     hub-only permission legitimately uses CollectionScope == Hub (e.g.
+//     project.create). Evidence never overrides a contradictory fact.
+//  1. r.Type == permissions.ResourceProject and r.ID != "": TargetScopeProject.
+//     An existing project resolves directly and unconditionally.
 //  2. r.Type == permissions.ResourceHub (the Hub singleton resource
-//     itself): TargetScopeHub. This is the one resource type with no
-//     per-instance concept at all, so it is safe to classify by type
-//     alone.
-//  3. r.ParentType == "project" and r.ParentID != "": TargetScopeProject.
-//     This applies uniformly to every resource type that carries project
-//     containment via ParentType/ParentID, including role_binding and
-//     access_constraint when a resource resolver populates their
-//     project-scoped instances this way — no resource-type family is
-//     special-cased out of this rule.
-//  4. r.ParentType == "system": TargetScopeHub. This sentinel (matching the
-//     existing convention at capabilities.go:222) is an explicit, positive
-//     declaration that a resource resolver must set for a confirmed
-//     system/hub-scoped instance of a mixed-scope type (role_binding,
-//     access_constraint, and similarly any future project-or-system-scoped
-//     type) — it is NOT the zero value, so it cannot be produced by
-//     accident. Resolvers for those types (owned by whichever tracker
-//     wires this — B.2/D.2 touch those handlers) must set ParentType to
-//     "project" or "system" explicitly; A.1 defines the contract, not that
-//     wiring.
+//     itself): TargetScopeHub.
+//  3. r.ParentType == "project" and r.ParentID != "": TargetScopeProject —
+//     UNLESS r.ScopeKind also indicates a global/user/core scope, which is
+//     a contradiction (a resource cannot be both project-parented and
+//     globally scoped) and resolves Unknown.
+//  4. r.ParentType == "system": TargetScopeHub — UNLESS r.ParentID is also
+//     set, a contradiction (the system sentinel must not carry a project
+//     ID), which resolves Unknown.
 //  5. r.Type is "broker" or "runtime_broker" (both occur as Resource.Type
 //     in the codebase; neither has a project-scoped variant): TargetScopeHub.
 //  6. r.ScopeKind indicates a global/user/core scope for skill/template/
-//     harness_config (their own ScopeKind, distinct from ParentType):
-//     TargetScopeHub. These types have no project containment by design
-//     when scoped this way. BoundaryAllows only answers "can this
-//     credential's boundary reach a resource with no project home";
-//     ownership/progeny authorization remains a separate relationship-grant
-//     check (B), evaluated after boundary and project-access gates pass.
-//  7. Anything else — including a resource type with no ParentType set at
-//     all and no ScopeKind evidence — resolves TargetScopeUnknown. This
-//     deliberately does NOT classify group/user/policy/gcp_service_account/
-//     quota/role/hub-adjacent types as Hub by type alone: a genuinely
-//     hub-scoped instance of those types is expected to reach rule 4 via an
-//     explicit ParentType == "system" (or rule 2 for the Hub type itself),
-//     not this fallback. Critical constraint preserved: never equate
-//     missing resource parent metadata with hub scope.
+//     harness_config: TargetScopeHub.
+//  7. Anything else resolves TargetScopeUnknown. This deliberately does NOT
+//     classify group/user/policy/gcp_service_account/quota/role/hub-adjacent
+//     types as Hub by type alone: a genuinely hub-scoped instance of those
+//     types is expected to reach rule 4 via an explicit ParentType ==
+//     "system", not this fallback. Critical constraint preserved: never
+//     equate missing resource parent metadata with hub scope.
 func ResolveTargetScope(r Resource, evidence TargetScopeEvidence) TargetScope {
 	if evidence.IsCollectionLevel {
+		if r.ID != "" {
+			// Contradiction: a collection-level request names an existing
+			// resource instance.
+			return TargetScope{Kind: TargetScopeUnknown}
+		}
 		applies, reviewed := permissions.AppliesToExistingProjectTarget(evidence.PermissionID)
-		if !reviewed || applies {
-			// Misuse: either the permission hasn't been reviewed, or it IS
-			// project-applicable, so collection-level evidence contradicts
-			// the permission's own reviewed disposition. Fail unknown.
+		if !reviewed {
 			return TargetScope{Kind: TargetScopeUnknown}
 		}
 		switch evidence.CollectionScope {
 		case TargetScopeHub:
+			if applies || evidence.CollectionProjectID != "" {
+				// Contradiction: Hub evidence for a project-applicable
+				// permission, or a stray project ID on Hub evidence.
+				return TargetScope{Kind: TargetScopeUnknown}
+			}
 			return TargetScope{Kind: TargetScopeHub}
 		case TargetScopeProject:
-			if evidence.CollectionProjectID == "" {
+			if !applies || evidence.CollectionProjectID == "" {
+				// Contradiction: Project evidence for a hub-only
+				// permission, or no project named.
 				return TargetScope{Kind: TargetScopeUnknown}
 			}
 			return TargetScope{Kind: TargetScopeProject, ProjectID: evidence.CollectionProjectID}
@@ -191,15 +189,29 @@ func ResolveTargetScope(r Resource, evidence TargetScopeEvidence) TargetScope {
 		}
 	}
 
+	if r.Type == permissions.ResourceProject && r.ID != "" {
+		return TargetScope{Kind: TargetScopeProject, ProjectID: r.ID}
+	}
+
 	if r.Type == permissions.ResourceHub {
 		return TargetScope{Kind: TargetScopeHub}
 	}
 
-	if r.ParentType == "project" && r.ParentID != "" {
-		return TargetScope{Kind: TargetScopeProject, ProjectID: r.ParentID}
+	hasProjectParent := r.ParentType == "project" && r.ParentID != ""
+	hasSystemParent := r.ParentType == "system"
+	hasGlobalScope := isUserOrGlobalScopeKind(r.ScopeKind)
+
+	if hasProjectParent && hasGlobalScope {
+		return TargetScope{Kind: TargetScopeUnknown}
+	}
+	if hasSystemParent && r.ParentID != "" {
+		return TargetScope{Kind: TargetScopeUnknown}
 	}
 
-	if r.ParentType == "system" {
+	if hasProjectParent {
+		return TargetScope{Kind: TargetScopeProject, ProjectID: r.ParentID}
+	}
+	if hasSystemParent {
 		return TargetScope{Kind: TargetScopeHub}
 	}
 
@@ -207,7 +219,7 @@ func ResolveTargetScope(r Resource, evidence TargetScopeEvidence) TargetScope {
 		return TargetScope{Kind: TargetScopeHub}
 	}
 
-	if isUserOrGlobalScopeKind(r.ScopeKind) {
+	if hasGlobalScope {
 		return TargetScope{Kind: TargetScopeHub}
 	}
 
@@ -349,7 +361,12 @@ func (a *AuthzService) principalClosure(ctx context.Context, principal Principal
 // matches scopeType (and, for project scope, whose ScopeID matches
 // scopeID), then applies the same access-constraint reduction
 // (loadAccessConstraintRestrictions) already relied on elsewhere.
-func (a *AuthzService) scopedRoleBindingPermissions(ctx context.Context, bindings []*store.RoleBinding, scopeType, scopeID string, closure map[string]struct{}, resourceCtx ResourceContext, now time.Time) []string {
+// A role definition referenced by an active binding but missing/unloadable
+// is a data-integrity error, not a routine "skip and continue" case: this
+// function propagates that error to the caller (fail closed) rather than
+// silently omitting the binding's permissions, per this contract's error
+// policy (pat-refactor review, 2026-09-28).
+func (a *AuthzService) scopedRoleBindingPermissions(ctx context.Context, bindings []*store.RoleBinding, scopeType, scopeID string, closure map[string]struct{}, resourceCtx ResourceContext, now time.Time) ([]string, error) {
 	seen := make(map[string]bool)
 	var result []string
 	for _, b := range bindings {
@@ -364,14 +381,10 @@ func (a *AuthzService) scopedRoleBindingPermissions(ctx context.Context, binding
 		}
 		rd, rdErr := a.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
 		if rdErr != nil {
-			a.logger.Warn("failed to resolve role definition for scoped binding",
-				"binding_id", b.ID, "role_definition_id", b.RoleDefinitionID, "scope_type", scopeType, "error", rdErr)
-			continue
+			return nil, fmt.Errorf("resolve role definition %q for binding %q: %w", b.RoleDefinitionID, b.ID, rdErr)
 		}
 		if rd == nil {
-			a.logger.Warn("role definition not found for scoped binding",
-				"binding_id", b.ID, "role_definition_id", b.RoleDefinitionID, "scope_type", scopeType)
-			continue
+			return nil, fmt.Errorf("role definition %q for binding %q not found", b.RoleDefinitionID, b.ID)
 		}
 		for _, permID := range rd.Permissions {
 			if !seen[permID] {
@@ -384,7 +397,7 @@ func (a *AuthzService) scopedRoleBindingPermissions(ctx context.Context, binding
 		restrictions := a.loadAccessConstraintRestrictions(ctx, closure, resourceCtx)
 		result = applyRestrictions(result, restrictions)
 	}
-	return result
+	return result, nil
 }
 
 // applyRestrictions filters permIDs down to those that survive every
@@ -603,6 +616,19 @@ func (a *AuthzService) SystemAuthorityProof(ctx context.Context, principal Princ
 	if applies, reviewed := permissions.AppliesToExistingProjectTarget(permissionID); !reviewed || !applies {
 		return false, nil
 	}
+	// Validate class against permissionID: a real project-target proof must
+	// name the permission's own resource type (never empty, never
+	// mismatched — an empty/wrong ResourceType would route around
+	// applyHubWideScopeFilters's curated-catalog dispatch entirely), and must never
+	// use a global-catalog/user scope kind (a real project target is never
+	// "the global catalog" — that contradiction is MintTimeSystemGrant's
+	// job, not this function's).
+	if expected := registryResourceType(permissionID); class.ResourceType == "" || class.ResourceType != expected {
+		return false, fmt.Errorf("%w: class resource type %q does not match permission %q's resource type %q", ErrProjectAccessDenied, class.ResourceType, permissionID, expected)
+	}
+	if isUserOrGlobalScopeKind(class.ScopeKind) {
+		return false, fmt.Errorf("%w: SystemAuthorityProof cannot use a global-catalog/user-scope class for a real project target", ErrProjectAccessDenied)
+	}
 
 	candidates, roleDefs, refs, err := a.activeSystemScopeCandidates(ctx, principal)
 	if err != nil {
@@ -674,6 +700,10 @@ func (a *AuthzService) MintTimeSystemGrant(ctx context.Context, principal Princi
 			}
 		case permissions.TargetClassKindProjectScoped:
 			class = ContemplatedProjectClass(permissionID)
+		case permissions.TargetClassKindHubResource:
+			// No curated hub-wide/project split for this resource type;
+			// applyHubWideScopeFilters passes candidates through unchanged
+			// regardless of ScopeKind. class stays {ResourceType, ""}.
 		}
 		filtered := applyHubWideScopeFilters(candidates, roleDefs, class)
 		if !candidateSetHasPermission(filtered, roleDefs, permissionID) {
@@ -687,15 +717,64 @@ func (a *AuthzService) MintTimeSystemGrant(ctx context.Context, principal Princi
 }
 
 // hasAnyProjectBinding reports whether principal holds permissionID via an
-// active project-scoped role binding in ANY project (not a specific one) —
-// used by CanMintSelector's hub-boundary project-applicable-permission
-// branch, where mint time has no single project to check against.
+// active, constraint-reduced project-scoped role binding in ANY project (not
+// a specific one) — used by CanMintSelector's hub-boundary
+// project-applicable-permission branch, where mint time has no single
+// project to check against. Restricted to permissions reviewed applicable
+// to an existing project target: a hub-only permission (e.g. broker.create)
+// must never be satisfied by an incidental project-role grant, and never
+// recursed into for one it cannot apply to. Role-load errors are
+// propagated, not swallowed.
 func (a *AuthzService) hasAnyProjectBinding(ctx context.Context, principal PrincipalContext, permissionID string) (bool, error) {
+	if applies, reviewed := permissions.AppliesToExistingProjectTarget(permissionID); !reviewed || !applies {
+		return false, nil
+	}
 	refs, _, _, err := a.principalClosure(ctx, principal)
 	if err != nil {
 		return false, fmt.Errorf("%w: %v", ErrProjectAccessDenied, err)
 	}
-	bindings, err := a.store.ListRoleBindingsForPrincipals(ctx, refs, nil, nil)
+	bindings, err := a.store.ListRoleBindingsForPrincipals(ctx, refs, []string{store.RoleScopeProject}, nil)
+	if err != nil {
+		return false, fmt.Errorf("%w: binding resolution failed: %v", ErrProjectAccessDenied, err)
+	}
+	now := time.Now()
+	var active []*store.RoleBinding
+	for _, b := range bindings {
+		if b.ScopeType != ScopeTypeProject {
+			continue
+		}
+		if !bindingActivationOK(b, now) {
+			continue
+		}
+		active = append(active, b)
+	}
+	roleDefs, err := a.loadRoleDefinitions(ctx, collectRoleDefinitionIDs(active))
+	if err != nil {
+		return false, fmt.Errorf("%w: role definition resolution failed: %v", ErrProjectAccessDenied, err)
+	}
+	if !candidateSetHasPermission(toCandidateBindings(active), roleDefs, permissionID) {
+		return false, nil
+	}
+	closure := make(map[string]struct{}, len(refs))
+	for _, p := range refs {
+		closure[p.Type+":"+p.ID] = struct{}{}
+	}
+	restrictions := a.loadAccessConstraintRestrictions(ctx, closure, ResourceContext{})
+	survivors := applyRestrictions([]string{permissionID}, restrictions)
+	return len(survivors) == 1, nil
+}
+
+// hasAnyProjectMembership reports whether principal has an active
+// project-scoped role binding in ANY project at all, permission-agnostic —
+// used as the "relevant project admission" evidence for a relationship-
+// eligible selector under a Hub boundary (CanMintSelector), without
+// enumerating any specific owned target.
+func (a *AuthzService) hasAnyProjectMembership(ctx context.Context, principal PrincipalContext) (bool, error) {
+	refs, _, _, err := a.principalClosure(ctx, principal)
+	if err != nil {
+		return false, fmt.Errorf("%w: %v", ErrProjectAccessDenied, err)
+	}
+	bindings, err := a.store.ListRoleBindingsForPrincipals(ctx, refs, []string{store.RoleScopeProject}, nil)
 	if err != nil {
 		return false, fmt.Errorf("%w: binding resolution failed: %v", ErrProjectAccessDenied, err)
 	}
@@ -704,17 +783,8 @@ func (a *AuthzService) hasAnyProjectBinding(ctx context.Context, principal Princ
 		if b.ScopeType != ScopeTypeProject {
 			continue
 		}
-		if !bindingActivationOK(b, now) {
-			continue
-		}
-		rd, err := a.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
-		if err != nil || rd == nil {
-			continue
-		}
-		for _, permID := range rd.Permissions {
-			if permID == permissionID {
-				return true, nil
-			}
+		if bindingActivationOK(b, now) {
+			return true, nil
 		}
 	}
 	return false, nil
@@ -858,50 +928,62 @@ func (a *AuthzService) hasProjectRoleFlatPermission(ctx context.Context, princip
 	return false, nil
 }
 
+// ErrEmptySelectorList is returned by CanMintSelector for a nil/empty
+// selectors argument: an empty request is rejected explicitly, never
+// silently treated as a trivially successful validation (pat-refactor
+// review, 2026-09-28).
+var ErrEmptySelectorList = errors.New("no selectors requested")
+
 // CanMintSelector answers, for every requested selector at once, whether
 // principal may select it for boundary — never "does a target already
-// exist," never a grant by itself.
+// exist," never a grant by itself. Principal and boundary are validated
+// BEFORE the selector list, so an invalid principal/boundary is never
+// masked by an empty-list short-circuit; an empty/nil selectors list is
+// then rejected explicitly with ErrEmptySelectorList.
 //
-// Admission: for a Project boundary, ProjectMembershipEvidence is loaded
-// ONCE for the whole batch. For each selector, resolved to
-// SelectorMapping.PermissionIDs: admitted := membershipOK; if not, admitted
-// requires EVERY permission ID in the expansion (all alias members) to
-// individually pass SystemAuthorityProof(ctx, principal, boundary.ProjectID,
-// permID, ContemplatedProjectClass(permID)) — a super-admin with exact
-// agent.delete authority and no membership row is admitted for an
-// agent.delete-eligible selector, but not for an unrelated one their system
-// role doesn't hold. For a Hub boundary, per permission ID in the
-// expansion: MintTimeSystemGrant(ctx, principal, permID) OR (held via an
-// active project-scoped role binding in ANY project). Boundary kind itself
-// is never evidence. Any admission failure sets
-// MintDenialProjectAccessRequired — no oracle distinguishing "no
-// membership" from "wrong permission."
+// For a Project boundary, ProjectMembershipEvidence is loaded ONCE for the
+// whole batch. For each selector, resolved to SelectorMapping.PermissionIDs:
+// admitted := membershipOK; if not, admitted requires EVERY permission ID in
+// the expansion (all alias members) to individually pass
+// SystemAuthorityProof(ctx, principal, boundary.ProjectID, permID,
+// ContemplatedProjectClass(permID)). If admitted, each permission without a
+// MintEligibilityRegistry descriptor additionally needs the project role's
+// OWN flat permission subset (hasProjectRoleFlatPermission) when admission
+// came from membership — when admission instead came from system authority
+// for that exact permission, that proof already suffices (no redundant,
+// narrower recheck).
 //
-// If admitted, each selector is evaluated against MintEligibilityRegistry:
-// MintEligibilityFlatRole selectors use the existing flat
-// role-permission-subset check (Project boundary) or the same admission
-// evidence (Hub boundary, already established above); MintEligibilityRelationship
-// selectors check permissions.RelationshipPolicyAllows for at least one
-// declared relationship type.
+// For a Hub boundary, EACH permission ID is evaluated by hubPermissionEligible:
+// a flat/system path (MintTimeSystemGrant OR any active project-scoped
+// binding) OR a relationship alternative (a MintEligibilityRelationship
+// source for this exact principal kind/resource type/permission, combined
+// with relevant — not target-enumerated — project admission). The
+// relationship path is a genuine ALTERNATIVE, not gated behind the flat/
+// system path succeeding first: an ordinary project member eligible for
+// their own agent's attach must be able to mint that selector under a hub
+// boundary even with no system role and no blanket project permission grant.
 //
-// Empty selectors returns an empty result slice and nil error.
+// Any failure sets MintDenialProjectAccessRequired for Project-boundary
+// admission, or the specific MintEligibilityRegistry-derived reason
+// otherwise — no oracle distinguishing "no membership" from "wrong
+// permission" for the admission gate itself.
 func (a *AuthzService) CanMintSelector(ctx context.Context, principal PrincipalContext, boundary TokenBoundary, selectors []string) ([]SelectorEligibility, error) {
-	if len(selectors) == 0 {
-		return nil, nil
+	if err := requireLocalUserPrincipal(principal); err != nil {
+		return nil, err
 	}
 	if !boundary.Valid() {
 		return nil, fmt.Errorf("%w: invalid token boundary", ErrProjectAccessDenied)
 	}
-	if err := requireLocalUserPrincipal(principal); err != nil {
-		return nil, err
+	if len(selectors) == 0 {
+		return nil, ErrEmptySelectorList
 	}
 
 	var membershipOK bool
-	var membershipErr error
 	if boundary.Kind == BoundaryKindProject {
-		membershipOK, _, membershipErr = a.ProjectMembershipEvidence(ctx, principal, boundary.ProjectID)
-		if membershipErr != nil {
-			return nil, membershipErr
+		var err error
+		membershipOK, _, err = a.ProjectMembershipEvidence(ctx, principal, boundary.ProjectID)
+		if err != nil {
+			return nil, err
 		}
 	}
 
@@ -924,6 +1006,15 @@ func (a *AuthzService) CanMintSelector(ctx context.Context, principal PrincipalC
 			continue
 		}
 
+		if boundary.Kind == BoundaryKindHub {
+			eligible, reason, err := a.hubSelectorEligible(ctx, principal, mapping.PermissionIDs)
+			if err != nil {
+				return nil, err
+			}
+			results = append(results, SelectorEligibility{Selector: selector, OK: eligible, Reason: reason})
+			continue
+		}
+
 		admitted, err := a.selectorAdmitted(ctx, principal, boundary, membershipOK, mapping.PermissionIDs)
 		if err != nil {
 			return nil, err
@@ -933,7 +1024,7 @@ func (a *AuthzService) CanMintSelector(ctx context.Context, principal PrincipalC
 			continue
 		}
 
-		eligible, reason, err := a.selectorMintEligible(ctx, principal, boundary, mapping.PermissionIDs)
+		eligible, reason, err := a.selectorMintEligible(ctx, principal, boundary, membershipOK, mapping.PermissionIDs)
 		if err != nil {
 			return nil, err
 		}
@@ -942,37 +1033,16 @@ func (a *AuthzService) CanMintSelector(ctx context.Context, principal PrincipalC
 	return results, nil
 }
 
-// selectorAdmitted implements CanMintSelector's admission step (membership
-// or per-permission system authority) for every permission ID in a
-// selector's expansion.
+// selectorAdmitted implements the PROJECT-boundary admission step
+// (membership or per-permission system authority) for every permission ID
+// in a selector's expansion. Hub-boundary admission+eligibility is handled
+// entirely by hubSelectorEligible instead (see CanMintSelector).
 func (a *AuthzService) selectorAdmitted(ctx context.Context, principal PrincipalContext, boundary TokenBoundary, membershipOK bool, permIDs []string) (bool, error) {
-	if boundary.Kind == BoundaryKindProject {
-		if membershipOK {
-			return true, nil
-		}
-		for _, permID := range permIDs {
-			ok, err := a.SystemAuthorityProof(ctx, principal, boundary.ProjectID, permID, ContemplatedProjectClass(permID))
-			if err != nil {
-				return false, err
-			}
-			if !ok {
-				return false, nil
-			}
-		}
+	if membershipOK {
 		return true, nil
 	}
-
-	// Hub boundary: per permission ID, MintTimeSystemGrant OR held via any
-	// active project-scoped binding.
 	for _, permID := range permIDs {
-		ok, err := a.MintTimeSystemGrant(ctx, principal, permID)
-		if err != nil {
-			return false, err
-		}
-		if ok {
-			continue
-		}
-		ok, err = a.hasAnyProjectBinding(ctx, principal, permID)
+		ok, err := a.SystemAuthorityProof(ctx, principal, boundary.ProjectID, permID, ContemplatedProjectClass(permID))
 		if err != nil {
 			return false, err
 		}
@@ -983,16 +1053,96 @@ func (a *AuthzService) selectorAdmitted(ctx context.Context, principal Principal
 	return true, nil
 }
 
+// hubSelectorEligible evaluates every permission ID in a Hub-boundary
+// selector's expansion via hubPermissionEligible, combining admission and
+// mint eligibility into one per-permission decision (the flat/system path
+// and the relationship path are genuine alternatives — see CanMintSelector).
+func (a *AuthzService) hubSelectorEligible(ctx context.Context, principal PrincipalContext, permIDs []string) (bool, MintDenialReason, error) {
+	for _, permID := range permIDs {
+		ok, err := a.hubPermissionEligible(ctx, principal, permID)
+		if err != nil {
+			return false, MintDenialNone, err
+		}
+		if !ok {
+			return false, MintDenialProjectAccessRequired, nil
+		}
+	}
+	return true, MintDenialNone, nil
+}
+
+// hubPermissionEligible answers, for ONE permission ID under a Hub boundary:
+// may principal select it? Two alternative paths, either sufficient:
+//
+//   - Flat/system: MintTimeSystemGrant(ctx, principal, permID) OR held via
+//     an active, constraint-reduced project-scoped role binding in ANY
+//     project (hasAnyProjectBinding, itself restricted to project-applicable
+//     permissions).
+//   - Relationship: permID has a MintEligibilityRegistry descriptor with a
+//     MintEligibilityRelationship source whose RelationshipTypes include one
+//     resolving via permissions.RelationshipPolicyMintEligible for this
+//     EXACT principal kind and permID's resource type, AND the principal has
+//     relevant project admission (hasAnyProjectMembership — permission-
+//     agnostic, no specific target enumerated). This is what lets an
+//     ordinary project member mint agent:attach under a hub boundary without
+//     any system role or blanket project permission grant.
+func (a *AuthzService) hubPermissionEligible(ctx context.Context, principal PrincipalContext, permID string) (bool, error) {
+	ok, err := a.MintTimeSystemGrant(ctx, principal, permID)
+	if err != nil {
+		return false, err
+	}
+	if ok {
+		return true, nil
+	}
+	ok, err = a.hasAnyProjectBinding(ctx, principal, permID)
+	if err != nil {
+		return false, err
+	}
+	if ok {
+		return true, nil
+	}
+
+	descriptor, hasDescriptor := permissions.MintEligibilityRegistry[permID]
+	if !hasDescriptor {
+		return false, nil
+	}
+	resourceType := registryResourceType(permID)
+	for _, src := range descriptor.Sources {
+		if src.Kind != permissions.MintEligibilityRelationship {
+			continue
+		}
+		for _, relType := range src.RelationshipTypes {
+			if !permissions.RelationshipPolicyMintEligible(relType, string(principal.Kind), resourceType, permID) {
+				continue
+			}
+			hasAny, err := a.hasAnyProjectMembership(ctx, principal)
+			if err != nil {
+				return false, err
+			}
+			if hasAny {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
 // selectorMintEligible evaluates MintEligibilityRegistry for every
-// permission ID in a selector's expansion. A permission absent from the
-// registry defaults to MintEligibilityFlatRole (already satisfied by the
-// admission step above for a Hub boundary; re-checked as the existing flat
-// role subset for a Project boundary).
-func (a *AuthzService) selectorMintEligible(ctx context.Context, principal PrincipalContext, boundary TokenBoundary, permIDs []string) (bool, MintDenialReason, error) {
+// permission ID in a PROJECT-boundary selector's expansion. A permission
+// absent from the registry defaults to MintEligibilityFlatRole. The extra
+// project-role flat-subset check only applies when admission was
+// established through membershipOK: a project member's OWN role may still
+// lack this specific permission even though they are a member (membership
+// is permission-agnostic by design). When admission was instead established
+// without membership (system authority for this exact permission),
+// selectorAdmitted has ALREADY individually verified every permID in this
+// expansion — re-deriving eligibility from getProjectScopedPermissions alone
+// would incorrectly deny a permission the admission step just proved via a
+// different, equally valid path.
+func (a *AuthzService) selectorMintEligible(ctx context.Context, principal PrincipalContext, boundary TokenBoundary, membershipOK bool, permIDs []string) (bool, MintDenialReason, error) {
 	for _, permID := range permIDs {
 		descriptor, hasDescriptor := permissions.MintEligibilityRegistry[permID]
 		if !hasDescriptor {
-			if boundary.Kind == BoundaryKindProject {
+			if membershipOK {
 				ok, err := a.hasProjectRoleFlatPermission(ctx, principal, boundary.ProjectID, permID)
 				if err != nil {
 					return false, MintDenialNone, err
@@ -1016,8 +1166,9 @@ func (a *AuthzService) selectorMintEligible(ctx context.Context, principal Princ
 					// marked mint-eligible (pat-b-lead correction), not
 					// merely a row that permits the action at runtime
 					// (RelationshipPolicyAllows also matches e.g. read-only
-					// progeny rows that are never mint-eligible).
-					if permissions.RelationshipPolicyMintEligible(relType, resourceType, permID) {
+					// progeny rows that are never mint-eligible). Checked
+					// against the actual principal kind, not any kind.
+					if permissions.RelationshipPolicyMintEligible(relType, string(principal.Kind), resourceType, permID) {
 						eligible = true
 						break
 					}

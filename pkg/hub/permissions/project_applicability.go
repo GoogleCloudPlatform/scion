@@ -212,44 +212,105 @@ type TargetClassKind string
 
 const (
 	// TargetClassKindProjectScoped represents an ordinary project-contained
-	// instance of the permission's resource type.
+	// instance of the permission's resource type (skill/template/
+	// harness_config's own project scope-kind, or any other project-
+	// applicable resource type with no scope-kind split at all — agent,
+	// gcp_service_account.assign).
 	TargetClassKindProjectScoped TargetClassKind = "project_scoped"
 	// TargetClassKindGlobalCatalog represents the hub-wide (global/core)
-	// catalog instance space, for the resource types that have one.
+	// catalog instance space, for the resource types that have one
+	// (skill/template/harness_config read/list).
 	TargetClassKindGlobalCatalog TargetClassKind = "global_catalog"
+	// TargetClassKindHubResource represents an ordinary hub-scoped resource
+	// with no project-scoped variant at all and no curated hub-wide-catalog
+	// carve-out to apply (group, user, broker, gcp_service_account other
+	// than assign, and any hub-only collection action such as
+	// project.clone/register). applyHubWideScopeFilters passes these
+	// resource types through unchanged regardless of class value; this
+	// class exists so MintTimeSystemGrant has an explicit, reviewed entry
+	// to iterate for these permissions instead of silently having none.
+	TargetClassKindHubResource TargetClassKind = "hub_resource"
 )
 
 // SupportedTargetClasses is an explicit, reviewed, per-permission-ID list of
-// target classes a permission can legitimately apply to. Used ONLY for
-// hub-boundary mint-time contemplation (hub.MintTimeSystemGrant) — never
-// inferred from ProjectTargetApplicability or PermissionAllowedBoundaries,
-// because one permission can legitimately support BOTH a global-catalog and
-// a project-scoped class (skill/template/harness_config read/list); a
-// single ContemplatedProjectClass answer would wrongly strip a seeded
-// hub-member's legitimate catalog-only grant when the operation actually
-// targets the global catalog (pat-refactor F-4 catalog-read correction,
-// 2026-09-28).
+// target classes a permission can legitimately apply to, covering EVERY
+// permission with a non-empty Permission.UATScope (the current universe of
+// mintable selectors) — including hub-only permissions such as user.invite.
+// Used ONLY for hub-boundary mint-time contemplation
+// (hub.MintTimeSystemGrant) — NEVER inferred from ProjectTargetApplicability
+// or PermissionAllowedBoundaries (pat-refactor blocker #8, 2026-09-28): a
+// permission can legitimately support BOTH a global-catalog and a
+// project-scoped class (skill/template/harness_config read/list), and a
+// hub-only permission with no entry here must deny rather than silently
+// inherit a guessed class — an unreviewed or absent permission ID returns
+// nil from SupportedTargetClassesFor, which MintTimeSystemGrant treats as
+// "no eligible class, deny." A drift test requires an entry for every
+// Registry row with a non-empty UATScope.
 var SupportedTargetClasses = map[string][]TargetClassKind{
-	"skill.read":          {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
-	"skill.list":          {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
-	"template.read":       {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
-	"template.list":       {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
-	"harness_config.read": {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
+	// agent.* — no scope-kind split.
+	"agent.create": {TargetClassKindProjectScoped}, "agent.read": {TargetClassKindProjectScoped},
+	"agent.list": {TargetClassKindProjectScoped}, "agent.delete": {TargetClassKindProjectScoped},
+	"agent.attach": {TargetClassKindProjectScoped}, "agent.lifecycle": {TargetClassKindProjectScoped},
+	"agent.port_access": {TargetClassKindProjectScoped}, "agent.message": {TargetClassKindProjectScoped},
+
+	// project.* — read/update/manage target an existing project; clone is a
+	// hub-level collection action (reviewed false in ProjectTargetApplicability)
+	// even though it is mintable.
+	"project.read": {TargetClassKindProjectScoped}, "project.update": {TargetClassKindProjectScoped},
+	"project.manage": {TargetClassKindProjectScoped}, "project.clone": {TargetClassKindHubResource},
+
+	// skill.* — read/list support both project and global catalog classes;
+	// create/update/delete are project-scoped only; register is a hub-level
+	// registry action.
+	"skill.create": {TargetClassKindProjectScoped},
+	"skill.read":   {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
+	"skill.update": {TargetClassKindProjectScoped}, "skill.delete": {TargetClassKindProjectScoped},
+	"skill.list":     {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
+	"skill.register": {TargetClassKindHubResource},
+
+	// template.*, harness_config.* — same shape as skill.
+	"template.create": {TargetClassKindProjectScoped},
+	"template.read":   {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
+	"template.update": {TargetClassKindProjectScoped}, "template.delete": {TargetClassKindProjectScoped},
+	"template.list": {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
+
+	"harness_config.create": {TargetClassKindProjectScoped},
+	"harness_config.read":   {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
+	"harness_config.update": {TargetClassKindProjectScoped}, "harness_config.delete": {TargetClassKindProjectScoped},
 	"harness_config.list": {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
+
+	// group.* — hub-wide resource, no project-scoped variant.
+	"group.create": {TargetClassKindHubResource}, "group.read": {TargetClassKindHubResource},
+	"group.update": {TargetClassKindHubResource}, "group.delete": {TargetClassKindHubResource},
+	"group.list": {TargetClassKindHubResource}, "group.addMember": {TargetClassKindHubResource},
+	"group.removeMember": {TargetClassKindHubResource},
+
+	// user.* — hub-wide. user.invite is the reviewed super-admin hub-only
+	// mint case pat-refactor's blocker #8 requires covering explicitly.
+	"user.read": {TargetClassKindHubResource}, "user.invite": {TargetClassKindHubResource},
+	"user.list": {TargetClassKindHubResource},
+
+	// broker.* — user-owned hub resource.
+	"broker.read": {TargetClassKindHubResource}, "broker.list": {TargetClassKindHubResource},
+
+	// gcp_service_account.* — hub/user resource; assign is the mixed-class
+	// exception, targeting an agent inside an existing project.
+	"gcp_service_account.read":   {TargetClassKindHubResource},
+	"gcp_service_account.list":   {TargetClassKindHubResource},
+	"gcp_service_account.verify": {TargetClassKindHubResource},
+	"gcp_service_account.assign": {TargetClassKindProjectScoped},
+
+	// broker.create has no UATScope yet (see PermissionAllowedBoundaries);
+	// pre-reviewed here too so D.1 need only add the UATScope, matching the
+	// same rationale.
+	"broker.create": {TargetClassKindHubResource},
 }
 
-// SupportedTargetClassesFor returns the reviewed classes for permissionID,
-// defaulting to {TargetClassKindProjectScoped} when the permission is
-// project-applicable but has no explicit multi-class entry above (its
-// resource type has no global-catalog variant), and nil when the permission
-// is not project-applicable at all (reviewed=false from
-// AppliesToExistingProjectTarget).
+// SupportedTargetClassesFor returns the reviewed classes for permissionID.
+// An unreviewed or absent permission ID returns nil — MintTimeSystemGrant
+// treats that as "no eligible class for hub-boundary mint-time
+// contemplation," never a guessed default from ProjectTargetApplicability
+// or PermissionAllowedBoundaries.
 func SupportedTargetClassesFor(permissionID string) []TargetClassKind {
-	if classes, ok := SupportedTargetClasses[permissionID]; ok {
-		return classes
-	}
-	if applies, reviewed := AppliesToExistingProjectTarget(permissionID); reviewed && applies {
-		return []TargetClassKind{TargetClassKindProjectScoped}
-	}
-	return nil
+	return SupportedTargetClasses[permissionID]
 }

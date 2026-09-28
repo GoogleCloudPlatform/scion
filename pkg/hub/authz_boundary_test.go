@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -129,23 +130,19 @@ func TestResolveTargetScope_CollectionLevelEvidence(t *testing.T) {
 		t.Errorf("project.create collection evidence: got %+v, want Hub", got)
 	}
 
-	// Creating the first agent inside an already-identified project: the
-	// agent is new, but the project is not. agent.create is reviewed
-	// project-applicable, so honoring evidence here requires the
-	// CollectionScope to be Project (not Hub) to avoid the misuse check.
+	// Creating the first agent inside an already-identified, already-
+	// access-checked project: the agent is new, but the project is not.
+	// agent.create IS project-applicable, and Project-scope collection
+	// evidence is the legitimate shape for that case (Hub-scope evidence
+	// for it would be the contradiction — see the misuse test below).
 	got = ResolveTargetScope(Resource{Type: "agent"}, TargetScopeEvidence{
 		IsCollectionLevel:   true,
 		CollectionScope:     TargetScopeProject,
 		CollectionProjectID: "p1",
 		PermissionID:        "agent.create",
 	})
-	// agent.create IS project-applicable, so this evidence is a misuse per
-	// the cross-check and must resolve Unknown, not Project — a real
-	// wiring for agent creation must supply ParentType=project on the
-	// Resource itself, not collection evidence, since agent.create is not
-	// a genuinely hub-level collection action the way project.create is.
-	if got.Kind != TargetScopeUnknown {
-		t.Errorf("agent-creation evidence for a project-applicable permission must resolve Unknown: got %+v", got)
+	if got.Kind != TargetScopeProject || got.ProjectID != "p1" {
+		t.Errorf("agent.create with Project collection evidence: got %+v, want Project/p1", got)
 	}
 }
 
@@ -160,6 +157,58 @@ func TestResolveTargetScope_CollectionEvidenceMisuseForProjectApplicablePermissi
 	})
 	if got.Kind != TargetScopeUnknown {
 		t.Errorf("collection evidence for project-applicable skill.create must resolve Unknown: got %+v", got)
+	}
+}
+
+func TestResolveTargetScope_CollectionEvidenceMisuseForHubOnlyPermission(t *testing.T) {
+	// project.create is hub-only (reviewed false); Project-scope evidence
+	// naming it is the reverse contradiction and must resolve Unknown.
+	got := ResolveTargetScope(Resource{Type: "project"}, TargetScopeEvidence{
+		IsCollectionLevel:   true,
+		CollectionScope:     TargetScopeProject,
+		CollectionProjectID: "p1",
+		PermissionID:        "project.create",
+	})
+	if got.Kind != TargetScopeUnknown {
+		t.Errorf("Project-scope collection evidence for hub-only project.create must resolve Unknown: got %+v", got)
+	}
+}
+
+func TestResolveTargetScope_CollectionEvidenceRejectsExistingResourceID(t *testing.T) {
+	// A collection-level request must not also name an existing resource
+	// instance -- that is a malformed existing-resource request, not a
+	// legitimate creation, regardless of what the evidence claims.
+	got := ResolveTargetScope(Resource{Type: "project", ID: "already-exists"}, TargetScopeEvidence{
+		IsCollectionLevel: true,
+		CollectionScope:   TargetScopeHub,
+		PermissionID:      "project.create",
+	})
+	if got.Kind != TargetScopeUnknown {
+		t.Errorf("collection evidence naming an existing resource ID must resolve Unknown: got %+v", got)
+	}
+}
+
+func TestResolveTargetScope_CollectionEvidenceRejectsStrayProjectIDOnHubScope(t *testing.T) {
+	// Hub-scope collection evidence must not also carry a project ID.
+	got := ResolveTargetScope(Resource{Type: "project"}, TargetScopeEvidence{
+		IsCollectionLevel:   true,
+		CollectionScope:     TargetScopeHub,
+		CollectionProjectID: "stray",
+		PermissionID:        "project.create",
+	})
+	if got.Kind != TargetScopeUnknown {
+		t.Errorf("Hub-scope evidence with a stray CollectionProjectID must resolve Unknown: got %+v", got)
+	}
+}
+
+func TestResolveTargetScope_CollectionEvidenceUnreviewedPermissionDenies(t *testing.T) {
+	got := ResolveTargetScope(Resource{Type: "widget"}, TargetScopeEvidence{
+		IsCollectionLevel: true,
+		CollectionScope:   TargetScopeHub,
+		PermissionID:      "widget.create_totally_unreviewed",
+	})
+	if got.Kind != TargetScopeUnknown {
+		t.Errorf("collection evidence for an unreviewed permission must resolve Unknown: got %+v", got)
 	}
 }
 
@@ -649,12 +698,30 @@ func TestProjectTargetAdmission_MemoReusesResult(t *testing.T) {
 
 // --- CanMintSelector ---------------------------------------------------------
 
-func TestCanMintSelector_EmptySelectors(t *testing.T) {
+func TestCanMintSelector_EmptySelectors_RejectedExplicitly(t *testing.T) {
 	authz, _ := authzTestSetup(t)
-	results, err := authz.CanMintSelector(context.Background(), activeUserPrincipal(tid("cms-0")), TokenBoundary{Kind: BoundaryKindHub}, nil)
-	require.NoError(t, err)
-	if len(results) != 0 {
-		t.Errorf("empty selector list must produce an empty result, got %v", results)
+	_, err := authz.CanMintSelector(context.Background(), activeUserPrincipal(tid("cms-0")), TokenBoundary{Kind: BoundaryKindHub}, nil)
+	if !errors.Is(err, ErrEmptySelectorList) {
+		t.Errorf("empty selector list must be rejected with ErrEmptySelectorList, got %v", err)
+	}
+}
+
+func TestCanMintSelector_InvalidBoundary_RejectedBeforeEmptyCheck(t *testing.T) {
+	authz, _ := authzTestSetup(t)
+	// An invalid boundary must be rejected on its own terms, not masked by
+	// (or confused with) the empty-selector-list validation.
+	_, err := authz.CanMintSelector(context.Background(), activeUserPrincipal(tid("cms-0b")), TokenBoundary{Kind: BoundaryKindProject, ProjectID: ""}, nil)
+	if err == nil || errors.Is(err, ErrEmptySelectorList) {
+		t.Errorf("invalid boundary must be rejected as invalid, not as an empty selector list: %v", err)
+	}
+}
+
+func TestCanMintSelector_UnsupportedPrincipalKind_RejectedFirst(t *testing.T) {
+	authz, _ := authzTestSetup(t)
+	agentPrincipal := PrincipalContext{Kind: PrincipalKindAgent, ID: tid("cms-0c")}
+	_, err := authz.CanMintSelector(context.Background(), agentPrincipal, TokenBoundary{Kind: BoundaryKindHub}, nil)
+	if !errorsIsUnsupportedKind(err) && err != ErrUnsupportedPrincipalKind {
+		t.Errorf("unsupported principal kind must be rejected before the empty-selector check: %v", err)
 	}
 }
 
@@ -780,5 +847,78 @@ func TestCanMintSelector_HubBoundary_NoBlanketAdmission(t *testing.T) {
 	require.Len(t, results, 1)
 	if results[0].OK {
 		t.Errorf("hub-member must not be admitted for agent:delete under a hub boundary: %+v", results[0])
+	}
+}
+
+// TestMintTimeSystemGrant_SuperAdminHubOnlyPermission_Allowed is the
+// blocker-#8 positive test: a super-admin can mint a hub-only permission
+// (user.invite) under a hub boundary via its explicit, reviewed
+// SupportedTargetClasses entry -- not a guessed default.
+func TestMintTimeSystemGrant_SuperAdminHubOnlyPermission_Allowed(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+	adminID := tid("mtsg-1")
+	createTestUserWithRole(t, s, adminID, "mtsg1@test.com", "admin", store.SystemRoleSuperAdmin)
+
+	ok, err := authz.MintTimeSystemGrant(ctx, activeUserPrincipal(adminID), "user.invite")
+	require.NoError(t, err)
+	if !ok {
+		t.Error("super-admin must be mint-eligible for the hub-only user.invite permission")
+	}
+}
+
+// TestMintTimeSystemGrant_UnreviewedPermission_Denied is the blocker-#8
+// unknown-class deny test: a permission with no SupportedTargetClasses
+// entry at all denies, even for a super-admin holding every permission.
+func TestMintTimeSystemGrant_UnreviewedPermission_Denied(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+	adminID := tid("mtsg-2")
+	createTestUserWithRole(t, s, adminID, "mtsg2@test.com", "admin", store.SystemRoleSuperAdmin)
+
+	ok, err := authz.MintTimeSystemGrant(ctx, activeUserPrincipal(adminID), "hub.settings.read")
+	require.NoError(t, err)
+	if ok {
+		t.Error("a permission with no reviewed SupportedTargetClasses entry must deny, never fall back to a guessed class")
+	}
+}
+
+// TestCanMintSelector_HubBoundary_RelationshipAlternative_OrdinaryMember is
+// the pat-refactor review-item-4 regression: an ordinary project member,
+// with no system role and no blanket project permission grant for
+// agent.attach, must still be able to mint agent:attach under a HUB
+// boundary via the relationship alternative -- flat/system authority is not
+// a precondition for relationship eligibility, it is an alternative to it.
+func TestCanMintSelector_HubBoundary_RelationshipAlternative_OrdinaryMember(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+	userID := tid("hpe-1")
+	projectID := tid("hpe-1-proj")
+	createDelegateTestProject(t, s, projectID, "hpe-1-proj", "test")
+	createTestUserWithProjectRole(t, s, userID, "hpe1@test.com", projectID, store.ProjectRoleMember)
+
+	results, err := authz.CanMintSelector(ctx, activeUserPrincipal(userID), TokenBoundary{Kind: BoundaryKindHub}, []string{"agent:attach"})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	if !results[0].OK {
+		t.Errorf("ordinary project member should be relationship-eligible for agent:attach under a hub boundary: %+v", results[0])
+	}
+}
+
+// TestCanMintSelector_HubBoundary_RelationshipAlternative_NoProjectAtAll_Denied
+// confirms the relationship alternative still requires SOME relevant project
+// admission -- a user with no project membership anywhere cannot mint
+// agent:attach under a hub boundary via the relationship path either.
+func TestCanMintSelector_HubBoundary_RelationshipAlternative_NoProjectAtAll_Denied(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+	userID := tid("hpe-2")
+	require.NoError(t, s.CreateUser(ctx, &store.User{ID: userID, Email: "hpe2@test.com", DisplayName: "u", Role: "member", Status: store.UserStatusActive}))
+
+	results, err := authz.CanMintSelector(ctx, activeUserPrincipal(userID), TokenBoundary{Kind: BoundaryKindHub}, []string{"agent:attach"})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	if results[0].OK {
+		t.Errorf("a user with no project admission anywhere must not be relationship-eligible for agent:attach: %+v", results[0])
 	}
 }

@@ -85,15 +85,21 @@ func RelationshipPolicyAllows(relationship, principalKind, resourceType, permiss
 	return false
 }
 
-// RelationshipPolicyMintEligible reports whether at least one MintEligible
-// row exists for relationship against resourceType/permissionID, for any
-// principal kind — used to validate MintEligibilityDescriptor references.
-func RelationshipPolicyMintEligible(relationship, resourceType, permissionID string) bool {
+// RelationshipPolicyMintEligible reports whether a MintEligible row exists
+// for relationship against principalKind/resourceType/permissionID. Checks
+// the actual principal kind, same as RelationshipPolicyAllows — a mint
+// eligibility reference must not silently match a row scoped to a different
+// principal kind (e.g. an agent-only ancestor row must not make a permission
+// mint-eligible for a user principal).
+func RelationshipPolicyMintEligible(relationship, principalKind, resourceType, permissionID string) bool {
 	for _, p := range RelationshipPolicies {
 		if !p.MintEligible {
 			continue
 		}
 		if p.Relationship != relationship || p.ResourceType != resourceType {
+			continue
+		}
+		if !containsString(p.PrincipalKinds, principalKind) {
 			continue
 		}
 		if containsString(p.PermissionIDs, permissionID) {
