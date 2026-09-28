@@ -133,6 +133,33 @@ func TestSeriesIncreasesIgnoresDistributionPoints(t *testing.T) {
 	assert.Equal(t, int64(9), incs[0].Value)
 }
 
+// TestSeriesIncreasesSkipsNilPoints pins the defensive nil handling added for
+// the upstream review of PR 2051 (Gemini finding on metrics_dashboard.go:492
+// and :536): a nil point, a point with a nil Value, and a point with a nil
+// Interval are all skipped without panicking, and a valid point mixed in
+// among them still contributes normally. p.GetValue()/p.GetInterval() are
+// nil-safe generated getters, so this was already safe before the explicit
+// check; the test pins the behavior regardless of why it holds.
+func TestSeriesIncreasesSkipsNilPoints(t *testing.T) {
+	epoch := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	points := []*monitoringpb.Point{
+		nil,
+		{Interval: &monitoringpb.TimeInterval{StartTime: timestamppb.New(epoch), EndTime: timestamppb.New(epoch.Add(time.Minute))}}, // nil Value
+		{Value: &monitoringpb.TypedValue{Value: &monitoringpb.TypedValue_Int64Value{Int64Value: 7}}},                                // nil Interval
+		intPoint(epoch, epoch.Add(2*time.Minute), 9),
+	}
+	incs := seriesIncreases(points, epoch.Add(-time.Hour))
+	require.Len(t, incs, 1)
+	assert.Equal(t, int64(9), incs[0].Value)
+}
+
+// TestPointValueNil pins pointValue(nil) as ok=false rather than panicking.
+func TestPointValueNil(t *testing.T) {
+	value, ok := pointValue(nil)
+	assert.False(t, ok)
+	assert.Equal(t, int64(0), value)
+}
+
 // TestQueryDailyTimeSeriesBucketsByEndDay pins the day-bucketing rule: two
 // flushes landing on different UTC days go to different buckets, and each
 // bucket holds the increment (not the raw cumulative value).
