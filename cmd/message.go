@@ -330,21 +330,29 @@ Examples:
 		var crossProjectTarget string
 		senderProjectPath := projectPath
 		hasAgentTarget := agentName != "" || (convRef != nil && convRef.Kind == messaging.RefAgent)
-		if hasAgentTarget && os.Getenv("SCION_AGENT_NAME") != "" && cmd.Flags().Changed("project") {
-			ownProjectSlug := os.Getenv("SCION_PROJECT")
-			ownProjectID := os.Getenv("SCION_PROJECT_ID")
-			isSameProject := (ownProjectSlug != "" && projectPath == ownProjectSlug) ||
-				(ownProjectID != "" && projectPath == ownProjectID)
-			if !isSameProject {
-				// The --project flag selects a DIFFERENT project.
-				crossProjectTarget = projectPath
+		if hasAgentTarget {
+			crossProjectTarget = detectCrossProjectTarget(cmd)
+			if crossProjectTarget != "" {
 				senderProjectPath = "" // let hub context resolve from agent's own config
 			}
 		}
 
+		// --raw cannot cross a project boundary: the deprecated keystroke
+		// path skips the wrapped envelope, so a cross-project send must
+		// refuse it the same way `scion keys` refuses cross-project targets
+		// outright. This CLI check is UX only; the authoritative refusal is
+		// hub-side (ExecuteAgentDM).
+		if crossProjectTarget != "" && msgRaw {
+			return fmt.Errorf("--raw cannot be used with a cross-project target; message the agent from within its own project")
+		}
+
 		// conv:<id> with explicit --project mismatch in agent mode: reject.
 		// The conversation ID already identifies its project context;
-		// reinterpreting the sender context via --project would be silently wrong.
+		// reinterpreting the sender context via --project would be silently
+		// wrong. This intentionally does NOT reuse detectCrossProjectTarget:
+		// that helper treats an explicitly empty --project ("") as
+		// same-project, but this check must still reject it, matching
+		// pre-existing behavior.
 		if convRef != nil && convRef.Kind == messaging.RefConversation &&
 			os.Getenv("SCION_AGENT_NAME") != "" && cmd.Flags().Changed("project") {
 			ownProjectSlug := os.Getenv("SCION_PROJECT")
@@ -514,11 +522,15 @@ func resolveSenderIdentity(hubCtx *HubContext) string {
 }
 
 // buildStructuredMessage constructs a StructuredMessage from CLI parameters.
-func buildStructuredMessage(sender, recipient, message string, attachments []string) *messages.StructuredMessage {
+// raw, plain and urgent are passed explicitly (rather than read from the
+// message-command package globals) so non-`scion message` callers — e.g.
+// `scion keys`, which always wants Raw=true and never sets the message
+// package's flag globals — can reuse this helper without forking it.
+func buildStructuredMessage(sender, recipient, message string, attachments []string, raw, plain, urgent bool) *messages.StructuredMessage {
 	msg := messages.NewInstruction(sender, recipient, message)
-	msg.Plain = msgPlain
-	msg.Raw = msgRaw
-	msg.Urgent = msgInterrupt
+	msg.Plain = plain
+	msg.Raw = raw
+	msg.Urgent = urgent
 	if len(attachments) > 0 {
 		msg.Attachments = attachments
 	}
@@ -556,7 +568,7 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	msg := buildStructuredMessage(sender, "agent:"+agentName, message, msgAttach)
+	msg := buildStructuredMessage(sender, "agent:"+agentName, message, msgAttach, msgRaw, msgPlain, interrupt)
 	// Validate through the new envelope choke point (Phase 7, AC-8).
 	if err := messaging.ValidateLegacyMessage(msg); err != nil {
 		return fmt.Errorf("message validation failed: %w", err)
@@ -612,7 +624,7 @@ func sendCrossProjectMessage(hubCtx *HubContext, targetProject, agentSlug, messa
 
 	// Step 2: Build the structured message with the sender's identity.
 	sender := resolveSenderIdentity(hubCtx)
-	msg := buildStructuredMessage(sender, "agent:"+agentSlug, message, attachments)
+	msg := buildStructuredMessage(sender, "agent:"+agentSlug, message, attachments, msgRaw, msgPlain, interrupt)
 	if err := messaging.ValidateLegacyMessage(msg); err != nil {
 		return fmt.Errorf("message validation failed: %w", err)
 	}
@@ -677,7 +689,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		// and the orphan rows.
 		if ref.Kind == messaging.RefAgent {
 			sender := "agent:" + senderAgent
-			agentMsg := buildStructuredMessage(sender, "agent:"+ref.Value, message, attachments)
+			agentMsg := buildStructuredMessage(sender, "agent:"+ref.Value, message, attachments, msgRaw, msgPlain, interrupt)
 			if err := messaging.ValidateLegacyMessage(agentMsg); err != nil {
 				return fmt.Errorf("message validation failed: %w", err)
 			}
@@ -755,7 +767,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 	// message endpoint. The server derives the conversation from the
 	// sender/recipient principals (DEF-138 Rule 3).
 	sender := resolveSenderIdentity(hubCtx)
-	agentMsg := buildStructuredMessage(sender, "agent:"+ref.Value, message, attachments)
+	agentMsg := buildStructuredMessage(sender, "agent:"+ref.Value, message, attachments, msgRaw, msgPlain, interrupt)
 	if err := messaging.ValidateLegacyMessage(agentMsg); err != nil {
 		return fmt.Errorf("message validation failed: %w", err)
 	}
@@ -892,7 +904,7 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 			switch recip.Kind {
 			case messages.RecipientAgent:
 				slug := api.Slugify(recip.Name)
-				msg := buildStructuredMessage(sender, "agent:"+slug, message, msgAttach)
+				msg := buildStructuredMessage(sender, "agent:"+slug, message, msgAttach, msgRaw, msgPlain, interrupt)
 				msg.Type = messages.TypeGroupSet
 				msg.Recipients = recipientsStr
 				msg.Metadata = map[string]string{"group_id": groupID}
