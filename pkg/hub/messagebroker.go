@@ -497,6 +497,10 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 			if surface := messaging.ChannelToSurface(msg.Channel, p.log); surface != "native" {
 				threadOpts = append(threadOpts, messaging.WithThreadSurface(surface))
 			}
+			// A25.6 F1/F3: msg.ThreadID may carry a dm: prefix, in which case
+			// this resolves as kind=="direct"; register both principals so
+			// the conversation is discoverable via `conversation list`.
+			threadOpts = append(threadOpts, messaging.WithThreadParticipants(p.store))
 			var convErr error
 			convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID, threadOpts...)
 			if convErr != nil {
@@ -821,6 +825,10 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 			if surface := messaging.ChannelToSurface(msg.Channel, p.log); surface != "native" {
 				threadOpts = append(threadOpts, messaging.WithThreadSurface(surface))
 			}
+			// A25.6 F1/F3: msg.ThreadID may carry a dm: prefix, in which case
+			// this resolves as kind=="direct"; register both principals so
+			// the conversation is discoverable via `conversation list`.
+			threadOpts = append(threadOpts, messaging.WithThreadParticipants(p.store))
 			var convErr error
 			convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID, threadOpts...)
 			if convErr != nil {

@@ -283,13 +283,17 @@ func ResolveOrCreateThreadConversation(
 	if cfg.surface != "" {
 		keyOpts = append(keyOpts, WithSurface(cfg.surface))
 	}
+	if cfg.participants != nil {
+		keyOpts = append(keyOpts, WithParticipants(cfg.participants))
+	}
 	return ResolveOrCreateConversationByKey(ctx, cs, log, extRef, kind, projID, keyOpts...)
 }
 
 // threadConversationConfig holds optional parameters for ResolveOrCreateThreadConversation.
 type threadConversationConfig struct {
-	topicLookup TopicConversationLookup
-	surface     string // override for the conversation surface; empty keeps the default ("native")
+	topicLookup  TopicConversationLookup
+	surface      string // override for the conversation surface; empty keeps the default ("native")
+	participants ParticipantEnsurer
 }
 
 // ThreadConversationOption is a functional option for ResolveOrCreateThreadConversation.
@@ -301,6 +305,18 @@ type ThreadConversationOption func(*threadConversationConfig)
 func WithTopicLookup(tl TopicConversationLookup) ThreadConversationOption {
 	return func(c *threadConversationConfig) {
 		c.topicLookup = tl
+	}
+}
+
+// WithThreadParticipants forwards a ParticipantEnsurer to the shared
+// ResolveOrCreateConversationByKey sink (A25.6 F1/F3). threadID may carry a
+// "dm:" prefix (DeriveConversationKey case 1), in which case the resolved
+// conversation is kind=="direct" and both principals in the key get
+// registered as participants. For an ordinary (non-dm:) thread key this is a
+// no-op: the sink only registers participants for kind=="direct".
+func WithThreadParticipants(pe ParticipantEnsurer) ThreadConversationOption {
+	return func(c *threadConversationConfig) {
+		c.participants = pe
 	}
 }
 

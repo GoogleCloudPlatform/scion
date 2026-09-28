@@ -489,6 +489,9 @@ func (s *Server) resolveOutboundRouting(
 			if wcs != nil {
 				keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
 			}
+			// A25.6 F1/F3: register both DM principals as participants so
+			// the conversation is discoverable via `conversation list`.
+			keyOpts = append(keyOpts, messaging.WithParticipants(s.store))
 			var convErr error
 			convResult, convErr = messaging.ResolveOrCreateConversationByKey(ctx, s.store, s.messageLog, extRef, kind, projID, keyOpts...)
 			if convErr != nil {
@@ -1840,6 +1843,12 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				if wcs != nil {
 					keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
 				}
+				// A25.6 F1/F3: register both DM principals as participants so
+				// the conversation is discoverable via `conversation list`
+				// (this is the handleAgentMessage no-ThreadID branch covering
+				// user->agent and agent->agent 1:1 sends, report-7-gteam-2a
+				// cases (a) and (b)).
+				keyOpts = append(keyOpts, messaging.WithParticipants(s.store))
 				var convErr error
 				convResult, convErr = messaging.ResolveOrCreateConversationByKey(ctx, s.store, s.messageLog, extRef, kind, projID, keyOpts...)
 				if convErr != nil {

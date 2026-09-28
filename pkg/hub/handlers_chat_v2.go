@@ -1456,6 +1456,10 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 			if wcs != nil {
 				threadOpts = append(threadOpts, messaging.WithTopicLookup(wcs))
 			}
+			// A25.6 F1/F3: key may be a dm: route (chat v2's 1:1 DM URLs,
+			// report-7-gteam-2a case (e)); register both principals so the
+			// conversation is discoverable via `conversation list`.
+			threadOpts = append(threadOpts, messaging.WithThreadParticipants(s.store))
 			var convErr error
 			convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, key, projectID, threadOpts...)
 			if convErr != nil {
@@ -1641,6 +1645,10 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 					if mentionWcs != nil {
 						threadOpts = append(threadOpts, messaging.WithTopicLookup(mentionWcs))
 					}
+					// A25.6 F1/F3: key may be a dm: route; register both
+					// principals so the mention's conversation is
+					// discoverable via `conversation list`.
+					threadOpts = append(threadOpts, messaging.WithThreadParticipants(s.store))
 					var convErr error
 					convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, key, projectID, threadOpts...)
 					if convErr != nil {
@@ -1911,6 +1919,9 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 			if h2hWcs != nil {
 				threadOpts = append(threadOpts, messaging.WithTopicLookup(h2hWcs))
 			}
+			// A25.6 F1/F3: key may be a dm: route; register both principals
+			// so the conversation is discoverable via `conversation list`.
+			threadOpts = append(threadOpts, messaging.WithThreadParticipants(s.store))
 			var convErr error
 			convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, key, msgProjectID, threadOpts...)
 			if convErr != nil {

@@ -637,6 +637,10 @@ func (s *Server) resolvePhase5Conversation(
 		if surface := messaging.ChannelToSurface(channel, s.messageLog); surface != "native" {
 			threadOpts = append(threadOpts, messaging.WithThreadSurface(surface))
 		}
+		// A25.6 F1/F3: threadID may carry a dm: prefix, in which case this
+		// resolves as kind=="direct"; register both principals so the
+		// conversation is discoverable via `conversation list`.
+		threadOpts = append(threadOpts, messaging.WithThreadParticipants(s.store))
 		return messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, threadID, projectID, threadOpts...)
 	}
 	if senderUserID != "" && agentID != "" {
