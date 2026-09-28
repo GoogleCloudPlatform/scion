@@ -282,6 +282,13 @@ Lists all agents and their status.
 - **Flags:**
     - `-a, --all`: Show all agents (including stopped ones).
     - `-r, --running`: Filter for active (running) agents.
+    - `--phase <phase>`, `--activity <activity>`, `--template <name>`, `--label <key=value>` (repeatable): Filter by attribute. Combine with each other using AND.
+    - `--owner <user>` (Hub mode only): Filter by owner — a user name, email, or `me`.
+    - `--broker <name|id>` (Hub mode only): Filter by runtime broker name or ID.
+    - `--harness <harness-config name>` (Hub mode only): Filter by harness-config name.
+    - `--descendants[=<agent>]` (Hub mode only): List every agent descended from the reference agent. With no value, the reference is the calling agent — only resolvable inside an agent container; from a human or assistant shell, an explicit agent name is required.
+    - `--ancestors[=<agent>]` (Hub mode only): List the agents named in the reference agent's ancestry chain (entries that name a user rather than an agent are skipped). Same reference-resolution rule as `--descendants`.
+    - `--descendants` and `--ancestors` are mutually exclusive with each other. All of the above combine with `--phase`/`--activity`/`--template`/`--label` using AND.
 
 ### `scion delete` (or `rm`)
 

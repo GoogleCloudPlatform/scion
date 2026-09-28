@@ -365,6 +365,40 @@ type AgentFilter struct {
 	// scoped constraints that block the list permission for specific projects.
 	// An empty or nil slice means no exclusions.
 	ExcludedProjectIDs []string
+
+	// RequestedOwnerID, when non-empty, restricts results to agents whose
+	// owner_id matches this value. Unlike OwnerID (which participates in the
+	// OR-based Mine/Shared classification via MemberOrOwnerProjectIDs), this
+	// field is always combined with every other filter using AND. It exists
+	// so an explicit caller-supplied owner filter (e.g. CLI `--owner`, hub
+	// query param `ownerId`) can never be folded into the classification OR
+	// clause and widen results beyond "agents owned by exactly this
+	// principal" (ptone/scion#2146).
+	RequestedOwnerID string
+
+	// HarnessConfig, when non-empty, restricts results to agents whose
+	// resolved AppliedConfig.HarnessConfig equals this value. AppliedConfig
+	// is stored as an opaque JSON document, so implementations must filter on
+	// the embedded harnessConfig key rather than a dedicated column
+	// (ptone/scion#2146).
+	HarnessConfig string
+
+	// IDs, when non-nil, restricts results to agents whose ID is in this set.
+	// Always combined with every other filter (including AuthorizedProjectIDs)
+	// using AND — it narrows, it never substitutes for authorization. A nil
+	// value means no restriction. An empty non-nil slice means no agents
+	// match (fail closed, mirroring AuthorizedProjectIDs).
+	//
+	// This backs relationship queries such as CLI `--ancestors`, where the
+	// caller supplies a set of IDs found in another agent's Ancestry chain.
+	// Some of those IDs may name users rather than agents (Ancestry mixes
+	// both); those simply match no row here, which is how "skip entries that
+	// are users" falls out without extra bookkeeping. It is deliberately NOT
+	// implemented by fetching each ID individually — doing so would bypass
+	// whatever authorization predicate (AuthorizedProjectIDs, etc.) the
+	// caller composed this filter with, and future relationship-based
+	// visibility (ptone/scion#2128) needs a single choke point to widen.
+	IDs []string
 }
 
 // AgentHealthAggregate holds pre-computed counts and short lists used by the

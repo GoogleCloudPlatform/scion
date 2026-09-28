@@ -1768,3 +1768,180 @@ func TestRS2_EnrichmentOnlyFromAuthorized(t *testing.T) {
 
 // TestRS2_RoleBindingAgentPrincipalStatus removed (R2 item 11):
 // zero-assertion documentation function; status recorded in dev report only.
+
+// ==========================================================================
+// ptone/scion#2146: ownerId / ancestorId / harnessConfig / id (relationship)
+// list filters must narrow only, never widen, the authorized-project scope.
+// ==========================================================================
+
+// TestRS2_AgentList_NewFiltersDoNotWiden is the explicit no-widening
+// regression the design calls for: an agent living in a project the caller
+// cannot see must stay hidden from /api/v1/agents even when it also matches
+// ownerId, ancestorId, or an explicit id[] relationship restriction. Every
+// new predicate must compose with the authorized-project scope using AND,
+// never resurrect a match via OR.
+func TestRS2_AgentList_NewFiltersDoNotWiden(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID: tid("r2146-u"), Email: "r2146@test.com",
+		DisplayName: "Filter User", Role: store.UserRoleMember, Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+
+	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+
+	visProj := &store.Project{
+		ID: tid("r2146-vp"), Name: "Visible", Slug: "r2146-vis",
+		OwnerID: user.ID, CreatedBy: user.ID, Created: time.Now(), Updated: time.Now(),
+	}
+	hidProj := &store.Project{
+		ID: tid("r2146-hp"), Name: "Hidden", Slug: "r2146-hid",
+		OwnerID: tid("r2146-oth"), CreatedBy: tid("r2146-oth"), Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, visProj))
+	require.NoError(t, s.CreateProject(ctx, hidProj))
+
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: memberRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      user.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          visProj.ID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	sharedOwner := tid("r2146-owner")
+	sharedAncestor := tid("r2146-ancestor")
+
+	visible := &store.Agent{
+		ID: tid("r2146-visible"), Slug: "r2146-visible", Name: "visible",
+		ProjectID: visProj.ID, OwnerID: sharedOwner, Ancestry: []string{sharedAncestor},
+		Created: time.Now(), Updated: time.Now(),
+	}
+	hidden := &store.Agent{
+		ID: tid("r2146-hidden"), Slug: "r2146-hidden", Name: "hidden",
+		ProjectID: hidProj.ID, OwnerID: sharedOwner, Ancestry: []string{sharedAncestor},
+		Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, visible))
+	require.NoError(t, s.CreateAgent(ctx, hidden))
+
+	cases := []struct {
+		name string
+		url  string
+	}{
+		{"ownerId", "/api/v1/agents?ownerId=" + sharedOwner},
+		{"ancestorId", "/api/v1/agents?ancestorId=" + sharedAncestor},
+		{"id relationship filter", "/api/v1/agents?id=" + visible.ID + "&id=" + hidden.ID},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doRequestAsUser(t, srv, user, http.MethodGet, tc.url, nil)
+			require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+			var resp ListAgentsResponse
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+			gotIDs := make([]string, 0, len(resp.Agents))
+			for _, a := range resp.Agents {
+				gotIDs = append(gotIDs, a.ID)
+			}
+			assert.Equal(t, []string{visible.ID}, gotIDs,
+				"%s must not resurrect the agent in the unauthorized project", tc.name)
+			assert.Equal(t, 1, resp.TotalCount)
+		})
+	}
+}
+
+// TestListAgents_AttributeFiltersNarrowCorrectly is the positive-path
+// counterpart to TestRS2_AgentList_NewFiltersDoNotWiden: within a single
+// authorized project, ownerId/ancestorId/harnessConfig must each narrow the
+// result to exactly the matching agent, via both the global list endpoint
+// and the project-scoped one. cmd/list.go's default (non-`--all`) path uses
+// the project-scoped endpoint, so the two must not drift apart
+// (ptone/scion#2146).
+func TestListAgents_AttributeFiltersNarrowCorrectly(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID: tid("r2146-narrow-u"), Email: "r2146-narrow@test.com",
+		DisplayName: "Narrow User", Role: store.UserRoleMember, Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+
+	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+
+	proj := &store.Project{
+		ID: tid("r2146-narrow-p"), Name: "Proj", Slug: "r2146-narrow",
+		OwnerID: user.ID, CreatedBy: user.ID, Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: memberRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      user.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          proj.ID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	target := tid("r2146-narrow-owner")
+	ancestor := tid("r2146-narrow-ancestor")
+
+	match := &store.Agent{
+		ID: tid("r2146-narrow-match"), Slug: "narrow-match", Name: "match",
+		ProjectID: proj.ID, OwnerID: target, Ancestry: []string{ancestor},
+		AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "claude"},
+		Created:       time.Now(), Updated: time.Now(),
+	}
+	other := &store.Agent{
+		ID: tid("r2146-narrow-other"), Slug: "narrow-other", Name: "other",
+		ProjectID:     proj.ID,
+		OwnerID:       tid("r2146-narrow-other-owner"),
+		AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "gemini"},
+		Created:       time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, match))
+	require.NoError(t, s.CreateAgent(ctx, other))
+
+	endpoints := []string{
+		"/api/v1/agents",
+		"/api/v1/projects/" + proj.ID + "/agents",
+	}
+	filters := []struct {
+		name  string
+		query string
+	}{
+		{"ownerId", "ownerId=" + target},
+		{"ancestorId", "ancestorId=" + ancestor},
+		{"harnessConfig", "harnessConfig=claude"},
+	}
+
+	for _, ep := range endpoints {
+		for _, f := range filters {
+			t.Run(ep+"?"+f.name, func(t *testing.T) {
+				rec := doRequestAsUser(t, srv, user, http.MethodGet, ep+"?"+f.query, nil)
+				require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+				var resp ListAgentsResponse
+				require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+				gotIDs := make([]string, 0, len(resp.Agents))
+				for _, a := range resp.Agents {
+					gotIDs = append(gotIDs, a.ID)
+				}
+				assert.Equal(t, []string{match.ID}, gotIDs)
+			})
+		}
+	}
+}

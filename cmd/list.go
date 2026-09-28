@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcache"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
@@ -47,6 +48,19 @@ var (
 	sortReverse    bool
 	filterLabels   []string
 	listCount      int
+
+	// Attribute filters (Hub mode only — combine with each other and with
+	// --phase/--activity/--template/--label using AND). ptone/scion#2146.
+	filterOwner   string
+	filterBroker  string
+	filterHarness string
+
+	// Relationship filters (Hub mode only, mutually exclusive with each
+	// other). Empty means unset; scopeInferSentinel (via cobra's
+	// NoOptDefVal) means "use the calling agent" — see
+	// resolveSelfOrExplicitRef. ptone/scion#2146.
+	filterDescendants string
+	filterAncestors   string
 )
 
 var validSortFields = map[string]bool{
@@ -147,6 +161,62 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 		agentSvc = hubCtx.Client.ProjectAgents(projectID)
 	}
 
+	if filterOwner != "" {
+		ownerID, err := resolveOwnerID(ctx, hubCtx.Client, filterOwner)
+		if err != nil {
+			return wrapHubError(err)
+		}
+		opts.OwnerID = ownerID
+	}
+
+	if filterBroker != "" {
+		broker, err := resolveBrokerByNameOrID(ctx, hubCtx.Client, filterBroker)
+		if err != nil {
+			return wrapHubError(err)
+		}
+		opts.RuntimeBrokerID = broker.ID
+	}
+
+	if filterHarness != "" {
+		opts.HarnessConfig = filterHarness
+	}
+
+	// Relationship flags. Mutually exclusive with each other — enforced by
+	// cobra's MarkFlagsMutuallyExclusive at parse time (see init below) — so
+	// at most one of these is non-empty here.
+	switch {
+	case filterDescendants != "":
+		ref, err := resolveSelfOrExplicitRef(filterDescendants, "descendants")
+		if err != nil {
+			return err
+		}
+		refAgent, err := resolveReferenceAgent(ctx, agentSvc, ref)
+		if err != nil {
+			return wrapHubError(err)
+		}
+		opts.AncestorID = refAgent.ID
+
+	case filterAncestors != "":
+		ref, err := resolveSelfOrExplicitRef(filterAncestors, "ancestors")
+		if err != nil {
+			return err
+		}
+		refAgent, err := resolveReferenceAgent(ctx, agentSvc, ref)
+		if err != nil {
+			return wrapHubError(err)
+		}
+		if len(refAgent.Ancestry) == 0 {
+			// No ancestors recorded (e.g. a root, user-created agent's sole
+			// ancestry entry was itself, or ancestry is empty). Short-circuit
+			// locally rather than sending an empty id-list query: an id query
+			// with zero "id" params is indistinguishable on the wire from "no
+			// id restriction at all", which would silently widen the result
+			// to every authorized agent instead of none.
+			return displayAgents(nil, listAll, true)
+		}
+		opts.IDs = refAgent.Ancestry
+	}
+
 	resp, err := agentSvc.List(ctx, opts)
 	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to list agents via Hub: %w", err))
@@ -171,6 +241,105 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 	enrichAgentsClientSide(ctx, hubCtx.Client, agents)
 
 	return displayAgents(agents, listAll, true)
+}
+
+// resolveOwnerID resolves --owner's value — a user's display name, email,
+// Hub ID, or the literal "me" — to a Hub user ID. It follows the same
+// ID-first-then-name-search convention as resolveBrokerByNameOrID (broker.go)
+// so the three name-resolving flags (--owner, --broker, and agent-name
+// resolution for the relationship flags) behave consistently.
+func resolveOwnerID(ctx context.Context, client hubclient.Client, ownerRef string) (string, error) {
+	ownerRef = strings.TrimSpace(ownerRef)
+
+	if ownerRef == "me" {
+		self, err := client.Auth().Me(ctx)
+		if err != nil {
+			return "", fmt.Errorf("failed to resolve --owner me: %w", err)
+		}
+		return self.ID, nil
+	}
+
+	// Try as a direct user ID first.
+	if user, err := client.Users().Get(ctx, ownerRef); err == nil {
+		return user.ID, nil
+	} else if !apiclient.IsNotFoundError(err) {
+		return "", fmt.Errorf("failed to resolve --owner %q: %w", ownerRef, err)
+	}
+
+	// Fall back to a name/email search.
+	resp, err := client.Users().List(ctx, &hubclient.ListUsersOptions{Search: ownerRef})
+	if err != nil {
+		return "", fmt.Errorf("failed to search for user %q: %w", ownerRef, err)
+	}
+	lower := strings.ToLower(ownerRef)
+	var matches []hubclient.User
+	for _, u := range resp.Users {
+		if strings.ToLower(u.Email) == lower || strings.ToLower(u.DisplayName) == lower {
+			matches = append(matches, u)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return "", fmt.Errorf("--owner %q: no matching user found", ownerRef)
+	case 1:
+		return matches[0].ID, nil
+	default:
+		return "", fmt.Errorf("--owner %q matches multiple users - use the user ID instead", ownerRef)
+	}
+}
+
+// resolveSelfOrExplicitRef interprets a relationship flag's raw value.
+// scopeInferSentinel is what cobra's NoOptDefVal substitutes when the flag is
+// given with no explicit value (bare `--descendants`, as opposed to
+// `--descendants=foo`) — see init() below. That case means "use the calling
+// agent", which only resolves inside an agent container: the agent mode env
+// vars are how the CLI identifies itself there (the same ones `scion whoami`
+// reads). Any other non-empty value is an explicit agent reference (name,
+// slug, or ID) and is returned unchanged.
+func resolveSelfOrExplicitRef(flagValue, flagName string) (string, error) {
+	if flagValue != scopeInferSentinel {
+		return flagValue, nil
+	}
+	if resolveMode() != ModeAgent {
+		return "", fmt.Errorf("--%s requires an agent name: there is no calling agent to infer it from outside an agent container", flagName)
+	}
+	id := os.Getenv("SCION_AGENT_ID")
+	if id == "" {
+		return "", fmt.Errorf("--%s: SCION_AGENT_ID is not set; cannot determine the calling agent", flagName)
+	}
+	return id, nil
+}
+
+// resolveReferenceAgent resolves ref (an agent ID, slug, or name) to the full
+// agent record via agentSvc, which the caller has already scoped to the
+// right project (or left unscoped for --all). It tries ref as a direct ID
+// first, then falls back to a slug/name match within agentSvc's listing.
+func resolveReferenceAgent(ctx context.Context, agentSvc hubclient.AgentService, ref string) (*hubclient.Agent, error) {
+	if a, err := agentSvc.Get(ctx, ref); err == nil {
+		return a, nil
+	} else if !apiclient.IsNotFoundError(err) {
+		return nil, fmt.Errorf("failed to resolve agent %q: %w", ref, err)
+	}
+
+	resp, err := agentSvc.List(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to look up agent %q: %w", ref, err)
+	}
+	var matches []hubclient.Agent
+	for i := range resp.Agents {
+		a := resp.Agents[i]
+		if a.Slug == ref || a.Name == ref {
+			matches = append(matches, a)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return nil, fmt.Errorf("agent %q not found", ref)
+	case 1:
+		return &matches[0], nil
+	default:
+		return nil, fmt.Errorf("agent %q matches multiple agents - use the agent ID instead", ref)
+	}
 }
 
 // enrichAgentsClientSide populates project and RuntimeBrokerName fields client-side
@@ -728,4 +897,19 @@ func init() {
 	listCmd.Flags().BoolVar(&sortReverse, "reverse", false, "Reverse sort order")
 	listCmd.Flags().StringArrayVar(&filterLabels, "label", nil, "Filter by label in key=value format (repeatable)")
 	listCmd.Flags().IntVar(&listCount, "count", 0, "Maximum number of agents to return (default: server limit)")
+
+	// Attribute filters (Hub mode only).
+	listCmd.Flags().StringVar(&filterOwner, "owner", "", "Filter by owner: a user name, email, or \"me\" (Hub mode only)")
+	listCmd.Flags().StringVar(&filterBroker, "broker", "", "Filter by runtime broker name or ID (Hub mode only)")
+	listCmd.Flags().StringVar(&filterHarness, "harness", "", "Filter by harness-config name (Hub mode only)")
+
+	// Relationship filters (Hub mode only). NoOptDefVal lets both
+	// `--descendants` and `--descendants=<agent>` parse: the bare form
+	// resolves to the calling agent in agent mode (see
+	// resolveSelfOrExplicitRef) and is an error otherwise.
+	listCmd.Flags().StringVar(&filterDescendants, "descendants", "", "List every agent descended from the reference agent (default: self, agent mode only)")
+	listCmd.Flags().Lookup("descendants").NoOptDefVal = scopeInferSentinel
+	listCmd.Flags().StringVar(&filterAncestors, "ancestors", "", "List the agents in the reference agent's ancestry chain (default: self, agent mode only)")
+	listCmd.Flags().Lookup("ancestors").NoOptDefVal = scopeInferSentinel
+	listCmd.MarkFlagsMutuallyExclusive("descendants", "ancestors")
 }

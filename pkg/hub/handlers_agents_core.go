@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -118,6 +119,24 @@ func parseLabelFilters(params []string) (map[string]string, error) {
 		return nil, fmt.Errorf("invalid label filter: %w", err)
 	}
 	return m, nil
+}
+
+// applyAgentAttributeAndRelationshipFilters reads the ownerId, ancestorId,
+// harnessConfig, and id query params shared by listAgents and
+// listProjectAgents into filter. Factored into one place so the two list
+// endpoints cannot drift on these narrowing-only filters (ptone/scion#2146).
+//
+// Every field this sets is combined with the rest of the caller's filter
+// (including any authorization predicate, such as AuthorizedProjectIDs) using
+// AND — see the field docs on store.AgentFilter. None of them may be used to
+// widen a result beyond what the caller was already authorized to list.
+func applyAgentAttributeAndRelationshipFilters(filter *store.AgentFilter, query url.Values) {
+	filter.RequestedOwnerID = query.Get("ownerId")
+	filter.AncestorID = query.Get("ancestorId")
+	filter.HarnessConfig = query.Get("harnessConfig")
+	if ids := query["id"]; len(ids) > 0 {
+		filter.IDs = ids
+	}
 }
 
 type ListAgentsResponse struct {
@@ -313,6 +332,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		Phase:           query.Get("phase"),
 		IncludeDeleted:  query.Get("includeDeleted") == "true",
 	}
+	applyAgentAttributeAndRelationshipFilters(&filter, query)
 
 	if labelParams := query["label"]; len(labelParams) > 0 {
 		parsed, err := parseLabelFilters(labelParams)

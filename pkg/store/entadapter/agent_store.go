@@ -691,6 +691,37 @@ func agentFilterPredicates(filter store.AgentFilter) ([]predicate.Agent, error) 
 		preds = append(preds, labelContains(k, v))
 	}
 
+	// RequestedOwnerID is always ANDed, independent of the OwnerID/
+	// MemberOrOwnerProjectIDs OR-based Mine/Shared classification above
+	// (ptone/scion#2146 — see the field doc in pkg/store/store.go).
+	if filter.RequestedOwnerID != "" {
+		requestedOwnerUID, err := parseUUID(filter.RequestedOwnerID)
+		if err != nil {
+			return nil, err
+		}
+		preds = append(preds, agent.OwnerIDEQ(requestedOwnerUID))
+	}
+
+	if filter.HarnessConfig != "" {
+		preds = append(preds, appliedConfigHarnessConfigEquals(filter.HarnessConfig))
+	}
+
+	// IDs: narrowing-only restriction to a specific agent ID set (e.g. a CLI
+	// --ancestors relationship query). Fail-closed like AuthorizedProjectIDs:
+	// nil means no restriction, empty non-nil means no agents match.
+	if filter.IDs != nil {
+		if len(filter.IDs) == 0 {
+			preds = append(preds, agent.IDEQ(uuid.Nil))
+		} else {
+			idUUIDs := parseUUIDList(filter.IDs)
+			if len(idUUIDs) > 0 {
+				preds = append(preds, agent.IDIn(idUUIDs...))
+			} else {
+				preds = append(preds, agent.IDEQ(uuid.Nil))
+			}
+		}
+	}
+
 	// AuthorizedProjectIDs: scope-aware authorization filter applied at the SQL
 	// level so pagination and totals reflect only the authorized set.
 	// Fail-closed: if all IDs fail UUID parsing, match nothing rather than

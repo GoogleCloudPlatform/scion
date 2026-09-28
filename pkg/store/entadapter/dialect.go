@@ -159,6 +159,42 @@ func projectLabelNotContains(key, value string) predicate.Project {
 // The ancestry IS NOT NULL guard short-circuits agents with no recorded
 // lineage and keeps Postgres from invoking the set-returning function on a NULL
 // input.
+// appliedConfigHarnessConfigEquals returns an Ent predicate restricting
+// results to agents whose `applied_config` JSON document has a top-level
+// "harnessConfig" key equal to value.
+//
+// Unlike labels and ancestry, applied_config is stored as a plain Ent
+// field.Text column (pkg/ent/schema/agent.go), not field.JSON — it is kept
+// decoupled from the store package's struct definition. On Postgres this
+// means the column has no native jsonb type to apply `@>` or `->>` against
+// directly; it must be cast first. SQLite's json_extract works against a text
+// column holding a JSON string either way.
+//
+//	SQLite:   json_extract(applied_config, '$.harnessConfig') = ?
+//	Postgres: applied_config IS NOT NULL AND (applied_config::jsonb ->> 'harnessConfig') = ?
+func appliedConfigHarnessConfigEquals(value string) predicate.Agent {
+	return func(s *entsql.Selector) {
+		col := s.C(agent.FieldAppliedConfig)
+		switch s.Dialect() {
+		case dialect.Postgres:
+			s.Where(entsql.P(func(b *entsql.Builder) {
+				b.WriteString(col).
+					WriteString(" IS NOT NULL AND (").
+					WriteString(col).
+					WriteString("::jsonb ->> 'harnessConfig') = ").
+					Arg(value)
+			}))
+		default: // SQLite
+			s.Where(entsql.P(func(b *entsql.Builder) {
+				b.WriteString("json_extract(").
+					WriteString(col).
+					WriteString(", '$.harnessConfig') = ").
+					Arg(value)
+			}))
+		}
+	}
+}
+
 func ancestryContains(principalID string) predicate.Agent {
 	return func(s *entsql.Selector) {
 		col := s.C(agent.FieldAncestry)

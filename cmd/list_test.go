@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -27,6 +28,8 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestFormatLastSeen(t *testing.T) {
@@ -1130,4 +1133,392 @@ func TestListJSONAlwaysBareArray(t *testing.T) {
 			}
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// ptone/scion#2146: --owner/--broker/--harness attribute filters and the
+// --descendants/--ancestors relationship filters.
+// ---------------------------------------------------------------------------
+
+func TestListCmd_RelationshipFlagsNoOptDefVal(t *testing.T) {
+	for _, name := range []string{"descendants", "ancestors"} {
+		f := listCmd.Flags().Lookup(name)
+		require.NotNilf(t, f, "list command should have a --%s flag", name)
+		assert.Equalf(t, scopeInferSentinel, f.NoOptDefVal,
+			"--%s should have NoOptDefVal set to the sentinel so bare usage works", name)
+	}
+}
+
+func TestListCmd_RelationshipFlagsMutuallyExclusive(t *testing.T) {
+	require.NoError(t, listCmd.Flags().Set("descendants", "agent-a"))
+	require.NoError(t, listCmd.Flags().Set("ancestors", "agent-b"))
+	defer func() {
+		_ = listCmd.Flags().Set("descendants", "")
+		_ = listCmd.Flags().Set("ancestors", "")
+		listCmd.Flags().Lookup("descendants").Changed = false
+		listCmd.Flags().Lookup("ancestors").Changed = false
+	}()
+
+	err := listCmd.ValidateFlagGroups()
+	require.Error(t, err, "--descendants and --ancestors together must be rejected")
+	assert.Contains(t, err.Error(), "descendants")
+	assert.Contains(t, err.Error(), "ancestors")
+}
+
+func TestResolveSelfOrExplicitRef(t *testing.T) {
+	tests := []struct {
+		name      string
+		flagValue string
+		cliMode   string
+		agentID   string
+		wantRef   string
+		wantErr   string
+	}{
+		{
+			name:      "explicit value passes through regardless of mode",
+			flagValue: "some-agent",
+			cliMode:   "",
+			wantRef:   "some-agent",
+		},
+		{
+			name:      "bare flag in agent mode resolves to SCION_AGENT_ID",
+			flagValue: scopeInferSentinel,
+			cliMode:   "agent",
+			agentID:   "agent-self-id",
+			wantRef:   "agent-self-id",
+		},
+		{
+			name:      "bare flag in agent mode with no SCION_AGENT_ID errors",
+			flagValue: scopeInferSentinel,
+			cliMode:   "agent",
+			agentID:   "",
+			wantErr:   "SCION_AGENT_ID is not set",
+		},
+		{
+			name:      "bare flag in human mode (unset) errors requiring an agent name",
+			flagValue: scopeInferSentinel,
+			cliMode:   "",
+			wantErr:   "requires an agent name",
+		},
+		{
+			name:      "bare flag in assistant mode errors requiring an agent name",
+			flagValue: scopeInferSentinel,
+			cliMode:   "assistant",
+			wantErr:   "requires an agent name",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("SCION_CLI_MODE", tt.cliMode)
+			t.Setenv("SCION_AGENT_ID", tt.agentID)
+
+			ref, err := resolveSelfOrExplicitRef(tt.flagValue, "descendants")
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantRef, ref)
+		})
+	}
+}
+
+func TestResolveOwnerID(t *testing.T) {
+	const meID = "11111111-1111-1111-1111-111111111111"
+	const directID = "22222222-2222-2222-2222-222222222222"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/auth/me":
+			_ = json.NewEncoder(w).Encode(hubclient.User{ID: meID, Email: "me@example.com"})
+		case r.URL.Path == "/api/v1/users/"+directID:
+			_ = json.NewEncoder(w).Encode(hubclient.User{ID: directID, Email: "direct@example.com"})
+		case r.URL.Path == "/api/v1/users/by-name" || r.URL.Path == "/api/v1/users/alice" || r.URL.Path == "/api/v1/users/ambiguous" || r.URL.Path == "/api/v1/users/nobody":
+			// These are name/email lookups mis-tried as direct IDs — 404 so
+			// resolveOwnerID falls back to the search branch below.
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "not found"})
+		case r.URL.Path == "/api/v1/users":
+			search := r.URL.Query().Get("search")
+			var users []hubclient.User
+			switch search {
+			case "alice":
+				users = []hubclient.User{{ID: "alice-id", Email: "alice@example.com", DisplayName: "Alice"}}
+			case "ambiguous":
+				users = []hubclient.User{
+					{ID: "amb-1", Email: "a1@example.com", DisplayName: "ambiguous"},
+					{ID: "amb-2", Email: "a2@example.com", DisplayName: "ambiguous"},
+				}
+			case "nobody":
+				users = nil
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"users": users})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	t.Run("me resolves via auth/me", func(t *testing.T) {
+		id, err := resolveOwnerID(context.Background(), client, "me")
+		require.NoError(t, err)
+		assert.Equal(t, meID, id)
+	})
+
+	t.Run("direct ID resolves via Users().Get", func(t *testing.T) {
+		id, err := resolveOwnerID(context.Background(), client, directID)
+		require.NoError(t, err)
+		assert.Equal(t, directID, id)
+	})
+
+	t.Run("name/email falls back to search - single match", func(t *testing.T) {
+		id, err := resolveOwnerID(context.Background(), client, "alice")
+		require.NoError(t, err)
+		assert.Equal(t, "alice-id", id)
+	})
+
+	t.Run("name/email matching multiple users errors", func(t *testing.T) {
+		_, err := resolveOwnerID(context.Background(), client, "ambiguous")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "multiple users")
+	})
+
+	t.Run("no matching user errors", func(t *testing.T) {
+		_, err := resolveOwnerID(context.Background(), client, "nobody")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no matching user")
+	})
+}
+
+func TestResolveReferenceAgent(t *testing.T) {
+	const directID = "33333333-3333-3333-3333-333333333333"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/agents/"+directID:
+			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: directID, Slug: "direct-agent", Name: "direct-agent"})
+		case strings.HasPrefix(r.URL.Path, "/api/v1/agents/") && r.URL.Path != "/api/v1/agents/":
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "not found"})
+		case r.URL.Path == "/api/v1/agents":
+			agents := []hubclient.Agent{
+				{ID: "by-slug-id", Slug: "worker", Name: "Worker Display Name"},
+				{ID: "ambiguous-1", Slug: "dup-1", Name: "duplicate"},
+				{ID: "ambiguous-2", Slug: "dup-2", Name: "duplicate"},
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"agents": agents})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	agentSvc := client.Agents()
+
+	t.Run("resolves directly by ID", func(t *testing.T) {
+		a, err := resolveReferenceAgent(context.Background(), agentSvc, directID)
+		require.NoError(t, err)
+		assert.Equal(t, directID, a.ID)
+	})
+
+	t.Run("falls back to slug match", func(t *testing.T) {
+		a, err := resolveReferenceAgent(context.Background(), agentSvc, "worker")
+		require.NoError(t, err)
+		assert.Equal(t, "by-slug-id", a.ID)
+	})
+
+	t.Run("falls back to name match", func(t *testing.T) {
+		a, err := resolveReferenceAgent(context.Background(), agentSvc, "Worker Display Name")
+		require.NoError(t, err)
+		assert.Equal(t, "by-slug-id", a.ID)
+	})
+
+	t.Run("ambiguous name/slug errors", func(t *testing.T) {
+		_, err := resolveReferenceAgent(context.Background(), agentSvc, "duplicate")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "multiple agents")
+	})
+
+	t.Run("no match errors", func(t *testing.T) {
+		_, err := resolveReferenceAgent(context.Background(), agentSvc, "does-not-exist")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not found")
+	})
+}
+
+// TestListAgentsViaHub_AttributeFilterQueryParams is an end-to-end wiring
+// check: --owner/--broker/--harness resolve and land on the outgoing
+// /api/v1/agents request as ownerId/runtimeBrokerId/harnessConfig, combined
+// with the existing --phase/--label filters (all via AND, per ptone/scion#2146).
+func TestListAgentsViaHub_AttributeFilterQueryParams(t *testing.T) {
+	const ownerID = "44444444-4444-4444-4444-444444444444"
+	const brokerID = "55555555-5555-5555-5555-555555555555"
+
+	var gotQuery map[string][]string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/users/"+ownerID:
+			_ = json.NewEncoder(w).Encode(hubclient.User{ID: ownerID})
+		case r.URL.Path == "/api/v1/runtime-brokers/"+brokerID:
+			_ = json.NewEncoder(w).Encode(hubclient.RuntimeBroker{ID: brokerID, Name: "broker-x"})
+		case r.URL.Path == "/api/v1/agents":
+			gotQuery = map[string][]string(r.URL.Query())
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"agents": []hubclient.Agent{}})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL}
+
+	oldListAll, oldOwner, oldBroker, oldHarness, oldPhase, oldOutputFormat :=
+		listAll, filterOwner, filterBroker, filterHarness, filterPhase, outputFormat
+	listAll = true // avoid project ID lookup
+	filterOwner = ownerID
+	filterBroker = brokerID
+	filterHarness = "claude"
+	filterPhase = "running"
+	outputFormat = "json"
+	defer func() {
+		listAll, filterOwner, filterBroker, filterHarness, filterPhase, outputFormat =
+			oldListAll, oldOwner, oldBroker, oldHarness, oldPhase, oldOutputFormat
+	}()
+
+	oldStdout := os.Stdout
+	_, w, _ := os.Pipe()
+	os.Stdout = w
+	err = listAgentsViaHub(hubCtx)
+	_ = w.Close()
+	os.Stdout = oldStdout
+
+	require.NoError(t, err)
+	require.NotNil(t, gotQuery, "the /api/v1/agents request should have been made")
+	assert.Equal(t, ownerID, gotQuery["ownerId"][0])
+	assert.Equal(t, brokerID, gotQuery["runtimeBrokerId"][0])
+	assert.Equal(t, "claude", gotQuery["harnessConfig"][0])
+	assert.Equal(t, "running", gotQuery["phase"][0])
+}
+
+// TestListAgentsViaHub_DescendantsFlag verifies --descendants=<agent> resolves
+// the reference agent and sends its ID as ancestorId on the outgoing request.
+func TestListAgentsViaHub_DescendantsFlag(t *testing.T) {
+	const refID = "66666666-6666-6666-6666-666666666666"
+
+	var gotAncestorID string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/agents/"+refID:
+			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: refID, Slug: "ref-agent", Name: "ref-agent"})
+		case r.URL.Path == "/api/v1/agents":
+			gotAncestorID = r.URL.Query().Get("ancestorId")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"agents": []hubclient.Agent{}})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL}
+
+	oldListAll, oldDescendants, oldOutputFormat := listAll, filterDescendants, outputFormat
+	listAll = true
+	filterDescendants = refID
+	outputFormat = "json"
+	defer func() {
+		listAll, filterDescendants, outputFormat = oldListAll, oldDescendants, oldOutputFormat
+	}()
+
+	oldStdout := os.Stdout
+	_, w, _ := os.Pipe()
+	os.Stdout = w
+	err = listAgentsViaHub(hubCtx)
+	_ = w.Close()
+	os.Stdout = oldStdout
+
+	require.NoError(t, err)
+	assert.Equal(t, refID, gotAncestorID)
+}
+
+// TestListAgentsViaHub_AncestorsFlag verifies --ancestors=<agent> resolves the
+// reference agent's Ancestry chain and sends it as the id[] relationship
+// filter, and that an agent with an empty Ancestry short-circuits to zero
+// results without sending an ambiguous empty id[] query.
+func TestListAgentsViaHub_AncestorsFlag(t *testing.T) {
+	const refID = "77777777-7777-7777-7777-777777777777"
+	const emptyRefID = "88888888-8888-8888-8888-888888888888"
+
+	var gotIDs []string
+	var agentsCalled bool
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/agents/"+refID:
+			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: refID, Slug: "ref-agent", Ancestry: []string{"anc-1", "anc-2"}})
+		case r.URL.Path == "/api/v1/agents/"+emptyRefID:
+			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: emptyRefID, Slug: "empty-ref-agent"})
+		case r.URL.Path == "/api/v1/agents":
+			agentsCalled = true
+			gotIDs = r.URL.Query()["id"]
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"agents": []hubclient.Agent{}})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL}
+
+	oldListAll, oldAncestors, oldOutputFormat := listAll, filterAncestors, outputFormat
+	listAll = true
+	outputFormat = "json"
+	defer func() {
+		listAll, filterAncestors, outputFormat = oldListAll, oldAncestors, oldOutputFormat
+	}()
+
+	t.Run("non-empty ancestry is sent as id[] filter", func(t *testing.T) {
+		agentsCalled, gotIDs = false, nil
+		filterAncestors = refID
+
+		oldStdout := os.Stdout
+		_, w, _ := os.Pipe()
+		os.Stdout = w
+		err := listAgentsViaHub(hubCtx)
+		_ = w.Close()
+		os.Stdout = oldStdout
+
+		require.NoError(t, err)
+		assert.True(t, agentsCalled)
+		assert.ElementsMatch(t, []string{"anc-1", "anc-2"}, gotIDs)
+	})
+
+	t.Run("empty ancestry short-circuits without querying agents", func(t *testing.T) {
+		agentsCalled, gotIDs = false, nil
+		filterAncestors = emptyRefID
+
+		oldStdout := os.Stdout
+		_, w, _ := os.Pipe()
+		os.Stdout = w
+		err := listAgentsViaHub(hubCtx)
+		_ = w.Close()
+		os.Stdout = oldStdout
+
+		require.NoError(t, err)
+		assert.False(t, agentsCalled, "an empty ancestry must not fall through to an unrestricted /api/v1/agents query")
+	})
 }
