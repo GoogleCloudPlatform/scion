@@ -98,7 +98,7 @@ const FALLBACK_SCOPES: ScopeOption[] = [
   {
     value: 'agent:lifecycle',
     label: 'agent:lifecycle',
-    description: 'Start, stop, suspend, restart, and restore agents',
+    description: 'Start, stop, suspend, restart, restore, and reincarnate agents',
     resource: 'agent',
     isAlias: false,
   },

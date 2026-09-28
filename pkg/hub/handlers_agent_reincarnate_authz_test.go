@@ -152,6 +152,15 @@ func TestReincarnateAgent_PATWithManageScope_Allowed(t *testing.T) {
 // PAT minted with only agent:read and agent:list must still be denied. The
 // UAT project-constraint gate narrows a token's own access down to its
 // scopes; it can never be widened by the user's underlying role.
+//
+// DryRun is false (review p1b-2078-r4 Optional #2): a dry run never mutates
+// the agent regardless of whether the request is allowed or denied, so a
+// DryRun:true request would make the "agent must be untouched" assertions
+// below vacuous -- they would pass even if the authz gate let the request
+// through. A real (non-dry-run) request that reached the worker would flip
+// ReincarnationState and bump StateVersion, so leaving those fields
+// untouched here is a genuine assertion about the gate, not about the
+// request shape.
 func TestReincarnateAgent_PATWithoutLifecycleScope_Denied(t *testing.T) {
 	srv, s, project, agent := reincarnateAuthzFixture(t)
 	user := newReincarnateAuthzUser(t, s, "no-lifecycle-pat")
@@ -159,7 +168,7 @@ func TestReincarnateAgent_PATWithoutLifecycleScope_Denied(t *testing.T) {
 	beforeVersion := agent.StateVersion
 
 	identity := scopedIdentityFor(user, project.ID, []string{"agent:read", "agent:list"})
-	req := reincarnateRequest(t, agent.ID, identity, ReincarnateAgentRequest{Handoff: "h", DryRun: true})
+	req := reincarnateRequest(t, agent.ID, identity, ReincarnateAgentRequest{Handoff: "h", DryRun: false})
 	rec := httptest.NewRecorder()
 	srv.handleReincarnateAgent(rec, req, agent.ID)
 	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
@@ -192,14 +201,42 @@ func TestReincarnateAgent_SessionUserWithRole_Allowed(t *testing.T) {
 
 // TestReincarnateAgent_SessionUserWithoutLifecycle_Denied: a session user
 // with no role binding on the project at all gets 403, and the agent is
-// untouched.
+// untouched. DryRun is false, for the same reason as
+// TestReincarnateAgent_PATWithoutLifecycleScope_Denied (review p1b-2078-r4
+// Optional #2): otherwise the untouched assertion is vacuous.
 func TestReincarnateAgent_SessionUserWithoutLifecycle_Denied(t *testing.T) {
 	srv, s, _, agent := reincarnateAuthzFixture(t)
 	user := newReincarnateAuthzUser(t, s, "session-nobody")
 	beforeVersion := agent.StateVersion
 
 	identity := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "web")
-	req := reincarnateRequest(t, agent.ID, identity, ReincarnateAgentRequest{Handoff: "h", DryRun: true})
+	req := reincarnateRequest(t, agent.ID, identity, ReincarnateAgentRequest{Handoff: "h", DryRun: false})
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, req, agent.ID)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+
+	after, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, beforeVersion, after.StateVersion, "agent must be untouched by a denied request")
+}
+
+// TestReincarnateAgent_SessionUserWithOnlyAgentUpdate_Denied is the review
+// p1b-2078-r4 Optional #2 regression test that pins the intended policy
+// shift on the non-PAT path: project-admin (used by
+// TestReincarnateAgent_SessionUserWithRole_Allowed) bundles both
+// agent.lifecycle and agent.update, so that test alone cannot distinguish
+// which permission the handler actually checks. A session user bound to a
+// custom role granting ONLY agent.update -- the exact permission A24
+// replaced -- must be denied. This fails under the pre-A24 ActionUpdate
+// mutation (verified; see the round-4 dev report) and passes at head.
+func TestReincarnateAgent_SessionUserWithOnlyAgentUpdate_Denied(t *testing.T) {
+	srv, s, project, agent := reincarnateAuthzFixture(t)
+	user := newReincarnateAuthzUser(t, s, "session-update-only")
+	grantPermissionViaRoleBinding(t, s, user.ID, "agent.update", store.RoleScopeProject, project.ID)
+	beforeVersion := agent.StateVersion
+
+	identity := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "web")
+	req := reincarnateRequest(t, agent.ID, identity, ReincarnateAgentRequest{Handoff: "h", DryRun: false})
 	rec := httptest.NewRecorder()
 	srv.handleReincarnateAgent(rec, req, agent.ID)
 	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
