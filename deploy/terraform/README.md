@@ -84,6 +84,32 @@ another hub's state.
 Each further hub is just step 3 again with a new `hub_name`/prefix — the
 shared layer is untouched.
 
+## Post-apply step: Vertex environment for agents
+
+Before an agent can start on a fresh hub, an admin must set two hub-scope
+environment values:
+
+```bash
+scion hub env set --scope hub --always GOOGLE_CLOUD_PROJECT=<project>
+scion hub env set --scope hub --always GOOGLE_CLOUD_REGION=<region>
+```
+
+(`GOOGLE_CLOUD_LOCATION` is accepted as an equivalent alternative to
+`GOOGLE_CLOUD_REGION`.) Without this, an agent using GCP-identity auth
+(Workload Identity or an assigned service account) fails to start with
+`2 required environment variable(s) are missing: GOOGLE_CLOUD_PROJECT,
+GOOGLE_CLOUD_LOCATION` — the runtime broker's preflight check rejects the
+create before it ever reaches the pod.
+
+This is a **manual, post-apply, per-hub step, not a Terraform variable**.
+No key in `settings.yaml` reaches the broker's preflight: `harness_configs
+.<h>.env` and `runtimes.<n>.env` are only applied later, after the
+preflight has already run and (without the values above) already failed.
+The hub-scope environment store is a database row set through the hub's own
+admin API/CLI, not a file Terraform renders, and this Terraform module set
+makes no `local-exec` calls, so it cannot run this step for you. Set it once
+per hub, right after that hub's first apply.
+
 ## IAP OAuth client
 
 `iap_enabled = true` on the Cloud Run service turns on direct IAP using the
@@ -169,14 +195,79 @@ This is fine for cost-sharing during development. Production multi-tenant
 isolation needs dedicated infra per hub (a variation built from the same
 modules, not yet implemented).
 
-Size Cloud SQL's `max_connections` for the sum across hubs: with
-`max_open_conns = 10` per hub instance, the default `max_instances = 1`
-(down from 3 — see `max_instances`'s description for the upstream defect,
-`ptone/scion#2090`, this avoids) uses at most 10 connections per hub;
-raising `max_instances` back toward 3 lets a hub use up to 30. Either way
-the default `max_connections = 200` supports roughly 5 dev hubs with
-headroom (`hub-cloudrun`'s `max_connections_budget`, default 40 per hub,
-checks this per hub).
+Size Cloud SQL's `max_connections` for the sum across hubs — see "Scaling"
+below for the per-hub connection budget this module checks.
+
+## Health endpoints
+
+The hub exposes `/readyz` and `/healthz`, and `hub-cloudrun` wires up a
+**startup probe on `/readyz` only — there is deliberately no liveness
+probe.**
+
+- **`/readyz`** answers `{"status":"ready"}`/200 once `store.Ping` succeeds
+  and, because this module always sets `workspace_storage.backend: nfs`,
+  the NFS mount also checks healthy; otherwise it's 503 `not_ready` with a
+  reason. This is what gates traffic to a fresh revision (the startup
+  probe), and what "the hub is up" means operationally.
+- **`/healthz`** (aliased as `/health` on Cloud Run, where the literal path
+  `/healthz` is reserved by Cloud Run's own infrastructure and 404s) always
+  returns 200, but the handler it calls does unbounded work first:
+  `store.Ping`, three more `List` queries against the same connection pool,
+  and an NFS mount check — with no timeout of its own. A Postgres stall or
+  pool exhaustion hangs this handler just as surely as it would hang
+  `/readyz`.
+- **There is no liveness probe, on purpose.** If `/healthz` (or any
+  DB-touching endpoint) were wired up as a liveness probe, a shared Cloud
+  SQL blip would make every hub instance fail its liveness check at once,
+  and Cloud Run would restart all of them simultaneously — a
+  self-inflicted thundering herd on top of the DB problem that caused it.
+  There is no DB-free endpoint upstream to point a liveness probe at
+  today; one should be added upstream before this module adds a liveness
+  probe.
+
+## Scaling
+
+`max_instances` defaults to **1**, down from an earlier default of 3,
+because of an upstream defect: when the Cloud Run instance that owns
+*broker affinity* goes away (scale-in, revision retirement, or graceful
+shutdown), it marks every project's runtime-broker provider **offline** for
+the shared `broker_id`, and nothing on the surviving instances brings them
+back online. The next agent-create on an affected project fails with
+"Default runtime broker is unavailable" until some instance reconnects
+(often requiring a manual restart). This is tracked upstream as
+`ptone/scion#2090`; raise `max_instances` back up only once that lands in
+the hub image you're running. `min_instances` stays at 1 for the same
+reason: a multi-instance steady state only makes the scale-in case more
+frequent, not more likely to matter — the underlying defect is present at
+`min=1/max=3` too.
+
+Whatever `max_instances` you run, `hub-cloudrun` checks a per-hub
+**connection budget**: `max_instances × database.max_open_conns` (10,
+single-sourced with the rendered settings) must not exceed
+`max_connections_budget` (default 40). The shared Cloud SQL instance's own
+`max_connections` (default 200, `shared-infra`'s `sql_max_connections`)
+must in turn cover the sum of every hub's budget attached to it — see
+"Shared-infra trust domain and sizing" above.
+
+## SQL availability
+
+The default is **`REGIONAL`** (`cloudsql-instance`'s `availability_type`),
+giving Cloud SQL automatic failover to a standby in a second zone.
+`ZONAL` is available for a smaller/cheaper dev footprint but gives up
+failover entirely.
+
+**Converting an existing `ZONAL` instance to `REGIONAL` is an in-place
+update, not a replacement** — but it triggers a restart of the shared
+instance with an observed outage of **about 7 minutes**. Every hub
+attached to the shared instance sees a window of `5xx`s and
+heartbeat/settings-refresh errors on their own `POST /status` calls during
+that window; it self-recovers with no hub restarts once the instance is
+back. **Schedule this**, the same way you would schedule any shared-infra
+maintenance, rather than running it against a project with active agents.
+
+A deliberate failover test (`gcloud sql instances failover`) has **not**
+been run against this module set. `REGIONAL`'s automatic-failover behavior
+is Cloud SQL's own documented guarantee, not something re-verified here.
 
 ## GKE deletion protection is Terraform-only
 
@@ -302,6 +393,29 @@ per-resource acks before applying.
 **Known window:** from the `google_sql_user` password update until the new
 revision is Ready, the old revision's *new* DB connections fail, while its
 existing pooled connections survive.
+
+## Second-plan expectations
+
+**A clean deployment's second `plan` exits 0 — "No changes."** on every
+root (`shared-infra` and each hub). That's the acceptance bar this module
+set is built to, and it's what CI's `terraform plan -detailed-exitcode`
+step checks.
+
+A **refresh-only note with no planned action** is benign and does not
+violate that bar — it means Terraform detected drift between state and the
+real resource on `refresh`, but nothing in *this* apply's config actually
+changes as a result. Two you may see:
+
+- The artifacts bucket's `lifecycle_rule` condition fields (e.g. an
+  API-normalized default that was left unset in config) refreshing to
+  their server-side default value.
+- A project IAM member's `etag` or similar server-churn field moving.
+
+Neither shows up as a planned add/change/destroy; only exit code 0 with
+"No changes" (or a `~` refresh-only note in `-refresh-only` mode) is the
+pass bar. An actual add/change/destroy on a plan you expected to be clean
+is not benign — treat it as a real finding and read the diff before
+applying.
 
 ## Troubleshooting
 
