@@ -25,7 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
@@ -269,15 +269,15 @@ func (r *PodmanRuntime) List(ctx context.Context, labelFilter map[string]string)
 			actual := labels[k]
 			if actual == "" {
 				switch k {
-				case projectcompat.LabelProject:
-					actual = projectcompat.ProjectNameFromLabels(labels)
-				case projectcompat.LabelProjectID:
-					actual = projectcompat.ProjectIDFromLabels(labels)
-				case projectcompat.LabelProjectPath:
-					actual = projectcompat.ProjectPathFromLabels(labels)
+				case projectkeys.LabelProject:
+					actual = projectkeys.ProjectNameFromLabels(labels)
+				case projectkeys.LabelProjectID:
+					actual = projectkeys.ProjectIDFromLabels(labels)
+				case projectkeys.LabelProjectPath:
+					actual = projectkeys.ProjectPathFromLabels(labels)
 				}
 			}
-			if !projectcompat.LabelValuesMatch(k, actual, v) {
+			if !projectkeys.LabelValuesMatch(k, actual, v) {
 				match = false
 				break
 			}
@@ -303,9 +303,9 @@ func (r *PodmanRuntime) List(ctx context.Context, labelFilter map[string]string)
 				Template:        labels["scion.template"],
 				HarnessConfig:   labels["scion.harness_config"],
 				HarnessAuth:     labels["scion.harness_auth"],
-				Project:         projectcompat.ProjectNameFromLabels(labels),
-				ProjectID:       projectcompat.ProjectIDFromLabels(labels),
-				ProjectPath:     projectcompat.ProjectPathFromLabels(labels),
+				Project:         projectkeys.ProjectNameFromLabels(labels),
+				ProjectID:       projectkeys.ProjectIDFromLabels(labels),
+				ProjectPath:     projectkeys.ProjectPathFromLabels(labels),
 				Runtime:         r.Name(),
 			}
 			if code, ok := ExitCodeFromContainerStatus(c.Status); ok {

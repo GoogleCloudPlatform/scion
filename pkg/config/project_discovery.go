@@ -19,7 +19,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
 // ProjectType indicates the kind of project.
@@ -386,14 +386,14 @@ func RemoveProjectConfig(configPath string) error {
 		return err
 	}
 
-	root := projectcompat.ResolvePathForCompare(projectConfigsDir)
+	root := projectkeys.ResolvePathForCompare(projectConfigsDir)
 	isSymlink := parentInfo.Mode()&os.ModeSymlink != 0
 
 	if !isSymlink {
 		// A real directory: safe only when it is itself a direct child of
 		// the canonical root — never root itself, and never anything a
 		// literal prefix match alone would have let through.
-		resolved := projectcompat.ResolvePathForCompare(parent)
+		resolved := projectkeys.ResolvePathForCompare(parent)
 		if filepath.Dir(resolved) != root {
 			return os.ErrPermission
 		}
@@ -410,7 +410,7 @@ func RemoveProjectConfig(configPath string) error {
 	// per-entry legacy links live in, and only when that link additionally
 	// has the exact shape the migrator produces. Anywhere else under
 	// ~/.scion — not just outside it — is refused rather than guessed at.
-	linkDir := projectcompat.ResolvePathForCompare(filepath.Dir(parent))
+	linkDir := projectkeys.ResolvePathForCompare(filepath.Dir(parent))
 	switch {
 	case linkDir == root:
 		// The migrator never creates a link directly inside project-configs/
@@ -420,7 +420,7 @@ func RemoveProjectConfig(configPath string) error {
 		// ever touched.
 		return os.Remove(parent)
 	case filepath.Dir(linkDir) == filepath.Dir(root) && filepath.Base(linkDir) == legacyProjectConfigsDirName:
-		resolved := projectcompat.ResolvePathForCompare(parent)
+		resolved := projectkeys.ResolvePathForCompare(parent)
 		if filepath.Dir(resolved) == root && filepath.Base(resolved) == filepath.Base(parent) {
 			if err := os.RemoveAll(resolved); err != nil {
 				return err

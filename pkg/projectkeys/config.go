@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package projectcompat
+package projectkeys
 
 const (
 	ConfigProjectIDKey     = "project_id"
@@ -29,15 +29,13 @@ const (
 )
 
 // IsProjectIDConfigKey reports whether key is the canonical top-level
-// project-id config key name. The legacy grove_id key name is no longer
-// accepted as CLI input.
+// project-id config key name.
 func IsProjectIDConfigKey(key string) bool {
 	return key == ConfigProjectIDKey
 }
 
 // IsHubProjectIDConfigKey reports whether key is a canonical hub project-id
-// config key name. The legacy hub.grove_id / hub.groveId key names are no
-// longer accepted as CLI input.
+// config key name.
 func IsHubProjectIDConfigKey(key string) bool {
 	switch key {
 	case ConfigHubProjectIDKey, ConfigHubProjectIDJSON:

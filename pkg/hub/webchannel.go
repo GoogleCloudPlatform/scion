@@ -22,7 +22,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
 // webChannelBus is a real broker spoke for the "web" channel. It follows the
@@ -174,7 +174,7 @@ func identityFromTopic(topic string, msg *messages.StructuredMessage) (userID, p
 	if msg == nil {
 		return "", "", "", false
 	}
-	parsed, err := projectcompat.ParseTopic(topic)
+	parsed, err := projectkeys.ParseTopic(topic)
 	if err != nil {
 		return "", "", "", false
 	}
@@ -182,7 +182,7 @@ func identityFromTopic(topic string, msg *messages.StructuredMessage) (userID, p
 	projectID = parsed.ProjectID
 
 	switch parsed.Kind {
-	case projectcompat.TopicKindUser:
+	case projectkeys.TopicKindUser:
 		// Agent → user message: topic has the user ID, sender is the agent.
 		userID = parsed.Actor
 		if strings.HasPrefix(msg.Sender, "agent:") {
@@ -191,7 +191,7 @@ func identityFromTopic(topic string, msg *messages.StructuredMessage) (userID, p
 				agentID = strings.TrimPrefix(msg.Sender, "agent:")
 			}
 		}
-	case projectcompat.TopicKindAgent:
+	case projectkeys.TopicKindAgent:
 		// User → agent message: topic has the agent slug, recipient is the agent.
 		// Phase 6 fix (O1): prefer msg.RecipientID (UUID) over the slug from
 		// the topic so that both directions use the same identifier form

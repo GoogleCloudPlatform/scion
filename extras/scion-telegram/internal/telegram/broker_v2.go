@@ -38,7 +38,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
 
@@ -534,10 +534,10 @@ func (b *TelegramBrokerV2) importV1UserMappings(ctx context.Context, mappingsJSO
 
 // parseTopicComponents extracts projectID and agentSlug from a broker topic.
 func parseTopicComponents(topic string) (projectID, agentSlug string) {
-	parsed, err := projectcompat.ParseTopic(topic)
+	parsed, err := projectkeys.ParseTopic(topic)
 	if err == nil {
 		projectID = parsed.ProjectID
-		if parsed.Kind == projectcompat.TopicKindAgent {
+		if parsed.Kind == projectkeys.TopicKindAgent {
 			agentSlug = parsed.Actor
 		}
 	} else {
@@ -567,7 +567,7 @@ const v1LegacyRouteTopicPrefix = "scion.grove."
 // the canonical topic prefix, if it still uses the frozen v1 prefix.
 func normalizeV1RouteTopic(topic string) string {
 	if rest, ok := strings.CutPrefix(topic, v1LegacyRouteTopicPrefix); ok {
-		return projectcompat.CanonicalTopicPrefix + "." + rest
+		return projectkeys.CanonicalTopicPrefix + "." + rest
 	}
 	return topic
 }
@@ -2136,7 +2136,7 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 			}
 		}
 
-		topic := projectcompat.AgentTopic(link.ProjectID, agentSlug)
+		topic := projectkeys.AgentTopic(link.ProjectID, agentSlug)
 		recipient := "agent:" + agentSlug
 
 		msg := &messages.StructuredMessage{
@@ -2239,7 +2239,7 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 			}
 
 			mentionRecipient := "agent:" + mention.Name
-			mentionTopic := projectcompat.AgentTopic(link.ProjectID, mention.Name)
+			mentionTopic := projectkeys.AgentTopic(link.ProjectID, mention.Name)
 
 			mentionMsg := messages.NewMention(sender, mentionRecipient, mentionText, mentionSource)
 			mentionMsg.SenderID = senderID
@@ -2555,7 +2555,7 @@ func (b *TelegramBrokerV2) handleCallbackQuery(ctx context.Context, cb *Callback
 	}
 
 	// Deliver the ask-user response to the hub.
-	topic := projectcompat.AgentTopic(resp.ProjectID, resp.AgentSlug)
+	topic := projectkeys.AgentTopic(resp.ProjectID, resp.AgentSlug)
 
 	// Determine sender identity from the callback user.
 	sender := "telegram:unknown"

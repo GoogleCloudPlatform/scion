@@ -22,7 +22,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"gopkg.in/yaml.v3"
 )
@@ -587,10 +587,10 @@ func UpdateSetting(projectPath string, key string, value string, global bool) er
 }
 
 func GetSettingValue(s *Settings, key string) (string, error) {
-	if projectcompat.IsProjectIDConfigKey(key) {
+	if projectkeys.IsProjectIDConfigKey(key) {
 		return s.ProjectID, nil
 	}
-	if projectcompat.IsHubProjectIDConfigKey(key) {
+	if projectkeys.IsHubProjectIDConfigKey(key) {
 		if s.Hub != nil {
 			return s.Hub.ProjectID, nil
 		}

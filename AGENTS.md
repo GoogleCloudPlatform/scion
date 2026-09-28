@@ -96,7 +96,7 @@ All icons in the web frontend use the Shoelace `<sl-icon>` component (Bootstrap 
 - **Hub/Runtime Separation**: Ensure distinct separation between state management (Hub) and execution logic (Runtime Broker).
 - **Harness Logic**: LLM-specific interactions should be encapsulated in `pkg/harness`.
 - **Refactoring**: Since the project is in alpha, refactoring that modifies or removes behavior does not require graceful deprecation.
-- **Project terminology guardrail**: Use `project` vocabulary in new code. The legacy `grove` name is retired but may still appear in explicit compatibility adapters, compatibility tests/fixtures, migrations, or examples that intentionally demonstrate historical behavior. Route any remaining legacy literals through `pkg/projectcompat` instead of open-coding aliases, and run `make compat-literals` when touching project/grove compatibility surfaces.
+- **Project terminology guardrail**: Use `project` vocabulary in new code. The legacy `grove` name is retired but may still appear in explicit compatibility adapters, compatibility tests/fixtures, migrations, or examples that intentionally demonstrate historical behavior. Route any remaining legacy literals through `pkg/projectkeys` instead of open-coding aliases, and run `make compat-literals` when touching project/grove compatibility surfaces.
 
 ## Glossary and project development terminology
 

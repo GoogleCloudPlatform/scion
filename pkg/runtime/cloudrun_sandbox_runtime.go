@@ -34,7 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
@@ -1101,10 +1101,10 @@ func (r *CloudRunSandboxRuntime) List(ctx context.Context, labelFilter map[strin
 			actual := entry.Labels[k]
 			if actual == "" {
 				switch k {
-				case projectcompat.LabelProject:
-					actual = projectcompat.ProjectNameFromLabels(entry.Labels)
-				case projectcompat.LabelProjectID:
-					actual = projectcompat.ProjectIDFromLabels(entry.Labels)
+				case projectkeys.LabelProject:
+					actual = projectkeys.ProjectNameFromLabels(entry.Labels)
+				case projectkeys.LabelProjectID:
+					actual = projectkeys.ProjectIDFromLabels(entry.Labels)
 				}
 			}
 			if actual != v {

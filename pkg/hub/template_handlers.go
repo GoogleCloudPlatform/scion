@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -154,6 +153,22 @@ func (s *Server) handleTemplatesV2(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// legacyResourceScope is the retired name for what is now the "project"
+// resource scope (templates, harness configs, skills, and any other
+// file-based resource organized by scope).
+const legacyResourceScope = "grove"
+
+// canonicalResourceScope maps the legacy scope name to "project"; other
+// values are returned unchanged. listTemplatesV2 applies it once, before the
+// scope drives the switch or the store filter. Create and clone handlers
+// reject the legacy name instead of normalizing it.
+func canonicalResourceScope(scope string) string {
+	if scope == legacyResourceScope {
+		return "project"
+	}
+	return scope
+}
+
 // listTemplatesV2 lists templates with extended filtering.
 func (s *Server) listTemplatesV2(w http.ResponseWriter, r *http.Request) {
 	if !checkAgentReadScope(w, r) {
@@ -163,7 +178,7 @@ func (s *Server) listTemplatesV2(w http.ResponseWriter, r *http.Request) {
 	filter := store.TemplateFilter{Name: query.Get("name"), Scope: query.Get("scope"), ScopeID: query.Get("scopeId"), ProjectID: query.Get("projectId"), Harness: query.Get("harness"), Status: query.Get("status"), Search: query.Get("search")}
 	// Normalize a legacy scope name to its canonical form before it drives
 	// the scope switch below or the store filter (ptone/scion#1977).
-	filter.Scope = projectcompat.CanonicalResourceScope(filter.Scope)
+	filter.Scope = canonicalResourceScope(filter.Scope)
 	if filter.Status == "" {
 		filter.Status = store.TemplateStatusActive
 	}

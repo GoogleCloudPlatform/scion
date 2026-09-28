@@ -10,7 +10,7 @@ import (
 	slackapi "github.com/slack-go/slack"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
 // OpenAskUserModal opens a Slack modal for free-text response to an ask-user request.
@@ -98,7 +98,7 @@ func HandleAskModalSubmit(
 			sender = "user:" + mapping.ScionEmail
 		}
 
-		topic := projectcompat.AgentTopic(pending.ProjectID, pending.AgentSlug)
+		topic := projectkeys.AgentTopic(pending.ProjectID, pending.AgentSlug)
 		msg := &messages.StructuredMessage{
 			Version:   messages.Version,
 			Timestamp: time.Now().UTC().Format(time.RFC3339),

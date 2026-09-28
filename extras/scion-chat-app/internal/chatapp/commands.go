@@ -30,7 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/extras/scion-chat-app/internal/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
 // eventUserLookup returns user info from the ChatEvent itself, using the
@@ -761,7 +761,7 @@ func (r *CommandRouter) cmdCreate(ctx context.Context, event *ChatEvent, args []
 // subscription link created; routing both through this one function keeps
 // them from drifting apart.
 func projectSubscriptionPattern(projectID string) string {
-	return projectcompat.ProjectPattern(projectID)
+	return projectkeys.ProjectPattern(projectID)
 }
 
 func (r *CommandRouter) cmdLink(ctx context.Context, event *ChatEvent, args []string) (*EventResponse, error) {

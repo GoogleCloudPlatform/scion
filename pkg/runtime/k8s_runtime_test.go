@@ -24,7 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
@@ -113,8 +113,8 @@ func TestKubernetesRuntime_List_SelectorUsesProjectLabels(t *testing.T) {
 	r := NewKubernetesRuntime(client)
 
 	_, err := r.List(context.Background(), map[string]string{
-		projectcompat.LabelProject:   "myproject",
-		projectcompat.LabelProjectID: "proj-123",
+		projectkeys.LabelProject:   "myproject",
+		projectkeys.LabelProjectID: "proj-123",
 	})
 	if err != nil {
 		t.Fatalf("List failed: %v", err)

@@ -33,7 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"golang.org/x/term"
 	corev1 "k8s.io/api/core/v1"
@@ -812,9 +812,9 @@ func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace s
 		return nil
 	}
 
-	projectID := projectcompat.ProjectIDFromLabels(config.Labels)
+	projectID := projectkeys.ProjectIDFromLabels(config.Labels)
 
-	projectName := projectcompat.ProjectNameFromLabels(config.Labels)
+	projectName := projectkeys.ProjectNameFromLabels(config.Labels)
 	if projectName == "" {
 		return fmt.Errorf("cannot create shared dir PVCs: missing scion.project label")
 	}
@@ -879,11 +879,11 @@ func (r *KubernetesRuntime) ensureProjectRWXClaim(
 		},
 	}
 
-	for k, v := range projectcompat.ProjectNameLabels(projectName) {
+	for k, v := range projectkeys.ProjectNameLabels(projectName) {
 		pvc.Labels[k] = v
 	}
 	if projectID != "" {
-		for k, v := range projectcompat.ProjectIDLabels(projectID) {
+		for k, v := range projectkeys.ProjectIDLabels(projectID) {
 			pvc.Labels[k] = v
 		}
 	}
@@ -1568,7 +1568,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			})
 		} else {
 			// Local backend: each shared dir gets its own PVC (existing behavior).
-			projectName := projectcompat.ProjectNameFromLabels(config.Labels)
+			projectName := projectkeys.ProjectNameFromLabels(config.Labels)
 			pvcName := sharedDirPVCName(projectName, sd.Name)
 			volName := fmt.Sprintf("shared-dir-%d", i)
 
@@ -2091,9 +2091,9 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 			}
 		}
 
-		projectPath := projectcompat.ProjectPathFromLabels(p.Annotations)
+		projectPath := projectkeys.ProjectPathFromLabels(p.Annotations)
 		if projectPath == "" {
-			projectPath = projectcompat.ProjectPathFromLabels(p.Labels)
+			projectPath = projectkeys.ProjectPathFromLabels(p.Labels)
 		}
 
 		var agentImage string
@@ -2108,8 +2108,8 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 			ContainerID:     p.Name, // Pod name serves as the container identifier
 			Name:            p.Labels["scion.name"],
 			Template:        p.Labels["scion.template"],
-			Project:         projectcompat.ProjectNameFromLabels(p.Labels),
-			ProjectID:       projectcompat.ProjectIDFromLabels(p.Labels),
+			Project:         projectkeys.ProjectNameFromLabels(p.Labels),
+			ProjectID:       projectkeys.ProjectIDFromLabels(p.Labels),
 			ProjectPath:     projectPath,
 			Labels:          p.Labels,
 			Annotations:     p.Annotations,

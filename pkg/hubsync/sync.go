@@ -32,7 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"gopkg.in/yaml.v3"
 )
@@ -257,7 +257,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	// external repo).
 	var projectID string
 	if hubContext {
-		projectID = projectcompat.ProjectIDFromEnv(os.Getenv)
+		projectID = projectkeys.ProjectIDFromEnv(os.Getenv)
 	}
 	if projectID == "" {
 		projectID = settings.ProjectID

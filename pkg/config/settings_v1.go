@@ -24,7 +24,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/confmap"
 	"github.com/knadh/koanf/providers/env"
@@ -1335,7 +1335,7 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 	// LoadSettingsKoanf's identical comment for why both step 3 and step 4
 	// compare against this same value, and why a migrated global value is
 	// not compared against at all.
-	globalHubProjectID := k.String(projectcompat.ConfigHubProjectIDKey)
+	globalHubProjectID := k.String(projectkeys.ConfigHubProjectIDKey)
 	if globalMigratedHub {
 		globalHubProjectID = ""
 	}
@@ -1393,7 +1393,7 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 		if projectPath != globalDir {
 			if projectID, err := ReadProjectID(projectPath); err == nil && projectID != "" {
 				_ = k.Load(confmap.Provider(map[string]interface{}{
-					projectcompat.ConfigHubProjectIDKey: projectID,
+					projectkeys.ConfigHubProjectIDKey: projectID,
 				}, "."), nil)
 			}
 		}
@@ -1422,7 +1422,7 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 // versionedEnvKeyMapper maps SCION_* environment variables to versioned settings keys.
 // All keys are snake_case so no camelCase conversion is needed.
 func versionedEnvKeyMapper(s string) string {
-	if mapped, ok := projectcompat.EnvProjectIDConfigKey(s, false); ok {
+	if mapped, ok := projectkeys.EnvProjectIDConfigKey(s, false); ok {
 		return mapped
 	}
 	if isRemovedLegacyEnv(s) {
@@ -2892,7 +2892,7 @@ func UpdateVersionedSetting(dir string, key string, value string) error {
 		return err
 	}
 
-	if projectcompat.IsProjectIDConfigKey(key) || projectcompat.IsHubProjectIDConfigKey(key) {
+	if projectkeys.IsProjectIDConfigKey(key) || projectkeys.IsHubProjectIDConfigKey(key) {
 		if vs.Hub == nil {
 			vs.Hub = &V1HubClientConfig{}
 		}
@@ -3020,7 +3020,7 @@ func UpdateVersionedSetting(dir string, key string, value string) error {
 // GetVersionedSettingValue retrieves a specific setting value from a VersionedSettings struct.
 // It mirrors the keys supported by UpdateVersionedSetting for read access.
 func GetVersionedSettingValue(vs *VersionedSettings, key string) (string, error) {
-	if projectcompat.IsProjectIDConfigKey(key) || projectcompat.IsHubProjectIDConfigKey(key) {
+	if projectkeys.IsProjectIDConfigKey(key) || projectkeys.IsHubProjectIDConfigKey(key) {
 		if vs.Hub != nil {
 			return vs.Hub.ProjectID, nil
 		}

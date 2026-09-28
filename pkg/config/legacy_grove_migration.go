@@ -45,13 +45,13 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"gopkg.in/yaml.v3"
 )
 
 // legacyProjectIDFile is the pre-rename name of the per-project id file.
-// Once migrated to projectcompat.ProjectIDFile, this name is never read
+// Once migrated to projectkeys.ProjectIDFile, this name is never read
 // again outside this file.
 const legacyProjectIDFile = "grove-id"
 
@@ -438,7 +438,7 @@ func MigrateLegacyProject(projectDir string, report Reporter) ProjectOverrides {
 // the right value in that case).
 func migrateLegacyProjectFile(dir string, report Reporter) string {
 	old := filepath.Join(dir, legacyProjectIDFile)
-	newPath := filepath.Join(dir, projectcompat.ProjectIDFile)
+	newPath := filepath.Join(dir, projectkeys.ProjectIDFile)
 
 	oldInfo, err := os.Lstat(old)
 	if err != nil {
@@ -659,7 +659,7 @@ func unwrapErrno(err error) string {
 
 // legacyProjectsDirName and legacyProjectConfigsDirName are the pre-rename
 // names of the two global ~/.scion directories migrated by
-// MigrateLegacyGlobalLayout. Once migrated to their projectcompat.ProjectsDir
+// MigrateLegacyGlobalLayout. Once migrated to their projectkeys.ProjectsDir
 // / ProjectConfigsDir replacements, these names are never read again outside
 // this file.
 const (
@@ -677,8 +677,8 @@ type legacyGlobalRoot struct {
 // legacyGlobalRoots lists the directories MigrateLegacyGlobalLayout moves,
 // in order.
 var legacyGlobalRoots = []legacyGlobalRoot{
-	{legacyName: legacyProjectsDirName, canonicalName: projectcompat.ProjectsDir},
-	{legacyName: legacyProjectConfigsDirName, canonicalName: projectcompat.ProjectConfigsDir},
+	{legacyName: legacyProjectsDirName, canonicalName: projectkeys.ProjectsDir},
+	{legacyName: legacyProjectConfigsDirName, canonicalName: projectkeys.ProjectConfigsDir},
 }
 
 // renameDir renames one legacy global-root entry to its canonical
@@ -1097,7 +1097,7 @@ func migrateProjectSettingsFile(path string) (migrated bool, override string) {
 		return false, ""
 	}
 	overrides := migrateLegacyYAMLKeys(path, hubGroveIDRename, currentProjectMigrationReporter())
-	v, ok := overrides[projectcompat.ConfigProjectIDKey]
+	v, ok := overrides[projectkeys.ConfigProjectIDKey]
 	return ok, v
 }
 

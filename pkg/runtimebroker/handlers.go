@@ -37,7 +37,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -66,7 +66,7 @@ func matchesAgent(a api.AgentInfo, id, projectID string) bool {
 
 func matchesAgentProject(a api.AgentInfo, projectID string) bool {
 	// Check the runtime's project_id label first, then the ProjectID field.
-	if labelProjectID := projectcompat.ProjectIDFromLabels(a.Labels); labelProjectID != "" {
+	if labelProjectID := projectkeys.ProjectIDFromLabels(a.Labels); labelProjectID != "" {
 		return labelProjectID == projectID
 	}
 	if a.ProjectID != "" {
@@ -325,7 +325,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	agentKey := func(a api.AgentInfo) string {
 		pid := a.ProjectID
 		if pid == "" {
-			pid = projectcompat.ProjectIDFromLabels(a.Labels)
+			pid = projectkeys.ProjectIDFromLabels(a.Labels)
 		}
 		return a.Name + "\x00" + pid
 	}
@@ -3193,7 +3193,7 @@ func agentNameMatches(a api.AgentInfo, id string) bool {
 // belonging to projectID (label first, then the ProjectID field). Unlike
 // matchesAgentProject, an entry with no project identity does not match.
 func agentInProjectStrict(a api.AgentInfo, projectID string) bool {
-	if labelProjectID := projectcompat.ProjectIDFromLabels(a.Labels); labelProjectID != "" {
+	if labelProjectID := projectkeys.ProjectIDFromLabels(a.Labels); labelProjectID != "" {
 		return labelProjectID == projectID
 	}
 	return a.ProjectID != "" && a.ProjectID == projectID
@@ -3202,7 +3202,7 @@ func agentInProjectStrict(a api.AgentInfo, projectID string) bool {
 // agentHasNoProjectIdentity reports whether an entry carries no project ID in
 // either labels or fields (a pre-label legacy container).
 func agentHasNoProjectIdentity(a api.AgentInfo) bool {
-	return projectcompat.ProjectIDFromLabels(a.Labels) == "" && a.ProjectID == ""
+	return projectkeys.ProjectIDFromLabels(a.Labels) == "" && a.ProjectID == ""
 }
 
 // resolveDeleteTarget finds the one agent entry a delete of id in projectID
@@ -3280,8 +3280,8 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, project
 	var matches []candidate
 	if projectID != "" {
 		matches = collect(map[string]string{
-			"scion.agent":                "true",
-			projectcompat.LabelProjectID: projectID,
+			"scion.agent":              "true",
+			projectkeys.LabelProjectID: projectID,
 		}, func(a api.AgentInfo) bool { return agentInProjectStrict(a, projectID) })
 		if len(matches) == 0 {
 			// Legacy (pre-label) containers carry no project ID. Accept one
@@ -3479,7 +3479,7 @@ func externalConfigShortID(path string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	abs = projectcompat.ResolvePathForCompare(abs)
+	abs = projectkeys.ResolvePathForCompare(abs)
 	if filepath.Base(abs) != config.DotScion {
 		return "", false
 	}
@@ -3489,7 +3489,7 @@ func externalConfigShortID(path string) (string, bool) {
 	}
 	projectDir := filepath.Dir(abs)
 	parent := filepath.Dir(projectDir)
-	if !projectcompat.ResolvedPathEqual(parent, filepath.Join(globalDir, config.ProjectConfigsDir)) {
+	if !projectkeys.ResolvedPathEqual(parent, filepath.Join(globalDir, config.ProjectConfigsDir)) {
 		return "", false
 	}
 	name := filepath.Base(projectDir)

@@ -33,7 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/resources"
@@ -316,8 +316,8 @@ func migrateLegacyAgentState(legacyDir, externalDir string) {
 // clean up containers before removing the project config directory.
 func StopProjectContainers(ctx context.Context, mgr Manager, projectName string, agentNames []string) []string {
 	containers, err := mgr.List(ctx, map[string]string{
-		"scion.agent":              "true",
-		projectcompat.LabelProject: projectName,
+		"scion.agent":            "true",
+		projectkeys.LabelProject: projectName,
 	})
 	if err != nil {
 		util.Debugf("StopProjectContainers: failed to list containers for project %s: %v", projectName, err)

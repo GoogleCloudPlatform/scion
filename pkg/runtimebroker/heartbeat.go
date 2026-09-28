@@ -25,7 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
 // heartbeatAgentKey returns a key that uniquely identifies an agent within the
@@ -36,7 +36,7 @@ import (
 func heartbeatAgentKey(a api.AgentInfo) string {
 	pid := a.ProjectID
 	if pid == "" {
-		pid = projectcompat.ProjectIDFromLabels(a.Labels)
+		pid = projectkeys.ProjectIDFromLabels(a.Labels)
 	}
 	return a.Name + "\x00" + pid
 }
