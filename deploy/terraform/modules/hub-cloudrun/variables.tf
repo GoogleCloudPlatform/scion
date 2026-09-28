@@ -176,9 +176,9 @@ variable "min_instances" {
 }
 
 variable "max_instances" {
-  description = "Cloud Run max instance count."
+  description = "Cloud Run max instance count. Default 1 (ptone decision, phase 2 hardening), down from 3: C1 (research-f114-oq4.md §C1; upstream issue ptone/scion#2090) — when the instance that owns broker affinity goes away (scale-in, revision retire, graceful shutdown), it stamps every project-provider row for the shared broker_id offline, and nothing on the surviving instances stamps them back online. Agent-create then fails with \"Default runtime broker is unavailable\" until an instance (re)connects. This is already reachable at min=1/max=3 today, and scaling above 1 only makes it more likely (more scale-in events). Revisit once ptone/scion#2090 is fixed upstream. min_instances stays 1 (OQ-4, unrelated: unconfirmed multi-replica in-process broker safety)."
   type        = number
-  default     = 3
+  default     = 1
 }
 
 variable "cpu" {
@@ -263,7 +263,7 @@ variable "broker_write_timeout" {
 }
 
 variable "max_connections_budget" {
-  description = "Phase 2 hardening (design §3.7): a per-hub ceiling on this hub's worst-case Postgres connection usage (max_instances * the rendered database.max_open_conns), checked below. The hub root has no visibility into sibling hubs on the same shared Cloud SQL instance (shared-lookup's contract, §3.5, exposes only the instance's own coordinates, not who else is attached to it), so the true design §3.7 budget — sum across every hub on the instance <= the shared instance's max_connections (default 200, configurations/shared-infra's sql_max_connections) — cannot be computed from inside a single hub root. This variable is the operator-supplied stand-in: it is one hub's share of that 200, not the total. Default 40 assumes up to 5 similarly-sized hubs on the shared instance (matching the README's \"roughly 5 dev hubs with headroom\" sizing note) — at the module defaults (max_instances=3, max_open_conns=10) a hub uses at most 30, leaving headroom under this 40 budget; 5 hubs at the budget's ceiling would use exactly 200. Operators adding more or larger hubs must lower this per-hub or raise the shared instance's max_connections and pass a matching value here."
+  description = "Phase 2 hardening (design §3.7): a per-hub ceiling on this hub's worst-case Postgres connection usage (max_instances * the rendered database.max_open_conns), checked below. The hub root has no visibility into sibling hubs on the same shared Cloud SQL instance (shared-lookup's contract, §3.5, exposes only the instance's own coordinates, not who else is attached to it), so the true design §3.7 budget — sum across every hub on the instance <= the shared instance's max_connections (default 200, configurations/shared-infra's sql_max_connections) — cannot be computed from inside a single hub root. This variable is the operator-supplied stand-in: it is one hub's share of that 200, not the total. Default 40 assumes up to 5 similarly-sized hubs on the shared instance (matching the README's \"roughly 5 dev hubs with headroom\" sizing note). At the module's own max_instances default (1, C1 — see that variable's description) a hub uses at most 10; even at the pre-C1 max_instances=3 some deployments may still run, a hub tops out at 30, still leaving headroom under this 40 budget, and 5 such hubs at the budget's ceiling would use exactly 200. Operators adding more or larger hubs must lower this per-hub or raise the shared instance's max_connections and pass a matching value here."
   type        = number
   default     = 40
 }

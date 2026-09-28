@@ -148,9 +148,13 @@ All IAM grants are additive (`google_*_iam_member` only — never
 Hubs sharing one project's infra form one trust domain, not a hard
 multi-tenancy boundary — see the design doc §3.7 for the full list of what
 is and isn't isolated. In particular, size Cloud SQL's `max_connections`
-for the sum across hubs: with `max_open_conns = 10` per hub instance and
-`max_instances = 3`, each hub can use up to 30 connections, so the default
-`max_connections = 200` supports roughly 5 dev hubs with headroom.
+for the sum across hubs: with `max_open_conns = 10` per hub instance, the
+phase 2 default `max_instances = 1` (down from 3 — see `max_instances`'s
+description for the C1 upstream defect, ptone/scion#2090, this avoids) uses
+at most 10 connections per hub; raising `max_instances` back toward 3 lets
+a hub use up to 30. Either way the default `max_connections = 200`
+supports roughly 5 dev hubs with headroom (`hub-cloudrun`'s
+`max_connections_budget`, default 40 per hub, checks this per hub).
 
 ## GKE deletion protection is Terraform-only
 

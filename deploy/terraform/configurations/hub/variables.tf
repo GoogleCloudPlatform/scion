@@ -106,9 +106,9 @@ variable "min_instances" {
 }
 
 variable "max_instances" {
-  description = "Cloud Run max instance count."
+  description = "Cloud Run max instance count. Default 1, down from 3 (ptone decision, phase 2 hardening) — see hub-cloudrun's max_instances description for the C1 upstream defect (research-f114-oq4.md §C1; ptone/scion#2090) this default avoids: scale-in of the broker-affinity-owning instance leaves the shared broker_id's project providers stamped offline with nothing to bring them back."
   type        = number
-  default     = 3
+  default     = 1
 }
 
 variable "cpu" {
