@@ -708,27 +708,39 @@ check "transport_audience_configured" {
 # (settings.yaml's auth.proxy.iap.audience, which agents must match) would
 # be assuming the wrong resource. outputs.tf's service_uri description has
 # named this exact check as a phase 2 item since phase 1.
-# NOT asserting google_cloud_run_v2_service.hub.uri == local.public_url here
-# (found while writing this check, reproduced credential-free with a
-# throwaway random_pet resource + a bare check block before touching this
-# module): a top-level check block's condition — unlike a resource
-# lifecycle{ postcondition {} }, which Terraform explicitly defers to apply
-# time for the resource's own not-yet-known attributes — must be a KNOWN
-# value at the moment Terraform evaluates it, and errors the entire plan
-# ("Check block assertion known after apply") if it isn't, rather than
-# merely warning. .uri is unknown until apply for any NEWLY CREATED service
-# (every fresh hub's first plan, e.g. tfha-h3's), so that assertion would
-# hard-block every future new hub's `terraform plan` — an F-112-class
-# regression (design doc §9: "no fresh hub can plan") introduced by this
-# very check, and exactly the failure mode fresh_hub_plan.tftest.hcl (item 6)
-# exists to catch; it does, which is how this was found instead of shipped.
-# It would NOT reproduce on the live h1/h2 update plan (.uri is already
-# known from refreshed state, since neither hub's service is being
-# replaced), but a check this module ships must hold for every hub,
-# including ones that don't exist yet. Reported to tf-lead as a phase 2
-# item 3a finding, not implemented as literally specified for that reason.
-# What's left, verifiable and warn-level: the URI format this module commits
-# to before the service exists at all.
+# NOT asserting google_cloud_run_v2_service.hub.uri == local.public_url here,
+# and NOT as a lifecycle{ postcondition {} } either (tf-lead review) — two
+# independent reasons, either one fatal on its own:
+#
+# 1. A top-level check block's condition — unlike a resource lifecycle
+#    postcondition, which Terraform explicitly defers to apply time for the
+#    resource's own not-yet-known attributes — must be a KNOWN value at the
+#    moment Terraform evaluates it, and errors the entire plan ("Check block
+#    assertion known after apply") if it isn't, rather than merely warning.
+#    .uri is unknown until apply for any NEWLY CREATED service (every fresh
+#    hub's first plan, e.g. tfha-h3's), so a check block asserting this
+#    would hard-block every future new hub's `terraform plan` — an
+#    F-112-class regression (design doc §9: "no fresh hub can plan").
+#    Reproduced credential-free with a throwaway random_pet resource + a
+#    bare check block before touching this module, then confirmed against
+#    this module via fresh_hub_plan.tftest.hcl (item 6), which exists to
+#    catch exactly this and did.
+#
+# 2. The equality doesn't even hold on hubs that already exist, so a
+#    postcondition (which DOES defer to apply, sidestepping #1) would just
+#    trade an unknown-value plan error for a hard apply failure on real
+#    infra. tf-lead: live h2 returns the legacy hash-based form
+#    (https://tfha-h2-4scjcvzjfa-uc.a.run.app), while h1 returns the
+#    deterministic vanity form local.public_url computes
+#    (https://tfha-h1-<project_number>.<region>.run.app) — Cloud Run does
+#    not guarantee which form a given service gets, so this module's own
+#    "no deploy twice" assumption about public_url (used for
+#    iap_audience/settings.yaml) already tolerates the two forms diverging,
+#    and a check pinning them together would misreport a subset of hubs as
+#    broken when they aren't.
+#
+# What's left, verifiable and warn-level regardless of URI form: the scheme
+# this module commits to before the service exists at all.
 check "service_uri_is_https" {
   assert {
     condition     = startswith(local.public_url, "https://")
