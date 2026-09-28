@@ -183,9 +183,10 @@ const def162MentionWaitTimeout = 30 * time.Second
 // given user, up to the timeout. Returns the notification if found.
 func waitForMentionNotification(t *testing.T, s store.Store, userID string, timeout time.Duration) *store.Notification {
 	t.Helper()
+	ctx := t.Context()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		notifs, err := s.GetNotifications(context.Background(), store.SubscriberTypeUser, userID, false)
+		notifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, userID, false)
 		require.NoError(t, err)
 		for i := range notifs {
 			if notifs[i].Status == ChatNotificationMention {
@@ -210,9 +211,10 @@ func waitForMentionNotification(t *testing.T, s store.Store, userID string, time
 // (notification fire vs. broker persistence) complete in a fixed order.
 func waitForBrokerMessage(t *testing.T, s store.Store, conversationID string, timeout time.Duration) []store.Message {
 	t.Helper()
+	ctx := t.Context()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		msgs, err := s.ListMessages(context.Background(), store.MessageFilter{ConversationID: conversationID}, store.ListOptions{})
+		msgs, err := s.ListMessages(ctx, store.MessageFilter{ConversationID: conversationID}, store.ListOptions{})
 		require.NoError(t, err)
 		if len(msgs.Items) > 0 {
 			return msgs.Items
