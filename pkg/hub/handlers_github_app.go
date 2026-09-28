@@ -29,7 +29,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
-	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	yamlv3 "gopkg.in/yaml.v3"
 )
@@ -61,18 +60,6 @@ type GitHubAppConfigUpdateRequest struct {
 	APIBaseURL      *string `json:"api_base_url,omitempty"`
 	WebhooksEnabled *bool   `json:"webhooks_enabled,omitempty"`
 	InstallationURL *string `json:"installation_url,omitempty"`
-}
-
-// handleGitHubApp handles GET and PUT /api/v1/github-app.
-func (s *Server) handleGitHubApp(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		s.handleGetGitHubApp(w, r)
-	case http.MethodPut:
-		s.handleUpdateGitHubApp(w, r)
-	default:
-		MethodNotAllowed(w)
-	}
 }
 
 func (s *Server) handleGetGitHubApp(w http.ResponseWriter, r *http.Request) {
@@ -218,36 +205,7 @@ func (s *Server) handleUpdateGitHubApp(w http.ResponseWriter, r *http.Request) {
 // setGitHubAppSecret stores a GitHub App secret via the secrets backend,
 // falling back to direct store if the backend is unavailable.
 func (s *Server) setGitHubAppSecret(ctx context.Context, name, value, description, userID string) error {
-	if s.secretBackend != nil {
-		_, _, err := s.secretBackend.Set(ctx, &secret.SetSecretInput{
-			Name:          name,
-			Value:         value,
-			SecretType:    secret.TypeVariable,
-			Scope:         store.ScopeHub,
-			ScopeID:       s.hubID,
-			Description:   description,
-			InjectionMode: "as_needed",
-			CreatedBy:     userID,
-			UpdatedBy:     userID,
-		})
-		return err
-	}
-
-	// Fallback: store directly in the database (same pattern as ensureSigningKey)
-	sec := &store.Secret{
-		ID:             fmt.Sprintf("hub-ghapp-%s", strings.ToLower(strings.ReplaceAll(name, "_", "-"))),
-		Key:            name,
-		EncryptedValue: value,
-		Scope:          store.ScopeHub,
-		ScopeID:        s.hubID,
-		SecretType:     store.SecretTypeVariable,
-		Description:    description,
-		Version:        1,
-		CreatedBy:      userID,
-		UpdatedBy:      userID,
-	}
-	_, err := s.store.UpsertSecret(ctx, sec)
-	return err
+	return s.setHubSecret(ctx, name, value, description, userID)
 }
 
 // loadGitHubAppSecret loads a GitHub App secret from the secrets backend,
@@ -370,40 +328,6 @@ func (s *Server) persistGitHubAppConfig(cfg GitHubAppServerConfig) error {
 	}
 
 	return os.WriteFile(settingsPath, newData, 0644)
-}
-
-// handleGitHubAppInstallations handles GET and POST /api/v1/github-app/installations.
-func (s *Server) handleGitHubAppInstallations(w http.ResponseWriter, r *http.Request) {
-	// Check if this is a sub-route (e.g., /api/v1/github-app/installations/{id})
-	path := strings.TrimPrefix(r.URL.Path, "/api/v1/github-app/installations")
-	if path != "" && path != "/" {
-		subPath := strings.TrimPrefix(path, "/")
-		subPath = strings.TrimSuffix(subPath, "/")
-
-		// Handle /discover sub-route
-		if subPath == "discover" {
-			s.handleGitHubAppDiscover(w, r)
-			return
-		}
-
-		// Sub-route: /api/v1/github-app/installations/{id}
-		installationID, err := strconv.ParseInt(subPath, 10, 64)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid installation ID", nil)
-			return
-		}
-		s.handleGitHubAppInstallationByID(w, r, installationID)
-		return
-	}
-
-	switch r.Method {
-	case http.MethodGet:
-		s.handleListGitHubAppInstallations(w, r)
-	case http.MethodPost:
-		s.handleCreateGitHubAppInstallation(w, r)
-	default:
-		MethodNotAllowed(w)
-	}
 }
 
 func (s *Server) handleListGitHubAppInstallations(w http.ResponseWriter, r *http.Request) {
@@ -540,8 +464,55 @@ func (s *Server) handleGitHubAppInstallationByID(w http.ResponseWriter, r *http.
 	}
 }
 
+// handleProjectGitHubRoutes dispatches the project GitHub App and git identity
+// settings subtrees (github-installation, github-status, github-permissions,
+// git-identity). The project is loaded and authorized once here; the leaf
+// handlers receive the authorized project.
+func (s *Server) handleProjectGitHubRoutes(w http.ResponseWriter, r *http.Request, projectID, subPath string) {
+	project, err := s.store.GetProject(r.Context(), projectID)
+	if err != nil {
+		if err == store.ErrNotFound {
+			writeError(w, http.StatusNotFound, ErrCodeNotFound, "project not found", nil)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get project", nil)
+		return
+	}
+
+	// SECURITY-GATE: CheckAccess — reads need project read access; every
+	// other method (including the github-status POST check, which refreshes
+	// stored status) needs project update access.
+	if !s.authorize(w, r, projectResource(project), projectGitHubRouteAction(r.Method)) {
+		return
+	}
+
+	switch subPath {
+	case "github-installation":
+		s.handleProjectGitHubInstallation(w, r, project)
+	case "github-status":
+		s.handleProjectGitHubStatus(w, r, project)
+	case "github-permissions":
+		s.handleProjectGitHubPermissions(w, r, project)
+	case "git-identity":
+		s.handleProjectGitIdentity(w, r, project)
+	default:
+		NotFound(w, "Project resource")
+	}
+}
+
+// projectGitHubRouteAction maps an HTTP method on the project GitHub settings
+// routes to the action required on the project.
+func projectGitHubRouteAction(method string) Action {
+	switch method {
+	case http.MethodGet, http.MethodHead:
+		return ActionRead
+	default:
+		return ActionUpdate
+	}
+}
+
 // handleProjectGitHubInstallation handles PUT and DELETE /api/v1/projects/{id}/github-installation.
-func (s *Server) handleProjectGitHubInstallation(w http.ResponseWriter, r *http.Request, projectID string) {
+func (s *Server) handleProjectGitHubInstallation(w http.ResponseWriter, r *http.Request, project *store.Project) {
 	switch r.Method {
 	case http.MethodPut:
 		var req struct {
@@ -566,16 +537,6 @@ func (s *Server) handleProjectGitHubInstallation(w http.ResponseWriter, r *http.
 			return
 		}
 
-		project, err := s.store.GetProject(r.Context(), projectID)
-		if err != nil {
-			if err == store.ErrNotFound {
-				writeError(w, http.StatusNotFound, ErrCodeNotFound, "project not found", nil)
-				return
-			}
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get project", nil)
-			return
-		}
-
 		project.GitHubInstallationID = &req.InstallationID
 		project.GitHubAppStatus = &store.GitHubAppProjectStatus{
 			State:       store.GitHubAppStateUnchecked,
@@ -589,22 +550,12 @@ func (s *Server) handleProjectGitHubInstallation(w http.ResponseWriter, r *http.
 		s.events.PublishProjectUpdated(r.Context(), project)
 
 		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"project_id":      projectID,
+			"project_id":      project.ID,
 			"installation_id": req.InstallationID,
 			"status":          "associated",
 		})
 
 	case http.MethodDelete:
-		project, err := s.store.GetProject(r.Context(), projectID)
-		if err != nil {
-			if err == store.ErrNotFound {
-				writeError(w, http.StatusNotFound, ErrCodeNotFound, "project not found", nil)
-				return
-			}
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get project", nil)
-			return
-		}
-
 		project.GitHubInstallationID = nil
 		project.GitHubAppStatus = nil
 
@@ -624,30 +575,20 @@ func (s *Server) handleProjectGitHubInstallation(w http.ResponseWriter, r *http.
 // handleProjectGitHubStatus handles GET and POST /api/v1/projects/{id}/github-status.
 // GET returns the current status. POST actively verifies the installation by
 // checking with GitHub and attempting a token mint, then returns the updated status.
-func (s *Server) handleProjectGitHubStatus(w http.ResponseWriter, r *http.Request, projectID string) {
+func (s *Server) handleProjectGitHubStatus(w http.ResponseWriter, r *http.Request, project *store.Project) {
 	switch r.Method {
 	case http.MethodGet:
-		s.handleGetProjectGitHubStatus(w, r, projectID)
+		s.handleGetProjectGitHubStatus(w, r, project)
 	case http.MethodPost:
-		s.handleCheckProjectGitHubStatus(w, r, projectID)
+		s.handleCheckProjectGitHubStatus(w, r, project)
 	default:
 		MethodNotAllowed(w)
 	}
 }
 
-func (s *Server) handleGetProjectGitHubStatus(w http.ResponseWriter, r *http.Request, projectID string) {
-	project, err := s.store.GetProject(r.Context(), projectID)
-	if err != nil {
-		if err == store.ErrNotFound {
-			writeError(w, http.StatusNotFound, ErrCodeNotFound, "project not found", nil)
-			return
-		}
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get project", nil)
-		return
-	}
-
+func (s *Server) handleGetProjectGitHubStatus(w http.ResponseWriter, r *http.Request, project *store.Project) {
 	resp := map[string]interface{}{
-		"project_id":      projectID,
+		"project_id":      project.ID,
 		"installation_id": project.GitHubInstallationID,
 		"status":          project.GitHubAppStatus,
 	}
@@ -658,18 +599,8 @@ func (s *Server) handleGetProjectGitHubStatus(w http.ResponseWriter, r *http.Req
 // handleCheckProjectGitHubStatus actively verifies the project's GitHub App
 // installation by checking the installation on GitHub and attempting to mint
 // a token. The project's status is updated to reflect the result.
-func (s *Server) handleCheckProjectGitHubStatus(w http.ResponseWriter, r *http.Request, projectID string) {
+func (s *Server) handleCheckProjectGitHubStatus(w http.ResponseWriter, r *http.Request, project *store.Project) {
 	ctx := r.Context()
-
-	project, err := s.store.GetProject(ctx, projectID)
-	if err != nil {
-		if err == store.ErrNotFound {
-			writeError(w, http.StatusNotFound, ErrCodeNotFound, "project not found", nil)
-			return
-		}
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get project", nil)
-		return
-	}
 
 	if project.GitHubInstallationID == nil {
 		writeError(w, http.StatusBadRequest, ErrCodeValidationError, "project has no GitHub App installation", nil)
@@ -681,14 +612,14 @@ func (s *Server) handleCheckProjectGitHubStatus(w http.ResponseWriter, r *http.R
 	_, _, mintErr := s.mintGitHubAppToken(ctx, project)
 
 	// Re-read the project to get the updated status (mintGitHubAppToken updates it)
-	project, err = s.store.GetProject(ctx, projectID)
+	project, err := s.store.GetProject(ctx, project.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to re-read project after check", nil)
 		return
 	}
 
 	resp := map[string]interface{}{
-		"project_id":      projectID,
+		"project_id":      project.ID,
 		"installation_id": project.GitHubInstallationID,
 		"status":          project.GitHubAppStatus,
 		"permissions":     project.GitHubPermissions,
@@ -701,19 +632,9 @@ func (s *Server) handleCheckProjectGitHubStatus(w http.ResponseWriter, r *http.R
 }
 
 // handleProjectGitHubPermissions handles GET, PUT, DELETE /api/v1/projects/{id}/github-permissions.
-func (s *Server) handleProjectGitHubPermissions(w http.ResponseWriter, r *http.Request, projectID string) {
+func (s *Server) handleProjectGitHubPermissions(w http.ResponseWriter, r *http.Request, project *store.Project) {
 	switch r.Method {
 	case http.MethodGet:
-		project, err := s.store.GetProject(r.Context(), projectID)
-		if err != nil {
-			if err == store.ErrNotFound {
-				writeError(w, http.StatusNotFound, ErrCodeNotFound, "project not found", nil)
-				return
-			}
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get project", nil)
-			return
-		}
-
 		perms := project.GitHubPermissions
 		if perms == nil {
 			// Return defaults
@@ -733,16 +654,6 @@ func (s *Server) handleProjectGitHubPermissions(w http.ResponseWriter, r *http.R
 			return
 		}
 
-		project, err := s.store.GetProject(r.Context(), projectID)
-		if err != nil {
-			if err == store.ErrNotFound {
-				writeError(w, http.StatusNotFound, ErrCodeNotFound, "project not found", nil)
-				return
-			}
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get project", nil)
-			return
-		}
-
 		project.GitHubPermissions = &perms
 		if err := s.store.UpdateProject(r.Context(), project); err != nil {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to update project", nil)
@@ -752,16 +663,6 @@ func (s *Server) handleProjectGitHubPermissions(w http.ResponseWriter, r *http.R
 		writeJSON(w, http.StatusOK, perms)
 
 	case http.MethodDelete:
-		project, err := s.store.GetProject(r.Context(), projectID)
-		if err != nil {
-			if err == store.ErrNotFound {
-				writeError(w, http.StatusNotFound, ErrCodeNotFound, "project not found", nil)
-				return
-			}
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get project", nil)
-			return
-		}
-
 		project.GitHubPermissions = nil
 		if err := s.store.UpdateProject(r.Context(), project); err != nil {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to update project", nil)
@@ -776,18 +677,9 @@ func (s *Server) handleProjectGitHubPermissions(w http.ResponseWriter, r *http.R
 }
 
 // handleProjectGitIdentity handles GET, PUT, DELETE /api/v1/projects/{id}/git-identity.
-func (s *Server) handleProjectGitIdentity(w http.ResponseWriter, r *http.Request, projectID string) {
+func (s *Server) handleProjectGitIdentity(w http.ResponseWriter, r *http.Request, project *store.Project) {
 	switch r.Method {
 	case http.MethodGet:
-		project, err := s.store.GetProject(r.Context(), projectID)
-		if err != nil {
-			if err == store.ErrNotFound {
-				writeError(w, http.StatusNotFound, ErrCodeNotFound, "project not found", nil)
-				return
-			}
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get project", nil)
-			return
-		}
 		identity := project.GitIdentity
 		if identity == nil {
 			identity = &store.GitIdentityConfig{Mode: "bot"}
@@ -810,15 +702,6 @@ func (s *Server) handleProjectGitIdentity(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusBadRequest, ErrCodeValidationError, "name and email are required when mode is 'custom'", nil)
 			return
 		}
-		project, err := s.store.GetProject(r.Context(), projectID)
-		if err != nil {
-			if err == store.ErrNotFound {
-				writeError(w, http.StatusNotFound, ErrCodeNotFound, "project not found", nil)
-				return
-			}
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get project", nil)
-			return
-		}
 		project.GitIdentity = &identity
 		if err := s.store.UpdateProject(r.Context(), project); err != nil {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to update project", nil)
@@ -827,15 +710,6 @@ func (s *Server) handleProjectGitIdentity(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusOK, identity)
 
 	case http.MethodDelete:
-		project, err := s.store.GetProject(r.Context(), projectID)
-		if err != nil {
-			if err == store.ErrNotFound {
-				writeError(w, http.StatusNotFound, ErrCodeNotFound, "project not found", nil)
-				return
-			}
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get project", nil)
-			return
-		}
 		project.GitIdentity = nil
 		if err := s.store.UpdateProject(r.Context(), project); err != nil {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to update project", nil)

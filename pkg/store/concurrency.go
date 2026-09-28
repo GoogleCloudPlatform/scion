@@ -104,6 +104,12 @@ const (
 	// operations and ensures no server is running during recovery.
 	LockRecoveryAuthz AdvisoryLockKey = 0x5C100020
 
+	// LockReincarnationSweep guards the periodic replica-safe sweep that
+	// fails stale non-terminal `scion reincarnate` records and agent
+	// reincarnation_state left behind by a replica that crashed or
+	// restarted mid-migration (design §3.7).
+	LockReincarnationSweep AdvisoryLockKey = 0x5C100022
+
 	// LockInlineSecretsMigration guards the one-shot migration of inline
 	// plugin secrets from settings.yaml to the secret backend at boot time.
 	LockInlineSecretsMigration AdvisoryLockKey = 0x5C100011
@@ -119,6 +125,38 @@ const (
 	// LockWebchatMigration guards webchat store data migrations so only
 	// one replica runs them during multi-replica cold start.
 	LockWebchatMigration AdvisoryLockKey = 0x5C100014
+
+	// LockDataMigrations guards boot-time conversation-model data
+	// migrations (DM key re-key, message backfill) so that concurrent
+	// replicas do not duplicate work. On SQLite the lock is a no-op
+	// (single-writer), so the guarded code must also be conflict-safe
+	// on its own merits.
+	//
+	// Originally allocated 0x5C100014 on the Tranche G branch. Main
+	// independently allocated that same value to LockWebchatMigration and
+	// shipped first, so the key was renumbered. Then 0x5C100015 collided
+	// with upstream's LockBrokerHeartbeatTimeout, so the key was
+	// renumbered again to 0x5C100016. Advisory locks are ephemeral
+	// session locks — never persisted, and a no-op on SQLite — so
+	// renumbering is safe.
+	LockDataMigrations AdvisoryLockKey = 0x5C100016
+
+	// LockNotificationDispatchSweep guards the periodic undispatched-notification
+	// re-delivery sweep so only one replica per tick scans and retries agent
+	// notifications that were not dispatched (e.g. subscriber had no broker).
+	// Originally allocated 0x5C10000D but that collided with LockTelegramWebhook
+	// after upstream added it; renumbered to 0x5C100017.
+	LockNotificationDispatchSweep AdvisoryLockKey = 0x5C100017
+
+	// LockReleaseUpdateCheck guards the scheduled release update check so only
+	// one replica per tick checks for a new binary release (binary-tier
+	// deployments). See design doc §6 "Scheduled Update Check".
+	LockReleaseUpdateCheck AdvisoryLockKey = 0x5C100018
+
+	// LockFailedMessageRetention guards the periodic purge of messages in
+	// dispatch_state="failed" that have exceeded the configured retention
+	// window (Server.Config.FailedMessageRetentionDays).
+	LockFailedMessageRetention AdvisoryLockKey = 0x5C100019
 
 	// LockWorkspaceProvision is the CLASS ID for per-project workspace
 	// provisioning locks. It is used with the two-int advisory lock form
@@ -142,6 +180,12 @@ const (
 	// quota checks for the same scope so that the "check count + reserve"
 	// sequence is atomic, preventing over-allocation.
 	LockQuotaEnforcement AdvisoryLockKey = 0x5C101002
+
+	// LockBrokerQuotaReconcile guards the periodic (and startup, tick 0)
+	// reconcile of stale max_agents_per_broker reservations (ptone/scion#1963)
+	// — rows left with released_at IS NULL for agents that are no longer in a
+	// counted phase (stopped/suspended/error) or no longer exist.
+	LockBrokerQuotaReconcile AdvisoryLockKey = 0x5C100021
 )
 
 // AdvisoryLocker is implemented by backends that can take a cluster-wide

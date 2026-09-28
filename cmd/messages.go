@@ -142,35 +142,24 @@ func runMessagesList(cmd *cobra.Command, args []string) error {
 }
 
 func runMessagesRead(cmd *cobra.Command, args []string) error {
-	hasID := len(args) > 0
-
-	if !hasID && !messagesReadAll {
-		return fmt.Errorf("provide a message ID or use --all to mark all messages as read")
-	}
-	if hasID && messagesReadAll {
-		return fmt.Errorf("provide either a message ID or --all, not both")
-	}
-
-	_, client, err := requireHubClient()
-	if err != nil {
-		return err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if messagesReadAll {
-		if err := client.Messages().MarkAllRead(ctx); err != nil {
-			return fmt.Errorf("failed to mark messages as read: %w", err)
-		}
-		fmt.Println("All messages marked as read.")
-		return nil
-	}
-
-	msgID := args[0]
-	if err := client.Messages().MarkRead(ctx, msgID); err != nil {
-		return fmt.Errorf("failed to mark message as read: %w", err)
-	}
-	fmt.Printf("Message %s marked as read.\n", msgID)
-	return nil
+	return runHubAllOrOne(
+		args,
+		messagesReadAll,
+		"provide a message ID or use --all to mark all messages as read",
+		"provide either a message ID or --all, not both",
+		func(ctx context.Context, client hubclient.Client) error {
+			if err := client.Messages().MarkAllRead(ctx); err != nil {
+				return fmt.Errorf("failed to mark messages as read: %w", err)
+			}
+			fmt.Println("All messages marked as read.")
+			return nil
+		},
+		func(ctx context.Context, client hubclient.Client, msgID string) error {
+			if err := client.Messages().MarkRead(ctx, msgID); err != nil {
+				return fmt.Errorf("failed to mark message as read: %w", err)
+			}
+			fmt.Printf("Message %s marked as read.\n", msgID)
+			return nil
+		},
+	)
 }

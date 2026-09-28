@@ -16,17 +16,16 @@ package runtime
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os/exec"
 	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
@@ -138,21 +137,8 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 			"use rootful Docker or Podman for NFS-backed projects")
 	}
 
-	// Serialize file and variable secrets into an env-var blob for
-	// container-side staging by sciontool init (stateless broker support).
-	if len(config.ResolvedSecrets) > 0 {
-		encoded, err := serializeSecrets(util.GetHomeDir(config.UnixUsername), config.ResolvedSecrets)
-		if err != nil {
-			return "", fmt.Errorf("failed to serialize secrets: %w", err)
-		}
-		if encoded != "" {
-			config.Env = append(config.Env, StagedSecretEnvVar+"="+encoded)
-		}
-	}
-
-	// Inject GCP telemetry credential path if the well-known secret is present
-	if credPath := findGCPTelemetryCredentialPath(config.ResolvedSecrets, util.GetHomeDir(config.UnixUsername)); credPath != "" {
-		config.Env = append(config.Env, telemetryGCPCredentialsEnvVar+"="+credPath)
+	if err := prepareContainerSecretEnv(&config); err != nil {
+		return "", err
 	}
 
 	args, err := buildCommonRunArgs(config)
@@ -197,28 +183,9 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 	// these flags with a warning when limits are unsupported. Not implemented
 	// here — affected deployments must set
 	// `runtime.enforce_resource_defaults: false` until it lands.
-	if config.Resources != nil {
-		if config.Resources.Limits.Memory != "" {
-			bytes, err := util.ParseMemory(config.Resources.Limits.Memory)
-			if err != nil {
-				return "", fmt.Errorf("invalid memory limit %q: %w", config.Resources.Limits.Memory, err)
-			}
-			newArgs = append(newArgs, "--memory", util.FormatMemoryForDocker(bytes))
-		}
-		if config.Resources.Requests.Memory != "" {
-			bytes, err := util.ParseMemory(config.Resources.Requests.Memory)
-			if err != nil {
-				return "", fmt.Errorf("invalid memory request %q: %w", config.Resources.Requests.Memory, err)
-			}
-			newArgs = append(newArgs, "--memory-reservation", util.FormatMemoryForDocker(bytes))
-		}
-		if config.Resources.Limits.CPU != "" {
-			cores, err := util.ParseCPU(config.Resources.Limits.CPU)
-			if err != nil {
-				return "", fmt.Errorf("invalid cpu limit %q: %w", config.Resources.Limits.CPU, err)
-			}
-			newArgs = append(newArgs, "--cpus", util.FormatCPU(cores))
-		}
+	newArgs, err = appendContainerResourceArgs(newArgs, config.Resources)
+	if err != nil {
+		return "", err
 	}
 
 	newArgs = append(newArgs, args[1:]...)
@@ -227,6 +194,13 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 
 	out, err := runSimpleCommand(ctx, r.Command, newArgs...)
 	if err != nil {
+		if ctx.Err() != nil {
+			// The caller gave up while the daemon may still have been
+			// creating/starting the container. Clean up any partial result
+			// instead of leaking it. See ptone/scion#1886.
+			rollbackCancelledCreate(r.Command, config.Name)
+			return "", ctx.Err()
+		}
 		return "", fmt.Errorf("container run failed: %w (output: %s)", err, out)
 	}
 
@@ -295,15 +269,15 @@ func (r *PodmanRuntime) List(ctx context.Context, labelFilter map[string]string)
 			actual := labels[k]
 			if actual == "" {
 				switch k {
-				case projectcompat.LabelProject:
-					actual = projectcompat.ProjectNameFromLabels(labels)
-				case projectcompat.LabelProjectID:
-					actual = projectcompat.ProjectIDFromLabels(labels)
-				case projectcompat.LabelProjectPath:
-					actual = projectcompat.ProjectPathFromLabels(labels)
+				case projectkeys.LabelProject:
+					actual = projectkeys.ProjectNameFromLabels(labels)
+				case projectkeys.LabelProjectID:
+					actual = projectkeys.ProjectIDFromLabels(labels)
+				case projectkeys.LabelProjectPath:
+					actual = projectkeys.ProjectPathFromLabels(labels)
 				}
 			}
-			if actual != v {
+			if !projectkeys.LabelValuesMatch(k, actual, v) {
 				match = false
 				break
 			}
@@ -329,9 +303,9 @@ func (r *PodmanRuntime) List(ctx context.Context, labelFilter map[string]string)
 				Template:        labels["scion.template"],
 				HarnessConfig:   labels["scion.harness_config"],
 				HarnessAuth:     labels["scion.harness_auth"],
-				Project:         projectcompat.ProjectNameFromLabels(labels),
-				ProjectID:       projectcompat.ProjectIDFromLabels(labels),
-				ProjectPath:     projectcompat.ProjectPathFromLabels(labels),
+				Project:         projectkeys.ProjectNameFromLabels(labels),
+				ProjectID:       projectkeys.ProjectIDFromLabels(labels),
+				ProjectPath:     projectkeys.ProjectPathFromLabels(labels),
 				Runtime:         r.Name(),
 			}
 			if code, ok := ExitCodeFromContainerStatus(c.Status); ok {
@@ -359,16 +333,7 @@ func (r *PodmanRuntime) Attach(ctx context.Context, id string) error {
 		return fmt.Errorf("failed to list containers: %w", err)
 	}
 
-	var agent *api.AgentInfo
-	for _, a := range agents {
-		// Match by full container ID, short ID (12 chars), or name (with or without leading slash)
-		if a.ContainerID == id || (len(id) >= 12 && strings.HasPrefix(a.ContainerID, id)) || (len(a.ContainerID) >= 12 && strings.HasPrefix(id, a.ContainerID)) ||
-			a.Name == id || a.Name == "/"+id || strings.TrimPrefix(a.Name, "/") == id {
-			agent = &a
-			break
-		}
-	}
-
+	agent := findContainerAgent(agents, id)
 	if agent == nil {
 		return fmt.Errorf("agent '%s' container not found, it may have exited and been removed", id)
 	}
@@ -419,7 +384,14 @@ func (r *PodmanRuntime) RemoveImage(ctx context.Context, image string) error {
 }
 
 func (r *PodmanRuntime) PullImage(ctx context.Context, image string) error {
-	return runInteractiveCommand(r.Command, "pull", image)
+	out, err := runSimpleCommand(ctx, r.Command, "pull", image)
+	if err != nil {
+		if trimmed := strings.TrimSpace(out); trimmed != "" {
+			return fmt.Errorf("pull %q: %w\n%s", image, err, trimmed)
+		}
+		return fmt.Errorf("pull %q: %w", image, err)
+	}
+	return nil
 }
 
 func (r *PodmanRuntime) Sync(ctx context.Context, id string, direction SyncDirection) error {
@@ -428,56 +400,14 @@ func (r *PodmanRuntime) Sync(ctx context.Context, id string, direction SyncDirec
 		return fmt.Errorf("failed to list containers: %w", err)
 	}
 
-	var agent *api.AgentInfo
-	for _, a := range agents {
-		// Match by full container ID, short ID (12 chars), or name (with or without leading slash)
-		if a.ContainerID == id || (len(id) >= 12 && strings.HasPrefix(a.ContainerID, id)) || (len(a.ContainerID) >= 12 && strings.HasPrefix(id, a.ContainerID)) ||
-			a.Name == id || a.Name == "/"+id || strings.TrimPrefix(a.Name, "/") == id {
-			agent = &a
-			break
-		}
-	}
-
+	agent := findContainerAgent(agents, id)
 	if agent == nil {
 		return fmt.Errorf("agent '%s' container not found", id)
 	}
 
 	// Check for GCS volumes
-	if val, ok := agent.Labels["scion.gcs_volumes"]; ok && val != "" {
-		decoded, err := base64.StdEncoding.DecodeString(val)
-		if err != nil {
-			return fmt.Errorf("failed to decode gcs volume info: %w", err)
-		}
-
-		type gcsVolInfo struct {
-			Source string `json:"source"`
-			Target string `json:"target"`
-			Bucket string `json:"bucket"`
-			Prefix string `json:"prefix"`
-		}
-		var vols []gcsVolInfo
-		if err := json.Unmarshal(decoded, &vols); err != nil {
-			return fmt.Errorf("failed to parse gcs volume info: %w", err)
-		}
-
-		for _, v := range vols {
-			if v.Source == "" {
-				continue
-			}
-			switch direction {
-			case SyncTo:
-				if err := gcp.SyncToGCS(ctx, v.Source, v.Bucket, v.Prefix); err != nil {
-					return fmt.Errorf("failed to sync to GCS: %w", err)
-				}
-			case SyncFrom:
-				if err := gcp.SyncFromGCS(ctx, v.Bucket, v.Prefix, v.Source); err != nil {
-					return fmt.Errorf("failed to sync from GCS: %w", err)
-				}
-			default:
-				return fmt.Errorf("sync direction must be specified for GCS volumes")
-			}
-		}
-		return nil
+	if encoded := agent.Labels["scion.gcs_volumes"]; encoded != "" {
+		return syncGCSVolumes(ctx, encoded, direction)
 	}
 
 	// Podman runtime uses bind mounts for normal volumes, so sync is automatic/noop
@@ -492,6 +422,17 @@ func (r *PodmanRuntime) Exec(ctx context.Context, id string, cmd []string) (stri
 	}
 	args := append([]string{"exec", "--user", r.ExecUser(), id}, cmd...)
 	return runSimpleCommand(ctx, r.Command, args...)
+}
+
+// ExecWithStdin runs cmd inside the container with stdin piped from the
+// given reader. The -i flag is required for `podman exec` to attach stdin.
+// See #1355.
+func (r *PodmanRuntime) ExecWithStdin(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
+	if agents, err := r.List(ctx, nil); err == nil {
+		id = resolveContainerID(agents, id)
+	}
+	args := append([]string{"exec", "-i", "--user", r.ExecUser(), id}, cmd...)
+	return runSimpleCommandWithStdin(ctx, stdin, r.Command, args...)
 }
 
 // GetWorkspacePath returns the host path to the container's /workspace mount.

@@ -47,7 +47,6 @@ type CreateSkillRequest struct {
 	Description string   `json:"description,omitempty"`
 	Scope       string   `json:"scope"`
 	ScopeID     string   `json:"scopeId,omitempty"`
-	Visibility  string   `json:"visibility,omitempty"`
 	Tags        []string `json:"tags,omitempty"`
 }
 
@@ -134,7 +133,6 @@ type ResolveSkillError struct {
 type UpdateSkillRequest struct {
 	Name        string   `json:"name,omitempty"`
 	Description string   `json:"description,omitempty"`
-	Visibility  string   `json:"visibility,omitempty"`
 	Tags        []string `json:"tags,omitempty"`
 }
 
@@ -194,6 +192,14 @@ func (s *Server) handleSkillByID(w http.ResponseWriter, r *http.Request) {
 		s.handleSkillDownload(w, r, skillID)
 	case "resolve":
 		s.handleSkillResolveSingle(w, r, skillID)
+	case "files":
+		// parts is split into at most 3 segments, so parts[2] carries the
+		// full (possibly nested) file path.
+		filePath := ""
+		if len(parts) == 3 {
+			filePath = parts[2]
+		}
+		s.handleSkillFiles(w, r, skillID, filePath)
 	default:
 		NotFound(w, "Skill action")
 	}
@@ -238,23 +244,87 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 		filter.Status = "active"
 	}
 
-	limit := 50
-	if l := query.Get("limit"); l != "" {
-		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
-			limit = parsed
+	identity := GetIdentityFromContext(ctx)
+
+	// ptone/scion#1901 (pagination follow-up): resolve the caller's project
+	// memberships and push the whole read boundary (hub scope, own user
+	// scope, member projects) into the store query, ahead of COUNT and
+	// LIMIT. "project.list" is the right proxy permission here: every
+	// project role that carries skill.list also carries project.list, and
+	// only the elevated hub-admin/super-admin roles resolve to an
+	// unrestricted (IsAll) scope — exactly the pair of facts (my projects;
+	// am I unrestricted) this predicate needs. See skillAccessScopePredicate
+	// in pkg/store/entadapter/skill_store.go. Visibility no longer widens
+	// this boundary (ptone/scion#1903): an anonymous caller gets an
+	// AccessScope with no matching terms, which authorizes nothing.
+	scopeResult, err := s.authzService.ResolveListScopes(ctx, identity, "project.list")
+	resolutionFailed := err != nil
+	if resolutionFailed {
+		// ptone/scion#1954: a principal-resolution error here (e.g. a
+		// federated identity whose ID isn't a bare UUID, which trips
+		// parseUUID in GetEffectiveGroups/GetEffectiveGroupsForAgent) must
+		// not take the whole endpoint down for every caller. Logged with
+		// principal type only: never the raw principal ID.
+		principalType := "anonymous"
+		if identity != nil {
+			principalType = identity.Type()
+		}
+		slog.WarnContext(ctx, "listSkills: failed to resolve list scopes; failing closed",
+			"principal_type", principalType, "error", err)
+	}
+	switch {
+	case identity == nil:
+		// ptone/scion#1903 removed the public-visibility bypass: an
+		// anonymous caller now gets a scope with no matching terms, which
+		// authorizes nothing.
+		filter.AccessScope = &store.SkillAccessScope{}
+	case resolutionFailed:
+		// ptone/scion#1954: the same principal-resolution error that failed
+		// ResolveListScopes also makes Decide() fail closed on every row's
+		// per-row capability check below (see authz.go), so this principal
+		// can never actually read anything regardless of what the query
+		// predicate offers. Giving it the ordinary no-grant-user floor
+		// (IncludeHubScope + CallerID + ProjectIDs) would only produce a
+		// nonzero totalCount over an empty page — exactly the count/page
+		// mismatch this fix closes for agents below — and would needlessly
+		// disclose the hub-wide skill count to a principal that can't read
+		// any of them. Match what Decide() actually grants: nothing.
+		filter.AccessScope = &store.SkillAccessScope{}
+	case isAgentIdentity(identity):
+		// ptone/scion#1968: agents read exactly their granted set — the hub
+		// catalog (global/core), their own project's skills, and their
+		// creator's own user-scoped skills, each gated
+		// by the agent JWT scope restriction and the delegation ceiling. See
+		// agentSkillAccessScope for why per-bucket probes equal the per-row
+		// decision, which keeps totalCount and pages consistent with point
+		// reads (the ptone/scion#1954 count/page mismatch).
+		//
+		// This case must stay before the IsAll() check below
+		// (ptone/scion#1954): an agent always gets an explicit, bounded
+		// predicate, never an unfiltered query.
+		filter.AccessScope = s.agentSkillAccessScope(ctx, identity.(AgentIdentity))
+	case scopeResult.Scopes.IsAll():
+		// identity holds an unrestricted (hub-admin/super-admin) scope —
+		// leave filter.AccessScope nil so the query is unfiltered.
+	default:
+		filter.AccessScope = &store.SkillAccessScope{
+			IncludeHubScope: true,
+			CallerID:        identity.ID(),
+			ProjectIDs:      scopeResult.Scopes.ProjectIDs(),
 		}
 	}
 
-	result, err := s.store.ListSkills(ctx, filter, store.ListOptions{
-		Limit:  limit,
-		Cursor: query.Get("cursor"),
-	})
+	result, err := s.store.ListSkills(ctx, filter, listOptionsFromQuery(query))
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
 
-	identity := GetIdentityFromContext(ctx)
+	// The store query above already applies the caller's read boundary, so
+	// result.Items only contains rows the caller may see and result.TotalCount
+	// only counts those rows — pagination cannot crowd them out. The
+	// capability computation below is defense in depth (it also derives the
+	// per-row "_capabilities" the response returns), not the access decision.
 	skills := make([]SkillWithCapabilities, 0, len(result.Items))
 	if identity != nil {
 		resources := make([]Resource, len(result.Items))
@@ -263,16 +333,10 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 		}
 		caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "skill")
 		for i := range result.Items {
-			if !capabilityAllows(caps[i], ActionRead) && result.Items[i].Visibility != store.VisibilityPublic {
+			if !capabilityAllows(caps[i], ActionRead) {
 				continue
 			}
 			skills = append(skills, SkillWithCapabilities{Skill: result.Items[i], Cap: caps[i]})
-		}
-	} else {
-		for i := range result.Items {
-			if result.Items[i].Visibility == store.VisibilityPublic {
-				skills = append(skills, SkillWithCapabilities{Skill: result.Items[i]})
-			}
 		}
 	}
 
@@ -281,17 +345,59 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "skill")
 	}
 
-	totalCount := result.TotalCount
-	if identity != nil {
-		totalCount = len(skills)
-	}
-
 	writeJSON(w, http.StatusOK, ListSkillsResponse{
 		Skills:       skills,
 		NextCursor:   result.NextCursor,
-		TotalCount:   totalCount,
+		TotalCount:   result.TotalCount,
 		Capabilities: scopeCap,
 	})
+}
+
+// agentSkillAccessScope derives an agent's list predicate from the same
+// authorization decisions its point reads get (ptone/scion#1968).
+//
+// For an agent principal every term of Decide depends on a skill row only
+// through its bucket: (scope kind, project) for hub and project skills, and
+// (scope kind, owning user) for user skills. The project-scoped JWT binding,
+// the synthetic agent-skill-catalog binding (Step 5b/5b2, global/core only
+// after Step 5c), the creator user-skill relationship grant (Step 9, user
+// skills owned by the agent's origin user only), the JWT scope restriction
+// and access constraints (Step 7), and the delegation ceiling (Step 10,
+// permission-level at the agent's project) all read nothing else from the
+// row. So one probe per bucket equals the per-row outcome for every row in
+// that bucket, and the store predicate built from the probes returns exactly
+// the rows the per-row check allows.
+//
+// global and core share one probe: the store predicate groups them
+// (ScopeIn(global, core)) and every Decide input treats them identically.
+// The only user bucket that can be granted is the origin user's, so that is
+// the only one probed; every other user's skills stay out of the predicate.
+func (s *Server) agentSkillAccessScope(ctx context.Context, agent AgentIdentity) *store.SkillAccessScope {
+	scope := &store.SkillAccessScope{}
+	scope.IncludeHubScope = s.authzService.CheckAccess(ctx, agent,
+		skillScopeResource(store.SkillScopeGlobal, ""), ActionRead).Allowed
+	if projectID := agent.ProjectID(); projectID != "" {
+		if s.authzService.CheckAccess(ctx, agent,
+			skillScopeResource(store.SkillScopeProject, projectID), ActionRead).Allowed {
+			scope.ProjectIDs = []string{projectID}
+		}
+	}
+	if origin := agent.OriginUserID(); origin != "" {
+		if s.authzService.CheckAccess(ctx, agent,
+			skillScopeResource(store.SkillScopeUser, origin), ActionRead).Allowed {
+			scope.CallerID = origin
+		}
+	}
+	return scope
+}
+
+// isAgentIdentity reports whether identity is a local or federated agent.
+// Both agentIdentityWrapper and FederatedAgentIdentity implement
+// AgentIdentity; BrokerIdentity and UserIdentity implementations
+// deliberately do not (see brokerIdentityImpl's doc comment, DEF-58).
+func isAgentIdentity(identity Identity) bool {
+	_, ok := identity.(AgentIdentity)
+	return ok
 }
 
 // createSkill creates a new skill record.
@@ -334,12 +440,17 @@ func (s *Server) createSkill(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 			return
 		}
-		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{Type: "skill"}, ActionCreate)
+		decision := s.authzService.CheckAccess(ctx, userIdent, skillScopeResource(scope, ""), globalWriteAction(scope, ActionCreate))
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create global skills", nil)
 			return
 		}
 	case store.SkillScopeProject:
+		if req.ScopeID == "" {
+			writeError(w, http.StatusBadRequest, "scope_id_required",
+				"scopeId is required for project-scoped skills", nil)
+			return
+		}
 		if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 			if !agentIdent.HasScope(ScopeAgentCreate) {
 				writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope", nil)
@@ -350,9 +461,8 @@ func (s *Server) createSkill(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-				Type: "skill", ParentType: "project", ParentID: req.ScopeID,
-			}, ActionCreate)
+			decision := s.authzService.CheckAccess(ctx, userIdent,
+				skillScopeResource(store.SkillScopeProject, req.ScopeID), ActionCreate)
 			if !decision.Allowed {
 				writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create skills in this project", nil)
 				return
@@ -380,11 +490,7 @@ func (s *Server) createSkill(w http.ResponseWriter, r *http.Request) {
 		Tags:        req.Tags,
 		Scope:       scope,
 		ScopeID:     req.ScopeID,
-		Visibility:  req.Visibility,
 		Status:      "active",
-	}
-	if skill.Visibility == "" {
-		skill.Visibility = store.VisibilityPrivate
 	}
 
 	// Set owner from identity
@@ -425,23 +531,23 @@ func (s *Server) getSkill(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 	skill, err := s.store.GetSkill(ctx, id)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		writeSkillLookupError(w, err)
 		return
 	}
 
 	identity := GetIdentityFromContext(ctx)
-	if identity != nil && skill.Visibility != store.VisibilityPublic {
-		decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
-		if !decision.Allowed {
-			NotFound(w, "Skill")
-			return
-		}
+	if identity == nil {
+		NotFound(w, "Skill")
+		return
+	}
+	decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
+	if !decision.Allowed {
+		NotFound(w, "Skill")
+		return
 	}
 
 	resp := SkillWithCapabilities{Skill: *skill}
-	if identity != nil {
-		resp.Cap = s.authzService.ComputeCapabilities(ctx, identity, skillResource(skill))
-	}
+	resp.Cap = s.authzService.ComputeCapabilities(ctx, identity, skillResource(skill))
 
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -480,9 +586,6 @@ func (s *Server) updateSkill(w http.ResponseWriter, r *http.Request, id string) 
 	}
 	if updates.Description != "" {
 		existing.Description = updates.Description
-	}
-	if updates.Visibility != "" {
-		existing.Visibility = updates.Visibility
 	}
 	if updates.Tags != nil {
 		existing.Tags = updates.Tags
@@ -562,17 +665,19 @@ func (s *Server) listSkillVersions(w http.ResponseWriter, r *http.Request, skill
 
 	skill, err := s.store.GetSkill(ctx, skillID)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		writeSkillLookupError(w, err)
 		return
 	}
 
 	identity := GetIdentityFromContext(ctx)
-	if identity != nil && skill.Visibility != store.VisibilityPublic {
-		decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
-		if !decision.Allowed {
-			NotFound(w, "Skill")
-			return
-		}
+	if identity == nil {
+		NotFound(w, "Skill")
+		return
+	}
+	decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
+	if !decision.Allowed {
+		NotFound(w, "Skill")
+		return
 	}
 
 	result, err := s.store.ListSkillVersions(ctx, skillID, store.ListOptions{
@@ -592,17 +697,19 @@ func (s *Server) getSkillVersion(w http.ResponseWriter, r *http.Request, skillID
 
 	skill, err := s.store.GetSkill(ctx, skillID)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		writeSkillLookupError(w, err)
 		return
 	}
 
 	identity := GetIdentityFromContext(ctx)
-	if identity != nil && skill.Visibility != store.VisibilityPublic {
-		decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
-		if !decision.Allowed {
-			NotFound(w, "Skill")
-			return
-		}
+	if identity == nil {
+		NotFound(w, "Skill")
+		return
+	}
+	decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
+	if !decision.Allowed {
+		NotFound(w, "Skill")
+		return
 	}
 
 	sv, err := s.store.GetSkillVersion(ctx, versionID)
@@ -790,6 +897,7 @@ func (s *Server) publishSkillVersion(w http.ResponseWriter, r *http.Request, ski
 				if stor.Provider() == storage.ProviderLocal {
 					hubURL := requestBaseURL(r)
 					uploadURLs = rewriteLocalUploadURLs(uploadURLs, hubURL, "skills", skillID)
+					uploadURLs = withSkillVersionUploadQuery(uploadURLs, req.Version)
 				}
 				response.UploadURLs = uploadURLs
 			}
@@ -1056,6 +1164,7 @@ func (s *Server) handleSkillUpload(w http.ResponseWriter, r *http.Request, skill
 	if stor.Provider() == storage.ProviderLocal {
 		hubURL := requestBaseURL(r)
 		uploadURLs = rewriteLocalUploadURLs(uploadURLs, hubURL, "skills", skillID)
+		uploadURLs = withSkillVersionUploadQuery(uploadURLs, req.Version)
 	}
 
 	writeJSON(w, http.StatusOK, UploadResponse{
@@ -1192,17 +1301,19 @@ func (s *Server) handleSkillDownload(w http.ResponseWriter, r *http.Request, ski
 
 	skill, err := s.store.GetSkill(ctx, skillID)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		writeSkillLookupError(w, err)
 		return
 	}
 
 	identity := GetIdentityFromContext(ctx)
-	if identity != nil && skill.Visibility != store.VisibilityPublic {
-		decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
-		if !decision.Allowed {
-			NotFound(w, "Skill")
-			return
-		}
+	if identity == nil {
+		NotFound(w, "Skill")
+		return
+	}
+	decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
+	if !decision.Allowed {
+		NotFound(w, "Skill")
+		return
 	}
 
 	stor := s.GetStorage()
@@ -1233,6 +1344,7 @@ func (s *Server) handleSkillDownload(w http.ResponseWriter, r *http.Request, ski
 	if stor.Provider() == storage.ProviderLocal {
 		hubURL := requestBaseURL(r)
 		downloadURLs = rewriteLocalDownloadURLs(downloadURLs, hubURL, "skills", skillID)
+		downloadURLs = withSkillVersionDownloadQuery(downloadURLs, sv.Version)
 	}
 
 	writeJSON(w, http.StatusOK, DownloadResponse{
@@ -1253,17 +1365,19 @@ func (s *Server) handleSkillResolveSingle(w http.ResponseWriter, r *http.Request
 
 	skill, err := s.store.GetSkill(ctx, skillID)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		writeSkillLookupError(w, err)
 		return
 	}
 
 	identity := GetIdentityFromContext(ctx)
-	if identity != nil && skill.Visibility != store.VisibilityPublic {
-		decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
-		if !decision.Allowed {
-			NotFound(w, "Skill")
-			return
-		}
+	if identity == nil {
+		NotFound(w, "Skill")
+		return
+	}
+	decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
+	if !decision.Allowed {
+		NotFound(w, "Skill")
+		return
 	}
 
 	version := r.URL.Query().Get("version")
@@ -1367,74 +1481,17 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// Expand scope aliases from request context
-		expandScopeAliases(uri, req.ProjectID, req.UserID)
-
-		skill, sv, err := s.resolveSkill(ctx, uri, req.ProjectID)
-		if err != nil {
-			resolveErrors = append(resolveErrors, ResolveSkillError{
-				URI: skillRef.URI, Code: "not_found", Message: err.Error(),
-			})
+		baseURL := ""
+		if stor != nil && stor.Provider() == storage.ProviderLocal {
+			baseURL = requestBaseURL(r)
+		}
+		entry, resolveErr := s.resolveRegistrySkillRef(ctx, GetIdentityFromContext(ctx), skillRef.URI, uri,
+			req.ProjectID, req.UserID, baseURL)
+		if resolveErr != nil {
+			resolveErrors = append(resolveErrors, *resolveErr)
 			continue
 		}
-
-		if skill.Visibility != store.VisibilityPublic {
-			identity := GetIdentityFromContext(ctx)
-			if identity == nil {
-				resolveErrors = append(resolveErrors, ResolveSkillError{
-					URI: skillRef.URI, Code: "forbidden",
-					Message: "you do not have permission to access this skill",
-				})
-				continue
-			}
-			decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
-			if !decision.Allowed {
-				resolveErrors = append(resolveErrors, ResolveSkillError{
-					URI: skillRef.URI, Code: "forbidden",
-					Message: "you do not have permission to access this skill",
-				})
-				continue
-			}
-		}
-
-		entry := ResolvedSkillResponse{
-			URI:             skillRef.URI,
-			Name:            skill.Name,
-			ResolvedVersion: sv.Version,
-			ContentHash:     sv.ContentHash,
-		}
-
-		if sv.Status == store.SkillVersionStatusDeprecated {
-			entry.Deprecated = true
-			entry.DeprecationMessage = sv.DeprecationMessage
-			entry.ReplacementURI = sv.ReplacementURI
-		}
-
-		// Generate download URLs for the resolved version's files
-		if stor != nil && len(sv.Files) > 0 {
-			versionPath := skill.StoragePath + "/" + sv.Version
-			downloadURLs, _, _, dlErr := generateDownloadURLs(ctx, stor, versionPath, s.legacyFallbackPath(versionPath), sv.Files)
-			if dlErr != nil {
-				slog.ErrorContext(ctx, "failed to generate download URLs for skill version",
-					"skill", skill.Name, "version", sv.Version, "error", dlErr)
-				resolveErrors = append(resolveErrors, ResolveSkillError{
-					URI: skillRef.URI, Code: "storage_error",
-					Message: fmt.Sprintf("skill %s version %s has storage files missing — re-sync the skill", skill.Name, sv.Version),
-				})
-				continue
-			}
-			if stor.Provider() == storage.ProviderLocal {
-				hubURL := requestBaseURL(r)
-				downloadURLs = rewriteLocalDownloadURLs(downloadURLs, hubURL, "skills", skill.ID)
-			}
-			entry.Files = downloadURLs
-		}
-
-		go func(versionID string) {
-			_ = s.store.IncrementSkillVersionDownloadCount(context.Background(), versionID)
-		}(sv.ID)
-
-		resolved = append(resolved, entry)
+		resolved = append(resolved, *entry)
 	}
 
 	writeJSON(w, http.StatusOK, ResolveSkillsResponse{
@@ -1443,8 +1500,23 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// resolveSkill finds a skill and version by URI, searching scopes in priority order.
-func (s *Server) resolveSkill(ctx context.Context, uri *api.SkillURI, projectID string) (*store.Skill, *store.SkillVersion, error) {
+// resolveSkill finds a skill and version by URI, searching scopes in
+// priority order, on behalf of identity (nil for an unauthenticated caller).
+//
+// ptone/scion#1901 finding F2: authorization runs here, per candidate,
+// before any version-specific detail is computed — and a candidate the
+// caller cannot read (identity is nil and the skill isn't public, or
+// CheckAccess denies) is skipped exactly like a scope with no matching slug
+// at all, continuing the search rather than stopping to report a
+// distinguishable reason. Two things this closes:
+//   - a batch/single resolve of a skill name the caller cannot read now
+//     produces the exact same "not found" outcome as guessing a nonexistent
+//     name, instead of a distinguishable "forbidden";
+//   - "found but version could not be resolved" (below) can now only ever
+//     describe a candidate the caller was already authorized to read, so it
+//     can no longer confirm the existence of a skill version to a caller who
+//     cannot read the skill itself.
+func (s *Server) resolveSkill(ctx context.Context, identity Identity, uri *api.SkillURI, projectID string) (*store.Skill, *store.SkillVersion, error) {
 	scopes := determineScopeSearchOrder(uri, projectID)
 
 	var versionErr error
@@ -1456,6 +1528,16 @@ func (s *Server) resolveSkill(ctx context.Context, uri *api.SkillURI, projectID 
 
 		skill, err := s.store.GetSkillBySlug(ctx, uri.Name, sc.scope, sc.scopeID)
 		if err != nil {
+			continue
+		}
+
+		if identity == nil {
+			continue
+		}
+		decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
+		if !decision.Allowed {
+			slog.WarnContext(ctx, "skill resolve candidate denied, continuing scope search",
+				"skill_id", skill.ID, "scope", sc.scope, "identity_type", identity.Type(), "reason", decision.Reason)
 			continue
 		}
 
@@ -1510,16 +1592,72 @@ func expandScopeAliases(uri *api.SkillURI, projectID, userID string) {
 	}
 }
 
+// globalWriteAction maps a CRUD action to its global-catalog twin for records
+// that live in the hub catalog. Project- and user-scoped records are unchanged.
+// Key off the record's stored scope, not parentlessness — user-scoped records
+// are also parentless but must NOT require global permissions. See design §3.1.
+func globalWriteAction(scope string, a Action) Action {
+	switch scope {
+	case store.SkillScopeGlobal, store.SkillScopeCore:
+		switch a {
+		case ActionCreate:
+			return ActionCreateGlobal
+		}
+	}
+	return a
+}
+
 // skillResource constructs a Resource from a store.Skill for capability computation.
 func skillResource(s *store.Skill) Resource {
-	r := Resource{
-		Type:    "skill",
-		ID:      s.ID,
-		OwnerID: s.OwnerID,
+	if s == nil {
+		return Resource{Type: "skill"}
 	}
-	if s.Scope == store.SkillScopeProject && s.ScopeID != "" {
+	r := skillScopeResource(s.Scope, s.ScopeID)
+	r.ID = s.ID
+	r.OwnerID = s.OwnerID
+	return r
+}
+
+// writeSkillLookupError writes the response for a failed store.GetSkill
+// lookup on a read surface. ptone/scion#1901 finding F2a: a missing skill
+// and a skill that exists but the caller cannot read must be byte-for-byte
+// indistinguishable, so both use NotFound(w, "Skill") — the same call the
+// CheckAccess-denied branch a few lines below already uses. Before this fix,
+// a missing skill instead went through writeErrorFromErr, which emits the
+// generic {"code":"not_found","message":"Resource not found"} — same status
+// and code, but different message text than the denied-access body — letting
+// an unauthorized caller distinguish "doesn't exist" from "exists, denied"
+// by string-comparing responses. Errors other than store.ErrNotFound (a
+// genuine backend failure) still go through writeErrorFromErr unchanged.
+func writeSkillLookupError(w http.ResponseWriter, err error) {
+	if errors.Is(err, store.ErrNotFound) {
+		NotFound(w, "Skill")
+		return
+	}
+	writeErrorFromErr(w, err, "")
+}
+
+// skillScopeResource builds an ad hoc "skill" Resource for authorization
+// checks that have a scope to evaluate but no concrete store.Skill record
+// (e.g. minting a project's GitHub App token before any specific skill is
+// resolved — see canUseProjectGitHubToken). scope should be one of the
+// store.SkillScope* constants; scopeID is the owning user or project ID and
+// is ignored for global/core scope.
+//
+// ptone/scion#1901 finding F3/F4: every ad hoc skill Resource literal must
+// set ScopeKind through this constructor (or skillResource, for a real
+// record), never by hand — filterHubWideSkillGrants only narrows the
+// curated hub-member/hub-viewer grant when ScopeKind is populated, so a
+// hand-built literal that forgets it silently reopens the #1901 leak. See
+// TestSkillResourceLiterals_AllUseCanonicalConstructor.
+func skillScopeResource(scope, scopeID string) Resource {
+	r := Resource{Type: "skill", ScopeKind: scope}
+	if scope == store.SkillScopeProject && scopeID != "" {
 		r.ParentType = "project"
-		r.ParentID = s.ScopeID
+		r.ParentID = scopeID
+	}
+	if scope == store.SkillScopeUser {
+		r.ScopeUserID = scopeID
 	}
 	return r
 }
@@ -1566,9 +1704,7 @@ func (s *Server) canUseProjectGitHubToken(ctx context.Context, projectID string)
 	if s.authzService == nil {
 		return false
 	}
-	return s.authzService.CheckAccess(ctx, userIdent, Resource{
-		Type: "skill", ParentType: "project", ParentID: projectID,
-	}, ActionRead).Allowed
+	return s.authzService.CheckAccess(ctx, userIdent, skillScopeResource(store.SkillScopeProject, projectID), ActionRead).Allowed
 }
 
 // resolveGitHubToken determines the GitHub token scope and mints a token if needed.

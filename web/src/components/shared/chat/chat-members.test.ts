@@ -123,6 +123,94 @@ describe('scion-chat-members agent tooltip', () => {
   });
 });
 
+describe('scion-chat-members thread default', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  /** Display names of the agent rows in DOM order. */
+  function rowNames(el: ScionChatMembers): string[] {
+    return [...(el.shadowRoot?.querySelectorAll('.member-item .member-name') ?? [])].map(
+      (n) => n.textContent?.trim() ?? ''
+    );
+  }
+
+  function subheading(el: ScionChatMembers): Element | null {
+    return el.shadowRoot?.querySelector('.agent-subsection-label') ?? null;
+  }
+
+  function divider(el: ScionChatMembers): Element | null {
+    return el.shadowRoot?.querySelector('.agent-default-divider') ?? null;
+  }
+
+  it('pins the default agent first under a sub-heading, then a divider, then the rest', async () => {
+    const el = await mount([
+      agent({ id: 'agent-2', displayName: 'Reviewer', slug: 'reviewer' }),
+      agent({ id: 'agent-1', displayName: 'Coder', slug: 'coder' }),
+    ]);
+    el.defaultAgentSlug = 'reviewer';
+    await el.updateComplete;
+
+    expect(subheading(el)?.textContent?.trim()).toBe('Thread default');
+    expect(divider(el)).not.toBeNull();
+    expect(rowNames(el)).toEqual(['Reviewer', 'Coder']);
+    expect(el.shadowRoot?.querySelector('.default-agent-label')).toBeNull();
+  });
+
+  it('renders no sub-heading and no divider when there is no default agent', async () => {
+    const el = await mount([
+      agent({ id: 'agent-1', displayName: 'Coder', slug: 'coder' }),
+      agent({ id: 'agent-2', displayName: 'Reviewer', slug: 'reviewer' }),
+    ]);
+    await el.updateComplete;
+
+    expect(subheading(el)).toBeNull();
+    expect(divider(el)).toBeNull();
+  });
+
+  it('renders no sub-heading and no divider when the default agent is filtered out', async () => {
+    const el = await mount([
+      agent({ id: 'agent-1', displayName: 'Coder', slug: 'coder' }),
+      agent({ id: 'agent-2', displayName: 'Reviewer', slug: 'reviewer' }),
+    ]);
+    el.defaultAgentSlug = 'reviewer';
+    el.unreadFromIds = ['agent-1'];
+    // Switch to the unread filter, which hides Reviewer (agent-2).
+    (el.shadowRoot?.querySelectorAll('.filter-toggle button')[1] as HTMLElement)?.click();
+    await el.updateComplete;
+
+    expect(subheading(el)).toBeNull();
+    expect(divider(el)).toBeNull();
+    expect(rowNames(el)).toEqual(['Coder']);
+  });
+
+  it('shows the sub-heading with no divider when the default is the only agent', async () => {
+    const el = await mount([agent({ id: 'agent-1', displayName: 'Coder', slug: 'coder' })]);
+    el.defaultAgentSlug = 'coder';
+    await el.updateComplete;
+
+    expect(subheading(el)?.textContent?.trim()).toBe('Thread default');
+    expect(divider(el)).toBeNull();
+    expect(rowNames(el)).toEqual(['Coder']);
+  });
+});
+
+describe('scion-chat-members host clicks', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('does not reset the current conversation when empty space is clicked', async () => {
+    const el = await mount([]);
+    const onResetView = vi.fn();
+    el.addEventListener('reset-view', onResetView);
+
+    el.click();
+
+    expect(onResetView).not.toHaveBeenCalled();
+  });
+});
+
 describe('scion-chat-members wobble', () => {
   beforeEach(() => {
     vi.useFakeTimers();

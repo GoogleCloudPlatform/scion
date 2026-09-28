@@ -198,16 +198,6 @@ func ByRuntimes(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldRuntimes, opts...).ToFunc()
 }
 
-// ByLabels orders the results by the labels field.
-func ByLabels(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldLabels, opts...).ToFunc()
-}
-
-// ByAnnotations orders the results by the annotations field.
-func ByAnnotations(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldAnnotations, opts...).ToFunc()
-}
-
 // ByEndpoint orders the results by the endpoint field.
 func ByEndpoint(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldEndpoint, opts...).ToFunc()

@@ -27,9 +27,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
-	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
@@ -38,8 +36,6 @@ import (
 )
 
 var msgInterrupt bool
-var msgBroadcast bool
-var msgAll bool
 var msgIn string
 var msgAt string
 var msgPlain bool
@@ -50,7 +46,7 @@ var msgWake bool
 var msgChannel string
 var msgThreadID string
 var msgCC []string
-var msgVisibility string
+var msgBodyFile string
 
 // emitDeprecationWarning prints a deprecation notice to stderr.
 func emitDeprecationWarning(flag, replacement string) {
@@ -64,8 +60,6 @@ var deprecationReplacements = []struct {
 	Flag    string
 	Message string
 }{
-	{"broadcast", "use 'scion broadcast' instead"},
-	{"all", "use 'scion broadcast --all' instead"},
 	{"raw", "use 'scion keys' instead"},
 	{"plain", "--plain is deprecated and will be removed"},
 	{"notify", "use 'scion notifications subscribe' instead"},
@@ -100,27 +94,55 @@ Recipients:
   group[a,b,...]     Send to multiple recipients (Hub mode only)
   @<agent-name>      Send to an agent's conversation (preferred)
   @<email>           Send to a user by email (global DM)
-  conv:<uuid>        Send to a conversation by ID (not yet supported — errors)
-  #<thread>          Send to a named thread (not yet supported — errors)
+  conv:<uuid>        Send to a conversation by ID
+  #<thread>          Send to a named thread
 
-If --broadcast is used, the recipient can be omitted and the message will be sent to all running agents.
+Message body can be provided as:
+  - Positional arguments: scion message agent "hello world"
+  - File: scion message agent --body-file msg.txt
+  - Stdin: echo "hello" | scion message agent -
 
 Examples:
   scion message my-agent "Please review the PR"
   scion message @my-agent "Please review the PR"
   scion message user:alice "I need clarification on the auth module"
-  scion message "group[agent:reviewer,user:alice,deploy-bot]" "Release v2 is ready"`,
-	Args:              cobra.MinimumNArgs(1),
+  scion message "group[agent:reviewer,user:alice,deploy-bot]" "Release v2 is ready"
+  scion message my-agent --body-file /path/to/message.txt
+  echo "message with backticks" | scion message my-agent -`,
+	Args: func(cmd *cobra.Command, args []string) error {
+		// --body-file provides the message, so we only need recipient
+		bodyFile, _ := cmd.Flags().GetString("body-file")
+		if bodyFile != "" {
+			if len(args) < 1 {
+				return fmt.Errorf("recipient is required")
+			}
+			if len(args) > 1 {
+				return fmt.Errorf("--body-file and positional message arguments are mutually exclusive")
+			}
+			return nil
+		}
+		if len(args) < 2 {
+			return fmt.Errorf("recipient and message are required unless --body-file is used")
+		}
+		return nil
+	},
 	ValidArgsFunction: getAgentNames,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// Validate --visibility if provided.
-		if msgVisibility != "" {
-			switch msgVisibility {
-			case "normal", "verbose", "full":
-				// valid
-			default:
-				return fmt.Errorf("invalid --visibility value %q: must be one of: normal, verbose, full", msgVisibility)
+		// Refuse removed flags with actionable errors.
+		// In agent mode, scion broadcast is not available (not in agentAllowed),
+		// so the error must not recommend it — tell agents to address recipients
+		// explicitly instead.
+		if cmd.Flags().Changed("broadcast") {
+			if resolveMode() == ModeAgent {
+				return fmt.Errorf("--broadcast has been removed from 'scion message'; broadcasting is not available in agent mode — address your recipients explicitly (e.g. @agent-name)")
 			}
+			return fmt.Errorf("--broadcast has been removed from 'scion message'; use 'scion broadcast' instead")
+		}
+		if cmd.Flags().Changed("all") {
+			if resolveMode() == ModeAgent {
+				return fmt.Errorf("--all has been removed from 'scion message'; broadcasting is not available in agent mode — address your recipients explicitly (e.g. @agent-name)")
+			}
+			return fmt.Errorf("--all has been removed from 'scion message'; use 'scion broadcast --all' instead")
 		}
 
 		// Emit deprecation warnings for any deprecated flags in use.
@@ -133,27 +155,23 @@ Examples:
 		var convRef *messaging.Reference // S4 conversation reference (conv:, @, #)
 		var message string
 
-		if msgBroadcast || msgAll {
-			if len(args) > 0 && messages.IsGroupRecipient(args[0]) {
-				return fmt.Errorf("group[] recipients cannot be combined with --broadcast or --all")
-			}
-			message = strings.Join(args, " ")
-		} else {
-			if len(args) < 2 {
-				return fmt.Errorf("recipient and message are required unless --broadcast is used")
+		{
+			if len(args) < 1 {
+				return fmt.Errorf("recipient is required")
 			}
 			recipient := args[0]
-			message = strings.Join(args[1:], " ")
+			if len(args) > 1 {
+				message = strings.Join(args[1:], " ")
+			}
 
 			// Try parsing as an S4 conversation reference first.
 			// This catches conv:<uuid>, @<agent-slug>, @<email>, #<thread>.
 			if ref, err := messaging.ParseReference(recipient); err == nil {
-				// Only @<agent> conversation references are fully supported in the CLI today.
-				// conv:<id> and #<thread> resolve correctly but delivery routing is not yet
-				// implemented -- accepting them would silently drop the message.
-				if ref.Kind == messaging.RefConversation || ref.Kind == messaging.RefThread {
-					return fmt.Errorf("conversation reference %q is not yet supported in the CLI; use @<agent-name> to message an agent", ref.Raw)
-				}
+				// DEF-138: conv:<uuid> and #<thread> are now fully supported.
+				// Delivery routing through explicit conversation assertion
+				// (P-1..P-3) means the conversation_id survives to the
+				// persisting writer. The gate that previously rejected these
+				// two kinds is removed.
 				convRef = ref
 			} else if strings.HasPrefix(recipient, "conv:") || strings.HasPrefix(recipient, "#") {
 				// Looks like a conversation reference but failed to parse.
@@ -180,12 +198,26 @@ Examples:
 			}
 		}
 
+		// Validate --body-file conflicts
+		if msgBodyFile != "" && len(args) > 1 {
+			return fmt.Errorf("--body-file and positional message arguments are mutually exclusive")
+		}
+
+		// Resolve body from --body-file or stdin
+		var err error
+		message, err = resolveMessageBody(msgBodyFile, message)
+		if err != nil {
+			return err
+		}
+
+		// Ensure we have a message body
+		if message == "" && !msgRaw {
+			return fmt.Errorf("message body is empty; provide a message via positional args, --body-file, or pipe to stdin with '-'")
+		}
+
 		// Validate scheduling flags
 		if msgIn != "" && msgAt != "" {
 			return fmt.Errorf("--in and --at are mutually exclusive")
-		}
-		if (msgIn != "" || msgAt != "") && (msgBroadcast || msgAll) {
-			return fmt.Errorf("--in/--at cannot be combined with --broadcast or --all")
 		}
 
 		// Validate --thread-id requires --channel
@@ -195,9 +227,6 @@ Examples:
 
 		// Validate --raw restrictions
 		if msgRaw {
-			if msgBroadcast || msgAll {
-				return fmt.Errorf("--raw cannot be combined with --broadcast or --all")
-			}
 			if msgPlain {
 				return fmt.Errorf("--raw and --plain are mutually exclusive")
 			}
@@ -209,19 +238,11 @@ Examples:
 			}
 		}
 
-		// Validate --notify restrictions
-		if msgNotify && (msgBroadcast || msgAll) {
-			return fmt.Errorf("--notify cannot be combined with --broadcast or --all")
-		}
-
 		// Validate --cc restrictions: parse first so empty-string values
 		// (e.g. --cc "") are handled correctly instead of triggering
 		// false-positive validation errors.
 		parsedCC := parseCCFlag(msgCC)
 		if len(parsedCC) > 0 {
-			if msgBroadcast || msgAll {
-				return fmt.Errorf("--cc cannot be combined with --broadcast or --all")
-			}
 			if msgRaw {
 				return fmt.Errorf("--cc cannot be combined with --raw")
 			}
@@ -235,9 +256,6 @@ Examples:
 
 		// Validate user-recipient restrictions
 		if userRecipient != "" {
-			if msgBroadcast || msgAll {
-				return fmt.Errorf("user recipients cannot be combined with --broadcast or --all")
-			}
 			if msgRaw {
 				return fmt.Errorf("--raw cannot be used with user recipients")
 			}
@@ -248,9 +266,6 @@ Examples:
 
 		// Validate group recipient restrictions
 		if len(groupRecipients) > 0 {
-			if msgBroadcast || msgAll {
-				return fmt.Errorf("group[] recipients cannot be combined with --broadcast or --all")
-			}
 			if msgRaw {
 				return fmt.Errorf("--raw cannot be used with group[] recipients")
 			}
@@ -264,9 +279,6 @@ Examples:
 
 		// Validate --wake restrictions
 		if msgWake {
-			if msgBroadcast || msgAll {
-				return fmt.Errorf("--wake cannot be combined with --broadcast or --all")
-			}
 			if msgIn != "" || msgAt != "" {
 				return fmt.Errorf("--wake cannot be combined with --in or --at")
 			}
@@ -304,27 +316,63 @@ Examples:
 			}
 		}
 
+		// Cross-project detection: when running as an agent and --project
+		// specifies a different project than the sender's own, the --project
+		// value is the TARGET project, not the sender's working context.
+		// Set up hub context using the agent's own project and capture the
+		// target project slug for cross-project resolution.
+		//
+		// When --project matches the agent's own project (by slug or ID),
+		// skip cross-project detection to preserve normal same-project
+		// sending — which works even when CPM is disabled. Without this
+		// guard, the cross-project resolver would reject at Hub-off before
+		// lookup, breaking ordinary same-project sends with explicit --project.
+		var crossProjectTarget string
+		senderProjectPath := projectPath
+		hasAgentTarget := agentName != "" || (convRef != nil && convRef.Kind == messaging.RefAgent)
+		if hasAgentTarget && os.Getenv("SCION_AGENT_NAME") != "" && cmd.Flags().Changed("project") {
+			ownProjectSlug := os.Getenv("SCION_PROJECT")
+			ownProjectID := os.Getenv("SCION_PROJECT_ID")
+			isSameProject := (ownProjectSlug != "" && projectPath == ownProjectSlug) ||
+				(ownProjectID != "" && projectPath == ownProjectID)
+			if !isSameProject {
+				// The --project flag selects a DIFFERENT project.
+				crossProjectTarget = projectPath
+				senderProjectPath = "" // let hub context resolve from agent's own config
+			}
+		}
+
+		// conv:<id> with explicit --project mismatch in agent mode: reject.
+		// The conversation ID already identifies its project context;
+		// reinterpreting the sender context via --project would be silently wrong.
+		if convRef != nil && convRef.Kind == messaging.RefConversation &&
+			os.Getenv("SCION_AGENT_NAME") != "" && cmd.Flags().Changed("project") {
+			ownProjectSlug := os.Getenv("SCION_PROJECT")
+			ownProjectID := os.Getenv("SCION_PROJECT_ID")
+			isSameProject := (ownProjectSlug != "" && projectPath == ownProjectSlug) ||
+				(ownProjectID != "" && projectPath == ownProjectID)
+			if !isSameProject {
+				return fmt.Errorf("--project cannot be used with conv: references; the conversation already identifies its project context")
+			}
+		}
+
 		// Check if Hub should be used
 		var hubCtx *HubContext
-		var err error
 		if convRef != nil {
 			// Conversation references require Hub mode for resolution
-			hubCtx, err = CheckHubAvailabilityWithOptions(projectPath, true)
+			hubCtx, err = CheckHubAvailabilityWithOptions(senderProjectPath, true)
 		} else if len(groupRecipients) > 0 {
 			// Group recipients: skip sync (multiple recipients, no single agent)
-			hubCtx, err = CheckHubAvailabilityWithOptions(projectPath, true)
+			hubCtx, err = CheckHubAvailabilityWithOptions(senderProjectPath, true)
 		} else if userRecipient != "" {
 			// User recipient: skip sync (no agent involved)
-			hubCtx, err = CheckHubAvailabilityWithOptions(projectPath, true)
-		} else if msgAll {
-			// Cross-project operation: skip sync
-			hubCtx, err = CheckHubAvailabilityWithOptions(projectPath, true)
-		} else if msgBroadcast {
-			// Grove-scoped broadcast: no specific agent
-			hubCtx, err = CheckHubAvailability(projectPath)
+			hubCtx, err = CheckHubAvailabilityWithOptions(senderProjectPath, true)
+		} else if crossProjectTarget != "" {
+			// Cross-project: set up hub from agent's own project
+			hubCtx, err = CheckHubAvailabilityWithOptions(senderProjectPath, true)
 		} else {
 			// Single agent: exclude target from sync requirements
-			hubCtx, err = CheckHubAvailabilityForAgent(projectPath, agentName, true)
+			hubCtx, err = CheckHubAvailabilityForAgent(senderProjectPath, agentName, true)
 		}
 		if err != nil {
 			return err
@@ -372,9 +420,21 @@ Examples:
 			msgAttach = staged
 		}
 
+		// Cross-project agent addressing: intercept @agent and bare agent
+		// names BEFORE the generic convRef dispatch. When crossProjectTarget
+		// is set, both forms route through the cross-project send path.
+		if hubCtx != nil && crossProjectTarget != "" {
+			if convRef != nil && convRef.Kind == messaging.RefAgent {
+				return sendCrossProjectMessage(hubCtx, crossProjectTarget, convRef.Value, message, msgInterrupt, msgWake, msgAttach)
+			}
+			if agentName != "" {
+				return sendCrossProjectMessage(hubCtx, crossProjectTarget, agentName, message, msgInterrupt, msgWake, msgAttach)
+			}
+		}
+
 		// Conversation-reference messages: resolve and send via Hub
 		if convRef != nil {
-			return sendMessageViaConversation(hubCtx, convRef, message, msgInterrupt, msgWake)
+			return sendMessageViaConversation(hubCtx, convRef, message, msgInterrupt, msgWake, msgAttach)
 		}
 
 		// Group-targeted messages: fan out to each recipient
@@ -388,7 +448,7 @@ Examples:
 		}
 
 		if hubCtx != nil {
-			return sendMessageViaHub(hubCtx, agentName, message, msgInterrupt, msgBroadcast, msgAll, msgNotify, msgWake)
+			return sendMessageViaHub(hubCtx, agentName, message, msgInterrupt, msgNotify, msgWake)
 		}
 
 		// --wake requires Hub mode
@@ -417,67 +477,9 @@ Examples:
 			return mgr.MessageRaw(ctx, agentName, "", message)
 		}
 
-		var targets []string
-		if msgBroadcast || msgAll {
-			filters := map[string]string{
-				"scion.agent": "true",
-			}
-
-			if !msgAll {
-				projectDir, _ := config.GetResolvedProjectDir(projectPath)
-				if projectDir != "" {
-					filters["scion.project_path"] = projectDir
-					filters["scion.project"] = config.GetProjectName(projectDir)
-				}
-			}
-
-			agents, err := mgr.List(ctx, filters)
-			if err != nil {
-				return err
-			}
-			for _, a := range agents {
-				if a.Phase == string(state.PhaseRunning) {
-					targets = append(targets, a.Name)
-				}
-			}
-		} else {
-			targets = []string{agentName}
-		}
-
-		if len(targets) == 0 {
-			if msgBroadcast || msgAll {
-				fmt.Println("No running agents found to broadcast to.")
-				return nil
-			}
-			return fmt.Errorf("agent '%s' not found or not running", agentName)
-		}
-
-		if len(targets) > 1 {
-			fmt.Printf("Broadcasting message to %d agents...\n", len(targets))
-			var wg sync.WaitGroup
-			for _, target := range targets {
-				wg.Add(1)
-				go func(name string) {
-					defer wg.Done()
-					if err := mgr.Message(ctx, name, "", message, msgInterrupt); err != nil {
-						fmt.Printf("Warning: failed to send message to agent '%s': %s\n", name, err)
-						return
-					}
-					fmt.Printf("Message delivered to agent '%s'.\n", name)
-				}(target)
-			}
-			wg.Wait()
-		} else {
-			for _, target := range targets {
-				fmt.Printf("Sending message to agent '%s'...\n", target)
-				if err := mgr.Message(ctx, target, "", message, msgInterrupt); err != nil {
-					if msgBroadcast || msgAll {
-						fmt.Printf("Warning: failed to send message to agent '%s': %s\n", target, err)
-						continue
-					}
-					return err
-				}
-			}
+		fmt.Printf("Sending message to agent '%s'...\n", agentName)
+		if err := mgr.Message(ctx, agentName, "", message, msgInterrupt); err != nil {
+			return err
 		}
 
 		return nil
@@ -512,24 +514,20 @@ func resolveSenderIdentity(hubCtx *HubContext) string {
 }
 
 // buildStructuredMessage constructs a StructuredMessage from CLI parameters.
-func buildStructuredMessage(sender, recipient, message string) *messages.StructuredMessage {
+func buildStructuredMessage(sender, recipient, message string, attachments []string) *messages.StructuredMessage {
 	msg := messages.NewInstruction(sender, recipient, message)
 	msg.Plain = msgPlain
 	msg.Raw = msgRaw
 	msg.Urgent = msgInterrupt
-	msg.Broadcasted = msgBroadcast || msgAll
-	if len(msgAttach) > 0 {
-		msg.Attachments = msgAttach
+	if len(attachments) > 0 {
+		msg.Attachments = attachments
 	}
 	msg.Channel = msgChannel
 	msg.ThreadID = msgThreadID
-	if msgVisibility != "" {
-		msg.Visibility = msgVisibility
-	}
 	return msg
 }
 
-func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, interrupt bool, broadcast bool, all bool, notify bool, wake bool) error {
+func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, interrupt bool, notify bool, wake bool) error {
 	if !isJSONOutput() {
 		PrintUsingHub(hubCtx.Endpoint)
 	}
@@ -542,81 +540,6 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 		if err := validateChannel(hubCtx, msgChannel); err != nil {
 			return err
 		}
-	}
-
-	// Grove-scoped broadcast: send via Hub broadcast endpoint.
-	if broadcast && !all {
-		projectID, err := GetProjectID(hubCtx)
-		if err != nil {
-			return wrapHubError(err)
-		}
-		agentSvc := hubCtx.Client.ProjectAgents(projectID)
-
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		msg := buildStructuredMessage(sender, "", message)
-		msg.Broadcasted = true
-		// Validate through the new envelope choke point (Phase 7, AC-8).
-		if err := messaging.ValidateLegacyMessage(msg); err != nil {
-			return fmt.Errorf("message validation failed: %w", err)
-		}
-		bcastResp, err := agentSvc.BroadcastMessage(ctx, msg, interrupt)
-		if err != nil {
-			return wrapHubError(fmt.Errorf("failed to broadcast message via Hub: %w", err))
-		}
-
-		if !isJSONOutput() {
-			printBroadcastAccepted(bcastResp)
-		}
-		return nil
-	}
-
-	// Global broadcast (--all): fan-out at client level across projects.
-	// Each project doesn't have a global broadcast endpoint, so we list all
-	// running agents and send individually.
-	// TODO: upgrade to P3 model (targeting breakdown, DELIVERY_FAILED notifications)
-	// once a global broadcast endpoint exists.
-	if all {
-		agentSvc := hubCtx.Client.Agents()
-
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		resp, err := agentSvc.List(ctx, &hubclient.ListAgentsOptions{Phase: "running"})
-		if err != nil {
-			return wrapHubError(fmt.Errorf("failed to list agents via Hub: %w", err))
-		}
-
-		if len(resp.Agents) == 0 {
-			fmt.Println("No running agents found to broadcast to.")
-			return nil
-		}
-
-		if !isJSONOutput() {
-			fmt.Printf("Broadcasting message to %d agents...\n", len(resp.Agents))
-		}
-
-		var wg sync.WaitGroup
-		for _, a := range resp.Agents {
-			wg.Add(1)
-			go func(name string) {
-				defer wg.Done()
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer cancel()
-
-				msg := buildStructuredMessage(sender, "agent:"+name, message)
-				if _, err := agentSvc.SendStructuredMessage(ctx, name, msg, interrupt, false, false); err != nil {
-					fmt.Printf("Warning: failed to send message to agent '%s' via Hub: %s\n", name, err)
-					return
-				}
-				if !isJSONOutput() {
-					fmt.Printf("Message delivered to agent '%s' via Hub.\n", name)
-				}
-			}(a.Name)
-		}
-		wg.Wait()
-		return nil
 	}
 
 	// Single agent: direct message
@@ -633,7 +556,7 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	msg := buildStructuredMessage(sender, "agent:"+agentName, message)
+	msg := buildStructuredMessage(sender, "agent:"+agentName, message, msgAttach)
 	// Validate through the new envelope choke point (Phase 7, AC-8).
 	if err := messaging.ValidateLegacyMessage(msg); err != nil {
 		return fmt.Errorf("message validation failed: %w", err)
@@ -662,140 +585,188 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 	return nil
 }
 
-// sendMessageViaConversation resolves a conversation reference through the Hub
-// and sends the message with the resolved conversation_id. This is the F-1 fix:
-// conversation references (conv:<uuid>, @<agent>, @<email>, #<thread>) are now
-// resolved through the Hub's Resolve function instead of being misinterpreted
-// by the legacy recipient parsing heuristics.
-func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, message string, interrupt bool, wake bool) error {
+// sendCrossProjectMessage resolves a target agent in a foreign project and
+// sends a message via the non-project-scoped agent message endpoint. The
+// sender's authenticated identity is preserved; only target resolution
+// crosses the project boundary.
+func sendCrossProjectMessage(hubCtx *HubContext, targetProject, agentSlug, message string, interrupt, wake bool, attachments []string) error {
 	if !isJSONOutput() {
 		PrintUsingHub(hubCtx.Endpoint)
 	}
 
-	// @email precondition: SCION_AGENT_NAME depends only on the environment
-	// and nothing computed by this function. Evaluate it before any I/O
-	// (resolveSenderIdentity makes a network call) so a guaranteed failure
-	// does not waste a round trip.
-	var emailSenderAgent string
-	if ref.Kind == messaging.RefEmail {
-		emailSenderAgent = os.Getenv("SCION_AGENT_NAME")
-		if emailSenderAgent == "" {
-			return fmt.Errorf("sending messages to users via @<email> is only supported from within an agent container (SCION_AGENT_NAME not set)")
-		}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Step 1: Resolve the target agent in the foreign project.
+	result, err := hubCtx.Client.Messaging().ResolveTarget(ctx, targetProject, agentSlug)
+	if err != nil {
+		return wrapHubError(fmt.Errorf("failed to resolve agent %q in project %q: %w", agentSlug, targetProject, err))
+	}
+	if result.Agent == nil {
+		return fmt.Errorf("agent %q not found in project %q", agentSlug, targetProject)
 	}
 
+	if !isJSONOutput() {
+		fmt.Printf("Sending cross-project message to agent '%s' in project '%s'...\n", agentSlug, targetProject)
+	}
+
+	// Step 2: Build the structured message with the sender's identity.
 	sender := resolveSenderIdentity(hubCtx)
+	msg := buildStructuredMessage(sender, "agent:"+agentSlug, message, attachments)
+	if err := messaging.ValidateLegacyMessage(msg); err != nil {
+		return fmt.Errorf("message validation failed: %w", err)
+	}
+
+	// Step 3: Send via the non-project-scoped endpoint using the target's UUID.
+	// ProjectAgents("") produces /api/v1/agents/{uuid}/message which bypasses
+	// the project-scoped slug lookup and its project isolation check.
+	agentSvc := hubCtx.Client.ProjectAgents("")
+	if _, err := agentSvc.SendStructuredMessage(ctx, result.Agent.ID, msg, interrupt, false, wake); err != nil {
+		return wrapHubError(fmt.Errorf("failed to send cross-project message to agent '%s': %w", agentSlug, err))
+	}
+
+	if !isJSONOutput() {
+		fmt.Printf("Message delivered to agent '%s' in project '%s'.\n", agentSlug, targetProject)
+	}
+
+	return nil
+}
+
+// sendMessageViaConversation sends a message to a conversation reference.
+//
+// DEF-142 P5: the CLI passes conversation_ref in the outbound message request
+// and the server resolves it inline (P3), routing through the existing DEF-138
+// auth block. This eliminates the two-step resolve-then-send pattern that
+// ResolveConversation existed for.
+//
+// Two dispatch paths remain:
+//   - Agent context (SCION_AGENT_NAME set): all ref kinds go via the outbound
+//     endpoint with conversation_ref. The server resolves + authorizes.
+//   - Human CLI context: only @agent is supported. The message is sent via
+//     SendStructuredMessage; the server derives the conversation from
+//     sender/recipient principals (DEF-138 Rule 3).
+func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, message string, interrupt bool, wake bool, attachments []string) error {
+	if !isJSONOutput() {
+		PrintUsingHub(hubCtx.Endpoint)
+	}
 
 	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return wrapHubError(err)
 	}
 
-	// DEF-48: For @agent references, build and validate the message before
-	// resolving the conversation. ResolveConversation can CREATE a row, and
-	// if validation fails afterward, the row survives with no message —
-	// orphaning it. buildStructuredMessage does not need ConversationID, and
-	// ValidateLegacyMessage does not check it (DEF-41), so the message is
-	// fully validatable before resolution.
-	var agentMsg *messages.StructuredMessage
-	if ref.Kind == messaging.RefAgent {
-		agentMsg = buildStructuredMessage(sender, "agent:"+ref.Value, message)
-		if err := messaging.ValidateLegacyMessage(agentMsg); err != nil {
-			return fmt.Errorf("message validation failed: %w", err)
-		}
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
-	// DEF-51: for @email references, construct the OutboundMessageRequest
-	// before resolve and validate it through the legacy choke point. The
-	// probe is derived from outMsg's actual fields — not from
-	// buildStructuredMessage — so the validated envelope matches the sent
-	// envelope by construction. Fields the @email path does not send
-	// (Channel, ThreadID, Attachments) are zero in both outMsg and probe,
-	// which closes two divergence directions:
-	//   - thread_id-without-channel cannot fire (no false rejection)
-	//   - empty-msg-with-attachments cannot pass (no missed rejection)
-	// Metadata.conversation_id is set after resolve; it is not validated.
-	var outMsg *hubclient.OutboundMessageRequest
-	if ref.Kind == messaging.RefEmail {
-		outMsg = &hubclient.OutboundMessageRequest{
-			Recipient: "user:" + ref.Value,
-			Msg:       message,
-			Type:      "instruction",
-			Urgent:    interrupt,
+	agentSvc := hubCtx.Client.ProjectAgents(projectID)
+
+	// DEF-142 P5: when running in an agent context, send ALL ref kinds via
+	// the outbound endpoint with conversation_ref. The server resolves the
+	// ref inline (P3) and routes through the existing DEF-138 auth block.
+	//
+	// CPM cutover (#1693): conv: references now route through the outbound
+	// endpoint like @email and #thread, eliminating the duplicate conversation
+	// send API path. Wake and attachments are fully supported.
+	senderAgent := os.Getenv("SCION_AGENT_NAME")
+	if senderAgent != "" {
+		// DEF-164: agent-to-agent messages use the structured message
+		// endpoint, not the outbound (user-only) endpoint. The outbound
+		// handler's resolveAgentDM creates conversation/participant rows
+		// before the DEF-152 addressee derivation rejects non-user DMs —
+		// routing through SendStructuredMessage avoids both the rejection
+		// and the orphan rows.
+		if ref.Kind == messaging.RefAgent {
+			sender := "agent:" + senderAgent
+			agentMsg := buildStructuredMessage(sender, "agent:"+ref.Value, message, attachments)
+			if err := messaging.ValidateLegacyMessage(agentMsg); err != nil {
+				return fmt.Errorf("message validation failed: %w", err)
+			}
+			if _, err := agentSvc.SendStructuredMessage(ctx, ref.Value, agentMsg, interrupt, false, wake); err != nil {
+				return wrapHubError(fmt.Errorf("failed to send message to agent '%s' via Hub: %w", ref.Value, err))
+			}
+			if !isJSONOutput() {
+				fmt.Printf("Message delivered to agent '%s'.\n", ref.Value)
+			}
+			return nil
 		}
+
+		// All non-agent ref kinds (conv:, @email, #thread) route through
+		// the outbound endpoint with conversation_ref. The server resolves
+		// the ref inline and handles wake, attachments, and auth.
+		outMsg := &hubclient.OutboundMessageRequest{
+			Msg:             message,
+			Type:            "instruction",
+			Urgent:          interrupt,
+			ConversationRef: ref.Raw,
+			Attachments:     attachments,
+			Wake:            wake,
+		}
+		if ref.Kind == messaging.RefEmail {
+			outMsg.Recipient = "user:" + ref.Value
+		}
+
+		// DEF-51 principle: the validated probe must match the sent envelope
+		// by construction. Fields the outbound path does not send (Channel,
+		// ThreadID) are zero in both outMsg and probe.
 		probe := &messages.StructuredMessage{
-			Version:   messages.Version,
-			Timestamp: time.Now().UTC().Format(time.RFC3339),
-			Sender:    emailSenderAgent,
-			Recipient: outMsg.Recipient,
-			Msg:       outMsg.Msg,
-			Type:      outMsg.Type,
+			Version:     messages.Version,
+			Timestamp:   time.Now().UTC().Format(time.RFC3339),
+			Sender:      senderAgent,
+			Msg:         outMsg.Msg,
+			Type:        outMsg.Type,
+			Attachments: attachments,
+		}
+		if ref.Kind == messaging.RefEmail {
+			probe.Recipient = outMsg.Recipient
 		}
 		if err := messaging.ValidateLegacyMessage(probe); err != nil {
 			return fmt.Errorf("message validation failed: %w", err)
 		}
-	}
 
-	if !isJSONOutput() {
-		fmt.Printf("Resolving conversation reference %q...\n", ref.Raw)
-	}
-
-	// Resolve the conversation reference via Hub.
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	resolveResp, err := hubCtx.Client.Messages().ResolveConversation(ctx, &hubclient.ConversationResolveRequest{
-		Reference: ref.Raw,
-		ProjectID: projectID,
-	})
-	if err != nil {
-		return wrapHubError(fmt.Errorf("failed to resolve conversation reference %q: %w", ref.Raw, err))
-	}
-	if resolveResp == nil {
-		return fmt.Errorf("failed to resolve conversation reference %q: server returned empty response", ref.Raw)
-	}
-
-	if !isJSONOutput() {
-		action := "Resolved"
-		if resolveResp.Created {
-			action = "Created"
-		}
-		fmt.Printf("%s conversation %s.\n", action, resolveResp.ConversationID)
-	}
-
-	// For @ agent references, we know the target agent slug and can send
-	// the message directly through the standard agent message path with
-	// the conversation_id set.
-	if ref.Kind == messaging.RefAgent {
-		agentSvc := hubCtx.Client.ProjectAgents(projectID)
-		agentMsg.ConversationID = resolveResp.ConversationID
-		if _, err := agentSvc.SendStructuredMessage(ctx, ref.Value, agentMsg, interrupt, false, wake); err != nil {
-			return wrapHubError(fmt.Errorf("failed to send message to agent '%s' via Hub: %w", ref.Value, err))
-		}
-		if !isJSONOutput() {
-			fmt.Printf("Message delivered to agent '%s' (conversation %s).\n", ref.Value, resolveResp.ConversationID)
-		}
-		return nil
-	}
-
-	// @email send: outMsg was constructed and validated before resolve
-	// (DEF-51). Set the conversation_id that resolve produced and send.
-	if ref.Kind == messaging.RefEmail {
-		outMsg.Metadata = map[string]string{"conversation_id": resolveResp.ConversationID}
-		agentSvc := hubCtx.Client.ProjectAgents(projectID)
-		if err := agentSvc.SendOutboundMessage(ctx, emailSenderAgent, outMsg); err != nil {
+		result, err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg)
+		if err != nil {
 			return wrapHubError(fmt.Errorf("failed to send message to %s: %w", ref.Raw, err))
 		}
 		if !isJSONOutput() {
-			fmt.Printf("Message sent to %s (conversation %s).\n", ref.Raw, resolveResp.ConversationID)
+			// Distinguish accepted dispatch from confirmed delivery.
+			if result.Status == "sent" {
+				fmt.Printf("Message sent to %s (message %s).\n", ref.Raw, result.MessageID)
+			} else {
+				fmt.Printf("Message dispatched to %s (message %s, status: %s).\n", ref.Raw, result.MessageID, result.Status)
+			}
+		} else {
+			// JSON output with full result
+			return outputJSON(result)
 		}
 		return nil
 	}
 
-	// conv:<uuid> and #<thread> are gated at the CLI entry point and never
-	// reach this function. @<agent> and @<email> are handled above and return.
-	// This point is unreachable.
-	return fmt.Errorf("unsupported conversation reference kind: %s", ref.Raw)
+	// Human CLI context — only @agent is supported without an agent identity.
+	// @email, conv:<uuid>, and #<thread> require SCION_AGENT_NAME because the
+	// server needs a sender principal to resolve the conversation.
+	if ref.Kind == messaging.RefEmail {
+		return fmt.Errorf("@<email> addressing requires an agent identity; it works inside an agent container where SCION_AGENT_NAME is set")
+	}
+	if ref.Kind != messaging.RefAgent {
+		return fmt.Errorf("%s addressing requires an agent identity; it works inside an agent container where SCION_AGENT_NAME is set", ref.Raw)
+	}
+
+	// @agent from human CLI: build and validate, then send via the agent
+	// message endpoint. The server derives the conversation from the
+	// sender/recipient principals (DEF-138 Rule 3).
+	sender := resolveSenderIdentity(hubCtx)
+	agentMsg := buildStructuredMessage(sender, "agent:"+ref.Value, message, attachments)
+	if err := messaging.ValidateLegacyMessage(agentMsg); err != nil {
+		return fmt.Errorf("message validation failed: %w", err)
+	}
+
+	if _, err := agentSvc.SendStructuredMessage(ctx, ref.Value, agentMsg, interrupt, false, wake); err != nil {
+		return wrapHubError(fmt.Errorf("failed to send message to agent '%s' via Hub: %w", ref.Value, err))
+	}
+	if !isJSONOutput() {
+		fmt.Printf("Message delivered to agent '%s'.\n", ref.Value)
+	}
+	return nil
 }
 
 func printBroadcastAccepted(resp *hubclient.BroadcastResponse) {
@@ -840,11 +811,11 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 		}
 	}
 
-	// Determine the sending agent's name. This command is intended for use
-	// by agents running inside containers, where SCION_AGENT_NAME is set.
+	// Determine the sending agent's name. User-targeted messages require an
+	// agent identity so the server can attribute and route the message.
 	senderAgent := os.Getenv("SCION_AGENT_NAME")
 	if senderAgent == "" {
-		return fmt.Errorf("sending messages to users is only supported from within an agent container (SCION_AGENT_NAME not set)")
+		return fmt.Errorf("user messaging requires an agent identity; it works inside an agent container where SCION_AGENT_NAME is set")
 	}
 
 	projectID, err := GetProjectID(hubCtx)
@@ -866,7 +837,7 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 		ThreadID:    msgThreadID,
 	}
 
-	if err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg); err != nil {
+	if _, err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg); err != nil {
 		return wrapHubError(fmt.Errorf("failed to send message to %s: %w", userRecipient, err))
 	}
 
@@ -921,7 +892,7 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 			switch recip.Kind {
 			case messages.RecipientAgent:
 				slug := api.Slugify(recip.Name)
-				msg := buildStructuredMessage(sender, "agent:"+slug, message)
+				msg := buildStructuredMessage(sender, "agent:"+slug, message, msgAttach)
 				msg.Type = messages.TypeGroupSet
 				msg.Recipients = recipientsStr
 				msg.Metadata = map[string]string{"group_id": groupID}
@@ -960,7 +931,7 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 					ThreadID:    msgThreadID,
 					Metadata:    map[string]string{"recipients": recipientsStr, "group_id": groupID},
 				}
-				if err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg); err != nil {
+				if _, err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg); err != nil {
 					results[idx] = recipientResult{Recipient: recipStr, Status: "failed", Error: err.Error()}
 					if !isJSONOutput() {
 						fmt.Printf("  Failed: %s: %s\n", recipStr, err)
@@ -1241,18 +1212,46 @@ func sendMentionMessages(hubCtx *HubContext, sender, primaryRecipient, messageTe
 	wg.Wait()
 }
 
+// resolveMessageBody determines the message body from flags or positional args.
+// Priority: --body-file > positional args. If body is "-", read from stdin.
+func resolveMessageBody(bodyFile string, positionalBody string) (string, error) {
+	if bodyFile != "" {
+		if positionalBody != "" {
+			return "", fmt.Errorf("--body-file and positional message arguments are mutually exclusive")
+		}
+		file, err := os.Open(bodyFile)
+		if err != nil {
+			return "", fmt.Errorf("failed to open body file: %w", err)
+		}
+		defer func() { _ = file.Close() }()
+		data, err := io.ReadAll(io.LimitReader(file, int64(messages.MaxMsgSize)+1))
+		if err != nil {
+			return "", fmt.Errorf("failed to read body file: %w", err)
+		}
+		return string(data), nil
+	}
+	if positionalBody == "-" {
+		data, err := io.ReadAll(io.LimitReader(os.Stdin, int64(messages.MaxMsgSize)+1))
+		if err != nil {
+			return "", fmt.Errorf("failed to read message from stdin: %w", err)
+		}
+		return strings.TrimRight(string(data), "\n"), nil
+	}
+	return positionalBody, nil
+}
+
 func init() {
 	// Retained flags (core message functionality)
 	messageCmd.Flags().BoolVarP(&msgInterrupt, "interrupt", "i", false, "Interrupt the harness before sending the message")
 	messageCmd.Flags().BoolVarP(&msgWake, "wake", "w", false, "Resume a suspended agent before delivering the message")
 	messageCmd.Flags().StringArrayVar(&msgAttach, "attach", nil, "Attach file path(s), repeatable; use paths under /workspace or /scion-volumes (bare relative paths resolve to /workspace). Absolute paths outside these roots are silently dropped on delivery.")
-	messageCmd.Flags().StringVar(&msgVisibility, "visibility", "", "Message visibility: normal, verbose, or full")
+	messageCmd.Flags().StringVar(&msgBodyFile, "body-file", "", "Read message body from a file instead of positional args")
 
 	// Deprecated flags — still functional, emit warnings when used.
 	// These flags are hidden from help output to guide users toward
 	// the new subcommands, but they continue to work identically.
-	messageCmd.Flags().BoolVarP(&msgBroadcast, "broadcast", "b", false, "Deprecated: use 'scion broadcast' instead")
-	messageCmd.Flags().BoolVarP(&msgAll, "all", "a", false, "Deprecated: use 'scion broadcast --all' instead")
+	messageCmd.Flags().BoolP("broadcast", "b", false, "Removed: use 'scion broadcast' instead")
+	messageCmd.Flags().BoolP("all", "a", false, "Removed: use 'scion broadcast --all' instead")
 	messageCmd.Flags().StringVar(&msgIn, "in", "", "Deprecated: use 'scion schedule create --in' instead")
 	messageCmd.Flags().StringVar(&msgAt, "at", "", "Deprecated: use 'scion schedule create --at' instead")
 	messageCmd.Flags().BoolVar(&msgPlain, "plain", false, "Deprecated: --plain is deprecated and will be removed")

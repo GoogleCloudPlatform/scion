@@ -22,7 +22,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/spf13/cobra"
@@ -138,9 +137,6 @@ func init() {
 
 	hubTokenCreateCmd.Flags().StringVar(&tokenCreateName, "name", "", "Token name/label (required)")
 	hubTokenCreateCmd.Flags().StringVar(&tokenCreateProject, "project", "", "Project name or ID to scope the token to (required)")
-	hubTokenCreateCmd.Flags().StringVar(&tokenCreateProject, "grove", "", "Deprecated alias for --project")
-	_ = hubTokenCreateCmd.Flags().MarkDeprecated("grove", "use --project instead")
-	_ = hubTokenCreateCmd.Flags().MarkHidden("grove")
 
 	hubTokenCreateCmd.Flags().StringArrayVar(&tokenCreateScopes, "scopes", nil, "Scope to grant (required, repeatable; also accepts a comma-separated list)")
 	hubTokenCreateCmd.Flags().StringVar(&tokenCreateExpires, "expires", "", "Expiry duration (e.g., 30d, 90d, 1y) or RFC 3339 date (default: 90d)")
@@ -151,23 +147,10 @@ func init() {
 
 	hubTokenListCmd.Flags().BoolVar(&tokenOutputJSON, "json", false, "Output in JSON format")
 	hubTokenListCmd.Flags().StringVar(&tokenListProject, "project", "", "Filter tokens by project name or ID")
-	hubTokenListCmd.Flags().StringVar(&tokenListProject, "grove", "", "Deprecated alias for --project")
-	_ = hubTokenListCmd.Flags().MarkDeprecated("grove", "use --project instead")
-	_ = hubTokenListCmd.Flags().MarkHidden("grove")
 }
 
 func runTokenCreate(cmd *cobra.Command, args []string) error {
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	_, client, err := loadHubClient()
 	if err != nil {
 		return err
 	}
@@ -229,17 +212,7 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 }
 
 func runTokenList(cmd *cobra.Command, args []string) error {
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	_, client, err := loadHubClient()
 	if err != nil {
 		return err
 	}
@@ -316,17 +289,7 @@ func runTokenList(cmd *cobra.Command, args []string) error {
 func runTokenRevoke(cmd *cobra.Command, args []string) error {
 	tokenID := args[0]
 
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	_, client, err := loadHubClient()
 	if err != nil {
 		return err
 	}
@@ -345,17 +308,7 @@ func runTokenRevoke(cmd *cobra.Command, args []string) error {
 func runTokenDelete(cmd *cobra.Command, args []string) error {
 	tokenID := args[0]
 
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	_, client, err := loadHubClient()
 	if err != nil {
 		return err
 	}

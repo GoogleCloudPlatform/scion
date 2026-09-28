@@ -230,12 +230,8 @@ server:
 	}
 }
 
-func TestGenerateProjectIDForDir_NoGitRepo(t *testing.T) {
-	// Create a non-git directory
-	tmpDir := t.TempDir()
-
-	// GenerateProjectIDForDir should return a UUID
-	id := GenerateProjectIDForDir(tmpDir)
+func TestGenerateProjectID(t *testing.T) {
+	id := GenerateProjectID()
 	if id == "" {
 		t.Error("expected non-empty project ID")
 	}
@@ -248,7 +244,7 @@ func TestGenerateProjectIDForDir_NoGitRepo(t *testing.T) {
 
 func TestIsInsideProject(t *testing.T) {
 	// Unset Hub context to avoid synthetic project root detection
-	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_GROVE_ID", "SCION_PROJECT_ID"} {
+	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_PROJECT_ID"} {
 		if val, ok := os.LookupEnv(e); ok {
 			_ = os.Unsetenv(e)
 			defer func() { _ = os.Setenv(e, val) }()
@@ -998,7 +994,7 @@ func TestInitMachine_PreservesSettings(t *testing.T) {
 
 func TestWriteProjectSettings_V1PlacesProjectIDUnderHub(t *testing.T) {
 	tmpDir := t.TempDir()
-	projectID := "test-grove-id-abc123"
+	projectID := "test-project-id-abc123"
 
 	err := writeProjectSettings(tmpDir, "/tmp/project", projectID, InitProjectOpts{SkipRuntimeCheck: true})
 	if err != nil {

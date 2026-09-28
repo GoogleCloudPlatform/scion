@@ -24,6 +24,7 @@ import (
 // Common errors returned by store implementations.
 var (
 	ErrNotFound         = errors.New("not found")
+	ErrNotSingular      = errors.New("not singular") // query matched more than one row
 	ErrAlreadyExists    = errors.New("already exists")
 	ErrVersionConflict  = errors.New("version conflict")
 	ErrInvalidInput     = errors.New("invalid input")
@@ -50,6 +51,13 @@ var (
 	// the existing membership binding before assigning a different built-in
 	// membership role (change-role = delete + create).
 	ErrBuiltInMembershipConflict = errors.New("principal already has a built-in membership role in this project")
+
+	// ErrIdentityKeyConflict is returned when writing an agent's identity
+	// keys (its slug and/or slugify(displayName)) would collide with a key
+	// already reserved by a different agent in the same project, including a
+	// soft-deleted one. Kept distinct from ErrAlreadyExists so callers can
+	// map it to a specific message instead of a generic conflict.
+	ErrIdentityKeyConflict = errors.New("identity key already reserved by another agent in this project")
 )
 
 // SystemReconcileCreatedBy is the CreatedBy sentinel that identifies the
@@ -62,19 +70,25 @@ const SystemReconcileCreatedBy = "system-reconcile"
 // startup backfill that migrates existing User.Role values into role bindings.
 const SystemBackfillCreatedBy = "system-backfill"
 
+// AdminAPICreatedBy is the CreatedBy sentinel that identifies super-admin
+// role bindings created through the admin API (UI-granted promotions).
+// These bindings are NOT touched by ReconcileSuperAdminBindings, making
+// UI-promoted admins immune to AdminEmails config changes.
+const AdminAPICreatedBy = "admin-api"
+
 // IsSuperAdminBindingAllowed reports whether the given CreatedBy value is
-// permitted to create a super-admin role binding. Only the system reconciler
-// and the startup backfill are allowed.
+// permitted to create a super-admin role binding. Only the system reconciler,
+// the startup backfill, and the admin API are allowed.
 func IsSuperAdminBindingAllowed(createdBy string) bool {
-	return createdBy == SystemReconcileCreatedBy || createdBy == SystemBackfillCreatedBy
+	return createdBy == SystemReconcileCreatedBy || createdBy == SystemBackfillCreatedBy || createdBy == AdminAPICreatedBy
 }
 
 // IsSystemCreatedBinding reports whether the given CreatedBy value identifies
-// a binding created automatically by the system (backfill or reconcile).
-// Used by cleanup routines to distinguish automatic bindings from
+// a binding created automatically by the system (backfill, reconcile, or
+// admin API). Used by cleanup routines to distinguish automatic bindings from
 // administrator-created ones.
 func IsSystemCreatedBinding(createdBy string) bool {
-	return createdBy == SystemReconcileCreatedBy || createdBy == SystemBackfillCreatedBy
+	return createdBy == SystemReconcileCreatedBy || createdBy == SystemBackfillCreatedBy || createdBy == AdminAPICreatedBy
 }
 
 // Store defines the interface for Hub data persistence.
@@ -198,6 +212,9 @@ type Store interface {
 	// Agent Credential operations (Permissions Foundation Phase 1H)
 	AgentCredentialStore
 
+	// Agent Identity Key operations (per-project display-name / slug uniqueness)
+	AgentIdentityKeyStore
+
 	// Decision Audit operations (Authorization Decision Audit Phase 1I)
 	DecisionAuditStore
 
@@ -209,6 +226,12 @@ type Store interface {
 
 	// Access Constraint operations (AC1 — Operator Access Constraint Backend)
 	AccessConstraintStore
+
+	// External Identity operations (GE Google Credential Exchange)
+	ExternalIdentityStore
+
+	// Agent Reincarnation operations (agent-reincarnate, ptone/scion#1821)
+	AgentReincarnationStore
 }
 
 // AgentStore defines agent-related persistence operations.
@@ -242,6 +265,14 @@ type AgentStore interface {
 
 	// ListAgents returns agents matching the filter criteria.
 	ListAgents(ctx context.Context, filter AgentFilter, opts ListOptions) (*ListResult[Agent], error)
+
+	// ListAgentsWithStaleNonTerminalReincarnationState returns every agent
+	// whose reincarnation_state is non-terminal and whose row has not been
+	// updated since before olderThan. Backstop for the replica-safe
+	// reincarnation sweep (design §3.7): catches an agent left claimed with
+	// no matching non-terminal AgentReincarnation record for the main sweep
+	// to find (e.g. the record was deleted).
+	ListAgentsWithStaleNonTerminalReincarnationState(ctx context.Context, olderThan time.Time) ([]*Agent, error)
 
 	// UpdateAgentStatus updates only status-related fields.
 	// This is a partial update that doesn't require version checking.
@@ -428,6 +459,13 @@ type ProjectStore interface {
 	// Must be called inside a transaction (WithTx) before any membership
 	// reads or writes. Returns ErrNotFound if the project does not exist.
 	LockProjectForMembership(ctx context.Context, projectID string) error
+
+	// UpdateProjectMessagingPolicy updates only the cross-project inbound
+	// policy and its revision using optimistic concurrency. The
+	// expectedRevision must match the current revision; returns
+	// ErrRevisionConflict on mismatch. This is the only path that may change
+	// the policy; generic UpdateProject must NOT update these fields.
+	UpdateProjectMessagingPolicy(ctx context.Context, projectID string, inbound string, expectedRevision int64) (*Project, error)
 }
 
 // ProjectFilter defines criteria for filtering projects.
@@ -493,6 +531,18 @@ type RuntimeBrokerStore interface {
 	// UpdateRuntimeBroker updates an existing runtime broker.
 	// Returns ErrNotFound if the broker doesn't exist.
 	UpdateRuntimeBroker(ctx context.Context, broker *RuntimeBroker) error
+
+	// SetRuntimeBrokerCreatedByIfEmpty atomically sets created_by on a runtime
+	// broker, but only if the row's created_by is currently empty. Returns
+	// applied=false (not an error) when the row already has a non-empty
+	// created_by, or when the row does not exist — both are safe no-ops for
+	// an idempotent, never-overwrite backfill of legacy ownerless records.
+	//
+	// This is intentionally separate from UpdateRuntimeBroker, which never
+	// touches created_by at all: ownership must not become settable through
+	// the same path a broker uses to update its own heartbeat, status, or
+	// capabilities.
+	SetRuntimeBrokerCreatedByIfEmpty(ctx context.Context, id, createdBy string) (applied bool, err error)
 
 	// DeleteRuntimeBroker removes a runtime broker by ID.
 	// Returns ErrNotFound if the broker doesn't exist.
@@ -609,6 +659,12 @@ type BrokerDispatchStore interface {
 	// past the given cutoff to failed, recording the reason. Returns the
 	// number of messages expired.
 	ExpireStuckPendingMessages(ctx context.Context, before time.Time, reason string) (int, error)
+
+	// FailPendingMessagesWithMissingRecipient transitions pending messages to
+	// failed early, without waiting for ExpireStuckPendingMessages' TTL, when
+	// their recipient agent has been deleted (soft- or hard-deleted) and can
+	// therefore never accept delivery. Returns the number of messages failed.
+	FailPendingMessagesWithMissingRecipient(ctx context.Context, reason string) (int, error)
 }
 
 // TemplateStore defines template persistence operations.
@@ -730,6 +786,10 @@ type UserStore interface {
 	// given email and status in ("invited", "active"). Used by the
 	// invite_only authorization gate as a replacement for IsEmailAllowListed.
 	IsUserInvitedOrActive(ctx context.Context, email string) (bool, error)
+
+	// IncrementSessionGeneration atomically increments the user's
+	// session_generation counter, invalidating all existing sessions.
+	IncrementSessionGeneration(ctx context.Context, userID string) error
 }
 
 // UserFilter defines criteria for filtering users.
@@ -1160,6 +1220,33 @@ type NotificationStore interface {
 	// for a given subscription. Returns ("", nil) if no notifications exist.
 	GetLastNotificationStatus(ctx context.Context, subscriptionID string) (string, error)
 
+	// ClaimNotificationForDispatch atomically transitions a notification from
+	// dispatched=false to dispatched=true, returning claimed=true if this caller
+	// won the CAS race. This is the retry-path concurrency primitive: exactly
+	// one caller (sweep or broker-connect hook) claims each notification.
+	// Returns (false, nil) if the notification is already dispatched or does
+	// not exist.
+	ClaimNotificationForDispatch(ctx context.Context, id string) (claimed bool, err error)
+
+	// UnmarkNotificationDispatched reverts a claimed notification back to
+	// dispatched=false so a future sweep can retry. Used when delivery cannot
+	// proceed (no dispatcher, no broker) after an optimistic claim.
+	UnmarkNotificationDispatched(ctx context.Context, id string) error
+
+	// GetUndispatchedAgentNotifications returns agent-targeted notifications
+	// with dispatched=false.
+	//
+	// If brokerID is empty (sweep mode), a 60s grace period is applied so
+	// the sweep does not race with an in-flight primary dispatch. All
+	// undispatched agent notifications older than 60s are returned.
+	//
+	// If brokerID is non-empty (broker-connect fast-path), no grace period
+	// is applied and only notifications whose subscriber agent currently
+	// has RuntimeBrokerID == brokerID are returned.
+	//
+	// Results are ordered by created_at ASC (oldest first), limited to 100.
+	GetUndispatchedAgentNotifications(ctx context.Context, brokerID string) ([]Notification, error)
+
 	// CreateSubscriptionTemplate creates a new subscription template.
 	CreateSubscriptionTemplate(ctx context.Context, tmpl *SubscriptionTemplate) error
 
@@ -1379,6 +1466,13 @@ type MessageStore interface {
 	// unread messages older than unreadCutoff. Returns count removed.
 	PurgeOldMessages(ctx context.Context, readCutoff time.Time, unreadCutoff time.Time) (int, error)
 
+	// PurgeFailedMessages removes messages with dispatch_state="failed" whose
+	// created timestamp is before cutoff. Returns the number of messages
+	// removed. Unlike PurgeOldMessages (read/unread semantics, which would
+	// also delete successfully delivered history), this filters strictly on
+	// dispatch_state so delivered messages are never touched.
+	PurgeFailedMessages(ctx context.Context, cutoff time.Time) (int, error)
+
 	// SetMessageConversationID updates the conversation_id on an existing
 	// message. Used by the Phase 4 backfill to link legacy messages to
 	// Conversation records. Returns ErrNotFound if the message doesn't exist.
@@ -1388,6 +1482,29 @@ type MessageStore interface {
 	// conversation_id for the given project. When projectID is empty, counts
 	// across all projects.
 	CountUnbackfilledMessages(ctx context.Context, projectID string) (int, error)
+
+	// CountUnreachableUnbackfilledMessages returns the number of messages with
+	// a NULL conversation_id whose project_id does not reference an existing
+	// project row. These messages are permanently unattributable by the
+	// per-project backfill because ListProjects will never return their
+	// project (DEF-111: the projects table hard-deletes).
+	//
+	// This count is used to split the residual attribution report into
+	// reachable (actionable) and unreachable (expected, stable) buckets,
+	// so that a permanent non-zero count of orphaned messages does not
+	// create alarm fatigue by firing a WARN on every boot forever.
+	//
+	// DEPENDENCY: correct only because ListProjects (empty ProjectFilter)
+	// applies no unconditional filter, so it returns every row in projects
+	// and NOT EXISTS is its exact complement. An unconditional filter added
+	// to ListProjects would silently break this invariant.
+	//
+	// GATE (M7, DEF-112): TestReachableCountConsistency_DEF112 enforces
+	// this invariant by asserting the counter's reachable count equals
+	// the sum of per-project counts over ListProjects. A divergence
+	// (e.g. an unconditional filter added to ListProjects) turns that
+	// test red.
+	CountUnreachableUnbackfilledMessages(ctx context.Context) (int, error)
 }
 
 // =============================================================================
@@ -1536,6 +1653,30 @@ type SkillFilter struct {
 	Status  string
 	Search  string
 	Tags    []string
+
+	// AccessScope, when non-nil, restricts results to the read boundary
+	// established by ptone/scion#1901. It is applied in the store query
+	// before LIMIT/cursor pagination (and before TotalCount) so that
+	// out-of-scope rows can never crowd a caller's own rows out of a page,
+	// and so TotalCount reflects only rows the caller may actually see. A
+	// nil AccessScope applies no restriction — used for the hub-admin/
+	// super-admin bypass, which sees every skill unfiltered.
+	AccessScope *SkillAccessScope
+}
+
+// SkillAccessScope narrows a skill query to the rows a specific caller may
+// read, mirroring the ptone/scion#1901 and ptone/scion#1903 rulings —
+// creation scope is the only read boundary; visibility does not widen it:
+//   - IncludeHubScope: hub-scoped (global/core) skills are visible to any
+//     authenticated caller.
+//   - CallerID: a user-scoped skill is visible only when its ScopeID equals
+//     CallerID (the owning user; for an agent caller, its creator).
+//   - ProjectIDs: a project-scoped skill is visible only when its ScopeID is
+//     one of these (the caller's project memberships).
+type SkillAccessScope struct {
+	IncludeHubScope bool
+	CallerID        string
+	ProjectIDs      []string
 }
 
 // =============================================================================
@@ -1908,6 +2049,31 @@ type AgentCredentialStore interface {
 }
 
 // =============================================================================
+// Agent Identity Key Store (per-project display-name / slug uniqueness)
+// =============================================================================
+
+// AgentIdentityKeyStore defines agent identity-key persistence operations.
+// An agent's identity keys are the distinct set {slug, slugify(displayName)};
+// the store enforces uniqueness of each key within a project as a database
+// invariant (UNIQUE(project_id, key)), including against soft-deleted agents.
+type AgentIdentityKeyStore interface {
+	// ReplaceAgentIdentityKeys atomically replaces agentID's identity-key
+	// rows in projectID with keys: rows for keys no longer present are
+	// deleted, rows for new keys are inserted, and rows for keys already
+	// present are left alone. Returns ErrIdentityKeyConflict if any key in
+	// keys is already reserved by a different agent in the project.
+	ReplaceAgentIdentityKeys(ctx context.Context, agentID, projectID string, keys []string) error
+
+	// DeleteAgentIdentityKeys removes all of agentID's identity-key rows,
+	// freeing its keys for reuse. Used on hard delete/purge.
+	DeleteAgentIdentityKeys(ctx context.Context, agentID string) error
+
+	// ListAgentIdentityKeys returns every identity-key row in projectID,
+	// across all agents.
+	ListAgentIdentityKeys(ctx context.Context, projectID string) ([]*AgentIdentityKey, error)
+}
+
+// =============================================================================
 // Decision Audit Store (Authorization Decision Audit Phase 1I)
 // =============================================================================
 
@@ -2013,6 +2179,13 @@ type QuotaStore interface {
 
 	// ListActiveReservations returns active (non-released) reservations for a limit and scope.
 	ListActiveReservations(ctx context.Context, limitDefinitionID, scopeType, scopeID string) ([]*UsageReservation, error)
+
+	// HasActiveReservation reports whether resourceID already holds a
+	// non-released reservation for the given limit, regardless of scope.
+	// Used to make re-reservation idempotent (ptone/scion#1963): a caller
+	// re-reserving on agent start/resume must not create a second active
+	// reservation for an agent that already holds one.
+	HasActiveReservation(ctx context.Context, limitDefinitionID, resourceID string) (bool, error)
 }
 
 // =============================================================================
@@ -2072,4 +2245,38 @@ type AccessConstraintStore interface {
 	// DisableAccessConstraint disables a constraint (for offline recovery).
 	// Returns ErrNotFound if the constraint doesn't exist.
 	DisableAccessConstraint(ctx context.Context, id string) error
+}
+
+// ExternalIdentityBinding represents a persistent mapping from an external
+// identity provider's (provider, issuer, subject) triple to a local Hub user.
+// Used by the GE Google credential exchange to persist stable cross-login
+// identity linkage.
+type ExternalIdentityBinding struct {
+	ID        string    `json:"id"`
+	Provider  string    `json:"provider"` // e.g. "google"
+	Issuer    string    `json:"issuer"`   // canonical issuer URL
+	Subject   string    `json:"subject"`  // stable provider subject
+	UserID    string    `json:"userId"`   // FK to User.ID
+	Email     string    `json:"email"`    // email at binding time (informational)
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+// ExternalIdentityStore provides durable persistence for external identity
+// bindings with transactional uniqueness on (provider, issuer, subject).
+type ExternalIdentityStore interface {
+	// GetExternalIdentity looks up a binding by (provider, issuer, subject).
+	// Returns ErrNotFound if no binding exists.
+	GetExternalIdentity(ctx context.Context, provider, issuer, subject string) (*ExternalIdentityBinding, error)
+
+	// CreateExternalIdentity atomically creates a new binding.
+	// Returns an error if a binding for this (provider, issuer, subject)
+	// already exists (unique constraint violation).
+	CreateExternalIdentity(ctx context.Context, binding *ExternalIdentityBinding) error
+
+	// UpdateExternalIdentityEmail updates the email field of an existing binding.
+	UpdateExternalIdentityEmail(ctx context.Context, id, email string) error
+
+	// GetExternalIdentitiesByUserID returns all bindings for a given user.
+	GetExternalIdentitiesByUserID(ctx context.Context, userID string) ([]*ExternalIdentityBinding, error)
 }

@@ -15,10 +15,12 @@
 package bridge
 
 import (
+	"bytes"
 	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -391,7 +393,7 @@ func TestPersistAndLoadOverlay_SentinelPreservation(t *testing.T) {
 		RateLimit: RateLimitConfig{Burst: 42},
 		Timeouts:  TimeoutConfig{PushRetryMax: 7},
 	}
-	result := ApplyOverlay(base, loaded)
+	result := ApplyOverlay(base, loaded, discardLogger(), nil)
 	if result.RateLimit.Burst != 42 {
 		t.Errorf("ApplyOverlay burst = %d, want 42 (base preserved)", result.RateLimit.Burst)
 	}
@@ -501,7 +503,7 @@ func TestApplyOverlay_Precedence(t *testing.T) {
 		},
 	}
 
-	result := ApplyOverlay(base, overlay)
+	result := ApplyOverlay(base, overlay, discardLogger(), nil)
 
 	// Overlay wins for present keys.
 	if result.Bridge.ExternalURL != "https://overlay.example.com" {
@@ -549,9 +551,346 @@ func TestApplyOverlay_NilOverlay(t *testing.T) {
 		Bridge: BridgeConfig{ExternalURL: "https://base.example.com"},
 	}
 
-	result := ApplyOverlay(base, nil)
+	result := ApplyOverlay(base, nil, discardLogger(), nil)
 	if result.Bridge.ExternalURL != "https://base.example.com" {
 		t.Errorf("ExternalURL = %q, want base value", result.Bridge.ExternalURL)
+	}
+}
+
+// TestEffectiveAuthScheme exercises the pure pinning decision directly.
+func TestEffectiveAuthScheme(t *testing.T) {
+	tests := []struct {
+		name       string
+		yamlScheme string
+		current    string
+		pushed     string
+		want       string
+		wantWarn   bool
+	}{
+		{"pinned hubBearer scheme, none push is ignored", "hubBearer", "hubBearer", "none", "hubBearer", true},
+		{"pinned geGoogle scheme, none push is ignored", "geGoogle", "geGoogle", "none", "geGoogle", true},
+		{"pinned federation scheme, none push is ignored (not dropdown-representable despite being a valid scheme)", "federation", "federation", "none", "federation", true},
+		{"pinned scheme, empty push keeps current, no warning", "hubBearer", "hubBearer", "", "hubBearer", false},
+		{"pinned scheme, push matches yaml exactly: no-op, no warning", "hubBearer", "hubBearer", "hubBearer", "hubBearer", false},
+		{"UI-representable yaml scheme is not pinned", "apiKey", "apiKey", "none", "none", false},
+		{"no yaml scheme captured (admin-only config): push always wins", "", "none", "hubUAT", "hubUAT", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			log := slog.New(slog.NewTextHandler(&buf, nil))
+
+			got := EffectiveAuthScheme(tt.yamlScheme, tt.current, tt.pushed, log, nil)
+			if got != tt.want {
+				t.Errorf("EffectiveAuthScheme(%q, %q, %q) = %q, want %q", tt.yamlScheme, tt.current, tt.pushed, got, tt.want)
+			}
+
+			logged := buf.Len() > 0
+			if logged != tt.wantWarn {
+				t.Errorf("warning logged = %v, want %v (log: %q)", logged, tt.wantWarn, buf.String())
+			}
+			if tt.wantWarn {
+				out := buf.String()
+				if !strings.Contains(out, "level=WARN") {
+					t.Errorf("expected a Warn-level log, got: %q", out)
+				}
+				if !strings.Contains(out, tt.yamlScheme) || !strings.Contains(out, tt.pushed) {
+					t.Errorf("warning must name both schemes, got: %q", out)
+				}
+			}
+		})
+	}
+}
+
+// TestEffectiveAuthScheme_NilLoggerDoesNotPanic: a nil logger falls back to
+// slog.Default() instead of panicking on the pinned path.
+func TestEffectiveAuthScheme_NilLoggerDoesNotPanic(t *testing.T) {
+	got := EffectiveAuthScheme("hubBearer", "hubBearer", "none", nil, nil)
+	if got != "hubBearer" {
+		t.Errorf("got %q, want %q", got, "hubBearer")
+	}
+}
+
+// TestAuthSchemeWarnDedupe: two pushes ignored for the same (yaml, pushed)
+// pair log one Warn followed by Debug on repeats; a different pushed value
+// for the same YAML scheme is a new pair and logs its own Warn.
+func TestAuthSchemeWarnDedupe(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	dedupe := NewAuthSchemeWarnDedupe()
+
+	EffectiveAuthScheme("hubBearer", "hubBearer", "none", log, dedupe)
+	EffectiveAuthScheme("hubBearer", "hubBearer", "none", log, dedupe)
+	EffectiveAuthScheme("hubBearer", "hubBearer", "bearer", log, dedupe)
+
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("got %d log lines, want 3:\n%s", len(lines), buf.String())
+	}
+	if !strings.Contains(lines[0], "level=WARN") || !strings.Contains(lines[0], "pushed_scheme=none") {
+		t.Errorf("line 1 = %q, want a Warn for pushed_scheme=none", lines[0])
+	}
+	if !strings.Contains(lines[1], "level=DEBUG") || !strings.Contains(lines[1], "pushed_scheme=none") {
+		t.Errorf("line 2 (repeat of the same pair) = %q, want a Debug for pushed_scheme=none", lines[1])
+	}
+	if !strings.Contains(lines[2], "level=WARN") || !strings.Contains(lines[2], "pushed_scheme=bearer") {
+		t.Errorf("line 3 (a new pushed value) = %q, want a Warn for pushed_scheme=bearer", lines[2])
+	}
+}
+
+// TestApplyOverlay_PinsYAMLOnlyScheme: YAML hubBearer, overlay
+// auth_scheme: none -> effective hubBearer, with a warning logged.
+func TestApplyOverlay_PinsYAMLOnlyScheme(t *testing.T) {
+	base := Config{
+		Hub:  HubConfig{Endpoint: "https://hub.example.com"},
+		Auth: AuthConfig{Scheme: "hubBearer", YAMLScheme: "hubBearer"},
+	}
+	overlay := &AdminOverlay{
+		AuthScheme:  "none",
+		presentKeys: map[string]bool{"auth_scheme": true},
+	}
+
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	result := ApplyOverlay(base, overlay, log, nil)
+
+	if result.Auth.Scheme != "hubBearer" {
+		t.Errorf("Auth.Scheme = %q, want %q (pinned)", result.Auth.Scheme, "hubBearer")
+	}
+	if !strings.Contains(buf.String(), "level=WARN") {
+		t.Errorf("expected a warning to be logged, got: %q", buf.String())
+	}
+}
+
+// TestApplyOverlay_GeGoogleSchemeAlsoPinned: the pin is not hubBearer-
+// specific, it applies to any YAML scheme the admin UI cannot express.
+func TestApplyOverlay_GeGoogleSchemeAlsoPinned(t *testing.T) {
+	base := Config{
+		Hub:  HubConfig{Endpoint: "https://hub.example.com"},
+		Auth: AuthConfig{Scheme: "geGoogle", YAMLScheme: "geGoogle"},
+	}
+	overlay := &AdminOverlay{
+		AuthScheme:  "none",
+		presentKeys: map[string]bool{"auth_scheme": true},
+	}
+	result := ApplyOverlay(base, overlay, discardLogger(), nil)
+	if result.Auth.Scheme != "geGoogle" {
+		t.Errorf("Auth.Scheme = %q, want %q (pinned)", result.Auth.Scheme, "geGoogle")
+	}
+}
+
+// TestApplyOverlay_FederationSchemeAlsoPinned: federation is a valid
+// ParseAdminOverlay scheme (validAuthSchemes), but the admin dropdown
+// (uiRepresentableSchemes) cannot express it either, so it must be pinned
+// just like hubBearer/geGoogle.
+func TestApplyOverlay_FederationSchemeAlsoPinned(t *testing.T) {
+	base := Config{
+		Hub:  HubConfig{Endpoint: "https://hub.example.com"},
+		Auth: AuthConfig{Scheme: "federation", YAMLScheme: "federation"},
+	}
+	overlay := &AdminOverlay{
+		AuthScheme:  "none",
+		presentKeys: map[string]bool{"auth_scheme": true},
+	}
+	result := ApplyOverlay(base, overlay, discardLogger(), nil)
+	if result.Auth.Scheme != "federation" {
+		t.Errorf("Auth.Scheme = %q, want %q (pinned: federation is not in uiRepresentableSchemes)", result.Auth.Scheme, "federation")
+	}
+}
+
+// TestApplyOverlay_DoesNotPinUIRepresentableScheme: a YAML scheme the admin
+// UI can express (apiKey) is not pinned, guarding against an over-broad pin
+// that ignores every push regardless of uiRepresentableSchemes.
+func TestApplyOverlay_DoesNotPinUIRepresentableScheme(t *testing.T) {
+	base := Config{
+		Auth: AuthConfig{Scheme: "apiKey", YAMLScheme: "apiKey", APIKey: "k"},
+	}
+	overlay := &AdminOverlay{
+		AuthScheme:  "none",
+		presentKeys: map[string]bool{"auth_scheme": true},
+	}
+
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	result := ApplyOverlay(base, overlay, log, nil)
+
+	if result.Auth.Scheme != "none" {
+		t.Errorf("Auth.Scheme = %q, want %q (not pinned, apiKey is UI-representable)", result.Auth.Scheme, "none")
+	}
+	if buf.Len() > 0 {
+		t.Errorf("expected no warning for a UI-representable YAML scheme, got: %q", buf.String())
+	}
+}
+
+// TestApplyOverlay_UsesCapturedYAMLScheme_NotCurrent proves ApplyOverlay
+// pins against the captured base.Auth.YAMLScheme, not against whatever the
+// live/current scheme happens to be. base.Auth.Scheme is deliberately set to
+// a different, UI-representable value than base.Auth.YAMLScheme: a
+// mutant that passed cfg.Auth.Scheme (or base.Auth.Scheme) instead of
+// base.Auth.YAMLScheme to EffectiveAuthScheme would see "apiKey" (matches
+// validAuthSchemes) and fail to pin, letting the push through as "none".
+func TestApplyOverlay_UsesCapturedYAMLScheme_NotCurrent(t *testing.T) {
+	base := Config{
+		Hub:  HubConfig{Endpoint: "https://hub.example.com"},
+		Auth: AuthConfig{Scheme: "apiKey", YAMLScheme: "hubBearer"},
+	}
+	overlay := &AdminOverlay{
+		AuthScheme:  "none",
+		presentKeys: map[string]bool{"auth_scheme": true},
+	}
+	result := ApplyOverlay(base, overlay, discardLogger(), nil)
+	if result.Auth.Scheme != "hubBearer" {
+		t.Errorf("Auth.Scheme = %q, want %q (must pin against the captured YAML scheme, not the current live scheme)", result.Auth.Scheme, "hubBearer")
+	}
+}
+
+// TestApplyOverlay_PersistedOverlayCannotUnpinYAMLScheme covers bridge
+// startup with a persisted overlay containing auth_scheme: none: the exact
+// sequence cmd/scion-a2a-bridge's main() runs at boot
+// (LoadPersistedOverlay -> ApplyOverlay), reproduced here against the
+// bridge package's own primitives.
+func TestApplyOverlay_PersistedOverlayCannotUnpinYAMLScheme(t *testing.T) {
+	dir := t.TempDir()
+	overlay := &AdminOverlay{
+		AuthScheme:  "none",
+		presentKeys: map[string]bool{"auth_scheme": true},
+	}
+	if err := PersistOverlay(dir, overlay); err != nil {
+		t.Fatalf("PersistOverlay: %v", err)
+	}
+
+	loaded, err := LoadPersistedOverlay(dir)
+	if err != nil {
+		t.Fatalf("LoadPersistedOverlay: %v", err)
+	}
+	if loaded == nil {
+		t.Fatal("expected a persisted overlay to load")
+	}
+
+	base := Config{
+		Hub:  HubConfig{Endpoint: "https://hub.example.com"},
+		Auth: AuthConfig{Scheme: "hubBearer", YAMLScheme: "hubBearer"},
+	}
+	effective := ApplyOverlay(base, loaded, discardLogger(), nil)
+	if effective.Auth.Scheme != "hubBearer" {
+		t.Errorf("Auth.Scheme = %q, want %q (a persisted none overlay must not unpin a YAML-only scheme at boot)", effective.Auth.Scheme, "hubBearer")
+	}
+}
+
+// TestApplyOverlay_PinnedSchemeSurvivesBuildSnapshot: after a pinned push,
+// the production snapshot/validator wiring (BuildSnapshot ->
+// BuildAuthValidators), not just the raw Config field, must reflect the
+// pinned scheme.
+func TestApplyOverlay_PinnedSchemeSurvivesBuildSnapshot(t *testing.T) {
+	base := Config{
+		Hub:  HubConfig{Endpoint: "https://hub.example.com"},
+		Auth: AuthConfig{Scheme: "hubBearer", YAMLScheme: "hubBearer"},
+	}
+	overlay := &AdminOverlay{
+		AuthScheme:  "none",
+		presentKeys: map[string]bool{"auth_scheme": true},
+	}
+	effective := ApplyOverlay(base, overlay, discardLogger(), nil)
+
+	snap := BuildSnapshot(effective)
+	if snap.Auth.Scheme != "hubBearer" {
+		t.Errorf("snapshot Auth.Scheme = %q, want %q", snap.Auth.Scheme, "hubBearer")
+	}
+	if snap.Auth.UATValidator == nil {
+		t.Error("snapshot UATValidator is nil, want non-nil: production wiring must reflect the pinned hubBearer scheme, not just the Config field")
+	}
+}
+
+// TestConfigure_PinsYAMLOnlyScheme covers the Hub-driven Restart/Configure
+// push path end to end: BrokerServer.Configure -> ApplyOverlay -> snapshot.
+// This is the real production route for both the non-HA admin-UI Reconnect
+// push and an HA Restart push that carries auth_scheme.
+func TestConfigure_PinsYAMLOnlyScheme(t *testing.T) {
+	broker := NewBrokerServer(nil, discardLogger(), nil)
+	baseCfg := &Config{
+		Bridge: BridgeConfig{ExternalURL: "https://base.example.com"},
+		Hub:    HubConfig{Endpoint: "https://hub.example.com", User: "test-user"},
+		Auth:   AuthConfig{Scheme: "hubBearer", YAMLScheme: "hubBearer"},
+	}
+	snap := NewSnapshotHolder(BuildSnapshot(*baseCfg))
+	dir := t.TempDir()
+	broker.SetAdminConfig(baseCfg, snap, dir)
+
+	// The admin UI's dropdown default: this is exactly what a routine save
+	// (or an HA Restart push carrying the integration's stored settings)
+	// sends.
+	pushedConfig := map[string]string{
+		"auth_scheme": "none",
+	}
+	if err := broker.Configure(pushedConfig); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	current := snap.Load()
+	if current.Config.Auth.Scheme != "hubBearer" {
+		t.Errorf("Config.Auth.Scheme = %q, want %q (pinned)", current.Config.Auth.Scheme, "hubBearer")
+	}
+	if current.Auth.Scheme != "hubBearer" {
+		t.Errorf("snapshot Auth.Scheme = %q, want %q (pinned)", current.Auth.Scheme, "hubBearer")
+	}
+	if current.Auth.UATValidator == nil {
+		t.Error("snapshot UATValidator is nil, want non-nil: production wiring must reflect the pinned hubBearer scheme")
+	}
+
+	// The persisted overlay itself still records the operator's raw push
+	// (so the admin UI shows what was actually sent); it is the effective
+	// config, not the persisted overlay, that is pinned. A restart re-runs
+	// ApplyOverlay against this same persisted overlay and base YAML, and
+	// pins again — the persisted overlay can never durably unpin a YAML-only
+	// scheme.
+	loaded, err := LoadPersistedOverlay(dir)
+	if err != nil {
+		t.Fatalf("LoadPersistedOverlay: %v", err)
+	}
+	if loaded == nil || loaded.AuthScheme != "none" {
+		t.Fatalf("persisted overlay AuthScheme = %+v, want \"none\"", loaded)
+	}
+	reapplied := ApplyOverlay(*baseCfg, loaded, discardLogger(), nil)
+	if reapplied.Auth.Scheme != "hubBearer" {
+		t.Errorf("re-applying the persisted overlay after a restart gave Auth.Scheme = %q, want %q (still pinned)", reapplied.Auth.Scheme, "hubBearer")
+	}
+}
+
+// TestConfigure_DedupesWarningAcrossConfigurePushes covers the dedupe's
+// per-BrokerServer ownership and lifetime: pushing the same ignored
+// auth_scheme through Configure twice must not double the Warn, because
+// BrokerServer keeps one dedupe instance for its whole lifetime rather than
+// creating a new one per push. Each Configure call itself runs ApplyOverlay
+// twice (once to validate, once to apply the snapshot), so the first push
+// alone already produces a Warn plus a Debug; three Debug lines total are
+// therefore expected across the two pushes in this trace.
+func TestConfigure_DedupesWarningAcrossConfigurePushes(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	broker := NewBrokerServer(nil, log, nil)
+	baseCfg := &Config{
+		Bridge: BridgeConfig{ExternalURL: "https://base.example.com"},
+		Hub:    HubConfig{Endpoint: "https://hub.example.com", User: "test-user"},
+		Auth:   AuthConfig{Scheme: "hubBearer", YAMLScheme: "hubBearer"},
+	}
+	snap := NewSnapshotHolder(BuildSnapshot(*baseCfg))
+	broker.SetAdminConfig(baseCfg, snap, "")
+
+	pushedConfig := map[string]string{"auth_scheme": "none"}
+	if err := broker.Configure(pushedConfig); err != nil {
+		t.Fatalf("first Configure: %v", err)
+	}
+	if err := broker.Configure(pushedConfig); err != nil {
+		t.Fatalf("second Configure: %v", err)
+	}
+
+	out := buf.String()
+	if warnCount := strings.Count(out, "level=WARN"); warnCount != 1 {
+		t.Errorf("got %d Warn line(s) across two identical Configure pushes, want 1 (the dedupe must be shared across pushes, not reset per Configure call):\n%s", warnCount, out)
+	}
+	if debugCount := strings.Count(out, "level=DEBUG"); debugCount != 3 {
+		t.Errorf("got %d Debug line(s), want 3 (each Configure call runs ApplyOverlay twice, so push 1 yields Warn+Debug and push 2 yields Debug+Debug):\n%s", debugCount, out)
 	}
 }
 
@@ -585,6 +924,7 @@ func TestBuildAuthValidators_Schemes(t *testing.T) {
 		{"bearer", false, true},
 		{"none", false, false},
 		{"hubUAT", true, false},
+		{"hubBearer", true, false},
 		{"hubJWT", false, false},
 		{"", false, true}, // default legacy scheme
 	}
@@ -820,7 +1160,7 @@ func TestParseAdminOverlay_EmptyNonStringFieldsNotPresent(t *testing.T) {
 		Auth:     AuthConfig{UATCacheTTL: 90 * time.Second},
 		Timeouts: TimeoutConfig{SendMessage: 60 * time.Second, SSEKeepalive: 15 * time.Second, PushRetryMax: 5},
 	}
-	result := ApplyOverlay(base, overlay)
+	result := ApplyOverlay(base, overlay, discardLogger(), nil)
 	if result.Auth.UATCacheTTL != 90*time.Second {
 		t.Errorf("UATCacheTTL = %v, want 90s (base preserved)", result.Auth.UATCacheTTL)
 	}
@@ -838,7 +1178,10 @@ func TestParseAdminOverlay_EmptyNonStringFieldsNotPresent(t *testing.T) {
 func TestParseAdminOverlay_EmptyStringFieldsStillPresent(t *testing.T) {
 	// String fields (external_url, auth_scheme, api_key, provider_org,
 	// provider_url) can be explicitly cleared by setting them to empty. They
-	// should still be marked as present so ApplyOverlay writes the empty value.
+	// should still be marked as present so ApplyOverlay writes the empty
+	// value. auth_scheme is the one exception: EffectiveAuthScheme treats an
+	// empty pushed scheme as "no scheme in this push" and keeps the current
+	// scheme rather than clearing it (see TestEffectiveAuthScheme).
 	cfg := map[string]string{
 		"external_url": "",
 		"auth_scheme":  "",
@@ -859,7 +1202,7 @@ func TestParseAdminOverlay_EmptyStringFieldsStillPresent(t *testing.T) {
 		}
 	}
 
-	// Verify ApplyOverlay clears base values.
+	// Verify ApplyOverlay clears base values, except auth_scheme.
 	base := Config{
 		Bridge: BridgeConfig{
 			ExternalURL: "https://base.example.com",
@@ -870,12 +1213,12 @@ func TestParseAdminOverlay_EmptyStringFieldsStillPresent(t *testing.T) {
 			APIKey: "base-key",
 		},
 	}
-	result := ApplyOverlay(base, overlay)
+	result := ApplyOverlay(base, overlay, discardLogger(), nil)
 	if result.Bridge.ExternalURL != "" {
 		t.Errorf("ExternalURL = %q, want empty (cleared)", result.Bridge.ExternalURL)
 	}
-	if result.Auth.Scheme != "" {
-		t.Errorf("Auth.Scheme = %q, want empty (cleared)", result.Auth.Scheme)
+	if result.Auth.Scheme != "apiKey" {
+		t.Errorf("Auth.Scheme = %q, want %q (an empty push keeps the current scheme, it does not clear it)", result.Auth.Scheme, "apiKey")
 	}
 	if result.Auth.APIKey != "" {
 		t.Errorf("Auth.APIKey = %q, want empty (cleared)", result.Auth.APIKey)

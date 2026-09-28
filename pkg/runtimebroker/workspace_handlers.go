@@ -39,7 +39,7 @@ type WorkspaceUploadRequest struct {
 	// Slug is the identifier of the agent whose workspace to upload.
 	Slug string `json:"slug"`
 	// StoragePath is the path within the bucket where files should be uploaded.
-	// Format: "workspaces/{groveId}/{slug}"
+	// Format: "workspaces/{projectId}/{slug}"
 	StoragePath string `json:"storagePath"`
 	// Bucket is the GCS bucket name for storage.
 	Bucket string `json:"bucket,omitempty"`
@@ -62,7 +62,7 @@ type WorkspaceApplyRequest struct {
 	// Slug is the identifier of the agent whose workspace to update.
 	Slug string `json:"slug"`
 	// StoragePath is the path within the bucket where files are stored.
-	// Format: "workspaces/{groveId}/{slug}"
+	// Format: "workspaces/{projectId}/{slug}"
 	StoragePath string `json:"storagePath"`
 	// Bucket is the GCS bucket name for storage.
 	Bucket string `json:"bucket,omitempty"`
@@ -462,36 +462,6 @@ type ProjectWorkspaceUploadRequest struct {
 	ExcludePatterns []string `json:"excludePatterns,omitempty"`
 }
 
-// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
-func (r *ProjectWorkspaceUploadRequest) UnmarshalJSON(data []byte) error {
-	type Alias ProjectWorkspaceUploadRequest
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(r),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if r.ProjectID == "" && aux.GroveID != "" {
-		r.ProjectID = aux.GroveID
-	}
-	return nil
-}
-
-// MarshalJSON implements custom marshaling to support legacy grove fields.
-func (r ProjectWorkspaceUploadRequest) MarshalJSON() ([]byte, error) {
-	type Alias ProjectWorkspaceUploadRequest
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId,omitempty"`
-	}{
-		Alias:   Alias(r),
-		GroveID: r.ProjectID,
-	})
-}
-
 // ProjectWorkspaceUploadResponse is the response after uploading a project workspace.
 type ProjectWorkspaceUploadResponse struct {
 	// Manifest contains the list of files uploaded with their hashes.
@@ -502,7 +472,7 @@ type ProjectWorkspaceUploadResponse struct {
 	UploadedBytes int64 `json:"uploadedBytes"`
 }
 
-// handleProjectWorkspaceUpload handles POST /api/v1/workspace/project-upload (and legacy grove-upload)
+// handleProjectWorkspaceUpload handles POST /api/v1/workspace/project-upload.
 // It uploads the project's workspace directory to GCS so the hub can cache it.
 func (s *Server) handleProjectWorkspaceUpload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {

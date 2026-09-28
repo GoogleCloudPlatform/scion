@@ -38,7 +38,7 @@ func protoResourceMetricsToSDK(resourceMetrics []*metricpb.ResourceMetrics) []me
 			}
 
 			scopeMetrics = append(scopeMetrics, metricdata.ScopeMetrics{
-				Scope:   protoScopeToSDK(sm.Scope),
+				Scope:   protoScopeToSDK(sm.Scope, sm.SchemaUrl),
 				Metrics: metrics,
 			})
 		}
@@ -47,7 +47,7 @@ func protoResourceMetricsToSDK(resourceMetrics []*metricpb.ResourceMetrics) []me
 		}
 
 		result = append(result, metricdata.ResourceMetrics{
-			Resource:     protoResourceToSDK(rm.Resource),
+			Resource:     protoResourceToSDK(rm.Resource, rm.SchemaUrl),
 			ScopeMetrics: scopeMetrics,
 		})
 	}

@@ -25,8 +25,19 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// noopGlobalLayoutReporter discards every config.MigrateLegacyGlobalLayout
+// report; these tests only care about the resulting filesystem state.
+type noopGlobalLayoutReporter struct{}
+
+func (noopGlobalLayoutReporter) Migrated(old, new string, tracked bool)      {}
+func (noopGlobalLayoutReporter) Conflict(old, new, detail string)            {}
+func (noopGlobalLayoutReporter) Skipped(old, reason, manual string)          {}
+func (noopGlobalLayoutReporter) EnvIgnored(name, replacement string)         {}
+func (noopGlobalLayoutReporter) PrecedenceChanged(path, value, other string) {}
 
 func TestClassifyPath_NonExistent(t *testing.T) {
 	pc, err := ClassifyPath(context.Background(), nil, "/nonexistent/path/abcxyz123456", "")
@@ -85,16 +96,77 @@ func TestClassifyPath_ManagedPath(t *testing.T) {
 	}
 }
 
-func TestClassifyPath_ManagedLegacyGroves(t *testing.T) {
-	// The legacy "groves" path should also be detected as managed
+// TestClassifyPath_SymlinkedManagedRoot guards against a managedRoot that is
+// itself behind a symlink (a symlinked home directory, common on macOS): the
+// prefix check must resolve managedRoot the same way it already resolves
+// path, not just Clean it, or a real, managed path would be misclassified as
+// unmanaged.
+func TestClassifyPath_SymlinkedManagedRoot(t *testing.T) {
 	base := t.TempDir()
-	managedRoot := filepath.Join(base, "projects")
-	legacyRoot := filepath.Join(base, "groves")
-	if err := os.MkdirAll(legacyRoot, 0755); err != nil {
+	realRoot := filepath.Join(base, "real-root")
+	sub := filepath.Join(realRoot, "myproject")
+	if err := os.MkdirAll(sub, 0755); err != nil {
 		t.Fatal(err)
 	}
+	symlinkedRoot := filepath.Join(base, "symlinked-root")
+	if err := os.Symlink(realRoot, symlinkedRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	// path is given through the symlinked root (as a caller resolving a
+	// project under a symlinked home directory would see it), and so is
+	// managedRoot itself.
+	pathThroughSymlink := filepath.Join(symlinkedRoot, "myproject")
+	pc, err := ClassifyPath(context.Background(), nil, pathThroughSymlink, symlinkedRoot)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !pc.IsManaged {
+		t.Error("expected IsManaged=true when both path and managedRoot are given through the same symlink")
+	}
+}
+
+func TestClassifyPath_ManagedThroughMigratedSymlink(t *testing.T) {
+	// A path recorded before config.MigrateLegacyGlobalLayout moved its
+	// project out of the legacy root still resolves through the per-entry
+	// symlink the migrator leaves behind, so it is still detected as managed
+	// with no separate legacy-path check.
+	base := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(base, "groves", "old-project"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	config.MigrateLegacyGlobalLayout(base, noopGlobalLayoutReporter{})
+
+	managedRoot := filepath.Join(base, "projects")
+	if _, err := os.Stat(filepath.Join(managedRoot, "old-project")); err != nil {
+		t.Fatalf("migration did not create the canonical project dir: %v", err)
+	}
+	legacyPath := filepath.Join(base, "groves", "old-project")
+	if info, err := os.Lstat(legacyPath); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("expected %s to be a symlink after migration, got %v, err %v", legacyPath, info, err)
+	}
+
+	pc, err := ClassifyPath(context.Background(), nil, legacyPath, managedRoot)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !pc.IsManaged {
+		t.Error("expected IsManaged=true for a path resolving through the migrated legacy symlink")
+	}
+}
+
+func TestClassifyPath_UnmigratedLegacyDirNotManaged(t *testing.T) {
+	// A bare directory literally named "groves" that is not a symlink to the
+	// canonical root (i.e. never migrated) is not treated as managed: there
+	// is no legacy-name fallback any more, only symlink resolution.
+	base := t.TempDir()
+	managedRoot := filepath.Join(base, "projects")
+	if err := os.MkdirAll(managedRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+	legacyRoot := filepath.Join(base, "groves")
 	sub := filepath.Join(legacyRoot, "old-project")
-	if err := os.Mkdir(sub, 0755); err != nil {
+	if err := os.MkdirAll(sub, 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -102,8 +174,8 @@ func TestClassifyPath_ManagedLegacyGroves(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !pc.IsManaged {
-		t.Error("expected IsManaged=true for path under legacy groves root")
+	if pc.IsManaged {
+		t.Error("expected IsManaged=false for an unmigrated legacy directory")
 	}
 }
 

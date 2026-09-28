@@ -136,13 +136,13 @@ describe('saListUrl', () => {
   });
 });
 
-describe('saCreateUrl — hub-scoped creation must reach the Hub’s refusal', () => {
+describe('saCreateUrl — hub-scoped creation addresses the flat collection', () => {
   /**
-   * The requirement is not "creation fails at hub scope". It is that it fails
-   * AT THE SERVER, where the refusal is implemented and where lifting the hold
-   * (#19) will change it. A create URL that pointed at some project's
-   * collection would SUCCEED, and succeed at making the wrong thing: a
-   * project-scoped account registered from a hub-scoped screen.
+   * Hub-scope BYO registration is now live (enabled in P9). The test’s value
+   * is ensuring the URL points at the flat collection — not at some project’s
+   * nested collection. A create URL that pointed at a project’s collection
+   * would succeed at making the wrong thing: a project-scoped account
+   * registered from a hub-scoped screen.
    */
   it('points at the flat collection with scope=hub, never at a project', () => {
     const url = saCreateUrl('hub', '');
@@ -155,12 +155,9 @@ describe('saCreateUrl — hub-scoped creation must reach the Hub’s refusal', (
   });
 });
 
-describe('saMintUrl — “nowhere to send this” is a value, not a URL', () => {
-  it('returns null at hub scope', () => {
-    // The flat route has no mint endpoint: /api/v1/gcp-service-accounts/mint
-    // parses as an account whose id is "mint". A plausible-looking string here
-    // would produce a 404 that reads like a missing account.
-    expect(saMintUrl('hub', '')).toBeNull();
+describe('saMintUrl — scope-appropriate mint endpoint', () => {
+  it('returns the flat mint URL with scope=hub at hub scope', () => {
+    expect(saMintUrl('hub', '')).toBe('/api/v1/gcp-service-accounts/mint?scope=hub');
   });
 
   it('returns the project mint endpoint at project scope', () => {

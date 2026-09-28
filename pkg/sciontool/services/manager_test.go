@@ -37,6 +37,12 @@ func setupTestEnv(t *testing.T) (cleanup func()) {
 	}
 }
 
+func (svc *managedService) currentFailures() int {
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	return svc.failures
+}
+
 func TestManager_StartAndShutdown(t *testing.T) {
 	cleanup := setupTestEnv(t)
 	defer cleanup()

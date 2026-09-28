@@ -1,0 +1,16 @@
+{
+  "hub_name": "my-hub",
+  "project_id": "",
+  "region": "us-central1",
+  "machine_size": "small",
+  "disk_size_gb": 200,
+  "chat_plugins": [],
+  "container_images": {
+    "source": "build",
+    "registry": "",
+    "force_rebuild": false
+  },
+  "admin_email": "",
+  "update_policy": "auto",
+  "release_channel": ""
+}

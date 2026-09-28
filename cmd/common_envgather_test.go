@@ -49,7 +49,7 @@ func TestGatherAndSubmitEnv_NonInteractiveGathersFromLocalEnv(t *testing.T) {
 	defer func() { _ = os.Unsetenv("TEST_SECRET_KEY") }()
 
 	// Set up mock Hub server
-	projectID := tid("grove-1")
+	projectID := tid("project-1")
 	server, captured := newEnvGatherMockHubServer(t, projectID)
 	defer server.Close()
 
@@ -98,12 +98,12 @@ func TestGatherAndSubmitEnv_NonInteractiveAllowsWhenAllSatisfied(t *testing.T) {
 		EnvGather: &hubclient.EnvGatherResponse{
 			AgentID:  "agent-2",
 			Required: []string{"GEMINI_API_KEY"},
-			HubHas:   []hubclient.EnvSource{{Key: "GEMINI_API_KEY", Scope: "grove"}},
+			HubHas:   []hubclient.EnvSource{{Key: "GEMINI_API_KEY", Scope: "project"}},
 			Needs:    []string{},
 		},
 	}
 
-	result, err := gatherAndSubmitEnv(context.Background(), nil, tid("grove-1"), resp)
+	result, err := gatherAndSubmitEnv(context.Background(), nil, tid("project-1"), resp)
 	require.NoError(t, err)
 	// Should return the original response since no env was gathered
 	assert.Equal(t, resp, result)
@@ -137,7 +137,7 @@ func TestGatherAndSubmitEnv_NonInteractiveMultipleKeysMissing(t *testing.T) {
 		},
 	}
 
-	_, err := gatherAndSubmitEnv(context.Background(), nil, tid("grove-1"), resp)
+	_, err := gatherAndSubmitEnv(context.Background(), nil, tid("project-1"), resp)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot satisfy required environment variables")
 	assert.Contains(t, err.Error(), "KEY_A")
@@ -164,7 +164,7 @@ func TestStartAgentViaHub_EnvGatherFailureCleansUp(t *testing.T) {
 	_ = os.Unsetenv("MISSING_KEY")
 
 	agentID := "agent-cleanup-1"
-	projectID := "grove-cleanup"
+	projectID := "project-cleanup"
 	var deleteCalled bool
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -216,7 +216,7 @@ func TestStartAgentViaHub_EnvGatherFailureCleansUp(t *testing.T) {
 	assert.True(t, deleteCalled, "expected provisioning agent to be deleted on env-gather failure")
 }
 
-func TestStartAgentViaHub_GlobalGroveSkipsWorkspaceBootstrap(t *testing.T) {
+func TestStartAgentViaHub_GlobalProjectSkipsWorkspaceBootstrap(t *testing.T) {
 	origOutputFormat := outputFormat
 	origTemplateName := templateName
 	origHarnessConfigFlag := harnessConfigFlag
@@ -239,7 +239,7 @@ func TestStartAgentViaHub_GlobalGroveSkipsWorkspaceBootstrap(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "state.yaml"), []byte("syncedAgents: []\n"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "large-local-file.txt"), []byte("should-not-upload"), 0644))
 
-	projectID := "grove-global"
+	projectID := "project-global"
 	var captured *hubclient.CreateAgentRequest
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -351,7 +351,7 @@ func TestGatherAndSubmitEnv_InteractiveSecretPrompt(t *testing.T) {
 	}
 
 	// Set up mock Hub server
-	projectID := "grove-prompt"
+	projectID := "project-prompt"
 	server, captured := newEnvGatherMockHubServer(t, projectID)
 	defer server.Close()
 
@@ -418,7 +418,7 @@ func TestGatherAndSubmitEnv_FileSecretShowsGuidance(t *testing.T) {
 		},
 	}
 
-	_, err := gatherAndSubmitEnv(context.Background(), nil, tid("grove-1"), resp)
+	_, err := gatherAndSubmitEnv(context.Background(), nil, tid("project-1"), resp)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "FILE_CERT")
 }
@@ -454,7 +454,7 @@ func TestGatherAndSubmitEnv_MixedSecretAndEnvKeys(t *testing.T) {
 		},
 	}
 
-	_, err := gatherAndSubmitEnv(context.Background(), nil, tid("grove-1"), resp)
+	_, err := gatherAndSubmitEnv(context.Background(), nil, tid("project-1"), resp)
 	require.Error(t, err)
 	// Should fail because ENV_ONLY is not secret-eligible and not in local env
 	assert.Contains(t, err.Error(), "ENV_ONLY")
@@ -495,7 +495,7 @@ func TestGatherAndSubmitEnv_NonInteractiveSecretsMissing(t *testing.T) {
 		},
 	}
 
-	_, err := gatherAndSubmitEnv(context.Background(), nil, tid("grove-1"), resp)
+	_, err := gatherAndSubmitEnv(context.Background(), nil, tid("project-1"), resp)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot satisfy required environment variables")
 }
@@ -542,7 +542,7 @@ func TestGatherAndSubmitEnv_InteractiveSecretEmptyInput(t *testing.T) {
 		},
 	}
 
-	_, err := gatherAndSubmitEnv(context.Background(), nil, tid("grove-1"), resp)
+	_, err := gatherAndSubmitEnv(context.Background(), nil, tid("project-1"), resp)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "MY_SECRET")
 }

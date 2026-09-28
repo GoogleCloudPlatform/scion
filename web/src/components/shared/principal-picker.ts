@@ -360,7 +360,9 @@ export class ScionPrincipalPicker extends LitElement {
     this.groupSearchLoading = true;
     this.groupSearchOpen = true;
     try {
-      const response = await apiFetch(`/api/v1/groups?search=${encodeURIComponent(query)}&limit=10`);
+      const response = await apiFetch(
+        `/api/v1/groups?search=${encodeURIComponent(query)}&limit=10`
+      );
       if (requestId !== this.groupSearchRequestId) return;
       if (response.ok) {
         const data = (await response.json()) as {

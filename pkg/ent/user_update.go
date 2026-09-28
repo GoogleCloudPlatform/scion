@@ -11,6 +11,7 @@ import (
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/externalidentity"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/group"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
@@ -201,6 +202,27 @@ func (_u *UserUpdate) ClearLastSeen() *UserUpdate {
 	return _u
 }
 
+// SetSessionGeneration sets the "session_generation" field.
+func (_u *UserUpdate) SetSessionGeneration(v int64) *UserUpdate {
+	_u.mutation.ResetSessionGeneration()
+	_u.mutation.SetSessionGeneration(v)
+	return _u
+}
+
+// SetNillableSessionGeneration sets the "session_generation" field if the given value is not nil.
+func (_u *UserUpdate) SetNillableSessionGeneration(v *int64) *UserUpdate {
+	if v != nil {
+		_u.SetSessionGeneration(*v)
+	}
+	return _u
+}
+
+// AddSessionGeneration adds value to the "session_generation" field.
+func (_u *UserUpdate) AddSessionGeneration(v int64) *UserUpdate {
+	_u.mutation.AddSessionGeneration(v)
+	return _u
+}
+
 // AddOwnedGroupIDs adds the "owned_groups" edge to the Group entity by IDs.
 func (_u *UserUpdate) AddOwnedGroupIDs(ids ...uuid.UUID) *UserUpdate {
 	_u.mutation.AddOwnedGroupIDs(ids...)
@@ -244,6 +266,21 @@ func (_u *UserUpdate) AddPolicyBindings(v ...*PolicyBinding) *UserUpdate {
 		ids[i] = v[i].ID
 	}
 	return _u.AddPolicyBindingIDs(ids...)
+}
+
+// AddExternalIdentityIDs adds the "external_identities" edge to the ExternalIdentity entity by IDs.
+func (_u *UserUpdate) AddExternalIdentityIDs(ids ...uuid.UUID) *UserUpdate {
+	_u.mutation.AddExternalIdentityIDs(ids...)
+	return _u
+}
+
+// AddExternalIdentities adds the "external_identities" edges to the ExternalIdentity entity.
+func (_u *UserUpdate) AddExternalIdentities(v ...*ExternalIdentity) *UserUpdate {
+	ids := make([]uuid.UUID, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.AddExternalIdentityIDs(ids...)
 }
 
 // Mutation returns the UserMutation object of the builder.
@@ -312,6 +349,27 @@ func (_u *UserUpdate) RemovePolicyBindings(v ...*PolicyBinding) *UserUpdate {
 		ids[i] = v[i].ID
 	}
 	return _u.RemovePolicyBindingIDs(ids...)
+}
+
+// ClearExternalIdentities clears all "external_identities" edges to the ExternalIdentity entity.
+func (_u *UserUpdate) ClearExternalIdentities() *UserUpdate {
+	_u.mutation.ClearExternalIdentities()
+	return _u
+}
+
+// RemoveExternalIdentityIDs removes the "external_identities" edge to ExternalIdentity entities by IDs.
+func (_u *UserUpdate) RemoveExternalIdentityIDs(ids ...uuid.UUID) *UserUpdate {
+	_u.mutation.RemoveExternalIdentityIDs(ids...)
+	return _u
+}
+
+// RemoveExternalIdentities removes "external_identities" edges to ExternalIdentity entities.
+func (_u *UserUpdate) RemoveExternalIdentities(v ...*ExternalIdentity) *UserUpdate {
+	ids := make([]uuid.UUID, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.RemoveExternalIdentityIDs(ids...)
 }
 
 // Save executes the query and returns the number of nodes affected by the update operation.
@@ -420,6 +478,12 @@ func (_u *UserUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.LastSeenCleared() {
 		_spec.ClearField(user.FieldLastSeen, field.TypeTime)
+	}
+	if value, ok := _u.mutation.SessionGeneration(); ok {
+		_spec.SetField(user.FieldSessionGeneration, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedSessionGeneration(); ok {
+		_spec.AddField(user.FieldSessionGeneration, field.TypeInt64, value)
 	}
 	if _u.mutation.OwnedGroupsCleared() {
 		edge := &sqlgraph.EdgeSpec{
@@ -549,6 +613,51 @@ func (_u *UserUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(policybinding.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
+	if _u.mutation.ExternalIdentitiesCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   user.ExternalIdentitiesTable,
+			Columns: []string{user.ExternalIdentitiesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(externalidentity.FieldID, field.TypeUUID),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.RemovedExternalIdentitiesIDs(); len(nodes) > 0 && !_u.mutation.ExternalIdentitiesCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   user.ExternalIdentitiesTable,
+			Columns: []string{user.ExternalIdentitiesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(externalidentity.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.ExternalIdentitiesIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   user.ExternalIdentitiesTable,
+			Columns: []string{user.ExternalIdentitiesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(externalidentity.FieldID, field.TypeUUID),
 			},
 		}
 		for _, k := range nodes {
@@ -744,6 +853,27 @@ func (_u *UserUpdateOne) ClearLastSeen() *UserUpdateOne {
 	return _u
 }
 
+// SetSessionGeneration sets the "session_generation" field.
+func (_u *UserUpdateOne) SetSessionGeneration(v int64) *UserUpdateOne {
+	_u.mutation.ResetSessionGeneration()
+	_u.mutation.SetSessionGeneration(v)
+	return _u
+}
+
+// SetNillableSessionGeneration sets the "session_generation" field if the given value is not nil.
+func (_u *UserUpdateOne) SetNillableSessionGeneration(v *int64) *UserUpdateOne {
+	if v != nil {
+		_u.SetSessionGeneration(*v)
+	}
+	return _u
+}
+
+// AddSessionGeneration adds value to the "session_generation" field.
+func (_u *UserUpdateOne) AddSessionGeneration(v int64) *UserUpdateOne {
+	_u.mutation.AddSessionGeneration(v)
+	return _u
+}
+
 // AddOwnedGroupIDs adds the "owned_groups" edge to the Group entity by IDs.
 func (_u *UserUpdateOne) AddOwnedGroupIDs(ids ...uuid.UUID) *UserUpdateOne {
 	_u.mutation.AddOwnedGroupIDs(ids...)
@@ -787,6 +917,21 @@ func (_u *UserUpdateOne) AddPolicyBindings(v ...*PolicyBinding) *UserUpdateOne {
 		ids[i] = v[i].ID
 	}
 	return _u.AddPolicyBindingIDs(ids...)
+}
+
+// AddExternalIdentityIDs adds the "external_identities" edge to the ExternalIdentity entity by IDs.
+func (_u *UserUpdateOne) AddExternalIdentityIDs(ids ...uuid.UUID) *UserUpdateOne {
+	_u.mutation.AddExternalIdentityIDs(ids...)
+	return _u
+}
+
+// AddExternalIdentities adds the "external_identities" edges to the ExternalIdentity entity.
+func (_u *UserUpdateOne) AddExternalIdentities(v ...*ExternalIdentity) *UserUpdateOne {
+	ids := make([]uuid.UUID, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.AddExternalIdentityIDs(ids...)
 }
 
 // Mutation returns the UserMutation object of the builder.
@@ -855,6 +1000,27 @@ func (_u *UserUpdateOne) RemovePolicyBindings(v ...*PolicyBinding) *UserUpdateOn
 		ids[i] = v[i].ID
 	}
 	return _u.RemovePolicyBindingIDs(ids...)
+}
+
+// ClearExternalIdentities clears all "external_identities" edges to the ExternalIdentity entity.
+func (_u *UserUpdateOne) ClearExternalIdentities() *UserUpdateOne {
+	_u.mutation.ClearExternalIdentities()
+	return _u
+}
+
+// RemoveExternalIdentityIDs removes the "external_identities" edge to ExternalIdentity entities by IDs.
+func (_u *UserUpdateOne) RemoveExternalIdentityIDs(ids ...uuid.UUID) *UserUpdateOne {
+	_u.mutation.RemoveExternalIdentityIDs(ids...)
+	return _u
+}
+
+// RemoveExternalIdentities removes "external_identities" edges to ExternalIdentity entities.
+func (_u *UserUpdateOne) RemoveExternalIdentities(v ...*ExternalIdentity) *UserUpdateOne {
+	ids := make([]uuid.UUID, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.RemoveExternalIdentityIDs(ids...)
 }
 
 // Where appends a list predicates to the UserUpdate builder.
@@ -994,6 +1160,12 @@ func (_u *UserUpdateOne) sqlSave(ctx context.Context) (_node *User, err error) {
 	if _u.mutation.LastSeenCleared() {
 		_spec.ClearField(user.FieldLastSeen, field.TypeTime)
 	}
+	if value, ok := _u.mutation.SessionGeneration(); ok {
+		_spec.SetField(user.FieldSessionGeneration, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedSessionGeneration(); ok {
+		_spec.AddField(user.FieldSessionGeneration, field.TypeInt64, value)
+	}
 	if _u.mutation.OwnedGroupsCleared() {
 		edge := &sqlgraph.EdgeSpec{
 			Rel:     sqlgraph.O2M,
@@ -1122,6 +1294,51 @@ func (_u *UserUpdateOne) sqlSave(ctx context.Context) (_node *User, err error) {
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(policybinding.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
+	if _u.mutation.ExternalIdentitiesCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   user.ExternalIdentitiesTable,
+			Columns: []string{user.ExternalIdentitiesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(externalidentity.FieldID, field.TypeUUID),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.RemovedExternalIdentitiesIDs(); len(nodes) > 0 && !_u.mutation.ExternalIdentitiesCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   user.ExternalIdentitiesTable,
+			Columns: []string{user.ExternalIdentitiesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(externalidentity.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.ExternalIdentitiesIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   user.ExternalIdentitiesTable,
+			Columns: []string{user.ExternalIdentitiesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(externalidentity.FieldID, field.TypeUUID),
 			},
 		}
 		for _, k := range nodes {

@@ -216,7 +216,7 @@ rules:
 
 ## Execution Flow
 
-1. **Start**: `scion start` creates a Pod with the configured image, resources, and secrets.
+1. **Start**: `scion start` creates a Pod with the configured image, resources, and secrets. Pods don't keep a workspace across a stop, so when the Hub starts an existing agent it sends the same git clone config, branch, and workspace mode that it sends on create. This lets the agent's workspace be recreated on the new Pod.
 2. **Sync**: Workspace and agent home are transferred to the Pod via tar streaming over `pods/exec`.
 3. **Ready**: Pod readiness is polled with detailed error classification (image pull, scheduling, config errors).
 4. **Attach**: `scion attach` connects to the tmux session inside the Pod via `pods/exec`.

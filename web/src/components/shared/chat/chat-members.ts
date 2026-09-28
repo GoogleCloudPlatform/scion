@@ -33,6 +33,8 @@ import { customElement, property, state } from 'lit/decorators.js';
 import type { PropertyValues } from 'lit';
 import { ACTIVITY_DISPLAY } from '../../../shared/agent-state-display.js';
 import { navigateTo } from '../../../client/main.js';
+import { openTerminal, terminalHref } from '../../../client/open-terminal.js';
+import { isFeatureEnabled } from '../../../utils/feature-flags.js';
 import './chat-avatar.js';
 import '../status-badge.js';
 
@@ -41,15 +43,16 @@ const TERMINAL_POPOUT_WIDTH = 1024;
 const TERMINAL_POPOUT_HEIGHT = 700;
 
 /**
- * Open an agent's terminal in its own window.
+ * Open an agent's terminal in its own window (legacy mode only).
+ *
+ * When the terminal workspace feature flag is enabled, callers must use
+ * {@link openTerminal} instead so all terminal opens join the singleton
+ * coordinator and reuse a retained session.
  *
  * The window is *named per agent*, which is the whole point: clicking the same
  * agent again focuses the window that is already open instead of spawning
  * another one. Six agents means six windows, not one window per click - the
  * tab pile-up that made this control painful in the first place.
- *
- * A terminal is also a poor fit for in-app navigation, because reaching it
- * replaces the chat you were reading it alongside.
  *
  * Note the deliberate absence of `noopener`: a named window cannot be reused
  * or focused if the opener is severed, and the target is our own same-origin
@@ -75,6 +78,23 @@ function openTerminalPopout(agentId: string): void {
     return;
   }
   navigateTo(`/agents/${agentId}/terminal`);
+}
+
+/**
+ * Open a terminal for the given agent through the appropriate path.
+ *
+ * When the terminal workspace is enabled, routes through the singleton
+ * coordinator so all entry points converge on one owner/session.  Chat source
+ * state remains intact because the route outlet is hidden, not destroyed.
+ *
+ * When the workspace is disabled, falls back to the legacy popup behaviour.
+ */
+function openTerminalFromChat(agentId: string): void {
+  if (isFeatureEnabled('web.terminal_workspace')) {
+    openTerminal(agentId);
+  } else {
+    openTerminalPopout(agentId);
+  }
 }
 
 /**
@@ -169,6 +189,10 @@ export class ScionChatMembers extends LitElement {
   @property({ attribute: 'dm-peer-id' })
   dmPeerId = '';
 
+  /** Slug of the agent used by default for the current thread. */
+  @property({ attribute: 'default-agent-slug' })
+  defaultAgentSlug = '';
+
   /** IDs of members currently typing — shows a dot overlay on their avatar. */
   @property({ type: Array })
   typingUserIds: string[] = [];
@@ -176,6 +200,12 @@ export class ScionChatMembers extends LitElement {
   /** IDs of members with unread messages — shows a blue dot on their avatar. */
   @property({ type: Array })
   unreadFromIds: string[] = [];
+
+  /** Filter mode: 'all' shows every member, 'unread' shows only those with unread messages. */
+  @state() private memberFilter: 'all' | 'unread' = 'all';
+
+  /** Sort mode: 'alpha' sorts A-Z by display name, 'activity' sorts by recent activity. */
+  @state() private memberSort: 'alpha' | 'activity' = 'alpha';
 
   /** Agent IDs that recently changed state — drives wobble animation. */
   @state() private recentlyChangedAgents = new Set<string>();
@@ -189,13 +219,19 @@ export class ScionChatMembers extends LitElement {
       display: flex;
       flex-direction: column;
       height: 100%;
-      overflow-y: auto;
+      overflow: hidden;
       font-family: var(--sl-font-sans);
+    }
+
+    .members-body {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
     }
 
     .section-label {
       padding: 12px 16px 4px;
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       font-weight: 600;
       text-transform: uppercase;
       letter-spacing: 0.05em;
@@ -229,7 +265,7 @@ export class ScionChatMembers extends LitElement {
     }
 
     .member-name {
-      font-size: 0.8125rem;
+      font-size: var(--chat-fs-md);
       font-weight: 500;
       color: var(--scion-text, #1e293b);
       overflow: hidden;
@@ -238,13 +274,27 @@ export class ScionChatMembers extends LitElement {
     }
 
     .member-role {
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       color: var(--scion-text-muted, #94a3b8);
     }
 
+    .agent-subsection-label {
+      padding: 4px 16px 2px;
+      font-size: var(--chat-fs-xs, 0.625rem);
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--scion-text-muted, #94a3b8);
+    }
+
+    .agent-default-divider {
+      border: none;
+      border-top: 1px solid var(--scion-border, #e2e8f0);
+      margin: 6px 16px;
+    }
 
     .agent-terminal,
-    .agent-popout {
+    .agent-graph {
       display: inline-flex;
       align-items: center;
       color: var(--scion-text-muted, #94a3b8);
@@ -255,12 +305,12 @@ export class ScionChatMembers extends LitElement {
     }
 
     .member-item:hover .agent-terminal,
-    .member-item:hover .agent-popout {
+    .member-item:hover .agent-graph {
       opacity: 1;
     }
 
     .agent-terminal:hover,
-    .agent-popout:hover {
+    .agent-graph:hover {
       color: var(--scion-primary, #3b82f6);
     }
 
@@ -280,9 +330,71 @@ export class ScionChatMembers extends LitElement {
       max-width: 260px;
     }
 
+    /* Filter + sort toolbar */
+    .members-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 0.375rem;
+      padding: 0.375rem 0.75rem;
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .filter-toggle {
+      display: inline-flex;
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: 0.375rem;
+      overflow: hidden;
+      flex: 1;
+    }
+
+    .filter-toggle button {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.125rem;
+      height: 1.5rem;
+      border: none;
+      background: var(--scion-surface, #ffffff);
+      color: var(--scion-text-muted, #64748b);
+      cursor: pointer;
+      padding: 0 0.5rem;
+      font-size: var(--chat-fs-sm);
+      font-family: inherit;
+      font-weight: 500;
+      transition: all 150ms ease;
+      white-space: nowrap;
+      flex: 1;
+      justify-content: center;
+    }
+
+    .filter-toggle button:not(:last-child) {
+      border-right: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .filter-toggle button:hover:not(.active) {
+      background: var(--scion-bg-subtle, #f1f5f9);
+    }
+
+    .filter-toggle button.active {
+      background: var(--scion-primary, #3b82f6);
+      color: white;
+    }
+
+    .filter-toggle button sl-icon {
+      font-size: var(--chat-fs-sm);
+    }
+
+    .sort-btn {
+      flex-shrink: 0;
+    }
+
+    .sort-btn::part(base) {
+      font-size: var(--chat-fs-base);
+      padding: 0.125rem;
+    }
+
     .empty-note {
       padding: 12px 16px;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-text-muted, #94a3b8);
       font-style: italic;
     }
@@ -336,9 +448,16 @@ export class ScionChatMembers extends LitElement {
     }
 
     @keyframes agent-wobble {
-      0%, 100% { transform: translateX(0); }
-      25% { transform: translateX(15%); }
-      75% { transform: translateX(-15%); }
+      0%,
+      100% {
+        transform: translateX(0);
+      }
+      25% {
+        transform: translateX(15%);
+      }
+      75% {
+        transform: translateX(-15%);
+      }
     }
 
     .avatar-wrapper.active {
@@ -359,15 +478,8 @@ export class ScionChatMembers extends LitElement {
     }
   `;
 
-  override connectedCallback(): void {
-    super.connectedCallback();
-    // Clicking empty area in the members sidebar resets to global view
-    this.addEventListener('click', this._handleHostClick);
-  }
-
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    this.removeEventListener('click', this._handleHostClick);
     // Clean up wobble timers
     for (const timer of this._wobbleTimers.values()) clearTimeout(timer);
     this._wobbleTimers.clear();
@@ -434,43 +546,102 @@ export class ScionChatMembers extends LitElement {
     this.recentlyChangedAgents = next;
   }
 
-  /** Click on the host element itself (empty space) triggers a reset. */
-  private _handleHostClick = (e: MouseEvent): void => {
-    // Only fire when the click lands on the host itself or on the
-    // scrollable container (not on a member item or section label)
-    const path = e.composedPath();
-    const clickedMember = path.some(
-      (el) => el instanceof HTMLElement && el.classList?.contains('member-item')
-    );
-    if (clickedMember) return;
-    const clickedLabel = path.some(
-      (el) => el instanceof HTMLElement && el.classList?.contains('section-label')
-    );
-    if (clickedLabel) return;
-
-    this.dispatchEvent(new CustomEvent('reset-view', { bubbles: true, composed: true }));
-  };
-
   override render() {
-    return html` ${this.renderHumans()} ${this.renderAgents()} `;
+    return html`
+      ${this.renderToolbar()}
+      <div class="members-body">${this.renderHumans()} ${this.renderAgents()}</div>
+    `;
+  }
+
+  /** Render the filter + sort toolbar at the top of the members sidebar. */
+  private renderToolbar() {
+    return html`
+      <div class="members-toolbar">
+        <div class="filter-toggle">
+          <button
+            class=${this.memberFilter === 'all' ? 'active' : ''}
+            aria-pressed=${this.memberFilter === 'all'}
+            @click=${() => this.setMemberFilter('all')}
+          >
+            All
+          </button>
+          <button
+            class=${this.memberFilter === 'unread' ? 'active' : ''}
+            aria-pressed=${this.memberFilter === 'unread'}
+            @click=${() => this.setMemberFilter('unread')}
+          >
+            <sl-icon name="envelope"></sl-icon>
+            Unread
+          </button>
+        </div>
+        <sl-dropdown>
+          <sl-icon-button
+            slot="trigger"
+            name="sort-down"
+            class="sort-btn"
+            label="Sort members"
+          ></sl-icon-button>
+          <sl-menu @sl-select=${this.handleMemberSortSelect}>
+            <sl-menu-label>Sort members</sl-menu-label>
+            <sl-menu-item type="checkbox" value="alpha" ?checked=${this.memberSort === 'alpha'}>
+              Alphabetical
+            </sl-menu-item>
+            <sl-menu-item
+              type="checkbox"
+              value="activity"
+              ?checked=${this.memberSort === 'activity'}
+            >
+              Recent activity
+            </sl-menu-item>
+          </sl-menu>
+        </sl-dropdown>
+      </div>
+    `;
+  }
+
+  /** Set the member filter mode. */
+  private setMemberFilter(filter: 'all' | 'unread'): void {
+    if (this.memberFilter === filter) return;
+    this.memberFilter = filter;
+  }
+
+  /** Handle sort mode selection from the dropdown. */
+  private handleMemberSortSelect(e: Event): void {
+    const detail = (e as CustomEvent<{ item?: HTMLElement }>).detail;
+    const value = detail?.item?.getAttribute('value');
+    if (value === 'alpha' || value === 'activity') {
+      this.memberSort = value;
+    }
   }
 
   private renderHumans() {
     // Filter out the current user so they don't appear in their own
     // members sidebar.
-    const visible = this.humans.filter((m) => m.id !== this.currentUserId);
+    let visible = this.humans.filter((m) => m.id !== this.currentUserId);
+
+    // Apply unread filter
+    if (this.memberFilter === 'unread') {
+      visible = visible.filter((m) => this.unreadFromIds.includes(m.id));
+    }
+
     const sorted = [...visible].sort((a, b) => {
-      // Active users first, then alphabetical
-      const aActive = a.presenceState === 'active' ? 0 : 1;
-      const bActive = b.presenceState === 'active' ? 0 : 1;
-      if (aActive !== bActive) return aActive - bActive;
+      if (this.memberSort === 'activity') {
+        // Active users first, idle second, then rest
+        const aActive = a.presenceState === 'active' ? 0 : a.presenceState === 'idle' ? 1 : 2;
+        const bActive = b.presenceState === 'active' ? 0 : b.presenceState === 'idle' ? 1 : 2;
+        if (aActive !== bActive) return aActive - bActive;
+        return a.displayName.localeCompare(b.displayName);
+      }
+      // Alphabetical
       return a.displayName.localeCompare(b.displayName);
     });
 
     return html`
       <div class="section-label">People — ${sorted.length}</div>
       ${sorted.length === 0
-        ? html`<div class="empty-note">No members</div>`
+        ? html`<div class="empty-note">
+            ${this.memberFilter === 'unread' ? 'No unread' : 'No members'}
+          </div>`
         : sorted.map((m) => this.renderHuman(m))}
     `;
   }
@@ -506,20 +677,66 @@ export class ScionChatMembers extends LitElement {
     `;
   }
 
-  private renderAgents() {
-    const sorted = [...this.agents].sort((a, b) => {
-      // Running agents first, then alphabetical
-      const aRunning = a.phase === 'running' ? 0 : 1;
-      const bRunning = b.phase === 'running' ? 0 : 1;
-      if (aRunning !== bRunning) return aRunning - bRunning;
+  /** Sort agents per the current sort mode (alphabetical or recent activity). */
+  private sortAgents(list: ChatAgentMember[]): ChatAgentMember[] {
+    return [...list].sort((a, b) => {
+      if (this.memberSort === 'activity') {
+        // Sort by lastActivityEvent timestamp (most recent first)
+        const aRaw = a.lastActivityEvent ? Date.parse(a.lastActivityEvent) : NaN;
+        const aTime = Number.isNaN(aRaw) ? 0 : aRaw;
+        const bRaw = b.lastActivityEvent ? Date.parse(b.lastActivityEvent) : NaN;
+        const bTime = Number.isNaN(bRaw) ? 0 : bRaw;
+        if (aTime !== bTime) return bTime - aTime;
+        return a.displayName.localeCompare(b.displayName);
+      }
+      // Alphabetical
       return a.displayName.localeCompare(b.displayName);
     });
+  }
+
+  private renderAgents() {
+    let visible = [...this.agents];
+
+    // Apply unread filter
+    if (this.memberFilter === 'unread') {
+      visible = visible.filter((a) => this.unreadFromIds.includes(a.id));
+    }
+
+    // Pin the thread-default agent first, under its own sub-heading, as long
+    // as it is actually present in the (possibly filtered) visible list —
+    // otherwise we'd show an orphaned "Thread default" heading with nothing
+    // under it.
+    const defaultAgent = this.defaultAgentSlug
+      ? visible.find((a) => a.slug === this.defaultAgentSlug)
+      : undefined;
+
+    const rest = defaultAgent ? visible.filter((a) => a !== defaultAgent) : visible;
+    const sortedRest = this.sortAgents(rest);
 
     return html`
-      <div class="section-label">Agents — ${sorted.length}</div>
-      ${sorted.length === 0
-        ? html`<div class="empty-note">No agents</div>`
-        : sorted.map((a) => this.renderAgent(a))}
+      <div class="section-label">Agents — ${visible.length}</div>
+      ${visible.length === 0
+        ? html`<div class="empty-note">
+            ${this.memberFilter === 'unread' ? 'No unread' : 'No agents'}
+          </div>`
+        : html`
+            ${defaultAgent
+              ? this.renderDefaultAgentGroup(defaultAgent, sortedRest.length > 0)
+              : nothing}
+            ${sortedRest.map((a) => this.renderAgent(a))}
+          `}
+    `;
+  }
+
+  /**
+   * Render the pinned thread-default agent under its "Thread default"
+   * sub-heading, followed by a divider when other agents follow it.
+   */
+  private renderDefaultAgentGroup(defaultAgent: ChatAgentMember, hasRest: boolean) {
+    return html`
+      <div class="agent-subsection-label">Thread default</div>
+      ${this.renderAgent(defaultAgent)}
+      ${hasRest ? html`<hr class="agent-default-divider" />` : nothing}
     `;
   }
 
@@ -556,7 +773,11 @@ export class ScionChatMembers extends LitElement {
         @click=${() => this.handleMemberClick(a.id, 'agent', a.displayName)}
       >
         <div class="avatar-wrapper ${this.recentlyChangedAgents.has(a.id) ? 'active' : ''}">
-          <scion-chat-avatar name="${a.slug || a.displayName}" color-seed="${a.id}" size="28"></scion-chat-avatar>
+          <scion-chat-avatar
+            name="${a.slug || a.displayName}"
+            color-seed="${a.id}"
+            size="28"
+          ></scion-chat-avatar>
           ${hasUnread ? html`<div class="unread-dot"></div>` : nothing}
           ${isTyping
             ? html`<div class="typing-overlay"><span></span><span></span><span></span></div>`
@@ -564,53 +785,52 @@ export class ScionChatMembers extends LitElement {
         </div>
         <div class="member-info">
           <div class="member-name">${a.displayName}</div>
-          <scion-status-badge
-            status=${badgeStatus}
-            size="small"
-          ></scion-status-badge>
+          <scion-status-badge status=${badgeStatus} size="small"></scion-status-badge>
         </div>
         ${a.canAttach !== true
           ? nothing
           : html`<a
-              href="/agents/${a.id}/terminal"
+              href=${terminalHref(a.id)}
               class="agent-terminal"
-              title="Open terminal in its own window (Ctrl/Cmd-click for a tab)"
+              title="Open terminal"
               @click=${(e: MouseEvent) => {
                 e.stopPropagation();
                 // Leave modified and non-primary clicks to the browser so
                 // Ctrl/Cmd-click, Shift-click and middle-click behave as they
                 // do on any other link.
-                if (
-                  e.button !== 0 ||
-                  e.metaKey ||
-                  e.ctrlKey ||
-                  e.shiftKey ||
-                  e.altKey
-                ) {
+                if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) {
                   return;
                 }
                 e.preventDefault();
-                openTerminalPopout(a.id);
+                openTerminalFromChat(a.id);
               }}
             >
-              <sl-icon name="terminal" style="font-size: 0.75rem;"></sl-icon>
+              <sl-icon name="terminal" style="font-size: var(--chat-fs-base);"></sl-icon>
             </a>`}
-        <a
-          href="/agents/${a.id}"
-          target="_blank"
-          class="agent-popout"
-          title="Open agent detail"
-          @click=${(e: Event) => e.stopPropagation()}
-        >
-          <sl-icon name="box-arrow-up-right" style="font-size: 0.75rem;"></sl-icon>
-        </a>
+        ${a.projectId
+          ? html`<a
+              href="/agents/graph?project=${encodeURIComponent(
+                a.projectId
+              )}&focus=${encodeURIComponent(a.id)}"
+              class="agent-graph"
+              title="Open in graph"
+              @click=${(e: MouseEvent) => {
+                e.stopPropagation();
+                if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+                e.preventDefault();
+                navigateTo(
+                  `/agents/graph?project=${encodeURIComponent(a.projectId!)}&focus=${encodeURIComponent(a.id)}`
+                );
+              }}
+            >
+              <sl-icon name="diagram-3" style="font-size: var(--chat-fs-base);"></sl-icon>
+            </a>`
+          : nothing}
       </div>
     `;
 
     return html`
-      <sl-tooltip .content=${tooltipContent} placement="left" hoist>
-        ${agentRow}
-      </sl-tooltip>
+      <sl-tooltip .content=${tooltipContent} placement="left" hoist> ${agentRow} </sl-tooltip>
     `;
   }
 

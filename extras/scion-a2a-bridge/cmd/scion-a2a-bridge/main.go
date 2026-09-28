@@ -35,6 +35,7 @@ import (
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	smpb "cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2acompat/a2av0"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 	"github.com/prometheus/client_golang/prometheus"
@@ -116,7 +117,10 @@ func main() {
 		log.Warn("failed to load persisted admin overlay, proceeding with base YAML config", "error", overlayErr)
 	}
 	if overlay != nil {
-		effective := bridge.ApplyOverlay(baseCfg, overlay)
+		// One-time boot-time apply, before the BrokerServer (which owns its
+		// own dedupe for repeated Configure pushes) exists; nil dedupe just
+		// means this single call always logs at Warn if a scheme is pinned.
+		effective := bridge.ApplyOverlay(baseCfg, overlay, log, nil)
 		cfg = &effective
 		log.Info("applied persisted admin overlay",
 			"auth_scheme", cfg.Auth.Scheme,
@@ -159,6 +163,19 @@ func main() {
 	adminAuth := identity.NewMintingAuth(minter, hubUserID, cfg.Hub.User, "admin", 15*time.Minute)
 
 	transportSrc, transportMode := resolveTransportAuth(log)
+
+	// Build GE validator options from transport auth. These are forwarded to
+	// BuildSnapshot so the geGoogle snapshot validator receives Cloud Run / IAP
+	// headers on Hub exchange requests. Also used for broker overlay rebuilds.
+	var geOpts []bridge.GEValidatorOption
+	if transportSrc != nil {
+		geOpts = append(geOpts, bridge.WithGETransportAuth(transportSrc, transportMode))
+	}
+
+	// Rebuild snapshot with transport auth now that it's resolved.
+	// The initial BuildSnapshot at line ~130 was created before transport
+	// resolution and therefore lacked GE transport options.
+	snapshot.Store(bridge.BuildSnapshot(*cfg, geOpts...))
 
 	hubOpts := []hubclient.Option{hubclient.WithAuthenticator(adminAuth)}
 	if transportSrc != nil {
@@ -205,7 +222,7 @@ func main() {
 
 	// Wire admin config management: snapshot + base config + state dir.
 	b.SetSnapshot(snapshot)
-	broker.SetAdminConfig(&baseCfg, snapshot, stateDir)
+	broker.SetAdminConfig(&baseCfg, snapshot, stateDir, geOpts...)
 
 	// Create SDK executor and request handler.
 	// Use a route-key authenticator so the in-memory task store associates tasks
@@ -235,6 +252,12 @@ func main() {
 		a2asrv.WithTransportKeepAlive(cfg.Timeouts.SSEKeepalive),
 	)
 
+	// Create v0.3 REST compat handler for legacy (GE v0.3) clients.
+	v0RESTHandler := a2av0.NewRESTHandler(
+		sdkRequestHandler,
+		a2asrv.WithTransportKeepAlive(cfg.Timeouts.SSEKeepalive),
+	)
+
 	// Start A2A HTTP server.
 	listenAddr := cfg.Bridge.ListenAddress
 	if listenAddr == "" {
@@ -242,9 +265,14 @@ func main() {
 	}
 
 	srv := bridge.NewServer(b, cfg, metrics, log.With("component", "a2a-server"), sdkJSONRPCHandler)
+	srv.SetV0RESTHandler(v0RESTHandler)
 	srv.SetSnapshot(snapshot)
 	if signingKey != nil {
 		srv.SetJWTValidator(bridge.NewJWTValidator(signingKey))
+	}
+	// Wire transport auth into GE exchange validator for Cloud Run / IAP.
+	if transportSrc != nil {
+		srv.SetGETransportAuth(transportSrc, transportMode)
 	}
 	srv.WarnOnOpenAuth()
 
@@ -252,7 +280,7 @@ func main() {
 		Addr:           listenAddr,
 		Handler:        srv.Handler(),
 		ReadTimeout:    30 * time.Second,
-		WriteTimeout:   30 * time.Second,
+		WriteTimeout:   0, // Rely on request/task context timeouts; avoid cutting off SSE streams
 		IdleTimeout:    120 * time.Second,
 		MaxHeaderBytes: 1 << 20,
 	}
@@ -301,6 +329,11 @@ func main() {
 func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 	log.Info("scion-a2a-bridge starting in standalone mode")
 
+	// Dedupes the pinned-auth-scheme warning across the runtime config poll
+	// (roughly every 60s) and every reconnect, for the lifetime of this
+	// process.
+	authWarnDedupe := bridge.NewAuthSchemeWarnDedupe()
+
 	// Detect Cloud Run or explicit port-muxing mode (single-port h2c).
 	muxPorts := os.Getenv("MUX_PORTS") == "true" || os.Getenv("K_SERVICE") != ""
 
@@ -327,7 +360,19 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 	brokerServer := bridge.NewBrokerServer(nil, log.With("component", "broker"), ctx)
 	grpcBrokerServer := grpcbroker.NewServer(brokerServer)
 
-	grpcServer := grpc.NewServer()
+	// Resolve gRPC server auth configuration from environment.
+	grpcAuthCfg := resolveGRPCServerAuth(muxPorts, log)
+	grpcServerOpts, err := grpcbroker.BuildStandaloneServerOptions(grpcAuthCfg)
+	if err != nil {
+		log.Error("failed to build gRPC server options", "error", err)
+		os.Exit(1)
+	}
+
+	// When muxPorts is active (Cloud Run h2c), native TLS credentials must
+	// NOT be applied — Cloud Run terminates TLS at the platform level.
+	// The grpc.Creds option only applies to the dedicated gRPC listener.
+	// Auth interceptors (from grpcServerOpts) apply to both paths.
+	grpcServer := grpc.NewServer(grpcServerOpts...)
 	brokerv1.RegisterBrokerServiceServer(grpcServer, grpcBrokerServer)
 	healthServer := health.NewServer()
 	healthpb.RegisterHealthServer(grpcServer, healthServer)
@@ -382,7 +427,7 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 
 	// 4. Apply runtime config onto the base YAML config.
 	rtConfig := rt.Config()
-	applyRuntimeConfig(cfg, rtConfig)
+	applyRuntimeConfig(cfg, rtConfig, log, authWarnDedupe)
 
 	// 5. Read A2A_API_KEY from environment (secret, never through runtime config path).
 	if apiKey := os.Getenv("A2A_API_KEY"); apiKey != "" {
@@ -427,6 +472,12 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 
 	transportSrc, transportMode := resolveTransportAuth(log)
 
+	// Build GE validator options from transport auth for snapshot composition.
+	var geOpts []bridge.GEValidatorOption
+	if transportSrc != nil {
+		geOpts = append(geOpts, bridge.WithGETransportAuth(transportSrc, transportMode))
+	}
+
 	hubOpts := []hubclient.Option{hubclient.WithAuthenticator(adminAuth)}
 	if transportSrc != nil {
 		hubOpts = append(hubOpts, hubclient.WithTransportAuth(transportSrc, transportMode))
@@ -441,9 +492,9 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 
 	metrics := bridge.NewMetrics(prometheus.DefaultRegisterer)
 
-	// 7. Build config snapshot (base YAML + runtime overrides).
+	// 7. Build config snapshot with transport auth (base YAML + runtime overrides).
 	baseCfg := *cfg
-	snapshot := bridge.NewSnapshotHolder(bridge.BuildSnapshot(*cfg))
+	snapshot := bridge.NewSnapshotHolder(bridge.BuildSnapshot(*cfg, geOpts...))
 
 	// 8. Create core bridge (pass transport auth so per-caller clients inherit it).
 	var bridgeOpts []bridge.BridgeOption
@@ -462,27 +513,64 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 	brokerServer.SetHandler(b.HandleBrokerMessage)
 	b.SetBroker(brokerServer)
 	b.SetSnapshot(snapshot)
-	brokerServer.SetAdminConfig(&baseCfg, snapshot, "")
+	brokerServer.SetAdminConfig(&baseCfg, snapshot, "", geOpts...)
 
 	// 9. Set up reconfigure callback for runtime config changes.
 	rt.SetReconfigure(func(newCfg map[string]string) error {
-		applyRuntimeConfig(cfg, newCfg)
+		applyRuntimeConfig(cfg, newCfg, log, authWarnDedupe)
 		// Re-read A2A_API_KEY on reconfigure (may have been rotated).
 		if apiKey := os.Getenv("A2A_API_KEY"); apiKey != "" {
 			cfg.Auth.APIKey = apiKey
 		}
-		snap := bridge.BuildSnapshot(*cfg)
+		snap := bridge.BuildSnapshot(*cfg, geOpts...)
 		snapshot.Store(snap)
 		return nil
 	})
 
 	// 10. Create SDK executor and request handler.
+	// In standalone mode, use a durable Postgres-backed SDK task store instead of
+	// the in-memory store. This ensures SDK task state (full a2a.Task payloads with
+	// history, artifacts, etc.) survives replica restarts and is accessible across
+	// all replicas sharing the same database.
 	executor := bridge.NewScionExecutor(b, log.With("component", "executor"))
-	routeAuthenticator := bridge.RouteKeyAuthenticator()
-	innerTaskStore := taskstore.NewInMemory(&taskstore.InMemoryStoreConfig{
-		Authenticator: routeAuthenticator,
-	})
-	scopedTaskStore := bridge.NewScopedTaskStore(innerTaskStore)
+	// Share the state store's connection pool with the SDK task store
+	// (REQ-4: avoid doubling max connections per replica).
+	pgTaskStore, err := bridge.NewPostgresTaskStoreWithDB(store.DB())
+	if err != nil {
+		log.Error("failed to initialize Postgres SDK task store", "error", err)
+		os.Exit(1)
+	}
+	defer pgTaskStore.Close() // no-op since pool is owned by state store
+	log.Info("Postgres SDK task store initialized (shared pool)")
+
+	// Wire the SDK task store into the bridge for execution leases,
+	// reaping stale execution claims, and retention cleanup.
+	b.SetSDKTaskStore(pgTaskStore)
+
+	// Constraint 2: Create barrier store for deterministic create-completion
+	// signaling between consumer (store.Create) and producer (ClaimExecution).
+	barrierStore := bridge.NewBarrierTaskStore(pgTaskStore)
+	b.SetBarrierStore(barrierStore)
+
+	// Startup recovery: reap any stale execution leases left by
+	// previous instances that crashed mid-execution.
+	// ReapStaleTasks may return partial successes alongside aggregated errors.
+	// Log both independently, matching the janitor path in bridge.go.
+	{
+		reapedIDs, err := pgTaskStore.ReapStaleTasks(context.Background(), 2*cfg.Timeouts.SendMessage)
+		if len(reapedIDs) > 0 {
+			log.Warn("startup: reaped stale SDK execution leases from previous crash", "count", len(reapedIDs), "task_ids", reapedIDs)
+		}
+		if err != nil {
+			log.Error("startup: errors reaping stale SDK execution leases", "error", err)
+		}
+	}
+
+	// SDK receives: SDK → BarrierTaskStore → PostgresTaskStore.
+	// PostgresTaskStore is the authoritative owner enforcer — it derives and
+	// checks owner_key on every Create/Get/Update/List at the SQL level.
+	// No ScopedTaskStore: its in-memory ownership map was redundant with SQL
+	// enforcement and grew monotonically without bound in long-lived processes.
 	sdkRequestHandler := a2asrv.NewHandler(
 		executor,
 		a2asrv.WithLogger(log.With("component", "a2a-sdk")),
@@ -491,11 +579,21 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 			PushNotifications: false,
 		}),
 		a2asrv.WithAgentInactivityTimeout(cfg.Timeouts.SendMessage),
-		a2asrv.WithTaskStore(scopedTaskStore),
+		a2asrv.WithTaskStore(barrierStore),
 	)
 	b.SetSDKRequestHandler(sdkRequestHandler)
 
+	// Constraint 3: DurableRequestHandler wraps the SDK handler for
+	// ownership-enforcing durable subscribe that bypasses localManager.Resubscribe.
+	durableHandler := bridge.NewDurableRequestHandler(sdkRequestHandler, pgTaskStore, store, notifier)
+
 	sdkJSONRPCHandler := a2asrv.NewJSONRPCHandler(
+		durableHandler,
+		a2asrv.WithTransportKeepAlive(cfg.Timeouts.SSEKeepalive),
+	)
+
+	// Create v0.3 REST compat handler for legacy (GE v0.3) clients.
+	v0RESTHandler := a2av0.NewRESTHandler(
 		sdkRequestHandler,
 		a2asrv.WithTransportKeepAlive(cfg.Timeouts.SSEKeepalive),
 	)
@@ -507,9 +605,14 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 	}
 
 	srv := bridge.NewServer(b, cfg, metrics, log.With("component", "a2a-server"), sdkJSONRPCHandler)
+	srv.SetV0RESTHandler(v0RESTHandler)
 	srv.SetSnapshot(snapshot)
 	if signingKey != nil {
 		srv.SetJWTValidator(bridge.NewJWTValidator(signingKey))
+	}
+	// Wire transport auth into GE exchange validator for Cloud Run / IAP.
+	if transportSrc != nil {
+		srv.SetGETransportAuth(transportSrc, transportMode)
 	}
 	srv.WarnOnOpenAuth()
 
@@ -534,7 +637,7 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 		Addr:           listenAddr,
 		Handler:        httpHandler,
 		ReadTimeout:    30 * time.Second,
-		WriteTimeout:   30 * time.Second,
+		WriteTimeout:   0, // Rely on request/task context timeouts; avoid cutting off SSE streams
 		IdleTimeout:    120 * time.Second,
 		MaxHeaderBytes: 1 << 20,
 	}
@@ -597,6 +700,83 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 	log.Info("scion-a2a-bridge stopped (standalone)")
 }
 
+// resolveGRPCServerAuth builds a StandaloneServerConfig from environment
+// variables and validates it at startup. When muxPorts is true (Cloud Run h2c),
+// TLS fields are ignored because Cloud Run terminates TLS at the platform level
+// — the grpcServer will use h2c (cleartext HTTP/2) via ServeHTTP, and native
+// gRPC TLS credentials are incompatible with that path.
+//
+// Environment variables:
+//
+//	GRPC_AUTH_MODE       - google_id_token | local_dev (default: empty)
+//	GRPC_AUTH_AUDIENCE   - expected audience claim
+//	GRPC_AUTH_SUBJECTS   - comma-separated authorized subject emails
+//	GRPC_TLS_CERT        - path to server TLS certificate (Kubernetes only)
+//	GRPC_TLS_KEY         - path to server TLS key (Kubernetes only)
+//	GRPC_TLS_CLIENT_CA   - path to client CA for mTLS (Kubernetes only)
+func resolveGRPCServerAuth(muxPorts bool, log *slog.Logger) grpcbroker.StandaloneServerConfig {
+	cfg := grpcbroker.StandaloneServerConfig{
+		AuthMode: grpcbroker.StandaloneAuthMode(os.Getenv("GRPC_AUTH_MODE")),
+		Audience: os.Getenv("GRPC_AUTH_AUDIENCE"),
+		Logger:   log,
+	}
+
+	if subjects := os.Getenv("GRPC_AUTH_SUBJECTS"); subjects != "" {
+		cfg.AuthorizedSubjects = strings.Split(subjects, ",")
+		for i, s := range cfg.AuthorizedSubjects {
+			cfg.AuthorizedSubjects[i] = strings.TrimSpace(s)
+		}
+	}
+
+	// TLS is only relevant for the dedicated gRPC listener (Kubernetes).
+	// When muxPorts is true (Cloud Run h2c), TLS is terminated by the
+	// platform and the grpcServer serves cleartext HTTP/2 — native gRPC
+	// TLS credentials must NOT be applied.
+	if !muxPorts {
+		cfg.TLSCertFile = os.Getenv("GRPC_TLS_CERT")
+		cfg.TLSKeyFile = os.Getenv("GRPC_TLS_KEY")
+		cfg.TLSClientCAFile = os.Getenv("GRPC_TLS_CLIENT_CA")
+	} else if os.Getenv("GRPC_TLS_CERT") != "" {
+		log.Warn("GRPC_TLS_CERT is ignored in mux-ports mode (Cloud Run h2c); " +
+			"TLS is terminated by the platform")
+	}
+
+	// Set listen address for fail-closed validation.
+	if !muxPorts {
+		grpcPort := "50051"
+		if p := os.Getenv("GRPC_PORT"); p != "" {
+			grpcPort = p
+		}
+		cfg.ListenAddress = ":" + grpcPort
+	} else {
+		// In mux mode, the listen address is the HTTP port — a wildcard
+		// bind (non-local), so auth is required unless explicitly set to
+		// local_dev. Cloud Run provides the PORT env.
+		listenAddr := ":8080"
+		if port := os.Getenv("PORT"); port != "" {
+			listenAddr = ":" + port
+		}
+		cfg.ListenAddress = listenAddr
+	}
+
+	// Validate config at startup — fail closed on invalid config.
+	if err := grpcbroker.ValidateStandaloneServerConfig(cfg); err != nil {
+		log.Error("gRPC server auth config validation failed", "error", err)
+		os.Exit(1)
+	}
+
+	log.Info("gRPC server auth configured",
+		"auth_mode", cfg.AuthMode,
+		"audience", cfg.Audience,
+		"authorized_subjects", len(cfg.AuthorizedSubjects),
+		"tls_cert", cfg.TLSCertFile != "",
+		"tls_client_ca", cfg.TLSClientCAFile != "",
+		"mux_ports", muxPorts,
+	)
+
+	return cfg
+}
+
 // resolveTransportAuth resolves the transport-layer OIDC token source and
 // header mode from settings and environment variables. Returns (nil, 0) when
 // transport auth is not configured.
@@ -622,14 +802,13 @@ func resolveTransportAuth(log *slog.Logger) (transportauth.TokenSource, transpor
 }
 
 // applyRuntimeConfig merges runtime config values into the bridge config.
-// Only non-empty values override existing config.
-func applyRuntimeConfig(cfg *bridge.Config, rtCfg map[string]string) {
+// Only non-empty values override existing config. auth_scheme is the
+// exception: see bridge.EffectiveAuthScheme. dedupe may be nil.
+func applyRuntimeConfig(cfg *bridge.Config, rtCfg map[string]string, log *slog.Logger, dedupe *bridge.AuthSchemeWarnDedupe) {
 	if v := rtCfg["external_url"]; v != "" {
 		cfg.Bridge.ExternalURL = v
 	}
-	if v := rtCfg["auth_scheme"]; v != "" {
-		cfg.Auth.Scheme = v
-	}
+	cfg.Auth.Scheme = bridge.EffectiveAuthScheme(cfg.Auth.YAMLScheme, cfg.Auth.Scheme, rtCfg["auth_scheme"], log, dedupe)
 	if v := rtCfg["uat_cache_ttl"]; v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			cfg.Auth.UATCacheTTL = d
@@ -682,9 +861,6 @@ func loadConfig(path string) (*bridge.Config, error) {
 	var missing []string
 	expanded := os.Expand(string(data), func(name string) string {
 		v, ok := os.LookupEnv(name)
-		if !ok && name == "SCION_PROJECT_ID" {
-			v, ok = os.LookupEnv("SCION_GROVE_ID")
-		}
 		if !ok {
 			missing = append(missing, name)
 		}
@@ -699,10 +875,9 @@ func loadConfig(path string) (*bridge.Config, error) {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 
-	// Backward compatibility: merge legacy 'groves' into 'projects' if 'projects' is empty.
-	if len(cfg.Projects) == 0 && len(cfg.Groves) > 0 {
-		cfg.Projects = cfg.Groves
-	}
+	// Capture the YAML-configured auth scheme once, before any admin overlay
+	// or runtime config is applied. See bridge.EffectiveAuthScheme.
+	cfg.Auth.YAMLScheme = cfg.Auth.Scheme
 
 	if cfg.Timeouts.SendMessage == 0 {
 		cfg.Timeouts.SendMessage = 120 * time.Second

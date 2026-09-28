@@ -103,7 +103,7 @@ add-apt-repository ppa:git-core/ppa
 apt update; apt install git
 ```
 
-For Debian you may need to build from source, see the [git site](https://git-scm.com/install/source), or see the Dockerfile in this repo for the base image.
+On Debian, Debian 13 (trixie) ships a new enough `git` (2.47.3) via `apt`. On older Debian releases you may need to build from source; see the [git site](https://git-scm.com/install/source).
 
 ---
 

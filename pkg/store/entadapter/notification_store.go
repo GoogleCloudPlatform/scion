@@ -22,6 +22,7 @@ import (
 
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/notification"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/notificationsubscription"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/subscriptiontemplate"
@@ -580,6 +581,151 @@ func notifsToStore(rows []*ent.Notification) []store.Notification {
 		out = append(out, *entNotifToStore(e))
 	}
 	return out
+}
+
+// ClaimNotificationForDispatch atomically claims an undispatched notification
+// for delivery by CAS-updating dispatched from false to true. Returns true if
+// this caller won the claim, false if the notification was already dispatched or
+// does not exist.
+func (s *NotificationStore) ClaimNotificationForDispatch(ctx context.Context, id string) (bool, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return false, err
+	}
+
+	affected, err := s.client.Notification.Update().
+		Where(
+			notification.IDEQ(uid),
+			notification.DispatchedEQ(false),
+		).
+		SetDispatched(true).
+		Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+
+	return affected > 0, nil
+}
+
+// UnmarkNotificationDispatched reverts a notification's dispatched flag to false
+// so a future sweep can retry delivery.
+func (s *NotificationStore) UnmarkNotificationDispatched(ctx context.Context, id string) error {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.client.Notification.Update().
+		Where(notification.IDEQ(uid)).
+		SetDispatched(false).
+		Save(ctx)
+	return mapError(err)
+}
+
+// undispatchedGracePeriod is the minimum age of an undispatched notification
+// before the sweep picks it up. This prevents racing with an in-flight primary
+// dispatch (whose 30s retry + margin is well within this window).
+const undispatchedGracePeriod = 60 * time.Second
+
+// undispatchedBatchLimit caps the number of undispatched notifications returned
+// per query to avoid loading unbounded rows into memory.
+const undispatchedBatchLimit = 100
+
+// GetUndispatchedAgentNotifications returns agent-targeted notifications with
+// dispatched=false, ordered oldest-first, limited to 100 rows.
+//
+// When brokerID is empty (sweep mode), a 60s grace period is applied so the
+// sweep does not race with an in-flight primary dispatch. When brokerID is
+// non-empty (broker-connect hook), no grace period is applied — the hook fires
+// precisely because the broker just came online, so even very recent
+// notifications should be drained immediately.
+func (s *NotificationStore) GetUndispatchedAgentNotifications(ctx context.Context, brokerID string) ([]store.Notification, error) {
+	query := s.client.Notification.Query().
+		Where(
+			notification.DispatchedEQ(false),
+			notification.SubscriberTypeEQ(store.SubscriberTypeAgent),
+		)
+
+	// Grace period only in sweep mode (empty brokerID) to avoid racing with
+	// the primary dispatch path's 30s retry + margin.
+	if brokerID == "" {
+		cutoff := time.Now().Add(-undispatchedGracePeriod)
+		query = query.Where(notification.CreatedLT(cutoff))
+
+		// Only return notifications whose subscriber agent currently has a
+		// RuntimeBrokerID. Without this filter the sweep would claim
+		// notifications for broker-less agents, fail to deliver them, and
+		// revert the claim — wasting cycles and starving deliverable
+		// notifications behind them (head-of-line blocking).
+		query = query.Where(func(sel *entsql.Selector) {
+			subIDCol := sel.C(notification.FieldSubscriberID)
+			projIDCol := sel.C(notification.FieldProjectID)
+			sel.Where(entsql.P(func(b *entsql.Builder) {
+				b.WriteString("EXISTS (SELECT 1 FROM ")
+				b.Ident(agent.Table)
+				b.WriteString(" WHERE ")
+				b.Ident(agent.Table)
+				b.WriteString(".")
+				b.Ident(agent.FieldSlug)
+				b.WriteString(" = ")
+				b.WriteString(subIDCol)
+				b.WriteString(" AND ")
+				b.Ident(agent.Table)
+				b.WriteString(".")
+				b.Ident(agent.FieldProjectID)
+				b.WriteString(" = ")
+				b.WriteString(projIDCol)
+				b.WriteString(" AND ")
+				b.Ident(agent.Table)
+				b.WriteString(".")
+				b.Ident(agent.FieldRuntimeBrokerID)
+				b.WriteString(" != '')")
+			}))
+		})
+	}
+
+	if brokerID != "" {
+		// Filter to notifications whose subscriber agent has this broker.
+		// Use a raw WHERE predicate with a correlated EXISTS subquery
+		// against the agents table. sel.C() returns the properly-qualified
+		// and quoted column reference for the outer notifications table.
+		query = query.Where(func(sel *entsql.Selector) {
+			subIDCol := sel.C(notification.FieldSubscriberID)
+			projIDCol := sel.C(notification.FieldProjectID)
+			sel.Where(entsql.P(func(b *entsql.Builder) {
+				b.WriteString("EXISTS (SELECT 1 FROM ")
+				b.Ident(agent.Table)
+				b.WriteString(" WHERE ")
+				b.Ident(agent.Table)
+				b.WriteString(".")
+				b.Ident(agent.FieldSlug)
+				b.WriteString(" = ")
+				b.WriteString(subIDCol)
+				b.WriteString(" AND ")
+				b.Ident(agent.Table)
+				b.WriteString(".")
+				b.Ident(agent.FieldProjectID)
+				b.WriteString(" = ")
+				b.WriteString(projIDCol)
+				b.WriteString(" AND ")
+				b.Ident(agent.Table)
+				b.WriteString(".")
+				b.Ident(agent.FieldRuntimeBrokerID)
+				b.WriteString(" = ")
+				b.Arg(brokerID)
+				b.WriteString(")")
+			}))
+		})
+	}
+
+	rows, err := query.
+		Order(notification.ByCreated()).
+		Limit(undispatchedBatchLimit).
+		All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return notifsToStore(rows), nil
 }
 
 // ----------------------------------------------------------------------------

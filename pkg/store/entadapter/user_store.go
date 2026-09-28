@@ -82,16 +82,17 @@ func entPrefsToStore(p *entschema.UserPreferences) *store.UserPreferences {
 // entUserToStore converts an Ent User entity to a store.User model.
 func entUserToStore(u *ent.User) *store.User {
 	su := &store.User{
-		ID:          u.ID.String(),
-		Email:       u.Email,
-		DisplayName: u.DisplayName,
-		AvatarURL:   u.AvatarURL,
-		Role:        string(u.Role),
-		Status:      string(u.Status),
-		InvitedBy:   u.InvitedBy,
-		InviteNote:  u.InviteNote,
-		Preferences: entPrefsToStore(u.Preferences),
-		Created:     u.Created,
+		ID:                u.ID.String(),
+		Email:             u.Email,
+		DisplayName:       u.DisplayName,
+		AvatarURL:         u.AvatarURL,
+		Role:              string(u.Role),
+		Status:            string(u.Status),
+		InvitedBy:         u.InvitedBy,
+		InviteNote:        u.InviteNote,
+		Preferences:       entPrefsToStore(u.Preferences),
+		SessionGeneration: u.SessionGeneration,
+		Created:           u.Created,
 	}
 	if u.LastLogin != nil {
 		su.LastLogin = *u.LastLogin
@@ -353,4 +354,16 @@ func (s *UserStore) IsUserInvitedOrActive(ctx context.Context, email string) (bo
 			user.StatusIn(user.StatusInvited, user.StatusActive),
 		).
 		Exist(ctx)
+}
+
+// IncrementSessionGeneration atomically increments the user's
+// session_generation counter, invalidating all existing sessions.
+func (s *UserStore) IncrementSessionGeneration(ctx context.Context, userID string) error {
+	uid, err := parseUUID(userID)
+	if err != nil {
+		return err
+	}
+	return s.client.User.UpdateOneID(uid).
+		AddSessionGeneration(1).
+		Exec(ctx)
 }

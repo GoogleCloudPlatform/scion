@@ -134,10 +134,7 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 		// failure here must not break the status update flow below.
 		//
 		// Content-type filtering: AssistantText is pre-filtered by the
-		// dialect layer (thinking/reasoning blocks stripped). The
-		// message is tagged with "verbose" visibility so chat consumers
-		// can distinguish automatic assistant replies from explicit
-		// agent→user messages.
+		// dialect layer (thinking/reasoning blocks stripped).
 		if event.Name == hooks.EventAgentEnd && event.Data.AssistantText != "" {
 			text := truncateAssistantText(event.Data.AssistantText)
 
@@ -152,10 +149,9 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 			msgCtx, msgCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer msgCancel()
 			if msgErr := h.client.SendOutboundMessage(msgCtx, hub.OutboundMessage{
-				Msg:        text,
-				Type:       "assistant-reply",
-				Visibility: "verbose",
-				Metadata:   metadata,
+				Msg:      text,
+				Type:     "assistant-reply",
+				Metadata: metadata,
 			}); msgErr != nil {
 				log.Error("Hub: outbound assistant reply failed: %v", msgErr)
 			} else {

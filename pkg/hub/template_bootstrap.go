@@ -185,8 +185,7 @@ func (s *Server) importTemplateHarnessConfigs(ctx context.Context, templatePath,
 		return
 	}
 
-	stor := s.GetStorage()
-	if stor == nil {
+	if s.GetStorage() == nil {
 		return
 	}
 
@@ -221,7 +220,7 @@ func (s *Server) importTemplateHarnessConfigs(ctx context.Context, templatePath,
 		}
 
 		if existing == nil {
-			if err := s.bootstrapSingleHarnessConfigScoped(ctx, name, dirPath, hcDirCfg, stor, hcScope, scopeID); err != nil {
+			if err := s.bootstrapSingleHarnessConfig(ctx, name, dirPath, hcDirCfg, hcScope, scopeID); err != nil {
 				s.templateLog.Warn("template harness-config import: failed to import, skipping",
 					"config", name, "error", err)
 				continue
@@ -229,24 +228,10 @@ func (s *Server) importTemplateHarnessConfigs(ctx context.Context, templatePath,
 			s.templateLog.Info("template harness-config import: imported config",
 				"config", name, "harness", hcDirCfg.Config.Harness, "scope", hcScope)
 		} else {
-			if _, err := s.syncExistingHarnessConfig(ctx, existing, dirPath, hcDirCfg, stor, false); err != nil {
+			if _, err := s.syncExistingHarnessConfig(ctx, existing, dirPath, hcDirCfg, false); err != nil {
 				s.templateLog.Warn("template harness-config import: failed to sync, skipping",
 					"config", name, "error", err)
 			}
 		}
 	}
-}
-
-// importTemplatesFromRemote fetches a remote source URL, discovers scion
-// templates within it, and registers each one into the Hub store scoped
-// to the given project. Returns the names of all templates imported or updated.
-func (s *Server) importTemplatesFromRemote(ctx context.Context, projectID, sourceURL string) ([]string, error) {
-	return s.importFromRemote(ctx, projectID, sourceURL, store.TemplateScopeProject, s.templateImportKind(), nil, nil)
-}
-
-// importTemplatesFromWorkspace imports templates from a path within the
-// project's workspace filesystem. The workspacePath is relative to the project's
-// workspace root (e.g. "/.scion/templates" or "/my/custom/path").
-func (s *Server) importTemplatesFromWorkspace(ctx context.Context, project *store.Project, workspacePath string) ([]string, error) {
-	return s.importFromWorkspace(ctx, project, workspacePath, store.TemplateScopeProject, s.templateImportKind(), nil, nil)
 }

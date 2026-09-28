@@ -84,3 +84,4 @@ pr-*-review*.md
 # Python bytecode (harness provisioner unit tests)
 __pycache__/
 *.pyc
+/checksecuritymarkergates

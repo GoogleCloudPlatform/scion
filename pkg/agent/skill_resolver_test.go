@@ -476,26 +476,6 @@ func TestCollectRequiredSkillURIs(t *testing.T) {
 	}
 }
 
-func TestFindRefByURI(t *testing.T) {
-	refs := []api.SkillReference{
-		{URI: "skill://scion/core/scion@^1.0"},
-		{URI: "skill://scion/core/other@latest", Optional: true},
-	}
-
-	got := findRefByURI(refs, "skill://scion/core/other@latest")
-	if got == nil {
-		t.Fatal("expected to find ref")
-	}
-	if !got.Optional {
-		t.Error("expected found ref to be optional")
-	}
-
-	got = findRefByURI(refs, "skill://scion/core/missing@1.0")
-	if got != nil {
-		t.Error("expected nil for missing URI")
-	}
-}
-
 func TestWriteResolutionRecord(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".scion", "resolved-skills.json")

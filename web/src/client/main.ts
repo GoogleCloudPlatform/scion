@@ -31,6 +31,10 @@ import { setDocumentTitle } from './page-title.js';
 import { CHAT_DM_ROUTE, CHAT_SPACE_ROUTE, CHAT_THREAD_ROUTE } from './chat-routes.js';
 import { chatNotifications } from './chat-notifications.js';
 import { chatUnread } from './chat-unread.js';
+import { TerminalCoordinator } from './terminal-coordinator.js';
+import { TerminalWorkspaceRoot } from './terminal-workspace-root.js';
+import { parseLayoutUrl } from './terminal-layout.js';
+import type { TerminalResources, TerminalSession } from './terminal-sessions.js';
 import { isFeatureEnabled, setFeatureFlag } from '../utils/feature-flags.js';
 import {
   type AdminStatus,
@@ -38,6 +42,7 @@ import {
   ROUTE_PERMISSION_MAP,
   SUPERADMIN_ROUTES,
 } from '../lib/admin-permissions.js';
+import { ACCOUNT_TEARDOWN_EVENT } from '../utils/auth.js';
 
 /**
  * Strip the Vite base path prefix from a URL pathname so the client-side
@@ -117,7 +122,6 @@ import '../components/shared/nav.js';
 import '../components/shared/header.js';
 import '../components/shared/breadcrumb.js';
 import '../components/shared/status-badge.js';
-import '../components/shared/debug-panel.js';
 
 // Profile shell (lazy-loaded with profile routes)
 // import '../components/profile/profile-shell.js';
@@ -138,6 +142,63 @@ let ssrPageData: PageData | null = null;
  * Includes the permissions array for per-route permission checks.
  */
 let cachedAdminStatus: AdminStatus | null = null;
+let terminalWorkspaceEnabled = false;
+let terminalCoordinator: TerminalCoordinator | null = null;
+let terminalWorkspace: TerminalWorkspaceRoot | null = null;
+/** Set after account teardown to prevent stale callbacks from recreating sessions. */
+let accountTornDown = false;
+let routeOutlet: HTMLElement | null = null;
+const terminalNavigations = new Map<string, number>();
+const uuidPath = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+const terminalAgentRoute = new RegExp(`^/terminals/(${uuidPath})$`, 'i');
+const legacyTerminalRoute = new RegExp(`^/agents/(${uuidPath})/terminal$`, 'i');
+
+function browserPath(path: string): string {
+  const base = import.meta.env.BASE_URL;
+  return base && base !== '/' ? base.replace(/\/$/, '') + path : path;
+}
+
+function ensureRoots(): HTMLElement | null {
+  const app = document.getElementById('app');
+  if (!app) return null;
+  if (!routeOutlet || routeOutlet.parentElement !== app) {
+    routeOutlet = document.createElement('div');
+    routeOutlet.id = 'route-outlet';
+    routeOutlet.style.cssText = 'height:100%;min-height:0';
+    app.replaceChildren(routeOutlet);
+  }
+  return routeOutlet;
+}
+
+function ensureTerminalCoordinator(): TerminalCoordinator | null {
+  if (!terminalWorkspaceEnabled || !currentUser?.id || accountTornDown) return null;
+  if (terminalCoordinator) return terminalCoordinator;
+  const app = document.getElementById('app');
+  if (!app) return null;
+  terminalWorkspace = new TerminalWorkspaceRoot(currentUser);
+  app.appendChild(terminalWorkspace.element);
+  terminalCoordinator = new TerminalCoordinator(
+    {
+      hubUrl: new URL(import.meta.env.BASE_URL, window.location.origin).href,
+      accountId: currentUser.id,
+    },
+    {
+      initialize: (): Promise<TerminalResources> =>
+        Promise.reject(new Error('Retained pane initializer required.')),
+      create: (registry, agentId): TerminalSession => terminalWorkspace!.create(registry, agentId),
+      select: (session, signal, requestId): void => {
+        if (signal.aborted) throw new Error('Terminal workspace stopped.');
+        const expected = requestId && terminalNavigations.get(requestId);
+        if (requestId) terminalNavigations.delete(requestId);
+        if (expected !== undefined && expected !== navigationId)
+          throw new Error('Navigation superseded.');
+        terminalWorkspace!.select(session);
+        if (expected === undefined) navigateTo(`/terminals/${session.state.agentId}`);
+      },
+    }
+  );
+  return terminalCoordinator;
+}
 
 /**
  * Fetch the current user's admin status from the backend.
@@ -462,6 +523,11 @@ const ROUTES: RouteConfig[] = [
     load: () => import('../components/pages/profile-skills.js'),
   },
   {
+    pattern: /^\/profile\/templates\/[^/]+$/,
+    tag: 'scion-page-template-detail',
+    load: () => import('../components/pages/template-detail.js'),
+  },
+  {
     pattern: /^\/profile\/templates$/,
     tag: 'scion-page-profile-templates',
     load: () => import('../components/pages/profile-templates.js'),
@@ -503,7 +569,7 @@ const ROUTES: RouteConfig[] = [
   },
   {
     pattern: /^\/projects\/[^/]+\/metrics$/,
-    tag: 'scion-page-metrics',
+    tag: 'scion-page-project-metrics',
     load: () => import('../components/pages/metrics-dashboard.js'),
   },
   {
@@ -527,6 +593,26 @@ const ROUTES: RouteConfig[] = [
     load: () => import('../components/pages/agent-configure.js'),
   },
   {
+    // Legacy terminal adapter (flag-off behavior):
+    //
+    // When `web.terminal_workspace` is OFF, navigating to
+    // `/agents/{id}/terminal` renders a disposable standalone page
+    // (`scion-page-terminal`). Each navigation creates a fresh WebSocket
+    // connection and xterm instance. Leaving the page closes the socket
+    // and discards the terminal — no session retention, no rail, no
+    // multi-pane layout. This is the pre-workspace behavior.
+    //
+    // When `web.terminal_workspace` is ON, the router in renderRoute()
+    // intercepts `/agents/{id}/terminal` and redirects to
+    // `/terminals/{id}`, which enters the retained workspace path
+    // instead. The workspace coordinator manages session lifetime,
+    // cross-tab ownership, and layout persistence.
+    //
+    // The `web.terminal_workspace` flag controls the switch between
+    // these two modes. Changing the flag value at runtime (e.g. via
+    // localStorage or server injection) preserves any active sessions
+    // in the workspace until page reload, at which point the flag is
+    // re-evaluated and the appropriate mode takes effect.
     pattern: /^\/agents\/[^/]+\/terminal$/,
     tag: 'scion-page-terminal',
     load: () => import('../components/pages/terminal.js'),
@@ -626,6 +712,7 @@ const ADMIN_ROUTES = new Set([
   'scion-page-admin-skill-registry-detail',
   'scion-page-diagnostics',
   'scion-page-health-dashboard',
+  'scion-page-metrics',
 ]);
 
 // ---------------------------------------------------------------------------
@@ -705,7 +792,6 @@ async function init(): Promise<void> {
     customElements.whenDefined('scion-header'),
     customElements.whenDefined('scion-breadcrumb'),
     customElements.whenDefined('scion-status-badge'),
-    customElements.whenDefined('scion-debug-panel'),
   ]);
 
   console.info('[Scion] Components defined, setting up router...');
@@ -731,6 +817,8 @@ async function init(): Promise<void> {
   // matching). Feature flags must be settled first — renderRoute gates /chat on
   // them, and rendering early would flash a page the server has disabled.
   await featureFlagsReady;
+  terminalWorkspaceEnabled = isFeatureEnabled('web.terminal_workspace');
+  ensureRoots();
 
   // The tab-title unread badge is unread state, not notification state: it
   // runs for every signed-in user regardless of the push preference, and on
@@ -741,14 +829,37 @@ async function init(): Promise<void> {
     chatUnread.start();
   }
 
-  await renderRoute(stripBasePath(window.location.pathname));
-
   // Setup client-side router for navigation
   setupRouter();
+  // Include query string on initial render so terminal layout state
+  // from a shared/bookmarked URL can be restored on page load (#1715).
+  const initialPath = stripBasePath(window.location.pathname);
+  const initialSearch = window.location.search;
+  await renderRoute(initialSearch ? `${initialPath}${initialSearch}` : initialPath);
+
+  // Account teardown: dispose terminals on logout/auth-expiry before redirect.
+  // The event fires synchronously from performLogout() or auth-expiry detection
+  // so cross-tab teardown completes before the page navigates away.
+  window.addEventListener(ACCOUNT_TEARDOWN_EVENT, () => {
+    if (accountTornDown) return;
+    accountTornDown = true;
+    try {
+      terminalCoordinator?.teardownAccount();
+    } catch (e) {
+      console.error('[Teardown] session cleanup error:', e);
+    } finally {
+      terminalCoordinator = null;
+      // Hide the workspace UI immediately so the login page does not show
+      // hidden active terminals underneath.
+      terminalWorkspace?.show(false);
+      terminalWorkspace = null;
+    }
+  });
 
   // Disconnect SSE on page unload
   window.addEventListener('beforeunload', () => {
     stateManager.disconnect();
+    terminalCoordinator?.stop();
   });
 
   console.info('[Scion] Client initialization complete');
@@ -816,11 +927,103 @@ let navigationId = 0;
  * to avoid full-page redraws on navigation.
  */
 async function renderRoute(path: string): Promise<void> {
-  const appContainer = document.getElementById('app');
+  const appContainer = ensureRoots();
   if (!appContainer) return;
+  const thisNav = ++navigationId;
 
   // Strip query string and hash for route matching
-  const pathname = path.split('?')[0].split('#')[0];
+  let pathname = path.split('?')[0].split('#')[0];
+  if (terminalWorkspaceEnabled) {
+    const legacyAgent = pathname.match(legacyTerminalRoute)?.[1];
+    if (legacyAgent) {
+      pathname = `/terminals/${legacyAgent}`;
+      path = pathname;
+      window.history.replaceState({}, '', browserPath(path));
+    }
+    if (pathname === '/terminals' || terminalAgentRoute.test(pathname)) {
+      if (!currentUser?.id) {
+        navigateTo('/login');
+        return;
+      }
+      appContainer.hidden = true;
+      const coordinator = ensureTerminalCoordinator();
+      terminalWorkspace?.setUser(currentUser);
+      terminalWorkspace?.setCurrentPath(path);
+      terminalWorkspace?.show(true);
+      setDocumentTitle('Terminals');
+
+      // ── URL layout restoration (#1715) ──────────────────────────────
+      // Parse layout state from query params BEFORE default single-agent
+      // selection to avoid a flash of single → multi layout transition.
+      const queryString = path.includes('?') ? path.split('?')[1] : window.location.search;
+      const layoutUrl = parseLayoutUrl(queryString);
+      if (layoutUrl && coordinator && terminalWorkspace) {
+        // Suppress URL sync while restoring to avoid feedback loops
+        terminalWorkspace.setSuppressUrlSync(true);
+        try {
+          // Restore the layout preset and open agents from URL slots.
+          // Map agent IDs to session keys, opening new sessions as needed.
+          const sessionKeys: Array<string | null> = [];
+          for (const agentId of layoutUrl.slots) {
+            if (!agentId) {
+              sessionKeys.push(null);
+              continue;
+            }
+            // Check if a session for this agent already exists
+            let key = terminalWorkspace.findSessionKeyByAgentId(agentId);
+            if (!key) {
+              // Open a new session — coordinator.open validates auth/existence
+              const requestId = coordinator.supported ? crypto.randomUUID() : undefined;
+              if (requestId) terminalNavigations.set(requestId, thisNav);
+              if (thisNav !== navigationId) return;
+              try {
+                const result = await coordinator.open(agentId, requestId);
+                if (thisNav !== navigationId) return;
+                if (requestId && result.status !== 'pending') terminalNavigations.delete(requestId);
+                // After coordinator.open, the session should exist
+                key = terminalWorkspace.findSessionKeyByAgentId(agentId);
+              } catch {
+                // Agent unavailable/unauthorized/deleted — slot stays empty
+              }
+            }
+            sessionKeys.push(key);
+          }
+          // Restore the layout manager state with the resolved session keys
+          terminalWorkspace.layoutManager.restore(layoutUrl.preset, sessionKeys);
+        } finally {
+          terminalWorkspace.setSuppressUrlSync(false);
+          // Sync URL once after restoration to ensure canonical form
+          terminalWorkspace.syncUrlFromLayout();
+        }
+        return;
+      }
+
+      // Default behavior: single-agent from path
+      const agentId = pathname.match(terminalAgentRoute)?.[1];
+      if (agentId && coordinator) {
+        const requestId = coordinator.supported ? crypto.randomUUID() : undefined;
+        if (requestId) terminalNavigations.set(requestId, thisNav);
+        const result = await coordinator.open(agentId, requestId);
+        if (requestId && result.status !== 'pending') terminalNavigations.delete(requestId);
+        if (thisNav === navigationId && !coordinator.isOwner) {
+          terminalWorkspace?.setStatus(
+            result.status === 'selected'
+              ? 'Terminal selected in its owning tab.'
+              : result.status === 'pending'
+                ? 'Waiting for the owning tab to select this terminal.'
+                : 'Terminal workspace is unavailable in this tab.'
+          );
+        }
+      }
+      return;
+    }
+  }
+  // Detect whether we are returning from a terminal workspace view.
+  // The terminal route handler hides the outlet without clearing it, so
+  // the previous page and shell are still live in the DOM.
+  const returningFromTerminal = appContainer.hidden;
+  appContainer.hidden = false;
+  terminalWorkspace?.show(false);
   const route = resolveRoute(pathname);
   const tag = route.tag;
 
@@ -875,12 +1078,10 @@ async function renderRoute(path: string): Promise<void> {
     return;
   }
 
-
   const shellType = getShellType(tag);
 
   // Lazy-load the page component module (and profile/chat shell if needed).
   // The import registers the custom element as a side effect.
-  const thisNav = ++navigationId;
   const loads: Promise<unknown>[] = [route.load()];
   if (shellType === 'profile' && !customElements.get('scion-profile-shell')) {
     loads.push(
@@ -921,11 +1122,30 @@ async function renderRoute(path: string): Promise<void> {
       currentPath: string;
       user: User | null;
     };
+
+    // When returning from a terminal workspace view to the same page that
+    // was hidden (not destroyed), preserve the existing page element so
+    // user state — drafts, selected conversation, scroll position — survives
+    // the round trip.  The outlet was hidden (`appContainer.hidden = true`)
+    // by the terminal route handler; the page inside is still live.
+    // Only skip the swap when the tag matches AND the path matches what
+    // was already rendered; explicit navigation to a different chat
+    // destination (e.g. /chat/space/xyz) must still render normally.
+    const oldPage = shell.querySelector('[data-scion-page]');
+    if (
+      returningFromTerminal &&
+      oldPage &&
+      oldPage.tagName.toLowerCase() === tag &&
+      shell.currentPath === path
+    ) {
+      shell.user = currentUser;
+      return;
+    }
+
     shell.currentPath = path;
     shell.user = currentUser;
 
-    // Replace only the page content inside the shell
-    const oldPage = shell.querySelector('[data-scion-page]');
+    // Replace the page content
     if (oldPage) oldPage.remove();
 
     const page = document.createElement(tag) as HTMLElement & { pageData: PageData };
@@ -977,6 +1197,17 @@ function setupRouter(): void {
     }
 
     if (!anchor) return;
+    if (
+      e.defaultPrevented ||
+      e.button !== 0 ||
+      e.metaKey ||
+      e.ctrlKey ||
+      e.shiftKey ||
+      e.altKey ||
+      (anchor.target && anchor.target !== '_self') ||
+      anchor.hasAttribute('download')
+    )
+      return;
 
     const href = anchor.getAttribute('href');
     if (!href) return;
@@ -1007,9 +1238,12 @@ function setupRouter(): void {
     }
   }) as EventListener);
 
-  // Handle browser back/forward
+  // Handle browser back/forward.
+  // Include query string so terminal layout state can be restored (#1715).
   window.addEventListener('popstate', () => {
-    void renderRoute(stripBasePath(window.location.pathname));
+    const path = stripBasePath(window.location.pathname);
+    const search = window.location.search;
+    void renderRoute(search ? `${path}${search}` : path);
   });
 }
 
@@ -1018,12 +1252,14 @@ function setupRouter(): void {
  */
 function navigateTo(path: string): void {
   const currentAppPath = stripBasePath(window.location.pathname);
-  if (path === currentAppPath) return;
+  if (path === currentAppPath) {
+    if (terminalWorkspaceEnabled && (path === '/terminals' || terminalAgentRoute.test(path)))
+      void renderRoute(path);
+    return;
+  }
 
   // Prefix app-relative paths with the base path for the browser URL bar
-  const base = import.meta.env.BASE_URL;
-  const browserPath = base && base !== '/' ? base.replace(/\/$/, '') + path : path;
-  window.history.pushState({}, '', browserPath);
+  window.history.pushState({}, '', browserPath(path));
   void renderRoute(path);
 }
 
@@ -1035,6 +1271,10 @@ if (document.readyState === 'loading') {
 } else {
   void init();
 }
+
+// Re-export the central terminal helpers so tests and non-component callers
+// can reach them through the entry module without importing a second path.
+export { openTerminal, terminalHref } from './open-terminal.js';
 
 // Export for use in components and tests
 export { getInitialData, navigateTo, stateManager };

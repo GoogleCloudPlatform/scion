@@ -26,6 +26,7 @@ For both Web and CLI access, Scion relies on standard OAuth 2.0 providers (Googl
 - **Web Flow**: Standard Authorization Code flow. The embedded Go web server handles the callback and exchanges the provider token for a session-bound Hub access token.
 - **CLI Flow**: Uses a localhost callback server (defaulting to port `18271`). The CLI opens the user's browser for authentication and receives the authorization code via the local server.
 - **PKCE**: The CLI uses Proof Key for Code Exchange (PKCE) to prevent authorization code injection attacks.
+- **Per-User Session Revocation**: Each user carries a `session_generation` counter. Administrators can increment this counter via the API (`POST /api/v1/users/:id/revoke-sessions`) or the Web Dashboard, immediately invalidating all of the user's active cookie-based sessions. The Hub middleware checks the counter on every request and forces re-authentication on mismatch. See [Authentication & Identity — Session Revocation](/scion/hosted/single-node/auth/#session-revocation).
 
 ### 1.3 Agent Authentication (`sciontool`)
 
@@ -85,7 +86,7 @@ Scion implements a robust, hierarchical RBAC (Role-Based Access Control) and pol
 - **Resource Scopes**: Policies are attached to scopes (Hub, Project, or specific Resource) and follow a containment hierarchy.
 - **Override Model**: Lower-level policies (e.g., at the Agent level) override higher-level ones (e.g., at the Project level), allowing for granular delegation of authority.
 - **Actions**: Standardized CRUD actions (`create`, `read`, `update`, `delete`, `list`) plus resource-specific actions (`start`, `stop`, `attach`, `message`).
-- **Lattice-Based Agent Authorization**: Agents are assigned tiered roles (`none`, `readonly`, `baseline`, `full`) that restrict their JWT scopes via a two-gate authority lattice.
+- **Tiered Agent Authorization**: Agents are assigned tiered roles (`none`, `readonly`, `baseline`, `full`) that restrict their JWT scopes through project and parent-agent creation ceilings plus live delegation checks.
 
 ### 3.3 GCP Service Account Assignment Gates
 
@@ -107,7 +108,32 @@ To guarantee that no API endpoints or handlers can be accessed without explicit 
 - **Fail-Closed Dispatch Access**: The `checkBrokerDispatchAccess` guard is strictly fail-closed, ensuring that no agent execution can be triggered on a runtime broker unless dispatch permissions have been verified.
 - **Role Boundary Enforcement (`addGroupMember`)**: Non-user callers (such as automated agents or system services) are strictly capped at the plain `member` role when executing `addGroupMember` operations, preventing elevation of privileges across organizational boundaries.
 - **Strict Isolation Ordering (404-before-403)**: To prevent unauthorized users or agents from discovering the existence of sensitive resources via API probe responses, Scion enforces strict **resource isolation ordering**. If a caller requests a resource they are not authorized to view, the Hub performs resource existence checks and tenant bounds validation first. This ensures the Hub responds with a `404 Not Found` rather than a `403 Forbidden` if the resource does not exist or belongs to another tenant/project, preventing side-channel resource enumeration.
+- **Dispatcher-Level Route Authorization**: Route families that share a resource are authorized once, in a single dispatcher, before any handler runs:
+  - **Project workspace routes** (files, archive, pull, cache, sync status, and WebDAV) check project access first. Any non-read method (for example `PUT`, `POST`, `DELETE`) requires update access on the project.
+  - **Template file routes** check access on the specific template before any read or write, and validate file paths with the same rules as the workspace file handlers.
+  - **Agent status updates**: an agent can update only its own status. Any non-agent caller needs update access on the agent.
+  - **Harness config routes** grant Runtime Brokers read-only access.
+  - **Project GitHub settings** require read access on the project for `GET`, and update access for any other method.
+- **Scope Boundary on Resource Reads**: User- and project-scoped skills, templates, and harness configs can be read only by their owner, members of the owning project, and Hub admins. Hub-wide member and viewer grants apply only to hub- and global-scoped records; they do not open up another user's or project's resources. The same scope check applies when a template is resolved at agent creation and when a template is cloned. There is no separate `visibility` setting on these resources, so access depends only on scope and grants.
+- **Project Agent Routes**: Project-scoped agent list, get, and update, and the resume and restart path, authorize each caller individually. Agent responses omit the environment in the agent's applied config unless the caller can attach to the agent, and `GITHUB_TOKEN` is never returned.
+- **Chat Search Visibility**: Chat search returns DM threads only to their participants.
+- **Project-Scoped Agent Deletion**: When a Runtime Broker deletes an agent, it resolves the agent within the requested project only, on every runtime. It never matches by bare slug across projects, so it cannot remove a same-slug agent's container, VM, or files in another project. The broker returns `404` when nothing matches and refuses the delete if the match is ambiguous.
+- **Agent Name Path Validation**: Wherever an agent name resolves to on-disk agent state, it must be a single, clean path element. Empty names, `.`, `..`, and names containing `/`, `\`, or NUL are rejected, so a name cannot escape the agents directory. Broker create and start requests that fail this check return a validation error. Broker dispatch and scheduled-event lookups address agents by slug.
+- **Sanitized Broker Failure Reasons**: Before a message failure reason reported by a Runtime Broker is stored or echoed into the sending agent's terminal, the Hub strips control characters and invalid UTF-8 and truncates it to 512 bytes.
 - **Regression Checks in CI**: To prevent future authorization regressions, an automated `authz-guard` check is wired into the CI pipeline (via a dedicated Makefile target and GitHub Actions step) that statically analyzes and validates that all API handlers are protected by appropriate authorization helpers.
+
+### 3.5 Project File Access Containment
+
+The Hub's project file handlers serve project workspaces and shared directories. These cover list, download, archive, upload, inline write, and delete. Each handler is confined to the directory it serves. The contents of these directories are agent-writable by design: a workspace is a git checkout, and a shared directory is mounted read-write into every agent in the project. A symlink planted inside one must therefore not expose files elsewhere on the host.
+
+- **Kernel-enforced containment**: File operations go through Go's `os.Root`, which checks containment at every path component. A path that resolves outside the served directory, including through a symlink stored inside it, is refused with `400 File not accessible` and a warning is logged. A symlink whose target is outside returns the same response whether or not the target exists, so it cannot be used to probe the host.
+- **In-tree symlinks**: A symlink that resolves to another location inside the same directory is followed normally.
+- **Symlinked base directories**: If the served directory itself is a symlink, the request is refused.
+- **Archives**: Directory archive downloads skip symlinks entirely.
+- **Deletes**: Deleting a symlink removes the link only, never its target.
+- **No implicit creation**: Read and delete requests on a missing workspace or shared directory no longer create it. Only uploads and writes do.
+- **Attachment ingest and staging**: Attachments are resolved through an `os.Root` anchored on the project scratchpad, so a symlink at any intermediate directory component cannot redirect them. A shared directory that is itself a symlink is refused.
+- **NFS shared directories**: With `server.shared_dir_storage.backend: nfs`, shared-directory operations use an `O_NOFOLLOW` component walk anchored on the project tree's inode. See [Shared Directory Storage](/scion/reference/server-config/#shared-directory-storage-servershared_dir_storage).
 
 ## 4. Secret Management
 
@@ -163,11 +189,14 @@ Scion ensures that sensitive credentials (GCP Service Accounts, API keys for LLM
 - **Broker Mode Isolation**: When agents are dispatched via the Hub, the credential pipeline only uses hub-resolved secrets and environment variables. The broker operator's host environment and filesystem are never scanned, preventing credential leakage into hub-dispatched agents.
 - **Isolation**: Agent home directories and non-git project data are isolated on the host filesystem and externalized from the workspace to prevent cross-agent data leakage and unauthorized traversal.
 - **Shadow Mounts**: Scion uses `tmpfs` shadow mounts to definitively block agents from accessing `.scion` configuration data or other agents' workspaces within the same project.
+- **Token Reset Off the Command Line**: `scion reset-auth` passes the fresh Hub token to the container over stdin, not as a command argument, so it never appears in `/proc/<pid>/cmdline` on the host. This applies to every runtime.
 - **Lifecycle**: Secrets exist only in the agent container's memory or transient mounts. When an agent is deleted, all projected secrets and transient volumes are purged.
 
 ### 4.6 Hub-Internal Keys
 
 JWT signing keys used for agent and user token issuance are stored through the secret backend when GCP Secret Manager is configured. In development mode (local backend), signing keys fall back to direct database storage with a logged warning. These keys use the internal `hub` scope and are not accessible through the user-facing secrets API.
+
+**Skill download signing key.** Hubs using local storage for the skill registry sign skill file download URLs with HMAC-SHA256. Cloud storage issues presigned object-store URLs and is unaffected. Each URL is a capability for exactly one file of one skill version (`?version=…&exp=…&sig=…`), valid for 15 minutes. The Hub signs it only after checking the creator's read access, and it lets a Runtime Broker download skill files at dispatch without a principal. The key follows the same persistence policy as the signing keys above. When stable keys are required (GCP Secret Manager backend), a failure to load it fails startup. Otherwise the Hub falls back to an in-memory key, which only invalidates URLs that are still outstanding.
 
 ### 4.7 Broker Authentication Secrets
 

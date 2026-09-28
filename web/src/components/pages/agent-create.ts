@@ -26,7 +26,13 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
-import type { Project, RuntimeBroker, Template, GCPServiceAccount, MessageMode } from '../../shared/types.js';
+import type {
+  Project,
+  RuntimeBroker,
+  Template,
+  GCPServiceAccount,
+  MessageMode,
+} from '../../shared/types.js';
 
 interface HarnessConfigEntry {
   id: string;
@@ -84,6 +90,9 @@ export class ScionPageAgentCreate extends LitElement {
   @state() private telemetryEnabled = false;
   @state() private autoExposePortsEnabled = false;
   @state() private hubDefaultRuntimeBroker = '';
+  @state() private hubDefaultHarnessConfig = '';
+  @state() private hubDefaultTemplate = '';
+  @state() private hubDefaultModel = '';
   @state() private autoExposePortsMode = 'allowlist';
   @state() private autoExposePortsList = '';
   @state() private autoExposePortsInterval = '3s';
@@ -412,7 +421,15 @@ export class ScionPageAgentCreate extends LitElement {
 
       const [projectsRes, brokersRes, templates, settingsRes, harnessConfigsRes] =
         await Promise.all([
-          fetch('/api/v1/projects?mine=true&limit=100', { credentials: 'include' }),
+          // Not `mine=true`: on the server that resolves to projects where the
+          // caller holds the project-owner role specifically, but creating an
+          // agent does not require ownership — project-member carries
+          // agent.create, and POST /api/v1/agents authorizes against the target
+          // project, not against ownership. Asking for owned projects hid every
+          // project a member belongs to from this picker, so members could not
+          // create an agent anywhere even though the API would have allowed it.
+          // The unfiltered list is already scoped to what the caller may read.
+          apiFetch('/api/v1/projects?limit=100'),
           fetch('/api/v1/runtime-brokers?limit=100', { credentials: 'include' }),
           apiFetchAllPages<Template>(tmplUrl, 'templates'),
           fetch('/api/v1/settings/public', { credentials: 'include' }),
@@ -437,10 +454,16 @@ export class ScionPageAgentCreate extends LitElement {
           telemetryEnabled?: boolean;
           autoExposePortsEnabled?: boolean;
           defaultRuntimeBroker?: string;
+          defaultHarnessConfig?: string;
+          defaultTemplate?: string;
+          defaultModel?: string;
         };
         this.telemetryEnabled = data.telemetryEnabled ?? false;
         this.autoExposePortsEnabled = data.autoExposePortsEnabled ?? false;
         this.hubDefaultRuntimeBroker = data.defaultRuntimeBroker ?? '';
+        this.hubDefaultHarnessConfig = data.defaultHarnessConfig ?? '';
+        this.hubDefaultTemplate = data.defaultTemplate ?? '';
+        this.hubDefaultModel = data.defaultModel ?? '';
       }
 
       if (harnessConfigsRes.ok) {
@@ -499,13 +522,16 @@ export class ScionPageAgentCreate extends LitElement {
     this.customModelId = '';
 
     const settings = await this.fetchProjectSettings(this.projectId);
-    if (!settings) return;
 
-    if (settings.defaultMaxTurns) this.maxTurns = settings.defaultMaxTurns;
-    if (settings.defaultMaxModelCalls) this.maxModelCalls = settings.defaultMaxModelCalls;
-    if (settings.defaultMaxDuration) this.maxDuration = settings.defaultMaxDuration;
-    if (settings.defaultModel) {
-      const derived = this.deriveModelSelection(settings.defaultModel);
+    if (settings) {
+      if (settings.defaultMaxTurns) this.maxTurns = settings.defaultMaxTurns;
+      if (settings.defaultMaxModelCalls) this.maxModelCalls = settings.defaultMaxModelCalls;
+      if (settings.defaultMaxDuration) this.maxDuration = settings.defaultMaxDuration;
+    }
+
+    const effectiveModel = settings?.defaultModel || this.hubDefaultModel;
+    if (effectiveModel) {
+      const derived = this.deriveModelSelection(effectiveModel);
       this.modelSelection = derived.selection;
       this.customModelId = derived.customId;
     }
@@ -586,7 +612,9 @@ export class ScionPageAgentCreate extends LitElement {
     const user = visible.filter((t) => t.scope === 'user').sort(byName);
     const project = visible.filter((t) => t.scope === 'project').sort(byName);
     const global = visible.filter((t) => t.scope === 'global').sort(byName);
-    const rest = visible.filter((t) => t.scope !== 'user' && t.scope !== 'project' && t.scope !== 'global').sort(byName);
+    const rest = visible
+      .filter((t) => t.scope !== 'user' && t.scope !== 'project' && t.scope !== 'global')
+      .sort(byName);
     return [...user, ...project, ...global, ...rest];
   }
 
@@ -597,7 +625,7 @@ export class ScionPageAgentCreate extends LitElement {
     const visible = this.filteredTemplates;
 
     const settings = this.projectId ? await this.fetchProjectSettings(this.projectId) : null;
-    const harnessDefault = settings?.defaultHarnessConfig || 'antigravity';
+    const harnessDefault = settings?.defaultHarnessConfig || this.hubDefaultHarnessConfig || 'claude';
 
     const harnessFor = (t: { defaultHarnessConfig?: string; harness?: string }) =>
       t.defaultHarnessConfig || t.harness || harnessDefault;
@@ -610,6 +638,18 @@ export class ScionPageAgentCreate extends LitElement {
       if (match) {
         this.templateId = match.id;
         this.setHarnessFromValue(harnessFor(match));
+        templateResolved = true;
+      }
+    }
+
+    // Hub-level default template fallback: try before the generic 'default' slug.
+    if (!templateResolved && this.hubDefaultTemplate) {
+      const hubMatch = visible.find(
+        (t) => t.name === this.hubDefaultTemplate || t.slug === this.hubDefaultTemplate
+      );
+      if (hubMatch) {
+        this.templateId = hubMatch.id;
+        this.setHarnessFromValue(harnessFor(hubMatch));
         templateResolved = true;
       }
     }
@@ -663,7 +703,9 @@ export class ScionPageAgentCreate extends LitElement {
     if (!this.projectId) return;
 
     try {
-      const res = await apiFetch(`/api/v1/projects/${this.projectId}/gcp-service-accounts`);
+      const res = await apiFetch(
+        `/api/v1/projects/${this.projectId}/gcp-service-accounts?includeHubScoped=true`
+      );
       if (res.ok) {
         const data = (await res.json()) as { items?: GCPServiceAccount[] } | GCPServiceAccount[];
         this.gcpServiceAccounts = Array.isArray(data) ? data : data.items || [];
@@ -1564,7 +1606,12 @@ export class ScionPageAgentCreate extends LitElement {
           }}
         >
           <sl-option value="">Default (inherit from parent)</sl-option>
-          ${(Object.entries(MESSAGE_MODE_DISPLAY) as [MessageMode, typeof MESSAGE_MODE_DISPLAY[MessageMode]][]).map(
+          ${(
+            Object.entries(MESSAGE_MODE_DISPLAY) as [
+              MessageMode,
+              (typeof MESSAGE_MODE_DISPLAY)[MessageMode],
+            ][]
+          ).map(
             ([mode, display]) => html`
               <sl-option value=${mode}>
                 <sl-icon slot="prefix" name=${display.icon}></sl-icon>
@@ -1575,9 +1622,18 @@ export class ScionPageAgentCreate extends LitElement {
         </sl-select>
         ${this.messageMode === 'none'
           ? html`<div class="hint" style="color: var(--sl-color-danger-600);">
-              This agent will be created in sealed mode. It will not be able to send or receive messages.
+              This agent will be created in sealed mode. It will not be able to send or receive
+              messages.
             </div>`
-          : html`<div class="hint">Message authorization scope. Default inherits from the parent agent's mode.</div>`}
+          : this.messageMode === 'hub'
+            ? html`<div class="hint">
+                Hub mode enables messaging with permitted agents in other projects on this Hub, in
+                addition to all agents and users in this project. External reach requires the Hub
+                cross-project switch to be enabled.
+              </div>`
+            : html`<div class="hint">
+                Message authorization scope. Default inherits from the parent agent's mode.
+              </div>`}
       </div>
 
       <!-- Harness Authentication -->
@@ -1649,7 +1705,9 @@ export class ScionPageAgentCreate extends LitElement {
                       ${this.verifiedGCPServiceAccounts.map(
                         (sa) =>
                           html`<sl-option value=${sa.id}>
-                            ${sa.email}${sa.displayName ? ` (${sa.displayName})` : ''}
+                            ${sa.email}${sa.displayName ? ` (${sa.displayName})` : ''}${
+                              sa.scope === 'hub' ? ' (Hub)' : ''
+                            }
                           </sl-option>`
                       )}
                     </sl-select>

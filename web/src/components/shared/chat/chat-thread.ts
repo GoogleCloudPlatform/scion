@@ -38,18 +38,19 @@
 
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import { guard } from 'lit/directives/guard.js';
+import { repeat } from 'lit/directives/repeat.js';
 import { apiFetch, extractApiError } from '../../../client/api.js';
 import type { Agent, Message } from '../../../shared/types.js';
 import type { ChatSendDetail } from './chat-composer.js';
-import type { VisibilityMode, VisibilityChangeDetail } from './chat-visibility-toggle.js';
 import { stateManager } from '../../../client/main.js';
+import { showToast } from '../../../utils/toast.js';
+import { playChimeThrottled } from '../../../utils/audio.js';
 import './chat-message.js';
 import './chat-system-line.js';
 import './chat-composer.js';
-import './chat-visibility-toggle.js';
 import './chat-interagent-marker.js';
-import './send-to-agent-picker.js';
-import type { AgentSelectedDetail } from './send-to-agent-picker.js';
+import { formatChatDate, renderDateDivider, chatDateDividerStyles } from './chat-date-divider.js';
 import { getLanguageFromPath } from '../code-editor.js';
 import '../code-editor.js';
 import '../markdown-preview.js';
@@ -69,11 +70,157 @@ const MAX_BUFFER = 500;
 /** Number of messages to fetch per history request. */
 const HISTORY_PAGE_SIZE = 50;
 
+const EMPTY_ATTACHMENTS: NonNullable<Message['attachments']> = [];
+const EMPTY_ATTACHMENT_REFS: import('./chat-message.js').AttachmentRefInfo[] = [];
+
 /** Threshold in pixels from top to trigger upward scroll loading. */
 const SCROLL_TOP_THRESHOLD = 100;
 
 /** Threshold in pixels from bottom to consider "pinned to bottom". */
 const SCROLL_BOTTOM_THRESHOLD = 80;
+
+/** Small margin kept above the unread divider when it is anchored to the top. */
+const UNREAD_ANCHOR_MARGIN_PX = 16;
+
+/**
+ * How long to keep correcting the unread-divider anchor against late layout
+ * shifts (images, markdown, attachments finishing their own load) before
+ * giving up. Short-lived on purpose: a live SSE message arriving inside this
+ * window changes the message count, not just element sizes, and is detected
+ * separately so it never re-anchors — this timer only guards against the
+ * anchor drifting while the *same* unread content is still settling.
+ */
+const UNREAD_ANCHOR_WINDOW_MS = 2000;
+
+/**
+ * Jump-to-message re-check (scrollend): pixel tolerance when deciding whether
+ * a jump target is still "in view" after the scroll settles. A late layout
+ * shift (image load, attachment height, late markdown) can move the target
+ * out from under a smooth `scrollIntoView`, since Chromium's smooth scroll
+ * targets the position computed when the scroll started.
+ */
+const JUMP_SCROLL_VIEW_TOLERANCE_PX = 24;
+
+/** Jump-to-message re-check: cap on corrective re-scrolls to avoid a loop. */
+const JUMP_SCROLL_MAX_RECHECKS = 2;
+
+/**
+ * Jump-to-message re-check: how long the fallback poll (older Safari, no
+ * `scrollend`) must see a stable `scrollTop` before treating the scroll as
+ * settled. This is a stability *window*, not the sampling interval — see
+ * `JUMP_SCROLL_SETTLE_POLL_INTERVAL_MS` for that.
+ */
+const JUMP_SCROLL_SETTLE_STABLE_MS = 150;
+
+/** Jump-to-message re-check: fallback poll's sampling interval. */
+const JUMP_SCROLL_SETTLE_POLL_INTERVAL_MS = 50;
+
+/**
+ * Jump-to-message re-check: how long the watch waits, with no `scroll` event
+ * and no `scrollend`, before concluding there's nothing left to watch for —
+ * either the scroll has genuinely gone idle after settling, or (screened by
+ * the pre-scroll check in `scrollToMessageById` for the common cases, but
+ * not every one — e.g. content still streaming in mid-jump) it never moved
+ * at all. Restarted on every `scroll` event, so a long smooth scroll, which
+ * fires `scroll` every frame, stays watched for however long it actually
+ * takes. A *fixed* deadline from arm time doesn't: Chromium's smooth-scroll
+ * duration grows with distance and exceeded a 1500ms fixed deadline on jumps
+ * beyond ~8000px, tearing the watcher down before `scrollend` and silently
+ * dropping the re-check on exactly the long jumps most exposed to the bug
+ * (deep search results, permalinks) (review R4). `scrollend` normally fires
+ * within a frame of the last `scroll`, well inside this window, so it
+ * doesn't delay the normal settle path.
+ */
+const JUMP_SCROLL_IDLE_TIMEOUT_MS = 300;
+
+/**
+ * Jump-to-message re-check: hard cap on the watch's total lifetime,
+ * regardless of `scroll`/`scrollend` activity. The idle timeout above is
+ * what actually bounds the normal cases; this is only a backstop against a
+ * scroller that never goes idle (e.g. a runaway continuous scroll), so it
+ * can be generous.
+ */
+const JUMP_SCROLL_HARD_CAP_MS = 5000;
+
+/**
+ * Jump-to-message re-check: keys that scroll the page even when focus is
+ * outside the scroll container — e.g. `document.activeElement` is `<body>`
+ * after clicking a message, yet Chromium still scrolls the last-clicked
+ * scroller on PageUp/PageDown. Filtered so unrelated typing (in a reply box,
+ * say) doesn't cancel the watch.
+ */
+const JUMP_SCROLL_CANCEL_KEYS = new Set([
+  'PageUp',
+  'PageDown',
+  'ArrowUp',
+  'ArrowDown',
+  'ArrowLeft',
+  'ArrowRight',
+  'Home',
+  'End',
+  ' ',
+]);
+
+/**
+ * Whether `targetRect` counts as "in view" within `containerRect`, allowing
+ * `JUMP_SCROLL_VIEW_TOLERANCE_PX` of slack. Full containment is sufficient
+ * but not necessary: a target taller than the viewport (a long agent reply)
+ * can never be fully contained, and `block: 'center'` deliberately puts its
+ * top above the viewport, so it also counts as in view once it overlaps the
+ * container's vertical midpoint — the point `center` alignment aims for.
+ */
+function isJumpTargetInView(containerRect: DOMRect, targetRect: DOMRect): boolean {
+  const contained =
+    targetRect.top >= containerRect.top - JUMP_SCROLL_VIEW_TOLERANCE_PX &&
+    targetRect.bottom <= containerRect.bottom + JUMP_SCROLL_VIEW_TOLERANCE_PX;
+  if (contained) return true;
+  const mid = (containerRect.top + containerRect.bottom) / 2;
+  return (
+    targetRect.top <= mid + JUMP_SCROLL_VIEW_TOLERANCE_PX &&
+    targetRect.bottom >= mid - JUMP_SCROLL_VIEW_TOLERANCE_PX
+  );
+}
+
+/**
+ * Whether scrolling `scrollEl` toward a target outside `containerRect` is
+ * clamped — i.e. cannot move further in the needed direction because the
+ * container is already scrolled to that end. `scrollIntoView` clamps to the
+ * scrollable range: a reply-jump to a message near the bottom while already
+ * pinned to the bottom, or a jump near the top while already at the top, has
+ * nowhere further to go, so it produces no scroll and no `scrollend`.
+ */
+function isJumpScrollClamped(
+  scrollEl: HTMLElement,
+  containerRect: DOMRect,
+  targetRect: DOMRect
+): boolean {
+  const targetAbove = targetRect.top < containerRect.top;
+  const targetBelow = targetRect.bottom > containerRect.bottom;
+  const atTop = scrollEl.scrollTop <= 0;
+  const atBottom =
+    scrollEl.scrollTop >=
+    scrollEl.scrollHeight - scrollEl.clientHeight - JUMP_SCROLL_VIEW_TOLERANCE_PX;
+  return (targetAbove && atTop) || (targetBelow && atBottom);
+}
+
+/**
+ * Whether `node` is (or is inside) an editable element — an input, textarea,
+ * select, or contenteditable — for the purpose of ignoring scroll-shaped
+ * keydowns (Space, arrows, ...) typed there as ordinary text input rather
+ * than a scroll gesture. Checked against `composedPath()[0]`, the real
+ * innermost element the event originated on, rather than `e.target`: at a
+ * document-level listener, `e.target` is retargeted to the nearest
+ * non-shadow ancestor, and Shoelace's `<sl-textarea>` (the composer) wraps
+ * its native `<textarea>` in shadow DOM, so `e.target` there is the
+ * `<sl-textarea>` host, not the editable element itself (review N3).
+ */
+function isEditableKeydownTarget(node: EventTarget | null): boolean {
+  if (!(node instanceof Element)) return false;
+  if (node.tagName === 'INPUT' || node.tagName === 'TEXTAREA' || node.tagName === 'SELECT') {
+    return true;
+  }
+  return node instanceof HTMLElement && node.isContentEditable;
+}
 
 /** Grouping window: consecutive messages from same sender within 5 min. */
 const GROUP_WINDOW_MS = 5 * 60 * 1000;
@@ -90,6 +237,48 @@ const TYPING_EXPIRY_MS = 6000;
  * receipt on every conversation is noise, not information.
  */
 const SEEN_VISIBLE_MS = 5 * 60 * 1000;
+
+/** Match the store's ascending (created, UUID) order, not arrival order. */
+function compareMessageOrder(a: Message, b: Message): number {
+  const milliseconds = Date.parse(a.createdAt) - Date.parse(b.createdAt);
+  if (Number.isFinite(milliseconds) && milliseconds !== 0) return milliseconds;
+  // Go emits RFC3339 timestamps with up to nine fractional digits; Date
+  // truncates to milliseconds. Preserve the remainder before breaking ties
+  // by ID, and pad varying precision (.1 and .100000001) to the same width.
+  const remainder = (timestamp: string): number => {
+    const fraction = /\.(\d+)/.exec(timestamp)?.[1] || '';
+    return Number(fraction.padEnd(9, '0').slice(3, 9));
+  };
+  const subMilliseconds = remainder(a.createdAt) - remainder(b.createdAt);
+  if (subMilliseconds !== 0) return subMilliseconds;
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+/**
+ * Return a copy of `msg` with `dispatchState` set to `dispatchState` and
+ * `dispatchFailureReason`/`dispatchFailureCode` replaced by `reason`/`code`
+ * (nc-delivery-unreachable PR #1895 review: build a fresh object instead of
+ * mutating and `delete`-ing the stale fields, which deoptimizes the object's
+ * V8 hidden class). Passing `undefined` for `reason`/`code` clears a stale
+ * value rather than leaving it behind — callers that need a truthy check
+ * instead of a nullish one should pre-convert falsy values to `undefined`
+ * before calling.
+ */
+function withDispatchFailure(
+  msg: Message,
+  dispatchState: string,
+  reason: string | undefined,
+  code: string | undefined
+): Message {
+  /* eslint-disable-next-line @typescript-eslint/no-unused-vars -- rest-omit idiom: bind and drop these two keys so `...rest` excludes them */
+  const { dispatchFailureReason: _reason, dispatchFailureCode: _code, ...rest } = msg;
+  return {
+    ...rest,
+    dispatchState,
+    ...(reason != null ? { dispatchFailureReason: reason } : {}),
+    ...(code != null ? { dispatchFailureCode: code } : {}),
+  };
+}
 
 /** Typing send throttle in ms. */
 const TYPING_SEND_THROTTLE_MS = 4000;
@@ -176,6 +365,10 @@ const PATH_MD_EXTS = new Set(['.md', '.markdown']);
 /** Maximum file size for inline text preview (512 KB). */
 const PATH_PREVIEW_MAX = 512 * 1024;
 
+/** Error shown when a path-link click cannot resolve any project id. */
+const PATH_LINK_NO_PROJECT_ERROR =
+  'Cannot open file: could not determine which project this file belongs to';
+
 /** State for the file-path viewer dialog. */
 interface FilePreviewState {
   /** The raw container path from the link. */
@@ -213,15 +406,6 @@ export class ScionChatThread extends LitElement {
 
   @property({ type: Boolean })
   canSend = false;
-
-  // DEPRECATED(wave-1): per-agent visibility mode — remove after v2 is stable and flag is permanently ON.
-  @property()
-  visibilityMode: VisibilityMode = 'conversation';
-
-  /** Whether the visibility toggle is shown in the header. */
-  // DEPRECATED(wave-1): visibility toggle — remove after v2 is stable and flag is permanently ON.
-  @property({ type: Boolean })
-  showVisibilityToggle = false;
 
   /** Agents available for @-mention in the composer. */
   @property({ type: Array })
@@ -285,6 +469,23 @@ export class ScionChatThread extends LitElement {
   @state() private loadingOlder = false;
   @state() private hasOlderMessages = true;
   @state() private loaded = false;
+
+  private messageRowsVersion = 0;
+
+  override willUpdate(changedProperties: Map<string, unknown>): void {
+    // These updates affect controls around the transcript, not its rows.
+    // Invalidate for every other property (including future ones), and for
+    // explicit requestUpdate() calls such as read-receipt expiry. Metadata
+    // maps are mutated in place alongside messages, so do not cache by map identity.
+    if (
+      changedProperties.size === 0 ||
+      [...changedProperties.keys()].some(
+        (key) => key !== 'typingUsers' && key !== 'agents' && key !== 'pinnedToBottom'
+      )
+    ) {
+      this.messageRowsVersion++;
+    }
+  }
   /** Mention results keyed by message ID (for "also notified" footer per message). */
   @state() private mentionResultsByMessageId = new Map<string, MentionResult[]>();
 
@@ -321,19 +522,13 @@ export class ScionChatThread extends LitElement {
     content: string;
   } | null = null;
 
-  // ---- Phase-5: Context menu + Send-to-agent state ----
+  // ---- Phase-5: Context menu state ----
 
   /** The message targeted by the right-click context menu. */
   @state() private contextMenuMessage: Message | null = null;
 
   /** Position of the right-click context menu. */
   @state() private contextMenuPosition: { x: number; y: number } = { x: 0, y: 0 };
-
-  /** Whether the agent picker is visible. */
-  @state() private showAgentPicker = false;
-
-  /** Temporarily stored message for send-to-agent flow. */
-  private _pendingSendToAgentMessage: Message | null = null;
 
   // ---- Path-link file preview state (#1148) ----
 
@@ -360,9 +555,58 @@ export class ScionChatThread extends LitElement {
 
   private eventSource: EventSource | null = null;
   private nextCursor: string | null = null;
+  private viewingAroundMessage = false;
   private lastKnownTimestamp: string | null = null;
   private hadError = false;
   private fetchId = 0;
+
+  // ---- Unread-divider open-to-top scroll anchor ----
+
+  /** True while the open-time anchor to the unread divider is still in effect. */
+  private _unreadAnchorActive = false;
+
+  /** Message count captured when the anchor was applied, to tell a late layout
+   *  shift of existing content (re-apply) apart from a new message arriving
+   *  (stop — never re-anchor on live activity). */
+  private _unreadAnchorMessageCount = 0;
+
+  /** True for the duration of our own programmatic scrollTop write, so the
+   *  resulting 'scroll' event is not mistaken for the user scrolling away. */
+  private _applyingUnreadAnchor = false;
+
+  /** Handle of the pending rAF that will clear `_applyingUnreadAnchor`. Kept
+   *  so a second `applyUnreadAnchor` call within the same short window can
+   *  cancel the earlier one before scheduling its own — otherwise the
+   *  earlier rAF (e.g. from a ResizeObserver notification a frame apart from
+   *  a second one) could clear the guard while the later write's own
+   *  'scroll' event is still pending, and that event would then be
+   *  misread as a user scroll. */
+  private _applyingUnreadAnchorRaf: number | null = null;
+
+  /** The value `applyUnreadAnchor` last wrote to `scrollTop` (read back after
+   *  the browser clamps it), so a genuine user scroll landing in the same
+   *  frame as that write — before the guard above clears on the next rAF —
+   *  is still recognized as manual instead of being swallowed by the guard. */
+  private _unreadAnchorWrittenScrollTop = 0;
+
+  /** Watches `.messages-list` for late layout shifts while the anchor is active. */
+  private _unreadAnchorResizeObserver: ResizeObserver | null = null;
+
+  /** Bounds how long the short-lived resize watch stays attached. */
+  private _unreadAnchorTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Handle of the deferred rAF, scheduled by `scrollToUnreadDivider`, that
+   *  applies the initial anchor after `updateComplete`. Canceled on
+   *  deactivation so a thread left before that first frame lands can't have
+   *  it fire against a superseded or torn-down anchor. */
+  private _unreadAnchorInitialRaf: number | null = null;
+
+  /**
+   * Cleanup for the in-flight jump-to-message scrollend re-check, if any.
+   * Set by `watchJumpScrollSettle()`; calling it tears down whatever
+   * listener/timer is pending and is idempotent.
+   */
+  private _jumpScrollCleanup: (() => void) | null = null;
 
   /** Bound listener for v2 SSE chat-message events via stateManager. */
   private _v2MessageHandler = this.handleV2ChatMessage.bind(this);
@@ -380,7 +624,7 @@ export class ScionChatThread extends LitElement {
       this._sawSseConnect = true;
       return;
     }
-    if (!this.loaded) return;
+    if (!this.loaded || this.viewingAroundMessage) return;
     void this.fetchHistoryV2().catch((err) => {
       console.warn('[chat-thread] catch-up fetch after reconnect failed:', err);
     });
@@ -420,17 +664,33 @@ export class ScionChatThread extends LitElement {
   /** Current user ID, cached from the stateManager scope once it exists. */
   private _currentUserId = '';
 
+  /** Timer for the initial-load watermark advance (500ms or 2000ms). */
+  private _initialWatermarkTimer: ReturnType<typeof setTimeout> | null = null;
+
   /** Read tracking: debounce timer for advancing watermark. */
   private _readDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Read tracking: whether the tab is focused. */
   private _tabFocused = true;
 
+  /**
+   * Cross-project: maps foreign project IDs to resolved slugs.
+   * Populated in the `updated()` lifecycle when `messages` changes.
+   * Reactive so that resolved slugs trigger a re-render automatically.
+   */
+  @state() private _projectSlugCache = new Map<string, string>();
+
+  /** Set of project IDs currently being resolved to avoid duplicate fetches. */
+  private _projectSlugPending = new Set<string>();
+
   /** Backfill single-flight guard: a backfill request is currently running. */
   private _backfillInFlight = false;
 
   /** Backfill single-flight guard: another backfill was requested while one was running. */
   private _backfillPending = false;
+
+  /** Idempotency keys of currently in-flight optimistic messages. */
+  private _pendingIdempotencyKeys = new Set<string>();
 
   /** Focus/blur handlers for read tracking. */
   private _focusHandler = () => {
@@ -441,54 +701,111 @@ export class ScionChatThread extends LitElement {
     this._tabFocused = false;
   };
 
-  static override styles = css`
-    :host {
-      display: flex;
-      flex-direction: column;
-      height: 100%;
-      min-height: 300px;
+  /**
+   * Look up a resolved project slug from the cache. Called during render —
+   * no async work happens here. Resolution is handled in `updated()`.
+   */
+  private resolveProjectSlug(projectId: string): string {
+    if (!projectId || projectId === this.projectId) return '';
+    return this._projectSlugCache.get(projectId) ?? '';
+  }
+
+  /**
+   * Scan messages for foreign senderProjectId values and resolve any that
+   * are not yet cached. Called from the `updated()` lifecycle so that
+   * async fetches never run during render.
+   */
+  private resolveUnknownProjectSlugs(): void {
+    const toResolve = new Set<string>();
+    for (const msg of this.messages) {
+      const pid = msg.senderProjectId;
+      if (
+        pid &&
+        pid !== this.projectId &&
+        !this._projectSlugCache.has(pid) &&
+        !this._projectSlugPending.has(pid)
+      ) {
+        toResolve.add(pid);
+      }
     }
 
-    .thread-container {
-      display: flex;
-      flex-direction: column;
-      flex: 1;
-      overflow: hidden;
+    for (const projectId of toResolve) {
+      this._projectSlugPending.add(projectId);
+      void apiFetch(`/api/v1/projects/${encodeURIComponent(projectId)}`)
+        .then(async (res) => {
+          const updated = new Map(this._projectSlugCache);
+          if (res.ok) {
+            const data = (await res.json()) as { slug?: string; name?: string };
+            updated.set(projectId, data.slug || data.name || projectId.slice(0, 8));
+          } else {
+            updated.set(projectId, projectId.slice(0, 8));
+          }
+          this._projectSlugPending.delete(projectId);
+          this._projectSlugCache = updated;
+        })
+        .catch(() => {
+          const updated = new Map(this._projectSlugCache);
+          updated.set(projectId, projectId.slice(0, 8));
+          this._projectSlugPending.delete(projectId);
+          this._projectSlugCache = updated;
+        });
     }
+  }
 
-    /* Streaming indicator */
-    .stream-bar {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 0.25rem 1rem;
-      font-size: 0.75rem;
-      color: var(--scion-text-muted, #64748b);
-      border-bottom: 1px solid var(--scion-border, #e2e8f0);
-      background: var(--scion-surface, #ffffff);
-    }
+  static override styles = [
+    chatDateDividerStyles,
+    css`
+      :host {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+        min-height: 300px;
+      }
 
-    .stream-indicator {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.375rem;
-    }
+      .thread-container {
+        display: flex;
+        flex-direction: column;
+        flex: 1;
+        overflow: hidden;
+      }
 
-    /* Message scroll area */
-    .messages-scroll {
-      flex: 1;
-      overflow-y: auto;
-      overflow-x: hidden;
-      padding: 0.5rem 0;
-      display: flex;
-      flex-direction: column;
-    }
+      /* Streaming indicator */
+      .stream-bar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0.25rem 1rem;
+        font-size: var(--chat-fs-base);
+        color: var(--scion-text-muted, #64748b);
+        border-bottom: 1px solid var(--scion-border, #e2e8f0);
+        background: var(--scion-surface, #ffffff);
+      }
 
-    .messages-list {
-      display: flex;
-      flex-direction: column;
-      gap: 0;
-      /*
+      .stream-indicator {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.375rem;
+      }
+
+      /* Message scroll area */
+      .messages-scroll {
+        /* Positioned so descendants' offsetTop (used to anchor the unread
+         * divider to the top of the viewport on open) is measured relative to
+         * this container instead of bubbling up to an ancestor outside it. */
+        position: relative;
+        flex: 1;
+        overflow-y: auto;
+        overflow-x: hidden;
+        padding: 0.5rem 0;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .messages-list {
+        display: flex;
+        flex-direction: column;
+        gap: 0;
+        /*
        * flex: 0 0 auto is load-bearing. As a flex item of .messages-scroll the
        * list would otherwise shrink to the scroll container's height (the
        * explicit min-height replaces the automatic minimum), and because the
@@ -497,322 +814,311 @@ export class ScionChatThread extends LitElement {
        * cannot be scrolled at all. Keeping the list at its content height makes
        * the overflow land at the bottom, where the scrollbar can reach it.
        */
-      flex: 0 0 auto;
-      min-height: 100%;
-      justify-content: flex-end;
-    }
+        flex: 0 0 auto;
+        min-height: 100%;
+        justify-content: flex-end;
+      }
 
-    /* Loading older messages */
-    .loading-older {
-      display: flex;
-      justify-content: center;
-      padding: 0.5rem;
-    }
+      /* Loading older messages */
+      .loading-older {
+        display: flex;
+        justify-content: center;
+        padding: 0.5rem;
+      }
 
-    /* Jump to latest pill */
-    .jump-to-latest {
-      position: sticky;
-      bottom: 0.5rem;
-      align-self: center;
-      z-index: 10;
-    }
+      /* Jump to latest pill */
+      .jump-to-latest {
+        position: sticky;
+        bottom: 0.5rem;
+        align-self: center;
+        z-index: 10;
+      }
 
-    .jump-btn {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.375rem;
-      padding: 0.375rem 0.75rem;
-      background: var(--scion-primary, #3b82f6);
-      color: #fff;
-      border: none;
-      border-radius: 1rem;
-      font-size: 0.75rem;
-      font-weight: 500;
-      cursor: pointer;
-      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
-      transition: background 0.15s;
-    }
+      .jump-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.375rem;
+        padding: 0.375rem 0.75rem;
+        background: var(--scion-primary, #3b82f6);
+        color: #fff;
+        border: none;
+        border-radius: 1rem;
+        font-size: var(--chat-fs-base);
+        font-weight: 500;
+        cursor: pointer;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+        transition: background 0.15s;
+      }
 
-    .jump-btn:hover {
-      background: var(--scion-primary-600, #2563eb);
-    }
+      .jump-btn:hover {
+        background: var(--scion-primary-600, #2563eb);
+      }
 
-    .jump-btn sl-icon {
-      font-size: 0.875rem;
-    }
+      .jump-btn sl-icon {
+        font-size: var(--chat-fs-lg);
+      }
 
-    /* Date divider */
-    .date-divider {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      padding: 0.75rem 1rem 0.25rem;
-    }
+      /* Unread divider */
+      .unread-divider {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 0.5rem 1rem;
+      }
 
-    .date-divider::before,
-    .date-divider::after {
-      content: '';
-      flex: 1;
-      height: 1px;
-      background: var(--scion-border, #e2e8f0);
-    }
+      .unread-divider::before,
+      .unread-divider::after {
+        content: '';
+        flex: 1;
+        height: 1px;
+        background: var(--scion-primary, #3b82f6);
+      }
 
-    .date-label {
-      font-size: 0.6875rem;
-      font-weight: 600;
-      color: var(--scion-text-muted, #64748b);
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      white-space: nowrap;
-    }
+      .unread-label {
+        font-size: var(--chat-fs-sm);
+        font-weight: 600;
+        color: var(--scion-primary, #3b82f6);
+        white-space: nowrap;
+      }
 
-    /* Unread divider */
-    .unread-divider {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      padding: 0.5rem 1rem;
-    }
+      /* Permalink highlight animation */
+      .permalink-highlight {
+        animation: permalink-fade 2s ease-out;
+      }
 
-    .unread-divider::before,
-    .unread-divider::after {
-      content: '';
-      flex: 1;
-      height: 1px;
-      background: var(--scion-primary, #3b82f6);
-    }
+      @keyframes permalink-fade {
+        0% {
+          background-color: rgba(59, 130, 246, 0.2);
+        }
+        100% {
+          background-color: transparent;
+        }
+      }
 
-    .unread-label {
-      font-size: 0.6875rem;
-      font-weight: 600;
-      color: var(--scion-primary, #3b82f6);
-      white-space: nowrap;
-    }
+      /* Empty / Loading / Error states */
+      .state-msg {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 3rem 2rem;
+        color: var(--scion-text-muted, #64748b);
+        gap: 0.75rem;
+        flex: 1;
+      }
 
-    /* Permalink highlight animation */
-    .permalink-highlight {
-      animation: permalink-fade 2s ease-out;
-    }
+      .state-msg sl-spinner {
+        font-size: var(--chat-fs-5xl);
+      }
 
-    @keyframes permalink-fade {
-      0% { background-color: rgba(59, 130, 246, 0.2); }
-      100% { background-color: transparent; }
-    }
-
-    /* Empty / Loading / Error states */
-    .state-msg {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      padding: 3rem 2rem;
-      color: var(--scion-text-muted, #64748b);
-      gap: 0.75rem;
-      flex: 1;
-    }
-
-    .state-msg sl-spinner {
-      font-size: 1.5rem;
-    }
-
-    .state-msg sl-icon {
-      font-size: 2rem;
-      opacity: 0.4;
-    }
-
-    /* Send error toast */
-    .send-error {
-      padding: 0.375rem 1rem;
-      font-size: 0.75rem;
-      color: var(--scion-danger-600, #dc2626);
-      background: var(--scion-danger-50, #fef2f2);
-      border-top: 1px solid var(--scion-danger-200, #fecaca);
-    }
-
-    /* Mention results footer */
-    .mention-results {
-      padding: 0.25rem 1rem;
-      font-size: 0.6875rem;
-      color: var(--scion-text-muted, #64748b);
-      border-top: 1px solid var(--scion-border, #e2e8f0);
-    }
-
-    .mention-results .mention-slug {
-      font-weight: 600;
-    }
-
-    /* Inter-agent toggle bar */
-    .interagent-toggle-bar {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      padding: 0.25rem 1rem;
-      border-bottom: 1px solid var(--scion-border, rgba(148, 163, 184, 0.15));
-    }
-
-    .interagent-label {
-      font-size: 0.6875rem;
-      color: var(--scion-text-muted, #64748b);
-      font-weight: 500;
-    }
-
-    .interagent-icons {
-      display: flex;
-      align-items: center;
-      gap: 0.25rem;
-    }
-
-    .interagent-icons sl-icon-button::part(base) {
-      font-size: 0.875rem;
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    /* Typing indicator */
-    .typing-indicator {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      padding: 4px 16px;
-      font-size: 0.75rem;
-      color: var(--scion-text-muted, #64748b);
-      min-height: 20px;
-    }
-
-    .typing-dots {
-      display: inline-flex;
-      gap: 2px;
-      align-items: center;
-    }
-
-    .typing-dots span {
-      width: 4px;
-      height: 4px;
-      border-radius: 50%;
-      background: var(--scion-text-muted, #64748b);
-      animation: typing-bounce 1.4s ease-in-out infinite;
-    }
-
-    .typing-dots span:nth-child(2) {
-      animation-delay: 0.2s;
-    }
-
-    .typing-dots span:nth-child(3) {
-      animation-delay: 0.4s;
-    }
-
-    @keyframes typing-bounce {
-      0%,
-      60%,
-      100% {
-        transform: translateY(0);
+      .state-msg sl-icon {
+        font-size: var(--chat-fs-6xl);
         opacity: 0.4;
       }
-      30% {
-        transform: translateY(-3px);
-        opacity: 1;
+
+      /* Send error toast */
+      .send-error {
+        padding: 0.375rem 1rem;
+        font-size: var(--chat-fs-base);
+        color: var(--scion-danger-600, #dc2626);
+        background: var(--scion-danger-50, #fef2f2);
+        border-top: 1px solid var(--scion-danger-200, #fecaca);
       }
-    }
 
-    /* Phase-3: Scroll-to-message highlight effect. */
-    scion-chat-message.scroll-highlight {
-      animation: highlight-flash 2s ease-out;
-    }
+      /* Mention results footer */
+      .mention-results {
+        padding: 0.25rem 1rem;
+        font-size: var(--chat-fs-sm);
+        color: var(--scion-text-muted, #64748b);
+        border-top: 1px solid var(--scion-border, #e2e8f0);
+      }
 
-    @keyframes highlight-flash {
-      0%, 20% {
+      .mention-results .mention-slug {
+        font-weight: 600;
+      }
+
+      /* Inter-agent toggle bar */
+      .interagent-toggle-bar {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.25rem 1rem;
+        border-bottom: 1px solid var(--scion-border, rgba(148, 163, 184, 0.15));
+      }
+
+      .interagent-label {
+        font-size: var(--chat-fs-sm);
+        color: var(--scion-text-muted, #64748b);
+        font-weight: 500;
+      }
+
+      .interagent-icons {
+        display: flex;
+        align-items: center;
+        gap: 0.25rem;
+      }
+
+      .interagent-icons sl-icon-button::part(base) {
+        font-size: var(--chat-fs-lg);
+        color: var(--scion-text-muted, #64748b);
+      }
+
+      /* Typing indicator */
+      .typing-indicator {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 16px;
+        font-size: var(--chat-fs-base);
+        color: var(--scion-text-muted, #64748b);
+        min-height: 20px;
+      }
+
+      .typing-dots {
+        display: inline-flex;
+        gap: 2px;
+        align-items: center;
+      }
+
+      .typing-dots span {
+        width: 4px;
+        height: 4px;
+        border-radius: 50%;
+        background: var(--scion-text-muted, #64748b);
+        animation: typing-bounce 1.4s ease-in-out infinite;
+      }
+
+      .typing-dots span:nth-child(2) {
+        animation-delay: 0.2s;
+      }
+
+      .typing-dots span:nth-child(3) {
+        animation-delay: 0.4s;
+      }
+
+      @keyframes typing-bounce {
+        0%,
+        60%,
+        100% {
+          transform: translateY(0);
+          opacity: 0.4;
+        }
+        30% {
+          transform: translateY(-3px);
+          opacity: 1;
+        }
+      }
+
+      /* Phase-3: Scroll-to-message highlight effect. */
+      scion-chat-message.scroll-highlight {
+        animation: highlight-flash 2s ease-out;
+      }
+
+      @keyframes highlight-flash {
+        0%,
+        20% {
+          background: var(--scion-primary-50, #eff6ff);
+        }
+        100% {
+          background: transparent;
+        }
+      }
+
+      /* Phase-5: Context menu */
+      .context-menu-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 149;
+      }
+
+      .context-menu {
+        position: fixed;
+        z-index: 150;
+        background: var(--scion-surface, #ffffff);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: 0.5rem;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+        min-width: 180px;
+        padding: 0.25rem 0;
+      }
+
+      .context-menu-item {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.5rem 0.75rem;
+        font-size: var(--chat-fs-md);
+        cursor: pointer;
+        color: var(--scion-text, #1e293b);
+        white-space: nowrap;
+        transition: background 0.1s;
+      }
+
+      .context-menu-item:hover {
         background: var(--scion-primary-50, #eff6ff);
       }
-      100% {
-        background: transparent;
+
+      .context-menu-item.danger {
+        color: var(--scion-danger-600, #dc2626);
       }
-    }
 
-    /* Phase-5: Context menu */
-    .context-menu-overlay {
-      position: fixed;
-      inset: 0;
-      z-index: 149;
-    }
+      .context-menu-item sl-icon {
+        font-size: var(--chat-fs-lg);
+        color: var(--scion-text-muted, #64748b);
+      }
 
-    .context-menu {
-      position: fixed;
-      z-index: 150;
-      background: var(--scion-surface, #ffffff);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.5rem;
-      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
-      min-width: 180px;
-      padding: 0.25rem 0;
-    }
+      .context-menu-item.danger sl-icon {
+        color: var(--scion-danger-600, #dc2626);
+      }
 
-    .context-menu-item {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      padding: 0.5rem 0.75rem;
-      font-size: 0.8125rem;
-      cursor: pointer;
-      color: var(--scion-text, #1e293b);
-      white-space: nowrap;
-      transition: background 0.1s;
-    }
+      /* Path-link file preview dialog (#1148) */
+      .file-preview-dialog::part(panel) {
+        width: min(90vw, 800px);
+        max-height: 85vh;
+      }
 
-    .context-menu-item:hover {
-      background: var(--scion-primary-50, #eff6ff);
-    }
+      .file-preview-dialog::part(body) {
+        padding: 0;
+        overflow: auto;
+      }
 
-    .context-menu-item sl-icon {
-      font-size: 0.875rem;
-      color: var(--scion-text-muted, #64748b);
-    }
+      .file-preview-placeholder {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.5rem;
+        padding: 3rem 2rem;
+        color: var(--scion-text-muted, #64748b);
+        font-size: var(--chat-fs-lg);
+      }
 
-    /* Path-link file preview dialog (#1148) */
-    .file-preview-dialog::part(panel) {
-      width: min(90vw, 800px);
-      max-height: 85vh;
-    }
+      .file-preview-placeholder.error {
+        color: var(--scion-danger-600, #dc2626);
+      }
 
-    .file-preview-dialog::part(body) {
-      padding: 0;
-      overflow: auto;
-    }
+      .file-preview-image {
+        max-width: 100%;
+        max-height: 70vh;
+        display: block;
+        margin: 0 auto;
+      }
 
-    .file-preview-placeholder {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 0.5rem;
-      padding: 3rem 2rem;
-      color: var(--scion-text-muted, #64748b);
-      font-size: 0.875rem;
-    }
+      .file-preview-dialog scion-code-editor {
+        --editor-max-height: 70vh;
+      }
 
-    .file-preview-placeholder.error {
-      color: var(--scion-danger-600, #dc2626);
-    }
-
-    .file-preview-image {
-      max-width: 100%;
-      max-height: 70vh;
-      display: block;
-      margin: 0 auto;
-    }
-
-    .file-preview-dialog scion-code-editor {
-      --editor-max-height: 70vh;
-    }
-
-    /* Phase-5: Slash command system message */
-    .system-info-message {
-      padding: 0.5rem 1rem;
-      font-size: 0.75rem;
-      color: var(--scion-text-muted, #64748b);
-      background: var(--scion-bg-subtle, #f1f5f9);
-      border-radius: 0.375rem;
-      margin: 0.25rem 1rem;
-      white-space: pre-wrap;
-    }
-  `;
+      /* Phase-5: Slash command system message */
+      .system-info-message {
+        padding: 0.5rem 1rem;
+        font-size: var(--chat-fs-base);
+        color: var(--scion-text-muted, #64748b);
+        background: var(--scion-bg-subtle, #f1f5f9);
+        border-radius: 0.375rem;
+        margin: 0.25rem 1rem;
+        white-space: pre-wrap;
+      }
+    `,
+  ];
 
   /** Auto-trigger loadHistory when the component first renders in v2 mode. */
   override firstUpdated(): void {
@@ -837,10 +1143,31 @@ export class ScionChatThread extends LitElement {
         this.loadHistory();
       }
     }
+
+    // Resolve foreign project slugs when messages change — keeps async work
+    // out of the render phase (M1 fix).
+    if (changedProperties.has('messages')) {
+      this.resolveUnknownProjectSlugs();
+    }
   }
 
   /** Tear down v2 state so a fresh load can happen. */
   private resetV2State(): void {
+    // Cancel any pending jump-to-message scrollend re-check — it belongs to
+    // the thread we're leaving, and a late correction must not fire against
+    // the new one.
+    this.cancelJumpScrollWatch();
+
+    // Clear initial watermark timer to prevent it from firing against wrong thread
+    if (this._initialWatermarkTimer) {
+      clearTimeout(this._initialWatermarkTimer);
+      this._initialWatermarkTimer = null;
+    }
+
+    // A thread switch is a fresh "open" — the old anchor (and its watchers)
+    // belong to the conversation we just left.
+    this.deactivateUnreadAnchor();
+
     // Stop any active SSE listener
     stateManager.removeEventListener('connected', this._sseReconnectHandler);
     stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
@@ -857,9 +1184,11 @@ export class ScionChatThread extends LitElement {
     this.showUnreadDivider = false;
 
     // Clear message state
+    this._pendingIdempotencyKeys.clear();
     this.messageMap.clear();
     this.messages = [];
     this.nextCursor = null;
+    this.viewingAroundMessage = false;
     this.lastKnownTimestamp = null;
     this.hasOlderMessages = true;
     this.loaded = false;
@@ -892,6 +1221,9 @@ export class ScionChatThread extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.stopStream();
+    this.deactivateUnreadAnchor();
+    // Cancel any pending jump-to-message scrollend re-check and its listeners/timers.
+    this.cancelJumpScrollWatch();
     // Clean up v2 SSE listeners
     stateManager.removeEventListener('connected', this._sseReconnectHandler);
     stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
@@ -907,10 +1239,16 @@ export class ScionChatThread extends LitElement {
     // Clean up read tracking
     window.removeEventListener('focus', this._focusHandler);
     window.removeEventListener('blur', this._blurHandler);
+    if (this._initialWatermarkTimer) {
+      clearTimeout(this._initialWatermarkTimer);
+      this._initialWatermarkTimer = null;
+    }
     if (this._readDebounceTimer) {
       clearTimeout(this._readDebounceTimer);
       this._readDebounceTimer = null;
     }
+    // Clean up context menu keyboard listener
+    document.removeEventListener('keydown', this.handleContextMenuKeydown);
   }
 
   /** Called by the parent when the chat view is first shown. */
@@ -925,91 +1263,16 @@ export class ScionChatThread extends LitElement {
   }
 
   // DEPRECATED(wave-1): agentId-based load path — remove after v2 is stable and flag is permanently ON.
-  /** Load saved preferences first, then fetch history. */
+  /** Load history (previously loaded prefs too, but visibility prefs have been removed). */
   private async loadPrefsAndHistory(): Promise<void> {
-    await this.loadPrefs();
     await this.initialLoad();
-  }
-
-  /** Load the saved visibility mode pref from the server. */
-  private async loadPrefs(): Promise<void> {
-    if (!this.agentId) return;
-    try {
-      const res = await apiFetch(`/api/v1/chat/prefs?agentId=${encodeURIComponent(this.agentId)}`);
-      if (res.ok) {
-        const data = (await res.json()) as { visibility_mode?: string };
-        if (
-          data.visibility_mode &&
-          ['conversation', 'verbose', 'full'].includes(data.visibility_mode)
-        ) {
-          this.visibilityMode = data.visibility_mode as VisibilityMode;
-        }
-      }
-    } catch (err) {
-      console.warn('Failed to load chat prefs, using defaults', err);
-    }
-  }
-
-  /** Save the visibility mode pref to the server. */
-  private async savePrefs(mode: VisibilityMode): Promise<void> {
-    if (!this.agentId) return;
-    try {
-      const res = await apiFetch(`/api/v1/chat/prefs?agentId=${encodeURIComponent(this.agentId)}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ visibility_mode: mode }),
-      });
-      if (!res.ok) {
-        console.warn('Failed to save chat prefs:', res.status, res.statusText);
-      }
-    } catch (err) {
-      console.warn('Failed to save chat prefs', err);
-    }
-  }
-
-  /** Handle visibility mode change from the toggle. */
-  private handleVisibilityChange(e: CustomEvent<VisibilityChangeDetail>): void {
-    const newMode = e.detail.mode;
-    if (newMode === this.visibilityMode) return;
-    this.visibilityMode = newMode;
-    void this.savePrefs(newMode);
-    // Clear and re-fetch with the new filter.
-    void this.refetchWithNewFilter();
-  }
-
-  /** Clear messages and re-fetch history with the current visibility filter. */
-  private async refetchWithNewFilter(): Promise<void> {
-    const currentId = ++this.fetchId;
-    this.messageMap.clear();
-    this.messages = [];
-    this.nextCursor = null;
-    this.lastKnownTimestamp = null;
-    this.hasOlderMessages = true;
-
-    // Stop the stream, re-fetch, and restart.
-    this.stopStream();
-    this.loading = true;
-    this.error = null;
-    try {
-      await this.fetchHistory();
-      if (currentId !== this.fetchId) return;
-      this.startStream();
-    } catch (err) {
-      if (currentId !== this.fetchId) return;
-      this.error = err instanceof Error ? err.message : 'Failed to load messages';
-    } finally {
-      if (currentId === this.fetchId) {
-        this.loading = false;
-        this.scrollToBottomAfterRender();
-      }
-    }
   }
 
   /** W7: Get attachment refs for a message (from history or send response). */
   private getMessageAttachmentRefs(
     messageId: string
   ): import('./chat-message.js').AttachmentRefInfo[] {
-    return this.v2AttachmentMap.get(messageId) ?? [];
+    return this.v2AttachmentMap.get(messageId) ?? EMPTY_ATTACHMENT_REFS;
   }
 
   /** Check if a message sender is an agent (v2 multi-sender). */
@@ -1047,7 +1310,6 @@ export class ScionChatThread extends LitElement {
       stateManager.removeEventListener('chat-message-edited', this._v2EditHandler);
       stateManager.removeEventListener('chat-message-deleted', this._v2DeleteHandler);
     }
-
   }
 
   // ---------------------------------------------------------------------------
@@ -1070,35 +1332,6 @@ export class ScionChatThread extends LitElement {
     }
   }
 
-  /** Check whether a message should be shown given the current visibility mode. */
-  private shouldShowMessage(msg: Message): boolean {
-    const vis = msg.visibility || 'normal';
-    switch (this.visibilityMode) {
-      case 'conversation':
-        return vis === 'normal';
-      case 'verbose':
-        return vis === 'normal' || vis === 'verbose';
-      case 'full':
-        return true;
-    }
-  }
-
-  /** Build the visibility query params based on the current mode. */
-  private appendVisibilityParams(params: URLSearchParams): void {
-    switch (this.visibilityMode) {
-      case 'conversation':
-        params.append('visibility', 'normal');
-        break;
-      case 'verbose':
-        params.append('visibility', 'normal');
-        params.append('visibility', 'verbose');
-        break;
-      case 'full':
-        // No filter — show everything.
-        break;
-    }
-  }
-
   // DEPRECATED(wave-1): agentId-based history fetch — remove after v2 is stable and flag is permanently ON.
   private async fetchHistory(cursor?: string): Promise<void> {
     const currentId = this.fetchId;
@@ -1106,7 +1339,6 @@ export class ScionChatThread extends LitElement {
     if (cursor) {
       params.set('cursor', cursor);
     }
-    this.appendVisibilityParams(params);
 
     const res = await apiFetch(
       `/api/v1/agents/${encodeURIComponent(this.agentId)}/messages?${params.toString()}`
@@ -1149,7 +1381,6 @@ export class ScionChatThread extends LitElement {
       limit: String(HISTORY_PAGE_SIZE),
       before: new Date().toISOString(),
     });
-    this.appendVisibilityParams(params);
 
     const res = await apiFetch(
       `/api/v1/agents/${encodeURIComponent(this.agentId)}/messages?${params.toString()}`
@@ -1165,13 +1396,39 @@ export class ScionChatThread extends LitElement {
 
   private mergeMessages(newMessages: Message[]): void {
     for (const msg of newMessages) {
-      this.messageMap.set(msg.id, msg);
+      const existing = this.messageMap.get(msg.id);
+      // Preserve agent recipient from existing message if incoming lacks it
+      // (e.g., backfill or SSE may not carry agent routing info).
+      if (existing?.recipient?.startsWith('agent:') && !msg.recipient?.startsWith('agent:')) {
+        msg.recipient = existing.recipient;
+        msg.recipientId = existing.recipientId;
+      }
+      // nc-delivery-unreachable review FYI 1 / round 4 Optional 1: `failed`
+      // is terminal for a given message ID. If the entry already shown is
+      // failed and an incoming update (SSE or HTTP, in either order) would
+      // move it away from `failed` — including an incoming entry that omits
+      // dispatchState entirely, e.g. a backfill/history row that doesn't
+      // carry dispatch info — keep the failed state and its reason/code,
+      // merging every other field from the incoming message so legitimate
+      // edits/updates still apply.
+      let toStore = msg;
+      if (existing?.dispatchState === 'failed' && msg.dispatchState !== 'failed') {
+        // The pinned dispatchFailureReason/Code must come only from
+        // `existing`, so strip any value `msg` carries for them before
+        // conditionally re-adding `existing`'s.
+        toStore = withDispatchFailure(
+          msg,
+          existing.dispatchState,
+          existing.dispatchFailureReason,
+          existing.dispatchFailureCode
+        );
+      }
+      this.messageMap.set(msg.id, toStore);
     }
 
-    // Sort ascending by createdAt (oldest first for chat display)
-    const sorted = Array.from(this.messageMap.values()).sort(
-      (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-    );
+    // Match the server's (created, id) order so the displayed tail is also
+    // the unread watermark, including tied/sub-millisecond timestamps.
+    const sorted = Array.from(this.messageMap.values()).sort(compareMessageOrder);
 
     // Enforce buffer cap — remove oldest
     if (sorted.length > MAX_BUFFER) {
@@ -1183,7 +1440,11 @@ export class ScionChatThread extends LitElement {
       }
     }
 
-    this.messages = sorted;
+    // Filter out mention fan-out messages from the display array. They are
+    // tracking artifacts for agent dispatch, not user-visible chat. They
+    // remain in messageMap so ID-based dedup prevents a later backfill from
+    // re-inserting them as real messages.
+    this.messages = sorted.filter((m) => m.type !== 'mention');
 
     // Track last known timestamp for backfill
     if (sorted.length > 0) {
@@ -1206,6 +1467,9 @@ export class ScionChatThread extends LitElement {
       try {
         const msg = JSON.parse((event as MessageEvent).data as string) as Message;
         this.mergeMessages([msg]);
+        if (msg.senderId && msg.senderId !== this.selfUserId()) {
+          playChimeThrottled(this.projectId || msg.projectId || '');
+        }
         this.scrollToBottomAfterRender();
       } catch {
         // Skip unparseable entries
@@ -1263,20 +1527,27 @@ export class ScionChatThread extends LitElement {
       // Determine scroll target: permalink hash > unread divider > bottom.
       const hashMsgId = this.parseMessageHash();
       if (hashMsgId) {
-        this.scrollToMessageById(hashMsgId, true);
+        void this.scrollToMessageById(hashMsgId, true);
       } else if (this.showUnreadDivider) {
         this.scrollToUnreadDivider();
       } else {
         this.scrollToBottomAfterRender();
       }
-      // Advance read watermark after a short delay so the user sees the divider.
-      if (this.showUnreadDivider && this.messages.length > 0) {
-        setTimeout(() => {
+      // Advance read watermark after a delay so the blue dot clears. When
+      // showUnreadDivider is true, use a longer delay so the user can see the
+      // "New messages" divider before it is acknowledged. When it is false
+      // (first DM open — no prior read state), a shorter settle delay is
+      // enough to let the render commit.
+      if (this.messages.length > 0) {
+        const delay = this.showUnreadDivider ? 2000 : 500;
+        if (this._initialWatermarkTimer) clearTimeout(this._initialWatermarkTimer);
+        this._initialWatermarkTimer = setTimeout(() => {
+          this._initialWatermarkTimer = null;
           const lastMsg = this.messages[this.messages.length - 1];
           if (lastMsg) {
             void this.advanceReadWatermark(lastMsg.id);
           }
-        }, 2000);
+        }, delay);
       }
     }
   }
@@ -1307,10 +1578,7 @@ export class ScionChatThread extends LitElement {
         string,
         { messageId: string; replyToId?: string; editedAt?: string; deletedAt?: string }
       >;
-      replyPreviews?: Record<
-        string,
-        { messageId: string; senderName: string; content: string }
-      >;
+      replyPreviews?: Record<string, { messageId: string; senderName: string; content: string }>;
     };
 
     const items = data?.items ?? data?.messages ?? [];
@@ -1408,9 +1676,10 @@ export class ScionChatThread extends LitElement {
       agentId?: string;
       createdAt?: string;
       channel?: string;
-      visibility?: string;
       groupId?: string;
       dispatchState?: string;
+      dispatchFailureReason?: string;
+      dispatchFailureCode?: string;
       urgent?: boolean;
       broadcasted?: boolean;
       read?: boolean;
@@ -1431,6 +1700,7 @@ export class ScionChatThread extends LitElement {
     if (eventKey && eventKey !== this.conversationKey) {
       return; // Not for this conversation
     }
+    if (this.viewingAroundMessage) return;
 
     // The sender finished typing the moment their message landed — drop the
     // indicator now rather than waiting out TYPING_EXPIRY_MS.
@@ -1439,9 +1709,12 @@ export class ScionChatThread extends LitElement {
     // If the event carries a full message payload, merge directly instead of
     // doing a round-trip backfill.
     // SSE events from PublishUserMessage carry the full message payload.
-    // mergeMessages() deduplicates by ID (last-write-wins via Map.set),
-    // so if both the POST response and the SSE event provide the same
-    // message, the later arrival's fields prevail — this is acceptable.
+    // mergeMessages() deduplicates by ID (last-write-wins via Map.set), so if
+    // both the POST response and the SSE event provide the same message, the
+    // later arrival's fields prevail — except that `failed` is terminal for
+    // dispatch fields (dispatchState/dispatchFailureReason/dispatchFailureCode):
+    // once a message is failed, a later arrival can't downgrade it back to
+    // dispatched/pending, though its other fields still merge normally.
     if (eventData.id && (eventData.msg !== undefined || eventData.type)) {
       const msg: Message = {
         id: eventData.id,
@@ -1456,9 +1729,14 @@ export class ScionChatThread extends LitElement {
         createdAt: eventData.createdAt || new Date().toISOString(),
         ...(eventData.channel != null ? { channel: eventData.channel } : {}),
         ...(eventData.threadId != null ? { threadId: eventData.threadId } : {}),
-        ...(eventData.visibility != null ? { visibility: eventData.visibility } : {}),
         ...(eventData.groupId != null ? { groupId: eventData.groupId } : {}),
         ...(eventData.dispatchState != null ? { dispatchState: eventData.dispatchState } : {}),
+        ...(eventData.dispatchFailureReason != null
+          ? { dispatchFailureReason: eventData.dispatchFailureReason }
+          : {}),
+        ...(eventData.dispatchFailureCode != null
+          ? { dispatchFailureCode: eventData.dispatchFailureCode }
+          : {}),
         ...(eventData.urgent != null ? { urgent: eventData.urgent } : {}),
         ...(eventData.broadcasted != null ? { broadcasted: eventData.broadcasted } : {}),
         ...(eventData.read != null ? { read: eventData.read } : {}),
@@ -1470,7 +1748,31 @@ export class ScionChatThread extends LitElement {
         this.v2AttachmentMap.set(msg.id, eventData.attachments);
       }
 
+      // If we have a pending optimistic message and this SSE event is from us,
+      // remove the temp-keyed optimistic entry to prevent a duplicate flash.
+      if (this._pendingIdempotencyKeys.size > 0 && msg.senderId === this.selfUserId()) {
+        for (const key of this._pendingIdempotencyKeys) {
+          const opt = this.messageMap.get(key);
+          if (opt) {
+            // Preserve optimistic agent recipient if SSE version lacks it.
+            if (opt.recipient?.startsWith('agent:') && !msg.recipient?.startsWith('agent:')) {
+              msg.recipient = opt.recipient;
+              msg.recipientId = opt.recipientId;
+            }
+            this.messageMap.delete(key);
+            this._pendingIdempotencyKeys.delete(key);
+            break;
+          }
+        }
+      }
+
       this.mergeMessages([msg]);
+
+      // Play a chime for messages from others — never for our own echoed
+      // back to this tab.
+      if (msg.senderId && msg.senderId !== this.selfUserId()) {
+        playChimeThrottled(this.projectId || msg.projectId || '');
+      }
 
       this.scrollToBottomAfterRender();
       this.maybeAdvanceReadWatermark();
@@ -1547,7 +1849,7 @@ export class ScionChatThread extends LitElement {
    * (a burst of SSE events) collapse into one trailing refetch.
    */
   private async backfillV2(): Promise<void> {
-    if (!this.conversationKey) return;
+    if (!this.conversationKey || this.viewingAroundMessage) return;
     if (this._backfillInFlight) {
       this._backfillPending = true;
       return;
@@ -1581,6 +1883,11 @@ export class ScionChatThread extends LitElement {
       items?: Message[];
       messages?: Message[];
       messageAttachments?: Record<string, import('./chat-message.js').AttachmentRefInfo[]>;
+      messageExtensions?: Record<
+        string,
+        { messageId: string; replyToId?: string; editedAt?: string; deletedAt?: string }
+      >;
+      replyPreviews?: Record<string, { messageId: string; senderName: string; content: string }>;
     };
     const items = data?.items ?? data?.messages ?? [];
 
@@ -1588,6 +1895,18 @@ export class ScionChatThread extends LitElement {
     if (data?.messageAttachments) {
       for (const [msgId, refs] of Object.entries(data.messageAttachments)) {
         this.v2AttachmentMap.set(msgId, refs);
+      }
+    }
+
+    // Phase-3: Merge message extensions and reply previews from backfill.
+    if (data?.messageExtensions) {
+      for (const [msgId, ext] of Object.entries(data.messageExtensions)) {
+        this.v2MessageExtMap.set(msgId, ext);
+      }
+    }
+    if (data?.replyPreviews) {
+      for (const [msgId, preview] of Object.entries(data.replyPreviews)) {
+        this.v2ReplyPreviewMap.set(msgId, preview);
       }
     }
 
@@ -1688,6 +2007,7 @@ export class ScionChatThread extends LitElement {
     this.peerReadAt = Number.isNaN(parsed) ? Date.now() : parsed;
 
     if (this._seenExpiryTimer) clearTimeout(this._seenExpiryTimer);
+    this._seenExpiryTimer = null;
     const remaining = this.peerReadAt + SEEN_VISIBLE_MS - Date.now();
     if (remaining > 0) {
       this._seenExpiryTimer = setTimeout(() => {
@@ -1748,7 +2068,7 @@ export class ScionChatThread extends LitElement {
     if (!this.peerReadMessageId) return false;
     const watermark = this.messageMap.get(this.peerReadMessageId);
     if (!watermark) return false;
-    return new Date(msg.createdAt).getTime() <= new Date(watermark.createdAt).getTime();
+    return compareMessageOrder(msg, watermark) <= 0;
   }
 
   /** Fetch inter-agent messages for inline markers. Stores the raw flat list. */
@@ -1768,9 +2088,7 @@ export class ScionChatThread extends LitElement {
       if (currentId !== this.fetchId) return;
       const msgs = data?.messages ?? [];
       // Store sorted flat list — grouping by DM gaps happens in renderMessages().
-      this.interagentMessages = [...msgs].sort(
-        (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-      );
+      this.interagentMessages = [...msgs].sort(compareMessageOrder);
     } catch {
       // Non-critical
     }
@@ -1778,7 +2096,8 @@ export class ScionChatThread extends LitElement {
 
   /** Send a message in v2 mode. */
   private async handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void> {
-    const { text, mentions, attachmentIds, replyToId, onSuccess } = e.detail;
+    const { text, mentions, attachmentIds, replyToId, replyToContent, onSuccess, onError } =
+      e.detail;
     const hasContent = text.length > 0 || (attachmentIds && attachmentIds.length > 0);
     if (!hasContent || this.sending) return;
 
@@ -1792,10 +2111,38 @@ export class ScionChatThread extends LitElement {
     this.sending = true;
     this.sendError = null;
 
+    // Generate an idempotency key so duplicate sends (e.g. network retry)
+    // are collapsed server-side. Also used as the optimistic message temp ID.
+    const idempotencyKey = crypto.randomUUID();
+
+    // Save composerReplyTo before clearing it optimistically. On failure we
+    // restore it so the reply bar comes back; on success it stays cleared.
+    const savedReplyTo = this.composerReplyTo;
+    this.composerReplyTo = null;
+
+    // Optimistic insertion: show the message in the history immediately with
+    // a "Sending" indicator, before the API call returns.
+    const optimisticMsg: Message = {
+      id: idempotencyKey,
+      projectId: '',
+      sender: '',
+      senderId: this.selfUserId(),
+      recipient: this.defaultAgent ? 'agent:' + this.defaultAgent : '',
+      recipientId: this.defaultAgent || '',
+      msg: text,
+      type: replyToId ? 'reply' : 'chat',
+      agentId: '',
+      createdAt: new Date().toISOString(),
+      dispatchState: 'pending',
+    };
+    this.messageMap.set(optimisticMsg.id, optimisticMsg);
+    this._pendingIdempotencyKeys.add(idempotencyKey);
+    this.messages = Array.from(this.messageMap.values())
+      .filter((m) => m.type !== 'mention')
+      .sort(compareMessageOrder);
+    this.scrollToBottomAfterRender();
+
     try {
-      // Generate an idempotency key so duplicate sends (e.g. network retry)
-      // are collapsed server-side.
-      const idempotencyKey = crypto.randomUUID();
       const body: Record<string, unknown> = {
         content: text,
         idempotency_key: idempotencyKey,
@@ -1811,6 +2158,20 @@ export class ScionChatThread extends LitElement {
       if (replyToId) {
         body.reply_to_id = replyToId;
       }
+      // nc-reply-recipient: the primary recipient for a reply is resolved
+      // server-side from reply_to_id (the replied-to message's actual
+      // sender) — not from a client-supplied agent slug, which would be
+      // spoofable and inconsistent across clients.
+      // Fix: Add RE-to metadata when replying — first 32 codepoints with ellipsis.
+      // Use spread to avoid splitting UTF-16 surrogate pairs (e.g. emoji).
+      if (replyToId && replyToContent) {
+        const codepoints = [...replyToContent];
+        const metadata: Record<string, string> = {
+          'RE-to':
+            codepoints.length > 32 ? codepoints.slice(0, 32).join('') + '...' : replyToContent,
+        };
+        body.metadata = metadata;
+      }
 
       const res = await apiFetch(
         `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/messages`,
@@ -1822,22 +2183,116 @@ export class ScionChatThread extends LitElement {
       );
 
       if (!res.ok) {
+        // Remove optimistic message on failure.
+        this.messageMap.delete(idempotencyKey);
+        this._pendingIdempotencyKeys.delete(idempotencyKey);
+        this.messages = Array.from(this.messageMap.values())
+          .filter((m) => m.type !== 'mention')
+          .sort(compareMessageOrder);
+        // Restore reply-to state so the reply bar comes back for retry.
+        this.composerReplyTo = savedReplyTo;
         this.sendError = await extractApiError(res, 'Failed to send message');
+        onError?.(this.sendError ?? 'Failed to send message');
       } else {
         // W7: Parse attachment refs from the send response.
         const resData = (await res.json().catch(() => null)) as {
           id?: string;
           attachments?: import('./chat-message.js').AttachmentRefInfo[];
+          dispatchState?: string;
+          dispatchFailureReason?: string;
+          dispatchFailureCode?: string;
         } | null;
         if (resData?.id && resData?.attachments && resData.attachments.length > 0) {
           this.v2AttachmentMap.set(resData.id, resData.attachments);
         }
+        // nc-delivery-unreachable: the backend now reports the real dispatch
+        // outcome instead of always being "dispatched" on any HTTP 2xx.
+        const dispatchState = resData?.dispatchState ?? 'dispatched';
+
+        // Update the optimistic message in-place with the server-assigned ID
+        // instead of deleting it. This avoids a visible flicker (message
+        // disappearing then reappearing) between the delete and the backfill
+        // delivering the real message.
+        const optimistic = this.messageMap.get(idempotencyKey);
+        if (optimistic && resData?.id) {
+          this.messageMap.delete(idempotencyKey);
+          this._pendingIdempotencyKeys.delete(idempotencyKey);
+          // If SSE already delivered the real message, keep it as the ground truth
+          // to preserve all server-enriched fields (createdAt, metadata, groupId, etc.)
+          const sseVersion = this.messageMap.get(resData.id);
+          if (sseVersion) {
+            // nc-delivery-unreachable review FYI 1: never downgrade a
+            // terminal `failed` state — skip applying this HTTP response's
+            // dispatch fields if the SSE-delivered version is already failed
+            // and this response would move it back to dispatched/pending.
+            const wouldDowngrade =
+              sseVersion.dispatchState === 'failed' &&
+              (dispatchState === 'dispatched' || dispatchState === 'pending');
+            let updatedSseVersion = sseVersion;
+            if (!wouldDowngrade) {
+              // Strip any prior dispatchFailureReason/Code before
+              // conditionally re-adding the response's, so a stale value is
+              // dropped rather than left behind when the response omits it.
+              updatedSseVersion = withDispatchFailure(
+                sseVersion,
+                dispatchState,
+                resData?.dispatchFailureReason || undefined,
+                resData?.dispatchFailureCode || undefined
+              );
+            }
+            // Preserve optimistic agent recipient if SSE version lacks it.
+            if (
+              optimistic.recipient?.startsWith('agent:') &&
+              !updatedSseVersion.recipient?.startsWith('agent:')
+            ) {
+              updatedSseVersion = {
+                ...updatedSseVersion,
+                recipient: optimistic.recipient,
+                recipientId: optimistic.recipientId,
+              };
+            }
+            this.messageMap.set(resData.id, updatedSseVersion);
+          } else {
+            // Symmetric with the sseVersion branch above: a stale
+            // dispatchFailureReason/Code is dropped, not left behind on this
+            // reused object, when the response omits it.
+            const updatedOptimistic: Message = {
+              ...withDispatchFailure(
+                optimistic,
+                dispatchState,
+                resData?.dispatchFailureReason || undefined,
+                resData?.dispatchFailureCode || undefined
+              ),
+              id: resData.id,
+            };
+            this.messageMap.set(resData.id, updatedOptimistic);
+          }
+        } else {
+          // Fallback: remove if we cannot remap (should not happen).
+          this.messageMap.delete(idempotencyKey);
+          this._pendingIdempotencyKeys.delete(idempotencyKey);
+        }
+        this.messages = Array.from(this.messageMap.values())
+          .filter((m) => m.type !== 'mention')
+          .sort(compareMessageOrder);
+
         onSuccess();
-        // Backfill to pick up the message immediately
+        // Backfill to get the full server-enriched message. The optimistic
+        // message (now keyed by the real ID) stays visible until the backfill
+        // overwrites it, so there is no gap.
         void this.backfillV2();
       }
     } catch (err) {
+      // Remove optimistic message on failure.
+      this.messageMap.delete(idempotencyKey);
+      this._pendingIdempotencyKeys.delete(idempotencyKey);
+      this.messages = Array.from(this.messageMap.values())
+        .filter((m) => m.type !== 'mention')
+        .sort(compareMessageOrder);
+      // Restore reply-to state so the reply bar comes back for retry.
+      this.composerReplyTo = savedReplyTo;
       this.sendError = err instanceof Error ? err.message : 'Failed to send message';
+      onError?.(this.sendError ?? 'Failed to send message');
     } finally {
       this.sending = false;
     }
@@ -1917,53 +2372,18 @@ export class ScionChatThread extends LitElement {
   // Phase-3: Message action handlers
   // ---------------------------------------------------------------------------
 
-  /** Handle reply action from a message. Sets the composer reply-to context. */
-  private handleMessageReply(
-    e: CustomEvent<{ messageId: string; senderName: string; content: string }>
-  ): void {
-    this.composerEditMessage = null; // Cancel any pending edit
-    this.composerReplyTo = {
-      messageId: e.detail.messageId,
-      senderName: e.detail.senderName,
-      content:
-        e.detail.content.length > 100
-          ? e.detail.content.slice(0, 100) + '...'
-          : e.detail.content,
-    };
+  /**
+   * Clear the composer's reply context. The composer cannot do this itself —
+   * `replyTo` is a property we own and push down, so a local assignment there
+   * is overwritten on our next render.
+   */
+  private handleComposerCancelReply(): void {
+    this.composerReplyTo = null;
   }
 
-  /** Handle edit action from a message. Sets the composer edit mode. */
-  private handleMessageEditRequest(
-    e: CustomEvent<{ messageId: string; content: string }>
-  ): void {
-    this.composerReplyTo = null; // Cancel any pending reply
-    this.composerEditMessage = {
-      messageId: e.detail.messageId,
-      content: e.detail.content,
-    };
-  }
-
-  /** Handle delete action from a message. Shows confirmation and calls API. */
-  private async handleMessageDeleteRequest(
-    e: CustomEvent<{ messageId: string }>
-  ): Promise<void> {
-    const { messageId } = e.detail;
-    const confirmed = window.confirm('Delete this message? This cannot be undone.');
-    if (!confirmed) return;
-
-    try {
-      const res = await apiFetch(
-        `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/messages/${encodeURIComponent(messageId)}`,
-        { method: 'DELETE' }
-      );
-      if (!res.ok) {
-        const errMsg = await extractApiError(res, 'Failed to delete message');
-        this.sendError = errMsg;
-      }
-      // SSE event will update the message state.
-    } catch (err) {
-      this.sendError = err instanceof Error ? err.message : 'Failed to delete message';
-    }
+  /** Clear the composer's edit context. See handleComposerCancelReply. */
+  private handleComposerCancelEdit(): void {
+    this.composerEditMessage = null;
   }
 
   /** Handle chat-edit event from the composer. Calls PUT endpoint. */
@@ -1994,14 +2414,20 @@ export class ScionChatThread extends LitElement {
 
   /** Handle scroll-to-message from reply preview click. */
   private handleScrollToMessage(e: CustomEvent<{ messageId: string }>): void {
-    this.scrollToMessageById(e.detail.messageId);
+    void this.scrollToMessageById(e.detail.messageId);
   }
 
   /** SSE handler for message-edited events. */
   private handleV2MessageEdited(e: Event): void {
     const detail = (e as CustomEvent).detail as
-      | ({ data?: { conversationKey?: string; messageId?: string; content?: string; editedAt?: string } }
-        & { conversationKey?: string; messageId?: string; content?: string; editedAt?: string })
+      | ({
+          data?: {
+            conversationKey?: string;
+            messageId?: string;
+            content?: string;
+            editedAt?: string;
+          };
+        } & { conversationKey?: string; messageId?: string; content?: string; editedAt?: string })
       | undefined;
     // stateManager wraps SSE payloads as { state, data }; unwrap like handleV2ChatMessage.
     const eventData = detail?.data ?? detail;
@@ -2028,8 +2454,11 @@ export class ScionChatThread extends LitElement {
   /** SSE handler for message-deleted events. */
   private handleV2MessageDeleted(e: Event): void {
     const detail = (e as CustomEvent).detail as
-      | ({ data?: { conversationKey?: string; messageId?: string; deletedAt?: string } }
-        & { conversationKey?: string; messageId?: string; deletedAt?: string })
+      | ({ data?: { conversationKey?: string; messageId?: string; deletedAt?: string } } & {
+          conversationKey?: string;
+          messageId?: string;
+          deletedAt?: string;
+        })
       | undefined;
     // stateManager wraps SSE payloads as { state, data }; unwrap like handleV2ChatMessage.
     const eventData = detail?.data ?? detail;
@@ -2052,7 +2481,7 @@ export class ScionChatThread extends LitElement {
     const msgIdx = this.messages.indexOf(msg);
     if (msgIdx < 0) return false;
     for (let i = msgIdx + 1; i < this.messages.length; i++) {
-      if (this.messages[i].sender?.startsWith('agent:')) {
+      if (this.isSenderAgent(this.messages[i])) {
         return true;
       }
     }
@@ -2128,8 +2557,28 @@ export class ScionChatThread extends LitElement {
 
   private handleScroll(e: Event): void {
     const el = e.target as HTMLElement;
+
+    // Any scroll not caused by our own anchor write is the user taking over —
+    // stop re-anchoring to the unread divider immediately. A genuine user
+    // scroll landing in the very same frame as our write is still detected:
+    // `_applyingUnreadAnchor` is true for that whole frame, but the resulting
+    // scrollTop then disagrees with the value we just wrote.
+    if (
+      this._unreadAnchorActive &&
+      (!this._applyingUnreadAnchor || el.scrollTop !== this._unreadAnchorWrittenScrollTop)
+    ) {
+      this.deactivateUnreadAnchor();
+    }
+
     const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     this.pinnedToBottom = distFromBottom < SCROLL_BOTTOM_THRESHOLD;
+
+    // A tap-opened (or right-clicked) context menu is positioned at a fixed
+    // viewport point; once the thread scrolls it no longer points at the
+    // message it targets, so dismiss it rather than leave it stranded.
+    if (this.contextMenuMessage) {
+      this.closeContextMenu();
+    }
 
     // Load older messages when scrolled near top
     if (
@@ -2185,6 +2634,10 @@ export class ScionChatThread extends LitElement {
   }
 
   private scrollToBottom(): void {
+    // A bottom-anchor scroll (autoscroll on new message, "Jump to latest")
+    // supersedes any pending jump-to-message re-check — don't let a stale
+    // correction yank the view back up once we've moved on.
+    this.cancelJumpScrollWatch();
     const scrollEl = this.shadowRoot?.querySelector('.messages-scroll') as HTMLElement | null;
     if (scrollEl) {
       scrollEl.scrollTop = scrollEl.scrollHeight;
@@ -2215,7 +2668,30 @@ export class ScionChatThread extends LitElement {
       .catch(() => {});
   }
 
-  private handleJumpToLatest(): void {
+  private async handleJumpToLatest(): Promise<void> {
+    // "Jump to latest" is explicit programmatic navigation too — same
+    // precedence over the open-time unread anchor as scrollToMessageById.
+    this.deactivateUnreadAnchor();
+    if (this.viewingAroundMessage) {
+      this.messageMap.clear();
+      this.messages = [];
+      this.v2AttachmentMap.clear();
+      this.v2MessageExtMap.clear();
+      this.v2ReplyPreviewMap.clear();
+      this.nextCursor = null;
+      this.hasOlderMessages = true;
+      this.pinnedToBottom = true;
+
+      try {
+        await this.fetchHistoryV2();
+        this.viewingAroundMessage = false;
+      } catch (err) {
+        this.error = err instanceof Error ? err.message : 'Failed to load messages';
+        this.pinnedToBottom = false;
+        return;
+      }
+    }
+
     this.pinnedToBottom = true;
     this.scrollToBottomAfterRender();
   }
@@ -2234,49 +2710,473 @@ export class ScionChatThread extends LitElement {
    * Scroll to a specific message by ID, with optional highlight animation.
    * Can be called externally (e.g. from search navigation on same conversation).
    */
-  scrollToMessageById(messageId: string, highlight = true): void {
-    void this.updateComplete.then(() => {
-      const scrollEl = this.shadowRoot?.querySelector('.messages-scroll');
-      if (!scrollEl) return;
-      const msgEl = scrollEl.querySelector(`#msg-${messageId}`);
-      if (!msgEl) return;
-      msgEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      if (highlight) {
-        msgEl.classList.add('permalink-highlight');
-        setTimeout(() => msgEl.classList.remove('permalink-highlight'), 2000);
-      }
-    });
+  async scrollToMessageById(messageId: string, highlight = true): Promise<void> {
+    // Explicit programmatic navigation (search-jump, reply-jump, deep link)
+    // takes precedence over the open-time unread anchor (rule 5). Without
+    // this, a same-thread search-jump made inside the anchor window is
+    // overridden the moment content resizes and the ResizeObserver re-anchors
+    // to the divider (R1).
+    this.deactivateUnreadAnchor();
+    await this.updateComplete;
+    const scrollEl = this.shadowRoot?.querySelector('.messages-scroll') as HTMLElement | null;
+    if (!scrollEl) return;
+
+    let msgEl = this.shadowRoot?.getElementById(`msg-${messageId}`) ?? null;
+    if (!msgEl) {
+      await this.fetchAroundMessage(messageId);
+      await this.updateComplete;
+      msgEl = this.shadowRoot?.getElementById(`msg-${messageId}`) ?? null;
+    }
+    if (!msgEl) return;
+
+    const align: ScrollLogicalPosition = 'center';
+    const containerRect = scrollEl.getBoundingClientRect();
+    const targetRect = msgEl.getBoundingClientRect();
+    // A jump that can't move the scroll position — the target is already in
+    // view, or reaching it is clamped at an end of the thread (the common
+    // reply-jump-while-pinned-to-bottom case) — never fires `scrollend`.
+    // Arming the watcher anyway would leave it pending until the user's next
+    // unrelated scroll, which it would then wrongly "correct" (review R1).
+    const willScroll =
+      !isJumpTargetInView(containerRect, targetRect) &&
+      !isJumpScrollClamped(scrollEl, containerRect, targetRect);
+
+    msgEl.scrollIntoView({ behavior: 'smooth', block: align });
+    if (willScroll) {
+      // A large layout shift mid-scroll (image load, late markdown,
+      // attachment height) can leave the target off screen because the
+      // smooth scroll's destination was computed when it started. Re-check
+      // once it settles and correct if needed (#1749 review).
+      this.watchJumpScrollSettle(scrollEl, messageId, align);
+    } else {
+      // Nothing to watch, but a previous jump's watcher — now superseded —
+      // must still be torn down.
+      this.cancelJumpScrollWatch();
+    }
+    if (highlight) {
+      msgEl.classList.add('permalink-highlight');
+      setTimeout(() => msgEl?.classList.remove('permalink-highlight'), 2000);
+    }
   }
 
-  /** Scroll to the unread divider after render. */
+  /** Cancel any pending jump-to-message scrollend re-check. Idempotent. */
+  private cancelJumpScrollWatch(): void {
+    const cleanup = this._jumpScrollCleanup;
+    this._jumpScrollCleanup = null;
+    cleanup?.();
+  }
+
+  /**
+   * Whether the `scrollend` event is supported in the current runtime.
+   * Feature-detected on `window` (a single browser-wide capability, not a
+   * per-element one) rather than on the scroll container: `onscrollend` is a
+   * statically-known property of `HTMLElement` in our TS lib target, so
+   * branching on `'onscrollend' in scrollEl` and then continuing to use
+   * `scrollEl` would let TS narrow the fallback branch to `never`.
+   *
+   * A method (not an inlined check) so tests can stub the older-Safari path
+   * without needing to fight jsdom/happy-dom's global handler properties.
+   */
+  private supportsScrollEndEvent(): boolean {
+    return typeof window !== 'undefined' && 'onscrollend' in window;
+  }
+
+  /**
+   * After starting a smooth jump-to-message scroll, wait for it to settle and
+   * verify the target actually landed in view. If a mid-scroll layout shift
+   * moved it, re-issue the scroll and check again, capped at
+   * `JUMP_SCROLL_MAX_RECHECKS` so a target that can never settle (e.g. content
+   * still streaming in) doesn't loop forever.
+   *
+   * "Settled" is detected via the `scrollend` event where supported. Older
+   * Safari has no `scrollend`, so this falls back to polling `scrollTop` for
+   * `JUMP_SCROLL_SETTLE_STABLE_MS` of no movement. Both paths, and the whole
+   * watch, are additionally bounded by `JUMP_SCROLL_IDLE_TIMEOUT_MS` of
+   * inactivity (no `scroll` event and no `scrollend`), restarted on every
+   * `scroll`, plus a `JUMP_SCROLL_HARD_CAP_MS` backstop — a scroll that never
+   * settles, or never scrolls at all, must not leave the watcher armed
+   * indefinitely (review R1, R4).
+   *
+   * Cancelled by any subsequent manual scroll (wheel, touch, a scrollbar
+   * grab/middle-click via `pointerdown`, or a scroll-relevant `keydown`
+   * anywhere in the document — not just on the scroll container, since focus
+   * often isn't there, and ignoring the same keys typed into an editable
+   * field like the composer, review N3), another jump (scrollToMessageById
+   * re-entry, or scrollToBottom for "Jump to latest" / autoscroll), or
+   * thread switch/disconnect — never yanks the user back to a target they've
+   * since scrolled away from on purpose.
+   */
+  private watchJumpScrollSettle(
+    scrollEl: HTMLElement,
+    messageId: string,
+    align: ScrollLogicalPosition
+  ): void {
+    // Only one jump's re-check is ever pending at a time.
+    this.cancelJumpScrollWatch();
+
+    let recheckCount = 0;
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
+    let scrollEndListener: (() => void) | null = null;
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    let hardCapTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const onManualScroll = (): void => cleanup();
+    const manualScrollEvents: Array<keyof HTMLElementEventMap> = [
+      'wheel',
+      'touchstart',
+      'pointerdown',
+    ];
+    const onManualKeydown = (e: KeyboardEvent): void => {
+      if (!JUMP_SCROLL_CANCEL_KEYS.has(e.key)) return;
+      // Space and the arrow keys are ordinary typing in the composer (or any
+      // other editable field), not a scroll gesture there — even though
+      // they're in JUMP_SCROLL_CANCEL_KEYS for the document-wide case (review
+      // N3).
+      if (isEditableKeydownTarget(e.composedPath()[0])) return;
+      cleanup();
+    };
+    // Not a cancel signal — Chromium fires `scroll` every frame of the
+    // programmatic smooth scroll too — but activity all the same, so it
+    // pushes the idle timeout back out (review R4).
+    const onScrollActivity = (): void => scheduleIdleTimeout();
+
+    const removeManualScrollListeners = (): void => {
+      for (const type of manualScrollEvents) {
+        scrollEl.removeEventListener(type, onManualScroll);
+      }
+      scrollEl.removeEventListener('scroll', onScrollActivity);
+      document.removeEventListener('keydown', onManualKeydown, { capture: true });
+    };
+
+    const cleanup = (): void => {
+      if (this._jumpScrollCleanup !== cleanup) return;
+      this._jumpScrollCleanup = null;
+      removeManualScrollListeners();
+      if (scrollEndListener) {
+        scrollEl.removeEventListener('scrollend', scrollEndListener);
+        scrollEndListener = null;
+      }
+      if (pollTimer !== null) {
+        clearTimeout(pollTimer);
+        pollTimer = null;
+      }
+      if (idleTimer !== null) {
+        clearTimeout(idleTimer);
+        idleTimer = null;
+      }
+      if (hardCapTimer !== null) {
+        clearTimeout(hardCapTimer);
+        hardCapTimer = null;
+      }
+    };
+    this._jumpScrollCleanup = cleanup;
+
+    // Idle timeout (review R4): restarted on every `scroll` event, so a long
+    // smooth scroll (which fires `scroll` every frame) stays watched for
+    // however long it actually takes, instead of being torn down by a fixed
+    // deadline before Chromium's `scrollend` fires. If no `scroll` and no
+    // `scrollend` arrive within the window — the jump produced no scroll to
+    // begin with, e.g. missed by the pre-scroll check — it fires and cleans
+    // up, faster than the old fixed deadline did.
+    const scheduleIdleTimeout = (): void => {
+      if (idleTimer !== null) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => cleanup(), JUMP_SCROLL_IDLE_TIMEOUT_MS);
+    };
+
+    for (const type of manualScrollEvents) {
+      scrollEl.addEventListener(type, onManualScroll, { passive: true });
+    }
+    scrollEl.addEventListener('scroll', onScrollActivity, { passive: true });
+    // Captured on `document`, not `scrollEl`: after clicking a message,
+    // focus commonly lands on `<body>`, so a PageUp/PageDown/arrow `keydown`
+    // never reaches scrollEl even though Chromium still scrolls it.
+    document.addEventListener('keydown', onManualKeydown, { capture: true });
+
+    // Hard cap (review R4): a generous backstop against a scroller that
+    // never goes idle, so `scroll` events alone can't keep this watch armed
+    // forever. The idle timeout above is what bounds the normal cases.
+    hardCapTimer = setTimeout(() => cleanup(), JUMP_SCROLL_HARD_CAP_MS);
+
+    const checkAndMaybeRescroll = (): void => {
+      if (this._jumpScrollCleanup !== cleanup) return; // already cancelled
+      const targetEl = this.shadowRoot?.getElementById(`msg-${messageId}`) ?? null;
+      if (!targetEl) {
+        cleanup();
+        return;
+      }
+      const containerRect = scrollEl.getBoundingClientRect();
+      const targetRect = targetEl.getBoundingClientRect();
+      if (isJumpTargetInView(containerRect, targetRect)) {
+        cleanup();
+        return;
+      }
+      recheckCount++;
+      if (recheckCount > JUMP_SCROLL_MAX_RECHECKS) {
+        cleanup();
+        return;
+      }
+      // Instant for the correction: it's already off screen, and stacking
+      // another smooth animation only widens the window for a second shift.
+      targetEl.scrollIntoView({ behavior: 'auto', block: align });
+      scheduleSettleWait();
+    };
+
+    const scheduleSettleWait = (): void => {
+      // Restart the idle window for this leg of the wait (the initial scroll,
+      // or a re-check's corrective one): a fresh scrollIntoView here may or
+      // may not itself produce `scroll` events, so don't rely solely on a
+      // stale timer from an earlier leg.
+      scheduleIdleTimeout();
+      if (this.supportsScrollEndEvent()) {
+        // Removed manually (also on cleanup) rather than `{ once: true }`:
+        // cleanup() needs to be able to remove a still-pending listener
+        // either way, so `once` would just be a second, redundant mechanism.
+        // Bound to a local `const` (rather than reading back the mutable
+        // `scrollEndListener` field) so TS narrows it to `() => void` here
+        // without an `as EventListener` assertion.
+        const listener = (): void => {
+          scrollEl.removeEventListener('scrollend', listener);
+          scrollEndListener = null;
+          checkAndMaybeRescroll();
+        };
+        scrollEndListener = listener;
+        scrollEl.addEventListener('scrollend', listener);
+        return;
+      }
+      // Fallback: poll scrollTop until it's stable for
+      // JUMP_SCROLL_SETTLE_STABLE_MS; the idle timeout and hard cap above
+      // still bound this path too.
+      let lastTop = scrollEl.scrollTop;
+      let stableSince = Date.now();
+      const poll = (): void => {
+        const now = Date.now();
+        const currentTop = scrollEl.scrollTop;
+        if (currentTop !== lastTop) {
+          lastTop = currentTop;
+          stableSince = now;
+        }
+        if (now - stableSince >= JUMP_SCROLL_SETTLE_STABLE_MS) {
+          pollTimer = null;
+          checkAndMaybeRescroll();
+          return;
+        }
+        pollTimer = setTimeout(poll, JUMP_SCROLL_SETTLE_POLL_INTERVAL_MS);
+      };
+      pollTimer = setTimeout(poll, JUMP_SCROLL_SETTLE_POLL_INTERVAL_MS);
+    };
+
+    scheduleSettleWait();
+  }
+
+  private async fetchAroundMessage(messageId: string): Promise<void> {
+    if (!this.conversationKey) return;
+
+    const currentId = this.fetchId;
+    const params = new URLSearchParams({
+      around: messageId,
+      limit: String(HISTORY_PAGE_SIZE),
+    });
+
+    try {
+      const res = await apiFetch(
+        `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/messages?${params.toString()}`
+      );
+      if (currentId !== this.fetchId || !res.ok) return;
+
+      const data = (await res.json()) as {
+        items?: Message[];
+        messages?: Message[];
+        nextCursor?: string;
+        messageAttachments?: Record<string, import('./chat-message.js').AttachmentRefInfo[]>;
+        messageExtensions?: Record<
+          string,
+          { messageId: string; replyToId?: string; editedAt?: string; deletedAt?: string }
+        >;
+        replyPreviews?: Record<string, { messageId: string; senderName: string; content: string }>;
+      };
+      if (currentId !== this.fetchId) return;
+
+      const items = data.items ?? data.messages ?? [];
+      this.messageMap.clear();
+      this.v2AttachmentMap.clear();
+      this.v2MessageExtMap.clear();
+      this.v2ReplyPreviewMap.clear();
+
+      for (const [msgId, refs] of Object.entries(data.messageAttachments ?? {})) {
+        this.v2AttachmentMap.set(msgId, refs);
+      }
+      for (const [msgId, ext] of Object.entries(data.messageExtensions ?? {})) {
+        this.v2MessageExtMap.set(msgId, ext);
+      }
+      for (const [msgId, preview] of Object.entries(data.replyPreviews ?? {})) {
+        this.v2ReplyPreviewMap.set(msgId, preview);
+      }
+
+      this.nextCursor = data.nextCursor || null;
+      this.hasOlderMessages = this.nextCursor !== null;
+      this.viewingAroundMessage = true;
+      this.pinnedToBottom = false;
+      this.mergeMessages(items);
+    } catch (err) {
+      console.error('Failed to fetch around message:', err);
+    }
+  }
+
+  /**
+   * Anchor the scroll position to the unread divider after render, so the
+   * user opens the thread reading forward from their first unread message
+   * instead of the tail.
+   *
+   * Only called once, at open time (initial load or a thread/conversationKey
+   * switch) — never from the SSE/merge path, so a message arriving while the
+   * thread is already open keeps the ordinary stick-to-bottom / "Jump to
+   * latest" behavior instead of re-anchoring to the divider.
+   */
   private scrollToUnreadDivider(): void {
+    this._unreadAnchorActive = true;
+    this._unreadAnchorMessageCount = this.messages.length;
+    // Captured as a local, not stored back onto `this`: `fetchId` only bumps
+    // on a thread switch, so if this open is superseded before this deferred
+    // callback runs, a *new* call to scrollToUnreadDivider() would otherwise
+    // overwrite a shared instance field with its own token before this one
+    // fires, making the two indistinguishable. A local closure variable
+    // keeps each open's token fixed to the value it had when scheduled.
+    const openToken = this.fetchId;
     void this.updateComplete.then(() => {
-      const divider = this.shadowRoot?.querySelector('.unread-divider');
-      if (divider) {
-        divider.scrollIntoView({ behavior: 'auto', block: 'center' });
-      } else {
-        // Fallback: scroll to bottom if divider not found.
-        this.scrollToBottom();
-      }
+      // One more frame past updateComplete: images, attachments and markdown
+      // inside already-rendered rows can still change height after Lit has
+      // committed the DOM, and reading geometry too early re-introduces the
+      // jump-to-bottom-then-up flash this anchor exists to avoid.
+      this._unreadAnchorInitialRaf = requestAnimationFrame(() => {
+        this._unreadAnchorInitialRaf = null;
+        if (!this._unreadAnchorActive || this.fetchId !== openToken) return;
+        this.applyUnreadAnchor();
+        this.observeUnreadAnchorLayout(openToken);
+      });
     });
   }
 
-  /** Handle copy-link event from a message's action bar. */
-  private handleCopyLink(e: CustomEvent<{ messageId: string }>): void {
-    const { messageId } = e.detail;
-    const url = `${window.location.origin}${window.location.pathname}#msg-${encodeURIComponent(messageId)}`;
-    navigator.clipboard.writeText(url).catch(() => {
-      // Fallback: ignore clipboard failure silently.
+  /**
+   * Compute and apply the anchor scroll position: the unread divider's top
+   * edge, minus a small margin, clamped to the container's maximum scroll so
+   * unread content shorter than the viewport lands at the bottom instead of
+   * over-scrolling.
+   */
+  private applyUnreadAnchor(): void {
+    const scrollEl = this.shadowRoot?.querySelector('.messages-scroll') as HTMLElement | null;
+    if (!scrollEl) return;
+
+    const divider = this.shadowRoot?.querySelector('.unread-divider') as HTMLElement | null;
+    if (!divider) {
+      // The divider isn't in the DOM (e.g. the unread message was since
+      // removed) — fall back to the ordinary bottom anchor.
+      this.scrollToBottom();
+      return;
+    }
+
+    const maxScroll = Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight);
+    const target = Math.min(maxScroll, Math.max(0, divider.offsetTop - UNREAD_ANCHOR_MARGIN_PX));
+
+    // Reflect where this leaves the user directly, rather than waiting on the
+    // 'scroll' event this write triggers to recompute it: that event is
+    // asynchronous, and an SSE message landing in the gap must already see
+    // the correct state to decide whether to stick-to-bottom or show "Jump to
+    // latest". Only the clamped-to-bottom case (behavior #3) counts as pinned.
+    this.pinnedToBottom = target >= maxScroll;
+
+    this._applyingUnreadAnchor = true;
+    scrollEl.scrollTop = target;
+    // Read back the value the browser actually committed (it may clamp
+    // differently than our own `maxScroll` computation) so handleScroll can
+    // tell our write apart from a real user scroll landing in the same frame.
+    this._unreadAnchorWrittenScrollTop = scrollEl.scrollTop;
+    // The 'scroll' event this write triggers lands asynchronously in real
+    // browsers; clear the guard on the next frame rather than synchronously
+    // so handleScroll still ignores it, and a genuine user scroll shortly
+    // after is still detected as manual.
+    //
+    // Rapid successive calls (e.g. ResizeObserver firing twice in one frame
+    // window) must not leave an earlier rAF racing this one: if it fired
+    // first, it would clear the guard while this write's own 'scroll' event
+    // is still pending, and that event could then be misread as a user
+    // scroll. Canceling any previous one keeps exactly one guard-clearing
+    // rAF alive at a time, tied to the most recent write.
+    if (this._applyingUnreadAnchorRaf !== null) {
+      cancelAnimationFrame(this._applyingUnreadAnchorRaf);
+    }
+    this._applyingUnreadAnchorRaf = requestAnimationFrame(() => {
+      this._applyingUnreadAnchorRaf = null;
+      this._applyingUnreadAnchor = false;
     });
+  }
+
+  /**
+   * Re-apply the anchor while content above the divider is still settling,
+   * for a short, bounded window. Stops itself — rather than fighting the live
+   * thread indefinitely — the moment the message count changes (a real
+   * message arrived, not a layout shift) or the window elapses.
+   *
+   * `openToken` is the `fetchId` this anchor belongs to, captured by the
+   * caller — see the comment in `scrollToUnreadDivider`. It guards this
+   * closure the same way against firing for a thread already left behind.
+   */
+  private observeUnreadAnchorLayout(openToken: number): void {
+    if (typeof ResizeObserver === 'undefined') return;
+    const list = this.shadowRoot?.querySelector('.messages-list');
+    if (!list) return;
+
+    this._unreadAnchorResizeObserver?.disconnect();
+    this._unreadAnchorResizeObserver = new ResizeObserver(() => {
+      if (!this._unreadAnchorActive || this.fetchId !== openToken) return;
+      if (this.messages.length !== this._unreadAnchorMessageCount) {
+        // New content, not late layout of the unread content itself — leave
+        // it to the ordinary stick-to-bottom / "Jump to latest" behavior.
+        this.deactivateUnreadAnchor();
+        return;
+      }
+      this.applyUnreadAnchor();
+    });
+    this._unreadAnchorResizeObserver.observe(list);
+
+    if (this._unreadAnchorTimer) clearTimeout(this._unreadAnchorTimer);
+    this._unreadAnchorTimer = setTimeout(() => {
+      this.deactivateUnreadAnchor();
+    }, UNREAD_ANCHOR_WINDOW_MS);
+  }
+
+  /** Stop correcting the unread-divider anchor and tear down its watchers. */
+  private deactivateUnreadAnchor(): void {
+    this._unreadAnchorActive = false;
+    this._applyingUnreadAnchor = false;
+    if (this._unreadAnchorResizeObserver) {
+      this._unreadAnchorResizeObserver.disconnect();
+      this._unreadAnchorResizeObserver = null;
+    }
+    if (this._unreadAnchorTimer) {
+      clearTimeout(this._unreadAnchorTimer);
+      this._unreadAnchorTimer = null;
+    }
+    if (this._unreadAnchorInitialRaf !== null) {
+      cancelAnimationFrame(this._unreadAnchorInitialRaf);
+      this._unreadAnchorInitialRaf = null;
+    }
+    if (this._applyingUnreadAnchorRaf !== null) {
+      cancelAnimationFrame(this._applyingUnreadAnchorRaf);
+      this._applyingUnreadAnchorRaf = null;
+    }
   }
 
   // ---------------------------------------------------------------------------
-  // Phase-5: Context menu + Send-to-agent
+  // Phase-5: Context menu
   // ---------------------------------------------------------------------------
 
   /** Render the context menu overlay when a message is right-clicked. */
   private renderContextMenu() {
     if (!this.contextMenuMessage) return nothing;
+
+    const msg = this.contextMenuMessage;
+    const isOwnMessage = msg.senderId === (this._currentUserId || this.currentUserId);
+    const canEditDelete = isOwnMessage && !this.hasAgentReplyAfter(msg);
 
     return html`
       <div class="context-menu-overlay" @click=${this.closeContextMenu}></div>
@@ -2284,10 +3184,41 @@ export class ScionChatThread extends LitElement {
         class="context-menu"
         style="left: ${this.contextMenuPosition.x}px; top: ${this.contextMenuPosition.y}px;"
       >
-        <div class="context-menu-item" @click=${this.handleSendToAgent}>
-          <sl-icon name="send"></sl-icon>
-          Send to Agent...
+        <div class="context-menu-item" @click=${() => this.handleContextMenuReply()}>
+          <sl-icon name="reply"></sl-icon>
+          Reply
         </div>
+        ${canEditDelete
+          ? html`<div class="context-menu-item" @click=${() => this.handleContextMenuEdit()}>
+              <sl-icon name="pencil"></sl-icon>
+              Edit
+            </div>`
+          : nothing}
+        ${canEditDelete
+          ? html`<div
+              class="context-menu-item danger"
+              @click=${() => this.handleContextMenuDelete()}
+            >
+              <sl-icon name="trash"></sl-icon>
+              Delete
+            </div>`
+          : nothing}
+        <div class="context-menu-item" @click=${() => this.handleContextMenuCopyText()}>
+          <sl-icon name="clipboard"></sl-icon>
+          Copy text
+        </div>
+        <div class="context-menu-item" @click=${() => this.handleContextMenuCopyLink()}>
+          <sl-icon name="link-45deg"></sl-icon>
+          Copy link
+        </div>
+        ${this.isSenderAgent(msg) &&
+        !this.isDM &&
+        !(msg.sender.startsWith('agent:') && msg.sender.slice(6) === this.defaultAgent)
+          ? html`<div class="context-menu-item" @click=${() => this.handleContextMenuSetDefault()}>
+              <sl-icon name="robot"></sl-icon>
+              Make this agent thread default
+            </div>`
+          : nothing}
       </div>
     `;
   }
@@ -2297,52 +3228,147 @@ export class ScionChatThread extends LitElement {
     e.preventDefault();
     this.contextMenuMessage = msg;
     this.contextMenuPosition = { x: e.clientX, y: e.clientY };
-    // Close agent picker if open
-    this.showAgentPicker = false;
+    document.addEventListener('keydown', this.handleContextMenuKeydown);
   }
+
+  /**
+   * Touch devices have no `:hover` state to reveal message actions, and a
+   * long-press (which would otherwise fire `contextmenu`) is consumed by
+   * iOS's native text-selection gesture instead. A plain tap opens the same
+   * context menu a desktop right-click would, positioned at the tap point,
+   * so touch users have a reachable path to reply/edit/delete/copy.
+   */
+  private handleMessageTap(e: MouseEvent, msg: Message): void {
+    // Desktop already has hover-revealed actions and a working right-click
+    // menu — only intervene on devices that cannot hover.
+    if (!window.matchMedia('(hover: none)').matches) return;
+
+    // <scion-chat-message> renders into its own shadow root, so `e.target`
+    // here is retargeted to the message host itself regardless of what was
+    // actually clicked inside it. `composedPath()[0]` is the real innermost
+    // element, which is what "was a link/button tapped?" needs to inspect.
+    const target = e.composedPath()[0] as HTMLElement;
+    if (target.closest?.('a, button, sl-icon-button, .entity-link, .mention, .reply-preview'))
+      return;
+
+    this.handleMessageContextMenu(e, msg);
+  }
+
+  /** Dismiss context menu on Escape key. */
+  private handleContextMenuKeydown = (e: KeyboardEvent): void => {
+    if (e.key === 'Escape') {
+      this.closeContextMenu();
+    }
+  };
 
   /** Close the context menu. */
   private closeContextMenu(): void {
     this.contextMenuMessage = null;
+    document.removeEventListener('keydown', this.handleContextMenuKeydown);
   }
 
-  /** Handle "Send to Agent..." click from context menu. */
-  private handleSendToAgent(): void {
-    // Close context menu and show agent picker
-    const pos = { ...this.contextMenuPosition };
-    this.contextMenuPosition = pos;
-    this.showAgentPicker = true;
-    // Keep contextMenuMessage so we have the message content
-    // but close the visual context menu
+  /** Context menu: Reply to the right-clicked message. */
+  private handleContextMenuReply(): void {
     const msg = this.contextMenuMessage;
-    this.contextMenuMessage = null;
-    // Re-store message for the picker callback
-    this._pendingSendToAgentMessage = msg;
+    this.closeContextMenu();
+    if (!msg) return;
+    this.composerEditMessage = null; // Cancel any pending edit
+    this.composerReplyTo = {
+      messageId: msg.id,
+      senderName: this.getSenderDisplayName(msg) || msg.sender,
+      content: msg.msg.length > 100 ? msg.msg.slice(0, 100) + '...' : msg.msg,
+    };
   }
 
-  /** Handle agent selection from the picker. */
-  private handleAgentSelected(e: CustomEvent<AgentSelectedDetail>): void {
-    const { agentId } = e.detail;
-    const msg = this._pendingSendToAgentMessage;
-    this._pendingSendToAgentMessage = null;
-    this.showAgentPicker = false;
+  /** Context menu: Edit the right-clicked message. */
+  private handleContextMenuEdit(): void {
+    const msg = this.contextMenuMessage;
+    this.closeContextMenu();
+    if (!msg) return;
+    this.composerReplyTo = null; // Cancel any pending reply
+    this.composerEditMessage = { messageId: msg.id, content: msg.msg };
+  }
 
+  /** Context menu: Delete the right-clicked message. */
+  private async handleContextMenuDelete(): Promise<void> {
+    const msg = this.contextMenuMessage;
+    this.closeContextMenu();
     if (!msg) return;
 
-    // Store context in sessionStorage to avoid URL length overflow (msg.msg
-    // can be 16 000 runes → 48 KB+ when percent-encoded).
-    const contextKey = `scion-send-ctx-${crypto.randomUUID().slice(0, 8)}`;
-    sessionStorage.setItem(contextKey, msg.msg);
-    const url = `/chat/dm/agent/${encodeURIComponent(agentId)}?ctx=${contextKey}`;
-    const navEvent = new CustomEvent('navigate', {
-      detail: { url },
-      bubbles: true,
-      composed: true,
-      cancelable: true,
+    const confirmed = window.confirm('Delete this message? This cannot be undone.');
+    if (!confirmed) return;
+
+    try {
+      const res = await apiFetch(
+        `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/messages/${encodeURIComponent(msg.id)}`,
+        { method: 'DELETE' }
+      );
+      if (!res.ok) {
+        const errMsg = await extractApiError(res, 'Failed to delete message');
+        this.sendError = errMsg;
+      }
+    } catch (err) {
+      this.sendError = err instanceof Error ? err.message : 'Failed to delete message';
+    }
+  }
+
+  /** Context menu: Copy message text to clipboard. */
+  private handleContextMenuCopyText(): void {
+    const msg = this.contextMenuMessage;
+    this.closeContextMenu();
+    if (!msg) return;
+    navigator.clipboard.writeText(msg.msg).catch(() => {
+      // Fallback: ignore clipboard failure silently.
     });
-    this.dispatchEvent(navEvent);
-    if (!navEvent.defaultPrevented) {
-      window.location.href = url;
+  }
+
+  /** Context menu: Copy link to message. */
+  private handleContextMenuCopyLink(): void {
+    const msg = this.contextMenuMessage;
+    this.closeContextMenu();
+    if (!msg) return;
+    const url = `${window.location.origin}${window.location.pathname}#msg-${encodeURIComponent(msg.id)}`;
+    navigator.clipboard.writeText(url).catch(() => {
+      // Fallback: ignore clipboard failure silently.
+    });
+  }
+
+  /** Context menu: Set the sender agent as the thread default. */
+  private async handleContextMenuSetDefault(): Promise<void> {
+    const msg = this.contextMenuMessage;
+    this.closeContextMenu();
+    if (!msg || !this.conversationKey || this.isDM) return;
+
+    // Extract agent slug from sender (strip "agent:" prefix).
+    // Guard: only proceed if the sender uses the "agent:" format.
+    if (!msg.sender.startsWith('agent:')) return;
+    const agentSlug = msg.sender.slice(6);
+    if (!agentSlug) return;
+
+    try {
+      const body: Record<string, unknown> = {
+        defaultAgent: agentSlug,
+      };
+      const res = await apiFetch(
+        `/api/v1/chat/topics/${encodeURIComponent(this.conversationKey)}`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        }
+      );
+      if (res.ok) {
+        this.defaultAgent = agentSlug;
+        this.dispatchEvent(
+          new CustomEvent('default-agent-changed', {
+            detail: { defaultAgent: this.defaultAgent },
+            bubbles: true,
+            composed: true,
+          })
+        );
+      }
+    } catch {
+      // Non-critical
     }
   }
 
@@ -2350,16 +3376,62 @@ export class ScionChatThread extends LitElement {
   // Path-link file preview (#1148)
   // ---------------------------------------------------------------------------
 
+  /**
+   * Resolve the best-available project id for a path-link click.
+   *
+   * For project-scoped threads, the thread's own `projectId` is correct and
+   * takes priority. But a DM's thread-level `projectId` is not a project the
+   * DM belongs to — it's whatever project the user happened to be viewing
+   * before opening the DM (`inheritedProjectId()`), kept around only for
+   * attachment uploads. Using it here would resolve links against an
+   * unrelated project (silently opening the wrong `/workspace` file, or
+   * 404ing on a scratchpad path that project doesn't declare). So in a DM we
+   * never fall back to it. Order of preference in a DM:
+   *
+   *   1. The message's own project — `senderProjectId` (server-derived) or
+   *      `projectId` (set on the agent-to-user outbound path, which never
+   *      sets `senderProjectId`; also the hub's user-to-agent send path
+   *      stamps this from the peer agent's project, so a persisted or
+   *      SSE-delivered message in an agent DM always carries it).
+   *   2. The DM peer agent's project, read from the shared agent cache
+   *      (`stateManager`, for the current view scope — cleared on every
+   *      `setScope()` and re-seeded by the chat page's member list — no
+   *      extra fetch). This only fills a narrow, real gap: the client's
+   *      own optimistic message (`optimisticMsg.projectId = ''` above) has
+   *      no project yet because it hasn't round-tripped the server. The
+   *      peer agent is not an unrelated project — it is who the DM is with.
+   *   3. Nothing — return '' so the caller shows the "could not determine
+   *      which project" error instead of guessing at an unrelated project.
+   */
+  private resolvePathLinkProjectId(msg: Message | undefined): string {
+    const fromMsg = msg?.senderProjectId || msg?.projectId || '';
+    if (!this.isDM) return this.projectId || fromMsg;
+    return fromMsg || this.peerAgentProjectId();
+  }
+
+  /**
+   * The DM peer agent's project id, from the shared in-memory agent cache
+   * (no network call). Empty when this isn't an agent DM or the peer agent
+   * isn't in the cache.
+   */
+  private peerAgentProjectId(): string {
+    if (!this.isAgentDM) return '';
+    const peerAgentId = this.conversationKey.split(':')[2] || '';
+    return (peerAgentId && stateManager.getAgent(peerAgentId)?.projectId) || '';
+  }
+
   /** Handle path-link-click event from a chat message. */
   private async handlePathLinkClick(
-    e: CustomEvent<{ path: string }>
+    e: CustomEvent<{ path: string }>,
+    msg?: Message
   ): Promise<void> {
     const containerPath = e.detail.path;
+    const resolvedProjectId = this.resolvePathLinkProjectId(msg);
 
-    if (!this.projectId) {
-      this.sendError = 'Cannot open file: no project context';
+    if (!resolvedProjectId) {
+      this.sendError = PATH_LINK_NO_PROJECT_ERROR;
       setTimeout(() => {
-        if (this.sendError === 'Cannot open file: no project context') {
+        if (this.sendError === PATH_LINK_NO_PROJECT_ERROR) {
           this.sendError = null;
         }
       }, 4000);
@@ -2381,7 +3453,7 @@ export class ScionChatThread extends LitElement {
     const ext = fileName.includes('.') ? '.' + fileName.split('.').pop()!.toLowerCase() : '';
     const isImage = PATH_IMAGE_EXTS.has(ext);
     const isMarkdown = PATH_MD_EXTS.has(ext);
-    const downloadUrl = buildFileApiUrl(this.projectId, target);
+    const downloadUrl = buildFileApiUrl(resolvedProjectId, target);
 
     this.filePreview = {
       containerPath,
@@ -2456,7 +3528,11 @@ export class ScionChatThread extends LitElement {
     } else if (fp.status === 'error') {
       body = html`<div class="file-preview-placeholder error">${fp.error}</div>`;
     } else if (fp.isImage) {
-      body = html`<img class="file-preview-image" src="${fp.downloadUrl}?view=true" alt=${fp.fileName} />`;
+      body = html`<img
+        class="file-preview-image"
+        src="${fp.downloadUrl}?view=true"
+        alt=${fp.fileName}
+      />`;
     } else if (fp.isBinary) {
       body = html`
         <div class="file-preview-placeholder">
@@ -2486,7 +3562,10 @@ export class ScionChatThread extends LitElement {
       >
         ${body}
         <div slot="footer" style="display:flex;gap:0.5rem;align-items:center">
-          <span style="flex:1;font-size:0.75rem;color:var(--scion-text-muted,#64748b);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title=${fp.containerPath}>
+          <span
+            style="flex:1;font-size:var(--chat-fs-base);color:var(--scion-text-muted,#64748b);overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+            title=${fp.containerPath}
+          >
             ${fp.containerPath}
           </span>
           <sl-button href="${fp.downloadUrl}" download=${fp.fileName} size="small">
@@ -2541,9 +3620,7 @@ export class ScionChatThread extends LitElement {
     }
 
     try {
-      const res = await apiFetch(
-        `/api/v1/agents?project=${encodeURIComponent(this.projectId)}`
-      );
+      const res = await apiFetch(`/api/v1/agents?project=${encodeURIComponent(this.projectId)}`);
       if (!res.ok) {
         this.insertLocalSystemMessage('Failed to fetch project status.');
         return;
@@ -2633,10 +3710,9 @@ export class ScionChatThread extends LitElement {
     }
 
     try {
-      const res = await apiFetch(
-        `/api/v1/agents/${encodeURIComponent(agentSlug)}`,
-        { method: 'DELETE' }
-      );
+      const res = await apiFetch(`/api/v1/agents/${encodeURIComponent(agentSlug)}`, {
+        method: 'DELETE',
+      });
 
       if (!res.ok) {
         const errMsg = await extractApiError(res, 'Failed to stop agent');
@@ -2759,12 +3835,11 @@ export class ScionChatThread extends LitElement {
     }
     return html`
       <div class="thread-container">
-        ${this.renderStreamBar()} ${this.renderContent()}
+        ${this.renderContent()}
         ${this.sendError ? html`<div class="send-error">${this.sendError}</div>` : nothing}
         ${this.canSend
           ? html`
               <scion-chat-composer
-                ?disabled=${this.sending}
                 .agents=${this.agents}
                 @chat-send=${this.handleChatSend}
               ></scion-chat-composer>
@@ -2778,12 +3853,9 @@ export class ScionChatThread extends LitElement {
   private renderV2() {
     return html`
       <div class="thread-container">
-        ${this.renderStreamBar()}
-        ${this.renderInteragentToggle()}
-        ${this.renderContent()} ${this.renderTypingIndicator()}
+        ${this.renderInteragentToggle()} ${this.renderContent()} ${this.renderTypingIndicator()}
         ${this.sendError ? html`<div class="send-error">${this.sendError}</div>` : nothing}
         <scion-chat-composer
-          ?disabled=${this.sending}
           .agents=${this.agents}
           .members=${this.members}
           .defaultAgent=${this.defaultAgent}
@@ -2793,21 +3865,15 @@ export class ScionChatThread extends LitElement {
           .conversationKey=${this.conversationKey}
           .replyTo=${this.composerReplyTo}
           .editMessage=${this.composerEditMessage}
+          @chat-cancel-reply=${this.handleComposerCancelReply}
+          @chat-cancel-edit=${this.handleComposerCancelEdit}
           @chat-send=${this.handleChatSendV2}
           @chat-edit=${this.handleChatEditV2}
           @chat-typing=${() => this.sendTypingEvent()}
           @default-agent-change=${this.handleDefaultAgentChange}
           @chat-slash-command=${this.handleSlashCommand}
         ></scion-chat-composer>
-        ${this.renderContextMenu()}
-        ${this.renderFilePreview()}
-        <scion-send-to-agent-picker
-          .agents=${this.agents}
-          ?open=${this.showAgentPicker}
-          .posX=${this.contextMenuPosition.x}
-          .posY=${this.contextMenuPosition.y}
-          @agent-selected=${this.handleAgentSelected}
-        ></scion-send-to-agent-picker>
+        ${this.renderContextMenu()} ${this.renderFilePreview()}
       </div>
     `;
   }
@@ -2871,24 +3937,6 @@ export class ScionChatThread extends LitElement {
     `;
   }
 
-  private renderStreamBar() {
-    // Show the bar only when the visibility toggle is visible.
-    if (!this.showVisibilityToggle) return nothing;
-    return html`
-      <div class="stream-bar">
-        <span class="stream-indicator"></span>
-        ${this.showVisibilityToggle
-          ? html`
-              <scion-chat-visibility-toggle
-                mode=${this.visibilityMode}
-                @visibility-change=${this.handleVisibilityChange}
-              ></scion-chat-visibility-toggle>
-            `
-          : nothing}
-      </div>
-    `;
-  }
-
   private renderContent() {
     if (this.loading && this.messages.length === 0) {
       return html`
@@ -2930,12 +3978,16 @@ export class ScionChatThread extends LitElement {
     }
 
     return html`
-      <div class="messages-scroll" @scroll=${this.handleScroll} @click=${this.handleMessageAreaClick}>
+      <div
+        class="messages-scroll"
+        @scroll=${this.handleScroll}
+        @click=${this.handleMessageAreaClick}
+      >
         <div class="messages-list">
           ${this.loadingOlder
             ? html`<div class="loading-older"><sl-spinner></sl-spinner></div>`
             : nothing}
-          ${this.renderMessages()}
+          ${guard([this.messageRowsVersion, this.seenExpired], () => this.renderMessages())}
         </div>
         ${!this.pinnedToBottom
           ? html`
@@ -2951,23 +4003,32 @@ export class ScionChatThread extends LitElement {
     `;
   }
 
+  private get seenExpired(): boolean {
+    return this.peerReadAt > 0 && Date.now() - this.peerReadAt >= SEEN_VISIBLE_MS;
+  }
+
   private renderMessages() {
-    const rows: unknown[] = [];
+    // Rendered with lit/directives/repeat.js and stable keys (not index
+    // position) so that hiding/showing inter-agent markers — which changes
+    // how many divider rows precede later rows — does not shift the
+    // identity of unrelated rows. Without stable keys, Lit's default
+    // positional array diffing tears down and recreates every row after the
+    // point where the row count changed, which loses per-element state such
+    // as a marker's expanded/collapsed toggle (R4).
+    const rows: Array<{ key: string; tpl: unknown }> = [];
     let lastDate = '';
     let prevSender = '';
     let prevTimestamp = 0;
 
     // Pre-sort inter-agent messages by time for gap-based grouping.
-    const iaMessages = [...this.interagentMessages].sort(
-      (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-    );
+    const iaMessages = [...this.interagentMessages].sort(compareMessageOrder);
     let iaIdx = 0;
     const hasIA = this.hasInteragentMessages;
 
     // Delivery state is a property of the conversation's tail, not of every
     // bubble: only the newest message this user sent carries it.
     const lastOwnMessageId = this.lastOwnMessageId();
-    const seenExpired = this.peerReadAt > 0 && Date.now() - this.peerReadAt > SEEN_VISIBLE_MS;
+    const seenExpired = this.seenExpired;
 
     // Unread divider: find the position of the last-read message so we can
     // insert the divider after it.
@@ -2977,36 +4038,72 @@ export class ScionChatThread extends LitElement {
       lastReadIdx = this.messages.findIndex((m) => m.id === this.lastReadMessageId);
     }
 
+    // Inter-agent messages are dated items like any other row: a run of
+    // consecutive messages is split into one marker per calendar day (local
+    // time), with the shared date-divider inserted between them exactly as
+    // it appears between normal messages. `msgs` is time-sorted, so day
+    // boundaries within it are contiguous.
+    const pushInteragentGroups = (msgs: Message[]): void => {
+      let groupStart = 0;
+      // Cache the current group's date string rather than recomputing it
+      // from msgs[groupStart] on every iteration of a long run.
+      let groupDateStr = msgs.length > 0 ? formatChatDate(msgs[0].createdAt) : '';
+      for (let i = 1; i <= msgs.length; i++) {
+        const atBoundary = i === msgs.length || formatChatDate(msgs[i].createdAt) !== groupDateStr;
+        if (!atBoundary) continue;
+        const group = msgs.slice(groupStart, i);
+        // Only a visible marker actually occupies a day in the timeline —
+        // when inter-agent messages are hidden, don't advance lastDate or
+        // emit a divider for them, or the next human message's own divider
+        // (or a divider for a day with no visible content at all) would be
+        // suppressed or left dangling with nothing under it.
+        if (this.interagentVisible) {
+          const groupDate = groupDateStr || 'Invalid Date';
+          if (groupDate !== lastDate) {
+            lastDate = groupDate;
+            rows.push({ key: `day:${groupDate}`, tpl: renderDateDivider(groupDate) });
+          }
+        }
+        rows.push({
+          key: `ia:${group[0].id}`,
+          tpl: html`
+            <scion-chat-interagent-marker
+              .messageCount=${group.length}
+              .messages=${group}
+              ?global-expanded=${this.interagentExpandAll}
+              ?hidden=${!this.interagentVisible}
+              current-project-id=${this.projectId}
+            ></scion-chat-interagent-marker>
+          `,
+        });
+        // Reset grouping after a marker so the next message shows its header.
+        prevSender = '';
+        prevTimestamp = 0;
+        groupStart = i;
+        if (i < msgs.length) groupDateStr = formatChatDate(msgs[i].createdAt);
+      }
+    };
+
     for (let mi = 0; mi < this.messages.length; mi++) {
       const msg = this.messages[mi];
-      const d = new Date(msg.createdAt);
-      const dateStr = d.toLocaleDateString('en', {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-      });
+      // Used for both the inter-agent cutoff below and the sender-grouping
+      // window further down — not tied to any single one of them.
+      const msgTime = new Date(msg.createdAt).getTime();
+      const dateStr = formatChatDate(msg.createdAt) || 'Invalid Date';
 
       // Collect all inter-agent messages that fall before this DM message
-      // and insert ONE pill for the entire group.
+      // and split them into one marker per day.
       if (hasIA) {
-        const msgTime = d.getTime();
         const pendingIA: Message[] = [];
-        while (iaIdx < iaMessages.length && new Date(iaMessages[iaIdx].createdAt).getTime() < msgTime) {
+        while (
+          iaIdx < iaMessages.length &&
+          new Date(iaMessages[iaIdx].createdAt).getTime() < msgTime
+        ) {
           pendingIA.push(iaMessages[iaIdx]);
           iaIdx++;
         }
         if (pendingIA.length > 0) {
-          rows.push(html`
-            <scion-chat-interagent-marker
-              .messageCount=${pendingIA.length}
-              .messages=${pendingIA}
-              ?global-expanded=${this.interagentExpandAll}
-              ?hidden=${!this.interagentVisible}
-            ></scion-chat-interagent-marker>
-          `);
-          // Reset grouping after a marker so the next message shows its header.
-          prevSender = '';
-          prevTimestamp = 0;
+          pushInteragentGroups(pendingIA);
         }
       }
 
@@ -3015,21 +4112,20 @@ export class ScionChatThread extends LitElement {
         lastDate = dateStr;
         prevSender = '';
         prevTimestamp = 0;
-        rows.push(html`
-          <div class="date-divider">
-            <span class="date-label">${dateStr}</span>
-          </div>
-        `);
+        rows.push({ key: `day:${dateStr}`, tpl: renderDateDivider(dateStr) });
       }
 
       // Unread divider: insert between the last-read message and the next one.
       if (!unreadDividerInserted && lastReadIdx >= 0 && mi > lastReadIdx) {
         unreadDividerInserted = true;
-        rows.push(html`
-          <div class="unread-divider">
-            <span class="unread-label">New messages</span>
-          </div>
-        `);
+        rows.push({
+          key: 'unread',
+          tpl: html`
+            <div class="unread-divider">
+              <span class="unread-label">New messages</span>
+            </div>
+          `,
+        });
         // Reset grouping so the first unread message shows its header.
         prevSender = '';
         prevTimestamp = 0;
@@ -3039,22 +4135,20 @@ export class ScionChatThread extends LitElement {
       if (SYSTEM_MESSAGE_TYPES.has(msg.type)) {
         prevSender = '';
         prevTimestamp = 0;
-        rows.push(html`
-          <scion-chat-system-line
-            message=${msg.msg}
-            timestamp=${msg.createdAt}
-            category=${(msg.metadata?.['system_category'] as string) || ''}
-          ></scion-chat-system-line>
-        `);
+        rows.push({
+          key: `msg:${msg.id}`,
+          tpl: html`
+            <scion-chat-system-line
+              message=${msg.msg}
+              timestamp=${msg.createdAt}
+              category=${(msg.metadata?.['system_category'] as string) || ''}
+            ></scion-chat-system-line>
+          `,
+        });
         continue;
       }
 
-      // Visibility filter: skip messages that don't match the current mode.
-      // The message stays in the map so mode switches show it without re-fetch.
-      if (!this.shouldShowMessage(msg)) continue;
-
       // Grouping: consecutive *visible* messages from same sender within GROUP_WINDOW_MS
-      const msgTime = d.getTime();
       const sameSender = msg.sender === prevSender;
       const withinWindow = msgTime - prevTimestamp < GROUP_WINDOW_MS;
       const showHeader = !sameSender || !withinWindow;
@@ -3072,9 +4166,10 @@ export class ScionChatThread extends LitElement {
       // send time) so historical messages without a default agent don't
       // retroactively show a routing header.
       const isAgentSender = this.isSenderAgent(msg);
-      const msgRoutedTo = !isAgentSender && msg.recipient
-        ? (msg.recipient.startsWith('agent:') ? msg.recipient.slice(6) : msg.recipient)
-        : '';
+      const msgRoutedTo =
+        !isAgentSender && msg.recipient && msg.recipient.startsWith('agent:')
+          ? msg.recipient.slice(6)
+          : '';
       const senderDisplayName = this.isV2
         ? this.getSenderDisplayName(msg)
         : isFromAgent
@@ -3084,51 +4179,47 @@ export class ScionChatThread extends LitElement {
       // Phase-3: Get extension data for this message.
       const ext = this.v2MessageExtMap.get(msg.id);
       const replyPreview = ext?.replyToId
-        ? this.v2ReplyPreviewMap.get(ext.replyToId) ?? null
+        ? (this.v2ReplyPreviewMap.get(ext.replyToId) ?? null)
         : null;
-      const isOwnMessage = msg.senderId === this.currentUserId;
-      // Guard: can edit/delete only if no agent has replied after this message.
-      const canEditDelete = isOwnMessage && !this.hasAgentReplyAfter(msg);
-
-      rows.push(html`
-        <scion-chat-message
-          @contextmenu=${(e: MouseEvent) => this.handleMessageContextMenu(e, msg)}
-          id="msg-${msg.id}"
-          body=${msg.msg}
-          sender=${msg.sender}
-          senderId=${msg.senderId || ''}
-          senderName=${senderDisplayName}
-          ?fromAgent=${isFromAgent}
-          ?plain=${msg.plain ?? false}
-          agentSlug=${isFromAgent ? senderDisplayName : ''}
-          timestamp=${msg.createdAt}
-          .showHeader=${showHeader}
-          ?urgent=${msg.urgent ?? false}
-          ?broadcasted=${msg.broadcasted ?? false}
-          channel=${msg.channel || ''}
-          visibility=${msg.visibility || 'normal'}
-          messageType=${msg.type || ''}
-          dispatchState=${this.deliveryStateFor(msg, lastOwnMessageId, seenExpired)}
-          ?seen=${msg.id === lastOwnMessageId && this.isMessageSeen(msg)}
-          dispatchFailureReason=${msg.dispatchFailureReason || ''}
-          .attachments=${msg.attachments || []}
-          .attachmentRefs=${this.getMessageAttachmentRefs(msg.id)}
-          routedTo=${msgRoutedTo}
-          messageId=${msg.id}
-          ?isOwn=${isOwnMessage}
-          ?canEdit=${canEditDelete}
-          ?canDelete=${canEditDelete}
-          .replyPreview=${replyPreview}
-          editedAt=${ext?.editedAt || ''}
-          deletedAt=${ext?.deletedAt || ''}
-          @message-reply=${this.handleMessageReply}
-          @message-edit=${this.handleMessageEditRequest}
-          @message-delete=${this.handleMessageDeleteRequest}
-          @message-copy-link=${this.handleCopyLink}
-          @scroll-to-message=${this.handleScrollToMessage}
-          @path-link-click=${this.handlePathLinkClick}
-        ></scion-chat-message>
-      `);
+      rows.push({
+        key: `msg:${msg.id}`,
+        tpl: html`
+          <scion-chat-message
+            @contextmenu=${(e: MouseEvent) => this.handleMessageContextMenu(e, msg)}
+            @click=${(e: MouseEvent) => this.handleMessageTap(e, msg)}
+            id="msg-${msg.id}"
+            body=${msg.msg}
+            sender=${msg.sender}
+            senderId=${msg.senderId || ''}
+            senderName=${senderDisplayName}
+            ?fromAgent=${isFromAgent}
+            ?plain=${msg.plain ?? false}
+            agentSlug=${isFromAgent ? senderDisplayName : ''}
+            timestamp=${msg.createdAt}
+            .showHeader=${showHeader}
+            ?urgent=${msg.urgent ?? false}
+            ?broadcasted=${msg.broadcasted ?? false}
+            channel=${msg.channel || ''}
+            messageType=${msg.type || ''}
+            dispatchState=${this.deliveryStateFor(msg, lastOwnMessageId, seenExpired)}
+            ?seen=${msg.id === lastOwnMessageId && this.isMessageSeen(msg)}
+            dispatchFailureReason=${msg.dispatchFailureReason || ''}
+            dispatchFailureCode=${msg.dispatchFailureCode || ''}
+            .attachments=${msg.attachments || EMPTY_ATTACHMENTS}
+            .attachmentRefs=${this.getMessageAttachmentRefs(msg.id)}
+            routedTo=${msgRoutedTo}
+            .replyPreview=${replyPreview}
+            editedAt=${ext?.editedAt || ''}
+            deletedAt=${ext?.deletedAt || ''}
+            senderProjectSlug=${msg.senderProjectId
+              ? this.resolveProjectSlug(msg.senderProjectId)
+              : ''}
+            @scroll-to-message=${this.handleScrollToMessage}
+            @path-link-click=${(e: CustomEvent<{ path: string }>) =>
+              this.handlePathLinkClick(e, msg)}
+          ></scion-chat-message>
+        `,
+      });
 
       // Render "also notified" footer under the specific message bubble (O3).
       const msgMentionResults = this.mentionResultsByMessageId.get(msg.id);
@@ -3136,12 +4227,15 @@ export class ScionChatThread extends LitElement {
         const delivered = msgMentionResults.filter((r) => r.status === 'delivered');
         if (delivered.length > 0) {
           const slugs = delivered.map((r) => html`<span class="mention-slug">@${r.slug}</span>`);
-          rows.push(html`
-            <div class="mention-results">
-              Also notified:
-              ${slugs.reduce((acc, s, i) => (i === 0 ? [s] : [...acc, ', ', s]), [] as unknown[])}
-            </div>
-          `);
+          rows.push({
+            key: `mention:${msg.id}`,
+            tpl: html`
+              <div class="mention-results">
+                Also notified:
+                ${slugs.reduce((acc, s, i) => (i === 0 ? [s] : [...acc, ', ', s]), [] as unknown[])}
+              </div>
+            `,
+          });
         }
       }
 
@@ -3151,18 +4245,163 @@ export class ScionChatThread extends LitElement {
 
     // Append any remaining inter-agent messages that come after all DM messages.
     if (hasIA && iaIdx < iaMessages.length) {
-      const trailingIA = iaMessages.slice(iaIdx);
-      rows.push(html`
-        <scion-chat-interagent-marker
-          .messageCount=${trailingIA.length}
-          .messages=${trailingIA}
-          ?global-expanded=${this.interagentExpandAll}
-          ?hidden=${!this.interagentVisible}
-        ></scion-chat-interagent-marker>
-      `);
+      pushInteragentGroups(iaMessages.slice(iaIdx));
     }
 
-    return rows;
+    return repeat(
+      rows,
+      (row) => row.key,
+      (row) => row.tpl
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Export helpers (#1570)
+  // ---------------------------------------------------------------------------
+
+  /** Escape HTML special characters to prevent XSS. */
+  private escapeHtml(text: string): string {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+  }
+
+  /** Format an ISO timestamp for export display. */
+  private formatExportTimestamp(iso: string): string {
+    try {
+      return new Date(iso).toLocaleString();
+    } catch {
+      return iso;
+    }
+  }
+
+  /** Generate a filename-safe date string (YYYY-MM-DD). */
+  private filenameDateStamp(): string {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+
+  /**
+   * Download the conversation as a Markdown file.
+   *
+   * Iterates the current message buffer, formats each message with sender,
+   * timestamp, and body, then triggers a browser download.
+   */
+  public exportAsMarkdown(): void {
+    if (this.messages.length === 0) {
+      showToast('No messages to export', 'warning');
+      return;
+    }
+
+    const lines = this.messages.map((m) => {
+      const ts = this.formatExportTimestamp(m.createdAt);
+      return `### ${m.sender} — ${ts}\n\n${m.msg}\n\n---\n`;
+    });
+
+    const content = lines.join('\n');
+    const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
+
+    const nameBase = this.threadName
+      ? this.threadName.replace(/[^a-zA-Z0-9_-]/g, '_')
+      : 'conversation';
+    const fileName = `${nameBase}-${this.filenameDateStamp()}.md`;
+
+    const anchor = document.createElement('a');
+    anchor.href = URL.createObjectURL(blob);
+    anchor.download = fileName;
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    URL.revokeObjectURL(anchor.href);
+  }
+
+  /**
+   * Open a print-friendly window with the conversation content.
+   *
+   * Creates a new browser window with clean HTML formatted messages and
+   * invokes the browser's print dialog (which allows saving as PDF).
+   */
+  public printConversation(): void {
+    if (this.messages.length === 0) {
+      showToast('No messages to export', 'warning');
+      return;
+    }
+
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) {
+      showToast('Unable to open print window — check your popup blocker.', 'warning');
+      return;
+    }
+
+    const title = this.threadName ? this.escapeHtml(this.threadName) : 'Conversation';
+
+    const messagesHtml = this.messages
+      .map(
+        (m) =>
+          `<div style="margin-bottom: 1rem; padding-bottom: 0.5rem; border-bottom: 1px solid #eee;">
+        <div style="font-weight: bold; font-size: 0.875rem;">${this.escapeHtml(m.sender)}
+          <span style="color: #666; font-weight: normal;">${this.escapeHtml(this.formatExportTimestamp(m.createdAt))}</span>
+        </div>
+        <div style="margin-top: 0.5rem; white-space: pre-wrap;">${this.escapeHtml(m.msg)}</div>
+      </div>`
+      )
+      .join('');
+
+    printWindow.document.write(
+      `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${title}</title>` +
+        `<style>body{font-family:system-ui,-apple-system,sans-serif;max-width:800px;margin:2rem auto;padding:0 1rem;color:#1a1a1a;}</style>` +
+        `</head><body><h1 style="font-size:1.25rem;margin-bottom:1.5rem;">${title}</h1>${messagesHtml}</body></html>`
+    );
+    printWindow.document.close();
+    printWindow.onafterprint = () => printWindow.close();
+    printWindow.print();
+    // Fallback for browsers that don't fire afterprint
+    setTimeout(() => {
+      if (!printWindow.closed) printWindow.close();
+    }, 1000);
+  }
+
+  /**
+   * Copy the conversation as formatted text to the clipboard.
+   *
+   * Writes both HTML and plain-text representations using the Clipboard API.
+   * Falls back to plain text if the ClipboardItem API is unavailable.
+   */
+  public async copyAsFormattedText(): Promise<void> {
+    if (this.messages.length === 0) {
+      showToast('No messages to export', 'warning');
+      return;
+    }
+
+    const htmlContent = this.messages
+      .map(
+        (m) =>
+          `<p><strong>${this.escapeHtml(m.sender)}</strong> (${this.escapeHtml(this.formatExportTimestamp(m.createdAt))})</p>` +
+          `<p>${this.escapeHtml(m.msg)}</p><hr>`
+      )
+      .join('');
+
+    const plainText = this.messages
+      .map((m) => `${m.sender} (${this.formatExportTimestamp(m.createdAt)})\n${m.msg}`)
+      .join('\n\n---\n\n');
+
+    try {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          'text/html': new Blob([htmlContent], { type: 'text/html' }),
+          'text/plain': new Blob([plainText], { type: 'text/plain' }),
+        }),
+      ]);
+      showToast('Conversation copied to clipboard.', 'success');
+    } catch {
+      // Fallback: plain text copy.
+      try {
+        await navigator.clipboard.writeText(plainText);
+        showToast('Conversation copied to clipboard (plain text).', 'success');
+      } catch {
+        showToast('Failed to copy to clipboard.', 'danger');
+      }
+    }
   }
 }
 

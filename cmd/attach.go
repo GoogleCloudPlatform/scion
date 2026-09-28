@@ -41,6 +41,11 @@ If the agent was started with tmux support, this will attach to the tmux session
 	Args:              cobra.ExactArgs(1),
 	ValidArgsFunction: getAgentNames,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// Args are already validated at this point, so any error returned
+		// below is a runtime failure (e.g. an abnormal session close), not a
+		// usage error — don't print the usage block for it.
+		cmd.SilenceUsage = true
+
 		agentName := api.Slugify(args[0])
 
 		// Check if Hub is enabled

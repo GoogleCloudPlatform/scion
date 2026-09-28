@@ -1,0 +1,377 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package entadapter
+
+import (
+	"context"
+	"encoding/json"
+	"log/slog"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentreincarnation"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+)
+
+// AgentReincarnationStore implements store.AgentReincarnationStore using Ent ORM.
+type AgentReincarnationStore struct {
+	client *ent.Client
+}
+
+// NewAgentReincarnationStore creates a new Ent-backed AgentReincarnationStore.
+func NewAgentReincarnationStore(client *ent.Client) *AgentReincarnationStore {
+	return &AgentReincarnationStore{client: client}
+}
+
+// entAgentReincarnationToStore converts an Ent AgentReincarnation entity to a
+// store model. Malformed applied-config JSON is logged and dropped rather
+// than failing the read, matching entAgentToStore's precedent: a corrupt
+// snapshot on one history row must not break the whole list.
+func entAgentReincarnationToStore(r *ent.AgentReincarnation) *store.AgentReincarnation {
+	out := &store.AgentReincarnation{
+		ID:             r.ID.String(),
+		AgentID:        r.AgentID,
+		FromGeneration: r.FromGeneration,
+		ToGeneration:   r.ToGeneration,
+		RequestedBy:    r.RequestedBy,
+		RequestedAt:    r.RequestedAt,
+		UpdatedAt:      r.UpdatedAt,
+		CompletedAt:    r.CompletedAt,
+		State:          string(r.State),
+		Error:          r.Error,
+		Handoff:        r.Handoff,
+	}
+	if r.PreviousAppliedConfig != "" {
+		cfg, err := unmarshalAppliedConfigSnapshot(r.PreviousAppliedConfig)
+		if err != nil {
+			slog.Error("agent reincarnation store: previous_applied_config could not be used as stored",
+				"reincarnation_id", out.ID, "error", err)
+		}
+		out.PreviousAppliedConfig = cfg
+	}
+	if r.NewAppliedConfig != "" {
+		cfg, err := unmarshalAppliedConfigSnapshot(r.NewAppliedConfig)
+		if err != nil {
+			slog.Error("agent reincarnation store: new_applied_config could not be used as stored",
+				"reincarnation_id", out.ID, "error", err)
+		}
+		out.NewAppliedConfig = cfg
+	}
+	return out
+}
+
+// unmarshalAppliedConfigSnapshot decodes an AgentAppliedConfig JSON blob for
+// a history row. Unlike parseAppliedConfig (agent_store.go), it does not
+// apply the live-agent GCP-metadata-mode sanitization: a reincarnation
+// snapshot is historical record, not a config that will be dispatched as-is.
+func unmarshalAppliedConfigSnapshot(raw string) (*store.AgentAppliedConfig, error) {
+	var cfg store.AgentAppliedConfig
+	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+// marshalAppliedConfigSnapshot serializes an AgentAppliedConfig snapshot to
+// JSON text, returning "" for nil so the column is left empty. It delegates to
+// marshalAppliedConfig so snapshots and the agents row share one serialization
+// path: a rollback must restore exactly what the row held.
+func marshalAppliedConfigSnapshot(cfg *store.AgentAppliedConfig) string {
+	if cfg == nil {
+		return ""
+	}
+	return marshalAppliedConfig(cfg)
+}
+
+// CreateAgentReincarnation creates a new reincarnation record.
+func (s *AgentReincarnationStore) CreateAgentReincarnation(ctx context.Context, r *store.AgentReincarnation) error {
+	state := r.State
+	if state == "" {
+		state = store.AgentReincarnationStatePending
+	}
+	builder := s.client.AgentReincarnation.Create().
+		SetAgentID(r.AgentID).
+		SetFromGeneration(r.FromGeneration).
+		SetToGeneration(r.ToGeneration).
+		SetRequestedBy(r.RequestedBy).
+		SetState(agentreincarnation.State(state)).
+		SetError(r.Error).
+		SetHandoff(r.Handoff)
+
+	if !r.RequestedAt.IsZero() {
+		builder.SetRequestedAt(r.RequestedAt)
+	}
+	if r.CompletedAt != nil {
+		builder.SetCompletedAt(*r.CompletedAt)
+	}
+	if cfg := marshalAppliedConfigSnapshot(r.PreviousAppliedConfig); cfg != "" {
+		builder.SetPreviousAppliedConfig(cfg)
+	}
+	if cfg := marshalAppliedConfigSnapshot(r.NewAppliedConfig); cfg != "" {
+		builder.SetNewAppliedConfig(cfg)
+	}
+	if r.ID != "" {
+		uid, err := parseUUID(r.ID)
+		if err != nil {
+			return err
+		}
+		builder.SetID(uid)
+	}
+
+	created, err := builder.Save(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	r.ID = created.ID.String()
+	r.State = string(created.State)
+	r.RequestedAt = created.RequestedAt
+	return nil
+}
+
+// GetAgentReincarnation retrieves a reincarnation record by ID.
+func (s *AgentReincarnationStore) GetAgentReincarnation(ctx context.Context, id string) (*store.AgentReincarnation, error) {
+	uid, err := parseGetID(id)
+	if err != nil {
+		return nil, err
+	}
+	r, err := s.client.AgentReincarnation.Get(ctx, uid)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return entAgentReincarnationToStore(r), nil
+}
+
+// UpdateAgentReincarnation updates the mutable fields of a reincarnation
+// record: state, completion, error, and the new-generation config snapshot
+// (written once the worker has resolved it).
+func (s *AgentReincarnationStore) UpdateAgentReincarnation(ctx context.Context, r *store.AgentReincarnation) error {
+	uid, err := parseGetID(r.ID)
+	if err != nil {
+		return err
+	}
+	builder := s.client.AgentReincarnation.UpdateOneID(uid).
+		SetState(agentreincarnation.State(r.State)).
+		SetError(r.Error)
+
+	if r.CompletedAt != nil {
+		builder.SetCompletedAt(*r.CompletedAt)
+	} else {
+		builder.ClearCompletedAt()
+	}
+	if cfg := marshalAppliedConfigSnapshot(r.NewAppliedConfig); cfg != "" {
+		builder.SetNewAppliedConfig(cfg)
+	}
+	if cfg := marshalAppliedConfigSnapshot(r.PreviousAppliedConfig); cfg != "" {
+		builder.SetPreviousAppliedConfig(cfg)
+	}
+
+	if _, err := builder.Save(ctx); err != nil {
+		return mapError(err)
+	}
+	return nil
+}
+
+// ListAgentReincarnations returns all reincarnation records for an agent,
+// most recent first.
+func (s *AgentReincarnationStore) ListAgentReincarnations(ctx context.Context, agentID string) ([]*store.AgentReincarnation, error) {
+	rows, err := s.client.AgentReincarnation.Query().
+		Where(agentreincarnation.AgentIDEQ(agentID)).
+		Order(ent.Desc(agentreincarnation.FieldRequestedAt)).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]*store.AgentReincarnation, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, entAgentReincarnationToStore(r))
+	}
+	return out, nil
+}
+
+// GetPendingAgentReincarnation returns the agent's non-terminal reincarnation
+// record, if any (AC-8's 409-concurrency check).
+func (s *AgentReincarnationStore) GetPendingAgentReincarnation(ctx context.Context, agentID string) (*store.AgentReincarnation, error) {
+	states := make([]agentreincarnation.State, 0, len(store.AgentReincarnationNonTerminalStates))
+	for _, st := range store.AgentReincarnationNonTerminalStates {
+		states = append(states, agentreincarnation.State(st))
+	}
+	r, err := s.client.AgentReincarnation.Query().
+		Where(
+			agentreincarnation.AgentIDEQ(agentID),
+			agentreincarnation.StateIn(states...),
+		).
+		Order(ent.Desc(agentreincarnation.FieldRequestedAt)).
+		First(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return entAgentReincarnationToStore(r), nil
+}
+
+// DeleteAgentReincarnationsForAgent hard-deletes all reincarnation records
+// for an agent. Called from the agent hard-delete cascade.
+func (s *AgentReincarnationStore) DeleteAgentReincarnationsForAgent(ctx context.Context, agentID string) error {
+	_, err := s.client.AgentReincarnation.Delete().
+		Where(agentreincarnation.AgentIDEQ(agentID)).
+		Exec(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	return nil
+}
+
+// TryAdvanceAgentReincarnation is the compare-and-swap write described on
+// store.AgentReincarnationStore: it only applies if the row's CURRENT State
+// exactly equals expectState (plain equality, not "any non-terminal state")
+// AND, when olderThan is non-zero, its CURRENT UpdatedAt is strictly before
+// olderThan — both checked and updated in the same conditional UPDATE
+// statement (design §3.4 Amendment A6/A7/A7.1).
+func (s *AgentReincarnationStore) TryAdvanceAgentReincarnation(ctx context.Context, r *store.AgentReincarnation, expectState string, olderThan time.Time) (bool, error) {
+	uid, err := parseGetID(r.ID)
+	if err != nil {
+		return false, err
+	}
+
+	preds := []predicate.AgentReincarnation{
+		agentreincarnation.IDEQ(uid),
+		agentreincarnation.StateEQ(agentreincarnation.State(expectState)),
+	}
+	if !olderThan.IsZero() {
+		preds = append(preds, agentreincarnation.UpdatedAtLT(olderThan))
+	}
+
+	builder := s.client.AgentReincarnation.Update().
+		Where(preds...).
+		SetState(agentreincarnation.State(r.State)).
+		SetError(r.Error)
+
+	// Explicit, not left to ent's UpdateDefault(time.Now): the caller
+	// (reincarnate_worker.go's tryAdvanceReincarnation) pins this to the same
+	// instant it uses for the corresponding agent-row write, so the two
+	// clocks the replica-safe sweep reads (design §3.4 Amendment A6.6) never
+	// appear out of order relative to each other for the same step, no
+	// matter which of the two writes physically lands on the wire first.
+	if !r.UpdatedAt.IsZero() {
+		builder.SetUpdatedAt(r.UpdatedAt)
+	}
+
+	if r.CompletedAt != nil {
+		builder.SetCompletedAt(*r.CompletedAt)
+	} else {
+		builder.ClearCompletedAt()
+	}
+	if cfg := marshalAppliedConfigSnapshot(r.NewAppliedConfig); cfg != "" {
+		builder.SetNewAppliedConfig(cfg)
+	}
+	if cfg := marshalAppliedConfigSnapshot(r.PreviousAppliedConfig); cfg != "" {
+		builder.SetPreviousAppliedConfig(cfg)
+	}
+
+	affected, err := builder.Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return affected > 0, nil
+}
+
+// ListNonTerminalAgentReincarnations returns every non-terminal reincarnation
+// record across all agents, for the hub-restart boot sweep (design §3.7).
+func (s *AgentReincarnationStore) ListStaleNonTerminalAgentReincarnations(ctx context.Context, olderThan time.Time) ([]*store.AgentReincarnation, error) {
+	states := make([]agentreincarnation.State, 0, len(store.AgentReincarnationNonTerminalStates))
+	for _, st := range store.AgentReincarnationNonTerminalStates {
+		states = append(states, agentreincarnation.State(st))
+	}
+	rows, err := s.client.AgentReincarnation.Query().
+		Where(
+			agentreincarnation.StateIn(states...),
+			agentreincarnation.UpdatedAtLT(olderThan),
+		).
+		Order(ent.Desc(agentreincarnation.FieldRequestedAt)).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]*store.AgentReincarnation, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, entAgentReincarnationToStore(r))
+	}
+	return out, nil
+}
+
+// ListAgentReincarnationsPage returns up to limit records across all agents,
+// ordered by ID ascending, starting strictly after afterID (keyset paging).
+func (s *AgentReincarnationStore) ListAgentReincarnationsPage(ctx context.Context, afterID string, limit int) ([]*store.AgentReincarnation, error) {
+	query := s.client.AgentReincarnation.Query().
+		Order(ent.Asc(agentreincarnation.FieldID))
+	if afterID != "" {
+		uid, err := parseGetID(afterID)
+		if err != nil {
+			return nil, err
+		}
+		query = query.Where(agentreincarnation.IDGT(uid))
+	}
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+	rows, err := query.All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]*store.AgentReincarnation, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, entAgentReincarnationToStore(r))
+	}
+	return out, nil
+}
+
+// UpdateAgentReincarnationSnapshots is the state-guarded snapshot rewrite
+// described on store.AgentReincarnationStore. Snapshots go through
+// marshalAppliedConfigSnapshot, the same serialization path as every other
+// write of these columns.
+func (s *AgentReincarnationStore) UpdateAgentReincarnationSnapshots(ctx context.Context, r *store.AgentReincarnation, expectState string) (bool, error) {
+	uid, err := parseGetID(r.ID)
+	if err != nil {
+		return false, err
+	}
+	current, err := s.client.AgentReincarnation.Get(ctx, uid)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return false, nil
+		}
+		return false, mapError(err)
+	}
+
+	builder := s.client.AgentReincarnation.Update().
+		Where(
+			agentreincarnation.IDEQ(uid),
+			agentreincarnation.StateEQ(agentreincarnation.State(expectState)),
+		).
+		// Pin updated_at to its stored value so ent's UpdateDefault does not
+		// move the lifecycle clock the replica-safe sweep reads.
+		SetUpdatedAt(current.UpdatedAt)
+	if cfg := marshalAppliedConfigSnapshot(r.PreviousAppliedConfig); cfg != "" {
+		builder.SetPreviousAppliedConfig(cfg)
+	}
+	if cfg := marshalAppliedConfigSnapshot(r.NewAppliedConfig); cfg != "" {
+		builder.SetNewAppliedConfig(cfg)
+	}
+
+	affected, err := builder.Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return affected > 0, nil
+}

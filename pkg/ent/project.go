@@ -49,6 +49,10 @@ type Project struct {
 	GithubAppStatus string `json:"github_app_status,omitempty"`
 	// GitIdentity holds the value of the "git_identity" field.
 	GitIdentity string `json:"git_identity,omitempty"`
+	// CrossProjectInbound holds the value of the "cross_project_inbound" field.
+	CrossProjectInbound project.CrossProjectInbound `json:"cross_project_inbound,omitempty"`
+	// CrossProjectInboundRevision holds the value of the "cross_project_inbound_revision" field.
+	CrossProjectInboundRevision int64 `json:"cross_project_inbound_revision,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the ProjectQuery when eager-loading is set.
 	Edges        ProjectEdges `json:"edges"`
@@ -80,9 +84,9 @@ func (*Project) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case project.FieldLabels, project.FieldAnnotations:
 			values[i] = new([]byte)
-		case project.FieldGithubInstallationID:
+		case project.FieldGithubInstallationID, project.FieldCrossProjectInboundRevision:
 			values[i] = new(sql.NullInt64)
-		case project.FieldName, project.FieldSlug, project.FieldGitRemote, project.FieldDefaultRuntimeBrokerID, project.FieldSharedDirs, project.FieldCreatedBy, project.FieldOwnerID, project.FieldGithubPermissions, project.FieldGithubAppStatus, project.FieldGitIdentity:
+		case project.FieldName, project.FieldSlug, project.FieldGitRemote, project.FieldDefaultRuntimeBrokerID, project.FieldSharedDirs, project.FieldCreatedBy, project.FieldOwnerID, project.FieldGithubPermissions, project.FieldGithubAppStatus, project.FieldGitIdentity, project.FieldCrossProjectInbound:
 			values[i] = new(sql.NullString)
 		case project.FieldCreated, project.FieldUpdated:
 			values[i] = new(sql.NullTime)
@@ -206,6 +210,18 @@ func (_m *Project) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.GitIdentity = value.String
 			}
+		case project.FieldCrossProjectInbound:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field cross_project_inbound", values[i])
+			} else if value.Valid {
+				_m.CrossProjectInbound = project.CrossProjectInbound(value.String)
+			}
+		case project.FieldCrossProjectInboundRevision:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field cross_project_inbound_revision", values[i])
+			} else if value.Valid {
+				_m.CrossProjectInboundRevision = value.Int64
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -297,6 +313,12 @@ func (_m *Project) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("git_identity=")
 	builder.WriteString(_m.GitIdentity)
+	builder.WriteString(", ")
+	builder.WriteString("cross_project_inbound=")
+	builder.WriteString(fmt.Sprintf("%v", _m.CrossProjectInbound))
+	builder.WriteString(", ")
+	builder.WriteString("cross_project_inbound_revision=")
+	builder.WriteString(fmt.Sprintf("%v", _m.CrossProjectInboundRevision))
 	builder.WriteByte(')')
 	return builder.String()
 }

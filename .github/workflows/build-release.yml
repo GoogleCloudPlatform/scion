@@ -17,15 +17,23 @@ name: Build Multi-Arch Release
 on:
   push:
     tags:
-      - '*'
-
-permissions:
-  contents: write
+      - 'v[0-9]+.[0-9]+.[0-9]+'          # Stable: v0.3.0, v1.2.3
+      - 'v[0-9]+.[0-9]+.[0-9]+-preview.*' # Preview: v0.3.0-preview.1
+      - 'v[0-9]+.[0-9]+.[0-9]+-rc.*'      # RC: v0.3.0-rc.1
+      - 'nightly-[0-9]*'                   # Nightly: nightly-20260916
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Git ref (tag) to build'
+        required: true
+        type: string
 
 jobs:
   build:
     name: Build Multi-Arch Binaries
     runs-on: ubuntu-latest
+    permissions:
+      contents: read     # Only needs to read code for building
     strategy:
       matrix:
         include:
@@ -45,18 +53,20 @@ jobs:
             output: scion-darwin-arm64
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
         with:
+          ref: ${{ inputs.ref || github.ref }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6
         with:
           go-version-file: 'go.mod'
           cache: true
 
       - name: Setup Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6
         with:
           node-version: '24'
           cache: 'npm'
@@ -96,13 +106,111 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 0
+          LDFLAGS: ${{ steps.version.outputs.ldflags }}
+          OUTPUT_NAME: ${{ matrix.output }}
         run: |
           mkdir -p dist
-          go build -ldflags "${{ steps.version.outputs.ldflags }}" -o dist/scion ./cmd/scion
-          tar -czvf ${{ matrix.output }}.tar.gz -C dist scion
+          go build -ldflags "${LDFLAGS}" -o dist/scion ./cmd/scion
+          tar -czvf "${OUTPUT_NAME}.tar.gz" -C dist scion
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: ${{ matrix.output }}
+          path: ${{ matrix.output }}.tar.gz
+          if-no-files-found: error
+
+  build-plugins:
+    name: Build Plugin Binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read     # Only needs to read code for building
+    strategy:
+      matrix:
+        include:
+          # Telegram plugin
+          - goos: linux
+            goarch: amd64
+            module_dir: extras/scion-telegram
+            build_path: ./cmd/scion-plugin-telegram
+            binary_name: scion-plugin-telegram
+            output: scion-plugin-telegram-linux-amd64
+          - goos: linux
+            goarch: arm64
+            module_dir: extras/scion-telegram
+            build_path: ./cmd/scion-plugin-telegram
+            binary_name: scion-plugin-telegram
+            output: scion-plugin-telegram-linux-arm64
+          # Discord plugin
+          - goos: linux
+            goarch: amd64
+            module_dir: extras/scion-discord
+            build_path: ./cmd/scion-plugin-discord
+            binary_name: scion-plugin-discord
+            output: scion-plugin-discord-linux-amd64
+          - goos: linux
+            goarch: arm64
+            module_dir: extras/scion-discord
+            build_path: ./cmd/scion-plugin-discord
+            binary_name: scion-plugin-discord
+            output: scion-plugin-discord-linux-arm64
+          # Slack plugin
+          - goos: linux
+            goarch: amd64
+            module_dir: extras/scion-slack
+            build_path: ./cmd/scion-plugin-slack
+            binary_name: scion-plugin-slack
+            output: scion-plugin-slack-linux-amd64
+          - goos: linux
+            goarch: arm64
+            module_dir: extras/scion-slack
+            build_path: ./cmd/scion-plugin-slack
+            binary_name: scion-plugin-slack
+            output: scion-plugin-slack-linux-arm64
+          # Teams plugin
+          - goos: linux
+            goarch: amd64
+            module_dir: extras/scion-teams
+            build_path: ./cmd/scion-plugin-teams
+            binary_name: scion-plugin-teams
+            output: scion-plugin-teams-linux-amd64
+          - goos: linux
+            goarch: arm64
+            module_dir: extras/scion-teams
+            build_path: ./cmd/scion-plugin-teams
+            binary_name: scion-plugin-teams
+            output: scion-plugin-teams-linux-arm64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6
+        with:
+          go-version-file: '${{ matrix.module_dir }}/go.mod'
+          cache: true
+
+      - name: Build plugin binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+          MODULE_DIR: ${{ matrix.module_dir }}
+          BUILD_PATH: ${{ matrix.build_path }}
+          BINARY_NAME: ${{ matrix.binary_name }}
+          OUTPUT_NAME: ${{ matrix.output }}
+        run: |
+          cd "${MODULE_DIR}"
+          mkdir -p dist
+          go build -o "dist/${BINARY_NAME}" "${BUILD_PATH}"
+          tar -czvf "${GITHUB_WORKSPACE}/${OUTPUT_NAME}.tar.gz" -C dist "${BINARY_NAME}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: ${{ matrix.output }}
           path: ${{ matrix.output }}.tar.gz
@@ -110,11 +218,43 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: build
+    needs: [build, build-plugins]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write    # Needs to create releases and push branches
+    outputs:
+      channel: ${{ steps.channel.outputs.channel }}
+      tag: ${{ steps.channel.outputs.tag }}
     steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Determine release channel
+        id: channel
+        env:
+          REF: ${{ inputs.ref || github.ref }}
+        run: |
+          # Strip refs/tags/ prefix if present
+          TAG="${REF#refs/tags/}"
+          if [[ "$TAG" == nightly-* ]]; then
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+            echo "channel=nightly" >> $GITHUB_OUTPUT
+          elif [[ "$TAG" == *"-preview."* ]]; then
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+            echo "channel=preview" >> $GITHUB_OUTPUT
+          elif [[ "$TAG" == *"-rc."* ]]; then
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+            echo "channel=rc" >> $GITHUB_OUTPUT
+          else
+            echo "prerelease=false" >> $GITHUB_OUTPUT
+            echo "channel=stable" >> $GITHUB_OUTPUT
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           path: binaries
 
@@ -124,9 +264,155 @@ jobs:
           find binaries -type f -exec mv {} release/ \;
 
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:
+          tag_name: ${{ steps.channel.outputs.tag }}
           files: release/*
           draft: false
-          prerelease: false
+          prerelease: ${{ steps.channel.outputs.prerelease == 'true' }}
+          name: ${{ steps.channel.outputs.tag }}
           generate_release_notes: true
+
+      - name: Update channel branch
+        continue-on-error: true
+        id: branch-update
+        env:
+          CHANNEL: ${{ steps.channel.outputs.channel }}
+          TAG: ${{ steps.channel.outputs.tag }}
+        run: |
+          if [[ "$CHANNEL" == "stable" ]]; then
+            BRANCH="stable"
+          elif [[ "$CHANNEL" == "nightly" ]]; then
+            BRANCH="nightly"
+          else
+            BRANCH="preview"
+          fi
+          # Force-update the channel branch to point at this tag's commit
+          git push origin "HEAD:refs/heads/${BRANCH}" --force
+
+      - name: Warn on branch update failure
+        if: steps.branch-update.outcome == 'failure'
+        env:
+          CHANNEL: ${{ steps.channel.outputs.channel }}
+          TAG: ${{ steps.channel.outputs.tag }}
+        run: |
+          if [[ "$CHANNEL" == "stable" ]]; then
+            BRANCH="stable"
+          elif [[ "$CHANNEL" == "nightly" ]]; then
+            BRANCH="nightly"
+          else
+            BRANCH="preview"
+          fi
+          echo "::warning::Failed to update channel branch '${BRANCH}' to ${TAG}. Manual update may be needed."
+
+  update-manifest:
+    name: Update LATEST.json
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write    # Needed to create and merge PRs
+    steps:
+      - name: Checkout main branch
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        with:
+          ref: main
+
+      - name: Update manifest
+        env:
+          CHANNEL: ${{ needs.release.outputs.channel }}
+          TAG: ${{ needs.release.outputs.tag }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          RELEASE_URL="${REPO_URL}/releases/tag/${TAG}"
+
+          # Map rc channel to preview in the manifest
+          MANIFEST_CHANNEL="${CHANNEL}"
+          if [ "${MANIFEST_CHANNEL}" = "rc" ]; then
+            MANIFEST_CHANNEL="preview"
+          fi
+
+          export DATE RELEASE_URL MANIFEST_CHANNEL
+
+          # Create or update LATEST.json using python if available, otherwise jq
+          if command -v python3 >/dev/null 2>&1; then
+            python3 <<'PYEOF'
+          import json, os
+
+          manifest_path = "LATEST.json"
+          if os.path.exists(manifest_path):
+              with open(manifest_path) as f:
+                  manifest = json.load(f)
+          else:
+              manifest = {"channels": {"stable": {"version": "", "date": "", "url": ""}, "preview": {"version": "", "date": "", "url": ""}, "nightly": {"version": "", "date": "", "url": ""}}}
+
+          channel = os.environ["MANIFEST_CHANNEL"]
+          manifest["channels"][channel] = {
+              "version": os.environ["TAG"],
+              "date": os.environ["DATE"],
+              "url": os.environ["RELEASE_URL"]
+          }
+
+          with open(manifest_path, "w") as f:
+              json.dump(manifest, f, indent=2)
+              f.write("\n")
+          PYEOF
+          elif command -v jq >/dev/null 2>&1; then
+            if [ -f LATEST.json ]; then
+              jq --arg ch "${MANIFEST_CHANNEL}" \
+                 --arg ver "${TAG}" \
+                 --arg date "${DATE}" \
+                 --arg url "${RELEASE_URL}" \
+                 '.channels[$ch] = {"version": $ver, "date": $date, "url": $url}' \
+                 LATEST.json > LATEST.json.tmp && mv LATEST.json.tmp LATEST.json
+            fi
+          fi
+
+      - name: Create manifest update PR
+        env:
+          TAG: ${{ needs.release.outputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Check if there are actual changes
+          if git diff --quiet LATEST.json; then
+            echo "No changes to LATEST.json"
+            exit 0
+          fi
+
+          BRANCH="automated/update-manifest-${TAG}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "${BRANCH}"
+          git add LATEST.json
+          git commit -m "chore: update LATEST.json for ${TAG}"
+          git push origin "${BRANCH}"
+
+          PR_URL=$(gh pr create \
+            --title "chore: update LATEST.json for ${TAG}" \
+            --body "Automated manifest update for release ${TAG}." \
+            --base main \
+            --head "${BRANCH}")
+
+          echo "Created PR: ${PR_URL}"
+
+          # Merge directly with retries instead of --auto. cla/google always fails on
+          # bot-authored commits (expected, non-blocking, not a required check) and its
+          # near-instant completion races with enablePullRequestAutoMerge, which rejects
+          # enabling auto-merge if mergeStateStatus is already "unstable" at call time.
+          # A direct merge only cares about `mergeable` (no conflicts), not non-required
+          # check status, so it isn't subject to that race.
+          MERGED="false"
+          for attempt in 1 2 3 4 5; do
+            if gh pr merge "${PR_URL}" --squash --delete-branch; then
+              echo "Merged ${PR_URL} on attempt ${attempt}"
+              MERGED="true"
+              break
+            fi
+            echo "Merge attempt ${attempt} failed, retrying in 10s..."
+            sleep 10
+          done
+
+          if [ "${MERGED}" != "true" ]; then
+            echo "::warning::Failed to merge ${PR_URL} after retries. Manual merge required."
+          fi

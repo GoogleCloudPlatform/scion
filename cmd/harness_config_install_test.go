@@ -182,7 +182,7 @@ func TestInstallLocally_Force(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestInstallLocally_GroveScope(t *testing.T) {
+func TestInstallLocally_ProjectScope(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	origHome := os.Getenv("HOME")

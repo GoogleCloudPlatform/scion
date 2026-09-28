@@ -139,6 +139,23 @@ func TestDecisionAudit_AllowAndDeny(t *testing.T) {
 	}
 }
 
+func TestDecisionAudit_BrokerDenyAudited(t *testing.T) {
+	srv, _ := testServer(t)
+
+	emitter := &recordingDecisionAuditEmitter{}
+	srv.authzService.SetDecisionAuditEmitter(emitter)
+
+	broker := NewBrokerIdentity(tid("audit-broker"))
+	decision := srv.authzService.CheckAccess(context.Background(), broker, Resource{Type: "skill", ID: tid("skill-1")}, ActionRead)
+	require.False(t, decision.Allowed)
+
+	require.Len(t, emitter.records, 1, "broker deny must emit a decision audit record")
+	rec := emitter.records[0]
+	assert.Equal(t, "deny", rec.Result)
+	assert.Equal(t, string(PrincipalKindBroker), rec.PrincipalKind)
+	assert.Equal(t, "broker identities are not supported by authorization", rec.Reason)
+}
+
 func TestDecisionAudit_NoSecrets(t *testing.T) {
 	srv, _ := testServer(t)
 
@@ -527,17 +544,6 @@ func TestExplainAPI_TraceContainsDecidingPolicy(t *testing.T) {
 	if resp.Reason == "" {
 		t.Error("expected non-empty reason in explain response")
 	}
-}
-
-// =============================================================================
-// Mutation Audit Tests
-// =============================================================================
-
-func TestMutationAudit_PolicyCreate(t *testing.T) {
-	// CO1: Policy API removed (returns 410 Gone). Mutation audit for policy
-	// creation is no longer testable via HTTP. Test retained as shell.
-	// Mutation audit for remaining write operations (role bindings,
-	// credential revocation) is covered by TestMutationAudit_CredentialRevocation.
 }
 
 // TestMutationAudit_CredentialRevocation was vacuous pre-RS4: the token ID

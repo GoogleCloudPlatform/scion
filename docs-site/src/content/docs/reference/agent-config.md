@@ -199,7 +199,7 @@ Environment variables are governed by a **separate** precedence system that rank
 the same-named sources differently. A rule taken from one and applied to the other
 gives answers backwards.
 
-See **[Settings Precedence](/reference/settings-precedence/)** for both systems in
+See **[Settings Precedence](/scion/reference/settings-precedence/)** for both systems in
 full, the `SCION_*` variables Scion injects, and the known gaps.
 :::
 

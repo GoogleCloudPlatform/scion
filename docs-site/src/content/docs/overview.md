@@ -1,15 +1,18 @@
 ---
 title: Scion Overview
-description: What Scion is, how it is put together, and where to go next.
+description: An open foundation for agent collaboration, from local experiments to hosted teams.
 ---
 
-Scion is a container-based orchestration platform for running multiple LLM **deep agents**
-concurrently — each isolated in its own container, workspace, and credentials. It lets you run
-groups of specialized agents with distinct identities to parallelize work such as research,
-coding, auditing, and testing.
+Scion is an open-source orchestration platform for teams of AI agents and the people working
+with them. Bring your choice of harnesses and models, define specialized roles, and let agents
+delegate tasks, exchange findings, and work in parallel on code, research, or other project files.
+
+Scion provides execution environments, messaging, reusable skills, and visibility into the work.
+You shape how the team collaborates through instructions and tools. It is a practical testbed
+for emerging agent patterns, with open interfaces for the systems you want to build around it.
 
 The same agents and the same `scion` CLI work whether you are running alone on a laptop with no
-server, or operating a durable, always-on platform for a team. What changes is **how much
+server, or operating a hosted platform for a team. What changes is **how much
 infrastructure sits behind the agents** — captured by Scion's [run modes](/scion/choosing-a-mode/).
 
 ## Choosing a mode

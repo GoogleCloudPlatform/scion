@@ -40,6 +40,10 @@ import (
 //   - secrets/<NAME>: staged as secrets/<NAME> in the bundle
 //   - instructions.md: staged as inputs/instructions.md
 //   - system-prompt.md: staged as inputs/system-prompt.md
+//   - bin/<NAME>: staged as an executable and prepended onto PATH — for
+//     stubbing external CLIs a provisioner shells out to (e.g. antigravity's
+//     `agy --version` gate), so the version-gated path is reachable without
+//     the real binary installed.
 func TestBundleContract(t *testing.T) {
 	python, err := exec.LookPath("python3")
 	if err != nil {
@@ -194,6 +198,26 @@ func runBundleContractCase(t *testing.T, python, hname, caseDir string) {
 		}
 	}
 
+	// Stage optional fixture-local executables (e.g. a fake `agy` CLI so
+	// antigravity's version-gated vertex-ai path is reachable without a real
+	// AGY install) and prepend their directory to PATH.
+	extraPathDir := ""
+	if binEntries, err := os.ReadDir(filepath.Join(caseDir, "bin")); err == nil {
+		extraPathDir = filepath.Join(tmpHome, "fixture-bin")
+		if err := os.MkdirAll(extraPathDir, 0755); err != nil {
+			t.Fatalf("mkdir fixture-bin: %v", err)
+		}
+		for _, be := range binEntries {
+			data, err := os.ReadFile(filepath.Join(caseDir, "bin", be.Name()))
+			if err != nil {
+				t.Fatalf("read bin/%s: %v", be.Name(), err)
+			}
+			if err := os.WriteFile(filepath.Join(extraPathDir, be.Name()), data, 0755); err != nil {
+				t.Fatalf("write bin/%s: %v", be.Name(), err)
+			}
+		}
+	}
+
 	// Build the manifest.
 	manifest := map[string]interface{}{
 		"schema_version":     1,
@@ -249,6 +273,9 @@ func runBundleContractCase(t *testing.T, python, hname, caseDir string) {
 	}
 	cmd := exec.Command(python, filepath.Join(bundleDir, "provision.py"), "--manifest", manifestPath)
 	cmd.Env = append(baseEnv, "HOME="+tmpHome, "PYTHONDONTWRITEBYTECODE=1")
+	if extraPathDir != "" {
+		cmd.Env = append(cmd.Env, "PATH="+extraPathDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	}
 	output, err := cmd.CombinedOutput()
 
 	gotExitCode := 0

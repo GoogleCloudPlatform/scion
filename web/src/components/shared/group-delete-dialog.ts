@@ -276,8 +276,8 @@ export class ScionGroupDeleteDialog extends LitElement {
         <div class="constraint-gate-body">
           <p>
             "${groupName}" is the subject of one or more access constraints. Deleting it would relax
-            those constraints, so it requires access-constraint administration permission, which you do
-            not hold.
+            those constraints, so it requires access-constraint administration permission, which you
+            do not hold.
           </p>
         </div>
 

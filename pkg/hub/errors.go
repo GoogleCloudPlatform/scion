@@ -84,6 +84,48 @@ const (
 	// Quota enforcement error codes
 	ErrCodeQuotaExceeded = "quota_exceeded"
 
+	// Conversation resolution error codes (Tranche G read-switch)
+
+	// ErrCodeConversationNotResolved is returned when the read-switch is ON
+	// but the conversation could not be resolved from the request parameters.
+	// This is a client-visible behaviour change: the endpoint returns a typed
+	// error instead of silently falling back to the legacy channel+thread
+	// filter. Status 409 — see G3 brief §3.
+	ErrCodeConversationNotResolved = "conversation_not_resolved"
+
+	// ErrCodeUnsupportedCapability is returned when a request exercises a
+	// capability that the server does not yet support (e.g. cross-project
+	// attachment transfer). Status 422.
+	ErrCodeUnsupportedCapability = "unsupported_capability"
+
+	// ErrCodeInvalidDMKey is returned when a DM key does not have exactly 5
+	// colon-separated parts. Distinguishable from ErrCodeConversationNotResolved
+	// because this is a parse failure, not a lookup miss.
+	ErrCodeInvalidDMKey = "invalid_dm_key"
+
+	// ErrCodeThreadProjectRequired is returned when a thread_id query param
+	// is present but the agent has no ProjectID, making thread conversation
+	// resolution impossible. Distinct from conversation_not_resolved so a VM
+	// operator can tell "agent has no project" apart from "conversation row
+	// missing". Without this, the request would silently fall through to the
+	// DM branch and serve wrong data (G3-f).
+	ErrCodeThreadProjectRequired = "thread_project_required"
+
+	// Addressee resolution error codes (DEF-126).
+
+	// ErrCodeAddrUnknown is returned when a user: addressee resolves to zero
+	// users — no row matches the supplied email or UUID.
+	ErrCodeAddrUnknown = "addr_unknown"
+
+	// ErrCodeAddrAmbiguous is returned when a user: addressee resolves to
+	// more than one user. This can only happen when TotalCount > 1 for a
+	// ListUsers query (the old len(Items)==1 check was masked by LIMIT 1).
+	ErrCodeAddrAmbiguous = "addr_ambiguous"
+
+	// ErrCodeAddrMalformed is returned when a user: addressee token is
+	// neither a UUID nor an email address. Display-name resolution is no
+	// longer supported because display_name has no uniqueness constraint.
+	ErrCodeAddrMalformed = "addr_malformed"
 	// Governance error codes — B5 transactional governance for boundary mutations
 	// and adjacent-domain operations.
 
@@ -224,6 +266,10 @@ func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 		statusCode = http.StatusConflict
 		code = ErrCodeConflict
 		message = "Principal already has a built-in membership role in this project"
+	case errors.Is(err, store.ErrIdentityKeyConflict):
+		statusCode = http.StatusConflict
+		code = ErrCodeConflict
+		message = "display name collides with another agent in this project"
 	case errors.Is(err, secret.ErrNoSecretBackend):
 		statusCode = http.StatusNotImplemented
 		code = ErrCodeUnavailable
@@ -263,6 +309,20 @@ func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 	}
 
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// writeStoreErr maps a store lookup error to an HTTP response: a
+// store.ErrNotFound gets the resource-specific "<resource> not found" body
+// via NotFound, and anything else falls through to writeErrorFromErr's
+// generic mapping. This is the common shape of the not-found check that
+// precedes authorization in the get/upload/finalize/download/validate/clone
+// handlers, so callers don't each repeat the branch.
+func writeStoreErr(w http.ResponseWriter, err error, resource string) {
+	if errors.Is(err, store.ErrNotFound) {
+		NotFound(w, resource)
+		return
+	}
+	writeErrorFromErr(w, err, "")
 }
 
 // NotFound writes a 404 Not Found response.

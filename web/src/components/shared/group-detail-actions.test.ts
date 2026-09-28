@@ -308,9 +308,7 @@ describe('constraint_gate boundary dialog href', () => {
     const fixture = loadFixture<{ error: { message: string } }>('error-constraint-gate.json');
     const msg = fixture.error.message;
     // The classifyError function checks for these strings
-    expect(
-      msg.includes('access constraint') || msg.includes('access_constraint')
-    ).toBe(true);
+    expect(msg.includes('access constraint') || msg.includes('access_constraint')).toBe(true);
   });
 });
 

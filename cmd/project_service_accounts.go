@@ -21,7 +21,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/spf13/cobra"
@@ -41,7 +40,7 @@ material is stored — the Hub impersonates the SA at token-generation time.
 
 Examples:
   scion project service-accounts list
-  scion project service-accounts add agent-worker@project.iam.gserviceaccount.com --project my-project
+  scion project service-accounts add agent-worker@project.iam.gserviceaccount.com --gcp-project my-project
   scion project service-accounts verify <id>
   scion project service-accounts remove <id>`,
 }
@@ -56,10 +55,11 @@ IAM Credentials API. The Hub's own service account must have
 roles/iam.serviceAccountTokenCreator on the target SA.
 
 Examples:
-  scion project service-accounts add agent-worker@my-project.iam.gserviceaccount.com --project my-project
-  scion project service-accounts add agent-worker@my-project.iam.gserviceaccount.com --project my-project --name "Worker SA"`,
-	Args: cobra.ExactArgs(1),
-	RunE: runSAAdd,
+  scion project service-accounts add agent-worker@my-project.iam.gserviceaccount.com --gcp-project my-project
+  scion project service-accounts add agent-worker@my-project.iam.gserviceaccount.com --gcp-project my-project --name "Worker SA"`,
+	Args:    cobra.ExactArgs(1),
+	PreRunE: checkGCPProjectFlag,
+	RunE:    runSAAdd,
 }
 
 var saListCmd = &cobra.Command{
@@ -135,9 +135,9 @@ func init() {
 	projectServiceAccountsCmd.AddCommand(saVerifyCmd)
 	projectServiceAccountsCmd.AddCommand(saMintCmd)
 
-	saAddCmd.Flags().StringVar(&saProjectID, "project", "", "GCP project ID (required)")
+	saAddCmd.Flags().StringVar(&saProjectID, "gcp-project", "", "GCP project ID (required)")
 	saAddCmd.Flags().StringVar(&saDisplayName, "name", "", "Display name for the service account")
-	_ = saAddCmd.MarkFlagRequired("project")
+	_ = saAddCmd.MarkFlagRequired("gcp-project")
 
 	saMintCmd.Flags().StringVar(&saMintID, "account-id", "", "Custom account ID (will be prefixed with scion-)")
 	saMintCmd.Flags().StringVar(&saDisplayName, "name", "", "Display name for the service account")
@@ -147,17 +147,7 @@ func init() {
 
 // resolveProjectForSA resolves the project ID and creates a hub client for SA operations.
 func resolveProjectForSA() (hubclient.Client, string, error) {
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	settings, client, err := loadHubClient()
 	if err != nil {
 		return nil, "", err
 	}

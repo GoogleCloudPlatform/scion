@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"runtime"
@@ -319,6 +320,10 @@ func (e *ErrorRuntime) Sync(ctx context.Context, id string, direction SyncDirect
 }
 
 func (e *ErrorRuntime) Exec(ctx context.Context, id string, cmd []string) (string, error) {
+	return "", e.Err
+}
+
+func (e *ErrorRuntime) ExecWithStdin(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
 	return "", e.Err
 }
 

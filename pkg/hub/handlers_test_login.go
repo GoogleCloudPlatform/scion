@@ -113,6 +113,7 @@ func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 
 	// Find or create user
 	user, err := ws.store.GetUserByEmail(ctx, req.Email)
+	syncGrants := true
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		slog.Error("test-login: failed to look up user", "email", req.Email, "error", err)
 		http.Error(w, "failed to look up user", http.StatusInternalServerError)
@@ -141,10 +142,19 @@ func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := ws.store.UpdateUser(ctx, user); err != nil {
 			slog.Warn("test-login: failed to update user", "email", req.Email, "error", err)
+			syncGrants = false
 		}
 	}
 
-	ensureHubMembership(ctx, ws.store, user.ID)
+	// Make the hub-members group and hub-viewer binding match the stored role
+	// (mirrors the other login paths). Skipped when UpdateUser failed, so the
+	// grants keep following the persisted role. Best-effort: a failure is
+	// logged and the login continues.
+	if syncGrants {
+		if err := syncHubRoleGrants(ctx, ws.store, user.ID, user.Role, store.SystemReconcileCreatedBy); err != nil {
+			slog.Warn("test-login: failed to sync hub role grants", "email", req.Email, "user_id", user.ID, "role", user.Role, "error", err)
+		}
+	}
 
 	// Generate tokens
 	accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.GenerateTokenPair(

@@ -16,11 +16,9 @@ package hubclient
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"strconv"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -31,18 +29,6 @@ type MessageChannel struct {
 	Name     string `json:"name"`
 	Status   string `json:"status"`
 	Observer bool   `json:"observer,omitempty"`
-}
-
-// ConversationResolveRequest is the request body for resolving a conversation reference.
-type ConversationResolveRequest struct {
-	Reference string `json:"reference"`
-	ProjectID string `json:"project_id,omitempty"`
-}
-
-// ConversationResolveResponse is the response from resolving a conversation reference.
-type ConversationResolveResponse struct {
-	ConversationID string `json:"conversation_id"`
-	Created        bool   `json:"created"`
 }
 
 // MessageService provides operations on the user's message inbox.
@@ -61,11 +47,6 @@ type MessageService interface {
 
 	// ListChannels returns the registered message broker channels.
 	ListChannels(ctx context.Context) ([]MessageChannel, error)
-
-	// ResolveConversation resolves a conversation reference string (conv:<id>,
-	// @<agent>, @<email>, #<thread>) to a conversation ID. Creates the
-	// conversation if needed (resolve-or-create for @ references).
-	ResolveConversation(ctx context.Context, req *ConversationResolveRequest) (*ConversationResolveResponse, error)
 }
 
 // messageService is the implementation of MessageService.
@@ -88,53 +69,6 @@ type Message = store.Message
 
 // MessageListResult is a local alias for list results.
 type MessageListResult = store.ListResult[store.Message]
-
-// AgentMessage is a lightweight view of a message used in agent-scoped listings.
-type AgentMessage struct {
-	ID          string    `json:"id"`
-	ProjectID   string    `json:"projectId"`
-	Sender      string    `json:"sender"`
-	SenderID    string    `json:"senderId"`
-	Recipient   string    `json:"recipient"`
-	RecipientID string    `json:"recipientId"`
-	Msg         string    `json:"msg"`
-	Type        string    `json:"type"`
-	Urgent      bool      `json:"urgent,omitempty"`
-	Broadcasted bool      `json:"broadcasted,omitempty"`
-	Read        bool      `json:"read"`
-	AgentID     string    `json:"agentId"`
-	CreatedAt   time.Time `json:"createdAt"`
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (m *AgentMessage) UnmarshalJSON(data []byte) error {
-	type Alias AgentMessage
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(m),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if m.ProjectID == "" && aux.GroveID != "" {
-		m.ProjectID = aux.GroveID
-	}
-	return nil
-}
-
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (m AgentMessage) MarshalJSON() ([]byte, error) {
-	type Alias AgentMessage
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId,omitempty"`
-	}{
-		Alias:   Alias(m),
-		GroveID: m.ProjectID,
-	})
-}
 
 // List returns messages for the authenticated user.
 func (s *messageService) List(ctx context.Context, opts *ListMessagesOptions) (*store.ListResult[store.Message], error) {
@@ -218,13 +152,4 @@ func (s *messageService) ListChannels(ctx context.Context) ([]MessageChannel, er
 		return nil, fmt.Errorf("decoding message channels: %w", err)
 	}
 	return result.Channels, nil
-}
-
-// ResolveConversation resolves a conversation reference string to a conversation ID.
-func (s *messageService) ResolveConversation(ctx context.Context, req *ConversationResolveRequest) (*ConversationResolveResponse, error) {
-	resp, err := s.c.post(ctx, "/api/v1/conversations/resolve", req, nil)
-	if err != nil {
-		return nil, err
-	}
-	return apiclient.DecodeResponse[ConversationResolveResponse](resp)
 }

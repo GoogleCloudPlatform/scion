@@ -249,7 +249,10 @@ func (s *Server) handleManagedAgentLifecycle(w http.ResponseWriter, r *http.Requ
 
 	agent.Phase = newPhase
 	s.events.PublishAgentStatus(ctx, agent)
-	writeJSON(w, http.StatusOK, agent)
+
+	respAgent := *agent
+	respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(agent.AppliedConfig, canViewAgentEnv(ctx, s, agent))
+	writeJSON(w, http.StatusOK, respAgent)
 }
 
 // formatManagedAgentLook returns the latest interaction formatted as structured text.

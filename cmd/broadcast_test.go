@@ -207,14 +207,11 @@ func TestBroadcastCmd_WithInterrupt(t *testing.T) {
 
 func TestBroadcastCmd_BuildMessage(t *testing.T) {
 	origBcastInterrupt := bcastInterrupt
-	origBcastVisibility := bcastVisibility
 	defer func() {
 		bcastInterrupt = origBcastInterrupt
-		bcastVisibility = origBcastVisibility
 	}()
 
 	bcastInterrupt = true
-	bcastVisibility = "verbose"
 
 	msg := buildBroadcastMessage("user:alice", "stop everything")
 	assert.Equal(t, "user:alice", msg.Sender)
@@ -222,5 +219,4 @@ func TestBroadcastCmd_BuildMessage(t *testing.T) {
 	assert.Equal(t, "stop everything", msg.Msg)
 	assert.True(t, msg.Broadcasted)
 	assert.True(t, msg.Urgent)
-	assert.Equal(t, "verbose", msg.Visibility)
 }

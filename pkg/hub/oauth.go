@@ -280,13 +280,6 @@ func (s *OAuthService) GetAuthorizationURLForClient(clientType OAuthClientType, 
 	}
 }
 
-// getGoogleAuthURL generates a Google OAuth authorization URL using the default config.
-//
-//nolint:unused // Kept for direct OAuth flow compatibility.
-func (s *OAuthService) getGoogleAuthURL(callbackURL, state string) (string, error) {
-	return s.getGoogleAuthURLWithConfig(s.config.CLI.Google, callbackURL, state)
-}
-
 // getGoogleAuthURLWithConfig generates a Google OAuth authorization URL with the given config.
 func (s *OAuthService) getGoogleAuthURLWithConfig(cfg OAuthProviderConfig, callbackURL, state string) (string, error) {
 	if cfg.ClientID == "" {
@@ -304,13 +297,6 @@ func (s *OAuthService) getGoogleAuthURLWithConfig(cfg OAuthProviderConfig, callb
 	}
 
 	return googleAuthURL + "?" + params.Encode(), nil
-}
-
-// getGitHubAuthURL generates a GitHub OAuth authorization URL using the default config.
-//
-//nolint:unused // Kept for direct OAuth flow compatibility.
-func (s *OAuthService) getGitHubAuthURL(callbackURL, state string) (string, error) {
-	return s.getGitHubAuthURLWithConfig(s.config.CLI.GitHub, callbackURL, state)
 }
 
 // getGitHubAuthURLWithConfig generates a GitHub OAuth authorization URL with the given config.
@@ -352,13 +338,6 @@ func (s *OAuthService) ExchangeCodeForClient(ctx context.Context, clientType OAu
 	}
 }
 
-// exchangeGoogleCode exchanges a Google authorization code for user info.
-//
-//nolint:unused // Kept for direct OAuth flow compatibility.
-func (s *OAuthService) exchangeGoogleCode(ctx context.Context, code, callbackURL string) (*OAuthUserInfo, error) {
-	return s.exchangeGoogleCodeWithConfig(ctx, s.config.CLI.Google, code, callbackURL)
-}
-
 // exchangeGoogleCodeWithConfig exchanges a Google authorization code for user info using the given config.
 func (s *OAuthService) exchangeGoogleCodeWithConfig(ctx context.Context, cfg OAuthProviderConfig, code, callbackURL string) (*OAuthUserInfo, error) {
 	if cfg.ClientID == "" || cfg.ClientSecret == "" {
@@ -378,13 +357,6 @@ func (s *OAuthService) exchangeGoogleCodeWithConfig(ctx context.Context, cfg OAu
 	}
 
 	return userInfo, nil
-}
-
-// exchangeGitHubCode exchanges a GitHub authorization code for user info.
-//
-//nolint:unused // Kept for direct OAuth flow compatibility.
-func (s *OAuthService) exchangeGitHubCode(ctx context.Context, code, callbackURL string) (*OAuthUserInfo, error) {
-	return s.exchangeGitHubCodeWithConfig(ctx, s.config.CLI.GitHub, code, callbackURL)
 }
 
 // exchangeGitHubCodeWithConfig exchanges a GitHub authorization code for user info using the given config.
@@ -455,13 +427,6 @@ func (s *OAuthService) exchangeCodeForToken(ctx context.Context, tokenURL, clien
 	}
 
 	return &tokenResp, nil
-}
-
-// exchangeGitHubCodeForToken exchanges a GitHub authorization code for an access token.
-//
-//nolint:unused // Kept for direct OAuth flow compatibility.
-func (s *OAuthService) exchangeGitHubCodeForToken(ctx context.Context, code, callbackURL string) (*tokenResponse, error) {
-	return s.exchangeGitHubCodeForTokenWithConfig(ctx, s.config.CLI.GitHub, code, callbackURL)
 }
 
 // exchangeGitHubCodeForTokenWithConfig exchanges a GitHub authorization code for an access token using the given config.

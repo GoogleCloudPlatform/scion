@@ -72,6 +72,8 @@ function serveUserPrefs(stored: Record<string, string> = {}): void {
         spaceSortMode: body.spaceSortMode || 'activity',
         threadSortMode: body.threadSortMode || 'activity',
         spaceOrder: body.spaceOrder ?? '',
+        threadOrder: body.threadOrder ?? '{}',
+        threadGroups: body.threadGroups ?? '{}',
       };
     }
     return Promise.resolve(new Response(JSON.stringify(stored), { status: 200 }));
@@ -154,6 +156,8 @@ describe('space rail — prefs round trip', () => {
       spaceSortMode: 'custom',
       threadSortMode: 'activity',
       spaceOrder: JSON.stringify(['p-b', 'p-a']),
+      threadOrder: '{}',
+      threadGroups: '{}',
     });
     expect(el.prefs.spaceOrder).toEqual(['p-b', 'p-a']);
   });
@@ -224,7 +228,11 @@ describe('space rail — sort mode selection', () => {
 
   it('keeps an existing custom order when custom is re-selected', async () => {
     const el = createRail();
-    el.prefs = { spaceSortMode: 'activity', threadSortMode: 'activity', spaceOrder: ['p-c', 'p-a'] };
+    el.prefs = {
+      spaceSortMode: 'activity',
+      threadSortMode: 'activity',
+      spaceOrder: ['p-c', 'p-a'],
+    };
 
     selectSort(el, 'custom');
     await Promise.resolve();
@@ -361,11 +369,7 @@ describe('space rail — sort menu and space menu rendering', () => {
     await el.updateComplete;
 
     const items = [...el.shadowRoot.querySelectorAll('.rail-toolbar sl-menu-item')];
-    expect(items.map((i: any) => i.getAttribute('value'))).toEqual([
-      'activity',
-      'alpha',
-      'custom',
-    ]);
+    expect(items.map((i: any) => i.getAttribute('value'))).toEqual(['activity', 'alpha', 'custom']);
     const checked = items.filter((i: any) => i.hasAttribute('checked'));
     expect(checked).toHaveLength(1);
     expect(checked[0]?.getAttribute('value')).toBe('custom');

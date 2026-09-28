@@ -203,6 +203,34 @@ func (_c *ProjectCreate) SetNillableGitIdentity(v *string) *ProjectCreate {
 	return _c
 }
 
+// SetCrossProjectInbound sets the "cross_project_inbound" field.
+func (_c *ProjectCreate) SetCrossProjectInbound(v project.CrossProjectInbound) *ProjectCreate {
+	_c.mutation.SetCrossProjectInbound(v)
+	return _c
+}
+
+// SetNillableCrossProjectInbound sets the "cross_project_inbound" field if the given value is not nil.
+func (_c *ProjectCreate) SetNillableCrossProjectInbound(v *project.CrossProjectInbound) *ProjectCreate {
+	if v != nil {
+		_c.SetCrossProjectInbound(*v)
+	}
+	return _c
+}
+
+// SetCrossProjectInboundRevision sets the "cross_project_inbound_revision" field.
+func (_c *ProjectCreate) SetCrossProjectInboundRevision(v int64) *ProjectCreate {
+	_c.mutation.SetCrossProjectInboundRevision(v)
+	return _c
+}
+
+// SetNillableCrossProjectInboundRevision sets the "cross_project_inbound_revision" field if the given value is not nil.
+func (_c *ProjectCreate) SetNillableCrossProjectInboundRevision(v *int64) *ProjectCreate {
+	if v != nil {
+		_c.SetCrossProjectInboundRevision(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *ProjectCreate) SetID(v uuid.UUID) *ProjectCreate {
 	_c.mutation.SetID(v)
@@ -275,6 +303,14 @@ func (_c *ProjectCreate) defaults() {
 		v := project.DefaultUpdated()
 		_c.mutation.SetUpdated(v)
 	}
+	if _, ok := _c.mutation.CrossProjectInbound(); !ok {
+		v := project.DefaultCrossProjectInbound
+		_c.mutation.SetCrossProjectInbound(v)
+	}
+	if _, ok := _c.mutation.CrossProjectInboundRevision(); !ok {
+		v := project.DefaultCrossProjectInboundRevision
+		_c.mutation.SetCrossProjectInboundRevision(v)
+	}
 	if _, ok := _c.mutation.ID(); !ok {
 		v := project.DefaultID()
 		_c.mutation.SetID(v)
@@ -304,6 +340,17 @@ func (_c *ProjectCreate) check() error {
 	}
 	if _, ok := _c.mutation.Updated(); !ok {
 		return &ValidationError{Name: "updated", err: errors.New(`ent: missing required field "Project.updated"`)}
+	}
+	if _, ok := _c.mutation.CrossProjectInbound(); !ok {
+		return &ValidationError{Name: "cross_project_inbound", err: errors.New(`ent: missing required field "Project.cross_project_inbound"`)}
+	}
+	if v, ok := _c.mutation.CrossProjectInbound(); ok {
+		if err := project.CrossProjectInboundValidator(v); err != nil {
+			return &ValidationError{Name: "cross_project_inbound", err: fmt.Errorf(`ent: validator failed for field "Project.cross_project_inbound": %w`, err)}
+		}
+	}
+	if _, ok := _c.mutation.CrossProjectInboundRevision(); !ok {
+		return &ValidationError{Name: "cross_project_inbound_revision", err: errors.New(`ent: missing required field "Project.cross_project_inbound_revision"`)}
 	}
 	return nil
 }
@@ -400,6 +447,14 @@ func (_c *ProjectCreate) createSpec() (*Project, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.GitIdentity(); ok {
 		_spec.SetField(project.FieldGitIdentity, field.TypeString, value)
 		_node.GitIdentity = value
+	}
+	if value, ok := _c.mutation.CrossProjectInbound(); ok {
+		_spec.SetField(project.FieldCrossProjectInbound, field.TypeEnum, value)
+		_node.CrossProjectInbound = value
+	}
+	if value, ok := _c.mutation.CrossProjectInboundRevision(); ok {
+		_spec.SetField(project.FieldCrossProjectInboundRevision, field.TypeInt64, value)
+		_node.CrossProjectInboundRevision = value
 	}
 	if nodes := _c.mutation.AgentsIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
@@ -706,6 +761,36 @@ func (u *ProjectUpsert) UpdateGitIdentity() *ProjectUpsert {
 // ClearGitIdentity clears the value of the "git_identity" field.
 func (u *ProjectUpsert) ClearGitIdentity() *ProjectUpsert {
 	u.SetNull(project.FieldGitIdentity)
+	return u
+}
+
+// SetCrossProjectInbound sets the "cross_project_inbound" field.
+func (u *ProjectUpsert) SetCrossProjectInbound(v project.CrossProjectInbound) *ProjectUpsert {
+	u.Set(project.FieldCrossProjectInbound, v)
+	return u
+}
+
+// UpdateCrossProjectInbound sets the "cross_project_inbound" field to the value that was provided on create.
+func (u *ProjectUpsert) UpdateCrossProjectInbound() *ProjectUpsert {
+	u.SetExcluded(project.FieldCrossProjectInbound)
+	return u
+}
+
+// SetCrossProjectInboundRevision sets the "cross_project_inbound_revision" field.
+func (u *ProjectUpsert) SetCrossProjectInboundRevision(v int64) *ProjectUpsert {
+	u.Set(project.FieldCrossProjectInboundRevision, v)
+	return u
+}
+
+// UpdateCrossProjectInboundRevision sets the "cross_project_inbound_revision" field to the value that was provided on create.
+func (u *ProjectUpsert) UpdateCrossProjectInboundRevision() *ProjectUpsert {
+	u.SetExcluded(project.FieldCrossProjectInboundRevision)
+	return u
+}
+
+// AddCrossProjectInboundRevision adds v to the "cross_project_inbound_revision" field.
+func (u *ProjectUpsert) AddCrossProjectInboundRevision(v int64) *ProjectUpsert {
+	u.Add(project.FieldCrossProjectInboundRevision, v)
 	return u
 }
 
@@ -1037,6 +1122,41 @@ func (u *ProjectUpsertOne) UpdateGitIdentity() *ProjectUpsertOne {
 func (u *ProjectUpsertOne) ClearGitIdentity() *ProjectUpsertOne {
 	return u.Update(func(s *ProjectUpsert) {
 		s.ClearGitIdentity()
+	})
+}
+
+// SetCrossProjectInbound sets the "cross_project_inbound" field.
+func (u *ProjectUpsertOne) SetCrossProjectInbound(v project.CrossProjectInbound) *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetCrossProjectInbound(v)
+	})
+}
+
+// UpdateCrossProjectInbound sets the "cross_project_inbound" field to the value that was provided on create.
+func (u *ProjectUpsertOne) UpdateCrossProjectInbound() *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateCrossProjectInbound()
+	})
+}
+
+// SetCrossProjectInboundRevision sets the "cross_project_inbound_revision" field.
+func (u *ProjectUpsertOne) SetCrossProjectInboundRevision(v int64) *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetCrossProjectInboundRevision(v)
+	})
+}
+
+// AddCrossProjectInboundRevision adds v to the "cross_project_inbound_revision" field.
+func (u *ProjectUpsertOne) AddCrossProjectInboundRevision(v int64) *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.AddCrossProjectInboundRevision(v)
+	})
+}
+
+// UpdateCrossProjectInboundRevision sets the "cross_project_inbound_revision" field to the value that was provided on create.
+func (u *ProjectUpsertOne) UpdateCrossProjectInboundRevision() *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateCrossProjectInboundRevision()
 	})
 }
 
@@ -1535,6 +1655,41 @@ func (u *ProjectUpsertBulk) UpdateGitIdentity() *ProjectUpsertBulk {
 func (u *ProjectUpsertBulk) ClearGitIdentity() *ProjectUpsertBulk {
 	return u.Update(func(s *ProjectUpsert) {
 		s.ClearGitIdentity()
+	})
+}
+
+// SetCrossProjectInbound sets the "cross_project_inbound" field.
+func (u *ProjectUpsertBulk) SetCrossProjectInbound(v project.CrossProjectInbound) *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetCrossProjectInbound(v)
+	})
+}
+
+// UpdateCrossProjectInbound sets the "cross_project_inbound" field to the value that was provided on create.
+func (u *ProjectUpsertBulk) UpdateCrossProjectInbound() *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateCrossProjectInbound()
+	})
+}
+
+// SetCrossProjectInboundRevision sets the "cross_project_inbound_revision" field.
+func (u *ProjectUpsertBulk) SetCrossProjectInboundRevision(v int64) *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetCrossProjectInboundRevision(v)
+	})
+}
+
+// AddCrossProjectInboundRevision adds v to the "cross_project_inbound_revision" field.
+func (u *ProjectUpsertBulk) AddCrossProjectInboundRevision(v int64) *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.AddCrossProjectInboundRevision(v)
+	})
+}
+
+// UpdateCrossProjectInboundRevision sets the "cross_project_inbound_revision" field to the value that was provided on create.
+func (u *ProjectUpsertBulk) UpdateCrossProjectInboundRevision() *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateCrossProjectInboundRevision()
 	})
 }
 

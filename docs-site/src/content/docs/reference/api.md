@@ -22,11 +22,17 @@ Most endpoints require a `Bearer` token in the `Authorization` header.
 - `POST /`: Dispatch a new agent.
 - `GET /:id`: Get detailed agent state (phase, activity, detail).
 - `POST /:id/suspend`: Suspend a running agent, preserving its harness session for a later resume. Sets the phase to `suspended`. Requires a harness that supports session resume.
-- `POST /:id/start`, `POST /:id/restart`: Start/restart an agent. Starting a `suspended` agent resumes (continues) its harness session; starting a `stopped` or `error` agent runs a fresh session.
+- `POST /:id/start`, `POST /:id/restart`: Start/restart an agent. Starting a `suspended` agent resumes (continues) its harness session; starting a `stopped` or `error` agent runs a fresh session. To continue the interrupted session of an `error` agent instead, send `{"forceResume": true}` as the `start` body (best effort). `forceResume` has no effect in other phases.
+- `POST /:id/reincarnate`: Migrate the agent to a new generation with the same ID and slug and a freshly resolved config (see [`scion reincarnate`](/scion/reference/cli/#scion-reincarnate)). Body: `handoff` (optional text for the new generation's first task, max 256 KiB) and `dryRun`. Returns `202 Accepted` with the pending plan, or `200 OK` with the plan only for a dry run. The migration runs in the background. Also available as `POST /api/v1/projects/:projectId/agents/:agentIdOrSlug/reincarnate`.
 - `DELETE /:id`: Stop and remove an agent.
 - `GET /:id/logs`: Stream agent logs (WebSocket).
+- `GET /:id/pty`: Interactive terminal (WebSocket). The Hub relays the stream to the agent's Runtime Broker and sends keepalive pings every 30 seconds, so a dead peer is detected instead of leaving the connection hanging. See [PTY close codes](#pty-close-codes).
 
 There is no separate resume endpoint: resuming is the **start** action applied to a `suspended` agent. A `suspended` agent is also resumed automatically when a message is delivered to it with the `wake` option set.
+
+Agent creation and start are rejected with `429 Too Many Requests` (`quota_exceeded`) when the target runtime broker is at its `max_agents_per_broker` limit (see [Admin](#admin-apiv1admin)).
+
+Agent responses no longer include a `visibility` field. Access is determined by scope and grants only.
 
 Agent state uses a layered model:
 - **Phase**: Lifecycle stage (`created`, `provisioning`, `cloning`, `starting`, `running`, `stopping`, `stopped`), plus `suspended` (paused for resume) and `error` (the agent crashed — restartable).
@@ -34,8 +40,11 @@ Agent state uses a layered model:
 - **Detail**: Freeform context (tool name, message, task summary).
 
 #### Projects (`/api/v1/projects`)
+
+The legacy `/api/v1/groves` aliases have been removed. Requests to `/api/v1/groves` or any path under it now return `404 Not Found`; use `/api/v1/projects`.
+
 - `GET /`: List projects you have access to.
-- `POST /register`: Register or link a project repository.
+- `POST /register`: Register or link a project repository. If the request resolves to an existing project, the caller needs update access to that project; without it, the request is rejected before anything changes. The same check applies to creating a project that resolves to an existing one and to linking a provider.
 - `GET /:id`: Get project metadata and statistics.
 - `GET /:id/secrets`: Manage environment secrets for the project.
 - `GET /:id/settings/resolved`: Get project settings indicating whether a Hub default exists per-setting (non-admin gated).
@@ -43,7 +52,7 @@ Agent state uses a layered model:
 
 #### Runtime Brokers (`/api/v1/brokers`)
 - `GET /`: List registered runtime brokers.
-- `POST /register`: Register a new compute node.
+- `POST /register`: Register a new compute node. The caller becomes the broker's owner. Re-registering an existing broker requires ownership (see [Broker Ownership](/scion/hosted/ha/runtime-broker/#broker-ownership)).
 - `POST /join`: Complete the two-phase broker registration.
 - `GET /:id`: Get broker status and capacity.
 
@@ -79,6 +88,13 @@ The stored MIME type is derived from the file's content plus its extension; the 
 #### Auth (`/api/v1/auth`)
 - `GET /scopes`: Dynamically discover all available User Access Token (UAT) scopes and their descriptions.
 
+#### Users (`/api/v1/users`)
+- `GET /`: List users (admin only).
+- `GET /:id`: Get user details and capabilities.
+- `PATCH /:id`: Update user attributes (e.g., role).
+- `DELETE /:id`: Delete a user.
+- `POST /:id/revoke-sessions`: Revoke all active sessions for a user (admin only). Increments the user's session generation counter, causing every existing cookie-based session to be invalidated on the next request. The affected user is forced to re-authenticate.
+
 #### Admin (`/api/v1/admin`)
 - `GET /roles`: List Role Definitions.
 - `POST /roles`, `PUT /roles/:id`, `DELETE /roles/:id`: Manage Role Definitions (requires appropriate administrative capabilities). Note that `updateRoleDefinition` includes a `CanDelegate` check to prevent privilege escalation.
@@ -89,6 +105,8 @@ The stored MIME type is derived from the file's content plus its extension; the 
 - `GET /entitlements/:id`: Inspect an Entitlement Binding.
 - `GET /gcp-quota`: View GCP quota status.
 - `GET /messaging/divergence`: View a read-only snapshot of migration divergence counters and metadata for the conversation model transition (requires `hub.diagnostics.read` permission).
+
+The Hub seeds a `max_agents_per_broker` limit (default **12**) that caps how many agents can be running on a single runtime broker. It is checked before an agent is created, and again when an agent is started, resumed, or restarted. Only running agents count: stop, suspend, and exit release an agent's slot. The Hub reconciles stale reservations at startup and hourly. To change the default for every broker, update the limit definition with `PUT /limits/:id`. To override it for one broker, add an entitlement binding with `POST /limits/:id/entitlements` whose `subjectType` is `system_default`, `scopeType` is `broker`, and `scopeId` is the broker ID.
 
 The Quota System API enforces fail-closed limits. Route guards strictly separate read and write permissions, preventing arbitrary modification of system limits.
 
@@ -103,6 +121,21 @@ Brokers maintain a persistent outbound WebSocket connection to the Hub. The Hub 
 - `GET /healthz`: Basic liveness and readiness check. In multi-node or hosted setups, if a reverse proxy (like GFE) intercepts this endpoint and returns a non-JSON body, the client detects this and returns a precise error naming the likely cause (rather than a generic JSON-decoding failure) to assist with troubleshooting.
 - `POST /api/v1/agents`: (Internal) The Hub dispatches agents to this endpoint.
 - `GET /api/v1/agents/:id/attach`: (WebSocket) Provides a terminal stream for interactive sessions.
+
+### PTY close codes
+
+The WebSocket close frame that ends a terminal attach carries a code that tells the client why the attach ended. The hop that knows the cause picks the code, and every later hop passes it through unchanged. The Runtime Broker classifies the cause the same way on every runtime. The close frame also carries a machine-readable `snake_case` reason that names the specific cause. A code can carry several reasons, so clients should decide whether to retry from the code and treat the reason as diagnostic detail.
+
+| Code | Meaning | Reasons | Client should |
+| :--- | :--- | :--- | :--- |
+| `1000` | Clean detach. The tmux session still exists. | None (empty reason) | Not retry |
+| `4404` | The Runtime Broker cannot find the agent or its container. | `agent_not_found` | Not retry |
+| `4410` | The tmux session is gone (agent exited, container stopped or removed). | `session_ended` (the container still exists), `container_removed` (the container is gone too), `agent_stopped` (the attach never reached a tmux session because the container is definitively stopped) | Not retry |
+| `4503` | A hop behind this one is temporarily unavailable (Hub-to-broker control channel dropped, stream failed to open, exec transport dropped while the session is still alive, tmux session not ready yet, container runtime lookup failed). | From the Hub: `broker_disconnected`, `stream_open_failed`, `broker_write_failed`. From the Runtime Broker: `runtime_stream_dropped`, `session_not_ready`, `lookup_unavailable`, `runtime_unavailable` | Retry |
+| `1006` | Connection dropped without a close frame. The client library generates this code; it is never sent. | None | Retry |
+| `1011` | Unexpected server error, or the Runtime Broker could not check whether the tmux session survived. | `internal_error`, `client_read_failed`, `client_write_failed`, `probe_failed` | Retry |
+
+`4401`, `4403`, and `4504` are reserved. Authentication and permission failures currently surface as HTTP `401`/`403` on the handshake.
 
 ## System Health Endpoints (Hub)
 - `GET /healthz`: Basic liveness check. If a reverse proxy intercepts this with a non-JSON response, the client gracefully falls back to `/health`.

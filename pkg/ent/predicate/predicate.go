@@ -18,6 +18,12 @@ type Agent func(*sql.Selector)
 // AgentCredential is the predicate function for agentcredential builders.
 type AgentCredential func(*sql.Selector)
 
+// AgentIdentityKey is the predicate function for agentidentitykey builders.
+type AgentIdentityKey func(*sql.Selector)
+
+// AgentReincarnation is the predicate function for agentreincarnation builders.
+type AgentReincarnation func(*sql.Selector)
+
 // AgentSessionMetrics is the predicate function for agentsessionmetrics builders.
 type AgentSessionMetrics func(*sql.Selector)
 
@@ -56,6 +62,9 @@ type EntitlementBinding func(*sql.Selector)
 
 // EnvVar is the predicate function for envvar builders.
 type EnvVar func(*sql.Selector)
+
+// ExternalIdentity is the predicate function for externalidentity builders.
+type ExternalIdentity func(*sql.Selector)
 
 // GCPServiceAccount is the predicate function for gcpserviceaccount builders.
 type GCPServiceAccount func(*sql.Selector)

@@ -364,6 +364,33 @@ func TestDeleteAgent_DispatchFailure_ReturnsError(t *testing.T) {
 	assert.NoError(t, err, "agent should still exist when broker dispatch fails")
 }
 
+// UAT F4 (#1846): a broker 409 (ambiguous target) is surfaced as a 409 with
+// the broker's message, not as a 502 runtime error.
+func TestDeleteAgent_BrokerConflict_Returns409(t *testing.T) {
+	srv, s := testServer(t)
+
+	disp := &deleteDispatcher{
+		deleteErr: fmt.Errorf("dispatch: %w", &brokerStatusError{
+			StatusCode: http.StatusConflict,
+			Body:       `{"error":{"code":"conflict","message":"agent 'dev' is ambiguous: 2 agents match in project \"p\""}}`,
+		}),
+	}
+	srv.SetDispatcher(disp)
+
+	_, _, agent := setupOnlineBrokerAgent(t, s, "ambig")
+
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
+	assert.Equal(t, http.StatusConflict, rec.Code)
+
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+	assert.Equal(t, ErrCodeConflict, errResp.Error.Code)
+	assert.Contains(t, errResp.Error.Message, "ambiguous")
+
+	_, err := s.GetAgent(context.Background(), agent.ID)
+	assert.NoError(t, err, "agent should still exist when the broker refuses the delete")
+}
+
 func TestDeleteAgent_DispatchFailure_ForceDeleteSucceeds(t *testing.T) {
 	srv, s := testServer(t)
 
@@ -785,9 +812,15 @@ type createAgentDispatcher struct {
 	startCalled   bool
 	execOutput    string
 	execExitCode  int
+	// capturedAgent records the agent passed to DispatchAgentCreate, so tests
+	// that need the create-time agent.ID (e.g. to check quota reservations,
+	// ptone/scion#1986) can read it back after the HTTP response, which for
+	// a failure path never echoes the ID.
+	capturedAgent *store.Agent
 }
 
 func (d *createAgentDispatcher) DispatchAgentCreate(_ context.Context, agent *store.Agent) error {
+	d.capturedAgent = agent
 	if d.createPhase != "" {
 		agent.Phase = d.createPhase
 	}
@@ -800,6 +833,11 @@ func (d *createAgentDispatcher) DispatchAgentCreate(_ context.Context, agent *st
 	return nil
 }
 func (d *createAgentDispatcher) DispatchAgentProvision(_ context.Context, agent *store.Agent) error {
+	agent.Phase = string(state.PhaseCreated)
+	return nil
+}
+
+func (d *createAgentDispatcher) DispatchAgentReprovision(_ context.Context, agent *store.Agent) error {
 	agent.Phase = string(state.PhaseCreated)
 	return nil
 }
@@ -843,7 +881,8 @@ type failingCreateDispatcher struct {
 	deleteBranch      bool
 }
 
-func (d *failingCreateDispatcher) DispatchAgentCreateWithGather(_ context.Context, _ *store.Agent) (*RemoteEnvRequirementsResponse, error) {
+func (d *failingCreateDispatcher) DispatchAgentCreateWithGather(_ context.Context, agent *store.Agent) (*RemoteEnvRequirementsResponse, error) {
+	d.capturedAgent = agent
 	return nil, d.createErr
 }
 func (d *failingCreateDispatcher) DispatchAgentDelete(_ context.Context, _ *store.Agent, deleteFiles, removeBranch, _ bool, _ time.Time) error {
@@ -3800,8 +3839,10 @@ func TestHandleAgentMessage_PlainTextBuildsStructuredMessage(t *testing.T) {
 	assert.Equal(t, messages.TypeInstruction, sm.Type)
 	assert.Equal(t, "hello from the UI", sm.Msg)
 	assert.Equal(t, "agent:"+agent.Slug, sm.Recipient)
-	// Dev auth sets DisplayName to "Development User"
-	assert.Equal(t, "user:Development User", sm.Sender)
+	// Dev auth identity has Email="dev@localhost" and DisplayName="Development User".
+	// The handler prefers email over display name for user: principal refs
+	// (see commits 47ee6f407, a3d0d9378) to produce routable references.
+	assert.Equal(t, "user:dev@localhost", sm.Sender)
 	assert.NotEmpty(t, sm.Timestamp)
 }
 
@@ -3863,8 +3904,10 @@ func TestHandleAgentMessage_StructuredMessagePopulatesSender(t *testing.T) {
 	require.NotNil(t, sm, "expected a StructuredMessage")
 	assert.Equal(t, "hello from web UI", sm.Msg)
 	assert.Equal(t, "agent:"+agent.Slug, sm.Recipient)
-	// Dev auth sets DisplayName to "Development User"
-	assert.Equal(t, "user:Development User", sm.Sender, "sender should be populated from authenticated user")
+	// Dev auth identity has Email="dev@localhost" and DisplayName="Development User".
+	// The handler prefers email over display name for user: principal refs
+	// (see commits 47ee6f407, a3d0d9378) to produce routable references.
+	assert.Equal(t, "user:dev@localhost", sm.Sender, "sender should be populated from authenticated user")
 	assert.NotEmpty(t, sm.SenderID, "sender ID should be populated")
 }
 
@@ -4082,6 +4125,14 @@ func TestCreateAgent_DispatchFailure_CleansUpBroker(t *testing.T) {
 	// Verify agent record was deleted from hub store
 	_, err := s.GetAgent(ctx, "auth-fail-agent")
 	assert.ErrorIs(t, err, store.ErrNotFound, "agent should be deleted from hub store after dispatch failure")
+
+	// ptone/scion#1986: a dispatch failure must not strand either quota
+	// reservation the create path took before dispatching.
+	require.NotNil(t, disp.capturedAgent, "dispatcher must have observed the create-time agent")
+	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, disp.capturedAgent.ID),
+		"a failed create must release the per-broker reservation")
+	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerProject, disp.capturedAgent.ID),
+		"a failed create must release the per-project reservation")
 }
 
 // --- GCP Identity Assignment Tests ---

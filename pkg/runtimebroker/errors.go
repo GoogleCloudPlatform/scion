@@ -34,18 +34,19 @@ type ErrorResponse struct {
 
 // Error codes matching the Runtime Broker API specification.
 const (
-	ErrCodeInvalidRequest   = "invalid_request"
-	ErrCodeValidationError  = "validation_error"
-	ErrCodeUnauthorized     = "unauthorized"
-	ErrCodeForbidden        = "forbidden"
-	ErrCodeAgentNotFound    = "agent_not_found"
-	ErrCodeNotFound         = "not_found"
-	ErrCodeConflict         = "conflict"
-	ErrCodeMethodNotAllowed = "method_not_allowed"
-	ErrCodeInternalError    = "internal_error"
-	ErrCodeRuntimeError     = "runtime_error"
-	ErrCodeHubUnreachable   = "hub_unreachable"
-	ErrCodeTemplateError    = "template_error"
+	ErrCodeInvalidRequest     = "invalid_request"
+	ErrCodeValidationError    = "validation_error"
+	ErrCodeUnauthorized       = "unauthorized"
+	ErrCodeForbidden          = "forbidden"
+	ErrCodeAgentNotFound      = "agent_not_found"
+	ErrCodeNotFound           = "not_found"
+	ErrCodeConflict           = "conflict"
+	ErrCodeMethodNotAllowed   = "method_not_allowed"
+	ErrCodeInternalError      = "internal_error"
+	ErrCodeRuntimeError       = "runtime_error"
+	ErrCodeRuntimeUnavailable = "runtime_unavailable"
+	ErrCodeHubUnreachable     = "hub_unreachable"
+	ErrCodeTemplateError      = "template_error"
 )
 
 // writeError writes a JSON error response.
@@ -115,6 +116,14 @@ func InternalError(w http.ResponseWriter) {
 // RuntimeError writes a 500 error for runtime failures.
 func RuntimeError(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, message, nil)
+}
+
+// RuntimeUnavailable writes a 503 error for a transient container-runtime
+// failure (e.g. `docker ps` still failing after internal retries). Unlike
+// RuntimeError, this signals the caller should retry rather than treating
+// the failure as permanent.
+func RuntimeUnavailable(w http.ResponseWriter, message string) {
+	writeError(w, http.StatusServiceUnavailable, ErrCodeRuntimeUnavailable, message, nil)
 }
 
 // HubUnreachableError writes a 503 Service Unavailable response for Hub connectivity issues.

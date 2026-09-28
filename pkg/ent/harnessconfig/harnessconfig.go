@@ -55,8 +55,6 @@ const (
 	FieldUpdatedBy = "updated_by"
 	// FieldSourceURL holds the string denoting the source_url field in the database.
 	FieldSourceURL = "source_url"
-	// FieldVisibility holds the string denoting the visibility field in the database.
-	FieldVisibility = "visibility"
 	// FieldCreated holds the string denoting the created field in the database.
 	FieldCreated = "created"
 	// FieldUpdated holds the string denoting the updated field in the database.
@@ -88,7 +86,6 @@ var Columns = []string{
 	FieldCreatedBy,
 	FieldUpdatedBy,
 	FieldSourceURL,
-	FieldVisibility,
 	FieldCreated,
 	FieldUpdated,
 }
@@ -112,8 +109,6 @@ var (
 	HarnessValidator func(string) error
 	// DefaultScope holds the default value on creation for the "scope" field.
 	DefaultScope string
-	// DefaultVisibility holds the default value on creation for the "visibility" field.
-	DefaultVisibility string
 	// DefaultCreated holds the default value on creation for the "created" field.
 	DefaultCreated func() time.Time
 	// DefaultUpdated holds the default value on creation for the "updated" field.
@@ -285,11 +280,6 @@ func ByUpdatedBy(opts ...sql.OrderTermOption) OrderOption {
 // BySourceURL orders the results by the source_url field.
 func BySourceURL(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldSourceURL, opts...).ToFunc()
-}
-
-// ByVisibility orders the results by the visibility field.
-func ByVisibility(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldVisibility, opts...).ToFunc()
 }
 
 // ByCreated orders the results by the created field.

@@ -30,6 +30,7 @@
 import { stateManager } from './state.js';
 import { chatConversationPath } from './chat-routes.js';
 import { canShowPushNotification } from './push-preference.js';
+import { playChimeThrottled } from '../utils/audio.js';
 
 /** Notification statuses this dispatcher owns. */
 export const MENTION_STATUS = 'MENTION';
@@ -175,6 +176,10 @@ export class ChatNotificationDispatcher {
     ) {
       return 'conversation-visible';
     }
+
+    // The chime is independent of desktop push permission/opt-in — a
+    // background thread should be audible even when popups are off.
+    playChimeThrottled(n.projectId ?? '');
 
     // Checked last so the rules above are observable in tests without
     // granting notification permission.

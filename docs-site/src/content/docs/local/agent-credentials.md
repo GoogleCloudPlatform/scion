@@ -413,7 +413,7 @@ needed.
 Two diagnostic commands help troubleshoot auth and connectivity:
 
 - **`scion doctor`** (host-side): checks host prerequisites — Git, tmux, the active container runtime (Docker/Podman daemon or Kubernetes cluster access), and related diagnostics. Supports `--format json`.
-- **`sciontool doctor`** (in-container): checks the *agent's* health from inside the container — required environment variables, the Hub token (presence, format, expiry), Hub reachability, token refresh, the GCP metadata server and token acquisition, and the GitHub App token. When the token check fails it prints a remediation hint pointing you at `scion reset-auth`.
+- **`sciontool doctor`** (in-container): checks the *agent's* health from inside the container — required environment variables, the Hub token (presence, format, expiry), Hub reachability, token validity (a read-only check that leaves the agent's token untouched), the GCP metadata server and token acquisition, and the GitHub App token. When the token check fails it prints a remediation hint pointing you at `scion reset-auth`.
 
 ## Agent Progeny & Secret Access
 

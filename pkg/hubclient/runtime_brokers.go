@@ -16,7 +16,6 @@ package hubclient
 
 import (
 	"context"
-	"encoding/json"
 	"net/url"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -49,6 +48,24 @@ type RuntimeBrokerService interface {
 
 	// Heartbeat sends a heartbeat for a broker.
 	Heartbeat(ctx context.Context, brokerID string, status *BrokerHeartbeat) error
+
+	// ReportMessageFailures reports hub messages that the broker accepted
+	// into its delivery buffer but failed to deliver, so the hub can mark
+	// them failed instead of leaving them "dispatched".
+	ReportMessageFailures(ctx context.Context, brokerID string, req *MessageFailuresReport) error
+}
+
+// MessageFailure is one buffered delivery that failed on the broker.
+type MessageFailure struct {
+	MessageID string `json:"messageId"`
+	AgentID   string `json:"agentId,omitempty"`
+	ProjectID string `json:"projectId,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+}
+
+// MessageFailuresReport is the body of a message-failures report.
+type MessageFailuresReport struct {
+	Failures []MessageFailure `json:"failures"`
 }
 
 // runtimeBrokerService is the implementation of RuntimeBrokerService.
@@ -82,70 +99,21 @@ type ListBrokerProjectsResponse struct {
 	Projects []BrokerProjectInfo `json:"projects"`
 }
 
-// MarshalJSON implements custom marshaling to support legacy grove fields.
-func (r ListBrokerProjectsResponse) MarshalJSON() ([]byte, error) {
-	type Alias ListBrokerProjectsResponse
-	return json.Marshal(&struct {
-		Alias
-		Groves []BrokerProjectInfo `json:"groves,omitempty"`
-	}{
-		Alias:  Alias(r),
-		Groves: r.Projects,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
-func (r *ListBrokerProjectsResponse) UnmarshalJSON(data []byte) error {
-	type Alias ListBrokerProjectsResponse
-	aux := &struct {
-		Groves []BrokerProjectInfo `json:"groves,omitempty"`
-		*Alias
-	}{
-		Alias: (*Alias)(r),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if len(r.Projects) == 0 && len(aux.Groves) > 0 {
-		r.Projects = aux.Groves
-	}
-	return nil
-}
-
 // BrokerHeartbeat is the heartbeat payload.
 type BrokerHeartbeat struct {
 	Status   string             `json:"status"`
 	Projects []ProjectHeartbeat `json:"projects,omitempty"`
-}
-
-// MarshalJSON implements custom marshaling to support legacy grove fields.
-func (h BrokerHeartbeat) MarshalJSON() ([]byte, error) {
-	type Alias BrokerHeartbeat
-	return json.Marshal(&struct {
-		Alias
-		Groves []ProjectHeartbeat `json:"groves,omitempty"`
-	}{
-		Alias:  Alias(h),
-		Groves: h.Projects,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
-func (h *BrokerHeartbeat) UnmarshalJSON(data []byte) error {
-	type Alias BrokerHeartbeat
-	aux := &struct {
-		Groves []ProjectHeartbeat `json:"groves,omitempty"`
-		*Alias
-	}{
-		Alias: (*Alias)(h),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if len(h.Projects) == 0 && len(aux.Groves) > 0 {
-		h.Projects = aux.Groves
-	}
-	return nil
+	// Capabilities refreshes the broker's reported capabilities on every
+	// heartbeat (design §3.4 Amendment A2.2(b)). Chosen over a hub->broker live /info query:
+	// no such query path exists today, and adding one would mean a new
+	// authenticated hub-initiated call plus endpoint resolution and timeout
+	// handling on the `scion reincarnate` pre-flight path, for a value that
+	// changes at most once per broker binary upgrade. Piggybacking on the
+	// heartbeat the broker already sends every few seconds gets the same
+	// "never stale for long" property for free. A CompleteBrokerJoin-time
+	// snapshot alone (the pre-A2 state) is never refreshed for an
+	// already-registered broker until it re-registers with --force.
+	Capabilities *BrokerCapabilities `json:"capabilities,omitempty"`
 }
 
 // ProjectHeartbeat is per-project status in a heartbeat.
@@ -153,36 +121,6 @@ type ProjectHeartbeat struct {
 	ProjectID  string           `json:"projectId"`
 	AgentCount int              `json:"agentCount"`
 	Agents     []AgentHeartbeat `json:"agents,omitempty"`
-}
-
-// MarshalJSON implements custom marshaling to support legacy grove fields.
-func (h ProjectHeartbeat) MarshalJSON() ([]byte, error) {
-	type Alias ProjectHeartbeat
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId,omitempty"`
-	}{
-		Alias:   Alias(h),
-		GroveID: h.ProjectID,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (h *ProjectHeartbeat) UnmarshalJSON(data []byte) error {
-	type Alias ProjectHeartbeat
-	aux := &struct {
-		GroveID string `json:"groveId,omitempty"`
-		*Alias
-	}{
-		Alias: (*Alias)(h),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if h.ProjectID == "" && aux.GroveID != "" {
-		h.ProjectID = aux.GroveID
-	}
-	return nil
 }
 
 // AgentHeartbeat is per-agent status in a heartbeat.
@@ -260,7 +198,6 @@ func (s *runtimeBrokerService) List(ctx context.Context, opts *ListBrokersOption
 		}
 		if opts.ProjectID != "" {
 			query.Set("projectId", opts.ProjectID)
-			query.Set("groveId", opts.ProjectID)
 		}
 		if opts.Name != "" {
 			query.Set("name", opts.Name)
@@ -332,6 +269,15 @@ func (s *runtimeBrokerService) ListProjects(ctx context.Context, brokerID string
 // Heartbeat sends a heartbeat for a broker.
 func (s *runtimeBrokerService) Heartbeat(ctx context.Context, brokerID string, status *BrokerHeartbeat) error {
 	resp, err := s.c.post(ctx, "/api/v1/runtime-brokers/"+brokerID+"/heartbeat", status, nil)
+	if err != nil {
+		return err
+	}
+	return apiclient.CheckResponse(resp)
+}
+
+// ReportMessageFailures reports buffered deliveries that failed on the broker.
+func (s *runtimeBrokerService) ReportMessageFailures(ctx context.Context, brokerID string, req *MessageFailuresReport) error {
+	resp, err := s.c.post(ctx, "/api/v1/runtime-brokers/"+url.PathEscape(brokerID)+"/message-failures", req, nil)
 	if err != nil {
 		return err
 	}

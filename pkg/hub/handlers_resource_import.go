@@ -50,100 +50,16 @@ type ImportTemplatesResponse struct {
 // handleProjectImportTemplates imports templates directly from a remote URL into
 // the project's template store without spawning a bootstrap container agent.
 func (s *Server) handleProjectImportTemplates(w http.ResponseWriter, r *http.Request, projectID string) {
-	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
-		return
-	}
-
-	ctx := r.Context()
-
-	// Authorize the caller
-	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
-		if !agentIdent.HasScope(ScopeAgentCreate) {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope: project:agent:create", nil)
-			return
-		}
-		if projectID != agentIdent.ProjectID() {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only import templates within their own project", nil)
-			return
-		}
-	} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-			Type:       "agent",
-			ParentType: "project",
-			ParentID:   projectID,
-		}, ActionCreate)
-		if !decision.Allowed {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"You don't have permission to import templates in this project", nil)
-			return
-		}
-	} else {
-		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
-		return
-	}
-
-	var req ImportTemplatesRequest
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", "Invalid request body", nil)
-		return
-	}
-
-	if req.SourceURL == "" && req.WorkspacePath == "" {
-		// Default workspace path when neither is provided
-		req.WorkspacePath = "/.scion/templates"
-	}
-
-	// Verify project exists
-	project, err := s.store.GetProject(ctx, projectID)
-	if err != nil {
-		if err == store.ErrNotFound {
-			NotFound(w, "Project")
-			return
-		}
-		writeErrorFromErr(w, err, "")
-		return
-	}
-
-	if s.GetStorage() == nil {
-		writeError(w, http.StatusServiceUnavailable, "storage_unavailable", "Template storage is not configured", nil)
-		return
-	}
-
-	run := func(progress importProgressFunc) ([]string, error) {
-		if req.WorkspacePath != "" {
-			return s.importFromWorkspace(ctx, project, req.WorkspacePath, store.TemplateScopeProject, s.templateImportKind(), progress, req.Names)
-		}
-		req.SourceURL = config.NormalizeTemplateSourceURL(req.SourceURL)
-		return s.importFromRemote(ctx, projectID, req.SourceURL, store.TemplateScopeProject, s.templateImportKind(), progress, req.Names)
-	}
-
-	if importAcceptsNDJSON(r) {
-		s.streamImport(w, run)
-		return
-	}
-
-	var failures []ImportFailure
-	imported, err := run(failureCollector(&failures))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "import_failed", err.Error(), nil)
-		return
-	}
-
-	if len(imported) == 0 && len(failures) > 0 {
-		reasons := make([]string, len(failures))
-		for i, f := range failures {
-			reasons[i] = f.Name + ": " + f.Reason
-		}
-		writeError(w, http.StatusBadRequest, "import_failed",
-			"config validation failed: "+strings.Join(reasons, "; "), nil)
-		return
-	}
-
-	writeJSON(w, http.StatusOK, ImportTemplatesResponse{
-		Templates: imported,
-		Count:     len(imported),
-		Failed:    failures,
+	s.handleProjectImportResources(w, r, projectID, projectImportOptions{
+		kind:                    s.templateImportKind(),
+		authzResourceType:       "agent",
+		scope:                   store.TemplateScopeProject,
+		defaultWorkspacePath:    "/.scion/templates",
+		storageLabel:            "Template",
+		validationFailurePrefix: "config validation failed: ",
+		response: func(imported []string, failures []ImportFailure) any {
+			return ImportTemplatesResponse{Templates: imported, Count: len(imported), Failed: failures}
+		},
 	})
 }
 
@@ -165,46 +81,59 @@ type ImportHarnessConfigsResponse struct {
 // handleProjectImportHarnessConfigs imports harness-configs directly from a
 // remote URL or workspace path into the project's harness-config store.
 func (s *Server) handleProjectImportHarnessConfigs(w http.ResponseWriter, r *http.Request, projectID string) {
+	s.handleProjectImportResources(w, r, projectID, projectImportOptions{
+		kind:                    s.harnessConfigImportKind(),
+		authzResourceType:       "harness_config",
+		scope:                   store.HarnessConfigScopeProject,
+		defaultWorkspacePath:    "/.scion/harness-configs",
+		storageLabel:            "Harness-config",
+		validationFailurePrefix: "config.yaml validation failed: ",
+		response: func(imported []string, failures []ImportFailure) any {
+			return ImportHarnessConfigsResponse{HarnessConfigs: imported, Count: len(imported), Failed: failures}
+		},
+	})
+}
+
+type projectImportRequest struct {
+	SourceURL     string   `json:"sourceUrl"`
+	WorkspacePath string   `json:"workspacePath"`
+	Names         []string `json:"names,omitempty"`
+}
+
+type projectImportOptions struct {
+	kind                    resourceImportKind
+	authzResourceType       string
+	scope                   string
+	defaultWorkspacePath    string
+	storageLabel            string
+	validationFailurePrefix string
+	response                func([]string, []ImportFailure) any
+}
+
+func (s *Server) handleProjectImportResources(
+	w http.ResponseWriter,
+	r *http.Request,
+	projectID string,
+	options projectImportOptions,
+) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
 		return
 	}
 
 	ctx := r.Context()
-
-	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
-		if !agentIdent.HasScope(ScopeAgentCreate) {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope: project:agent:create", nil)
-			return
-		}
-		if projectID != agentIdent.ProjectID() {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only import harness-configs within their own project", nil)
-			return
-		}
-	} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-			Type:       "harness_config",
-			ParentType: "project",
-			ParentID:   projectID,
-		}, ActionCreate)
-		if !decision.Allowed {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"You don't have permission to import harness-configs in this project", nil)
-			return
-		}
-	} else {
-		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "Authentication required", nil)
+	if !s.authorizeProjectImport(ctx, w, projectID, options.kind.noun, options.authzResourceType) {
 		return
 	}
 
-	var req ImportHarnessConfigsRequest
+	var req projectImportRequest
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
 		return
 	}
 
 	if req.SourceURL == "" && req.WorkspacePath == "" {
-		req.WorkspacePath = "/.scion/harness-configs"
+		req.WorkspacePath = options.defaultWorkspacePath
 	}
 
 	project, err := s.store.GetProject(ctx, projectID)
@@ -218,16 +147,16 @@ func (s *Server) handleProjectImportHarnessConfigs(w http.ResponseWriter, r *htt
 	}
 
 	if s.GetStorage() == nil {
-		writeError(w, http.StatusServiceUnavailable, "storage_unavailable", "Harness-config storage is not configured", nil)
+		writeError(w, http.StatusServiceUnavailable, "storage_unavailable", options.storageLabel+" storage is not configured", nil)
 		return
 	}
 
 	run := func(progress importProgressFunc) ([]string, error) {
 		if req.WorkspacePath != "" {
-			return s.importFromWorkspace(ctx, project, req.WorkspacePath, store.HarnessConfigScopeProject, s.harnessConfigImportKind(), progress, req.Names)
+			return s.importFromWorkspace(ctx, project, req.WorkspacePath, options.scope, options.kind, progress, req.Names)
 		}
-		req.SourceURL = config.NormalizeTemplateSourceURL(req.SourceURL)
-		return s.importFromRemote(ctx, projectID, req.SourceURL, store.HarnessConfigScopeProject, s.harnessConfigImportKind(), progress, req.Names)
+		sourceURL := config.NormalizeTemplateSourceURL(req.SourceURL)
+		return s.importFromRemote(ctx, projectID, sourceURL, options.scope, options.kind, progress, req.Names)
 	}
 
 	if importAcceptsNDJSON(r) {
@@ -248,15 +177,11 @@ func (s *Server) handleProjectImportHarnessConfigs(w http.ResponseWriter, r *htt
 			reasons[i] = f.Name + ": " + f.Reason
 		}
 		writeError(w, http.StatusBadRequest, "import_failed",
-			"config.yaml validation failed: "+strings.Join(reasons, "; "), nil)
+			options.validationFailurePrefix+strings.Join(reasons, "; "), nil)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, ImportHarnessConfigsResponse{
-		HarnessConfigs: imported,
-		Count:          len(imported),
-		Failed:         failures,
-	})
+	writeJSON(w, http.StatusOK, options.response(imported, failures))
 }
 
 // ImportResourcesRequest is the body for the unified import endpoint
@@ -361,7 +286,7 @@ func (s *Server) handleResourcesImport(w http.ResponseWriter, r *http.Request) {
 				"scopeId (project id) is required for project scope", nil)
 			return
 		}
-		if !s.authorizeProjectImport(ctx, w, req.ScopeID, kind.noun) {
+		if !s.authorizeProjectImport(ctx, w, req.ScopeID, kind.noun, authzType) {
 			return
 		}
 		// Verify project exists before fetching.
@@ -375,9 +300,23 @@ func (s *Server) handleResourcesImport(w http.ResponseWriter, r *http.Request) {
 		}
 		projectID, scope = req.ScopeID, "project"
 
+	case "user":
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized",
+				"Authentication required", nil)
+			return
+		}
+		// projectID carries the user ID here. importFromRemote uses it for:
+		// 1. Auth token lookup in fetchRemoteForImport — will find no project,
+		//    so the fetch proceeds unauthenticated (correct for user scope).
+		// 2. scopeID in importResourceDirs/Bootstrap — correctly uses the user
+		//    ID as the template's scope identifier.
+		projectID, scope = userIdent.ID(), "user"
+
 	default:
 		writeError(w, http.StatusBadRequest, "invalid_request",
-			"scope must be 'global' or 'project'", nil)
+			"scope must be 'global', 'project', or 'user'", nil)
 		return
 	}
 
@@ -473,7 +412,7 @@ func (s *Server) streamImport(w http.ResponseWriter, run func(progress importPro
 // authorizeProjectImport checks that the caller may import resources into the
 // given project, mirroring the per-project import handlers. It writes the error
 // response and returns false when access is denied.
-func (s *Server) authorizeProjectImport(ctx context.Context, w http.ResponseWriter, projectID, noun string) bool {
+func (s *Server) authorizeProjectImport(ctx context.Context, w http.ResponseWriter, projectID, noun, authzResourceType string) bool {
 	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 		if !agentIdent.HasScope(ScopeAgentCreate) {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope: project:agent:create", nil)
@@ -487,7 +426,7 @@ func (s *Server) authorizeProjectImport(ctx context.Context, w http.ResponseWrit
 	}
 	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-			Type:       "agent",
+			Type:       authzResourceType,
 			ParentType: "project",
 			ParentID:   projectID,
 		}, ActionCreate)
@@ -519,86 +458,23 @@ type DiscoverResourcesResponse struct {
 // handleProjectDiscoverTemplates handles POST /api/v1/projects/{id}/discover-templates:
 // discovers templates at a remote URL or workspace path without importing them.
 func (s *Server) handleProjectDiscoverTemplates(w http.ResponseWriter, r *http.Request, projectID string) {
-	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
-		return
-	}
-
-	ctx := r.Context()
-
-	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
-		if !agentIdent.HasScope(ScopeAgentCreate) {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope: project:agent:create", nil)
-			return
-		}
-		if projectID != agentIdent.ProjectID() {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only discover templates within their own project", nil)
-			return
-		}
-	} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-			Type:       "agent",
-			ParentType: "project",
-			ParentID:   projectID,
-		}, ActionCreate)
-		if !decision.Allowed {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"You don't have permission to discover templates in this project", nil)
-			return
-		}
-	} else {
-		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "Authentication required", nil)
-		return
-	}
-
-	var req DiscoverResourcesRequest
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
-		return
-	}
-
-	if req.SourceURL == "" && req.WorkspacePath == "" {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "sourceUrl or workspacePath is required", nil)
-		return
-	}
-
-	project, err := s.store.GetProject(ctx, projectID)
-	if err != nil {
-		if err == store.ErrNotFound {
-			NotFound(w, "Project")
-			return
-		}
-		writeErrorFromErr(w, err, "")
-		return
-	}
-
-	if s.GetStorage() == nil {
-		writeError(w, http.StatusServiceUnavailable, "storage_unavailable", "Template storage is not configured", nil)
-		return
-	}
-
-	var names, skipped []string
-	if req.WorkspacePath != "" {
-		names, skipped, err = s.discoverFromWorkspace(ctx, project, req.WorkspacePath, s.templateImportKind())
-	} else {
-		req.SourceURL = config.NormalizeTemplateSourceURL(req.SourceURL)
-		names, skipped, err = s.discoverFromRemote(ctx, projectID, req.SourceURL, s.templateImportKind())
-	}
-	if err != nil {
-		writeError(w, http.StatusBadRequest, ErrCodeDiscoverFailed, err.Error(), nil)
-		return
-	}
-
-	writeJSON(w, http.StatusOK, DiscoverResourcesResponse{
-		Resources: names,
-		Skipped:   skipped,
-		Count:     len(names),
-	})
+	s.handleProjectDiscoverResources(w, r, projectID, s.templateImportKind(), "agent", "Template")
 }
 
 // handleProjectDiscoverHarnessConfigs handles POST /api/v1/projects/{id}/discover-harness-configs:
 // discovers harness-configs at a remote URL or workspace path without importing them.
 func (s *Server) handleProjectDiscoverHarnessConfigs(w http.ResponseWriter, r *http.Request, projectID string) {
+	s.handleProjectDiscoverResources(w, r, projectID, s.harnessConfigImportKind(), "harness_config", "Harness-config")
+}
+
+func (s *Server) handleProjectDiscoverResources(
+	w http.ResponseWriter,
+	r *http.Request,
+	projectID string,
+	kind resourceImportKind,
+	authzResourceType string,
+	storageLabel string,
+) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
 		return
@@ -612,18 +488,19 @@ func (s *Server) handleProjectDiscoverHarnessConfigs(w http.ResponseWriter, r *h
 			return
 		}
 		if projectID != agentIdent.ProjectID() {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only discover harness-configs within their own project", nil)
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"Agents can only discover "+kind.noun+" within their own project", nil)
 			return
 		}
 	} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-			Type:       "harness_config",
+			Type:       authzResourceType,
 			ParentType: "project",
 			ParentID:   projectID,
 		}, ActionCreate)
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"You don't have permission to discover harness-configs in this project", nil)
+				"You don't have permission to discover "+kind.noun+" in this project", nil)
 			return
 		}
 	} else {
@@ -653,16 +530,16 @@ func (s *Server) handleProjectDiscoverHarnessConfigs(w http.ResponseWriter, r *h
 	}
 
 	if s.GetStorage() == nil {
-		writeError(w, http.StatusServiceUnavailable, "storage_unavailable", "Harness-config storage is not configured", nil)
+		writeError(w, http.StatusServiceUnavailable, "storage_unavailable", storageLabel+" storage is not configured", nil)
 		return
 	}
 
 	var names, skipped []string
 	if req.WorkspacePath != "" {
-		names, skipped, err = s.discoverFromWorkspace(ctx, project, req.WorkspacePath, s.harnessConfigImportKind())
+		names, skipped, err = s.discoverFromWorkspace(ctx, project, req.WorkspacePath, kind)
 	} else {
 		req.SourceURL = config.NormalizeTemplateSourceURL(req.SourceURL)
-		names, skipped, err = s.discoverFromRemote(ctx, projectID, req.SourceURL, s.harnessConfigImportKind())
+		names, skipped, err = s.discoverFromRemote(ctx, projectID, req.SourceURL, kind)
 	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeDiscoverFailed, err.Error(), nil)
@@ -752,7 +629,7 @@ func (s *Server) handleResourcesDiscover(w http.ResponseWriter, r *http.Request)
 				"scopeId (project id) is required for project scope", nil)
 			return
 		}
-		if !s.authorizeProjectImport(ctx, w, req.ScopeID, kind.noun) {
+		if !s.authorizeProjectImport(ctx, w, req.ScopeID, kind.noun, authzType) {
 			return
 		}
 		if _, perr := s.store.GetProject(ctx, req.ScopeID); perr != nil {
@@ -765,9 +642,21 @@ func (s *Server) handleResourcesDiscover(w http.ResponseWriter, r *http.Request)
 		}
 		projectID = req.ScopeID
 
+	case "user":
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized",
+				"Authentication required", nil)
+			return
+		}
+		// No authz check — users can always discover for their own scope.
+		// projectID stays empty — discovery is scope-independent (only fetches
+		// and walks directories) and user scope has no project for auth tokens.
+		projectID = ""
+
 	default:
 		writeError(w, http.StatusBadRequest, "invalid_request",
-			"scope must be 'global' or 'project'", nil)
+			"scope must be 'global', 'project', or 'user'", nil)
 		return
 	}
 

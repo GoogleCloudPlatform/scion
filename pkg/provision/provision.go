@@ -128,6 +128,19 @@ type ProvisionInput struct {
 	// itself is mounted (not its parent), so the sentinel must live inside the
 	// workspace mount.
 	SentinelDir string
+
+	// RequireChownSuccess makes a chown failure fatal (returns an error,
+	// before the sentinel is written) instead of the default warn-and-continue
+	// behavior (F-111, design §9). The default tolerates "an operator may
+	// have pre-chowned" for the broker's own host-side worktree-per-agent
+	// flow. The k8s init container (cmd/sciontool/commands/provision.go) sets
+	// this true: its entire purpose IS the chown, so a silent failure there
+	// reproduces the exact "workspace stuck root:root" bug this mechanism
+	// exists to fix — and does so invisibly, since without this flag the
+	// sentinel would still be written, masking the failure from every future
+	// pod that starts for this project (they'd all see the sentinel and skip
+	// provisioning, forever).
+	RequireChownSuccess bool
 }
 
 // ProvisionShared is the universal, vendor-agnostic workspace provisioning
@@ -232,13 +245,38 @@ func ProvisionShared(in ProvisionInput) error {
 
 	// Chown to stable NFS UID/GID (design §9.1). This is a ONE-TIME operation
 	// under the advisory lock — per-start chown is skipped for NFS (see N1-5).
-	//
+	// chown -R on an existing, differently-owned directory (e.g. one kubelet
+	// auto-created as root:root before this mechanism ran) re-owns it and
+	// everything already inside it — self-healing on the next start needs no
+	// separate repair step, as long as no sentinel was ever written for it
+	// (F-111, design §9).
 	chownRoot := chownTarget(in.Resolved.HostPath)
 	uid, gid := resolveUID(in), resolveGID(in)
 	if err := chownProjectTree(ctx, chownRoot, uid, gid); err != nil {
+		if in.RequireChownSuccess {
+			return fmt.Errorf("ProvisionShared: chown %s to %d:%d: %w", chownRoot, uid, gid, err)
+		}
 		slog.Warn("ProvisionShared: chown failed (non-fatal, may lack privileges)",
 			"project_id", in.ProjectID, "path", chownRoot, "uid", uid, "gid", gid, "error", err)
 		// Non-fatal: operator may have pre-chowned. Continue to write sentinel.
+	}
+
+	// Shared dirs are siblings of the workspace dir under the project root
+	// on the broker's own host-side flow, so chownRoot above (the project
+	// root there) already recurses into them — this loop is a no-op there
+	// beyond a second, redundant chown -R. In the k8s init container,
+	// chownRoot is scoped to the workspace subPath mount alone (chownTarget's
+	// "/" fallback), which does NOT reach a shared dir mounted at its own,
+	// separate subPath (F-111, design §9) — chown each one explicitly so it
+	// isn't missed there.
+	for name, sd := range in.Resolved.SharedDirs {
+		if err := chownProjectTree(ctx, sd.HostPath, uid, gid); err != nil {
+			if in.RequireChownSuccess {
+				return fmt.Errorf("ProvisionShared: chown shared-dir %q %s to %d:%d: %w", name, sd.HostPath, uid, gid, err)
+			}
+			slog.Warn("ProvisionShared: chown shared-dir failed (non-fatal, may lack privileges)",
+				"project_id", in.ProjectID, "name", name, "path", sd.HostPath, "uid", uid, "gid", gid, "error", err)
+		}
 	}
 
 	// Write sentinel atomically.
@@ -349,7 +387,15 @@ func gitCloneWorkspace(ctx context.Context, in ProvisionInput) error {
 
 		// No .git — the prior attempt died mid-clone, leaving partial contents
 		// behind. Clear the directory so provisioning self-heals on retry
-		// without manual intervention, then clone once more.
+		// without manual intervention, then clone once more. Refuse when a
+		// "worktrees" subdirectory already holds anything: for
+		// worktree-per-agent, that directory holds every agent's checkout,
+		// and clearing the base out from under them would destroy work that
+		// has nothing to do with this clone's own failure.
+		if nonEmpty, checkErr := dirHasEntries(filepath.Join(in.Resolved.HostPath, "worktrees")); checkErr != nil || nonEmpty {
+			return fmt.Errorf("git clone failed (dir not empty) and checking %s/worktrees before clearing the shared base failed or found it non-empty (err=%v, nonEmpty=%v); refusing to clear it",
+				in.Resolved.HostPath, checkErr, nonEmpty)
+		}
 		slog.Warn("ProvisionShared: workspace not empty and no .git (incomplete prior clone), cleaning and retrying",
 			"project_id", in.ProjectID, "path", in.Resolved.HostPath)
 		if cleanErr := removeDirContents(in.Resolved.HostPath); cleanErr != nil {
@@ -382,10 +428,95 @@ func removeDirContents(dir string) error {
 	return nil
 }
 
+// dirHasEntries reports whether dir exists and contains at least one entry.
+// A missing directory reports false with a nil error: there is nothing in
+// it, by definition.
+func dirHasEntries(dir string) (bool, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return len(entries) > 0, nil
+}
+
 // WorktreePath returns the canonical worktree path for a given agent within
 // a shared base checkout: <hostPath>/worktrees/<agentID>.
 func WorktreePath(hostPath, agentID string) string {
 	return filepath.Join(hostPath, "worktrees", agentID)
+}
+
+// IsRealWorktreeDir reports whether path is a git worktree that belongs to
+// the shared base checkout at base: a real directory (not a symlink)
+// containing a .git file (not a directory, and not a symlink) whose
+// "gitdir: " target resolves inside base's own .git/worktrees admin
+// directory. Any other entry at path — a plain file, a directory without a
+// matching worktree admin entry, or a symlink at any point in the chain —
+// is not a worktree this checkout owns, and must never be reused, mounted,
+// or removed as if it were one.
+func IsRealWorktreeDir(path, base string) bool {
+	fi, err := os.Lstat(path)
+	if err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+		return false
+	}
+
+	gitFile := filepath.Join(path, ".git")
+	gfi, err := os.Lstat(gitFile)
+	if err != nil || gfi.IsDir() || gfi.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
+
+	data, err := os.ReadFile(gitFile)
+	if err != nil {
+		return false
+	}
+	content := strings.TrimSpace(string(data))
+	target, ok := strings.CutPrefix(content, "gitdir: ")
+	if !ok || target == "" {
+		return false
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(path, target)
+	}
+	target = filepath.Clean(target)
+
+	// The gitdir target must be exactly one path element below the admin
+	// worktrees directory (base/.git/worktrees/<name>) — not the admin
+	// directory itself (rel "."), not above it (rel ".." or an ancestor),
+	// and not nested any deeper.
+	worktreesAdminDir := filepath.Clean(filepath.Join(base, ".git", "worktrees"))
+	rel, err := filepath.Rel(worktreesAdminDir, target)
+	if err != nil || rel == "." || rel == ".." || strings.ContainsRune(rel, filepath.Separator) || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return true
+}
+
+// isDirectChildOfWorktreesDir reports whether path, once symlinks are
+// resolved, is a direct child of base's own "worktrees" directory — not the
+// worktrees directory itself, and not anything nested deeper. Only direct
+// entries of worktrees/ are ever mounted read-write into a container, so a
+// path that is a real worktree by IsRealWorktreeDir's check but sits any
+// deeper (or is the worktrees directory itself) must still be refused.
+func isDirectChildOfWorktreesDir(base, path string) bool {
+	worktreesDir := filepath.Join(base, "worktrees")
+	// The exact string is what is stored and mounted, and downstream
+	// consumers clean it lexically rather than resolving symlinks, so it
+	// must already be the canonical worktrees/<name> form.
+	if filepath.Clean(path) != path || filepath.Dir(path) != worktreesDir {
+		return false
+	}
+	resolvedWorktreesDir, err := filepath.EvalSymlinks(worktreesDir)
+	if err != nil {
+		return false
+	}
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return false
+	}
+	return resolvedPath != resolvedWorktreesDir && filepath.Dir(resolvedPath) == resolvedWorktreesDir
 }
 
 // ensureWorktree creates or attaches to a per-agent worktree if the mode is
@@ -418,9 +549,14 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) error {
 		branchName = sanitizeBranchName(in.AgentName)
 	}
 
-	// If this agent's own worktree directory already exists, register
-	// (idempotent) and return.
-	if _, err := os.Stat(worktreePath); err == nil {
+	// If this agent's own worktree directory already exists, reuse it only
+	// if it is a real worktree of this base — never a plain file, a foreign
+	// directory, or a symlink, none of which this checkout created and none
+	// of which are safe to mount or to remove.
+	if _, err := os.Lstat(worktreePath); err == nil {
+		if !IsRealWorktreeDir(worktreePath, base) {
+			return fmt.Errorf("ProvisionShared: %s exists but is not a git worktree of this checkout; refusing to reuse or remove it", worktreePath)
+		}
 		slog.Debug("ProvisionShared: worktree already exists",
 			"agent_id", in.AgentID, "path", worktreePath)
 		return RegisterSharer(base, branchName, worktreePath, in.AgentID)
@@ -435,13 +571,20 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) error {
 
 	// --- JOIN check: does a worktree for this branch already exist? ---
 
-	// 1. Check the sharer registry.
+	// 1. Check the sharer registry. The registry is written by every
+	// worktree-mode agent's own container (it lives under the shared,
+	// read-write-mounted .git); only join the path it names when that path
+	// is both a real worktree of this same base and a direct child of its
+	// "worktrees" directory.
 	sharers, existingWtPath, err := ListSharers(base, branchName)
 	if err != nil {
 		return fmt.Errorf("ProvisionShared: list sharers for branch %q: %w", branchName, err)
 	}
 	if len(sharers) > 0 && existingWtPath != "" {
-		if _, statErr := os.Stat(existingWtPath); statErr == nil {
+		if _, statErr := os.Lstat(existingWtPath); statErr == nil {
+			if !IsRealWorktreeDir(existingWtPath, base) || !isDirectChildOfWorktreesDir(base, existingWtPath) {
+				return fmt.Errorf("ProvisionShared: the sharer registry for branch %q names %s, which is not a direct worktree of this checkout; refusing to join it", branchName, existingWtPath)
+			}
 			slog.Info("ProvisionShared: joining existing worktree (registry)",
 				"agent_id", in.AgentID, "branch", branchName, "path", existingWtPath,
 				"existing_sharers", sharers)
@@ -452,7 +595,7 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) error {
 	}
 
 	// 2. Check git worktree list for a prior-run worktree without a registry entry.
-	if existingPath, findErr := findWorktreeForBranch(ctx, base, branchName); findErr == nil && existingPath != "" {
+	if existingPath, findErr := findWorktreeForBranch(ctx, base, branchName); findErr == nil && existingPath != "" && IsRealWorktreeDir(existingPath, base) && isDirectChildOfWorktreesDir(base, existingPath) {
 		slog.Info("ProvisionShared: joining pre-existing worktree (git)",
 			"agent_id", in.AgentID, "branch", branchName, "path", existingPath)
 		return RegisterSharer(base, branchName, existingPath, in.AgentID)
@@ -477,9 +620,17 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) error {
 		outputStr := strings.TrimSpace(string(output))
 
 		// Branch collision: the proactive JOIN checks above should catch this,
-		// but handle defensively in case of a race or stale state.
+		// but handle defensively in case of a race or stale state. git itself
+		// permits a nested worktree (e.g. worktrees/agent-a/sub), so the path
+		// findWorktreeForBranch returns here needs the same validation as the
+		// proactive JOIN checks above — it is not guaranteed safe just because
+		// git reported it.
 		if strings.Contains(outputStr, "already checked out") || strings.Contains(outputStr, "already used by worktree") {
 			if attachPath, findErr := findWorktreeForBranch(ctx, base, branchName); findErr == nil && attachPath != "" {
+				if !IsRealWorktreeDir(attachPath, base) || !isDirectChildOfWorktreesDir(base, attachPath) {
+					return fmt.Errorf("git worktree add: branch %q already checked out, but %s is not a direct worktree of this checkout; refusing to join it",
+						branchName, attachPath)
+				}
 				slog.Info("ProvisionShared: attaching to existing worktree (git fallback)",
 					"agent_id", in.AgentID, "branch", branchName, "path", attachPath)
 				return RegisterSharer(base, branchName, attachPath, in.AgentID)
@@ -497,6 +648,10 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) error {
 				reuse := strings.TrimSpace(string(output))
 				if strings.Contains(reuse, "already checked out") || strings.Contains(reuse, "already used by worktree") {
 					if attachPath, findErr := findWorktreeForBranch(ctx, base, branchName); findErr == nil && attachPath != "" {
+						if !IsRealWorktreeDir(attachPath, base) || !isDirectChildOfWorktreesDir(base, attachPath) {
+							return fmt.Errorf("git worktree add: branch %q already checked out, but %s is not a direct worktree of this checkout; refusing to join it",
+								branchName, attachPath)
+						}
 						slog.Info("ProvisionShared: attaching to existing worktree (reuse fallback)",
 							"agent_id", in.AgentID, "branch", branchName, "path", attachPath)
 						return RegisterSharer(base, branchName, attachPath, in.AgentID)
@@ -640,12 +795,33 @@ func chownTarget(hostPath string) string {
 // given UID/GID. This is a ONE-TIME operation done under the advisory lock
 // during first provisioning (design §9.1). Per-start chown is NOT done for
 // NFS (slow/racy over the network).
+//
+// -h (--no-dereference), not plain -R (F-111 review, tf-lead): GNU chown's
+// non-recursive default is to dereference a symlink argument, and this now
+// runs as root with CAP_DAC_OVERRIDE in the k8s init container — without -h,
+// a symlink inside a cloned (possibly untrusted) repo pointing outside the
+// chowned tree (elsewhere in the init container's own filesystem view, or
+// another mounted shared dir) risks having its REFERENT re-owned instead of
+// just the link itself. -h makes chown re-own the link and never follow it.
+// Confirmed the chown binary in scion-base supports -h: its runtime layer is
+// node:24-trixie-slim (Debian, GNU coreutils, not BusyBox), and GNU chown
+// --help lists "-h, --no-dereference"; BusyBox chown also supports -h.
+//
+// TestChownProjectTree_SymlinkOutsideTree_TargetOwnershipUnchanged exercises
+// this with a same-uid chown (this sandbox has no CAP_CHOWN, so it cannot
+// chown to a different uid at all) and checks the outside target's ctime is
+// untouched. That is evidence -h behaves as documented here, not proof that
+// the real scenario (root, a different target uid, CAP_DAC_OVERRIDE) is
+// safe — it cannot exercise that scenario in this environment. Treat it as
+// a regression guard on -h's own behavior, not as a substitute for
+// verifying the real k8s init container against a live cluster.
+
 func chownProjectTree(ctx context.Context, projectRoot string, uid, gid int) error {
-	// Use chown -R for recursive ownership change.
-	cmd := exec.CommandContext(ctx, "chown", "-R", fmt.Sprintf("%d:%d", uid, gid), projectRoot)
+	// Use chown -R -h for recursive ownership change without following symlinks.
+	cmd := exec.CommandContext(ctx, "chown", "-R", "-h", fmt.Sprintf("%d:%d", uid, gid), projectRoot)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("chown -R %d:%d %s: %s", uid, gid, projectRoot, strings.TrimSpace(string(output)))
+		return fmt.Errorf("chown -R -h %d:%d %s: %s", uid, gid, projectRoot, strings.TrimSpace(string(output)))
 	}
 	return nil
 }

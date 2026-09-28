@@ -581,6 +581,20 @@ func TestAgentMentions_DoNotCreateUserNotifications(t *testing.T) {
 		Role:       "member",
 	}))
 
+	// Create a project-scoped role binding so resolveProjectHumanMembers
+	// (which queries ListProjectMembers via role bindings) can find the human.
+	rd, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err, "project-member role definition must exist")
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      humanUser.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          proj.ID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
 	// Create a topic for the conversation.
 	topicID := api.NewUUID()
 	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{

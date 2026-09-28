@@ -162,9 +162,10 @@ func TestPipeline_HandleMetrics_NilExporter(t *testing.T) {
 		t.Fatal("Expected non-nil pipeline")
 	}
 
-	// handleMetrics with nil exporter should not error
+	// A valid metric with no configured exporter is accepted and counted as a
+	// deliberate local drop.
 	err := pipeline.handleMetrics(context.Background(), []*metricpb.ResourceMetrics{
-		{ScopeMetrics: []*metricpb.ScopeMetrics{{Metrics: []*metricpb.Metric{{Name: "test"}}}}},
+		testMetricResource("native", "scope", "", "", testNumber("test", metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE, 1, 2, 1)),
 	})
 	if err != nil {
 		t.Errorf("handleMetrics should not return error without exporter, got: %v", err)

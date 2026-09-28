@@ -370,10 +370,13 @@ func TestParseTopicComponents(t *testing.T) {
 		wantAgent   string
 	}{
 		{"scion.project.myproj.agent.coder.messages", "myproj", "coder"},
-		{"scion.grove.myproj.agent.coder.messages", "myproj", "coder"},
 		{"scion.project.proj1.broadcast", "proj1", ""},
 		{"scion.project.proj2.agent.reviewer.messages", "proj2", "reviewer"},
 		{"scion.project.proj1.agent.coder.agent.reviewer.messages", "proj1", "reviewer"},
+		// A grove-prefixed topic is not a project topic: the project ID
+		// falls back to the whole topic string, and the agent segment is
+		// still extracted.
+		{"scion.grove.myproj.agent.coder.messages", "scion.grove.myproj.agent.coder.messages", "coder"},
 		{"unknown-topic-format", "unknown-topic-format", ""},
 	}
 
@@ -382,6 +385,24 @@ func TestParseTopicComponents(t *testing.T) {
 			projID, agentSlug := parseTopicComponents(tt.topic)
 			assert.Equal(t, tt.wantProject, projID)
 			assert.Equal(t, tt.wantAgent, agentSlug)
+		})
+	}
+}
+
+func TestNormalizeV1RouteTopic(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"v1 legacy agent route", "scion.grove.proj1.agent.coder.messages", "scion.project.proj1.agent.coder.messages"},
+		{"v1 legacy broadcast route", "scion.grove.proj1.broadcast", "scion.project.proj1.broadcast"},
+		{"already canonical", "scion.project.proj1.agent.coder.messages", "scion.project.proj1.agent.coder.messages"},
+		{"unrelated string", "not-a-topic", "not-a-topic"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, normalizeV1RouteTopic(tt.in))
 		})
 	}
 }
@@ -744,6 +765,71 @@ func TestV2_HandleGroupMessage_UserMappingResolution(t *testing.T) {
 
 	assert.Equal(t, "user:alice@example.com", deliveredMsg.Sender)
 	assert.Equal(t, "456", deliveredMsg.SenderID)
+}
+
+// TestV2_HandleGroupMessage_SenderIDUsesHubUserID verifies that once a
+// Telegram user is registered (mapping.ScionUserID populated), the outbound
+// StructuredMessage.SenderID carries the Hub user UUID rather than the raw
+// Telegram numeric ID. The Hub's outbound-message reply-affinity lookup
+// (webchat_conversation_context) is keyed by Hub user ID; sending the raw
+// Telegram ID there means a registered user's reply-affinity never matches,
+// and the agent's next reply falls back to whatever channel that Hub user
+// last used elsewhere (e.g. the web dashboard) instead of Telegram.
+func TestV2_HandleGroupMessage_SenderIDUsesHubUserID(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	hub := newFakeHubClient()
+	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}}
+	b := newTestBrokerV2WithHub(t, tgSrv, hub)
+
+	ctx := context.Background()
+	require.NoError(t, b.store.SaveGroupLink(ctx, &GroupLink{
+		ChatID:       -200,
+		ProjectID:    "proj-1",
+		DefaultAgent: "coder",
+		LinkedAt:     time.Now().UTC(),
+		Active:       true,
+	}))
+	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		ProjectID:   "proj-1",
+		Agents:      []AgentInfo{{Slug: "coder"}},
+		RefreshedAt: time.Now(),
+	}))
+	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
+		TelegramUserID: "456",
+		ScionEmail:     "alice@example.com",
+		ScionUserID:    "hub-user-uuid-alice",
+		LinkedAt:       time.Now().UTC(),
+	}))
+
+	var deliveredMsg *messages.StructuredMessage
+	done := make(chan struct{}, 1)
+	b.InboundHandler = func(_ string, msg *messages.StructuredMessage) {
+		deliveredMsg = msg
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+	}
+
+	b.handleGroupMessage(&TGMessage{
+		MessageID: 42,
+		From:      &TGUser{ID: 456, Username: "alice"},
+		Chat:      TGChat{ID: -200, Type: "group"},
+		Date:      time.Now().Unix(),
+		Text:      "@test_bot hi",
+		Entities: []MessageEntity{
+			{Type: "mention", Offset: 0, Length: 9},
+		},
+	})
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out")
+	}
+
+	assert.Equal(t, "user:alice@example.com", deliveredMsg.Sender)
+	assert.Equal(t, "hub-user-uuid-alice", deliveredMsg.SenderID)
 }
 
 func TestV2_HandleGroupMessage_ConversationContextSaved(t *testing.T) {

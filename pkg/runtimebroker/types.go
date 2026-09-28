@@ -21,6 +21,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
 
@@ -52,36 +53,6 @@ type BrokerInfoResponse struct {
 	Projects     []ProjectInfo       `json:"projects,omitempty"`
 }
 
-// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
-func (r *BrokerInfoResponse) UnmarshalJSON(data []byte) error {
-	type Alias BrokerInfoResponse
-	aux := &struct {
-		Groves []ProjectInfo `json:"groves"`
-		*Alias
-	}{
-		Alias: (*Alias)(r),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if len(r.Projects) == 0 && len(aux.Groves) > 0 {
-		r.Projects = aux.Groves
-	}
-	return nil
-}
-
-// MarshalJSON implements custom marshaling to support legacy grove fields.
-func (r BrokerInfoResponse) MarshalJSON() ([]byte, error) {
-	type Alias BrokerInfoResponse
-	return json.Marshal(&struct {
-		Alias
-		Groves []ProjectInfo `json:"groves,omitempty"`
-	}{
-		Alias:  Alias(r),
-		Groves: r.Projects,
-	})
-}
-
 // BrokerProfile describes a runtime profile available on a broker.
 type BrokerProfile struct {
 	Name      string `json:"name"`
@@ -97,6 +68,11 @@ type BrokerCapabilities struct {
 	Sync   bool `json:"sync"`
 	Attach bool `json:"attach"`
 	Exec   bool `json:"exec"`
+	// Reprovision indicates this broker supports the reincarnation reprovision
+	// primitive (POST .../agents/{id} with provisionOnly+reprovision, design
+	// §3.4). The hub gates `scion reincarnate` on this — see
+	// store.BrokerCapabilities.Reprovision and its 412 gate in pkg/hub.
+	Reprovision bool `json:"reprovision"`
 }
 
 // ProjectInfo is a summary of a project registered on this broker.
@@ -105,42 +81,6 @@ type ProjectInfo struct {
 	ProjectName string `json:"projectName"`
 	GitRemote   string `json:"gitRemote,omitempty"`
 	AgentCount  int    `json:"agentCount"`
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
-func (i *ProjectInfo) UnmarshalJSON(data []byte) error {
-	type Alias ProjectInfo
-	aux := &struct {
-		GroveID   string `json:"groveId"`
-		GroveName string `json:"groveName"`
-		*Alias
-	}{
-		Alias: (*Alias)(i),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if i.ProjectID == "" && aux.GroveID != "" {
-		i.ProjectID = aux.GroveID
-	}
-	if i.ProjectName == "" && aux.GroveName != "" {
-		i.ProjectName = aux.GroveName
-	}
-	return nil
-}
-
-// MarshalJSON implements custom marshaling to support legacy grove fields.
-func (i ProjectInfo) MarshalJSON() ([]byte, error) {
-	type Alias ProjectInfo
-	return json.Marshal(&struct {
-		Alias
-		GroveID   string `json:"groveId,omitempty"`
-		GroveName string `json:"groveName,omitempty"`
-	}{
-		Alias:     Alias(i),
-		GroveID:   i.ProjectID,
-		GroveName: i.ProjectName,
-	})
 }
 
 // ============================================================================
@@ -198,36 +138,6 @@ type AgentResponse struct {
 	Labels                map[string]string `json:"labels,omitempty"`
 	CreatedAt             time.Time         `json:"createdAt,omitempty"`
 	UpdatedAt             time.Time         `json:"updatedAt,omitempty"`
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
-func (r *AgentResponse) UnmarshalJSON(data []byte) error {
-	type Alias AgentResponse
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(r),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if r.ProjectID == "" && aux.GroveID != "" {
-		r.ProjectID = aux.GroveID
-	}
-	return nil
-}
-
-// MarshalJSON implements custom marshaling to support legacy grove fields.
-func (r AgentResponse) MarshalJSON() ([]byte, error) {
-	type Alias AgentResponse
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId,omitempty"`
-	}{
-		Alias:   Alias(r),
-		GroveID: r.ProjectID,
-	})
 }
 
 // AgentConfig contains agent configuration details.
@@ -298,6 +208,15 @@ type CreateAgentRequest struct {
 	// ProvisionOnly indicates the agent should be provisioned (dirs, worktree, templates)
 	// but not started. The container will not be launched.
 	ProvisionOnly bool `json:"provisionOnly,omitempty"`
+	// Reprovision indicates this ProvisionOnly request targets an existing
+	// agent whose on-disk config should be replaced from the current
+	// template/harness-config catalog, for a `scion reincarnate` request
+	// (design §3.4). The hub always sets ProvisionOnly alongside this. Unlike
+	// a plain ProvisionOnly call (which reuses persisted config when the
+	// agent directory already exists), Reprovision forces a fresh render
+	// while preserving the agent's home directory and clone-per-agent
+	// workspace. Ignored when ProvisionOnly is false.
+	Reprovision bool `json:"reprovision,omitempty"`
 	// ProjectPath is the local filesystem path to the project on this runtime broker.
 	// This is provided by the Hub from the project provider record.
 	ProjectPath string `json:"projectPath,omitempty"`
@@ -327,6 +246,12 @@ type CreateAgentRequest struct {
 	// Passed by the Hub so the broker can include them in env-gather requirements.
 	RequiredSecrets []api.RequiredSecret `json:"requiredSecrets,omitempty"`
 
+	// PreResolvedSkills carries the Hub-registry skills the Hub resolved at
+	// dispatch as the agent's creator (#1784). Refs covered here are installed
+	// from this payload; the broker's own resolver handles the rest. Nil when
+	// the Hub predates this field or had nothing to resolve.
+	PreResolvedSkills *hubclient.ResolveSkillsResponse `json:"preResolvedSkills,omitempty"`
+
 	// InlineConfig carries the full ScionConfig provided via the Hub API.
 	// When set, the broker applies this during agent provisioning, enabling
 	// inline configuration without pre-existing templates on the broker.
@@ -347,48 +272,6 @@ type CreateAgentRequest struct {
 	// These are NEVER forwarded to the agent container environment or harness scripts.
 	// Populated by the Hub from project-scope secrets at dispatch time.
 	ProvisionCredentials map[string]string `json:"provisionCredentials,omitempty"`
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
-func (r *CreateAgentRequest) UnmarshalJSON(data []byte) error {
-	type Alias CreateAgentRequest
-	aux := &struct {
-		GroveID   string `json:"groveId"`
-		GrovePath string `json:"grovePath"`
-		GroveSlug string `json:"groveSlug"`
-		*Alias
-	}{
-		Alias: (*Alias)(r),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if r.ProjectID == "" && aux.GroveID != "" {
-		r.ProjectID = aux.GroveID
-	}
-	if r.ProjectPath == "" && aux.GrovePath != "" {
-		r.ProjectPath = aux.GrovePath
-	}
-	if r.ProjectSlug == "" && aux.GroveSlug != "" {
-		r.ProjectSlug = aux.GroveSlug
-	}
-	return nil
-}
-
-// MarshalJSON implements custom marshaling to support legacy grove fields.
-func (r CreateAgentRequest) MarshalJSON() ([]byte, error) {
-	type Alias CreateAgentRequest
-	return json.Marshal(&struct {
-		Alias
-		GroveID   string `json:"groveId,omitempty"`
-		GrovePath string `json:"grovePath,omitempty"`
-		GroveSlug string `json:"groveSlug,omitempty"`
-	}{
-		Alias:     Alias(r),
-		GroveID:   r.ProjectID,
-		GrovePath: r.ProjectPath,
-		GroveSlug: r.ProjectSlug,
-	})
 }
 
 // CreateAgentConfig contains configuration for agent creation.
@@ -469,6 +352,15 @@ type GCPIdentityConfig struct {
 type CreateAgentResponse struct {
 	Agent   *AgentResponse `json:"agent"`
 	Created bool           `json:"created"`
+
+	// Reprovisioned is set true ONLY on the branch of handleCreateAgent that
+	// actually ran Manager.Reprovision (design §3.4 Amendment A2.2(a)).
+	// A broker that predates the reincarnate feature has no field named
+	// "reprovision" in its request handling at all, so it silently runs a
+	// plain Provision for a request that set Reprovision=true — the hub
+	// treats an absent echo on a reprovision dispatch as a failure, which is
+	// what keeps that failure mode closed instead of a silent no-op.
+	Reprovisioned bool `json:"reprovisioned,omitempty"`
 }
 
 // EnvRequirementsResponse is returned by the broker when GatherEnv is true
@@ -496,18 +388,28 @@ type MessageRequest struct {
 	// Structured message (new field, used by default).
 	StructuredMessage *messages.StructuredMessage `json:"structured_message,omitempty"`
 
+	// DeliveryText is the fully rendered agent-facing envelope, produced by
+	// the hub (Phase 9b). When set, the broker delivers it verbatim and
+	// performs no formatting. Takes precedence over StructuredMessage
+	// rendering and Message. Phase 13 deletes this field.
+	DeliveryText string `json:"delivery_text,omitempty"`
+
 	// Interrupt the harness before sending.
 	Interrupt bool `json:"interrupt,omitempty"`
 
 	// ProjectID is the project ID for the target agent (used for message log labels).
 	ProjectID string `json:"projectId,omitempty"`
+
+	// MessageID is the hub's persisted message ID, when the hub wants to be
+	// told about a buffered delivery that fails after acceptance (#1820).
+	MessageID string `json:"message_id,omitempty"`
 }
 
-// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
+// UnmarshalJSON implements custom unmarshaling to support the legacy
+// snake_case project_id field alongside the canonical projectId.
 func (r *MessageRequest) UnmarshalJSON(data []byte) error {
 	type Alias MessageRequest
 	aux := &struct {
-		GroveID      string `json:"grove_id"`
 		LegacyProjID string `json:"project_id"`
 		*Alias
 	}{
@@ -516,26 +418,21 @@ func (r *MessageRequest) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
 	}
-	if r.ProjectID == "" {
-		if aux.LegacyProjID != "" {
-			r.ProjectID = aux.LegacyProjID
-		} else if aux.GroveID != "" {
-			r.ProjectID = aux.GroveID
-		}
+	if r.ProjectID == "" && aux.LegacyProjID != "" {
+		r.ProjectID = aux.LegacyProjID
 	}
 	return nil
 }
 
-// MarshalJSON implements custom marshaling to support legacy grove fields.
+// MarshalJSON implements custom marshaling to support the legacy snake_case
+// project_id field alongside the canonical projectId.
 func (r MessageRequest) MarshalJSON() ([]byte, error) {
 	type Alias MessageRequest
 	return json.Marshal(&struct {
 		Alias
-		GroveID      string `json:"grove_id,omitempty"`
 		LegacyProjID string `json:"project_id,omitempty"`
 	}{
 		Alias:        Alias(r),
-		GroveID:      r.ProjectID,
 		LegacyProjID: r.ProjectID,
 	})
 }

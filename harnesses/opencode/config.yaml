@@ -54,8 +54,8 @@ command:
   task_position: before_base_args
 capabilities:
   limits:
-    max_turns: { support: "no", reason: "This harness has no hook dialect for turn events" }
-    max_model_calls: { support: "no", reason: "This harness has no hook dialect for model events" }
+    max_turns: { support: "yes" }
+    max_model_calls: { support: "partial", reason: "Uses message.updated as proxy for model-end; no explicit model-start event" }
     max_duration: { support: "yes" }
   telemetry:
     enabled: { support: "yes" }
@@ -73,7 +73,7 @@ capabilities:
     sse: { support: "yes" }
     streamable_http: { support: "yes" }
     project_scope: { support: "no", reason: "OpenCode does not distinguish project-scoped MCP" }
-  resume: { support: "no", reason: "OpenCode CLI --continue flag exists but resume is not yet verified (ptone/scion#1521)" }
+  resume: { support: "yes" }
 no_auth:
   behavior: drop-to-shell
   command: opencode auth login

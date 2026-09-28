@@ -273,7 +273,7 @@ func TestTelemetryConfigToEnv_Full(t *testing.T) {
 		"SCION_TELEMETRY_CLOUD_ENABLED":             "true",
 		"SCION_OTEL_ENDPOINT":                       "otel.example.com:4317",
 		"SCION_OTEL_PROTOCOL":                       "grpc",
-		"SCION_OTEL_INSECURE":                       "false",
+		"SCION_OTEL_SKIP_TLS_VERIFY":                "false",
 		"SCION_OTEL_CA_FILE":                        "/etc/ssl/certs/custom-root.pem",
 		"SCION_TELEMETRY_CLOUD_BATCH_MAX_SIZE":      "256",
 		"SCION_TELEMETRY_CLOUD_BATCH_TIMEOUT":       "10s",

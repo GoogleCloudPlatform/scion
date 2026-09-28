@@ -10,7 +10,7 @@ import (
 	slackapi "github.com/slack-go/slack"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
 // HandleCommand dispatches a Slack slash command to the appropriate handler.
@@ -294,7 +294,7 @@ func handleMsg(
 		log.Warn("Failed to save conversation context", "error", err)
 	}
 
-	topic := projectcompat.AgentTopic(link.ProjectID, agentSlug)
+	topic := projectkeys.AgentTopic(link.ProjectID, agentSlug)
 	hubMsg := &messages.StructuredMessage{
 		Version:   messages.Version,
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
@@ -663,7 +663,7 @@ func handleAskOption(
 			sender = "user:" + mapping.ScionEmail
 		}
 
-		topic := projectcompat.AgentTopic(pending.ProjectID, pending.AgentSlug)
+		topic := projectkeys.AgentTopic(pending.ProjectID, pending.AgentSlug)
 		msg := &messages.StructuredMessage{
 			Version:   messages.Version,
 			Timestamp: time.Now().UTC().Format(time.RFC3339),

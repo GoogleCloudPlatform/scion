@@ -781,7 +781,7 @@ func TestEnvGather_HubEnvResolution(t *testing.T) {
 	// Store env vars in project scope
 	if err := memStore.CreateEnvVar(ctx, &store.EnvVar{
 		ID:            tid("env-1"),
-		Key:           "GROVE_API_KEY",
+		Key:           "PROJECT_API_KEY",
 		Value:         "project-key-value",
 		Scope:         "project",
 		ScopeID:       tid("project-env"),
@@ -813,9 +813,9 @@ func TestEnvGather_HubEnvResolution(t *testing.T) {
 	if mockClient.lastCreateReq == nil {
 		t.Fatal("expected CreateReq to be captured")
 	}
-	if mockClient.lastCreateReq.ResolvedEnv["GROVE_API_KEY"] != "project-key-value" {
-		t.Errorf("expected GROVE_API_KEY=project-key-value in resolved env, got %q",
-			mockClient.lastCreateReq.ResolvedEnv["GROVE_API_KEY"])
+	if mockClient.lastCreateReq.ResolvedEnv["PROJECT_API_KEY"] != "project-key-value" {
+		t.Errorf("expected PROJECT_API_KEY=project-key-value in resolved env, got %q",
+			mockClient.lastCreateReq.ResolvedEnv["PROJECT_API_KEY"])
 	}
 }
 

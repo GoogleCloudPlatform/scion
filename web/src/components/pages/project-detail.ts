@@ -30,6 +30,7 @@ import type {
   AgentPhase,
   Capabilities,
   ProjectSessionMetricsSummary,
+  AgentLifecycleAction,
 } from '../../shared/types.js';
 import {
   can,
@@ -39,11 +40,14 @@ import {
   isAgentRunning,
   isTerminalAvailable,
   isSharedWorkspace,
+  RESUME_BEST_EFFORT_CONFIRM_MESSAGE,
+  lifecycleActionRequestInit,
 } from '../../shared/types.js';
 import type { StatusType } from '../shared/status-badge.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
+import { fetchHubProjectCapabilities } from '../../client/hub-capabilities.js';
 import '../shared/git-remote-display.js';
 import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
@@ -64,9 +68,13 @@ import {
 import type { FileEditorDataSource } from '../shared/file-editor.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
+import { terminalHref } from '../../client/open-terminal.js';
 
 type AgentSortField = 'name' | 'status' | 'created' | 'updated';
 type SortDir = 'asc' | 'desc';
+
+// User-level (not per-project) sticky preference for the agents section height.
+const AGENTS_EXPANDED_STORAGE_KEY = 'scion-project-agents-expanded';
 
 @customElement('scion-page-project-detail')
 export class ScionPageProjectDetail extends LitElement {
@@ -119,6 +127,14 @@ export class ScionPageProjectDetail extends LitElement {
   private agentScopeCapabilities: Capabilities | undefined;
 
   /**
+   * Hub-scope project capabilities (`_capabilities` of GET /api/v1/projects).
+   * Clone and Create Template make a new project, which needs hub
+   * `project.create` (project_clone.go), so they are hidden without it.
+   */
+  @state()
+  private hubProjectCapabilities: Capabilities | undefined;
+
+  /**
    * Active file tab key ('workspace' or shared dir name)
    */
   @state()
@@ -140,6 +156,14 @@ export class ScionPageProjectDetail extends LitElement {
    */
   @state()
   private viewMode: ViewMode = 'grid';
+
+  /**
+   * Whether the agents section is expanded to full height. Collapsed (the
+   * default) caps the grid/table at a fixed height with its own scrollbar.
+   * Persisted per user (not per project) in localStorage.
+   */
+  @state()
+  private agentsExpanded = false;
 
   @state()
   private phaseFilter: AgentPhase | '' = '';
@@ -344,12 +368,61 @@ export class ScionPageProjectDetail extends LitElement {
       margin: 0;
     }
 
+    /* Matches the shared .resource-grid in resource-styles.ts. When expanded
+       the section flows at full height; when collapsed (the default) it is
+       capped by .agents-collapsed below. */
     .agent-grid {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
       gap: 1.5rem;
+    }
+
+    /* Collapsed agents section: fixed max-height with a slim, themed
+       scrollbar. The expand toggle in the section header removes the cap. */
+    .agent-grid.agents-collapsed,
+    .agent-table-container.agents-collapsed {
       max-height: 26rem;
       overflow-y: auto;
+      scrollbar-width: thin;
+      scrollbar-color: var(--scion-border, #cbd5e1) transparent;
+    }
+
+    /* Keep column headers visible while the collapsed table scrolls. With
+       border-collapse the th border-bottom does not stick, so draw the
+       divider with an inset shadow instead. */
+    .agent-table-container.agents-collapsed th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      box-shadow: inset 0 -1px 0 var(--scion-border, #e2e8f0);
+    }
+
+    .agent-grid.agents-collapsed {
+      /* Room so card hover shadows/borders are not clipped by the scroller. */
+      padding: 2px 0.5rem 2px 2px;
+    }
+
+    .agents-collapsed::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+
+    .agents-collapsed::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    .agents-collapsed::-webkit-scrollbar-thumb {
+      background: var(--scion-border, #cbd5e1);
+      border-radius: 9999px;
+    }
+
+    .agents-collapsed::-webkit-scrollbar-thumb:hover {
+      background: var(--scion-text-muted, #94a3b8);
+    }
+
+    .agents-expand-toggle {
+      font-size: 1rem;
+      color: var(--scion-text-muted, #64748b);
     }
 
     .agent-card {
@@ -373,6 +446,23 @@ export class ScionPageProjectDetail extends LitElement {
       align-items: flex-start;
       justify-content: space-between;
       margin-bottom: 0.75rem;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+
+    /* Let the name column shrink so .agent-name can wrap; without this a
+       flex item's min-width:auto holds the header open at the full name. */
+    .agent-header > div {
+      /* Full-width basis so the badge always wraps to its own row. A wide
+         status label like "Waiting_for_input" would otherwise crush the name
+         to a few characters, the same failure the agents grid had — it is the
+         badge's width that matters, not how many there are. */
+      flex: 1 1 100%;
+      min-width: 0;
+    }
+
+    .agent-header > scion-status-badge {
+      flex-shrink: 0;
     }
 
     .agent-name {
@@ -383,10 +473,20 @@ export class ScionPageProjectDetail extends LitElement {
       display: flex;
       align-items: center;
       gap: 0.5rem;
+      min-width: 0;
     }
 
     .agent-name sl-icon {
       color: var(--scion-primary, #3b82f6);
+      flex-shrink: 0;
+    }
+
+    /* Wrapping has to land on the anchor that holds the text; the flex parent
+       only bounds it. overflow-wrap:anywhere covers the hard case — a long
+       name with no spaces or hyphens, which has nowhere else to break. */
+    .agent-name > a {
+      min-width: 0;
+      overflow-wrap: anywhere;
     }
 
     .agent-meta {
@@ -433,12 +533,14 @@ export class ScionPageProjectDetail extends LitElement {
       border-top: 1px solid var(--scion-border, #e2e8f0);
     }
 
+    /* overflow-x: auto keeps the rounded corners clipping the table while
+       allowing horizontal scrolling on smaller screens. The collapsed height
+       cap is shared with the grid via .agents-collapsed. */
     .agent-table-container {
       background: var(--scion-surface, #ffffff);
       border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: var(--scion-radius-lg, 0.75rem);
-      max-height: 26rem;
-      overflow-y: auto;
+      overflow-x: auto;
     }
 
     .agent-table-container table {
@@ -813,6 +915,9 @@ export class ScionPageProjectDetail extends LitElement {
       this.viewMode = stored;
     }
 
+    // Read persisted agents section expand/collapse preference (user-level)
+    this.agentsExpanded = localStorage.getItem(AGENTS_EXPANDED_STORAGE_KEY) === 'true';
+
     // Read persisted phase filter
     const storedPhase = localStorage.getItem(`scion-filter-project-agents-phase-${this.projectId}`);
     if (
@@ -846,6 +951,7 @@ export class ScionPageProjectDetail extends LitElement {
     }
 
     void this.loadData();
+    void this.loadHubProjectCapabilities();
 
     // Set SSE scope to this project (receives all agent events within project)
     if (this.projectId) {
@@ -908,6 +1014,12 @@ export class ScionPageProjectDetail extends LitElement {
     if (updatedProject && this.project) {
       this.project = { ...this.project, ...updatedProject };
     }
+  }
+
+  private async loadHubProjectCapabilities(): Promise<void> {
+    const caps = await fetchHubProjectCapabilities();
+    if (!this.isConnected) return;
+    this.hubProjectCapabilities = caps;
   }
 
   private async loadData(): Promise<void> {
@@ -1179,11 +1291,27 @@ export class ScionPageProjectDetail extends LitElement {
 
   private async handleAgentAction(
     agentId: string,
-    action: 'start' | 'stop' | 'suspend' | 'resume' | 'delete',
+    action: AgentLifecycleAction,
     event?: MouseEvent
   ): Promise<void> {
+    if (action === 'force-resume') {
+      if (
+        !(await showConfirm(RESUME_BEST_EFFORT_CONFIRM_MESSAGE, {
+          title: 'Resume (best effort)',
+          confirmText: 'Resume',
+          variant: 'primary',
+        }))
+      ) {
+        return;
+      }
+    }
+
     if (action === 'delete') {
-      if (!event?.altKey && !(await showConfirm('Are you sure you want to delete this agent?'))) {
+      const agentName = this.agents.find((a) => a.id === agentId)?.name ?? 'this agent';
+      if (
+        !event?.altKey &&
+        !(await showConfirm(`Are you sure you want to delete agent "${agentName}"?`))
+      ) {
         return;
       }
       this.actionLoading = { ...this.actionLoading, [agentId]: true };
@@ -1216,6 +1344,7 @@ export class ScionPageProjectDetail extends LitElement {
       stop: 'stopping',
       suspend: 'stopping',
       resume: 'starting',
+      'force-resume': 'starting',
     };
     const agentIndex = this.agents.findIndex((a) => a.id === agentId);
     if (agentIndex >= 0) {
@@ -1230,10 +1359,11 @@ export class ScionPageProjectDetail extends LitElement {
       stop: `/api/v1/agents/${agentId}/stop`,
       suspend: `/api/v1/agents/${agentId}/suspend`,
       resume: `/api/v1/agents/${agentId}/start`,
+      'force-resume': `/api/v1/agents/${agentId}/start`,
     };
 
     try {
-      const response = await apiFetch(actionUrls[action], { method: 'POST' });
+      const response = await apiFetch(actionUrls[action], lifecycleActionRequestInit(action));
 
       if (!response.ok) {
         throw new Error(await extractApiError(response, `Failed to ${action} agent`));
@@ -1249,6 +1379,11 @@ export class ScionPageProjectDetail extends LitElement {
 
   private onViewChange(e: CustomEvent<{ view: ViewMode }>): void {
     this.viewMode = e.detail.view;
+  }
+
+  private toggleAgentsExpanded(): void {
+    this.agentsExpanded = !this.agentsExpanded;
+    localStorage.setItem(AGENTS_EXPANDED_STORAGE_KEY, String(this.agentsExpanded));
   }
 
   private get displayAgents(): Agent[] {
@@ -1742,7 +1877,7 @@ export class ScionPageProjectDetail extends LitElement {
                 </sl-button>
               `
             : nothing}
-          ${can(this.project?._capabilities, 'read')
+          ${can(this.project?._capabilities, 'read') && can(this.hubProjectCapabilities, 'create')
             ? this.pageData?.user?.role === 'admin'
               ? html`
                   <sl-dropdown>
@@ -1921,6 +2056,19 @@ export class ScionPageProjectDetail extends LitElement {
                   <sl-icon slot="prefix" name="stop-circle"></sl-icon>
                   Stop All
                 </sl-button>
+              `
+            : nothing}
+          ${this.agents.length > 0 && this.viewMode !== 'graph'
+            ? html`
+                <sl-tooltip content=${this.agentsExpanded ? 'Collapse' : 'Expand'}>
+                  <sl-icon-button
+                    class="agents-expand-toggle"
+                    name=${this.agentsExpanded ? 'arrows-angle-contract' : 'arrows-angle-expand'}
+                    label=${this.agentsExpanded ? 'Collapse agents' : 'Expand agents'}
+                    aria-expanded=${this.agentsExpanded ? 'true' : 'false'}
+                    @click=${() => this.toggleAgentsExpanded()}
+                  ></sl-icon-button>
+                </sl-tooltip>
               `
             : nothing}
         </div>
@@ -2151,7 +2299,7 @@ export class ScionPageProjectDetail extends LitElement {
 
   private renderAgentGrid() {
     return html`
-      <div class="agent-grid">
+      <div class="agent-grid ${this.agentsExpanded ? '' : 'agents-collapsed'}">
         ${this.displayAgents.map((agent) => this.renderAgentCard(agent))}
       </div>
     `;
@@ -2159,7 +2307,7 @@ export class ScionPageProjectDetail extends LitElement {
 
   private renderAgentTable() {
     return html`
-      <div class="agent-table-container">
+      <div class="agent-table-container ${this.agentsExpanded ? '' : 'agents-collapsed'}">
         <table>
           <thead>
             <tr>
@@ -2245,7 +2393,7 @@ export class ScionPageProjectDetail extends LitElement {
                       <sl-button
                         variant="primary"
                         size="small"
-                        href="/agents/${agent.id}/terminal"
+                        href=${terminalHref(agent.id)}
                         ?disabled=${!isTerminalAvailable(agent)}
                         aria-label="Terminal"
                       >
@@ -2310,6 +2458,22 @@ export class ScionPageProjectDetail extends LitElement {
                   : nothing
                 : canLifecycle(agent._capabilities)
                   ? html`
+                      ${agent.phase === 'error'
+                        ? html`
+                            <sl-tooltip content="Resume (best effort)">
+                              <sl-button
+                                size="small"
+                                outline
+                                ?loading=${isLoading}
+                                ?disabled=${isLoading}
+                                @click=${() => this.handleAgentAction(agent.id, 'force-resume')}
+                                aria-label="Resume (best effort)"
+                              >
+                                <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+                              </sl-button>
+                            </sl-tooltip>
+                          `
+                        : nothing}
                       <sl-tooltip content="Start">
                         <sl-button
                           variant="success"
@@ -2390,7 +2554,7 @@ export class ScionPageProjectDetail extends LitElement {
                     <sl-button
                       variant="primary"
                       size="small"
-                      href="/agents/${agent.id}/terminal"
+                      href=${terminalHref(agent.id)}
                       ?disabled=${!isTerminalAvailable(agent)}
                       aria-label="Terminal"
                     >
@@ -2455,6 +2619,22 @@ export class ScionPageProjectDetail extends LitElement {
                 : nothing
               : canLifecycle(agent._capabilities)
                 ? html`
+                    ${agent.phase === 'error'
+                      ? html`
+                          <sl-tooltip content="Resume (best effort)">
+                            <sl-button
+                              size="small"
+                              outline
+                              ?loading=${isLoading}
+                              ?disabled=${isLoading}
+                              @click=${() => this.handleAgentAction(agent.id, 'force-resume')}
+                              aria-label="Resume (best effort)"
+                            >
+                              <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+                            </sl-button>
+                          </sl-tooltip>
+                        `
+                      : nothing}
                     <sl-tooltip content="Start">
                       <sl-button
                         variant="success"

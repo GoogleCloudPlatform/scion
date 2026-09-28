@@ -16,6 +16,7 @@ import (
 func TestProtoResourceMetricsToSDK(t *testing.T) {
 	resourceMetrics := []*metricpb.ResourceMetrics{
 		{
+			SchemaUrl: "https://example.test/resource-schema",
 			Resource: &resourcepb.Resource{
 				Attributes: []*commonpb.KeyValue{
 					{Key: "service.name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "claude"}}},
@@ -23,6 +24,12 @@ func TestProtoResourceMetricsToSDK(t *testing.T) {
 			},
 			ScopeMetrics: []*metricpb.ScopeMetrics{
 				{
+					SchemaUrl: "https://example.test/scope-schema",
+					Scope: &commonpb.InstrumentationScope{
+						Name:       "native.metric.scope",
+						Version:    "1.0.0",
+						Attributes: []*commonpb.KeyValue{{Key: "scope.safe", Value: stringValue("processed")}},
+					},
 					Metrics: []*metricpb.Metric{
 						{
 							Name: "gemini_cli.token.usage",
@@ -103,6 +110,16 @@ func TestProtoResourceMetricsToSDK(t *testing.T) {
 	}
 	if got[0].ScopeMetrics[0].Metrics[0].Name != "gemini_cli.token.usage" {
 		t.Fatalf("first metric name = %q, want gemini_cli.token.usage", got[0].ScopeMetrics[0].Metrics[0].Name)
+	}
+	if got[0].Resource.SchemaURL() != "https://example.test/resource-schema" {
+		t.Fatalf("resource schema URL = %q", got[0].Resource.SchemaURL())
+	}
+	scope := got[0].ScopeMetrics[0].Scope
+	if scope.Name != "native.metric.scope" || scope.Version != "1.0.0" || scope.SchemaURL != "https://example.test/scope-schema" {
+		t.Fatalf("scope metadata = %#v", scope)
+	}
+	if value, ok := scope.Attributes.Value("scope.safe"); !ok || value.AsString() != "processed" {
+		t.Fatalf("scope attributes = %v", scope.Attributes)
 	}
 }
 

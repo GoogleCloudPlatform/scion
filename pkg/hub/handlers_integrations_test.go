@@ -58,6 +58,7 @@ type mockIntegrationManager struct {
 	updateCalls        []string
 	installCalls       []string
 	loadOneCalls       []string
+	loadOneEntries     []plugin.PluginEntry
 	loadOneErr         error
 	brokers            map[string]eventbus.EventBus // name → bus (for GetBroker)
 }
@@ -189,6 +190,7 @@ func (m *mockIntegrationManager) InstallPlugin(name, repoPath, pluginsDir, confi
 
 func (m *mockIntegrationManager) LoadOne(pluginType, name string, entry plugin.PluginEntry, pluginsDir string) error {
 	m.loadOneCalls = append(m.loadOneCalls, name)
+	m.loadOneEntries = append(m.loadOneEntries, entry)
 	if m.loadOneErr != nil {
 		return m.loadOneErr
 	}

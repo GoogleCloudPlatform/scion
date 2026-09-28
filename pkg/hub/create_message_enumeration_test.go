@@ -37,7 +37,11 @@ func TestCreateMessageEnumeration(t *testing.T) {
 	// CreateMessage.
 	// -------------------------------------------------------------------
 	stamped := map[string]string{
-		// handleAgentOutboundMessage: agent → user outbound message.
+		// ExecuteAgentDM: shared agent DM operation (#1688).
+		"agent_dm_operation.go:ExecuteAgentDM": "Phase 5 dual-write: shared agent DM operation (#1688)",
+
+		// handleAgentOutboundMessage: agent-to-user direct (deliveryUserDirect path).
+		// Only one CreateMessage remains after agent DM extraction (#1688).
 		"handlers_agent_messaging.go:handleAgentOutboundMessage": "Phase 5 dual-write: agent outbound DM or thread conversation",
 
 		// handleAgentMessage direct-persist path: user/agent → agent.
@@ -55,14 +59,21 @@ func TestCreateMessageEnumeration(t *testing.T) {
 		// handleBrokerInbound: external channel inbound (B15).
 		"handlers_broker_inbound.go:handleBrokerInbound": "B15 dual-write: broker inbound conversation stamping",
 
+		// dispatchRoutedRecipient: routed broker inbound (centralized routing).
+		"handlers_broker_inbound_routed.go:dispatchRoutedRecipient": "Routed inbound: conversation stamped via Phase 11 or Phase 5 before CreateMessage",
+
 		// sendAgentRouted primary: web chat user → agent.
 		"handlers_chat_v2.go:sendAgentRouted:primary": "B15 dual-write: web chat user→agent primary message",
 
 		// sendAgentRouted mention fan-out: web chat user → mentioned agent.
 		"handlers_chat_v2.go:sendAgentRouted:mention": "B15 dual-write: web chat mention fan-out",
 
-		// sendHumanToHuman: web chat user → user DM or thread.
-		"handlers_chat_v2.go:sendHumanToHuman": "B15 dual-write: human-to-human DM/thread conversation stamping",
+		// sendHumanToHuman: web chat user → user DM or thread. Also handles
+		// the unreachable-default override (nc-delivery-unreachable review
+		// R1): a topic send to an unresolvable default agent (soft-deleted,
+		// or missing) shares this same call site rather than a separate
+		// sendUnreachableDefaultAgent copy.
+		"handlers_chat_v2.go:sendHumanToHuman": "B15 dual-write: human-to-human DM/thread conversation stamping (also covers the unreachable-default override)",
 
 		// messagebroker deliverToUser: broker-delivered user messages.
 		"messagebroker.go:deliverToUser": "Phase 5 dual-write: broker-delivered user message",

@@ -12,6 +12,7 @@ import (
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/externalidentity"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/group"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
@@ -158,6 +159,20 @@ func (_c *UserCreate) SetNillableLastSeen(v *time.Time) *UserCreate {
 	return _c
 }
 
+// SetSessionGeneration sets the "session_generation" field.
+func (_c *UserCreate) SetSessionGeneration(v int64) *UserCreate {
+	_c.mutation.SetSessionGeneration(v)
+	return _c
+}
+
+// SetNillableSessionGeneration sets the "session_generation" field if the given value is not nil.
+func (_c *UserCreate) SetNillableSessionGeneration(v *int64) *UserCreate {
+	if v != nil {
+		_c.SetSessionGeneration(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *UserCreate) SetID(v uuid.UUID) *UserCreate {
 	_c.mutation.SetID(v)
@@ -217,6 +232,21 @@ func (_c *UserCreate) AddPolicyBindings(v ...*PolicyBinding) *UserCreate {
 	return _c.AddPolicyBindingIDs(ids...)
 }
 
+// AddExternalIdentityIDs adds the "external_identities" edge to the ExternalIdentity entity by IDs.
+func (_c *UserCreate) AddExternalIdentityIDs(ids ...uuid.UUID) *UserCreate {
+	_c.mutation.AddExternalIdentityIDs(ids...)
+	return _c
+}
+
+// AddExternalIdentities adds the "external_identities" edges to the ExternalIdentity entity.
+func (_c *UserCreate) AddExternalIdentities(v ...*ExternalIdentity) *UserCreate {
+	ids := make([]uuid.UUID, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _c.AddExternalIdentityIDs(ids...)
+}
+
 // Mutation returns the UserMutation object of the builder.
 func (_c *UserCreate) Mutation() *UserMutation {
 	return _c.mutation
@@ -264,6 +294,10 @@ func (_c *UserCreate) defaults() {
 		v := user.DefaultCreated()
 		_c.mutation.SetCreated(v)
 	}
+	if _, ok := _c.mutation.SessionGeneration(); !ok {
+		v := user.DefaultSessionGeneration
+		_c.mutation.SetSessionGeneration(v)
+	}
 	if _, ok := _c.mutation.ID(); !ok {
 		v := user.DefaultID()
 		_c.mutation.SetID(v)
@@ -301,6 +335,9 @@ func (_c *UserCreate) check() error {
 	}
 	if _, ok := _c.mutation.Created(); !ok {
 		return &ValidationError{Name: "created", err: errors.New(`ent: missing required field "User.created"`)}
+	}
+	if _, ok := _c.mutation.SessionGeneration(); !ok {
+		return &ValidationError{Name: "session_generation", err: errors.New(`ent: missing required field "User.session_generation"`)}
 	}
 	return nil
 }
@@ -382,6 +419,10 @@ func (_c *UserCreate) createSpec() (*User, *sqlgraph.CreateSpec) {
 		_spec.SetField(user.FieldLastSeen, field.TypeTime, value)
 		_node.LastSeen = &value
 	}
+	if value, ok := _c.mutation.SessionGeneration(); ok {
+		_spec.SetField(user.FieldSessionGeneration, field.TypeInt64, value)
+		_node.SessionGeneration = value
+	}
 	if nodes := _c.mutation.OwnedGroupsIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
 			Rel:     sqlgraph.O2M,
@@ -423,6 +464,22 @@ func (_c *UserCreate) createSpec() (*User, *sqlgraph.CreateSpec) {
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(policybinding.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges = append(_spec.Edges, edge)
+	}
+	if nodes := _c.mutation.ExternalIdentitiesIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   user.ExternalIdentitiesTable,
+			Columns: []string{user.ExternalIdentitiesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(externalidentity.FieldID, field.TypeUUID),
 			},
 		}
 		for _, k := range nodes {
@@ -635,6 +692,24 @@ func (u *UserUpsert) UpdateLastSeen() *UserUpsert {
 // ClearLastSeen clears the value of the "last_seen" field.
 func (u *UserUpsert) ClearLastSeen() *UserUpsert {
 	u.SetNull(user.FieldLastSeen)
+	return u
+}
+
+// SetSessionGeneration sets the "session_generation" field.
+func (u *UserUpsert) SetSessionGeneration(v int64) *UserUpsert {
+	u.Set(user.FieldSessionGeneration, v)
+	return u
+}
+
+// UpdateSessionGeneration sets the "session_generation" field to the value that was provided on create.
+func (u *UserUpsert) UpdateSessionGeneration() *UserUpsert {
+	u.SetExcluded(user.FieldSessionGeneration)
+	return u
+}
+
+// AddSessionGeneration adds v to the "session_generation" field.
+func (u *UserUpsert) AddSessionGeneration(v int64) *UserUpsert {
+	u.Add(user.FieldSessionGeneration, v)
 	return u
 }
 
@@ -868,6 +943,27 @@ func (u *UserUpsertOne) UpdateLastSeen() *UserUpsertOne {
 func (u *UserUpsertOne) ClearLastSeen() *UserUpsertOne {
 	return u.Update(func(s *UserUpsert) {
 		s.ClearLastSeen()
+	})
+}
+
+// SetSessionGeneration sets the "session_generation" field.
+func (u *UserUpsertOne) SetSessionGeneration(v int64) *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.SetSessionGeneration(v)
+	})
+}
+
+// AddSessionGeneration adds v to the "session_generation" field.
+func (u *UserUpsertOne) AddSessionGeneration(v int64) *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.AddSessionGeneration(v)
+	})
+}
+
+// UpdateSessionGeneration sets the "session_generation" field to the value that was provided on create.
+func (u *UserUpsertOne) UpdateSessionGeneration() *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.UpdateSessionGeneration()
 	})
 }
 
@@ -1268,6 +1364,27 @@ func (u *UserUpsertBulk) UpdateLastSeen() *UserUpsertBulk {
 func (u *UserUpsertBulk) ClearLastSeen() *UserUpsertBulk {
 	return u.Update(func(s *UserUpsert) {
 		s.ClearLastSeen()
+	})
+}
+
+// SetSessionGeneration sets the "session_generation" field.
+func (u *UserUpsertBulk) SetSessionGeneration(v int64) *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.SetSessionGeneration(v)
+	})
+}
+
+// AddSessionGeneration adds v to the "session_generation" field.
+func (u *UserUpsertBulk) AddSessionGeneration(v int64) *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.AddSessionGeneration(v)
+	})
+}
+
+// UpdateSessionGeneration sets the "session_generation" field to the value that was provided on create.
+func (u *UserUpsertBulk) UpdateSessionGeneration() *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.UpdateSessionGeneration()
 	})
 }
 

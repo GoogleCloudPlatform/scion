@@ -41,6 +41,8 @@ Files without `schema_version` are treated as legacy format. Run `scion config m
 | `default_max_model_calls` | int | Default maximum number of LLM model calls an agent can make. |
 | `default_max_duration` | string | Default maximum execution time (e.g., `"2h"`, `"45m"`) for an agent. |
 | `default_resources` | object | Default resource constraints (CPU, memory, disk). See [Resource Specification](#resource-specification-resources) below. |
+| `default_gcp_identity_mode` | string | Hub server only. Hub-wide fallback GCP metadata mode for new agents: `block`, `passthrough`, or `assign`. Applied when neither the create request nor the project's default GCP identity names one. See [Hub-Default GCP Identity](/scion/hosted/ha/permissions/#hub-default-gcp-identity). |
+| `default_gcp_identity_service_account_id` | string | Hub server only. ID of the verified, hub-scoped service account assigned when `default_gcp_identity_mode` is `assign`. |
 
 ## CLI Configuration (`cli`)
 
@@ -213,8 +215,18 @@ profiles:
 | `default_harness_auth` | string | Default authentication type for new agents under this profile. |
 | `image_registry` | string | Profile-level registry override. Takes precedence over the top-level `image_registry`. |
 | `env` | map | Environment variables merged into the runtime environment. |
+| `timezone` | string | IANA timezone name (e.g., `America/Los_Angeles`) injected as `TZ` into agent containers dispatched by a Hub under this profile. Validated on write; an invalid name is rejected with `422`. |
 | `harness_overrides` | map | Per-harness-config overrides. Keys match `harness_configs` names. |
 | `secrets` | list | Required secrets for agents created under this profile. |
+
+**Agent timezone (Hub-dispatched agents).** The Hub sets `TZ` in the agent container from the first source that is set:
+
+1. The profile's `timezone` field.
+2. A `TZ` entry in the profile's `env` map.
+3. The Hub-level `agent_defaults.default_timezone` (see [Operational settings](/scion/reference/server-config/#layer-1--operational-postgres-hub_settings-table)).
+4. Otherwise `TZ` is not injected and the container uses its default (UTC).
+
+The web **Profile settings** page includes a **Timezone** card that edits the `timezone` field of the Hub's active runtime profile. Names are checked client-side as IANA timezones before saving; leave the field blank to clear it and fall back to the Hub default. This is a Hub-wide profile setting, not a per-user preference: the card appears only to users who can read the admin server configuration (`GET /api/v1/admin/server-config`), and saving writes the `profiles` map back through the same admin endpoint.
 
 ## Telemetry Configuration (`telemetry`)
 

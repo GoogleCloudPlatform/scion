@@ -18,6 +18,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -171,8 +173,9 @@ func TestHarnessConfigResolveSuccess(t *testing.T) {
 	}
 }
 
-// TestHarnessConfigResolveWithHash verifies the fast cache path short-circuits
-// before any Hub round-trip when the hash is already cached.
+// TestHarnessConfigResolveWithHash verifies that ResolveWithHash always
+// verifies the content hash with the hub, returning the cached directory
+// when the hub confirms the hash is still current.
 func TestHarnessConfigResolveWithHash(t *testing.T) {
 	tmpDir := t.TempDir()
 	cache, err := New(tmpDir, DefaultMaxSize)
@@ -186,10 +189,15 @@ func TestHarnessConfigResolveWithHash(t *testing.T) {
 		t.Fatalf("Put() error = %v", err)
 	}
 
+	getCalls := 0
 	hcSvc := &mockHarnessConfigService{
 		getFunc: func(ctx context.Context, id string) (*hubclient.HarnessConfig, error) {
-			t.Error("Get() should not be called when hash matches cache")
-			return nil, nil
+			getCalls++
+			// Hub confirms the hash is still current.
+			return &hubclient.HarnessConfig{
+				ID:          "hc-999",
+				ContentHash: contentHash,
+			}, nil
 		},
 	}
 
@@ -202,6 +210,73 @@ func TestHarnessConfigResolveWithHash(t *testing.T) {
 	}
 	if path != cachedPath {
 		t.Errorf("ResolveWithHash() should return cached path: got %q want %q", path, cachedPath)
+	}
+	if getCalls != 1 {
+		t.Errorf("ResolveWithHash() should verify with hub: Get() called %d times, want 1", getCalls)
+	}
+}
+
+// TestResolveWithHash_StaleHashServesCurrentVersion verifies that after a
+// harness config is re-bootstrapped, ResolveWithHash returns the new version
+// even when the caller provides the old (stale) content hash.
+func TestResolveWithHash_StaleHashServesCurrentVersion(t *testing.T) {
+	tmpDir := t.TempDir()
+	cache, err := New(tmpDir, DefaultMaxSize)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	oldHash := "hc-old-hash"
+	newHash := "hc-new-hash"
+	newBody := []byte("new provision.py content")
+
+	// Seed the cache with the old hash entry (simulating a pre-bootstrap state).
+	_, err = cache.Put(oldHash, map[string][]byte{"provision.py": []byte("old provision.py")})
+	if err != nil {
+		t.Fatalf("Put() error = %v", err)
+	}
+
+	hcSvc := &mockHarnessConfigService{
+		getFunc: func(ctx context.Context, id string) (*hubclient.HarnessConfig, error) {
+			// Hub returns the CURRENT (post-bootstrap) hash.
+			return &hubclient.HarnessConfig{
+				ID:          "hc-123",
+				ContentHash: newHash,
+			}, nil
+		},
+		requestDownloadURLs: func(ctx context.Context, id string) (*hubclient.DownloadResponse, error) {
+			return &hubclient.DownloadResponse{
+				Files: []hubclient.DownloadURLInfo{
+					{Path: "provision.py", URL: "file:///new", Hash: transfer.HashBytes(newBody)},
+				},
+				Expires: time.Now().Add(time.Hour),
+			}, nil
+		},
+		downloadFileFunc: func(ctx context.Context, url string) ([]byte, error) {
+			return newBody, nil
+		},
+	}
+
+	client := &mockHubClient{harnessConfigs: hcSvc}
+	resolver := NewHarnessConfigResolver(cache, client)
+
+	// Call with the OLD hash (simulating a dispatch that raced with bootstrap).
+	path, err := resolver.ResolveWithHash(context.Background(), "hc-123", oldHash)
+	if err != nil {
+		t.Fatalf("ResolveWithHash() error = %v", err)
+	}
+	if path == "" {
+		t.Fatal("ResolveWithHash() returned empty path")
+	}
+
+	// Verify the returned path has the new content, not the stale cached version.
+	content, readErr := readFileFromDir(path, "provision.py")
+	if readErr != nil {
+		t.Fatalf("failed to read provision.py from result path: %v", readErr)
+	}
+	if string(content) != string(newBody) {
+		t.Errorf("ResolveWithHash() returned stale content: got %q, want %q",
+			string(content), string(newBody))
 	}
 }
 
@@ -274,4 +349,37 @@ func TestHarnessConfigResolveNoHubClient(t *testing.T) {
 	if _, err := resolver.Resolve(context.Background(), "hc"); err == nil {
 		t.Error("Resolve() should error when hub client is nil")
 	}
+}
+
+// TestCacheInvalidate verifies that Invalidate removes a specific content-hash
+// entry so subsequent lookups for that hash miss.
+func TestCacheInvalidate(t *testing.T) {
+	tmpDir := t.TempDir()
+	cache, err := New(tmpDir, DefaultMaxSize)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	hash := "invalidate-me"
+	_, err = cache.Put(hash, map[string][]byte{"f.txt": []byte("data")})
+	if err != nil {
+		t.Fatalf("Put() error = %v", err)
+	}
+
+	// Confirm it's cached.
+	if _, ok := cache.Get(hash); !ok {
+		t.Fatal("expected cache hit before Invalidate")
+	}
+
+	cache.Invalidate(hash)
+
+	// After invalidation, the entry should be gone.
+	if _, ok := cache.Get(hash); ok {
+		t.Error("expected cache miss after Invalidate")
+	}
+}
+
+// readFileFromDir reads a file from a directory path (test helper).
+func readFileFromDir(dirPath, fileName string) ([]byte, error) {
+	return os.ReadFile(filepath.Join(dirPath, fileName))
 }

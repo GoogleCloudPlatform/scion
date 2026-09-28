@@ -1,11 +1,11 @@
 ---
 title: Hub Setup on GCE
-description: Deploy a Scion Hub on a Google Compute Engine VM using the starter scripts.
+description: Deploy a Scion Hub on a Google Compute Engine VM using the Developer Hub scripts or the binary-release single-node VM script.
 ---
 
 ## Overview
 
-The quickest path to a deployed Scion Hub is a single Google Compute Engine VM using the starter scripts in `scripts/starter-hub/`. These scripts automate VM provisioning, repository setup, TLS configuration, and Hub startup.
+The quickest path to a deployed Scion Hub that builds from source is a single Google Compute Engine VM using the Developer Hub scripts in `scripts/starter-hub/`. These scripts automate VM provisioning, repository setup, TLS configuration, and Hub startup.
 
 ## Prerequisites
 
@@ -15,7 +15,7 @@ The quickest path to a deployed Scion Hub is a single Google Compute Engine VM u
 
 ## Steps
 
-The starter scripts are designed to be run in sequence from your local machine.
+The Developer Hub scripts are designed to be run in sequence from your local machine.
 
 ### 1. Provision the VM
 
@@ -41,13 +41,17 @@ SSHs into the VM and clones the Scion repository, installing required dependenci
 
 Builds the Hub server and its dependencies on the VM.
 
-### 4. Configure TLS (Optional)
+### 4. Configure TLS
 
 ```bash
 ./scripts/starter-hub/gce-certs.sh
 ```
 
 Sets up Caddy as a reverse proxy with automatic TLS certificate provisioning. Requires a domain name pointed at the VM's external IP.
+
+:::note[Internal or private deployments]
+If your VM has no external IP — or TLS is terminated upstream by a load balancer, reverse proxy, or similar appliance — skip this step and see [Internal Deployments (BYO TLS)](#internal-deployments-byo-tls) below.
+:::
 
 ### 5. Generate Hub Configuration
 
@@ -74,3 +78,92 @@ Once the Hub is running:
 3. **Register a Runtime Broker** — Connect a machine to execute agents. See [Runtime Broker](/scion/hosted/ha/runtime-broker/) for details on registering your local machine or a remote VM.
 
 For ongoing Hub administration (auth, permissions, observability), see the other guides in the Hub Administration section.
+
+## Binary Release Deployment (single-node VM)
+
+If you don't need to build from source, `scripts/single-node-vm/deploy.sh` stands up a Hub from a published GitHub Release instead. It creates a GCE VM with no public IP that runs the `scion` binary under systemd with embedded SQLite, plus a Cloud Run reverse proxy protected by Identity-Aware Proxy (IAP). The proxy image is built on the VM, pushed to the `cloud-run-source-deploy` Artifact Registry repository, and deployed with `--image`. The deployment does not upload source to Cloud Storage, so it works in organizations whose policies block `storage.googleapis.com`. Re-running the script is idempotent.
+
+**IAP SSH firewall rule.** The `scion-hub-HUB_NAME-allow-iap-ssh` rule targets only the hub VM's network tag, not every VM on the network. Deployments made before this scoping have an unscoped rule. Re-running `deploy.sh` narrows that rule in place, but only once it confirms the tag is on the hub VM. Any other VM that relied on the old rule for IAP SSH loses that access and needs its own firewall rule.
+
+```bash
+./scripts/single-node-vm/deploy.sh                    # interactive wizard
+./scripts/single-node-vm/deploy.sh --version v0.5.0   # pin a release
+```
+
+The wizard asks for the Hub name, region, machine size, disk size, chat plugins, container image source, admin email, and **update policy**.
+
+**Headless installs.** Pass `--config <file>` to pre-answer the wizard from JSON. This is intended for non-interactive and agent-driven installs:
+
+```bash
+./scripts/single-node-vm/deploy.sh --config my-deploy-config.json
+```
+
+Fields in the file skip their prompt. Missing fields fall back to a prompt when a terminal is attached, or to defaults otherwise. With no terminal, a missing required field makes the script exit with an error rather than hang. See `scripts/single-node-vm/deploy-config.example.json` for every field, including `update_policy` and `release_channel`.
+
+**Vertex AI out of the box.** The script enables the Vertex AI API (`aiplatform.googleapis.com`) and grants the VM service account `roles/aiplatform.user`. It then sets two things so agents can use that service account:
+
+- `default_gcp_identity_mode: passthrough` in `settings.yaml`. This is the [hub-default GCP identity](/scion/hosted/ha/permissions/#hub-default-gcp-identity), so new agents on the Hub's embedded broker inherit the VM service account unless the create request or project sets a different identity. To turn this off, change the mode to `block` or `assign` in **Admin > Server Config > Agent Defaults**.
+- `GOOGLE_CLOUD_PROJECT` (the VM's project) and `GOOGLE_CLOUD_LOCATION` (`global`) as hub-scoped environment variables with injection mode `always`. The script only creates them if they are missing, so a redeploy never overwrites your edits. If this step fails, the script prints a warning and you can set them yourself with `scion hub env set --scope hub`.
+
+Agents on the `antigravity` harness detect the metadata-server identity and select Vertex AI auth without a `gcloud-adc` file, so a fresh Hub runs Vertex AI inference with no manual credential setup.
+
+**Automatic updates.** The script writes a `server.maintenance` section with `deployment_tier: binary`, so the Hub checks GitHub Releases on a schedule. It installs updates automatically (`auto`), shows an update banner in the admin UI (`notify`), or does neither (`disabled`). The release channel defaults to `nightly` unless you set it. See [Maintenance (`server.maintenance`)](/scion/reference/server-config/#maintenance-servermaintenance) for all fields.
+
+For the full guide, including architecture, access patterns, and troubleshooting, see [`docs/deploy/single-node-vm.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/single-node-vm.md). If an AI agent is running the deployment for you, point it at the step-by-step [agent deployment runbook](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/agent-runbook-single-node-vm.md). The runbook covers GCP preflight checks, the questions to ask the user, config file generation, and troubleshooting.
+
+Deploying into a GCP organization with a security-hardening baseline (no default network, Shielded VM required, etc.)? See [Deploy on a VM (Hardened Org)](/scion/hosted/single-node/hub-setup-gce-hardened-org/) for the one manual prerequisite and what the script already handles for you.
+
+## Internal Deployments (BYO TLS)
+
+The steps above assume a public-facing VM with an external IP and public DNS. If your VM is internal-only — for example, on a private VPC with no external IP — the Hub works identically, but TLS must be provided by you or terminated upstream.
+
+### What to skip
+
+| Step | Script | Skip? |
+|------|--------|-------|
+| 1. Provision the VM | `gce-demo-provision.sh` | **No** — run the script as-is. It creates firewall rules for inbound HTTP/HTTPS (tcp:80, tcp:443) that are unnecessary if the VM is not publicly reachable; you can remove them afterward or let your network team manage internal firewall rules instead. |
+| 4. Configure TLS | `gce-certs.sh` | **Yes** — this script fetches the VM's external IP, creates public Cloud DNS records, and obtains Let's Encrypt certificates via DNS challenge. All of this requires a public IP and will fail without one. |
+
+Steps 2, 3, 5, and 6 work without modification.
+
+### Set `SCION_SERVER_BASE_URL`
+
+The Hub uses `SCION_SERVER_BASE_URL` to construct OAuth redirect URIs and set the session cookie's `Secure` flag. When Step 4 is skipped, you must set this variable yourself.
+
+In your `hub.env` file (see `scripts/starter-hub/hub.env.sample`):
+
+```bash
+# The URL that browsers and agents use to reach the Hub.
+# Must include the scheme (https://) — the Hub derives cookie
+# security from the URL scheme.
+SCION_SERVER_BASE_URL=https://hub.internal.example.com
+```
+
+:::caution[HTTPS is strongly recommended]
+If `SCION_SERVER_BASE_URL` uses `http://`, the Hub will not set the `Secure` flag on session cookies. Use `https://` in production even when TLS is terminated upstream.
+:::
+
+### TLS options
+
+Choose the option that matches your environment:
+
+**Option A — Caddy with your own certificates**
+
+If you still want Caddy as a local reverse proxy but with your own certificate and key instead of Let's Encrypt, create a Caddyfile on the VM:
+
+```caddy
+hub.internal.example.com {
+    tls /path/to/your/cert.pem /path/to/your/key.pem
+    reverse_proxy localhost:8080
+}
+```
+
+Then start Caddy manually (`sudo caddy start --config /etc/caddy/Caddyfile`) instead of running `gce-certs.sh`.
+
+**Option B — TLS terminated upstream**
+
+If TLS is terminated by an upstream load balancer, reverse proxy, or appliance (e.g., an F5, nginx, or GCP HTTPS Load Balancer), no local TLS configuration is needed. The upstream proxy forwards plain HTTP to the Hub on port 8080. Ensure `SCION_SERVER_BASE_URL` is still set to the `https://` URL that clients use.
+
+**Option C — Identity-Aware Proxy (GCP)**
+
+For GCP deployments, you can front the Hub with [Identity-Aware Proxy (IAP)](/scion/hosted/ha/auth-proxy-iap/) instead of managing certificates directly. IAP handles both TLS and user authentication at the network edge. The IAP guide covers HA deployments but the same pattern works for a single VM behind an internal load balancer.

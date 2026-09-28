@@ -23,7 +23,7 @@ echo "=== Cleaning up agents ==="
 # Stop all agents started by scion
 # Use the scion on path
 if command -v scion &> /dev/null; then
-    # We need to be in a grove context or use -g
+    # We need to be in a project context or use -g
     AGENTS=$(scion -g "${TEST_DIR}/.scion" list | tail -n +2 | awk '{print $1}')
     for agent in $AGENTS; do
         if [ -n "$agent" ]; then

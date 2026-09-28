@@ -1373,6 +1373,8 @@ func (s *Server) activateInstalledIntegration(ctx context.Context, mgr Integrati
 		TLSKeyFile:    entry.TLSKeyFile,
 		TLSCAFile:     entry.TLSCAFile,
 		TLSSkipVerify: entry.TLSSkipVerify,
+		AuthType:      entry.AuthType,
+		AuthAudience:  entry.AuthAudience,
 	}, pluginsDir)
 }
 

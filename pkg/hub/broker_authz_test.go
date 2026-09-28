@@ -51,12 +51,11 @@ func setupBroadcastProject(t *testing.T, srv *Server, s store.Store) *store.Proj
 	}
 
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Slug:       "bcast-agent",
-		Name:       "bcast-agent",
-		ProjectID:  project.ID,
-		Phase:      string(state.PhaseRunning),
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Slug:      "bcast-agent",
+		Name:      "bcast-agent",
+		ProjectID: project.ID,
+		Phase:     string(state.PhaseRunning),
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("CreateAgent: %v", err)
@@ -142,7 +141,7 @@ func TestBroadcast_UserWithProjectAttach(t *testing.T) {
 		t.Fatalf("CreateUser: %v", err)
 	}
 	ensureHubMembership(ctx, s, userID)
-	srv.createProjectMembersGroup(ctx, project, userID)
+	srv.createProjectMembersGroup(ctx, project)
 	if err := srv.createProjectOwnerRoleBinding(ctx, project.ID, userID); err != nil {
 		t.Fatalf("createProjectOwnerRoleBinding: %v", err)
 	}
@@ -250,12 +249,11 @@ func setupChatAgent(t *testing.T, srv *Server, s store.Store) (*store.Project, *
 	}
 
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Slug:       "chat-agent",
-		Name:       "chat-agent",
-		ProjectID:  project.ID,
-		Phase:      string(state.PhaseRunning),
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Slug:      "chat-agent",
+		Name:      "chat-agent",
+		ProjectID: project.ID,
+		Phase:     string(state.PhaseRunning),
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("CreateAgent: %v", err)
@@ -281,7 +279,7 @@ func TestSendAgentRouted_WithoutAttach(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	msgID := srv.sendAgentRouted(rr, req, "topic:"+project.ID, project.ID, outsider,
-		"hello", "outsider@test.com", []*store.Agent{agent}, nil, nil, nil, time.Now(), "")
+		"hello", "outsider@test.com", []*store.Agent{agent}, nil, nil, nil, time.Now(), "", nil)
 
 	if msgID != "" {
 		t.Errorf("expected empty msgID on denied request, got %q", msgID)
@@ -318,7 +316,7 @@ func TestSendAgentRouted_WithAttach(t *testing.T) {
 		t.Fatalf("CreateUser: %v", err)
 	}
 	ensureHubMembership(ctx, s, userID)
-	srv.createProjectMembersGroup(ctx, project, userID)
+	srv.createProjectMembersGroup(ctx, project)
 	if err := srv.createProjectOwnerRoleBinding(ctx, project.ID, userID); err != nil {
 		t.Fatalf("createProjectOwnerRoleBinding: %v", err)
 	}
@@ -329,7 +327,7 @@ func TestSendAgentRouted_WithAttach(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	msgID := srv.sendAgentRouted(rr, req, "topic:"+project.ID, project.ID, owner,
-		"hello", "owner@test.com", []*store.Agent{agent}, nil, nil, nil, time.Now(), "")
+		"hello", "owner@test.com", []*store.Agent{agent}, nil, nil, nil, time.Now(), "", nil)
 
 	if msgID == "" {
 		t.Errorf("expected non-empty msgID, got empty; response: %d: %s", rr.Code, rr.Body.String())
@@ -357,20 +355,18 @@ func TestSendAgentRouted_MentionSkippedWithoutAttach(t *testing.T) {
 	}
 
 	primaryAgent := &store.Agent{
-		ID:         api.NewUUID(),
-		Slug:       "primary-agent",
-		Name:       "primary-agent",
-		ProjectID:  project.ID,
-		Phase:      string(state.PhaseRunning),
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Slug:      "primary-agent",
+		Name:      "primary-agent",
+		ProjectID: project.ID,
+		Phase:     string(state.PhaseRunning),
 	}
 	mentionAgent := &store.Agent{
-		ID:         api.NewUUID(),
-		Slug:       "mention-agent",
-		Name:       "mention-agent",
-		ProjectID:  project.ID,
-		Phase:      string(state.PhaseRunning),
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Slug:      "mention-agent",
+		Name:      "mention-agent",
+		ProjectID: project.ID,
+		Phase:     string(state.PhaseRunning),
 	}
 	for _, a := range []*store.Agent{primaryAgent, mentionAgent} {
 		if err := s.CreateAgent(ctx, a); err != nil {
@@ -394,7 +390,7 @@ func TestSendAgentRouted_MentionSkippedWithoutAttach(t *testing.T) {
 		t.Fatalf("CreateUser: %v", err)
 	}
 	ensureHubMembership(ctx, s, userID)
-	srv.createProjectMembersGroup(ctx, project, userID)
+	srv.createProjectMembersGroup(ctx, project)
 	if err := srv.createProjectOwnerRoleBinding(ctx, project.ID, userID); err != nil {
 		t.Fatalf("createProjectOwnerRoleBinding: %v", err)
 	}
@@ -407,7 +403,7 @@ func TestSendAgentRouted_MentionSkippedWithoutAttach(t *testing.T) {
 	agents := []*store.Agent{primaryAgent, mentionAgent}
 	mentionResults := []messages.MentionResult{{Slug: "mention-agent", Status: "delivered"}}
 	msgID := srv.sendAgentRouted(rr, req, "topic:"+project.ID, project.ID, owner,
-		"@mention-agent hello", "owner@test.com", agents, []string{"mention-agent"}, mentionResults, nil, time.Now(), "")
+		"@mention-agent hello", "owner@test.com", agents, []string{"mention-agent"}, mentionResults, nil, time.Now(), "", nil)
 
 	if msgID == "" {
 		t.Errorf("expected non-empty msgID, got empty; response: %d: %s", rr.Code, rr.Body.String())

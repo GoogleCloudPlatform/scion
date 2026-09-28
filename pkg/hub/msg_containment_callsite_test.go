@@ -65,6 +65,12 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	{file: "handlers_agent_messaging.go", function: "handleAgentMessage", symbol: "dispatchWithBrokerRetry",
 		class: "guarded", reason: "authorizeAgentMessage called in both routers before this handler"},
 
+	// agent_dm_operation.go: ExecuteAgentDM — the shared agent DM operation
+	// (#1688). Authorization is the first admission check inside the operation
+	// (authorizeAgentMessage called before any side effects).
+	{file: "agent_dm_operation.go", function: "ExecuteAgentDM", symbol: "dispatchWithBrokerRetry",
+		class: "guarded", reason: "authorizeAgentMessage called inside ExecuteAgentDM before persistence/dispatch/observer (#1688)"},
+
 	// handlers_agent_messaging.go: handleGroupMessage — guarded at :1286.
 	{file: "handlers_agent_messaging.go", function: "handleGroupMessage", symbol: "dispatchWithBrokerRetry",
 		class: "guarded", reason: "authorizeAgentMessage at handlers_agent_messaging.go:1286"},
@@ -83,14 +89,20 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	{file: "handlers_agent_messaging.go", function: "processMentions", symbol: "dispatchWithBrokerRetry",
 		class: "guarded", reason: "authorizeAgentMessage at handlers_agent_messaging.go:1852"},
 
-	// handlers_agent_messaging.go: wake-on-message DispatchAgentStart —
-	// guarded by the calling routers. Fragile derivative (see F-RS6-16).
-	{file: "handlers_agent_messaging.go", function: "handleAgentMessage", symbol: "DispatchAgentStart",
-		class: "guarded", reason: "guarded by calling routers; fragile derivative (F-RS6-16)"},
+	// wake_dm.go: wakeAgentForDM — shared wake helper (#1691). Called from
+	// ExecuteAgentDM after all admission checks pass (rate limit, message
+	// length, authorization, attachment rejection). Also called inline from
+	// handleAgentMessage for user→agent messages (guarded by calling routers).
+	{file: "wake_dm.go", function: "wakeAgentForDM", symbol: "DispatchAgentStart",
+		class: "guarded", reason: "called after admission checks in ExecuteAgentDM (#1691 AC-2); or guarded by calling routers for user→agent"},
 
 	// handlers_broker_inbound.go: guarded at :164 (authorizeAgentMessage).
 	{file: "handlers_broker_inbound.go", function: "handleBrokerInbound", symbol: "dispatchWithBrokerRetry",
 		class: "guarded", reason: "authorizeAgentMessage at handlers_broker_inbound.go:164"},
+
+	// handlers_broker_inbound_routed.go: dispatchRoutedRecipient — guarded per-recipient.
+	{file: "handlers_broker_inbound_routed.go", function: "dispatchRoutedRecipient", symbol: "dispatchWithBrokerRetry",
+		class: "guarded", reason: "authorizeAgentMessage called per-recipient before dispatch"},
 
 	// handlers_chat_v2.go: sendAgentRouted primary — guarded at :1125.
 	{file: "handlers_chat_v2.go", function: "sendAgentRouted", symbol: "dispatchWithBrokerRetry",
@@ -145,6 +157,14 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	{file: "handlers_agent_lifecycle.go", function: "handleAgentLifecycle", symbol: "DispatchAgentStart",
 		class: "guarded", reason: "authorizeAgentLifecycle at handlers_agent_lifecycle.go"},
 
+	// reincarnate_worker.go: DispatchAgentStart in runReincarnationWorker —
+	// the detached background worker for `scion reincarnate` (design §3.1).
+	// Started only from handleReincarnateAgent, after authorizeAgentReincarnate
+	// (design §3.8, decision D2) has already authorized the request; the
+	// worker itself does not re-check authorization.
+	{file: "reincarnate_worker.go", function: "runReincarnationWorker", symbol: "DispatchAgentStart",
+		class: "guarded", reason: "authorizeAgentReincarnate in handleReincarnateAgent runs before the worker is started"},
+
 	// handlers_agents_core.go: DispatchAgentCreateWithGather in createAgentInProject.
 	{file: "handlers_agents_core.go", function: "createAgentInProject", symbol: "DispatchAgentCreateWithGather",
 		class: "guarded", reason: "authorizeAgentCreate at handlers_agents_core.go"},
@@ -152,6 +172,11 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	// workspace_handlers.go: DispatchAgentCreate in handleWorkspaceSyncToFinalize.
 	{file: "workspace_handlers.go", function: "handleWorkspaceSyncToFinalize", symbol: "DispatchAgentCreate",
 		class: "guarded", reason: "workspace agent creation with project authorization"},
+
+	// notification_sweep.go: RetryDispatch — guarded retry of previously
+	// authorized notification dispatch.
+	{file: "notification_sweep.go", function: "RetryDispatch", symbol: "dispatchWithBrokerRetry",
+		class: "guarded", reason: "retry of previously authorized notification dispatch"},
 }
 
 // targetSymbols is the set of function/method names that constitute

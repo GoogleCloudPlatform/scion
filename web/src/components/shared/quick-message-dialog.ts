@@ -35,6 +35,9 @@ export class ScionQuickMessageDialog extends LitElement {
   /** The agent name, used in the dialog title. */
   @property({ type: String }) agentName = '';
 
+  /** Optional project name for cross-project context (shown as "project / agent"). */
+  @property({ type: String }) projectName = '';
+
   /** Whether the dialog is open. */
   @property({ type: Boolean, reflect: true }) open = false;
 
@@ -135,7 +138,11 @@ export class ScionQuickMessageDialog extends LitElement {
   }
 
   render() {
-    const label = this.agentName ? `Message ${this.agentName}` : 'Send Message';
+    const displayName =
+      this.projectName && this.agentName
+        ? `${this.projectName} / ${this.agentName}`
+        : this.agentName;
+    const label = displayName ? `Message ${displayName}` : 'Send Message';
 
     return html`
       <sl-dialog label=${label} ?open=${this.open} @sl-request-close=${this.close}>

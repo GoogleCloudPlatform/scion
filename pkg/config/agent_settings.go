@@ -15,7 +15,6 @@
 package config
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 
@@ -41,19 +40,6 @@ func LoadAgentSettings(path string) (*AgentSettings, error) {
 	}
 
 	return &settings, nil
-}
-
-func SaveAgentSettings(path string, settings *AgentSettings) error {
-	data, err := json.MarshalIndent(settings, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
-	}
-
-	return os.WriteFile(path, data, 0644)
 }
 
 func GetAgentSettings() (*AgentSettings, error) {

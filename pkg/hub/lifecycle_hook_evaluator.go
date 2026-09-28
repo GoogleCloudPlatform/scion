@@ -163,21 +163,6 @@ func (d *memoryDeduper) seed(s store.Store, log *slog.Logger) {
 	log.Info("Seeded lifecycle hook evaluator previousPhase", "agents", len(result.Items))
 }
 
-// previousPhaseLen returns the number of entries (test helper).
-func (d *memoryDeduper) previousPhaseLen() int {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return len(d.previousPhase)
-}
-
-// previousPhaseHas returns true if the agent has an entry (test helper).
-func (d *memoryDeduper) previousPhaseHas(agentID string) bool {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	_, ok := d.previousPhase[agentID]
-	return ok
-}
-
 // DBDriverPostgres is the sentinel value for a Postgres-backed hub. When the
 // evaluator is constructed with this driver, it uses the durable storeDeduper.
 const DBDriverPostgres = "postgres"

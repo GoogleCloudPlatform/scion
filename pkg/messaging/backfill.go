@@ -42,6 +42,15 @@ type BackfillConfig struct {
 }
 
 // BackfillResult summarises what a backfill run did (or would do in dry-run).
+//
+// Errors are recorded exclusively through the addDeriveFailure,
+// addWriteFailure, and addResolutionFailure methods. This enforces the
+// invariant by construction: every Errors entry is classified into
+// exactly one bucket, so
+//
+//	sum(DeriveFailures) + WriteFailures + ResolutionFailures == len(Errors)
+//
+// holds by design, not by discipline.
 type BackfillResult struct {
 	TotalProcessed       int `json:"totalProcessed"`
 	Attributed           int `json:"attributed"`
@@ -50,6 +59,17 @@ type BackfillResult struct {
 	ConversationsCreated int `json:"conversationsCreated"`
 	HazardAEmailCount    int `json:"hazardAEmailCount"`
 	HazardBSlugCount     int `json:"hazardBSlugCount"`
+	// DeriveFailures counts refused messages by cause (DEF-114). Keys are
+	// DeriveErr* constants from derive_key.go. This is the per-cause
+	// breakdown that makes the dominant failure mode diagnosable.
+	DeriveFailures map[string]int `json:"deriveFailures,omitempty"`
+	// WriteFailures counts errors that occur AFTER key derivation succeeds —
+	// e.g. participant-validation failures during persistGroup.
+	WriteFailures int `json:"writeFailures,omitempty"`
+	// ResolutionFailures counts errors from agent-ref resolution in
+	// resolveGroup — store/database errors that are neither ErrNotFound
+	// nor ErrInvalidInput.
+	ResolutionFailures int `json:"resolutionFailures,omitempty"`
 	// LastCheckpoint is the pagination cursor of the last completed page.
 	// Pass this value as BackfillConfig.Checkpoint to resume from this position.
 	// Empty when the backfill completed in a single page (no more data to process).
@@ -57,17 +77,41 @@ type BackfillResult struct {
 	Errors         []string `json:"errors,omitempty"`
 }
 
+// addDeriveFailure records a key-derivation refusal with its cause.
+func (r *BackfillResult) addDeriveFailure(cause, msg string) {
+	r.Errors = append(r.Errors, msg)
+	if r.DeriveFailures == nil {
+		r.DeriveFailures = make(map[string]int)
+	}
+	r.DeriveFailures[cause]++
+}
+
+// addWriteFailure records a post-derivation persistence error.
+func (r *BackfillResult) addWriteFailure(msg string) {
+	r.Errors = append(r.Errors, msg)
+	r.WriteFailures++
+}
+
+// addResolutionFailure records an agent-ref resolution error.
+func (r *BackfillResult) addResolutionFailure(msg string) {
+	r.Errors = append(r.Errors, msg)
+	r.ResolutionFailures++
+}
+
 // conversationGroup collects messages that belong to the same conversation.
 type conversationGroup struct {
-	key          string // canonical key used for dedup
-	kind         string // "direct" or "group"
-	projectID    string
-	participants []participant // deduplicated participants
-	agentRef     string        // agent reference for DefaultAgent resolution
-	messageIDs   []string      // message IDs to stamp
-	driftState   string        // computed drift state
-	hazardA      bool          // Hazard (a): non-UUID sender/recipient
-	hazardB      bool          // Hazard (b): slug-based agent reference
+	key             string // canonical key used for dedup
+	kind            string // "direct" or "group"
+	projectID       string
+	participants    []participant // deduplicated participants
+	agentRef        string        // agent reference for DefaultAgent resolution
+	messageIDs      []string      // message IDs to stamp
+	driftState      string        // computed drift state
+	hazardA         bool          // Hazard (a): non-UUID sender/recipient
+	hazardB         bool          // Hazard (b): slug-based agent reference
+	surface         string        // derived surface for the group (DEF-156 P3)
+	channel         string        // raw channel of first message in group (DEF-156 P3)
+	channelConflict bool          // true if messages disagree on channel (DEF-156 P3)
 }
 
 // participant represents a conversation participant extracted from a message.
@@ -135,9 +179,29 @@ func (s *BackfillService) Run(ctx context.Context, cfg BackfillConfig) (*Backfil
 				continue
 			}
 
-			g := s.groupForMessage(msg, cfg.ProjectID, groups)
-			if g == nil {
-				result.Errors = append(result.Errors, fmt.Sprintf("message %s: key derivation failed", msg.ID))
+			g, deriveErr := s.groupForMessage(msg, cfg.ProjectID, groups)
+			if deriveErr != nil {
+				// Classify and record the derive failure (DEF-114).
+				var de *DeriveError
+				if errors.As(deriveErr, &de) {
+					result.addDeriveFailure(de.Cause,
+						fmt.Sprintf("message %s: %v", msg.ID, deriveErr))
+
+					// Hazard (a) fix: non-UUID principals are exactly what
+					// makes principal-pair derivation fail, so the hazardA
+					// counter must be updated here — not after a successful
+					// derive where it structurally can never fire (DEF-114).
+					if de.Cause == DeriveErrPrincipalPair {
+						_, senderID := parsePrincipal(msg.Sender, msg.SenderID)
+						_, recipientID := parsePrincipal(msg.Recipient, msg.RecipientID)
+						if !isValidUUID(senderID) || !isValidUUID(recipientID) {
+							result.HazardAEmailCount++
+						}
+					}
+				} else {
+					result.addDeriveFailure("unclassified",
+						fmt.Sprintf("message %s: %v", msg.ID, deriveErr))
+				}
 				continue
 			}
 			g.messageIDs = append(g.messageIDs, msg.ID)
@@ -158,6 +222,15 @@ func (s *BackfillService) Run(ctx context.Context, cfg BackfillConfig) (*Backfil
 	// In dry-run mode, compute statistics and return without persisting.
 	if cfg.DryRun {
 		for _, g := range groups {
+			// DEF-156 P3: model channel-conflict refusals in dry-run,
+			// matching the persistGroup check in the real path.
+			if g.channelConflict {
+				for _, msgID := range g.messageIDs {
+					result.addDeriveFailure(DeriveErrSurfaceConflict,
+						fmt.Sprintf("message %s: channel conflict in group %q (first=%q)", msgID, g.key, g.channel))
+				}
+				continue
+			}
 			if g.hazardA {
 				result.Inferred += len(g.messageIDs)
 			} else {
@@ -171,7 +244,7 @@ func (s *BackfillService) Run(ctx context.Context, cfg BackfillConfig) (*Backfil
 	// Phase 3: Create conversations and stamp messages.
 	for _, g := range groups {
 		if err := s.persistGroup(ctx, g, result); err != nil {
-			result.Errors = append(result.Errors,
+			result.addWriteFailure(
 				fmt.Sprintf("group %s: %v", g.key, err))
 		}
 	}
@@ -180,9 +253,9 @@ func (s *BackfillService) Run(ctx context.Context, cfg BackfillConfig) (*Backfil
 }
 
 // groupForMessage finds or creates the conversation group for a message.
-// Returns nil when key derivation fails (e.g. malformed dm: key); the caller
-// MUST check for nil before appending message IDs.
-func (s *BackfillService) groupForMessage(msg *store.Message, projectID string, groups map[string]*conversationGroup) *conversationGroup {
+// Returns (nil, err) when key derivation fails; the caller propagates the
+// error into result.Errors with the actual cause (DEF-114).
+func (s *BackfillService) groupForMessage(msg *store.Message, projectID string, groups map[string]*conversationGroup) (*conversationGroup, error) {
 	senderKind, senderID := parsePrincipal(msg.Sender, msg.SenderID)
 	recipientKind, recipientID := parsePrincipal(msg.Recipient, msg.RecipientID)
 
@@ -195,21 +268,48 @@ func (s *BackfillService) groupForMessage(msg *store.Message, projectID string, 
 		RecipientID:   recipientID,
 	})
 	if deriveErr != nil {
-		// Key derivation refused — return nil so the caller skips this message.
-		return nil
+		// Key derivation refused — return the error so the caller can
+		// classify and report the actual cause (DEF-114).
+		return nil, deriveErr
 	}
 	key := extRef
 	kind := derivedKind
 
 	g, ok := groups[key]
 	if !ok {
+		// DEF-156 P3: derive surface from the first message's channel.
+		// Subsequent messages in the same group must agree; disagreement
+		// is flagged and the group is refused in persistGroup.
+		surface, surfErr := ChannelToSurfaceStrict(msg.Channel)
+		if surfErr != nil {
+			return nil, &DeriveError{
+				Cause: DeriveErrSurfaceUnmap,
+				Err:   fmt.Errorf("message %s: channel %q cannot be mapped to a surface: %w", msg.ID, msg.Channel, surfErr),
+			}
+		}
 		g = &conversationGroup{
 			key:        key,
 			kind:       kind,
 			projectID:  projectID,
 			driftState: DriftStateActive,
+			surface:    surface,
+			channel:    msg.Channel,
 		}
 		groups[key] = g
+	} else {
+		// DEF-156 P3 / #1493: normalize channel to surface before
+		// conflict detection. "" and "web" both map to "native" and
+		// must not conflict.
+		msgSurface, surfErr := ChannelToSurfaceStrict(msg.Channel)
+		if surfErr != nil {
+			return nil, &DeriveError{
+				Cause: DeriveErrSurfaceUnmap,
+				Err:   fmt.Errorf("message %s: channel %q cannot be mapped to a surface: %w", msg.ID, msg.Channel, surfErr),
+			}
+		}
+		if msgSurface != g.surface {
+			g.channelConflict = true
+		}
 	}
 
 	// Collect participants (deduplicated in addParticipant).
@@ -227,11 +327,16 @@ func (s *BackfillService) groupForMessage(msg *store.Message, projectID string, 
 	}
 
 	// Hazard (a): check for non-UUID sender/recipient IDs.
+	// This fires only when derivation succeeds despite non-UUID principals
+	// (e.g. thread-keyed messages where the key comes from ThreadID, not
+	// the principal pair). The dominant hazardA population — messages that
+	// FAIL to derive because of non-UUID principals — is counted in Run
+	// at the derive-error handling site (DEF-114).
 	if !isValidUUID(senderID) || !isValidUUID(recipientID) {
 		g.hazardA = true
 	}
 
-	return g
+	return g, nil
 }
 
 // resolveGroup resolves the default agent reference and sets the drift state.
@@ -261,7 +366,7 @@ func (s *BackfillService) resolveGroup(ctx context.Context, g *conversationGroup
 			result.HazardBSlugCount += len(g.messageIDs)
 			g.hazardB = true
 		} else {
-			result.Errors = append(result.Errors,
+			result.addResolutionFailure(
 				fmt.Sprintf("resolving agent ref %q: %v", g.agentRef, err))
 		}
 		return
@@ -278,12 +383,23 @@ func (s *BackfillService) resolveGroup(ctx context.Context, g *conversationGroup
 
 // persistGroup creates the conversation and stamps all messages in the group.
 func (s *BackfillService) persistGroup(ctx context.Context, g *conversationGroup, result *BackfillResult) error {
+	// DEF-156 P3: refuse groups whose messages disagree on channel.
+	// Each message is recorded as a DeriveFailure under surface_conflict
+	// so the count is surfaced per message, not per group.
+	if g.channelConflict {
+		for _, msgID := range g.messageIDs {
+			result.addDeriveFailure(DeriveErrSurfaceConflict,
+				fmt.Sprintf("message %s: channel conflict in group %q (first=%q)", msgID, g.key, g.channel))
+		}
+		return nil
+	}
+
 	convID := uuid.NewString()
 
 	conv := &store.Conversation{
 		ID:          convID,
 		Kind:        g.kind,
-		Surface:     "native",
+		Surface:     g.surface,
 		ExternalRef: g.key,
 		DriftState:  g.driftState,
 	}
@@ -320,7 +436,7 @@ func (s *BackfillService) persistGroup(ctx context.Context, g *conversationGroup
 			// AddParticipant may return ErrAlreadyExists for re-joins;
 			// the ent adapter handles this, but guard against other impls.
 			if !errors.Is(err, store.ErrAlreadyExists) {
-				result.Errors = append(result.Errors,
+				result.addWriteFailure(
 					fmt.Sprintf("adding participant %s:%s to %s: %v", p.kind, p.id, actualConvID, err))
 			}
 		}
@@ -329,7 +445,7 @@ func (s *BackfillService) persistGroup(ctx context.Context, g *conversationGroup
 	// Stamp messages.
 	for _, msgID := range g.messageIDs {
 		if err := s.msgStore.SetMessageConversationID(ctx, msgID, actualConvID); err != nil {
-			result.Errors = append(result.Errors,
+			result.addWriteFailure(
 				fmt.Sprintf("stamping message %s: %v", msgID, err))
 			continue
 		}

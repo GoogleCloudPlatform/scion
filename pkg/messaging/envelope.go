@@ -18,6 +18,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
 
 // ---------- MessageKind ----------
@@ -212,35 +214,6 @@ func ValidateDeliveryState(s DeliveryState) error {
 	return nil
 }
 
-// ---------- Visibility ----------
-
-// Visibility controls which consumers see a message.
-type Visibility string
-
-const (
-	VisibilityNormal  Visibility = "normal"
-	VisibilityVerbose Visibility = "verbose"
-	VisibilityFull    Visibility = "full"
-)
-
-// validVisibilities enumerates all accepted Visibility values.
-var validVisibilities = map[Visibility]bool{
-	VisibilityNormal:  true,
-	VisibilityVerbose: true,
-	VisibilityFull:    true,
-}
-
-// ValidateVisibility returns an error if v is not a recognised visibility.
-func ValidateVisibility(v Visibility) error {
-	if v == "" {
-		return nil // empty defaults to normal
-	}
-	if !validVisibilities[v] {
-		return fmt.Errorf("invalid visibility %q: must be one of: normal, verbose, full", v)
-	}
-	return nil
-}
-
 // ---------- EventBody ----------
 
 // EventBody carries the payload for an event-kind message.
@@ -281,24 +254,21 @@ type Message struct {
 	Intent *TextIntent `json:"intent,omitempty"` // Kind == text
 	Event  *EventBody  `json:"event,omitempty"`  // Kind == event
 
-	Body        string          `json:"body"`
-	Attachments []AttachmentRef `json:"attachments,omitempty"`
-	Visibility  Visibility      `json:"visibility,omitempty"`
-	CreatedAt   time.Time       `json:"created_at"`
+	Body        string            `json:"body"`
+	Attachments []AttachmentRef   `json:"attachments,omitempty"`
+	Metadata    map[string]string `json:"metadata,omitempty"`
+	Urgent      bool              `json:"urgent,omitempty"`
+	CreatedAt   time.Time         `json:"created_at"`
 }
 
-// Validate checks internal consistency of a Message.
-func (m *Message) Validate() error {
-	if m.ID == "" {
-		return fmt.Errorf("message id is required")
-	}
+// validateStructural checks every Message invariant that does not depend on
+// persistence identity: From, Kind, kind/intent mutual exclusivity.
+// This is the shared core; Validate() adds the ID requirement on top.
+func (m *Message) validateStructural() error {
 	if err := ValidatePrincipalRef(m.From); err != nil {
 		return fmt.Errorf("invalid from: %w", err)
 	}
 	if err := ValidateMessageKind(m.Kind); err != nil {
-		return err
-	}
-	if err := ValidateVisibility(m.Visibility); err != nil {
 		return err
 	}
 
@@ -326,7 +296,34 @@ func (m *Message) Validate() error {
 		}
 	}
 
+	// Validate metadata limits.
+	if len(m.Metadata) > messages.MaxMetadataEntries {
+		return fmt.Errorf("metadata exceeds maximum entries (%d > %d)", len(m.Metadata), messages.MaxMetadataEntries)
+	}
+	for k, v := range m.Metadata {
+		if len(k) > messages.MaxMetadataKeySize {
+			return fmt.Errorf("metadata key exceeds maximum size (%d > %d)", len(k), messages.MaxMetadataKeySize)
+		}
+		if len(v) > messages.MaxMetadataValueSize {
+			return fmt.Errorf("metadata value exceeds maximum size (%d > %d)", len(v), messages.MaxMetadataValueSize)
+		}
+	}
+
 	return nil
+}
+
+// Validate checks internal consistency of a Message, including that a
+// persisted ID is set. This is the post-persistence entry point.
+//
+// NOTE: Validate() currently has zero non-test callers. The only call path
+// through the structural checks is validateMessageContent →
+// validateStructural. Validate is retained as the type's public contract
+// for post-persistence contexts; its dead-code state is tracked.
+func (m *Message) Validate() error {
+	if m.ID == "" {
+		return fmt.Errorf("message id is required")
+	}
+	return m.validateStructural()
 }
 
 // ---------- Addressee ----------

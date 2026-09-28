@@ -65,13 +65,11 @@ func TestBypassCensus(t *testing.T) {
 		{file: "authz.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "AuthorizeReadBatch short-circuit (KEEP)"},
 		{file: "authz.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "Decide explain trace admin check"},
 		{file: "authz_candelegate.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "CanDelegate super-admin bypass (KEEP)"},
-		{file: "capabilities.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "checkAccessPrecomputed admin bypass (KEEP — mirrors checkAccessForUser step 1)"},
 		{file: "authz_delegation_ceiling.go", lineSubstr: "IsSystemAdmin", description: "delegation ceiling system admin check (KEEP)"},
 
 		// ─── Authorization infrastructure (permanent or deprecating) ─────
 		{file: "authorize.go", lineSubstr: "func (s *Server) requireAdmin(", description: "requireAdmin helper definition (DEPRECATED — fallback only)"},
 		{file: "authorize.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "requireAdmin implementation"},
-		{file: "authorize.go", lineSubstr: "requireAdmin(w, r)", description: "requireAdminHandler wrapper"},
 		{file: "route_metadata.go", lineSubstr: "requireAdmin(w, r)", description: "routeGuard fallback for unconverted routes (temporary)"},
 		{file: "identity.go", lineSubstr: "IsUnscopedLocalPlatformAdmin", description: "IsUnscopedLocalPlatformAdmin definition"},
 		{file: "identity.go", lineSubstr: `user.Role() != "admin"`, description: "IsUnscopedLocalPlatformAdmin implementation"},
@@ -83,11 +81,15 @@ func TestBypassCensus(t *testing.T) {
 		// ─── Messaging authorization engine (permanent, D6/D7) ─────────────
 		{file: "authorize_message.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "authorizeAgentMessage super-admin bypass (D6, KEEP)"},
 		{file: "handlers_agent_message_mode.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(userIdent)", description: "handleSetMessageMode project-admin exclusion (D7, KEEP — super-admins must not be blocked by the project-admin deny gate)"},
+		{file: "project_messaging_policy.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(userIdent)", description: "Messaging policy admin bypass (owner-or-admin check)"},
 
 		// ─── Auth/identity infrastructure (non-bypass references) ────────
 		{file: "handlers_auth.go", lineSubstr: "IsUnscopedLocalPlatformAdmin", description: "admin reconciliation comment reference"},
 		{file: "handlers_auth.go", lineSubstr: "IsUnscopedLocalPlatformAdmin", description: "admin reconciliation helper"},
 		{file: "authz_candelegate.go", lineSubstr: "requireAdmin", description: "comment reference in CanDelegate"},
+
+		// ─── Session revocation (admin-only endpoint) ────────────────────
+		{file: "handlers_users_core.go", lineSubstr: "requireAdmin(w, r)", description: "revokeUserSessions: admin-only endpoint for session invalidation"},
 	}
 
 	// Build the allow map: file -> list of allowed substrings with counts

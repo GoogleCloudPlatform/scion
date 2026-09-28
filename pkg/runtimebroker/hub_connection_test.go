@@ -34,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
+	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
 )
 
 // makeTestCreds creates BrokerCredentials with a base64-encoded secret key.
@@ -327,16 +328,16 @@ func TestHeartbeatService_ProjectFilter(t *testing.T) {
 	client := &mockRuntimeBrokerService{}
 	manager := &heartbeatMockManager{
 		agents: []api.AgentInfo{
-			{Name: "agent-1", ProjectID: "grove-hub1", Phase: "running"},
-			{Name: "agent-2", ProjectID: "grove-hub1", Phase: "running"},
-			{Name: "agent-3", ProjectID: "grove-hub2", Phase: "running"},
-			{Name: "agent-4", ProjectID: "grove-shared", Phase: "running"},
+			{Name: "agent-1", ProjectID: "project-hub1", Phase: "running"},
+			{Name: "agent-2", ProjectID: "project-hub1", Phase: "running"},
+			{Name: "agent-3", ProjectID: "project-hub2", Phase: "running"},
+			{Name: "agent-4", ProjectID: "project-shared", Phase: "running"},
 		},
 	}
 
-	// Filter: only include grove-hub1 projects
+	// Filter: only include project-hub1 projects
 	projectFilter := func(projectID string) bool {
-		return projectID == "grove-hub1"
+		return projectID == "project-hub1"
 	}
 
 	svc := NewHeartbeatService(client, "test-host", time.Hour, manager, projectFilter, slog.Default())
@@ -352,17 +353,17 @@ func TestHeartbeatService_ProjectFilter(t *testing.T) {
 
 	heartbeat := calls[0].Heartbeat
 
-	// Should only include grove-hub1 (2 agents), not grove-hub2 or grove-shared
+	// Should only include project-hub1 (2 agents), not project-hub2 or project-shared
 	if len(heartbeat.Projects) != 1 {
 		t.Errorf("Expected 1 project in heartbeat (filtered), got %d", len(heartbeat.Projects))
 	}
 
-	if len(heartbeat.Projects) > 0 && heartbeat.Projects[0].ProjectID != "grove-hub1" {
-		t.Errorf("Expected grove-hub1, got %q", heartbeat.Projects[0].ProjectID)
+	if len(heartbeat.Projects) > 0 && heartbeat.Projects[0].ProjectID != "project-hub1" {
+		t.Errorf("Expected project-hub1, got %q", heartbeat.Projects[0].ProjectID)
 	}
 
 	if len(heartbeat.Projects) > 0 && heartbeat.Projects[0].AgentCount != 2 {
-		t.Errorf("Expected 2 agents in grove-hub1, got %d", heartbeat.Projects[0].AgentCount)
+		t.Errorf("Expected 2 agents in project-hub1, got %d", heartbeat.Projects[0].AgentCount)
 	}
 }
 
@@ -370,8 +371,8 @@ func TestHeartbeatService_NilProjectFilter(t *testing.T) {
 	client := &mockRuntimeBrokerService{}
 	manager := &heartbeatMockManager{
 		agents: []api.AgentInfo{
-			{Name: "agent-1", ProjectID: "grove-1", Phase: "running"},
-			{Name: "agent-2", ProjectID: "grove-2", Phase: "running"},
+			{Name: "agent-1", ProjectID: "project-1", Phase: "running"},
+			{Name: "agent-2", ProjectID: "project-2", Phase: "running"},
 		},
 	}
 
@@ -441,64 +442,54 @@ func TestHydrateHarnessConfig_NoResolverIsGraceful(t *testing.T) {
 	}
 }
 
-func TestResolveHydrator_WithConnectionHeader(t *testing.T) {
+func TestResolveHubConnection_WithConnectionHeader(t *testing.T) {
 	creds := makeTestCreds("local", "broker-1", "http://localhost:8080")
 	srv := newTestServerWithInMemoryCreds(creds)
 
-	// Verify the hydrator resolves via header
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", nil)
-	req.Header.Set("X-Scion-Hub-Connection", "local")
-
-	hydrator := srv.resolveHydrator(req)
-	// In test mode cache is nil, so hydrator is nil -- that's expected
-	// What we're testing is the routing logic
 	srv.hubMu.RLock()
 	conn := srv.hubConnections["local"]
 	srv.hubMu.RUnlock()
-
 	if conn == nil {
 		t.Fatal("expected 'local' connection to exist")
 	}
+	conn.Hydrator = new(templatecache.Hydrator)
 
-	// The hydrator from resolveHydrator should match the connection's hydrator
-	if hydrator != conn.Hydrator {
-		t.Error("expected resolveHydrator to return the local connection's hydrator")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", nil)
+	req.Header.Set("X-Scion-Hub-Connection", "local")
+
+	if got := srv.resolveHubConnection(req); got != conn {
+		t.Error("expected resolveHubConnection to return the named connection")
 	}
 }
 
-func TestResolveHydrator_FallbackToFirstAvailable(t *testing.T) {
+func TestResolveHubConnection_FallbackToFirstAvailable(t *testing.T) {
 	creds := makeTestCreds("local", "broker-1", "http://localhost:8080")
 	srv := newTestServerWithInMemoryCreds(creds)
-
-	// Request without connection header should fall back to first available
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", nil)
-	hydrator := srv.resolveHydrator(req)
 
 	srv.hubMu.RLock()
 	conn := srv.hubConnections["local"]
 	srv.hubMu.RUnlock()
+	conn.Hydrator = new(templatecache.Hydrator)
 
-	if hydrator != conn.Hydrator {
-		t.Error("expected resolveHydrator to fall back to first available hydrator")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", nil)
+	if got := srv.resolveHubConnection(req); got != conn {
+		t.Error("expected resolveHubConnection to fall back to first available connection")
 	}
 }
 
-func TestResolveHydrator_UnknownConnection(t *testing.T) {
+func TestResolveHubConnection_UnknownConnection(t *testing.T) {
 	creds := makeTestCreds("local", "broker-1", "http://localhost:8080")
 	srv := newTestServerWithInMemoryCreds(creds)
 
-	// Request with unknown connection name should fall back
+	srv.hubMu.RLock()
+	conn := srv.hubConnections["local"]
+	srv.hubMu.RUnlock()
+	conn.Hydrator = new(templatecache.Hydrator)
+
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", nil)
 	req.Header.Set("X-Scion-Hub-Connection", "nonexistent")
-	hydrator := srv.resolveHydrator(req)
-
-	// Should fall back to any available hydrator
-	srv.hubMu.RLock()
-	conn := srv.hubConnections["local"]
-	srv.hubMu.RUnlock()
-
-	if hydrator != conn.Hydrator {
-		t.Error("expected resolveHydrator to fall back when connection not found")
+	if got := srv.resolveHubConnection(req); got != conn {
+		t.Error("expected resolveHubConnection to fall back when connection not found")
 	}
 }
 
@@ -544,8 +535,8 @@ func TestGlobalProjectRejection_MultiHub(t *testing.T) {
 	if !ok {
 		t.Fatal("expected error object in response")
 	}
-	if errObj["code"] != "global_grove_disabled" {
-		t.Errorf("expected error code 'global_grove_disabled', got %q", errObj["code"])
+	if errObj["code"] != "global_project_disabled" {
+		t.Errorf("expected error code 'global_project_disabled', got %q", errObj["code"])
 	}
 }
 
@@ -584,8 +575,8 @@ func TestGlobalProjectRejection_WithProjectID_MultiHub(t *testing.T) {
 
 	body := `{
 		"name": "scoped-agent",
-		"groveId": "my-project",
-		"grovePath": "/some/path/.scion",
+		"projectId": "my-project",
+		"projectPath": "/some/path/.scion",
 		"config": {"template": "claude"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -615,8 +606,8 @@ func TestGlobalProjectRejection_GitProjectWithProjectID_NoPath_MultiHub(t *testi
 	srv.hubMu.Unlock()
 
 	body := `{
-		"name": "git-grove-agent",
-		"groveId": "abc-123-grove-id",
+		"name": "git-project-agent",
+		"projectId": "abc-123-project-id",
 		"config": {"template": "claude"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -1062,15 +1053,6 @@ func TestValidateBrokerAuthStartup_NonLoopbackPermissiveModeFails(t *testing.T) 
 	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
 	if err := srv.validateBrokerAuthStartup(); err == nil {
 		t.Fatal("expected startup validation to fail for non-loopback host without strict auth")
-	}
-}
-
-func TestGetFirstHeartbeat_NoConnections(t *testing.T) {
-	srv := newTestServer(t)
-
-	hb := srv.getFirstHeartbeat()
-	if hb != nil {
-		t.Error("expected nil heartbeat when no connections")
 	}
 }
 

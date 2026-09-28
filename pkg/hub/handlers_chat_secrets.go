@@ -16,48 +16,16 @@ package hub
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
-	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // SetChatIntegrationSecret stores a chat integration secret (Telegram bot token,
-// Discord bot token, etc.) via the secrets backend, following the GitHub App
-// pattern from handlers_github_app.go.
+// Discord bot token, etc.) via the shared Hub secret path.
 func (s *Server) SetChatIntegrationSecret(ctx context.Context, name, value, description, userID string) error {
-	if s.secretBackend != nil {
-		_, _, err := s.secretBackend.Set(ctx, &secret.SetSecretInput{
-			Name:          name,
-			Value:         value,
-			SecretType:    secret.TypeVariable,
-			Scope:         store.ScopeHub,
-			ScopeID:       s.hubID,
-			Description:   description,
-			InjectionMode: "as_needed",
-			CreatedBy:     userID,
-			UpdatedBy:     userID,
-		})
-		return err
-	}
-
-	sec := &store.Secret{
-		ID:             fmt.Sprintf("hub-chat-%s", strings.ToLower(strings.ReplaceAll(name, "_", "-"))),
-		Key:            name,
-		EncryptedValue: value,
-		Scope:          store.ScopeHub,
-		ScopeID:        s.hubID,
-		SecretType:     store.SecretTypeVariable,
-		Description:    description,
-		Version:        1,
-		CreatedBy:      userID,
-		UpdatedBy:      userID,
-	}
-	_, err := s.store.UpsertSecret(ctx, sec)
-	return err
+	return s.setHubSecret(ctx, name, value, description, userID)
 }
 
 // LoadChatIntegrationSecret loads a chat integration secret from the secrets

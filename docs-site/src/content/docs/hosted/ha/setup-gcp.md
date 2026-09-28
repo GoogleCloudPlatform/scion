@@ -212,6 +212,7 @@ When creating a project through the Hub web UI, Scion includes a default **"scra
 - **The Catch:** GKE Autopilot's default storage class (`standard-rwo`) **only supports `ReadWriteOnce` (RWO)**. Attempting to dispatch an agent will fail with an opaque scheduling error: `VolumeCapabilities is invalid: specified multi writer with mount access type`, and the Hub will output `pods not found`.
 - **The Fix (Option A - Easiest):** If you do not require shared directories, navigate to your project settings in the Hub UI *after* installation and **remove or disable the default shared directory** (e.g., delete the scratchpad entry).
 - **The Fix (Option B - Production):** Set up Google Cloud Filestore or a compatible NFS server, configure the Filestore CSI driver, and define the custom storage class in your GKE runtime profile to support native ReadWriteMany volumes.
+- **The Fix (Option C - Shared NFS export):** Set [`server.shared_dir_storage.backend`](/scion/reference/server-config/#shared-directory-storage-servershared_dir_storage) to `nfs` with a static PVC (`pv_name`) bound to your Filestore or NFS export. Pods then mount shared directories from that single claim by `subPath` instead of requesting a new RWX PVC per directory.
 :::
 
 Create the agent namespace:
@@ -563,7 +564,7 @@ For programmatic access to an IAP-protected Cloud Run service (which our GKE age
 Scion agent image building follows a strict dependency chain:
 $$\text{core-base} \longrightarrow \text{scion-base} \longrightarrow \text{harnesses (gemini-cli, etc.)}$$
 
-1. **`core-base`:** Contains core tools (Go compiler, Git from source, unix packages, GCS FUSE).
+1. **`core-base`:** Built on `node:24-trixie-slim` (Debian 13). Contains core tools (Go compiler, Git vendored from the Chainguard `git` image, unix packages, GCS FUSE).
 2. **`scion-base`:** Copies repository code (`cmd/`, `pkg/`, etc.) and builds the `scion` and `sciontool` binaries on top of `core-base`.
 3. **Harnesses:** Pulls `scion-base` and adds target agent packages (like `@google/gemini-cli`).
 
@@ -602,12 +603,18 @@ The default `.gcloudignore` excludes the `web/` frontend directory. Because the 
 
 #### 3. Build the Core Base Image
 ```bash
-gcloud builds submit . \
+gcloud builds submit image-build \
   --tag="$IMAGE_REGISTRY/core-base:latest" \
-  --dockerfile=image-build/core-base/Dockerfile \
+  --dockerfile=core-base/Dockerfile \
   --project=$PROJECT_ID \
   --quiet
 ```
+:::caution[Submit `image-build`, not the repository root]
+`core-base/Dockerfile` copies `image-build/lib/` (the shared toolchain and
+base-contract scripts it runs, also used by `thick-prep/Dockerfile`). Docker
+cannot read anything outside the build context, so the context has to be
+`image-build/` and the Dockerfile path is relative to it.
+:::
 
 #### 4. Build the Scion Base Image
 Create a single-arch temporary build file to inject the custom `BASE_IMAGE` cleanly:
@@ -789,7 +796,7 @@ gcloud run deploy scion-hub \
   --project=$PROJECT_ID \
   --service-account=scion-hub-runner@$PROJECT_ID.iam.gserviceaccount.com \
   --add-cloudsql-instances=$PROJECT_ID:$REGION:scion-hub-db \
-  --set-env-vars="SCION_DEPLOY=$(date +%s),KUBECONFIG=/etc/scion/kubeconfig.yaml,SCION_K8S_NAMESPACE=scion-agents" \
+  --set-env-vars="SCION_DEPLOY=$(date +%s),KUBECONFIG=/etc/scion/kubeconfig.yaml,SCION_K8S_NAMESPACE=scion-agents,SESSION_SECRET=$SESSION_SECRET" \
   --set-secrets="/etc/scion/kubeconfig.yaml=scion-gke-kubeconfig:latest,/home/scion/.scion/settings.yaml=scion-hub-settings:latest" \
   --min-instances=1 \
   --max-instances=3 \
@@ -798,7 +805,7 @@ gcloud run deploy scion-hub \
   --port=8080 \
   --timeout=900 \
   --command="/usr/local/bin/scion" \
-  --args="server,start,--hosted,--enable-hub,--enable-runtime-broker,--enable-web,--foreground,--web-port,8080,--session-secret,$SESSION_SECRET" \
+  --args="server,start,--hosted,--enable-hub,--enable-runtime-broker,--enable-web,--foreground,--web-port,8080" \
   --no-allow-unauthenticated \
   --quiet
 ```

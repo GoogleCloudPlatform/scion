@@ -1,0 +1,84 @@
+{
+  "schema": "scion.test.ge-a2a.protocol-matrix/v1",
+  "comment": "Synthetic envelope categories based on the named specifications. They define deterministic parser/routing inputs only and are not captures from Gemini Enterprise.",
+  "sources": [
+    {
+      "title": "A2A Protocol v1.0 specification",
+      "url": "https://a2a-protocol.org/v1.0.0/specification/"
+    },
+    {
+      "title": "A2A Protocol v0.3.0 specification",
+      "url": "https://a2a-protocol.org/v0.3.0/specification/"
+    },
+    {
+      "title": "Gemini Enterprise - Register and manage an A2A agent",
+      "url": "https://docs.cloud.google.com/gemini/enterprise/docs/register-and-manage-an-a2a-agent"
+    }
+  ],
+  "entries": [
+    {
+      "category": "a2a-v1-discovery",
+      "protocol_version": "1.0",
+      "binding": "JSONRPC",
+      "method": "GET",
+      "path": "/.well-known/agent-card.json",
+      "envelope": {"expected": "agent-card"}
+    },
+    {
+      "category": "a2a-v1-jsonrpc-send",
+      "protocol_version": "1.0",
+      "binding": "JSONRPC",
+      "method": "POST",
+      "path": "/projects/project-alpha/agents/stable-agent/jsonrpc",
+      "envelope": {"jsonrpc": "2.0", "id": "request-001", "method": "message/send", "params": {"message": {"messageId": "message-001", "role": "user", "parts": [{"kind": "text", "text": "synthetic hello"}]}}}
+    },
+    {
+      "category": "a2a-v1-jsonrpc-stream",
+      "protocol_version": "1.0",
+      "binding": "JSONRPC+SSE",
+      "method": "POST",
+      "path": "/projects/project-alpha/agents/stable-agent/jsonrpc",
+      "envelope": {"jsonrpc": "2.0", "id": "request-002", "method": "message/stream", "params": {"message": {"messageId": "message-002", "role": "user", "parts": [{"kind": "text", "text": "synthetic stream"}]}}}
+    },
+    {
+      "category": "a2a-v1-sse-reconnect",
+      "protocol_version": "1.0",
+      "binding": "JSONRPC+SSE",
+      "method": "POST",
+      "path": "/projects/project-alpha/agents/stable-agent/jsonrpc",
+      "envelope": {"jsonrpc": "2.0", "id": "request-003", "method": "tasks/resubscribe", "params": {"id": "task-001", "metadata": {"cursor": "cursor-002"}}}
+    },
+    {
+      "category": "ge-v0.3-discovery",
+      "protocol_version": "0.3",
+      "binding": "JSONRPC",
+      "method": "GET",
+      "path": "/.well-known/agent-card.json",
+      "envelope": {"expected": "agent-card-v0.3"}
+    },
+    {
+      "category": "ge-v0.3-jsonrpc-send",
+      "protocol_version": "0.3",
+      "binding": "JSONRPC",
+      "method": "POST",
+      "path": "/projects/project-alpha/agents/stable-agent/jsonrpc",
+      "envelope": {"jsonrpc": "2.0", "id": "ge-request-001", "method": "message/send", "params": {"message": {"messageId": "ge-message-001", "role": "user", "parts": [{"kind": "text", "text": "synthetic GE hello"}]}}}
+    },
+    {
+      "category": "ge-v0.3-jsonrpc-stream",
+      "protocol_version": "0.3",
+      "binding": "JSONRPC+SSE",
+      "method": "POST",
+      "path": "/projects/project-alpha/agents/stable-agent/jsonrpc",
+      "envelope": {"jsonrpc": "2.0", "id": "ge-request-002", "method": "message/stream", "params": {"message": {"messageId": "ge-message-002", "role": "user", "parts": [{"kind": "text", "text": "synthetic GE stream"}]}}}
+    },
+    {
+      "category": "ge-v0.3-multiturn",
+      "protocol_version": "0.3",
+      "binding": "JSONRPC",
+      "method": "POST",
+      "path": "/projects/project-alpha/agents/stable-agent/jsonrpc",
+      "envelope": {"jsonrpc": "2.0", "id": "ge-request-003", "method": "message/send", "params": {"message": {"messageId": "ge-message-003", "taskId": "task-001", "contextId": "context-001", "role": "user", "parts": [{"kind": "text", "text": "synthetic follow-up"}]}}}
+    }
+  ]
+}

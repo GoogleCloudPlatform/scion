@@ -170,85 +170,54 @@ class CodexProvisionTest(unittest.TestCase):
 
             self.assertFalse(os.path.exists(agents_path))
 
-    def test_build_otel_section_emits_traces_metrics_environment_and_tls(self) -> None:
-        telemetry = {
-            "enabled": True,
-            "cloud": {
-                "endpoint": "https://otel.example.com/v1/logs",
-                "protocol": "http",
-                "headers": {"x-otlp-meta": "abc123", "authorization": "Bearer token"},
-                "tls": {"ca_file": "/etc/scion/ca.pem"},
-            },
-            "resource": {"deployment.environment": "staging"},
-            "filter": {"events": {"include": ["agent.user.prompt"]}},
-        }
-
-        section = provision._build_otel_section(telemetry, None)
-
-        self.assertIn('environment = "staging"', section)
-        self.assertIn("log_user_prompt = true", section)
-        self.assertIn('metrics_exporter = "statsig"', section)
-        self.assertIn('exporter."otlp-http".endpoint = "https://otel.example.com/v1/logs"', section)
-        self.assertIn('trace_exporter."otlp-http".endpoint = "https://otel.example.com/v1/logs"', section)
-        self.assertIn(
-            'exporter."otlp-http".headers = { "authorization" = "Bearer token", "x-otlp-meta" = "abc123" }',
-            section,
-        )
-        self.assertIn(
-            'trace_exporter."otlp-http".headers = { "authorization" = "Bearer token", "x-otlp-meta" = "abc123" }',
-            section,
-        )
-        self.assertIn('exporter."otlp-http".tls.ca-certificate = "/etc/scion/ca.pem"', section)
-        self.assertIn('trace_exporter."otlp-http".tls.ca-certificate = "/etc/scion/ca.pem"', section)
-
-    def test_build_otel_section_uses_env_overrides_and_production_default(self) -> None:
-        telemetry = {
-            "enabled": True,
-            "cloud": {
-                "endpoint": "localhost:4317",
-                "protocol": "grpc",
-            },
-            "resource": {"deployment.environment": "staging"},
-            "filter": {"events": {"include": ["agent.user.prompt"], "exclude": ["agent.user.prompt"]}},
-        }
-        env = {
-            "SCION_CODEX_OTEL_ENDPOINT": "collector.internal:4317",
-            "SCION_CODEX_OTEL_PROTOCOL": "grpc",
-            "SCION_CODEX_OTEL_ENVIRONMENT": "dev",
-        }
-
+    def test_native_otel_routes_only_to_local_receiver(self) -> None:
+        telemetry = {"enabled": True, "cloud": {"endpoint": "cloudtrace.googleapis.com:443", "protocol": "http", "headers": {"authorization": "secret"}}}
+        env = {"SCION_CODEX_OTEL_ENDPOINT": "external.invalid:4317", "SCION_OTEL_GRPC_PORT": "14317"}
         section = provision._build_otel_section(telemetry, env)
+        self.assertIn('metrics_exporter."otlp-grpc".endpoint = "http://127.0.0.1:14317"', section)
+        self.assertIn('exporter."otlp-grpc".endpoint = "http://127.0.0.1:14317"', section)
+        self.assertIn('trace_exporter."otlp-grpc".endpoint = "http://127.0.0.1:14317"', section)
+        self.assertIn('log_user_prompt = false', section)
+        self.assertNotIn("cloudtrace", section)
+        self.assertNotIn("external.invalid", section)
+        self.assertNotIn("secret", section)
+        self.assertNotIn("statsig", section)
 
-        self.assertIn('environment = "dev"', section)
-        self.assertIn("log_user_prompt = false", section)
-        self.assertIn('exporter."otlp-grpc".endpoint = "collector.internal:4317"', section)
-        self.assertIn('trace_exporter."otlp-grpc".endpoint = "collector.internal:4317"', section)
-
-        defaulted = provision._build_otel_section({"enabled": True}, None)
-        self.assertIn('environment = "production"', defaulted)
-
+    def test_disabled_otel_disables_all_exporters(self) -> None:
+        with tempfile.TemporaryDirectory() as home, temporary_home(home):
+            os.makedirs(os.path.join(home, ".codex"), exist_ok=True)
+            with open(os.path.join(home, ".codex", "config.toml"), "w", encoding="utf-8") as f:
+                f.write('[otel.exporter."otlp-grpc"]\nendpoint = "https://external.invalid:443"\n')
+            provision._reconcile_codex_toml(None, None)
+            with open(os.path.join(home, ".codex", "config.toml"), encoding="utf-8") as f:
+                content = f.read()
+        self.assertIn('exporter = "none"', content)
+        self.assertIn('metrics_exporter = "none"', content)
+        self.assertIn('trace_exporter = "none"', content)
+        self.assertNotIn('external.invalid', content)
 
     def test_resolve_reasoning_effort_maps_thinking_levels(self) -> None:
         self.assertEqual(provision._resolve_reasoning_effort(0), "low")
-        self.assertEqual(provision._resolve_reasoning_effort(33), "low")
-        self.assertEqual(provision._resolve_reasoning_effort(34), "medium")
+        self.assertEqual(provision._resolve_reasoning_effort(25), "low")
+        self.assertEqual(provision._resolve_reasoning_effort(26), "medium")
         self.assertEqual(provision._resolve_reasoning_effort(50), "medium")
-        self.assertEqual(provision._resolve_reasoning_effort(66), "medium")
-        self.assertEqual(provision._resolve_reasoning_effort(67), "high")
-        self.assertEqual(provision._resolve_reasoning_effort(100), "high")
+        self.assertEqual(provision._resolve_reasoning_effort(51), "high")
+        self.assertEqual(provision._resolve_reasoning_effort(75), "high")
+        self.assertEqual(provision._resolve_reasoning_effort(76), "xhigh")
+        self.assertEqual(provision._resolve_reasoning_effort(100), "xhigh")
 
     def test_resolve_reasoning_effort_clamps_out_of_range(self) -> None:
         self.assertEqual(provision._resolve_reasoning_effort(-10), "low")
-        self.assertEqual(provision._resolve_reasoning_effort(150), "high")
+        self.assertEqual(provision._resolve_reasoning_effort(150), "xhigh")
 
-    def test_reconcile_codex_toml_writes_reasoning_effort(self) -> None:
+    def test_reconcile_codex_toml_writes_model_reasoning_effort(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with temporary_home(tmp):
                 provision._reconcile_codex_toml(None, None, reasoning_effort="medium")
                 config_path = os.path.join(tmp, ".codex", "config.toml")
                 with open(config_path, "r", encoding="utf-8") as f:
                     content = f.read()
-                self.assertIn('reasoning_effort = "medium"', content)
+                self.assertIn('model_reasoning_effort = "medium"', content)
 
     def test_reconcile_codex_toml_omits_reasoning_effort_when_none(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -258,6 +227,7 @@ class CodexProvisionTest(unittest.TestCase):
                 with open(config_path, "r", encoding="utf-8") as f:
                     content = f.read()
                 self.assertNotIn("reasoning_effort", content)
+                self.assertNotIn("model_reasoning_effort", content)
 
     def test_reconcile_codex_toml_replaces_existing_reasoning_effort(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -270,8 +240,47 @@ class CodexProvisionTest(unittest.TestCase):
                 provision._reconcile_codex_toml(None, None, reasoning_effort="high")
                 with open(config_path, "r", encoding="utf-8") as f:
                     content = f.read()
-                self.assertIn('reasoning_effort = "high"', content)
+                self.assertIn('model_reasoning_effort = "high"', content)
                 self.assertNotIn('"low"', content)
+                self.assertIn('other_key = "value"', content)
+
+    def test_reconcile_codex_toml_replaces_baked_in_model_reasoning_effort(self) -> None:
+        """Verify that a pre-existing model_reasoning_effort (from the image config) gets replaced."""
+        with tempfile.TemporaryDirectory() as tmp:
+            with temporary_home(tmp):
+                codex_dir = os.path.join(tmp, ".codex")
+                os.makedirs(codex_dir)
+                config_path = os.path.join(codex_dir, "config.toml")
+                with open(config_path, "w", encoding="utf-8") as f:
+                    f.write('model_reasoning_effort = "medium"\nother_key = "value"\n')
+                provision._reconcile_codex_toml(None, None, reasoning_effort="high")
+                with open(config_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                self.assertIn('model_reasoning_effort = "high"', content)
+                self.assertEqual(content.count("model_reasoning_effort"), 1)
+                self.assertNotIn('"medium"', content)
+                self.assertIn('other_key = "value"', content)
+
+    def test_reconcile_codex_toml_strips_both_old_and_new_keys(self) -> None:
+        """Verify both reasoning_effort and model_reasoning_effort are stripped before writing."""
+        with tempfile.TemporaryDirectory() as tmp:
+            with temporary_home(tmp):
+                codex_dir = os.path.join(tmp, ".codex")
+                os.makedirs(codex_dir)
+                config_path = os.path.join(codex_dir, "config.toml")
+                with open(config_path, "w", encoding="utf-8") as f:
+                    f.write(
+                        'model_reasoning_effort = "medium"\n'
+                        'reasoning_effort = "low"\n'
+                        'other_key = "value"\n'
+                    )
+                provision._reconcile_codex_toml(None, None, reasoning_effort="high")
+                with open(config_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                self.assertIn('model_reasoning_effort = "high"', content)
+                self.assertEqual(content.count("model_reasoning_effort"), 1)
+                self.assertNotIn('reasoning_effort = "low"', content)
+                self.assertNotIn('reasoning_effort = "medium"', content)
                 self.assertIn('other_key = "value"', content)
 
     def test_strip_toml_top_level_key_section_safety(self) -> None:

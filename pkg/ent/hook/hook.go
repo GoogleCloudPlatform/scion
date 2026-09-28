@@ -57,6 +57,30 @@ func (f AgentCredentialFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Va
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.AgentCredentialMutation", m)
 }
 
+// The AgentIdentityKeyFunc type is an adapter to allow the use of ordinary
+// function as AgentIdentityKey mutator.
+type AgentIdentityKeyFunc func(context.Context, *ent.AgentIdentityKeyMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f AgentIdentityKeyFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.AgentIdentityKeyMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.AgentIdentityKeyMutation", m)
+}
+
+// The AgentReincarnationFunc type is an adapter to allow the use of ordinary
+// function as AgentReincarnation mutator.
+type AgentReincarnationFunc func(context.Context, *ent.AgentReincarnationMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f AgentReincarnationFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.AgentReincarnationMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.AgentReincarnationMutation", m)
+}
+
 // The AgentSessionMetricsFunc type is an adapter to allow the use of ordinary
 // function as AgentSessionMetrics mutator.
 type AgentSessionMetricsFunc func(context.Context, *ent.AgentSessionMetricsMutation) (ent.Value, error)
@@ -211,6 +235,18 @@ func (f EnvVarFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, erro
 		return f(ctx, mv)
 	}
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.EnvVarMutation", m)
+}
+
+// The ExternalIdentityFunc type is an adapter to allow the use of ordinary
+// function as ExternalIdentity mutator.
+type ExternalIdentityFunc func(context.Context, *ent.ExternalIdentityMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f ExternalIdentityFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.ExternalIdentityMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.ExternalIdentityMutation", m)
 }
 
 // The GCPServiceAccountFunc type is an adapter to allow the use of ordinary

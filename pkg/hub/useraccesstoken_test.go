@@ -161,6 +161,7 @@ func (m *mockUserStore) UpdateUserLastSeen(context.Context, string, time.Time) e
 func (m *mockUserStore) IsUserInvitedOrActive(context.Context, string) (bool, error) {
 	return false, nil
 }
+func (m *mockUserStore) IncrementSessionGeneration(context.Context, string) error { return nil }
 
 // newTestValidateService creates a minimal UAT service for ValidateToken tests.
 func newTestValidateService() (*UserAccessTokenService, *mockUATStore, *mockUserStore) {

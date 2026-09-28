@@ -16,7 +16,7 @@ Scion agents run inside container images that bundle an LLM harness (Claude, Gem
 Scion images are built in layers:
 
 ```
-core-base          System dependencies (Go, Node, Python, Git)
+core-base          System dependencies on node:24-trixie-slim (Go, Node, Python, Git)
   └── scion-base   Scion CLI, sciontool binary, scion user, entrypoint
         ├── scion-claude     Claude Code harness
         ├── scion-gemini-cli Gemini CLI harness
@@ -278,6 +278,16 @@ Every image is tagged with both `:<tag>` (controlled by `--tag`, defaults to `la
 
 When two steps in the same run depend on each other, the orchestrator threads `BASE_IMAGE=...:<short-sha>` so chained builds are immune to concurrent overwrites of `:latest`. Standalone targets (e.g. `--target harnesses` on its own) reference the parent image as `:<tag>`.
 
+### Build Provenance
+
+When building `scion-base`, the orchestrator stamps `scion` and `sciontool` with the git commit and, when `HEAD` is on an exact git tag, the version. Inside an agent container, `sciontool version` reports both. `scion-base` also carries the OCI `org.opencontainers.image.revision` label, which every image built `FROM scion-base` (harnesses, hub) inherits. To check which commit an image was built from without running it:
+
+```bash
+docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' scion-claude:latest
+```
+
+If a build uses `scion-base` but does not rebuild it in the same run (for example, `--target harnesses`), the orchestrator prints a warning. The resulting images inherit whatever `sciontool` is already baked into the existing `scion-base:<tag>`. The warning also shows that image's revision when a local copy exists. Include `scion-base` in the build (for example, `--target common`) so `sciontool` fixes reach your agents.
+
 ### Authentication
 
 The orchestrator and builders assume the caller is already authenticated to the target registry (via `docker login`, `podman login`, `gcloud auth configure-docker`, etc.) and to any required cloud APIs. No login steps are performed inside the script.
@@ -354,7 +364,7 @@ The `cloud-build` builder maps each `--target` to a static YAML file in `image-b
 | `harnesses` | `cloudbuild-harnesses.yaml` |
 | `hub` | `cloudbuild-hub.yaml` |
 
-These YAMLs reference `$_TAG`, `$_SHORT_SHA`, `$_COMMIT_SHA`, and `$_REGISTRY` substitutions, all forwarded by the orchestrator. `_TAG` defaults to `latest` in each YAML's `substitutions:` block, preserving the prior behavior when `--tag` is omitted.
+These YAMLs reference `$_TAG`, `$_SHORT_SHA`, `$_COMMIT_SHA`, `$_REGISTRY`, and (in the five that build `scion-base`: `all`, `common`, `scion-base`, `thick`/`thick-prep`, `omni`) `$_VERSION`, all forwarded by the orchestrator. `_TAG` defaults to `latest` in every YAML's `substitutions:` block; `_VERSION` defaults to `''` in the YAMLs that declare it, preserving the prior behavior when `--tag` or a version tag is omitted. The orchestrator only forwards a non-empty `_VERSION` when `HEAD` is on an exact git tag; off-tag, it relies on that default.
 
 ### Initial Setup
 

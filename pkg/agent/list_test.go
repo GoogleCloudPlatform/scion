@@ -249,7 +249,7 @@ func TestListNonRunningAgentIncludesHarnessConfig(t *testing.T) {
 
 	mgr := NewManager(mock)
 	agents, err := mgr.List(context.Background(), map[string]string{
-		"scion.grove_path": projectPath,
+		"scion.project_path": projectPath,
 	})
 	if err != nil {
 		t.Fatalf("List() error: %v", err)
@@ -479,7 +479,7 @@ func TestListPreservesRuntimeTerminalStateForKubernetes(t *testing.T) {
 
 			mgr := NewManager(mock)
 			agents, err := mgr.List(context.Background(), map[string]string{
-				"scion.grove_path": projectPath,
+				"scion.project_path": projectPath,
 			})
 			if err != nil {
 				t.Fatalf("List() error: %v", err)
@@ -804,7 +804,7 @@ func TestListLegacyEndedWithExitCode(t *testing.T) {
 
 			mgr := NewManager(mock)
 			agents, err := mgr.List(context.Background(), map[string]string{
-				"scion.grove_path": projectPath,
+				"scion.project_path": projectPath,
 			})
 			if err != nil {
 				t.Fatalf("List() error: %v", err)
@@ -866,7 +866,11 @@ func TestPersistAgentInfoState_AtomicallyRewritesAndPreservesMode(t *testing.T) 
 	if fi.Mode().Perm() != 0600 {
 		t.Fatalf("mode = %o, want %o", fi.Mode().Perm(), os.FileMode(0600))
 	}
-	if _, err := os.Stat(infoPath + ".tmp"); !os.IsNotExist(err) {
-		t.Fatalf("temp file should not remain, stat err = %v", err)
+	tempFiles, err := filepath.Glob(filepath.Join(tmpDir, ".agent-info.json.tmp-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tempFiles) != 0 {
+		t.Fatalf("temp files should not remain: %v", tempFiles)
 	}
 }

@@ -15,6 +15,7 @@
 package messaging
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -113,6 +114,12 @@ func TestMapLegacyType_AllOldTypes(t *testing.T) {
 			wantKind:   KindText,
 			wantIntent: ptrIntent(IntentRequest),
 		},
+		{
+			name:       "reply → text/request",
+			oldType:    messages.TypeReply,
+			wantKind:   KindText,
+			wantIntent: ptrIntent(IntentRequest),
+		},
 	}
 
 	for _, tc := range tests {
@@ -204,7 +211,7 @@ func TestMapLegacyDeliveryArtifact(t *testing.T) {
 // ---------- MapLegacyEnvelope ----------
 
 func TestMapLegacyEnvelope_NilInput(t *testing.T) {
-	_, _, err := MapLegacyEnvelope(nil)
+	_, _, err := MapLegacyEnvelope(nil, PersistedIdentity{})
 	if err == nil {
 		t.Fatal("expected error for nil input")
 	}
@@ -221,7 +228,7 @@ func TestMapLegacyEnvelope_Instruction(t *testing.T) {
 		Type:      messages.TypeInstruction,
 	}
 
-	msg, addrs, err := MapLegacyEnvelope(old)
+	msg, addrs, err := MapLegacyEnvelope(old, PersistedIdentity{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -258,7 +265,7 @@ func TestMapLegacyEnvelope_StateChange(t *testing.T) {
 		Status:    "COMPLETED",
 	}
 
-	msg, _, err := MapLegacyEnvelope(old)
+	msg, _, err := MapLegacyEnvelope(old, PersistedIdentity{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -288,7 +295,7 @@ func TestMapLegacyEnvelope_SystemScheduler(t *testing.T) {
 		Metadata:  map[string]string{"system_category": messages.SystemCategoryScheduler},
 	}
 
-	msg, _, err := MapLegacyEnvelope(old)
+	msg, _, err := MapLegacyEnvelope(old, PersistedIdentity{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -298,6 +305,91 @@ func TestMapLegacyEnvelope_SystemScheduler(t *testing.T) {
 	}
 	if msg.Event == nil || msg.Event.Type != EventScheduleFired {
 		t.Errorf("event.type: got %v, want schedule.fired", msg.Event)
+	}
+}
+
+func TestMapLegacyEnvelope_MetadataPassThrough(t *testing.T) {
+	old := &messages.StructuredMessage{
+		Version:   1,
+		Timestamp: "2026-08-27T10:00:00Z",
+		Sender:    "user:alice",
+		SenderID:  "user:alice",
+		Recipient: "agent:builder",
+		Msg:       "Replying to your message",
+		Type:      messages.TypeReply,
+		Metadata: map[string]string{
+			"RE-to":           "original message preview...",
+			"system_category": "scheduler",
+			"__attachments":   "internal-data",
+		},
+	}
+
+	msg, _, err := MapLegacyEnvelope(old, PersistedIdentity{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// RE-to should pass through.
+	if msg.Metadata == nil {
+		t.Fatal("metadata is nil, want non-nil")
+	}
+	if got, ok := msg.Metadata["RE-to"]; !ok || got != "original message preview..." {
+		t.Errorf("metadata[RE-to] = %q, want %q", got, "original message preview...")
+	}
+
+	// Internal keys must be filtered out.
+	if _, ok := msg.Metadata["system_category"]; ok {
+		t.Error("metadata contains system_category, want filtered out")
+	}
+	if _, ok := msg.Metadata["__attachments"]; ok {
+		t.Error("metadata contains __attachments, want filtered out")
+	}
+}
+
+func TestMapLegacyEnvelope_MetadataEmpty(t *testing.T) {
+	old := &messages.StructuredMessage{
+		Version:   1,
+		Timestamp: "2026-08-27T10:00:00Z",
+		Sender:    "user:alice",
+		SenderID:  "user:alice",
+		Recipient: "agent:builder",
+		Msg:       "No metadata",
+		Type:      messages.TypeInstruction,
+	}
+
+	msg, _, err := MapLegacyEnvelope(old, PersistedIdentity{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if msg.Metadata != nil {
+		t.Errorf("metadata = %v, want nil", msg.Metadata)
+	}
+}
+
+func TestMapLegacyEnvelope_MetadataOnlyInternalKeys(t *testing.T) {
+	old := &messages.StructuredMessage{
+		Version:   1,
+		Timestamp: "2026-08-27T10:00:00Z",
+		Sender:    "user:alice",
+		SenderID:  "user:alice",
+		Recipient: "agent:builder",
+		Msg:       "Only internal metadata",
+		Type:      messages.TypeInstruction,
+		Metadata: map[string]string{
+			"system_category": "scheduler",
+			"__attachments":   "internal-data",
+		},
+	}
+
+	msg, _, err := MapLegacyEnvelope(old, PersistedIdentity{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// When only internal keys exist, Metadata should be nil (not empty map).
+	if msg.Metadata != nil {
+		t.Errorf("metadata = %v, want nil (all keys filtered)", msg.Metadata)
 	}
 }
 
@@ -314,7 +406,7 @@ func TestMapLegacyEnvelope_InputNeeded_Addressed(t *testing.T) {
 		Broadcasted: false,
 	}
 
-	msg, _, err := MapLegacyEnvelope(old)
+	msg, _, err := MapLegacyEnvelope(old, PersistedIdentity{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -340,7 +432,7 @@ func TestMapLegacyEnvelope_InputNeeded_Broadcast(t *testing.T) {
 		Broadcasted: true,
 	}
 
-	msg, _, err := MapLegacyEnvelope(old)
+	msg, _, err := MapLegacyEnvelope(old, PersistedIdentity{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -364,7 +456,7 @@ func TestMapLegacyEnvelope_Mention(t *testing.T) {
 		Metadata:  map[string]string{"mention_source": "agent:builder", "mention_position": "body"},
 	}
 
-	msg, addrs, err := MapLegacyEnvelope(old)
+	msg, addrs, err := MapLegacyEnvelope(old, PersistedIdentity{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -393,7 +485,7 @@ func TestMapLegacyEnvelope_GroupSet(t *testing.T) {
 		Type:      messages.TypeGroupSet,
 	}
 
-	msg, addrs, err := MapLegacyEnvelope(old)
+	msg, addrs, err := MapLegacyEnvelope(old, PersistedIdentity{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -423,7 +515,7 @@ func TestMapLegacyEnvelope_Attachments(t *testing.T) {
 		Attachments: []string{"/tmp/file1.go", "/tmp/file2.go"},
 	}
 
-	msg, _, err := MapLegacyEnvelope(old)
+	msg, _, err := MapLegacyEnvelope(old, PersistedIdentity{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -436,33 +528,179 @@ func TestMapLegacyEnvelope_Attachments(t *testing.T) {
 	}
 }
 
-func TestMapLegacyEnvelope_Visibility(t *testing.T) {
-	tests := []struct {
-		oldVis string
-		want   Visibility
-	}{
-		{"", VisibilityNormal},
-		{messages.VisibilityNormal, VisibilityNormal},
-		{messages.VisibilityVerbose, VisibilityVerbose},
-		{messages.VisibilityFull, VisibilityFull},
+// ---------- Urgent mapping (OQ-1b) ----------
+
+// TestMapLegacyEnvelope_UrgentMapped verifies that old.Urgent is mapped to
+// Message.Urgent. This pins the urgent semantics that were previously
+// silently discarded by the conversion (noted in DEF-103 footnote).
+func TestMapLegacyEnvelope_UrgentMapped(t *testing.T) {
+	old := &messages.StructuredMessage{
+		Version:   1,
+		Timestamp: "2026-08-27T10:00:00Z",
+		Sender:    "user:alice",
+		SenderID:  "user:alice",
+		Recipient: "agent:builder",
+		Msg:       "Urgent task",
+		Type:      messages.TypeInstruction,
+		Urgent:    true,
 	}
-	for _, tc := range tests {
-		old := &messages.StructuredMessage{
-			Version:    1,
-			Timestamp:  "2026-08-27T10:00:00Z",
-			Sender:     "user:alice",
-			Recipient:  "agent:builder",
-			Msg:        "Hello",
-			Type:       messages.TypeInstruction,
-			Visibility: tc.oldVis,
+
+	msg, _, err := MapLegacyEnvelope(old, PersistedIdentity{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !msg.Urgent {
+		t.Error("msg.Urgent = false, want true; old.Urgent must be mapped")
+	}
+}
+
+// TestMapLegacyEnvelope_NotUrgent verifies that non-urgent messages produce
+// Urgent=false on the new Message.
+func TestMapLegacyEnvelope_NotUrgent(t *testing.T) {
+	old := &messages.StructuredMessage{
+		Version:   1,
+		Timestamp: "2026-08-27T10:00:00Z",
+		Sender:    "user:alice",
+		SenderID:  "user:alice",
+		Recipient: "agent:builder",
+		Msg:       "Normal task",
+		Type:      messages.TypeInstruction,
+		Urgent:    false,
+	}
+
+	msg, _, err := MapLegacyEnvelope(old, PersistedIdentity{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if msg.Urgent {
+		t.Error("msg.Urgent = true, want false; non-urgent message should not be marked urgent")
+	}
+}
+
+// ---------- PersistedIdentity / DEF-103 ----------
+
+// TestMapLegacyEnvelope_ThreadedMessage_NoReplyTo (DEF-103, AC-9-12) verifies
+// that a message with a ThreadID does NOT produce a reply_to field. A thread
+// ID is not a message ID, and reply_to must point at a real message or be absent.
+func TestMapLegacyEnvelope_ThreadedMessage_NoReplyTo(t *testing.T) {
+	old := &messages.StructuredMessage{
+		Version:   1,
+		Timestamp: "2026-08-27T10:00:00Z",
+		Sender:    "user:alice",
+		SenderID:  "user:alice",
+		Recipient: "agent:builder",
+		Msg:       "Build it",
+		Type:      messages.TypeInstruction,
+		Channel:   "dev",
+		ThreadID:  "thread-42",
+	}
+
+	msg, _, err := MapLegacyEnvelope(old, PersistedIdentity{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if msg.ReplyToID != nil {
+		t.Errorf("reply_to should be nil when no real reply target exists, got %q", *msg.ReplyToID)
+	}
+}
+
+// TestMapLegacyEnvelope_NoFabricatedMessageID (DEF-103, AC-9-13) verifies
+// that when no persisted identity is provided, the message ID is empty
+// rather than a fabricated "legacy-<timestamp>" string.
+func TestMapLegacyEnvelope_NoFabricatedMessageID(t *testing.T) {
+	old := &messages.StructuredMessage{
+		Version:   1,
+		Timestamp: "2026-08-27T10:00:00Z",
+		Sender:    "user:alice",
+		SenderID:  "user:alice",
+		Recipient: "agent:builder",
+		Msg:       "Hello",
+		Type:      messages.TypeInstruction,
+	}
+
+	msg, _, err := MapLegacyEnvelope(old, PersistedIdentity{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if msg.ID != "" {
+		t.Errorf("message ID should be empty when no persisted identity, got %q", msg.ID)
+	}
+	if strings.HasPrefix(msg.ID, "legacy-") {
+		t.Errorf("fabricated legacy- message ID must not be produced, got %q", msg.ID)
+	}
+}
+
+// TestMapLegacyEnvelope_RealPersistedIdentity (DEF-103) verifies that real
+// persisted identifiers are used in the output when provided.
+func TestMapLegacyEnvelope_RealPersistedIdentity(t *testing.T) {
+	old := &messages.StructuredMessage{
+		Version:   1,
+		Timestamp: "2026-08-27T10:00:00Z",
+		Sender:    "user:alice",
+		SenderID:  "user:alice",
+		Recipient: "agent:builder",
+		Msg:       "Hello",
+		Type:      messages.TypeInstruction,
+		ThreadID:  "thread-42",
+		Channel:   "dev",
+	}
+
+	ident := PersistedIdentity{
+		MessageID: "real-msg-uuid-001",
+		ReplyToID: "real-reply-uuid-002",
+	}
+
+	msg, addrs, err := MapLegacyEnvelope(old, ident)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if msg.ID != "real-msg-uuid-001" {
+		t.Errorf("message ID = %q, want %q", msg.ID, "real-msg-uuid-001")
+	}
+	if msg.ReplyToID == nil || *msg.ReplyToID != "real-reply-uuid-002" {
+		t.Errorf("reply_to = %v, want %q", msg.ReplyToID, "real-reply-uuid-002")
+	}
+	// Addressee message IDs must match the real persisted ID.
+	for i, a := range addrs {
+		if a.MessageID != "real-msg-uuid-001" {
+			t.Errorf("addrs[%d].MessageID = %q, want %q", i, a.MessageID, "real-msg-uuid-001")
 		}
-		msg, _, err := MapLegacyEnvelope(old)
-		if err != nil {
-			t.Fatalf("unexpected error for vis=%q: %v", tc.oldVis, err)
-		}
-		if msg.Visibility != tc.want {
-			t.Errorf("visibility %q: got %q, want %q", tc.oldVis, msg.Visibility, tc.want)
-		}
+	}
+}
+
+// TestMapLegacyEnvelope_EmptyReplyToID_Omitted verifies that an empty
+// ReplyToID in PersistedIdentity results in a nil ReplyToID on the Message,
+// even when the legacy message has a ThreadID set.
+func TestMapLegacyEnvelope_EmptyReplyToID_Omitted(t *testing.T) {
+	old := &messages.StructuredMessage{
+		Version:   1,
+		Timestamp: "2026-08-27T10:00:00Z",
+		Sender:    "user:alice",
+		SenderID:  "user:alice",
+		Recipient: "agent:builder",
+		Msg:       "Hello",
+		Type:      messages.TypeInstruction,
+		ThreadID:  "thread-42",
+		Channel:   "dev",
+	}
+
+	ident := PersistedIdentity{
+		MessageID: "real-msg-uuid-001",
+		ReplyToID: "", // explicitly absent
+	}
+
+	msg, _, err := MapLegacyEnvelope(old, ident)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if msg.ReplyToID != nil {
+		t.Errorf("reply_to should be nil when ReplyToID is empty, got %q", *msg.ReplyToID)
 	}
 }
 
@@ -688,33 +926,6 @@ func TestNewEnvelopeToLegacy_Attachments(t *testing.T) {
 	}
 }
 
-func TestNewEnvelopeToLegacy_Visibility(t *testing.T) {
-	tests := []struct {
-		vis     Visibility
-		wantOld string
-	}{
-		{VisibilityNormal, ""},
-		{VisibilityVerbose, "verbose"},
-		{VisibilityFull, "full"},
-	}
-	for _, tc := range tests {
-		intent := IntentInform
-		msg := &Message{
-			ID:         "msg-1",
-			From:       "user:alice",
-			Kind:       KindText,
-			Intent:     &intent,
-			Body:       "Hello",
-			Visibility: tc.vis,
-			CreatedAt:  time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
-		}
-		old := NewEnvelopeToLegacy(msg, nil)
-		if old.Visibility != tc.wantOld {
-			t.Errorf("vis=%q: old.Visibility got %q, want %q", tc.vis, old.Visibility, tc.wantOld)
-		}
-	}
-}
-
 // ---------- Round-trip tests ----------
 
 func TestRoundTrip_OldToNewToOld(t *testing.T) {
@@ -825,7 +1036,7 @@ func TestRoundTrip_OldToNewToOld(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			msg, addrs, err := MapLegacyEnvelope(tc.old)
+			msg, addrs, err := MapLegacyEnvelope(tc.old, PersistedIdentity{})
 			if err != nil {
 				t.Fatalf("MapLegacyEnvelope failed: %v", err)
 			}
@@ -847,16 +1058,22 @@ func TestRoundTrip_OldToNewToOld(t *testing.T) {
 }
 
 func TestRoundTrip_NewToOldToNew(t *testing.T) {
+	// Every Message field is populated non-zero so the round trip can
+	// detect a silent drop. A field left at its zero value survives even
+	// when the mapper omits it, hiding the bug.
 	intent := IntentRequest
+	replyTo := "reply-99"
 	original := &Message{
-		ID:          "msg-1",
-		From:        "user:alice",
-		Kind:        KindText,
-		Intent:      &intent,
-		Body:        "Build it",
-		Attachments: []AttachmentRef{{Path: "/tmp/a.go"}},
-		Visibility:  VisibilityVerbose,
-		CreatedAt:   time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
+		ID:             "msg-1",
+		ConversationID: "conv-123",
+		ReplyToID:      &replyTo,
+		From:           "user:alice",
+		Kind:           KindText,
+		Intent:         &intent,
+		Body:           "Build it",
+		Attachments:    []AttachmentRef{{Path: "/tmp/a.go", Name: "a.go"}},
+		Urgent:         true,
+		CreatedAt:      time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
 	}
 	originalAddrs := []Addressee{{
 		MessageID:     "msg-1",
@@ -866,16 +1083,25 @@ func TestRoundTrip_NewToOldToNew(t *testing.T) {
 		DeliveryState: DeliveryPending,
 	}}
 
-	// Convert new → old.
+	// ---- new → old ----
 	legacy := NewEnvelopeToLegacy(original, originalAddrs)
 
-	// Convert old → new.
-	restored, restoredAddrs, err := MapLegacyEnvelope(legacy)
+	// Verify the intermediate StructuredMessage carries the fields that
+	// have a direct legacy equivalent.
+	if !legacy.Urgent {
+		t.Error("new→old: Urgent not mapped to StructuredMessage")
+	}
+	if legacy.ConversationID != "conv-123" {
+		t.Errorf("new→old: ConversationID = %q, want %q", legacy.ConversationID, "conv-123")
+	}
+
+	// ---- old → new ----
+	restored, restoredAddrs, err := MapLegacyEnvelope(legacy, PersistedIdentity{})
 	if err != nil {
 		t.Fatalf("MapLegacyEnvelope failed: %v", err)
 	}
 
-	// Check preserved semantics.
+	// Fields that survive the full round trip (new → old → new):
 	if restored.Kind != original.Kind {
 		t.Errorf("kind: got %q, want %q", restored.Kind, original.Kind)
 	}
@@ -888,44 +1114,183 @@ func TestRoundTrip_NewToOldToNew(t *testing.T) {
 	if len(restored.Attachments) != len(original.Attachments) {
 		t.Errorf("attachments count: got %d, want %d", len(restored.Attachments), len(original.Attachments))
 	}
-	if restored.Visibility != original.Visibility {
-		t.Errorf("visibility: got %q, want %q", restored.Visibility, original.Visibility)
+	if restored.Attachments[0].Path != original.Attachments[0].Path {
+		t.Errorf("attachment path: got %q, want %q", restored.Attachments[0].Path, original.Attachments[0].Path)
+	}
+	if restored.Urgent != original.Urgent {
+		t.Errorf("urgent: got %v, want %v", restored.Urgent, original.Urgent)
 	}
 	if len(restoredAddrs) != len(originalAddrs) {
 		t.Errorf("addressees count: got %d, want %d", len(restoredAddrs), len(originalAddrs))
 	}
+
+	// Fields with expected loss in the round trip — documented here so a
+	// future reader knows the omission is intentional, not overlooked.
+	//
+	// ID: StructuredMessage has no ID field. Restored msg.ID comes from
+	//     PersistedIdentity, which is empty in this test.
+	//
+	// ConversationID: NewEnvelopeToLegacy maps it to old.ConversationID,
+	//     but MapLegacyEnvelope does not read old.ConversationID back
+	//     (conversation context is handled separately via ConversationInfo).
+	//
+	// ReplyToID: no clean legacy equivalent. ThreadID is semantically
+	//     different (DEF-103); mapping would re-introduce fabrication.
+	//
+	// AttachmentRef.Name: old format carries only paths.
 }
 
 // ---------- buildPrincipalRef ----------
 
-func TestBuildPrincipalRef_RawUUIDWithPrefixedName(t *testing.T) {
-	// When SenderID is a raw UUID (no colon), the kind should be derived
-	// from the Sender name field.
-	ref := buildPrincipalRef("user:alice", "be67fbc9-c869-5d43-b15d-c28ca3e8d355")
-	if ref != "user:be67fbc9-c869-5d43-b15d-c28ca3e8d355" {
-		t.Fatalf("expected user-prefixed ref, got %q", ref)
+func TestBuildPrincipalRef_PreferSlugOverUUID(t *testing.T) {
+	// When name is a valid PrincipalRef (kind:value), prefer it over the
+	// raw UUID in the id parameter. This keeps human-readable slugs and
+	// emails in the delivery envelope.
+	tests := []struct {
+		name string
+		n    string // name parameter
+		id   string // id parameter
+		want PrincipalRef
+	}{
+		{
+			name: "agent slug preferred over UUID",
+			n:    "agent:my-slug",
+			id:   "814b7c0b-1a15-43a2-a3f1-2aa3b1548c94",
+			want: "agent:my-slug",
+		},
+		{
+			name: "user email preferred over UUID",
+			n:    "user:alice@example.com",
+			id:   "be67fbc9-c869-5d43-b15d-c28ca3e8d355",
+			want: "user:alice@example.com",
+		},
+		{
+			name: "system ref preferred over UUID",
+			n:    "system:scheduler",
+			id:   "some-uuid",
+			want: "system:scheduler",
+		},
 	}
-	// Must pass PrincipalRef validation.
-	if err := ValidatePrincipalRef(ref); err != nil {
-		t.Fatalf("expected valid PrincipalRef, got error: %v", err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ref := buildPrincipalRef(tc.n, tc.id)
+			if ref != tc.want {
+				t.Errorf("got %q, want %q", ref, tc.want)
+			}
+		})
+	}
+}
+
+func TestBuildPrincipalRef_FallbackToID(t *testing.T) {
+	// When name is absent, empty, or not a valid PrincipalRef, fall back
+	// to constructing from the id parameter.
+	tests := []struct {
+		name string
+		n    string // name parameter
+		id   string // id parameter
+		want PrincipalRef
+	}{
+		{
+			name: "empty name falls back to kind from name (trailing colon)",
+			n:    "user:",
+			id:   "be67fbc9-c869-5d43-b15d-c28ca3e8d355",
+			want: "user:be67fbc9-c869-5d43-b15d-c28ca3e8d355",
+		},
+		{
+			name: "no name at all falls back to system",
+			n:    "",
+			id:   "some-uuid",
+			want: "system:some-uuid",
+		},
+		{
+			name: "name without colon falls back to system",
+			n:    "alice",
+			id:   "some-uuid",
+			want: "system:some-uuid",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ref := buildPrincipalRef(tc.n, tc.id)
+			if ref != tc.want {
+				t.Errorf("got %q, want %q", ref, tc.want)
+			}
+		})
 	}
 }
 
 func TestBuildPrincipalRef_PrefixedID(t *testing.T) {
-	// When SenderID already has a colon, use it directly.
-	ref := buildPrincipalRef("user:alice", "user:alice-uuid")
+	// When name is absent and id already has a colon, use id directly.
+	ref := buildPrincipalRef("", "user:alice-uuid")
 	if ref != "user:alice-uuid" {
 		t.Fatalf("expected prefixed id used directly, got %q", ref)
 	}
 }
 
-func TestBuildPrincipalRef_AgentKindDerived(t *testing.T) {
-	ref := buildPrincipalRef("agent:builder", "814b7c0b-1a15-43a2-a3f1-2aa3b1548c94")
-	if ref != "agent:814b7c0b-1a15-43a2-a3f1-2aa3b1548c94" {
-		t.Fatalf("expected agent-prefixed ref, got %q", ref)
+func TestBuildPrincipalRef_NameOnlyNoID(t *testing.T) {
+	// When id is empty and name is a valid PrincipalRef, use name directly.
+	ref := buildPrincipalRef("agent:builder", "")
+	if ref != "agent:builder" {
+		t.Fatalf("expected name used directly, got %q", ref)
 	}
-	if err := ValidatePrincipalRef(ref); err != nil {
-		t.Fatalf("expected valid PrincipalRef, got error: %v", err)
+}
+
+func TestBuildPrincipalRef_BothEmpty(t *testing.T) {
+	ref := buildPrincipalRef("", "")
+	if ref != "system:unknown" {
+		t.Fatalf("expected system:unknown, got %q", ref)
+	}
+}
+
+// ---------- Human-to-human reply intent override ----------
+
+func TestMapLegacyEnvelope_ReplyToHuman_IntentInform(t *testing.T) {
+	old := &messages.StructuredMessage{
+		Version:   1,
+		Timestamp: "2026-08-27T10:00:00Z",
+		Sender:    "user:alice",
+		SenderID:  "user:alice",
+		Recipient: "user:bob",
+		Msg:       "Replying to Bob",
+		Type:      messages.TypeReply,
+	}
+
+	msg, _, err := MapLegacyEnvelope(old, PersistedIdentity{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if msg.Kind != KindText {
+		t.Errorf("kind: got %q, want text", msg.Kind)
+	}
+	// Human-to-human reply should be inform, not request.
+	if msg.Intent == nil || *msg.Intent != IntentInform {
+		t.Errorf("intent: got %v, want inform (human-to-human reply)", msg.Intent)
+	}
+}
+
+func TestMapLegacyEnvelope_ReplyToAgent_IntentRequest(t *testing.T) {
+	old := &messages.StructuredMessage{
+		Version:   1,
+		Timestamp: "2026-08-27T10:00:00Z",
+		Sender:    "user:alice",
+		SenderID:  "user:alice",
+		Recipient: "agent:builder",
+		Msg:       "Replying to agent",
+		Type:      messages.TypeReply,
+	}
+
+	msg, _, err := MapLegacyEnvelope(old, PersistedIdentity{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if msg.Kind != KindText {
+		t.Errorf("kind: got %q, want text", msg.Kind)
+	}
+	// Reply to agent should remain request.
+	if msg.Intent == nil || *msg.Intent != IntentRequest {
+		t.Errorf("intent: got %v, want request (reply to agent)", msg.Intent)
 	}
 }
 

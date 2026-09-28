@@ -108,17 +108,21 @@ function createRolesListFetchHandler(opts?: {
       const existingNames = new Set(roles.filter((r: any) => !r.system).map((r: any) => r.name));
       const items = (body.roles || []).map((r: any) => {
         if (existingNames.has(r.name)) {
-          return { name: r.name, status: 'skipped', reason: 'role with this name and scope already exists' };
+          return {
+            name: r.name,
+            status: 'skipped',
+            reason: 'role with this name and scope already exists',
+          };
         }
         return { name: r.name, status: 'created', id: `role-new-${r.name}` };
       });
       const created = items.filter((i: any) => i.status === 'created').length;
       const skipped = items.filter((i: any) => i.status === 'skipped').length;
       return Promise.resolve(
-        new Response(
-          JSON.stringify({ created, skipped, errors: 0, items }),
-          { status: 200, headers: { 'Content-Type': 'application/json' } }
-        )
+        new Response(JSON.stringify({ created, skipped, errors: 0, items }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
       );
     }
 
@@ -165,10 +169,9 @@ function createRolesListFetchHandler(opts?: {
     // Admin status
     if (path.includes('/api/v1/auth/admin-status')) {
       return Promise.resolve(
-        new Response(
-          JSON.stringify({ isAdmin: true, isSuperAdmin: true, permissions: [] }),
-          { status: 200 }
-        )
+        new Response(JSON.stringify({ isAdmin: true, isSuperAdmin: true, permissions: [] }), {
+          status: 200,
+        })
       );
     }
 
@@ -185,11 +188,14 @@ function createRolesListFetchHandler(opts?: {
 // Pre-import modules
 // ---------------------------------------------------------------------------
 
-let ScionPageAdminRolesCtor: typeof import('./admin-roles.js')['ScionPageAdminRoles'];
-let ScionPageAdminRoleDetailCtor: typeof import('./admin-role-detail.js')['ScionPageAdminRoleDetail'];
+let ScionPageAdminRolesCtor: (typeof import('./admin-roles.js'))['ScionPageAdminRoles'];
+let ScionPageAdminRoleDetailCtor: (typeof import('./admin-role-detail.js'))['ScionPageAdminRoleDetail'];
 
 beforeAll(async () => {
-  vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response('{}', { status: 200 }))));
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(() => Promise.resolve(new Response('{}', { status: 200 })))
+  );
   const [rolesMod, detailMod] = await Promise.all([
     import('./admin-roles.js'),
     import('./admin-role-detail.js'),
@@ -197,7 +203,7 @@ beforeAll(async () => {
   ScionPageAdminRolesCtor = rolesMod.ScionPageAdminRoles;
   ScionPageAdminRoleDetailCtor = detailMod.ScionPageAdminRoleDetail;
   vi.restoreAllMocks();
-});
+}, 30_000);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -226,9 +232,7 @@ async function createRolesPage(
   return el;
 }
 
-async function createRoleDetailPage(
-  rolePath = '/admin/roles/role-custom-1'
-): Promise<HTMLElement> {
+async function createRoleDetailPage(rolePath = '/admin/roles/role-custom-1'): Promise<HTMLElement> {
   try {
     Object.defineProperty(window.location, 'pathname', {
       value: rolePath,
@@ -296,6 +300,23 @@ function createJsonFile(content: string, name = 'roles.json'): File {
   return new File([content], name, { type: 'application/json' });
 }
 
+/**
+ * The export buttons are `<sl-button href=... target="_blank">`. Shoelace's
+ * `click()` forwards to the internal native `<a>` (exposed as `.button`), and
+ * happy-dom's anchor click handler responds to a real, un-prevented click by
+ * calling `window.open(href)` — which navigates and fetches the href for
+ * real. There's no server listening on that origin in this test, and the
+ * connection failure surfaces asynchronously (after this function returns),
+ * which is exactly the kind of late console noise that races vitest's worker
+ * teardown. `preventDefault` on the underlying anchor's click event stops
+ * happy-dom from doing that, without touching the "not JS-driven" assertion
+ * these tests exist to make.
+ */
+function preventLinkNavigation(button: Element | undefined): void {
+  const anchor = (button as unknown as { button?: HTMLAnchorElement })?.button;
+  anchor?.addEventListener('click', (e) => e.preventDefault());
+}
+
 // ---------------------------------------------------------------------------
 // Tests: Export (roles list page) — native anchor download
 // ---------------------------------------------------------------------------
@@ -332,8 +353,8 @@ describe('admin-roles: export', () => {
     el = await createRolesPage(handler);
 
     const buttons = el.shadowRoot?.querySelectorAll('.header-right sl-button');
-    const exportBtn = [...(buttons ?? [])].find((b) =>
-      b.textContent?.trim() === 'Export Custom Roles'
+    const exportBtn = [...(buttons ?? [])].find(
+      (b) => b.textContent?.trim() === 'Export Custom Roles'
     );
     expect(exportBtn?.hasAttribute('disabled')).toBe(true);
   });
@@ -343,8 +364,8 @@ describe('admin-roles: export', () => {
     el = await createRolesPage(handler);
 
     const buttons = el.shadowRoot?.querySelectorAll('.header-right sl-button');
-    const exportBtn = [...(buttons ?? [])].find((b) =>
-      b.textContent?.trim() === 'Export Custom Roles'
+    const exportBtn = [...(buttons ?? [])].find(
+      (b) => b.textContent?.trim() === 'Export Custom Roles'
     );
     expect(exportBtn?.getAttribute('href')).toBe('/api/v1/admin/roles/export');
     expect(exportBtn?.getAttribute('target')).toBe('_blank');
@@ -363,9 +384,7 @@ describe('admin-roles: export', () => {
     const handler = createRolesListFetchHandler();
     el = await createRolesPage(handler);
 
-    const exportButtons = el.shadowRoot?.querySelectorAll(
-      'sl-icon-button[label="Export role"]'
-    );
+    const exportButtons = el.shadowRoot?.querySelectorAll('sl-icon-button[label="Export role"]');
     expect(exportButtons?.length).toBeGreaterThanOrEqual(2);
 
     // First custom role's export button should point to its export endpoint
@@ -383,11 +402,13 @@ describe('admin-roles: export', () => {
     // Verify no Blob/createObjectURL references in the component's export path
     const createObjectURLSpy = vi.spyOn(URL, 'createObjectURL');
 
-    // Click the export button — since it's a native link, no JS export method fires
+    // Click the export button — since it's a native link, no JS export method
+    // fires. See preventLinkNavigation() for why the click needs guarding.
     const buttons = el.shadowRoot?.querySelectorAll('.header-right sl-button');
-    const exportBtn = [...(buttons ?? [])].find((b) =>
-      b.textContent?.trim() === 'Export Custom Roles'
+    const exportBtn = [...(buttons ?? [])].find(
+      (b) => b.textContent?.trim() === 'Export Custom Roles'
     );
+    preventLinkNavigation(exportBtn);
     exportBtn?.click();
     await new Promise((r) => setTimeout(r, 50));
 
@@ -399,9 +420,7 @@ describe('admin-roles: export', () => {
     const handler = createRolesListFetchHandler();
     el = await createRolesPage(handler);
 
-    const exportButtons = el.shadowRoot?.querySelectorAll(
-      'sl-icon-button[label="Export role"]'
-    );
+    const exportButtons = el.shadowRoot?.querySelectorAll('sl-icon-button[label="Export role"]');
     // Should have export buttons for each custom role (2) but not for system role
     expect(exportButtons?.length).toBeGreaterThanOrEqual(2);
   });
@@ -410,9 +429,7 @@ describe('admin-roles: export', () => {
     const handler = createRolesListFetchHandler({ roles: [SYSTEM_ROLE] });
     el = await createRolesPage(handler);
 
-    const exportButtons = el.shadowRoot?.querySelectorAll(
-      'sl-icon-button[label="Export role"]'
-    );
+    const exportButtons = el.shadowRoot?.querySelectorAll('sl-icon-button[label="Export role"]');
     expect(exportButtons?.length ?? 0).toBe(0);
   });
 });
@@ -467,7 +484,12 @@ describe('admin-roles: import', () => {
       version: '1',
       exportedAt: '2026-09-01T00:00:00Z',
       roles: [
-        { name: 'imported-role', description: 'A new role', scopeType: 'system', permissions: ['project.read'] },
+        {
+          name: 'imported-role',
+          description: 'A new role',
+          scopeType: 'system',
+          permissions: ['project.read'],
+        },
       ],
     });
 
@@ -490,7 +512,12 @@ describe('admin-roles: import', () => {
 
     const validArray = JSON.stringify([
       { name: 'role-a', description: 'Role A', scopeType: 'system', permissions: [] },
-      { name: 'role-b', description: 'Role B', scopeType: 'project', permissions: ['project.read'] },
+      {
+        name: 'role-b',
+        description: 'Role B',
+        scopeType: 'project',
+        permissions: ['project.read'],
+      },
     ]);
 
     const file = createJsonFile(validArray);
@@ -580,7 +607,12 @@ describe('admin-roles: import', () => {
       JSON.stringify({
         roles: [
           { name: 'brand-new-role', description: 'New', scopeType: 'system', permissions: [] },
-          { name: 'test-editor', description: 'Already exists', scopeType: 'system', permissions: [] },
+          {
+            name: 'test-editor',
+            description: 'Already exists',
+            scopeType: 'system',
+            permissions: [],
+          },
         ],
       })
     );
@@ -615,7 +647,12 @@ describe('admin-roles: import', () => {
 
     // Prepare import data
     const importData = [
-      { name: 'brand-new-role', description: 'New', scopeType: 'system', permissions: ['project.read'] },
+      {
+        name: 'brand-new-role',
+        description: 'New',
+        scopeType: 'system',
+        permissions: ['project.read'],
+      },
       { name: 'test-editor', description: 'Exists', scopeType: 'system', permissions: [] },
     ];
 
@@ -669,9 +706,7 @@ describe('admin-roles: import', () => {
         created: 0,
         skipped: 0,
         errors: 1,
-        items: [
-          { name: 'bad-role', status: 'error', reason: 'invalid permission IDs: foo.bar' },
-        ],
+        items: [{ name: 'bad-role', status: 'error', reason: 'invalid permission IDs: foo.bar' }],
       },
     });
     el = await createRolesPage(handler);
@@ -737,12 +772,8 @@ describe('admin-role-detail: single role export', () => {
     el = await createRoleDetailPage();
 
     const buttons = el.shadowRoot?.querySelectorAll('.header-actions sl-button');
-    const exportBtn = [...(buttons ?? [])].find((b) =>
-      b.textContent?.trim() === 'Export'
-    );
-    expect(exportBtn?.getAttribute('href')).toBe(
-      '/api/v1/admin/roles/role-custom-1/export'
-    );
+    const exportBtn = [...(buttons ?? [])].find((b) => b.textContent?.trim() === 'Export');
+    expect(exportBtn?.getAttribute('href')).toBe('/api/v1/admin/roles/role-custom-1/export');
     expect(exportBtn?.getAttribute('target')).toBe('_blank');
     expect(exportBtn?.hasAttribute('download')).toBe(true);
   });
@@ -759,11 +790,11 @@ describe('admin-role-detail: single role export', () => {
 
     const createObjectURLSpy = vi.spyOn(URL, 'createObjectURL');
 
-    // Click the export button — native link, no JS handler
+    // Click the export button — native link, no JS handler. See
+    // preventLinkNavigation() for why the click needs guarding.
     const buttons = el.shadowRoot?.querySelectorAll('.header-actions sl-button');
-    const exportBtn = [...(buttons ?? [])].find((b) =>
-      b.textContent?.trim() === 'Export'
-    );
+    const exportBtn = [...(buttons ?? [])].find((b) => b.textContent?.trim() === 'Export');
+    preventLinkNavigation(exportBtn);
     exportBtn?.click();
     await new Promise((r) => setTimeout(r, 50));
 

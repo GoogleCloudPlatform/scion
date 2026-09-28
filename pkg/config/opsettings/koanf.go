@@ -52,6 +52,7 @@ var layer0Prefixes = []string{
 	"server.secrets",
 	"server.storage",
 	"server.workspace_storage",
+	"server.shared_dir_storage",
 	// Identity/mode
 	"server.mode",
 	"server.env",
@@ -88,6 +89,7 @@ var koanfPathToJSONField = map[string]map[string]string{
 	"access": {
 		"server.hub.admin_emails":        "admin_emails",
 		"server.auth.user_access_mode":   "user_access_mode",
+		"server.auth.default_user_role":  "default_user_role",
 		"server.auth.authorized_domains": "authorized_domains",
 	},
 	"lifecycle": {
@@ -128,6 +130,7 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 	"access": {
 		"admin_emails":       "server.hub.admin_emails",
 		"user_access_mode":   "server.auth.user_access_mode",
+		"default_user_role":  "server.auth.default_user_role",
 		"authorized_domains": "server.auth.authorized_domains",
 	},
 	"lifecycle": {
@@ -212,7 +215,8 @@ func extractAgentDefaults(k *koanf.Koanf) (json.RawMessage, error) {
 	fields := []string{"default_template", "default_harness_config", "default_max_turns",
 		"default_max_model_calls", "default_max_duration", "default_resources",
 		"default_model", "default_thinking_level",
-		"default_max_agent_role", "default_agent_role"}
+		"default_max_agent_role", "default_agent_role",
+		"default_gcp_identity_mode", "default_gcp_identity_service_account_id"}
 	for _, f := range fields {
 		if k.Exists(f) {
 			doc[f] = k.Get(f)

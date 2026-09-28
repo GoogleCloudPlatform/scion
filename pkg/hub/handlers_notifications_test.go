@@ -484,6 +484,34 @@ func TestHandleSubscriptions_List(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&projectSubs))
 	assert.Len(t, projectSubs, 1)
 	assert.Equal(t, "project", projectSubs[0].Scope)
+
+	// Filter by canonical projectId query param: both the setup's agent-scoped
+	// subscription and the project-scoped one just created belong to this
+	// project, so both come back.
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/notifications/subscriptions?projectId="+tid("project-notif-handler"), nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var byProjectID []store.NotificationSubscription
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&byProjectID))
+	assert.GreaterOrEqual(t, len(byProjectID), 2)
+	for _, s := range byProjectID {
+		assert.Equal(t, tid("project-notif-handler"), s.ProjectID)
+	}
+
+	// A projectId for a different (nonexistent) project excludes them all,
+	// proving the canonical filter is actually applied.
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/notifications/subscriptions?projectId="+tid("project-notif-handler-other"), nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var otherProjectSubs []store.NotificationSubscription
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&otherProjectSubs))
+	assert.Empty(t, otherProjectSubs)
+
+	// groveId is no longer a recognized filter alias: it is ignored, not
+	// treated as a projectId filter, so it returns the unfiltered list.
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/notifications/subscriptions?groveId="+tid("project-notif-handler"), nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var ignoredGroveID []store.NotificationSubscription
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&ignoredGroveID))
+	assert.GreaterOrEqual(t, len(ignoredGroveID), 2)
 }
 
 func TestHandleSubscriptions_Delete(t *testing.T) {
@@ -849,6 +877,51 @@ func TestHandleSubscriptionTemplates_RejectsAgents(t *testing.T) {
 
 	_, err := s.GetSubscriptionTemplate(ctx, tmpl.ID)
 	assert.NoError(t, err)
+}
+
+// TestCreateNotificationSubscriptionTemplate_ScopeValidation verifies that
+// creating a notification subscription template accepts only "" (defaults
+// to project), "project" or "agent" per
+// store.SubscriptionScope*, and rejects anything else — including the
+// removed legacy "grove" scope — with 400, echoing the rejected value.
+func TestCreateNotificationSubscriptionTemplate_ScopeValidation(t *testing.T) {
+	srv, _ := testServer(t)
+
+	valid := []struct {
+		name  string
+		scope string
+	}{
+		{"empty defaults to project", ""},
+		{"project", store.SubscriptionScopeProject},
+		{"agent", store.SubscriptionScopeAgent},
+	}
+	for _, tt := range valid {
+		t.Run("accepts/"+tt.name, func(t *testing.T) {
+			createReq := createTemplateRequest{
+				Name:              "subtmpl-" + tt.name,
+				Scope:             tt.scope,
+				TriggerActivities: []string{"COMPLETED"},
+				ProjectID:         tid("project-notif-handler"),
+			}
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/notifications/templates", createReq)
+			require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+		})
+	}
+
+	invalid := []string{"grove", "bogus"}
+	for _, scope := range invalid {
+		t.Run("rejects/"+scope, func(t *testing.T) {
+			createReq := createTemplateRequest{
+				Name:              "subtmpl-invalid-" + scope,
+				Scope:             scope,
+				TriggerActivities: []string{"COMPLETED"},
+				ProjectID:         tid("project-notif-handler"),
+			}
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/notifications/templates", createReq)
+			assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "invalid scope", "body: %s", rec.Body.String())
+		})
+	}
 }
 
 func TestHandleSubscriptions_AgentCreateAndList(t *testing.T) {

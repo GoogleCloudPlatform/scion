@@ -29,17 +29,17 @@ func TestStopProjectContainers_StopsMatchingContainers(t *testing.T) {
 		{
 			ContainerID: "container-1",
 			Name:        "agent-a",
-			Labels:      map[string]string{"scion.name": "agent-a", "scion.grove": "myproject"},
+			Labels:      map[string]string{"scion.name": "agent-a", "scion.project": "myproject"},
 		},
 		{
 			ContainerID: "container-2",
 			Name:        "agent-b",
-			Labels:      map[string]string{"scion.name": "agent-b", "scion.grove": "myproject"},
+			Labels:      map[string]string{"scion.name": "agent-b", "scion.project": "myproject"},
 		},
 		{
 			ContainerID: "container-3",
 			Name:        "other-agent",
-			Labels:      map[string]string{"scion.name": "other-agent", "scion.grove": "myproject"},
+			Labels:      map[string]string{"scion.name": "other-agent", "scion.project": "myproject"},
 		},
 	}
 

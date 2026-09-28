@@ -3,6 +3,7 @@
 package ent
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -43,9 +44,9 @@ type RuntimeBroker struct {
 	// Runtimes holds the value of the "runtimes" field.
 	Runtimes string `json:"runtimes,omitempty"`
 	// Labels holds the value of the "labels" field.
-	Labels string `json:"labels,omitempty"`
+	Labels map[string]string `json:"labels,omitempty"`
 	// Annotations holds the value of the "annotations" field.
-	Annotations string `json:"annotations,omitempty"`
+	Annotations map[string]string `json:"annotations,omitempty"`
 	// Endpoint holds the value of the "endpoint" field.
 	Endpoint string `json:"endpoint,omitempty"`
 	// CreatedBy holds the value of the "created_by" field.
@@ -74,11 +75,13 @@ func (*RuntimeBroker) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
+		case runtimebroker.FieldLabels, runtimebroker.FieldAnnotations:
+			values[i] = new([]byte)
 		case runtimebroker.FieldAutoProvide:
 			values[i] = new(sql.NullBool)
 		case runtimebroker.FieldLockVersion:
 			values[i] = new(sql.NullInt64)
-		case runtimebroker.FieldName, runtimebroker.FieldSlug, runtimebroker.FieldMode, runtimebroker.FieldVersion, runtimebroker.FieldStatus, runtimebroker.FieldConnectionState, runtimebroker.FieldCapabilities, runtimebroker.FieldSupportedHarnesses, runtimebroker.FieldResources, runtimebroker.FieldRuntimes, runtimebroker.FieldLabels, runtimebroker.FieldAnnotations, runtimebroker.FieldEndpoint, runtimebroker.FieldCreatedBy, runtimebroker.FieldGcpHostServiceAccountEmail, runtimebroker.FieldGcpHostProjectID, runtimebroker.FieldConnectedHubID, runtimebroker.FieldConnectedSessionID:
+		case runtimebroker.FieldName, runtimebroker.FieldSlug, runtimebroker.FieldMode, runtimebroker.FieldVersion, runtimebroker.FieldStatus, runtimebroker.FieldConnectionState, runtimebroker.FieldCapabilities, runtimebroker.FieldSupportedHarnesses, runtimebroker.FieldResources, runtimebroker.FieldRuntimes, runtimebroker.FieldEndpoint, runtimebroker.FieldCreatedBy, runtimebroker.FieldGcpHostServiceAccountEmail, runtimebroker.FieldGcpHostProjectID, runtimebroker.FieldConnectedHubID, runtimebroker.FieldConnectedSessionID:
 			values[i] = new(sql.NullString)
 		case runtimebroker.FieldLastHeartbeat, runtimebroker.FieldConnectedAt, runtimebroker.FieldCreated, runtimebroker.FieldUpdated:
 			values[i] = new(sql.NullTime)
@@ -179,16 +182,20 @@ func (_m *RuntimeBroker) assignValues(columns []string, values []any) error {
 				_m.Runtimes = value.String
 			}
 		case runtimebroker.FieldLabels:
-			if value, ok := values[i].(*sql.NullString); !ok {
+			if value, ok := values[i].(*[]byte); !ok {
 				return fmt.Errorf("unexpected type %T for field labels", values[i])
-			} else if value.Valid {
-				_m.Labels = value.String
+			} else if value != nil && len(*value) > 0 {
+				if err := json.Unmarshal(*value, &_m.Labels); err != nil {
+					return fmt.Errorf("unmarshal field labels: %w", err)
+				}
 			}
 		case runtimebroker.FieldAnnotations:
-			if value, ok := values[i].(*sql.NullString); !ok {
+			if value, ok := values[i].(*[]byte); !ok {
 				return fmt.Errorf("unexpected type %T for field annotations", values[i])
-			} else if value.Valid {
-				_m.Annotations = value.String
+			} else if value != nil && len(*value) > 0 {
+				if err := json.Unmarshal(*value, &_m.Annotations); err != nil {
+					return fmt.Errorf("unmarshal field annotations: %w", err)
+				}
 			}
 		case runtimebroker.FieldEndpoint:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -330,10 +337,10 @@ func (_m *RuntimeBroker) String() string {
 	builder.WriteString(_m.Runtimes)
 	builder.WriteString(", ")
 	builder.WriteString("labels=")
-	builder.WriteString(_m.Labels)
+	builder.WriteString(fmt.Sprintf("%v", _m.Labels))
 	builder.WriteString(", ")
 	builder.WriteString("annotations=")
-	builder.WriteString(_m.Annotations)
+	builder.WriteString(fmt.Sprintf("%v", _m.Annotations))
 	builder.WriteString(", ")
 	builder.WriteString("endpoint=")
 	builder.WriteString(_m.Endpoint)

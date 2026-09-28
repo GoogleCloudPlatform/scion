@@ -243,32 +243,39 @@ func (ws *WebServer) suspendedUserMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Need a store for authoritative lookup. Fail closed if the store
-		// is not configured — do not trust stale cookie authority.
-		if ws.store == nil {
-			ws.logger().Error("Suspended user check: store not configured, failing closed",
-				"user_id", user.UserID)
-			ws.serveInternalError(w, r)
-			return
-		}
-
-		// Authoritative store lookup by user ID (not the cookie role/status).
-		dbUser, err := ws.store.GetUser(r.Context(), user.UserID)
-		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				// User deleted — fail closed. Clear the stale session and
-				// redirect to login so the cookie cannot carry stale admin
-				// authority.
-				ws.logger().Warn("Suspended user check: user no longer exists",
-					"user_id", user.UserID, "email", user.Email)
-				ws.clearStaleSession(w, r)
+		// Reuse the authoritative store.User from the request context if
+		// sessionAuthMiddleware already fetched it (avoids a duplicate DB
+		// round-trip on every authenticated request).
+		dbUser, _ := r.Context().Value(dbUserContextKey{}).(*store.User)
+		if dbUser == nil {
+			// Need a store for authoritative lookup. Fail closed if the store
+			// is not configured — do not trust stale cookie authority.
+			if ws.store == nil {
+				ws.logger().Error("Suspended user check: store not configured, failing closed",
+					"user_id", user.UserID)
+				ws.serveInternalError(w, r)
 				return
 			}
-			// Transient store error — fail closed to prevent stale authority.
-			ws.logger().Error("Suspended user check: store lookup failed",
-				"user_id", user.UserID, "error", err)
-			ws.serveInternalError(w, r)
-			return
+
+			// Authoritative store lookup by user ID (not the cookie role/status).
+			var err error
+			dbUser, err = ws.store.GetUser(r.Context(), user.UserID)
+			if err != nil {
+				if errors.Is(err, store.ErrNotFound) {
+					// User deleted — fail closed. Clear the stale session and
+					// redirect to login so the cookie cannot carry stale admin
+					// authority.
+					ws.logger().Warn("Suspended user check: user no longer exists",
+						"user_id", user.UserID, "email", user.Email)
+					ws.clearStaleSession(w, r)
+					return
+				}
+				// Transient store error — fail closed to prevent stale authority.
+				ws.logger().Error("Suspended user check: store lookup failed",
+					"user_id", user.UserID, "error", err)
+				ws.serveInternalError(w, r)
+				return
+			}
 		}
 
 		if dbUser.Status == store.UserStatusSuspended {

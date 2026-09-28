@@ -28,7 +28,7 @@ import { customElement, state } from 'lit/decorators.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
-import type { RuntimeBroker } from '../../shared/types.js';
+import type { RuntimeBroker, GCPServiceAccount } from '../../shared/types.js';
 
 // ── Type definitions matching the Go API response ──
 
@@ -83,6 +83,7 @@ interface V1AuthConfig {
   dev_token_file?: string;
   authorized_domains?: string[];
   user_access_mode?: string;
+  default_user_role?: string;
 }
 
 interface V1OAuthProviderConfig {
@@ -241,6 +242,8 @@ interface ServerConfigResponse {
   default_max_agent_role?: string;
   default_agent_role?: string;
   default_runtime_broker?: string;
+  default_gcp_identity_mode?: string;
+  default_gcp_identity_service_account_id?: string;
 
   auto_expose_ports?: { enabled?: boolean };
 
@@ -352,6 +355,7 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   // access section
   'server.hub.admin_emails': 'Admin Emails',
   'server.auth.user_access_mode': 'User Access Mode',
+  'server.auth.default_user_role': 'Default User Role',
   'server.auth.authorized_domains': 'Authorized Domains',
   // lifecycle section
   'server.hub.auto_suspend_stalled': 'Auto-Suspend Stalled Agents',
@@ -389,6 +393,8 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   default_max_agent_role: 'Default Maximum Agent Role',
   default_agent_role: 'Default Agent Role',
   default_runtime_broker: 'Default Runtime Broker',
+  default_gcp_identity_mode: 'Default GCP Identity Mode',
+  default_gcp_identity_service_account_id: 'Default GCP Identity Service Account',
   // endpoints section
   'server.hub.public_url': 'Public URL',
   image_registry: 'Image Registry',
@@ -475,6 +481,11 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private defaultRuntimeBroker = '';
   @state() private runtimeBrokers: RuntimeBroker[] = [];
 
+  // Default GCP identity (hub-wide fallback)
+  @state() private defaultGCPIdentityMode = '';
+  @state() private defaultGCPIdentitySAID = '';
+  @state() private hubGCPServiceAccounts: GCPServiceAccount[] = [];
+
   // Agent defaults sub-tab
   @state() private agentDefaultsTab = 'general';
 
@@ -521,6 +532,7 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private authDevToken = '';
   @state() private authAuthorizedDomains = '';
   @state() private authUserAccessMode = 'open';
+  @state() private authDefaultUserRole = 'member';
 
   // Storage
   @state() private storageProvider = '';
@@ -555,6 +567,13 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   // Native Chat — default ON, matching the server's absent-means-enabled rule.
   @state() private nativeChatEnabled = true;
+
+  // Cross-project agent messaging (from admin/messaging API, not server-config)
+  @state() private crossProjectMessagingEnabled = false;
+  @state() private crossProjectMessagingRevision = 0;
+  @state() private crossProjectMessagingLoading = false;
+  @state() private crossProjectMessagingError: string | null = null;
+  @state() private crossProjectMessagingSuccess: string | null = null;
 
   // GitHub App
   @state() private githubAppConfigured = false;
@@ -750,6 +769,15 @@ export class ScionPageAdminServerConfig extends LitElement {
     .form-field .hint {
       font-size: 0.75rem;
       color: var(--scion-text-muted, #64748b);
+    }
+
+    .default-user-role-help p,
+    .default-user-role-help ul {
+      margin: 0 0 0.375rem 0;
+    }
+
+    .default-user-role-help ul {
+      padding-left: 1.25rem;
     }
 
     .agent-defaults-tabs sl-tab-group {
@@ -1339,7 +1367,9 @@ export class ScionPageAdminServerConfig extends LitElement {
     void this.loadConfig();
     void this.loadHarnessConfigs();
     void this.loadRuntimeBrokers();
+    void this.loadHubGCPServiceAccounts();
     void this.loadGitHubAppInstallations();
+    void this.loadMessagingSettings();
   }
 
   private async loadConfig(): Promise<void> {
@@ -1464,6 +1494,8 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.defaultMaxAgentRole = data.default_max_agent_role || '';
     this.defaultAgentRole = data.default_agent_role || '';
     this.defaultRuntimeBroker = data.default_runtime_broker || '';
+    this.defaultGCPIdentityMode = data.default_gcp_identity_mode || '';
+    this.defaultGCPIdentitySAID = data.default_gcp_identity_service_account_id || '';
 
     // Server
     const srv = data.server;
@@ -1512,6 +1544,7 @@ export class ScionPageAdminServerConfig extends LitElement {
         this.authDevToken = srv.auth.dev_token || '';
         this.authAuthorizedDomains = (srv.auth.authorized_domains || []).join(', ');
         this.authUserAccessMode = srv.auth.user_access_mode || 'open';
+        this.authDefaultUserRole = srv.auth.default_user_role || 'member';
       }
 
       // Storage
@@ -1525,7 +1558,9 @@ export class ScionPageAdminServerConfig extends LitElement {
       if (srv.secrets) {
         this.secretsBackend = srv.secrets.backend || '';
         this.secretsGCPProjectId = srv.secrets.gcp_project_id || '';
-        this.secretsGCPReplicationLocations = (srv.secrets.gcp_replication_locations || []).join(', ');
+        this.secretsGCPReplicationLocations = (srv.secrets.gcp_replication_locations || []).join(
+          ', '
+        );
       }
 
       // Message Broker
@@ -1601,7 +1636,7 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   private async loadHarnessConfigs(): Promise<void> {
     try {
-      const res = await apiFetch('/api/v1/harness-configs?status=active&limit=100');
+      const res = await apiFetch('/api/v1/harness-configs?status=active&scope=global&limit=100');
       if (res.ok) {
         const data = (await res.json()) as { harnessConfigs?: HarnessConfigEntry[] };
         this.harnessConfigs = data.harnessConfigs || [];
@@ -1634,6 +1669,22 @@ export class ScionPageAdminServerConfig extends LitElement {
       }
     } catch {
       // Non-critical — dropdown falls back to free-text input
+    }
+  }
+
+  // Hub-scoped service accounts, for the "Assign Service Account" option of
+  // the hub-wide default GCP identity mode. Scoped to "hub" only — a
+  // hub-wide default naming a project-scoped account would silently fail
+  // reachability checks in every project but the one that owns it.
+  private async loadHubGCPServiceAccounts(): Promise<void> {
+    try {
+      const res = await apiFetch('/api/v1/gcp-service-accounts?scope=hub');
+      if (res.ok) {
+        const data = (await res.json()) as { items?: GCPServiceAccount[] };
+        this.hubGCPServiceAccounts = (data.items || []).filter((sa) => sa.verified);
+      }
+    } catch {
+      // Non-critical — dropdown falls back to an empty list
     }
   }
 
@@ -1754,6 +1805,13 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('default_runtime_broker')) {
       payload.default_runtime_broker = this.defaultRuntimeBroker || '';
     }
+    if (ok('default_gcp_identity_mode')) {
+      payload.default_gcp_identity_mode = this.defaultGCPIdentityMode || '';
+    }
+    if (ok('default_gcp_identity_service_account_id')) {
+      payload.default_gcp_identity_service_account_id =
+        this.defaultGCPIdentityMode === 'assign' ? this.defaultGCPIdentitySAID || '' : '';
+    }
 
     const server: Record<string, unknown> = {};
 
@@ -1784,6 +1842,9 @@ export class ScionPageAdminServerConfig extends LitElement {
     const auth: Record<string, unknown> = {};
     if (ok('server.auth.user_access_mode')) {
       auth.user_access_mode = this.authUserAccessMode;
+    }
+    if (ok('server.auth.default_user_role')) {
+      auth.default_user_role = this.authDefaultUserRole;
     }
     if (ok('server.auth.authorized_domains')) {
       auth.authorized_domains = this.authAuthorizedDomains
@@ -1864,7 +1925,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('active_profile')) payload.active_profile = this.activeProfile || undefined;
     if (ok('default_template')) payload.default_template = this.defaultTemplate || undefined;
     if (ok('default_harness_config'))
-      payload.default_harness_config = this.defaultHarnessConfig || undefined;
+      payload.default_harness_config = this.resolvedHarnessConfig || undefined;
     if (ok('default_harness_auth'))
       payload.default_harness_auth = this.defaultHarnessAuth || undefined;
     if (ok('image_registry')) payload.image_registry = this.imageRegistry || undefined;
@@ -1994,6 +2055,9 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.auth.user_access_mode') && this.authUserAccessMode) {
       auth.user_access_mode = this.authUserAccessMode;
     }
+    if (ok('server.auth.default_user_role') && this.authDefaultUserRole) {
+      auth.default_user_role = this.authDefaultUserRole;
+    }
     server.auth = auth;
 
     // Storage
@@ -2014,7 +2078,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       secrets.gcp_replication_locations = this.secretsGCPReplicationLocations
         ? this.secretsGCPReplicationLocations
             .split(',')
-            .map(s => s.trim())
+            .map((s) => s.trim())
             .filter(Boolean)
         : [];
     }
@@ -3161,16 +3225,12 @@ export class ScionPageAdminServerConfig extends LitElement {
                             clearable
                             value=${this.defaultRuntimeBroker}
                             @sl-change=${(e: Event) => {
-                              this.defaultRuntimeBroker = (
-                                e.target as HTMLSelectElement
-                              ).value;
+                              this.defaultRuntimeBroker = (e.target as HTMLSelectElement).value;
                             }}
                           >
                             ${this.runtimeBrokers.map(
                               (b) =>
-                                html`<sl-option value=${b.id}
-                                  >${b.name} (${b.status})</sl-option
-                                >`
+                                html`<sl-option value=${b.id}>${b.name} (${b.status})</sl-option>`
                             )}
                           </sl-select>`
                       : html`${this.renderEnvBadge('default_runtime_broker')}<sl-input
@@ -3178,13 +3238,80 @@ export class ScionPageAdminServerConfig extends LitElement {
                             placeholder="broker ID, name, or slug"
                             clearable
                             @sl-change=${(e: Event) => {
-                              this.defaultRuntimeBroker = (
-                                e.target as HTMLInputElement
-                              ).value;
+                              this.defaultRuntimeBroker = (e.target as HTMLInputElement).value;
                             }}
                           ></sl-input>`
                   )}
                 </div>
+                <div class="form-field">
+                  <label>Default GCP Identity Mode</label>
+                  <span class="hint"
+                    >Hub-wide fallback GCP metadata mode for new agents, applied when neither the
+                    agent create request nor the project's default GCP identity setting names one.
+                    Passthrough set here applies only to agents on the hub's embedded broker; agents
+                    on any other broker get Block. Assign requires a verified hub-scoped service
+                    account and gcpIamCheckMode=enforce.</span
+                  >
+                  ${this.renderFieldValue(
+                    'default_gcp_identity_mode',
+                    this.defaultGCPIdentityMode || 'Block (default)',
+                    html`${this.renderEnvBadge('default_gcp_identity_mode')}<sl-select
+                        placeholder="Block (default)"
+                        clearable
+                        value=${this.defaultGCPIdentityMode}
+                        @sl-change=${(e: Event) => {
+                          const val = (e.target as HTMLSelectElement).value;
+                          this.defaultGCPIdentityMode = val;
+                          if (val !== 'assign') {
+                            this.defaultGCPIdentitySAID = '';
+                          }
+                        }}
+                      >
+                        <sl-option value="block">Block</sl-option>
+                        <sl-option value="passthrough">Passthrough</sl-option>
+                        <sl-option value="assign">Assign Service Account</sl-option>
+                      </sl-select>`
+                  )}
+                </div>
+                ${this.defaultGCPIdentityMode === 'assign'
+                  ? html`
+                      <div class="form-field">
+                        <label>Default GCP Identity Service Account</label>
+                        <span class="hint"
+                          >Hub-scoped service account assigned to new agents when no project or
+                          request-level identity is set. Only verified hub-scoped accounts are
+                          shown.</span
+                        >
+                        ${this.renderFieldValue(
+                          'default_gcp_identity_service_account_id',
+                          this.defaultGCPIdentitySAID || 'None',
+                          html`${this.renderEnvBadge(
+                              'default_gcp_identity_service_account_id'
+                            )}<sl-select
+                              placeholder="Select a verified hub-scoped service account"
+                              clearable
+                              value=${this.defaultGCPIdentitySAID}
+                              @sl-change=${(e: Event) => {
+                                this.defaultGCPIdentitySAID = (e.target as HTMLSelectElement).value;
+                              }}
+                            >
+                              ${this.hubGCPServiceAccounts.length > 0
+                                ? this.hubGCPServiceAccounts.map(
+                                    (sa) => html`
+                                      <sl-option value=${sa.id}>
+                                        ${sa.displayName || sa.email}
+                                        <small>(${sa.email})</small>
+                                      </sl-option>
+                                    `
+                                  )
+                                : html`<sl-option value="" disabled
+                                    >No verified hub-scoped service accounts available</sl-option
+                                  >`}
+                            </sl-select>`
+                        )}
+                      </div>
+                    `
+                  : nothing}
               </div>
             </sl-tab-panel>
 
@@ -3577,6 +3704,47 @@ export class ScionPageAdminServerConfig extends LitElement {
       </div>
 
       ${this.renderNativeChatSection()} ${this.renderMessageBrokerSection()}
+      ${this.renderCrossProjectMessagingSection()}
+    `;
+  }
+
+  private renderCrossProjectMessagingSection() {
+    return html`
+      <div class="section">
+        <h3 class="section-title">Cross-Project Agent Messaging</h3>
+        <div class="form-grid">
+          <div class="form-field full-width">
+            <sl-switch
+              ?checked=${this.crossProjectMessagingEnabled}
+              ?disabled=${this.crossProjectMessagingLoading}
+              @sl-change=${(e: Event) => {
+                const enabled = (e.target as HTMLInputElement & { checked: boolean }).checked;
+                void this.saveCrossProjectMessaging(enabled);
+              }}
+              >Allow agent messaging across projects</sl-switch
+            >
+            <span class="hint">
+              When enabled, agents in Hub mode can send direct messages to agents in other projects on
+              this Hub. The sender needs Hub mode; each destination project independently chooses
+              whether to accept external messages. Disabling takes effect for new cross-project checks
+              and delayed deliveries. Already delivered messages are not recalled.
+            </span>
+            ${this.crossProjectMessagingError
+              ? html`<div class="status-message error" style="margin-top: 0.5rem">
+                  ${this.crossProjectMessagingError}
+                </div>`
+              : nothing}
+            ${this.crossProjectMessagingSuccess
+              ? html`<div class="status-message success" style="margin-top: 0.5rem">
+                  ${this.crossProjectMessagingSuccess}
+                </div>`
+              : nothing}
+            <span class="hint" style="margin-top: 0.25rem; font-size: 0.6875rem">
+              Revision: ${this.crossProjectMessagingRevision}
+            </span>
+          </div>
+        </div>
+      </div>
     `;
   }
 
@@ -4540,9 +4708,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                   value=${this.secretsGCPReplicationLocations}
                   placeholder="e.g. northamerica-northeast1, us-east1"
                   @sl-input=${(e: Event) => {
-                    this.secretsGCPReplicationLocations = (
-                      e.target as HTMLInputElement
-                    ).value;
+                    this.secretsGCPReplicationLocations = (e.target as HTMLInputElement).value;
                   }}
                 ></sl-input>
               </div>`
@@ -4592,6 +4758,45 @@ export class ScionPageAdminServerConfig extends LitElement {
                     : ''}
                 </sl-alert>`
               : ''}
+          </div>
+          <div class="form-field full-width">
+            <label>Default User Role</label>
+            <div class="hint default-user-role-help">
+              <p>
+                <strong>Default role for new users.</strong> Applies when a user first signs in,
+                including invited and allow-listed users (their role is assigned at first sign-in,
+                not when the invite is created). Changing it does not affect users who have already
+                signed in. Users listed in Admin Emails are always admins.
+              </p>
+              <ul>
+                <li>
+                  <strong>Member:</strong> can create projects, and works in any project they are
+                  added to.
+                </li>
+                <li>
+                  <strong>Viewer:</strong> the same as Member, but
+                  <strong>cannot create projects</strong> (including cloning). Viewers can still be
+                  added to projects and work there according to their project role.
+                </li>
+              </ul>
+              <p>
+                This is also the role given to an admin who is removed from Admin Emails. Change an
+                individual user's role on <a href="/admin/users">Admin &gt; Users</a>.
+              </p>
+            </div>
+            ${this.renderFieldValue(
+              'server.auth.default_user_role',
+              this.authDefaultUserRole,
+              html`${this.renderEnvBadge('server.auth.default_user_role')}<sl-select
+                  value=${this.authDefaultUserRole}
+                  @sl-change=${(e: Event) => {
+                    this.authDefaultUserRole = (e.target as HTMLSelectElement).value;
+                  }}
+                >
+                  <sl-option value="member">Member</sl-option>
+                  <sl-option value="viewer">Viewer</sl-option>
+                </sl-select>`
+            )}
           </div>
         </div>
       </div>
@@ -5317,6 +5522,75 @@ export class ScionPageAdminServerConfig extends LitElement {
       // Non-critical
     } finally {
       this.githubAppInstallationsLoading = false;
+    }
+  }
+
+  // ── Cross-project messaging (admin/messaging API) ──
+
+  private async loadMessagingSettings(): Promise<void> {
+    try {
+      const res = await apiFetch('/api/v1/admin/messaging');
+      if (res.ok) {
+        const data = (await res.json()) as {
+          cross_project_messaging_enabled?: boolean;
+          revision?: number;
+        };
+        this.crossProjectMessagingEnabled = data.cross_project_messaging_enabled ?? false;
+        this.crossProjectMessagingRevision = data.revision ?? 0;
+      }
+    } catch {
+      // Non-critical — the toggle defaults to off
+    }
+  }
+
+  private async saveCrossProjectMessaging(enabled: boolean): Promise<void> {
+    const previous = this.crossProjectMessagingEnabled;
+    this.crossProjectMessagingEnabled = enabled; // optimistic
+    this.crossProjectMessagingLoading = true;
+    this.crossProjectMessagingError = null;
+    this.crossProjectMessagingSuccess = null;
+
+    try {
+      const res = await apiFetch('/api/v1/admin/messaging', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          cross_project_messaging_enabled: enabled,
+          expected_revision: this.crossProjectMessagingRevision,
+        }),
+      });
+
+      if (res.status === 409) {
+        this.crossProjectMessagingError =
+          'Settings were changed by another administrator. Reloading current values.';
+        this.crossProjectMessagingEnabled = previous; // revert
+        await this.loadMessagingSettings();
+        return;
+      }
+
+      if (!res.ok) {
+        this.crossProjectMessagingError = await extractApiError(
+          res,
+          'Failed to update cross-project messaging setting'
+        );
+        this.crossProjectMessagingEnabled = previous; // revert
+        return;
+      }
+
+      const data = (await res.json()) as {
+        cross_project_messaging_enabled?: boolean;
+        revision?: number;
+      };
+      this.crossProjectMessagingEnabled = data.cross_project_messaging_enabled ?? enabled;
+      this.crossProjectMessagingRevision = data.revision ?? this.crossProjectMessagingRevision;
+      this.crossProjectMessagingSuccess = enabled
+        ? 'Cross-project messaging enabled.'
+        : 'Cross-project messaging disabled.';
+    } catch {
+      this.crossProjectMessagingError = 'Failed to update cross-project messaging setting';
+      this.crossProjectMessagingEnabled = previous; // revert
+    } finally {
+      this.crossProjectMessagingLoading = false;
     }
   }
 

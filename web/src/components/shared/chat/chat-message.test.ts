@@ -401,12 +401,18 @@ describe('scion-chat-message path links', () => {
     expect(links[0].dataset.filePath).toBe('/workspace/.scion-volumes/data/output.json');
   });
 
-  it('matches paths without file extensions (directories)', async () => {
+  it('does not link directory paths without a file extension', async () => {
     const el = await mount('look in /workspace/src/components for the code');
     const links = pathLinks(el);
 
-    expect(links).toHaveLength(1);
-    expect(links[0].dataset.filePath).toBe('/workspace/src/components');
+    expect(links).toHaveLength(0);
+  });
+
+  it('does not link directory paths (no file extension)', async () => {
+    const el = await mount('check /scion-volumes/scratchpad/projects for details');
+    const links = pathLinks(el);
+
+    expect(links).toHaveLength(0);
   });
 
   it('stops at spaces (paths with spaces are not linkable)', async () => {
@@ -433,7 +439,9 @@ describe('scion-chat-message path links', () => {
   });
 
   it('leaves path links inside fenced code blocks as literal text', async () => {
-    const el = await mount('run:\n```\ncat /workspace/src/main.go\n```\nthen check /workspace/README.md');
+    const el = await mount(
+      'run:\n```\ncat /workspace/src/main.go\n```\nthen check /workspace/README.md'
+    );
     const links = pathLinks(el);
 
     // Only the one outside the fence should be linked.
@@ -454,6 +462,17 @@ describe('scion-chat-message path links', () => {
     expect(seen).toEqual(['/workspace/src/main.go']);
   });
 
+  it('does not include trailing sentence punctuation in path links', async () => {
+    const el = await mount(
+      'results are in /scion-volumes/scratchpad/final-summary.md. Check them.'
+    );
+    const links = pathLinks(el);
+
+    expect(links).toHaveLength(1);
+    expect(links[0].dataset.filePath).toBe('/scion-volumes/scratchpad/final-summary.md');
+    expect(links[0].textContent).toBe('/scion-volumes/scratchpad/final-summary.md');
+  });
+
   it('renders multiple path links in the same message', async () => {
     const el = await mount('compare /workspace/a.ts and /scion-volumes/data/b.ts');
     const links = pathLinks(el);
@@ -461,5 +480,163 @@ describe('scion-chat-message path links', () => {
     expect(links).toHaveLength(2);
     expect(links[0].dataset.filePath).toBe('/workspace/a.ts');
     expect(links[1].dataset.filePath).toBe('/scion-volumes/data/b.ts');
+  });
+
+  it('links file paths inside backtick code spans', async () => {
+    const el = await mount('see `/scion-volumes/scratchpad/report.md` for results');
+    const links = pathLinks(el);
+
+    expect(links).toHaveLength(1);
+    expect(links[0].dataset.filePath).toBe('/scion-volumes/scratchpad/report.md');
+  });
+
+  it('links extensionless known filenames like Makefile and Dockerfile', async () => {
+    const el = await mount('see /workspace/src/Makefile for build targets');
+    const links = pathLinks(el);
+
+    expect(links).toHaveLength(1);
+    expect(links[0].dataset.filePath).toBe('/workspace/src/Makefile');
+  });
+
+  it('does not double-link paths already inside markdown links', async () => {
+    // The mocked renderer turns `[text](url)` into `<a href="url">text</a>`.
+    // Using the path as both the link text and the URL means the path
+    // string appears inside the anchor's text content, which is exactly
+    // the case that would previously produce a nested <a> tag.
+    const el = await mount(
+      'check [/scion-volumes/data/report.md](/scion-volumes/data/report.md) for details'
+    );
+    const links = pathLinks(el);
+
+    // The markdown link produces one <a>; the path inside should NOT be
+    // re-wrapped in a nested path-link.
+    expect(links).toHaveLength(0);
+
+    const anchor = el.shadowRoot?.querySelector('.md-content a');
+    expect(anchor?.querySelector('a')).toBeNull();
+  });
+});
+
+describe('scion-chat-message cross-project label', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('shows cross-project label when senderProjectSlug is set', async () => {
+    const el = document.createElement('scion-chat-message') as ScionChatMessage;
+    el.body = 'Hello from another project';
+    el.sender = 'agent:remote-bot';
+    el.senderName = 'remote-bot';
+    el.fromAgent = true;
+    el.showHeader = true;
+    el.senderProjectSlug = 'other-project';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await Promise.resolve();
+    await el.updateComplete;
+
+    const label = el.shadowRoot?.querySelector('.cross-project-label');
+    expect(label).toBeTruthy();
+    expect(label?.textContent).toContain('other-project');
+  });
+
+  it('hides cross-project label when senderProjectSlug is empty', async () => {
+    const el = document.createElement('scion-chat-message') as ScionChatMessage;
+    el.body = 'Hello from same project';
+    el.sender = 'agent:local-bot';
+    el.senderName = 'local-bot';
+    el.fromAgent = true;
+    el.showHeader = true;
+    el.senderProjectSlug = '';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await Promise.resolve();
+    await el.updateComplete;
+
+    const label = el.shadowRoot?.querySelector('.cross-project-label');
+    expect(label).toBeNull();
+  });
+});
+
+// nc-delivery-unreachable: "Agent unreachable" replaces the generic "Failed"
+// label when the primary agent could not receive the message at all, either
+// via the machine-readable code (new sends) or the reason prefix (history
+// rows sent before the code field existed).
+describe('scion-chat-message delivery state', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  async function mountOutbound(props: Partial<ScionChatMessage>): Promise<ScionChatMessage> {
+    const el = document.createElement('scion-chat-message') as ScionChatMessage;
+    el.body = 'hello';
+    el.fromAgent = false;
+    Object.assign(el, props);
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await Promise.resolve();
+    await el.updateComplete;
+    return el;
+  }
+
+  function deliveryState(el: ScionChatMessage): Element | null | undefined {
+    return el.shadowRoot?.querySelector('.delivery-state');
+  }
+
+  it('shows "Agent unreachable" when dispatchFailureCode is agent_unreachable', async () => {
+    const el = await mountOutbound({
+      dispatchState: 'failed',
+      dispatchFailureReason: 'Agent unreachable (suspended)',
+      dispatchFailureCode: 'agent_unreachable',
+    });
+
+    const state = deliveryState(el);
+    expect(state?.textContent).toContain('Agent unreachable');
+    expect(state?.classList.contains('failed')).toBe(true);
+    const tooltip = el.shadowRoot?.querySelector('sl-tooltip');
+    expect(tooltip?.getAttribute('content')).toBe('Agent unreachable (suspended)');
+  });
+
+  it('falls back to matching the reason prefix for history rows without a code', async () => {
+    const el = await mountOutbound({
+      dispatchState: 'failed',
+      dispatchFailureReason: 'Agent unreachable (deleted)',
+      dispatchFailureCode: '',
+    });
+
+    const state = deliveryState(el);
+    expect(state?.textContent).toContain('Agent unreachable');
+  });
+
+  it('keeps the generic "Failed" label for a non-unreachable dispatch error', async () => {
+    const el = await mountOutbound({
+      dispatchState: 'failed',
+      dispatchFailureReason: "agent 'x' not found or not running",
+      dispatchFailureCode: 'dispatch_error',
+    });
+
+    const state = deliveryState(el);
+    expect(state?.textContent).toContain('Failed');
+    expect(state?.textContent).not.toContain('Agent unreachable');
+  });
+
+  it('keeps the generic "Failed" label when neither code nor reason indicate unreachable', async () => {
+    const el = await mountOutbound({
+      dispatchState: 'failed',
+      dispatchFailureReason: "agent 'x' not found or not running",
+      dispatchFailureCode: '',
+    });
+
+    const state = deliveryState(el);
+    expect(state?.textContent).toContain('Failed');
+    expect(state?.textContent).not.toContain('Agent unreachable');
   });
 });

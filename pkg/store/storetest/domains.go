@@ -445,13 +445,12 @@ func seedAgentProject(t *testing.T, ctx context.Context, s store.Store) {
 func newOracleAgent(slug string) *store.Agent {
 	id := uuid.NewString()
 	return &store.Agent{
-		ID:         id,
-		Slug:       slug + "-" + id[:8],
-		Name:       slug,
-		Template:   "default",
-		ProjectID:  agentDomainProjectID,
-		Phase:      "running",
-		Visibility: "private",
+		ID:        id,
+		Slug:      slug + "-" + id[:8],
+		Name:      slug,
+		Template:  "default",
+		ProjectID: agentDomainProjectID,
+		Phase:     "running",
 	}
 }
 
@@ -480,15 +479,14 @@ func AgentDomain() Domain[store.Agent] {
 		Make: func(seq int) *store.Agent {
 			id := uuid.NewString()
 			return &store.Agent{
-				ID:         id,
-				Slug:       fmt.Sprintf("agent-%d-%s", seq, id[:8]),
-				Name:       fmt.Sprintf("Agent %d", seq),
-				Template:   "default",
-				ProjectID:  agentDomainProjectID,
-				Phase:      "running",
-				Activity:   "thinking",
-				Visibility: "private",
-				Labels:     map[string]string{"seq": fmt.Sprintf("%d", seq)},
+				ID:        id,
+				Slug:      fmt.Sprintf("agent-%d-%s", seq, id[:8]),
+				Name:      fmt.Sprintf("Agent %d", seq),
+				Template:  "default",
+				ProjectID: agentDomainProjectID,
+				Phase:     "running",
+				Activity:  "thinking",
+				Labels:    map[string]string{"seq": fmt.Sprintf("%d", seq)},
 			}
 		},
 		GetID: func(a *store.Agent) string { return a.ID },

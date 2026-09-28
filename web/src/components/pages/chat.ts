@@ -54,13 +54,15 @@ import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PageData, Capabilities, Agent } from '../../shared/types.js';
-import { can } from '../../shared/types.js';
-import { apiFetch } from '../../client/api.js';
+import { canMessageAgent } from '../../shared/types.js';
+import { apiFetch, parseApiError } from '../../client/api.js';
 import { navigateTo, stateManager } from '../../client/main.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { chatNotifications } from '../../client/chat-notifications.js';
 import { chatUnread } from '../../client/chat-unread.js';
 import { isFeatureEnabled, NATIVE_CHAT_V2_FLAG } from '../../utils/feature-flags.js';
+import { isProjectChimeEnabled, setProjectChimeEnabled } from '../../utils/audio.js';
+import { openTerminal, terminalHref } from '../../client/open-terminal.js';
 import { hashColor, getInitials } from '../shared/chat/chat-avatar.js';
 import '../shared/chat/chat-thread.js';
 
@@ -130,9 +132,7 @@ function normalizeMentionSlug(value: string): string {
  * state manager's agent map. Only the fields SSE status deltas merge onto
  * matter — the map exists here purely to give those deltas a baseline.
  */
-function agentMemberToAgent(
-  m: import('../shared/chat/chat-members.js').ChatAgentMember
-): Agent {
+function agentMemberToAgent(m: import('../shared/chat/chat-members.js').ChatAgentMember): Agent {
   return {
     id: m.id,
     name: m.displayName,
@@ -215,6 +215,10 @@ export class ScionPageChat extends LitElement {
   // ---- Shared state ----
   private isV2 = isFeatureEnabled(NATIVE_CHAT_V2_FLAG);
 
+  /** Layout density: 'dense' is the compact default, 'comfy' bumps font sizes ~20-25%. */
+  @property({ type: String, attribute: 'data-density', reflect: true })
+  private density: 'dense' | 'comfy' = 'dense';
+
   // ---- V1 state ----
   @state() private threads: ChatThread[] = [];
   @state() private loadingThreads = false;
@@ -229,6 +233,13 @@ export class ScionPageChat extends LitElement {
   // ---- V2 state ----
   @state() private v2Conversation: V2ConversationState | null = null;
   @state() private v2Members: SpaceMember[] = [];
+  /** Per-project chat chime preference for the currently open conversation's project. */
+  @state() private projectChimeOn = true;
+  private _chimeProjectId = '';
+
+  private mentionAgentsSource: SpaceMember[] | null = null;
+  private mentionAgentsProjectId = '';
+  private mentionAgents: import('../../shared/types.js').Agent[] = [];
   @state() private v2MembersExpanded = true;
 
   /** Width of the members panel in px. Persisted per browser. */
@@ -244,8 +255,10 @@ export class ScionPageChat extends LitElement {
   private _onChatTyping = this.handleChatTyping.bind(this);
   private _onRailLoaded = this.handleRailLoaded.bind(this);
   private _onAgentsUpdated = this._handleAgentsUpdated.bind(this);
+  private _onAgentCreated = this._handleAgentCreated.bind(this);
   private _onScopeChanged = this._handleScopeChanged.bind(this);
   private _onReadStateUpdated = this._handleReadStateUpdated.bind(this);
+  private _unreadDMRequestId = 0;
   private _onDMPromoted = this.handleDMPromoted.bind(this);
   /** Bound keydown handler for Cmd/Ctrl+K quick switcher. */
   private _onKeydown = this._handleGlobalKeydown.bind(this);
@@ -264,7 +277,9 @@ export class ScionPageChat extends LitElement {
   /** Whether the quick-switcher component has been lazy-loaded. */
   private v2SwitcherLoaded = false;
   /** Cached conversation list for the switcher. */
-  @state() private v2SwitcherConversations: import('../shared/chat/chat-switcher.js').SwitcherConversation[] = [];
+  @state()
+  private v2SwitcherConversations: import('../shared/chat/chat-switcher.js').SwitcherConversation[] =
+    [];
   /** Whether the search panel is visible. */
   @state() private v2SearchActive = false;
   /** Whether the search component has been lazy-loaded. */
@@ -281,6 +296,14 @@ export class ScionPageChat extends LitElement {
   private _presenceProjectIds: string[] = [];
   /** Slow fallback poll for what SSE does not cover (see FALLBACK_POLL_INTERVAL_MS). */
   private _fallbackPollInterval: ReturnType<typeof setInterval> | null = null;
+  /** Debounced re-fetch of members after a new agent appears via SSE. */
+  private _canAttachRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  // IDs an authoritative members fetch has just left out (see loadV2Members
+  // reconciliation). Blocks _handleAgentsUpdated from re-adding a stale
+  // stateManager entry the server has already rejected, breaking the
+  // SSE-merge/refetch feedback loop. Cleared when a legitimate SSE
+  // `created` event arrives for that ID.
+  private _serverOmittedAgentIds = new Set<string>();
   /**
    * Which of the three panels is on screen. Only meaningful under the mobile
    * breakpoint — on desktop all three are visible and this is inert.
@@ -300,6 +323,39 @@ export class ScionPageChat extends LitElement {
       display: flex;
       height: 100%;
       overflow: hidden;
+
+      /* Layout density: dense (default) — current sizes */
+      --chat-fs-2xs: 0.5625rem;
+      --chat-fs-xs: 0.625rem;
+      --chat-fs-sm: 0.6875rem;
+      --chat-fs-base: 0.75rem;
+      --chat-fs-md: 0.8125rem;
+      --chat-fs-lg: 0.875rem;
+      --chat-fs-xl: 0.9375rem;
+      --chat-fs-2xl: 1rem;
+      --chat-fs-3xl: 1.125rem;
+      --chat-fs-4xl: 1.25rem;
+      --chat-fs-5xl: 1.5rem;
+      --chat-fs-6xl: 2rem;
+      --chat-fs-7xl: 2.5rem;
+      --chat-lh-tight: 1.25rem;
+    }
+
+    :host([data-density='comfy']) {
+      --chat-fs-2xs: 0.6875rem;
+      --chat-fs-xs: 0.75rem;
+      --chat-fs-sm: 0.875rem;
+      --chat-fs-base: 0.9375rem;
+      --chat-fs-md: 1rem;
+      --chat-fs-lg: 1.0625rem;
+      --chat-fs-xl: 1.125rem;
+      --chat-fs-2xl: 1.25rem;
+      --chat-fs-3xl: 1.375rem;
+      --chat-fs-4xl: 1.5rem;
+      --chat-fs-5xl: 1.875rem;
+      --chat-fs-6xl: 2.5rem;
+      --chat-fs-7xl: 3.125rem;
+      --chat-lh-tight: 1.5rem;
     }
 
     /* ---- V1 Layout ---- */
@@ -320,7 +376,7 @@ export class ScionPageChat extends LitElement {
       display: flex;
       align-items: center;
       padding: 0.75rem 1rem 0.5rem;
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       font-weight: 600;
       text-transform: uppercase;
       letter-spacing: 0.05em;
@@ -360,7 +416,7 @@ export class ScionPageChat extends LitElement {
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       font-weight: 600;
       color: #fff;
       flex-shrink: 0;
@@ -376,7 +432,7 @@ export class ScionPageChat extends LitElement {
       display: flex;
       align-items: center;
       gap: 0.375rem;
-      font-size: 0.8125rem;
+      font-size: var(--chat-fs-md);
       font-weight: 600;
       color: var(--scion-text, #1e293b);
     }
@@ -390,7 +446,7 @@ export class ScionPageChat extends LitElement {
     }
 
     .thread-preview {
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-text-muted, #64748b);
       white-space: nowrap;
       overflow: hidden;
@@ -399,7 +455,7 @@ export class ScionPageChat extends LitElement {
     }
 
     .thread-time {
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       color: var(--scion-text-muted, #64748b);
       white-space: nowrap;
       flex-shrink: 0;
@@ -428,17 +484,17 @@ export class ScionPageChat extends LitElement {
     }
 
     .empty-state sl-icon {
-      font-size: 2.5rem;
+      font-size: var(--chat-fs-7xl);
       opacity: 0.3;
     }
 
     .empty-state .title {
-      font-size: 1rem;
+      font-size: var(--chat-fs-2xl);
       font-weight: 500;
     }
 
     .empty-state .subtitle {
-      font-size: 0.875rem;
+      font-size: var(--chat-fs-lg);
     }
 
     .loading-rail {
@@ -526,7 +582,7 @@ export class ScionPageChat extends LitElement {
       gap: 0.25rem;
       padding: 0.75rem;
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
-      font-size: 0.8125rem;
+      font-size: var(--chat-fs-md);
       font-weight: 600;
       color: var(--scion-text, #1e293b);
     }
@@ -535,7 +591,7 @@ export class ScionPageChat extends LitElement {
       flex: 1;
       overflow-y: auto;
       padding: 0.5rem;
-      font-size: 0.8125rem;
+      font-size: var(--chat-fs-md);
       color: var(--scion-text-muted, #64748b);
       display: flex;
       align-items: center;
@@ -548,7 +604,7 @@ export class ScionPageChat extends LitElement {
       gap: 0.5rem;
       padding: 0.5rem 1rem;
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
-      font-size: 0.875rem;
+      font-size: var(--chat-fs-lg);
       font-weight: 600;
       color: var(--scion-text, #1e293b);
       background: var(--scion-surface, #ffffff);
@@ -758,11 +814,7 @@ export class ScionPageChat extends LitElement {
       const raw = localStorage.getItem(MEMBERS_WIDTH_KEY);
       if (!raw) return;
       const parsed = Number.parseInt(raw, 10);
-      if (
-        Number.isFinite(parsed) &&
-        parsed >= MEMBERS_WIDTH_MIN &&
-        parsed <= MEMBERS_WIDTH_MAX
-      ) {
+      if (Number.isFinite(parsed) && parsed >= MEMBERS_WIDTH_MIN && parsed <= MEMBERS_WIDTH_MAX) {
         this.membersWidth = parsed;
       }
     } catch {
@@ -770,9 +822,26 @@ export class ScionPageChat extends LitElement {
     }
   }
 
+  /** Toggle between dense and comfortable layout density. */
+  private toggleDensity(): void {
+    this.density = this.density === 'dense' ? 'comfy' : 'dense';
+    try {
+      localStorage.setItem('scion.chat.density', this.density);
+    } catch {
+      // localStorage unavailable (private browsing, iframe sandbox)
+    }
+  }
+
   override connectedCallback(): void {
     super.connectedCallback();
     this.restoreMembersWidth();
+    // Restore persisted layout density preference.
+    try {
+      const savedDensity = localStorage.getItem('scion.chat.density');
+      if (savedDensity === 'comfy') this.density = 'comfy';
+    } catch {
+      // localStorage unavailable (private browsing, iframe sandbox)
+    }
     // Global Cmd/Ctrl+K listener for the quick switcher.
     document.addEventListener('keydown', this._onKeydown);
 
@@ -793,6 +862,7 @@ export class ScionPageChat extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
+    ++this._unreadDMRequestId;
     document.removeEventListener('keydown', this._onKeydown);
     if (this.isV2) {
       stateManager.removeEventListener('chat-message-received', this._onChatMessage);
@@ -800,6 +870,7 @@ export class ScionPageChat extends LitElement {
       stateManager.removeEventListener('chat-presence-updated', this._onPresenceUpdated);
       stateManager.removeEventListener('chat-typing-received', this._onChatTyping);
       stateManager.removeEventListener('agents-updated', this._onAgentsUpdated);
+      stateManager.removeEventListener('agent-created', this._onAgentCreated);
       stateManager.removeEventListener('scope-changed', this._onScopeChanged);
       stateManager.removeEventListener('chat-dm-promoted', this._onDMPromoted);
       this.removeEventListener('rail-loaded', this._onRailLoaded);
@@ -809,6 +880,11 @@ export class ScionPageChat extends LitElement {
       if (this._fallbackPollInterval) {
         clearInterval(this._fallbackPollInterval);
         this._fallbackPollInterval = null;
+      }
+      // Clean up the canAttach refresh timer
+      if (this._canAttachRefreshTimer != null) {
+        clearTimeout(this._canAttachRefreshTimer);
+        this._canAttachRefreshTimer = null;
       }
       // Clean up typing timers
       for (const timer of this._typingTimers.values()) {
@@ -839,6 +915,26 @@ export class ScionPageChat extends LitElement {
     // rather than from each of the twenty places v2Conversation is assigned.
     if (changedProperties.has('v2Conversation')) {
       chatNotifications.setActiveConversation(this.v2Conversation?.conversationKey ?? null);
+
+      const projectId = this.v2Conversation?.projectId || '';
+      if (projectId !== this._chimeProjectId) {
+        this._chimeProjectId = projectId;
+        this.projectChimeOn = projectId ? isProjectChimeEnabled(projectId) : true;
+      }
+    }
+  }
+
+  /** Handle selections from the rail header's options menu (currently: chime toggle). */
+  private handleRailMenuSelect(e: Event): void {
+    const detail = (e as CustomEvent<{ item?: HTMLElement }>).detail;
+    const value = detail?.item?.getAttribute('value');
+    if (value === 'toggle-chime') {
+      const projectId = this.v2Conversation?.projectId;
+      if (projectId) {
+        this.projectChimeOn = !this.projectChimeOn;
+        this._chimeProjectId = projectId;
+        setProjectChimeEnabled(projectId, this.projectChimeOn);
+      }
     }
   }
 
@@ -941,7 +1037,7 @@ export class ScionPageChat extends LitElement {
 
   private async fetchAgentCapabilities(agentId: string): Promise<void> {
     if (this.agentCapabilities.has(agentId)) {
-      this.selectedAgentCanSend = can(this.agentCapabilities.get(agentId), 'attach');
+      this.selectedAgentCanSend = canMessageAgent(this.agentCapabilities.get(agentId));
       return;
     }
 
@@ -950,7 +1046,7 @@ export class ScionPageChat extends LitElement {
       if (res.ok) {
         const agent = (await res.json()) as { _capabilities?: Capabilities };
         this.agentCapabilities.set(agentId, agent._capabilities);
-        this.selectedAgentCanSend = can(agent._capabilities, 'attach');
+        this.selectedAgentCanSend = canMessageAgent(agent._capabilities);
       }
     } catch {
       this.selectedAgentCanSend = false;
@@ -1012,6 +1108,7 @@ export class ScionPageChat extends LitElement {
     stateManager.addEventListener('chat-presence-updated', this._onPresenceUpdated);
     stateManager.addEventListener('chat-typing-received', this._onChatTyping);
     stateManager.addEventListener('agents-updated', this._onAgentsUpdated);
+    stateManager.addEventListener('agent-created', this._onAgentCreated);
     stateManager.addEventListener('scope-changed', this._onScopeChanged);
     stateManager.addEventListener('chat-dm-promoted', this._onDMPromoted);
 
@@ -1395,16 +1492,16 @@ export class ScionPageChat extends LitElement {
       return;
     }
 
-    // Find #general thread for this space from the rail
+    // Find #general thread (or fall back to first thread) for this space
     const threads = await this.loadSpaceThreads(projectId);
-    const general = threads.find((t: { isGeneral: boolean }) => t.isGeneral);
-    if (general) {
+    const target = threads.find((t: { isGeneral: boolean }) => t.isGeneral) || threads[0];
+    if (target) {
       this.v2Conversation = {
-        conversationKey: general.id,
+        conversationKey: target.id,
         projectId,
         projectSlug: slug,
-        threadName: general.name,
-        defaultAgent: general.defaultAgent || '',
+        threadName: target.name,
+        defaultAgent: target.defaultAgent || '',
         isDM: false,
         peerName: '',
         peerId: '',
@@ -1412,9 +1509,9 @@ export class ScionPageChat extends LitElement {
       };
       this.mobilePanel = 'center';
       void this.loadV2Members(projectId);
-      dispatchPageTitle(this, `#${general.name}`, 'Chat');
+      dispatchPageTitle(this, `#${target.name}`, 'Chat');
       // Update URL to include the thread
-      navigateTo(`/chat/${encodeURIComponent(slug)}/${encodeURIComponent(general.id)}`);
+      navigateTo(`/chat/${encodeURIComponent(slug)}/${encodeURIComponent(target.id)}`);
     }
   }
 
@@ -1425,9 +1522,7 @@ export class ScionPageChat extends LitElement {
     projectId: string
   ): Promise<Array<{ id: string; name: string; isGeneral: boolean; defaultAgent?: string }>> {
     try {
-      const res = await apiFetch(
-        `/api/v1/chat/spaces/${encodeURIComponent(projectId)}/threads`
-      );
+      const res = await apiFetch(`/api/v1/chat/spaces/${encodeURIComponent(projectId)}/threads`);
       if (res.ok) {
         const data = (await res.json()) as {
           threads?: Array<{
@@ -1477,10 +1572,18 @@ export class ScionPageChat extends LitElement {
       scopeProjectId ? projectId === scopeProjectId : true;
 
     const byId = new Map(this.v2AgentMembers.map((a) => [a.id, a]));
+    let hasNewAgent = false;
 
     for (const agent of stateManager.getAgents()) {
       const existing = byId.get(agent.id);
       if (!existing && !inScope(agent.projectId || '')) continue;
+      // A prior authoritative refetch left this ID out of the members
+      // response. Don't re-add it from stateManager's stale cache until a
+      // legitimate SSE `created` event confirms it (see _handleAgentCreated) —
+      // otherwise every SSE tick re-adds it and re-triggers the refetch that
+      // removes it again (the flicker loop).
+      if (!existing && this._serverOmittedAgentIds.has(agent.id)) continue;
+      if (!existing) hasNewAgent = true;
       byId.set(agent.id, {
         id: agent.id,
         kind: 'agent' as const,
@@ -1496,10 +1599,10 @@ export class ScionPageChat extends LitElement {
           realTimestamp(agent.updated) ||
           existing?.lastActivityEvent ||
           '',
-          // SSE deltas carry status, not authorization. Preserve what the
-          // members endpoint decided; rebuilding without it restores the
-          // terminal control on every status tick.
-          canAttach: existing?.canAttach,
+        // SSE deltas carry status, not authorization. Preserve what the
+        // members endpoint decided; rebuilding without it restores the
+        // terminal control on every status tick.
+        canAttach: existing?.canAttach,
       });
     }
 
@@ -1514,6 +1617,23 @@ export class ScionPageChat extends LitElement {
 
     this.v2AgentMembers = Array.from(byId.values());
 
+    // When a brand-new agent appears via SSE, its `canAttach` is unknown
+    // (SSE events carry status, not per-viewer authorization). Schedule a
+    // debounced re-fetch of the members endpoint so the terminal icon
+    // appears without waiting for the 60-second fallback poll.
+    if (hasNewAgent && this.v2Conversation && !this.v2Conversation.isDM) {
+      const projectId = this.v2Conversation.projectId;
+      if (this._canAttachRefreshTimer != null) {
+        clearTimeout(this._canAttachRefreshTimer);
+      }
+      this._canAttachRefreshTimer = setTimeout(() => {
+        this._canAttachRefreshTimer = null;
+        if (projectId && this.v2Conversation?.projectId === projectId) {
+          void this.loadV2Members(projectId);
+        }
+      }, 1000);
+    }
+
     // A deleted agent cannot remain the thread default. The server clears the
     // binding and emits topic-updated; this covers the open view even if that
     // event is missed. defaultAgent holds a slug or an ID, so both are checked.
@@ -1524,9 +1644,23 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
+   * A legitimate SSE `created` event arrived for this agent ID. Lift the
+   * loop guard set by loadV2Members' reconciliation, if any, so a real
+   * re-creation (or ID reuse) isn't permanently suppressed.
+   */
+  private _handleAgentCreated(e: Event): void {
+    const detail = (e as CustomEvent).detail as Record<string, unknown> | undefined;
+    const eventData = (detail?.data ?? detail) as Record<string, unknown> | undefined;
+    const agentId = eventData?.agentId as string | undefined;
+    if (agentId) {
+      this._serverOmittedAgentIds.delete(agentId);
+    }
+  }
+
+  /**
    * A conversation's read watermark moved (dispatched by chat-thread after a
    * successful POST). Clear the matching unread markers without a round trip,
-   * then re-sync from the server so a rejected write cannot leave the UI lying.
+   * then re-sync from the server to account for messages arriving meanwhile.
    */
   private _handleReadStateUpdated(e: Event): void {
     const detail = (e as CustomEvent).detail as { conversationKey?: string } | undefined;
@@ -1534,7 +1668,15 @@ export class ScionPageChat extends LitElement {
     if (!key) return;
 
     if (key.startsWith('dm:')) {
-      const peerId = this.v2Conversation?.peerId || '';
+      // The acknowledgement belongs to its key, even if navigation changed
+      // the selected conversation before this event was delivered.
+      const parts = key.split(':');
+      const userId = this.pageData?.user?.id;
+      let peerId = '';
+      if (parts.length === 5) {
+        if (parts[1] === 'user' && parts[2] === userId) peerId = parts[4];
+        else if (parts[3] === 'user' && parts[4] === userId) peerId = parts[2];
+      }
       if (peerId && this.v2UnreadFromIds.includes(peerId)) {
         this.v2UnreadFromIds = this.v2UnreadFromIds.filter((id) => id !== peerId);
       }
@@ -1573,6 +1715,7 @@ export class ScionPageChat extends LitElement {
     const eventDetail = (e as CustomEvent).detail as Record<string, unknown> | undefined;
     // Unwrap the notifyWithData envelope: { state, data: { action, topic: {...} } }
     const eventData = (eventDetail?.data ?? eventDetail) as Record<string, unknown> | undefined;
+    const action = eventData?.action as string | undefined;
     const topic = eventData?.topic as Record<string, unknown> | undefined;
     const topicId = (topic?.id as string) || '';
     const newDefault = (topic?.defaultAgent as string) ?? '';
@@ -1590,10 +1733,17 @@ export class ScionPageChat extends LitElement {
       return;
     }
 
-    // For other topic changes (rename, delete, etc.), reload rail
+    // Skip reload for topics this client just created — already handled
+    // optimistically by the rail's submitCreateThread.
     const rail = this.shadowRoot?.querySelector('scion-chat-space-rail') as
       | import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail
       | null;
+    if (action === 'created' && topicId && rail?._recentlyCreatedTopicIds?.has(topicId)) {
+      rail._recentlyCreatedTopicIds.delete(topicId);
+      return;
+    }
+
+    // For other topic changes (rename, delete, etc.), reload rail
     if (rail) void rail.reload();
   }
 
@@ -1606,16 +1756,19 @@ export class ScionPageChat extends LitElement {
     const detail = (e as CustomEvent).detail as Record<string, unknown> | undefined;
     const eventData = (detail?.data ?? detail) as Record<string, unknown> | undefined;
     const oldConversationKey = eventData?.oldConversationKey as string | undefined;
-    const newTopic = eventData?.newTopic as {
-      id: string;
-      projectId: string;
-      name: string;
-      defaultAgent?: string;
-    } | undefined;
+    const newTopic = eventData?.newTopic as
+      | {
+          id: string;
+          projectId: string;
+          name: string;
+          defaultAgent?: string;
+        }
+      | undefined;
     if (!oldConversationKey || !newTopic) return;
 
     // If we're currently viewing the promoted DM, navigate to the new thread
     if (this.v2Conversation?.conversationKey === oldConversationKey) {
+      this.promoteDialogOpen = false;
       this.navigateToPromotedThread(newTopic);
       this.showPromoteToast(`Conversation promoted to #${newTopic.name}`, 'success');
     }
@@ -1650,10 +1803,7 @@ export class ScionPageChat extends LitElement {
     };
 
     // Determine the slug for the readable URL
-    const slug =
-      detail.projectSlug ||
-      this._projectIdToSlug.get(detail.projectId) ||
-      '';
+    const slug = detail.projectSlug || this._projectIdToSlug.get(detail.projectId) || '';
 
     // Cache the mapping if we received a slug
     if (slug && detail.projectId) {
@@ -1739,9 +1889,7 @@ export class ScionPageChat extends LitElement {
    */
   private async fetchThreadDetails(conversationKey: string): Promise<void> {
     try {
-      const res = await apiFetch(
-        `/api/v1/chat/topics/${encodeURIComponent(conversationKey)}`
-      );
+      const res = await apiFetch(`/api/v1/chat/topics/${encodeURIComponent(conversationKey)}`);
       if (!res.ok) return;
       const data = (await res.json()) as { name?: string; defaultAgent?: string };
       const conv = this.v2Conversation;
@@ -2049,6 +2197,7 @@ export class ScionPageChat extends LitElement {
    * for the blue unread dot on member avatars.
    */
   private async loadUnreadDMPeers(): Promise<void> {
+    const requestId = ++this._unreadDMRequestId;
     try {
       const res = await apiFetch('/api/v1/chat/dms');
       if (!res.ok) return;
@@ -2061,6 +2210,7 @@ export class ScionPageChat extends LitElement {
       };
       // A muted DM raises no dot: muting is the user saying "stop telling me
       // about this", and the avatar dot is the telling (#1029).
+      if (requestId !== this._unreadDMRequestId) return;
       const unreadIds = (data?.dms || [])
         .filter((dm) => dm.hasUnread && !dm.muted)
         .map((dm) => dm.peerId);
@@ -2134,6 +2284,28 @@ export class ScionPageChat extends LitElement {
           // dropped before the sidebar sees it.
           canAttach: a.canAttach,
         }));
+        // Reconcile stateManager: remove agents the server no longer returns
+        // for this project. This handles agents deleted while the client was
+        // disconnected (e.g., Safari backgrounded, missed SSE `deleted`
+        // event) — stateManager.seedAgents is add-only, so a stale entry
+        // would otherwise linger and get re-added by every SSE tick,
+        // triggering this same refetch in a loop (see _handleAgentsUpdated).
+        const serverAgentIds = new Set((data.agents || []).map((a) => a.id));
+        // If an agent the server now returns was previously marked as omitted,
+        // lift the suppression — it is active and should not be blocked.
+        for (const id of serverAgentIds) {
+          this._serverOmittedAgentIds.delete(id);
+        }
+        const staleIds: string[] = [];
+        for (const agent of stateManager.getAgents()) {
+          if (agent.projectId === projectId && !serverAgentIds.has(agent.id)) {
+            staleIds.push(agent.id);
+          }
+        }
+        for (const id of staleIds) {
+          stateManager.removeAgent(id);
+          this._serverOmittedAgentIds.add(id);
+        }
         // Seed the shared agent map so SSE status deltas have a baseline to
         // merge onto — otherwise they are buffered and never notify.
         stateManager.seedAgents(this.v2AgentMembers.map(agentMemberToAgent));
@@ -2581,9 +2753,7 @@ export class ScionPageChat extends LitElement {
       } else {
         // Find the project slug for this thread via its projectId.
         let foundSlug = '';
-        const conv = this.v2SwitcherConversations.find(
-          (c) => c.conversationKey === key && !c.isDM
-        );
+        const conv = this.v2SwitcherConversations.find((c) => c.conversationKey === key && !c.isDM);
         if (conv?.projectId) {
           foundSlug = this._projectIdToSlug.get(conv.projectId) || '';
         }
@@ -2627,7 +2797,7 @@ export class ScionPageChat extends LitElement {
           ${this.loadingThreads
             ? html`<div class="loading-rail"><sl-spinner></sl-spinner></div>`
             : this.threads.length === 0
-              ? html`<div class="loading-rail" style="font-size: 0.8125rem">
+              ? html`<div class="loading-rail" style="font-size: var(--chat-fs-md)">
                   No conversations yet
                 </div>`
               : this.threads.map((t) => this.renderThreadItem(t))}
@@ -2762,8 +2932,8 @@ export class ScionPageChat extends LitElement {
             .unreadFromIds=${this.v2UnreadFromIds}
             current-user-id="${this.pageData?.user?.id || ''}"
             dm-peer-id="${this.v2Conversation?.isDM ? this.v2Conversation.peerId : ''}"
+            default-agent-slug="${this.v2Conversation?.defaultAgent || ''}"
             @member-click=${this.handleMemberClick}
-            @reset-view=${this.handleResetView}
           ></scion-chat-members>
         </div>
       </div>
@@ -2788,6 +2958,68 @@ export class ScionPageChat extends LitElement {
       return Array.from(this._projectIdToSlug.values())[0];
     }
     return '';
+  }
+
+  /** Look up the project ID for an agent DM peer. */
+  private getAgentProjectId(peerId: string): string {
+    const agent = this.v2AgentMembers.find((a) => a.id === peerId);
+    if (agent?.projectId) return agent.projectId;
+    return this.v2Conversation?.projectId || '';
+  }
+
+  /**
+   * Resolve a thread's `defaultAgent` (which holds either an agent ID or a
+   * slug) to the agent's ID, so it can be used wherever DM code expects
+   * `conv.peerId`. Empty string when the agent isn't a known space member.
+   */
+  private resolveDefaultAgentId(defaultAgent: string): string {
+    if (!defaultAgent) return '';
+    const byId = this.v2AgentMembers.find((a) => a.id === defaultAgent);
+    if (byId) return byId.id;
+    const bySlug = this.v2AgentMembers.find((a) => a.slug === defaultAgent);
+    return bySlug?.id || '';
+  }
+
+  /**
+   * Terminal + graph icon buttons for an agent, shared by the DM header and
+   * the thread header (when the thread has a default agent). Graph link is
+   * omitted when the agent's project can't be resolved.
+   */
+  private renderAgentToolbarButtons(agentId: string): TemplateResult | typeof nothing {
+    if (!agentId) return nothing;
+    const projectId = this.getAgentProjectId(agentId);
+    return html`
+      <sl-tooltip content="Open terminal">
+        <sl-icon-button
+          name="terminal"
+          label="Open terminal"
+          href=${terminalHref(agentId)}
+          @click=${(e: MouseEvent) => {
+            if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+            e.preventDefault();
+            openTerminal(agentId);
+          }}
+        ></sl-icon-button>
+      </sl-tooltip>
+      ${projectId
+        ? html`
+            <sl-tooltip content="Open in graph">
+              <sl-icon-button
+                name="diagram-3"
+                label="Open in graph"
+                href=${`/agents/graph?project=${encodeURIComponent(projectId)}&focus=${encodeURIComponent(agentId)}`}
+                @click=${(e: MouseEvent) => {
+                  if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+                  e.preventDefault();
+                  navigateTo(
+                    `/agents/graph?project=${encodeURIComponent(projectId)}&focus=${encodeURIComponent(agentId)}`
+                  );
+                }}
+              ></sl-icon-button>
+            </sl-tooltip>
+          `
+        : nothing}
+    `;
   }
 
   /**
@@ -2898,9 +3130,10 @@ export class ScionPageChat extends LitElement {
     const conv = this.v2Conversation;
 
     // Look up the project slug for agent DMs
-    const agentProjectSlug = conv.isDM && conv.peerKind === 'agent' && conv.peerId
-      ? this.getAgentProjectSlug(conv.peerId)
-      : '';
+    const agentProjectSlug =
+      conv.isDM && conv.peerKind === 'agent' && conv.peerId
+        ? this.getAgentProjectSlug(conv.peerId)
+        : '';
 
     // The header renders for every open conversation, not only once the name
     // has resolved: on a deep link or reload the name arrives from the topic
@@ -2912,14 +3145,20 @@ export class ScionPageChat extends LitElement {
         ${conv.isDM
           ? html`
               ${conv.peerKind === 'agent' && agentProjectSlug
-                ? html`<sl-icon name="folder" style="font-size: 0.75rem; color: var(--scion-text-muted, #64748b)"></sl-icon>
-                        <span style="font-size: 0.8125rem; color: var(--scion-text-muted, #64748b)">${agentProjectSlug}</span>`
+                ? html`<sl-icon
+                      name="folder"
+                      style="font-size: var(--chat-fs-base); color: var(--scion-text-muted, #64748b)"
+                    ></sl-icon>
+                    <span
+                      style="font-size: var(--chat-fs-md); color: var(--scion-text-muted, #64748b)"
+                      >${agentProjectSlug}</span
+                    >`
                 : nothing}
               ${conv.peerKind === 'agent'
-                ? html`<span style="font-size: 0.875rem">🤖</span>`
+                ? html`<span style="font-size: var(--chat-fs-lg)">🤖</span>`
                 : html`<sl-icon
                     name="person"
-                    style="font-size: 0.875rem; color: var(--scion-text-muted)"
+                    style="font-size: var(--chat-fs-lg); color: var(--scion-text-muted)"
                   ></sl-icon>`}
               <span>${conv.peerName}</span>
             `
@@ -2935,7 +3174,23 @@ export class ScionPageChat extends LitElement {
                   `
                 : nothing}
             `}
-        <div class="header-actions" style="display: flex; align-items: center; gap: 0.25rem; margin-left: auto;">
+        <div
+          class="header-actions"
+          style="display: flex; align-items: center; gap: 0.25rem; margin-left: auto;"
+        >
+          ${conv.isDM && conv.peerKind === 'agent' && conv.peerId
+            ? this.renderAgentToolbarButtons(conv.peerId)
+            : nothing}
+          ${!conv.isDM && conv.defaultAgent
+            ? this.renderAgentToolbarButtons(this.resolveDefaultAgentId(conv.defaultAgent))
+            : nothing}
+          <sl-tooltip content=${this.density === 'dense' ? 'Comfortable view' : 'Dense view'}>
+            <sl-icon-button
+              name=${this.density === 'dense' ? 'arrows-angle-expand' : 'arrows-angle-contract'}
+              label="Toggle density"
+              @click=${() => this.toggleDensity()}
+            ></sl-icon-button>
+          </sl-tooltip>
           ${conv.isDM && conv.peerKind === 'agent'
             ? html`
                 <sl-tooltip content="Promote to thread">
@@ -2948,6 +3203,45 @@ export class ScionPageChat extends LitElement {
               `
             : nothing}
           ${conv.isDM ? this.renderDMMuteButton(conv) : nothing}
+          ${conv.projectId
+            ? html`
+                <sl-dropdown>
+                  <sl-icon-button
+                    slot="trigger"
+                    name="three-dots-vertical"
+                    label="Options"
+                  ></sl-icon-button>
+                  <sl-menu @sl-select=${this.handleRailMenuSelect}>
+                    <sl-menu-item value="toggle-chime">
+                      <sl-icon
+                        slot="prefix"
+                        name=${this.projectChimeOn ? 'volume-up' : 'volume-mute'}
+                      ></sl-icon>
+                      ${this.projectChimeOn ? 'Chime on' : 'Chime off'}
+                    </sl-menu-item>
+                  </sl-menu>
+                </sl-dropdown>
+              `
+            : nothing}
+          <sl-dropdown>
+            <sl-tooltip content="Export conversation" slot="trigger">
+              <sl-icon-button name="download" label="Export conversation"></sl-icon-button>
+            </sl-tooltip>
+            <sl-menu>
+              <sl-menu-item @click=${() => this.exportMarkdown()}>
+                <sl-icon slot="prefix" name="filetype-md"></sl-icon>
+                Download as Markdown
+              </sl-menu-item>
+              <sl-menu-item @click=${() => this.exportPrint()}>
+                <sl-icon slot="prefix" name="printer"></sl-icon>
+                Print / Save as PDF
+              </sl-menu-item>
+              <sl-menu-item @click=${() => void this.exportClipboard()}>
+                <sl-icon slot="prefix" name="clipboard"></sl-icon>
+                Copy to clipboard
+              </sl-menu-item>
+            </sl-menu>
+          </sl-dropdown>
           <sl-tooltip content="Search messages">
             <sl-icon-button
               name="search"
@@ -2963,7 +3257,11 @@ export class ScionPageChat extends LitElement {
             <scion-chat-search
               projectId=${conv.projectId}
               conversationKey=${conv.conversationKey}
-              conversationName=${conv.isDM ? conv.peerName : conv.threadName ? '#' + conv.threadName : ''}
+              conversationName=${conv.isDM
+                ? conv.peerName
+                : conv.threadName
+                  ? '#' + conv.threadName
+                  : ''}
               @search-close=${this.handleSearchClose}
               @search-navigate=${this.handleSearchNavigate}
             ></scion-chat-search>
@@ -2994,6 +3292,8 @@ export class ScionPageChat extends LitElement {
   private renderPromoteDialog() {
     if (!this.promoteDialogOpen || !this.v2Conversation) return nothing;
     const conv = this.v2Conversation;
+    const displaySlug =
+      conv.projectSlug || this._projectIdToSlug.get(conv.projectId) || 'this project';
     return html`
       <sl-dialog
         label="Promote DM to Thread"
@@ -3004,8 +3304,8 @@ export class ScionPageChat extends LitElement {
       >
         <p>
           This will move your conversation with
-          <strong>${conv.peerName}</strong> into a shared thread visible to all
-          members of <strong>${conv.projectSlug}</strong>. This cannot be undone.
+          <strong>${conv.peerName}</strong> into a shared thread visible to all members of
+          <strong>${displaySlug}</strong>. This cannot be undone.
         </p>
         <sl-input
           label="Thread name"
@@ -3062,23 +3362,17 @@ export class ScionPageChat extends LitElement {
         }
       );
       if (!res.ok) {
-        const body = (await res.json().catch(() => ({}))) as {
-          error?: string;
-          code?: string;
-        };
+        const err = await parseApiError(res, `Promotion failed (${res.status})`);
         if (res.status === 409) {
           const msg =
-            body.code === 'IN_FLIGHT_MESSAGES'
+            err.code === 'IN_FLIGHT_MESSAGES'
               ? 'Agent is still responding. Try again in a few seconds.'
-              : body.code === 'NAME_CONFLICT'
+              : err.code === 'NAME_CONFLICT'
                 ? 'A thread with that name already exists.'
-                : body.error || 'Conflict — please try again.';
+                : err.message || 'Conflict — please try again.';
           this.showPromoteToast(msg, 'warning');
         } else {
-          this.showPromoteToast(
-            body.error || `Promotion failed (${res.status})`,
-            'danger'
-          );
+          this.showPromoteToast(err.message, 'danger');
         }
         return;
       }
@@ -3090,16 +3384,16 @@ export class ScionPageChat extends LitElement {
         defaultAgent?: string;
       };
 
+      // Always close the dialog on success, even if the SSE dm.promoted
+      // handler already navigated us away before this fetch resolved.
+      this.promoteDialogOpen = false;
+
       // Guard: SSE dm.promoted may have already navigated us away
       if (this.v2Conversation?.conversationKey !== conversationKey) return;
 
-      // Close dialog and navigate to the new thread
-      this.promoteDialogOpen = false;
+      // Navigate to the new thread
       this.navigateToPromotedThread(topic);
-      this.showPromoteToast(
-        `Conversation promoted to #${topic.name}`,
-        'success'
-      );
+      this.showPromoteToast(`Conversation promoted to #${topic.name}`, 'success');
 
       // Remove the old DM from the switcher cache
       this.removeSwitcherConversation(conv.conversationKey);
@@ -3140,8 +3434,7 @@ export class ScionPageChat extends LitElement {
     } else {
       threadPath = `/chat/space/${encodeURIComponent(topic.projectId)}/thread/${encodeURIComponent(topic.id)}`;
     }
-    const browserPath =
-      base && base !== '/' ? base.replace(/\/$/, '') + threadPath : threadPath;
+    const browserPath = base && base !== '/' ? base.replace(/\/$/, '') + threadPath : threadPath;
     window.history.pushState({}, '', browserPath);
 
     dispatchPageTitle(this, `#${topic.name}`, 'Chat');
@@ -3227,24 +3520,31 @@ export class ScionPageChat extends LitElement {
         const thread = this.shadowRoot?.querySelector('scion-chat-thread') as
           | import('../shared/chat/chat-thread.js').ScionChatThread
           | null;
-        thread?.scrollToMessageById(detail.messageId);
+        void thread?.scrollToMessageById(detail.messageId);
       });
     }
   }
 
   /** Extract agent members as Agent-like objects for the mention autocomplete. */
   private getAgentsFromMembers(): import('../../shared/types.js').Agent[] {
-    return this.v2Members
+    const projectId = this.v2Conversation?.projectId || '';
+    if (this.mentionAgentsSource === this.v2Members && this.mentionAgentsProjectId === projectId) {
+      return this.mentionAgents;
+    }
+    this.mentionAgentsSource = this.v2Members;
+    this.mentionAgentsProjectId = projectId;
+    this.mentionAgents = this.v2Members
       .filter((m) => m.kind === 'agent')
       .map((m) => ({
         id: m.id,
         name: m.name,
         slug: m.name,
-        projectId: this.v2Conversation?.projectId || '',
+        projectId,
         template: '',
         phase: 'running' as const,
         status: 'active' as const,
       }));
+    return this.mentionAgents;
   }
 
   // ---- Shared utilities ----
@@ -3264,6 +3564,32 @@ export class ScionPageChat extends LitElement {
     if (diffDays < 7) return `${diffDays}d`;
 
     return d.toLocaleDateString('en', { month: 'short', day: 'numeric' });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Export helpers — delegate to the thread component (#1570)
+  // ---------------------------------------------------------------------------
+
+  /** Get a reference to the active scion-chat-thread component. */
+  private get chatThread(): import('../shared/chat/chat-thread.js').ScionChatThread | null {
+    return this.shadowRoot?.querySelector('scion-chat-thread') as
+      | import('../shared/chat/chat-thread.js').ScionChatThread
+      | null;
+  }
+
+  /** Download the current conversation as Markdown. */
+  private exportMarkdown(): void {
+    this.chatThread?.exportAsMarkdown();
+  }
+
+  /** Open a print-friendly view of the conversation. */
+  private exportPrint(): void {
+    this.chatThread?.printConversation();
+  }
+
+  /** Copy the conversation to the clipboard as formatted text. */
+  private async exportClipboard(): Promise<void> {
+    await this.chatThread?.copyAsFormattedText();
   }
 }
 

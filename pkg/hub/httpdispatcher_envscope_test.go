@@ -434,7 +434,7 @@ func TestResolveEnvFromStorage_ScopePrecedence(t *testing.T) {
 		store.ScopeRuntimeBroker: "from-broker",
 	})
 
-	resolved, err := d.resolveEnvFromStorage(ctx, envScopeTestAgent())
+	resolved, _, err := d.resolveEnvFromStorage(ctx, envScopeTestAgent())
 	if err != nil {
 		t.Fatalf("resolveEnvFromStorage: %v", err)
 	}
@@ -479,7 +479,7 @@ func TestResolveEnvFromStorage_PairwisePrecedence(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			d, _ := newEnvScopeDispatcher(t, "SHARED_KEY", tc.values)
-			resolved, err := d.resolveEnvFromStorage(ctx, envScopeTestAgent())
+			resolved, _, err := d.resolveEnvFromStorage(ctx, envScopeTestAgent())
 			if err != nil {
 				t.Fatalf("resolveEnvFromStorage: %v", err)
 			}
@@ -500,7 +500,7 @@ func TestBuildEnvSources_ReportsBrokerScope(t *testing.T) {
 	})
 	agent := envScopeTestAgent()
 
-	resolved, err := d.resolveEnvFromStorage(ctx, agent)
+	resolved, _, err := d.resolveEnvFromStorage(ctx, agent)
 	if err != nil {
 		t.Fatalf("resolveEnvFromStorage: %v", err)
 	}
@@ -570,7 +570,7 @@ func TestEnvSources_AgreesWithResolver(t *testing.T) {
 			d, _ := newEnvScopeDispatcher(t, "SHARED_KEY", values)
 			agent := envScopeTestAgent()
 
-			resolved, err := d.resolveEnvFromStorage(ctx, agent)
+			resolved, _, err := d.resolveEnvFromStorage(ctx, agent)
 			if err != nil {
 				t.Fatalf("resolveEnvFromStorage: %v", err)
 			}
@@ -642,7 +642,7 @@ func TestResolveEnvFromStorage_SkipsInapplicableScopes(t *testing.T) {
 	agent.OwnerID = ""
 	agent.RuntimeBrokerID = ""
 
-	resolved, err := d.resolveEnvFromStorage(ctx, agent)
+	resolved, _, err := d.resolveEnvFromStorage(ctx, agent)
 	if err != nil {
 		t.Fatalf("resolveEnvFromStorage: %v", err)
 	}

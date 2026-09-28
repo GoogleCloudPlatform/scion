@@ -31,9 +31,24 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
 
+// setOrUnsetEnv sets key to val for the duration of the test, unless val is
+// empty, in which case it removes key from the environment entirely rather
+// than setting it to an empty string. This matters for SCION_ config vars:
+// koanf's settings loader treats an empty-valued env var as present and lets
+// it override a real value loaded from a settings file, whereas a genuinely
+// absent env var does not. Always going through t.Setenv first (even when
+// unsetting) keeps its guard against use alongside t.Parallel.
+func setOrUnsetEnv(t *testing.T, key, val string) {
+	t.Helper()
+	t.Setenv(key, val)
+	if val == "" {
+		_ = os.Unsetenv(key)
+	}
+}
+
 func TestEnsureHubReady_GlobalFallbackWithHubEnabled(t *testing.T) {
 	// Unset Hub context to avoid synthetic project root detection
-	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_GROVE_ID", "SCION_HUB_GROVE_ID", "SCION_PROJECT_ID"} {
+	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_PROJECT_ID"} {
 		if val, ok := os.LookupEnv(e); ok {
 			_ = os.Unsetenv(e)
 			defer func() { _ = os.Setenv(e, val) }()
@@ -188,7 +203,7 @@ hub:
 
 func TestEnsureHubReady_GlobalFallbackWithHubDisabled(t *testing.T) {
 	// Unset Hub context to avoid synthetic project root detection
-	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_GROVE_ID", "SCION_HUB_GROVE_ID", "SCION_PROJECT_ID"} {
+	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_PROJECT_ID"} {
 		if val, ok := os.LookupEnv(e); ok {
 			_ = os.Unsetenv(e)
 			defer func() { _ = os.Setenv(e, val) }()
@@ -269,7 +284,7 @@ func TestEnsureHubReady_HubContextEnvVars(t *testing.T) {
 	// Simulate container env vars
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 	t.Setenv("SCION_HUB_URL", "")
-	t.Setenv("SCION_GROVE_ID", projectID)
+	t.Setenv("SCION_PROJECT_ID", projectID)
 	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
 	t.Setenv("SCION_DEV_TOKEN", "")
 
@@ -344,7 +359,7 @@ func TestEnsureHubReady_HubContextSkipsSyncAndRegistration(t *testing.T) {
 	t.Setenv("HOME", tmpHome)
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 	t.Setenv("SCION_HUB_URL", "")
-	t.Setenv("SCION_GROVE_ID", projectID)
+	t.Setenv("SCION_PROJECT_ID", projectID)
 	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
 	t.Setenv("SCION_DEV_TOKEN", "")
 
@@ -374,12 +389,11 @@ func TestEnsureHubReady_HubContextSkipsSyncAndRegistration(t *testing.T) {
 }
 
 func TestEnsureHubReady_HubContextProjectIDEnvPriority(t *testing.T) {
-	// When SCION_GROVE_ID env var and settings.project_id both exist in hub
+	// When a project id env var and settings.project_id both exist in hub
 	// context, the env var should take priority. This is important for
 	// template-sync agents that clone an external repo whose .scion/settings
 	// contains the source repo's project_id.
 
-	envProjectID := "env-project-id-target"
 	settingsProjectID := "settings-project-id-source"
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -393,43 +407,68 @@ func TestEnsureHubReady_HubContextProjectIDEnvPriority(t *testing.T) {
 	}))
 	defer server.Close()
 
-	tmpHome := t.TempDir()
-	// Create a project directory with .scion that has a project_id in settings
-	projectDir := filepath.Join(tmpHome, "project")
-	scionDir := filepath.Join(projectDir, ".scion")
-	if err := os.MkdirAll(scionDir, 0755); err != nil {
-		t.Fatalf("Failed to create scion dir: %v", err)
+	tests := []struct {
+		name      string
+		projectID string
+		want      string
+	}{
+		{name: "env set, wins over settings", projectID: "env-project-id-target", want: "env-project-id-target"},
+		{name: "env unset, falls back to settings", projectID: "", want: settingsProjectID},
 	}
 
-	settingsContent := fmt.Sprintf("grove_id: %s\nruntime: docker\n", settingsProjectID)
-	if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(settingsContent), 0644); err != nil {
-		t.Fatalf("Failed to write settings: %v", err)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpHome := t.TempDir()
+			// Create a project directory with .scion that has a project_id in settings
+			projectDir := filepath.Join(tmpHome, "project")
+			scionDir := filepath.Join(projectDir, ".scion")
+			if err := os.MkdirAll(scionDir, 0755); err != nil {
+				t.Fatalf("Failed to create scion dir: %v", err)
+			}
 
-	t.Setenv("HOME", tmpHome)
-	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
-	t.Setenv("SCION_HUB_URL", "")
-	t.Setenv("SCION_GROVE_ID", envProjectID)
-	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
-	t.Setenv("SCION_DEV_TOKEN", "")
+			settingsContent := fmt.Sprintf("project_id: %s\nruntime: docker\n", settingsProjectID)
+			if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(settingsContent), 0644); err != nil {
+				t.Fatalf("Failed to write settings: %v", err)
+			}
+			// Also write .scion/project-id: the loader applies this file after
+			// the env provider, so it survives env overrides. Without it,
+			// settings.ProjectID equals the env value and the ordering below
+			// is untestable.
+			if err := os.WriteFile(filepath.Join(scionDir, "project-id"), []byte(settingsProjectID), 0644); err != nil {
+				t.Fatalf("Failed to write project-id: %v", err)
+			}
 
-	origDir, _ := os.Getwd()
-	if err := os.Chdir(projectDir); err != nil {
-		t.Fatalf("Failed to chdir: %v", err)
-	}
-	defer func() { _ = os.Chdir(origDir) }()
+			t.Setenv("HOME", tmpHome)
+			t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+			t.Setenv("SCION_HUB_URL", "")
+			// Unset (rather than set-to-empty) the var this test isn't
+			// exercising, for hygiene: the .scion/project-id fixture above is
+			// what actually makes settings.ProjectID resist the env var, so
+			// this isn't load-bearing for the precedence check itself, but
+			// leaving a var truly absent is clearer than leaving it empty.
+			setOrUnsetEnv(t, "SCION_PROJECT_ID", tt.projectID)
+			t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
+			t.Setenv("SCION_DEV_TOKEN", "")
 
-	hubCtx, err := EnsureHubReady("", EnsureHubReadyOptions{
-		AutoConfirm: true,
-	})
-	if err != nil {
-		t.Fatalf("EnsureHubReady returned error: %v", err)
-	}
-	if hubCtx == nil {
-		t.Fatal("EnsureHubReady returned nil")
-	}
-	if hubCtx.ProjectID != envProjectID {
-		t.Errorf("ProjectID = %q, want %q (SCION_GROVE_ID should take priority over settings.project_id in hub context)", hubCtx.ProjectID, envProjectID)
+			origDir, _ := os.Getwd()
+			if err := os.Chdir(projectDir); err != nil {
+				t.Fatalf("Failed to chdir: %v", err)
+			}
+			defer func() { _ = os.Chdir(origDir) }()
+
+			hubCtx, err := EnsureHubReady("", EnsureHubReadyOptions{
+				AutoConfirm: true,
+			})
+			if err != nil {
+				t.Fatalf("EnsureHubReady returned error: %v", err)
+			}
+			if hubCtx == nil {
+				t.Fatal("EnsureHubReady returned nil")
+			}
+			if hubCtx.ProjectID != tt.want {
+				t.Errorf("ProjectID = %q, want %q", hubCtx.ProjectID, tt.want)
+			}
+		})
 	}
 }
 
@@ -786,31 +825,6 @@ func TestSyncResult_ExcludeAgent_WithPending(t *testing.T) {
 	}
 }
 
-func TestContainsIgnoreCase(t *testing.T) {
-	tests := []struct {
-		s        string
-		substr   string
-		expected bool
-	}{
-		{"Hello World", "hello", true},
-		{"Hello World", "WORLD", true},
-		{"Hello World", "llo wor", true},
-		{"404 Not Found", "404", true},
-		{"404 Not Found", "not found", true},
-		{"Hello World", "goodbye", false},
-		{"", "test", false},
-		{"test", "", true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.s+"_"+tt.substr, func(t *testing.T) {
-			if got := containsIgnoreCase(tt.s, tt.substr); got != tt.expected {
-				t.Errorf("containsIgnoreCase(%q, %q) = %v, want %v", tt.s, tt.substr, got, tt.expected)
-			}
-		})
-	}
-}
-
 func TestProjectChoice_Constants(t *testing.T) {
 	// Verify that the choice constants have expected values
 	if ProjectChoiceCancel != 0 {
@@ -1016,7 +1030,7 @@ func TestUpdateLastSyncedAt_UsesHubTime(t *testing.T) {
 	// Use a specific hub time that's clearly different from time.Now()
 	hubTime := time.Date(2025, 6, 15, 10, 30, 45, 123456789, time.UTC)
 
-	UpdateLastSyncedAt(tmpDir, hubTime, false)
+	UpdateLastSyncedAt(tmpDir, hubTime)
 
 	// Read back from state.yaml
 	state, err := config.LoadProjectState(tmpDir)
@@ -1047,7 +1061,7 @@ func TestUpdateLastSyncedAt_FallbackToLocalTime(t *testing.T) {
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	before := time.Now().UTC()
-	UpdateLastSyncedAt(tmpDir, time.Time{}, false) // zero time = fallback
+	UpdateLastSyncedAt(tmpDir, time.Time{}) // zero time = fallback
 	after := time.Now().UTC()
 
 	state, err := config.LoadProjectState(tmpDir)
@@ -1078,7 +1092,7 @@ func TestUpdateLastSyncedAt_NanoPrecision(t *testing.T) {
 
 	// Use a time with sub-second precision
 	hubTime := time.Date(2025, 6, 15, 10, 30, 45, 123456789, time.UTC)
-	UpdateLastSyncedAt(tmpDir, hubTime, false)
+	UpdateLastSyncedAt(tmpDir, hubTime)
 
 	state, err := config.LoadProjectState(tmpDir)
 	if err != nil {
@@ -1108,8 +1122,8 @@ func TestUpdateLastSyncedAt_Monotonic(t *testing.T) {
 	newer := time.Date(2026, 3, 1, 10, 0, 0, 0, time.UTC)
 	older := newer.Add(-time.Hour)
 
-	UpdateLastSyncedAt(tmpDir, newer, false)
-	UpdateLastSyncedAt(tmpDir, older, false)
+	UpdateLastSyncedAt(tmpDir, newer)
+	UpdateLastSyncedAt(tmpDir, older)
 
 	state, err := config.LoadProjectState(tmpDir)
 	if err != nil {
@@ -1135,7 +1149,7 @@ func TestUpdateLastSyncedAt_InvalidExistingTimestamp(t *testing.T) {
 	}
 
 	hubTime := time.Date(2026, 3, 2, 9, 30, 0, 123, time.UTC)
-	UpdateLastSyncedAt(tmpDir, hubTime, false)
+	UpdateLastSyncedAt(tmpDir, hubTime)
 
 	state, err := config.LoadProjectState(tmpDir)
 	if err != nil {
@@ -1185,7 +1199,7 @@ hub:
   endpoint: https://hub.example.com
   brokerId: stale-broker-id
   brokerToken: stale-broker-token
-  groveId: my-grove
+  projectId: my-project
 `
 	if err := os.WriteFile(filepath.Join(tmpDir, "settings.yaml"), []byte(legacyContent), 0644); err != nil {
 		t.Fatal(err)
@@ -1210,8 +1224,8 @@ hub:
 	if !strings.Contains(content, "endpoint") {
 		t.Error("hub.endpoint should be preserved")
 	}
-	if !strings.Contains(content, "groveId") {
-		t.Error("hub.groveId should be preserved")
+	if !strings.Contains(content, "projectId") {
+		t.Error("hub.projectId should be preserved")
 	}
 }
 
@@ -1223,7 +1237,7 @@ func TestCleanupProjectBrokerCredentials_V1(t *testing.T) {
 active_profile: local
 hub:
   endpoint: https://hub.example.com
-  grove_id: my-grove
+  project_id: my-project
 server:
   broker:
     broker_id: stale-broker-id
@@ -1273,7 +1287,7 @@ func TestCleanupProjectBrokerCredentials_V1_NoBrokerCreds(t *testing.T) {
 active_profile: local
 hub:
   endpoint: https://hub.example.com
-  grove_id: my-grove
+  project_id: my-project
 `
 	if err := os.WriteFile(filepath.Join(tmpDir, "settings.yaml"), []byte(v1Content), 0644); err != nil {
 		t.Fatal(err)
@@ -1361,6 +1375,52 @@ func TestCreateHubClient_PrefersTokenFileOverEnv(t *testing.T) {
 	// Set a different value in env
 	t.Setenv("SCION_AUTH_TOKEN", "env-token-value")
 	t.Setenv("SCION_DEV_TOKEN", "")
+
+	settings := &config.Settings{}
+	client, err := createHubClient(settings, server.URL)
+	if err != nil {
+		t.Fatalf("createHubClient failed: %v", err)
+	}
+
+	_, err = client.Health(context.Background())
+	if err != nil {
+		t.Fatalf("Health check failed: %v", err)
+	}
+}
+
+// TestCreateHubClient_HubManagedAgentUsesRealTokenOnLocalhost is the
+// createHubClient counterpart to
+// cmd.TestGetAuthInfo_HubManagedAgentUsesRealTokenOnLocalhost: a hub-managed
+// agent (SCION_AGENT_ID set) talking to a localhost Hub must authenticate
+// with its own scion-token, not get silently swapped onto dev auth, even
+// when a dev-token file is also present.
+func TestCreateHubClient_HubManagedAgentUsesRealTokenOnLocalhost(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		agentToken := r.Header.Get("X-Scion-Agent-Token")
+		if agentToken != "fresh-agent-jwt" {
+			t.Errorf("expected X-Scion-Agent-Token 'fresh-agent-jwt', got %q", agentToken)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if auth := r.Header.Get("Authorization"); auth != "" {
+			t.Errorf("expected no Authorization bearer header when the real agent token is used, got %q", auth)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	}))
+	defer server.Close()
+
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("SCION_AGENT_ID", "agent-uuid-123") // Hub-managed agent context.
+	t.Setenv("SCION_AUTH_TOKEN", "")
+
+	scionDir := filepath.Join(tmpHome, ".scion")
+	_ = os.MkdirAll(scionDir, 0700)
+	// Real per-agent token, freshly issued by the broker for this Hub.
+	_ = os.WriteFile(filepath.Join(scionDir, "scion-token"), []byte("fresh-agent-jwt"), 0600)
+	// A dev token also present — must not be preferred in this context.
+	t.Setenv("SCION_DEV_TOKEN", "scion_dev_abc123")
 
 	settings := &config.Settings{}
 	client, err := createHubClient(settings, server.URL)

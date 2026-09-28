@@ -1052,7 +1052,10 @@ this settings schema since they use provider-specific namespaces.
 2. **Non-blocking startup**: Telemetry failures log errors but don't block agent startup.
 3. **Privacy default**: `agent.user.prompt` excluded by default.
 4. **Raw proto forwarding**: Uses `ExportProtoSpans()` to forward OTLP data directly without SDK span conversion (avoids `ReadOnlySpan` private method constraint).
-5. **Graceful shutdown**: 5-second timeout for telemetry flush on shutdown.
+5. **Graceful shutdown**: The init telemetry Stop path allows 20 seconds after
+   child exit for an in-flight metric export and one safe 15-second write slot;
+   it reports residual state when that budget expires. External runtime stop
+   deadlines can be shorter and may force termination first.
 
 **Integration Point:** `cmd/sciontool/commands/init.go`
 - Pipeline starts after `setupHostUser()` and before lifecycle hooks.
@@ -1271,6 +1274,35 @@ telemetry config vars → explicit `opts.Env` (Hub/broker/CLI).
 Tests in `pkg/config/telemetry_convert_test.go` (9 cases) and
 `pkg/agent/run_test.go` (2 cases) cover nil handling, full conversion, partial
 structs, bool/CSV/JSON formatting, injection, and override-preservation.
+
+### Cloud Monitoring normalized hook counter time policy
+
+In GCP-native forwarding, the exact hook scope and six monotonic delta Int64
+counters (`agent.tool.calls`, `agent.session.count`, `gen_ai.api.calls`, and
+`scion.hook.tokens.input/output/cached`) form collector-observed cumulative
+streams. Their output epoch is set at the first admitted addition; each new
+immutable snapshot uses the actual collector observation time as its end.
+Snapshots wait at least two milliseconds after their epoch so the Monitoring
+SDK does not extend a short hook interval into a future mapped timestamp.
+Source intervals remain separate for validation and bounded duplicate
+suppression. Generic OTLP output, lifecycle-scope counters, and native metric
+timestamps keep their source times. The scope/name selector is caller supplied
+and conveys semantics, not authenticated origin.
+
+The GCP intake rejects an entire request before ACK when a changed native
+output point is known to end less than five seconds after the possibly written
+point for the same full Cloud series. Exactly five seconds is allowed. The
+comparison uses the pinned Monitoring SDK's mapped end: non-gauge intervals
+shorter than two milliseconds map to start plus one millisecond. A paired hook
+request containing a duration histogram can therefore be rejected as a
+whole even when its normalized counter would otherwise be eligible. Watermarks
+include pending and ambiguous writes, remain bounded by active series state,
+and do not survive restart or idle eviction. External writers are outside this
+local knowledge. One global immutable pending batch retains whole-admission
+ownership; hook clock rollback holds the entire dirty batch before snapshot
+transfer, bounded by original admission age and Stop deadline. Partial resource
+group success remains terminal Unconfirmed and reports only bounded group
+counts and fixed error classes, without raw backend text or labels.
 
 ### 13.2 Hub Metrics Reporting (Milestone 3)
 

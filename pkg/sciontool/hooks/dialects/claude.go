@@ -131,104 +131,6 @@ func (d *ClaudeDialect) Parse(data map[string]interface{}) (*hooks.Event, error)
 	return event, nil
 }
 
-// extractFinalAssistantText reads a Claude Code transcript JSONL file and
-// returns the concatenated text blocks from the final assistant turn. A
-// "final turn" is the contiguous run of assistant entries at the end of the
-// transcript, stopped at the first preceding user entry. Tool-use and other
-// non-text content blocks are skipped. On any error the function returns an
-// empty string — callers must treat absence as "no assistant text
-// available" rather than a failure condition.
-func extractFinalAssistantText(path string) string {
-	f, err := os.Open(path)
-	if err != nil {
-		return ""
-	}
-	defer func() { _ = f.Close() }()
-
-	// Collect text from contiguous assistant entries at the tail of the
-	// transcript. Iterate forward once (Claude transcripts are small
-	// enough that double-pass or reverse-scan overhead is unnecessary);
-	// reset the collected text whenever a user entry is seen so that by
-	// the end of the scan we hold exactly the final assistant turn.
-	var turnParts []string
-	scanner := bufio.NewScanner(f)
-	// Transcript lines can contain very long tool outputs; raise the
-	// scanner buffer so we don't silently truncate them.
-	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		var entry struct {
-			Type    string `json:"type"`
-			Message struct {
-				Role    string          `json:"role"`
-				Content json.RawMessage `json:"content"`
-			} `json:"message"`
-		}
-		if err := json.Unmarshal(line, &entry); err != nil {
-			continue
-		}
-		entryType := entry.Type
-		if entryType == "" {
-			entryType = entry.Message.Role
-		}
-
-		switch entryType {
-		case "user":
-			// A user entry ends any prior assistant turn.
-			turnParts = turnParts[:0]
-		case "assistant":
-			if text := assistantContentText(entry.Message.Content); text != "" {
-				turnParts = append(turnParts, text)
-			}
-		}
-	}
-	// If the scanner hit an error (e.g. a single line exceeded the 16MB
-	// buffer limit), return whatever text was collected before the error
-	// rather than discarding the entire turn.
-	if err := scanner.Err(); err != nil && len(turnParts) == 0 {
-		return ""
-	}
-
-	return strings.TrimSpace(strings.Join(turnParts, "\n\n"))
-}
-
-// assistantContentText extracts text from an assistant message's content
-// field, which in Claude transcripts is either a JSON array of typed blocks
-// or (rarely) a plain string. Only "text" blocks contribute; tool_use and
-// other block types are ignored.
-func assistantContentText(content json.RawMessage) string {
-	if len(content) == 0 {
-		return ""
-	}
-
-	// Plain string content (older/simpler transcript shape).
-	var s string
-	if err := json.Unmarshal(content, &s); err == nil {
-		return strings.TrimSpace(s)
-	}
-
-	// Typed block array.
-	var blocks []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
-	if err := json.Unmarshal(content, &blocks); err != nil {
-		return ""
-	}
-
-	var parts []string
-	for _, b := range blocks {
-		if b.Type == "text" && b.Text != "" {
-			parts = append(parts, b.Text)
-		}
-	}
-	return strings.TrimSpace(strings.Join(parts, ""))
-}
-
 // extractAssistantContentFromPayload extracts and classifies content from
 // the last_assistant_message field in the hook payload. The field value may be:
 //
@@ -385,8 +287,7 @@ func classifyContentBlock(m map[string]interface{}) hooks.ContentBlock {
 
 // extractFinalAssistantContentFromTranscript reads a Claude Code transcript
 // JSONL file and returns both filtered text and classified content blocks
-// from the final assistant turn. This is the content-type-aware version of
-// extractFinalAssistantText that populates AssistantContent.
+// from the final assistant turn.
 func extractFinalAssistantContentFromTranscript(path string) (string, *hooks.AssistantContent) {
 	f, err := os.Open(path)
 	if err != nil {

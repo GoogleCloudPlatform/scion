@@ -244,20 +244,6 @@ func (_c *MessageCreate) SetNillableConversationID(v *uuid.UUID) *MessageCreate 
 	return _c
 }
 
-// SetVisibility sets the "visibility" field.
-func (_c *MessageCreate) SetVisibility(v string) *MessageCreate {
-	_c.mutation.SetVisibility(v)
-	return _c
-}
-
-// SetNillableVisibility sets the "visibility" field if the given value is not nil.
-func (_c *MessageCreate) SetNillableVisibility(v *string) *MessageCreate {
-	if v != nil {
-		_c.SetVisibility(*v)
-	}
-	return _c
-}
-
 // SetCreated sets the "created" field.
 func (_c *MessageCreate) SetCreated(v time.Time) *MessageCreate {
 	_c.mutation.SetCreated(v)
@@ -405,11 +391,6 @@ func (_c *MessageCreate) check() error {
 			return &ValidationError{Name: "thread_id", err: fmt.Errorf(`ent: validator failed for field "Message.thread_id": %w`, err)}
 		}
 	}
-	if v, ok := _c.mutation.Visibility(); ok {
-		if err := message.VisibilityValidator(v); err != nil {
-			return &ValidationError{Name: "visibility", err: fmt.Errorf(`ent: validator failed for field "Message.visibility": %w`, err)}
-		}
-	}
 	if _, ok := _c.mutation.Created(); !ok {
 		return &ValidationError{Name: "created", err: errors.New(`ent: missing required field "Message.created"`)}
 	}
@@ -520,10 +501,6 @@ func (_c *MessageCreate) createSpec() (*Message, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.ConversationID(); ok {
 		_spec.SetField(message.FieldConversationID, field.TypeUUID, value)
 		_node.ConversationID = &value
-	}
-	if value, ok := _c.mutation.Visibility(); ok {
-		_spec.SetField(message.FieldVisibility, field.TypeString, value)
-		_node.Visibility = value
 	}
 	if value, ok := _c.mutation.Created(); ok {
 		_spec.SetField(message.FieldCreated, field.TypeTime, value)
@@ -848,24 +825,6 @@ func (u *MessageUpsert) UpdateConversationID() *MessageUpsert {
 // ClearConversationID clears the value of the "conversation_id" field.
 func (u *MessageUpsert) ClearConversationID() *MessageUpsert {
 	u.SetNull(message.FieldConversationID)
-	return u
-}
-
-// SetVisibility sets the "visibility" field.
-func (u *MessageUpsert) SetVisibility(v string) *MessageUpsert {
-	u.Set(message.FieldVisibility, v)
-	return u
-}
-
-// UpdateVisibility sets the "visibility" field to the value that was provided on create.
-func (u *MessageUpsert) UpdateVisibility() *MessageUpsert {
-	u.SetExcluded(message.FieldVisibility)
-	return u
-}
-
-// ClearVisibility clears the value of the "visibility" field.
-func (u *MessageUpsert) ClearVisibility() *MessageUpsert {
-	u.SetNull(message.FieldVisibility)
 	return u
 }
 
@@ -1232,27 +1191,6 @@ func (u *MessageUpsertOne) UpdateConversationID() *MessageUpsertOne {
 func (u *MessageUpsertOne) ClearConversationID() *MessageUpsertOne {
 	return u.Update(func(s *MessageUpsert) {
 		s.ClearConversationID()
-	})
-}
-
-// SetVisibility sets the "visibility" field.
-func (u *MessageUpsertOne) SetVisibility(v string) *MessageUpsertOne {
-	return u.Update(func(s *MessageUpsert) {
-		s.SetVisibility(v)
-	})
-}
-
-// UpdateVisibility sets the "visibility" field to the value that was provided on create.
-func (u *MessageUpsertOne) UpdateVisibility() *MessageUpsertOne {
-	return u.Update(func(s *MessageUpsert) {
-		s.UpdateVisibility()
-	})
-}
-
-// ClearVisibility clears the value of the "visibility" field.
-func (u *MessageUpsertOne) ClearVisibility() *MessageUpsertOne {
-	return u.Update(func(s *MessageUpsert) {
-		s.ClearVisibility()
 	})
 }
 
@@ -1786,27 +1724,6 @@ func (u *MessageUpsertBulk) UpdateConversationID() *MessageUpsertBulk {
 func (u *MessageUpsertBulk) ClearConversationID() *MessageUpsertBulk {
 	return u.Update(func(s *MessageUpsert) {
 		s.ClearConversationID()
-	})
-}
-
-// SetVisibility sets the "visibility" field.
-func (u *MessageUpsertBulk) SetVisibility(v string) *MessageUpsertBulk {
-	return u.Update(func(s *MessageUpsert) {
-		s.SetVisibility(v)
-	})
-}
-
-// UpdateVisibility sets the "visibility" field to the value that was provided on create.
-func (u *MessageUpsertBulk) UpdateVisibility() *MessageUpsertBulk {
-	return u.Update(func(s *MessageUpsert) {
-		s.UpdateVisibility()
-	})
-}
-
-// ClearVisibility clears the value of the "visibility" field.
-func (u *MessageUpsertBulk) ClearVisibility() *MessageUpsertBulk {
-	return u.Update(func(s *MessageUpsert) {
-		s.ClearVisibility()
 	})
 }
 

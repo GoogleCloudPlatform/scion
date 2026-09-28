@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"gopkg.in/yaml.v3"
 )
@@ -249,29 +250,27 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	}
 
 	// Ensure project_id exists.
-	// In hub context, SCION_GROVE_ID takes priority over settings.ProjectID
-	// because the dispatcher sets it to the authoritative project for this
-	// agent. The workspace may contain a cloned repo whose .scion/settings
-	// has a different project_id (e.g. template-sync from an external repo).
+	// In hub context, the env-provided project id takes priority over
+	// settings.ProjectID because the dispatcher sets it to the authoritative
+	// project for this agent. The workspace may contain a cloned repo whose
+	// .scion/settings has a different project_id (e.g. template-sync from an
+	// external repo).
 	var projectID string
 	if hubContext {
-		projectID = os.Getenv("SCION_GROVE_ID")
-		if projectID == "" {
-			projectID = os.Getenv("SCION_PROJECT_ID")
-		}
+		projectID = projectkeys.ProjectIDFromEnv(os.Getenv)
 	}
 	if projectID == "" {
 		projectID = settings.ProjectID
 	}
 	if projectID == "" {
 		if hubContext {
-			// Inside a container without SCION_GROVE_ID — we can't generate
-			// and persist a project ID. The Hub client can still be constructed
-			// for cross-project operations like list --all.
+			// Inside a container without a project id env var — we can't
+			// generate and persist a project ID. The Hub client can still be
+			// constructed for cross-project operations like list --all.
 			debugf("hub context without project_id — project-scoped operations may fail")
 		} else {
 			// Generate project_id for projects that don't have one
-			projectID = config.GenerateProjectIDForDir(filepath.Dir(resolvedPath))
+			projectID = config.GenerateProjectID()
 			if err := config.UpdateSetting(resolvedPath, "project_id", projectID, isGlobal); err != nil {
 				return nil, fmt.Errorf("failed to save project_id: %w", err)
 			}
@@ -499,7 +498,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		}
 	} else {
 		// Already in sync — update the watermark and synced agents to keep current
-		UpdateLastSyncedAt(hubCtx.ProjectPath, syncResult.ServerTime, hubCtx.IsGlobal)
+		UpdateLastSyncedAt(hubCtx.ProjectPath, syncResult.ServerTime)
 		UpdateSyncedAgents(hubCtx.ProjectPath, collectSyncedAgentNames(syncResult))
 	}
 
@@ -529,9 +528,7 @@ func checkBrokerAvailability(ctx context.Context, hubCtx *HubContext) (bool, err
 // Uses hubTime if non-zero (preferred), otherwise falls back to local time.
 var lastSyncedAtMu sync.Mutex
 
-func UpdateLastSyncedAt(projectPath string, hubTime time.Time, isGlobal bool) {
-	_ = isGlobal // retained for API compatibility
-
+func UpdateLastSyncedAt(projectPath string, hubTime time.Time) {
 	if strings.TrimSpace(projectPath) == "" {
 		debugf("Warning: skipping lastSyncedAt update: empty project path")
 		return
@@ -942,7 +939,7 @@ func ExecuteSync(ctx context.Context, hubCtx *HubContext, result *SyncResult, au
 	}
 
 	// Update lastSyncedAt watermark after successful sync
-	UpdateLastSyncedAt(hubCtx.ProjectPath, result.ServerTime, hubCtx.IsGlobal)
+	UpdateLastSyncedAt(hubCtx.ProjectPath, result.ServerTime)
 
 	// Record the set of agents now known to be on the hub for this broker.
 	// After sync: InSync + newly registered + RemoteOnly + Pending are all on hub.
@@ -1337,7 +1334,13 @@ func readAgentTokenFile() string {
 // Note: hub.token and hub.apiKey are deprecated and no longer used for auth.
 // Auth priority: OAuth credentials > scion-token file > SCION_AUTH_TOKEN env > auto dev auth.
 // Exception: for localhost endpoints, dev auth takes priority over non-dev agent tokens
-// to avoid stale scion-token files from previous remote hub connections.
+// to avoid stale scion-token files from previous remote hub connections. This exception
+// is suppressed for hub-managed agents (config.IsHubManagedAgent(), i.e. SCION_AGENT_ID
+// is set): inside a container the Runtime Broker started, the scion-token file is freshly
+// minted for *this* Hub, not stale, and some Hub endpoints (e.g. an agent's own outbound
+// message to a user) require the real per-agent identity that only that token carries —
+// dev auth resolves to a superuser/dev identity, not any specific agent, so it 401s on
+// self-only endpoints.
 func createHubClient(settings *config.Settings, endpoint string) (hubclient.Client, error) {
 	var opts []hubclient.Option
 
@@ -1353,7 +1356,7 @@ func createHubClient(settings *config.Settings, endpoint string) (hubclient.Clie
 	// 2. Check for agent token from canonical token file, then bootstrap env var
 	if !authConfigured {
 		if token := readAgentTokenFile(); token != "" {
-			if !apiclient.IsDevToken(token) && isLocalhostEndpoint(endpoint) {
+			if !apiclient.IsDevToken(token) && isLocalhostEndpoint(endpoint) && !config.IsHubManagedAgent() {
 				if devToken := apiclient.ResolveDevToken(); devToken != "" {
 					opts = append(opts, hubclient.WithBearerToken(devToken))
 					authConfigured = true
@@ -1413,11 +1416,6 @@ func wrapHubError(err error) error {
 		return err
 	}
 	return fmt.Errorf("%w\n\nTo use local-only mode, use: scion --no-hub <command>", err)
-}
-
-// containsIgnoreCase checks if a string contains a substring (case-insensitive).
-func containsIgnoreCase(s, substr string) bool {
-	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
 }
 
 // cleanupProjectBrokerCredentials removes stale broker credentials from project settings.

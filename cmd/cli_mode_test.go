@@ -3,6 +3,7 @@ package cmd
 import (
 	"os"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -64,6 +65,7 @@ func buildTestTree() *cobra.Command {
 
 	// Top-level commands
 	for _, name := range []string{
+		"broadcast",
 		"create", "delete", "list", "start", "stop", "attach", "look", "logs",
 		"message", "resume", "restore", "sync", "clean", "cdw", "init",
 		"doctor", "version",
@@ -78,9 +80,10 @@ func buildTestTree() *cobra.Command {
 
 	// config with subcommands
 	cfg := &cobra.Command{Use: "config"}
-	for _, name := range []string{"list", "set", "get", "validate", "migrate", "dir", "cd-config", "cd-grove", "schema"} {
+	for _, name := range []string{"list", "set", "get", "validate", "migrate", "dir", "cd-config", "schema"} {
 		cfg.AddCommand(&cobra.Command{Use: name})
 	}
+	cfg.AddCommand(&cobra.Command{Use: "cd-project"})
 	root.AddCommand(cfg)
 
 	// hub with subcommands
@@ -103,11 +106,6 @@ func buildTestTree() *cobra.Command {
 	hubToken.AddCommand(&cobra.Command{Use: "delete"})
 	hub.AddCommand(hubToken)
 
-	hubGrv := &cobra.Command{Use: "groves"}
-	hubGrv.AddCommand(&cobra.Command{Use: "info"})
-	hubGrv.AddCommand(&cobra.Command{Use: "delete"})
-	hub.AddCommand(hubGrv)
-
 	hubBrk := &cobra.Command{Use: "brokers"}
 	hubBrk.AddCommand(&cobra.Command{Use: "info"})
 	hubBrk.AddCommand(&cobra.Command{Use: "delete"})
@@ -128,16 +126,17 @@ func buildTestTree() *cobra.Command {
 
 	root.AddCommand(hub)
 
-	// grove with subcommands
-	grove := &cobra.Command{Use: "grove"}
+	// project with subcommands; canonical name is "project", "group" is a
+	// legacy alias that must resolve to the same command.
+	project := &cobra.Command{Use: "project", Aliases: []string{"group"}}
 	for _, name := range []string{"init", "list", "prune", "reconnect"} {
-		grove.AddCommand(&cobra.Command{Use: name})
+		project.AddCommand(&cobra.Command{Use: name})
 	}
-	groveSA := &cobra.Command{Use: "service-accounts"}
-	groveSA.AddCommand(&cobra.Command{Use: "add"})
-	groveSA.AddCommand(&cobra.Command{Use: "list"})
-	grove.AddCommand(groveSA)
-	root.AddCommand(grove)
+	projectSA := &cobra.Command{Use: "service-accounts"}
+	projectSA.AddCommand(&cobra.Command{Use: "add"})
+	projectSA.AddCommand(&cobra.Command{Use: "list"})
+	project.AddCommand(projectSA)
+	root.AddCommand(project)
 
 	// server with subcommands
 	server := &cobra.Command{Use: "server"}
@@ -241,8 +240,8 @@ func TestApplyModeRestrictions_Assistant(t *testing.T) {
 	removed := []string{
 		"hub.auth", "hub.auth.login", "hub.auth.logout",
 		"hub.token", "hub.token.create", "hub.token.list", "hub.token.revoke", "hub.token.delete",
-		"grove.reconnect",
-		"config.migrate", "config.cd-config", "config.cd-grove",
+		"project.reconnect",
+		"config.migrate", "config.cd-config", "config.cd-project",
 		"cdw",
 		"clean",
 	}
@@ -255,8 +254,8 @@ func TestApplyModeRestrictions_Assistant(t *testing.T) {
 		"create", "delete", "list", "start", "stop", "attach",
 		"config", "config.list", "config.set", "config.get", "config.validate", "config.dir", "config.schema",
 		"hub", "hub.status", "hub.enable", "hub.disable", "hub.link", "hub.unlink",
-		"hub.groves", "hub.brokers", "hub.env", "hub.secret",
-		"grove", "grove.init", "grove.list", "grove.prune", "grove.service-accounts",
+		"hub.brokers", "hub.env", "hub.secret",
+		"project", "project.init", "project.list", "project.prune", "project.service-accounts",
 		"server", "server.start", "server.stop",
 		"broker",
 		"templates",
@@ -283,6 +282,11 @@ func TestApplyModeRestrictions_Agent(t *testing.T) {
 		"notifications",
 		"notifications.ack", "notifications.subscribe", "notifications.subscriptions",
 		"notifications.unsubscribe", "notifications.update",
+		// "project" itself stays allowed (mirrors the real agentAllowed map,
+		// which permits bare "project" so "project.skills" routes through
+		// it), even though none of its subcommands in this fake tree are
+		// agent-allowed and so are stripped below.
+		"project",
 		"resume",
 		"schedule", "schedule.cancel", "schedule.create", "schedule.create-recurring",
 		"schedule.delete", "schedule.get", "schedule.history", "schedule.list",
@@ -304,9 +308,13 @@ func TestApplyModeRestrictions_Agent(t *testing.T) {
 
 	// These should be removed
 	absent := []string{
-		"attach", "broker", "cdw", "clean", "completion", "config", "doctor",
-		"grove", "hub",
+		"attach", "broadcast", "broker", "cdw", "clean", "completion", "config", "doctor",
+		"hub",
 		"init", "messages", "restore", "server", "sync",
+		// "project" itself remains (see expected list above), but none of
+		// its subcommands are agent-allowed.
+		"project.init", "project.list", "project.prune", "project.reconnect",
+		"project.service-accounts", "project.service-accounts.add", "project.service-accounts.list",
 	}
 	for _, cmd := range absent {
 		assert.NotContains(t, remaining, cmd, "agent mode should remove %s", cmd)
@@ -392,8 +400,8 @@ func TestRemoveCommands_DoesNotPanicOnEmptyTree(t *testing.T) {
 func TestAssistantDeniedList(t *testing.T) {
 	expectedDenied := []string{
 		"hub.auth", "hub.token",
-		"grove.reconnect",
-		"config.migrate", "config.cd-config", "config.cd-grove",
+		"project.reconnect",
+		"config.migrate", "config.cd-config", "config.cd-project",
 		"cdw", "clean",
 	}
 	for _, path := range expectedDenied {
@@ -402,7 +410,7 @@ func TestAssistantDeniedList(t *testing.T) {
 
 	notDenied := []string{
 		"create", "list", "hub.status", "config.list", "config.set",
-		"server", "grove.init", "templates",
+		"server", "project.init", "templates",
 	}
 	for _, path := range notDenied {
 		assert.False(t, assistantDenied[path], "assistantDenied should NOT contain %s", path)
@@ -433,13 +441,13 @@ func TestAgentAllowedList(t *testing.T) {
 	}
 
 	notAllowed := []string{
-		"attach", "restore", "sync", "clean", "cdw", "init",
+		"attach", "broadcast", "restore", "sync", "clean", "cdw", "init",
 		"completion", "config", "doctor", "hub", "messages",
-		"server", "broker", "grove",
+		"server", "broker",
 		"config.set", "config.validate", "config.migrate",
 		"config.list", "config.get", "config.dir", "config.schema",
 		"hub.enable", "hub.disable", "hub.link", "hub.unlink",
-		"hub.auth", "hub.token", "hub.groves", "hub.brokers",
+		"hub.auth", "hub.token", "hub.brokers",
 		"hub.env", "hub.secret", "hub.status", "hub.notifications",
 		"messages.read",
 		"shared-dir.create", "shared-dir.remove",
@@ -454,4 +462,96 @@ func TestResolveModeEnvOverridesSettings(t *testing.T) {
 	t.Setenv("SCION_CLI_MODE", "agent")
 	mode := resolveMode()
 	require.Equal(t, ModeAgent, mode)
+}
+
+// resolveCommandPath walks a dot-separated command path (as produced by
+// removeCommands, using each command's canonical Name(), never an Aliases
+// entry) starting at root, and returns the command it points to, or nil if
+// no such command exists.
+func resolveCommandPath(root *cobra.Command, path string) *cobra.Command {
+	current := root
+	for _, seg := range strings.Split(path, ".") {
+		var next *cobra.Command
+		for _, child := range current.Commands() {
+			if child.Name() == seg {
+				next = child
+				break
+			}
+		}
+		if next == nil {
+			return nil
+		}
+		current = next
+	}
+	return current
+}
+
+// TestAssistantDeniedKeysResolveToRealCommands guards against the denylist
+// drifting out of sync with the real command tree: a key built from a stale
+// or aliased name instead of a command's canonical name silently never
+// matches anything in removeCommands, so the command it names is never
+// actually hidden. This walks every
+// assistantDenied key against the real rootCmd tree (populated by this
+// package's init() functions) and fails if any key does not resolve.
+func TestAssistantDeniedKeysResolveToRealCommands(t *testing.T) {
+	for path := range assistantDenied {
+		t.Run(path, func(t *testing.T) {
+			cmd := resolveCommandPath(rootCmd, path)
+			assert.NotNil(t, cmd,
+				"assistantDenied key %q does not resolve to any command in the real root command tree "+
+					"(paths must use each command's canonical Name(), not an Aliases entry)", path)
+		})
+	}
+}
+
+// ptone/scion#1968: agents may browse the hub skill bank read-only. The
+// allowlisted skill paths must resolve to real commands, and every mutating
+// skill verb must stay out of agent mode.
+func TestAgentAllowedSkillBrowse(t *testing.T) {
+	for _, path := range []string{"skills", "skills.list", "skills.show", "skill", "skill.list"} {
+		assert.True(t, agentAllowed[path], "agentAllowed should contain %s", path)
+		assert.NotNil(t, resolveCommandPath(rootCmd, path),
+			"agentAllowed key %q must resolve to a real command", path)
+	}
+	for _, path := range []string{
+		"skills.create", "skills.publish", "skills.delete", "skills.deprecate",
+		"skills.registries", "skills.registries.add", "skills.registries.update",
+		"skills.registries.remove", "skills.registries.pin",
+	} {
+		assert.False(t, agentAllowed[path], "agentAllowed must NOT contain mutating skill verb %s", path)
+	}
+}
+
+// cloneCommandShape copies the names of cmd and its subcommands into a fresh
+// tree, so mode filtering can run against the real command layout without
+// mutating the shared rootCmd.
+func cloneCommandShape(cmd *cobra.Command) *cobra.Command {
+	c := &cobra.Command{Use: cmd.Name(), Run: func(*cobra.Command, []string) {}}
+	for _, child := range cmd.Commands() {
+		c.AddCommand(cloneCommandShape(child))
+	}
+	return c
+}
+
+// ptone/scion#1968: runs agent-mode filtering over a copy of the real skills
+// and skill subtrees and checks that exactly the read-only browse verbs
+// survive, so a mistyped allowlist key or a new mutating verb fails here.
+func TestApplyModeRestrictions_AgentRealSkillTree(t *testing.T) {
+	t.Setenv("SCION_CLI_MODE", "agent")
+	root := &cobra.Command{Use: "scion"}
+	for _, name := range []string{"skills", "skill"} {
+		real := resolveCommandPath(rootCmd, name)
+		require.NotNil(t, real, "real command %q must exist", name)
+		root.AddCommand(cloneCommandShape(real))
+	}
+	before := collectCommandNames(root)
+	for _, mutating := range []string{"skills.create", "skills.publish", "skills.delete", "skills.deprecate"} {
+		require.Contains(t, before, mutating, "real tree should contain %s before filtering", mutating)
+	}
+
+	applyModeRestrictions(root)
+
+	assert.Equal(t, []string{"skill", "skill.list", "skills", "skills.list", "skills.show"},
+		collectCommandNames(root),
+		"agent mode must keep exactly the read-only skill browse verbs")
 }

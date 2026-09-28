@@ -125,9 +125,9 @@ describe('StateManager user-scoped notification subject', () => {
 
   it('subscribes to the per-user notification subject in chat scope before the user id is set', () => {
     const sm = new StateManager();
-    const subjects = (
-      sm as unknown as { subjectsForScope(s: unknown): string[] }
-    ).subjectsForScope({ type: 'chat', spaceIds: ['p1'], userId: 'me' });
+    const subjects = (sm as unknown as { subjectsForScope(s: unknown): string[] }).subjectsForScope(
+      { type: 'chat', spaceIds: ['p1'], userId: 'me' }
+    );
 
     // `user.me.chat.>` does not match `user.me.notification` — the chat scope
     // needs the notification subject listed in its own right.

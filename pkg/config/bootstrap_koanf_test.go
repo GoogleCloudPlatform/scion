@@ -368,6 +368,95 @@ func TestLoadBootstrapKoanf_SingleValueListEnv(t *testing.T) {
 	}
 }
 
+// TestLoadBootstrapKoanf_EmbeddedAgentDefaults_AppliesOnUnseededInstance is
+// the regression test for ptone/scion#1306: on an un-seeded instance (no
+// settings.yaml on disk, no SCION_SEED_*/SCION_SERVER_* env vars),
+// LoadBootstrapKoanf must still produce default_template/default_harness_config
+// from the embedded settings file, rather than leaving them absent. Before this
+// fix, the coded-defaults layer never included these two keys at all, so an
+// agent-create request that omitted harnessConfig resolved to an empty name
+// and the broker returned a 502 for "harness-config \"\" not found" (or, once
+// the value was seeded through some other path, the same failure for whatever
+// name ended up there) instead of picking up the product default.
+func TestLoadBootstrapKoanf_EmbeddedAgentDefaults_AppliesOnUnseededInstance(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	// Deliberately do NOT create .scion/ or a settings.yaml — this is the
+	// un-seeded, first-boot state.
+
+	wantTemplate, wantHarnessConfig := embeddedAgentDefaultsForTest(t)
+	if wantHarnessConfig == "" {
+		t.Fatal("test setup: embedded default_harness_config is empty; embeds/default_settings.yaml may have changed shape")
+	}
+
+	k := LoadBootstrapKoanf()
+
+	if v := k.String("default_template"); v != wantTemplate {
+		t.Errorf("expected default_template = %q (from embedded defaults), got %q", wantTemplate, v)
+	}
+	if v := k.String("default_harness_config"); v != wantHarnessConfig {
+		t.Errorf("expected default_harness_config = %q (from embedded defaults), got %q", wantHarnessConfig, v)
+	}
+}
+
+// TestLoadBootstrapKoanf_EmbeddedAgentDefaults_YamlOverrides verifies that the
+// embedded agent-defaults layer sits at the bottom of the precedence chain:
+// a value in settings.yaml must still win, exactly like every other coded
+// default in LoadBootstrapKoanf.
+func TestLoadBootstrapKoanf_EmbeddedAgentDefaults_YamlOverrides(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	scionDir := filepath.Join(tmpDir, ".scion")
+	if err := os.MkdirAll(scionDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	settingsContent := `schema_version: "1"
+default_harness_config: my-custom-hc
+default_template: my-custom-template
+`
+	if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(settingsContent), 0644); err != nil {
+		t.Fatalf("write settings.yaml: %v", err)
+	}
+
+	k := LoadBootstrapKoanf()
+
+	if v := k.String("default_harness_config"); v != "my-custom-hc" {
+		t.Errorf("settings.yaml should override the embedded default: expected %q, got %q", "my-custom-hc", v)
+	}
+	if v := k.String("default_template"); v != "my-custom-template" {
+		t.Errorf("settings.yaml should override the embedded default: expected %q, got %q", "my-custom-template", v)
+	}
+}
+
+// TestLoadBootstrapKoanf_EmbeddedAgentDefaults_SeedEnvOverrides verifies that
+// SCION_SEED_DEFAULTHARNESSCONFIG — the operator-facing seed knob — overrides
+// the embedded default, consistent with every other coded default.
+func TestLoadBootstrapKoanf_EmbeddedAgentDefaults_SeedEnvOverrides(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	t.Setenv("SCION_SEED_DEFAULTHARNESSCONFIG", "seed-hc")
+
+	k := LoadBootstrapKoanf()
+
+	if v := k.String("default_harness_config"); v != "seed-hc" {
+		t.Errorf("SCION_SEED_DEFAULTHARNESSCONFIG should override the embedded default: expected %q, got %q", "seed-hc", v)
+	}
+}
+
+// embeddedAgentDefaultsForTest reads the same embedded settings file
+// LoadBootstrapKoanf uses and returns its default_template/default_harness_config
+// values, so tests assert against the real embedded content instead of a
+// hardcoded literal that would drift silently if the embed changed.
+func embeddedAgentDefaultsForTest(t *testing.T) (template, harnessConfig string) {
+	t.Helper()
+	m := embeddedAgentDefaultsKoanfMap()
+	template, _ = m["default_template"].(string)
+	harnessConfig, _ = m["default_harness_config"].(string)
+	return template, harnessConfig
+}
+
 func indexOf(s string, c byte) int {
 	for i := 0; i < len(s); i++ {
 		if s[i] == c {

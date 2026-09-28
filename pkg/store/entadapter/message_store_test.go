@@ -145,6 +145,31 @@ func TestListMessagesFilters(t *testing.T) {
 	assert.Equal(t, 1, res.TotalCount)
 }
 
+func TestListMessagesExcludeTypeAndSkipCount(t *testing.T) {
+	s := newTestMessageStore(t)
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	for i, kind := range []string{"chat", "instruction", "mention"} {
+		msg := newTestMessage(projectID, "agent-1")
+		msg.Type = kind
+		msg.CreatedAt = time.Now().Add(time.Duration(i) * time.Second)
+		require.NoError(t, s.CreateMessage(ctx, msg))
+	}
+	filter := store.MessageFilter{ExcludeType: "mention"}
+	page, err := s.ListMessages(ctx, filter, store.ListOptions{Limit: 1, SkipTotalCount: true})
+	require.NoError(t, err)
+	require.Len(t, page.Items, 1)
+	assert.Equal(t, "instruction", page.Items[0].Type)
+	assert.Zero(t, page.TotalCount)
+	require.NotEmpty(t, page.NextCursor)
+	next, err := s.ListMessages(ctx, filter, store.ListOptions{Limit: 1, Cursor: page.NextCursor})
+	require.NoError(t, err)
+	require.Len(t, next.Items, 1)
+	assert.Equal(t, "chat", next.Items[0].Type)
+	assert.Equal(t, 2, next.TotalCount)
+	assert.Empty(t, next.NextCursor)
+}
+
 func TestPurgeOldMessages(t *testing.T) {
 	s := newTestMessageStore(t)
 	ctx := context.Background()
@@ -175,6 +200,41 @@ func TestPurgeOldMessages(t *testing.T) {
 	require.NoError(t, err)
 	_, err = s.GetMessage(ctx, recent.ID)
 	require.NoError(t, err)
+}
+
+func TestPurgeFailedMessages(t *testing.T) {
+	s := newTestMessageStore(t)
+	ctx := context.Background()
+	projectID := uuid.NewString()
+
+	oldFailed := newTestMessage(projectID, "agent-1")
+	oldFailed.DispatchState = store.MessageDispatchFailed
+	oldFailed.CreatedAt = time.Now().Add(-10 * 24 * time.Hour).UTC().Truncate(time.Second)
+	require.NoError(t, s.CreateMessage(ctx, oldFailed))
+
+	recentFailed := newTestMessage(projectID, "agent-1")
+	recentFailed.DispatchState = store.MessageDispatchFailed
+	require.NoError(t, s.CreateMessage(ctx, recentFailed))
+
+	// A dispatched (successfully delivered) message old enough to be purged
+	// by PurgeOldMessages semantics, but must survive PurgeFailedMessages
+	// since it filters strictly on dispatch_state=failed.
+	oldDelivered := newTestMessage(projectID, "agent-1")
+	oldDelivered.DispatchState = store.MessageDispatchDispatched
+	oldDelivered.CreatedAt = time.Now().Add(-10 * 24 * time.Hour).UTC().Truncate(time.Second)
+	require.NoError(t, s.CreateMessage(ctx, oldDelivered))
+
+	cutoff := time.Now().Add(-7 * 24 * time.Hour)
+	n, err := s.PurgeFailedMessages(ctx, cutoff)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n, "only the old failed message is purged")
+
+	_, err = s.GetMessage(ctx, oldFailed.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	_, err = s.GetMessage(ctx, recentFailed.ID)
+	require.NoError(t, err, "recent failed message is within the retention window")
+	_, err = s.GetMessage(ctx, oldDelivered.ID)
+	require.NoError(t, err, "delivered message history is never purged by this sweep")
 }
 
 // fakePublisher records PublishUserMessage calls to verify the LISTEN/NOTIFY

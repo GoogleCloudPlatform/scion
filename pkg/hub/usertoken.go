@@ -187,6 +187,17 @@ func (s *UserTokenService) GenerateAccessToken(userID, email, displayName, role 
 	return token, int64(duration.Seconds()), nil
 }
 
+// GenerateAccessTokenWithTTL generates an access token with a specific duration.
+// Used by GE exchange to cryptographically cap the token lifetime at
+// min(configured TTL, upstream credential expiry).
+func (s *UserTokenService) GenerateAccessTokenWithTTL(userID, email, displayName, role string, clientType ClientType, ttl time.Duration) (string, int64, error) {
+	token, err := s.generateToken(userID, email, displayName, role, TokenTypeAccess, clientType, ttl)
+	if err != nil {
+		return "", 0, err
+	}
+	return token, int64(ttl.Seconds()), nil
+}
+
 // generateToken creates a signed JWT token.
 func (s *UserTokenService) generateToken(userID, email, displayName, role string, tokenType UserTokenType, clientType ClientType, duration time.Duration) (string, error) {
 	now := time.Now()

@@ -212,7 +212,7 @@ export type AgentPhase =
 /**
  * Message mode controlling an agent's messaging authorization scope
  */
-export type MessageMode = 'none' | 'lineage' | 'branch' | 'project';
+export type MessageMode = 'none' | 'lineage' | 'branch' | 'project' | 'hub';
 
 // ---------------------------------------------------------------------------
 // Cascade mode change types
@@ -251,7 +251,50 @@ export interface AgentMessageability {
     | 'mode_branch_no_edge'
     | 'mode_lineage_agent_to_agent'
     | 'mode_none_sender'
-    | 'missing_permission';
+    | 'missing_permission'
+    | 'cross_project_disabled'
+    | 'cross_project_sender_mode'
+    | 'cross_project_target_mode'
+    | 'cross_project_inbound_none'
+    | 'cross_project_origin_not_member'
+    | 'cross_project_untrusted_origin'
+    | 'cross_project_surface_unsupported'
+    | 'denied';
+  /** Reason code when canReachViewer is false */
+  replyReason?: string;
+}
+
+/**
+ * Cross-project inbound policy for a project.
+ * Controls which external agents may send messages to agents in this project.
+ */
+export type CrossProjectInboundPolicy = 'none' | 'members' | 'any';
+
+/**
+ * Messaging policy for a project (GET /api/v1/projects/{id}/messaging-policy).
+ */
+export interface ProjectMessagingPolicy {
+  /** Configured inbound policy: "none", "members", "any" */
+  crossProjectInbound: CrossProjectInboundPolicy;
+  /** Optimistic concurrency revision */
+  revision: number;
+  /** Effective policy considering Hub switch state */
+  effectiveCrossProjectInbound: CrossProjectInboundPolicy;
+  /** Whether the Hub-level cross-project messaging is enabled */
+  hubCrossProjectEnabled: boolean;
+  /** Supported cross-project conversation kinds */
+  capabilities?: {
+    crossProjectConversationKinds: string[];
+  };
+}
+
+/**
+ * Hub-level messaging settings (GET /api/v1/admin/messaging).
+ */
+export interface HubMessagingSettings {
+  conversation_envelope_switch: boolean;
+  cross_project_messaging_enabled: boolean;
+  revision: number;
 }
 
 /** Present on agent DETAIL responses only. O(n) per agent — too costly for lists. */
@@ -315,6 +358,48 @@ export function getAgentDisplayStatus(agent: Agent): string {
  */
 export function isAgentRunning(agent: Agent): boolean {
   return agent.phase === 'running';
+}
+
+/**
+ * Confirmation copy shown before a best-effort resume of an error-phase
+ * agent (POST /start with `{ forceResume: true }`). The agent's home
+ * directory and harness session are usually still intact even after a host
+ * crash, but the crash itself may have corrupted that state, so the resume
+ * is best-effort rather than guaranteed.
+ */
+export const RESUME_BEST_EFFORT_CONFIRM_MESSAGE =
+  'This agent stopped unexpectedly. Resume will try to continue its previous session from the saved home directory. This may fail or behave oddly if the crash corrupted session state. Start instead begins a fresh session with the original task.';
+
+/**
+ * A lifecycle action a caller can request for an agent from the UI.
+ * `force-resume` posts to the same `/start` endpoint as `start`/`resume`,
+ * but with a body asking the hub for a best-effort resume of an
+ * error-phase agent's interrupted harness session (see
+ * RESUME_BEST_EFFORT_CONFIRM_MESSAGE).
+ */
+export type AgentLifecycleAction =
+  | 'start'
+  | 'stop'
+  | 'suspend'
+  | 'resume'
+  | 'delete'
+  | 'force-resume';
+
+/**
+ * Builds the fetch RequestInit for POSTing an agent lifecycle action.
+ * Only `force-resume` needs a JSON body; every other action (including the
+ * plain `start` that a suspended/stopped/error agent otherwise uses) posts
+ * with no body, matching the Hub's existing `/start` and `/stop` handlers.
+ */
+export function lifecycleActionRequestInit(action: AgentLifecycleAction): RequestInit {
+  if (action === 'force-resume') {
+    return {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ forceResume: true }),
+    };
+  }
+  return { method: 'POST' };
 }
 
 /**
@@ -495,7 +580,6 @@ export interface Agent {
   slug?: string;
   image?: string;
   runtime?: string;
-  visibility?: string;
   createdBy?: string;
   appliedConfig?: AgentAppliedConfig;
 
@@ -733,20 +817,28 @@ export interface Message {
   channel?: string;
   /** Thread identifier (e.g. "agent:<agentId>"). Phase 0 addition. */
   threadId?: string;
-  /** Visibility level: "normal", "verbose", or "full". Phase 0 addition. */
-  visibility?: string;
   /** Group identifier for related messages. */
   groupId?: string;
   /** Dispatch state: "pending", "dispatched", or "failed". */
   dispatchState?: string;
   /** Reason for dispatch failure, if any. */
   dispatchFailureReason?: string;
+  /**
+   * Machine-readable dispatch failure code, e.g. "agent_unreachable"
+   * (nc-delivery-unreachable). Only present on rows returned by the chat v2
+   * send response; history rows fall back to matching the reason prefix.
+   */
+  dispatchFailureCode?: string;
   /** Whether the message was sent with plain formatting. */
   plain?: boolean;
   /** File attachment paths. */
   attachments?: string[];
   /** Arbitrary metadata attached to the message. */
   metadata?: Record<string, unknown>;
+  /** Server-derived sender project ID for cross-project provenance. */
+  senderProjectId?: string;
+  /** Server-derived recipient project ID for cross-project provenance. */
+  recipientProjectId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -833,22 +925,29 @@ export function can(capabilities: Capabilities | undefined, action: string): boo
 
 /**
  * Whether the viewer may run agent lifecycle actions (start, stop, suspend,
- * resume).
+ * restart, restore).
  *
- * These are authorized server-side by `authorizeAgentLifecycle`, the same gate
- * that governs `attach` (see handlers_projects_core.go, where AgentActionStart
- * and AgentActionStop route through it). The permission registry defines no
- * `agent.start` and no per-agent `agent.stop` - only the scope-level
- * `agent.stop_all` - so `ComputeCapabilities` can never emit "start" or "stop",
- * and gating on those names hides the controls from every user including
- * super-admins.
- *
- * Gating on the capability the Hub actually enforces keeps the UI truthful. If
- * start/stop should become separately governed, that needs registry entries
- * plus role updates, and this helper is the single place to change.
+ * These are authorized server-side by `authorizeAgentLifecycle` with the
+ * `agent.lifecycle` permission (ActionLifecycle). Project owners/admins hold
+ * it for every agent in the project; other users get it on agents they own or
+ * spawned. It is deliberately separate from `attach`, which gates terminal /
+ * exec / env access and is NOT granted to owners/admins on other members'
+ * agents, because those agents run with their owner's secrets
+ * (miller79/scion#88).
  */
 export function canLifecycle(capabilities: Capabilities | undefined): boolean {
-  return can(capabilities, 'attach');
+  return can(capabilities, 'lifecycle');
+}
+
+/**
+ * Whether the viewer may offer the message composer for an agent. Messaging is
+ * authorized server-side by `authorizeAgentMessage` (a scope-level axis with no
+ * per-agent capability), so the UI uses per-agent management capability as the
+ * proxy: `lifecycle` (owners/admins and the agent's creator) or `attach`.
+ * `_messageability` remains the authoritative per-agent signal where present.
+ */
+export function canMessageAgent(capabilities: Capabilities | undefined): boolean {
+  return can(capabilities, 'lifecycle') || can(capabilities, 'attach');
 }
 
 /**
@@ -904,6 +1003,8 @@ export interface GCPServiceAccount {
 export interface GCPMintQuotaInfo {
   project_minted: number;
   project_cap: number;
+  hub_minted?: number;
+  hub_cap?: number;
   global_minted: number;
   global_cap: number;
 }
@@ -949,7 +1050,6 @@ export interface PolicyConditions {
 // ---------------------------------------------------------------------------
 
 export type SkillScope = 'core' | 'global' | 'project' | 'user';
-export type SkillVisibility = 'public' | 'private';
 export type SkillVersionStatus = 'draft' | 'published' | 'deprecated' | 'archived';
 
 export interface Skill {
@@ -963,7 +1063,6 @@ export interface Skill {
   status: string;
   ownerId?: string;
   createdBy?: string;
-  visibility: SkillVisibility;
   created: string;
   updated: string;
   _capabilities?: Capabilities;

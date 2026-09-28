@@ -4,14 +4,17 @@ title: Release Notes
 
 Scion release notes are published weekly.
 
-## Latest: Week of August 31 -- September 6, 2026
+## Latest: Week of September 21 -- 27, 2026
 
-This week completed the authorization foundation refactor, replacing the legacy dual Policy/RoleBinding grant model with a unified, positive-authority RoleBinding system and shipping end-to-end access boundaries with a full admin UI. The Cloud Run sandbox received significant hardening for the single-node tier, including a gVisor capability discovery that forced a UID strategy change. Several critical credential-management fixes landed — notably a P0 GITHUB_TOKEN injection regression and a GCP Secret Manager mapping error that caused approximately 15 hours of Discord downtime.
+The grove→project rename reached its breaking phase: legacy grove routes, CLI flags, API keys, event topics, container labels, environment variables and hub↔broker wire fields were removed, on-disk state now migrates automatically, and hub and broker must be upgraded together. Alongside it, a broad authorization sweep closed cross-member and cross-project exposure paths, single-node VM deployment became headless, self-updating and Vertex-ready out of the box, and the persistent terminal workspace gained shareable layouts and auto-reconnect.
 
-[Read the full release notes for this week ->](/scion/release-notes/2026-08-31/)
+[Read the full release notes for this week ->](/scion/release-notes/2026-09-21/)
 
 ## Previous Weeks
 
+- [Week of September 14 -- 20, 2026](/scion/release-notes/2026-09-14/)
+- [Week of September 7 -- 13, 2026](/scion/release-notes/2026-09-07/)
+- [Week of August 31 -- September 6, 2026](/scion/release-notes/2026-08-31/)
 - [Week of August 24 -- 30, 2026](/scion/release-notes/2026-08-24/)
 - [Week of August 17 -- 23, 2026](/scion/release-notes/2026-08-17/)
 - [Week of August 10 -- 16, 2026](/scion/release-notes/2026-08-10/)

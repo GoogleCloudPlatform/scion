@@ -78,7 +78,7 @@ func TestResolveEnvFromStorage_InjectionMode(t *testing.T) {
 	d := NewHTTPAgentDispatcherWithClient(memStore, &mockRuntimeBrokerClient{}, false, slog.Default())
 	d.SetHubID(envScopeTestHubID)
 
-	resolved, err := d.resolveEnvFromStorage(ctx, agent)
+	resolved, _, err := d.resolveEnvFromStorage(ctx, agent)
 	if err != nil {
 		t.Fatalf("resolveEnvFromStorage: %v", err)
 	}

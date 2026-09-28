@@ -88,6 +88,8 @@ skills:
 
 At provisioning time Scion resolves every required skill, downloads its files (using the [content-hash cache](#content-hash-caching)), and mounts them into the harness's skills directory (for example `.claude/skills/` or `.gemini/skills/`).
 
+When a Hub dispatches the agent, the Hub resolves Hub-registry skill references with the permissions of the principal creating the agent. That principal is the user, or the parent agent when an agent creates a child. The Runtime Broker's own identity is not used. A required non-public skill therefore provisions whenever the agent's creator can read it. If the creator cannot, provisioning fails with `the agent's creator does not have permission to access this skill`. The broker installs Hub-resolved skills as-is. It resolves only what the Hub did not cover itself, such as `gh://`, `gcp-skill://`, federated registries, and references found only in broker-local templates.
+
 ## Skill reference URIs
 
 A skill reference is either a **bare name** or a full `skill://` URI. Federated sources use their own schemes (`gh://`, `gcp-skill://`).
@@ -211,8 +213,12 @@ scion skills publish ./deploy-checklist --version 1.1.0 --skill-id <skill-id>
 | Flag | Default | Description |
 | :--- | :--- | :--- |
 | `--version` | *(required)* | SemVer version to publish (e.g. `1.0.0`). |
-| `--scope` | `global` | Scope for a **newly created** skill: `core`, `global`, `project`, or `user`. |
+| `--scope` | `global` | Scope for a **newly created** skill: `core`, `global`, `project`, or `user`. With `project`, the skill is attached to the current Hub-linked project. The command fails if no project can be determined (run `scion hub link` first). |
 | `--skill-id` | *(auto)* | Publish a new version for an existing skill ID. If omitted, Scion matches by directory name and creates the skill when no match exists. |
+
+:::note[Global scope permissions]
+Publishing a skill to the `global` scope requires either the `hub-admin` role or the `global-catalog-author` role. The `global-catalog-author` role grants only the `skill.create_global` permission, allowing non-admin users to author global catalog skills without full Hub administrator authority. See [Permissions & Policy](/scion/hosted/ha/permissions/#roles) for role details.
+:::
 
 **Per-version limits:** at most **50 files**, **10 MB** per file, and **50 MB** total. `.git/`, `.DS_Store`, `__pycache__`, and files matching `.gitignore` patterns are excluded automatically.
 
@@ -277,6 +283,16 @@ Most commands accept either a skill **name** or **ID**. Add the global `--format
 :::tip
 `scion skill` (singular) is an alias for `scion skills`.
 :::
+
+### From inside an agent
+
+Agents can browse skills too. In agent mode, the CLI allows `scion skills list` and `scion skills show`, but not `versions`, `resolve`, or `delete`. Access is read-only. An agent can see:
+
+- The Hub's global skill catalog
+- Skills scoped to the agent's own project
+- The personal (user-scoped) skills of the user at the root of the agent's creation chain
+
+Other projects' skills and other users' personal skills are not visible. Agent project scope and the creator's delegated permissions still apply on top of these grants.
 
 ## Auto-Injected Skills (Multi-Scope)
 

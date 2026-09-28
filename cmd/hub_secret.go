@@ -15,7 +15,6 @@
 package cmd
 
 import (
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -198,11 +197,6 @@ func init() {
 		cmd.Flags().StringVar(&secretProjectScope, "project", "", "Project scope (bare flag infers current project, or use --project=<name|id>)")
 		cmd.Flags().Lookup("project").NoOptDefVal = scopeInferSentinel
 
-		cmd.Flags().StringVar(&secretProjectScope, "grove", "", "Deprecated alias for --project")
-		cmd.Flags().Lookup("grove").NoOptDefVal = scopeInferSentinel
-		_ = cmd.Flags().MarkDeprecated("grove", "use --project instead")
-		_ = cmd.Flags().MarkHidden("grove")
-
 		cmd.Flags().StringVar(&secretBrokerScope, "broker", "", "Broker scope (bare flag infers current broker, or use --broker=<name|id>)")
 		cmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
 	}
@@ -230,7 +224,6 @@ func init() {
 func resolveSecretScope(cmd *cobra.Command, settings *config.Settings) (scope, scopeID string, err error) {
 	scopeSet := cmd.Flags().Changed("scope")
 	projectSet := cmd.Flags().Changed("project")
-	projectAliasSet := cmd.Flags().Changed("grove")
 	brokerSet := cmd.Flags().Changed("broker")
 
 	// Enforce mutual exclusivity
@@ -238,7 +231,7 @@ func resolveSecretScope(cmd *cobra.Command, settings *config.Settings) (scope, s
 	if scopeSet {
 		setCount++
 	}
-	if projectSet || projectAliasSet {
+	if projectSet {
 		setCount++
 	}
 	if brokerSet {
@@ -259,7 +252,7 @@ func resolveSecretScope(cmd *cobra.Command, settings *config.Settings) (scope, s
 		}
 	}
 
-	if projectSet || projectAliasSet {
+	if projectSet {
 		scope = "project"
 		projectVal := secretProjectScope
 		if projectVal == scopeInferSentinel {
@@ -355,33 +348,11 @@ func runSecretSet(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	client, scope, scopeID, ctx, cancel, err := resolveHubScope(cmd, resolveSecretScope)
 	if err != nil {
 		return err
 	}
-
-	scope, scopeID, err := resolveSecretScope(cmd, settings)
-	if err != nil {
-		return err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
-	scopeID, err = resolveScopeID(ctx, client, scope, scopeID)
-	if err != nil {
-		return err
-	}
 
 	req := &hubclient.SetSecretRequest{
 		Value:   value,
@@ -421,107 +392,61 @@ func runSecretSet(cmd *cobra.Command, args []string) error {
 }
 
 func runSecretGet(cmd *cobra.Command, args []string) error {
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
+	if len(args) != 1 {
+		return runSecretList(cmd, nil)
 	}
 
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	client, scope, scopeID, ctx, cancel, err := resolveHubScope(cmd, resolveSecretScope)
 	if err != nil {
 		return err
 	}
-
-	scope, scopeID, err := resolveSecretScope(cmd, settings)
-	if err != nil {
-		return err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	scopeID, err = resolveScopeID(ctx, client, scope, scopeID)
+	key := args[0]
+	opts := &hubclient.SecretScopeOptions{
+		Scope:   scope,
+		ScopeID: scopeID,
+	}
+
+	secret, err := client.Secrets().Get(ctx, key, opts)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get secret: %w", err)
 	}
 
-	// If key is provided, get specific secret metadata
-	if len(args) == 1 {
-		key := args[0]
-		opts := &hubclient.SecretScopeOptions{
-			Scope:   scope,
-			ScopeID: scopeID,
-		}
-
-		secret, err := client.Secrets().Get(ctx, key, opts)
-		if err != nil {
-			return fmt.Errorf("failed to get secret: %w", err)
-		}
-
-		if secretOutputJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			return enc.Encode(secret)
-		}
-
-		fmt.Printf("Secret: %s\n", secret.Key)
-		fmt.Printf("  Scope:   %s\n", secret.Scope)
-		typeLabel := secret.SecretType
-		if typeLabel == "" {
-			typeLabel = "environment"
-		}
-		fmt.Printf("  Type:    %s\n", typeLabel)
-		if secret.Target != "" && secret.Target != secret.Key {
-			fmt.Printf("  Target:  %s\n", secret.Target)
-		}
-		if secret.SecretRef != "" {
-			fmt.Printf("  Ref:     %s\n", secret.SecretRef)
-		}
-		fmt.Printf("  Version: %d\n", secret.Version)
-		fmt.Printf("  Created: %s\n", secret.Created.Format(time.RFC3339))
-		fmt.Printf("  Updated: %s\n", secret.Updated.Format(time.RFC3339))
-		if secret.Description != "" {
-			fmt.Printf("  Description: %s\n", secret.Description)
-		}
-		return nil
+	if secretOutputJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(secret)
 	}
 
-	// No key provided, delegate to list
-	return runSecretList(cmd, nil)
+	fmt.Printf("Secret: %s\n", secret.Key)
+	fmt.Printf("  Scope:   %s\n", secret.Scope)
+	typeLabel := secret.SecretType
+	if typeLabel == "" {
+		typeLabel = "environment"
+	}
+	fmt.Printf("  Type:    %s\n", typeLabel)
+	if secret.Target != "" && secret.Target != secret.Key {
+		fmt.Printf("  Target:  %s\n", secret.Target)
+	}
+	if secret.SecretRef != "" {
+		fmt.Printf("  Ref:     %s\n", secret.SecretRef)
+	}
+	fmt.Printf("  Version: %d\n", secret.Version)
+	fmt.Printf("  Created: %s\n", secret.Created.Format(time.RFC3339))
+	fmt.Printf("  Updated: %s\n", secret.Updated.Format(time.RFC3339))
+	if secret.Description != "" {
+		fmt.Printf("  Description: %s\n", secret.Description)
+	}
+	return nil
 }
 
 func runSecretList(cmd *cobra.Command, _ []string) error {
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	client, scope, scopeID, ctx, cancel, err := resolveHubScope(cmd, resolveSecretScope)
 	if err != nil {
 		return err
 	}
-
-	scope, scopeID, err := resolveSecretScope(cmd, settings)
-	if err != nil {
-		return err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
-	scopeID, err = resolveScopeID(ctx, client, scope, scopeID)
-	if err != nil {
-		return err
-	}
 
 	opts := &hubclient.ListSecretOptions{
 		Scope:   scope,
@@ -598,33 +523,11 @@ func runSecretUpdate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	client, scope, scopeID, ctx, cancel, err := resolveHubScope(cmd, resolveSecretScope)
 	if err != nil {
 		return err
 	}
-
-	scope, scopeID, err := resolveSecretScope(cmd, settings)
-	if err != nil {
-		return err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
-	scopeID, err = resolveScopeID(ctx, client, scope, scopeID)
-	if err != nil {
-		return err
-	}
 
 	req := &hubclient.UpdateSecretMetaRequest{
 		Scope:   scope,
@@ -667,33 +570,11 @@ func runSecretUpdate(cmd *cobra.Command, args []string) error {
 func runSecretClear(cmd *cobra.Command, args []string) error {
 	key := args[0]
 
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	client, scope, scopeID, ctx, cancel, err := resolveHubScope(cmd, resolveSecretScope)
 	if err != nil {
 		return err
 	}
-
-	scope, scopeID, err := resolveSecretScope(cmd, settings)
-	if err != nil {
-		return err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
-	scopeID, err = resolveScopeID(ctx, client, scope, scopeID)
-	if err != nil {
-		return err
-	}
 
 	opts := &hubclient.SecretScopeOptions{
 		Scope:   scope,

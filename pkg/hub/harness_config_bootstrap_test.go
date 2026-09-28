@@ -26,6 +26,14 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
+func (s *Server) importHarnessConfigsFromRemote(ctx context.Context, projectID, sourceURL string) ([]string, error) {
+	return s.importFromRemote(ctx, projectID, sourceURL, store.HarnessConfigScopeProject, s.harnessConfigImportKind(), nil, nil)
+}
+
+func (s *Server) importHarnessConfigsFromWorkspace(ctx context.Context, project *store.Project, workspacePath string) ([]string, error) {
+	return s.importFromWorkspace(ctx, project, workspacePath, store.HarnessConfigScopeProject, s.harnessConfigImportKind(), nil, nil)
+}
+
 // makeHarnessConfigDir creates a temp harness-configs directory with a single
 // config subdirectory containing config.yaml and optional extra files.
 // Returns the parent harness-configs directory.

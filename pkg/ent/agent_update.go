@@ -164,20 +164,6 @@ func (_u *AgentUpdate) SetNillableDelegationEnabled(v *bool) *AgentUpdate {
 	return _u
 }
 
-// SetVisibility sets the "visibility" field.
-func (_u *AgentUpdate) SetVisibility(v string) *AgentUpdate {
-	_u.mutation.SetVisibility(v)
-	return _u
-}
-
-// SetNillableVisibility sets the "visibility" field if the given value is not nil.
-func (_u *AgentUpdate) SetNillableVisibility(v *string) *AgentUpdate {
-	if v != nil {
-		_u.SetVisibility(*v)
-	}
-	return _u
-}
-
 // SetMessageMode sets the "message_mode" field.
 func (_u *AgentUpdate) SetMessageMode(v agent.MessageMode) *AgentUpdate {
 	_u.mutation.SetMessageMode(v)
@@ -736,6 +722,67 @@ func (_u *AgentUpdate) AddStateVersion(v int64) *AgentUpdate {
 	return _u
 }
 
+// SetGeneration sets the "generation" field.
+func (_u *AgentUpdate) SetGeneration(v int) *AgentUpdate {
+	_u.mutation.ResetGeneration()
+	_u.mutation.SetGeneration(v)
+	return _u
+}
+
+// SetNillableGeneration sets the "generation" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableGeneration(v *int) *AgentUpdate {
+	if v != nil {
+		_u.SetGeneration(*v)
+	}
+	return _u
+}
+
+// AddGeneration adds value to the "generation" field.
+func (_u *AgentUpdate) AddGeneration(v int) *AgentUpdate {
+	_u.mutation.AddGeneration(v)
+	return _u
+}
+
+// SetReincarnationState sets the "reincarnation_state" field.
+func (_u *AgentUpdate) SetReincarnationState(v string) *AgentUpdate {
+	_u.mutation.SetReincarnationState(v)
+	return _u
+}
+
+// SetNillableReincarnationState sets the "reincarnation_state" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableReincarnationState(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetReincarnationState(*v)
+	}
+	return _u
+}
+
+// ClearReincarnationState clears the value of the "reincarnation_state" field.
+func (_u *AgentUpdate) ClearReincarnationState() *AgentUpdate {
+	_u.mutation.ClearReincarnationState()
+	return _u
+}
+
+// SetReincarnationUpdatedAt sets the "reincarnation_updated_at" field.
+func (_u *AgentUpdate) SetReincarnationUpdatedAt(v time.Time) *AgentUpdate {
+	_u.mutation.SetReincarnationUpdatedAt(v)
+	return _u
+}
+
+// SetNillableReincarnationUpdatedAt sets the "reincarnation_updated_at" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableReincarnationUpdatedAt(v *time.Time) *AgentUpdate {
+	if v != nil {
+		_u.SetReincarnationUpdatedAt(*v)
+	}
+	return _u
+}
+
+// ClearReincarnationUpdatedAt clears the value of the "reincarnation_updated_at" field.
+func (_u *AgentUpdate) ClearReincarnationUpdatedAt() *AgentUpdate {
+	_u.mutation.ClearReincarnationUpdatedAt()
+	return _u
+}
+
 // SetProject sets the "project" edge to the Project entity.
 func (_u *AgentUpdate) SetProject(v *Project) *AgentUpdate {
 	return _u.SetProjectID(v.ID)
@@ -930,9 +977,6 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if value, ok := _u.mutation.DelegationEnabled(); ok {
 		_spec.SetField(agent.FieldDelegationEnabled, field.TypeBool, value)
 	}
-	if value, ok := _u.mutation.Visibility(); ok {
-		_spec.SetField(agent.FieldVisibility, field.TypeString, value)
-	}
 	if value, ok := _u.mutation.MessageMode(); ok {
 		_spec.SetField(agent.FieldMessageMode, field.TypeEnum, value)
 	}
@@ -1113,6 +1157,24 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.AddedStateVersion(); ok {
 		_spec.AddField(agent.FieldStateVersion, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.Generation(); ok {
+		_spec.SetField(agent.FieldGeneration, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedGeneration(); ok {
+		_spec.AddField(agent.FieldGeneration, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.ReincarnationState(); ok {
+		_spec.SetField(agent.FieldReincarnationState, field.TypeString, value)
+	}
+	if _u.mutation.ReincarnationStateCleared() {
+		_spec.ClearField(agent.FieldReincarnationState, field.TypeString)
+	}
+	if value, ok := _u.mutation.ReincarnationUpdatedAt(); ok {
+		_spec.SetField(agent.FieldReincarnationUpdatedAt, field.TypeTime, value)
+	}
+	if _u.mutation.ReincarnationUpdatedAtCleared() {
+		_spec.ClearField(agent.FieldReincarnationUpdatedAt, field.TypeTime)
 	}
 	if _u.mutation.ProjectCleared() {
 		edge := &sqlgraph.EdgeSpec{
@@ -1379,20 +1441,6 @@ func (_u *AgentUpdateOne) SetDelegationEnabled(v bool) *AgentUpdateOne {
 func (_u *AgentUpdateOne) SetNillableDelegationEnabled(v *bool) *AgentUpdateOne {
 	if v != nil {
 		_u.SetDelegationEnabled(*v)
-	}
-	return _u
-}
-
-// SetVisibility sets the "visibility" field.
-func (_u *AgentUpdateOne) SetVisibility(v string) *AgentUpdateOne {
-	_u.mutation.SetVisibility(v)
-	return _u
-}
-
-// SetNillableVisibility sets the "visibility" field if the given value is not nil.
-func (_u *AgentUpdateOne) SetNillableVisibility(v *string) *AgentUpdateOne {
-	if v != nil {
-		_u.SetVisibility(*v)
 	}
 	return _u
 }
@@ -1955,6 +2003,67 @@ func (_u *AgentUpdateOne) AddStateVersion(v int64) *AgentUpdateOne {
 	return _u
 }
 
+// SetGeneration sets the "generation" field.
+func (_u *AgentUpdateOne) SetGeneration(v int) *AgentUpdateOne {
+	_u.mutation.ResetGeneration()
+	_u.mutation.SetGeneration(v)
+	return _u
+}
+
+// SetNillableGeneration sets the "generation" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableGeneration(v *int) *AgentUpdateOne {
+	if v != nil {
+		_u.SetGeneration(*v)
+	}
+	return _u
+}
+
+// AddGeneration adds value to the "generation" field.
+func (_u *AgentUpdateOne) AddGeneration(v int) *AgentUpdateOne {
+	_u.mutation.AddGeneration(v)
+	return _u
+}
+
+// SetReincarnationState sets the "reincarnation_state" field.
+func (_u *AgentUpdateOne) SetReincarnationState(v string) *AgentUpdateOne {
+	_u.mutation.SetReincarnationState(v)
+	return _u
+}
+
+// SetNillableReincarnationState sets the "reincarnation_state" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableReincarnationState(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetReincarnationState(*v)
+	}
+	return _u
+}
+
+// ClearReincarnationState clears the value of the "reincarnation_state" field.
+func (_u *AgentUpdateOne) ClearReincarnationState() *AgentUpdateOne {
+	_u.mutation.ClearReincarnationState()
+	return _u
+}
+
+// SetReincarnationUpdatedAt sets the "reincarnation_updated_at" field.
+func (_u *AgentUpdateOne) SetReincarnationUpdatedAt(v time.Time) *AgentUpdateOne {
+	_u.mutation.SetReincarnationUpdatedAt(v)
+	return _u
+}
+
+// SetNillableReincarnationUpdatedAt sets the "reincarnation_updated_at" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableReincarnationUpdatedAt(v *time.Time) *AgentUpdateOne {
+	if v != nil {
+		_u.SetReincarnationUpdatedAt(*v)
+	}
+	return _u
+}
+
+// ClearReincarnationUpdatedAt clears the value of the "reincarnation_updated_at" field.
+func (_u *AgentUpdateOne) ClearReincarnationUpdatedAt() *AgentUpdateOne {
+	_u.mutation.ClearReincarnationUpdatedAt()
+	return _u
+}
+
 // SetProject sets the "project" edge to the Project entity.
 func (_u *AgentUpdateOne) SetProject(v *Project) *AgentUpdateOne {
 	return _u.SetProjectID(v.ID)
@@ -2179,9 +2288,6 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	if value, ok := _u.mutation.DelegationEnabled(); ok {
 		_spec.SetField(agent.FieldDelegationEnabled, field.TypeBool, value)
 	}
-	if value, ok := _u.mutation.Visibility(); ok {
-		_spec.SetField(agent.FieldVisibility, field.TypeString, value)
-	}
 	if value, ok := _u.mutation.MessageMode(); ok {
 		_spec.SetField(agent.FieldMessageMode, field.TypeEnum, value)
 	}
@@ -2362,6 +2468,24 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	}
 	if value, ok := _u.mutation.AddedStateVersion(); ok {
 		_spec.AddField(agent.FieldStateVersion, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.Generation(); ok {
+		_spec.SetField(agent.FieldGeneration, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedGeneration(); ok {
+		_spec.AddField(agent.FieldGeneration, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.ReincarnationState(); ok {
+		_spec.SetField(agent.FieldReincarnationState, field.TypeString, value)
+	}
+	if _u.mutation.ReincarnationStateCleared() {
+		_spec.ClearField(agent.FieldReincarnationState, field.TypeString)
+	}
+	if value, ok := _u.mutation.ReincarnationUpdatedAt(); ok {
+		_spec.SetField(agent.FieldReincarnationUpdatedAt, field.TypeTime, value)
+	}
+	if _u.mutation.ReincarnationUpdatedAtCleared() {
+		_spec.ClearField(agent.FieldReincarnationUpdatedAt, field.TypeTime)
 	}
 	if _u.mutation.ProjectCleared() {
 		edge := &sqlgraph.EdgeSpec{

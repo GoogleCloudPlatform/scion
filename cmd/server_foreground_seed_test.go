@@ -21,6 +21,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/knadh/koanf/providers/confmap"
 	"github.com/knadh/koanf/v2"
@@ -138,6 +139,52 @@ func TestSyncHubSettings_SeedsNewSections(t *testing.T) {
 	}
 	if access.Origin != "seeded" {
 		t.Errorf("access origin: want seeded, got %s", access.Origin)
+	}
+}
+
+// TestSyncHubSettings_UnseededInstance_SeedsAgentDefaultsFromEmbeds is the
+// end-to-end regression test for ptone/scion#1306: on a genuinely un-seeded
+// instance — no settings.yaml on disk, no SCION_SEED_*/SCION_SERVER_* env
+// vars, empty hub_settings table — the very first sync must still seed
+// agent_defaults.default_harness_config (and default_template) from the
+// embedded settings file via the real config.LoadBootstrapKoanf(), not leave
+// the section empty. An empty default_harness_config here is exactly what let
+// an agent-create request that omitted harnessConfig resolve to an empty
+// name and fail with a 502 instead of using the product default.
+func TestSyncHubSettings_UnseededInstance_SeedsAgentDefaultsFromEmbeds(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	fs := newFakeHubSettingStore()
+
+	// The real bootstrap koanf, exactly as cmd/server_foreground.go builds it
+	// at boot — no settings.yaml exists in the isolated HOME above, so this
+	// is the un-seeded-instance case.
+	k := config.LoadBootstrapKoanf()
+
+	if err := syncHubSettings(context.Background(), fs, k); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	agentDefaults, ok := fs.settings["agent_defaults"]
+	if !ok {
+		t.Fatal("expected agent_defaults section to be seeded")
+	}
+
+	var doc map[string]interface{}
+	if err := json.Unmarshal(agentDefaults.Value, &doc); err != nil {
+		t.Fatalf("agent_defaults: unmarshal error: %v", err)
+	}
+
+	hc, _ := doc["default_harness_config"].(string)
+	if hc == "" {
+		t.Error("expected agent_defaults.default_harness_config to be seeded from embedded defaults on an un-seeded instance, got empty")
+	}
+	tmpl, _ := doc["default_template"].(string)
+	if tmpl == "" {
+		t.Error("expected agent_defaults.default_template to be seeded from embedded defaults on an un-seeded instance, got empty")
 	}
 }
 

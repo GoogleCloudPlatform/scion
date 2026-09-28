@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -38,7 +39,7 @@ func TestBuildPod_SharedDirs_DefaultMount(t *testing.T) {
 		Image:        "test:latest",
 		UnixUsername: "scion",
 		Labels: map[string]string{
-			"scion.grove": "myproject",
+			"scion.project": "myproject",
 		},
 		SharedDirs: []api.SharedDir{
 			{Name: "build-cache"},
@@ -86,7 +87,7 @@ func TestBuildPod_SharedDirs_InWorkspace(t *testing.T) {
 		Image:        "test:latest",
 		UnixUsername: "scion",
 		Labels: map[string]string{
-			"scion.grove": "myproject",
+			"scion.project": "myproject",
 		},
 		SharedDirs: []api.SharedDir{
 			{Name: "workspace-cache", InWorkspace: true},
@@ -115,7 +116,7 @@ func TestBuildPod_SharedDirs_SkipsLocalVolumesForSharedDirTargets(t *testing.T) 
 		Image:        "test:latest",
 		UnixUsername: "scion",
 		Labels: map[string]string{
-			"scion.grove": "myproject",
+			"scion.project": "myproject",
 		},
 		SharedDirs: []api.SharedDir{
 			{Name: "build-cache"},
@@ -148,7 +149,7 @@ func TestBuildPod_NoSharedDirs(t *testing.T) {
 		Image:        "test:latest",
 		UnixUsername: "scion",
 		Labels: map[string]string{
-			"scion.grove": "myproject",
+			"scion.project": "myproject",
 		},
 	}
 
@@ -169,7 +170,8 @@ func TestCreateSharedDirPVCs(t *testing.T) {
 		Name:  "test-agent",
 		Image: "test:latest",
 		Labels: map[string]string{
-			"scion.grove": "myproject",
+			"scion.project":    "myproject",
+			"scion.project_id": "proj-1",
 		},
 		SharedDirs: []api.SharedDir{
 			{Name: "build-cache"},
@@ -188,9 +190,17 @@ func TestCreateSharedDirPVCs(t *testing.T) {
 	pvcNames := make(map[string]bool)
 	for _, pvc := range pvcList.Items {
 		pvcNames[pvc.Name] = true
-		// Verify labels
-		assert.Equal(t, "myproject", pvc.Labels["scion.grove"])
-		assert.NotEmpty(t, pvc.Labels["scion.shared-dir"])
+		// Verify the exact label set — nothing beyond the canonical project
+		// labels and the shared-dir marker (no unexpected extra key survives).
+		wantDir := "build-cache"
+		if strings.Contains(pvc.Name, "artifacts") {
+			wantDir = "artifacts"
+		}
+		assert.Equal(t, map[string]string{
+			"scion.project":    "myproject",
+			"scion.project_id": "proj-1",
+			"scion.shared-dir": wantDir,
+		}, pvc.Labels)
 		// Verify access mode
 		assert.Contains(t, pvc.Spec.AccessModes, corev1.ReadWriteMany)
 		// Verify default size
@@ -210,7 +220,7 @@ func TestCreateSharedDirPVCs_CustomStorageClassAndSize(t *testing.T) {
 		Name:  "test-agent",
 		Image: "test:latest",
 		Labels: map[string]string{
-			"scion.grove": "myproject",
+			"scion.project": "myproject",
 		},
 		SharedDirs: []api.SharedDir{
 			{Name: "data"},
@@ -253,7 +263,7 @@ func TestCreateSharedDirPVCs_ReusesExisting(t *testing.T) {
 		Name:  "test-agent",
 		Image: "test:latest",
 		Labels: map[string]string{
-			"scion.grove": "myproject",
+			"scion.project": "myproject",
 		},
 		SharedDirs: []api.SharedDir{
 			{Name: "build-cache"},
@@ -278,7 +288,7 @@ func TestCreateSharedDirPVCs_NoSharedDirs(t *testing.T) {
 		Name:  "test-agent",
 		Image: "test:latest",
 		Labels: map[string]string{
-			"scion.grove": "myproject",
+			"scion.project": "myproject",
 		},
 	}
 
@@ -301,32 +311,5 @@ func TestCreateSharedDirPVCs_MissingProjectLabel(t *testing.T) {
 
 	err := rt.createSharedDirPVCs(ctx, "default", config)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "missing scion.project or scion.grove label")
-}
-
-func TestCleanupSharedDirPVCs(t *testing.T) {
-	rt, clientset, _ := newTestK8sRuntime()
-	ctx := context.Background()
-
-	// Create PVCs with project labels
-	for _, name := range []string{"scion-shared-myproject-cache", "scion-shared-myproject-data"} {
-		pvc := &corev1.PersistentVolumeClaim{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      name,
-				Namespace: "default",
-				Labels: map[string]string{
-					"scion.grove":      "myproject",
-					"scion.shared-dir": "test",
-				},
-			},
-		}
-		_, err := clientset.CoreV1().PersistentVolumeClaims("default").Create(ctx, pvc, metav1.CreateOptions{})
-		require.NoError(t, err)
-	}
-
-	rt.cleanupSharedDirPVCs(ctx, "default", "myproject")
-
-	pvcList, err := clientset.CoreV1().PersistentVolumeClaims("default").List(ctx, metav1.ListOptions{})
-	require.NoError(t, err)
-	assert.Empty(t, pvcList.Items)
+	assert.Contains(t, err.Error(), "missing scion.project label")
 }

@@ -134,25 +134,6 @@ export class ScionPageSkills extends LitElement {
         color: var(--scion-text-muted, #64748b);
       }
 
-      .visibility-badge {
-        display: inline-flex;
-        align-items: center;
-        padding: 0.125rem 0.5rem;
-        border-radius: 9999px;
-        font-size: 0.6875rem;
-        font-weight: 500;
-      }
-
-      .visibility-badge.public {
-        background: var(--sl-color-success-100, #dcfce7);
-        color: var(--sl-color-success-700, #15803d);
-      }
-
-      .visibility-badge.private {
-        background: var(--scion-bg-subtle, #f1f5f9);
-        color: var(--scion-text-muted, #64748b);
-      }
-
       .filter-bar {
         display: flex;
         align-items: center;
@@ -518,7 +499,6 @@ export class ScionPageSkills extends LitElement {
             </h3>
             <div class="skill-meta">
               <span class="scope-badge">${skill.scope}</span>
-              <span class="visibility-badge ${skill.visibility}">${skill.visibility}</span>
             </div>
           </div>
         </div>
@@ -552,7 +532,6 @@ export class ScionPageSkills extends LitElement {
                 Name <span class="sort-indicator">${this.sortIndicator('name')}</span>
               </th>
               <th>Scope</th>
-              <th class="hide-mobile">Visibility</th>
               <th class="hide-mobile">Tags</th>
               <th
                 class="sortable ${this.sortField === 'updated' ? 'sorted' : ''}"
@@ -586,9 +565,6 @@ export class ScionPageSkills extends LitElement {
           </span>
         </td>
         <td><span class="scope-badge">${skill.scope}</span></td>
-        <td class="hide-mobile">
-          <span class="visibility-badge ${skill.visibility}">${skill.visibility}</span>
-        </td>
         <td class="hide-mobile">
           ${skill.tags?.length
             ? skill.tags.map((tag) => html`<span class="skill-tag">${tag}</span> `)

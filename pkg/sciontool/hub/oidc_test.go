@@ -141,6 +141,29 @@ func TestConfigureOIDCTransport_SkipsMetadataWhenScionMetadataActive(t *testing.
 	assert.Nil(t, c.oidcSource, "should not configure OIDC metadata mode when scion metadata server is active")
 }
 
+// TestConfigureOIDCTransport_PassthroughStillUsesMetadata is the regression
+// guard for ptone/scion#1882: SCION_METADATA_MODE=passthrough does not
+// redirect the real GCE metadata server (unlike assign/block), so ambient-SA
+// OIDC via MetadataSource must still be configured for it.
+func TestConfigureOIDCTransport_PassthroughStillUsesMetadata(t *testing.T) {
+	cleanup := overrideGCPDetection(true)
+	defer cleanup()
+
+	t.Setenv(transportauth.EnvTransportToken, "")
+	t.Setenv(transportauth.EnvMetadataMode, "passthrough")
+
+	c := &Client{
+		hubURL: "https://hub.example.com",
+		client: &http.Client{Timeout: DefaultTimeout},
+	}
+
+	c.configureOIDCTransport()
+
+	require.NotNil(t, c.oidcSource, "passthrough must not disable ambient-SA OIDC transport")
+	_, ok := c.oidcSource.(*transportauth.MetadataSource)
+	assert.True(t, ok, "should use MetadataSource")
+}
+
 func TestConfigureOIDCTransport_InjectedPriority(t *testing.T) {
 	cleanup := overrideGCPDetection(true)
 	defer cleanup()

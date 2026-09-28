@@ -22,12 +22,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	atlasmigrate "ariga.io/atlas/sql/migrate"
 	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
 	entschema "entgo.io/ent/dialect/sql/schema"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -147,7 +149,18 @@ func OpenPostgres(dsn string, pool PoolConfig, opts ...ent.Option) (*ent.Client,
 		connConfig.ConnectTimeout = connectTimeout
 	}
 
-	db := stdlib.OpenDB(*connConfig)
+	// Register google/uuid.UUID with pgx's type system so that UUID values are
+	// encoded with OID 2950 (uuid) instead of the fragile DriverValuer fallback
+	// that sends OID 25 (text). Without this, raw queries comparing uuid columns
+	// against Go uuid.UUID parameters fail with SQLSTATE 42883 ("operator does
+	// not exist: uuid = text"). See https://github.com/ptone/scion/issues/1634.
+	db := stdlib.OpenDB(*connConfig, stdlib.OptionAfterConnect(
+		func(ctx context.Context, conn *pgx.Conn) error {
+			conn.TypeMap().RegisterDefaultPgType(uuid.UUID{}, "uuid")
+			conn.TypeMap().RegisterDefaultPgType([]uuid.UUID{}, "_uuid")
+			return nil
+		},
+	))
 	pool.apply(db)
 	drv := entsql.OpenDB(dialect.Postgres, db)
 	client := ent.NewClient(append(opts, ent.Driver(drv))...)
@@ -186,7 +199,10 @@ func AutoMigrate(ctx context.Context, client *ent.Client) error {
 		migrate.WithDropIndex(false),
 	}
 	if client.Driver().Dialect() == dialect.Postgres {
-		migrateOpts = append(migrateOpts, entschema.WithApplyHook(skipExistingRelations))
+		migrateOpts = append(migrateOpts,
+			entschema.WithApplyHook(normalizeBrokerLabels),
+			entschema.WithApplyHook(skipExistingRelations),
+		)
 	}
 	return client.Schema.Create(ctx, migrateOpts...)
 }
@@ -225,5 +241,67 @@ func skipExistingRelations(next entschema.Applier) entschema.Applier {
 			}
 		}
 		return nil
+	})
+}
+
+// normalizeBrokerLabels is an Ent schema ApplyHook that runs before the
+// migration plan to normalize empty-string labels/annotations to NULL on
+// runtime_brokers and inject USING clauses for varchar→jsonb casts.
+//
+// PostgreSQL cannot automatically cast varchar to jsonb (SQLSTATE 42804),
+// so any ALTER COLUMN … TYPE jsonb must include a USING col::jsonb clause.
+// The ent framework does not emit USING, so we patch the plan here.
+//
+// The empty-string→NULL normalization is still needed because even with
+// USING, a bare empty string is not valid JSON and would fail the cast.
+// The WHERE clause uses ::text so the comparison remains valid on
+// subsequent runs when the column is already jsonb.
+func normalizeBrokerLabels(next entschema.Applier) entschema.Applier {
+	return entschema.ApplyFunc(func(ctx context.Context, conn dialect.ExecQuerier, plan *atlasmigrate.Plan) error {
+		for i, stmt := range []string{
+			`UPDATE runtime_brokers SET labels = NULL WHERE labels::text = ''`,
+			`UPDATE runtime_brokers SET annotations = NULL WHERE annotations::text = ''`,
+		} {
+			// Wrap in a SAVEPOINT so a failure (e.g. 42P01 on a fresh DB,
+			// where runtime_brokers doesn't exist yet) doesn't abort the
+			// surrounding migration transaction; see skipExistingRelations.
+			sp := fmt.Sprintf("normalize_broker_labels_%d", i)
+			if err := conn.Exec(ctx, fmt.Sprintf("SAVEPOINT %s", sp), []any{}, nil); err != nil {
+				return fmt.Errorf("creating savepoint: %w", err)
+			}
+			if err := conn.Exec(ctx, stmt, []any{}, nil); err != nil {
+				// Table may not exist yet on a fresh database — that is
+				// fine, but the transaction is now aborted and must be
+				// rolled back to the savepoint before continuing.
+				slog.Debug("normalizeBrokerLabels: skipping", "stmt", stmt, "err", err)
+				if rbErr := conn.Exec(ctx, fmt.Sprintf("ROLLBACK TO SAVEPOINT %s", sp), []any{}, nil); rbErr != nil {
+					return fmt.Errorf("rolling back savepoint after normalizeBrokerLabels statement failure: %w", rbErr)
+				}
+				continue
+			}
+			if err := conn.Exec(ctx, fmt.Sprintf("RELEASE SAVEPOINT %s", sp), []any{}, nil); err != nil {
+				return fmt.Errorf("releasing savepoint: %w", err)
+			}
+		}
+		// Patch the plan to add USING clauses for varchar→jsonb column casts
+		// on runtime_brokers. Without this, Postgres rejects the ALTER with
+		// SQLSTATE 42804 ("column cannot be cast automatically to type jsonb").
+		for _, c := range plan.Changes {
+			for _, col := range []string{"labels", "annotations"} {
+				// Match "ALTER COLUMN "<col>" TYPE jsonb" that is NOT already
+				// followed by " USING". We check for the bare target (without
+				// USING) and the extended target (with USING) separately, so
+				// that adding USING for one column doesn't block the other
+				// when both appear in the same statement.
+				bare := fmt.Sprintf("ALTER COLUMN \"%s\" TYPE jsonb", col)
+				withUsing := fmt.Sprintf("ALTER COLUMN \"%s\" TYPE jsonb USING", col)
+				if strings.Contains(c.Cmd, bare) && !strings.Contains(c.Cmd, withUsing) {
+					replacement := fmt.Sprintf("ALTER COLUMN \"%s\" TYPE jsonb USING \"%s\"::jsonb", col, col)
+					c.Cmd = strings.Replace(c.Cmd, bare, replacement, 1)
+					slog.Debug("normalizeBrokerLabels: added USING clause", "col", col, "cmd", c.Cmd)
+				}
+			}
+		}
+		return next.Apply(ctx, conn, plan)
 	})
 }

@@ -44,6 +44,14 @@ return an error instead of blocking.`,
 	SilenceErrors: true,
 	SilenceUsage:  true,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		// Warn (once per process) about legacy environment variables that
+		// scion no longer reads. For real top-level invocations this has
+		// already run in Execute(), before any settings or project
+		// resolution; this call is the deduplicated (sync.Once-guarded)
+		// path for callers that invoke rootCmd directly (e.g. cmd-level
+		// tests) without going through the package's own Execute().
+		maybeWarnRemovedLegacyEnv(cmd)
+
 		// --non-interactive implies --yes
 		if nonInteractive {
 			autoConfirm = true
@@ -106,8 +114,12 @@ return an error instead of blocking.`,
 		if commandInSubtree(cmd, "server") {
 			requiresProject = false
 		}
+		// Admin subcommands connect directly to the database and don't need a local project
+		if commandInSubtree(cmd, "admin") {
+			requiresProject = false
+		}
 		// Project subcommands operate on all projects, not just the current one
-		if parentName == "project" || parentName == "grove" {
+		if parentName == "project" {
 			requiresProject = false
 		}
 
@@ -193,20 +205,32 @@ return an error instead of blocking.`,
 // Execute adds all child commands to the root command and sets flags appropriately.
 // This is called by main.main(). It only needs to happen once to the rootCmd.
 func Execute() {
+	// Warn about legacy environment variables scion no longer reads. This
+	// must run before any settings or project resolution,
+	// including the early settings load a few lines below — PersistentPreRunE
+	// runs too late for that. rootCmd.Find is a read-only tree walk (no
+	// flags are parsed, nothing executes), so it is safe to call before
+	// ExecuteC(). Skipped for "start" under the "server"/"runtime-broker"
+	// subtree; see maybeWarnRemovedLegacyEnv.
+	var cliArgs []string
+	if len(os.Args) > 1 {
+		cliArgs = os.Args[1:]
+	}
+	target, _, _ := rootCmd.Find(cliArgs)
+	maybeWarnRemovedLegacyEnv(target)
+
 	// Early settings load to determine autoHelp behavior
 	// This handles cases where ExecuteC fails during flag parsing or unknown commands
 	tempProjectPath := ""
 	for i := 1; i < len(os.Args); i++ {
 		arg := os.Args[i]
-		if arg == "--project" || arg == "--grove" || arg == "-g" {
+		if arg == "--project" || arg == "-g" {
 			if i+1 < len(os.Args) {
 				tempProjectPath = os.Args[i+1]
 				i++
 			}
 		} else if strings.HasPrefix(arg, "--project=") {
 			tempProjectPath = strings.TrimPrefix(arg, "--project=")
-		} else if strings.HasPrefix(arg, "--grove=") {
-			tempProjectPath = strings.TrimPrefix(arg, "--grove=")
 		} else if arg == "--global" {
 			tempProjectPath = "global"
 		}
@@ -228,11 +252,32 @@ func Execute() {
 	cmd, err := rootCmd.ExecuteC()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\n%s%s%sError: %v%s\n\n", util.BgRed, util.White, util.Bold, err, util.Reset)
-		if cmd != nil && autoHelp {
+		if shouldShowUsageOnError(cmd, autoHelp) {
 			_ = cmd.Usage()
 		}
 		os.Exit(1)
 	}
+}
+
+// shouldShowUsageOnError reports whether Execute should print cmd's usage
+// block after a failed invocation. cobra's own SilenceUsage handling is
+// bypassed here because Execute prints the error and usage itself (for the
+// colored error banner above), so this helper re-implements the same intent:
+// a subcommand sets SilenceUsage on itself once argument parsing has already
+// succeeded, so a later runtime failure isn't mistaken for a usage error.
+//
+// rootCmd itself sets SilenceUsage: true, but only so cobra's own internal
+// auto-print never double-prints usage under the banner above — it is not an
+// opt-out signal for this helper. ExecuteC returns rootCmd as cmd for
+// root-level usage errors (an unknown command or an unknown global flag), and
+// those must still show usage, so only a non-root command's SilenceUsage is
+// honored here. This is a no-op for every subcommand that never sets
+// SilenceUsage on itself, which today is every command except attach.
+func shouldShowUsageOnError(cmd *cobra.Command, autoHelp bool) bool {
+	if cmd == nil || !autoHelp {
+		return false
+	}
+	return !cmd.HasParent() || !cmd.SilenceUsage
 }
 
 func commandInSubtree(cmd *cobra.Command, name string) bool {
@@ -247,9 +292,6 @@ func commandInSubtree(cmd *cobra.Command, name string) bool {
 func init() {
 	rootCmd.Long = util.GetBanner() + "\n" + rootCmd.Long
 	rootCmd.PersistentFlags().StringVarP(&projectPath, "project", "g", "", "Project identifier: path, slug (with Hub), or git URL (with Hub)")
-	rootCmd.PersistentFlags().StringVar(&projectPath, "grove", "", "Deprecated alias for --project")
-	_ = rootCmd.PersistentFlags().MarkDeprecated("grove", "use --project instead")
-	_ = rootCmd.PersistentFlags().MarkHidden("grove")
 
 	rootCmd.PersistentFlags().BoolVar(&globalMode, "global", false, "Use the global project (equivalent to --project global)")
 	rootCmd.PersistentFlags().StringVarP(&profile, "profile", "p", "", "Configuration profile to use")

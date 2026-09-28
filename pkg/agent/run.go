@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"os/user"
@@ -33,7 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -73,6 +74,17 @@ func isTmuxShellNotFoundError(err error) bool {
 		strings.Contains(msg, "tmux: not found")
 }
 
+// sortedEnvVarKeys returns the sorted key names of an env var map, for
+// diagnostic logging that must not print the values themselves.
+func sortedEnvVarKeys(envVars map[string]string) []string {
+	keys := make([]string, 0, len(envVars))
+	for k := range envVars {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
 	// Resolve project name early so we can scope the container lookup below.
 	projectDir, err := config.GetResolvedProjectDir(opts.ProjectPath)
@@ -90,10 +102,19 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			agentID = opts.Env["SCION_AGENT_ID"]
 		}
 		projectID = opts.Env["SCION_PROJECT_ID"]
-		if projectID == "" {
-			projectID = opts.Env["SCION_GROVE_ID"]
-		}
 	}
+	// Snapshot the dispatch-provided project ID now, before any
+	// settings-driven env merging (resolveAuthEnvOverlay copying
+	// harness-config env into opts.Env for absent keys, telemetry env, etc.)
+	// can inject a project-controlled SCION_PROJECT_ID.
+	// Used only by the nfs shared_dir_storage branch below (round 3 review
+	// finding C1/S-L1): a project's harness_configs.<name>.env can set
+	// these keys, and since resolveAuthEnvOverlay only fills in *absent*
+	// keys, capturing the value here — before that overlay ever runs — is
+	// what keeps it from being attacker-influenced. The general `projectID`
+	// below is unaffected and keeps its existing settings.Hub.ProjectID
+	// fallback for labels, RunConfig.ProjectID, etc.
+	hubDispatchedProjectID := projectID
 
 	// 0. Check if container already exists (scoped to this project)
 	slug := api.Slugify(opts.Name)
@@ -139,6 +160,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	}
 	if opts.GitClone != nil {
 		ctx = api.ContextWithGitClone(ctx, opts.GitClone)
+	}
+	if opts.FreshProvision {
+		ctx = api.ContextWithFreshProvision(ctx)
 	}
 	if opts.SharedWorkspace {
 		ctx = api.ContextWithSharedWorkspace(ctx)
@@ -497,6 +521,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		if opts.HarnessAuth != "" && !harness.IsHarnessImplementationName(opts.HarnessAuth) {
 			auth.SelectedType = opts.HarnessAuth
 		}
+		// Auto-detect an auth type when nothing explicit selected one yet.
+		autoDetectAuthSelectedType(&auth, authMeta, &opts)
 		util.Debugf("auth: after overlay — selectedType=%q", auth.SelectedType)
 		resolved, err := h.ResolveAuth(auth)
 		if err != nil {
@@ -534,7 +560,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 				resolved.Files[i].SourcePath = ""
 			}
 		}
-		util.Debugf("auth: resolved — method=%q, envVars=%v, files=%d", resolved.Method, resolved.EnvVars, len(resolved.Files))
+		util.Debugf("auth: resolved — method=%q, envVarKeys=%v, files=%d", resolved.Method, sortedEnvVarKeys(resolved.EnvVars), len(resolved.Files))
 		if err := harness.ValidateAuth(resolved, opts.BrokerMode); err != nil {
 			if canFallbackToNoAuth() {
 				util.Debugf("auth: validation failed, falling back to no-auth mode: %v", err)
@@ -654,7 +680,6 @@ authDone:
 		opts.Env = make(map[string]string)
 	}
 	opts.Env["SCION_AGENT_NAME"] = opts.Name
-	opts.Env["SCION_GROVE"] = projectName
 	opts.Env["SCION_PROJECT"] = projectName
 	if template != "" {
 		opts.Env["SCION_TEMPLATE_NAME"] = template
@@ -679,7 +704,7 @@ authDone:
 	// The hub may inject a raw alias (e.g. "large") when its store lacks
 	// the harness config's model_aliases map; the broker has the on-disk
 	// config and can resolve it here.
-	if resolved, ok := reResolveModelAlias(opts.Env["SCION_MODEL"], finalScionCfg); ok {
+	if resolved, ok := reResolveModelAlias(opts.Env["SCION_MODEL"], finalScionCfg, harnessName); ok {
 		util.Debugf("RunAgent: re-resolved leaked model alias %q → %q", opts.Env["SCION_MODEL"], resolved)
 		opts.Env["SCION_MODEL"] = resolved
 	}
@@ -868,7 +893,11 @@ authDone:
 		effectiveTelemetry = finalScionCfg.Telemetry
 	}
 	if telemetryApplier, ok := h.(api.TelemetrySettingsApplier); ok {
-		if err := telemetryApplier.ApplyTelemetrySettings(agentHome, effectiveTelemetry, opts.Env); err != nil {
+		provisionEnv, err := nativeTelemetryProvisionEnvForHarness(h.Name(), agentHome, effectiveTelemetry, opts.Env, opts.ResolvedSecrets)
+		if err != nil {
+			return nil, fmt.Errorf("failed to determine native telemetry backend: %w", err)
+		}
+		if err := telemetryApplier.ApplyTelemetrySettings(agentHome, effectiveTelemetry, provisionEnv); err != nil {
 			return nil, fmt.Errorf("failed to apply telemetry settings: %w", err)
 		}
 	}
@@ -952,19 +981,98 @@ authDone:
 	} else if len(opts.SharedDirs) > 0 {
 		effectiveSharedDirs = opts.SharedDirs
 	}
-	var sharedDirVolumes []api.VolumeMount
+	// server.shared_dir_storage is global-only (design §3.2.1, AC5): read it
+	// via config.LoadGlobalSettings(), never from the project-merged
+	// `settings` above and never via LoadEffectiveSettings("") — an empty
+	// path is NOT global-only, since it resolves a project from the
+	// process's current working directory and merges that project's
+	// settings.yaml on top of global (round 2 review findings C1/T1/S-F2).
+	// A project's settings, including in-repo content from a cloned
+	// repository, must not be able to redirect Docker bind-mount sources or
+	// override the operator's NFS config. workspace_storage is untouched
+	// and keeps its existing (pre-existing, out of scope) project-level
+	// exposure — see design §3.2.6.
+	var sharedDirStorageCfg *config.V1SharedDirStorageConfig
 	if len(effectiveSharedDirs) > 0 {
-		if err := config.EnsureSharedDirs(projectDir, effectiveSharedDirs); err != nil {
-			util.Debugf("Start: failed to ensure shared dirs: %v", err)
+		globalSettings, _, gErr := config.LoadGlobalSettings()
+		if gErr != nil {
+			// A broken global settings file must fail closed (design G5)
+			// ONLY when the operator plausibly intended to configure
+			// shared_dir_storage — round 3 review disposition 6' (amended):
+			// failing closed on every malformed global settings file,
+			// including deployments that never touched this feature, would
+			// regress essentially every agent start, since every project
+			// has a default scratchpad shared dir (main tolerates this
+			// exact input and starts with the legacy local layout). We
+			// can't parse the broken file to check the real value, so fall
+			// back to a raw substring check on its bytes.
+			if config.GlobalSettingsMentions("shared_dir_storage") {
+				return nil, fmt.Errorf("loading global settings for server.shared_dir_storage: %w", gErr)
+			}
+			slog.Warn("Start: failed to load global settings; server.shared_dir_storage was not found in the raw file, proceeding with the local shared-dir layout",
+				"error", gErr)
+		} else if globalSettings != nil && globalSettings.Server != nil && globalSettings.Server.SharedDirStorage != nil {
+			sharedDirStorageCfg = globalSettings.Server.SharedDirStorage
+		} else if config.GlobalSettingsIsLegacyFormat() && config.GlobalSettingsMentions("shared_dir_storage") {
+			// Round 4 review finding S-L1: a global settings.yaml with no
+			// "schema_version: \"1\"" takes the LEGACY loader path, which
+			// silently drops the entire server block — LoadGlobalSettings
+			// returns err == nil with Server == nil, so the gErr != nil
+			// branch above never runs. Without this check, an operator's
+			// shared_dir_storage config would vanish with only a generic
+			// "unrecognized keys" WARN, which is a worse silent failure
+			// than the malformed-YAML case, and contradicts G5 fail-closed
+			// for an operator who plausibly intended to configure it.
+			//
+			// Round 5 review finding C1=T1=S-L2: GlobalSettingsMentions is a
+			// raw substring check, so it also fires on a well-formed v1 file
+			// whose only mention of the key is a YAML comment (e.g. a
+			// commented-out "# shared_dir_storage:" block, which is the
+			// design's documented rollback path). For a file that LOADED
+			// successfully as v1, the loader above is authoritative — no
+			// parsed block means it genuinely was not configured, exactly
+			// like main. The GlobalSettingsIsLegacyFormat() gate restricts
+			// this fail-closed substring check to files that actually took
+			// the legacy loader path, where there is no parsed struct to
+			// trust and the substring is the only available signal; the
+			// "(missing schema_version...)" wording below is therefore
+			// always accurate when this branch fires.
+			return nil, fmt.Errorf(
+				"global settings mention server.shared_dir_storage but it was not loaded (missing schema_version: \"1\"?)")
 		}
-		sdVolumes, err := config.SharedDirsToVolumeMounts(projectDir, effectiveSharedDirs, containerWorkspace)
-		if err != nil {
-			util.Debugf("Start: failed to resolve shared dir volumes: %v", err)
-		} else {
-			sharedDirVolumes = sdVolumes
-			// Add SCION_VOLUMES env var for discoverability
-			opts.Env["SCION_VOLUMES"] = "/scion-volumes"
-		}
+	}
+	// nfs shared_dir_storage keys its layout on hubDispatchedProjectID,
+	// snapshotted above at Start entry — NOT the general projectID variable
+	// (which falls back to settings.Hub.ProjectID / the project-id file)
+	// and NOT a fresh read of opts.Env here. By this point opts.Env may
+	// already have been filled in from project-level harness-config env by
+	// resolveAuthEnvOverlay (it only fills *absent* keys, but that includes
+	// SCION_PROJECT_ID when the hub didn't dispatch this
+	// start), so re-reading opts.Env at this line would reopen exactly the
+	// hole this snapshot closes (round 3 review finding C1/S-L1). The hub
+	// sets SCION_PROJECT_ID unconditionally after merging any
+	// user-supplied env for hub-dispatched starts
+	// (pkg/hub/httpdispatcher.go DispatchAgentStart/DispatchAgentRestart,
+	// "Identity vars at highest precedence"), so hubDispatchedProjectID is
+	// authoritative whenever the hub dispatched this agent, and correctly
+	// empty otherwise — project settings cannot choose which project's
+	// shared tree an nfs-backed agent mounts (round 2 review finding S-F4).
+	//
+	// F-111 review (BLOCKING): resolveSharedDirs needs to know whether
+	// server.workspace_storage.backend is "nfs" — a different config block
+	// from sharedDirStorageCfg (server.shared_dir_storage) — so its local/
+	// default branch can validate shared-dir names when they're about to
+	// become NFS subPaths via the k8s runtime's nfsSharedDirs path.
+	nfsWorkspaceBackend := settings != nil && settings.Server != nil &&
+		settings.Server.WorkspaceStorage != nil && settings.Server.WorkspaceStorage.Backend == "nfs"
+	sharedDirVolumes, sharedDirStorage, err := resolveSharedDirs(
+		sharedDirStorageCfg, projectDir, hubDispatchedProjectID, m.Runtime.Name(), effectiveSharedDirs, containerWorkspace, nfsWorkspaceBackend)
+	if err != nil {
+		return nil, err
+	}
+	if len(sharedDirVolumes) > 0 {
+		// Add SCION_VOLUMES env var for discoverability
+		opts.Env["SCION_VOLUMES"] = "/scion-volumes"
 	}
 
 	workspaceBackendName := ""
@@ -1040,7 +1148,18 @@ authDone:
 		NFSPVClaimName:       nfsPVClaimName,
 		NFSSubPath:           nfsSubPath,
 		NFSStorageClass:      nfsStorageClass,
-		TelemetryEnabled:     telemetryEnabled,
+		// F-111 (design §9): drives the k8s runtime's NFS init container's
+		// clone-vs-plain-provision choice (nfsProvisionCommand), not whether
+		// provisioning happens at all — the init container is now gated
+		// solely on WorkspaceBackendName=="nfs" && NFSPVClaimName != ""
+		// (k8s_runtime.go's nfsInitContainerInjected), so a nil GitClone here
+		// (a non-git, shared-plain project) still gets mkdir+chown, just no
+		// clone. Mirrors the existing GitClone field above/below, which this
+		// package already sets from the same opts.GitClone for other
+		// purposes; previously nothing set GitCloneForInit at all, so the
+		// k8s init container never ran for ANY project, git or not.
+		GitCloneForInit:  opts.GitClone,
+		TelemetryEnabled: telemetryEnabled,
 		Task: func() string {
 			// When task_flag is set, task is delivered via CommandArgs instead
 			if finalScionCfg != nil && finalScionCfg.TaskFlag != "" {
@@ -1093,9 +1212,10 @@ authDone:
 			}
 			return nil
 		}(),
-		GitClone:   opts.GitClone,
-		SharedDirs: effectiveSharedDirs,
-		BrokerMode: opts.BrokerMode,
+		GitClone:         opts.GitClone,
+		SharedDirs:       effectiveSharedDirs,
+		SharedDirStorage: sharedDirStorage,
+		BrokerMode:       opts.BrokerMode,
 		NoAuth: opts.NoAuth && noAuthConfig != nil &&
 			(noAuthConfig.Behavior == "drop-to-shell" || noAuthConfig.Behavior == "allow"),
 		NoAuthMessage: func() string {
@@ -1124,18 +1244,18 @@ authDone:
 				"scion.harness_auth":   opts.HarnessAuth,
 				"agent_id":             agentID,
 			}
-			for k, v := range projectcompat.ProjectNameLabels(projectName, true) {
+			for k, v := range projectkeys.ProjectNameLabels(projectName) {
 				l[k] = v
 			}
 			// Add project_id label for project-scoped agent isolation.
 			if projectID != "" {
-				for k, v := range projectcompat.ProjectIDLabels(projectID, true) {
+				for k, v := range projectkeys.ProjectIDLabels(projectID) {
 					l[k] = v
 				}
 			}
 			return l
 		}(),
-		Annotations: projectcompat.ProjectPathLabels(projectDir, true),
+		Annotations: projectkeys.ProjectPathLabels(projectDir),
 	}
 	id, err := m.Runtime.Run(ctx, runCfg)
 	if err != nil {
@@ -1288,7 +1408,7 @@ func filterWorkspaceVolume(volumes []api.VolumeMount) []api.VolumeMount {
 func matchAgentProject(a api.AgentInfo, projectName, projectID string) bool {
 	// If we have a projectID, check the canonical project label first.
 	if projectID != "" {
-		if labelProjectID := projectcompat.ProjectIDFromLabels(a.Labels); labelProjectID != "" {
+		if labelProjectID := projectkeys.ProjectIDFromLabels(a.Labels); labelProjectID != "" {
 			return labelProjectID == projectID
 		}
 		if a.ProjectID != "" {
@@ -1297,7 +1417,7 @@ func matchAgentProject(a api.AgentInfo, projectName, projectID string) bool {
 	}
 	// Fall back to project name matching
 	if projectName != "" {
-		if labelProject := projectcompat.ProjectNameFromLabels(a.Labels); labelProject != "" {
+		if labelProject := projectkeys.ProjectNameFromLabels(a.Labels); labelProject != "" {
 			return labelProject == projectName
 		}
 		if a.Project != "" {
@@ -1424,6 +1544,83 @@ func buildAuthEnvOverlay(baseEnv map[string]string, secrets []api.ResolvedSecret
 		}
 	}
 	return overlay
+}
+
+// autoDetectAuthSelectedType sets auth.SelectedType when nothing explicit has
+// selected one yet (CLI/template/profile overrides, scion-agent.json). It
+// mirrors the precedence the hub preflight already uses
+// (pkg/runtimebroker/handlers.go extractRequiredEnvKeys): file secrets, then
+// env vars, then GCP identity.
+//
+// Without this, container-script harnesses (e.g. antigravity) never learn a
+// resolved auth type for the auto-detect case: h.ResolveAuth forwards
+// auth.SelectedType into SCION_HARNESS_SELECTED_AUTH / explicit_type
+// (container_script_harness.go), which the container-side provisioner is
+// meant to trust instead of re-guessing via its own, harness-local method
+// ordering. Extracted (like resolveAuthEnvOverlay) so it can be exercised
+// directly in tests. See ptone/scion#1873.
+//
+// gcpSAAssigned is derived from opts.Env["SCION_METADATA_MODE"] rather than a
+// structured GCPIdentity: api.StartOptions carries no such field, and
+// SCION_METADATA_MODE is the only channel this signal has across the
+// runtimebroker -> agent package boundary (pkg/runtimebroker/start_context.go
+// sets it for assign, block, and passthrough alike).
+func autoDetectAuthSelectedType(auth *api.AuthConfig, authMeta *config.HarnessAuthMetadata, opts *api.StartOptions) {
+	if auth.SelectedType != "" || authMeta == nil {
+		return
+	}
+	// Skip in local/workstation mode: the GCP-identity signal
+	// (SCION_METADATA_MODE) and opts.Env / opts.ResolvedSecrets only reflect
+	// what the *broker* pre-resolved. GatherAuthWithEnv(authEnvOverlay,
+	// localSources=true, authMeta) separately discovers host env vars via
+	// os.Getenv and host credential files (e.g. ~/.claude/.credentials.json,
+	// the local ADC file) that never pass through opts.Env/opts.ResolvedSecrets
+	// at all — this function has no visibility into them. Deciding from opts
+	// alone in local mode would bind to a narrower view of the world than
+	// ResolveAuth/provision.py actually have, and could override a real host
+	// credential this function simply cannot see. SCION_METADATA_MODE is also
+	// broker-only by construction (pkg/runtimebroker/start_context.go), so
+	// the identity leg has nothing to contribute locally anyway.
+	if !opts.BrokerMode {
+		return
+	}
+
+	fileSecretNames := make(map[string]struct{})
+	for _, sec := range opts.ResolvedSecrets {
+		if sec.Type == "file" {
+			fileSecretNames[sec.Name] = struct{}{}
+		}
+	}
+
+	envKeys := make(map[string]struct{})
+	for k, v := range opts.Env {
+		if v != "" {
+			envKeys[k] = struct{}{}
+		}
+	}
+	for _, sec := range opts.ResolvedSecrets {
+		if sec.Type == "environment" || sec.Type == "" {
+			target := sec.Target
+			if target == "" {
+				target = sec.Name
+			}
+			if target != "" {
+				envKeys[target] = struct{}{}
+			}
+		}
+	}
+
+	// gcpSAAssigned mirrors the broker's own check (extractRequiredEnvKeys:
+	// assign or passthrough both provide credentials).
+	metadataMode := opts.Env["SCION_METADATA_MODE"]
+	gcpSAAssigned := metadataMode == store.GCPMetadataModeAssign || metadataMode == store.GCPMetadataModePassthrough
+
+	// AutoDetectAuthType runs the file -> env -> identity precedence as a
+	// single call so a present default-type credential (e.g. antigravity's
+	// AGY_TOKEN, claude's ANTHROPIC_API_KEY) always wins over the identity leg.
+	if detected := harness.AutoDetectAuthType(authMeta, fileSecretNames, envKeys, gcpSAAssigned); detected != "" {
+		auth.SelectedType = detected
+	}
 }
 
 // filterResolvedSecretsForResolvedAuth drops auth-candidate secrets that are
@@ -1598,17 +1795,35 @@ func mergeExtraHosts(a, b []string) []string {
 }
 
 // reResolveModelAlias detects when SCION_MODEL contains an unresolved size
-// alias (e.g. "large") that the hub failed to resolve, and returns the
-// broker-side resolved concrete model from cfg.Model. It returns ("", false)
-// when no re-resolution is needed — either because the value is not a known
-// alias, the config is nil, or the config model is empty.
-func reResolveModelAlias(envModel string, cfg *api.ScionConfig) (string, bool) {
-	if envModel == "" || cfg == nil || cfg.Model == "" {
+// alias (e.g. "large") that the hub failed to resolve, and returns a
+// concrete model to use instead. It returns ("", false) when no
+// re-resolution is needed — either because the value is not a known alias,
+// or a concrete replacement could not be determined.
+//
+// It first tries cfg.Model, the broker's own resolved config (this is the
+// pre-existing behavior for when the hub's alias resolution failed but the
+// broker's local config resolved it). When cfg.Model is empty or is itself
+// still the same unresolved alias — e.g. GetAgent had no local template
+// chain to resolve against either — it falls back to the harness's built-in
+// alias table (harnesses/<harnessName>/config.yaml) so a bare alias never
+// reaches the harness verbatim.
+func reResolveModelAlias(envModel string, cfg *api.ScionConfig, harnessName string) (string, bool) {
+	if envModel == "" {
 		return "", false
 	}
 	normalized := config.NormalizeModelAlias(envModel)
-	if config.KnownModelAliases[normalized] && envModel != cfg.Model {
+	if !config.KnownModelAliases[normalized] {
+		return "", false
+	}
+	if cfg != nil && cfg.Model != "" && envModel != cfg.Model {
 		return cfg.Model, true
+	}
+	if harnessName != "" {
+		if aliases := harness.DefaultModelAliases(harnessName); len(aliases) > 0 {
+			if resolved := config.ResolveModelAlias(envModel, aliases); resolved != envModel {
+				return resolved, true
+			}
+		}
 	}
 	return "", false
 }

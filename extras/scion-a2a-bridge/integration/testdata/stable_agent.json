@@ -1,0 +1,27 @@
+{
+  "schema": "scion.test.ge-a2a.stable-agent/v1",
+  "comment": "Synthetic stable agent flow for future process-boundary lifecycle tests. It contains identifiers and behavior labels only, no credentials or live endpoint values.",
+  "sources": [
+    {
+      "title": "A2A Protocol v1.0 specification - life of a task and streaming",
+      "url": "https://a2a-protocol.org/v1.0.0/specification/"
+    },
+    {
+      "title": "Gemini Enterprise - Register and manage an A2A agent",
+      "url": "https://docs.cloud.google.com/gemini/enterprise/docs/register-and-manage-an-a2a-agent"
+    }
+  ],
+  "project_id": "project-alpha",
+  "agent_id": "stable-agent",
+  "task_id": "task-001",
+  "context_id": "context-001",
+  "initial_replica": "bridge-1",
+  "delayed_event_replica": "bridge-2",
+  "capabilities": [
+    "initial-send",
+    "follow-up-turn",
+    "streaming-events",
+    "cancellation",
+    "delayed-opposite-replica-event"
+  ]
+}

@@ -107,8 +107,7 @@ var (
 		{Name: "created_by", Type: field.TypeUUID, Nullable: true},
 		{Name: "owner_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "delegation_enabled", Type: field.TypeBool, Default: false},
-		{Name: "visibility", Type: field.TypeString, Default: "private"},
-		{Name: "message_mode", Type: field.TypeEnum, Enums: []string{"none", "lineage", "branch", "project"}, Default: "project"},
+		{Name: "message_mode", Type: field.TypeEnum, Enums: []string{"none", "lineage", "branch", "project", "hub"}, Default: "project"},
 		{Name: "labels", Type: field.TypeJSON, Nullable: true},
 		{Name: "annotations", Type: field.TypeJSON, Nullable: true},
 		{Name: "phase", Type: field.TypeString, Nullable: true},
@@ -139,6 +138,9 @@ var (
 		{Name: "started_at", Type: field.TypeTime, Nullable: true},
 		{Name: "deleted_at", Type: field.TypeTime, Nullable: true},
 		{Name: "state_version", Type: field.TypeInt64, Default: 1},
+		{Name: "generation", Type: field.TypeInt, Default: 1},
+		{Name: "reincarnation_state", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "reincarnation_updated_at", Type: field.TypeTime, Nullable: true},
 		{Name: "project_id", Type: field.TypeUUID},
 	}
 	// AgentsTable holds the schema information for the "agents" table.
@@ -149,7 +151,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "agents_projects_agents",
-				Columns:    []*schema.Column{AgentsColumns[40]},
+				Columns:    []*schema.Column{AgentsColumns[42]},
 				RefColumns: []*schema.Column{ProjectsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -158,7 +160,7 @@ var (
 			{
 				Name:    "agent_slug_project_id",
 				Unique:  true,
-				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[40]},
+				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[42]},
 			},
 		},
 	}
@@ -200,6 +202,65 @@ var (
 				Name:    "agentcredential_expires_at",
 				Unique:  false,
 				Columns: []*schema.Column{AgentCredentialsColumns[5]},
+			},
+		},
+	}
+	// AgentIdentityKeysColumns holds the columns for the "agent_identity_keys" table.
+	AgentIdentityKeysColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "project_id", Type: field.TypeUUID},
+		{Name: "key", Type: field.TypeString},
+		{Name: "agent_id", Type: field.TypeUUID},
+	}
+	// AgentIdentityKeysTable holds the schema information for the "agent_identity_keys" table.
+	AgentIdentityKeysTable = &schema.Table{
+		Name:       "agent_identity_keys",
+		Columns:    AgentIdentityKeysColumns,
+		PrimaryKey: []*schema.Column{AgentIdentityKeysColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "agentidentitykey_project_id_key",
+				Unique:  true,
+				Columns: []*schema.Column{AgentIdentityKeysColumns[1], AgentIdentityKeysColumns[2]},
+			},
+			{
+				Name:    "agentidentitykey_agent_id",
+				Unique:  false,
+				Columns: []*schema.Column{AgentIdentityKeysColumns[3]},
+			},
+		},
+	}
+	// AgentReincarnationsColumns holds the columns for the "agent_reincarnations" table.
+	AgentReincarnationsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "agent_id", Type: field.TypeString},
+		{Name: "from_generation", Type: field.TypeInt},
+		{Name: "to_generation", Type: field.TypeInt},
+		{Name: "requested_by", Type: field.TypeString, Nullable: true},
+		{Name: "requested_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
+		{Name: "completed_at", Type: field.TypeTime, Nullable: true},
+		{Name: "state", Type: field.TypeEnum, Enums: []string{"pending", "stopping", "provisioning", "starting", "completed", "failed"}, Default: "pending"},
+		{Name: "error", Type: field.TypeString, Nullable: true},
+		{Name: "previous_applied_config", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "new_applied_config", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "handoff", Type: field.TypeString, Nullable: true, Size: 2147483647},
+	}
+	// AgentReincarnationsTable holds the schema information for the "agent_reincarnations" table.
+	AgentReincarnationsTable = &schema.Table{
+		Name:       "agent_reincarnations",
+		Columns:    AgentReincarnationsColumns,
+		PrimaryKey: []*schema.Column{AgentReincarnationsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "agentreincarnation_agent_id_state",
+				Unique:  false,
+				Columns: []*schema.Column{AgentReincarnationsColumns[1], AgentReincarnationsColumns[8]},
+			},
+			{
+				Name:    "agentreincarnation_state_updated_at",
+				Unique:  false,
+				Columns: []*schema.Column{AgentReincarnationsColumns[8], AgentReincarnationsColumns[6]},
 			},
 		},
 	}
@@ -575,7 +636,7 @@ var (
 		{Name: "id", Type: field.TypeUUID},
 		{Name: "subject_type", Type: field.TypeEnum, Enums: []string{"user", "group", "system_default"}},
 		{Name: "subject_id", Type: field.TypeString, Default: ""},
-		{Name: "scope_type", Type: field.TypeEnum, Enums: []string{"system", "project"}},
+		{Name: "scope_type", Type: field.TypeEnum, Enums: []string{"system", "project", "broker"}},
 		{Name: "scope_id", Type: field.TypeString, Default: ""},
 		{Name: "value", Type: field.TypeInt64},
 		{Name: "created_by", Type: field.TypeString, Nullable: true, Default: ""},
@@ -635,6 +696,43 @@ var (
 				Name:    "envvar_scope_scope_id",
 				Unique:  false,
 				Columns: []*schema.Column{EnvVarsColumns[3], EnvVarsColumns[4]},
+			},
+		},
+	}
+	// ExternalIdentitiesColumns holds the columns for the "external_identities" table.
+	ExternalIdentitiesColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "provider", Type: field.TypeString},
+		{Name: "issuer", Type: field.TypeString},
+		{Name: "subject", Type: field.TypeString},
+		{Name: "email", Type: field.TypeString, Nullable: true},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
+		{Name: "user_id", Type: field.TypeUUID},
+	}
+	// ExternalIdentitiesTable holds the schema information for the "external_identities" table.
+	ExternalIdentitiesTable = &schema.Table{
+		Name:       "external_identities",
+		Columns:    ExternalIdentitiesColumns,
+		PrimaryKey: []*schema.Column{ExternalIdentitiesColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "external_identities_users_external_identities",
+				Columns:    []*schema.Column{ExternalIdentitiesColumns[7]},
+				RefColumns: []*schema.Column{UsersColumns[0]},
+				OnDelete:   schema.Cascade,
+			},
+		},
+		Indexes: []*schema.Index{
+			{
+				Name:    "externalidentity_provider_issuer_subject",
+				Unique:  true,
+				Columns: []*schema.Column{ExternalIdentitiesColumns[1], ExternalIdentitiesColumns[2], ExternalIdentitiesColumns[3]},
+			},
+			{
+				Name:    "externalidentity_user_id",
+				Unique:  false,
+				Columns: []*schema.Column{ExternalIdentitiesColumns[7]},
 			},
 		},
 	}
@@ -821,7 +919,6 @@ var (
 		{Name: "created_by", Type: field.TypeString, Nullable: true},
 		{Name: "updated_by", Type: field.TypeString, Nullable: true},
 		{Name: "source_url", Type: field.TypeString, Nullable: true},
-		{Name: "visibility", Type: field.TypeString, Default: "private"},
 		{Name: "created", Type: field.TypeTime},
 		{Name: "updated", Type: field.TypeTime},
 	}
@@ -1098,7 +1195,6 @@ var (
 		{Name: "channel", Type: field.TypeString, Nullable: true, Size: 64},
 		{Name: "thread_id", Type: field.TypeString, Nullable: true, Size: 256},
 		{Name: "conversation_id", Type: field.TypeUUID, Nullable: true},
-		{Name: "visibility", Type: field.TypeString, Nullable: true, Size: 16},
 		{Name: "created", Type: field.TypeTime},
 	}
 	// MessagesTable holds the schema information for the "messages" table.
@@ -1120,12 +1216,22 @@ var (
 			{
 				Name:    "message_created",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[20]},
+				Columns: []*schema.Column{MessagesColumns[19]},
 			},
 			{
 				Name:    "message_conversation_id",
 				Unique:  false,
 				Columns: []*schema.Column{MessagesColumns[18]},
+			},
+			{
+				Name:    "message_conversation_id_channel_created_id",
+				Unique:  false,
+				Columns: []*schema.Column{MessagesColumns[18], MessagesColumns[16], MessagesColumns[19], MessagesColumns[0]},
+			},
+			{
+				Name:    "message_thread_id_channel_created_id",
+				Unique:  false,
+				Columns: []*schema.Column{MessagesColumns[17], MessagesColumns[16], MessagesColumns[19], MessagesColumns[0]},
 			},
 		},
 	}
@@ -1261,6 +1367,14 @@ var (
 				Unique:  false,
 				Columns: []*schema.Column{NotificationsColumns[3], NotificationsColumns[4], NotificationsColumns[5]},
 			},
+			{
+				Name:    "notification_subscriber_type_created",
+				Unique:  false,
+				Columns: []*schema.Column{NotificationsColumns[4], NotificationsColumns[10]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "dispatched = false",
+				},
+			},
 		},
 	}
 	// NotificationSubscriptionsColumns holds the columns for the "notification_subscriptions" table.
@@ -1354,6 +1468,8 @@ var (
 		{Name: "github_permissions", Type: field.TypeString, Nullable: true},
 		{Name: "github_app_status", Type: field.TypeString, Nullable: true},
 		{Name: "git_identity", Type: field.TypeString, Nullable: true},
+		{Name: "cross_project_inbound", Type: field.TypeEnum, Enums: []string{"none", "members", "any"}, Default: "none"},
+		{Name: "cross_project_inbound_revision", Type: field.TypeInt64, Default: 1},
 	}
 	// ProjectsTable holds the schema information for the "projects" table.
 	ProjectsTable = &schema.Table{
@@ -1543,8 +1659,8 @@ var (
 		{Name: "supported_harnesses", Type: field.TypeString, Nullable: true},
 		{Name: "resources", Type: field.TypeString, Nullable: true},
 		{Name: "runtimes", Type: field.TypeString, Nullable: true},
-		{Name: "labels", Type: field.TypeString, Nullable: true},
-		{Name: "annotations", Type: field.TypeString, Nullable: true},
+		{Name: "labels", Type: field.TypeJSON, Nullable: true},
+		{Name: "annotations", Type: field.TypeJSON, Nullable: true},
 		{Name: "endpoint", Type: field.TypeString, Nullable: true},
 		{Name: "created_by", Type: field.TypeString, Nullable: true},
 		{Name: "auto_provide", Type: field.TypeBool, Default: false},
@@ -1701,7 +1817,6 @@ var (
 		{Name: "owner_id", Type: field.TypeString, Nullable: true},
 		{Name: "created_by", Type: field.TypeString, Nullable: true},
 		{Name: "updated_by", Type: field.TypeString, Nullable: true},
-		{Name: "visibility", Type: field.TypeString, Default: "private"},
 		{Name: "created", Type: field.TypeTime},
 		{Name: "updated", Type: field.TypeTime},
 	}
@@ -1872,7 +1987,6 @@ var (
 		{Name: "created_by", Type: field.TypeString, Nullable: true},
 		{Name: "updated_by", Type: field.TypeString, Nullable: true},
 		{Name: "source_url", Type: field.TypeString, Nullable: true},
-		{Name: "visibility", Type: field.TypeString, Default: "private"},
 		{Name: "created", Type: field.TypeTime},
 		{Name: "updated", Type: field.TypeTime},
 	}
@@ -1908,7 +2022,7 @@ var (
 	UsageReservationsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
 		{Name: "subject_id", Type: field.TypeString},
-		{Name: "scope_type", Type: field.TypeEnum, Enums: []string{"system", "project"}},
+		{Name: "scope_type", Type: field.TypeEnum, Enums: []string{"system", "project", "broker"}},
 		{Name: "scope_id", Type: field.TypeString, Default: ""},
 		{Name: "resource_id", Type: field.TypeString},
 		{Name: "reserved", Type: field.TypeInt64, Default: 1},
@@ -1962,6 +2076,7 @@ var (
 		{Name: "invite_note", Type: field.TypeString, Nullable: true},
 		{Name: "last_login", Type: field.TypeTime, Nullable: true},
 		{Name: "last_seen", Type: field.TypeTime, Nullable: true},
+		{Name: "session_generation", Type: field.TypeInt64, Default: 0},
 	}
 	// UsersTable holds the schema information for the "users" table.
 	UsersTable = &schema.Table{
@@ -2039,6 +2154,8 @@ var (
 		AccessPoliciesTable,
 		AgentsTable,
 		AgentCredentialsTable,
+		AgentIdentityKeysTable,
+		AgentReincarnationsTable,
 		AgentSessionMetricsTable,
 		AllowListTable,
 		APIKeysTable,
@@ -2052,6 +2169,7 @@ var (
 		DelegationEdgesTable,
 		EntitlementBindingsTable,
 		EnvVarsTable,
+		ExternalIdentitiesTable,
 		GcpServiceAccountsTable,
 		GithubResolutionCacheTable,
 		GithubInstallationsTable,
@@ -2129,6 +2247,10 @@ func init() {
 	EntitlementBindingsTable.ForeignKeys[0].RefTable = LimitDefinitionsTable
 	EnvVarsTable.Annotation = &entsql.Annotation{
 		Table: "env_vars",
+	}
+	ExternalIdentitiesTable.ForeignKeys[0].RefTable = UsersTable
+	ExternalIdentitiesTable.Annotation = &entsql.Annotation{
+		Table: "external_identities",
 	}
 	GcpServiceAccountsTable.Annotation = &entsql.Annotation{
 		Table: "gcp_service_accounts",

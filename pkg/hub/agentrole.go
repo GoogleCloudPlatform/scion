@@ -63,6 +63,7 @@ func ScopesForRole(role AgentRole) []AgentTokenScope {
 			ScopeAgentLifecycle,
 			ScopeProjectSecretRead,
 			ScopeProjectTemplateWrite,
+			ScopeAgentSetMessageMode,
 		}
 	case "":
 		return ScopesForRole(AgentRoleNone)
@@ -107,16 +108,4 @@ func minRole(roles ...AgentRole) AgentRole {
 		}
 	}
 	return min
-}
-
-// ResolveEffectiveRole computes the effective agent role.
-//
-// The user-ceiling gate is no longer applied at creation time. Live delegation
-// ceiling (Phase 1G) handles user authority bounding at decision time rather
-// than at role resolution time. Only the project maximum and template boundary
-// apply at creation time.
-//
-// userHubRole is retained for API compatibility but is no longer used.
-func ResolveEffectiveRole(requested AgentRole, userHubRole string, projectMax AgentRole) AgentRole {
-	return minRole(requested, projectMax)
 }

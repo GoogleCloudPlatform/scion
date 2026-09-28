@@ -36,7 +36,12 @@
 import { LitElement, html, css, svg, nothing } from 'lit';
 import { customElement, property, state, query } from 'lit/decorators.js';
 import type { Agent } from '../../shared/types.js';
-import { getAgentDisplayStatus, can, isTerminalAvailable } from '../../shared/types.js';
+import {
+  getAgentDisplayStatus,
+  can,
+  canMessageAgent,
+  isTerminalAvailable,
+} from '../../shared/types.js';
 import { getStateDisplay, type StatusVariant } from '../../shared/agent-state-display.js';
 import {
   buildLineageForest,
@@ -60,6 +65,7 @@ import './status-badge.js';
 import { getMessageModeDisplay, getDenialMessage } from '../../shared/message-mode.js';
 import type { MessageMode } from '../../shared/types.js';
 import './quick-message-dialog.js';
+import { terminalHref } from '../../client/open-terminal.js';
 
 /**
  * Determine edge visual style based on parent/child message mode compatibility.
@@ -79,8 +85,14 @@ function getEdgeStyle(
   if (pm === 'branch' && cm === 'branch') {
     return { stroke: 'var(--sl-color-primary-600)', dashArray: '', markerClass: 'lit' };
   }
-  // Both project mode (messageable)
-  if (pm === 'project' && cm === 'project') {
+  // Hub/project compatibility: hub joins the project communication cell.
+  // hub↔hub, hub↔project, and project↔project are all messageable within the same project.
+  const projectOrHub = new Set<MessageMode>(['project', 'hub']);
+  if (projectOrHub.has(pm) && projectOrHub.has(cm)) {
+    // Use hub color when either endpoint is hub mode
+    if (pm === 'hub' || cm === 'hub') {
+      return { stroke: 'var(--sl-color-success-600)', dashArray: '', markerClass: 'lit' };
+    }
     return { stroke: 'var(--sl-color-neutral-400)', dashArray: '', markerClass: '' };
   }
   // Mode mismatch (non-messageable)
@@ -1046,7 +1058,7 @@ export class ScionAgentTreeView extends LitElement {
                   ></sl-icon-button>
                 </sl-tooltip>
               `
-            : can(agent._capabilities, 'attach')
+            : canMessageAgent(agent._capabilities)
               ? html`
                   <sl-icon-button
                     class="message-btn"
@@ -1068,7 +1080,7 @@ export class ScionAgentTreeView extends LitElement {
                 class="terminal-btn"
                 name="terminal"
                 label="Terminal"
-                href=${isTerminalAvailable(agent) ? `/agents/${agent.id}/terminal` : nothing}
+                href=${isTerminalAvailable(agent) ? terminalHref(agent.id) : nothing}
                 ?disabled=${!isTerminalAvailable(agent)}
               ></sl-icon-button>
             `

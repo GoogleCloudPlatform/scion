@@ -143,9 +143,7 @@ describe('scion-page-admin-role-bindings sorting', () => {
     await el.updateComplete;
 
     // After click, should request created asc.
-    const lastBindingsCall = calls
-      .filter((c) => c.includes('/api/v1/admin/role-bindings'))
-      .pop();
+    const lastBindingsCall = calls.filter((c) => c.includes('/api/v1/admin/role-bindings')).pop();
     expect(lastBindingsCall).toContain('sort_by=created');
     expect(lastBindingsCall).toContain('sort_order=asc');
 
@@ -164,9 +162,7 @@ describe('scion-page-admin-role-bindings sorting', () => {
     await new Promise((resolve) => setTimeout(resolve, 200));
     await el.updateComplete;
 
-    const lastBindingsCall = calls
-      .filter((c) => c.includes('/api/v1/admin/role-bindings'))
-      .pop();
+    const lastBindingsCall = calls.filter((c) => c.includes('/api/v1/admin/role-bindings')).pop();
     expect(lastBindingsCall).toContain('sort_by=principal');
     expect(lastBindingsCall).toContain('sort_order=asc'); // default for non-created
 
@@ -186,9 +182,7 @@ describe('scion-page-admin-role-bindings sorting', () => {
     await new Promise((resolve) => setTimeout(resolve, 200));
     await el.updateComplete;
 
-    const lastBindingsCall = calls
-      .filter((c) => c.includes('/api/v1/admin/role-bindings'))
-      .pop();
+    const lastBindingsCall = calls.filter((c) => c.includes('/api/v1/admin/role-bindings')).pop();
     expect(lastBindingsCall).toContain('offset=0');
   });
 

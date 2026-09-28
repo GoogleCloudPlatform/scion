@@ -58,6 +58,26 @@ func ExtractMentions(text string) []string {
 	return mentions
 }
 
+// IsLeadingMention reports whether text begins with an @-mention token
+// whose extracted name matches firstMentionName (case-insensitive).
+// The extraction uses the same rules as ExtractMentions: TrimPrefix "@",
+// then TrimRightFunc for trailing punctuation (except _ and -).
+//
+// This is used to detect the "leading @-mention override" pattern where
+// a message starting with @agent-name signals explicit address override
+// rather than additive mention routing.
+func IsLeadingMention(text, firstMentionName string) bool {
+	fields := strings.Fields(text)
+	if len(fields) == 0 || !strings.HasPrefix(fields[0], "@") {
+		return false
+	}
+	name := strings.TrimPrefix(fields[0], "@")
+	name = strings.TrimRightFunc(name, func(r rune) bool {
+		return unicode.IsPunct(r) && r != '_' && r != '-'
+	})
+	return name != "" && strings.EqualFold(name, firstMentionName)
+}
+
 // ParseCCFlag parses a --cc flag value into a slice of agent names.
 // Names are comma-separated and whitespace-trimmed.
 func ParseCCFlag(cc string) []string {

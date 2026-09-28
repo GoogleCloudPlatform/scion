@@ -15,8 +15,10 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"testing/fstest"
 )
@@ -207,10 +209,17 @@ user: scion
 		t.Errorf("expected global image, got %q", hc.Config.Image)
 	}
 
-	// Test: not found
+	// Test: not found — error should include searched paths
 	_, err = FindHarnessConfigDir("nonexistent", projectPath)
 	if err == nil {
 		t.Fatal("expected error for nonexistent harness-config")
+	}
+	errMsg := err.Error()
+	if !strings.Contains(errMsg, "searched:") {
+		t.Errorf("expected error to include searched paths, got: %s", errMsg)
+	}
+	if !strings.Contains(errMsg, filepath.Join(projectPath, harnessConfigsDirName, "nonexistent")) {
+		t.Errorf("expected error to include project search path, got: %s", errMsg)
 	}
 
 	// Test: "generic" returns a synthetic entry even with no on-disk directory
@@ -313,6 +322,96 @@ user: scion
 	}
 }
 
+func TestFindHarnessConfigDir_NotFoundErrorIncludesSearchedPaths(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	origHome := os.Getenv("HOME")
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
+
+	projectPath := filepath.Join(tmpDir, "project")
+	templateDir := filepath.Join(tmpDir, "templates", "web-dev")
+
+	_, err := FindHarnessConfigDir("missing-harness", projectPath, templateDir)
+	if err == nil {
+		t.Fatal("expected error for missing harness-config")
+	}
+	errMsg := err.Error()
+
+	// Error should mention all three search locations
+	expectedPaths := []string{
+		filepath.Join(templateDir, harnessConfigsDirName, "missing-harness"),
+		filepath.Join(projectPath, harnessConfigsDirName, "missing-harness"),
+	}
+	for _, p := range expectedPaths {
+		if !strings.Contains(errMsg, p) {
+			t.Errorf("expected error to include path %q, got: %s", p, errMsg)
+		}
+	}
+	// Global dir should also be included — assert the exact path, not just the directory name
+	globalExpected := filepath.Join(tmpDir, DotScion, harnessConfigsDirName, "missing-harness")
+	if !strings.Contains(errMsg, globalExpected) {
+		t.Errorf("expected error to include global search path %q, got: %s", globalExpected, errMsg)
+	}
+	if !strings.Contains(errMsg, "searched:") {
+		t.Errorf("expected error to include 'searched:' prefix, got: %s", errMsg)
+	}
+}
+
+// TestFindHarnessConfigDir_NotFoundWrapsSentinel proves the fix for
+// ptone/scion#1316 fault 3: a caller must be able to distinguish "this named
+// harness-config does not exist" from any other provisioning failure via
+// errors.Is, so the runtime broker can report a 404 naming the resource
+// instead of folding it into a generic 5xx.
+func TestFindHarnessConfigDir_NotFoundWrapsSentinel(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	origHome := os.Getenv("HOME")
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
+
+	_, err := FindHarnessConfigDir("missing-harness", "")
+	if err == nil {
+		t.Fatal("expected error for missing harness-config")
+	}
+	if !errors.Is(err, ErrHarnessConfigNotFound) {
+		t.Errorf("expected errors.Is(err, ErrHarnessConfigNotFound) to be true, got err: %v", err)
+	}
+}
+
+func TestFindHarnessConfigDir_NotFoundErrorNoProjectPath(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	origHome := os.Getenv("HOME")
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
+
+	// No project path, no template paths — only global is searched
+	_, err := FindHarnessConfigDir("missing-harness", "")
+	if err == nil {
+		t.Fatal("expected error for missing harness-config")
+	}
+	errMsg := err.Error()
+
+	// Should include the global search path
+	globalDir := filepath.Join(tmpDir, DotScion, harnessConfigsDirName, "missing-harness")
+	if !strings.Contains(errMsg, globalDir) {
+		t.Errorf("expected error to include global search path %q, got: %s", globalDir, errMsg)
+	}
+	// Should NOT include a project search path since none was provided.
+	// Avoid checking for the generic word "project" — it could appear in the
+	// temp-dir path or error text.  Instead, verify that the specific
+	// project-level search path pattern is absent.
+	projectSearchPath := filepath.Join("harness-configs", "missing-harness")
+	// Count how many times the harness-configs/missing-harness pattern appears.
+	// With no project path, only the global path should be listed.
+	occurrences := strings.Count(errMsg, projectSearchPath)
+	if occurrences != 1 {
+		t.Errorf("expected exactly 1 searched path (global only), found %d occurrences of %q in: %s",
+			occurrences, projectSearchPath, errMsg)
+	}
+}
+
 func TestFindHarnessConfigDir_FallsThrough_BrokenDirectory(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -348,8 +447,8 @@ func TestFindHarnessConfigDir_FallsThrough_BrokenDirectory(t *testing.T) {
 
 	// Project has harness-configs/opencode/ directory but NO config.yaml
 	projectPath := filepath.Join(tmpDir, "project")
-	brokenGroveHCDir := filepath.Join(projectPath, harnessConfigsDirName, "opencode")
-	if err := os.MkdirAll(brokenGroveHCDir, 0755); err != nil {
+	brokenProjectHCDir := filepath.Join(projectPath, harnessConfigsDirName, "opencode")
+	if err := os.MkdirAll(brokenProjectHCDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 

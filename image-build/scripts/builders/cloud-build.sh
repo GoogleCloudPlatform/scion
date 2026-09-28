@@ -113,6 +113,9 @@ builder_run_target() {
   # (referenced) in the template steps.
   local short_sha="${SHORT_SHA:-unknown}"
   local commit_sha="${COMMIT_SHA:-unknown}"
+  # Unlike short_sha/commit_sha, an empty VERSION is a normal, expected value
+  # (off-tag builds), not a placeholder — same convention as hack/version.sh.
+  local version_val="${VERSION:-}"
 
   local subs="_TAG=${tag}"
   if grep -q '_SHORT_SHA' "${config}"; then
@@ -120,6 +123,13 @@ builder_run_target() {
   fi
   if grep -q '_COMMIT_SHA' "${config}"; then
     subs="${subs},_COMMIT_SHA=${commit_sha}"
+  fi
+  # Omit _VERSION entirely when empty so the yaml's own `_VERSION: ''`
+  # default applies. The regex excludes `GO_VERSION` and the `_VERSION: ''`
+  # declaration line (both lack a leading `$`); it's POSIX ERE, so it also
+  # works with BSD grep.
+  if [[ -n "${version_val}" ]] && grep -qE '\$\{?_VERSION([^A-Za-z0-9_]|$)' "${config}"; then
+    subs="${subs},_VERSION=${version_val}"
   fi
   if [[ -n "${registry}" ]]; then
     subs="${subs},_REGISTRY=${registry}"

@@ -116,6 +116,12 @@ func TestExecuteMigration_AlreadyCompleted(t *testing.T) {
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("expected 409, got %d: %s", rr.Code, rr.Body.String())
 	}
+	// The 409 body must not point an operator at a CLI flag that does not
+	// exist -- there is no command in cmd/ that re-runs a completed
+	// migration through this endpoint.
+	if body := rr.Body.String(); strings.Contains(body, "--force") || strings.Contains(body, "CLI") {
+		t.Errorf("409 body must not reference a nonexistent CLI flag, got: %s", body)
+	}
 }
 
 func TestExecuteMigration_AlreadyRunning(t *testing.T) {

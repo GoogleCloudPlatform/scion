@@ -66,13 +66,9 @@ export function formatAccessDenied(detail: AccessDeniedDetail): {
   // Primary: prefer the backend message when it is not the generic
   // "Insufficient permissions" (which adds no information). Custom
   // messages from authorizeMsg carry real user-facing guidance.
-  const isGeneric =
-    !detail.reason ||
-    detail.reason === 'Insufficient permissions';
+  const isGeneric = !detail.reason || detail.reason === 'Insufficient permissions';
 
-  const primary = isGeneric
-    ? "You don't have permission to perform this action."
-    : detail.reason!;
+  const primary = isGeneric ? "You don't have permission to perform this action." : detail.reason!;
 
   // Secondary: build from structured detail (denied_action / resource_type).
   const label = actionLabel(detail.action);
@@ -183,14 +179,8 @@ export function showAccessDeniedToast(detail: AccessDeniedDetail): void {
   secondarySpan.style.opacity = '0.8';
   alert.appendChild(secondarySpan);
 
-  alert.addEventListener(
-    'sl-after-hide',
-    () => {
-      alert.remove();
-    },
-    { once: true }
-  );
-
+  // Shoelace's .toast() handles cleanup via its own sl-after-hide listener.
+  // Do NOT register a competing alert.remove() here — see #1733.
   document.body.appendChild(alert);
   void (alert as HTMLElement & { toast(): Promise<void> }).toast();
 }

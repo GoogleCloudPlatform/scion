@@ -284,7 +284,7 @@ func TestValidateLegacyMessage_GroupRecipient_Addressees(t *testing.T) {
 	msg := validLegacyMessage()
 	msg.Recipient = "group[agent:reviewer,user:alice]"
 
-	_, addrs, err := MapLegacyEnvelope(msg)
+	_, addrs, err := MapLegacyEnvelope(msg, PersistedIdentity{})
 	if err != nil {
 		t.Fatalf("MapLegacyEnvelope: %v", err)
 	}
@@ -313,7 +313,7 @@ func TestValidateLegacyMessage_GroupRecipient_BareNames(t *testing.T) {
 	msg := validLegacyMessage()
 	msg.Recipient = "group[reviewer,deploy-bot]"
 
-	_, addrs, err := MapLegacyEnvelope(msg)
+	_, addrs, err := MapLegacyEnvelope(msg, PersistedIdentity{})
 	if err != nil {
 		t.Fatalf("MapLegacyEnvelope: %v", err)
 	}
@@ -341,7 +341,7 @@ func TestValidateLegacyMessage_GroupRecipient_ViaExplicitPinned(t *testing.T) {
 	msg.Type = messages.TypeMention
 	msg.Recipient = "group[agent:reviewer,agent:deploy-bot]"
 
-	_, addrs, err := MapLegacyEnvelope(msg)
+	_, addrs, err := MapLegacyEnvelope(msg, PersistedIdentity{})
 	if err != nil {
 		t.Fatalf("MapLegacyEnvelope: %v", err)
 	}
@@ -359,7 +359,7 @@ func TestValidateLegacyMessage_GroupRecipient_ViaExplicitPinned(t *testing.T) {
 	singleMsg := validLegacyMessage()
 	singleMsg.Type = messages.TypeMention
 	singleMsg.Recipient = "agent:reviewer"
-	_, singleAddrs, err := MapLegacyEnvelope(singleMsg)
+	_, singleAddrs, err := MapLegacyEnvelope(singleMsg, PersistedIdentity{})
 	if err != nil {
 		t.Fatalf("MapLegacyEnvelope (single): %v", err)
 	}
@@ -384,7 +384,7 @@ func TestValidateLegacyMessage_SetRecipient_LegacyAlias(t *testing.T) {
 		t.Fatalf("ValidateLegacyMessage(set[...]) returned error: %v", err)
 	}
 
-	_, addrs, err := MapLegacyEnvelope(msg)
+	_, addrs, err := MapLegacyEnvelope(msg, PersistedIdentity{})
 	if err != nil {
 		t.Fatalf("MapLegacyEnvelope(set[...]): %v", err)
 	}

@@ -90,9 +90,11 @@ type AgentService interface {
 	// GetLogs retrieves agent logs.
 	GetLogs(ctx context.Context, agentID string, opts *GetLogsOptions) (string, error)
 
-	// SendOutboundMessage sends a message from an agent to a human inbox.
-	// Used when agents need to communicate with users (e.g., asking questions).
-	SendOutboundMessage(ctx context.Context, agentID string, msg *OutboundMessageRequest) error
+	// SendOutboundMessage sends a message from an agent via the outbound
+	// endpoint and returns the server-assigned message identity and delivery
+	// status. The SDK adds no retry or fallback routing; send budget, policy,
+	// and capabilities are server-enforced.
+	SendOutboundMessage(ctx context.Context, agentID string, msg *OutboundMessageRequest) (*OutboundMessageResult, error)
 
 	// GetCloudLogs retrieves structured log entries from Cloud Logging.
 	GetCloudLogs(ctx context.Context, agentID string, opts *GetCloudLogsOptions) (*CloudLogsResponse, error)
@@ -101,6 +103,15 @@ type AgentService interface {
 	// The handler is called for each log entry received. Blocks until the
 	// context is cancelled or the server closes the connection.
 	StreamCloudLogs(ctx context.Context, agentID string, opts *GetCloudLogsOptions, handler func(CloudLogEntry)) error
+
+	// SetMessageMode changes the messaging mode for an agent.
+	SetMessageMode(ctx context.Context, agentID string, req *SetMessageModeRequest, opts *SetMessageModeOptions) (*SetMessageModeResponse, error)
+
+	// Reincarnate requests a `scion reincarnate` migration for an agent:
+	// re-resolve its configuration against the current template/harness-config
+	// catalog and start a new generation with the given handoff as its first
+	// task. With req.DryRun, returns the resolved plan and changes nothing.
+	Reincarnate(ctx context.Context, agentID string, req *ReincarnateAgentRequest) (*ReincarnateAgentResponse, error)
 }
 
 // agentService is the implementation of AgentService.
@@ -190,6 +201,11 @@ type CreateAgentRequest struct {
 	// AgentRole specifies the requested authorization role.
 	AgentRole string `json:"agentRole,omitempty"`
 
+	// MessageMode specifies the initial message mode for the agent.
+	// Valid values: "none", "lineage", "branch", "project", "hub".
+	// When omitted, resolved from template, parent inheritance, or "project" default.
+	MessageMode string `json:"messageMode,omitempty"`
+
 	// GCPIdentity specifies the GCP identity assignment for the agent.
 	// Controls metadata server behavior and optional service account binding.
 	// When nil, the project default (if any) is applied by the Hub.
@@ -208,36 +224,6 @@ type GCPIdentityConfig struct {
 	// ServiceAccountID is the Scion resource ID of the service account to assign.
 	// Required when MetadataMode is "assign", must be empty otherwise.
 	ServiceAccountID string `json:"service_account_id,omitempty"`
-}
-
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (r CreateAgentRequest) MarshalJSON() ([]byte, error) {
-	type Alias CreateAgentRequest
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId,omitempty"`
-	}{
-		Alias:   Alias(r),
-		GroveID: r.ProjectID,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (r *CreateAgentRequest) UnmarshalJSON(data []byte) error {
-	type Alias CreateAgentRequest
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(r),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if r.ProjectID == "" && aux.GroveID != "" {
-		r.ProjectID = aux.GroveID
-	}
-	return nil
 }
 
 // CreateAgentResponse is the response from creating an agent.
@@ -319,7 +305,6 @@ func (s *agentService) List(ctx context.Context, opts *ListAgentsOptions) (*List
 	if opts != nil {
 		if opts.ProjectID != "" {
 			query.Set("projectId", opts.ProjectID)
-			query.Set("groveId", opts.ProjectID)
 		}
 		if opts.Phase != "" {
 			query.Set("phase", opts.Phase)
@@ -536,26 +521,54 @@ func (s *agentService) SendStructuredMessage(ctx context.Context, agentID string
 	return apiclient.DecodeResponse[MessageResponse](resp)
 }
 
-// OutboundMessageRequest is the request body for sending an agent-to-human outbound message.
+// OutboundMessageRequest is the request body for sending an outbound message
+// from an agent. The recipient may be a human user or another agent; the hub
+// determines the delivery path from the addressing fields.
 type OutboundMessageRequest struct {
-	Recipient   string            `json:"recipient,omitempty"`
-	RecipientID string            `json:"recipient_id,omitempty"`
-	Msg         string            `json:"msg"`
-	Type        string            `json:"type,omitempty"`
-	Urgent      bool              `json:"urgent,omitempty"`
-	Attachments []string          `json:"attachments,omitempty"`
-	Channel     string            `json:"channel,omitempty"`
-	ThreadID    string            `json:"thread_id,omitempty"`
-	Metadata    map[string]string `json:"metadata,omitempty"`
+	Recipient       string            `json:"recipient,omitempty"`
+	RecipientID     string            `json:"recipient_id,omitempty"`
+	Msg             string            `json:"msg"`
+	Type            string            `json:"type,omitempty"`
+	Urgent          bool              `json:"urgent,omitempty"`
+	Attachments     []string          `json:"attachments,omitempty"`
+	Channel         string            `json:"channel,omitempty"`
+	ThreadID        string            `json:"thread_id,omitempty"`
+	Metadata        map[string]string `json:"metadata,omitempty"`
+	ConversationID  string            `json:"conversation_id,omitempty"`
+	ConversationRef string            `json:"conversation_ref,omitempty"`
+	// Wake requests that a suspended target agent be resumed before
+	// delivering the message. Ignored for non-agent recipients.
+	Wake bool `json:"wake,omitempty"`
 }
 
-// SendOutboundMessage sends a message from an agent to a human inbox.
-func (s *agentService) SendOutboundMessage(ctx context.Context, agentID string, msg *OutboundMessageRequest) error {
+// OutboundMessageResult is the parsed response from a successful outbound
+// message send. It carries the server-assigned message identity and delivery
+// status so callers can correlate the message or detect ambiguous delivery.
+//
+// All fields are populated by the server on every 2xx response; omitempty is
+// intentionally absent because the contract guarantees non-empty values on
+// success. A nil result (with a non-nil error) indicates a non-2xx response.
+type OutboundMessageResult struct {
+	// MessageID is the server-assigned UUID for the persisted message.
+	MessageID string `json:"message_id"`
+	// Status is the delivery status reported by the hub (e.g. "sent").
+	Status string `json:"status"`
+	// Recipient is the wire-format recipient (e.g. "user:alice" or "agent:builder").
+	Recipient string `json:"recipient"`
+	// RecipientID is the recipient's UUID.
+	RecipientID string `json:"recipient_id"`
+}
+
+// SendOutboundMessage sends a message from an agent via the outbound endpoint.
+// Returns the server-assigned message identity and delivery status, or a
+// structured error on failure. The SDK adds no retry or fallback routing;
+// send budget, policy, and capabilities are server-enforced.
+func (s *agentService) SendOutboundMessage(ctx context.Context, agentID string, msg *OutboundMessageRequest) (*OutboundMessageResult, error) {
 	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/outbound-message", msg, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return apiclient.CheckResponse(resp)
+	return apiclient.DecodeResponse[OutboundMessageResult](resp)
 }
 
 // BroadcastResponse is the parsed response from a broadcast message delivery.
@@ -740,4 +753,101 @@ func (s *agentService) StreamCloudLogs(ctx context.Context, agentID string, opts
 	}
 
 	return scanner.Err()
+}
+
+// SetMessageModeRequest is the request body for changing an agent's message mode.
+type SetMessageModeRequest struct {
+	Mode    string `json:"mode"`
+	Cascade bool   `json:"cascade,omitempty"`
+}
+
+// SetMessageModeResponse is the response from changing an agent's message mode.
+type SetMessageModeResponse struct {
+	AgentID  string          `json:"agent_id"`
+	Mode     string          `json:"mode"`
+	Previous string          `json:"previous_mode"`
+	Cascade  json.RawMessage `json:"cascade,omitempty"`
+}
+
+// SetMessageModeOptions configures the set-message-mode call.
+type SetMessageModeOptions struct {
+	DryRun bool
+}
+
+// SetMessageMode changes the messaging mode for an agent.
+func (s *agentService) SetMessageMode(ctx context.Context, agentID string, req *SetMessageModeRequest, opts *SetMessageModeOptions) (*SetMessageModeResponse, error) {
+	path := s.agentPath(agentID) + "/set_message_mode"
+	if opts != nil && opts.DryRun {
+		path += "?dryRun=true"
+	}
+	resp, err := s.c.post(ctx, path, req, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeResponse[SetMessageModeResponse](resp)
+}
+
+// Reincarnate requests a `scion reincarnate` migration for an agent (design
+// /scion-volumes/scratchpad/projects/agent-migrate/design.md §3.2).
+func (s *agentService) Reincarnate(ctx context.Context, agentID string, req *ReincarnateAgentRequest) (*ReincarnateAgentResponse, error) {
+	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/reincarnate", req, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeResponse[ReincarnateAgentResponse](resp)
+}
+
+// ReincarnateAgentRequest is the request body for Reincarnate. Phase 1
+// supports only Handoff and DryRun; every override field is accepted on the
+// wire (so a hub that has adopted overrides can still parse an old client's
+// request), but a Phase-1 hub rejects any of them with a 400.
+type ReincarnateAgentRequest struct {
+	Handoff string `json:"handoff,omitempty"`
+	DryRun  bool   `json:"dryRun,omitempty"`
+
+	// Phase 3 overrides — not yet supported by a Phase 1 hub.
+	Image          string            `json:"image,omitempty"`
+	HarnessConfig  string            `json:"harnessConfig,omitempty"`
+	HarnessAuth    string            `json:"harnessAuth,omitempty"`
+	Model          string            `json:"model,omitempty"`
+	Env            map[string]string `json:"env,omitempty"`
+	TemplateHash   string            `json:"templateHash,omitempty"`
+	ResetOverrides bool              `json:"resetOverrides,omitempty"`
+	Rollback       bool              `json:"rollback,omitempty"`
+}
+
+// ReincarnateAgentResponse is the response body for Reincarnate: 202 for a
+// persisted (pending) reincarnation, or 200 for a dry run.
+type ReincarnateAgentResponse struct {
+	AgentID    string            `json:"agentId"`
+	Generation int               `json:"generation"`
+	State      string            `json:"state"`
+	Plan       ReincarnationPlan `json:"plan"`
+}
+
+// FieldChange describes an old→new change to a single scalar field on the
+// reincarnation plan.
+type FieldChange struct {
+	Old string `json:"old,omitempty"`
+	New string `json:"new,omitempty"`
+}
+
+// KeyDiff describes an old→new change to a set of map keys (e.g. env var
+// names), by name only — never by value.
+type KeyDiff struct {
+	Added   []string `json:"added,omitempty"`
+	Removed []string `json:"removed,omitempty"`
+	Changed []string `json:"changed,omitempty"`
+}
+
+// ReincarnationPlan is the old→new diff returned by both a dry run and a real
+// reincarnate request.
+type ReincarnationPlan struct {
+	Template   FieldChange `json:"template"`
+	Image      FieldChange `json:"image"`
+	HarnessCfg FieldChange `json:"harnessConfig"`
+	Model      FieldChange `json:"model"`
+	EnvKeys    KeyDiff     `json:"envKeys"`
+	Branch     string      `json:"branch"`
+	Warnings   []string    `json:"warnings,omitempty"`
 }

@@ -226,37 +226,21 @@ export class ScionGCPServiceAccountList extends LitElement {
   }
 
   /**
-   * THERE IS NO CREATE AFFORDANCE AT HUB SCOPE, AND THAT IS NOT A CAPABILITY
-   * DECISION.
-   *
-   * The Hub refuses hub-scoped registration outright: POST to the flat
-   * collection with scope=hub answers 400 invalid_request, and it does so
-   * before consulting any policy, because the enabling change is held (#19).
-   * So a hub admin's `create` capability at hub scope is TRUE and the operation
-   * still fails -- capability answers "may you", not "is it implemented".
-   *
-   * Rendering the button from the capability alone would therefore produce the
-   * one thing this feature is under instruction to avoid: an affordance that
-   * cannot work. It is suppressed here rather than in the template so the rule
-   * has a name and a single place to be deleted from when the hold lifts.
-   *
-   * WHAT MUST NOT HAPPEN when it does lift: this returning true while
-   * saCreateUrl still points somewhere that succeeds by registering the wrong
-   * thing. The URL is already correct -- it addresses the refusal -- which is
-   * why the two live apart.
+   * Whether the caller may register an existing GCP service account at the
+   * current scope. The capability is the sole gate — hub-scope registration
+   * was enabled on the backend in P9.
    */
   private canCreateHere(): boolean {
-    if (this.scope === 'hub') return false;
     return can(this.listCapabilities, 'create');
   }
 
   /**
-   * Mint is a per-project operation against the Hub's own GCP project, with a
-   * per-project quota; the flat route has no mint endpoint at all. At hub scope
-   * there is nowhere to send it, which saMintUrl says by returning null.
+   * Whether minting is available at the current scope. The URL module is the
+   * sole source of truth for "does a mint endpoint exist at this scope" —
+   * saMintUrl returns null where there is nowhere to send it.
    */
   private canMintHere(): boolean {
-    if (this.scope !== 'project') return false;
+    if (!saMintUrl(this.scope, this.scopeId)) return false;
     return can(this.listCapabilities, 'mint');
   }
 
@@ -337,12 +321,11 @@ export class ScionGCPServiceAccountList extends LitElement {
       if (this.mintDescription.trim()) body.description = this.mintDescription.trim();
       if (!this.mintAllowSelfActAs) body.allow_self_act_as = false;
 
-      // Non-null asserted through a guard rather than a `!`: openMintDialog is
-      // unreachable at hub scope (renderMintAffordance returns nothing there),
-      // and mint has no hub address to fall back on.
+      // Non-null asserted through a guard rather than a `!`: canMintHere()
+      // already checks saMintUrl, so this is a defensive fallback.
       const url = saMintUrl(this.scope, this.scopeId);
       if (!url) {
-        throw new Error('Minting is only available for a project');
+        throw new Error('Minting is not available at this scope');
       }
 
       const response = await apiFetch(url, {
@@ -376,8 +359,14 @@ export class ScionGCPServiceAccountList extends LitElement {
 
   private isMintDisabled(): boolean {
     if (!this.mintQuota) return false;
-    const { project_cap, project_minted, global_cap, global_minted } = this.mintQuota;
-    if (project_cap > 0 && project_minted >= project_cap) return true;
+    const { global_cap, global_minted } = this.mintQuota;
+    if (this.scope === 'hub') {
+      const { hub_cap, hub_minted } = this.mintQuota;
+      if (hub_cap && hub_cap > 0 && (hub_minted ?? 0) >= hub_cap) return true;
+    } else {
+      const { project_cap, project_minted } = this.mintQuota;
+      if (project_cap > 0 && project_minted >= project_cap) return true;
+    }
     if (global_cap > 0 && global_minted >= global_cap) return true;
     return false;
   }
@@ -417,10 +406,9 @@ export class ScionGCPServiceAccountList extends LitElement {
         body.displayName = this.dialogDisplayName.trim();
       }
 
-      // saCreateUrl at hub scope addresses the Hub's own refusal, not some
-      // project's collection. No affordance reaches this line at hub scope
-      // today; if one ever does, it must fail the way the server says it
-      // fails rather than quietly registering a project-scoped account.
+      // saCreateUrl at hub scope addresses the flat collection with scope=hub,
+      // which the backend accepts for hub-scoped BYO registration since P9.
+      // At project scope it addresses the nested project collection.
       const response = await apiFetch(saCreateUrl(this.scope, this.scopeId), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -931,11 +919,19 @@ export class ScionGCPServiceAccountList extends LitElement {
 
   private renderQuotaInfo() {
     if (!this.mintQuota) return nothing;
-    const { project_minted, project_cap, global_minted, global_cap } = this.mintQuota;
+    const { global_minted, global_cap } = this.mintQuota;
 
     const parts: string[] = [];
-    if (project_cap > 0) {
-      parts.push(`Project: ${project_minted}/${project_cap}`);
+    if (this.scope === 'hub') {
+      const { hub_minted, hub_cap } = this.mintQuota;
+      if (hub_cap && hub_cap > 0) {
+        parts.push(`Hub: ${hub_minted ?? 0}/${hub_cap}`);
+      }
+    } else {
+      const { project_minted, project_cap } = this.mintQuota;
+      if (project_cap > 0) {
+        parts.push(`Project: ${project_minted}/${project_cap}`);
+      }
     }
     if (global_cap > 0) {
       parts.push(`Global: ${global_minted}/${global_cap}`);

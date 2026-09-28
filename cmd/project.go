@@ -39,8 +39,8 @@ var initImageRegistry string
 // projectCmd represents the project command
 var projectCmd = &cobra.Command{
 	Use:     "project",
-	Aliases: []string{"grove", "group"},
-	Short:   "Manage scion projects (formerly groves)",
+	Aliases: []string{"group"},
+	Short:   "Manage scion projects",
 	Long:    `A project is the grouping construct for a set of agents. The .scion folder represents a project.`,
 }
 
@@ -183,7 +183,7 @@ With --global, it initializes in the user's home folder.`,
 			// Git project: read projectID from file, save to in-repo settings
 			projectID, _ = config.ReadProjectID(targetDir)
 			if projectID == "" {
-				projectID = config.GenerateProjectIDForDir(filepath.Dir(targetDir))
+				projectID = config.GenerateProjectID()
 			}
 			if err := config.UpdateSetting(targetDir, "project_id", projectID, false); err != nil {
 				if !isJSONOutput() {

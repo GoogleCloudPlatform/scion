@@ -33,6 +33,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func (d *memoryDeduper) previousPhaseLen() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.previousPhase)
+}
+
+func (d *memoryDeduper) previousPhaseHas(agentID string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, ok := d.previousPhase[agentID]
+	return ok
+}
+
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
@@ -167,15 +180,14 @@ func seedHookProject(t *testing.T, s store.Store, name string) string {
 func seedHookAgent(t *testing.T, s store.Store, projectID, template, phase string) *store.Agent {
 	t.Helper()
 	a := &store.Agent{
-		ID:         uuid.New().String(),
-		Slug:       "agent-" + uuid.New().String()[:8],
-		Name:       "Test Agent",
-		Template:   template,
-		ProjectID:  projectID,
-		Phase:      phase,
-		Visibility: "private",
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:        uuid.New().String(),
+		Slug:      "agent-" + uuid.New().String()[:8],
+		Name:      "Test Agent",
+		Template:  template,
+		ProjectID: projectID,
+		Phase:     phase,
+		Created:   time.Now(),
+		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateAgent(context.Background(), a))
 	return a

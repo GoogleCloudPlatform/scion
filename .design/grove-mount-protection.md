@@ -136,7 +136,7 @@ The following functions in `pkg/config/paths.go` check `info.IsDir()` and would 
 These would need to: detect `.scion` as a file, parse the grove-id/slug, and resolve to `~/.scion/grove-configs/<grove-slug>__<short-uuid>/.scion/`.
 
 Additionally affected:
-- `GetProjectAgentsDir()` / `GetProjectTemplatesDir()` — must follow the indirection
+- `GetAgentHomePath()` / `GetAgentDir()` and `GetProjectTemplatesDir()` — resolve agent state and template locations through the marker/split-storage indirection
 - `InitProject()` in `pkg/config/init.go` — rewrite to create file + external directory
 - `GetGroveName()` — read from the marker file or derive from the project directory name
 

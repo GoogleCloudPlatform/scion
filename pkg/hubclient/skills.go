@@ -91,7 +91,6 @@ type Skill struct {
 	OwnerID       string    `json:"ownerId,omitempty"`
 	CreatedBy     string    `json:"createdBy,omitempty"`
 	UpdatedBy     string    `json:"updatedBy,omitempty"`
-	Visibility    string    `json:"visibility"`
 	Created       time.Time `json:"created"`
 	Updated       time.Time `json:"updated"`
 }
@@ -141,7 +140,6 @@ type CreateSkillRequest struct {
 	Description string   `json:"description,omitempty"`
 	Scope       string   `json:"scope"`
 	ScopeID     string   `json:"scopeId,omitempty"`
-	Visibility  string   `json:"visibility,omitempty"`
 	Tags        []string `json:"tags,omitempty"`
 }
 
@@ -154,7 +152,6 @@ type CreateSkillResponse struct {
 type UpdateSkillRequest struct {
 	Name        string   `json:"name,omitempty"`
 	Description string   `json:"description,omitempty"`
-	Visibility  string   `json:"visibility,omitempty"`
 	Tags        []string `json:"tags,omitempty"`
 }
 

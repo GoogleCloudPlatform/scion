@@ -23,25 +23,7 @@ import (
 )
 
 func TestBrokerInfoResponse_JSON(t *testing.T) {
-	t.Run("unmarshal legacy grove fields", func(t *testing.T) {
-		jsonData := `{
-			"brokerId": "b1",
-			"version": "1.0",
-			"groves": [{"projectId": "p1", "projectName": "Project 1"}]
-		}`
-		var resp BrokerInfoResponse
-		if err := json.Unmarshal([]byte(jsonData), &resp); err != nil {
-			t.Fatalf("Unmarshal failed: %v", err)
-		}
-		if len(resp.Projects) != 1 {
-			t.Fatalf("Expected 1 project, got %d", len(resp.Projects))
-		}
-		if resp.Projects[0].ProjectID != "p1" {
-			t.Errorf("ProjectID = %q, want %q", resp.Projects[0].ProjectID, "p1")
-		}
-	})
-
-	t.Run("marshal dual fields", func(t *testing.T) {
+	t.Run("canonical round-trip", func(t *testing.T) {
 		resp := BrokerInfoResponse{
 			BrokerID: "b1",
 			Version:  "1.0",
@@ -62,28 +44,37 @@ func TestBrokerInfoResponse_JSON(t *testing.T) {
 		if _, ok := m["projects"]; !ok {
 			t.Errorf("Missing 'projects' field")
 		}
-		if _, ok := m["groves"]; !ok {
-			t.Errorf("Missing 'groves' field")
+		if _, ok := m["groves"]; ok {
+			t.Errorf("legacy 'groves' field present in marshal output")
+		}
+
+		var roundTripped BrokerInfoResponse
+		if err := json.Unmarshal(data, &roundTripped); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if len(roundTripped.Projects) != 1 || roundTripped.Projects[0].ProjectID != "p1" {
+			t.Errorf("round-trip Projects = %+v", roundTripped.Projects)
+		}
+	})
+
+	t.Run("legacy groves field is not honoured", func(t *testing.T) {
+		jsonData := `{
+			"brokerId": "b1",
+			"version": "1.0",
+			"groves": [{"projectId": "p1", "projectName": "Project 1"}]
+		}`
+		var resp BrokerInfoResponse
+		if err := json.Unmarshal([]byte(jsonData), &resp); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if len(resp.Projects) != 0 {
+			t.Errorf("expected no projects from legacy 'groves' field, got %+v", resp.Projects)
 		}
 	})
 }
 
 func TestProjectInfo_JSON(t *testing.T) {
-	t.Run("unmarshal legacy grove fields", func(t *testing.T) {
-		jsonData := `{"groveId": "legacy-id", "groveName": "legacy-name"}`
-		var info ProjectInfo
-		if err := json.Unmarshal([]byte(jsonData), &info); err != nil {
-			t.Fatalf("Unmarshal failed: %v", err)
-		}
-		if info.ProjectID != "legacy-id" {
-			t.Errorf("ProjectID = %q, want %q", info.ProjectID, "legacy-id")
-		}
-		if info.ProjectName != "legacy-name" {
-			t.Errorf("ProjectName = %q, want %q", info.ProjectName, "legacy-name")
-		}
-	})
-
-	t.Run("marshal dual fields", func(t *testing.T) {
+	t.Run("canonical round-trip", func(t *testing.T) {
 		info := ProjectInfo{
 			ProjectID:   "my-id",
 			ProjectName: "my-name",
@@ -98,28 +89,39 @@ func TestProjectInfo_JSON(t *testing.T) {
 			t.Fatalf("Unmarshal back failed: %v", err)
 		}
 
-		if m["projectId"] != "my-id" || m["groveId"] != "my-id" {
-			t.Errorf("ID fields mismatch: projectId=%v, groveId=%v", m["projectId"], m["groveId"])
+		if m["projectId"] != "my-id" || m["projectName"] != "my-name" {
+			t.Errorf("canonical fields mismatch: %v", m)
 		}
-		if m["projectName"] != "my-name" || m["groveName"] != "my-name" {
-			t.Errorf("Name fields mismatch: projectName=%v, groveName=%v", m["projectName"], m["groveName"])
+		if _, ok := m["groveId"]; ok {
+			t.Errorf("legacy 'groveId' field present in marshal output")
+		}
+		if _, ok := m["groveName"]; ok {
+			t.Errorf("legacy 'groveName' field present in marshal output")
+		}
+
+		var roundTripped ProjectInfo
+		if err := json.Unmarshal(data, &roundTripped); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if roundTripped != info {
+			t.Errorf("round-trip = %+v, want %+v", roundTripped, info)
+		}
+	})
+
+	t.Run("legacy grove fields are not honoured", func(t *testing.T) {
+		jsonData := `{"groveId": "legacy-id", "groveName": "legacy-name"}`
+		var info ProjectInfo
+		if err := json.Unmarshal([]byte(jsonData), &info); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if info.ProjectID != "" || info.ProjectName != "" {
+			t.Errorf("legacy grove fields were honoured: %+v", info)
 		}
 	})
 }
 
 func TestAgentResponse_JSON(t *testing.T) {
-	t.Run("unmarshal legacy grove fields", func(t *testing.T) {
-		jsonData := `{"groveId": "legacy-id", "slug": "agent-1", "status": "running"}`
-		var resp AgentResponse
-		if err := json.Unmarshal([]byte(jsonData), &resp); err != nil {
-			t.Fatalf("Unmarshal failed: %v", err)
-		}
-		if resp.ProjectID != "legacy-id" {
-			t.Errorf("ProjectID = %q, want %q", resp.ProjectID, "legacy-id")
-		}
-	})
-
-	t.Run("marshal dual fields", func(t *testing.T) {
+	t.Run("canonical round-trip", func(t *testing.T) {
 		resp := AgentResponse{
 			ProjectID: "my-id",
 			Slug:      "agent-1",
@@ -135,36 +137,36 @@ func TestAgentResponse_JSON(t *testing.T) {
 			t.Fatalf("Unmarshal back failed: %v", err)
 		}
 
-		if m["projectId"] != "my-id" || m["groveId"] != "my-id" {
-			t.Errorf("ID fields mismatch: projectId=%v, groveId=%v", m["projectId"], m["groveId"])
+		if m["projectId"] != "my-id" {
+			t.Errorf("projectId = %v, want %v", m["projectId"], "my-id")
+		}
+		if _, ok := m["groveId"]; ok {
+			t.Errorf("legacy 'groveId' field present in marshal output")
+		}
+
+		var roundTripped AgentResponse
+		if err := json.Unmarshal(data, &roundTripped); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if roundTripped.ProjectID != resp.ProjectID || roundTripped.Slug != resp.Slug || roundTripped.Status != resp.Status {
+			t.Errorf("round-trip = %+v, want %+v", roundTripped, resp)
+		}
+	})
+
+	t.Run("legacy groveId field is not honoured", func(t *testing.T) {
+		jsonData := `{"groveId": "legacy-id", "slug": "agent-1", "status": "running"}`
+		var resp AgentResponse
+		if err := json.Unmarshal([]byte(jsonData), &resp); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if resp.ProjectID != "" {
+			t.Errorf("legacy groveId field was honoured: ProjectID = %q", resp.ProjectID)
 		}
 	})
 }
 
 func TestCreateAgentRequest_JSON(t *testing.T) {
-	t.Run("unmarshal legacy grove fields", func(t *testing.T) {
-		jsonData := `{
-			"groveId": "legacy-id",
-			"grovePath": "/legacy/path",
-			"groveSlug": "legacy-slug",
-			"name": "agent-1"
-		}`
-		var req CreateAgentRequest
-		if err := json.Unmarshal([]byte(jsonData), &req); err != nil {
-			t.Fatalf("Unmarshal failed: %v", err)
-		}
-		if req.ProjectID != "legacy-id" {
-			t.Errorf("ProjectID = %q, want %q", req.ProjectID, "legacy-id")
-		}
-		if req.ProjectPath != "/legacy/path" {
-			t.Errorf("ProjectPath = %q, want %q", req.ProjectPath, "/legacy/path")
-		}
-		if req.ProjectSlug != "legacy-slug" {
-			t.Errorf("ProjectSlug = %q, want %q", req.ProjectSlug, "legacy-slug")
-		}
-	})
-
-	t.Run("marshal dual fields", func(t *testing.T) {
+	t.Run("canonical round-trip", func(t *testing.T) {
 		req := CreateAgentRequest{
 			ProjectID:   "my-id",
 			ProjectPath: "/my/path",
@@ -181,31 +183,43 @@ func TestCreateAgentRequest_JSON(t *testing.T) {
 			t.Fatalf("Unmarshal back failed: %v", err)
 		}
 
-		if m["projectId"] != "my-id" || m["groveId"] != "my-id" {
-			t.Errorf("ID fields mismatch")
+		if m["projectId"] != "my-id" || m["projectPath"] != "/my/path" || m["projectSlug"] != "my-slug" {
+			t.Errorf("canonical fields mismatch: %v", m)
 		}
-		if m["projectPath"] != "/my/path" || m["grovePath"] != "/my/path" {
-			t.Errorf("Path fields mismatch")
+		for _, legacyKey := range []string{"groveId", "grovePath", "groveSlug"} {
+			if _, ok := m[legacyKey]; ok {
+				t.Errorf("legacy key %q present in marshal output", legacyKey)
+			}
 		}
-		if m["projectSlug"] != "my-slug" || m["groveSlug"] != "my-slug" {
-			t.Errorf("Slug fields mismatch")
+
+		var roundTripped CreateAgentRequest
+		if err := json.Unmarshal(data, &roundTripped); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if roundTripped.ProjectID != req.ProjectID || roundTripped.ProjectPath != req.ProjectPath || roundTripped.ProjectSlug != req.ProjectSlug {
+			t.Errorf("round-trip = %+v, want %+v", roundTripped, req)
+		}
+	})
+
+	t.Run("legacy grove fields are not honoured", func(t *testing.T) {
+		jsonData := `{
+			"groveId": "legacy-id",
+			"grovePath": "/legacy/path",
+			"groveSlug": "legacy-slug",
+			"name": "agent-1"
+		}`
+		var req CreateAgentRequest
+		if err := json.Unmarshal([]byte(jsonData), &req); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if req.ProjectID != "" || req.ProjectPath != "" || req.ProjectSlug != "" {
+			t.Errorf("legacy grove fields were honoured: %+v", req)
 		}
 	})
 }
 
 func TestMessageRequest_JSON(t *testing.T) {
-	t.Run("unmarshal legacy grove fields", func(t *testing.T) {
-		jsonData := `{"grove_id": "legacy-id", "message": "hello"}`
-		var req MessageRequest
-		if err := json.Unmarshal([]byte(jsonData), &req); err != nil {
-			t.Fatalf("Unmarshal failed: %v", err)
-		}
-		if req.ProjectID != "legacy-id" {
-			t.Errorf("ProjectID = %q, want %q", req.ProjectID, "legacy-id")
-		}
-	})
-
-	t.Run("marshal dual fields", func(t *testing.T) {
+	t.Run("canonical round-trip, with legacy snake_case alias", func(t *testing.T) {
 		req := MessageRequest{
 			ProjectID: "my-id",
 			Message:   "hello",
@@ -220,8 +234,30 @@ func TestMessageRequest_JSON(t *testing.T) {
 			t.Fatalf("Unmarshal back failed: %v", err)
 		}
 
-		if m["project_id"] != "my-id" || m["grove_id"] != "my-id" {
-			t.Errorf("ID fields mismatch")
+		if m["projectId"] != "my-id" || m["project_id"] != "my-id" {
+			t.Errorf("ID fields mismatch: %v", m)
+		}
+		if _, ok := m["grove_id"]; ok {
+			t.Errorf("legacy 'grove_id' field present in marshal output")
+		}
+
+		var roundTripped MessageRequest
+		if err := json.Unmarshal(data, &roundTripped); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if roundTripped.ProjectID != req.ProjectID || roundTripped.Message != req.Message {
+			t.Errorf("round-trip = %+v, want %+v", roundTripped, req)
+		}
+	})
+
+	t.Run("legacy grove_id field is not honoured", func(t *testing.T) {
+		jsonData := `{"grove_id": "legacy-id", "message": "hello"}`
+		var req MessageRequest
+		if err := json.Unmarshal([]byte(jsonData), &req); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if req.ProjectID != "" {
+			t.Errorf("legacy grove_id field was honoured: ProjectID = %q", req.ProjectID)
 		}
 	})
 }

@@ -34,32 +34,10 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 		return nil, err
 	}
 
-	// Also find "created" agents that don't have a container yet
-	// We need to know which projects to scan.
-	// Preference is given to scion.project, then scion.grove.
-	var projectName string
-	if pn, ok := filter["scion.project"]; ok {
-		projectName = pn
-	} else if pn, ok := filter["scion.grove"]; ok {
-		projectName = pn
-	}
-
+	// Also find "created" agents that don't have a container yet. An explicit
+	// project path identifies which local project directory to scan.
 	var projectsToScan []string
-	if projectName != "" {
-		_ = projectName
-		// We need to resolve projectName to a path. This is currently not easy without searching.
-		// For now, if scion.project is provided, we assume we only care about running ones
-		// OR we need to be passed a project path.
-	}
-
-	// This logic is a bit tied to how CLI uses it.
-	// Let's at least support scanning a specific project if provided in filter?
-	// Or maybe Add a special filter key for ProjectPath.
-
 	projectPath := filter["scion.project_path"]
-	if projectPath == "" {
-		projectPath = filter["scion.grove_path"]
-	}
 	if projectPath != "" {
 		projectsToScan = append(projectsToScan, projectPath)
 	} else if len(filter) == 0 || (len(filter) == 1 && filter["scion.agent"] == "true") {
@@ -261,18 +239,6 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 							Project: projectName,
 							Phase:   "unknown",
 						}
-					} else if ms, msErr := LoadManagedAgentState(agentDir); msErr == nil {
-						phase := "stopped"
-						if ms.LastStatus == "in_progress" {
-							phase = "running"
-						}
-						info = &api.AgentInfo{
-							Name:    e.Name(),
-							Project: projectName,
-							Runtime: "managed:" + ms.CloudProvider,
-							Profile: "managed-agents",
-							Phase:   phase,
-						}
 					} else {
 						continue
 					}
@@ -355,9 +321,5 @@ func persistAgentInfoState(path, phase, activity string) error {
 		return err
 	}
 
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, updated, fi.Mode()); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, path)
+	return writeAgentInfoFile(path, updated, fi.Mode().Perm())
 }

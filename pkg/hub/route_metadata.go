@@ -98,6 +98,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/auth/providers", RouteID: "auth.providers",
 		Classification: RoutePublic,
 	},
+	"/api/v1/auth/integrations/google/exchange": {
+		Pattern: "/api/v1/auth/integrations/google/exchange", RouteID: "auth.integrations.google.exchange",
+		Classification: RoutePublic,
+	},
 	"/api/v1/auth/invite/redeem": {
 		Pattern: "/api/v1/auth/invite/redeem", RouteID: "auth.invite.redeem",
 		Classification: RoutePublic,
@@ -214,6 +218,29 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/message-channels", RouteID: "messageChannels.list",
 		Classification: RouteAuthenticated,
 	},
+	"/api/v1/conversations": {
+		Pattern: "/api/v1/conversations", RouteID: "conversations.list",
+		Classification: RouteAuthenticated,
+	},
+	"/api/v1/conversations/": {
+		Pattern: "/api/v1/conversations/", RouteID: "conversations.byId",
+		Classification: RouteAuthenticated,
+	},
+	"/api/v1/conversations/resolve": {
+		Pattern: "/api/v1/conversations/resolve", RouteID: "conversations.resolve",
+		Classification: RouteAuthenticated,
+	},
+
+	// Cross-project messaging (Phase 3)
+	"/api/v1/messaging/capabilities": {
+		Pattern: "/api/v1/messaging/capabilities", RouteID: "messaging.capabilities",
+		Classification: RouteAuthenticated,
+	},
+	"/api/v1/messaging/targets/resolve": {
+		Pattern: "/api/v1/messaging/targets/resolve", RouteID: "messaging.targets.resolve",
+		Classification: RouteAuthenticated,
+	},
+
 	"/api/v1/chat/user-prefs": {
 		Pattern: "/api/v1/chat/user-prefs", RouteID: "chat.userPrefs",
 		Classification: RouteAuthenticated,
@@ -297,25 +324,6 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 
 	// -------------------------------------------------------------------------
-	// Policy: Legacy groves (aliases for projects)
-	// -------------------------------------------------------------------------
-	"/api/v1/groves": {
-		Pattern: "/api/v1/groves", RouteID: "groves.list",
-		Classification: RoutePolicy,
-		Permission:     "project.read", Resource: "project", Action: "read",
-	},
-	"/api/v1/groves/register": {
-		Pattern: "/api/v1/groves/register", RouteID: "groves.register",
-		Classification: RoutePolicy,
-		Permission:     "project.register", Resource: "project", Action: "register",
-	},
-	"/api/v1/groves/": {
-		Pattern: "/api/v1/groves/", RouteID: "groves.byId",
-		Classification: RoutePolicy,
-		Permission:     "project.read", Resource: "project", Action: "read",
-	},
-
-	// -------------------------------------------------------------------------
 	// Policy: Runtime brokers
 	// -------------------------------------------------------------------------
 	"/api/v1/runtime-brokers": {
@@ -350,6 +358,11 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/gcp-service-accounts", RouteID: "gcpServiceAccounts.list",
 		Classification: RoutePolicy,
 		Permission:     "gcp_service_account.read", Resource: "gcp_service_account", Action: "read",
+	},
+	"/api/v1/gcp-service-accounts/mint": {
+		Pattern: "/api/v1/gcp-service-accounts/mint", RouteID: "gcpServiceAccounts.mint",
+		Classification: RoutePolicy,
+		Permission:     "gcp_service_account.create", Resource: "gcp_service_account", Action: "create",
 	},
 	"/api/v1/gcp-service-accounts/": {
 		Pattern: "/api/v1/gcp-service-accounts/", RouteID: "gcpServiceAccounts.byId",
@@ -602,6 +615,11 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RouteHubAdmin,
 		Permission:     "hub.maintenance.execute", Resource: "hub", Action: "execute",
 	},
+	"/api/v1/admin/maintenance/update-available": {
+		Pattern: "/api/v1/admin/maintenance/update-available", RouteID: "admin.maintenance.updateAvailable",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.maintenance.execute", Resource: "hub", Action: "execute",
+	},
 	"/api/v1/admin/maintenance/restart": {
 		Pattern: "/api/v1/admin/maintenance/restart", RouteID: "admin.maintenance.restart",
 		Classification: RouteHubAdmin,
@@ -661,6 +679,11 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/admin/project-defaults", RouteID: "admin.projectDefaults",
 		Classification: RouteHubAdmin,
 		Permission:     "hub.project_defaults.read", Resource: "hub", Action: "read",
+	},
+	"/api/v1/admin/messaging": {
+		Pattern: "/api/v1/admin/messaging", RouteID: "admin.messaging",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.messaging.update", Resource: "hub", Action: "update",
 	},
 	"/api/v1/admin/agents/reset-auth-all": {
 		Pattern: "/api/v1/admin/agents/reset-auth-all", RouteID: "admin.agents.resetAuthAll",
@@ -914,6 +937,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 	"/api/v1/broker/inbound": {
 		Pattern: "/api/v1/broker/inbound", RouteID: "broker.inbound",
+		Classification: RouteBrokerHMAC,
+	},
+	"/api/v1/broker/inbound/routed": {
+		Pattern: "/api/v1/broker/inbound/routed", RouteID: "broker.inbound.routed",
 		Classification: RouteBrokerHMAC,
 	},
 	"/api/v1/broker/callback": {

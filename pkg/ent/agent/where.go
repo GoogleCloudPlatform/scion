@@ -91,11 +91,6 @@ func DelegationEnabled(v bool) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldDelegationEnabled, v))
 }
 
-// Visibility applies equality check predicate on the "visibility" field. It's identical to VisibilityEQ.
-func Visibility(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldEQ(FieldVisibility, v))
-}
-
 // Phase applies equality check predicate on the "phase" field. It's identical to PhaseEQ.
 func Phase(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldPhase, v))
@@ -224,6 +219,21 @@ func DeletedAt(v time.Time) predicate.Agent {
 // StateVersion applies equality check predicate on the "state_version" field. It's identical to StateVersionEQ.
 func StateVersion(v int64) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldStateVersion, v))
+}
+
+// Generation applies equality check predicate on the "generation" field. It's identical to GenerationEQ.
+func Generation(v int) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldGeneration, v))
+}
+
+// ReincarnationState applies equality check predicate on the "reincarnation_state" field. It's identical to ReincarnationStateEQ.
+func ReincarnationState(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldReincarnationState, v))
+}
+
+// ReincarnationUpdatedAt applies equality check predicate on the "reincarnation_updated_at" field. It's identical to ReincarnationUpdatedAtEQ.
+func ReincarnationUpdatedAt(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldReincarnationUpdatedAt, v))
 }
 
 // SlugEQ applies the EQ predicate on the "slug" field.
@@ -579,71 +589,6 @@ func DelegationEnabledEQ(v bool) predicate.Agent {
 // DelegationEnabledNEQ applies the NEQ predicate on the "delegation_enabled" field.
 func DelegationEnabledNEQ(v bool) predicate.Agent {
 	return predicate.Agent(sql.FieldNEQ(FieldDelegationEnabled, v))
-}
-
-// VisibilityEQ applies the EQ predicate on the "visibility" field.
-func VisibilityEQ(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldEQ(FieldVisibility, v))
-}
-
-// VisibilityNEQ applies the NEQ predicate on the "visibility" field.
-func VisibilityNEQ(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldNEQ(FieldVisibility, v))
-}
-
-// VisibilityIn applies the In predicate on the "visibility" field.
-func VisibilityIn(vs ...string) predicate.Agent {
-	return predicate.Agent(sql.FieldIn(FieldVisibility, vs...))
-}
-
-// VisibilityNotIn applies the NotIn predicate on the "visibility" field.
-func VisibilityNotIn(vs ...string) predicate.Agent {
-	return predicate.Agent(sql.FieldNotIn(FieldVisibility, vs...))
-}
-
-// VisibilityGT applies the GT predicate on the "visibility" field.
-func VisibilityGT(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldGT(FieldVisibility, v))
-}
-
-// VisibilityGTE applies the GTE predicate on the "visibility" field.
-func VisibilityGTE(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldGTE(FieldVisibility, v))
-}
-
-// VisibilityLT applies the LT predicate on the "visibility" field.
-func VisibilityLT(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldLT(FieldVisibility, v))
-}
-
-// VisibilityLTE applies the LTE predicate on the "visibility" field.
-func VisibilityLTE(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldLTE(FieldVisibility, v))
-}
-
-// VisibilityContains applies the Contains predicate on the "visibility" field.
-func VisibilityContains(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldContains(FieldVisibility, v))
-}
-
-// VisibilityHasPrefix applies the HasPrefix predicate on the "visibility" field.
-func VisibilityHasPrefix(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldHasPrefix(FieldVisibility, v))
-}
-
-// VisibilityHasSuffix applies the HasSuffix predicate on the "visibility" field.
-func VisibilityHasSuffix(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldHasSuffix(FieldVisibility, v))
-}
-
-// VisibilityEqualFold applies the EqualFold predicate on the "visibility" field.
-func VisibilityEqualFold(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldEqualFold(FieldVisibility, v))
-}
-
-// VisibilityContainsFold applies the ContainsFold predicate on the "visibility" field.
-func VisibilityContainsFold(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldContainsFold(FieldVisibility, v))
 }
 
 // MessageModeEQ applies the EQ predicate on the "message_mode" field.
@@ -2224,6 +2169,171 @@ func StateVersionLT(v int64) predicate.Agent {
 // StateVersionLTE applies the LTE predicate on the "state_version" field.
 func StateVersionLTE(v int64) predicate.Agent {
 	return predicate.Agent(sql.FieldLTE(FieldStateVersion, v))
+}
+
+// GenerationEQ applies the EQ predicate on the "generation" field.
+func GenerationEQ(v int) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldGeneration, v))
+}
+
+// GenerationNEQ applies the NEQ predicate on the "generation" field.
+func GenerationNEQ(v int) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldGeneration, v))
+}
+
+// GenerationIn applies the In predicate on the "generation" field.
+func GenerationIn(vs ...int) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldGeneration, vs...))
+}
+
+// GenerationNotIn applies the NotIn predicate on the "generation" field.
+func GenerationNotIn(vs ...int) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldGeneration, vs...))
+}
+
+// GenerationGT applies the GT predicate on the "generation" field.
+func GenerationGT(v int) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldGeneration, v))
+}
+
+// GenerationGTE applies the GTE predicate on the "generation" field.
+func GenerationGTE(v int) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldGeneration, v))
+}
+
+// GenerationLT applies the LT predicate on the "generation" field.
+func GenerationLT(v int) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldGeneration, v))
+}
+
+// GenerationLTE applies the LTE predicate on the "generation" field.
+func GenerationLTE(v int) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldGeneration, v))
+}
+
+// ReincarnationStateEQ applies the EQ predicate on the "reincarnation_state" field.
+func ReincarnationStateEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldReincarnationState, v))
+}
+
+// ReincarnationStateNEQ applies the NEQ predicate on the "reincarnation_state" field.
+func ReincarnationStateNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldReincarnationState, v))
+}
+
+// ReincarnationStateIn applies the In predicate on the "reincarnation_state" field.
+func ReincarnationStateIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldReincarnationState, vs...))
+}
+
+// ReincarnationStateNotIn applies the NotIn predicate on the "reincarnation_state" field.
+func ReincarnationStateNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldReincarnationState, vs...))
+}
+
+// ReincarnationStateGT applies the GT predicate on the "reincarnation_state" field.
+func ReincarnationStateGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldReincarnationState, v))
+}
+
+// ReincarnationStateGTE applies the GTE predicate on the "reincarnation_state" field.
+func ReincarnationStateGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldReincarnationState, v))
+}
+
+// ReincarnationStateLT applies the LT predicate on the "reincarnation_state" field.
+func ReincarnationStateLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldReincarnationState, v))
+}
+
+// ReincarnationStateLTE applies the LTE predicate on the "reincarnation_state" field.
+func ReincarnationStateLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldReincarnationState, v))
+}
+
+// ReincarnationStateContains applies the Contains predicate on the "reincarnation_state" field.
+func ReincarnationStateContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldReincarnationState, v))
+}
+
+// ReincarnationStateHasPrefix applies the HasPrefix predicate on the "reincarnation_state" field.
+func ReincarnationStateHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldReincarnationState, v))
+}
+
+// ReincarnationStateHasSuffix applies the HasSuffix predicate on the "reincarnation_state" field.
+func ReincarnationStateHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldReincarnationState, v))
+}
+
+// ReincarnationStateIsNil applies the IsNil predicate on the "reincarnation_state" field.
+func ReincarnationStateIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldReincarnationState))
+}
+
+// ReincarnationStateNotNil applies the NotNil predicate on the "reincarnation_state" field.
+func ReincarnationStateNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldReincarnationState))
+}
+
+// ReincarnationStateEqualFold applies the EqualFold predicate on the "reincarnation_state" field.
+func ReincarnationStateEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldReincarnationState, v))
+}
+
+// ReincarnationStateContainsFold applies the ContainsFold predicate on the "reincarnation_state" field.
+func ReincarnationStateContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldReincarnationState, v))
+}
+
+// ReincarnationUpdatedAtEQ applies the EQ predicate on the "reincarnation_updated_at" field.
+func ReincarnationUpdatedAtEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldReincarnationUpdatedAt, v))
+}
+
+// ReincarnationUpdatedAtNEQ applies the NEQ predicate on the "reincarnation_updated_at" field.
+func ReincarnationUpdatedAtNEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldReincarnationUpdatedAt, v))
+}
+
+// ReincarnationUpdatedAtIn applies the In predicate on the "reincarnation_updated_at" field.
+func ReincarnationUpdatedAtIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldReincarnationUpdatedAt, vs...))
+}
+
+// ReincarnationUpdatedAtNotIn applies the NotIn predicate on the "reincarnation_updated_at" field.
+func ReincarnationUpdatedAtNotIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldReincarnationUpdatedAt, vs...))
+}
+
+// ReincarnationUpdatedAtGT applies the GT predicate on the "reincarnation_updated_at" field.
+func ReincarnationUpdatedAtGT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldReincarnationUpdatedAt, v))
+}
+
+// ReincarnationUpdatedAtGTE applies the GTE predicate on the "reincarnation_updated_at" field.
+func ReincarnationUpdatedAtGTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldReincarnationUpdatedAt, v))
+}
+
+// ReincarnationUpdatedAtLT applies the LT predicate on the "reincarnation_updated_at" field.
+func ReincarnationUpdatedAtLT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldReincarnationUpdatedAt, v))
+}
+
+// ReincarnationUpdatedAtLTE applies the LTE predicate on the "reincarnation_updated_at" field.
+func ReincarnationUpdatedAtLTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldReincarnationUpdatedAt, v))
+}
+
+// ReincarnationUpdatedAtIsNil applies the IsNil predicate on the "reincarnation_updated_at" field.
+func ReincarnationUpdatedAtIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldReincarnationUpdatedAt))
+}
+
+// ReincarnationUpdatedAtNotNil applies the NotNil predicate on the "reincarnation_updated_at" field.
+func ReincarnationUpdatedAtNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldReincarnationUpdatedAt))
 }
 
 // HasProject applies the HasEdge predicate on the "project" edge.

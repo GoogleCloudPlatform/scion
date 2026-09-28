@@ -57,7 +57,6 @@ const NAV_SECTIONS: NavSection[] = [
       { path: '/agents', label: 'Agents', icon: 'cpu' },
       { path: '/brokers', label: 'Brokers', icon: 'hdd-rack' },
       { path: '/skills', label: 'Skills', icon: 'lightning-charge' },
-      { path: '/metrics', label: 'Metrics', icon: 'graph-up' },
     ],
   },
 ];
@@ -79,6 +78,7 @@ const ADMIN_SCOPEABLE_ITEMS: NavItem[] = [
   { path: '/admin/access-boundaries', label: 'Access Constraints', icon: 'shield-check' },
   { path: '/admin/quotas', label: 'Quotas', icon: 'speedometer2' },
   { path: '/health', label: 'Health', icon: 'heart-pulse' },
+  { path: '/metrics', label: 'Metrics', icon: 'graph-up' },
   { path: '/admin/skill-registries', label: 'Skill Registries', icon: 'cloud-arrow-down' },
 ];
 
@@ -440,14 +440,22 @@ export class ScionNav extends LitElement {
                 ${section.items.map(
                   (item) => html`
                     <li class="nav-item">
-                      <a
-                        href="${item.path}"
-                        class="nav-link ${this.isActive(item.path) ? 'active' : ''}"
-                        @click=${(e: Event) => this.handleNavClick(e, item.path)}
+                      <sl-tooltip
+                        style="display: block;"
+                        content="${item.label}"
+                        placement="right"
+                        ?disabled=${!this.collapsed}
+                        hoist
                       >
-                        <sl-icon name="${item.icon}"></sl-icon>
-                        <span class="nav-link-text">${item.label}</span>
-                      </a>
+                        <a
+                          href="${item.path}"
+                          class="nav-link ${this.isActive(item.path) ? 'active' : ''}"
+                          @click=${(e: Event) => this.handleNavClick(e, item.path)}
+                        >
+                          <sl-icon name="${item.icon}"></sl-icon>
+                          <span class="nav-link-text">${item.label}</span>
+                        </a>
+                      </sl-tooltip>
                     </li>
                   `
                 )}
@@ -473,14 +481,22 @@ export class ScionNav extends LitElement {
                   ).map(
                     (item) => html`
                       <li class="nav-item">
-                        <a
-                          href="${item.path}"
-                          class="nav-link ${this.isActive(item.path) ? 'active' : ''}"
-                          @click=${(e: Event) => this.handleNavClick(e, item.path)}
+                        <sl-tooltip
+                          style="display: block;"
+                          content="${item.label}"
+                          placement="right"
+                          ?disabled=${!this.collapsed}
+                          hoist
                         >
-                          <sl-icon name="${item.icon}"></sl-icon>
-                          <span class="nav-link-text">${item.label}</span>
-                        </a>
+                          <a
+                            href="${item.path}"
+                            class="nav-link ${this.isActive(item.path) ? 'active' : ''}"
+                            @click=${(e: Event) => this.handleNavClick(e, item.path)}
+                          >
+                            <sl-icon name="${item.icon}"></sl-icon>
+                            <span class="nav-link-text">${item.label}</span>
+                          </a>
+                        </sl-tooltip>
                       </li>
                     `
                   )}
@@ -488,14 +504,22 @@ export class ScionNav extends LitElement {
                     ? ADMIN_SUPERADMIN_ITEMS.map(
                         (item) => html`
                           <li class="nav-item">
-                            <a
-                              href="${item.path}"
-                              class="nav-link ${this.isActive(item.path) ? 'active' : ''}"
-                              @click=${(e: Event) => this.handleNavClick(e, item.path)}
+                            <sl-tooltip
+                              style="display: block;"
+                              content="${item.label}"
+                              placement="right"
+                              ?disabled=${!this.collapsed}
+                              hoist
                             >
-                              <sl-icon name="${item.icon}"></sl-icon>
-                              <span class="nav-link-text">${item.label}</span>
-                            </a>
+                              <a
+                                href="${item.path}"
+                                class="nav-link ${this.isActive(item.path) ? 'active' : ''}"
+                                @click=${(e: Event) => this.handleNavClick(e, item.path)}
+                              >
+                                <sl-icon name="${item.icon}"></sl-icon>
+                                <span class="nav-link-text">${item.label}</span>
+                              </a>
+                            </sl-tooltip>
                           </li>
                         `
                       )

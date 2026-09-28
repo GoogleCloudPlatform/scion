@@ -37,15 +37,6 @@ func makeTestJWTWithExpiry(exp time.Time) string {
 	return fmt.Sprintf("%s.%s.%s", header, payloadB64, sig)
 }
 
-func TestNoopTransportMinter_ReturnsError(t *testing.T) {
-	m := &noopTransportMinter{}
-	token, expiry, err := m.MintIDToken(context.Background(), "https://example.com")
-	assert.Empty(t, token)
-	assert.True(t, expiry.IsZero())
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "disabled")
-}
-
 func TestFakeTransportMinter(t *testing.T) {
 	testToken := makeTestJWTWithExpiry(time.Now().Add(1 * time.Hour))
 	testExpiry := time.Now().Add(1 * time.Hour)

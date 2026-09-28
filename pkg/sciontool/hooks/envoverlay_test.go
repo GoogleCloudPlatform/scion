@@ -184,6 +184,87 @@ func TestMergeEnvOverlay_EmptyOverlayIsPassthrough(t *testing.T) {
 	}
 }
 
+func TestValidateNativeTelemetryEnv(t *testing.T) {
+	policy := map[string]string{
+		"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+		"OTEL_EXPORTER_OTLP_ENDPOINT":  "http://127.0.0.1:24317",
+		"GEMINI_TELEMETRY_ENABLED":     "true",
+		"CODEX_HOME":                   "/home/scion/.codex",
+	}
+	for _, tc := range []struct {
+		name      string
+		env       []string
+		overrides map[string]string
+		conflict  bool
+	}{
+		{"matching and unrelated", []string{"OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:24317", "TOKEN=old"}, map[string]string{"TOKEN": "new"}, false},
+		{"external endpoint", []string{"OTEL_EXPORTER_OTLP_ENDPOINT=https://external.invalid"}, nil, true},
+		{"alternate endpoint", []string{"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://external.invalid"}, nil, true},
+		{"alternate protocol", []string{"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf"}, nil, true},
+		{"SDK disabled", []string{"OTEL_SDK_DISABLED=true"}, nil, true},
+		{"gemini alias", []string{"GEMINI_TELEMETRY_OUTFILE=/tmp/out"}, nil, true},
+		{"copilot alias", []string{"COPILOT_OTEL_EXPORTER_TYPE=file"}, nil, true},
+		{"grok telemetry alias", []string{"GROK_TELEMETRY_ENABLED=false"}, nil, true},
+		{"grok external otel alias", []string{"GROK_EXTERNAL_OTEL=false"}, nil, true},
+		{"claude disabled", []string{"CLAUDE_CODE_ENABLE_TELEMETRY=0"}, nil, true},
+		{"codex redirect", []string{"CODEX_HOME=/tmp/other"}, nil, true},
+		{"secret override", nil, map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "https://external.invalid"}, true},
+		{"secret alias", nil, map[string]string{"GEMINI_TELEMETRY_TARGET": "gcp"}, true},
+		{"secret copilot alias", nil, map[string]string{"COPILOT_OTEL_ENABLED": "false"}, true},
+		{"secret grok alias", nil, map[string]string{"GROK_TELEMETRY_ENABLED": "false"}, true},
+		{"marker", []string{NativeTelemetryPolicyKey + "=disabled"}, nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateNativeTelemetryEnv("enabled", tc.env, policy, tc.overrides)
+			if (err != nil) != tc.conflict {
+				t.Fatalf("conflict=%v, err=%v", tc.conflict, err)
+			}
+			if err != nil && (strings.Contains(err.Error(), "external.invalid") || strings.Contains(err.Error(), "/tmp/other")) {
+				t.Fatalf("diagnostic leaked value: %v", err)
+			}
+		})
+	}
+	if err := ValidateNativeTelemetryEnv("disabled", []string{"OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317"}, map[string]string{"CLAUDE_CODE_ENABLE_TELEMETRY": "0"}, nil); err == nil {
+		t.Fatal("disabled policy accepted inherited exporter endpoint")
+	}
+	// With telemetry disabled, provision.py never emits COPILOT_OTEL_* or
+	// GROK_TELEMETRY_*/GROK_EXTERNAL_OTEL (see harnesses/telemetry_provision_test.py),
+	// so an inherited copy of one of these must still be rejected, the same
+	// as an inherited OTEL_* var.
+	if err := ValidateNativeTelemetryEnv("disabled", []string{"COPILOT_OTEL_ENABLED=true"}, nil, nil); err == nil {
+		t.Fatal("disabled policy accepted inherited COPILOT_OTEL_ENABLED")
+	}
+	if err := ValidateNativeTelemetryEnv("disabled", []string{"GROK_TELEMETRY_ENABLED=true"}, nil, nil); err == nil {
+		t.Fatal("disabled policy accepted inherited GROK_TELEMETRY_ENABLED")
+	}
+	if err := ValidateNativeTelemetryEnv("disabled", []string{"GROK_EXTERNAL_OTEL=true"}, nil, nil); err == nil {
+		t.Fatal("disabled policy accepted inherited GROK_EXTERNAL_OTEL")
+	}
+}
+
+func TestMergeEnvOverlayWithNativeTelemetryPolicy(t *testing.T) {
+	generated := map[string]string{
+		"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:4317",
+		"TOKEN":                       "generated",
+	}
+	if _, err := MergeEnvOverlayWithNativeTelemetryPolicy("enabled", []string{"OTEL_EXPORTER_OTLP_ENDPOINT=https://external.invalid"}, generated, nil); err == nil {
+		t.Fatal("conflicting endpoint merged")
+	}
+	if _, err := MergeEnvOverlayWithNativeTelemetryPolicy("disabled", []string{"OTEL_TRACES_EXPORTER=otlp"}, map[string]string{"CLAUDE_CODE_ENABLE_TELEMETRY": "0"}, nil); err == nil {
+		t.Fatal("disabled policy accepted exporter alias")
+	}
+	got, err := MergeEnvOverlayWithNativeTelemetryPolicy("enabled", []string{"TOKEN=cli"}, generated, map[string]string{"SECRET": "fetched"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, ",") != "TOKEN=cli,OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317" {
+		t.Fatalf("merged env=%v", got)
+	}
+	if _, err := MergeEnvOverlayWithNativeTelemetryPolicy("enabled", nil, generated, map[string]string{NativeTelemetryPolicyKey: "enabled"}); err == nil {
+		t.Fatal("matching spoofed marker accepted")
+	}
+}
+
 func envMap(env []string) map[string]string {
 	m := make(map[string]string, len(env))
 	for _, e := range env {

@@ -452,6 +452,13 @@ func TestCapabilities_ProjectOwnerBypass_AgentAllActions(t *testing.T) {
 	user := NewAuthenticatedUser(bob.ID, bob.Email, bob.DisplayName, "member", "api")
 	caps := srv.authzService.ComputeCapabilities(ctx, user, agentResource(a))
 	for _, action := range ResourceActions["agent"] {
+		// miller79/scion#88: attach/port_access to another member's agent
+		// would expose that member's user-scoped secrets.
+		if ownerAdminExcludedActions[action] {
+			assert.NotContains(t, caps.Actions, string(action),
+				"project owner must NOT have %q on another member's agent", action)
+			continue
+		}
 		assert.Contains(t, caps.Actions, string(action),
 			"project owner should have %q on another member's agent", action)
 	}
@@ -484,6 +491,13 @@ func TestCapabilities_ProjectOwnerBypass_BatchAllActions(t *testing.T) {
 	require.Len(t, capsList, 2)
 	for i, caps := range capsList {
 		for _, action := range ResourceActions["agent"] {
+			// miller79/scion#88: attach/port_access only on bob's own agent
+			// (index 1), never on alice's (index 0).
+			if ownerAdminExcludedActions[action] && i == 0 {
+				assert.NotContains(t, caps.Actions, string(action),
+					"agent[%d]: project owner must NOT have %q on another member's agent", i, action)
+				continue
+			}
 			assert.Contains(t, caps.Actions, string(action),
 				"agent[%d]: project owner should have %q in batch result", i, action)
 		}

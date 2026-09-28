@@ -96,6 +96,11 @@ func LastSeen(v time.Time) predicate.User {
 	return predicate.User(sql.FieldEQ(FieldLastSeen, v))
 }
 
+// SessionGeneration applies equality check predicate on the "session_generation" field. It's identical to SessionGenerationEQ.
+func SessionGeneration(v int64) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldSessionGeneration, v))
+}
+
 // EmailEQ applies the EQ predicate on the "email" field.
 func EmailEQ(v string) predicate.User {
 	return predicate.User(sql.FieldEQ(FieldEmail, v))
@@ -641,6 +646,46 @@ func LastSeenNotNil() predicate.User {
 	return predicate.User(sql.FieldNotNull(FieldLastSeen))
 }
 
+// SessionGenerationEQ applies the EQ predicate on the "session_generation" field.
+func SessionGenerationEQ(v int64) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldSessionGeneration, v))
+}
+
+// SessionGenerationNEQ applies the NEQ predicate on the "session_generation" field.
+func SessionGenerationNEQ(v int64) predicate.User {
+	return predicate.User(sql.FieldNEQ(FieldSessionGeneration, v))
+}
+
+// SessionGenerationIn applies the In predicate on the "session_generation" field.
+func SessionGenerationIn(vs ...int64) predicate.User {
+	return predicate.User(sql.FieldIn(FieldSessionGeneration, vs...))
+}
+
+// SessionGenerationNotIn applies the NotIn predicate on the "session_generation" field.
+func SessionGenerationNotIn(vs ...int64) predicate.User {
+	return predicate.User(sql.FieldNotIn(FieldSessionGeneration, vs...))
+}
+
+// SessionGenerationGT applies the GT predicate on the "session_generation" field.
+func SessionGenerationGT(v int64) predicate.User {
+	return predicate.User(sql.FieldGT(FieldSessionGeneration, v))
+}
+
+// SessionGenerationGTE applies the GTE predicate on the "session_generation" field.
+func SessionGenerationGTE(v int64) predicate.User {
+	return predicate.User(sql.FieldGTE(FieldSessionGeneration, v))
+}
+
+// SessionGenerationLT applies the LT predicate on the "session_generation" field.
+func SessionGenerationLT(v int64) predicate.User {
+	return predicate.User(sql.FieldLT(FieldSessionGeneration, v))
+}
+
+// SessionGenerationLTE applies the LTE predicate on the "session_generation" field.
+func SessionGenerationLTE(v int64) predicate.User {
+	return predicate.User(sql.FieldLTE(FieldSessionGeneration, v))
+}
+
 // HasOwnedGroups applies the HasEdge predicate on the "owned_groups" edge.
 func HasOwnedGroups() predicate.User {
 	return predicate.User(func(s *sql.Selector) {
@@ -702,6 +747,29 @@ func HasPolicyBindings() predicate.User {
 func HasPolicyBindingsWith(preds ...predicate.PolicyBinding) predicate.User {
 	return predicate.User(func(s *sql.Selector) {
 		step := newPolicyBindingsStep()
+		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
+			for _, p := range preds {
+				p(s)
+			}
+		})
+	})
+}
+
+// HasExternalIdentities applies the HasEdge predicate on the "external_identities" edge.
+func HasExternalIdentities() predicate.User {
+	return predicate.User(func(s *sql.Selector) {
+		step := sqlgraph.NewStep(
+			sqlgraph.From(Table, FieldID),
+			sqlgraph.Edge(sqlgraph.O2M, false, ExternalIdentitiesTable, ExternalIdentitiesColumn),
+		)
+		sqlgraph.HasNeighbors(s, step)
+	})
+}
+
+// HasExternalIdentitiesWith applies the HasEdge predicate on the "external_identities" edge with a given conditions (other predicates).
+func HasExternalIdentitiesWith(preds ...predicate.ExternalIdentity) predicate.User {
+	return predicate.User(func(s *sql.Selector) {
+		step := newExternalIdentitiesStep()
 		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
 			for _, p := range preds {
 				p(s)

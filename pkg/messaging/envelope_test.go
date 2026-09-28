@@ -15,9 +15,12 @@
 package messaging
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
 
 // ---------- MessageKind ----------
@@ -196,27 +199,6 @@ func TestValidateDeliveryState(t *testing.T) {
 	}
 }
 
-// ---------- Visibility ----------
-
-func TestValidateVisibility(t *testing.T) {
-	tests := []struct {
-		vis     Visibility
-		wantErr bool
-	}{
-		{VisibilityNormal, false},
-		{VisibilityVerbose, false},
-		{VisibilityFull, false},
-		{"", false}, // empty defaults to normal
-		{"unknown", true},
-	}
-	for _, tc := range tests {
-		err := ValidateVisibility(tc.vis)
-		if (err != nil) != tc.wantErr {
-			t.Errorf("ValidateVisibility(%q): got err=%v, wantErr=%v", tc.vis, err, tc.wantErr)
-		}
-	}
-}
-
 // ---------- Message.Validate ----------
 
 func TestMessageValidate_TextMessage(t *testing.T) {
@@ -347,18 +329,80 @@ func TestMessageValidate_InvalidKind(t *testing.T) {
 	}
 }
 
-func TestMessageValidate_InvalidVisibility(t *testing.T) {
+// ---------- Message metadata validation ----------
+
+func TestMessageValidateStructural_MetadataTooManyEntries(t *testing.T) {
 	intent := IntentInform
 	msg := &Message{
-		ID:         "msg-1",
-		From:       "user:alice",
-		Kind:       KindText,
-		Intent:     &intent,
-		Body:       "Hello",
-		Visibility: "secret",
+		ID:        "msg-1",
+		From:      "user:alice",
+		Kind:      KindText,
+		Intent:    &intent,
+		Body:      "Hello",
+		CreatedAt: time.Now(),
+		Metadata:  make(map[string]string),
+	}
+	for i := 0; i < messages.MaxMetadataEntries+1; i++ {
+		msg.Metadata[fmt.Sprintf("key-%d", i)] = "value"
 	}
 	if err := msg.Validate(); err == nil {
-		t.Fatal("message with invalid visibility should fail validation")
+		t.Fatal("expected error for too many metadata entries")
+	} else if !strings.Contains(err.Error(), "metadata exceeds maximum entries") {
+		t.Fatalf("error should mention metadata entries, got: %v", err)
+	}
+}
+
+func TestMessageValidateStructural_MetadataKeyTooLong(t *testing.T) {
+	intent := IntentInform
+	longKey := strings.Repeat("k", messages.MaxMetadataKeySize+1)
+	msg := &Message{
+		ID:        "msg-1",
+		From:      "user:alice",
+		Kind:      KindText,
+		Intent:    &intent,
+		Body:      "Hello",
+		CreatedAt: time.Now(),
+		Metadata:  map[string]string{longKey: "value"},
+	}
+	if err := msg.Validate(); err == nil {
+		t.Fatal("expected error for metadata key exceeding max size")
+	} else if !strings.Contains(err.Error(), "metadata key exceeds maximum size") {
+		t.Fatalf("error should mention metadata key, got: %v", err)
+	}
+}
+
+func TestMessageValidateStructural_MetadataValueTooLong(t *testing.T) {
+	intent := IntentInform
+	longValue := strings.Repeat("v", messages.MaxMetadataValueSize+1)
+	msg := &Message{
+		ID:        "msg-1",
+		From:      "user:alice",
+		Kind:      KindText,
+		Intent:    &intent,
+		Body:      "Hello",
+		CreatedAt: time.Now(),
+		Metadata:  map[string]string{"key": longValue},
+	}
+	if err := msg.Validate(); err == nil {
+		t.Fatal("expected error for metadata value exceeding max size")
+	} else if !strings.Contains(err.Error(), "metadata value exceeds maximum size") {
+		t.Fatalf("error should mention metadata value, got: %v", err)
+	}
+}
+
+func TestMessageValidateStructural_MetadataValidSizes(t *testing.T) {
+	intent := IntentInform
+	msg := &Message{
+		ID:        "msg-1",
+		From:      "user:alice",
+		Kind:      KindText,
+		Intent:    &intent,
+		Body:      "Hello",
+		CreatedAt: time.Now(),
+		Metadata:  map[string]string{"short-key": "short-value"},
+	}
+	if err := msg.Validate(); err != nil {
+		t.Fatalf("valid metadata should pass validation: %v", err)
 	}
 }
 

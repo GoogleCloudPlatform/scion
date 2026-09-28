@@ -17,16 +17,20 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
+	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
 )
 
 func TestResolveContainerID(t *testing.T) {
@@ -111,6 +115,123 @@ func TestResolveContainerID_SlugMatchesAgentName(t *testing.T) {
 	got := resolveContainerID(agents, "foo")
 	if got != "a1b2c3d4e5f60000" {
 		t.Errorf("resolveContainerID(\"foo\") = %q, want %q", got, "a1b2c3d4e5f60000")
+	}
+}
+
+func TestSyncGCSVolumesValidation(t *testing.T) {
+	encode := func(t *testing.T, volumes []gcsVolumeInfo) string {
+		t.Helper()
+		data, err := json.Marshal(volumes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return base64.StdEncoding.EncodeToString(data)
+	}
+
+	tests := []struct {
+		name      string
+		encoded   string
+		direction SyncDirection
+		wantError string
+	}{
+		{
+			name:      "invalid base64",
+			encoded:   "%%%",
+			direction: SyncTo,
+			wantError: "failed to decode gcs volume info",
+		},
+		{
+			name:      "invalid json",
+			encoded:   base64.StdEncoding.EncodeToString([]byte("not json")),
+			direction: SyncTo,
+			wantError: "failed to parse gcs volume info",
+		},
+		{
+			name:      "direction required for sourced volume",
+			encoded:   encode(t, []gcsVolumeInfo{{Source: "/workspace", Bucket: "bucket"}}),
+			direction: SyncUnspecified,
+			wantError: "sync direction must be specified for GCS volumes",
+		},
+		{
+			name:      "empty source skipped",
+			encoded:   encode(t, []gcsVolumeInfo{{Bucket: "bucket"}}),
+			direction: SyncUnspecified,
+		},
+		{
+			name:      "empty list",
+			encoded:   encode(t, nil),
+			direction: SyncUnspecified,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := syncGCSVolumes(context.Background(), test.encoded, test.direction)
+			if test.wantError == "" {
+				if err != nil {
+					t.Fatalf("syncGCSVolumes() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("syncGCSVolumes() error = %v, want %q", err, test.wantError)
+			}
+		})
+	}
+}
+
+func TestAppendContainerResourceArgs(t *testing.T) {
+	tests := []struct {
+		name      string
+		resources *api.ResourceSpec
+		want      []string
+		wantError string
+	}{
+		{
+			name: "nil resources",
+			want: []string{"run", "-t"},
+		},
+		{
+			name: "all supported resources",
+			resources: &api.ResourceSpec{
+				Limits:   api.ResourceList{Memory: "1Gi", CPU: "1500m"},
+				Requests: api.ResourceList{Memory: "512Mi", CPU: "250m"},
+			},
+			want: []string{"run", "-t", "--memory", "1g", "--memory-reservation", "512m", "--cpus", "1.5"},
+		},
+		{
+			name:      "invalid memory limit",
+			resources: &api.ResourceSpec{Limits: api.ResourceList{Memory: "bad"}},
+			wantError: `invalid memory limit "bad"`,
+		},
+		{
+			name:      "invalid memory request",
+			resources: &api.ResourceSpec{Requests: api.ResourceList{Memory: "bad"}},
+			wantError: `invalid memory request "bad"`,
+		},
+		{
+			name:      "invalid cpu limit",
+			resources: &api.ResourceSpec{Limits: api.ResourceList{CPU: "bad"}},
+			wantError: `invalid cpu limit "bad"`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := appendContainerResourceArgs([]string{"run", "-t"}, test.resources)
+			if test.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantError) {
+					t.Fatalf("appendContainerResourceArgs() error = %v, want %q", err, test.wantError)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("appendContainerResourceArgs() error = %v", err)
+			}
+			if !slices.Equal(got, test.want) {
+				t.Fatalf("appendContainerResourceArgs() = %v, want %v", got, test.want)
+			}
+		})
 	}
 }
 
@@ -572,6 +693,26 @@ func TestBuildCommonRunArgs(t *testing.T) {
 				"-o",
 				"--implicit-dirs",
 				"-e SCION_START_CMD=",
+			},
+		},
+		{
+			name: "project identity",
+			config: RunConfig{
+				Harness:      &harness.Generic{},
+				Name:         "test-agent",
+				UnixUsername: "scion",
+				Image:        "scion-agent:latest",
+				Task:         "hello",
+				Project:      "p",
+				ProjectID:    "pid",
+			},
+			wantIn: []string{
+				"-e SCION_PROJECT=p",
+				"-e SCION_PROJECT_ID=pid",
+			},
+			wantOut: []string{
+				"SCION_GROVE=",
+				"SCION_GROVE_ID=",
 			},
 		},
 	}
@@ -1126,6 +1267,47 @@ func TestGcloudMountSkippedInBrokerMode(t *testing.T) {
 	}
 }
 
+func TestEmptySourcePathSkippedInApplyResolvedAuth(t *testing.T) {
+	// Regression test: in broker mode, SourcePath is intentionally empty.
+	// applyResolvedAuth must skip these entries — attempting to copy an empty
+	// path would fail at util.CopyFile("").
+	agentHome := t.TempDir()
+
+	var mountedFiles []string
+	config := RunConfig{
+		UnixUsername: "scion",
+		HomeDir:      agentHome,
+		ResolvedAuth: &api.ResolvedAuth{
+			Files: []api.FileMapping{
+				{SourcePath: "", ContainerPath: "~/.config/gcloud/application_default_credentials.json"},
+				{SourcePath: "", ContainerPath: "~/.config/gcloud/credentials.db"},
+			},
+		},
+	}
+
+	err := applyResolvedAuth(config,
+		func(k, v string) {},       // addEnv
+		func(v api.VolumeMount) {}, // addVolume
+		func(src, dst string, ro, bind bool) { mountedFiles = append(mountedFiles, src) }, // registerMount
+	)
+	if err != nil {
+		t.Fatalf("applyResolvedAuth should succeed with empty SourcePaths, got: %v", err)
+	}
+	if len(mountedFiles) > 0 {
+		t.Errorf("expected no mounts for empty SourcePath files, got %d: %v", len(mountedFiles), mountedFiles)
+	}
+
+	// Verify no files were copied into HomeDir
+	entries, _ := os.ReadDir(agentHome)
+	if len(entries) > 0 {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("expected empty HomeDir, found: %v", names)
+	}
+}
+
 func TestResolveContainerWorkspace(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -1458,6 +1640,41 @@ func TestBuildCommonRunArgs_ExtraHosts(t *testing.T) {
 	}
 }
 
+// TestBuildCommonRunArgs_ProjectLabels_ExactSet asserts that a config with
+// Project and ProjectID set emits exactly the canonical scion.* labels and
+// nothing else — in particular, no extra legacy label sneaks in alongside
+// them.
+func TestBuildCommonRunArgs_ProjectLabels_ExactSet(t *testing.T) {
+	config := RunConfig{
+		Harness:      &harness.Generic{},
+		Name:         "test-agent",
+		UnixUsername: "scion",
+		Image:        "scion-agent:latest",
+		Project:      "p",
+		ProjectID:    "id",
+	}
+
+	args, err := buildCommonRunArgs(config)
+	if err != nil {
+		t.Fatalf("buildCommonRunArgs failed: %v", err)
+	}
+
+	var scionLabels []string
+	for i, arg := range args {
+		if arg == "--label" && i+1 < len(args) {
+			if v := args[i+1]; strings.HasPrefix(v, "scion.") {
+				scionLabels = append(scionLabels, v)
+			}
+		}
+	}
+	slices.Sort(scionLabels)
+
+	want := []string{"scion.project=p", "scion.project_id=id"}
+	if !slices.Equal(scionLabels, want) {
+		t.Fatalf("scion.* --label values = %v, want %v", scionLabels, want)
+	}
+}
+
 func TestSerializeSecrets_DeduplicatesByTarget(t *testing.T) {
 	containerHome := "/home/scion"
 
@@ -1473,9 +1690,9 @@ func TestSerializeSecrets_DeduplicatesByTarget(t *testing.T) {
 		t.Fatalf("serializeSecrets failed: %v", err)
 	}
 
-	staged, err := DecodeStagedSecrets(encoded)
+	staged, err := stagedsecrets.Decode(encoded)
 	if err != nil {
-		t.Fatalf("DecodeStagedSecrets failed: %v", err)
+		t.Fatalf("stagedsecrets.Decode failed: %v", err)
 	}
 
 	// Duplicate targets are deduplicated (last entry wins), so we should have

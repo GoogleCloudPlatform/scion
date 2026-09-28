@@ -43,12 +43,17 @@ type brokerDispatchedMsg struct {
 	msg        string
 	interrupt  bool
 	structured *messages.StructuredMessage
+	messageID  string // hub message ID carried on the dispatch context (#1820)
 }
 
 func (d *brokerMockDispatcher) DispatchAgentCreate(ctx context.Context, agent *store.Agent) error {
 	return nil
 }
 func (d *brokerMockDispatcher) DispatchAgentProvision(ctx context.Context, agent *store.Agent) error {
+	return nil
+}
+
+func (d *brokerMockDispatcher) DispatchAgentReprovision(ctx context.Context, agent *store.Agent) error {
 	return nil
 }
 func (d *brokerMockDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, _ bool) error {
@@ -74,6 +79,7 @@ func (d *brokerMockDispatcher) DispatchAgentMessage(ctx context.Context, agent *
 		msg:        message,
 		interrupt:  interrupt,
 		structured: structuredMsg,
+		messageID:  dispatchMessageIDFromContext(ctx),
 	})
 	return nil
 }
@@ -151,7 +157,6 @@ func setupBrokerTestAgent(t *testing.T, s store.Store, projectID, slug, phase st
 		ProjectID:       projectID,
 		Phase:           phase,
 		RuntimeBrokerID: tid("broker-1"),
-		Visibility:      store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(context.Background(), agent); err != nil {
 		t.Fatalf("failed to create agent: %v", err)
@@ -356,7 +361,7 @@ func TestMessageBrokerProxy_InterruptPrefixPersistence(t *testing.T) {
 	proxy.subscribeAgent(projectID, "persist-agent")
 
 	msg := messages.NewInstruction("user:alice", "agent:persist-agent", "!urgent task")
-	msg.SenderID = "user-alice-id"
+	msg.SenderID = tid("user-alice")
 	msg.RecipientID = agent.ID
 	if err := proxy.PublishMessage(context.Background(), projectID, msg); err != nil {
 		t.Fatal(err)
@@ -515,7 +520,7 @@ func TestMessageBrokerProxy_DeliverToAgentPersistence(t *testing.T) {
 	proxy.subscribeAgent(projectID, "persist-agent")
 
 	msg := messages.NewInstruction("user:alice", "agent:persist-agent", "persist this")
-	msg.SenderID = "user-alice-id"
+	msg.SenderID = tid("user-alice")
 	msg.RecipientID = agent.ID
 	if err := proxy.PublishMessage(context.Background(), projectID, msg); err != nil {
 		t.Fatal(err)
@@ -566,13 +571,13 @@ func TestMessageBrokerProxy_UserMessageDelivery(t *testing.T) {
 	// Subscribe to user messages for this project (as EnsureProjectSubscriptions would do)
 	proxy.subscribeProjectUserMessages(projectID)
 
+	userID := tid("user-bob")
 	// Subscribe to SSE user.message events to verify delivery
-	sseEvents, unsub := events.Subscribe("user.user-bob-id.message", "project.*.user.message")
+	sseEvents, unsub := events.Subscribe("user."+userID+".message", "project.*.user.message")
 	defer unsub()
 
-	userID := "user-bob-id"
 	msg := messages.NewInstruction("agent:sending-agent", "user:bob", "question for you")
-	msg.SenderID = "agent-uuid-123"
+	msg.SenderID = tid("agent-sending")
 	msg.RecipientID = userID
 
 	if err := proxy.PublishUserMessage(context.Background(), projectID, userID, msg); err != nil {
@@ -630,7 +635,7 @@ func TestMessageBrokerProxy_EnsureProjectSubscriptionsIncludesUserMessages(t *te
 		t.Fatal(err)
 	}
 
-	userID := "user-carol-id"
+	userID := tid("user-carol")
 	msg := messages.NewInstruction("agent:some-agent", "user:carol", "auto-subscribed?")
 	msg.RecipientID = userID
 
@@ -802,8 +807,9 @@ func TestMessageBrokerProxy_StartBootstrapsExistingProjects(t *testing.T) {
 
 	proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return dispatcher }, slog.Default())
 
+	userID := tid("user-dave")
 	// Subscribe to SSE events before Start() so we can verify delivery
-	sseEvents, unsub := events.Subscribe("user.user-dave-id.message", "project.*.user.message")
+	sseEvents, unsub := events.Subscribe("user."+userID+".message", "project.*.user.message")
 	defer unsub()
 
 	// Start() should bootstrap subscriptions for the pre-existing project
@@ -812,9 +818,8 @@ func TestMessageBrokerProxy_StartBootstrapsExistingProjects(t *testing.T) {
 
 	// Publish a user message — should be received because Start() bootstrapped
 	// the project's user message subscription
-	userID := "user-dave-id"
 	msg := messages.NewInstruction("agent:pre-existing-agent", "user:dave", "bootstrap test")
-	msg.SenderID = "agent-uuid"
+	msg.SenderID = tid("agent-pre-existing")
 	msg.RecipientID = userID
 
 	if err := proxy.PublishUserMessage(context.Background(), projectID, userID, msg); err != nil {
@@ -870,7 +875,7 @@ func TestMessageBrokerProxy_ProjectSubscriptionDedup(t *testing.T) {
 	}
 
 	// Publish a user message — should be received exactly once
-	userID := "user-dedup-id"
+	userID := tid("user-dedup")
 	msg := messages.NewInstruction("agent:dedup-agent", "user:dedup", "dedup test")
 	msg.RecipientID = userID
 
@@ -1003,7 +1008,7 @@ func TestMessageBrokerProxy_UserMessageLinksAttachments(t *testing.T) {
 		Filename:   "shot.png",
 		MimeType:   "image/png",
 		Size:       12,
-		UploadedBy: "agent-uuid-123",
+		UploadedBy: tid("agent-sending"),
 		CreatedAt:  time.Now().UTC(),
 	}
 	if err := wcs.CreateAttachment(ctx, meta); err != nil {
@@ -1025,13 +1030,13 @@ func TestMessageBrokerProxy_UserMessageLinksAttachments(t *testing.T) {
 	proxy.webChatStore = wcs
 
 	msg := messages.NewInstruction("agent:sending-agent", "user:bob", "here is the screenshot")
-	msg.SenderID = "agent-uuid-123"
-	msg.RecipientID = "user-bob-id"
+	msg.SenderID = tid("agent-sending")
+	msg.RecipientID = tid("user-bob")
 	msg.Metadata = map[string]string{attachmentsMetadataKey: encoded}
 
 	proxy.deliverToUser(ctx, projectID, "project."+projectID+".user.message", msg)
 
-	result, err := s.ListMessages(ctx, store.MessageFilter{RecipientID: "user-bob-id"}, store.ListOptions{})
+	result, err := s.ListMessages(ctx, store.MessageFilter{RecipientID: tid("user-bob")}, store.ListOptions{})
 	if err != nil {
 		t.Fatalf("ListMessages: %v", err)
 	}
@@ -1347,5 +1352,77 @@ func TestResolveDMConversation_BroadcastSkipped(t *testing.T) {
 	}
 	if result.Items[0].ConversationID != "" {
 		t.Fatalf("expected empty ConversationID for broadcast, got %q", result.Items[0].ConversationID)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TypeMention guard regression test (R-1, commit 55c85c76)
+// ---------------------------------------------------------------------------
+
+// TestDeliverToUser_MentionExcludedFromDMActivity verifies that a message with
+// Type=TypeMention does NOT trigger cross-channel DM detection (no phantom DM
+// rows), while an otherwise-identical message with Type=TypeInstruction DOES
+// create DM activity rows.
+func TestDeliverToUser_MentionExcludedFromDMActivity(t *testing.T) {
+	s := newBrokerTestStore(t)
+	projectID := setupBrokerTestProject(t, s)
+	ctx := context.Background()
+
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	wcs := NewWebChatStore(db, "sqlite3")
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	events := NewChannelEventPublisher()
+	defer events.Close()
+	b := eventbus.NewInProcessEventBus(slog.Default())
+	defer func() { _ = b.Close() }()
+
+	proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return &brokerMockDispatcher{} }, slog.Default())
+	proxy.webChatStore = wcs
+
+	senderID := tid("sender-alice")
+	recipientID := tid("recipient-bob")
+	topic := "project." + projectID + ".user.message"
+
+	// --- Case 1: TypeMention should NOT create DM activity rows.
+	mention := messages.NewMention("user:alice", "user:bob", "you were mentioned", "agent:primary-dev")
+	mention.SenderID = senderID
+	mention.RecipientID = recipientID
+	mention.ThreadID = "space-thread-1" // non-dm ThreadID
+
+	proxy.deliverToUser(ctx, projectID, topic, mention)
+
+	// Verify no DM rows were created for either participant.
+	dms, _ := wcs.ListDMs(ctx, senderID)
+	if len(dms) != 0 {
+		t.Errorf("TypeMention: expected 0 DM rows for sender, got %d", len(dms))
+	}
+	dms, _ = wcs.ListDMs(ctx, recipientID)
+	if len(dms) != 0 {
+		t.Errorf("TypeMention: expected 0 DM rows for recipient, got %d", len(dms))
+	}
+
+	// --- Case 2: TypeInstruction with same shape SHOULD create DM activity rows.
+	instruction := messages.NewInstruction("user:alice", "user:bob", "direct message")
+	instruction.SenderID = senderID
+	instruction.RecipientID = recipientID
+	instruction.ThreadID = "space-thread-2" // non-dm ThreadID
+
+	proxy.deliverToUser(ctx, projectID, topic, instruction)
+
+	// Verify DM rows WERE created for both participants.
+	dms, _ = wcs.ListDMs(ctx, senderID)
+	if len(dms) != 1 {
+		t.Fatalf("TypeInstruction: expected 1 DM row for sender, got %d", len(dms))
+	}
+	dms, _ = wcs.ListDMs(ctx, recipientID)
+	if len(dms) != 1 {
+		t.Fatalf("TypeInstruction: expected 1 DM row for recipient, got %d", len(dms))
 	}
 }

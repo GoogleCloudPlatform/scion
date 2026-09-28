@@ -25,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 var configGlobal bool
@@ -33,6 +34,31 @@ var configCmd = &cobra.Command{
 	Use:   "config",
 	Short: "Manage scion configuration settings",
 	Long:  `View and modify settings for scion-agent. Settings are resolved from project (.scion/settings.json) and global (~/.scion/settings.json) locations.`,
+	// Args/Run make this command Runnable so cobra validates subcommand
+	// names: an unrecognized subcommand (e.g. a removed alias) returns an
+	// "unknown command" error instead of silently falling through to this
+	// command's own help with exit status 0.
+	//
+	// A bare "config" (no subcommand), and "config help ..." (cobra only
+	// registers a real "help" subcommand on the root command, so under
+	// "config" it would otherwise hit the same unknown-command path)
+	// return pflag.ErrHelp instead of going through cobra.NoArgs. Cobra's
+	// ExecuteC handles ErrHelp specially: it prints help and returns a nil
+	// error *before* any PersistentPreRunE hook runs. That distinction
+	// matters here because root's PersistentPreRunE requires an active
+	// scion project for "config" (it's not in the exempt command list), so
+	// letting a bare "config" fall through to a normal nil return would
+	// turn "scion config" run outside a project into a "not in a scion
+	// project" error instead of printing help.
+	Args: func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 || args[0] == "help" {
+			return pflag.ErrHelp
+		}
+		return cobra.NoArgs(cmd, args)
+	},
+	// Must be Runnable (any Run/RunE) for the Args validator above to be
+	// evaluated at all; the actual printing happens via the ErrHelp path.
+	Run: func(cmd *cobra.Command, args []string) {},
 }
 
 var configListCmd = &cobra.Command{
@@ -487,9 +513,8 @@ var configCdConfigCmd = &cobra.Command{
 }
 
 var configCdProjectCmd = &cobra.Command{
-	Use:     "cd-project",
-	Aliases: []string{"cd-grove"},
-	Short:   "Open a shell in the project workspace directory",
+	Use:   "cd-project",
+	Short: "Open a shell in the project workspace directory",
 	Long: `Open a shell in the project workspace directory.
 
 For external projects (non-git), navigates to the workspace path stored in settings.

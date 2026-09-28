@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -32,13 +33,27 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/resources"
 )
 
 func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (bool, error) {
+	// Every path built below joins agentName onto some directory -- the
+	// project's agents dir, the global agents dir, the external per-agent
+	// state dir, or the shared worktree base -- so an unvalidated name could
+	// otherwise resolve outside all of them (e.g. "../sibling"). Containment
+	// under checkAgentDirContained is invariant of which root and
+	// sharedWorkspace value is passed: a name it accepts is a direct,
+	// single-element child of every root; a name it rejects escapes every
+	// root the same way. Validating once here, before any of the joins or
+	// filesystem operations below, is therefore sufficient to guard every
+	// branch regardless of which directory ends up being touched.
+	if _, err := checkAgentDirContained(projectPath, agentName, false); err != nil {
+		return false, fmt.Errorf("delete: %w", err)
+	}
+
 	var agentsDirs []string
 	branchDeleted := false
 	var repoRoot string
@@ -301,8 +316,8 @@ func migrateLegacyAgentState(legacyDir, externalDir string) {
 // clean up containers before removing the project config directory.
 func StopProjectContainers(ctx context.Context, mgr Manager, projectName string, agentNames []string) []string {
 	containers, err := mgr.List(ctx, map[string]string{
-		"scion.agent":              "true",
-		projectcompat.LabelProject: projectName,
+		"scion.agent":            "true",
+		projectkeys.LabelProject: projectName,
 	})
 	if err != nil {
 		util.Debugf("StopProjectContainers: failed to list containers for project %s: %v", projectName, err)
@@ -326,7 +341,7 @@ func StopProjectContainers(ctx context.Context, mgr Manager, projectName string,
 		util.Debugf("StopProjectContainers: removing container %s (agent %s, project %s)", c.ContainerID, agentName, projectName)
 		// Use Delete with deleteFiles=false — we only want to remove the container,
 		// not the filesystem artifacts (those will be removed by RemoveProjectConfig).
-		if _, err := mgr.Delete(ctx, c.ContainerID, false, "", false); err != nil {
+		if _, err := mgr.DeleteTarget(ctx, agentName, c.ContainerID, false, "", false); err != nil {
 			util.Debugf("StopProjectContainers: failed to remove container for agent %s: %v", agentName, err)
 		} else {
 			stopped = append(stopped, agentName)
@@ -335,12 +350,21 @@ func StopProjectContainers(ctx context.Context, mgr Manager, projectName string,
 	return stopped
 }
 
-func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+// buildProvisionContext wires the api.Context* values shared by Provision and
+// Reprovision, and injects an explicit HarnessAuth override into the inline
+// config so it is applied before the harness's own Provision() logic runs
+// (which reads auth_selectedType to decide which env vars to inject into
+// scion-agent.json). Extracted so a context value either one
+// needs cannot be added to just one of them by accident.
+func buildProvisionContext(ctx context.Context, opts api.StartOptions) (context.Context, *api.ScionConfig) {
 	if opts.BrokerMode {
 		ctx = api.ContextWithBrokerMode(ctx)
 	}
 	if opts.GitClone != nil {
 		ctx = api.ContextWithGitClone(ctx, opts.GitClone)
+	}
+	if opts.FreshProvision {
+		ctx = api.ContextWithFreshProvision(ctx)
 	}
 	if opts.SharedWorkspace {
 		ctx = api.ContextWithSharedWorkspace(ctx)
@@ -348,9 +372,6 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 	if opts.HarnessConfigPath != "" {
 		ctx = api.ContextWithHarnessConfigPath(ctx, opts.HarnessConfigPath)
 	}
-	// Inject harness auth override into inline config so it is applied
-	// before harness Provision() runs (which reads auth_selectedType to
-	// decide which env vars to inject into scion-agent.json).
 	inlineCfg := opts.InlineConfig
 	if opts.HarnessAuth != "" {
 		if inlineCfg == nil {
@@ -358,40 +379,242 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 		}
 		inlineCfg.AuthSelectedType = opts.HarnessAuth
 	}
-	agentDir, agentHome, _, cfg, err := GetAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "created", opts.Branch, opts.Workspace, inlineCfg)
-	if err == nil {
-		_ = UpdateAgentConfig(opts.Name, opts.ProjectPath, "created", m.Runtime.Name(), opts.Profile)
-	}
-	if err != nil {
-		return cfg, err
-	}
+	return ctx, inlineCfg
+}
 
-	// Stage the project-level pre-start hook script if one was inlined into
-	// opts at agent-create time. The script is written at
-	// pre-start.d/30-project-custom so it runs after the harness provisioner
-	// (20-harness-provision). A staging failure is fatal — the project owner
-	// explicitly configured this script and a silent skip would be misleading.
-	//
-	// Called unconditionally: with an empty script the helper removes any
-	// previously staged file, so a hook that no longer applies cannot survive
-	// on a reused agent home.
-	//
-	// Use agentHome from GetAgent (which resolves the project path correctly
-	// for non-git/external projects) rather than recomputing from opts.ProjectPath,
-	// which may be a marker file rather than a directory for such projects.
+// finishProvision performs the steps common to Provision and Reprovision once
+// the agent's on-disk config exists: persist the lightweight agent-config
+// status file, (re-)stage the project pre-start hook, and persist an explicit
+// HarnessAuth override onto scion-agent.json. Extracted (the same
+// argument the design makes for deriveAgentConfig) so a future change to any
+// of these three steps cannot silently apply to only one of the two callers.
+func (m *AgentManager) finishProvision(opts api.StartOptions, agentDir, agentHome string, cfg *api.ScionConfig) error {
+	_ = UpdateAgentConfig(opts.Name, opts.ProjectPath, "created", m.Runtime.Name(), opts.Profile)
+
+	// Re-stage the project-level pre-start hook. Called unconditionally: an
+	// empty script removes any previously staged file, so a hook that no
+	// longer applies (e.g. deactivated between generations, or on a
+	// first-time resume) cannot survive on a reused agent home.
 	if err := harness.WriteProjectPreStartHook(agentHome, opts.ProjectPreStartHookScript); err != nil {
-		return cfg, fmt.Errorf("stage project pre-start hook: %w", err)
+		return fmt.Errorf("stage project pre-start hook: %w", err)
 	}
 
 	// Persist harness auth override to the on-disk config (for sciontool).
-	// The auth type was already applied via inlineConfig above, but we
-	// re-write to ensure the final file reflects the override.
+	// The auth type was already applied via inlineConfig in
+	// buildProvisionContext, but we re-write to ensure the final file
+	// reflects the override.
 	if opts.HarnessAuth != "" && cfg != nil {
 		cfg.AuthSelectedType = opts.HarnessAuth
 		cfgData, marshalErr := json.MarshalIndent(cfg, "", "  ")
 		if marshalErr == nil {
 			_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), cfgData, 0644)
 		}
+	}
+	return nil
+}
+
+// containerIsRunning reports whether a container named scion.name=name is
+// currently running, per the runtime's own status string
+// (phaseFromContainerStatus maps "Up ..."/"running" to "running"). Used by
+// Reprovision's running-container precondition check (design §3.4 Amendment
+// A2). A List error is not treated as "not running" by the caller — see the
+// call site's comment.
+func (m *AgentManager) containerIsRunning(ctx context.Context, name string) (bool, error) {
+	agents, err := m.Runtime.List(ctx, map[string]string{"scion.name": name})
+	if err != nil {
+		return false, err
+	}
+	for _, a := range agents {
+		if a.Name == name || strings.TrimPrefix(a.Name, "/") == name || strings.EqualFold(a.Name, name) {
+			if strings.EqualFold(a.Phase, "running") {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// ErrReprovisionRefused wraps every refusal Reprovision returns (design §3.4
+// Amendment A4.2): the workspace preconditions and the running-container
+// check. Callers can match it with errors.Is to distinguish "the primitive
+// refused to run" from any other failure — the runtime broker handler maps
+// it to 409, and the reincarnate worker records the reason on the
+// AgentReincarnation record either way.
+var ErrReprovisionRefused = errors.New("reprovision refused")
+
+// Reprovision re-renders an existing agent's on-disk configuration
+// (scion-agent.json, agent-info.json, home dotfiles, and skills) from the
+// current template/harness-config catalog, for a `scion reincarnate` request
+// (design §3.4, Amendments A2 and A23). Unlike Provision, it always calls
+// ProvisionAgent directly rather than through GetAgent's "agent dir already
+// exists → keep the persisted config" branch: reincarnation's entire point is
+// to replace that persisted config with a freshly resolved one.
+//
+// Reprovision accepts two workspace modes, gated by api.ReincarnateEligible:
+//   - clone-per-agent: opts.GitClone != nil, with an existing real clone on
+//     disk.
+//   - explicit mount (design §3.4 Amendment A23): opts.GitClone == nil and a
+//     non-empty opts.Workspace — shared-workspace and hub-managed projects.
+//     The agent directory and the workspace path must already exist;
+//     Reprovision never creates either.
+//
+// Preconditions are enforced here rather than merely documented (design §3.4
+// Amendments A2.1/A2.4 and A23), before ProvisionAgent ever runs:
+// ProvisionAgent's worktree-creation branch decides whether to create a
+// worktree using CWD-dependent git checks (util.BranchExists), which are
+// always wrong on a broker (its CWD is outside the repo) — so calling it for
+// a clone-per-agent agent without first confirming a real, existing clone
+// risks os.RemoveAll on a live worktree-per-agent workspace, destroying
+// uncommitted work. Likewise, ProvisionAgent unconditionally creates the
+// agent directory (os.MkdirAll) before it even looks at the workspace mode,
+// so the explicit-mount case needs its own existence checks to avoid
+// silently standing up a fresh, empty agent directory for a name that was
+// never actually provisioned. Phase 4 may replace the clone-per-agent
+// refusal with a proper "workspace exists → reuse as-is" branch that does
+// not depend on CWD.
+//
+// Once past those checks, Reprovision never touches:
+//   - the agent's workspace, clone-per-agent or explicit-mount (ProvisionAgent's
+//     git-clone branch leaves an existing real clone in place; the
+//     explicit-mount branch only mounts the path Reprovision already verified
+//     exists — it never creates, clones, pulls, resets, or removes it);
+//   - the agent's branch;
+//   - unrelated files already in the agent's home directory (only files the
+//     template/harness-config/platform-skill layers themselves own are
+//     overlaid — see ContextWithReprovision's ForceOverwrite wiring for
+//     platform skills specifically);
+//   - a sibling agent's directory (both branches resolve strictly this
+//     agent's own agentDir via checkAgentDirContained/CheckAgentDirContained).
+func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	hasGitClone := opts.GitClone != nil
+	if !api.ReincarnateEligible(hasGitClone, opts.Workspace) {
+		return nil, fmt.Errorf("%w: agent %q is neither clone-per-agent nor has an explicit workspace; reincarnate currently supports those workspace modes only", ErrReprovisionRefused, opts.Name)
+	}
+
+	projectDir, pdErr := config.GetResolvedProjectDir(opts.ProjectPath)
+	if pdErr != nil {
+		return nil, fmt.Errorf("reprovision: resolve project dir: %w", pdErr)
+	}
+
+	// agentDir is resolved and existence-checked up front, for both
+	// branches, instead of derived after ProvisionAgent returns: the
+	// explicit-mount branch does not set its returned workspace to
+	// agentDir/workspace (see ProvisionAgent's Case 1), so there is no
+	// single after-the-fact derivation that works for both modes.
+	var agentDir string
+
+	if hasGitClone {
+		agentDir = config.GetAgentDir(projectDir, opts.Name, opts.SharedWorkspace)
+		agentWorkspace := filepath.Join(agentDir, "workspace")
+		if info, statErr := os.Stat(filepath.Join(agentWorkspace, ".git")); statErr != nil || !info.IsDir() {
+			return nil, fmt.Errorf("%w: agent %q has no existing git clone at %s; reincarnate does not create or recreate the workspace", ErrReprovisionRefused, opts.Name, agentWorkspace)
+		}
+	} else {
+		// Design §3.4 Amendment A23: explicit-mount case. Confirm this is an
+		// existing agent (CheckAgentDirContained both resolves the
+		// containment-checked path and, via the os.Stat below, its
+		// existence) and that the workspace path — absolute, or a
+		// project-relative subdir exactly as ProvisionAgent's own
+		// explicit-workspace branch accepts — already exists. A miss here is
+		// refused as ErrReprovisionRefused (409) rather than left to
+		// ProvisionAgent's untyped error (or, worse, ProvisionAgent silently
+		// creating the missing piece).
+		dir, err := CheckAgentDirContained(projectDir, opts.Name, opts.SharedWorkspace)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrReprovisionRefused, err)
+		}
+		if info, statErr := os.Stat(dir); statErr != nil || !info.IsDir() {
+			return nil, fmt.Errorf("%w: agent %q has no existing agent directory at %s; reincarnate does not create it", ErrReprovisionRefused, opts.Name, dir)
+		}
+		agentDir = dir
+
+		if filepath.IsAbs(opts.Workspace) {
+			// Upstream review (GoogleCloudPlatform/scion#2037, comment
+			// 4121261313): split the existence check from the directory
+			// check, so a workspace path that exists but is a regular file
+			// gets its own precise message instead of being reported as
+			// "does not exist" -- the same split the relative-path branch
+			// below already makes.
+			info, statErr := os.Stat(opts.Workspace)
+			if statErr != nil {
+				return nil, fmt.Errorf("%w: agent %q workspace path does not exist: %s; reincarnate does not create it", ErrReprovisionRefused, opts.Name, opts.Workspace)
+			}
+			if !info.IsDir() {
+				return nil, fmt.Errorf("%w: agent %q workspace path is not a directory: %s", ErrReprovisionRefused, opts.Name, opts.Workspace)
+			}
+		} else {
+			// Upstream review (GoogleCloudPlatform/scion#2037, comment
+			// 4121261307): LoadEffectiveSettings' error was previously
+			// ignored. A load failure (e.g. a malformed settings.yaml) is a
+			// real environment problem, not a "this reincarnation is
+			// ineligible" refusal -- resolveProjectRoot would otherwise run
+			// against a nil/stale *VersionedSettings and could silently
+			// resolve the wrong project root, misjudging the relative
+			// --workspace containment check below. Returned unwrapped (not
+			// ErrReprovisionRefused), matching the resolve-project-dir error
+			// a few lines above: this surfaces as the broker's generic 500,
+			// not its typed 409 refusal, because it is not a precondition
+			// refusal but an inability to evaluate the request at all. This
+			// runs after the hub has already stopped the agent's container
+			// (§3.7), same as every other precondition here; the
+			// reincarnation is recorded failed with this error as the
+			// reason, and the agent stays stopped until a retry.
+			settings, _, err := config.LoadEffectiveSettings(projectDir)
+			if err != nil {
+				return nil, fmt.Errorf("reprovision: load effective settings: %w", err)
+			}
+			projectRoot := resolveProjectRoot(settings, projectDir)
+			resolved, err := resolveWorkspaceSubdir(projectRoot, opts.Workspace)
+			if err != nil {
+				return nil, fmt.Errorf("%w: %v", ErrReprovisionRefused, err)
+			}
+			// O2 (review p1b-r1): resolveWorkspaceSubdir already confirms
+			// the resolved path exists, but not that it is a directory —
+			// unlike the absolute-path branch above. A relative workspace
+			// that resolves to a regular file must be refused the same way.
+			if info, statErr := os.Stat(resolved); statErr != nil || !info.IsDir() {
+				return nil, fmt.Errorf("%w: agent %q workspace path is not a directory: %s", ErrReprovisionRefused, opts.Name, resolved)
+			}
+		}
+	}
+
+	// A broker unreachable/unresponsive List error is logged and tolerated
+	// (proceeding is the pre-fail-closed behavior; the hub is expected to
+	// have stopped the container already), but an affirmative "yes, still
+	// running" answer is always honored.
+	if running, err := m.containerIsRunning(ctx, opts.Name); err != nil {
+		util.Debugf("reprovision: failed to check running state for %s, proceeding: %v", opts.Name, err)
+	} else if running {
+		return nil, fmt.Errorf("%w: agent %q container is still running; stop it first", ErrReprovisionRefused, opts.Name)
+	}
+
+	ctx, inlineCfg := buildProvisionContext(ctx, opts)
+	ctx = api.ContextWithReprovision(ctx)
+
+	agentHome, _, cfg, err := ProvisionAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "created", opts.Branch, opts.Workspace, inlineCfg)
+	if err != nil {
+		return cfg, err
+	}
+
+	if err := m.finishProvision(opts, agentDir, agentHome, cfg); err != nil {
+		return cfg, err
+	}
+
+	// Deliberately no prompt.md write here: the new generation's first task
+	// (the hub-built preamble plus handoff) is delivered by the subsequent
+	// DispatchAgentStart call, not pre-staged as a file.
+	return cfg, nil
+}
+
+func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	ctx, inlineCfg := buildProvisionContext(ctx, opts)
+	agentDir, agentHome, _, cfg, err := GetAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "created", opts.Branch, opts.Workspace, inlineCfg)
+	if err != nil {
+		return cfg, err
+	}
+
+	if err := m.finishProvision(opts, agentDir, agentHome, cfg); err != nil {
+		return cfg, err
 	}
 
 	// If a task was provided, write it to prompt.md for later execution
@@ -467,6 +690,53 @@ func resolveWorkspaceSubdir(projectRoot, subdir string) (string, error) {
 	return realJoined, nil
 }
 
+// checkAgentDirContained computes the on-disk directory for agentName under
+// projectDir exactly as config.GetAgentDir does, and confirms the result is
+// still a direct child of the same root config.SelectAgentsRoot selected --
+// the external agents dir when sharedWorkspace is true and one is
+// configured, else <projectDir>/agents (GetAgentDir is defined in terms of
+// SelectAgentsRoot, so the two roots can never drift apart).
+//
+// Both ProvisionAgent and GetAgent call this immediately after resolving
+// agentName into a directory, before either one creates, removes, or
+// otherwise acts on it: ProvisionAgent's git-clone and worktree branches
+// clear an existing workspace under agentDir, and GetAgent's stale-
+// directory branch removes agentDir outright. agentName is expected to be a
+// single path element by the time it reaches either function (see
+// runtimebroker's isSingleCleanPathElement, the other half of this
+// defense-in-depth pair), but neither caller is guaranteed to have gone
+// through that check -- Reprovision calls ProvisionAgent directly, not
+// through GetAgent -- so this fails closed on its own rather than trust the
+// caller.
+func checkAgentDirContained(projectDir, agentName string, sharedWorkspace bool) (string, error) {
+	agentDir := config.GetAgentDir(projectDir, agentName, sharedWorkspace)
+	agentsRoot := filepath.Clean(config.SelectAgentsRoot(projectDir, sharedWorkspace))
+	cleanAgentDir := filepath.Clean(agentDir)
+	// Both conditions matter: Dir(...) != root catches a name that is
+	// outside the root entirely (e.g. "../sibling"); Base(...) != agentName
+	// catches a name that cleans down to a direct child of the root but
+	// isn't the single path element it claims to be (e.g. "x/../y" cleans
+	// to <root>/y, a direct child, even though agentName itself is not
+	// "y"). The broker's isSingleCleanPathElement enforces the same
+	// single-element rule at the request boundary; this enforces it again
+	// here, independently, for every caller.
+	if filepath.Dir(cleanAgentDir) != agentsRoot || filepath.Base(cleanAgentDir) != agentName {
+		return "", fmt.Errorf("agent %q is not a single path element under %s", agentName, agentsRoot)
+	}
+	return agentDir, nil
+}
+
+// CheckAgentDirContained is the exported form of checkAgentDirContained, for
+// callers outside this package that resolve an agent directory from a
+// request-supplied name and need to verify containment before their own file
+// operations -- e.g. runtimebroker's deleteAgent and startAgent handlers,
+// which run this alongside their own isSingleCleanPathElement check at the
+// request boundary, the same defense-in-depth pairing ProvisionAgent and
+// GetAgent already use within this package.
+func CheckAgentDirContained(projectDir, agentName string, sharedWorkspace bool) (string, error) {
+	return checkAgentDirContained(projectDir, agentName, sharedWorkspace)
+}
+
 func ProvisionAgent(ctx context.Context, agentName string, templateName string, agentImage string, harnessConfig string, projectPath string, profileName string, optionalStatus string, branch string, workspace string, inlineConfig ...*api.ScionConfig) (string, string, *api.ScionConfig, error) {
 	provisionStart := time.Now()
 	// 1. Prepare agent directories
@@ -483,6 +753,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 
 	projectName := config.GetProjectName(projectDir)
 	isGit := util.IsGitRepoDir(projectDir)
+	isGitWorkspace := isGit // preserve for skill injection before container override
 	if isGit && os.Getenv("SCION_HOST_UID") != "" {
 		// Inside an agent container: treat as non-git to prevent worktree
 		// creation. Container worktrees produce path-identity mismatches
@@ -509,7 +780,10 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 	}
 	sharedWorkspace := api.IsSharedWorkspaceFromContext(ctx)
-	agentDir := config.GetAgentDir(projectDir, agentName, sharedWorkspace)
+	agentDir, err := checkAgentDirContained(projectDir, agentName, sharedWorkspace)
+	if err != nil {
+		return "", "", nil, err
+	}
 	agentHome := config.GetAgentHomePath(projectDir, agentName)
 	// In worktree mode the workspace lives under agentDir so git's relative
 	// worktree pointers resolve correctly. In shared-workspace mode there is
@@ -881,12 +1155,27 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	h := resolved.Harness
 	util.Debugf("ProvisionAgent: harness implementation=%s for harness=%q", resolved.Implementation, finalScionCfg.Harness)
 	skillsDir := h.SkillsDir()
+	// templateSkillNames records which skill directory names the current
+	// template chain provides, independent of what may already be on disk
+	// from a previous provisioning of this same agent home. Platform-skill
+	// injection (Step 3a2) uses this — rather than a plain "does the
+	// directory already exist" check — to decide precedence, so that
+	// force-overwrite (reincarnation reprovisioning) can refresh a stale
+	// platform skill without clobbering a template's intentional override.
+	templateSkillNames := make(map[string]bool)
 	if skillsDir != "" {
 		skillsDest := filepath.Join(agentHome, skillsDir)
 
 		// Copy skills from each template in the chain (overlay behavior)
 		for _, tpl := range chain {
 			tplSkills := filepath.Join(tpl.Path, "skills")
+			if entries, err := os.ReadDir(tplSkills); err == nil {
+				for _, e := range entries {
+					if e.IsDir() {
+						templateSkillNames[e.Name()] = true
+					}
+				}
+			}
 			if info, err := os.Stat(tplSkills); err == nil && info.IsDir() {
 				if err := os.MkdirAll(skillsDest, 0755); err != nil {
 					return "", "", nil, fmt.Errorf("failed to create skills dir: %w", err)
@@ -902,8 +1191,10 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// Step 3a2: Inject platform skills from embedded resources
 	hubEnabled := (settings != nil && settings.IsHubEnabled()) || api.IsBrokerModeFromContext(ctx)
 	injCtx := workspaceSkillsInjectionContext{
-		IsGit:      isGit,
-		HubEnabled: hubEnabled,
+		IsGit:              isGitWorkspace,
+		HubEnabled:         hubEnabled,
+		ForceOverwrite:     api.IsReprovisionFromContext(ctx),
+		TemplateSkillNames: templateSkillNames,
 	}
 	if skillsDir != "" {
 		if err := injectPlatformSkills(resources.PlatformSkillsFS(), agentHome, skillsDir, injCtx); err != nil {
@@ -1437,6 +1728,19 @@ func parseSkillFrontmatter(data []byte) skillFrontmatter {
 type workspaceSkillsInjectionContext struct {
 	IsGit      bool
 	HubEnabled bool
+	// ForceOverwrite re-injects a platform skill even when a directory of the
+	// same name already exists in the agent's home, provided it wasn't just
+	// placed there by a template in this same provisioning call (which still
+	// takes precedence — see TemplateSkillNames). Set for reincarnation
+	// reprovisioning (design §3.4), where a newer broker binary may carry
+	// updated platform-skill content that a plain existence check would
+	// otherwise leave stale.
+	ForceOverwrite bool
+	// TemplateSkillNames holds the skill directory names provided by the
+	// current template chain (independent of what's already on disk), so
+	// ForceOverwrite can still respect "template skills take precedence"
+	// rather than clobbering a template's intentional override.
+	TemplateSkillNames map[string]bool
 }
 
 // shouldInjectSkill checks whether a skill should be injected based on its
@@ -1505,9 +1809,16 @@ func composeInstructions(preamble, templateContent []byte) []byte {
 // injectPlatformSkills copies platform skills from the embedded filesystem
 // into the agent's skills directory. Skills with inject_when conditions are
 // evaluated against the injection context (e.g. git_workspace skills are
-// only injected when isGit is true). Template skills take precedence: if a
-// template already installed a skill with the same directory name, the
-// platform skill is skipped.
+// only injected when isGit is true). Template skills take precedence: if the
+// current template chain provides a skill with the same directory name
+// (injCtx.TemplateSkillNames), the platform skill is skipped.
+//
+// Otherwise, a platform skill whose directory already exists on disk is
+// normally left alone (idempotent restart/resume). injCtx.ForceOverwrite
+// (reincarnation reprovisioning) refreshes it instead, so a newer broker
+// binary's platform-skill content actually reaches an agent that already had
+// an older copy — a plain existence check cannot distinguish "up to date"
+// from "stale leftover from a previous generation".
 func injectPlatformSkills(
 	skillsFS fs.FS,
 	agentHome string,
@@ -1539,10 +1850,30 @@ func injectPlatformSkills(
 
 		skillDest := filepath.Join(agentHome, skillsDir, skillName)
 
-		// Template skills take precedence
-		if _, err := os.Stat(skillDest); err == nil {
+		// Template skills take precedence, regardless of ForceOverwrite: a
+		// template's intentional override must never be clobbered by the
+		// platform default.
+		if injCtx.TemplateSkillNames[skillName] {
 			util.Debugf("provision: platform skill %q skipped (template skill takes precedence)", skillName)
 			continue
+		}
+
+		if !injCtx.ForceOverwrite {
+			if _, err := os.Stat(skillDest); err == nil {
+				util.Debugf("provision: platform skill %q skipped (already present)", skillName)
+				continue
+			}
+		} else {
+			// A plain overlay copy only adds/updates files; it
+			// never removes one the new platform-skill version dropped, so a
+			// stale file from an earlier generation would linger forever
+			// under ForceOverwrite. Safe to RemoveAll: skillDest is
+			// platform-owned at this point (the TemplateSkillNames check
+			// above already exempted anything template-owned), so there is
+			// nothing here that isn't about to be fully replaced anyway.
+			if err := os.RemoveAll(skillDest); err != nil {
+				return fmt.Errorf("failed to clear stale platform skill %q before overwrite: %w", skillName, err)
+			}
 		}
 
 		// Walk the embedded skill directory and copy all files
@@ -1574,79 +1905,48 @@ func injectPlatformSkills(
 	return nil
 }
 
-func GetSavedProfile(agentName string, projectPath string) string {
+func getSavedAgentInfo(agentName string, projectPath string) *api.AgentInfo {
 	projectDir, err := config.GetResolvedProjectDir(projectPath)
 	if err != nil {
-		return ""
+		return nil
 	}
 	agentInfoPath := filepath.Join(config.GetAgentHomePath(projectDir, agentName), "agent-info.json")
-	if _, err := os.Stat(agentInfoPath); err == nil {
-		data, err := os.ReadFile(agentInfoPath)
-		if err == nil {
-			var info api.AgentInfo
-			if err := json.Unmarshal(data, &info); err == nil {
-				return info.Profile
-			}
-		}
+	if _, err := os.Stat(agentInfoPath); err != nil {
+		return nil
 	}
-	return ""
+	data, err := os.ReadFile(agentInfoPath)
+	if err != nil {
+		return nil
+	}
+	var info api.AgentInfo
+	if err := json.Unmarshal(data, &info); err != nil {
+		return nil
+	}
+	return &info
 }
 
-func GetSavedRuntime(agentName string, projectPath string) string {
-	projectDir, err := config.GetResolvedProjectDir(projectPath)
-	if err != nil {
-		return ""
-	}
-	agentInfoPath := filepath.Join(config.GetAgentHomePath(projectDir, agentName), "agent-info.json")
-	if _, err := os.Stat(agentInfoPath); err == nil {
-		data, err := os.ReadFile(agentInfoPath)
-		if err == nil {
-			var info api.AgentInfo
-			if err := json.Unmarshal(data, &info); err == nil {
-				return info.Runtime
-			}
-		}
+func GetSavedProfile(agentName string, projectPath string) string {
+	if info := getSavedAgentInfo(agentName, projectPath); info != nil {
+		return info.Profile
 	}
 	return ""
 }
 
 func GetSavedHarnessConfig(agentName string, projectPath string) string {
-	projectDir, err := config.GetResolvedProjectDir(projectPath)
-	if err != nil {
-		return ""
-	}
-	agentInfoPath := filepath.Join(config.GetAgentHomePath(projectDir, agentName), "agent-info.json")
-	if _, err := os.Stat(agentInfoPath); err == nil {
-		data, err := os.ReadFile(agentInfoPath)
-		if err == nil {
-			var info api.AgentInfo
-			if err := json.Unmarshal(data, &info); err == nil {
-				return info.HarnessConfig
-			}
-		}
+	if info := getSavedAgentInfo(agentName, projectPath); info != nil {
+		return info.HarnessConfig
 	}
 	return ""
 }
 
 func GetSavedPhase(agentName string, projectPath string) string {
-	projectDir, err := config.GetResolvedProjectDir(projectPath)
-	if err != nil {
-		return ""
-	}
-	agentInfoPath := filepath.Join(config.GetAgentHomePath(projectDir, agentName), "agent-info.json")
-	if _, err := os.Stat(agentInfoPath); err == nil {
-		data, err := os.ReadFile(agentInfoPath)
-		if err == nil {
-			var info api.AgentInfo
-			if err := json.Unmarshal(data, &info); err == nil {
-				return info.Phase
-			}
-		}
+	if info := getSavedAgentInfo(agentName, projectPath); info != nil {
+		return info.Phase
 	}
 	return ""
 }
 
-func UpdateAgentConfig(agentName string, projectPath string, status string, runtime string, profile string) error {
+func updateSavedAgentInfo(agentName string, projectPath string, update func(*api.AgentInfo)) error {
 	projectDir, err := config.GetResolvedProjectDir(projectPath)
 	if err != nil {
 		return err
@@ -1656,8 +1956,11 @@ func UpdateAgentConfig(agentName string, projectPath string, status string, runt
 
 	// If agent-info.json doesn't exist, we can't update it.
 	// This might happen if provisioning failed or hasn't finished.
-	if _, err := os.Stat(agentInfoPath); os.IsNotExist(err) {
+	mode := os.FileMode(0o644)
+	if fi, err := os.Stat(agentInfoPath); os.IsNotExist(err) {
 		return nil
+	} else if err == nil {
+		mode = fi.Mode().Perm()
 	}
 
 	data, err := os.ReadFile(agentInfoPath)
@@ -1670,58 +1973,58 @@ func UpdateAgentConfig(agentName string, projectPath string, status string, runt
 		return err
 	}
 
-	if status != "" {
-		info.Phase = status
-	}
-	if runtime != "" {
-		info.Runtime = runtime
-	}
-	if profile != "" {
-		info.Profile = profile
-	}
+	update(&info)
 
 	newData, err := json.MarshalIndent(info, "", "  ")
 	if err != nil {
 		return err
 	}
 
-	if err := os.WriteFile(agentInfoPath, newData, 0644); err != nil {
+	return writeAgentInfoFile(agentInfoPath, newData, mode)
+}
+
+func writeAgentInfoFile(path string, data []byte, mode os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
 		return err
 	}
+	tmpPath := tmp.Name()
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+	}()
 
-	return nil
+	if err := tmp.Chmod(mode); err != nil {
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
+}
+
+func UpdateAgentConfig(agentName string, projectPath string, status string, runtime string, profile string) error {
+	return updateSavedAgentInfo(agentName, projectPath, func(info *api.AgentInfo) {
+		if status != "" {
+			info.Phase = status
+		}
+		if runtime != "" {
+			info.Runtime = runtime
+		}
+		if profile != "" {
+			info.Profile = profile
+		}
+	})
 }
 
 // UpdateAgentDeletedAt writes the deletedAt timestamp to agent-info.json.
 func UpdateAgentDeletedAt(agentName string, projectPath string, deletedAt time.Time) error {
-	projectDir, err := config.GetResolvedProjectDir(projectPath)
-	if err != nil {
-		return err
-	}
-	agentInfoPath := filepath.Join(config.GetAgentHomePath(projectDir, agentName), "agent-info.json")
-
-	if _, err := os.Stat(agentInfoPath); os.IsNotExist(err) {
-		return nil
-	}
-
-	data, err := os.ReadFile(agentInfoPath)
-	if err != nil {
-		return err
-	}
-
-	var info api.AgentInfo
-	if err := json.Unmarshal(data, &info); err != nil {
-		return err
-	}
-
-	info.DeletedAt = deletedAt
-
-	newData, err := json.MarshalIndent(info, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(agentInfoPath, newData, 0644)
+	return updateSavedAgentInfo(agentName, projectPath, func(info *api.AgentInfo) {
+		info.DeletedAt = deletedAt
+	})
 }
 
 func GetAgent(ctx context.Context, agentName string, templateName string, agentImage string, harnessConfig string, projectPath string, profileName string, optionalStatus string, branch string, workspace string, inlineConfig ...*api.ScionConfig) (string, string, string, *api.ScionConfig, error) {
@@ -1734,7 +2037,11 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 		agentName, templateName, harnessConfig, projectPath, projectDir)
 
 	sharedWorkspace := api.IsSharedWorkspaceFromContext(ctx)
-	agentDir := config.GetAgentDir(projectDir, agentName, sharedWorkspace)
+	agentDir, err := checkAgentDirContained(projectDir, agentName, sharedWorkspace)
+	if err != nil {
+		return "", "", "", nil, err
+	}
+
 	agentHome := config.GetAgentHomePath(projectDir, agentName)
 	var agentWorkspace string
 	if !sharedWorkspace {
@@ -1841,12 +2148,18 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 
 	util.Debugf("GetAgent: agent dir exists, loading existing config from %s", agentDir)
 
-	// When git clone is configured (hub-dispatched create), clear the workspace
-	// so sciontool performs a fresh clone. The agent directory may be left over
-	// from a previous agent with the same name that was deleted via the hub but
-	// whose local files were not cleaned up. Without this, sciontool sees the
-	// old clone as "already populated" and skips cloning.
-	if gitClone := api.GitCloneFromContext(ctx); gitClone != nil {
+	// When git clone is configured on a fresh provision (hub-dispatched
+	// create), clear the workspace so sciontool performs a fresh clone. The
+	// agent directory may be left over from a previous agent with the same
+	// name that was deleted via the hub but whose local files were not
+	// cleaned up. Without this, sciontool sees the old clone as "already
+	// populated" and skips cloning.
+	//
+	// Gated on FreshProvision, not just GitClone being set: start also
+	// carries GitClone, so a workspace that didn't survive a stop can be
+	// recreated, but it must never clear a workspace that did survive —
+	// that would discard un-pushed work.
+	if gitClone := api.GitCloneFromContext(ctx); gitClone != nil && api.IsFreshProvisionFromContext(ctx) {
 		if info, err := os.Stat(agentWorkspace); err == nil && info.IsDir() {
 			if !isWorkspaceEmptyDir(agentWorkspace) {
 				util.Debugf("GetAgent: clearing existing workspace for git-clone re-provision: %s", agentWorkspace)
@@ -1886,6 +2199,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	if err != nil {
 		util.Debugf("GetAgent: template chain for %q not found: %v, returning agentCfg only (harness=%q image=%q)",
 			effectiveTemplate, err, agentCfg.Harness, agentCfg.Image)
+		resolveModelAliasForExistingAgent(ctx, agentCfg, projectPath)
 		return agentDir, agentHome, agentWorkspace, agentCfg, nil
 	}
 
@@ -1906,22 +2220,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	// This covers the case where scion-agent.json was written with a raw alias
 	// (e.g. by applyInlineConfigUpdate before the hub-side fix) or where the
 	// agent was created before the hub resolved aliases at storage time.
-	if finalCfg.Model != "" {
-		hcName := finalCfg.HarnessConfig
-		if hcName == "" {
-			hcName = finalCfg.DefaultHarnessConfig
-		}
-		if hcName != "" {
-			hcDir, err := resolveHarnessConfigDir(ctx, hcName, projectPath)
-			if err == nil && hcDir != nil && hcDir.Config.ModelAliases != nil {
-				resolved := config.ResolveModelAlias(finalCfg.Model, hcDir.Config.ModelAliases)
-				if resolved != finalCfg.Model {
-					util.Debugf("GetAgent: resolved model alias %q → %q", finalCfg.Model, resolved)
-					finalCfg.Model = resolved
-				}
-			}
-		}
-	}
+	resolveModelAliasForExistingAgent(ctx, finalCfg, projectPath)
 
 	// Ensure Info is populated from agent-info.json if available
 	if agentInfo != nil {
@@ -1932,6 +2231,48 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 		finalCfg.Harness, finalCfg.HarnessConfig, finalCfg.Image, finalCfg.DefaultHarnessConfig)
 
 	return agentDir, agentHome, agentWorkspace, finalCfg, nil
+}
+
+// resolveModelAliasForExistingAgent resolves cfg.Model in place when it is
+// still a size alias (e.g. "large"). It first tries the harness-config's
+// model_aliases map resolved from disk (resolveHarnessConfigDir); when that
+// can't be resolved — which is the common case for hub-dispatched agents
+// that have no local template chain — it falls back to the harness's
+// built-in alias table (harnesses/<name>/config.yaml, via
+// harness.DefaultModelAliases). This is a no-op if cfg is nil, cfg.Model is
+// empty, or cfg.Model is not a known alias.
+func resolveModelAliasForExistingAgent(ctx context.Context, cfg *api.ScionConfig, projectPath string) {
+	if cfg == nil || cfg.Model == "" {
+		return
+	}
+
+	aliases := map[string]string{}
+	hcName := cfg.HarnessConfig
+	if hcName == "" {
+		hcName = cfg.DefaultHarnessConfig
+	}
+	if hcName != "" {
+		if hcDir, err := resolveHarnessConfigDir(ctx, hcName, projectPath); err == nil && hcDir != nil {
+			// hcDir.Config is a config.HarnessConfigEntry value (not a
+			// pointer), so it can never itself be nil here; only its
+			// ModelAliases map can be nil/empty, which len() handles safely.
+			if len(hcDir.Config.ModelAliases) > 0 {
+				aliases = hcDir.Config.ModelAliases
+			}
+		}
+	}
+	if len(aliases) == 0 && cfg.Harness != "" {
+		aliases = harness.DefaultModelAliases(cfg.Harness)
+	}
+	if len(aliases) == 0 {
+		return
+	}
+
+	resolved := config.ResolveModelAlias(cfg.Model, aliases)
+	if resolved != cfg.Model {
+		util.Debugf("resolveModelAliasForExistingAgent: resolved model alias %q → %q", cfg.Model, resolved)
+		cfg.Model = resolved
+	}
 }
 
 // isWorkspaceEmptyDir returns true if the directory is empty or contains only

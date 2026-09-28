@@ -427,6 +427,14 @@ func resolveEmailDM(ctx context.Context, s ResolutionStore, email string, rctx R
 }
 
 // resolveThread resolves a #<thread-name> reference within the current project.
+//
+// DEF-142 P1: collects ALL matches across all pages and fails closed on
+// ambiguity. Two group conversations in one project sharing a display name
+// is not hypothetical — DEF-140 made conversation identity (surface,
+// external_ref), so a live thread forks into (native, thread:P:T) and
+// (discord, thread:P:T) which can carry the same display_name. Silently
+// picking the first match would deliver to a different audience depending
+// on pagination order.
 func resolveThread(ctx context.Context, s ResolutionStore, name string, rctx ResolveContext) (*ResolveResult, error) {
 	if rctx.ProjectID == "" {
 		return nil, &ResolutionError{
@@ -435,10 +443,14 @@ func resolveThread(ctx context.Context, s ResolutionStore, name string, rctx Res
 		}
 	}
 
-	// Paginate through all group conversations in this project to find one
-	// matching the display name. A previous implementation passed Limit:0
-	// expecting "no limit", but clampLimit(0) returns 50 (the default page
-	// size), silently missing threads beyond the first page.
+	// Collect all matching conversations across all pages. Do NOT return on
+	// first match — a second match turns this from a resolve into an error.
+	type match struct {
+		id      string
+		surface string
+	}
+	var matches []match
+
 	var cursor string
 	for {
 		result, err := s.ListConversations(ctx, store.ConversationFilter{
@@ -451,10 +463,7 @@ func resolveThread(ctx context.Context, s ResolutionStore, name string, rctx Res
 
 		for _, c := range result.Items {
 			if c.DisplayName == name {
-				return &ResolveResult{
-					ConversationID: c.ID,
-					Created:        false,
-				}, nil
+				matches = append(matches, match{id: c.ID, surface: c.Surface})
 			}
 		}
 
@@ -464,9 +473,30 @@ func resolveThread(ctx context.Context, s ResolutionStore, name string, rctx Res
 		cursor = result.NextCursor
 	}
 
-	return nil, &ResolutionError{
-		Ref:    "#" + name,
-		Reason: "not-found",
+	switch len(matches) {
+	case 0:
+		return nil, &ResolutionError{
+			Ref:    "#" + name,
+			Reason: "not-found",
+		}
+	case 1:
+		return &ResolveResult{
+			ConversationID: matches[0].id,
+			Created:        false,
+		}, nil
+	default:
+		// Two or more conversations share this display name. Refuse the
+		// send — do NOT silently pick one. Populate Candidates with
+		// disambiguating forms (conv:<uuid> with surface context).
+		candidates := make([]string, len(matches))
+		for i, m := range matches {
+			candidates[i] = fmt.Sprintf("conv:%s (surface=%s)", m.id, m.surface)
+		}
+		return nil, &ResolutionError{
+			Ref:        "#" + name,
+			Reason:     "ambiguous",
+			Candidates: candidates,
+		}
 	}
 }
 
@@ -478,6 +508,13 @@ func resolveThread(ctx context.Context, s ResolutionStore, name string, rctx Res
 // the participant was newly added (i.e. the conversation was just created for
 // this pair). ErrAlreadyExists is swallowed — re-adding an existing
 // participant is expected on the upsert path.
+//
+// G2 EXCEPTION — same class as EnsureParticipant in conversation.go.
+// Participants are a LISTING concern, not an access concern: authorization
+// is key-derived (the DM key IS the ACL), not participant-derived. Denying
+// a send because a listing row failed to write turns a cosmetic gap into
+// an outage. Errors are logged as warnings and self-repair on the next
+// message in the same conversation.
 func ensureParticipant(ctx context.Context, s ResolutionStore, convID, kind, id string) bool {
 	err := s.AddParticipant(ctx, &store.ConversationParticipant{
 		ID:             uuid.NewString(),

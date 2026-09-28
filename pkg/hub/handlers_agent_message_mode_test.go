@@ -209,6 +209,44 @@ func TestSetMessageMode_ProjectAdminDenied(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Test 1b: Non-member denied with 403, not a runtime error
+// ---------------------------------------------------------------------------
+
+// TestSetMessageMode_NonMemberDenied guards against a non-member's
+// GetProjectMembership lookup (which returns store.ErrNotFound, since a
+// non-member has no membership row at all) being mistaken for an
+// unexpected lookup failure. The correct outcome for "no membership row"
+// is the same 403 every other unauthorized caller gets, not a 500-class
+// error.
+func TestSetMessageMode_NonMemberDenied(t *testing.T) {
+	srv, s, owner, _, _, projectID := smmSetup(t)
+	ctx := context.Background()
+
+	nonMember := &store.User{
+		ID:          tid("smm-non-member"),
+		Email:       "smm-non-member@test.com",
+		DisplayName: "SMM Non-Member",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require_NoError(t, s.CreateUser(ctx, nonMember))
+	ensureHubMembership(ctx, s, nonMember.ID)
+	// Deliberately not added to the project's members group or given any
+	// project-scoped role binding.
+
+	agent := smmAgent(t, s, "smm-non-member-denied", projectID, store.MessageModeProject,
+		[]string{owner.ID})
+
+	nonMemberIdent := msgAuthzUserIdentity(nonMember.ID)
+	rr := smmDoRequest(t, srv, agent.ID, SetMessageModeRequest{Mode: "none"}, nonMemberIdent)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for a non-member, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Test 2: Project owner allowed
 // ---------------------------------------------------------------------------
 
@@ -288,6 +326,54 @@ func TestSetMessageMode_LineageOwnerAllowed(t *testing.T) {
 	}
 	if updated.MessageMode != "branch" {
 		t.Fatalf("expected branch, got %q", updated.MessageMode)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: Cross-project agent caller gets 404 (not 403)
+// ---------------------------------------------------------------------------
+
+func TestSetMessageMode_CrossProjectAgentDenied(t *testing.T) {
+	srv, s, owner, _, _, projectID := smmSetup(t)
+	ctx := context.Background()
+
+	// Target agent in the default project.
+	target := smmAgent(t, s, "smm-cross-proj-target", projectID, store.MessageModeProject,
+		[]string{owner.ID})
+
+	// Create a second project for the cross-project caller.
+	otherProjectID := tid("smm-other-project")
+	otherOwner := &store.User{
+		ID:          tid("smm-other-owner"),
+		Email:       "smm-other-owner@test.com",
+		DisplayName: "SMM Other Owner",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require_NoError(t, s.CreateUser(ctx, otherOwner))
+	ensureHubMembership(ctx, s, otherOwner.ID)
+
+	otherProject := &store.Project{
+		ID:        otherProjectID,
+		Name:      "smm-other-project",
+		Slug:      "smm-other-project",
+		OwnerID:   otherOwner.ID,
+		CreatedBy: otherOwner.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require_NoError(t, s.CreateProject(ctx, otherProject))
+
+	// Create a caller agent in the other project with full-role scopes.
+	caller := smmAgent(t, s, "smm-cross-proj-caller", otherProjectID, store.MessageModeProject,
+		[]string{otherOwner.ID})
+	callerIdent := msgAuthzAgentIdentity(caller.ID, otherProjectID, caller.Ancestry, ScopesForRole(AgentRoleFull)...)
+
+	rr := smmDoRequest(t, srv, target.ID, SetMessageModeRequest{Mode: "none"}, callerIdent)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for cross-project agent caller, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
 
@@ -492,13 +578,13 @@ func TestSetMessageMode_Quarantine(t *testing.T) {
 		[]string{owner.ID})
 	senderIdent := msgAuthzAgentIdentity(sender.ID, projectID, sender.Ancestry)
 
-	allowed, _ := srv.authorizeAgentMessage(ctx, senderIdent, agent, false)
+	allowed, _, _ := srv.authorizeAgentMessage(ctx, senderIdent, agent, false)
 	if allowed {
 		t.Fatal("messaging a none-mode agent should be denied (quarantine)")
 	}
 
 	// System-plane notice should still work (D8).
-	allowed, reason := srv.authorizeAgentMessage(ctx, senderIdent, agent, true)
+	allowed, reason, _ := srv.authorizeAgentMessage(ctx, senderIdent, agent, true)
 	if !allowed {
 		t.Fatalf("system-plane delivery should be allowed even for none-mode agent: %s", reason)
 	}
@@ -517,14 +603,14 @@ func TestSetMessageMode_LiveEffect(t *testing.T) {
 
 	// Member cannot message project-mode agent (agent.message removed from member role).
 	memberIdent := msgAuthzUserIdentity(member.ID)
-	allowed, _ := srv.authorizeAgentMessage(ctx, memberIdent, agent, false)
+	allowed, _, _ := srv.authorizeAgentMessage(ctx, memberIdent, agent, false)
 	if allowed {
 		t.Fatal("member without agent.message should be denied messaging project-mode agent")
 	}
 
 	// Owner CAN message project-mode agent (has agent.message via owner role).
 	ownerIdent := msgAuthzUserIdentity(owner.ID)
-	allowed, reason := srv.authorizeAgentMessage(ctx, ownerIdent, agent, false)
+	allowed, reason, _ := srv.authorizeAgentMessage(ctx, ownerIdent, agent, false)
 	if !allowed {
 		t.Fatalf("owner should message project-mode agent: %s", reason)
 	}
@@ -542,7 +628,7 @@ func TestSetMessageMode_LiveEffect(t *testing.T) {
 	}
 
 	// Owner's message attempt -> DENIED after mode change to none (live effect).
-	allowed, _ = srv.authorizeAgentMessage(ctx, ownerIdent, updatedAgent, false)
+	allowed, _, _ = srv.authorizeAgentMessage(ctx, ownerIdent, updatedAgent, false)
 	if allowed {
 		t.Fatal("after mode change to none, message should be denied even for owner")
 	}
@@ -720,5 +806,70 @@ func TestSetMessageMode_APIRouting(t *testing.T) {
 	rr := smmDoRequest(t, srv, agent.ID, SetMessageModeRequest{Mode: "lineage"}, ownerIdent)
 	if rr.Code == http.StatusNotFound {
 		t.Fatal("set_message_mode should be a recognized action, got 404")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: Full-role agent allowed (D7 amendment)
+// ---------------------------------------------------------------------------
+
+func TestSetMessageMode_FullRoleAgentAllowed(t *testing.T) {
+	srv, s, owner, _, _, projectID := smmSetup(t)
+
+	// Target agent whose mode will be changed.
+	target := smmAgent(t, s, "smm-full-agent-target", projectID, store.MessageModeProject,
+		[]string{owner.ID})
+
+	// Caller agent with full-role scopes (same project).
+	caller := smmAgent(t, s, "smm-full-agent-caller", projectID, store.MessageModeProject,
+		[]string{owner.ID})
+	callerIdent := msgAuthzAgentIdentity(caller.ID, projectID, caller.Ancestry, ScopesForRole(AgentRoleFull)...)
+
+	rr := smmDoRequest(t, srv, target.ID, SetMessageModeRequest{Mode: "branch"}, callerIdent)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 for full-role agent caller, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp SetMessageModeResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if resp.Mode != "branch" {
+		t.Fatalf("expected mode=branch, got %q", resp.Mode)
+	}
+	if resp.Previous != "project" {
+		t.Fatalf("expected previous_mode=project, got %q", resp.Previous)
+	}
+
+	// Verify mode is updated in store.
+	updated, err := s.GetAgent(context.Background(), target.ID)
+	if err != nil {
+		t.Fatalf("failed to get agent: %v", err)
+	}
+	if updated.MessageMode != "branch" {
+		t.Fatalf("store should reflect new mode, got %q", updated.MessageMode)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: Baseline-role agent denied (D7 amendment)
+// ---------------------------------------------------------------------------
+
+func TestSetMessageMode_BaselineRoleAgentDenied(t *testing.T) {
+	srv, s, owner, _, _, projectID := smmSetup(t)
+
+	target := smmAgent(t, s, "smm-baseline-agent-target", projectID, store.MessageModeProject,
+		[]string{owner.ID})
+
+	// Caller agent with baseline-role scopes (does not include ScopeAgentSetMessageMode).
+	caller := smmAgent(t, s, "smm-baseline-agent-caller", projectID, store.MessageModeProject,
+		[]string{owner.ID})
+	callerIdent := msgAuthzAgentIdentity(caller.ID, projectID, caller.Ancestry, ScopesForRole(AgentRoleBaseline)...)
+
+	rr := smmDoRequest(t, srv, target.ID, SetMessageModeRequest{Mode: "none"}, callerIdent)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for baseline-role agent caller, got %d: %s", rr.Code, rr.Body.String())
 	}
 }

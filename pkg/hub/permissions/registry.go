@@ -61,6 +61,8 @@ const (
 	ActionExecute        = "execute"
 	ActionMessage        = "message"
 	ActionSetMessageMode = "set_message_mode"
+	ActionLifecycle      = "lifecycle"
+	ActionCreateGlobal   = "create_global"
 
 	UATScopeAgentManage         = "agent:manage"
 	UATScopeSkillManage         = "skill:manage"
@@ -102,6 +104,13 @@ type Permission struct {
 	Description    string
 	Enforcement    []string
 	NonRouteUse    []string
+	// ExcludeFromManageAlias keeps this permission's UAT scope out of the
+	// resource's "<resource>:manage" convenience alias. Used for observation
+	// permissions (agent.attach, agent.port_access) that project owners/admins
+	// no longer hold through their role, so that they can still mint
+	// agent:manage tokens (miller79/scion#88). The scope remains available
+	// for explicit selection.
+	ExcludeFromManageAlias bool
 }
 
 // Registry is the canonical permission/resource vocabulary for Hub authz.
@@ -115,11 +124,13 @@ var Registry = []Permission{
 	{ID: "agent.list", Resource: ResourceAgent, Action: ActionList, CapabilityKind: CapabilityScope, UATScope: "agent:list", Description: "List agents in the project", Enforcement: []string{"pkg/hub/handlers_agents_core.go", "pkg/hub/authz.go"}},
 	{ID: "agent.update", Resource: ResourceAgent, Action: ActionUpdate, CapabilityKind: CapabilityResource, Description: "Update agents", Enforcement: []string{"pkg/hub/handlers_agents_core.go"}},
 	{ID: "agent.delete", Resource: ResourceAgent, Action: ActionDelete, CapabilityKind: CapabilityResource, UATScope: "agent:delete", AgentScopes: []string{"project:agent:lifecycle"}, Description: "Delete agents", Enforcement: []string{"pkg/hub/handlers_agents_core.go", "pkg/hub/handlers_agent_delete_authz_test.go"}},
-	{ID: "agent.attach", Resource: ResourceAgent, Action: ActionAttach, CapabilityKind: CapabilityResource, UATScope: "agent:attach", AgentScopes: []string{"project:agent:lifecycle"}, Description: "Attach to agent sessions", Enforcement: []string{"pkg/hub/authorize.go:authorizeAgentLifecycle", "pkg/hub/pty_handlers.go"}},
-	{ID: "agent.port_access", Resource: ResourceAgent, Action: ActionPortAccess, CapabilityKind: CapabilityResource, UATScope: "agent:port_access", Description: "Access agent forwarded ports", Enforcement: []string{"pkg/hub/port_forward_handlers.go"}},
+	{ID: "agent.attach", Resource: ResourceAgent, Action: ActionAttach, CapabilityKind: CapabilityResource, UATScope: "agent:attach", AgentScopes: []string{"project:agent:lifecycle"}, Description: "Attach to agent sessions (terminal, exec, env, reset-auth)", Enforcement: []string{"pkg/hub/authorize.go:authorizeAgentLifecycle", "pkg/hub/pty_handlers.go"}, ExcludeFromManageAlias: true},
+	{ID: "agent.lifecycle", Resource: ResourceAgent, Action: ActionLifecycle, CapabilityKind: CapabilityResource, UATScope: "agent:lifecycle", AgentScopes: []string{"project:agent:lifecycle"}, Description: "Start, stop, suspend, restart, restore, and reincarnate agents", Enforcement: []string{"pkg/hub/authorize.go:authorizeAgentLifecycle", "pkg/hub/handlers_agents_core.go:handleAgentAction", "pkg/hub/handlers_agent_reincarnate.go:authorizeAgentReincarnate"}},
+	{ID: "agent.port_access", Resource: ResourceAgent, Action: ActionPortAccess, CapabilityKind: CapabilityResource, UATScope: "agent:port_access", Description: "Access agent forwarded ports", Enforcement: []string{"pkg/hub/port_forward_handlers.go"}, ExcludeFromManageAlias: true},
 	{ID: "agent.stop_all", Resource: ResourceAgent, Action: ActionStopAll, CapabilityKind: CapabilityScope, Description: "Stop all agents", Enforcement: []string{"pkg/hub/handlers_agents_core.go"}},
 	{ID: "agent.message", Resource: ResourceAgent, Action: ActionMessage, CapabilityKind: CapabilityScope, UATScope: "agent:message", Description: "Send messages to agents", NonRouteUse: []string{"Phase 2: pkg/hub/authorize.go:authorizeAgentMessage"}},
-	{ID: "agent.set_message_mode", Resource: ResourceAgent, Action: ActionSetMessageMode, CapabilityKind: CapabilityResource, Description: "Change agent message mode", Enforcement: []string{"pkg/hub/handlers_agents_core.go"}},
+	{ID: "agent.set_message_mode", Resource: ResourceAgent, Action: ActionSetMessageMode, CapabilityKind: CapabilityResource, AgentScopes: []string{"project:agent:set_message_mode"}, Description: "Change agent message mode", Enforcement: []string{"pkg/hub/handlers_agents_core.go"}},
+	{ID: "agent.grant_hub_mode", Resource: ResourceAgent, Action: "grant_hub_mode", CapabilityKind: CapabilityResource, Description: "Grant hub message mode (requires full role + hub mode for agent callers)", Enforcement: []string{"pkg/hub/authorize_message_mode_grant.go"}},
 
 	{ID: "project.create", Resource: ResourceProject, Action: ActionCreate, CapabilityKind: CapabilityScope, Description: "Create projects", Enforcement: []string{"pkg/hub/handlers_projects_core.go"}},
 	{ID: "project.read", Resource: ResourceProject, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "project:read", AgentScopes: []string{"project:read"}, Description: "Read project metadata", Enforcement: []string{"pkg/hub/handlers_projects_core.go", "pkg/hub/authz.go"}},
@@ -127,12 +138,14 @@ var Registry = []Permission{
 	{ID: "project.delete", Resource: ResourceProject, Action: ActionDelete, CapabilityKind: CapabilityResource, Description: "Delete projects", Enforcement: []string{"pkg/hub/handlers_projects_core.go"}},
 	{ID: "project.manage", Resource: ResourceProject, Action: ActionManage, CapabilityKind: CapabilityResource, UATScope: "project:manage", Description: "Manage project administration (RS1 membership operations)", Enforcement: []string{"pkg/hub/handlers_projects_core.go"}},
 	{ID: "project.register", Resource: ResourceProject, Action: ActionRegister, CapabilityKind: CapabilityResource, Description: "Register projects", Enforcement: []string{"pkg/hub/handlers_projects_core.go"}},
+	{ID: "project.set_messaging_policy", Resource: ResourceProject, Action: "set_messaging_policy", CapabilityKind: CapabilityResource, Description: "Set project cross-project messaging policy (owner/admin only)", Enforcement: []string{"pkg/hub/project_messaging_policy.go"}},
 
 	{ID: "skill.create", Resource: ResourceSkill, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "skill:create", Description: "Create skills", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
-	{ID: "skill.read", Resource: ResourceSkill, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "skill:read", Description: "Read skills", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
+	{ID: "skill.create_global", Resource: ResourceSkill, Action: ActionCreateGlobal, CapabilityKind: CapabilityScope, Description: "Create skills in the global (hub) catalog", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
+	{ID: "skill.read", Resource: ResourceSkill, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "skill:read", AgentScopes: []string{"project:read"}, Description: "Read skills", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
 	{ID: "skill.update", Resource: ResourceSkill, Action: ActionUpdate, CapabilityKind: CapabilityResource, UATScope: "skill:update", Description: "Update skills", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
 	{ID: "skill.delete", Resource: ResourceSkill, Action: ActionDelete, CapabilityKind: CapabilityResource, UATScope: "skill:delete", Description: "Delete skills", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
-	{ID: "skill.list", Resource: ResourceSkill, Action: ActionList, CapabilityKind: CapabilityScope, UATScope: "skill:list", Description: "List skills", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
+	{ID: "skill.list", Resource: ResourceSkill, Action: ActionList, CapabilityKind: CapabilityScope, UATScope: "skill:list", AgentScopes: []string{"project:read"}, Description: "List skills", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
 
 	{ID: "template.create", Resource: ResourceTemplate, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "template:create", AgentScopes: []string{"project:template:write"}, Description: "Create templates", Enforcement: []string{"pkg/hub/template_handlers.go"}},
 	{ID: "template.read", Resource: ResourceTemplate, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "template:read", AgentScopes: []string{"project:read"}, Description: "Read templates", Enforcement: []string{"pkg/hub/template_handlers.go"}},
@@ -196,6 +209,7 @@ var Registry = []Permission{
 	{ID: "hub.allow_list.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update allow list", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
 	{ID: "hub.project_defaults.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read project defaults", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
 	{ID: "hub.project_defaults.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update project defaults", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "hub.messaging.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update messaging switches", Enforcement: []string{"pkg/hub/route_metadata.go:admin.messaging", "pkg/hub/admin_messaging.go:handleAdminMessaging"}},
 	{ID: "hub.auth_reset.execute", Resource: ResourceHub, Action: ActionExecute, CapabilityKind: CapabilityScope, Description: "Reset all auth", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
 	{ID: "hub.scheduler.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read scheduler", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
 	{ID: "hub.scheduler.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update scheduler", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
@@ -355,9 +369,19 @@ func UATScopeHelp() string {
 func uatScopesForResource(resource string) []string {
 	var out []string
 	for _, permission := range Registry {
-		if permission.Resource == resource && permission.UATScope != "" {
+		if permission.Resource == resource && permission.UATScope != "" && !permission.ExcludeFromManageAlias {
 			out = append(out, permission.UATScope)
 		}
 	}
 	return out
+}
+
+// LegacyUATScopeImplications maps a UAT scope to additional scopes it
+// implicitly carries for tokens minted before a permission split. Before
+// agent.lifecycle existed, start/stop/suspend/restart/restore were enforced
+// through agent.attach, and agent:manage expanded (at mint time) to include
+// agent:attach. Tokens holding agent:attach therefore keep lifecycle authority
+// so that existing CI tokens continue to work (miller79/scion#88).
+var LegacyUATScopeImplications = map[string][]string{
+	"agent:attach": {"agent:lifecycle"},
 }

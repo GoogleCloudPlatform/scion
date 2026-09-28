@@ -72,7 +72,9 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 		// before publish.
 		"handlers_chat_v2.go:sendHumanToHuman:publish": "CreateMessage error triggers early return before publish",
 
-		// sendHumanToHuman: DM notification after successful persist.
+		// sendHumanToHuman: DM notification after successful persist. Also
+		// covers the unreachable-default override (nc-delivery-unreachable
+		// review R1), which shares this call site.
 		"handlers_chat_v2.go:sendHumanToHuman:notify": "CreateMessage error triggers early return before notification dispatch",
 
 		// deliverToUser: CreateMessage error triggers early return.
@@ -85,8 +87,17 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 		// error check.
 		"handlers_broker_inbound.go:handleBrokerInbound": "Publish in else branch of CreateMessage error check",
 
-		// handleAgentOutboundMessage: CreateMessage error triggers early
-		// return before publish.
+		// dispatchRoutedRecipient: publish in else branch of CreateMessage
+		// error check.
+		"handlers_broker_inbound_routed.go:dispatchRoutedRecipient": "Publish in else branch of CreateMessage error check",
+
+		// agent_dm_operation.go:ExecuteAgentDM: the shared agent DM operation
+		// (#1688). CreateMessage error triggers early return before publish.
+		"agent_dm_operation.go:ExecuteAgentDM": "CreateMessage error triggers early return before publish",
+
+		// handleAgentOutboundMessage deliveryUserDirect path: CreateMessage
+		// error triggers early return before publish (only non-broker,
+		// non-agent-DM recipient path remains after #1688 extraction).
 		"handlers_agent_messaging.go:handleAgentOutboundMessage:publish": "CreateMessage error triggers early return before publish",
 
 		// handleAgentOutboundMessage: DM notification after successful
@@ -107,6 +118,17 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 
 		// processMentions: publish inside if persisted block.
 		"handlers_agent_messaging.go:processMentions": "Publish inside if persisted block",
+
+		// applyBrokerMessageFailure (ptone/scion#1866): unlike every other
+		// guarded site, this function never calls CreateMessage — it acts on
+		// a row a prior request already persisted. The row's existence is
+		// confirmed by the GetMessage lookup earlier in the function
+		// (returns false on ErrNotFound/lookup error), and the publish is
+		// reached only after s.markFailed has already written
+		// dispatch_state=failed for that row (also returns false on error).
+		// The publish mirrors that committed write onto the in-memory copy;
+		// it is not gating persistence, persistence already happened.
+		"message_delivery_failures.go:applyBrokerMessageFailure": "Acts on an already-persisted row (confirmed via GetMessage) after markFailed has already committed; publish mirrors the committed write, not a pending one",
 	}
 
 	// Build accounted set from guarded entries.
@@ -304,15 +326,16 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 }
 
 // isPublishUserMessageCall returns true if the call expression is a call to
-// PublishUserMessage with exactly 2 arguments (the event publish signature).
-// The broker proxy's PublishUserMessage takes 4 arguments and is excluded —
-// persistence is handled by its deliverToUser callback, not by the caller.
+// PublishUserMessage with exactly 3 arguments (the event publish signature:
+// ctx, msg, attachments). The broker proxy's PublishUserMessage takes 4
+// arguments and is excluded — persistence is handled by its deliverToUser
+// callback, not by the caller.
 func isPublishUserMessageCall(call *ast.CallExpr) bool {
 	switch fn := call.Fun.(type) {
 	case *ast.SelectorExpr:
-		return fn.Sel.Name == "PublishUserMessage" && len(call.Args) == 2
+		return fn.Sel.Name == "PublishUserMessage" && len(call.Args) == 3
 	case *ast.Ident:
-		return fn.Name == "PublishUserMessage" && len(call.Args) == 2
+		return fn.Name == "PublishUserMessage" && len(call.Args) == 3
 	}
 	return false
 }
@@ -343,6 +366,9 @@ func persistedRowDisambiguationSuffixes(file, fn, target string, idx, total int)
 			return []string{"agent"}
 		}
 		return []string{"user"}
+	case file == "handlers_agent_messaging.go" && fn == "handleAgentOutboundMessage" && target == "publish" && total == 1:
+		// Single non-DM publish path after #1688 refactor.
+		return []string{"publish"}
 	}
 	return nil
 }

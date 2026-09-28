@@ -38,6 +38,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 var (
@@ -57,6 +58,31 @@ Configure the Hub endpoint via:
   - SCION_HUB_ENDPOINT environment variable
   - hub.endpoint in settings.yaml
   - --hub flag on any command`,
+	// Args/Run make this command Runnable so cobra validates subcommand
+	// names: an unrecognized subcommand (e.g. a removed alias) returns an
+	// "unknown command" error instead of silently falling through to this
+	// command's own help with exit status 0.
+	//
+	// A bare "hub" (no subcommand), and "hub help ..." (cobra only
+	// registers a real "help" subcommand on the root command, so under
+	// "hub" it would otherwise hit the same unknown-command path) return
+	// pflag.ErrHelp instead of going through cobra.NoArgs. Cobra's
+	// ExecuteC handles ErrHelp specially: it prints help and returns a nil
+	// error *before* any PersistentPreRunE hook runs. That distinction
+	// matters here because root's PersistentPreRunE requires an active
+	// scion project for "hub" (it's not in the exempt command list), so
+	// letting a bare "hub" fall through to a normal nil return would turn
+	// "scion hub" run outside a project into a "not in a scion project"
+	// error instead of printing help.
+	Args: func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 || args[0] == "help" {
+			return pflag.ErrHelp
+		}
+		return cobra.NoArgs(cmd, args)
+	},
+	// Must be Runnable (any Run/RunE) for the Args validator above to be
+	// evaluated at all; the actual printing happens via the ErrHelp path.
+	Run: func(cmd *cobra.Command, args []string) {},
 }
 
 // hubStatusCmd shows Hub connection status
@@ -306,23 +332,6 @@ func init() {
 	hubProjectsCmd.AddCommand(hubProjectsDeleteCmd)
 	hubProjectsCmd.AddCommand(hubProjectCreateCmd)
 
-	// Hidden aliases for 'groves' for backward compatibility
-	hubGrovesCmd := &cobra.Command{
-		Use:     "groves",
-		Aliases: []string{"grove"},
-		Hidden:  true,
-		Short:   "Alias for 'projects'",
-		RunE:    runHubProjects,
-		Args:    cobra.MaximumNArgs(1),
-	}
-	hubCmd.AddCommand(hubGrovesCmd)
-
-	// Add the same subcommands to the hidden alias
-	hubGrovesInfoCmd := *hubProjectsInfoCmd
-	hubGrovesDeleteCmd := *hubProjectsDeleteCmd
-	hubGrovesCreateCmd := *hubProjectCreateCmd
-	hubGrovesCmd.AddCommand(&hubGrovesInfoCmd, &hubGrovesDeleteCmd, &hubGrovesCreateCmd)
-
 	// Broker subcommands
 	hubBrokersCmd.AddCommand(hubBrokersInfoCmd)
 	hubBrokersCmd.AddCommand(hubBrokersDeleteCmd)
@@ -341,15 +350,6 @@ func init() {
 	hubProjectCreateCmd.Flags().StringVar(&hubProjectCreateName, "name", "", "Human-friendly display name (defaults to repo name)")
 	hubProjectCreateCmd.Flags().StringVar(&hubProjectCreateBranch, "branch", "", "Base branch for the project (defaults to detected default branch, or main)")
 	hubProjectCreateCmd.Flags().BoolVar(&hubOutputJSON, "json", false, "Output in JSON format")
-
-	// Also link flags to the hidden alias subcommands so they work too
-	hubGrovesInfoCmd.Flags().BoolVar(&hubOutputJSON, "json", false, "Output in JSON format")
-	hubGrovesDeleteCmd.Flags().BoolVarP(&autoConfirm, "yes", "y", false, "Skip confirmation prompt")
-	hubGrovesDeleteCmd.Flags().BoolVar(&nonInteractive, "non-interactive", false, "Non-interactive mode: implies --yes, errors on ambiguous prompts")
-	hubGrovesCreateCmd.Flags().StringVar(&hubProjectCreateSlug, "slug", "", "Override the auto-derived slug")
-	hubGrovesCreateCmd.Flags().StringVar(&hubProjectCreateName, "name", "", "Human-friendly display name (defaults to repo name)")
-	hubGrovesCreateCmd.Flags().StringVar(&hubProjectCreateBranch, "branch", "", "Base branch for the project (defaults to detected default branch, or main)")
-	hubGrovesCreateCmd.Flags().BoolVar(&hubOutputJSON, "json", false, "Output in JSON format")
 
 	// Broker subcommand flags
 	hubBrokersInfoCmd.Flags().BoolVar(&hubOutputJSON, "json", false, "Output in JSON format")
@@ -449,6 +449,11 @@ func getAuthInfo(settings *config.Settings, endpoint string) authInfo {
 	// When the endpoint is localhost and dev auth is available, prefer dev auth
 	// over a non-dev agent token — the scion-token may be stale from a previous
 	// remote hub connection while the dev-token was written by the running local server.
+	// Not for hub-managed agents (config.IsHubManagedAgent()): inside a
+	// broker-started container the scion-token is freshly minted for this Hub,
+	// not stale, and dev auth doesn't carry the per-agent identity some
+	// endpoints require — see the comment on createHubClient in
+	// pkg/hubsync/sync.go.
 	if token := readAgentTokenFile(); token != "" {
 		if apiclient.IsDevToken(token) {
 			info.Method = "Agent token (dev)"
@@ -458,7 +463,7 @@ func getAuthInfo(settings *config.Settings, endpoint string) authInfo {
 			info.TokenExpiry = parseJWTExpiry(token)
 			return info
 		}
-		if isLocalhostEndpoint(endpoint) {
+		if isLocalhostEndpoint(endpoint) && !config.IsHubManagedAgent() {
 			if devToken, devSource := apiclient.ResolveDevTokenWithSource(); devToken != "" {
 				util.Debugf("Skipping non-dev agent token from scion-token file; using dev auth (%s) for localhost endpoint", devSource)
 				info.Method = "Dev auth"
@@ -537,7 +542,9 @@ func getHubClient(settings *config.Settings) (hubclient.Client, error) {
 	// Note: hub.token and hub.apiKey are deprecated and no longer used for auth.
 	// Auth priority: OAuth credentials > scion-token file > SCION_AUTH_TOKEN env > SCION_HUB_TOKEN env > auto dev auth.
 	// Exception: for localhost endpoints, dev auth takes priority over non-dev agent tokens
-	// to avoid stale scion-token files from previous remote hub connections.
+	// to avoid stale scion-token files from previous remote hub connections. This exception
+	// is suppressed for hub-managed agents (config.IsHubManagedAgent()) — see the matching
+	// comment on createHubClient in pkg/hubsync/sync.go for why.
 	authConfigured := false
 
 	// Check for OAuth credentials from scion hub auth login
@@ -549,7 +556,7 @@ func getHubClient(settings *config.Settings) (hubclient.Client, error) {
 	// Check for agent auth token from canonical token file, then bootstrap env var
 	if !authConfigured {
 		if token := readAgentTokenFile(); token != "" {
-			if !apiclient.IsDevToken(token) && isLocalhostEndpoint(endpoint) {
+			if !apiclient.IsDevToken(token) && isLocalhostEndpoint(endpoint) && !config.IsHubManagedAgent() {
 				if devToken := apiclient.ResolveDevToken(); devToken != "" {
 					opts = append(opts, hubclient.WithBearerToken(devToken))
 					authConfigured = true
@@ -1197,18 +1204,7 @@ func runHubProjects(cmd *cobra.Command, args []string) error {
 		return runHubProjectsInfo(cmd, args)
 	}
 
-	// Resolve project path to find project settings
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	_, client, err := loadHubClient()
 	if err != nil {
 		return err
 	}
@@ -1524,18 +1520,7 @@ func runHubProjectCreate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Load settings and get Hub client
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	_, client, err := loadHubClient()
 	if err != nil {
 		return err
 	}
@@ -1703,18 +1688,7 @@ func runHubBrokers(cmd *cobra.Command, args []string) error {
 		outputFormat = "json"
 	}
 
-	// Resolve project path to find project settings
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	_, client, err := loadHubClient()
 	if err != nil {
 		return err
 	}
@@ -1927,18 +1901,7 @@ func runHubBrokersDelete(cmd *cobra.Command, args []string) error {
 
 	brokerNameOrID := args[0]
 
-	// Resolve project path to find project settings
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	_, client, err := loadHubClient()
 	if err != nil {
 		return err
 	}
@@ -2255,7 +2218,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 	// Ensure project_id exists
 	projectID := settings.ProjectID
 	if projectID == "" {
-		projectID = config.GenerateProjectIDForDir(filepath.Dir(resolvedPath))
+		projectID = config.GenerateProjectID()
 		if err := config.UpdateSetting(resolvedPath, "project_id", projectID, isGlobal); err != nil {
 			return fmt.Errorf("failed to save project_id: %w", err)
 		}
@@ -2306,7 +2269,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 			if markerID, err := config.ReadProjectID(resolvedPath); err == nil && markerID != "" {
 				projectID = markerID
 			} else {
-				projectID = config.GenerateProjectIDForDir(filepath.Dir(resolvedPath))
+				projectID = config.GenerateProjectID()
 			}
 			if err := config.UpdateSetting(resolvedPath, "project_id", projectID, isGlobal); err != nil {
 				return fmt.Errorf("failed to save project_id: %w", err)

@@ -41,6 +41,20 @@ func TestDMConversationKey_Roundtrip(t *testing.T) {
 	assert.Equal(t, idA, gotIDB) // user's ID comes second
 }
 
+// TestDMConversationKey_Ordering_AgentUser pins the mixed-kind canonical
+// ordering: agent always precedes user in the key.
+//
+// WHY THIS MATTERS: the comparator sorts by the rendered token string
+// (kind+":"+uuid), and "agent:" < "user:" only because 'a' < 'u'. Renaming
+// either kind token — e.g. "agent" → "bot", "user" → "human" — silently
+// flips the canonical order for every mixed-kind pair. Every existing DM key
+// in every deployment becomes underivable from its principals. The keys still
+// parse; they just no longer match what derivation now produces. That is a
+// mass ACL break with no error at the point of change, and it would look
+// like a harmless rename in review.
+//
+// This test, together with the golden vectors below, serves as a tripwire:
+// any rename that changes the sort order turns these tests red.
 func TestDMConversationKey_Ordering_AgentUser(t *testing.T) {
 	userID := uuid.NewString()
 	agentID := uuid.NewString()

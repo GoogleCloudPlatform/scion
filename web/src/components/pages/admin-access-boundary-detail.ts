@@ -43,7 +43,6 @@ import type {
 } from '../../shared/access-boundaries.js';
 import { canAccessBoundary } from '../../shared/access-boundaries.js';
 
-
 // Import sub-components
 import '../shared/access-boundary-status.js';
 import '../shared/access-boundary-impact-summary.js';
@@ -888,8 +887,8 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
           <sl-icon name="shield-lock" style="font-size: 2rem"></sl-icon>
           <h1>Access Constraint Not Found</h1>
           <p>
-            The access constraint "${this.boundaryId}" does not exist or you do not have permission to
-            view it.
+            The access constraint "${this.boundaryId}" does not exist or you do not have permission
+            to view it.
           </p>
           <sl-button variant="primary" @click=${() => navigateTo('/admin/access-boundaries')}>
             Back to inventory

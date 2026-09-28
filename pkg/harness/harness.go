@@ -44,6 +44,28 @@ func newFromEmbedFS(name string) api.Harness {
 	return NewDeclarativeGenericHarness(entry)
 }
 
+// DefaultModelAliases returns the built-in model_aliases map declared in the
+// embedded harnesses/<name>/config.yaml, or nil if the harness is unknown or
+// declares no aliases. This is the source of truth for a harness's size
+// aliases (small/medium/large/extra-large) when no project- or hub-stored
+// harness config is available to resolve them — e.g. for hub-dispatched
+// agents resumed without a local template chain.
+func DefaultModelAliases(harnessName string) map[string]string {
+	data, err := fs.ReadFile(harnessesEmbed.FS, harnessName+"/config.yaml")
+	if err != nil {
+		return nil
+	}
+	entry, err := config.ParseHarnessConfigYAML(data)
+	if err != nil {
+		return nil
+	}
+	// entry is a config.HarnessConfigEntry value (not a pointer), so it can
+	// never be nil here; empty or whitespace-only YAML just yields a
+	// zero-value entry whose ModelAliases map is nil, which callers already
+	// treat as "no aliases".
+	return entry.ModelAliases
+}
+
 // EmbedOnlyHarnesses returns harnesses that use compiled-in Go embeds for
 // seeding. All harnesses have migrated to the harnesses/ directory, so this
 // returns an empty slice.
@@ -62,9 +84,15 @@ func AllHarnessNames() []string {
 	entries, _ := fs.ReadDir(harnessesEmbed.FS, ".")
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
-		if e.IsDir() {
-			names = append(names, e.Name())
+		if !e.IsDir() {
+			continue
 		}
+		// Skip directories without config.yaml — they are not harnesses
+		// (e.g. gen/ is a code generator, not a harness definition).
+		if _, err := fs.Stat(harnessesEmbed.FS, e.Name()+"/config.yaml"); err != nil {
+			continue
+		}
+		names = append(names, e.Name())
 	}
 	sort.Strings(names)
 	return names

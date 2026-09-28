@@ -26,8 +26,6 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import './profile-nav.js';
 import '../shared/header.js';
-import '../shared/debug-panel.js';
-
 import type { User } from '../../shared/types.js';
 import { performLogout } from '../../utils/auth.js';
 import { setDocumentTitle } from '../../client/page-title.js';
@@ -39,6 +37,7 @@ const PROFILE_TITLES: Record<string, string> = {
   '/profile/settings': 'Settings',
   '/profile/tokens': 'Access Tokens',
   '/profile/skills': 'Skills',
+  '/profile/templates': 'Templates',
 };
 
 @customElement('scion-profile-shell')
@@ -191,7 +190,6 @@ export class ScionProfileShell extends LitElement {
         </div>
       </main>
 
-      <scion-debug-panel></scion-debug-panel>
     `;
   }
 

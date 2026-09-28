@@ -69,9 +69,7 @@ function getAlerts(): Element[] {
 
 /** Fire a scion:access-denied event on window and return the detail. */
 function fireAccessDenied(detail: AccessDeniedDetail): AccessDeniedDetail {
-  window.dispatchEvent(
-    new CustomEvent('scion:access-denied', { detail })
-  );
+  window.dispatchEvent(new CustomEvent('scion:access-denied', { detail }));
   return detail;
 }
 
@@ -82,17 +80,11 @@ function fireAccessDenied(detail: AccessDeniedDetail): AccessDeniedDetail {
 describe('app-shell access-denied handler integration', () => {
   beforeEach(() => {
     _resetDedupState();
-    window.addEventListener(
-      'scion:access-denied',
-      appShellHandler as EventListener
-    );
+    window.addEventListener('scion:access-denied', appShellHandler as EventListener);
   });
 
   afterEach(() => {
-    window.removeEventListener(
-      'scion:access-denied',
-      appShellHandler as EventListener
-    );
+    window.removeEventListener('scion:access-denied', appShellHandler as EventListener);
     document.querySelectorAll('sl-alert').forEach((el) => el.remove());
     _resetDedupState();
   });
@@ -108,9 +100,7 @@ describe('app-shell access-denied handler integration', () => {
     expect(alerts.length).toBe(1);
     const spans = alerts[0].querySelectorAll('span');
     expect(spans.length).toBe(2);
-    expect(spans[0].textContent).toBe(
-      "You don't have permission to perform this action."
-    );
+    expect(spans[0].textContent).toBe("You don't have permission to perform this action.");
     expect(spans[1].textContent).toBe('Permission needed: delete on agent');
   });
 
@@ -124,9 +114,7 @@ describe('app-shell access-denied handler integration', () => {
     expect(alerts.length).toBe(1);
     const spans = alerts[0].querySelectorAll('span');
     expect(spans.length).toBe(1);
-    expect(spans[0].textContent).toBe(
-      "You don't have permission to perform this action."
-    );
+    expect(spans[0].textContent).toBe("You don't have permission to perform this action.");
   });
 
   it('renders custom backend reason on first line', () => {
@@ -139,9 +127,7 @@ describe('app-shell access-denied handler integration', () => {
     const alerts = getAlerts();
     expect(alerts.length).toBe(1);
     const spans = alerts[0].querySelectorAll('span');
-    expect(spans[0].textContent).toBe(
-      'Agents can only create sub-agents within their own project'
-    );
+    expect(spans[0].textContent).toBe('Agents can only create sub-agents within their own project');
     expect(spans[1].textContent).toBe('Permission needed: create on agent');
   });
 
@@ -178,17 +164,11 @@ describe('app-shell access-denied handler integration', () => {
 describe('chat-shell access-denied handler integration', () => {
   beforeEach(() => {
     _resetDedupState();
-    window.addEventListener(
-      'scion:access-denied',
-      chatShellHandler as EventListener
-    );
+    window.addEventListener('scion:access-denied', chatShellHandler as EventListener);
   });
 
   afterEach(() => {
-    window.removeEventListener(
-      'scion:access-denied',
-      chatShellHandler as EventListener
-    );
+    window.removeEventListener('scion:access-denied', chatShellHandler as EventListener);
     document.querySelectorAll('sl-alert').forEach((el) => el.remove());
     _resetDedupState();
   });
@@ -204,9 +184,7 @@ describe('chat-shell access-denied handler integration', () => {
     expect(alerts.length).toBe(1);
     const spans = alerts[0].querySelectorAll('span');
     expect(spans.length).toBe(2);
-    expect(spans[0].textContent).toBe(
-      "You don't have permission to perform this action."
-    );
+    expect(spans[0].textContent).toBe("You don't have permission to perform this action.");
     expect(spans[1].textContent).toBe('Permission needed: manage on project');
   });
 
@@ -228,9 +206,7 @@ describe('chat-shell access-denied handler integration', () => {
       resource: 'agent',
     };
     detail._handled = true;
-    window.dispatchEvent(
-      new CustomEvent('scion:access-denied', { detail })
-    );
+    window.dispatchEvent(new CustomEvent('scion:access-denied', { detail }));
 
     // No new alerts created.
     expect(getAlerts().length).toBe(alertsBefore);
@@ -257,25 +233,13 @@ describe('app-shell + chat-shell deduplication', () => {
   beforeEach(() => {
     _resetDedupState();
     // app-shell handler runs first (registered first, like parent element).
-    window.addEventListener(
-      'scion:access-denied',
-      appShellHandler as EventListener
-    );
-    window.addEventListener(
-      'scion:access-denied',
-      chatShellHandler as EventListener
-    );
+    window.addEventListener('scion:access-denied', appShellHandler as EventListener);
+    window.addEventListener('scion:access-denied', chatShellHandler as EventListener);
   });
 
   afterEach(() => {
-    window.removeEventListener(
-      'scion:access-denied',
-      appShellHandler as EventListener
-    );
-    window.removeEventListener(
-      'scion:access-denied',
-      chatShellHandler as EventListener
-    );
+    window.removeEventListener('scion:access-denied', appShellHandler as EventListener);
+    window.removeEventListener('scion:access-denied', chatShellHandler as EventListener);
     document.querySelectorAll('sl-alert').forEach((el) => el.remove());
     _resetDedupState();
   });
@@ -309,17 +273,11 @@ describe('app-shell + chat-shell deduplication', () => {
 describe('user admin denial payloads', () => {
   beforeEach(() => {
     _resetDedupState();
-    window.addEventListener(
-      'scion:access-denied',
-      appShellHandler as EventListener
-    );
+    window.addEventListener('scion:access-denied', appShellHandler as EventListener);
   });
 
   afterEach(() => {
-    window.removeEventListener(
-      'scion:access-denied',
-      appShellHandler as EventListener
-    );
+    window.removeEventListener('scion:access-denied', appShellHandler as EventListener);
     document.querySelectorAll('sl-alert').forEach((el) => el.remove());
     _resetDedupState();
   });
@@ -397,12 +355,8 @@ describe('user admin denial payloads', () => {
     expect(alerts.length).toBe(1);
     const spans = alerts[0].querySelectorAll('span');
     expect(spans.length).toBe(2);
-    expect(spans[0].textContent).toBe(
-      "You don't have permission to perform this action."
-    );
-    expect(spans[1].textContent).toBe(
-      'Permission needed: create on role_binding'
-    );
+    expect(spans[0].textContent).toBe("You don't have permission to perform this action.");
+    expect(spans[1].textContent).toBe('Permission needed: create on role_binding');
   });
 
   it('renders all user admin payloads as safe literal text', () => {
@@ -433,17 +387,11 @@ describe('duplicate-toast suppression', () => {
     _resetDedupState();
     nowMs = 1000;
     dateNowSpy = vi.spyOn(Date, 'now').mockImplementation(() => nowMs);
-    window.addEventListener(
-      'scion:access-denied',
-      appShellHandler as EventListener
-    );
+    window.addEventListener('scion:access-denied', appShellHandler as EventListener);
   });
 
   afterEach(() => {
-    window.removeEventListener(
-      'scion:access-denied',
-      appShellHandler as EventListener
-    );
+    window.removeEventListener('scion:access-denied', appShellHandler as EventListener);
     document.querySelectorAll('sl-alert').forEach((el) => el.remove());
     dateNowSpy.mockRestore();
     _resetDedupState();
@@ -487,11 +435,11 @@ describe('duplicate-toast suppression', () => {
   });
 
   it('suppresses A→B→A interleaved within window', () => {
-    fireAccessDenied({ action: 'read', resource: 'hub' });   // A fires
+    fireAccessDenied({ action: 'read', resource: 'hub' }); // A fires
     nowMs += 100;
     fireAccessDenied({ action: 'update', resource: 'hub' }); // B fires (distinct)
     nowMs += 100;
-    fireAccessDenied({ action: 'read', resource: 'hub' });   // A again at +200ms — suppressed
+    fireAccessDenied({ action: 'read', resource: 'hub' }); // A again at +200ms — suppressed
 
     expect(getAlerts().length).toBe(2);
   });
@@ -535,25 +483,13 @@ describe('dedup with both app-shell and chat-shell mounted', () => {
     _resetDedupState();
     nowMs = 1000;
     dateNowSpy = vi.spyOn(Date, 'now').mockImplementation(() => nowMs);
-    window.addEventListener(
-      'scion:access-denied',
-      appShellHandler as EventListener
-    );
-    window.addEventListener(
-      'scion:access-denied',
-      chatShellHandler as EventListener
-    );
+    window.addEventListener('scion:access-denied', appShellHandler as EventListener);
+    window.addEventListener('scion:access-denied', chatShellHandler as EventListener);
   });
 
   afterEach(() => {
-    window.removeEventListener(
-      'scion:access-denied',
-      appShellHandler as EventListener
-    );
-    window.removeEventListener(
-      'scion:access-denied',
-      chatShellHandler as EventListener
-    );
+    window.removeEventListener('scion:access-denied', appShellHandler as EventListener);
+    window.removeEventListener('scion:access-denied', chatShellHandler as EventListener);
     document.querySelectorAll('sl-alert').forEach((el) => el.remove());
     dateNowSpy.mockRestore();
     _resetDedupState();
@@ -581,11 +517,11 @@ describe('dedup with both app-shell and chat-shell mounted', () => {
   });
 
   it('suppresses A→B→A interleaved with both shells', () => {
-    fireAccessDenied({ action: 'read', resource: 'hub' });   // A fires
+    fireAccessDenied({ action: 'read', resource: 'hub' }); // A fires
     nowMs += 100;
     fireAccessDenied({ action: 'update', resource: 'hub' }); // B fires
     nowMs += 100;
-    fireAccessDenied({ action: 'read', resource: 'hub' });   // A at +200ms — suppressed
+    fireAccessDenied({ action: 'read', resource: 'hub' }); // A at +200ms — suppressed
     expect(getAlerts().length).toBe(2);
   });
 });

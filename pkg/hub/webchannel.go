@@ -22,7 +22,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
 // webChannelBus is a real broker spoke for the "web" channel. It follows the
@@ -135,11 +135,14 @@ func (b *webChannelBus) Publish(ctx context.Context, topic string, msg *messages
 		}
 	}
 
-	// Reply affinity — still needed for cross-channel reply routing.
-	if err := b.store.RecordChannel(ctx, userID, projectID, agentID, "web", time.Now().UTC()); err != nil {
-		b.log.Error("Failed to record conversation context",
-			"user_id", userID, "project_id", projectID, "agent_id", agentID, "error", err)
-		return err
+	// Reply affinity — only record "web" affinity when the message is explicitly tagged
+	// for the web channel (not during untagged fan-out across all broker spokes).
+	if msg.Channel == "web" {
+		if err := b.store.RecordChannel(ctx, userID, projectID, agentID, "web", time.Now().UTC()); err != nil {
+			b.log.Error("Failed to record conversation context",
+				"user_id", userID, "project_id", projectID, "agent_id", agentID, "error", err)
+			return err
+		}
 	}
 
 	return nil
@@ -171,7 +174,7 @@ func identityFromTopic(topic string, msg *messages.StructuredMessage) (userID, p
 	if msg == nil {
 		return "", "", "", false
 	}
-	parsed, err := projectcompat.ParseTopic(topic)
+	parsed, err := projectkeys.ParseTopic(topic)
 	if err != nil {
 		return "", "", "", false
 	}
@@ -179,7 +182,7 @@ func identityFromTopic(topic string, msg *messages.StructuredMessage) (userID, p
 	projectID = parsed.ProjectID
 
 	switch parsed.Kind {
-	case projectcompat.TopicKindUser:
+	case projectkeys.TopicKindUser:
 		// Agent → user message: topic has the user ID, sender is the agent.
 		userID = parsed.Actor
 		if strings.HasPrefix(msg.Sender, "agent:") {
@@ -188,7 +191,7 @@ func identityFromTopic(topic string, msg *messages.StructuredMessage) (userID, p
 				agentID = strings.TrimPrefix(msg.Sender, "agent:")
 			}
 		}
-	case projectcompat.TopicKindAgent:
+	case projectkeys.TopicKindAgent:
 		// User → agent message: topic has the agent slug, recipient is the agent.
 		// Phase 6 fix (O1): prefer msg.RecipientID (UUID) over the slug from
 		// the topic so that both directions use the same identifier form

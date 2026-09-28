@@ -403,7 +403,7 @@ func stopAllAgentsViaHub(hubCtx *HubContext) error {
 		}
 		if removedAny {
 			// Keep sync watermark current after hub-side delete operations.
-			hubsync.UpdateLastSyncedAt(hubCtx.ProjectPath, time.Time{}, hubCtx.IsGlobal)
+			hubsync.UpdateLastSyncedAt(hubCtx.ProjectPath, time.Time{})
 			for _, r := range results {
 				if r.Removed && r.Error == "" {
 					hubsync.RemoveSyncedAgent(hubCtx.ProjectPath, r.Name)
@@ -488,7 +488,7 @@ func stopAgentViaHub(hubCtx *HubContext, agentName string) error {
 		}
 		if hubCtx.ProjectPath != "" {
 			// Keep sync watermark current after hub-side delete operations.
-			hubsync.UpdateLastSyncedAt(hubCtx.ProjectPath, time.Time{}, hubCtx.IsGlobal)
+			hubsync.UpdateLastSyncedAt(hubCtx.ProjectPath, time.Time{})
 			hubsync.RemoveSyncedAgent(hubCtx.ProjectPath, agentName)
 		}
 		if isJSONOutput() {

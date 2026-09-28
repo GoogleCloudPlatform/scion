@@ -42,6 +42,8 @@ type User struct {
 	LastLogin *time.Time `json:"last_login,omitempty"`
 	// LastSeen holds the value of the "last_seen" field.
 	LastSeen *time.Time `json:"last_seen,omitempty"`
+	// Incremented to revoke all sessions for this user
+	SessionGeneration int64 `json:"session_generation,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the UserQuery when eager-loading is set.
 	Edges        UserEdges `json:"edges"`
@@ -56,9 +58,11 @@ type UserEdges struct {
 	Memberships []*GroupMembership `json:"memberships,omitempty"`
 	// PolicyBindings holds the value of the policy_bindings edge.
 	PolicyBindings []*PolicyBinding `json:"policy_bindings,omitempty"`
+	// ExternalIdentities holds the value of the external_identities edge.
+	ExternalIdentities []*ExternalIdentity `json:"external_identities,omitempty"`
 	// loadedTypes holds the information for reporting if a
 	// type was loaded (or requested) in eager-loading or not.
-	loadedTypes [3]bool
+	loadedTypes [4]bool
 }
 
 // OwnedGroupsOrErr returns the OwnedGroups value or an error if the edge
@@ -88,6 +92,15 @@ func (e UserEdges) PolicyBindingsOrErr() ([]*PolicyBinding, error) {
 	return nil, &NotLoadedError{edge: "policy_bindings"}
 }
 
+// ExternalIdentitiesOrErr returns the ExternalIdentities value or an error if the edge
+// was not loaded in eager-loading.
+func (e UserEdges) ExternalIdentitiesOrErr() ([]*ExternalIdentity, error) {
+	if e.loadedTypes[3] {
+		return e.ExternalIdentities, nil
+	}
+	return nil, &NotLoadedError{edge: "external_identities"}
+}
+
 // scanValues returns the types for scanning values from sql.Rows.
 func (*User) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
@@ -95,6 +108,8 @@ func (*User) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case user.FieldPreferences:
 			values[i] = new([]byte)
+		case user.FieldSessionGeneration:
+			values[i] = new(sql.NullInt64)
 		case user.FieldEmail, user.FieldDisplayName, user.FieldAvatarURL, user.FieldRole, user.FieldStatus, user.FieldInvitedBy, user.FieldInviteNote:
 			values[i] = new(sql.NullString)
 		case user.FieldCreated, user.FieldLastLogin, user.FieldLastSeen:
@@ -194,6 +209,12 @@ func (_m *User) assignValues(columns []string, values []any) error {
 				_m.LastSeen = new(time.Time)
 				*_m.LastSeen = value.Time
 			}
+		case user.FieldSessionGeneration:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field session_generation", values[i])
+			} else if value.Valid {
+				_m.SessionGeneration = value.Int64
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -220,6 +241,11 @@ func (_m *User) QueryMemberships() *GroupMembershipQuery {
 // QueryPolicyBindings queries the "policy_bindings" edge of the User entity.
 func (_m *User) QueryPolicyBindings() *PolicyBindingQuery {
 	return NewUserClient(_m.config).QueryPolicyBindings(_m)
+}
+
+// QueryExternalIdentities queries the "external_identities" edge of the User entity.
+func (_m *User) QueryExternalIdentities() *ExternalIdentityQuery {
+	return NewUserClient(_m.config).QueryExternalIdentities(_m)
 }
 
 // Update returns a builder for updating this User.
@@ -285,6 +311,9 @@ func (_m *User) String() string {
 		builder.WriteString("last_seen=")
 		builder.WriteString(v.Format(time.ANSIC))
 	}
+	builder.WriteString(", ")
+	builder.WriteString("session_generation=")
+	builder.WriteString(fmt.Sprintf("%v", _m.SessionGeneration))
 	builder.WriteByte(')')
 	return builder.String()
 }

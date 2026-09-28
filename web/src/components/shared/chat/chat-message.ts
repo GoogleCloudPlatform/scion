@@ -48,6 +48,12 @@ export interface AttachmentRefInfo {
 /** Image MIME types rendered inline. */
 const IMAGE_MIMES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 
+const MESSAGE_TIME_FORMAT = new Intl.DateTimeFormat('en', {
+  hour12: false,
+  hour: '2-digit',
+  minute: '2-digit',
+});
+
 /** Non-`text/*` MIME types whose bytes are still text. */
 const TEXT_MIMES = new Set([
   'application/json',
@@ -139,6 +145,22 @@ interface EntityPattern {
   linkBuilder: (match: RegExpExecArray) => string;
 }
 
+/** Known filenames that should be linked even without a file extension. */
+const EXTENSIONLESS_FILES = new Set([
+  'makefile',
+  'dockerfile',
+  'license',
+  'readme',
+  'changelog',
+  'gemfile',
+  'rakefile',
+  'procfile',
+  'vagrantfile',
+  'justfile',
+  'taskfile',
+  'caddyfile',
+]);
+
 /**
  * Configurable entity patterns for deep-linking. Order matters: the first
  * match wins, so more specific patterns must come before less specific ones.
@@ -154,7 +176,8 @@ const ENTITY_PATTERNS: EntityPattern[] = [
   },
   // Bare UUIDs preceded by "session" (case-insensitive)
   {
-    regex: /\bsession\s+([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\b/gi,
+    regex:
+      /\bsession\s+([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\b/gi,
     linkBuilder: (m) => {
       const uuid = m[1];
       return `session <a class="entity-link" href="/sessions/${encodeURIComponent(uuid)}" title="Open session ${uuid}">${uuid}</a>`;
@@ -170,9 +193,14 @@ const ENTITY_PATTERNS: EntityPattern[] = [
   },
   // File paths: /workspace/... and /scion-volumes/... container paths
   {
-    regex: /(?:\/scion-volumes\/[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*|\/workspace\/(?:\.scion-volumes\/[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*|[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*))/g,
+    regex:
+      /(?:\/scion-volumes\/[a-zA-Z0-9_.-]*[a-zA-Z0-9_-](?:\/[a-zA-Z0-9_.-]*[a-zA-Z0-9_-])*|\/workspace\/(?:\.scion-volumes\/[a-zA-Z0-9_.-]*[a-zA-Z0-9_-](?:\/[a-zA-Z0-9_.-]*[a-zA-Z0-9_-])*|[a-zA-Z0-9_.-]*[a-zA-Z0-9_-](?:\/[a-zA-Z0-9_.-]*[a-zA-Z0-9_-])*))/g,
     linkBuilder: (m) => {
       const path = m[0];
+      const lastSegment = path.split('/').pop() || '';
+      if (!lastSegment.includes('.') && !EXTENSIONLESS_FILES.has(lastSegment.toLowerCase())) {
+        return path;
+      }
       return `<a class="entity-link path-link" data-file-path="${path.replace(/"/g, '&quot;')}" href="javascript:void(0)" title="Open ${path.replace(/"/g, '&quot;')}">${path}</a>`;
     },
   },
@@ -193,7 +221,9 @@ function styleEntityLinksInText(text: string): string {
     // Clone the regex so each call starts from index 0.
     // Ensure the global flag is always set so re.exec() advances lastIndex
     // and cannot loop infinitely on a zero-width or non-advancing match.
-    const flags = pattern.regex.flags.includes('g') ? pattern.regex.flags : pattern.regex.flags + 'g';
+    const flags = pattern.regex.flags.includes('g')
+      ? pattern.regex.flags
+      : pattern.regex.flags + 'g';
     const re = new RegExp(pattern.regex.source, flags);
     let m: RegExpExecArray | null;
     let prevIndex = 0;
@@ -232,7 +262,7 @@ function styleEntityLinksInText(text: string): string {
  * Follows the exact same skip-region approach as `styleMentions()`.
  */
 function styleEntityLinks(htmlStr: string): string {
-  const skip = new RegExp(MENTION_SKIP_REGION, 'gi');
+  const skip = new RegExp(ENTITY_SKIP_REGION, 'gi');
   let out = '';
   let cursor = 0;
   let match: RegExpExecArray | null;
@@ -343,6 +373,17 @@ function formatFileSize(bytes: number): string {
 const MENTION_SKIP_REGION = '<pre\\b[^>]*>[\\s\\S]*?</pre>|<code\\b[^>]*>[\\s\\S]*?</code>|<[^>]+>';
 
 /**
+ * Skip regions for entity-link processing. Like MENTION_SKIP_REGION but
+ * does NOT skip inline <code> spans, so file paths inside backticks
+ * are still auto-linked. Fenced code blocks (<pre>) are still skipped.
+ * Anchor elements (`<a>…</a>`) are skipped in full, including their text
+ * content, so a path already inside a link is never re-wrapped in a nested
+ * `<a>` — the `<a>` pattern must come before the generic `<[^>]+>` pattern
+ * so the full anchor element is consumed first.
+ */
+const ENTITY_SKIP_REGION = '<pre\\b[^>]*>[\\s\\S]*?</pre>|<a\\b[^>]*>[\\s\\S]*?</a>|<[^>]+>';
+
+/**
  * Wrap @mentions in styled, clickable spans.
  *
  * The captured slug is limited to `[\w.-]` so it can never break out of the
@@ -350,7 +391,7 @@ const MENTION_SKIP_REGION = '<pre\\b[^>]*>[\\s\\S]*?</pre>|<code\\b[^>]*>[\\s\\S
  */
 function styleMentionsInText(text: string): string {
   return text.replace(
-    /@([\w.-]+)/g,
+    /@([\w.-]+(?:@[\w.-]+)?)/g,
     '<span class="mention clickable" data-mention="$1">@$1</span>'
   );
 }
@@ -423,10 +464,6 @@ export class ScionChatMessage extends LitElement {
   @property()
   channel = '';
 
-  /** Visibility level: "normal", "verbose", or "full". */
-  @property()
-  visibility = 'normal';
-
   /** Message type (e.g. "assistant-reply", "state-change"). */
   @property()
   messageType = '';
@@ -438,6 +475,15 @@ export class ScionChatMessage extends LitElement {
   /** Reason for dispatch failure. */
   @property()
   dispatchFailureReason = '';
+
+  /**
+   * Machine-readable dispatch failure code, e.g. "agent_unreachable"
+   * (nc-delivery-unreachable). May be empty for history rows sent before this
+   * field existed; renderDeliveryState() falls back to matching the reason
+   * prefix in that case.
+   */
+  @property()
+  dispatchFailureCode = '';
 
   /**
    * True when the DM peer's read watermark has reached this message. Replaces
@@ -461,24 +507,6 @@ export class ScionChatMessage extends LitElement {
   @property({ type: Array })
   attachmentRefs: AttachmentRefInfo[] = [];
 
-  // ---- Phase-3 properties ----
-
-  /** Whether this is the current user's message. */
-  @property({ type: Boolean })
-  isOwn = false;
-
-  /** Whether edit is allowed (no agent in reply chain). */
-  @property({ type: Boolean })
-  canEdit = false;
-
-  /** Whether delete is allowed (no agent in reply chain). */
-  @property({ type: Boolean })
-  canDelete = false;
-
-  /** Message ID for copy-link and event dispatch. */
-  @property()
-  messageId = '';
-
   /** Reply preview data: the message this one is replying to. */
   @property({ type: Object })
   replyPreview: { messageId: string; senderName: string; content: string } | null = null;
@@ -491,12 +519,12 @@ export class ScionChatMessage extends LitElement {
   @property()
   deletedAt = '';
 
+  /** Sender's project slug for cross-project provenance display. */
+  @property()
+  senderProjectSlug = '';
+
   @state()
   private renderedHtml = '';
-
-  /** Whether the action bar is pinned visible (for touch devices). */
-  @state()
-  private actionBarPinned = false;
 
   /** Preview load state per attachment ID. Replaced, never mutated. */
   @state()
@@ -555,7 +583,7 @@ export class ScionChatMessage extends LitElement {
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       font-weight: 700;
       color: #fff;
       flex-shrink: 0;
@@ -583,28 +611,38 @@ export class ScionChatMessage extends LitElement {
     }
 
     .sender-name {
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       font-weight: 600;
       color: var(--scion-text, #1e293b);
     }
 
     .msg-time {
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       color: var(--scion-text-muted, #64748b);
       white-space: nowrap;
     }
 
     .routed-to {
       color: var(--scion-text-muted, #64748b);
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       font-weight: 400;
+    }
+
+    .cross-project-label {
+      font-size: var(--chat-fs-sm);
+      font-weight: 400;
+      color: var(--sl-color-success-700, #15803d);
+      background: var(--sl-color-success-50, #f0fdf4);
+      padding: 0 0.375rem;
+      border-radius: 0.25rem;
+      white-space: nowrap;
     }
 
     .bubble-content {
       padding: 0.5rem 0.75rem;
       border-radius: 0.75rem;
       line-height: 1.5;
-      font-size: 0.875rem;
+      font-size: var(--chat-fs-lg);
       word-break: break-word;
     }
 
@@ -621,7 +659,7 @@ export class ScionChatMessage extends LitElement {
     }
 
     .from-user .bubble-header {
-      flex-direction: row-reverse;
+      justify-content: flex-end;
     }
 
     /* Pre-formatted (plain) text */
@@ -659,13 +697,13 @@ export class ScionChatMessage extends LitElement {
     }
 
     .md-content h1 {
-      font-size: 1.25rem;
+      font-size: var(--chat-fs-4xl);
     }
     .md-content h2 {
-      font-size: 1.125rem;
+      font-size: var(--chat-fs-3xl);
     }
     .md-content h3 {
-      font-size: 1rem;
+      font-size: var(--chat-fs-2xl);
     }
 
     .md-content a {
@@ -700,7 +738,7 @@ export class ScionChatMessage extends LitElement {
       background: none;
       border: none;
       padding: 0;
-      font-size: 0.8125rem;
+      font-size: var(--chat-fs-md);
     }
 
     /* Syntax-highlighted code blocks (#1049) */
@@ -718,9 +756,9 @@ export class ScionChatMessage extends LitElement {
       top: 0.375rem;
       right: 0.375rem;
       padding: 0.125rem 0.5rem;
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       font-family: inherit;
-      line-height: 1.25rem;
+      line-height: var(--chat-lh-tight);
       border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: 0.25rem;
       background: var(--scion-bg-subtle, #f1f5f9);
@@ -777,7 +815,7 @@ export class ScionChatMessage extends LitElement {
       border-collapse: collapse;
       width: 100%;
       margin: 0.5em 0;
-      font-size: 0.8125rem;
+      font-size: var(--chat-fs-md);
     }
 
     .md-content th,
@@ -803,11 +841,11 @@ export class ScionChatMessage extends LitElement {
       display: inline-block;
       padding: 0 0.375rem;
       border-radius: 0.25rem;
-      font-size: 0.625rem;
+      font-size: var(--chat-fs-xs);
       font-weight: 600;
       text-transform: uppercase;
       letter-spacing: 0.03em;
-      line-height: 1.25rem;
+      line-height: var(--chat-lh-tight);
     }
 
     .badge-urgent {
@@ -841,13 +879,13 @@ export class ScionChatMessage extends LitElement {
       background: var(--scion-bg-subtle, #f1f5f9);
       border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: 0.375rem;
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       color: var(--scion-text-muted, #64748b);
       cursor: default;
     }
 
     .attachment-chip sl-icon {
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
     }
 
     /* W7: Inline image attachments */
@@ -892,7 +930,7 @@ export class ScionChatMessage extends LitElement {
 
     .image-actions sl-icon-button::part(base) {
       padding: 0.25rem;
-      font-size: 0.875rem;
+      font-size: var(--chat-fs-lg);
       color: #ffffff;
     }
 
@@ -939,7 +977,7 @@ export class ScionChatMessage extends LitElement {
       background: var(--scion-bg-subtle, #f1f5f9);
       border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: 0.5rem;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-text, #1e293b);
       cursor: pointer;
       text-decoration: none;
@@ -951,7 +989,7 @@ export class ScionChatMessage extends LitElement {
     }
 
     .download-chip sl-icon {
-      font-size: 0.875rem;
+      font-size: var(--chat-fs-lg);
       color: var(--scion-primary, #3b82f6);
     }
 
@@ -965,7 +1003,7 @@ export class ScionChatMessage extends LitElement {
 
     .download-chip .file-size {
       color: var(--scion-text-muted, #64748b);
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
     }
 
     /* Inline code/text previews for non-image attachments */
@@ -990,7 +1028,7 @@ export class ScionChatMessage extends LitElement {
       flex: 1;
       min-width: 0;
       font-family: var(--scion-font-mono, 'SF Mono', 'Fira Code', monospace);
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-text, #1e293b);
       overflow: hidden;
       text-overflow: ellipsis;
@@ -998,7 +1036,7 @@ export class ScionChatMessage extends LitElement {
     }
 
     .preview-size {
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       color: var(--scion-text-muted, #64748b);
       white-space: nowrap;
     }
@@ -1010,7 +1048,7 @@ export class ScionChatMessage extends LitElement {
 
     .preview-actions sl-icon-button::part(base) {
       padding: 0.25rem;
-      font-size: 0.875rem;
+      font-size: var(--chat-fs-lg);
       color: var(--scion-text-muted, #64748b);
     }
 
@@ -1058,12 +1096,12 @@ export class ScionChatMessage extends LitElement {
       align-items: center;
       gap: 0.5rem;
       padding: 0.75rem;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-text-muted, #64748b);
     }
 
     .preview-placeholder sl-spinner {
-      font-size: 0.875rem;
+      font-size: var(--chat-fs-lg);
     }
 
     .preview-placeholder.error {
@@ -1098,7 +1136,7 @@ export class ScionChatMessage extends LitElement {
       padding: 0.25rem 0.75rem;
       border-radius: 0;
       color: var(--scion-text-muted, #64748b);
-      font-size: 0.8125rem;
+      font-size: var(--chat-fs-md);
       font-style: italic;
     }
 
@@ -1106,7 +1144,7 @@ export class ScionChatMessage extends LitElement {
       display: inline-flex;
       align-items: center;
       gap: 0.25rem;
-      font-size: 0.625rem;
+      font-size: var(--chat-fs-xs);
       font-weight: 500;
       color: var(--scion-text-muted, #94a3b8);
       text-transform: uppercase;
@@ -1115,7 +1153,7 @@ export class ScionChatMessage extends LitElement {
     }
 
     .verbose-label sl-icon {
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
     }
 
     /* Full/trace rendering — collapsed details block */
@@ -1132,7 +1170,7 @@ export class ScionChatMessage extends LitElement {
 
     .trace-block summary {
       padding: 0.375rem 0.75rem;
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       font-weight: 500;
       color: var(--scion-text-muted, #64748b);
       cursor: pointer;
@@ -1143,12 +1181,12 @@ export class ScionChatMessage extends LitElement {
     }
 
     .trace-block summary sl-icon {
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
     }
 
     .trace-content {
       padding: 0.5rem 0.75rem;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-text-muted, #64748b);
       border-top: 1px solid var(--scion-border, #e2e8f0);
       white-space: pre-wrap;
@@ -1163,12 +1201,12 @@ export class ScionChatMessage extends LitElement {
       align-items: center;
       gap: 0.25rem;
       margin-top: 0.125rem;
-      font-size: 0.625rem;
+      font-size: var(--chat-fs-xs);
       color: var(--scion-text-muted, #94a3b8);
     }
 
     .delivery-state sl-icon {
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
     }
 
     .delivery-state.pending sl-icon {
@@ -1202,11 +1240,13 @@ export class ScionChatMessage extends LitElement {
       border-radius: 0.375rem;
       background: var(--scion-surface-100, #f1f5f9);
       border: 1px solid var(--scion-neutral-200, #e2e8f0);
-      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
       opacity: 0;
       visibility: hidden;
       pointer-events: none;
-      transition: opacity 0.15s ease, visibility 0.15s ease;
+      transition:
+        opacity 0.15s ease,
+        visibility 0.15s ease;
       z-index: 10;
     }
 
@@ -1233,7 +1273,7 @@ export class ScionChatMessage extends LitElement {
 
     .message-actions sl-icon-button::part(base) {
       padding: 0.25rem;
-      font-size: 0.875rem;
+      font-size: var(--chat-fs-lg);
       color: var(--scion-neutral-600, #475569);
     }
 
@@ -1252,7 +1292,7 @@ export class ScionChatMessage extends LitElement {
       background: var(--scion-surface-50, #f8fafc);
       border-radius: 0 0.25rem 0.25rem 0;
       cursor: pointer;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-neutral-500, #64748b);
       max-width: 100%;
       overflow: hidden;
@@ -1282,7 +1322,7 @@ export class ScionChatMessage extends LitElement {
 
     /* ---- Phase-3: Edited label ---- */
     .edited-label {
-      font-size: 0.625rem;
+      font-size: var(--chat-fs-xs);
       color: var(--scion-neutral-400, #94a3b8);
       margin-left: 0.25rem;
     }
@@ -1314,7 +1354,7 @@ export class ScionChatMessage extends LitElement {
     /* ---- Rich output: diff blocks (#1060) ---- */
     .diff-block {
       font-family: var(--scion-font-mono, 'SF Mono', 'Fira Code', monospace);
-      font-size: 0.8125rem;
+      font-size: var(--chat-fs-md);
       line-height: 1.5;
       background: var(--scion-bg-subtle, #f1f5f9);
       border: 1px solid var(--scion-border, #e2e8f0);
@@ -1376,7 +1416,7 @@ export class ScionChatMessage extends LitElement {
       border-radius: 0 0 0.375rem 0.375rem;
       background: var(--scion-bg-subtle, #f1f5f9);
       color: var(--sl-color-primary-600, #2563eb);
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       font-family: inherit;
       cursor: pointer;
       text-align: center;
@@ -1389,7 +1429,7 @@ export class ScionChatMessage extends LitElement {
     /* ---- Rich output: test results (#1060) ---- */
     .test-results {
       font-family: var(--scion-font-mono, 'SF Mono', 'Fira Code', monospace);
-      font-size: 0.8125rem;
+      font-size: var(--chat-fs-md);
       line-height: 1.5;
       background: var(--scion-bg-subtle, #f1f5f9);
       border: 1px solid var(--scion-border, #e2e8f0);
@@ -1431,11 +1471,6 @@ export class ScionChatMessage extends LitElement {
     this.previewObserver?.disconnect();
     this.previewObserver = null;
     this.observedPreviews = new WeakSet();
-    // Clean up touch long-press timer to prevent leaks on disconnect.
-    if (this.touchTimer) {
-      clearTimeout(this.touchTimer);
-      this.touchTimer = null;
-    }
   }
 
   override updated(changed: Map<string, unknown>): void {
@@ -1565,7 +1600,9 @@ export class ScionChatMessage extends LitElement {
       pre.setAttribute('data-highlighted', 'true');
 
       // Create a readonly code editor and replace the <pre> in-place.
-      const editor = document.createElement('scion-code-editor') as import('../code-editor.js').ScionCodeEditor;
+      const editor = document.createElement(
+        'scion-code-editor'
+      ) as import('../code-editor.js').ScionCodeEditor;
       editor.content = content;
       editor.language = language;
       editor.readonly = true;
@@ -1593,7 +1630,8 @@ export class ScionChatMessage extends LitElement {
       // Heuristic: require a ---/+++ header pair or @@ hunk headers to
       // avoid false-positives on YAML lists, markdown checklists, and
       // code with @ decorators.
-      const hasHeaders = lines.some((l) => l.startsWith('--- ')) && lines.some((l) => l.startsWith('+++ '));
+      const hasHeaders =
+        lines.some((l) => l.startsWith('--- ')) && lines.some((l) => l.startsWith('+++ '));
       const hasHunks = lines.some((l) => l.startsWith('@@ '));
       const diffLineCount = lines.filter((l) => /^[-+@]/.test(l)).length;
       const looksLikeDiff = hasHeaders || (hasHunks && diffLineCount >= 3);
@@ -1686,9 +1724,8 @@ export class ScionChatMessage extends LitElement {
 
       // Heuristic: test output if it contains PASS/FAIL/ok lines that look
       // like Go test output or a generic "Tests:" summary line.
-      const testIndicators = lines.filter(
-        (l) =>
-          /^(ok\s|PASS|FAIL|--- PASS|--- FAIL|Tests:)/.test(l.trimStart())
+      const testIndicators = lines.filter((l) =>
+        /^(ok\s|PASS|FAIL|--- PASS|--- FAIL|Tests:)/.test(l.trimStart())
       ).length;
       if (testIndicators < 2) return;
 
@@ -1794,51 +1831,6 @@ export class ScionChatMessage extends LitElement {
     );
   }
 
-  // ---- Phase-3: Action bar and event helpers ----
-
-  /** Render the hover action bar with contextual actions. */
-  private renderActionBar() {
-    const pinnedClass = this.actionBarPinned ? ' pinned' : '';
-    return html`
-      <div class="message-actions${pinnedClass}">
-        <sl-icon-button
-          name="reply"
-          label="Reply"
-          title="Reply"
-          @click=${this.handleReply}
-        ></sl-icon-button>
-        ${this.isOwn && this.canEdit
-          ? html`<sl-icon-button
-              name="pencil"
-              label="Edit"
-              title="Edit"
-              @click=${this.handleEdit}
-            ></sl-icon-button>`
-          : nothing}
-        ${this.isOwn && this.canDelete
-          ? html`<sl-icon-button
-              name="trash"
-              label="Delete"
-              title="Delete"
-              @click=${this.handleDelete}
-            ></sl-icon-button>`
-          : nothing}
-        <sl-icon-button
-          name="clipboard"
-          label="Copy text"
-          title="Copy message"
-          @click=${this.handleCopyText}
-        ></sl-icon-button>
-        <sl-icon-button
-          name="link-45deg"
-          label="Copy link"
-          title="Copy link"
-          @click=${this.handleCopyLink}
-        ></sl-icon-button>
-      </div>
-    `;
-  }
-
   /** Render the reply preview block above the bubble content. */
   private renderReplyPreview() {
     if (!this.replyPreview) return nothing;
@@ -1851,59 +1843,6 @@ export class ScionChatMessage extends LitElement {
     `;
   }
 
-  private handleReply() {
-    this.dispatchEvent(
-      new CustomEvent('message-reply', {
-        bubbles: true,
-        composed: true,
-        detail: {
-          messageId: this.messageId,
-          senderName: this.senderName || this.sender,
-          content: this.body,
-        },
-      })
-    );
-  }
-
-  private handleEdit() {
-    this.dispatchEvent(
-      new CustomEvent('message-edit', {
-        bubbles: true,
-        composed: true,
-        detail: {
-          messageId: this.messageId,
-          content: this.body,
-        },
-      })
-    );
-  }
-
-  private handleDelete() {
-    this.dispatchEvent(
-      new CustomEvent('message-delete', {
-        bubbles: true,
-        composed: true,
-        detail: { messageId: this.messageId },
-      })
-    );
-  }
-
-  private handleCopyText() {
-    navigator.clipboard.writeText(this.body).catch(() => {
-      // Fallback: ignore clipboard failure silently.
-    });
-  }
-
-  private handleCopyLink() {
-    this.dispatchEvent(
-      new CustomEvent('message-copy-link', {
-        bubbles: true,
-        composed: true,
-        detail: { messageId: this.messageId },
-      })
-    );
-  }
-
   private handleScrollToMessage(messageId: string) {
     this.dispatchEvent(
       new CustomEvent('scroll-to-message', {
@@ -1914,44 +1853,13 @@ export class ScionChatMessage extends LitElement {
     );
   }
 
-  /** Touch handler for long-press to toggle action bar on mobile. */
-  private touchTimer: ReturnType<typeof setTimeout> | null = null;
-
-  private handleTouchStart() {
-    this.touchTimer = setTimeout(() => {
-      this.actionBarPinned = !this.actionBarPinned;
-    }, 500);
-
-    const clearTimer = () => {
-      if (this.touchTimer) {
-        clearTimeout(this.touchTimer);
-        this.touchTimer = null;
-      }
-      window.removeEventListener('touchend', clearTimer);
-      window.removeEventListener('touchmove', clearTimer);
-      window.removeEventListener('touchcancel', clearTimer);
-    };
-    window.addEventListener('touchend', clearTimer, { once: true });
-    window.addEventListener('touchmove', clearTimer, { once: true });
-    window.addEventListener('touchcancel', clearTimer, { once: true });
-  }
-
   override render() {
-    // Full/trace messages render as a collapsed details block.
-    if (this.visibility === 'full') {
-      return this.renderTraceBlock();
-    }
-
     const dirClass = this.fromAgent ? 'from-agent' : 'from-user';
-    const visClass = this.visibility === 'verbose' ? ' verbose' : '';
     const groupClass = !this.showHeader ? ' grouped' : '';
     const isDeleted = !!this.deletedAt;
 
     return html`
-      <div
-        class="message-wrapper ${dirClass}${visClass}${groupClass}"
-        @touchstart=${this.handleTouchStart}
-      >
+      <div class="message-wrapper ${dirClass}${groupClass}">
         ${this.showHeader && this.fromAgent
           ? html`<div class="avatar" style="background: ${this.getAvatarColor()}">
               ${this.getInitials()}
@@ -1960,19 +1868,13 @@ export class ScionChatMessage extends LitElement {
             ? html`<div class="avatar-spacer"></div>`
             : nothing}
         <div class="bubble">
-          ${!isDeleted ? this.renderActionBar() : nothing}
-          ${this.visibility === 'verbose'
-            ? html`
-                <span class="verbose-label">
-                  <sl-icon name="arrow-return-right"></sl-icon>
-                  assistant reply
-                </span>
-              `
-            : nothing}
-          ${this.showHeader && this.fromAgent && this.visibility !== 'verbose'
+          ${this.showHeader && this.fromAgent
             ? html`
                 <div class="bubble-header">
                   <span class="sender-name">${this.senderName || this.sender}</span>
+                  ${this.senderProjectSlug
+                    ? html`<span class="cross-project-label">${this.senderProjectSlug}</span>`
+                    : nothing}
                   ${this.routedTo
                     ? html`<span class="routed-to"> &rarr; ${this.routedTo}</span>`
                     : nothing}
@@ -1985,6 +1887,9 @@ export class ScionChatMessage extends LitElement {
             ? html`
                 <div class="bubble-header">
                   <span class="sender-name">${this.senderName || this.sender}</span>
+                  ${this.senderProjectSlug
+                    ? html`<span class="cross-project-label">${this.senderProjectSlug}</span>`
+                    : nothing}
                   <span class="routed-to"> &rarr; ${this.routedTo}</span>
                   <span class="msg-time">${this.formatTime()}</span>
                   ${this.editedAt ? html`<span class="edited-label">(edited)</span>` : nothing}
@@ -1993,29 +1898,16 @@ export class ScionChatMessage extends LitElement {
             : nothing}
           ${this.replyPreview ? this.renderReplyPreview() : nothing}
           ${isDeleted
-            ? html`<div class="bubble-content"><span class="deleted-message">This message was deleted</span></div>`
+            ? html`<div class="bubble-content">
+                <span class="deleted-message">This message was deleted</span>
+              </div>`
             : html`<div class="bubble-content">${this.renderBody()}</div>`}
-          ${isDeleted ? nothing : this.renderDeliveryState()}
-          ${isDeleted ? nothing : this.renderBadges()}
           ${isDeleted ? nothing : this.renderAttachments()}
+          ${isDeleted ? nothing : this.renderBadges()}
+          ${isDeleted ? nothing : this.renderDeliveryState()}
         </div>
       </div>
       ${this.renderFullPreview()}
-    `;
-  }
-
-  /** Render a collapsed trace block for full-visibility messages. */
-  private renderTraceBlock() {
-    return html`
-      <div class="trace-block">
-        <details>
-          <summary>
-            <sl-icon name="code-slash"></sl-icon>
-            Trace — ${this.sender} at ${this.formatTime()}
-          </summary>
-          <div class="trace-content">${this.body}</div>
-        </details>
-      </div>
     `;
   }
 
@@ -2046,15 +1938,23 @@ export class ScionChatMessage extends LitElement {
                 Delivered
               </div>
             `;
-      case 'failed':
+      case 'failed': {
+        // nc-delivery-unreachable: distinguish "the agent can't receive this
+        // at all" from a generic dispatch failure. Prefer the machine-readable
+        // code; history rows sent before that field existed fall back to
+        // matching the reason prefix.
+        const isUnreachable =
+          this.dispatchFailureCode === 'agent_unreachable' ||
+          (!this.dispatchFailureCode && this.dispatchFailureReason.startsWith('Agent unreachable'));
         return html`
           <sl-tooltip content=${this.dispatchFailureReason || 'Delivery failed'} hoist>
             <div class="delivery-state failed">
               <sl-icon name="exclamation-triangle"></sl-icon>
-              Failed
+              ${isUnreachable ? 'Agent unreachable' : 'Failed'}
             </div>
           </sl-tooltip>
         `;
+      }
       default:
         return nothing;
     }
@@ -2390,11 +2290,7 @@ export class ScionChatMessage extends LitElement {
     if (!this.timestamp) return '';
     try {
       const d = new Date(this.timestamp);
-      return d.toLocaleTimeString('en', {
-        hour12: false,
-        hour: '2-digit',
-        minute: '2-digit',
-      });
+      return Number.isNaN(d.getTime()) ? 'Invalid Date' : MESSAGE_TIME_FORMAT.format(d);
     } catch {
       return '';
     }

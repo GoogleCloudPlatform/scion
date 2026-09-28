@@ -90,9 +90,11 @@ OpenCode supports two authentication methods (auto-detected in this order):
 - **Model Resolution**: Supports model selection via the `SCION_MODEL` environment variable. When `ctx.model_resolution` is empty, the provisioning script automatically falls back to `SCION_MODEL` to resolve and configure the underlying model.
 - **Catalog Pre-fetch**: The provisioner automatically pre-fetches the `models.dev` catalog to ensure fresh model data is available before startup.
 
+### Hooks
+OpenCode communicates lifecycle events to the Scion Hub via a **hook bridge plugin**. The hook bridge translates OpenCode events into standard Scion lifecycle signals using the `opencode` hook dialect, enabling status reporting, activity tracking, and notification dispatch.
+
 ### Known Limitations
 - **Auth File Copy**: The `auth.json` file is copied only when the agent is **created**. If you update your host credentials, you may need to manually update the file in the agent or recreate the agent.
-- **No Hook support**: OpenCode does not have analogous hook support, and so will require use of plugin system to notify the scion orchestrator.
 
 ---
 
@@ -111,6 +113,18 @@ Codex supports two authentication methods (auto-detected in this order):
 - **Resume Support**: Automatically uses the `resume` positional argument to continue existing sessions.
 - **Notify Bridge**: Scion configures `notify = "sh ~/.codex/scion_notify.sh"` so Codex notify payloads can drive Scion state updates.
 - **OpenTelemetry**: When telemetry is enabled, Scion performs telemetry reconciliation at start to ensure consistent OTLP export (default `localhost:4317`).
+
+### Reasoning Effort (Thinking Level)
+When `SCION_THINKING_LEVEL` is set (a value from 0–100, provided via `--thinking-level` on `scion start` or via Hub agent defaults), the Codex provisioner maps it to the `model_reasoning_effort` key in `~/.codex/config.toml` using four quartile buckets:
+
+| Thinking Level | Reasoning Effort |
+| :--- | :--- |
+| 0–25 | `low` |
+| 26–50 | `medium` |
+| 51–75 | `high` |
+| 76–100 | `xhigh` |
+
+Values outside the 0–100 range are clamped to the nearest boundary.
 
 ### Known Limitations
 - **Auth File Copy**: The `auth.json` file is only copied when the agent is **created**.
@@ -144,10 +158,12 @@ An active GitHub Copilot subscription is required at runtime.
 - **Instructions**: `agent_instructions` and `system_prompt` are projected into `.github/copilot-instructions.md`. Copilot has no native system-prompt flag, so the system prompt is *prepended to the instructions file*.
 - **MCP**: `~/.copilot/mcp-config.json`. Project-scoped MCP servers are not supported (they are demoted to global).
 - **Model aliases**: `small` → `claude-haiku-4.5`, `medium` → `claude-sonnet-4.5`, `large` → `claude-opus-4.8`.
+- **OpenTelemetry**: When telemetry is enabled, Scion sets `COPILOT_OTEL_ENABLED`, `COPILOT_OTEL_EXPORTER_TYPE=otlp-http`, and standard `OTEL_*` env vars that always point at sciontool's local OTLP/HTTP receiver (port `4318`), so Copilot's logs are redacted and identity-stamped like any other harness's. For local debugging only, `SCION_COPILOT_OTEL_ENDPOINT` overrides the endpoint. It bypasses sciontool's redaction and identity stamping, so never point it at anything but a local collector.
 
 ### Known Limitations
 - **System Prompt**: approximated via the instructions file (no native override).
-- **No hooks / no OpenTelemetry**: Copilot exposes no hook dialect or telemetry surface.
+- **No hooks**: Copilot exposes no hook dialect.
+- **Native metrics on GCP**: Copilot's raw native metrics (such as `gen_ai.client.token.usage`) are rejected by the GCP telemetry provider. Logs are forwarded normally.
 - **No project-scoped MCP**.
 - **OAuth/Vertex AI**: not supported — Copilot uses GitHub auth only.
 
@@ -200,7 +216,7 @@ a containerized workspace agent; choose the managed agent for repo-less, broker-
 ### Authentication
 Antigravity supports three authentication methods, evaluated in priority order (`vertex-ai` > `oauth-token` > `api-key`):
 
-- **Vertex AI** (`vertex-ai`): Google Cloud's Vertex AI mode using Google Cloud Application Default Credentials (ADC) plus `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION` (or `GOOGLE_CLOUD_REGION`). This mode no longer requires `AGY_TOKEN`. It uses the `gcloud-adc` file secret or automatically resolves ADC via the assigned GCP Service Account (Hub-managed GCP Identity). Requires AGY CLI >= 1.1.10.
+- **Vertex AI** (`vertex-ai`): Google Cloud's Vertex AI mode using Google Cloud Application Default Credentials (ADC) plus `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION` (or `GOOGLE_CLOUD_REGION`). This mode no longer requires `AGY_TOKEN`. It uses the `gcloud-adc` file secret or automatically resolves ADC via the agent's GCP identity from the metadata server. When no auth file or env credential is present and the agent has a metadata-server service account (for example through the [hub-default GCP identity](/scion/hosted/ha/permissions/#hub-default-gcp-identity)), `vertex-ai` is selected automatically, with no ADC file needed. Requires AGY CLI >= 1.1.10.
 - **OAuth token** (`oauth-token`): Provide a JSON file secret named `AGY_TOKEN` containing a `refresh_token`. Scion stages it at `~/.gemini/antigravity-cli/antigravity-oauth-token` and injects it into the container's gnome-keyring at launch.
 - **API Key** (`api-key`): The lowest-priority fallback method. Accepts either the `GEMINI_API_KEY` or `GOOGLE_API_KEY` environment secret. The provisioner will automatically set `modelProvider` to `Gemini` in the agent's `settings.json` and authenticate using this key.
 
@@ -240,6 +256,14 @@ global endpoint). The provisioner writes `[auth_provider]` and `[model]` entries
 `~/.grok/config.toml` using `gcloud auth print-access-token` for on-demand token refresh.
 Application Default Credentials (ADC) are placed automatically when staged.
 
+:::note[Vertex AI API backend]
+When using the Vertex AI auth method, the provisioner automatically configures grok to use the
+**Chat Completions API backend** (`api_backend = "chat_completions"`) and disables backend search
+(`supports_backend_search = false`). This is required because the Vertex AI Model Garden does not
+return complete usage metadata under the Responses API, and the `x_search` hosted tool is not
+available through Vertex AI.
+:::
+
 If no credentials are found, the agent drops to a shell — run `grok login --device-auth`
 interactively, then capture the credential with the container's `capture_auth.py`
 (see [Harness Authentication](/scion/local/agent-credentials/#capturing-credentials-from-a-running-agent)).
@@ -255,12 +279,13 @@ interactively, then capture the credential with the container's `capture_auth.py
 - **Instructions**: `agent_instructions` are projected into `~/.grok/AGENTS.md`.
 - **System Prompt**: Supported natively via the `--system-prompt-override` flag during launch.
 - **MCP**: `~/.grok/config.toml` under `[mcp_servers.*]` TOML sections (supports `stdio`, `sse`, and `streamable-http` transports). Project-scoped MCP servers are not supported (demoted to global).
-- **Model aliases**: `small` → `grok-3-mini`, `medium` → `grok-3`, `large` → `grok-4.5`, `extra-large` → `grok-4.6` (resolved and injected via `GROK_DEFAULT_MODEL`).
+- **Model aliases**: `small` → `grok-3-mini`, `medium` → `grok-4.5`, `large` → `grok-4.6`, `extra-large` → `grok-4.6` (resolved and injected via `GROK_DEFAULT_MODEL`).
 - **Hooks**: 15 Grok lifecycle event hooks are wired to sciontool via `~/.grok/hooks/scion.json` using the `grok-build` dialect, including `PermissionDenied`, `SubagentStart`, `PreCompact`, and `PostCompact`.
-- **OpenTelemetry**: When telemetry is enabled, Scion injects `GROK_TELEMETRY_ENABLED`, `GROK_EXTERNAL_OTEL`, and standard `OTEL_*` env vars pointing at sciontool's local OTLP receiver.
+- **OpenTelemetry**: When telemetry is enabled, Scion injects `GROK_TELEMETRY_ENABLED`, `GROK_EXTERNAL_OTEL`, and standard `OTEL_*` env vars that always point at sciontool's local OTLP gRPC receiver (port `4317`), never directly at the cloud endpoint. For local debugging only, `SCION_GROK_BUILD_OTEL_ENDPOINT` overrides the endpoint and bypasses sciontool's redaction and identity stamping.
 
 ### Known Limitations
 - **No max_model_calls** — Grok hooks do not expose model-call start/end events. `max_turns` and `max_duration` are supported.
+- **No backend search** — The `x_search` hosted tool is disabled globally via `--disallowed-tools` to ensure compatibility across all auth modes (including Vertex AI, which does not support it).
 - **No project-scoped MCP**.
 - **OAuth**: not supported — Grok uses xAI auth only.
 
@@ -311,9 +336,9 @@ The following table summarizes the capabilities supported by each agent harness 
 | **Interject** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Interrupt Key | C-c | C-c | Esc / C-c | C-c | C-c | C-c | C-c | C-c | Esc |
 | **Enqueue** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Hooks** | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
-| Support | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
-| **OpenTelemetry** | ✅ | ✅  | ❌ | ✅  | ❌ | ❌ | ❌ | ✅ | ❌ |
+| **Hooks** | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
+| Support | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
+| **OpenTelemetry** | ✅ | ✅  | ❌ | ✅  | ✅ | ❌ | ❌ | ✅ | ❌ |
 | **System Prompt Override** | ✅ | ✅ | ❌ | ❌ | ◐ | ◐ | ◐ | ✅ | ◐ |
 | **Auth: API Key** | ✅ | ✅ | ✅ | ✅ | ✅¹ | ✅ | ❌ | ✅ | ✅ |
 | **Auth: OAuth Token** | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |

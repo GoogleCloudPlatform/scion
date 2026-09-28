@@ -9,7 +9,7 @@ The Hub is the authoritative **Skill Registry** for the Skill Bank: it stores pu
 
 The Hub persists two record types:
 
-- **Skill** — the logical skill: `name`, `slug`, `description`, `tags`, `scope` (`core`, `global`, `project`, `user`) and optional `scope_id`, `visibility`, ownership, and `status` (`active` or `archived`). Skills are unique per `(slug, scope, scope_id)`.
+- **Skill** — the logical skill: `name`, `slug`, `description`, `tags`, `scope` (`core`, `global`, `project`, `user`) and optional `scope_id`, ownership, and `status` (`active` or `archived`). Skills are unique per `(slug, scope, scope_id)`.
 - **SkillVersion** — an immutable release of a skill: `version` (semver), `status` (`draft`, `published`, `deprecated`, `archived`), a `sha256:` `content_hash`, the file manifest, publisher, download count, and — for deprecated versions — a deprecation message and optional replacement URI.
 
 `scion skills delete` performs a **soft delete**: the skill's status becomes `archived` and its records are retained for audit and history.
@@ -142,6 +142,12 @@ The web dashboard includes both user-facing and admin surfaces for skills:
 - **Skill Registries admin** (`/admin/skill-registries`) — list, create, edit, and remove external registries, toggle their status, and set their trust level. The registry detail page manages the registry's **pinned hashes** (add and remove pins) for pinned-trust registries.
 
 Registry administration is capability-gated; it is available to users with the appropriate admin permissions.
+
+### Global catalog authoring
+
+Publishing skills to the `global` scope requires the `skill.create_global` permission. Hub administrators hold this permission by default. For non-admin users who need to author global skills, assign the system-scoped `global-catalog-author` role. This role grants only `skill.create_global`, decoupling global skill authoring from full Hub administration authority.
+
+See [Permissions & Policy — Roles](/scion/hosted/ha/permissions/#roles) for the complete role listing.
 
 ## See also
 

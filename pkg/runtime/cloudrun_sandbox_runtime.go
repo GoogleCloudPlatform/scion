@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -33,7 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
@@ -79,9 +80,21 @@ const sandboxAgentHome = "/home/scion"
 const sandboxWorkspace = "/workspace"
 
 // entrypointLogFile is the filename (relative to agentHome) where the
-// entrypoint's stdout/stderr is captured on failure. When `exec sciontool
-// init` succeeds the shell is replaced and the file contains normal init
-// output; when it fails the file holds the error output that explains why.
+// entrypoint's stdout/stderr is captured.  This file is the ONLY record
+// of failures that occur before, around, or outside sciontool's own
+// logger — shell-level errors ("command not found"), exec failures, and
+// any diagnostic the process writes to stdout/stderr without going
+// through log.go.  Those failures produce a bare exit code in the UI
+// and nothing else; this file is where the explanation lives.
+//
+// The file is opened with >> (append) so that a restart preserves the
+// previous run's output.  A run-delimiter line is emitted at the start
+// of each run to make boundaries unambiguous.  See #110 for the history.
+//
+// Growth is unbounded across restarts, matching agent.log (which also
+// appends without rotation in the same directory).  If disk pressure
+// from diagnostic logs becomes a concern on this tier, rotation should
+// be added to BOTH files together.
 const entrypointLogFile = ".scion-entrypoint.log"
 
 // sandboxUID and sandboxGID control the UID/GID passed to the sandbox via
@@ -562,11 +575,9 @@ func envFor(cfg RunConfig, paths scionPaths) map[string]string {
 	// Project identity.
 	if cfg.Project != "" {
 		env["SCION_PROJECT"] = cfg.Project
-		env["SCION_GROVE"] = cfg.Project
 	}
 	if cfg.ProjectID != "" {
 		env["SCION_PROJECT_ID"] = cfg.ProjectID
-		env["SCION_GROVE_ID"] = cfg.ProjectID
 	}
 
 	// Workspace path: tell sciontool init where the writable workspace is
@@ -712,8 +723,11 @@ func buildEntrypoint(cfg RunConfig) ([]string, error) {
 	// No .rc file: `exec` replaces the shell on success (echo never runs),
 	// and `sandbox wait` already provides the exit code on the host side.
 	logPath := filepath.Join(sandboxAgentHome, entrypointLogFile)
-	wrappedCmd := fmt.Sprintf("{ exec sciontool init -- /bin/sh -c %s; } > %s 2>&1",
-		shellQuote(tmuxCmd), logPath)
+	// Append (>>), not truncate (>): a restart must preserve the previous
+	// run's diagnostic output.  The run delimiter makes boundaries
+	// unambiguous when multiple runs accumulate in the same file.  #110.
+	wrappedCmd := fmt.Sprintf("echo \"--- entrypoint start $(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ) ---\" >> %s 2>&1; { exec sciontool init -- /bin/sh -c %s; } >> %s 2>&1",
+		logPath, shellQuote(tmuxCmd), logPath)
 	return []string{"/bin/sh", "-c", wrappedCmd}, nil
 }
 
@@ -819,6 +833,23 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 		return "", fmt.Errorf("cloudrun-sandbox: prepare layout: %w", err)
 	}
 
+	// Stat the entrypoint log BEFORE the sandbox launches to capture the
+	// current size as an offset. This run's output starts after this point;
+	// prior content (from earlier runs, if PR 1323 append-mode is present)
+	// is skipped. The entrypoint has not started yet, so nothing can write
+	// to the file between this stat and sandbox launch.
+	entrypointLogPath := filepath.Join(paths.agentHome, entrypointLogFile)
+	var entrypointLogOffset int64
+	if st, err := os.Stat(entrypointLogPath); err == nil {
+		entrypointLogOffset = st.Size()
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		// Unexpected stat error (permission denied, I/O error). Proceed with
+		// offset 0 but warn — this may cause prior-run output to be re-shipped.
+		runtimeLog.Warn("entrypoint log stat failed unexpectedly; starting from offset 0",
+			"path", entrypointLogPath, "error", err, "sandbox", slug)
+	}
+	// ENOENT is the normal case for first-ever run: offset stays 0.
+
 	// Build environment.
 	env := envFor(cfg, paths)
 
@@ -842,6 +873,9 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 		// the Docker runtime's file-copy mode (common.go:820-839) for
 		// robustness in case the staging path is bypassed or incomplete.
 		for _, f := range cfg.ResolvedAuth.Files {
+			if f.SourcePath == "" {
+				continue
+			}
 			containerPath := expandTildeTarget(f.ContainerPath, sandboxAgentHome)
 			var relPath string
 			if strings.HasPrefix(containerPath, sandboxAgentHome+"/") {
@@ -1002,6 +1036,7 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 	r.watchCancels[slug] = watchCancel
 	r.watchMu.Unlock()
 	go r.watchSandbox(watchCtx, slug)
+	go r.tailEntrypointLog(watchCtx, slug, cfg.Name, cfg.Project, paths, entrypointLogOffset)
 
 	return slug, nil
 }
@@ -1066,10 +1101,10 @@ func (r *CloudRunSandboxRuntime) List(ctx context.Context, labelFilter map[strin
 			actual := entry.Labels[k]
 			if actual == "" {
 				switch k {
-				case projectcompat.LabelProject:
-					actual = projectcompat.ProjectNameFromLabels(entry.Labels)
-				case projectcompat.LabelProjectID:
-					actual = projectcompat.ProjectIDFromLabels(entry.Labels)
+				case projectkeys.LabelProject:
+					actual = projectkeys.ProjectNameFromLabels(entry.Labels)
+				case projectkeys.LabelProjectID:
+					actual = projectkeys.ProjectIDFromLabels(entry.Labels)
 				}
 			}
 			if actual != v {
@@ -1121,9 +1156,83 @@ func (r *CloudRunSandboxRuntime) List(ctx context.Context, labelFilter map[strin
 }
 
 func (r *CloudRunSandboxRuntime) GetLogs(ctx context.Context, id string) (string, error) {
-	// Use tmux capture-pane to get the scrollback buffer.
+	// Try tmux capture-pane first (live sandbox path).
 	// Absolute paths required -- PATH is empty inside a sandbox.
-	return runSimpleCommand(ctx, r.bin, "exec", id, "--", "/usr/bin/tmux", "capture-pane", "-p", "-t", "scion", "-S", "-1000")
+	logs, err := runSimpleCommand(ctx, r.bin, "exec", id, "--", "/usr/bin/tmux", "capture-pane", "-p", "-t", "scion", "-S", "-1000")
+	if err == nil && strings.TrimSpace(logs) != "" {
+		return logs, nil
+	}
+
+	// Fall back to reading the entrypoint log from the host filesystem
+	// via the state entry. This triggers in two cases:
+	//
+	//   1. tmux exec failed — the sandbox is likely dead.
+	//   2. tmux succeeded but returned empty output — the pane has
+	//      printed nothing (or only whitespace). Showing the entrypoint
+	//      log is strictly better than an empty tab, and the source
+	//      label (below) tells the operator what they are looking at.
+	//
+	// WHY FALLBACK, NOT FLAG CHECK: on this tier, liveness flags have
+	// been wrong before (#17: hub reported agents "running" when the
+	// entrypoint had hung). A flag-check strategy would consult the
+	// flag, and if it said "running" while the sandbox was dead, it
+	// would SKIP the fallback and return the exec error — leaving the
+	// tab empty in precisely the case the feature exists for. Try-and-
+	// fallback is strictly more robust: it does not consult the flag.
+
+	var reason string
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		// Preserve the tmux failure for diagnostics. The operator gets
+		// the fallback content (better than empty), but the exec error
+		// is recorded so it can be found during debugging.
+		runtimeLog.Warn("tmux capture-pane failed, falling back to entrypoint log",
+			"agent_id", id, "error", err)
+		reason = "sandbox was not reachable via tmux"
+	} else {
+		reason = "tmux returned no terminal output"
+	}
+
+	return r.readEntrypointLogFromState(id, reason)
+}
+
+// readEntrypointLogFromState reads the entrypoint log from the host
+// filesystem using the AgentHome path stored in the sandbox state entry.
+// This is the same file and the same host-side path that the DOA handler
+// (line 812-826) reads after a failed liveness probe — the mechanism
+// exists, this gives it an exit through GetLogs.
+func (r *CloudRunSandboxRuntime) readEntrypointLogFromState(id, reason string) (string, error) {
+	entry := r.state.get(id)
+	if entry == nil {
+		return "", fmt.Errorf("cloudrun-sandbox: sandbox %q not found in state store", id)
+	}
+	if entry.AgentHome == "" {
+		return "", fmt.Errorf("cloudrun-sandbox: sandbox %q has no AgentHome in state entry", id)
+	}
+
+	logPath := filepath.Join(entry.AgentHome, entrypointLogFile)
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// State the observation, not the inference.
+			return fmt.Sprintf("[no entrypoint log at %s]", logPath), nil
+		}
+		return "", fmt.Errorf("cloudrun-sandbox: failed to read entrypoint log at %s: %w", logPath, err)
+	}
+
+	if len(data) == 0 {
+		return fmt.Sprintf("[entrypoint log at %s is empty]", logPath), nil
+	}
+
+	// Label the source so the operator knows this is startup output,
+	// not live terminal content. This is mandatory: without it, the
+	// output is indistinguishable from a live pane. The reason is
+	// per-case so the operator can distinguish "agent is dead" from
+	// "agent has not printed yet."
+	header := fmt.Sprintf("[source: entrypoint log (startup) — %s]\n", reason)
+	return header + string(data), nil
 }
 
 func (r *CloudRunSandboxRuntime) Attach(ctx context.Context, id string) error {
@@ -1179,6 +1288,16 @@ func (r *CloudRunSandboxRuntime) Exec(ctx context.Context, id string, cmd []stri
 	// absolute paths or the command must be on a bind-mounted path.
 	args := append([]string{"exec", id, "--"}, cmd...)
 	return runSimpleCommand(ctx, r.bin, args...)
+}
+
+// ExecWithStdin runs cmd inside the sandbox with stdin piped from the given
+// reader. Unlike docker/podman, `sandbox exec` has no explicit -i flag: it
+// forwards whatever stdio is attached to the launcher process (see Attach,
+// which relies on the same behaviour for interactive tmux sessions). See
+// #1355.
+func (r *CloudRunSandboxRuntime) ExecWithStdin(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
+	args := append([]string{"exec", id, "--"}, cmd...)
+	return runSimpleCommandWithStdin(ctx, stdin, r.bin, args...)
 }
 
 // GetWorkspacePath returns the HOST-side workspace path from the state

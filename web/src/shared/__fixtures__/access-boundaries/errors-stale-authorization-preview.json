@@ -19,7 +19,11 @@
       "stateRevisionNow": "rv-2026-08-31T14:30:48Z-0x4c88",
       "changeSummary": [
         { "kind": "group_membership", "groupId": "grp-contractors", "changedPrincipalCount": 3 },
-        { "kind": "role_binding", "scope": { "type": "project", "projectId": "proj-atlas" }, "changedBindingCount": 1 }
+        {
+          "kind": "role_binding",
+          "scope": { "type": "project", "projectId": "proj-atlas" },
+          "changedBindingCount": 1
+        }
       ],
       "remedy": "Recompute the impact preview and review the updated result before committing."
     }

@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
+	"sync/atomic"
 
 	"cloud.google.com/go/logging"
 	mexporter "github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric"
@@ -22,18 +24,25 @@ import (
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/api/option"
+	"google.golang.org/grpc/status"
 )
 
 // GCPExporter exports telemetry data to GCP using native APIs.
 // It uses Cloud Trace for spans and Cloud Logging for logs.
-// Metrics are forwarded via the SDK metric exporter (see providers.go).
+// Metrics are converted at the forwarding boundary and sent through the SDK
+// metric exporter after receiver policy processing.
 type GCPExporter struct {
-	traceExporter  trace.SpanExporter
-	metricExporter sdkmetric.Exporter
-	logClient      *logging.Client
-	logger         *logging.Logger
-	projectID      string
-	metricsDebug   bool
+	traceExporter   trace.SpanExporter
+	metricExporter  sdkmetric.Exporter
+	logClient       *logging.Client
+	logger          *logging.Logger
+	logSink         func(logging.Entry) // optional local capture after conversion
+	projectID       string
+	metricsDebug    bool
+	asyncLogErrors  atomic.Int64
+	onAsyncLogError func(error)
+	logSlotOnce     sync.Once
+	logSlot         chan struct{} // one Logger/Client Flush outcome per pipeline batch
 }
 
 // NewGCPExporter creates a new GCP-native exporter for traces, metrics, and logs.
@@ -98,21 +107,47 @@ func NewGCPExporter(config *Config) (*GCPExporter, error) {
 		loggerOpts = append(loggerOpts, logging.CommonLabels(commonLabels))
 	}
 
-	return &GCPExporter{
+	exporter := &GCPExporter{
 		traceExporter:  traceExp,
 		metricExporter: metricExporter,
 		logClient:      logClient,
 		logger:         logClient.Logger(scionlog.AgentLogID, loggerOpts...),
 		projectID:      config.ProjectID,
 		metricsDebug:   config.MetricsDebug,
-	}, nil
+	}
+	logClient.OnError = func(err error) {
+		exporter.reportAsyncLogError(err)
+	}
+	return exporter, nil
+}
+
+func (e *GCPExporter) reportAsyncLogError(err error) {
+	e.asyncLogErrors.Add(1)
+	if e.onAsyncLogError != nil {
+		e.onAsyncLogError(err)
+	}
+	log.Error("Cloud Logging asynchronous delivery failed: %v", err)
+}
+
+func (e *GCPExporter) acquireLogSlot(ctx context.Context) error {
+	e.logSlotOnce.Do(func() { e.logSlot = make(chan struct{}, 1) })
+	select {
+	case e.logSlot <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			<-e.logSlot
+			return err
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // ExportProtoSpans converts OTLP proto spans to SDK ReadOnlySpan and exports
 // via the GCP Cloud Trace exporter.
 func (e *GCPExporter) ExportProtoSpans(ctx context.Context, resourceSpans []*tracepb.ResourceSpans) error {
 	if e == nil || e.traceExporter == nil {
-		return nil
+		return errors.New("GCP trace exporter unavailable")
 	}
 
 	sdkSpans := protoResourceSpansToSDK(resourceSpans)
@@ -126,16 +161,20 @@ func (e *GCPExporter) ExportProtoSpans(ctx context.Context, resourceSpans []*tra
 // ExportProtoMetrics converts OTLP proto metrics to SDK metricdata and exports
 // them via the Cloud Monitoring exporter.
 //
-// This is primarily used for harnesses that emit native OTLP metrics to the
-// local sciontool receiver. Sciontool's own normalized SDK metrics may still be
-// exported directly by a MeterProvider configured in providers.go.
+// Both native and normalized SDK metrics reach this path through the local
+// sciontool receiver.
 func (e *GCPExporter) ExportProtoMetrics(ctx context.Context, resourceMetrics []*metricpb.ResourceMetrics) error {
 	if e == nil || e.metricExporter == nil {
-		return nil
+		return errors.New("GCP metric exporter unavailable")
 	}
 
-	sdkMetrics := protoResourceMetricsToSDK(resourceMetrics)
+	identified, err := gcpIdentityMetrics(resourceMetrics)
+	if err != nil {
+		return err
+	}
+	sdkMetrics := protoResourceMetricsToSDK(identified)
 	var errs []error
+	succeeded := 0
 
 	for i := range sdkMetrics {
 		filtered := filterGCPMetricdata(&sdkMetrics[i], e.metricsDebug)
@@ -144,27 +183,70 @@ func (e *GCPExporter) ExportProtoMetrics(ctx context.Context, resourceMetrics []
 		}
 		if err := e.metricExporter.Export(ctx, filtered); err != nil {
 			errs = append(errs, err)
+		} else {
+			succeeded++
 		}
 	}
-
+	if succeeded > 0 && len(errs) > 0 {
+		cause, code := classifyMonitoringFailures(errs)
+		return &partialSuccessError{
+			message:         fmt.Sprintf("GCP metric batch partly delivered: %d resource groups succeeded, %d failed; cause=%s status=%s", succeeded, len(errs), cause, code),
+			succeededGroups: succeeded, failedGroups: len(errs), causeClass: cause, statusCode: code,
+		}
+	}
 	return errors.Join(errs...)
+}
+
+// classifyMonitoringFailures exposes only bounded codes, never SDK text or labels.
+func classifyMonitoringFailures(errs []error) (string, string) {
+	cause, code := "", ""
+	for _, err := range errs {
+		currentCause := classifyError(err)
+		currentCode := status.Code(err).String()
+		if cause == "" {
+			cause = currentCause
+		} else if cause != currentCause {
+			cause = "mixed"
+		}
+		if code == "" {
+			code = currentCode
+		} else if code != currentCode {
+			code = "mixed"
+		}
+	}
+	return cause, code
 }
 
 // ExportProtoLogs converts OTLP proto log records to Cloud Logging entries.
 func (e *GCPExporter) ExportProtoLogs(ctx context.Context, resourceLogs []*logspb.ResourceLogs) error {
-	if e == nil || e.logger == nil {
-		return nil
+	if e == nil {
+		return errors.New("GCP log exporter unavailable")
+	}
+	if err := e.acquireLogSlot(ctx); err != nil {
+		return err
+	}
+	defer func() { <-e.logSlot }()
+	if e.logger == nil && e.logSink == nil {
+		return errors.New("GCP log exporter unavailable")
 	}
 
 	for _, rl := range resourceLogs {
 		for _, sl := range rl.ScopeLogs {
 			for _, lr := range sl.LogRecords {
-				entry := protoLogToCloudEntry(lr, rl.Resource)
-				e.logger.Log(entry)
+				entry := protoLogToCloudEntry(lr, rl.Resource, rl.SchemaUrl, sl.Scope, sl.SchemaUrl)
+				if e.logSink != nil {
+					e.logSink(entry)
+				} else {
+					e.logger.Log(entry)
+				}
 			}
 		}
 	}
-
+	if e.logger != nil && e.logSink == nil {
+		if err := e.logger.Flush(); err != nil {
+			return &partialSuccessError{message: fmt.Sprintf("Cloud Logging flush failed with unknown per-record outcome: %v", err)}
+		}
+	}
 	return nil
 }
 
@@ -180,24 +262,39 @@ func (e *GCPExporter) Shutdown(ctx context.Context) error {
 		if err := e.traceExporter.Shutdown(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("trace exporter shutdown: %w", err))
 		}
+		e.traceExporter = nil
 	}
 
 	if e.metricExporter != nil {
+		// The pinned Monitoring SDK runs Shutdown once and closes its client
+		// even when it returns a caller-context or Close error. The debug
+		// wrapper delegates to that same one-shot method.
 		if err := e.metricExporter.Shutdown(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("metric exporter shutdown: %w", err))
 		}
+		e.metricExporter = nil
 	}
 
 	if e.logClient != nil {
-		if err := e.logClient.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("log client close: %w", err))
+		if err := e.acquireLogSlot(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("log client close incomplete: %w", err))
+		} else {
+			// The pinned Logging SDK marks Client closed even when Close returns
+			// an asynchronous flush error. It must not be closed again.
+			if err := e.logClient.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("log client close: %w", err))
+			}
+			e.logClient = nil
+			e.logger = nil
+			<-e.logSlot
 		}
 	}
 
-	if len(errs) > 0 {
-		return errs[0]
-	}
-	return nil
+	return errors.Join(errs...)
+}
+
+func (e *GCPExporter) shutdownComplete() bool {
+	return e == nil || e.traceExporter == nil && e.metricExporter == nil && e.logClient == nil
 }
 
 func filterGCPMetricdata(rm *metricdata.ResourceMetrics, metricsDebug bool) *metricdata.ResourceMetrics {

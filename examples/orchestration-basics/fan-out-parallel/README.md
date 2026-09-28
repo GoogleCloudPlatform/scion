@@ -1,6 +1,6 @@
 ## Fan out sample
 
-Initialize this example as a grove:
+Initialize this example as a project:
 
 ```bash
 scion init
@@ -24,7 +24,7 @@ Start the workstation server
 scion server start
 ```
 
-enable hub and link grove
+enable hub and link project
 
 ```bash
 scion config set hub.endpoint http://localhost:8080

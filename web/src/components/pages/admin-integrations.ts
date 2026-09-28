@@ -226,7 +226,8 @@ const PLATFORM_FIELDS: Record<string, PlatformFieldDef[]> = {
     {
       key: 'register_url',
       label: 'Register URL',
-      description: 'Public URL for user-facing registration links. Used instead of internal hub_url when behind auth proxies or custom domains.',
+      description:
+        'Public URL for user-facing registration links. Used instead of internal hub_url when behind auth proxies or custom domains.',
       defaultValue: '',
       placeholder: 'https://scion.example.com',
     },
@@ -249,7 +250,8 @@ const PLATFORM_FIELDS: Record<string, PlatformFieldDef[]> = {
     {
       key: 'register_url',
       label: 'Register URL',
-      description: 'Public URL for user-facing registration links. Used instead of internal hub_url when behind auth proxies or custom domains.',
+      description:
+        'Public URL for user-facing registration links. Used instead of internal hub_url when behind auth proxies or custom domains.',
       defaultValue: '',
       placeholder: 'https://scion.example.com',
     },

@@ -130,6 +130,92 @@ func TestHeartbeatExitCode_StructuredCrash(t *testing.T) {
 	assert.Contains(t, got.Message, "exit code 137")
 }
 
+// TestHeartbeatExitCode_SuppressedDuringReincarnation proves a heartbeat
+// reporting a crash (e.g. the OLD container dying mid-reprovision) cannot
+// clobber Phase/Activity/ExitCode/ExitReason/Message while a `scion
+// reincarnate` migration owns the agent: the worker is the sole authority for
+// those fields until it completes or fails. ContainerStatus and the LastSeen
+// bump are not worker-owned and must still apply. It runs for every in-flight
+// state, and for both crash shapes: an empty activity (what live brokers
+// send, which the notification dispatcher would match as ERROR) and
+// "crashed".
+func TestHeartbeatExitCode_SuppressedDuringReincarnation(t *testing.T) {
+	states := []string{
+		store.ReincarnationStatePending,
+		store.ReincarnationStateStopping,
+		store.ReincarnationStateProvisioning,
+		store.ReincarnationStateStarting,
+	}
+	for _, state := range states {
+		for _, activity := range []string{"", "crashed"} {
+			t.Run(state+"/activity="+activity, func(t *testing.T) {
+				srv, s, brokerID, projectID, agentSlug := setupHeartbeatExitCodeTest(t)
+
+				oldLastSeen := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
+				agent := getAgentState(t, s, agentSlug, projectID)
+				agent.ReincarnationState = state
+				agent.LastSeen = oldLastSeen
+				require.NoError(t, s.UpdateAgent(context.Background(), agent))
+				before := getAgentState(t, s, agentSlug, projectID)
+				require.True(t, before.LastSeen.Equal(oldLastSeen), "sanity: the known old LastSeen must be stored")
+
+				ec := 137
+				code := sendHeartbeat(t, srv, brokerID, projectID, brokerAgentHeartbeat{
+					Slug:            agentSlug,
+					Phase:           "stopped",
+					Activity:        activity,
+					ExitCode:        &ec,
+					ExitReason:      "crashed",
+					Message:         "container exited",
+					ContainerStatus: "exited (137)",
+				})
+				assert.Equal(t, http.StatusOK, code)
+
+				got := getAgentState(t, s, agentSlug, projectID)
+				assert.Equal(t, before.Phase, got.Phase, "phase must stay under the worker's control while reincarnating")
+				assert.Equal(t, before.Activity, got.Activity, "activity must not be set from the racing container's crash")
+				assert.Nil(t, got.ExitCode, "ExitCode must not be recorded from a heartbeat while reincarnating")
+				assert.Equal(t, "", got.ExitReason)
+				assert.Equal(t, before.Message, got.Message, "message must not be overwritten by the racing container's heartbeat")
+				assert.Equal(t, "exited (137)", got.ContainerStatus, "ContainerStatus is not a worker-owned field and must still update")
+				assert.True(t, got.LastSeen.After(oldLastSeen),
+					"the LastSeen bump must still apply while reincarnating (was %v, now %v)", oldLastSeen, got.LastSeen)
+			})
+		}
+	}
+}
+
+// TestHeartbeatExitCode_CrashStillWorksAfterFailedReincarnation is the
+// counterpart regression test to
+// TestHeartbeatExitCode_SuppressedDuringReincarnation: a FAILED reincarnation
+// is terminal, not in flight (design §3.4 Amendment A11 item 2 — see
+// reincarnationInFlight), so a heartbeat crash report must be processed
+// completely normally once a reincarnation has already failed, exactly as it
+// would be for an agent that never attempted one.
+func TestHeartbeatExitCode_CrashStillWorksAfterFailedReincarnation(t *testing.T) {
+	srv, s, brokerID, projectID, agentSlug := setupHeartbeatExitCodeTest(t)
+
+	agent := getAgentState(t, s, agentSlug, projectID)
+	agent.ReincarnationState = store.ReincarnationStateFailed
+	require.NoError(t, s.UpdateAgent(context.Background(), agent))
+
+	ec := 137
+	code := sendHeartbeat(t, srv, brokerID, projectID, brokerAgentHeartbeat{
+		Slug:       agentSlug,
+		Phase:      "stopped",
+		Activity:   "crashed",
+		ExitCode:   &ec,
+		ExitReason: "crashed",
+	})
+	assert.Equal(t, http.StatusOK, code)
+
+	got := getAgentState(t, s, agentSlug, projectID)
+	assert.Equal(t, "error", got.Phase, "a failed (terminal) reincarnation must not suppress normal crash handling")
+	assert.Equal(t, "crashed", got.Activity)
+	require.NotNil(t, got.ExitCode)
+	assert.Equal(t, 137, *got.ExitCode)
+}
+
 // TestHeartbeatExitCode_StructuredCleanExit verifies that ExitCode==0 keeps
 // PhaseStopped (clean exit) and still records the exit code.
 func TestHeartbeatExitCode_StructuredCleanExit(t *testing.T) {

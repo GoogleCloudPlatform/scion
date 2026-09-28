@@ -16,6 +16,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/accesspolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentcredential"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentidentitykey"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentreincarnation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentsessionmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/allowlistentry"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/apikey"
@@ -29,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationedge"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entitlementbinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/envvar"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/externalidentity"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/gcpserviceaccount"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubinstallation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubresolutioncache"
@@ -134,6 +137,8 @@ func checkColumn(t, c string) error {
 			accesspolicy.Table:             accesspolicy.ValidColumn,
 			agent.Table:                    agent.ValidColumn,
 			agentcredential.Table:          agentcredential.ValidColumn,
+			agentidentitykey.Table:         agentidentitykey.ValidColumn,
+			agentreincarnation.Table:       agentreincarnation.ValidColumn,
 			agentsessionmetrics.Table:      agentsessionmetrics.ValidColumn,
 			allowlistentry.Table:           allowlistentry.ValidColumn,
 			apikey.Table:                   apikey.ValidColumn,
@@ -147,6 +152,7 @@ func checkColumn(t, c string) error {
 			delegationedge.Table:           delegationedge.ValidColumn,
 			entitlementbinding.Table:       entitlementbinding.ValidColumn,
 			envvar.Table:                   envvar.ValidColumn,
+			externalidentity.Table:         externalidentity.ValidColumn,
 			gcpserviceaccount.Table:        gcpserviceaccount.ValidColumn,
 			githubresolutioncache.Table:    githubresolutioncache.ValidColumn,
 			githubinstallation.Table:       githubinstallation.ValidColumn,

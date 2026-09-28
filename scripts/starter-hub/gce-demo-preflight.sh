@@ -165,7 +165,6 @@ else
         SCION_SERVER_OAUTH_CLI_GOOGLE_CLIENTSECRET
         SCION_SERVER_OAUTH_CLI_GITHUB_CLIENTID
         SCION_SERVER_OAUTH_CLI_GITHUB_CLIENTSECRET
-        SCION_HUB_ENDPOINT
     )
 
     PROJECT_VARS=(
@@ -205,7 +204,7 @@ else
     done
 
     # Optional vars — warn if missing
-    for var in SCION_SERVER_AUTH_AUTHORIZEDDOMAINS SCION_SERVER_HUB_ADMINEMAILS; do
+    for var in SCION_SERVER_HUB_ENDPOINT SCION_SERVER_AUTH_AUTHORIZEDDOMAINS SCION_SERVER_HUB_ADMINEMAILS; do
         val=$(get_env_value "$var" "${HUB_ENV_FILE}")
         if [[ -z "$val" ]]; then
             check_warn "${var} is not set (optional — see hub.env.sample)"

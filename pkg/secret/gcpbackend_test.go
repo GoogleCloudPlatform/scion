@@ -436,14 +436,14 @@ func TestGCPBackend_GetMeta(t *testing.T) {
 		SecretType:  TypeVariable,
 		Target:      "config",
 		Scope:       ScopeProject,
-		ScopeID:     "grove-1",
+		ScopeID:     "project-1",
 		Description: "Test meta",
 	})
 	if err != nil {
 		t.Fatalf("Set failed: %v", err)
 	}
 
-	meta, err := backend.GetMeta(ctx, "META_KEY", ScopeProject, "grove-1")
+	meta, err := backend.GetMeta(ctx, "META_KEY", ScopeProject, "project-1")
 	if err != nil {
 		t.Fatalf("GetMeta failed: %v", err)
 	}
@@ -471,10 +471,10 @@ func TestGCPBackend_Resolve(t *testing.T) {
 	// Project-level value for the same key (user scope wins)
 	_, _, _ = backend.Set(ctx, &SetSecretInput{
 		Name:       "API_KEY",
-		Value:      "grove-api-key",
+		Value:      "project-api-key",
 		SecretType: TypeEnvironment,
 		Scope:      ScopeProject,
-		ScopeID:    "grove-1",
+		ScopeID:    "project-1",
 	})
 
 	// Project-only secret
@@ -484,10 +484,10 @@ func TestGCPBackend_Resolve(t *testing.T) {
 		SecretType: TypeEnvironment,
 		Target:     "DATABASE_PASSWORD",
 		Scope:      ScopeProject,
-		ScopeID:    "grove-1",
+		ScopeID:    "project-1",
 	})
 
-	resolved, err := backend.Resolve(ctx, "user-1", "grove-1", "", nil)
+	resolved, err := backend.Resolve(ctx, "user-1", "project-1", "", nil)
 	if err != nil {
 		t.Fatalf("Resolve failed: %v", err)
 	}
@@ -557,9 +557,9 @@ func TestGCPBackend_SecretNameSanitization(t *testing.T) {
 	}
 
 	// Test sanitization of special characters in name (scopeID is hashed, not sanitized)
-	name = backend.gcpSecretName("my.key/with spaces", "grove", "grove@id")
-	expectedHash = hashCombined("grove@id")
-	expectedFull := fmt.Sprintf("scion-grove-%s-my-key-with-spaces", expectedHash)
+	name = backend.gcpSecretName("my.key/with spaces", "project", "project@id")
+	expectedHash = hashCombined("project@id")
+	expectedFull := fmt.Sprintf("scion-project-%s-my-key-with-spaces", expectedHash)
 	if name != expectedFull {
 		t.Errorf("expected sanitized name %q, got %q", expectedFull, name)
 	}
@@ -915,7 +915,7 @@ func TestGCPBackend_Labels_DefaultTarget(t *testing.T) {
 		Value:      "value",
 		SecretType: TypeEnvironment,
 		Scope:      ScopeProject,
-		ScopeID:    "grove-1",
+		ScopeID:    "project-1",
 	}
 
 	_, _, err := backend.Set(ctx, input)

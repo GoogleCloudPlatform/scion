@@ -117,8 +117,20 @@ func (s *ConversationStore) CreateConversation(ctx context.Context, conv *store.
 	}
 	// A direct conversation's external_ref IS the access control basis: the DM
 	// key names who is entitled to see the messages. A keyless direct row has no
-	// ACL at all. Group conversations may legitimately omit the external ref
-	// (native groups have no upstream surface to point at).
+	// ACL at all.
+	//
+	// A group conversation's external_ref is its routing key: the "thread:…"
+	// string that ParseThreadConversationExternalRef decomposes to route a
+	// group reply (handlers_agent_messaging.go:655). An empty ref yields
+	// HTTP 500 and no delivery (DEF-166). Post-DEF-156, all group conversation
+	// creation paths derive a non-empty external_ref via
+	// ThreadConversationExternalRef; an empty one here is a derivation bug,
+	// not a legitimate omission. However, CreateConversation does not yet
+	// enforce this for groups — that guard is deferred until the CHECK
+	// constraint migration (see DEF-166-guard-patch.diff in the scratchpad).
+	//
+	// The two kinds have different failure consequences — direct: ACL breach;
+	// group: silent non-delivery — but both require a non-empty external_ref.
 	if conv.Kind == "direct" && conv.ExternalRef == "" {
 		return fmt.Errorf("direct conversation requires a non-empty external_ref (the DM key is the access authority): %w", store.ErrInvalidInput)
 	}
@@ -301,9 +313,18 @@ func (s *ConversationStore) ListConversations(ctx context.Context, filter store.
 		query.Where(conversation.DriftStateEQ(conversation.DriftState(filter.DriftState)))
 	}
 
-	totalCount, err := query.Clone().Count(ctx)
-	if err != nil {
-		return nil, err
+	// Review round 2 finding #5: honor SkipTotalCount like the other
+	// stores (agent_store.go, group_store.go, ...) — a caller paging
+	// through every row (e.g. the conversation listing union) was already
+	// passing this flag, but it was silently ignored, so every page still
+	// ran a full COUNT.
+	totalCount := 0
+	if !opts.SkipTotalCount {
+		var err error
+		totalCount, err = query.Clone().Count(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Cursor-based keyset pagination using the same encoding as message_store.

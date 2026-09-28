@@ -50,6 +50,14 @@ Choose a **containerized (brokered) agent** when:
 - You need interactive terminal attach, suspend/resume, or other container-only operations
   (see [Limitations](#limitations) below).
 
+:::note[GCP identity on Cloud Run Sandboxes]
+Containerized agents running on Cloud Run Sandbox (gVisor) runtimes support
+GCP identity in **assign** mode but not **passthrough** mode — the real GCE
+metadata server is unreachable from inside gVisor. See the
+[Authentication guide](/scion/hosted/single-node/auth/#gcp-identity--metadata-emulation)
+for details.
+:::
+
 The choice between a managed agent and a brokered agent is a **deployment-time decision
 controlled by a broker profile**, not a property of the agent template. The same template can run
 on a container runtime or on a managed service depending on the profile you select at
@@ -119,13 +127,12 @@ agents and return a clear error:
 ## How it works
 
 Managed agents are a peer concept to the Runtime + Harness stack, not a replacement. The
-`Manager` interface is the branching point: a `ManagedAgentManager` implements the same interface
-as the container-based `AgentManager` but delegates to a cloud API client. As a result, the CLI
-and Hub talk to one interface and do not need to know whether an agent is containerized or
-managed.
+Hub is the branching point: requests using the `managed-agents` profile go directly to a
+managed backend, while container-based agents continue through a Runtime Broker. The CLI uses
+the same Hub agent APIs for both execution paths.
 
-State for a managed agent (cloud-side identifiers and the interaction chain) is persisted locally
-so the CLI can reconnect across restarts, but no container or broker is involved at any point.
+The Hub Agent record stores the managed runtime plus the current interaction and environment
+identifiers. No broker-local state directory, container, or Runtime Broker is involved.
 
 ## See also
 

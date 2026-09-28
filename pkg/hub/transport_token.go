@@ -46,14 +46,6 @@ type RefreshTokenEntry struct {
 	Audience  string `json:"audience,omitempty"` // only for transport tokens
 }
 
-// noopTransportMinter is used when transport auth is disabled (mode == "none").
-// It always returns an error indicating transport auth is not configured.
-type noopTransportMinter struct{}
-
-func (m *noopTransportMinter) MintIDToken(_ context.Context, _ string) (string, time.Time, error) {
-	return "", time.Time{}, fmt.Errorf("transport auth is disabled (mode=none)")
-}
-
 // gcpTransportMinter mints Google OIDC ID tokens by impersonating a dedicated
 // service account via the IAM Credentials API (generateIdToken).
 // The hub's runtime SA must hold serviceAccountTokenCreator on the target SA.

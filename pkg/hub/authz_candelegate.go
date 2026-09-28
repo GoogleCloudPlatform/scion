@@ -302,8 +302,8 @@ func (a *AuthzService) canDelegateAgent(ctx context.Context, actor Identity, gra
 	}
 
 	// For user callers: verify the user has agent-create authority in the
-	// target project. The role ceiling logic (ResolveEffectiveRole, minRole)
-	// already caps the effective role to the project max and caller ceiling.
+	// target project. Agent creation already caps the effective role to the
+	// project maximum (and, for agent callers, the parent agent's role).
 	// CanDelegate adds the check that the user has at least the base
 	// create-agent permission. For role-level escalation prevention between
 	// users, the system relies on the role ceiling logic rather than

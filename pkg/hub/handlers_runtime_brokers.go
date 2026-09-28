@@ -16,14 +16,12 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
-	"strconv"
+	"reflect"
 	"strings"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
@@ -79,17 +77,7 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 		Name:      query.Get("name"),
 	}
 
-	limit := 50
-	if l := query.Get("limit"); l != "" {
-		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
-			limit = parsed
-		}
-	}
-
-	result, err := s.store.ListRuntimeBrokers(ctx, filter, store.ListOptions{
-		Limit:  limit,
-		Cursor: query.Get("cursor"),
-	})
+	result, err := s.store.ListRuntimeBrokers(ctx, filter, listOptionsFromQuery(query))
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -249,6 +237,12 @@ func (s *Server) handleRuntimeBrokerByIDInternal(w http.ResponseWriter, r *http.
 		return
 	}
 
+	// Handle buffered-delivery failure reports (#1820)
+	if subPath == "message-failures" && r.Method == http.MethodPost {
+		s.handleBrokerMessageFailures(w, r, id)
+		return
+	}
+
 	// Handle projects action
 	if subPath == "projects" && r.Method == http.MethodGet {
 		s.getBrokerProjects(w, r, id)
@@ -258,32 +252,6 @@ func (s *Server) handleRuntimeBrokerByIDInternal(w http.ResponseWriter, r *http.
 	// Only handle if no subpath (direct resource)
 	if subPath != "" {
 		NotFound(w, "RuntimeBroker resource")
-		return
-	}
-
-	switch r.Method {
-	case http.MethodGet:
-		s.getRuntimeBroker(w, r, id)
-	case http.MethodPatch:
-		s.updateRuntimeBroker(w, r, id)
-	case http.MethodDelete:
-		s.deleteRuntimeBroker(w, r, id)
-	default:
-		MethodNotAllowed(w, http.MethodGet, http.MethodPatch, http.MethodDelete)
-	}
-}
-
-//nolint:unused // Kept for legacy route compatibility.
-func (s *Server) handleRuntimeBrokerByID(w http.ResponseWriter, r *http.Request) {
-	id, action := extractAction(r, "/api/v1/runtime-brokers")
-
-	if id == "" {
-		NotFound(w, "RuntimeBroker")
-		return
-	}
-
-	if action == "heartbeat" && r.Method == http.MethodPost {
-		s.handleBrokerHeartbeat(w, r, id)
 		return
 	}
 
@@ -569,55 +537,8 @@ func (s *Server) enrichProjectOwnerNames(ctx context.Context, projects []store.P
 	}
 }
 
-// resolveUserProjectIDs returns project IDs from the user's group memberships,
-// including transitive memberships through nested groups.
-func (s *Server) resolveUserProjectIDs(ctx context.Context, userID string) []string {
-	groupIDs, err := s.store.GetEffectiveGroups(ctx, userID)
-	if err != nil || len(groupIDs) == 0 {
-		return nil
-	}
-
-	groups, err := s.store.GetGroupsByIDs(ctx, groupIDs)
-	if err != nil {
-		return nil
-	}
-
-	projectIDSet := make(map[string]struct{})
-	for _, g := range groups {
-		if g.ProjectID != "" {
-			projectIDSet[g.ProjectID] = struct{}{}
-		}
-	}
-
-	projectIDs := make([]string, 0, len(projectIDSet))
-	for id := range projectIDSet {
-		projectIDs = append(projectIDs, id)
-	}
-	return projectIDs
-}
-
-// mergeProjectIDs deduplicates and merges project IDs from multiple sources.
-func mergeProjectIDs(sources ...[]string) []string {
-	seen := make(map[string]struct{})
-	for _, ids := range sources {
-		for _, id := range ids {
-			seen[id] = struct{}{}
-		}
-	}
-	if len(seen) == 0 {
-		return nil
-	}
-	merged := make([]string, 0, len(seen))
-	for id := range seen {
-		merged = append(merged, id)
-	}
-	return merged
-}
-
 // subtractProjectIDs returns IDs from all that are NOT in exclude.
-//
-// F-PLAN-01 (resolved-rs2 for project/agent list) — used to compute Shared =
-// all-membership minus owner-only set. Still used by broker list endpoint.
+// It computes Shared as the authorized project set minus the owner-only set.
 func subtractProjectIDs(all, exclude []string) []string {
 	if len(exclude) == 0 {
 		return all
@@ -638,106 +559,16 @@ func subtractProjectIDs(all, exclude []string) []string {
 	return result
 }
 
-// resolveUserRBProjectIDs returns project IDs from the user's project-scoped
-// RoleBindings. This complements resolveUserProjectIDs (which uses legacy
-// group memberships) by including projects where the user was granted access
-// via the RoleBinding-based membership model (project-owner, project-admin,
-// or project-member).
-func (s *Server) resolveUserRBProjectIDs(ctx context.Context, userID string) []string {
-	bindings, err := s.store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
-	if err != nil || len(bindings) == 0 {
-		return nil
-	}
-
-	projectIDSet := make(map[string]struct{})
-	for _, rb := range bindings {
-		if rb.ScopeType == store.RoleScopeProject && rb.ScopeID != "" {
-			projectIDSet[rb.ScopeID] = struct{}{}
-		}
-	}
-
-	if len(projectIDSet) == 0 {
-		return nil
-	}
-
-	projectIDs := make([]string, 0, len(projectIDSet))
-	for id := range projectIDSet {
-		projectIDs = append(projectIDs, id)
-	}
-	return projectIDs
-}
-
-// resolveUserOwnerProjectIDs returns project IDs where the user has an active,
-// direct project-owner RoleBinding. This is the C0-containment definition of
-// "mine": only projects the user directly owns.
-//
-// F-QA-01 (resolved-rs2 for project/agent list) — Mine must select only active
-// direct project-owner bindings, not all project-scoped bindings. Still used
-// by broker list endpoint.
-func (s *Server) resolveUserOwnerProjectIDs(ctx context.Context, userID string) []string {
-	bindings, err := s.store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
-	if err != nil || len(bindings) == 0 {
-		return nil
-	}
-
-	// Resolve the project-owner role definition ID once per request.
-	ownerRoleDef, err := s.store.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
-	if err != nil || ownerRoleDef == nil {
-		return nil
-	}
-
-	now := time.Now()
-	projectIDSet := make(map[string]struct{})
-	for _, rb := range bindings {
-		if rb.ScopeType != store.RoleScopeProject || rb.ScopeID == "" {
-			continue
-		}
-		if rb.RoleDefinitionID != ownerRoleDef.ID {
-			continue
-		}
-		// Check activation lifecycle: binding must be currently active.
-		if rb.NotBefore != nil && now.Before(*rb.NotBefore) {
-			continue
-		}
-		if rb.ExpiresAt != nil && now.After(*rb.ExpiresAt) {
-			continue
-		}
-		projectIDSet[rb.ScopeID] = struct{}{}
-	}
-
-	if len(projectIDSet) == 0 {
-		return nil
-	}
-
-	projectIDs := make([]string, 0, len(projectIDSet))
-	for id := range projectIDSet {
-		projectIDs = append(projectIDs, id)
-	}
-	return projectIDs
-}
-
 // brokerHeartbeatRequest is the request body for broker heartbeats.
 type brokerHeartbeatRequest struct {
 	Status   string                   `json:"status"`
 	Projects []brokerProjectHeartbeat `json:"projects,omitempty"`
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
-func (h *brokerHeartbeatRequest) UnmarshalJSON(data []byte) error {
-	type Alias brokerHeartbeatRequest
-	aux := &struct {
-		Groves []brokerProjectHeartbeat `json:"groves,omitempty"`
-		*Alias
-	}{
-		Alias: (*Alias)(h),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if len(h.Projects) == 0 && len(aux.Groves) > 0 {
-		h.Projects = aux.Groves
-	}
-	return nil
+	// Capabilities refreshes the broker's stored capabilities on every
+	// heartbeat (design §3.4 Amendment A2.2(b); see
+	// hubclient.BrokerHeartbeat.Capabilities). Omitted by an old broker, in
+	// which case the store's capabilities are
+	// left exactly as CompleteBrokerJoin last set them.
+	Capabilities *store.BrokerCapabilities `json:"capabilities,omitempty"`
 }
 
 // brokerProjectHeartbeat is per-project status in a heartbeat.
@@ -745,24 +576,6 @@ type brokerProjectHeartbeat struct {
 	ProjectID  string                 `json:"projectId"`
 	AgentCount int                    `json:"agentCount"`
 	Agents     []brokerAgentHeartbeat `json:"agents,omitempty"`
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
-func (p *brokerProjectHeartbeat) UnmarshalJSON(data []byte) error {
-	type Alias brokerProjectHeartbeat
-	aux := &struct {
-		GroveID string `json:"groveId,omitempty"`
-		*Alias
-	}{
-		Alias: (*Alias)(p),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if p.ProjectID == "" && aux.GroveID != "" {
-		p.ProjectID = aux.GroveID
-	}
-	return nil
 }
 
 // brokerAgentHeartbeat is per-agent status in a heartbeat.
@@ -820,6 +633,26 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
+	// Design §3.4 Amendment A2.2(b): refresh stored capabilities from every heartbeat that
+	// reports them, so an already-registered broker's capabilities are never
+	// stuck at whatever CompleteBrokerJoin saw once at join time — the false
+	// 412 case that otherwise blocks `scion reincarnate` until a manual
+	// --force re-registration. An old broker sends no Capabilities field at
+	// all, and the store keeps whatever it already had (nil-safe: a missing
+	// field, not an empty struct, is the "don't touch" signal).
+	if heartbeat.Capabilities != nil {
+		if broker, err := s.store.GetRuntimeBroker(ctx, id); err != nil {
+			s.agentLifecycleLog.Warn("heartbeat: failed to load broker to refresh capabilities",
+				"broker_id", id, "error", err)
+		} else if !reflect.DeepEqual(broker.Capabilities, heartbeat.Capabilities) {
+			broker.Capabilities = heartbeat.Capabilities
+			if err := s.store.UpdateRuntimeBroker(ctx, broker); err != nil {
+				s.agentLifecycleLog.Warn("heartbeat: failed to persist refreshed capabilities",
+					"broker_id", id, "error", err)
+			}
+		}
+	}
+
 	// Process agent status updates from each project
 	for _, project := range heartbeat.Projects {
 		for _, agentHB := range project.Agents {
@@ -869,11 +702,26 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			// start/stop lifecycle actions may leave the suspended phase.
 			agentSuspended := agent.Phase == string(state.PhaseSuspended)
 
+			// Reincarnation in flight is sticky like suspension (design §3.4
+			// Amendment A11 item 2): the worker owns Phase/Activity/ExitCode/
+			// ExitReason/Message for the duration of a migration, so a racing
+			// heartbeat — including one reporting the OLD container being torn
+			// down mid-reprovision, or a stale crash from before the restart —
+			// must not report a spurious failure while the new generation is
+			// still coming up. ContainerStatus and the Heartbeat/LastSeen bump
+			// still apply below; only the status fields the worker itself drives
+			// are suppressed.
+			agentReincarnating := reincarnationInFlight(agent)
+			if agentReincarnating {
+				statusUpdate.Message = ""
+			}
+
 			if agentHB.Phase != "" {
-				if agentSuspended {
+				if agentSuspended || agentReincarnating {
 					// Do not let the heartbeat change the phase or propagate
-					// terminal activities while suspended; leave statusUpdate.Phase
-					// unset so the hub's authoritative suspended phase is kept.
+					// terminal activities while suspended or reincarnating; leave
+					// statusUpdate.Phase unset so the hub's authoritative phase is
+					// kept.
 				} else if agentInTerminalPhase {
 					// Keep the hub's authoritative terminal phase; only
 					// allow the heartbeat to confirm it (not revert it).
@@ -966,7 +814,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 						}
 					}
 				}
-			} else if !agentInTerminalPhase && !agentSuspended {
+			} else if !agentInTerminalPhase && !agentSuspended && !agentReincarnating {
 				// Legacy path: no structured fields, derive from ContainerStatus
 				// Derive phase from container status to ensure agents
 				// registered via sync (not started via hub) get proper state.
@@ -1048,6 +896,12 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 						"agent_id", agent.ID, "harnessAuth", agentHB.HarnessAuth, "profile", agentHB.Profile, "error", err)
 				}
 			}
+
+			// Reconcile the max_agents_per_broker reservation against the
+			// phase this heartbeat will actually persist — e.g. release on an
+			// observed crash/exit, or best-effort re-reserve on an observed
+			// out-of-band restart (ptone/scion#1963).
+			s.reconcileBrokerQuotaOnPhaseChange(ctx, agent, agent.Phase, statusUpdate.Phase)
 
 			// Update the agent's status
 			if err := s.store.UpdateAgentStatus(ctx, agent.ID, statusUpdate); err != nil {

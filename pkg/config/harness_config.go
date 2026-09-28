@@ -18,6 +18,7 @@ import (
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -31,6 +32,14 @@ import (
 )
 
 const harnessConfigsDirName = "harness-configs"
+
+// ErrHarnessConfigNotFound marks a FindHarnessConfigDir failure where the
+// named harness-config was not found in any searched location (template,
+// project, or global directories). Wrapped into the returned error so
+// callers (e.g. the runtime broker's create/provision handlers) can
+// classify an unresolvable name as a client-facing 4xx naming the resource,
+// instead of folding it into a generic 5xx (ptone/scion#1316 fault 3).
+var ErrHarnessConfigNotFound = errors.New("harness-config not found")
 
 // HarnessConfigDir represents a harness-config directory on disk.
 // Located at ~/.scion/harness-configs/<name>/ or .scion/harness-configs/<name>/
@@ -103,11 +112,15 @@ func ParseHarnessConfigYAML(data []byte) (HarnessConfigEntry, error) {
 // subdirectories are checked first (highest precedence), per the harness-agnostic
 // template design (§3.4).
 func FindHarnessConfigDir(name string, projectPath string, templatePaths ...string) (*HarnessConfigDir, error) {
+	// Track which directories were searched so the error message is actionable.
+	var searched []string
+
 	// Check template-level first (highest precedence).
 	// If the directory exists but is invalid (e.g. missing config.yaml),
 	// fall through to project/global rather than returning an error.
 	for _, tplPath := range templatePaths {
 		tplHarnessConfigDir := filepath.Join(tplPath, harnessConfigsDirName, name)
+		searched = append(searched, tplHarnessConfigDir)
 		if info, err := os.Stat(tplHarnessConfigDir); err == nil && info.IsDir() {
 			if hcDir, err := LoadHarnessConfigDir(tplHarnessConfigDir); err == nil {
 				return hcDir, nil
@@ -118,6 +131,7 @@ func FindHarnessConfigDir(name string, projectPath string, templatePaths ...stri
 	// Check project-level
 	if projectPath != "" {
 		projectHarnessConfigDir := filepath.Join(projectPath, harnessConfigsDirName, name)
+		searched = append(searched, projectHarnessConfigDir)
 		if info, err := os.Stat(projectHarnessConfigDir); err == nil && info.IsDir() {
 			if hcDir, err := LoadHarnessConfigDir(projectHarnessConfigDir); err == nil {
 				return hcDir, nil
@@ -129,6 +143,7 @@ func FindHarnessConfigDir(name string, projectPath string, templatePaths ...stri
 	globalDir, err := GetGlobalDir()
 	if err == nil {
 		globalHarnessConfigDir := filepath.Join(globalDir, harnessConfigsDirName, name)
+		searched = append(searched, globalHarnessConfigDir)
 		if info, err := os.Stat(globalHarnessConfigDir); err == nil && info.IsDir() {
 			if hcDir, err := LoadHarnessConfigDir(globalHarnessConfigDir); err == nil {
 				return hcDir, nil
@@ -146,7 +161,7 @@ func FindHarnessConfigDir(name string, projectPath string, templatePaths ...stri
 		}, nil
 	}
 
-	return nil, fmt.Errorf("harness-config %q not found", name)
+	return nil, fmt.Errorf("harness-config %q not found (searched: %s): %w", name, strings.Join(searched, ", "), ErrHarnessConfigNotFound)
 }
 
 // ListHarnessConfigDirs lists all available harness-configs.

@@ -424,7 +424,7 @@ func TestGolden_ProjectOwnerFullAccess(t *testing.T) {
 // permissions except delete and agent.set_message_mode. Behavior narrows
 // intentionally.
 //
-// Reference: design.md §4, seed.go projectPermissionIDsExcluding("delete").
+// Reference: design.md §4, seed.go projectAdminPermissionIDs().
 func TestGolden_ProjectAdminAccess(t *testing.T) {
 	f := newGoldenFixture(t)
 	ctx := context.Background()
@@ -436,13 +436,20 @@ func TestGolden_ProjectAdminAccess(t *testing.T) {
 		ParentType: "project", ParentID: f.projectAlpha.ID,
 	}
 
-	// Admin should read, update, attach, message agents
-	// CO1: start/stop are enforced through ActionAttach, not as independent permissions.
+	// Admin should read, update, message agents
 	// ActionMessage is a scope-level permission but project-admin role includes agent.message.
-	for _, action := range []Action{ActionRead, ActionUpdate, ActionAttach, ActionMessage} {
+	for _, action := range []Action{ActionRead, ActionUpdate, ActionMessage} {
 		decision := f.authz.CheckAccess(ctx, admin, alphaAgentRes, action)
 		assert.True(t, decision.Allowed,
 			"project admin should have %s access on project agents", action)
+	}
+
+	// miller79/scion#88: admin must NOT attach to or reach ports of another
+	// member's agent — the agent runs with its owner's user-scoped secrets.
+	for _, action := range []Action{ActionAttach, ActionPortAccess} {
+		decision := f.authz.CheckAccess(ctx, admin, alphaAgentRes, action)
+		assert.False(t, decision.Allowed,
+			"project admin should NOT have %s access on another member's agent", action)
 	}
 
 	// CO1 CUTOVER: Admin cannot delete agents — project-admin role excludes
@@ -459,13 +466,10 @@ func TestGolden_ProjectAdminAccess(t *testing.T) {
 // TestGolden_ProjectMemberCreateAgents verifies that project members can
 // create agents within their project.
 //
-// Current behavior: The project:<slug>:member-create-agents policy grants
-// create, stop_all, message on agent resources scoped to the project.
+// Current behavior: The project-member RoleDefinition grants agent.create but
+// reserves messaging and bulk stop for owners, admins, or ancestry-based access.
 //
-// Intended post-cutover: Same behavior via project-member RoleDefinition
-// which includes agent.create, agent.stop_all, agent.message.
-//
-// Reference: design.md §4, seed.go projectMemberPermissionIDs().
+// Reference: design.md §4, seed.go projectMemberCuratedPermissionIDs().
 func TestGolden_ProjectMemberCreateAgents(t *testing.T) {
 	f := newGoldenFixture(t)
 	ctx := context.Background()

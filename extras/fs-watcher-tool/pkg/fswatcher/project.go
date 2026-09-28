@@ -47,7 +47,7 @@ func NewProjectDiscovery(dockerClient *client.Client, projectID string, debug bo
 func (g *ProjectDiscovery) Discover(ctx context.Context) ([]string, error) {
 	containers, err := g.dockerClient.ContainerList(ctx, container.ListOptions{
 		Filters: filters.NewArgs(
-			filters.Arg("label", fmt.Sprintf("scion.grove=%s", g.projectID)),
+			filters.Arg("label", fmt.Sprintf("scion.project=%s", g.projectID)),
 		),
 	})
 	if err != nil {
@@ -102,7 +102,7 @@ func (g *ProjectDiscovery) DiscoverForContainer(ctx context.Context, containerID
 	}
 
 	// Check that the container belongs to our project.
-	if projectLabel, ok := info.Config.Labels["scion.grove"]; !ok || projectLabel != g.projectID {
+	if projectLabel, ok := info.Config.Labels["scion.project"]; !ok || projectLabel != g.projectID {
 		return "", nil
 	}
 

@@ -240,16 +240,8 @@ func (_u *RuntimeBrokerUpdate) ClearRuntimes() *RuntimeBrokerUpdate {
 }
 
 // SetLabels sets the "labels" field.
-func (_u *RuntimeBrokerUpdate) SetLabels(v string) *RuntimeBrokerUpdate {
+func (_u *RuntimeBrokerUpdate) SetLabels(v map[string]string) *RuntimeBrokerUpdate {
 	_u.mutation.SetLabels(v)
-	return _u
-}
-
-// SetNillableLabels sets the "labels" field if the given value is not nil.
-func (_u *RuntimeBrokerUpdate) SetNillableLabels(v *string) *RuntimeBrokerUpdate {
-	if v != nil {
-		_u.SetLabels(*v)
-	}
 	return _u
 }
 
@@ -260,16 +252,8 @@ func (_u *RuntimeBrokerUpdate) ClearLabels() *RuntimeBrokerUpdate {
 }
 
 // SetAnnotations sets the "annotations" field.
-func (_u *RuntimeBrokerUpdate) SetAnnotations(v string) *RuntimeBrokerUpdate {
+func (_u *RuntimeBrokerUpdate) SetAnnotations(v map[string]string) *RuntimeBrokerUpdate {
 	_u.mutation.SetAnnotations(v)
-	return _u
-}
-
-// SetNillableAnnotations sets the "annotations" field if the given value is not nil.
-func (_u *RuntimeBrokerUpdate) SetNillableAnnotations(v *string) *RuntimeBrokerUpdate {
-	if v != nil {
-		_u.SetAnnotations(*v)
-	}
 	return _u
 }
 
@@ -565,16 +549,16 @@ func (_u *RuntimeBrokerUpdate) sqlSave(ctx context.Context) (_node int, err erro
 		_spec.ClearField(runtimebroker.FieldRuntimes, field.TypeString)
 	}
 	if value, ok := _u.mutation.Labels(); ok {
-		_spec.SetField(runtimebroker.FieldLabels, field.TypeString, value)
+		_spec.SetField(runtimebroker.FieldLabels, field.TypeJSON, value)
 	}
 	if _u.mutation.LabelsCleared() {
-		_spec.ClearField(runtimebroker.FieldLabels, field.TypeString)
+		_spec.ClearField(runtimebroker.FieldLabels, field.TypeJSON)
 	}
 	if value, ok := _u.mutation.Annotations(); ok {
-		_spec.SetField(runtimebroker.FieldAnnotations, field.TypeString, value)
+		_spec.SetField(runtimebroker.FieldAnnotations, field.TypeJSON, value)
 	}
 	if _u.mutation.AnnotationsCleared() {
-		_spec.ClearField(runtimebroker.FieldAnnotations, field.TypeString)
+		_spec.ClearField(runtimebroker.FieldAnnotations, field.TypeJSON)
 	}
 	if value, ok := _u.mutation.Endpoint(); ok {
 		_spec.SetField(runtimebroker.FieldEndpoint, field.TypeString, value)
@@ -856,16 +840,8 @@ func (_u *RuntimeBrokerUpdateOne) ClearRuntimes() *RuntimeBrokerUpdateOne {
 }
 
 // SetLabels sets the "labels" field.
-func (_u *RuntimeBrokerUpdateOne) SetLabels(v string) *RuntimeBrokerUpdateOne {
+func (_u *RuntimeBrokerUpdateOne) SetLabels(v map[string]string) *RuntimeBrokerUpdateOne {
 	_u.mutation.SetLabels(v)
-	return _u
-}
-
-// SetNillableLabels sets the "labels" field if the given value is not nil.
-func (_u *RuntimeBrokerUpdateOne) SetNillableLabels(v *string) *RuntimeBrokerUpdateOne {
-	if v != nil {
-		_u.SetLabels(*v)
-	}
 	return _u
 }
 
@@ -876,16 +852,8 @@ func (_u *RuntimeBrokerUpdateOne) ClearLabels() *RuntimeBrokerUpdateOne {
 }
 
 // SetAnnotations sets the "annotations" field.
-func (_u *RuntimeBrokerUpdateOne) SetAnnotations(v string) *RuntimeBrokerUpdateOne {
+func (_u *RuntimeBrokerUpdateOne) SetAnnotations(v map[string]string) *RuntimeBrokerUpdateOne {
 	_u.mutation.SetAnnotations(v)
-	return _u
-}
-
-// SetNillableAnnotations sets the "annotations" field if the given value is not nil.
-func (_u *RuntimeBrokerUpdateOne) SetNillableAnnotations(v *string) *RuntimeBrokerUpdateOne {
-	if v != nil {
-		_u.SetAnnotations(*v)
-	}
 	return _u
 }
 
@@ -1211,16 +1179,16 @@ func (_u *RuntimeBrokerUpdateOne) sqlSave(ctx context.Context) (_node *RuntimeBr
 		_spec.ClearField(runtimebroker.FieldRuntimes, field.TypeString)
 	}
 	if value, ok := _u.mutation.Labels(); ok {
-		_spec.SetField(runtimebroker.FieldLabels, field.TypeString, value)
+		_spec.SetField(runtimebroker.FieldLabels, field.TypeJSON, value)
 	}
 	if _u.mutation.LabelsCleared() {
-		_spec.ClearField(runtimebroker.FieldLabels, field.TypeString)
+		_spec.ClearField(runtimebroker.FieldLabels, field.TypeJSON)
 	}
 	if value, ok := _u.mutation.Annotations(); ok {
-		_spec.SetField(runtimebroker.FieldAnnotations, field.TypeString, value)
+		_spec.SetField(runtimebroker.FieldAnnotations, field.TypeJSON, value)
 	}
 	if _u.mutation.AnnotationsCleared() {
-		_spec.ClearField(runtimebroker.FieldAnnotations, field.TypeString)
+		_spec.ClearField(runtimebroker.FieldAnnotations, field.TypeJSON)
 	}
 	if value, ok := _u.mutation.Endpoint(); ok {
 		_spec.SetField(runtimebroker.FieldEndpoint, field.TypeString, value)

@@ -50,7 +50,10 @@ message StructuredMessage {
   map<string, string> metadata = 17;
   string channel = 18;
   string thread_id = 19;
-  string visibility = 20;
+  reserved 20;
+  reserved "visibility";
+  string conversation_id = 21;
+  string delivery_text = 22;
 }
 
 message ConfigureRequest {

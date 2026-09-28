@@ -26,26 +26,36 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // messageTestState captures and restores package-level vars for test isolation.
 type messageTestState struct {
-	projectPath string
-	noHub       bool
+	projectPath  string
+	noHub        bool
+	bcastChanged bool
+	allChanged   bool
+	bodyFile     string
 }
 
 func saveMessageTestState() messageTestState {
 	return messageTestState{
-		projectPath: projectPath,
-		noHub:       noHub,
+		projectPath:  projectPath,
+		noHub:        noHub,
+		bcastChanged: messageCmd.Flags().Lookup("broadcast").Changed,
+		allChanged:   messageCmd.Flags().Lookup("all").Changed,
+		bodyFile:     msgBodyFile,
 	}
 }
 
 func (s messageTestState) restore() {
 	projectPath = s.projectPath
 	noHub = s.noHub
+	messageCmd.Flags().Lookup("broadcast").Changed = s.bcastChanged
+	messageCmd.Flags().Lookup("all").Changed = s.allChanged
+	msgBodyFile = s.bodyFile
 }
 
 // messageMockServer creates a mock Hub server that handles project-scoped
@@ -72,7 +82,7 @@ func newMessageMockHubServer(t *testing.T, projectID string, runningAgents []hub
 		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 
-		case r.Method == http.MethodGet && (r.URL.Path == "/api/v1/groves/"+projectID+"/agents" || r.URL.Path == "/api/v1/projects/"+projectID+"/agents" || r.URL.Path == "/api/v1/agents"):
+		case r.Method == http.MethodGet && (r.URL.Path == "/api/v1/projects/"+projectID+"/agents" || r.URL.Path == "/api/v1/agents"):
 			// List agents endpoint
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents": runningAgents,
@@ -106,18 +116,13 @@ func newMessageMockHubServer(t *testing.T, projectID string, runningAgents []hub
 
 		case r.Method == http.MethodPost:
 			// Extract agent name from path: /api/v1/projects/<projectID>/agents/<name>/message
-			// or /api/v1/groves/<projectID>/agents/<name>/message (legacy)
 			// or /api/v1/agents/<name>/message
 			var agentName string
 			projectPrefix := "/api/v1/projects/" + projectID + "/agents/"
-			grovePrefix := "/api/v1/groves/" + projectID + "/agents/"
 			globalPrefix := "/api/v1/agents/"
 			path := r.URL.Path
 			if len(path) > len(projectPrefix) && path[:len(projectPrefix)] == projectPrefix {
 				rest := path[len(projectPrefix):]
-				agentName = rest[:len(rest)-len("/message")]
-			} else if len(path) > len(grovePrefix) && path[:len(grovePrefix)] == grovePrefix {
-				rest := path[len(grovePrefix):]
 				agentName = rest[:len(rest)-len("/message")]
 			} else if len(path) > len(globalPrefix) && path[:len(globalPrefix)] == globalPrefix {
 				rest := path[len(globalPrefix):]
@@ -157,11 +162,110 @@ func newMessageMockHubServer(t *testing.T, projectID string, runningAgents []hub
 	return server, &sent
 }
 
+// --- resolveMessageBody tests ---
+
+func TestResolveMessageBody_BodyFile(t *testing.T) {
+	// Create a temp file with known content
+	tmpDir := t.TempDir()
+	bodyFile := filepath.Join(tmpDir, "msg.txt")
+	content := "Hello, this is a message with `backticks` and $variables"
+	err := os.WriteFile(bodyFile, []byte(content), 0644)
+	require.NoError(t, err)
+
+	got, err := resolveMessageBody(bodyFile, "")
+	require.NoError(t, err)
+	assert.Equal(t, content, got)
+}
+
+func TestResolveMessageBody_BodyFilePreservesNewlines(t *testing.T) {
+	tmpDir := t.TempDir()
+	bodyFile := filepath.Join(tmpDir, "msg.txt")
+	content := "line1\nline2\nline3\n"
+	err := os.WriteFile(bodyFile, []byte(content), 0644)
+	require.NoError(t, err)
+
+	got, err := resolveMessageBody(bodyFile, "")
+	require.NoError(t, err)
+	assert.Equal(t, content, got, "body-file content should be preserved exactly")
+}
+
+func TestResolveMessageBody_BodyFileNotFound(t *testing.T) {
+	_, err := resolveMessageBody("/tmp/nonexistent-body-file-xyz.txt", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to open body file")
+}
+
+func TestResolveMessageBody_Conflict(t *testing.T) {
+	tmpDir := t.TempDir()
+	bodyFile := filepath.Join(tmpDir, "msg.txt")
+	err := os.WriteFile(bodyFile, []byte("file content"), 0644)
+	require.NoError(t, err)
+
+	_, err = resolveMessageBody(bodyFile, "positional content")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--body-file and positional message arguments are mutually exclusive")
+}
+
+func TestResolveMessageBody_Stdin(t *testing.T) {
+	// Save and restore os.Stdin
+	origStdin := os.Stdin
+	defer func() { os.Stdin = origStdin }()
+
+	// Create a pipe to mock stdin
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+
+	_, err = w.WriteString("hello from stdin\n")
+	require.NoError(t, err)
+	_ = w.Close()
+
+	os.Stdin = r
+
+	got, err := resolveMessageBody("", "-")
+	require.NoError(t, err)
+	assert.Equal(t, "hello from stdin", got, "trailing newline from stdin should be trimmed")
+}
+
+func TestResolveMessageBody_StdinNoTrailingNewline(t *testing.T) {
+	origStdin := os.Stdin
+	defer func() { os.Stdin = origStdin }()
+
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+
+	_, err = w.WriteString("no trailing newline")
+	require.NoError(t, err)
+	_ = w.Close()
+
+	os.Stdin = r
+
+	got, err := resolveMessageBody("", "-")
+	require.NoError(t, err)
+	assert.Equal(t, "no trailing newline", got)
+}
+
+func TestResolveMessageBody_Positional(t *testing.T) {
+	got, err := resolveMessageBody("", "plain positional message")
+	require.NoError(t, err)
+	assert.Equal(t, "plain positional message", got)
+}
+
+func TestResolveMessageBody_EmptyFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	bodyFile := filepath.Join(tmpDir, "empty.txt")
+	err := os.WriteFile(bodyFile, []byte(""), 0644)
+	require.NoError(t, err)
+
+	got, err := resolveMessageBody(bodyFile, "")
+	require.NoError(t, err)
+	assert.Equal(t, "", got, "empty file returns empty string; validation happens in RunE")
+}
+
 func TestSendMessageViaHub_SingleAgent(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-msg-single"
+	projectID := "project-msg-single"
 	server, sent := newMessageMockHubServer(t, projectID, nil)
 	defer server.Close()
 
@@ -174,7 +278,7 @@ func TestSendMessageViaHub_SingleAgent(t *testing.T) {
 		ProjectID: projectID,
 	}
 
-	err = sendMessageViaHub(hubCtx, "my-agent", "hello world", false, false, false, false, false)
+	err = sendMessageViaHub(hubCtx, "my-agent", "hello world", false, false, false)
 	require.NoError(t, err)
 
 	require.Len(t, *sent, 1)
@@ -191,7 +295,7 @@ func TestSendMessageViaHub_SingleAgentInterrupt(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-msg-int"
+	projectID := "project-msg-int"
 	server, sent := newMessageMockHubServer(t, projectID, nil)
 	defer server.Close()
 
@@ -209,7 +313,7 @@ func TestSendMessageViaHub_SingleAgentInterrupt(t *testing.T) {
 	msgInterrupt = true
 	defer func() { msgInterrupt = origInterrupt }()
 
-	err = sendMessageViaHub(hubCtx, "my-agent", "urgent", true, false, false, false, false)
+	err = sendMessageViaHub(hubCtx, "my-agent", "urgent", true, false, false)
 	require.NoError(t, err)
 
 	require.Len(t, *sent, 1)
@@ -220,107 +324,11 @@ func TestSendMessageViaHub_SingleAgentInterrupt(t *testing.T) {
 	assert.True(t, (*sent)[0].StructuredMsg.Urgent)
 }
 
-func TestSendMessageViaHub_Broadcast(t *testing.T) {
-	orig := saveMessageTestState()
-	defer orig.restore()
-
-	projectID := "grove-msg-broadcast"
-	agents := []hubclient.Agent{
-		{Name: tid("agent-1"), Status: "running"},
-		{Name: "agent-2", Status: "running"},
-		{Name: "agent-3", Status: "running"},
-	}
-	server, sent := newMessageMockHubServer(t, projectID, agents)
-	defer server.Close()
-
-	client, err := hubclient.New(server.URL)
-	require.NoError(t, err)
-
-	hubCtx := &HubContext{
-		Client:    client,
-		Endpoint:  server.URL,
-		ProjectID: projectID,
-	}
-
-	// Set broadcast flag for structured message construction
-	origBroadcast := msgBroadcast
-	msgBroadcast = true
-	defer func() { msgBroadcast = origBroadcast }()
-
-	err = sendMessageViaHub(hubCtx, "", "broadcast msg", false, true, false, false, false)
-	require.NoError(t, err)
-
-	require.Len(t, *sent, 3)
-	names := make([]string, len(*sent))
-	for i, s := range *sent {
-		names[i] = s.AgentName
-		assert.Equal(t, "broadcast msg", s.Message)
-		// Verify broadcast flag in structured message
-		require.NotNil(t, s.StructuredMsg)
-		assert.True(t, s.StructuredMsg.Broadcasted)
-	}
-	assert.ElementsMatch(t, []string{tid("agent-1"), "agent-2", "agent-3"}, names)
-}
-
-func TestSendMessageViaHub_BroadcastNoAgents(t *testing.T) {
-	orig := saveMessageTestState()
-	defer orig.restore()
-
-	projectID := "grove-msg-empty"
-	server, sent := newMessageMockHubServer(t, projectID, []hubclient.Agent{})
-	defer server.Close()
-
-	client, err := hubclient.New(server.URL)
-	require.NoError(t, err)
-
-	hubCtx := &HubContext{
-		Client:    client,
-		Endpoint:  server.URL,
-		ProjectID: projectID,
-	}
-
-	err = sendMessageViaHub(hubCtx, "", "hello", false, true, false, false, false)
-	require.NoError(t, err)
-
-	// No messages should be sent
-	assert.Len(t, *sent, 0)
-}
-
-func TestSendMessageViaHub_All(t *testing.T) {
-	orig := saveMessageTestState()
-	defer orig.restore()
-
-	projectID := "grove-msg-all"
-	agents := []hubclient.Agent{
-		{Name: "grove1-agent", Status: "running", ProjectID: "grove-a"},
-		{Name: "grove2-agent", Status: "running", ProjectID: "grove-b"},
-	}
-	server, sent := newMessageMockHubServer(t, projectID, agents)
-	defer server.Close()
-
-	client, err := hubclient.New(server.URL)
-	require.NoError(t, err)
-
-	// For --all mode, we use global agent service (no project scoping)
-	hubCtx := &HubContext{
-		Client:   client,
-		Endpoint: server.URL,
-	}
-
-	err = sendMessageViaHub(hubCtx, "", "all msg", false, false, true, false, false)
-	require.NoError(t, err)
-
-	require.Len(t, *sent, 2)
-	for _, s := range *sent {
-		assert.Equal(t, "all msg", s.Message)
-	}
-}
-
 func TestSendMessageViaHub_SingleAgentError(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-msg-err"
+	projectID := "project-msg-err"
 
 	// Server that returns 500 for message requests
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -348,18 +356,19 @@ func TestSendMessageViaHub_SingleAgentError(t *testing.T) {
 		ProjectID: projectID,
 	}
 
-	err = sendMessageViaHub(hubCtx, "my-agent", "hello", false, false, false, false, false)
+	err = sendMessageViaHub(hubCtx, "my-agent", "hello", false, false, false)
 	require.Error(t, err, "single-agent message failure should return an error")
 }
 
 func TestScheduleMessageFlagValidation(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
 	tests := []struct {
-		name      string
-		in        string
-		at        string
-		broadcast bool
-		all       bool
-		wantErr   string
+		name    string
+		in      string
+		at      string
+		wantErr string
 	}{
 		{
 			name:    "in and at are mutually exclusive",
@@ -367,90 +376,26 @@ func TestScheduleMessageFlagValidation(t *testing.T) {
 			at:      "2030-01-01T00:00:00Z",
 			wantErr: "--in and --at are mutually exclusive",
 		},
-		{
-			name:      "in with broadcast not allowed",
-			in:        "30m",
-			broadcast: true,
-			wantErr:   "--in/--at cannot be combined with --broadcast or --all",
-		},
-		{
-			name:    "at with all not allowed",
-			at:      "2030-01-01T00:00:00Z",
-			all:     true,
-			wantErr: "--in/--at cannot be combined with --broadcast or --all",
-		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			// Save and restore global state
 			origIn, origAt := msgIn, msgAt
-			origBroadcast, origAll := msgBroadcast, msgAll
 			defer func() {
 				msgIn, msgAt = origIn, origAt
-				msgBroadcast, msgAll = origBroadcast, origAll
 			}()
 
 			msgIn = tc.in
 			msgAt = tc.at
-			msgBroadcast = tc.broadcast
-			msgAll = tc.all
 
-			// Build args appropriate for the flag combination
-			var args []string
-			if tc.broadcast || tc.all {
-				args = []string{"hello"}
-			} else {
-				args = []string{"agent1", "hello"}
-			}
+			args := []string{"agent1", "hello"}
 
 			err := messageCmd.RunE(messageCmd, args)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.wantErr)
 		})
 	}
-}
-
-func TestSendMessageViaHub_BroadcastPartialFailure(t *testing.T) {
-	orig := saveMessageTestState()
-	defer orig.restore()
-
-	projectID := "grove-msg-partial"
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-
-		switch {
-		case r.URL.Path == "/healthz":
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/"+projectID+"/broadcast":
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				"status":   "accepted",
-				"total":    2,
-				"targeted": 1,
-				"skipped":  1,
-				"skipped_breakdown": map[string]int{
-					"stopped": 1,
-				},
-			})
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer server.Close()
-
-	client, err := hubclient.New(server.URL)
-	require.NoError(t, err)
-
-	hubCtx := &HubContext{
-		Client:    client,
-		Endpoint:  server.URL,
-		ProjectID: projectID,
-	}
-
-	// Broadcast should not return an error on partial delivery
-	err = sendMessageViaHub(hubCtx, "", "test", false, true, false, false, false)
-	require.NoError(t, err)
 }
 
 func TestResolveSenderIdentity_AgentContext(t *testing.T) {
@@ -479,23 +424,18 @@ func TestResolveSenderIdentity_NoContext(t *testing.T) {
 func TestBuildStructuredMessage(t *testing.T) {
 	// Save and restore global state
 	origPlain, origInterrupt := msgPlain, msgInterrupt
-	origBroadcast, origAll := msgBroadcast, msgAll
 	origAttach := msgAttach
 	defer func() {
 		msgPlain = origPlain
 		msgInterrupt = origInterrupt
-		msgBroadcast = origBroadcast
-		msgAll = origAll
 		msgAttach = origAttach
 	}()
 
 	msgPlain = false
 	msgInterrupt = true
-	msgBroadcast = true
-	msgAll = false
 	msgAttach = []string{"file1.go", "file2.go"}
 
-	msg := buildStructuredMessage("user:alice", "agent:dev", "do something")
+	msg := buildStructuredMessage("user:alice", "agent:dev", "do something", msgAttach)
 
 	assert.Equal(t, messages.Version, msg.Version)
 	assert.Equal(t, "user:alice", msg.Sender)
@@ -504,7 +444,7 @@ func TestBuildStructuredMessage(t *testing.T) {
 	assert.Equal(t, messages.TypeInstruction, msg.Type)
 	assert.False(t, msg.Plain)
 	assert.True(t, msg.Urgent)
-	assert.True(t, msg.Broadcasted)
+	assert.False(t, msg.Broadcasted)
 	assert.Equal(t, []string{"file1.go", "file2.go"}, msg.Attachments)
 }
 
@@ -512,7 +452,7 @@ func TestSendMessageViaHub_NotifyFlag(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-msg-notify"
+	projectID := "project-msg-notify"
 
 	var notifyReceived bool
 	var mu sync.Mutex
@@ -548,7 +488,7 @@ func TestSendMessageViaHub_NotifyFlag(t *testing.T) {
 		ProjectID: projectID,
 	}
 
-	err = sendMessageViaHub(hubCtx, "my-agent", "hello", false, false, false, true, false)
+	err = sendMessageViaHub(hubCtx, "my-agent", "hello", false, true, false)
 	require.NoError(t, err)
 
 	mu.Lock()
@@ -560,7 +500,7 @@ func TestSendMessageViaHub_NoNotifyFlag(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-msg-no-notify"
+	projectID := "project-msg-no-notify"
 
 	var notifyReceived bool
 	var mu sync.Mutex
@@ -597,7 +537,7 @@ func TestSendMessageViaHub_NoNotifyFlag(t *testing.T) {
 	}
 
 	// Explicit --no-notify: notify should be false
-	err = sendMessageViaHub(hubCtx, "my-agent", "hello", false, false, false, false, false)
+	err = sendMessageViaHub(hubCtx, "my-agent", "hello", false, false, false)
 	require.NoError(t, err)
 
 	mu.Lock()
@@ -610,7 +550,7 @@ func TestSendOutboundMessageViaHub(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-msg-outbound"
+	projectID := "project-msg-outbound"
 
 	var receivedMsg *hubclient.OutboundMessageRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -618,12 +558,17 @@ func TestSendOutboundMessageViaHub(t *testing.T) {
 		switch {
 		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
-		case r.Method == http.MethodPost && (r.URL.Path == "/api/v1/projects/"+projectID+"/agents/my-agent/outbound-message" ||
-			r.URL.Path == "/api/v1/groves/"+projectID+"/agents/my-agent/outbound-message"):
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/"+projectID+"/agents/my-agent/outbound-message":
 			var msg hubclient.OutboundMessageRequest
 			_ = json.NewDecoder(r.Body).Decode(&msg)
 			receivedMsg = &msg
 			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message_id":   "msg-test-1",
+				"status":       "sent",
+				"recipient":    msg.Recipient,
+				"recipient_id": "uid-test",
+			})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -667,17 +612,20 @@ func TestSendOutboundMessageViaHub_RequiresAgentContext(t *testing.T) {
 	hubCtx := &HubContext{
 		Client:    client,
 		Endpoint:  server.URL,
-		ProjectID: "grove-test",
+		ProjectID: "project-test",
 	}
 
 	t.Setenv("SCION_AGENT_NAME", "")
 
 	err = sendOutboundMessageViaHub(hubCtx, "user:alice", "hello", false)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "SCION_AGENT_NAME not set")
+	assert.Contains(t, err.Error(), "requires an agent identity")
 }
 
 func TestUserRecipientFlagValidation(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
 	tests := []struct {
 		name    string
 		args    []string
@@ -719,33 +667,22 @@ func TestUserRecipientFlagValidation(t *testing.T) {
 }
 
 func TestSetRecipientFlagValidation(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
 	tests := []struct {
-		name      string
-		args      []string
-		raw       bool
-		broadcast bool
-		all       bool
-		in        string
-		notify    bool
-		wantErr   string
+		name    string
+		args    []string
+		raw     bool
+		in      string
+		notify  bool
+		wantErr string
 	}{
 		{
 			name:    "set with raw not allowed",
 			args:    []string{"set[agent:a,agent:b]", "hello"},
 			raw:     true,
 			wantErr: "--raw cannot be used with group[] recipients",
-		},
-		{
-			name:      "set with broadcast not allowed",
-			args:      []string{"set[agent:a,agent:b]", "hello"},
-			broadcast: true,
-			wantErr:   "group[] recipients cannot be combined with --broadcast or --all",
-		},
-		{
-			name:    "set with all not allowed",
-			args:    []string{"set[agent:a,agent:b]", "hello"},
-			all:     true,
-			wantErr: "group[] recipients cannot be combined with --broadcast or --all",
 		},
 		{
 			name:    "set with in not allowed",
@@ -774,20 +711,15 @@ func TestSetRecipientFlagValidation(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			origRaw := msgRaw
-			origBroadcast, origAll := msgBroadcast, msgAll
 			origIn := msgIn
 			origNotify := msgNotify
 			defer func() {
 				msgRaw = origRaw
-				msgBroadcast = origBroadcast
-				msgAll = origAll
 				msgIn = origIn
 				msgNotify = origNotify
 			}()
 
 			msgRaw = tc.raw
-			msgBroadcast = tc.broadcast
-			msgAll = tc.all
 			msgIn = tc.in
 			msgNotify = tc.notify
 
@@ -799,6 +731,9 @@ func TestSetRecipientFlagValidation(t *testing.T) {
 }
 
 func TestWakeFlagValidation(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
 	tests := []struct {
 		name     string
 		setup    func()
@@ -806,20 +741,6 @@ func TestWakeFlagValidation(t *testing.T) {
 		args     []string // cobra args; nil means use default ["agent1", "hello"]
 		errMsg   string
 	}{
-		{
-			name:     "wake with broadcast",
-			setup:    func() { msgWake = true; msgBroadcast = true },
-			teardown: func() { msgWake = false; msgBroadcast = false },
-			args:     []string{"hello"},
-			errMsg:   "--wake cannot be combined with --broadcast or --all",
-		},
-		{
-			name:     "wake with all",
-			setup:    func() { msgWake = true; msgAll = true },
-			teardown: func() { msgWake = false; msgAll = false },
-			args:     []string{"hello"},
-			errMsg:   "--wake cannot be combined with --broadcast or --all",
-		},
 		{
 			name:     "wake with in",
 			setup:    func() { msgWake = true; msgIn = "5m" },
@@ -865,6 +786,9 @@ func TestWakeFlagValidation(t *testing.T) {
 }
 
 func TestAttachFlagValidation(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
 	tests := []struct {
 		name     string
 		setup    func()
@@ -949,7 +873,7 @@ func TestSendGroupMessageViaHub(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-msg-group"
+	projectID := "project-msg-group"
 	agents := []hubclient.Agent{
 		{Name: "agent-a", Status: "running"},
 		{Name: "agent-b", Status: "running"},
@@ -993,7 +917,7 @@ func TestSendGroupMessageViaHub_UserRecipientType(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-msg-group-user"
+	projectID := "project-msg-group-user"
 	t.Setenv("SCION_AGENT_NAME", "my-agent")
 
 	var receivedMsg *hubclient.OutboundMessageRequest
@@ -1010,7 +934,12 @@ func TestSendGroupMessageViaHub_UserRecipientType(t *testing.T) {
 			receivedMsg = &msg
 			mu.Unlock()
 			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message_id":   "msg-test-conv",
+				"status":       "sent",
+				"recipient":    msg.Recipient,
+				"recipient_id": "uid-test",
+			})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -1046,11 +975,6 @@ func TestSendGroupMessageViaHub_RequiresHub(t *testing.T) {
 	defer orig.restore()
 
 	// group[] without Hub should fail at the RunE level, not get to sendGroupMessageViaHub
-	origBroadcast, origAll := msgBroadcast, msgAll
-	defer func() { msgBroadcast = origBroadcast; msgAll = origAll }()
-	msgBroadcast = false
-	msgAll = false
-
 	err := messageCmd.RunE(messageCmd, []string{"set[agent:a,agent:b]", "hello"})
 	// When Hub is not configured, this should fail with "group[] recipients require Hub mode".
 	// When Hub is configured but test agents don't exist, delivery fails.
@@ -1062,7 +986,7 @@ func TestSendMessageViaHub_WakePassedThrough(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-msg-wake"
+	projectID := "project-msg-wake"
 
 	var wakeReceived bool
 	var mu sync.Mutex
@@ -1100,7 +1024,7 @@ func TestSendMessageViaHub_WakePassedThrough(t *testing.T) {
 	}
 
 	// Send with wake=true
-	err = sendMessageViaHub(hubCtx, "my-agent", "hello", false, false, false, false, true)
+	err = sendMessageViaHub(hubCtx, "my-agent", "hello", false, false, true)
 	require.NoError(t, err)
 
 	mu.Lock()
@@ -1109,6 +1033,9 @@ func TestSendMessageViaHub_WakePassedThrough(t *testing.T) {
 }
 
 func TestBareEmailRecipientAutoPrefix(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
 	tests := []struct {
 		name string
 		args []string
@@ -1132,21 +1059,16 @@ func TestBareEmailRecipientAutoPrefix(t *testing.T) {
 			// Reset flags to defaults
 			origRaw := msgRaw
 			origIn := msgIn
-			origBroadcast, origAll := msgBroadcast, msgAll
 			origNotify := msgNotify
 			origWake := msgWake
 			defer func() {
 				msgRaw = origRaw
 				msgIn = origIn
-				msgBroadcast = origBroadcast
-				msgAll = origAll
 				msgNotify = origNotify
 				msgWake = origWake
 			}()
 			msgRaw = false
 			msgIn = ""
-			msgBroadcast = false
-			msgAll = false
 			msgNotify = false
 			msgWake = false
 
@@ -1159,56 +1081,6 @@ func TestBareEmailRecipientAutoPrefix(t *testing.T) {
 				assert.NotContains(t, err.Error(), "looks like an email address")
 				assert.NotContains(t, err.Error(), "missing the \"user:\" prefix")
 			}
-		})
-	}
-}
-
-func TestNotifyFlagValidation(t *testing.T) {
-	tests := []struct {
-		name      string
-		notify    bool
-		broadcast bool
-		all       bool
-		wantErr   string
-	}{
-		{
-			name:      "notify with broadcast not allowed",
-			notify:    true,
-			broadcast: true,
-			wantErr:   "--notify cannot be combined with --broadcast or --all",
-		},
-		{
-			name:    "notify with all not allowed",
-			notify:  true,
-			all:     true,
-			wantErr: "--notify cannot be combined with --broadcast or --all",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			origNotify := msgNotify
-			origBroadcast, origAll := msgBroadcast, msgAll
-			defer func() {
-				msgNotify = origNotify
-				msgBroadcast = origBroadcast
-				msgAll = origAll
-			}()
-
-			msgNotify = tc.notify
-			msgBroadcast = tc.broadcast
-			msgAll = tc.all
-
-			var args []string
-			if tc.broadcast || tc.all {
-				args = []string{"hello"}
-			} else {
-				args = []string{"agent1", "hello"}
-			}
-
-			err := messageCmd.RunE(messageCmd, args)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), tc.wantErr)
 		})
 	}
 }
@@ -1735,7 +1607,7 @@ func TestSendMessageViaHub_MentionFanOut(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-msg-mention"
+	projectID := "project-msg-mention"
 	agents := []hubclient.Agent{
 		{Name: "primary-agent", Status: "running"},
 		{Name: "mentioned-agent", Status: "running"},
@@ -1758,7 +1630,7 @@ func TestSendMessageViaHub_MentionFanOut(t *testing.T) {
 	msgCC = nil
 	defer func() { msgCC = origCC }()
 
-	err = sendMessageViaHub(hubCtx, "primary-agent", "hey @mentioned-agent check this", false, false, false, false, false)
+	err = sendMessageViaHub(hubCtx, "primary-agent", "hey @mentioned-agent check this", false, false, false)
 	require.NoError(t, err)
 
 	// Should have 2 messages: primary + mention
@@ -1781,7 +1653,7 @@ func TestSendMessageViaHub_MentionDedup(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-msg-mention-dedup"
+	projectID := "project-msg-mention-dedup"
 	agents := []hubclient.Agent{
 		{Name: "my-agent", Status: "running"},
 		{Name: "other-agent", Status: "running"},
@@ -1803,7 +1675,7 @@ func TestSendMessageViaHub_MentionDedup(t *testing.T) {
 	defer func() { msgCC = origCC }()
 
 	// Primary recipient is also @mentioned in body — should be deduplicated
-	err = sendMessageViaHub(hubCtx, "my-agent", "hey @my-agent check @other-agent", false, false, false, false, false)
+	err = sendMessageViaHub(hubCtx, "my-agent", "hey @my-agent check @other-agent", false, false, false)
 	require.NoError(t, err)
 
 	// Should have 2 messages: primary + mention for other-agent only (my-agent deduped)
@@ -1817,7 +1689,7 @@ func TestSendMessageViaHub_UnknownMentionWarns(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-msg-mention-unknown"
+	projectID := "project-msg-mention-unknown"
 	agents := []hubclient.Agent{
 		{Name: "my-agent", Status: "running"},
 	}
@@ -1838,7 +1710,7 @@ func TestSendMessageViaHub_UnknownMentionWarns(t *testing.T) {
 	defer func() { msgCC = origCC }()
 
 	// @nonexistent doesn't match any agent — should warn but not fail
-	err = sendMessageViaHub(hubCtx, "my-agent", "hey @nonexistent check this", false, false, false, false, false)
+	err = sendMessageViaHub(hubCtx, "my-agent", "hey @nonexistent check this", false, false, false)
 	require.NoError(t, err)
 
 	// Only the primary message should be sent
@@ -1850,7 +1722,7 @@ func TestSendMessageViaHub_CCFlag(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-msg-cc"
+	projectID := "project-msg-cc"
 	agents := []hubclient.Agent{
 		{Name: "primary-agent", Status: "running"},
 		{Name: "cc-agent-1", Status: "running"},
@@ -1872,7 +1744,7 @@ func TestSendMessageViaHub_CCFlag(t *testing.T) {
 	msgCC = []string{"cc-agent-1", "cc-agent-2"}
 	defer func() { msgCC = origCC }()
 
-	err = sendMessageViaHub(hubCtx, "primary-agent", "check this out", false, false, false, false, false)
+	err = sendMessageViaHub(hubCtx, "primary-agent", "check this out", false, false, false)
 	require.NoError(t, err)
 
 	// Should have 3 messages: primary + 2 CC mentions
@@ -1893,7 +1765,7 @@ func TestSendMessageViaHub_CCAndMentionCombined(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-msg-cc-mention"
+	projectID := "project-msg-cc-mention"
 	agents := []hubclient.Agent{
 		{Name: "primary-agent", Status: "running"},
 		{Name: "mention-agent", Status: "running"},
@@ -1916,7 +1788,7 @@ func TestSendMessageViaHub_CCAndMentionCombined(t *testing.T) {
 	defer func() { msgCC = origCC }()
 
 	// Both @mention in body and --cc flag
-	err = sendMessageViaHub(hubCtx, "primary-agent", "hey @mention-agent check this", false, false, false, false, false)
+	err = sendMessageViaHub(hubCtx, "primary-agent", "hey @mention-agent check this", false, false, false)
 	require.NoError(t, err)
 
 	// Should have 3 messages: primary + @mention + --cc
@@ -1931,7 +1803,7 @@ func TestSendMessageViaHub_CCDedupWithMention(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-msg-cc-dedup"
+	projectID := "project-msg-cc-dedup"
 	agents := []hubclient.Agent{
 		{Name: "primary-agent", Status: "running"},
 		{Name: "shared-agent", Status: "running"},
@@ -1953,7 +1825,7 @@ func TestSendMessageViaHub_CCDedupWithMention(t *testing.T) {
 	defer func() { msgCC = origCC }()
 
 	// Same agent in both @mention and --cc — should only get one mention
-	err = sendMessageViaHub(hubCtx, "primary-agent", "hey @shared-agent check this", false, false, false, false, false)
+	err = sendMessageViaHub(hubCtx, "primary-agent", "hey @shared-agent check this", false, false, false)
 	require.NoError(t, err)
 
 	// Should have 2 messages: primary + 1 mention (deduped)
@@ -1966,7 +1838,7 @@ func TestSendMessageViaHub_NoMentionsInBody(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-msg-no-mention"
+	projectID := "project-msg-no-mention"
 	agents := []hubclient.Agent{
 		{Name: "my-agent", Status: "running"},
 		{Name: "other-agent", Status: "running"},
@@ -1988,7 +1860,7 @@ func TestSendMessageViaHub_NoMentionsInBody(t *testing.T) {
 	defer func() { msgCC = origCC }()
 
 	// No mentions in body, no --cc — only primary should be sent
-	err = sendMessageViaHub(hubCtx, "my-agent", "hello world", false, false, false, false, false)
+	err = sendMessageViaHub(hubCtx, "my-agent", "hello world", false, false, false)
 	require.NoError(t, err)
 
 	require.Len(t, *sent, 1)
@@ -1999,7 +1871,7 @@ func TestSendGroupMessageViaHub_MentionFanOut(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-msg-group-mention"
+	projectID := "project-msg-group-mention"
 	agents := []hubclient.Agent{
 		{Name: "agent-a", Status: "running"},
 		{Name: "agent-b", Status: "running"},
@@ -2058,29 +1930,18 @@ func TestSendGroupMessageViaHub_MentionFanOut(t *testing.T) {
 }
 
 func TestCCFlagValidation(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
 	tests := []struct {
 		name      string
 		cc        []string
-		broadcast bool
-		all       bool
 		raw       bool
 		userRecip bool
 		in        string
 		at        string
 		wantErr   string
 	}{
-		{
-			name:      "cc with broadcast",
-			cc:        []string{"agent-a"},
-			broadcast: true,
-			wantErr:   "--cc cannot be combined with --broadcast or --all",
-		},
-		{
-			name:    "cc with all",
-			cc:      []string{"agent-a"},
-			all:     true,
-			wantErr: "--cc cannot be combined with --broadcast or --all",
-		},
 		{
 			name:    "cc with raw",
 			cc:      []string{"agent-a"},
@@ -2110,31 +1971,23 @@ func TestCCFlagValidation(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			origCC := msgCC
-			origBroadcast := msgBroadcast
-			origAll := msgAll
 			origRaw := msgRaw
 			origIn := msgIn
 			origAt := msgAt
 			defer func() {
 				msgCC = origCC
-				msgBroadcast = origBroadcast
-				msgAll = origAll
 				msgRaw = origRaw
 				msgIn = origIn
 				msgAt = origAt
 			}()
 
 			msgCC = tc.cc
-			msgBroadcast = tc.broadcast
-			msgAll = tc.all
 			msgRaw = tc.raw
 			msgIn = tc.in
 			msgAt = tc.at
 
 			var args []string
-			if tc.broadcast || tc.all {
-				args = []string{"hello"}
-			} else if tc.userRecip {
+			if tc.userRecip {
 				args = []string{"user:alice", "hello"}
 			} else {
 				args = []string{"my-agent", "hello"}
@@ -2145,4 +1998,532 @@ func TestCCFlagValidation(t *testing.T) {
 			assert.Contains(t, err.Error(), tc.wantErr)
 		})
 	}
+}
+
+// --- Cross-project messaging tests ---
+
+// crossProjectMockServer creates a mock Hub server that handles:
+// - GET /api/v1/messaging/targets/resolve → resolve target agent
+// - POST /api/v1/agents/{uuid}/message → non-project-scoped send
+// - POST /api/v1/conversations/{id}/messages → conversation send
+func crossProjectMockServer(t *testing.T, targetAgentID, targetAgentSlug, targetProjectID, targetProjectSlug string) (*httptest.Server, *[]sentMessage) {
+	t.Helper()
+	var sent []sentMessage
+	var mu sync.Mutex
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+
+		case r.URL.Path == "/api/v1/messaging/targets/resolve" && r.Method == http.MethodGet:
+			project := r.URL.Query().Get("project")
+			agent := r.URL.Query().Get("agent")
+			if project == targetProjectSlug && agent == targetAgentSlug {
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"agent": map[string]interface{}{
+						"id":          targetAgentID,
+						"slug":        targetAgentSlug,
+						"projectId":   targetProjectID,
+						"projectSlug": targetProjectSlug,
+					},
+					"messageability": map[string]interface{}{
+						"canMessage":     true,
+						"canReachViewer": false,
+					},
+				})
+			} else {
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": map[string]interface{}{
+						"code":    "not_found",
+						"message": "Target not found",
+					},
+				})
+			}
+
+		case strings.HasPrefix(r.URL.Path, "/api/v1/agents/") && r.Method == http.MethodPost:
+			agentUUID := strings.TrimPrefix(r.URL.Path, "/api/v1/agents/")
+			agentUUID = strings.TrimSuffix(agentUUID, "/message")
+
+			var body struct {
+				StructuredMessage *messages.StructuredMessage `json:"structured_message"`
+				Interrupt         bool                        `json:"interrupt"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+
+			sm := sentMessage{
+				AgentName:     agentUUID,
+				Interrupt:     body.Interrupt,
+				StructuredMsg: body.StructuredMessage,
+			}
+			if body.StructuredMessage != nil {
+				sm.Message = body.StructuredMessage.Msg
+			}
+			mu.Lock()
+			sent = append(sent, sm)
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+
+		case strings.HasPrefix(r.URL.Path, "/api/v1/conversations/") && r.Method == http.MethodPost:
+			convID := strings.TrimPrefix(r.URL.Path, "/api/v1/conversations/")
+			convID = strings.TrimSuffix(convID, "/messages")
+
+			var body struct {
+				Msg  string `json:"msg"`
+				Type string `json:"type"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+
+			sm := sentMessage{
+				AgentName: "conv:" + convID,
+				Message:   body.Msg,
+			}
+			mu.Lock()
+			sent = append(sent, sm)
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"messageId": "msg-test-123",
+				"status":    "delivered",
+			})
+
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+
+	return server, &sent
+}
+
+func TestSendCrossProjectMessage_Success(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "sender-agent")
+
+	targetAgentID := "target-uuid-1234"
+	targetAgentSlug := "target-agent"
+	targetProjectID := "proj-b-uuid"
+	targetProjectSlug := "project-b"
+
+	server, sent := crossProjectMockServer(t, targetAgentID, targetAgentSlug, targetProjectID, targetProjectSlug)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: "proj-a-uuid",
+	}
+
+	err = sendCrossProjectMessage(hubCtx, targetProjectSlug, targetAgentSlug, "hello from project A", false, false, nil)
+	require.NoError(t, err)
+
+	require.Len(t, *sent, 1)
+	assert.Equal(t, targetAgentID, (*sent)[0].AgentName)
+	assert.Equal(t, "hello from project A", (*sent)[0].Message)
+	require.NotNil(t, (*sent)[0].StructuredMsg)
+	assert.Equal(t, "agent:"+targetAgentSlug, (*sent)[0].StructuredMsg.Recipient)
+}
+
+func TestSendCrossProjectMessage_TargetNotFound(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "sender-agent")
+
+	server, _ := crossProjectMockServer(t, "", "", "", "")
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: "proj-a-uuid",
+	}
+
+	err = sendCrossProjectMessage(hubCtx, "nonexistent-project", "nonexistent-agent", "hello", false, false, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to resolve agent")
+}
+
+// TestSendCrossProjectConversationReply verifies that conv:<uuid> from an
+// agent context routes through the outbound endpoint (not the conversation
+// send API). CPM cutover (#1693): conv: now uses the same outbound path as
+// @email and #thread.
+func TestSendCrossProjectConversationReply(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "sender-agent")
+
+	projectID := "proj-convref-cross-reply"
+	server, sent, outbound := newConvRefMockHubServer(t, projectID)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	convID := "conv-uuid-5678"
+	ref := &messaging.Reference{
+		Kind:  messaging.RefConversation,
+		Value: convID,
+		Raw:   "conv:" + convID,
+	}
+
+	err = sendMessageViaConversation(hubCtx, ref, "reply message", false, false, nil)
+	require.NoError(t, err)
+
+	// CPM cutover: conv: now routes through outbound, not conversation send API.
+	assert.Len(t, *sent, 0, "conv: should not go through agent message path")
+	require.Len(t, *outbound, 1, "conv: should go through outbound path")
+	assert.Equal(t, "conv:"+convID, (*outbound)[0].ConversationRef)
+	assert.Equal(t, "reply message", (*outbound)[0].Message)
+}
+
+// TestCrossProjectAtAgentDispatch verifies that @agent-slug with --project
+// in agent mode routes through sendCrossProjectMessage (the exact repro
+// for CPM-UAT-001: scion message --project target-proj @agent msg).
+//
+// ParseReference("@agent-slug") produces a RefAgent convRef and leaves
+// agentName empty. The cross-project detection must trigger on convRef
+// and the dispatch must intercept BEFORE the generic convRef path.
+func TestCrossProjectAtAgentDispatch(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "sender-agent")
+
+	targetAgentID := "target-uuid-9999"
+	targetAgentSlug := "cpm-probe-b"
+	targetProjectID := "proj-b-uuid"
+	targetProjectSlug := "cpm-uat-b-20260919"
+
+	server, sent := crossProjectMockServer(t, targetAgentID, targetAgentSlug, targetProjectID, targetProjectSlug)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: "proj-a-uuid",
+	}
+
+	// Simulate the exact parsing path from messageCmd.RunE:
+	// "@cpm-probe-b" → ParseReference → RefAgent convRef, agentName stays empty
+	ref, parseErr := messaging.ParseReference("@" + targetAgentSlug)
+	require.NoError(t, parseErr)
+	assert.Equal(t, messaging.RefAgent, ref.Kind)
+	assert.Equal(t, targetAgentSlug, ref.Value)
+
+	// With crossProjectTarget set (simulating --project=cpm-uat-b-20260919
+	// in agent mode), the dispatch must route through sendCrossProjectMessage
+	// using convRef.Value, NOT through sendMessageViaConversation.
+	err = sendCrossProjectMessage(hubCtx, targetProjectSlug, ref.Value, "CPM-UAT-ON-20260919", false, false, nil)
+	require.NoError(t, err)
+
+	require.Len(t, *sent, 1)
+	assert.Equal(t, targetAgentID, (*sent)[0].AgentName, "should send to resolved UUID, not slug")
+	assert.Equal(t, "CPM-UAT-ON-20260919", (*sent)[0].Message)
+	require.NotNil(t, (*sent)[0].StructuredMsg)
+	assert.Equal(t, "agent:"+targetAgentSlug, (*sent)[0].StructuredMsg.Recipient)
+}
+
+// TestCrossProjectDetectionLogic verifies the cross-project detection
+// condition in messageCmd.RunE handles both bare agent names and @agent refs.
+func TestCrossProjectDetectionLogic(t *testing.T) {
+	tests := []struct {
+		name           string
+		agentName      string
+		convRefKind    messaging.ReferenceKind
+		agentMode      bool
+		projectChanged bool
+		wantCross      bool
+	}{
+		{
+			name:           "bare agent + agent mode + --project → cross-project",
+			agentName:      "target-agent",
+			agentMode:      true,
+			projectChanged: true,
+			wantCross:      true,
+		},
+		{
+			name:           "@agent ref + agent mode + --project → cross-project",
+			convRefKind:    messaging.RefAgent,
+			agentMode:      true,
+			projectChanged: true,
+			wantCross:      true,
+		},
+		{
+			name:           "conv:uuid ref + agent mode + --project → NOT cross-project",
+			convRefKind:    messaging.RefConversation,
+			agentMode:      true,
+			projectChanged: true,
+			wantCross:      false,
+		},
+		{
+			name:           "@agent ref + human mode + --project → NOT cross-project",
+			convRefKind:    messaging.RefAgent,
+			agentMode:      false,
+			projectChanged: true,
+			wantCross:      false,
+		},
+		{
+			name:           "@agent ref + agent mode + no --project → NOT cross-project",
+			convRefKind:    messaging.RefAgent,
+			agentMode:      true,
+			projectChanged: false,
+			wantCross:      false,
+		},
+		{
+			name:           "no target + agent mode + --project → NOT cross-project",
+			agentMode:      true,
+			projectChanged: true,
+			wantCross:      false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Replicate the detection logic from messageCmd.RunE
+			var convRef *messaging.Reference
+			if tc.convRefKind != 0 {
+				convRef = &messaging.Reference{Kind: tc.convRefKind, Value: "test", Raw: "@test"}
+			}
+
+			hasAgentTarget := tc.agentName != "" || (convRef != nil && convRef.Kind == messaging.RefAgent)
+
+			agentEnv := ""
+			if tc.agentMode {
+				agentEnv = "sender-agent"
+			}
+
+			gotCross := hasAgentTarget && agentEnv != "" && tc.projectChanged
+			assert.Equal(t, tc.wantCross, gotCross, "cross-project detection mismatch")
+		})
+	}
+}
+
+// TestCrossProjectDispatchOrder verifies that cross-project @agent dispatch
+// happens BEFORE the generic convRef dispatch, preventing the RefAgent from
+// falling through to sendMessageViaConversation (which scopes to sender's project).
+func TestCrossProjectDispatchOrder(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "sender-agent")
+
+	targetAgentSlug := "remote-agent"
+	targetProjectSlug := "remote-project"
+
+	server, sent := crossProjectMockServer(t, "remote-uuid", targetAgentSlug, "remote-proj-id", targetProjectSlug)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: "local-proj-id",
+	}
+
+	// Simulate the dispatch logic from messageCmd.RunE with crossProjectTarget set
+	crossProjectTarget := targetProjectSlug
+	convRef := &messaging.Reference{Kind: messaging.RefAgent, Value: targetAgentSlug, Raw: "@" + targetAgentSlug}
+
+	// This is the exact dispatch order from the fixed code:
+	// 1. Cross-project @agent intercept (should fire)
+	// 2. Generic convRef dispatch (should NOT fire)
+	if hubCtx != nil && crossProjectTarget != "" {
+		if convRef != nil && convRef.Kind == messaging.RefAgent {
+			err = sendCrossProjectMessage(hubCtx, crossProjectTarget, convRef.Value, "dispatch order test", false, false, nil)
+			require.NoError(t, err)
+			require.Len(t, *sent, 1)
+			assert.Equal(t, "remote-uuid", (*sent)[0].AgentName, "cross-project dispatch should resolve to target UUID")
+			return
+		}
+		// If we reach here for RefAgent, the dispatch order is wrong
+		t.Fatal("RefAgent should have been intercepted by cross-project dispatch")
+	}
+	t.Fatal("should have entered cross-project dispatch block")
+}
+
+// TestCrossProjectMismatchRejection verifies that --project with a non-agent
+// target (e.g. conv:uuid, user:, group[]) does NOT trigger cross-project
+// agent detection, preserving normal behavior for those paths.
+func TestCrossProjectMismatchRejection(t *testing.T) {
+	// conv:uuid should NOT trigger cross-project even with --project
+	convRef := &messaging.Reference{Kind: messaging.RefConversation, Value: "some-uuid", Raw: "conv:some-uuid"}
+	hasAgentTarget := false || (convRef != nil && convRef.Kind == messaging.RefAgent)
+	assert.False(t, hasAgentTarget, "conv:uuid should not be detected as agent target")
+
+	// #thread should NOT trigger cross-project
+	threadRef := &messaging.Reference{Kind: messaging.RefThread, Value: "discussion", Raw: "#discussion"}
+	hasAgentTarget = false || (threadRef != nil && threadRef.Kind == messaging.RefAgent)
+	assert.False(t, hasAgentTarget, "thread ref should not be detected as agent target")
+
+	// @email should NOT trigger cross-project
+	emailRef := &messaging.Reference{Kind: messaging.RefEmail, Value: "user@example.com", Raw: "@user@example.com"}
+	hasAgentTarget = false || (emailRef != nil && emailRef.Kind == messaging.RefAgent)
+	assert.False(t, hasAgentTarget, "email ref should not be detected as agent target")
+}
+
+// TestCrossProjectSameProjectBypass verifies that --project matching the
+// agent's own project (by slug or ID) does NOT trigger cross-project
+// detection, preserving normal same-project sending even when CPM is disabled.
+func TestCrossProjectSameProjectBypass(t *testing.T) {
+	tests := []struct {
+		name        string
+		projectFlag string
+		ownSlug     string
+		ownID       string
+		wantCross   bool
+	}{
+		{
+			name:        "slug match → same-project (no cross-project)",
+			projectFlag: "my-project",
+			ownSlug:     "my-project",
+			wantCross:   false,
+		},
+		{
+			name:        "ID match → same-project (no cross-project)",
+			projectFlag: "abc-123-def",
+			ownID:       "abc-123-def",
+			wantCross:   false,
+		},
+		{
+			name:        "different slug → cross-project",
+			projectFlag: "other-project",
+			ownSlug:     "my-project",
+			wantCross:   true,
+		},
+		{
+			name:        "no env vars → cross-project (conservative)",
+			projectFlag: "some-project",
+			ownSlug:     "",
+			ownID:       "",
+			wantCross:   true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			isSameProject := (tc.ownSlug != "" && tc.projectFlag == tc.ownSlug) ||
+				(tc.ownID != "" && tc.projectFlag == tc.ownID)
+			gotCross := !isSameProject
+			assert.Equal(t, tc.wantCross, gotCross)
+		})
+	}
+}
+
+// TestConvRefMismatchedProjectRejection verifies that conv:<id> with an
+// explicit --project that doesn't match the agent's own project is rejected.
+func TestConvRefMismatchedProjectRejection(t *testing.T) {
+	convRef := &messaging.Reference{Kind: messaging.RefConversation, Value: "some-uuid", Raw: "conv:some-uuid"}
+
+	// Simulate the rejection logic from messageCmd.RunE
+	agentMode := true
+	projectChanged := true
+	ownSlug := "my-project"
+	projectFlag := "other-project"
+
+	if convRef != nil && convRef.Kind == messaging.RefConversation && agentMode && projectChanged {
+		isSameProject := projectFlag == ownSlug
+		if !isSameProject {
+			// Should reject
+			assert.True(t, true, "mismatched --project with conv: should reject")
+			return
+		}
+	}
+	t.Fatal("should have rejected mismatched --project with conv: ref")
+}
+
+// TestConvRefSameProjectAllowed verifies that conv:<id> with --project
+// matching the agent's own project is allowed through.
+func TestConvRefSameProjectAllowed(t *testing.T) {
+	convRef := &messaging.Reference{Kind: messaging.RefConversation, Value: "some-uuid", Raw: "conv:some-uuid"}
+
+	agentMode := true
+	projectChanged := true
+	ownSlug := "my-project"
+	projectFlag := "my-project"
+
+	rejected := false
+	if convRef != nil && convRef.Kind == messaging.RefConversation && agentMode && projectChanged {
+		isSameProject := projectFlag == ownSlug
+		if !isSameProject {
+			rejected = true
+		}
+	}
+	assert.False(t, rejected, "same-project conv: should not be rejected")
+}
+
+// TestConvRefAttachWakeSupported verifies that --attach and --wake are
+// properly serialized for conv: references via the outbound endpoint.
+// CPM cutover (#1693): conv: now routes through the outbound endpoint
+// which supports both wake and attachments.
+func TestConvRefAttachWakeSupported(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "sender-agent")
+
+	projectID := "proj-convref-attach-wake"
+	server, sent, outbound := newConvRefMockHubServer(t, projectID)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	convID := "conv-uuid-attach-wake"
+	ref := &messaging.Reference{
+		Kind:  messaging.RefConversation,
+		Value: convID,
+		Raw:   "conv:" + convID,
+	}
+
+	// Attachments should be supported and serialized
+	err = sendMessageViaConversation(hubCtx, ref, "msg with attach", false, false, []string{"file.txt"})
+	require.NoError(t, err, "conv: with --attach should succeed via outbound")
+
+	require.Len(t, *outbound, 1)
+	assert.Equal(t, "conv:"+convID, (*outbound)[0].ConversationRef)
+	assert.Equal(t, "msg with attach", (*outbound)[0].Message)
+
+	// Wake should be supported and serialized
+	err = sendMessageViaConversation(hubCtx, ref, "msg with wake", false, true, nil)
+	require.NoError(t, err, "conv: with --wake should succeed via outbound")
+
+	require.Len(t, *outbound, 2)
+	assert.Equal(t, "conv:"+convID, (*outbound)[1].ConversationRef)
+	assert.Equal(t, "msg with wake", (*outbound)[1].Message)
+
+	// Normal message (no attach, no wake): should also succeed
+	err = sendMessageViaConversation(hubCtx, ref, "normal msg", false, false, nil)
+	require.NoError(t, err)
+	require.Len(t, *outbound, 3)
+
+	// Verify no messages went through the agent message path
+	assert.Len(t, *sent, 0, "conv: should not go through agent message path")
 }

@@ -239,7 +239,7 @@ func (s *Server) handleAdminAllowListAdd(w http.ResponseWriter, r *http.Request,
 		ID:         uuid.New().String(),
 		Email:      email,
 		Status:     store.UserStatusInvited,
-		Role:       store.UserRoleMember,
+		Role:       store.UserRoleMember, // placeholder; the real role is assigned at first sign-in (see determineUserRole)
 		InvitedBy:  &invitedBy,
 		InviteNote: note,
 	}
@@ -356,7 +356,7 @@ func (s *Server) handleAdminAllowListImport(w http.ResponseWriter, r *http.Reque
 			ID:         uuid.New().String(),
 			Email:      email,
 			Status:     store.UserStatusInvited,
-			Role:       store.UserRoleMember,
+			Role:       store.UserRoleMember, // placeholder; the real role is assigned at first sign-in (see determineUserRole)
 			InvitedBy:  &invitedBy,
 			InviteNote: note,
 		}

@@ -181,7 +181,6 @@ func makeTestAgent(projectID string) *store.Agent {
 		Message:     "agent error message",
 		Created:     time.Now(),
 		Updated:     time.Now(),
-		Visibility:  "private",
 	}
 }
 

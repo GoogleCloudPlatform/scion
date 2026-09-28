@@ -19,8 +19,12 @@ func TestClaudeDialect_Name(t *testing.T) {
 	assert.Equal(t, "claude", d.Name())
 }
 
-func TestExtractFinalAssistantText(t *testing.T) {
+func TestExtractFinalAssistantContentFromTranscript(t *testing.T) {
 	dir := t.TempDir()
+	extractText := func(path string) string {
+		text, _ := extractFinalAssistantContentFromTranscript(path)
+		return text
+	}
 
 	write := func(t *testing.T, name, content string) string {
 		t.Helper()
@@ -34,14 +38,14 @@ func TestExtractFinalAssistantText(t *testing.T) {
 			`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}`+"\n"+
 				`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Hello there"}]}}`+"\n",
 		)
-		assert.Equal(t, "Hello there", extractFinalAssistantText(path))
+		assert.Equal(t, "Hello there", extractText(path))
 	})
 
 	t.Run("multiple blocks in final assistant message", func(t *testing.T) {
 		path := write(t, "multiblock.jsonl",
 			`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Thinking..."},{"type":"tool_use","id":"t1","name":"Read","input":{}},{"type":"text","text":"Done."}]}}`+"\n",
 		)
-		assert.Equal(t, "Thinking...Done.", extractFinalAssistantText(path))
+		assert.Equal(t, "Thinking...Done.", extractText(path))
 	})
 
 	t.Run("contiguous assistant entries concatenated", func(t *testing.T) {
@@ -53,7 +57,7 @@ func TestExtractFinalAssistantText(t *testing.T) {
 				`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Second"}]}}`+"\n"+
 				`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Third"}]}}`+"\n",
 		)
-		assert.Equal(t, "Second\n\nThird", extractFinalAssistantText(path))
+		assert.Equal(t, "SecondThird", extractText(path))
 	})
 
 	t.Run("tool-use only final turn yields empty", func(t *testing.T) {
@@ -61,18 +65,18 @@ func TestExtractFinalAssistantText(t *testing.T) {
 			`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"go"}]}}`+"\n"+
 				`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read","input":{}}]}}`+"\n",
 		)
-		assert.Equal(t, "", extractFinalAssistantText(path))
+		assert.Equal(t, "", extractText(path))
 	})
 
 	t.Run("plain string content", func(t *testing.T) {
 		path := write(t, "plainstr.jsonl",
 			`{"type":"assistant","message":{"role":"assistant","content":"Legacy shape"}}`+"\n",
 		)
-		assert.Equal(t, "Legacy shape", extractFinalAssistantText(path))
+		assert.Equal(t, "Legacy shape", extractText(path))
 	})
 
 	t.Run("missing file returns empty", func(t *testing.T) {
-		assert.Equal(t, "", extractFinalAssistantText(filepath.Join(dir, "nope.jsonl")))
+		assert.Equal(t, "", extractText(filepath.Join(dir, "nope.jsonl")))
 	})
 
 	t.Run("malformed lines are skipped", func(t *testing.T) {
@@ -81,7 +85,7 @@ func TestExtractFinalAssistantText(t *testing.T) {
 				`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Survived"}]}}`+"\n"+
 				`{"type":"assistant","broken`+"\n",
 		)
-		assert.Equal(t, "Survived", extractFinalAssistantText(path))
+		assert.Equal(t, "Survived", extractText(path))
 	})
 }
 

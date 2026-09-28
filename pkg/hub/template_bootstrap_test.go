@@ -34,6 +34,14 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
+func (s *Server) importTemplatesFromRemote(ctx context.Context, projectID, sourceURL string) ([]string, error) {
+	return s.importFromRemote(ctx, projectID, sourceURL, store.TemplateScopeProject, s.templateImportKind(), nil, nil)
+}
+
+func (s *Server) importTemplatesFromWorkspace(ctx context.Context, project *store.Project, workspacePath string) ([]string, error) {
+	return s.importFromWorkspace(ctx, project, workspacePath, store.TemplateScopeProject, s.templateImportKind(), nil, nil)
+}
+
 // testTemplateBootstrapServer creates a hub Server backed by an in-memory
 // SQLite store and a mock storage, suitable for template bootstrap tests.
 func testTemplateBootstrapServer(t *testing.T) (*Server, store.Store, *mockStorage) {

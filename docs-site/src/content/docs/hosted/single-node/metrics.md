@@ -41,6 +41,10 @@ telemetry:
 
   cloud:
     enabled: true
+    # Required when exporting to Google Cloud. The metrics dashboard queries
+    # Cloud Monitoring for this project, so without it the export has no
+    # destination and the dashboard stays empty with no error shown.
+    gcp_project_id: "my-gcp-project"
     endpoint: "monitoring.googleapis.com:443"
     protocol: grpc
     headers:
@@ -126,6 +130,10 @@ export SCION_OTEL_PROTOCOL="grpc"
 export SCION_GCP_PROJECT_ID="your-project-id"
 ```
 
+:::caution[`SCION_GCP_PROJECT_ID` is required for cloud export]
+Cloud export is silently skipped when no GCP project ID is available. Set `SCION_GCP_PROJECT_ID` explicitly, or ensure the `scion-telemetry-gcp-credentials` service-account key file contains a `project_id` field so auto-detection can populate it. If export is enabled but no project ID is found, `sciontool` logs a warning at startup.
+:::
+
 ### 2. Configure the Agent (Native OTel)
 
 If your agent harness supports native OpenTelemetry (e.g., `opencode`), configure it to point to the `sciontool` forwarder running on localhost:
@@ -186,8 +194,25 @@ All metrics and traces emitted by Scion are enriched with context-aware OpenTele
 
 - `scion.harness`: The type of harness running the agent (e.g., `gemini`, `claude`, `codex`).
 - `scion.model`: The specific LLM model being used.
-- `scion.broker`: The ID of the Runtime Broker executing the agent.
-- `project_id`: The ID of the agent's parent project.
+- `scion.broker.name`: The name of the Runtime Broker executing the agent, when available.
+- `scion.project.id`: The authoritative ID of the agent's parent project, when available.
+
+#### Identity Enforcement
+
+The `sciontool` receiver enforces authoritative identity on all incoming telemetry. Reserved identity attributes (`scion.agent.id`, `scion.agent.slug`, `scion.project.id`, `scion.harness`, `scion.model`, `scion.broker.name`, and related keys) are stripped from agent-submitted resource attributes and replaced with Hub-sourced values. This prevents agents from spoofing their identity in exported telemetry.
+
+### Native Event Name Normalization
+
+When harnesses emit native OTLP log records or events, `sciontool` normalizes their harness-specific event names into the canonical `agent.*` namespace before forwarding. This ensures consistent filtering and querying across harnesses:
+
+| Harness | Native event name | Normalized name |
+|---------|------------------|-----------------|
+| Claude Code | `user_prompt` (scope `com.anthropic.claude_code.events`) | `agent.user.prompt` |
+| Codex | `codex.user_prompt` | `agent.user.prompt` |
+| Codex | `codex.tool_result` | `agent.tool.result` |
+| Gemini CLI | `gemini_cli.user_prompt` | `agent.user.prompt` |
+
+Event names that do not match a known alias are forwarded unchanged. All log records carry a normalized `event.name` attribute after processing.
 
 ### Automated Metrics Collection
 
@@ -195,16 +220,49 @@ When harness events occur (via hooks), sciontool automatically records the follo
 
 | Metric | Type | Unit | Description |
 |--------|------|------|-------------|
-| `gen_ai.tokens.input` | Counter | tokens | Number of input tokens processed |
-| `gen_ai.tokens.output` | Counter | tokens | Number of output tokens generated |
-| `gen_ai.tokens.cached` | Counter | tokens | Number of tokens retrieved from cache |
+| `scion.hook.tokens.input` | Counter | tokens | Input tokens reported by model-end hooks |
+| `scion.hook.tokens.output` | Counter | tokens | Output tokens reported by model-end hooks |
+| `scion.hook.tokens.cached` | Counter | tokens | Cached tokens reported by model-end hooks |
 | `agent.tool.calls` | Counter | calls | Total number of tool executions |
-| `agent.tool.duration` | Histogram | ms | Latency of tool executions |
-| `agent.session.count` | Counter | sessions | Total number of agent sessions |
+| `agent.tool.duration` | Histogram | ms | Tool duration when paired start and end events are available in one process |
+| `agent.session.count` | Counter | sessions | Session-end events emitted by each source |
 | `gen_ai.api.calls` | Counter | calls | Total number of LLM API requests |
-| `gen_ai.api.duration` | Histogram | ms | Latency of LLM API requests |
+| `gen_ai.api.duration` | Histogram | ms | Model duration when paired start and end events are available in one process |
 
-*(Note: The Codex harness has been expanded to capture comprehensive telemetry including tool usage, detailed tool input/output, and granular token counts for input, output, and cached tokens).*
+Hook token counters use the `scion.hook.tokens.*` namespace. Genuine native harness
+`gen_ai.tokens.*` metrics remain separate; normalized hooks do not emit those
+native names. Token counters appear only when a hook provides token usage.
+For Cloud Monitoring, the six normalized hook counters in this table use a
+collector observation epoch and the time sciontool takes each cumulative
+snapshot. A counter's Cloud point time therefore describes when this collector
+observed the total, rather than the time of the last hook event. Retries keep
+the original snapshot time. Generic OTLP forwarding and native metric points
+keep their source timestamps through sciontool. The Monitoring SDK maps
+non-gauge intervals shorter than two milliseconds to a one-millisecond
+interval; admission checks use that mapped end. A native point known to be less than five seconds
+after a possibly written point in the same Cloud series is rejected before
+admission; a request containing that point is rejected as a whole. Scope and
+metric names select the hook counter behavior, so local producers using those
+reserved names also opt into it. This does not authenticate the producer.
+Session-end totals do not add a second copy of model-end usage. Short-lived
+hook processes normally cannot pair start and end events, so duration
+histograms are not guaranteed. This does not establish native Codex token
+emission.
+
+`agent.session.count` has two distinct sources: harness `session-end` hooks and
+the `sciontool init` lifecycle `session-end` event. They keep the same metric
+name and unit, but use distinct instrumentation scopes. In Cloud Monitoring,
+filter the `scion_metric_scope_id` label for the source you intend to inspect:
+the hook scope is `github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers`,
+and the init lifecycle scope adds `/lifecycle`. The Cloud label contains a
+digest of the scope identity, so inspect a sample series to obtain its value.
+These are source event counts; summing both does not produce a canonical count
+of logical sessions. The Hub dashboard does not reconcile them.
+
+The current Hub dashboard still queries historical `gen_ai.tokens.*` names.
+Its charts exclude the new hook token namespace and, because older normalized
+hook samples may remain under the historical names, are neither complete usage
+totals nor native-only usage views.
 
 ### Correlated Logs
 
@@ -352,6 +410,10 @@ The aggregated relational metrics are exposed directly within the Hub's Web UI:
 - **Agents List Stats Columns**: Displays high-level stats columns (such as total token consumption) directly on the main agents index table.
 - **Project Summary Panel**: Provides an operational cost and model usage dashboard across all agents in the selected project.
 
+
+## Upgrading
+
+`sciontool`'s telemetry code (including usage-metrics fixes) is compiled into the `scion-base` image; harness and hub images only build on top of it. A `sciontool`-side fix reaches running agents only after `scion-base` is rebuilt, then the harness/hub images on top of it — rebuilding harnesses alone against an old `scion-base` keeps the old telemetry behavior. See [Build provenance and stale sciontool](https://github.com/GoogleCloudPlatform/scion/blob/main/image-build/README.md#build-provenance-and-stale-sciontool) for how to check which commit is embedded in a given image and the required rebuild order.
 
 ## Implementation Details
 

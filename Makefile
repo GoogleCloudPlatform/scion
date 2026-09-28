@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge install test test-fast vet lint compat-literals check-authz-guards check-conversation-upsert-guard check-security-marker-gates check-authorization-catalog golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
+.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite vet lint compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-security-marker-gates check-authorization-catalog check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -34,6 +34,10 @@ build-a2a-bridge:
 	@mkdir -p bin
 	@go build -o bin/scion-a2a-bridge ./extras/scion-a2a-bridge/cmd/scion-a2a-bridge/
 	@echo "Binary: bin/scion-a2a-bridge"
+
+## test-a2a-integration: Run the A2A bridge deterministic integration suite with fail-closed PostgreSQL
+test-a2a-integration:
+	@./extras/scion-a2a-bridge/scripts/run-integration-ci.sh
 
 ## install: Install a pre-built binary (default: /usr/local/bin, override with PREFIX=~/.local). Run 'make build' first.
 install:
@@ -68,6 +72,16 @@ test-fast:
 	@echo "Running tests (no SQLite)..."
 	@go test -tags no_sqlite ./...
 
+## test-hub-sqlite: Run pkg/hub tests with SQLite enabled (no build tag). This is
+# the ~67% of pkg/hub's test files that "make test-fast" never compiles (see
+# ptone/scion#1118). Skips four tests with known pre-existing, tracked failures
+# (ptone/scion#1847) so this target can be used as a CI merge gate.
+test-hub-sqlite:
+	@echo "Running pkg/hub tests (SQLite-enabled)..."
+	@go test -count=1 -timeout 25m \
+		-skip '^(TestDEF164_AtAgentSlug_DeliversToAgent|TestDEF164_AtAgentSlug_DMConversationCreated|TestDEF152_AgentToAgentDM_DeliversViaOutbound|TestCreateTemplateV2_ScopeIDInjectionBlocked)$$' \
+		./pkg/hub/...
+
 ## vet: Run go vet
 vet:
 	@go vet ./...
@@ -89,6 +103,10 @@ compat-literals:
 check-authz-guards:
 	@./hack/check-authz-guards.sh
 
+## check-annotation-prefix: Flag new scion.io/ annotation keys (migration to scion.dev/)
+check-annotation-prefix:
+	@./hack/check-annotation-prefix.sh
+
 ## check-conversation-upsert-guard: Verify UpsertConversationByExternalRef is only called from pkg/messaging and pkg/store
 check-conversation-upsert-guard:
 	@./hack/check-conversation-upsert-guard.sh
@@ -100,6 +118,10 @@ check-security-marker-gates:
 ## check-authorization-catalog: Validate authorization operation catalog, permission coverage, and generated report
 check-authorization-catalog:
 	@./hack/check-authorization-catalog.sh
+
+## check-custom: Run all custom CI lint checks (see hack/LINT-CONVENTIONS.md)
+check-custom: compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-security-marker-gates check-authorization-catalog
+	@echo "All custom checks passed."
 
 ## golangci-lint: Run golangci-lint on new issues only (install via: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest)
 golangci-lint:
@@ -186,13 +208,13 @@ tidy-extras:
 	fi; \
 	echo "All extras modules tidied."
 
-## ci: Run fast CI checks (format check, vet, compatibility guardrails, authz guards, tests, build)
-ci: fmt-check lint compat-literals check-authz-guards check-conversation-upsert-guard check-security-marker-gates check-authorization-catalog test-fast build
+## ci: Run fast CI checks (format check, vet, custom lint checks, tests, build)
+ci: fmt-check lint check-custom test-fast build
 	@echo ""
 	@echo "CI passed."
 
 ## ci-full: Run the full CI pipeline locally (mirrors GitHub Actions, includes web + golangci-lint)
-ci-full: fmt-check web web-typecheck web-test lint compat-literals check-authz-guards check-conversation-upsert-guard golangci-lint test-fast build
+ci-full: fmt-check web web-typecheck web-test lint check-custom golangci-lint test-fast build
 	@echo ""
 	@echo "CI (full) passed."
 

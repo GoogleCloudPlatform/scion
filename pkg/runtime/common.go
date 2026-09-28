@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
 	"os"
@@ -32,7 +33,8 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	stagedsecrets "github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
@@ -42,6 +44,13 @@ const (
 	telemetryGCPCredentialsSecretName = "scion-telemetry-gcp-credentials"
 	telemetryGCPCredentialsEnvVar     = "SCION_OTEL_GCP_CREDENTIALS"
 )
+
+type gcsVolumeInfo struct {
+	Source string `json:"source"`
+	Target string `json:"target"`
+	Bucket string `json:"bucket"`
+	Prefix string `json:"prefix"`
+}
 
 // findGCPTelemetryCredentialPath scans the resolved secrets for the well-known
 // GCP telemetry credential file secret and returns the expanded container target
@@ -153,13 +162,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	}
 
 	var fuseMounts []string
-	type gcsVolInfo struct {
-		Source string `json:"source"`
-		Target string `json:"target"`
-		Bucket string `json:"bucket"`
-		Prefix string `json:"prefix"`
-	}
-	var gcsVolumes []gcsVolInfo
+	var gcsVolumes []gcsVolumeInfo
 
 	addVolume := func(v api.VolumeMount) {
 		tgt := expandPath(v.Target, true)
@@ -179,7 +182,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			cmd += fmt.Sprintf("%q %q", v.Bucket, tgt)
 			fuseMounts = append(fuseMounts, cmd)
 
-			gcsVolumes = append(gcsVolumes, gcsVolInfo{
+			gcsVolumes = append(gcsVolumes, gcsVolumeInfo{
 				Source: expandPath(v.Source, false),
 				Target: tgt,
 				Bucket: v.Bucket,
@@ -329,9 +332,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 
 	// Phase 3 & 5: Project identity injection
 	addEnv("SCION_PROJECT", config.Project)
-	addEnv("SCION_GROVE", config.Project)
 	addEnv("SCION_PROJECT_ID", config.ProjectID)
-	addEnv("SCION_GROVE_ID", config.ProjectID)
 
 	// Mount gcloud config if it exists on the host (local mode only).
 	// In broker mode, credentials are projected via ResolvedSecrets;
@@ -435,12 +436,10 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 
 	// Phase 5: Standard project labels
 	if config.Project != "" {
-		addArg("--label", fmt.Sprintf("%s=%s", projectcompat.LabelProject, config.Project))
-		addArg("--label", fmt.Sprintf("%s=%s", projectcompat.LabelGrove, config.Project))
+		addArg("--label", fmt.Sprintf("%s=%s", projectkeys.LabelProject, config.Project))
 	}
 	if config.ProjectID != "" {
-		addArg("--label", fmt.Sprintf("%s=%s", projectcompat.LabelProjectID, config.ProjectID))
-		addArg("--label", fmt.Sprintf("%s=%s", projectcompat.LabelGroveID, config.ProjectID))
+		addArg("--label", fmt.Sprintf("%s=%s", projectkeys.LabelProjectID, config.ProjectID))
 	}
 
 	if config.Template != "" {
@@ -508,15 +507,82 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 // When no match is found the original id is returned so callers can fall
 // back to the raw value (which may itself be a valid container name).
 func resolveContainerID(agents []api.AgentInfo, id string) string {
-	for _, a := range agents {
-		if a.ContainerID == id ||
-			(len(id) >= 12 && strings.HasPrefix(a.ContainerID, id)) ||
-			(len(a.ContainerID) >= 12 && strings.HasPrefix(id, a.ContainerID)) ||
-			a.Name == id || a.Name == "/"+id || strings.TrimPrefix(a.Name, "/") == id {
-			return a.ContainerID
-		}
+	if agent := findContainerAgent(agents, id); agent != nil {
+		return agent.ContainerID
 	}
 	return id
+}
+
+func findContainerAgent(agents []api.AgentInfo, id string) *api.AgentInfo {
+	for i := range agents {
+		agent := &agents[i]
+		if agent.ContainerID == id ||
+			(len(id) >= 12 && strings.HasPrefix(agent.ContainerID, id)) ||
+			(len(agent.ContainerID) >= 12 && strings.HasPrefix(id, agent.ContainerID)) ||
+			agent.Name == id || agent.Name == "/"+id || strings.TrimPrefix(agent.Name, "/") == id {
+			return agent
+		}
+	}
+	return nil
+}
+
+func syncGCSVolumes(ctx context.Context, encoded string, direction SyncDirection) error {
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return fmt.Errorf("failed to decode gcs volume info: %w", err)
+	}
+
+	var volumes []gcsVolumeInfo
+	if err := json.Unmarshal(decoded, &volumes); err != nil {
+		return fmt.Errorf("failed to parse gcs volume info: %w", err)
+	}
+
+	for _, volume := range volumes {
+		if volume.Source == "" {
+			continue
+		}
+		switch direction {
+		case SyncTo:
+			if err := gcp.SyncToGCS(ctx, volume.Source, volume.Bucket, volume.Prefix); err != nil {
+				return fmt.Errorf("failed to sync to GCS: %w", err)
+			}
+		case SyncFrom:
+			if err := gcp.SyncFromGCS(ctx, volume.Bucket, volume.Prefix, volume.Source); err != nil {
+				return fmt.Errorf("failed to sync from GCS: %w", err)
+			}
+		default:
+			return fmt.Errorf("sync direction must be specified for GCS volumes")
+		}
+	}
+	return nil
+}
+
+func appendContainerResourceArgs(args []string, resources *api.ResourceSpec) ([]string, error) {
+	if resources == nil {
+		return args, nil
+	}
+	if resources.Limits.Memory != "" {
+		bytes, err := util.ParseMemory(resources.Limits.Memory)
+		if err != nil {
+			return nil, fmt.Errorf("invalid memory limit %q: %w", resources.Limits.Memory, err)
+		}
+		args = append(args, "--memory", util.FormatMemoryForDocker(bytes))
+	}
+	if resources.Requests.Memory != "" {
+		bytes, err := util.ParseMemory(resources.Requests.Memory)
+		if err != nil {
+			return nil, fmt.Errorf("invalid memory request %q: %w", resources.Requests.Memory, err)
+		}
+		args = append(args, "--memory-reservation", util.FormatMemoryForDocker(bytes))
+	}
+	if resources.Limits.CPU != "" {
+		cores, err := util.ParseCPU(resources.Limits.CPU)
+		if err != nil {
+			return nil, fmt.Errorf("invalid cpu limit %q: %w", resources.Limits.CPU, err)
+		}
+		args = append(args, "--cpus", util.FormatCPU(cores))
+	}
+	return args, nil
 }
 
 // runtimeLog is the structured logger for runtime command execution.
@@ -568,6 +634,76 @@ func runSimpleCommand(ctx context.Context, command string, args ...string) (stri
 	return strings.TrimSpace(string(out)), nil
 }
 
+// runSimpleCommandWithStdin is runSimpleCommand's counterpart for callers
+// that need to deliver data to the child process over stdin rather than
+// argv (see #1355 — secrets embedded in argv leak via /proc/<pid>/cmdline
+// for the lifetime of the exec). It never logs the piped content.
+func runSimpleCommandWithStdin(ctx context.Context, stdin io.Reader, command string, args ...string) (string, error) {
+	// Log the command name and argument count only — see runSimpleCommand
+	// comment above. The stdin payload is never logged.
+	runtimeLog.Debug("Executing command with stdin", "cmd", command, "argc", len(args))
+	start := time.Now()
+	cmd := exec.CommandContext(ctx, command, args...)
+	cmd.Stdin = stdin
+	out, err := cmd.CombinedOutput()
+	elapsed := time.Since(start)
+	if err != nil {
+		runtimeLog.Debug("Command failed", "cmd", command, "argc", len(args), "duration", elapsed, "output", strings.TrimSpace(string(out)))
+		return string(out), fmt.Errorf("%s failed: %w", command, err)
+	}
+	runtimeLog.Debug("Command completed", "cmd", command, "argc", len(args), "duration", elapsed)
+	return strings.TrimSpace(string(out)), nil
+}
+
+// rollbackCancelledCreate best-effort removes a container that the daemon
+// may have already created/started before the CLI process (e.g. a detached
+// "run -d") was killed by context cancellation. exec.CommandContext only
+// kills the local CLI subprocess — it does not tell the daemon to undo work
+// it already began server-side. Without this, a create whose context is
+// cancelled because the caller gave up (e.g. the Hub's dispatch timeout
+// elapsed, or the original request was itself cancelled) can leak a running
+// container that nothing else knows to reap. See ptone/scion#1886.
+//
+// It intentionally uses a fresh, short-lived context rather than the
+// (already cancelled) caller context, since the caller has already given up
+// and this cleanup must still be allowed to run.
+//
+// The Apple "container" CLI's "rm" does not support "-f" and fails if the
+// container is still running (see AppleContainerRuntime.Delete), so for that
+// runtime we kill first, then retry a plain "rm" a few times — kill is
+// asynchronous and the container may not be immediately ready for removal.
+// Docker/Podman support "rm -f" directly.
+func rollbackCancelledCreate(command, containerName string) {
+	if containerName == "" {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if filepath.Base(command) == "container" {
+		_, _ = runSimpleCommand(cleanupCtx, command, "kill", containerName)
+
+		var out string
+		var err error
+		for attempt := 0; attempt < 5; attempt++ {
+			out, err = runSimpleCommand(cleanupCtx, command, "rm", containerName)
+			if err == nil {
+				return
+			}
+			select {
+			case <-cleanupCtx.Done():
+				runtimeLog.Warn("Failed to roll back cancelled create", "cmd", command, "container", containerName, "error", cleanupCtx.Err(), "output", strings.TrimSpace(out))
+				return
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+		runtimeLog.Warn("Failed to roll back cancelled create", "cmd", command, "container", containerName, "error", err, "output", strings.TrimSpace(out))
+		return
+	}
+	if out, err := runSimpleCommand(cleanupCtx, command, "rm", "-f", containerName); err != nil {
+		runtimeLog.Warn("Failed to roll back cancelled create", "cmd", command, "container", containerName, "error", err, "output", strings.TrimSpace(out))
+	}
+}
+
 func runInteractiveCommand(command string, args ...string) error {
 	// Log command name and argument count only — see runSimpleCommand comment
 	// and #127 / P5 for rationale.
@@ -577,42 +713,6 @@ func runInteractiveCommand(command string, args ...string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
-}
-
-// TODO(#284): remove once Phase 2 eliminates remaining bind-mount usage
-//
-// insertVolumeFlags inserts -v flags for the given mount specs before the image
-// in an args slice. This ensures volume mounts appear as runtime flags rather
-// than being appended after the image and container command.
-func insertVolumeFlags(args []string, image string, mountSpecs []string) []string {
-	if len(mountSpecs) == 0 {
-		return args
-	}
-
-	// Find the image position (search from end since it's near the tail)
-	imageIdx := -1
-	for i := len(args) - 1; i >= 0; i-- {
-		if args[i] == image {
-			imageIdx = i
-			break
-		}
-	}
-
-	var mountArgs []string
-	for _, spec := range mountSpecs {
-		mountArgs = append(mountArgs, "-v", spec)
-	}
-
-	if imageIdx < 0 {
-		// Fallback: shouldn't happen, but append before end as best-effort
-		return append(args, mountArgs...)
-	}
-
-	result := make([]string, 0, len(args)+len(mountArgs))
-	result = append(result, args[:imageIdx]...)
-	result = append(result, mountArgs...)
-	result = append(result, args[imageIdx:]...)
-	return result
 }
 
 // WriteRuntimeDebugFile writes a redacted summary of the runtime execution
@@ -819,6 +919,12 @@ func applyResolvedAuth(config RunConfig, addEnv func(string, string), addVolume 
 	// Inject files
 	containerHome := util.GetHomeDir(config.UnixUsername)
 	for _, f := range ra.Files {
+		if f.SourcePath == "" {
+			// In broker mode, file content is projected from staged secrets
+			// (SCION_STAGED_SECRETS), not copied from host paths. SourcePath is
+			// intentionally cleared by run.go. Skip the copy/mount.
+			continue
+		}
 		containerPath := expandTildeTarget(f.ContainerPath, containerHome)
 
 		if config.HomeDir != "" {
@@ -846,27 +952,39 @@ func applyResolvedAuth(config RunConfig, addEnv func(string, string), addVolume 
 	return nil
 }
 
-// StagedSecretEnvVar is the environment variable used to pass serialized
-// file and variable secrets from the broker to the container.
-const StagedSecretEnvVar = stagedsecrets.EnvVar
-
 // stagedSecretWarnThreshold is the size (in bytes) above which a warning is
 // logged for the serialized secret blob. Container runtimes typically cap
 // the combined environment at ~128KB.
 const stagedSecretWarnThreshold = 100 * 1024
 
-// StagedFileSecret is an alias for the type in pkg/stagedsecrets.
-type StagedFileSecret = stagedsecrets.FileSecret
+// prepareContainerSecretEnv adds the shared secret-related environment needed
+// by local container runtimes.
+func prepareContainerSecretEnv(config *RunConfig) error {
+	if len(config.ResolvedSecrets) == 0 {
+		return nil
+	}
 
-// StagedSecrets is an alias for the type in pkg/stagedsecrets.
-type StagedSecrets = stagedsecrets.Staged
+	containerHome := util.GetHomeDir(config.UnixUsername)
+	encoded, err := serializeSecrets(containerHome, config.ResolvedSecrets)
+	if err != nil {
+		return fmt.Errorf("failed to serialize secrets: %w", err)
+	}
+	if encoded != "" {
+		config.Env = append(config.Env, stagedsecrets.EnvVar+"="+encoded)
+	}
+
+	if credPath := findGCPTelemetryCredentialPath(config.ResolvedSecrets, containerHome); credPath != "" {
+		config.Env = append(config.Env, telemetryGCPCredentialsEnvVar+"="+credPath)
+	}
+	return nil
+}
 
 // serializeSecrets collects file and variable secrets into a single JSON blob,
 // base64-encodes it, and returns the encoded string suitable for injection as
 // an environment variable. Returns "" when there are no file or variable secrets.
 // The containerHome parameter is used to expand ~/ prefixes in file target paths.
 func serializeSecrets(containerHome string, secrets []api.ResolvedSecret) (string, error) {
-	var staged StagedSecrets
+	var staged stagedsecrets.Staged
 
 	// Collect file secrets, deduplicating by container target path (last wins).
 	targetIndex := make(map[string]int) // target → index in FileSecrets
@@ -885,7 +1003,7 @@ func serializeSecrets(containerHome string, secrets []api.ResolvedSecret) (strin
 			data = []byte(s.Value)
 		}
 
-		entry := StagedFileSecret{
+		entry := stagedsecrets.FileSecret{
 			Name:   s.Name,
 			Target: target,
 			Value:  base64.StdEncoding.EncodeToString(data),
@@ -929,18 +1047,6 @@ func serializeSecrets(containerHome string, secrets []api.ResolvedSecret) (strin
 	}
 
 	return encoded, nil
-}
-
-// DecodeStagedSecrets decodes the SCION_STAGED_SECRETS env var value.
-// Deprecated: Use stagedsecrets.Decode directly.
-func DecodeStagedSecrets(encoded string) (*StagedSecrets, error) {
-	return stagedsecrets.Decode(encoded)
-}
-
-// WriteStagedSecrets writes decoded staged secrets to the filesystem.
-// Deprecated: Use stagedsecrets.Write directly.
-func WriteStagedSecrets(homeDir string, staged *StagedSecrets) error {
-	return stagedsecrets.Write(homeDir, staged)
 }
 
 // phaseFromContainerStatus derives an agent phase from a container status string.

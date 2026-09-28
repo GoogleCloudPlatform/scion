@@ -221,6 +221,16 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 		return err
 	}
 
+	// Validate --role flag if provided
+	if err := validateAgentRole(agentRoleFlag); err != nil {
+		return err
+	}
+
+	// Validate --message-mode flag if provided
+	if err := validateMessageMode(messageModeFlag); err != nil {
+		return err
+	}
+
 	// Build create request — always provision-only (create does not start the agent)
 	req := &hubclient.CreateAgentRequest{
 		Name:            agentName,
@@ -233,6 +243,8 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 		Branch:          branch,
 		Labels:          parsedLabels,
 		ProvisionOnly:   true,
+		AgentRole:       agentRoleFlag,
+		MessageMode:     messageModeFlag,
 	}
 
 	// Wire --service-account flag into the GCP identity assignment.
@@ -260,7 +272,7 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 	// Advance watermark to the hub-assigned creation time so this agent
 	// won't trigger a sync warning on the next 'scion ls'.
 	if resp.Agent != nil && !resp.Agent.Created.IsZero() {
-		hubsync.UpdateLastSyncedAt(hubCtx.ProjectPath, resp.Agent.Created, hubCtx.IsGlobal)
+		hubsync.UpdateLastSyncedAt(hubCtx.ProjectPath, resp.Agent.Created)
 		hubsync.AddSyncedAgent(hubCtx.ProjectPath, agentName)
 	}
 
@@ -342,6 +354,14 @@ func init() {
 
 	// Label flags
 	createCmd.Flags().StringArrayVar(&labelFlags, "label", nil, "Label in key=value format (repeatable)")
+
+	// Agent role flag
+	createCmd.Flags().StringVar(&agentRoleFlag, "role", "",
+		"Agent role for Hub API access: none, readonly, baseline, full")
+
+	// Agent message mode flag
+	createCmd.Flags().StringVar(&messageModeFlag, "message-mode", "",
+		"Agent message mode: none, lineage, branch, project")
 
 	// GCP service account assignment flag
 	createCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account ID to assign to this agent (requires Hub mode)")

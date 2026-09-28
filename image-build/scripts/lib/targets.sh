@@ -64,7 +64,7 @@ ALL_STEP_IDS+=(
 )
 
 # All known target names. Used by the orchestrator's --help and --target
-# validation.
+# validation. Includes both group targets and individual step IDs.
 # shellcheck disable=SC2034 # sourced library; ALL_TARGETS is read by build-images.sh
 ALL_TARGETS=(
   core-base
@@ -77,6 +77,21 @@ ALL_TARGETS=(
   all
   thick
 )
+# Append individual step IDs that are not already group targets, so they
+# appear in --help and in the error message for unknown targets.
+for _step_id in "${ALL_STEP_IDS[@]}"; do
+  _already="false"
+  for _t in "${ALL_TARGETS[@]}"; do
+    if [[ "${_step_id}" == "${_t}" ]]; then
+      _already="true"
+      break
+    fi
+  done
+  if [[ "${_already}" == "false" ]]; then
+    ALL_TARGETS+=("${_step_id}")
+  fi
+done
+unset _step_id _already _t
 
 # resolve_targets <target>
 #
@@ -118,6 +133,14 @@ resolve_targets() {
       printf '%s\n' scion-hub
       ;;
     *)
+      # Allow individual step IDs (e.g. scion-claude, scion-hub) as targets.
+      local _id
+      for _id in "${ALL_STEP_IDS[@]}"; do
+        if [[ "$1" == "${_id}" ]]; then
+          echo "$1"
+          return 0
+        fi
+      done
       return 1
       ;;
   esac
@@ -152,12 +175,16 @@ step_dockerfile() {
 # step_context_dir <step_id>
 #
 # Echoes the absolute path to the build context for the step. scion-base
-# uses the repo root because it copies go source; everything else uses its
-# own image-build subdirectory.
+# uses the repo root because it copies go source; core-base and thick-prep use
+# image-build/ itself so both can COPY the shared lib/ scripts they run
+# (install-core-toolchain.sh, verify-base-contract.sh) -- docker cannot COPY
+# from outside the context, and duplicating those scripts per-directory is
+# exactly the drift they exist to prevent. Everything else uses its own
+# image-build subdirectory.
 step_context_dir() {
   case "$1" in
-    core-base)     echo "${IMAGE_BUILD_DIR}/core-base" ;;
-    thick-prep)    echo "${IMAGE_BUILD_DIR}/thick-prep" ;;
+    core-base)     echo "${IMAGE_BUILD_DIR}" ;;
+    thick-prep)    echo "${IMAGE_BUILD_DIR}" ;;
     scion-base)    echo "${REPO_ROOT}" ;;
     scion-hub)     echo "${IMAGE_BUILD_DIR}/hub" ;;
     scion-omni)    echo "${REPO_ROOT}" ;;
@@ -225,7 +252,17 @@ step_build_args() {
       fi
       ;;
     thick-prep)
-      # No build-args — BASE_IMAGE default is in the Dockerfile ARG.
+      # BASE_IMAGE default is in the Dockerfile ARG. The mirror passthroughs are
+      # the same as core-base's and must be emitted here too: thick-prep now
+      # runs the same npm install as core-base, and a build behind a corporate
+      # proxy that worked on one chain failing on the other is the exact drift
+      # image-build/lib/ exists to eliminate.
+      if [[ -n "${NPM_REGISTRY:-}" ]]; then
+        echo "NPM_REGISTRY=${NPM_REGISTRY}"
+      fi
+      if [[ -n "${PIP_INDEX_URL:-}" ]]; then
+        echo "PIP_INDEX_URL=${PIP_INDEX_URL}"
+      fi
       ;;
     scion-base)
       if [[ "${THICK_BUILD:-}" == "true" ]]; then
@@ -235,6 +272,9 @@ step_build_args() {
       fi
       if [[ -n "${COMMIT_SHA:-}" ]]; then
         echo "GIT_COMMIT=${COMMIT_SHA}"
+      fi
+      if [[ -n "${VERSION:-}" ]]; then
+        echo "VERSION=${VERSION}"
       fi
       ;;
     scion-hub)
@@ -250,6 +290,9 @@ step_build_args() {
       fi
       if [[ -n "${COMMIT_SHA:-}" ]]; then
         echo "GIT_COMMIT=${COMMIT_SHA}"
+      fi
+      if [[ -n "${VERSION:-}" ]]; then
+        echo "VERSION=${VERSION}"
       fi
       ;;
     *)

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -95,10 +96,41 @@ func runProvision(ctx context.Context) error {
 
 	mode := store.ResolveWorkspaceSharingMode(provisionMode)
 
+	// F-111 (design §9): the k8s runtime mounts each NFS-backed shared dir
+	// into this init container at its own path (mirroring the main
+	// container's mounts) and passes "name=mountPath" pairs here, comma-joined
+	// — mkdir+chown must reach them the same as the workspace dir, since
+	// they're separate volume mounts the workspace's own chown doesn't reach.
+	// Keyed explicitly by the shared dir's own name (the producer side,
+	// pkg/runtime/k8s_runtime.go's nfsSharedDirMount, carries it alongside
+	// the mount for exactly this reason), not derived from the path here —
+	// two shared dirs could produce the same path basename through different
+	// target shapes (InWorkspace vs not), so reconstructing the key from the
+	// path on this side would risk a silent collision.
+	sharedDirs := make(map[string]provision.ResolvedSharedDir)
+	if raw := os.Getenv("SCION_SHARED_DIR_PATHS"); raw != "" {
+		for i, pair := range strings.Split(raw, ",") {
+			if pair == "" {
+				continue
+			}
+			name, path, ok := strings.Cut(pair, "=")
+			if !ok || name == "" || path == "" {
+				log.Info("SCION_SHARED_DIR_PATHS: skipping malformed entry %q (want name=path)", pair)
+				continue
+			}
+			key := name
+			if _, dup := sharedDirs[key]; dup {
+				key = fmt.Sprintf("%s-%d", name, i)
+			}
+			sharedDirs[key] = provision.ResolvedSharedDir{HostPath: path}
+		}
+	}
+
 	in := provision.ProvisionInput{
 		Ctx: ctx,
 		Resolved: provision.ResolvedWorkspace{
-			HostPath: provisionWorkspace,
+			HostPath:   provisionWorkspace,
+			SharedDirs: sharedDirs,
 		},
 		ProjectID:   projectID,
 		Mode:        mode,
@@ -107,9 +139,17 @@ func runProvision(ctx context.Context) error {
 		NFSUID:      provisionUID,
 		NFSGID:      provisionGID,
 		SentinelDir: provisionWorkspace,
+		// F-111: this command's entire purpose is the chown. A silent
+		// failure here would reproduce the "workspace stuck root:root" bug
+		// invisibly — the sentinel would still get written, and every future
+		// pod for this project would see it and skip provisioning forever.
+		// Failing the init container (non-zero exit, pod doesn't start) is
+		// the correct, loud failure mode.
+		RequireChownSuccess: true,
 	}
 
-	log.Info("Provisioning workspace at %s (mode=%s, project=%s)", provisionWorkspace, mode, projectID)
+	log.Info("Provisioning workspace at %s (mode=%s, project=%s, shared_dirs=%d)",
+		provisionWorkspace, mode, projectID, len(sharedDirs))
 	if err := provision.ProvisionShared(in); err != nil {
 		return fmt.Errorf("provision failed: %w", err)
 	}

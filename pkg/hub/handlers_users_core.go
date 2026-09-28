@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -55,19 +54,10 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 		Search: query.Get("search"),
 	}
 
-	limit := 50
-	if l := query.Get("limit"); l != "" {
-		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
-			limit = parsed
-		}
-	}
-
-	result, err := s.store.ListUsers(ctx, filter, store.ListOptions{
-		Limit:   limit,
-		Cursor:  query.Get("cursor"),
-		SortBy:  query.Get("sort"),
-		SortDir: query.Get("dir"),
-	})
+	listOptions := listOptionsFromQuery(query)
+	listOptions.SortBy = query.Get("sort")
+	listOptions.SortDir = query.Get("dir")
+	result, err := s.store.ListUsers(ctx, filter, listOptions)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -114,10 +104,20 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
-	id := extractID(r, "/api/v1/users")
+	id, action := extractAction(r, "/api/v1/users")
 
 	if id == "" {
 		NotFound(w, "User")
+		return
+	}
+
+	// Sub-resource actions
+	if action == "revoke-sessions" {
+		if r.Method != http.MethodPost {
+			MethodNotAllowed(w)
+			return
+		}
+		s.revokeUserSessions(w, r, id)
 		return
 	}
 
@@ -131,6 +131,26 @@ func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
 	default:
 		MethodNotAllowed(w)
 	}
+}
+
+// revokeUserSessions increments the user's session generation, invalidating
+// all existing cookie-based sessions for that user.
+func (s *Server) revokeUserSessions(w http.ResponseWriter, r *http.Request, id string) {
+	admin, ok := s.requireAdmin(w, r)
+	if !ok {
+		return
+	}
+
+	if err := s.store.IncrementSessionGeneration(r.Context(), id); err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	slog.Info("Admin revoked all sessions for user",
+		"user_id", id,
+		"admin_id", admin.ID(),
+		"admin_email", admin.Email())
+	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
 }
 
 func (s *Server) getUser(w http.ResponseWriter, r *http.Request, id string) {
@@ -292,10 +312,10 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 	// role matches the current value.
 	if updates.Role != nil {
 		switch *updates.Role {
-		case "admin", "member":
+		case store.UserRoleAdmin, store.UserRoleMember, store.UserRoleViewer:
 			// valid canonical roles
 		default:
-			BadRequest(w, fmt.Sprintf("unsupported role %q; valid values are \"admin\" and \"member\"", *updates.Role))
+			BadRequest(w, fmt.Sprintf("unsupported role %q; valid values are \"admin\", \"member\" and \"viewer\"", *updates.Role))
 			return
 		}
 	}
@@ -395,6 +415,22 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
+	// Invited users have no real role yet: the stored role is a placeholder and
+	// the role is assigned at first sign-in (see determineUserRole). Reject role
+	// changes so an admin cannot set a role that activation would silently
+	// overwrite. Suspending an invited user remains allowed; activation is rejected below.
+	if needsPromote && user.Status == store.UserStatusInvited {
+		writeError(w, http.StatusConflict, ErrCodeConflict, errRoleOnInvitedUser.Error(), nil)
+		return
+	}
+	// Likewise, activating an invited user directly would leave the placeholder
+	// role in place and skip the invited->active branch at first sign-in, so
+	// the hub default would never be applied. Suspending remains allowed.
+	if activatesInvitedUser(updates.Status, user.Status) {
+		writeError(w, http.StatusConflict, ErrCodeConflict, errActivateInvitedUser.Error(), nil)
+		return
+	}
+
 	// ── Execute ALL mutations in a single atomic transaction (R4-C1) ──
 
 	// Build actor audit metadata outside the transaction.
@@ -411,6 +447,14 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 		// truthful audit records and change detection (R4-fix: not stale pre-tx).
 		beforeRole := txUser.Role
 		beforeStatus := txUser.Status
+
+		// Re-check the invited guard against the transactional read.
+		if needsPromote && beforeStatus == store.UserStatusInvited {
+			return errRoleOnInvitedUser
+		}
+		if activatesInvitedUser(updates.Status, beforeStatus) {
+			return errActivateInvitedUser
+		}
 
 		// Role transition: derives classification from canonical binding state
 		// inside the transaction, not from User.Role (R4-fix).
@@ -499,7 +543,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 	})
 
 	if err != nil {
-		if errors.Is(err, errLastSuperAdmin) || errors.Is(err, errSelfDemotion) {
+		if errors.Is(err, errLastSuperAdmin) || errors.Is(err, errSelfDemotion) || errors.Is(err, errRoleOnInvitedUser) || errors.Is(err, errActivateInvitedUser) {
 			writeError(w, http.StatusConflict, ErrCodeConflict, err.Error(), nil)
 		} else if errors.Is(err, errBindingStateDrift) {
 			writeError(w, http.StatusConflict, "binding_state_drift", err.Error(), nil)
@@ -644,6 +688,19 @@ var errLastSuperAdmin = errors.New("cannot remove the last super-admin; promote 
 // binding mutation.
 var errSelfDemotion = errors.New("cannot demote yourself; ask another admin to change your role")
 
+// errRoleOnInvitedUser is returned when PATCH sets a role on an invited user.
+var errRoleOnInvitedUser = errors.New("role is assigned when the user first signs in")
+
+// errActivateInvitedUser is returned when PATCH sets status=active on an
+// invited user.
+var errActivateInvitedUser = errors.New("invited users are activated at first sign-in")
+
+// activatesInvitedUser reports whether a PATCH status would move an invited
+// user straight to active, bypassing first sign-in.
+func activatesInvitedUser(newStatus *string, currentStatus string) bool {
+	return newStatus != nil && *newStatus == store.UserStatusActive && currentStatus == store.UserStatusInvited
+}
+
 // bindingMutationKind describes what happened to super-admin bindings during
 // a role transition. Used for truthful audit records even when User.Role
 // doesn't change (R4-fix audit).
@@ -668,7 +725,7 @@ var errBindingStateDrift = errors.New("binding state changed since authorization
 // NOT from User.Role which may be stale.
 //
 // Lifecycle handling (R4-fix lifecycle):
-//   - member: removes ALL matching bindings (active, scheduled, expired)
+//   - member/viewer: removes ALL matching bindings (active, scheduled, expired)
 //   - admin: ensures exactly one active binding exists; stale rows are
 //     deleted then a fresh active binding is created
 //
@@ -677,6 +734,10 @@ var errBindingStateDrift = errors.New("binding state changed since authorization
 // weren't present at preauth (txState.HasAny && !preAuthState.HasAny), the
 // operation is rejected to prevent concurrent promotion from creating a
 // binding that is then silently removed without CanDelegate verification.
+//
+// After the super-admin bookkeeping, syncHubRoleGrants makes the hub-members
+// group membership and hub-viewer binding match newRole in the same
+// transaction (fail closed).
 //
 // Returns what binding mutation occurred for truthful audit (R4-fix audit).
 func (s *Server) executeRoleTransition(
@@ -750,11 +811,11 @@ func (s *Server) executeRoleTransition(
 		// !wantsBinding && !txState.HasAny: nothing to do.
 	}
 
-	// Ensure canonical hub-member group membership for members (demotion path).
-	if !wantsBinding {
-		if err := s.ensureHubMembershipTx(ctx, tx, user.ID); err != nil {
-			return bindingMutationNone, fmt.Errorf("ensure hub-member group membership: %w", err)
-		}
+	// Make hub-level grants (hub-members group, hub-viewer binding) match
+	// the target role inside the same transaction. Fails closed: any error
+	// rolls back the role change.
+	if err := syncHubRoleGrants(ctx, tx, user.ID, newRole, store.AdminAPICreatedBy); err != nil {
+		return bindingMutationNone, fmt.Errorf("sync hub role grants: %w", err)
 	}
 
 	user.Role = newRole
@@ -762,7 +823,8 @@ func (s *Server) executeRoleTransition(
 }
 
 // createSuperAdminBindingTx idempotently creates a system-scoped super-admin
-// role binding. Uses SystemReconcileCreatedBy sentinel (D10 store guard).
+// role binding. Uses AdminAPICreatedBy sentinel so that UI/API-granted
+// promotions are protected from demotion by ReconcileSuperAdminBindings.
 func (s *Server) createSuperAdminBindingTx(
 	ctx context.Context, tx store.Store,
 	userID string, rd *store.RoleDefinition,
@@ -773,7 +835,7 @@ func (s *Server) createSuperAdminBindingTx(
 		PrincipalID:      userID,
 		ScopeType:        store.RoleScopeSystem,
 		ScopeID:          "",
-		CreatedBy:        store.SystemReconcileCreatedBy,
+		CreatedBy:        store.AdminAPICreatedBy,
 	})
 	if err != nil && errors.Is(err, store.ErrAlreadyExists) {
 		return nil
@@ -880,28 +942,6 @@ func (s *Server) checkLastSuperAdminTx(
 		return errLastSuperAdmin
 	}
 
-	return nil
-}
-
-// ensureHubMembershipTx idempotently adds the given user to the canonical
-// Hub Members group within the provided transaction. This is the canonical
-// path for granting hub-member permissions on demotion from admin to member.
-// Returns an error if the group cannot be found (fail-closed).
-func (s *Server) ensureHubMembershipTx(ctx context.Context, tx store.Store, userID string) error {
-	group, err := tx.GetGroupBySlug(ctx, "hub-members")
-	if err != nil {
-		return fmt.Errorf("hub-members group lookup: %w", err)
-	}
-
-	err = tx.AddGroupMember(ctx, &store.GroupMember{
-		GroupID:    group.ID,
-		MemberType: store.GroupMemberTypeUser,
-		MemberID:   userID,
-		Role:       store.GroupMemberRoleMember,
-	})
-	if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
-		return fmt.Errorf("add user to hub-members group: %w", err)
-	}
 	return nil
 }
 

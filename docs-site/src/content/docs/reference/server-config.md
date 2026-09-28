@@ -54,12 +54,13 @@ Controls the central Hub API server.
 | `port` | int | `9810` | HTTP port to listen on (standalone mode). In combined mode (`--enable-web`), the Hub API is served on the web port instead and this setting is ignored. |
 | `host` | string | `"0.0.0.0"` | Network interface to bind to. |
 | `public_url` | string | | The externally accessible URL of the Hub (used for callbacks). |
+| `agent_endpoint` | string | | Optional override of `public_url` used **only** for the Hub URL injected into agents (`SCION_HUB_ENDPOINT`). Use when agents reach the Hub on a different address than users — e.g. an internal VPC URL — while invite links, chat-bridge links, the OIDC issuer default, and the `cloudrun_invoker` audience default keep using `public_url`. Must be `scheme://host[:port]` only: `http` or `https`, an IP literal or a hostname of letters, digits, `_`, `-`, and `.`, no path, query, fragment, or credentials (a trailing `/` is stripped); the Hub fails to start otherwise. When unset, agents receive the Hub's regular endpoint (`public_url`, or the endpoint the Hub resolves when `public_url` is unset). **Scope:** injected into agents on every broker attached to this Hub, including remote brokers — see [Splitting the agent endpoint from the public URL](#splitting-the-agent-endpoint-from-the-public-url). **Security:** an `http://` value sends agent bearer tokens and fetched secrets unencrypted; prefer `https://` unless the network is trusted and isolated. |
 | `gcp_project_id` | string | | GCP project ID used for minting GCP Service Accounts. Auto-detected if running on GCE/Cloud Run. |
 | `gcp_iam_check_mode` | string | `"off"` | Controls whether IAM `actAs` permission is checked when binding a GCP service account to an agent. Supported values: `"off"` (no check; default) or `"enforce"` (uses Policy Troubleshooter to enforce `iam.serviceAccounts.actAs`). See the security/permissions reference for details on roles and caches. |
 | `gcp_iam_deny_unknown_policy` | string | `"fail-open"` | Behavior when Policy Troubleshooter cannot evaluate deny policies (e.g. if the Hub lacks org-level reviewer roles). Supported values: `"fail-open"` (allow if no explicit deny is found; default) or `"fail-closed"` (treat as indeterminate and deny). |
 | `read_timeout` | duration | `"30s"` | HTTP read timeout. |
 | `write_timeout` | duration | `"60s"` | HTTP write timeout. |
-| `admin_emails` | list | `[]` | List of emails granted super-admin access. Additive only: listed users are promoted to admin on login, but the list never demotes or rewrites a role already stored in the database (e.g. `admin` or `viewer` set from the admin UI). Changing a role is an explicit admin action. |
+| `admin_emails` | list | `[]` | List of emails granted super-admin access. Listed users are always admins: they are promoted on sign-in. When the list is non-empty, an admin whose email is removed from it is demoted to [`default_user_role`](#authentication-serverauth) at the next hub restart or their next sign-in, whichever comes first. At restart, both `admin_emails` and the default role come from `settings.yaml` or the environment, so a change made only in the Admin UI (Postgres mode) takes effect at the user's next sign-in. If the default role was set only in the Admin UI, a user demoted at restart becomes Member. Two exceptions: admins promoted from **Admin > Users** (or the users API) stay admins, and nobody is demoted if the startup safety check failed (for example, no existing user matched the list at startup and there were no UI-promoted admins); demotions resume only after the configuration is fixed and the hub is restarted. Roles set from the admin UI for users who were never config admins (`member`, `viewer`) are not changed by this list. |
 | `soft_delete_retention` | duration | | Duration to retain soft-deleted agents (e.g., `"72h"`). |
 | `soft_delete_retain_files` | bool | `false` | Preserve workspace files during the soft-delete period. |
 | `cors` | object | | CORS configuration (see below). |
@@ -104,14 +105,16 @@ Persistence settings for the Hub.
 | `dev_mode` | bool | `false` | Enable insecure development authentication (used in `"dev"` mode). |
 | `dev_token` | string | | Static token for dev mode. |
 | `authorized_domains` | list | `[]` | Limit access to specific email domains. |
+| `user_access_mode` | string | `"open"` | Who may sign in: `"open"` (any verified email, subject to `authorized_domains` if set), `"domain_restricted"` (email domain must be in `authorized_domains`), or `"invite_only"` (the email must belong to an invited, allow-listed or existing user). Users in `admin_emails` are always allowed. |
+| `default_user_role` | string | `"member"` | Hub role given to a user when their account is first created or activated: first sign-in, including the first sign-in of an invited or allow-listed user. Values: `"member"` or `"viewer"` (`"admin"` is rejected; use `admin_emails`). Users in `admin_emails` are always admins. Changing it does not affect existing users. It is also the role given to an admin who is removed from `admin_emails`. See [Hub roles](/scion/hosted/ha/permissions/#hub-roles). Environment: `SCION_SEED_SERVER_AUTH_DEFAULTUSERROLE` (recommended) or `SCION_SERVER_AUTH_DEFAULTUSERROLE` (per-node, deprecated for Layer-1 keys). |
 
 ### Proxy Auth (`server.auth.proxy`)
 
-Proxy authentication configuration (consulted when `server.auth.mode` is set to `"proxy"`). See [Proxy Auth (Google IAP)](/scion/hosted/ha/auth-proxy-iap/) for the full deployment guide.
+Proxy authentication configuration (consulted when `server.auth.mode` is set to `"proxy"`). See [Proxy Auth (Google IAP)](/scion/hosted/ha/auth-proxy-iap/) for the full deployment guide, and [Generic JWT proxy provider](/scion/hosted/ha/auth-proxy-iap/#generic-jwt-proxy-provider) for bespoke auth proxies.
 
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `provider` | string | | Selects the proxy auth provider: `"iap"` or `"header"`. |
+| `provider` | string | | Selects the proxy auth provider: `"iap"`, `"jwt"`, or `"header"`. |
 | `require_trusted_proxy_ip` | bool | `false` | Enables defense-in-depth IP allowlisting. Uses the trusted_proxies CIDR list. |
 
 #### Google IAP Settings (`server.auth.proxy.iap`)
@@ -122,6 +125,24 @@ Proxy authentication configuration (consulted when `server.auth.mode` is set to 
 | `issuer` | string | `"https://cloud.google.com/iap"` | The expected JWT issuer. Override only for mock/testing setups. |
 | `jwks_url` | string | `"https://www.gstatic.com/iap/verify/public_key-jwk"` | The URL to retrieve public keys for signature verification. Override only for testing. |
 
+#### Generic JWT Settings (`server.auth.proxy.jwt`)
+
+Used when `provider` is `"jwt"`. Exactly one key source — `public_key_file`, `jwks_url`, or `jwks_file` — must be set; the Hub refuses to start otherwise.
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `header` | string | `"X-Auth-Proxy-JWT"` | HTTP header carrying the signed JWT assertion. |
+| `algorithm` | string | | **Required.** The single accepted signing algorithm. Must be asymmetric: `RS256`, `RS384`, `RS512`, `ES256`, `ES384`, `ES512`, `PS256`, `PS384`, or `PS512`. |
+| `issuer` | string | | If set, must match the JWT `iss` claim. Empty skips issuer validation. |
+| `audience` | string | | If set, must be contained in the JWT `aud` claim. Empty skips audience validation. |
+| `public_key_file` | string | | Key source: path to a PEM-encoded public key (PKIX, PKCS1, or an X.509 certificate). Loaded once at startup. |
+| `jwks_url` | string | | Key source: JWKS endpoint. Keys are cached and refreshed hourly and on an unknown `kid`, with the last-good key set served if the endpoint fails. |
+| `jwks_file` | string | | Key source: path to a local JWKS JSON document. Loaded once at startup; keys are matched by `kid`. Changes require a restart. |
+| `claims.email` | string | `"email"` | Claim holding the user's email. The claim is required on every token. |
+| `claims.subject` | string | `"sub"` | Claim holding the stable subject ID. Falls back to the email when absent. |
+| `claims.display_name` | string | `"name"` | Claim holding the display name. |
+| `claims.domain` | string | `"hd"` | Claim holding the hosted domain. |
+
 ### Transport Auth (`server.auth.transport`)
 
 Transport auth configuration for the platform guard (IAP or Cloud Run invoker). See [Proxy Auth (Google IAP)](/scion/hosted/ha/auth-proxy-iap/) for the full deployment guide.
@@ -130,7 +151,7 @@ Transport auth configuration for the platform guard (IAP or Cloud Run invoker). 
 | :--- | :--- | :--- | :--- |
 | `mode` | string | `"none"` | Transport auth mode: `none`, `iap`, or `cloudrun_invoker`. |
 | `oidc_audience` | string | | OIDC audience for transport tokens. For `iap`: the IAP OAuth client ID. For `cloudrun_invoker`: the Hub URL (auto-derived from `hub.public_url` if empty). |
-| `platform_auth_sa` | string | | Dedicated service account the Hub impersonates to mint OIDC ID tokens for agents. |
+| `platform_auth_sa` | string | | Dedicated service account the Hub impersonates to mint OIDC ID tokens for agents. This account is never provisioned as a Hub user and is never issued user credentials, even if it signs in. |
 
 #### Agent transport environment variables
 
@@ -218,12 +239,56 @@ Configures the backend and mount settings for storing and managing agent workspa
 | `gke_shared_volume.pv_claim_name` | string | | The name of the GKE-managed PVC bound to the shared storage backend (e.g. Filestore). |
 | `gke_shared_volume.subpath_root` | string | `"projects"` | Sub-directory prefix within the GKE volume. |
 
+#### NFS Workspaces on Kubernetes
+
+With the `nfs` backend and a bound PV claim (`nfs.shares[].pv_name`), each Kubernetes agent pod gets a `workspace-provision` init container. It runs for both git and non-git agents. It creates the per-project subPath (or, if another pod is already provisioning it, waits for that pod to finish) and chowns it to `nfs.uid`/`nfs.gid` so the agent can write `/workspace`. For git agents, it also clones the repository. The init container runs as root with only the `CHOWN`, `FOWNER`, and `DAC_OVERRIDE` capabilities and does not follow symlinks. If the chown fails, the agent start fails and the error names the failed init container, so the agent never runs with an unwritable workspace.
+
 #### Ephemeral Storage & 503 Safety Gate
 
 To protect deployments from silent data loss, the Hub implements a strict **503 Safety Gate**:
 * If the Hub is deployed on serverless environments like Google Cloud Run with the `local` backend selected, its local workspace paths map to ephemeral, non-durable container storage.
 * The Hub detects this non-durable state and automatically intercepts all file write and modification endpoints (including WebDAV, inline file editing, and git cloning).
 * Affected endpoints will return `503 Service Unavailable` with a descriptive message rather than allowing writes to persist ephemerally on the container's scratch space, enforcing the transition to a durable backend (`nfs`, `cloudrun-volume`, or `gke-shared-volume`) for production.
+
+### Shared Directory Storage (`server.shared_dir_storage`)
+
+Selects where project [shared directories](/scion/local/workspace/#5-project-shared-directories) are stored, independently of `server.workspace_storage`. With the `nfs` backend, every Runtime Broker resolves a project's shared directories to the same path on one NFS export, so agents on different brokers — Docker or Kubernetes — see the same files.
+
+This setting is **global-only**: each broker process reads it from its own global `settings.yaml`, never from project settings. It is a [Layer-0](#layer-0--bootstrap-file--env-only) setting and requires a restart to take effect.
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `backend` | string | `"local"` | `"local"` (shared directories live next to the project's local config) or `"nfs"`. Any other value, including a different case, is rejected. |
+| `nfs.mount_root` | string | | **Required for `nfs`.** Host directory under which the share is mounted, at `<mount_root>/<shares[0].id>`. Docker, Podman, and Apple runtimes bind-mount from here. |
+| `nfs.shares` | list of objects | `[]` | **Required for `nfs`.** Only the first entry is used. `id` is required. `pv_name` names the static PersistentVolumeClaim that Kubernetes pods mount by `subPath`, and is required for Kubernetes brokers. |
+| `nfs.subpath_root` | string | `"projects"` | Directory within the share that holds per-project trees. Must be a relative path. |
+
+Shared directories resolve to `<mount_root>/<share id>/<subpath_root>/<project id>/shared-dirs/<name>`. On Kubernetes, pods mount the `pv_name` claim with the matching `subPath` instead of creating a per-directory PVC.
+
+The `nfs` backend fails closed. Agent start is refused when the block is incomplete, the host base directory does not exist, the runtime is not a local-container or Kubernetes runtime (for example, Cloud Run), or a shared-directory path resolves through a symlink. The NFS export itself must be provisioned and mounted before agents start. The `uid`, `gid`, `mount_options`, and `storage_class` fields of the `nfs` block are ignored here.
+
+With the `nfs` backend, the Hub and brokers also apply the following:
+
+- **Symlink-safe access**: Every Hub operation on an NFS shared directory goes through the same confined resolver. This covers the web file browser, archive downloads, attachment staging, and shared-dir deletion. The resolver walks each path component with `O_NOFOLLOW`, anchored on the inode of the project's tree, and refuses any symlink in the path. A missing or incomplete `nfs` block, or an unusable host base directory, fails closed on the Hub as well as on agent start.
+- **Leaf modes and ACLs**: A newly created shared directory gets mode `2775` (setgid, group-writable) and a minimal default POSIX ACL, so files agents create inside it inherit group write access regardless of umask. If the export does not support POSIX ACLs, a warning is logged once and the directory stays plain `2775` with no ACL. Directories that already existed are never modified. See the [hybrid tier guide](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/hybrid-tier.md) for the manual fix-up recipe.
+- **Cleanup on delete**: Deleting a project removes its `<subpath_root>/<project id>/shared-dirs` tree from the export. Removing a single shared directory removes that directory's contents. Both are best-effort: failures are logged and never block or roll back the database change.
+- **Startup summary**: At startup the server logs one `server.shared_dir_storage resolved layout: …` line, plus a warning if any ignored `nfs` fields are set.
+
+The `local` backend (or an unset `shared_dir_storage`) behaves as before.
+
+```yaml
+server:
+  shared_dir_storage:
+    backend: nfs
+    nfs:
+      mount_root: /mnt/scion-nfs
+      subpath_root: projects
+      shares:
+        - id: shared
+          server: 10.0.0.2
+          export: /scion-shared
+          pv_name: scion-shared-pvc
+```
 
 ### Scheduler (`server.scheduler`)
 
@@ -237,6 +302,31 @@ Controls the background task scheduler in the Hub. This regulates the tick inter
 :::note[Database Stability]
 Configuring a modest concurrency limit (such as the default `2`) is highly recommended for small or single-node database instances to prevent sudden spikes in database connection usage.
 :::
+
+### Maintenance (`server.maintenance`)
+
+Controls how the Hub checks for and applies its own updates. The Hub dispatches update checks by **deployment tier**: a `binary` Hub reads the `LATEST.json` release manifest and the GitHub Releases API, while a `source` Hub checks its git checkout for new commits.
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `deployment_tier` | string | `binary` if no repository path is configured, otherwise `source` | Update strategy. `binary` updates from GitHub Releases; `source` updates from a git checkout. The single-node VM deploy script sets `binary`. |
+| `release_channel` | string | Detected from the running version | Release channel to track: `stable`, `preview`, or `nightly`. When empty, the channel is derived from the version string (`v0.5.0` → `stable`, `v0.5.0-rc1` → `preview`, `nightly-*` → `nightly`). Development builds have no channel and skip scheduled checks. |
+| `update_policy` | string | `auto` for `binary`, `disabled` for `source` | `auto` checks on a schedule and installs updates automatically. `notify` checks on a schedule and shows an update-available banner in the admin UI, where an admin applies or dismisses it. `disabled` turns off scheduled checks; manual checks from the admin UI still work. |
+| `check_interval_hours` | integer | `6` | How often the scheduled release check runs. Minimum `1`. Each run is jittered by up to ±30 minutes. |
+| `github_repo` | string | `GoogleCloudPlatform/scion` | GitHub repository used for release and manifest lookups. |
+
+Scheduled checks run only when `deployment_tier` is `binary` and `update_policy` is not `disabled`. A binary update downloads the release tarball, verifies the new binary's version, backs up the current binary, installs the new one, and restarts the `scion-hub` systemd service. If the install fails, the backup is restored.
+
+The related admin endpoints are `POST /api/v1/admin/maintenance/check-updates` (manual check) and `GET` / `DELETE` on `/api/v1/admin/maintenance/update-available` (read or dismiss a pending update notification). Both require the `hub.maintenance.execute` permission.
+
+```yaml
+server:
+  maintenance:
+    deployment_tier: "binary"
+    release_channel: "stable"
+    update_policy: "notify"
+    check_interval_hours: 12
+```
 
 ### OIDC Identity Provider (`server.oidc`)
 
@@ -266,13 +356,15 @@ Configuration for inbound OIDC-based federation authentication.
 | :--- | :--- | :--- | :--- |
 | `issuer_url` | string | | **MANDATORY.** The exact OIDC issuer URL (matching token `iss` claim). |
 | `jwks_url` | string | | The URL to fetch signing public keys. Discovered via OIDC discovery if empty. |
-| `expected_audience` | string | | The expected audience `aud` claim in tokens. |
+| `expected_audience` | string | | The expected audience `aud` claim in tokens. Required (non-empty) for a `user`-type Google issuer to enable external bearer tokens. |
 | `allowed_projects` | list of strings | | If set, restricts tokens to specific project UUIDs. |
 | `allowed_root_users` | list of strings | | If set, restricts tokens to specific root user emails. |
 | `default_scopes` | list of strings | | Default JWT scopes granted to federated agents. |
 | `issuer_type` | string | `"hub"` | Type of issuer: `"hub"`, `"service_account"`, or `"user"`. |
 | `default_role` | string | `"viewer"` | Default role for federated users (`issuer_type: user`). |
 | `allowed_emails` | list of strings | | Restrict user tokens to specific email claims (supports wildcards e.g. `*@example.com`). |
+| `allowed_domains` | list of strings | | Google issuer only. Restrict **user** principals presenting an [external bearer token](/scion/hosted/single-node/auth/#external-bearer-tokens-google-credential-pass-through) to these email domains (exact, case-insensitive, no wildcards or subdomain matching). The Hub sign-in policy still applies. Never consulted for service accounts. |
+| `allowed_gcp_projects` | list of strings | | Google issuer only. Admit **service-account** principals whose GCP project ID (parsed from the service account email) is listed. Empty admits no service accounts. Distinct from `allowed_projects`, which matches Scion project IDs. |
 
 ### OIDC Login (`server.oidc_login`)
 
@@ -305,7 +397,7 @@ project_defaults:
 ## Environment Variables
 
 :::tip[Database Mode]
-When running with a postgres database, operational settings (Layer-1) can be configured via `SCION_SEED_*` environment variables and managed in the admin UI. See the [Admin Settings Model](/reference/admin-settings/) for details on the seeded/managed lifecycle and the `SCION_SEED_*` namespace.
+When running with a postgres database, operational settings (Layer-1) can be configured via `SCION_SEED_*` environment variables and managed in the admin UI. See the [Admin Settings Model](/scion/reference/admin-settings/) for details on the seeded/managed lifecycle and the `SCION_SEED_*` namespace.
 :::
 
 All server settings can be overridden via environment variables using the `SCION_SERVER_` prefix and snake_case naming.
@@ -372,6 +464,18 @@ When `server.hub.public_url` is not explicitly set, the Hub endpoint injected in
 5. Auto-computed `http://localhost:{port}` (last resort).
 
 For local development where the Hub runs on `localhost` but agents are in containers, set `server.broker.container_hub_endpoint` to a container-accessible address like `http://host.containers.internal:8080`.
+
+The endpoint resolved above (or `server.hub.agent_endpoint`, if set — see below) is what the co-located broker then forwards to the container, applying its own bridging rules (host-gateway mapping for a hostname on co-located Docker, no rewrite for an already-reachable IP, and the `cloudrun-sandbox` runtime's own link-local logic).
+
+#### Splitting the agent endpoint from the public URL
+
+`server.hub.agent_endpoint` overrides the endpoint above for agents only — invite links, chat-bridge links, the OIDC issuer default, and the `cloudrun_invoker` audience default keep reading `public_url`. Use it when agents must reach the Hub on an address that would be wrong for a human clicking a link, such as an internal VPC IP in a topology where a proxy fronts the Hub for users. When unset, agents receive the Hub's regular endpoint — `public_url`, or the endpoint the Hub resolves above when `public_url` is itself unset.
+
+The value must be `scheme://host[:port]` only: `http` or `https`, an IP literal or a hostname of letters, digits, `_`, `-`, and `.` (Docker Compose-style service names such as `scion_hub` are accepted), and an optional port — no path, query, fragment, or credentials (a trailing `/` is stripped from an otherwise-bare URL). The Hub rejects anything else at startup with an error naming `server.hub.agent_endpoint`.
+
+**Scope: this value is injected into agents on every runtime broker attached to this Hub, including remote brokers.** Only set it if every broker's agents can reach the address and it is this Hub on each of those networks — otherwise agents dispatched from a remote broker will send their Hub credentials to whatever answers at that address on their own network.
+
+**Security:** with an `http://` value, agent bearer tokens, and the secrets and tokens agents fetch from the Hub, travel **unencrypted** on the network between agents and the Hub. Use `https://` unless that network is trusted and isolated (for example, a private VPC subnet with no untrusted tenants).
 
 ## Notification channels
 
@@ -543,7 +647,7 @@ Settings required before the database connection exists, or that are restart-bou
 | Database | `database.*` |
 | Listeners | `hub.port`, `hub.host`, `hub.read_timeout`, `hub.write_timeout`, `broker.*` |
 | Auth stack | `auth.mode`, `auth.dev_mode`, `auth.dev_token`, `auth.dev_token_file`, `auth.proxy.*`, `auth.transport.*`, `oauth.*`, `oidc_login.*` |
-| Secrets/storage | `secrets.*`, `storage.*`, `workspace_storage.*` |
+| Secrets/storage | `secrets.*`, `storage.*`, `workspace_storage.*`, `shared_dir_storage.*` |
 | Identity/mode | `mode`, `env`, `hub.hub_id`, `hub.gcp_project_id` |
 | Logging | `log_level`, `log_format` |
 | CORS | `hub.cors.*`, `broker.cors` |
@@ -555,11 +659,11 @@ Settings that can be changed at runtime and are shared across all replicas. Stor
 
 | Section | Contents |
 | :--- | :--- |
-| `access` | `admin_emails`, `user_access_mode`, `authorized_domains` |
+| `access` | `admin_emails`, `user_access_mode`, `authorized_domains`, `default_user_role` |
 | `lifecycle` | `auto_suspend_stalled`, `soft_delete_retention`, `soft_delete_retain_files` |
 | `maintenance` | `admin_mode`, `maintenance_message` (durable + cluster-wide) |
 | `telemetry` | Full `telemetry.*` subtree (enabled, cloud, hub, local, filter, resource) |
-| `agent_defaults` | `default_template`, `default_harness_config`, `default_max_turns`, `default_max_model_calls`, `default_max_duration`, `default_resources`, `default_model`, `default_thinking_level`, `default_max_agent_role`, `default_agent_role` |
+| `agent_defaults` | `default_template`, `default_harness_config`, `default_max_turns`, `default_max_model_calls`, `default_max_duration`, `default_resources`, `default_model`, `default_thinking_level`, `default_max_agent_role`, `default_agent_role`, `default_runtime_broker`, `default_timezone`, `default_gcp_identity_mode`, `default_gcp_identity_service_account_id` |
 | `federation` | `enabled`, `trusted_issuers[]`, `algorithms`, `refresh_interval`, `debounce_interval` |
 | `endpoints` | `hub.public_url`, `image_registry` |
 | `github_app` | `app_id`, `api_base_url`, `webhooks_enabled`, `installation_url`, `private_key_path` |
@@ -595,9 +699,9 @@ Because env overrides on Layer-1 keys reintroduce per-node drift, the system war
 
 **PUT partitioning**: The request body is partitioned by the section registry. Layer-1 fields (including `runtimes`, `profiles`, and `harness_configs`) are written to DB sections in the `hub_settings` table as whole-map JSONB documents. Layer-0 fields trigger a `422` rejection. Unclassified fields (non-registered settings) are ignored and reported in `ignored_keys`.
 
-**Revision CAS**: The request body may include `expected_revisions` — a map of section name to expected revision number. On mismatch, the response is `409 Conflict` with the conflicting sections and their current revisions. Omitted sections use last-writer-wins semantics. Sections are written in alphabetical order for deterministic partial-apply behavior.
+**Revision CAS**: The request body may include `expected_revisions` — a map of section name to expected revision number. On mismatch, the response is `409 Conflict` with the conflicting sections and their current revisions. Omitted sections use last-writer-wins semantics. The `access` section is the exception: it is merged onto the current row, and a concurrent change to that row between read and write returns 409 even without `expected_revisions`. Sections are written in alphabetical order for deterministic partial-apply behavior.
 
-**Presence-aware clearing**: The PUT handler distinguishes **omitted** fields (preserve current DB value) from **explicitly-sent empty values** (`""`, `[]`, `null`) which **clear** the field. This enables clearing admin_emails, user_access_mode, authorized_domains, notification_channels, and public_url without sending every field.
+**Presence-aware clearing**: The PUT handler distinguishes **omitted** fields (preserve current DB value) from **explicitly-sent empty values** (`""`, `[]`, `null`) which **clear** the field. This enables clearing admin_emails, user_access_mode, authorized_domains, default_user_role, notification_channels, and public_url without sending every field.
 
 **Maintenance durability**: `PUT /api/v1/admin/maintenance` writes to the `maintenance` section in DB, making admin/maintenance mode durable across restarts and propagated to all replicas. `SCION_SERVER_ADMINMODE` env var still force-enables per node for break-glass access. In file/SQLite mode, maintenance changes are ephemeral (in-memory only, lost on restart). Use `SCION_SERVER_ADMINMODE=true` env var for persistent control.
 

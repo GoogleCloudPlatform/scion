@@ -43,6 +43,28 @@ func TestEmbedOnlyHarnesses_ReturnsEmpty(t *testing.T) {
 	assert.Empty(t, all)
 }
 
+// TestDefaultModelAliases_KnownHarnessReturnsBuiltInTable is a regression
+// test for the ptone/scion#1869 fallback: the built-in alias table read from
+// the embedded harnesses/claude/config.yaml must be non-empty and contain
+// the "large" size alias, since resume/restart paths depend on it when no
+// project- or hub-stored harness-config carries model_aliases.
+func TestDefaultModelAliases_KnownHarnessReturnsBuiltInTable(t *testing.T) {
+	aliases := DefaultModelAliases("claude")
+	assert.NotEmpty(t, aliases)
+	assert.Contains(t, aliases, "large")
+}
+
+// TestDefaultModelAliases_UnknownOrEmptyHarnessReturnsNil is the "nil/empty
+// config" guard test for harness.go's DefaultModelAliases: a harness name
+// with no embedded config.yaml (fs.ReadFile error) and one whose name is
+// empty must both resolve to a nil map rather than panicking, exercising the
+// same code path the gemini review on GoogleCloudPlatform/scion#1891 flagged
+// for a defensive nil check around the parsed YAML entry.
+func TestDefaultModelAliases_UnknownOrEmptyHarnessReturnsNil(t *testing.T) {
+	assert.Nil(t, DefaultModelAliases("unknown-harness"))
+	assert.Nil(t, DefaultModelAliases(""))
+}
+
 func TestAllHarnessNames_IncludesAll(t *testing.T) {
 	names := AllHarnessNames()
 	assert.Contains(t, names, "claude")

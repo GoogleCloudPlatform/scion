@@ -45,12 +45,6 @@ func GetSharedDirsBasePath(projectDir string) (string, error) {
 	// ~/.scion/project-configs/<slug>__<uuid>/.scion/
 	// Go up one level to get the project-config root, then into shared-dirs
 	parent := filepath.Dir(projectDir)
-	// Verify we're in a project-configs or grove-configs directory structure
-	parentBase := filepath.Base(filepath.Dir(parent))
-	if parentBase == ProjectConfigsDir || parentBase == GroveConfigsDir || filepath.Base(parent) != DotScion {
-		return filepath.Join(parent, SharedDirsSubdir), nil
-	}
-
 	return filepath.Join(parent, SharedDirsSubdir), nil
 }
 

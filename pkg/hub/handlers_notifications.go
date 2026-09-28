@@ -16,7 +16,6 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -496,9 +495,6 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 
 		// Apply optional filters
 		projectID := r.URL.Query().Get("projectId")
-		if projectID == "" {
-			projectID = r.URL.Query().Get("groveId")
-		}
 		agentID := r.URL.Query().Get("agentId")
 		scope := r.URL.Query().Get("scope")
 
@@ -722,22 +718,6 @@ type createTemplateRequest struct {
 	ProjectID         string   `json:"projectId"`
 }
 
-// UnmarshalJSON implements backward compatibility for the grove-to-project rename.
-func (r *createTemplateRequest) UnmarshalJSON(data []byte) error {
-	type Alias createTemplateRequest
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{Alias: (*Alias)(r)}
-	if err := json.Unmarshal(data, aux); err != nil {
-		return err
-	}
-	if r.ProjectID == "" && aux.GroveID != "" {
-		r.ProjectID = aux.GroveID
-	}
-	return nil
-}
-
 // handleSubscriptionTemplateRoutes handles CRUD for subscription templates.
 //
 // Templates are a user-facing convenience with no project containment of their
@@ -771,6 +751,11 @@ func (s *Server) handleSubscriptionTemplateRoutes(w http.ResponseWriter, r *http
 		if req.Scope == "" {
 			req.Scope = store.SubscriptionScopeProject
 		}
+		if req.Scope != store.SubscriptionScopeProject && req.Scope != store.SubscriptionScopeAgent {
+			writeError(w, http.StatusBadRequest, "bad_request",
+				fmt.Sprintf("invalid scope %q: must be \"project\" or \"agent\"", req.Scope), nil)
+			return
+		}
 
 		tmpl := &store.SubscriptionTemplate{
 			ID:                api.NewUUID(),
@@ -797,9 +782,6 @@ func (s *Server) handleSubscriptionTemplateRoutes(w http.ResponseWriter, r *http
 	// GET /api/v1/notifications/templates — List
 	case templateID == "" && r.Method == http.MethodGet:
 		projectID := r.URL.Query().Get("projectId")
-		if projectID == "" {
-			projectID = r.URL.Query().Get("groveId")
-		}
 		templates, err := s.store.ListSubscriptionTemplates(ctx, projectID)
 		if err != nil {
 			writeErrorFromErr(w, err, "")

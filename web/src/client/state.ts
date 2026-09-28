@@ -41,6 +41,14 @@ export type ViewScope =
   | { type: 'broker-detail'; brokerId: string }
   | { type: 'chat'; spaceIds: string[]; userId: string };
 
+/**
+ * Resource a scope-level capability set was computed for.
+ *
+ * The Hub computes these per resource kind, so a cached set is only a valid
+ * answer for the same kind it was computed for.
+ */
+export type ScopeResource = 'agent' | 'project';
+
 /** Full in-memory state for the current scope */
 export interface AppState {
   agents: Map<string, Agent>;
@@ -50,8 +58,19 @@ export interface AppState {
   deletedAgentIds: Set<string>;
   connected: boolean;
   scope: ViewScope | null;
-  /** Scope-level capabilities from the SSR-prefetched list response */
-  scopeCapabilities: import('../shared/types.js').Capabilities | undefined;
+  /**
+   * Scope-level capabilities from the SSR-prefetched list response, keyed by
+   * the resource they were computed for.
+   *
+   * Keyed rather than a single slot because agent-scope and project-scope
+   * capabilities are different vocabularies computed by different calls
+   * (`ComputeScopeCapabilities(..., "agent")` vs `..., "project"`). The Agents
+   * and Projects pages declare the same `dashboard` scope, so `setScope`
+   * early-returns on a navigation between them and never clears this. With one
+   * shared slot the second page read the first page's capabilities and
+   * rendered its "New …" button from the wrong answer.
+   */
+  scopeCapabilities: Map<ScopeResource, import('../shared/types.js').Capabilities>;
 }
 
 /** Events dispatched by StateManager */
@@ -71,7 +90,8 @@ export type StateEventType =
   | 'chat-read-state-updated'
   | 'chat-message-edited'
   | 'chat-message-deleted'
-  | 'chat-dm-promoted';
+  | 'chat-dm-promoted'
+  | 'agent-created';
 
 export class StateManager extends EventTarget {
   private state: AppState = {
@@ -82,7 +102,7 @@ export class StateManager extends EventTarget {
     deletedAgentIds: new Set(),
     connected: false,
     scope: null,
-    scopeCapabilities: undefined,
+    scopeCapabilities: new Map(),
   };
 
   /**
@@ -130,7 +150,11 @@ export class StateManager extends EventTarget {
    *
    * @param initialData - Agents and/or projects from the prefetched API response.
    * @param scopeCapabilities - Scope-level capabilities from the API response's
-   *   top-level `_capabilities` field (if present).
+   *   top-level `_capabilities` field (if present). The payload is prefetched
+   *   for one page, so these belong to whichever list it carries; they are
+   *   attributed to that resource. When the payload carries both lists the
+   *   owner is ambiguous, so they are dropped rather than guessed — the page
+   *   then fetches its own, which is correct if slower.
    */
   hydrate(
     initialData: { agents?: Agent[]; projects?: Project[] },
@@ -149,7 +173,13 @@ export class StateManager extends EventTarget {
     }
 
     if (scopeCapabilities) {
-      this.state.scopeCapabilities = scopeCapabilities;
+      const hasAgents = Array.isArray(initialData.agents);
+      const hasProjects = Array.isArray(initialData.projects);
+      if (hasAgents && !hasProjects) {
+        this.state.scopeCapabilities.set('agent', scopeCapabilities);
+      } else if (hasProjects && !hasAgents) {
+        this.state.scopeCapabilities.set('project', scopeCapabilities);
+      }
     }
   }
 
@@ -192,7 +222,7 @@ export class StateManager extends EventTarget {
     this.state.brokers.clear();
     this.state.deletedProjectIds.clear();
     this.state.deletedAgentIds.clear();
-    this.state.scopeCapabilities = undefined;
+    this.state.scopeCapabilities.clear();
     this.pendingAgentDeltas.clear();
 
     const subjects = this.subjectsForScope(scope);
@@ -479,6 +509,13 @@ export class StateManager extends EventTarget {
         updated._capabilities = base._capabilities;
       }
       this.state.agents.set(agentId, updated as Agent);
+      if (eventType === 'created') {
+        // A legitimate SSE creation for this ID. Signal it separately from
+        // the generic agents-updated notify so consumers that suppress
+        // re-adding a server-omitted agent (see chat.ts loop guard) know
+        // the suppression no longer applies to this ID.
+        this.notifyWithData('agent-created', { agentId });
+      }
     }
     this.notify('agents-updated');
   }
@@ -548,6 +585,19 @@ export class StateManager extends EventTarget {
   }
 
   /**
+   * Remove a stale agent from the shared map, e.g. one an authoritative
+   * members fetch no longer returns because the client missed its SSE
+   * `deleted` event (backgrounded tab, dropped connection). Does not
+   * notify — the caller already owns the UI update from its own fetch,
+   * and notifying here would re-trigger SSE merge consumers that read
+   * from this map, re-adding the entry they're removing.
+   */
+  removeAgent(id: string): void {
+    this.state.agents.delete(id);
+    this.pendingAgentDeltas.delete(id);
+  }
+
+  /**
    * Seed the projects map with full objects from a REST API response.
    * Does not trigger notifications.
    */
@@ -558,11 +608,18 @@ export class StateManager extends EventTarget {
   }
 
   /**
-   * Seed scope-level capabilities so other pages sharing the same scope
-   * can use them without re-fetching.
+   * Seed scope-level capabilities for one resource kind, so a later visit to
+   * the same page can use them without re-fetching.
+   *
+   * `resource` is required: a capability set answers "what may I do with
+   * <resource>", and storing it unkeyed let one page's answer be read as
+   * another's.
    */
-  seedScopeCapabilities(caps: import('../shared/types.js').Capabilities): void {
-    this.state.scopeCapabilities = caps;
+  seedScopeCapabilities(
+    resource: ScopeResource,
+    caps: import('../shared/types.js').Capabilities
+  ): void {
+    this.state.scopeCapabilities.set(resource, caps);
   }
 
   /**
@@ -650,8 +707,14 @@ export class StateManager extends EventTarget {
     return this.state.deletedAgentIds;
   }
 
-  getScopeCapabilities(): import('../shared/types.js').Capabilities | undefined {
-    return this.state.scopeCapabilities;
+  /**
+   * Scope-level capabilities previously seeded for `resource`, or undefined
+   * when none were. Never returns another resource's capabilities.
+   */
+  getScopeCapabilities(
+    resource: ScopeResource
+  ): import('../shared/types.js').Capabilities | undefined {
+    return this.state.scopeCapabilities.get(resource);
   }
 
   get isConnected(): boolean {

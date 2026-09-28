@@ -120,14 +120,20 @@ func (m *mockAgentService) Exec(ctx context.Context, agentID string, command []s
 func (m *mockAgentService) GetLogs(ctx context.Context, agentID string, opts *hubclient.GetLogsOptions) (string, error) {
 	return "", fmt.Errorf("not implemented")
 }
-func (m *mockAgentService) SendOutboundMessage(ctx context.Context, agentID string, msg *hubclient.OutboundMessageRequest) error {
-	return fmt.Errorf("not implemented")
+func (m *mockAgentService) SendOutboundMessage(ctx context.Context, agentID string, msg *hubclient.OutboundMessageRequest) (*hubclient.OutboundMessageResult, error) {
+	return nil, fmt.Errorf("not implemented")
 }
 func (m *mockAgentService) GetCloudLogs(ctx context.Context, agentID string, opts *hubclient.GetCloudLogsOptions) (*hubclient.CloudLogsResponse, error) {
 	return nil, fmt.Errorf("not implemented")
 }
 func (m *mockAgentService) StreamCloudLogs(ctx context.Context, agentID string, opts *hubclient.GetCloudLogsOptions, handler func(hubclient.CloudLogEntry)) error {
 	return fmt.Errorf("not implemented")
+}
+func (m *mockAgentService) SetMessageMode(ctx context.Context, agentID string, req *hubclient.SetMessageModeRequest, opts *hubclient.SetMessageModeOptions) (*hubclient.SetMessageModeResponse, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+func (m *mockAgentService) Reincarnate(ctx context.Context, agentID string, req *hubclient.ReincarnateAgentRequest) (*hubclient.ReincarnateAgentResponse, error) {
+	return nil, fmt.Errorf("not implemented")
 }
 
 // mockHubClient implements hubclient.Client for testing, delegating to a mockAgentService.
@@ -154,8 +160,10 @@ func (m *mockHubClient) ScheduledEvents(string) hubclient.ScheduledEventService 
 func (m *mockHubClient) Schedules(string) hubclient.ScheduleService                   { return nil }
 func (m *mockHubClient) GCPServiceAccounts() hubclient.GCPServiceAccountService       { return nil }
 func (m *mockHubClient) Messages() hubclient.MessageService                           { return nil }
+func (m *mockHubClient) Conversations() hubclient.ConversationService                 { return nil }
 func (m *mockHubClient) AllowList() hubclient.AllowListService                        { return nil }
 func (m *mockHubClient) Invites() hubclient.InviteService                             { return nil }
+func (m *mockHubClient) Messaging() hubclient.MessagingService                        { return nil }
 func (m *mockHubClient) Skills() hubclient.SkillService                               { return nil }
 func (m *mockHubClient) SkillRegistries() hubclient.SkillRegistryService              { return nil }
 func (m *mockHubClient) ProjectInjectedSkills(projectID string) hubclient.InjectedSkillsService {

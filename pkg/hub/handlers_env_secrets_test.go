@@ -553,3 +553,114 @@ func TestPatchSecret_BrokerScope_InvalidInjectionMode(t *testing.T) {
 		t.Errorf("PATCH with invalid injectionMode at broker scope: expected 4xx, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// =============================================================================
+// Secret promotion: AllowProgeny propagation (miller79/scion#47)
+// =============================================================================
+
+// TestEnvVar_SecretPromotion_AllowProgenyPropagated verifies that when a secret
+// is created via the env-var endpoint (secret=true), the AllowProgeny flag is
+// correctly propagated to the resulting secret in the secret backend.
+func TestEnvVar_SecretPromotion_AllowProgenyPropagated(t *testing.T) {
+	srv, s := testServer(t)
+	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
+	srv.SetSecretBackend(localBackend)
+	ctx := context.Background()
+
+	body := SetEnvVarRequest{
+		Value:         "progeny-secret-value",
+		Secret:        true,
+		AllowProgeny:  true,
+		InjectionMode: "always",
+	}
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/env/PROGENY_PROMO_KEY?scope=user", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT (secret promotion) expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify the resulting secret has AllowProgeny=true via the secret backend.
+	meta, err := localBackend.GetMeta(ctx, "PROGENY_PROMO_KEY", "user", DevUserID)
+	if err != nil {
+		t.Fatalf("GetMeta failed: %v", err)
+	}
+	if !meta.AllowProgeny {
+		t.Error("expected AllowProgeny=true on promoted secret, got false")
+	}
+}
+
+// TestEnvVar_SecretPromotion_AllowProgeny_AsNeeded verifies that secret
+// promotion with AllowProgeny=true succeeds when InjectionMode is "as_needed".
+// Unlike plain env vars, secrets do NOT require injectionMode=always for
+// allowProgeny (design doc §5.7).
+func TestEnvVar_SecretPromotion_AllowProgeny_AsNeeded(t *testing.T) {
+	srv, s := testServer(t)
+	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
+	srv.SetSecretBackend(localBackend)
+	ctx := context.Background()
+
+	body := SetEnvVarRequest{
+		Value:         "progeny-secret-as-needed",
+		Secret:        true,
+		AllowProgeny:  true,
+		InjectionMode: "as_needed",
+	}
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/env/PROGENY_AS_NEEDED_KEY?scope=user", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT (secret promotion, as_needed) expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	meta, err := localBackend.GetMeta(ctx, "PROGENY_AS_NEEDED_KEY", "user", DevUserID)
+	if err != nil {
+		t.Fatalf("GetMeta failed: %v", err)
+	}
+	if !meta.AllowProgeny {
+		t.Error("expected AllowProgeny=true on promoted secret with as_needed mode, got false")
+	}
+}
+
+// TestEnvVar_SecretPromotion_AllowProgeny_DefaultMode verifies that secret
+// promotion with AllowProgeny=true succeeds when InjectionMode is empty
+// (defaults to "as_needed"). This ensures the env-var validation does not
+// reject secret promotions that omit injectionMode.
+func TestEnvVar_SecretPromotion_AllowProgeny_DefaultMode(t *testing.T) {
+	srv, s := testServer(t)
+	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
+	srv.SetSecretBackend(localBackend)
+	ctx := context.Background()
+
+	body := SetEnvVarRequest{
+		Value:        "progeny-secret-default",
+		Secret:       true,
+		AllowProgeny: true,
+		// InjectionMode intentionally omitted — defaults to "as_needed"
+	}
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/env/PROGENY_DEFAULT_MODE_KEY?scope=user", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT (secret promotion, default mode) expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	meta, err := localBackend.GetMeta(ctx, "PROGENY_DEFAULT_MODE_KEY", "user", DevUserID)
+	if err != nil {
+		t.Fatalf("GetMeta failed: %v", err)
+	}
+	if !meta.AllowProgeny {
+		t.Error("expected AllowProgeny=true on promoted secret with default mode, got false")
+	}
+}
+
+// TestEnvVar_PlainEnvVar_AllowProgeny_AsNeeded_Rejected ensures the original
+// validation still holds for plain (non-secret) env vars: AllowProgeny with
+// injectionMode != "always" must be rejected.
+func TestEnvVar_PlainEnvVar_AllowProgeny_AsNeeded_Rejected(t *testing.T) {
+	srv, _ := testServer(t)
+
+	body := SetEnvVarRequest{
+		Value:         "plain-env-value",
+		AllowProgeny:  true,
+		InjectionMode: "as_needed",
+	}
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/env/PLAIN_PROGENY_KEY?scope=user", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("PUT (plain env, as_needed + allowProgeny) expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}

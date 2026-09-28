@@ -42,6 +42,7 @@ const (
 	ActionStop         Action = "stop"
 	ActionMessage      Action = "message"
 	ActionAttach       Action = "attach"
+	ActionLifecycle    Action = "lifecycle"
 	ActionPortAccess   Action = "port_access"
 	ActionRegister     Action = "register"
 	ActionAddMember    Action = "addMember"
@@ -59,6 +60,12 @@ const (
 	ActionClone          Action = "clone"
 	ActionExecute        Action = "execute"
 	ActionSetMessageMode Action = "set_message_mode"
+
+	// Global-catalog write actions — see design doc §3.1.
+	// These distinguish hub-catalog mutation from project-scoped CRUD,
+	// so a system-scoped binding carrying only these IDs does not
+	// silently grant project-level authority.
+	ActionCreateGlobal Action = "create_global"
 )
 
 // Resource represents the target of an authorization check.
@@ -70,6 +77,35 @@ type Resource struct {
 	ParentID   string            // Parent resource ID
 	Labels     map[string]string // Resource labels for condition matching
 	Ancestry   []string          // Ordered ancestor chain [root, ..., parent] for transitive access
+
+	// ScopeKind is the resource's own scope classification for resource
+	// types whose records are themselves partitioned by scope: "skill"
+	// (store.SkillScopeGlobal/Core/Project/User), "template"
+	// (store.TemplateScopeGlobal/Project/User), and "harness_config"
+	// (store.HarnessConfigScopeGlobal/Project/User). It is distinct from
+	// ParentType/ParentID, which describe project containment for the
+	// kernel's project-scoped binding check. ScopeKind instead lets a
+	// resource-type-specific check (see filterHubWideSkillGrants,
+	// filterHubWideTemplateGrants, filterHubWideHarnessConfigGrants) tell a
+	// genuinely hub-scoped record apart from a user- or project-scoped one
+	// that merely happens to have no ParentType set. Left empty for resource
+	// types that don't need it. For "skill", "template", and
+	// "harness_config" resources specifically, build this through the
+	// resource's canonical constructor (skillResource/skillScopeResource,
+	// templateResource/templateScopeResource,
+	// harnessConfigResource/harnessConfigScopeResource) rather than a
+	// hand-built literal: each filter fails closed on an empty or
+	// unrecognized ScopeKind (ptone/scion#1901 finding F4; ptone/scion#1916
+	// applies the same rule to template and harness_config), so only those
+	// constructors are guaranteed to set it correctly.
+	ScopeKind string
+
+	// ScopeUserID is the owning user of a user-scoped skill
+	// (store.Skill.ScopeID when ScopeKind is store.SkillScopeUser), set only
+	// by skillScopeResource/skillResource. It lets the agent creator
+	// user-skill relationship grant (agentCreatorUserSkillGrant) match the
+	// same column the skill list predicate filters on. Empty otherwise.
+	ScopeUserID string
 }
 
 // PrincipalKind describes the authenticated actor evaluated by an authorization request.
@@ -256,7 +292,12 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 	case PrincipalKindFederatedService:
 		return decorateDecision(Decision{Allowed: false, Reason: "federated service identities are not supported"}, principal, credential)
 	case PrincipalKindBroker:
-		return decorateDecision(Decision{Allowed: false, Reason: "broker identities are not supported by authorization"}, principal, credential)
+		result := decorateDecision(Decision{Allowed: false, Reason: "broker identities are not supported by authorization"}, principal, credential)
+		// Emit the audit before returning so broker denies are diagnosable.
+		if a.decisionAuditEmitter != nil {
+			a.emitDecisionAudit(ctx, request, result)
+		}
+		return result
 	}
 
 	// Resolve permission ID. When the caller provides an explicit permission,
@@ -382,6 +423,18 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 	// Agents derive project-scoped permissions from their JWT token scopes.
 	// This creates a synthetic project-scoped binding so the kernel can
 	// evaluate agent permissions through the standard pipeline.
+	//
+	// Deliberately NOT given a hub-wide-catalog carve-out here: this kernel
+	// function is shared by every resource type, including ones (broker,
+	// group, user, github_app — see TestAuthz_AgentProjectReadBaseline_NoProjectDenied)
+	// where a parentless resource must stay unconditionally denied to an
+	// agent. The template/harness_config global-catalog exception for agents
+	// (ptone/scion#1916 follow-up) is instead applied at the two call sites
+	// that need it — catalogListReadBatch (authorized_list.go) and
+	// authorizeTemplateReadRoute/authorizeHarnessConfigRoute — the same way
+	// this function already carves out brokers outside the kernel rather
+	// than inside it, so the exception cannot leak into an unrelated
+	// resource type's evaluation.
 	if isAgentPrincipal(principal.Kind) {
 		if agent, ok := principal.Identity.(AgentIdentity); ok && agent.ProjectID() != "" {
 			synthCandidates, synthRoles := a.buildAgentSyntheticBindings(agent)
@@ -390,6 +443,45 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 				roleDefs[k] = v
 			}
 		}
+	}
+
+	// ── Step 5b2: Agent hub skill catalog (ptone/scion#1968) ──────────
+	// Agents may read the hub-wide (global/core) skill catalog. The
+	// project-scoped JWT binding above cannot express that (a hub-scoped
+	// skill has no ProjectID, so scopeApplies rejects it), so add a
+	// synthetic system-scoped skill.read/skill.list binding. Step 5c strips
+	// it again for any skill that is not global/core, and the agent JWT
+	// restriction (7b) and delegation ceiling (10) still apply.
+	if request.Resource.Type == "skill" && isAgentPrincipal(principal.Kind) {
+		if agent, ok := principal.Identity.(AgentIdentity); ok {
+			cb, role := agentSkillCatalogBinding(agent)
+			candidates = append(candidates, cb)
+			roleDefs[cb.RoleDefinitionID] = role
+		}
+	}
+
+	// ── Step 5c: Skill scope containment (ptone/scion#1901) ───────────
+	// The curated hub-member/hub-viewer roles carry skill.read/skill.list at
+	// system scope purely so every hub member can browse the hub-wide
+	// (global/core) skill catalog. That grant must not leak into user- or
+	// project-scoped skills; see filterHubWideSkillGrants.
+	if request.Resource.Type == "skill" {
+		candidates = filterHubWideSkillGrants(candidates, roleDefs, request.Resource.ScopeKind)
+	}
+
+	// ── Step 5d/5e: Template and harness-config scope containment
+	// (ptone/scion#1916) ────────────────────────────────────────────────
+	// Same shape as step 5c: the curated hub-member/hub-viewer roles also
+	// carry template.read/list and harness_config.read/list at system
+	// scope, purely so every hub member can browse the hub-wide (global)
+	// catalog. That grant must not leak into user- or project-scoped
+	// records; see filterHubWideTemplateGrants and
+	// filterHubWideHarnessConfigGrants.
+	if request.Resource.Type == "template" {
+		candidates = filterHubWideTemplateGrants(candidates, roleDefs, request.Resource.ScopeKind)
+	}
+	if request.Resource.Type == "harness_config" {
+		candidates = filterHubWideHarnessConfigGrants(candidates, roleDefs, request.Resource.ScopeKind)
 	}
 
 	// ── Step 6: Build resource context ────────────────────────────────
@@ -936,7 +1028,16 @@ func (a *AuthzService) checkRelationshipGrants(
 		}
 	}
 
-	// 4. Progeny relationship grants (agents only).
+	// 4. Creator user-skill read (agents only).
+	// An agent may read its creator's own user-scoped skills; see
+	// agentCreatorUserSkillGrant. The origin user must also still exist and
+	// be active. The agent JWT restriction and access constraints (applied
+	// by the caller) and the delegation ceiling still apply on top.
+	if d, ok := agentCreatorUserSkillGrant(principal, resource, action); ok && a.originUserActive(ctx, principal) {
+		return d, true
+	}
+
+	// 5. Progeny relationship grants (agents only).
 	// Agent reads on secrets, env vars, and skill injections via the
 	// creator-progeny ancestry chain. Replaces the old DelegatedFrom
 	// policy pattern.
@@ -1035,6 +1136,9 @@ func uatScopeRestriction(scopes []string) Restriction {
 	scopeSet := make(map[string]bool, len(scopes))
 	for _, s := range scopes {
 		scopeSet[s] = true
+		for _, implied := range permissions.LegacyUATScopeImplications[s] {
+			scopeSet[implied] = true
+		}
 	}
 	// Build the set of allowed permission IDs from the scopes.
 	allowed := make(map[string]struct{})
@@ -1362,43 +1466,16 @@ func projectIDForResource(r Resource) string {
 // IsSystemAdmin checks whether the given user has a system-scoped super-admin
 // role binding. Uses the batched query path.
 func (a *AuthzService) IsSystemAdmin(ctx context.Context, userID string) bool {
-	if userID == "" {
-		return false
-	}
-	now := time.Now()
-	principals := []store.PrincipalRef{{Type: "user", ID: userID}}
-	groups, err := a.store.GetEffectiveGroups(ctx, userID)
-	if err == nil {
-		for _, gid := range groups {
-			principals = append(principals, store.PrincipalRef{Type: "group", ID: gid})
-		}
-	}
-	bindings, err := a.store.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
-	if err != nil {
-		return false
-	}
-	for _, b := range bindings {
-		if b.ScopeType != store.RoleScopeSystem {
-			continue
-		}
-		// R-2: Check activation — expired super-admin binding should not return true.
-		if !isBindingActive(b, now) {
-			continue
-		}
-		rd, err := a.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
-		if err != nil {
-			continue
-		}
-		if rd.Name == store.SystemRoleSuperAdmin {
-			return true
-		}
-	}
-	return false
+	return a.hasActiveSystemRole(ctx, userID, store.SystemRoleSuperAdmin)
 }
 
 // IsHubAdmin checks whether the given user has a system-scoped hub-admin
 // role binding.
 func (a *AuthzService) IsHubAdmin(ctx context.Context, userID string) bool {
+	return a.hasActiveSystemRole(ctx, userID, store.SystemRoleHubAdmin)
+}
+
+func (a *AuthzService) hasActiveSystemRole(ctx context.Context, userID, roleName string) bool {
 	if userID == "" {
 		return false
 	}
@@ -1418,7 +1495,6 @@ func (a *AuthzService) IsHubAdmin(ctx context.Context, userID string) bool {
 		if b.ScopeType != store.RoleScopeSystem {
 			continue
 		}
-		// R-2: Check activation — expired hub-admin binding should not return true.
 		if !isBindingActive(b, now) {
 			continue
 		}
@@ -1426,7 +1502,7 @@ func (a *AuthzService) IsHubAdmin(ctx context.Context, userID string) bool {
 		if err != nil {
 			continue
 		}
-		if rd.Name == store.SystemRoleHubAdmin {
+		if rd.Name == roleName {
 			return true
 		}
 	}
@@ -1833,37 +1909,4 @@ func (a *AuthzService) getProjectScopedPermissions(ctx context.Context, principa
 	}
 
 	return result, nil
-}
-
-// makeAllowed creates a slice of n true values.
-func makeAllowed(n int) []bool {
-	allowed := make([]bool, n)
-	for i := range allowed {
-		allowed[i] = true
-	}
-	return allowed
-}
-
-// =============================================================================
-// Legacy compatibility: scope/action helpers used by other files
-// =============================================================================
-
-// scopeLevel returns a numeric level for scope ordering (higher = more specific).
-// Retained for compatibility with audit and response code.
-func scopeLevel(scope string) int {
-	switch scope {
-	case "hub":
-		return 0
-	case "project":
-		return 1
-	case "resource":
-		return 2
-	default:
-		return -1
-	}
-}
-
-// isReadClassAction reports whether an action is read-class.
-func isReadClassAction(a Action) bool {
-	return a == ActionRead || a == ActionList
 }

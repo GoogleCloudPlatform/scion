@@ -23,12 +23,10 @@
  *   ASKED THE WRONG SERVER QUESTION — the component renders fine and shows
  *   another scope's accounts, or none, with no error anywhere.
  *
- *   OFFERED AN ACTION THAT CANNOT WORK — hub-scoped accounts are readable by
- *   every logged-in user and writable by almost none, so any affordance
- *   rendered from a row being VISIBLE is a button that 403s for most of the
- *   hub. Creation at hub scope is refused by the Hub outright (held under #19),
- *   so there the button cannot work for ANYONE, including a hub admin whose
- *   `create` capability is true.
+ *   OFFERED AN ACTION THAT CANNOT WORK — the Hub gates each action on
+ *   capabilities returned per-scope. Both BYO registration and minting are
+ *   now available at hub scope (registration since P9, minting since Phase 2),
+ *   gated on the `create` and `mint` capabilities respectively.
  *
  * ON ASSERTING ABSENCE: "no create button" passes just as well when the
  * component failed to render, when the selector is misspelled, and when the
@@ -206,20 +204,13 @@ describe('scion-gcp-service-account-list', () => {
     });
   });
 
-  describe('creation is not offered at hub scope', () => {
+  describe('hub-scope affordances: Register and Mint are both offered', () => {
     /**
-     * THE CAPABILITY IS TRUE AND THE BUTTON MUST STILL BE ABSENT.
-     *
-     * This fixture is a hub admin: `create` is in the list capabilities. The
-     * Hub nevertheless answers 400 to a hub-scoped registration, before
-     * consulting policy, because the write path is held. So the button is not
-     * suppressed because the caller may not — it is suppressed because the
-     * operation does not exist yet, and no capability can make it exist.
-     *
-     * The project-scope control in the same test is what makes the absence
-     * mean something: same selector, same capability payload, button present.
+     * Hub-scope BYO registration was enabled on the backend in P9. The
+     * capability is the sole gate — a hub admin with `create` now sees the
+     * Register Existing button at hub scope, just as at project scope.
      */
-    it('hides Register Existing at hub scope even for a caller who may create', async () => {
+    it('shows Register Existing at hub scope when caller has create capability', async () => {
       const caps = { actions: ['create', 'list', 'mint'] };
 
       const hubEl = await createComponent(
@@ -234,12 +225,23 @@ describe('scion-gcp-service-account-list', () => {
       const hubLabels = buttonLabels(hubEl).join('|');
       const projectLabels = buttonLabels(projectEl).join('|');
 
-      expect(hubLabels).not.toContain('Register Existing');
-      // POSITIVE CONTROL: the same selector finds the button where it belongs.
+      expect(hubLabels).toContain('Register Existing');
+      // POSITIVE CONTROL: both scopes show the button when the capability is present.
       expect(projectLabels).toContain('Register Existing');
     });
 
-    it('hides Mint at hub scope, where there is no mint endpoint at all', async () => {
+    it('hides Register Existing at hub scope when caller lacks create capability', async () => {
+      const caps = { actions: ['list'] }; // no 'create'
+
+      const el = await createComponent(
+        { scope: 'hub' },
+        makeFetch([], { items: [], _capabilities: caps })
+      );
+
+      expect(buttonLabels(el).join('|')).not.toContain('Register Existing');
+    });
+
+    it('shows Mint at hub scope when caller has mint capability', async () => {
       const caps = { actions: ['create', 'mint'] };
 
       const hubEl = await createComponent(
@@ -251,25 +253,36 @@ describe('scion-gcp-service-account-list', () => {
         makeFetch([], { items: [], _capabilities: caps })
       );
 
-      expect(buttonLabels(hubEl).join('|')).not.toContain('Mint');
+      // Both scopes show Mint when the capability is present.
+      expect(buttonLabels(hubEl).join('|')).toContain('Mint');
       expect(buttonLabels(projectEl).join('|')).toContain('Mint');
     });
 
-    it('hides them in the empty state too, which is the state a new hub is in', async () => {
-      // The empty state carries its own copy of both affordances. A hub with no
-      // accounts registered yet is precisely the screen where a "Register" call
-      // to action is most tempting to a reader and most broken in fact.
+    it('hides Mint at hub scope when caller lacks mint capability', async () => {
+      const caps = { actions: ['create', 'list'] }; // no 'mint'
+
+      const el = await createComponent(
+        { scope: 'hub' },
+        makeFetch([], { items: [], _capabilities: caps })
+      );
+
+      expect(buttonLabels(el).join('|')).not.toContain('Mint');
+    });
+
+    it('shows Register and Mint in the empty state', async () => {
+      // The empty state carries its own copy of both affordances. A new hub
+      // with no accounts is where "Register" and "Mint" are most useful.
       const el = await createComponent(
         { scope: 'hub' },
         makeFetch([], { items: [], _capabilities: { actions: ['create', 'mint'] } })
       );
 
       expect(el.shadowRoot!.textContent).toContain('No GCP Service Accounts');
-      expect(buttonLabels(el).join('|')).not.toContain('Register Existing');
-      expect(buttonLabels(el).join('|')).not.toContain('Mint');
+      expect(buttonLabels(el).join('|')).toContain('Register Existing');
+      expect(buttonLabels(el).join('|')).toContain('Mint');
     });
 
-    it('hides them in compact mode too', async () => {
+    it('shows Register and Mint in compact mode', async () => {
       const caps = { actions: ['create', 'mint'] };
 
       const hubEl = await createComponent(
@@ -284,8 +297,10 @@ describe('scion-gcp-service-account-list', () => {
         })
       );
 
-      expect(buttonLabels(hubEl).join('|')).not.toContain('Register Existing');
+      expect(buttonLabels(hubEl).join('|')).toContain('Register Existing');
+      expect(buttonLabels(hubEl).join('|')).toContain('Mint');
       expect(buttonLabels(projectEl).join('|')).toContain('Register Existing');
+      expect(buttonLabels(projectEl).join('|')).toContain('Mint');
     });
   });
 
@@ -401,6 +416,54 @@ describe('scion-gcp-service-account-list', () => {
 
       const post = calls.find((c) => c.method === 'POST');
       expect(post!.url).toBe('/api/v1/projects/proj-1/gcp-service-accounts/sa-p/verify');
+    });
+  });
+
+  describe('hub-scope quota logic', () => {
+    it('isMintDisabled returns true when hub_cap is reached', async () => {
+      const caps = { actions: ['create', 'mint'] };
+      const mintQuota = {
+        project_minted: 0,
+        project_cap: 0,
+        hub_minted: 2,
+        hub_cap: 2,
+        global_minted: 2,
+        global_cap: 10,
+      };
+
+      const el = await createComponent(
+        { scope: 'hub' },
+        makeFetch([], { items: [], _capabilities: caps, mint_quota: mintQuota })
+      );
+
+      // The component exposes isMintDisabled as a private method — call it
+      // through the element to exercise scope-aware branching.
+      const disabled = (
+        el as unknown as { isMintDisabled: () => boolean }
+      ).isMintDisabled();
+      expect(disabled).toBe(true);
+    });
+
+    it('renderQuotaInfo shows "Hub: X/Y" at hub scope', async () => {
+      const caps = { actions: ['create', 'mint'] };
+      const mintQuota = {
+        project_minted: 0,
+        project_cap: 0,
+        hub_minted: 1,
+        hub_cap: 5,
+        global_minted: 3,
+        global_cap: 10,
+      };
+
+      const el = await createComponent(
+        { scope: 'hub' },
+        makeFetch([], { items: [], _capabilities: caps, mint_quota: mintQuota })
+      );
+
+      const text = el.shadowRoot!.textContent ?? '';
+      expect(text).toContain('Hub: 1/5');
+      // Should not show "Project:" at hub scope.
+      expect(text).not.toContain('Project:');
     });
   });
 

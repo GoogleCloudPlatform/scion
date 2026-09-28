@@ -16,35 +16,44 @@ package runtime
 
 import (
 	"context"
+	"io"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 type RunConfig struct {
-	Name                 string
-	Template             string
-	UnixUsername         string
-	Image                string
-	HomeDir              string
-	Workspace            string
-	RepoRoot             string
-	ContainerWorkspace   string // The container-side workspace path (e.g., /workspace or /repo-root/.scion/agents/foo/workspace)
-	Env                  []string
-	ResolvedSecrets      []api.ResolvedSecret
-	Volumes              []api.VolumeMount
-	Labels               map[string]string
-	Annotations          map[string]string
-	ResolvedAuth         *api.ResolvedAuth
-	Harness              api.Harness
-	Task                 string
-	CommandArgs          []string
-	Resume               bool
-	TelemetryEnabled     bool
-	Resources            *api.ResourceSpec
-	Kubernetes           *api.KubernetesConfig
-	GitClone             *api.GitCloneConfig
-	SharedDirs           []api.SharedDir
+	Name               string
+	Template           string
+	UnixUsername       string
+	Image              string
+	HomeDir            string
+	Workspace          string
+	RepoRoot           string
+	ContainerWorkspace string // The container-side workspace path (e.g., /workspace or /repo-root/.scion/agents/foo/workspace)
+	Env                []string
+	ResolvedSecrets    []api.ResolvedSecret
+	Volumes            []api.VolumeMount
+	Labels             map[string]string
+	Annotations        map[string]string
+	ResolvedAuth       *api.ResolvedAuth
+	Harness            api.Harness
+	Task               string
+	CommandArgs        []string
+	Resume             bool
+	TelemetryEnabled   bool
+	Resources          *api.ResourceSpec
+	Kubernetes         *api.KubernetesConfig
+	GitClone           *api.GitCloneConfig
+	SharedDirs         []api.SharedDir
+	// SharedDirStorage holds the resolved shared-dir storage plan when
+	// server.shared_dir_storage.backend is "nfs" (design
+	// deploy-config-explore §3.2.3/§3.2.4). It is independent of
+	// WorkspaceBackendName/NFS* above, which describe workspace storage
+	// only. Nil means shared dirs use the default local layout (or, on K8s,
+	// fall back to the existing workspace_storage:nfs subPath branch or
+	// per-dir dynamic PVCs).
+	SharedDirStorage     *SharedDirRealization
 	BrokerMode           bool
 	NoAuth               bool
 	NoAuthMessage        string
@@ -104,6 +113,27 @@ type RunConfig struct {
 	nfsProvisionLockLost bool
 }
 
+// SharedDirRealization holds the plan for realizing a project's shared
+// directories when server.shared_dir_storage.backend is "nfs" (design
+// deploy-config-explore §3.2.3/§3.2.4). It is computed once (in
+// pkg/agent.resolveSharedDirs) and consumed by the K8s runtime's buildPod,
+// which mounts PVClaimName by subPath instead of creating per-dir dynamic
+// PVCs. Docker/Podman/Apple consume the equivalent bind-mount VolumeMounts
+// directly (from runtime.NFSSharedDirsToVolumeMounts) rather than this
+// struct.
+type SharedDirRealization struct {
+	// Backend is "nfs" — the only realized backend today.
+	Backend string
+	// PVClaimName is the K8s PVC claim name holding the shared NFS export
+	// root. Empty means shared_dir_storage nfs is misconfigured (missing
+	// pv_name); buildPod must fail closed rather than fall back to EmptyDir
+	// (design G5).
+	PVClaimName string
+	// SubPaths maps each shared dir name to its subPath within PVClaimName,
+	// e.g. "projects/<pid>/shared-dirs/<name>".
+	SubPaths map[string]string
+}
+
 type Runtime interface {
 	Name() string
 	Run(ctx context.Context, config RunConfig) (string, error)
@@ -118,6 +148,14 @@ type Runtime interface {
 	PullImage(ctx context.Context, image string) error
 	Sync(ctx context.Context, id string, direction SyncDirection) error
 	Exec(ctx context.Context, id string, cmd []string) (string, error)
+	// ExecWithStdin runs cmd with stdin piped from the given reader, instead
+	// of embedding data in the command's argv. Callers delivering secrets
+	// (e.g. a token) into a container MUST use this instead of interpolating
+	// the secret into cmd: argv (including heredoc bodies passed via `sh -c`)
+	// becomes part of the outer host process's command line and is readable
+	// via /proc/<pid>/cmdline for the lifetime of the exec, even though a
+	// heredoc keeps the secret out of the *inner* command's argv. See #1355.
+	ExecWithStdin(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error)
 	// GetWorkspacePath returns the host path to the container's /workspace mount.
 	// This is used for workspace sync operations.
 	GetWorkspacePath(ctx context.Context, id string) (string, error)

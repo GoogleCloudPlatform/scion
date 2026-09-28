@@ -72,7 +72,9 @@ describe('parseContainerPath', () => {
   });
 
   it('handles workspace path with .scion-volumes deeper than root', () => {
-    const result = parseContainerPath('/workspace/.scion-volumes/shared-stuff/deeply/nested/file.md');
+    const result = parseContainerPath(
+      '/workspace/.scion-volumes/shared-stuff/deeply/nested/file.md'
+    );
     expect(result).toEqual({
       kind: 'shared-dir',
       dirName: 'shared-stuff',

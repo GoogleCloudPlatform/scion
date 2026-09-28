@@ -123,8 +123,11 @@ func (s *Server) resolveAgentHarnessCapabilities(ctx context.Context, agent *sto
 
 // resolveModelAliasForAgent resolves a model size alias (e.g. "extra-large")
 // to a concrete model name (e.g. "fable") using the agent's harness config's
-// model_aliases map. Returns the input unchanged if no alias mapping exists
-// or any lookup fails.
+// model_aliases map. When the stored harness config has no model_aliases (or
+// can't be found at all — e.g. it was deleted, or the agent only has an
+// inline/harness-name reference), this falls back to the harness's built-in
+// alias table (harnesses/<name>/config.yaml) so aliases still resolve rather
+// than passing through unchanged to a resumed agent.
 func (s *Server) resolveModelAliasForAgent(ctx context.Context, agent *store.Agent, model string) string {
 	if agent == nil || agent.AppliedConfig == nil || model == "" {
 		return model
@@ -140,18 +143,26 @@ func (s *Server) resolveModelAliasForAgent(ctx context.Context, agent *store.Age
 
 	// Fallback: by slug (project scope, then global)
 	hcSlug := agent.AppliedConfig.HarnessConfig
-	if hcSlug == "" {
-		return model
+	if hcSlug != "" {
+		var hc *store.HarnessConfig
+		if agent.ProjectID != "" {
+			hc, _ = s.store.GetHarnessConfigBySlug(ctx, hcSlug, store.HarnessConfigScopeProject, agent.ProjectID)
+		}
+		if hc == nil {
+			hc, _ = s.store.GetHarnessConfigBySlug(ctx, hcSlug, store.HarnessConfigScopeGlobal, "")
+		}
+		if hc != nil && hc.Config != nil && len(hc.Config.ModelAliases) > 0 {
+			return config.ResolveModelAlias(model, hc.Config.ModelAliases)
+		}
 	}
-	var hc *store.HarnessConfig
-	if agent.ProjectID != "" {
-		hc, _ = s.store.GetHarnessConfigBySlug(ctx, hcSlug, store.HarnessConfigScopeProject, agent.ProjectID)
-	}
-	if hc == nil {
-		hc, _ = s.store.GetHarnessConfigBySlug(ctx, hcSlug, store.HarnessConfigScopeGlobal, "")
-	}
-	if hc != nil && hc.Config != nil && len(hc.Config.ModelAliases) > 0 {
-		return config.ResolveModelAlias(model, hc.Config.ModelAliases)
+
+	// Built-in fallback: no stored harness config carries a model_aliases
+	// map for this agent. Resolve against the harness's own bundled
+	// defaults instead of passing the alias through unresolved.
+	if harnessType := s.resolveAgentHarnessType(ctx, agent); harnessType != "" {
+		if aliases := harness.DefaultModelAliases(harnessType); len(aliases) > 0 {
+			return config.ResolveModelAlias(model, aliases)
+		}
 	}
 	return model
 }

@@ -105,7 +105,7 @@ func TestAgentTokenScopesMapToRegistry(t *testing.T) {
 		ScopeAgentLogAppend:    {"agent.log_append"},
 		ScopeProjectSecretRead: {"project.secret_read"},
 		ScopeAgentCreate:       {"agent.create", "gcp_service_account.assign"},
-		ScopeAgentLifecycle:    {"agent.attach", "agent.delete"},
+		ScopeAgentLifecycle:    {"agent.attach", "agent.delete", "agent.lifecycle"},
 		ScopeAgentNotify:       {"agent.notify"},
 		ScopeAgentTokenRefresh: {"agent.token_refresh"},
 		ScopeAgentPortForward:  {"agent.port_forward"},
@@ -115,10 +115,13 @@ func TestAgentTokenScopesMapToRegistry(t *testing.T) {
 		// been failing on main since. The scope constant documents itself as
 		// covering "agents, templates, skills, harness configs, projects", so the
 		// widening is intended - it just was not recorded here.
+		// ptone/scion#1968 adds skill.read/list (agents read skills).
 		ScopeProjectRead: {
 			"harness_config.list",
 			"harness_config.read",
 			"project.read",
+			"skill.list",
+			"skill.read",
 			"template.list",
 			"template.read",
 		},

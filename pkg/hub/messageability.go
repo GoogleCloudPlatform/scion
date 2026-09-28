@@ -64,6 +64,24 @@ func mapReasonToCode(reason string) string {
 		return ReasonModeLineageAgentAgent
 	case strings.HasPrefix(reason, "agent.message permission denied"):
 		return ReasonMissingPermission
+	// Phase 5: Cross-project denial codes mapped to API-safe values.
+	// Order matters: longer/more-specific prefixes must be checked BEFORE
+	// shorter/broader ones so the broad "cross-project messaging" catch-all
+	// does not shadow more specific matches.
+	case strings.HasPrefix(reason, "cross-project messaging requires sender mode hub"):
+		return string(MessageDenialCrossProjectSenderMode)
+	case strings.HasPrefix(reason, "cross-project messaging requires hub-attested"):
+		return string(MessageDenialCrossProjectUntrusted)
+	case reason == "cross-project messaging is not enabled on this Hub":
+		return string(MessageDenialCrossProjectDisabled)
+	case strings.HasPrefix(reason, "cross-project target must be"):
+		return string(MessageDenialCrossProjectTargetMode)
+	case reason == "destination project does not accept external agent messages":
+		return string(MessageDenialCrossProjectInboundNone)
+	case reason == "origin user is not an active member of the destination project":
+		return string(MessageDenialCrossProjectNotMember)
+	case strings.HasPrefix(reason, "cross-project"):
+		return string(MessageDenialCrossProjectUnsupported)
 	default:
 		// For unrecognized reasons, return a generic code rather than leaking
 		// internal reason strings to the API consumer.
@@ -84,7 +102,7 @@ func (s *Server) ComputeMessageability(
 	}
 
 	// canMessage: can the viewer send a message to this agent?
-	canMessage, reason := s.authorizeAgentMessage(ctx, viewerIdentity, targetAgent, false)
+	canMessage, reason, _ := s.authorizeAgentMessage(ctx, viewerIdentity, targetAgent, false)
 
 	// canReachViewer: can this agent send a message to the viewer?
 	canReachViewer := computeCanReachViewer(viewerIdentity, targetAgent)
@@ -123,8 +141,9 @@ func computeCanReachViewer(viewerIdentity Identity, targetAgent *store.Agent) bo
 	switch mode {
 	case store.MessageModeNone:
 		return false
-	case store.MessageModeProject:
-		// Project-mode agents can message any user/agent in the project.
+	case store.MessageModeProject, store.MessageModeHub:
+		// Project/hub-mode agents can message any user/agent in the project.
+		// Hub mode behaves like project for same-project sends.
 		// For user viewers, this is generally true (they are browsing the project).
 		// For agent viewers, the full check requires the viewer agent's mode — this
 		// is a simplified approximation (see design doc Section 3.2).
@@ -164,7 +183,7 @@ func (s *Server) ComputeMessageabilityDetail(
 		if other.ID == targetAgent.ID {
 			continue
 		}
-		allowed, _ := s.authorizeAgentMessage(ctx, senderIdentity, other, false)
+		allowed, _, _ := s.authorizeAgentMessage(ctx, senderIdentity, other, false)
 		if allowed {
 			reachableAgents++
 		}
@@ -219,8 +238,9 @@ func countReachableUsers(targetAgent *store.Agent) int {
 			return 1
 		}
 		return 0
-	case store.MessageModeProject:
-		// Project-mode agents can reach all project members. Without a
+	case store.MessageModeProject, store.MessageModeHub:
+		// Project/hub-mode agents can reach all project members. Hub mode
+		// behaves like project for same-project sends. Without a
 		// project-member count available here, return -1 to signal "all
 		// project members" or a sentinel. The brief says simplified approach
 		// is acceptable, so return a positive indicator.

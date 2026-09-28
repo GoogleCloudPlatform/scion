@@ -41,7 +41,7 @@ steps:
   # Build core-base image and cache locally (no push yet)
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-core-base'
-    dir: 'image-build/core-base'
+    dir: 'image-build'
     args:
       - 'buildx'
       - 'build'
@@ -54,7 +54,7 @@ steps:
       - '-t'
       - '$_REGISTRY/core-base:$_TAG'
       - '-f'
-      - 'Dockerfile'
+      - 'core-base/Dockerfile'
       - '.'
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
@@ -62,7 +62,7 @@ steps:
   # Push core-base image (gets fresh OAuth token, uses cached layers)
   - name: 'gcr.io/cloud-builders/docker'
     id: 'push-core-base'
-    dir: 'image-build/core-base'
+    dir: 'image-build'
     args:
       - 'buildx'
       - 'build'
@@ -75,7 +75,7 @@ steps:
       - '-t'
       - '$_REGISTRY/core-base:$_TAG'
       - '-f'
-      - 'Dockerfile'
+      - 'core-base/Dockerfile'
       - '--push'
       - '.'
     env:

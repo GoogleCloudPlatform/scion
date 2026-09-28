@@ -72,16 +72,6 @@ func (m *TemplateMatch) IsHub() bool {
 	return m.Location == LocationHubProject || m.Location == LocationHubGlobal
 }
 
-// IsGlobal returns true if this template is in global scope.
-func (m *TemplateMatch) IsGlobal() bool {
-	return m.Location == LocationLocalGlobal || m.Location == LocationHubGlobal
-}
-
-// IsProjectScoped returns true if this template is in project scope.
-func (m *TemplateMatch) IsProjectScoped() bool {
-	return m.Location == LocationLocalProject || m.Location == LocationHubProject
-}
-
 // ResolveOpts controls how template resolution behaves.
 type ResolveOpts struct {
 	LocalOnly   bool // --local flag: only search local filesystem
@@ -133,7 +123,7 @@ func findLocalTemplates(name string, opts *ResolveOpts) ([]TemplateMatch, error)
 
 	// Get templates directory paths
 	globalDir, globalErr := config.GetGlobalTemplatesDir()
-	projectDir, projectErr := config.GetProjectTemplatesDir()
+	_, projectErr := config.GetProjectTemplatesDir()
 
 	// Search project (project) templates unless GlobalOnly is set
 	if !opts.GlobalOnly && projectErr == nil {
@@ -169,10 +159,6 @@ func findLocalTemplates(name string, opts *ResolveOpts) ([]TemplateMatch, error)
 			}
 		}
 	}
-
-	// Suppress unused variable warnings
-	_ = globalDir
-	_ = projectDir
 
 	return matches, nil
 }
@@ -398,38 +384,4 @@ func ResolveTemplateForDelete(ctx context.Context, name string, hubCtx *HubConte
 	}
 
 	return PromptTemplateChoiceWithAll(matches, "delete")
-}
-
-// FilterMatchesBySource filters matches to only local or only hub sources.
-func FilterMatchesBySource(matches []TemplateMatch, localOnly, hubOnly bool) []TemplateMatch {
-	if !localOnly && !hubOnly {
-		return matches
-	}
-
-	var filtered []TemplateMatch
-	for _, m := range matches {
-		if localOnly && m.IsLocal() {
-			filtered = append(filtered, m)
-		} else if hubOnly && m.IsHub() {
-			filtered = append(filtered, m)
-		}
-	}
-	return filtered
-}
-
-// FilterMatchesByScope filters matches to only project or only global scope.
-func FilterMatchesByScope(matches []TemplateMatch, projectOnly, globalOnly bool) []TemplateMatch {
-	if !projectOnly && !globalOnly {
-		return matches
-	}
-
-	var filtered []TemplateMatch
-	for _, m := range matches {
-		if projectOnly && m.IsProjectScoped() {
-			filtered = append(filtered, m)
-		} else if globalOnly && m.IsGlobal() {
-			filtered = append(filtered, m)
-		}
-	}
-	return filtered
 }

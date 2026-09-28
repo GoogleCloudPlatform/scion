@@ -41,6 +41,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/GoogleCloudPlatform/scion/web"
+	"github.com/google/uuid"
 	"github.com/gorilla/sessions"
 	"golang.org/x/net/http2"
 	//nolint:staticcheck // h2c is kept for local cleartext HTTP/2 support.
@@ -81,20 +82,27 @@ const webSessionName = "scion_sess"
 
 // Session key constants for storing values in the gorilla session map.
 const (
-	sessKeyUserID          = "uid"
-	sessKeyUserEmail       = "email"
-	sessKeyUserName        = "name"
-	sessKeyUserAvatar      = "avatar"
-	sessKeyUserRole        = "role"
-	sessKeyReturnTo        = "returnTo"
-	sessKeyOAuthState      = "oauthState"
-	sessKeyHubAccessToken  = "hubAccessToken"
-	sessKeyHubRefreshToken = "hubRefreshToken"
-	sessKeyHubTokenExpiry  = "hubTokenExpiry"
+	sessKeyUserID            = "uid"
+	sessKeyUserEmail         = "email"
+	sessKeyUserName          = "name"
+	sessKeyUserAvatar        = "avatar"
+	sessKeyUserRole          = "role"
+	sessKeyReturnTo          = "returnTo"
+	sessKeyOAuthState        = "oauthState"
+	sessKeyHubAccessToken    = "hubAccessToken"
+	sessKeyHubRefreshToken   = "hubRefreshToken"
+	sessKeyHubTokenExpiry    = "hubTokenExpiry"
+	sessKeySessionGeneration = "sessGen"
 )
 
 // webUserContextKey is the key for storing the web session user in the request context.
 type webUserContextKey struct{}
+
+// dbUserContextKey is the key for storing the authoritative store.User in the
+// request context. sessionAuthMiddleware populates this after the session-
+// generation check so that downstream middleware (e.g. suspendedUserMiddleware)
+// can reuse it instead of issuing a duplicate DB lookup.
+type dbUserContextKey struct{}
 
 // webSessionUser represents an authenticated user from the web session.
 type webSessionUser struct {
@@ -125,6 +133,9 @@ type AccessSettingsProvider interface {
 	// UserAccessMode returns the current login-time access mode
 	// ("open", "domain_restricted", "invite_only").
 	UserAccessMode() string
+	// DefaultUserRole returns the configured default role for new users
+	// ("member" or "viewer"). Returns "member" when unconfigured.
+	DefaultUserRole() string
 }
 
 // WebServerConfig holds configuration for the web frontend server.
@@ -158,6 +169,11 @@ type WebServerConfig struct {
 	// ProxyAuthenticator verifies proxy-supplied assertions (e.g., IAP JWT).
 	// Required when AuthMode == "proxy".
 	ProxyAuthenticator ProxyAuthenticator
+	// PlatformAuthSA is the hub's configured platform/transport auth service
+	// account email (cfg.Auth.Transport.PlatformAuthSA). The web proxy-auth
+	// path does not create or authenticate a user account for this identity.
+	// Empty when no transport service account is configured.
+	PlatformAuthSA string
 	// SSEMaxConnectionAge is the maximum lifetime of an SSE connection before
 	// the server proactively closes it so the client can reconnect cleanly.
 	// Defaults to defaultSSEMaxConnectionAge (3500s) when zero.
@@ -186,6 +202,7 @@ type WebServer struct {
 	maintenance    *MaintenanceState           // runtime maintenance mode state (shared with Hub)
 	demotionSafe   *atomic.Bool                // shared with Hub; nil-safe (nil = false = don't demote)
 	authzService   *AuthzService               // authorization service for SSE subject checks
+	hasAssets      bool                        // cached result of asset detection
 	startTime      time.Time
 	log            *slog.Logger // subsystem logger for hub.web
 
@@ -552,6 +569,8 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 	}
 	ws.shellTmpl = tmpl
 
+	ws.hasAssets = ws.detectWebAssets()
+
 	ws.registerRoutes()
 
 	return ws
@@ -635,6 +654,15 @@ func (ws *WebServer) userAccessMode() string {
 	return ws.accessSettings.UserAccessMode()
 }
 
+// defaultUserRole returns the live default user role from the access settings
+// provider. Returns "member" when no provider is configured.
+func (ws *WebServer) defaultUserRole() string {
+	if ws.accessSettings == nil {
+		return "member"
+	}
+	return ws.accessSettings.DefaultUserRole()
+}
+
 // SetAccessSettingsProvider sets the live operational access settings provider.
 // When set, WebServer reads AdminEmails, AuthorizedDomains, and UserAccessMode
 // through this provider rather than from its static config snapshot.
@@ -702,6 +730,24 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 			// Create a fresh session so the redirect logic below can
 			// handle browser proxy requests instead of returning a raw 401.
 			session, _ = ws.sessionStore.New(r, webSessionName)
+		}
+
+		// See isReservedPlatformIdentity: a session for the reserved identity
+		// must not have a hub token minted or refreshed from it — including
+		// an existing session, whether or not it currently holds an access
+		// token (both the overflow-mint branch and the refresh branches
+		// below). Clear it and continue with no Authorization header so the
+		// request falls through the normal auth flow instead.
+		if email, _ := session.Values[sessKeyUserEmail].(string); isReservedPlatformIdentity(email, ws.config.PlatformAuthSA) {
+			for key := range session.Values {
+				delete(session.Values, key)
+			}
+			session.Options.MaxAge = -1
+			if err := session.Save(r, w); err != nil {
+				ws.logger().Warn("Failed to clear session for the configured service account", "error", err)
+			}
+			next.ServeHTTP(w, r)
+			return
 		}
 
 		accessToken, _ := session.Values[sessKeyHubAccessToken].(string)
@@ -974,7 +1020,7 @@ func resolveAPIPath(urlPath string) string {
 	switch {
 	case p == "/agents":
 		return "/api/v1/agents"
-	case p == "/projects", p == "/groves":
+	case p == "/projects":
 		return "/api/v1/projects"
 	case strings.HasPrefix(p, "/agents/") && strings.Count(p, "/") == 2:
 		// /agents/{id} -> /api/v1/agents/{id}
@@ -1067,10 +1113,28 @@ func (ws *WebServer) prefetchPageData(r *http.Request) template.JS {
 	return template.JS(safeJSONForHTML(string(raw)))
 }
 
-// hasWebAssets reports whether the server has web assets available to serve,
-// either from an embedded FS or a filesystem directory.
+// hasWebAssets reports whether the server has web assets available to serve.
+// The result is cached at startup by detectWebAssets since the asset state
+// does not change at runtime.
 func (ws *WebServer) hasWebAssets() bool {
-	return ws.assets != nil || ws.assetsDisk != ""
+	return ws.hasAssets
+}
+
+// detectWebAssets checks whether web assets are available, either from an
+// embedded FS or a filesystem directory. It verifies the presence of the
+// core entry point (assets/main.js) to ensure the UI is actually built and
+// ready to serve. Called once at startup; the result is cached in hasAssets.
+func (ws *WebServer) detectWebAssets() bool {
+	if ws.assetsDisk != "" {
+		p := filepath.Join(ws.assetsDisk, "assets", "main.js")
+		_, err := os.Stat(p)
+		return err == nil
+	}
+	if ws.assets != nil {
+		_, err := fs.Stat(ws.assets, "assets/main.js")
+		return err == nil
+	}
+	return false
 }
 
 // spaHandler returns the SPA shell HTML for any route not matched by other handlers.
@@ -1137,7 +1201,16 @@ func (ws *WebServer) tryServeStaticFile(w http.ResponseWriter, r *http.Request) 
 		if err != nil {
 			return false
 		}
-		_ = f.Close()
+		// Reject directories — only serve actual files. Without this
+		// check, a request for a client-side route like /chat/space/xxx
+		// could match an embedded directory and be handed to
+		// http.FileServer, which returns a 404 or redirect instead of
+		// the SPA shell.
+		info, statErr := f.Stat()
+		_ = f.Close() // Close immediately — we only needed to probe existence + type.
+		if statErr != nil || info.IsDir() {
+			return false
+		}
 	} else {
 		return false
 	}
@@ -1178,6 +1251,24 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Expand NATS-style wildcards (e.g. project.>) into specific
+	// resource-scoped subjects before authorization. This ensures the
+	// subscription only covers resources the caller can actually access,
+	// preventing over-subscription to events the user shouldn't see.
+	subjects = ws.expandSSEWildcards(r, subjects)
+	if len(subjects) == 0 {
+		// All wildcard subjects expanded to nothing (e.g. user has no
+		// accessible projects). Fail closed — deny the connection.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		body, _ := json.Marshal(map[string]interface{}{
+			"error":           "no accessible resources for requested subjects",
+			"denied_subjects": []string{},
+		})
+		_, _ = w.Write(body)
+		return
+	}
+
 	// Subject-level authorization: verify the caller has access to every
 	// requested subject. This runs once at connection time, not per-event.
 	if denied := ws.authorizeSSESubjects(r, subjects); len(denied) > 0 {
@@ -1199,14 +1290,16 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		ws.logger().Debug("Failed to clear write deadline for SSE", "error", err)
 	}
 
+	// Install the subscription before flushing headers: EventSource can start
+	// its metadata snapshot as soon as the client observes the open stream.
+	ch, unsubscribe := ws.events.Subscribe(subjects...)
+	defer unsubscribe()
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 	flusher.Flush()
-
-	ch, unsubscribe := ws.events.Subscribe(subjects...)
-	defer unsubscribe()
 
 	eventID := 0
 	heartbeat := time.NewTicker(30 * time.Second)
@@ -1293,12 +1386,195 @@ func validateSSESubjects(subjects []string) string {
 	return ""
 }
 
+// expandSSEWildcards expands NATS-style wildcard subjects into concrete
+// resource-scoped subjects. For example, "project.>" (meaning "all my
+// projects") is expanded to "project.<uuid>.>" for each project the caller
+// has ActionRead access to. Subjects that don't contain wildcards in a
+// resource-ID position pass through unchanged. "notification" and "broker"
+// wildcards pass through unchanged too, since authorizeSSESubjects does not
+// apply a per-resource check to those two categories. Every other category —
+// including "admin" and "system", and any namespace this function does not
+// recognize — also passes through unchanged rather than being dropped here:
+// authorizeSSESubjects is the single place that decides whether a category is
+// allowed, and its default case denies anything not explicitly allow-listed.
+// Dropping unknown categories at this stage instead would make a mixed
+// request (e.g. an unknown subject alongside an allowed one) silently narrow
+// to the allowed subset instead of failing the whole request closed with a
+// deny reason.
+//
+// This expansion must run before authorizeSSESubjects so the authorization
+// check sees concrete resource IDs, and before Subscribe so the event
+// subscription only covers resources the caller is allowed to see.
+func (ws *WebServer) expandSSEWildcards(r *http.Request, subjects []string) []string {
+	sessionUser := getWebSessionUser(r.Context())
+	if sessionUser == nil {
+		// No session — return as-is; authorizeSSESubjects will deny.
+		return subjects
+	}
+
+	var expanded []string
+	for _, sub := range subjects {
+		tokens := strings.Split(sub, ".")
+		if len(tokens) < 2 || !isNATSWildcard(tokens[1]) {
+			// No wildcard in resource-ID position — keep as-is.
+			expanded = append(expanded, sub)
+			continue
+		}
+
+		switch tokens[0] {
+		case "project":
+			// Expand project.> to project.<uuid>.> for each accessible
+			// project. Fail-closed: if the store is nil or returns an
+			// error, emit nothing (the subject is silently dropped,
+			// which authorizeSSESubjects will not see — equivalent to
+			// deny).
+			projectSubs := ws.expandProjectWildcard(r, tokens)
+			expanded = append(expanded, projectSubs...)
+
+		case "user":
+			// User wildcards: only the caller's own ID is allowed.
+			// Expand user.> to user.<callerID>.> and let authz confirm.
+			var userSuffix []string
+			if tokens[1] == ">" {
+				userSuffix = append(userSuffix, ">")
+			}
+			if len(tokens) > 2 {
+				userSuffix = append(userSuffix, tokens[2:]...)
+			}
+			s := strings.Join(userSuffix, ".")
+			if s == "" {
+				expanded = append(expanded, "user."+sessionUser.UserID)
+			} else {
+				expanded = append(expanded, "user."+sessionUser.UserID+"."+s)
+			}
+
+		case "notification", "broker":
+			// These categories pass through authorization without
+			// resource checks — wildcards are fine as-is.
+			expanded = append(expanded, sub)
+
+		default:
+			// "admin", "system", and any unrecognized category: keep the
+			// subject as-is. authorizeSSESubjects — not this function — is
+			// what denies it, so it shows up as a denied_subjects entry
+			// rather than silently vanishing from the subscription.
+			expanded = append(expanded, sub)
+		}
+	}
+
+	// Deduplicate expanded subjects preserving first-occurrence order.
+	// This handles two scenarios:
+	// 1. Duplicate wildcards in input (e.g. ["project.>", "project.>"])
+	//    that each expand independently to the same concrete subjects.
+	// 2. Wildcard + explicit overlap (e.g. ["project.>", "project.<uuid>.>"])
+	//    where expansion produces a subject already present explicitly.
+	seen := make(map[string]bool, len(expanded))
+	deduped := make([]string, 0, len(expanded))
+	for _, s := range expanded {
+		if !seen[s] {
+			seen[s] = true
+			deduped = append(deduped, s)
+		}
+	}
+	expanded = deduped
+
+	if len(expanded) == 0 {
+		// All subjects were wildcards that expanded to nothing.
+		// Return an empty slice (authorizeSSESubjects will see 0
+		// subjects, handleSSE already checked len > 0 above).
+		return expanded
+	}
+
+	return expanded
+}
+
+// expandProjectWildcard expands a project wildcard (project.> or project.*)
+// into concrete project-scoped subjects for all projects the caller can read.
+// Returns an empty slice if no accessible projects exist (fail-closed).
+func (ws *WebServer) expandProjectWildcard(r *http.Request, tokens []string) []string {
+	if ws.store == nil || ws.authzService == nil {
+		return nil // fail-closed
+	}
+
+	sessionUser := getWebSessionUser(r.Context())
+	if sessionUser == nil {
+		return nil
+	}
+
+	identity := NewAuthenticatedUser(
+		sessionUser.UserID,
+		sessionUser.Email,
+		sessionUser.Name,
+		sessionUser.Role,
+		"web",
+	)
+
+	// List all projects and filter by ActionRead.
+	allProjects, err := ws.store.ListProjects(r.Context(), store.ProjectFilter{}, store.ListOptions{Limit: 1000})
+	if err != nil {
+		ws.logger().Warn("expandProjectWildcard: failed to list projects", "error", err)
+		return nil // fail-closed
+	}
+	if allProjects == nil || len(allProjects.Items) == 0 {
+		return nil
+	}
+
+	resources := make([]Resource, len(allProjects.Items))
+	for i := range allProjects.Items {
+		resources[i] = projectResource(&allProjects.Items[i])
+	}
+	caps := ws.authzService.ComputeCapabilitiesBatch(r.Context(), identity, resources, "project")
+
+	// Build the suffix to append after the concrete project ID.
+	//
+	// tokens[1] is the wildcard (> or *):
+	//   - ">" at position 1 means "all descendants" — the user wants all
+	//     sub-events. The expanded subject needs ".>" appended so the
+	//     NATS pattern still matches sub-events (e.g. project.<uuid>.>).
+	//   - "*" at position 1 means "single level" — the expanded subject
+	//     is just project.<uuid> with no descendant matching.
+	//
+	// tokens[2:] contains any further path components after the wildcard,
+	// e.g. for "project.*.agent.>" → tokens[2:] = ["agent", ">"].
+	var suffixParts []string
+	if tokens[1] == ">" {
+		// ">" at position 1 means all descendants — preserve it.
+		suffixParts = append(suffixParts, ">")
+	}
+	if len(tokens) > 2 {
+		suffixParts = append(suffixParts, tokens[2:]...)
+	}
+	suffix := strings.Join(suffixParts, ".")
+
+	var result []string
+	for i, p := range allProjects.Items {
+		if capabilityAllows(caps[i], ActionRead) {
+			if suffix == "" {
+				result = append(result, "project."+p.ID)
+			} else {
+				result = append(result, "project."+p.ID+"."+suffix)
+			}
+		}
+	}
+	return result
+}
+
+// isNATSWildcard returns true if the token is a NATS-style wildcard
+// (> matches all descendants, * matches a single token).
+func isNATSWildcard(token string) bool {
+	return token == ">" || token == "*"
+}
+
 // authorizeSSESubjects checks that the caller has access to every requested
 // subject. Returns the list of denied subjects; an empty slice means all are
 // authorized. For project-scoped subjects (project.<id>.*) the caller must
-// have ActionRead on the project. For user-scoped subjects (user.<id>.*)
-// the caller's identity must match the user ID. Other subjects (notification,
-// broker, etc.) pass through without additional checks.
+// have ActionRead on the project. Agent subjects require a concrete canonical
+// UUID and ActionRead on the resolved agent, matching the metadata endpoint.
+// For user-scoped subjects (user.<id>.*) the caller's identity must match the
+// user ID. notification.* and broker.* are an explicit, deliberate pass-through
+// (see the switch below). system.images.<jobId> requires a concrete job ID,
+// and admin.* requires the admin role. Every other first token — including
+// any unknown or future namespace — is denied by default.
 func (ws *WebServer) authorizeSSESubjects(r *http.Request, subjects []string) []string {
 	if ws.authzService == nil {
 		// No authz service configured — fail closed. Callers that need
@@ -1334,18 +1610,46 @@ func (ws *WebServer) authorizeSSESubjects(r *http.Request, subjects []string) []
 		"web",
 	)
 
-	// Collect unique project IDs and user IDs from subjects.
+	// Collect unique resource IDs from subjects. Wildcard tokens (> or *)
+	// in resource-ID positions are rejected for the three categories that
+	// carry a per-resource check (project, user, agent) — expandSSEWildcards
+	// should have replaced them with concrete IDs. If one slips through, it
+	// is denied. broker, notification, system and admin have no resource ID
+	// to collect here; the final switch below decides them directly.
 	projectIDs := map[string]bool{}
 	userIDs := map[string]bool{}
+	agentIDs := map[string]bool{}
+	wildcardDenied := map[string]bool{} // subjects with unresolved wildcards
 	for _, sub := range subjects {
 		tokens := strings.Split(sub, ".")
 		if len(tokens) >= 2 {
 			switch tokens[0] {
 			case "project":
+				// Belt-and-suspenders: reject wildcards in resource-ID position.
+				if isNATSWildcard(tokens[1]) {
+					wildcardDenied[sub] = true
+					continue
+				}
 				projectIDs[tokens[1]] = true
 			case "user":
+				if isNATSWildcard(tokens[1]) {
+					wildcardDenied[sub] = true
+					continue
+				}
 				userIDs[tokens[1]] = true
+			case "agent":
+				if isNATSWildcard(tokens[1]) {
+					wildcardDenied[sub] = true
+					continue
+				}
+				if len(tokens) >= 3 {
+					agentIDs[tokens[1]] = true
+				}
 			}
+			// broker, notification, system and admin pass through this loop
+			// untouched — none of them has a per-resource authorization
+			// check here, so there is no ID to collect. The final switch
+			// below applies whatever check each of those does need.
 		}
 	}
 
@@ -1366,6 +1670,22 @@ func (ws *WebServer) authorizeSSESubjects(r *http.Request, subjects []string) []
 		}
 	}
 
+	// Resolve each concrete agent once. Wildcard/alias selectors must never
+	// bypass resource checks, even for administrators. Event suffix wildcards
+	// remain valid once access to the single agent has been established.
+	allowedAgents := map[string]bool{}
+	for id := range agentIDs {
+		parsed, err := uuid.Parse(id)
+		if err != nil || parsed.String() != id || ws.store == nil {
+			continue
+		}
+		agent, err := ws.store.GetAgent(r.Context(), id)
+		if err != nil || agent == nil || agent.ID != id {
+			continue
+		}
+		allowedAgents[id] = ws.authzService.CheckAccess(r.Context(), identity, agentResource(agent), ActionRead).Allowed
+	}
+
 	// Check user subjects: caller can only subscribe to their own user subjects.
 	deniedUsers := map[string]bool{}
 	for uid := range userIDs {
@@ -1374,24 +1694,53 @@ func (ws *WebServer) authorizeSSESubjects(r *http.Request, subjects []string) []
 		}
 	}
 
-	// Build denied list.
-	if len(deniedProjects) == 0 && len(deniedUsers) == 0 {
-		return nil
-	}
+	// Build denied list. Every category must be explicitly allow-listed
+	// here; anything else is denied by default so a new or duplicated
+	// publish namespace cannot bypass authorization by accident.
 	var denied []string
 	for _, sub := range subjects {
+		// Deny any subject with an unresolved wildcard in resource-ID position.
+		if wildcardDenied[sub] {
+			denied = append(denied, sub)
+			continue
+		}
 		tokens := strings.Split(sub, ".")
-		if len(tokens) >= 2 {
-			switch tokens[0] {
-			case "project":
-				if deniedProjects[tokens[1]] {
-					denied = append(denied, sub)
-				}
-			case "user":
-				if deniedUsers[tokens[1]] {
-					denied = append(denied, sub)
-				}
+		switch tokens[0] {
+		case "agent":
+			if len(tokens) < 3 || !allowedAgents[tokens[1]] {
+				denied = append(denied, sub)
 			}
+		case "project":
+			if len(tokens) < 2 || deniedProjects[tokens[1]] {
+				denied = append(denied, sub)
+			}
+		case "user":
+			if len(tokens) < 2 || deniedUsers[tokens[1]] {
+				denied = append(denied, sub)
+			}
+		case "broker", "notification":
+			// Explicit, deliberate pass-through: neither category carries a
+			// per-resource authorization check today. notification.* is
+			// already known to over-share across projects (see
+			// PublishChatNotification in events.go) — narrowing it to
+			// user.<subscriberId>.notification is left for a follow-up.
+			// TODO(ptone/scion#1934): scope notification.created per-user
+			// and drop this pass-through.
+		case "system":
+			// Only a concrete image-build job ID is allowed; no wildcards
+			// and no trailing tokens past the job ID.
+			if len(tokens) != 3 || tokens[1] != "images" || isNATSWildcard(tokens[2]) {
+				denied = append(denied, sub)
+			}
+		case "admin":
+			// Admin-only namespace. No web client subscribes to this today.
+			if sessionUser.Role != "admin" {
+				denied = append(denied, sub)
+			}
+		default:
+			// Unknown namespace: deny. Only categories explicitly handled
+			// above may bypass per-resource checks.
+			denied = append(denied, sub)
 		}
 	}
 	return denied
@@ -1583,12 +1932,10 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 				currentRole, _ := session.Values[sessKeyUserRole].(string)
 				// The stored role is the source of truth: it carries UI-granted
 				// promotions (and demotions) that the config list knows nothing
-				// about. If it can't be read we deliberately fall back to the
-				// session role, preserving the status quo rather than extending
-				// privilege: unlike a refresh token, the session cookie is not
-				// re-minted here, so a transient read failure cannot lengthen
-				// the life of a stale role.
-				storedRole := currentRole
+				// about. All lookup failures now fail closed (return early),
+				// so the only path that reaches role evaluation is the
+				// successful lookup where storedRole is set from the DB record.
+				var storedRole string
 				// A nil store must fail closed — do not trust stale cookie
 				// authority for authenticated protected routes.
 				if ws.store == nil {
@@ -1611,6 +1958,14 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 					storedRole = u.Role
 					// Refresh email from authoritative record in case it changed.
 					email = u.Email
+					// See isReservedPlatformIdentity: every path that provisions a
+					// user or mints/re-mints a hub token checks this, including an
+					// existing session for the configured service account.
+					if isReservedPlatformIdentity(email, ws.config.PlatformAuthSA) {
+						ws.logger().Warn("Proxy auth: clearing stale session for the configured service account", "user_id", u.ID)
+						ws.clearStaleSession(w, r)
+						return
+					}
 				case errors.Is(err, store.ErrNotFound):
 					// Definitive answer: the account is gone. Unlike a
 					// transient read failure, this must not fall back to
@@ -1628,7 +1983,11 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 					ws.serveInternalError(w, r)
 					return
 				}
-				expectedRole := determineUserRole(email, ws.adminEmails(), storedRole, ws.isDemotionSafe())
+				uiPromoted := false
+				if storedRole == "admin" && ws.store != nil {
+					uiPromoted = hasUIPromotedBinding(r.Context(), ws.store, uid)
+				}
+				expectedRole := determineUserRole(email, ws.adminEmails(), storedRole, ws.isDemotionSafe(), uiPromoted, ws.defaultUserRole())
 				if currentRole == expectedRole {
 					// Role unchanged — inject user into context and proceed
 					// without saving session (avoids redundant write).
@@ -1693,6 +2052,18 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 
 		// Verified proxy identity — check authorization and provision/lookup user
 		ctx := r.Context()
+
+		// The hub does not create or authenticate user accounts for its
+		// configured transport service account; this path does its own
+		// find-or-create (it does not go through Server.provisionUser), so it
+		// carries the same check independently. Checked before authorization,
+		// before find-or-create, and before any session/token is issued.
+		if isReservedPlatformIdentity(proxyUser.Email, ws.config.PlatformAuthSA) {
+			ws.logger().Warn("Proxy auth: rejecting configured service account identity", "email", proxyUser.Email)
+			http.Error(w, "access denied", http.StatusForbidden)
+			return
+		}
+
 		if ws.store == nil {
 			ws.logger().Error("Proxy auth: store not configured")
 			http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -1707,6 +2078,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 
 		// Find or create user (same pattern as handleOAuthCallback)
 		user, err := ws.store.GetUserByEmail(ctx, proxyUser.Email)
+		syncGrants := true
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			// Genuine DB error — don't treat as "create new user"
 			ws.logger().Error("Proxy auth: failed to look up user", "email", proxyUser.Email, "error", err)
@@ -1715,7 +2087,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 		}
 		if err != nil {
 			// User not found — create new user
-			role := determineUserRole(proxyUser.Email, ws.adminEmails(), "", ws.isDemotionSafe())
+			role := determineUserRole(proxyUser.Email, ws.adminEmails(), "", ws.isDemotionSafe(), false, ws.defaultUserRole())
 			user = &store.User{
 				ID:          generateID(),
 				Email:       proxyUser.Email,
@@ -1762,7 +2134,15 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 				}
 				user.LastLogin = time.Now()
 				oldRole := user.Role
-				user.Role = determineUserRole(proxyUser.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe())
+				proxyUIPromoted := hasUIPromotedBinding(ctx, ws.store, user.ID)
+				// The stored role on an invited row is a placeholder (invites carry
+				// no role): evaluate as a brand-new user, except keep an admin that
+				// was already promoted through the admin UI.
+				activationRole := ""
+				if user.Role == store.UserRoleAdmin && proxyUIPromoted {
+					activationRole = user.Role
+				}
+				user.Role = determineUserRole(proxyUser.Email, ws.adminEmails(), activationRole, ws.isDemotionSafe(), proxyUIPromoted, ws.defaultUserRole())
 				if oldRole == "admin" && user.Role != "admin" {
 					bindingSuperAdmin = "delete"
 				} else if user.Role == "admin" {
@@ -1776,7 +2156,8 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 					user.DisplayName = proxyUser.DisplayName
 				}
 				// Re-evaluate admin status on every login (matches handleOAuthCallback / provisionUser)
-				if newRole := determineUserRole(proxyUser.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe()); user.Role != newRole {
+				proxyUIPromoted := hasUIPromotedBinding(ctx, ws.store, user.ID)
+				if newRole := determineUserRole(proxyUser.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe(), proxyUIPromoted, ws.defaultUserRole()); user.Role != newRole {
 					oldRole := user.Role
 					ws.logger().Info("User role changed on proxy login", "email", proxyUser.Email, "old_role", oldRole, "new_role", newRole)
 					user.Role = newRole
@@ -1789,6 +2170,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 			}
 			if err := ws.store.UpdateUser(ctx, user); err != nil {
 				ws.logger().Warn("Failed to update user via proxy auth", "email", proxyUser.Email, "error", err)
+				syncGrants = false
 			} else {
 				// Apply binding changes only after UpdateUser has succeeded.
 				switch bindingSuperAdmin {
@@ -1800,8 +2182,15 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 			}
 		}
 
-		// Ensure hub membership
-		ensureHubMembership(ctx, ws.store, user.ID)
+		// Make the hub-members group and hub-viewer binding match the stored
+		// role (mirrors provisionUser). Skipped when UpdateUser failed, so the
+		// grants keep following the persisted role. Best-effort: a failure is
+		// logged and the login continues; the startup backfill repairs it.
+		if syncGrants {
+			if err := syncHubRoleGrants(ctx, ws.store, user.ID, user.Role, store.SystemReconcileCreatedBy); err != nil {
+				ws.logger().Warn("Proxy auth: failed to sync hub role grants", "email", proxyUser.Email, "user_id", user.ID, "role", user.Role, "error", err)
+			}
+		}
 
 		// Generate Hub JWT tokens (mirrors devAuthMiddleware / handleOAuthCallback)
 		if ws.userTokenSvc != nil {
@@ -1823,6 +2212,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 		session.Values[sessKeyUserName] = user.DisplayName
 		session.Values[sessKeyUserAvatar] = user.AvatarURL
 		session.Values[sessKeyUserRole] = user.Role
+		session.Values[sessKeySessionGeneration] = user.SessionGeneration
 
 		if err := session.Save(r, w); err != nil {
 			ws.logger().Error("Proxy auth: failed to save session", "error", err)
@@ -1868,6 +2258,44 @@ func (ws *WebServer) sessionAuthMiddleware(next http.Handler) http.Handler {
 
 		// Check for user in session
 		if uid, ok := session.Values[sessKeyUserID].(string); ok && uid != "" {
+			// Verify session generation against the DB to support per-user
+			// session revocation. A mismatch means an admin has revoked
+			// this user's sessions since login.
+			//
+			// The fetched dbUser is stored in the request context so that
+			// downstream middleware (e.g. suspendedUserMiddleware) can
+			// reuse it instead of issuing a duplicate DB query.
+			var ctx = r.Context()
+			if ws.store != nil {
+				dbUser, err := ws.store.GetUser(ctx, uid)
+				if err != nil {
+					if errors.Is(err, store.ErrNotFound) {
+						// User deleted — clear session and force re-login.
+						// Redirect to /login (the SPA login page) rather than
+						// /auth/login so the user sees the provider-choice page
+						// instead of being pushed into an OAuth flow for an
+						// account that no longer exists.
+						session.Options.MaxAge = -1
+						_ = session.Save(r, w)
+						http.Redirect(w, r, "/login", http.StatusFound)
+						return
+					}
+					// Transient DB error — fail closed with 500 but do not destroy session
+					ws.logger().Error("Session auth: store lookup failed", "user_id", uid, "error", err)
+					http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+					return
+				}
+				cookieGen, _ := session.Values[sessKeySessionGeneration].(int64)
+				if dbUser.SessionGeneration > cookieGen {
+					// Generation mismatch — force re-login
+					session.Options.MaxAge = -1
+					_ = session.Save(r, w)
+					http.Redirect(w, r, "/auth/login", http.StatusFound)
+					return
+				}
+				ctx = context.WithValue(ctx, dbUserContextKey{}, dbUser)
+			}
+
 			user := &webSessionUser{
 				UserID:    uid,
 				Email:     sessionString(session, sessKeyUserEmail),
@@ -1875,7 +2303,7 @@ func (ws *WebServer) sessionAuthMiddleware(next http.Handler) http.Handler {
 				AvatarURL: sessionString(session, sessKeyUserAvatar),
 				Role:      sessionString(session, sessKeyUserRole),
 			}
-			ctx := context.WithValue(r.Context(), webUserContextKey{}, user)
+			ctx = context.WithValue(ctx, webUserContextKey{}, user)
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
@@ -2033,6 +2461,16 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// See isReservedPlatformIdentity: every path that provisions a user or
+	// mints/re-mints a hub token checks this. A service account cannot
+	// complete interactive OAuth, so this is not reachable in practice; kept
+	// for consistency with the other find-or-create paths.
+	if isReservedPlatformIdentity(userInfo.Email, ws.config.PlatformAuthSA) {
+		ws.logger().Warn("OAuth callback: rejecting configured service account identity", "email", userInfo.Email)
+		http.Redirect(w, r, "/login?error=unauthorized_domain", http.StatusFound)
+		return
+	}
+
 	// Check if user is authorized (admin bypass, domain check, access mode)
 	if !checkUserAuthorized(ctx, userInfo.Email, ws.authorizedDomains(), ws.adminEmails(), ws.userAccessMode(), ws.store) {
 		ws.logger().Warn("Unauthorized user", "email", userInfo.Email)
@@ -2042,10 +2480,11 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 
 	// Find or create user
 	user, err := ws.store.GetUserByEmail(ctx, userInfo.Email)
+	syncGrants := true
 	if err != nil {
 		// Create new user (only reachable in open/domain_restricted modes;
 		// in invite_only mode, checkUserAuthorized already confirmed a User record exists)
-		role := determineUserRole(userInfo.Email, ws.adminEmails(), "", ws.isDemotionSafe())
+		role := determineUserRole(userInfo.Email, ws.adminEmails(), "", ws.isDemotionSafe(), false, ws.defaultUserRole())
 		user = &store.User{
 			ID:          generateID(),
 			Email:       userInfo.Email,
@@ -2095,7 +2534,15 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 			}
 			user.LastLogin = time.Now()
 			oldRole := user.Role
-			user.Role = determineUserRole(userInfo.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe())
+			oauthUIPromoted := hasUIPromotedBinding(ctx, ws.store, user.ID)
+			// The stored role on an invited row is a placeholder (invites carry
+			// no role): evaluate as a brand-new user, except keep an admin that
+			// was already promoted through the admin UI.
+			activationRole := ""
+			if user.Role == store.UserRoleAdmin && oauthUIPromoted {
+				activationRole = user.Role
+			}
+			user.Role = determineUserRole(userInfo.Email, ws.adminEmails(), activationRole, ws.isDemotionSafe(), oauthUIPromoted, ws.defaultUserRole())
 			if oldRole == "admin" && user.Role != "admin" {
 				bindingSuperAdmin = "delete"
 			} else if user.Role == "admin" {
@@ -2114,7 +2561,8 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 				user.DisplayName = userInfo.DisplayName
 			}
 			// Re-evaluate admin status on every login
-			newRole := determineUserRole(userInfo.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe())
+			oauthUIPromoted := hasUIPromotedBinding(ctx, ws.store, user.ID)
+			newRole := determineUserRole(userInfo.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe(), oauthUIPromoted, ws.defaultUserRole())
 			if user.Role != newRole {
 				oldRole := user.Role
 				ws.logger().Info("User role changed on login", "email", userInfo.Email, "old_role", oldRole, "new_role", newRole)
@@ -2128,6 +2576,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 		}
 		if err := ws.store.UpdateUser(ctx, user); err != nil {
 			ws.logger().Warn("Failed to update user on login", "email", userInfo.Email, "error", err)
+			syncGrants = false
 		} else {
 			// Apply binding changes only after UpdateUser has succeeded.
 			switch bindingSuperAdmin {
@@ -2139,8 +2588,15 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	// Ensure user is a member of the hub-members group
-	ensureHubMembership(ctx, ws.store, user.ID)
+	// Make the hub-members group and hub-viewer binding match the stored
+	// role (mirrors provisionUser). Skipped when UpdateUser failed, so the
+	// grants keep following the persisted role. Best-effort: a failure is
+	// logged and the login continues; the startup backfill repairs it.
+	if syncGrants {
+		if err := syncHubRoleGrants(ctx, ws.store, user.ID, user.Role, store.SystemReconcileCreatedBy); err != nil {
+			ws.logger().Warn("OAuth login: failed to sync hub role grants", "email", userInfo.Email, "user_id", user.ID, "role", user.Role, "error", err)
+		}
+	}
 
 	// Generate Hub tokens if token service is available
 	if ws.userTokenSvc != nil {
@@ -2162,6 +2618,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	session.Values[sessKeyUserName] = user.DisplayName
 	session.Values[sessKeyUserAvatar] = user.AvatarURL
 	session.Values[sessKeyUserRole] = user.Role
+	session.Values[sessKeySessionGeneration] = user.SessionGeneration
 
 	// Get returnTo and clear it
 	returnTo, _ := session.Values[sessKeyReturnTo].(string)

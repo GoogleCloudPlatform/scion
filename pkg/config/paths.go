@@ -20,7 +20,7 @@ import (
 	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
@@ -28,10 +28,8 @@ const (
 	DotScion  = ".scion"
 	GlobalDir = ".scion"
 
-	ProjectConfigsDir = projectcompat.ProjectConfigsDir
-	ProjectsDir       = projectcompat.ProjectsDir
-	GroveConfigsDir   = projectcompat.GroveConfigsDir
-	GrovesDir         = projectcompat.GrovesDir
+	ProjectConfigsDir = projectkeys.ProjectConfigsDir
+	ProjectsDir       = projectkeys.ProjectsDir
 )
 
 // FindProjectRoot walks up the directory tree to find the .scion directory or marker file.
@@ -218,22 +216,6 @@ func GetGlobalTemplatesDir() (string, error) {
 		return "", err
 	}
 	return filepath.Join(g, "templates"), nil
-}
-
-func GetProjectAgentsDir() (string, error) {
-	p, err := GetProjectDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(p, "agents"), nil
-}
-
-func GetProjectKubernetesConfigPath() (string, error) {
-	p, err := GetProjectDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(p, "kubernetes-config.json"), nil
 }
 
 func GetGlobalAgentsDir() (string, error) {

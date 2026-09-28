@@ -295,6 +295,37 @@ func TestChatLinkStore_ProviderIsolation(t *testing.T) {
 	assert.Equal(t, "dc-user-1", uid)
 }
 
+func TestLinkServicesUseProviderSpecificStoreScope(t *testing.T) {
+	linkStore := newTestChatLinkStore(t)
+	type linkService interface {
+		SetStore(*ChatLinkStore)
+		RegisterCode(code, providerUserID string)
+		Close()
+	}
+	tests := []struct {
+		name           string
+		service        linkService
+		provider       chatlinkcode.Provider
+		code           string
+		providerUserID string
+	}{
+		{name: "telegram", service: NewTelegramLinkService(), provider: chatlinkcode.ProviderTelegram, code: "SCOPE1", providerUserID: "telegram-user"},
+		{name: "discord", service: NewDiscordLinkService(), provider: chatlinkcode.ProviderDiscord, code: "SCOPE2", providerUserID: "discord-user"},
+		{name: "teams", service: NewTeamsLinkService(), provider: chatlinkcode.ProviderTeams, code: "SCOPE3", providerUserID: "teams-user"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer tt.service.Close()
+			tt.service.SetStore(linkStore)
+			tt.service.RegisterCode(tt.code, tt.providerUserID)
+
+			status, _, _ := linkStore.GetStatusByUser(context.Background(), tt.provider, tt.providerUserID)
+			assert.Equal(t, "pending", status)
+		})
+	}
+}
+
 func TestChatLinkStore_ConcurrentVerify_AtomicUpdate(t *testing.T) {
 	store := newTestChatLinkStore(t)
 	ctx := context.Background()

@@ -283,7 +283,10 @@ func (c *Client) UpdateStatus(ctx context.Context, status StatusUpdate) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal status: %w", err)
 	}
+	return c.postJSONWithRetry(ctx, endpoint, body)
+}
 
+func (c *Client) postJSONWithRetry(ctx context.Context, endpoint string, body []byte) error {
 	// Read token under lock to avoid data race with concurrent RefreshToken calls.
 	c.tokenMu.RLock()
 	currentToken := c.token
@@ -1451,20 +1454,23 @@ func ReadTokenFile() string {
 	return token
 }
 
-// OutboundMessage is the payload for sending an agent-to-human outbound message.
+// OutboundMessage is the payload for sending an outbound message from an agent.
 type OutboundMessage struct {
 	Recipient   string            `json:"recipient,omitempty"`
 	RecipientID string            `json:"recipient_id,omitempty"`
 	Msg         string            `json:"msg"`
 	Type        string            `json:"type,omitempty"`
 	Urgent      bool              `json:"urgent,omitempty"`
-	Visibility  string            `json:"visibility,omitempty"`
 	Metadata    map[string]string `json:"metadata,omitempty"`
+	// Wake requests that a suspended target agent be resumed before
+	// delivering the message. Ignored for non-agent recipients.
+	Wake bool `json:"wake,omitempty"`
 }
 
-// SendOutboundMessage sends an outbound message from the agent to a human inbox.
-// Posts to POST /api/v1/agents/{agentID}/outbound-message using the agent token.
-// No retries — this is a best-effort fire-and-forget call.
+// SendOutboundMessage sends an outbound message from the agent via the hub.
+// The recipient may be a human user or another agent; the hub determines the
+// delivery path. Posts to POST /api/v1/agents/{agentID}/outbound-message using
+// the agent token. No retries — this is a best-effort fire-and-forget call.
 func (c *Client) SendOutboundMessage(ctx context.Context, msg OutboundMessage) error {
 	if !c.IsConfigured() {
 		return fmt.Errorf("hub client not configured")

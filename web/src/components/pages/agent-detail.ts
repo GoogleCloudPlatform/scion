@@ -36,12 +36,16 @@ import type {
   Subscription,
   AgentMetricsSummary,
 } from '../../shared/types.js';
+import type { AgentLifecycleAction } from '../../shared/types.js';
 import {
   can,
   canLifecycle,
+  canMessageAgent,
   isTerminalAvailable,
   getAgentDisplayStatus,
   isAgentRunning,
+  RESUME_BEST_EFFORT_CONFIRM_MESSAGE,
+  lifecycleActionRequestInit,
 } from '../../shared/types.js';
 
 interface AgentNotificationsResponse {
@@ -75,6 +79,7 @@ import '../shared/effective-role-provenance.js';
 import '../shared/effective-access-boundary-notice.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
+import { terminalHref } from '../../client/open-terminal.js';
 
 /**
  * Parse a Go-style duration string (e.g. "2h30m", "1h", "45m", "90s") into
@@ -164,6 +169,10 @@ export class ScionPageAgentDetail extends LitElement {
   /** Whether the Chat|Log toggle is in "chat" mode (vs "log" mode). */
   @state()
   private chatViewActive = true;
+
+  /** Current user ID for constructing the DM conversation key. */
+  @state()
+  private currentUserId = '';
 
   /** Whether the native chat feature flag is enabled. */
   private get nativeChatEnabled(): boolean {
@@ -595,19 +604,6 @@ export class ScionPageAgentDetail extends LitElement {
       text-decoration: underline;
       color: #22c55e;
     }
-
-    /* ---- Visibility badge ---- */
-    .visibility-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.25rem;
-      padding: 0.125rem 0.5rem;
-      border-radius: 9999px;
-      font-size: 0.8125rem;
-      font-weight: 500;
-      background: var(--scion-bg-subtle, #f1f5f9);
-      color: var(--scion-text-muted, #64748b);
-    }
   `;
 
   private boundOnAgentsUpdated = this.onAgentsUpdated.bind(this);
@@ -705,6 +701,25 @@ export class ScionPageAgentDetail extends LitElement {
             })
             .catch(() => {
               // Project loading is optional
+            })
+        );
+      }
+
+      // Resolve current user ID for the DM conversation key.
+      // Use pageData first, fall back to auth/me endpoint.
+      if (this.pageData?.user?.id) {
+        this.currentUserId = this.pageData.user.id;
+      } else if (!this.currentUserId) {
+        parallel.push(
+          apiFetch('/api/v1/auth/me')
+            .then(async (res) => {
+              if (res.ok) {
+                const data = (await res.json()) as { id?: string };
+                if (data.id) this.currentUserId = data.id;
+              }
+            })
+            .catch(() => {
+              // User ID resolution is optional; chat will degrade gracefully
             })
         );
       }
@@ -827,14 +842,26 @@ export class ScionPageAgentDetail extends LitElement {
     }
   }
 
-  private async handleAction(
-    action: 'start' | 'stop' | 'suspend' | 'resume' | 'delete',
-    event?: MouseEvent
-  ): Promise<void> {
+  private async handleAction(action: AgentLifecycleAction, event?: MouseEvent): Promise<void> {
     if (!this.agent) return;
 
+    if (action === 'force-resume') {
+      if (
+        !(await showConfirm(RESUME_BEST_EFFORT_CONFIRM_MESSAGE, {
+          title: 'Resume (best effort)',
+          confirmText: 'Resume',
+          variant: 'primary',
+        }))
+      ) {
+        return;
+      }
+    }
+
     if (action === 'delete') {
-      if (!event?.altKey && !(await showConfirm('Are you sure you want to delete this agent?'))) {
+      if (
+        !event?.altKey &&
+        !(await showConfirm(`Are you sure you want to delete agent "${this.agent.name}"?`))
+      ) {
         return;
       }
       this.actionLoading = { ...this.actionLoading, delete: true };
@@ -852,18 +879,15 @@ export class ScionPageAgentDetail extends LitElement {
               { title: 'Force Delete', confirmText: 'Force Delete', variant: 'danger' }
             );
             if (forceConfirmed) {
-              const forceResponse = await apiFetch(
-                `/api/v1/agents/${this.agentId}?force=true`,
-                { method: 'DELETE' }
-              );
+              const forceResponse = await apiFetch(`/api/v1/agents/${this.agentId}?force=true`, {
+                method: 'DELETE',
+              });
               if (!forceResponse.ok) {
                 throw new Error(
                   await extractApiError(forceResponse, 'Failed to force delete agent')
                 );
               }
-              window.location.href = this.project
-                ? `/projects/${this.project.id}`
-                : '/agents';
+              window.location.href = this.project ? `/projects/${this.project.id}` : '/agents';
               return;
             }
           }
@@ -885,6 +909,7 @@ export class ScionPageAgentDetail extends LitElement {
       stop: 'stopping',
       suspend: 'stopping',
       resume: 'starting',
+      'force-resume': 'starting',
     };
     this.agent = {
       ...this.agent,
@@ -896,10 +921,11 @@ export class ScionPageAgentDetail extends LitElement {
       stop: `/api/v1/agents/${this.agentId}/stop`,
       suspend: `/api/v1/agents/${this.agentId}/suspend`,
       resume: `/api/v1/agents/${this.agentId}/start`,
+      'force-resume': `/api/v1/agents/${this.agentId}/start`,
     };
 
     try {
-      const response = await apiFetch(actionUrls[action], { method: 'POST' });
+      const response = await apiFetch(actionUrls[action], lifecycleActionRequestInit(action));
 
       if (!response.ok) {
         throw new Error(await extractApiError(response, `Failed to ${action} agent`));
@@ -1119,7 +1145,7 @@ export class ScionPageAgentDetail extends LitElement {
         <scion-agent-message-viewer
           agentId=${this.agentId}
           agentName=${agent.name || ''}
-          ?canSend=${can(agent._capabilities, 'attach') &&
+          ?canSend=${canMessageAgent(agent._capabilities) &&
           agent._messageability?.canMessage !== false}
           ?cloudLogging=${agent.cloudLogging || false}
         ></scion-agent-message-viewer>
@@ -1151,7 +1177,11 @@ export class ScionPageAgentDetail extends LitElement {
       <scion-chat-thread
         agentId=${this.agentId}
         agentName=${agent.name || ''}
-        ?canSend=${can(agent._capabilities, 'attach') &&
+        .conversationKey=${this.currentUserId ? `dm:agent:${this.agentId}:user:${this.currentUserId}` : ''}
+        .projectId=${agent.projectId || ''}
+        .currentUserId=${this.currentUserId}
+        ?isDM=${true}
+        ?canSend=${canMessageAgent(agent._capabilities) &&
         agent._messageability?.canMessage !== false}
         ?showVisibilityToggle=${true}
         style="display: ${this.chatViewActive ? '' : 'none'}"
@@ -1159,7 +1189,8 @@ export class ScionPageAgentDetail extends LitElement {
       <scion-agent-message-viewer
         agentId=${this.agentId}
         agentName=${agent.name || ''}
-        ?canSend=${can(agent._capabilities, 'attach') &&
+        .projectId=${agent.projectId || ''}
+        ?canSend=${canMessageAgent(agent._capabilities) &&
         agent._messageability?.canMessage !== false}
         ?cloudLogging=${agent.cloudLogging || false}
         style="display: ${this.chatViewActive ? 'none' : ''}"
@@ -1225,7 +1256,7 @@ export class ScionPageAgentDetail extends LitElement {
                     </sl-button>
                   </sl-tooltip>
                 `
-              : can(agent._capabilities, 'attach')
+              : canMessageAgent(agent._capabilities)
                 ? html`
                     <sl-button
                       variant="default"
@@ -1242,7 +1273,7 @@ export class ScionPageAgentDetail extends LitElement {
                 : nothing}
           ${can(agent._capabilities, 'attach')
             ? html`
-                <a href="/agents/${this.agentId}/terminal" style="text-decoration: none;">
+                <a href=${terminalHref(this.agentId)} style="text-decoration: none;">
                   <sl-button
                     variant="primary"
                     size="small"
@@ -1304,6 +1335,21 @@ export class ScionPageAgentDetail extends LitElement {
                 : nothing
               : canLifecycle(agent._capabilities)
                 ? html`
+                    ${agent.phase === 'error'
+                      ? html`
+                          <sl-button
+                            variant="default"
+                            outline
+                            size="small"
+                            ?loading=${this.actionLoading['force-resume']}
+                            ?disabled=${this.actionLoading['force-resume']}
+                            @click=${() => this.handleAction('force-resume')}
+                          >
+                            <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+                            Resume (best effort)
+                          </sl-button>
+                        `
+                      : nothing}
                     <sl-button
                       variant="success"
                       size="small"
@@ -1776,6 +1822,11 @@ export class ScionPageAgentDetail extends LitElement {
                         `
                       )}
                     </sl-select>
+                    ${(agent.messageMode || 'project') === 'hub'
+                      ? html`<div style="font-size: 0.75rem; color: var(--sl-color-neutral-500); margin-top: 0.25rem; max-width: 360px;">
+                          Hub mode: sends within this project and to permitted agents in other projects. External messaging requires the Hub cross-project switch to be enabled.
+                        </div>`
+                      : nothing}
                   `
                 : html`
                     <scion-message-mode-badge
@@ -1785,6 +1836,11 @@ export class ScionPageAgentDetail extends LitElement {
                     <span style="margin-left: 0.5em; color: var(--sl-color-neutral-600);">
                       ${modeDisplay.description}
                     </span>
+                    ${(agent.messageMode || 'project') === 'hub'
+                      ? html`<div style="font-size: 0.75rem; color: var(--sl-color-neutral-500); margin-top: 0.25rem;">
+                          External messaging requires the Hub cross-project switch to be enabled.
+                        </div>`
+                      : nothing}
                   `}
             </span>
           </div>
@@ -1793,8 +1849,8 @@ export class ScionPageAgentDetail extends LitElement {
                 <div class="info-item">
                   <span class="info-label">Reachability</span>
                   <span class="info-value">
-                    Can message: ${messageability.reachableAgentCount} agents,
-                    ${messageability.reachableUserCount} users
+                    Can reach ${messageability.reachableAgentCount} agents,
+                    ${messageability.reachableUserCount} users in this project
                   </span>
                 </div>
               `
@@ -1902,6 +1958,13 @@ export class ScionPageAgentDetail extends LitElement {
       });
 
       if (!response.ok) {
+        // Detect hub mode grant denial: server returns 403 when the caller
+        // lacks full-role + current-hub-mode authority to grant hub.
+        if (response.status === 403 && newMode === 'hub') {
+          throw new Error(
+            'Cannot grant Hub mode: the granting agent or user must have full role and already be in Hub mode.'
+          );
+        }
         throw new Error(await extractApiError(response, 'Failed to change message mode.'));
       }
 
@@ -1976,16 +2039,6 @@ export class ScionPageAgentDetail extends LitElement {
                               : 'neutral'}
                       >${agent.appliedConfig.agentRole}</sl-badge
                     >
-                  </span>
-                </div>
-              `
-            : ''}
-          ${agent.visibility
-            ? html`
-                <div class="info-item">
-                  <span class="info-label">Visibility</span>
-                  <span class="info-value">
-                    <span class="visibility-badge">${agent.visibility}</span>
                   </span>
                 </div>
               `

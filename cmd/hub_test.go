@@ -15,12 +15,14 @@
 package cmd
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestGetAuthInfo_NoAuth(t *testing.T) {
@@ -112,6 +114,7 @@ func TestGetAuthInfo_DevAuthPreferredOverStaleAgentTokenOnLocalhost(t *testing.T
 	t.Setenv("SCION_DEV_TOKEN", "")
 	t.Setenv("SCION_DEV_TOKEN_FILE", "")
 	t.Setenv("SCION_HUB_TOKEN", "")
+	t.Setenv("SCION_AGENT_ID", "")
 
 	scionDir := filepath.Join(tmpDir, ".scion")
 	if err := os.MkdirAll(scionDir, 0755); err != nil {
@@ -133,6 +136,47 @@ func TestGetAuthInfo_DevAuthPreferredOverStaleAgentTokenOnLocalhost(t *testing.T
 	assert.Equal(t, "devauth", info.MethodType)
 	assert.Equal(t, "Dev auth", info.Method)
 	assert.True(t, info.IsDevAuth)
+}
+
+// TestGetAuthInfo_HubManagedAgentUsesRealTokenOnLocalhost is the counterpart
+// to TestGetAuthInfo_DevAuthPreferredOverStaleAgentTokenOnLocalhost: inside a
+// container the Runtime Broker started (SCION_AGENT_ID set), the scion-token
+// file is freshly minted for *this* Hub, not stale — so it must NOT be
+// overridden by dev auth even when the endpoint is localhost, since some Hub
+// endpoints (e.g. an agent's own outbound message to a user) require the
+// caller's authenticated identity to be that specific agent, which dev auth
+// does not provide.
+func TestGetAuthInfo_HubManagedAgentUsesRealTokenOnLocalhost(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("SCION_AUTH_TOKEN", "")
+	t.Setenv("SCION_DEV_TOKEN", "")
+	t.Setenv("SCION_DEV_TOKEN_FILE", "")
+	t.Setenv("SCION_HUB_TOKEN", "")
+	t.Setenv("SCION_AGENT_ID", "agent-uuid-123") // Hub-managed agent context.
+
+	scionDir := filepath.Join(tmpDir, ".scion")
+	if err := os.MkdirAll(scionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Real per-agent token, freshly issued by the broker for this Hub.
+	if err := os.WriteFile(filepath.Join(scionDir, "scion-token"), []byte("eyJhbGciOiJIUzI1NiJ9.fresh-agent-jwt"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// A dev token also happens to be present (this IS a dev-mode Hub) — must
+	// not be preferred over the agent's own token in this context.
+	if err := os.WriteFile(filepath.Join(scionDir, "dev-token"), []byte("scion_dev_abc123"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	settings := &config.Settings{}
+	info := getAuthInfo(settings, "http://localhost:8080")
+	assert.Equal(t, "agent_token", info.MethodType)
+	assert.Equal(t, "Agent token", info.Method)
+	assert.Equal(t, "scion-token file", info.Source)
+	assert.False(t, info.IsDevAuth)
 }
 
 func TestGetAuthInfo_AgentTokenUsedOnRemoteEndpoint(t *testing.T) {
@@ -467,4 +511,75 @@ func TestParseDefaultBranch_NoMatch(t *testing.T) {
 func TestParseDefaultBranch_EmptyOutput(t *testing.T) {
 	result := parseDefaultBranch("")
 	assert.Equal(t, "", result)
+}
+
+// TestHubUnknownSubcommand_RejectsRemovedGroveAlias is a regression test for
+// the removed "hub groves"/"hub grove" alias. hubCmd has no subcommand
+// named "groves", but before hubCmd was made Runnable, cobra silently fell
+// through to hub's own help with exit status 0 for any unrecognized hub
+// subcommand — including this one — instead of reporting an error. That
+// made a removed command indistinguishable from a typo and let old
+// scripts' error checks pass silently. This executes the real rootCmd,
+// since the behavior depends on cobra's command-resolution path through
+// the actual tree, not a synthetic one.
+func TestHubUnknownSubcommand_RejectsRemovedGroveAlias(t *testing.T) {
+	var buf bytes.Buffer
+	rootCmd.SetArgs([]string{"hub", "groves", "list"})
+	rootCmd.SetOut(&buf)
+	rootCmd.SetErr(&buf)
+	defer func() {
+		rootCmd.SetArgs(nil)
+		rootCmd.SetOut(nil)
+		rootCmd.SetErr(nil)
+	}()
+
+	err := rootCmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `unknown command "groves" for "scion hub"`)
+}
+
+// TestHubBareInvocation_PrintsHelpOutsideProject is a regression test for a
+// side effect of making hubCmd Runnable: once ValidateArgs runs for "hub",
+// execution would otherwise continue into root's PersistentPreRunE, which
+// requires an active scion project for "hub" (it is not in that hook's
+// exempt command list). A bare "scion hub" run outside any project would
+// then fail with "not in a scion project" instead of printing hub's help,
+// even though a plain "scion hub" never did anything project-specific
+// before. hubCmd's Args validator returns pflag.ErrHelp for zero args (and
+// for a leading "help" argument, since cobra only auto-registers a real
+// "help" subcommand on the root command) specifically to make cobra print
+// help and stop *before* that hook runs. This test runs both cases from a
+// temp directory that is not a scion project, with a clean HOME, so it
+// fails loudly if that short-circuit regresses for either one — a mutation
+// that only special-cases zero args (dropping the "help" branch) passes
+// unless the "help" sub-case below is present.
+func TestHubBareInvocation_PrintsHelpOutsideProject(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{name: "bare", args: []string{"hub"}},
+		{name: "help", args: []string{"hub", "help"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			t.Chdir(t.TempDir())
+
+			var buf bytes.Buffer
+			rootCmd.SetArgs(tc.args)
+			rootCmd.SetOut(&buf)
+			rootCmd.SetErr(&buf)
+			defer func() {
+				rootCmd.SetArgs(nil)
+				rootCmd.SetOut(nil)
+				rootCmd.SetErr(nil)
+			}()
+
+			err := rootCmd.Execute()
+			require.NoError(t, err)
+			assert.Contains(t, buf.String(), "Commands for interacting with a remote Scion Hub")
+		})
+	}
 }

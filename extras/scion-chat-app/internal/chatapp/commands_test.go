@@ -5,9 +5,11 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-chat-app/internal/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
 // newTestRouter creates a CommandRouter backed by an ephemeral store and a
@@ -108,7 +110,7 @@ func TestHandleEvent_CommandRouting(t *testing.T) {
 }
 
 // TestCmdStart_RequiresSpaceLink verifies that /scion start now requires a
-// space link (grove context) before attempting to start an agent.
+// space link (project context) before attempting to start an agent.
 func TestCmdStart_RequiresSpaceLink(t *testing.T) {
 	router, _ := newTestRouter(t)
 	event := &ChatEvent{
@@ -131,7 +133,7 @@ func TestCmdStart_RequiresSpaceLink(t *testing.T) {
 }
 
 // TestCmdStop_RequiresSpaceLink verifies that /scion stop now requires a
-// space link (grove context) before attempting to stop an agent.
+// space link (project context) before attempting to stop an agent.
 func TestCmdStop_RequiresSpaceLink(t *testing.T) {
 	router, _ := newTestRouter(t)
 	event := &ChatEvent{
@@ -154,7 +156,7 @@ func TestCmdStop_RequiresSpaceLink(t *testing.T) {
 }
 
 // TestCmdUnsubscribe_RequiresSpaceLink verifies that /scion unsubscribe now
-// requires a space link to scope the deletion to the correct grove.
+// requires a space link to scope the deletion to the correct project.
 func TestCmdUnsubscribe_RequiresSpaceLink(t *testing.T) {
 	router, _ := newTestRouter(t)
 	event := &ChatEvent{
@@ -177,7 +179,7 @@ func TestCmdUnsubscribe_RequiresSpaceLink(t *testing.T) {
 }
 
 // TestHandleAgentAction_RequiresSpaceLink verifies that agent button actions
-// (start, stop, logs) now require a space link for grove scoping.
+// (start, stop, logs) now require a space link for project scoping.
 func TestHandleAgentAction_RequiresSpaceLink(t *testing.T) {
 	router, fm := newTestRouter(t)
 	event := &ChatEvent{
@@ -205,7 +207,7 @@ func TestHandleAgentAction_RequiresSpaceLink(t *testing.T) {
 }
 
 // TestExecuteDelete_RequiresSpaceLink verifies that the delete confirmation
-// handler requires a space link for grove scoping.
+// handler requires a space link for project scoping.
 func TestExecuteDelete_RequiresSpaceLink(t *testing.T) {
 	router, _ := newTestRouter(t)
 	event := &ChatEvent{
@@ -229,7 +231,7 @@ func TestExecuteDelete_RequiresSpaceLink(t *testing.T) {
 }
 
 // TestDialogSubmitRespond_RequiresSpaceLink verifies that the agent.respond
-// dialog handler requires a space link for grove scoping.
+// dialog handler requires a space link for project scoping.
 func TestDialogSubmitRespond_RequiresSpaceLink(t *testing.T) {
 	router, fm := newTestRouter(t)
 	event := &ChatEvent{
@@ -833,5 +835,88 @@ func TestSubscribeFilterAction_UpdatesMessage(t *testing.T) {
 	}
 	if !strings.Contains(resp.UpdateMessage.Text, "all activity types") {
 		t.Errorf("expected 'all activity types' (no checkboxes), got: %s", resp.UpdateMessage.Text)
+	}
+}
+
+// --- subscription pattern tests ---
+
+// fakeHostCallbacks records the patterns BrokerServer forwards via
+// RequestSubscription/CancelSubscription, without needing a real plugin RPC
+// connection to the hub.
+type fakeHostCallbacks struct {
+	mu         sync.Mutex
+	subscribed []string
+	cancelled  []string
+}
+
+func (f *fakeHostCallbacks) RequestSubscription(pattern string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.subscribed = append(f.subscribed, pattern)
+	return nil
+}
+
+func (f *fakeHostCallbacks) CancelSubscription(pattern string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cancelled = append(f.cancelled, pattern)
+	return nil
+}
+
+// TestProjectSubscriptionPattern_MatchesCanonicalProjectPattern guards the
+// shared helper cmdLink and cmdUnlink both call to build their subscription
+// pattern against drifting from the canonical projectkeys helper.
+func TestProjectSubscriptionPattern_MatchesCanonicalProjectPattern(t *testing.T) {
+	got := projectSubscriptionPattern("proj-1")
+	want := projectkeys.ProjectPattern("proj-1")
+	if got != want {
+		t.Errorf("projectSubscriptionPattern(%q) = %q, want %q", "proj-1", got, want)
+	}
+}
+
+// TestCmdUnlink_CancelsMatchingSubscriptionPattern verifies that /scionAdmin
+// unlink cancels the broker subscription using the same pattern shape cmdLink
+// subscribes with (scion.project.<id>.>), by running the real cmdUnlink
+// handler against a BrokerServer wired to a fake host-callback recorder.
+// Reverting this call site to a different pattern fails this test. cmdLink is
+// not exercised directly here — it needs a real identity.Mapper (a concrete
+// type, not swappable like the r.testClient shortcut other commands use) to
+// resolve a user and look up a project over the hub API before it ever
+// reaches RequestSubscription. It shares projectSubscriptionPattern with
+// cmdUnlink, and TestProjectSubscriptionPattern_MatchesCanonicalProjectPattern
+// pins that shared helper against drifting from the canonical
+// projectkeys.ProjectPattern.
+func TestCmdUnlink_CancelsMatchingSubscriptionPattern(t *testing.T) {
+	router, _ := newTestRouter(t)
+
+	hc := &fakeHostCallbacks{}
+	broker := NewBrokerServer(nil, router.log)
+	broker.SetHostCallbacks(hc)
+	router.broker = broker
+
+	if err := router.store.SetSpaceLink(&state.SpaceLink{
+		SpaceID:     "spaces/unlink-test",
+		Platform:    "googlechat",
+		ProjectID:   "proj-77",
+		ProjectSlug: "my-project",
+		LinkedBy:    "test",
+	}); err != nil {
+		t.Fatalf("setting space link: %v", err)
+	}
+
+	event := &ChatEvent{
+		Type:     EventCommand,
+		Platform: "googlechat",
+		SpaceID:  "spaces/unlink-test",
+		UserID:   "user-1",
+	}
+
+	if _, err := router.cmdUnlink(context.Background(), event, nil); err != nil {
+		t.Fatalf("cmdUnlink: %v", err)
+	}
+
+	want := projectkeys.ProjectPattern("proj-77")
+	if len(hc.cancelled) != 1 || hc.cancelled[0] != want {
+		t.Errorf("expected CancelSubscription(%q) exactly once, got %v", want, hc.cancelled)
 	}
 }

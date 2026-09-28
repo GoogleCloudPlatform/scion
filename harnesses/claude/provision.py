@@ -77,6 +77,16 @@ CLAUDE_AUTH_FILE = "~/.claude/.credentials.json"
 # requested model impossible to apply.
 DEFAULT_MODEL = "opus"
 
+# Shorthand spellings for model size aliases. Must stay in lockstep with
+# config.NormalizeModelAlias (pkg/config/templates.go): the Go side resolves
+# --model against the same shorthand set, so accepting a spelling here that
+# Go does not recognize would make ANTHROPIC_MODEL disagree with --model.
+MODEL_ALIAS_SHORTHAND = {"s": "small", "m": "medium", "l": "large", "xl": "extra-large"}
+
+# The canonical set of recognized model size aliases. Mirrors
+# config.KnownModelAliases (pkg/config/templates.go).
+KNOWN_MODEL_ALIASES = frozenset({"small", "medium", "large", "extra-large"})
+
 AUTH = scion_harness.AuthSpec(
     harness="claude",
     methods=[
@@ -223,18 +233,64 @@ def _update_project_paths(ctx: scion_harness.ProvisionContext) -> None:
     scion_harness.atomic_write_json(claude_json_path, cfg)
 
 
+def _normalize_model_alias(raw: str) -> str:
+    """Python mirror of config.NormalizeModelAlias (pkg/config/templates.go).
+
+    Lower-cases the input and expands the s/m/l/xl shorthand to their full
+    alias names. Must stay in lockstep with the Go implementation — see the
+    MODEL_ALIAS_SHORTHAND comment above.
+    """
+    lowered = raw.strip().lower()
+    return MODEL_ALIAS_SHORTHAND.get(lowered, lowered)
+
+
+def _resolve_model_alias(ctx: scion_harness.ProvisionContext, raw: str) -> str:
+    """Python mirror of config.ResolveModelAlias (pkg/config/templates.go).
+
+    Resolves a model size alias (e.g. "large") to a concrete model name using
+    this harness's own model_aliases from config.yaml (ctx.harness_config).
+    Unknown aliases and already-concrete model names pass through unchanged,
+    normalized to lowercase/canonical shorthand.
+
+    This is the defense-in-depth layer for resume/restart paths where the Go
+    side (hub or broker) had no alias table to resolve SCION_MODEL against
+    and passed a bare alias straight through — this harness always has its
+    own config.yaml on disk, so it can resolve the alias itself rather than
+    exporting it verbatim, which Claude Code rejects outright.
+    """
+    if not raw:
+        return raw
+    normalized = _normalize_model_alias(raw)
+    if normalized not in KNOWN_MODEL_ALIASES:
+        return normalized
+    # ctx.harness_config is normally always a dict (the property defaults to
+    # {} when the manifest carries none), but guard defensively in case that
+    # ever changes or a future caller passes a stripped-down context.
+    aliases = ctx.harness_config.get("model_aliases") if ctx.harness_config else None
+    if not isinstance(aliases, dict):
+        aliases = {}
+    return aliases.get(normalized, normalized)
+
+
 def _apply_model(ctx: scion_harness.ProvisionContext, env: dict[str, str]) -> str:
     """Read the resolved model from SCION_MODEL and publish as ANTHROPIC_MODEL.
 
-    SCION_MODEL arrives already resolved by the Go side (pkg/agent/provision.go
-    and pkg/hub/handlers_agent_create_helpers.go resolve size aliases before the
-    container starts). This function applies it as ANTHROPIC_MODEL and handles
-    the edge case where ANTHROPIC_MODEL is already set in the environment.
+    SCION_MODEL is expected to arrive already resolved by the Go side
+    (pkg/agent/provision.go and pkg/hub/handlers_agent_create_helpers.go
+    resolve size aliases before the container starts). This function applies
+    it as ANTHROPIC_MODEL and handles the edge case where ANTHROPIC_MODEL is
+    already set in the environment.
+
+    Defense in depth: if SCION_MODEL still carries a bare size alias (e.g.
+    "large") — which has happened on resume/restart paths where the Go side
+    had no alias table to resolve against — _resolve_model_alias maps it
+    using this harness's own config.yaml rather than exporting the alias
+    verbatim.
 
     Returns the concrete model name that was applied.
     """
     raw = os.environ.get("SCION_MODEL", "").strip()
-    model = raw or DEFAULT_MODEL
+    model = _resolve_model_alias(ctx, raw) if raw else DEFAULT_MODEL
 
     preset = os.environ.get("ANTHROPIC_MODEL", "").strip()
     if raw and preset and preset != model:
@@ -252,17 +308,23 @@ def _apply_model(ctx: scion_harness.ProvisionContext, env: dict[str, str]) -> st
 def _build_env_overlay(ctx: scion_harness.ProvisionContext, auth: scion_harness.ResolvedAuth) -> dict[str, str]:
     """Build the env vars overlay for outputs/env.json."""
     if auth.method == "api-key" and auth.env_key:
-        return {auth.env_key: _resolve(ctx, auth.env_key)}
-    if auth.method == "oauth-token":
-        return {"CLAUDE_CODE_OAUTH_TOKEN": _resolve(ctx, "CLAUDE_CODE_OAUTH_TOKEN")}
-    if auth.method == "vertex-ai":
+        env = {auth.env_key: _resolve(ctx, auth.env_key)}
+    elif auth.method == "oauth-token":
+        env = {"CLAUDE_CODE_OAUTH_TOKEN": _resolve(ctx, "CLAUDE_CODE_OAUTH_TOKEN")}
+    elif auth.method == "vertex-ai":
         region_key = auth.env_key or "GOOGLE_CLOUD_REGION"
-        return {
+        env = {
             "CLAUDE_CODE_USE_VERTEX": "1",
             "ANTHROPIC_VERTEX_PROJECT_ID": _resolve(ctx, "GOOGLE_CLOUD_PROJECT"),
             "CLOUD_ML_REGION": _resolve(ctx, region_key),
         }
-    return {}
+    else:
+        env = {}
+
+    # Suppress model upgrade/fallback dialogs — Scion manages the provider.
+    env["CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST"] = "1"
+
+    return env
 
 
 def provision(ctx: scion_harness.ProvisionContext) -> None:
@@ -282,6 +344,39 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
                 ctx.warn(f"failed to write API key approval: {exc}")
 
     env = _build_env_overlay(ctx, auth)
+    telemetry = ctx.telemetry
+    config = telemetry.get("telemetry") if isinstance(telemetry, dict) else None
+    enabled = isinstance(config, dict) and config.get("enabled", True)
+    source_env = telemetry.get("env", {}) if isinstance(telemetry, dict) else {}
+    cloud = config.get("cloud") if isinstance(config, dict) else None
+    configured_provider = cloud.get("provider", "") if isinstance(cloud, dict) else ""
+    staged_provider = source_env.get("SCION_TELEMETRY_CLOUD_PROVIDER", "")
+    if enabled and configured_provider and staged_provider and configured_provider != staged_provider:
+        raise scion_harness.ProvisionError("conflicting telemetry cloud provider")
+    provider = staged_provider or configured_provider
+    if enabled and not provider:
+        # The receiver can infer GCP from credentials even when provider is
+        # absent. A credential path is only a reason to stop, not a selector.
+        has_credentials = bool(source_env.get("SCION_OTEL_GCP_CREDENTIALS")) or os.path.isfile(
+            os.path.join(ctx.home, ".scion", "telemetry-gcp-credentials.json")
+        )
+        generic_endpoint = (cloud.get("endpoint") if isinstance(cloud, dict) else None) or source_env.get("SCION_OTEL_ENDPOINT")
+        if has_credentials or not generic_endpoint:
+            raise scion_harness.ProvisionError("explicit telemetry cloud provider required")
+    port = str(source_env.get("SCION_OTEL_GRPC_PORT") or "4317")
+    if not port.isdecimal() or not 1 <= int(port) <= 65535:
+        raise scion_harness.ProvisionError("invalid local telemetry gRPC port")
+    env.update({
+        "SCION_NATIVE_TELEMETRY_POLICY": "enabled" if enabled else "disabled",
+        "CLAUDE_CODE_ENABLE_TELEMETRY": "1" if enabled else "0",
+        "OTEL_METRICS_EXPORTER": "otlp" if enabled and provider != "gcp" else "none",
+        "OTEL_LOGS_EXPORTER": "otlp" if enabled else "none",
+        "OTEL_TRACES_EXPORTER": "none",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": f"http://127.0.0.1:{port}",
+        "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": f"http://127.0.0.1:{port}",
+        "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": f"http://127.0.0.1:{port}",
+        "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
+    })
     model = _apply_model(ctx, env)
     extra: dict[str, Any] | None = None
     if auth.method == "vertex-ai":

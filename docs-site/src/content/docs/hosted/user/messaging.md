@@ -29,7 +29,7 @@ Scion features an interactive, top-level **Native Web Chat** interface in the We
   - **DMs / General Chat**: If there is no active project context (such as when in Direct Messages or bare `/chat`), the toggle falls back to the top-level dashboard `/`.
 - **Direct Messaging (DMs)**: In addition to collaborative project spaces, the chat interface supports robust 1-on-1 Direct Messages (DMs). This includes both **human-to-human (H2H)** communication between team members and **human-to-agent (H2A)** chats. DMs are structured as a "global pair"—a single, consolidated thread per participant pair.
   - **DM Promotion to Shared Threads**: When a 1-on-1 Direct Message with an agent develops context useful for the broader team, you can promote the DM conversation into a Shared Space Thread. This atomic operation safely re-keys the messages and streams the transition live to all clients via SSE without a page reload. Use the promotion button located in the DM header.
-- **Members Sidebar, Presence & Typing**: A right-hand members sidebar lists all participants in the active project space or DM. This includes real-time online **presence indicators** (active, away, offline) and live **typing indicators** to show when a team member or agent is actively composing a message.
+- **Members Sidebar, Presence & Typing**: A right-hand members sidebar lists all participants in the active project space or DM. This includes real-time online **presence indicators** (active, away, offline) and live **typing indicators** to show when a team member or agent is actively composing a message. The thread's default agent is listed first in the AGENTS section of the sidebar, under a **Thread default** sub-heading. When a thread has a default agent, the thread header shows **terminal** and **graph** buttons for that agent, the same as a DM with an agent. Members can be filtered (All/Unread toggle) and sorted (Alphabetical or Recent Activity).
 - **The Thread Rail & Mobile Swipe Navigation**: A left-hand navigation sidebar lists all active chat spaces, threads, and DMs. On mobile viewports, the rail supports native **swipe gestures** for fluid, app-like drawer navigation.
 - **Chat/Log Toggle**: Located on the main `scion-chat-thread` panel, this toggle lets you switch between a clean, dialogue-focused **Chat** view and a live **Execution Log** stream for that agent.
 - **Zero-Reload Navigation**: Move between threads, project spaces, and configuration pages instantly with deep-linking support and no full-page reloads, ensuring no interruption to your active chat context or log streams.
@@ -44,8 +44,8 @@ Scion features an interactive, top-level **Native Web Chat** interface in the We
 
 The native web chat includes a complete suite of collaboration and developer productivity tools (Phases 0–5):
 
-#### 1. Message Action Bar
-Hovering over a message (on desktop) or long-pressing (on mobile) reveals a contextual **action bar** providing several per-message actions:
+#### 1. Message Context Menu
+Right-clicking a message (on desktop) or tapping it (on touch devices without hover) opens a contextual **context menu** providing several per-message actions. On touch devices, taps on links, buttons, mentions, and reply previews keep their normal behavior:
 - **Reply / Quote**: Quote a previous message with full backend support for reply-threading, maintaining clear context in fast-moving development discussions.
 - **Edit / Delete**: Edit or delete your own messages.
 - **Copy Permalink**: Generate a direct link to any message in the thread.
@@ -53,14 +53,22 @@ Hovering over a message (on desktop) or long-pressing (on mobile) reveals a cont
 #### 2. Advanced Organization
 - **Thread Pinning**: Pin critical threads to the top of the thread rail for easy access.
 - **Conversation Muting**: Mute busy threads or spaces to suppress notifications while keeping the discussion active.
-- **Custom Space Ordering**: Reorder your chat spaces using intuitive drag-and-drop navigation in the sidebar.
+- **Thread Drag-and-Drop Reorder**: Reorder threads within the rail by dragging and dropping them (native HTML5 drag API). Organize related threads into named **collapsible groups** that you can expand or collapse to manage long thread lists. Group membership and ordering are persisted server-side via user preferences.
+- **Space Emoji Icons**: Assign optional emoji icons to spaces, stored in project annotations, for quick visual identification in the thread rail.
+- **Layout Density**: Choose between **Dense** and **Comfortable** layout modes via the density toggle. Dense mode reduces whitespace for maximum information density; Comfortable mode provides more breathing room for extended reading.
 
 #### 3. High-Density Developer Utilities
 - **Cmd/Ctrl-K Conversation Switcher**: Trigger a keyboard-driven switcher to jump between spaces, threads, and DMs instantly without leaving your keyboard.
-- **Unread Divider with Watermark**: An unread indicator bar automatically segments new messages since your last visit, including a watermark to ensure you never miss a transition.
+- **Jump-to-Message from Search**: Clicking a search result automatically scrolls to the target message, even when it falls outside the currently loaded message buffer. The target message receives a highlight-flash animation, and a "Jump to latest" button appears to return to the live message stream.
+- **Unread Divider with Watermark**: An unread indicator bar automatically segments new messages since your last visit, including a watermark to ensure you never miss a transition. A thread with unread messages opens scrolled to the **New messages** divider rather than to the bottom.
+- **Day Separators**: Messages, including inter-agent messages, are split by day with the same date separator used throughout the thread.
 - **Rich Agent Output Rendering**: Dispatched agents can render complex interactive payloads directly inside the chat, including structural diffs, test suite results, and interactive JSON/YAML tree-structures.
 - **Collapsed Agent-to-Agent Messages**: To keep threads readable, background agent-to-agent messages (visible under the **Full** density filter) are collapsed into a compact, click-to-expand pill. When expanded, these messages are displayed with 2-line truncation. If a message is truncated, an expand icon ('arrows-angle-expand') appears next to it, allowing you to open a full-screen Markdown-rendered dialog overlay.
-- **Thread Export**: Export any collaborative thread as a clean Markdown document, useful for sharing agent reasoning or saving session histories.
+- **Conversation Export**: Export any collaborative thread via the export dropdown in the chat header:
+  - **Download as Markdown** for archiving or sharing agent reasoning.
+  - **Print / Save as PDF** for offline review.
+  - **Copy to Clipboard** (HTML + plain text) for quick pasting into other tools.
+  All exported content is HTML-escaped for safe rendering.
 - **Send-to-Agent Context & Slash Commands**: Fast-track your workflow with slash commands (e.g. `/start`, `/help`) and easily forward snippets or whole discussions directly to your agents as contextual guidance.
 
 ---
@@ -69,6 +77,7 @@ Hovering over a message (on desktop) or long-pressing (on mobile) reveals a cont
 
 - **Real-Time Browser Notifications**: Stay informed of `@mentions` and incoming DMs with native browser push notifications.
 - **Smart Suppression**: Notifications are mute-aware and automatically suppressed for active conversations (threads you are currently looking at) to prevent alert fatigue.
+- **Chat Chime**: A short two-tone chime plays when a chat message arrives from someone else. Your own messages never chime. The chime plays at most once every 2 seconds and does not depend on browser notification permission. Turn it off globally with **Chat chime sound** in your profile's notification settings. To turn it off for one project, choose **Chime on/off** from the thread rail's options menu. Both preferences are stored in the browser. If the browser's autoplay policy blocks audio, no sound plays.
 - **Unread Badges**: The tab title dynamically updates with an unread badge count when you are away from the tab.
 - **Per-Thread Draft Persistence**: Drafts are saved locally per-thread, so if you switch threads or close the tab, your unsent message remains waiting when you return.
 
@@ -87,20 +96,12 @@ The web composer features a security-hardened, developer-friendly file upload sy
 ### Performance & Safety Safeguards
 
 - **Token-Bucket Rate Limiting**: Per-sender token-bucket rate limits prevent message flooding, ensuring platform stability and protecting backend model endpoints.
+- **Touch-Friendly Composer**: On touch devices without hover, `Enter` inserts a newline instead of sending, because there is no `Shift+Enter`. Use the **Send** button to send.
 - **16K Input Character Limit**: A robust 16,000-character limit is enforced in the composer, protecting token context limits.
 - **SSE Direct Append & Real-Time Attachments**: Chat messages stream via Server-Sent Events (SSE) using direct-append logic, providing lag-free typing rendering. Additionally, attachment previews render immediately on incoming SSE messages, ensuring the user interface instantly displays attachment references without waiting for subsequent user-triggered renders.
 - **Idempotency Keys**: Client-side idempotency keys eliminate duplicate messages during transient connection drops or retry states.
+- **Honest Delivery Status**: A message to an agent that is not running is marked **Agent unreachable** instead of **Delivered**. If the Runtime Broker fails to deliver a message to the agent's terminal, it makes up to 3 attempts in total, but never retries once part of the text has already reached the terminal (so the agent does not see it twice), and a user sender sees the failure live in the chat. Messages to an agent that has been deleted fail right away instead of waiting in the queue. Failed messages are purged after 7 days.
 - **Cursor-Based Scrollback Pagination**: Solved previous scroll-jump issues and cursor-mismatches. Scrollback pagination and scroll-to-bottom locks operate smoothly as history loads.
-
-### Three-State Visibility Filtering
-
-To prevent notification noise from overwhelming your conversation, the chat thread supports three distinct visibility filters:
-
-1. **Conversation**: The cleanest view. Displays only direct human instructions and agent replies.
-2. **Verbose**: Adds CCs, explicit `@-mentions`, and user-directed warnings.
-3. **Full**: Displays every message, including background agent-to-agent operations, state-change notifications, and system warnings.
-
-The visibility filter is processed **server-side** for efficiency, and your filter preferences are persisted **per-agent** so your preferred density level is remembered when you return to a thread. Dispatched messages feature real-time delivery state indicators, showing a success checkmark or a failure icon with a detailed tooltip (e.g. for delivery-failed notices).
 
 ### Interactive @-Mentions & Autocomplete
 
@@ -109,6 +110,7 @@ When writing instructions, you can easily pull other agents into the thread:
 - **Code-Fence Guard**: The mention autocomplete is smart — it automatically disables itself when typing inside Markdown code fences (e.g., ` ``` ` blocks) so code snippets don't trigger unwanted dropdowns.
 - **Mention Leak Protection**: Direct mentions are safely partitioned, resolving a previous bug where mentions would leak into the default agent tab.
 - **Fan-Out Restrictions**: For platform stability, a single message is fanned out to a maximum of **10 recipients** per `@-mention` broadcast.
+- **Bidirectional Mention Translation**: Mentions are automatically translated between the formats used by agents and the web chat. In the chat UI, mentions display as `@firstname-lastname`; when delivered to agents, they are translated to `@email` format, and vice versa. This ensures both humans and agents see the most natural identifier for their context.
 - **Composer Default-Agent Disambiguation**: When sending messages in collaborative project spaces with multiple active agents, typing a message without an explicit target or `@-mention` triggers a smart disambiguation interface. This guides the user to select which agent the message should target (or fall back to the project's configured default agent), keeping routing unambiguous and conversations clear.
 
 ### Cross-Channel Coherence
@@ -150,8 +152,8 @@ scion message agent:tech-lead "Please review the auth module."
 # Attach a file
 scion message @tech-lead "See the test results." --attach ./results.json
 
-# Set message visibility
-scion message @tech-lead "Debug trace attached." --visibility verbose
+# Read message body from a file (useful for long messages or scripted workflows)
+scion message @tech-lead --body-file ./review-notes.md
 ```
 
 ### Message Formatting
@@ -187,8 +189,46 @@ scion message --non-interactive @reviewer "PR #42 is ready for review.\n\nBranch
 
 ### Related Commands
 
-- **`scion broadcast`**: Send a message to all agents in the current project, or use `--all` for a global broadcast. This replaces the old `--broadcast` flag on `scion message`.
+- **`scion broadcast`**: Send a message to all agents in the current project, or use `--all` for a global broadcast. The `--broadcast` and `--all` flags on `scion message` have been removed; use this command instead.
 - **`scion keys`**: Send raw keystrokes to an agent's tmux terminal (e.g., `scion keys editor "ENTER"`). Useful for unblocking interactive prompts. This replaces the old `--raw` flag on `scion message`.
+
+### Conversation Management
+
+The `scion conversation` command (alias `conv`) provides a surface-agnostic interface for managing conversations — the containers for message threads that span across the web chat, external channels, and CLI. Requires Hub mode.
+
+Conversations are referenced using one of three forms:
+- `conv:<uuid>` — by conversation ID.
+- `@<agent-name>` — resolves the direct conversation with the named agent.
+- `#<thread-name>` — resolves a named group conversation.
+
+```bash
+# List your conversations
+scion conversation list
+
+# View messages in a specific conversation
+scion conversation messages @tech-lead
+
+# Create a new group conversation
+scion conversation create "sprint-planning"
+
+# Set a default agent for a conversation
+scion conversation set-default "#sprint-planning" agent-id
+
+# Catch up on recent messages (last 2 hours)
+scion conversation catch-up @tech-lead --since 2h
+
+# Retrieve a single message by ID
+scion conversation get-message conv:a1b2c3d4-... msg-uuid-here
+
+# List participants in a conversation
+scion conversation participants "#sprint-planning"
+
+# Join or leave a conversation
+scion conversation join "#sprint-planning" user user-id
+scion conversation leave "#sprint-planning"
+```
+
+For full flag details, see the [CLI Reference](/scion/reference/cli/#scion-conversation-alias-conv).
 
 ## Discord
 
@@ -216,11 +256,29 @@ When an agent uses the `ask_user` tool (or similar mechanism depending on the ha
 
 Messages are delivered in real-time to the Web Dashboard via Server-Sent Events (SSE). The **Messages Tab** on the individual agent detail page provides a real-time stream of all communication with that specific agent.
 
+### Delivery failures
+
+Messages to agents are never silently dropped:
+
+- **Non-running recipients.** A message is rejected if the recipient agent is not running (suspended, stopped, in error, or still starting). For direct messages, human or agent, the send fails immediately with a `409` error. Pass `--wake` to resume a suspended agent and then deliver. Broadcast, group, and message-broker deliveries are rejected per recipient. A sending agent gets a `DELIVERY_FAILED` system notice ("Message delivery to `<agent>` failed: …") for each rejected recipient.
+- **Late broker failures.** A Runtime Broker may accept a message into its short delivery buffer and then fail to deliver it, for example because the container has gone away. The broker reports this to the Hub. The Hub marks the message `failed` rather than leaving it `dispatched`, and notifies the sending agent.
+
 ## Message Authorization & Modes
 
-Every agent is protected by a **Message Mode** that controls which users and other agents can send messages to it. An agent's message mode can be set via the Web Dashboard or via the `set_message_mode` action. The available modes are:
+:::tip[Full Reference]
+For the complete authorization reference — including mode decision tables, cross-project messaging controls, piercing rules, denial codes, and the API for changing modes — see [Messaging Authorization](/scion/reference/messaging-authorization/).
+:::
+
+Every agent is protected by a **Message Mode** that controls which users and other agents can send messages to it. An agent's message mode can be managed in several ways:
+
+- **Web Dashboard**: Use the mode controls on the agent detail page.
+- **CLI**: Use `scion set-message-mode <agent-name> <mode>`, or set the initial mode at creation time with `scion start --message-mode <mode>`.
+- **Agent self-service**: Full-role agents can call `set_message_mode` programmatically to adjust their own or their children's message modes.
+
+The available modes are:
 
 - **Project Mode (Default)**: Any user with the `agent:message` permission in the project can message the agent. Any peer agent in the project (that is not restricted by lineage mode) can also message it. The most permissive mode. Note that the default project-member role does **not** include `agent:message` — messaging requires an owner, admin, or ancestry relationship with the agent (i.e., the agent's creator or their ancestors). This aligns messaging authorization with the terminal attach permission gate.
+- **Hub Mode**: Behaves like Project mode within the agent's own project, and additionally allows the agent to send direct messages across project boundaries when [cross-project messaging](#cross-project-messaging) is enabled. A project-mode agent can *receive* a cross-project DM but cannot *reply* across the boundary until granted Hub mode.
 - **Branch Mode**: Only users in the agent's ancestry chain (its creator and their ancestors), plus the agent's direct parent and child agents, can message it.
 - **Lineage Mode**: Strictly restricts messaging to users in the agent's ancestry chain (its creator and their ancestors). No agent-to-agent messaging is permitted.
 - **None Mode**: Seals the agent from all messaging except system-plane notices. No users and no agents can message a none-mode agent through normal paths.
@@ -232,6 +290,70 @@ Highly privileged users can bypass an agent's message mode restrictions. This is
 Piercing applies only to user identities — it is never inherited by an owner's agents.
 
 The Web Dashboard displays reachability indicators (e.g., whether you can message a specific agent) based on the computed messageability, which takes into account the agent's mode, your ancestry relationship to it, and any piercing privileges.
+
+---
+
+## Cross-Project Messaging
+
+Agents can send direct messages across project boundaries when all three independent controls permit it. Cross-project messaging is **off by default**; all three must be enabled for a message to be delivered.
+
+### The Three-Control System
+
+| Control | Setting | Default | Who can change it |
+| :--- | :--- | :--- | :--- |
+| **Hub availability** | `cross_project_messaging_enabled` (Hub messaging settings) | `false` | Hub administrator |
+| **Agent outbound reach** | Agent message mode set to `hub` | `project` | Agent owner or project admin |
+| **Receiving project inbound policy** | `crossProjectInbound` on the destination project | `none` | Project owner or Hub administrator |
+
+### Project Inbound Policy
+
+Each project controls which cross-project messages it accepts via its `crossProjectInbound` setting:
+
+| Policy | Meaning |
+| :--- | :--- |
+| `none` | Accept no agent messages from other projects (default). |
+| `members` | Accept an external agent only when its originating human is an active member of the receiving project. |
+| `any` | Accept an eligible agent from any project on the Hub. |
+
+### Enabling Cross-Project Messaging
+
+1. **Hub administrator enables the feature globally:**
+   ```bash
+   scion hub messaging set --cross-project-enabled=true --revision <N>
+   ```
+
+2. **Project owner sets an inbound policy on the receiving project:**
+   ```bash
+   scion project messaging set --project <project> --policy members --revision <N>
+   ```
+
+3. **Grant `hub` mode to the sending agent:**
+   ```bash
+   scion set-message-mode <agent-name> hub
+   ```
+
+4. **Send a cross-project message:**
+   ```bash
+   scion message --project <target-project> @<agent-name> "message"
+   ```
+
+### Denial Codes
+
+When a cross-project message is rejected, the system returns a specific denial code explaining the reason:
+
+| Code | Meaning |
+| :--- | :--- |
+| `cross_project_disabled` | Cross-project messaging is disabled by the Hub administrator. |
+| `cross_project_sender_mode` | The sender must be in Hub mode to send cross-project messages. |
+| `cross_project_target_mode` | The recipient must be in Project or Hub mode to receive cross-project messages. |
+| `cross_project_inbound_none` | The recipient's project does not accept messages from external agents. |
+| `cross_project_origin_not_member` | The sender's originating user is not a member of the recipient's project. |
+| `cross_project_untrusted_origin` | The sender's identity origin could not be verified. |
+| `cross_project_surface_unsupported` | Cross-project messaging is not supported for this conversation type (e.g., group conversations). |
+
+:::note[Hub Mode Grant Guard]
+An **agent** can only grant `hub` mode to another agent when the calling agent is itself in `hub` mode, has the `full` authorization role, and holds the `project:agent:set_message_mode` scope. Human callers (project owners, super-admins) can seed `hub` mode directly without these restrictions.
+:::
 
 ---
 
@@ -267,6 +389,7 @@ Write a unit test for the auth package.
 | Type | Meaning | Action Required |
 |---|---|---|
 | **`instruction`** | Direct instruction sent to you. | Read and act on it. |
+| **`reply`** | A reply to a message you previously sent. Routes to the original sender agent, not the thread default. Includes `reply_context` metadata with the first 32 characters of the replied-to message. | Read and act on it like an `instruction`. |
 | **`state-change`** | A notification that another agent changed phase (e.g. stopped or stalled). | Treat as FYI — no reply or action needed. |
 | **`input-needed`** | A broadcast that an agent has called `sciontool status ask_user`. | See handling rules below. |
 | **`mention`** | You were CC'd or mentioned in a message. | Treat as FYI unless explicitly directed otherwise. |
@@ -274,7 +397,7 @@ Write a unit test for the auth package.
 | **`system`** | Operational notices generated by the Hub (e.g. `delivery-failed`, `scheduler`, `port-forward`). | Treat as FYI or follow troubleshooting instructions in the notice. |
 
 :::note[Conversation Model Migration]
-The messaging system is transitioning to a conversation-based model where messages carry a `conversation_id` and are addressed to conversations rather than agents directly. During this transition, inbound messages continue to arrive with the `type` fields described above, and agents should continue to discriminate on the `type` field as documented. 
+The messaging system has transitioned to a conversation-based model where messages carry a `conversation_id` and are addressed to conversations rather than agents directly. The `scion conversation` CLI command (alias `conv`) provides full management of conversations — listing, viewing messages, creating group conversations, managing participants, and more (see [Conversation Management](#conversation-management) above). During this transition, inbound messages continue to arrive with the `type` fields described above, and agents should continue to discriminate on the `type` field as documented. 
 
 To migrate historical messages that predate the conversation model, administrators can use the `scion server backfill` command.
 

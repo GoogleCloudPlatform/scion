@@ -16,8 +16,8 @@ const (
 	FieldID = "id"
 	// FieldAgentID holds the string denoting the agent_id field in the database.
 	FieldAgentID = "agent_id"
-	// FieldGroveID holds the string denoting the grove_id field in the database.
-	FieldGroveID = "grove_id"
+	// FieldProjectID holds the string denoting the project_id field in the database.
+	FieldProjectID = "grove_id"
 	// FieldSessionID holds the string denoting the session_id field in the database.
 	FieldSessionID = "session_id"
 	// FieldStartedAt holds the string denoting the started_at field in the database.
@@ -52,7 +52,7 @@ const (
 var Columns = []string{
 	FieldID,
 	FieldAgentID,
-	FieldGroveID,
+	FieldProjectID,
 	FieldSessionID,
 	FieldStartedAt,
 	FieldEndedAt,
@@ -81,8 +81,8 @@ func ValidColumn(column string) bool {
 var (
 	// AgentIDValidator is a validator for the "agent_id" field. It is called by the builders before save.
 	AgentIDValidator func(string) error
-	// GroveIDValidator is a validator for the "grove_id" field. It is called by the builders before save.
-	GroveIDValidator func(string) error
+	// ProjectIDValidator is a validator for the "project_id" field. It is called by the builders before save.
+	ProjectIDValidator func(string) error
 	// SessionIDValidator is a validator for the "session_id" field. It is called by the builders before save.
 	SessionIDValidator func(string) error
 	// DefaultTurnCount holds the default value on creation for the "turn_count" field.
@@ -114,9 +114,9 @@ func ByAgentID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldAgentID, opts...).ToFunc()
 }
 
-// ByGroveID orders the results by the grove_id field.
-func ByGroveID(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldGroveID, opts...).ToFunc()
+// ByProjectID orders the results by the project_id field.
+func ByProjectID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldProjectID, opts...).ToFunc()
 }
 
 // BySessionID orders the results by the session_id field.

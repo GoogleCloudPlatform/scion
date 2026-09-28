@@ -67,6 +67,10 @@ func (Notification) Indexes() []ent.Index {
 	return []ent.Index{
 		index.Fields("subscription_id"),
 		index.Fields("project_id", "subscriber_type", "subscriber_id"),
+		// Partial index for the undispatched-notification sweep: covers
+		// queries filtering on subscriber_type + created WHERE dispatched = false.
+		index.Fields("subscriber_type", "created").
+			Annotations(entsql.IndexWhere("dispatched = false")),
 	}
 }
 

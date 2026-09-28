@@ -172,18 +172,6 @@ type TokenResponse struct {
 	Created   time.Time  `json:"created"`
 }
 
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (t TokenResponse) MarshalJSON() ([]byte, error) {
-	type Alias TokenResponse
-	return json.Marshal(&struct {
-		Alias
-		ProjectID string `json:"groveId"`
-	}{
-		Alias:     Alias(t),
-		ProjectID: t.ProjectID,
-	})
-}
-
 // ExternalUserInfo carries the provider-verified identity fields needed to
 // provision a user. It is a subset of OAuthUserInfo, decoupled from the
 // OAuth layer so that provisionUser can serve both OAuth and proxy callers.
@@ -196,29 +184,6 @@ type ExternalUserInfo struct {
 // ErrAccessDenied is returned by provisionUser when the user's email is not
 // authorized to log in (domain restriction, invite-only, etc.).
 var ErrAccessDenied = errors.New("access denied")
-
-// handleAuth routes auth-related requests.
-//
-//nolint:unused // Kept as a legacy aggregate router; routes are registered individually.
-func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Path
-	switch {
-	case path == "/api/v1/auth/login" && r.Method == http.MethodPost:
-		s.handleAuthLogin(w, r)
-	case path == "/api/v1/auth/token" && r.Method == http.MethodPost:
-		s.handleAuthToken(w, r)
-	case path == "/api/v1/auth/refresh" && r.Method == http.MethodPost:
-		s.handleAuthRefresh(w, r)
-	case path == "/api/v1/auth/validate" && r.Method == http.MethodPost:
-		s.handleAuthValidate(w, r)
-	case path == "/api/v1/auth/logout" && r.Method == http.MethodPost:
-		s.handleAuthLogout(w, r)
-	case path == "/api/v1/auth/me" && r.Method == http.MethodGet:
-		s.handleAuthMe(w, r)
-	default:
-		MethodNotAllowed(w)
-	}
-}
 
 // handleAuthLogin handles POST /api/v1/auth/login.
 // This endpoint exchanges an OAuth provider token for Hub-issued tokens.
@@ -451,6 +416,15 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// See isReservedPlatformIdentity: every path that provisions a user or
+	// mints/re-mints a hub token checks this, including an already-issued
+	// refresh token for the configured service account.
+	if isReservedPlatformIdentity(claims.Email, s.platformAuthSA) {
+		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+			"invalid refresh token", nil)
+		return
+	}
+
 	// Re-evaluate admin status on token refresh. The stored role is the source
 	// of truth for UI-granted promotions; admin_emails can only add to it.
 	//
@@ -484,15 +458,34 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 			"user account is suspended", nil)
 		return
 	}
-	if newRole := s.getUserRole(claims.Email, storedRole); role != newRole {
+	refreshUserID := ""
+	if user != nil {
+		refreshUserID = user.ID
+	}
+	if newRole := s.getUserRole(r.Context(), claims.Email, storedRole, refreshUserID); role != newRole {
 		slog.Info("User role changed on token refresh", "email", claims.Email, "old_role", role, "new_role", newRole)
 		role = newRole
-		// Persist the role change
+		// Persist the role change, then bring the super-admin binding and
+		// the hub role grants in line with it (mirrors provisionUser). Grant
+		// changes are applied only after UpdateUser succeeds so they never
+		// diverge from the stored role; grant failures are logged and the
+		// refresh continues.
 		if user != nil && user.Role != role {
+			oldRole := user.Role
 			user.Role = role
 			if err := s.store.UpdateUser(r.Context(), user); err != nil {
 				slog.Error("Failed to persist role change on token refresh",
 					"email", claims.Email, "error", err)
+			} else {
+				if oldRole == store.UserRoleAdmin {
+					s.deleteSuperAdminBinding(r.Context(), user.ID)
+				} else if role == store.UserRoleAdmin {
+					s.ensureSuperAdminBinding(r.Context(), user.ID)
+				}
+				if err := syncHubRoleGrants(r.Context(), s.store, user.ID, role, store.SystemReconcileCreatedBy); err != nil {
+					slog.Warn("failed to sync hub role grants on token refresh",
+						"email", claims.Email, "user_id", user.ID, "role", role, "error", err)
+				}
 			}
 		}
 	}
@@ -539,6 +532,14 @@ func (s *Server) handleAuthValidate(w http.ResponseWriter, r *http.Request) {
 
 	claims, err := s.userTokenService.ValidateUserToken(req.Token)
 	if err != nil {
+		writeJSON(w, http.StatusOK, AuthValidateResponse{Valid: false})
+		return
+	}
+
+	// See isReservedPlatformIdentity: a token for the reserved identity must
+	// not be reported valid, matching the same token's rejection at the
+	// UnifiedAuthMiddleware choke point.
+	if isReservedPlatformIdentity(claims.Email, s.platformAuthSA) {
 		writeJSON(w, http.StatusOK, AuthValidateResponse{Valid: false})
 		return
 	}
@@ -1349,6 +1350,14 @@ var ErrUserSuspended = errors.New("user account is suspended")
 // authorized, or ErrUserSuspended when the user is suspended.
 // On success it also ensures hub-members group membership.
 func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*store.User, error) {
+	// The hub does not create or authenticate user accounts for its
+	// configured transport service account. Checked before authorization and
+	// before find-or-create so this covers both a brand-new identity and an
+	// already-existing user row for that email.
+	if isReservedPlatformIdentity(info.Email, s.platformAuthSA) {
+		return nil, ErrAccessDenied
+	}
+
 	// Authorization check
 	if !s.isUserAuthorized(ctx, info.Email) {
 		reason := "not_on_allow_list"
@@ -1368,7 +1377,7 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 			Email:       info.Email,
 			DisplayName: info.DisplayName,
 			AvatarURL:   info.AvatarURL,
-			Role:        s.getUserRole(info.Email, ""),
+			Role:        s.getUserRole(ctx, info.Email, "", ""),
 			Status:      "active",
 			Created:     time.Now(),
 			LastLogin:   time.Now(),
@@ -1408,7 +1417,17 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 			}
 			user.LastLogin = time.Now()
 			oldRole := user.Role
-			user.Role = s.getUserRole(info.Email, user.Role)
+			// The stored role on an invited row is a placeholder (invites
+			// carry no role), so evaluate as a brand-new user: admin if in
+			// admin_emails, otherwise the current default_user_role. The one
+			// carve-out is a pending invite that was already promoted through
+			// the admin UI; keep that admin.
+			activationRole := ""
+			uiPromoted := user.Role == store.UserRoleAdmin && hasUIPromotedBinding(ctx, s.store, user.ID)
+			if uiPromoted {
+				activationRole = user.Role
+			}
+			user.Role = determineUserRole(info.Email, s.AdminEmails(), activationRole, s.demotionSafe.Load(), uiPromoted, s.DefaultUserRole())
 			if oldRole == "admin" && user.Role != "admin" {
 				bindingSuperAdmin = "delete"
 			} else if user.Role == "admin" && oldRole != "admin" {
@@ -1430,7 +1449,7 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 			// agrees with IsUnscopedLocalPlatformAdmin. The empty-list guard
 			// is inherited: determineUserRole refuses to demote when AdminEmails
 			// is nil/empty, so oldRole == newRole and this branch is skipped.
-			if newRole := s.getUserRole(info.Email, user.Role); user.Role != newRole {
+			if newRole := s.getUserRole(ctx, info.Email, user.Role, user.ID); user.Role != newRole {
 				oldRole := user.Role
 				slog.Info("User role changed on login", "email", info.Email, "old_role", oldRole, "new_role", newRole)
 				user.Role = newRole
@@ -1454,8 +1473,13 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 		}
 	}
 
-	// Ensure user is a member of the hub-members group
-	ensureHubMembership(ctx, s.store, user.ID)
+	// Make the hub-members group and hub-viewer binding match the role now,
+	// so the user's first request already has the right hub permissions.
+	// Best-effort: a grant write failure degrades the session but must not
+	// fail the login; the startup backfill repairs it.
+	if err := syncHubRoleGrants(ctx, s.store, user.ID, user.Role, store.SystemReconcileCreatedBy); err != nil {
+		slog.Warn("failed to sync hub role grants on login", "email", info.Email, "user_id", user.ID, "role", user.Role, "error", err)
+	}
 
 	return user, nil
 }
@@ -1537,60 +1561,16 @@ func isEmailInDomains(emailLower string, authorizedDomains []string) bool {
 	return false
 }
 
-// isEmailAuthorized checks if an email address is from an authorized domain.
-// If authorizedDomains is empty, all emails are allowed.
-// Bootstrap admin emails (from AdminEmails config) bypass the domain check.
-func isEmailAuthorized(email string, authorizedDomains []string, adminEmails []string) bool {
-	// If no domains are configured, allow all
-	if len(authorizedDomains) == 0 {
-		return true
-	}
-
-	// Bootstrap admin emails bypass domain restrictions
-	emailLower := strings.ToLower(email)
-	for _, admin := range adminEmails {
-		if strings.ToLower(admin) == emailLower {
-			return true
-		}
-	}
-
-	// Extract domain from email
-	atIndex := strings.LastIndex(email, "@")
-	if atIndex == -1 {
-		return false
-	}
-
-	domain := strings.ToLower(email[atIndex+1:])
-
-	// Check if domain is in the authorized list
-	for _, authorized := range authorizedDomains {
-		authorizedLower := strings.ToLower(authorized)
-		if authorizedLower == domain {
-			return true
-		}
-		// Support wildcard subdomains: "*.example.com" matches "foo.example.com",
-		// "bar.baz.example.com", etc.
-		if strings.HasPrefix(authorizedLower, "*.") {
-			suffix := authorizedLower[1:] // e.g. ".example.com"
-			if strings.HasSuffix(domain, suffix) {
-				return true
-			}
-		}
-	}
-
-	return false
-}
-
 // determineUserRole returns the role for a user based on their email and the
 // role they currently hold.
 //
 // The adminEmails config list is the sole authority for the "admin" role:
 //   - Present in adminEmails → always "admin" (promotion).
-//   - Absent from adminEmails AND currentRole is "admin" → demoted to "member"
-//     (D11: removal from AdminEmails is no longer a no-op).
+//   - Absent from adminEmails AND currentRole is "admin" → demoted to
+//     defaultRole (D11: removal from AdminEmails is no longer a no-op).
 //   - Absent from adminEmails AND currentRole is anything else → preserved
 //     verbatim (including "viewer" and any role added in future).
-//   - No stored role (new user) → "member".
+//   - No stored role (new user) → defaultRole (from config; defaults to "member").
 //
 // This function intentionally does NOT demote non-admin roles: a "viewer" set
 // through the admin UI stays "viewer". Only the "admin" role is owned by
@@ -1603,7 +1583,11 @@ func isEmailAuthorized(email string, authorizedDomains []string, adminEmails []s
 //
 // currentRole is the user's role as stored in the database; pass "" for a user
 // that does not exist yet.
-func determineUserRole(email string, adminEmails []string, currentRole string, demotionSafe bool) string {
+//
+// defaultRole is the configured default role for new users (from
+// auth.default_user_role). Only "member" and "viewer" are accepted; any other
+// value (including "admin") falls back to "member".
+func determineUserRole(email string, adminEmails []string, currentRole string, demotionSafe bool, isUIPromoted bool, defaultRole string) string {
 	emailLower := strings.ToLower(email)
 	for _, adminEmail := range adminEmails {
 		if strings.ToLower(adminEmail) == emailLower {
@@ -1611,7 +1595,14 @@ func determineUserRole(email string, adminEmails []string, currentRole string, d
 		}
 	}
 	// D11: if the user currently holds "admin" but is no longer in adminEmails,
-	// demote to "member". The admin role is owned by config, not by the store.
+	// demote to defaultRole. The admin role is owned by config, not by the
+	// store. Using defaultRole ensures that when the org configures "viewer"
+	// as default, a demoted admin does not land at a higher privilege than
+	// new users would receive.
+	//
+	// UI-promoted guard: admins promoted via the admin API (AdminAPICreatedBy
+	// binding) are immune to login-time demotion — their authority comes from
+	// an explicit admin action, not from the AdminEmails config.
 	//
 	// Empty-list safety: when adminEmails is nil or empty, do NOT demote.
 	// An empty list is almost always a config load failure, not an instruction
@@ -1622,13 +1613,28 @@ func determineUserRole(email string, adminEmails []string, currentRole string, d
 	// demotions because the intended admin set was empty, or reconciler never
 	// ran), refuse login-time demotion too — the same condition that prevents
 	// mass demotion at startup must prevent one-at-a-time demotion at login.
-	if currentRole == "admin" && len(adminEmails) > 0 && demotionSafe {
-		return "member"
+	if currentRole == "admin" && len(adminEmails) > 0 && demotionSafe && !isUIPromoted {
+		return normalizedDefaultRole(defaultRole)
 	}
 	if currentRole != "" {
 		return currentRole
 	}
-	return "member"
+	// New user: use the configured default role. Only "member" and "viewer"
+	// are accepted; anything else (including "admin") falls back to "member"
+	// to prevent config-driven admin escalation.
+	return normalizedDefaultRole(defaultRole)
+}
+
+// normalizedDefaultRole maps the configured default_user_role to the role a
+// user actually gets when it applies (new user, invite activation, or admin
+// demotion at login or at startup reconciliation): "viewer" stays "viewer",
+// anything else (including "" and "admin") is "member". It is the single
+// place this rule lives, so login-time and startup demotion cannot disagree.
+func normalizedDefaultRole(defaultRole string) string {
+	if defaultRole == store.UserRoleViewer {
+		return store.UserRoleViewer
+	}
+	return store.UserRoleMember
 }
 
 // (s *Server) getUserRole is a convenience method to determine role using server config.
@@ -1636,8 +1642,39 @@ func determineUserRole(email string, adminEmails []string, currentRole string, d
 // when the reconciler refused demotions (zero intended admins, empty config, or
 // reconciler never ran), demotionSafe is false and login-time demotion is blocked
 // to prevent one-at-a-time admin loss through the interactive path.
-func (s *Server) getUserRole(email, currentRole string) string {
-	return determineUserRole(email, s.AdminEmails(), currentRole, s.demotionSafe.Load())
+//
+// userID may be empty for new users (no bindings to check). When non-empty and
+// the current role is "admin", the store is queried for an AdminAPICreatedBy
+// super-admin binding to protect UI-promoted admins from demotion.
+func (s *Server) getUserRole(ctx context.Context, email, currentRole, userID string) string {
+	uiPromoted := false
+	if currentRole == "admin" && userID != "" {
+		uiPromoted = hasUIPromotedBinding(ctx, s.store, userID)
+	}
+	return determineUserRole(email, s.AdminEmails(), currentRole, s.demotionSafe.Load(), uiPromoted, s.DefaultUserRole())
+}
+
+// hasUIPromotedBinding reports whether the user has a system-scoped super-admin
+// role binding created via the admin API (AdminAPICreatedBy). Such users were
+// promoted by an admin through the UI and must not be demoted by config changes.
+func hasUIPromotedBinding(ctx context.Context, st store.Store, userID string) bool {
+	if st == nil {
+		return false
+	}
+	rd, err := st.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	if err != nil {
+		return false
+	}
+	bindings, err := st.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	if err != nil {
+		return false
+	}
+	for _, b := range bindings {
+		if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == rd.ID && b.CreatedBy == store.AdminAPICreatedBy {
+			return true
+		}
+	}
+	return false
 }
 
 // handleInviteRedeem handles POST /api/v1/auth/invite/redeem.

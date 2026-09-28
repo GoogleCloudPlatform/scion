@@ -51,6 +51,12 @@ var defaultSeedOperations = []store.MaintenanceOperation{
 		Category:    store.MaintenanceCategoryMigration,
 	},
 	{
+		Key:         "applied-config-env-cleanup",
+		Title:       "Applied Config Env Cleanup",
+		Description: `Removes entries from agent.appliedConfig.env that a since-fixed merge-back could have written for agents created before the fix: GITHUB_TOKEN unconditionally, plus any other key that matches a secret-flagged entry in the agent's reachable env-var or secret scopes. Safe to re-run; agents with nothing to remove are left untouched.`,
+		Category:    store.MaintenanceCategoryMigration,
+	},
+	{
 		Key:         "pull-images",
 		Title:       "Pull Container Images",
 		Description: "Pulls the latest container images for all configured harnesses from the image registry.",
@@ -78,6 +84,12 @@ var defaultSeedOperations = []store.MaintenanceOperation{
 		Key:         "build-harness-config-image",
 		Title:       "Build Harness Config Image",
 		Description: "Builds a container image from a harness-config's bundled Dockerfile. The base image is resolved from the configured image registry.",
+		Category:    store.MaintenanceCategoryOperation,
+	},
+	{
+		Key:         "update-binary",
+		Title:       "Update Binary from Release",
+		Description: "Downloads the latest release binary from GitHub, verifies it, swaps the current binary, and restarts the hub service. Only available for binary-tier deployments.",
 		Category:    store.MaintenanceCategoryOperation,
 	},
 }

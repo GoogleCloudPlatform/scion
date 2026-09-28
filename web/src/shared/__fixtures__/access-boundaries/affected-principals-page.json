@@ -73,7 +73,12 @@
       ],
       "currentPermissionCount": 9,
       "proposedPermissionCount": 5,
-      "removedPermissions": ["agent.message.send", "agent.update", "skill.register", "project.update"],
+      "removedPermissions": [
+        "agent.message.send",
+        "agent.update",
+        "skill.register",
+        "project.update"
+      ],
       "regainedPermissions": [],
       "removedPermissionsTruncated": false,
       "removedPermissionCount": 4,
@@ -136,7 +141,13 @@
       "currentPermissionCount": 6,
       "proposedPermissionCount": 11,
       "removedPermissions": [],
-      "regainedPermissions": ["skill.list", "role.read", "role_binding.read", "group.read", "quota.read"],
+      "regainedPermissions": [
+        "skill.list",
+        "role.read",
+        "role_binding.read",
+        "group.read",
+        "quota.read"
+      ],
       "removedPermissionsTruncated": false,
       "removedPermissionCount": 0,
       "grantSources": [

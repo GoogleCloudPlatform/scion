@@ -104,36 +104,11 @@ func validateAllTemplates(ctx context.Context, hubCtx *HubContext) error {
 		return fmt.Errorf("failed to list templates: %w", err)
 	}
 
-	if len(resp.Templates) == 0 {
-		fmt.Println("No templates found.")
-		return nil
+	targets := make([]validationTarget, len(resp.Templates))
+	for i, template := range resp.Templates {
+		targets[i] = validationTarget{id: template.ID, name: template.Name}
 	}
-
-	var passed, failed int
-	for _, t := range resp.Templates {
-		report, err := hubCtx.Client.Templates().Validate(ctx, t.ID)
-		if err != nil {
-			fmt.Printf("FAIL  %s  (error: %v)\n", t.Name, err)
-			failed++
-			continue
-		}
-		if len(report.Issues) == 0 {
-			fmt.Printf("PASS  %s\n", t.Name)
-			passed++
-		} else {
-			fmt.Printf("FAIL  %s\n", t.Name)
-			for _, issue := range report.Issues {
-				fmt.Printf("  - [%s] %s\n", issue.Kind, issue.Message)
-			}
-			failed++
-		}
-	}
-
-	fmt.Printf("\n%d passed, %d failed\n", passed, failed)
-	if failed > 0 {
-		return fmt.Errorf("%d template(s) failed validation", failed)
-	}
-	return nil
+	return validateAllResources(ctx, "template", targets, hubCtx.Client.Templates().Validate)
 }
 
 var harnessConfigValidateCmd = &cobra.Command{
@@ -217,24 +192,42 @@ func validateAllHarnessConfigs(ctx context.Context, hubCtx *HubContext) error {
 		return fmt.Errorf("failed to list harness-configs: %w", err)
 	}
 
-	if len(resp.HarnessConfigs) == 0 {
-		fmt.Println("No harness-configs found.")
+	targets := make([]validationTarget, len(resp.HarnessConfigs))
+	for i, harnessConfig := range resp.HarnessConfigs {
+		targets[i] = validationTarget{id: harnessConfig.ID, name: harnessConfig.Name}
+	}
+	return validateAllResources(ctx, "harness-config", targets, hubCtx.Client.HarnessConfigs().Validate)
+}
+
+type validationTarget struct {
+	id   string
+	name string
+}
+
+func validateAllResources(
+	ctx context.Context,
+	resourceKind string,
+	targets []validationTarget,
+	validate func(context.Context, string) (*hubclient.ValidationReport, error),
+) error {
+	if len(targets) == 0 {
+		fmt.Printf("No %ss found.\n", resourceKind)
 		return nil
 	}
 
 	var passed, failed int
-	for _, hc := range resp.HarnessConfigs {
-		report, err := hubCtx.Client.HarnessConfigs().Validate(ctx, hc.ID)
+	for _, target := range targets {
+		report, err := validate(ctx, target.id)
 		if err != nil {
-			fmt.Printf("FAIL  %s  (error: %v)\n", hc.Name, err)
+			fmt.Printf("FAIL  %s  (error: %v)\n", target.name, err)
 			failed++
 			continue
 		}
 		if len(report.Issues) == 0 {
-			fmt.Printf("PASS  %s\n", hc.Name)
+			fmt.Printf("PASS  %s\n", target.name)
 			passed++
 		} else {
-			fmt.Printf("FAIL  %s\n", hc.Name)
+			fmt.Printf("FAIL  %s\n", target.name)
 			for _, issue := range report.Issues {
 				fmt.Printf("  - [%s] %s\n", issue.Kind, issue.Message)
 			}
@@ -244,7 +237,7 @@ func validateAllHarnessConfigs(ctx context.Context, hubCtx *HubContext) error {
 
 	fmt.Printf("\n%d passed, %d failed\n", passed, failed)
 	if failed > 0 {
-		return fmt.Errorf("%d harness-config(s) failed validation", failed)
+		return fmt.Errorf("%d %s(s) failed validation", failed, resourceKind)
 	}
 	return nil
 }

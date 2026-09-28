@@ -73,6 +73,30 @@ type AuthConfig struct {
 	// The middleware loads from this pointer on each request to see
 	// hot-reloaded authenticators.
 	FederationAuth *atomic.Pointer[FederationAuthenticator]
+	// GoogleValidator verifies Google ID tokens / access tokens for the
+	// external-bearer path (auth_external_bearer.go). nil disables that path
+	// even when FederationAuth trusts accounts.google.com.
+	GoogleValidator GoogleCredentialValidator
+	// GoogleResolver resolves a validated Google identity to a Hub user for
+	// the external-bearer path, sharing decisions with GEExchangeService.
+	GoogleResolver *GoogleIdentityResolver
+	// ExternalBearerLimiter rate-limits the external-bearer path per client
+	// IP, consulted only on a Google-credential-cache miss. nil disables
+	// rate limiting for that path (see authenticateExternalBearer).
+	ExternalBearerLimiter *externalBearerRateLimiter
+	// ExternalBearerMetrics records the outcome of every external-bearer
+	// authentication attempt (the external_bearer counter; see
+	// external_bearer_metrics.go for the closed label set and the real
+	// exported metric names). UnifiedAuthMiddleware captures a copy of this
+	// cfg each time applyMiddleware runs (Start(), Handler()).
+	// cmd/server_foreground.go calls SetExternalBearerMetrics before either,
+	// so a plain field would work today; the *atomic.Pointer (the
+	// FederationAuth shape above) makes a setter call after the handler is
+	// already built still take effect, race-free, so correctness does not
+	// depend on that ordering. A nil pointer, or one currently holding a nil
+	// interface, disables recording; it never changes the external-bearer
+	// path's authentication outcome.
+	ExternalBearerMetrics *atomic.Pointer[ExternalBearerMetricsRecorder]
 	// CredentialStore handles agent credential validation (Phase 1H).
 	// When non-nil, agent tokens are validated against persistent credential state.
 	CredentialStore store.AgentCredentialStore
@@ -84,6 +108,14 @@ type AuthConfig struct {
 	Debug bool
 	// Logger is the subsystem logger for auth middleware (defaults to slog.Default())
 	Logger *slog.Logger
+	// PlatformAuthSA is the hub's configured platform/transport auth service
+	// account email. UnifiedAuthMiddleware's tokenTypeUser and tokenTypeUAT
+	// arms use it to reject an otherwise-valid user JWT or PAT issued for
+	// that identity — see isReservedPlatformIdentity's invariant comment.
+	// Wired from the same server-config value as Server.platformAuthSA (see
+	// server.go's New) so the two cannot diverge. Empty when no transport
+	// service account is configured, which leaves the check inert.
+	PlatformAuthSA string
 }
 
 // tokenType represents the type of authentication token.
@@ -330,6 +362,19 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 					}
 				}
 
+				// Step 3c: Skill file capability URL (#1792). A credential-less
+				// GET of /api/v1/skills/{id}/files/{path} carrying exp/sig
+				// parameters is passed through WITHOUT an identity. Only the
+				// request shape is checked here; handleSkillFileRead verifies
+				// the HMAC signature unconditionally and rejects the request
+				// if it does not validate, and every other handler sees an
+				// anonymous request exactly as it would for a public route.
+				if isSignedSkillFileRequest(r) {
+					ctx = contextWithAuthType(ctx, AuthTypeSignedURL)
+					next.ServeHTTP(w, r.WithContext(ctx))
+					return
+				}
+
 				writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 					"missing authorization header", nil)
 				return
@@ -373,6 +418,14 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						"invalid access token", nil)
 					return
 				}
+				// See isReservedPlatformIdentity: every credential-acceptance
+				// point checks this too, including a PAT issued under a
+				// reserved-identity user row.
+				if isReservedPlatformIdentity(scopedUser.Email(), cfg.PlatformAuthSA) {
+					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+						"invalid access token", nil)
+					return
+				}
 				ctx = context.WithValue(ctx, userContextKey{}, scopedUser)
 				ctx = contextWithIdentity(ctx, scopedUser)
 				ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(scopedUser))
@@ -401,8 +454,26 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				}
 				claims, err := cfg.UserTokenSvc.ValidateUserToken(token)
 				if err != nil {
+					// Not a Hub-issued user JWT. It may be a Google ID token
+					// forwarded verbatim by a trusted external caller.
+					if serveExternalBearer(w, r, next, ctx, token, cfg, log) {
+						return
+					}
 					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 						"invalid access token: "+err.Error(), nil)
+					return
+				}
+				// PRIMARY choke: see isReservedPlatformIdentity's invariant
+				// comment. This check applies to every self-contained user
+				// JWT that reaches this point, independent of which mint
+				// site issued it or how long ago — it is what revokes an
+				// already-issued, unexpired access token for the reserved
+				// identity. Agent, federation, and broker credentials never
+				// reach this arm (see UnifiedAuthMiddleware's earlier steps),
+				// so this cannot deny an agent or broker token.
+				if isReservedPlatformIdentity(claims.Email, cfg.PlatformAuthSA) {
+					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+						"invalid access token", nil)
 					return
 				}
 				// JWT tokens are self-contained; check current user status
@@ -448,6 +519,21 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				}
 
 			default:
+				// Opaque (non-JWT) bearer tokens land here — detectTokenType
+				// routes every 3-segment token to tokenTypeUser, so this arm
+				// never sees a JWT. This is the external-bearer path's
+				// access-token hook site (auth_external_bearer.go):
+				// serveExternalBearer returns true whenever it has fully
+				// handled the request (Google trust configured, whether
+				// validation succeeds or fails), so this arm returns and the
+				// "unrecognized token format" rejection below never runs. It
+				// returns false only when the token is not applicable to
+				// this path at all (e.g. no Google trust configured), in
+				// which case that rejection runs as usual. The ID-token hook
+				// site is reached only from the tokenTypeUser case above.
+				if serveExternalBearer(w, r, next, ctx, token, cfg, log) {
+					return
+				}
 				writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 					"unrecognized token format", nil)
 				return
@@ -528,6 +614,8 @@ func isUnauthenticatedEndpoint(path string) bool {
 		return true
 	case "/api/v1/auth/cli/device/token": // CLI device flow token polling
 		return true
+	case "/api/v1/auth/integrations/google/exchange": // GE Google credential exchange (pre-auth; handler validates Google credential)
+		return true
 	case "/api/v1/auth/test-login": // Test-login for integration testing (gated by --enable-test-login)
 		return true
 	case "/api/v1/brokers/join": // Broker registration bootstrap (uses join token)
@@ -544,6 +632,50 @@ func isUnauthenticatedEndpoint(path string) bool {
 		return true
 	}
 	return false
+}
+
+// isReservedPlatformIdentity reports whether email is the hub's configured
+// platform/transport auth service account. A reserved-platform-identity
+// credential is never minted, re-minted, accepted as valid at validation, or
+// reported valid — and the validation choke (below) also revokes an
+// already-issued, unexpired token, not just new ones.
+//
+// Invariant: every path that provisions a user, or mints, re-mints, or
+// validates a hub token, checks this. That covers, today:
+//   - Provisioning: Server.provisionUser (API proxy/IAP, OAuth, and session
+//     login), GoogleIdentityResolver.Resolve (GE exchange and the
+//     external-bearer path), WebServer.proxyAuthMiddleware's fresh-identity
+//     branch, and the web OAuth callback.
+//   - Re-minting from an existing credential: Server.handleAuthRefresh,
+//     WebServer.proxyAuthMiddleware's existing-session branch, and
+//     WebServer.sessionToBearerMiddleware (both its cookie-overflow mint and
+//     its refresh branches).
+//   - Validation (the choke that also revokes an already-issued token):
+//     UnifiedAuthMiddleware's tokenTypeUser arm (the primary choke — every
+//     self-contained hub-issued user JWT passes through it) and its
+//     tokenTypeUAT arm (PATs), and Server.handleAuthValidate.
+//
+// Intentionally NOT checked, because none of them can authenticate as this
+// identity or are gated some other way: devAuthMiddleware (mints a token
+// only for the fixed dev-user identity, never an external one),
+// handlers_test_login (gated behind --enable-test-login, never enabled in
+// production), and the a2a-bridge's synthetic service token (server.go,
+// an internal token that never carries an external identity's email).
+//
+// Stating the covered and excluded sites here makes the guard set auditable
+// by checking this list against the code, rather than by a reachability
+// argument for each new call site.
+//
+// Comparison trims surrounding whitespace and is case-insensitive on both
+// sides. Returns false whenever platformAuthSA is empty, so the check is
+// inert on hubs that do not configure a transport service account (the
+// common case).
+func isReservedPlatformIdentity(email, platformAuthSA string) bool {
+	platformAuthSA = strings.TrimSpace(platformAuthSA)
+	if platformAuthSA == "" {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(email), platformAuthSA)
 }
 
 // parseTrustedProxies parses a list of IP addresses and CIDR ranges.

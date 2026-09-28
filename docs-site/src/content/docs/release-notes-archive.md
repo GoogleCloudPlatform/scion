@@ -13,7 +13,7 @@ sources differently. That has never been written down, so this release writes it
 the two ordering decisions that were accidents rather than choices. There are **two breaking
 changes**; read both, because one of them is a row saying that something *survives*.
 
-New: **[Settings Precedence](/reference/settings-precedence/)**, the reference page for all of it,
+New: **[Settings Precedence](/scion/reference/settings-precedence/)**, the reference page for all of it,
 including the known gaps this release does not fix.
 
 ### ⚠️ Breaking Changes
@@ -86,7 +86,7 @@ including the known gaps this release does not fix.
 * **[Hub]:** Env scope precedence now has a single source of truth. The resolver, the provenance
   reporter behind `scion hub env list`, and the new startup shadow warning all derive their order
   from one list, so they can no longer disagree about who outranks whom.
-* **[Docs]:** New **[Settings Precedence](/reference/settings-precedence/)** reference, covering
+* **[Docs]:** New **[Settings Precedence](/scion/reference/settings-precedence/)** reference, covering
   both precedence systems separately, the `SCION_*` variables Scion injects and which of them
   discard a user-supplied value, hub `agent_defaults` and their null semantics, and a catalogue of
   known gaps.

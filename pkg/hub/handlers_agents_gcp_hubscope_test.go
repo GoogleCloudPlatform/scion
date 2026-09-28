@@ -117,16 +117,18 @@ func hubAdminUser(t *testing.T, f *bypassAgentsFixture) *store.User {
 
 // createAgentAsOwner posts to the project agent route as the project owner.
 //
-// It first materialises the project's members group. The bypassAgents fixture
-// builds its projects directly in the store, so the group that the project
-// create handler would have made does not exist, and without it the owner has
-// no rights over the project at all — agent create is refused before any
+// It first materialises the project's members group and grants the owner a
+// project-owner role binding. The bypassAgents fixture builds its projects
+// directly in the store, so neither the group nor the role binding that the
+// project create handler would have made exists, and without them the owner
+// has no rights over the project at all — agent create is refused before any
 // service-account logic runs. Those tests never noticed because their callers
 // are agents; these tests use a human caller, which is the realistic one for
-// picking a hub-wide account. The call is idempotent.
+// picking a hub-wide account. Both calls are idempotent.
 func createAgentAsOwner(t *testing.T, f *bypassAgentsFixture, req CreateAgentRequest) *httptest.ResponseRecorder {
 	t.Helper()
-	f.srv.createProjectMembersGroup(context.Background(), f.proj, f.owner.ID)
+	f.srv.createProjectMembersGroup(context.Background(), f.proj)
+	require.NoError(t, f.srv.createProjectOwnerRoleBinding(context.Background(), f.proj.ID, f.owner.ID))
 	return doRequestAsUser(t, f.srv, f.owner, http.MethodPost,
 		"/api/v1/projects/"+f.proj.ID+"/agents", req)
 }
@@ -224,7 +226,8 @@ func TestAgentCreate_HubScopedSA_AssignableByCreatorAndAdmin(t *testing.T) {
 		sa := hubScopedSAForAgent(t, f, true) // created by a stranger
 		admin := hubAdminUser(t, f)
 
-		f.srv.createProjectMembersGroup(context.Background(), f.proj, f.owner.ID)
+		f.srv.createProjectMembersGroup(context.Background(), f.proj)
+		require.NoError(t, f.srv.createProjectOwnerRoleBinding(context.Background(), f.proj.ID, f.owner.ID))
 		rec := doRequestAsUser(t, f.srv, admin, http.MethodPost,
 			"/api/v1/projects/"+f.proj.ID+"/agents", CreateAgentRequest{
 				Name: "hub-sa-agent-admin",

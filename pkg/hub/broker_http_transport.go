@@ -139,7 +139,7 @@ func (t *brokerHTTPTransport) decodeResponseWithSnippet(resp *http.Response, out
 
 func brokerHTTPError(resp *http.Response) error {
 	respBody, _ := io.ReadAll(resp.Body)
-	return fmt.Errorf("runtime broker returned error %d: %s", resp.StatusCode, string(respBody))
+	return &brokerStatusError{StatusCode: resp.StatusCode, Body: string(respBody)}
 }
 
 func (t *brokerHTTPTransport) CreateAgent(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, error) {
@@ -163,7 +163,7 @@ func (t *brokerHTTPTransport) CreateAgent(ctx context.Context, brokerID, brokerE
 	return &result, nil
 }
 
-func (t *brokerHTTPTransport) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace, resume bool) (*RemoteAgentResponse, error) {
+func (t *brokerHTTPTransport) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace, resume bool, extras StartExtras) (*RemoteAgentResponse, error) {
 	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/start", strings.TrimSuffix(brokerEndpoint, "/"), url.PathEscape(agentID))
 	if projectID != "" {
 		endpoint += "?projectId=" + url.QueryEscape(projectID)
@@ -180,6 +180,12 @@ func (t *brokerHTTPTransport) StartAgent(ctx context.Context, brokerID, brokerEn
 	}
 	if harnessConfig != "" {
 		payload["harnessConfig"] = harnessConfig
+	}
+	if harnessConfigID != "" {
+		payload["harnessConfigId"] = harnessConfigID
+	}
+	if harnessConfigHash != "" {
+		payload["harnessConfigHash"] = harnessConfigHash
 	}
 	if len(resolvedEnv) > 0 {
 		payload["resolvedEnv"] = resolvedEnv
@@ -199,6 +205,10 @@ func (t *brokerHTTPTransport) StartAgent(ctx context.Context, brokerID, brokerEn
 	if resume {
 		payload["resume"] = true
 	}
+	// Carry the same dispatch-time metadata create sends, so the broker can
+	// attach a working skill resolver and recreate the workspace on every
+	// path that can reach ProvisionAgent, not just create.
+	applyStartExtras(payload, extras)
 
 	var body []byte
 	if len(payload) > 0 {
@@ -241,16 +251,21 @@ func (t *brokerHTTPTransport) StopAgent(ctx context.Context, brokerID, brokerEnd
 	return nil
 }
 
-func (t *brokerHTTPTransport) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string) error {
+func (t *brokerHTTPTransport) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) error {
 	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/restart", strings.TrimSuffix(brokerEndpoint, "/"), url.PathEscape(agentID))
 	if projectID != "" {
 		endpoint += "?projectId=" + url.QueryEscape(projectID)
 	}
-	var body []byte
+	payload := map[string]interface{}{}
 	if len(resolvedEnv) > 0 {
-		payload := map[string]interface{}{
-			"resolvedEnv": resolvedEnv,
-		}
+		payload["resolvedEnv"] = resolvedEnv
+	}
+	// Carry the same dispatch-time metadata the create/start paths send, so
+	// the broker can attach a working skill resolver when restart
+	// (re-)provisions the agent.
+	applyStartExtras(payload, extras)
+	var body []byte
+	if len(payload) > 0 {
 		var err error
 		body, err = json.Marshal(payload)
 		if err != nil {
@@ -294,6 +309,7 @@ func (t *brokerHTTPTransport) DeleteAgent(ctx context.Context, brokerID, brokerE
 	if projectID != "" {
 		endpoint += "&projectId=" + url.QueryEscape(projectID)
 	}
+	endpoint += deleteProjectPathQuery(ctx)
 	if softDelete {
 		endpoint += fmt.Sprintf("&softDelete=true&deletedAt=%s", url.QueryEscape(deletedAt.Format(time.RFC3339)))
 	}
@@ -324,8 +340,18 @@ func (t *brokerHTTPTransport) MessageAgent(ctx context.Context, brokerID, broker
 	}
 	if structuredMsg != nil {
 		reqBody["structured_message"] = structuredMsg
+		// Phase 9b(i): promote DeliveryText to the top-level wire field
+		// so the broker can prefer it without parsing StructuredMessage.
+		if structuredMsg.DeliveryText != "" {
+			reqBody["delivery_text"] = structuredMsg.DeliveryText
+		}
 	} else {
 		reqBody["message"] = message
+	}
+	// #1820: carry the persisted hub message ID so the broker can report a
+	// buffered-delivery failure back against the right row.
+	if msgID := dispatchMessageIDFromContext(ctx); msgID != "" {
+		reqBody["message_id"] = msgID
 	}
 
 	body, err := json.Marshal(reqBody)

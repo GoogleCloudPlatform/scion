@@ -181,11 +181,18 @@ type staticAccessSettings struct {
 	adminEmails       []string
 	authorizedDomains []string
 	userAccessMode    string
+	defaultUserRole   string
 }
 
 func (s *staticAccessSettings) AdminEmails() []string       { return s.adminEmails }
 func (s *staticAccessSettings) AuthorizedDomains() []string { return s.authorizedDomains }
 func (s *staticAccessSettings) UserAccessMode() string      { return s.userAccessMode }
+func (s *staticAccessSettings) DefaultUserRole() string {
+	if s.defaultUserRole == "" {
+		return "member"
+	}
+	return s.defaultUserRole
+}
 
 func newTestWebServer(t *testing.T, cfg WebServerConfig) *WebServer {
 	t.Helper()
@@ -194,6 +201,7 @@ func newTestWebServer(t *testing.T, cfg WebServerConfig) *WebServer {
 		ws.assets = fstest.MapFS{
 			"assets/main.js": &fstest.MapFile{Data: []byte("// test stub")},
 		}
+		ws.hasAssets = ws.detectWebAssets()
 	}
 	return ws
 }
@@ -221,6 +229,15 @@ func newDevAuthWebServer(t *testing.T, overrides ...func(*WebServerConfig)) *Web
 			"assets/main.js": &fstest.MapFile{Data: []byte("// test stub")},
 		}
 	}
+	// When a disk-based assets dir is used, provision assets/main.js so that
+	// detectWebAssets() detects valid assets on disk.
+	if ws.assetsDisk != "" {
+		assetsSubDir := filepath.Join(ws.assetsDisk, "assets")
+		if err := os.MkdirAll(assetsSubDir, 0o755); err == nil {
+			_ = os.WriteFile(filepath.Join(assetsSubDir, "main.js"), []byte("// test stub"), 0o644)
+		}
+	}
+	ws.hasAssets = ws.detectWebAssets()
 
 	// Install a minimal authoritative store with an active dev user so the
 	// suspended-user middleware does not fail closed on every authenticated
@@ -282,8 +299,18 @@ func TestSPACatchAll(t *testing.T) {
 	// Use dev-auth so all routes are accessible
 	ws := newDevAuthWebServer(t)
 
-	// Various SPA routes should all return the SPA shell
-	paths := []string{"/", "/projects", "/agents", "/projects/abc123", "/settings", "/not-a-real-page"}
+	// Various SPA routes should all return the SPA shell.
+	// Chat routes are included to verify that multi-segment client-side
+	// paths survive a browser refresh (SPA routing fallback).
+	paths := []string{
+		"/", "/projects", "/agents", "/projects/abc123", "/settings", "/not-a-real-page",
+		"/chat",
+		"/chat/my-project",
+		"/chat/chat-grove/649788a3-322a-45d5-9972-c7e66b2ada30",
+		"/chat/space/project-id",
+		"/chat/space/project-id/thread/topic-id",
+		"/chat/dm/dm-key",
+	}
 	for _, path := range paths {
 		t.Run(path, func(t *testing.T) {
 			req := httptest.NewRequest("GET", path, nil)
@@ -380,6 +407,7 @@ func TestStaticAssetHandler_NoAssets(t *testing.T) {
 	// if the embedded dist/client/ directory happens to lack the requested file.
 	ws.assets = nil
 	ws.assetsDisk = ""
+	ws.hasAssets = false
 
 	req := httptest.NewRequest("GET", "/assets/main.js", nil)
 	rec := httptest.NewRecorder()
@@ -396,6 +424,7 @@ func TestSPAHandler_NoAssets_ServesErrorPage(t *testing.T) {
 	ws := newDevAuthWebServer(t)
 	ws.assets = nil
 	ws.assetsDisk = ""
+	ws.hasAssets = false
 
 	handler := ws.Handler()
 
@@ -427,6 +456,7 @@ func TestSPAHandler_NoAssets_HealthzStillWorks(t *testing.T) {
 	ws := newTestWebServer(t, WebServerConfig{})
 	ws.assets = nil
 	ws.assetsDisk = ""
+	ws.hasAssets = false
 
 	req := httptest.NewRequest("GET", "/healthz", nil)
 	rec := httptest.NewRecorder()
@@ -445,6 +475,7 @@ func TestSPAHandler_NoAssets_APIStillWorks(t *testing.T) {
 	ws := newTestWebServer(t, WebServerConfig{})
 	ws.assets = nil
 	ws.assetsDisk = ""
+	ws.hasAssets = false
 
 	mockHub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -538,6 +569,36 @@ func TestRootLevelStaticFile_NonexistentFallsToSPA(t *testing.T) {
 	ct := resp.Header.Get("Content-Type")
 	if !strings.Contains(ct, "text/html") {
 		t.Errorf("non-existent root file should fall through to SPA shell (text/html), got Content-Type %q", ct)
+	}
+}
+
+func TestSPACatchAll_EmbeddedDirectoryDoesNotIntercept(t *testing.T) {
+	// Ensure that an embedded directory matching part of a client-side route
+	// does not cause tryServeStaticFile to intercept the request. The SPA
+	// handler must fall through to the SPA shell for directory-like paths.
+	ws := newDevAuthWebServer(t, func(cfg *WebServerConfig) {
+		// AssetsDir stays empty so ws.assets (in-memory FS) is used.
+	})
+	// Override the embedded asset FS with one that has a "chat" directory.
+	ws.assets = fstest.MapFS{
+		"assets/main.js":    &fstest.MapFile{Data: []byte("// stub")},
+		"chat/somefile.txt": &fstest.MapFile{Data: []byte("data")},
+	}
+	ws.hasAssets = ws.detectWebAssets()
+
+	// A request to /chat/my-project/thread-id should get the SPA shell,
+	// NOT a static file or 404 from the file server.
+	req := httptest.NewRequest("GET", "/chat/my-project/thread-id", nil)
+	rec := httptest.NewRecorder()
+	ws.Handler().ServeHTTP(rec, req)
+
+	resp := rec.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "scion-app") {
+		t.Errorf("expected SPA shell HTML, got: %s", string(body)[:min(200, len(body))])
 	}
 }
 
@@ -3649,6 +3710,69 @@ func TestProxyAuthMiddleware_Demotion_DeletesSuperAdminBinding(t *testing.T) {
 	assert.Equal(t, "member", user.Role)
 	assert.False(t, st.hasSuperAdminBinding("u-demote"),
 		"admin demoted via proxy auth must have super-admin RoleBinding removed")
+}
+
+// TestOAuthCallback_PlatformAuthSA_Denied is a consistency check: a service
+// account cannot complete interactive Google OAuth in practice, but the
+// callback carries the same isReservedPlatformIdentity guard as every other
+// find-or-create path (see that predicate's invariant comment), so this
+// covers it in case that ever changes.
+func TestOAuthCallback_PlatformAuthSA_Denied(t *testing.T) {
+	const secret = "test-session-secret-for-platform-auth-sa-oauth-1234"
+	const sa = "transport-sa@example.iam.gserviceaccount.com"
+
+	ws := newTestWebServer(t, WebServerConfig{
+		SessionSecret:  secret,
+		BaseURL:        "http://localhost:8080",
+		PlatformAuthSA: sa,
+	})
+
+	ws.oauthService = NewOAuthService(OAuthConfig{
+		Web: OAuthClientConfig{
+			Google: OAuthProviderConfig{
+				ClientID:     "test-client-id",
+				ClientSecret: "test-client-secret",
+			},
+		},
+	}, nil)
+	ws.oauthService.httpClient = &http.Client{
+		Transport: &mockOAuthTransport{
+			tokenJSON:    `{"access_token":"mock-token","token_type":"Bearer","expires_in":3600}`,
+			userinfoJSON: `{"id":"sa-subject","email":"` + sa + `","verified_email":true,"name":"Transport SA"}`,
+		},
+	}
+
+	st := newProxyAuthStore()
+	ws.store = st
+	ws.SetAccessSettingsProvider(&staticAccessSettings{adminEmails: []string{}})
+
+	reqSetup := httptest.NewRequest(http.MethodGet, "/auth/login/google", nil)
+	recSetup := httptest.NewRecorder()
+	sess, err := ws.sessionStore.Get(reqSetup, webSessionName)
+	require.NoError(t, err)
+	oauthState := "test-state-platform-auth-sa"
+	sess.Values[sessKeyOAuthState] = oauthState
+	require.NoError(t, sess.Save(reqSetup, recSetup))
+	cookies := recSetup.Result().Cookies()
+	require.NotEmpty(t, cookies)
+
+	callbackURL := "/auth/callback/google?code=test-code&state=" + oauthState
+	reqCallback := httptest.NewRequest(http.MethodGet, callbackURL, nil)
+	for _, c := range cookies {
+		reqCallback.AddCookie(c)
+	}
+	recCallback := httptest.NewRecorder()
+
+	ws.Handler().ServeHTTP(recCallback, reqCallback)
+
+	resp := recCallback.Result()
+	assert.Equal(t, http.StatusFound, resp.StatusCode)
+	assert.Contains(t, resp.Header.Get("Location"), "/login?error=",
+		"OAuth callback must redirect to login with an error for the configured service account")
+
+	_, lookupErr := st.GetUserByEmail(context.Background(), sa)
+	assert.ErrorIs(t, lookupErr, store.ErrNotFound,
+		"no user row should be created for the configured service account")
 }
 
 func TestOAuthCallback_NewAdminUser_GetsSuperAdminBinding(t *testing.T) {

@@ -23,6 +23,35 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
 
+// TestIsReservedPlatformIdentity covers the shared predicate that
+// provisionUser and GoogleIdentityResolver.Resolve both use to refuse the
+// hub's configured platform/transport auth service account: case/whitespace
+// normalization on both sides, and inertness when no SA is configured.
+func TestIsReservedPlatformIdentity(t *testing.T) {
+	const sa = "transport-sa@example.iam.gserviceaccount.com"
+
+	cases := []struct {
+		name           string
+		email          string
+		platformAuthSA string
+		want           bool
+	}{
+		{"exact match", sa, sa, true},
+		{"case-insensitive match", "Transport-SA@Example.IAM.GSERVICEACCOUNT.COM", sa, true},
+		{"whitespace trimmed on both sides", "  " + sa + "  ", " " + sa + " ", true},
+		{"different identity", "person@example.com", sa, false},
+		{"platform auth SA unconfigured", sa, "", false},
+		{"both empty", "", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isReservedPlatformIdentity(tc.email, tc.platformAuthSA); got != tc.want {
+				t.Errorf("isReservedPlatformIdentity(%q, %q) = %v, want %v", tc.email, tc.platformAuthSA, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestUnifiedAuthMiddleware_DevToken(t *testing.T) {
 	devToken := "scion_dev_test_token_12345678901234567890123456789012"
 
@@ -443,7 +472,7 @@ func min(a, b int) int {
 	return b
 }
 
-func TestIsEmailAuthorized(t *testing.T) {
+func TestCheckUserAuthorized_OpenModeDomains(t *testing.T) {
 	tests := []struct {
 		name              string
 		email             string
@@ -591,9 +620,9 @@ func TestIsEmailAuthorized(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			result := isEmailAuthorized(tc.email, tc.authorizedDomains, tc.adminEmails)
+			result := checkUserAuthorized(context.Background(), tc.email, tc.authorizedDomains, tc.adminEmails, "open", nil)
 			if result != tc.expected {
-				t.Errorf("isEmailAuthorized(%q, domains=%v, admins=%v) = %v, expected %v",
+				t.Errorf("checkUserAuthorized(%q, domains=%v, admins=%v) = %v, expected %v",
 					tc.email, tc.authorizedDomains, tc.adminEmails, result, tc.expected)
 			}
 		})
@@ -698,9 +727,9 @@ func TestDetermineUserRole(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := determineUserRole(tc.email, tc.adminEmails, tc.currentRole, tc.demotionSafe)
+			got := determineUserRole(tc.email, tc.adminEmails, tc.currentRole, tc.demotionSafe, false, "member")
 			if got != tc.expected {
-				t.Errorf("determineUserRole(%q, %v, %q, %v) = %q, expected %q",
+				t.Errorf("determineUserRole(%q, %v, %q, %v, false) = %q, expected %q",
 					tc.email, tc.adminEmails, tc.currentRole, tc.demotionSafe, got, tc.expected)
 			}
 		})
@@ -712,7 +741,7 @@ func TestDetermineUserRole(t *testing.T) {
 // preserves the admin role instead of demoting.
 func TestDetermineUserRole_GuardBlocksDemotion(t *testing.T) {
 	// Admin not in adminEmails, but demotionSafe is false → preserved.
-	got := determineUserRole("former@example.com", []string{"real-admin@example.com"}, "admin", false)
+	got := determineUserRole("former@example.com", []string{"real-admin@example.com"}, "admin", false, false, "member")
 	if got != "admin" {
 		t.Errorf("expected admin preserved when demotionSafe=false, got %q", got)
 	}
@@ -722,8 +751,120 @@ func TestDetermineUserRole_GuardBlocksDemotion(t *testing.T) {
 // completed normally (demotionSafe=true), the login path demotes as expected.
 func TestDetermineUserRole_GuardAllowsDemotion(t *testing.T) {
 	// Admin not in adminEmails, demotionSafe is true → demoted.
-	got := determineUserRole("former@example.com", []string{"real-admin@example.com"}, "admin", true)
+	got := determineUserRole("former@example.com", []string{"real-admin@example.com"}, "admin", true, false, "member")
 	if got != "member" {
 		t.Errorf("expected demotion to member when demotionSafe=true, got %q", got)
+	}
+}
+
+// TestDetermineUserRole_DefaultUserRole verifies that the configurable
+// default_user_role setting controls the role assigned to new users.
+func TestDetermineUserRole_DefaultUserRole(t *testing.T) {
+	tests := []struct {
+		name        string
+		email       string
+		adminEmails []string
+		currentRole string
+		defaultRole string
+		expected    string
+	}{
+		{
+			name:        "new user with default_user_role=viewer gets viewer",
+			email:       "newuser@example.com",
+			adminEmails: []string{"admin@example.com"},
+			currentRole: "",
+			defaultRole: "viewer",
+			expected:    "viewer",
+		},
+		{
+			name:        "new user with default_user_role=member gets member",
+			email:       "newuser@example.com",
+			adminEmails: []string{"admin@example.com"},
+			currentRole: "",
+			defaultRole: "member",
+			expected:    "member",
+		},
+		{
+			name:        "new user with empty default_user_role gets member",
+			email:       "newuser@example.com",
+			adminEmails: []string{"admin@example.com"},
+			currentRole: "",
+			defaultRole: "",
+			expected:    "member",
+		},
+		{
+			// admin is blocked as a default_user_role value — admin promotion
+			// is handled exclusively by admin_emails.
+			name:        "admin blocked as default_user_role falls back to member",
+			email:       "newuser@example.com",
+			adminEmails: []string{"admin@example.com"},
+			currentRole: "",
+			defaultRole: "admin",
+			expected:    "member",
+		},
+		{
+			// Unknown/invalid values fall back to member.
+			name:        "unknown default_user_role falls back to member",
+			email:       "newuser@example.com",
+			adminEmails: nil,
+			currentRole: "",
+			defaultRole: "superuser",
+			expected:    "member",
+		},
+		{
+			// default_user_role does not affect existing users.
+			name:        "existing member is not changed by default_user_role=viewer",
+			email:       "user@example.com",
+			adminEmails: []string{"admin@example.com"},
+			currentRole: "member",
+			defaultRole: "viewer",
+			expected:    "member",
+		},
+		{
+			// default_user_role does not affect existing viewers.
+			name:        "existing viewer is not changed by default_user_role=member",
+			email:       "user@example.com",
+			adminEmails: []string{"admin@example.com"},
+			currentRole: "viewer",
+			defaultRole: "member",
+			expected:    "viewer",
+		},
+		{
+			// admin_emails still takes priority over default_user_role.
+			name:        "admin_emails promotion overrides default_user_role=viewer",
+			email:       "admin@example.com",
+			adminEmails: []string{"admin@example.com"},
+			currentRole: "",
+			defaultRole: "viewer",
+			expected:    "admin",
+		},
+		{
+			// Demoted admin with default_user_role=viewer gets viewer, not member.
+			name:        "demoted admin with default_user_role=viewer gets viewer",
+			email:       "former@example.com",
+			adminEmails: []string{"real-admin@example.com"},
+			currentRole: "admin",
+			defaultRole: "viewer",
+			expected:    "viewer",
+		},
+		{
+			// Demoted admin with default_user_role=member gets member (unchanged).
+			name:        "demoted admin with default_user_role=member gets member",
+			email:       "former@example.com",
+			adminEmails: []string{"real-admin@example.com"},
+			currentRole: "admin",
+			defaultRole: "member",
+			expected:    "member",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := determineUserRole(tc.email, tc.adminEmails, tc.currentRole, true, false, tc.defaultRole)
+			if got != tc.expected {
+				t.Errorf("determineUserRole(%q, %v, %q, true, false, %q) = %q, expected %q",
+					tc.email, tc.adminEmails, tc.currentRole, tc.defaultRole, got, tc.expected)
+			}
+		})
 	}
 }

@@ -55,7 +55,9 @@
 #     REQUIRED: handleProjectBroadcast x1 (B5 — server-side broadcast forcing)
 #
 #   parseDMKeyIDs in handlers_agent_messaging.go:
-#     REQUIRED: handleAgentOutboundMessage x1, handleAgentMessage x1 (#1322 — DM key ownership)
+#     REQUIRED: resolveOutboundRouting x1 (#1322 — DM key ownership; conditional
+#               on DM-keyed thread_id with resolved recipientID)
+#     REQUIRED: handleAgentMessage x1 (#1322 — DM key ownership)
 #
 #   parseDMKeyIDs in handlers_chat_v2.go:
 #     REQUIRED: func definition x1 (#1322 — must exist)
@@ -68,6 +70,18 @@
 #     REQUIRED: SenderID x4 in handleBrokerInbound (B5 — canonical sender identity)
 #     REQUIRED: NewAuthenticatedUser x1 in handleBrokerInbound (B5 — server-derived identity)
 #     REQUIRED: parseDMKeyIDs x1 in handleBrokerInbound (B5 — DM key ownership)
+#
+#   resolveOutboundRouting delegation in handlers_agent_messaging.go:
+#     REQUIRED: handleAgentOutboundMessage must call resolveOutboundRouting x1
+#               (#1497 — routing delegation; guards parseDMKeyIDs,
+#               ValidateLegacyMessage, and ValidateAttributed which now live
+#               in the helper)
+#
+#   DEF-50 validation choke-points (relocated to resolveOutboundRouting):
+#     REQUIRED: ValidateLegacyMessage x1 in resolveOutboundRouting
+#               (unconditional within the helper, after S1-S2 resolution)
+#     REQUIRED: ValidateAttributed x1 in resolveOutboundRouting
+#               (conditional: derive-conversation path only)
 #
 #   COMPOSITE: handleProjectBroadcast in handlers_agent_messaging.go must
 #   contain BOTH authenticatedSender AND authorizeAgentMessage.

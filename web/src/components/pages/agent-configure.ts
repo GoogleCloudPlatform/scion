@@ -144,7 +144,9 @@ export class ScionPageAgentConfigure extends LitElement {
   private async loadGCPServiceAccounts(projectId: string): Promise<void> {
     this.gcpServiceAccounts = [];
     try {
-      const res = await apiFetch(`/api/v1/projects/${projectId}/gcp-service-accounts`);
+      const res = await apiFetch(
+        `/api/v1/projects/${projectId}/gcp-service-accounts?includeHubScoped=true`
+      );
       if (res.ok) {
         const data = (await res.json()) as { items?: GCPServiceAccount[] } | GCPServiceAccount[];
         this.gcpServiceAccounts = Array.isArray(data) ? data : data.items || [];
@@ -1061,7 +1063,12 @@ export class ScionPageAgentConfigure extends LitElement {
                 }}
               >
                 <sl-option value="">Default (inherit from parent)</sl-option>
-                ${(Object.entries(MESSAGE_MODE_DISPLAY) as [MessageMode, typeof MESSAGE_MODE_DISPLAY[MessageMode]][]).map(
+                ${(
+                  Object.entries(MESSAGE_MODE_DISPLAY) as [
+                    MessageMode,
+                    (typeof MESSAGE_MODE_DISPLAY)[MessageMode],
+                  ][]
+                ).map(
                   ([mode, display]) => html`
                     <sl-option value=${mode}>
                       <sl-icon slot="prefix" name=${display.icon}></sl-icon>
@@ -1072,9 +1079,18 @@ export class ScionPageAgentConfigure extends LitElement {
               </sl-select>
               ${this.messageMode === 'none'
                 ? html`<div class="hint" style="color: var(--sl-color-danger-600);">
-                    This agent is configured in sealed mode. It will not be able to send or receive messages.
+                    This agent is configured in sealed mode. It will not be able to send or receive
+                    messages.
                   </div>`
-                : html`<div class="hint">Message authorization scope. Default inherits from the parent agent's mode.</div>`}
+                : this.messageMode === 'hub'
+                  ? html`<div class="hint">
+                      Hub mode enables messaging with permitted agents in other projects on this Hub,
+                      in addition to all agents and users in this project. External reach requires the
+                      Hub cross-project switch to be enabled.
+                    </div>`
+                  : html`<div class="hint">
+                      Message authorization scope. Default inherits from the parent agent's mode.
+                    </div>`}
             </div>
           `
         : this.agent?.messageMode
@@ -1088,7 +1104,8 @@ export class ScionPageAgentConfigure extends LitElement {
                   ></scion-message-mode-badge>
                 </div>
                 <div class="hint">
-                  Message mode is read-only for started agents. Use the agent detail page to change it.
+                  Message mode is read-only for started agents. Use the agent detail page to change
+                  it.
                 </div>
               </div>
             `
@@ -1143,7 +1160,9 @@ export class ScionPageAgentConfigure extends LitElement {
                       ${this.verifiedGCPServiceAccounts.map(
                         (sa) =>
                           html`<sl-option value=${sa.id}>
-                            ${sa.email}${sa.displayName ? ` (${sa.displayName})` : ''}
+                            ${sa.email}${sa.displayName ? ` (${sa.displayName})` : ''}${
+                              sa.scope === 'hub' ? ' (Hub)' : ''
+                            }
                           </sl-option>`
                       )}
                     </sl-select>

@@ -39,9 +39,7 @@ import (
 // maps back to the hub host, the file is copied into the attachment store, and
 // the message it arrived with links to it.
 
-func TestAgentAttachmentHostPath(t *testing.T) {
-	const shared = "/srv/project-configs/demo/shared-dirs/scratchpad"
-
+func TestAgentAttachmentRelPath(t *testing.T) {
 	tests := []struct {
 		name      string
 		agentPath string
@@ -51,13 +49,13 @@ func TestAgentAttachmentHostPath(t *testing.T) {
 		{
 			name:      "staged under the scratchpad mount",
 			agentPath: "/scion-volumes/scratchpad/.attachments/sender/msg1/shot.png",
-			want:      shared + "/.attachments/sender/msg1/shot.png",
+			want:      ".attachments/sender/msg1/shot.png",
 			wantOK:    true,
 		},
 		{
 			name:      "in-workspace mount point",
 			agentPath: "/workspace/.scion-volumes/scratchpad/.attachments/sender/msg1/shot.png",
-			want:      shared + "/.attachments/sender/msg1/shot.png",
+			want:      ".attachments/sender/msg1/shot.png",
 			wantOK:    true,
 		},
 		{
@@ -84,7 +82,7 @@ func TestAgentAttachmentHostPath(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := agentAttachmentHostPath(tc.agentPath, shared)
+			got, ok := agentAttachmentRelPath(tc.agentPath)
 			if ok != tc.wantOK {
 				t.Fatalf("ok = %v, want %v (path %q)", ok, tc.wantOK, got)
 			}
@@ -319,6 +317,43 @@ func TestOutboundMessage_AttachmentsLinkedToMessage(t *testing.T) {
 	if attachments[0].Filename != "shot.png" || attachments[0].MimeType != "image/png" {
 		t.Errorf("unexpected attachment: %+v", attachments[0])
 	}
+}
+
+func TestStripAttachmentMetadata(t *testing.T) {
+	// Verify that after the strip operation, the internal attachments
+	// transport key is removed from metadata while other keys survive.
+	refs := []AttachmentRef{{ID: "a1", Name: "shot.png", MimeType: "image/png", Size: 42}}
+	encoded, ok := attachmentRefsMetadata(refs)
+	if !ok {
+		t.Fatal("expected refs to encode")
+	}
+
+	metadata := map[string]string{
+		attachmentsMetadataKey: encoded,
+		"channel":              "web",
+		"thread_id":            "topic-123",
+	}
+
+	// Simulate the strip that happens at each consume site.
+	delete(metadata, attachmentsMetadataKey)
+
+	if _, present := metadata[attachmentsMetadataKey]; present {
+		t.Error("attachments metadata key should have been stripped after consume")
+	}
+	if metadata["channel"] != "web" {
+		t.Error("other metadata keys should be preserved")
+	}
+	if metadata["thread_id"] != "topic-123" {
+		t.Error("other metadata keys should be preserved")
+	}
+}
+
+func TestStripAttachmentMetadata_NilSafe(t *testing.T) {
+	// Deleting from a nil map must not panic — the same delete() call
+	// executes even when no attachments were set.
+	var metadata map[string]string
+	// This should not panic.
+	delete(metadata, attachmentsMetadataKey)
 }
 
 func TestParseAttachmentRefs(t *testing.T) {

@@ -39,6 +39,10 @@ func (m *mockAgentManager) Provision(ctx context.Context, opts api.StartOptions)
 	return nil, nil
 }
 
+func (m *mockAgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	return nil, nil
+}
+
 func (m *mockAgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
 	return nil, nil
 }
@@ -48,6 +52,10 @@ func (m *mockAgentManager) Stop(ctx context.Context, name string, projectPath st
 }
 
 func (m *mockAgentManager) Delete(ctx context.Context, name string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+	return true, nil
+}
+
+func (m *mockAgentManager) DeleteTarget(ctx context.Context, agentName, containerID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	return true, nil
 }
 
@@ -235,7 +243,7 @@ func TestWorkspaceUploadAgentNotFound(t *testing.T) {
 
 	body := WorkspaceUploadRequest{
 		Slug:        "nonexistent-agent",
-		StoragePath: "workspaces/grove/agent",
+		StoragePath: "workspaces/project/agent",
 	}
 	bodyBytes, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/workspace/upload", bytes.NewReader(bodyBytes))
@@ -259,7 +267,7 @@ func TestWorkspaceApplyAgentNotFound(t *testing.T) {
 
 	body := WorkspaceApplyRequest{
 		Slug:        "nonexistent-agent",
-		StoragePath: "workspaces/grove/agent",
+		StoragePath: "workspaces/project/agent",
 	}
 	bodyBytes, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/workspace/apply", bytes.NewReader(bodyBytes))
@@ -589,7 +597,7 @@ func TestApplyFilePermissions_MissingFile(t *testing.T) {
 func TestWorkspaceUploadRequest_JSONSerialization(t *testing.T) {
 	req := WorkspaceUploadRequest{
 		Slug:            "agent-123",
-		StoragePath:     "workspaces/grove-1/agent-123",
+		StoragePath:     "workspaces/project-1/agent-123",
 		Bucket:          "my-bucket",
 		ExcludePatterns: []string{".git/**", "node_modules/**"},
 	}
@@ -607,8 +615,8 @@ func TestWorkspaceUploadRequest_JSONSerialization(t *testing.T) {
 	if parsed.Slug != "agent-123" {
 		t.Errorf("agent ID = %q, want %q", parsed.Slug, "agent-123")
 	}
-	if parsed.StoragePath != "workspaces/grove-1/agent-123" {
-		t.Errorf("storage path = %q, want %q", parsed.StoragePath, "workspaces/grove-1/agent-123")
+	if parsed.StoragePath != "workspaces/project-1/agent-123" {
+		t.Errorf("storage path = %q, want %q", parsed.StoragePath, "workspaces/project-1/agent-123")
 	}
 	if parsed.Bucket != "my-bucket" {
 		t.Errorf("bucket = %q, want %q", parsed.Bucket, "my-bucket")
@@ -658,7 +666,7 @@ func TestWorkspaceUploadResponse_JSONSerialization(t *testing.T) {
 func TestWorkspaceApplyRequest_JSONSerialization(t *testing.T) {
 	req := WorkspaceApplyRequest{
 		Slug:        "agent-456",
-		StoragePath: "workspaces/grove-2/agent-456",
+		StoragePath: "workspaces/project-2/agent-456",
 		Bucket:      "other-bucket",
 		Manifest: &transfer.Manifest{
 			Version: "1.0",
@@ -764,7 +772,7 @@ func TestWorkspaceUpload_WithBucketInRequest(t *testing.T) {
 	// Bucket provided in request
 	body := WorkspaceUploadRequest{
 		Slug:        "test-agent",
-		StoragePath: "workspaces/grove/agent",
+		StoragePath: "workspaces/project/agent",
 		Bucket:      "request-bucket",
 	}
 	bodyBytes, _ := json.Marshal(body)
@@ -797,7 +805,7 @@ func TestWorkspaceApply_WithBucketInRequest(t *testing.T) {
 	// Bucket provided in request
 	body := WorkspaceApplyRequest{
 		Slug:        "test-agent",
-		StoragePath: "workspaces/grove/agent",
+		StoragePath: "workspaces/project/agent",
 		Bucket:      "request-bucket",
 	}
 	bodyBytes, _ := json.Marshal(body)
@@ -896,7 +904,7 @@ func TestProjectWorkspaceUpload_MissingProjectID(t *testing.T) {
 	srv := New(cfg, mgr, rt)
 
 	body := ProjectWorkspaceUploadRequest{
-		StoragePath:   "workspaces/test/grove-workspace",
+		StoragePath:   "workspaces/test/project-workspace",
 		WorkspacePath: "/tmp/test",
 	}
 
@@ -914,7 +922,7 @@ func TestProjectWorkspaceUpload_MissingStoragePath(t *testing.T) {
 	srv := New(cfg, mgr, rt)
 
 	body := ProjectWorkspaceUploadRequest{
-		ProjectID:     "grove-123",
+		ProjectID:     "project-123",
 		WorkspacePath: "/tmp/test",
 	}
 
@@ -932,8 +940,8 @@ func TestProjectWorkspaceUpload_MissingWorkspacePath(t *testing.T) {
 	srv := New(cfg, mgr, rt)
 
 	body := ProjectWorkspaceUploadRequest{
-		ProjectID:   "grove-123",
-		StoragePath: "workspaces/test/grove-workspace",
+		ProjectID:   "project-123",
+		StoragePath: "workspaces/test/project-workspace",
 	}
 
 	rec := doProjectUploadRequest(t, srv, body)
@@ -950,8 +958,8 @@ func TestProjectWorkspaceUpload_NoBucket(t *testing.T) {
 	srv := New(cfg, mgr, rt)
 
 	body := ProjectWorkspaceUploadRequest{
-		ProjectID:     "grove-123",
-		StoragePath:   "workspaces/test/grove-workspace",
+		ProjectID:     "project-123",
+		StoragePath:   "workspaces/test/project-workspace",
 		WorkspacePath: "/tmp/test",
 	}
 
@@ -970,8 +978,8 @@ func TestProjectWorkspaceUpload_NonExistentPath(t *testing.T) {
 	srv := New(cfg, mgr, rt)
 
 	body := ProjectWorkspaceUploadRequest{
-		ProjectID:     "grove-123",
-		StoragePath:   "workspaces/test/grove-workspace",
+		ProjectID:     "project-123",
+		StoragePath:   "workspaces/test/project-workspace",
 		WorkspacePath: "/nonexistent/path/12345",
 	}
 
@@ -988,12 +996,31 @@ func TestProjectWorkspaceUpload_MethodNotAllowed(t *testing.T) {
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(cfg, mgr, rt)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/grove-upload", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/project-upload", nil)
 	rec := httptest.NewRecorder()
 	srv.handleProjectWorkspaceUpload(rec, req)
 
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("expected 405, got %d", rec.Code)
+	}
+}
+
+// TestProjectWorkspaceUpload_LegacyRouteRemoved verifies that the retired
+// /api/v1/workspace/grove-upload route no longer resolves. Callers must use
+// /api/v1/workspace/project-upload instead.
+func TestProjectWorkspaceUpload_LegacyRouteRemoved(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	mgr := &mockAgentManager{}
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	srv := New(cfg, mgr, rt)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/workspace/grove-upload", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for removed route, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -1004,7 +1031,7 @@ func doProjectUploadRequest(t *testing.T, srv *Server, body ProjectWorkspaceUplo
 		t.Fatalf("failed to marshal body: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/workspace/grove-upload", bytes.NewReader(bodyBytes))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/workspace/project-upload", bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	srv.handleProjectWorkspaceUpload(rec, req)

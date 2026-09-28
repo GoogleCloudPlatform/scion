@@ -16,12 +16,14 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
@@ -49,13 +51,18 @@ const (
 // from the attachment store but leaves the staged copy in the shared dir, the
 // same way Discord downloads persist.
 type attachmentStaging struct {
-	hostDir  string // host-side directory holding staged copies
-	agentDir string // container-visible directory for the same files
+	sharedDir string // host path of the shared dir, opened as a root per operation
+	relDir    string // staging directory, relative to sharedDir
+	agentDir  string // container-visible directory for the same files
 }
 
 // newAttachmentStaging builds a staging target from the host path of the
 // project's shared dir. inWorkspace mirrors api.SharedDir.InWorkspace, which
 // moves the container mount point under the agent workspace.
+//
+// The shared dir is kept as a base path rather than pre-joined with the
+// staging subdirectory, because staging resolves it through an os.Root and
+// needs the boundary and the path below it as separate values.
 func newAttachmentStaging(sharedDirHostPath string, inWorkspace bool) *attachmentStaging {
 	if sharedDirHostPath == "" {
 		return nil
@@ -69,14 +76,26 @@ func newAttachmentStaging(sharedDirHostPath string, inWorkspace bool) *attachmen
 		agentBase = "/workspace/.scion-volumes/" + attachmentSharedDirName
 	}
 	return &attachmentStaging{
-		hostDir:  filepath.Join(sharedDirHostPath, ".attachments", attachmentStagingSubdir),
-		agentDir: path.Join(agentBase, ".attachments", attachmentStagingSubdir),
+		sharedDir: sharedDirHostPath,
+		relDir:    path.Join(".attachments", attachmentStagingSubdir),
+		agentDir:  path.Join(agentBase, ".attachments", attachmentStagingSubdir),
 	}
 }
 
 // stage copies the file at srcPath into the staging directory and returns the
 // container-visible path of the copy. Staging is keyed by attachment ID, so a
 // file already staged (re-dispatch, fan-out to several agents) is reused.
+//
+// The destination is resolved through an os.Root anchored on the shared dir.
+// Agents mount that dir read-write, so every component below it is content the
+// hub does not control: ".attachments" or the per-id directory can be replaced
+// with a link, and a path-based MkdirAll would follow it and write the copy
+// wherever it pointed. O_EXCL already covered the final component, but only
+// that one. The root covers every component, and the id and name checks above
+// keep this to a single directory level either way.
+//
+// srcPath is not resolved through the root: it is the hub's own attachment
+// store, which is not reachable from a container.
 func (a *attachmentStaging) stage(srcPath, id, filename string) (string, error) {
 	if err := validStagingComponent(id); err != nil {
 		return "", fmt.Errorf("attachment id: %w", err)
@@ -86,15 +105,21 @@ func (a *attachmentStaging) stage(srcPath, id, filename string) (string, error) 
 		return "", fmt.Errorf("attachment name: %w", err)
 	}
 
-	destDir := filepath.Join(a.hostDir, id)
-	if err := os.MkdirAll(destDir, 0o755); err != nil {
+	root, err := openConfinedBase(a.sharedDir, false)
+	if err != nil {
+		return "", fmt.Errorf("open shared dir: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+
+	destDir := path.Join(a.relDir, id)
+	if err := root.MkdirAll(destDir, 0o755); err != nil {
 		return "", fmt.Errorf("create staging dir: %w", err)
 	}
-	destPath := filepath.Join(destDir, name)
+	destPath := path.Join(destDir, name)
 
-	// O_EXCL both prevents following a symlink planted at destPath and tells us
-	// the attachment was already staged.
-	dst, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o644)
+	// O_EXCL both refuses a symlink planted at destPath and tells us the
+	// attachment was already staged.
+	dst, err := root.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o644)
 	if err != nil {
 		if os.IsExist(err) {
 			return path.Join(a.agentDir, id, name), nil
@@ -105,7 +130,7 @@ func (a *attachmentStaging) stage(srcPath, id, filename string) (string, error) 
 
 	src, err := os.Open(srcPath)
 	if err != nil {
-		_ = os.Remove(destPath)
+		_ = root.Remove(destPath)
 		return "", fmt.Errorf("open attachment: %w", err)
 	}
 	defer func() { _ = src.Close() }()
@@ -113,7 +138,7 @@ func (a *attachmentStaging) stage(srcPath, id, filename string) (string, error) 
 	// No LimitReader: the size ceiling is enforced at upload time, and capping
 	// the copy here would silently truncate an already-accepted attachment.
 	if _, err := io.Copy(dst, src); err != nil {
-		_ = os.Remove(destPath)
+		_ = root.Remove(destPath)
 		return "", fmt.Errorf("copy attachment: %w", err)
 	}
 
@@ -144,10 +169,26 @@ func (s *Server) resolveAttachmentStaging(ctx context.Context, projectID string)
 	return newAttachmentStaging(hostPath, inWorkspace)
 }
 
+// nfsAttachmentSkipLogged and nfsAttachmentResolveErrorLogged each dedup
+// their own log line in sharedDirHostPath below, once per project: the
+// function can run once per message dispatch, and logging every call would
+// spam the hub log for an actively-used NFS-backed project. They are kept
+// separate rather than sharing one map so that an NFS resolution error
+// still gets its own Warn even after the project's Info line ("chat
+// attachments are not staged") has already fired once.
+var (
+	nfsAttachmentSkipLogged         sync.Map // key: project ID, value: struct{} (Info: NFS-backed, not staged)
+	nfsAttachmentResolveErrorLogged sync.Map // key: project ID, value: struct{} (Warn: NFS resolution failed)
+)
+
 // sharedDirHostPath resolves the host-side directory backing one of a project's
 // shared dirs, along with the shared dir's in-workspace flag. It returns an
-// empty path when the project does not declare the shared dir or no directory
-// backing it exists on this machine.
+// empty path when the project does not declare the shared dir, when the
+// project's shared_dir_storage backend is NFS (see below), or when no
+// directory backing the shared dir exists on this machine.
+//
+// NFS-backed shared dirs: attachments unavailable in this release; no
+// fallback.
 func (s *Server) sharedDirHostPath(ctx context.Context, projectID, name string) (string, bool) {
 	if projectID == "" {
 		return "", false
@@ -167,17 +208,37 @@ func (s *Server) sharedDirHostPath(ctx context.Context, projectID, name string) 
 		}
 	}
 	if !found {
+		s.projectsLogger().DebugContext(ctx, "sharedDirHostPath: project has no shared dir entry",
+			"project_id", projectID, "name", name)
 		return "", false
 	}
 
 	// Preferred: the hub's own resolution, which follows the project's .scion
 	// marker or a co-located broker's local path.
 	var candidates []string
-	if res, err := s.resolveSharedDirPath(ctx, project, name); err == nil && res != nil && res.Path != "" {
+	res, resErr := s.resolveSharedDirPath(ctx, project, name)
+	if resErr != nil {
+		var nfsErr *sharedDirStorageResolveError
+		if errors.As(resErr, &nfsErr) {
+			if _, alreadyLogged := nfsAttachmentResolveErrorLogged.LoadOrStore(projectID, struct{}{}); !alreadyLogged {
+				s.projectsLogger().WarnContext(ctx, "sharedDirHostPath: NFS-configured shared dir resolution failed; refusing to fall back to a local directory",
+					"project_id", projectID, "name", name, "error", resErr)
+			}
+			return "", false
+		}
+	} else if res != nil && res.Path != "" {
+		if res.Backend == "nfs" {
+			if _, alreadyLogged := nfsAttachmentSkipLogged.LoadOrStore(projectID, struct{}{}); !alreadyLogged {
+				s.projectsLogger().InfoContext(ctx, "sharedDirHostPath: chat attachments are not staged into NFS-backed shared dirs",
+					"project_id", projectID, "name", name)
+			}
+			return "", false
+		}
 		candidates = append(candidates, res.Path)
 	}
 	// Fallback: the conventional project-configs layout, the same computation
-	// the Discord and Telegram brokers use to stage their downloads.
+	// the Discord and Telegram brokers use to stage their downloads. Never
+	// reached for an NFS-backed shared dir -- see the doc comment above.
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		candidates = append(candidates,
 			config.SharedDirHostPath(home, project.Slug, project.ID, name))
@@ -188,5 +249,7 @@ func (s *Server) sharedDirHostPath(ctx context.Context, projectID, name string) 
 			return c, inWorkspace
 		}
 	}
+	s.projectsLogger().DebugContext(ctx, "sharedDirHostPath: no candidate directory exists on disk",
+		"project_id", projectID, "name", name, "candidates", candidates)
 	return "", false
 }

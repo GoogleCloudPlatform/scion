@@ -271,9 +271,15 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"hub.audit.read": "Super-admin audit explain, NonRouteUse only",
 
 		// User/project permissions — NonRouteUse only
-		"user.list":     "NonRouteUse only, no route declaration",
-		"project.clone": "NonRouteUse only, no route declaration",
-		"project.list":  "NonRouteUse only, no route declaration",
+		"user.list":                    "NonRouteUse only, no route declaration",
+		"project.clone":                "NonRouteUse only, no route declaration",
+		"project.list":                 "NonRouteUse only, no route declaration",
+		"project.set_messaging_policy": "Inline admin/owner check in project_messaging_policy.go, not route-enforced",
+		"agent.grant_hub_mode":         "Inline authorization in authorize_message_mode_grant.go, not route-enforced",
+		"agent.lifecycle":              "Inline authorization in authorizeAgentLifecycle/handleAgentAction (start, stop, suspend, restart, restore) and authorizeAgentReincarnate (reincarnate), not route-enforced",
+
+		// Global catalog permissions — handler-enforced, not a standalone route.
+		"skill.create_global": "Handler-enforced via globalWriteAction in skill_handlers.go; catalog operation deferred to Phase 2 (ptone/scion#1713)",
 
 		// Agent token scopes — not route-enforced
 		"agent.status_update":  "Agent token scope, not route-enforced",

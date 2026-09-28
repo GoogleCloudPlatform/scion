@@ -17,18 +17,24 @@ package runtimebroker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // mockManager implements agent.Manager for testing
@@ -38,20 +44,39 @@ type mockManager struct {
 	stopCalls             int
 	deleteCalls           int
 	startErr              error
+	provisionErr          error
 	stopErr               error
+	listErr               error
 	lastStartOpts         api.StartOptions
 	lastDeleteProjectPath string
 	lastDeleteAgentID     string
+	lastDeleteContainerID string
+	lastDeleteFiles       bool
 	lastStopAgentID       string
+	// lastStartCtx captures the context passed to Start, so tests can assert
+	// on what was attached to it (e.g. a skill resolver, #1960) without a
+	// real container runtime or ProvisionAgent call.
+	lastStartCtx context.Context
+	// lastListFilter captures the filter map passed to List, so tests can
+	// assert on which keys the handler builds from query parameters.
+	lastListFilter map[string]string
 }
 
 func (m *mockManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	if m.provisionErr != nil {
+		return nil, m.provisionErr
+	}
+	return &api.ScionConfig{}, nil
+}
+
+func (m *mockManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
 	return &api.ScionConfig{}, nil
 }
 
 func (m *mockManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
 	m.startCalls++
 	m.lastStartOpts = opts
+	m.lastStartCtx = ctx
 	if m.startErr != nil {
 		return nil, m.startErr
 	}
@@ -77,7 +102,20 @@ func (m *mockManager) Delete(ctx context.Context, agentID string, deleteFiles bo
 	return true, nil
 }
 
+func (m *mockManager) DeleteTarget(ctx context.Context, agentName, containerID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+	m.lastDeleteProjectPath = projectPath
+	m.lastDeleteAgentID = agentName
+	m.lastDeleteContainerID = containerID
+	m.lastDeleteFiles = deleteFiles
+	m.deleteCalls++
+	return true, nil
+}
+
 func (m *mockManager) List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+	m.lastListFilter = filter
+	if m.listErr != nil {
+		return nil, m.listErr
+	}
 	return m.agents, nil
 }
 
@@ -95,7 +133,11 @@ func (m *mockManager) Watch(ctx context.Context, agentID string) (<-chan api.Sta
 
 func (m *mockManager) Close() {}
 
-func newTestServer(t *testing.T) *Server {
+// setupTestScionEnv isolates the test from the repo's own .scion directory by
+// switching to a temp CWD with its own settings/templates/harness-configs, so
+// buildStartContext (used by start/restart) can resolve a harness config
+// without touching real project state.
+func setupTestScionEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
 
@@ -154,11 +196,30 @@ runtimes:
 			t.Fatal(err)
 		}
 	}
+}
+
+// newTestServerWithManager wires up a Server with the given agent.Manager
+// (e.g. a *filteringMockManager for tests that need List to honor the filter
+// map) plus the same isolated .scion environment newTestServer uses, so
+// restart's buildStartContext path resolves cleanly.
+func newTestServerWithManager(t *testing.T, mgr agent.Manager) *Server {
+	t.Helper()
+	setupTestScionEnv(t)
 
 	cfg := DefaultServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.ForceRuntime = "mock"
+
+	// NameFunc returns "mock" to match ForceRuntime so resolveManagerForOpts
+	// returns the mock manager directly instead of creating a real one.
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "mock" }}
+
+	return New(cfg, mgr, rt)
+}
+
+func newTestServer(t *testing.T) *Server {
+	t.Helper()
 
 	mgr := &mockManager{
 		agents: []api.AgentInfo{
@@ -177,11 +238,7 @@ runtimes:
 		},
 	}
 
-	// NameFunc returns "mock" to match ForceRuntime so resolveManagerForOpts
-	// returns the mock manager directly instead of creating a real one.
-	rt := &runtime.MockRuntime{NameFunc: func() string { return "mock" }}
-
-	return New(cfg, mgr, rt)
+	return newTestServerWithManager(t, mgr)
 }
 
 func TestHealthz(t *testing.T) {
@@ -268,6 +325,32 @@ func TestListAgents(t *testing.T) {
 
 	if resp.TotalCount != 2 {
 		t.Errorf("expected totalCount 2, got %d", resp.TotalCount)
+	}
+}
+
+// TestListAgents_GroveIDQueryParamNotHonoured verifies that a groveId-only
+// query no longer scopes the agent list: the filter built for the manager
+// must carry no scion.project_id key, so the list falls back to unscoped
+// (matching every agent) rather than silently re-honouring the legacy alias.
+func TestListAgents_GroveIDQueryParamNotHonoured(t *testing.T) {
+	mgr := &mockManager{
+		agents: []api.AgentInfo{
+			{ID: "container-1", Name: "test-agent-1", Phase: "running"},
+		},
+	}
+	srv := newTestServerWithManager(t, mgr)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents?groveId=p1", nil)
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	if v, ok := mgr.lastListFilter["scion.project_id"]; ok {
+		t.Errorf("groveId-only query must not scope the list filter, got scion.project_id=%q", v)
 	}
 }
 
@@ -433,6 +516,114 @@ func TestCreateAgentMissingName(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
+	}
+}
+
+// TestCreateAgentRejectsMultiSegmentName is the regression anchor for the
+// isSingleCleanPathElement check added to createAgent. req.Name is joined
+// onto a directory as a single path segment all the way down to
+// GetAgentDir, so a name that isn't exactly one clean segment must be
+// rejected here rather than reaching that join. GetAgentDir/GetAgent (in
+// pkg/agent) enforce the same constraint independently before their own
+// stale-directory removal branch; this covers the same shape earlier, at
+// the request boundary, for every name this check can see regardless of
+// what a caller intended.
+//
+// "a\\b" covers backslash specifically: isSingleCleanPathElement must
+// reject it on every platform, not only when os.PathSeparator is '\' (i.e.
+// on Windows). '\' is a path separator on Windows and a general
+// path-injection vector everywhere else, so it must be rejected regardless
+// of GOOS.
+func TestCreateAgentRejectsMultiSegmentName(t *testing.T) {
+	srv := newTestServer(t)
+
+	for _, name := range []string{"../sibling", "a/../..", "..", ".", "a/b", "/etc", `a\b`, "a\x00b"} {
+		t.Run(name, func(t *testing.T) {
+			body, err := json.Marshal(CreateAgentRequest{Name: name})
+			if err != nil {
+				t.Fatalf("marshal request: %v", err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(string(body)))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			srv.Handler().ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("name %q: expected status %d, got %d: %s", name, http.StatusBadRequest, w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+// TestCreateAgentFullStart_HarnessConfigNotFound proves the fix for
+// ptone/scion#1316 fault 3: when Start fails because a configured
+// harness-config name does not resolve anywhere the broker looked, the
+// broker must report a 404 naming the resource instead of the blanket 502
+// every other provisioning failure gets.
+func TestCreateAgentFullStart_HarnessConfigNotFound(t *testing.T) {
+	srv := newTestServer(t)
+	mgr := srv.manager.(*mockManager)
+	mgr.startErr = fmt.Errorf("failed to find harness-config %q: %w", "antigravity", config.ErrHarnessConfigNotFound)
+
+	body := `{"name": "new-agent", "config": {"template": "claude", "harness": "antigravity"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusNotFound, w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "antigravity") {
+		t.Errorf("expected response to name the unresolved resource, got: %s", w.Body.String())
+	}
+}
+
+// TestCreateAgentFullStart_OtherErrorStaysRuntimeError proves that a
+// provisioning failure unrelated to naming (e.g. a runtime/infra failure)
+// still gets the generic 502-mapped RuntimeError, not a 404 — the
+// classification in dispatchCreateErrorResponse and its broker-side
+// counterpart must be narrow.
+func TestCreateAgentFullStart_OtherErrorStaysRuntimeError(t *testing.T) {
+	srv := newTestServer(t)
+	mgr := srv.manager.(*mockManager)
+	mgr.startErr = fmt.Errorf("docker daemon unreachable")
+
+	body := `{"name": "new-agent", "config": {"template": "claude"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusInternalServerError, w.Code, w.Body.String())
+	}
+}
+
+// TestCreateAgentProvisionOnly_TemplateNotFound is the ProvisionOnly-path
+// counterpart of TestCreateAgentFullStart_HarnessConfigNotFound, covering the
+// other named resource (template) and the other dispatch branch (Provision).
+func TestCreateAgentProvisionOnly_TemplateNotFound(t *testing.T) {
+	srv := newTestServer(t)
+	mgr := srv.manager.(*mockManager)
+	mgr.provisionErr = fmt.Errorf("failed to load template: %w",
+		fmt.Errorf("template %s not found: %w", "missing-template", config.ErrTemplateNotFound))
+
+	body := `{"name": "new-agent", "provisionOnly": true, "config": {"template": "missing-template"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusNotFound, w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "missing-template") {
+		t.Errorf("expected response to name the unresolved resource, got: %s", w.Body.String())
 	}
 }
 
@@ -720,8 +911,8 @@ runtimes:
 	mgr := &mockManager{
 		agents: []api.AgentInfo{
 			{
-				ID:          "mygrove--foo", // project-prefixed container name
-				ContainerID: "mygrove--foo",
+				ID:          "myproject--foo", // project-prefixed container name
+				ContainerID: "myproject--foo",
 				Name:        "foo",
 				Slug:        "",
 				Phase:       "running",
@@ -743,8 +934,8 @@ runtimes:
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d; body: %s", http.StatusOK, w.Code, w.Body.String())
 	}
-	if receivedID != "mygrove--foo" {
-		t.Fatalf("expected GetLogs to receive container ID %q, got %q", "mygrove--foo", receivedID)
+	if receivedID != "myproject--foo" {
+		t.Fatalf("expected GetLogs to receive container ID %q, got %q", "myproject--foo", receivedID)
 	}
 	if body := w.Body.String(); body != "container log output" {
 		t.Fatalf("expected body %q, got %q", "container log output", body)
@@ -790,7 +981,7 @@ func TestCreateAgentWithHubCredentials(t *testing.T) {
 	body := `{
 		"name": "test-agent",
 		"id": "agent-uuid-123",
-		"groveId": "grove-uuid-456",
+		"projectId": "project-uuid-456",
 		"hubEndpoint": "https://hub.example.com",
 		"agentToken": "secret-token-xyz",
 		"config": {"template": "claude"}
@@ -830,9 +1021,12 @@ func TestCreateAgentWithHubCredentials(t *testing.T) {
 		t.Errorf("expected SCION_AGENT_ID='agent-uuid-123', got %q", got)
 	}
 
-	// Check SCION_GROVE_ID
-	if got := mgr.lastEnv["SCION_GROVE_ID"]; got != "grove-uuid-456" {
-		t.Errorf("expected SCION_GROVE_ID='grove-uuid-456', got %q", got)
+	// Check SCION_PROJECT_ID
+	if got := mgr.lastEnv["SCION_PROJECT_ID"]; got != "project-uuid-456" {
+		t.Errorf("expected SCION_PROJECT_ID='project-uuid-456', got %q", got)
+	}
+	if _, ok := mgr.lastEnv["SCION_GROVE_ID"]; ok {
+		t.Errorf("expected SCION_GROVE_ID to be absent, got %q", mgr.lastEnv["SCION_GROVE_ID"])
 	}
 }
 
@@ -977,17 +1171,39 @@ func TestCreateAgentWithoutHubCredentials(t *testing.T) {
 	}
 }
 
-// provisionCapturingManager tracks whether Provision vs Start was called.
+// provisionCapturingManager tracks whether Provision, Reprovision or Start
+// was called. Provision and Reprovision use DISTINCT flags (design §3.4
+// Amendment A2.5): the whole fail-closed design rests on the broker calling
+// exactly one of them per the request's Reprovision flag, and a shared flag
+// cannot catch a regression where handleCreateAgent's branch is inverted or
+// deleted.
 type provisionCapturingManager struct {
 	mockManager
-	provisionCalled bool
-	startCalled     bool
-	lastOpts        api.StartOptions
+	provisionCalled   bool
+	reprovisionCalled bool
+	startCalled       bool
+	lastOpts          api.StartOptions
+	reprovisionErr    error
+	// lastProvisionCtx captures the context passed to Provision (#1960).
+	lastProvisionCtx context.Context
+	// lastReprovisionCtx captures the context passed to Reprovision.
+	lastReprovisionCtx context.Context
 }
 
 func (m *provisionCapturingManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
 	m.provisionCalled = true
 	m.lastOpts = opts
+	m.lastProvisionCtx = ctx
+	return &api.ScionConfig{Harness: "claude", HarnessConfig: "claude"}, nil
+}
+
+func (m *provisionCapturingManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	m.reprovisionCalled = true
+	m.lastReprovisionCtx = ctx
+	m.lastOpts = opts
+	if m.reprovisionErr != nil {
+		return nil, m.reprovisionErr
+	}
 	return &api.ScionConfig{Harness: "claude", HarnessConfig: "claude"}, nil
 }
 
@@ -1062,6 +1278,392 @@ func TestCreateAgentProvisionOnly(t *testing.T) {
 	}
 	if resp.Agent.Slug != "provisioned-agent" {
 		t.Errorf("expected slug 'provisioned-agent', got '%s'", resp.Agent.Slug)
+	}
+}
+
+// TestCreateAgentProvisionOnly_Reprovision_CallsReprovisionNotProvision is
+// the design §3.4 Amendment A2.5 regression test: a
+// provisionOnly+reprovision request must call Manager.Reprovision, never
+// Manager.Provision, and the response must echo reprovisioned:true — the
+// echo the hub's whole fail-closed dispatch design rests on
+// (design §3.4 Amendment A2.2(a)).
+func TestCreateAgentProvisionOnly_Reprovision_CallsReprovisionNotProvision(t *testing.T) {
+	srv, mgr := newTestServerWithProvisionCapture()
+
+	body := `{
+		"name": "reprovisioned-agent",
+		"id": "agent-uuid-reprov",
+		"slug": "reprovisioned-agent",
+		"provisionOnly": true,
+		"reprovision": true,
+		"config": {"template": "claude"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, w.Code, w.Body.String())
+	}
+	if !mgr.reprovisionCalled {
+		t.Error("expected Reprovision to be called")
+	}
+	if mgr.provisionCalled {
+		t.Error("expected Provision NOT to be called when reprovision=true")
+	}
+	if mgr.startCalled {
+		t.Error("expected Start NOT to be called for provision-only")
+	}
+
+	var resp CreateAgentResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !resp.Reprovisioned {
+		t.Error("expected Reprovisioned=true in the response")
+	}
+}
+
+// TestCreateAgentProvisionOnly_SetsFreshProvision proves a plain
+// provisionOnly create (no reprovision) sets opts.FreshProvision, so
+// Manager.Provision -> GetAgent clears a leftover populated workspace from a
+// same-named agent, extending GoogleCloudPlatform/scion#1931's create-only
+// wipe gate to the ProvisionOnly path.
+func TestCreateAgentProvisionOnly_SetsFreshProvision(t *testing.T) {
+	srv, mgr := newTestServerWithProvisionCapture()
+
+	body := `{
+		"name": "provisioned-agent",
+		"id": "agent-uuid-456",
+		"slug": "provisioned-agent",
+		"provisionOnly": true,
+		"config": {"template": "claude"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, w.Code, w.Body.String())
+	}
+	if !mgr.lastOpts.FreshProvision {
+		t.Error("expected opts.FreshProvision to be true for a plain provisionOnly create")
+	}
+}
+
+// TestCreateAgentProvisionOnly_Reprovision_NeverSetsFreshProvision proves a
+// reprovision (reincarnation) create never sets opts.FreshProvision, even
+// though it is still an opCreate dispatch: reincarnation targets an existing
+// agent's workspace, and FreshProvision would let GetAgent wipe it.
+func TestCreateAgentProvisionOnly_Reprovision_NeverSetsFreshProvision(t *testing.T) {
+	srv, mgr := newTestServerWithProvisionCapture()
+
+	body := `{
+		"name": "reprovisioned-agent",
+		"id": "agent-uuid-reprov",
+		"slug": "reprovisioned-agent",
+		"provisionOnly": true,
+		"reprovision": true,
+		"config": {"template": "claude"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, w.Code, w.Body.String())
+	}
+	if mgr.lastOpts.FreshProvision {
+		t.Error("expected opts.FreshProvision to be false for a reprovision create")
+	}
+}
+
+// TestCreateAgentProvisionOnly_PlainProvision_DoesNotEchoReprovisioned is the
+// reverse of the above: a plain provisionOnly request (no reprovision) must
+// call Manager.Provision, never Manager.Reprovision, and must NOT echo
+// reprovisioned:true — a broker that always echoed true regardless of which
+// branch ran would defeat the hub's mandatory-echo fail-closed check.
+func TestCreateAgentProvisionOnly_PlainProvision_DoesNotEchoReprovisioned(t *testing.T) {
+	srv, mgr := newTestServerWithProvisionCapture()
+
+	body := `{
+		"name": "plain-provisioned-agent",
+		"id": "agent-uuid-plain",
+		"slug": "plain-provisioned-agent",
+		"provisionOnly": true,
+		"config": {"template": "claude"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, w.Code, w.Body.String())
+	}
+	if !mgr.provisionCalled {
+		t.Error("expected Provision to be called")
+	}
+	if mgr.reprovisionCalled {
+		t.Error("expected Reprovision NOT to be called when reprovision is unset")
+	}
+
+	var resp CreateAgentResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if resp.Reprovisioned {
+		t.Error("expected Reprovisioned to be false/absent for a plain provision")
+	}
+}
+
+// TestCreateAgentProvisionOnly_ReprovisionError_ReturnsErrorNoEcho covers a
+// plain (unwrapped, not agent.ErrReprovisionRefused) Reprovision failure: the
+// handler must return the generic 500 — not the 409 the sentinel-wrapped
+// path gets — and must not echo reprovisioned:true for a request that never
+// actually succeeded. A neutral error message (no "reprovision refused"
+// substring) keeps this test from being satisfied by accident if the 409
+// path's body text ever changed to also contain "error".
+func TestCreateAgentProvisionOnly_ReprovisionError_ReturnsErrorNoEcho(t *testing.T) {
+	srv, mgr := newTestServerWithProvisionCapture()
+	mgr.reprovisionErr = errors.New("boom: transient broker failure")
+
+	body := `{
+		"name": "reprovision-fail-agent",
+		"id": "agent-uuid-reprov-fail",
+		"slug": "reprovision-fail-agent",
+		"provisionOnly": true,
+		"reprovision": true,
+		"config": {"template": "claude"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 for a plain (non-refusal) Reprovision error, got %d: %s", w.Code, w.Body.String())
+	}
+	if !mgr.reprovisionCalled {
+		t.Error("expected Reprovision to have been attempted")
+	}
+	if !strings.Contains(w.Body.String(), "boom: transient broker failure") {
+		t.Errorf("expected the error body to surface the Reprovision error, got: %s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), `"reprovisioned":true`) {
+		t.Errorf("a failed Reprovision must never echo reprovisioned:true, got: %s", w.Body.String())
+	}
+}
+
+// TestCreateAgentProvisionOnly_ReprovisionRefused_Returns409 covers design
+// §3.4 Amendment A4.2: a Reprovision failure that wraps agent.ErrReprovisionRefused
+// (workspace preconditions, running-container check) must surface as 409
+// Conflict specifically, not a generic 500 — so the reincarnate worker's
+// failure message and any future caller-side retry logic can tell "refused
+// to run" apart from an actual provisioning error.
+func TestCreateAgentProvisionOnly_ReprovisionRefused_Returns409(t *testing.T) {
+	srv, mgr := newTestServerWithProvisionCapture()
+	mgr.reprovisionErr = fmt.Errorf("%w: agent %q container is still running; stop it first", agent.ErrReprovisionRefused, "reprovision-409-agent")
+
+	body := `{
+		"name": "reprovision-409-agent",
+		"id": "agent-uuid-reprov-409",
+		"slug": "reprovision-409-agent",
+		"provisionOnly": true,
+		"reprovision": true,
+		"config": {"template": "claude"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 Conflict for a refused reprovision, got %d: %s", w.Code, w.Body.String())
+	}
+	if !mgr.reprovisionCalled {
+		t.Error("expected Reprovision to have been attempted")
+	}
+	if !strings.Contains(w.Body.String(), "reprovision refused") {
+		t.Errorf("expected the error body to surface the refusal reason, got: %s", w.Body.String())
+	}
+}
+
+// snapshotFileTimes walks dir and records the ModTime of every regular file
+// found under it, keyed by path relative to dir. Used to prove that NO
+// write happened anywhere under a directory tree across an operation —
+// including a content-identical rewrite (e.g. RegisterSharer's atomic
+// temp-file-plus-rename always changes ModTime, even when the marshaled
+// JSON is byte-identical to what was already there), which a before/after
+// content comparison alone would miss.
+func snapshotFileTimes(t *testing.T, dir string) map[string]time.Time {
+	t.Helper()
+	out := map[string]time.Time{}
+	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(dir, path)
+		if relErr != nil {
+			return nil
+		}
+		out[rel] = info.ModTime()
+		return nil
+	})
+	return out
+}
+
+// TestCreateAgentProvisionOnly_Reprovision_WorktreePerAgent_Returns409 is the
+// design §3.4 Amendment A23.1/A23.2 (review p1b-r1 R2, p1b-r2 R2-T)
+// regression test: a reprovision request for a worktree-per-agent project
+// must be refused with 409 before buildStartContext ever runs —
+// buildStartContext's tryProvisionWorktree finds or creates the agent's
+// worktree and hands Manager.Reprovision an explicit-mount-shaped
+// StartOptions (GitClone=nil, Workspace=<worktree path>), a mode reincarnate
+// has neither designed for nor reviewed, and whose OWN failure path can
+// `git worktree remove --force` / os.RemoveAll the agent's LIVE worktree
+// (round-1 review FYI-2) if ProvisionShared ever errors on it.
+//
+// The fixture is realistic, not a stand-in: a real git-backed project
+// (config.gitClone set, matching what populateAgentConfig always sends for a
+// worktree-per-agent agent), a real ProjectPath, and the agent's own base
+// clone + worktree ALREADY provisioned on this broker — exactly the state a
+// second reprovision of a running agent finds. Manager.Reprovision/Provision
+// must never be called, the pre-seeded sentinel file in the agent's worktree
+// must survive untouched, and — the property a placement-blind assertion on
+// the manager mock alone cannot prove — NOTHING under the base clone
+// (including worktrees/ and the .git/ sharer registry) may be written to at
+// all: buildStartContext, and therefore tryProvisionWorktree, must never
+// run. A refusal placed anywhere AFTER buildStartContext (e.g. immediately
+// before the Manager.Reprovision call) would let tryProvisionWorktree run
+// its (safe, in this fixture) JOIN path, which still rewrites the sharer
+// registry file and would be caught by the whole-tree ModTime snapshot even
+// though Manager.Reprovision itself is never reached in that JOIN case
+// either -- see the round-2 review's identical finding.
+func TestCreateAgentProvisionOnly_Reprovision_WorktreePerAgent_Returns409(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	srv, mgr := newTestServerWithProvisionCapture()
+
+	bare := initBareRepoWithCommit(t)
+	gc := &api.GitCloneConfig{URL: bare, Branch: "main"}
+	agentID := "worktree-reprov-agent"
+
+	projectPath := filepath.Join(t.TempDir(), "proj")
+	if err := os.MkdirAll(projectPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-seed the agent's own base clone + worktree, as an earlier
+	// successful provision on this broker would have left them.
+	resolved, err := runtime.NewLocalBackend().Resolve(runtime.ResolveInput{
+		ProjectDir: projectPath, ProjectID: "p1", AgentID: agentID,
+		Mode: store.SharingModeWorktreePerAgent,
+	})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if err := provision.ProvisionShared(provision.ProvisionInput{
+		Resolved: resolved, Mode: store.SharingModeWorktreePerAgent,
+		ProjectID: "p1", AgentID: agentID, AgentName: agentID, GitClone: gc,
+	}); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	base := resolved.HostPath
+	worktreePath := provision.WorktreePath(base, agentID)
+	sentinelPath := filepath.Join(worktreePath, "uncommitted-work.txt")
+	if err := os.WriteFile(sentinelPath, []byte("hours of agent work"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	beforeTimes := snapshotFileTimes(t, base)
+
+	reqBody, err := json.Marshal(CreateAgentRequest{
+		Name:          agentID,
+		ID:            "agent-uuid-worktree-reprov",
+		Slug:          agentID,
+		ProjectID:     "p1",
+		ProjectPath:   projectPath,
+		ProvisionOnly: true,
+		Reprovision:   true,
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		Config: &CreateAgentConfig{
+			Template: "claude",
+			GitClone: gc,
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(string(reqBody)))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 Conflict for a worktree-per-agent reprovision, got %d: %s", w.Code, w.Body.String())
+	}
+	if mgr.reprovisionCalled {
+		t.Error("expected Manager.Reprovision NOT to be called: the refusal must happen before buildStartContext, which is what would otherwise call it")
+	}
+	if mgr.provisionCalled {
+		t.Error("expected Manager.Provision NOT to be called either")
+	}
+	if !strings.Contains(w.Body.String(), "worktree-per-agent") {
+		t.Errorf("expected the error body to name the worktree-per-agent refusal, got: %s", w.Body.String())
+	}
+
+	data, err := os.ReadFile(sentinelPath)
+	if err != nil {
+		t.Fatalf("sentinel file in the agent's live worktree was lost: %v", err)
+	}
+	if string(data) != "hours of agent work" {
+		t.Fatalf("sentinel content changed: %q", data)
+	}
+
+	afterTimes := snapshotFileTimes(t, base)
+	if !reflect.DeepEqual(beforeTimes, afterTimes) {
+		t.Fatalf("base clone / worktree tree was written to -- buildStartContext (and therefore tryProvisionWorktree) must never run before the refusal:\nbefore=%v\nafter=%v", beforeTimes, afterTimes)
+	}
+}
+
+// TestCreateAgentProvisionOnly_Reprovision_SharedWorkspace_StillCallsReprovision
+// is the companion negative control for the R2 fix above: a reprovision
+// request for a shared-workspace (not worktree-per-agent) project must still
+// reach Manager.Reprovision as normal — the new gate must not over-refuse
+// every WorkspaceMode.
+func TestCreateAgentProvisionOnly_Reprovision_SharedWorkspace_StillCallsReprovision(t *testing.T) {
+	srv, mgr := newTestServerWithProvisionCapture()
+
+	body := `{
+		"name": "shared-reprov-agent",
+		"id": "agent-uuid-shared-reprov",
+		"slug": "shared-reprov-agent",
+		"provisionOnly": true,
+		"reprovision": true,
+		"workspaceMode": "shared",
+		"config": {"template": "claude"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for a shared-workspace reprovision, got %d: %s", w.Code, w.Body.String())
+	}
+	if !mgr.reprovisionCalled {
+		t.Error("expected Manager.Reprovision to be called for a shared-workspace reprovision")
 	}
 }
 
@@ -1344,9 +1946,9 @@ func TestCreateAgentHubEndpointFromProjectSettings(t *testing.T) {
 		}
 
 		body := `{
-			"name": "grove-endpoint-agent",
+			"name": "project-endpoint-agent",
 			"hubEndpoint": "http://localhost:9810",
-			"grovePath": "` + projectDir + `",
+			"projectPath": "` + projectDir + `",
 			"config": {"template": "claude"}
 		}`
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -1388,8 +1990,8 @@ func TestCreateAgentHubEndpointFromProjectSettings(t *testing.T) {
 		}
 
 		body := `{
-			"name": "grove-fallback-agent",
-			"grovePath": "` + projectDir + `",
+			"name": "project-fallback-agent",
+			"projectPath": "` + projectDir + `",
 			"config": {"template": "claude"}
 		}`
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -1411,7 +2013,7 @@ func TestCreateAgentHubEndpointFromProjectSettings(t *testing.T) {
 		srv, mgr := newTestServerWithEnvCapture()
 
 		body := `{
-			"name": "no-grove-agent",
+			"name": "no-project-agent",
 			"hubEndpoint": "https://hub.direct.com",
 			"config": {"template": "claude"}
 		}`
@@ -1451,8 +2053,8 @@ func TestCreateAgentProjectHubEndpointSuppressedWhenDisabled(t *testing.T) {
 		}
 
 		body := `{
-			"name": "grove-disabled-agent",
-			"grovePath": "` + projectDir + `",
+			"name": "project-disabled-agent",
+			"projectPath": "` + projectDir + `",
 			"config": {"template": "claude"}
 		}`
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -1498,7 +2100,7 @@ func TestCreateAgentProjectHubEndpointSuppressedWhenDisabled(t *testing.T) {
 		body := `{
 			"name": "dispatcher-endpoint-agent",
 			"hubEndpoint": "https://hub.authoritative.com",
-			"grovePath": "` + projectDir + `",
+			"projectPath": "` + projectDir + `",
 			"config": {"template": "claude"}
 		}`
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -1542,7 +2144,7 @@ func TestCreateAgentHubManagedProjectSettingsEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get global dir: %v", err)
 	}
-	projectPath := filepath.Join(globalDir, "projects", "settings-test-grove")
+	projectPath := filepath.Join(globalDir, "projects", "settings-test-project")
 	scionDir := filepath.Join(projectPath, ".scion")
 	if err := os.MkdirAll(scionDir, 0755); err != nil {
 		t.Fatalf("failed to create .scion dir: %v", err)
@@ -1558,7 +2160,7 @@ func TestCreateAgentHubManagedProjectSettingsEndpoint(t *testing.T) {
 	// Send createAgent request with projectSlug but no projectPath
 	body := `{
 		"name": "hub-managed-agent",
-		"groveSlug": "settings-test-grove",
+		"projectSlug": "settings-test-project",
 		"hubEndpoint": "http://localhost:9810",
 		"config": {"template": "claude"}
 	}`
@@ -1606,7 +2208,7 @@ func TestResolveProjectSettingsDir(t *testing.T) {
 	})
 
 	t.Run("hub-managed project - settings in .scion subdirectory", func(t *testing.T) {
-		// Hub-managed project: projectPath = ~/.scion.groves/<slug>, settings in .scion/
+		// Hub-managed project: projectPath = ~/.scion/projects/<slug>, settings in .scion/
 		projectDir := t.TempDir()
 		scionDir := filepath.Join(projectDir, ".scion")
 		if err := os.MkdirAll(scionDir, 0755); err != nil {
@@ -1702,7 +2304,7 @@ hub:
 		body := fmt.Sprintf(`{
 			"name": "test-agent",
 			"hubEndpoint": "http://localhost:8080",
-			"grovePath": %q
+			"projectPath": %q
 		}`, projectDir)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
@@ -1805,7 +2407,7 @@ runtimes:
 		body := fmt.Sprintf(`{
 			"name": "test-agent",
 			"hubEndpoint": "http://localhost:8080",
-			"grovePath": %q
+			"projectPath": %q
 		}`, projectDir)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
@@ -1913,10 +2515,12 @@ func TestCreateAgentConnectionHubEndpoint(t *testing.T) {
 // gitCloneCapturingManager captures env and GitClone from Start options.
 type gitCloneCapturingManager struct {
 	mockManager
-	lastEnv         map[string]string
-	lastGitClone    *api.GitCloneConfig
-	lastWorkspace   string
-	lastProjectPath string
+	lastEnv            map[string]string
+	lastGitClone       *api.GitCloneConfig
+	lastWorkspace      string
+	lastProjectPath    string
+	lastBranch         string
+	lastFreshProvision bool
 }
 
 func (m *gitCloneCapturingManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
@@ -1924,6 +2528,8 @@ func (m *gitCloneCapturingManager) Start(ctx context.Context, opts api.StartOpti
 	m.lastGitClone = opts.GitClone
 	m.lastWorkspace = opts.Workspace
 	m.lastProjectPath = opts.ProjectPath
+	m.lastBranch = opts.Branch
+	m.lastFreshProvision = opts.FreshProvision
 	return m.mockManager.Start(ctx, opts)
 }
 
@@ -2060,6 +2666,241 @@ func TestCreateAgentWithoutGitClone(t *testing.T) {
 	// Verify GitClone is nil
 	if mgr.lastGitClone != nil {
 		t.Error("expected GitClone to be nil for regular agent")
+	}
+}
+
+// TestStartAgentWithGitCloneOnly proves the start handler decodes a
+// top-level gitClone field the same way create's config.gitClone is decoded
+// (GoogleCloudPlatform/scion#1931), so a workspace that did not survive a
+// stop can be recreated on start.
+func TestStartAgentWithGitCloneOnly(t *testing.T) {
+	srv, mgr := newTestServerWithGitCloneCapture()
+
+	body := `{
+		"gitClone": {
+			"url": "https://github.com/example/repo.git",
+			"branch": "develop",
+			"depth": 1
+		}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/git-clone-agent/start", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+	}
+	if mgr.lastEnv == nil {
+		t.Fatal("expected environment variables to be set, got nil")
+	}
+	if got := mgr.lastEnv["SCION_GIT_CLONE_URL"]; got != "https://github.com/example/repo.git" {
+		t.Errorf("expected SCION_GIT_CLONE_URL='https://github.com/example/repo.git', got %q", got)
+	}
+	if got := mgr.lastEnv["SCION_GIT_BRANCH"]; got != "develop" {
+		t.Errorf("expected SCION_GIT_BRANCH='develop', got %q", got)
+	}
+	if got := mgr.lastEnv["SCION_GIT_DEPTH"]; got != "1" {
+		t.Errorf("expected SCION_GIT_DEPTH='1', got %q", got)
+	}
+	if _, ok := mgr.lastEnv["SCION_AGENT_BRANCH"]; ok {
+		t.Errorf("expected SCION_AGENT_BRANCH to be unset when no top-level branch is sent, got %q", mgr.lastEnv["SCION_AGENT_BRANCH"])
+	}
+	if mgr.lastGitClone == nil || mgr.lastGitClone.URL != "https://github.com/example/repo.git" {
+		t.Errorf("expected GitClone to be passed through to StartOptions, got %+v", mgr.lastGitClone)
+	}
+	// A start dispatch must never set FreshProvision: GitClone being present
+	// means the workspace may need recreating on a runtime that dropped it,
+	// not that a same-named leftover should be wiped (GoogleCloudPlatform/scion#1931).
+	if mgr.lastFreshProvision {
+		t.Error("expected opts.FreshProvision=false for a start dispatch, got true")
+	}
+}
+
+// TestStartAgentWithGitCloneAndBranch mirrors TestCreateAgentWithGitCloneAndBranch
+// for the start path: the top-level branch (agent's checkout branch) and the
+// gitClone's own branch (the clone source ref) are independent.
+func TestStartAgentWithGitCloneAndBranch(t *testing.T) {
+	srv, mgr := newTestServerWithGitCloneCapture()
+
+	body := `{
+		"branch": "my-feature",
+		"gitClone": {
+			"url": "https://github.com/example/repo.git",
+			"branch": "main",
+			"depth": 1
+		}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/branch-agent/start", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+	}
+	if mgr.lastEnv == nil {
+		t.Fatal("expected environment variables to be set, got nil")
+	}
+	if got := mgr.lastEnv["SCION_AGENT_BRANCH"]; got != "my-feature" {
+		t.Errorf("expected SCION_AGENT_BRANCH='my-feature', got %q", got)
+	}
+	if got := mgr.lastEnv["SCION_GIT_BRANCH"]; got != "main" {
+		t.Errorf("expected SCION_GIT_BRANCH='main', got %q", got)
+	}
+}
+
+// TestStartAgentOldHubPayloadHasNoWorkspaceFields proves a start request
+// without gitClone/branch/workspaceMode (an older Hub, or a non-git project)
+// behaves exactly as it did before those fields existed: no git-clone env is
+// injected and the request still succeeds.
+func TestStartAgentOldHubPayloadHasNoWorkspaceFields(t *testing.T) {
+	srv, mgr := newTestServerWithGitCloneCapture()
+
+	body := `{
+		"resolvedEnv": {"SCION_HUB_ENDPOINT": "https://hub.example.com"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/old-payload-agent/start", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+	}
+	if mgr.lastGitClone != nil {
+		t.Errorf("expected GitClone to be nil for an old-shape payload, got %+v", mgr.lastGitClone)
+	}
+	if mgr.lastBranch != "" {
+		t.Errorf("expected opts.Branch to be empty for an old-shape payload, got %q", mgr.lastBranch)
+	}
+	// SCION_WORKSPACE_MODE is excluded: it always defaults to shared-plain
+	// when no workspace mode is supplied, independent of gitClone/branch.
+	for _, key := range []string{"SCION_GIT_CLONE_URL", "SCION_GIT_BRANCH", "SCION_GIT_DEPTH", "SCION_AGENT_BRANCH"} {
+		if _, ok := mgr.lastEnv[key]; ok {
+			t.Errorf("expected %s to be unset for an old-shape payload, got %q", key, mgr.lastEnv[key])
+		}
+	}
+}
+
+// TestStartAgentIgnoresUnknownJSONKey proves an unrecognized top-level key in
+// the start request body (e.g. from a newer Hub sending a field this broker
+// version doesn't know about yet) does not break decoding of the fields this
+// broker does recognize. The unknown key is placed BEFORE the recognized
+// fields in the JSON object. The assertions check that gitClone and
+// workspaceMode — sent in the same payload — were actually applied, not
+// just that the response status was 202: a vacuous assertion (e.g. only
+// checking GitClone is nil) would pass even if decoding silently stopped
+// after the unknown key.
+func TestStartAgentIgnoresUnknownJSONKey(t *testing.T) {
+	srv, mgr := newTestServerWithGitCloneCapture()
+
+	body := `{
+		"someFutureField": {"nested": "value"},
+		"gitClone": {"url": "https://github.com/example/repo.git", "branch": "main"},
+		"workspaceMode": "clone-per-agent"
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/unknown-key-agent/start", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+	}
+	if mgr.lastGitClone == nil || mgr.lastGitClone.URL != "https://github.com/example/repo.git" {
+		t.Errorf("expected GitClone to be applied despite the preceding unknown key, got %+v", mgr.lastGitClone)
+	}
+	if got := mgr.lastEnv["SCION_WORKSPACE_MODE"]; got != "clone-per-agent" {
+		t.Errorf("expected SCION_WORKSPACE_MODE='clone-per-agent' despite the preceding unknown key, got %q", got)
+	}
+}
+
+// TestStartAgentBranchOnlyPropagatesToOpts proves a start request carrying
+// only a top-level branch (no gitClone) still reaches opts.Branch: the
+// broker-side cfg-building condition includes startReq.Branch != "" as one
+// of its triggers, not only GitClone.
+func TestStartAgentBranchOnlyPropagatesToOpts(t *testing.T) {
+	srv, mgr := newTestServerWithGitCloneCapture()
+
+	body := `{"branch": "my-feature"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/branch-only-agent/start", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+	}
+	if mgr.lastBranch != "my-feature" {
+		t.Errorf("expected opts.Branch='my-feature', got %q", mgr.lastBranch)
+	}
+	if mgr.lastGitClone != nil {
+		t.Errorf("expected GitClone to remain nil for a branch-only start, got %+v", mgr.lastGitClone)
+	}
+}
+
+// TestStartAndCreate_GitWorkspaceEnvParity proves create and start inject the
+// identical set of SCION_GIT_*, SCION_AGENT_BRANCH, and SCION_WORKSPACE_*
+// keys and values for equivalent GitClone/Branch/WorkspaceMode inputs
+// (GoogleCloudPlatform/scion#1931) — the two paths must not drift.
+func TestStartAndCreate_GitWorkspaceEnvParity(t *testing.T) {
+	const parityKeys = "SCION_GIT_CLONE_URL,SCION_GIT_BRANCH,SCION_GIT_DEPTH,SCION_AGENT_BRANCH,SCION_WORKSPACE_MODE,SCION_WORKSPACE_GIT"
+	keys := strings.Split(parityKeys, ",")
+
+	createSrv, createMgr := newTestServerWithGitCloneCapture()
+	createBody := `{
+		"name": "parity-agent",
+		"workspaceMode": "clone-per-agent",
+		"config": {
+			"template": "claude",
+			"branch": "my-feature",
+			"gitClone": {"url": "https://github.com/example/repo.git", "branch": "main", "depth": 1}
+		}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(createBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	createSrv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create: expected status %d, got %d: %s", http.StatusCreated, w.Code, w.Body.String())
+	}
+
+	startSrv, startMgr := newTestServerWithGitCloneCapture()
+	startBody := `{
+		"branch": "my-feature",
+		"workspaceMode": "clone-per-agent",
+		"gitClone": {"url": "https://github.com/example/repo.git", "branch": "main", "depth": 1}
+	}`
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/agents/parity-agent/start", strings.NewReader(startBody))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	startSrv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("start: expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+	}
+
+	for _, key := range keys {
+		createVal, createOK := createMgr.lastEnv[key]
+		startVal, startOK := startMgr.lastEnv[key]
+		if createOK != startOK || createVal != startVal {
+			t.Errorf("%s: create=%q(present=%v) start=%q(present=%v), want identical", key, createVal, createOK, startVal, startOK)
+		}
+	}
+
+	// FreshProvision is the one input that must NOT be at parity: create
+	// dispatches it true (safe to wipe a same-named leftover), start leaves
+	// it false (must preserve a workspace that survived a stop).
+	if !createMgr.lastFreshProvision {
+		t.Error("expected opts.FreshProvision=true for a create dispatch, got false")
+	}
+	if startMgr.lastFreshProvision {
+		t.Error("expected opts.FreshProvision=false for a start dispatch, got true")
 	}
 }
 
@@ -2220,17 +3061,17 @@ func TestCreateAgentWithoutProfile(t *testing.T) {
 
 func TestProjectSlugWorkspacePath(t *testing.T) {
 	// Verify the workspace directory path for hub-managed projects uses
-	// ~/.scion.groves/<slug>/ instead of the worktree-based path.
+	// ~/.scion/projects/<slug>/ instead of the worktree-based path.
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		t.Fatalf("failed to get global dir: %v", err)
 	}
 
-	expected := filepath.Join(globalDir, "projects", "my-test-grove")
+	expected := filepath.Join(globalDir, "projects", "my-test-project")
 
 	// Simulate the logic from the handler: when ProjectSlug is set,
 	// use the conventional path.
-	projectSlug := "my-test-grove"
+	projectSlug := "my-test-project"
 	workspaceDir := filepath.Join(globalDir, "projects", projectSlug)
 
 	if workspaceDir != expected {
@@ -2250,9 +3091,9 @@ func TestProjectSlugWorkspacePath(t *testing.T) {
 func TestCreateAgentRequest_ProjectSlugField(t *testing.T) {
 	// Verify ProjectSlug is properly serialized/deserialized in CreateAgentRequest.
 	reqJSON := `{
-		"name": "grove-agent",
-		"groveSlug": "my-hub-grove",
-		"workspaceStoragePath": "workspaces/grove-123/grove-workspace"
+		"name": "project-agent",
+		"projectSlug": "my-hub-project",
+		"workspaceStoragePath": "workspaces/project-123/project-workspace"
 	}`
 
 	var req CreateAgentRequest
@@ -2260,18 +3101,18 @@ func TestCreateAgentRequest_ProjectSlugField(t *testing.T) {
 		t.Fatalf("failed to unmarshal: %v", err)
 	}
 
-	if req.ProjectSlug != "my-hub-grove" {
-		t.Errorf("expected ProjectSlug 'my-hub-grove', got '%s'", req.ProjectSlug)
+	if req.ProjectSlug != "my-hub-project" {
+		t.Errorf("expected ProjectSlug 'my-hub-project', got '%s'", req.ProjectSlug)
 	}
-	if req.WorkspaceStoragePath != "workspaces/grove-123/grove-workspace" {
-		t.Errorf("expected WorkspaceStoragePath 'workspaces/grove-123/grove-workspace', got '%s'", req.WorkspaceStoragePath)
+	if req.WorkspaceStoragePath != "workspaces/project-123/project-workspace" {
+		t.Errorf("expected WorkspaceStoragePath 'workspaces/project-123/project-workspace', got '%s'", req.WorkspaceStoragePath)
 	}
 }
 
 func TestCreateAgentProjectSlugResolvesProjectPath(t *testing.T) {
 	// When ProjectSlug is set and ProjectPath is empty (hub-managed project with no
 	// local provider path), the handler should resolve ProjectPath to the
-	// conventional ~/.scion.groves/<slug>/ path so the agent is created in the
+	// conventional ~/.scion/projects/<slug>/ path so the agent is created in the
 	// correct project instead of the broker's local project.
 	srv, mgr := newTestServerWithProvisionCapture()
 
@@ -2279,8 +3120,8 @@ func TestCreateAgentProjectSlugResolvesProjectPath(t *testing.T) {
 		"name": "hub-managed-agent",
 		"id": "agent-uuid-123",
 		"slug": "hub-managed-agent",
-		"groveId": "grove-abc",
-		"groveSlug": "my-hub-grove",
+		"projectId": "project-abc",
+		"projectSlug": "my-hub-project",
 		"provisionOnly": true,
 		"config": {"template": "claude"}
 	}`
@@ -2303,7 +3144,7 @@ func TestCreateAgentProjectSlugResolvesProjectPath(t *testing.T) {
 		t.Fatalf("failed to get global dir: %v", err)
 	}
 
-	expectedPath := filepath.Join(globalDir, "projects", "my-hub-grove")
+	expectedPath := filepath.Join(globalDir, "projects", "my-hub-project")
 	if mgr.lastOpts.ProjectPath != expectedPath {
 		t.Errorf("expected ProjectPath %q, got %q", expectedPath, mgr.lastOpts.ProjectPath)
 	}
@@ -2315,12 +3156,12 @@ func TestCreateAgentProjectSlugNotUsedWhenProjectPathSet(t *testing.T) {
 	srv, mgr := newTestServerWithProvisionCapture()
 
 	body := `{
-		"name": "local-grove-agent",
+		"name": "local-project-agent",
 		"id": "agent-uuid-456",
-		"slug": "local-grove-agent",
-		"groveId": "grove-def",
-		"groveSlug": "my-hub-grove",
-		"grovePath": "/projects/my-local-grove/.scion",
+		"slug": "local-project-agent",
+		"projectId": "project-def",
+		"projectSlug": "my-hub-project",
+		"projectPath": "/projects/my-local-project/.scion",
 		"provisionOnly": true,
 		"config": {"template": "claude"}
 	}`
@@ -2339,8 +3180,8 @@ func TestCreateAgentProjectSlugNotUsedWhenProjectPathSet(t *testing.T) {
 	}
 
 	// ProjectPath should remain as explicitly provided, not overridden by ProjectSlug
-	if mgr.lastOpts.ProjectPath != "/projects/my-local-grove/.scion" {
-		t.Errorf("expected ProjectPath %q, got %q", "/projects/my-local-grove/.scion", mgr.lastOpts.ProjectPath)
+	if mgr.lastOpts.ProjectPath != "/projects/my-local-project/.scion" {
+		t.Errorf("expected ProjectPath %q, got %q", "/projects/my-local-project/.scion", mgr.lastOpts.ProjectPath)
 	}
 }
 
@@ -2370,7 +3211,7 @@ func TestStartAgentProjectSettingsFallbackHubEndpoint(t *testing.T) {
 			t.Fatalf("failed to write settings.yaml: %v", err)
 		}
 
-		body := fmt.Sprintf(`{"grovePath": %q}`, projectDir)
+		body := fmt.Sprintf(`{"projectPath": %q}`, projectDir)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent/start", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
@@ -2406,7 +3247,7 @@ func TestStartAgentProjectSettingsFallbackHubEndpoint(t *testing.T) {
 		rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 		srv := New(cfg, mgr, rt)
 
-		// Hub-managed project: projectPath is the workspace parent (~/.scion.groves/<slug>),
+		// Hub-managed project: projectPath is the workspace parent (~/.scion/projects/<slug>),
 		// settings.yaml lives in the .scion subdirectory
 		projectDir := t.TempDir()
 		scionDir := filepath.Join(projectDir, ".scion")
@@ -2418,7 +3259,7 @@ func TestStartAgentProjectSettingsFallbackHubEndpoint(t *testing.T) {
 			t.Fatalf("failed to write settings.yaml: %v", err)
 		}
 
-		body := fmt.Sprintf(`{"grovePath": %q}`, projectDir)
+		body := fmt.Sprintf(`{"projectPath": %q}`, projectDir)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent/start", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
@@ -2464,7 +3305,7 @@ func TestStartAgentBrokerConfigUsedWhenNoProjectSettings(t *testing.T) {
 		t.Fatalf("failed to write settings.yaml: %v", err)
 	}
 
-	body := fmt.Sprintf(`{"grovePath": %q}`, projectDir)
+	body := fmt.Sprintf(`{"projectPath": %q}`, projectDir)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent/start", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -2500,7 +3341,7 @@ func TestStartAgentResolvedEnvHubEndpointFallback(t *testing.T) {
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(cfg, mgr, rt)
 
-	body := `{"resolvedEnv": {"SCION_HUB_ENDPOINT": "http://hub.example.com:8080", "SCION_GROVE_ID": "grove-1"}}`
+	body := `{"resolvedEnv": {"SCION_HUB_ENDPOINT": "http://hub.example.com:8080", "SCION_PROJECT_ID": "project-1"}}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent/start", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -2597,6 +3438,395 @@ func TestStartAgentResolvedEnvHubEndpointWithContainerOverride(t *testing.T) {
 	}
 }
 
+// TestHTTPStartAndRestart_DispatchedEndpointOutranksLocalhostBroker is the
+// regression test for GoogleCloudPlatform/scion#1931: on a co-located
+// (combo) broker, the broker's own HubEndpoint is often a localhost address
+// (its own view of the Hub). On the kubernetes runtime, an agent started or
+// restarted through the broker's HTTP handlers must still get the Hub's
+// dispatched public endpoint, in parity with what create gives it — not the
+// broker's localhost view, which means nothing inside the pod.
+func TestHTTPStartAndRestart_DispatchedEndpointOutranksLocalhostBroker(t *testing.T) {
+	const dispatched = "https://hub.example.com"
+
+	// A dedicated isolated server, rather than newTestServerWithRuntime: the
+	// runtime name here ("kubernetes") must also be the settings-resolved
+	// runtime type, or resolveManagerForOpts detects a mismatch against the
+	// injected mock runtime and builds a real auxiliary manager instead of
+	// using the capturing mock — bypassing the very capture this test needs.
+	newSrv := func(t *testing.T) (*Server, *envCapturingManager) {
+		t.Helper()
+		t.Setenv("HOME", t.TempDir())
+
+		origWd, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		tmpDir := t.TempDir()
+		if err := os.Chdir(tmpDir); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chdir(origWd) })
+
+		dotScion := filepath.Join(tmpDir, ".scion")
+		if err := os.Mkdir(dotScion, 0755); err != nil {
+			t.Fatal(err)
+		}
+		// No explicit "type" for the "kubernetes" runtime entry: ResolveRuntime
+		// falls back to the map key as the effective type, so it resolves to
+		// "kubernetes" — matching the injected runtime's Name() below — and
+		// resolveManagerForOpts uses the broker's own (capturing) manager.
+		settingsYAML := `schema_version: "1"
+active_profile: local
+profiles:
+    local:
+        runtime: kubernetes
+runtimes:
+    kubernetes: {}
+`
+		if err := os.WriteFile(filepath.Join(dotScion, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
+			t.Fatal(err)
+		}
+		templatesDir := filepath.Join(dotScion, "templates")
+		if err := os.MkdirAll(filepath.Join(templatesDir, "default"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(filepath.Join(templatesDir, "claude"), 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		cfg := DefaultServerConfig()
+		cfg.BrokerID = "test-broker-id"
+		cfg.BrokerName = "test-host"
+		cfg.HubEndpoint = "http://localhost:8080" // combo broker's own (loopback) view
+		cfg.ForceRuntime = "kubernetes"
+
+		mgr := &envCapturingManager{}
+		rt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
+		return New(cfg, mgr, rt), mgr
+	}
+
+	assertDispatched := func(t *testing.T, mgr *envCapturingManager) {
+		t.Helper()
+		if got := mgr.lastEnv["SCION_HUB_ENDPOINT"]; got != dispatched {
+			t.Errorf("SCION_HUB_ENDPOINT = %q, want the Hub-dispatched %q (not the broker's own localhost endpoint)", got, dispatched)
+		}
+		if got := mgr.lastEnv["SCION_HUB_URL"]; got != dispatched {
+			t.Errorf("SCION_HUB_URL = %q, want the Hub-dispatched %q", got, dispatched)
+		}
+	}
+
+	t.Run("start", func(t *testing.T) {
+		srv, mgr := newSrv(t)
+		body := fmt.Sprintf(`{"hubEndpoint": %q, "resolvedEnv": {"SCION_HUB_ENDPOINT": %q}}`, dispatched, dispatched)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent/start", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+
+		srv.Handler().ServeHTTP(w, req)
+
+		if w.Code != http.StatusAccepted {
+			t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+		}
+		assertDispatched(t, mgr)
+	})
+
+	t.Run("restart", func(t *testing.T) {
+		srv, mgr := newSrv(t)
+		body := fmt.Sprintf(`{"hubEndpoint": %q, "resolvedEnv": {"SCION_HUB_ENDPOINT": %q}}`, dispatched, dispatched)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent/restart", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+
+		srv.Handler().ServeHTTP(w, req)
+
+		if w.Code != http.StatusAccepted {
+			t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+		}
+		assertDispatched(t, mgr)
+	})
+
+	t.Run("start: request field wins over a differing resolvedEnv value", func(t *testing.T) {
+		srv, mgr := newSrv(t)
+		const stale = "https://stale-in-resolved-env.example.com"
+		body := fmt.Sprintf(`{"hubEndpoint": %q, "resolvedEnv": {"SCION_HUB_ENDPOINT": %q}}`, dispatched, stale)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent/start", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+
+		srv.Handler().ServeHTTP(w, req)
+
+		if w.Code != http.StatusAccepted {
+			t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+		}
+		assertDispatched(t, mgr)
+	})
+
+	t.Run("restart: request field wins over a differing resolvedEnv value", func(t *testing.T) {
+		srv, mgr := newSrv(t)
+		const stale = "https://stale-in-resolved-env.example.com"
+		body := fmt.Sprintf(`{"hubEndpoint": %q, "resolvedEnv": {"SCION_HUB_ENDPOINT": %q}}`, dispatched, stale)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent/restart", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+
+		srv.Handler().ServeHTTP(w, req)
+
+		if w.Code != http.StatusAccepted {
+			t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+		}
+		assertDispatched(t, mgr)
+	})
+}
+
+// TestHTTPStartAndRestart_DockerComboBridgeOverrideMatchesCreate proves
+// parity for the docker combo case in GoogleCloudPlatform/scion#1931: create
+// sends the dispatched endpoint as its request-level HubEndpoint; start and
+// restart send it as their own request-level HubEndpoint and in
+// ResolvedEnv["SCION_HUB_ENDPOINT"], as the Hub does; and — for both a
+// public dispatched endpoint and a localhost one that then goes through the
+// container bridge override — all three operations resolve to the same
+// SCION_HUB_ENDPOINT for the broker's ContainerHubEndpoint configuration.
+func TestHTTPStartAndRestart_DockerComboBridgeOverrideMatchesCreate(t *testing.T) {
+	newSrv := func() (*Server, *envCapturingManager) {
+		cfg := DefaultServerConfig()
+		cfg.BrokerID = "test-broker-id"
+		cfg.BrokerName = "test-host"
+		cfg.HubEndpoint = "http://localhost:8080" // combo broker's own (loopback) view
+		cfg.ContainerHubEndpoint = "http://host.docker.internal:8080"
+		cfg.ForceRuntime = "mock"
+
+		mgr := &envCapturingManager{}
+		rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+		return New(cfg, mgr, rt), mgr
+	}
+
+	cases := []struct {
+		name       string
+		dispatched string
+		want       string
+	}{
+		{name: "public dispatched endpoint", dispatched: "https://hub.example.com", want: "https://hub.example.com"},
+		{name: "localhost dispatched endpoint goes through the bridge override", dispatched: "http://localhost:8080", want: "http://host.docker.internal:8080"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Run("create", func(t *testing.T) {
+				srv, mgr := newSrv()
+				body := fmt.Sprintf(`{"name": "test-agent", "hubEndpoint": %q}`, tc.dispatched)
+				req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				w := httptest.NewRecorder()
+
+				srv.Handler().ServeHTTP(w, req)
+
+				if w.Code != http.StatusCreated {
+					t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, w.Code, w.Body.String())
+				}
+				if got := mgr.lastEnv["SCION_HUB_ENDPOINT"]; got != tc.want {
+					t.Errorf("create: SCION_HUB_ENDPOINT = %q, want %q", got, tc.want)
+				}
+			})
+
+			t.Run("http-start", func(t *testing.T) {
+				srv, mgr := newSrv()
+				body := fmt.Sprintf(`{"hubEndpoint": %q, "resolvedEnv": {"SCION_HUB_ENDPOINT": %q}}`, tc.dispatched, tc.dispatched)
+				req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent/start", strings.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				w := httptest.NewRecorder()
+
+				srv.Handler().ServeHTTP(w, req)
+
+				if w.Code != http.StatusAccepted {
+					t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+				}
+				if got := mgr.lastEnv["SCION_HUB_ENDPOINT"]; got != tc.want {
+					t.Errorf("http-start: SCION_HUB_ENDPOINT = %q, want %q (same as create)", got, tc.want)
+				}
+			})
+
+			t.Run("http-restart", func(t *testing.T) {
+				srv, mgr := newSrv()
+				body := fmt.Sprintf(`{"hubEndpoint": %q, "resolvedEnv": {"SCION_HUB_ENDPOINT": %q}}`, tc.dispatched, tc.dispatched)
+				req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent/restart", strings.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				w := httptest.NewRecorder()
+
+				srv.Handler().ServeHTTP(w, req)
+
+				if w.Code != http.StatusAccepted {
+					t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+				}
+				if got := mgr.lastEnv["SCION_HUB_ENDPOINT"]; got != tc.want {
+					t.Errorf("http-restart: SCION_HUB_ENDPOINT = %q, want %q (same as create)", got, tc.want)
+				}
+			})
+		})
+	}
+}
+
+// TestHTTPStartAndRestart_ConnectionHeaderRescuesLocalhostDispatch proves the
+// connection-endpoint localhost rescue is wired all the way from the
+// X-Scion-Hub-Connection header through the HTTP start and restart handlers,
+// not just inside the resolver: a registered connection naming a public
+// endpoint rescues a localhost dispatched value on kubernetes, the same way
+// it does on create with the same header.
+func TestHTTPStartAndRestart_ConnectionHeaderRescuesLocalhostDispatch(t *testing.T) {
+	const (
+		connectionName = "conn1"
+		connEndpoint   = "https://hub.connection.example.com"
+		dispatchLocal  = "http://localhost:9090"
+	)
+
+	// A dedicated isolated server: the runtime name here ("kubernetes") must
+	// also be the settings-resolved runtime type, or resolveManagerForOpts
+	// detects a mismatch against the injected mock runtime and builds a real
+	// auxiliary manager instead of using the capturing mock.
+	newSrv := func(t *testing.T) (*Server, *envCapturingManager) {
+		t.Helper()
+		t.Setenv("HOME", t.TempDir())
+
+		origWd, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		tmpDir := t.TempDir()
+		if err := os.Chdir(tmpDir); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chdir(origWd) })
+
+		dotScion := filepath.Join(tmpDir, ".scion")
+		if err := os.Mkdir(dotScion, 0755); err != nil {
+			t.Fatal(err)
+		}
+		settingsYAML := `schema_version: "1"
+active_profile: local
+profiles:
+    local:
+        runtime: kubernetes
+runtimes:
+    kubernetes: {}
+`
+		if err := os.WriteFile(filepath.Join(dotScion, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
+			t.Fatal(err)
+		}
+		templatesDir := filepath.Join(dotScion, "templates")
+		if err := os.MkdirAll(filepath.Join(templatesDir, "default"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(filepath.Join(templatesDir, "claude"), 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		creds := makeTestCreds(connectionName, "test-broker-id", connEndpoint)
+		cfg := DefaultServerConfig()
+		cfg.BrokerID = "test-broker-id"
+		cfg.BrokerName = "test-host"
+		cfg.HubEnabled = true
+		cfg.HubEndpoint = "http://localhost:8080" // combo broker's own (loopback) view
+		cfg.InMemoryCredentials = creds
+		cfg.BrokerAuthEnabled = false
+		cfg.ForceRuntime = "kubernetes"
+
+		mgr := &envCapturingManager{}
+		rt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
+		return New(cfg, mgr, rt), mgr
+	}
+
+	assertRescued := func(t *testing.T, mgr *envCapturingManager) {
+		t.Helper()
+		if got := mgr.lastEnv["SCION_HUB_ENDPOINT"]; got != connEndpoint {
+			t.Errorf("SCION_HUB_ENDPOINT = %q, want the connection endpoint %q (not the broker's own localhost, and not the raw localhost dispatch)", got, connEndpoint)
+		}
+	}
+
+	t.Run("create", func(t *testing.T) {
+		srv, mgr := newSrv(t)
+		body := fmt.Sprintf(`{"name": "test-agent", "hubEndpoint": %q}`, dispatchLocal)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Scion-Hub-Connection", connectionName)
+		w := httptest.NewRecorder()
+
+		srv.Handler().ServeHTTP(w, req)
+
+		if w.Code != http.StatusCreated {
+			t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, w.Code, w.Body.String())
+		}
+		assertRescued(t, mgr)
+	})
+
+	t.Run("http-start", func(t *testing.T) {
+		srv, mgr := newSrv(t)
+		body := fmt.Sprintf(`{"hubEndpoint": %q, "resolvedEnv": {"SCION_HUB_ENDPOINT": %q}}`, dispatchLocal, dispatchLocal)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent/start", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Scion-Hub-Connection", connectionName)
+		w := httptest.NewRecorder()
+
+		srv.Handler().ServeHTTP(w, req)
+
+		if w.Code != http.StatusAccepted {
+			t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+		}
+		assertRescued(t, mgr)
+	})
+
+	t.Run("http-restart", func(t *testing.T) {
+		srv, mgr := newSrv(t)
+		body := fmt.Sprintf(`{"hubEndpoint": %q, "resolvedEnv": {"SCION_HUB_ENDPOINT": %q}}`, dispatchLocal, dispatchLocal)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent/restart", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Scion-Hub-Connection", connectionName)
+		w := httptest.NewRecorder()
+
+		srv.Handler().ServeHTTP(w, req)
+
+		if w.Code != http.StatusAccepted {
+			t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+		}
+		assertRescued(t, mgr)
+	})
+}
+
+// TestRestartAgent_ContainerScanSuppliesSettingsFallback proves restartAgent's
+// container-scan branch (used when the request carries no projectPath) feeds
+// the scanned agent's ProjectPath into buildStartContext, so the
+// project-settings fallback reaches the resolver on restart and is not
+// silently dropped by an empty ProjectPath.
+func TestRestartAgent_ContainerScanSuppliesSettingsFallback(t *testing.T) {
+	projectDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte("hub:\n  endpoint: https://settings.example.com\n"), 0644); err != nil {
+		t.Fatalf("failed to write settings: %v", err)
+	}
+
+	cfg := DefaultServerConfig()
+	cfg.BrokerID = "test-broker-id"
+	cfg.BrokerName = "test-host"
+	cfg.ForceRuntime = "mock"
+	// No broker-level HubEndpoint: the settings fallback must supply it.
+
+	mgr := &envCapturingManager{}
+	mgr.agents = []api.AgentInfo{
+		{Name: "test-agent", ProjectPath: projectDir, Labels: map[string]string{"scion.project_id": "p1"}},
+	}
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	srv := New(cfg, mgr, rt)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent/restart?projectId=p1", nil)
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+	}
+	if got := mgr.lastEnv["SCION_HUB_ENDPOINT"]; got != "https://settings.example.com" {
+		t.Errorf("SCION_HUB_ENDPOINT = %q, want the settings-supplied endpoint %q (container-scan projectPath must reach the resolver)", got, "https://settings.example.com")
+	}
+}
+
 // TestCreateAgentPortPreservedAcrossBridge verifies that when the hub dispatch
 // sends a localhost endpoint on port 8080 but the broker's ContainerHubEndpoint
 // was pre-computed with port 9810, the actual endpoint port (8080) is preserved.
@@ -2665,100 +3895,89 @@ func TestStartAgentBrokerIDEnv(t *testing.T) {
 }
 
 func TestStartAgentProjectSlugResolvesProjectPath(t *testing.T) {
-	tests := []struct {
-		name string
-		body string
-	}{
-		{
-			name: "projectSlug",
-			body: `{"projectSlug": "my-hub-project"}`,
-		},
-		{
-			name: "legacy groveSlug",
-			body: `{"groveSlug": "my-hub-project"}`,
-		},
+	// When the startAgent handler receives projectSlug with no projectPath
+	// (hub-managed project), it should resolve ProjectPath from the slug.
+	srv, mgr := newTestServerWithProvisionCapture()
+
+	body := `{"projectSlug": "my-hub-project"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/hub-managed-agent/start", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// When the startAgent handler receives projectSlug with no projectPath
-			// (hub-managed project), it should resolve ProjectPath from the slug.
-			srv, mgr := newTestServerWithProvisionCapture()
+	if !mgr.startCalled {
+		t.Fatal("expected Start to be called")
+	}
 
-			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/hub-managed-agent/start", strings.NewReader(tt.body))
-			req.Header.Set("Content-Type", "application/json")
-			w := httptest.NewRecorder()
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		t.Fatalf("failed to get global dir: %v", err)
+	}
 
-			srv.Handler().ServeHTTP(w, req)
-
-			if w.Code != http.StatusAccepted {
-				t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
-			}
-
-			if !mgr.startCalled {
-				t.Fatal("expected Start to be called")
-			}
-
-			globalDir, err := config.GetGlobalDir()
-			if err != nil {
-				t.Fatalf("failed to get global dir: %v", err)
-			}
-
-			expectedPath := filepath.Join(globalDir, "projects", "my-hub-project")
-			if mgr.lastOpts.ProjectPath != expectedPath {
-				t.Errorf("expected ProjectPath %q, got %q", expectedPath, mgr.lastOpts.ProjectPath)
-			}
-		})
+	expectedPath := filepath.Join(globalDir, "projects", "my-hub-project")
+	if mgr.lastOpts.ProjectPath != expectedPath {
+		t.Errorf("expected ProjectPath %q, got %q", expectedPath, mgr.lastOpts.ProjectPath)
 	}
 }
 
 func TestStartAgentProjectSlugNotUsedWhenProjectPathSet(t *testing.T) {
-	tests := []struct {
-		name         string
-		body         string
-		expectedPath string
-	}{
-		{
-			name:         "legacy grovePath wins over legacy groveSlug",
-			body:         `{"grovePath": "/projects/my-local-project/.scion", "groveSlug": "my-hub-project"}`,
-			expectedPath: "/projects/my-local-project/.scion",
-		},
-		{
-			name: "projectPath wins over projectSlug and legacy keys",
-			body: `{
-				"projectPath": "/projects/my-local-project/.scion",
-				"projectSlug": "my-hub-project",
-				"grovePath": "/projects/legacy-project/.scion",
-				"groveSlug": "legacy-hub-project"
-			}`,
-			expectedPath: "/projects/my-local-project/.scion",
-		},
+	// When startAgent receives both projectPath and projectSlug,
+	// projectPath takes precedence.
+	srv, mgr := newTestServerWithProvisionCapture()
+
+	body := `{
+		"projectPath": "/projects/my-local-project/.scion",
+		"projectSlug": "my-hub-project"
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/local-project-agent/start", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// When startAgent receives both projectPath and projectSlug,
-			// projectPath takes precedence.
-			srv, mgr := newTestServerWithProvisionCapture()
+	if !mgr.startCalled {
+		t.Fatal("expected Start to be called")
+	}
 
-			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/local-project-agent/start", strings.NewReader(tt.body))
-			req.Header.Set("Content-Type", "application/json")
-			w := httptest.NewRecorder()
+	expectedPath := "/projects/my-local-project/.scion"
+	if mgr.lastOpts.ProjectPath != expectedPath {
+		t.Errorf("expected ProjectPath %q, got %q", expectedPath, mgr.lastOpts.ProjectPath)
+	}
+}
 
-			srv.Handler().ServeHTTP(w, req)
+// TestStartAgentLegacyGroveFieldsNotHonoured verifies that a start request
+// carrying only the retired grovePath/groveSlug fields resolves no project
+// path: the legacy fallback that used to promote them into
+// ProjectPath/ProjectSlug is gone.
+func TestStartAgentLegacyGroveFieldsNotHonoured(t *testing.T) {
+	srv, mgr := newTestServerWithProvisionCapture()
 
-			if w.Code != http.StatusAccepted {
-				t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
-			}
+	body := `{"grovePath": "/projects/my-local-project/.scion", "groveSlug": "my-hub-project"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/legacy-fields-agent/start", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
 
-			if !mgr.startCalled {
-				t.Fatal("expected Start to be called")
-			}
+	srv.Handler().ServeHTTP(w, req)
 
-			if mgr.lastOpts.ProjectPath != tt.expectedPath {
-				t.Errorf("expected ProjectPath %q, got %q", tt.expectedPath, mgr.lastOpts.ProjectPath)
-			}
-		})
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+	}
+
+	if !mgr.startCalled {
+		t.Fatal("expected Start to be called")
+	}
+
+	if mgr.lastOpts.ProjectPath != "" {
+		t.Errorf("expected legacy grovePath to be ignored, got ProjectPath %q", mgr.lastOpts.ProjectPath)
 	}
 }
 
@@ -2813,6 +4032,55 @@ func TestStartAgentInlineConfigModelUpdatesExistingAgentConfig(t *testing.T) {
 	}
 	if updated.MaxTurns != 7 {
 		t.Errorf("expected max_turns 7, got %d", updated.MaxTurns)
+	}
+}
+
+// TestStartAgent_RejectsTraversalName is the regression anchor for
+// startAgent's containment check: id must be a single, clean path element
+// that resolves under the project's agents root before any of
+// applyInlineConfigUpdate, GetSavedProfile, GetSavedPhase, or mgr.Start runs,
+// checked independently of whatever the request routing already filtered.
+func TestStartAgent_RejectsTraversalName(t *testing.T) {
+	srv, mgr := newTestServerWithProvisionCapture()
+
+	projectDir := filepath.Join(t.TempDir(), ".scion")
+	if err := os.MkdirAll(filepath.Join(projectDir, "agents"), 0755); err != nil {
+		t.Fatalf("failed to create projectDir/agents: %v", err)
+	}
+	// Sentinel representing project-level state that must remain untouched
+	// when the request's agent id fails containment.
+	sentinelPath := filepath.Join(projectDir, "scion-agent.json")
+	const sentinelContent = `{"harness":"sentinel-do-not-touch"}`
+	if err := os.WriteFile(sentinelPath, []byte(sentinelContent), 0644); err != nil {
+		t.Fatalf("failed to write sentinel: %v", err)
+	}
+
+	body := fmt.Sprintf(`{
+		"projectPath": %q,
+		"inlineConfig": {
+			"model": "gemini-2.5-pro"
+		}
+	}`, projectDir)
+	// Decodes to id="..", action="start".
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/..%2Fstart", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+	if mgr.startCalled {
+		t.Fatal("expected Start not to be called")
+	}
+
+	data, err := os.ReadFile(sentinelPath)
+	if err != nil {
+		t.Fatalf("sentinel must survive untouched, but read failed: %v", err)
+	}
+	if string(data) != sentinelContent {
+		t.Fatalf("sentinel must survive unmodified, got: %s", data)
 	}
 }
 
@@ -2920,7 +4188,7 @@ func TestCreateAgentProjectSlugInitializesScionDir(t *testing.T) {
 
 	// Use a temporary directory to simulate the project workspace.
 	tmpDir := t.TempDir()
-	projectPath := filepath.Join(tmpDir, "test-grove")
+	projectPath := filepath.Join(tmpDir, "test-project")
 	if err := os.MkdirAll(projectPath, 0755); err != nil {
 		t.Fatalf("failed to create test project dir: %v", err)
 	}
@@ -2970,7 +4238,7 @@ func TestDeleteProject_RemovesDirectory(t *testing.T) {
 	// Create a temporary projects directory structure
 	tmpHome := t.TempDir()
 	projectsDir := filepath.Join(tmpHome, ".scion", "projects")
-	projectDir := filepath.Join(projectsDir, "test-grove")
+	projectDir := filepath.Join(projectsDir, "test-project")
 	scionDir := filepath.Join(projectDir, ".scion")
 
 	if err := os.MkdirAll(scionDir, 0o755); err != nil {
@@ -2986,7 +4254,7 @@ func TestDeleteProject_RemovesDirectory(t *testing.T) {
 	// Override HOME so config.GetGlobalDir resolves to our temp dir
 	t.Setenv("HOME", tmpHome)
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/projects/test-grove", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/projects/test-project", nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
@@ -3012,7 +4280,7 @@ func TestDeleteProject_NonExistent_Returns204(t *testing.T) {
 
 	t.Setenv("HOME", tmpHome)
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/projects/nonexistent-grove", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/projects/nonexistent-project", nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
@@ -3050,20 +4318,20 @@ func TestFindAgentInHubManagedProjects(t *testing.T) {
 	}
 
 	// Should find the agent in the hub-managed project
-	result := findAgentInHubManagedProjects("test-agent")
+	result, _ := findAgentInHubManagedProjects("test-agent", "")
 	if result != scionDir {
 		t.Errorf("expected %q, got %q", scionDir, result)
 	}
 
 	// Should not find a non-existent agent
-	result = findAgentInHubManagedProjects("nonexistent-agent")
+	result, _ = findAgentInHubManagedProjects("nonexistent-agent", "")
 	if result != "" {
 		t.Errorf("expected empty string for nonexistent agent, got %q", result)
 	}
 
 	// Should handle missing projects directory gracefully
 	t.Setenv("HOME", t.TempDir())
-	result = findAgentInHubManagedProjects("test-agent")
+	result, _ = findAgentInHubManagedProjects("test-agent", "")
 	if result != "" {
 		t.Errorf("expected empty string when projects dir missing, got %q", result)
 	}
@@ -3087,7 +4355,7 @@ func TestDeleteAgent_HubManagedProject_NoContainer(t *testing.T) {
 	t.Setenv("HOME", tmpHome)
 
 	// Create hub-managed project with an agent directory and config file
-	projectSlug := "hub-grove"
+	projectSlug := "hub-project"
 	scionDir := filepath.Join(tmpHome, ".scion", "projects", projectSlug, ".scion")
 	agentName := "orphaned-agent"
 	agentDir := filepath.Join(scionDir, "agents", agentName)
@@ -3119,6 +4387,120 @@ func TestDeleteAgent_HubManagedProject_NoContainer(t *testing.T) {
 	}
 	if mgr.lastDeleteAgentID != agentName {
 		t.Errorf("expected agentID %q, got %q", agentName, mgr.lastDeleteAgentID)
+	}
+}
+
+// TestDeleteAgent_RejectsTraversalName is the regression anchor for
+// deleteAgent's containment check: an agent id must be a single, clean path
+// element that resolves under the project's agents root before any file
+// operation runs, checked independently of whatever the request routing
+// already filtered.
+func TestDeleteAgent_RejectsTraversalName(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.BrokerID = "test-broker-id"
+	cfg.BrokerName = "test-host"
+
+	mgr := &mockManager{agents: []api.AgentInfo{}}
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	srv := New(cfg, mgr, rt)
+
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	projectSlug := "hub-project"
+	scionDir := filepath.Join(tmpHome, ".scion", "projects", projectSlug, ".scion")
+	if err := os.MkdirAll(filepath.Join(scionDir, "agents"), 0o755); err != nil {
+		t.Fatalf("failed to create scionDir/agents: %v", err)
+	}
+	// Sentinel representing project-level state that must remain untouched
+	// when the request's agent id fails containment.
+	markerPath := filepath.Join(scionDir, "marker.txt")
+	if err := os.WriteFile(markerPath, []byte("keep"), 0o644); err != nil {
+		t.Fatalf("failed to write marker: %v", err)
+	}
+
+	// Decodes to id="..", action="".
+	req := httptest.NewRequest(http.MethodDelete,
+		"/api/v1/agents/..%2F?deleteFiles=true&removeBranch=false", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, rec.Code, rec.Body.String())
+	}
+	if mgr.deleteCalls != 0 {
+		t.Fatalf("expected no Delete calls, got %d", mgr.deleteCalls)
+	}
+	if _, err := os.Stat(markerPath); err != nil {
+		t.Fatalf("project directory must survive untouched, but stat failed: %v", err)
+	}
+	if _, err := os.Stat(scionDir); err != nil {
+		t.Fatalf("project .scion directory must survive untouched, but stat failed: %v", err)
+	}
+}
+
+// TestDeleteAgent_ContainerOnlyRemovalSurvivesBadName is the converse of
+// TestDeleteAgent_RejectsTraversalName: a request that never asks for file
+// cleanup (the default -- no deleteFiles, no softDelete) must still remove a
+// legacy agent recorded under a bad name, by container ID alone, with the
+// containment check never entering the picture. Runtime.Delete acts on
+// containerID, not on any path built from the name, so nothing here is
+// unsafe to allow. This is the independent, non-file-touching removal path
+// that keeps the containment fix from stranding a pre-existing bad-named
+// agent: the check added for the traversal case above must gate only
+// requests that actually touch a file, not every request naming a bad
+// agent.
+func TestDeleteAgent_ContainerOnlyRemovalSurvivesBadName(t *testing.T) {
+	mgr := &mockManager{
+		agents: []api.AgentInfo{
+			{Name: "..", ContainerID: "legacy-bad-name-container"},
+		},
+	}
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	// No deleteFiles, no softDelete: a plain container-record removal.
+	// Decodes to id="..", action="".
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/agents/..%2F", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusNoContent, rec.Code, rec.Body.String())
+	}
+	if mgr.deleteCalls != 1 {
+		t.Fatalf("expected 1 Delete call (container-only removal must still succeed), got %d", mgr.deleteCalls)
+	}
+	if mgr.lastDeleteFiles {
+		t.Fatal("expected deleteFiles to be false for a container-only removal")
+	}
+}
+
+// TestDeleteAgent_InvalidIDWithDeleteFilesRejected proves that a DELETE with
+// deleteFiles=true and an id that is not a single valid path element is
+// still rejected: deleteAgent's own gate (isSingleCleanPathElement plus
+// containment) is reached and enforced even though handleAgentByID exempts
+// a bare DELETE from its own gate. Unlike
+// TestDeleteAgent_ContainerOnlyRemovalSurvivesBadName, this request does
+// touch files, so deleteAgent's own validation must still apply.
+func TestDeleteAgent_InvalidIDWithDeleteFilesRejected(t *testing.T) {
+	mgr := &mockManager{
+		agents: []api.AgentInfo{
+			{Name: `a\b`, ContainerID: "bad-name-container"},
+		},
+	}
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/agents/a%5Cb?deleteFiles=true", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, rec.Code, rec.Body.String())
+	}
+	if mgr.deleteCalls != 0 {
+		t.Fatalf("expected no Delete call for a rejected id, got %d", mgr.deleteCalls)
 	}
 }
 
@@ -3176,7 +4558,7 @@ func TestCreateAgentStartFailure_CleansUpFiles(t *testing.T) {
 
 	body := fmt.Sprintf(`{
 		"name": "fail-agent",
-		"grovePath": %q,
+		"projectPath": %q,
 		"config": {"task": "do something"}
 	}`, projectPath)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))

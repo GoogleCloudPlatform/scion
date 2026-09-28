@@ -30,10 +30,13 @@ import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 const apiFetch = vi.fn(() => Promise.resolve(new Response('{}', { status: 200 })));
+const showToast = vi.fn();
 
 vi.mock('../../../client/api.js', () => ({ apiFetch }));
+vi.mock('../../../utils/toast.js', () => ({ showToast }));
 
 let ATTACHMENT_ACCEPT: string;
+let PASTE_TO_ATTACHMENT_THRESHOLD: number;
 
 /** A composer with a file already chosen in its hidden input. */
 function createComposer(): any {
@@ -64,6 +67,7 @@ const STORED = {
 beforeAll(async () => {
   const mod = await import('./chat-composer.js');
   ATTACHMENT_ACCEPT = (mod as any).ATTACHMENT_ACCEPT;
+  PASTE_TO_ATTACHMENT_THRESHOLD = (mod as any).PASTE_TO_ATTACHMENT_THRESHOLD;
 });
 
 afterEach(() => {
@@ -243,5 +247,152 @@ describe('composer — file picker filter', () => {
     expect(input).toBeTruthy();
     // No accept attribute — the server enforces the deny-list.
     expect(input?.hasAttribute('accept')).toBe(false);
+  });
+});
+
+// ── Paste-to-attachment auto-conversion ──────────────────────────────────
+
+/** Build a minimal paste event with the given plain text on the clipboard. */
+function makePasteEvent(text: string, imageFiles?: File[]): ClipboardEvent {
+  const items: DataTransferItem[] = [];
+  if (imageFiles) {
+    for (const f of imageFiles) {
+      items.push({ kind: 'file', type: f.type, getAsFile: () => f, getAsString: () => {} } as any);
+    }
+  }
+  if (text) {
+    items.push({
+      kind: 'string',
+      type: 'text/plain',
+      getAsFile: () => null,
+      getAsString: (cb: (s: string) => void) => cb(text),
+    } as any);
+  }
+
+  const clipboardData = {
+    items,
+    getData: (format: string) => (format === 'text/plain' ? text : ''),
+  } as any;
+
+  const event = new Event('paste', { bubbles: true, cancelable: true }) as any;
+  event.clipboardData = clipboardData;
+  // Add a working preventDefault that sets defaultPrevented.
+  let prevented = false;
+  event.preventDefault = () => {
+    prevented = true;
+  };
+  Object.defineProperty(event, 'defaultPrevented', { get: () => prevented });
+  return event as ClipboardEvent;
+}
+
+describe('composer — paste-to-attachment', () => {
+  it('lets short pastes fall through to the textarea', () => {
+    const el = createComposer();
+    const shortText = 'a'.repeat(PASTE_TO_ATTACHMENT_THRESHOLD - 1);
+    const event = makePasteEvent(shortText);
+
+    el.handlePaste(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(apiFetch).not.toHaveBeenCalled();
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
+  it('converts pastes over the threshold into a text attachment upload', async () => {
+    const el = createComposer();
+    respondWith(201, {
+      attachments: [
+        {
+          id: 'att-paste',
+          name: 'pasted-text.txt',
+          mime: 'text/plain',
+          size: 1501,
+          url: '/api/v1/chat/attachments/att-paste',
+        },
+      ],
+      failures: [],
+    });
+    const longText = 'x'.repeat(PASTE_TO_ATTACHMENT_THRESHOLD + 1);
+    const event = makePasteEvent(longText);
+
+    el.handlePaste(event);
+
+    expect(event.defaultPrevented).toBe(true);
+    // uploadFiles is async — wait for the microtask to flush.
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(1));
+
+    // The uploaded FormData should contain a File with the pasted text.
+    const call = apiFetch.mock.calls[0];
+    expect(call[0]).toBe('/api/v1/chat/attachments');
+    const body = call[1].body as FormData;
+    const uploaded = body.get('files') as File;
+    expect(uploaded).toBeInstanceOf(File);
+    expect(uploaded.type).toBe('text/plain');
+    expect(uploaded.name).toMatch(/^pasted-text-.*\.txt$/);
+    const content = await uploaded.text();
+    expect(content).toBe(longText);
+
+    // Toast was shown.
+    expect(showToast).toHaveBeenCalledWith('Large paste converted to text attachment', 'primary');
+  });
+
+  it('gives image pastes precedence over text conversion', async () => {
+    const el = createComposer();
+    respondWith(201, { attachments: [], failures: [] });
+    const imageFile = new File(['img'], 'screenshot.png', { type: 'image/png' });
+    const longText = 'x'.repeat(PASTE_TO_ATTACHMENT_THRESHOLD + 500);
+    const event = makePasteEvent(longText, [imageFile]);
+
+    el.handlePaste(event);
+
+    expect(event.defaultPrevented).toBe(true);
+    // Wait for the image upload to complete so it doesn't leak into later tests.
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(1));
+    // The upload was for the image, not the text — no toast.
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
+  it('skips paste-to-attachment in edit mode', () => {
+    const el = createComposer();
+    el.editMessage = { messageId: 'msg-1', content: 'original' };
+    const longText = 'y'.repeat(PASTE_TO_ATTACHMENT_THRESHOLD + 100);
+    const event = makePasteEvent(longText);
+
+    el.handlePaste(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(apiFetch).not.toHaveBeenCalled();
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
+  it('does not convert pastes at exactly the threshold', () => {
+    const el = createComposer();
+    const exactText = 'a'.repeat(PASTE_TO_ATTACHMENT_THRESHOLD);
+    const event = makePasteEvent(exactText);
+
+    el.handlePaste(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('lets large paste fall through when at attachment limit', () => {
+    const el = createComposer();
+    // Simulate 10 pending files
+    el.pendingFiles = Array.from({ length: 10 }, (_, i) => ({
+      id: `att-${i}`,
+      name: `file-${i}.txt`,
+      mime: 'text/plain',
+      size: 100,
+      url: `/att/${i}`,
+    }));
+    const longText = 'z'.repeat(PASTE_TO_ATTACHMENT_THRESHOLD + 1);
+    const event = makePasteEvent(longText);
+
+    el.handlePaste(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(apiFetch).not.toHaveBeenCalled();
+    expect(showToast).not.toHaveBeenCalled();
   });
 });

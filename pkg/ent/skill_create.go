@@ -190,20 +190,6 @@ func (_c *SkillCreate) SetNillableUpdatedBy(v *string) *SkillCreate {
 	return _c
 }
 
-// SetVisibility sets the "visibility" field.
-func (_c *SkillCreate) SetVisibility(v string) *SkillCreate {
-	_c.mutation.SetVisibility(v)
-	return _c
-}
-
-// SetNillableVisibility sets the "visibility" field if the given value is not nil.
-func (_c *SkillCreate) SetNillableVisibility(v *string) *SkillCreate {
-	if v != nil {
-		_c.SetVisibility(*v)
-	}
-	return _c
-}
-
 // SetCreated sets the "created" field.
 func (_c *SkillCreate) SetCreated(v time.Time) *SkillCreate {
 	_c.mutation.SetCreated(v)
@@ -289,10 +275,6 @@ func (_c *SkillCreate) defaults() {
 		v := skill.DefaultStatus
 		_c.mutation.SetStatus(v)
 	}
-	if _, ok := _c.mutation.Visibility(); !ok {
-		v := skill.DefaultVisibility
-		_c.mutation.SetVisibility(v)
-	}
 	if _, ok := _c.mutation.Created(); !ok {
 		v := skill.DefaultCreated()
 		_c.mutation.SetCreated(v)
@@ -335,9 +317,6 @@ func (_c *SkillCreate) check() error {
 		if err := skill.StatusValidator(v); err != nil {
 			return &ValidationError{Name: "status", err: fmt.Errorf(`ent: validator failed for field "Skill.status": %w`, err)}
 		}
-	}
-	if _, ok := _c.mutation.Visibility(); !ok {
-		return &ValidationError{Name: "visibility", err: errors.New(`ent: missing required field "Skill.visibility"`)}
 	}
 	if _, ok := _c.mutation.Created(); !ok {
 		return &ValidationError{Name: "created", err: errors.New(`ent: missing required field "Skill.created"`)}
@@ -432,10 +411,6 @@ func (_c *SkillCreate) createSpec() (*Skill, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.UpdatedBy(); ok {
 		_spec.SetField(skill.FieldUpdatedBy, field.TypeString, value)
 		_node.UpdatedBy = value
-	}
-	if value, ok := _c.mutation.Visibility(); ok {
-		_spec.SetField(skill.FieldVisibility, field.TypeString, value)
-		_node.Visibility = value
 	}
 	if value, ok := _c.mutation.Created(); ok {
 		_spec.SetField(skill.FieldCreated, field.TypeTime, value)
@@ -704,18 +679,6 @@ func (u *SkillUpsert) UpdateUpdatedBy() *SkillUpsert {
 // ClearUpdatedBy clears the value of the "updated_by" field.
 func (u *SkillUpsert) ClearUpdatedBy() *SkillUpsert {
 	u.SetNull(skill.FieldUpdatedBy)
-	return u
-}
-
-// SetVisibility sets the "visibility" field.
-func (u *SkillUpsert) SetVisibility(v string) *SkillUpsert {
-	u.Set(skill.FieldVisibility, v)
-	return u
-}
-
-// UpdateVisibility sets the "visibility" field to the value that was provided on create.
-func (u *SkillUpsert) UpdateVisibility() *SkillUpsert {
-	u.SetExcluded(skill.FieldVisibility)
 	return u
 }
 
@@ -1024,20 +987,6 @@ func (u *SkillUpsertOne) UpdateUpdatedBy() *SkillUpsertOne {
 func (u *SkillUpsertOne) ClearUpdatedBy() *SkillUpsertOne {
 	return u.Update(func(s *SkillUpsert) {
 		s.ClearUpdatedBy()
-	})
-}
-
-// SetVisibility sets the "visibility" field.
-func (u *SkillUpsertOne) SetVisibility(v string) *SkillUpsertOne {
-	return u.Update(func(s *SkillUpsert) {
-		s.SetVisibility(v)
-	})
-}
-
-// UpdateVisibility sets the "visibility" field to the value that was provided on create.
-func (u *SkillUpsertOne) UpdateVisibility() *SkillUpsertOne {
-	return u.Update(func(s *SkillUpsert) {
-		s.UpdateVisibility()
 	})
 }
 
@@ -1515,20 +1464,6 @@ func (u *SkillUpsertBulk) UpdateUpdatedBy() *SkillUpsertBulk {
 func (u *SkillUpsertBulk) ClearUpdatedBy() *SkillUpsertBulk {
 	return u.Update(func(s *SkillUpsert) {
 		s.ClearUpdatedBy()
-	})
-}
-
-// SetVisibility sets the "visibility" field.
-func (u *SkillUpsertBulk) SetVisibility(v string) *SkillUpsertBulk {
-	return u.Update(func(s *SkillUpsert) {
-		s.SetVisibility(v)
-	})
-}
-
-// UpdateVisibility sets the "visibility" field to the value that was provided on create.
-func (u *SkillUpsertBulk) UpdateVisibility() *SkillUpsertBulk {
-	return u.Update(func(s *SkillUpsert) {
-		s.UpdateVisibility()
 	})
 }
 

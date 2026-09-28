@@ -60,8 +60,7 @@ func TestAC_DEF15_1_KeyDerivationConsolidation(t *testing.T) {
 			threadKeyFiles = append(threadKeyFiles, name)
 		}
 
-		// Check for directMessageExternalRef (now unexported).
-		// Count production definitions (not just references in comments).
+		// Reject the retired legacy DM-key constructor in production code.
 		for _, line := range strings.Split(content, "\n") {
 			trimmed := strings.TrimSpace(line)
 			// Skip comments.
@@ -80,8 +79,6 @@ func TestAC_DEF15_1_KeyDerivationConsolidation(t *testing.T) {
 	assert.Equal(t, []string{"derive_key.go"}, threadKeyFiles,
 		"AC-DEF15-1: thread key construction must be confined to derive_key.go")
 
-	// AC-DEF15-1: directMessageExternalRef (now unexported) must appear in
-	// exactly ONE non-test .go file (divergence.go).
-	assert.Equal(t, []string{"divergence.go"}, legacyDMRefFiles,
-		"AC-DEF15-1: directMessageExternalRef must be confined to divergence.go")
+	assert.Empty(t, legacyDMRefFiles,
+		"AC-DEF15-1: directMessageExternalRef must not appear in production code")
 }

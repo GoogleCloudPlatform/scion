@@ -24,9 +24,6 @@ import (
 )
 
 // CleanupNFSProject removes the NFS project subtree for a given project ID.
-// This mirrors the K8s-side cleanupSharedDirPVCs (k8s_runtime.go:753-770)
-// for the Docker/VM NFS model.
-//
 // The target path is <MountRoot>/<shareID>/projects/<projectID>/, which
 // contains the workspace and shared-dirs subdirectories.
 //

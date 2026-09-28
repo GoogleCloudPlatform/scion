@@ -49,20 +49,24 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/auth/cli/token":                         "public:cli-oauth",
 	"/api/v1/auth/cli/device":                        "public:cli-oauth",
 	"/api/v1/auth/cli/device/token":                  "public:cli-oauth",
+	"/api/v1/auth/integrations/google/exchange":      "public:ge-auth",
+	"/api/v1/conversations":                          "authenticated:conversation",
+	"/api/v1/conversations/":                         "authenticated:conversation",
+	"/api/v1/conversations/resolve":                  "authenticated:conversation",
 	"/api/v1/agents":                                 "policy:agent",
 	"/api/v1/agents/":                                "policy:agent",
 	"/api/v1/projects":                               "policy:project",
 	"/api/v1/projects/register":                      "policy:project-register",
 	"/api/v1/projects/":                              "policy:project-subroute",
-	"/api/v1/groves":                                 "policy:legacy-project",
-	"/api/v1/groves/register":                        "policy:legacy-project-register",
-	"/api/v1/groves/":                                "policy:legacy-project-subroute",
 	"/api/v1/runtime-brokers":                        "policy:broker",
 	"/api/v1/runtime-brokers/":                       "policy:broker",
 	"/api/v1/templates":                              "policy:template",
 	"/api/v1/templates/":                             "policy:template",
 	"/api/v1/gcp-service-accounts":                   "policy:gcp-service-account",
 	"/api/v1/gcp-service-accounts/":                  "policy:gcp-service-account",
+	"/api/v1/gcp-service-accounts/mint":              "policy:gcp-service-account",
+	"/api/v1/messaging/capabilities":                 "authenticated:messaging",
+	"/api/v1/messaging/targets/resolve":              "authenticated:messaging",
 	"/api/v1/skills":                                 "policy:skill",
 	"/api/v1/skills/":                                "policy:skill",
 	"/api/v1/skill-registries":                       "hub-admin:skill-registry",
@@ -94,6 +98,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/brokers/":                               "broker-hmac:broker",
 	"/api/v1/broker/callback":                        "broker-hmac:callback",
 	"/api/v1/broker/inbound":                         "broker-hmac:inbound",
+	"/api/v1/broker/inbound/routed":                  "broker-hmac:inbound-routed",
 	"/api/v1/broker/projects":                        "broker-hmac:projects",
 	"/api/v1/admin/maintenance":                      "hub-admin:maintenance",
 	"/api/v1/admin/maintenance/operations":           "hub-admin:maintenance",
@@ -101,6 +106,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/admin/maintenance/migrations/":          "hub-admin:maintenance",
 	"/api/v1/admin/maintenance/check-updates":        "hub-admin:maintenance",
 	"/api/v1/admin/maintenance/restart":              "hub-admin:maintenance",
+	"/api/v1/admin/maintenance/update-available":     "hub-admin:maintenance",
 	"/api/v1/admin/scheduler":                        "hub-admin:scheduler",
 	"/api/v1/admin/allow-list":                       "hub-admin:allow-list",
 	"/api/v1/admin/allow-list/":                      "hub-admin:allow-list",
@@ -123,6 +129,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/admin/diagnostics/logs/stream":          "hub-admin:diagnostics",
 	"/api/v1/admin/diagnostics/logs":                 "hub-admin:diagnostics",
 	"/api/v1/admin/health/summary":                   "hub-admin:health",
+	"/api/v1/admin/messaging":                        "hub-admin:messaging",
 	"/api/v1/admin/messaging/divergence":             "hub-admin:diagnostics",
 	"/api/v1/metrics/":                               "hub-admin:metrics-dashboard",
 	"/api/v1/admin/metrics-dashboard":                "hub-admin:metrics-dashboard",
@@ -467,7 +474,8 @@ func scopedAdminUATRouteRequest(route string) (string, string, *bytes.Reader) {
 		"/api/v1/admin/agents/reset-auth-all", "/api/v1/admin/maintenance/check-updates",
 		"/api/v1/admin/maintenance/restart":
 		method = http.MethodPost
-	case "/api/v1/admin/server-config", "/api/v1/admin/project-defaults":
+	case "/api/v1/admin/server-config", "/api/v1/admin/project-defaults",
+		"/api/v1/admin/messaging":
 		method = http.MethodPut
 		body = "{}"
 	case "/api/v1/hub/settings/injected-skills":

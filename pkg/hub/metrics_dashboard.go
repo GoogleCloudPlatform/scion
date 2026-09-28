@@ -163,6 +163,78 @@ func (c *queryConfig) cacheKeySuffix() string {
 	return ""
 }
 
+type metricsQueryWindow struct {
+	start       time.Time
+	end         time.Time
+	extraFilter []string
+}
+
+func metricsQueryWindowFor(now time.Time, periodDays int, cfg *queryConfig) metricsQueryWindow {
+	now = now.UTC()
+	window := metricsQueryWindow{
+		start: now.AddDate(0, 0, -periodDays),
+		end:   now,
+	}
+	if cfg.ProjectID != "" {
+		window.extraFilter = []string{projectFilter(cfg.ProjectID)}
+	}
+	return window
+}
+
+type groupedTimeSeriesQuery struct {
+	metricName string
+	groupBy    string
+	errorLabel string
+}
+
+func queryGroupedTimeSeriesSet(
+	queries []groupedTimeSeriesQuery,
+	run func(metricName, groupBy string) ([]LabeledTimeSeries, error),
+) ([][]LabeledTimeSeries, error) {
+	results := make([][]LabeledTimeSeries, len(queries))
+	var queryErrors []string
+	for i, query := range queries {
+		series, err := run(query.metricName, query.groupBy)
+		if err != nil {
+			queryErrors = append(queryErrors, fmt.Sprintf("%s: %v", query.errorLabel, err))
+			continue
+		}
+		results[i] = series
+	}
+	if len(queryErrors) > 0 {
+		return results, fmt.Errorf("partial query failures: %s", strings.Join(queryErrors, "; "))
+	}
+	return results, nil
+}
+
+func queryGroupedMetricsView[T any](
+	s *MetricsDashboardService,
+	ctx context.Context,
+	cachePrefix string,
+	periodDays int,
+	opts []QueryOption,
+	queries []groupedTimeSeriesQuery,
+	build func([][]LabeledTimeSeries) *T,
+) (*T, error) {
+	cfg := applyQueryOptions(opts)
+	cacheKey := fmt.Sprintf("%s:%d%s", cachePrefix, periodDays, cfg.cacheKeySuffix())
+	if cached, ok := s.getCached(cacheKey); ok {
+		return cached.(*T), nil
+	}
+
+	window := metricsQueryWindowFor(time.Now(), periodDays, cfg)
+	series, err := queryGroupedTimeSeriesSet(queries, func(metricName, groupBy string) ([]LabeledTimeSeries, error) {
+		return s.queryGroupedTimeSeries(ctx, metricName, groupBy, window.start, window.end, window.extraFilter)
+	})
+	view := build(series)
+	if err != nil {
+		return view, err
+	}
+
+	s.setCache(cacheKey, view)
+	return view, nil
+}
+
 // projectFilter returns the Cloud Monitoring filter clause for a project ID.
 func projectFilter(projectID string) string {
 	return fmt.Sprintf(`metric.labels.project_id = "%s"`, projectID)
@@ -176,42 +248,36 @@ func (s *MetricsDashboardService) QuerySummary(ctx context.Context, periodDays i
 		return cached.(*DashboardSummary), nil
 	}
 
-	now := time.Now().UTC()
-	start := now.AddDate(0, 0, -periodDays)
-
-	var extraFilter []string
-	if cfg.ProjectID != "" {
-		extraFilter = append(extraFilter, projectFilter(cfg.ProjectID))
-	}
+	window := metricsQueryWindowFor(time.Now(), periodDays, cfg)
 
 	summary := &DashboardSummary{PeriodDays: periodDays}
 	var queryErrors []string
 
-	sessions, err := s.querySum(ctx, "agent.session.count", start, now, extraFilter)
+	sessions, err := s.querySum(ctx, "agent.session.count", window.start, window.end, window.extraFilter)
 	if err != nil {
 		queryErrors = append(queryErrors, fmt.Sprintf("session count: %v", err))
 	} else {
 		summary.TotalSessions = sessions
 	}
 
-	apiCalls, err := s.querySum(ctx, "gen_ai.api.calls", start, now, extraFilter)
+	apiCalls, err := s.querySum(ctx, "gen_ai.api.calls", window.start, window.end, window.extraFilter)
 	if err != nil {
 		queryErrors = append(queryErrors, fmt.Sprintf("API calls: %v", err))
 	} else {
 		summary.TotalAPICalls = apiCalls
 	}
 
-	inputTokens, err := s.querySum(ctx, "gen_ai.tokens.input", start, now, extraFilter)
+	inputTokens, err := s.querySum(ctx, "gen_ai.tokens.input", window.start, window.end, window.extraFilter)
 	if err != nil {
 		queryErrors = append(queryErrors, fmt.Sprintf("input tokens: %v", err))
 	}
-	outputTokens, err := s.querySum(ctx, "gen_ai.tokens.output", start, now, extraFilter)
+	outputTokens, err := s.querySum(ctx, "gen_ai.tokens.output", window.start, window.end, window.extraFilter)
 	if err != nil {
 		queryErrors = append(queryErrors, fmt.Sprintf("output tokens: %v", err))
 	}
 	summary.TotalTokens = inputTokens + outputTokens
 
-	agents, err := s.queryUniqueLabels(ctx, "agent.session.count", "metric.labels.agent_id", start, now, extraFilter)
+	agents, err := s.queryUniqueLabels(ctx, "agent.session.count", "metric.labels.agent_id", window.start, window.end, window.extraFilter)
 	if err != nil {
 		queryErrors = append(queryErrors, fmt.Sprintf("unique agents: %v", err))
 	} else {
@@ -234,25 +300,19 @@ func (s *MetricsDashboardService) QuerySessions(ctx context.Context, periodDays 
 		return cached.(*SessionsView), nil
 	}
 
-	now := time.Now().UTC()
-	start := now.AddDate(0, 0, -periodDays)
-
-	var extraFilter []string
-	if cfg.ProjectID != "" {
-		extraFilter = append(extraFilter, projectFilter(cfg.ProjectID))
-	}
+	window := metricsQueryWindowFor(time.Now(), periodDays, cfg)
 
 	view := &SessionsView{PeriodDays: periodDays}
 	var queryErrors []string
 
-	dailyCounts, err := s.queryDailyTimeSeries(ctx, "agent.session.count", start, now, extraFilter)
+	dailyCounts, err := s.queryDailyTimeSeries(ctx, "agent.session.count", window.start, window.end, window.extraFilter)
 	if err != nil {
 		queryErrors = append(queryErrors, fmt.Sprintf("daily sessions: %v", err))
 	} else {
 		view.DailyCounts = dailyCounts
 	}
 
-	activeAgents, err := s.queryDailyUniqueCount(ctx, "agent.session.count", "metric.labels.agent_id", start, now, extraFilter)
+	activeAgents, err := s.queryDailyUniqueCount(ctx, "agent.session.count", "metric.labels.agent_id", window.start, window.end, window.extraFilter)
 	if err != nil {
 		queryErrors = append(queryErrors, fmt.Sprintf("active agents: %v", err))
 	} else {
@@ -269,84 +329,22 @@ func (s *MetricsDashboardService) QuerySessions(ctx context.Context, periodDays 
 
 // QueryModelCalls returns API call data grouped by model and harness.
 func (s *MetricsDashboardService) QueryModelCalls(ctx context.Context, periodDays int, opts ...QueryOption) (*ModelCallsView, error) {
-	cfg := applyQueryOptions(opts)
-	cacheKey := fmt.Sprintf("model-calls:%d%s", periodDays, cfg.cacheKeySuffix())
-	if cached, ok := s.getCached(cacheKey); ok {
-		return cached.(*ModelCallsView), nil
-	}
-
-	now := time.Now().UTC()
-	start := now.AddDate(0, 0, -periodDays)
-
-	var extraFilter []string
-	if cfg.ProjectID != "" {
-		extraFilter = append(extraFilter, projectFilter(cfg.ProjectID))
-	}
-
-	view := &ModelCallsView{PeriodDays: periodDays}
-	var queryErrors []string
-
-	byModel, err := s.queryGroupedTimeSeries(ctx, "gen_ai.api.calls", "metric.labels.model", start, now, extraFilter)
-	if err != nil {
-		queryErrors = append(queryErrors, fmt.Sprintf("by model: %v", err))
-	} else {
-		view.ByModel = byModel
-	}
-
-	byHarness, err := s.queryGroupedTimeSeries(ctx, "gen_ai.api.calls", "metric.labels.harness", start, now, extraFilter)
-	if err != nil {
-		queryErrors = append(queryErrors, fmt.Sprintf("by harness: %v", err))
-	} else {
-		view.ByHarness = byHarness
-	}
-
-	if len(queryErrors) > 0 {
-		return view, fmt.Errorf("partial query failures: %s", strings.Join(queryErrors, "; "))
-	}
-
-	s.setCache(cacheKey, view)
-	return view, nil
+	return queryGroupedMetricsView(s, ctx, "model-calls", periodDays, opts, []groupedTimeSeriesQuery{
+		{metricName: "gen_ai.api.calls", groupBy: "metric.labels.model", errorLabel: "by model"},
+		{metricName: "gen_ai.api.calls", groupBy: "metric.labels.harness", errorLabel: "by harness"},
+	}, func(series [][]LabeledTimeSeries) *ModelCallsView {
+		return &ModelCallsView{PeriodDays: periodDays, ByModel: series[0], ByHarness: series[1]}
+	})
 }
 
 // QueryTokens returns token usage data grouped by model.
 func (s *MetricsDashboardService) QueryTokens(ctx context.Context, periodDays int, opts ...QueryOption) (*TokensView, error) {
-	cfg := applyQueryOptions(opts)
-	cacheKey := fmt.Sprintf("tokens:%d%s", periodDays, cfg.cacheKeySuffix())
-	if cached, ok := s.getCached(cacheKey); ok {
-		return cached.(*TokensView), nil
-	}
-
-	now := time.Now().UTC()
-	start := now.AddDate(0, 0, -periodDays)
-
-	var extraFilter []string
-	if cfg.ProjectID != "" {
-		extraFilter = append(extraFilter, projectFilter(cfg.ProjectID))
-	}
-
-	view := &TokensView{PeriodDays: periodDays}
-	var queryErrors []string
-
-	input, err := s.queryGroupedTimeSeries(ctx, "gen_ai.tokens.input", "metric.labels.model", start, now, extraFilter)
-	if err != nil {
-		queryErrors = append(queryErrors, fmt.Sprintf("input tokens: %v", err))
-	} else {
-		view.Input = input
-	}
-
-	output, err := s.queryGroupedTimeSeries(ctx, "gen_ai.tokens.output", "metric.labels.model", start, now, extraFilter)
-	if err != nil {
-		queryErrors = append(queryErrors, fmt.Sprintf("output tokens: %v", err))
-	} else {
-		view.Output = output
-	}
-
-	if len(queryErrors) > 0 {
-		return view, fmt.Errorf("partial query failures: %s", strings.Join(queryErrors, "; "))
-	}
-
-	s.setCache(cacheKey, view)
-	return view, nil
+	return queryGroupedMetricsView(s, ctx, "tokens", periodDays, opts, []groupedTimeSeriesQuery{
+		{metricName: "gen_ai.tokens.input", groupBy: "metric.labels.model", errorLabel: "input tokens"},
+		{metricName: "gen_ai.tokens.output", groupBy: "metric.labels.model", errorLabel: "output tokens"},
+	}, func(series [][]LabeledTimeSeries) *TokensView {
+		return &TokensView{PeriodDays: periodDays, Input: series[0], Output: series[1]}
+	})
 }
 
 // querySum queries a metric and returns the total sum across all time series and points.

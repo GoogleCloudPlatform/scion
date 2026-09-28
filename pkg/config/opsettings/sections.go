@@ -27,6 +27,7 @@ import (
 type AccessSettings struct {
 	AdminEmails       []string `json:"admin_emails,omitempty"`
 	UserAccessMode    string   `json:"user_access_mode,omitempty"`
+	DefaultUserRole   string   `json:"default_user_role,omitempty"`
 	AuthorizedDomains []string `json:"authorized_domains,omitempty"`
 }
 
@@ -69,6 +70,17 @@ type AgentDefaultsSettings struct {
 	DefaultMaxAgentRole  string            `json:"default_max_agent_role,omitempty"`
 	DefaultAgentRole     string            `json:"default_agent_role,omitempty"`
 	DefaultRuntimeBroker string            `json:"default_runtime_broker,omitempty"`
+	// DefaultTimezone is the hub-level IANA timezone fallback (e.g.
+	// "America/Los_Angeles"). Applied as TZ when neither the profile's
+	// first-class timezone field nor a raw TZ in the profile env is set.
+	DefaultTimezone string `json:"default_timezone,omitempty"`
+	// DefaultGCPIdentityMode is the hub-wide fallback GCP metadata mode
+	// ("block", "passthrough", or "assign") applied when neither the agent
+	// create request nor the project's default GCP identity setting names one.
+	DefaultGCPIdentityMode string `json:"default_gcp_identity_mode,omitempty"`
+	// DefaultGCPIdentityServiceAccountID is the service account used when
+	// DefaultGCPIdentityMode is "assign". Ignored otherwise.
+	DefaultGCPIdentityServiceAccountID string `json:"default_gcp_identity_service_account_id,omitempty"`
 }
 
 // EndpointsSettings holds Layer-1 endpoint configuration.
@@ -124,7 +136,26 @@ type HarnessConfigsSettings = map[string]config.HarnessConfigEntry
 
 // MessagingSettings holds Layer-1 messaging configuration.
 // DB-only (runtime state), no settings.yaml representation.
-// The ConversationReadSwitch flag gates the Phase 8 read-switch migration.
+//
+// ConversationEnvelopeSwitch is the consolidated switch that replaces the
+// former conversation_read_switch and conversation_write_deny_switch.
+// It defaults ON when absent or omitted, and OFF when the document is
+// malformed (Phase 9a §4.6).
+//
+// The two stale fields are retained for deserialization of existing rows
+// (Go's json.Unmarshal ignores unknown fields, but keeping them lets us
+// read old documents cleanly). They are never written by new code and
+// self-clean on first PUT via the admin endpoint.
 type MessagingSettings struct {
-	ConversationReadSwitch *bool `json:"conversation_read_switch,omitempty"`
+	ConversationEnvelopeSwitch *bool `json:"conversation_envelope_switch,omitempty"`
+
+	// CrossProjectMessagingEnabled controls whether agents may communicate
+	// across project boundaries on this Hub. Default false (off).
+	// This is a security-critical flag requiring revision/ETag concurrency.
+	CrossProjectMessagingEnabled *bool `json:"cross_project_messaging_enabled,omitempty"`
+
+	// Stale fields — kept for backward-compatible deserialization only.
+	// New code must not read or write these.
+	ConversationReadSwitch      *bool `json:"conversation_read_switch,omitempty"`
+	ConversationWriteDenySwitch *bool `json:"conversation_write_deny_switch,omitempty"`
 }

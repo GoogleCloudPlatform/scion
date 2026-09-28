@@ -272,11 +272,3 @@ func TestAuthz_AgentAssignBaseline_AllowPolicyStillWins(t *testing.T) {
 	assert.False(t, decision.Allowed,
 		"CO1: baseline agent lacks project:agent:create scope; gcp_service_account.assign blocked")
 }
-
-// TestAuthz_AssignIsNotReadClass pins that the arm was added without widening
-// the read-class set. Widening isReadClassAction would have granted assign on
-// every resource type rather than on service accounts alone.
-func TestAuthz_AssignIsNotReadClass(t *testing.T) {
-	assert.False(t, isReadClassAction(ActionAssign),
-		"ActionAssign must not be read-class; the assign baseline is a separate, resource-type-scoped arm")
-}

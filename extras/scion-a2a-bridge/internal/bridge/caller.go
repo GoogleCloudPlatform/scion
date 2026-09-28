@@ -23,11 +23,15 @@ import (
 // validated hub credential. Absent for legacy apiKey/bearer/none modes.
 type CallerIdentity struct {
 	// --- Existing fields (user callers) ---
-	UserID    string
-	Email     string
-	Role      string
-	RawToken  string // The original bearer token for passthrough
-	TokenType string // "uat", "jwt", or "federation"
+	UserID   string
+	Email    string
+	Role     string
+	RawToken string // The original bearer token for passthrough
+	// TokenType is "uat" (Scion scion_pat_* user access token), "bearer" (any
+	// other bearer credential the Hub accepted via /auth/me, e.g. a forwarded
+	// Google token under the hubBearer scheme), "jwt", "federation", or
+	// "ge_exchange" (a token exchanged for a Hub JWT under the geGoogle scheme).
+	TokenType string
 
 	// --- New fields (agent/federation callers) ---
 
@@ -77,9 +81,15 @@ func (c *CallerIdentity) CallerKey() string {
 
 type callerContextKey struct{}
 
-// withCallerIdentity injects a CallerIdentity into the context.
-func withCallerIdentity(ctx context.Context, id *CallerIdentity) context.Context {
+// WithCallerIdentity injects a CallerIdentity into the context.
+// Exported for use in test infrastructure (subprocess servers).
+func WithCallerIdentity(ctx context.Context, id *CallerIdentity) context.Context {
 	return context.WithValue(ctx, callerContextKey{}, id)
+}
+
+// withCallerIdentity is the internal alias kept for existing callers.
+func withCallerIdentity(ctx context.Context, id *CallerIdentity) context.Context {
+	return WithCallerIdentity(ctx, id)
 }
 
 // callerIdentityFromContext retrieves the CallerIdentity from the context.

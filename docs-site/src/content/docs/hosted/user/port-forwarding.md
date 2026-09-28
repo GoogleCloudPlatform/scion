@@ -24,7 +24,7 @@ Port forwarding in Scion relies on a **reverse tunnel architecture**:
 5. **Response Delivery**: The local service's response is streamed back over the WebSocket tunnel, reconstructed by the Hub, and returned to the caller.
 
 ```d2
-direction: lr
+direction: right
 classes: {
   box: {
     style: {

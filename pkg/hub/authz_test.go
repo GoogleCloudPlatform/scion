@@ -396,25 +396,6 @@ func TestAuthz_ResourceTypeMismatch(t *testing.T) {
 	assert.False(t, decision.Allowed)
 }
 
-func TestEvaluatePolicies_NoMatch(t *testing.T) {
-	// CO1: Legacy function removed; test retained as shell.
-}
-
-func TestMatchesAction(t *testing.T) {
-	// CO1: Legacy function removed; test retained as shell.
-}
-
-func TestMatchesResource(t *testing.T) {
-	// CO1: Legacy function removed; test retained as shell.
-}
-
-func TestScopeLevel(t *testing.T) {
-	assert.Equal(t, 0, scopeLevel("hub"))
-	assert.Equal(t, 1, scopeLevel("project"))
-	assert.Equal(t, 2, scopeLevel("resource"))
-	assert.Equal(t, -1, scopeLevel("unknown"))
-}
-
 func TestAuthz_BrokerDispatch_OwnerAllowed(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()
@@ -1250,8 +1231,8 @@ func TestGetEffectivePermissions_AppliesConstraintIntersection(t *testing.T) {
 // ===========================================================================
 
 // TestGetEffectivePermissions_PrincipalConstraintTargetingGroup verifies that
-// a {principal, group, G} constraint is enforced by getEffectivePermissions
-// when the user is a member of group G.
+// a group_closure constraint is enforced by getEffectivePermissions when the
+// user is a member of the targeted group.
 // Regression test for B1 fix 1: exact-principal matching fail-open.
 func TestGetEffectivePermissions_PrincipalConstraintTargetingGroup(t *testing.T) {
 	authz, s := authzTestSetup(t)
@@ -1286,17 +1267,14 @@ func TestGetEffectivePermissions_PrincipalConstraintTargetingGroup(t *testing.T)
 	})
 	require.NoError(t, err)
 
-	// Create a constraint targeting group:b1-target-group that allows only agent.read.
-	groupIDStr := groupID
-	principalType := "group"
+	// Create a group_closure constraint targeting b1-target-group that allows only agent.read.
 	_, err = s.CreateAccessConstraint(ctx, &store.AccessConstraint{
-		Name:                 "b1-group-targeting-constraint",
-		SubjectKind:          store.ConstraintSubjectPrincipal,
-		SubjectPrincipalType: &principalType,
-		SubjectPrincipalID:   &groupIDStr,
-		ScopeType:            store.RoleScopeSystem,
-		MaximumPermissions:   []string{"agent.read"},
-		Purpose:              "B1 test: group-targeted principal constraint",
+		Name:               "b1-group-targeting-constraint",
+		SubjectKind:        store.ConstraintSubjectGroupClosure,
+		SubjectGroupID:     &groupID,
+		ScopeType:          store.RoleScopeSystem,
+		MaximumPermissions: []string{"agent.read"},
+		Purpose:            "B1 test: group_closure constraint targeting group members",
 	})
 	require.NoError(t, err)
 
@@ -1305,7 +1283,7 @@ func TestGetEffectivePermissions_PrincipalConstraintTargetingGroup(t *testing.T)
 
 	assert.Contains(t, perms, "agent.read", "agent.read should survive the constraint")
 	assert.NotContains(t, perms, "project.read",
-		"project.read should be removed by group-targeted principal constraint")
+		"project.read should be removed by group_closure constraint")
 }
 
 // TestGetEffectivePermissions_ProjectScopeConstraint verifies that project-scoped
@@ -1448,14 +1426,14 @@ func TestGetEffectivePermissions_GroupResolutionFailure_FailsClosed(t *testing.T
 	assert.ErrorIs(t, err, injectedErr, "original error must be wrapped")
 }
 
-// TestResolveConstraintAdminUsers_GetGroupMembersFailure_FailsClosed verifies
+// TestResolveAdminUsers_GetGroupMembersFailure_FailsClosed verifies
 // that when GetGroupMembers returns an error during lockout resolution,
-// resolveConstraintAdminUsers propagates the error (fail-closed) instead of
+// resolveAdminUsers propagates the error (fail-closed) instead of
 // silently continuing with incomplete admin data.
 //
 // Regression test for B1 fix 4a: lockout helper store fault → reject mutation.
-func TestResolveConstraintAdminUsers_GetGroupMembersFailure_FailsClosed(t *testing.T) {
-	srv, realStore := testServer(t)
+func TestResolveAdminUsers_GetGroupMembersFailure_FailsClosed(t *testing.T) {
+	_, realStore := testServer(t)
 	ctx := context.Background()
 
 	// Create a group and a role with constraint-admin permission.
@@ -1476,29 +1454,29 @@ func TestResolveConstraintAdminUsers_GetGroupMembersFailure_FailsClosed(t *testi
 	})
 	require.NoError(t, err)
 
-	// Inject GetGroupMembers error and replace the store on the server.
+	// Inject GetGroupMembers error into the production lockout resolver.
 	injectedErr := errors.New("simulated GetGroupMembers failure")
 	errStore := &errorInjectingStore{
 		Store:              realStore,
 		getGroupMembersErr: injectedErr,
 	}
-	srv.store = errStore
+	preview := &PreviewService{store: errStore}
 
-	_, err = srv.resolveConstraintAdminUsers(ctx, ScopeTypeSystem, "")
+	_, err = preview.resolveAdminUsers(ctx, ScopeTypeSystem, "")
 
 	// Must fail closed: error propagates instead of continuing with empty members.
-	assert.Error(t, err, "resolveConstraintAdminUsers must propagate GetGroupMembers error")
+	assert.Error(t, err, "resolveAdminUsers must propagate GetGroupMembers error")
 	assert.ErrorIs(t, err, injectedErr, "original error must be wrapped")
 }
 
-// TestResolveConstraintAdminUsers_GetEffectiveGroupsFailure_FailsClosed verifies
+// TestResolveAdminUsers_GetEffectiveGroupsFailure_FailsClosed verifies
 // that when GetEffectiveGroups returns an error during lockout resolution,
-// resolveConstraintAdminUsers propagates the error (fail-closed) instead of
+// resolveAdminUsers propagates the error (fail-closed) instead of
 // silently setting groupIDs to nil.
 //
 // Regression test for B1 fix 4b: lockout helper store fault → reject mutation.
-func TestResolveConstraintAdminUsers_GetEffectiveGroupsFailure_FailsClosed(t *testing.T) {
-	srv, realStore := testServer(t)
+func TestResolveAdminUsers_GetEffectiveGroupsFailure_FailsClosed(t *testing.T) {
+	_, realStore := testServer(t)
 	ctx := context.Background()
 
 	// Create a user and bind them directly to a constraint-admin role.
@@ -1519,17 +1497,17 @@ func TestResolveConstraintAdminUsers_GetEffectiveGroupsFailure_FailsClosed(t *te
 	})
 	require.NoError(t, err)
 
-	// Inject GetEffectiveGroups error and replace the store on the server.
+	// Inject GetEffectiveGroups error into the production lockout resolver.
 	injectedErr := errors.New("simulated GetEffectiveGroups failure")
 	errStore := &errorInjectingStore{
 		Store:                 realStore,
 		getEffectiveGroupsErr: injectedErr,
 	}
-	srv.store = errStore
+	preview := &PreviewService{store: errStore}
 
-	_, err = srv.resolveConstraintAdminUsers(ctx, ScopeTypeSystem, "")
+	_, err = preview.resolveAdminUsers(ctx, ScopeTypeSystem, "")
 
 	// Must fail closed: error propagates instead of setting groupIDs = nil.
-	assert.Error(t, err, "resolveConstraintAdminUsers must propagate GetEffectiveGroups error")
+	assert.Error(t, err, "resolveAdminUsers must propagate GetEffectiveGroups error")
 	assert.ErrorIs(t, err, injectedErr, "original error must be wrapped")
 }

@@ -30,8 +30,8 @@ import (
 // --- Registry completeness tests ---
 
 func TestRegistryHasAllSections(t *testing.T) {
-	expected := []string{"access", "lifecycle", "maintenance", "telemetry",
-		"agent_defaults", "endpoints", "github_app", "notifications",
+	expected := []string{"access", "lifecycle", "maintenance", "messaging",
+		"telemetry", "agent_defaults", "endpoints", "github_app", "notifications",
 		"project_defaults", "auto_expose_ports", "federation"}
 	for _, name := range expected {
 		if SectionByName(name) == nil {
@@ -68,6 +68,7 @@ func TestSectionHasKoanfPaths(t *testing.T) {
 	// Sections that are DB-only (no settings.yaml representation).
 	dbOnlySections := map[string]bool{
 		"maintenance": true,
+		"messaging":   true,
 	}
 	for _, sec := range Registry {
 		if dbOnlySections[sec.Name] {
@@ -140,6 +141,33 @@ func TestMaintenanceHasNoOwnedKeys(t *testing.T) {
 	}
 }
 
+func TestMessagingHasNoOwnedKeys(t *testing.T) {
+	keys := []string{
+		"messaging.conversation_envelope_switch",
+	}
+	for _, key := range keys {
+		if sec := OwningSection(key); sec != "" {
+			t.Errorf("messaging has no KoanfPaths, but OwningSection(%q) returned %q", key, sec)
+		}
+	}
+}
+
+// TestMessagingNotSeeded verifies that syncHubSettings skips the messaging
+// section because KoanfPaths is nil. The seeding loop condition is:
+//
+//	if len(sec.KoanfPaths) == 0 { continue }
+//
+// A seeded messaging row would be a behaviour change on every existing deployment.
+func TestMessagingNotSeeded(t *testing.T) {
+	sec := SectionByName("messaging")
+	if sec == nil {
+		t.Fatal("messaging section not found in registry")
+	}
+	if len(sec.KoanfPaths) != 0 {
+		t.Fatalf("messaging section has non-empty KoanfPaths %v; syncHubSettings will seed it at startup", sec.KoanfPaths)
+	}
+}
+
 func TestLayer0KeyNotOwned(t *testing.T) {
 	layer0Keys := []string{
 		"server.database.driver",
@@ -202,6 +230,8 @@ func TestValidateValidDoc(t *testing.T) {
 		{"federation", `{"enabled":true,"trusted_issuers":[{"issuer_url":"https://hub.example.com","issuer_type":"hub"}],"algorithms":["RS256"]}`},
 		{"federation", `{"enabled":false}`},
 		{"federation", `{}`},
+		{"federation", `{"enabled":true,"trusted_issuers":[{"issuer_url":"https://accounts.google.com","issuer_type":"user","expected_audience":"client-id","allowed_gcp_projects":["my-project"]}]}`},
+		{"federation", `{"enabled":true,"trusted_issuers":[{"issuer_url":"https://accounts.google.com","issuer_type":"user","expected_audience":"client-id","allowed_domains":["example.com"]}]}`},
 	}
 	for _, tt := range tests {
 		errs := Validate(tt.section, json.RawMessage(tt.doc))
@@ -267,6 +297,13 @@ func TestFederationSettingsRoundTrip(t *testing.T) {
 				DefaultScopes:    []string{"agent:status:update"},
 				IssuerType:       "hub",
 			},
+			{
+				IssuerURL:          "https://accounts.google.com",
+				ExpectedAudience:   "client-id.apps.googleusercontent.com",
+				IssuerType:         "user",
+				AllowedGCPProjects: []string{"gcp-proj-1"},
+				AllowedDomains:     []string{"Example.com"},
+			},
 		},
 		Algorithms:       []string{"RS256"},
 		RefreshInterval:  "1h",
@@ -286,14 +323,20 @@ func TestFederationSettingsRoundTrip(t *testing.T) {
 	if *restored.Enabled != true {
 		t.Errorf("Enabled: got %v, want true", *restored.Enabled)
 	}
-	if len(restored.TrustedIssuers) != 1 {
-		t.Fatalf("TrustedIssuers: got %d, want 1", len(restored.TrustedIssuers))
+	if len(restored.TrustedIssuers) != 2 {
+		t.Fatalf("TrustedIssuers: got %d, want 2", len(restored.TrustedIssuers))
 	}
 	if restored.TrustedIssuers[0].IssuerURL != "https://hub-a.example.com" {
 		t.Errorf("IssuerURL: got %q, want %q", restored.TrustedIssuers[0].IssuerURL, "https://hub-a.example.com")
 	}
 	if restored.TrustedIssuers[0].IssuerType != "hub" {
 		t.Errorf("IssuerType: got %q, want %q", restored.TrustedIssuers[0].IssuerType, "hub")
+	}
+	if got, want := restored.TrustedIssuers[1].AllowedGCPProjects, []string{"gcp-proj-1"}; len(got) != 1 || got[0] != want[0] {
+		t.Errorf("AllowedGCPProjects: got %v, want %v", got, want)
+	}
+	if got, want := restored.TrustedIssuers[1].AllowedDomains, []string{"Example.com"}; len(got) != 1 || got[0] != want[0] {
+		t.Errorf("AllowedDomains: got %v, want %v", got, want)
 	}
 	if restored.RefreshInterval != "1h" {
 		t.Errorf("RefreshInterval: got %q, want %q", restored.RefreshInterval, "1h")
@@ -587,6 +630,33 @@ func TestRoundTripDefaultResources(t *testing.T) {
 	}
 }
 
+// The hub-default GCP identity keys must survive bootstrap extraction:
+// syncHubSettings seeds/re-syncs the agent_defaults row from this document on
+// every boot, so a key missing here is silently dropped on SQLite restart.
+func TestExtractAgentDefaults_GCPIdentityKeys(t *testing.T) {
+	k := koanf.New(".")
+	_ = k.Load(confmap.Provider(map[string]interface{}{
+		"default_gcp_identity_mode":               "assign",
+		"default_gcp_identity_service_account_id": "sa-123",
+	}, "."), nil)
+
+	raw, err := ExtractSectionFromKoanf(k, "agent_defaults")
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+
+	var settings AgentDefaultsSettings
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		t.Fatalf("unmarshal into AgentDefaultsSettings: %v", err)
+	}
+	if settings.DefaultGCPIdentityMode != "assign" {
+		t.Errorf("DefaultGCPIdentityMode = %q, want assign", settings.DefaultGCPIdentityMode)
+	}
+	if settings.DefaultGCPIdentityServiceAccountID != "sa-123" {
+		t.Errorf("DefaultGCPIdentityServiceAccountID = %q, want sa-123", settings.DefaultGCPIdentityServiceAccountID)
+	}
+}
+
 // N1: Stronger round-trip using a real settings.yaml through the koanf YAML
 // parser, matching the actual config loader chain.
 func TestRoundTripFromYAMLFile(t *testing.T) {
@@ -856,6 +926,8 @@ func TestClassifyKeys_AllLayer0Prefixes(t *testing.T) {
 		"server.secrets",
 		"server.storage",
 		"server.workspace_storage",
+		"server.shared_dir_storage",
+		"server.shared_dir_storage.nfs",
 		"server.mode",
 		"server.env",
 		"server.hub.hub_id",

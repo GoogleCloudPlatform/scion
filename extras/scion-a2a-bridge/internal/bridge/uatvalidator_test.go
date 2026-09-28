@@ -189,6 +189,47 @@ func TestUATValidator_DefaultAndMaxTTL(t *testing.T) {
 	}
 }
 
+// TestUATValidator_TokenTypeClassification proves the scion_pat_* / other
+// split that server.go's hubBearer case and bridge.go's callerHubClient rely
+// on: only a scion_pat_* token is classified "uat"; anything else the Hub
+// accepted (reachable only via the hubBearer scheme) is "bearer". If this
+// classification were ever changed to always "uat", callerHubClient would
+// still forward the token correctly (since it handles both types
+// identically), but CallerIdentity.TokenType — used for task-bookkeeping and
+// log labels — would misreport a forwarded Google credential as a Scion PAT.
+func TestUATValidator_TokenTypeClassification(t *testing.T) {
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(userResponse{
+			ID:    "user-1",
+			Email: "alice@example.com",
+			Role:  "user",
+		})
+	}))
+	defer hub.Close()
+
+	v := NewUATValidator(hub.URL, 60*time.Second)
+	ctx := context.Background()
+
+	patIdentity, err := v.Validate(ctx, "scion_pat_abc123")
+	if err != nil {
+		t.Fatalf("Validate(scion_pat_*): %v", err)
+	}
+	if patIdentity.TokenType != "uat" {
+		t.Errorf("TokenType for scion_pat_* = %q, want %q", patIdentity.TokenType, "uat")
+	}
+
+	bearerIdentity, err := v.Validate(ctx, "a-google-issued-id-token-not-a-pat")
+	if err != nil {
+		t.Fatalf("Validate(non-pat): %v", err)
+	}
+	if bearerIdentity.TokenType != "bearer" {
+		t.Errorf("TokenType for non-pat token = %q, want %q", bearerIdentity.TokenType, "bearer")
+	}
+	if bearerIdentity.RawToken != "a-google-issued-id-token-not-a-pat" {
+		t.Errorf("RawToken = %q, want the original token verbatim", bearerIdentity.RawToken)
+	}
+}
+
 func TestUATValidator_IncompleteResponse(t *testing.T) {
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Return a response with missing email

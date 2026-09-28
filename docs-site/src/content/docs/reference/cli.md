@@ -18,6 +18,15 @@ These flags are available on all commands:
 - `--non-interactive`: Full non-interactive mode (implies `--yes`, errors on ambiguous prompts).
 - `--debug`: Enable verbose debug output.
 
+The legacy hidden `--grove` flag has been removed from every command; passing it fails with
+`unknown flag: --grove`. Use `--project`.
+
+:::caution[`--gcp-project` on GCP commands]
+On `scion project service-accounts add` and `scion hub secret migrate`, the GCP project ID is passed
+with `--gcp-project`. On those commands `--project` is the global Scion project selector, and using
+it for the GCP project ID fails with a hint pointing to `--gcp-project`.
+:::
+
 :::tip[Decluttered CLI Help]
 To keep subcommand help output clean and readable, global flags are hidden from default subcommand help outputs. You can view the full list of global flags anytime by running:
 
@@ -51,6 +60,7 @@ starting a **stopped** or **error** agent runs a fresh session. See
     - `--harness-config <string>`: Named harness configuration to use.
     - `--harness-auth <string>`: Override auth method for the harness. Universal types: `api-key`, `oauth-token`, `vertex-ai`, `auth-file` (each harness accepts a subset — see [Harness Authentication](/scion/local/agent-credentials/)).
     - `--broker <string>`: Preferred runtime broker ID or name for execution.
+    - `--message-mode <mode>`: Set the agent's initial message mode (`project`, `branch`, `lineage`, `none`, or `hub`). Defaults to `project`. See [Message Authorization & Modes](/scion/hosted/user/messaging/#message-authorization--modes).
     - `--notify`: Get notified via the browser or system when the spawned agent reaches a terminal state.
 
 ### `scion stop`
@@ -119,8 +129,8 @@ Sends a message to a running agent or user.
     - `group[a,b,...]`: Send to multiple recipients. *(Hub mode only)*
     - `@<agent-name>`: Send to an agent's conversation (preferred).
     - `@<email>`: Send to a user by email (global DM).
-    - `conv:<uuid>`: Send to a conversation by ID. *(Not yet supported — errors)*
-    - `#<thread>`: Send to a named thread. *(Not yet supported — errors)*
+    - `conv:<uuid>`: Send to a conversation by ID. *(Hub mode only)*
+    - `#<thread>`: Send to a named thread. *(Hub mode only)*
 
 - **Arguments:**
     - `<recipient>`: The recipient (see above).
@@ -128,17 +138,15 @@ Sends a message to a running agent or user.
 - **Flags:**
     - `-i, --interrupt`: Interrupt the harness before sending the message.
     - `-w, --wake`: Resume a suspended agent before delivering the message.
+    - `--body-file <path>`: Read the message body from a file instead of passing it inline. Useful for long messages and scripted workflows. Mutually exclusive with the inline `<message>` argument.
     - `--attach <path>`: Attach one or more file paths (repeatable). File paths must be within allowed roots (`/workspace` or `/scion-volumes`), where relative paths resolve against `/workspace`.
         - **Constraints:** Cannot be combined with `--raw`, `--in`, or `--at`.
         - **Requirements:** Requires Hub mode (`scion hub enable`). If run in local mode, the command will fail with an error suggesting you include file contents directly in the message text. If the file is not a regular file (e.g., is a directory) or is outside allowed roots, the command will fail.
-    - `--visibility <string>`: Message visibility: `normal`, `verbose`, or `full`.
     - `--cc <agents>`: *(Deprecated — will be removed.)* Carbon copy additional agents. This flag is **repeatable** and also accepts a **comma-separated list** of agent names (e.g., `--cc dev-agent,qa-agent --cc test-agent`). Use `group[...]` addressing or body `@mentions` instead.
     - `--notify`: *(Deprecated — use `scion notifications subscribe` instead.)* Get notified when the target agent(s) respond or reach a terminal state after receiving the message.
     - `--plain`: *(Deprecated — will be removed.)*  Mark for plain-text delivery.
     - `--channel <channel>`: *(Deprecated — use conversation addressing instead.)* Target a specific message channel (e.g., `telegram`, `gchat`, `teams`, `web`).
     - `--thread-id <id>`: *(Deprecated — use conversation addressing instead.)* Target a specific thread ID within the channel.
-    - `-b, --broadcast`: *(Deprecated — use `scion broadcast` instead.)*
-    - `-a, --all`: *(Deprecated — use `scion broadcast --all` instead.)*
     - `--raw`: *(Deprecated — use `scion keys` instead.)* Send literal bytes via tmux send-keys with no trailing Enter.
     - `--in <duration>`: *(Deprecated — use `scion schedule create --in` instead.)* Schedule message delivery after a duration.
     - `--at <time>`: *(Deprecated — use `scion schedule create --at` instead.)* Schedule message delivery at an absolute time.
@@ -179,13 +187,25 @@ Sends a message to all running agents in the current project (or across all proj
 
 **Usage:** `scion broadcast <message> [flags]`
 
-This command replaces the deprecated `--broadcast` / `--all` flags on `scion message`.
+This command replaces the removed `--broadcast` / `--all` flags on `scion message`.
 
 ### `scion keys`
 
 Sends raw keystrokes to an agent's terminal via tmux `send-keys` with no trailing Enter. Supports control keys like arrows and Escape. This command replaces the deprecated `--raw` flag on `scion message`.
 
 **Usage:** `scion keys <agent-name> <keys>`
+
+### `scion set-message-mode`
+
+Sets the message mode for an agent, controlling which users and agents can send messages to it. Full-role agents can also call this command programmatically.
+
+**Usage:** `scion set-message-mode <agent-name> <mode>`
+
+- **Arguments:**
+    - `<agent-name>`: The target agent.
+    - `<mode>`: One of `project` (default), `branch`, `lineage`, `none`, or `hub`.
+
+See [Message Authorization & Modes](/scion/hosted/user/messaging/#message-authorization--modes) for details on each mode. The `hub` mode enables [cross-project messaging](/scion/hosted/user/messaging/#cross-project-messaging).
 
 ### `scion messages` (aliases: `msgs`, `inbox`)
 
@@ -200,6 +220,49 @@ Manages bidirectional communication and persistent messages sent by agents to hu
 - **Flags:**
     - `--agent <string>`: Filter messages by a specific agent.
     - `--all`: Show all messages, including those already marked as read.
+
+### `scion conversation` (alias: `conv`)
+
+Manages conversations — the surface-agnostic containers for message threads. Requires Hub mode. Running `scion conversation` without a subcommand defaults to `list`. It also works inside Hub-connected agent containers, as does `scion notifications`; this requires a harness image built from this release or later.
+
+Conversations are referenced using one of three forms:
+
+- `conv:<uuid>` — by conversation ID.
+- `@<agent-name>` — resolves the direct conversation with the named agent.
+- `#<thread-name>` — resolves a named group conversation.
+
+**Usage:** `scion conversation [command] [flags]`
+
+- **Commands:**
+    - `list` (default): List conversations you participate in.
+    - `get <conversation-ref>`: Show conversation details.
+    - `get-message <conversation-ref> <message-id>`: Retrieve a single message by its ID from a conversation. Authorization is participant-based — only participants of the conversation can retrieve its messages.
+    - `messages <conversation-ref>`: View messages in a conversation.
+    - `create <name>`: Create a new group conversation. The group appears as a thread in the project's web chat space. Names must start with a letter or digit, contain only letters, digits, spaces, `_`, or `-`, and be at most 100 characters (returns `400 Bad Request` otherwise). A name already used in the project returns `409` (name conflict).
+    - `set-default <conversation-ref> <agent-id>`: Set the default agent for a conversation.
+    - `participants <conversation-ref>`: List participants in a conversation.
+    - `join <conversation-ref> <principal-kind> <principal-id>`: Add a participant to a conversation.
+    - `leave <conversation-ref>`: Leave a conversation.
+    - `catch-up <conversation-ref>`: Show recent messages in a conversation.
+- **Flags (on `list`):**
+    - `--kind <string>`: Filter by kind (`direct`, `group`).
+    - `--surface <string>`: Filter by surface (`native`, `discord`, `slack`, etc.).
+    - `--project <string>`: Filter by project ID.
+    - `--limit <int>`: Maximum number of conversations to show (default 50).
+    - `--json`: Output in JSON format.
+- **Flags (on `messages`):**
+    - `--limit <int>`: Maximum number of messages to show (default 25).
+    - `--before <time>`: Show messages before this time (RFC 3339).
+    - `--after <time>`: Show messages after this time (RFC 3339).
+    - `--json`: Output in JSON format.
+- **Flags (on `create`):**
+    - `--project <string>`: Project ID. Defaults to the Hub-linked project, then the local project. If no project resolves, the Hub falls back to the calling agent's project; a user caller with no project gets `400 projectId is required`.
+    - `--json`: Output in JSON format.
+- **Flags (on `catch-up`):**
+    - `--since <duration>`: Show messages from this duration ago, e.g. `30m`, `2h` (default `1h`).
+    - `--json`: Output in JSON format.
+- **Flags (on `get-message`):**
+    - `--json`: Output in JSON format.
 
 ### `scion logs`
 
@@ -245,9 +308,35 @@ Synchronizes the agent workspace between the host and the container.
 Injects a fresh Hub token into a **running** agent's container and signals it to reload, without
 restarting the agent. Use this to recover an agent whose token expired and cannot self-refresh
 (e.g. after a Hub signing-key rotation). Requires a Hub connection. The same action is available
-as a **Reset Auth** button in the web UI.
+as a **Reset Auth** button in the web UI. The token is passed to the container over stdin, not on the
+command line, so it does not appear in the host's process list.
 
 **Usage:** `scion reset-auth <agent-name>`
+
+### `scion reincarnate`
+
+Migrates an agent to a fresh **generation**: it stops the agent, re-resolves its configuration
+against the current template and harness-config catalog (template, image, harness config, model,
+env keys), and starts it again with the **same** agent ID and slug. The new generation's first task
+is a Hub-built preamble plus the handoff you provide. Requires a Hub connection.
+
+The Hub accepts the request with `202 Accepted` and completes the migration in the background. If
+the new generation cannot be provisioned, the Hub restores the previous generation's configuration.
+
+Run it with no argument inside an agent container to migrate the agent itself (self-migration).
+Self-migration requires `--handoff-file`, because there is no one else to describe the work in
+progress. When migrating another agent, the handoff is optional.
+
+**Usage:** `scion reincarnate [agent-name] [flags]`
+
+- **Flags:**
+    - `--handoff-file <path>`: File whose content becomes the new generation's first task. Required for self-migration.
+    - `--dry-run`: Print the resolved plan (old → new template, image, harness config, model, env key names, and branch) without migrating anything.
+
+:::note[Phase 1]
+This release supports only `--handoff-file` and `--dry-run`. Overrides such as a different image,
+model, or harness config are not yet available.
+:::
 
 ## Configuration & Workspace
 
@@ -264,6 +353,15 @@ Manages the Scion workspace (Project).
     - **Hub Integration:** If a Hub endpoint is configured, `init` will prompt to register the new project with the Hub.
 - `scion project list` (alias `ls`): List all projects known to Scion on this machine, including their type, agent count, status, and workspace path.
 - `scion project prune`: Detect and remove project configurations whose workspace directories no longer exist. This stops any running containers associated with orphaned projects before cleaning up.
+- `scion project status [project]` (alias `health`): Show agent status for a project from the Hub: counts per lifecycle phase and per activity, a per-agent table (template, harness, phase, activity), and troubleshooting hints for blocked, stalled, or errored agents. Uses the current project when no name is given.
+    - Flags: `--all` (report across all projects on the Hub), `--json` (JSON output).
+- `scion project service-accounts` (alias `sa`): Manage GCP service accounts registered for the project.
+    - `add <email>`: Register an existing GCP service account.
+        - Flags: `--gcp-project <id>` (required, the GCP project ID), `--name <string>` (display name).
+    - `mint`: Create a new service account in the Hub's GCP project (the account ID is prefixed with `scion-`). Flags: `--account-id`, `--name`.
+    - `list` (alias `ls`): List registered service accounts. Flags: `--json`.
+    - `verify <id>`: Verify that the Hub can impersonate the service account.
+    - `remove <id>` (aliases `rm`, `delete`): Remove a service account registration.
 - `scion project reconnect <new-workspace-path>`: Reconnect a moved workspace to its externalized project configuration. This fixes projects that show as "orphaned" after being relocated.
 - `scion project skills`: Manage auto-injected skills for the project.
     - `list [project]` (alias `ls`): List auto-injected skills configured for the current project (or a specified project).
@@ -279,6 +377,10 @@ Manages the Scion workspace (Project).
         - Flags: `--name`, `--script`, `--description`.
     - `activate <id-or-slug> [project]`: Mark an archived hook as active (archives any currently active hook).
     - `delete <id-or-slug> [project]` (alias `rm`, `remove`): Delete an archived hook. Active hooks cannot be deleted.
+- `scion project messaging`: Manage cross-project messaging policy for a project.
+    - `set [project]`: Set the inbound messaging policy.
+        - Flags: `--policy <string>` (one of `none`, `members`, `all`), `--revision <int>` (required, optimistic concurrency revision).
+    - `get [project]`: Show the current messaging policy and revision.
 
 ### `scion user`
 
@@ -443,7 +545,7 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
         - Flags:
             - `--project <string>`: Project ID or name to scope the token to (required).
             - `--name <string>`: Token name/label (required).
-            - `--scopes <scopes>`: Scopes to grant (required). This flag is **repeatable** and also accepts a **comma-separated list** of scopes (e.g., `--scopes agent:read,agent:create --scopes agent:start`). Strict empty-value validation is enforced.
+            - `--scopes <scopes>`: Scopes to grant (required). This flag is **repeatable** and also accepts a **comma-separated list** of scopes (e.g., `--scopes agent:read,agent:create --scopes agent:lifecycle`). Strict empty-value validation is enforced.
             - `--expires <duration>`: Expiry duration (e.g., 30d, 90d, 1y, default: 90d).
     - `list`: List your access tokens.
     - `revoke <token-id>`: Revoke a token (remains visible in listings as revoked).
@@ -458,12 +560,14 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
     - `set <key> <value>`: Set a secret (supports `--allow-progeny` for user-scoped secrets).
     - `get [key]`: Get secret metadata.
     - `clear <key>`: Remove a secret.
+    - `migrate`: Move existing secrets from the Hub database to GCP Secret Manager.
+        - Flags: `--gcp-project <id>` (required, the GCP project ID), `--credentials <path>` (GCP credentials JSON), `--dry-run`, `--force` (re-migrate secrets that already reference Secret Manager), `--hub-id <id>` (Hub instance ID used to namespace secrets).
 - `scion hub env`: Manage environment variables on the Hub.
     - `set <key>=<value>`: Set a variable.
     - `get [key]`: Get variable values.
     - `clear <key>`: Remove a variable.
 - `scion hub project create <git-url>`: Create a project from a remote git repository.
-    - Flags: `--slug`, `--name`, `--branch`, `--visibility`, `--json`
+    - Flags: `--slug`, `--name`, `--branch`, `--json`
 - `scion hub hook` (alias `psh`): Manage hub-scoped (baseline) pre-start hooks. Requires administrator privileges.
     - `list` (alias `ls`): List hub-scoped pre-start hooks.
     - `show <id-or-slug>`: Show details and script content of a hub-scoped hook.
@@ -473,6 +577,10 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
         - Flags: `--name`, `--script`, `--description`.
     - `activate <id-or-slug>`: Mark an archived hook as active (archives any currently active hub-scoped hook).
     - `delete <id-or-slug>` (alias `rm`, `remove`): Delete an archived hook. Active hooks cannot be deleted.
+- `scion hub messaging`: Manage hub-wide cross-project messaging settings. Requires administrator privileges.
+    - `set`: Set hub-wide messaging settings.
+        - Flags: `--cross-project-enabled <bool>` (enable or disable cross-project messaging), `--revision <int>` (required, optimistic concurrency revision).
+    - `get`: Show the current hub-wide messaging settings and revision.
 
 ## Notification Management
 
@@ -534,6 +642,42 @@ Manages Scion server components (Hub and Broker).
         - `--checkpoint <string>`: Resume from this pagination cursor (project-scoped).
         - `--db <string>`: Database DSN (overrides configuration/environment DSN).
 
+## Administration
+
+### `scion admin`
+
+Administrative operations for emergency recovery scenarios. These commands connect directly to the database, bypassing the running server. They are intended for break-glass situations where normal admin access has been lost.
+
+### `scion admin promote`
+
+Promotes an existing user to the admin role by connecting directly to the database, bypassing the running Hub server. This is a break-glass recovery command for situations where all admin users have been removed or an organization has lost admin access.
+
+The target user must already exist in the database — this command does not create new users.
+
+**Usage:** `scion admin promote [flags]`
+
+- **Flags:**
+    - `--email <string>`: Email address of the user to promote (required).
+    - `--db <string>`: Database URL or path (overrides the config-derived connection). Accepts Postgres connection strings (`postgres://...`) or SQLite file paths.
+    - `--config <string>`: Path to server configuration file (defaults to the standard `settings.yaml` resolution).
+
+**Examples:**
+
+```bash
+# Promote using the default config-derived database connection
+scion admin promote --email user@example.com
+
+# Promote with an explicit Postgres database URL
+scion admin promote --email user@example.com --db postgres://user:pass@host:5432/db
+
+# Promote using a specific config file
+scion admin promote --email user@example.com --config /path/to/server.yaml
+```
+
+:::caution[Break-glass only]
+This command modifies the database directly. Use it only when normal admin access through the Hub API or Web Dashboard is unavailable. Under normal operation, manage admin roles via the Web Dashboard Users list or the `admin_emails` server setting.
+:::
+
 ## Miscellaneous
 
 ### `scion doctor`
@@ -547,7 +691,7 @@ health (Docker/Podman daemon, or Kubernetes cluster/namespace/RBAC/CSI access). 
 :::note[In-container diagnostics]
 A separate **`sciontool doctor`** command runs *inside* an agent container and diagnoses the
 agent's own health — environment variables, Hub token (presence/format/expiry), Hub reachability,
-token refresh, the GCP metadata server, and the GitHub App token. See
+token validity (a read-only check that does not refresh or revoke the token), the GCP metadata server, and the GitHub App token. See
 [Harness Authentication](/scion/local/agent-credentials/#diagnostics).
 :::
 
@@ -595,8 +739,11 @@ The command populates a structured JSON schema divided into two latency tiers:
 
 ### `scion version`
 
-Prints the Scion version information.
+Prints the Scion version information and optionally checks for available updates.
 
-**Usage:** `scion version`
+**Usage:** `scion version [flags]`
+
+- **Flags:**
+    - `--check`: Query the release manifest (`LATEST.json`) for available updates across release channels (stable, preview, nightly). Outputs update availability in plain text by default, or structured JSON when combined with `--format json`.
 
 

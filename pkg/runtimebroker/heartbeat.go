@@ -25,7 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
 // heartbeatAgentKey returns a key that uniquely identifies an agent within the
@@ -36,7 +36,7 @@ import (
 func heartbeatAgentKey(a api.AgentInfo) string {
 	pid := a.ProjectID
 	if pid == "" {
-		pid = projectcompat.ProjectIDFromLabels(a.Labels)
+		pid = projectkeys.ProjectIDFromLabels(a.Labels)
 	}
 	return a.Name + "\x00" + pid
 }
@@ -199,6 +199,17 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 
 	heartbeat := &hubclient.BrokerHeartbeat{
 		Status: status,
+		// Design §3.4 Amendment A2.2(b): report capabilities on every heartbeat so the hub's
+		// `scion reincarnate` gate is never stuck on a stale join-time
+		// snapshot for an already-registered broker. Mirrors handleInfo's
+		// hardcoded set (a fixed property of this broker binary, not
+		// runtime-negotiated).
+		Capabilities: &hubclient.BrokerCapabilities{
+			WebPTY:      false,
+			Sync:        true,
+			Attach:      true,
+			Reprovision: true,
+		},
 	}
 
 	// Gather per-project agent counts. gatherProjectAgents snapshots the
