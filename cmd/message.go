@@ -910,6 +910,12 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 		Error     string `json:"error,omitempty"`
 	}
 
+	// A25.6 F2: the group[] fan-out prints its per-recipient status from the
+	// send response, not an assumption. Report-7-gteam-2a: while a target
+	// was reincarnating, the human CLI printed "Delivered" for it anyway —
+	// the response was discarded. Mirror the single-recipient path's own
+	// "Status == deferred" check (see sendMessageViaHub above).
+
 	results := make([]recipientResult, len(recipients))
 	var wg sync.WaitGroup
 
@@ -928,10 +934,18 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 				msg.Type = messages.TypeGroupSet
 				msg.Recipients = recipientsStr
 				msg.Metadata = map[string]string{"group_id": groupID}
-				if _, err := agentSvc.SendStructuredMessage(ctx, slug, msg, interrupt, false, false); err != nil {
+				sendResp, err := agentSvc.SendStructuredMessage(ctx, slug, msg, interrupt, false, false)
+				if err != nil {
 					results[idx] = recipientResult{Recipient: recipStr, Status: "failed", Error: err.Error()}
 					if !isJSONOutput() {
 						fmt.Printf("  Failed: %s: %s\n", recipStr, err)
+					}
+					return
+				}
+				if sendResp != nil && sendResp.Status == "deferred" {
+					results[idx] = recipientResult{Recipient: recipStr, Status: "deferred"}
+					if !isJSONOutput() {
+						fmt.Printf("  Deferred: %s (agent is reincarnating; saved)\n", recipStr)
 					}
 					return
 				}
@@ -980,14 +994,22 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 	wg.Wait()
 
 	delivered := 0
+	deferred := 0
 	for _, r := range results {
-		if r.Status == "delivered" {
+		switch r.Status {
+		case "delivered":
 			delivered++
+		case "deferred":
+			deferred++
 		}
 	}
 
 	if !isJSONOutput() {
-		fmt.Printf("Group delivery complete: %d/%d delivered.\n", delivered, len(recipients))
+		if deferred > 0 {
+			fmt.Printf("Group delivery complete: %d/%d delivered, %d deferred.\n", delivered, len(recipients), deferred)
+		} else {
+			fmt.Printf("Group delivery complete: %d/%d delivered.\n", delivered, len(recipients))
+		}
 	}
 
 	// @mention and --cc fan-out for group messages: mentioned agents that are
@@ -1026,11 +1048,15 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 		}
 	}
 
-	if delivered == 0 {
+	// A25.6 F2: a deferred recipient is not a failure (design agent-reincarnate
+	// §3.7 — the message is saved for catch-up, not dropped), so it must not
+	// trip the partial-failure error below on its own.
+	succeeded := delivered + deferred
+	if succeeded == 0 {
 		return fmt.Errorf("group delivery failed: 0/%d recipients received the message", len(recipients))
 	}
-	if delivered < len(recipients) {
-		return fmt.Errorf("group delivery partially failed: %d/%d delivered", delivered, len(recipients))
+	if succeeded < len(recipients) {
+		return fmt.Errorf("group delivery partially failed: %d/%d delivered", succeeded, len(recipients))
 	}
 
 	return nil

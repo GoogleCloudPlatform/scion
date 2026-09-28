@@ -1932,6 +1932,84 @@ func TestSendGroupMessageViaHub_MentionFanOut(t *testing.T) {
 	assert.Equal(t, messages.TypeMention, mentionMsgs[0].StructuredMsg.Type)
 }
 
+// TestSendGroupMessageViaHub_A256_F2_DeferredRecipientNotReportedDelivered is
+// report-7-gteam-2a F2 / design.md A25.6: while a group[] recipient is
+// mid-`scion reincarnate`, the server reports it "deferred" (the message was
+// saved to history for catch-up, not dropped, per §3.7), but the human CLI's
+// group fan-out discarded SendStructuredMessage's response and always
+// printed "Delivered". The status must come from the send response.
+func TestSendGroupMessageViaHub_A256_F2_DeferredRecipientNotReportedDelivered(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	projectID := "project-msg-group-deferred"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/agent-migrating/message"):
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message_id":  "msg-deferred",
+				"status":      "deferred",
+				"agent":       "agent-migrating",
+				"agent_phase": "stopping",
+				"deferred":    "agent is reincarnating",
+			})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/agent-running/message"):
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message_id":  "msg-delivered",
+				"status":      "delivered",
+				"agent":       "agent-running",
+				"agent_phase": "running",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	recipients := []messages.GroupRecipient{
+		{Kind: messages.RecipientAgent, Name: "agent-running"},
+		{Kind: messages.RecipientAgent, Name: "agent-migrating"},
+	}
+
+	oldStdout := os.Stdout
+	r, w, pipeErr := os.Pipe()
+	require.NoError(t, pipeErr)
+	os.Stdout = w
+
+	err = sendGroupMessageViaHub(hubCtx, recipients, "group hello mid-migration", false)
+
+	_ = w.Close()
+	os.Stdout = oldStdout
+	require.NoError(t, err, "a deferred recipient is not a failure and must not error the group send")
+
+	var buf [4096]byte
+	n, _ := r.Read(buf[:])
+	_ = r.Close()
+	output := string(buf[:n])
+
+	assert.Contains(t, output, "Deferred: agent:agent-migrating (agent is reincarnating; saved)",
+		"the migrating recipient must be reported deferred, not delivered; got: %s", output)
+	assert.NotContains(t, output, "Delivered: agent:agent-migrating",
+		"a deferred recipient must never be printed as delivered; got: %s", output)
+	assert.Contains(t, output, "Delivered: agent:agent-running",
+		"the non-migrating recipient must still be reported delivered; got: %s", output)
+	assert.Contains(t, output, "1/2 delivered, 1 deferred",
+		"the summary line must separate deferred from delivered; got: %s", output)
+}
+
 func TestCCFlagValidation(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
