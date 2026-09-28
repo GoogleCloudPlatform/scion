@@ -25,9 +25,13 @@ export default defineConfig({
     //
     // This narrowly matches ONLY that exact error and lets every other
     // unhandled error and rejection fail the run as normal.
+    //
+    // A non-false return (including falling off the end of this function)
+    // lets Vitest report the error and fail the run normally.
     onUnhandledError(error) {
       if (
-        error.name === 'EnvironmentTeardownError' &&
+        error?.name === 'EnvironmentTeardownError' &&
+        typeof error?.message === 'string' &&
         error.message.includes('onUserConsoleLog')
       ) {
         return false;
