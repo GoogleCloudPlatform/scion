@@ -4681,6 +4681,10 @@ func (s *Server) handleAttachmentDownload(w http.ResponseWriter, r *http.Request
 
 	// R1: Prevent browsers from MIME-sniffing the response body.
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// Defence in depth: markup is refused at upload and only raster images
+	// are served inline, but if either check ever lets active content
+	// through, the sandbox keeps it off the hub's origin.
+	w.Header().Set("Content-Security-Policy", untrustedContentSandboxCSP)
 
 	// Content-Disposition: inline for images, attachment for everything else.
 	disposition := "attachment"
@@ -4689,8 +4693,7 @@ func (s *Server) handleAttachmentDownload(w http.ResponseWriter, r *http.Request
 	}
 	// R2: Escape backslash and double-quote in the filename to prevent
 	// Content-Disposition header injection (RFC 6266 §4.3).
-	safeName := strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(meta.Filename)
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`%s; filename="%s"`, disposition, safeName))
+	w.Header().Set("Content-Disposition", contentDisposition(disposition, meta.Filename))
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", fileMeta.Size))
 	w.Header().Set("Cache-Control", "private, max-age=3600")
 

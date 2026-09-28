@@ -58,6 +58,36 @@ const maxEditableFileSize = 1 * 1024 * 1024
 // maxPreviewFileSize is the maximum file size for read-only preview (50MB).
 const maxPreviewFileSize = 50 * 1024 * 1024
 
+// untrustedContentSandboxCSP is sent on hub responses whose bytes are written
+// by users or agents rather than by the hub: workspace and shared-dir files
+// (above all ?view=true HTML and SVG, which would otherwise render on the
+// hub's origin with the viewer's session), the project WebDAV endpoint that
+// serves the same workspace, and chat attachments. Anything that
+// can write into a project, including its agents, could otherwise act as
+// whoever opens the file. A sandboxed document gets an opaque origin: its
+// scripts still run, so generated reports and visualisations keep working,
+// but it cannot use the viewer's cookies against the hub or read the
+// responses. allow-same-origin must never be added: it would undo exactly
+// that isolation. The header has no effect when the response is loaded as a
+// subresource such as an <img>, so inline image previews are unaffected.
+const untrustedContentSandboxCSP = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads"
+
+// contentDisposition builds a Content-Disposition header value with
+// mime.FormatMediaType, as the skill and template handlers do, so non-ASCII
+// filenames get the RFC 2231 filename* form. FormatMediaType returns "" for
+// input it cannot encode; rather than drop the header (and with it the
+// attachment disposition), fall back to a quoted filename with backslash and
+// double-quote escaped so a crafted name cannot close the quoted string and
+// append parameters (RFC 6266 §4.3). Go's header writer already neutralises
+// CR and LF.
+func contentDisposition(disposition, filename string) string {
+	if v := mime.FormatMediaType(disposition, map[string]string{"filename": filename}); v != "" {
+		return v
+	}
+	safeName := strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(filename)
+	return fmt.Sprintf(`%s; filename="%s"`, disposition, safeName)
+}
+
 // isCloudRunEnv checks K_SERVICE to determine if we're running on Cloud Run.
 // In production, K_SERVICE is set once at container startup and never changes,
 // so calling os.Getenv is effectively a cached lookup (the C library caches
@@ -626,11 +656,14 @@ func (s *Server) handleProjectWorkspaceDownload(w http.ResponseWriter, r *http.R
 
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// Set on attachments too, so the file stays sandboxed if a browser ever
+	// renders one instead of downloading it.
+	w.Header().Set("Content-Security-Policy", untrustedContentSandboxCSP)
 	disposition := "attachment"
 	if r.URL.Query().Get("view") == "true" {
 		disposition = "inline"
 	}
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`%s; filename="%s"`, disposition, fileName))
+	w.Header().Set("Content-Disposition", contentDisposition(disposition, fileName))
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", info.Size()))
 
 	_, _ = io.Copy(w, f)

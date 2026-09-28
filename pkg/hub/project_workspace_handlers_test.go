@@ -24,9 +24,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -417,6 +419,138 @@ func TestProjectWorkspaceDownload_InlineView(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Header().Get("Content-Disposition"), "inline")
 	assert.Equal(t, "inline content", rec.Body.String())
+}
+
+// assertSandboxed checks that a response carrying user- or agent-written
+// bytes has the sandbox CSP and never allow-same-origin, which would let the
+// document act with the viewer's session on the hub's origin.
+func assertSandboxed(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	csp := rec.Header().Get("Content-Security-Policy")
+	assert.Equal(t, untrustedContentSandboxCSP, csp)
+	assert.True(t, strings.HasPrefix(csp, "sandbox"), "CSP must start with the sandbox directive: %q", csp)
+	assert.Contains(t, csp, "allow-scripts", "scripts stay enabled so generated reports keep working")
+	assert.NotContains(t, csp, "allow-same-origin", "allow-same-origin would undo the isolation")
+}
+
+func TestProjectWorkspaceDownload_InlineHTMLIsSandboxed(t *testing.T) {
+	srv, _ := testServer(t)
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS Download Sandbox")
+
+	page := []byte("<!doctype html><p>report</p><script>document.title = 'x'</script>")
+	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "report.html"), page, 0644))
+
+	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s/workspace/files/report.html?view=true", project.ID), nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.True(t, strings.HasPrefix(rec.Header().Get("Content-Type"), "text/html"))
+	assert.Contains(t, rec.Header().Get("Content-Disposition"), "inline")
+	assertSandboxed(t, rec)
+	assert.Equal(t, string(page), rec.Body.String(), "content is served unchanged")
+
+	// Downloads carry it too, in case a browser renders one.
+	rec = doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s/workspace/files/report.html", project.ID), nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Header().Get("Content-Disposition"), "attachment")
+	assertSandboxed(t, rec)
+}
+
+func TestSharedDirFiles_InlineHTMLIsSandboxed(t *testing.T) {
+	hostBase := setNFSSharedDirStorageGlobalSettings(t)
+
+	srv, _ := testServer(t)
+	project := createTestGitProject(t, srv, "Shared Dir Sandbox", "github.com/test/shared-dir-sandbox")
+	addSharedDirToProject(t, srv, project.ID, "artifacts")
+
+	leaf := filepath.Join(hostBase, "projects", project.ID, "shared-dirs", "artifacts")
+	require.NoError(t, os.MkdirAll(leaf, 0o2775))
+	require.NoError(t, os.WriteFile(filepath.Join(leaf, "graph.html"), []byte("<script>1</script>"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(leaf, "chart.svg"), []byte(`<svg xmlns="http://www.w3.org/2000/svg"><script>1</script></svg>`), 0o644))
+
+	for _, name := range []string{"graph.html", "chart.svg"} {
+		rec := doRequest(t, srv, http.MethodGet,
+			fmt.Sprintf("/api/v1/projects/%s/shared-dirs/artifacts/files/%s?view=true", project.ID, name), nil)
+		require.Equal(t, http.StatusOK, rec.Code, "%s: %s", name, rec.Body.String())
+		assert.Contains(t, rec.Header().Get("Content-Disposition"), "inline", name)
+		assertSandboxed(t, rec)
+	}
+}
+
+// The project WebDAV endpoint serves the same workspace directory as
+// workspace/files, so browsers must get the same isolation from it: the
+// sandbox CSP, nosniff (it sniffs extensionless files) and an attachment
+// disposition on every method that returns file bytes (GET, HEAD, POST).
+func TestProjectWebDAV_GetIsSandboxed(t *testing.T) {
+	srv, _ := testServer(t)
+	project, workspacePath := createTestHubManagedProject(t, srv, "DAV Sandbox")
+	require.NoError(t, os.MkdirAll(workspacePath, 0755))
+
+	page := "<!doctype html><p>report</p><script>document.title = 'x'</script>"
+	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "report.html"), []byte(page), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "noext"), []byte(page), 0644))
+	davURL := fmt.Sprintf("/api/v1/projects/%s/dav", project.ID)
+
+	for _, name := range []string{"report.html", "noext"} {
+		for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodPost} {
+			rec := doDavRequest(t, srv, method, davURL+"/"+name, nil, nil)
+			require.Equal(t, http.StatusOK, rec.Code, "%s %s: %s", method, name, rec.Body.String())
+			assertSandboxed(t, rec)
+			assert.Equal(t, "nosniff", rec.Header().Get("X-Content-Type-Options"), "%s %s", method, name)
+			assert.Equal(t, "attachment", rec.Header().Get("Content-Disposition"), "%s %s", method, name)
+		}
+	}
+
+	// Content is still served unchanged to DAV clients, and POST returns
+	// the same bytes as GET.
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		rec := doDavRequest(t, srv, method, davURL+"/report.html", nil, nil)
+		assert.Equal(t, page, rec.Body.String(), method)
+	}
+
+	// PROPFIND still works and carries no attachment disposition.
+	rec := doDavRequest(t, srv, "PROPFIND", davURL+"/", nil, map[string]string{"Depth": "1"})
+	require.Equal(t, http.StatusMultiStatus, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "report.html")
+	assert.Empty(t, rec.Header().Get("Content-Disposition"))
+}
+
+// A filename containing a double quote must not be able to close the quoted
+// filename parameter and append its own parameters to Content-Disposition.
+func TestProjectWorkspaceDownload_ContentDispositionEscapesFilename(t *testing.T) {
+	srv, _ := testServer(t)
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS Download Quote")
+
+	name := `a"; x=y.html`
+	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, name), []byte("<p>x</p>"), 0644))
+
+	rec := doRequest(t, srv, http.MethodGet,
+		fmt.Sprintf("/api/v1/projects/%s/workspace/files/%s?view=true", project.ID, url.PathEscape(name)), nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	cd := rec.Header().Get("Content-Disposition")
+	assert.Equal(t, `inline; filename="a\"; x=y.html"`, cd)
+	disp, params, err := mime.ParseMediaType(cd)
+	require.NoError(t, err)
+	assert.Equal(t, "inline", disp)
+	assert.Equal(t, map[string]string{"filename": name}, params, "the quote must not introduce extra parameters")
+	assertSandboxed(t, rec)
+}
+
+func TestContentDisposition(t *testing.T) {
+	assert.Equal(t, `attachment; filename=plain.txt`, contentDisposition("attachment", "plain.txt"))
+	assert.Equal(t, `inline; filename="report 1.html"`, contentDisposition("inline", "report 1.html"))
+	assert.Equal(t, `inline; filename="a\\b\"c"`, contentDisposition("inline", `a\b"c`))
+	// Non-ASCII names use the RFC 2231 filename* form, as the skill and
+	// template handlers already do via mime.FormatMediaType.
+	assert.Equal(t, `attachment; filename*=utf-8''r%C3%A9sum%C3%A9.html`, contentDisposition("attachment", "résumé.html"))
+	for _, name := range []string{"plain.txt", `a\b"c`, "résumé.html", "a\nb"} {
+		disp, params, err := mime.ParseMediaType(contentDisposition("attachment", name))
+		require.NoError(t, err, name)
+		assert.Equal(t, "attachment", disp, name)
+		assert.Equal(t, name, params["filename"], name)
+	}
+	// FormatMediaType returns "" when it cannot encode its input (here, a
+	// disposition that is not a valid token); the header must still be
+	// produced, with the filename escaped, rather than dropped.
+	assert.Equal(t, `in line; filename="a\"b"`, contentDisposition("in line", `a"b`))
 }
 
 func TestProjectWorkspaceDownload_FormatJSON(t *testing.T) {

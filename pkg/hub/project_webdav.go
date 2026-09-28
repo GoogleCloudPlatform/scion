@@ -119,6 +119,19 @@ func (s *Server) handleProjectWebDAV(w http.ResponseWriter, r *http.Request, pro
 		},
 	}
 
+	// Workspace bytes are written by users and agents, so a browser that
+	// opens a dav/ URL must not render them as the hub app. The sandbox and
+	// nosniff are harmless to PROPFIND and the other DAV verbs. The
+	// attachment disposition goes on every method that returns file bytes
+	// (x/net/webdav serves GET, HEAD and POST through the same path); DAV
+	// clients ignore it and it makes browsers download instead of render.
+	w.Header().Set("Content-Security-Policy", untrustedContentSandboxCSP)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodPost:
+		w.Header().Set("Content-Disposition", "attachment")
+	}
+
 	handler.ServeHTTP(w, r)
 
 	// Update sync state after successful write operations
