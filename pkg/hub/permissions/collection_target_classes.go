@@ -138,15 +138,21 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	"broker.list": {TargetClassKindHubResource}, "broker.dispatch": {},
 
 	// gcp_service_account.* — create/list/mint are CapabilityScope, hub-wide.
-	// assign is CapabilityResource by field, but its actual authorization
-	// call site (sa_assign_gate.go, invoked from handlers_agents_core.go
-	// during agent create/patch) runs in the context of the agent being
-	// created/patched — a genuinely project-scoped operation. Reviewed
-	// ProjectScoped against that real call site, not CapabilityKind.
+	// assign is CapabilityResource, confirmed against its actual
+	// authorization call site: evaluateSAAssignment/authorizeSAAssignment
+	// (sa_assign_gate.go, invoked from handlers_agents_core.go during agent
+	// create/patch) authorizes using gcpServiceAccountResource(sa)
+	// (capabilities.go:150-163), whose ID is the EXISTING gcp_service_account
+	// being assigned and whose ParentType/ParentID (when set) is that SA's
+	// OWN scope — NOT the new agent being created/patched. assign always
+	// targets an existing SA instance and is correctly empty (never
+	// collection-level); an earlier revision of this table incorrectly
+	// reasoned from the call site's context (agent creation) rather than
+	// the actual Resource authorized, and was corrected back.
 	"gcp_service_account.create": {TargetClassKindHubResource},
 	"gcp_service_account.read": {}, "gcp_service_account.delete": {},
 	"gcp_service_account.list": {TargetClassKindHubResource},
-	"gcp_service_account.verify": {}, "gcp_service_account.assign": {TargetClassKindProjectScoped},
+	"gcp_service_account.verify": {}, "gcp_service_account.assign": {},
 	"gcp_service_account.mint": {TargetClassKindHubResource},
 
 	// hub.* — every entry is CapabilityScope (there is no per-instance

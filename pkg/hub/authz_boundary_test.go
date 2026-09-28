@@ -1438,15 +1438,17 @@ func TestResolveTargetScope_AccessConstraintAdminIsHubOnly(t *testing.T) {
 	}
 }
 
-func TestResolveTargetScope_GCPServiceAccountAssignIsProjectScoped(t *testing.T) {
-	// sa_assign_gate.go authorizes assign in the context of the agent being
-	// created/patched -- a genuinely project-scoped operation, despite
-	// CapabilityKind=Resource.
+func TestResolveTargetScope_GCPServiceAccountAssignIsInstanceOnly(t *testing.T) {
+	// gcpServiceAccountResource(sa) (capabilities.go:150-163) always builds
+	// a Resource for the EXISTING gcp_service_account being assigned, whose
+	// ParentType/ParentID (when set) is that SA's own scope -- never the
+	// new agent being created/patched. assign is instance-only: collection
+	// evidence for it must deny.
 	got := ResolveTargetScope(Resource{Type: "gcp_service_account"}, TargetScopeEvidence{
 		IsCollectionLevel: true, CollectionScope: TargetScopeProject, CollectionProjectID: "p1", PermissionID: "gcp_service_account.assign",
 	})
-	if got.Kind != TargetScopeProject || got.ProjectID != "p1" {
-		t.Errorf("gcp_service_account.assign Project collection evidence: got %+v, want Project/p1", got)
+	if got.Kind != TargetScopeUnknown {
+		t.Errorf("gcp_service_account.assign collection evidence must resolve Unknown (instance-only): got %+v", got)
 	}
 }
 
@@ -1488,5 +1490,57 @@ func TestResolveTargetScope_CollectionEvidenceUnrecognizedParentTypeIsUnknown(t 
 	})
 	if got.Kind != TargetScopeUnknown {
 		t.Errorf("collection evidence with an unrecognized ParentType must resolve Unknown: got %+v", got)
+	}
+}
+
+// --- R1 round 5: exhaustive fast-path contradiction matrix ------------------
+
+func TestResolveTargetScope_ExistingProjectWithProjectParent_Denied(t *testing.T) {
+	// A project resource has no "project parent" concept at all; claiming
+	// one is a contradiction, not something the existing-project fast path
+	// may ignore.
+	got := ResolveTargetScope(Resource{Type: "project", ID: "A", ParentType: "project", ParentID: "B"}, TargetScopeEvidence{})
+	if got.Kind != TargetScopeUnknown {
+		t.Errorf("project A with a project parent B must resolve Unknown, not Project/A: got %+v", got)
+	}
+}
+
+func TestResolveTargetScope_HubTypeWithProjectParent_Denied(t *testing.T) {
+	// The Hub singleton has no parent concept at all.
+	got := ResolveTargetScope(Resource{Type: "hub", ParentType: "project", ParentID: "X"}, TargetScopeEvidence{})
+	if got.Kind != TargetScopeUnknown {
+		t.Errorf("hub with a project parent must resolve Unknown, not Hub: got %+v", got)
+	}
+}
+
+func TestResolveTargetScope_ExistingProjectWithMalformedSystemParent_Denied(t *testing.T) {
+	// A system parent must never carry a ParentID; this must be caught
+	// BEFORE the existing-project fast path returns Project(A).
+	got := ResolveTargetScope(Resource{Type: "project", ID: "A", ParentType: "system", ParentID: "X"}, TargetScopeEvidence{})
+	if got.Kind != TargetScopeUnknown {
+		t.Errorf("project A with a malformed system parent must resolve Unknown, not Project/A: got %+v", got)
+	}
+}
+
+func TestResolveTargetScope_SkillWithSystemParentAndExplicitProjectScope_Denied(t *testing.T) {
+	// Plain (non-collection) instance path: a skill claiming both a system
+	// parent AND an explicit "project" ScopeKind is internally
+	// contradictory.
+	got := ResolveTargetScope(Resource{Type: "skill", ParentType: "system", ScopeKind: store.SkillScopeProject}, TargetScopeEvidence{})
+	if got.Kind != TargetScopeUnknown {
+		t.Errorf("skill with system parent + explicit project ScopeKind must resolve Unknown: got %+v", got)
+	}
+}
+
+func TestResolveTargetScope_CollectionEmptyTypeWithBogusScopeKind_Denied(t *testing.T) {
+	// Resource.Type is empty; the effective type only becomes "skill" via
+	// the permission's own registry type. The bogus ScopeKind must still be
+	// caught once the effective type is resolved, rather than escaping
+	// review because Resource.Type itself was empty at validation time.
+	got := ResolveTargetScope(Resource{ScopeKind: "bogus"}, TargetScopeEvidence{
+		IsCollectionLevel: true, CollectionScope: TargetScopeHub, PermissionID: "skill.list",
+	})
+	if got.Kind != TargetScopeUnknown {
+		t.Errorf("collection evidence with empty Resource.Type + bogus ScopeKind must resolve Unknown: got %+v", got)
 	}
 }

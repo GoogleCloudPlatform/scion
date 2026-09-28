@@ -126,40 +126,36 @@ type TargetScopeEvidence struct {
 }
 
 // ResolveTargetScope classifies a request for boundary matching from the
-// resolved Resource plus explicit collection-level evidence. It computes a
-// small set of independent facts about the Resource and, for the
-// collection-evidence path, validates ALL of them against the evidence and
-// against each other before returning anything other than Unknown — no
-// single field is allowed to "win" over a contradictory one (pat-refactor
-// R1, 2026-09-28: a full contradiction matrix, not case-by-case checks).
-//
-// Non-collection-level path, applied in order:
-//
-//  1. r.Type == permissions.ResourceProject and r.ID != "": TargetScopeProject.
-//  2. r.Type == permissions.ResourceHub: TargetScopeHub.
-//  3. hasProjectParent(r) — UNLESS hasReviewedGlobalScopeKind(r) also holds
-//     (a resource cannot be both project-parented and globally scoped) or
-//     r.ParentType=="project" with an empty r.ParentID (malformed parent):
-//     either contradiction resolves Unknown; otherwise TargetScopeProject.
-//  4. r.ParentType == "system" — UNLESS r.ParentID is also set (a
-//     contradiction): TargetScopeHub.
-//  5. r.Type is "broker" or "runtime_broker": TargetScopeHub.
-//  6. hasReviewedGlobalScopeKind(r): TargetScopeHub.
-//  7. Anything else: TargetScopeUnknown. Never equate missing resource
-//     parent metadata with hub scope.
+// resolved Resource plus explicit collection-level evidence, via ONE shared
+// fact-computation-and-coherence matrix (computeTargetFacts) used by both
+// the plain-resource and collection-evidence paths, so no fast path
+// (existing project, Hub singleton) can return before EVERY supplied fact —
+// parent type/ID and scope kind — has been checked together, including
+// against a resource type that has no parent/scope concept at all
+// (pat-refactor R1, 2026-09-28: contradictory recognized facts must be
+// rejected everywhere, not only in the examples first reviewed).
 //
 // Collection-level path (evidence.IsCollectionLevel): see resolveCollectionEvidence.
+// Plain-resource path:
+//
+//  1. computeTargetFacts(r.Type, r) — any contradiction resolves Unknown
+//     before any other rule runs.
+//  2. r.Type == permissions.ResourceProject and r.ID != "": TargetScopeProject.
+//  3. r.Type == permissions.ResourceHub: TargetScopeHub.
+//  4. facts.hasProjectParent: TargetScopeProject.
+//  5. facts.hasSystemParent: TargetScopeHub.
+//  6. r.Type is "broker" or "runtime_broker": TargetScopeHub.
+//  7. facts.hasGlobalScope: TargetScopeHub.
+//  8. Anything else: TargetScopeUnknown. Never equate missing resource
+//     parent metadata with hub scope.
 func ResolveTargetScope(r Resource, evidence TargetScopeEvidence) TargetScope {
-	// Supplied-but-unrecognized metadata is a contradiction, not absent
-	// metadata — validated BEFORE any fast path, including the coherent
-	// existing-project/Hub-type cases, so a caller cannot smuggle a
-	// contradictory extra fact past them (pat-refactor R1, 2026-09-28).
-	if !recognizedFactsCoherent(r) {
-		return TargetScope{Kind: TargetScopeUnknown}
-	}
-
 	if evidence.IsCollectionLevel {
 		return resolveCollectionEvidence(r, evidence)
+	}
+
+	facts, ok := computeTargetFacts(r.Type, r)
+	if !ok {
+		return TargetScope{Kind: TargetScopeUnknown}
 	}
 
 	if r.Type == permissions.ResourceProject && r.ID != "" {
@@ -168,50 +164,35 @@ func ResolveTargetScope(r Resource, evidence TargetScopeEvidence) TargetScope {
 	if r.Type == permissions.ResourceHub {
 		return TargetScope{Kind: TargetScopeHub}
 	}
-
-	hasProjectParent := r.ParentType == "project" && r.ParentID != ""
-	hasProjectParentMalformed := r.ParentType == "project" && r.ParentID == ""
-	hasSystemParent := r.ParentType == "system"
-	hasSystemParentMalformed := hasSystemParent && r.ParentID != ""
-	hasGlobalScope := hasReviewedGlobalScopeKind(r.Type, r.ScopeKind)
-
-	if hasProjectParentMalformed || hasSystemParentMalformed {
-		return TargetScope{Kind: TargetScopeUnknown}
-	}
-	if hasProjectParent && hasGlobalScope {
-		return TargetScope{Kind: TargetScopeUnknown}
-	}
-
-	if hasProjectParent {
+	if facts.hasProjectParent {
 		return TargetScope{Kind: TargetScopeProject, ProjectID: r.ParentID}
 	}
-	if hasSystemParent {
+	if facts.hasSystemParent {
 		return TargetScope{Kind: TargetScopeHub}
 	}
 	if r.Type == "broker" || r.Type == "runtime_broker" {
 		return TargetScope{Kind: TargetScopeHub}
 	}
-	if hasGlobalScope {
+	if facts.hasGlobalScope {
 		return TargetScope{Kind: TargetScopeHub}
 	}
 
 	return TargetScope{Kind: TargetScopeUnknown}
 }
 
-// resolveCollectionEvidence is ResolveTargetScope's collection-level branch,
-// factored out for the full contradiction matrix pat-refactor's R1 review
-// requires. Facts are computed ONCE and checked against both the evidence
-// and each other; any contradiction denies (Unknown), and evidence never
-// overrides a contradictory resource fact.
+// resolveCollectionEvidence is ResolveTargetScope's collection-level branch.
+// The EFFECTIVE resource type (Resource.Type, or the permission's own
+// registry type when Resource.Type is empty) is resolved FIRST, then
+// computeTargetFacts validates and computes every fact against THAT
+// effective type before any classification — so a bogus ScopeKind on an
+// empty-Type Resource cannot slip through before the effective type is
+// known to be, say, "skill" (pat-refactor R1 round 5, 2026-09-28).
 func resolveCollectionEvidence(r Resource, evidence TargetScopeEvidence) TargetScope {
 	// Fact: a collection-level request must not also name an existing
 	// resource instance.
 	if r.ID != "" {
 		return TargetScope{Kind: TargetScopeUnknown}
 	}
-	// recognizedFactsCoherent is already checked by the caller
-	// (ResolveTargetScope) before dispatching here, but resolveCollectionEvidence
-	// is unexported and only reachable that way — no separate check needed.
 
 	// Fact: if both the Resource and the permission imply a resource type,
 	// they must agree — a caller cannot mismatch which resource family a
@@ -225,6 +206,11 @@ func resolveCollectionEvidence(r Resource, evidence TargetScopeEvidence) TargetS
 		effectiveType = expectedType
 	}
 
+	facts, ok := computeTargetFacts(effectiveType, r)
+	if !ok {
+		return TargetScope{Kind: TargetScopeUnknown}
+	}
+
 	// Fact: the permission's OWN reviewed collection-class set. A reviewed
 	// but EMPTY set (e.g. agent.attach/delete/token_refresh — instance-only
 	// actions that always target an existing resource) denies regardless of
@@ -236,22 +222,6 @@ func resolveCollectionEvidence(r Resource, evidence TargetScopeEvidence) TargetS
 		return TargetScope{Kind: TargetScopeUnknown}
 	}
 
-	// Facts about the resource's own parent/scope metadata, independent of
-	// the evidence — computed once, checked against both branches below.
-	hasProjectParent := r.ParentType == "project" && r.ParentID != ""
-	hasProjectParentMalformed := r.ParentType == "project" && r.ParentID == ""
-	hasSystemParent := r.ParentType == "system"
-	hasSystemParentMalformed := hasSystemParent && r.ParentID != ""
-	hasGlobalScope := hasReviewedGlobalScopeKind(effectiveType, r.ScopeKind)
-	hasExplicitProjectScope := hasExplicitProjectScopeKind(effectiveType, r.ScopeKind)
-
-	if hasProjectParentMalformed || hasSystemParentMalformed {
-		return TargetScope{Kind: TargetScopeUnknown}
-	}
-	if hasProjectParent && hasGlobalScope {
-		return TargetScope{Kind: TargetScopeUnknown}
-	}
-
 	switch evidence.CollectionScope {
 	case TargetScopeHub:
 		if evidence.CollectionProjectID != "" {
@@ -260,11 +230,10 @@ func resolveCollectionEvidence(r Resource, evidence TargetScopeEvidence) TargetS
 		if !classesInclude(classes, permissions.TargetClassKindGlobalCatalog, permissions.TargetClassKindHubResource) {
 			return TargetScope{Kind: TargetScopeUnknown} // Hub is not a reviewed class for this permission
 		}
-		if hasProjectParent {
+		if facts.hasProjectParent {
 			return TargetScope{Kind: TargetScopeUnknown} // resource independently claims a project parent
 		}
-		// hasSystemParent agrees with Hub evidence — not a contradiction.
-		if hasExplicitProjectScope {
+		if facts.hasProjectScope {
 			return TargetScope{Kind: TargetScopeUnknown} // resource's own ScopeKind explicitly says "project", contradicting Hub evidence
 		}
 		return TargetScope{Kind: TargetScopeHub}
@@ -275,13 +244,13 @@ func resolveCollectionEvidence(r Resource, evidence TargetScopeEvidence) TargetS
 		if !classesInclude(classes, permissions.TargetClassKindProjectScoped) {
 			return TargetScope{Kind: TargetScopeUnknown} // Project is not a reviewed class for this permission
 		}
-		if hasProjectParent && r.ParentID != evidence.CollectionProjectID {
+		if facts.hasProjectParent && r.ParentID != evidence.CollectionProjectID {
 			return TargetScope{Kind: TargetScopeUnknown} // resource names a DIFFERENT project than the evidence
 		}
-		if hasSystemParent {
+		if facts.hasSystemParent {
 			return TargetScope{Kind: TargetScopeUnknown} // resource independently claims system/hub scope
 		}
-		if hasGlobalScope {
+		if facts.hasGlobalScope {
 			return TargetScope{Kind: TargetScopeUnknown} // resource's own ScopeKind claims global/user scope
 		}
 		return TargetScope{Kind: TargetScopeProject, ProjectID: evidence.CollectionProjectID}
@@ -301,37 +270,85 @@ func classesInclude(classes []permissions.TargetClassKind, want ...permissions.T
 	return false
 }
 
-// hasReviewedGlobalScopeKind reports whether scopeKind marks resourceType's
-// record as scoped to a user or globally, rather than to a project. RESTRICTED
-// to the reviewed resource types that actually carry this ScopeKind concept
-// (skill/template/harness_config) — an arbitrary/unexpected resource type
-// that happens to have ScopeKind set to "user"/"global"/"core" (e.g. by a
-// bug in an unrelated resource-building call site) must NOT be classified
-// Hub on that basis alone (pat-refactor R1, 2026-09-28). store.SkillScopeUser,
-// store.TemplateScopeUser, and store.HarnessConfigScopeUser are all the
-// literal string "user" (and likewise "global"/"core"), so a single string
-// comparison covers every resource-specific constant once the resource type
-// itself is confirmed reviewed.
-// recognizedFactsCoherent validates that r's own metadata is internally
-// well-formed BEFORE any classification is attempted: an unrecognized
-// ParentType value, an orphan ParentID with no declared ParentType, or an
-// unrecognized ScopeKind value on a resource type that has reviewed
-// scope-kind semantics are all contradictions — supplied-but-unrecognized
-// metadata is NOT the same as absent metadata, and must deny rather than be
-// silently treated as "no claim" (pat-refactor R1, 2026-09-28).
-func recognizedFactsCoherent(r Resource) bool {
+// targetFacts is the fully-validated, independent fact set computeTargetFacts
+// produces for one (effectiveType, Resource) pair.
+type targetFacts struct {
+	hasProjectParent bool
+	hasSystemParent  bool
+	hasGlobalScope   bool // explicit global/core/user ScopeKind, reviewed types only
+	hasProjectScope  bool // explicit "project" ScopeKind, reviewed types only
+}
+
+// computeTargetFacts is the ONE shared validation matrix both
+// ResolveTargetScope paths use. ok=false for ANY internal contradiction —
+// checked together, before the caller is allowed to return anything for
+// effectiveType/r:
+//
+//   - r.ParentType is not one of "", "project", "system" (unrecognized —
+//     supplied-but-unrecognized is a contradiction, not absent metadata).
+//   - r.ParentID is set with an empty r.ParentType (orphan ParentID).
+//   - r.ParentType == "project" with an empty r.ParentID (malformed parent).
+//   - r.ParentType == "system" with a non-empty r.ParentID (malformed parent).
+//   - r.ParentType is set AT ALL on a resource type with NO parent concept —
+//     project and Hub are singleton/global types; a project cannot have
+//     a project OR system parent, and neither can the Hub singleton
+//     (pat-refactor round 5: "existing project A + project parent B still
+//     returns A", "hub + project parent returns Hub", "project ID with a
+//     malformed system parent reaches the fast path unchecked" are all
+//     instances of this same rule).
+//   - r.ScopeKind is set on a resource type with NO scope-kind concept
+//     (only skill/template/harness_config have one).
+//   - r.ScopeKind is an unrecognized value for a resource type that DOES
+//     have scope-kind semantics.
+//   - The resulting facts cross-contradict: project-parented AND globally
+//     scoped, or system-parented AND explicitly project-scoped (e.g. "plain
+//     skill with system parent + ScopeKind=project").
+func computeTargetFacts(effectiveType string, r Resource) (targetFacts, bool) {
 	switch r.ParentType {
 	case "", "project", "system":
 	default:
-		return false
+		return targetFacts{}, false
 	}
 	if r.ParentType == "" && r.ParentID != "" {
-		return false // orphan ParentID with no declared ParentType
+		return targetFacts{}, false
 	}
-	if isReviewedScopeKindResourceType(r.Type) && !isRecognizedScopeKindValue(r.ScopeKind) {
-		return false
+	if r.ParentType == "project" && r.ParentID == "" {
+		return targetFacts{}, false
 	}
-	return true
+	if r.ParentType == "system" && r.ParentID != "" {
+		return targetFacts{}, false
+	}
+	if (effectiveType == permissions.ResourceProject || effectiveType == permissions.ResourceHub) && r.ParentType != "" {
+		return targetFacts{}, false
+	}
+
+	hasScopeKindSemantics := isReviewedScopeKindResourceType(effectiveType)
+	if !hasScopeKindSemantics && r.ScopeKind != "" {
+		return targetFacts{}, false
+	}
+	if hasScopeKindSemantics && !isRecognizedScopeKindValue(r.ScopeKind) {
+		return targetFacts{}, false
+	}
+
+	facts := targetFacts{
+		hasProjectParent: r.ParentType == "project",
+		hasSystemParent:  r.ParentType == "system",
+	}
+	if hasScopeKindSemantics {
+		switch r.ScopeKind {
+		case store.SkillScopeGlobal, store.SkillScopeCore, store.SkillScopeUser:
+			facts.hasGlobalScope = true
+		case store.SkillScopeProject:
+			facts.hasProjectScope = true
+		}
+	}
+	if facts.hasProjectParent && facts.hasGlobalScope {
+		return targetFacts{}, false
+	}
+	if facts.hasSystemParent && facts.hasProjectScope {
+		return targetFacts{}, false
+	}
+	return facts, true
 }
 
 // isReviewedScopeKindResourceType reports whether resourceType is one of
@@ -353,35 +370,6 @@ func isRecognizedScopeKindValue(scopeKind string) bool {
 	switch scopeKind {
 	case "", store.SkillScopeProject, store.SkillScopeGlobal, store.SkillScopeCore, store.SkillScopeUser:
 		return true
-	default:
-		return false
-	}
-}
-
-func hasReviewedGlobalScopeKind(resourceType, scopeKind string) bool {
-	switch resourceType {
-	case permissions.ResourceSkill, permissions.ResourceTemplate, permissions.ResourceHarnessConfig:
-	default:
-		return false
-	}
-	switch scopeKind {
-	case store.SkillScopeUser, store.SkillScopeGlobal, store.SkillScopeCore:
-		return true
-	default:
-		return false
-	}
-}
-
-// hasExplicitProjectScopeKind reports whether scopeKind is resourceType's
-// own explicit "project" scope-kind constant (store.SkillScopeProject and
-// the Template/HarnessConfig equivalents are all the literal "project").
-// RESTRICTED to the same three reviewed resource types as
-// hasReviewedGlobalScopeKind, for the same reason: an arbitrary type cannot
-// carry this concept.
-func hasExplicitProjectScopeKind(resourceType, scopeKind string) bool {
-	switch resourceType {
-	case permissions.ResourceSkill, permissions.ResourceTemplate, permissions.ResourceHarnessConfig:
-		return scopeKind == store.SkillScopeProject
 	default:
 		return false
 	}
