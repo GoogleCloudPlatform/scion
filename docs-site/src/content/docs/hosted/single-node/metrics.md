@@ -228,17 +228,17 @@ When harness events occur (via hooks), sciontool automatically records the follo
 
 | Metric | Type | Unit | Description |
 |--------|------|------|-------------|
-| `scion.hook.tokens.input` | Counter | tokens | Input tokens reported by model-end hooks |
-| `scion.hook.tokens.output` | Counter | tokens | Output tokens reported by model-end hooks |
-| `scion.hook.tokens.cached` | Counter | tokens | Cached tokens reported by model-end hooks |
+| `scion.usage.tokens` | Counter | tokens | Tokens reported by model-end hooks, broken down by the `token_type` label (see "Canonical usage contract" below) |
 | `agent.tool.calls` | Counter | calls | Total number of tool executions |
 | `agent.tool.duration` | Histogram | ms | Tool duration when paired start and end events are available in one process |
 | `agent.session.count` | Counter | sessions | Session-end events emitted by each source |
 | `gen_ai.api.calls` | Counter | calls | Total number of LLM API requests |
 | `gen_ai.api.duration` | Histogram | ms | Model duration when paired start and end events are available in one process |
 
-Hook token counters use the `scion.hook.tokens.*` namespace. Token counters appear
-only when a hook provides token usage.
+Token counters appear only when a hook provides token usage, and only when the
+harness's usage source is `hooks` (see "Usage source" below). The retired
+`scion.hook.tokens.{input,output,cached}` names are rejected by the receiver on
+the hook scope, the same way `gen_ai.tokens.*` is.
 
 #### Canonical usage contract: `gen_ai.api.calls` and `scion.usage.tokens`
 
@@ -249,13 +249,13 @@ The Hub dashboard reads exactly two usage metrics, regardless of source:
 | `gen_ai.api.calls` | `harness`, `model`, `status` (`success`\|`error`), `scion_agent_id`, `scion_project_id`, `scion_agent_slug` | One completed model response, or a failed request where the source reports it. |
 | `scion.usage.tokens` | `harness`, `model`, `token_type`, `scion_agent_id`, `scion_project_id`, `scion_agent_slug` | Tokens attributed to model requests. |
 
-`token_type` is a closed enum: `input` (non-cached prompt tokens), `output` (generated tokens, including reasoning), `cache_read`, `cache_write`, and `reasoning` (an informational subset of `output`, already counted there — never add it to a total alongside `output`). `scion.usage.tokens` replaces the `scion.hook.tokens.*` family for any source that has been migrated to it; both a harness's native events and its hooks can in principle populate it, but never both at once for the same harness (see "Usage source" below).
+`token_type` is a closed enum: `input` (non-cached prompt tokens), `output` (generated tokens, including reasoning), `cache_read`, `cache_write`, and `reasoning` (an informational subset of `output`, already counted there — never add it to a total alongside `output`). `scion.usage.tokens` is the only token metric either source writes; the retired `scion.hook.tokens.*` family is rejected at admission (see above). A harness's native events and its hooks can in principle both populate it, but never both at once for the same harness (see "Usage source" below).
 
-Each harness declares **one** usage source in its `provision.py`, via `SCION_USAGE_SOURCE=native|hooks`. When native, sciontool's receiver derives `gen_ai.api.calls`/`scion.usage.tokens` itself from the harness's own OTLP log events (for example Claude's `api_request`/`api_error`), so no hook needs to carry usage at all. As of this phase, only Claude declares `SCION_USAGE_SOURCE=native`; every other harness is unaffected by this build and keeps publishing usage from its existing hooks exactly as before.
+Each harness declares **one** usage source in its `provision.py`, via `SCION_USAGE_SOURCE=native|hooks`. When native, sciontool's receiver derives `gen_ai.api.calls`/`scion.usage.tokens` itself from the harness's own OTLP log events (for example Claude's `api_request`/`api_error`), so no hook needs to carry usage at all. Claude declares `SCION_USAGE_SOURCE=native`.
 
-**From phase 2** (the hook-side vetting gate, [ptone/scion#2053](https://github.com/ptone/scion/issues/2053)), an unset `SCION_USAGE_SOURCE` will mean **no usage is published** from hooks for that harness — an unvetted guess is worse than a visible gap — and a harness will publish hook-sourced usage only once its `provision.py` declares `SCION_USAGE_SOURCE=hooks` behind a fixture-backed PR. Until that phase lands, unset behaves as it always has.
+An unset `SCION_USAGE_SOURCE` means **no usage is published** from hooks for that harness (design D10, the vetting gate) — an unvetted guess is worse than a visible gap. A harness publishes hook-sourced usage only once its `provision.py` declares `SCION_USAGE_SOURCE=hooks`, behind a PR that checks in a captured fixture proving the mapping. As of this phase, no harness has opted in that way; declaring `hooks` for a given harness's `provision.py` is tracked per-harness follow-up work (for example opencode and antigravity). Tool, session, turn and every other hook metric, span and log is unaffected by `SCION_USAGE_SOURCE` in every case (design D4, narrow).
 
-All of this — the deriver, the hook vetting gate once it lands, and the allowlist changes below — is sciontool-side value: it takes effect only after an operator rebuilds `scion-base` and then the harness images. An unrebuilt `scion-base` keeps today's behavior unchanged; it does not error, and it does not need a `provision.py` workaround.
+All of this — the deriver, the hook vetting gate, and the allowlist changes below — is sciontool-side value: it takes effect only after an operator rebuilds `scion-base` and then the harness images. An unrebuilt `scion-base` keeps today's behavior unchanged; it does not error, and it does not need a `provision.py` workaround.
 
 For Cloud Monitoring, the normalized hook counters and the derived usage counters in this table use a
 collector observation epoch and the time sciontool takes each cumulative
@@ -288,13 +288,12 @@ The Hub dashboard reads only `gen_ai.api.calls` and `scion.usage.tokens` (never
 `gen_ai.tokens.*` or `scion.hook.tokens.*`), and computes totals from each
 series' cumulative increase per flush rather than summing raw points — summing
 raw points on a CUMULATIVE counter over-counts by roughly the flush count.
-A harness whose hooks already publish `gen_ai.api.calls`/`scion.usage.tokens`
-keeps appearing on the dashboard unchanged. Claude's usage instead comes from
-its native events once its `provision.py` declares `SCION_USAGE_SOURCE=native`
-(this phase); see "Canonical usage contract" above. From phase 2, an
-as-yet-unvetted hook-sourced harness's usage stops appearing until its
-`provision.py` opts back in under a fixture-backed PR (the vetting gate
-described there).
+A harness whose `provision.py` declares `SCION_USAGE_SOURCE=hooks` keeps
+appearing on the dashboard from its hooks. Claude's usage instead comes from
+its native events, since its `provision.py` declares `SCION_USAGE_SOURCE=native`;
+see "Canonical usage contract" above. An as-yet-unvetted hook-sourced harness's
+usage does not appear until its `provision.py` opts in under a fixture-backed
+PR (the vetting gate described there).
 
 ### Correlated Logs
 
