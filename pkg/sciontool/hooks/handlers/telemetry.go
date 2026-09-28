@@ -15,6 +15,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
+	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -67,9 +68,7 @@ type TelemetryHandler struct {
 	OnSessionEnd func(summary telemetry.SessionSummary)
 
 	// Metric instruments
-	tokensInput  metric.Int64Counter
-	tokensOutput metric.Int64Counter
-	tokensCached metric.Int64Counter
+	usageTokens  metric.Int64Counter // scion.usage.tokens{token_type} (design §3.5; replaces scion.hook.tokens.*)
 	toolCalls    metric.Int64Counter
 	toolDuration metric.Float64Histogram
 	sessionCount metric.Int64Counter
@@ -127,28 +126,12 @@ func (h *TelemetryHandler) initMetrics(mp metric.MeterProvider, scope string) {
 
 	var err error
 
-	h.tokensInput, err = meter.Int64Counter("scion.hook.tokens.input",
+	h.usageTokens, err = meter.Int64Counter(telemetrycontract.MetricUsageTokens,
 		metric.WithUnit("{token}"),
-		metric.WithDescription("Number of input tokens consumed"),
+		metric.WithDescription("Tokens attributed to model requests, by token_type"),
 	)
 	if err != nil {
-		log.Error("Failed to create scion.hook.tokens.input counter: %v", err)
-	}
-
-	h.tokensOutput, err = meter.Int64Counter("scion.hook.tokens.output",
-		metric.WithUnit("{token}"),
-		metric.WithDescription("Number of output tokens generated"),
-	)
-	if err != nil {
-		log.Error("Failed to create scion.hook.tokens.output counter: %v", err)
-	}
-
-	h.tokensCached, err = meter.Int64Counter("scion.hook.tokens.cached",
-		metric.WithUnit("{token}"),
-		metric.WithDescription("Number of tokens served from cache"),
-	)
-	if err != nil {
-		log.Error("Failed to create scion.hook.tokens.cached counter: %v", err)
+		log.Error("Failed to create %s counter: %v", telemetrycontract.MetricUsageTokens, err)
 	}
 
 	h.toolCalls, err = meter.Int64Counter("agent.tool.calls",
@@ -175,12 +158,12 @@ func (h *TelemetryHandler) initMetrics(mp metric.MeterProvider, scope string) {
 		log.Error("Failed to create agent.session.count counter: %v", err)
 	}
 
-	h.apiCalls, err = meter.Int64Counter("gen_ai.api.calls",
+	h.apiCalls, err = meter.Int64Counter(telemetrycontract.MetricAPICalls,
 		metric.WithUnit("{call}"),
 		metric.WithDescription("Number of LLM API calls"),
 	)
 	if err != nil {
-		log.Error("Failed to create gen_ai.api.calls counter: %v", err)
+		log.Error("Failed to create %s counter: %v", telemetrycontract.MetricAPICalls, err)
 	}
 
 	h.apiDuration, err = meter.Float64Histogram("gen_ai.api.duration",
@@ -483,13 +466,29 @@ func (h *TelemetryHandler) metricAttrs() []attribute.KeyValue {
 		attrs = append(attrs, attribute.String("agent_id", v))
 	}
 	if v := os.Getenv("SCION_HARNESS"); v != "" {
-		attrs = append(attrs, attribute.String("harness", v))
+		attrs = append(attrs, attribute.String(telemetrycontract.HarnessLabel, v))
 	}
 	projectID := projectkeys.ProjectIDFromEnv(os.Getenv)
 	if projectID != "" {
 		attrs = append(attrs, attribute.String("project_id", projectID))
 	}
 	return attrs
+}
+
+// usageHookRecordingEnabled reports whether this process should record
+// hook-sourced usage (gen_ai.api.calls and scion.usage.tokens). Per design
+// D4/D10 and §3.5 "Single source":
+//   - SCION_USAGE_SOURCE=hooks: this harness has opted in behind a
+//     fixture-backed PR, so hook usage is recorded;
+//   - SCION_USAGE_SOURCE=native: the native UsageDeriver owns usage instead,
+//     so hook usage is skipped;
+//   - unset (the vetting-gate default, D10): usage is skipped until a
+//     harness's provision.py explicitly declares a source.
+//
+// Tool, session, turn and every other hook metric, span and log is
+// unaffected by this gate (D4, narrow).
+func usageHookRecordingEnabled() bool {
+	return os.Getenv("SCION_USAGE_SOURCE") == "hooks"
 }
 
 // recordEndMetrics records metrics when a paired end event completes.
@@ -519,28 +518,32 @@ func (h *TelemetryHandler) recordEndMetrics(event *hooks.Event, startEventType s
 		}
 
 	case hooks.EventModelStart:
-		if h.apiCalls != nil {
-			status := "success"
+		usageEnabled := usageHookRecordingEnabled()
+		if h.apiCalls != nil && usageEnabled {
+			status := telemetrycontract.StatusSuccess
 			if event.Data.Error != "" {
-				status = "error"
+				status = telemetrycontract.StatusError
 			}
 			attrs := baseAttrs
 			if model := os.Getenv("SCION_MODEL"); model != "" {
-				attrs = append(attrs, attribute.String("model", model))
+				attrs = append(attrs, attribute.String(telemetrycontract.ModelLabel, model))
 			}
-			attrs = append(attrs, attribute.String("status", status))
+			attrs = append(attrs, attribute.String(telemetrycontract.StatusLabel, status))
 			h.apiCalls.Add(ctx, 1, metric.WithAttributes(attrs...))
 		}
 		if h.apiDuration != nil {
 			attrs := baseAttrs
 			if model := os.Getenv("SCION_MODEL"); model != "" {
-				attrs = append(attrs, attribute.String("model", model))
+				attrs = append(attrs, attribute.String(telemetrycontract.ModelLabel, model))
 			}
 			h.apiDuration.Record(ctx, durationMs, metric.WithAttributes(attrs...))
 		}
 
-		// Record token usage from model-end events
-		h.recordTokenMetrics(ctx, event, baseAttrs)
+		// Record token usage from model-end events, subject to the same
+		// usage-source gate as gen_ai.api.calls above (design §3.5).
+		if usageEnabled {
+			h.recordTokenMetrics(ctx, event, baseAttrs)
+		}
 	}
 }
 
@@ -567,45 +570,55 @@ func (h *TelemetryHandler) recordUnpairedEndMetrics(event *hooks.Event, startEve
 		}
 
 	case hooks.EventModelStart:
-		if h.apiCalls != nil {
-			status := "success"
+		usageEnabled := usageHookRecordingEnabled()
+		if h.apiCalls != nil && usageEnabled {
+			status := telemetrycontract.StatusSuccess
 			if event.Data.Error != "" {
-				status = "error"
+				status = telemetrycontract.StatusError
 			}
 			attrs := baseAttrs
 			if model := os.Getenv("SCION_MODEL"); model != "" {
-				attrs = append(attrs, attribute.String("model", model))
+				attrs = append(attrs, attribute.String(telemetrycontract.ModelLabel, model))
 			}
-			attrs = append(attrs, attribute.String("status", status))
+			attrs = append(attrs, attribute.String(telemetrycontract.StatusLabel, status))
 			h.apiCalls.Add(ctx, 1, metric.WithAttributes(attrs...))
 		}
 
-		// Record token usage from model-end events
-		h.recordTokenMetrics(ctx, event, baseAttrs)
+		// Record token usage from model-end events, subject to the same
+		// usage-source gate as gen_ai.api.calls above (design §3.5).
+		if usageEnabled {
+			h.recordTokenMetrics(ctx, event, baseAttrs)
+		}
 	}
 }
 
 // recordTokenMetrics records token usage counters from an event's token fields.
 func (h *TelemetryHandler) recordTokenMetrics(ctx context.Context, event *hooks.Event, baseAttrs []attribute.KeyValue) {
+	if h.usageTokens == nil {
+		return
+	}
+
 	attrs := baseAttrs
 	if model := os.Getenv("SCION_MODEL"); model != "" {
-		attrs = append(attrs, attribute.String("model", model))
+		attrs = append(attrs, attribute.String(telemetrycontract.ModelLabel, model))
 	}
 
 	recorded := false
+	record := func(tokenType string, n int64) {
+		if n <= 0 {
+			return
+		}
+		pointAttrs := append(attrs, attribute.String(telemetrycontract.TokenTypeLabel, tokenType))
+		h.usageTokens.Add(ctx, n, metric.WithAttributes(pointAttrs...))
+		recorded = true
+	}
 
-	if h.tokensInput != nil && event.Data.InputTokens > 0 {
-		h.tokensInput.Add(ctx, event.Data.InputTokens, metric.WithAttributes(attrs...))
-		recorded = true
-	}
-	if h.tokensOutput != nil && event.Data.OutputTokens > 0 {
-		h.tokensOutput.Add(ctx, event.Data.OutputTokens, metric.WithAttributes(attrs...))
-		recorded = true
-	}
-	if h.tokensCached != nil && event.Data.CachedTokens > 0 {
-		h.tokensCached.Add(ctx, event.Data.CachedTokens, metric.WithAttributes(attrs...))
-		recorded = true
-	}
+	// scion.hook.tokens.{input,output,cached} is replaced by a single
+	// scion.usage.tokens counter with a token_type attribute (design §3.5).
+	// "cached" maps to the canonical "cache_read" (design §3.2/§3.5).
+	record(telemetrycontract.TokenTypeInput, event.Data.InputTokens)
+	record(telemetrycontract.TokenTypeOutput, event.Data.OutputTokens)
+	record(telemetrycontract.TokenTypeCacheRead, event.Data.CachedTokens)
 
 	if h.metricsDebug {
 		if recorded {

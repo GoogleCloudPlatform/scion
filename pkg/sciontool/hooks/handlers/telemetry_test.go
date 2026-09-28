@@ -11,6 +11,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
+	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
@@ -437,14 +438,8 @@ func TestNewTelemetryHandler_WithMeterProvider(t *testing.T) {
 	if h == nil {
 		t.Fatal("NewTelemetryHandler should not return nil")
 	}
-	if h.tokensInput == nil {
-		t.Error("tokensInput instrument should be initialized")
-	}
-	if h.tokensOutput == nil {
-		t.Error("tokensOutput instrument should be initialized")
-	}
-	if h.tokensCached == nil {
-		t.Error("tokensCached instrument should be initialized")
+	if h.usageTokens == nil {
+		t.Error("usageTokens instrument should be initialized")
 	}
 	if h.toolCalls == nil {
 		t.Error("toolCalls instrument should be initialized")
@@ -465,8 +460,8 @@ func TestNewTelemetryHandler_WithMeterProvider(t *testing.T) {
 
 func TestTelemetryHandler_NilMeterProviderNoInstruments(t *testing.T) {
 	h := NewTelemetryHandler(nil, nil, nil)
-	if h.tokensInput != nil {
-		t.Error("tokensInput should be nil without MeterProvider")
+	if h.usageTokens != nil {
+		t.Error("usageTokens should be nil without MeterProvider")
 	}
 	if h.toolCalls != nil {
 		t.Error("toolCalls should be nil without MeterProvider")
@@ -524,6 +519,10 @@ func TestTelemetryHandler_ToolMetrics(t *testing.T) {
 }
 
 func TestTelemetryHandler_ModelMetrics(t *testing.T) {
+	// Usage (gen_ai.api.calls / scion.usage.tokens) is gated by
+	// SCION_USAGE_SOURCE=hooks (design D10 vetting gate); see
+	// TestTelemetryHandler_UsageSourceGate for the unset/native states.
+	t.Setenv("SCION_USAGE_SOURCE", "hooks")
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	defer func() { _ = mp.Shutdown(context.Background()) }()
@@ -634,7 +633,30 @@ func TestSessionMetricScopesSeparateHookAndLifecycleSources(t *testing.T) {
 	}
 }
 
+// usageTokenTotals sums scion.usage.tokens data points by their token_type
+// attribute value.
+func usageTokenTotals(rm metricdata.ResourceMetrics) map[string]int64 {
+	totals := map[string]int64{}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != telemetrycontract.MetricUsageTokens {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				continue
+			}
+			for _, point := range sum.DataPoints {
+				tokenType, _ := point.Attributes.Value(attribute.Key(telemetrycontract.TokenTypeLabel))
+				totals[tokenType.AsString()] += point.Value
+			}
+		}
+	}
+	return totals
+}
+
 func TestTelemetryHandler_TokenMetricsOnModelEnd(t *testing.T) {
+	t.Setenv("SCION_USAGE_SOURCE", "hooks")
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	defer func() { _ = mp.Shutdown(context.Background()) }()
@@ -674,26 +696,107 @@ func TestTelemetryHandler_TokenMetricsOnModelEnd(t *testing.T) {
 		}
 	}
 
-	if !found["scion.hook.tokens.input"] {
-		t.Error("expected scion.hook.tokens.input metric to be recorded")
+	totals := usageTokenTotals(rm)
+	if totals[telemetrycontract.TokenTypeInput] != 1500 {
+		t.Errorf("expected %s token_type=%s = 1500, got %d", telemetrycontract.MetricUsageTokens, telemetrycontract.TokenTypeInput, totals[telemetrycontract.TokenTypeInput])
 	}
-	if !found["scion.hook.tokens.output"] {
-		t.Error("expected scion.hook.tokens.output metric to be recorded")
+	if totals[telemetrycontract.TokenTypeOutput] != 500 {
+		t.Errorf("expected %s token_type=%s = 500, got %d", telemetrycontract.MetricUsageTokens, telemetrycontract.TokenTypeOutput, totals[telemetrycontract.TokenTypeOutput])
 	}
-	if !found["scion.hook.tokens.cached"] {
-		t.Error("expected scion.hook.tokens.cached metric to be recorded")
+	// "cached" maps to the canonical "cache_read" (design §3.5).
+	if totals[telemetrycontract.TokenTypeCacheRead] != 200 {
+		t.Errorf("expected %s token_type=%s = 200, got %d", telemetrycontract.MetricUsageTokens, telemetrycontract.TokenTypeCacheRead, totals[telemetrycontract.TokenTypeCacheRead])
 	}
-	if !found["gen_ai.api.calls"] {
+	if !found[telemetrycontract.MetricAPICalls] {
 		t.Error("expected gen_ai.api.calls metric to be recorded")
 	}
-	for _, oldName := range []string{"gen_ai.tokens.input", "gen_ai.tokens.output", "gen_ai.tokens.cached"} {
+	for _, oldName := range []string{"gen_ai.tokens.input", "gen_ai.tokens.output", "gen_ai.tokens.cached", "scion.hook.tokens.input", "scion.hook.tokens.output", "scion.hook.tokens.cached"} {
 		if found[oldName] {
-			t.Errorf("normalized hook emitted old native token name %s", oldName)
+			t.Errorf("normalized hook emitted retired token name %s", oldName)
 		}
 	}
 }
 
+// TestTelemetryHandler_UsageSourceGate pins design D4/D10 and the Phase 2 AC:
+// hook-sourced usage (gen_ai.api.calls, scion.usage.tokens) is recorded only
+// when SCION_USAGE_SOURCE=hooks. It is suppressed both when the variable is
+// unset (the vetting-gate default) and when it is "native" (the deriver owns
+// usage instead). Tool and session hook metrics are unaffected in every case.
+func TestTelemetryHandler_UsageSourceGate(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		usageSource string
+		wantUsage   bool
+	}{
+		{name: "unset (vetting gate default)", usageSource: "", wantUsage: false},
+		{name: "native (deriver owns usage)", usageSource: "native", wantUsage: false},
+		{name: "hooks (opted in)", usageSource: "hooks", wantUsage: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// An empty value is equivalent to unset for usageHookRecordingEnabled
+			// (both compare != "hooks"), and t.Setenv restores the previous
+			// value automatically, so this also covers the true-unset default.
+			t.Setenv("SCION_USAGE_SOURCE", tc.usageSource)
+
+			reader := sdkmetric.NewManualReader()
+			mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+			defer func() { _ = mp.Shutdown(context.Background()) }()
+
+			h := NewTelemetryHandler(nil, nil, nil, mp)
+
+			if err := h.Handle(&hooks.Event{Name: hooks.EventModelStart, Data: hooks.EventData{}}); err != nil {
+				t.Fatalf("Handle model-start error: %v", err)
+			}
+			if err := h.Handle(&hooks.Event{
+				Name: hooks.EventModelEnd,
+				Data: hooks.EventData{Success: true, InputTokens: 100, OutputTokens: 50},
+			}); err != nil {
+				t.Fatalf("Handle model-end error: %v", err)
+			}
+			if err := h.Handle(&hooks.Event{Name: hooks.EventToolStart, Data: hooks.EventData{ToolName: "Bash"}}); err != nil {
+				t.Fatalf("Handle tool-start error: %v", err)
+			}
+			if err := h.Handle(&hooks.Event{Name: hooks.EventToolEnd, Data: hooks.EventData{ToolName: "Bash", Success: true}}); err != nil {
+				t.Fatalf("Handle tool-end error: %v", err)
+			}
+
+			var rm metricdata.ResourceMetrics
+			if err := reader.Collect(context.Background(), &rm); err != nil {
+				t.Fatalf("Collect error: %v", err)
+			}
+
+			found := map[string]bool{}
+			var foundAPIDuration bool
+			for _, sm := range rm.ScopeMetrics {
+				for _, m := range sm.Metrics {
+					found[m.Name] = true
+					if m.Name == "gen_ai.api.duration" {
+						foundAPIDuration = true
+					}
+				}
+			}
+
+			if found[telemetrycontract.MetricAPICalls] != tc.wantUsage {
+				t.Errorf("%s recorded=%v, want %v", telemetrycontract.MetricAPICalls, found[telemetrycontract.MetricAPICalls], tc.wantUsage)
+			}
+			if found[telemetrycontract.MetricUsageTokens] != tc.wantUsage {
+				t.Errorf("%s recorded=%v, want %v", telemetrycontract.MetricUsageTokens, found[telemetrycontract.MetricUsageTokens], tc.wantUsage)
+			}
+			// gen_ai.api.duration is not part of the usage contract (design
+			// §3.5 "the switch covers only usage"), so it is unaffected.
+			if !foundAPIDuration {
+				t.Error("expected gen_ai.api.duration to be recorded regardless of SCION_USAGE_SOURCE")
+			}
+			// Tool and session metrics are unaffected either way (D4, narrow).
+			if !found["agent.tool.calls"] {
+				t.Error("expected agent.tool.calls to be recorded regardless of SCION_USAGE_SOURCE")
+			}
+		})
+	}
+}
+
 func TestTelemetryHandler_SessionTotalsDoNotDuplicateModelTokens(t *testing.T) {
+	t.Setenv("SCION_USAGE_SOURCE", "hooks")
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	defer func() { _ = mp.Shutdown(context.Background()) }()
@@ -721,23 +824,18 @@ func TestTelemetryHandler_SessionTotalsDoNotDuplicateModelTokens(t *testing.T) {
 	}
 
 	found := map[string]bool{}
-	totals := map[string]int64{}
 	for _, sm := range rm.ScopeMetrics {
 		for _, m := range sm.Metrics {
 			found[m.Name] = true
-			if sum, ok := m.Data.(metricdata.Sum[int64]); ok {
-				for _, point := range sum.DataPoints {
-					totals[m.Name] += point.Value
-				}
-			}
 		}
 	}
 
 	if !found["agent.session.count"] {
 		t.Error("expected agent.session.count metric to be recorded")
 	}
-	if totals["scion.hook.tokens.input"] != 1500 || totals["scion.hook.tokens.output"] != 500 {
-		t.Errorf("session totals duplicated model increments: input=%d output=%d", totals["scion.hook.tokens.input"], totals["scion.hook.tokens.output"])
+	totals := usageTokenTotals(rm)
+	if totals[telemetrycontract.TokenTypeInput] != 1500 || totals[telemetrycontract.TokenTypeOutput] != 500 {
+		t.Errorf("session totals duplicated model increments: input=%d output=%d", totals[telemetrycontract.TokenTypeInput], totals[telemetrycontract.TokenTypeOutput])
 	}
 }
 
@@ -776,6 +874,7 @@ func TestTelemetryHandler_UnpairedToolEnd(t *testing.T) {
 }
 
 func TestTelemetryHandler_UnpairedModelEnd(t *testing.T) {
+	t.Setenv("SCION_USAGE_SOURCE", "hooks")
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	defer func() { _ = mp.Shutdown(context.Background()) }()
@@ -806,18 +905,20 @@ func TestTelemetryHandler_UnpairedModelEnd(t *testing.T) {
 		}
 	}
 
-	if !found["gen_ai.api.calls"] {
+	if !found[telemetrycontract.MetricAPICalls] {
 		t.Error("expected gen_ai.api.calls metric from unpaired model-end")
 	}
-	if !found["scion.hook.tokens.input"] {
-		t.Error("expected scion.hook.tokens.input metric from unpaired model-end")
+	totals := usageTokenTotals(rm)
+	if totals[telemetrycontract.TokenTypeInput] != 1000 {
+		t.Errorf("expected scion.usage.tokens token_type=input from unpaired model-end, got %d", totals[telemetrycontract.TokenTypeInput])
 	}
-	if !found["scion.hook.tokens.output"] {
-		t.Error("expected scion.hook.tokens.output metric from unpaired model-end")
+	if totals[telemetrycontract.TokenTypeOutput] != 300 {
+		t.Errorf("expected scion.usage.tokens token_type=output from unpaired model-end, got %d", totals[telemetrycontract.TokenTypeOutput])
 	}
 }
 
 func TestTelemetryHandler_NoTokenMetricsWhenZero(t *testing.T) {
+	t.Setenv("SCION_USAGE_SOURCE", "hooks")
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	defer func() { _ = mp.Shutdown(context.Background()) }()
@@ -839,7 +940,7 @@ func TestTelemetryHandler_NoTokenMetricsWhenZero(t *testing.T) {
 
 	for _, sm := range rm.ScopeMetrics {
 		for _, m := range sm.Metrics {
-			if m.Name == "scion.hook.tokens.input" || m.Name == "scion.hook.tokens.output" || m.Name == "scion.hook.tokens.cached" {
+			if m.Name == telemetrycontract.MetricUsageTokens {
 				t.Errorf("did not expect %s metric when token counts are zero", m.Name)
 			}
 		}
