@@ -94,7 +94,14 @@ type ReincarnationPlan struct {
 
 // authorizeAgentReincarnate gates POST .../reincarnate for every caller kind
 // (design §3.8, decision D2):
-//   - A user needs ActionUpdate on the agent, the same policy as agent update.
+//   - A user needs the agent lifecycle permission (ActionLifecycle), the same
+//     policy as stop/start/restart (design §3.8 Amendment A24). ActionUpdate
+//     (agent.update) has no UATScope in the permission registry, so the UAT
+//     project-constraint gate denied every User Access Token outright,
+//     including one scoped to agent:lifecycle or agent:manage -- only
+//     session/OAuth users and agent tokens could ever reincarnate. The
+//     built-in roles grant agent.update and agent.lifecycle together, so
+//     this does not widen access for any existing role.
 //   - An agent reincarnating ANOTHER agent needs project:agent:lifecycle
 //     within its own project, same as stop/start (authorizeAgentLifecycle).
 //   - An agent reincarnating ITSELF is allowed for any role, with no scope
@@ -138,20 +145,20 @@ func (s *Server) authorizeAgentReincarnate(w http.ResponseWriter, r *http.Reques
 	case "user", "dev":
 		userIdent, ok := identity.(UserIdentity)
 		if !ok {
-			logAuthzDenial(r, identity, resource, ActionUpdate, "invalid user identity")
+			logAuthzDenial(r, identity, resource, ActionLifecycle, "invalid user identity")
 			writeForbidden(w, "")
 			return false
 		}
-		decision := s.authzService.CheckAccess(ctx, userIdent, resource, ActionUpdate)
+		decision := s.authzService.CheckAccess(ctx, userIdent, resource, ActionLifecycle)
 		if !decision.Allowed {
-			logAuthzDenial(r, identity, resource, ActionUpdate, decision.Reason)
+			logAuthzDenial(r, identity, resource, ActionLifecycle, decision.Reason)
 			writeForbidden(w, "")
 			return false
 		}
 		return true
 
 	default:
-		logAuthzDenial(r, identity, resource, ActionUpdate, "identity type may not reincarnate agents")
+		logAuthzDenial(r, identity, resource, ActionLifecycle, "identity type may not reincarnate agents")
 		writeForbidden(w, "")
 		return false
 	}
