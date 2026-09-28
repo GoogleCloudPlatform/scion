@@ -252,11 +252,32 @@ func Execute() {
 	cmd, err := rootCmd.ExecuteC()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\n%s%s%sError: %v%s\n\n", util.BgRed, util.White, util.Bold, err, util.Reset)
-		if cmd != nil && autoHelp {
+		if shouldShowUsageOnError(cmd, autoHelp) {
 			_ = cmd.Usage()
 		}
 		os.Exit(1)
 	}
+}
+
+// shouldShowUsageOnError reports whether Execute should print cmd's usage
+// block after a failed invocation. cobra's own SilenceUsage handling is
+// bypassed here because Execute prints the error and usage itself (for the
+// colored error banner above), so this helper re-implements the same intent:
+// a subcommand sets SilenceUsage on itself once argument parsing has already
+// succeeded, so a later runtime failure isn't mistaken for a usage error.
+//
+// rootCmd itself sets SilenceUsage: true, but only so cobra's own internal
+// auto-print never double-prints usage under the banner above — it is not an
+// opt-out signal for this helper. ExecuteC returns rootCmd as cmd for
+// root-level usage errors (an unknown command or an unknown global flag), and
+// those must still show usage, so only a non-root command's SilenceUsage is
+// honored here. This is a no-op for every subcommand that never sets
+// SilenceUsage on itself, which today is every command except attach.
+func shouldShowUsageOnError(cmd *cobra.Command, autoHelp bool) bool {
+	if cmd == nil || !autoHelp {
+		return false
+	}
+	return !cmd.HasParent() || !cmd.SilenceUsage
 }
 
 func commandInSubtree(cmd *cobra.Command, name string) bool {
