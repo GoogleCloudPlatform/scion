@@ -11,7 +11,7 @@ resource "google_filestore_instance" "this" {
   tier     = var.tier
 
   deletion_protection_enabled = var.deletion_protection
-  deletion_protection_reason  = var.deletion_protection ? "Shared Filestore instance; hubs read it via shared-lookup. Flip deletion_protection to destroy (design §3.10)." : null
+  deletion_protection_reason  = var.deletion_protection ? "Protected by Terraform; see deploy/terraform/README.md's Destroy runbook to remove protection before destroying." : null
 
   file_shares {
     capacity_gb = var.capacity_gb
