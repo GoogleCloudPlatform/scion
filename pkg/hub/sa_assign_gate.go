@@ -359,8 +359,21 @@ func (s *Server) evaluateSAAssignment(ctx context.Context, r *http.Request, sa *
 	}
 	if decision := s.authzService.CheckAccess(ctx, identity, resource, ActionAssign); !decision.Allowed {
 		logAuthzDenial(r, identity, resource, ActionAssign, decision.Reason)
+		// Ordinary policy denials keep the generic message unchanged. Only
+		// the two delegation-ceiling causes below get a more specific one —
+		// classified structurally via decision.DenyCause, never by matching
+		// substrings of decision.Reason. A ceiling store error (or any other
+		// cause, including none) falls through to the generic message: it is
+		// transient/internal, not a fact about the caller worth surfacing.
+		msg := "You don't have permission to assign this GCP service account"
+		switch decision.DenyCause {
+		case DenyCauseCeilingOrphaned:
+			msg = "This agent cannot assign service accounts: the principal that created it no longer exists. Ask an admin to recreate the agent under a current user."
+		case DenyCauseCeilingDelegatorLacksPermission:
+			msg = "This agent cannot assign service accounts: the principal that created it no longer holds permission to assign this service account."
+		}
 		return &saAssignDenial{kind: saAssignDenyForbiddenStructured,
-			msg: "You don't have permission to assign this GCP service account", resourceType: resource.Type}
+			msg: msg, resourceType: resource.Type}
 	}
 
 	// Layer 2: GCP actAs.
