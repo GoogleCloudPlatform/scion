@@ -35,7 +35,7 @@ server:
     # applyEnvOverrides for the env override (verified: it fills
     # database.url when the file has none).
     driver: postgres
-    max_open_conns: 10
+    max_open_conns: ${max_open_conns}
     max_idle_conns: 5
     conn_max_idle_time: 5m
   storage:

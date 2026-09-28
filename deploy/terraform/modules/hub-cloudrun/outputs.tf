@@ -1,5 +1,5 @@
 output "service_uri" {
-  description = "Cloud Run service URI. Should equal the locally-computed deterministic URL (public_url) — a `check` block asserting that is a phase 2 item (design §3.6, §7 phase 2), not phase 1."
+  description = "Cloud Run service URI. Asserted equal to the locally-computed deterministic URL (public_url) by check.service_uri_matches_computed (design §3.6, phase 2 hardening item 3a)."
   value       = google_cloud_run_v2_service.hub.uri
 }
 

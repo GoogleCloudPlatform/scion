@@ -262,6 +262,12 @@ variable "broker_write_timeout" {
   }
 }
 
+variable "max_connections_budget" {
+  description = "Phase 2 hardening (design §3.7): a per-hub ceiling on this hub's worst-case Postgres connection usage (max_instances * the rendered database.max_open_conns), checked below. The hub root has no visibility into sibling hubs on the same shared Cloud SQL instance (shared-lookup's contract, §3.5, exposes only the instance's own coordinates, not who else is attached to it), so the true design §3.7 budget — sum across every hub on the instance <= the shared instance's max_connections (default 200, configurations/shared-infra's sql_max_connections) — cannot be computed from inside a single hub root. This variable is the operator-supplied stand-in: it is one hub's share of that 200, not the total. Default 40 assumes up to 5 similarly-sized hubs on the shared instance (matching the README's \"roughly 5 dev hubs with headroom\" sizing note) — at the module defaults (max_instances=3, max_open_conns=10) a hub uses at most 30, leaving headroom under this 40 budget; 5 hubs at the budget's ceiling would use exactly 200. Operators adding more or larger hubs must lower this per-hub or raise the shared instance's max_connections and pass a matching value here."
+  type        = number
+  default     = 40
+}
+
 variable "extra_settings" {
   description = "Escape hatch for variations to deep-merge extra settings.yaml keys. Not wired up in phase 1 (seam reserved for phase 3)."
   type        = any

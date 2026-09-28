@@ -33,6 +33,16 @@ locals {
   # broker identity. Namespaced on hub_id + project_id so two hubs (or the
   # same hub_name reused in a different project) never collide.
   broker_id = uuidv5("dns", "${local.hub_id}.broker.${var.project_id}.scion")
+
+  # Phase 2 hardening (item 3b, design §3.7 connection budget). Single
+  # source of truth for the per-instance Postgres pool ceiling rendered into
+  # settings.yaml's database.max_open_conns below, so the check block's
+  # assumption can never silently drift from the literal actually shipped —
+  # exactly the split-source-of-truth class of bug this design keeps
+  # re-finding (F-106, F-107). Verified against pkg/config/hub_config.go's
+  # applyDatabasePoolDefaults (Postgres default is 5 when unset) — this
+  # module has always rendered an explicit 10, overriding that default.
+  hub_max_open_conns = 10
 }
 
 # --- Bucket (artifacts, signed URLs) ---
@@ -131,6 +141,7 @@ resource "google_secret_manager_secret_version" "settings" {
     broker_name          = "${local.hub_id}-broker"
     hub_write_timeout    = var.hub_write_timeout
     broker_write_timeout = var.broker_write_timeout
+    max_open_conns       = local.hub_max_open_conns
   })
 
   # F-107: secret_data changing always forces a replace (Secret Manager
@@ -667,6 +678,40 @@ check "transport_audience_configured" {
   assert {
     condition     = var.iap_oauth_client_id != null
     error_message = "transport auth disabled until iap_oauth_client_id is set — see the README's \"IAP OAuth client\" section to discover the Google-managed client ID (or create a custom one for cross-org) and re-apply."
+  }
+}
+
+# Phase 2 hardening (item 3a). Warn-level, post-apply sanity: the actual
+# service URI Cloud Run hands back should be https (IAP requires it; a plain
+# http URI would mean IAP/the GFE path is misconfigured) and should equal
+# the deterministic URL this module computed *before* creating the service
+# (local.public_url) — the same identity triple (project_number, region,
+# hub_name) local.iap_audience is built from. If the real URI ever disagreed
+# with local.public_url, it would mean Cloud Run's actual URL-generation
+# scheme diverged from what this module assumes, and local.iap_audience
+# (settings.yaml's auth.proxy.iap.audience, which agents must match) would
+# be assuming the wrong resource. outputs.tf's service_uri description has
+# named this exact check as a phase 2 item since phase 1.
+check "service_uri_matches_computed" {
+  assert {
+    condition     = startswith(google_cloud_run_v2_service.hub.uri, "https://")
+    error_message = "hub Cloud Run service URI is not https: ${google_cloud_run_v2_service.hub.uri}"
+  }
+
+  assert {
+    condition     = google_cloud_run_v2_service.hub.uri == local.public_url
+    error_message = "hub Cloud Run service URI (${google_cloud_run_v2_service.hub.uri}) does not match the locally computed deterministic URL (${local.public_url}) that local.iap_audience (settings.yaml's IAP audience) assumes — see local.public_url's comment."
+  }
+}
+
+# Phase 2 hardening (item 3b, design §3.7). Warn-level, post-apply sanity
+# for the shared Cloud SQL instance's connection budget. See
+# var.max_connections_budget's description for why this is a per-hub
+# stand-in rather than a true sum-across-hubs check.
+check "connection_budget" {
+  assert {
+    condition     = var.max_instances * local.hub_max_open_conns <= var.max_connections_budget
+    error_message = "connection budget exceeded: max_instances (${var.max_instances}) * database.max_open_conns (${local.hub_max_open_conns}) = ${var.max_instances * local.hub_max_open_conns}, which is over this hub's max_connections_budget (${var.max_connections_budget}). Lower max_instances, or raise max_connections_budget only after confirming headroom against the shared Cloud SQL instance's max_connections across every hub attached to it (design §3.7)."
   }
 }
 
