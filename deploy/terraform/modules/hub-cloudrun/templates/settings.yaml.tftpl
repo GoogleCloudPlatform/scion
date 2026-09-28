@@ -7,9 +7,9 @@ schema_version: "1"
 image_registry: ${image_registry}
 active_profile: remote
 profiles:
-  # REQUIRED (tf-review B3, proven via config.LoadGlobalSettings): without
-  # this, "remote" resolves to the embedded default 'kubernetes' runtime and
-  # the runtimes.remote block below (namespace, gke) is silently ignored.
+  # REQUIRED (proven via config.LoadGlobalSettings): without this, "remote"
+  # resolves to the embedded default 'kubernetes' runtime and the
+  # runtimes.remote block below (namespace, gke) is silently ignored.
   remote:
     runtime: remote
 server:
