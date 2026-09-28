@@ -793,7 +793,7 @@ check "transport_audience_configured" {
 #    postcondition (which DOES defer to apply, sidestepping #1) would just
 #    trade an unknown-value plan error for a hard apply failure on real
 #    infra. One live hub returned the legacy hash-based form
-#    (https://tfha-h2-4scjcvzjfa-uc.a.run.app), while another returned the
+#    (https://<service>-<hash>-uc.a.run.app), while another returned the
 #    deterministic vanity form local.public_url computes
 #    (https://tfha-h1-<project_number>.<region>.run.app) — Cloud Run does
 #    not guarantee which form a given service gets, so this module's own
