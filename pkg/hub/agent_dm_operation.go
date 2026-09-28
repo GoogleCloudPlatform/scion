@@ -71,6 +71,18 @@ type AgentDMInput struct {
 	// Msg is the plain text message body.
 	Msg string
 
+	// Raw requests that the target agent's runtime receive the message body
+	// verbatim via keystroke injection (no envelope, no automatic Enter).
+	// Deprecated client flag (`scion message --raw`), still functional.
+	// Propagated through unchanged so agent-sender DMs match the delivery
+	// behavior of the non-DM (human-sender) path (#1808 regression fix).
+	Raw bool
+
+	// Plain requests that the target agent's runtime receive the message
+	// body verbatim, submitted normally (Enter), with no envelope.
+	// Deprecated client flag (`scion message --plain`), still functional.
+	Plain bool
+
 	// Type is the message type (e.g. "input-needed", "instruction").
 	// Used for rate limit class derivation. The type-class reservation
 	// system is preserved: the aggregate ceiling is always charged, so
@@ -373,6 +385,8 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		RecipientID:          storeMsg.RecipientID,
 		Msg:                  storeMsg.Msg,
 		Type:                 storeMsg.Type,
+		Plain:                input.Plain,
+		Raw:                  input.Raw,
 		Urgent:               storeMsg.Urgent,
 		Attachments:          input.Attachments,
 		Channel:              input.Channel,
