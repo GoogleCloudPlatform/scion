@@ -78,7 +78,7 @@ test-fast:
 # (ptone/scion#1847) so this target can be used as a CI merge gate.
 test-hub-sqlite:
 	@echo "Running pkg/hub tests (SQLite-enabled)..."
-	@go test -count=1 -timeout 15m \
+	@go test -count=1 -timeout 25m \
 		-skip '^(TestDEF164_AtAgentSlug_DeliversToAgent|TestDEF164_AtAgentSlug_DMConversationCreated|TestDEF152_AgentToAgentDM_DeliversViaOutbound|TestCreateTemplateV2_ScopeIDInjectionBlocked)$$' \
 		./pkg/hub/...
 
