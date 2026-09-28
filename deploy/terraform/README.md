@@ -527,6 +527,16 @@ prevent (see hub-identity's IAM scope rule comment).
 - **Agent create returns a 503 even though the agent goes on to start** —
   likely a cold Autopilot node exceeding the hub's upstream client timeout,
   not a real failure. See "Cold start" above.
+- **Creating a user or project secret fails with** "the Hub service account
+  lacks the required Secret Manager permission. Grant
+  `roles/secretmanager.admin` to the Hub Runner service account" — this is
+  the documented limitation (see [What's not here yet](#whats-not-here-yet);
+  tracked upstream as ptone/scion#2152). **Do not follow the hint** in a
+  shared project: an unconditioned project-wide `roles/secretmanager.admin`
+  gives this hub every other hub's and co-tenant workload's secrets,
+  including their signing keys. The fix is upstream: hub-prefixed secret
+  names, after which this module's conditioned grant can cover user and
+  project scope.
 
 ## What's not here yet
 
@@ -535,6 +545,7 @@ prevent (see hub-identity's IAM scope rule comment).
 - User- and project-scope secrets have no per-hub prefix to condition an
   IAM grant on (only the hub-scope prefix does — see `hub-identity`'s IAM
   scope rule), so creating one under the current IAM fails with a 403.
-  Resolving this is a future seams item.
+  Resolving this needs an upstream change to secret naming (hub-prefixed
+  names; tracked as ptone/scion#2152).
 - Typed `validation` blocks on every remaining variable, and a
   per-module README generated with `terraform-docs`.
