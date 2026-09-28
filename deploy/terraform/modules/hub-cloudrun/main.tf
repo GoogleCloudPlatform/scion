@@ -43,6 +43,55 @@ locals {
   # applyDatabasePoolDefaults (Postgres default is 5 when unset) — this
   # module has always rendered an explicit 10, overriding that default.
   hub_max_open_conns = 10
+
+  # tf-dev-lifecycle-output: single source of truth for the artifacts
+  # bucket's lifecycle_rule blocks, rendered below via `dynamic
+  # "lifecycle_rule"` and returned verbatim by the bucket_lifecycle_rules
+  # output (outputs.tf). Previously that output read
+  # google_storage_bucket.artifacts.lifecycle_rule (the resource attribute)
+  # directly. On refresh, terraform-provider-google's
+  # flattenStorageBucketLifecycleRuleCondition (resource_storage_bucket.go)
+  # normalises the API's response into state — unset condition fields go
+  # from null to their zero value (0 / false / ""), and an omitted
+  # with_state (API IsLive == nil) normalises to "ANY" — so the output's
+  # value changed on the very first post-apply plan even though the API
+  # request Terraform sends is unchanged: 0 resource changes, but rc=2
+  # ("objects changed outside of Terraform" + an output-only diff) instead
+  # of a clean rc=0. Reading this config-derived local instead of the
+  # resource attribute makes the output stable across refreshes; the two
+  # can't drift because the resource is rendered from this same local.
+  artifacts_lifecycle_rules = [
+    {
+      # This only ever touches ARCHIVED (non-live) versions — see the
+      # resource-level comment below for why that's safe.
+      condition = {
+        with_state = "ARCHIVED"
+        age        = 30
+      }
+      action = {
+        type = "Delete"
+      }
+    },
+    {
+      # with_state = "ANY" is set explicitly here, matching what the
+      # provider itself normalises an *unset* with_state to. Both
+      # expandStorageBucketLifecycleRuleCondition (what Terraform sends to
+      # the API) and flattenStorageBucketLifecycleRuleCondition (what it
+      # reads back) treat "ANY" and "" (unset) identically: the API's
+      # IsLive field is left nil either way (resource_storage_bucket.go,
+      # terraform-provider-google v8.4.0, ~L2001-2009 and ~L2183-2196), so
+      # this sends the exact same API request as leaving with_state unset
+      # and removes the latent ""->"ANY" normalisation this rule would
+      # otherwise show on every refresh.
+      condition = {
+        with_state = "ANY"
+        age        = 7
+      }
+      action = {
+        type = "AbortIncompleteMultipartUpload"
+      }
+    },
+  ]
 }
 
 # --- Bucket (artifacts, signed URLs) ---
@@ -64,31 +113,28 @@ resource "google_storage_bucket" "artifacts" {
   # to expire on a blanket age/prefix rule, so no rule targets CURRENT
   # objects. Versioning is on (above), so overwriting or deleting a live
   # object leaves its prior content as a NONCURRENT (ARCHIVED) version
-  # instead of freeing it — those accumulate forever with no rule. This
-  # only ever touches ARCHIVED (non-live) versions, so it cannot delete live
-  # data: the current version of every object is untouched regardless of
-  # age. In-place update (lifecycle_rule is a normal, non-ForceNew field on
-  # google_storage_bucket) — no bucket replace.
-  lifecycle_rule {
-    condition {
-      with_state = "ARCHIVED"
-      age        = 30
-    }
-    action {
-      type = "Delete"
-    }
-  }
-
-  # Belt-and-suspenders, also in-place and also CURRENT-object-safe: an
-  # interrupted resumable/multipart upload has no live reader by
-  # definition, so aborting it after a week reclaims storage with zero risk
-  # to anything the hub or an agent might still be using.
-  lifecycle_rule {
-    condition {
-      age = 7
-    }
-    action {
-      type = "AbortIncompleteMultipartUpload"
+  # instead of freeing it — those accumulate forever with no rule. The
+  # Delete rule only ever touches ARCHIVED (non-live) versions, so it
+  # cannot delete live data: the current version of every object is
+  # untouched regardless of age. The AbortIncompleteMultipartUpload rule is
+  # belt-and-suspenders, also CURRENT-object-safe: an interrupted
+  # resumable/multipart upload has no live reader by definition, so
+  # aborting it after a week reclaims storage with zero risk to anything
+  # the hub or an agent might still be using. Both are in-place updates
+  # (lifecycle_rule is a normal, non-ForceNew field on
+  # google_storage_bucket) — no bucket replace. Rendered from
+  # local.artifacts_lifecycle_rules above so the resource config and the
+  # bucket_lifecycle_rules output (outputs.tf) can never drift apart.
+  dynamic "lifecycle_rule" {
+    for_each = local.artifacts_lifecycle_rules
+    content {
+      condition {
+        with_state = lifecycle_rule.value.condition.with_state
+        age        = lifecycle_rule.value.condition.age
+      }
+      action {
+        type = lifecycle_rule.value.action.type
+      }
     }
   }
 }

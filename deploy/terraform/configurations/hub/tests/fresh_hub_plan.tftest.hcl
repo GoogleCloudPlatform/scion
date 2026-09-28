@@ -122,12 +122,16 @@ run "fresh_h2_plans_clean" {
 
   # Phase 2 hardening item 6: the artifacts bucket's noncurrent-version
   # lifecycle rule (item 4) exists and is scoped to ARCHIVED (noncurrent)
-  # object versions only. tolist() on condition/action is required because
-  # the provider schema nests both as sets (max 1 item), not lists.
+  # object versions only. bucket_lifecycle_rules now returns
+  # local.artifacts_lifecycle_rules (tf-dev-lifecycle-output) — a plain list
+  # of plain objects — rather than the google_storage_bucket.artifacts
+  # .lifecycle_rule resource attribute, so condition/action are read
+  # directly, without the tolist() the provider's set-of-object schema used
+  # to require.
   assert {
     condition = anytrue([
       for r in output.bucket_lifecycle_rules :
-      tolist(r.condition)[0].with_state == "ARCHIVED" && tolist(r.action)[0].type == "Delete"
+      r.condition.with_state == "ARCHIVED" && r.action.type == "Delete"
     ])
     error_message = "expected a Delete lifecycle rule on the artifacts bucket scoped to with_state = ARCHIVED (noncurrent versions only) — a rule without that scope could delete live/CURRENT data."
   }
