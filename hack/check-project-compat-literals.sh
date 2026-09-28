@@ -158,10 +158,7 @@ allowed_paths=(
   # above.
   "^pkg/runtime/podman_test.go$"
   "^pkg/runtimebroker/delete_project_scope_test.go$"
-  "^pkg/runtimebroker/handlers_envgather_test.go$"
   "^pkg/runtimebroker/handlers_test.go$"
-  "^pkg/runtimebroker/heartbeat_test.go$"
-  "^pkg/runtimebroker/hub_connection_test.go$"
   "^pkg/runtimebroker/legacy_layout_migration_test.go$"
   "^pkg/runtimebroker/protocol_mismatch_test.go$"
   # Asserts that a groveId-only PTY attach query no longer scopes the lookup
@@ -204,7 +201,6 @@ allowed_paths=(
   "^pkg/projectcompat/.*\\.go$"
   "^pkg/runtimebroker/handlers.go$"
   "^pkg/runtimebroker/server.go$"
-  "^pkg/runtimebroker/workspace_handlers.go$"
   # Reserved-identity-attribute denylist: the three retired grove-named
   # telemetry keys (scion.grove, scion.grove.id, scion.grove_id) are kept
   # here so the receiver still strips them from user-supplied attributes,

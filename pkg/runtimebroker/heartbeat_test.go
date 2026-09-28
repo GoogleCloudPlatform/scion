@@ -259,9 +259,9 @@ func TestHeartbeatService_IncludesAgentInfo(t *testing.T) {
 	client := &mockRuntimeBrokerService{}
 	manager := &heartbeatMockManager{
 		agents: []api.AgentInfo{
-			{Name: "agent-1", ProjectID: "grove-1", Phase: "running", Activity: "thinking"},
-			{Name: "agent-2", ProjectID: "grove-1", Phase: "running", Activity: "waiting_for_input"},
-			{Name: "agent-3", Project: "grove-2", Phase: "running", Activity: "completed"},
+			{Name: "agent-1", ProjectID: "project-1", Phase: "running", Activity: "thinking"},
+			{Name: "agent-2", ProjectID: "project-1", Phase: "running", Activity: "waiting_for_input"},
+			{Name: "agent-3", Project: "project-2", Phase: "running", Activity: "completed"},
 		},
 	}
 
@@ -281,17 +281,17 @@ func TestHeartbeatService_IncludesAgentInfo(t *testing.T) {
 		t.Errorf("Expected 2 projects in heartbeat, got %d", len(heartbeat.Projects))
 	}
 
-	// Check grove counts
+	// Check project counts
 	projectCounts := make(map[string]int)
 	for _, g := range heartbeat.Projects {
 		projectCounts[g.ProjectID] = g.AgentCount
 	}
 
-	if projectCounts["grove-1"] != 2 {
-		t.Errorf("Expected grove-1 to have 2 agents, got %d", projectCounts["grove-1"])
+	if projectCounts["project-1"] != 2 {
+		t.Errorf("Expected project-1 to have 2 agents, got %d", projectCounts["project-1"])
 	}
-	if projectCounts["grove-2"] != 1 {
-		t.Errorf("Expected grove-2 to have 1 agent, got %d", projectCounts["grove-2"])
+	if projectCounts["project-2"] != 1 {
+		t.Errorf("Expected project-2 to have 1 agent, got %d", projectCounts["project-2"])
 	}
 }
 
@@ -301,19 +301,19 @@ func TestHeartbeatService_IncludesPhaseActivity(t *testing.T) {
 		agents: []api.AgentInfo{
 			{
 				Name:      "agent-structured",
-				ProjectID: "grove-1",
+				ProjectID: "project-1",
 				Phase:     "running",
 				Activity:  "thinking",
 			},
 			{
 				Name:      "agent-waiting",
-				ProjectID: "grove-1",
+				ProjectID: "project-1",
 				Phase:     "running",
 				Activity:  "waiting_for_input",
 			},
 			{
 				Name:      "agent-stopped",
-				ProjectID: "grove-1",
+				ProjectID: "project-1",
 				Phase:     "stopped",
 			},
 		},
@@ -455,14 +455,14 @@ func TestHeartbeatService_IncludesAuxiliaryRuntimes(t *testing.T) {
 	// Default manager has docker agents
 	defaultMgr := &heartbeatMockManager{
 		agents: []api.AgentInfo{
-			{Name: "docker-agent", ProjectID: "grove-1", Phase: "running"},
+			{Name: "docker-agent", ProjectID: "project-1", Phase: "running"},
 		},
 	}
 
 	// Auxiliary manager has K8s agents
 	auxMgr := &heartbeatMockManager{
 		agents: []api.AgentInfo{
-			{Name: "k8s-agent", ProjectID: "grove-1", Phase: "running", Activity: "thinking"},
+			{Name: "k8s-agent", ProjectID: "project-1", Phase: "running", Activity: "thinking"},
 		},
 	}
 
@@ -508,17 +508,17 @@ func TestHeartbeatService_IncludesAuxiliaryRuntimes(t *testing.T) {
 func TestHeartbeatService_AuxiliaryRuntimeSlugCollisionAcrossProjects(t *testing.T) {
 	client := &mockRuntimeBrokerService{}
 
-	// Default-runtime "coordinator" lives in grove-1.
+	// Default-runtime "coordinator" lives in project-1.
 	defaultMgr := &heartbeatMockManager{
 		agents: []api.AgentInfo{
-			{Name: "coordinator", ProjectID: "grove-1", Phase: "running", Activity: "thinking"},
+			{Name: "coordinator", ProjectID: "project-1", Phase: "running", Activity: "thinking"},
 		},
 	}
 
-	// Auxiliary-runtime "coordinator" lives in a different project, grove-2.
+	// Auxiliary-runtime "coordinator" lives in a different project, project-2.
 	auxMgr := &heartbeatMockManager{
 		agents: []api.AgentInfo{
-			{Name: "coordinator", ProjectID: "grove-2", Phase: "running", Activity: "working"},
+			{Name: "coordinator", ProjectID: "project-2", Phase: "running", Activity: "working"},
 		},
 	}
 
@@ -536,7 +536,7 @@ func TestHeartbeatService_AuxiliaryRuntimeSlugCollisionAcrossProjects(t *testing
 
 	heartbeat := calls[0].Heartbeat
 	if len(heartbeat.Projects) != 2 {
-		t.Fatalf("Expected 2 projects (grove-1 and grove-2), got %d", len(heartbeat.Projects))
+		t.Fatalf("Expected 2 projects (project-1 and project-2), got %d", len(heartbeat.Projects))
 	}
 
 	// Both projects must report their "coordinator" agent with its own status.
@@ -545,14 +545,14 @@ func TestHeartbeatService_AuxiliaryRuntimeSlugCollisionAcrossProjects(t *testing
 		byProject[p.ProjectID] = p.Agents
 	}
 
-	g1 := byProject["grove-1"]
-	if len(g1) != 1 || g1[0].Slug != "coordinator" || g1[0].Activity != "thinking" {
-		t.Errorf("grove-1 coordinator missing or wrong status: %+v", g1)
+	p1 := byProject["project-1"]
+	if len(p1) != 1 || p1[0].Slug != "coordinator" || p1[0].Activity != "thinking" {
+		t.Errorf("project-1 coordinator missing or wrong status: %+v", p1)
 	}
 
-	g2 := byProject["grove-2"]
-	if len(g2) != 1 || g2[0].Slug != "coordinator" || g2[0].Activity != "working" {
-		t.Errorf("grove-2 coordinator missing or wrong status (dropped by slug-only dedup?): %+v", g2)
+	p2 := byProject["project-2"]
+	if len(p2) != 1 || p2[0].Slug != "coordinator" || p2[0].Activity != "working" {
+		t.Errorf("project-2 coordinator missing or wrong status (dropped by slug-only dedup?): %+v", p2)
 	}
 }
 
@@ -564,12 +564,12 @@ func TestHeartbeatService_AuxiliaryRuntimeDedupSameAgent(t *testing.T) {
 
 	defaultMgr := &heartbeatMockManager{
 		agents: []api.AgentInfo{
-			{Name: "coordinator", ProjectID: "grove-1", Phase: "running"},
+			{Name: "coordinator", ProjectID: "project-1", Phase: "running"},
 		},
 	}
 	auxMgr := &heartbeatMockManager{
 		agents: []api.AgentInfo{
-			{Name: "coordinator", ProjectID: "grove-1", Phase: "running"},
+			{Name: "coordinator", ProjectID: "project-1", Phase: "running"},
 		},
 	}
 
@@ -609,8 +609,8 @@ func TestHeartbeatService_DefaultManagerFailsFallsBackToAuxiliary(t *testing.T) 
 	// Auxiliary manager (e.g. podman) has agents
 	auxMgr := &heartbeatMockManager{
 		agents: []api.AgentInfo{
-			{Name: "podman-agent-1", ProjectID: "grove-1", Phase: "running", Activity: "thinking"},
-			{Name: "podman-agent-2", ProjectID: "grove-1", Phase: "running", Activity: "working"},
+			{Name: "podman-agent-1", ProjectID: "project-1", Phase: "running", Activity: "thinking"},
+			{Name: "podman-agent-2", ProjectID: "project-1", Phase: "running", Activity: "working"},
 		},
 	}
 
@@ -633,8 +633,8 @@ func TestHeartbeatService_DefaultManagerFailsFallsBackToAuxiliary(t *testing.T) 
 	}
 
 	project := heartbeat.Projects[0]
-	if project.ProjectID != "grove-1" {
-		t.Errorf("Expected project ID 'grove-1', got %q", project.ProjectID)
+	if project.ProjectID != "project-1" {
+		t.Errorf("Expected project ID 'project-1', got %q", project.ProjectID)
 	}
 	if project.AgentCount != 2 {
 		t.Errorf("Expected 2 agents from auxiliary runtime, got %d", project.AgentCount)

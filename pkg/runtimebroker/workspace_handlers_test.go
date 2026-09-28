@@ -243,7 +243,7 @@ func TestWorkspaceUploadAgentNotFound(t *testing.T) {
 
 	body := WorkspaceUploadRequest{
 		Slug:        "nonexistent-agent",
-		StoragePath: "workspaces/grove/agent",
+		StoragePath: "workspaces/project/agent",
 	}
 	bodyBytes, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/workspace/upload", bytes.NewReader(bodyBytes))
@@ -267,7 +267,7 @@ func TestWorkspaceApplyAgentNotFound(t *testing.T) {
 
 	body := WorkspaceApplyRequest{
 		Slug:        "nonexistent-agent",
-		StoragePath: "workspaces/grove/agent",
+		StoragePath: "workspaces/project/agent",
 	}
 	bodyBytes, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/workspace/apply", bytes.NewReader(bodyBytes))
@@ -597,7 +597,7 @@ func TestApplyFilePermissions_MissingFile(t *testing.T) {
 func TestWorkspaceUploadRequest_JSONSerialization(t *testing.T) {
 	req := WorkspaceUploadRequest{
 		Slug:            "agent-123",
-		StoragePath:     "workspaces/grove-1/agent-123",
+		StoragePath:     "workspaces/project-1/agent-123",
 		Bucket:          "my-bucket",
 		ExcludePatterns: []string{".git/**", "node_modules/**"},
 	}
@@ -615,8 +615,8 @@ func TestWorkspaceUploadRequest_JSONSerialization(t *testing.T) {
 	if parsed.Slug != "agent-123" {
 		t.Errorf("agent ID = %q, want %q", parsed.Slug, "agent-123")
 	}
-	if parsed.StoragePath != "workspaces/grove-1/agent-123" {
-		t.Errorf("storage path = %q, want %q", parsed.StoragePath, "workspaces/grove-1/agent-123")
+	if parsed.StoragePath != "workspaces/project-1/agent-123" {
+		t.Errorf("storage path = %q, want %q", parsed.StoragePath, "workspaces/project-1/agent-123")
 	}
 	if parsed.Bucket != "my-bucket" {
 		t.Errorf("bucket = %q, want %q", parsed.Bucket, "my-bucket")
@@ -666,7 +666,7 @@ func TestWorkspaceUploadResponse_JSONSerialization(t *testing.T) {
 func TestWorkspaceApplyRequest_JSONSerialization(t *testing.T) {
 	req := WorkspaceApplyRequest{
 		Slug:        "agent-456",
-		StoragePath: "workspaces/grove-2/agent-456",
+		StoragePath: "workspaces/project-2/agent-456",
 		Bucket:      "other-bucket",
 		Manifest: &transfer.Manifest{
 			Version: "1.0",
@@ -772,7 +772,7 @@ func TestWorkspaceUpload_WithBucketInRequest(t *testing.T) {
 	// Bucket provided in request
 	body := WorkspaceUploadRequest{
 		Slug:        "test-agent",
-		StoragePath: "workspaces/grove/agent",
+		StoragePath: "workspaces/project/agent",
 		Bucket:      "request-bucket",
 	}
 	bodyBytes, _ := json.Marshal(body)
@@ -805,7 +805,7 @@ func TestWorkspaceApply_WithBucketInRequest(t *testing.T) {
 	// Bucket provided in request
 	body := WorkspaceApplyRequest{
 		Slug:        "test-agent",
-		StoragePath: "workspaces/grove/agent",
+		StoragePath: "workspaces/project/agent",
 		Bucket:      "request-bucket",
 	}
 	bodyBytes, _ := json.Marshal(body)
@@ -904,7 +904,7 @@ func TestProjectWorkspaceUpload_MissingProjectID(t *testing.T) {
 	srv := New(cfg, mgr, rt)
 
 	body := ProjectWorkspaceUploadRequest{
-		StoragePath:   "workspaces/test/grove-workspace",
+		StoragePath:   "workspaces/test/project-workspace",
 		WorkspacePath: "/tmp/test",
 	}
 
@@ -922,7 +922,7 @@ func TestProjectWorkspaceUpload_MissingStoragePath(t *testing.T) {
 	srv := New(cfg, mgr, rt)
 
 	body := ProjectWorkspaceUploadRequest{
-		ProjectID:     "grove-123",
+		ProjectID:     "project-123",
 		WorkspacePath: "/tmp/test",
 	}
 
@@ -940,8 +940,8 @@ func TestProjectWorkspaceUpload_MissingWorkspacePath(t *testing.T) {
 	srv := New(cfg, mgr, rt)
 
 	body := ProjectWorkspaceUploadRequest{
-		ProjectID:   "grove-123",
-		StoragePath: "workspaces/test/grove-workspace",
+		ProjectID:   "project-123",
+		StoragePath: "workspaces/test/project-workspace",
 	}
 
 	rec := doProjectUploadRequest(t, srv, body)
@@ -958,8 +958,8 @@ func TestProjectWorkspaceUpload_NoBucket(t *testing.T) {
 	srv := New(cfg, mgr, rt)
 
 	body := ProjectWorkspaceUploadRequest{
-		ProjectID:     "grove-123",
-		StoragePath:   "workspaces/test/grove-workspace",
+		ProjectID:     "project-123",
+		StoragePath:   "workspaces/test/project-workspace",
 		WorkspacePath: "/tmp/test",
 	}
 
@@ -978,8 +978,8 @@ func TestProjectWorkspaceUpload_NonExistentPath(t *testing.T) {
 	srv := New(cfg, mgr, rt)
 
 	body := ProjectWorkspaceUploadRequest{
-		ProjectID:     "grove-123",
-		StoragePath:   "workspaces/test/grove-workspace",
+		ProjectID:     "project-123",
+		StoragePath:   "workspaces/test/project-workspace",
 		WorkspacePath: "/nonexistent/path/12345",
 	}
 
