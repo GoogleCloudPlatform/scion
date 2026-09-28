@@ -4201,6 +4201,80 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesSharedWorkspace(t *te
 	}
 }
 
+// TestHTTPAgentDispatcher_DispatchAgentReprovision_PropagatesSharedWorkspace
+// is the design §3.4 Amendment A23 regression test for "opts.SharedWorkspace
+// must reach Reprovision exactly as it does on start": a reprovision
+// dispatch for a shared-workspace git project must carry
+// Config.SharedWorkspace=true, the same as
+// TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesSharedWorkspace
+// proves for a plain create/start dispatch. Both go through the same
+// buildCreateRequest (dispatchProvision calls it directly for reprovision),
+// so this also guards against a future reprovision-only code path bypassing
+// it.
+func TestHTTPAgentDispatcher_DispatchAgentReprovision_PropagatesSharedWorkspace(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	project := &store.Project{
+		ID:        tid("project-shared-ws-reprov"),
+		Name:      "Shared WS Reprovision",
+		Slug:      "shared-ws-reprovision",
+		GitRemote: "github.com/test/shared",
+		Labels: map[string]string{
+			store.LabelWorkspaceMode: store.WorkspaceModeShared,
+		},
+	}
+	if err := memStore.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	broker := &store.RuntimeBroker{
+		ID:       tid("host-1"),
+		Name:     "test-host",
+		Slug:     "test-host",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	agent := &store.Agent{
+		ID:              "agent-shared-reprov-1",
+		Name:            "shared-agent-reprov",
+		Slug:            "shared-agent-reprov",
+		ProjectID:       tid("project-shared-ws-reprov"),
+		RuntimeBrokerID: tid("host-1"),
+		AppliedConfig: &store.AgentAppliedConfig{
+			HarnessConfig: "claude",
+			Workspace:     "/home/user/.scion/projects/shared-ws-reprovision",
+		},
+	}
+
+	if err := dispatcher.DispatchAgentReprovision(ctx, agent); err != nil {
+		t.Fatalf("DispatchAgentReprovision failed: %v", err)
+	}
+
+	if !mockClient.lastCreateReq.Reprovision {
+		t.Error("expected Reprovision to be true in the request")
+	}
+	if mockClient.lastCreateReq.Config == nil {
+		t.Fatal("expected config to be present")
+	}
+	if !mockClient.lastCreateReq.Config.SharedWorkspace {
+		t.Error("expected SharedWorkspace=true for a shared-workspace project on reprovision")
+	}
+	if mockClient.lastCreateReq.Config.GitClone != nil {
+		t.Error("expected GitClone to be nil for shared-workspace project")
+	}
+	if mockClient.lastCreateReq.Config.Workspace != "/home/user/.scion/projects/shared-ws-reprovision" {
+		t.Errorf("expected the explicit-mount Workspace to be sent, got %q", mockClient.lastCreateReq.Config.Workspace)
+	}
+}
+
 // TestHTTPAgentDispatcher_DispatchAgentStart_InjectsGCPIdentityEnv verifies
 // that DispatchAgentStart injects GCP identity env vars from the agent's
 // AppliedConfig into resolvedEnv so the broker can configure the metadata

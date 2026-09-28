@@ -743,7 +743,10 @@ func (s *Server) buildReincarnationPreamble(agent *store.Agent, toGeneration int
 	fmt.Fprintf(&b, "[SCION REINCARNATION] You are generation %d of agent %q (id %s).\n",
 		toGeneration, agent.Slug, agent.ID)
 	b.WriteString("Before resuming:\n")
-	b.WriteString(" 1. Verify your environment: `git status` shows your branch up to date with the remote, and any files your handoff names as canonical are readable.\n")
+	// Design §3.4 Amendment A23: neutral wording, since Phase 1b also serves
+	// shared-workspace and hub-managed agents, whose git state is not "your
+	// branch" the way a clone-per-agent agent's is.
+	b.WriteString(" 1. Verify your environment: `git status` shows the branch and state your handoff describes, and any files your handoff names as canonical are readable.\n")
 	// Messages sent during the migration are rejected, not queued, so step 2
 	// must not promise that they are redelivered.
 	b.WriteString(" 2. Catch up on your conversations (`scion conversation catch-up`). If that command is unavailable in this environment, rely on the handoff and on incoming messages.\n")

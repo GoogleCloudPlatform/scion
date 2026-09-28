@@ -37,7 +37,7 @@ permissions). Available scopes:
 | `agent:create` | Create agents |
 | `agent:read` | Read agent status/metadata |
 | `agent:list` | List agents |
-| `agent:lifecycle` | Start, stop, suspend, restart, and restore agents |
+| `agent:lifecycle` | Start, stop, suspend, restart, restore, and reincarnate agents |
 | `agent:delete` | Delete agents |
 | `agent:message` | Send messages to agents |
 | `agent:attach` | Attach to agent sessions (terminal, exec, env, reset-auth) |

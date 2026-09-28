@@ -812,6 +812,28 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Design §3.4 Amendment A23.1 (review p1b-r1, R2): refuse a reprovision
+	// request for a worktree-per-agent project before buildStartContext runs.
+	// buildStartContext's tryProvisionWorktree finds or creates the agent's
+	// worktree and sets opts.Workspace to its path with opts.GitClone left
+	// nil -- exactly the explicit-mount shape Manager.Reprovision now
+	// accepts, which would let a worktree-per-agent reprovision reach
+	// ProvisionAgent's Case 1 despite that mode never having been designed
+	// or reviewed for reincarnation (A23's contract excludes it). The Hub
+	// already refuses worktree-per-agent before dispatching (A2/A4); this is
+	// the broker's own independent defense, and it also keeps
+	// tryProvisionWorktree off the reprovision path entirely.
+	if req.Reprovision && req.WorkspaceMode == store.WorkspaceModeWorktreePerAgent {
+		const msg = "reprovision refused: worktree-per-agent workspaces are not supported by reincarnate"
+		// O-a (review p1b-r2): use the same dispatch-attempt message as the
+		// sibling A4.2 refusal below, so dispatch-attempt consumers can match
+		// one string regardless of which precondition refused the request.
+		markAttemptFailed(http.StatusConflict, "reprovision refused")
+		span.SetStatus(codes.Error, msg)
+		Conflict(w, "Failed to provision agent: "+msg)
+		return
+	}
+
 	// Build unified start context (project path, env, template, git-clone, secrets, manager)
 	s.agentLifecycleLog.Info("Agent dispatch: pre-flight complete",
 		"agent_id", req.ID, "name", req.Name, "elapsed", time.Since(createStart).String())

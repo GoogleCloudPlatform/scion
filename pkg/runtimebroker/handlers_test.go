@@ -23,14 +23,18 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // mockManager implements agent.Manager for testing
@@ -1491,6 +1495,175 @@ func TestCreateAgentProvisionOnly_ReprovisionRefused_Returns409(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "reprovision refused") {
 		t.Errorf("expected the error body to surface the refusal reason, got: %s", w.Body.String())
+	}
+}
+
+// snapshotFileTimes walks dir and records the ModTime of every regular file
+// found under it, keyed by path relative to dir. Used to prove that NO
+// write happened anywhere under a directory tree across an operation —
+// including a content-identical rewrite (e.g. RegisterSharer's atomic
+// temp-file-plus-rename always changes ModTime, even when the marshaled
+// JSON is byte-identical to what was already there), which a before/after
+// content comparison alone would miss.
+func snapshotFileTimes(t *testing.T, dir string) map[string]time.Time {
+	t.Helper()
+	out := map[string]time.Time{}
+	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(dir, path)
+		if relErr != nil {
+			return nil
+		}
+		out[rel] = info.ModTime()
+		return nil
+	})
+	return out
+}
+
+// TestCreateAgentProvisionOnly_Reprovision_WorktreePerAgent_Returns409 is the
+// design §3.4 Amendment A23.1/A23.2 (review p1b-r1 R2, p1b-r2 R2-T)
+// regression test: a reprovision request for a worktree-per-agent project
+// must be refused with 409 before buildStartContext ever runs —
+// buildStartContext's tryProvisionWorktree finds or creates the agent's
+// worktree and hands Manager.Reprovision an explicit-mount-shaped
+// StartOptions (GitClone=nil, Workspace=<worktree path>), a mode reincarnate
+// has neither designed for nor reviewed, and whose OWN failure path can
+// `git worktree remove --force` / os.RemoveAll the agent's LIVE worktree
+// (round-1 review FYI-2) if ProvisionShared ever errors on it.
+//
+// The fixture is realistic, not a stand-in: a real git-backed project
+// (config.gitClone set, matching what populateAgentConfig always sends for a
+// worktree-per-agent agent), a real ProjectPath, and the agent's own base
+// clone + worktree ALREADY provisioned on this broker — exactly the state a
+// second reprovision of a running agent finds. Manager.Reprovision/Provision
+// must never be called, the pre-seeded sentinel file in the agent's worktree
+// must survive untouched, and — the property a placement-blind assertion on
+// the manager mock alone cannot prove — NOTHING under the base clone
+// (including worktrees/ and the .git/ sharer registry) may be written to at
+// all: buildStartContext, and therefore tryProvisionWorktree, must never
+// run. A refusal placed anywhere AFTER buildStartContext (e.g. immediately
+// before the Manager.Reprovision call) would let tryProvisionWorktree run
+// its (safe, in this fixture) JOIN path, which still rewrites the sharer
+// registry file and would be caught by the whole-tree ModTime snapshot even
+// though Manager.Reprovision itself is never reached in that JOIN case
+// either -- see the round-2 review's identical finding.
+func TestCreateAgentProvisionOnly_Reprovision_WorktreePerAgent_Returns409(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	srv, mgr := newTestServerWithProvisionCapture()
+
+	bare := initBareRepoWithCommit(t)
+	gc := &api.GitCloneConfig{URL: bare, Branch: "main"}
+	agentID := "worktree-reprov-agent"
+
+	projectPath := filepath.Join(t.TempDir(), "proj")
+	if err := os.MkdirAll(projectPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-seed the agent's own base clone + worktree, as an earlier
+	// successful provision on this broker would have left them.
+	resolved, err := runtime.NewLocalBackend().Resolve(runtime.ResolveInput{
+		ProjectDir: projectPath, ProjectID: "p1", AgentID: agentID,
+		Mode: store.SharingModeWorktreePerAgent,
+	})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if err := provision.ProvisionShared(provision.ProvisionInput{
+		Resolved: resolved, Mode: store.SharingModeWorktreePerAgent,
+		ProjectID: "p1", AgentID: agentID, AgentName: agentID, GitClone: gc,
+	}); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	base := resolved.HostPath
+	worktreePath := provision.WorktreePath(base, agentID)
+	sentinelPath := filepath.Join(worktreePath, "uncommitted-work.txt")
+	if err := os.WriteFile(sentinelPath, []byte("hours of agent work"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	beforeTimes := snapshotFileTimes(t, base)
+
+	reqBody, err := json.Marshal(CreateAgentRequest{
+		Name:          agentID,
+		ID:            "agent-uuid-worktree-reprov",
+		Slug:          agentID,
+		ProjectID:     "p1",
+		ProjectPath:   projectPath,
+		ProvisionOnly: true,
+		Reprovision:   true,
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		Config: &CreateAgentConfig{
+			Template: "claude",
+			GitClone: gc,
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(string(reqBody)))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 Conflict for a worktree-per-agent reprovision, got %d: %s", w.Code, w.Body.String())
+	}
+	if mgr.reprovisionCalled {
+		t.Error("expected Manager.Reprovision NOT to be called: the refusal must happen before buildStartContext, which is what would otherwise call it")
+	}
+	if mgr.provisionCalled {
+		t.Error("expected Manager.Provision NOT to be called either")
+	}
+	if !strings.Contains(w.Body.String(), "worktree-per-agent") {
+		t.Errorf("expected the error body to name the worktree-per-agent refusal, got: %s", w.Body.String())
+	}
+
+	data, err := os.ReadFile(sentinelPath)
+	if err != nil {
+		t.Fatalf("sentinel file in the agent's live worktree was lost: %v", err)
+	}
+	if string(data) != "hours of agent work" {
+		t.Fatalf("sentinel content changed: %q", data)
+	}
+
+	afterTimes := snapshotFileTimes(t, base)
+	if !reflect.DeepEqual(beforeTimes, afterTimes) {
+		t.Fatalf("base clone / worktree tree was written to -- buildStartContext (and therefore tryProvisionWorktree) must never run before the refusal:\nbefore=%v\nafter=%v", beforeTimes, afterTimes)
+	}
+}
+
+// TestCreateAgentProvisionOnly_Reprovision_SharedWorkspace_StillCallsReprovision
+// is the companion negative control for the R2 fix above: a reprovision
+// request for a shared-workspace (not worktree-per-agent) project must still
+// reach Manager.Reprovision as normal — the new gate must not over-refuse
+// every WorkspaceMode.
+func TestCreateAgentProvisionOnly_Reprovision_SharedWorkspace_StillCallsReprovision(t *testing.T) {
+	srv, mgr := newTestServerWithProvisionCapture()
+
+	body := `{
+		"name": "shared-reprov-agent",
+		"id": "agent-uuid-shared-reprov",
+		"slug": "shared-reprov-agent",
+		"provisionOnly": true,
+		"reprovision": true,
+		"workspaceMode": "shared",
+		"config": {"template": "claude"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for a shared-workspace reprovision, got %d: %s", w.Code, w.Body.String())
+	}
+	if !mgr.reprovisionCalled {
+		t.Error("expected Manager.Reprovision to be called for a shared-workspace reprovision")
 	}
 }
 

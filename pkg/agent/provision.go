@@ -445,42 +445,137 @@ var ErrReprovisionRefused = errors.New("reprovision refused")
 // Reprovision re-renders an existing agent's on-disk configuration
 // (scion-agent.json, agent-info.json, home dotfiles, and skills) from the
 // current template/harness-config catalog, for a `scion reincarnate` request
-// (design §3.4, Amendment A2). Unlike Provision, it always calls
+// (design §3.4, Amendments A2 and A23). Unlike Provision, it always calls
 // ProvisionAgent directly rather than through GetAgent's "agent dir already
 // exists → keep the persisted config" branch: reincarnation's entire point is
 // to replace that persisted config with a freshly resolved one.
 //
-// Preconditions, both enforced here rather than merely documented (design
-// §3.4 Amendment A2.1/A2.4): the agent is clone-per-agent with an existing real
-// clone, and its container is not running. Both matter for the same reason:
+// Reprovision accepts two workspace modes, gated by api.ReincarnateEligible:
+//   - clone-per-agent: opts.GitClone != nil, with an existing real clone on
+//     disk.
+//   - explicit mount (design §3.4 Amendment A23): opts.GitClone == nil and a
+//     non-empty opts.Workspace — shared-workspace and hub-managed projects.
+//     The agent directory and the workspace path must already exist;
+//     Reprovision never creates either.
+//
+// Preconditions are enforced here rather than merely documented (design §3.4
+// Amendments A2.1/A2.4 and A23), before ProvisionAgent ever runs:
 // ProvisionAgent's worktree-creation branch decides whether to create a
 // worktree using CWD-dependent git checks (util.BranchExists), which are
-// always wrong on a broker (its CWD is outside the repo) — so calling it on
-// anything but an existing clone risks os.RemoveAll on a live
-// worktree-per-agent workspace, destroying uncommitted work. Refusing here,
-// before ProvisionAgent ever runs, is Phase 1's fix; Phase 4 may replace the
-// refusal with a proper "workspace exists → reuse as-is" branch that does not
-// depend on CWD.
+// always wrong on a broker (its CWD is outside the repo) — so calling it for
+// a clone-per-agent agent without first confirming a real, existing clone
+// risks os.RemoveAll on a live worktree-per-agent workspace, destroying
+// uncommitted work. Likewise, ProvisionAgent unconditionally creates the
+// agent directory (os.MkdirAll) before it even looks at the workspace mode,
+// so the explicit-mount case needs its own existence checks to avoid
+// silently standing up a fresh, empty agent directory for a name that was
+// never actually provisioned. Phase 4 may replace the clone-per-agent
+// refusal with a proper "workspace exists → reuse as-is" branch that does
+// not depend on CWD.
 //
 // Once past those checks, Reprovision never touches:
-//   - the agent's clone-per-agent git workspace (ProvisionAgent's git-clone
-//     branch leaves an existing real clone in place);
+//   - the agent's workspace, clone-per-agent or explicit-mount (ProvisionAgent's
+//     git-clone branch leaves an existing real clone in place; the
+//     explicit-mount branch only mounts the path Reprovision already verified
+//     exists — it never creates, clones, pulls, resets, or removes it);
 //   - the agent's branch;
 //   - unrelated files already in the agent's home directory (only files the
 //     template/harness-config/platform-skill layers themselves own are
 //     overlaid — see ContextWithReprovision's ForceOverwrite wiring for
-//     platform skills specifically).
+//     platform skills specifically);
+//   - a sibling agent's directory (both branches resolve strictly this
+//     agent's own agentDir via checkAgentDirContained/CheckAgentDirContained).
 func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
-	if opts.GitClone == nil {
-		return nil, fmt.Errorf("%w: agent %q is not clone-per-agent; reincarnate currently supports clone-per-agent workspaces only", ErrReprovisionRefused, opts.Name)
+	hasGitClone := opts.GitClone != nil
+	if !api.ReincarnateEligible(hasGitClone, opts.Workspace) {
+		return nil, fmt.Errorf("%w: agent %q is neither clone-per-agent nor has an explicit workspace; reincarnate currently supports those workspace modes only", ErrReprovisionRefused, opts.Name)
 	}
+
 	projectDir, pdErr := config.GetResolvedProjectDir(opts.ProjectPath)
 	if pdErr != nil {
 		return nil, fmt.Errorf("reprovision: resolve project dir: %w", pdErr)
 	}
-	agentWorkspace := filepath.Join(config.GetAgentDir(projectDir, opts.Name, opts.SharedWorkspace), "workspace")
-	if info, statErr := os.Stat(filepath.Join(agentWorkspace, ".git")); statErr != nil || !info.IsDir() {
-		return nil, fmt.Errorf("%w: agent %q has no existing git clone at %s; reincarnate does not create or recreate the workspace", ErrReprovisionRefused, opts.Name, agentWorkspace)
+
+	// agentDir is resolved and existence-checked up front, for both
+	// branches, instead of derived after ProvisionAgent returns: the
+	// explicit-mount branch does not set its returned workspace to
+	// agentDir/workspace (see ProvisionAgent's Case 1), so there is no
+	// single after-the-fact derivation that works for both modes.
+	var agentDir string
+
+	if hasGitClone {
+		agentDir = config.GetAgentDir(projectDir, opts.Name, opts.SharedWorkspace)
+		agentWorkspace := filepath.Join(agentDir, "workspace")
+		if info, statErr := os.Stat(filepath.Join(agentWorkspace, ".git")); statErr != nil || !info.IsDir() {
+			return nil, fmt.Errorf("%w: agent %q has no existing git clone at %s; reincarnate does not create or recreate the workspace", ErrReprovisionRefused, opts.Name, agentWorkspace)
+		}
+	} else {
+		// Design §3.4 Amendment A23: explicit-mount case. Confirm this is an
+		// existing agent (CheckAgentDirContained both resolves the
+		// containment-checked path and, via the os.Stat below, its
+		// existence) and that the workspace path — absolute, or a
+		// project-relative subdir exactly as ProvisionAgent's own
+		// explicit-workspace branch accepts — already exists. A miss here is
+		// refused as ErrReprovisionRefused (409) rather than left to
+		// ProvisionAgent's untyped error (or, worse, ProvisionAgent silently
+		// creating the missing piece).
+		dir, err := CheckAgentDirContained(projectDir, opts.Name, opts.SharedWorkspace)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrReprovisionRefused, err)
+		}
+		if info, statErr := os.Stat(dir); statErr != nil || !info.IsDir() {
+			return nil, fmt.Errorf("%w: agent %q has no existing agent directory at %s; reincarnate does not create it", ErrReprovisionRefused, opts.Name, dir)
+		}
+		agentDir = dir
+
+		if filepath.IsAbs(opts.Workspace) {
+			// Upstream review (GoogleCloudPlatform/scion#2037, comment
+			// 4121261313): split the existence check from the directory
+			// check, so a workspace path that exists but is a regular file
+			// gets its own precise message instead of being reported as
+			// "does not exist" -- the same split the relative-path branch
+			// below already makes.
+			info, statErr := os.Stat(opts.Workspace)
+			if statErr != nil {
+				return nil, fmt.Errorf("%w: agent %q workspace path does not exist: %s; reincarnate does not create it", ErrReprovisionRefused, opts.Name, opts.Workspace)
+			}
+			if !info.IsDir() {
+				return nil, fmt.Errorf("%w: agent %q workspace path is not a directory: %s", ErrReprovisionRefused, opts.Name, opts.Workspace)
+			}
+		} else {
+			// Upstream review (GoogleCloudPlatform/scion#2037, comment
+			// 4121261307): LoadEffectiveSettings' error was previously
+			// ignored. A load failure (e.g. a malformed settings.yaml) is a
+			// real environment problem, not a "this reincarnation is
+			// ineligible" refusal -- resolveProjectRoot would otherwise run
+			// against a nil/stale *VersionedSettings and could silently
+			// resolve the wrong project root, misjudging the relative
+			// --workspace containment check below. Returned unwrapped (not
+			// ErrReprovisionRefused), matching the resolve-project-dir error
+			// a few lines above: this surfaces as the broker's generic 500,
+			// not its typed 409 refusal, because it is not a precondition
+			// refusal but an inability to evaluate the request at all. This
+			// runs after the hub has already stopped the agent's container
+			// (§3.7), same as every other precondition here; the
+			// reincarnation is recorded failed with this error as the
+			// reason, and the agent stays stopped until a retry.
+			settings, _, err := config.LoadEffectiveSettings(projectDir)
+			if err != nil {
+				return nil, fmt.Errorf("reprovision: load effective settings: %w", err)
+			}
+			projectRoot := resolveProjectRoot(settings, projectDir)
+			resolved, err := resolveWorkspaceSubdir(projectRoot, opts.Workspace)
+			if err != nil {
+				return nil, fmt.Errorf("%w: %v", ErrReprovisionRefused, err)
+			}
+			// O2 (review p1b-r1): resolveWorkspaceSubdir already confirms
+			// the resolved path exists, but not that it is a directory —
+			// unlike the absolute-path branch above. A relative workspace
+			// that resolves to a regular file must be refused the same way.
+			if info, statErr := os.Stat(resolved); statErr != nil || !info.IsDir() {
+				return nil, fmt.Errorf("%w: agent %q workspace path is not a directory: %s", ErrReprovisionRefused, opts.Name, resolved)
+			}
+		}
 	}
 
 	// A broker unreachable/unresponsive List error is logged and tolerated
@@ -496,19 +591,10 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 	ctx, inlineCfg := buildProvisionContext(ctx, opts)
 	ctx = api.ContextWithReprovision(ctx)
 
-	agentHome, provisionedWorkspace, cfg, err := ProvisionAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "created", opts.Branch, opts.Workspace, inlineCfg)
+	agentHome, _, cfg, err := ProvisionAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "created", opts.Branch, opts.Workspace, inlineCfg)
 	if err != nil {
 		return cfg, err
 	}
-
-	// Derive agentDir from the workspace ProvisionAgent actually used,
-	// instead of independently recomputing project/agent dirs. Safe
-	// specifically because the GitClone-only gate above guarantees
-	// ProvisionAgent's git-clone branch ran, and that branch always sets the
-	// workspace to agentDir/workspace (never "" — unlike the worktree,
-	// explicit-workspace, and external-mount branches Reprovision never
-	// reaches).
-	agentDir := filepath.Dir(provisionedWorkspace)
 
 	if err := m.finishProvision(opts, agentDir, agentHome, cfg); err != nil {
 		return cfg, err

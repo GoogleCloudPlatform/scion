@@ -521,3 +521,31 @@ func TestScionConfig_ParseMaxDuration(t *testing.T) {
 		})
 	}
 }
+
+// TestReincarnateEligible covers the design §3.4 Amendment A23 eligibility
+// predicate over the modes it distinguishes: clone-per-agent, an explicit
+// mount (shared-workspace or hub-managed), and "neither". Worktree-per-agent
+// and shared-workspace exclusion are layered on top by the Hub caller (see
+// ReincarnateEligible's doc comment) and are not this function's concern —
+// pkg/hub's handlers_agent_reincarnate_test.go covers those.
+func TestReincarnateEligible(t *testing.T) {
+	tests := []struct {
+		name        string
+		hasGitClone bool
+		workspace   string
+		want        bool
+	}{
+		{"clone-per-agent: GitClone set, no Workspace", true, "", true},
+		{"explicit mount: no GitClone, Workspace set", false, "/mnt/project", true},
+		{"both set (defensive; GitClone still wins)", true, "/mnt/project", true},
+		{"neither GitClone nor Workspace", false, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ReincarnateEligible(tt.hasGitClone, tt.workspace)
+			if got != tt.want {
+				t.Errorf("ReincarnateEligible(%v, %q) = %v, want %v", tt.hasGitClone, tt.workspace, got, tt.want)
+			}
+		})
+	}
+}

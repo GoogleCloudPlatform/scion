@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -93,7 +94,14 @@ type ReincarnationPlan struct {
 
 // authorizeAgentReincarnate gates POST .../reincarnate for every caller kind
 // (design §3.8, decision D2):
-//   - A user needs ActionUpdate on the agent, the same policy as agent update.
+//   - A user needs the agent lifecycle permission (ActionLifecycle), the same
+//     policy as stop/start/restart (design §3.8 Amendment A24). ActionUpdate
+//     (agent.update) has no UATScope in the permission registry, so the UAT
+//     project-constraint gate denied every User Access Token outright,
+//     including one scoped to agent:lifecycle or agent:manage -- only
+//     session/OAuth users and agent tokens could ever reincarnate. The
+//     built-in roles grant agent.update and agent.lifecycle together, so
+//     this does not widen access for any existing role.
 //   - An agent reincarnating ANOTHER agent needs project:agent:lifecycle
 //     within its own project, same as stop/start (authorizeAgentLifecycle).
 //   - An agent reincarnating ITSELF is allowed for any role, with no scope
@@ -137,20 +145,20 @@ func (s *Server) authorizeAgentReincarnate(w http.ResponseWriter, r *http.Reques
 	case "user", "dev":
 		userIdent, ok := identity.(UserIdentity)
 		if !ok {
-			logAuthzDenial(r, identity, resource, ActionUpdate, "invalid user identity")
+			logAuthzDenial(r, identity, resource, ActionLifecycle, "invalid user identity")
 			writeForbidden(w, "")
 			return false
 		}
-		decision := s.authzService.CheckAccess(ctx, userIdent, resource, ActionUpdate)
+		decision := s.authzService.CheckAccess(ctx, userIdent, resource, ActionLifecycle)
 		if !decision.Allowed {
-			logAuthzDenial(r, identity, resource, ActionUpdate, decision.Reason)
+			logAuthzDenial(r, identity, resource, ActionLifecycle, decision.Reason)
 			writeForbidden(w, "")
 			return false
 		}
 		return true
 
 	default:
-		logAuthzDenial(r, identity, resource, ActionUpdate, "identity type may not reincarnate agents")
+		logAuthzDenial(r, identity, resource, ActionLifecycle, "identity type may not reincarnate agents")
 		writeForbidden(w, "")
 		return false
 	}
@@ -197,22 +205,72 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Design §3.4 Amendments A2/A4: Phase 1 targets clone-per-agent
-	// workspaces only (design §7). GitClone alone does NOT
-	// identify that mode: populateAgentConfig
-	// (handlers_agent_create_helpers.go) sets GitClone for every git-remote
-	// project that is not shared-workspace, and that includes
-	// worktree-per-agent — so a worktree-per-agent agent has a non-nil
-	// GitClone and used to pass this gate. Checked here, before any plan is
-	// computed or anything persisted, as defense in depth alongside the
-	// broker's own refusal (Reprovision refuses to touch a non-clone
-	// workspace): this is what makes --dry-run report the restriction too,
-	// instead of a dry run showing a plan that a real request could not
-	// safely execute.
-	if agent.AppliedConfig == nil || agent.AppliedConfig.GitClone == nil ||
-		project.IsWorktreePerAgent() || project.IsSharedWorkspace() {
-		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
-			"reincarnate currently supports clone-per-agent workspaces only", nil)
+	// Design §3.4 Amendments A2/A4/A23/A23.1/A23.2: eligible workspaces are
+	// clone-per-agent (a real GitClone, on a project that is neither
+	// worktree-per-agent nor shared — A23.1 R3: a project can be switched to
+	// shared after an agent was created as clone-per-agent, via a project
+	// label update, so this must be re-checked here rather than assumed from
+	// how populateAgentConfig behaves today) or an explicit mount (no
+	// GitClone, but a non-empty EFFECTIVE Workspace — shared-workspace and
+	// hub-managed projects), via the shared api.ReincarnateEligible
+	// predicate. GitClone alone does NOT identify clone-per-agent mode:
+	// populateAgentConfig (handlers_agent_create_helpers.go) sets GitClone
+	// for every git-remote project that is not shared-workspace, and that
+	// includes worktree-per-agent — so a worktree-per-agent agent has a
+	// non-nil GitClone and would otherwise pass the predicate. It is
+	// excluded here, separately, because only the Hub has the project
+	// record the predicate itself cannot see (api.ReincarnateEligible's doc
+	// comment).
+	//
+	// "Effective" Workspace (A23.1 R1): linkedProjectPath resolves a
+	// registered ProjectProvider.LocalPath for the agent's broker, exactly
+	// as the dispatcher's resolveDispatchProjectInfo does, and
+	// effectiveDispatchWorkspace applies buildCreateRequest's own "a linked
+	// local provider clears an absolute Workspace" rule. Gating on the raw
+	// AppliedConfig.Workspace let a linked shared project look eligible
+	// here, then get stopped and refused by the broker with a 409 — a
+	// regression from Phase 1's clean up-front 400. Evaluating the same
+	// effective value the dispatcher will actually send keeps the two from
+	// disagreeing.
+	//
+	// A23.2 FYI-b: the mirror of R3, for the reverse switch. A project can
+	// also switch TO clone-per-agent after an agent was created as
+	// shared-workspace or hub-managed: the agent's stored GitClone is still
+	// nil, but a fresh reincarnation would derive a GitClone from the
+	// project's CURRENT mode — and this agent has no existing real clone on
+	// disk for the broker's GitClone branch to find, so (without this
+	// check) it would be stopped and then refused by the broker's own "no
+	// existing git clone" 409, the same stop-then-refuse shape R1 fixed for
+	// the other direction. The linked-provider case is excluded here
+	// (linkedProjectPath == "") because when a provider IS linked,
+	// effectiveDispatchWorkspace already clears the workspace to "" and the
+	// generic ReincarnateEligible check below catches it as "neither".
+	//
+	// Checked before any plan is computed or anything persisted, as defense
+	// in depth alongside the broker's own refusal (Reprovision refuses to
+	// touch a workspace it did not find already on disk): this is what
+	// makes --dry-run report the restriction too, instead of a dry run
+	// showing a plan that a real request could not safely execute.
+	hasGitClone := agent.AppliedConfig != nil && agent.AppliedConfig.GitClone != nil
+	var effectiveWorkspace string
+	var linkedProjectPath string
+	if agent.AppliedConfig != nil {
+		linkedProjectPath = s.linkedProjectPath(ctx, agent)
+		effectiveWorkspace = effectiveDispatchWorkspace(agent.AppliedConfig.Workspace, linkedProjectPath)
+	}
+	switchedToCloneOnly := !hasGitClone && project.GitRemote != "" && !project.IsSharedWorkspace() &&
+		linkedProjectPath == "" && effectiveWorkspace != ""
+	if agent.AppliedConfig == nil || project.IsWorktreePerAgent() ||
+		(hasGitClone && project.IsSharedWorkspace()) ||
+		switchedToCloneOnly ||
+		!api.ReincarnateEligible(hasGitClone, effectiveWorkspace) {
+		// FYI-6 (review p1b-r1): the generic message now covers every
+		// eligible mode, not just clone-per-agent.
+		msg := "reincarnate requires a clone-per-agent, shared-workspace or hub-managed workspace"
+		if project.IsWorktreePerAgent() {
+			msg = "reincarnate does not yet support worktree-per-agent workspaces"
+		}
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError, msg, nil)
 		return
 	}
 
@@ -374,6 +432,25 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		State:      store.AgentReincarnationStatePending,
 		Plan:       plan,
 	})
+}
+
+// linkedProjectPath resolves the local path a runtime broker has registered
+// for the agent's project via a ProjectProvider, exactly as the dispatcher's
+// resolveDispatchProjectInfo does for a real dispatch — used by
+// handleReincarnateAgent's eligibility gate to compute the effective
+// dispatched workspace (design §3.4 Amendment A23.1, review p1b-r1 R1).
+// Returns "" when the agent has no broker assigned yet, or when no provider
+// (or no LocalPath) is registered for it — the gate then evaluates the raw
+// Workspace, matching a non-linked (hub-native) dispatch.
+func (s *Server) linkedProjectPath(ctx context.Context, agent *store.Agent) string {
+	if agent.RuntimeBrokerID == "" {
+		return ""
+	}
+	provider, err := s.store.GetProjectProvider(ctx, agent.ProjectID, agent.RuntimeBrokerID)
+	if err != nil || provider == nil {
+		return ""
+	}
+	return provider.LocalPath
 }
 
 // ensureReincarnateRequesterSubscribed implements design §3.4 Amendment
