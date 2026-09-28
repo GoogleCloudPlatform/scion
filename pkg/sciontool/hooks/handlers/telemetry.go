@@ -604,37 +604,44 @@ func (h *TelemetryHandler) recordUnpairedEndMetrics(event *hooks.Event, startEve
 	}
 }
 
+// toOTelAttrs converts contract label pairs into OTel attributes,
+// preallocated to the input length.
+func toOTelAttrs(kvs []telemetrycontract.LabelKV) []attribute.KeyValue {
+	attrs := make([]attribute.KeyValue, len(kvs))
+	for i, kv := range kvs {
+		attrs[i] = attribute.String(kv.Key, kv.Value)
+	}
+	return attrs
+}
+
 // recordTokenMetrics records token usage counters from an event's token
 // fields. Unlike gen_ai.api.calls (which keeps agent_id/project_id for
 // descriptor compatibility, design §3.2), scion.usage.tokens's producer
-// label set is exactly harness, model and token_type -- nothing else. GCP
-// admission's allowlist for this one metric is narrower than the general
-// hook-counter allowlist (cloudUsageTokenFields vs. cloudPointFields in
-// gcp_metric_identity.go), so reusing the caller's baseAttrs (which carries
-// agent_id/project_id from metricAttrs()) got the whole OTLP request
-// rejected on GCP (round 1 review H1). This builds its attribute set from
-// telemetrycontract.UsageTokenPointAttrs instead of taking baseAttrs from
-// the caller -- the same helper the admission regression test in
-// pkg/sciontool/telemetry uses, so the two can't drift apart again.
+// label set is exactly harness, model and token_type -- nothing else. The
+// GCP allowlist for this one metric is cloudUsageTokenFields, narrower than
+// the general hook-counter allowlist cloudPointFields
+// (gcp_metric_identity.go): a point carrying any other key, such as
+// agent_id or project_id, gets the whole OTLP request rejected. This builds
+// its attribute set from telemetrycontract.UsageTokenPointAttrs instead of
+// taking baseAttrs from the caller -- the same helper the admission
+// regression test in pkg/sciontool/telemetry uses, so the two can't drift
+// apart.
 func (h *TelemetryHandler) recordTokenMetrics(ctx context.Context, event *hooks.Event) {
 	if h.usageTokens == nil {
 		return
 	}
 
-	var attrs []attribute.KeyValue
-	for _, kv := range telemetrycontract.UsageTokenPointAttrs(os.Getenv("SCION_HARNESS"), os.Getenv("SCION_MODEL")) {
-		attrs = append(attrs, attribute.String(kv.Key, kv.Value))
-	}
+	attrs := toOTelAttrs(telemetrycontract.UsageTokenPointAttrs(os.Getenv("SCION_HARNESS"), os.Getenv("SCION_MODEL")))
 
 	recorded := false
 	record := func(tokenType string, n int64) {
 		if n <= 0 {
 			return
 		}
-		// Built fresh on every call (round 1 review N1): appending onto a
-		// shared prefix's spare capacity is safe today only because
-		// metric.WithAttributes copies synchronously before the next call,
-		// and that's an easy invariant to break later.
+		// Built fresh on every call: appending onto a shared prefix's spare
+		// capacity would be safe only as long as metric.WithAttributes
+		// copies synchronously before the next call -- an easy invariant to
+		// break later, so this avoids depending on it.
 		pointAttrs := make([]attribute.KeyValue, len(attrs), len(attrs)+1)
 		copy(pointAttrs, attrs)
 		pointAttrs = append(pointAttrs, attribute.String(telemetrycontract.TokenTypeLabel, tokenType))

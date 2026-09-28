@@ -717,6 +717,118 @@ func TestTelemetryHandler_TokenMetricsOnModelEnd(t *testing.T) {
 	}
 }
 
+// TestTelemetryHandler_UsageTokenLabelsMatchContract asserts that every
+// scion.usage.tokens point the real handler emits carries exactly the
+// contract's producer label set -- UsageTokenPointAttrs(harness, model) plus
+// token_type -- and nothing else, on both the paired and unpaired model-end
+// paths. This is the handler-side complement to
+// pkg/sciontool/telemetry.TestHookUsageTokensPassStrictGCPCloudAdmission,
+// which guards the UsageTokenPointAttrs helper against real GCP admission
+// but never runs recordTokenMetrics itself (the two packages can't import
+// each other in tests; see that test's doc comment). Without this test nothing
+// would catch a regression where the handler goes back to including
+// agent_id/project_id, since the admission test would keep passing --
+// mutation-tested during review: manually appending agent_id/project_id
+// after the helper loop in recordTokenMetrics left every existing handler
+// test green.
+//
+// gen_ai.api.calls is asserted to still carry agent_id and project_id in the
+// same run, documenting the intended asymmetry: it keeps them for Cloud
+// descriptor compatibility (design §3.2); scion.usage.tokens does not,
+// because its GCP allowlist doesn't permit them.
+func TestTelemetryHandler_UsageTokenLabelsMatchContract(t *testing.T) {
+	t.Setenv("SCION_USAGE_SOURCE", "hooks")
+	t.Setenv("SCION_AGENT_ID", "agent-1")
+	t.Setenv("SCION_PROJECT_ID", "project-1")
+	t.Setenv("SCION_HARNESS", "muse-code")
+	t.Setenv("SCION_MODEL", "test-model")
+
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	defer func() { _ = mp.Shutdown(context.Background()) }()
+
+	h := NewTelemetryHandler(nil, nil, nil, mp)
+
+	// Paired path.
+	if err := h.Handle(&hooks.Event{Name: hooks.EventModelStart, Data: hooks.EventData{}}); err != nil {
+		t.Fatalf("Handle model-start error: %v", err)
+	}
+	if err := h.Handle(&hooks.Event{
+		Name: hooks.EventModelEnd,
+		Data: hooks.EventData{Success: true, InputTokens: 100, OutputTokens: 50, CachedTokens: 10},
+	}); err != nil {
+		t.Fatalf("Handle model-end error: %v", err)
+	}
+	// Unpaired path (recordUnpairedEndMetrics): a second model-end with no
+	// matching start, the normal hook-per-process case.
+	if err := h.Handle(&hooks.Event{
+		Name: hooks.EventModelEnd,
+		Data: hooks.EventData{Success: true, InputTokens: 5, OutputTokens: 2, CachedTokens: 1},
+	}); err != nil {
+		t.Fatalf("Handle unpaired model-end error: %v", err)
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect error: %v", err)
+	}
+
+	wantTokenKeys := map[string]bool{
+		telemetrycontract.HarnessLabel:   true,
+		telemetrycontract.ModelLabel:     true,
+		telemetrycontract.TokenTypeLabel: true,
+	}
+	sawUsageTokenPoint := false
+	sawAPICallPoint := false
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			switch m.Name {
+			case telemetrycontract.MetricUsageTokens:
+				sum, ok := m.Data.(metricdata.Sum[int64])
+				if !ok {
+					t.Fatalf("%s: unexpected data type %T", m.Name, m.Data)
+				}
+				for _, point := range sum.DataPoints {
+					sawUsageTokenPoint = true
+					gotKeys := map[string]bool{}
+					for _, kv := range point.Attributes.ToSlice() {
+						gotKeys[string(kv.Key)] = true
+					}
+					if len(gotKeys) != len(wantTokenKeys) {
+						t.Errorf("%s point attribute keys = %v, want exactly %v", m.Name, gotKeys, wantTokenKeys)
+						continue
+					}
+					for key := range wantTokenKeys {
+						if !gotKeys[key] {
+							t.Errorf("%s point attribute keys = %v, missing %q", m.Name, gotKeys, key)
+						}
+					}
+				}
+			case telemetrycontract.MetricAPICalls:
+				sum, ok := m.Data.(metricdata.Sum[int64])
+				if !ok {
+					t.Fatalf("%s: unexpected data type %T", m.Name, m.Data)
+				}
+				for _, point := range sum.DataPoints {
+					sawAPICallPoint = true
+					if _, ok := point.Attributes.Value(attribute.Key("agent_id")); !ok {
+						t.Errorf("%s point missing agent_id (intended asymmetry vs. %s)", m.Name, telemetrycontract.MetricUsageTokens)
+					}
+					if _, ok := point.Attributes.Value(attribute.Key("project_id")); !ok {
+						t.Errorf("%s point missing project_id (intended asymmetry vs. %s)", m.Name, telemetrycontract.MetricUsageTokens)
+					}
+				}
+			}
+		}
+	}
+	if !sawUsageTokenPoint {
+		t.Fatalf("expected at least one %s point", telemetrycontract.MetricUsageTokens)
+	}
+	if !sawAPICallPoint {
+		t.Fatalf("expected at least one %s point", telemetrycontract.MetricAPICalls)
+	}
+}
+
 // TestTelemetryHandler_UsageSourceGate pins design D4/D10 and the Phase 2 AC:
 // hook-sourced usage (gen_ai.api.calls, scion.usage.tokens) is recorded only
 // when SCION_USAGE_SOURCE=hooks. It is suppressed both when the variable is
@@ -754,9 +866,9 @@ func TestTelemetryHandler_UsageSourceGate(t *testing.T) {
 			}); err != nil {
 				t.Fatalf("Handle model-end error: %v", err)
 			}
-			// Unpaired model-end (round 1 review L1): the normal
-			// hook-per-process case (recordUnpairedEndMetrics), gated the
-			// same way as the paired path above.
+			// Unpaired model-end: the normal hook-per-process case
+			// (recordUnpairedEndMetrics), gated the same way as the paired
+			// path above.
 			if err := h.Handle(&hooks.Event{
 				Name: hooks.EventModelEnd,
 				Data: hooks.EventData{Success: true, InputTokens: 10, OutputTokens: 5},
@@ -769,9 +881,8 @@ func TestTelemetryHandler_UsageSourceGate(t *testing.T) {
 			if err := h.Handle(&hooks.Event{Name: hooks.EventToolEnd, Data: hooks.EventData{ToolName: "Bash", Success: true}}); err != nil {
 				t.Fatalf("Handle tool-end error: %v", err)
 			}
-			// session-end (round 1 review L1): agent.session.count must be
-			// recorded in every state, since the gate is scoped to usage
-			// only (D4, narrow).
+			// session-end: agent.session.count must be recorded in every
+			// state, since the gate is scoped to usage only (D4, narrow).
 			if err := h.Handle(&hooks.Event{Name: hooks.EventSessionEnd, Data: hooks.EventData{Reason: "user_exit"}}); err != nil {
 				t.Fatalf("Handle session-end error: %v", err)
 			}
