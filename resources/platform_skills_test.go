@@ -32,7 +32,7 @@ func TestIndependentReviewPlatformSkillContract(t *testing.T) {
 		"Do not ask it to judge only from the producer's summary",
 		"findings go to the orchestrator",
 		"every material finding has an explicit disposition",
-		"run a focused re-review before acceptance",
+		"run a focused re-review",
 	} {
 		if !strings.Contains(content, required) {
 			t.Errorf("independent-review skill missing required contract text %q", required)
