@@ -12,33 +12,41 @@ import (
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 )
 
-// TestHookUsageTokensPassStrictGCPCloudAdmission is a regression test for
-// round 1 review finding H1 (fork PR ptone/scion#2150): the hook handler's
-// scion.usage.tokens points used to carry agent_id and project_id (from
-// metricAttrs()'s baseAttrs), but GCP admission's allowlist for that one
-// metric is narrower (cloudUsageTokenFields = harness, model, token_type;
-// see gcp_metric_identity.go), so the whole OTLP request -- including that
-// flush's gen_ai.api.calls, agent.tool.calls and agent.session.count points
-// -- was rejected. On 69049bd7f (phase 2 round 1, the regression this
-// fixes), a point built the old way fails admission with "unsupported Cloud
-// Monitoring point dimension"; the shape built by
-// telemetrycontract.UsageTokenPointAttrs (what the fixed
-// hooks/handlers.recordTokenMetrics now emits) passes.
+// pointAttrsForTest converts contract label pairs into OTel attributes,
+// mirroring hooks/handlers.toOTelAttrs. Duplicated rather than shared: this
+// test lives in package telemetry, which hooks/handlers already imports, so
+// importing handlers back here for the helper would be a cycle.
+func pointAttrsForTest(kvs []telemetrycontract.LabelKV) []attribute.KeyValue {
+	attrs := make([]attribute.KeyValue, len(kvs))
+	for i, kv := range kvs {
+		attrs[i] = attribute.String(kv.Key, kv.Value)
+	}
+	return attrs
+}
+
+// TestHookUsageTokensPassStrictGCPCloudAdmission asserts that a
+// scion.usage.tokens point built from telemetrycontract.UsageTokenPointAttrs
+// -- the exact shape hooks/handlers.recordTokenMetrics emits -- survives
+// real GCP admission (receiver -> policy -> metricStreams{gcp:true} ->
+// gcpIdentityMetrics). MetricUsageTokens's GCP allowlist
+// (cloudUsageTokenFields = harness, model, token_type; gcp_metric_identity.go)
+// is narrower than the general hook-counter allowlist, so a point carrying
+// any other key, such as agent_id or project_id, gets the whole OTLP request
+// rejected -- taking that flush's gen_ai.api.calls, agent.tool.calls and
+// agent.session.count points down with it.
 //
-// This uses the shared-helper alternative the review offered, not an
-// external test package driving the real handler: pkg/sciontool/telemetry
-// can't import pkg/sciontool/hooks/handlers from a same-package (white-box)
-// test, because handlers already imports telemetry and Go rejects that as
-// an import cycle in the test binary ("import cycle not allowed in test").
-// An external "telemetry_test" package could import handlers, but couldn't
-// reach the unexported receiverPolicy/metricStreams/gcpIdentityMetrics this
-// test needs to drive real admission. So instead, both
-// hooks/handlers.recordTokenMetrics and this test build the point's
-// producer label set from the single shared
-// telemetrycontract.UsageTokenPointAttrs helper (see its doc comment): if
-// that helper ever regresses to include a forbidden key, this test fails
-// against the real admission code the exporter uses, the same way it would
-// have caught H1.
+// This guards the shared UsageTokenPointAttrs helper against real admission,
+// not the handler's use of it: pkg/sciontool/telemetry can't import
+// pkg/sciontool/hooks/handlers from a same-package (white-box) test, because
+// handlers already imports telemetry and Go rejects that as an import cycle
+// in the test binary ("import cycle not allowed in test"). An external
+// "telemetry_test" package could import handlers, but couldn't reach the
+// unexported receiverPolicy/metricStreams/gcpIdentityMetrics this test needs
+// to drive real admission. hooks/handlers.TestTelemetryHandler_UsageTokenLabelsMatchContract
+// is the complementary handler-side guard: it asserts the handler emits
+// exactly UsageTokenPointAttrs' keys plus token_type, nothing more. Together
+// the two pin the end-to-end behavior even though neither package can import
+// the other in tests.
 //
 // The token values mirror the muse-code PostLLMCall fixture
 // (hooks/handlers/muse_dialect_test.go's TestMuseCodeHookTokensReachUsageMetric),
@@ -92,10 +100,7 @@ func TestHookUsageTokensPassStrictGCPCloudAdmission(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var baseAttrs []attribute.KeyValue
-	for _, kv := range telemetrycontract.UsageTokenPointAttrs("muse-code", "model") {
-		baseAttrs = append(baseAttrs, attribute.String(kv.Key, kv.Value))
-	}
+	baseAttrs := pointAttrsForTest(telemetrycontract.UsageTokenPointAttrs("muse-code", "model"))
 	for tokenType, n := range map[string]int64{
 		telemetrycontract.TokenTypeInput:     1200,
 		telemetrycontract.TokenTypeOutput:    400,

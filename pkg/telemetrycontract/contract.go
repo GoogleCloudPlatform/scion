@@ -82,15 +82,13 @@ type LabelKV struct{ Key, Value string }
 // by the caller alongside these.
 //
 // Unlike MetricAPICalls, which keeps agent_id/project_id for Cloud
-// descriptor compatibility, MetricUsageTokens's allowlist on the GCP
-// exporter does not permit them (round 1 review of ptone/scion#2053 phase
-// 2, finding H1: reusing a shared agent_id/project_id-carrying attribute
-// set for both metrics got every hook-sourced scion.usage.tokens point
-// rejected by GCP admission, taking the rest of that flush with it). This
-// function is the single place the hook handler
-// (pkg/sciontool/hooks/handlers) and its admission regression test
-// (pkg/sciontool/telemetry) build this set from, so the two can't drift
-// apart again.
+// descriptor compatibility, MetricUsageTokens's GCP allowlist does not
+// permit them: a point carrying any key outside {harness, model, token_type}
+// gets the whole OTLP request rejected, taking the rest of that flush (calls,
+// tool and session metrics included) with it. This function is the single
+// place the hook handler (pkg/sciontool/hooks/handlers) and its admission
+// regression test (pkg/sciontool/telemetry) build this set from, so the two
+// can't drift apart again.
 func UsageTokenPointAttrs(harness, model string) []LabelKV {
 	var attrs []LabelKV
 	if harness != "" {
