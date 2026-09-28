@@ -1000,3 +1000,105 @@ func TestLookupContainerID_ListingErrorIsListUnavailable(t *testing.T) {
 		t.Errorf("expected errors.Is(err, ErrAgentListUnavailable), got: %v", err)
 	}
 }
+
+// TestLookupAgent_PhaseIsRawRuntimeNotMerged proves that AgentLookupResult's
+// Phase comes from the runtime's own listing (rawRuntimePhase), not from
+// agent.Manager's merged view (which overlays agent-info.json and can lag
+// behind the container's actual state — see pkg/agent/list.go). This is the
+// signal classifyAttachEnd's containerRunningState relies on to decide
+// whether a stopped container gets a terminal 4410 (ptone/scion#2088): if
+// LookupAgent ever regressed to returning the merged phase instead, a
+// container that has already restarted (or is still starting up) while its
+// on-disk agent-info.json still says "stopped" would wrongly end an attach
+// with a terminal code instead of retrying.
+func TestLookupAgent_PhaseIsRawRuntimeNotMerged(t *testing.T) {
+	tests := []struct {
+		name        string
+		mergedPhase string          // agent.Manager.List's overlaid phase (what ag.Phase would be)
+		rawPhase    string          // the runtime's own List phase for the same container (single-entry cases)
+		rawEntries  []api.AgentInfo // explicit raw List result, for cases needing more than one entry
+		rawListErr  error
+		wantPhase   string
+	}{
+		{
+			name:        "raw runtime disagrees with a stale merged phase: raw wins",
+			mergedPhase: "stopped",
+			rawPhase:    "running",
+			wantPhase:   "running",
+		},
+		{
+			name:        "raw runtime agrees with the merged phase",
+			mergedPhase: "stopped",
+			rawPhase:    "stopped",
+			wantPhase:   "stopped",
+		},
+		{
+			name:        "the raw runtime list itself fails: unknown, never falls back to the merged value",
+			mergedPhase: "stopped",
+			rawListErr:  errors.New("docker ps failed: exit status 1"),
+			wantPhase:   "",
+		},
+		{
+			// The broader name-only filter rawRuntimePhase uses can return
+			// another container that happens to share the "scion.name"
+			// label (e.g. a same-named agent in a different project). The
+			// container-ID match, not list order, must decide which entry's
+			// phase gets used.
+			name: "raw runtime lists a same-named container first: the ID match wins, not list order",
+			rawEntries: []api.AgentInfo{
+				{ContainerID: "other-project-container", Name: "agent1", Labels: map[string]string{"scion.name": "agent1"}, Phase: "stopped"},
+				{ContainerID: "container-1", Name: "agent1", Labels: map[string]string{"scion.name": "agent1"}, Phase: "running"},
+			},
+			wantPhase: "running",
+		},
+		{
+			name: "raw runtime lists entries but none match this container ID: unknown",
+			rawEntries: []api.AgentInfo{
+				{ContainerID: "some-other-container", Name: "agent1", Labels: map[string]string{"scion.name": "agent1"}, Phase: "stopped"},
+			},
+			wantPhase: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := &filteringMockManager{}
+			mgr.agents = []api.AgentInfo{
+				{
+					ContainerID: "container-1",
+					Name:        "agent1",
+					Labels:      map[string]string{"scion.name": "agent1"},
+					Phase:       tc.mergedPhase,
+				},
+			}
+			rt := &runtime.MockRuntime{
+				NameFunc: func() string { return "docker" },
+				ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+					if tc.rawListErr != nil {
+						return nil, tc.rawListErr
+					}
+					if tc.rawEntries != nil {
+						return tc.rawEntries, nil
+					}
+					return []api.AgentInfo{
+						{
+							ContainerID: "container-1",
+							Name:        "agent1",
+							Labels:      map[string]string{"scion.name": "agent1"},
+							Phase:       tc.rawPhase,
+						},
+					}, nil
+				},
+			}
+			srv := New(DefaultServerConfig(), mgr, rt)
+
+			result, err := srv.LookupAgent(context.Background(), "agent1", "")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result.Phase != tc.wantPhase {
+				t.Errorf("Phase = %q, want %q", result.Phase, tc.wantPhase)
+			}
+		})
+	}
+}

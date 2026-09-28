@@ -130,7 +130,7 @@ The WebSocket close frame that ends a terminal attach carries a code that tells 
 | :--- | :--- | :--- | :--- |
 | `1000` | Clean detach. The tmux session still exists. | None (empty reason) | Not retry |
 | `4404` | The Runtime Broker cannot find the agent or its container. | `agent_not_found` | Not retry |
-| `4410` | The tmux session is gone (agent exited, container stopped or removed). | `session_ended` (the container still exists), `container_removed` (the container is gone too) | Not retry |
+| `4410` | The tmux session is gone (agent exited, container stopped or removed). | `session_ended` (the container still exists), `container_removed` (the container is gone too), `agent_stopped` (the attach never reached a tmux session because the container is definitively stopped) | Not retry |
 | `4503` | A hop behind this one is temporarily unavailable (Hub-to-broker control channel dropped, stream failed to open, exec transport dropped while the session is still alive, tmux session not ready yet, container runtime lookup failed). | From the Hub: `broker_disconnected`, `stream_open_failed`, `broker_write_failed`. From the Runtime Broker: `runtime_stream_dropped`, `session_not_ready`, `lookup_unavailable`, `runtime_unavailable` | Retry |
 | `1006` | Connection dropped without a close frame. The client library generates this code; it is never sent. | None | Retry |
 | `1011` | Unexpected server error, or the Runtime Broker could not check whether the tmux session survived. | `internal_error`, `client_read_failed`, `client_write_failed`, `probe_failed` | Retry |

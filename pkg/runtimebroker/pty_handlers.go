@@ -617,6 +617,15 @@ func (s *Server) handleAgentAttach(w http.ResponseWriter, r *http.Request) {
 		NotFound(w, "Agent")
 		return
 	}
+	if result == nil {
+		// A well-behaved AgentLookup never returns (nil, nil); don't
+		// dereference it or guess the agent is gone if one does — treat it
+		// the same as a list-unavailable failure and retry.
+		slog.Error("PTY attach: agent lookup returned no result and no error", "agent_id", agentID)
+		RuntimeUnavailable(w, fmt.Sprintf(
+			"Unable to look up agent %q: the container runtime is temporarily unavailable. Please retry the attach in a moment.", agentID))
+		return
+	}
 
 	containerID := result.ContainerID
 
@@ -650,6 +659,19 @@ func (s *Server) handleAgentAttach(w http.ResponseWriter, r *http.Request) {
 	runtimeCmd := result.RuntimeName
 	if runtimeCmd == "" {
 		runtimeCmd = s.RuntimeCommand()
+	}
+
+	// The container is already definitively stopped: no tmux session will
+	// ever come up in it, so there's no reason to start the PTY session and
+	// let it exhaust the full waitForTmuxSession timeout before
+	// classifyAttachEnd reaches the same conclusion post-hoc. This is the
+	// same runtime-authoritative Phase signal classifyAttachEnd's
+	// containerRunningState uses; an unknown or running phase falls through
+	// to the normal attach path unchanged.
+	if runningResultFromPhase(result.Phase) == runningNo {
+		slog.Info("Attach: container is stopped, ending the attach without waiting for tmux", "agent_id", agentID, "containerID", containerID)
+		writePTYCloseFrame(conn, wsprotocol.ClosePTYSessionGone, wsprotocol.CloseReasonAgentStopped)
+		return
 	}
 
 	slog.Info("Attach session started", "agent_id", agentID, "containerID", containerID, "runtime", runtimeCmd)
@@ -1202,16 +1224,26 @@ func (s *LocalPTYSession) writeToWebSocket(v interface{}) error {
 // retry — every attach end looked like an ungraceful drop (observed as close
 // code 1006).
 func (s *LocalPTYSession) sendCloseFrame(code int, reason string) {
+	s.writeMu.Lock()
+	writePTYCloseFrame(s.conn, code, reason)
+	s.writeMu.Unlock()
+
+	_ = s.conn.Close()
+}
+
+// writePTYCloseFrame writes a close frame carrying code/reason directly to
+// conn, clamping to a sendable code (IsSendableCloseCode) and a valid reason
+// length (TruncateCloseReason). Shared by LocalPTYSession.sendCloseFrame
+// (which holds writeMu because the PTY loop may still be writing to conn
+// concurrently) and handleAgentAttach's pre-session stopped-container check
+// below (no writeMu needed there: the PTY session, and any other writer,
+// hasn't started yet).
+func writePTYCloseFrame(conn *websocket.Conn, code int, reason string) {
 	if !wsprotocol.IsSendableCloseCode(code) {
 		code = wsprotocol.ClosePTYInternalError
 	}
 	reason = wsprotocol.TruncateCloseReason(reason)
-
-	s.writeMu.Lock()
-	_ = s.conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason), time.Now().Add(directAttachKeepaliveConfig.WriteWait))
-	s.writeMu.Unlock()
-
-	_ = s.conn.Close()
+	_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason), time.Now().Add(directAttachKeepaliveConfig.WriteWait))
 }
 
 // pokeReadDeadlineUntilDone repeatedly forces conn's read deadline into the

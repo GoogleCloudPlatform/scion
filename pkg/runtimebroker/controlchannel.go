@@ -96,6 +96,18 @@ type AgentLookupResult struct {
 	ExecUser    string // Container user for exec/attach (e.g., "scion" or "root" for rootless Podman)
 	Namespace   string // Kubernetes namespace (empty for non-k8s runtimes)
 
+	// Phase is the container runtime's OWN lifecycle phase at lookup time
+	// (e.g. "running", "stopped", "created" — see api.AgentInfo.Phase),
+	// read directly from the runtime's listing (Server.rawRuntimePhase).
+	// This is deliberately NOT agent.Manager's merged phase (which overlays
+	// agent-info.json and can lag the runtime's actual state — see
+	// pkg/agent/list.go): callers like classifyAttachEnd that need to know
+	// whether a container is definitively running right now would get a
+	// false answer from that overlay. Empty when the runtime's listing
+	// doesn't include this container at lookup time, or the re-list itself
+	// failed — callers must treat that as unknown, not stopped.
+	Phase string
+
 	// K8sConfig and K8sClientset are set for kubernetes agents so that
 	// PTY handlers can use the Go client (remotecommand) instead of
 	// shelling out to kubectl (which may not be in PATH or may lack auth).
@@ -841,10 +853,31 @@ func (c *ControlChannelClient) handlePTYStream(handler *StreamHandler, cols, row
 		_ = c.CloseStream(handler.streamID, wsprotocol.CloseReasonAgentNotFound, wsprotocol.ClosePTYAgentNotFound)
 		return
 	}
+	if result == nil {
+		// A well-behaved AgentLookup never returns (nil, nil); don't
+		// dereference it or guess the agent is gone if one does — treat it
+		// the same as a list-unavailable failure and retry.
+		c.log.Error("PTY stream failed: agent lookup returned no result and no error", "slug", handler.slug)
+		_ = c.CloseStream(handler.streamID, wsprotocol.CloseReasonRuntimeUnavailable, wsprotocol.ClosePTYUpstreamUnavailable)
+		return
+	}
 
 	if result.ContainerID == "" {
 		c.log.Error("PTY stream failed: container not found", "slug", handler.slug)
 		_ = c.CloseStream(handler.streamID, wsprotocol.CloseReasonAgentNotFound, wsprotocol.ClosePTYAgentNotFound)
+		return
+	}
+
+	// The container is already definitively stopped: no tmux session will
+	// ever come up in it, so there's no reason to start the PTY session and
+	// let it exhaust the full waitForTmuxSession timeout before
+	// classifyAttachEnd reaches the same conclusion post-hoc. This is the
+	// same runtime-authoritative Phase signal classifyAttachEnd's
+	// containerRunningState uses; an unknown or running phase falls through
+	// to the normal attach path unchanged.
+	if runningResultFromPhase(result.Phase) == runningNo {
+		c.log.Info("PTY stream: container is stopped, ending the attach without waiting for tmux", "slug", handler.slug)
+		_ = c.CloseStream(handler.streamID, wsprotocol.CloseReasonAgentStopped, wsprotocol.ClosePTYSessionGone)
 		return
 	}
 

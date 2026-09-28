@@ -98,6 +98,12 @@ const (
 	// CloseReasonContainerRemoved (4410): the tmux session is gone and the
 	// agent's container/pod no longer resolves either.
 	CloseReasonContainerRemoved = "container_removed"
+	// CloseReasonAgentStopped (4410): the attach exec never started because
+	// the tmux session was never up, and the container itself is
+	// definitively not running (Exited/stopped, or errored). Unlike
+	// CloseReasonSessionNotReady, this cannot resolve itself: the agent
+	// must be started again before an attach can succeed.
+	CloseReasonAgentStopped = "agent_stopped"
 	// CloseReasonSessionNotReady (4503): the attach exec never started
 	// because the tmux session was not ready yet (e.g. the agent is still
 	// starting up), and the container itself still resolves. Retry.

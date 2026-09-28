@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"k8s.io/client-go/kubernetes"
@@ -59,14 +60,42 @@ const (
 	lookupAbsent
 )
 
-// attachProber answers the two questions classifyAttachEnd needs once a PTY
-// attach loop has ended: is the tmux session still there, and does the agent
-// still resolve to a container? Both probes are bounded and best-effort — a
-// fake implementation drives the unit tests in pty_classifier_test.go; the
-// real implementation is attachEndProber below.
+// runningResult is the tri-state outcome of checking whether an agent's
+// container is definitively running right now. It is consulted only when
+// the tmux exec never started (startErr != nil) and the agent still
+// resolves to a container: that combination is ambiguous by itself (the
+// container could be mid-startup, or it could already be Exited), and only
+// this check tells the two apart.
+type runningResult int
+
+const (
+	// runningUnknown means the runtime couldn't say (the lookup itself
+	// failed, or the runtime reported no phase/status at all). It must
+	// never be treated the same as runningStopped: an unresolvable running
+	// state always retries.
+	runningUnknown runningResult = iota
+	// runningYes means the runtime reports the container is up.
+	runningYes
+	// runningNo means the runtime reports the container is definitively not
+	// running (e.g. Exited/stopped). The tmux session inside it cannot come
+	// back on its own; only restarting the agent will help.
+	runningNo
+)
+
+// attachProber answers the questions classifyAttachEnd needs once a PTY
+// attach loop has ended: is the tmux session still there, does the agent
+// still resolve to a container, and (when the exec never even started) is
+// that container definitively running or stopped? All three probes are
+// bounded and best-effort — a fake implementation drives the unit tests in
+// pty_classifier_test.go; the real implementation is attachEndProber below.
 type attachProber interface {
 	probeHasSession(ctx context.Context) probeResult
 	lookupStillResolves(ctx context.Context) lookupResult
+	// containerRunningState reports whether the agent's container is
+	// definitively running or stopped right now. Only called when
+	// lookupStillResolves has already returned lookupResolves, so
+	// implementations may assume the agent resolves to a container.
+	containerRunningState(ctx context.Context) runningResult
 }
 
 // classifyAttachEnd decides the WebSocket/control-channel close code and
@@ -92,7 +121,19 @@ func classifyAttachEnd(ctx context.Context, startErr error, cleanExit bool, prob
 		case lookupUnknown:
 			return wsprotocol.ClosePTYUpstreamUnavailable, wsprotocol.CloseReasonLookupUnavailable
 		default: // lookupResolves
-			return wsprotocol.ClosePTYUpstreamUnavailable, wsprotocol.CloseReasonSessionNotReady
+			// The container still resolves, but the tmux exec never started
+			// (e.g. waitForTmuxSession timed out). That alone is ambiguous:
+			// the agent could be starting up (retry) or its container could
+			// already be Exited, in which case tmux will never appear no
+			// matter how long we wait. Check which one it definitively is
+			// before deciding — an unknown running state must still retry,
+			// same as an unknown lookup does.
+			switch prober.containerRunningState(ctx) {
+			case runningNo:
+				return wsprotocol.ClosePTYSessionGone, wsprotocol.CloseReasonAgentStopped
+			default: // runningYes, runningUnknown
+				return wsprotocol.ClosePTYUpstreamUnavailable, wsprotocol.CloseReasonSessionNotReady
+			}
 		}
 	}
 
@@ -235,14 +276,80 @@ func (p *attachEndProber) lookupStillResolves(ctx context.Context) lookupResult 
 	}
 	ctx, cancel := context.WithTimeout(ctx, attachProbeTimeout)
 	defer cancel()
-	_, err := p.lookup.LookupAgent(ctx, p.slug, p.projectID)
+	// LookupAgent, not LookupContainerID: only LookupAgent is hardened to
+	// return ErrAgentListUnavailable from every auxiliary-runtime and
+	// project-fallback List failure (see TestLookupAgent_*ListErrorSurfacesUnavailable
+	// in server_lookup_test.go). LookupContainerID lacks that hardening on
+	// several of the same paths, so using it here would turn a transient
+	// listing failure into a false lookupAbsent — a terminal 4410 instead of
+	// a 4503 retry. The result (including its Phase re-resolution) is
+	// discarded either way; only the error's shape matters.
+	result, err := p.lookup.LookupAgent(ctx, p.slug, p.projectID)
 	switch {
-	case err == nil:
+	case err == nil && result != nil:
 		return lookupResolves
+	case err == nil:
+		// A well-behaved AgentLookup never returns (nil, nil), but a test
+		// double or a future implementation might. Don't read that as
+		// "resolves" — treat it the same as a list-unavailable failure.
+		return lookupUnknown
 	case errors.Is(err, ErrAgentListUnavailable):
 		return lookupUnknown
 	default:
 		return lookupAbsent
+	}
+}
+
+// containerRunningState re-resolves the agent and reports whether its
+// container is definitively running or stopped, from AgentLookupResult's
+// Phase — which LookupAgent populates from the container runtime's own
+// unmerged listing (rawRuntimePhase in server.go), not from agent.Manager's
+// agent-info.json-overlaid view. That distinction matters here specifically:
+// the overlay can keep reporting a stale "stopped"/"error" phase for a
+// container that has since restarted or is still starting up, which would
+// otherwise turn a transient state into a false terminal 4410. It issues its
+// own lookup rather than reusing lookupStillResolves's: the two are called
+// from different branches of classifyAttachEnd (this one only when the exec
+// never started), and keeping them independent means a failure here can
+// never be mistaken for lookupStillResolves's own tri-state.
+func (p *attachEndProber) containerRunningState(ctx context.Context) runningResult {
+	if p.lookup == nil {
+		return runningUnknown
+	}
+	ctx, cancel := context.WithTimeout(ctx, attachProbeTimeout)
+	defer cancel()
+	result, err := p.lookup.LookupAgent(ctx, p.slug, p.projectID)
+	if err != nil || result == nil {
+		// Includes ErrAgentListUnavailable and a genuine not-found: either
+		// way we can't confirm the container is stopped, so don't guess. A
+		// nil result with a nil error is not a contract a well-behaved
+		// AgentLookup should produce, but a test double or a future
+		// implementation might — don't dereference it, and don't guess
+		// "running" or "stopped" from it either.
+		return runningUnknown
+	}
+	return runningResultFromPhase(result.Phase)
+}
+
+// runningResultFromPhase maps a raw, unmerged runtime.List-derived lifecycle
+// phase (see api.AgentInfo.Phase and runtime.phaseFromContainerStatus; NOT
+// agent.Manager's agent-info.json-overlaid phase — see rawRuntimePhase in
+// server.go) to a runningResult, using the same stopped/error-means-stopped
+// rule
+// pkg/agent/list.go already applies when reconciling an agent's phase with
+// its container status. "created" and "provisioning" mean the container
+// exists but hasn't reached "running" yet — exactly the state
+// waitForTmuxSession is normally waiting out — so those must retry rather
+// than terminate. An empty or unrecognized phase (an older runtime that
+// doesn't populate it) is unknown, not stopped.
+func runningResultFromPhase(phase string) runningResult {
+	switch state.Phase(phase) {
+	case state.PhaseRunning:
+		return runningYes
+	case state.PhaseStopped, state.PhaseError:
+		return runningNo
+	default:
+		return runningUnknown
 	}
 }
 
