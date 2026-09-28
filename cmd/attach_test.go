@@ -98,6 +98,51 @@ func newAttachMockHubServer(t *testing.T, projectID, agentName, agentID, runtime
 	return srv
 }
 
+// TestAttachCmd_RuntimeErrorSilencesUsage is a regression test for
+// ptone/scion#2089: a runtime attach failure (agent not found, in this case —
+// standing in for any post-argument-validation failure such as an abnormal
+// session close) must set SilenceUsage on the command so Execute does not
+// print the cobra usage block after it, while the error itself is still
+// returned so the exit code stays non-zero.
+func TestAttachCmd_RuntimeErrorSilencesUsage(t *testing.T) {
+	origNoHub := noHub
+	origProjectPath := projectPath
+	origSilenceUsage := attachCmd.SilenceUsage
+	defer func() {
+		noHub = origNoHub
+		projectPath = origProjectPath
+		attachCmd.SilenceUsage = origSilenceUsage
+	}()
+
+	noHub = true
+	projectPath = t.TempDir() // no agents/ dir present -> deterministic "not found"
+	attachCmd.SilenceUsage = false
+
+	err := attachCmd.RunE(attachCmd, []string{"does-not-exist"})
+
+	require.Error(t, err, "expected a runtime error for a nonexistent agent")
+	assert.Contains(t, err.Error(), "not found")
+	assert.True(t, attachCmd.SilenceUsage,
+		"a runtime attach error must silence usage so Execute does not print it")
+}
+
+// TestAttachCmd_BadArgsDoesNotSilenceUsage is the counterpart regression test:
+// a bad-arguments invocation (wrong arg count) is rejected by cobra's Args
+// validator before RunE ever runs, so it must not silence usage — real
+// argument errors should still show the usage block.
+func TestAttachCmd_BadArgsDoesNotSilenceUsage(t *testing.T) {
+	origSilenceUsage := attachCmd.SilenceUsage
+	defer func() { attachCmd.SilenceUsage = origSilenceUsage }()
+
+	attachCmd.SilenceUsage = false
+
+	err := attachCmd.Args(attachCmd, []string{})
+
+	require.Error(t, err, "expected an args error for a missing <agent> argument")
+	assert.False(t, attachCmd.SilenceUsage,
+		"a bad-arguments error must leave usage enabled")
+}
+
 // TestResolveAttachTransport_PlainMode verifies that resolveAttachTransport returns
 // a nil TokenSource when no transport auth is configured (plain / dev / local hub).
 // This is the base case; the plain-mode invariant requires an app token in this case.

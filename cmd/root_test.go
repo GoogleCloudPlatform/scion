@@ -22,7 +22,166 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+// TestShouldShowUsageOnError covers the decision Execute makes about printing
+// a command's usage block after a failed invocation. Regression test for
+// ptone/scion#2089: Execute used to call cmd.Usage() unconditionally whenever
+// autoHelp was enabled, ignoring cmd.SilenceUsage entirely — so a command
+// opting into SilenceUsage (e.g. attach, once argument parsing has already
+// succeeded) had no way to suppress usage on a runtime error.
+//
+// A parentless command with SilenceUsage set is also covered here (standing
+// in for rootCmd, which sets SilenceUsage on itself only to stop cobra's own
+// internal auto-print — not as an opt-out signal for this helper): it must
+// still show usage, or root-level usage errors like an unknown command or an
+// unknown global flag would silently lose their usage block. See
+// TestExecuteUsageOnError_EndToEnd for the same case driven through the real
+// rootCmd.ExecuteC() dispatch.
+func TestShouldShowUsageOnError(t *testing.T) {
+	tests := []struct {
+		name         string
+		cmd          *cobra.Command
+		hasParent    bool
+		autoHelp     bool
+		silenceUsage bool
+		want         bool
+	}{
+		{
+			name:     "nil command never shows usage",
+			cmd:      nil,
+			autoHelp: true,
+			want:     false,
+		},
+		{
+			name:     "autoHelp disabled never shows usage",
+			cmd:      &cobra.Command{Use: "other"},
+			autoHelp: false,
+			want:     false,
+		},
+		{
+			name:     "a command that never opts in shows usage as before (no-op default)",
+			cmd:      &cobra.Command{Use: "other"},
+			autoHelp: true,
+			want:     true,
+		},
+		{
+			name:         "a subcommand that sets SilenceUsage suppresses usage",
+			cmd:          &cobra.Command{Use: "attach"},
+			hasParent:    true,
+			autoHelp:     true,
+			silenceUsage: true,
+			want:         false,
+		},
+		{
+			name:         "a parentless (root-like) command with SilenceUsage still shows usage",
+			cmd:          &cobra.Command{Use: "scion"},
+			hasParent:    false,
+			autoHelp:     true,
+			silenceUsage: true,
+			want:         true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.cmd != nil {
+				tt.cmd.SilenceUsage = tt.silenceUsage
+				if tt.hasParent {
+					parent := &cobra.Command{Use: "parent"}
+					parent.AddCommand(tt.cmd)
+				}
+			}
+			got := shouldShowUsageOnError(tt.cmd, tt.autoHelp)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestExecuteUsageOnError_EndToEnd drives the real cobra dispatch via
+// rootCmd.ExecuteC() and feeds the result into shouldShowUsageOnError,
+// exercising exactly the code path Execute() uses. This is the regression
+// test for the root-command finding raised in review: the helper originally
+// read cmd.SilenceUsage without checking whether cmd was the root command
+// itself, so rootCmd's own SilenceUsage (set only to silence cobra's
+// internal auto-print, see the doc comment on shouldShowUsageOnError) leaked
+// into the decision and hid usage for genuine root-level usage errors — an
+// unknown command or an unknown global flag.
+func TestExecuteUsageOnError_EndToEnd(t *testing.T) {
+	// attach's PersistentPreRunE requires project/registry context unless
+	// Hub context is detected. Configure that once for the attach-scoped
+	// subtests below so they reach cobra's flag/Args validation or RunE
+	// instead of failing earlier on an unrelated "no project" or "no
+	// image_registry" error.
+	origNoHub := noHub
+	origProjectPath := projectPath
+	origSilenceUsage := attachCmd.SilenceUsage
+	origNonInteractive := nonInteractive
+	origAutoConfirm := autoConfirm
+	origAutoHelp := autoHelp
+	t.Cleanup(func() {
+		noHub = origNoHub
+		projectPath = origProjectPath
+		attachCmd.SilenceUsage = origSilenceUsage
+		// PersistentPreRunE mutates these (agent mode / cli.* settings) in
+		// the agent-mode / interactive_disabled block; restore them so this
+		// test doesn't leak state into whichever test runs next.
+		nonInteractive = origNonInteractive
+		autoConfirm = origAutoConfirm
+		autoHelp = origAutoHelp
+		rootCmd.SetArgs(nil)
+		rootCmd.SetOut(nil)
+		rootCmd.SetErr(nil)
+	})
+
+	t.Setenv("SCION_HOST_UID", "")
+	// A non-empty Hub endpoint makes config.IsHubContext() true, which is
+	// what PersistentPreRunE uses to skip the image_registry requirement.
+	// This doesn't affect the attach code path itself, which is gated
+	// separately by the package-level noHub flag set below.
+	t.Setenv("SCION_HUB_ENDPOINT", "https://hub.invalid.example")
+	noHub = true
+	projectPath = t.TempDir()
+
+	run := func(t *testing.T, args []string) (*cobra.Command, error) {
+		t.Helper()
+		attachCmd.SilenceUsage = false
+		var buf bytes.Buffer
+		rootCmd.SetOut(&buf)
+		rootCmd.SetErr(&buf)
+		rootCmd.SetArgs(args)
+		return rootCmd.ExecuteC()
+	}
+
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"unknown root command still shows usage", []string{"totally-bogus-command-zzz"}, true},
+		{"unknown root flag still shows usage", []string{"--totally-bogus-flag-zzz"}, true},
+		{"attach with no args still shows usage", []string{"attach"}, true},
+		{"attach with too many args still shows usage", []string{"attach", "a", "b"}, true},
+		{"attach with an unknown flag still shows usage", []string{"attach", "--totally-bogus-flag-zzz", "x"}, true},
+		{"attach runtime error hides usage", []string{"attach", "does-not-exist-xyz"}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd, err := run(t, tt.args)
+			require.Error(t, err)
+			assert.Equal(t, tt.want, shouldShowUsageOnError(cmd, true))
+			if tt.name == "attach runtime error hides usage" {
+				// Make the intent explicit: this row's outcome depends on
+				// cobra actually dispatching into attachCmd (and RunE running
+				// far enough to hit the "not found" error), not on
+				// PersistentPreRunE failing first for an unrelated reason.
+				assert.Equal(t, attachCmd, cmd)
+			}
+		})
+	}
+}
 
 func TestFormatFlagCheck(t *testing.T) {
 	// Backup original values
