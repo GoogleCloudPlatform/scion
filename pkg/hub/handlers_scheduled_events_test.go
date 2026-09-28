@@ -109,6 +109,51 @@ func TestScheduledEvent_CreateDispatchAgentRequiresAgentCreateScope(t *testing.T
 	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 }
 
+// TestScheduledEvent_CreateDispatchAgentScopedUATDenied covers B.3's interim
+// authoring gate: a scoped UAT cannot author a dispatch_agent event even when
+// the underlying user holds full project-owner authority, because the
+// scheduler persists only the creator ID and cannot re-apply the token's
+// scope at fire time. The same unscoped user identity must keep working,
+// confirming the gate is specific to scoped credentials.
+func TestScheduledEvent_CreateDispatchAgentScopedUATDenied(t *testing.T) {
+	srv, s, projectID := setupScheduledEventTest(t)
+	ctx := context.Background()
+
+	ownerUserID := tid("sched-evt-dispatch-owner")
+	ownerUser := NewAuthenticatedUser(ownerUserID, "dispatchowner@test.com", "Dispatch Owner", "member", "api")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID:          ownerUserID,
+		Email:       ownerUser.Email(),
+		DisplayName: ownerUser.DisplayName(),
+		Role:        "member",
+		Status:      "active",
+	}))
+
+	project, err := s.GetProject(ctx, projectID)
+	require.NoError(t, err)
+	srv.createProjectMembersGroup(ctx, project)
+	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, projectID, ownerUserID))
+
+	req := CreateScheduledEventRequest{
+		EventType: "dispatch_agent",
+		FireIn:    "30m",
+		AgentName: "scoped-worker",
+	}
+
+	t.Run("unscoped project owner allowed", func(t *testing.T) {
+		rec := doScheduledEventUserRequest(t, srv, ownerUser, http.MethodPost, projectID, "", req)
+		assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	})
+
+	t.Run("scoped UAT for the same user denied", func(t *testing.T) {
+		scoped := NewScopedUserIdentity(ownerUser, projectID, []string{"scheduled_event:create", "agent:create"})
+		rec := doScheduledEventUserRequest(t, srv, scoped, http.MethodPost, projectID, "", req)
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(),
+			"scheduled agent creation requires a credential whose scope can be applied at execution time")
+	})
+}
+
 func TestScheduledEvent_CreateWithFireAt(t *testing.T) {
 	srv, _, projectID := setupScheduledEventTest(t)
 
