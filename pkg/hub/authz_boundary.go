@@ -150,6 +150,14 @@ type TargetScopeEvidence struct {
 //
 // Collection-level path (evidence.IsCollectionLevel): see resolveCollectionEvidence.
 func ResolveTargetScope(r Resource, evidence TargetScopeEvidence) TargetScope {
+	// Supplied-but-unrecognized metadata is a contradiction, not absent
+	// metadata — validated BEFORE any fast path, including the coherent
+	// existing-project/Hub-type cases, so a caller cannot smuggle a
+	// contradictory extra fact past them (pat-refactor R1, 2026-09-28).
+	if !recognizedFactsCoherent(r) {
+		return TargetScope{Kind: TargetScopeUnknown}
+	}
+
 	if evidence.IsCollectionLevel {
 		return resolveCollectionEvidence(r, evidence)
 	}
@@ -201,6 +209,9 @@ func resolveCollectionEvidence(r Resource, evidence TargetScopeEvidence) TargetS
 	if r.ID != "" {
 		return TargetScope{Kind: TargetScopeUnknown}
 	}
+	// recognizedFactsCoherent is already checked by the caller
+	// (ResolveTargetScope) before dispatching here, but resolveCollectionEvidence
+	// is unexported and only reachable that way — no separate check needed.
 
 	// Fact: if both the Resource and the permission imply a resource type,
 	// they must agree — a caller cannot mismatch which resource family a
@@ -301,6 +312,52 @@ func classesInclude(classes []permissions.TargetClassKind, want ...permissions.T
 // literal string "user" (and likewise "global"/"core"), so a single string
 // comparison covers every resource-specific constant once the resource type
 // itself is confirmed reviewed.
+// recognizedFactsCoherent validates that r's own metadata is internally
+// well-formed BEFORE any classification is attempted: an unrecognized
+// ParentType value, an orphan ParentID with no declared ParentType, or an
+// unrecognized ScopeKind value on a resource type that has reviewed
+// scope-kind semantics are all contradictions — supplied-but-unrecognized
+// metadata is NOT the same as absent metadata, and must deny rather than be
+// silently treated as "no claim" (pat-refactor R1, 2026-09-28).
+func recognizedFactsCoherent(r Resource) bool {
+	switch r.ParentType {
+	case "", "project", "system":
+	default:
+		return false
+	}
+	if r.ParentType == "" && r.ParentID != "" {
+		return false // orphan ParentID with no declared ParentType
+	}
+	if isReviewedScopeKindResourceType(r.Type) && !isRecognizedScopeKindValue(r.ScopeKind) {
+		return false
+	}
+	return true
+}
+
+// isReviewedScopeKindResourceType reports whether resourceType is one of
+// the three types with reviewed ScopeKind semantics.
+func isReviewedScopeKindResourceType(resourceType string) bool {
+	switch resourceType {
+	case permissions.ResourceSkill, permissions.ResourceTemplate, permissions.ResourceHarnessConfig:
+		return true
+	default:
+		return false
+	}
+}
+
+// isRecognizedScopeKindValue reports whether scopeKind is a value
+// ResolveTargetScope understands for a resource type with reviewed
+// scope-kind semantics. Empty means "not supplied" — not itself a
+// contradiction; any other unrecognized value is.
+func isRecognizedScopeKindValue(scopeKind string) bool {
+	switch scopeKind {
+	case "", store.SkillScopeProject, store.SkillScopeGlobal, store.SkillScopeCore, store.SkillScopeUser:
+		return true
+	default:
+		return false
+	}
+}
+
 func hasReviewedGlobalScopeKind(resourceType, scopeKind string) bool {
 	switch resourceType {
 	case permissions.ResourceSkill, permissions.ResourceTemplate, permissions.ResourceHarnessConfig:

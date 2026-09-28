@@ -1405,3 +1405,88 @@ func TestValidRealProjectScopeKinds_MaterialTypesRegistered(t *testing.T) {
 		}
 	}
 }
+
+// --- R1 round 4: real-route review corrections + supplied-unknown-metadata coherence ---
+
+func TestResolveTargetScope_RoleBindingReadIsHubOnly(t *testing.T) {
+	// handleAdminRoleBindings authorizes GET (list) against a hard-coded
+	// Resource{Type:"role_binding", ID:"hub"} regardless of the bindings'
+	// own scope -- role_binding.read is Hub-only for collection purposes.
+	hub := ResolveTargetScope(Resource{Type: "role_binding"}, TargetScopeEvidence{
+		IsCollectionLevel: true, CollectionScope: TargetScopeHub, PermissionID: "role_binding.read",
+	})
+	if hub.Kind != TargetScopeHub {
+		t.Errorf("role_binding.read Hub collection evidence: got %+v, want Hub", hub)
+	}
+	proj := ResolveTargetScope(Resource{Type: "role_binding"}, TargetScopeEvidence{
+		IsCollectionLevel: true, CollectionScope: TargetScopeProject, CollectionProjectID: "p1", PermissionID: "role_binding.read",
+	})
+	if proj.Kind != TargetScopeUnknown {
+		t.Errorf("role_binding.read Project collection evidence must resolve Unknown (Hub-only): got %+v", proj)
+	}
+}
+
+func TestResolveTargetScope_AccessConstraintAdminIsHubOnly(t *testing.T) {
+	// requireConstraintAdminPermission authorizes against a hard-coded
+	// Resource{Type:"access_constraint", ID:"hub"} regardless of the
+	// constraint record's own ScopeType.
+	hub := ResolveTargetScope(Resource{Type: "access_constraint"}, TargetScopeEvidence{
+		IsCollectionLevel: true, CollectionScope: TargetScopeHub, PermissionID: "access_constraint.admin",
+	})
+	if hub.Kind != TargetScopeHub {
+		t.Errorf("access_constraint.admin Hub collection evidence: got %+v, want Hub", hub)
+	}
+}
+
+func TestResolveTargetScope_GCPServiceAccountAssignIsProjectScoped(t *testing.T) {
+	// sa_assign_gate.go authorizes assign in the context of the agent being
+	// created/patched -- a genuinely project-scoped operation, despite
+	// CapabilityKind=Resource.
+	got := ResolveTargetScope(Resource{Type: "gcp_service_account"}, TargetScopeEvidence{
+		IsCollectionLevel: true, CollectionScope: TargetScopeProject, CollectionProjectID: "p1", PermissionID: "gcp_service_account.assign",
+	})
+	if got.Kind != TargetScopeProject || got.ProjectID != "p1" {
+		t.Errorf("gcp_service_account.assign Project collection evidence: got %+v, want Project/p1", got)
+	}
+}
+
+func TestResolveTargetScope_UnrecognizedParentTypeIsUnknown(t *testing.T) {
+	got := ResolveTargetScope(Resource{Type: "agent", ParentType: "bogus", ParentID: "p1"}, TargetScopeEvidence{})
+	if got.Kind != TargetScopeUnknown {
+		t.Errorf("unrecognized ParentType must resolve Unknown (contradiction, not absent): got %+v", got)
+	}
+}
+
+func TestResolveTargetScope_OrphanParentIDIsUnknown(t *testing.T) {
+	// ParentID set with no declared ParentType is a malformed fact, not "no
+	// parent claim."
+	got := ResolveTargetScope(Resource{Type: "agent", ParentID: "p1"}, TargetScopeEvidence{})
+	if got.Kind != TargetScopeUnknown {
+		t.Errorf("orphan ParentID with blank ParentType must resolve Unknown: got %+v", got)
+	}
+}
+
+func TestResolveTargetScope_UnrecognizedScopeKindIsUnknown(t *testing.T) {
+	got := ResolveTargetScope(Resource{Type: "skill", ScopeKind: "bogus"}, TargetScopeEvidence{})
+	if got.Kind != TargetScopeUnknown {
+		t.Errorf("unrecognized ScopeKind on a reviewed-scope-kind type must resolve Unknown: got %+v", got)
+	}
+}
+
+func TestResolveTargetScope_ExistingProjectStillCoherentAfterValidation(t *testing.T) {
+	// The simple, coherent existing-project case must still work after the
+	// supplied-fact coherence check runs first.
+	got := ResolveTargetScope(Resource{Type: "project", ID: "p1"}, TargetScopeEvidence{})
+	if got.Kind != TargetScopeProject || got.ProjectID != "p1" {
+		t.Errorf("coherent existing project must still resolve Project/p1: got %+v", got)
+	}
+}
+
+func TestResolveTargetScope_CollectionEvidenceUnrecognizedParentTypeIsUnknown(t *testing.T) {
+	got := ResolveTargetScope(Resource{Type: "agent", ParentType: "bogus"}, TargetScopeEvidence{
+		IsCollectionLevel: true, CollectionScope: TargetScopeProject, CollectionProjectID: "p1", PermissionID: "agent.create",
+	})
+	if got.Kind != TargetScopeUnknown {
+		t.Errorf("collection evidence with an unrecognized ParentType must resolve Unknown: got %+v", got)
+	}
+}

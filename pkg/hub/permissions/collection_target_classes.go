@@ -42,17 +42,36 @@ package permissions
 // distinctly here because they are reviewed differently: "not yet reviewed"
 // vs. "reviewed and confirmed never collection-level."
 //
-// The instance-only/collection-capable split below is drawn from each
-// permission's OWN existing, independently authored Permission.CapabilityKind
-// field (CapabilityScope = applies to a collection/scope, CapabilityResource
-// or unset = applies to one individual, already-existing resource) — not a
-// new inference invented for this table, but the same distinction
-// Permission.CapabilityKind's own doc comment already declares. Every
-// CapabilityScope permission below is then hand-reviewed for WHICH
-// classes it supports (ProjectScoped / GlobalCatalog / HubResource), the
-// same way ProjectTargetApplicability/PermissionAllowedBoundaries/
-// SupportedTargetClasses were reviewed; the three tables remain
-// independently maintained.
+// Reviewed against ACTUAL live routes and handlers, not inferred from
+// Permission.CapabilityKind (pat-refactor correction, 2026-09-28):
+// CapabilityKind records whether a permission conceptually applies to an
+// individual resource or a collection/scope, but it is not a collection-route
+// inventory and cannot decide these rows by itself — concrete
+// counterexamples found during this review: `handlers_roles.go`'s GET
+// role-bindings list and POST role-binding create both authorize against a
+// hard-coded `Resource{Type:"role_binding", ID:"hub"}` regardless of
+// whether the binding being listed/created is project- or system-scoped
+// (`role_binding.read`/`role_binding.create` are Hub-only in practice, not
+// ProjectScoped, despite CapabilityKind=Scope suggesting otherwise);
+// `handlers_access_constraints.go`'s admin actions authorize the same way
+// against `Resource{Type:"access_constraint", ID:"hub"}` regardless of the
+// constraint record's own ScopeType (`access_constraint.admin`/`.read` are
+// also Hub-only, even though a constraint RECORD can have ScopeType=project
+// — administering constraints is a hub-level permission, independent of
+// which scope a given constraint governs); `handlers_quota.go`'s
+// create/update/delete all authorize against `Resource{Type:"quota",
+// ID:"hub"}` (confirmed HubResource, as already reviewed). Conversely,
+// `gcp_service_account.assign` (`sa_assign_gate.go`, invoked from
+// `handlers_agents_core.go` during agent create/patch) authorizes in the
+// context of the agent being created/patched — a genuinely project-scoped
+// operation — confirming ProjectScoped despite CapabilityKind=Resource.
+// CapabilityKind remains a useful STARTING heuristic for which permissions
+// are instance-only (single-resource) actions that can never be
+// collection-level at all (agent.attach/delete/token_refresh, etc. — no
+// route ever authorizes these except against a specific existing
+// resource), but every CapabilityScope-or-otherwise-collection-shaped
+// entry below is checked against its actual authorization call site before
+// being assigned a non-empty class set.
 var CollectionTargetClasses = map[string][]TargetClassKind{
 	// agent.* — create/list/stop_all/message are CapabilityScope (no
 	// existing instance targeted); every other agent.* permission is
@@ -118,14 +137,16 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	"broker.update": {}, "broker.delete": {},
 	"broker.list": {TargetClassKindHubResource}, "broker.dispatch": {},
 
-	// gcp_service_account.* — create/list/mint are CapabilityScope; read/
-	// delete/verify/assign are CapabilityResource (assign targets an
-	// EXISTING GCP service account AND an existing agent — reviewed down
-	// from an earlier, incorrect classification).
+	// gcp_service_account.* — create/list/mint are CapabilityScope, hub-wide.
+	// assign is CapabilityResource by field, but its actual authorization
+	// call site (sa_assign_gate.go, invoked from handlers_agents_core.go
+	// during agent create/patch) runs in the context of the agent being
+	// created/patched — a genuinely project-scoped operation. Reviewed
+	// ProjectScoped against that real call site, not CapabilityKind.
 	"gcp_service_account.create": {TargetClassKindHubResource},
 	"gcp_service_account.read": {}, "gcp_service_account.delete": {},
 	"gcp_service_account.list": {TargetClassKindHubResource},
-	"gcp_service_account.verify": {}, "gcp_service_account.assign": {},
+	"gcp_service_account.verify": {}, "gcp_service_account.assign": {TargetClassKindProjectScoped},
 	"gcp_service_account.mint": {TargetClassKindHubResource},
 
 	// hub.* — every entry is CapabilityScope (there is no per-instance
@@ -154,15 +175,37 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	// role.* — role DEFINITIONS: every entry is CapabilityScope (hub-wide).
 	"role.read": {TargetClassKindHubResource}, "role.create": {TargetClassKindHubResource},
 	"role.update": {TargetClassKindHubResource}, "role.delete": {TargetClassKindHubResource},
-	// role_binding.* — all three are CapabilityScope per the registry's own
-	// existing modeling; a binding's scope can be a project.
-	"role_binding.read": {TargetClassKindProjectScoped}, "role_binding.create": {TargetClassKindProjectScoped},
-	"role_binding.delete": {TargetClassKindProjectScoped},
+	// role_binding.* — reviewed against handlers_roles.go's actual
+	// authorization call sites, not CapabilityKind (both are Scope, which
+	// would incorrectly suggest ProjectScoped): handleAdminRoleBindings's
+	// GET (list) authorizes role_binding.read against a hard-coded
+	// Resource{Type:"role_binding", ID:"hub"} UNCONDITIONALLY — regardless
+	// of whether the bindings being listed are project- or system-scoped —
+	// so role_binding.read is Hub-only for collection purposes.
+	// createRoleBindingScopeAware's POST authorizes role_binding.create the
+	// same way ONLY for system-scoped requests; a project-scoped POST
+	// defers entirely to project.manage instead (a different permission),
+	// so role_binding.create itself is also only ever evaluated at Hub
+	// scope. role_binding.delete's handler
+	// (requireWritePermissionForRoleBinding) authorizes against the same
+	// hard-coded hub-scope Resource regardless of the target binding's
+	// scope, and always targets an existing binding by ID — reviewed empty
+	// (never a collection-level evidence case; enforced via a fixed
+	// hub-scope gate in the handler, not per-instance/per-collection
+	// resolution).
+	"role_binding.read": {TargetClassKindHubResource}, "role_binding.create": {TargetClassKindHubResource},
+	"role_binding.delete": {},
 
-	// access_constraint.* — both CapabilityScope; a constraint's scope can
-	// be a project.
-	"access_constraint.admin": {TargetClassKindProjectScoped},
-	"access_constraint.read":  {TargetClassKindProjectScoped},
+	// access_constraint.* — reviewed against handlers_access_constraints.go:
+	// requireConstraintAdminPermission (create/update/delete/preview) and
+	// the read path both authorize against a hard-coded
+	// Resource{Type:"access_constraint", ID:"hub"} regardless of the
+	// CONSTRAINT RECORD's own ScopeType (a constraint's data can be
+	// project-scoped, but administering/reading constraints is itself a
+	// hub-level permission). Hub-only for collection purposes, not
+	// ProjectScoped.
+	"access_constraint.admin": {TargetClassKindHubResource},
+	"access_constraint.read":  {TargetClassKindHubResource},
 
 	// scheduled_event.* — list/create are CapabilityScope; read/delete/
 	// update target an existing scheduled event.
