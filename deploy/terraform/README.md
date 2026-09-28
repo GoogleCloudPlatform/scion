@@ -110,6 +110,76 @@ admin API/CLI, not a file Terraform renders, and this Terraform module set
 makes no `local-exec` calls, so it cannot run this step for you. Set it once
 per hub, right after that hub's first apply.
 
+### GCP identity for agents
+
+Getting `GOOGLE_CLOUD_PROJECT`/`GOOGLE_CLOUD_REGION` set is not enough on
+its own for an agent to authenticate to Vertex. This module (`hub-identity`,
+`agent-runtime-k8s`) wires Workload Identity so the namespace's `default`
+KSA maps to the `<hub>-agent` service account, which holds
+`roles/aiplatform.user` by default. But a **new agent's GCP identity
+defaults to Block** — the metadata server is blocked, no identity is
+reachable, and the agent comes up unauthenticated to Vertex even though the
+Workload Identity binding above is fully in place.
+
+The setting to change is the agent's **GCP Identity** field (agent create/
+configure), or a project's **Default Service Account** field (project
+settings), which sets the default new agents in that project pick up. Both
+expose the same three modes; the labels differ slightly by page: the
+per-agent field offers **Block**, **Assign Service Account**, and
+**Passthrough**; the project-level field offers **Block**, **Passthrough**,
+and **Assign Service Account** (plus an inherited "None (default to
+block)"). To let the Workload Identity binding actually reach the agent,
+set **Passthrough** — it removes the metadata-server interception so the
+agent inherits the broker's ambient GCP identity instead of being denied
+one. See ptone/scion#2009 for the default-block behavior this addresses.
+
+Passthrough only gets the agent an identity; it does not itself grant
+access to a model. The model(s) an agent will call must also be enabled
+for the project in Vertex AI Model Garden — that enablement is a
+per-project step outside this Terraform.
+
+## Harness images
+
+Agents pull `<image_registry>/scion-<harness>:<tag>` (`image_registry` is
+this module's variable of that name — see `configurations/hub/
+variables.tf`). The set of harnesses a user can pick is the `harnesses/`
+directory in the repo root, mirrored for the UI's fallback list in
+`web/src/shared/harness-utils.ts`'s `KNOWN_HARNESS_NAMES`: at the time of
+writing, `claude`, `codex`, `copilot`, `gemini-cli`, `opencode`,
+`antigravity`, `hermes`, `grok-build`, and `muse-code`.
+
+The image pipeline (`image-build/`) must publish an image for every one of
+those harnesses into whatever registry `image_registry` points at — at
+minimum `core-base`, `scion-base`, and each `scion-<harness>` (e.g.
+`scion-claude`). A harness that exists in the catalog and is selectable in
+the UI but has no published image builds an agent record fine and then
+fails at pod start: the `workspace-provision` init container hits an
+image-pull `NotFound` for that harness's image. `muse-code` is an example
+of the gap today — it has a `harnesses/muse-code/config.yaml` and is listed
+in `KNOWN_HARNESS_NAMES`, but `image-build/cloudbuild-harnesses.yaml` does
+not build it. Check the harness catalog against
+`cloudbuild-harnesses.yaml`'s build steps before offering a harness, and
+whenever either list changes.
+
+## Cold start
+
+Agent create is synchronous upstream: the hub waits for the create to
+actually finish before responding. On a fresh GKE Autopilot node, the
+first agent pays for node provisioning plus pulling a roughly 1 GB harness
+image, and that combined wait can exceed the hub's own client timeout for
+calls to the runtime broker, which is hard-coded upstream (not a
+Terraform variable, not in `settings.yaml`). When that happens the UI
+shows a 503 even though the agent goes on to start moments later.
+Subsequent agents on an already-warm node skip both costs and comfortably
+finish inside the timeout.
+
+This module raises the hub's own write timeouts (`hub_write_timeout`,
+`broker_write_timeout` — see `modules/hub-cloudrun/variables.tf`) so the
+hub's HTTP server itself no longer cuts a slow create off early. The
+remaining limit — the hub-to-runtime-broker client timeout — is upstream
+Go code this Terraform cannot reach; the durable fix is making agent
+create asynchronous upstream, not a larger value here.
+
 ## IAP OAuth client
 
 `iap_enabled = true` on the Cloud Run service turns on direct IAP using the
@@ -447,6 +517,16 @@ the built-in 120s guard (`time_sleep.hub_iam_propagation`) to become
 consistent. **Re-apply** — do not widen the IAM condition to work around it.
 Widening it is exactly the mistake this whole scoping exercise exists to
 prevent (see hub-identity's IAM scope rule comment).
+
+- **An agent starts but can't reach Vertex, despite Workload Identity being
+  wired** — its GCP identity is probably still Block. See "GCP identity for
+  agents" above.
+- **An agent's pod fails to start with an image-pull `NotFound` on
+  `workspace-provision`** — the harness image isn't published to the
+  registry `image_registry` points at. See "Harness images" above.
+- **Agent create returns a 503 even though the agent goes on to start** —
+  likely a cold Autopilot node exceeding the hub's upstream client timeout,
+  not a real failure. See "Cold start" above.
 
 ## What's not here yet
 
