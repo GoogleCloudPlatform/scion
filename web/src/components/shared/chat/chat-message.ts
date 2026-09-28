@@ -1229,6 +1229,17 @@ export class ScionChatMessage extends LitElement {
       color: var(--scion-danger-600, #dc2626);
     }
 
+    /* F5 (p2a-r2 review): deferred (design agent-reincarnate §3.7) —
+       distinct from failed (not an error) and from pending (not a normal
+       in-flight send); a warning-toned, not danger-toned, indicator. */
+    .delivery-state.deferred {
+      color: var(--scion-warning-600, #d97706);
+    }
+
+    .delivery-state.deferred sl-icon {
+      color: var(--scion-warning-600, #d97706);
+    }
+
     /* ---- Phase-3: Message action bar ---- */
     .message-actions {
       position: absolute;
@@ -1938,6 +1949,21 @@ export class ScionChatMessage extends LitElement {
                 Delivered
               </div>
             `;
+      case 'deferred':
+        // F5 (p2a-r2 review): design agent-reincarnate §3.7 — the
+        // recipient is mid-`scion reincarnate`. The message was saved to
+        // history for catch-up, not dropped and not yet dispatched.
+        // Distinct from "failed" (no icon/wording overlap) and from
+        // "pending" (that's a normal in-flight send, this is a deliberate
+        // hold).
+        return html`
+          <sl-tooltip content="Agent is reincarnating; message saved and will be seen on catch-up" hoist>
+            <div class="delivery-state deferred">
+              <sl-icon name="pause-circle"></sl-icon>
+              Deferred: agent is reincarnating (saved)
+            </div>
+          </sl-tooltip>
+        `;
       case 'failed': {
         // nc-delivery-unreachable: distinguish "the agent can't receive this
         // at all" from a generic dispatch failure. Prefer the machine-readable
