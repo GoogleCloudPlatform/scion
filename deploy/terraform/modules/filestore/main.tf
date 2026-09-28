@@ -11,7 +11,7 @@ resource "google_filestore_instance" "this" {
   tier     = var.tier
 
   deletion_protection_enabled = var.deletion_protection
-  deletion_protection_reason  = var.deletion_protection ? "Shared Filestore instance; hubs read it via shared-lookup. Set deletion_protection = false to allow destroying it." : null
+  deletion_protection_reason  = var.deletion_protection ? "Shared Filestore instance; hubs read it via shared-lookup. Flip deletion_protection to destroy (design §3.10)." : null
 
   file_shares {
     capacity_gb = var.capacity_gb
