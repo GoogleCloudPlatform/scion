@@ -4,6 +4,18 @@
 resource "random_password" "db" {
   length  = 32
   special = false
+
+  # F-115 rotation design (12:35Z): var.password_rotation defaults to "",
+  # which keeps keepers null — a null-to-null comparison on every plan
+  # against existing state, so the default is a no-op. Setting
+  # password_rotation to any new value (e.g. a date) changes the keepers
+  # map, which replaces this resource and cascades: sql_user password
+  # update, then CBD-replaced db_password/db_dsn secret versions, then a
+  # new hub revision (see the lifecycle blocks below and the module
+  # README/runbook comment).
+  keepers = var.password_rotation == "" ? null : {
+    rotation = var.password_rotation
+  }
 }
 
 resource "google_sql_database" "this" {
@@ -33,6 +45,17 @@ resource "google_secret_manager_secret" "db_password" {
 resource "google_secret_manager_secret_version" "db_password" {
   secret      = google_secret_manager_secret.db_password.id
   secret_data = random_password.db.result
+
+  # F-115 rotation design (12:35Z): secret_data changing always forces a
+  # replace (Secret Manager versions are add-only), and without
+  # create_before_destroy the default destroy-then-create order would
+  # delete this version before the replacement exists. CBD makes the new
+  # version exist first, so the running revision never references a
+  # destroyed version mid-apply (same reasoning as hub-cloudrun's F-107
+  # settings-secret lifecycle block).
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 
@@ -73,4 +96,27 @@ resource "google_secret_manager_secret" "db_dsn" {
 resource "google_secret_manager_secret_version" "db_dsn" {
   secret      = google_secret_manager_secret.db_dsn.id
   secret_data = "postgres://${google_sql_user.this.name}:${urlencode(random_password.db.result)}@/${google_sql_database.this.name}?host=/cloudsql/${var.sql_connection_name}"
+
+  # F-115 rotation design (12:35Z): same reasoning as db_password above —
+  # CBD keeps this DSN version alive (and the running revision's pinned
+  # secret env var valid) until the replacement version exists.
+  lifecycle {
+    create_before_destroy = true
+  }
 }
+
+# --- F-115 password rotation runbook ---
+#
+# To rotate this hub's DB password: set -var password_rotation=<new value>
+# (e.g. a date) on this module, wired from the hub root's
+# db_password_rotation variable, and apply. Apply order per hub:
+#   random_password.db replace
+#     -> google_sql_user.this password update (in place)
+#     -> google_secret_manager_secret_version.db_password/db_dsn CBD-replaced
+#     -> hub-cloudrun's Cloud Run service picks up the new pinned dsn
+#        secret version and rolls a new revision
+#     -> the old secret versions are then destroyed
+# Expected per hub: 3 add / 2 change / 3 destroy (random_password.db is
+# state-only). Known window: from the sql_user password update until the
+# new revision is Ready, the old revision's *new* DB connections fail,
+# while its existing pooled connections survive.

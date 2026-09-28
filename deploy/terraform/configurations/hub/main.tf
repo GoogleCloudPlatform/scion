@@ -66,6 +66,7 @@ module "cloudsql_database" {
   hub_name            = var.hub_name
   hub_sa_email        = module.hub_identity.hub_sa_email
   sql_connection_name = module.shared_lookup.shared.sql.connection_name
+  password_rotation   = var.db_password_rotation
 }
 
 module "hub_identity" {

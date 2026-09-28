@@ -19,6 +19,11 @@ hub_image = "us-central1-docker.pkg.dev/ptone-emblem/tfha-scion/hub:latest"
 # disabled until this is set.
 # iap_oauth_client_id = "REPLACE_ME.apps.googleusercontent.com"
 
+# Optional — leave unset (default "") for normal applies. Set to any new
+# value (e.g. a date) only when rotating this hub's DB password; see the
+# README's "Rotating a hub's DB password" section (F-115 rotation design).
+# db_password_rotation = "REPLACE_ME_WITH_ROTATION_MARKER"
+
 iap_members  = []
 admin_emails = []
 

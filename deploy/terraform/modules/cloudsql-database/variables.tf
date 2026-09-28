@@ -33,3 +33,9 @@ variable "sql_connection_name" {
   description = "Cloud SQL connection name (shared.sql.connection_name from shared-lookup), used to build the DSN's ?host=/cloudsql/<connection name> suffix (Alt-F, design §6 OQ-11)."
   type        = string
 }
+
+variable "password_rotation" {
+  description = "F-115 rotation design (12:35Z): set to any new value (e.g. a date, \"2026-09-28\") to rotate the password; changing it replaces the password, updates the SQL user, writes new secret versions and rolls a new hub revision. Default \"\" is a no-op for existing state (random_password.db's keepers stay null, so no diff)."
+  type        = string
+  default     = ""
+}

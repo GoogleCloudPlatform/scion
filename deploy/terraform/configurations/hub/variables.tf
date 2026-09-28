@@ -59,6 +59,12 @@ variable "hub_name" {
   }
 }
 
+variable "db_password_rotation" {
+  description = "F-115 rotation design (12:35Z): passed through to cloudsql-database's password_rotation. Set to any new value (e.g. a date) to rotate this hub's DB password; changing it replaces the password, updates the SQL user, writes new secret versions and rolls a new hub revision. Default \"\" is a no-op for existing state. See the README's \"Rotating a hub's DB password\" section."
+  type        = string
+  default     = ""
+}
+
 variable "hub_image" {
   description = "Artifact Registry image URI for the hub container (built and pushed after the shared-infra apply creates the repo)."
   type        = string

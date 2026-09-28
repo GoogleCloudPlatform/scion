@@ -241,6 +241,34 @@ operator SA has today) can delete `tfha-agents` out-of-band regardless of
 any of this. Both are recorded as residual risk in the design doc §9, not
 omissions.
 
+## Rotating a hub's DB password
+
+F-115 rotation design (12:35Z): `cloudsql-database` has no imperative
+`-replace` step for rotating a hub's database password. Set
+`db_password_rotation` to any new value (e.g. a date, `"2026-09-28"`) on the
+`hub` root and apply:
+
+```bash
+terraform -chdir=deploy/terraform/configurations/hub apply \
+  -var hub_name=<hub_name> -var state_prefix=<prefix>/hubs/<hub_name> \
+  -var-file=<hub_name>.tfvars \
+  -var db_password_rotation=<new value>
+```
+
+The default `""` is a no-op — `random_password.db`'s `keepers` stay `null`,
+so a plan against existing state with the default shows no diff. Changing
+the value replaces the password and cascades: `google_sql_user` password
+update, then the `db_password`/`db_dsn` secret versions are
+create-before-destroy replaced, then `hub-cloudrun`'s Cloud Run service
+picks up the new pinned DSN secret version and rolls a new revision, and
+only then are the old secret versions destroyed. Expected per hub: 3 add / 2
+change / 3 destroy (`random_password.db` is state-only) — review the plan's
+per-resource acks before applying.
+
+**Known window:** from the `google_sql_user` password update until the new
+revision is Ready, the old revision's *new* DB connections fail, while its
+existing pooled connections survive.
+
 ## Troubleshooting
 
 **A 403 on a secret named `scion-hub-<h12>-...` shortly after the first
