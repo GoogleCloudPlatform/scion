@@ -516,6 +516,41 @@ resource "google_cloud_run_v2_service" "hub" {
         timeout_seconds       = 3
         failure_threshold     = 30
       }
+
+      # Phase 2 hardening: liveness probe. Deliberately /healthz, NOT
+      # /readyz. route_metadata.go labels them explicitly
+      # ("/healthz": RouteID "health.liveness"; "/readyz": RouteID
+      # "health.readiness"), and handleHealthz (handlers_health.go) always
+      # answers 200 regardless of the database check's result — it only
+      # reports "degraded" in the JSON body — while handleReadyz 503s
+      # whenever store.Ping fails. A liveness probe on /readyz would let a
+      # transient Cloud SQL blip (a Postgres restart during the REGIONAL
+      # failover this same phase enables, a maintenance window, a brief
+      # connection-budget squeeze) fail liveness on every instance at once
+      # and have Cloud Run restart them all simultaneously — the exact
+      # thundering-herd this probe must not cause. The startup probe above
+      # stays on /readyz: the DB must be reachable before Cloud Run ever
+      # routes traffic to a fresh revision, but once serving, a DB blip
+      # should surface as readiness/error-rate, not a container restart.
+      #
+      # F-104 does not apply to probes the way it applies to volumes/
+      # volume_mounts: liveness_probe and startup_probe are each a single
+      # nested block in the provider schema (MaxItems: 1), not a list the
+      # API can reorder, so there is nothing for the provider to diff
+      # positionally. Confirmed against the pinned google-beta ~> 8.4
+      # schema (same source read for F-109's scaling-block check) — no
+      # list semantics apply here, and adding this second block does not
+      # reproduce F-104's drift.
+      liveness_probe {
+        http_get {
+          path = "/healthz"
+          port = 8080
+        }
+        initial_delay_seconds = 10
+        period_seconds        = 10
+        timeout_seconds       = 3
+        failure_threshold     = 3
+      }
     }
 
     volumes {
