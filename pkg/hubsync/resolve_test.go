@@ -200,7 +200,7 @@ func TestResolveProjectOnHub_ByGitURL(t *testing.T) {
 			if gitRemote != "" {
 				_ = json.NewEncoder(w).Encode(map[string]interface{}{
 					"projects": []hubclient.Project{
-						{ID: "git-grove-1", Name: "Git Project", Slug: "git-project"},
+						{ID: "git-project-1", Name: "Git Project", Slug: "git-project"},
 					},
 					"totalCount": 1,
 				})
@@ -221,7 +221,7 @@ func TestResolveProjectOnHub_ByGitURL(t *testing.T) {
 
 	project, err := resolveProjectOnHub(context.Background(), client, "https://github.com/org/repo.git")
 	require.NoError(t, err)
-	assert.Equal(t, "git-grove-1", project.ID)
+	assert.Equal(t, "git-project-1", project.ID)
 }
 
 func TestResolveProjectOnHub_NotFound(t *testing.T) {

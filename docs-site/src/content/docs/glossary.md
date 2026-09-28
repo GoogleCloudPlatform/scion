@@ -6,7 +6,7 @@ description: Standardized terminology for the Scion project.
 This glossary defines key terms used throughout the Scion documentation and ecosystem. It is a projection of the project's canonical [`GLOSSARY.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/GLOSSARY.md); when the two disagree, the root glossary wins.
 
 :::note[Two naming rules run throughout]
-- The concept formerly called *grove* is now **Project**.
+- The concept formerly called *grove* is now **Project**. See [Migrating from grove names](/scion/reference/grove-removal/) for what changed.
 - Bare **"broker"** is never used on its own — it is ambiguous across **Runtime Broker**, **Message Broker**, and the **Event Bus**, so it must always be qualified.
 :::
 

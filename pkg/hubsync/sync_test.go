@@ -1199,7 +1199,7 @@ hub:
   endpoint: https://hub.example.com
   brokerId: stale-broker-id
   brokerToken: stale-broker-token
-  groveId: my-grove
+  projectId: my-project
 `
 	if err := os.WriteFile(filepath.Join(tmpDir, "settings.yaml"), []byte(legacyContent), 0644); err != nil {
 		t.Fatal(err)
@@ -1224,8 +1224,8 @@ hub:
 	if !strings.Contains(content, "endpoint") {
 		t.Error("hub.endpoint should be preserved")
 	}
-	if !strings.Contains(content, "groveId") {
-		t.Error("hub.groveId should be preserved")
+	if !strings.Contains(content, "projectId") {
+		t.Error("hub.projectId should be preserved")
 	}
 }
 
@@ -1237,7 +1237,7 @@ func TestCleanupProjectBrokerCredentials_V1(t *testing.T) {
 active_profile: local
 hub:
   endpoint: https://hub.example.com
-  grove_id: my-grove
+  project_id: my-project
 server:
   broker:
     broker_id: stale-broker-id
@@ -1287,7 +1287,7 @@ func TestCleanupProjectBrokerCredentials_V1_NoBrokerCreds(t *testing.T) {
 active_profile: local
 hub:
   endpoint: https://hub.example.com
-  grove_id: my-grove
+  project_id: my-project
 `
 	if err := os.WriteFile(filepath.Join(tmpDir, "settings.yaml"), []byte(v1Content), 0644); err != nil {
 		t.Fatal(err)

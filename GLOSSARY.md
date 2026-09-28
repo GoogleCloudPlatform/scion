@@ -2,7 +2,7 @@
 
 Scion is a container-based orchestration platform for running multiple LLM "deep agents" concurrently, each isolated in its own container, workspace, and credentials. This document fixes the preferred term for each domain concept so that code, docs, UI, and prompts share one vocabulary.
 
-> Two naming rules run throughout: the concept formerly called *grove* is now **project**, and bare **"broker"** is never used on its own — it is ambiguous across three distinct concepts (**Runtime Broker**, **Message Broker**, and the **Event Bus**), so it must always be qualified (see the disambiguation rule under [Hub & Hosted](#hub--hosted)). The codebase does not yet fully match either rule; the known gaps are tracked as GitHub issues.
+> Two naming rules run throughout: the concept formerly called *grove* is now **project** (see `docs-site/src/content/docs/reference/grove-removal.md` for what changed), and bare **"broker"** is never used on its own — it is ambiguous across three distinct concepts (**Runtime Broker**, **Message Broker**, and the **Event Bus**), so it must always be qualified (see the disambiguation rule under [Hub & Hosted](#hub--hosted)). The codebase does not yet fully match either rule; the known gaps are tracked as GitHub issues.
 
 ## Orchestration
 
