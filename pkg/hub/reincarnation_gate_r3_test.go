@@ -146,6 +146,9 @@ func TestProcessMentions_O2_DeferredMentionDMResolutionFailure(t *testing.T) {
 	res := srv.processMentions(mctx, []string{mentioned.Slug}, primary, orig, "")
 	require.Len(t, res, 1)
 	assert.Equal(t, "error", res[0].Status)
+	// O-a (p2a-r4 review): pin that this "error" specifically came from the
+	// DM-resolution branch, not some other error path in the loop.
+	assert.Contains(t, res[0].Error, "catch-up conversation")
 
 	rows, err := s.ListMessages(context.Background(), store.MessageFilter{AgentID: mentioned.ID}, store.ListOptions{})
 	require.NoError(t, err)
@@ -204,9 +207,14 @@ func TestProcessMentions_O2_DeferredMentionAgentSenderDM(t *testing.T) {
 // TestProcessMentions_O2_DeferredMentionBrokerSender is the reviewer's
 // TestRev2a3Repro_DeferredMentionBrokerSender: a sender identity that is
 // neither a user nor an agent (e.g. a broker) must never be reported
-// "deferred" for a mention, even though it slips past the DM-linkage
-// happy path — the authID=="" guard (handlers_agent_messaging.go) exists
-// for exactly this case.
+// "deferred" for a mention. N1 (p2a-r4 review): a broker identity is
+// actually denied by authorizeAgentMessage before the migration gate is
+// ever reached — the defensive `authID == ""` guard in processMentions
+// (handlers_agent_messaging.go) is currently unreachable by this path, not
+// exercised by it. The assertion is tightened to the exact observed
+// status so a future authz change that lets brokers reach the gate is
+// noticed (rather than this test silently continuing to pass on some
+// other non-"deferred" status).
 func TestProcessMentions_O2_DeferredMentionBrokerSender(t *testing.T) {
 	srv, _, primary, mentioned, _ := rev2MentionSetup(t)
 	bctx := contextWithBrokerIdentity(context.Background(), NewBrokerIdentity(primary.RuntimeBrokerID))
@@ -214,6 +222,6 @@ func TestProcessMentions_O2_DeferredMentionBrokerSender(t *testing.T) {
 
 	res := srv.processMentions(bctx, []string{mentioned.Slug}, primary, orig, "")
 	require.Len(t, res, 1)
-	assert.NotEqual(t, "deferred", res[0].Status,
-		"a non-user, non-agent sender must never be told a mention was saved for catch-up")
+	assert.Equal(t, "unauthorized", res[0].Status,
+		"a broker sender is denied by authz before the migration gate, not by the authID==\"\" guard")
 }
