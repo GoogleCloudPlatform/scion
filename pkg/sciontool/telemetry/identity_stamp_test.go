@@ -55,7 +55,7 @@ func genericIdentityTestResource() *metricpb.ResourceMetrics {
 	}
 }
 
-// TestGenericOTLPIdentityStampingCoversEveryPointKind is F4/F5: the generic
+// TestGenericOTLPIdentityStampingCoversEveryPointKind pins that the generic
 // OTLP path must stamp scion_agent_id/scion_project_id/scion_agent_slug on
 // every exported metric point kind (AC-1.1b "every exported metric point"),
 // not only Sum/Gauge/Histogram — ExponentialHistogram and Summary too.
@@ -151,23 +151,22 @@ func TestGenericOTLPIdentityStampingToleratesNilDataPoint(t *testing.T) {
 	}
 }
 
-// TestReservedIdentityPointLabelRejectedAtAdmissionBothPaths is F3+F4: a
+// TestReservedIdentityPointLabelRejectedAtAdmissionBothPaths pins that a
 // producer-supplied value for any of the three exporter-reserved identity
 // labels must be rejected where the point is admitted (metricStreams.add),
 // on both the GCP and the generic OTLP path — not deferred to export time,
-// where a single offending point would otherwise poison the whole batch
-// (F3).
+// where a single offending point would otherwise poison the whole batch.
 //
 // Each reserved key is tried under its canonical (underscore) spelling and
-// the dotted/dashed variants cloudLabelKey normalizes to the same key
-// (round-3 review N4): the GCP path already rejects those via
-// validateDescriptor's use of cloudLabelKey, and
-// rejectReservedIdentityPointLabel now does the same for the generic path,
-// closing a gap where a producer label like scion.agent.id could otherwise
-// collide with the stamped scion_agent_id after a backend's own
-// dot-to-underscore translation (for example Prometheus/Mimir).
+// the dotted/dashed variants cloudLabelKey normalizes to the same key: the
+// GCP path already rejects those via validateDescriptor's use of
+// cloudLabelKey, and rejectReservedIdentityPointLabel now does the same for
+// the generic path, closing a gap where a producer label like
+// scion.agent.id could otherwise collide with the stamped scion_agent_id
+// after a backend's own dot-to-underscore translation (for example
+// Prometheus/Mimir).
 //
-// N5: the rejection reason must actually name the reserved-key check, not
+// The rejection reason must actually name the reserved-key check, not
 // merely be non-nil — a stray extra label would also be rejected on the GCP
 // path (as an unsupported dimension), which would let this test pass even
 // if the reserved-key check itself broke.

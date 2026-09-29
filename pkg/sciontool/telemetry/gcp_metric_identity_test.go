@@ -471,7 +471,7 @@ func usageTokensPoint(tokenType string) *metricpb.ResourceMetrics {
 	return testMetricResource("sciontool", usageMetricScope, "", "usage", metric)
 }
 
-// TestUsageTokensClosedEnumEnforcedAtGCPAdmission is F2: token_type is a
+// TestUsageTokensClosedEnumEnforcedAtGCPAdmission pins that token_type is a
 // closed enum (design §3.2, "Any other value is an admission error"), and it
 // must be enforced where the point is admitted, not merely by the deriver's
 // own producer code.
@@ -492,12 +492,11 @@ func TestUsageTokensClosedEnumEnforcedAtGCPAdmission(t *testing.T) {
 	}
 }
 
-// TestUsageTokensClosedEnumEnforcedOnGenericOTLPAdmission is round-2 FYI-4:
-// the contract's closed token_type enum ("Any other value is an admission
-// error") was enforced only on the GCP path; the generic OTLP path forwarded
-// any value unchecked. usageTokensPoint's shape admits on the generic path
-// too (it carries no GCP-only fields), so it can be reused directly with
-// s.gcp left false.
+// TestUsageTokensClosedEnumEnforcedOnGenericOTLPAdmission pins that the
+// contract's closed token_type enum (design §3.2, "Any other value is an
+// admission error") is enforced on the generic OTLP path too, not only GCP.
+// usageTokensPoint's shape admits on the generic path too (it carries no
+// GCP-only fields), so it can be reused directly with s.gcp left false.
 func TestUsageTokensClosedEnumEnforcedOnGenericOTLPAdmission(t *testing.T) {
 	for _, tokenType := range telemetrycontract.TokenTypes {
 		s := newMetricStreams()
@@ -508,15 +507,14 @@ func TestUsageTokensClosedEnumEnforcedOnGenericOTLPAdmission(t *testing.T) {
 	for _, bad := range []string{"", "bogus", "INPUT", "input "} {
 		s := newMetricStreams()
 		if err := s.add([]*metricpb.ResourceMetrics{usageTokensPoint(bad)}); err == nil {
-			t.Fatalf("token_type=%q was admitted on the generic OTLP path, want rejection (closed enum, FYI-4)", bad)
+			t.Fatalf("token_type=%q was admitted on the generic OTLP path, want rejection (closed enum)", bad)
 		}
 	}
 }
 
-// TestTokenTypeLabelRestrictedToUsageTokensMetric is the second half of F2:
-// token_type is meaningful only on scion.usage.tokens. cloudPointFieldsFor
-// must not let it slip onto any other reserved counter, such as
-// gen_ai.api.calls.
+// TestTokenTypeLabelRestrictedToUsageTokensMetric pins that token_type is
+// meaningful only on scion.usage.tokens. cloudPointFieldsFor must not let it
+// slip onto any other reserved counter, such as gen_ai.api.calls.
 func TestTokenTypeLabelRestrictedToUsageTokensMetric(t *testing.T) {
 	metric := testNumber(telemetrycontract.MetricAPICalls, metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA, 1, 2, 1,
 		metricStringLabel("harness", "claude"), metricStringLabel("model", "claude-sonnet-5"),
@@ -527,6 +525,6 @@ func TestTokenTypeLabelRestrictedToUsageTokensMetric(t *testing.T) {
 	s := newMetricStreams()
 	s.gcp = true
 	if err := s.add([]*metricpb.ResourceMetrics{input}); err == nil {
-		t.Fatal("token_type on gen_ai.api.calls was admitted, want rejection (F2: restricted to scion.usage.tokens)")
+		t.Fatal("token_type on gen_ai.api.calls was admitted, want rejection (restricted to scion.usage.tokens)")
 	}
 }

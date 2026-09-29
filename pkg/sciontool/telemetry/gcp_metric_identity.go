@@ -31,13 +31,13 @@ var identityLabelKeys = []string{gcpAgentLabel, gcpProjectLabel, gcpAgentSlugLab
 
 // rejectReservedIdentityPointLabel enforces, at admission, that a producer
 // never sets one of the exporter-reserved canonical identity labels itself
-// (design D3/D7, F3). The GCP path already rejects these per point through
+// (design D3/D7). The GCP path already rejects these per point through
 // validateDescriptor/validateCloudIdentity; this is the same rule for the
 // generic OTLP path, which used to defer the check to export time
 // (stampIdentityLabels), too late to fail only the offending request rather
 // than poisoning the whole batch on a retry loop.
 //
-// Compares cloudLabelKey(kv.Key), not kv.Key directly (round-3 review N4):
+// Compares cloudLabelKey(kv.Key), not kv.Key directly:
 // the GCP path normalizes dots and dashes to underscores before comparing,
 // so a producer label spelled scion.agent.id or scion-agent-id is rejected
 // there too. Some generic-OTLP backends (for example a Prometheus/Mimir
@@ -69,7 +69,7 @@ var cloudResourceFields = map[string]bool{
 var cloudScopeFields = map[string]bool{"component": true, "scope.kind": true, "scope.variant": true}
 
 // cloudPointFields is the general point-label allowlist shared by every
-// reserved counter and hook metric except scion.usage.tokens (F2): token_type
+// reserved counter and hook metric except scion.usage.tokens: token_type
 // is a closed enum meaningful only on that one metric, so it is not a member
 // of this set. cloudPointFieldsFor routes scion.usage.tokens to
 // cloudUsageTokenFields instead.
@@ -80,7 +80,7 @@ var cloudPointFields = map[string]bool{
 }
 
 // cloudUsageTokenFields is the point-label allowlist for scion.usage.tokens
-// only (design §3.2, F2): harness and model as usual, plus the closed
+// only (design §3.2): harness and model as usual, plus the closed
 // token_type enum. checkTokenTypeField enforces the enum's membership; being
 // listed here only admits the label, it does not validate its value.
 var cloudUsageTokenFields = map[string]bool{
@@ -124,12 +124,12 @@ func checkTokenTypeField(kv *commonpb.KeyValue) error {
 	return nil
 }
 
-// checkUsageTokenTypeField enforces the same closed token_type enum on the
-// generic OTLP admission path (round-2 review FYI-4: "the contract says a
-// token_type outside the enum is an admission error", and that wasn't true
-// there — the generic path has no per-metric label allowlist to route
-// token_type's validation through the way cloudPointFieldsFor does for GCP,
-// so this checks it directly, scoped to scion.usage.tokens the same way).
+// checkUsageTokenTypeField enforces the same closed token_type enum (design
+// §3.2: "any other value is an admission error") on the generic OTLP
+// admission path: the generic path has no per-metric label allowlist to
+// route token_type's validation through the way cloudPointFieldsFor does
+// for GCP, so this checks it directly, scoped to scion.usage.tokens the
+// same way.
 func checkUsageTokenTypeField(metricName string, attrs []*commonpb.KeyValue) error {
 	if metricName != telemetrycontract.MetricUsageTokens {
 		return nil

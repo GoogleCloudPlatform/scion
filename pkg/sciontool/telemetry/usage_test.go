@@ -54,9 +54,9 @@ func loadClaudeUsageFixture(t *testing.T) []*logspb.ResourceLogs {
 }
 
 // mustEventName is normalizedLogEventName for tests that exercise
-// claudeUsageRule.MatchLog directly: since Nit-3 (round 2), MatchLog takes
-// the already-computed event name rather than deriving it itself, so tests
-// calling it directly compute it the same way observe() does.
+// claudeUsageRule.MatchLog directly: MatchLog takes the already-computed
+// event name rather than deriving it itself, so tests calling it directly
+// compute it the same way observe() does.
 func mustEventName(t *testing.T, record *logspb.LogRecord, scope string) string {
 	t.Helper()
 	name, err := normalizedLogEventName(record, scope)
@@ -162,8 +162,8 @@ func TestClaudeUsageRuleMalformedTokenField(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected a malformed-field error")
 	}
-	// F6(b): the call itself is still counted, with no tokens at all (not a
-	// partial total) for this event.
+	// The call itself is still counted, with no tokens at all (not a
+	// partial total) for this event (design §3.3).
 	if increment.Calls != 1 || increment.Status != telemetrycontract.StatusSuccess {
 		t.Fatalf("increment = %+v, want Calls=1 Status=success even when malformed", increment)
 	}
@@ -186,7 +186,7 @@ func TestClaudeUsageRuleNegativeTokenField(t *testing.T) {
 	}
 }
 
-// TestClaudeUsageRuleTokenFieldTypeTolerance pins F6(a): the fixture itself
+// TestClaudeUsageRuleTokenFieldTypeTolerance pins: the fixture itself
 // mixes value types across attributes on the same event, and an unpinned
 // CLI (harnesses/claude installs @latest) can change encodings across
 // releases. A string-encoded non-negative integer and an integral double
@@ -219,7 +219,7 @@ func TestClaudeUsageRuleFractionalDoubleTokenFieldIsMalformed(t *testing.T) {
 	}
 }
 
-// TestClaudeUsageRuleMatchesEventNameField pins F6(c): a native SDK may
+// TestClaudeUsageRuleMatchesEventNameField pins: a native SDK may
 // carry the event name in LogRecord's own EventName field instead of the
 // event.name attribute. The rule must recognize either.
 func TestClaudeUsageRuleMatchesEventNameField(t *testing.T) {
@@ -316,7 +316,7 @@ func TestBoundedLRUTTLEvictionZeroesSlots(t *testing.T) {
 	}
 }
 
-// TestBoundedLRUSeenBeforeConcurrent is the F1 regression test: the receiver
+// TestBoundedLRUSeenBeforeConcurrent is a regression test: the receiver
 // runs each OTLP export request on its own goroutine (Pipeline.handleLogs is
 // not serialized), so SeenBefore must be safe under concurrent callers. Run
 // with -race; before the mutex fix this both raced and could panic with
@@ -357,7 +357,7 @@ func TestBoundedLRUSeenBeforeConcurrent(t *testing.T) {
 
 // TestUsageDeriverObserveConcurrent exercises the same race at the
 // UsageDeriver level, through ProcessResourceLogs and observe, which is what
-// the receiver actually calls concurrently (F1).
+// the receiver actually calls concurrently.
 func TestUsageDeriverObserveConcurrent(t *testing.T) {
 	d := bareUsageDeriver(claudeUsageRule{})
 	const goroutines = 16
@@ -417,9 +417,9 @@ func TestUsageDeriverObserveDedupesReplayedRequest(t *testing.T) {
 	}
 }
 
-// TestUsageDeriverObserveCountsMalformed pins F6(b): a call is a completed
-// response, so it is still counted even when one of its token fields could
-// not be parsed. Only the tokens for that event are dropped.
+// TestUsageDeriverObserveCountsMalformed pins that a call is a completed
+// response (design §3.3), so it is still counted even when one of its token
+// fields could not be parsed. Only the tokens for that event are dropped.
 func TestUsageDeriverObserveCountsMalformed(t *testing.T) {
 	d := bareUsageDeriver(claudeUsageRule{})
 	record := &logspb.LogRecord{Attributes: []*commonpb.KeyValue{
@@ -501,7 +501,7 @@ func TestPipelineDerivesClaudeUsageEndToEnd(t *testing.T) {
 	// (providers.go) read — SCION_AGENT_ID, SCION_AGENT_SLUG, SCION_PROJECT_ID
 	// (via projectkeys.ProjectIDFromEnv), SCION_HARNESS, SCION_MODEL,
 	// SCION_BROKER_ID, SCION_BROKER_NAME, and SCION_GCP_PROJECT_ID
-	// (config.EnvProjectID) — and scion_metric_resource_id (part of the F7
+	// (config.EnvProjectID) — and scion_metric_resource_id (part of the
 	// golden comparison below) is a digest of that whole resource. Every one
 	// of those must be pinned, not just the ones this test's own assertions
 	// name, or an ambient value for any of them (this container sets several,
@@ -555,11 +555,11 @@ func TestPipelineDerivesClaudeUsageEndToEnd(t *testing.T) {
 	// collector epoch and its observed end (so the pinned Monitoring SDK
 	// never has to rewrite a near-zero interval), and at least 5s between two
 	// exports of the same GCP identity (metricPossibleEnds' sampling-interval
-	// floor). F9(a) exercises the second guard, which a short real sleep
+	// floor). This test exercises the second guard, which a short real sleep
 	// cannot satisfy without slowing every test run.
 	//
 	// The base is a fixed date, not time.Now(): the golden fixture below
-	// (F7) is checked in, so its own comparison (this package, this test)
+	// is checked in, so its own comparison (this package, this test)
 	// must reproduce byte-identical Interval timestamps on every run, not
 	// only the run that captured it. It is pinned near "today" rather than
 	// an arbitrary date because pkg/hub's golden test (which loads the same
@@ -618,7 +618,7 @@ func TestPipelineDerivesClaudeUsageEndToEnd(t *testing.T) {
 
 	firstSuccessCalls := latestSeries(t, series, "workload.googleapis.com/gen_ai.api.calls", "success")
 
-	// Replay: a retried request must not double count (AC-1.4). F9(b): assert
+	// Replay: a retried request must not double count (AC-1.4). Assert
 	// this explicitly — no new series, and the already-exported values are
 	// unchanged — rather than relying on the replay simply exporting nothing
 	// to make the assertion below trivially pass.
@@ -638,7 +638,7 @@ func TestPipelineDerivesClaudeUsageEndToEnd(t *testing.T) {
 		t.Fatalf("gen_ai.api.calls/success value changed after a deduped replay: %d -> %d", firstSuccessCalls.Points[0].Value.GetInt64Value(), got.Points[0].Value.GetInt64Value())
 	}
 
-	// F9(a): a genuinely new event (distinct request_id, so not deduped) that
+	// A genuinely new event (distinct request_id, so not deduped) that
 	// maps to the same stream must be cumulative, not reset — same
 	// collector-epoch StartTime as the first flush, EndTime strictly later,
 	// value accumulated rather than replaced (design §7.5).
@@ -669,7 +669,7 @@ func TestPipelineDerivesClaudeUsageEndToEnd(t *testing.T) {
 		t.Fatalf("gen_ai.api.calls/success value = %d, want %d (cumulative, not reset)", secondSuccessCalls.Points[0].Value.GetInt64Value(), want)
 	}
 
-	// F7: pin emitter -> dashboard against a golden file of exactly what was
+	// Pin emitter -> dashboard against a golden file of exactly what was
 	// captured above (not hand-built), covering two flushes so the
 	// epoch-stable/cumulative shape (StartTime fixed, EndTime advancing,
 	// value accumulating — just asserted above) is part of what the fixture
@@ -679,7 +679,7 @@ func TestPipelineDerivesClaudeUsageEndToEnd(t *testing.T) {
 	checkOrUpdateUsageGolden(t, [][]*monitoringpb.TimeSeries{series, newInThirdFlush})
 }
 
-// TestPipelineStartConstructsUsageDeriverFromEnv is F9(c): it exercises the
+// TestPipelineStartConstructsUsageDeriverFromEnv exercises the
 // deriver's construction inside Pipeline.Start itself — including the
 // SCION_USAGE_SOURCE/SCION_HARNESS env gating design §3.3/D4/D10 require —
 // rather than only through a deriver built by hand and assigned directly, as
@@ -776,7 +776,7 @@ func TestPipelineStopFlushesFinalUsageIncrementQuickly(t *testing.T) {
 	}
 
 	// Record directly, rather than posting a log request through the
-	// receiver (round-3 review N2): ProcessResourceLogs does its own
+	// receiver: ProcessResourceLogs does its own
 	// ForceFlush after every matched request, which would let this
 	// increment reach the exporter regardless of whether Stop's own final
 	// flush works at all. Recording without flushing isolates the property
@@ -948,7 +948,7 @@ func assertLabelKeys(t *testing.T, labels map[string]string, want ...string) {
 	}
 }
 
-// TestTruncateUTF8DoesNotSplitRune pins F12: truncating a model name to the
+// TestTruncateUTF8DoesNotSplitRune pins that truncating a model name to the
 // 128-byte label limit must never cut a multi-byte rune in half, which would
 // produce an invalid UTF-8 label value.
 func TestTruncateUTF8DoesNotSplitRune(t *testing.T) {

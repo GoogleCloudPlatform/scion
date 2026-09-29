@@ -33,7 +33,7 @@ import (
 )
 
 // usageGoldenRelPath is pkg/sciontool/telemetry's captured-emitter-output
-// fixture (design §7.6, F7), read here as a plain file rather than imported
+// fixture (design §7.6), read here as a plain file rather than imported
 // as a Go type — hub must not depend on sciontool. Keep this path in sync
 // with pkg/sciontool/telemetry/usage_golden_test.go's usageGoldenPath; if
 // that fixture is regenerated (`go test ./pkg/sciontool/telemetry/... -run
@@ -62,8 +62,8 @@ const usageGoldenRecency = time.Hour
 // "now" override on the production QueryOption API). A single constant
 // offset applied uniformly preserves every relative spacing the fixture
 // pins — the collector-epoch start within a series, and the gap between the
-// two captured flushes — so this only defeats staleness, not the shape F7's
-// two-flush capture exists to pin.
+// two captured flushes — so this only defeats staleness, not the two-flush
+// shape the golden fixture exists to pin.
 func loadUsageGoldenFlushes(t *testing.T) [][]*monitoringpb.TimeSeries {
 	t.Helper()
 	data, err := os.ReadFile(usageGoldenRelPath)
@@ -133,7 +133,7 @@ func canonicalSeriesLabelKey(ts *monitoringpb.TimeSeries) string {
 }
 
 // mergeUsageGoldenFlushes merges every flush's points into one TimeSeries
-// per identity (O-1, design §7.6): each captured flush is its own
+// per identity (design §7.6): each captured flush is its own
 // CreateTimeSeries wire call — one point each — mirroring what sciontool
 // sends, but a dashboard query reads back one ListTimeSeries response per
 // identity carrying every point across the queried window. Without this
@@ -185,9 +185,9 @@ func lastPointValue(t *testing.T, ts *monitoringpb.TimeSeries) int64 {
 // (TestPipelineDerivesClaudeUsageEndToEnd) captured and checked in — so a
 // rename of a metric, a label, or a token_type value on either side shows up
 // as a diff here or a failure there, not as two hand-maintained fixtures that
-// silently drift apart (design §7.6, F7).
+// silently drift apart.
 //
-// Both captured flushes are used (O-1), merged into one TimeSeries per
+// Both captured flushes are used, merged into one TimeSeries per
 // identity so each carries both cumulative points the way a real
 // ListTimeSeries response would, not the one-point-per-CreateTimeSeries-call
 // shape sciontool's own export wire format captures them in. The dashboard
@@ -206,7 +206,7 @@ func lastPointValue(t *testing.T, ts *monitoringpb.TimeSeries) int64 {
 // go stale.
 func TestDashboardGoldenClaudeUsagePoints(t *testing.T) {
 	flushes := loadUsageGoldenFlushes(t)
-	require.GreaterOrEqual(t, len(flushes), 2, "golden fixture must carry at least two flushes to pin the cumulative shape (design §7.6, O-1)")
+	require.GreaterOrEqual(t, len(flushes), 2, "golden fixture must carry at least two flushes to pin the cumulative shape (design §7.6)")
 	series := mergeUsageGoldenFlushes(flushes)
 
 	var callsSeries, tokenSeries []*monitoringpb.TimeSeries
@@ -284,7 +284,7 @@ func TestDashboardGoldenClaudeUsagePoints(t *testing.T) {
 	require.Len(t, tokens.Output, 1)
 	require.Empty(t, tokens.CacheRead, "cache_read was never emitted (its value was 0)")
 	require.Len(t, tokens.CacheWrite, 1)
-	// Sum every day bucket, not just Points[0] (N1): queryGroupedTimeSeries
+	// Sum every day bucket, not just Points[0]: queryGroupedTimeSeries
 	// buckets increments by the end time's UTC calendar day, and the
 	// fixture's two flushes are only ~5s apart (loadUsageGoldenFlushes
 	// shifts both by the same offset), so a run that happens to start in the

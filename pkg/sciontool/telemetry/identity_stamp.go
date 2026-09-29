@@ -13,22 +13,22 @@ import (
 
 // stampIdentityLabels adds the canonical scion_project_id, scion_agent_id
 // and scion_agent_slug point labels to every metric point — Sum, Gauge,
-// Histogram, ExponentialHistogram and Summary alike (F5: "every exported
-// metric point" per AC-1.1b) — from the receiver's authoritative resource
-// identity only (design §3.4). Unlike the GCP path (gcpIdentityMetrics),
-// this does not enforce the Cloud Monitoring allowlist: generic OTLP still
-// forwards every other attribute unchanged. It runs on both exporters so any
+// Histogram, ExponentialHistogram and Summary alike ("every exported metric
+// point" per AC-1.1b) — from the receiver's authoritative resource identity
+// only (design §3.4). Unlike the GCP path (gcpIdentityMetrics), this does
+// not enforce the Cloud Monitoring allowlist: generic OTLP still forwards
+// every other attribute unchanged. It runs on both exporters so any
 // backend, not only Cloud Monitoring, gets point-level identity (today
 // generic OTLP kept identity on the resource only).
 //
-// This is pure stamping (F3): a producer-supplied reserved identity key is
+// This is pure stamping: a producer-supplied reserved identity key is
 // rejected at admission (metricStreams.add, rejectReservedIdentityPointLabel)
 // before a point ever reaches this function, so there is nothing left to
 // reject here, and nothing here can fail a whole batch that admission has
 // already accepted point-by-point.
 //
 // The ExponentialHistogram and Summary branches are unreachable through the
-// real pipeline today (round-2 review Nit-2): Pipeline.handleMetrics calls
+// real pipeline today: Pipeline.handleMetrics calls
 // metricKind on every metric in a request, for both exporters, before any
 // admission or export step runs, and metricKind only recognizes Sum, Gauge
 // and Histogram — a request containing either kind is rejected outright

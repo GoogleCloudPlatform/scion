@@ -1,12 +1,12 @@
 # Design: holistic harness usage telemetry (fork issue ptone/scion#2053)
 
 Status: Agreed design (revision 4). Phase 1 (Claude vertical slice, the canonical usage
-contract, and the dashboard cumulative-math fix) and Phase 2 (hook-side usage alignment)
-are implemented; phases 0, 3 and 4 (per-harness usage rules, build provenance) are follow-up
-work tracked against ptone/scion#2053.
+contract, and the dashboard cumulative-math fix) is implemented. Phase 2 (hook-side usage
+alignment) follows in a separate PR; phases 0, 3 and 4 (native-OTel routing, per-harness usage
+rules, build provenance) are follow-up work tracked against ptone/scion#2053.
 Updated: 2026-09-29.
 
-ptone agreed to every decision D1–D10. The opencode refinement from source investigation (§3.7) implements D9 as directed.
+ptone agreed to every decision D1–D11. The opencode refinement from source investigation (§3.7) implements D9 as directed.
 Base: main `d9b9e6a`.
 Citations of the form `file:line` are spot-checked against the code.
 
@@ -85,7 +85,7 @@ harness native OTLP ─►│ receiver ─► policy (identity, redaction) ─�
 harness hooks ───────►│ (loopback OTLP, hook scope) ────────────────► metricStreams (reserved │
  (sciontool hook)     │                                               counter, collector epoch)│
                       └────────────────────────────────────────────────────────────────────────┘
-hub dashboard ─► ListTimeSeries(gen_ai.api.calls | scion.usage.tokens, metric.labels.project_id)
+hub dashboard ─► ListTimeSeries(gen_ai.api.calls | scion.usage.tokens, metric.labels.scion_project_id)
              ─► per-series cumulative increase ─► views
 ```
 
@@ -158,7 +158,7 @@ type UsageDeriver struct {
 - **Canonical labels:** `scion_project_id`, `scion_agent_id` and `scion_agent_slug`. The GCP exporter already stamps the first two on *every* metric point from the post-policy resource identity (`gcp_metric_identity.go:251-256`), so hook series are covered today. This design:
   - adds `scion_agent_slug` from the resource key `scion.agent.slug`, which the policy already stamps authoritatively (D7);
   - moves the stamping into an exporter-independent step, applied by the **generic OTLP exporter** too, so any backend receives the same labels. Today generic OTLP keeps identity only on the resource.
-- **Dashboard queries:** `projectFilter` becomes `metric.labels.scion_project_id` (`metrics_dashboard.go:239-241`), and unique agents group by `metric.labels.scion_agent_id`. The views display `scion_agent_slug`, falling back to the ID when the slug is absent.
+- **Dashboard queries:** `projectFilter` becomes `metric.labels.scion_project_id` (`metrics_dashboard.go:239-241`), and unique agents group by `metric.labels.scion_agent_id`. The views display `scion_agent_slug`, falling back to the ID when the slug is absent (N/A per D11: no per-agent slug view shipped; the label itself still stays on the series).
 - **Producer point labels `agent_id` and `project_id`** stay on the existing hook metrics, to avoid changing the existing `gen_ai.api.calls` / `agent.session.count` descriptors. They are non-canonical and are not read by the dashboard. The deriver emits the same set for `gen_ai.api.calls`, since one descriptor serves both sources. The new `scion.usage.tokens` omits them.
 - **Side benefit:** the existing hook metrics (sessions, calls, tools) become project-filterable immediately. Today they are filtered by `project_id` but come from the resource, and the change makes the whole dashboard consistent.
 - Raw native metrics never reach the dashboard, so their lack of point identity doesn't matter.
@@ -170,7 +170,7 @@ type UsageDeriver struct {
 - **Retired names.** The receiver rejects `scion.hook.tokens.*` on the hook scope, the same way it rejects `gen_ai.tokens.*` today (`metric_streams.go:256-258`). An old hook binary talking to a new receiver can't happen, because they are the same binary in one image.
 
 ### 3.6 Dashboard (hub)
-- **Queries.** Tokens come from `scion.usage.tokens`, grouped by `metric.labels.model` and filtered by `token_type`. Calls come from `gen_ai.api.calls` (unchanged name). All project filters use `metric.labels.scion_project_id`. Agent grouping uses `scion_agent_id`, displayed via `scion_agent_slug`.
+- **Queries.** Tokens come from `scion.usage.tokens`, grouped by `metric.labels.model` and filtered by `token_type`. Calls come from `gen_ai.api.calls` (unchanged name). All project filters use `metric.labels.scion_project_id`. Agent grouping uses `scion_agent_id`, displayed via `scion_agent_slug` (N/A per D11: no per-agent slug view shipped).
 - **API shape.** `DashboardSummary.TotalTokens` = input + output + cache_write + cache_read. `TokensView` keeps `Input` and `Output` and **adds** `CacheRead` and `CacheWrite`; this is additive and the JSON stays backward compatible. The web page adds a cached series in a later phase if wanted (OQ-3).
 - **Cumulative math, the core fix.** Replace the "sum every point" loops with a single helper `seriesIncreases(ts) []increment`, used by `querySum`, `queryDailyTimeSeries` and `queryGroupedTimeSeries`:
   1. Fetch raw points over `[windowStart − lookback, windowEnd]` with `lookback = 24h`.
@@ -181,7 +181,7 @@ type UsageDeriver struct {
   - Where the error sits: an epoch that began more than 24h before the window and wrote no point in the lookback loses at most its pre-window tail. That is acceptable, and documented in code.
   - The existing comment in `querySum` about "one point per short-lived process" is deleted; it describes pre-GoogleCloudPlatform/scion#1792 behaviour.
 - **Absent metrics.** A `NotFound` for a metric type with no descriptor yet (for example, `scion.usage.tokens` before its first write) counts as zero, not as a partial failure.
-- **Contract pinning.** A new `pkg/hub/metrics_contract.go` holds the exported constants for metric names, label keys and `token_type` values. sciontool (the deriver and the hook handler) imports the **same** constants, from a small leaf package `pkg/telemetrycontract`, so that `pkg/hub` doesn't depend on sciontool. The contract test asserts both sides use it (§7).
+- **Contract pinning.** The leaf package `pkg/telemetrycontract` holds the exported constants for metric names, label keys and `token_type` values. Both `pkg/hub` and sciontool (the deriver and the hook handler) import the **same** constants from it, so that `pkg/hub` doesn't depend on sciontool. The contract test asserts both sides use it (§7).
 
 ### 3.7 Harness provisioning (Python, reaches old images)
 - **claude:** set `SCION_USAGE_SOURCE=native` when telemetry is enabled. Logs are already `otlp` to local (`claude/provision.py:369-379`), and metrics stay `none` on GCP. No other change.
@@ -290,7 +290,7 @@ Each phase is one upstream PR, independently mergeable, and must not regress cur
   - docs (`metrics.md`).
 - AC:
   - AC-1.1: a Claude `api_request` fixture posted to the receiver yields exactly one `gen_ai.api.calls` increment and the right `scion.usage.tokens` increments, with the exact §3.2 label set.
-  - AC-1.1b: every exported metric point, on both the GCP and generic-OTLP exporters, carries `scion_project_id`, `scion_agent_id` and `scion_agent_slug` taken from authoritative identity. Producer-supplied values for these keys are rejected. The dashboard filters on `scion_project_id` and displays the slug. The live gate confirms Cloud Monitoring accepts the slug label on the existing descriptors; otherwise apply the D7 fallback.
+  - AC-1.1b: every exported metric point, on both the GCP and generic-OTLP exporters, carries `scion_project_id`, `scion_agent_id` and `scion_agent_slug` taken from authoritative identity. Producer-supplied values for these keys are rejected. The dashboard filters on `scion_project_id` and displays the slug (N/A per D11: no per-agent slug view shipped). The live gate confirms Cloud Monitoring accepts the slug label on the existing descriptors; otherwise apply the D7 fallback.
   - AC-1.2: the GCP-mode end-to-end test (§7.5) passes, and the raw Claude log records are still exported and redacted as before (the existing privacy tests are unchanged and green).
   - AC-1.3: the dashboard contract test (§7.2), the math tests (§7.3) and the golden cross-side test (§7.6) pass. The summary total for a single-epoch series with N flushes equals the last value.
   - AC-1.4: derivation happens when `Filter.Include` excludes `api_request`, and a replayed request doesn't double count.
@@ -323,7 +323,7 @@ Each phase is one upstream PR, independently mergeable, and must not regress cur
   - AC: the raw histogram is consumed, not rejected, on GCP; canonical increments match the fixture; OQ-1 is resolved in the PR description.
 - **3b, opencode (hooks):**
   - rewrite `scion-bridge.js` onto the generic `event` hook (usage via `step-finish`, plus session, idle, error and permission events), and fix the tool args and success;
-  - `opencode/dialect.yaml` token mapping; pin `opencode-ai` in the Dockerfile;
+  - `opencode/dialect.yaml` token mapping; ~~pin `opencode-ai` in the Dockerfile~~ (superseded by D11: no pin; record the fixture's CLI version in the test instead);
   - a captured bus-event fixture from the pinned version, including a fork and a multi-step tool loop;
   - `SCION_USAGE_SOURCE=hooks` in opencode `provision.py` (the D10 opt-in).
   - AC:
@@ -354,7 +354,7 @@ Each phase is one upstream PR, independently mergeable, and must not regress cur
 1. On a GCP-provider hub with rebuilt images, the claude, copilot, codex and opencode agents (and antigravity for calls, plus tokens if available) each show non-zero model calls and tokens on both the global and the project dashboard, attributed to the correct project, model and harness, and within ±5% of the CLI's own reported usage for the same session.
 2. No dashboard total is inflated by the flush count: the cumulative-math tests pass, and a live single-agent check matches.
 3. No new attribute reaches Cloud Monitoring labels beyond `token_type` (producer-settable) and `scion_agent_slug` (exporter-stamped from authoritative identity). The existing privacy tests are green.
-3b. The dashboard filters on `scion_project_id` and groups on `scion_agent_id`, presenting slugs, and a contract test pins this.
+3b. The dashboard filters on `scion_project_id` and groups on `scion_agent_id`, presenting slugs (N/A per D11: no per-agent slug view shipped), and a contract test pins this.
 4. Copilot and grok-build never send telemetry directly to a cloud endpoint by default.
 5. The contract constants are used by the hub, the hook handler and the deriver. The contract, golden and fixture tests exist and pass.
 6. On old images (pre-change sciontool), nothing regresses relative to today.

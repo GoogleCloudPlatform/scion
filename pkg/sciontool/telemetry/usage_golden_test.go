@@ -17,7 +17,7 @@ import (
 )
 
 // usageGoldenPath is the checked-in emitter output pkg/hub's dashboard golden
-// test loads by relative path (design §7.6, F7): hub must not import
+// test loads by relative path (design §7.6): hub must not import
 // sciontool, so a plain file — not a Go type — is the cross-package
 // contract. Keep the two in sync: pkg/hub/metrics_dashboard_golden_test.go
 // reads "../sciontool/telemetry/" + usageGoldenPath.
@@ -40,7 +40,7 @@ type usageGoldenFixture struct {
 	Flushes          [][]json.RawMessage `json:"flushes"`
 }
 
-// checkOrUpdateUsageGolden is the F7 golden check: with -update it writes
+// checkOrUpdateUsageGolden is the golden check: with -update it writes
 // flushes (one []*TimeSeries per captured GCP export call) to
 // usageGoldenPath; otherwise it loads that file and requires an exact
 // (proto.Equal) match, series for series, flush for flush.

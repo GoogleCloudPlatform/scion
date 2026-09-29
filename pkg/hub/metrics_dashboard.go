@@ -37,8 +37,8 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// Design references in this file (section N, Dn) are to
-// .design/hosted/usage-telemetry.md (ptone/scion#2053).
+// Design references in this file and the metrics_dashboard_*_test.go files
+// (section N, Dn) are to .design/hosted/usage-telemetry.md (ptone/scion#2053).
 
 const (
 	metricPrefix  = "workload.googleapis.com/"

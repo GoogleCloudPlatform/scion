@@ -242,7 +242,7 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	// exports over loopback back into this same receiver (design §3.3). A
 	// harness with no matching rule, or SCION_USAGE_SOURCE unset, yields a
 	// cheap no-op deriver (D4/D10); only a construction failure is logged.
-	// p.usageDeriver is an atomic.Pointer (F10): a log request can arrive
+	// p.usageDeriver is an atomic.Pointer: a log request can arrive
 	// concurrently with this Store, between receiver.Start returning above
 	// and this assignment running, and handleLogs's Load must never race it.
 	if deriver, err := NewUsageDeriver(ctx, p.config); err != nil {
@@ -1074,7 +1074,7 @@ func (p *Pipeline) handleLogs(ctx context.Context, resourceLogs []*logspb.Resour
 	// depend on Filter.Include, and derivation happens independently of
 	// whether the raw logs go on to export successfully. It runs after
 	// validateLogs so a request the policy would reject outright is never
-	// derived from (F8) — policy.processLogs re-validates below, which is
+	// derived from — policy.processLogs re-validates below, which is
 	// deterministic and cheap on typical log batch sizes.
 	if err := validateLogs(resourceLogs); err == nil {
 		p.usageDeriver.Load().ProcessResourceLogs(ctx, resourceLogs)

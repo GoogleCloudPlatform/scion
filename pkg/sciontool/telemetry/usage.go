@@ -57,10 +57,9 @@ type usageIncrement struct {
 // completed response, even when its token fields could not be parsed).
 //
 // eventName is normalizedLogEventName's result for record, computed once by
-// the caller (observe) rather than a second time inside MatchLog (round-2
-// review Nit-3): the fingerprint needs it too, and it isn't free (it walks
-// record's attributes and, per the design, must also honor a native
-// LogRecord.EventName field).
+// the caller (observe) rather than a second time inside MatchLog: the
+// fingerprint needs it too, and it isn't free (it walks record's attributes
+// and, per the design, must also honor a native LogRecord.EventName field).
 type usageRule interface {
 	// Harness is the SCION_HARNESS value this rule applies to.
 	Harness() string
@@ -103,7 +102,7 @@ func (claudeUsageRule) MatchLog(scopeName, eventName string, record *logspb.LogR
 			if err != nil {
 				// Keep checking the remaining fields (for a call still worth
 				// counting), but drop every token for this event rather than
-				// reporting a partial, misleading total (design §3.3 F6).
+				// reporting a partial, misleading total (design §3.3).
 				if malformed == nil {
 					malformed = fmt.Errorf("claude api_request %s: %w", attrKey, err)
 				}
@@ -280,7 +279,7 @@ func (d *UsageDeriver) ProcessResourceLogs(ctx context.Context, resourceLogs []*
 //
 // The event name comes from normalizedLogEventName, not a bare "event.name"
 // attribute read: a native SDK may carry the event name in LogRecord's own
-// EventName field instead (design §3.3 F6), and this must recognize either.
+// EventName field instead (design §3.3), and this must recognize either.
 func (d *UsageDeriver) observe(ctx context.Context, scopeName string, record *logspb.LogRecord) bool {
 	eventName, err := normalizedLogEventName(record, scopeName)
 	if err != nil || eventName == "" {
@@ -415,9 +414,9 @@ func (d *UsageDeriver) Shutdown(ctx context.Context) error {
 }
 
 // truncateUTF8 truncates s to at most maxBytes bytes without splitting a
-// multi-byte rune (F12): it walks back from maxBytes to the nearest rune
-// boundary rather than cutting mid-rune, which would produce an invalid
-// UTF-8 label value.
+// multi-byte rune: it walks back from maxBytes to the nearest rune boundary
+// rather than cutting mid-rune, which would produce an invalid UTF-8 label
+// value.
 func truncateUTF8(s string, maxBytes int) string {
 	if len(s) <= maxBytes {
 		return s
