@@ -785,7 +785,9 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	key, token, err := s.uatService.CreateToken(r.Context(), user.ID(), req.Name, req.ProjectID, req.Scopes, req.ExpiresAt)
+	key, token, err := s.uatService.CreateTokenWithParams(r.Context(), CreateTokenParams{
+		UserID: user.ID(), Name: req.Name, ProjectID: req.ProjectID, Scopes: req.Scopes, ExpiresAt: req.ExpiresAt,
+	})
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrUATLimitExceeded):

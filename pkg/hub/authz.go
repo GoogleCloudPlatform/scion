@@ -144,13 +144,17 @@ type PrincipalContext struct {
 }
 
 // CredentialContext records the credential used for an authorization request.
-// ProjectID and Scopes are caveats for scoped bearer credentials.
+// ProjectID and Scopes are caveats for scoped bearer credentials. Ceiling is
+// the UAT's normalized, frozen permission ceiling (A.2) — the single source
+// every credential-scope restriction evaluates through, regardless of
+// whether the underlying token predates ceiling normalization.
 type CredentialContext struct {
 	Kind      CredentialKind
 	ID        string
 	Type      string
 	ProjectID string
 	Scopes    []string
+	Ceiling   permissions.FrozenPermissionCeiling
 }
 
 // AuthzRequest carries both the acting principal and the credential caveats.
@@ -483,9 +487,13 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 	// ── Step 7: Build restrictions ────────────────────────────────────
 	var restrictions []Restriction
 
-	// 7a. UAT credential scope restriction.
-	if credential.Kind == CredentialKindUAT && len(credential.Scopes) > 0 {
-		restrictions = append(restrictions, uatScopeRestriction(credential.Scopes))
+	// 7a. UAT credential permission ceiling restriction. Applied whenever the
+	// credential is a UAT, regardless of whether Ceiling.PermissionIDs is
+	// empty — an empty or malformed ceiling must deny every permission
+	// (F-8), not fall through to "no restriction" the way the old
+	// len(credential.Scopes) > 0 guard did.
+	if credential.Kind == CredentialKindUAT {
+		restrictions = append(restrictions, ceilingRestriction(credential.Ceiling))
 	}
 
 	// 7b. Agent JWT scope restriction.
@@ -1116,8 +1124,32 @@ func agentScopesToPermissionIDs(scopes []AgentTokenScope) []string {
 // Restriction builders
 // =============================================================================
 
-// uatScopeRestriction builds a kernel Restriction from UAT credential scopes.
-// Only permissions whose agent scope strings match the UAT scopes are allowed.
+// ceilingRestriction builds a kernel Restriction from a UAT's normalized,
+// frozen permission ceiling (A.2). It is the production restriction builder
+// for UAT credentials — used by both Decide (step 7a) and CanDelegate's
+// intersectCredentialCaveats — and defers entirely to
+// FrozenPermissionCeiling.Allows, the one place "empty/unknown/malformed
+// denies" is encoded, so it applies identically to every ceiling version,
+// including a zero-value ceiling (which denies every permission, never
+// "unrestricted").
+func ceilingRestriction(ceiling permissions.FrozenPermissionCeiling) Restriction {
+	return Restriction{
+		Kind:        "credential_scope",
+		Description: "UAT credential permission ceiling",
+		Check: func(permissionID string) bool {
+			return ceiling.Allows(permissionID)
+		},
+	}
+}
+
+// uatScopeRestriction builds a kernel Restriction from raw UAT credential
+// scopes, expanded via LegacyUATScopeImplications. It is retained only as a
+// direct, documented characterization of that legacy implication map (see
+// its own doc comment and TestCrossMemberAttach_UATScopes) — production
+// UAT restriction now goes through ceilingRestriction, which never applies
+// implication expansion, matching the A.2 ruling that CanDelegate narrows to
+// Decide's actual exact-scope behavior rather than Decide widening to
+// CanDelegate's historical over-grant.
 func uatScopeRestriction(scopes []string) Restriction {
 	// UAT scopes are in "resource:action" format. Map them to permission IDs.
 	scopeSet := make(map[string]bool, len(scopes))
@@ -1416,7 +1448,7 @@ func credentialContextForIdentity(identity Identity) CredentialContext {
 		return CredentialContext{}
 	}
 	if scoped, ok := identity.(*ScopedUserIdentity); ok {
-		return CredentialContext{Kind: CredentialKindUAT, ID: scoped.CredentialID(), ProjectID: scoped.ScopedProjectID(), Scopes: scoped.ScopedScopes()}
+		return CredentialContext{Kind: CredentialKindUAT, ID: scoped.CredentialID(), ProjectID: scoped.ScopedProjectID(), Scopes: scoped.ScopedScopes(), Ceiling: scoped.Ceiling()}
 	}
 	switch identity.Type() {
 	case "agent":

@@ -318,6 +318,30 @@ func TestExpandScopes(t *testing.T) {
 	}
 }
 
+// TestResolveScopePermissionIDs pins that mint validation resolves flat,
+// already-expanded scopes through A.1's SelectorRegistry (ResolveSelector),
+// not a Registry resource/action scan — the "inferred scope-to-permission
+// conversion" the A.2 brief requires replacing.
+func TestResolveScopePermissionIDs(t *testing.T) {
+	ids, ok := resolveScopePermissionIDs([]string{"agent:attach", "agent:read"})
+	if !ok {
+		t.Fatal("expected resolution to succeed")
+	}
+	want := map[string]bool{"agent.attach": true, "agent.read": true}
+	if len(ids) != len(want) {
+		t.Fatalf("expected %v, got %v", want, ids)
+	}
+	for _, id := range ids {
+		if !want[id] {
+			t.Errorf("unexpected permission ID %q", id)
+		}
+	}
+
+	if _, ok := resolveScopePermissionIDs([]string{"not:a-real-scope"}); ok {
+		t.Error("expected an unresolvable scope to fail closed")
+	}
+}
+
 func TestExpandScopes_ManageAliasesExpandToCorrectResource(t *testing.T) {
 	for alias, resource := range permissions.UATManageAliases {
 		t.Run(alias, func(t *testing.T) {
