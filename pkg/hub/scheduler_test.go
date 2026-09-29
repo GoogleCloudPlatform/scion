@@ -51,6 +51,7 @@ func newEventHandlerTestServer(st store.Store) *Server {
 	return &Server{
 		store:             st,
 		agentLifecycleLog: slog.Default(),
+		authzService:      NewAuthzService(st, slog.Default()),
 	}
 }
 
@@ -599,6 +600,16 @@ func (m *mockScheduledEventStore) ListSkillInjections(_ context.Context, _, _ st
 }
 
 func (m *mockScheduledEventStore) GetEffectiveGroups(_ context.Context, _ string) ([]string, error) {
+	return nil, nil
+}
+
+func (m *mockScheduledEventStore) GetEffectiveGroupsForAgent(_ context.Context, _ string) ([]string, error) {
+	return nil, nil
+}
+
+// GetDelegationEdgesForDelegate returns no edges; the mock store has no
+// backfill marker, so an agent without an edge is evaluated pre-backfill.
+func (m *mockScheduledEventStore) GetDelegationEdgesForDelegate(_ context.Context, _, _ string) ([]*store.DelegationEdge, error) {
 	return nil, nil
 }
 

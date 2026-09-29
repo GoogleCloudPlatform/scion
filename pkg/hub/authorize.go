@@ -208,20 +208,39 @@ func (s *Server) brokerMayReadCatalogResource(ctx context.Context, broker Broker
 	}
 }
 
-// authorizeAgentCreate gates agent creation for every caller kind. Exhaustive
-// and fail-closed. Replaces the caller-kind branch in createAgent, which had no
-// else clause, and supplies the gate createProjectAgent never had.
+// agentCreateDenyMessage is the client message for a denied agent creation.
+const agentCreateDenyMessage = "You don't have permission to create agents in this project"
+
+// agentCreateDecision decides whether identity may create an agent in
+// projectID: the exact agent.create permission on the project's agent
+// collection through Decide, which applies the caller's roles, token
+// restrictions and, for an agent caller, the delegation ceiling of every
+// live ancestor.
+func (s *Server) agentCreateDecision(ctx context.Context, identity Identity, projectID string) Decision {
+	return s.authzService.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(identity),
+		Credential: credentialContextForIdentity(identity),
+		Resource:   agentCreateResource(projectID),
+		Action:     ActionCreate,
+		Permission: "agent.create",
+	})
+}
+
+// agentCreateResource is the authorization target of agent creation in
+// projectID.
+func agentCreateResource(projectID string) Resource {
+	return Resource{Type: "agent", ParentType: "project", ParentID: projectID}
+}
+
+// authorizeAgentCreate gates agent creation for every caller kind, fail
+// closed, with a terminating default for unknown kinds.
 //
-// The agent path is scope-gated rather than policy-gated: sub-agent creation is
-// a template-administered capability (ScopeAgentCreate), constrained to the
-// calling agent's own project.
+//   - An agent caller needs ScopeAgentCreate (template-administered) and must
+//     create within its own project (both project IDs non-empty).
+//   - Every caller then needs agentCreateDecision.
 func (s *Server) authorizeAgentCreate(w http.ResponseWriter, r *http.Request, projectID string) bool {
 	ctx := r.Context()
-	resource := Resource{
-		Type:       "agent",
-		ParentType: "project",
-		ParentID:   projectID,
-	}
+	resource := agentCreateResource(projectID)
 
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
@@ -229,8 +248,6 @@ func (s *Server) authorizeAgentCreate(w http.ResponseWriter, r *http.Request, pr
 		return false
 	}
 
-	// A switch with a terminating default, not a chain of ifs: an unhandled
-	// caller kind falling through the guard is precisely the #591 bug.
 	switch identity.Type() {
 	case "agent":
 		agentIdent, ok := identity.(AgentIdentity)
@@ -245,27 +262,18 @@ func (s *Server) authorizeAgentCreate(w http.ResponseWriter, r *http.Request, pr
 			writeForbidden(w, "Missing required scope: "+string(ScopeAgentCreate))
 			return false
 		}
-		if agentIdent.ProjectID() != projectID {
+		if projectID == "" || agentIdent.ProjectID() != projectID {
 			logAuthzDenial(r, identity, resource, ActionCreate, "agent project mismatch")
 			writeForbidden(w, "Agents can only create sub-agents within their own project")
 			return false
 		}
-		return true
 
 	case "user", "dev":
-		userIdent, ok := identity.(UserIdentity)
-		if !ok {
+		if _, ok := identity.(UserIdentity); !ok {
 			logAuthzDenial(r, identity, resource, ActionCreate, "invalid user identity")
 			writeForbidden(w, "")
 			return false
 		}
-		decision := s.authzService.CheckAccess(ctx, userIdent, resource, ActionCreate)
-		if !decision.Allowed {
-			logAuthzDenial(r, identity, resource, ActionCreate, decision.Reason)
-			writeForbidden(w, "You don't have permission to create agents in this project")
-			return false
-		}
-		return true
 
 	default:
 		logAuthzDenial(r, identity, resource, ActionCreate,
@@ -273,6 +281,14 @@ func (s *Server) authorizeAgentCreate(w http.ResponseWriter, r *http.Request, pr
 		writeForbidden(w, "")
 		return false
 	}
+
+	decision := s.agentCreateDecision(ctx, identity, projectID)
+	if !decision.Allowed {
+		logAuthzDenial(r, identity, resource, ActionCreate, decision.Reason)
+		writeForbiddenDenial(w, agentCreateDenyMessage, decision.DeniedBy)
+		return false
+	}
+	return true
 }
 
 // agentTargetDenyMessage is the client message for a denied action on an

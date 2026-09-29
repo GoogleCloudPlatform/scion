@@ -805,10 +805,12 @@ var Catalog = []OperationSpec{
 		ResourceResolver: "project-from-body",
 		BasePermission:   "agent.create",
 		Effects:          []SecurityEffect{EffectCreateResource},
-		DelegationKind:   DelegationNone,
-		AuthorityEval:    AuthorityEvalNone,
-		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		DelegationKind:   DelegationNonAmplification,
+		DelegationDescription: "Actor must hold the role and scopes delegated to the new agent (CanDelegate non-amplification); " +
+			"an agent actor is also evaluated against the delegation ceiling of its live delegation chain for agent.create on the target project",
+		AuthorityEval: AuthorityEvalNone,
+		DenialCodes:   []DenialCode{DenialForbidden},
+		TestRefs:      []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
 		ID:          "agent.lifecycle.delete",
