@@ -272,20 +272,56 @@ func execAuditRiskyPackageDirs() map[string]bool {
 	return risky
 }
 
+// execAuditFuncInfo is what execAuditRiskyFuncNames records per top-level,
+// non-method function declared in an execAuditFileAllowlist file, before
+// the fixpoint below turns it into a plain risky/not-risky verdict.
+type execAuditFuncInfo struct {
+	// direct is true if the function's own body references os/exec, or
+	// references a not-explicitly-approved symbol from an imported risky
+	// package (see execAuditRiskyPackageDirs/execAuditSymbolAllowlist) —
+	// i.e. it reaches exec.Cmd in zero further same-package hops.
+	direct bool
+	// refs is every bare identifier this function's body mentions — a
+	// superset that includes ordinary local variables, parameters and
+	// selector members, not just other top-level function names; the
+	// fixpoint below only cares whether one of them happens to name an
+	// already-risky function in the same directory.
+	refs map[string]bool
+}
+
 // execAuditRiskyFuncNames is the same-package counterpart to
 // execAuditRiskyPackageDirs/execAuditSymbolAllowlist: for each
-// execAuditFileAllowlist file, it collects the names of that file's
-// top-level, non-method functions whose bodies reference the file's os/exec
-// import. A non-allowlisted file elsewhere in the *same directory* could
-// otherwise dodge this whole test by calling one of these unqualified
-// (Go's same-package call syntax) instead of calling exec.Command directly
-// — the same shape of backdoor execAuditSymbolAllowlist closes across
-// package boundaries, just within one. Keyed by directory, since an
-// unqualified call is only ever resolved within its own package: two
-// different directories reusing a function name isn't a collision here.
+// execAuditFileAllowlist file, it finds every top-level, non-method
+// function that reaches os/exec or a risky imported package — directly, or
+// transitively through any number of other same-package functions (a
+// wrapper around a risky function, or a risky function passed around as a
+// value, is still risky) — and returns their names, keyed by directory. A
+// non-allowlisted file elsewhere in the *same directory* could otherwise
+// dodge this whole test by referencing one of these unqualified (Go's
+// same-package reference syntax) instead of calling exec.Command directly —
+// the same shape of backdoor execAuditSymbolAllowlist closes across package
+// boundaries, just within one. Keyed by directory, since an unqualified
+// reference is only ever resolved within its own package: two different
+// directories reusing a function name isn't a collision here.
+//
+// This is a fixpoint over bare-identifier references, not a call graph:
+// methods are excluded from the risky set itself (an unqualified reference
+// can never resolve to one), but a plain function's body referencing a
+// risky name in *any* position — not just as a call — is enough, so a
+// function value (`f := riskyFunc`) or a wrapper (`func w() { riskyFunc()
+// }`) is still caught. The only way this can over- or under-count is a
+// local variable, parameter, or struct field that happens to share a name
+// with a risky same-package function (a "shadow"); none exist in this
+// codebase today, and if one is ever added, the failure mode is a false
+// positive (something extra to justify), never a silent miss.
 func execAuditRiskyFuncNames(t *testing.T, repoRoot string) map[string]map[string]bool {
 	t.Helper()
-	byDir := map[string]map[string]bool{}
+	riskyPkgDirs := execAuditRiskyPackageDirs()
+
+	// byDir[dir][funcName] holds each allowlisted-file function's info,
+	// before the fixpoint below resolves it to a risky/not-risky verdict.
+	byDir := map[string]map[string]execAuditFuncInfo{}
+
 	for relPath := range execAuditFileAllowlist {
 		absPath := filepath.Join(repoRoot, filepath.FromSlash(relPath))
 		fset := token.NewFileSet()
@@ -293,36 +329,91 @@ func execAuditRiskyFuncNames(t *testing.T, repoRoot string) map[string]map[strin
 		if err != nil {
 			t.Fatalf("parsing %s: %v", relPath, err)
 		}
-		execAlias := importAlias(file, "os/exec", "exec")
-		if execAlias == "" {
-			continue // this allowlisted file doesn't itself use os/exec
-		}
 		dir := filepath.ToSlash(filepath.Dir(relPath))
+		execAlias := importAlias(file, "os/exec", "exec")
+
+		// aliasToRiskyDir maps this file's own import aliases to the risky
+		// package directory they refer to, so a selector into one (e.g.
+		// provision.ProvisionShared from a file that imports pkg/provision)
+		// counts as direct even though it's a value reference, not exec.X.
+		aliasToRiskyDir := map[string]string{}
+		for _, imp := range file.Imports {
+			p, err := strconv.Unquote(imp.Path.Value)
+			if err != nil || !strings.HasPrefix(p, moduleImportPrefix) {
+				continue
+			}
+			relDir := strings.TrimPrefix(p, moduleImportPrefix)
+			if !riskyPkgDirs[relDir] {
+				continue
+			}
+			alias := relDir[strings.LastIndex(relDir, "/")+1:]
+			if imp.Name != nil {
+				alias = imp.Name.Name
+			}
+			aliasToRiskyDir[alias] = relDir
+		}
+
 		for _, decl := range file.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
 			if !ok || fn.Recv != nil || fn.Body == nil {
-				continue // methods are excluded: an unqualified call can never reach one
+				continue // methods are excluded: an unqualified reference can never reach one
 			}
-			references := false
+			info := execAuditFuncInfo{refs: map[string]bool{}}
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				sel, ok := n.(*ast.SelectorExpr)
-				if ok {
-					if id, ok := sel.X.(*ast.Ident); ok && id.Name == execAlias {
-						references = true
+				switch v := n.(type) {
+				case *ast.SelectorExpr:
+					if id, ok := v.X.(*ast.Ident); ok {
+						if execAlias != "" && id.Name == execAlias {
+							info.direct = true
+						}
+						if riskyDir, ok := aliasToRiskyDir[id.Name]; ok &&
+							!execAuditSymbolAllowlist[riskyDir][v.Sel.Name] {
+							info.direct = true
+						}
 					}
+				case *ast.Ident:
+					info.refs[v.Name] = true
 				}
 				return true
 			})
-			if !references {
-				continue
-			}
 			if byDir[dir] == nil {
-				byDir[dir] = map[string]bool{}
+				byDir[dir] = map[string]execAuditFuncInfo{}
 			}
-			byDir[dir][fn.Name.Name] = true
+			byDir[dir][fn.Name.Name] = info
 		}
 	}
-	return byDir
+
+	// Fixpoint per directory: a function is risky if it's direct, or if it
+	// references (as a bare identifier, anywhere in its body) any
+	// already-risky function's name in the same directory. Loops until a
+	// full pass adds nothing new; this always terminates since each
+	// directory has a finite set of candidate functions.
+	result := map[string]map[string]bool{}
+	for dir, funcs := range byDir {
+		riskySet := map[string]bool{}
+		for name, info := range funcs {
+			if info.direct {
+				riskySet[name] = true
+			}
+		}
+		for changed := true; changed; {
+			changed = false
+			for name, info := range funcs {
+				if riskySet[name] {
+					continue
+				}
+				for ref := range info.refs {
+					if riskySet[ref] {
+						riskySet[name] = true
+						changed = true
+						break
+					}
+				}
+			}
+		}
+		result[dir] = riskySet
+	}
+	return result
 }
 
 // repoRootForTest returns the absolute path of the repo root, derived from
@@ -682,14 +773,19 @@ func findSymbolAllowlistViolations(path string, risky map[string]bool) ([]string
 }
 
 // findRiskyFuncCallViolations parses a single Go source file and flags any
-// unqualified call to a function named in riskyFuncs — the same-package
+// bare (unqualified) reference to a name in riskyFuncs — the same-package
 // counterpart to findSymbolAllowlistViolations's cross-package check. Go
 // only resolves an unqualified identifier within the same package, so a
 // hit here means this file (which the caller has already confirmed is not
-// itself in execAuditFileAllowlist) calls a function that a sibling,
-// allowlisted file in this same directory defines and that itself touches
-// os/exec — the same shape of backdoor as calling into a risky imported
-// package, just within one package instead of across two.
+// itself in execAuditFileAllowlist) references a function that
+// execAuditRiskyFuncNames determined (directly, or transitively through
+// other same-package functions) reaches os/exec or a risky imported
+// package — the same shape of backdoor as calling into a risky imported
+// package, just within one package instead of across two. This flags any
+// *ast.Ident, not just a CallExpr.Fun, so a function value (`f :=
+// riskyFunc`) or a wrapper's own reference is caught, not just a direct
+// `riskyFunc(...)` call — see execAuditRiskyFuncNames's doc comment for the
+// (empty today) false-positive risk this accepts in exchange.
 func findRiskyFuncCallViolations(path string, riskyFuncs map[string]bool) ([]string, error) {
 	if len(riskyFuncs) == 0 {
 		return nil, nil
@@ -702,19 +798,15 @@ func findRiskyFuncCallViolations(path string, riskyFuncs map[string]bool) ([]str
 
 	var violations []string
 	ast.Inspect(file, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		id, ok := call.Fun.(*ast.Ident)
+		id, ok := n.(*ast.Ident)
 		if !ok || !riskyFuncs[id.Name] {
 			return true
 		}
 		violations = append(violations, fmt.Sprintf(
-			"%s: calls %s(...), a same-package function defined in an execAuditFileAllowlist file "+
-				"that itself references os/exec; route through pkg/sciontool/procreap instead, or "+
-				"justify this call explicitly (see execAuditRiskyFuncNames)",
-			fset.Position(call.Pos()), id.Name))
+			"%s: references %s, a same-package function that (transitively) reaches os/exec or a "+
+				"risky package (see execAuditFileAllowlist/execAuditRiskyFuncNames); route through "+
+				"pkg/sciontool/procreap instead, or justify this reference explicitly",
+			fset.Position(id.Pos()), id.Name))
 		return true
 	})
 	return violations, nil
