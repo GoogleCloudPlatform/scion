@@ -42,42 +42,14 @@ import (
 // be validated the same way.
 // ---------------------------------------------------------------------------
 
-// postOutboundRawConvIDWithThread sends an outbound message with a raw
-// conversation_id, an explicit recipient, and a thread_id + channel (a
-// thread_id requires a registered channel — see messages.ValidateLegacyMessage).
-func postOutboundRawConvIDWithThread(t *testing.T, srv *Server, projectID, agentID, recipientEmail, msg, convID, threadID, channel string) *httptest.ResponseRecorder {
+// postOutboundRequest sends a prepared OutboundMessageRequest for agentID.
+// Shared by the raw conversation_id and conversation_ref with-thread cases
+// below (they differ only in which fields of OutboundMessageRequest are
+// set), so the two paths can't drift apart in how the request is built.
+func postOutboundRequest(t *testing.T, srv *Server, projectID, agentID string, r OutboundMessageRequest) *httptest.ResponseRecorder {
 	t.Helper()
-	body, _ := json.Marshal(OutboundMessageRequest{
-		Recipient:      "user:" + recipientEmail,
-		Msg:            msg,
-		ConversationID: convID,
-		ThreadID:       threadID,
-		Channel:        channel,
-	})
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agentID+"/outbound-message", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
-		Claims:    jwt.Claims{Subject: agentID},
-		ProjectID: projectID,
-	}}))
-
-	rr := httptest.NewRecorder()
-	srv.handleAgentOutboundMessage(rr, req, agentID)
-	return rr
-}
-
-// postOutboundRefConvWithThread sends an outbound message with a
-// conversation_ref (conv:<uuid>), an explicit recipient, and a thread_id +
-// channel, for parity comparison against the raw conversation_id path.
-func postOutboundRefConvWithThread(t *testing.T, srv *Server, projectID, agentID, recipientEmail, msg, convRef, threadID, channel string) *httptest.ResponseRecorder {
-	t.Helper()
-	body, _ := json.Marshal(OutboundMessageRequest{
-		Recipient:       "user:" + recipientEmail,
-		Msg:             msg,
-		ConversationRef: convRef,
-		ThreadID:        threadID,
-		Channel:         channel,
-	})
+	body, err := json.Marshal(r)
+	require.NoError(t, err)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agentID+"/outbound-message", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
@@ -160,6 +132,12 @@ func TestDirectRawConversationID_RecipientNotInDMKey_Rejected(t *testing.T) {
 		"response must not contain other participant ID")
 	assert.NotContains(t, body, user.ID,
 		"response must not contain the supplied recipient ID")
+
+	// A rejection must leave no trace: no message row persisted or delivered
+	// for the sending agent.
+	msgs, err := s.ListMessages(ctx, store.MessageFilter{SenderID: agent.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	assert.Empty(t, msgs.Items, "a rejected send must not persist a message")
 }
 
 // ---------------------------------------------------------------------------
@@ -230,15 +208,25 @@ func TestDirectConversation_ThreadID_RecipientMismatch_SameOnBothPaths(t *testin
 
 	// Raw conversation_id (naming the agent/otherUser DM) + thread_id (naming
 	// the agent/user DM) + recipient user.Email.
-	rawRR := postOutboundRawConvIDWithThread(t, srv, project.ID, agent.ID, user.Email,
-		"raw with thread", dmConv.ID, threadDMKey, "web")
+	rawRR := postOutboundRequest(t, srv, project.ID, agent.ID, OutboundMessageRequest{
+		Recipient:      "user:" + user.Email,
+		Msg:            "raw with thread",
+		ConversationID: dmConv.ID,
+		ThreadID:       threadDMKey,
+		Channel:        "web",
+	})
 	require.Equal(t, http.StatusBadRequest, rawRR.Code,
 		"raw conversation_id + thread_id: mismatched recipient must be rejected: %s",
 		rawRR.Body.String())
 
 	// conversation_ref (same conversation) + same thread_id + same recipient.
-	refRR := postOutboundRefConvWithThread(t, srv, project.ID, agent.ID, user.Email,
-		"ref with thread", "conv:"+dmConv.ID, threadDMKey, "web")
+	refRR := postOutboundRequest(t, srv, project.ID, agent.ID, OutboundMessageRequest{
+		Recipient:       "user:" + user.Email,
+		Msg:             "ref with thread",
+		ConversationRef: "conv:" + dmConv.ID,
+		ThreadID:        threadDMKey,
+		Channel:         "web",
+	})
 	require.Equal(t, http.StatusBadRequest, refRR.Code,
 		"conversation_ref + thread_id: mismatched recipient must be rejected: %s",
 		refRR.Body.String())
@@ -248,6 +236,12 @@ func TestDirectConversation_ThreadID_RecipientMismatch_SameOnBothPaths(t *testin
 		"raw conversation_id and conversation_ref must reject identically when a thread_id is present")
 	assert.Equal(t, refRR.Body.String(), rawRR.Body.String(),
 		"raw conversation_id and conversation_ref must produce the same error body when a thread_id is present")
+
+	// Both rejections must leave no trace: no message row persisted or
+	// delivered for the sending agent.
+	msgs, err := s.ListMessages(ctx, store.MessageFilter{SenderID: agent.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	assert.Empty(t, msgs.Items, "a rejected send must not persist a message, on either path")
 }
 
 // ---------------------------------------------------------------------------

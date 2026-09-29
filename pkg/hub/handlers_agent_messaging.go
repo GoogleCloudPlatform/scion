@@ -779,8 +779,16 @@ func (s *Server) resolveOutboundRouting(
 	// caller instead asserted a direct conversation directly by
 	// conversation_id (Rule 1), so both ways of naming the same conversation
 	// enforce the same recipient consistency.
-	if !convRefResolved && asserted && convResult != nil && convResult.Kind == "direct" {
-		explicitRecipient := (req.Recipient != "" || req.RecipientID != "") && !def152DerivedRecipient
+	//
+	// convResult != nil is not checked here: asserted is only ever set true
+	// together with convResult (see the Rule 1 branch above), so the two are
+	// never observed apart. def152DerivedRecipient is not checked either:
+	// it is only ever set when the caller supplied no explicit recipient,
+	// but this path requires one (a raw conversation_id with no recipient
+	// and no conversation_ref is rejected earlier), so it is always false
+	// here.
+	if !convRefResolved && asserted && convResult.Kind == "direct" {
+		explicitRecipient := req.Recipient != "" || req.RecipientID != ""
 		if err := s.checkDirectRecipientMatchesDMKey(w, convResult.ConversationID, convResult.ExternalRef, recipientID, explicitRecipient); err != nil {
 			return nil, err
 		}
@@ -852,8 +860,13 @@ func (s *Server) checkDirectRecipientMatchesDMKey(w http.ResponseWriter, convers
 		s.messageLog.Warn("DEF-161: supplied recipient does not match DM key participants",
 			"recipient_id", recipientID, "dm_key_idA", idA, "dm_key_idB", idB,
 			"external_ref", externalRef)
+		// This helper serves both the conversation_ref and the raw
+		// conversation_id paths (see the doc comment above), so the body
+		// deliberately says "direct conversation" rather than "conversation
+		// reference" — it reads correctly no matter which way the caller
+		// named the conversation. Keep it identical on both call sites.
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
-			"a recipient may not be supplied with a direct conversation reference — "+
+			"a recipient may not be supplied with a direct conversation — "+
 				"the conversation is the address; remove the recipient and retry", nil)
 		return fmt.Errorf("recipient not in DM key")
 	}
