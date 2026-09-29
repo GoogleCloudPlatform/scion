@@ -170,10 +170,9 @@ func isCloexec(t *testing.T, fd int) bool {
 
 // TestFdsAreCloseOnExec proves every fd this package hands back is
 // close-on-exec, so it never leaks into a child process this one execs —
-// under an enforced privilege-drop runtime, that child is the workload
-// itself, running with dropped privileges. Go's raw syscall.Open/Openat,
-// unlike os.OpenFile, do not set O_CLOEXEC by default, so this has to be
-// forced explicitly.
+// on Substrate, that child is the workload itself, running with dropped
+// privileges. Go's raw syscall.Open/Openat, unlike os.OpenFile, do not set
+// O_CLOEXEC by default, so this has to be forced explicitly.
 func TestFdsAreCloseOnExec(t *testing.T) {
 	dir := t.TempDir()
 

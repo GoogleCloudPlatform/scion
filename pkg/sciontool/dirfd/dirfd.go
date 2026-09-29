@@ -13,7 +13,7 @@ Copyright 2026 The Scion Authors.
 // kernel still resolves and follows that symlink while walking the rest of
 // the path, because O_NOFOLLOW only applies to the last component. A
 // process that runs as root for its whole life over a directory tree a
-// less-privileged user owns (the sciontool init/serve pattern)
+// less-privileged user owns (the sciontool init/substrate-serve pattern)
 // needs every component checked, not just the last one.
 //
 // Callers get back an open fd for path's parent directory and path's own
@@ -98,9 +98,8 @@ func CreateExclAt(dirFd int, name string, mode os.FileMode) (*os.File, error) {
 // the raw syscall.Openat this wraps does not set it, and every fd this
 // package hands back either sits behind a privilege boundary (a cached log
 // fd, a token read/write fd) or is meant to be used and closed within this
-// process — never leaked into a child this process execs, which under an
-// enforced privilege-drop runtime is the workload itself running with
-// dropped privileges.
+// process — never leaked into a child this process execs, which on
+// Substrate is the workload itself running with dropped privileges.
 func OpenAt(dirFd int, name string, flags int, mode os.FileMode) (*os.File, error) {
 	fd, err := unix.Openat(dirFd, name, flags|syscall.O_CLOEXEC, uint32(mode))
 	if err != nil {
