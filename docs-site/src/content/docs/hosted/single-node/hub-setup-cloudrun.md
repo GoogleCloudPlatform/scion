@@ -357,6 +357,25 @@ with no warning and no recovery. The two errors are not the same size.
 There are **no per-agent resource limits**. All agents share the Instance's CPU and
 memory budget. A single compute-heavy agent can starve its neighbours.
 
+### Set the agent cap after deploying
+
+The Hub's `max_agents_per_broker` limit defaults to **100** hub-wide, which is above
+the measured ceiling of both Instance sizes above and does not by itself protect a
+single-node deployment. Right after deploying, lower it to about **16** — safely
+under the 4 CPU/8 GiB idle ceiling — from **Admin → Quotas** in the web UI, or with:
+
+```bash
+curl -X PUT "$HUB_URL/api/v1/admin/limits/$LIMIT_ID" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"max_agents_per_broker","resourceType":"agent","unit":"count","defaultValue":16}'
+```
+
+(`$LIMIT_ID` comes from `GET /api/v1/admin/limits`.) This is a single hub-wide value;
+there is no way yet to set a different cap for one broker (per-broker values are
+coming in `ptone/scion#2061` P2). If you deploy at 8 CPU/32 GiB instead, size the cap
+closer to that tier's measured ceiling.
+
 To change the Instance size:
 
 ```bash

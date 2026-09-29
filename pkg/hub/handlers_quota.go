@@ -360,18 +360,26 @@ func (s *Server) updateLimitDefinition(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
-	// System-seeded limit definitions cannot be modified.
+	// System-seeded limit definitions: only default_value and description
+	// may be changed (ptone/scion#2061 P1a, ptone/scion#2063). This is the
+	// supported admin path for the hub-wide max_agents_per_broker value
+	// (and any other system limit) — see pkg/hub/seed.go.
 	if existing.System {
-		writeForbidden(w, "system-seeded limit definitions cannot be modified")
-		return
+		if req.Name != existing.Name || req.ResourceType != existing.ResourceType || req.Unit != existing.Unit {
+			writeForbidden(w, "system limit definitions: only default_value and description can be changed")
+			return
+		}
+		existing.Description = req.Description
+		existing.DefaultValue = req.DefaultValue
+		existing.UpdatedAt = time.Now()
+	} else {
+		existing.Name = req.Name
+		existing.ResourceType = req.ResourceType
+		existing.Unit = req.Unit
+		existing.Description = req.Description
+		existing.DefaultValue = req.DefaultValue
+		existing.UpdatedAt = time.Now()
 	}
-
-	existing.Name = req.Name
-	existing.ResourceType = req.ResourceType
-	existing.Unit = req.Unit
-	existing.Description = req.Description
-	existing.DefaultValue = req.DefaultValue
-	existing.UpdatedAt = time.Now()
 
 	updated, err := s.store.UpdateLimitDefinition(r.Context(), existing)
 	if err != nil {

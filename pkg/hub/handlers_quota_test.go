@@ -17,6 +17,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -672,6 +673,183 @@ func TestQuotaAPI_UpdateLimitDefinition_SystemSeeded(t *testing.T) {
 	var def store.LimitDefinition
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&def))
 	assert.Equal(t, "system_update_test", def.Name)
+	assert.Equal(t, int64(100), def.DefaultValue)
+}
+
+// ---------------------------------------------------------------------------
+// Tests: ptone/scion#2061 P1a / ptone/scion#2063 — system limit definitions
+// allow changing default_value and description, but not name/resource_type/
+// unit.
+// ---------------------------------------------------------------------------
+
+// TestQuotaAPI_UpdateLimitDefinition_SystemSeeded_DefaultValueAllowed verifies
+// that a PUT changing only default_value (and description) on a system limit
+// succeeds and persists. This is the supported admin path for the hub-wide
+// max_agents_per_broker value (design.md §4.3, P1-D3).
+func TestQuotaAPI_UpdateLimitDefinition_SystemSeeded_DefaultValueAllowed(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	systemDef, err := s.CreateLimitDefinition(ctx, &store.LimitDefinition{
+		Name:         "system_default_value_test",
+		ResourceType: "agent",
+		Unit:         "count",
+		Description:  "original description",
+		DefaultValue: 100,
+		System:       true,
+	})
+	require.NoError(t, err)
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/limits/"+systemDef.ID, updateLimitDefinitionRequest{
+		Name:         systemDef.Name,
+		ResourceType: systemDef.ResourceType,
+		Unit:         systemDef.Unit,
+		Description:  "updated description",
+		DefaultValue: 16,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var updated store.LimitDefinition
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&updated))
+	assert.Equal(t, int64(16), updated.DefaultValue)
+	assert.Equal(t, "updated description", updated.Description)
+	assert.Equal(t, systemDef.Name, updated.Name)
+
+	// Verify it persisted.
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/admin/limits/"+systemDef.ID, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var def store.LimitDefinition
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&def))
+	assert.Equal(t, int64(16), def.DefaultValue)
+	assert.Equal(t, "updated description", def.Description)
+}
+
+// TestQuotaAPI_UpdateLimitDefinition_SystemSeeded_NameChangeForbidden verifies
+// that a PUT changing name on a system limit is rejected with 403 and the
+// documented message, and leaves the row untouched.
+func TestQuotaAPI_UpdateLimitDefinition_SystemSeeded_NameChangeForbidden(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	systemDef, err := s.CreateLimitDefinition(ctx, &store.LimitDefinition{
+		Name:         "system_name_change_test",
+		ResourceType: "agent",
+		Unit:         "count",
+		DefaultValue: 100,
+		System:       true,
+	})
+	require.NoError(t, err)
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/limits/"+systemDef.ID, updateLimitDefinitionRequest{
+		Name:         "renamed",
+		ResourceType: systemDef.ResourceType,
+		Unit:         systemDef.Unit,
+		DefaultValue: 16,
+	})
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "only default_value and description can be changed")
+
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/admin/limits/"+systemDef.ID, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var def store.LimitDefinition
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&def))
+	assert.Equal(t, "system_name_change_test", def.Name)
+	assert.Equal(t, int64(100), def.DefaultValue)
+}
+
+// TestQuotaAPI_UpdateLimitDefinition_SystemSeeded_ResourceTypeChangeForbidden
+// verifies the same 403 for a resource_type change.
+func TestQuotaAPI_UpdateLimitDefinition_SystemSeeded_ResourceTypeChangeForbidden(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	systemDef, err := s.CreateLimitDefinition(ctx, &store.LimitDefinition{
+		Name:         "system_rt_change_test",
+		ResourceType: "agent",
+		Unit:         "count",
+		DefaultValue: 100,
+		System:       true,
+	})
+	require.NoError(t, err)
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/limits/"+systemDef.ID, updateLimitDefinitionRequest{
+		Name:         systemDef.Name,
+		ResourceType: "project",
+		Unit:         systemDef.Unit,
+		DefaultValue: 16,
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+// TestQuotaAPI_UpdateLimitDefinition_SystemSeeded_UnitChangeForbidden verifies
+// the same 403 for a unit change.
+func TestQuotaAPI_UpdateLimitDefinition_SystemSeeded_UnitChangeForbidden(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	systemDef, err := s.CreateLimitDefinition(ctx, &store.LimitDefinition{
+		Name:         "system_unit_change_test",
+		ResourceType: "agent",
+		Unit:         "count",
+		DefaultValue: 100,
+		System:       true,
+	})
+	require.NoError(t, err)
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/limits/"+systemDef.ID, updateLimitDefinitionRequest{
+		Name:         systemDef.Name,
+		ResourceType: systemDef.ResourceType,
+		Unit:         "instances",
+		DefaultValue: 16,
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+// TestQuotaAPI_UpdateLimitDefinition_SystemSeeded_Forbidden_NonAdmin verifies
+// that a caller without quota.update cannot PUT a system limit definition
+// (or any limit definition).
+func TestQuotaAPI_UpdateLimitDefinition_SystemSeeded_Forbidden_NonAdmin(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	seedRoleDefinitions(ctx, s)
+
+	systemDef, err := s.CreateLimitDefinition(ctx, &store.LimitDefinition{
+		Name:         "system_nonadmin_test",
+		ResourceType: "agent",
+		Unit:         "count",
+		DefaultValue: 100,
+		System:       true,
+	})
+	require.NoError(t, err)
+
+	memberU := &store.User{
+		ID: tid("quota-nonadmin-put"), Email: "qa-nonadmin-put@example.com",
+		DisplayName: "Member", Role: "member", Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, memberU))
+	handler := srv.guarded("/api/v1/admin/limits/", srv.handleAdminLimitByID)
+
+	body, err := json.Marshal(updateLimitDefinitionRequest{
+		Name:         systemDef.Name,
+		ResourceType: systemDef.ResourceType,
+		Unit:         systemDef.Unit,
+		DefaultValue: 16,
+	})
+	require.NoError(t, err)
+
+	member := NewAuthenticatedUser(tid("quota-nonadmin-put"), "qa-nonadmin-put@example.com", "Member", "member", "cli")
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/limits/"+systemDef.ID, bytes.NewReader(body))
+	req = req.WithContext(contextWithIdentity(ctx, member))
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+
+	// Verify it was not modified.
+	getRec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/limits/"+systemDef.ID, nil)
+	require.Equal(t, http.StatusOK, getRec.Code)
+	var def store.LimitDefinition
+	require.NoError(t, json.NewDecoder(getRec.Body).Decode(&def))
 	assert.Equal(t, int64(100), def.DefaultValue)
 }
 

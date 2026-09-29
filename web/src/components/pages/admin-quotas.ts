@@ -951,13 +951,13 @@ export class ScionPageAdminQuotas extends LitElement {
           <span class="meta-text">${this.formatRelativeTime(limit.updatedAt)}</span>
         </td>
         <td class="actions-cell">
+          <sl-icon-button
+            name="pencil"
+            label="Edit"
+            @click=${(e: Event) => this.openEditLimit(limit, e)}
+          ></sl-icon-button>
           ${!limit.system
             ? html`
-                <sl-icon-button
-                  name="pencil"
-                  label="Edit"
-                  @click=${(e: Event) => this.openEditLimit(limit, e)}
-                ></sl-icon-button>
                 <sl-icon-button
                   name="trash"
                   label="Delete"
@@ -1095,6 +1095,11 @@ export class ScionPageAdminQuotas extends LitElement {
 
   private renderLimitDialog() {
     const title = this.editingLimit ? 'Edit Limit Definition' : 'Create Limit Definition';
+    // System-seeded limit definitions: only default_value and description
+    // can be changed (enforced server-side too, pkg/hub/handlers_quota.go
+    // updateLimitDefinition). Keep name/resourceType/unit read-only here so
+    // the form can't produce a request the server will 403.
+    const isSystemEdit = !!this.editingLimit?.system;
 
     return html`
       <sl-dialog
@@ -1109,6 +1114,12 @@ export class ScionPageAdminQuotas extends LitElement {
               >${this.limitDialogError}</sl-alert
             >`
           : nothing}
+        ${isSystemEdit
+          ? html`<sl-alert variant="neutral" open class="dialog-error"
+              >This is a system limit definition. Only default value and description can be
+              changed.</sl-alert
+            >`
+          : nothing}
 
         <div class="form-row">
           <sl-input
@@ -1118,6 +1129,7 @@ export class ScionPageAdminQuotas extends LitElement {
             @sl-input=${(e: Event) => {
               this.limitForm = { ...this.limitForm, name: (e.target as HTMLInputElement).value };
             }}
+            ?readonly=${isSystemEdit}
             required
           ></sl-input>
         </div>
@@ -1133,6 +1145,7 @@ export class ScionPageAdminQuotas extends LitElement {
                 resourceType: (e.target as HTMLSelectElement).value,
               };
             }}
+            ?disabled=${isSystemEdit}
             required
           >
             <sl-option value="agent">agent</sl-option>
@@ -1149,6 +1162,7 @@ export class ScionPageAdminQuotas extends LitElement {
             @sl-input=${(e: Event) => {
               this.limitForm = { ...this.limitForm, unit: (e.target as HTMLInputElement).value };
             }}
+            ?readonly=${isSystemEdit}
           ></sl-input>
         </div>
 
