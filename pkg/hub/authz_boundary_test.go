@@ -1395,6 +1395,65 @@ func TestHasAnyProjectBinding_SoleProjectConstrained_Denied(t *testing.T) {
 	}
 }
 
+// TestHasAnyProjectBinding_ConstraintLoadErrorReturnsError proves a
+// transient access-constraint-table load failure surfaces as an error from
+// hasAnyProjectBinding, wrapping ErrProjectAccessDenied, rather than a
+// deny-all-derived false. This path is not reachable through CanMintSelector
+// under a persistently failing store: MintTimeSystemGrant's own unconditional
+// constraint load runs first and errors, and the per-call cache then replays
+// that same error for every later helper in the batch, so this test calls
+// hasAnyProjectBinding directly.
+func TestHasAnyProjectBinding_ConstraintLoadErrorReturnsError(t *testing.T) {
+	_, s := authzTestSetup(t)
+	ctx := context.Background()
+	userID := tid("hapb-cle")
+	projectID := tid("hapb-cle-proj")
+	createDelegateTestProject(t, s, projectID, "hapb-cle-proj", "test")
+	require.NoError(t, s.CreateUser(ctx, &store.User{ID: userID, Email: "hapbcle@test.com", DisplayName: "u", Role: "member", Status: store.UserStatusActive}))
+
+	rd := createTestRoleDefinition(t, s, "hapb-cle-role", store.RoleScopeProject, []string{"agent.read"})
+	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: userID,
+		ScopeType: store.RoleScopeProject, ScopeID: projectID, CreatedBy: "test",
+	})
+	require.NoError(t, err)
+
+	failing := &r2FailingStore{Store: s, failListConstraints: errors.New("injected: constraint load failure")}
+	authz := NewAuthzService(failing, slog.Default())
+
+	ok, err := authz.hasAnyProjectBinding(ctx, activeUserPrincipal(userID), "agent.read")
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrProjectAccessDenied)
+	if ok {
+		t.Error("a constraint-table load failure must deny, not admit")
+	}
+}
+
+// TestHasRelevantProjectAdmission_ConstraintLoadErrorReturnsError is
+// hasAnyProjectBinding's counterpart for the Hub-boundary relationship
+// alternative: hasRelevantProjectAdmission calls
+// permissionSurvivesProjectConstraints per project, so this pins that a
+// transient constraint-table load failure surfaces as an error there too,
+// called directly for the same reason as the test above.
+func TestHasRelevantProjectAdmission_ConstraintLoadErrorReturnsError(t *testing.T) {
+	_, s := authzTestSetup(t)
+	ctx := context.Background()
+	userID := tid("hrpa-cle")
+	projectID := tid("hrpa-cle-proj")
+	createDelegateTestProject(t, s, projectID, "hrpa-cle-proj", "test")
+	createTestUserWithProjectRole(t, s, userID, "hrpacle@test.com", projectID, store.ProjectRoleMember)
+
+	failing := &r2FailingStore{Store: s, failListConstraints: errors.New("injected: constraint load failure")}
+	authz := NewAuthzService(failing, slog.Default())
+
+	ok, err := authz.hasRelevantProjectAdmission(ctx, activeUserPrincipal(userID), "agent.attach")
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrProjectAccessDenied)
+	if ok {
+		t.Error("a constraint-table load failure must deny, not admit")
+	}
+}
+
 // TestHasAnyProjectBinding_SecondUnconstrainedProject_Allowed confirms the
 // other half of the rule: a second, unconstrained project's grant still succeeds
 // even though a first project's grant is constrained away -- each project
@@ -1632,11 +1691,18 @@ func TestCanMintSelector_HubBoundary_ConstraintTableLoadedOnceForBatch(t *testin
 
 // TestCanMintSelector_ConstraintLoadErrorReturnsError proves a transient
 // access-constraint-table load failure surfaces as an error from
-// CanMintSelector on every path that reaches it, not just some — covering
-// both the Hub-boundary path (hubPermissionEligible -> MintTimeSystemGrant)
-// and the Project-boundary path (selectorMintEligible ->
-// permissionSurvivesProjectConstraints, for a relationship-eligible
-// selector). Neither case should return a SelectorEligibility slice.
+// CanMintSelector on three of its paths: the Hub-boundary flat/system path
+// (hubPermissionEligible -> MintTimeSystemGrant), the Project-boundary
+// relationship path (selectorMintEligible -> permissionSurvivesProjectConstraints),
+// and the Project-boundary flat-role path (selectorMintEligible ->
+// hasProjectRoleFlatPermission -> projectScopedPermissionsStrict). See
+// TestHasAnyProjectBinding_ConstraintLoadErrorReturnsError and
+// TestHasRelevantProjectAdmission_ConstraintLoadErrorReturnsError for the two
+// remaining CanMintSelector paths, exercised via a direct call to each
+// helper: through CanMintSelector itself, MintTimeSystemGrant's unconditional
+// constraint load and the per-call cache both return before either path is
+// tried. None of the three subtests below should return a SelectorEligibility
+// slice.
 func TestCanMintSelector_ConstraintLoadErrorReturnsError(t *testing.T) {
 	t.Run("hub_boundary", func(t *testing.T) {
 		_, s := authzTestSetup(t)
@@ -1649,7 +1715,7 @@ func TestCanMintSelector_ConstraintLoadErrorReturnsError(t *testing.T) {
 
 		// Mirrors TestCanMintSelector_HubBoundary_CatalogOnlyGrantEligible:
 		// a hub-member's catalog-only skill:read reaches MintTimeSystemGrant,
-		// which now loads the constraint table via the error-returning form.
+		// which loads the constraint table via the error-returning form.
 		results, err := authz.CanMintSelector(ctx, activeUserPrincipal(userID), TokenBoundary{Kind: BoundaryKindHub}, []string{"skill:read"})
 		require.Error(t, err)
 		require.ErrorIs(t, err, ErrProjectAccessDenied)
@@ -1698,6 +1764,58 @@ func TestCanMintSelector_ConstraintLoadErrorReturnsError(t *testing.T) {
 		require.ErrorIs(t, err, ErrProjectAccessDenied)
 		require.Nil(t, results)
 	})
+}
+
+// TestHasProjectRoleFlatPermission_BindingListErrorWrapsSentinel proves that
+// a store failure on the flat mint path's OWN group/binding resolution
+// (projectScopedGrants) is classified with ErrProjectAccessDenied, the same
+// as a constraint-table load failure on this path — matching every other
+// CanMintSelector path's error classification. getProjectScopedPermissions's
+// non-strict form keeps its unwrapped error, for useraccesstoken.go.
+func TestHasProjectRoleFlatPermission_BindingListErrorWrapsSentinel(t *testing.T) {
+	_, s := authzTestSetup(t)
+	ctx := context.Background()
+	userID := tid("hprfp-ble")
+	projectID := tid("hprfp-ble-proj")
+	createDelegateTestProject(t, s, projectID, "hprfp-ble-proj", "test")
+	createTestUserWithProjectRole(t, s, userID, "hprfpble@test.com", projectID, store.ProjectRoleAdmin)
+
+	failing := &r2FailingStore{Store: s, failListBindings: errors.New("injected: binding list failure")}
+	authz := NewAuthzService(failing, slog.Default())
+
+	ok, err := authz.hasProjectRoleFlatPermission(ctx, activeUserPrincipal(userID), projectID, "agent.delete")
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrProjectAccessDenied)
+	if ok {
+		t.Error("a binding-list failure must deny, not admit")
+	}
+}
+
+// TestGetProjectScopedPermissions_GroupResolutionFailureLogsAndErrors proves
+// getProjectScopedPermissions's own behavior on a group-resolution failure is
+// independent of projectScopedPermissionsStrict, despite both sharing
+// projectScopedGrants: it emits a Warn log and returns an unwrapped error,
+// not ErrProjectAccessDenied -- useraccesstoken.go's caller does not expect
+// that sentinel.
+func TestGetProjectScopedPermissions_GroupResolutionFailureLogsAndErrors(t *testing.T) {
+	_, s := authzTestSetup(t)
+	ctx := context.Background()
+	userID := tid("gpsp-grf")
+	projectID := tid("gpsp-grf-proj")
+	createDelegateTestProject(t, s, projectID, "gpsp-grf-proj", "test")
+
+	failing := &r2FailingStore{Store: s, failGetEffectiveGroups: errors.New("injected: group resolution failure")}
+	logger, buf := federationAuthCaptureBuffer()
+	authz := NewAuthzService(failing, logger)
+
+	_, err := authz.getProjectScopedPermissions(ctx, store.RoleBindingPrincipalUser, userID, projectID)
+	require.Error(t, err)
+	if errors.Is(err, ErrProjectAccessDenied) {
+		t.Error("getProjectScopedPermissions must keep its unwrapped group-resolution error, not ErrProjectAccessDenied")
+	}
+	if got := countWarnLines(t, buf, "failed to get effective groups for project-scoped permission resolution (fail-closed)"); got != 1 {
+		t.Errorf("expected exactly 1 Warn log line for the group-resolution failure, got %d", got)
+	}
 }
 
 // --- Full contradiction matrix ----------------------------------------------
