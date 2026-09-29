@@ -27,6 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -140,6 +141,44 @@ func TestHandleAuthScopes_NonAdmin(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200 for non-admin user, got %d: %s", rr.Code, rr.Body.String())
 	}
+}
+
+// TestHandleAuthScopes_NonUserIdentity pins the parameterless catalog's
+// backward compatibility: any authenticated identity, not only a user, gets
+// it -- exactly as before this endpoint gained per-project eligibility.
+// Eligibility itself is a per-user computation (CanMintSelector requires a
+// local user principal), so a non-user identity requesting it gets 401
+// instead of a partial or crafted response.
+func TestHandleAuthScopes_NonUserIdentity(t *testing.T) {
+	srv, _ := testServer(t)
+	handler := srv.guarded("/api/v1/auth/scopes", srv.handleAuthScopes)
+	agent := &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: tid("authscopes-agent-identity")},
+		ProjectID: tid("authscopes-agent-identity-project"),
+	}}
+
+	t.Run("catalog with no params succeeds for a non-user identity", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/scopes", nil)
+		req = req.WithContext(contextWithIdentity(req.Context(), agent))
+
+		rr := httptest.NewRecorder()
+		handler(rr, req)
+
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		var resp AuthScopesResponse
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+		assert.NotEmpty(t, resp.Scopes)
+	})
+
+	t.Run("eligibility with projectId requires a user identity", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/scopes?projectId="+tid("authscopes-agent-identity-project"), nil)
+		req = req.WithContext(contextWithIdentity(req.Context(), agent))
+
+		rr := httptest.NewRecorder()
+		handler(rr, req)
+
+		assert.Equal(t, http.StatusUnauthorized, rr.Code, rr.Body.String())
+	})
 }
 
 // TestHandleAuthScopes_ContainsNewScopes verifies the new resource type scopes
@@ -398,11 +437,11 @@ func TestAuthScopes_ProjectEligibilityForMember(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), "uatp-agent")
 }
 
-// TestAuthScopes_ProjectEligibilityRequiresProjectAccess verifies DTO v3's
-// all-denied case (pat-c-lead 06:45Z): an outsider with no membership and
-// no exact-permission system authority for anything gets the same
-// oracle-resistant 403 as token mint, byte-identical to a nonexistent
-// project -- the endpoint must not become a project-existence oracle. See
+// TestAuthScopes_ProjectEligibilityRequiresProjectAccess verifies the
+// all-denied case: an outsider with no membership and no exact-permission
+// system authority for anything gets the same oracle-resistant 403 as
+// token mint, byte-identical to a nonexistent project -- the endpoint must
+// not become a project-existence oracle. See
 // TestAuthScopes_ProjectEligibility_PartialSystemAuthorityAnswersPerEntry
 // for the other half: once at least one selector is genuinely admitted,
 // the response answers per-entry instead.
@@ -438,10 +477,10 @@ func TestAuthScopes_ProjectEligibilityRequiresProjectAccess(t *testing.T) {
 }
 
 // TestAuthScopes_ProjectEligibility_PartialSystemAuthorityAnswersPerEntry
-// verifies DTO v3's other case (pat-c-lead 06:45Z): a non-member holding
-// EXACT system authority for exactly one permission (agent.attach, via a
-// dedicated system-scope role binding, not membership and not a broader
-// role) is genuinely admitted for that one selector -- 200, eligible=true
+// verifies the other case: a non-member holding EXACT system authority for
+// exactly one permission (agent.attach, via a dedicated system-scope role
+// binding, not membership and not a broader role) is genuinely admitted
+// for that one selector -- 200, eligible=true
 // -- while every other project-applicable selector they lack authority for
 // reports eligible=false, reason="project_access_required" verbatim. The
 // whole response must NOT collapse to the oracle-resistant 403 here: since
@@ -494,10 +533,11 @@ func TestAuthScopes_ProjectEligibility_PartialSystemAuthorityAnswersPerEntry(t *
 	}
 }
 
-// TestAuthScopes_ListingAgreesWithMint pins DTO v3's consistency
-// requirement end to end through both real HTTP endpoints, for the same
-// principal and selectors: a selector the listing reports eligible for a
-// project also mints, and one it reports ineligible for does not.
+// TestAuthScopes_ListingAgreesWithMint pins the consistency requirement
+// between the listing and mint end to end through both real HTTP
+// endpoints, for the same principal and selectors: a selector the listing
+// reports eligible for a project also mints, and one it reports
+// ineligible for does not.
 func TestAuthScopes_ListingAgreesWithMint(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -582,10 +622,10 @@ func TestAuthScopes_AliasEligibleOnlyWhenAllMembersEligible(t *testing.T) {
 
 // TestAuthScopes_BoundaryParamValidation pins every 400 case for
 // ?boundary=/?projectId=, independent of whether hub-boundary eligibility
-// is enabled yet: when D.3 flips that single gate, these structural
+// is enabled yet: when that single gate is flipped on, these structural
 // validations must keep returning 400 unchanged.
 func TestAuthScopes_BoundaryParamValidation(t *testing.T) {
-	srv, _ := testServer(t)
+	srv, s := testServer(t)
 
 	cases := []struct {
 		name string
@@ -621,6 +661,34 @@ func TestAuthScopes_BoundaryParamValidation(t *testing.T) {
 		for _, alias := range resp.Aliases {
 			assert.Nil(t, alias.Eligibility, "catalog-only response must not include eligibility")
 		}
+	})
+
+	t.Run("boundary=project with projectId succeeds and pins the eligibility boundary shape", func(t *testing.T) {
+		ctx := context.Background()
+		projectID := tid("authscopes-boundary-positive-project")
+		ownerID := tid("authscopes-boundary-positive-owner")
+		memberID := tid("authscopes-boundary-positive-member")
+		createRS1Project(t, s, projectID, ownerID)
+		uatpMember(t, s, projectID, memberID)
+
+		member, err := s.GetUser(ctx, memberID)
+		require.NoError(t, err)
+
+		rec := doRequestAsUser(t, srv, member, http.MethodGet, "/api/v1/auth/scopes?boundary=project&projectId="+projectID, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		var resp AuthScopesResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+		var attach *AuthScopeEntry
+		for i := range resp.Scopes {
+			if resp.Scopes[i].ID == "agent:attach" {
+				attach = &resp.Scopes[i]
+			}
+		}
+		require.NotNil(t, attach, "agent:attach missing from response")
+		require.NotNil(t, attach.Eligibility)
+		assert.Equal(t, TokenBoundaryDTO{Kind: "project", ProjectID: projectID}, attach.Eligibility.Boundary)
 	})
 }
 

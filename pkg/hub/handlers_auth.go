@@ -1788,7 +1788,7 @@ type ScopeEligibility struct {
 	Boundary TokenBoundaryDTO `json:"boundary"`
 	Eligible bool             `json:"eligible"`
 	// Reason is a MintDenialReason code, present only when !Eligible,
-	// including "project_access_required" (DTO v3): that code appears here
+	// including "project_access_required": that code appears here
 	// whenever at least one OTHER selector in the same request was
 	// admitted, since the caller already knows the project exists in that
 	// case. It appears ONLY as the request's uniform 403 -- never here --
@@ -1852,9 +1852,9 @@ type AuthScopesResponse struct {
 }
 
 // scopeEligibilityNote returns optional human-readable framing for a
-// !eligible relationship-kind entry: eligibility here answers only "may you
-// select this restriction," and a relationship-eligible selector is
-// re-checked against the actual target on every later request.
+// relationship-kind entry, eligible or not: eligibility here answers only
+// "may you select this restriction," and a relationship-eligible selector
+// is re-checked against the actual target on every later request.
 func scopeEligibilityNote(kind permissions.MintEligibilityKind) string {
 	if kind == permissions.MintEligibilityRelationship {
 		return "checked on each target: your own agents and their descendants"
@@ -1922,8 +1922,9 @@ func parseAuthScopesBoundary(w http.ResponseWriter, r *http.Request) (boundary *
 			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "boundary=hub does not accept projectId", nil)
 			return nil, true
 		}
-		// D.3 flips this single switch to enable hub-boundary eligibility;
-		// the two validation cases above must keep returning 400 unchanged.
+		// Hub-boundary eligibility is not enabled yet; enabling it is this
+		// single switch. The two validation cases above must keep
+		// returning 400 unchanged when it is.
 		writeError(w, http.StatusBadRequest, "unsupported_boundary", "hub boundary eligibility is not available yet", nil)
 		return nil, true
 	default:
@@ -1939,18 +1940,18 @@ func parseAuthScopesBoundary(w http.ResponseWriter, r *http.Request) (boundary *
 // it as a project-boundary restriction (CanMintSelector), computed fresh for
 // the principal and never widened by whatever credential made this request.
 //
-// Project-access aggregation (DTO v3, pat-c-lead 06:45Z): the whole response
-// collapses to the same oracle-resistant 403 as token mint ONLY when the
-// batch has at least one MintDenialProjectAccessRequired result AND no
-// result is admitted (OK=true) -- that combination is indistinguishable
-// from "project does not exist" (no membership and no exact-permission
-// system authority for anything relevant), so existence stays unobservable
-// in that all-denied case. A selector denied for an unrelated, structural
-// reason (boundary_not_allowed, unknown_selector -- e.g. a hub-only
-// selector requested under a project boundary, true for every principal)
-// neither triggers nor blocks the collapse; it is orthogonal to project
-// access and always shown per-entry either way. Otherwise the response
-// answers per-entry, and an entry denied for project access reports
+// Project-access aggregation: the whole response collapses to the same
+// oracle-resistant 403 as token mint ONLY when the batch has at least one
+// MintDenialProjectAccessRequired result AND no result is admitted
+// (OK=true) -- that combination is indistinguishable from "project does
+// not exist" (no membership and no exact-permission system authority for
+// anything relevant), so existence stays unobservable in that all-denied
+// case. A selector denied for an unrelated, structural reason
+// (boundary_not_allowed, unknown_selector -- e.g. a hub-only selector
+// requested under a project boundary, true for every principal) neither
+// triggers nor blocks the collapse; it is orthogonal to project access and
+// always shown per-entry either way. Otherwise the response answers
+// per-entry, and an entry denied for project access reports
 // eligible=false, reason="project_access_required" verbatim: a caller
 // admitted for at least one selector already knows the project exists, so
 // seeing which of their own selectors also lack authority is not a new
@@ -1959,12 +1960,6 @@ func parseAuthScopesBoundary(w http.ResponseWriter, r *http.Request) (boundary *
 func (s *Server) handleAuthScopes(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
-		return
-	}
-
-	user := GetUserIdentityFromContext(r.Context())
-	if user == nil {
-		Unauthorized(w)
 		return
 	}
 
@@ -1977,6 +1972,15 @@ func (s *Server) handleAuthScopes(w http.ResponseWriter, r *http.Request) {
 
 	var eligByScope map[string]SelectorEligibility
 	if boundary != nil {
+		// Eligibility is a per-user computation (CanMintSelector requires a
+		// local user principal); the parameterless catalog below has no
+		// such requirement and stays available to any authenticated
+		// identity, exactly as before this endpoint gained eligibility.
+		user := GetUserIdentityFromContext(r.Context())
+		if user == nil {
+			Unauthorized(w)
+			return
+		}
 		selectors := make([]string, 0, len(options))
 		for _, opt := range options {
 			selectors = append(selectors, opt.UATScope)
@@ -1984,6 +1988,8 @@ func (s *Server) handleAuthScopes(w http.ResponseWriter, r *http.Request) {
 		principal := principalContextForIdentity(user)
 		results, err := s.authzService.CanMintSelector(r.Context(), principal, *boundary, selectors)
 		if err != nil {
+			slog.Warn("auth scopes: CanMintSelector failed",
+				"user_id", user.ID(), "project_id", boundary.ProjectID, "error", err)
 			// Fail closed, oracle-resistant: identical to mint's forbidden
 			// response for an inaccessible or nonexistent project.
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "forbidden", nil)
