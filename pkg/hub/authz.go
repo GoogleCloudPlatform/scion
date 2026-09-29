@@ -220,11 +220,27 @@ type Decision struct {
 	Actor   *DecisionActor `json:"actor,omitempty"`
 	Purpose string         `json:"purpose,omitempty"`
 
+	// DeniedBy names the pipeline stage that produced a deny, as a stable
+	// snake_case value. It is empty on allow and on a deny that is not
+	// attributed to a named stage. Reason is independent of it.
+	DeniedBy DeniedBy `json:"deniedBy,omitempty"`
+
 	// Provenance contains the full decision provenance when Explain=true.
 	// For non-explain requests, this is populated with minimal data
 	// (matched grant and deny reason).
 	Provenance *DecisionProvenance `json:"provenance,omitempty"`
 }
+
+// DeniedBy is the stable identifier of the stage that denied a decision.
+type DeniedBy string
+
+const (
+	// DeniedByDelegationCeiling: the agent's delegation chain does not
+	// supply the permission (a non-live delegator, a delegator that does
+	// not hold the permission, a missing or ambiguous edge, or a failed
+	// lookup).
+	DeniedByDelegationCeiling DeniedBy = "delegation_ceiling"
+)
 
 // EvaluationDetail provides detailed info for the evaluate endpoint.
 type EvaluationDetail struct {
@@ -259,6 +275,11 @@ type AuthzService struct {
 	// progenyAdapters holds progeny sharing-source adapters registered
 	// through RegisterProgenyAdapter.
 	progenyAdapters progenyAdapterRegistry
+
+	// sourceResolver identifies an agent's authoritative source user for
+	// the execution-project relationship stage. Nil selects the stored
+	// agent row and typed delegation edges.
+	sourceResolver ExecutionSourceResolver
 }
 
 // NewAuthzService creates a new AuthzService.
@@ -589,23 +610,27 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 	}
 
 	// ── Step 10: Agent delegation ceiling (post-decision) ────────────
-	// Applies to ALL allowed decisions regardless of grant source
-	// (kernel or relationship grant). C-1 fix: previously only ran on
-	// kernel-allowed decisions because Step 9 returned early.
+	// Applies to every allowed decision for an agent principal, whatever
+	// the grant source (kernel or relationship grant). The ceiling
+	// evaluates the exact permission resolved above. A failed lookup
+	// denies.
 	if decision.Allowed && isAgentPrincipal(principal.Kind) {
 		if agent, ok := principal.Identity.(AgentIdentity); ok {
 			if getDelegationCeilingCache(ctx) == nil {
 				ctx = contextWithDelegationCeilingCache(ctx)
 			}
-			ceilingAllowed, ceilingReason, ceilingErr := a.checkDelegationCeiling(ctx, request, agent.ID(), nil)
+			ceilingReq := request
+			ceilingReq.Principal = principal
+			ceilingReq.Permission = permissionID
+			ceilingAllowed, ceilingReason, ceilingErr := a.checkDelegationCeiling(ctx, ceilingReq, permissionID, agent.ID(), nil)
 			if ceilingErr != nil {
-				if !isReadOnlyOperation(request.Action) {
-					decision.Allowed = false
-					decision.Reason = "delegation ceiling check failed (fail-closed): " + ceilingErr.Error()
-				}
+				decision.Allowed = false
+				decision.Reason = "delegation ceiling check failed (fail-closed): " + ceilingErr.Error()
+				decision.DeniedBy = DeniedByDelegationCeiling
 			} else if !ceilingAllowed {
 				decision.Allowed = false
 				decision.Reason = ceilingReason
+				decision.DeniedBy = DeniedByDelegationCeiling
 			}
 		}
 	}

@@ -826,7 +826,10 @@ func TestGolden_AgentRelationshipGrantDelegationCeiling(t *testing.T) {
 	resource := Resource{
 		Type: "agent", ID: tid("relceil-child"),
 		ParentType: "project", ParentID: f.projectBeta.ID,
-		Ancestry: []string{ceilingUserID, ceilingAgentID},
+		// The chain root is a different user, so the delegator's own
+		// authority on the resource comes only from its Beta role (an
+		// ancestor relationship of the delegator would also supply it).
+		Ancestry: []string{tid("relceil-other-root"), ceilingAgentID},
 	}
 
 	// ALLOWED: relationship grant fires (kernel denied), ceiling passes.
@@ -887,6 +890,8 @@ func TestGolden_AgentProgenySecretAccess(t *testing.T) {
 		CreatedBy: f.projectOwnerID,
 	}
 	require.NoError(t, f.store.CreateAgent(ctx, progenyAgent))
+	createDCEdge(t, f.store, store.DelegationPrincipalUser, f.projectOwnerID,
+		store.DelegationPrincipalAgent, progenyAgent.ID, store.RoleScopeProject, f.projectAlpha.ID, string(AgentRoleFull))
 
 	// Use an ancestry-bearing agent identity (nil scopes → fail-closed restriction)
 	agentIdentity := &testProgenyAgentIdentity{

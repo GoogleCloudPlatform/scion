@@ -423,12 +423,11 @@ func TestAgentSkillRead_FilterParamsCannotWiden(t *testing.T) {
 }
 
 // A17: a project-less agent never gets a project bucket, and its predicate is
-// never nil (unfiltered). Its granted set is the hub catalog plus its
-// creator's user skills: the delegation ceiling walks with an empty scope
-// (it logs "no project scope" but does not itself deny), and post-backfill
-// reads by a hub-attested agent with no edge are allowed. With no origin user
-// there is no user bucket. Pinned here, together with probe ⇔ per-row
-// agreement on every fixture skill.
+// never nil (unfiltered). Its granted set is the hub catalog. It gets no
+// user bucket: a creator user-skill read requires the source user's
+// admission to the agent's execution project, and a project-less agent has
+// none. Pinned here, together with probe ⇔ per-row agreement on every
+// fixture skill.
 func TestAgentSkillRead_ProjectlessAgent(t *testing.T) {
 	f := setupAgentSkillFixture(t)
 	ctx := context.Background()
@@ -437,7 +436,7 @@ func TestAgentSkillRead_ProjectlessAgent(t *testing.T) {
 		ancestry []string
 		wantUser string
 	}{
-		{"with-creator", []string{f.u.ID}, f.u.ID},
+		{"with-creator", []string{f.u.ID}, ""},
 		{"no-ancestry", nil, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

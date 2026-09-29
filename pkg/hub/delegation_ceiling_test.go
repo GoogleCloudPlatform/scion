@@ -306,19 +306,6 @@ func TestDelegationCeiling_FailClosedMinting(t *testing.T) {
 	assert.False(t, decision.Allowed, "minting operation should fail closed on delegation ceiling error")
 }
 
-// --- Test: isMintingOperation ---
-
-func TestIsMintingOperation(t *testing.T) {
-	assert.True(t, isMintingOperation(ActionCreate), "ActionCreate is minting")
-	assert.True(t, isMintingOperation(ActionManage), "ActionManage is minting")
-	assert.True(t, isMintingOperation(ActionAddMember), "ActionAddMember is minting")
-	assert.True(t, isMintingOperation(ActionMint), "ActionMint is minting")
-	assert.True(t, isMintingOperation(ActionAssign), "ActionAssign is minting")
-	assert.True(t, isMintingOperation(ActionRegister), "ActionRegister is minting")
-	assert.False(t, isMintingOperation(ActionRead), "ActionRead is not minting")
-	assert.False(t, isMintingOperation(ActionList), "ActionList is not minting")
-}
-
 // --- Test: Request-scoped caching ---
 
 func TestDelegationCeiling_RequestScopedCache(t *testing.T) {
@@ -1005,7 +992,7 @@ func TestDelegationCeiling_DeleteFailsClosedOnOrphanedDelegation(t *testing.T) {
 		"ActionRead should still be allowed on orphaned delegation")
 }
 
-// --- R2-3: Unmapped permission in handleOrphanedDelegation must deny ---
+// --- R2-3: Unmapped permission under the migration sentinel must deny ---
 
 func TestDelegationCeiling_UnmappedPermissionOrphanedDeny(t *testing.T) {
 	authz, s := setupDelegationCeilingTest(t)
@@ -1032,17 +1019,11 @@ func TestDelegationCeiling_UnmappedPermissionOrphanedDeny(t *testing.T) {
 
 	agent := dcAgentIdentity(agentID, projectID, AgentRoleFull)
 
-	// Use a resource type that produces a permission ID not in the registry
-	// (e.g., "imaginary_resource.read" won't be in the permissions registry).
+	// A resource type with no registered permission: the migration
+	// sentinel authorizes only registered non-sensitive reads, so an
+	// unmapped permission denies.
 	unmappedResource := Resource{Type: "imaginary_resource", ParentType: "project", ParentID: projectID}
-
-	// Even though this is a "read" action, the resource type is unknown,
-	// so the permission will not be in the registry. For orphaned delegations,
-	// genuinely unmapped permissions must deny.
 	decision := authz.CheckAccess(ctx, agent, unmappedResource, ActionRead)
-	// The resolvePermissionID will construct "imaginary_resource.read" which
-	// won't be in the registry, so permissionToAgentScope returns "".
-	// The isKnownRead check should find it's NOT in the registry and deny.
 	assert.False(t, decision.Allowed,
 		"unmapped permission in orphaned delegation must deny (R2-3)")
 }

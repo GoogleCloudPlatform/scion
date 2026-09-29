@@ -266,9 +266,12 @@ func TestRelationshipRules_FederatedAgentMatchesNoAgentRow(t *testing.T) {
 // A progeny read requires the sharing source's owner to be active.
 func TestRelationshipRules_ProgenySourceInactive(t *testing.T) {
 	f := newGoldenFixture(t)
+	// The execution source is a different active member of the agent's
+	// project, so the source-activity stage is the one under test.
+	seedExecutionAgent(t, f.store, tid("relrule-progeny-agent"), f.projectAlpha.ID, []string{f.projectOwnerID}, []string{f.projectAdminID})
 	agent := &agentIdentityWrapper{&AgentTokenClaims{
 		Claims:    jwt.Claims{Subject: tid("relrule-progeny-agent")},
-		ProjectID: f.projectBeta.ID,
+		ProjectID: f.projectAlpha.ID,
 		Ancestry:  []string{f.projectOwnerID},
 		Scopes:    allRegisteredAgentScopes(),
 	}}
@@ -297,9 +300,12 @@ func TestRelationshipRules_ProgenySourceInactive(t *testing.T) {
 // The creator user-skill read requires an active origin user.
 func TestRelationshipRules_CreatorSkillSourceInactive(t *testing.T) {
 	f := newGoldenFixture(t)
+	// The execution source is a different active member of the agent's
+	// project, so the source-activity stage is the one under test.
+	seedExecutionAgent(t, f.store, tid("relrule-skill-agent"), f.projectAlpha.ID, []string{f.projectOwnerID}, []string{f.projectAdminID})
 	agent := &agentIdentityWrapper{&AgentTokenClaims{
 		Claims:    jwt.Claims{Subject: tid("relrule-skill-agent")},
-		ProjectID: f.projectBeta.ID,
+		ProjectID: f.projectAlpha.ID,
 		Ancestry:  []string{f.projectOwnerID},
 		Scopes:    allRegisteredAgentScopes(),
 	}}
@@ -433,9 +439,10 @@ func TestRegisterProgenyAdapter_BuiltinKindsRefused(t *testing.T) {
 // lookup error denies.
 func TestProgenyAdapter_RegisteredSourcesDecide(t *testing.T) {
 	f := newGoldenFixture(t)
+	seedExecutionAgent(t, f.store, tid("relrule-adapter-agent"), f.projectAlpha.ID, []string{f.projectOwnerID}, []string{f.projectOwnerID})
 	agent := &agentIdentityWrapper{&AgentTokenClaims{
 		Claims:    jwt.Claims{Subject: tid("relrule-adapter-agent")},
-		ProjectID: f.projectBeta.ID,
+		ProjectID: f.projectAlpha.ID,
 		Ancestry:  []string{f.projectOwnerID},
 		Scopes:    allRegisteredAgentScopes(),
 	}}
@@ -458,9 +465,10 @@ func TestProgenyAdapter_RegisteredSourcesDecide(t *testing.T) {
 // fact stage, with an active owner and every other stage satisfied.
 func TestProgenyAdapter_SourcesErrorRejectsAtFactStage(t *testing.T) {
 	f := newGoldenFixture(t)
+	seedExecutionAgent(t, f.store, tid("relrule-adapter-err-agent"), f.projectAlpha.ID, []string{f.projectOwnerID}, []string{f.projectOwnerID})
 	agent := &agentIdentityWrapper{&AgentTokenClaims{
 		Claims:    jwt.Claims{Subject: tid("relrule-adapter-err-agent")},
-		ProjectID: f.projectBeta.ID,
+		ProjectID: f.projectAlpha.ID,
 		Ancestry:  []string{f.projectOwnerID},
 		Scopes:    allRegisteredAgentScopes(),
 	}}
@@ -490,9 +498,10 @@ func TestProgeny_ListAndPointReadConsistent(t *testing.T) {
 	require.NoError(t, f.store.CreateUser(context.Background(), &store.User{
 		ID: suspendedID, Email: "suspended@relrule.test", DisplayName: "s", Role: "member", Status: "suspended",
 	}))
+	seedExecutionAgent(t, f.store, tid("relrule-consistency-agent"), f.projectAlpha.ID, []string{f.projectOwnerID, suspendedID}, []string{f.projectOwnerID})
 	agent := &agentIdentityWrapper{&AgentTokenClaims{
 		Claims:    jwt.Claims{Subject: tid("relrule-consistency-agent")},
-		ProjectID: f.projectBeta.ID,
+		ProjectID: f.projectAlpha.ID,
 		Ancestry:  []string{f.projectOwnerID, suspendedID},
 		Scopes:    allRegisteredAgentScopes(),
 	}}
@@ -688,7 +697,7 @@ func TestRelationshipRules_ProgenySourceOwnerLookupAndAgentOwner(t *testing.T) {
 		Store: f.store,
 		users: map[string]*store.User{suspendedRoot: {ID: suspendedRoot, Status: "suspended"}},
 		agents: map[string]*store.Agent{
-			okAgent:   {ID: okAgent, Ancestry: []string{activeRoot, okAgent}},
+			okAgent:   {ID: okAgent, ProjectID: f.projectAlpha.ID, Ancestry: []string{activeRoot, okAgent}},
 			suspAgent: {ID: suspAgent, Ancestry: []string{suspendedRoot, suspAgent}},
 		},
 		userErr: map[string]bool{lookupErrOwner: true},
@@ -704,9 +713,11 @@ func TestRelationshipRules_ProgenySourceOwnerLookupAndAgentOwner(t *testing.T) {
 		optIn("s-agent-ok", okAgent),
 		optIn("s-agent-root-susp", suspAgent),
 	}}))
+	seedExecutionAgent(t, f.store, tid("srcdec-reader"), f.projectAlpha.ID,
+		[]string{activeRoot, lookupErrOwner, okAgent, suspAgent}, []string{activeRoot})
 	reader := &agentIdentityWrapper{&AgentTokenClaims{
 		Claims:    jwt.Claims{Subject: tid("srcdec-reader")},
-		ProjectID: f.projectBeta.ID,
+		ProjectID: f.projectAlpha.ID,
 		Ancestry:  []string{activeRoot, lookupErrOwner, okAgent, suspAgent},
 		Scopes:    allRegisteredAgentScopes(),
 	}}
@@ -786,9 +797,11 @@ func TestProgeny_RegisteredKindListAndPointParity(t *testing.T) {
 	releaseBuiltinProgenyAdapter(t, other.authz, "secret")
 	secretSrc := SharingSource{Kind: "secret", ID: other.secretID, OwnerID: other.projectOwnerID, Policy: SharingPolicyOptInRequired, OptedIn: true}
 	require.NoError(t, other.authz.RegisterProgenyAdapter(fakeProgenyAdapter{kind: "secret", perms: []string{"skill.read"}, sources: []SharingSource{secretSrc}}))
+	seedExecutionAgent(t, other.store, tid("relrule-regkind-agent-2"), other.projectAlpha.ID,
+		[]string{other.projectOwnerID}, []string{other.projectOwnerID})
 	otherAgent := &agentIdentityWrapper{&AgentTokenClaims{
 		Claims:    jwt.Claims{Subject: tid("relrule-regkind-agent-2")},
-		ProjectID: other.projectBeta.ID,
+		ProjectID: other.projectAlpha.ID,
 		Ancestry:  []string{other.projectOwnerID},
 		Scopes:    allRegisteredAgentScopes(),
 	}}

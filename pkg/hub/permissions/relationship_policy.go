@@ -72,7 +72,6 @@ var RelationshipPolicies = []RelationshipPolicy{
 	// TestRelationshipPolicy_MatchesCharacterization.
 	{
 		// owner/user/agent: the remaining agent permissions (not mint-eligible).
-		// agent.manage is a reviewed unregistered ID (relationshipPolicyReviewedExceptions).
 		Relationship:   "owner",
 		PrincipalKinds: []string{"user"},
 		ResourceType:   ResourceAgent,
@@ -80,7 +79,7 @@ var RelationshipPolicies = []RelationshipPolicy{
 			"agent.create", "agent.read", "agent.list", "agent.update", "agent.delete",
 			"agent.lifecycle", "agent.stop_all", "agent.message", "agent.set_message_mode",
 			"agent.grant_hub_mode", "agent.status_update", "agent.log_append", "agent.notify",
-			"agent.token_refresh", "agent.port_forward", "agent.identity_token", "agent.manage",
+			"agent.token_refresh", "agent.port_forward", "agent.identity_token",
 		},
 	},
 	{
@@ -163,7 +162,7 @@ var RelationshipPolicies = []RelationshipPolicy{
 			"agent.create", "agent.read", "agent.list", "agent.update", "agent.delete",
 			"agent.lifecycle", "agent.stop_all", "agent.message", "agent.set_message_mode",
 			"agent.grant_hub_mode", "agent.status_update", "agent.log_append", "agent.notify",
-			"agent.token_refresh", "agent.port_forward", "agent.identity_token", "agent.manage",
+			"agent.token_refresh", "agent.port_forward", "agent.identity_token",
 		},
 	},
 	{

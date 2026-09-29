@@ -201,9 +201,8 @@ func (s *Server) handleMessageRoutes(w http.ResponseWriter, r *http.Request) {
 
 // handleAgentMessages handles GET /api/v1/agents/{id}/messages.
 // Returns messages involving the specified agent, filtered by the caller's
-// permission level. Users who can manage the agent (owners, project admins,
-// global admins) see all messages; other users see only messages where they
-// are a participant (sender or recipient), preserving privacy across users
+// permission level. Callers holding agent.attach on the agent see all
+// messages; other users see only messages where they are a participant (sender or recipient), preserving privacy across users
 // who share read access to the same agent.
 func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request, agentID string) {
 	if r.Method != http.MethodGet {
@@ -234,11 +233,11 @@ func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request, age
 		return
 	}
 
-	// Check manage first — manage implies read and lets us skip a second
-	// authz lookup for users who have it.
+	// Full history requires agent.attach on this agent; agent.read alone
+	// gives participant-filtered history.
 	res := agentResource(agent)
-	canManage := s.authzService.CheckAccess(ctx, user, res, ActionManage)
-	if !canManage.Allowed {
+	fullHistory := s.agentFullHistoryDecision(ctx, user, agent)
+	if !fullHistory.Allowed {
 		decision := s.authzService.CheckAccess(ctx, user, res, ActionRead)
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
@@ -257,13 +256,13 @@ func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request, age
 		opts.Cursor = cursor
 	}
 
-	// Users who can manage the agent (owners, project admins, global admins)
-	// see all messages including those from chat integrations. Other users
-	// only see messages where they are a participant, preserving privacy.
+	// Callers holding agent.attach on the agent see all messages including
+	// those from chat integrations. Other users only see messages where they
+	// are a participant, preserving privacy.
 	filter := store.MessageFilter{
 		AgentID: agentID,
 	}
-	if !canManage.Allowed {
+	if !fullHistory.Allowed {
 		filter.ParticipantID = user.ID()
 	}
 
@@ -366,8 +365,9 @@ func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request, age
 }
 
 // handleAgentMessagesStream handles GET /api/v1/agents/{id}/messages/stream.
-// Streams new messages involving a specific agent in real time. Users who
-// can manage the agent see all messages; others see only their own.
+// Streams new messages involving a specific agent in real time. Callers
+// holding agent.attach on the agent see all messages; others see only their
+// own.
 // Unlike /message-logs/stream this does not depend on Cloud Logging: it
 // subscribes to the in-process event bus that handleAgentOutboundMessage
 // and handleAgentMessage already publish to, so it works on any hub
@@ -402,11 +402,11 @@ func (s *Server) handleAgentMessagesStream(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Check manage first — manage implies read and lets us skip a second
-	// authz lookup for users who have it.
+	// Full history requires agent.attach on this agent; agent.read alone
+	// gives participant-filtered history.
 	res := agentResource(agent)
-	canManage := s.authzService.CheckAccess(ctx, user, res, ActionManage)
-	if !canManage.Allowed {
+	fullHistory := s.agentFullHistoryDecision(ctx, user, agent)
+	if !fullHistory.Allowed {
 		decision := s.authzService.CheckAccess(ctx, user, res, ActionRead)
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
@@ -437,10 +437,10 @@ func (s *Server) handleAgentMessagesStream(w http.ResponseWriter, r *http.Reques
 	ch, unsubscribe := ep.Subscribe("agent." + agent.ID + ".message")
 	defer unsubscribe()
 
-	// Users who can manage the agent see all messages; others only see
-	// messages where they are a participant.
+	// Callers holding agent.attach on the agent see all messages; others
+	// only see messages where they are a participant.
 	userID := user.ID()
-	filterStream := !canManage.Allowed
+	filterStream := !fullHistory.Allowed
 
 	heartbeat := time.NewTicker(30 * time.Second)
 	defer heartbeat.Stop()

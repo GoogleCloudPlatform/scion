@@ -336,6 +336,16 @@ func (a *AuthzService) runRelationshipStages(
 		return nil, false
 	}
 
+	// Stage 2b: execution project. An agent's access to its source user's
+	// resources requires that user's live admission to the agent's
+	// current project for the exact permission.
+	if isAgentPrincipal(principal.Kind) && executionProjectRule(c.rule) {
+		if ok, detail := a.executionProjectAdmission(ctx, principal, permissionID); !ok {
+			reject(RelationshipRejectExecutionProject, detail)
+			return nil, false
+		}
+	}
+
 	// Stage 3: relationship fact.
 	var src *SharingSource
 	if c.fact != nil {
@@ -351,6 +361,12 @@ func (a *AuthzService) runRelationshipStages(
 	// Stage 4: sharing-source owner is active.
 	if src != nil {
 		if active, detail := a.relationshipSourceActive(ctx, src.OwnerID); !active {
+			reject(RelationshipRejectSourceInactive, detail)
+			return src, false
+		}
+		// An agent-owned source must hold the permission through
+		// its delegation chain.
+		if holds, detail := a.relationshipSourceDelegationHolds(ctx, src.OwnerID, resource, permissionID); !holds {
 			reject(RelationshipRejectSourceInactive, detail)
 			return src, false
 		}
@@ -402,6 +418,39 @@ func (a *AuthzService) relationshipSourceActive(ctx context.Context, ownerID str
 	root, err := a.store.GetUser(ctx, agent.Ancestry[0])
 	if err != nil || root == nil || root.Status != store.UserStatusActive {
 		return false, "sharing source owner agent's root user is not active"
+	}
+	return true, ""
+}
+
+// relationshipSourceDelegationHolds reports whether an agent-owned sharing
+// source holds permissionID for resource through its delegation chain,
+// using the shared chain evaluation. A user owner has no delegation chain and
+// holds (its activity is checked by relationshipSourceActive). Any lookup
+// failure reports false.
+func (a *AuthzService) relationshipSourceDelegationHolds(ctx context.Context, ownerID string, resource Resource, permissionID string) (bool, string) {
+	if a.store == nil {
+		return false, "store not available"
+	}
+	agent, err := a.store.GetAgent(ctx, ownerID)
+	if errors.Is(err, store.ErrNotFound) {
+		return true, ""
+	}
+	if err != nil || agent == nil {
+		return false, "sharing source owner agent lookup failed"
+	}
+	scopeID := agent.ProjectID
+	if rp := resourceProjectScope(resource); rp != "" && rp != scopeID {
+		scopeID = rp
+	}
+	if scopeID == "" {
+		return false, "sharing source owner agent has no project"
+	}
+	allowed, _, err := a.walkDelegationChain(ctx, resource, ActionRead, permissionID, agent.ID, true, store.RoleScopeProject, scopeID, nil)
+	if err != nil {
+		return false, "sharing source owner agent delegation lookup failed"
+	}
+	if !allowed {
+		return false, "sharing source owner agent's delegation does not hold the permission"
 	}
 	return true, ""
 }
@@ -687,22 +736,39 @@ func (a *AuthzService) ProgenyListPredicate(ctx context.Context, principal Princ
 	if adapter == nil {
 		return none
 	}
-	allowed := false
+	var policyPerms []string
 	for _, id := range adapter.ReadPermissions() {
 		if permissions.RelationshipPolicyAllows(string(RelationshipRuleProgeny), "agent", kind, id) {
-			allowed = true
-			break
+			policyPerms = append(policyPerms, id)
 		}
 	}
-	if !allowed {
+	// The execution-project stage applies per permission, as on point
+	// reads: keep only the permissions the agent's source user is admitted
+	// for in the agent's project.
+	var admittedPerms []string
+	for _, id := range policyPerms {
+		if ok, _ := a.executionProjectAdmission(ctx, principal, id); ok {
+			admittedPerms = append(admittedPerms, id)
+		}
+	}
+	if len(admittedPerms) == 0 {
 		return none
 	}
 	return ProgenyPredicate{
 		Kind:             kind,
 		AttestedAncestry: append([]string(nil), agent.Ancestry()...),
 		SourceActive: func(ownerID string) bool {
-			active, _ := a.relationshipSourceActive(ctx, ownerID)
-			return active
+			if active, _ := a.relationshipSourceActive(ctx, ownerID); !active {
+				return false
+			}
+			// An agent-owned source must hold at least one of the kind's
+			// progeny read permissions through its delegation chain.
+			for _, id := range admittedPerms {
+				if holds, _ := a.relationshipSourceDelegationHolds(ctx, ownerID, Resource{Type: kind}, id); holds {
+					return true
+				}
+			}
+			return false
 		},
 	}
 }
