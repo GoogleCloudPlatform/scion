@@ -2327,22 +2327,26 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request, id string) {
 	// with 404 rather than 403 so the response does not disclose that the agent
 	// exists. Authorizing first would turn that 404 into a 403 and leak
 	// existence (design §4.2).
+	isSelf := false
 	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 		if agent.ProjectID != agentIdent.ProjectID() {
 			NotFound(w, "Agent")
 			return
 		}
+		isSelf = agentIdent.ID() == agent.ID
 	}
 	// CO1: agent.read carries no AgentScopes mapping, so an agent identity is
-	// always denied here, self-read included -- see
-	// TestBypassAgents_LegitimateFlowsStillWork's "agent reads itself" case.
-	// This differs deliberately from getProjectAgent, which exempts an agent
-	// reading its *own* record from this check to preserve that route's
-	// existing, tested self-read contract -- see
-	// TestReadEndpoint_ProjectScopedAgents_WithReadScope_Allowed. Reading a
-	// different agent still goes through this same check on both routes.
-	if !s.authorize(w, r, agentResource(agent), ActionRead) {
-		return
+	// denied reading any *other* agent here. An agent reading its own record
+	// is exempt, matching getProjectAgent's self-read contract (see
+	// TestReadEndpoint_ProjectScopedAgents_WithReadScope_Allowed): this is the
+	// route the in-container CLI uses for `scion whoami --full` (GetSelf), and
+	// both routes return the same writeAgentGetResponse body, so the exemption
+	// exposes nothing the project route doesn't already. The project:read
+	// scope check above still applies to self-reads.
+	if !isSelf {
+		if !s.authorize(w, r, agentResource(agent), ActionRead) {
+			return
+		}
 	}
 
 	s.writeAgentGetResponse(w, r, agent)
