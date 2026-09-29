@@ -366,6 +366,9 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 		return
 	}
 	originalStatus := schedule.Status
+	originalCronExpr := schedule.CronExpr
+	originalEventType := schedule.EventType
+	originalPayload := schedule.Payload
 
 	var req UpdateScheduleRequest
 	if err := readJSON(r, &req); err != nil {
@@ -410,7 +413,13 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 		schedule.Name = req.Name
 		fields.Name = true
 	}
-	if req.CronExpr != "" {
+	// CronExpr/EventType/Payload are compared against the stored values, not
+	// just checked for presence: a request that resends the current value
+	// (e.g. a client round-tripping the full resource on every PATCH) is
+	// metadata-only, the same as omitting the field. Only an actual change
+	// writes the column, which keeps the field mask consistent with
+	// changesFutureDispatch below.
+	if req.CronExpr != "" && req.CronExpr != originalCronExpr {
 		// Validate new cron expression
 		parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 		cronSchedule, err := parser.Parse(req.CronExpr)
@@ -424,11 +433,11 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 		fields.CronExpr = true
 		fields.NextRunAt = true
 	}
-	if req.EventType != "" {
+	if req.EventType != "" && req.EventType != originalEventType {
 		schedule.EventType = req.EventType
 		fields.EventType = true
 	}
-	if req.Payload != "" {
+	if req.Payload != "" && req.Payload != originalPayload {
 		schedule.Payload = req.Payload
 		fields.Payload = true
 	}
@@ -440,10 +449,14 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 	// Ruling Q2: a fully reauthorized mutation that changes future dispatch
 	// (payload/target/type/timing, or an enable transition) replaces the
 	// attribution and bumps authorization_revision atomically in the same
-	// write. A metadata-only edit (name, or a status change other than an
-	// enable, e.g. pause) does not re-attribute, and attribution is passed to
-	// the store only when it changed.
-	changesFutureDispatch := req.CronExpr != "" || req.EventType != "" || req.Payload != "" ||
+	// write. A metadata-only edit (name, an unchanged cron/type/payload
+	// resent as-is, or a status change other than an enable, e.g. pause)
+	// does not re-attribute, and attribution is passed to the store only
+	// when it changed. Deriving this from the field mask itself (rather
+	// than from req's presence checks) is what keeps the two in sync: a
+	// dispatch field only re-attributes when it is also the field mask
+	// actually writes.
+	changesFutureDispatch := fields.CronExpr || fields.EventType || fields.Payload ||
 		(req.Status == store.ScheduleStatusActive && originalStatus != store.ScheduleStatusActive)
 
 	// The write is conditioned on the revision this handler just read,

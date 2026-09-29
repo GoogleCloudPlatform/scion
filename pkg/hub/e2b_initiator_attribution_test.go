@@ -623,6 +623,81 @@ func TestUpdateSchedule_ReattributesToMutatorNotCreator(t *testing.T) {
 	assert.Equal(t, userA.ID, after.CreatedBy, "CreatedBy must never be touched by a re-attribution")
 }
 
+// TestUpdateSchedule_UnchangedDispatchFieldsDoNotReattribute is T2's
+// regression test: resending the CronExpr/EventType/Payload the schedule
+// already has (e.g. a client round-tripping the full resource on every
+// PATCH) is metadata-only. It must not re-attribute or bump the revision,
+// even though all three "changes future dispatch" fields are present in the
+// request — presence alone is not a change.
+func TestUpdateSchedule_UnchangedDispatchFieldsDoNotReattribute(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	userA, userB := setupTwoScheduleUsers(t, srv, s, projectID)
+	ctx := context.Background()
+
+	createReq := CreateScheduleRequest{Name: "n1", CronExpr: "0 9 * * *", EventType: "message", AgentName: "all", Message: "hi"}
+	rec := doRequestAsUser(t, srv, userA, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules", createReq)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var created store.Schedule
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
+
+	before, err := s.GetSchedule(ctx, created.ID)
+	require.NoError(t, err)
+	require.Equal(t, userA.ID, before.InitiatorPrincipalID)
+	require.Equal(t, 1, before.AuthorizationRevision)
+
+	// Resend the same CronExpr, EventType, and Payload the schedule already
+	// has — all present, none actually different.
+	updateReq := UpdateScheduleRequest{
+		CronExpr:  before.CronExpr,
+		EventType: before.EventType,
+		Payload:   before.Payload,
+	}
+	rec2 := doRequestAsUser(t, srv, userB, http.MethodPatch, "/api/v1/projects/"+projectID+"/schedules/"+created.ID, updateReq)
+	require.Equal(t, http.StatusOK, rec2.Code, rec2.Body.String())
+
+	after, err := s.GetSchedule(ctx, created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, before.CronExpr, after.CronExpr)
+	assert.Equal(t, before.EventType, after.EventType)
+	assert.Equal(t, before.Payload, after.Payload)
+	assert.Equal(t, 1, after.AuthorizationRevision, "resending unchanged dispatch fields must not bump the revision")
+	assert.Equal(t, userA.ID, after.InitiatorPrincipalID,
+		"resending unchanged dispatch fields by a DIFFERENT user must not change the initiator")
+}
+
+// TestUpdateSchedule_PayloadChangeReattributes is the payload counterpart to
+// TestUpdateSchedule_ReattributesToMutatorNotCreator (which covers CronExpr):
+// an actual payload change still re-attributes to the mutator and bumps the
+// revision, even though the field-mask/reattribution decision is now driven
+// by an equality check rather than mere presence.
+func TestUpdateSchedule_PayloadChangeReattributes(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	userA, userB := setupTwoScheduleUsers(t, srv, s, projectID)
+	ctx := context.Background()
+
+	createReq := CreateScheduleRequest{Name: "n1", CronExpr: "0 9 * * *", EventType: "message", AgentName: "all", Message: "hi"}
+	rec := doRequestAsUser(t, srv, userA, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules", createReq)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var created store.Schedule
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
+
+	before, err := s.GetSchedule(ctx, created.ID)
+	require.NoError(t, err)
+	require.Equal(t, 1, before.AuthorizationRevision)
+
+	newPayloadBytes, err := json.Marshal(MessageEventPayload{AgentName: "all", Message: "bye"})
+	require.NoError(t, err)
+	updateReq := UpdateScheduleRequest{Payload: string(newPayloadBytes)}
+	rec2 := doRequestAsUser(t, srv, userB, http.MethodPatch, "/api/v1/projects/"+projectID+"/schedules/"+created.ID, updateReq)
+	require.Equal(t, http.StatusOK, rec2.Code, rec2.Body.String())
+
+	after, err := s.GetSchedule(ctx, created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(newPayloadBytes), after.Payload)
+	assert.Equal(t, userB.ID, after.InitiatorPrincipalID, "an actual payload change must re-attribute to the mutator")
+	assert.Equal(t, 2, after.AuthorizationRevision, "an actual payload change must bump the revision")
+}
+
 // TestResumeSchedule_ReattributesToResumer is R7's resume counterpart.
 func TestResumeSchedule_ReattributesToResumer(t *testing.T) {
 	srv, s, projectID := setupScheduleTest(t)
