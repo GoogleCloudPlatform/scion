@@ -132,7 +132,7 @@ handoff is optional.
 Self-migration follows this contract:
 
 ` + reincarnateFiveLineContract + `
-Run 'scion reincarnate --handoff-template' to print the handoff's expected
+Run ` + "`scion reincarnate --handoff-template`" + ` to print the handoff's expected
 sections.
 
 Use --dry-run to see the planned changes (template, image, harness config,
@@ -245,7 +245,7 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 	// `sciontool status blocked \"migrating to generation N+1\"` itself."
 	// This runs before either output path below, so it fires the same way
 	// whether the caller asked for JSON or plain output.
-	if !reincarnateDryRun && isSelf {
+	if shouldSetBlockedStatus(isSelf, reincarnateDryRun) {
 		reincarnateSetBlockedStatus(resp.Generation)
 	}
 
@@ -267,6 +267,28 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 	return nil
 }
 
+// shouldSetBlockedStatus decides whether reincarnateAgentViaHub should call
+// reincarnateSetBlockedStatus after a successful Hub response (design §3.9:
+// "in self-mode the command also sets sciontool status blocked ... itself"
+// — only in self-mode, and only when a migration actually happened, not on
+// a --dry-run that changed nothing). Extracted as a pure decision (p2b-r1
+// review R4) so the two guard conditions are table-testable on their own,
+// without a real or fake sciontool process: the mutation the reviewer found
+// undetected (dropping the "&& !dryRun" half of the guard, which would put
+// a coordinator's own container into "blocked" whenever it migrates a
+// child, or on every dry run) is caught by a table test alone.
+func shouldSetBlockedStatus(isSelf, dryRun bool) bool {
+	return isSelf && !dryRun
+}
+
+// reincarnateBlockedStatusTimeout bounds reincarnateSetBlockedStatus's
+// sciontool call (design Amendment A26.2 O3): sciontool status reports to
+// the Hub, and a hang there must not hang the already-successful reincarnate
+// CLI call after its 202, while the container is being torn down. A package
+// var (not a const) so a test can shorten it rather than actually waiting
+// out the real timeout.
+var reincarnateBlockedStatusTimeout = 10 * time.Second
+
 // reincarnateSetBlockedStatus implements design §3.9's self-mode success
 // step: "the command also sets `sciontool status blocked \"migrating to
 // generation N+1\"` itself." N+1 is toGeneration, taken from the Hub's
@@ -276,7 +298,11 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 // in-process. Its absence — for example a harness image that predates it
 // (ptone/scion#1910) — must not turn an already-successful reincarnate call
 // into a failing command: this warns to stderr and returns rather than
-// erroring out.
+// erroring out. The call is also time-bounded (Amendment A26.2 O3) and its
+// child stdout is routed to our stderr rather than our stdout (Amendment
+// A26.2 N1), so this side effect can never interfere with a caller's
+// `--json` stdout output even if sciontool's own stdout behavior changes in
+// the future.
 func reincarnateSetBlockedStatus(toGeneration int) {
 	message := fmt.Sprintf("migrating to generation %d", toGeneration)
 
@@ -286,10 +312,17 @@ func reincarnateSetBlockedStatus(toGeneration int) {
 		return
 	}
 
-	cmd := exec.Command(path, "status", "blocked", message)
-	cmd.Stdout = os.Stdout
+	ctx, cancel := context.WithTimeout(context.Background(), reincarnateBlockedStatusTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, path, "status", "blocked", message)
+	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			fmt.Fprintf(os.Stderr, "Warning: sciontool status blocked timed out after %s: %v\n", reincarnateBlockedStatusTimeout, err)
+			return
+		}
 		fmt.Fprintf(os.Stderr, "Warning: sciontool status blocked failed: %v\n", err)
 	}
 }
@@ -329,9 +362,18 @@ func printReincarnationPlan(plan hubclient.ReincarnationPlan) {
 	}
 }
 
+// isReincarnateHandoffTemplateInvocation reports whether cmd is the
+// `reincarnate` command with `--handoff-template` set (design Amendment
+// A26.2 O1). root.go's PersistentPreRunE calls this to exempt the flag from
+// the agent-container-context gate and the requires-project check: the flag
+// is a pure local print (see RunE above) and must work anywhere.
+func isReincarnateHandoffTemplateInvocation(cmd *cobra.Command) bool {
+	return cmd.Name() == "reincarnate" && reincarnateHandoffTemplate
+}
+
 func init() {
 	reincarnateCmd.Flags().StringVar(&reincarnateHandoffFile, "handoff-file", "", "File whose content becomes the new generation's first task (required for self-migration)")
 	reincarnateCmd.Flags().BoolVar(&reincarnateDryRun, "dry-run", false, "Print the resolved reincarnation plan without migrating anything")
-	reincarnateCmd.Flags().BoolVar(&reincarnateHandoffTemplate, "handoff-template", false, "Print the handoff template (design §3.9 sections) and exit")
+	reincarnateCmd.Flags().BoolVar(&reincarnateHandoffTemplate, "handoff-template", false, "Print the handoff template and exit")
 	rootCmd.AddCommand(reincarnateCmd)
 }

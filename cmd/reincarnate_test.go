@@ -17,9 +17,11 @@ package cmd
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -257,4 +259,117 @@ func TestReincarnateSetBlockedStatus_InvokesSciontool(t *testing.T) {
 	got, err := os.ReadFile(recordPath)
 	require.NoError(t, err, "the fake sciontool script must have been invoked")
 	assert.Equal(t, "status blocked migrating to generation 3\n", string(got))
+}
+
+// TestReincarnateSetBlockedStatus_TimesOut is the design Amendment A26.2 O3
+// test: a hung sciontool call must not hang the CLI forever — it warns and
+// returns once reincarnateBlockedStatusTimeout elapses. Overrides the
+// package var to a few milliseconds so the test doesn't actually wait out
+// the real 10s production timeout.
+func TestReincarnateSetBlockedStatus_TimesOut(t *testing.T) {
+	origTimeout := reincarnateBlockedStatusTimeout
+	t.Cleanup(func() { reincarnateBlockedStatusTimeout = origTimeout })
+	reincarnateBlockedStatusTimeout = 50 * time.Millisecond
+
+	// Resolve `sleep` on the real PATH before overriding it below, so the
+	// fake sciontool script can exec it by absolute path.
+	sleepPath, err := exec.LookPath("sleep")
+	require.NoError(t, err, "this test needs a real `sleep` binary")
+
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "sciontool")
+	// Sleeps far longer than the shortened timeout above; `exec` (not a
+	// shell builtin) so CommandContext's context cancellation actually
+	// kills it rather than killing an intermediate shell.
+	script := "#!/bin/sh\nexec " + sleepPath + " 5\n"
+	require.NoError(t, os.WriteFile(scriptPath, []byte(script), 0o755))
+	t.Setenv("PATH", dir)
+
+	stderr := captureStderr(t, func() {
+		reincarnateSetBlockedStatus(9)
+	})
+	assert.Contains(t, stderr, "timed out")
+}
+
+// TestShouldSetBlockedStatus is the design Amendment A26.2 R4 table test:
+// the blocked-status call must fire only in self-mode and only on a real
+// (non-dry-run) migration. Regression test for the p2b-r1 review's R4
+// mutation (dropping the "&& !dryRun" half of the guard survived every
+// existing test), extracted as a pure decision so it needs no process
+// execution at all.
+func TestShouldSetBlockedStatus(t *testing.T) {
+	cases := []struct {
+		name   string
+		isSelf bool
+		dryRun bool
+		want   bool
+	}{
+		{"self, real migration: fires", true, false, true},
+		{"self, dry run: does not fire", true, true, false},
+		{"other agent, real migration: does not fire", false, false, false},
+		{"other agent, dry run: does not fire", false, true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, shouldSetBlockedStatus(tc.isSelf, tc.dryRun))
+		})
+	}
+}
+
+// TestReincarnateHandoffTemplate_WorksAnywhere is the design Amendment A26.2
+// O1 test: `scion reincarnate --handoff-template` is a pure local print and
+// must work through the real command dispatch path (rootCmd.ExecuteC, which
+// runs the full PersistentPreRunE chain), even inside a simulated agent
+// container with no reachable Hub endpoint, and even outside any scion
+// project — both of which reject ordinary commands in PersistentPreRunE,
+// before RunE ever runs. The original golden test
+// (TestReincarnateHandoffTemplate_Golden) called RunE directly, bypassing
+// PersistentPreRunE entirely, so this gap went unnoticed until the p2b-r1
+// review (O1).
+func TestReincarnateHandoffTemplate_WorksAnywhere(t *testing.T) {
+	origProjectPath := projectPath
+	origHubEndpoint := hubEndpoint
+	origNoHub := noHub
+	t.Cleanup(func() {
+		projectPath = origProjectPath
+		hubEndpoint = origHubEndpoint
+		noHub = origNoHub
+		reincarnateHandoffTemplate = false
+		rootCmd.SetArgs(nil)
+		rootCmd.SetOut(nil)
+		rootCmd.SetErr(nil)
+	})
+
+	run := func(t *testing.T) string {
+		t.Helper()
+		var buf bytes.Buffer
+		rootCmd.SetOut(&buf)
+		rootCmd.SetErr(&buf)
+		rootCmd.SetArgs([]string{"reincarnate", "--handoff-template"})
+		_, err := rootCmd.ExecuteC()
+		require.NoError(t, err)
+		return buf.String()
+	}
+
+	t.Run("inside an agent container with no reachable Hub endpoint", func(t *testing.T) {
+		t.Setenv("SCION_HOST_UID", "1000")
+		t.Setenv("SCION_HUB_ENDPOINT", "")
+		t.Setenv("SCION_HUB_URL", "")
+		t.Setenv("SCION_NETWORK_MODE", "")
+		hubEndpoint = ""
+		projectPath = t.TempDir()
+
+		out := run(t)
+		assert.Equal(t, reincarnateHandoffTemplateText, out)
+	})
+
+	t.Run("outside any scion project", func(t *testing.T) {
+		t.Setenv("SCION_HOST_UID", "")
+		t.Setenv("HOME", t.TempDir())
+		t.Chdir(t.TempDir())
+		projectPath = ""
+
+		out := run(t)
+		assert.Equal(t, reincarnateHandoffTemplateText, out)
+	})
 }
