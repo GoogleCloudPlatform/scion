@@ -348,7 +348,7 @@ formula can never drift apart):
   prefixed name first, then the legacy pre-ptone/scion#2152 name, with a
   `WARN` log on a legacy hit.
 - **Migration**: `scion hub secret migrate-names [--dry-run] [--delete-legacy]
-  [--hub-id] [--timeout]` (a new, separate subcommand from the DB-value
+  [--hub-id] [--timeout] [--config]` (a new, separate subcommand from the DB-value
   migration `scion hub secret migrate`) independently checks, per secret
   identity: whether it needs copying forward, whether its DB `SecretRef`
   needs repairing to the prefixed name (which can be true even without a
@@ -365,9 +365,13 @@ formula can never drift apart):
   `oidc_signing_key`, `download_signing_key`).
   - **Hub ID resolution**: `migrate-names` resolves its hub ID exactly the
     way the running hub server does at startup (`--hub-id`, then settings
-    `server.hub.hub_id`, then the server's own environment/hostname fallback
-    `HubServerConfig.ResolveHubID()`) — never a parallel resolution path —
-    and prints the resolved ID and the prefix it produces before acting. It
+    `server.hub.hub_id` as loaded from `--config` (or the default settings
+    file if `--config` is omitted), then the server's own environment/hostname
+    fallback `HubServerConfig.ResolveHubID()`) — never a parallel resolution
+    path — and prints the resolved ID and the prefix it produces before
+    acting. Pass `--config` when the hub server runs with a non-default
+    settings file, or the two can disagree on `hub_id` even though both look
+    correct in isolation. It
     also refuses to proceed if the resolved ID disagrees with an existing
     hub-scope secret record's `ScopeID`, unless `--hub-id` was passed
     explicitly. Under `--dry-run`, the environment/hostname fallback is
@@ -487,7 +491,13 @@ formula can never drift apart):
   name, in which case the older binary still reads the ref value literally
   and works). Legacy secrets are never deleted except by an explicit
   `--delete-legacy` run, so a rollback window before that step is always
-  safe. Rolling back, writing through the old binary (which always targets
+  safe for **reads**. Writes are a separate story: an old binary only ever
+  writes the legacy name, so if the legacy IAM grant has already been
+  removed (per the removal criterion below), rolling back and then calling
+  `Set` — or generating a signing key — fails with `PermissionDenied` on a
+  rolled-back binary. Restore the legacy grant before rolling back if it was
+  already removed (round-5 review non-blocking finding 3). Rolling back,
+  writing through the old binary (which always targets
   the legacy name and resets the ref to it), and then rolling forward again
   leaves a *stale* prefixed copy relative to the ref — this is exactly what
   the resync logic above corrects on the next `migrate-names` run or hub
