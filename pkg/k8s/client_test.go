@@ -339,6 +339,28 @@ func TestNewClientWithContext_DoesNotFallBackWhenContextExplicit(t *testing.T) {
 	}
 }
 
+func TestGCEFallbackAuthScopes(t *testing.T) {
+	want := map[string]bool{
+		"https://www.googleapis.com/auth/cloud-platform": true,
+		"https://www.googleapis.com/auth/userinfo.email": true,
+	}
+
+	if len(gceFallbackAuthScopes) != len(want) {
+		t.Fatalf("expected %d scopes, got %d: %v", len(want), len(gceFallbackAuthScopes), gceFallbackAuthScopes)
+	}
+
+	for _, scope := range gceFallbackAuthScopes {
+		if !want[scope] {
+			t.Errorf("unexpected scope %q", scope)
+		}
+		delete(want, scope)
+	}
+
+	for missing := range want {
+		t.Errorf("missing expected scope %q", missing)
+	}
+}
+
 func TestNewClientWithContext_ReportsBothKubeconfigAndInClusterErrors(t *testing.T) {
 	_, err := newClientWithContext(
 		"",

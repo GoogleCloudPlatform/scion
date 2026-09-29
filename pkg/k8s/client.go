@@ -206,12 +206,23 @@ func (c *Client) Verify() error {
 	return fmt.Errorf("%s — underlying error: %w", hint, err)
 }
 
+// gceFallbackAuthScopes are the OAuth2 scopes requested when falling back to
+// GCE metadata-based auth. cloud-platform alone authenticates the caller to
+// GCP, but GKE authorizes RBAC subjects by identity: without
+// userinfo.email, tokens are presented to the cluster under the service
+// account's numeric unique ID rather than its email address, so
+// email-subject RoleBindings never match.
+var gceFallbackAuthScopes = []string{
+	"https://www.googleapis.com/auth/cloud-platform",
+	"https://www.googleapis.com/auth/userinfo.email",
+}
+
 // fallbackToGCEAuth reconfigures the client to use GCE metadata-based
 // OAuth2 tokens instead of the exec-based credential plugin. This is the
 // standard auth method for services running on GCE/GKE infrastructure.
 func (c *Client) fallbackToGCEAuth() error {
 	ctx := context.Background()
-	ts, err := google.DefaultTokenSource(ctx, "https://www.googleapis.com/auth/cloud-platform")
+	ts, err := google.DefaultTokenSource(ctx, gceFallbackAuthScopes...)
 	if err != nil {
 		return fmt.Errorf("failed to get default token source: %w", err)
 	}
