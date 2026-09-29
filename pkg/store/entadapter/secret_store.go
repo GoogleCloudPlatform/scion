@@ -196,17 +196,23 @@ func (s *SecretStore) UpdateSecret(ctx context.Context, secret *store.Secret) er
 
 // UpdateSecretRefIfMatches conditionally updates only the secret_ref column,
 // applying the change (and incrementing version) only if the row's current
-// secret_ref equals expectedRef. See store.SecretStore for the full contract.
-func (s *SecretStore) UpdateSecretRefIfMatches(ctx context.Context, key, scope, scopeID, expectedRef, newRef string) (bool, error) {
+// secret_ref equals expectedRef AND its current version equals
+// expectedVersion. See store.SecretStore for the full contract, including
+// why the version predicate is required, not merely the ref (ptone/scion#2152
+// round-4 review finding 1).
+func (s *SecretStore) UpdateSecretRefIfMatches(ctx context.Context, key, scope, scopeID string, expectedRef string, expectedVersion int, newRef string) (bool, error) {
 	// secret_ref is an optional (nullable) column: a record that never had a
 	// ref set stores SQL NULL, not "". entsecret.SecretRefEQ("") compiles to
 	// "secret_ref = ''", which SQL NULL never matches — so matching an
 	// expected empty ref needs the IsNil predicate instead, or the CAS would
 	// silently never apply to exactly the records (no ref persisted yet)
-	// this method exists to safely migrate.
+	// this method exists to safely migrate. Current writers never persist a
+	// literal "" (empty-but-non-NULL) secret_ref, but also match on
+	// SecretRefEQ("") defensively in case a row is ever imported or edited
+	// into that state (ptone/scion#2152 round-4 review nit 11).
 	refPredicate := entsecret.SecretRefEQ(expectedRef)
 	if expectedRef == "" {
-		refPredicate = entsecret.SecretRefIsNil()
+		refPredicate = entsecret.Or(entsecret.SecretRefIsNil(), entsecret.SecretRefEQ(""))
 	}
 	update := s.client.Secret.Update().
 		Where(
@@ -214,6 +220,7 @@ func (s *SecretStore) UpdateSecretRefIfMatches(ctx context.Context, key, scope, 
 			entsecret.ScopeEQ(scope),
 			entsecret.ScopeIDEQ(scopeID),
 			refPredicate,
+			entsecret.VersionEQ(expectedVersion),
 		).
 		SetSecretRef(newRef).
 		AddVersion(1).

@@ -144,7 +144,8 @@ func TestUpsertSecret(t *testing.T) {
 }
 
 // =============================================================================
-// UpdateSecretRefIfMatches (ptone/scion#2152 round-3 review finding 7)
+// UpdateSecretRefIfMatches (ptone/scion#2152 round-3 review finding 7;
+// version-awareness added for round-4 review finding 1)
 //
 // These test the CAS directly, independent of the GCPBackend resync logic
 // built on top of it, since the NULL-vs-empty-string handling below was
@@ -154,6 +155,11 @@ func TestUpsertSecret(t *testing.T) {
 // compiles to "secret_ref = ''", which never matches NULL, so a CAS keyed on
 // expectedRef="" needs SecretRefIsNil() or it silently never applies to
 // exactly the never-migrated records this method exists to fix.
+//
+// The CAS also matches on expectedVersion, not just expectedRef, so a
+// same-ref rotation (a write that bumps Version but re-asserts the exact
+// same ref string -- e.g. an old binary rewriting a secret through the
+// legacy name) is detected too; a ref-only predicate would miss it entirely.
 // =============================================================================
 
 func TestUpdateSecretRefIfMatches_NilRefMatchesEmptyExpected(t *testing.T) {
@@ -166,7 +172,7 @@ func TestUpdateSecretRefIfMatches_NilRefMatchesEmptyExpected(t *testing.T) {
 	require.Empty(t, sec.SecretRef, "a never-migrated secret has no ref")
 	require.Equal(t, 1, sec.Version)
 
-	applied, err := ss.UpdateSecretRefIfMatches(ctx, "CAS_NIL", store.ScopeUser, scopeID, "", "gcpsm:projects/p/secrets/new")
+	applied, err := ss.UpdateSecretRefIfMatches(ctx, "CAS_NIL", store.ScopeUser, scopeID, "", 1, "gcpsm:projects/p/secrets/new")
 	require.NoError(t, err)
 	assert.True(t, applied, "CAS with expectedRef=\"\" must match a SQL-NULL secret_ref")
 
@@ -184,7 +190,7 @@ func TestUpdateSecretRefIfMatches_EmptyExpectedDoesNotMatchNonEmptyRef(t *testin
 	sec := &store.Secret{ID: uuid.New().String(), Key: "CAS_SET", EncryptedValue: "v", Scope: store.ScopeUser, ScopeID: scopeID, SecretRef: "gcpsm:projects/p/secrets/legacy"}
 	require.NoError(t, ss.CreateSecret(ctx, sec))
 
-	applied, err := ss.UpdateSecretRefIfMatches(ctx, "CAS_SET", store.ScopeUser, scopeID, "", "gcpsm:projects/p/secrets/new")
+	applied, err := ss.UpdateSecretRefIfMatches(ctx, "CAS_SET", store.ScopeUser, scopeID, "", 1, "gcpsm:projects/p/secrets/new")
 	require.NoError(t, err)
 	assert.False(t, applied, "expectedRef=\"\" must not match a row whose secret_ref is already set")
 
@@ -202,7 +208,7 @@ func TestUpdateSecretRefIfMatches_MismatchFails(t *testing.T) {
 	sec := &store.Secret{ID: uuid.New().String(), Key: "CAS_MISMATCH", EncryptedValue: "v", Scope: store.ScopeUser, ScopeID: scopeID, SecretRef: "gcpsm:projects/p/secrets/legacy"}
 	require.NoError(t, ss.CreateSecret(ctx, sec))
 
-	applied, err := ss.UpdateSecretRefIfMatches(ctx, "CAS_MISMATCH", store.ScopeUser, scopeID, "gcpsm:projects/p/secrets/stale-snapshot", "gcpsm:projects/p/secrets/new")
+	applied, err := ss.UpdateSecretRefIfMatches(ctx, "CAS_MISMATCH", store.ScopeUser, scopeID, "gcpsm:projects/p/secrets/stale-snapshot", 1, "gcpsm:projects/p/secrets/new")
 	require.NoError(t, err)
 	assert.False(t, applied, "a stale expectedRef (a concurrent write already changed it) must not apply")
 
@@ -210,6 +216,44 @@ func TestUpdateSecretRefIfMatches_MismatchFails(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "gcpsm:projects/p/secrets/legacy", got.SecretRef)
 	assert.Equal(t, 1, got.Version)
+}
+
+// TestUpdateSecretRefIfMatches_SameRefBumpedVersionFails reproduces round-4
+// review finding 1: a same-ref rotation (the ref string is unchanged, but
+// something -- e.g. an old binary rewriting the value through it -- bumped
+// Version) must not match a CAS keyed on the Version read before that
+// rotation happened, even though the ref string alone still matches.
+func TestUpdateSecretRefIfMatches_SameRefBumpedVersionFails(t *testing.T) {
+	ss := newTestSecretStore(t)
+	ctx := context.Background()
+
+	scopeID := uuid.New().String()
+	sec := &store.Secret{ID: uuid.New().String(), Key: "CAS_ABA", EncryptedValue: "v1", Scope: store.ScopeUser, ScopeID: scopeID, SecretRef: "gcpsm:projects/p/secrets/legacy"}
+	require.NoError(t, ss.CreateSecret(ctx, sec))
+	require.Equal(t, 1, sec.Version)
+
+	// A same-ref rotation: the ref string is unchanged, but the row's
+	// Version still bumps on every UpsertSecret.
+	_, err := ss.UpsertSecret(ctx, &store.Secret{
+		Key: "CAS_ABA", EncryptedValue: "v2-rotated", Scope: store.ScopeUser, ScopeID: scopeID, SecretRef: "gcpsm:projects/p/secrets/legacy",
+	})
+	require.NoError(t, err)
+
+	// A CAS keyed on the pre-rotation ref AND version must not apply, even
+	// though the ref string alone still matches the current row.
+	applied, err := ss.UpdateSecretRefIfMatches(ctx, "CAS_ABA", store.ScopeUser, scopeID, "gcpsm:projects/p/secrets/legacy", 1, "gcpsm:projects/p/secrets/prefixed")
+	require.NoError(t, err)
+	assert.False(t, applied, "a same-ref CAS must not apply once Version has moved past the expected value")
+
+	got, err := ss.GetSecret(ctx, "CAS_ABA", store.ScopeUser, scopeID)
+	require.NoError(t, err)
+	assert.Equal(t, "gcpsm:projects/p/secrets/legacy", got.SecretRef, "the ref must not have been repointed")
+	assert.Equal(t, 2, got.Version)
+
+	// The CAS re-run with the correct (post-rotation) version applies.
+	applied, err = ss.UpdateSecretRefIfMatches(ctx, "CAS_ABA", store.ScopeUser, scopeID, "gcpsm:projects/p/secrets/legacy", 2, "gcpsm:projects/p/secrets/prefixed")
+	require.NoError(t, err)
+	assert.True(t, applied)
 }
 
 func TestUpdateSecretRefIfMatches_MatchApplies(t *testing.T) {
@@ -223,7 +267,7 @@ func TestUpdateSecretRefIfMatches_MatchApplies(t *testing.T) {
 	}
 	require.NoError(t, ss.CreateSecret(ctx, sec))
 
-	applied, err := ss.UpdateSecretRefIfMatches(ctx, "CAS_MATCH", store.ScopeUser, scopeID, "gcpsm:projects/p/secrets/legacy", "gcpsm:projects/p/secrets/prefixed")
+	applied, err := ss.UpdateSecretRefIfMatches(ctx, "CAS_MATCH", store.ScopeUser, scopeID, "gcpsm:projects/p/secrets/legacy", 1, "gcpsm:projects/p/secrets/prefixed")
 	require.NoError(t, err)
 	assert.True(t, applied)
 
@@ -240,7 +284,7 @@ func TestUpdateSecretRefIfMatches_MissingRowReturnsNoError(t *testing.T) {
 	ss := newTestSecretStore(t)
 	ctx := context.Background()
 
-	applied, err := ss.UpdateSecretRefIfMatches(ctx, "ghost", store.ScopeUser, uuid.New().String(), "", "gcpsm:projects/p/secrets/new")
+	applied, err := ss.UpdateSecretRefIfMatches(ctx, "ghost", store.ScopeUser, uuid.New().String(), "", 1, "gcpsm:projects/p/secrets/new")
 	require.NoError(t, err, "a missing row is applied=false, not an error")
 	assert.False(t, applied)
 }
@@ -254,7 +298,7 @@ func TestUpdateSecretRefIfMatches_ScopeIsolation(t *testing.T) {
 	require.NoError(t, ss.CreateSecret(ctx, &store.Secret{ID: uuid.New().String(), Key: "SAME_KEY", EncryptedValue: "u", Scope: store.ScopeUser, ScopeID: userScope}))
 	require.NoError(t, ss.CreateSecret(ctx, &store.Secret{ID: uuid.New().String(), Key: "SAME_KEY", EncryptedValue: "p", Scope: store.ScopeProject, ScopeID: projectScope}))
 
-	applied, err := ss.UpdateSecretRefIfMatches(ctx, "SAME_KEY", store.ScopeUser, userScope, "", "gcpsm:projects/p/secrets/user")
+	applied, err := ss.UpdateSecretRefIfMatches(ctx, "SAME_KEY", store.ScopeUser, userScope, "", 1, "gcpsm:projects/p/secrets/user")
 	require.NoError(t, err)
 	assert.True(t, applied)
 
