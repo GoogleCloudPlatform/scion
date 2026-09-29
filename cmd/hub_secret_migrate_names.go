@@ -98,6 +98,13 @@ action taken (or, under --dry-run, that would be taken):
      but only once step 2 has confirmed the DB ref no longer depends on it,
      so a secret can never become unreadable as a result (DELETED LEGACY).
 
+If step 1 or 2 writes a new version to the prefixed name and then detects
+that a concurrent write already changed the secret's ref, that secret is
+reported as CONFLICT with a non-zero exit instead of being silently treated
+as done: its prefixed name's latest version may now be stale relative to
+the concurrent write. Re-run migrate-names, or re-set the secret directly,
+to verify or restore its current value.
+
 Hub ID: resolved the same way the running hub server resolves it at startup
 (--hub-id, then this command's --config file's server.hub.hub_id, then the
 server's own environment/hostname fallback) — pass --config if the server
@@ -139,7 +146,7 @@ func init() {
 	hubSecretMigrateNamesCmd.Flags().BoolVar(&migrateNamesDeleteLegacy, "delete-legacy", false, "Delete each legacy secret after verifying its hub-prefixed copy (run a plain migrate-names first)")
 	hubSecretMigrateNamesCmd.Flags().StringVar(&migrateNamesHubID, "hub-id", "", "Hub instance ID for secret namespacing (defaults to the resolved server hub ID)")
 	hubSecretMigrateNamesCmd.Flags().DurationVar(&migrateNamesTimeout, "timeout", 5*time.Minute, "Maximum time to run before aborting (increase for a large number of secrets)")
-	hubSecretMigrateNamesCmd.Flags().StringVarP(&migrateNamesConfigPath, "config", "c", "", "Path to server configuration file (must match the one the running hub server uses, so hub ID resolution agrees — ptone/scion#2152 round-4 review Consider 3)")
+	hubSecretMigrateNamesCmd.Flags().StringVarP(&migrateNamesConfigPath, "config", "c", "", "Path to server configuration file (must match the one the running hub server uses, so hub ID resolution agrees)")
 
 	_ = hubSecretMigrateNamesCmd.MarkFlagRequired("gcp-project")
 }
@@ -442,7 +449,17 @@ func runMigrateNames(ctx context.Context, backend *secret.GCPBackend, db store.S
 
 		acted, err := migrateOneCandidate(ctx, backend, c, deleteLegacy, out, &deletedLegacy)
 		if err != nil {
-			fmt.Fprintf(out, "  ERROR  %s (scope: %s/%s) - %v\n", c.name, c.scope, c.scopeID, err)
+			if errors.Is(err, secret.ErrConflictingWrite) {
+				// Distinct from a generic ERROR (round-5 review finding 2):
+				// a concurrent write raced with this run's own write to the
+				// prefixed name, so the secret's current value can't be
+				// trusted without a human looking at it. Still counts
+				// toward a non-zero exit, since silently continuing would
+				// hide it.
+				fmt.Fprintf(out, "  CONFLICT  %s (scope: %s/%s) - a concurrent write was detected after this run already wrote a version to the prefixed name; re-run migrate-names or re-set the secret to verify its current value\n", c.name, c.scope, c.scopeID)
+			} else {
+				fmt.Fprintf(out, "  ERROR  %s (scope: %s/%s) - %v\n", c.name, c.scope, c.scopeID, err)
+			}
 			failed++
 			continue
 		}
@@ -537,6 +554,12 @@ func migrateOneCandidate(ctx context.Context, backend *secret.GCPBackend, c migr
 				// awareness, but not a migrate-names failure — there is
 				// nothing for it to copy (round-3 review finding 4).
 				fmt.Fprintf(out, "  ORPHAN  %s (scope: %s/%s) - stored ref has no accessible value; nothing to migrate\n", c.name, c.scope, c.scopeID)
+			case errors.Is(err, secret.ErrConflictingWrite):
+				// Propagated as-is; runMigrateNames reports this as a
+				// distinct CONFLICT outcome (round-5 review finding 2) rather
+				// than a generic ERROR, since the advice differs (re-run or
+				// re-set the secret, not check an IAM grant).
+				return false, err
 			default:
 				return false, fmt.Errorf("failed to migrate/repair (check the hub's IAM grant on the legacy name): %w", err)
 			}

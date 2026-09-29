@@ -1039,3 +1039,158 @@ func TestSPREV4_DeleteLegacyDryRunRealRunParity_NoRecordLegacyFailedPrecondition
 	assert.Equal(t, dryErr == nil, realErr == nil,
 		"BUG: --dry-run --delete-legacy and --delete-legacy disagree on success for a FailedPrecondition legacy secret")
 }
+
+// =============================================================================
+// Round 5 review regression tests (ptone/scion#2152 PR 2171, sp-rev-5.md)
+// =============================================================================
+
+// TestSPREV5_DeleteLegacyFailsForeverOnOrphanedRef reproduces round-5 review
+// finding 1, a round-4 regression: canDeleteLegacyName refused as soon as
+// hasRecord && !refIsPrefixed held, before ever reading the legacy name --
+// so an ORPHAN record (a stored ref whose target is gone) failed
+// --delete-legacy on every run, in both modes, contradicting the help text,
+// design doc, and PR body, which all say ORPHAN is a skip, not a failure.
+func TestSPREV5_DeleteLegacyFailsForeverOnOrphanedRef(t *testing.T) {
+	ctx := context.Background()
+	db := newTestStore(t)
+	mock := newMigrateNamesMockSMClient()
+	backend := migrateNamesTestBackend(t, db, mock, migrateNamesTestHubID)
+
+	orphanedRef := "gcpsm:projects/test-project/secrets/scion-deadbeefcafe-user-aaaaaaaaaaaa-GONE"
+	require.NoError(t, db.CreateSecret(ctx, &store.Secret{
+		ID: tid("sprev5-orphan-dl"), Key: "GONE", Scope: "user", ScopeID: "user-1", SecretRef: orphanedRef,
+	}))
+
+	for _, dry := range []bool{true, false} {
+		var out bytes.Buffer
+		err := runMigrateNames(ctx, backend, db, migrateNamesTestHubID, dry, true, &out)
+		t.Logf("dryRun=%v err=%v\n%s", dry, err, out.String())
+		assert.NoError(t, err, "BUG: ORPHAN record makes --delete-legacy fail (dryRun=%v)", dry)
+		assert.Contains(t, out.String(), "0 failed")
+	}
+}
+
+// TestSPREV5_DeleteLegacyFailsForeverOnNoRefNoValueRecord is the no-ref/
+// no-legacy-value counterpart: "truly nothing to migrate" (a silent skip
+// without --delete-legacy) must also not become a permanent failure with it.
+func TestSPREV5_DeleteLegacyFailsForeverOnNoRefNoValueRecord(t *testing.T) {
+	ctx := context.Background()
+	db := newTestStore(t)
+	mock := newMigrateNamesMockSMClient()
+	backend := migrateNamesTestBackend(t, db, mock, migrateNamesTestHubID)
+
+	require.NoError(t, db.CreateSecret(ctx, &store.Secret{
+		ID: tid("sprev5-noref-dl"), Key: "GHOST", Scope: "user", ScopeID: "user-1",
+	}))
+
+	for _, dry := range []bool{true, false} {
+		var out bytes.Buffer
+		err := runMigrateNames(ctx, backend, db, migrateNamesTestHubID, dry, true, &out)
+		t.Logf("dryRun=%v err=%v\n%s", dry, err, out.String())
+		assert.NoError(t, err, "BUG: no-ref/no-value record makes --delete-legacy fail (dryRun=%v)", dry)
+		assert.Contains(t, out.String(), "0 failed")
+	}
+}
+
+// sprev5OnceAtCallAccessSMClient fires hook exactly once, immediately before
+// the call-th call to AccessSecretVersion is delegated to the underlying
+// mock. Mirrors pkg/secret's onceAtCallAccessSMClient (unexported there, so
+// duplicated minimally here for the cmd-level end-to-end reproduction).
+type sprev5OnceAtCallAccessSMClient struct {
+	*migrateNamesMockSMClient
+	mu    sync.Mutex
+	calls int
+	call  int
+	hook  func()
+	fired bool
+}
+
+func (c *sprev5OnceAtCallAccessSMClient) AccessSecretVersion(ctx context.Context, req *smpb.AccessSecretVersionRequest) (*smpb.AccessSecretVersionResponse, error) {
+	c.mu.Lock()
+	c.calls++
+	fire := !c.fired && c.calls == c.call
+	if fire {
+		c.fired = true
+	}
+	c.mu.Unlock()
+	if fire {
+		c.hook()
+	}
+	return c.migrateNamesMockSMClient.AccessSecretVersion(ctx, req)
+}
+
+// sprev5AddHookSMClient fires hook once, immediately after the first
+// AddSecretVersion whose parent contains match has been applied. Mirrors
+// pkg/secret's addHookSMClient.
+type sprev5AddHookSMClient struct {
+	*migrateNamesMockSMClient
+	match string
+	once  sync.Once
+	hook  func()
+}
+
+func (c *sprev5AddHookSMClient) AddSecretVersion(ctx context.Context, req *smpb.AddSecretVersionRequest) (*smpb.SecretVersion, error) {
+	v, err := c.migrateNamesMockSMClient.AddSecretVersion(ctx, req)
+	if strings.Contains(req.Parent, c.match) {
+		c.once.Do(c.hook)
+	}
+	return v, err
+}
+
+// sprev5CompositeSMClient composes independent access/add hooks so a single
+// interleaving can inject a concurrent event at two different points in
+// planOrRepairRefAttempt's read/write sequence.
+type sprev5CompositeSMClient struct {
+	*migrateNamesMockSMClient
+	access *sprev5OnceAtCallAccessSMClient
+	add    *sprev5AddHookSMClient
+}
+
+func (c *sprev5CompositeSMClient) AccessSecretVersion(ctx context.Context, req *smpb.AccessSecretVersionRequest) (*smpb.AccessSecretVersionResponse, error) {
+	return c.access.AccessSecretVersion(ctx, req)
+}
+
+func (c *sprev5CompositeSMClient) AddSecretVersion(ctx context.Context, req *smpb.AddSecretVersionRequest) (*smpb.SecretVersion, error) {
+	return c.add.AddSecretVersion(ctx, req)
+}
+
+// TestSPREV5_MigrateNames_ReportsConflictNotSilence reproduces round-5 review
+// finding 2's "make it not silent" requirement end to end through
+// migrate-names: a concurrent new-binary Set() racing with this run's own
+// write to the prefixed name must be reported as a distinct CONFLICT outcome
+// with a non-zero exit, not silently accepted.
+func TestSPREV5_MigrateNames_ReportsConflictNotSilence(t *testing.T) {
+	ctx := context.Background()
+	db := newTestStore(t)
+	mock := newMigrateNamesMockSMClient()
+
+	legacyName := legacyNameForTest("API_KEY", "user", "user-1")
+	legacyRef := "gcpsm:projects/test-project/secrets/" + legacyName
+	prefixedName := prefixedNameForTest("API_KEY", "user", "user-1")
+	prefixedRef := "gcpsm:projects/test-project/secrets/" + prefixedName
+	mock.seed(t, "test-project", legacyName, "v1")
+	require.NoError(t, db.CreateSecret(ctx, &store.Secret{
+		ID: tid("sprev5-conflict-cli"), Key: "API_KEY", Scope: "user", ScopeID: "user-1", SecretRef: legacyRef,
+	}))
+
+	race := &sprev5OnceAtCallAccessSMClient{migrateNamesMockSMClient: mock, call: 2}
+	race.hook = func() {
+		mock.seed(t, "test-project", prefixedName, "v2-new-binary-set")
+	}
+	hooked := &sprev5AddHookSMClient{migrateNamesMockSMClient: mock, match: prefixedName}
+	hooked.hook = func() {
+		_, err := db.UpsertSecret(ctx, &store.Secret{
+			Key: "API_KEY", Scope: "user", ScopeID: "user-1", SecretRef: prefixedRef,
+		})
+		require.NoError(t, err)
+	}
+	composite := &sprev5CompositeSMClient{migrateNamesMockSMClient: mock, access: race, add: hooked}
+	backend := migrateNamesTestBackend(t, db, composite, migrateNamesTestHubID)
+
+	var out bytes.Buffer
+	err := runMigrateNames(ctx, backend, db, migrateNamesTestHubID, false, false, &out)
+	t.Logf("err=%v\n%s", err, out.String())
+	assert.Error(t, err, "a CONFLICT must produce a non-zero exit")
+	assert.Contains(t, out.String(), "CONFLICT")
+	assert.Contains(t, out.String(), "API_KEY")
+}
