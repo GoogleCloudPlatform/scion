@@ -49,6 +49,13 @@ func NewGCPBackend(ctx context.Context, s store.SecretStore, cfg GCPBackendConfi
 	if cfg.ProjectID == "" {
 		return nil, fmt.Errorf("gcpsm backend requires a GCP project ID")
 	}
+	if hubID == "" {
+		// secretNamePrefix() still produces a valid, deterministic prefix
+		// (sha256("")[:12]) so this is not fatal, but every hub instance that
+		// hits this ends up sharing the same meaningless prefix, defeating
+		// the point of this feature (ptone/scion#2152 review finding 15).
+		slog.Warn("GCP secret backend configured with an empty hub ID; secrets will use a shared, non-hub-specific name prefix")
+	}
 	smClient, err := newGCPSMClient(ctx, cfg.CredentialsJSON)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create GCP SM client: %w", err)
@@ -315,12 +322,18 @@ func (b *GCPBackend) ensureSecretAndAddVersion(ctx context.Context, smName strin
 					Labels:      labels,
 				},
 			})
-			if err != nil {
+			if err != nil && status.Code(err) != codes.AlreadyExists {
 				if permErr := b.wrapGCPError(err, "create secret"); permErr != nil {
 					return permErr
 				}
 				return fmt.Errorf("failed to create GCP SM secret: %w", err)
 			}
+			// AlreadyExists: a concurrent replica of this same hub created the
+			// container first (both saw NotFound on GetSecret above and raced
+			// to CreateSecret). The container now exists either way, so fall
+			// through to add the version — no data is lost, and the key
+			// material both replicas are writing is identical (review
+			// finding 11, ptone/scion#2152).
 		} else {
 			if permErr := b.wrapGCPError(err, "check secret"); permErr != nil {
 				return permErr
@@ -364,21 +377,32 @@ func (b *GCPBackend) UpdateMeta(ctx context.Context, input *UpdateMetaInput) (*S
 }
 
 func (b *GCPBackend) Delete(ctx context.Context, name, scope, scopeID string) error {
-	// Delete from GCP SM under both the current hub-prefixed name and the
-	// legacy pre-prefix name (NotFound on either is fine — a secret created
-	// before ptone/scion#2152, or one already migrated, will only exist under
-	// one of the two).
-	for _, smName := range []string{b.gcpSecretName(name, scope, scopeID), b.legacyGCPSecretName(name, scope, scopeID)} {
-		fullName := fmt.Sprintf("projects/%s/secrets/%s", b.projectID, smName)
-		err := b.smClient.DeleteSecret(ctx, &smpb.DeleteSecretRequest{
-			Name: fullName,
-		})
-		if err != nil && status.Code(err) != codes.NotFound {
-			if permErr := b.wrapGCPError(err, "delete secret"); permErr != nil {
-				return permErr
-			}
-			return fmt.Errorf("failed to delete GCP SM secret %s: %w", smName, err)
+	// Delete the current hub-prefixed name. A failure here is fatal: this is
+	// the name new writes actually use, so its delete must succeed.
+	prefixedName := b.gcpSecretName(name, scope, scopeID)
+	prefixedFull := fmt.Sprintf("projects/%s/secrets/%s", b.projectID, prefixedName)
+	if err := b.smClient.DeleteSecret(ctx, &smpb.DeleteSecretRequest{Name: prefixedFull}); err != nil && status.Code(err) != codes.NotFound {
+		if permErr := b.wrapGCPError(err, "delete secret"); permErr != nil {
+			return permErr
 		}
+		return fmt.Errorf("failed to delete GCP SM secret %s: %w", prefixedName, err)
+	}
+
+	// Best-effort: also remove the legacy (pre-ptone/scion#2152) name if present. This
+	// is NOT fatal (ptone/scion#2152 review finding 4): once an operator has
+	// narrowed IAM to only the new prefix — the whole point of this
+	// feature — the Hub's service account may no longer have permission to
+	// even query the legacy name, and GCP evaluates IAM before existence, so
+	// PermissionDenied here is expected steady-state behavior, not an error
+	// condition. Swallowing it (rather than returning early, as a naive
+	// "delete both names" loop would) means the primary delete above having
+	// succeeded is what determines the outcome the caller sees, and the DB
+	// row below is always removed to match.
+	legacyName := b.legacyGCPSecretName(name, scope, scopeID)
+	legacyFull := fmt.Sprintf("projects/%s/secrets/%s", b.projectID, legacyName)
+	if err := b.smClient.DeleteSecret(ctx, &smpb.DeleteSecretRequest{Name: legacyFull}); err != nil && status.Code(err) != codes.NotFound {
+		slog.Warn("failed to delete legacy GCP SM secret (non-fatal; the current hub-prefixed copy was deleted successfully)",
+			"name", name, "scope", scope, "legacy_name", legacyName, "error", err)
 	}
 
 	// Delete from Hub DB
@@ -632,11 +656,30 @@ func (b *GCPBackend) secretNamePrefix() string {
 // The hubID is combined with the scopeID before hashing to ensure uniqueness
 // across hub instances sharing the same GCP project, independent of the
 // hub-prefix segment (which only depends on hubID).
+//
+// If the raw name would exceed GCP SM's 255-character secret ID limit even
+// after sanitization, a short content-hash suffix is appended at the
+// truncation point instead of plain-truncating (ptone/scion#2152 review
+// finding 16): the longer hub prefix moves the cut point earlier than before
+// this feature, so plain truncation makes it more likely that two distinct,
+// very long names collide after being cut to the same 255 bytes. This is
+// safe to change here (unlike legacyGCPSecretName below, which must keep
+// reproducing the exact pre-ptone/scion#2152 truncated bytes to find already-existing
+// secrets): every gcpSecretName output is a brand-new name under this PR
+// regardless of length, so there is no existing secret whose ID this could
+// stop matching.
 func (b *GCPBackend) gcpSecretName(name, scope, scopeID string) string {
 	combined := b.hubID + ":" + scopeID
 	hash := sha256.Sum256([]byte(combined))
 	shortHash := hex.EncodeToString(hash[:6]) // 6 bytes = 12 hex chars
-	return sanitizeSecretID(fmt.Sprintf("%s%s-%s-%s", b.secretNamePrefix(), scope, shortHash, name))
+	raw := fmt.Sprintf("%s%s-%s-%s", b.secretNamePrefix(), scope, shortHash, name)
+	sanitized := invalidSecretIDChars.ReplaceAllString(raw, "-")
+	if len(sanitized) <= 255 {
+		return sanitized
+	}
+	contentHash := sha256.Sum256([]byte(sanitized))
+	suffix := "-" + hex.EncodeToString(contentHash[:4]) // 4 bytes = 8 hex chars, plus "-" = 9
+	return sanitized[:255-len(suffix)] + suffix
 }
 
 // legacyGCPSecretName builds the pre-ptone/scion#2152 GCP SM secret ID (no hub
@@ -680,25 +723,81 @@ func (b *GCPBackend) accessSecretByComputedName(ctx context.Context, name, scope
 	return value, legacyName, nil
 }
 
+// hasAccessibleVersion reports whether the given GCP SM secret ID currently
+// has an accessible "latest" version. NotFound (no such secret) and
+// FailedPrecondition (the secret container exists but its latest version is
+// disabled or destroyed — "exists with no enabled version" in
+// formula-decision.md) both mean "not accessible" for migration purposes, not
+// an error (ptone/scion#2152 review finding 12).
+func (b *GCPBackend) hasAccessibleVersion(ctx context.Context, smName string) (bool, error) {
+	_, err := b.accessLatestVersion(ctx, smName)
+	if err == nil {
+		return true, nil
+	}
+	switch status.Code(err) {
+	case codes.NotFound, codes.FailedPrecondition:
+		return false, nil
+	default:
+		return false, err
+	}
+}
+
+// migrationCheck classifies a secret identity's name-migration state in a
+// single pass over GCP SM: whether the prefixed name is already accessible,
+// and — only if it is not — whether the legacy name is accessible and, if so,
+// its current value. NeedsNameMigration and MigrateNameForward both build on
+// this so the legacy name is read at most once per call instead of twice
+// (ptone/scion#2152 review nit 19).
+//
+// A PermissionDenied on the legacy name (distinct from NotFound: GCP
+// evaluates IAM before existence) is treated the same as "legacy absent" —
+// on a fresh hub whose service account only holds the new-prefix conditioned
+// grant, there is no legacy secret this call could ever migrate, and
+// treating the denial as a hard error would log a spurious warning on every
+// boot (ptone/scion#2152 review finding 13).
+func (b *GCPBackend) migrationCheck(ctx context.Context, name, scope, scopeID string) (prefixedOK bool, legacyValue string, legacyOK bool, err error) {
+	prefixedName := b.gcpSecretName(name, scope, scopeID)
+	prefixedOK, err = b.hasAccessibleVersion(ctx, prefixedName)
+	if err != nil {
+		return false, "", false, fmt.Errorf("failed to check prefixed secret %s: %w", prefixedName, err)
+	}
+	if prefixedOK {
+		return true, "", false, nil
+	}
+
+	legacyName := b.legacyGCPSecretName(name, scope, scopeID)
+	value, accessErr := b.accessLatestVersion(ctx, legacyName)
+	if accessErr != nil {
+		switch status.Code(accessErr) {
+		case codes.NotFound, codes.FailedPrecondition:
+			return false, "", false, nil
+		case codes.PermissionDenied:
+			slog.Debug("legacy GCP SM secret not accessible (permission denied); treating as absent",
+				"name", name, "scope", scope, "legacy_name", legacyName)
+			return false, "", false, nil
+		default:
+			return false, "", false, fmt.Errorf("failed to check legacy secret %s: %w", legacyName, accessErr)
+		}
+	}
+	return false, value, true, nil
+}
+
 // NeedsNameMigration reports whether a secret identity's GCP SM value is only
 // reachable under the legacy (pre-prefix) name — i.e. the hub-prefixed name
 // has no accessible version yet, but the legacy name does. It performs reads
 // only (no writes), so it is safe to use for --dry-run planning.
-// Returns store.ErrNotFound if the secret exists under neither name.
+// Returns store.ErrNotFound if the secret exists under neither name (or the
+// legacy name is not accessible to this hub's service account at all).
 func (b *GCPBackend) NeedsNameMigration(ctx context.Context, name, scope, scopeID string) (bool, error) {
-	prefixedName := b.gcpSecretName(name, scope, scopeID)
-	if _, err := b.accessLatestVersion(ctx, prefixedName); err == nil {
-		return false, nil
-	} else if status.Code(err) != codes.NotFound {
-		return false, fmt.Errorf("failed to check prefixed secret %s: %w", prefixedName, err)
+	prefixedOK, _, legacyOK, err := b.migrationCheck(ctx, name, scope, scopeID)
+	if err != nil {
+		return false, err
 	}
-
-	legacyName := b.legacyGCPSecretName(name, scope, scopeID)
-	if _, err := b.accessLatestVersion(ctx, legacyName); err != nil {
-		if status.Code(err) == codes.NotFound {
-			return false, store.ErrNotFound
-		}
-		return false, fmt.Errorf("failed to check legacy secret %s: %w", legacyName, err)
+	if prefixedOK {
+		return false, nil
+	}
+	if !legacyOK {
+		return false, store.ErrNotFound
 	}
 	return true, nil
 }
@@ -711,38 +810,75 @@ func (b *GCPBackend) NeedsNameMigration(ctx context.Context, name, scope, scopeI
 // it returns store.ErrNotFound. The legacy secret is left in place — deleting
 // it is the separate, explicit job of DeleteLegacySecretName (--delete-legacy).
 func (b *GCPBackend) MigrateNameForward(ctx context.Context, name, scope, scopeID string) (migrated bool, err error) {
-	needsMigration, err := b.NeedsNameMigration(ctx, name, scope, scopeID)
+	prefixedOK, legacyValue, legacyOK, err := b.migrationCheck(ctx, name, scope, scopeID)
 	if err != nil {
 		return false, err
 	}
-	if !needsMigration {
+	if prefixedOK {
 		return false, nil
+	}
+	if !legacyOK {
+		return false, store.ErrNotFound
 	}
 
 	legacyName := b.legacyGCPSecretName(name, scope, scopeID)
 	legacyFull := fmt.Sprintf("projects/%s/secrets/%s", b.projectID, legacyName)
-	value, err := b.accessLatestVersion(ctx, legacyName)
-	if err != nil {
-		return false, fmt.Errorf("failed to read legacy secret %s: %w", legacyName, err)
-	}
-
 	var labels map[string]string
 	if legacySecret, gerr := b.smClient.GetSecret(ctx, &smpb.GetSecretRequest{Name: legacyFull}); gerr == nil {
 		labels = legacySecret.Labels
 	}
 
 	prefixedName := b.gcpSecretName(name, scope, scopeID)
-	if err := b.ensureSecretAndAddVersion(ctx, prefixedName, []byte(value), labels); err != nil {
+	if err := b.ensureSecretAndAddVersion(ctx, prefixedName, []byte(legacyValue), labels); err != nil {
 		return false, fmt.Errorf("failed to copy %s to prefixed GCP SM name: %w", name, err)
 	}
 	return true, nil
+}
+
+// LegacyStillPresent reports whether a secret identity's legacy (pre-prefix)
+// GCP SM name still has an accessible version. Used by migrate-names to
+// decide whether a --delete-legacy pass has anything to do for this
+// identity, without attempting (and reporting) a no-op delete.
+func (b *GCPBackend) LegacyStillPresent(ctx context.Context, name, scope, scopeID string) (bool, error) {
+	legacyName := b.legacyGCPSecretName(name, scope, scopeID)
+	ok, err := b.hasAccessibleVersion(ctx, legacyName)
+	if err != nil {
+		return false, fmt.Errorf("failed to check legacy secret %s: %w", legacyName, err)
+	}
+	return ok, nil
+}
+
+// RefPointsAtPrefixed reports whether a DB record exists for the given secret
+// identity and, if so, whether its SecretRef already points at the current
+// hub-prefixed GCP SM name. hasRecord is false (with refIsPrefixed
+// meaningless) when there is no DB row at all — e.g. a hub-scope signing key
+// recovered directly from GCP SM without ever gaining one. Used by
+// migrate-names to decide whether UpdateSecretRefToPrefixed has anything to
+// do, and by DeleteLegacySecretName to refuse deleting the legacy secret
+// while a DB record still depends on it.
+func (b *GCPBackend) RefPointsAtPrefixed(ctx context.Context, name, scope, scopeID string) (hasRecord, refIsPrefixed bool, err error) {
+	rec, err := b.store.GetSecret(ctx, name, scope, scopeID)
+	if err != nil {
+		if err == store.ErrNotFound {
+			return false, false, nil
+		}
+		return false, false, err
+	}
+	prefixedName := b.gcpSecretName(name, scope, scopeID)
+	prefixedRef := "gcpsm:" + fmt.Sprintf("projects/%s/secrets/%s", b.projectID, prefixedName)
+	return true, rec.SecretRef == prefixedRef, nil
 }
 
 // DeleteLegacySecretName verifies that the hub-prefixed secret for the given
 // identity has an accessible version whose value matches the legacy secret's
 // current value, then deletes the legacy secret. It refuses to delete if the
 // prefixed copy is missing or its value does not match, so --delete-legacy can
-// never drop the only copy of a secret. NotFound on the legacy secret is
+// never drop the only copy of a secret. It also refuses to delete while a DB
+// record still exists with a SecretRef that is not yet the prefixed name
+// (ptone/scion#2152 review finding 2): Get() trusts a stored SecretRef
+// verbatim with no fallback, so deleting the legacy secret while the ref
+// still points at it would make the record unreadable — callers must repair
+// the ref (UpdateSecretRefToPrefixed) first. NotFound on the legacy secret is
 // treated as success (already migrated/deleted).
 func (b *GCPBackend) DeleteLegacySecretName(ctx context.Context, name, scope, scopeID string) error {
 	legacyName := b.legacyGCPSecretName(name, scope, scopeID)
@@ -765,6 +901,12 @@ func (b *GCPBackend) DeleteLegacySecretName(ctx context.Context, name, scope, sc
 		return fmt.Errorf("refusing to delete legacy secret %s: prefixed copy %s value does not match", legacyName, prefixedName)
 	}
 
+	if hasRecord, refIsPrefixed, err := b.RefPointsAtPrefixed(ctx, name, scope, scopeID); err != nil {
+		return fmt.Errorf("failed to check DB record before deleting legacy secret %s: %w", legacyName, err)
+	} else if hasRecord && !refIsPrefixed {
+		return fmt.Errorf("refusing to delete legacy secret %s: its DB record's SecretRef is not yet repaired to the prefixed name %s — call UpdateSecretRefToPrefixed first", legacyName, prefixedName)
+	}
+
 	if err := b.smClient.DeleteSecret(ctx, &smpb.DeleteSecretRequest{Name: legacyFull}); err != nil && status.Code(err) != codes.NotFound {
 		return fmt.Errorf("failed to delete legacy secret %s: %w", legacyName, err)
 	}
@@ -772,9 +914,10 @@ func (b *GCPBackend) DeleteLegacySecretName(ctx context.Context, name, scope, sc
 }
 
 // UpdateSecretRefToPrefixed points a secret's stored DB SecretRef at its
-// current hub-prefixed GCP SM name. It is a no-op (returns nil) if no DB
-// record exists for the identity — e.g. a hub-scope signing key recovered
-// directly from GCP SM without ever gaining a DB row.
+// current hub-prefixed GCP SM name. It is a no-op (returns nil, no store
+// write) if no DB record exists for the identity — e.g. a hub-scope signing
+// key recovered directly from GCP SM without ever gaining a DB row — or if
+// the ref already points at the prefixed name.
 func (b *GCPBackend) UpdateSecretRefToPrefixed(ctx context.Context, name, scope, scopeID string) error {
 	rec, err := b.store.GetSecret(ctx, name, scope, scopeID)
 	if err != nil {
@@ -784,26 +927,43 @@ func (b *GCPBackend) UpdateSecretRefToPrefixed(ctx context.Context, name, scope,
 		return err
 	}
 	prefixedName := b.gcpSecretName(name, scope, scopeID)
-	rec.SecretRef = "gcpsm:" + fmt.Sprintf("projects/%s/secrets/%s", b.projectID, prefixedName)
+	prefixedRef := "gcpsm:" + fmt.Sprintf("projects/%s/secrets/%s", b.projectID, prefixedName)
+	if rec.SecretRef == prefixedRef {
+		return nil
+	}
+	rec.SecretRef = prefixedRef
 	return b.store.UpdateSecret(ctx, rec)
 }
 
 // CopyHubSecretForward implements the hub-startup copy-forward for hub-scope
-// infrastructure secrets (signing keys): it is a thin wrapper around
-// MigrateNameForward fixing scope=hub, scopeID=b.hubID. Called at
-// ensureSigningKey time so that a signing key created before ptone/scion#2152
-// becomes available under the hub-prefixed name — with the same key
-// material — without waiting for an operator to run `migrate-names`. This
-// matters specifically for signing keys (unlike ordinary secrets) because
-// losing them invalidates every live session/agent token; ordinary secrets
-// are already backward compatible via the stored SecretRef and are migrated
-// on the operator's schedule via `migrate-names`.
+// infrastructure secrets (signing keys): it wraps MigrateNameForward (fixing
+// scope=hub, scopeID=b.hubID), then repairs the DB SecretRef so the caller's
+// very next read actually resolves through the prefixed name instead of
+// silently continuing to read the legacy copy via a stale ref
+// (ptone/scion#2152 review finding 3 — formula-decision.md's "read the
+// legacy name and write the same value to the prefixed name, then use it").
+// The ref is repaired whether this call performed the copy or the prefixed
+// copy already existed from an earlier boot or an operator's `migrate-names`
+// run, so a ref left stale by a prior failure also self-heals here.
+//
+// Called at ensureSigningKey/OIDC-key-manager time, without waiting for an
+// operator to run `migrate-names`. This matters specifically for signing
+// keys (unlike ordinary secrets) because losing them invalidates every live
+// session/agent token; ordinary secrets are already backward compatible via
+// the stored SecretRef and are migrated on the operator's schedule via
+// `migrate-names`.
 // Returns store.ErrNotFound when there is nothing to copy (neither name
-// exists yet, e.g. first boot) — callers should treat that as "proceed with
+// exists yet, e.g. first boot, or the legacy name is not accessible to this
+// hub's service account at all) — callers should treat that as "proceed with
 // normal key resolution", not a failure.
 func (b *GCPBackend) CopyHubSecretForward(ctx context.Context, name string) error {
-	_, err := b.MigrateNameForward(ctx, name, store.ScopeHub, b.hubID)
-	return err
+	if _, err := b.MigrateNameForward(ctx, name, store.ScopeHub, b.hubID); err != nil {
+		return err
+	}
+	if err := b.UpdateSecretRefToPrefixed(ctx, name, store.ScopeHub, b.hubID); err != nil {
+		return fmt.Errorf("copied %s forward but failed to update its DB ref: %w", name, err)
+	}
+	return nil
 }
 
 // sanitizeSecretID ensures the string is a valid GCP SM secret ID.

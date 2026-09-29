@@ -1366,7 +1366,20 @@ func TestGCPBackend_CopyHubSecretForward(t *testing.T) {
 	ctx := context.Background()
 
 	legacyName := backend.legacyGCPSecretName("user_signing_key", store.ScopeHub, backend.hubID)
+	legacyRef := "gcpsm:" + fmt.Sprintf("projects/%s/secrets/%s", backend.projectID, legacyName)
 	seedMockSecret(t, mock, backend.projectID, legacyName, "key-material")
+
+	// Seed a DB record with a legacy SecretRef, as ensureSigningKey's
+	// pre-existing backup path would have created before ptone/scion#2152.
+	if err := backend.store.CreateSecret(ctx, &store.Secret{
+		ID:        tid("copy-forward-signing-key"),
+		Key:       "user_signing_key",
+		Scope:     store.ScopeHub,
+		ScopeID:   backend.hubID,
+		SecretRef: legacyRef,
+	}); err != nil {
+		t.Fatalf("failed to seed DB record: %v", err)
+	}
 
 	if err := backend.CopyHubSecretForward(ctx, "user_signing_key"); err != nil {
 		t.Fatalf("CopyHubSecretForward failed: %v", err)
@@ -1379,6 +1392,18 @@ func TestGCPBackend_CopyHubSecretForward(t *testing.T) {
 	}
 	if value != "key-material" {
 		t.Errorf("expected copied key material %q, got %q", "key-material", value)
+	}
+
+	// ptone/scion#2152 review finding 3: the DB ref must move to the
+	// prefixed name too, or a subsequent Get() (which trusts the stored ref
+	// verbatim, with no fallback) keeps reading the legacy copy forever.
+	rec, err := backend.store.GetSecret(ctx, "user_signing_key", store.ScopeHub, backend.hubID)
+	if err != nil {
+		t.Fatalf("GetSecret failed: %v", err)
+	}
+	prefixedRef := "gcpsm:" + fmt.Sprintf("projects/%s/secrets/%s", backend.projectID, prefixedName)
+	if rec.SecretRef != prefixedRef {
+		t.Errorf("expected SecretRef repaired to %q, got %q", prefixedRef, rec.SecretRef)
 	}
 
 	// Legacy secret is untouched — deletion is a separate, explicit step.
@@ -1395,11 +1420,373 @@ func TestGCPBackend_CopyHubSecretForward(t *testing.T) {
 	}
 }
 
+// TestGCPBackend_CopyHubSecretForward_RepairsRefWhenAlreadyCopied covers the
+// case where the prefixed copy was already created on an earlier boot (or by
+// an operator's migrate-names run) but the DB ref update failed or never
+// happened — CopyHubSecretForward must still repair it, not just on the call
+// that performs the copy (ptone/scion#2152 review finding 3).
+func TestGCPBackend_CopyHubSecretForward_RepairsRefWhenAlreadyCopied(t *testing.T) {
+	backend, mock := createTestGCPBackend(t)
+	ctx := context.Background()
+
+	legacyName := backend.legacyGCPSecretName("user_signing_key", store.ScopeHub, backend.hubID)
+	legacyRef := "gcpsm:" + fmt.Sprintf("projects/%s/secrets/%s", backend.projectID, legacyName)
+	seedMockSecret(t, mock, backend.projectID, legacyName, "key-material")
+	prefixedName := backend.gcpSecretName("user_signing_key", store.ScopeHub, backend.hubID)
+	seedMockSecret(t, mock, backend.projectID, prefixedName, "key-material")
+
+	if err := backend.store.CreateSecret(ctx, &store.Secret{
+		ID:        tid("already-copied-signing-key"),
+		Key:       "user_signing_key",
+		Scope:     store.ScopeHub,
+		ScopeID:   backend.hubID,
+		SecretRef: legacyRef, // stale: still legacy even though the prefixed copy exists
+	}); err != nil {
+		t.Fatalf("failed to seed DB record: %v", err)
+	}
+
+	if err := backend.CopyHubSecretForward(ctx, "user_signing_key"); err != nil {
+		t.Fatalf("CopyHubSecretForward failed: %v", err)
+	}
+
+	rec, err := backend.store.GetSecret(ctx, "user_signing_key", store.ScopeHub, backend.hubID)
+	if err != nil {
+		t.Fatalf("GetSecret failed: %v", err)
+	}
+	prefixedRef := "gcpsm:" + fmt.Sprintf("projects/%s/secrets/%s", backend.projectID, prefixedName)
+	if rec.SecretRef != prefixedRef {
+		t.Errorf("expected stale ref to be repaired to %q, got %q", prefixedRef, rec.SecretRef)
+	}
+}
+
 func TestGCPBackend_CopyHubSecretForward_NothingToCopy(t *testing.T) {
 	// First boot: neither the prefixed nor legacy signing key exists yet.
 	backend, _ := createTestGCPBackend(t)
 	ctx := context.Background()
 	if err := backend.CopyHubSecretForward(ctx, "agent_signing_key"); err != store.ErrNotFound {
 		t.Errorf("expected ErrNotFound when nothing to copy, got: %v", err)
+	}
+}
+
+// --- ptone/scion#2152 round-1 review fixes ---
+
+// denyDeleteSMClient denies DeleteSecret for exactly one full GCP SM
+// resource name (simulating an IAM condition that no longer covers it),
+// while every other call passes through to the wrapped mock.
+type denyDeleteSMClient struct {
+	*mockSMClient
+	denyFullName string
+}
+
+func (m *denyDeleteSMClient) DeleteSecret(ctx context.Context, req *smpb.DeleteSecretRequest) error {
+	if req.Name == m.denyFullName {
+		return status.Errorf(codes.PermissionDenied, "denied by IAM condition")
+	}
+	return m.mockSMClient.DeleteSecret(ctx, req)
+}
+
+// TestGCPBackend_Delete_SucceedsWhenLegacyGrantRemoved reproduces review
+// finding 4: once an operator narrows IAM to only the hub-prefixed name, the
+// Hub's service account can no longer even query the legacy name (GCP
+// evaluates IAM before existence), so Delete must not fail just because the
+// best-effort legacy cleanup got PermissionDenied.
+func TestGCPBackend_Delete_SucceedsWhenLegacyGrantRemoved(t *testing.T) {
+	backend, mock := createTestGCPBackend(t)
+	ctx := context.Background()
+
+	if _, _, err := backend.Set(ctx, &SetSecretInput{
+		Name: "K", Value: "v", SecretType: TypeEnvironment, Scope: ScopeUser, ScopeID: "u1",
+	}); err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	legacyName := backend.legacyGCPSecretName("K", ScopeUser, "u1")
+	legacyFull := fmt.Sprintf("projects/%s/secrets/%s", backend.projectID, legacyName)
+	denyBackend := NewGCPBackendWithClient(backend.store, &denyDeleteSMClient{mock, legacyFull}, "test-project", "test-hub-id")
+
+	if err := denyBackend.Delete(ctx, "K", ScopeUser, "u1"); err != nil {
+		t.Errorf("expected Delete to succeed despite the legacy delete being denied, got: %v", err)
+	}
+	if _, err := backend.store.GetSecret(ctx, "K", ScopeUser, "u1"); err != store.ErrNotFound {
+		t.Errorf("expected DB record removed, got err=%v", err)
+	}
+
+	// The prefixed (actually-used) copy must be gone too.
+	prefixedName := backend.gcpSecretName("K", ScopeUser, "u1")
+	mock.mu.Lock()
+	_, prefixedStillThere := mock.secrets[fmt.Sprintf("projects/%s/secrets/%s", backend.projectID, prefixedName)]
+	mock.mu.Unlock()
+	if prefixedStillThere {
+		t.Error("expected the prefixed secret to be deleted")
+	}
+}
+
+// TestGCPBackend_Delete_FailsWhenPrefixedDeleteDenied ensures Delete still
+// treats a denial on the *prefixed* (currently-used) name as fatal — only the
+// legacy cleanup is best-effort.
+func TestGCPBackend_Delete_FailsWhenPrefixedDeleteDenied(t *testing.T) {
+	backend, mock := createTestGCPBackend(t)
+	ctx := context.Background()
+	if _, _, err := backend.Set(ctx, &SetSecretInput{
+		Name: "K", Value: "v", SecretType: TypeEnvironment, Scope: ScopeUser, ScopeID: "u1",
+	}); err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+	prefixedName := backend.gcpSecretName("K", ScopeUser, "u1")
+	prefixedFull := fmt.Sprintf("projects/%s/secrets/%s", backend.projectID, prefixedName)
+	denyBackend := NewGCPBackendWithClient(backend.store, &denyDeleteSMClient{mock, prefixedFull}, "test-project", "test-hub-id")
+
+	if err := denyBackend.Delete(ctx, "K", ScopeUser, "u1"); err == nil {
+		t.Error("expected Delete to fail when the prefixed (in-use) name can't be deleted")
+	}
+}
+
+// TestGCPBackend_DeleteLegacySecretName_RefusesWhenDBRefNotPrefixed
+// reproduces review finding 2: deleting the legacy secret while a DB record
+// still points at it would make the record unreadable, since Get() trusts a
+// stored SecretRef verbatim with no fallback.
+func TestGCPBackend_DeleteLegacySecretName_RefusesWhenDBRefNotPrefixed(t *testing.T) {
+	backend, mock := createTestGCPBackend(t)
+	ctx := context.Background()
+
+	legacyName := backend.legacyGCPSecretName("K", ScopeUser, "u1")
+	legacyRef := "gcpsm:" + fmt.Sprintf("projects/%s/secrets/%s", backend.projectID, legacyName)
+	seedMockSecret(t, mock, backend.projectID, legacyName, "v")
+	if _, err := backend.MigrateNameForward(ctx, "K", ScopeUser, "u1"); err != nil {
+		t.Fatalf("MigrateNameForward failed: %v", err)
+	}
+	if err := backend.store.CreateSecret(ctx, &store.Secret{
+		ID: tid("ref-not-repaired"), Key: "K", Scope: ScopeUser, ScopeID: "u1", SecretRef: legacyRef,
+	}); err != nil {
+		t.Fatalf("failed to seed DB record: %v", err)
+	}
+
+	if err := backend.DeleteLegacySecretName(ctx, "K", ScopeUser, "u1"); err == nil {
+		t.Error("expected DeleteLegacySecretName to refuse while the DB ref is still legacy")
+	}
+	mock.mu.Lock()
+	_, stillThere := mock.secrets[fmt.Sprintf("projects/%s/secrets/%s", backend.projectID, legacyName)]
+	mock.mu.Unlock()
+	if !stillThere {
+		t.Error("legacy secret should not have been deleted while the DB ref was unrepaired")
+	}
+
+	// After repairing the ref, the same call must succeed.
+	if err := backend.UpdateSecretRefToPrefixed(ctx, "K", ScopeUser, "u1"); err != nil {
+		t.Fatalf("UpdateSecretRefToPrefixed failed: %v", err)
+	}
+	if err := backend.DeleteLegacySecretName(ctx, "K", ScopeUser, "u1"); err != nil {
+		t.Errorf("expected DeleteLegacySecretName to succeed once the ref is repaired, got: %v", err)
+	}
+}
+
+// TestGCPBackend_DeleteLegacySecretName_NoDBRecordIsFine covers the
+// defensive case (no DB row at all, e.g. a signing key recovered directly
+// from GCP SM) — RefPointsAtPrefixed's hasRecord=false must not block delete.
+func TestGCPBackend_DeleteLegacySecretName_NoDBRecordIsFine(t *testing.T) {
+	backend, mock := createTestGCPBackend(t)
+	ctx := context.Background()
+	legacyName := backend.legacyGCPSecretName("K", ScopeUser, "u1")
+	seedMockSecret(t, mock, backend.projectID, legacyName, "v")
+	if _, err := backend.MigrateNameForward(ctx, "K", ScopeUser, "u1"); err != nil {
+		t.Fatalf("MigrateNameForward failed: %v", err)
+	}
+	if err := backend.DeleteLegacySecretName(ctx, "K", ScopeUser, "u1"); err != nil {
+		t.Errorf("expected success with no DB record, got: %v", err)
+	}
+}
+
+func TestGCPBackend_RefPointsAtPrefixed(t *testing.T) {
+	backend, mock := createTestGCPBackend(t)
+	ctx := context.Background()
+
+	if hasRecord, _, err := backend.RefPointsAtPrefixed(ctx, "K", ScopeUser, "u1"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	} else if hasRecord {
+		t.Error("expected hasRecord=false with no DB row")
+	}
+
+	legacyName := backend.legacyGCPSecretName("K", ScopeUser, "u1")
+	seedMockSecret(t, mock, backend.projectID, legacyName, "v")
+	legacyRef := "gcpsm:" + fmt.Sprintf("projects/%s/secrets/%s", backend.projectID, legacyName)
+	if err := backend.store.CreateSecret(ctx, &store.Secret{ID: tid("rpap"), Key: "K", Scope: ScopeUser, ScopeID: "u1", SecretRef: legacyRef}); err != nil {
+		t.Fatalf("failed to seed DB record: %v", err)
+	}
+	if hasRecord, refIsPrefixed, err := backend.RefPointsAtPrefixed(ctx, "K", ScopeUser, "u1"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	} else if !hasRecord || refIsPrefixed {
+		t.Errorf("expected hasRecord=true, refIsPrefixed=false, got hasRecord=%v refIsPrefixed=%v", hasRecord, refIsPrefixed)
+	}
+
+	if err := backend.UpdateSecretRefToPrefixed(ctx, "K", ScopeUser, "u1"); err != nil {
+		t.Fatalf("UpdateSecretRefToPrefixed failed: %v", err)
+	}
+	if hasRecord, refIsPrefixed, err := backend.RefPointsAtPrefixed(ctx, "K", ScopeUser, "u1"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	} else if !hasRecord || !refIsPrefixed {
+		t.Errorf("expected hasRecord=true, refIsPrefixed=true after repair, got hasRecord=%v refIsPrefixed=%v", hasRecord, refIsPrefixed)
+	}
+}
+
+// raceCreateSMClient simulates two replicas of one hub racing to create the
+// same GCP SM secret container: GetSecret reports NotFound (as if this
+// replica hasn't seen it yet), but the underlying CreateSecret call hits a
+// container another replica already created, returning AlreadyExists.
+type raceCreateSMClient struct {
+	*mockSMClient
+}
+
+func (m *raceCreateSMClient) GetSecret(_ context.Context, _ *smpb.GetSecretRequest) (*smpb.Secret, error) {
+	return nil, status.Errorf(codes.NotFound, "not found (this replica hasn't seen it yet)")
+}
+
+// TestGCPBackend_Set_ConcurrentCreateRace reproduces review finding 11: two
+// replicas of the same hub both see NotFound on GetSecret and race to
+// CreateSecret; the loser must not fail, since the container now exists
+// either way and both replicas write identical key material.
+func TestGCPBackend_Set_ConcurrentCreateRace(t *testing.T) {
+	s, err := newTestStore(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+	if err := s.Migrate(context.Background()); err != nil {
+		t.Fatalf("failed to migrate test store: %v", err)
+	}
+	mock := newMockSMClient()
+	winner := NewGCPBackendWithClient(s, mock, "test-project", "test-hub-id")
+	smName := winner.gcpSecretName("API_KEY", ScopeUser, "user-1")
+
+	ctx := context.Background()
+	if _, err := mock.CreateSecret(ctx, &smpb.CreateSecretRequest{
+		Parent: "projects/test-project", SecretId: smName, Secret: &smpb.Secret{},
+	}); err != nil {
+		t.Fatalf("failed to seed the winning replica's container: %v", err)
+	}
+
+	loser := NewGCPBackendWithClient(s, &raceCreateSMClient{mock}, "test-project", "test-hub-id")
+	if _, _, err := loser.Set(ctx, &SetSecretInput{Name: "API_KEY", Value: "v", Scope: ScopeUser, ScopeID: "user-1"}); err != nil {
+		t.Errorf("expected Set to succeed despite the AlreadyExists race, got: %v", err)
+	}
+
+	fullName := fmt.Sprintf("projects/test-project/secrets/%s", smName)
+	mock.mu.Lock()
+	val, ok := mock.versions[fullName]
+	mock.mu.Unlock()
+	if !ok || string(val) != "v" {
+		t.Errorf("expected version %q to be added despite the race, got %q (present=%v)", "v", val, ok)
+	}
+}
+
+// TestGCPBackend_NeedsNameMigration_FailedPreconditionOnPrefixedIsAbsent
+// reproduces review finding 12: a prefixed container whose latest version is
+// disabled/destroyed returns FailedPrecondition, not NotFound, and must
+// still be treated as "needs copying", not surfaced as an error.
+func TestGCPBackend_NeedsNameMigration_FailedPreconditionOnPrefixedIsAbsent(t *testing.T) {
+	backend, mock := createTestGCPBackend(t)
+	ctx := context.Background()
+
+	legacyName := backend.legacyGCPSecretName("K", ScopeUser, "u1")
+	seedMockSecret(t, mock, backend.projectID, legacyName, "v")
+
+	// Create the prefixed container but give it no accessible version: the
+	// mock's AccessSecretVersion returns NotFound for a container with no
+	// version, so wrap it to simulate the disabled/destroyed-version case
+	// (FailedPrecondition) instead.
+	prefixedName := backend.gcpSecretName("K", ScopeUser, "u1")
+	if _, err := mock.CreateSecret(ctx, &smpb.CreateSecretRequest{Parent: "projects/test-project", SecretId: prefixedName, Secret: &smpb.Secret{}}); err != nil {
+		t.Fatalf("failed to seed prefixed container: %v", err)
+	}
+	prefixedFull := fmt.Sprintf("projects/test-project/secrets/%s", prefixedName)
+	fpBackend := NewGCPBackendWithClient(backend.store, &failedPreconditionSMClient{mock, prefixedFull}, "test-project", "test-hub-id")
+
+	needs, err := fpBackend.NeedsNameMigration(ctx, "K", ScopeUser, "u1")
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if !needs {
+		t.Error("expected needs=true when the prefixed name has no enabled version")
+	}
+}
+
+// failedPreconditionSMClient returns FailedPrecondition from
+// AccessSecretVersion for exactly one full GCP SM resource name.
+type failedPreconditionSMClient struct {
+	*mockSMClient
+	failName string
+}
+
+func (m *failedPreconditionSMClient) AccessSecretVersion(ctx context.Context, req *smpb.AccessSecretVersionRequest) (*smpb.AccessSecretVersionResponse, error) {
+	if strings.HasPrefix(req.Name, m.failName) {
+		return nil, status.Errorf(codes.FailedPrecondition, "secret version is disabled")
+	}
+	return m.mockSMClient.AccessSecretVersion(ctx, req)
+}
+
+// denyAccessSMClient returns PermissionDenied from AccessSecretVersion for
+// exactly one full GCP SM resource name.
+type denyAccessSMClient struct {
+	*mockSMClient
+	denyName string
+}
+
+func (m *denyAccessSMClient) AccessSecretVersion(ctx context.Context, req *smpb.AccessSecretVersionRequest) (*smpb.AccessSecretVersionResponse, error) {
+	if strings.HasPrefix(req.Name, m.denyName) {
+		return nil, status.Errorf(codes.PermissionDenied, "denied by IAM condition")
+	}
+	return m.mockSMClient.AccessSecretVersion(ctx, req)
+}
+
+// TestGCPBackend_NeedsNameMigration_PermissionDeniedOnLegacyIsAbsent
+// reproduces review finding 13: on a hub whose service account only holds
+// the new-prefix conditioned grant, checking the legacy name returns
+// PermissionDenied (GCP evaluates IAM before existence), not NotFound. This
+// must be treated as "nothing to migrate" (store.ErrNotFound), not a hard
+// error — otherwise CopyHubSecretForward logs a spurious WARN on every boot.
+func TestGCPBackend_NeedsNameMigration_PermissionDeniedOnLegacyIsAbsent(t *testing.T) {
+	backend, mock := createTestGCPBackend(t)
+	ctx := context.Background()
+	legacyName := backend.legacyGCPSecretName("K", ScopeUser, "u1")
+	legacyFull := fmt.Sprintf("projects/test-project/secrets/%s", legacyName)
+	denyBackend := NewGCPBackendWithClient(backend.store, &denyAccessSMClient{mock, legacyFull}, "test-project", "test-hub-id")
+
+	_, err := denyBackend.NeedsNameMigration(ctx, "K", ScopeUser, "u1")
+	if err != store.ErrNotFound {
+		t.Errorf("expected store.ErrNotFound, got: %v", err)
+	}
+
+	// CopyHubSecretForward must therefore also return ErrNotFound (not a
+	// hard error), which is what tells server.go's WARN-on-failure not to fire.
+	if err := denyBackend.CopyHubSecretForward(ctx, "K"); err != store.ErrNotFound {
+		t.Errorf("expected CopyHubSecretForward to propagate ErrNotFound, got: %v", err)
+	}
+}
+
+// TestGCPBackend_SecretName_LongNamesDoNotSilentlyCollide reproduces review
+// finding 16: the longer hub prefix moves the 255-char truncation boundary
+// earlier than before ptone/scion#2152, so plain truncation risks two
+// distinct, very long secret names colliding once cut to the same 255 bytes.
+func TestGCPBackend_SecretName_LongNamesDoNotSilentlyCollide(t *testing.T) {
+	backend, _ := createTestGCPBackend(t)
+
+	// Two names that are identical for the first 240 characters and differ
+	// only after that — long enough that the sanitized ID exceeds 255 bytes
+	// and gets truncated.
+	base := strings.Repeat("A", 240)
+	name1 := base + "-one"
+	name2 := base + "-two"
+
+	got1 := backend.gcpSecretName(name1, ScopeUser, "user-1")
+	got2 := backend.gcpSecretName(name2, ScopeUser, "user-1")
+
+	if len(got1) > 255 || len(got2) > 255 {
+		t.Fatalf("expected both names within the 255-char GCP SM limit, got %d and %d", len(got1), len(got2))
+	}
+	if got1 == got2 {
+		t.Errorf("two distinct long names collided after truncation: %q", got1)
+	}
+
+	// Determinism: recomputing the same long name gives the same result.
+	if again := backend.gcpSecretName(name1, ScopeUser, "user-1"); again != got1 {
+		t.Errorf("gcpSecretName is not deterministic for a truncated name: %q != %q", again, got1)
 	}
 }
