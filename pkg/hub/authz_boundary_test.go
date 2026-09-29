@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -971,6 +972,86 @@ func TestProjectAdmissionCache_KeyIncludesClass(t *testing.T) {
 	}
 	if cached, ok := memo.get(base); !ok || !cached.Admitted {
 		t.Errorf("the exact key must still hit: got %+v, ok=%v", cached, ok)
+	}
+}
+
+// TestProjectAdmissionCache_ZeroValueUsable proves a zero-value
+// ProjectAdmissionCache{} (as opposed to one built via
+// NewProjectAdmissionCache) is ready to use: put followed by get on the same
+// key returns the stored value, and get on a key that was never put misses
+// cleanly rather than panicking.
+func TestProjectAdmissionCache_ZeroValueUsable(t *testing.T) {
+	var memo ProjectAdmissionCache
+	key := projectAdmissionCacheKey{
+		principalKind: PrincipalKindUser, principalID: "u1", projectID: "p1", permissionID: "agent.read",
+	}
+
+	if _, ok := memo.get(key); ok {
+		t.Error("get on a zero-value cache before any put must miss, not hit")
+	}
+
+	memo.put(key, ProjectAdmissionResult{Admitted: true, Source: ProjectAccessSourceMembership})
+
+	got, ok := memo.get(key)
+	if !ok || !got.Admitted {
+		t.Errorf("get after put on a zero-value cache = %+v, ok=%v, want the stored value", got, ok)
+	}
+}
+
+// TestProjectAdmissionCache_LiteralWithoutMapUsable is
+// TestProjectAdmissionCache_ZeroValueUsable's variant for a cache built as an
+// explicit literal that omits the map field — the same shape a caller gets
+// from &ProjectAdmissionCache{} rather than var declaration or
+// NewProjectAdmissionCache.
+func TestProjectAdmissionCache_LiteralWithoutMapUsable(t *testing.T) {
+	memo := &ProjectAdmissionCache{}
+	key := projectAdmissionCacheKey{
+		principalKind: PrincipalKindUser, principalID: "u2", projectID: "p2", permissionID: "agent.create",
+	}
+
+	memo.put(key, ProjectAdmissionResult{Admitted: false})
+
+	got, ok := memo.get(key)
+	if !ok || got.Admitted {
+		t.Errorf("get after put on a literal cache without a map = %+v, ok=%v, want the stored (non-admitted) value", got, ok)
+	}
+}
+
+// TestProjectAdmissionCache_ZeroValueConcurrentSafe proves the lazy map
+// initialization in put is safe under concurrent first use: many goroutines
+// racing to put into the same zero-value cache must not lose any write, and
+// must not race on the map itself.
+func TestProjectAdmissionCache_ZeroValueConcurrentSafe(t *testing.T) {
+	var memo ProjectAdmissionCache
+	const n = 50
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			key := projectAdmissionCacheKey{
+				principalKind: PrincipalKindUser,
+				principalID:   "u",
+				projectID:     "p",
+				permissionID:  string(rune('a' + i%26)),
+			}
+			memo.put(key, ProjectAdmissionResult{Admitted: true})
+			memo.get(key)
+		}()
+	}
+	wg.Wait()
+
+	for i := 0; i < 26; i++ {
+		key := projectAdmissionCacheKey{
+			principalKind: PrincipalKindUser,
+			principalID:   "u",
+			projectID:     "p",
+			permissionID:  string(rune('a' + i)),
+		}
+		got, ok := memo.get(key)
+		if !ok || !got.Admitted {
+			t.Errorf("get(%q) after concurrent puts = %+v, ok=%v, want the stored value", key.permissionID, got, ok)
+		}
 	}
 }
 
