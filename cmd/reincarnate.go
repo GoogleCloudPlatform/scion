@@ -246,7 +246,7 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 	// This runs before either output path below, so it fires the same way
 	// whether the caller asked for JSON or plain output.
 	if shouldSetBlockedStatus(isSelf, reincarnateDryRun) {
-		reincarnateSetBlockedStatus(resp.Generation)
+		setBlockedStatus(resp.Generation)
 	}
 
 	if isJSONOutput() {
@@ -268,18 +268,23 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 }
 
 // shouldSetBlockedStatus decides whether reincarnateAgentViaHub should call
-// reincarnateSetBlockedStatus after a successful Hub response (design §3.9:
-// "in self-mode the command also sets sciontool status blocked ... itself"
-// — only in self-mode, and only when a migration actually happened, not on
-// a --dry-run that changed nothing). Extracted as a pure decision (p2b-r1
-// review R4) so the two guard conditions are table-testable on their own,
-// without a real or fake sciontool process: the mutation the reviewer found
-// undetected (dropping the "&& !dryRun" half of the guard, which would put
-// a coordinator's own container into "blocked" whenever it migrates a
-// child, or on every dry run) is caught by a table test alone.
+// setBlockedStatus after a successful Hub response (design §3.9: "in
+// self-mode the command also sets sciontool status blocked ... itself" —
+// only in self-mode, and only when a migration actually happened, not on a
+// --dry-run that changed nothing). Extracted as a pure decision, table-
+// testable on its own without a real or fake sciontool process: dropping
+// either half of this guard would put a coordinator's own container into
+// "blocked" whenever it migrates a child, or on every dry run.
 func shouldSetBlockedStatus(isSelf, dryRun bool) bool {
 	return isSelf && !dryRun
 }
+
+// setBlockedStatus is reincarnateSetBlockedStatus by default, as an
+// injectable package var so tests can drive reincarnateAgentViaHub end to
+// end (against a fake Hub) and assert the call site itself — not just
+// shouldSetBlockedStatus's decision in isolation — invokes it exactly once,
+// with the Hub's actual returned generation, only for a real self-migration.
+var setBlockedStatus = reincarnateSetBlockedStatus
 
 // reincarnateBlockedStatusTimeout bounds reincarnateSetBlockedStatus's
 // sciontool call (design Amendment A26.2 O3): sciontool status reports to
@@ -366,9 +371,11 @@ func printReincarnationPlan(plan hubclient.ReincarnationPlan) {
 // `reincarnate` command with `--handoff-template` set (design Amendment
 // A26.2 O1). root.go's PersistentPreRunE calls this to exempt the flag from
 // the agent-container-context gate and the requires-project check: the flag
-// is a pure local print (see RunE above) and must work anywhere.
+// is a pure local print (see RunE above) and must work anywhere. Compares by
+// identity (cmd == reincarnateCmd), not by name, so no other command named
+// "reincarnate" in some other subtree could ever match (Amendment A26.3 N3).
 func isReincarnateHandoffTemplateInvocation(cmd *cobra.Command) bool {
-	return cmd.Name() == "reincarnate" && reincarnateHandoffTemplate
+	return cmd == reincarnateCmd && reincarnateHandoffTemplate
 }
 
 func init() {

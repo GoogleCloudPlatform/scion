@@ -456,7 +456,15 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// and also persisted onto AppliedConfig.Task for restart consistency.
 	toGeneration := agent.Generation + 1
 	requesterCtx := s.buildReincarnationRequesterContext(ctx, agent, requestedBy)
-	preamble := s.buildReincarnationPreamble(agent, toGeneration, handoff, migrationStart, requesterCtx)
+	// Amendment A26.3 FYI-1: the "Changes:" line is recomputed here with the
+	// exact same pure function (computeReincarnationPlan) and the exact same
+	// previous/fresh AppliedConfig values the request handler already used
+	// for the dry-run plan and the 202 response's Plan field — no new store
+	// queries. dispatcher is already in scope (fetched above), so
+	// dispatchImageRegistry needs no new plumbing either.
+	imageRegistry := dispatchImageRegistry(dispatcher)
+	plan := computeReincarnationPlan(previous, fresh, nil, imageRegistry)
+	preamble := s.buildReincarnationPreamble(agent, toGeneration, handoff, migrationStart, requesterCtx, plan)
 	fresh.Task = preamble
 	agent, err = s.updateReincarnationStep(ctx, agentID, reincarnationStepUpdate{
 		reincarnationState: store.ReincarnationStateProvisioning,
@@ -758,9 +766,9 @@ const reincarnationRequesterFallback = "whoever requested this migration"
 // resolveReincarnationRequesterName resolves a bare principal ID (design
 // §3.2: a polymorphic ID — a User.ID or an Agent.ID, no FK, "like
 // Agent.CreatedBy") to a display string for design §3.9's "{requester}"
-// slots (Amendment A26.1, lead review round 1 on this phase: "the new
-// generation can't act on 'whoever requested this migration'"). Used for
-// both AgentReincarnation.RequestedBy and, in the self-request case,
+// slots — an addressable handle usable with `scion message`, since a generic
+// phrase gives the new generation nothing to act on (Amendment A26.1). Used
+// for both AgentReincarnation.RequestedBy and, in the self-request case,
 // agent.CreatedBy (Amendment A26.2 R1) — the same resolution rules apply to
 // either kind of principal ID.
 //
@@ -839,16 +847,17 @@ type reincarnationRequesterContext struct {
 
 // buildReincarnationRequesterContext resolves the requester and, for a
 // self-migration, the creator hint, before the preamble is built (Amendments
-// A26.1, A26.2 R1). ptone's lead review round 1 found that self-migration —
-// the AC-10/2c dogfood path — made resolveReincarnationRequesterName resolve
-// the agent's own ID back to its own handle, telling the new generation to
-// message itself. The fix: detect requestedBy == agent.ID up front and never
-// resolve or emit the agent's own handle at all; instead resolve
-// agent.CreatedBy as a hint for the handoff-driven "Authority and ownership"
-// instruction (see buildReincarnationPreamble). The defensive equality check
-// below (never surface CreatorHandle if it equals the agent's own handle) is
-// belt-and-suspenders: CreatedBy is not expected to ever equal an agent's own
-// ID, but "never emit the agent's own handle" is stated as an absolute rule.
+// A26.1, A26.2 R1). Self-migration (the AC-10/2c dogfood path) must never
+// have resolveReincarnationRequesterName resolve the agent's own ID back to
+// its own handle — that would tell the new generation to message itself.
+// The fix: detect requestedBy == agent.ID up front and never resolve or
+// emit the agent's own handle at all; instead resolve agent.CreatedBy as a
+// hint for the handoff-driven "Authority and ownership" instruction (see
+// buildReincarnationPreamble). The defensive equality check below (never
+// surface CreatorHandle if it equals the agent's own handle) is
+// belt-and-suspenders: CreatedBy is not expected to ever equal an agent's
+// own ID, but "never emit the agent's own handle" is stated as an absolute
+// rule.
 func (s *Server) buildReincarnationRequesterContext(ctx context.Context, agent *store.Agent, requestedBy string) reincarnationRequesterContext {
 	if requestedBy != "" && requestedBy == agent.ID {
 		ctxOut := reincarnationRequesterContext{IsSelf: true}
@@ -869,63 +878,98 @@ func (s *Server) buildReincarnationRequesterContext(ctx context.Context, agent *
 // as the new generation's first harness input (design §3.9).
 //
 // Amendment A26 (Phase 2b): steps 1 and 2 keep their 2a wording verbatim (the
-// A23 neutral step 1 and the A25.2 O-b catch-up-window step 2); "everything
-// else in §3.9" — steps 3-4 and the no-handoff fallback text — comes in from
-// the original design here. One adjustment from §3.9's literal text, made
-// because the section names it uses don't otherwise exist at this call site:
-//   - Step 4 names the handoff's actual section headings ("Immediate active
-//     work" and "Do not redo") from the --handoff-template sections
-//     (cmd/reincarnate.go's reincarnateHandoffTemplateText), rather than
-//     §3.9's literal "Next action"/"Do not redo" labels — "Next action" is a
-//     sub-field of "Immediate active work (status, next action)" in the
-//     template's actual section list, not its own heading, so pointing at
-//     the real heading keeps the instruction literally followable against
-//     the template the outgoing generation was told to use.
+// A23 neutral step 1 and the A25.2 catch-up-window step 2); "everything else
+// in §3.9" — steps 3-4 and the no-handoff fallback text — comes in from the
+// original design here. Step 4 names the handoff's actual section headings
+// ("Immediate active work" and "Do not redo") from the --handoff-template
+// sections (cmd/reincarnate.go's reincarnateHandoffTemplateText), rather than
+// §3.9's literal "Next action"/"Do not redo" labels — "Next action" is a
+// sub-field of "Immediate active work (status, next action)" in the
+// template's actual section list, not its own heading, so pointing at the
+// real heading keeps the instruction literally followable against the
+// template the outgoing generation was told to use.
 //
 // requester is pre-resolved by buildReincarnationRequesterContext (Amendment
-// A26.1, sharpened by A26.2 R1 for self-migration) — this function does no
-// store I/O itself and stays a pure string builder. It renders three cases:
+// A26.1, A26.2 R1) — this function does no store I/O itself and stays a pure
+// string builder. It renders three cases:
 //   - Self-request (requester.IsSelf): the header says "reincarnated at its
 //     own request" and step 3 points at the handoff's own "Authority and
-//     ownership" section rather than naming the agent itself — A26.2 R1's
-//     fix for self-migration (the AC-10/2c dogfood path) previously
-//     resolving to the agent's own handle, telling the new generation to
-//     message itself. If agent.CreatedBy resolved to a *different* handle,
-//     it's appended as a hint for when the handoff names no owner.
+//     ownership" section rather than naming the agent itself (A26.2 R1: a
+//     self-migration must never be told to message its own handle). If
+//     agent.CreatedBy resolved to a *different* handle, it's added as its
+//     own sentence, a hint for when the handoff names no owner.
 //   - Resolved (requester.Resolved): the header names requester.Handle
 //     ("reincarnated on request of %s") and step 3 addresses it directly.
-//   - Unresolved (neither of the above): Amendment A26.2 O2 — the header's
-//     "on request of" clause is omitted entirely (a generic phrase there
-//     reads as a tautology), while step 3 keeps
-//     reincarnationRequesterFallback, since a next action ("message
-//     someone") is still better than no instruction at all.
+//   - Unresolved (neither of the above): the header's "on request of" clause
+//     is omitted entirely (Amendment A26.2 O2 — a generic phrase there reads
+//     as a tautology), while step 3 keeps reincarnationRequesterFallback,
+//     since a next action ("message someone") is still better than none.
+//
+// plan is the same old→new diff computeReincarnationPlan produces for the
+// dry-run response (Amendment A26.3 FYI-1): a "Changes: template A->B, image
+// X->Y, harness-config P->Q" line is rendered right after the header, naming
+// only the fields that actually changed, and omitted entirely when nothing
+// did. §3.9 also has a second header line naming the migration time, which
+// is declined here as redundant with step 2's stated window start.
 //
 // migrationStart is step 2's catch-up window start (design §3.7, Amendment
-// A25 2a.3/R4, p2a-r1 review): only the start is named, not an end. An end
-// timestamp would have to be the instant reincarnation_state clears, which
-// is not known until the completion write — long after this preamble is
-// built — so any value written here would be a lower bound on the true end,
-// silently mis-stating the window as narrower than it actually is (p2a-r1
-// review R4). "Since {start}" makes no claim about when the window closes.
-// The command given is runnable as written: `scion conversation catch-up`
-// takes a `--since <duration>` flag, not absolute timestamps, so step 2
-// asks the agent to choose a duration reaching back to the stated instant,
-// rather than naming one that would already be wrong by the time this task
-// actually runs (R4). O-b (p2a-r2 review): `scion conversation list`'s plain
-// text output truncates the ID to 12 runes with no `conv:` prefix, which
-// `catch-up` cannot accept (it only takes `conv:<full-uuid>`, `@name` or
-// `#name`). Step 2 therefore says `list --json` (full untruncated IDs) and
-// spells out the `conv:<id>` prefix explicitly.
+// A25): only the start is named, not an end — an end timestamp would have to
+// be the instant reincarnation_state clears, which isn't known until the
+// completion write, long after this preamble is built, so any value written
+// here would understate the window. "Since {start}" makes no claim about
+// when the window closes. The command given is runnable as written:
+// `scion conversation catch-up` takes a `--since <duration>` flag, not
+// absolute timestamps, so step 2 asks the agent to choose a duration
+// reaching back to the stated instant. Plain `scion conversation list`'s
+// output truncates IDs to 12 runes with no `conv:` prefix, which `catch-up`
+// cannot accept (it only takes `conv:<full-uuid>`, `@name` or `#name`), so
+// step 2 says `list --json` (full untruncated IDs) and spells out the
+// `conv:<id>` prefix explicitly.
 //
 // The redelivery-adjacent wording ("messages ... can be read with
-// catch-up") was dropped in Phase 1 (A11.4 item 4) because it was false
-// then — catch-up did not work inside agent containers (F4) and a message
-// sent during the gap was rejected or silently dropped, not saved. Phase
-// 2a's F4 fix (agent-mode hub-context detection) and migration gate (every
-// hub delivery path persists-and-defers instead of rejecting/dropping while
-// agents.reincarnation_state is non-terminal, p2a-r1 R3) make it true again,
-// so it comes back here.
-func (s *Server) buildReincarnationPreamble(agent *store.Agent, toGeneration int, handoff string, migrationStart time.Time, requester reincarnationRequesterContext) string {
+// catch-up") was dropped in Phase 1 (A11.4) because it was false then —
+// catch-up did not work inside agent containers and a message sent during
+// the gap was rejected or silently dropped, not saved. Phase 2a's F4 fix
+// (agent-mode hub-context detection) and migration gate (every hub delivery
+// path persists-and-defers instead of rejecting/dropping while
+// agents.reincarnation_state is non-terminal) make it true again, so it
+// comes back here.
+
+// reincarnationChangesLine renders §3.9's "Changes:" preamble line from a
+// ReincarnationPlan (design Amendment A26.3 FYI-1), naming only the fields
+// that actually changed between the outgoing and incoming generation, and
+// returning "" (no line at all) when nothing did. Bounded deliberately: only
+// the three fields the plan already carries for the dry-run response
+// (Template, Image, HarnessCfg) are considered, and no new store queries are
+// introduced — see the call site in runReincarnationWorker.
+func reincarnationChangesLine(plan ReincarnationPlan) string {
+	var parts []string
+	if plan.Template.Old != plan.Template.New {
+		parts = append(parts, fmt.Sprintf("template %s->%s", reincarnateValueOrNone(plan.Template.Old), reincarnateValueOrNone(plan.Template.New)))
+	}
+	if plan.Image.Old != plan.Image.New {
+		parts = append(parts, fmt.Sprintf("image %s->%s", reincarnateValueOrNone(plan.Image.Old), reincarnateValueOrNone(plan.Image.New)))
+	}
+	if plan.HarnessCfg.Old != plan.HarnessCfg.New {
+		parts = append(parts, fmt.Sprintf("harness-config %s->%s", reincarnateValueOrNone(plan.HarnessCfg.Old), reincarnateValueOrNone(plan.HarnessCfg.New)))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "Changes: " + strings.Join(parts, ", ") + "\n"
+}
+
+// reincarnateValueOrNone renders an empty FieldChange side as "(none)" so
+// e.g. a legacy agent with no recorded template hash reads clearly rather
+// than as a blank.
+func reincarnateValueOrNone(s string) string {
+	if s == "" {
+		return "(none)"
+	}
+	return s
+}
+
+func (s *Server) buildReincarnationPreamble(agent *store.Agent, toGeneration int, handoff string, migrationStart time.Time, requester reincarnationRequesterContext, plan ReincarnationPlan) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[SCION REINCARNATION] You are generation %d of agent %q (id %s)", toGeneration, agent.Slug, agent.ID)
 	switch {
@@ -938,6 +982,9 @@ func (s *Server) buildReincarnationPreamble(agent *store.Agent, toGeneration int
 		// the fallback phrase here too — "reincarnated on request of
 		// whoever requested this migration" reads as a tautology.
 		b.WriteString(".\n")
+	}
+	if changes := reincarnationChangesLine(plan); changes != "" {
+		b.WriteString(changes)
 	}
 	b.WriteString("Before resuming:\n")
 	// Design §3.4 Amendment A23: neutral wording, since Phase 1b also serves
@@ -955,10 +1002,10 @@ func (s *Server) buildReincarnationPreamble(agent *store.Agent, toGeneration int
 		// handoff's own "Authority and ownership" section (§3.9's handoff
 		// template) is authoritative on who to tell; the resolved creator
 		// (if any, and not the agent itself) is only a hint for when the
-		// handoff names no one.
+		// handoff names no one, rendered as its own sentence (A26.3 N2).
 		fmt.Fprintf(&b, " 3. Message the owner named in your handoff's \"Authority and ownership\" section that generation %d is up, and state your next action.", toGeneration)
 		if requester.CreatorResolved {
-			fmt.Fprintf(&b, " (if the handoff names none: %s)", requester.CreatorHandle)
+			fmt.Fprintf(&b, " If the handoff names none, message %s.", requester.CreatorHandle)
 		}
 		b.WriteString("\n")
 	case requester.Resolved:

@@ -2118,7 +2118,7 @@ func TestBuildReincarnationPreamble_CatchUpWindow(t *testing.T) {
 
 	start := time.Date(2026, 9, 28, 10, 0, 0, 0, time.UTC)
 	requester := reincarnationRequesterContext{Handle: "user:requester@example.com", Resolved: true}
-	preamble := srv.buildReincarnationPreamble(agent, 2, "do the thing next", start, requester)
+	preamble := srv.buildReincarnationPreamble(agent, 2, "do the thing next", start, requester, ReincarnationPlan{})
 
 	assert.Contains(t, preamble,
 		"2. Run `scion conversation list --json` and, for each conversation, "+
@@ -2194,13 +2194,13 @@ func TestBuildReincarnationPreamble_A26StepsAndNoHandoff(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Run("with handoff", func(t *testing.T) {
-				preamble := srv.buildReincarnationPreamble(tc.agent, 4, "next: ship it", start, requester)
+				preamble := srv.buildReincarnationPreamble(tc.agent, 4, "next: ship it", start, requester, ReincarnationPlan{})
 				assertA26Steps(t, preamble, tc.agent, 4)
 				assert.Contains(t, preamble, "next: ship it")
 				assert.NotContains(t, preamble, "No handoff was provided")
 			})
 			t.Run("no handoff", func(t *testing.T) {
-				preamble := srv.buildReincarnationPreamble(tc.agent, 4, "", start, requester)
+				preamble := srv.buildReincarnationPreamble(tc.agent, 4, "", start, requester, ReincarnationPlan{})
 				assertA26Steps(t, preamble, tc.agent, 4)
 				assert.Contains(t, preamble,
 					"No handoff was provided. Reconstruct context from your branch, your conversations "+
@@ -2223,28 +2223,28 @@ func TestBuildReincarnationPreamble_A262_SelfRequest(t *testing.T) {
 
 	t.Run("with a resolved creator hint", func(t *testing.T) {
 		requester := reincarnationRequesterContext{IsSelf: true, CreatorHandle: "user:owner@example.com", CreatorResolved: true}
-		preamble := srv.buildReincarnationPreamble(agent, 3, "h", start, requester)
+		preamble := srv.buildReincarnationPreamble(agent, 3, "h", start, requester, ReincarnationPlan{})
 
 		assert.Contains(t, preamble,
 			`You are generation 3 of agent "self-agt" (id agent-self), reincarnated at its own request.`,
 			"the header must say the migration was self-requested, never name a requester handle")
 		assert.Contains(t, preamble,
-			` 3. Message the owner named in your handoff's "Authority and ownership" section that generation 3 is up, and state your next action. (if the handoff names none: user:owner@example.com)`,
-			"step 3 must point at the handoff and append the resolved creator as a fallback hint")
+			` 3. Message the owner named in your handoff's "Authority and ownership" section that generation 3 is up, and state your next action. If the handoff names none, message user:owner@example.com.`,
+			"step 3 must point at the handoff, then give the resolved creator hint as its own sentence (A26.3 N2)")
 		assert.NotContains(t, preamble, "agent:"+agent.Slug,
 			"the preamble must never emit the agent's own handle (A26.2 R1)")
 	})
 
 	t.Run("with no resolved creator", func(t *testing.T) {
 		requester := reincarnationRequesterContext{IsSelf: true}
-		preamble := srv.buildReincarnationPreamble(agent, 3, "h", start, requester)
+		preamble := srv.buildReincarnationPreamble(agent, 3, "h", start, requester, ReincarnationPlan{})
 
 		assert.Contains(t, preamble,
 			`You are generation 3 of agent "self-agt" (id agent-self), reincarnated at its own request.`)
 		assert.Contains(t, preamble,
 			` 3. Message the owner named in your handoff's "Authority and ownership" section that generation 3 is up, and state your next action.`+"\n",
 			"with no creator hint, step 3 must end right after the handoff-driven instruction, no parenthetical")
-		assert.NotContains(t, preamble, "if the handoff names none",
+		assert.NotContains(t, preamble, "If the handoff names none",
 			"no creator hint means no fallback clause at all")
 		assert.NotContains(t, preamble, "agent:"+agent.Slug)
 	})
@@ -2262,7 +2262,7 @@ func TestBuildReincarnationPreamble_A262_UnresolvedRequester(t *testing.T) {
 	agent := &store.Agent{ID: "agent-u", Slug: "unresolved-agt"}
 	requester := reincarnationRequesterContext{} // Resolved: false, IsSelf: false
 
-	preamble := srv.buildReincarnationPreamble(agent, 5, "h", start, requester)
+	preamble := srv.buildReincarnationPreamble(agent, 5, "h", start, requester, ReincarnationPlan{})
 
 	assert.Contains(t, preamble, `You are generation 5 of agent "unresolved-agt" (id agent-u).`+"\n",
 		"an unresolved, non-self requester must omit the 'on request of' clause entirely (O2)")
@@ -2273,9 +2273,97 @@ func TestBuildReincarnationPreamble_A262_UnresolvedRequester(t *testing.T) {
 		"step 3 still keeps the generic fallback phrase so there is some instruction")
 }
 
+// TestReincarnationChangesLine is the design Amendment A26.3 FYI-1 test for
+// the "Changes:" preamble line: computeReincarnationPlan's diff is rendered
+// only for the fields that actually changed, an empty side renders as
+// "(none)", and the whole line is omitted when nothing changed.
+func TestReincarnationChangesLine(t *testing.T) {
+	cases := []struct {
+		name string
+		plan ReincarnationPlan
+		want string
+	}{
+		{
+			name: "nothing changed: no line at all",
+			plan: ReincarnationPlan{
+				Template:   FieldChange{Old: "h1", New: "h1"},
+				Image:      FieldChange{Old: "img:v1", New: "img:v1"},
+				HarnessCfg: FieldChange{Old: "hc1", New: "hc1"},
+			},
+			want: "",
+		},
+		{
+			name: "all three changed",
+			plan: ReincarnationPlan{
+				Template:   FieldChange{Old: "h1", New: "h2"},
+				Image:      FieldChange{Old: "img:v1", New: "img:v2"},
+				HarnessCfg: FieldChange{Old: "hc1", New: "hc2"},
+			},
+			want: "Changes: template h1->h2, image img:v1->img:v2, harness-config hc1->hc2\n",
+		},
+		{
+			name: "only image changed",
+			plan: ReincarnationPlan{
+				Template:   FieldChange{Old: "h1", New: "h1"},
+				Image:      FieldChange{Old: "img:v1", New: "img:v2"},
+				HarnessCfg: FieldChange{Old: "hc1", New: "hc1"},
+			},
+			want: "Changes: image img:v1->img:v2\n",
+		},
+		{
+			name: "empty old side renders as (none)",
+			plan: ReincarnationPlan{
+				Template: FieldChange{Old: "", New: "h1"},
+			},
+			want: "Changes: template (none)->h1\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, reincarnationChangesLine(tc.plan))
+		})
+	}
+}
+
+// TestBuildReincarnationPreamble_A263_ChangesLine is the design Amendment
+// A26.3 FYI-1 golden test for where the "Changes:" line sits in the full
+// preamble: right after the header line, before "Before resuming:", and
+// omitted entirely when nothing changed.
+func TestBuildReincarnationPreamble_A263_ChangesLine(t *testing.T) {
+	srv, _ := testServer(t)
+	start := time.Date(2026, 9, 29, 8, 0, 0, 0, time.UTC)
+	agent := &store.Agent{ID: "agent-c", Slug: "changes-agt"}
+	requester := reincarnationRequesterContext{Handle: "user:req@example.com", Resolved: true}
+
+	t.Run("changed: the line appears between the header and Before resuming", func(t *testing.T) {
+		plan := ReincarnationPlan{
+			Template: FieldChange{Old: "h1", New: "h2"},
+			Image:    FieldChange{Old: "img:v1", New: "img:v2"},
+		}
+		preamble := srv.buildReincarnationPreamble(agent, 2, "h", start, requester, plan)
+
+		want := `You are generation 2 of agent "changes-agt" (id agent-c), reincarnated on request of user:req@example.com.` + "\n" +
+			"Changes: template h1->h2, image img:v1->img:v2\n" +
+			"Before resuming:\n"
+		assert.Contains(t, preamble, want)
+	})
+
+	t.Run("unchanged: no Changes line at all", func(t *testing.T) {
+		plan := ReincarnationPlan{
+			Template: FieldChange{Old: "h1", New: "h1"},
+		}
+		preamble := srv.buildReincarnationPreamble(agent, 2, "h", start, requester, plan)
+
+		assert.NotContains(t, preamble, "Changes:")
+		want := `You are generation 2 of agent "changes-agt" (id agent-c), reincarnated on request of user:req@example.com.` + "\n" +
+			"Before resuming:\n"
+		assert.Contains(t, preamble, want)
+	})
+}
+
 // TestResolveReincarnationRequesterName_A26_1 is the design Amendment A26.1
-// (lead review round 1 on Phase 2b, R3 disposition A26.2) test matrix for
-// resolving a bare principal ID to a display string: a resolvable user, a
+// (R3 disposition, Amendment A26.2) test matrix for resolving a bare
+// principal ID to a display string: a resolvable user, a
 // resolvable agent, a principal ID that resolves to neither (unresolvable),
 // a GetUser store error that still falls through to a successful GetAgent
 // lookup, and a genuine store error that ends in the fallback (R3: the
@@ -2604,8 +2692,8 @@ func TestReincarnateAgent_AC6_NonCreatorRequesterGetsNotifiedOnFailure(t *testin
 	require.NoError(t, err)
 	assert.Equal(t, "error", final.Phase)
 
-	// R2 (p2b-r1 review): the worker→preamble wiring is otherwise untested —
-	// a mutation that passed the raw RequestedBy UUID straight to
+	// The worker→preamble wiring is otherwise untested — a mutation that
+	// passed the raw RequestedBy UUID straight to
 	// buildReincarnationPreamble instead of the resolved handle left every
 	// other test green. The failure here happens at the start step, after
 	// reprovision already succeeded, so AppliedConfig.Task still holds the

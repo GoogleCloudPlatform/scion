@@ -16,6 +16,9 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -293,10 +297,10 @@ func TestReincarnateSetBlockedStatus_TimesOut(t *testing.T) {
 
 // TestShouldSetBlockedStatus is the design Amendment A26.2 R4 table test:
 // the blocked-status call must fire only in self-mode and only on a real
-// (non-dry-run) migration. Regression test for the p2b-r1 review's R4
-// mutation (dropping the "&& !dryRun" half of the guard survived every
-// existing test), extracted as a pure decision so it needs no process
-// execution at all.
+// (non-dry-run) migration, extracted as a pure decision so it needs no
+// process execution at all. TestReincarnateAgentViaHub_SetBlockedStatusCallSite
+// below additionally pins that reincarnateAgentViaHub's call site actually
+// uses this decision, end to end against a fake Hub.
 func TestShouldSetBlockedStatus(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -317,15 +321,15 @@ func TestShouldSetBlockedStatus(t *testing.T) {
 }
 
 // TestReincarnateHandoffTemplate_WorksAnywhere is the design Amendment A26.2
-// O1 test: `scion reincarnate --handoff-template` is a pure local print and
-// must work through the real command dispatch path (rootCmd.ExecuteC, which
-// runs the full PersistentPreRunE chain), even inside a simulated agent
-// container with no reachable Hub endpoint, and even outside any scion
-// project — both of which reject ordinary commands in PersistentPreRunE,
-// before RunE ever runs. The original golden test
-// (TestReincarnateHandoffTemplate_Golden) called RunE directly, bypassing
-// PersistentPreRunE entirely, so this gap went unnoticed until the p2b-r1
-// review (O1).
+// O1 / A26.3 R1 test: `scion reincarnate --handoff-template` is a pure local
+// print and must work through the real command dispatch path
+// (rootCmd.ExecuteC, which runs the full PersistentPreRunE chain), even
+// inside a simulated agent container with no reachable Hub endpoint, and
+// even outside any scion project — both of which reject ordinary commands in
+// PersistentPreRunE, before RunE ever runs. The negative subtests pin the
+// other half: an ordinary `reincarnate` invocation (no --handoff-template)
+// must still hit both gates in the same two environments, so the exemption
+// cannot silently widen to the whole command.
 func TestReincarnateHandoffTemplate_WorksAnywhere(t *testing.T) {
 	origProjectPath := projectPath
 	origHubEndpoint := hubEndpoint
@@ -335,20 +339,25 @@ func TestReincarnateHandoffTemplate_WorksAnywhere(t *testing.T) {
 		hubEndpoint = origHubEndpoint
 		noHub = origNoHub
 		reincarnateHandoffTemplate = false
+		reincarnateDryRun = false
 		rootCmd.SetArgs(nil)
 		rootCmd.SetOut(nil)
 		rootCmd.SetErr(nil)
 	})
 
-	run := func(t *testing.T) string {
+	// run resets the two flag vars cobra does not reset between ExecuteC
+	// calls on the same command tree, then executes args through the real
+	// dispatch path (PersistentPreRunE included).
+	run := func(t *testing.T, args []string) (string, error) {
 		t.Helper()
+		reincarnateHandoffTemplate = false
+		reincarnateDryRun = false
 		var buf bytes.Buffer
 		rootCmd.SetOut(&buf)
 		rootCmd.SetErr(&buf)
-		rootCmd.SetArgs([]string{"reincarnate", "--handoff-template"})
+		rootCmd.SetArgs(args)
 		_, err := rootCmd.ExecuteC()
-		require.NoError(t, err)
-		return buf.String()
+		return buf.String(), err
 	}
 
 	t.Run("inside an agent container with no reachable Hub endpoint", func(t *testing.T) {
@@ -359,8 +368,24 @@ func TestReincarnateHandoffTemplate_WorksAnywhere(t *testing.T) {
 		hubEndpoint = ""
 		projectPath = t.TempDir()
 
-		out := run(t)
-		assert.Equal(t, reincarnateHandoffTemplateText, out)
+		t.Run("--handoff-template works", func(t *testing.T) {
+			out, err := run(t, []string{"reincarnate", "--handoff-template"})
+			require.NoError(t, err)
+			assert.Equal(t, reincarnateHandoffTemplateText, out)
+		})
+
+		t.Run("an ordinary --dry-run is still gated", func(t *testing.T) {
+			out, err := run(t, []string{"reincarnate", "--dry-run"})
+			require.Error(t, err, "the agent-container gate must still reject an ordinary reincarnate call")
+			assert.Contains(t, err.Error(), "agent container")
+			assert.NotContains(t, out, reincarnateHandoffTemplateText)
+		})
+
+		t.Run("--handoff-template=false is still gated", func(t *testing.T) {
+			out, err := run(t, []string{"reincarnate", "--handoff-template=false"})
+			require.Error(t, err, "an explicit false must not be treated as the exemption")
+			assert.NotContains(t, out, reincarnateHandoffTemplateText)
+		})
 	})
 
 	t.Run("outside any scion project", func(t *testing.T) {
@@ -369,7 +394,78 @@ func TestReincarnateHandoffTemplate_WorksAnywhere(t *testing.T) {
 		t.Chdir(t.TempDir())
 		projectPath = ""
 
-		out := run(t)
-		assert.Equal(t, reincarnateHandoffTemplateText, out)
+		t.Run("--handoff-template works", func(t *testing.T) {
+			out, err := run(t, []string{"reincarnate", "--handoff-template"})
+			require.NoError(t, err)
+			assert.Equal(t, reincarnateHandoffTemplateText, out)
+		})
+
+		t.Run("an ordinary --dry-run still hits the requires-project error", func(t *testing.T) {
+			_, err := run(t, []string{"reincarnate", "--dry-run", "some-agent"})
+			require.Error(t, err, "the requires-project gate must still reject an ordinary reincarnate call")
+			assert.Contains(t, err.Error(), "not in a scion project")
+		})
+	})
+}
+
+// TestReincarnateAgentViaHub_SetBlockedStatusCallSite is the design
+// Amendment A26.3 O1 test (A26.2 R4's second option): drives
+// reincarnateAgentViaHub end to end against a fake Hub returning 202 with a
+// given generation, and asserts the injectable setBlockedStatus var is
+// called exactly once with that generation for a real self-migration, and
+// not at all for a self dry-run or a real migration of another agent. This
+// pins the call site itself — shouldSetBlockedStatus's own decision is
+// covered in isolation by TestShouldSetBlockedStatus above — and also pins
+// "N+1 = the Hub's returned generation" end to end.
+func TestReincarnateAgentViaHub_SetBlockedStatusCallSite(t *testing.T) {
+	const projectID = "proj-1"
+	const targetGeneration = 7
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"agentId":    "agent-1",
+			"generation": targetGeneration,
+			"state":      "pending",
+			"plan":       map[string]any{},
+		})
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID}
+
+	origSetter := setBlockedStatus
+	origDryRun := reincarnateDryRun
+	t.Cleanup(func() {
+		setBlockedStatus = origSetter
+		reincarnateDryRun = origDryRun
+	})
+
+	run := func(t *testing.T, isSelf, dryRun bool) []int {
+		t.Helper()
+		var calls []int
+		setBlockedStatus = func(gen int) { calls = append(calls, gen) }
+		reincarnateDryRun = dryRun
+		err := reincarnateAgentViaHub(hubCtx, "some-agent", "handoff", isSelf)
+		require.NoError(t, err)
+		return calls
+	}
+
+	t.Run("self, real migration: called once with the Hub's generation", func(t *testing.T) {
+		calls := run(t, true, false)
+		assert.Equal(t, []int{targetGeneration}, calls)
+	})
+
+	t.Run("self, dry run: never called", func(t *testing.T) {
+		calls := run(t, true, true)
+		assert.Empty(t, calls)
+	})
+
+	t.Run("other agent, real migration: never called", func(t *testing.T) {
+		calls := run(t, false, false)
+		assert.Empty(t, calls)
 	})
 }
