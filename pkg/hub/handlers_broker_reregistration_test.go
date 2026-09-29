@@ -37,13 +37,14 @@ import (
 // POST /api/v1/brokers matches an existing broker by name or by a
 // caller-supplied ID and, on a match, updates that record and issues a new
 // join token. POST /api/v1/brokers/{id}/rotate-secret replaces a broker's
-// HMAC secret. Both require broker ownership, checked by
-// authorizedForBrokerOwnerAction (handlers_brokers.go): the caller must be
-// a system-scoped super-admin, be the broker itself (HMAC), or be the user
-// recorded as the broker's creator. Holding the broker.read catalog
-// permission alone does not satisfy this check for either action. A
-// brand-new registration (no existing match) remains open to any
-// authenticated user.
+// HMAC secret. Every user-credential call to POST /api/v1/brokers — a
+// brand-new registration as well as a match — additionally requires the
+// broker.create permission (authorizeBrokerCreate, handlers_brokers.go); a
+// match on top of that also requires broker ownership, checked by
+// authorizedForBrokerOwnerAction: the caller must be a system-scoped
+// super-admin, be the broker itself (HMAC), or be the user recorded as the
+// broker's creator. Holding the broker.read catalog permission alone does
+// not satisfy either check.
 // ============================================================================
 
 // grantSystemBrokerReadPermission binds a dedicated role granting only
@@ -249,7 +250,12 @@ func TestBrokerReregistration_OrdinaryHubMemberDenied(t *testing.T) {
 
 func TestBrokerReregistration_OwnerAllowed(t *testing.T) {
 	srv, s := testServer(t)
-	owner := newPlainUser(t, s, "reregistration-owner-c")
+	// Re-registration requires both broker.create AND target ownership
+	// (ptone/scion#2138) — owner-only identity without broker.create is
+	// denied on a match too (see
+	// TestBrokerReregistration_OwnerWithoutBrokerCreateDenied), so this owner
+	// must be a hub member to hold broker.create.
+	owner := newHubMemberUser(t, s, "reregistration-owner-c")
 	broker := createReregistrationTestBroker(t, s, "reregistration-broker-owner-c", owner.ID)
 
 	rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
@@ -271,6 +277,44 @@ func TestBrokerReregistration_OwnerAllowed(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, updated.AutoProvide, "owner re-registration should apply the requested fields")
 	assert.Equal(t, "updated", updated.Labels["env"])
+}
+
+// TestBrokerReregistration_OwnerWithoutBrokerCreateDenied confirms that the
+// broker.create requirement applies equally whether an existing record is
+// matched by name or by a caller-supplied ID: the recorded creator of a
+// broker is denied re-registration of that same broker while they lack
+// broker.create, whether the request identifies it by name or by ID.
+func TestBrokerReregistration_OwnerWithoutBrokerCreateDenied(t *testing.T) {
+	t.Run("by name", func(t *testing.T) {
+		srv, s := testServer(t)
+		owner := newPlainUser(t, s, "reregistration-owner-nogrant-name")
+		broker := createReregistrationTestBroker(t, s, "reregistration-broker-nogrant-name", owner.ID)
+
+		rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+			Name:        broker.Name,
+			AutoProvide: true,
+		})
+
+		assert.Equal(t, http.StatusForbidden, rec.Code,
+			"the recorded creator must still be denied a name match without broker.create; got: %s", rec.Body.String())
+		assertBrokerUnchanged(t, s, broker.ID)
+	})
+
+	t.Run("by ID", func(t *testing.T) {
+		srv, s := testServer(t)
+		owner := newPlainUser(t, s, "reregistration-owner-nogrant-id")
+		broker := createReregistrationTestBroker(t, s, "reregistration-broker-nogrant-id", owner.ID)
+
+		rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+			BrokerID:    broker.ID,
+			Name:        "a different requested name",
+			AutoProvide: true,
+		})
+
+		assert.Equal(t, http.StatusForbidden, rec.Code,
+			"the recorded creator must still be denied an ID match without broker.create; got: %s", rec.Body.String())
+		assertBrokerUnchanged(t, s, broker.ID)
+	})
 }
 
 func TestBrokerReregistration_SuperAdminAllowed(t *testing.T) {
@@ -296,16 +340,20 @@ func TestBrokerReregistration_SuperAdminAllowed(t *testing.T) {
 	assert.True(t, updated.AutoProvide)
 }
 
-func TestBrokerReregistration_NewRegistrationStillOpenToAnyUser(t *testing.T) {
+// TestBrokerRegistration_NewRegistrationRequiresBrokerCreate confirms that a
+// hub member (who holds broker.create through the curated hub-member role,
+// seed.go hubMemberPermissionIDs) can complete a brand-new registration and
+// becomes the new broker's owner.
+func TestBrokerRegistration_NewRegistrationRequiresBrokerCreate(t *testing.T) {
 	srv, s := testServer(t)
-	requester := newPlainUser(t, s, "reregistration-newuser-e")
+	requester := newHubMemberUser(t, s, "reregistration-newuser-e")
 
 	rec := doRequestAsUser(t, srv, requester, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name: "a brand new broker name never seen before",
 	})
 
 	require.Equal(t, http.StatusCreated, rec.Code,
-		"first-time registration by any authenticated user should still succeed; got: %s", rec.Body.String())
+		"first-time registration by a hub member holding broker.create should succeed; got: %s", rec.Body.String())
 
 	var resp CreateBrokerRegistrationResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
@@ -315,6 +363,25 @@ func TestBrokerReregistration_NewRegistrationStillOpenToAnyUser(t *testing.T) {
 	created, err := s.GetRuntimeBroker(context.Background(), resp.BrokerID)
 	require.NoError(t, err)
 	assert.Equal(t, requester.ID, created.CreatedBy, "the requester should become the new broker's owner")
+}
+
+// TestBrokerRegistration_NewRegistrationWithoutBrokerCreateDenied pins the
+// ptone/scion#2138 rule: a plain authenticated user with no hub-member grant
+// — and so no broker.create — must be denied a brand-new registration. Being
+// authenticated is not, by itself, sufficient.
+func TestBrokerRegistration_NewRegistrationWithoutBrokerCreateDenied(t *testing.T) {
+	srv, s := testServer(t)
+	requester := newPlainUser(t, s, "reregistration-newuser-nogrant")
+
+	rec := doRequestAsUser(t, srv, requester, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+		Name: "a brand new broker name that must not be created",
+	})
+
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"first-time registration without broker.create should be denied; got: %s", rec.Body.String())
+
+	_, err := s.GetRuntimeBrokerByName(context.Background(), "a brand new broker name that must not be created")
+	assert.ErrorIs(t, err, store.ErrNotFound, "a denied registration must not create a broker record")
 }
 
 // TestBrokerReregistration_OwnerlessBrokerDenied covers the record shape left
@@ -484,14 +551,15 @@ func TestBrokerRotateSecret_SelfAllowed(t *testing.T) {
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 	originalKey := seedBrokerSecret(t, s, broker.ID)
 
+	// Driven through real middleware: the request is HMAC-signed with the
+	// broker's actual stored secret via BrokerAuthService.SignRequest and
+	// dispatched through srv.Handler().ServeHTTP, the same as a real broker's
+	// outbound call.
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/brokers/"+broker.ID+"/rotate-secret", nil)
-	brokerIdent := NewBrokerIdentity(broker.ID)
-	reqCtx := contextWithBrokerIdentity(req.Context(), brokerIdent)
-	reqCtx = contextWithIdentity(reqCtx, brokerIdent)
-	req = req.WithContext(reqCtx)
+	require.NoError(t, srv.brokerAuthService.SignRequest(req, broker.ID, originalKey))
 	rec := httptest.NewRecorder()
 
-	srv.handleBrokerRotateSecret(rec, req, broker.ID)
+	srv.Handler().ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code,
 		"a broker should be able to rotate its own secret; got: %s", rec.Body.String())
