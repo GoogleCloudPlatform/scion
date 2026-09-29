@@ -94,29 +94,26 @@ func TestCatalogRoute_PortProxyReachesAuthorizePortAccessForEveryMethodAndSubpat
 
 // TestCatalogRoute_DiagnosticsLogsStreamMethodGate is the route-backed half
 // of the diagnostics-stream reclassification: through the real server mux
-// (not a direct handler call), GET reaches handleDiagnosticsLogsStream
-// (forced to its documented 501 short-circuit by nilling out
-// logQueryService, since attempting a real Cloud Logging tail would block
-// indefinitely in a test) and every other method is rejected by the same
-// handler's method gate (405).
-// Verifying the literal "Content-Type: text/event-stream" header requires a
-// configured *logadmin.Client/*logv2.Client (handlers_diagnostics.go:149),
-// which needs real Cloud Logging credentials this test environment does not
-// have; TestHandleDiagnosticsLogsStream_NoLogQueryService/_MethodNotAllowed
-// (handlers_diagnostics_test.go) already pin the handler's own behavior
-// directly, and this test adds the missing piece: that the live mux route
-// for the catalog's declared pattern actually dispatches to that handler.
+// (not a direct handler call), GET reaches handleDiagnosticsLogsStream and
+// every other method is rejected by the same handler's method gate (405).
+// logQueryService is forced to nil (testServerNoCloudLogs's exact pattern,
+// handlers_logs_test.go) so GET takes the handler's documented 501
+// short-circuit instead of attempting a real Cloud Logging tail, which would
+// block a test indefinitely. Verifying the literal
+// "Content-Type: text/event-stream" header therefore still requires a real
+// *logadmin.Client/*logv2.Client (handlers_diagnostics.go:149) and is not
+// exercised end to end here; TestHandleDiagnosticsLogsStream_NoLogQueryService/
+// _MethodNotAllowed (handlers_diagnostics_test.go) already pin the handler's
+// own behavior directly, and this test adds the missing piece: that the live
+// mux route for the catalog's declared pattern actually dispatches to that
+// handler.
 func TestCatalogRoute_DiagnosticsLogsStreamMethodGate(t *testing.T) {
-	// testServer wires up a real logQueryService in this environment; force
-	// it back to nil (testServerNoCloudLogs's exact pattern,
-	// handlers_logs_test.go) so GET takes the documented 501 short-circuit
-	// instead of attempting a real, indefinitely-blocking Cloud Logging tail.
 	srv, _ := testServer(t)
 	srv.logQueryService = nil
 
 	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/diagnostics/logs/stream", nil)
 	if rec.Code != http.StatusNotImplemented {
-		t.Errorf("GET: got %d, want %d (NotImplemented, no Cloud Logging client configured)", rec.Code, http.StatusNotImplemented)
+		t.Errorf("GET: got %d, want %d (NotImplemented, logQueryService forced nil)", rec.Code, http.StatusNotImplemented)
 	}
 
 	rec = doRequest(t, srv, http.MethodPost, "/api/v1/admin/diagnostics/logs/stream", nil)
