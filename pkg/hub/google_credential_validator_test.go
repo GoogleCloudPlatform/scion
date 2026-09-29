@@ -1649,7 +1649,7 @@ func TestGEExchange_ProvisioningRejectedByPolicy(t *testing.T) {
 func TestGEExchange_ExistingUserByEmail_SubjectToSignInPolicy(t *testing.T) {
 	// The live sign-in policy applies consistently to every sign-in path: an
 	// existing record resolved by email is subject to the same authChecker
-	// as new-user provisioning, not bypassed.
+	// as new-user provisioning; it is not skipped for existing records.
 	neverAuthorized := func(_ context.Context, _ string) bool { return false }
 
 	identity := validGmailIdentity()

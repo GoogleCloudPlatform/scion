@@ -1453,6 +1453,25 @@ func (s *Server) signInPolicyDeps() signInPolicyDeps {
 		auditActivated: func(ctx context.Context, email, userID string) {
 			LogInviteAudit(ctx, s.auditLogger, InviteAuditUserActivated, email, "", userID, email, nil)
 		},
+		// auditDenied mirrors provisionUser's own denial-reason logic above.
+		// provisionUser calls the helper with preAuthorized=true, so this
+		// only fires from a caller (the resolver) that passes
+		// preAuthorized=false and fails the authorize check — provisionUser
+		// itself already audited its denial before ever reaching the helper,
+		// so there is no double-audit for that path.
+		// auditDenied mirrors provisionUser's own denial-reason logic above.
+		// provisionUser calls the helper with preAuthorized=true, so this
+		// only fires from a caller (the resolver) that passes
+		// preAuthorized=false and fails the authorize check — provisionUser
+		// itself already audited its denial before ever reaching the helper,
+		// so there is no double-audit for that path.
+		auditDenied: func(ctx context.Context, email string) {
+			reason := "not_on_allow_list"
+			if s.UserAccessMode() != "invite_only" {
+				reason = "domain_not_authorized"
+			}
+			LogInviteAuditFailure(ctx, s.auditLogger, InviteAuditLoginDenied, email, reason)
+		},
 	}
 }
 
