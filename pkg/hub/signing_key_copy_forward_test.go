@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -216,9 +217,9 @@ func TestEnsureSigningKey_CopiesLegacyKeyForwardAndRepairsRef(t *testing.T) {
 
 // TestOIDCKeyManager_CopiesLegacyKeyForwardAndRepairsRef is the OIDC
 // equivalent of TestEnsureSigningKey_CopiesLegacyKeyForwardAndRepairsRef
-// (ptone/scion#2152 review finding 5: formula-decision.md names
-// oidc_signing_key explicitly, but it has its own load path — separate from
-// ensureSigningKey — that originally had no copy-forward at all).
+// (ptone/scion#2152 review finding 5: .design/secret-id-hub-refactor.md §7
+// names oidc_signing_key explicitly, but it has its own load path — separate
+// from ensureSigningKey — that originally had no copy-forward at all).
 func TestOIDCKeyManager_CopiesLegacyKeyForwardAndRepairsRef(t *testing.T) {
 	st := createOIDCTestStore(t)
 	ctx := context.Background()
@@ -263,8 +264,32 @@ func TestOIDCKeyManager_CopiesLegacyKeyForwardAndRepairsRef(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewOIDCKeyManager failed: %v", err)
 	}
-	if len(mgr.JWKS().Keys) == 0 {
+	keys := mgr.JWKS().Keys
+	if len(keys) == 0 {
 		t.Fatal("expected at least one JWKS key")
+	}
+
+	// ptone/scion#2152 round-2 review finding 4: assert the loaded key is
+	// byte-identical to the seeded legacy one, not just "a key exists". A
+	// broken copy-forward that fell through to generating a brand-new key
+	// would still satisfy every assertion below this point (Set() writes the
+	// prefixed name and ref, and the legacy copy is left untouched either
+	// way) — only a modulus/value comparison against the original key
+	// catches that, which is the whole point of "sessions and agent tokens
+	// survive" for the OIDC-signed tokens this key protects.
+	pub, ok := keys[0].Key.(*rsa.PublicKey)
+	if !ok {
+		t.Fatalf("expected an RSA public key in the JWKS, got %T", keys[0].Key)
+	}
+	if pub.N.Cmp(priv.PublicKey.N) != 0 || pub.E != priv.PublicKey.E {
+		t.Error("BUG: loaded OIDC key's public modulus/exponent does not match the seeded legacy key — a new key may have been generated instead of loading the legacy one")
+	}
+
+	mock.mu.Lock()
+	prefixedValueAtCopy := string(mock.versions[fmt.Sprintf("projects/%s/secrets/%s", projectID, prefixedGCPSecretNameForTest(hubID, store.ScopeHub, hubID, keyName))])
+	mock.mu.Unlock()
+	if prefixedValueAtCopy != string(pemBytes) {
+		t.Errorf("BUG: prefixed copy's PEM value does not match the seeded legacy PEM byte-for-byte")
 	}
 
 	rec, err := st.GetSecret(ctx, keyName, store.ScopeHub, hubID)

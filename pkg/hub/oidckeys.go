@@ -418,8 +418,9 @@ func (m *OIDCKeyManager) loadOrCreateKey(ctx context.Context, cfg OIDCKeyManager
 		// the DB ref to point at the new name — before the Get below, so
 		// this read actually resolves through the prefixed name instead of
 		// silently continuing to read the legacy copy via a stale ref
-		// (review finding 5: formula-decision.md names oidc_signing_key
-		// explicitly as one of the keys this applies to). Idempotent;
+		// (review finding 5: .design/secret-id-hub-refactor.md §7 names
+		// oidc_signing_key explicitly as one of the keys this applies to).
+		// Idempotent;
 		// best-effort — a failure here just means the existing (legacy-ref)
 		// resolution below is used instead.
 		if gcpBackend, ok := cfg.Backend.(*secret.GCPBackend); ok {
