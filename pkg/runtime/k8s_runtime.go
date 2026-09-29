@@ -1107,10 +1107,10 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			}
 
 			if hasVariableSecrets {
-				scionDir := filepath.Join(util.GetHomeDir(config.UnixUsername), ".scion")
+				secretsJSONPath := filepath.Join(util.GetHomeDir(config.UnixUsername), ".scion", "secrets.json")
 				extraVolumeMounts = append(extraVolumeMounts, corev1.VolumeMount{
 					Name:      "agent-secrets",
-					MountPath: scionDir + "/secrets.json",
+					MountPath: secretsJSONPath,
 					SubPath:   "secrets.json",
 					ReadOnly:  true,
 				})
