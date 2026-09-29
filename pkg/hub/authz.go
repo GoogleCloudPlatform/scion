@@ -314,7 +314,7 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 	if credential.Kind == CredentialKindUAT {
 		if user, ok := principal.Identity.(UserIdentity); ok {
 			if scoped, ok := user.(*ScopedUserIdentity); ok {
-				if denied := a.enforceUATConstraints(scoped, request.Resource, request.Action); denied != nil {
+				if denied := a.enforceUATConstraints(ctx, principal, scoped, request.Resource, request.Action, permissionID); denied != nil {
 					return decorateDecision(*denied, principal, credential)
 				}
 			}
@@ -1401,7 +1401,16 @@ func decorateDecision(decision Decision, principal PrincipalContext, credential 
 // enforceUATConstraints checks the project and scope restrictions carried by a
 // ScopedUserIdentity (produced from a UAT). Returns a deny Decision if the
 // request falls outside the token's allowed project or scopes, nil otherwise.
-func (a *AuthzService) enforceUATConstraints(scoped *ScopedUserIdentity, resource Resource, action Action) *Decision {
+//
+// C.1 (ptone/scion#2092) adds a third check after the two pre-existing ones:
+// live project access for project targets (permissionID is the already-
+// resolved canonical permission Decide computed for this request, so the
+// admission check evaluates the exact permission the kernel will evaluate,
+// not a re-derived one). It runs last so only in-scope requests pay the
+// extra store lookup, and so the ordering documented in
+// C/plan.md §2.2(2) is preserved: project match, then exact scope, then
+// live project access.
+func (a *AuthzService) enforceUATConstraints(ctx context.Context, principal PrincipalContext, scoped *ScopedUserIdentity, resource Resource, action Action, permissionID string) *Decision {
 	// Enforce project constraint: the resource must belong to the token's project.
 	projectID := scoped.ScopedProjectID()
 	if resource.Type == "project" {
@@ -1420,6 +1429,24 @@ func (a *AuthzService) enforceUATConstraints(scoped *ScopedUserIdentity, resourc
 	scope := resource.Type + ":" + string(action)
 	if !scoped.HasScope(scope) {
 		return &Decision{Allowed: false, Reason: "token does not have scope: " + scope}
+	}
+
+	// Live project access (design doc "Resource-relative minting for
+	// #2092": "Active project access is required at use time as well as
+	// mint time: retained creation ancestry alone cannot authorize a UAT
+	// request after project access is removed"; F-3 ruling,
+	// D/notes/ruling-f3-project-access.md). The two checks above already
+	// confirm resource is a project target inside the token's own project
+	// (either the "project" resource itself, or a resource whose
+	// ParentType is "project" and whose ParentID matches) -- anything else
+	// was already denied above as hub-level. ProjectTargetAdmission fails
+	// closed on any error (including ErrUnsupportedPrincipalKind for a
+	// non-local-user principal, which cannot occur for a ScopedUserIdentity
+	// today but is handled the same as any other denial rather than
+	// panicking or special-cased here).
+	admission, err := a.ProjectTargetAdmission(ctx, principal, projectID, permissionID, resource, nil)
+	if err != nil || !admission.Admitted {
+		return &Decision{Allowed: false, Reason: "token holder lacks active access to the target project"}
 	}
 
 	return nil
