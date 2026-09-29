@@ -163,8 +163,12 @@ const (
 	// CredentialKindAgentToken is an actual agent identity token — the
 	// canonical token file, or the SCION_AUTH_TOKEN bootstrap env var.
 	CredentialKindAgentToken CredentialKind = "agent_token"
-	// CredentialKindHubToken is the legacy SCION_HUB_TOKEN bearer token path
-	// (running inside a container, pre-agent-token-file convention).
+	// CredentialKindHubToken is a bearer token from the SCION_HUB_TOKEN env
+	// var — normally a user personal access token (`scion_pat_...`), or a
+	// bootstrap bearer token; never an agent identity token
+	// (ptone/scion#2146 review R5-9 — this matters because the agent-mode
+	// --all guard's correctness rests on hub_token being treated as a
+	// non-agent-token credential).
 	CredentialKindHubToken CredentialKind = "hub_token"
 	// CredentialKindDevAuto covers both dev-auth paths: the automatic
 	// localhost dev-token override that takes priority over a non-dev agent
@@ -1366,7 +1370,12 @@ func readAgentTokenFile() string {
 	return strings.TrimSpace(string(data))
 }
 
-// createHubClient creates a new Hub client with proper authentication.
+// createHubClient creates a new Hub client with proper authentication, and
+// reports which credential it selected (ptone/scion#2146 review R4-6) so a
+// caller like the CLI's --all guard can key on the credential actually in
+// use rather than inferring it from CLI mode. Recording the kind is purely
+// observational — it never changes auth priority or behavior.
+//
 // Note: hub.token and hub.apiKey are deprecated and no longer used for auth.
 // Auth priority: OAuth credentials > scion-token file > SCION_AUTH_TOKEN env > auto dev auth.
 // Exception: for localhost endpoints, dev auth takes priority over non-dev agent tokens
@@ -1377,18 +1386,17 @@ func readAgentTokenFile() string {
 // message to a user) require the real per-agent identity that only that token carries —
 // dev auth resolves to a superuser/dev identity, not any specific agent, so it 401s on
 // self-only endpoints.
-// createHubClient builds the Hub client used by EnsureHubReady and
-// resolveHubProjectRef, and reports which credential it selected
-// (ptone/scion#2146 review R4-6) so a caller like the CLI's --all guard can
-// key on the credential actually in use rather than inferring it from CLI
-// mode. The auth priority order itself is unchanged by this — recording the
-// kind is purely observational.
 //
-// Note this duplicates cmd/hub.go's getHubClient, which implements the
-// identical priority order independently for commands that call it
-// directly. That duplication predates this change and is out of scope here
-// (ptone/scion#2146 review round 4) — see dev-notes.md's "Release notes" /
-// observations for the follow-up this raises.
+// This is the Hub client builder used by EnsureHubReady and
+// resolveHubProjectRef — i.e. everything that goes through
+// CheckHubAvailability* (cmd/common.go), including `scion list`. It
+// duplicates cmd/hub.go's getHubClient, which implements the identical
+// priority order independently for commands that call it directly instead
+// (`broker`, `clean`, `notifications`, `project`, `doctor`, template sync,
+// etc.) and does not report CredentialKind. That duplication predates this
+// change and was out of scope to refactor here (ptone/scion#2146 review
+// round 4's additive-only authorization) — tracked as
+// https://github.com/ptone/scion/issues/2213.
 func createHubClient(settings *config.Settings, endpoint string) (hubclient.Client, CredentialKind, error) {
 	var opts []hubclient.Option
 

@@ -294,7 +294,9 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 		}
 		if userID != "" {
 			// A user reference: Ancestry records the creator user directly
-			// (see createAgentInProject), so the same AncestorID predicate
+			// (see createAgent/handlers_agents_core.go and
+			// createProjectAgent/handlers_projects_core.go, the two
+			// handlers that build it), so the same AncestorID predicate
 			// that works for an agent reference works unchanged here.
 			opts.AncestorID = userID
 		} else {
@@ -500,8 +502,9 @@ func resolveRelationshipReference(ctx context.Context, client hubclient.Client, 
 //     there is no parent to walk to.
 //   - Ancestry has exactly one entry: that entry is EITHER the creating
 //     user's ID (the common, top-level-agent case) OR another agent's ID.
-//     The latter is real, not hypothetical: `createAgentInProject`
-//     (`handlers_agents_core.go`) sets a child's Ancestry to
+//     The latter is real, not hypothetical: `createAgent`
+//     (`handlers_agents_core.go`) and `createProjectAgent`
+//     (`handlers_projects_core.go`) each set a child's Ancestry to
 //     `creatorAgent.Ancestry + [creatorAgent.ID]` when the creator resolved
 //     to an agent — so if that creator's OWN Ancestry was itself empty (its
 //     `GetAgent` lookup failed at creation time, it was created by an
@@ -519,9 +522,10 @@ func resolveRelationshipReference(ctx context.Context, client hubclient.Client, 
 //     cannot see — both must be indistinguishable to the caller, so both
 //     root at self).
 //   - Ancestry has two or more entries: the last entry is always the direct
-//     parent AGENT's ID by construction — `createAgentInProject` only ever
-//     appends when the creator resolved to an agent, so at this length the
-//     appended, last entry is unconditionally that creator agent's own ID,
+//     parent AGENT's ID by construction — `createAgent`/`createProjectAgent`
+//     only ever append when the creator resolved to an agent, so at this
+//     length the appended, last entry is unconditionally that creator
+//     agent's own ID,
 //     never a user's (a user can only ever appear as Ancestry[0], the
 //     original creator at the base of the chain, never later). No lookup
 //     is needed at this length. (This is the same definition
@@ -572,10 +576,28 @@ func isAncestryEntryAnAgent(ctx context.Context, agentSvc hubclient.AgentService
 	if err != nil {
 		return nil, false, fmt.Errorf("failed to resolve ancestry entry %q: %w", ancestryEntry, err)
 	}
-	if len(resp.Agents) == 0 {
+	// Only trust a result whose ID actually equals ancestryEntry, mirroring
+	// resolveReferenceAgent's own skepticism of the response shape — a Hub
+	// that predates ptone/scion#2146 and silently ignores the `id` query
+	// param (see R4-11) would otherwise hand back an arbitrary agent, which
+	// this authz-adjacent path (its result becomes the --lineage root) must
+	// never trust blindly (ptone/scion#2146 review R5-7).
+	var found *hubclient.Agent
+	for i := range resp.Agents {
+		if resp.Agents[i].ID == ancestryEntry {
+			if found != nil {
+				// IDs is a single-element set; the server should never
+				// return more than one exact-ID match. Fail loud rather
+				// than guess which one, same as resolveReferenceAgent.
+				return nil, false, fmt.Errorf("ancestry entry %q unexpectedly matched more than one record", ancestryEntry)
+			}
+			found = &resp.Agents[i]
+		}
+	}
+	if found == nil {
 		return nil, false, nil
 	}
-	return &resp.Agents[0], true, nil
+	return found, true, nil
 }
 
 // maxResolutionPages bounds how many pages resolveOwnerID and
@@ -1229,7 +1251,7 @@ func init() {
 	listCmd.Flags().Lookup("descendants").NoOptDefVal = scopeInferSentinel
 	listCmd.Flags().StringVar(&filterAncestors, "ancestors", "", "List the agents in the reference's ancestry chain (default: self)")
 	listCmd.Flags().Lookup("ancestors").NoOptDefVal = scopeInferSentinel
-	listCmd.Flags().StringVar(&filterLineage, "lineage", "", "List the reference's creation-tree neighborhood: its direct parent plus all of the parent's descendants, bounded to the reference's project (default: self)")
+	listCmd.Flags().StringVar(&filterLineage, "lineage", "", "List the reference's creation-tree neighborhood: its direct parent agent plus all of that parent's descendants, bounded to the reference's project. A reference with no parent agent you can see (e.g. one created directly by a user) is its own root (default: self)")
 	listCmd.Flags().Lookup("lineage").NoOptDefVal = scopeInferSentinel
 	listCmd.MarkFlagsMutuallyExclusive("descendants", "ancestors", "lineage")
 }

@@ -1354,7 +1354,9 @@ func TestResolveRelationshipReference(t *testing.T) {
 func TestResolveLineageRootID(t *testing.T) {
 	const ancestryLessCreatorID = "11111111-1111-1111-1111-111111111111"
 
+	var requestCount int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
 		if r.URL.Path != "/api/v1/agents" {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -1380,15 +1382,17 @@ func TestResolveLineageRootID(t *testing.T) {
 	agentSvc := client.Agents()
 
 	tests := []struct {
-		name     string
-		id       string
-		ancestry []string
-		want     string
+		name        string
+		id          string
+		ancestry    []string
+		want        string
+		wantNoCalls bool // ptone/scion#2146 review R5-6(b): len 0 and len>=2 must make zero requests
 	}{
 		{
-			name: "no ancestry: self is root (covers a user reference, which has no Ancestry at all)",
-			id:   "self-id",
-			want: "self-id",
+			name:        "no ancestry: self is root (covers a user reference, which has no Ancestry at all)",
+			id:          "self-id",
+			want:        "self-id",
+			wantNoCalls: true,
 		},
 		{
 			name:     "single ancestry entry naming a user (the common top-level-agent case): parent is a user, so self is root, not the user (ptone/scion#2146 --lineage option (i))",
@@ -1403,20 +1407,47 @@ func TestResolveLineageRootID(t *testing.T) {
 			want:     ancestryLessCreatorID,
 		},
 		{
-			name:     "multi-entry ancestry: the LAST entry is the direct parent, not the topmost ancestor — no lookup needed, since it's guaranteed to be an agent ID by construction",
-			id:       "grandchild-id",
-			ancestry: []string{"user-id", "parent-id", "immediate-parent-id"},
-			want:     "immediate-parent-id",
+			name:        "multi-entry ancestry: the LAST entry is the direct parent, not the topmost ancestor — no lookup needed, since it's guaranteed to be an agent ID by construction",
+			id:          "grandchild-id",
+			ancestry:    []string{"user-id", "parent-id", "immediate-parent-id"},
+			want:        "immediate-parent-id",
+			wantNoCalls: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			requestCount = 0
 			got, err := resolveLineageRootID(context.Background(), agentSvc, tt.id, tt.ancestry)
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, got)
+			if tt.wantNoCalls {
+				assert.Zero(t, requestCount, "this ancestry length must resolve locally, with no Hub call at all")
+			} else {
+				assert.Equal(t, 1, requestCount, "a length-1 ancestry must resolve via exactly one authorized-list call")
+			}
 		})
 	}
+}
+
+// TestResolveLineageRootID_LookupError is the ptone/scion#2146 review R5-6(a)
+// gap: a length-1 ancestry's authorized-list lookup can fail (a real HTTP/
+// network error, not just a zero-result "not an agent" outcome), and that
+// must propagate as a wrapped error, not silently root at self — rooting at
+// self on an unknown outcome would be indistinguishable from a legitimate
+// "it's a user" result, hiding a real failure from the caller.
+func TestResolveLineageRootID_LookupError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	agentSvc := client.Agents()
+
+	_, err = resolveLineageRootID(context.Background(), agentSvc, "child-id", []string{"some-ancestor-id"})
+	require.Error(t, err)
 }
 
 func TestResolveOwnerID(t *testing.T) {
@@ -1846,6 +1877,11 @@ func TestListAgentsViaHub_LineageFlag(t *testing.T) {
 	const rootlessRefID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 	const topLevelRefID = "cccccccc-cccc-cccc-cccc-cccccccccccc"
 	const topLevelRefProjectID = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+	// ptone/scion#2146 review R5-6(c): a length-1 ancestry whose entry
+	// resolves to a visible agent, through the full listAgentsViaHub path.
+	const agentParentRefID = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+	const agentParentRefProjectID = "11111111-2222-3333-4444-555555555555"
+	const agentParentID = "66666666-7777-8888-9999-aaaaaaaaaaaa"
 
 	var gotLineageRootID, gotProjectID string
 
@@ -1860,6 +1896,15 @@ func TestListAgentsViaHub_LineageFlag(t *testing.T) {
 			// entry (the user that created it), so its direct parent is a
 			// user, not an agent.
 			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: topLevelRefID, Slug: "top-level-ref-agent", ProjectID: topLevelRefProjectID, Ancestry: []string{"user-id"}})
+		case r.URL.Path == "/api/v1/agents/"+agentParentRefID:
+			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: agentParentRefID, Slug: "agent-parent-ref", ProjectID: agentParentRefProjectID, Ancestry: []string{agentParentID}})
+		case r.URL.Path == "/api/v1/agents" && r.URL.Query().Get("id") == agentParentID:
+			// The isAncestryEntryAnAgent resolution call for the length-1
+			// entry above — distinct from the final listing call below,
+			// which never sets `id`.
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"agents": []hubclient.Agent{{ID: agentParentID, Slug: "agent-parent"}},
+			})
 		case r.URL.Path == "/api/v1/agents":
 			gotLineageRootID = r.URL.Query().Get("lineageRootId")
 			gotProjectID = r.URL.Query().Get("projectId")
@@ -1923,6 +1968,17 @@ func TestListAgentsViaHub_LineageFlag(t *testing.T) {
 		run()
 		assert.Equal(t, topLevelRefID, gotLineageRootID)
 		assert.Equal(t, topLevelRefProjectID, gotProjectID)
+	})
+
+	// ptone/scion#2146 review R5-6(c): a length-1 ancestry whose entry
+	// resolves to a visible agent (the R4-3 case), driven through the full
+	// listAgentsViaHub path, not just the resolveLineageRootID unit test.
+	t.Run("length-1 ancestry entry resolving to a visible agent roots there, project-bounded", func(t *testing.T) {
+		gotLineageRootID, gotProjectID = "", ""
+		filterLineage = agentParentRefID
+		run()
+		assert.Equal(t, agentParentID, gotLineageRootID)
+		assert.Equal(t, agentParentRefProjectID, gotProjectID)
 	})
 }
 

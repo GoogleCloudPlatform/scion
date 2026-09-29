@@ -1444,13 +1444,18 @@ func TestCreateHubClient_HubManagedAgentUsesRealTokenOnLocalhost(t *testing.T) {
 	}
 }
 
-// TestCreateHubClient_UsesOAuth is the ptone/scion#2146 review R4-6 addition:
-// unlike the pre-existing tests in this file, this one actually exercises
-// the OAuth branch (the prior comment on this test said that couldn't be
-// done because credentials.GetAccessToken reads a global store — that store
-// is just a file under HOME, though, so a clean, test-local HOME plus
-// credentials.Store makes it directly testable).
-func TestCreateHubClient_UsesOAuth(t *testing.T) {
+// TestCreateHubClient_PrefersOAuthOverAgentToken is the ptone/scion#2146
+// review R4-6 addition, renamed in review R5-10: it sets BOTH an OAuth
+// credential and an agent token and proves OAuth wins, which is what a test
+// with this name should do — an earlier version of this file had a
+// same-named test that never actually configured OAuth at all (it only
+// checked that SCION_AUTH_TOKEN is picked up when OAuth is absent, which
+// duplicated TestCreateHubClient_UsesAgentTokenFromEnv and has been
+// removed). OAuth was believed untestable here because
+// credentials.GetAccessToken reads a global store — that store is just a
+// file under HOME, though, so a clean, test-local HOME plus
+// credentials.Store makes it directly testable after all.
+func TestCreateHubClient_PrefersOAuthOverAgentToken(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if auth := r.Header.Get("Authorization"); auth != "Bearer oauth-access-token" {
 			t.Errorf("expected Authorization 'Bearer oauth-access-token', got %q", auth)
@@ -1487,33 +1492,6 @@ func TestCreateHubClient_UsesOAuth(t *testing.T) {
 	_, err = client.Health(context.Background())
 	if err != nil {
 		t.Fatalf("Health check failed: %v", err)
-	}
-}
-
-func TestCreateHubClient_PrefersOAuthOverAgentToken(t *testing.T) {
-	// When OAuth credentials exist, they should take precedence over SCION_AUTH_TOKEN.
-	// We can't easily test this because credentials.GetAccessToken uses a global store,
-	// but we can verify that without OAuth, SCION_AUTH_TOKEN is picked up.
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Just verify the request arrives
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-	}))
-	defer server.Close()
-
-	// Use a clean HOME so no token file interferes
-	t.Setenv("HOME", t.TempDir())
-	// With SCION_AUTH_TOKEN set but no OAuth, agent token should be used
-	t.Setenv("SCION_AUTH_TOKEN", "agent-jwt")
-	t.Setenv("SCION_DEV_TOKEN", "")
-
-	settings := &config.Settings{}
-	_, kind, err := createHubClient(settings, server.URL)
-	if err != nil {
-		t.Fatalf("createHubClient failed: %v", err)
-	}
-	if kind != CredentialKindAgentToken {
-		t.Errorf("expected CredentialKindAgentToken, got %q", kind)
 	}
 }
 
