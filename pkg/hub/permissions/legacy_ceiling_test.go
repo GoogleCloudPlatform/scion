@@ -96,10 +96,9 @@ func TestLegacyUATScopeToPermissionID_Golden(t *testing.T) {
 	}
 }
 
-// TestNormalizeLegacyUATScopes_AttachOnlyStaysAttachOnly is the
-// characterization pin for the legacy-attach ruling: a legacy row holding
-// only agent:attach normalizes to exactly agent.attach — no lifecycle
-// implication.
+// TestNormalizeLegacyUATScopes_AttachOnlyStaysAttachOnly pins that an
+// unversioned row holding only agent:attach normalizes to exactly
+// agent.attach — no lifecycle implication.
 func TestNormalizeLegacyUATScopes_AttachOnlyStaysAttachOnly(t *testing.T) {
 	ids := NormalizeLegacyUATScopes([]string{"agent:attach"})
 	if len(ids) != 1 || ids[0] != "agent.attach" {
@@ -162,12 +161,6 @@ func TestNormalizeLegacyUATScopes_UnrecognizedScopeDropped(t *testing.T) {
 func TestNormalizeLegacyUATScopes_ImmuneToRegistryChanges(t *testing.T) {
 	before := NormalizeLegacyUATScopes([]string{"agent:attach", "agent:read"})
 
-	originalAliases := UATManageAliases
-	t.Cleanup(func() {
-		UATManageAliases = originalAliases
-		ResetSelectorRegistryForTest()
-	})
-
 	// agent:attach already exists as an ordinary UATScope (mapping only to
 	// agent.attach). Retargeting it as a manage alias too makes the alias
 	// candidate — built and inserted into the selector table AFTER the
@@ -175,13 +168,12 @@ func TestNormalizeLegacyUATScopes_ImmuneToRegistryChanges(t *testing.T) {
 	// of "agent:attach" would jump from {agent.attach} to the full
 	// agent:manage expansion, which includes agent.lifecycle. That is
 	// exactly the widening a live-resolution regression would produce.
-	mutated := make(map[string]string, len(originalAliases)+1)
-	for k, v := range originalAliases {
-		mutated[k] = v
+	mutatedAliases := make(map[string]string, len(UATManageAliases)+1)
+	for k, v := range UATManageAliases {
+		mutatedAliases[k] = v
 	}
-	mutated["agent:attach"] = ResourceAgent
-	UATManageAliases = mutated
-	ResetSelectorRegistryForTest()
+	mutatedAliases["agent:attach"] = ResourceAgent
+	t.Cleanup(OverrideSelectorInputsForTest(Registry, mutatedAliases))
 
 	mutatedResolution, ok := ResolveSelector("agent:attach")
 	if !ok {

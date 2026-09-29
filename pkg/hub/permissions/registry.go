@@ -407,13 +407,11 @@ const (
 //
 // This table is derived from the existing Permission.UATScope field and
 // UATManageAliases/UATManageScopesFor, not a second hand-maintained
-// selector vocabulary: it is the replacement for useraccesstoken.go's
-// scopeToPermissionIDs, which reconstructs "resource:action" and would
-// silently collapse two permissions sharing a resource/action pair (e.g.
+// selector vocabulary: a resource:action reconstruction would silently
+// collapse two permissions sharing a resource/action pair (e.g.
 // hub.settings.read and hub.config.read, both {hub, read}) into one
-// selector once either becomes UAT-selectable. A.2 owns wiring the
-// mint/runtime call sites to this table; A.1 owns the table and its
-// build/validate logic.
+// selector once either becomes UAT-selectable; mint, runtime authorization,
+// and delegation all resolve through this table instead.
 type SelectorMapping struct {
 	Selector          string
 	PermissionIDs     []string

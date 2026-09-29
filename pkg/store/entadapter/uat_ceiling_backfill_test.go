@@ -34,8 +34,8 @@ import (
 // CreateUserAccessToken would have set is present, but ceiling_permission_ids
 // is left unset (SQL NULL) and ceiling_version keeps its column default (0).
 // It deliberately goes around ExternalStore.CreateUserAccessToken — that
-// method now always populates the ceiling columns for a newly minted token,
-// so it cannot produce the "never backfilled" shape this test needs.
+// method always populates the ceiling columns for a newly minted token, so
+// it cannot produce the "never backfilled" shape this test needs.
 func createLegacyUAT(t *testing.T, cs *CompositeStore, userID, projectID string, scopes []string) *store.UserAccessToken {
 	t.Helper()
 	ctx := context.Background()
@@ -162,10 +162,15 @@ func TestBackfillUATCeilings_Idempotent(t *testing.T) {
 	assert.Equal(t, []string{"agent.read"}, mintedAfter.CeilingPermissionIDs)
 }
 
-// TestBackfillUATCeilings_ImmuneToRegistryChange pins that once a legacy
-// row's ceiling has been persisted, reloading it is unaffected by a
-// subsequent change to the live permissions.Registry — the persisted value,
-// not a re-derivation, is authoritative.
+// TestBackfillUATCeilings_ImmuneToRegistryChange pins that the backfill
+// itself writes the frozen legacy snapshot's value, never a live
+// selector-resolved one. The alias mutation is installed and proven
+// effective on ResolveSelector BEFORE Migrate runs, so a backfill that used
+// live resolution (instead of permissions.NormalizeLegacyUATScopes) would
+// persist the widened value — the exact hazard a skipped-upgrade or
+// restored-old-database rolling deploy could hit for real, since the
+// mutation reflects registry/alias state that can differ between when a row
+// was minted and when its first Migrate finally runs.
 func TestBackfillUATCeilings_ImmuneToRegistryChange(t *testing.T) {
 	ctx := context.Background()
 	client := enttest.NewClient(t)
@@ -173,26 +178,31 @@ func TestBackfillUATCeilings_ImmuneToRegistryChange(t *testing.T) {
 	userID, projectID := seedProjectAndUser(t, cs)
 
 	legacy := createLegacyUAT(t, cs, userID, projectID, []string{"agent:attach"})
+
+	// Retarget agent:attach as a manage alias for "agent" BEFORE Migrate:
+	// buildSelectorRegistry processes aliases after plain UATScope entries,
+	// so this alias candidate wins the same map key, and a live resolution
+	// of "agent:attach" would jump from {agent.attach} to the full
+	// agent:manage expansion, which includes agent.lifecycle.
+	mutatedAliases := make(map[string]string, len(permissions.UATManageAliases)+1)
+	for k, v := range permissions.UATManageAliases {
+		mutatedAliases[k] = v
+	}
+	mutatedAliases["agent:attach"] = permissions.ResourceAgent
+	t.Cleanup(permissions.OverrideSelectorInputsForTest(permissions.Registry, mutatedAliases))
+
+	live, ok := permissions.ResolveSelector("agent:attach")
+	require.True(t, ok)
+	require.Contains(t, live.PermissionIDs, "agent.lifecycle", "test setup: expected the alias mutation to be effective before Migrate runs")
+
 	require.NoError(t, cs.Migrate(ctx))
 
-	before, err := cs.GetUserAccessToken(ctx, legacy.ID)
+	persisted, err := cs.GetUserAccessToken(ctx, legacy.ID)
 	require.NoError(t, err)
-
-	originalRegistry := permissions.Registry
-	t.Cleanup(func() { permissions.Registry = originalRegistry })
-	mutated := append([]permissions.Permission(nil), originalRegistry...)
-	for i := range mutated {
-		if mutated[i].UATScope == "agent:attach" {
-			mutated[i].ID = "agent.attach.renamed"
-		}
-	}
-	permissions.Registry = mutated
-
-	after, err := cs.GetUserAccessToken(ctx, legacy.ID)
-	require.NoError(t, err)
-	assert.Equal(t, before.CeilingPermissionIDs, after.CeilingPermissionIDs, "reloading a backfilled row must not change after a Registry mutation")
-	assert.Contains(t, after.CeilingPermissionIDs, "agent.attach")
-	assert.NotContains(t, after.CeilingPermissionIDs, "agent.attach.renamed")
+	assert.Equal(t, []string{"agent.attach"}, persisted.CeilingPermissionIDs,
+		"the backfill must persist the frozen legacy snapshot's value, not a live-resolved one")
+	assert.False(t, persisted.NormalizedCeiling().Allows("agent.lifecycle"),
+		"a live-resolving backfill would have persisted lifecycle; the frozen snapshot must not")
 }
 
 // TestBackfillUATCeilings_PreservesTransactionalAudit is the AC's
@@ -264,6 +274,35 @@ func TestBackfillUATCeilings_Pagination(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, []string{"agent.read"}, loaded.CeilingPermissionIDs, "row %s must be backfilled exactly once across pagination", id)
 	}
+}
+
+// TestBackfillUATCeilings_LeavesExistingV1RowsUntouched pins the backfill's
+// ceiling_permission_ids IS NULL filter: a V1 row that already exists before
+// the first Migrate call (e.g. minted by a replica whose own Migrate already
+// wrote the completion marker while another replica is still rolling out)
+// must not be rewritten. Its Scopes deliberately normalize to a DIFFERENT
+// permission than its persisted V1 ceiling, so the assertion cannot pass by
+// the backfill coincidentally recomputing the same value.
+func TestBackfillUATCeilings_LeavesExistingV1RowsUntouched(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	userID, projectID := seedProjectAndUser(t, cs)
+
+	v1Token := &store.UserAccessToken{
+		ID: uuid.NewString(), UserID: userID, Name: "pre-migrate-v1", Prefix: "scion_pat_premig",
+		KeyHash: uuid.NewString(), ProjectID: projectID, Scopes: []string{"agent:attach"},
+		CeilingVersion: permissions.CeilingVersionV1, CeilingPermissionIDs: []string{"agent.read"},
+		Created: time.Now(),
+	}
+	require.NoError(t, cs.CreateUserAccessToken(ctx, v1Token))
+
+	require.NoError(t, cs.Migrate(ctx)) // first Migrate on this store
+
+	after, err := cs.GetUserAccessToken(ctx, v1Token.ID)
+	require.NoError(t, err)
+	assert.Equal(t, permissions.CeilingVersionV1, after.CeilingVersion, "a pre-existing V1 row must not be rewritten to version 0")
+	assert.Equal(t, []string{"agent.read"}, after.CeilingPermissionIDs, "a pre-existing V1 row's ceiling must not be recomputed from Scopes")
 }
 
 // TestBackfillUATCeilings_PreservesRevokedAndNilExpiry covers two field

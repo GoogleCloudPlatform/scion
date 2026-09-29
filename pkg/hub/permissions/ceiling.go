@@ -89,7 +89,7 @@ func (c FrozenPermissionCeiling) Allows(permissionID string) bool {
 // credential.
 func BuildCeilingFromSelectors(selectors []string) (ceiling FrozenPermissionCeiling, ok bool) {
 	seen := make(map[string]bool, len(selectors))
-	var ids []string
+	ids := make([]string, 0, len(selectors))
 	for _, selector := range selectors {
 		m, resolved := ResolveSelector(selector)
 		if !resolved {

@@ -16,23 +16,56 @@ package permissions
 
 import "sync"
 
-// ResetSelectorRegistryForTest clears the process-wide cached selector
-// registry built from Registry and UATManageAliases, so a test that mutates
-// either one is reflected on the next ResolveSelector or
-// ValidateSelectorRegistry call instead of being masked by the cache.
+// selectorTestMu serializes OverrideSelectorInputsForTest calls against each
+// other and against the cache reset they perform, so overlapping install/
+// restore pairs cannot interleave. It does not make this hook safe to call
+// concurrently with ResolveSelector itself — see the doc comment below.
+var selectorTestMu sync.Mutex
+
+// OverrideSelectorInputsForTest replaces Registry and UATManageAliases for
+// the duration of a test and resets the cached selector registry so the
+// replacement takes effect on the next ResolveSelector or
+// ValidateSelectorRegistry call. It returns a restore function that
+// reinstates the originals and resets the cache again; callers install it
+// via t.Cleanup.
 //
-// Test-only. Production code never mutates Registry or UATManageAliases
-// after process startup, so it never needs to invalidate this cache; the
-// live registry callers depend on is expected to be immutable for the life
-// of the process. A test that calls this must restore Registry/
-// UATManageAliases and call it again afterward (t.Cleanup), so later tests
-// observe the real registry.
+//	restore := permissions.OverrideSelectorInputsForTest(mutatedRegistry, mutatedAliases)
+//	t.Cleanup(restore)
+//
+// Must only be called from tests, never concurrently with ResolveSelector:
+// it reassigns package-level state ResolveSelector reads without a lock on
+// the read side, by design, since production code treats that state as
+// immutable for the life of the process. Production code never calls this.
 //
 // Exported (rather than confined to a _test.go file in this package)
 // because callers outside this package — e.g. pkg/hub tests proving that a
-// Registry change cannot widen an already-issued credential — need to force
-// the same cache invalidation the mutation would otherwise require.
-func ResetSelectorRegistryForTest() {
+// Registry or alias change cannot widen an already-issued credential — need
+// to force the same override and cache invalidation a live mutation would
+// otherwise require, and an export_test.go accessor is visible only to this
+// package's own tests.
+func OverrideSelectorInputsForTest(registry []Permission, aliases map[string]string) (restore func()) {
+	selectorTestMu.Lock()
+	defer selectorTestMu.Unlock()
+
+	originalRegistry := Registry
+	originalAliases := UATManageAliases
+	Registry = registry
+	UATManageAliases = aliases
+	resetSelectorRegistryCache()
+
+	return func() {
+		selectorTestMu.Lock()
+		defer selectorTestMu.Unlock()
+		Registry = originalRegistry
+		UATManageAliases = originalAliases
+		resetSelectorRegistryCache()
+	}
+}
+
+// resetSelectorRegistryCache clears the process-wide cached selector
+// registry so the next ResolveSelector or ValidateSelectorRegistry call
+// rebuilds it from the current Registry/UATManageAliases.
+func resetSelectorRegistryCache() {
 	selectorRegistryOnce = sync.Once{}
 	selectorRegistry = nil
 }

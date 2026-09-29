@@ -100,7 +100,7 @@ type ScopedUserIdentity struct {
 // NormalizeLegacyUATScopes) — the same interpretation a real
 // CeilingVersionUnspecified token gets — so callers that construct an
 // identity directly from raw scope strings (most test fixtures) exercise
-// the same permission-ID-based restriction production code now applies. A
+// the same permission-ID-based restriction that production applies. A
 // caller minting a real token should use NewScopedUserIdentityWithCeiling
 // with the token's actual store.UserAccessToken.NormalizedCeiling() instead,
 // so a CeilingVersionV1+ ceiling is not silently reinterpreted as legacy.

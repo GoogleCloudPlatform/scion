@@ -109,26 +109,21 @@ func TestBuildCeilingFromSelectors_UnknownSelectorFailsClosed(t *testing.T) {
 	}
 }
 
-// TestBuildCeilingFromSelectors_FreezingProtectsAgainstLaterRegistryChange
-// pins the AC directly: a ceiling computed and frozen at one point in time
-// must not change meaning just because the live Registry later grows. Since
-// BuildCeilingFromSelectors resolves live (correct at mint time), the actual
-// non-widening guarantee for an EXISTING token comes entirely from calling
-// it once and storing the result — never calling it, or ResolveSelector,
-// again for that token. This test proves the Registry mutation is real
-// (a fresh ResolveSelector call changes) before trusting that the
-// already-frozen value does not.
-func TestBuildCeilingFromSelectors_FreezingProtectsAgainstLaterRegistryChange(t *testing.T) {
-	frozen, ok := BuildCeilingFromSelectors([]string{"agent:read"})
-	if !ok {
-		t.Fatal("expected agent:read to resolve")
+// TestBuildCeilingFromSelectors_FollowsLiveRegistry documents the other half
+// of the non-widening design: BuildCeilingFromSelectors is deliberately a
+// LIVE resolver — correct only at the instant of minting — and callers are
+// responsible for calling it exactly once and persisting the result. This
+// test exists so that property stays visible and intentional; the actual
+// non-widening guarantee for an already-issued credential is pinned at the
+// storage/load layer (pkg/hub's TestUATCeiling_V1Token_RegistryChangeCannotWidenBetweenValidations
+// and TestUATCeiling_LegacyRow_AliasChangeCannotWidenBetweenValidations,
+// and this package's TestBackfillUATCeilings_ImmuneToRegistryChange),
+// never by BuildCeilingFromSelectors refusing to see a Registry change.
+func TestBuildCeilingFromSelectors_FollowsLiveRegistry(t *testing.T) {
+	before, ok := BuildCeilingFromSelectors([]string{"agent:read"})
+	if !ok || !before.Allows("agent.read") {
+		t.Fatalf("expected agent:read to resolve to agent.read, got %v ok=%v", before, ok)
 	}
-
-	originalRegistry := Registry
-	t.Cleanup(func() {
-		Registry = originalRegistry
-		ResetSelectorRegistryForTest()
-	})
 
 	// Retarget "agent:read" to resolve to agent.list instead, by appending a
 	// later Registry entry with the same UATScope: buildSelectorRegistry's
@@ -136,25 +131,20 @@ func TestBuildCeilingFromSelectors_FreezingProtectsAgainstLaterRegistryChange(t 
 	// ResolveSelector("agent:read") returns from here on. agent.list already
 	// has a reviewed SelectorAllowedBoundaries entry, so the selector still
 	// resolves rather than being dropped as unreviewed.
-	mutated := append([]Permission(nil), originalRegistry...)
+	mutated := append([]Permission(nil), Registry...)
 	mutated = append(mutated, Permission{
 		ID: "agent.list", Resource: ResourceAgent, Action: ActionRead, UATScope: "agent:read",
 	})
-	Registry = mutated
-	ResetSelectorRegistryForTest()
+	t.Cleanup(OverrideSelectorInputsForTest(mutated, UATManageAliases))
 
-	live, ok := ResolveSelector("agent:read")
-	if !ok || len(live.PermissionIDs) != 1 || live.PermissionIDs[0] != "agent.list" {
-		t.Fatalf("test setup: expected the Registry mutation to be effective, got %v ok=%v", live, ok)
+	after, ok := BuildCeilingFromSelectors([]string{"agent:read"})
+	if !ok {
+		t.Fatal("expected agent:read to still resolve after the mutation")
 	}
-
-	// The already-frozen value is a plain []string with no live dependency
-	// on Registry: it must still allow the ORIGINAL permission and must not
-	// pick up the one the mutation retargeted the selector to.
-	if !frozen.Allows("agent.read") {
-		t.Error("frozen ceiling must still allow agent.read")
+	if after.Allows("agent.read") {
+		t.Error("a fresh BuildCeilingFromSelectors call must follow the mutated Registry, not the pre-mutation mapping")
 	}
-	if frozen.Allows("agent.list") {
-		t.Error("frozen ceiling must not gain the permission ID a later Registry mutation retargeted the selector to")
+	if !after.Allows("agent.list") {
+		t.Error("a fresh BuildCeilingFromSelectors call must resolve agent:read to whatever the live Registry currently maps it to")
 	}
 }

@@ -145,9 +145,9 @@ type PrincipalContext struct {
 
 // CredentialContext records the credential used for an authorization request.
 // ProjectID and Scopes are caveats for scoped bearer credentials. Ceiling is
-// the UAT's normalized, frozen permission ceiling (A.2) — the single source
-// every credential-scope restriction evaluates through, regardless of
-// whether the underlying token predates ceiling normalization.
+// the UAT's normalized permission ceiling — the single source every
+// credential-scope restriction evaluates through, for every ceiling
+// version.
 type CredentialContext struct {
 	Kind      CredentialKind
 	ID        string

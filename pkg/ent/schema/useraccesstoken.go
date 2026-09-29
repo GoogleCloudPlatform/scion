@@ -54,7 +54,7 @@ func (UserAccessToken) Fields() []ent.Field {
 		field.String("scopes").
 			NotEmpty(),
 		// ceiling_version and ceiling_permission_ids persist the normalized,
-		// frozen permission ceiling (A.2). ceiling_version defaults to 0
+		// frozen permission ceiling. ceiling_version defaults to 0
 		// (permissions.CeilingVersionUnspecified) for every row created
 		// before this column existed. ceiling_permission_ids is Nillable so
 		// "never backfilled" (NULL) is distinguishable from "backfilled to an

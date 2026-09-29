@@ -382,23 +382,17 @@ func TestUATCeiling_LegacyRow_AliasChangeCannotWidenBetweenValidations(t *testin
 	})
 	require.False(t, beforeDecision.Allowed)
 
-	originalAliases := permissions.UATManageAliases
-	t.Cleanup(func() {
-		permissions.UATManageAliases = originalAliases
-		permissions.ResetSelectorRegistryForTest()
-	})
 	// Retarget agent:attach as a manage alias for "agent": buildSelectorRegistry
 	// processes aliases after plain UATScope entries, so this alias
 	// candidate wins the same map key and "agent:attach" would resolve to
 	// the full agent:manage expansion — including agent.lifecycle — if
 	// anything re-consulted ResolveSelector live.
-	mutated := make(map[string]string, len(originalAliases)+1)
-	for k, v := range originalAliases {
-		mutated[k] = v
+	mutatedAliases := make(map[string]string, len(permissions.UATManageAliases)+1)
+	for k, v := range permissions.UATManageAliases {
+		mutatedAliases[k] = v
 	}
-	mutated["agent:attach"] = permissions.ResourceAgent
-	permissions.UATManageAliases = mutated
-	permissions.ResetSelectorRegistryForTest()
+	mutatedAliases["agent:attach"] = permissions.ResourceAgent
+	t.Cleanup(permissions.OverrideSelectorInputsForTest(permissions.Registry, mutatedAliases))
 
 	live, ok := permissions.ResolveSelector("agent:attach")
 	require.True(t, ok)
@@ -438,22 +432,16 @@ func TestUATCeiling_V1Token_RegistryChangeCannotWidenBetweenValidations(t *testi
 	require.True(t, before.Ceiling().Allows("agent.read"))
 	require.False(t, before.Ceiling().Allows("agent.list"))
 
-	originalRegistry := permissions.Registry
-	t.Cleanup(func() {
-		permissions.Registry = originalRegistry
-		permissions.ResetSelectorRegistryForTest()
-	})
 	// Retarget "agent:read" to resolve to agent.list instead, by appending a
 	// later Registry entry with the same UATScope: buildSelectorRegistry's
 	// last-write-wins map assignment means the appended entry decides what
 	// ResolveSelector("agent:read") returns from here on. agent.list already
 	// has a reviewed boundary entry, so the selector still resolves.
-	mutated := append([]permissions.Permission(nil), originalRegistry...)
+	mutated := append([]permissions.Permission(nil), permissions.Registry...)
 	mutated = append(mutated, permissions.Permission{
 		ID: "agent.list", Resource: permissions.ResourceAgent, Action: permissions.ActionRead, UATScope: "agent:read",
 	})
-	permissions.Registry = mutated
-	permissions.ResetSelectorRegistryForTest()
+	t.Cleanup(permissions.OverrideSelectorInputsForTest(mutated, permissions.UATManageAliases))
 
 	live, ok := permissions.ResolveSelector("agent:read")
 	require.True(t, ok)
@@ -463,6 +451,17 @@ func TestUATCeiling_V1Token_RegistryChangeCannotWidenBetweenValidations(t *testi
 	require.NoError(t, err)
 	assert.True(t, after.Ceiling().Allows("agent.read"), "a V1 token's persisted ceiling must survive a later Registry mutation unchanged")
 	assert.False(t, after.Ceiling().Allows("agent.list"), "a Registry mutation must not let re-validating an existing V1 token gain a new permission")
+
+	// Behavior-level confirmation, not just the ceiling's own bookkeeping:
+	// the owner role holds agent.list, so CanDelegate would allow delegating
+	// it if the mutation had actually widened this token's ceiling.
+	cdDecision := srv.authzService.CanDelegate(ctx, after, GrantDescriptor{
+		Type:            GrantTypeRoleBinding,
+		RolePermissions: []string{"agent.list"},
+		ScopeType:       store.RoleScopeProject,
+		ScopeID:         project.ID,
+	})
+	assert.False(t, cdDecision.Allowed, "a Registry mutation must not let re-validating an existing V1 token delegate a new permission")
 }
 
 // TestCreateTokenWithParams_PersistsCeiling_ExplicitScope pins that mint
