@@ -1243,6 +1243,14 @@ type MessageRequest struct {
 	// Structured message (new field, used by default).
 	StructuredMessage *messages.StructuredMessage `json:"structured_message,omitempty"`
 
+	// Raw delivers the message as raw terminal keystrokes without envelope
+	// formatting or trailing Enter. Merged onto StructuredMessage when set.
+	Raw bool `json:"raw,omitempty"`
+
+	// Plain delivers the message as plain text without ---BEGIN SCION MESSAGE---
+	// envelope formatting. Merged onto StructuredMessage when set.
+	Plain bool `json:"plain,omitempty"`
+
 	// Interrupt the harness before sending.
 	Interrupt bool `json:"interrupt,omitempty"`
 
@@ -1283,6 +1291,12 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	if req.StructuredMessage != nil {
 		structuredMsg = req.StructuredMessage
 		plainMessage = req.StructuredMessage.Msg
+		if req.Raw {
+			structuredMsg.Raw = true
+		}
+		if req.Plain {
+			structuredMsg.Plain = true
+		}
 		// B5 SECURITY FIX: ALWAYS derive sender identity from the
 		// authenticated context. Client-supplied Sender and SenderID are
 		// untrusted inputs that must never be used as conversation key
@@ -1336,9 +1350,21 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			} else {
 				sender = "user:" + user.ID()
 			}
+		} else if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+			senderID = agentIdent.ID()
+			senderSlug := agentIdent.ID() // fallback to UUID
+			if senderAgent, err := s.store.GetAgent(ctx, agentIdent.ID()); err == nil {
+				senderSlug = senderAgent.Slug
+			} else {
+				s.messageLog.Warn("failed to resolve agent slug for sender, using UUID fallback",
+					"agent_id", agentIdent.ID(), "error", err)
+			}
+			sender = "agent:" + senderSlug
 		}
 		structuredMsg = messages.NewInstruction(sender, "agent:"+id, plainMessage)
 		structuredMsg.SenderID = senderID
+		structuredMsg.Raw = req.Raw
+		structuredMsg.Plain = req.Plain
 		messaging.RecordStep(ctx, "sender_identity_extracted")
 	} else {
 		ValidationError(w, "message or structured_message is required", nil)
@@ -1882,6 +1908,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				TargetAgent:    agent,
 				Msg:            plainMessage,
 				Type:           structuredMsg.Type,
+				Raw:            structuredMsg.Raw,
+				Plain:          structuredMsg.Plain,
 				Urgent:         structuredMsg.Urgent,
 				Interrupt:      req.Interrupt,
 				Attachments:    structuredMsg.Attachments,

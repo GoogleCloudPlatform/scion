@@ -1,0 +1,689 @@
+{
+  "resourceLogs":  [
+    {
+      "resource":  {
+        "attributes":  [
+          {
+            "key":  "host.arch",
+            "value":  {
+              "stringValue":  "amd64"
+            }
+          },
+          {
+            "key":  "os.type",
+            "value":  {
+              "stringValue":  "linux"
+            }
+          },
+          {
+            "key":  "os.version",
+            "value":  {
+              "stringValue":  "6.8.0-1064-gcp"
+            }
+          },
+          {
+            "key":  "service.name",
+            "value":  {
+              "stringValue":  "claude-code"
+            }
+          },
+          {
+            "key":  "service.version",
+            "value":  {
+              "stringValue":  "2.1.280"
+            }
+          }
+        ]
+      },
+      "scopeLogs":  [
+        {
+          "scope":  {
+            "name":  "com.anthropic.claude_code.events",
+            "version":  "2.1.280"
+          },
+          "logRecords":  [
+            {
+              "timeUnixNano":  "1790522695136000000",
+              "observedTimeUnixNano":  "1790522695136000000",
+              "body":  {
+                "stringValue":  "claude_code.hook_execution_start"
+              },
+              "attributes":  [
+                {
+                  "key":  "user.id",
+                  "value":  {
+                    "stringValue":  "scrubbed-user-id"
+                  }
+                },
+                {
+                  "key":  "session.id",
+                  "value":  {
+                    "stringValue":  "scrubbed-session-id"
+                  }
+                },
+                {
+                  "key":  "terminal.type",
+                  "value":  {
+                    "stringValue":  "tmux"
+                  }
+                },
+                {
+                  "key":  "event.name",
+                  "value":  {
+                    "stringValue":  "hook_execution_start"
+                  }
+                },
+                {
+                  "key":  "event.timestamp",
+                  "value":  {
+                    "stringValue":  "2026-09-27T15:24:55.136Z"
+                  }
+                },
+                {
+                  "key":  "event.sequence",
+                  "value":  {
+                    "intValue":  "1"
+                  }
+                },
+                {
+                  "key":  "hook_event",
+                  "value":  {
+                    "stringValue":  "SessionStart"
+                  }
+                },
+                {
+                  "key":  "hook_name",
+                  "value":  {
+                    "stringValue":  "SessionStart:startup"
+                  }
+                },
+                {
+                  "key":  "num_hooks",
+                  "value":  {
+                    "stringValue":  "1"
+                  }
+                },
+                {
+                  "key":  "managed_only",
+                  "value":  {
+                    "stringValue":  "false"
+                  }
+                },
+                {
+                  "key":  "hook_source",
+                  "value":  {
+                    "stringValue":  "merged"
+                  }
+                },
+                {
+                  "key":  "safe_mode",
+                  "value":  {
+                    "stringValue":  "false"
+                  }
+                }
+              ]
+            },
+            {
+              "timeUnixNano":  "1790522695416000000",
+              "observedTimeUnixNano":  "1790522695416000000",
+              "body":  {
+                "stringValue":  "claude_code.user_prompt"
+              },
+              "attributes":  [
+                {
+                  "key":  "user.id",
+                  "value":  {
+                    "stringValue":  "scrubbed-user-id"
+                  }
+                },
+                {
+                  "key":  "session.id",
+                  "value":  {
+                    "stringValue":  "scrubbed-session-id"
+                  }
+                },
+                {
+                  "key":  "terminal.type",
+                  "value":  {
+                    "stringValue":  "tmux"
+                  }
+                },
+                {
+                  "key":  "event.name",
+                  "value":  {
+                    "stringValue":  "user_prompt"
+                  }
+                },
+                {
+                  "key":  "event.timestamp",
+                  "value":  {
+                    "stringValue":  "2026-09-27T15:24:55.416Z"
+                  }
+                },
+                {
+                  "key":  "event.sequence",
+                  "value":  {
+                    "intValue":  "12"
+                  }
+                },
+                {
+                  "key":  "prompt.id",
+                  "value":  {
+                    "stringValue":  "scrubbed-prompt-id"
+                  }
+                },
+                {
+                  "key":  "prompt_length",
+                  "value":  {
+                    "stringValue":  "40"
+                  }
+                },
+                {
+                  "key":  "prompt",
+                  "value":  {
+                    "stringValue":  "<REDACTED>"
+                  }
+                },
+                {
+                  "key":  "message.uuid",
+                  "value":  {
+                    "stringValue":  "scrubbed-message-uuid"
+                  }
+                }
+              ]
+            },
+            {
+              "timeUnixNano":  "1790522695418000000",
+              "observedTimeUnixNano":  "1790522695418000000",
+              "body":  {
+                "stringValue":  "claude_code.hook_execution_start"
+              },
+              "attributes":  [
+                {
+                  "key":  "user.id",
+                  "value":  {
+                    "stringValue":  "scrubbed-user-id"
+                  }
+                },
+                {
+                  "key":  "session.id",
+                  "value":  {
+                    "stringValue":  "scrubbed-session-id"
+                  }
+                },
+                {
+                  "key":  "terminal.type",
+                  "value":  {
+                    "stringValue":  "tmux"
+                  }
+                },
+                {
+                  "key":  "event.name",
+                  "value":  {
+                    "stringValue":  "hook_execution_start"
+                  }
+                },
+                {
+                  "key":  "event.timestamp",
+                  "value":  {
+                    "stringValue":  "2026-09-27T15:24:55.418Z"
+                  }
+                },
+                {
+                  "key":  "event.sequence",
+                  "value":  {
+                    "intValue":  "13"
+                  }
+                },
+                {
+                  "key":  "prompt.id",
+                  "value":  {
+                    "stringValue":  "scrubbed-prompt-id"
+                  }
+                },
+                {
+                  "key":  "hook_event",
+                  "value":  {
+                    "stringValue":  "UserPromptSubmit"
+                  }
+                },
+                {
+                  "key":  "hook_name",
+                  "value":  {
+                    "stringValue":  "UserPromptSubmit"
+                  }
+                },
+                {
+                  "key":  "num_hooks",
+                  "value":  {
+                    "stringValue":  "1"
+                  }
+                },
+                {
+                  "key":  "managed_only",
+                  "value":  {
+                    "stringValue":  "false"
+                  }
+                },
+                {
+                  "key":  "hook_source",
+                  "value":  {
+                    "stringValue":  "merged"
+                  }
+                },
+                {
+                  "key":  "safe_mode",
+                  "value":  {
+                    "stringValue":  "false"
+                  }
+                }
+              ]
+            },
+            {
+              "timeUnixNano":  "1790522696833000000",
+              "observedTimeUnixNano":  "1790522696833000000",
+              "body":  {
+                "stringValue":  "claude_code.api_request"
+              },
+              "attributes":  [
+                {
+                  "key":  "user.id",
+                  "value":  {
+                    "stringValue":  "scrubbed-user-id"
+                  }
+                },
+                {
+                  "key":  "session.id",
+                  "value":  {
+                    "stringValue":  "scrubbed-session-id"
+                  }
+                },
+                {
+                  "key":  "terminal.type",
+                  "value":  {
+                    "stringValue":  "tmux"
+                  }
+                },
+                {
+                  "key":  "event.name",
+                  "value":  {
+                    "stringValue":  "api_request"
+                  }
+                },
+                {
+                  "key":  "event.timestamp",
+                  "value":  {
+                    "stringValue":  "2026-09-27T15:24:56.833Z"
+                  }
+                },
+                {
+                  "key":  "event.sequence",
+                  "value":  {
+                    "intValue":  "15"
+                  }
+                },
+                {
+                  "key":  "prompt.id",
+                  "value":  {
+                    "stringValue":  "scrubbed-prompt-id"
+                  }
+                },
+                {
+                  "key":  "model",
+                  "value":  {
+                    "stringValue":  "claude-sonnet-5"
+                  }
+                },
+                {
+                  "key":  "input_tokens",
+                  "value":  {
+                    "intValue":  "2"
+                  }
+                },
+                {
+                  "key":  "output_tokens",
+                  "value":  {
+                    "intValue":  "41"
+                  }
+                },
+                {
+                  "key":  "cache_read_tokens",
+                  "value":  {
+                    "intValue":  "0"
+                  }
+                },
+                {
+                  "key":  "cache_creation_tokens",
+                  "value":  {
+                    "intValue":  "26607"
+                  }
+                },
+                {
+                  "key":  "cost_usd",
+                  "value":  {
+                    "doubleValue":  0.06693149999999999
+                  }
+                },
+                {
+                  "key":  "cost_usd_micros",
+                  "value":  {
+                    "intValue":  "66931"
+                  }
+                },
+                {
+                  "key":  "duration_ms",
+                  "value":  {
+                    "intValue":  "1339"
+                  }
+                },
+                {
+                  "key":  "ttft_ms",
+                  "value":  {
+                    "intValue":  "1007"
+                  }
+                },
+                {
+                  "key":  "request_id",
+                  "value":  {
+                    "stringValue":  "scrubbed-request-id"
+                  }
+                },
+                {
+                  "key":  "speed",
+                  "value":  {
+                    "stringValue":  "normal"
+                  }
+                },
+                {
+                  "key":  "query_source",
+                  "value":  {
+                    "stringValue":  "sdk"
+                  }
+                },
+                {
+                  "key":  "effort",
+                  "value":  {
+                    "stringValue":  "high"
+                  }
+                }
+              ]
+            },
+            {
+              "timeUnixNano":  "1790522696833000000",
+              "observedTimeUnixNano":  "1790522696833000000",
+              "body":  {
+                "stringValue":  "claude_code.assistant_response"
+              },
+              "attributes":  [
+                {
+                  "key":  "user.id",
+                  "value":  {
+                    "stringValue":  "scrubbed-user-id"
+                  }
+                },
+                {
+                  "key":  "session.id",
+                  "value":  {
+                    "stringValue":  "scrubbed-session-id"
+                  }
+                },
+                {
+                  "key":  "terminal.type",
+                  "value":  {
+                    "stringValue":  "tmux"
+                  }
+                },
+                {
+                  "key":  "event.name",
+                  "value":  {
+                    "stringValue":  "assistant_response"
+                  }
+                },
+                {
+                  "key":  "event.timestamp",
+                  "value":  {
+                    "stringValue":  "2026-09-27T15:24:56.833Z"
+                  }
+                },
+                {
+                  "key":  "event.sequence",
+                  "value":  {
+                    "intValue":  "16"
+                  }
+                },
+                {
+                  "key":  "prompt.id",
+                  "value":  {
+                    "stringValue":  "scrubbed-prompt-id"
+                  }
+                },
+                {
+                  "key":  "response_length",
+                  "value":  {
+                    "intValue":  "50"
+                  }
+                },
+                {
+                  "key":  "response",
+                  "value":  {
+                    "stringValue":  "<REDACTED>"
+                  }
+                },
+                {
+                  "key":  "request_id",
+                  "value":  {
+                    "stringValue":  "scrubbed-request-id"
+                  }
+                },
+                {
+                  "key":  "message.uuid",
+                  "value":  {
+                    "stringValue":  "scrubbed-message-uuid"
+                  }
+                },
+                {
+                  "key":  "model",
+                  "value":  {
+                    "stringValue":  "claude-sonnet-5"
+                  }
+                },
+                {
+                  "key":  "query_source",
+                  "value":  {
+                    "stringValue":  "sdk"
+                  }
+                }
+              ]
+            },
+            {
+              "timeUnixNano":  "1790522696837000000",
+              "observedTimeUnixNano":  "1790522696837000000",
+              "body":  {
+                "stringValue":  "claude_code.hook_execution_start"
+              },
+              "attributes":  [
+                {
+                  "key":  "user.id",
+                  "value":  {
+                    "stringValue":  "scrubbed-user-id"
+                  }
+                },
+                {
+                  "key":  "session.id",
+                  "value":  {
+                    "stringValue":  "scrubbed-session-id"
+                  }
+                },
+                {
+                  "key":  "terminal.type",
+                  "value":  {
+                    "stringValue":  "tmux"
+                  }
+                },
+                {
+                  "key":  "event.name",
+                  "value":  {
+                    "stringValue":  "hook_execution_start"
+                  }
+                },
+                {
+                  "key":  "event.timestamp",
+                  "value":  {
+                    "stringValue":  "2026-09-27T15:24:56.837Z"
+                  }
+                },
+                {
+                  "key":  "event.sequence",
+                  "value":  {
+                    "intValue":  "17"
+                  }
+                },
+                {
+                  "key":  "prompt.id",
+                  "value":  {
+                    "stringValue":  "scrubbed-prompt-id"
+                  }
+                },
+                {
+                  "key":  "hook_event",
+                  "value":  {
+                    "stringValue":  "Stop"
+                  }
+                },
+                {
+                  "key":  "hook_name",
+                  "value":  {
+                    "stringValue":  "Stop"
+                  }
+                },
+                {
+                  "key":  "num_hooks",
+                  "value":  {
+                    "stringValue":  "1"
+                  }
+                },
+                {
+                  "key":  "managed_only",
+                  "value":  {
+                    "stringValue":  "false"
+                  }
+                },
+                {
+                  "key":  "hook_source",
+                  "value":  {
+                    "stringValue":  "merged"
+                  }
+                },
+                {
+                  "key":  "safe_mode",
+                  "value":  {
+                    "stringValue":  "false"
+                  }
+                }
+              ]
+            },
+            {
+              "timeUnixNano":  "1790522741592000000",
+              "observedTimeUnixNano":  "1790522741592000000",
+              "body":  {
+                "stringValue":  "claude_code.api_error"
+              },
+              "attributes":  [
+                {
+                  "key":  "user.id",
+                  "value":  {
+                    "stringValue":  "scrubbed-user-id"
+                  }
+                },
+                {
+                  "key":  "session.id",
+                  "value":  {
+                    "stringValue":  "scrubbed-session-id"
+                  }
+                },
+                {
+                  "key":  "terminal.type",
+                  "value":  {
+                    "stringValue":  "tmux"
+                  }
+                },
+                {
+                  "key":  "event.name",
+                  "value":  {
+                    "stringValue":  "api_error"
+                  }
+                },
+                {
+                  "key":  "event.timestamp",
+                  "value":  {
+                    "stringValue":  "2026-09-27T15:25:41.592Z"
+                  }
+                },
+                {
+                  "key":  "event.sequence",
+                  "value":  {
+                    "intValue":  "15"
+                  }
+                },
+                {
+                  "key":  "prompt.id",
+                  "value":  {
+                    "stringValue":  "scrubbed-prompt-id"
+                  }
+                },
+                {
+                  "key":  "model",
+                  "value":  {
+                    "stringValue":  "claude-sonnet-5"
+                  }
+                },
+                {
+                  "key":  "error",
+                  "value":  {
+                    "stringValue":  "403 permission denied (scrubbed fixture error detail)"
+                  }
+                },
+                {
+                  "key":  "status_code",
+                  "value":  {
+                    "intValue":  "403"
+                  }
+                },
+                {
+                  "key":  "duration_ms",
+                  "value":  {
+                    "intValue":  "385"
+                  }
+                },
+                {
+                  "key":  "attempt",
+                  "value":  {
+                    "intValue":  "1"
+                  }
+                },
+                {
+                  "key":  "speed",
+                  "value":  {
+                    "stringValue":  "normal"
+                  }
+                },
+                {
+                  "key":  "query_source",
+                  "value":  {
+                    "stringValue":  "sdk"
+                  }
+                },
+                {
+                  "key":  "effort",
+                  "value":  {
+                    "stringValue":  "high"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

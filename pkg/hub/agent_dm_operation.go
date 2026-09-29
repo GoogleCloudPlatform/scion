@@ -71,6 +71,16 @@ type AgentDMInput struct {
 	// Msg is the plain text message body.
 	Msg string
 
+	// Raw requests that the target agent's runtime receive the message body
+	// verbatim via keystroke injection (no envelope, no automatic Enter).
+	// Deprecated client flag (`scion message --raw`), still functional.
+	Raw bool
+
+	// Plain requests that the target agent's runtime receive the message
+	// body verbatim, submitted normally (Enter), with no envelope.
+	// Deprecated client flag (`scion message --plain`), still functional.
+	Plain bool
+
 	// Type is the message type (e.g. "input-needed", "instruction").
 	// Used for rate limit class derivation. The type-class reservation
 	// system is preserved: the aggregate ceiling is always charged, so
@@ -304,6 +314,31 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		}
 	}
 
+	// 4b. Foreign raw keystroke-injection rejection.
+	//
+	// Raw skips the wrapped envelope and is delivered as literal
+	// keystrokes with no automatic Enter — the same isolation boundary
+	// concern that #1687 raised for attachments. Refuse it cross-project
+	// the same way, rather than downgrading the message or extending
+	// cross-project capabilities.
+	//
+	// This check is intentionally isolated (its own step, its own denial
+	// code) pending confirmation of the final cross-project policy for
+	// keystroke injection; it does not touch Plain, which is unaffected by
+	// this decision.
+	if input.Raw && input.SenderAgent.ProjectID != input.TargetAgent.ProjectID {
+		LogDMAdmission(DMAuditEntryForDenial(input, string(MessageDenialCrossProjectRawUnsupported),
+			"cross-project raw keystroke delivery not supported"))
+		return nil, &AgentDMError{
+			Code:       ErrCodeUnsupportedCapability,
+			Message:    "cross-project raw message delivery is not supported",
+			HTTPStatus: http.StatusUnprocessableEntity,
+			Details: map[string]interface{}{
+				"reason": string(MessageDenialCrossProjectRawUnsupported),
+			},
+		}
+	}
+
 	// 5. Dispatch availability pre-check (#1689).
 	// Verify dispatch infrastructure before persistence so that missing
 	// dispatcher/broker does not leave orphaned pending rows or falsely
@@ -367,12 +402,16 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 
 	// 7b. Build structured message for dispatch and observer publication.
 	structuredMsg := &messages.StructuredMessage{
+		Version:              messages.Version,
+		Timestamp:            storeMsg.CreatedAt.UTC().Format(time.RFC3339),
 		Sender:               storeMsg.Sender,
 		SenderID:             storeMsg.SenderID,
 		Recipient:            storeMsg.Recipient,
 		RecipientID:          storeMsg.RecipientID,
 		Msg:                  storeMsg.Msg,
 		Type:                 storeMsg.Type,
+		Plain:                input.Plain,
+		Raw:                  input.Raw,
 		Urgent:               storeMsg.Urgent,
 		Attachments:          input.Attachments,
 		Channel:              input.Channel,

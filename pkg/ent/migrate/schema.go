@@ -141,6 +141,17 @@ var (
 		{Name: "generation", Type: field.TypeInt, Default: 1},
 		{Name: "reincarnation_state", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "reincarnation_updated_at", Type: field.TypeTime, Nullable: true},
+		{Name: "launch_async_opt_in", Type: field.TypeBool, Default: false},
+		{Name: "launch_id", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "launch_state", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "launch_end_reason", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "launch_kind", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "launch_deadline", Type: field.TypeTime, Nullable: true},
+		{Name: "launch_last_report_at", Type: field.TypeTime, Nullable: true},
+		{Name: "launch_owner", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "launch_seq", Type: field.TypeInt64, Default: 0},
+		{Name: "launch_step", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "launch_error", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "project_id", Type: field.TypeUUID},
 	}
 	// AgentsTable holds the schema information for the "agents" table.
@@ -151,7 +162,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "agents_projects_agents",
-				Columns:    []*schema.Column{AgentsColumns[42]},
+				Columns:    []*schema.Column{AgentsColumns[53]},
 				RefColumns: []*schema.Column{ProjectsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -160,7 +171,20 @@ var (
 			{
 				Name:    "agent_slug_project_id",
 				Unique:  true,
-				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[42]},
+				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[53]},
+			},
+			{
+				Name:    "agent_launch_deadline",
+				Unique:  false,
+				Columns: []*schema.Column{AgentsColumns[47]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "launch_state = 'active'",
+				},
+			},
+			{
+				Name:    "agent_launch_id",
+				Unique:  false,
+				Columns: []*schema.Column{AgentsColumns[43]},
 			},
 		},
 	}
@@ -1051,6 +1075,18 @@ var (
 				Columns: []*schema.Column{InviteCodesColumns[5]},
 			},
 		},
+	}
+	// LaunchReaperStatesColumns holds the columns for the "launch_reaper_states" table.
+	LaunchReaperStatesColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeString},
+		{Name: "ok_at", Type: field.TypeTime, Nullable: true},
+		{Name: "armed_since", Type: field.TypeTime, Nullable: true},
+	}
+	// LaunchReaperStatesTable holds the schema information for the "launch_reaper_states" table.
+	LaunchReaperStatesTable = &schema.Table{
+		Name:       "launch_reaper_states",
+		Columns:    LaunchReaperStatesColumns,
+		PrimaryKey: []*schema.Column{LaunchReaperStatesColumns[0]},
 	}
 	// LifecycleHooksColumns holds the columns for the "lifecycle_hooks" table.
 	LifecycleHooksColumns = []*schema.Column{
@@ -2180,6 +2216,7 @@ var (
 		IntegrationConfigsTable,
 		IntegrationUpdatesTable,
 		InviteCodesTable,
+		LaunchReaperStatesTable,
 		LifecycleHooksTable,
 		LifecycleHookAgentPhasesTable,
 		LimitDefinitionsTable,

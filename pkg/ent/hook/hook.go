@@ -369,6 +369,18 @@ func (f InviteCodeFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, 
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.InviteCodeMutation", m)
 }
 
+// The LaunchReaperStateFunc type is an adapter to allow the use of ordinary
+// function as LaunchReaperState mutator.
+type LaunchReaperStateFunc func(context.Context, *ent.LaunchReaperStateMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f LaunchReaperStateFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.LaunchReaperStateMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.LaunchReaperStateMutation", m)
+}
+
 // The LifecycleHookFunc type is an adapter to allow the use of ordinary
 // function as LifecycleHook mutator.
 type LifecycleHookFunc func(context.Context, *ent.LifecycleHookMutation) (ent.Value, error)

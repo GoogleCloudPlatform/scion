@@ -15,7 +15,6 @@
 package hub
 
 import (
-	"errors"
 	"log/slog"
 	"net/http"
 
@@ -41,16 +40,30 @@ type secretFetchResult struct {
 	Error  string `json:"error,omitempty"`
 }
 
+// agentSecretAccessDeniedMessage and agentSecretAccessErrorMessage are the
+// fixed neutral messages for a whole-request precheck denial (checks 1-6).
+// No backend error string ever reaches the caller.
+const (
+	agentSecretAccessDeniedMessage = "agent is not authorized for secret access"
+	agentSecretAccessErrorMessage  = "failed to verify agent access"
+)
+
 // handleAgentSecretFetch handles POST /api/v1/agent/secrets.
 // Called by the agent client (FetchSecrets) to retrieve secret values by key.
 // Authenticates via X-Scion-Agent-Token and returns secrets scoped to the
 // agent's project.
+//
+// Every key goes through one check sequence (material_runtime.go) before
+// any value is read: the whole-request precheck (checks 1-6), then per-item
+// project authorization (check 7) and the record-race rule (check 9).
 func (s *Server) handleAgentSecretFetch(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
 		return
 	}
 
+	// ident == nil keeps today's status for this endpoint (403), decided
+	// before the precheck runs.
 	agent := GetAgentFromContext(r.Context())
 	if agent == nil {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "agent authentication required", nil)
@@ -75,24 +88,8 @@ func (s *Server) handleAgentSecretFetch(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Look up the agent record to get the project ID.
-	agentRecord, err := s.store.GetAgent(r.Context(), agent.Subject)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "agent not found", nil)
-			return
-		}
-		writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "failed to look up agent", nil)
-		return
-	}
-	if agentRecord == nil {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden, "agent not found", nil)
-		return
-	}
-
 	slog.Info("agent secret fetch",
 		"agent_id", agent.Subject,
-		"project_id", agentRecord.ProjectID,
 		"keys", req.Keys,
 	)
 
@@ -102,31 +99,59 @@ func (s *Server) handleAgentSecretFetch(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	results := make([]secretFetchResult, 0, len(req.Keys))
-	for _, key := range req.Keys {
-		sv, err := s.secretBackend.Get(r.Context(), key, store.ScopeProject, agentRecord.ProjectID)
-		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				results = append(results, secretFetchResult{
-					Key:    key,
-					Status: "not_found",
-					Error:  "secret not found",
-				})
-			} else {
-				results = append(results, secretFetchResult{
-					Key:    key,
-					Status: "entitled_but_unavailable",
-					Error:  err.Error(),
-				})
-			}
-			continue
+	ctx := r.Context()
+	ident := GetAgentIdentityFromContext(ctx)
+	correlationID := newMaterialCorrelationID()
+
+	facts, reason, status := s.materialRuntimePrecheck(ctx, ident)
+	if status != 0 {
+		event := s.buildMaterialSelectionEvent(ctx, "fetch", correlationID, nil, reason, nil)
+		s.logMaterialSelection(ctx, event)
+
+		if status == http.StatusInternalServerError {
+			writeError(w, status, ErrCodeRuntimeError, agentSecretAccessErrorMessage, nil)
+			return
 		}
-		results = append(results, secretFetchResult{
-			Key:    key,
-			Value:  sv.Value,
-			Status: "ok",
-		})
+		writeError(w, status, ErrCodeForbidden, agentSecretAccessDeniedMessage, nil)
+		return
 	}
+
+	// A nil or absent authz service fails the whole request closed (a
+	// per-item entitled_but_unavailable inside a 200 would not match that).
+	if s.authzService == nil {
+		event := s.buildMaterialSelectionEvent(ctx, "fetch", correlationID, facts, ReasonBackendError, nil)
+		s.logMaterialSelection(ctx, event)
+		writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, agentSecretAccessErrorMessage, nil)
+		return
+	}
+
+	results := make([]secretFetchResult, 0, len(req.Keys))
+	items := make([]MaterialSelectionEventItem, 0, len(req.Keys))
+	var decisionCache projectDecisionCache
+
+	for _, key := range req.Keys {
+		item, sv, permission, detail := s.selectRuntimeMaterial(ctx, ident, facts, store.ScopeProject, key, &decisionCache)
+		items = append(items, materialSelectionItem(item, permission, detail))
+
+		switch {
+		case item.Selected:
+			results = append(results, secretFetchResult{Key: key, Value: sv.Value, Status: "ok"})
+			s.logAgentSecretReadCompat(ctx, agent.Subject, facts.ProjectID, store.ScopeProject, facts.ProjectID, key, true, "", true, correlationID)
+		case item.Allowed || item.Reason == ReasonBackendError:
+			// The project-level decision allowed this item (or check 7 hit an
+			// infrastructure error before deciding). Either way a backend
+			// fault or a check-9 record race confirms nothing about the key,
+			// so it is reported unavailable rather than not found.
+			results = append(results, secretFetchResult{Key: key, Status: "entitled_but_unavailable", Error: "secret unavailable"})
+			s.logAgentSecretReadCompat(ctx, agent.Subject, facts.ProjectID, store.ScopeProject, facts.ProjectID, key, false, item.Reason, true, correlationID)
+		default:
+			results = append(results, secretFetchResult{Key: key, Status: "not_found", Error: "secret not found"})
+			s.logAgentSecretReadCompat(ctx, agent.Subject, facts.ProjectID, store.ScopeProject, facts.ProjectID, key, false, item.Reason, true, correlationID)
+		}
+	}
+
+	event := s.buildMaterialSelectionEvent(ctx, "fetch", correlationID, facts, "", items)
+	s.logMaterialSelection(ctx, event)
 
 	writeJSON(w, http.StatusOK, secretFetchResponse{
 		Secrets: results,

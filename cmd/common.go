@@ -304,6 +304,28 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 	}, nil
 }
 
+// detectCrossProjectTarget reports the target project when the caller is an
+// agent that set --project to a DIFFERENT project than its own. Returns ""
+// when the caller is not an agent, --project was not set, or --project
+// names the agent's own project — i.e. whenever the send is same-project.
+//
+// Shared by `scion message` (which routes a non-empty result through
+// sendCrossProjectMessage) and `scion keys` (which refuses a non-empty
+// result outright — keys must not work as a cross-project command).
+func detectCrossProjectTarget(cmd *cobra.Command) string {
+	if os.Getenv("SCION_AGENT_NAME") == "" || !cmd.Flags().Changed("project") {
+		return ""
+	}
+	ownProjectSlug := os.Getenv("SCION_PROJECT")
+	ownProjectID := os.Getenv("SCION_PROJECT_ID")
+	isSameProject := (ownProjectSlug != "" && projectPath == ownProjectSlug) ||
+		(ownProjectID != "" && projectPath == ownProjectID)
+	if isSameProject {
+		return ""
+	}
+	return projectPath
+}
+
 // CheckAgentsGitignore verifies that .scion/agents/ is listed in .gitignore
 // when running inside a git repo with a project-local project directory.
 // This runs once before any agent provisioning so the user gets a single
