@@ -6,13 +6,13 @@
           {
             "key":  "env",
             "value":  {
-              "stringValue":  "prod"
+              "stringValue":  "test"
             }
           },
           {
             "key":  "service.name",
             "value":  {
-              "stringValue":  "codex"
+              "stringValue":  "codex_exec"
             }
           },
           {
@@ -213,19 +213,19 @@
                 {
                   "key":  "input_token_count",
                   "value":  {
-                    "stringValue":  "15000"
+                    "stringValue":  "1500"
                   }
                 },
                 {
                   "key":  "output_token_count",
                   "value":  {
-                    "stringValue":  "842"
+                    "stringValue":  "80"
                   }
                 },
                 {
                   "key":  "cached_token_count",
                   "value":  {
-                    "intValue":  "12000"
+                    "intValue":  "1200"
                   }
                 },
                 {
@@ -237,13 +237,13 @@
                 {
                   "key":  "reasoning_token_count",
                   "value":  {
-                    "intValue":  "512"
+                    "intValue":  "20"
                   }
                 },
                 {
                   "key":  "tool_token_count",
                   "value":  {
-                    "stringValue":  "15842"
+                    "stringValue":  "1580"
                   }
                 },
                 {

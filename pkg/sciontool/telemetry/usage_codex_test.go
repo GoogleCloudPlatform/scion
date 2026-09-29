@@ -37,24 +37,35 @@ const codexUsageFixturePath = "testdata/usage/codex-0.158.0.pb.json"
 // disconnect; codex retries stream errors, so the fixture keeps only one
 // of the resulting records.
 //
-// Scrubbed: conversation.id and host.name are replaced with placeholders;
-// model/slug are replaced with a realistic value (the capture used a
-// placeholder mock model name); originator is normalized from the
-// capture's "codex_exec" (the `codex exec` subcommand) to "codex_cli_rs"
-// (interactive mode, what harnesses/codex's provision.py actually
-// launches, per harnesses/authoring-guide.md's "always configure
-// interactive/REPL mode" requirement) since the two subcommands'
-// originator differs and interactive is what production runs. The token
-// counts are the mock server's configured usage block, not a real model's
-// output. The fixture is also a *subset* of what the capture produced: a
-// response.created frame and a response.output_item.done frame were
-// emitted too but are omitted here, since the rule ignores every
-// event.kind other than the two included ones. Every other attribute key,
-// value type (stringValue vs intValue), the scope name, and every
-// record's observedTimeUnixNano/event.timestamp are exactly what the
-// capture produced (verified by diffing each fixture record against its
-// raw captured record: the only differences are the scrubbing and
-// substitutions listed above).
+// Scrubbed at the resource level: host.name is replaced with a placeholder
+// ("scrubbed-host"); env and service.name are the capture's real values
+// ("test" and "codex_exec", the `codex exec` subcommand's service name)
+// and are not edited.
+//
+// Scrubbed or substituted per record: conversation.id is replaced with a
+// placeholder; model/slug are replaced with a realistic value (the
+// capture used a placeholder mock model name); originator is normalized
+// from the capture's "codex_exec" to "codex_cli_rs" (interactive mode,
+// what harnesses/codex's provision.py actually launches, per
+// harnesses/authoring-guide.md's "always configure interactive/REPL mode"
+// requirement) since the two subcommands' originator differs and
+// interactive is what production runs.
+//
+// The token counts in the completion record are the mock server's
+// configured usage block (1500/80/1200/0/20/1580 for
+// input/output/cached/cache_write/reasoning/tool), not a real model's
+// output, and are not edited. The fixture is also a *subset* of what the
+// capture produced: a response.created frame and a response.output_item.done
+// frame were emitted too but are omitted here, since the rule ignores
+// every event.kind other than the two included ones.
+//
+// Every other field -- every attribute key, value type (stringValue vs
+// intValue), the scope name, and every record's
+// observedTimeUnixNano/event.timestamp -- is exactly what the capture
+// produced. Verified by a script that matches each fixture record to its
+// raw captured record (by observedTimeUnixNano) and diffs every resource
+// attribute, scope name and record attribute: the only differences found
+// are the scrubbing and substitutions listed above, nothing else.
 //
 // See codexUsageRule's doc comment for which emitter each record models
 // and why. Every record's LogRecord.EventName is the literal
@@ -155,15 +166,15 @@ func TestCodexUsageRuleMatchesFixtureResponseCompleted(t *testing.T) {
 	if increment.Calls != 1 || increment.Status != telemetrycontract.StatusSuccess || increment.Model != "gpt-5.1-codex" {
 		t.Fatalf("increment = %+v", increment)
 	}
-	// input_token_count=15000, cached_token_count=12000: canonical input is
+	// input_token_count=1500, cached_token_count=1200: canonical input is
 	// the difference (design §5: "input = input_token_count −
 	// cached_token_count"), because unlike Claude, codex's input_token_count
 	// includes cache hits.
 	want := map[string]int64{
-		telemetrycontract.TokenTypeInput:     3000,
-		telemetrycontract.TokenTypeOutput:    842,
-		telemetrycontract.TokenTypeCacheRead: 12000,
-		telemetrycontract.TokenTypeReasoning: 512,
+		telemetrycontract.TokenTypeInput:     300,
+		telemetrycontract.TokenTypeOutput:    80,
+		telemetrycontract.TokenTypeCacheRead: 1200,
+		telemetrycontract.TokenTypeReasoning: 20,
 	}
 	if len(increment.Tokens) != len(want) {
 		t.Fatalf("tokens = %+v, want %+v", increment.Tokens, want)
@@ -516,10 +527,10 @@ func TestPipelineDerivesCodexUsageThroughValidation(t *testing.T) {
 	// {harness, model, token_type} plus the exporter-stamped canonical
 	// identity labels -- nothing else (design §3.2).
 	wantTokens := map[string]int64{
-		telemetrycontract.TokenTypeInput:     3000,
-		telemetrycontract.TokenTypeOutput:    842,
-		telemetrycontract.TokenTypeCacheRead: 12000,
-		telemetrycontract.TokenTypeReasoning: 512,
+		telemetrycontract.TokenTypeInput:     300,
+		telemetrycontract.TokenTypeOutput:    80,
+		telemetrycontract.TokenTypeCacheRead: 1200,
+		telemetrycontract.TokenTypeReasoning: 20,
 	}
 	if len(tokens) != len(wantTokens) {
 		t.Fatalf("scion.usage.tokens series = %d, want %d", len(tokens), len(wantTokens))
