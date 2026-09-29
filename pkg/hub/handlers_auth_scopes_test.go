@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -474,6 +475,32 @@ func TestAuthScopes_ProjectEligibilityRequiresProjectAccess(t *testing.T) {
 	assert.Equal(t, ErrCodeForbidden, resp.Error.Code)
 	assert.Equal(t, "forbidden", resp.Error.Message)
 	assert.Nil(t, resp.Error.Details)
+}
+
+// TestAuthScopes_ProjectEligibilityCanMintSelectorErrorFailsClosed verifies
+// that a CanMintSelector error (as opposed to a per-selector denial) on the
+// scopes-listing path gives the same whole-response, oracle-resistant 403 as
+// mint's own CanMintSelector-error handling -- never a 200 with the full
+// catalog, and never a per-entry reason. A project admin is used so the 403
+// cannot come from the all-denied aggregate path exercised by
+// TestAuthScopes_ProjectEligibilityRequiresProjectAccess above: without the
+// injected error this user would get a 200.
+func TestAuthScopes_ProjectEligibilityCanMintSelectorErrorFailsClosed(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	projectID := tid("authscopes-cle-project")
+	ownerID := tid("authscopes-cle-owner")
+	adminID := tid("authscopes-cle-admin")
+	createRS1Project(t, s, projectID, ownerID)
+	createTestUserWithProjectRole(t, s, adminID, adminID+"@test.com", projectID, store.ProjectRoleAdmin)
+	ensureHubMembership(ctx, s, adminID)
+	u, err := s.GetUser(ctx, adminID)
+	require.NoError(t, err)
+	restore := installFailStore(srv, &r2FailingStore{failListConstraints: fmt.Errorf("injected: constraint load failure")})
+	defer restore()
+	rec := doRequestAsUser(t, srv, u, http.MethodGet, "/api/v1/auth/scopes?projectId="+projectID, nil)
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.JSONEq(t, `{"error":{"code":"forbidden","message":"forbidden"}}`, rec.Body.String())
 }
 
 // TestAuthScopes_ProjectEligibility_PartialSystemAuthorityAnswersPerEntry

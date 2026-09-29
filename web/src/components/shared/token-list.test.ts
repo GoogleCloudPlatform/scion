@@ -28,7 +28,6 @@ import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let ScionTokenList: any;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 let formatEligibilityReason: (reason?: string) => string;
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
