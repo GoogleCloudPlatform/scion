@@ -100,15 +100,15 @@ function evictOldest(collection, maxEntries) {
 // opposed to replayed by a fork), which model-end parts have already been
 // emitted, the provider/model pair for each assistant message, which
 // session IDs are task-tool subagent children (see routeSessionCreated), and
-// which sessions have had activity since their last emitted agent-end (see
-// routeSessionIdle).
+// which sessions have been busy (or retrying) since their last emitted
+// agent-end (see routeSessionIdle).
 export function createBridgeState() {
   return {
     liveMessageIds: new Set(),
     seenModelEnds: new Set(),
     modelByMessage: new Map(),
     childSessionIds: new Set(),
-    activeSessionIds: new Set(),
+    busySessionIds: new Set(),
   };
 }
 
@@ -127,6 +127,8 @@ export function route(state, event) {
       return routeSessionCreated(state, event);
     case 'session.idle':
       return routeSessionIdle(state, event);
+    case 'session.status':
+      return routeSessionStatus(state, event);
     // session.error is deliberately unmapped: see routeSessionIdle's doc
     // comment for why a session's turn must end exactly once, on
     // session.idle, and never a second time here.
@@ -184,38 +186,57 @@ function routeSessionCreated(state, event) {
 //    (confirmed in the capture: the child's session.idle fires before the
 //    parent's).
 //
-// 2. Activity gating: OpenCode's own session.idle is not 1:1 with a real
-//    turn. A real capture shows it fires twice for one failed prompt (once
-//    right after the provider error, once again after OpenCode's own
-//    cleanup), and session.error (unmapped above) used to be routed to
-//    agent-end too, for a third. Every agent-end increments a turn counter
-//    (hooks/handlers/limits.go's max_turns, the hub turn count, and the
-//    aggregator's RecordTurn), so counting a turn more than once per real
-//    prompt cycle can trip max_turns on a single error or user abort.
-//    routeMessageUpdated and routeMessagePartUpdated mark a session active
-//    whenever it does real work (a live message.updated or any part
-//    update); session.idle only produces agent-end, and clears that
-//    activity, the first time it fires *after* that work -- a second idle
-//    with no new activity in between (OpenCode's duplicate idle, or the
-//    idle that always follows an unmapped session.error) is silently
-//    dropped. This makes agent-end count real prompt cycles, not raw
-//    session.idle events.
+// 2. Busy gating: OpenCode's own session.idle is not 1:1 with a real turn.
+//    Traced through OpenCode v1.18.33's SessionProcessor (process/halt/
+//    cleanup) and confirmed against the captures: an errored or aborted
+//    turn publishes session.idle once right after the error (from `halt`),
+//    then runs `cleanup`, which rewrites every in-flight text/reasoning/
+//    tool part via message.part.updated, then publishes session.idle a
+//    second time once the runner actually finishes. A version of this gate
+//    that armed on any message/part activity (an earlier iteration of this
+//    file) was re-armed by exactly those cleanup part updates, so a
+//    mid-response abort or error still produced two agent-ends. Arming on
+//    session.status{type:"busy"|"retry"} instead avoids this: OpenCode only
+//    ever publishes busy at the start of a real run attempt (including each
+//    retry attempt), never from halt, cleanup, or an idle-only cancel. Every
+//    agent-end increments a turn counter (hooks/handlers/limits.go's
+//    max_turns, the hub turn count, and the aggregator's RecordTurn), so
+//    counting a turn more than once per real prompt cycle can trip
+//    max_turns on a single error or user abort. session.idle only produces
+//    agent-end, and clears the busy flag, the first time it fires after a
+//    busy/retry was seen; a second idle with nothing new in between
+//    (OpenCode's own duplicate idle, or the idle that always follows an
+//    unmapped session.error) is silently dropped.
 function routeSessionIdle(state, event) {
   const sessionID = event.properties?.sessionID;
   if (!sessionID) return [];
   if (state.childSessionIds.has(sessionID)) return [];
-  if (!state.activeSessionIds.has(sessionID)) return [];
-  state.activeSessionIds.delete(sessionID);
+  if (!state.busySessionIds.has(sessionID)) return [];
+  state.busySessionIds.delete(sessionID);
   return [{ name: 'session.idle', data: { session_id: sessionID } }];
 }
 
+// routeSessionStatus never emits a hook event by itself. It only remembers
+// that a session has been busy (or is retrying, which OpenCode treats the
+// same way as busy for the duration of that attempt) since its last
+// emitted agent-end -- see routeSessionIdle for how that gate is consumed.
+// A child session's own busy signal is skipped: the child's session.idle is
+// already unconditionally filtered in routeSessionIdle, so arming for it
+// would never be consulted, just wasted cache space.
+function routeSessionStatus(state, event) {
+  const sessionID = event.properties?.sessionID;
+  const statusType = event.properties?.status?.type;
+  if (!sessionID || (statusType !== 'busy' && statusType !== 'retry')) return [];
+  if (state.childSessionIds.has(sessionID)) return [];
+  state.busySessionIds.add(sessionID);
+  evictOldest(state.busySessionIds, MAX_CACHE_ENTRIES);
+  return [];
+}
+
 // routeMessageUpdated never emits a hook event by itself. It only updates
-// bridge state: whether a session has done real work since its last
-// agent-end (routeSessionIdle's activity gate; both user and assistant
-// messages count), which provider/model an assistant message belongs to
-// (for the model-end join in routeMessagePartUpdated), and whether an
-// assistant message was seen "live" — i.e. observed by this process while
-// still in progress.
+// bridge state: which provider/model an assistant message belongs to (for
+// the model-end join in routeMessagePartUpdated), and whether the message
+// was seen "live" — i.e. observed by this process while still in progress.
 //
 // Liveness is the fork-replay discriminator (design §3.7, "fork replays are
 // excluded by counting only parts whose message was seen live"), confirmed
@@ -229,28 +250,17 @@ function routeSessionIdle(state, event) {
 // reliably separates the two cases; a replayed `step-start` part looks
 // byte-for-byte identical to a live one and cannot be used for this (both
 // carry the same fields), so this bridge does not treat step-start as a
-// liveness signal. A user message has no `time.completed` field at all
-// (OpenCode never sets one), so it always counts as live here -- correctly,
-// since a new user prompt is exactly the kind of real work that should
-// re-arm a session's activity gate.
+// liveness signal.
 function routeMessageUpdated(state, event) {
   const info = event.properties?.info;
-  if (!info || !info.id) return [];
-
-  const isLive = !info.time || !info.time.completed;
-  if (isLive && info.sessionID) {
-    state.activeSessionIds.add(info.sessionID);
-    evictOldest(state.activeSessionIds, MAX_CACHE_ENTRIES);
-  }
-
-  if (info.role !== 'assistant') return [];
+  if (!info || info.role !== 'assistant' || !info.id) return [];
 
   if (info.providerID && info.modelID) {
     state.modelByMessage.set(info.id, { providerID: info.providerID, modelID: info.modelID });
     evictOldest(state.modelByMessage, MAX_CACHE_ENTRIES);
   }
 
-  if (isLive) {
+  if (!info.time || !info.time.completed) {
     state.liveMessageIds.add(info.id);
     evictOldest(state.liveMessageIds, MAX_CACHE_ENTRIES);
   }
@@ -261,18 +271,10 @@ function routeMessageUpdated(state, event) {
 // routeMessagePartUpdated emits one model-end per completed LLM step, from a
 // `step-finish` part. Every other part type (text, tool, step-start,
 // snapshot, ...) and every `message.part.delta` streaming chunk is ignored
-// for model-end purposes as a plain object-shape check, with no process
-// spawned. Any part update still marks its session active (routeSessionIdle's
-// activity gate), regardless of part type: a tool call or a streamed text
-// chunk is real work just as much as a step-finish is.
+// here as a plain object-shape check, with no process spawned.
 function routeMessagePartUpdated(state, event) {
   const part = event.properties?.part;
-  if (!part) return [];
-  if (part.sessionID) {
-    state.activeSessionIds.add(part.sessionID);
-    evictOldest(state.activeSessionIds, MAX_CACHE_ENTRIES);
-  }
-  if (part.type !== 'step-finish') return [];
+  if (!part || part.type !== 'step-finish') return [];
 
   const sessionID = part.sessionID;
   const messageID = part.messageID;

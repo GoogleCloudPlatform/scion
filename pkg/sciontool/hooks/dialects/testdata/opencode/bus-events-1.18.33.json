@@ -79,6 +79,20 @@
   {
     "kind": "event",
     "payload": {
+      "id": "evt_0ed15e205001ZiQLxWgpSUcXVn",
+      "properties": {
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
       "id": "evt_0ed15e20b0014h8Bg2XsPAXV1X",
       "properties": {
         "info": {
@@ -138,6 +152,20 @@
         "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70"
       },
       "type": "message.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e54d001OZTW55ZeBhMDds",
+      "properties": {
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
     },
     "run": "run2"
   },
@@ -544,6 +572,20 @@
   {
     "kind": "event",
     "payload": {
+      "id": "evt_0ed15e622001n8caSrR116VvSm",
+      "properties": {
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
       "id": "evt_0ed15e624001vM7NojHUT9xJR2",
       "properties": {
         "info": {
@@ -576,6 +618,20 @@
         "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70"
       },
       "type": "message.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e65a001VQbx84UqpnGYyu",
+      "properties": {
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
     },
     "run": "run2"
   },
@@ -933,6 +989,20 @@
   {
     "kind": "event",
     "payload": {
+      "id": "evt_0ed15e6dd001N0wMWDQh5QNvq4",
+      "properties": {
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
       "id": "evt_0ed15e6df001xVLxxIP4gWaFeI",
       "properties": {
         "info": {
@@ -965,6 +1035,20 @@
         "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70"
       },
       "type": "message.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e716001hoR53IG7KpVikN",
+      "properties": {
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
     },
     "run": "run2"
   },
@@ -1168,6 +1252,34 @@
         "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70"
       },
       "type": "message.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e761001lhbooNc759233i",
+      "properties": {
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e7660014pABpwfJtA61p4",
+      "properties": {
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "status": {
+          "type": "idle"
+        }
+      },
+      "type": "session.status"
     },
     "run": "run2"
   },
@@ -1697,6 +1809,20 @@
   {
     "kind": "event",
     "payload": {
+      "id": "evt_0ed17d846001877POTNliQO52y",
+      "properties": {
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
       "id": "evt_0ed17d84c001FlCGinh94LwSQH",
       "properties": {
         "info": {
@@ -1762,6 +1888,175 @@
   {
     "kind": "event",
     "payload": {
+      "id": "evt_0ed17db42001D5MvBZIuwZgBmX",
+      "properties": {
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed17db57001pDYcco5RBtPi5s",
+      "properties": {
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA",
+        "status": {
+          "attempt": 1,
+          "message": "mock upstream failure",
+          "next": 1790684160961,
+          "type": "retry"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed17e3ca001lPOBq5fGVg4OJT",
+      "properties": {
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed17e3d1001bvsnidfBxKy6Ue",
+      "properties": {
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA",
+        "status": {
+          "attempt": 2,
+          "message": "mock upstream failure",
+          "next": 1790684165664,
+          "type": "retry"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed17f628001mSN1HyabYmVOXF",
+      "properties": {
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed17f631001Vy5rkNrEzAaK15",
+      "properties": {
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA",
+        "status": {
+          "attempt": 3,
+          "message": "mock upstream failure",
+          "next": 1790684174371,
+          "type": "retry"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed1818250015JEsphbHPMcJLe",
+      "properties": {
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed18182e001Me5uAY5d0boGMm",
+      "properties": {
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA",
+        "status": {
+          "attempt": 4,
+          "message": "mock upstream failure",
+          "next": 1790684192909,
+          "type": "retry"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed1860950011shwPiJzt0DREm",
+      "properties": {
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed1860a3001IjQ5qB5yL1PKWp",
+      "properties": {
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA",
+        "status": {
+          "attempt": 5,
+          "message": "mock upstream failure",
+          "next": 1790684232014,
+          "type": "retry"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed18f9510016xhhj5eIZ77Sc0",
+      "properties": {
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
       "id": "evt_0ed18f964001mCwsUrA0Ogh26E",
       "properties": {
         "error": {
@@ -1786,6 +2081,20 @@
         "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA"
       },
       "type": "session.error"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed18f965001qSGMWg1Ra8j44y",
+      "properties": {
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA",
+        "status": {
+          "type": "idle"
+        }
+      },
+      "type": "session.status"
     },
     "run": "run3"
   },
@@ -1855,6 +2164,20 @@
         "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA"
       },
       "type": "message.updated"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed18f996001SQgY9ohjGHa9zH",
+      "properties": {
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA",
+        "status": {
+          "type": "idle"
+        }
+      },
+      "type": "session.status"
     },
     "run": "run3"
   },
@@ -1966,6 +2289,20 @@
   {
     "kind": "event",
     "payload": {
+      "id": "evt_0ed193d87001LBB0WnmnTIAQqW",
+      "properties": {
+        "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run4"
+  },
+  {
+    "kind": "event",
+    "payload": {
       "id": "evt_0ed193d8e001HiSDOFaqdf4tMK",
       "properties": {
         "info": {
@@ -2025,6 +2362,20 @@
         "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA"
       },
       "type": "message.updated"
+    },
+    "run": "run4"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed19409a0015JwVrGh2rxP0Yr",
+      "properties": {
+        "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
     },
     "run": "run4"
   },
@@ -2377,6 +2728,20 @@
   {
     "kind": "event",
     "payload": {
+      "id": "evt_0ed194178001S9o47VT8rCkaSV",
+      "properties": {
+        "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA",
+        "status": {
+          "type": "idle"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run4"
+  },
+  {
+    "kind": "event",
+    "payload": {
       "id": "evt_0ed194178002xZjE7vFnVScfAa",
       "properties": {
         "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA"
@@ -2482,6 +2847,20 @@
   {
     "kind": "event",
     "payload": {
+      "id": "evt_0ed4fc64a0010yrFg1RxHFaGC2",
+      "properties": {
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
       "id": "evt_0ed4fc64e001fuSOSuC7Slntd2",
       "properties": {
         "info": {
@@ -2541,6 +2920,20 @@
         "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4"
       },
       "type": "message.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fc985001vza8eHP0YbZfXr",
+      "properties": {
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
     },
     "run": "run5"
   },
@@ -2832,6 +3225,20 @@
   {
     "kind": "event",
     "payload": {
+      "id": "evt_0ed4fc9e8001qsDLaLKoP987oE",
+      "properties": {
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
       "id": "evt_0ed4fc9ea001krGWdqaH1d3Heo",
       "properties": {
         "info": {
@@ -2891,6 +3298,20 @@
         "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v"
       },
       "type": "message.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fca250014I5hx4Gdvz6LbV",
+      "properties": {
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
     },
     "run": "run5"
   },
@@ -3179,6 +3600,20 @@
   {
     "kind": "event",
     "payload": {
+      "id": "evt_0ed4fcab2001IPQHyRBhwmaVR3",
+      "properties": {
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
       "id": "evt_0ed4fcab4001z0LnQ7VIKrKiG0",
       "properties": {
         "info": {
@@ -3211,6 +3646,20 @@
         "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v"
       },
       "type": "message.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcaec001xKOJH8L2q6xUId",
+      "properties": {
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
     },
     "run": "run5"
   },
@@ -3420,6 +3869,34 @@
   {
     "kind": "event",
     "payload": {
+      "id": "evt_0ed4fcb57001X5YZoyS736668x",
+      "properties": {
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcb5b0013ZpSq8hBLlYVwh",
+      "properties": {
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+        "status": {
+          "type": "idle"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
       "id": "evt_0ed4fcb5b0025uQOzCARc6WNUM",
       "properties": {
         "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v"
@@ -3586,6 +4063,20 @@
   {
     "kind": "event",
     "payload": {
+      "id": "evt_0ed4fcbc8001c2CpM3tpC5l516",
+      "properties": {
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
       "id": "evt_0ed4fcbcb001PP6w0ek6rU6K2t",
       "properties": {
         "info": {
@@ -3618,6 +4109,20 @@
         "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4"
       },
       "type": "message.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcbf2001m9JiO2oZbHgHKp",
+      "properties": {
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
     },
     "run": "run5"
   },
@@ -3848,6 +4353,34 @@
         "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4"
       },
       "type": "message.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcc64001oudZM6NPsG5707",
+      "properties": {
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcc660016IFO1yVE7j2EbL",
+      "properties": {
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+        "status": {
+          "type": "idle"
+        }
+      },
+      "type": "session.status"
     },
     "run": "run5"
   },

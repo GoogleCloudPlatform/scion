@@ -80,14 +80,21 @@ agent-end increments a turn counter (`max_turns`), so double-counting could
 shut a working agent down on a single recoverable error or user abort. See
 `dialect.yaml`'s comment for the full reasoning.
 
-**`agent-end` is gated on session activity.** OpenCode's own `session.idle`
-is not 1:1 with a real turn either — a real capture shows it firing twice
-for one failed prompt. The bridge only turns a session's `session.idle` into
-`agent-end` the first time it fires after that session did real work (a live
-`message.updated`, user or assistant, or any `message.part.updated`); a
-repeated idle with no new activity in between is dropped. This makes
-`agent-end` — and therefore turn counts — track real prompt cycles rather
-than OpenCode's own possibly-repeated idle signal.
+**`agent-end` is gated on a prior `session.status` busy (or retry), not on
+message/part activity.** OpenCode's own `session.idle` is not 1:1 with a real
+turn: an errored or aborted turn publishes it once right after the error,
+then again after OpenCode's own cleanup finishes rewriting every in-flight
+part. An earlier version of this gate armed on any live `message.updated` or
+`message.part.updated`, but that cleanup step *is* a part update, so it
+re-armed the gate and produced two `agent-end`s for one aborted turn.
+OpenCode only ever publishes `session.status{type:"busy"}` (or `"retry"`,
+during a provider retry) at the start of a real run attempt — never from its
+error/cleanup path or from cancelling an already-idle session — so the
+bridge instead remembers, per session, whether a busy or retry was seen
+since the session's last emitted `agent-end`, and turns a `session.idle`
+into `agent-end` only if so, clearing the flag either way. This makes
+`agent-end` — and therefore turn counts — track real prompt cycles even
+across a mid-response abort or a retried provider call.
 
 ## Build the Image
 

@@ -23,8 +23,9 @@
 #
 # Event coverage analysis against the full scion event grammar:
 #   session-start    <- session.created                    (direct match)
-#   agent-end        <- session.idle                        (gated on session
-#                                                             activity; see
+#   agent-end        <- session.idle                        (gated on a prior
+#                                                             session.status
+#                                                             busy/retry; see
 #                                                             scion-bridge.js's
 #                                                             routeSessionIdle)
 #   tool-start       <- tool.execute.before                 (direct match)

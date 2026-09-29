@@ -67,17 +67,20 @@ the same two steps to build the committed fixture:
 1. **Type filter.** Only these bus event types are kept (the ones
    `scion-bridge.js`'s `route()` or the JS test actually reads, plus
    `message.part.delta`, kept deliberately to prove it's ignored):
-   `session.created`, `session.idle`, `session.error`, `message.updated`,
-   `message.part.updated`, `message.part.delta`, `permission.asked`,
-   `permission.replied`. Every other bus event type present in the raw
-   capture (`session.updated`, `session.status`, `session.diff`,
+   `session.created`, `session.idle`, `session.error`, `session.status`,
+   `message.updated`, `message.part.updated`, `message.part.delta`,
+   `permission.asked`, `permission.replied`. Every other bus event type
+   present in the raw capture (`session.updated`, `session.diff`,
    `plugin.added`, `catalog.updated`, `reference.updated`,
    `integration.updated`) is dropped — none of these is consumed by the
    bridge. `tool.execute.before`/`tool.execute.after` records are kept
    (except in run5, per above).
 2. **Delta cap.** `message.part.delta` is capped at 2 kept records per run
    (the raw captures have many more; the bridge ignores every one, so only
-   enough are kept to exercise that).
+   enough are kept to exercise that). `session.status` has no such cap: it
+   is kept in full, because the busy/retry gate (`scion-bridge.js`'s
+   `routeSessionStatus`) needs the real sequence and count of these per run,
+   not just one example.
 3. **Record wrapper.** Each kept record's `{kind, t, payload}` wrapper (see
    above) becomes `{run, kind, payload}` in the committed fixture: `t` (the
    capture-side timestamp, never used by any consumer) is dropped, and `run`
