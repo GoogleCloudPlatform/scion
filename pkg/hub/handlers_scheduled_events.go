@@ -404,8 +404,8 @@ func (s *Server) cancelScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 		return
 	}
 
-	// E.2b (review O1): no future dispatch remains after a cancel, so there
-	// is no re-attribution — just a record of who cancelled it.
+	// No future dispatch remains after a cancel, so there is no
+	// re-attribution — just a record of who cancelled it.
 	s.emitMutationAudit(r.Context(), &store.MutationAuditRecord{
 		MutationType: "scheduled_event_cancel",
 		TargetType:   "scheduled_event",
