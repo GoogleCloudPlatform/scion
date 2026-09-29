@@ -417,10 +417,10 @@ func (s *Server) advanceListedRecord(ctx context.Context, rec *store.AgentReinca
 // from agent.Generation+1 partway through the steps below — the same
 // by-construction reasoning as plan above. It is also the value the worker
 // stamps into its own in-flight status message (Amendment A26.8): Guard 0b
-// (handlers_agent_lifecycle.go) blanks Message on every agent status update
-// while a migration is in flight, so the worker is the sole writer of
-// §3.9's "migrating to generation N+1" for both self and non-self
-// migrations.
+// (handlers_agent_lifecycle.go) blanks Message on a status update that
+// carries a Phase or Activity while a migration is in flight, so the
+// worker is the sole writer of §3.9's "migrating to generation N+1" for
+// both self and non-self migrations.
 func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnationID string, previous, fresh *store.AgentAppliedConfig, handoff string, migrationStart time.Time, requestedBy string, plan *ReincarnationPlan, toGeneration int) {
 	defer func() {
 		if p := recover(); p != nil {
