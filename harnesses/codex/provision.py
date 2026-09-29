@@ -147,14 +147,11 @@ def _resolve_otel_environment(telemetry: dict[str, Any], env: dict[str, str] | N
     return "production"
 
 
-def _telemetry_enabled(telemetry: dict[str, Any] | None) -> bool:
-    # The production writer (ApplyTelemetrySettings, pkg/harness/
-    # container_script_harness.go) always marshals a typed *api.TelemetryConfig
-    # or a Go nil, so inputs/telemetry.json's "telemetry" key is always a JSON
-    # object or null in practice -- a non-dict value can't reach here today.
-    # The isinstance guard is defensive anyway (GoogleCloudPlatform/scion#2065
-    # review): treat anything that isn't a dict (True, a string, a list, ...)
-    # the same as absent, rather than crashing on `.get()`.
+def _telemetry_enabled(telemetry: Any) -> bool:
+    # ApplyTelemetrySettings only ever writes an object or null, so a
+    # non-dict value can't reach here in production -- but treat anything
+    # that isn't a dict (True, a string, a list, ...) the same as absent,
+    # rather than crashing on `.get()`.
     if not isinstance(telemetry, dict) or not telemetry:
         return False
     enabled = telemetry.get("enabled")
@@ -178,15 +175,15 @@ def _telemetry_output_env(telemetry: dict[str, Any] | None) -> dict[str, str]:
     return env
 
 
-def _telemetry_provider(telemetry: dict[str, Any] | None, env: dict[str, str] | None) -> str:
+def _telemetry_provider(telemetry: Any, env: dict[str, str] | None) -> str:
     """Resolves the configured telemetry cloud provider ("gcp", or "" when
     unset or some other provider). An explicit env override wins over the
     staged telemetry config, mirroring harnesses/claude/provision.py's
     provider resolution, minus claude's stricter "explicit provider
     required" validation, which is out of scope for codex."""
     env = env or {}
-    # Same non-dict defensiveness as _telemetry_enabled above: a truthy
-    # non-dict telemetry (e.g. True) would otherwise crash `.get("cloud")`.
+    # Same non-dict defensiveness as _telemetry_enabled above: a non-dict
+    # telemetry (e.g. True) would otherwise crash `.get("cloud")`.
     cloud = telemetry.get("cloud") if isinstance(telemetry, dict) else None
     configured_provider = cloud.get("provider", "") if isinstance(cloud, dict) else ""
     staged_provider = env.get("SCION_TELEMETRY_CLOUD_PROVIDER", "")
