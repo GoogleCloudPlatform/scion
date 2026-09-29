@@ -65,6 +65,34 @@ function railPrefs(threadGroups: Record<string, unknown[]>): any {
   };
 }
 
+/**
+ * Mocks a single space, "p-a", with the given thread groups and (optional)
+ * threads — the shape every auto-expand test needs: one space, its thread
+ * list, and its groups, all 200s. Each call replaces the mock wholesale, so
+ * a test can call this again mid-test (e.g. after a server-side change) to
+ * simulate a follow-up reload seeing new data.
+ */
+function serveGroups(threadGroups: Record<string, unknown[]>, threads: unknown[] = []): void {
+  apiFetchMock.mockImplementation((path: string) => {
+    if (path === '/api/v1/chat/spaces') {
+      return Promise.resolve(
+        new Response(JSON.stringify({ spaces: [space('p-a', 'Alpha')] }), { status: 200 })
+      );
+    }
+    if (path.startsWith('/api/v1/chat/spaces/')) {
+      return Promise.resolve(new Response(JSON.stringify({ threads }), { status: 200 }));
+    }
+    if (path === '/api/v1/chat/user-prefs') {
+      return Promise.resolve(
+        new Response(JSON.stringify({ threadGroups: JSON.stringify(threadGroups) }), {
+          status: 200,
+        })
+      );
+    }
+    return Promise.resolve(new Response('{}', { status: 200 }));
+  });
+}
+
 /** Default mock: both endpoints return empty, successful responses. */
 function serveDefaults(): void {
   apiFetchMock.mockImplementation((path: string) => {
@@ -149,12 +177,14 @@ describe('space rail — thread-group collapse persistence', () => {
     expect(el.collapsedGroups.has('g-abc123')).toBe(false);
   });
 
-  it('restores collapsed state when the component is re-instantiated (reload)', () => {
+  it('restores collapsed state when the component is re-instantiated (reload)', async () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(['g-abc123']));
 
-    // Restoration happens synchronously in connectedCallback, before the
-    // first render — no need to await updateComplete to observe it.
+    // Restoration happens in willUpdate, before the first render — no flash
+    // — but that's still the first update cycle, which is scheduled async,
+    // so the assertion has to wait for it.
     const el = mount();
+    await el.updateComplete;
 
     expect(el.collapsedGroups.has('g-abc123')).toBe(true);
   });
@@ -165,34 +195,37 @@ describe('space rail — thread-group collapse persistence', () => {
     expect(el.collapsedGroups.size).toBe(0);
   });
 
-  it('falls back to the default when stored state is corrupt JSON', () => {
+  it('falls back to the default when stored state is corrupt JSON', async () => {
     localStorage.setItem(STORAGE_KEY, '{not valid json');
 
     let el: any;
     expect(() => {
       el = mount();
     }).not.toThrow();
+    await el.updateComplete;
     expect(el.collapsedGroups.size).toBe(0);
   });
 
-  it('falls back to the default when stored state is not an array', () => {
+  it('falls back to the default when stored state is not an array', async () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ foo: 'bar' }));
 
     const el = mount();
+    await el.updateComplete;
 
     expect(el.collapsedGroups.size).toBe(0);
   });
 
-  it('falls back to the default when stored entries are not strings', () => {
+  it('falls back to the default when stored entries are not strings', async () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(['g-real', 7, null, { id: 'g-fake' }]));
 
     const el = mount();
+    await el.updateComplete;
 
     expect(el.collapsedGroups.has('g-real')).toBe(true);
     expect(el.collapsedGroups.size).toBe(1);
   });
 
-  it('falls back to the default when localStorage throws (private mode)', () => {
+  it('falls back to the default when localStorage throws (private mode)', async () => {
     Object.defineProperty(window, 'localStorage', {
       value: {
         getItem: (key: string) => {
@@ -211,14 +244,16 @@ describe('space rail — thread-group collapse persistence', () => {
     expect(() => {
       el = mount();
     }).not.toThrow();
+    await el.updateComplete;
     expect(el.collapsedGroups.size).toBe(0);
   });
 });
 
 describe('space rail — pruning stale entries', () => {
-  it('prunes stale group ids once the current groups are known', () => {
+  it('prunes stale group ids once the current groups are known', async () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(['stale-group', 'live-group']));
     const el = mount();
+    await el.updateComplete; // restore, before hand-setting spaces/prefs below
     el.spaces = [space('p-a', 'Alpha')];
     el.prefs = railPrefs({ 'p-a': [{ id: 'live-group', name: 'Live', threadIds: [] }] });
 
@@ -231,9 +266,10 @@ describe('space rail — pruning stale entries', () => {
     expect(stored).toContain('live-group');
   });
 
-  it('does not prune anything when spaces have not loaded (transient failure)', () => {
+  it('does not prune anything when spaces have not loaded (transient failure)', async () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(['g-a', 'g-b']));
     const el = mount();
+    await el.updateComplete;
     el.spaces = [];
 
     el.pruneCollapsedGroups();
@@ -296,24 +332,7 @@ describe('space rail — prune gating on partial load failures (R1 regression)',
 
   it('prunes once both spaces and prefs load successfully in the same pass', async () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(['stale-group']));
-    apiFetchMock.mockImplementation((path: string) => {
-      if (path === '/api/v1/chat/spaces') {
-        return Promise.resolve(
-          new Response(JSON.stringify({ spaces: [space('p-a', 'Alpha')] }), { status: 200 })
-        );
-      }
-      if (path.startsWith('/api/v1/chat/spaces/')) {
-        return Promise.resolve(new Response(JSON.stringify({ threads: [] }), { status: 200 }));
-      }
-      if (path === '/api/v1/chat/user-prefs') {
-        return Promise.resolve(
-          new Response(JSON.stringify({ threadGroups: JSON.stringify({ 'p-a': [] }) }), {
-            status: 200,
-          })
-        );
-      }
-      return Promise.resolve(new Response('{}', { status: 200 }));
-    });
+    serveGroups({ 'p-a': [] });
 
     const el = mount();
     await el.reload();
@@ -394,11 +413,12 @@ describe('space rail — auto-expand group for a selected/deep-linked thread (N1
 });
 
 describe('space rail — auto-expand must never leak into the persisted set (R2 regression)', () => {
-  it('toggling a different group afterward does not drop the auto-expanded group from storage', () => {
+  it('toggling a different group afterward does not drop the auto-expanded group from storage', async () => {
     localStorage.setItem(`${STORAGE_KEY}:user-1`, JSON.stringify(['g-sel']));
     const el = document.createElement('scion-chat-space-rail') as any;
     el.currentUserId = 'user-1';
     document.body.appendChild(el);
+    await el.updateComplete; // restore ['g-sel'], before hand-setting prefs below
     el.selectedKey = 'thread-1';
     el.prefs = railPrefs({ 'p-a': [{ id: 'g-sel', name: 'Sel', threadIds: ['thread-1'] }] });
     el._prefsLoaded = true;
@@ -415,11 +435,12 @@ describe('space rail — auto-expand must never leak into the persisted set (R2 
     expect(stored).toContain('g-other');
   });
 
-  it('a later prune does not drop the auto-expanded group from storage', () => {
+  it('a later prune does not drop the auto-expanded group from storage', async () => {
     localStorage.setItem(`${STORAGE_KEY}:user-1`, JSON.stringify(['g-sel', 'g-stale']));
     const el = document.createElement('scion-chat-space-rail') as any;
     el.currentUserId = 'user-1';
     document.body.appendChild(el);
+    await el.updateComplete; // restore ['g-sel', 'g-stale'], before hand-setting below
     el.selectedKey = 'thread-1';
     el.spaces = [space('p-a', 'Alpha')];
     // g-stale no longer exists server-side; g-sel still does and still holds
@@ -440,29 +461,7 @@ describe('space rail — auto-expand must never leak into the persisted set (R2 
   });
 
   it("does not override the user's collapse on a later reload with the same selectedKey (R3 regression)", async () => {
-    apiFetchMock.mockImplementation((path: string) => {
-      if (path === '/api/v1/chat/spaces') {
-        return Promise.resolve(
-          new Response(JSON.stringify({ spaces: [space('p-a', 'Alpha')] }), { status: 200 })
-        );
-      }
-      if (path.startsWith('/api/v1/chat/spaces/')) {
-        return Promise.resolve(new Response(JSON.stringify({ threads: [] }), { status: 200 }));
-      }
-      if (path === '/api/v1/chat/user-prefs') {
-        return Promise.resolve(
-          new Response(
-            JSON.stringify({
-              threadGroups: JSON.stringify({
-                'p-a': [{ id: 'g-sel', name: 'Sel', threadIds: ['thread-1'] }],
-              }),
-            }),
-            { status: 200 }
-          )
-        );
-      }
-      return Promise.resolve(new Response('{}', { status: 200 }));
-    });
+    serveGroups({ 'p-a': [{ id: 'g-sel', name: 'Sel', threadIds: ['thread-1'] }] });
 
     const el = document.createElement('scion-chat-space-rail') as any;
     el.selectedKey = 'thread-1';
@@ -484,48 +483,19 @@ describe('space rail — auto-expand must never leak into the persisted set (R2 
   });
 });
 
-/** Mocks spaces/threads/prefs so space "p-a" has one collapsed group, `g-sel`,
- * holding `thread-1` — the deep-link target for the R4 tests. */
+/** Space "p-a" has one collapsed group, `g-sel`, holding `thread-1` — the
+ * deep-link target for the R4 and R5 tests. */
 function serveColdDeepLinkFixture(): void {
-  apiFetchMock.mockImplementation((path: string) => {
-    if (path === '/api/v1/chat/spaces') {
-      return Promise.resolve(
-        new Response(JSON.stringify({ spaces: [space('p-a', 'Alpha')] }), { status: 200 })
-      );
-    }
-    if (path.startsWith('/api/v1/chat/spaces/')) {
-      return Promise.resolve(
-        new Response(
-          JSON.stringify({
-            threads: [
-              {
-                id: 'thread-1',
-                name: 'sel-thread',
-                isGeneral: false,
-                pinned: false,
-                hasUnread: false,
-                hasUnreadMention: false,
-              },
-            ],
-          }),
-          { status: 200 }
-        )
-      );
-    }
-    if (path === '/api/v1/chat/user-prefs') {
-      return Promise.resolve(
-        new Response(
-          JSON.stringify({
-            threadGroups: JSON.stringify({
-              'p-a': [{ id: 'g-sel', name: 'Sel', threadIds: ['thread-1'] }],
-            }),
-          }),
-          { status: 200 }
-        )
-      );
-    }
-    return Promise.resolve(new Response('{}', { status: 200 }));
-  });
+  serveGroups({ 'p-a': [{ id: 'g-sel', name: 'Sel', threadIds: ['thread-1'] }] }, [
+    {
+      id: 'thread-1',
+      name: 'sel-thread',
+      isGeneral: false,
+      pinned: false,
+      hasUnread: false,
+      hasUnreadMention: false,
+    },
+  ]);
 }
 
 describe('space rail — cold deep link auto-expands before any reload (R4 regression)', () => {
@@ -650,55 +620,106 @@ describe('space rail — storage key scoped per user (F2)', () => {
     expect(elB.collapsedGroups.has('g-shared-id')).toBe(false);
   });
 
-  it("restores only the current user's collapsed groups, ignoring another user's stored entries", () => {
+  it("restores only the current user's collapsed groups, ignoring another user's stored entries", async () => {
     localStorage.setItem(`${STORAGE_KEY}:user-a`, JSON.stringify(['g-a-group']));
     localStorage.setItem(`${STORAGE_KEY}:user-b`, JSON.stringify(['g-b-group']));
 
     const elA = document.createElement('scion-chat-space-rail') as any;
     elA.currentUserId = 'user-a';
     document.body.appendChild(elA);
+    await elA.updateComplete;
     expect(elA.collapsedGroups.has('g-a-group')).toBe(true);
     expect(elA.collapsedGroups.has('g-b-group')).toBe(false);
 
     const elB = document.createElement('scion-chat-space-rail') as any;
     elB.currentUserId = 'user-b';
     document.body.appendChild(elB);
+    await elB.updateComplete;
     expect(elB.collapsedGroups.has('g-b-group')).toBe(true);
     expect(elB.collapsedGroups.has('g-a-group')).toBe(false);
   });
 });
 
-describe('space rail — currentUserId arriving after connect (N4)', () => {
-  it('re-reads the scoped key if currentUserId is set after the rail has already connected', async () => {
-    localStorage.setItem(`${STORAGE_KEY}:user-late`, JSON.stringify(['g-late']));
-    const el = mount(); // currentUserId defaults to '' — restores the unscoped (empty) key
-    await el.updateComplete;
-    expect(el.collapsedGroups.size).toBe(0);
-
-    // A future caller setting the ID only after the rail is already up —
-    // the scenario N4 is about.
-    el.currentUserId = 'user-late';
-    await el.updateComplete;
-
-    expect(el.collapsedGroups.has('g-late')).toBe(true);
-  });
-
-  it('does not re-read storage when currentUserId was already set before connecting', async () => {
+describe('space rail — currentUserId restore covers every arrival timing (N7)', () => {
+  it('restores from the scoped key when currentUserId is already set before connecting (the normal chat.ts case)', async () => {
     localStorage.setItem(`${STORAGE_KEY}:user-1`, JSON.stringify(['g-1']));
     const el = document.createElement('scion-chat-space-rail') as any;
-    el.currentUserId = 'user-1'; // set before appendChild, the normal chat.ts case
+    el.currentUserId = 'user-1';
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    expect(el.collapsedGroups.has('g-1')).toBe(true);
+  });
+
+  it('does not clobber in-memory state on an unrelated update once already loaded', async () => {
+    const el = document.createElement('scion-chat-space-rail') as any;
+    el.currentUserId = 'user-1';
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    // Set collapsedGroups directly rather than via toggleGroupCollapse, so
+    // nothing is on disk for this value — a spurious re-read on *any*
+    // update (not just a currentUserId change) would silently replace it
+    // with whatever's actually stored (nothing), and a toggle-then-check
+    // couldn't tell that apart from a correct no-op re-read, since the
+    // toggle would have already persisted the same value either way.
+    el.collapsedGroups = new Set(['g-in-memory-only']);
+    el.selectedKey = 'thread-1'; // unrelated property change
+    await el.updateComplete;
+
+    expect(el.collapsedGroups.has('g-in-memory-only')).toBe(true);
+  });
+
+  it('P1 — restores correctly when currentUserId is set after appendChild but before the first update', async () => {
+    localStorage.setItem(`${STORAGE_KEY}:user-1`, JSON.stringify(['g-1']));
+    const el = document.createElement('scion-chat-space-rail') as any;
+    document.body.appendChild(el);
+    // Old (round-2) guard compared against Lit's changedProperties old
+    // value, which reads as `undefined` (not `''`) for a same-tick,
+    // post-append set like this — so it never fired. This is what that
+    // missed (round-4 review, N7, probe P1).
+    el.currentUserId = 'user-1';
+    await el.updateComplete;
+
+    expect(el.collapsedGroups.has('g-1')).toBe(true);
+
+    // A save from here on goes to the scoped bucket, not the unscoped one
+    // a synchronous connectedCallback-time read would have used.
+    el.toggleGroupCollapse('g-2');
+    const stored = JSON.parse(localStorage.getItem(`${STORAGE_KEY}:user-1`) ?? '[]') as string[];
+    expect(stored).toContain('g-1');
+    expect(stored).toContain('g-2');
+    expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
+  });
+
+  it('P2 — restores the new set when currentUserId switches directly from one user to another', async () => {
+    localStorage.setItem(`${STORAGE_KEY}:user-1`, JSON.stringify(['g-1']));
+    localStorage.setItem(`${STORAGE_KEY}:user-2`, JSON.stringify(['g-2']));
+    const el = document.createElement('scion-chat-space-rail') as any;
+    el.currentUserId = 'user-1';
     document.body.appendChild(el);
     await el.updateComplete;
     expect(el.collapsedGroups.has('g-1')).toBe(true);
 
-    // A toggle lands in memory; an unrelated update (selecting a thread)
-    // must not clobber it by re-reading storage — the guard only fires when
-    // the *old* currentUserId was '', not on every update.
-    el.toggleGroupCollapse('g-mid-session');
-    el.selectedKey = 'thread-1';
+    // A live switch with no reload — e.g. an in-app account switcher. The
+    // old guard required the *old* value to be `''`, so this never fired
+    // (round-4 review, N7, probe P2).
+    el.currentUserId = 'user-2';
     await el.updateComplete;
 
-    expect(el.collapsedGroups.has('g-mid-session')).toBe(true);
+    expect(el.collapsedGroups.has('g-2')).toBe(true);
+    expect(el.collapsedGroups.has('g-1')).toBe(false);
+
+    // And a save now goes to user-2's bucket, not user-1's stale one.
+    el.toggleGroupCollapse('g-3');
+    const storedForUser1 = JSON.parse(
+      localStorage.getItem(`${STORAGE_KEY}:user-1`) ?? '[]'
+    ) as string[];
+    const storedForUser2 = JSON.parse(
+      localStorage.getItem(`${STORAGE_KEY}:user-2`) ?? '[]'
+    ) as string[];
+    expect(storedForUser1).not.toContain('g-3');
+    expect(storedForUser2).toContain('g-3');
   });
 });
 
@@ -706,32 +727,12 @@ describe('space rail — auto-expand override cleared when the thread changes gr
   it('clears (without re-picking) the override when the selected thread moves to a different group', async () => {
     localStorage.setItem(`${STORAGE_KEY}:user-1`, JSON.stringify(['g-a', 'g-b']));
 
-    apiFetchMock.mockImplementation((path: string) => {
-      if (path === '/api/v1/chat/spaces') {
-        return Promise.resolve(
-          new Response(JSON.stringify({ spaces: [space('p-a', 'Alpha')] }), { status: 200 })
-        );
-      }
-      if (path.startsWith('/api/v1/chat/spaces/')) {
-        return Promise.resolve(new Response(JSON.stringify({ threads: [] }), { status: 200 }));
-      }
-      if (path === '/api/v1/chat/user-prefs') {
-        // thread-1 starts in g-a.
-        return Promise.resolve(
-          new Response(
-            JSON.stringify({
-              threadGroups: JSON.stringify({
-                'p-a': [
-                  { id: 'g-a', name: 'A', threadIds: ['thread-1'] },
-                  { id: 'g-b', name: 'B', threadIds: [] },
-                ],
-              }),
-            }),
-            { status: 200 }
-          )
-        );
-      }
-      return Promise.resolve(new Response('{}', { status: 200 }));
+    // thread-1 starts in g-a.
+    serveGroups({
+      'p-a': [
+        { id: 'g-a', name: 'A', threadIds: ['thread-1'] },
+        { id: 'g-b', name: 'B', threadIds: [] },
+      ],
     });
 
     const el = document.createElement('scion-chat-space-rail') as any;
@@ -742,31 +743,11 @@ describe('space rail — auto-expand override cleared when the thread changes gr
     expect(el.autoExpandedGroupId).toBe('g-a');
 
     // The thread moves server-side from g-a to g-b; both stay collapsed.
-    apiFetchMock.mockImplementation((path: string) => {
-      if (path === '/api/v1/chat/spaces') {
-        return Promise.resolve(
-          new Response(JSON.stringify({ spaces: [space('p-a', 'Alpha')] }), { status: 200 })
-        );
-      }
-      if (path.startsWith('/api/v1/chat/spaces/')) {
-        return Promise.resolve(new Response(JSON.stringify({ threads: [] }), { status: 200 }));
-      }
-      if (path === '/api/v1/chat/user-prefs') {
-        return Promise.resolve(
-          new Response(
-            JSON.stringify({
-              threadGroups: JSON.stringify({
-                'p-a': [
-                  { id: 'g-a', name: 'A', threadIds: [] },
-                  { id: 'g-b', name: 'B', threadIds: ['thread-1'] },
-                ],
-              }),
-            }),
-            { status: 200 }
-          )
-        );
-      }
-      return Promise.resolve(new Response('{}', { status: 200 }));
+    serveGroups({
+      'p-a': [
+        { id: 'g-a', name: 'A', threadIds: [] },
+        { id: 'g-b', name: 'B', threadIds: ['thread-1'] },
+      ],
     });
 
     await el.reload();
@@ -793,28 +774,8 @@ describe('space rail — auto-expand override cleared when the thread changes gr
 describe('space rail — a new selection re-decides the override (N6, intended behavior)', () => {
   it('reopens a group the user just collapsed when a different thread in it is selected next', async () => {
     localStorage.setItem(`${STORAGE_KEY}:user-1`, JSON.stringify(['g-shared']));
-    apiFetchMock.mockImplementation((path: string) => {
-      if (path === '/api/v1/chat/spaces') {
-        return Promise.resolve(
-          new Response(JSON.stringify({ spaces: [space('p-a', 'Alpha')] }), { status: 200 })
-        );
-      }
-      if (path.startsWith('/api/v1/chat/spaces/')) {
-        return Promise.resolve(new Response(JSON.stringify({ threads: [] }), { status: 200 }));
-      }
-      if (path === '/api/v1/chat/user-prefs') {
-        return Promise.resolve(
-          new Response(
-            JSON.stringify({
-              threadGroups: JSON.stringify({
-                'p-a': [{ id: 'g-shared', name: 'Shared', threadIds: ['thread-a', 'thread-b'] }],
-              }),
-            }),
-            { status: 200 }
-          )
-        );
-      }
-      return Promise.resolve(new Response('{}', { status: 200 }));
+    serveGroups({
+      'p-a': [{ id: 'g-shared', name: 'Shared', threadIds: ['thread-a', 'thread-b'] }],
     });
 
     const el = document.createElement('scion-chat-space-rail') as any;

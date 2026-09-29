@@ -318,6 +318,15 @@ export class ScionChatSpaceRail extends LitElement {
    */
   @state() private collapsedGroups = new Set<string>();
   /**
+   * The `currentUserId` that `collapsedGroups` was last restored from
+   * storage for. `null` before the first restore. Compared against
+   * `currentUserId` directly (not against Lit's `changedProperties`) in
+   * `willUpdate`, so it's a single check that covers the normal case
+   * (already set before connect), a late-arriving ID, and a live switch
+   * from one user to another — see `willUpdate` (round-4 review, N7).
+   */
+  private _collapseLoadedFor: string | null = null;
+  /**
    * Transient, render-only override: the one group forced open because it
    * contains the selected/deep-linked thread, even though the user's real
    * preference for it (in `collapsedGroups`) is collapsed. Never persisted.
@@ -817,30 +826,29 @@ export class ScionChatSpaceRail extends LitElement {
     // Restore persisted filter/sort from localStorage
     const savedFilter = localStorage.getItem('scion-chat-space-filter');
     if (savedFilter === 'unread') this.spaceFilter = 'unread';
-    // Restore collapsed thread-groups before the first render so there is no
-    // expand-then-collapse flash.
-    this.collapsedGroups = loadCollapsedGroupIds(this.currentUserId);
+    // Collapsed thread-groups are restored in willUpdate, not here — see its
+    // doc comment (round-4 review, N7).
     void this.loadData();
     // Close context menu on outside click
     this._outsideClickHandler = this.handleOutsideClick.bind(this);
     document.addEventListener('click', this._outsideClickHandler);
   }
 
-  override willUpdate(changedProperties: Map<string, unknown>): void {
-    // `currentUserId` is normally set before connectedCallback (chat.ts
-    // binds it as a template attribute — round-2 review, F5), so the
-    // restore in connectedCallback already reads the right key and this is
-    // a no-op on the very first update (`this.hasUpdated` is still false).
-    // If some future caller instead sets the ID *after* the rail has
-    // already connected and rendered with none, re-read the scoped key —
-    // otherwise a save from that point on would silently write into a
-    // different bucket than the one the initial restore read from (round-2
-    // review, N4).
-    if (
-      this.hasUpdated &&
-      changedProperties.has('currentUserId') &&
-      changedProperties.get('currentUserId') === ''
-    ) {
+  override willUpdate(_changedProperties: Map<string, unknown>): void {
+    // Single home for restoring collapsedGroups, run before every render so
+    // there is no expand-then-collapse flash. Comparing `currentUserId`
+    // against `_collapseLoadedFor` directly — rather than inspecting Lit's
+    // changedProperties old/new pair — covers every way the ID can arrive
+    // in one check: already set before connect (the normal chat.ts case,
+    // where the very first willUpdate sees `currentUserId !== null` and
+    // restores), a late-arriving ID after connect, and even a live switch
+    // from one signed-in user to another. An old version of this gated on
+    // `changedProperties.get('currentUserId') === ''`, which only caught
+    // the "was never set, now is" case and missed a same-tick post-append
+    // set (the old value reads as `undefined`, not `''`) and any u1-to-u2
+    // switch (round-4 review, N7).
+    if (this.currentUserId !== this._collapseLoadedFor) {
+      this._collapseLoadedFor = this.currentUserId;
       this.collapsedGroups = loadCollapsedGroupIds(this.currentUserId);
     }
   }
