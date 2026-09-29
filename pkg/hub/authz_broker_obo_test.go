@@ -57,10 +57,9 @@ func (e *capturingAuditEmitter) last() *store.DecisionAuditRecord {
 }
 
 // oboMiddlewareVariant names the two broker-auth middleware constructors
-// under test, so every OBO wiring assertion runs against both — closing the
-// gap the review found: only BrokerAuthMiddleware installed a broker
-// CredentialContext before this fix, so the audited configuration silently
-// disagreed with the non-audited one for the identical request.
+// under test, so every OBO wiring assertion runs against both: both must
+// install an identical broker CredentialContext for the identical request,
+// through the one shared applyOnBehalfOf helper.
 func oboMiddlewareVariants(auditLogger AuditLogger) []struct {
 	name string
 	wrap func(svc *BrokerAuthService, next http.Handler) http.Handler
@@ -275,11 +274,11 @@ func TestBrokerOnBehalfOf_InvalidHMACNeverInstallsAnything(t *testing.T) {
 
 // TestBrokerOnBehalfOf_TokenIssuanceAndAdminRoutesStayDenied: under a real
 // OBO context (valid HMAC, resolving header), the session-only gates that
-// guard token issuance and user-mutation admin routes still deny — they read
-// the raw ctx CredentialContext.Kind directly (never through Decide's
+// guard token issuance and user-mutation admin routes still deny — they
+// read the raw ctx CredentialContext.Kind directly (never through Decide's
 // compatibility predicate), so the broker credential remaining "effective"
-// for Decide must not leak into routes that require a full interactive
-// session.
+// for Decide's own evaluation has no bearing on routes that require a full
+// interactive session.
 func TestBrokerOnBehalfOf_TokenIssuanceAndAdminRoutesStayDenied(t *testing.T) {
 	for _, variant := range oboMiddlewareVariants(nil) {
 		t.Run(variant.name, func(t *testing.T) {
