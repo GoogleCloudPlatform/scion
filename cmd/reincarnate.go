@@ -18,7 +18,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -241,14 +240,6 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 		return wrapHubError(fmt.Errorf("failed to reincarnate agent via Hub: %w", err))
 	}
 
-	// Design §3.9: "On success, in self-mode the command also sets
-	// `sciontool status blocked \"migrating to generation N+1\"` itself."
-	// This runs before either output path below, so it fires the same way
-	// whether the caller asked for JSON or plain output.
-	if shouldSetBlockedStatus(isSelf, reincarnateDryRun) {
-		setBlockedStatus(resp.Generation)
-	}
-
 	if isJSONOutput() {
 		return outputJSON(resp)
 	}
@@ -265,71 +256,6 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 		fmt.Println("This container will be stopped shortly as part of the migration.")
 	}
 	return nil
-}
-
-// shouldSetBlockedStatus decides whether reincarnateAgentViaHub should call
-// setBlockedStatus after a successful Hub response (design §3.9: "in
-// self-mode the command also sets sciontool status blocked ... itself" —
-// only in self-mode, and only when a migration actually happened, not on a
-// --dry-run that changed nothing). Extracted as a pure decision, table-
-// testable on its own without a real or fake sciontool process: dropping
-// either half of this guard would put a coordinator's own container into
-// "blocked" whenever it migrates a child, or on every dry run.
-func shouldSetBlockedStatus(isSelf, dryRun bool) bool {
-	return isSelf && !dryRun
-}
-
-// setBlockedStatus is reincarnateSetBlockedStatus by default, as an
-// injectable package var so tests can drive reincarnateAgentViaHub end to
-// end (against a fake Hub) and assert the call site itself — not just
-// shouldSetBlockedStatus's decision in isolation — invokes it exactly once,
-// with the Hub's actual returned generation, only for a real self-migration.
-var setBlockedStatus = reincarnateSetBlockedStatus
-
-// reincarnateBlockedStatusTimeout bounds reincarnateSetBlockedStatus's
-// sciontool call (design Amendment A26.2 O3): sciontool status reports to
-// the Hub, and a hang there must not hang the already-successful reincarnate
-// CLI call after its 202, while the container is being torn down. A package
-// var (not a const) so a test can shorten it rather than actually waiting
-// out the real timeout.
-var reincarnateBlockedStatusTimeout = 10 * time.Second
-
-// reincarnateSetBlockedStatus implements design §3.9's self-mode success
-// step: "the command also sets `sciontool status blocked \"migrating to
-// generation N+1\"` itself." N+1 is toGeneration, taken from the Hub's
-// response (the target generation), not recomputed locally.
-//
-// sciontool is a separate binary, not something this package can call
-// in-process. Its absence — for example a harness image that predates it
-// (ptone/scion#1910) — must not turn an already-successful reincarnate call
-// into a failing command: this warns to stderr and returns rather than
-// erroring out. The call is also time-bounded (Amendment A26.2 O3) and its
-// child stdout is routed to our stderr rather than our stdout (Amendment
-// A26.2 N1), so this side effect can never interfere with a caller's
-// `--json` stdout output even if sciontool's own stdout behavior changes in
-// the future.
-func reincarnateSetBlockedStatus(toGeneration int) {
-	message := fmt.Sprintf("migrating to generation %d", toGeneration)
-
-	path, err := exec.LookPath("sciontool")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: sciontool not found on PATH; could not set blocked status (%q): %v\n", message, err)
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), reincarnateBlockedStatusTimeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, path, "status", "blocked", message)
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			fmt.Fprintf(os.Stderr, "Warning: sciontool status blocked timed out after %s: %v\n", reincarnateBlockedStatusTimeout, err)
-			return
-		}
-		fmt.Fprintf(os.Stderr, "Warning: sciontool status blocked failed: %v\n", err)
-	}
 }
 
 // printReincarnationPlan renders a ReincarnationPlan as plain text: old vs

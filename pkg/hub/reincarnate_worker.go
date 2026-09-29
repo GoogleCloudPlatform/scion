@@ -68,7 +68,14 @@ type reincarnationStepUpdate struct {
 	activity           *string                   // nil = leave untouched, non-nil (incl. "") = set
 	appliedConfig      *store.AgentAppliedConfig // nil = leave untouched
 	generation         *int                      // nil = leave untouched
-	message            *string                   // nil = leave untouched
+	message            *string                   // nil = leave untouched, unconditional set (wins over clearMessageIfEquals below)
+	// clearMessageIfEquals, when non-empty and message is nil, clears
+	// Message to "" but ONLY if the freshly re-read agent.Message still
+	// equals this exact value (design Amendment A26.8: the completion write
+	// uses this so it never clobbers a message the new generation has
+	// already set for itself — e.g. by messaging the requester — between
+	// the start dispatch and this write landing).
+	clearMessageIfEquals string
 	// now, when non-zero, pins ReincarnationUpdatedAt to this exact instant
 	// instead of a freshly computed time.Now(). tryAdvanceReincarnation's
 	// callers pass the same instant they just stamped on the corresponding
@@ -116,6 +123,8 @@ func (s *Server) updateReincarnationStep(ctx context.Context, agentID string, up
 		}
 		if upd.message != nil {
 			agent.Message = *upd.message
+		} else if upd.clearMessageIfEquals != "" && agent.Message == upd.clearMessageIfEquals {
+			agent.Message = ""
 		}
 		if err := s.store.UpdateAgent(ctx, agent); err != nil {
 			if errors.Is(err, store.ErrVersionConflict) {
@@ -134,6 +143,16 @@ func (s *Server) updateReincarnationStep(ctx context.Context, agentID string, up
 // "leave untouched" (nil) from "set to this value, including empty string"
 // (non-nil).
 func reincarnateStrPtr(s string) *string { return &s }
+
+// reincarnationMigratingMessage is the exact text the worker owns for the
+// in-flight Message field, for every reincarnation, self or not (design
+// Amendment A26.8, option ii): the stopping step sets it, and the
+// completion write clears it only if it still holds this exact value —
+// both call sites must use this one function so the two can never drift
+// apart.
+func reincarnationMigratingMessage(toGeneration int) string {
+	return fmt.Sprintf("migrating to generation %d", toGeneration)
+}
 
 // tryAdvanceReincarnation is the record-side half of every step and terminal
 // transition the WORKER makes (as opposed to the sweep, which uses
@@ -392,7 +411,18 @@ func (s *Server) advanceListedRecord(ctx context.Context, rec *store.AgentReinca
 // coincidence of shared inputs). nil omits the Changes: line entirely
 // (buildReincarnationPreamble/reincarnationChangesLine both handle it) —
 // this line must never be able to fail the reincarnation.
-func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnationID string, previous, fresh *store.AgentAppliedConfig, handoff string, migrationStart time.Time, requestedBy string, plan *ReincarnationPlan) {
+//
+// toGeneration is the target generation (the handler's targetGeneration,
+// also the 202 response's Generation field), passed in rather than derived
+// from agent.Generation+1 partway through the steps below — the same
+// by-construction reasoning as plan above. It is also the value the worker
+// stamps into its own in-flight status message (Amendment A26.8): since a
+// `sciontool status blocked` POST from the CLI is unconditionally discarded
+// by Guard 0b (handlers_agent_lifecycle.go) for the whole in-flight window —
+// the CLI's blocked-status call was removed for exactly this reason — the
+// worker is the only thing that can make §3.9's "migrating to generation
+// N+1" observable at all, for both self and non-self migrations.
+func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnationID string, previous, fresh *store.AgentAppliedConfig, handoff string, migrationStart time.Time, requestedBy string, plan *ReincarnationPlan, toGeneration int) {
 	defer func() {
 		if p := recover(); p != nil {
 			s.agentLifecycleLog.Error("reincarnation worker panicked",
@@ -427,10 +457,17 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// otherwise either suppress the ERROR notification on failure (Activity
 	// takes precedence over Phase when matching subscriptions) or dispatch a
 	// misleading one.
+	//
+	// Message is set here too (design Amendment A26.8): this is the
+	// worker's first write, and setting it at the same first step write for
+	// every reincarnation (self or not) makes the in-flight status
+	// mode-neutral and informative for a coordinator watching a child, not
+	// just self-migration.
 	agent, err := s.updateReincarnationStep(ctx, agentID, reincarnationStepUpdate{
 		reincarnationState: store.ReincarnationStateStopping,
 		phase:              string(state.PhaseStopping),
 		activity:           reincarnateStrPtr(""),
+		message:            reincarnateStrPtr(reincarnationMigratingMessage(toGeneration)),
 		now:                stoppingNow,
 	}, reincarnationStepMaxAttempts)
 	if err != nil {
@@ -462,7 +499,6 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// preamble plus handoff — this is the new generation's first harness
 	// input (AC-3), delivered as the task argument to DispatchAgentStart below
 	// and also persisted onto AppliedConfig.Task for restart consistency.
-	toGeneration := agent.Generation + 1
 	requesterCtx := s.buildReincarnationRequesterContext(ctx, agent, requestedBy)
 	preamble := s.buildReincarnationPreamble(agent, toGeneration, handoff, migrationStart, requesterCtx, plan)
 	fresh.Task = preamble
@@ -580,11 +616,19 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// appliedConfig: fresh makes the row end with exactly the config recorded
 	// in rec.NewAppliedConfig above, including anything the start response
 	// echoed back after the starting step's write.
+	//
+	// clearMessageIfEquals (design Amendment A26.8): clears the in-flight
+	// "migrating to generation N" message set at the stopping step, but only
+	// if it is still exactly that value — the new generation's own container
+	// is already running by this point (DispatchAgentStart above already
+	// succeeded) and may have messaged the requester and/or reported its own
+	// status in the meantime; this write must never clobber that.
 	if _, err := s.updateReincarnationStep(ctx, agentID, reincarnationStepUpdate{
-		reincarnationState: store.ReincarnationStateNone,
-		generation:         &toGeneration,
-		appliedConfig:      fresh,
-		now:                completedNow,
+		reincarnationState:   store.ReincarnationStateNone,
+		generation:           &toGeneration,
+		appliedConfig:        fresh,
+		clearMessageIfEquals: reincarnationMigratingMessage(toGeneration),
+		now:                  completedNow,
 	}, reincarnationStepMaxAttempts+3); err != nil {
 		// The new generation is already running at this point — do not mark
 		// the reincarnation failed over a bookkeeping write. Log loudly so an

@@ -16,17 +16,9 @@ package cmd
 
 import (
 	"bytes"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -223,103 +215,6 @@ func TestReincarnateHandoffTemplate_Golden(t *testing.T) {
 	}
 }
 
-// TestReincarnateSetBlockedStatus_SciontoolAbsent is the design §3.9 "fail
-// soft" requirement: if sciontool is not on PATH (e.g. a harness image that
-// predates it, ptone/scion#1910), reincarnateSetBlockedStatus must warn, not
-// panic or otherwise fail the already-succeeded reincarnate call.
-func TestReincarnateSetBlockedStatus_SciontoolAbsent(t *testing.T) {
-	// An empty, otherwise-real temp dir on PATH guarantees "sciontool" is
-	// not found, without disturbing anything else the test process needs.
-	t.Setenv("PATH", t.TempDir())
-
-	stderr := captureStderr(t, func() {
-		reincarnateSetBlockedStatus(7)
-	})
-
-	assert.Contains(t, stderr, "sciontool not found")
-	assert.Contains(t, stderr, "migrating to generation 7",
-		"the warning must still name the message that could not be delivered")
-}
-
-// TestReincarnateSetBlockedStatus_InvokesSciontool proves the success path:
-// when sciontool is on PATH, reincarnateSetBlockedStatus must invoke it as
-// `sciontool status blocked "migrating to generation N+1"`, with N+1 taken
-// from the argument (the Hub's returned target generation).
-func TestReincarnateSetBlockedStatus_InvokesSciontool(t *testing.T) {
-	dir := t.TempDir()
-	recordPath := filepath.Join(dir, "invoked-args.txt")
-
-	scriptPath := filepath.Join(dir, "sciontool")
-	script := "#!/bin/sh\necho \"$@\" > " + recordPath + "\n"
-	require.NoError(t, os.WriteFile(scriptPath, []byte(script), 0o755))
-
-	t.Setenv("PATH", dir)
-
-	stderr := captureStderr(t, func() {
-		reincarnateSetBlockedStatus(3)
-	})
-	assert.Empty(t, stderr, "no warning should be printed when sciontool succeeds")
-
-	got, err := os.ReadFile(recordPath)
-	require.NoError(t, err, "the fake sciontool script must have been invoked")
-	assert.Equal(t, "status blocked migrating to generation 3\n", string(got))
-}
-
-// TestReincarnateSetBlockedStatus_TimesOut is the design Amendment A26.2 O3
-// test: a hung sciontool call must not hang the CLI forever — it warns and
-// returns once reincarnateBlockedStatusTimeout elapses. Overrides the
-// package var to a few milliseconds so the test doesn't actually wait out
-// the real 10s production timeout.
-func TestReincarnateSetBlockedStatus_TimesOut(t *testing.T) {
-	origTimeout := reincarnateBlockedStatusTimeout
-	t.Cleanup(func() { reincarnateBlockedStatusTimeout = origTimeout })
-	reincarnateBlockedStatusTimeout = 50 * time.Millisecond
-
-	// Resolve `sleep` on the real PATH before overriding it below, so the
-	// fake sciontool script can exec it by absolute path.
-	sleepPath, err := exec.LookPath("sleep")
-	require.NoError(t, err, "this test needs a real `sleep` binary")
-
-	dir := t.TempDir()
-	scriptPath := filepath.Join(dir, "sciontool")
-	// Sleeps far longer than the shortened timeout above; `exec` (not a
-	// shell builtin) so CommandContext's context cancellation actually
-	// kills it rather than killing an intermediate shell.
-	script := "#!/bin/sh\nexec " + sleepPath + " 5\n"
-	require.NoError(t, os.WriteFile(scriptPath, []byte(script), 0o755))
-	t.Setenv("PATH", dir)
-
-	stderr := captureStderr(t, func() {
-		reincarnateSetBlockedStatus(9)
-	})
-	assert.Contains(t, stderr, "timed out")
-}
-
-// TestShouldSetBlockedStatus is the design Amendment A26.2 R4 table test:
-// the blocked-status call must fire only in self-mode and only on a real
-// (non-dry-run) migration, extracted as a pure decision so it needs no
-// process execution at all. TestReincarnateAgentViaHub_SetBlockedStatusCallSite
-// below additionally pins that reincarnateAgentViaHub's call site actually
-// uses this decision, end to end against a fake Hub.
-func TestShouldSetBlockedStatus(t *testing.T) {
-	cases := []struct {
-		name   string
-		isSelf bool
-		dryRun bool
-		want   bool
-	}{
-		{"self, real migration: fires", true, false, true},
-		{"self, dry run: does not fire", true, true, false},
-		{"other agent, real migration: does not fire", false, false, false},
-		{"other agent, dry run: does not fire", false, true, false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, shouldSetBlockedStatus(tc.isSelf, tc.dryRun))
-		})
-	}
-}
-
 // TestReincarnateHandoffTemplate_WorksAnywhere is the design Amendment A26.2
 // O1 / A26.3 R1 test: `scion reincarnate --handoff-template` is a pure local
 // print and must work through the real command dispatch path
@@ -418,67 +313,5 @@ func TestReincarnateHandoffTemplate_WorksAnywhere(t *testing.T) {
 			require.Error(t, err, "the requires-project gate must still reject an ordinary reincarnate call")
 			assert.Contains(t, err.Error(), "not in a scion project")
 		})
-	})
-}
-
-// TestReincarnateAgentViaHub_SetBlockedStatusCallSite is the design
-// Amendment A26.3 O1 test (A26.2 R4's second option): drives
-// reincarnateAgentViaHub end to end against a fake Hub returning 202 with a
-// given generation, and asserts the injectable setBlockedStatus var is
-// called exactly once with that generation for a real self-migration, and
-// not at all for a self dry-run or a real migration of another agent. This
-// pins the call site itself — shouldSetBlockedStatus's own decision is
-// covered in isolation by TestShouldSetBlockedStatus above — and also pins
-// "N+1 = the Hub's returned generation" end to end.
-func TestReincarnateAgentViaHub_SetBlockedStatusCallSite(t *testing.T) {
-	const projectID = "proj-1"
-	const targetGeneration = 7
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusAccepted)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"agentId":    "agent-1",
-			"generation": targetGeneration,
-			"state":      "pending",
-			"plan":       map[string]any{},
-		})
-	}))
-	defer server.Close()
-
-	client, err := hubclient.New(server.URL)
-	require.NoError(t, err)
-	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID}
-
-	origSetter := setBlockedStatus
-	origDryRun := reincarnateDryRun
-	t.Cleanup(func() {
-		setBlockedStatus = origSetter
-		reincarnateDryRun = origDryRun
-	})
-
-	run := func(t *testing.T, isSelf, dryRun bool) []int {
-		t.Helper()
-		var calls []int
-		setBlockedStatus = func(gen int) { calls = append(calls, gen) }
-		reincarnateDryRun = dryRun
-		err := reincarnateAgentViaHub(hubCtx, "some-agent", "handoff", isSelf)
-		require.NoError(t, err)
-		return calls
-	}
-
-	t.Run("self, real migration: called once with the Hub's generation", func(t *testing.T) {
-		calls := run(t, true, false)
-		assert.Equal(t, []int{targetGeneration}, calls)
-	})
-
-	t.Run("self, dry run: never called", func(t *testing.T) {
-		calls := run(t, true, true)
-		assert.Empty(t, calls)
-	})
-
-	t.Run("other agent, real migration: never called", func(t *testing.T) {
-		calls := run(t, false, false)
-		assert.Empty(t, calls)
 	})
 }

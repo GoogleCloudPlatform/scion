@@ -2895,6 +2895,120 @@ func TestReincarnateAgent_ChangesLineWiring(t *testing.T) {
 	})
 }
 
+// TestReincarnateAgent_MigratingMessageOwnership is the design Amendment
+// A26.8 worker end-to-end test: since a `sciontool status blocked` POST
+// from the CLI is unconditionally discarded by Guard 0b
+// (handlers_agent_lifecycle.go, reincarnationInFlight) for the whole
+// in-flight window, the reincarnation worker itself is the only thing that
+// can make "migrating to generation N" observable on the agent row. It must
+// be set at the very first step write (stopping) and cleared again once the
+// migration completes.
+func TestReincarnateAgent_MigratingMessageOwnership(t *testing.T) {
+	base := newReincarnateTestDispatcher()
+	disp := &blockingStopDispatcher{reincarnateTestDispatcher: base, entered: make(chan struct{}), release: make(chan struct{})}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	<-disp.entered // worker is inside Stop; the stopping step's write has already landed
+
+	midFlight, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "migrating to generation 2", midFlight.Message,
+		"the worker, not the CLI, must own the in-flight status message (A26.8)")
+
+	close(disp.release)
+	waitForReincarnationSettled(t, s, agent.ID)
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ReincarnationStateNone, final.ReincarnationState)
+	assert.Equal(t, "", final.Message, "completion must clear the migrating message")
+}
+
+// TestReincarnateAgent_MigratingMessagePreservedIfNewGenAlreadySetOne is the
+// design Amendment A26.8 test for the conditional clear: the completion
+// write must clear Message only if it still holds the exact migrating text
+// it set at the stopping step — never a message something else wrote in the
+// meantime. A message-only status update (no Phase, no Activity) bypasses
+// Guard 0b entirely, because updateAgentStatus only invokes
+// guardAgentPhaseTransition when Phase or Activity is present
+// (handlers_agent_lifecycle.go) — this is the one real path by which
+// something can set Message while reincarnation_state is still non-terminal.
+// This test drives that real path (the actual HTTP handler, not a direct
+// store write) while the worker is paused just before DispatchAgentStart,
+// then confirms the completion write leaves the new value alone.
+func TestReincarnateAgent_MigratingMessagePreservedIfNewGenAlreadySetOne(t *testing.T) {
+	disp := newGatedDispatcher("start", nil)
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	<-disp.entered // worker is about to call DispatchAgentStart; reincarnation_state is "starting"
+
+	inFlight, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	require.Equal(t, store.ReincarnationStateStarting, inFlight.ReincarnationState,
+		"the message-only bypass this test exercises only matters while a migration is genuinely in flight")
+
+	statusBody, err := json.Marshal(store.AgentStatusUpdate{Message: "gen 2 says hi"})
+	require.NoError(t, err)
+	statusReq := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/status", bytes.NewReader(statusBody))
+	statusReq = statusReq.WithContext(contextWithIdentity(statusReq.Context(), agentIdentityFor(agent.ID, project.ID, ScopeAgentStatusUpdate)))
+	statusRec := httptest.NewRecorder()
+	srv.updateAgentStatus(statusRec, statusReq, agent.ID)
+	require.Equal(t, http.StatusOK, statusRec.Code, statusRec.Body.String())
+
+	// Confirm the message-only update actually bypassed Guard 0b (a
+	// precondition for this test to mean anything — if this assertion ever
+	// fails, Guard 0b's gate widened to cover message-only updates too, and
+	// this test's premise needs revisiting).
+	midFlight, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	require.Equal(t, "gen 2 says hi", midFlight.Message,
+		"a message-only status update is not gated by guardAgentPhaseTransition, which only runs when Phase or Activity is set")
+
+	close(disp.release)
+	waitForReincarnationSettled(t, s, agent.ID)
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "gen 2 says hi", final.Message,
+		"the completion write must not clobber a message that is no longer the migrating text")
+}
+
+// TestReincarnateAgent_FailureNeverLeavesMigratingMessageStale is the design
+// Amendment A26.8 test for the failure path: writeFailedAgent's message
+// write is unconditional (design §3.7), so a failure can never leave
+// "migrating to generation N" stale on the agent row — it is always replaced
+// by a failure message.
+func TestReincarnateAgent_FailureNeverLeavesMigratingMessageStale(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.startErr = fmt.Errorf("no such image: nonexistent:latest")
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	req := reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"})
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, req, agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	waitForReincarnationSettled(t, s, agent.ID)
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.NotEqual(t, "migrating to generation 2", final.Message,
+		"a failure must never leave the in-flight migrating message stale")
+	assert.Contains(t, final.Message, "reincarnation failed: start failed: no such image")
+}
+
 // TestReincarnateAgent_AC6_NotifiesWithRealisticActivity is the design §3.4
 // Amendment A5.3 regression test. The notification dispatcher matches a
 // subscription on the status event's Activity when non-empty, falling back
@@ -4258,6 +4372,7 @@ func TestReincarnateAgent_BackstopResetsOrphanAgentState(t *testing.T) {
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 	agent := newReincarnateTestAgent(t, s, project, broker, nil)
 	agent.ReincarnationState = store.ReincarnationStateStarting
+	agent.Message = "migrating to generation 2" // what a real in-flight worker would have set
 	claimedAt := time.Now()
 	agent.ReincarnationUpdatedAt = &claimedAt // a real claim always sets this
 	require.NoError(t, s.UpdateAgent(context.Background(), agent))
@@ -4273,6 +4388,11 @@ func TestReincarnateAgent_BackstopResetsOrphanAgentState(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, store.ReincarnationStateFailed, after.ReincarnationState)
 	assert.Equal(t, "error", after.Phase)
+	// Amendment A26.8: the orphan-sweep path (reincarnate_worker.go's
+	// sweepStaleReincarnationsOlderThan) sets Message unconditionally too, so
+	// a stale "migrating to generation N" can never survive this path either.
+	assert.NotEqual(t, "migrating to generation 2", after.Message)
+	assert.Contains(t, after.Message, "reincarnation failed: hub restarted during reincarnation")
 }
 
 // =============================================================================
