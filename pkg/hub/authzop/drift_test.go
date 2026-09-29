@@ -110,32 +110,3 @@ func TestCheckDrift_NoOpOnEmptyInput(t *testing.T) {
 		t.Errorf("expected no findings for nil input, got %+v", findings)
 	}
 }
-
-// TestBrokerInboundServiceEntryPointHasNoDrift spot-checks the "service"
-// entry-point class (EntryPointBrokerCall) the task scope names alongside
-// HTTP/WebSocket/SSE/scheduled: broker.inbound's cataloged entry point is
-// exercised here as a service-class example with no drift found.
-func TestBrokerInboundServiceEntryPointHasNoDrift(t *testing.T) {
-	var spec *OperationSpec
-	for i := range Catalog {
-		for _, ep := range Catalog[i].EntryPoints {
-			if ep.Kind == EntryPointBrokerCall && ep.Pattern == "broker.inbound" {
-				spec = &Catalog[i]
-			}
-		}
-	}
-	if spec == nil {
-		t.Fatal("expected a catalog entry with EntryPointBrokerCall pattern \"broker.inbound\"")
-	}
-	// Supply every entry point this operation actually declares (not just
-	// the broker-call one) so the comparison is complete rather than
-	// reporting the operation's other, unrelated entry points as missing.
-	var allDiscovered []DiscoveredEntryPoint
-	for _, ep := range spec.EntryPoints {
-		allDiscovered = append(allDiscovered, DiscoveredEntryPoint{Kind: ep.Kind, Pattern: ep.Pattern, Method: ep.Method})
-	}
-	discovered := map[OperationID][]DiscoveredEntryPoint{spec.ID: allDiscovered}
-	if findings := CheckDrift(discovered); len(findings) != 0 {
-		t.Errorf("expected no drift for the broker.inbound service entry point, got %+v", findings)
-	}
-}

@@ -2245,6 +2245,10 @@
 |------|--------|---------|
 | http_route | GET | `/api/v1/agents/{id}/ports` |
 | http_route | GET | `/api/v1/agents/{id}/ports/{port}/proxy` |
+| http_route | POST | `/api/v1/agents/{id}/ports/{port}/proxy` |
+| http_route | PUT | `/api/v1/agents/{id}/ports/{port}/proxy` |
+| http_route | DELETE | `/api/v1/agents/{id}/ports/{port}/proxy` |
+| http_route | GET | `/api/v1/agents/{id}/ports/{port}/proxy/{subpath}` |
 
 **Principals:** `user`
 

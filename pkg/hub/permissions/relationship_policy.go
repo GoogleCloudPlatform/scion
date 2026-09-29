@@ -257,3 +257,25 @@ func containsString(list []string, want string) bool {
 	}
 	return false
 }
+
+// RelationshipPrincipalKind maps a runtime principal kind string to the
+// canonical kind RelationshipPolicies rows are authored against: user, dev
+// and federated_user all collapse to "user"; agent and federated_agent
+// collapse to "agent". Any other value passes through unchanged. Both the
+// flat mint path and the relationship mint path must normalize through this
+// one function before calling RelationshipPolicyAllows/
+// RelationshipPolicyMintEligible, so a dev or federated principal cannot
+// diverge between the two paths on which PrincipalKinds row it matches.
+// This mapping only changes which existing row a call matches — it does not
+// widen which principal kinds may reach the relationship or mint paths at
+// all; that gate is enforced earlier, by each caller's own principal check.
+func RelationshipPrincipalKind(kind string) string {
+	switch kind {
+	case "user", "dev", "federated_user":
+		return "user"
+	case "agent", "federated_agent":
+		return "agent"
+	default:
+		return kind
+	}
+}
