@@ -598,15 +598,10 @@ func AuditableBrokerAuthMiddleware(svc *BrokerAuthService, logger AuditLogger) f
 			}
 
 			// Install the authenticated broker/on-behalf-of context through
-			// the same shared helper BrokerAuthMiddleware uses: broker
-			// identity, effective user (when OBO resolves), the OBO marker,
-			// and the broker credential. Before this, this middleware called
-			// applyOnBehalfOf without ever installing the broker
-			// CredentialContext, so a broker-OBO request audited through this
-			// path carried an empty ctx credential — Decide fell back to the
-			// derived interactive kind and the session gates saw no
-			// credential at all, disagreeing with the non-audited
-			// BrokerAuthMiddleware path for the identical request.
+			// the same shared helper BrokerAuthMiddleware uses, so both
+			// variants install an identical broker identity, effective user
+			// (when OBO resolves), OBO marker, and broker credential for the
+			// same request.
 			ctx, userIdent, ok := svc.applyOnBehalfOf(r.Context(), w, r, identity)
 			if !ok {
 				return

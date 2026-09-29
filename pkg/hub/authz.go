@@ -310,15 +310,20 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 		}
 	case request.Credential.Kind != "" && !isRecognizedCredentialKind(request.Credential.Kind):
 		denyReason = "unrecognized credential kind"
-	case request.Credential.Kind != "" && !suppliedCredentialCompatible(ctx, derivedPrincipal.Kind, derivedCredential, request.Credential):
+	case request.Credential.Kind != "" && !suppliedCredentialCompatible(ctx, derivedPrincipal, derivedCredential, request.Credential):
 		denyReason = "credential kind does not match identity"
 	}
 	if denyReason != "" {
 		result := decorateDecision(Decision{Allowed: false, Reason: denyReason}, derivedPrincipal, derivedCredential)
 		// Emit the audit before returning so every entry deny is
 		// diagnosable, matching the broker/federated-service denials below.
+		// The emitted request carries the derived principal, not the
+		// caller's rejected claim, so the whole record — including
+		// PrincipalID — describes the identity actually evaluated.
 		if a.decisionAuditEmitter != nil {
-			a.emitDecisionAudit(ctx, request, result)
+			auditRequest := request
+			auditRequest.Principal = derivedPrincipal
+			a.emitDecisionAudit(ctx, auditRequest, result)
 		}
 		return result
 	}
@@ -1469,11 +1474,10 @@ func isRecognizedCredentialKind(kind CredentialKind) bool {
 
 // suppliedCredentialCompatible reports whether a caller-supplied
 // Credential.Kind may stand in for an identity's own derived classification.
-// It implements rule B (ruling-identity-fail-closed.md, 06:03Z), extended for
-// broker on-behalf-of (08:04Z). It is admitted only when:
+// It is admitted only when:
 //
 //  1. supplied equals derived; or
-//  2. principalKind is PrincipalKindUser, derived is CredentialKindInteractive
+//  2. principal.Kind is PrincipalKindUser, derived is CredentialKindInteractive
 //     (a plain local user, not a *ScopedUserIdentity — that derives UAT and so
 //     only ever reaches case 1), and supplied is CredentialKindUAT — a
 //     narrowing overlay used by recorded/reconstructed UAT evaluation. Every
@@ -1482,38 +1486,37 @@ func isRecognizedCredentialKind(kind CredentialKind) bool {
 //     gate; or
 //  3. the same principal/derived precondition as case 2, supplied is
 //     CredentialKindBroker, and ctx proves BrokerAuthMiddleware (or its
-//     audited variant) resolved this exact user on behalf of the
+//     audited variant) resolved this exact principal on behalf of the
 //     authenticated broker named by supplied — see
 //     brokerOnBehalfOfAuthorizes. The broker credential remains effective for
 //     the rest of Decide, so route/credential restrictions still apply.
 //
 // Nothing else passes: dev is not in the UAT/broker exception (a used UAT or
-// broker-OBO grant represents its local user owner, not dev's token-issuing
-// power), and an unrecognized derived identity never reaches this predicate —
-// it denies earlier, on the unrecognized-kind check. This consumes ctx
-// provenance for case 3, not just the two kinds, so a caller cannot fabricate
-// the broker exception by supplying CredentialKindBroker alone.
-func suppliedCredentialCompatible(ctx context.Context, principalKind PrincipalKind, derived, supplied CredentialContext) bool {
+// broker-on-behalf-of grant represents its local user owner, not dev's
+// token-issuing power), and an unrecognized derived identity never reaches
+// this predicate — it denies earlier, on the unrecognized-kind check. This
+// consumes ctx provenance for case 3, not just the two kinds, so a caller
+// cannot admit the broker exception by supplying CredentialKindBroker alone.
+func suppliedCredentialCompatible(ctx context.Context, principal PrincipalContext, derived, supplied CredentialContext) bool {
 	if supplied.Kind == derived.Kind {
 		return true
 	}
-	if principalKind != PrincipalKindUser || derived.Kind != CredentialKindInteractive {
+	if principal.Kind != PrincipalKindUser || derived.Kind != CredentialKindInteractive {
 		return false
 	}
 	switch supplied.Kind {
 	case CredentialKindUAT:
 		return true
 	case CredentialKindBroker:
-		return brokerOnBehalfOfAuthorizes(ctx, supplied)
+		return brokerOnBehalfOfAuthorizes(ctx, principal, supplied)
 	default:
 		return false
 	}
 }
 
-// brokerOnBehalfOfAuthorizes reports whether ctx proves that the current
-// request's effective local-user identity was substituted by
-// BrokerAuthMiddleware (or its audited variant) on behalf of the broker named
-// by supplied, per the 08:04Z ruling. It requires ALL of:
+// brokerOnBehalfOfAuthorizes reports whether ctx proves that the authenticated
+// broker acted on behalf of exactly the principal being evaluated, naming
+// exactly the broker identified by supplied. It requires ALL of:
 //   - the broker identity marker (contextWithBrokerIdentity), installed for
 //     every HMAC-authenticated broker request;
 //   - the dedicated BrokerOnBehalfOf marker, installed only after HMAC
@@ -1522,14 +1525,17 @@ func suppliedCredentialCompatible(ctx context.Context, principalKind PrincipalKi
 //   - supplied.ID equal to both the marker's BrokerID and the ctx broker
 //     identity's own ID;
 //   - the ctx broker identity's Type() equal to the expected broker
-//     credential type ("broker").
+//     credential type ("broker"), and supplied.Type equal to it too;
+//   - the ctx effective identity (GetIdentityFromContext) has the same ID as
+//     principal — the on-behalf-of substitution named exactly this principal,
+//     not merely some local user.
 //
-// A header alone, or a fabricated CredentialKindBroker with no marker, never
-// qualifies: this reads ctx provenance the middleware sets, not the supplied
-// kind by itself.
-func brokerOnBehalfOfAuthorizes(ctx context.Context, supplied CredentialContext) bool {
+// A header alone, a fabricated CredentialKindBroker with no marker, or a
+// context authenticated for a different principal never qualifies: this reads
+// ctx provenance the middleware sets, not the supplied kind by itself.
+func brokerOnBehalfOfAuthorizes(ctx context.Context, principal PrincipalContext, supplied CredentialContext) bool {
 	broker := GetBrokerIdentityFromContext(ctx)
-	if broker == nil || broker.Type() != "broker" {
+	if broker == nil || broker.Type() != "broker" || supplied.Type != "broker" {
 		return false
 	}
 	obo, ok := BrokerOnBehalfOfFromContext(ctx)
@@ -1537,6 +1543,10 @@ func brokerOnBehalfOfAuthorizes(ctx context.Context, supplied CredentialContext)
 		return false
 	}
 	if obo.BrokerID != broker.ID() || obo.Broker == nil || obo.Broker.ID() != broker.ID() {
+		return false
+	}
+	effective := GetIdentityFromContext(ctx)
+	if effective == nil || principal.ID == "" || effective.ID() != principal.ID {
 		return false
 	}
 	return supplied.ID == broker.ID()

@@ -1022,13 +1022,9 @@ func (svc *BrokerAuthService) resolveOnBehalfOf(ctx context.Context, r *http.Req
 
 // applyOnBehalfOf is the single shared helper that installs the authenticated
 // broker/on-behalf-of context for an HMAC-verified request (ptone/scion#2123).
-// Both BrokerAuthMiddleware
-// and AuditableBrokerAuthMiddleware call it instead of each wiring their own
-// copy — before this, only BrokerAuthMiddleware installed a broker
-// CredentialContext, so the audited configuration (the one production uses
-// whenever an audit logger is configured) carried an empty ctx credential for
-// every broker request, and the two configurations disagreed about the
-// request's credential.
+// Both BrokerAuthMiddleware and AuditableBrokerAuthMiddleware call it instead
+// of each wiring their own copy, so the two configurations always agree on
+// the request's ctx credential.
 //
 // Callers must pass brokerIdent only after ValidateBrokerSignature succeeds:
 // this function does not itself verify the HMAC. On success ctx carries:
