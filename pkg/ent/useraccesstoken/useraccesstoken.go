@@ -34,6 +34,10 @@ const (
 	FieldLastUsed = "last_used"
 	// FieldCreated holds the string denoting the created field in the database.
 	FieldCreated = "created"
+	// FieldPurpose holds the string denoting the purpose field in the database.
+	FieldPurpose = "purpose"
+	// FieldLabels holds the string denoting the labels field in the database.
+	FieldLabels = "labels"
 	// Table holds the table name of the useraccesstoken in the database.
 	Table = "user_access_tokens"
 )
@@ -51,6 +55,8 @@ var Columns = []string{
 	FieldExpiresAt,
 	FieldLastUsed,
 	FieldCreated,
+	FieldPurpose,
+	FieldLabels,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -136,4 +142,14 @@ func ByLastUsed(opts ...sql.OrderTermOption) OrderOption {
 // ByCreated orders the results by the created field.
 func ByCreated(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldCreated, opts...).ToFunc()
+}
+
+// ByPurpose orders the results by the purpose field.
+func ByPurpose(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPurpose, opts...).ToFunc()
+}
+
+// ByLabels orders the results by the labels field.
+func ByLabels(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldLabels, opts...).ToFunc()
 }

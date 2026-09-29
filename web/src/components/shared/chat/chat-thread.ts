@@ -2058,7 +2058,13 @@ export class ScionChatThread extends LitElement {
    */
   private deliveryStateFor(msg: Message, lastOwnMessageId: string, seenExpired: boolean): string {
     const dispatchState = msg.dispatchState || '';
-    if (!dispatchState || dispatchState === 'failed') return dispatchState;
+    // F5 (p2a-r2 review): "deferred" stays visible on every message, like
+    // "failed" — the sender must be told their message was saved for
+    // catch-up rather than dispatched, on every message it happened to,
+    // not just the most recent one.
+    if (!dispatchState || dispatchState === 'failed' || dispatchState === 'deferred') {
+      return dispatchState;
+    }
     if (msg.id !== lastOwnMessageId) return '';
     if (seenExpired && this.isMessageSeen(msg)) return '';
     return dispatchState;
