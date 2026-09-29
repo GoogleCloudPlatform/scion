@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -405,7 +406,15 @@ func (b *GCPBackend) Delete(ctx context.Context, name, scope, scopeID string) er
 	if err != nil {
 		return fmt.Errorf("failed to check DB record before deleting %s: %w", name, err)
 	}
-	legacyMightBeOnlyCopy := prefixedWasNotFound || (hasRecord && !refIsPrefixed)
+	// A DB record whose ref already points at the prefixed name is confirmed
+	// authoritative regardless of what happened to the prefixed delete above
+	// (ptone/scion#2152 round-3 review finding 8): if a prior, partially
+	// completed migrate-names/Delete run already removed the prefixed copy,
+	// re-running Delete would otherwise see prefixedWasNotFound=true and
+	// wedge forever on a PermissionDenied legacy delete that can never
+	// succeed once IAM has been narrowed. Only the no-DB-record path still
+	// leans on prefixedWasNotFound, since it has no ref to consult.
+	legacyMightBeOnlyCopy := (!hasRecord && prefixedWasNotFound) || (hasRecord && !refIsPrefixed)
 
 	legacyName := b.legacyGCPSecretName(name, scope, scopeID)
 	legacyFull := fmt.Sprintf("projects/%s/secrets/%s", b.projectID, legacyName)
@@ -669,7 +678,17 @@ func (b *GCPBackend) AccessSecretValueByRef(ctx context.Context, smPath string) 
 // (Terraform) computes the identical formula from hub_id to build the
 // matching IAM condition.
 func (b *GCPBackend) secretNamePrefix() string {
-	hash := sha256.Sum256([]byte(b.hubID))
+	return SecretNamePrefixForHubID(b.hubID)
+}
+
+// SecretNamePrefixForHubID computes the hub-prefix formula
+// (ptone/scion#2152) — "scion-" + first 12 hex chars of sha256(hubID) + "-" —
+// without requiring a constructed GCPBackend. Exported so callers that only
+// need to report the prefix a resolved hub ID would produce (e.g. `hub
+// secret migrate-names` printing it before acting, per round-3 review
+// finding 1) don't have to duplicate the formula.
+func SecretNamePrefixForHubID(hubID string) string {
+	hash := sha256.Sum256([]byte(hubID))
 	return "scion-" + hex.EncodeToString(hash[:6]) + "-" // 6 bytes = 12 hex chars
 }
 
@@ -907,42 +926,34 @@ func (b *GCPBackend) RefPointsAtPrefixed(ctx context.Context, name, scope, scope
 	return true, rec.SecretRef == prefixedRef, nil
 }
 
-// DeleteLegacySecretName verifies that the hub-prefixed secret for the given
-// identity has an accessible version whose value matches the legacy secret's
-// current value, then deletes the legacy secret. It refuses to delete if the
-// prefixed copy is missing or its value does not match, so --delete-legacy can
-// never drop the only copy of a secret. It also refuses to delete while a DB
-// record still exists with a SecretRef that is not yet the prefixed name
-// (ptone/scion#2152 review finding 2): Get() trusts a stored SecretRef
-// verbatim with no fallback, so deleting the legacy secret while the ref
-// still points at it would make the record unreadable — callers must repair
-// the ref (RepairRefToPrefixed) first. NotFound on the legacy secret is
-// treated as success (already migrated/deleted).
+// DeleteLegacySecretName decides whether the legacy (pre-prefix) secret for
+// the given identity is safe to delete, then deletes it. canDeleteLegacyName
+// is the shared decision function: --dry-run (PlanLegacyDeletion) and a real
+// run (this function) must reach the identical conclusion from the identical
+// check (ptone/scion#2152 round-3 review finding 2), so a dry-run's report of
+// what a real run would do is never a guess.
+//
+// The safety condition is *not* value equality with the legacy secret. Once
+// a DB record's ref already points at the prefixed name, the prefixed copy
+// is authoritative by definition — that is exactly what the ref means — so
+// all that's required is that it have an accessible version; it is not a
+// bug for a rotation performed after migration to have left the legacy copy
+// stale, and refusing to delete a stale-but-superseded legacy copy would
+// make --delete-legacy permanently unable to finish for any secret that was
+// ever rotated post-migration. Value equality is still required for the
+// no-DB-record path (a hub-scope signing key recovered directly from GCP SM
+// with no ref to establish which copy is authoritative), where matching
+// values is the only available evidence the prefixed copy is safe to treat
+// as a full replacement. NotFound on the legacy secret is treated as success
+// (already migrated/deleted).
 func (b *GCPBackend) DeleteLegacySecretName(ctx context.Context, name, scope, scopeID string) error {
 	legacyName := b.legacyGCPSecretName(name, scope, scopeID)
 	legacyFull := fmt.Sprintf("projects/%s/secrets/%s", b.projectID, legacyName)
 
-	legacyValue, err := b.accessLatestVersion(ctx, legacyName)
-	if err != nil {
-		if status.Code(err) == codes.NotFound {
-			return nil
-		}
-		return fmt.Errorf("failed to read legacy secret %s: %w", legacyFull, err)
-	}
-
-	prefixedName := b.gcpSecretName(name, scope, scopeID)
-	prefixedValue, err := b.accessLatestVersion(ctx, prefixedName)
-	if err != nil {
-		return fmt.Errorf("refusing to delete legacy secret %s: prefixed copy %s is not accessible: %w", legacyFull, prefixedName, err)
-	}
-	if prefixedValue != legacyValue {
-		return fmt.Errorf("refusing to delete legacy secret %s: prefixed copy %s value does not match", legacyFull, prefixedName)
-	}
-
-	if hasRecord, refIsPrefixed, err := b.RefPointsAtPrefixed(ctx, name, scope, scopeID); err != nil {
-		return fmt.Errorf("failed to check DB record before deleting legacy secret %s: %w", legacyFull, err)
-	} else if hasRecord && !refIsPrefixed {
-		return fmt.Errorf("refusing to delete legacy secret %s: its DB record's SecretRef is not yet repaired to the prefixed name %s — call RepairRefToPrefixed first", legacyFull, prefixedName)
+	if ok, err := b.canDeleteLegacyName(ctx, name, scope, scopeID); err != nil {
+		return err
+	} else if !ok {
+		return nil
 	}
 
 	if err := b.smClient.DeleteSecret(ctx, &smpb.DeleteSecretRequest{Name: legacyFull}); err != nil && status.Code(err) != codes.NotFound {
@@ -950,6 +961,100 @@ func (b *GCPBackend) DeleteLegacySecretName(ctx context.Context, name, scope, sc
 	}
 	return nil
 }
+
+// PlanLegacyDeletion is the read-only counterpart of DeleteLegacySecretName,
+// used for --delete-legacy --dry-run: it runs the identical decision
+// (canDeleteLegacyName) but never deletes anything.
+func (b *GCPBackend) PlanLegacyDeletion(ctx context.Context, name, scope, scopeID string) (bool, error) {
+	return b.canDeleteLegacyName(ctx, name, scope, scopeID)
+}
+
+// canDeleteLegacyName is the shared decision behind DeleteLegacySecretName
+// and PlanLegacyDeletion (ptone/scion#2152 round-3 review finding 2). It
+// returns (true, nil) when the legacy secret exists and is safe to delete,
+// (false, nil) when there is nothing to delete (the legacy secret is already
+// gone), and a non-nil error when deletion would be unsafe or the checks
+// themselves failed.
+func (b *GCPBackend) canDeleteLegacyName(ctx context.Context, name, scope, scopeID string) (bool, error) {
+	legacyName := b.legacyGCPSecretName(name, scope, scopeID)
+	legacyFull := fmt.Sprintf("projects/%s/secrets/%s", b.projectID, legacyName)
+
+	legacyValue, err := b.accessLatestVersion(ctx, legacyName)
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to read legacy secret %s: %w", legacyFull, err)
+	}
+
+	prefixedName := b.gcpSecretName(name, scope, scopeID)
+
+	hasRecord, refIsPrefixed, err := b.RefPointsAtPrefixed(ctx, name, scope, scopeID)
+	if err != nil {
+		return false, fmt.Errorf("failed to check DB record before deleting legacy secret %s: %w", legacyFull, err)
+	}
+	if hasRecord && !refIsPrefixed {
+		return false, fmt.Errorf("refusing to delete legacy secret %s: its DB record's SecretRef is not yet repaired to the prefixed name %s — call RepairRefToPrefixed first", legacyFull, prefixedName)
+	}
+
+	if hasRecord && refIsPrefixed {
+		// The DB ref already designates the prefixed name as authoritative:
+		// all that's required is that it actually be readable. Its value is
+		// not compared against the legacy value — a rotation performed after
+		// migration legitimately leaves the legacy copy stale, and that is
+		// exactly the case --delete-legacy exists to clean up.
+		if _, err := b.accessLatestVersion(ctx, prefixedName); err != nil {
+			return false, fmt.Errorf("refusing to delete legacy secret %s: prefixed copy %s is not accessible: %w", legacyFull, prefixedName, err)
+		}
+		return true, nil
+	}
+
+	// No DB record at all: fall back to value equality as the only available
+	// evidence that the prefixed copy is a safe, complete replacement.
+	prefixedValue, err := b.accessLatestVersion(ctx, prefixedName)
+	if err != nil {
+		return false, fmt.Errorf("refusing to delete legacy secret %s: prefixed copy %s is not accessible: %w", legacyFull, prefixedName, err)
+	}
+	if prefixedValue != legacyValue {
+		return false, fmt.Errorf("refusing to delete legacy secret %s: prefixed copy %s value does not match", legacyFull, prefixedName)
+	}
+	return true, nil
+}
+
+// ErrOrphanedRef indicates a secret's DB record has a stored SecretRef, but
+// neither the value it designates nor the prefixed name has an accessible
+// version (ptone/scion#2152 round-3 review finding 4). This is distinct from
+// store.ErrNotFound (no DB record and no computed-legacy-name value either —
+// truly nothing to migrate): here the record itself exists and makes a
+// specific authority claim about where its value lives, and that claim can no
+// longer be honored. migrate-names reports this as a skipped ORPHAN, visible
+// to an operator, rather than a silent no-op or a hard failure — there is
+// nothing for it to copy.
+var ErrOrphanedRef = errors.New("secret record's SecretRef designates no accessible GCP SM value")
+
+// maxPlanOrRepairRefAttempts bounds the retry loop in planOrRepairRef (see
+// its doc comment for why a retry is needed at all).
+const maxPlanOrRepairRefAttempts = 3
+
+// RefRepairAction identifies which action planOrRepairRef determined was
+// needed (or took) for one secret identity (ptone/scion#2152 round-3 review
+// nit 13). Typed rather than a bare string so a typo in a comparison or a
+// switch case fails to compile instead of silently matching nothing.
+type RefRepairAction string
+
+const (
+	// RefRepairNone means there was nothing to do.
+	RefRepairNone RefRepairAction = ""
+	// RefRepairCopied means the prefixed name didn't exist and was created
+	// with the ref-designated value.
+	RefRepairCopied RefRepairAction = "copied"
+	// RefRepairResynced means the prefixed name existed with a value
+	// different from the ref-designated one and was overwritten.
+	RefRepairResynced RefRepairAction = "resynced"
+	// RefRepairRepaired means the prefixed name already held the correct
+	// value and only the DB ref itself needed to move.
+	RefRepairRepaired RefRepairAction = "repaired"
+)
 
 // planOrRepairRef is the shared implementation behind RepairRefToPrefixed
 // (write=true) and PlanRefRepair (write=false).
@@ -967,11 +1072,24 @@ func (b *GCPBackend) DeleteLegacySecretName(ctx context.Context, name, scope, sc
 // new replica already created a prefixed copy, or a rollback-then-
 // roll-forward window — not just the first-ever migration.
 //
-// The ref update itself is a compare-and-swap (store.UpdateSecretRefIfMatches)
-// keyed on the exact ref value this call read, so a concurrent Set() that
-// changes both the value and the ref in between can never be silently
-// reverted (finding 11): if the swap doesn't apply, this returns ("", nil) —
-// nothing claimed, safe to re-run.
+// Concurrency (ptone/scion#2152 round-3 review finding 3): GCP Secret Manager
+// has no conditional AddSecretVersion, so a write racing between this reading
+// the authoritative value and writing it to the prefixed name cannot be
+// prevented by the GCP SM API alone. Immediately before writing, this
+// re-reads the DB record and compares (SecretRef, Version) against what it
+// read at the start of the attempt; if either changed, something else — a
+// concurrent Set(), or an old-binary rotation that re-upserts the exact same
+// ref string but still bumps Version — has already moved the authoritative
+// value out from under this attempt, and writing the stale value now would
+// silently revert that change. Rather than write, the whole attempt is
+// discarded and retried with fresh reads, up to maxPlanOrRepairRefAttempts
+// times, then fails loudly for that secret rather than clobbering silently.
+// The ref update itself is still a compare-and-swap
+// (store.UpdateSecretRefIfMatches) on top of that recheck, closing the
+// remaining gap between the recheck and the CAS call. A residual window
+// remains between the final recheck and the GCP SM write itself — a true
+// cross-system transaction isn't possible here — documented rather than
+// masked; see .design/secret-id-hub-refactor.md #7.
 //
 // Returns:
 //   - ("", nil) if there is nothing to do: no DB record, the ref already
@@ -983,25 +1101,43 @@ func (b *GCPBackend) DeleteLegacySecretName(ctx context.Context, name, scope, sc
 //     than the ref-designated one and was overwritten with a new version.
 //   - ("repaired", nil) if the prefixed name already held the correct value
 //     and only the ref itself needed to move.
+//   - ("", store.ErrNotFound) if there is a DB record but no ref, and the
+//     computed legacy name has no accessible value either — nothing to
+//     migrate for this identity (round-3 finding 4).
+//   - ("", ErrOrphanedRef) if there is a DB record with a *stored* ref, but
+//     the value it designates is gone (round-3 finding 4) — a distinct,
+//     reportable condition, not a failure.
 //   - an error, with no side effects, if the ref-designated value could not
-//     be read (including PermissionDenied — round-2 finding 3 deliberately
-//     does *not* soften this the way the no-DB-record path does, since a
-//     record whose ref depends on an unreadable secret is a real problem to
-//     surface, not something to silently skip).
-func (b *GCPBackend) planOrRepairRef(ctx context.Context, name, scope, scopeID string, write bool) (action string, err error) {
+//     be read for any other reason (including PermissionDenied on a stored
+//     ref — round-2 finding 3 deliberately does *not* soften this the way
+//     the no-DB-record path does, since a record whose ref depends on an
+//     unreadable secret is a real problem to surface, not something to
+//     silently skip), or if concurrent writes kept invalidating every
+//     attempt.
+func (b *GCPBackend) planOrRepairRef(ctx context.Context, name, scope, scopeID string, write bool) (action RefRepairAction, err error) {
+	for attempt := 0; attempt < maxPlanOrRepairRefAttempts; attempt++ {
+		action, retry, err := b.planOrRepairRefAttempt(ctx, name, scope, scopeID, write)
+		if !retry {
+			return action, err
+		}
+	}
+	return "", fmt.Errorf("failed to migrate/resync %s (scope %s/%s): concurrent writes kept changing the authoritative value across %d attempts; re-run later", name, scope, scopeID, maxPlanOrRepairRefAttempts)
+}
+
+func (b *GCPBackend) planOrRepairRefAttempt(ctx context.Context, name, scope, scopeID string, write bool) (action RefRepairAction, retry bool, err error) {
 	rec, err := b.store.GetSecret(ctx, name, scope, scopeID)
 	if err != nil {
 		if err == store.ErrNotFound {
-			return "", nil
+			return "", false, nil
 		}
-		return "", err
+		return "", false, err
 	}
 
 	prefixedName := b.gcpSecretName(name, scope, scopeID)
 	prefixedFull := fmt.Sprintf("projects/%s/secrets/%s", b.projectID, prefixedName)
 	prefixedRef := "gcpsm:" + prefixedFull
 	if rec.SecretRef == prefixedRef {
-		return "", nil
+		return "", false, nil
 	}
 
 	// A stored ref designates the authoritative source directly. A record
@@ -1018,65 +1154,85 @@ func (b *GCPBackend) planOrRepairRef(ctx context.Context, name, scope, scopeID s
 	authoritativeValue, err := b.accessLatestVersionByPath(ctx, refPath)
 	if err != nil {
 		if status.Code(err) == codes.NotFound {
-			return "", store.ErrNotFound
+			if hasStoredRef {
+				// The record makes a specific authority claim (its stored
+				// ref) that no longer resolves to anything. Distinct from
+				// "nothing to migrate" — surface it (round-3 finding 4).
+				return "", false, ErrOrphanedRef
+			}
+			return "", false, store.ErrNotFound
 		}
 		if !hasStoredRef && status.Code(err) == codes.PermissionDenied {
 			// No stored ref to begin with, so this claims no more than the
 			// no-DB-record path does: treat identically (round-2 review
 			// finding 3's rule only applies once a ref makes a real
 			// authority claim about where the value lives).
-			return "", store.ErrNotFound
+			return "", false, store.ErrNotFound
 		}
-		return "", fmt.Errorf("failed to read authoritative value at %s: %w", refPath, err)
+		return "", false, fmt.Errorf("failed to read authoritative value at %s: %w", refPath, err)
 	}
 
 	prefixedValue, prefixedErr := b.accessLatestVersion(ctx, prefixedName)
 	prefixedOK := prefixedErr == nil
 	if prefixedErr != nil && status.Code(prefixedErr) != codes.NotFound && status.Code(prefixedErr) != codes.FailedPrecondition {
-		return "", fmt.Errorf("failed to check prefixed secret %s: %w", prefixedFull, prefixedErr)
+		return "", false, fmt.Errorf("failed to check prefixed secret %s: %w", prefixedFull, prefixedErr)
 	}
 
 	switch {
 	case !prefixedOK:
-		action = "copied"
+		action = RefRepairCopied
 	case prefixedValue != authoritativeValue:
-		action = "resynced"
+		action = RefRepairResynced
 	default:
-		action = "repaired"
+		action = RefRepairRepaired
 	}
 
 	if !write {
-		return action, nil
+		return action, false, nil
 	}
 
-	if action != "repaired" {
+	if action != RefRepairRepaired {
+		// Recheck immediately before writing: if the record's ref or Version
+		// has moved since the read above, a concurrent Set() or an
+		// old-binary rotation already changed the authoritative value (or
+		// re-asserted the same ref with a new value — Version still bumps on
+		// every UpsertSecret, so this catches that ABA case too). Writing the
+		// value captured above would silently revert that change, so
+		// discard this attempt and retry with fresh reads instead.
+		current, err := b.store.GetSecret(ctx, name, scope, scopeID)
+		if err != nil {
+			return "", false, err
+		}
+		if current.SecretRef != rec.SecretRef || current.Version != rec.Version {
+			return "", true, nil
+		}
+
 		labels, err := b.legacyLabels(ctx, refPath)
 		if err != nil {
-			return "", fmt.Errorf("failed to sync %s to prefixed GCP SM name: %w", name, err)
+			return "", false, fmt.Errorf("failed to sync %s to prefixed GCP SM name: %w", name, err)
 		}
 		if err := b.ensureSecretAndAddVersion(ctx, prefixedName, []byte(authoritativeValue), labels); err != nil {
-			return "", fmt.Errorf("failed to sync %s to prefixed GCP SM name: %w", name, err)
+			return "", false, fmt.Errorf("failed to sync %s to prefixed GCP SM name: %w", name, err)
 		}
 	}
 
 	applied, err := b.store.UpdateSecretRefIfMatches(ctx, name, scope, scopeID, rec.SecretRef, prefixedRef)
 	if err != nil {
-		return "", fmt.Errorf("failed to update DB ref: %w", err)
+		return "", false, fmt.Errorf("failed to update DB ref: %w", err)
 	}
 	if !applied {
-		// The record's ref changed concurrently (e.g. a Set() raced in
-		// between our read and this write): our snapshot of "authoritative
-		// value" may already be stale. Claim nothing; a re-run picks up
-		// whatever the record's ref now says.
-		return "", nil
+		// The record's ref changed concurrently between our recheck above
+		// and this CAS call: retry with fresh reads rather than claiming an
+		// action that may already be stale.
+		return "", true, nil
 	}
-	return action, nil
+	return action, false, nil
 }
 
 // RepairRefToPrefixed makes the DB record's SecretRef authoritative-safe (see
 // planOrRepairRef) and points it at the prefixed name. See planOrRepairRef
-// for the full contract and the "copied"/"resynced"/"repaired" action values.
-func (b *GCPBackend) RepairRefToPrefixed(ctx context.Context, name, scope, scopeID string) (action string, err error) {
+// for the full contract and the RefRepairAction values it can return.
+func (b *GCPBackend) RepairRefToPrefixed(ctx context.Context, name, scope, scopeID string) (action RefRepairAction, err error) {
 	return b.planOrRepairRef(ctx, name, scope, scopeID, true)
 }
 
@@ -1084,7 +1240,7 @@ func (b *GCPBackend) RepairRefToPrefixed(ctx context.Context, name, scope, scope
 // --dry-run planning: it performs the identical checks (including reading
 // both the ref-designated and prefixed values to determine whether a resync
 // would be needed) but never writes to GCP SM or the DB.
-func (b *GCPBackend) PlanRefRepair(ctx context.Context, name, scope, scopeID string) (action string, err error) {
+func (b *GCPBackend) PlanRefRepair(ctx context.Context, name, scope, scopeID string) (action RefRepairAction, err error) {
 	return b.planOrRepairRef(ctx, name, scope, scopeID, false)
 }
 

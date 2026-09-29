@@ -2102,3 +2102,279 @@ func TestGCPBackend_Delete_PermissionDeniedOnLegacyFatalWhenUnmigrated(t *testin
 		t.Errorf("expected the DB record to survive a failed Delete, got: %v", err)
 	}
 }
+
+// =============================================================================
+// Round 3 review regression tests (ptone/scion#2152 PR 2171, sp-rev-3.md)
+// =============================================================================
+
+// TestGCPBackend_DeleteLegacySecretName_SafeAfterRotationOnPrefixedName
+// reproduces round-3 review finding 2: once a DB record's ref already
+// designates the prefixed name as authoritative, a rotation performed AFTER
+// migration legitimately leaves the legacy copy's value stale -- that must
+// not block --delete-legacy from ever completing for a rotated secret.
+func TestGCPBackend_DeleteLegacySecretName_SafeAfterRotationOnPrefixedName(t *testing.T) {
+	backend, mock := createTestGCPBackend(t)
+	ctx := context.Background()
+
+	legacyName := backend.legacyGCPSecretName("ROTATED", ScopeUser, "user-1")
+	prefixedName := backend.gcpSecretName("ROTATED", ScopeUser, "user-1")
+	prefixedFull := fmt.Sprintf("projects/%s/secrets/%s", backend.projectID, prefixedName)
+	prefixedRef := "gcpsm:" + prefixedFull
+
+	seedMockSecret(t, mock, backend.projectID, legacyName, "v1-original")
+	seedMockSecret(t, mock, backend.projectID, prefixedName, "v1-original")
+	if err := backend.store.CreateSecret(ctx, &store.Secret{
+		ID: tid("delete-legacy-after-rotation"), Key: "ROTATED", Scope: ScopeUser, ScopeID: "user-1", SecretRef: prefixedRef,
+	}); err != nil {
+		t.Fatalf("failed to seed DB record: %v", err)
+	}
+
+	// A rotation performed after migration only touches the prefixed name
+	// (the current write target): the legacy copy is now stale by design,
+	// not by mistake, and must not be treated as unsafe to delete.
+	if _, err := mock.AddSecretVersion(ctx, &smpb.AddSecretVersionRequest{
+		Parent:  prefixedFull,
+		Payload: &smpb.SecretPayload{Data: []byte("v2-rotated")},
+	}); err != nil {
+		t.Fatalf("failed to rotate prefixed value: %v", err)
+	}
+
+	planned, err := backend.PlanLegacyDeletion(ctx, "ROTATED", ScopeUser, "user-1")
+	if err != nil {
+		t.Fatalf("PlanLegacyDeletion failed: %v", err)
+	}
+	if !planned {
+		t.Error("expected PlanLegacyDeletion to report the legacy secret as safe to delete despite the value mismatch caused by a post-migration rotation")
+	}
+
+	if err := backend.DeleteLegacySecretName(ctx, "ROTATED", ScopeUser, "user-1"); err != nil {
+		t.Fatalf("expected DeleteLegacySecretName to succeed once the ref designates the prefixed name, even though the legacy value is now stale: %v", err)
+	}
+
+	mock.mu.Lock()
+	_, stillThere := mock.secrets[fmt.Sprintf("projects/%s/secrets/%s", backend.projectID, legacyName)]
+	mock.mu.Unlock()
+	if stillThere {
+		t.Error("expected the legacy secret to be deleted")
+	}
+}
+
+// TestGCPBackend_RepairRefToPrefixed_NoRefNoGCPCopyIsNotFound reproduces
+// round-3 review finding 4: a DB record with no stored ref, and no value
+// under the computed legacy name either, has nothing to migrate -- it must
+// come back as store.ErrNotFound (a skip), not a generic failure.
+func TestGCPBackend_RepairRefToPrefixed_NoRefNoGCPCopyIsNotFound(t *testing.T) {
+	backend, _ := createTestGCPBackend(t)
+	ctx := context.Background()
+
+	if err := backend.store.CreateSecret(ctx, &store.Secret{
+		ID: tid("no-ref-no-copy"), Key: "GHOST", Scope: ScopeUser, ScopeID: "user-1",
+	}); err != nil {
+		t.Fatalf("failed to seed DB record: %v", err)
+	}
+
+	action, err := backend.RepairRefToPrefixed(ctx, "GHOST", ScopeUser, "user-1")
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expected store.ErrNotFound for a DB record with no ref and no GCP copy under either name, got action=%q err=%v", action, err)
+	}
+}
+
+// TestGCPBackend_RepairRefToPrefixed_OrphanedStoredRefIsDistinctFromNotFound
+// reproduces round-3 review finding 4's other half: a DB record with a
+// *stored* ref whose designated value is gone is a distinct, visible ORPHAN
+// condition, not silently folded into the same "nothing to migrate" bucket
+// as a record that never had a ref at all.
+func TestGCPBackend_RepairRefToPrefixed_OrphanedStoredRefIsDistinctFromNotFound(t *testing.T) {
+	backend, _ := createTestGCPBackend(t)
+	ctx := context.Background()
+
+	orphanedRef := "gcpsm:" + fmt.Sprintf("projects/%s/secrets/%s", backend.projectID, "scion-deadbeefcafe-user-aaaaaaaaaaaa-GONE")
+	if err := backend.store.CreateSecret(ctx, &store.Secret{
+		ID: tid("orphan"), Key: "GONE", Scope: ScopeUser, ScopeID: "user-1", SecretRef: orphanedRef,
+	}); err != nil {
+		t.Fatalf("failed to seed DB record: %v", err)
+	}
+
+	_, err := backend.RepairRefToPrefixed(ctx, "GONE", ScopeUser, "user-1")
+	if !errors.Is(err, ErrOrphanedRef) {
+		t.Fatalf("expected ErrOrphanedRef for a stored ref whose designated value is gone, got: %v", err)
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		t.Error("ErrOrphanedRef must be distinguishable from store.ErrNotFound (round-3 finding 4)")
+	}
+}
+
+// TestGCPBackend_Delete_TolerantOfPermissionDeniedLegacyAfterPartialDelete
+// reproduces round-3 review finding 8 (the Delete retry wedge): once the DB
+// ref already confirms the prefixed copy was authoritative, a legacy delete
+// denial must be tolerated even if *this* run's prefixed delete itself
+// returned NotFound (e.g. a prior, partially-completed Delete already
+// removed it) -- what matters is the confirmed-authoritative ref, not
+// whether the prefixed delete happened to find something to delete this
+// time. Without the fix, re-running Delete after such a partial failure
+// would wedge forever once the legacy IAM grant is narrowed.
+func TestGCPBackend_Delete_TolerantOfPermissionDeniedLegacyAfterPartialDelete(t *testing.T) {
+	backend, mock := createTestGCPBackend(t)
+	ctx := context.Background()
+	if _, _, err := backend.Set(ctx, &SetSecretInput{
+		Name: "K", Value: "v", SecretType: TypeEnvironment, Scope: ScopeUser, ScopeID: "u1",
+	}); err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	prefixedName := backend.gcpSecretName("K", ScopeUser, "u1")
+	prefixedFull := fmt.Sprintf("projects/%s/secrets/%s", backend.projectID, prefixedName)
+	// Simulate a prior, partially-completed Delete run that already removed
+	// the prefixed copy but never got to (or failed on) the legacy cleanup.
+	if err := mock.DeleteSecret(ctx, &smpb.DeleteSecretRequest{Name: prefixedFull}); err != nil {
+		t.Fatalf("failed to simulate prior prefixed delete: %v", err)
+	}
+
+	legacyName := backend.legacyGCPSecretName("K", ScopeUser, "u1")
+	legacyFull := fmt.Sprintf("projects/%s/secrets/%s", backend.projectID, legacyName)
+	denyBackend := NewGCPBackendWithClient(backend.store, &denyDeleteSMClient{mock, legacyFull}, "test-project", "test-hub-id")
+
+	if err := denyBackend.Delete(ctx, "K", ScopeUser, "u1"); err != nil {
+		t.Errorf("expected Delete to tolerate a PermissionDenied legacy delete once the DB ref already confirms the prefixed copy was authoritative, even though the prefixed delete itself returned NotFound this time: %v", err)
+	}
+	if _, err := backend.store.GetSecret(ctx, "K", ScopeUser, "u1"); err != store.ErrNotFound {
+		t.Errorf("expected DB record removed, got err=%v", err)
+	}
+}
+
+// onceAtCallAccessSMClient wraps a mockSMClient and invokes hook exactly
+// once, immediately before the call-th call to AccessSecretVersion is
+// delegated to the underlying mock. Used to inject a concurrent write at a
+// precise point inside planOrRepairRef's read sequence, without real
+// goroutines racing non-deterministically.
+type onceAtCallAccessSMClient struct {
+	*mockSMClient
+	mu    sync.Mutex
+	calls int
+	call  int
+	hook  func()
+	fired bool
+}
+
+func (c *onceAtCallAccessSMClient) AccessSecretVersion(ctx context.Context, req *smpb.AccessSecretVersionRequest) (*smpb.AccessSecretVersionResponse, error) {
+	c.mu.Lock()
+	c.calls++
+	fire := !c.fired && c.calls == c.call
+	if fire {
+		c.fired = true
+	}
+	c.mu.Unlock()
+	if fire {
+		c.hook()
+	}
+	return c.mockSMClient.AccessSecretVersion(ctx, req)
+}
+
+// TestGCPBackend_RepairRefToPrefixed_ConcurrentSetIsNotReverted reproduces
+// round-3 review finding 3's first interleaving: a concurrent Set() lands
+// between planOrRepairRef reading the ref-designated ("authoritative") value
+// and writing it to the prefixed name. Without a recheck immediately before
+// that write, the stale value captured at the start of the attempt would be
+// written over the prefixed copy, silently reverting the concurrent Set().
+func TestGCPBackend_RepairRefToPrefixed_ConcurrentSetIsNotReverted(t *testing.T) {
+	backend, mock := createTestGCPBackend(t)
+	ctx := context.Background()
+
+	legacyName := backend.legacyGCPSecretName("API_KEY", ScopeUser, "user-1")
+	legacyRef := "gcpsm:" + fmt.Sprintf("projects/%s/secrets/%s", backend.projectID, legacyName)
+	seedMockSecret(t, mock, backend.projectID, legacyName, "v1-old")
+	if err := backend.store.CreateSecret(ctx, &store.Secret{
+		ID: tid("race-concurrent-set"), Key: "API_KEY", Scope: ScopeUser, ScopeID: "user-1", SecretRef: legacyRef,
+	}); err != nil {
+		t.Fatalf("failed to seed DB record: %v", err)
+	}
+
+	race := &onceAtCallAccessSMClient{mockSMClient: mock, call: 1}
+	race.hook = func() {
+		// A concurrent Set() lands after our read of the authoritative
+		// (legacy) value has started but conceptually "in between" reading
+		// and writing: it writes a fresh value directly to the prefixed
+		// name (as Set always does) and repoints the DB ref, all before our
+		// attempt gets a chance to write.
+		concurrent := NewGCPBackendWithClient(backend.store, mock, backend.projectID, backend.hubID)
+		if _, _, err := concurrent.Set(ctx, &SetSecretInput{Name: "API_KEY", Value: "v2-concurrent", Scope: ScopeUser, ScopeID: "user-1"}); err != nil {
+			t.Fatalf("simulated concurrent Set failed: %v", err)
+		}
+	}
+	raceBackend := NewGCPBackendWithClient(backend.store, race, backend.projectID, backend.hubID)
+
+	if _, err := raceBackend.RepairRefToPrefixed(ctx, "API_KEY", ScopeUser, "user-1"); err != nil {
+		t.Fatalf("RepairRefToPrefixed failed: %v", err)
+	}
+
+	sv, err := backend.Get(ctx, "API_KEY", ScopeUser, "user-1")
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if sv.Value != "v2-concurrent" {
+		t.Errorf("BUG: resync silently reverted a concurrent Set(); got %q, want %q", sv.Value, "v2-concurrent")
+	}
+}
+
+// TestGCPBackend_RepairRefToPrefixed_OldBinaryRotationABAIsDetected
+// reproduces round-3 review finding 3's second interleaving: an old (pre-
+// prefix) binary rotates the secret through the legacy name, re-persisting
+// the *same* ref string (it has no notion of the prefixed name) but with a
+// new value -- and the DB row's Version still bumps on every write. A
+// recheck keyed only on the ref string would miss this ABA case; the
+// Version check is what catches it.
+func TestGCPBackend_RepairRefToPrefixed_OldBinaryRotationABAIsDetected(t *testing.T) {
+	backend, mock := createTestGCPBackend(t)
+	ctx := context.Background()
+
+	legacyName := backend.legacyGCPSecretName("API_KEY", ScopeUser, "user-1")
+	legacyFull := fmt.Sprintf("projects/%s/secrets/%s", backend.projectID, legacyName)
+	legacyRef := "gcpsm:" + legacyFull
+	seedMockSecret(t, mock, backend.projectID, legacyName, "v1-original")
+	if err := backend.store.CreateSecret(ctx, &store.Secret{
+		ID: tid("race-old-binary-aba"), Key: "API_KEY", Scope: ScopeUser, ScopeID: "user-1", SecretRef: legacyRef,
+	}); err != nil {
+		t.Fatalf("failed to seed DB record: %v", err)
+	}
+
+	// Fire after the first AccessSecretVersion call (the authoritative read,
+	// which will have already captured the stale "v1-original" value) but
+	// before the second (the prefixed-name check), simulating the rotation
+	// landing in between.
+	race := &onceAtCallAccessSMClient{mockSMClient: mock, call: 2}
+	race.hook = func() {
+		if _, err := mock.AddSecretVersion(ctx, &smpb.AddSecretVersionRequest{
+			Parent:  legacyFull,
+			Payload: &smpb.SecretPayload{Data: []byte("v2-rotated-by-old-binary")},
+		}); err != nil {
+			t.Fatalf("simulated old-binary GCP SM rotation failed: %v", err)
+		}
+		// An old binary doesn't know about the prefixed name, so it
+		// re-persists the *same* legacy ref -- but UpsertSecret still bumps
+		// Version on every write, which is exactly what the ABA-detecting
+		// recheck relies on.
+		if _, err := backend.store.UpsertSecret(ctx, &store.Secret{
+			Key: "API_KEY", Scope: ScopeUser, ScopeID: "user-1", SecretRef: legacyRef, EncryptedValue: "unused-by-this-backend",
+		}); err != nil {
+			t.Fatalf("simulated old-binary DB rewrite failed: %v", err)
+		}
+	}
+	raceBackend := NewGCPBackendWithClient(backend.store, race, backend.projectID, backend.hubID)
+
+	action, err := raceBackend.RepairRefToPrefixed(ctx, "API_KEY", ScopeUser, "user-1")
+	if err != nil {
+		t.Fatalf("RepairRefToPrefixed failed: %v", err)
+	}
+	if action != RefRepairCopied {
+		t.Errorf("expected action %q, got %q", RefRepairCopied, action)
+	}
+
+	prefixedName := backend.gcpSecretName("API_KEY", ScopeUser, "user-1")
+	value, err := backend.accessLatestVersion(ctx, prefixedName)
+	if err != nil {
+		t.Fatalf("failed to read prefixed value: %v", err)
+	}
+	if value != "v2-rotated-by-old-binary" {
+		t.Errorf("BUG: prefixed copy holds the stale pre-rotation value %q instead of the rotated %q", value, "v2-rotated-by-old-binary")
+	}
+}
