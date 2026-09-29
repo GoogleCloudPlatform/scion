@@ -64,8 +64,8 @@ func (t *mockGitHubOAuthTransport) RoundTrip(req *http.Request) (*http.Response,
 
 // TestOAuthCallback_GitHub_VerifiedPrimaryEmail_Provisions is the full
 // GitHub web-login regression: callback -> getGitHubUserInfo (always
-// fetching /user/emails) -> provisionUser -> session, with a normal
-// primary-verified email.
+// fetching /user/emails) -> WebServer.handleOAuthCallback's own find-or-create
+// -> session, with a normal primary-verified email.
 func TestOAuthCallback_GitHub_VerifiedPrimaryEmail_Provisions(t *testing.T) {
 	const secret = "test-session-secret-for-github-oauth-1234567890"
 	const email = "github-user@example.com"
