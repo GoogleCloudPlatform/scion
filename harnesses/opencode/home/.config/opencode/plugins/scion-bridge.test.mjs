@@ -162,12 +162,14 @@ test('agent-end count matches the number of real prompt cycles, for every real r
   // each expects exactly one agent-end, for a different reason each time:
   const expected = {
     // run2: a 3-step tool loop (bash, read, final answer) is ONE turn --
-    // session.status goes busy once at the start and session.idle fires
-    // once at the end, across all three steps. The fork never receives its
-    // own session.idle in this capture (it is a separate, later-forked
-    // session; its own eventual idle, whenever it happens, would be
-    // counted independently for that session), so this run's total is
-    // still 1.
+    // session.status goes busy repeatedly across the three steps (the raw
+    // capture has 7 busy records for this one run), but the gate is a set
+    // membership check, not a counter, so that collapses to one armed
+    // session, and session.idle fires once at the end. The fork never
+    // receives its own session.idle in this capture (it is a separate,
+    // later-forked session; its own eventual idle, whenever it happens,
+    // would be counted independently for that session), so this run's
+    // total is still 1.
     run2: 1,
     // run3: one failed prompt, with several real provider retries.
     // OpenCode's own processor publishes session.idle twice for this one
@@ -351,7 +353,7 @@ test('a session.created with no parentID (e.g. a fork) still fires session-start
 
 test('session.error is unmapped for both a child session and a top-level session', () => {
   // Labelled synthetic (not from a capture): a session's turn ends exactly
-  // once, on session.idle (routeSessionIdle's activity gate); routing
+  // once, on session.idle (routeSessionIdle's busy/retry gate); routing
   // session.error to any lifecycle event, for a child or a top-level
   // session, would count that same turn a second time. See dialect.yaml's
   // comment above its mappings block for the full reasoning.
@@ -382,11 +384,12 @@ test('session.error is unmapped for both a child session and a top-level session
 // rewrites every in-flight text/reasoning/tool part via
 // message.part.updated (and completes the assistant message); the runner
 // then publishes session.status{idle} and session.idle a second time once
-// it actually finishes. An earlier version of this gate armed on any
-// message/part activity, which made those cleanup part updates re-arm it,
-// giving 2 agent-ends for a single aborted or errored turn. Arming only on
-// session.status{busy|retry} avoids this: OpenCode never publishes busy
-// from halt, cleanup, or an idle-only cancel.
+// it actually finishes. Arming on message or part activity would not work
+// here: cleanup's own part updates would re-arm the gate, giving 2
+// agent-ends for a single aborted or errored turn. Arming only on
+// session.status{busy|retry} avoids this: OpenCode publishes busy from the
+// run loop and processor on each step or attempt of an active run, but
+// never from halt, cleanup, SessionSummary, or an idle-only cancel.
 function driveScenario(events) {
   const state = createBridgeState();
   const emissions = [];
@@ -491,6 +494,19 @@ test('a retry within one run still gives exactly one agent-end', () => {
     { type: 'session.idle', properties: { sessionID } },
   ]);
   assert.equal(count, 1, 'a retried run is still one prompt cycle, so one agent-end');
+});
+
+test('a retry with no preceding busy still arms the gate on its own', () => {
+  // Pins that "retry" is checked in routeSessionStatus's arm condition, not
+  // just "busy": a session.idle following only a retry (no busy record at
+  // all first) must still give one agent-end.
+  const sessionID = 'ses_synthetic_retry_only';
+  const count = driveScenario([
+    { type: 'session.created', properties: { info: { id: sessionID } } },
+    { type: 'session.status', properties: { sessionID, status: { type: 'retry', attempt: 1, message: 'rate limited', next: 1000 } } },
+    { type: 'session.idle', properties: { sessionID } },
+  ]);
+  assert.equal(count, 1, 'retry alone must arm the gate, with no busy record required first');
 });
 
 test('bridge caches (seenModelEnds, childSessionIds, busySessionIds) evict oldest entries once MAX_CACHE_ENTRIES is exceeded', () => {

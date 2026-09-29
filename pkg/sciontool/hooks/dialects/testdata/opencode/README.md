@@ -121,7 +121,7 @@ the one that produced `bus-events-1.18.33.json`'s run2 records, same scripted
 `tool_input` path (the same capture-host scratch directory as above) →
 the same placeholder repo path. Nothing else differs from the raw capture.
 
-`scion-bridge.js` has changed since this file was captured (activity-gated
+`scion-bridge.js` has changed since this file was captured (busy/retry-gated
 agent-end, unmapped `session.error`, task-tool child-session filtering).
 Re-verified equivalent: replaying `bus-events-1.18.33.json`'s own run2 records
 through the current `route()` reproduces the same emission sequence and the

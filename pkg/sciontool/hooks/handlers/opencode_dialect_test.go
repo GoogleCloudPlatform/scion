@@ -39,7 +39,7 @@ import (
 // verifying this (field by field, against the unscrubbed raw capture log)
 // are private artifacts (not shipped) and are not a fact this comment
 // relies on beyond what's stated above. scion-bridge.js has since changed
-// (activity-gated agent-end, unmapped session.error, child-session
+// (busy/retry-gated agent-end, unmapped session.error, child-session
 // filtering); replaying the same underlying raw bus events (this fixture's
 // sibling bus-events-1.18.33.json's run2 records) through the current
 // route() reproduces the same emission sequence and values shown below,
@@ -434,7 +434,8 @@ func TestOpencodeDialectCacheWriteMapsToNonZeroTokenType(t *testing.T) {
 // TestOpencodeDialectHasNoSessionErrorMapping guards dialect.yaml's
 // deliberate omission of a session.error mapping. scion-bridge.js's route()
 // never sends this event at all (a session's turn ends exactly once, on
-// session.idle, gated on activity -- see that file's routeSessionIdle),
+// session.idle, gated on a prior busy/retry -- see that file's
+// routeSessionIdle),
 // but this pins the dialect-level fallback: if a raw session.error payload
 // ever reached this dialect anyway, it must not resolve to agent-end (which
 // would double-count a turn on every error) or session-end (which would

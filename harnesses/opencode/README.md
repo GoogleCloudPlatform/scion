@@ -84,17 +84,18 @@ shut a working agent down on a single recoverable error or user abort. See
 message/part activity.** OpenCode's own `session.idle` is not 1:1 with a real
 turn: an errored or aborted turn publishes it once right after the error,
 then again after OpenCode's own cleanup finishes rewriting every in-flight
-part. An earlier version of this gate armed on any live `message.updated` or
-`message.part.updated`, but that cleanup step *is* a part update, so it
-re-armed the gate and produced two `agent-end`s for one aborted turn.
-OpenCode only ever publishes `session.status{type:"busy"}` (or `"retry"`,
-during a provider retry) at the start of a real run attempt — never from its
-error/cleanup path or from cancelling an already-idle session — so the
-bridge instead remembers, per session, whether a busy or retry was seen
-since the session's last emitted `agent-end`, and turns a `session.idle`
-into `agent-end` only if so, clearing the flag either way. This makes
-`agent-end` — and therefore turn counts — track real prompt cycles even
-across a mid-response abort or a retried provider call.
+part. Arming on message or part activity would not work here: that cleanup
+step *is* a part update, so it would re-arm the gate and produce two
+`agent-end`s for one aborted turn. `session.status{type:"busy"}` (or
+`"retry"`, during a provider retry) is published from the run loop and
+processor on each step or attempt of an active run, but never from the
+error/cleanup path, from `SessionSummary`, or from cancelling an
+already-idle session — so the bridge instead remembers, per session,
+whether a busy or retry was seen since the session's last emitted
+`agent-end`, and turns a `session.idle` into `agent-end` only if so,
+clearing the flag either way. This makes `agent-end` — and therefore turn
+counts — track real prompt cycles even across a mid-response abort or a
+retried provider call.
 
 ## Build the Image
 

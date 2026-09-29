@@ -192,21 +192,21 @@ function routeSessionCreated(state, event) {
 //    turn publishes session.idle once right after the error (from `halt`),
 //    then runs `cleanup`, which rewrites every in-flight text/reasoning/
 //    tool part via message.part.updated, then publishes session.idle a
-//    second time once the runner actually finishes. A version of this gate
-//    that armed on any message/part activity (an earlier iteration of this
-//    file) was re-armed by exactly those cleanup part updates, so a
-//    mid-response abort or error still produced two agent-ends. Arming on
-//    session.status{type:"busy"|"retry"} instead avoids this: OpenCode only
-//    ever publishes busy at the start of a real run attempt (including each
-//    retry attempt), never from halt, cleanup, or an idle-only cancel. Every
-//    agent-end increments a turn counter (hooks/handlers/limits.go's
-//    max_turns, the hub turn count, and the aggregator's RecordTurn), so
-//    counting a turn more than once per real prompt cycle can trip
-//    max_turns on a single error or user abort. session.idle only produces
-//    agent-end, and clears the busy flag, the first time it fires after a
-//    busy/retry was seen; a second idle with nothing new in between
-//    (OpenCode's own duplicate idle, or the idle that always follows an
-//    unmapped session.error) is silently dropped.
+//    second time once the runner actually finishes. Arming on message or
+//    part activity would not work here: cleanup's own part updates would
+//    re-arm the gate, so a mid-response abort or error would still produce
+//    two agent-ends. Arming on session.status{type:"busy"|"retry"} instead
+//    avoids this: OpenCode publishes busy from the run loop and processor
+//    on each step or attempt of an active run (including each retry
+//    attempt), but never from halt, cleanup, SessionSummary, or an
+//    idle-only cancel. Every agent-end increments a turn counter
+//    (hooks/handlers/limits.go's max_turns, the hub turn count, and the
+//    aggregator's RecordTurn), so counting a turn more than once per real
+//    prompt cycle can trip max_turns on a single error or user abort.
+//    session.idle only produces agent-end, and clears the busy flag, the
+//    first time it fires after a busy/retry was seen; a second idle with
+//    nothing new in between (OpenCode's own duplicate idle, or the idle
+//    that always follows an unmapped session.error) is silently dropped.
 function routeSessionIdle(state, event) {
   const sessionID = event.properties?.sessionID;
   if (!sessionID) return [];
