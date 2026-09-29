@@ -33,6 +33,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -1364,4 +1365,91 @@ func TestProjectUAT_EnforceUATConstraintsFailsClosedOnUnsupportedPrincipal(t *te
 	require.NotNil(t, decision, "an unsupported principal kind must deny, not pass through as nil")
 	assert.False(t, decision.Allowed)
 	assert.Equal(t, "token holder lacks active access to the target project", decision.Reason)
+}
+
+// TestProjectUAT_EnforceUATConstraintsFailsClosedOnConstraintLoadError pins
+// the same fail-closed contract as
+// TestProjectUAT_EnforceUATConstraintsFailsClosedOnUnsupportedPrincipal for a
+// realistic error source, exercised through a real HTTP request rather than
+// a direct call: a transient access-constraint-table load failure inside
+// SystemAuthorityProof, reached from ProjectTargetAdmission when the UAT
+// holder has no project membership and relies on system authority (the same
+// fixture as TestProjectUAT_SuperAdminNoMembershipCanMintAndAttach). Any
+// error from ProjectTargetAdmission must deny, never silently pass through
+// as if the check had not run.
+func TestProjectUAT_EnforceUATConstraintsFailsClosedOnConstraintLoadError(t *testing.T) {
+	srv, s := testServer(t)
+	projectID := tid("uatp-failclosed-cle-project")
+	ownerID := tid("uatp-failclosed-cle-owner")
+	superAdminID := tid("uatp-failclosed-cle-admin")
+	createRS1Project(t, s, projectID, ownerID)
+	createTestUserWithRole(t, s, superAdminID, superAdminID+"@test.com", "admin", store.SystemRoleSuperAdmin)
+	// Deliberately no project-scoped binding for superAdminID: the use-time
+	// gate below must go through SystemAuthorityProof, not
+	// ProjectMembershipEvidence, so it actually reaches constraint loading.
+
+	uatKey, _, err := srv.uatService.CreateToken(rs4MintContext(superAdminID), superAdminID, "cle-attach",
+		projectID, []string{"agent:attach"}, nil)
+	require.NoError(t, err, "super-admin's exact agent.attach authority should admit minting without a project binding")
+
+	agent := uatpAgent(t, s, projectID, superAdminID, t.Name(), superAdminID)
+
+	// Sanity: without any injected failure, the request is authorized.
+	sanity := doRequestWithUAT(t, srv, uatKey, http.MethodGet, "/api/v1/agents/"+agent.ID+"/pty", nil)
+	assertAuthorizedPTY(t, sanity, "sanity check before injecting the failure: %s", sanity.Body.String())
+
+	failing := &r2FailingStore{failListConstraints: fmt.Errorf("injected: constraint load failure")}
+	restore := installFailStore(srv, failing)
+	defer restore()
+
+	rec := doRequestWithUAT(t, srv, uatKey, http.MethodGet, "/api/v1/agents/"+agent.ID+"/pty", nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"a transient access-constraint load failure inside the use-time gate must deny, not silently pass through: %s", rec.Body.String())
+}
+
+// TestProjectUAT_CreateTokenMapsCanMintSelectorErrorToForbidden pins the
+// fail-closed mapping at CreateToken's own call site: when CanMintSelector
+// itself returns an error (as opposed to a per-selector denial), CreateToken
+// must map it to the same bare, oracle-resistant ErrUATProjectForbidden used
+// for "no admission at all" -- never a different, more specific error that
+// would let a caller distinguish "the check itself failed" from "the check
+// ran and denied." Uses the same injected access-constraint-table load
+// failure that TestCanMintSelector_ConstraintLoadErrorReturnsError/
+// project_boundary_flat_role_descriptor pins at the CanMintSelector level
+// directly, here observed through the actual mint call site and a real HTTP
+// request.
+func TestProjectUAT_CreateTokenMapsCanMintSelectorErrorToForbidden(t *testing.T) {
+	srv, s := testServer(t)
+	projectID := tid("uatp-cle-mint-project")
+	ownerID := tid("uatp-cle-mint-owner")
+	adminID := tid("uatp-cle-mint-admin")
+	createRS1Project(t, s, projectID, ownerID)
+	// project-admin carries agent.delete, a permission with no
+	// MintEligibilityRegistry descriptor (flat-role default), so mint
+	// eligibility reaches hasProjectRoleFlatPermission, which loads the
+	// access-constraint table.
+	createTestUserWithProjectRole(t, s, adminID, adminID+"@test.com", projectID, store.ProjectRoleAdmin)
+	ensureHubMembership(context.Background(), s, adminID)
+
+	failing := &r2FailingStore{failListConstraints: fmt.Errorf("injected: constraint load failure")}
+	restore := installFailStore(srv, failing)
+	defer restore()
+
+	_, _, err := srv.uatService.CreateToken(rs4MintContext(adminID), adminID, "cle-mint",
+		projectID, []string{"agent:delete"}, nil)
+	require.ErrorIs(t, err, ErrUATProjectForbidden,
+		"a CanMintSelector error must map to the bare, oracle-resistant ErrUATProjectForbidden, not a distinguishable error")
+
+	adminUser, getErr := s.GetUser(context.Background(), adminID)
+	require.NoError(t, getErr)
+	body := map[string]any{"name": "cle-mint-http", "projectId": projectID, "scopes": []string{"agent:delete"}}
+	rec := doRequestAsUser(t, srv, adminUser, http.MethodPost, "/api/v1/auth/tokens", body)
+	require.Equal(t, http.StatusForbidden, rec.Code, "mint over HTTP: %s", rec.Body.String())
+
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, ErrCodeForbidden, resp.Error.Code)
+	assert.Equal(t, "forbidden", resp.Error.Message)
+	assert.Nil(t, resp.Error.Details,
+		"a CanMintSelector-level error must produce the same detail-free body as any other admission failure")
 }
