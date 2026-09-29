@@ -14,8 +14,8 @@
 
 //go:build !no_sqlite
 
-// Package hub — shared fixtures for the F.2a runtime material selection
-// tests (material_*_test.go, handlers_agent_secret_*_test.go).
+// Package hub — shared fixtures for the runtime material selection tests
+// (material_*_test.go, handlers_agent_secret_*_test.go).
 package hub
 
 import (
@@ -116,8 +116,9 @@ func newFullAgentIdentity(agentID, projectID string, ancestry []string, scopes [
 }
 
 // materialFailingStore wraps a store.Store and injects errors, or canned
-// results, for specific method calls. Used to exercise F.2a's fail-closed
-// paths on genuine store faults (as opposed to store.ErrNotFound), and to
+// results, for specific method calls. Used to exercise runtime material
+// reads' fail-closed paths on genuine store faults (as opposed to
+// store.ErrNotFound), and to
 // exercise the delegation ceiling's duplicate-active-edge invariant-
 // violation branch, which the partial unique index on
 // (delegate_type, delegate_id, scope_type, scope_id) WHERE active=true makes

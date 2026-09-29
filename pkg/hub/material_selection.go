@@ -21,12 +21,14 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// MaterialPurpose identifies why material selection is running. F.2a uses
-// only the runtime-read purpose; later slices add launch-delivery purposes.
+// MaterialPurpose identifies why material selection is running. Runtime
+// material reads use only the runtime-read purpose; later changes add
+// launch-delivery purposes.
 type MaterialPurpose string
 
-// PurposeRuntimeRead is the only purpose F.2a exercises: an agent asking for
-// a value by key at runtime (P7 fetch, P8 get, and the agent secret list).
+// PurposeRuntimeRead is the only purpose runtime material reads exercise: an
+// agent asking for a value by key at runtime (the bulk fetch endpoint, the
+// by-key get endpoint, and the agent secret list).
 const PurposeRuntimeRead MaterialPurpose = "runtime_read"
 
 // MaterialKind identifies the kind of material a candidate represents.
@@ -34,7 +36,7 @@ const PurposeRuntimeRead MaterialPurpose = "runtime_read"
 // selection only ever produces MaterialKindSecret.
 type MaterialKind string
 
-// MaterialKindSecret is the only material kind F.2a selects.
+// MaterialKindSecret is the only material kind runtime material reads select.
 const MaterialKindSecret MaterialKind = "secret"
 
 // GrantKind identifies the named grant that authorized a Candidate.
@@ -51,13 +53,14 @@ const (
 )
 
 // ProvenanceRoot identifies the human ancestor a runtime read is evaluated
-// against. F.2a fills Kind and ID only; Edge and Revision are populated once
-// a later change resolves them from recorded delegation provenance.
+// against. Runtime material reads fill Kind and ID only; Edge and Revision
+// are populated once a later change resolves them from recorded delegation
+// provenance.
 type ProvenanceRoot struct {
-	Kind     string                // F.2a: always "user"
-	ID       string                // F.2a: Ancestry[0], confirmed an active user by check 5
-	Edge     *store.DelegationEdge // nil in F.2a
-	Revision int                   // 0 in F.2a
+	Kind     string                // always "user" for a runtime read
+	ID       string                // Ancestry[0], confirmed an active user by check 5
+	Edge     *store.DelegationEdge // nil for a runtime read
+	Revision int                   // 0 for a runtime read
 }
 
 // TargetFacts holds store-sourced facts about the target agent. Nothing here
@@ -68,7 +71,7 @@ type TargetFacts struct {
 	Agent     *store.Agent   // store.GetAgent(ident.ID()); DeletedAt zero
 	ProjectID string         // Agent.ProjectID
 	Ancestry  []string       // Agent.Ancestry as stored; never extended
-	Root      ProvenanceRoot // F.2a rule: ProvenanceRoot{Kind: "user", ID: Ancestry[0]} (check 3), confirmed by check 5
+	Root      ProvenanceRoot // ProvenanceRoot{Kind: "user", ID: Ancestry[0]} (check 3), confirmed by check 5
 	Project   *store.Project // loaded by ProjectID
 }
 
@@ -78,7 +81,7 @@ type SourceRef struct{ Kind, ID string }
 
 // Candidate is a single key under consideration for selection.
 type Candidate struct {
-	Kind          MaterialKind // MaterialKindSecret (F.2a)
+	Kind          MaterialKind // MaterialKindSecret for a runtime read
 	Key           string
 	Scope         string            // "project" | "user"
 	ScopeID       string            // ProjectID | Root.ID
@@ -95,8 +98,9 @@ type ItemResult struct {
 	Reason   string // a reason code below; audit only, never sent to the caller
 }
 
-// Reason codes (F.2a subset). These are audit-only: never sent to the
-// caller, and never string-matched against the underlying decision text.
+// Reason codes used by runtime material reads. These are audit-only: never
+// sent to the caller, and never string-matched against the underlying
+// decision text.
 const (
 	ReasonAllowed              = "allowed"
 	ReasonNotFound             = "not_found"

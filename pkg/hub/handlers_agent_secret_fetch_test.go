@@ -36,7 +36,7 @@ import (
 // member root user, and an agent descending from that root, for the POST
 // /api/v1/agent/secrets endpoint. The agent's token carries
 // ScopeProjectSecretRead and an ancestry rooted at the member user, so it
-// passes the F.2a runtime precheck (material_runtime.go): the delegation
+// passes the runtime material precheck (material_runtime.go): the delegation
 // edge backfill marker is absent in test servers (testServer, handlers_test.go),
 // so the pre-backfill ceiling exception admits a hub-attested agent with no
 // recorded edge.

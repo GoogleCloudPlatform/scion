@@ -14,8 +14,8 @@
 
 //go:build !no_sqlite
 
-// Package hub — the two F.2a delegating-agent-state characterizations that
-// are pinned to this file by name, so a follow-up change can reference them
+// Package hub — the two delegating-agent-state characterizations that are
+// pinned to this file by name, so a follow-up change can reference them
 // directly: a retained soft-deleted parent or grandparent still resolves in
 // the delegation ceiling and is followed at its stored role. A follow-up
 // change changes or removes these characterizations when it lands the
@@ -38,12 +38,12 @@ import (
 // characterization, changed or removed by a follow-up change: a retained
 // soft-deleted parent agent still resolves in the delegation ceiling,
 // because GetAgent returns soft-deleted rows and checkAgentHoldsPermission
-// checks neither DeletedAt nor status. F.2a does not claim to enforce the
-// non-deleted-source rule for delegation, and adds no second, F-local
-// delegation traversal. A follow-up change owns enforcing non-deleted
-// agents in the shared chain evaluation. This test is separate from the
-// final acceptance regression and must be changed or removed when the
-// shared fix lands.
+// checks neither DeletedAt nor status. Runtime material reads do not claim
+// to enforce the non-deleted-source rule for delegation, and add no second,
+// separate delegation traversal. A follow-up change owns enforcing
+// non-deleted agents in the shared chain evaluation. This test is separate
+// from the final acceptance regression and must be changed or removed when
+// the shared fix lands.
 func TestAgentSecretRead_ProjectScopeSoftDeletedParentFollowsStoredRole(t *testing.T) {
 	f := newMaterialFixture(t, "soft-deleted-parent")
 	ctx := context.Background()

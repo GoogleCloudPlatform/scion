@@ -39,8 +39,8 @@ type MaterialSelectionEventItem struct {
 	Detail        string // check 7 only, Decision.Reason verbatim; audit-only, never parsed
 }
 
-// MaterialSelectionEvent is emitted once per request by the F.2a runtime
-// check sequence. It never contains values.
+// MaterialSelectionEvent is emitted once per request by the runtime material
+// selection check sequence. It never contains values.
 type MaterialSelectionEvent struct {
 	EventType      string // "material_selection"
 	CorrelationID  string // uuid.NewString() per request (no request-ID helper exists on main)
@@ -51,7 +51,7 @@ type MaterialSelectionEvent struct {
 	CredentialKind string // "agent_jwt"
 	CredentialID   string // agentCredentialIDContextKey value when present, else ""
 	TargetAgent    struct{ AgentID, ProjectID, BrokerID string }
-	ProvenanceRoot struct{ Kind, ID string } // Target.Root.Kind/ID (F.2a: {"user", Ancestry[0]}); not the ancestry
+	ProvenanceRoot struct{ Kind, ID string } // Target.Root.Kind/ID: {"user", Ancestry[0]}; not the ancestry
 	RequestReason  string                    // set when checks 1-6 deny; items then empty
 	Items          []MaterialSelectionEventItem
 	Timestamp      time.Time

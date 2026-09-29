@@ -186,13 +186,13 @@ type AgentSecretReadEvent struct {
 	// Scope and ScopeID record the secret's scope and scope ID separately.
 	// Earlier callers folded the scope ID into ProjectID; the material
 	// selection compat path (logAgentSecretReadCompat) is the corrected
-	// shape (F.2a).
+	// shape.
 	Scope     string `json:"scope,omitempty"`
 	ScopeID   string `json:"scopeId,omitempty"`
 	SecretKey string `json:"secretKey"`
 	Success   bool   `json:"success"`
 	// Derived is true when this event has a partner MaterialSelectionEvent
-	// with the same CorrelationID (F.2a).
+	// with the same CorrelationID.
 	Derived       bool      `json:"derived,omitempty"`
 	CorrelationID string    `json:"correlationId,omitempty"`
 	FailReason    string    `json:"failReason,omitempty"`

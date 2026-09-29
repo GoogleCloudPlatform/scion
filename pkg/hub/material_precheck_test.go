@@ -14,10 +14,10 @@
 
 //go:build !no_sqlite
 
-// Package hub — F.2a tests for the whole-request precheck (checks 1-5) of
-// the runtime material selection check sequence: identity locality, the
-// store record, store facts (project, token/project match, provenance
-// root), credential capability, and root human live authority.
+// Package hub — tests for the whole-request precheck (checks 1-5) of the
+// runtime material selection check sequence: identity locality, the store
+// record, store facts (project, token/project match, provenance root),
+// credential capability, and root human live authority.
 package hub
 
 import (
@@ -36,9 +36,10 @@ import (
 // --- Precheck and identity ---
 
 // TestAgentSecretFetch_RevokedTokenRejected characterizes that a revoked
-// agent credential is rejected by the auth middleware (auth.go, not
-// F.2a-owned) before F.2a's own checks run. F.2a inherits this behaviour and
-// does not change it.
+// agent credential is rejected by the auth middleware (auth.go, which the
+// runtime material checks do not own) before the runtime material checks
+// run. The runtime material checks inherit this behaviour and do not change
+// it.
 func TestAgentSecretFetch_RevokedTokenRejected(t *testing.T) {
 	f := newMaterialFixture(t, "revoked-token-fetch")
 	ctx := context.Background()
@@ -57,8 +58,8 @@ func TestAgentSecretFetch_RevokedTokenRejected(t *testing.T) {
 }
 
 // TestAgentGetSecret_ExpiredTokenRejected characterizes that an expired
-// agent token is rejected by the auth middleware (auth.go, not F.2a-owned)
-// before F.2a's own checks run.
+// agent token is rejected by the auth middleware (auth.go, which the runtime
+// material checks do not own) before the runtime material checks run.
 func TestAgentGetSecret_ExpiredTokenRejected(t *testing.T) {
 	f := newMaterialFixture(t, "expired-token-get")
 
@@ -105,9 +106,10 @@ func TestAgentGetSecret_MissingIdentityKeepsUnauthorizedStatus(t *testing.T) {
 }
 
 // TestMaterialRuntimePrecheck_FederatedIdentityDenied unit-tests check 1
-// directly with a federated identity. At P8, validateAgentSecretAccess
-// already rejects federated identities (their ProjectID() is empty), so
-// this check is exercised here rather than at the HTTP layer.
+// directly with a federated identity. On the by-key get endpoint,
+// validateAgentSecretAccess already rejects federated identities (their
+// ProjectID() is empty), so this check is exercised here rather than at the
+// HTTP layer.
 func TestMaterialRuntimePrecheck_FederatedIdentityDenied(t *testing.T) {
 	srv, _ := testServer(t)
 
@@ -220,8 +222,8 @@ func TestAgentSecretRead_RootNotAUserDenied(t *testing.T) {
 }
 
 // TestAgentSecretRead_RequiresProjectSecretReadPermission covers check 4:
-// the credential must carry ScopeProjectSecretRead. Missing it denies both
-// P7 and both scopes of P8.
+// the credential must carry ScopeProjectSecretRead. Missing it denies the
+// bulk fetch endpoint and both scopes of the by-key get endpoint.
 func TestAgentSecretRead_RequiresProjectSecretReadPermission(t *testing.T) {
 	f := newMaterialFixture(t, "cap-required")
 	f.reissueToken(t, []AgentTokenScope{ScopeAgentStatusUpdate}, []string{f.UserID})
@@ -231,17 +233,17 @@ func TestAgentSecretRead_RequiresProjectSecretReadPermission(t *testing.T) {
 	rec := doRequestWithAgentToken(t, f.Server, http.MethodPost, "/api/v1/agent/secrets",
 		secretFetchRequest{Keys: []string{"CAP_KEY"}}, f.Token)
 	if rec.Code != http.StatusForbidden {
-		t.Fatalf("P7: expected 403, got %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("bulk fetch: expected 403, got %d: %s", rec.Code, rec.Body.String())
 	}
 
 	recProject := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+f.AgentID+"/secrets/CAP_KEY", nil, f.Token)
 	if recProject.Code != http.StatusForbidden {
-		t.Fatalf("P8 project scope: expected 403, got %d: %s", recProject.Code, recProject.Body.String())
+		t.Fatalf("by-key get, project scope: expected 403, got %d: %s", recProject.Code, recProject.Body.String())
 	}
 
 	recUser := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+f.AgentID+"/secrets/CAP_KEY?scope=user", nil, f.Token)
 	if recUser.Code != http.StatusForbidden {
-		t.Fatalf("P8 user scope: expected 403, got %d: %s", recUser.Code, recUser.Body.String())
+		t.Fatalf("by-key get, user scope: expected 403, got %d: %s", recUser.Code, recUser.Body.String())
 	}
 }
 
@@ -267,7 +269,7 @@ func TestAgentSecretRead_SuspendedRootUserDenied(t *testing.T) {
 
 // TestAgentSecretRead_RootUserWithoutProjectMembershipDenied covers check 5:
 // an active root user who is not a current member of the agent's project is
-// denied on both P7 and P8.
+// denied on both the bulk fetch endpoint and the by-key get endpoint.
 func TestAgentSecretRead_RootUserWithoutProjectMembershipDenied(t *testing.T) {
 	srv, s := testServer(t)
 	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
@@ -294,12 +296,12 @@ func TestAgentSecretRead_RootUserWithoutProjectMembershipDenied(t *testing.T) {
 
 	rec := doRequestWithAgentToken(t, srv, http.MethodPost, "/api/v1/agent/secrets", secretFetchRequest{Keys: []string{"NOMEM_KEY"}}, token)
 	if rec.Code != http.StatusForbidden {
-		t.Fatalf("P7: expected 403, got %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("bulk fetch: expected 403, got %d: %s", rec.Code, rec.Body.String())
 	}
 
 	rec2 := doRequestWithAgentToken(t, srv, http.MethodGet, "/api/v1/agents/"+agentID+"/secrets/NOMEM_KEY", nil, token)
 	if rec2.Code != http.StatusForbidden {
-		t.Fatalf("P8: expected 403, got %d: %s", rec2.Code, rec2.Body.String())
+		t.Fatalf("by-key get: expected 403, got %d: %s", rec2.Code, rec2.Body.String())
 	}
 }
 

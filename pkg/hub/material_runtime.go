@@ -31,9 +31,10 @@ import (
 // after any effect — see TestMaterialRuntime_ProjectSecretReadActionMatchesRegistry.
 const actionProjectSecretRead Action = Action("secret_read")
 
-// materialRuntimePrecheck runs the whole-request checks (1-5) of the F.2a
-// check sequence against the presented agent identity. On success it returns
-// the resolved TargetFacts and a zero httpStatus. On denial it returns a
+// materialRuntimePrecheck runs the whole-request checks (1-5) of the runtime
+// material selection check sequence against the presented agent identity. On
+// success it returns the resolved TargetFacts and a zero httpStatus. On
+// denial it returns a
 // reason code (audit only, never sent to the caller) and the HTTP status the
 // caller should use: 403 for a policy/store-fact denial, 500 for an
 // infrastructure error. Both fail closed.
