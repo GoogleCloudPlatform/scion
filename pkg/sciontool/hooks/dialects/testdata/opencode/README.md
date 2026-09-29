@@ -111,9 +111,16 @@ where each substitution landed.
 
 ## `hook-payloads-1.18.33.jsonl`
 
-The real stdin the *actual, currently shipped* `scion-bridge.js` wrote to a
-stub `sciontool` binary while replaying run2's exact session live (a separate
-run from the one that produced `bus-events-1.18.33.json`'s run2 records, same
-scripted 3-step-then-fork scenario). One scrub: the `read` tool's captured
+The real stdin `scion-bridge.js` wrote to a stub `sciontool` binary at
+capture time, while replaying run2's exact session live (a separate run from
+the one that produced `bus-events-1.18.33.json`'s run2 records, same scripted
+3-step-then-fork scenario). One scrub: the `read` tool's captured
 `tool_input` path (the same capture-host scratch directory as above) →
 the same placeholder repo path. Nothing else differs from the raw capture.
+
+`scion-bridge.js` has changed since this file was captured (activity-gated
+agent-end, unmapped `session.error`, task-tool child-session filtering).
+Re-verified equivalent: replaying `bus-events-1.18.33.json`'s own run2 records
+through the current `route()` reproduces the same emission sequence and the
+same token/tool values as this file, modulo session and message IDs (the two
+captures are separate runs, so their IDs differ).

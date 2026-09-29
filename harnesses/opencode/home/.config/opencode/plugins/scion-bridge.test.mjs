@@ -157,13 +157,58 @@ test('session and agent-end events route through the event hook', () => {
   assert.equal(idleEmissions.length, 1);
 });
 
-test('run3: a real session.error is routed with a usable error string', () => {
+test('agent-end count matches the number of real prompt cycles, for every real run', () => {
+  // Each run below is one real prompt cycle from the user's perspective, so
+  // each expects exactly one agent-end, for a different reason each time:
+  const expected = {
+    // run2: a 3-step tool loop (bash, read, final answer) is ONE turn --
+    // session.idle fires once, after continuous activity across all three
+    // steps. The fork never receives its own session.idle in this capture
+    // (it is a separate, later-forked session; its own eventual idle,
+    // whenever it happens, would be counted independently for that
+    // session), so this run's total is still 1.
+    run2: 1,
+    // run3: one failed prompt. OpenCode itself emits session.idle twice for
+    // this one cycle (see that test above for the full trace); the
+    // activity gate collapses that to 1.
+    run3: 1,
+    // run4: one prompt that requests a tool the user denies permission for,
+    // then finishes with an error message and a single session.idle.
+    run4: 1,
+    // run5: a task-tool call. The child session's own session.idle is
+    // filtered entirely (it is a subagent, not the top-level agent -- see
+    // the child-session tests below), so only the parent's one real idle
+    // is left, and it correctly sees activity from the parent's own two
+    // steps.
+    run5: 1,
+  };
+  const byRun = loadFixture();
+  for (const [run, want] of Object.entries(expected)) {
+    const idleEmissions = emissionsFor(byRun.get(run), 'session.idle');
+    assert.equal(idleEmissions.length, want, `${run}: agent-end count = ${idleEmissions.length}, want ${want}`);
+  }
+});
+
+test('run3: session.error emits nothing, and the number of agent-ends equals the number of real prompt cycles', () => {
   const run3 = loadFixture().get('run3');
   assert.ok(run3 && run3.length > 0, 'fixture must contain run3 records');
+
   const errorEmissions = emissionsFor(run3, 'session.error');
-  assert.equal(errorEmissions.length, 1);
-  assert.equal(errorEmissions[0].data.reason, 'error');
-  assert.match(errorEmissions[0].data.error, /mock upstream failure/);
+  assert.deepEqual(errorEmissions, [], 'session.error must never be routed to any lifecycle event');
+
+  // The raw capture has two session.idle records for this one failed
+  // prompt (OpenCode's own retry/cleanup behavior: session.error, then
+  // session.idle, then one more message.updated as the assistant message
+  // finalizes, then session.idle again). Without activity gating this
+  // would give 2 (or, before session.error was unmapped, 3) agent-ends for
+  // a single real prompt cycle. The activity gate accepts the first idle
+  // (there was live message/part activity before it) and clears the
+  // session's activity; the trailing message.updated between the two
+  // idles is already `time.completed` and so does not re-arm it, so the
+  // second idle is dropped. Net: exactly 1 agent-end, matching the 1 real
+  // prompt cycle in this run.
+  const idleEmissions = emissionsFor(run3, 'session.idle');
+  assert.equal(idleEmissions.length, 1, 'run3 is one real prompt cycle (a failed one), so exactly one agent-end is expected');
 });
 
 test('run4: permission.asked and permission.replied route through the event hook', () => {
@@ -301,11 +346,12 @@ test('a session.created with no parentID (e.g. a fork) still fires session-start
   assert.equal(emissions[0].data.session_id, 'ses_no_parent');
 });
 
-test('a child session error is excluded, but a top-level session error still emits', () => {
-  // Labelled synthetic (not from a capture): pins that session.error is
-  // filtered for a task-tool child session the same way session.created and
-  // session.idle are, independent of dialect.yaml's own remapping of
-  // session.error away from session-end.
+test('session.error is unmapped for both a child session and a top-level session', () => {
+  // Labelled synthetic (not from a capture): a session's turn ends exactly
+  // once, on session.idle (routeSessionIdle's activity gate); routing
+  // session.error to any lifecycle event, for a child or a top-level
+  // session, would count that same turn a second time. See dialect.yaml's
+  // comment above its mappings block for the full reasoning.
   const state = createBridgeState();
   const parentID = 'ses_synthetic_parent';
   const childID = 'ses_synthetic_child';
@@ -323,11 +369,43 @@ test('a child session error is excluded, but a top-level session error still emi
     type: 'session.error',
     properties: { sessionID: parentID, error: { data: { message: 'parent provider error' } } },
   });
-  assert.equal(parentErrorEmissions.length, 1, 'a top-level session error must still be routed');
-  assert.match(parentErrorEmissions[0].data.error, /parent provider error/);
+  assert.deepEqual(parentErrorEmissions, [], 'a top-level session error must not be routed either');
 });
 
-test('bridge caches (seenModelEnds, childSessionIds) evict oldest entries once MAX_CACHE_ENTRIES is exceeded', () => {
+test('a user abort (session.error, then session.idle) gives at most one agent-end for that prompt cycle', () => {
+  // Labelled synthetic: no captured MessageAbortedError payload exists (see
+  // the fixture provenance -- run3 only proves the order error -> idle for
+  // a provider failure, not a user abort). The bridge does not distinguish
+  // session.error by its error type at all -- it is unmapped
+  // unconditionally -- so this pins the outcome for the abort case
+  // specifically, a scenario OpenCode's own permission/abort flow can
+  // trigger just as easily as a provider failure.
+  const state = createBridgeState();
+  const sessionID = 'ses_synthetic_abort';
+  const messageID = 'msg_synthetic_abort';
+
+  route(state, { type: 'session.created', properties: { info: { id: sessionID } } });
+  route(state, {
+    type: 'message.updated',
+    properties: { info: { id: messageID, sessionID, role: 'user', time: { created: 1 } } },
+  });
+  const errorEmissions = route(state, {
+    type: 'session.error',
+    properties: { sessionID, error: { name: 'MessageAbortedError', data: { message: 'aborted by user' } } },
+  });
+  assert.deepEqual(errorEmissions, []);
+
+  const idleEmissions = route(state, { type: 'session.idle', properties: { sessionID } });
+  assert.equal(idleEmissions.length, 1, 'the one real prompt cycle before the abort gives exactly one agent-end');
+
+  // A second idle with no new activity (OpenCode's own possible duplicate,
+  // or any idle that fires again before real work resumes) must not add a
+  // second agent-end for the same cycle.
+  const secondIdleEmissions = route(state, { type: 'session.idle', properties: { sessionID } });
+  assert.deepEqual(secondIdleEmissions, [], 'at most one agent-end per prompt cycle, even across a repeated idle');
+});
+
+test('bridge caches (seenModelEnds, childSessionIds, activeSessionIds) evict oldest entries once MAX_CACHE_ENTRIES is exceeded', () => {
   const cap = 4096;
 
   const modelEndState = createBridgeState();
@@ -357,6 +435,17 @@ test('bridge caches (seenModelEnds, childSessionIds) evict oldest entries once M
   assert.ok(childState.childSessionIds.size <= cap, `childSessionIds.size = ${childState.childSessionIds.size}, want <= ${cap}`);
   assert.equal(childState.childSessionIds.has('ses_child_0'), false);
   assert.equal(childState.childSessionIds.has(`ses_child_${cap + 9}`), true);
+
+  const activityState = createBridgeState();
+  for (let i = 0; i < cap + 10; i++) {
+    route(activityState, {
+      type: 'message.updated',
+      properties: { info: { id: `msg_${i}`, sessionID: `ses_active_${i}`, role: 'user', time: { created: i } } },
+    });
+  }
+  assert.ok(activityState.activeSessionIds.size <= cap, `activeSessionIds.size = ${activityState.activeSessionIds.size}, want <= ${cap}`);
+  assert.equal(activityState.activeSessionIds.has('ses_active_0'), false);
+  assert.equal(activityState.activeSessionIds.has(`ses_active_${cap + 9}`), true);
 });
 
 test('run5: child-session step-finish usage is still counted (not silently dropped)', () => {

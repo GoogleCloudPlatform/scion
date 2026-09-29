@@ -26,9 +26,8 @@ import (
 // one JSON object per line in the exact shape scion-bridge.js's
 // emitHookEvent sends as `sciontool hook --dialect=opencode`'s stdin.
 //
-// Provenance: this is the real stdin the *actual, currently shipped*
-// harnesses/opencode/home/.config/opencode/plugins/scion-bridge.js wrote to
-// a stub `sciontool` binary while driving a real npm-installed
+// Provenance: this is the real stdin scion-bridge.js wrote to a stub
+// `sciontool` binary at capture time, while driving a real npm-installed
 // opencode-ai@1.18.33 through a 3-step tool loop (bash, then read, then a
 // final answer with no more tool calls) against a local, credential-free
 // mock OpenAI-compatible model server, followed by a real
@@ -39,7 +38,13 @@ import (
 // replaced with a placeholder). The comparison script and its clean output
 // verifying this (field by field, against the unscrubbed raw capture log)
 // are private artifacts (not shipped) and are not a fact this comment
-// relies on beyond what's stated above.
+// relies on beyond what's stated above. scion-bridge.js has since changed
+// (activity-gated agent-end, unmapped session.error, child-session
+// filtering); replaying the same underlying raw bus events (this fixture's
+// sibling bus-events-1.18.33.json's run2 records) through the current
+// route() reproduces the same emission sequence and values shown below,
+// modulo session/message IDs (which differ because the two fixtures come
+// from separate capture runs).
 //
 // Ten records, three step-finish "model calls": the second session.created
 // is OpenCode's fork of the first session at its last message, and
@@ -426,56 +431,35 @@ func TestOpencodeDialectCacheWriteMapsToNonZeroTokenType(t *testing.T) {
 	}
 }
 
-// TestOpencodeDialectSessionErrorMapsToAgentEndNotSessionEnd guards a real
-// session.error event (bridge output derived from a real capture -- see the
-// literal payload below, produced by feeding run3's actual captured
-// session.error bus event through the real scion-bridge.js route()) against
-// ever mapping to session-end, which hooks/handlers/hub.go's EventSessionEnd
-// case turns
-// into hub PhaseStopped. OpenCode's own session.error is often recoverable
-// (a real capture shows session.error followed by session.idle, with
-// opencode continuing) or a plain user abort, so marking the whole agent
-// Stopped on it would be wrong. dialect.yaml now maps session.error to
-// agent-end instead -- the same target session.idle already used, and one
-// hub.go does not treat as terminal (EventAgentEnd reports
-// PhaseRunning/ActivityWorking).
-func TestOpencodeDialectSessionErrorMapsToAgentEndNotSessionEnd(t *testing.T) {
+// TestOpencodeDialectHasNoSessionErrorMapping guards dialect.yaml's
+// deliberate omission of a session.error mapping. scion-bridge.js's route()
+// never sends this event at all (a session's turn ends exactly once, on
+// session.idle, gated on activity -- see that file's routeSessionIdle),
+// but this pins the dialect-level fallback: if a raw session.error payload
+// ever reached this dialect anyway, it must not resolve to agent-end (which
+// would double-count a turn on every error) or session-end (which would
+// mark the whole agent Stopped on a recoverable error). It stays an
+// unrecognized, inert event name instead.
+func TestOpencodeDialectHasNoSessionErrorMapping(t *testing.T) {
 	md := loadOpencodeDialect(t)
 
-	// The exact payload scion-bridge.js's route() emits for run3's real
-	// captured session.error event (mock model server returning HTTP 500,
-	// see the fixture's provenance), followed by the session.idle that
-	// really follows it in the same capture.
-	errorPayload := map[string]interface{}{
+	payload := map[string]interface{}{
 		"hook_event_name": "session.error",
-		"session_id":      "ses_f12e82b0fffeTWfXQtofqh9VxA",
-		"error":           "mock upstream failure",
+		"session_id":      "ses_synthetic",
+		"error":           "synthetic error",
 		"reason":          "error",
 	}
-	idlePayload := map[string]interface{}{
-		"hook_event_name": "session.idle",
-		"session_id":      "ses_f12e82b0fffeTWfXQtofqh9VxA",
-	}
-
-	errorEvent, err := md.Parse(errorPayload)
+	event, err := md.Parse(payload)
 	if err != nil {
-		t.Fatalf("Parse(error): %v", err)
+		t.Fatalf("Parse: %v", err)
 	}
-	if errorEvent.Name != hooks.EventAgentEnd {
-		t.Errorf("session.error event.Name = %q, want %q", errorEvent.Name, hooks.EventAgentEnd)
+	if event.Name == hooks.EventAgentEnd {
+		t.Error("session.error must not map to agent-end (would double-count a turn on every error)")
 	}
-	if errorEvent.Name == hooks.EventSessionEnd {
-		t.Error("session.error must never map to session-end (would mark the agent Stopped on a recoverable error)")
+	if event.Name == hooks.EventSessionEnd {
+		t.Error("session.error must not map to session-end (would mark the agent Stopped on a recoverable error)")
 	}
-	if errorEvent.Data.Error != "mock upstream failure" {
-		t.Errorf("errorEvent.Data.Error = %q, want the real captured message", errorEvent.Data.Error)
-	}
-
-	idleEvent, err := md.Parse(idlePayload)
-	if err != nil {
-		t.Fatalf("Parse(idle): %v", err)
-	}
-	if idleEvent.Name != hooks.EventAgentEnd {
-		t.Errorf("session.idle event.Name = %q, want %q", idleEvent.Name, hooks.EventAgentEnd)
+	if event.Name != "session.error" {
+		t.Errorf("event.Name = %q, want the raw name unchanged (no mapping entry exists for session.error)", event.Name)
 	}
 }

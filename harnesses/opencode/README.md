@@ -60,24 +60,34 @@ Known undercount: a model call that produces no `step-finish` part (a failed
 or retried attempt, an abort, title generation, or agent generation) is not
 counted.
 
-**Task-tool subagent sessions are excluded from session-start, agent-end and
-session errors.** OpenCode's `task` tool spawns a full child session with
+**Task-tool subagent sessions are excluded from session-start and
+agent-end.** OpenCode's `task` tool spawns a full child session with
 `info.parentID` set to the invoking session (confirmed against a real
 capture). The bridge tracks which session IDs are children from their
-`session.created` event and filters that event, the child's later
-`session.idle`, and any `session.error` for the child — a subagent's error
-or idle turn is not the parent agent's, and must not stand in for the
-parent's status. A forked session (`Session.fork`) has no `parentID` at all
-and is unaffected by this filter; only task-tool children are. Child-session
-model usage (`step-finish` parts) is still counted normally — only the
-session-lifecycle signals are filtered.
+`session.created` event and filters that event and the child's later
+`session.idle` — a subagent's idle turn is not the parent agent's, and must
+not stand in for the parent's status. A forked session (`Session.fork`) has
+no `parentID` at all and is unaffected by this filter; only task-tool
+children are. Child-session model usage (`step-finish` parts) is still
+counted normally — only the session-lifecycle signals are filtered.
 
-**`session.error` maps to agent-end, not session-end.** Before this bridge
-rewrite, the keyed `session.error` hook never fired, so mapping it to
-session-end (which the hub turns into a Stopped phase) would be a new
-regression: OpenCode's own session errors are frequently recoverable
-(retried provider calls) or a plain user abort, and OpenCode itself keeps
-running afterwards. See `dialect.yaml`'s comment for the full reasoning.
+**`session.error` is unmapped: the bridge emits nothing for it.** A
+session's turn ends exactly once, on `session.idle` — routing
+`session.error` to any lifecycle event as well (even a non-terminal one)
+would count that same turn a second time, since a real capture shows
+`session.idle` always follows a `session.error`. That matters because every
+agent-end increments a turn counter (`max_turns`), so double-counting could
+shut a working agent down on a single recoverable error or user abort. See
+`dialect.yaml`'s comment for the full reasoning.
+
+**`agent-end` is gated on session activity.** OpenCode's own `session.idle`
+is not 1:1 with a real turn either — a real capture shows it firing twice
+for one failed prompt. The bridge only turns a session's `session.idle` into
+`agent-end` the first time it fires after that session did real work (a live
+`message.updated`, user or assistant, or any `message.part.updated`); a
+repeated idle with no new activity in between is dropped. This makes
+`agent-end` — and therefore turn counts — track real prompt cycles rather
+than OpenCode's own possibly-repeated idle signal.
 
 ## Build the Image
 
