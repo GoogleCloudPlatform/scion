@@ -16,6 +16,7 @@ package permissions
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -534,6 +535,10 @@ func intersectAllowedBoundaries(ids []string) (boundaries []BoundaryKind, ok boo
 // unmapped, unreviewed, or (defensively) empty-after-expansion selectors
 // return ok=false — callers must fail closed rather than reconstruct a
 // selector from resource/action.
+//
+// ResolveSelector returns a COPY of the derived mapping: PermissionIDs and
+// AllowedBoundaries are cloned so a caller mutating the returned slices
+// cannot corrupt the process-wide cached selectorRegistry.
 func ResolveSelector(selector string) (SelectorMapping, bool) {
 	selectorRegistryOnce.Do(func() {
 		selectorRegistry = buildSelectorRegistry()
@@ -542,6 +547,8 @@ func ResolveSelector(selector string) (SelectorMapping, bool) {
 	if !ok || len(m.PermissionIDs) == 0 {
 		return SelectorMapping{}, false
 	}
+	m.PermissionIDs = slices.Clone(m.PermissionIDs)
+	m.AllowedBoundaries = slices.Clone(m.AllowedBoundaries)
 	return m, true
 }
 

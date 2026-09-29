@@ -96,7 +96,7 @@ var ProjectTargetApplicability = map[string]bool{
 	// CapabilityScope action) is never evaluated per-instance — all three
 	// stay reviewed false. read/delete/verify/assign are CapabilityResource:
 	// each authorizes against the EXISTING service account
-	// (gcpServiceAccountResource, capabilities.go:150-163), whose own
+	// (gcpServiceAccountResource, capabilities.go), whose own
 	// ParentType/ParentID is a project scope whenever sa.Scope ==
 	// store.ScopeProject. ComputeCapabilities/ComputeCapabilitiesBatch
 	// (capabilities.go) evaluate every ResourceActions["gcp_service_account"]
