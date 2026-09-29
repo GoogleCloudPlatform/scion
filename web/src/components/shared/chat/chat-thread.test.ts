@@ -68,6 +68,8 @@ type ScionChatThread = import('./chat-thread.js').ScionChatThread;
 type ChatSendDetail = import('./chat-composer.js').ChatSendDetail;
 type Message = import('../../../shared/types.js').Message;
 
+import { chatRecentFiles } from '../../../client/chat-recent-files.js';
+
 const CONVERSATION_KEY = 'topic-1';
 
 /** An empty history response, the shape fetchHistoryV2/backfillV2 expect. */
@@ -3527,8 +3529,11 @@ describe('scion-chat-thread path-link project context fallback', () => {
 
   type Internals = {
     sendError: string | null;
-    filePreview: { containerPath: string; status: string; downloadUrl?: string } | null;
-    handlePathLinkClick(e: CustomEvent<{ path: string }>, msg?: Message): Promise<void>;
+    // Loading/error/downloadUrl now live inside the reusable
+    // <scion-chat-file-preview> (see chat-file-preview.test.ts); this
+    // component only resolves which path to preview.
+    filePreview: { containerPath: string; projectId: string } | null;
+    handlePathLinkClick(e: CustomEvent<{ path: string }>, msg?: Message): void;
   };
 
   it('shows a clear error for a cold-load DM with no thread projectId and no message fallback', async () => {
@@ -3573,9 +3578,9 @@ describe('scion-chat-thread path-link project context fallback', () => {
     );
 
     expect(internals.sendError).toBeNull();
-    expect(internals.filePreview?.status).toBe('ready');
-    expect(internals.filePreview?.downloadUrl).toBe(
-      '/api/v1/projects/proj-visibility-removal/shared-dirs/scratchpad/files/projects/visibility-removal/scoping.md'
+    expect(internals.filePreview?.projectId).toBe('proj-visibility-removal');
+    expect(internals.filePreview?.containerPath).toBe(
+      '/scion-volumes/scratchpad/projects/visibility-removal/scoping.md'
     );
   });
 
@@ -3602,9 +3607,9 @@ describe('scion-chat-thread path-link project context fallback', () => {
     );
 
     expect(internals.sendError).toBeNull();
-    expect(internals.filePreview?.status).toBe('ready');
-    expect(internals.filePreview?.downloadUrl).toBe(
-      '/api/v1/projects/proj-visibility-removal/shared-dirs/scratchpad/files/projects/visibility-removal/scoping.md'
+    expect(internals.filePreview?.projectId).toBe('proj-visibility-removal');
+    expect(internals.filePreview?.containerPath).toBe(
+      '/scion-volumes/scratchpad/projects/visibility-removal/scoping.md'
     );
   });
 
@@ -3627,9 +3632,9 @@ describe('scion-chat-thread path-link project context fallback', () => {
     );
 
     expect(internals.sendError).toBeNull();
-    expect(internals.filePreview?.status).toBe('ready');
-    expect(internals.filePreview?.downloadUrl).toBe(
-      '/api/v1/projects/proj-visibility-removal/shared-dirs/scratchpad/files/projects/visibility-removal/scoping.md'
+    expect(internals.filePreview?.projectId).toBe('proj-visibility-removal');
+    expect(internals.filePreview?.containerPath).toBe(
+      '/scion-volumes/scratchpad/projects/visibility-removal/scoping.md'
     );
   });
 
@@ -3654,9 +3659,8 @@ describe('scion-chat-thread path-link project context fallback', () => {
     );
 
     expect(internals.sendError).toBeNull();
-    expect(internals.filePreview?.downloadUrl).toBe(
-      '/api/v1/projects/proj-fallback/shared-dirs/scratchpad/files/notes.md'
-    );
+    expect(internals.filePreview?.projectId).toBe('proj-fallback');
+    expect(internals.filePreview?.containerPath).toBe('/scion-volumes/scratchpad/notes.md');
   });
 
   it('prefers the thread-level projectId for a project-scoped (non-DM) thread', async () => {
@@ -3677,9 +3681,8 @@ describe('scion-chat-thread path-link project context fallback', () => {
       makeMessage({ senderProjectId: 'proj-sender' })
     );
 
-    expect(internals.filePreview?.downloadUrl).toBe(
-      '/api/v1/projects/proj-thread/shared-dirs/scratchpad/files/notes.md'
-    );
+    expect(internals.filePreview?.projectId).toBe('proj-thread');
+    expect(internals.filePreview?.containerPath).toBe('/scion-volumes/scratchpad/notes.md');
   });
 
   it('keeps the "unrecognized path format" behavior for a resolvable project', async () => {
@@ -3764,10 +3767,8 @@ describe('scion-chat-thread path-link project context fallback', () => {
     );
 
     expect(internals.sendError).toBeNull();
-    expect(internals.filePreview?.status).toBe('ready');
-    expect(internals.filePreview?.downloadUrl).toBe(
-      '/api/v1/projects/proj-peer-agent/shared-dirs/scratchpad/files/notes.md'
-    );
+    expect(internals.filePreview?.projectId).toBe('proj-peer-agent');
+    expect(internals.filePreview?.containerPath).toBe('/scion-volumes/scratchpad/notes.md');
   });
 
   it('uses the message project over the cached peer-agent project when both are available', async () => {
@@ -3806,10 +3807,8 @@ describe('scion-chat-thread path-link project context fallback', () => {
     );
 
     expect(internals.sendError).toBeNull();
-    expect(internals.filePreview?.status).toBe('ready');
-    expect(internals.filePreview?.downloadUrl).toBe(
-      '/api/v1/projects/proj-msg/shared-dirs/scratchpad/files/notes.md'
-    );
+    expect(internals.filePreview?.projectId).toBe('proj-msg');
+    expect(internals.filePreview?.containerPath).toBe('/scion-volumes/scratchpad/notes.md');
   });
 
   it('does not use the peer-agent fallback when the peer agent is not in the local cache', async () => {
@@ -3904,5 +3903,785 @@ describe('scion-chat-thread deliveryStateFor visibility (O1, p2a-r3 review)', ()
     const internals = el as unknown as DeliveryStateInternals;
     const older = makeDeliveryMessage('dispatched');
     expect(internals.deliveryStateFor(older, 'a-newer-message-id', false)).toBe('');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Recent-files capture hooks
+// ---------------------------------------------------------------------------
+
+describe('scion-chat-thread recent-files capture', () => {
+  let ingestSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+    ingestSpy = vi.spyOn(chatRecentFiles, 'ingest').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    ingestSpy.mockRestore();
+    document.body.innerHTML = '';
+  });
+
+  it('captures an accepted own-send provisionally, keyed by the server id, never the optimistic id', async () => {
+    const el = await mount();
+    const internals = el as unknown as {
+      handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    };
+
+    apiFetch.mockImplementationOnce(() =>
+      Promise.resolve({
+        ok: true,
+        status: 201,
+        json: () =>
+          Promise.resolve({
+            id: 'server-1',
+            attachments: [{ id: 'att-1', name: 'a.txt', mime: 'text/plain', size: 5 }],
+          }),
+      } as unknown as Response)
+    );
+
+    const beforeSend = Date.now();
+    await internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'see /workspace/a.md',
+          plain: false,
+          interrupt: false,
+          onSuccess: vi.fn(),
+          mentions: [],
+          attachmentIds: ['att-1'],
+        },
+      })
+    );
+    const afterSend = Date.now();
+
+    expect(ingestSpy).toHaveBeenCalledTimes(1);
+    const [message, refs, context, opts] = ingestSpy.mock.calls[0];
+    expect((message as { id: string }).id).toBe('server-1');
+    expect(refs).toEqual([{ id: 'att-1', name: 'a.txt', mime: 'text/plain', size: 5 }]);
+    expect((context as { provisional?: boolean }).provisional).toBe(true);
+    expect((opts as { scopeGeneration?: number }).scopeGeneration).toBe(
+      chatRecentFiles.scopeGeneration
+    );
+    // The message text (which is what buildCandidates scans for inline
+    // container paths, as opposed to attachment refs) must actually reach
+    // ingest, not just the id.
+    expect((message as { text?: string }).text).toBe('see /workspace/a.md');
+    // The provisional record's timestamp is the client's own optimistic
+    // send time (the response never carries the server's createdAt) — it
+    // must be a real timestamp captured around the send, not an empty or
+    // fabricated value.
+    const sentAtMs = new Date((message as { sentAt: string }).sentAt).getTime();
+    expect(sentAtMs).toBeGreaterThanOrEqual(beforeSend);
+    expect(sentAtMs).toBeLessThanOrEqual(afterSend);
+  });
+
+  it('attributes an accepted send to the conversation/project it was sent in, even if the thread switches conversations before the response resolves', async () => {
+    const el = await mount();
+    el.projectId = 'proj-A';
+    await el.updateComplete;
+    const internals = el as unknown as {
+      handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    };
+
+    let resolveSend!: (value: unknown) => void;
+    apiFetch.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveSend = resolve;
+        })
+    );
+
+    const sendPromise = internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'see /workspace/a.md',
+          plain: false,
+          interrupt: false,
+          onSuccess: vi.fn(),
+          mentions: [],
+          attachmentIds: [],
+        },
+      })
+    );
+
+    // The thread is reused for a different conversation/project while the
+    // POST above is still in flight.
+    el.conversationKey = 'other-thread';
+    el.projectId = 'proj-B';
+    await el.updateComplete;
+
+    resolveSend({
+      ok: true,
+      status: 201,
+      json: () => Promise.resolve({ id: 'server-race', attachments: [] }),
+    });
+    await sendPromise;
+
+    expect(ingestSpy).toHaveBeenCalledTimes(1);
+    const [message, , context] = ingestSpy.mock.calls[0];
+    expect((message as { conversationKey?: string }).conversationKey).toBe(CONVERSATION_KEY);
+    expect((context as { projectId?: string }).projectId).toBe('proj-A');
+  });
+
+  it('does not re-resolve the project against a new conversation when none was resolvable at send time', async () => {
+    // `recordRecentFiles`'s `opts.projectId` snapshot must be trusted even
+    // when it's the empty string ("no project was resolvable at send
+    // time") — a truthy check on that snapshot would treat '' the same as
+    // "not provided" and wrongly fall back to re-resolving against whatever
+    // project the thread has since moved on to.
+    const el = await mount();
+    el.projectId = '';
+    await el.updateComplete;
+    const internals = el as unknown as {
+      handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    };
+
+    let resolveSend!: (value: unknown) => void;
+    apiFetch.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveSend = resolve;
+        })
+    );
+
+    const sendPromise = internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'see /workspace/a.md',
+          plain: false,
+          interrupt: false,
+          onSuccess: vi.fn(),
+          mentions: [],
+          attachmentIds: [],
+        },
+      })
+    );
+
+    // Switch to a project-backed conversation while the POST is in flight.
+    el.conversationKey = 'other-thread';
+    el.projectId = 'proj-B';
+    await el.updateComplete;
+
+    resolveSend({
+      ok: true,
+      status: 201,
+      json: () => Promise.resolve({ id: 'server-race-no-project', attachments: [] }),
+    });
+    await sendPromise;
+
+    expect(ingestSpy).toHaveBeenCalledTimes(1);
+    const [, , context] = ingestSpy.mock.calls[0];
+    // No project was resolvable at send time, so the context must omit
+    // projectId entirely — never fall back to the new conversation's project.
+    expect((context as { projectId?: string }).projectId).toBeUndefined();
+  });
+
+  it('does not capture a send whose response is missing an id', async () => {
+    const el = await mount();
+    const internals = el as unknown as {
+      handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    };
+
+    apiFetch.mockImplementationOnce(() =>
+      Promise.resolve({
+        ok: true,
+        status: 201,
+        json: () => Promise.resolve({ attachments: [] }), // no id
+      } as unknown as Response)
+    );
+
+    await internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'hello',
+          plain: false,
+          interrupt: false,
+          onSuccess: vi.fn(),
+          mentions: [],
+          attachmentIds: [],
+        },
+      })
+    );
+
+    expect(ingestSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not capture a failed send', async () => {
+    const el = await mount();
+    const internals = el as unknown as {
+      handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    };
+
+    apiFetch.mockImplementationOnce(() =>
+      Promise.resolve({
+        ok: false,
+        status: 500,
+        text: () => Promise.resolve(''),
+      } as unknown as Response)
+    );
+
+    await internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'hello',
+          plain: false,
+          interrupt: false,
+          onSuccess: vi.fn(),
+          onError: vi.fn(),
+          mentions: [],
+          attachmentIds: [],
+        },
+      })
+    );
+
+    expect(ingestSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not capture when the send throws (network failure)', async () => {
+    const el = await mount();
+    const internals = el as unknown as {
+      handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    };
+
+    apiFetch.mockImplementationOnce(() => Promise.reject(new Error('offline')));
+
+    await internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'hello',
+          plain: false,
+          interrupt: false,
+          onSuccess: vi.fn(),
+          onError: vi.fn(),
+          mentions: [],
+          attachmentIds: [],
+        },
+      })
+    );
+
+    expect(ingestSpy).not.toHaveBeenCalled();
+  });
+
+  it('captures a live SSE message from another sender, non-provisionally', async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+
+    emitChatMessage({
+      id: 'srv-2',
+      threadId: CONVERSATION_KEY,
+      senderId: 'agent-1',
+      sender: 'agent:coder',
+      msg: 'here: /workspace/report.md',
+      type: 'chat',
+      createdAt: '2026-01-01T00:00:00Z',
+    });
+    await el.updateComplete;
+
+    expect(ingestSpy).toHaveBeenCalledTimes(1);
+    const [message, , context] = ingestSpy.mock.calls[0];
+    expect((message as { id: string }).id).toBe('srv-2');
+    expect((context as { provisional?: boolean }).provisional).toBeUndefined();
+  });
+
+  it('does not capture a live message whose SSE payload has no createdAt', async () => {
+    // A fabricated (viewing-time) timestamp must never be recorded, and must
+    // never "correct" a pending provisional record for the same server id.
+    const el = await mount();
+    el.currentUserId = 'user-me';
+
+    emitChatMessage({
+      id: 'srv-no-time',
+      threadId: CONVERSATION_KEY,
+      senderId: 'agent-1',
+      sender: 'agent:coder',
+      msg: 'here: /workspace/report.md',
+      type: 'chat',
+      // createdAt intentionally omitted
+    });
+    await el.updateComplete;
+
+    expect(ingestSpy).not.toHaveBeenCalled();
+  });
+
+  it('captures messages admitted through the initial history load', async () => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          items: [
+            {
+              id: 'hist-1',
+              projectId: '',
+              sender: 'agent:coder',
+              senderId: 'agent-1',
+              recipient: '',
+              recipientId: '',
+              msg: 'note /workspace/hist.md',
+              type: 'chat',
+              agentId: '',
+              createdAt: '2026-01-01T00:00:00Z',
+            },
+          ],
+        }),
+    } as unknown as Response);
+
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = CONVERSATION_KEY;
+    el.projectId = 'proj-thread';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await vi.waitFor(() => expect(ingestSpy).toHaveBeenCalled());
+
+    const [message, , context, opts] = ingestSpy.mock.calls[0];
+    expect((message as { id: string }).id).toBe('hist-1');
+    expect((context as { projectId?: string }).projectId).toBe('proj-thread');
+    expect((opts as { scopeGeneration?: number }).scopeGeneration).toBe(
+      chatRecentFiles.scopeGeneration
+    );
+  });
+
+  it('does not attribute an initial history page to a conversation the thread has since switched away from', async () => {
+    // The race is specifically in the gap between the fetch resolving (the
+    // existing fetchId check at that point still passes) and `res.json()`
+    // resolving — not the earlier gap during the fetch itself, which the
+    // existing check already covers.
+    apiFetch.mockReset();
+    let resolveJson!: (value: unknown) => void;
+    apiFetch.mockImplementationOnce(
+      () =>
+        Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () =>
+            new Promise((resolve) => {
+              resolveJson = resolve;
+            }),
+        }) as unknown as Promise<Response>
+    );
+    apiFetch.mockResolvedValue(emptyHistory());
+
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = CONVERSATION_KEY;
+    el.projectId = 'proj-A';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await vi.waitFor(() => expect(resolveJson).toBeDefined());
+
+    // Switch conversations while `res.json()` is still pending.
+    el.conversationKey = 'other-thread';
+    el.projectId = 'proj-B';
+    await el.updateComplete;
+
+    resolveJson({
+      items: [
+        {
+          id: 'hist-stale',
+          projectId: '',
+          sender: 'agent:coder',
+          senderId: 'agent-1',
+          recipient: '',
+          recipientId: '',
+          msg: 'note /workspace/hist.md',
+          type: 'chat',
+          agentId: '',
+          createdAt: '2026-01-01T00:00:00Z',
+        },
+      ],
+    });
+
+    const internals = el as unknown as { messageMap: Map<string, unknown> };
+    // mergeMessages (unconditional) runs immediately before the recent-files
+    // guard, in the same synchronous continuation — once the stale item is
+    // merged, the guard has already run too.
+    await vi.waitFor(() => expect(internals.messageMap.has('hist-stale')).toBe(true));
+    expect(ingestSpy).not.toHaveBeenCalled();
+  });
+
+  it('forwards a historical message’s legacy (wave-1) attachment paths to ingest', async () => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          items: [
+            {
+              id: 'hist-legacy',
+              projectId: '',
+              sender: 'agent:coder',
+              senderId: 'agent-1',
+              recipient: '',
+              recipientId: '',
+              msg: 'no mention in text',
+              type: 'chat',
+              agentId: '',
+              createdAt: '2026-01-01T00:00:00Z',
+              attachments: ['/workspace/legacy.md'],
+            },
+          ],
+        }),
+    } as unknown as Response);
+
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = CONVERSATION_KEY;
+    el.projectId = 'proj-thread';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await vi.waitFor(() => expect(ingestSpy).toHaveBeenCalled());
+
+    const [message] = ingestSpy.mock.calls[0];
+    expect((message as { legacyAttachmentPaths?: string[] }).legacyAttachmentPaths).toEqual([
+      '/workspace/legacy.md',
+    ]);
+  });
+
+  it('forwards a historical message’s modern (W7) attachment refs from messageAttachments to ingest', async () => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          items: [
+            {
+              id: 'hist-refs',
+              projectId: '',
+              sender: 'agent:coder',
+              senderId: 'agent-1',
+              recipient: '',
+              recipientId: '',
+              msg: 'see attached',
+              type: 'chat',
+              agentId: '',
+              createdAt: '2026-01-01T00:00:00Z',
+            },
+          ],
+          messageAttachments: {
+            'hist-refs': [
+              { id: 'att-hist-1', name: 'report.pdf', mime: 'application/pdf', size: 10 },
+            ],
+          },
+        }),
+    } as unknown as Response);
+
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = CONVERSATION_KEY;
+    el.projectId = 'proj-thread';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await vi.waitFor(() => expect(ingestSpy).toHaveBeenCalled());
+
+    const [, refs] = ingestSpy.mock.calls[0];
+    expect(refs).toEqual([
+      { id: 'att-hist-1', name: 'report.pdf', mime: 'application/pdf', size: 10 },
+    ]);
+  });
+
+  it('captures messages admitted through a reconnect backfill', async () => {
+    const el = await mount();
+
+    apiFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          items: [
+            {
+              id: 'backfill-1',
+              projectId: '',
+              sender: 'agent:coder',
+              senderId: 'agent-1',
+              recipient: '',
+              recipientId: '',
+              msg: 'note /workspace/backfill.md',
+              type: 'chat',
+              agentId: '',
+              createdAt: '2026-01-01T00:00:00Z',
+            },
+          ],
+        }),
+    } as unknown as Response);
+
+    // A lightweight SSE notification (no full payload) falls back to backfill.
+    emitChatMessage({});
+    await vi.waitFor(() => expect(ingestSpy).toHaveBeenCalled());
+
+    const [message, , , opts] = ingestSpy.mock.calls[0];
+    expect((message as { id: string }).id).toBe('backfill-1');
+    expect((opts as { scopeGeneration?: number }).scopeGeneration).toBe(
+      chatRecentFiles.scopeGeneration
+    );
+    void el;
+  });
+
+  it('does not attribute a reconnect-backfill page to a conversation the thread has since switched away from', async () => {
+    // Same race as the initial-history-load test above, but for
+    // runBackfillV2's post-json re-check specifically: the gap is between
+    // the fetch resolving (its earlier fetchId check still passes) and
+    // `res.json()` resolving.
+    const el = await mount();
+    el.projectId = 'proj-A';
+    await el.updateComplete;
+
+    let resolveJson!: (value: unknown) => void;
+    apiFetch.mockImplementationOnce(
+      () =>
+        Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () =>
+            new Promise((resolve) => {
+              resolveJson = resolve;
+            }),
+        }) as unknown as Promise<Response>
+    );
+
+    emitChatMessage({}); // a lightweight SSE notification triggers backfillV2
+    await vi.waitFor(() => expect(resolveJson).toBeDefined());
+
+    // Switch conversations while `res.json()` is still pending.
+    el.conversationKey = 'other-thread';
+    el.projectId = 'proj-B';
+    await el.updateComplete;
+
+    resolveJson({
+      items: [
+        {
+          id: 'backfill-stale',
+          projectId: '',
+          sender: 'agent:coder',
+          senderId: 'agent-1',
+          recipient: '',
+          recipientId: '',
+          msg: 'note /workspace/backfill.md',
+          type: 'chat',
+          agentId: '',
+          createdAt: '2026-01-01T00:00:00Z',
+        },
+      ],
+    });
+
+    const internals = el as unknown as { messageMap: Map<string, unknown> };
+    // mergeMessages (unconditional) runs immediately before the recent-files
+    // guard, in the same synchronous continuation — once the stale item is
+    // merged, the guard has already run too.
+    await vi.waitFor(() => expect(internals.messageMap.has('backfill-stale')).toBe(true));
+    expect(ingestSpy).not.toHaveBeenCalled();
+  });
+
+  it('captures messages admitted through an around-message fetch', async () => {
+    // scrollToMessageById only attempts fetchAroundMessage when the target id
+    // isn't already rendered, and the thread's "messages-scroll" container
+    // (which the scroll math needs) only renders once at least one message
+    // exists — seed the initial history with an unrelated message first.
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          items: [
+            {
+              id: 'seed-1',
+              projectId: '',
+              sender: 'agent:coder',
+              senderId: 'agent-1',
+              recipient: '',
+              recipientId: '',
+              msg: 'seed message',
+              type: 'chat',
+              agentId: '',
+              createdAt: '2026-01-01T00:00:00Z',
+            },
+          ],
+        }),
+    } as unknown as Response);
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = CONVERSATION_KEY;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await vi.waitFor(() => expect(ingestSpy).toHaveBeenCalled());
+    ingestSpy.mockClear();
+
+    apiFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          items: [
+            {
+              id: 'around-1',
+              projectId: '',
+              sender: 'agent:coder',
+              senderId: 'agent-1',
+              recipient: '',
+              recipientId: '',
+              msg: 'note /workspace/around.md',
+              type: 'chat',
+              agentId: '',
+              createdAt: '2026-01-01T00:00:00Z',
+            },
+          ],
+        }),
+    } as unknown as Response);
+
+    await el.scrollToMessageById('missing-message-id');
+    await vi.waitFor(() => expect(ingestSpy).toHaveBeenCalled());
+
+    const [message, , , opts] = ingestSpy.mock.calls[0];
+    expect((message as { id: string }).id).toBe('around-1');
+    expect((opts as { scopeGeneration?: number }).scopeGeneration).toBe(
+      chatRecentFiles.scopeGeneration
+    );
+  });
+
+  it('captures nothing from mounting/rendering alone, with no load, merge, or send', async () => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = CONVERSATION_KEY;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await el.updateComplete;
+
+    expect(ingestSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not capture a mention fan-out copy admitted through history', async () => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          items: [
+            {
+              id: 'mention-1',
+              projectId: '',
+              sender: 'agent:coder',
+              senderId: 'agent-1',
+              recipient: '',
+              recipientId: '',
+              msg: 'note /workspace/mention.md',
+              type: 'mention',
+              agentId: '',
+              createdAt: '2026-01-01T00:00:00Z',
+            },
+            {
+              id: 'real-1',
+              projectId: '',
+              sender: 'agent:coder',
+              senderId: 'agent-1',
+              recipient: '',
+              recipientId: '',
+              msg: 'note /workspace/real.md',
+              type: 'chat',
+              agentId: '',
+              createdAt: '2026-01-01T00:00:01Z',
+            },
+          ],
+        }),
+    } as unknown as Response);
+
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = CONVERSATION_KEY;
+    el.projectId = 'proj-thread';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await vi.waitFor(() => expect(ingestSpy).toHaveBeenCalled());
+
+    expect(ingestSpy).toHaveBeenCalledTimes(1);
+    const [message] = ingestSpy.mock.calls[0];
+    expect((message as { id: string }).id).toBe('real-1');
+  });
+
+  it('resolves the DM sender project over the thread-level inherited project (live SSE, messageProjectId)', async () => {
+    // The SSE payload's ChatEventData has no senderProjectId field (only
+    // projectId flows through live messages today), so this exercises the
+    // messageProjectId fallback half of the precedence at thread level.
+    const el = await mount();
+    el.isDM = true;
+    el.projectId = 'proj-inherited';
+
+    emitChatMessage({
+      id: 'srv-3',
+      threadId: CONVERSATION_KEY,
+      senderId: 'agent-1',
+      sender: 'agent:coder',
+      msg: 'note /workspace/dm.md',
+      type: 'chat',
+      projectId: 'proj-sender',
+      createdAt: '2026-01-01T00:00:00Z',
+    });
+    await el.updateComplete;
+
+    const [, , context] = ingestSpy.mock.calls[0];
+    expect((context as { projectId?: string }).projectId).toBe('proj-sender');
+  });
+
+  it('resolves the DM senderProjectId over both messageProjectId and the thread-level inherited project (history load)', async () => {
+    // Unlike the live-SSE path above, a full history Message does carry
+    // senderProjectId — this proves the sender-field half of the precedence
+    // (resolveMessageProjectId: senderProjectId before messageProjectId)
+    // actually wins at thread level, not just in the pure-helper unit tests.
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          items: [
+            {
+              id: 'hist-sender',
+              projectId: 'proj-message', // messageProjectId — must lose to senderProjectId
+              sender: 'agent:coder',
+              senderId: 'agent-1',
+              recipient: '',
+              recipientId: '',
+              msg: 'note /workspace/dm.md',
+              type: 'chat',
+              agentId: '',
+              createdAt: '2026-01-01T00:00:00Z',
+              senderProjectId: 'proj-sender',
+            },
+          ],
+        }),
+    } as unknown as Response);
+
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = CONVERSATION_KEY;
+    el.isDM = true;
+    el.projectId = 'proj-inherited';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await vi.waitFor(() => expect(ingestSpy).toHaveBeenCalled());
+
+    const [, , context] = ingestSpy.mock.calls[0];
+    expect((context as { projectId?: string }).projectId).toBe('proj-sender');
+  });
+
+  it('omits the path candidate (but the spy call still happens) when no project resolves', async () => {
+    const el = await mount();
+    el.isDM = true;
+    el.projectId = 'proj-inherited';
+
+    emitChatMessage({
+      id: 'srv-4',
+      threadId: CONVERSATION_KEY,
+      senderId: 'agent-1',
+      sender: 'agent:coder',
+      msg: 'note /workspace/dm.md',
+      type: 'chat',
+      createdAt: '2026-01-01T00:00:00Z',
+    });
+    await el.updateComplete;
+
+    const [, , context] = ingestSpy.mock.calls[0];
+    expect((context as { projectId?: string }).projectId).toBeUndefined();
   });
 });

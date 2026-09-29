@@ -55,11 +55,16 @@ beforeAll(async () => {
   expect(ScionPageChat).toBeDefined();
   // Connecting a page below (`document.body.appendChild`) runs
   // `connectedCallback`'s unawaited `initV2()`, which starts lazily
-  // importing these modules in the background and never gets awaited by
-  // anything in this file. Importing them here, awaited, warms the module
-  // cache so that background import resolves near-instantly instead of
-  // running a first-time module transform that can still be unresolved
-  // when this file's own tests finish and its environment tears down.
+  // importing chat-space-rail/chat-members in the background and never
+  // gets awaited by anything in this file. Importing them here, awaited,
+  // warms the module cache so that background import resolves
+  // near-instantly instead of running a first-time module transform that
+  // can still be unresolved when this file's own tests finish and their
+  // environment tears down. `chat-switcher.js` is a different import —
+  // `togglePalette`'s first-open lazy load, not `initV2()`'s — and every
+  // test below that reaches it already awaits it to completion; it is
+  // warmed here too so that a connected page can never leave it in flight
+  // at teardown, even if a future test reaches it without awaiting.
   await Promise.all([
     import('../shared/chat/chat-space-rail.js'),
     import('../shared/chat/chat-members.js'),
