@@ -6,11 +6,14 @@ package hooks
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 )
 
 // maxEnvOverlayBytes caps the env overlay file size to prevent abuse from
@@ -118,19 +121,22 @@ func LoadEnvOverlay(path string, allowedRoots []string) (map[string]string, erro
 	if path == "" {
 		return nil, nil
 	}
-	info, err := os.Stat(path)
-	if os.IsNotExist(err) {
-		return nil, nil
-	}
+	// This overlay file is written by a pre-start provisioner running as
+	// the workload user, into a directory the workload owns outright, and
+	// is then read back here — potentially by root, if a future caller
+	// moves overlay loading earlier. dirfd.ReadFileNoFollow refuses a
+	// symlink at any component, requires a single-link regular file, and
+	// bounds the read, instead of the previous separate os.Stat-then-
+	// os.ReadFile (itself a TOCTOU: the file could change between the two
+	// calls, and os.ReadFile follows symlinks unconditionally).
+	data, err := dirfd.ReadFileNoFollow(path, maxEnvOverlayBytes)
 	if err != nil {
-		return nil, fmt.Errorf("stat env overlay %s: %w", path, err)
-	}
-	if info.Size() > maxEnvOverlayBytes {
-		return nil, fmt.Errorf("env overlay %s exceeds %d bytes", path, maxEnvOverlayBytes)
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		if errors.Is(err, dirfd.ErrTooLarge) {
+			return nil, fmt.Errorf("env overlay %s exceeds %d bytes: %w", path, maxEnvOverlayBytes, err)
+		}
 		return nil, fmt.Errorf("read env overlay %s: %w", path, err)
 	}
 
@@ -180,28 +186,91 @@ func resolveEnvValue(raw json.RawMessage, allowedRoots []string) (string, error)
 	if err != nil {
 		return "", fmt.Errorf("resolve from_file %q: %w", from, err)
 	}
-	if !pathInAnyRoot(cleaned, allowedRoots) {
-		return "", fmt.Errorf("from_file %q escapes allowed roots %v", cleaned, allowedRoots)
-	}
 
-	info, err := os.Stat(cleaned)
+	content, err := readFromFileNoFollow(cleaned, allowedRoots)
 	if err != nil {
-		return "", fmt.Errorf("from_file %q not found: %w", cleaned, err)
-	}
-	if info.IsDir() {
-		return "", fmt.Errorf("from_file %q is a directory", cleaned)
-	}
-	if info.Size() > maxEnvSecretFileBytes {
-		return "", fmt.Errorf("from_file %q exceeds %d bytes", cleaned, maxEnvSecretFileBytes)
-	}
-
-	content, err := os.ReadFile(cleaned)
-	if err != nil {
-		return "", fmt.Errorf("read from_file %q: %w", cleaned, err)
+		return "", err
 	}
 	// Trim trailing whitespace; tokens written via shell heredoc/echo often
 	// pick up a trailing newline that breaks Bearer-token comparisons.
 	return strings.TrimRight(string(content), "\r\n \t"), nil
+}
+
+// readFromFileNoFollow reads a from_file referent through the same
+// fd-anchored, no-follow, bounded primitives used everywhere else in this
+// package, rather than the previous filepath.Abs + string-prefix
+// containment check followed by a separate os.Stat and os.ReadFile — a
+// TOCTOU pair that also trusted the path's textual form to prove
+// containment, which a symlink defeats: a symlink whose own name sits
+// inside an allowed root but whose target does not passes a string-prefix
+// check yet still gets read.
+//
+// If allowedRoots is empty there is no containment policy to enforce —
+// matching pathInAnyRoot's historical "no roots configured" behaviour, used
+// only by tests — and cleaned is read directly (dirfd.ReadFileNoFollow,
+// which refuses every symlink outright: with no root there is nothing to
+// prove a target stays inside). Otherwise cleaned must resolve to inside
+// one of allowedRoots, which dirfd.ReadUnderRootNoFollow verifies by
+// walking an openat(O_NOFOLLOW) fd chain down from that root rather than by
+// comparing path strings, so containment itself becomes symlink-safe.
+//
+// A symlink cleaned resolves through — at any component, including
+// cleaned's own leaf — is followed, not refused, as long as
+// ReadUnderRootNoFollow can prove its target stays under that same root
+// through the fd-anchored walk itself. This is required, not optional: a
+// Kubernetes projected-secret volume's key files are exactly this shape
+// ("key" -> "..data/key", "..data" -> a timestamped sibling directory), so
+// refusing every symlink unconditionally broke from_file for every secret
+// mounted that way. A symlink whose name sits under allowedRoots but whose
+// real target does not is still refused; see ReadUnderRootNoFollow's doc
+// comment for exactly what "prove" means here and why a textual containment
+// check is not enough. There is deliberately no separate stat anywhere in
+// this path: the file is fstat'd and read exactly once, from the fd the
+// walk finally verifies.
+//
+// Error messages preserve their pre-existing shapes ("not found", "escapes
+// allowed roots", "exceeds N bytes") so callers and tests that key off
+// those substrings keep working; only the mechanism producing them changed.
+func readFromFileNoFollow(cleaned string, allowedRoots []string) ([]byte, error) {
+	if len(allowedRoots) == 0 {
+		data, err := dirfd.ReadFileNoFollow(cleaned, maxEnvSecretFileBytes)
+		if err != nil {
+			return nil, wrapFromFileErr(cleaned, err)
+		}
+		return data, nil
+	}
+
+	lastErr := dirfd.ErrPathEscapesRoot
+	for _, root := range allowedRoots {
+		if root == "" {
+			continue
+		}
+		data, err := dirfd.ReadUnderRootNoFollow(root, cleaned, maxEnvSecretFileBytes)
+		if err == nil {
+			return data, nil
+		}
+		if errors.Is(err, dirfd.ErrPathEscapesRoot) {
+			lastErr = err
+			continue
+		}
+		return nil, wrapFromFileErr(cleaned, err)
+	}
+	return nil, fmt.Errorf("from_file %q escapes allowed roots %v: %w", cleaned, allowedRoots, lastErr)
+}
+
+// wrapFromFileErr translates a dirfd sentinel error into the from_file
+// error message shape callers already depend on.
+func wrapFromFileErr(cleaned string, err error) error {
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return fmt.Errorf("from_file %q not found: %w", cleaned, err)
+	case errors.Is(err, dirfd.ErrTooLarge):
+		return fmt.Errorf("from_file %q exceeds %d bytes: %w", cleaned, maxEnvSecretFileBytes, err)
+	case errors.Is(err, dirfd.ErrNotSingleLinkRegular):
+		return fmt.Errorf("from_file %q is not a plain file: %w", cleaned, err)
+	default:
+		return fmt.Errorf("read from_file %q: %w", cleaned, err)
+	}
 }
 
 // MergeEnvOverlay merges overlay values into env and returns the result.
@@ -262,28 +331,4 @@ func validEnvKey(k string) bool {
 		}
 	}
 	return len(k) > 0
-}
-
-func pathInAnyRoot(path string, roots []string) bool {
-	if len(roots) == 0 {
-		return true
-	}
-	for _, root := range roots {
-		if root == "" {
-			continue
-		}
-		abs, err := filepath.Abs(root)
-		if err != nil {
-			continue
-		}
-		// Use Rel to avoid prefix-mismatch (e.g. /foo vs /foobar).
-		rel, err := filepath.Rel(abs, path)
-		if err != nil {
-			continue
-		}
-		if rel == "." || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel)) {
-			return true
-		}
-	}
-	return false
 }

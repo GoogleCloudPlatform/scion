@@ -14,9 +14,15 @@ import (
 	"time"
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
+
+// agentLimitsMaxBytes bounds readLimitsState's read. A legitimate
+// agent-limits.json is a handful of integer counters; 1 MiB is generous
+// headroom with no legitimate case anywhere near it.
+const agentLimitsMaxBytes = 1 << 20
 
 // ExitCodeLimitsExceeded is the exit code used when an agent is stopped due to
 // exceeding configured limits (max_turns, max_model_calls, or max_duration).
@@ -107,9 +113,15 @@ func (h *LimitsHandler) Handle(event *hooks.Event) error {
 	}
 }
 
-// InitLimitsFile creates or resets the agent-limits.json file.
-// Called during post-start to initialize counters (they reset on each start/resume).
-func InitLimitsFile(limitsPath string, maxTurns, maxModelCalls int) error {
+// InitLimitsFile creates or resets the agent-limits.json file. Called
+// during post-start to initialize counters (they reset on each
+// start/resume). When uid > 0, the file is chowned to uid:gid (the scion
+// user hook processes run as) via an fchown on the temp file's open fd
+// before the rename, not a separate path-based chown afterwards — init
+// runs as root and calls this after sup.Run has already started the
+// workload, so a path-based chown at that point has a real race window
+// against a symlink swapped in at limitsPath.
+func InitLimitsFile(limitsPath string, maxTurns, maxModelCalls, uid, gid int) error {
 	ls := LimitsState{
 		TurnCount:      0,
 		ModelCallCount: 0,
@@ -117,7 +129,7 @@ func InitLimitsFile(limitsPath string, maxTurns, maxModelCalls int) error {
 		MaxModelCalls:  maxModelCalls,
 		StartedAt:      time.Now().UTC().Format(time.RFC3339),
 	}
-	return writeLimitsState(limitsPath, &ls)
+	return writeLimitsState(limitsPath, &ls, uid, gid)
 }
 
 // incrementAndCheck reads the limits file, increments the given counter field,
@@ -141,8 +153,10 @@ func (h *LimitsHandler) incrementAndCheck(counterField string, limit int, limitN
 		count = ls.ModelCallCount
 	}
 
-	// Write the updated state
-	if err := writeLimitsState(h.limitsPath, ls); err != nil {
+	// Write the updated state. Skip chown (uid<=0): this runs from a hook
+	// process that already runs as the scion user, so the rewritten file
+	// keeps the ownership it's created with.
+	if err := writeLimitsState(h.limitsPath, ls, 0, 0); err != nil {
 		log.Error("Failed to write agent-limits.json: %v", err)
 		return nil
 	}
@@ -189,8 +203,18 @@ func (h *LimitsHandler) triggerLimitsExceeded(message string) {
 }
 
 // readLimitsState reads the agent-limits.json file.
+//
+// LimitsHandler is only ever constructed inside the dropped `sciontool
+// hook` subprocess today, so this read is not currently a privilege-
+// boundary crossing — but its sibling writeLimitsState is already
+// fd-based and no-follow, and a future caller that moves this into root's
+// own context should not silently inherit an unhardened read just because
+// this one predates that hardening. dirfd.ReadFileNoFollow gives it the
+// same symlink/FIFO/oversize refusals as every other root-context state
+// read in this codebase, at no behavioral cost to the current dropped
+// caller.
 func (h *LimitsHandler) readLimitsState() (*LimitsState, error) {
-	data, err := os.ReadFile(h.limitsPath)
+	data, err := dirfd.ReadFileNoFollow(h.limitsPath, agentLimitsMaxBytes)
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", h.limitsPath, err)
 	}
@@ -201,8 +225,11 @@ func (h *LimitsHandler) readLimitsState() (*LimitsState, error) {
 	return &ls, nil
 }
 
-// writeLimitsState writes the limits state to disk atomically.
-func writeLimitsState(path string, ls *LimitsState) error {
+// writeLimitsState writes the limits state to disk atomically. When uid > 0,
+// the file is chowned to uid:gid by fchown on the temp file's open fd
+// before the rename, never by a separate path-based chown afterwards that a
+// symlink swapped in at path could redirect to an arbitrary file.
+func writeLimitsState(path string, ls *LimitsState, uid, gid int) error {
 	data, err := json.MarshalIndent(ls, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling limits state: %w", err)
@@ -214,17 +241,32 @@ func writeLimitsState(path string, ls *LimitsState) error {
 		return fmt.Errorf("creating temp file: %w", err)
 	}
 	tmpPath := tmpFile.Name()
+	defer func() {
+		if err != nil {
+			_ = os.Remove(tmpPath)
+		}
+	}()
 
-	if _, err := tmpFile.Write(data); err != nil {
+	if _, werr := tmpFile.Write(data); werr != nil {
 		_ = tmpFile.Close()
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("writing temp file: %w", err)
+		err = fmt.Errorf("writing temp file: %w", werr)
+		return err
 	}
-	_ = tmpFile.Close()
+	if uid > 0 {
+		if cerr := tmpFile.Chown(uid, gid); cerr != nil {
+			_ = tmpFile.Close()
+			err = fmt.Errorf("chowning temp file: %w", cerr)
+			return err
+		}
+	}
+	if cerr := tmpFile.Close(); cerr != nil {
+		err = fmt.Errorf("closing temp file: %w", cerr)
+		return err
+	}
 
-	if err := os.Rename(tmpPath, path); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("atomic rename: %w", err)
+	if rerr := os.Rename(tmpPath, path); rerr != nil {
+		err = fmt.Errorf("atomic rename: %w", rerr)
+		return err
 	}
 
 	return nil
