@@ -238,15 +238,15 @@ func (s *Server) resolveOutboundRouting(
 		// UUID arm above.
 		//
 		// Scoped to skip when ConversationID/ConversationRef is set (DEF-138
-		// Rule 1): there, recipientID is never used to derive a new key — it
-		// is only compared against the ALREADY-RESOLVED conversation's own
-		// external_ref (in handleAgentOutboundMessage's "Case (b)", after
-		// this function returns) to detect an agent-to-agent DM on an
-		// existing, independently-authorized conversation. recipientID can
-		// legitimately be an agent's ID there (TestOutboundDMAuthz_
-		// ConversationID_Allowed_Persisted), and requiring it to be a user
-		// would break that path for no security benefit: the conversation's
-		// real identity, not recipientID, is what gates that route.
+		// Rule 1, A25.9 spec correction to A25.8 R1): recipientID is never
+		// used to derive a key, create a conversation, or register
+		// participants on this path; the asserted conversation is
+		// authorized independently in S4. recipientID can legitimately be
+		// an agent's ID there (TestOutboundDMAuthz_ConversationID_
+		// Allowed_Persisted for ConversationID; TestHandleAgentOutboundMessage_
+		// A259_R1_ConversationRef_AgentPeer_Allowed for ConversationRef),
+		// and requiring it to be a user would break those paths for no
+		// security benefit.
 		u, err := s.store.GetUser(ctx, recipientID)
 		if err == nil {
 			recipientID = u.ID
