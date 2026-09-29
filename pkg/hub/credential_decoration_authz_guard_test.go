@@ -47,25 +47,27 @@ import (
 // decorationGuardAllowed lists the exact "file.go:function" locations
 // permitted to reference credential decoration. These are the only carriage
 // and rendering sites: where ValidateToken derives it, where
-// credentialContextForIdentity copies it onto the credential context, and
-// the accessor/constructor definitions themselves in identity.go. The whole
-// of credential_decoration.go (the type's own definition and rendering code)
-// is allowed separately, by filename, below.
+// credentialContextForIdentity copies it onto the credential context, the
+// accessor/constructor definitions themselves in identity.go, and
+// credential_decoration.go's own type/rendering methods (review-2 finding 1
+// hardening: function-level entries, not a whole-file exemption, so a
+// decision helper added to that file later is still scanned like any other
+// function in the package).
 //
 // decorateDecision is deliberately NOT here: it references no decoration
 // today, so pre-authorizing it would grant E.2's future access before E.2
 // exists. E.2 adds its own entry here, explicitly, when it adds a real
 // reference.
 var decorationGuardAllowed = map[string]bool{
-	"identity.go:NewScopedUserIdentityWithDecoration": true,
-	"identity.go:Decoration":                          true,
-	"useraccesstoken.go:ValidateToken":                true,
-	"authz.go:credentialContextForIdentity":           true,
+	"identity.go:NewScopedUserIdentityWithDecoration":          true,
+	"identity.go:Decoration":                                   true,
+	"useraccesstoken.go:ValidateToken":                         true,
+	"authz.go:credentialContextForIdentity":                    true,
+	"credential_decoration.go:IsZero":                          true,
+	"credential_decoration.go:LogValue":                        true,
+	"credential_decoration.go:clone":                           true,
+	"credential_decoration.go:CredentialDecorationFromContext": true,
 }
-
-// decorationGuardAllowedFile is fully exempt: it is E.1's own type
-// definition and rendering file, not authorization-decision code.
-const decorationGuardAllowedFile = "credential_decoration.go"
 
 // decorationHit is one reference to credential decoration found by
 // scanDecorationReferences.
@@ -88,13 +90,16 @@ var decorationSymbols = map[string]bool{
 // so it can be unit-tested against synthetic fixtures, not just real files
 // on disk) and returns every reference to credential decoration: the
 // CredentialDecoration type, CredentialDecorationFromContext,
-// NewScopedUserIdentityWithDecoration, or a ".Decoration" selector (which
-// also catches the Decoration() accessor method call). References that occur
-// inside a top-level type declaration (e.g. CredentialContext's own
-// `Decoration *CredentialDecoration` field, or ScopedUserIdentity's
-// `decoration *CredentialDecoration` field) are not reported: declaring a
-// carriage field is expected and is not executable logic that can branch on
-// the value.
+// NewScopedUserIdentityWithDecoration, or a selector matching "Decoration"
+// case-insensitively (which catches the exported `.Decoration` field, the
+// `Decoration()` accessor method call, AND — review-2 finding 1 — a direct
+// read of the unexported `s.decoration` field on ScopedUserIdentity, or of a
+// promoted `.decoration`/`.Decoration` field on any struct embedding
+// *CredentialDecoration). References that occur inside a top-level type
+// declaration (e.g. CredentialContext's own `Decoration *CredentialDecoration`
+// field, or ScopedUserIdentity's `decoration *CredentialDecoration` field)
+// are not reported: declaring a carriage field is expected and is not
+// executable logic that can branch on the value.
 func scanDecorationReferences(filename, src string) ([]decorationHit, error) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, filename, src, 0)
@@ -123,8 +128,8 @@ func scanDecorationReferences(filename, src string) ([]decorationHit, error) {
 		var symbol string
 		switch node := n.(type) {
 		case *ast.SelectorExpr:
-			if node.Sel.Name == "Decoration" {
-				symbol = "Decoration"
+			if strings.EqualFold(node.Sel.Name, "Decoration") {
+				symbol = node.Sel.Name
 			}
 		case *ast.Ident:
 			if decorationSymbols[node.Name] {
@@ -173,8 +178,11 @@ func enclosingDeclName(f *ast.File, pos token.Pos) string {
 
 // scanDirForDecorationReferences walks dir (non-recursively skips testdata
 // and vendor, like the other guard tests in this package) and runs
-// scanDecorationReferences over every non-test .go file, skipping
-// decorationGuardAllowedFile entirely (it is the type's own definition).
+// scanDecorationReferences over every non-test .go file, including
+// credential_decoration.go itself: its legitimate references are covered by
+// function-level decorationGuardAllowed entries, not a whole-file exemption
+// (review-2 finding 1 hardening), so a decision helper added to that file
+// later is still scanned like any other function in the package.
 func scanDirForDecorationReferences(dir string) ([]decorationHit, error) {
 	var hits []decorationHit
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, walkErr error) error {
@@ -190,9 +198,6 @@ func scanDirForDecorationReferences(dir string) ([]decorationHit, error) {
 		}
 		name := info.Name()
 		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			return nil
-		}
-		if name == decorationGuardAllowedFile {
 			return nil
 		}
 		src, readErr := os.ReadFile(path)
@@ -211,8 +216,8 @@ func scanDirForDecorationReferences(dir string) ([]decorationHit, error) {
 
 // TestCredentialDecorationNotReadByAuthzCode mechanically enforces the E.1
 // rule that credential decoration never influences an authorization
-// decision: no production code outside decorationGuardAllowed (or the wholly
-// exempt credential_decoration.go) may reference it.
+// decision: no production code outside decorationGuardAllowed's specific
+// function-level entries may reference it.
 func TestCredentialDecorationNotReadByAuthzCode(t *testing.T) {
 	hubDir := findHubDir(t)
 	hits, err := scanDirForDecorationReferences(hubDir)
@@ -269,11 +274,27 @@ func otherFileReference(req AuthzRequest) bool {
 	return req.Credential.Decoration != nil
 }
 `,
+		// Review-2 finding 1: a direct read of the unexported
+		// ScopedUserIdentity.decoration field. Every file in pkg/hub shares
+		// the package, so any of them can name this lowercase field
+		// directly, without going through the exported Decoration()
+		// accessor at all. The exact-case-only match in the first fix after
+		// review-1 missed this (0 hits when probed).
+		"lowercase_field.go": `package hub
+
+func lowerFieldReference(id Identity) bool {
+	if s, ok := id.(*ScopedUserIdentity); ok && s.decoration != nil {
+		return s.decoration.Labels["role_hint"] == "admin"
+	}
+	return false
+}
+`,
 	}
 	want := map[string]string{
 		"authz_direct_field.go:directFieldReference": "Decoration",
 		"authz_accessor.go:accessorReference":        "CredentialDecorationFromContext",
 		"capabilities_mut3.go:otherFileReference":    "Decoration",
+		"lowercase_field.go:lowerFieldReference":     "decoration",
 	}
 
 	for name, src := range fixtures {
