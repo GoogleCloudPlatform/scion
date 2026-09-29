@@ -112,7 +112,7 @@ func TestCredentialDecoration_LogValue_SanitizesAndGroups(t *testing.T) {
 		Kind:      CredentialKindUAT,
 		TokenID:   "tok-1",
 		TokenName: "bad\x00name",
-		Boundary:  DecorationBoundary{Kind: "project", ProjectID: "proj-1"},
+		Boundary:  decorationBoundary{Kind: "project", ProjectID: "proj-1"},
 		Purpose:   "ci\x00automation",
 		Labels:    map[string]string{"env": "prod"},
 	}
@@ -154,7 +154,7 @@ func TestCredentialDecoration_LogValue_TruncatesOversizeText(t *testing.T) {
 		Kind:      CredentialKindUAT,
 		TokenID:   "tok-1",
 		TokenName: strings.Repeat("a", 200),
-		Boundary:  DecorationBoundary{Kind: "project", ProjectID: "p"},
+		Boundary:  decorationBoundary{Kind: "project", ProjectID: "p"},
 	}
 	attrs := attrMap(t, d.LogValue().Group())
 	name := attrs["name"].String()
@@ -215,35 +215,66 @@ func TestValidateCredentialMetadata_Rejects(t *testing.T) {
 	for i := 0; i < uatMaxLabelCount+1; i++ {
 		nineLabels[strings.Repeat("k", 1)+string(rune('a'+i))] = "placeholderval"
 	}
+	invalidUTF8 := string([]byte{0xff, 0xfe})
+
+	const (
+		ruleUTF8              = "must be valid UTF-8"
+		ruleControlOrFormat   = "must not contain control or formatting characters"
+		rulePurposeSingleLine = "must not contain control or formatting characters, and must be a single line"
+		ruleSecret            = "must not resemble a bearer token or credential value"
+		ruleNameLength        = "must be at most 128 bytes"
+		rulePurposeLength     = "must be at most 128 bytes"
+		ruleLabelCount        = "at most 8 labels are allowed"
+		ruleLabelUTF8         = "label key and value must be valid UTF-8"
+		ruleLabelKeyShape     = "label key must match ^[a-z][a-z0-9_.-]{0,31}$"
+		ruleLabelKeyReserved  = "label key is reserved"
+		ruleLabelValueLength  = "label value must be at most 64 bytes"
+		ruleLabelValueSpacing = "label value must not have leading or trailing whitespace"
+		ruleLabelValueCharset = "label value contains a disallowed character"
+	)
 
 	cases := []struct {
-		name    string
-		token   string
-		purpose string
-		labels  map[string]string
+		name      string
+		token     string
+		purpose   string
+		labels    map[string]string
+		wantField string
+		wantRule  string
 	}{
-		{name: "NUL byte in purpose", token: "n", purpose: "bad\x00purpose"},
-		{name: "newline in purpose (single line rule)", token: "n", purpose: "line1\nline2"},
-		{name: "bidi override in purpose", token: "n", purpose: "bad\u202epurpose"},
-		{name: "zero-width space in purpose", token: "n", purpose: "bad\u200bpurpose"},
-		{name: "129-byte purpose", token: "n", purpose: strings.Repeat("p", uatMaxPurposeBytes+1)},
-		{name: "33-char label key", token: "n", labels: map[string]string{longKey: "placeholderval"}},
-		{name: "uppercase label key", token: "n", labels: map[string]string{"Env": "placeholderval"}},
-		{name: "9 labels exceeds count cap", token: "n", labels: nineLabels},
-		{name: "label value contains scion_pat_", token: "n", labels: map[string]string{"k": "has scion_pat_abc"}},
-		{name: "label value contains Bearer prefix", token: "n", labels: map[string]string{"k": "Bearer x"}},
-		{name: "reserved key exact match", token: "n", labels: map[string]string{"user_id": "placeholderval"}},
-		{name: "reserved dotted-prefix match", token: "n", labels: map[string]string{"agent.name": "placeholderval"}},
-		{name: "actor_binding reserved for G's verified agent binding", token: "n", labels: map[string]string{"actor_binding": "placeholderval"}},
-		{name: "actor_binding dotted-prefix match", token: "n", labels: map[string]string{"actor_binding.id": "placeholderval"}},
-		{name: "x- prefix reserved", token: "n", labels: map[string]string{"x-custom": "placeholderval"}},
-		{name: "scion. prefix reserved", token: "n", labels: map[string]string{"scion.internal": "placeholderval"}},
-		{name: "leading/trailing space in value", token: "n", labels: map[string]string{"k": " v "}},
-		{name: "disallowed char in value", token: "n", labels: map[string]string{"k": "v!"}},
-		{name: "65-byte label value", token: "n", labels: map[string]string{"k": strings.Repeat("v", uatMaxLabelValueBytes+1)}},
-		{name: "129-byte name", token: strings.Repeat("n", uatMaxNameBytes+1)},
-		{name: "control char in name", token: "bad\x00name"},
-		{name: "name resembles a bearer token", token: "scion_pat_abcdefgh"},
+		{name: "NUL byte in purpose", token: "n", purpose: "bad\x00purpose", wantField: "purpose", wantRule: rulePurposeSingleLine},
+		{name: "newline in purpose (single line rule)", token: "n", purpose: "line1\nline2", wantField: "purpose", wantRule: rulePurposeSingleLine},
+		{name: "bidi override in purpose", token: "n", purpose: "bad\u202epurpose", wantField: "purpose", wantRule: rulePurposeSingleLine},
+		{name: "zero-width space in purpose", token: "n", purpose: "bad\u200bpurpose", wantField: "purpose", wantRule: rulePurposeSingleLine},
+		{name: "line separator U+2028 in purpose", token: "n", purpose: "line1\u2028line2", wantField: "purpose", wantRule: rulePurposeSingleLine},
+		{name: "paragraph separator U+2029 in purpose", token: "n", purpose: "para1\u2029para2", wantField: "purpose", wantRule: rulePurposeSingleLine},
+		{name: "invalid UTF-8 in purpose", token: "n", purpose: "bad" + invalidUTF8, wantField: "purpose", wantRule: ruleUTF8},
+		{name: "129-byte purpose", token: "n", purpose: strings.Repeat("p", uatMaxPurposeBytes+1), wantField: "purpose", wantRule: rulePurposeLength},
+		{name: "invalid UTF-8 in name", token: "n" + invalidUTF8, wantField: "name", wantRule: ruleUTF8},
+		{name: "invalid UTF-8 in label key", token: "n", labels: map[string]string{"k" + invalidUTF8: "placeholderval"}, wantField: "labels", wantRule: ruleLabelUTF8},
+		{name: "invalid UTF-8 in label value", token: "n", labels: map[string]string{"k": "placeholderval" + invalidUTF8}, wantField: "labels", wantRule: ruleLabelUTF8},
+		{name: "33-char label key", token: "n", labels: map[string]string{longKey: "placeholderval"}, wantField: "labels", wantRule: ruleLabelKeyShape},
+		{name: "uppercase label key", token: "n", labels: map[string]string{"Env": "placeholderval"}, wantField: "labels", wantRule: ruleLabelKeyShape},
+		{name: "9 labels exceeds count cap", token: "n", labels: nineLabels, wantField: "labels", wantRule: ruleLabelCount},
+		{name: "label value contains scion_pat_", token: "n", labels: map[string]string{"k": "has scion_pat_abc"}, wantField: "labels", wantRule: ruleSecret},
+		{name: "label value contains Bearer prefix", token: "n", labels: map[string]string{"k": "Bearer x"}, wantField: "labels", wantRule: ruleSecret},
+		{name: "label value contains lowercase bearer prefix", token: "n", labels: map[string]string{"k": "bearer x"}, wantField: "labels", wantRule: ruleSecret},
+		{name: "label value contains uppercase SCION_PAT_", token: "n", labels: map[string]string{"k": "SCION_PAT_abc"}, wantField: "labels", wantRule: ruleSecret},
+		{name: "reserved key exact match", token: "n", labels: map[string]string{"user_id": "placeholderval"}, wantField: "labels", wantRule: ruleLabelKeyReserved},
+		{name: "reserved dotted-prefix match", token: "n", labels: map[string]string{"agent.name": "placeholderval"}, wantField: "labels", wantRule: ruleLabelKeyReserved},
+		{name: "actor_binding reserved for G's verified agent binding", token: "n", labels: map[string]string{"actor_binding": "placeholderval"}, wantField: "labels", wantRule: ruleLabelKeyReserved},
+		{name: "actor_binding dotted-prefix match", token: "n", labels: map[string]string{"actor_binding.id": "placeholderval"}, wantField: "labels", wantRule: ruleLabelKeyReserved},
+		{name: "actor-binding hyphen variant reserved", token: "n", labels: map[string]string{"actor-binding": "placeholderval"}, wantField: "labels", wantRule: ruleLabelKeyReserved},
+		{name: "agent-id hyphen variant reserved", token: "n", labels: map[string]string{"agent-id": "placeholderval"}, wantField: "labels", wantRule: ruleLabelKeyReserved},
+		{name: "on-behalf-of hyphen variant reserved", token: "n", labels: map[string]string{"on-behalf-of": "placeholderval"}, wantField: "labels", wantRule: ruleLabelKeyReserved},
+		{name: "x- prefix reserved", token: "n", labels: map[string]string{"x-custom": "placeholderval"}, wantField: "labels", wantRule: ruleLabelKeyReserved},
+		{name: "scion. prefix reserved", token: "n", labels: map[string]string{"scion.internal": "placeholderval"}, wantField: "labels", wantRule: ruleLabelKeyReserved},
+		{name: "hub. prefix reserved", token: "n", labels: map[string]string{"hub.internal": "placeholderval"}, wantField: "labels", wantRule: ruleLabelKeyReserved},
+		{name: "leading/trailing space in value", token: "n", labels: map[string]string{"k": " v "}, wantField: "labels", wantRule: ruleLabelValueSpacing},
+		{name: "disallowed char in value", token: "n", labels: map[string]string{"k": "v!"}, wantField: "labels", wantRule: ruleLabelValueCharset},
+		{name: "65-byte label value", token: "n", labels: map[string]string{"k": strings.Repeat("v", uatMaxLabelValueBytes+1)}, wantField: "labels", wantRule: ruleLabelValueLength},
+		{name: "129-byte name", token: strings.Repeat("n", uatMaxNameBytes+1), wantField: "name", wantRule: ruleNameLength},
+		{name: "control char in name", token: "bad\x00name", wantField: "name", wantRule: ruleControlOrFormat},
+		{name: "name resembles a bearer token", token: "scion_pat_abcdefgh", wantField: "name", wantRule: ruleSecret},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -254,6 +285,12 @@ func TestValidateCredentialMetadata_Rejects(t *testing.T) {
 			var metaErr *ErrInvalidUATMetadata
 			if !asMetadataErr(err, &metaErr) {
 				t.Fatalf("expected *ErrInvalidUATMetadata, got %T: %v", err, err)
+			}
+			// Pin exactly which rule fired (review finding F13): without
+			// this, a case could pass through an unintended rule and the
+			// table would still go green.
+			if metaErr.Field != tc.wantField || metaErr.Rule != tc.wantRule {
+				t.Fatalf("got field=%q rule=%q, want field=%q rule=%q", metaErr.Field, metaErr.Rule, tc.wantField, tc.wantRule)
 			}
 			// The error must name the field/rule but never the offending value.
 			for _, v := range tc.labels {
