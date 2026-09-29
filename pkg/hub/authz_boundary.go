@@ -678,7 +678,7 @@ func ContemplatedProjectClass(permissionID string) ProjectTargetClass {
 // ALLOWLIST, not a blocklist: for a resource type with reviewed semantics,
 // an unrecognized ScopeKind value is rejected just as surely as a known but
 // wrong one — a real project-target proof is never "the global catalog,"
-// and never a value the reviewer hasn't seen. A resource type with no entry
+// and never a value outside the reviewed set. A resource type with no entry
 // in validRealProjectScopeKinds at all has no reviewed ScopeKind concept,
 // so its class.ScopeKind must be exactly empty.
 func validateRealProjectClass(permissionID string, class ProjectTargetClass) error {
@@ -957,12 +957,10 @@ func (a *AuthzService) SystemAuthorityProof(ctx context.Context, principal Princ
 // project-agnostic. Iterates permissions.SupportedTargetClassesFor(permissionID)
 // and succeeds if applyHubWideScopeFilters leaves permissionID intact for
 // the principal's active, constraint-reduced (hub-wide ResourceContext, no
-// ProjectID) system-scope grants for ANY supported class. This is the fix
-// for "a hub-member's catalog-only skill.read must remain hub-boundary
-// mint-eligible for the global catalog" while ProjectTargetAdmission still
-// denies that same user for an unrelated project-scoped skill at use time,
-// where the real target's actual ScopeKind resolves the class without
-// contemplation.
+// ProjectID) system-scope grants for ANY supported class. A hub-member's
+// catalog-only skill.read therefore remains hub-boundary mint-eligible for
+// the global catalog, while ProjectTargetAdmission still resolves a real
+// project target by its actual ScopeKind, independent of contemplation.
 func (a *AuthzService) MintTimeSystemGrant(ctx context.Context, principal PrincipalContext, permissionID string) (bool, error) {
 	if err := requireLocalUserPrincipal(principal); err != nil {
 		return false, err
@@ -1345,11 +1343,11 @@ var ErrEmptySelectorList = errors.New("no selectors requested")
 // the expansion (all alias members) to individually pass
 // SystemAuthorityProof(ctx, principal, boundary.ProjectID, permID,
 // ContemplatedProjectClass(permID)). If admitted, each permission without a
-// MintEligibilityRegistry descriptor additionally needs the project role's
-// OWN flat permission subset (hasProjectRoleFlatPermission) when admission
-// came from membership — when admission instead came from system authority
-// for that exact permission, that proof already suffices (no redundant,
-// narrower recheck).
+// If admitted, each permission without a MintEligibilityRegistry descriptor
+// additionally requires the project role's own flat permission subset
+// (hasProjectRoleFlatPermission), regardless of whether admission came from
+// membership or from system authority; system authority admits but never
+// widens the flat ceiling.
 //
 // For a Hub boundary, EACH permission ID is evaluated by hubPermissionEligible:
 // a flat/system path (MintTimeSystemGrant OR any active project-scoped
@@ -1427,7 +1425,7 @@ func (a *AuthzService) CanMintSelector(ctx context.Context, principal PrincipalC
 			continue
 		}
 
-		eligible, reason, err := a.selectorMintEligible(ctx, principal, boundary, membershipOK, mapping.PermissionIDs)
+		eligible, reason, err := a.selectorMintEligible(ctx, principal, boundary, mapping.PermissionIDs)
 		if err != nil {
 			return nil, err
 		}
@@ -1512,25 +1510,31 @@ func (a *AuthzService) hubPermissionEligible(ctx context.Context, principal Prin
 	if !hasDescriptor {
 		return false, nil
 	}
+	// hasRelevantProjectAdmission's result depends only on (principal,
+	// permID), never on relType, so it is computed at most once here —
+	// lazily, only once some RelationshipTypes entry is actually mint-
+	// eligible for this principal kind/resource type/permission — rather
+	// than once per matching relType.
 	resourceType := registryResourceType(permID)
+	relationshipCandidate := false
 	for _, src := range descriptor.Sources {
 		if src.Kind != permissions.MintEligibilityRelationship {
 			continue
 		}
 		for _, relType := range src.RelationshipTypes {
-			if !permissions.RelationshipPolicyMintEligible(relType, permissions.RelationshipPrincipalKind(string(principal.Kind)), resourceType, permID) {
-				continue
-			}
-			hasAny, err := a.hasRelevantProjectAdmission(ctx, principal, permID)
-			if err != nil {
-				return false, err
-			}
-			if hasAny {
-				return true, nil
+			if permissions.RelationshipPolicyMintEligible(relType, permissions.RelationshipPrincipalKind(string(principal.Kind)), resourceType, permID) {
+				relationshipCandidate = true
+				break
 			}
 		}
+		if relationshipCandidate {
+			break
+		}
 	}
-	return false, nil
+	if !relationshipCandidate {
+		return false, nil
+	}
+	return a.hasRelevantProjectAdmission(ctx, principal, permID)
 }
 
 // selectorMintEligible evaluates MintEligibilityRegistry for every
@@ -1546,8 +1550,8 @@ func (a *AuthzService) hubPermissionEligible(ctx context.Context, principal Prin
 // project's own role definition. Only MintEligibilityRelationship
 // selectors (declared resource-relative, e.g. agent.attach/port_access) can
 // be minted without a matching project role, via RelationshipPolicyMintEligible
-// below, which does not depend on membershipOK either.
-func (a *AuthzService) selectorMintEligible(ctx context.Context, principal PrincipalContext, boundary TokenBoundary, membershipOK bool, permIDs []string) (bool, MintDenialReason, error) {
+// below.
+func (a *AuthzService) selectorMintEligible(ctx context.Context, principal PrincipalContext, boundary TokenBoundary, permIDs []string) (bool, MintDenialReason, error) {
 	for _, permID := range permIDs {
 		descriptor, hasDescriptor := permissions.MintEligibilityRegistry[permID]
 		if !hasDescriptor {
@@ -1561,6 +1565,7 @@ func (a *AuthzService) selectorMintEligible(ctx context.Context, principal Princ
 			continue
 		}
 		eligible := false
+		sawRelationshipSource := false
 		for _, src := range descriptor.Sources {
 			switch src.Kind {
 			case permissions.MintEligibilityFlatRole:
@@ -1578,6 +1583,7 @@ func (a *AuthzService) selectorMintEligible(ctx context.Context, principal Princ
 					eligible = true
 				}
 			case permissions.MintEligibilityRelationship:
+				sawRelationshipSource = true
 				resourceType := registryResourceType(permID)
 				for _, relType := range src.RelationshipTypes {
 					// MintEligible, not RelationshipPolicyAllows: a mint
@@ -1612,6 +1618,9 @@ func (a *AuthzService) selectorMintEligible(ctx context.Context, principal Princ
 			}
 		}
 		if !eligible {
+			if !sawRelationshipSource {
+				return false, MintDenialFlatRoleInsufficient, nil
+			}
 			return false, MintDenialNoRelationshipCandidacy, nil
 		}
 	}

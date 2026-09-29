@@ -96,6 +96,29 @@ func TestGroupAndGCPServiceAccount_DecideAgreesWithSystemAuthorityProof(t *testi
 				t.Errorf("Decide and SystemAuthorityProof must agree for %s: Decide.Allowed=%v, SystemAuthorityProof=%v", permID, decision.Allowed, proof)
 			}
 		})
+
+		t.Run(permID+"/decide_agrees_with_system_authority_proof_no_grant", func(t *testing.T) {
+			authz, s := authzTestSetup(t)
+			ctx := context.Background()
+			projectID := tid("gsa-diff-nogrant-proj-" + permID)
+			userID := tid("gsa-diff-nogrant-user-" + permID)
+			createDelegateTestProject(t, s, projectID, "gsa-diff-nogrant-"+permID, "someone-else")
+			require.NoError(t, s.CreateUser(ctx, &store.User{ID: userID, Email: userID + "@test.com", DisplayName: "u", Role: "member", Status: store.UserStatusActive}))
+
+			target := groupSATarget(p.Resource, projectID, "nogrant-"+permID)
+			identity := NewAuthenticatedUser(userID, userID+"@test.com", "u", store.UserRoleMember, "api")
+
+			decision := authz.CheckAccess(ctx, identity, target, Action(p.Action))
+			proof, err := authz.SystemAuthorityProof(ctx, activeUserPrincipal(userID), projectID, permID, ContemplatedProjectClass(permID))
+			require.NoError(t, err)
+
+			if decision.Allowed {
+				t.Fatalf("Decide must deny %s against its real project-parented target when the principal holds no grant for it: %+v", permID, decision)
+			}
+			if decision.Allowed != proof {
+				t.Errorf("Decide and SystemAuthorityProof must agree for %s with no grant: Decide.Allowed=%v, SystemAuthorityProof=%v", permID, decision.Allowed, proof)
+			}
+		})
 	}
 }
 
@@ -130,8 +153,8 @@ func TestGroupAndGCPServiceAccount_NonApplicableRows_SystemAuthorityProofDenied(
 	}
 }
 
-// TestSeededRoleException_DecideAgreesWithSystemAuthorityProof is finding
-// 1's differential proof for the seeded-role exceptions specifically: the
+// TestSeededRoleException_DecideAgreesWithSystemAuthorityProof is the
+// differential check for the seeded-role exceptions specifically: the
 // SAME seeded system role (not a synthetic single-permission role) must
 // make Decide agree with SystemAuthorityProof on a real target for each
 // entry in seededRoleProjectTargetExceptions.

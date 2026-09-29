@@ -1495,6 +1495,32 @@ func TestMintEligibilityCache_PrincipalMismatchSkipsCache(t *testing.T) {
 	if len(refsB) != 1 || refsB[0].ID != userB {
 		t.Errorf("a second principal sharing one cache must get its OWN closure, not the first principal's: got %+v, want ID %q", refsB, userB)
 	}
+
+	// Same guard, for activeSystemScopeCandidates's system-scope slot: two
+	// principals with DIFFERENT system-scoped grants, sharing one cache,
+	// must each see their own candidates.
+	sysUserA := tid("mec-sys-user-a")
+	sysUserB := tid("mec-sys-user-b")
+	systemRoleUserWithPermissions(t, s, sysUserA, []string{"quota.read"})
+	systemRoleUserWithPermissions(t, s, sysUserB, []string{"scheduled_event.read"})
+
+	sysCache := &mintEligibilityCache{}
+	sysCachedCtx := withMintEligibilityCache(ctx, sysCache)
+
+	candidatesA, roleDefsA, _, err := authz.activeSystemScopeCandidates(sysCachedCtx, activeUserPrincipal(sysUserA))
+	require.NoError(t, err)
+	candidatesB, roleDefsB, _, err := authz.activeSystemScopeCandidates(sysCachedCtx, activeUserPrincipal(sysUserB))
+	require.NoError(t, err)
+
+	if !candidateSetHasPermission(candidatesA, roleDefsA, "quota.read") {
+		t.Fatal("sanity: sysUserA's candidates must include quota.read")
+	}
+	if !candidateSetHasPermission(candidatesB, roleDefsB, "scheduled_event.read") {
+		t.Error("a second principal sharing one cache must get its OWN system-scope candidates, not the first principal's")
+	}
+	if candidateSetHasPermission(candidatesB, roleDefsB, "quota.read") {
+		t.Error("sysUserB's candidates must not include sysUserA's quota.read grant")
+	}
 }
 
 // countingConstraintStore wraps a store.Store and counts calls to
@@ -1652,16 +1678,16 @@ func TestSelectorMintEligible_ExplicitFlatRoleSource_ProvesProjectRole(t *testin
 	})
 
 	// The test permission is not actually in the project-member role's
-	// permission set, so an explicit FlatRole descriptor must still deny --
-	// proving the branch now calls hasProjectRoleFlatPermission instead of
-	// assuming eligible=true.
-	ok, reason, err := authz.selectorMintEligible(ctx, activeUserPrincipal(userID), TokenBoundary{Kind: BoundaryKindProject, ProjectID: projectID}, true, []string{testFlatRoleOnlyPermissionID})
+	// permission set, so an explicit FlatRole descriptor must still deny:
+	// an explicit FlatRole source is proven via hasProjectRoleFlatPermission,
+	// never assumed.
+	ok, reason, err := authz.selectorMintEligible(ctx, activeUserPrincipal(userID), TokenBoundary{Kind: BoundaryKindProject, ProjectID: projectID}, []string{testFlatRoleOnlyPermissionID})
 	require.NoError(t, err)
 	if ok {
 		t.Error("an explicit FlatRole descriptor must still require the project role to actually carry the permission")
 	}
-	if reason != MintDenialNoRelationshipCandidacy {
-		t.Errorf("got reason %q", reason)
+	if reason != MintDenialFlatRoleInsufficient {
+		t.Errorf("a descriptor with no Relationship source must return MintDenialFlatRoleInsufficient, not a relationship-flavored reason; got %q", reason)
 	}
 }
 
@@ -1682,10 +1708,45 @@ func TestSelectorMintEligible_FlatRoleAndRelationship_ORBehavior(t *testing.T) {
 		{Kind: permissions.MintEligibilityRelationship, RelationshipTypes: []string{"owner", "ancestor"}},
 	})
 
-	ok, _, err := authz.selectorMintEligible(ctx, activeUserPrincipal(userID), TokenBoundary{Kind: BoundaryKindProject, ProjectID: projectID}, true, []string{testFlatAndRelationshipPermRoleID})
+	ok, _, err := authz.selectorMintEligible(ctx, activeUserPrincipal(userID), TokenBoundary{Kind: BoundaryKindProject, ProjectID: projectID}, []string{testFlatAndRelationshipPermRoleID})
 	require.NoError(t, err)
 	if !ok {
 		t.Error("FlatRole failing must not prevent the Relationship alternative from succeeding (OR semantics)")
+	}
+}
+
+// TestSelectorMintEligible_FlatRoleAndRelationship_BothFail_DenialReason
+// pins the MintDenialReason chosen for a mixed-source descriptor when
+// NEITHER source succeeds: a Relationship source that was actually tried
+// and failed keeps MintDenialNoRelationshipCandidacy, even though a
+// FlatRole source was also present and also failed.
+func TestSelectorMintEligible_FlatRoleAndRelationship_BothFail_DenialReason(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+	userID := tid("smef-4")
+	projectID := tid("smef-4-proj")
+	createDelegateTestProject(t, s, projectID, "smef-4-proj", "test")
+	createTestUserWithProjectRole(t, s, userID, "smef4@test.com", projectID, store.ProjectRoleMember)
+	_, err := s.CreateAccessConstraint(ctx, &store.AccessConstraint{
+		Name: "smef-4-constraint", SubjectKind: store.ConstraintSubjectAllPrincipals,
+		ScopeType: store.RoleScopeProject, ScopeID: projectID,
+		MaximumPermissions: []string{"agent.read"}, // excludes agent.attach
+		Purpose:            "test: mixed-source denial reason when both sources fail",
+	})
+	require.NoError(t, err)
+
+	withTestFlatRoleDescriptor(t, testFlatAndRelationshipPermRoleID, []permissions.MintEligibilitySource{
+		{Kind: permissions.MintEligibilityFlatRole},
+		{Kind: permissions.MintEligibilityRelationship, RelationshipTypes: []string{"owner", "ancestor"}},
+	})
+
+	ok, reason, err := authz.selectorMintEligible(ctx, activeUserPrincipal(userID), TokenBoundary{Kind: BoundaryKindProject, ProjectID: projectID}, []string{testFlatAndRelationshipPermRoleID})
+	require.NoError(t, err)
+	if ok {
+		t.Fatal("both FlatRole and Relationship failing must deny")
+	}
+	if reason != MintDenialNoRelationshipCandidacy {
+		t.Errorf("a descriptor with a Relationship source that was tried and failed must return MintDenialNoRelationshipCandidacy even though a FlatRole source was also present and failed; got %q", reason)
 	}
 }
 
@@ -1845,7 +1906,7 @@ func TestResolveTargetScope_AccessConstraintAdminIsHubOnly(t *testing.T) {
 }
 
 func TestResolveTargetScope_GCPServiceAccountAssignIsInstanceOnly(t *testing.T) {
-	// gcpServiceAccountResource(sa) (capabilities.go:150-163) always builds
+	// gcpServiceAccountResource(sa) always builds
 	// a Resource for the EXISTING gcp_service_account being assigned, whose
 	// ParentType/ParentID (when set) is that SA's own scope -- never the
 	// new agent being created/patched. assign is instance-only: collection

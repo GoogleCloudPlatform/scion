@@ -1570,10 +1570,10 @@ var Catalog = []OperationSpec{
 			// suffixes) authorizes via authorizePortAccess for EVERY HTTP
 			// method and any subpath after "/proxy" — there is no
 			// method-based routing before that authorization check. Entry
-			// points here are representative, not exhaustive (the schema
-			// has no wildcard method/pattern), so every method this route
-			// actually accepts is listed explicitly, plus one representative
-			// subpath.
+			// points are representative, not exhaustive: the schema has no
+			// wildcard method or pattern, and this route accepts every
+			// HTTP method on ".../proxy" and any subpath. GET/POST/PUT/
+			// DELETE and one subpath are listed as representatives.
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/ports/{port}/proxy", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/ports/{port}/proxy", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/ports/{port}/proxy", Method: "PUT"},

@@ -16,11 +16,11 @@ package authzop
 
 import "testing"
 
-// TestAgentAttachCatalogMatchesRoute pins the concrete drift this task
-// closes: the live agent-attach route is a WebSocket handshake at
-// "/api/v1/agents/{id}/pty" (pkg/hub/pty_handlers.go handleAgentPTY,
-// invoked from handlers_agents_core.go's action == "pty" branch) — never
-// "/attach". The catalog must declare the route that actually exists.
+// TestAgentAttachCatalogMatchesRoute pins the rule: the catalog must
+// declare the route that actually exists. The live agent-attach route is a
+// WebSocket handshake at "/api/v1/agents/{id}/pty" (pkg/hub/pty_handlers.go
+// handleAgentPTY, invoked from handlers_agents_core.go's action == "pty"
+// branch) — never "/attach".
 func TestAgentAttachCatalogMatchesRoute(t *testing.T) {
 	discovered := map[OperationID][]DiscoveredEntryPoint{
 		"agent.attach": {
@@ -33,11 +33,11 @@ func TestAgentAttachCatalogMatchesRoute(t *testing.T) {
 	}
 }
 
-// TestAgentAttachCatalogDoesNotMatchOldPattern proves CheckDrift would have
-// caught the original mismatch: if the discovered route were still the
-// old, wrong "/attach" pattern, the live/catalog comparison must report a
-// mismatch rather than silently agreeing (i.e. this test exercises the
-// negative case that motivated the fix above).
+// TestAgentAttachCatalogDoesNotMatchOldPattern pins the other direction of
+// the same rule: the catalog pattern must match the registered route, so
+// if the discovered route were the "/attach" pattern instead of "/pty",
+// the live/catalog comparison must report a mismatch rather than silently
+// agreeing.
 func TestAgentAttachCatalogDoesNotMatchOldPattern(t *testing.T) {
 	discovered := map[OperationID][]DiscoveredEntryPoint{
 		"agent.attach": {
@@ -53,12 +53,11 @@ func TestAgentAttachCatalogDoesNotMatchOldPattern(t *testing.T) {
 	}
 }
 
-// TestDiagnosticsLogsStreamCatalogMatchesRoute pins the second concrete
-// drift this task closes: handleDiagnosticsLogsStream
-// (pkg/hub/handlers_diagnostics.go) sets "Content-Type: text/event-stream"
-// and streams incrementally -- it is an SSE entry point, not a plain HTTP
-// route, even though it is reached via a normal http.HandleFunc
-// registration.
+// TestDiagnosticsLogsStreamCatalogMatchesRoute pins the rule:
+// handleDiagnosticsLogsStream (pkg/hub/handlers_diagnostics.go) is an SSE
+// entry point, not a plain HTTP route, even though it is reached via a
+// normal http.HandleFunc registration -- it sets
+// "Content-Type: text/event-stream" and streams incrementally.
 func TestDiagnosticsLogsStreamCatalogMatchesRoute(t *testing.T) {
 	discovered := map[OperationID][]DiscoveredEntryPoint{
 		"hub.diagnostics.read": {
@@ -70,6 +69,27 @@ func TestDiagnosticsLogsStreamCatalogMatchesRoute(t *testing.T) {
 	findings := CheckDrift(discovered)
 	if len(findings) != 0 {
 		t.Errorf("expected no drift for hub.diagnostics.read against its live routes, got %+v", findings)
+	}
+}
+
+// TestAgentPortAccessCatalogMatchesRoute pins agent.portaccess's declared
+// entry points against the live port_forward_handlers.go routes: the bare
+// list route, plus proxyAgentPort reachable via every listed method on
+// ".../proxy" and one representative ".../proxy/{subpath}".
+func TestAgentPortAccessCatalogMatchesRoute(t *testing.T) {
+	discovered := map[OperationID][]DiscoveredEntryPoint{
+		"agent.portaccess": {
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/ports", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/ports/{port}/proxy", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/ports/{port}/proxy", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/ports/{port}/proxy", Method: "PUT"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/ports/{port}/proxy", Method: "DELETE"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/ports/{port}/proxy/{subpath}", Method: "GET"},
+		},
+	}
+	findings := CheckDrift(discovered)
+	if len(findings) != 0 {
+		t.Errorf("expected no drift for agent.portaccess against its live routes, got %+v", findings)
 	}
 }
 
