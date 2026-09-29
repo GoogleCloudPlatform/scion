@@ -83,6 +83,8 @@ type Agent struct {
 	Message string `json:"message,omitempty"`
 	// AppliedConfig holds the value of the "applied_config" field.
 	AppliedConfig string `json:"applied_config,omitempty"`
+	// HarnessConfig holds the value of the "harness_config" field.
+	HarnessConfig string `json:"harness_config,omitempty"`
 	// Ancestry holds the value of the "ancestry" field.
 	Ancestry []string `json:"ancestry,omitempty"`
 	// Created holds the value of the "created" field.
@@ -166,7 +168,7 @@ func (*Agent) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullBool)
 		case agent.FieldExitCode, agent.FieldCurrentTurns, agent.FieldCurrentModelCalls, agent.FieldStateVersion, agent.FieldGeneration:
 			values[i] = new(sql.NullInt64)
-		case agent.FieldSlug, agent.FieldName, agent.FieldTemplate, agent.FieldStatus, agent.FieldMessageMode, agent.FieldPhase, agent.FieldActivity, agent.FieldToolName, agent.FieldConnectionState, agent.FieldContainerStatus, agent.FieldExitReason, agent.FieldRuntimeState, agent.FieldStalledFromActivity, agent.FieldImage, agent.FieldRuntime, agent.FieldRuntimeBrokerID, agent.FieldTaskSummary, agent.FieldMessage, agent.FieldAppliedConfig, agent.FieldReincarnationState:
+		case agent.FieldSlug, agent.FieldName, agent.FieldTemplate, agent.FieldStatus, agent.FieldMessageMode, agent.FieldPhase, agent.FieldActivity, agent.FieldToolName, agent.FieldConnectionState, agent.FieldContainerStatus, agent.FieldExitReason, agent.FieldRuntimeState, agent.FieldStalledFromActivity, agent.FieldImage, agent.FieldRuntime, agent.FieldRuntimeBrokerID, agent.FieldTaskSummary, agent.FieldMessage, agent.FieldAppliedConfig, agent.FieldHarnessConfig, agent.FieldReincarnationState:
 			values[i] = new(sql.NullString)
 		case agent.FieldCreated, agent.FieldUpdated, agent.FieldLastSeen, agent.FieldLastActivityEvent, agent.FieldStartedAt, agent.FieldDeletedAt, agent.FieldReincarnationUpdatedAt:
 			values[i] = new(sql.NullTime)
@@ -387,6 +389,12 @@ func (_m *Agent) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field applied_config", values[i])
 			} else if value.Valid {
 				_m.AppliedConfig = value.String
+			}
+		case agent.FieldHarnessConfig:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field harness_config", values[i])
+			} else if value.Valid {
+				_m.HarnessConfig = value.String
 			}
 		case agent.FieldAncestry:
 			if value, ok := values[i].(*[]byte); !ok {
@@ -610,6 +618,9 @@ func (_m *Agent) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("applied_config=")
 	builder.WriteString(_m.AppliedConfig)
+	builder.WriteString(", ")
+	builder.WriteString("harness_config=")
+	builder.WriteString(_m.HarnessConfig)
 	builder.WriteString(", ")
 	builder.WriteString("ancestry=")
 	builder.WriteString(fmt.Sprintf("%v", _m.Ancestry))

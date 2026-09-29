@@ -377,10 +377,15 @@ type AgentFilter struct {
 	RequestedOwnerID string
 
 	// HarnessConfig, when non-empty, restricts results to agents whose
-	// resolved AppliedConfig.HarnessConfig equals this value. AppliedConfig
-	// is stored as an opaque JSON document, so implementations must filter on
-	// the embedded harnessConfig key rather than a dedicated column
-	// (ptone/scion#2146).
+	// resolved AppliedConfig.HarnessConfig equals this value. The Ent
+	// adapter backs this with a dedicated, plain-equality column
+	// (harness_config, pkg/ent/schema/agent.go) kept in sync with
+	// AppliedConfig.HarnessConfig on every write, rather than parsing or
+	// pattern-matching AppliedConfig's JSON at query time — two earlier
+	// attempts at the latter each had a real correctness bug (a Postgres
+	// version floor, then false positives from a same-named nested key
+	// elsewhere in AppliedConfig) that a real column eliminates by
+	// construction (ptone/scion#2146 review R3-1).
 	HarnessConfig string
 
 	// IDs, when non-nil, restricts results to agents whose ID is in this set.

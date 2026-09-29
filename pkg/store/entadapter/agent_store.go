@@ -266,6 +266,9 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
 	if cfg := marshalAppliedConfig(a.AppliedConfig); cfg != "" {
 		create.SetAppliedConfig(cfg)
 	}
+	if hc := harnessConfigOf(a.AppliedConfig); hc != "" {
+		create.SetHarnessConfig(hc)
+	}
 	if !a.LastSeen.IsZero() {
 		create.SetLastSeen(a.LastSeen)
 	}
@@ -434,6 +437,11 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 		update.SetAppliedConfig(cfg)
 	} else {
 		update.ClearAppliedConfig()
+	}
+	if hc := harnessConfigOf(a.AppliedConfig); hc != "" {
+		update.SetHarnessConfig(hc)
+	} else {
+		update.ClearHarnessConfig()
 	}
 	if a.LastSeen.IsZero() {
 		update.ClearLastSeen()
@@ -703,7 +711,7 @@ func agentFilterPredicates(filter store.AgentFilter) ([]predicate.Agent, error) 
 	}
 
 	if filter.HarnessConfig != "" {
-		preds = append(preds, appliedConfigHarnessConfigEquals(filter.HarnessConfig))
+		preds = append(preds, agent.HarnessConfigEQ(filter.HarnessConfig))
 	}
 
 	// IDs: narrowing-only restriction to a specific agent ID set (e.g. a CLI
@@ -1064,6 +1072,18 @@ func marshalAppliedConfig(cfg *store.AgentAppliedConfig) string {
 		return ""
 	}
 	return string(data)
+}
+
+// harnessConfigOf extracts the top-level harness-config name from cfg, or ""
+// if cfg is nil or has none set. This is the single value CreateAgent and
+// UpdateAgent write into the harness_config shadow column (see its doc in
+// pkg/ent/schema/agent.go) — kept as its own function so both call sites
+// derive it identically and cannot drift (ptone/scion#2146 review R3-1).
+func harnessConfigOf(cfg *store.AgentAppliedConfig) string {
+	if cfg == nil {
+		return ""
+	}
+	return cfg.HarnessConfig
 }
 
 // parseTimeString parses a status update's started_at string, accepting the

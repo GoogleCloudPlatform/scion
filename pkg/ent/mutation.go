@@ -3072,6 +3072,7 @@ type AgentMutation struct {
 	task_summary             *string
 	message                  *string
 	applied_config           *string
+	harness_config           *string
 	ancestry                 *[]string
 	appendancestry           []string
 	created                  *time.Time
@@ -4670,6 +4671,55 @@ func (m *AgentMutation) ResetAppliedConfig() {
 	delete(m.clearedFields, agent.FieldAppliedConfig)
 }
 
+// SetHarnessConfig sets the "harness_config" field.
+func (m *AgentMutation) SetHarnessConfig(s string) {
+	m.harness_config = &s
+}
+
+// HarnessConfig returns the value of the "harness_config" field in the mutation.
+func (m *AgentMutation) HarnessConfig() (r string, exists bool) {
+	v := m.harness_config
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldHarnessConfig returns the old "harness_config" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldHarnessConfig(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldHarnessConfig is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldHarnessConfig requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldHarnessConfig: %w", err)
+	}
+	return oldValue.HarnessConfig, nil
+}
+
+// ClearHarnessConfig clears the value of the "harness_config" field.
+func (m *AgentMutation) ClearHarnessConfig() {
+	m.harness_config = nil
+	m.clearedFields[agent.FieldHarnessConfig] = struct{}{}
+}
+
+// HarnessConfigCleared returns if the "harness_config" field was cleared in this mutation.
+func (m *AgentMutation) HarnessConfigCleared() bool {
+	_, ok := m.clearedFields[agent.FieldHarnessConfig]
+	return ok
+}
+
+// ResetHarnessConfig resets all changes to the "harness_config" field.
+func (m *AgentMutation) ResetHarnessConfig() {
+	m.harness_config = nil
+	delete(m.clearedFields, agent.FieldHarnessConfig)
+}
+
 // SetAncestry sets the "ancestry" field.
 func (m *AgentMutation) SetAncestry(s []string) {
 	m.ancestry = &s
@@ -5382,7 +5432,7 @@ func (m *AgentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentMutation) Fields() []string {
-	fields := make([]string, 0, 42)
+	fields := make([]string, 0, 43)
 	if m.slug != nil {
 		fields = append(fields, agent.FieldSlug)
 	}
@@ -5475,6 +5525,9 @@ func (m *AgentMutation) Fields() []string {
 	}
 	if m.applied_config != nil {
 		fields = append(fields, agent.FieldAppliedConfig)
+	}
+	if m.harness_config != nil {
+		fields = append(fields, agent.FieldHarnessConfig)
 	}
 	if m.ancestry != nil {
 		fields = append(fields, agent.FieldAncestry)
@@ -5579,6 +5632,8 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.Message()
 	case agent.FieldAppliedConfig:
 		return m.AppliedConfig()
+	case agent.FieldHarnessConfig:
+		return m.HarnessConfig()
 	case agent.FieldAncestry:
 		return m.Ancestry()
 	case agent.FieldCreated:
@@ -5672,6 +5727,8 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldMessage(ctx)
 	case agent.FieldAppliedConfig:
 		return m.OldAppliedConfig(ctx)
+	case agent.FieldHarnessConfig:
+		return m.OldHarnessConfig(ctx)
 	case agent.FieldAncestry:
 		return m.OldAncestry(ctx)
 	case agent.FieldCreated:
@@ -5920,6 +5977,13 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetAppliedConfig(v)
 		return nil
+	case agent.FieldHarnessConfig:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetHarnessConfig(v)
+		return nil
 	case agent.FieldAncestry:
 		v, ok := value.([]string)
 		if !ok {
@@ -6153,6 +6217,9 @@ func (m *AgentMutation) ClearedFields() []string {
 	if m.FieldCleared(agent.FieldAppliedConfig) {
 		fields = append(fields, agent.FieldAppliedConfig)
 	}
+	if m.FieldCleared(agent.FieldHarnessConfig) {
+		fields = append(fields, agent.FieldHarnessConfig)
+	}
 	if m.FieldCleared(agent.FieldAncestry) {
 		fields = append(fields, agent.FieldAncestry)
 	}
@@ -6250,6 +6317,9 @@ func (m *AgentMutation) ClearField(name string) error {
 		return nil
 	case agent.FieldAppliedConfig:
 		m.ClearAppliedConfig()
+		return nil
+	case agent.FieldHarnessConfig:
+		m.ClearHarnessConfig()
 		return nil
 	case agent.FieldAncestry:
 		m.ClearAncestry()
@@ -6372,6 +6442,9 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldAppliedConfig:
 		m.ResetAppliedConfig()
+		return nil
+	case agent.FieldHarnessConfig:
+		m.ResetHarnessConfig()
 		return nil
 	case agent.FieldAncestry:
 		m.ResetAncestry()

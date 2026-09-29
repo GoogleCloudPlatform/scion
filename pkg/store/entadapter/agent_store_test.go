@@ -19,7 +19,6 @@ package entadapter
 import (
 	"context"
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 
@@ -1291,10 +1290,16 @@ func TestListAgentsWithStaleNonTerminalReincarnationState_ExcludesAgentWithNonTe
 }
 
 // TestAgentStore_HarnessConfigFilter verifies filtering agents by the
-// harnessConfig key embedded in the applied_config JSON document
-// (ptone/scion#2146). harnessConfig has no dedicated column — it must be
-// read out of the same opaque JSON blob that models.AgentAppliedConfig
-// round-trips through marshalAppliedConfig.
+// harness_config shadow column (pkg/ent/schema/agent.go), which
+// CreateAgent/UpdateAgent keep in sync with the top-level
+// AppliedConfig.HarnessConfig (ptone/scion#2146 review R3-1 — this replaced
+// two prior attempts at parsing/pattern-matching the applied_config JSON
+// document at query time, each of which had a real correctness bug: R1-4's
+// PG16-only pg_input_is_valid guard, then R2/R3's strpos/to_json substring
+// search, which produced false positives from CreateInputs.HarnessConfig,
+// a same-named field declared later in AgentAppliedConfig). These tests
+// execute the real predicate (agent.HarnessConfigEQ) via ListAgents, not a
+// hand-simulation of it.
 func TestAgentStore_HarnessConfigFilter(t *testing.T) {
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)
@@ -1334,16 +1339,64 @@ func TestAgentStore_HarnessConfigFilter(t *testing.T) {
 	assert.Equal(t, 3, all.TotalCount)
 }
 
+// TestAgentStore_HarnessConfigFilter_NoEnv is an explicit no-env-field case
+// (ptone/scion#2146 review R3-1's requested coverage): with no Env map at
+// all, filtering by HarnessConfig must still match exactly the top-level
+// value and nothing else.
+func TestAgentStore_HarnessConfigFilter_NoEnv(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	a := makeAgent(projectID, "no-env-agent")
+	a.AppliedConfig = &store.AgentAppliedConfig{HarnessConfig: "claude"}
+	require.NoError(t, s.CreateAgent(ctx, a))
+
+	result, err := s.ListAgents(ctx, store.AgentFilter{HarnessConfig: "claude"}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, result.Items, 1)
+	assert.Equal(t, a.ID, result.Items[0].ID)
+}
+
+// TestAgentStore_HarnessConfigFilter_CreateInputsDivergence is the exact
+// ptone/scion#2146 review R3-1 probe case: an agent whose live, top-level
+// HarnessConfig ("gemini") differs from CreateInputs.HarnessConfig
+// ("claude") — reachable in production because the broker overwrites
+// AppliedConfig.HarnessConfig after create (pkg/hub/httpdispatcher.go)
+// while CreateInputs stays frozen at the create-time value. Filtering by
+// "claude" must NOT match this agent (that was R3-1's false positive on the
+// string-matching predicate); filtering by "gemini" must.
+func TestAgentStore_HarnessConfigFilter_CreateInputsDivergence(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	a := makeAgent(projectID, "diverged-agent")
+	a.AppliedConfig = &store.AgentAppliedConfig{
+		HarnessConfig: "gemini",
+		CreateInputs:  &store.AgentCreateInputs{HarnessConfig: "claude"},
+	}
+	require.NoError(t, s.CreateAgent(ctx, a))
+
+	byCreateInputsValue, err := s.ListAgents(ctx, store.AgentFilter{HarnessConfig: "claude"}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, byCreateInputsValue.Items,
+		"CreateInputs.HarnessConfig must never match — only the live, top-level value does")
+
+	byLiveValue, err := s.ListAgents(ctx, store.AgentFilter{HarnessConfig: "gemini"}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, byLiveValue.Items, 1)
+	assert.Equal(t, a.ID, byLiveValue.Items[0].ID)
+}
+
 // TestAgentStore_HarnessConfigFilter_TolerantOfCorruptRow is the ptone/scion#2146
-// review R1-4 regression: applied_config is a plain Ent field.Text column, not
-// schema-validated JSON (unlike labels/ancestry, which are field.JSON), so a
-// corrupt row can and does exist in practice — parseAppliedConfig already
-// tolerates one by logging and continuing. A naive `col::jsonb`/json_extract
-// cast throws on the first malformed row it touches, which would turn any
-// single corrupt agent anywhere in the table — even in a project the caller
-// can't see — into a 500 for every harnessConfig-filtered query. The
-// appliedConfigHarnessConfigEquals predicate must instead treat a corrupt row
-// as "does not match" and let the query complete.
+// review R1-4 regression, re-verified after the R3-1 rework: a corrupt
+// applied_config row (a plain Ent field.Text column, not schema-validated
+// JSON) must not break a HarnessConfig-filtered query. With the harness_config
+// shadow column, this is now trivially true rather than merely
+// guard-verified: the filter predicate (agent.HarnessConfigEQ) never reads
+// applied_config at all, so a corrupt applied_config value simply can't
+// reach the query — it can only ever affect whether the shadow column was
+// populated in the first place (see BackfillHarnessConfigColumn's own
+// corrupt-row handling for the backfill path).
 func TestAgentStore_HarnessConfigFilter_TolerantOfCorruptRow(t *testing.T) {
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)
@@ -1353,11 +1406,14 @@ func TestAgentStore_HarnessConfigFilter_TolerantOfCorruptRow(t *testing.T) {
 	require.NoError(t, s.CreateAgent(ctx, claude))
 
 	corrupt := makeAgent(projectID, "corrupt-applied-config-agent")
+	corrupt.AppliedConfig = &store.AgentAppliedConfig{HarnessConfig: "gemini"}
 	require.NoError(t, s.CreateAgent(ctx, corrupt))
 
-	// Corrupt corrupt's applied_config directly at the column level — Ent's
-	// field.Text setter does not validate JSON-ness, exactly like production
-	// data that predates a stricter writer or was hand-edited.
+	// Corrupt the row's applied_config directly at the column level, leaving
+	// harness_config (already set to "gemini" at create time) untouched —
+	// exactly like production data whose applied_config was hand-edited or
+	// written by a stricter/older writer, but whose harness_config shadow
+	// column was already correctly populated.
 	corruptUID, err := uuid.Parse(corrupt.ID)
 	require.NoError(t, err)
 	_, err = s.client.Agent.UpdateOneID(corruptUID).SetAppliedConfig("{not json").Save(ctx)
@@ -1368,90 +1424,18 @@ func TestAgentStore_HarnessConfigFilter_TolerantOfCorruptRow(t *testing.T) {
 	require.Len(t, result.Items, 1)
 	assert.Equal(t, claude.ID, result.Items[0].ID)
 
-	// The corrupt row itself never matches any harnessConfig value — it
-	// degrades to "no match", not an error and not a false positive.
-	byCorruptValue, err := s.ListAgents(ctx, store.AgentFilter{HarnessConfig: "not json"}, store.ListOptions{})
+	// The corrupt-applied_config row's harness_config column is untouched by
+	// the corruption (it's a separate column) and still filters correctly.
+	byCorruptRowsHarness, err := s.ListAgents(ctx, store.AgentFilter{HarnessConfig: "gemini"}, store.ListOptions{})
 	require.NoError(t, err)
-	assert.Empty(t, byCorruptValue.Items)
+	require.Len(t, byCorruptRowsHarness.Items, 1)
+	assert.Equal(t, corrupt.ID, byCorruptRowsHarness.Items[0].ID)
 
-	// The unfiltered listing already tolerated this (parseAppliedConfig logs
-	// and continues) — confirm that still holds after corrupting the row.
+	// The unfiltered listing already tolerated a corrupt applied_config
+	// (parseAppliedConfig logs and continues) — confirm that still holds.
 	all, err := s.ListAgents(ctx, store.AgentFilter{ProjectID: projectID}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, 2, all.TotalCount)
-}
-
-// TestAppliedConfigHarnessConfigEquals_PostgresSearchStringMatchesGoEncoding
-// is the "by reasoning" verification the ptone/scion#2146 review R2 asked
-// for on the Postgres branch of appliedConfigHarnessConfigEquals, which
-// cannot be exercised directly (no Postgres available in this sandbox). It
-// pins, in pure Go with no database at all, that the exact substring the
-// Postgres predicate searches for — `"harnessConfig":` followed by
-// to_json(value)'s output — is byte-identical to what marshalAppliedConfig
-// actually writes for a plain ASCII harness-config value (the only kind a
-// validated harness-config slug ever is). This is what makes the strpos
-// match correct rather than coincidental.
-func TestAppliedConfigHarnessConfigEquals_PostgresSearchStringMatchesGoEncoding(t *testing.T) {
-	for _, value := range []string{"claude", "gemini-2", "codex_v1"} {
-		encoded := marshalAppliedConfig(&store.AgentAppliedConfig{HarnessConfig: value})
-
-		// Postgres's to_json(value::text)::text produces exactly `"value"`
-		// for a plain ASCII string with no JSON-special characters — a
-		// double-quoted, unescaped copy, identical to what Go's
-		// encoding/json writes for the same input (both follow the JSON
-		// string-escaping grammar; they diverge only on '<', '>', '&',
-		// which Go additionally HTML-escapes and to_json does not — a
-		// known, narrow gap documented on appliedConfigHarnessConfigEquals,
-		// and not a shape a harness-config slug takes).
-		searchFor := `"harnessConfig":"` + value + `"`
-		assert.Contains(t, encoded, searchFor,
-			"the Postgres strpos search string must match what marshalAppliedConfig actually writes")
-	}
-}
-
-// TestAppliedConfigHarnessConfigEquals_EnvFalsePositiveReasoning is the other
-// half of the "by reasoning" verification: it demonstrates, in pure Go, why
-// the Postgres predicate's second condition (match must occur before any
-// "env": key) is necessary and sufficient. Env is the only later-declared,
-// user-controlled map field that could coincidentally contain the substring
-// "harnessConfig" as one of its own keys; every other field has a fixed,
-// unrelated JSON key name.
-func TestAppliedConfigHarnessConfigEquals_EnvFalsePositiveReasoning(t *testing.T) {
-	// An Env var literally named "harnessConfig" with a colliding value, and
-	// no real top-level HarnessConfig set: the naive (unanchored) substring
-	// search would incorrectly match "gemini" here.
-	encoded := marshalAppliedConfig(&store.AgentAppliedConfig{
-		Env: map[string]string{"harnessConfig": "gemini"},
-	})
-	naivePattern := `"harnessConfig":"gemini"`
-	require.Contains(t, encoded, naivePattern,
-		"sanity check: the collision must actually be present in the encoded document for this test to mean anything")
-
-	// The real top-level "harnessConfig" key is absent (HarnessConfig was
-	// never set, so omitempty drops it) — only the nested one under "env"
-	// exists. The anchor requires the match to occur before "env": starts;
-	// here it does not (the only occurrence IS inside "env"), so the
-	// predicate must not treat this as a match.
-	matchPos := strings.Index(encoded, naivePattern)
-	envPos := strings.Index(encoded, `"env":`)
-	require.NotEqual(t, -1, envPos, "the document must contain an env key for this scenario")
-	assert.Greater(t, matchPos, envPos,
-		"the only occurrence of the colliding pattern must be inside \"env\", after \"env\": starts — "+
-			"this is exactly the case appliedConfigHarnessConfigEquals's env-anchor excludes")
-
-	// By contrast, a real top-level HarnessConfig set alongside the same
-	// colliding Env key: the top-level match occurs before "env": starts,
-	// so the anchor correctly admits it.
-	encodedReal := marshalAppliedConfig(&store.AgentAppliedConfig{
-		HarnessConfig: "gemini",
-		Env:           map[string]string{"harnessConfig": "gemini"},
-	})
-	realMatchPos := strings.Index(encodedReal, naivePattern)
-	realEnvPos := strings.Index(encodedReal, `"env":`)
-	require.NotEqual(t, -1, realMatchPos)
-	require.NotEqual(t, -1, realEnvPos)
-	assert.Less(t, realMatchPos, realEnvPos,
-		"the top-level match must be found before \"env\": starts, regardless of an identically-named Env key")
 }
 
 // TestAgentStore_RequestedOwnerIDFilter verifies that RequestedOwnerID is a

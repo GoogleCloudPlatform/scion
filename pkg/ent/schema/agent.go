@@ -128,6 +128,25 @@ func (Agent) Fields() []ent.Field {
 		field.Text("applied_config").
 			Optional(),
 
+		// harness_config is a queryable shadow of applied_config's
+		// "harnessConfig" key, kept in sync by every write to applied_config
+		// (CreateAgent/UpdateAgent — see agent_store.go's harnessConfigOf
+		// helper) and backfilled once for existing rows (BackfillHarnessConfigColumn).
+		// It exists solely so the CLI --harness filter (AgentFilter.HarnessConfig)
+		// can use a plain, dialect-independent equality predicate instead of
+		// parsing/pattern-matching the applied_config JSON document at query
+		// time — two prior attempts at the latter (a CASE+validity-checked
+		// JSON extract, then a strpos/to_json substring search) each had a
+		// real correctness bug (a Postgres version floor, then false
+		// positives from a same-named nested key) that a real column
+		// eliminates by construction (ptone/scion#2146 review R3-1). It is
+		// not part of store.Agent — nothing outside the HarnessConfig filter
+		// predicate reads it; the enriched, response-facing
+		// store.Agent.HarnessConfig field is unrelated and still derived
+		// from applied_config at response time, unchanged.
+		field.String("harness_config").
+			Optional(),
+
 		// ancestry is the ordered chain of ancestor principal IDs used for
 		// transitive access control. Stored as a JSON array so the dialect-aware
 		// json_each / json_array_elements_text membership filter can be applied.
