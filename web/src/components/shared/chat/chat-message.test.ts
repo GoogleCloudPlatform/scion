@@ -751,6 +751,56 @@ describe('scion-chat-message GitHub shortform refs', () => {
     expect(links[0].getAttribute('href')).toBe('https://github.com/PTone/Scion/issues/42');
     expect(links[0].textContent).toBe('PTone/Scion#42');
   });
+
+  it('does not link when a word character trails the number (R1)', async () => {
+    const el = await mount('see foo/bar#12abc for details');
+    expect(ghRefLinks(el)).toHaveLength(0);
+  });
+
+  it('does not link when an underscore trails the number (R1)', async () => {
+    const el = await mount('see foo/bar#12_x for details');
+    expect(ghRefLinks(el)).toHaveLength(0);
+  });
+
+  it('does not link a scheme-less host like example.com/foo#12 (O1)', async () => {
+    const el = await mount('see example.com/foo#12 for details');
+    expect(ghRefLinks(el)).toHaveLength(0);
+  });
+
+  it('does not link a dotted prefix like user.name/repo#1 (O1)', async () => {
+    const el = await mount('see user.name/repo#1 for details');
+    expect(ghRefLinks(el)).toHaveLength(0);
+  });
+
+  it('does not link mid-word after a non-ASCII prefix like äptone/scion#1 (O1)', async () => {
+    const el = await mount('see äptone/scion#1 for details');
+    expect(ghRefLinks(el)).toHaveLength(0);
+  });
+
+  it('rejects a repo of just dots, e.g. ptone/.#1 (O2)', async () => {
+    const el = await mount('see ptone/.#1 for details');
+    expect(ghRefLinks(el)).toHaveLength(0);
+  });
+
+  it('rejects a repo of just dots, e.g. ptone/..#1 (O2)', async () => {
+    const el = await mount('see ptone/..#1 for details');
+    expect(ghRefLinks(el)).toHaveLength(0);
+  });
+
+  it('links a 39-character owner, the GitHub max length (O3)', async () => {
+    const owner = 'a'.repeat(39);
+    const el = await mount(`see ${owner}/repo#1 for details`);
+    const links = ghRefLinks(el);
+
+    expect(links).toHaveLength(1);
+    expect(links[0].getAttribute('href')).toBe(`https://github.com/${owner}/repo/issues/1`);
+  });
+
+  it('does not link a 40-character owner, one past the GitHub max length (O3)', async () => {
+    const owner = 'a'.repeat(40);
+    const el = await mount(`see ${owner}/repo#1 for details`);
+    expect(ghRefLinks(el)).toHaveLength(0);
+  });
 });
 
 describe('scion-chat-message cross-project label', () => {

@@ -275,18 +275,27 @@ function styleEntityLinks(htmlStr: string): string {
 /**
  * Matches `owner/repo#123` shortform GitHub references:
  *   - Owner: a GitHub username/org, `[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})`.
- *   - Repo: `[A-Za-z0-9._-]+`.
+ *   - Repo: `[A-Za-z0-9._-]+`, excluding a repo made up of only dots (`.`,
+ *     `..`, ...) — GitHub forbids those as repo names, and without the
+ *     exclusion they'd produce a wrong link that the browser silently
+ *     resolves to a different URL.
  *   - Number: one or more digits after `#`.
  * The leading negative lookbehind requires the owner not be preceded by a
- * word character or `/`. That is what keeps `foo/bar#1` from double-linking
- * inside a URL or file path, and keeps `a/b/c#12` from also matching the
- * shorter `b/c#12` tail: a repo can never contain `/`, so a match starting at
- * `a` fails structurally, and a match starting at `b` or `c` is blocked by
- * the preceding `/`. The trailing negative lookahead excludes a following
- * word character, so `#2217a` cannot be split into a ref plus stray text.
+ * Unicode letter, digit, `_`, `/`, or `.`. That is what keeps `foo/bar#1`
+ * from double-linking inside a URL or file path, keeps `a/b/c#12` from also
+ * matching the shorter `b/c#12` tail (a repo can never contain `/`, so a
+ * match starting at `a` fails structurally, and a match starting at `b` or
+ * `c` is blocked by the preceding `/`), keeps a scheme-less host like
+ * `example.com/foo#12` or a dotted prefix like `user.name/repo#1` from
+ * matching (both are blocked by the added `.` exclusion, since a GitHub
+ * owner can never follow a `.`), and — using `\p{L}`/`\p{N}` with the `u`
+ * flag rather than ASCII `\w` — keeps a non-ASCII prefix like `äptone` from
+ * letting `ptone/scion#1` match mid-word. The trailing negative lookahead
+ * excludes a following Unicode letter, digit, or `_`, so `#2217a` cannot be
+ * split into a ref plus stray text.
  */
 const GITHUB_REF_REGEX =
-  /(?<![\w/])([A-Za-z0-9][A-Za-z0-9-]{0,38})\/([A-Za-z0-9._-]+)#(\d+)(?!\w)/g;
+  /(?<![\p{L}\p{N}_/.])([A-Za-z0-9][A-Za-z0-9-]{0,38})\/(?!\.+#)([A-Za-z0-9._-]+)#(\d+)(?![\p{L}\p{N}_])/gu;
 
 /** Apply the GitHub-ref pattern to a text segment (outside code/HTML regions). */
 function styleGithubRefsInText(text: string): string {
@@ -302,6 +311,11 @@ function styleGithubRefsInText(text: string): string {
  * backticks is literal text, not a link. `<pre>` fences and existing `<a>`
  * elements are also skipped in full, so a ref inside a fenced code block, an
  * existing markdown link, or an already-autolinked URL is never re-linked.
+ *
+ * This intentionally does not reuse ENTITY_SKIP_REGION: that region skips
+ * `<pre>` but deliberately leaves inline `<code>` open, because a file path
+ * inside backticks is still meant to link (see its own doc comment) — the
+ * opposite of what this feature needs — so the two skip lists must diverge.
  */
 const GITHUB_REF_SKIP_REGION =
   '<pre\\b[^>]*>[\\s\\S]*?</pre>|<a\\b[^>]*>[\\s\\S]*?</a>|<code\\b[^>]*>[\\s\\S]*?</code>|<[^>]+>';
