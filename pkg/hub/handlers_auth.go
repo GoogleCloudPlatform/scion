@@ -151,6 +151,11 @@ type TokenCreateRequest struct {
 	ProjectID string     `json:"projectId"`
 	Scopes    []string   `json:"scopes"`
 	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
+
+	// E.1 descriptive credential metadata: optional, bounded, immutable
+	// after issuance (there is no update endpoint).
+	Purpose string            `json:"purpose,omitempty"`
+	Labels  map[string]string `json:"labels,omitempty"`
 }
 
 // TokenCreateResponse is the response for creating a user access token.
@@ -170,6 +175,11 @@ type TokenResponse struct {
 	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
 	LastUsed  *time.Time `json:"lastUsed,omitempty"`
 	Created   time.Time  `json:"created"`
+
+	// E.1 descriptive credential metadata: empty for tokens created before
+	// E.1 or without metadata supplied at issuance.
+	Purpose string            `json:"purpose,omitempty"`
+	Labels  map[string]string `json:"labels,omitempty"`
 }
 
 // ExternalUserInfo carries the provider-verified identity fields needed to
@@ -785,8 +795,10 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	key, token, err := s.uatService.CreateToken(r.Context(), user.ID(), req.Name, req.ProjectID, req.Scopes, req.ExpiresAt)
+	key, token, err := s.uatService.CreateTokenWithMetadata(r.Context(), user.ID(), req.Name, req.ProjectID, req.Scopes, req.ExpiresAt,
+		TokenMetadata{Purpose: req.Purpose, Labels: req.Labels})
 	if err != nil {
+		var metadataErr *ErrInvalidUATMetadata
 		switch {
 		case errors.Is(err, ErrUATLimitExceeded):
 			writeError(w, http.StatusConflict, "limit_exceeded", err.Error(), nil)
@@ -806,6 +818,11 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusForbidden, "scope_violation", err.Error(), nil)
 		case errors.Is(err, ErrUATProjectForbidden):
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "forbidden", nil)
+		case errors.As(err, &metadataErr):
+			// E.1: bounded metadata validation failure. The error message
+			// names the field/rule only; it never echoes the offending
+			// value (see ErrInvalidUATMetadata).
+			ValidationError(w, err.Error(), nil)
 		default:
 			InternalError(w)
 		}
@@ -889,7 +906,7 @@ func (s *Server) handleDeleteToken(w http.ResponseWriter, r *http.Request, id st
 }
 
 func tokenToResponse(t store.UserAccessToken) TokenResponse {
-	return TokenResponse{
+	resp := TokenResponse{
 		ID:        t.ID,
 		Name:      t.Name,
 		Prefix:    t.Prefix,
@@ -900,6 +917,14 @@ func tokenToResponse(t store.UserAccessToken) TokenResponse {
 		LastUsed:  t.LastUsed,
 		Created:   t.Created,
 	}
+	// E.1 descriptive credential metadata.
+	if t.Purpose != nil {
+		resp.Purpose = *t.Purpose
+	}
+	if len(t.Labels) > 0 {
+		resp.Labels = t.Labels
+	}
+	return resp
 }
 
 func tokenResponsePtr(t *store.UserAccessToken) *TokenResponse {

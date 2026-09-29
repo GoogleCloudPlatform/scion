@@ -105,6 +105,48 @@ func TestParseExpiry_Invalid(t *testing.T) {
 	}
 }
 
+// TestParseLabelFlags is the F12 regression test (review-2 finding 2(b)):
+// parseLabelFlags rejects a repeated --label key instead of silently
+// keeping the last value.
+func TestParseLabelFlags(t *testing.T) {
+	cases := []struct {
+		name    string
+		input   []string
+		want    map[string]string
+		wantErr bool
+	}{
+		{name: "nil input yields nil", input: nil, want: nil},
+		{name: "empty slice yields nil", input: []string{}, want: nil},
+		{name: "single key=value", input: []string{"k=v"}, want: map[string]string{"k": "v"}},
+		{name: "empty value allowed", input: []string{"k="}, want: map[string]string{"k": ""}},
+		{name: "missing = is an error", input: []string{"k"}, wantErr: true},
+		{name: "repeated key is an error", input: []string{"k=a", "k=b"}, wantErr: true},
+		{name: "distinct keys both kept", input: []string{"k=a", "j=b"}, want: map[string]string{"k": "a", "j": "b"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseLabelFlags(tc.input)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected an error for input %v, got labels %v", tc.input, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error for input %v: %v", tc.input, err)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+			for k, v := range tc.want {
+				if got[k] != v {
+					t.Fatalf("got %v, want %v", got, tc.want)
+				}
+			}
+		})
+	}
+}
+
 func TestParseExpiry_90Days(t *testing.T) {
 	result, err := parseExpiry("90d")
 	if err != nil {
