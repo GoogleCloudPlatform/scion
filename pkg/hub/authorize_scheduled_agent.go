@@ -49,3 +49,17 @@ func (s *Server) authorizeScheduledDispatchAgentAuthoring(w http.ResponseWriter,
 	}
 	return true
 }
+
+// scopedUATDeniedForFutureDispatchAuthoring reports whether identity is a
+// scoped UAT that must be denied when authoring or changing what a future
+// scheduled dispatch does or who it runs as. The scheduler persists only the
+// creator's identity, not the authoring credential's boundary and scopes, so
+// a scoped credential's restrictions cannot be reconstructed and re-applied
+// when the event fires. Shared by authorizeScheduledMessageAuthoring
+// (authorize_scheduled_message.go) and
+// authorizeScheduledDispatchAgentAuthoring, so both event kinds enforce the
+// same rule through one predicate rather than two independently maintained
+// checks.
+func scopedUATDeniedForFutureDispatchAuthoring(identity Identity) bool {
+	return IsScopedUserIdentity(identity)
+}

@@ -152,6 +152,15 @@ func TestScheduledEvent_CreateDispatchAgentScopedUATDenied(t *testing.T) {
 		assert.Contains(t, rec.Body.String(),
 			"scheduled agent creation requires a credential whose scope can be applied at execution time")
 	})
+
+	t.Run("hub-scoped UAT for the same user denied", func(t *testing.T) {
+		// A hub-scoped UAT is refused by the project-scoped access check;
+		// TestAuthorizeScheduledDispatchAgentAuthoring_HubScopedUATDenied
+		// covers the authoring gate itself for this credential shape.
+		scoped := NewScopedUserIdentity(ownerUser, "", []string{"scheduled_event:create", "agent:create"})
+		rec := doScheduledEventUserRequest(t, srv, scoped, http.MethodPost, projectID, "", req)
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	})
 }
 
 func TestScheduledEvent_CreateWithFireAt(t *testing.T) {

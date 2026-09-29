@@ -282,16 +282,3 @@ func (s *Server) authorizeScheduledMessageFire(
 // ScheduledEventFailed when the handler returns an error (R3 O-R3-1).
 // This eliminates the dual-status-update race where markScheduledEventFailed
 // set "failed" and the wrapper subsequently overwrote it (R2 O-R2-1).
-
-// scopedUATDeniedForFutureDispatchAuthoring reports whether identity is a
-// scoped UAT that must be denied when authoring or changing what a future
-// scheduled dispatch does or who it runs as. The scheduler persists only the
-// creator's identity, not the authoring credential's boundary and scopes, so
-// a scoped credential's restrictions cannot be reconstructed and re-applied
-// when the event fires. Shared by the scheduled-message authoring gate above
-// and the scheduled dispatch_agent authoring gate in
-// authorize_scheduled_agent.go, so both event kinds enforce the same rule
-// through one predicate rather than two independently maintained checks.
-func scopedUATDeniedForFutureDispatchAuthoring(identity Identity) bool {
-	return IsScopedUserIdentity(identity)
-}

@@ -182,6 +182,15 @@ func TestSchedule_CreateDispatchAgentScopedUATDenied(t *testing.T) {
 		assert.Contains(t, rec.Body.String(),
 			"scheduled agent creation requires a credential whose scope can be applied at execution time")
 	})
+
+	t.Run("hub-scoped UAT for the same user denied", func(t *testing.T) {
+		// A hub-scoped UAT is refused by the project-scoped access check;
+		// TestAuthorizeScheduledDispatchAgentAuthoring_HubScopedUATDenied
+		// covers the authoring gate itself for this credential shape.
+		scoped := NewScopedUserIdentity(ownerUser, "", []string{"scheduled_event:create", "agent:create"})
+		rec := doScheduleAgentRequest(t, srv, scoped, projectID, "", http.MethodPost, req)
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	})
 }
 
 // TestSchedule_UpdateDispatchAgentScopedUATDenied covers every alternate
@@ -235,12 +244,10 @@ func TestSchedule_UpdateDispatchAgentScopedUATDenied(t *testing.T) {
 	})
 }
 
-// TestSchedule_ResumeDispatchAgentScopedUATDenied covers resume/enable: a
-// paused dispatch_agent schedule re-arms future dispatch authority when
-// resumed, so a scoped UAT must not be able to resume it even though the
-// resume endpoint itself performs no other authorization check today. A
-// paused "message" schedule is unaffected — only dispatch_agent authoring is
-// gated.
+// TestSchedule_ResumeDispatchAgentScopedUATDenied covers resume: resuming a
+// paused dispatch_agent schedule re-arms future dispatches, so it requires a
+// credential whose scope can be applied at execution time. A paused
+// "message" schedule is unaffected.
 func TestSchedule_ResumeDispatchAgentScopedUATDenied(t *testing.T) {
 	srv, s, projectID := setupScheduleTest(t)
 	ownerUser := setupScopedDispatchAgentOwner(t, srv, s, projectID, tid("sched-resume-dispatch-owner"))
