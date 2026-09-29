@@ -421,16 +421,24 @@ type AgentFilter struct {
 	// agent may message under any message mode (scion set-message-mode),
 	// which can be a different, smaller set (ptone/scion#2146 review R2-1,
 	// R2-2; an earlier version of this doc incorrectly implied the two were
-	// related). The root ID this field is set to is computed client-side,
-	// as a pure local function of data the caller already has (see
-	// resolveLineageRootID in cmd/list.go): the reference's direct parent
-	// (the last entry in its Ancestry chain), or the reference itself when
-	// that parent would be a user rather than an agent (Ancestry has fewer
-	// than 2 entries) or when Ancestry is empty. The root ID handed to this
-	// field may therefore be a USER principal ID, not only an agent ID — the
-	// OR predicate treats either the same way, since IDEQ simply never
-	// matches a user ID and ancestryContains still finds that user's
-	// descendants.
+	// related). The root ID this field is set to is computed client-side
+	// (see resolveLineageRootID in cmd/list.go): the reference's direct
+	// parent, or the reference itself when it has no parent at all (an
+	// empty Ancestry) or when its parent is a user rather than an agent.
+	// "Parent is a user" is NOT simply "Ancestry has fewer than 2 entries"
+	// — an earlier version of this doc and of resolveLineageRootID asserted
+	// that equivalence, and it is false: a child can inherit a length-1,
+	// agent-only Ancestry from a creator whose own Ancestry was itself
+	// empty (ptone/scion#2146 review R4-3; see resolveLineageRootID's doc
+	// for exactly when this happens). Determining "is the parent a user"
+	// therefore requires resolving a length-1 Ancestry entry through the
+	// caller's authorized list (never a bare per-ID fetch) rather than a
+	// purely local length check; an Ancestry of two or more entries never
+	// needs this, since its last entry is always an agent ID by
+	// construction. The root ID handed to this field may therefore be a
+	// USER principal ID, not only an agent ID — the OR predicate treats
+	// either the same way, since IDEQ simply never matches a user ID and
+	// ancestryContains still finds that user's descendants.
 	LineageRootID string
 }
 

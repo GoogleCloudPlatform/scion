@@ -138,7 +138,42 @@ type HubContext struct {
 	BrokerID    string
 	ProjectPath string
 	IsGlobal    bool
+	// CredentialKind records which authentication mechanism createHubClient
+	// selected for Client, so a caller that needs to know "is this actually
+	// an agent token" — not just "is the CLI running in agent mode" — can
+	// check it directly instead of inferring it from CLI mode
+	// (ptone/scion#2146 review R3-2/R4-6). It is purely observational: it
+	// must never be used to change auth priority or behavior, only to let a
+	// caller-side guard key on the credential that's actually in use.
+	CredentialKind CredentialKind
 }
+
+// CredentialKind identifies which authentication mechanism createHubClient
+// selected. See HubContext.CredentialKind.
+type CredentialKind string
+
+const (
+	// CredentialKindUnknown is the zero value: no HubContext was built via a
+	// path that records this (e.g. a test double), or the field predates
+	// this HubContext.
+	CredentialKindUnknown CredentialKind = ""
+	// CredentialKindOAuth is a human/assistant OAuth login
+	// (`scion hub auth login`), via credentials.GetAccessToken.
+	CredentialKindOAuth CredentialKind = "oauth"
+	// CredentialKindAgentToken is an actual agent identity token — the
+	// canonical token file, or the SCION_AUTH_TOKEN bootstrap env var.
+	CredentialKindAgentToken CredentialKind = "agent_token"
+	// CredentialKindHubToken is the legacy SCION_HUB_TOKEN bearer token path
+	// (running inside a container, pre-agent-token-file convention).
+	CredentialKindHubToken CredentialKind = "hub_token"
+	// CredentialKindDevAuto covers both dev-auth paths: the automatic
+	// localhost dev-token override that takes priority over a non-dev agent
+	// token for a non-hub-managed agent, and the final SCION_DEV_TOKEN/
+	// ~/.scion/dev-token fallback when no other credential is configured.
+	// Either way the effective caller is a dev-auth identity, not an agent
+	// token.
+	CredentialKindDevAuto CredentialKind = "dev_auto"
+)
 
 // EnsureHubReadyOptions configures the behavior of EnsureHubReady.
 type EnsureHubReadyOptions struct {
@@ -283,7 +318,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	}
 
 	// Create Hub client
-	client, err := createHubClient(settings, endpoint)
+	client, credentialKind, err := createHubClient(settings, endpoint)
 	if err != nil {
 		return nil, wrapHubError(fmt.Errorf("failed to create Hub client: %w", err))
 	}
@@ -311,13 +346,14 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	}
 
 	hubCtx := &HubContext{
-		Client:      client,
-		Endpoint:    endpoint,
-		Settings:    settings,
-		ProjectID:   effectiveProjectID,
-		BrokerID:    brokerID,
-		ProjectPath: resolvedPath,
-		IsGlobal:    isGlobal,
+		Client:         client,
+		Endpoint:       endpoint,
+		Settings:       settings,
+		ProjectID:      effectiveProjectID,
+		BrokerID:       brokerID,
+		ProjectPath:    resolvedPath,
+		IsGlobal:       isGlobal,
+		CredentialKind: credentialKind,
 	}
 
 	debugf("HubContext created: endpoint=%s, projectID=%s (local=%s), brokerID=%s, projectPath=%s, isGlobal=%v",
@@ -1341,16 +1377,30 @@ func readAgentTokenFile() string {
 // message to a user) require the real per-agent identity that only that token carries —
 // dev auth resolves to a superuser/dev identity, not any specific agent, so it 401s on
 // self-only endpoints.
-func createHubClient(settings *config.Settings, endpoint string) (hubclient.Client, error) {
+// createHubClient builds the Hub client used by EnsureHubReady and
+// resolveHubProjectRef, and reports which credential it selected
+// (ptone/scion#2146 review R4-6) so a caller like the CLI's --all guard can
+// key on the credential actually in use rather than inferring it from CLI
+// mode. The auth priority order itself is unchanged by this — recording the
+// kind is purely observational.
+//
+// Note this duplicates cmd/hub.go's getHubClient, which implements the
+// identical priority order independently for commands that call it
+// directly. That duplication predates this change and is out of scope here
+// (ptone/scion#2146 review round 4) — see dev-notes.md's "Release notes" /
+// observations for the follow-up this raises.
+func createHubClient(settings *config.Settings, endpoint string) (hubclient.Client, CredentialKind, error) {
 	var opts []hubclient.Option
 
 	// Add authentication - check in priority order
 	authConfigured := false
+	kind := CredentialKindUnknown
 
 	// 1. Check for OAuth credentials from scion hub auth login
 	if accessToken := credentials.GetAccessToken(endpoint); accessToken != "" {
 		opts = append(opts, hubclient.WithBearerToken(accessToken))
 		authConfigured = true
+		kind = CredentialKindOAuth
 	}
 
 	// 2. Check for agent token from canonical token file, then bootstrap env var
@@ -1360,15 +1410,18 @@ func createHubClient(settings *config.Settings, endpoint string) (hubclient.Clie
 				if devToken := apiclient.ResolveDevToken(); devToken != "" {
 					opts = append(opts, hubclient.WithBearerToken(devToken))
 					authConfigured = true
+					kind = CredentialKindDevAuto
 				}
 			}
 			if !authConfigured {
 				opts = append(opts, hubclient.WithAgentToken(token))
 				authConfigured = true
+				kind = CredentialKindAgentToken
 			}
 		} else if token := os.Getenv("SCION_AUTH_TOKEN"); token != "" {
 			opts = append(opts, hubclient.WithAgentToken(token))
 			authConfigured = true
+			kind = CredentialKindAgentToken
 		}
 	}
 
@@ -1377,17 +1430,20 @@ func createHubClient(settings *config.Settings, endpoint string) (hubclient.Clie
 		if token := os.Getenv("SCION_HUB_TOKEN"); token != "" {
 			opts = append(opts, hubclient.WithBearerToken(token))
 			authConfigured = true
+			kind = CredentialKindHubToken
 		}
 	}
 
 	// 4. Fallback to auto dev auth
 	if !authConfigured {
 		opts = append(opts, hubclient.WithAutoDevAuth())
+		kind = CredentialKindDevAuto
 	}
 
 	opts = append(opts, hubclient.WithTimeout(30*time.Second))
 
-	return hubclient.New(endpoint, opts...)
+	client, err := hubclient.New(endpoint, opts...)
+	return client, kind, err
 }
 
 func isLocalhostEndpoint(endpoint string) bool {

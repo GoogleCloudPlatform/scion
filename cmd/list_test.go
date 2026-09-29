@@ -29,6 +29,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1340,7 +1341,44 @@ func TestResolveRelationshipReference(t *testing.T) {
 	}
 }
 
+// TestResolveLineageRootID covers ptone/scion#2146 review R4-3: a length-1
+// Ancestry entry is not always a user. It can also be another AGENT's ID, if
+// that agent's own Ancestry was itself empty when it created the reference
+// (see resolveLineageRootID's doc for the three ways that happens). Only
+// resolving what the entry actually names — through the same authorized-list
+// mechanism as --descendants/--ancestors, never a bare per-ID fetch — can
+// tell the two apart, so this test runs against a real stub Hub rather than
+// a purely local table (the pre-R4-3 version of this test asserted the false
+// "len(ancestry) < 2 means parent is a user" equivalence, which is exactly
+// the bug this round fixes).
 func TestResolveLineageRootID(t *testing.T) {
+	const ancestryLessCreatorID = "11111111-1111-1111-1111-111111111111"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/agents" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		ids := r.URL.Query()["id"]
+		if len(ids) == 1 && ids[0] == ancestryLessCreatorID {
+			// ancestryLessCreatorID names a real, visible agent — the R4-3
+			// edge case: a length-1 Ancestry entry that is an AGENT, not a
+			// user, because its own Ancestry was itself empty when it
+			// created the reference below.
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"agents": []hubclient.Agent{{ID: ancestryLessCreatorID, Slug: "ancestry-less-creator"}},
+			})
+			return
+		}
+		// Any other queried ID (e.g. a plain user ID) names no agent.
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"agents": []hubclient.Agent{}})
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	agentSvc := client.Agents()
+
 	tests := []struct {
 		name     string
 		id       string
@@ -1353,13 +1391,19 @@ func TestResolveLineageRootID(t *testing.T) {
 			want: "self-id",
 		},
 		{
-			name:     "single ancestry entry (a top-level, user-created agent): parent is a user, so self is root, not the user (ptone/scion#2146 --lineage option (i))",
+			name:     "single ancestry entry naming a user (the common top-level-agent case): parent is a user, so self is root, not the user (ptone/scion#2146 --lineage option (i))",
 			id:       "child-id",
-			ancestry: []string{"user-id"},
+			ancestry: []string{"a-user-id"},
 			want:     "child-id",
 		},
 		{
-			name:     "multi-entry ancestry: the LAST entry is the direct parent, not the topmost ancestor",
+			name:     "single ancestry entry naming an AGENT (ptone/scion#2146 review R4-3): root at that agent, not self — len(ancestry) < 2 alone would have wrongly rooted at self here",
+			id:       "child-of-ancestry-less-creator",
+			ancestry: []string{ancestryLessCreatorID},
+			want:     ancestryLessCreatorID,
+		},
+		{
+			name:     "multi-entry ancestry: the LAST entry is the direct parent, not the topmost ancestor — no lookup needed, since it's guaranteed to be an agent ID by construction",
 			id:       "grandchild-id",
 			ancestry: []string{"user-id", "parent-id", "immediate-parent-id"},
 			want:     "immediate-parent-id",
@@ -1368,7 +1412,9 @@ func TestResolveLineageRootID(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, resolveLineageRootID(tt.id, tt.ancestry))
+			got, err := resolveLineageRootID(context.Background(), agentSvc, tt.id, tt.ancestry)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -1796,6 +1842,7 @@ func TestListAgentsViaHub_AncestorsFlag(t *testing.T) {
 // root.
 func TestListAgentsViaHub_LineageFlag(t *testing.T) {
 	const refID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	const refProjectID = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
 	const rootlessRefID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 	const topLevelRefID = "cccccccc-cccc-cccc-cccc-cccccccccccc"
 	const topLevelRefProjectID = "dddddddd-dddd-dddd-dddd-dddddddddddd"
@@ -1805,7 +1852,7 @@ func TestListAgentsViaHub_LineageFlag(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/api/v1/agents/"+refID:
-			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: refID, Slug: "ref-agent", Ancestry: []string{"user-id", "parent-id"}})
+			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: refID, Slug: "ref-agent", ProjectID: refProjectID, Ancestry: []string{"user-id", "parent-id"}})
 		case r.URL.Path == "/api/v1/agents/"+rootlessRefID:
 			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: rootlessRefID, Slug: "rootless-ref-agent"})
 		case r.URL.Path == "/api/v1/agents/"+topLevelRefID:
@@ -1846,10 +1893,14 @@ func TestListAgentsViaHub_LineageFlag(t *testing.T) {
 	}
 
 	t.Run("root is the direct parent (last ancestry entry), not the topmost ancestor", func(t *testing.T) {
-		gotLineageRootID = ""
+		gotLineageRootID, gotProjectID = "", ""
 		filterLineage = refID
 		run()
 		assert.Equal(t, "parent-id", gotLineageRootID)
+		// R2-8/R4-7: project-bounding matters most in exactly this
+		// agent-parent case (the top-level-agent subtest below is not the
+		// only path that must bound to the reference's project).
+		assert.Equal(t, refProjectID, gotProjectID)
 	})
 
 	t.Run("ancestry-less reference is its own root", func(t *testing.T) {
@@ -1876,27 +1927,37 @@ func TestListAgentsViaHub_LineageFlag(t *testing.T) {
 }
 
 // TestListAgentsViaHub_AllMode_AgentIdentityWithRelationshipFlag_Errors is
-// the ptone/scion#2146 review R2-4 fix: agent mode plus --all plus any
-// relationship flag must fail loudly, not silently print an empty list. An
-// agent identity has no hub-wide list authority at all — the real Hub
-// proves this directly (TestR1_3_ListEndpointResolvesAgentIdentityCantGetOnPeer,
+// the ptone/scion#2146 review R2-4 fix, re-keyed in review round 4 (R4-6):
+// an agent TOKEN plus --all plus any relationship flag must fail loudly, not
+// silently print an empty list. An agent identity has no hub-wide list
+// authority at all — the real Hub proves this directly
+// (TestR1_3_ListEndpointResolvesAgentIdentityCantGetOnPeer,
 // pkg/hub/rs2_r1_fixes_test.go: the global endpoint returns nothing for a
 // bare agent token, even for id=<self>) — so the final --all listing could
-// never succeed for an agent caller regardless of how the reference itself
-// is resolved. The guard fires before any HTTP call at all (there is
+// never succeed for an agent-token caller regardless of how the reference
+// itself is resolved. The guard fires before any HTTP call at all (there is
 // nothing to fake here: the test server would fail the test if it received
 // any request), which is the point — no reference resolution, no listing,
 // no silent wrong answer.
+//
+// The guard keys on hubCtx.CredentialKind == CredentialKindAgentToken, not
+// on CLI mode (R4-6 replaces R3-2's mode-keyed version) — SCION_CLI_MODE is
+// still set to "agent" here because that's the realistic pairing (an actual
+// agent container normally does authenticate with its agent token), but it
+// is CredentialKind, set explicitly below, that the guard actually reads.
+// See TestListAgentsViaHub_AllMode_AgentModeWithOAuthCredential_NotBlocked
+// for the case this fixes: the same agent-mode setup, but a non-agent-token
+// credential, which must NOT be blocked.
 func TestListAgentsViaHub_AllMode_AgentIdentityWithRelationshipFlag_Errors(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Errorf("unexpected HTTP request to %s — the --all/agent-mode/relationship-flag guard must fire before any network call", r.URL.Path)
+		t.Errorf("unexpected HTTP request to %s — the --all/agent-token/relationship-flag guard must fire before any network call", r.URL.Path)
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer server.Close()
 
 	client, err := hubclient.New(server.URL)
 	require.NoError(t, err)
-	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: "some-project-id"}
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: "some-project-id", CredentialKind: hubsync.CredentialKindAgentToken}
 
 	oldListAll := listAll
 	oldDescendants, oldAncestors, oldLineage := filterDescendants, filterAncestors, filterLineage
@@ -1933,12 +1994,111 @@ func TestListAgentsViaHub_AllMode_AgentIdentityWithRelationshipFlag_Errors(t *te
 	}
 }
 
+// TestListAgentsViaHub_AllMode_AgentModeWithOAuthCredential_NotBlocked is the
+// ptone/scion#2146 review R4-6 fix itself, proven directly: the SAME
+// SCION_CLI_MODE=agent setup as
+// TestListAgentsViaHub_AllMode_AgentIdentityWithRelationshipFlag_Errors, but
+// a HubContext whose CredentialKind is OAuth (a human authenticated via
+// `scion hub auth login`, running inside an agent container) rather than an
+// agent token. R3-2 found this was wrongly blocked by the old mode-keyed
+// guard; R4-6 fixes it by keying on the credential instead. Dev auth is
+// covered by the sibling test right below — both are real, named
+// CredentialKind values a caller might have in agent mode, not just "not an
+// agent token" in the abstract.
+func TestListAgentsViaHub_AllMode_AgentModeWithOAuthCredential_NotBlocked(t *testing.T) {
+	const refID = "88888888-9999-aaaa-bbbb-cccccccccccc"
+	var listCalled bool
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/agents/"+refID:
+			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: refID, Slug: "ref-agent"})
+		case r.URL.Path == "/api/v1/agents":
+			listCalled = true
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"agents": []hubclient.Agent{}})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, CredentialKind: hubsync.CredentialKindOAuth}
+
+	oldListAll, oldDescendants, oldOutputFormat := listAll, filterDescendants, outputFormat
+	listAll = true
+	filterDescendants = refID
+	outputFormat = "json"
+	t.Setenv("SCION_CLI_MODE", "agent")
+	t.Setenv("SCION_AGENT_ID", "some-agent-id")
+	defer func() {
+		listAll, filterDescendants, outputFormat = oldListAll, oldDescendants, oldOutputFormat
+	}()
+
+	captureListStdout(func() {
+		err = listAgentsViaHub(hubCtx)
+	})
+
+	require.NoError(t, err, "an OAuth credential in agent mode must not trip the agent-token --all guard")
+	assert.True(t, listCalled)
+}
+
+// TestListAgentsViaHub_AllMode_AgentModeWithDevAuthCredential_NotBlocked is
+// TestListAgentsViaHub_AllMode_AgentModeWithOAuthCredential_NotBlocked's
+// sibling for the other non-agent-token credential R3-2 named: dev auth on a
+// localhost Hub for a non-hub-managed agent.
+func TestListAgentsViaHub_AllMode_AgentModeWithDevAuthCredential_NotBlocked(t *testing.T) {
+	const refID = "99999999-aaaa-bbbb-cccc-dddddddddddd"
+	var listCalled bool
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/agents/"+refID:
+			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: refID, Slug: "ref-agent"})
+		case r.URL.Path == "/api/v1/agents":
+			listCalled = true
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"agents": []hubclient.Agent{}})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, CredentialKind: hubsync.CredentialKindDevAuto}
+
+	oldListAll, oldDescendants, oldOutputFormat := listAll, filterDescendants, outputFormat
+	listAll = true
+	filterDescendants = refID
+	outputFormat = "json"
+	t.Setenv("SCION_CLI_MODE", "agent")
+	t.Setenv("SCION_AGENT_ID", "some-agent-id")
+	defer func() {
+		listAll, filterDescendants, outputFormat = oldListAll, oldDescendants, oldOutputFormat
+	}()
+
+	captureListStdout(func() {
+		err = listAgentsViaHub(hubCtx)
+	})
+
+	require.NoError(t, err, "a dev-auth credential in agent mode must not trip the agent-token --all guard")
+	assert.True(t, listCalled)
+}
+
 // TestListAgentsViaHub_AllMode_AssistantModeWithRelationshipFlag_NotBlocked
-// is the ptone/scion#2146 review R3-5 negative-coverage gap: the agent-mode
-// --all guard must NOT fire in assistant mode. Human mode is already covered
-// by TestListAgentsViaHub_AllMode_HumanCrossProjectReference; this covers
-// the other non-agent CLI mode explicitly, since the guard's condition
-// checks `resolveMode() == ModeAgent` specifically, not "not human".
+// is the ptone/scion#2146 review R3-5 negative-coverage gap: the --all guard
+// must NOT fire for a HubContext with no agent-token CredentialKind set
+// (this test's HubContext leaves it at its zero value,
+// hubsync.CredentialKindUnknown). It predates R4-6's re-keying of the guard
+// from CLI mode to CredentialKind, but stays useful as coverage that
+// assistant mode itself is otherwise unaffected — SCION_CLI_MODE=assistant
+// is still set here for realism, even though the guard no longer reads it.
+// Human mode is covered by TestListAgentsViaHub_AllMode_HumanCrossProjectReference;
+// agent mode with a non-agent-token credential is covered by
+// TestListAgentsViaHub_AllMode_AgentModeWithOAuthCredential_NotBlocked and
+// its dev-auth sibling, immediately above.
 func TestListAgentsViaHub_AllMode_AssistantModeWithRelationshipFlag_NotBlocked(t *testing.T) {
 	const refID = "77777777-8888-9999-aaaa-bbbbbbbbbbbb"
 	var listCalled bool
