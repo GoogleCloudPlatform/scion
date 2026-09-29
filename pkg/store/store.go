@@ -58,6 +58,14 @@ var (
 	// soft-deleted one. Kept distinct from ErrAlreadyExists so callers can
 	// map it to a specific message instead of a generic conflict.
 	ErrIdentityKeyConflict = errors.New("identity key already reserved by another agent in this project")
+
+	// ErrInvalidPhase is returned by BeginLaunch when the agent's current
+	// phase is not eligible for the requested launch kind (design
+	// t1-async-create-v11.md §3.3): in P1a, a create launch requires phase
+	// in {created, provisioning}. Callers must never fall back to a
+	// synchronous send on this error (design §3.4, NB-1); it means a
+	// concurrent write (e.g. a stop) landed first.
+	ErrInvalidPhase = errors.New("agent phase is not eligible for this launch")
 )
 
 // SystemReconcileCreatedBy is the CreatedBy sentinel that identifies the
@@ -320,6 +328,57 @@ type AgentStore interface {
 	// for the health-summary endpoint without fetching full agent records.
 	// This avoids the O(N) deserialization cost of ListAgents on large installations.
 	AggregateAgentHealth(ctx context.Context) (*AgentHealthAggregate, error)
+
+	// --- T1 async agent create (design t1-async-create-v11.md §3.3) ---
+	// These are the only writers of the launch_* columns. Each runs as a
+	// single row-locked transaction. See launch.go for the supporting types.
+	//
+	// Each of these methods opens its own transaction and must not be called
+	// from inside WithTx: the entadapter implementation cannot nest a second
+	// transaction inside the ambient one WithTx provides, and returns an
+	// error (or, for RunLaunchReaperTick, ReaperTickUnavailable) instead.
+
+	// BeginLaunch starts a new launch for agentID. The caller must start its
+	// monotonic remaining-budget timer BEFORE calling this (§3.4). Any
+	// previous active launch on the row becomes implicitly superseded (its ID
+	// no longer matches launch_id). kind must be LaunchKindCreate in P1a;
+	// any other value returns an error wrapping ErrInvalidInput (start and
+	// restart are P6, design §3.13). Returns ErrInvalidPhase when the
+	// agent's current phase is not eligible for kind (P1a: phase must be
+	// created or provisioning). Returns ErrNotFound if the agent doesn't
+	// exist.
+	BeginLaunch(ctx context.Context, agentID, kind string, timeout time.Duration) (launchID string, err error)
+
+	// MarkLaunchAccepted records that a broker (owner) has claimed launchID:
+	// if owner is currently empty on the row, sets it, and if phase is
+	// "created", moves it to "provisioning". Returns ErrNotFound if the
+	// agent doesn't exist. Otherwise never returns an error for a stale
+	// caller: if the row's launch_id no longer matches launchID (superseded)
+	// or the launch has already ended, this is a no-op that returns the
+	// current row unchanged, with a nil error — callers detect that case by
+	// comparing the returned Agent's LaunchID/LaunchState against the
+	// launchID they hold. Does not bump state_version.
+	MarkLaunchAccepted(ctx context.Context, agentID, launchID, owner string) (Agent, error)
+
+	// EndLaunch ends launchID with the given reason if it is still the
+	// agent's current, active launch. No-op if launch_id no longer matches or
+	// the launch has already ended. Does not bump state_version. Used by the
+	// dispatcher's not_launched cases (design §3.4).
+	EndLaunch(ctx context.Context, agentID, launchID, reason string) error
+
+	// ApplyLaunchReport evaluates a broker's launch report against the
+	// current row and applies the resulting state transition, per the
+	// ordered rule list in design §3.7. Bumps state_version only on a
+	// terminal apply (succeeded/failed) or a reaper-refining apply.
+	ApplyLaunchReport(ctx context.Context, agentID, brokerID string, r LaunchReport) (LaunchReportAnswer, Agent, error)
+
+	// RunLaunchReaperTick runs one tick of the launch deadline/staleness
+	// reaper (design §3.7): a single hand-built transaction holding the
+	// transaction-scoped advisory lock store.LockAgentLaunchDeadline, which
+	// arms/disarms cluster-wide staleness detection and reaps overdue
+	// launches. Synchronous, bounded by a 10s internal timeout; safe to call
+	// from a 15s ticker on every replica.
+	RunLaunchReaperTick(ctx context.Context, p ReaperParams) (ReaperTickResult, error)
 }
 
 // AgentFilter defines criteria for filtering agents.

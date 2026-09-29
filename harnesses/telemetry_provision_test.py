@@ -112,6 +112,12 @@ class TelemetryProvisionTest(unittest.TestCase):
         self.assertEqual(disabled['OTEL_METRICS_EXPORTER'], 'none')
         self.assertEqual(disabled['OTEL_LOGS_EXPORTER'], 'none')
 
+    def test_claude_sets_usage_source_native_only_when_enabled(self):
+        enabled_env, _ = self._invoke('claude', True, 4317, provider='otlp')
+        self.assertEqual(enabled_env['SCION_USAGE_SOURCE'], 'native')
+        disabled_env, _ = self._invoke('claude', False, 4317, provider='otlp')
+        self.assertNotIn('SCION_USAGE_SOURCE', disabled_env)
+
     def test_gemini_default_custom_and_disabled(self):
         for enabled, port in ((True, 4317), (True, 14317), (False, 14317)):
             with self.subTest(enabled=enabled, port=port):

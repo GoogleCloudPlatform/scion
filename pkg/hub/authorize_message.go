@@ -43,6 +43,7 @@ const (
 	MessageDenialCrossProjectUnsupported         MessageDenialCode = "cross_project_surface_unsupported"
 	MessageDenialCrossProjectGroupsUnsupported   MessageDenialCode = "cross_project_groups_unsupported"
 	MessageDenialCrossProjectAttachUnsupported   MessageDenialCode = "cross_project_attachment_unsupported"
+	MessageDenialCrossProjectRawUnsupported      MessageDenialCode = "cross_project_raw_unsupported"
 	MessageDenialCrossProjectScheduledDenied     MessageDenialCode = "cross_project_scheduled_denied"
 	MessageDenialCrossProjectScheduledDisabled   MessageDenialCode = "cross_project_scheduled_disabled"
 	MessageDenialCrossProjectScheduledTarget     MessageDenialCode = "cross_project_scheduled_target" // reserved: scheduled message target validation

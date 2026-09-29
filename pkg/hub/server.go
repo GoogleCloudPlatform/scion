@@ -1449,56 +1449,9 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		Debug:          cfg.Debug,
 	}, logging.Subsystem("hub.control-channel"))
 	// Set disconnect callback to mark broker offline when WebSocket drops.
-	// ReleaseAndMarkBrokerOffline atomically clears affinity AND stamps
-	// status=offline in a single CAS write — if a concurrent reconnect has
-	// already claimed the broker with a new session, the compare fails and the
-	// callback is a no-op. This eliminates the TOCTOU race where a separate
-	// ReleaseRuntimeBrokerConnection + UpdateRuntimeBrokerHeartbeat allowed
-	// the offline stamp to clobber a concurrent markBrokerOnline (issue #131).
+	// See handleBrokerDisconnect for the CAS/race rationale (issue #131).
 	srv.controlChannel.SetOnDisconnect(func(brokerID, sessionID string) {
-		ctx := context.Background()
-
-		cleared, err := s.ReleaseAndMarkBrokerOffline(ctx, brokerID, srv.instanceID, sessionID)
-		if err != nil {
-			slog.Error("Failed to release broker affinity on disconnect", "brokerID", brokerID, "sessionID", sessionID, "error", err)
-			return
-		}
-		if !cleared {
-			slog.Info("broker reconnected elsewhere; skipping offline stamp", "brokerID", brokerID, "staleSession", sessionID)
-			return
-		}
-
-		slog.Info("Broker disconnected, marking offline", "brokerID", brokerID, "sessionID", sessionID)
-
-		// Guard: re-read the broker before updating provider statuses. A
-		// concurrent markBrokerOnline may have already re-claimed the broker
-		// between our atomic release+offline and now. If so, skip provider
-		// updates to avoid clobbering the new session's online providers.
-		broker, rerr := s.GetRuntimeBroker(ctx, brokerID)
-		if rerr == nil && broker.ConnectedSessionID != nil && *broker.ConnectedSessionID != "" {
-			slog.Info("broker re-claimed by new session after release; skipping provider offline stamp",
-				"brokerID", brokerID, "staleSession", sessionID, "newSession", *broker.ConnectedSessionID)
-			return
-		}
-
-		// Update all project provider records for this broker
-		providers, err := s.GetBrokerProjects(ctx, brokerID)
-		if err != nil {
-			slog.Error("Failed to get broker projects for status update", "brokerID", brokerID, "error", err)
-		} else {
-			for _, provider := range providers {
-				if err := s.UpdateProviderStatus(ctx, provider.ProjectID, brokerID, store.BrokerStatusOffline); err != nil {
-					slog.Error("Failed to update provider status", "brokerID", brokerID, "project_id", provider.ProjectID, "error", err)
-				}
-			}
-
-			// Publish broker disconnected event
-			projectIDs := make([]string, len(providers))
-			for i, p := range providers {
-				projectIDs[i] = p.ProjectID
-			}
-			srv.events.PublishBrokerDisconnected(ctx, brokerID, projectIDs)
-		}
+		srv.handleBrokerDisconnect(context.Background(), brokerID, sessionID)
 	})
 	slog.Info("Control channel manager initialized")
 
@@ -2358,6 +2311,29 @@ func (s *Server) waitForEmbeddedBroker(ctx context.Context) embeddedBrokerState 
 		case <-ctx.Done():
 		}
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return embeddedBrokerState{
+		id:      s.embeddedBrokerID,
+		regErr:  s.embeddedBrokerRegErr,
+		pending: s.embeddedBrokerPending != nil,
+	}
+}
+
+// embeddedBrokerSnapshot returns the current embedded broker state without
+// waiting for a pending co-located registration to resolve. GetHealthInfo
+// (/healthz and the admin health summary) calls this instead of
+// waitForEmbeddedBroker: it is polled frequently (and often with short
+// client-side timeouts), so blocking up to embeddedBrokerWaitTimeout on
+// every call would make a probe hitting the process during the startup race
+// look like a timeout instead of the deliberate "not registered yet" status
+// it should report. /readyz does not call this and is intentionally
+// unaffected — see checkColocatedBrokerHealth in handlers_health.go for why
+// /healthz degrades on this instead. A pending state self-corrects on the
+// next poll once SetEmbeddedBrokerID or EmbeddedBrokerRegistrationFailed
+// runs; a failure does not self-correct at all (no retry), so it persists
+// until the broker configuration is fixed and the process is restarted.
+func (s *Server) embeddedBrokerSnapshot() embeddedBrokerState {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return embeddedBrokerState{
@@ -4206,37 +4182,25 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 	_ = s.store.UpdateScheduleAfterRun(ctx, sched.ID, now, nextRunAt, errMsg)
 }
 
-// StartBackgroundServices initializes and starts the scheduler and notification
-// dispatcher. It is called by Start() for standalone mode and must be called
-// explicitly in combined mode (Hub mounted on WebServer) since Start() is
-// not invoked in that case.
-func (s *Server) StartBackgroundServices(ctx context.Context) {
-	s.mu.Lock()
-	if s.startTime.IsZero() {
-		s.startTime = time.Now()
-	}
-	s.mu.Unlock()
-
-	// Initialize and start the scheduler. Interval and concurrency are
-	// configurable via server.scheduler in settings.yaml to let operators
-	// tune background load to match their DB capacity (see issue #367).
-	var schedOpts []SchedulerOption
-	if s.config.SchedulerIntervalSeconds > 0 {
-		schedOpts = append(schedOpts, WithTickInterval(time.Duration(s.config.SchedulerIntervalSeconds)*time.Second))
-	}
-	if s.config.SchedulerMaxConcurrency != nil {
-		schedOpts = append(schedOpts, WithMaxConcurrency(*s.config.SchedulerMaxConcurrency))
-	}
-	s.scheduler = NewScheduler(s.store, logging.Subsystem("hub.scheduler"), schedOpts...)
-	// Recurring sweeps are cluster-wide-once work: under multi-replica Postgres
-	// they must run on a single replica per tick (gated by an advisory lock),
-	// otherwise every replica would publish duplicate offline/stalled events and
-	// race on the schedule claim. On SQLite the lock is a no-op. See
-	// CONCURRENCY-AUDIT.md §"Singleton / leader".
-	// Non-critical maintenance tasks run every 5 minutes (not every 1 minute) to
-	// reduce DB connection pressure. Combined with per-handler jitter in the
-	// scheduler, this eliminates the thundering-herd pattern that was causing
-	// 9-54 s API latency spikes.
+// registerSchedulerHandlers registers every periodic scheduler task, plus the
+// "message" and "dispatch_agent" event handlers, on s.scheduler, which must
+// already be initialized (StartBackgroundServices does this before calling
+// in). Factored out of StartBackgroundServices so tests can inspect
+// registration metadata (interval, singleton mode) without starting the
+// scheduler's ticker or any other background service.
+//
+// Most recurring sweeps are cluster-wide-once work: under multi-replica
+// Postgres they must run on a single replica per tick (gated by an advisory
+// lock), otherwise every replica would publish duplicate offline/stalled
+// events and race on the schedule claim. On SQLite the lock is a no-op. See
+// CONCURRENCY-AUDIT.md §"Singleton / leader". broker-provider-selfheal is the
+// per-instance exception: every instance must run it, not just one (see its
+// registration below).
+// Non-critical maintenance tasks run every 5 minutes (not every 1 minute) to
+// reduce DB connection pressure. Combined with per-handler jitter in the
+// scheduler, this eliminates the thundering-herd pattern that was causing
+// 9-54 s API latency spikes.
+func (s *Server) registerSchedulerHandlers() {
 	s.scheduler.RegisterRecurringSingleton("agent-heartbeat-timeout", 5, store.LockAgentHeartbeatTimeout, s.agentHeartbeatTimeoutHandler())
 	s.scheduler.RegisterRecurringSingleton("agent-stalled-detection", 5, store.LockAgentStalledDetection, s.agentStalledDetectionHandler())
 	if s.config.SoftDeleteRetention > 0 {
@@ -4247,6 +4211,10 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	s.scheduler.RegisterRecurringSingleton("schedule-evaluator", 1, store.LockScheduleEvaluator, s.evaluateSchedulesHandler())
 	s.scheduler.RegisterRecurringSingleton("broker-heartbeat-timeout", 5, store.LockBrokerHeartbeatTimeout, s.brokerHeartbeatTimeoutHandler())
 	s.scheduler.RegisterRecurringSingleton("broker-affinity-reap", 5, store.LockBrokerAffinityReap, s.brokerAffinityReapHandler())
+	// Not a singleton: this instance can only self-heal the providers of
+	// brokers it personally holds a live local control-channel socket for
+	// (see brokerProviderSelfHealHandler), so every instance must run it.
+	s.scheduler.RegisterRecurring("broker-provider-selfheal", 1, s.brokerProviderSelfHealHandler())
 	s.scheduler.RegisterRecurringSingleton("broker-message-sweep", 5, store.LockBrokerMessageSweep, s.brokerMessageSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("failed-message-retention", 60, store.LockFailedMessageRetention, s.failedMessageRetentionHandler())
 	s.scheduler.RegisterRecurringSingleton("exposed-ports-sweep", 5, store.LockExposedPortsSweep, s.exposedPortsSweepHandler())
@@ -4317,6 +4285,31 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 			s.releaseUpdateCheckHandler(),
 		)
 	}
+}
+
+// StartBackgroundServices initializes and starts the scheduler and notification
+// dispatcher. It is called by Start() for standalone mode and must be called
+// explicitly in combined mode (Hub mounted on WebServer) since Start() is
+// not invoked in that case.
+func (s *Server) StartBackgroundServices(ctx context.Context) {
+	s.mu.Lock()
+	if s.startTime.IsZero() {
+		s.startTime = time.Now()
+	}
+	s.mu.Unlock()
+
+	// Initialize and start the scheduler. Interval and concurrency are
+	// configurable via server.scheduler in settings.yaml to let operators
+	// tune background load to match their DB capacity (see issue #367).
+	var schedOpts []SchedulerOption
+	if s.config.SchedulerIntervalSeconds > 0 {
+		schedOpts = append(schedOpts, WithTickInterval(time.Duration(s.config.SchedulerIntervalSeconds)*time.Second))
+	}
+	if s.config.SchedulerMaxConcurrency != nil {
+		schedOpts = append(schedOpts, WithMaxConcurrency(*s.config.SchedulerMaxConcurrency))
+	}
+	s.scheduler = NewScheduler(s.store, logging.Subsystem("hub.scheduler"), schedOpts...)
+	s.registerSchedulerHandlers()
 
 	s.scheduler.Start(ctx)
 
@@ -5297,6 +5290,30 @@ func (s *Server) handleRuntimeBrokerConnect(w http.ResponseWriter, r *http.Reque
 	s.markBrokerOnline(broker.ID(), sessionID)
 }
 
+// stampProvidersOnline sets status=online on every project-provider row linked
+// to brokerID and returns only the providers it actually stamped online, so
+// its only caller, markBrokerOnline, doesn't have to query the project list
+// twice for event publishing and doesn't announce a project as online when
+// its row was never updated. A failed UpdateProviderStatus for one provider
+// is logged and excluded from the result — a partial stamp is still strictly
+// better than none, but the caller must not treat an excluded provider as
+// online.
+func (s *Server) stampProvidersOnline(ctx context.Context, brokerID string) ([]store.ProjectProvider, error) {
+	providers, err := s.store.GetBrokerProjects(ctx, brokerID)
+	if err != nil {
+		return nil, err
+	}
+	online := make([]store.ProjectProvider, 0, len(providers))
+	for _, provider := range providers {
+		if err := s.store.UpdateProviderStatus(ctx, provider.ProjectID, brokerID, store.BrokerStatusOnline); err != nil {
+			slog.Error("Failed to update provider status", "brokerID", brokerID, "project_id", provider.ProjectID, "error", err)
+			continue
+		}
+		online = append(online, provider)
+	}
+	return online, nil
+}
+
 // markBrokerOnline updates broker and provider statuses to online after a successful WebSocket connection.
 // It claims broker affinity for this hub instance + the connection's sessionID,
 // which also bumps status->online and refreshes the heartbeat in one CAS write.
@@ -5308,15 +5325,10 @@ func (s *Server) markBrokerOnline(brokerID, sessionID string) {
 		slog.Error("Failed to claim broker connection", "brokerID", brokerID, "error", err)
 	}
 
-	providers, err := s.store.GetBrokerProjects(ctx, brokerID)
+	providers, err := s.stampProvidersOnline(ctx, brokerID)
 	if err != nil {
 		slog.Error("Failed to get broker projects for status update", "brokerID", brokerID, "error", err)
 		return
-	}
-	for _, provider := range providers {
-		if err := s.store.UpdateProviderStatus(ctx, provider.ProjectID, brokerID, store.BrokerStatusOnline); err != nil {
-			slog.Error("Failed to update provider status", "brokerID", brokerID, "project_id", provider.ProjectID, "error", err)
-		}
 	}
 
 	// Publish broker connected event
@@ -5342,6 +5354,174 @@ func (s *Server) markBrokerOnline(brokerID, sessionID string) {
 	// pattern as reconcileBroker above.
 	if s.notificationDispatcher != nil {
 		go s.drainUndispatchedNotifications(context.Background(), brokerID)
+	}
+}
+
+// handleBrokerDisconnect runs when a broker's control-channel WebSocket drops.
+// It is the OnDisconnect callback wired to srv.controlChannel in New; factored
+// out to a method (rather than left as an inline closure) so tests can drive
+// it directly against a lightly-constructed *Server.
+//
+// ReleaseAndMarkBrokerOffline atomically clears affinity AND stamps
+// status=offline in a single CAS write — if a concurrent reconnect has
+// already claimed the broker with a new session, the compare fails and the
+// callback is a no-op. This eliminates the TOCTOU race where a separate
+// ReleaseRuntimeBrokerConnection + UpdateRuntimeBrokerHeartbeat allowed
+// the offline stamp to clobber a concurrent markBrokerOnline (issue #131).
+func (s *Server) handleBrokerDisconnect(ctx context.Context, brokerID, sessionID string) {
+	cleared, err := s.store.ReleaseAndMarkBrokerOffline(ctx, brokerID, s.instanceID, sessionID)
+	if err != nil {
+		slog.Error("Failed to release broker affinity on disconnect", "brokerID", brokerID, "sessionID", sessionID, "error", err)
+		return
+	}
+	if !cleared {
+		slog.Info("broker reconnected elsewhere; skipping offline stamp", "brokerID", brokerID, "staleSession", sessionID)
+		return
+	}
+
+	slog.Info("Broker disconnected, marking offline", "brokerID", brokerID, "sessionID", sessionID)
+
+	// Guard: re-read the broker before updating provider statuses. A
+	// concurrent markBrokerOnline may have already re-claimed the broker
+	// between our atomic release+offline and now. If so, skip provider
+	// updates to avoid clobbering the new session's online providers.
+	broker, rerr := s.store.GetRuntimeBroker(ctx, brokerID)
+	if rerr == nil && broker.ConnectedSessionID != nil && *broker.ConnectedSessionID != "" {
+		slog.Info("broker re-claimed by new session after release; skipping provider offline stamp",
+			"brokerID", brokerID, "staleSession", sessionID, "newSession", *broker.ConnectedSessionID)
+		return
+	}
+
+	// Update all project provider records for this broker
+	providers, err := s.store.GetBrokerProjects(ctx, brokerID)
+	if err != nil {
+		slog.Error("Failed to get broker projects for status update", "brokerID", brokerID, "error", err)
+		return
+	}
+	for _, provider := range providers {
+		if err := s.store.UpdateProviderStatus(ctx, provider.ProjectID, brokerID, store.BrokerStatusOffline); err != nil {
+			slog.Error("Failed to update provider status", "brokerID", brokerID, "project_id", provider.ProjectID, "error", err)
+		}
+	}
+
+	// Publish broker disconnected event
+	projectIDs := make([]string, len(providers))
+	for i, p := range providers {
+		projectIDs[i] = p.ProjectID
+	}
+	s.events.PublishBrokerDisconnected(ctx, brokerID, projectIDs)
+}
+
+// brokerProviderSelfHealHandler returns a recurring handler that re-stamps a
+// broker's project-provider rows online for every broker this hub instance
+// currently holds a live control-channel connection to.
+//
+// issue #2090: the affinity-owning instance's disconnect callback
+// (handleBrokerDisconnect) stamps every project-provider row for that
+// broker_id offline. When the same broker_id is served by more than one
+// instance or session — e.g. a co-located broker embedded in every replica of
+// a multi-instance Hub deployment — the survivors never reconnect, so nothing
+// else ever restores those rows: agent-create stays blocked with "Default
+// runtime broker is unavailable" until an instance reconnects or restarts.
+//
+// This closes the gap from the side that can actually observe it: a live
+// local socket is per-process, in-memory state, so the check must run on
+// every instance rather than as a cluster-wide singleton (contrast
+// brokerHeartbeatTimeoutHandler/brokerAffinityReapHandler in reaper.go, which
+// are registered with RegisterRecurringSingleton because they only need one
+// replica to run them).
+//
+// It deliberately never touches broker affinity (connected_hub_id /
+// connected_session_id): reclaiming affinity from every live instance on
+// every tick would fight over routing ownership between replicas that do not
+// share underlying agent/container state. That reclaim isn't needed for
+// correctness either — broker_routing.go's route() already prefers this
+// instance's own live local socket (routeLocal) over the affinity hint, so
+// dispatch to a connected instance keeps working without an affinity change.
+// Restamping only the provider rows is enough to unblock agent-create, and is
+// safe against a genuine broker loss: it is driven by a live local socket,
+// not a cached flag, so a broker that is actually gone stops appearing in
+// ListConnectedBrokers() and this handler stops touching it. From there,
+// handleBrokerDisconnect is the only place that stamps this broker's
+// project-provider rows offline — the heartbeat-timeout reaper
+// (brokerHeartbeatTimeoutHandler → MarkStaleBrokersOffline) only ever sets
+// runtime_brokers.status, never provider rows. The broker row itself is
+// stamped offline by handleBrokerDisconnect's CAS (or, as a backstop, by the
+// heartbeat-timeout reaper), and getAvailableBrokersForProject requires both
+// rows online, so an actually-dead broker stays out of broker selection even
+// while its provider rows lag behind it.
+func (s *Server) brokerProviderSelfHealHandler() func(ctx context.Context) {
+	return func(ctx context.Context) {
+		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		s.selfHealBrokerProviders(ctx, s.controlChannel.ListConnectedBrokers())
+	}
+}
+
+// selfHealBrokerProviders re-stamps provider rows online for every broker ID
+// in snapshot that this instance still holds a live local control-channel
+// connection to. snapshot is normally ListConnectedBrokers() taken by the
+// caller; it is accepted as a parameter (rather than read here) so tests can
+// drive the loop with a snapshot that is already stale with respect to
+// s.controlChannel.connections.
+//
+// Every row this heals from offline to online is announced with the same
+// PublishBrokerConnected event markBrokerOnline publishes on a fresh
+// connect, one call per broker with exactly the project IDs healed for that
+// broker — mirroring handleBrokerDisconnect's PublishBrokerDisconnected on
+// the way down, so the event stream stays an accurate record of provider
+// status for any consumer of project.<id>.broker.status (the in-tree web
+// client does not act on this subject today; see web/src/client/state.ts).
+// Nothing is published for a broker where no row changed. A duplicate
+// PublishBrokerConnected from two instances healing the same row on the same
+// tick is harmless: both carry an identical, stateless status="online"
+// payload for the same project ID, so any consumer that treats the event as
+// a state fact rather than a counted transition sees no difference from a
+// single publish.
+func (s *Server) selfHealBrokerProviders(ctx context.Context, snapshot []string) {
+	for _, brokerID := range snapshot {
+		// snapshot may be stale; re-check right before stamping to narrow the
+		// window against a genuine disconnect that removed this brokerID from
+		// the connections map in between. This does not close the window
+		// (removeConnection can still fire after this check and before the
+		// UPDATE below) — the broker-status gate in getAvailableBrokersForProject
+		// is the backstop that keeps an actually-dead broker out of agent-create
+		// regardless.
+		if !s.controlChannel.IsConnected(brokerID) {
+			continue
+		}
+
+		providers, err := s.store.GetBrokerProjects(ctx, brokerID)
+		if err != nil {
+			slog.Error("Scheduler: broker provider self-heal failed to list projects", "brokerID", brokerID, "error", err)
+			continue
+		}
+		var healedProjectIDs []string
+		for _, provider := range providers {
+			// Skip rows already online. Unlike stampProvidersOnline (used by
+			// markBrokerOnline on connect, which must keep refreshing
+			// last_seen every time), this handler runs every tick on every
+			// instance holding a live socket, so re-stamping an
+			// already-online row on every tick is pure write load with no
+			// effect on status.
+			if provider.Status == store.BrokerStatusOnline {
+				continue
+			}
+			if err := s.store.UpdateProviderStatus(ctx, provider.ProjectID, brokerID, store.BrokerStatusOnline); err != nil {
+				slog.Error("Failed to update provider status", "brokerID", brokerID, "project_id", provider.ProjectID, "error", err)
+				continue
+			}
+			healedProjectIDs = append(healedProjectIDs, provider.ProjectID)
+		}
+		if len(healedProjectIDs) == 0 {
+			continue
+		}
+		broker, err := s.store.GetRuntimeBroker(ctx, brokerID)
+		var brokerName string
+		if err == nil {
+			brokerName = broker.Name
+		}
+		s.events.PublishBrokerConnected(ctx, brokerID, brokerName, healedProjectIDs)
 	}
 }
 
