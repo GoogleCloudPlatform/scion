@@ -188,10 +188,12 @@ function routeSessionCreated(state, event) {
 //
 // 2. Busy gating: OpenCode's own session.idle is not 1:1 with a real turn.
 //    Traced through OpenCode v1.18.33's SessionProcessor (process/halt/
-//    cleanup) and confirmed against the captures: an errored or aborted
-//    turn publishes session.idle once right after the error (from `halt`),
-//    then runs `cleanup`, which rewrites every in-flight text/reasoning/
-//    tool part via message.part.updated, then publishes session.idle a
+//    cleanup); confirmed against the captures for an errored turn, and
+//    against OpenCode's source for an aborted turn (the bridge's own
+//    abort tests are labelled synthetic): either publishes session.idle
+//    once right after the error or abort (from `halt`), then runs
+//    `cleanup`, which rewrites every in-flight text/reasoning/tool part
+//    via message.part.updated, then publishes session.idle a
 //    second time once the runner actually finishes. Arming on message or
 //    part activity would not work here: cleanup's own part updates would
 //    re-arm the gate, so a mid-response abort or error would still produce

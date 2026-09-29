@@ -75,12 +75,12 @@ counted normally — only the session-lifecycle signals are filtered.
 session's turn ends exactly once, on `session.idle` — routing
 `session.error` to any lifecycle event as well (even a non-terminal one)
 would count that same turn a second time, since `session.idle` follows a
-`session.error` in every captured error/abort path (and the one uncaptured
-path without an idle, context-overflow auto-compaction, continues the turn
-rather than ending it). That matters because every
-agent-end increments a turn counter (`max_turns`), so double-counting could
-shut a working agent down on a single recoverable error or user abort. See
-`dialect.yaml`'s comment for the full reasoning.
+`session.error` in the captured error path and, per OpenCode's source, in the
+abort path (the one known path without an idle, context-overflow
+auto-compaction, continues the turn rather than ending it). That matters
+because every agent-end increments a turn counter (`max_turns`), so
+double-counting could shut a working agent down on a single recoverable error
+or user abort. See `dialect.yaml`'s comment for the full reasoning.
 
 **`agent-end` is gated on a prior `session.status` busy (or retry), not on
 message/part activity.** OpenCode's own `session.idle` is not 1:1 with a real
