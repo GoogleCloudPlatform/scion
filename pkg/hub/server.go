@@ -3533,11 +3533,7 @@ func (s *Server) messageEventHandler() EventHandler {
 		// by the caller (fireEvent / executeSchedule), so a scheduled message
 		// is distinguishable in logs from a live send without changing the
 		// live authorization identity above (cutover rule).
-		initiator, initiatorErr := s.scheduledInitiator(ctx, evt)
-		if initiatorErr != nil {
-			slog.Warn("Scheduler: failed to resolve initiator attribution for scheduled message log",
-				"eventID", evt.ID, "error", initiatorErr)
-		}
+		initiator := s.scheduledInitiator(evt.InitiatorAttribution)
 		slog.Info("Scheduler: message delivered to agent",
 			"eventID", evt.ID, "agent_id", agent.ID, "agentName", agent.Name,
 			"initiator_principal_kind", initiator.PrincipalKind,
@@ -4036,18 +4032,24 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			return fmt.Errorf("failed to create agent %q: %w", slug, err)
 		}
 
-		// E.2b: success-path mutation audit for scheduled dispatch (plan
-		// §3.5). Today only CanDelegate denials were audited
-		// (authorizeScheduledAgentCreate above); this is the allow-path
-		// counterpart, mirroring the direct agent-create path
-		// (handlers_agents_core.go). ActorPrincipalKind/ID mirror the
-		// existing deny-audit convention above (the resolved creator/
-		// execution identity, required non-empty by the ent schema) — the
-		// cutover rule keeps the fire-time execution/authorization identity
-		// as CreatedBy, so the deny and allow audits for the same check
-		// agree on who the actor is. The recorded initiator's credential is
-		// added as optional, descriptive enrichment only: a legacy_unknown
-		// row (no recorded credential) still produces a valid audit record.
+		// E.2b: success-path audit for scheduled dispatch. The deny-path
+		// records for this same CanDelegate check are in
+		// authorizeScheduledAgentCreate above. ActorPrincipalKind/ID mirror
+		// that deny-audit convention (the resolved creator/execution
+		// identity, required non-empty by the ent schema) — the cutover rule
+		// keeps the fire-time execution/authorization identity as CreatedBy,
+		// so the deny and allow audits for the same check agree on who the
+		// actor is.
+		//
+		// The recorded initiator's credential is copied onto the audit ONLY
+		// when the initiator is the same principal as the creator (review
+		// R4): after an update or resume by a different user, the initiator
+		// is not the creator, and ApplyActor exists specifically to prevent
+		// naming principal A with principal B's credential. When it does
+		// match, the value is mapped back to hub.CredentialKind's vocabulary
+		// (uat/agent_jwt/interactive), since actor_credential_type is a
+		// column every other writer fills from that domain, not
+		// InitiatorAttribution's smaller one.
 		scheduledDispatchAudit := &store.MutationAuditRecord{
 			MutationType:       "agent_delegation",
 			ActorPrincipalKind: creatorIdentity.Type(),
@@ -4056,12 +4058,13 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			TargetID:           agent.ID,
 			CanDelegateResult:  "allow",
 		}
-		if initiator, err := s.scheduledInitiator(ctx, evt); err != nil {
-			slog.Warn("Scheduler: failed to resolve initiator attribution for scheduled dispatch audit",
-				"eventID", evt.ID, "error", err)
-		} else if !initiator.LegacyUnknown {
-			scheduledDispatchAudit.ActorCredentialType = initiator.CredentialKind
-			scheduledDispatchAudit.ActorCredentialID = initiator.CredentialID
+		initiator := s.scheduledInitiator(evt.InitiatorAttribution)
+		if !initiator.LegacyUnknown &&
+			initiator.PrincipalKind == creatorIdentity.Type() && initiator.PrincipalID == creatorIdentity.ID() {
+			if hubKind := hubCredentialKindForInitiator(initiator.CredentialKind); hubKind != "" {
+				scheduledDispatchAudit.ActorCredentialType = hubKind
+				scheduledDispatchAudit.ActorCredentialID = initiator.CredentialID
+			}
 		}
 		s.emitMutationAudit(ctx, scheduledDispatchAudit)
 
