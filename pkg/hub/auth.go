@@ -27,6 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // AuthConfig holds authentication configuration.
@@ -409,6 +410,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				}
 				scopedUser, err := cfg.UATSvc.ValidateToken(ctx, token)
 				if err != nil {
+					logUATRejection(log, ctx, err)
 					if errors.Is(err, ErrUserSuspended) {
 						writeError(w, http.StatusForbidden, "user_suspended",
 							"access denied: user account is suspended", nil)
@@ -422,6 +424,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				// point checks this too, including a PAT issued under a
 				// reserved-identity user row.
 				if isReservedPlatformIdentity(scopedUser.Email(), cfg.PlatformAuthSA) {
+					logCredentialRejected(log, ctx, "reserved_identity", true, scopedUser.CredentialID())
 					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 						"invalid access token", nil)
 					return
@@ -542,6 +545,42 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// logUATRejection logs a single "credential rejected" line for a UAT that
+// failed ValidateToken (plan §3.1(3)). It classifies the reason from the
+// returned error's *UATRejection, when present, falling back to the generic
+// "invalid" reason for any other error shape.
+func logUATRejection(log *slog.Logger, ctx context.Context, err error) {
+	reason := "invalid"
+	found := false
+	tokenID := ""
+	var rej *UATRejection
+	if errors.As(err, &rej) {
+		reason = rej.Reason
+		found = rej.Found
+		tokenID = rej.TokenID
+	}
+	logCredentialRejected(log, ctx, reason, found, tokenID)
+}
+
+// logCredentialRejected logs the standard "credential rejected" warning line.
+// The token ID is included only when found is true, i.e. the presented value
+// matched a server-verified stored record — this marks the record as
+// rejected, never as an authenticated principal (rulings, plan correction
+// (b)). The presented token string itself is never logged (ruling Q3).
+func logCredentialRejected(log *slog.Logger, ctx context.Context, reason string, found bool, tokenID string) {
+	attrs := []any{
+		slog.String("auth_type", AuthTypeUAT),
+		slog.String("reason", reason),
+	}
+	if found && tokenID != "" {
+		attrs = append(attrs, slog.String("credential.id", tokenID))
+	}
+	if reqID := logging.RequestIDFromContext(ctx); reqID != "" {
+		attrs = append(attrs, slog.String(logging.AttrRequestID, reqID))
+	}
+	log.Warn("credential rejected", attrs...)
 }
 
 // detectTokenType identifies the type of token.
