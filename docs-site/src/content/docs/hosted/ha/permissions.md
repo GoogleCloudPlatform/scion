@@ -109,8 +109,8 @@ The Hub API and Web UI utilize a capability gating system. Resource responses fr
 
 To prevent lateral privilege escalation—where an agent with low privileges creates a child agent with high privileges, or a user assigns a highly privileged GCP service account they shouldn't have access to—Scion implements a secure, **two-layer gate** for binding a GCP service account to any agent:
 
-1. **Layer 1: Scion Hub Authorization**: The Hub's built-in authorization engine verifies the caller has the `ActionAssign` permission on the GCP service account resource within Scion.
-2. **Layer 2: GCP IAM Policy (`actAs`)**: If `gcp_iam_check_mode` is set to `enforce` (see [Server Configuration Reference](/scion/reference/server-config/)), the Hub evaluates Google Cloud's IAM delegation model via the **GCP Policy Troubleshooter v3 API**. It verifies that the caller's GCP principal possesses `iam.serviceAccounts.actAs` permission on the target service account.
+1. **Layer 1: Scion Hub Authorization**: The Hub's built-in authorization engine verifies the caller has the `ActionAssign` permission on the GCP service account resource within Scion. For project-scoped service accounts, the `project-owner`, `project-admin` and `project-member` roles hold `gcp_service_account.assign`, so every owner, admin and member of a project passes this layer for any project-scoped service account in that project.
+2. **Layer 2: GCP IAM Policy (`actAs`)**: This layer runs only when `gcp_iam_check_mode` is set to `enforce`; in the default `off` mode, Layer 1 alone decides project-scoped assignment. `enforce` is strongly recommended, see the caution under [GCP IAM Check Mode](/scion/reference/server-config/#gcp-iam-check-mode). Under `enforce`, the Hub evaluates Google Cloud's IAM delegation model via the **GCP Policy Troubleshooter v3 API**. It verifies that the caller's GCP principal possesses `iam.serviceAccounts.actAs` permission on the target service account.
 
 ### The `actAs` Validation Gate
 

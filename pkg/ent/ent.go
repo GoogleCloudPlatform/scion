@@ -42,6 +42,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationconfig"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationupdate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/invitecode"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/launchreaperstate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/lifecyclehook"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/lifecyclehookagentphase"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/limitdefinition"
@@ -163,6 +164,7 @@ func checkColumn(t, c string) error {
 			integrationconfig.Table:        integrationconfig.ValidColumn,
 			integrationupdate.Table:        integrationupdate.ValidColumn,
 			invitecode.Table:               invitecode.ValidColumn,
+			launchreaperstate.Table:        launchreaperstate.ValidColumn,
 			lifecyclehook.Table:            lifecyclehook.ValidColumn,
 			lifecyclehookagentphase.Table:  lifecyclehookagentphase.ValidColumn,
 			limitdefinition.Table:          limitdefinition.ValidColumn,

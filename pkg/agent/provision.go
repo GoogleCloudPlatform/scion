@@ -1009,6 +1009,26 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		finalScionCfg = config.MergeScionConfig(finalScionCfg, inlineCfg)
 	}
 
+	// Capture the inline config's own image/pull-policy — if any — before
+	// harness-config resolution. Deliberately NOT finalScionCfg.Image: that
+	// already includes the template's contribution, and a template is
+	// re-read live on every Start (see run.go), so persisting it here would
+	// let a create-time template snapshot outrank the CURRENT template on a
+	// later restart. Only the inline config has no live source to re-derive
+	// from at Start time — a local restart's request has no --config unless
+	// the caller repeats it — so only its contribution needs to survive via
+	// agent-info.json (AgentInfo.ExplicitImage / .ExplicitImagePullPolicy),
+	// as the explicit tier's fallback when the current Start request has no
+	// inline image/pull-policy of its own (ptone/scion#2156).
+	explicitImage := ""
+	explicitPullPolicy := ""
+	if inlineCfg != nil {
+		explicitImage = inlineCfg.Image
+		if inlineCfg.Kubernetes != nil {
+			explicitPullPolicy = inlineCfg.Kubernetes.ImagePullPolicy
+		}
+	}
+
 	// 2b. Resolve harness-config name (unified resolution chain)
 	hcResolution, err := config.ResolveHarnessConfigName(config.HarnessConfigInputs{
 		CLIFlag:     harnessConfig,
@@ -1037,8 +1057,32 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 
 	// Merge harness-config scalars into finalScionCfg (harness-config is base, template overrides)
 	hcCfg := &api.ScionConfig{}
-	if hcDir.Config.Image != "" {
-		hcCfg.Image = hcDir.Config.Image
+
+	// Image and Kubernetes.ImagePullPolicy precedence (ptone/scion#2156:
+	// settings win over the harness-config file's own default; an explicit template or
+	// inline-config override, merged in below via finalScionCfg, still
+	// outranks settings). Start from the on-disk harness-config file's
+	// values, then let a Hub settings harness_configs.<h> entry (including
+	// any profiles.<p>.harness_overrides.<h> override) replace them if set.
+	// See docs-site/src/content/docs/reference/settings-precedence.md.
+	hcImage := hcDir.Config.Image
+	hcPullPolicy := hcDir.Config.ImagePullPolicy
+	if settings != nil {
+		if settingsHC, err := settings.ResolveHarnessConfig(profileName, harnessConfigName); err == nil {
+			if settingsHC.Image != "" {
+				hcImage = settingsHC.Image
+				util.Debugf("ProvisionAgent: image overridden by settings harness-config %q: %s", harnessConfigName, hcImage)
+			}
+			if settingsHC.ImagePullPolicy != "" {
+				hcPullPolicy = settingsHC.ImagePullPolicy
+			}
+		}
+	}
+	if hcImage != "" {
+		hcCfg.Image = hcImage
+	}
+	if hcPullPolicy != "" {
+		hcCfg.Kubernetes = &api.KubernetesConfig{ImagePullPolicy: hcPullPolicy}
 	}
 	if hcDir.Config.Model != "" {
 		hcCfg.Model = hcDir.Config.Model
@@ -1612,6 +1656,12 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 	if agentImage != "" {
 		info.Image = agentImage
+	}
+	if explicitImage != "" {
+		info.ExplicitImage = explicitImage
+	}
+	if explicitPullPolicy != "" {
+		info.ExplicitImagePullPolicy = explicitPullPolicy
 	}
 
 	agentCfgData, err := json.MarshalIndent(finalScionCfg, "", "  ")
@@ -2200,6 +2250,17 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 		util.Debugf("GetAgent: template chain for %q not found: %v, returning agentCfg only (harness=%q image=%q)",
 			effectiveTemplate, err, agentCfg.Harness, agentCfg.Image)
 		resolveModelAliasForExistingAgent(ctx, agentCfg, projectPath)
+		// Populate Info from agent-info.json here too, matching the
+		// successful-lookup path below. scion-agent.json never carries Info
+		// (json:"-"), so without this, run.go's own independent
+		// template/profile resolution loses finalScionCfg.Info.Template and
+		// .Profile whenever the on-disk template can't be found for the
+		// same reason this lookup just failed — silently disabling both the
+		// unresolvable-template image fallback and the saved-profile
+		// fallback exactly when they matter most (ptone/scion#2156).
+		if agentInfo != nil {
+			agentCfg.Info = agentInfo
+		}
 		return agentDir, agentHome, agentWorkspace, agentCfg, nil
 	}
 

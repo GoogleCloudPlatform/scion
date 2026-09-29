@@ -111,6 +111,64 @@ type Agent struct {
 	// A6.6) keys on this instead of Updated. Nil means no reincarnation has
 	// ever touched this agent.
 	ReincarnationUpdatedAt *time.Time `json:"reincarnationUpdatedAt,omitempty"`
+
+	// --- T1 async agent create (design t1-async-create-v11.md §3.3) ---
+	// These are the persisted launch_* columns. They are internal bookkeeping,
+	// not the client-facing shape — untagged (json:"-") so they never leak
+	// directly onto the wire. The client-facing computed view (AgentLaunch /
+	// ComputeAgentLaunch, design §3.2) is P1a-ii scope, not here.
+	//
+	// UpdateAgent (the whole-row CAS writer) never sets any of these from the
+	// caller's struct: they are absent from its Ent builder chain entirely.
+	// The only writers are BeginLaunch, MarkLaunchAccepted, EndLaunch,
+	// ApplyLaunchReport and RunLaunchReaperTick, plus the narrow "clear
+	// launch_error / end an active launch" rule inside UpdateAgent and
+	// UpdateAgentStatus when the written phase is "running" (§3.3).
+	LaunchAsyncOptIn   bool      `json:"-"`
+	LaunchID           string    `json:"-"`
+	LaunchState        string    `json:"-"` // "" | "active" | "ended"
+	LaunchEndReason    string    `json:"-"`
+	LaunchKind         string    `json:"-"` // "create" | "start" | "restart"
+	LaunchDeadline     time.Time `json:"-"`
+	LaunchLastReportAt time.Time `json:"-"`
+	LaunchOwner        string    `json:"-"`
+	LaunchSeq          int64     `json:"-"`
+	LaunchStep         string    `json:"-"`
+	LaunchError        string    `json:"-"`
+}
+
+// InFlightPhases are the agent phases considered "in flight" for a launch
+// (design §3.3 in-flight predicate). Used by the store-side predicates
+// (IsInFlight, IsIncompleteCreate); the client-facing AgentLaunch view is
+// P1a-ii scope.
+var InFlightPhases = map[string]bool{
+	"created":      true,
+	"provisioning": true,
+	"cloning":      true,
+	"starting":     true,
+}
+
+// IsInFlight reports whether a matches the in-flight predicate (design
+// §3.3): a launch is currently occupying the agent's pre-running phases.
+func (a *Agent) IsInFlight() bool {
+	return a.LaunchState == "active" && InFlightPhases[a.Phase] && a.DeletedAt.IsZero()
+}
+
+// IsIncompleteCreate reports whether a matches the incomplete-create
+// predicate (design §3.3, §0c Option R): a create launch that ended (or is
+// winding down) leaving the agent on a phase where it never ran. Only
+// applicable when LaunchKind == "create" — start/restart launches (P6) are
+// out of scope for P1a and never set this predicate true.
+func (a *Agent) IsIncompleteCreate() bool {
+	if a.LaunchKind != "create" || !a.DeletedAt.IsZero() {
+		return false
+	}
+	switch a.Phase {
+	case "suspended", "stopping", "stopped", "error":
+	default:
+		return false
+	}
+	return a.LaunchState == "active" || a.LaunchError != ""
 }
 
 // ReincarnationState values for Agent.ReincarnationState.
