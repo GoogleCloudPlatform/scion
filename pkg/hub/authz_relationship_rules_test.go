@@ -831,7 +831,7 @@ func TestProgeny_ReadPermissionsFixedAtRegistration(t *testing.T) {
 	newAgent := func(f *goldenFixture, name string) *agentIdentityWrapper {
 		return &agentIdentityWrapper{&AgentTokenClaims{
 			Claims:    jwt.Claims{Subject: tid(name)},
-			ProjectID: f.projectBeta.ID,
+			ProjectID: f.projectAlpha.ID,
 			Ancestry:  []string{f.projectOwnerID},
 			Scopes:    allRegisteredAgentScopes(),
 		}}
@@ -840,6 +840,7 @@ func TestProgeny_ReadPermissionsFixedAtRegistration(t *testing.T) {
 	t.Run("registered set keeps serving", func(t *testing.T) {
 		f := newGoldenFixture(t)
 		agent := newAgent(f, "relrule-fixedperms-agent")
+		seedExecutionAgent(t, f.store, tid("relrule-fixedperms-agent"), f.projectAlpha.ID, []string{f.projectOwnerID}, []string{f.projectOwnerID})
 		src := SharingSource{Kind: "secret", ID: "fixed-opted", OwnerID: f.projectOwnerID, Policy: SharingPolicyOptInRequired, OptedIn: true}
 		adapter := &changingPermsProgenyAdapter{fakeProgenyAdapter{
 			kind: "secret", perms: []string{permissionProjectSecretRead}, sources: []SharingSource{src},
@@ -859,6 +860,7 @@ func TestProgeny_ReadPermissionsFixedAtRegistration(t *testing.T) {
 	t.Run("later set is not served", func(t *testing.T) {
 		f := newGoldenFixture(t)
 		agent := newAgent(f, "relrule-fixedperms-agent-2")
+		seedExecutionAgent(t, f.store, tid("relrule-fixedperms-agent-2"), f.projectAlpha.ID, []string{f.projectOwnerID}, []string{f.projectOwnerID})
 		src := SharingSource{Kind: "secret", ID: "fixed-opted-2", OwnerID: f.projectOwnerID, Policy: SharingPolicyOptInRequired, OptedIn: true}
 		adapter := &changingPermsProgenyAdapter{fakeProgenyAdapter{
 			kind: "secret", perms: []string{"skill.read"}, sources: []SharingSource{src},
