@@ -124,12 +124,6 @@ func TestUATEnforcement_ScopeAndBinding_Allowed(t *testing.T) {
 	authz, s, userID, projectID := uatTestSetup(t)
 	ctx := context.Background()
 
-	// group:read and gcp_service_account:read were REMOVED from this table
-	// (C.1, ptone/scion#2092): see
-	// TestUATProjectAdmission_SystemAuthorityForExactPermission in
-	// uat_project_relationship_test.go for their current (post-A.1)
-	// coverage under the same live-project-access gate this table's other
-	// cases pass through.
 	tests := []struct {
 		name         string
 		permissionID string
@@ -172,6 +166,24 @@ func TestUATEnforcement_ScopeAndBinding_Allowed(t *testing.T) {
 				ID: tid("skill-2"), Scope: store.SkillScopeProject, ScopeID: projectID,
 			}),
 			action: ActionCreate,
+		},
+		{
+			name:         "group:read scope + user has group.read binding",
+			permissionID: "group.read",
+			uatScope:     "group:read",
+			resource: groupResource(&store.Group{
+				ID: tid("group-1"), ProjectID: projectID,
+			}),
+			action: ActionRead,
+		},
+		{
+			name:         "gcp_service_account:read scope + user has gcp_service_account.read binding",
+			permissionID: "gcp_service_account.read",
+			uatScope:     "gcp_service_account:read",
+			resource: gcpServiceAccountResource(&store.GCPServiceAccount{
+				ID: tid("sa-int-1"), Scope: store.ScopeProject, ScopeID: projectID,
+			}),
+			action: ActionRead,
 		},
 	}
 

@@ -1006,13 +1006,10 @@ func TestCanMintSelector_RelationshipEligibleWithoutTarget(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // System-role runtime authority for the EXACT requested permission on a
-// project target is the intended rule (ptone/scion#2092); the reviewed
-// permissions.ProjectTargetApplicability table is being corrected per
-// permission (group.read, gcp_service_account.read, group.addMember, and
-// others -- ptone/scion#2117). The ALLOW subtests below are t.Skip'd with a
-// TODO naming that fix; the DENY subtests exercise paths that are correct
-// both today and after the fix (no authority, the wrong permission, or a
-// governing constraint), so they run unskipped now.
+// project target (ptone/scion#2092): permissions.ProjectTargetApplicability
+// reviews group.read, gcp_service_account.read, and group.addMember true
+// (ptone/scion#2117), so both the ALLOW and DENY subtests below run
+// unskipped.
 // ---------------------------------------------------------------------------
 
 // TestUATProjectAdmission_SystemAuthorityForExactPermission covers
@@ -1052,8 +1049,6 @@ func TestUATProjectAdmission_SystemAuthorityForExactPermission(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.permissionID, func(t *testing.T) {
 			t.Run("system-scope binding with the exact permission allows use", func(t *testing.T) {
-				t.Skip("TODO(ptone/scion#2117): ProjectTargetApplicability[\"" + tc.permissionID + "\"] is currently false; unskip once pat/2117-a1-contracts corrects it to true.")
-
 				srv, s := testServer(t)
 				ctx := context.Background()
 				projectID := tid("uatp-exactperm-allow-project-" + tc.permissionID)
@@ -1198,8 +1193,6 @@ func TestUATProjectAdmission_CrossPermissionMemoIsolation(t *testing.T) {
 // the group family's real-HTTP exercise.
 func TestProjectUAT_GroupAddMemberExactSystemPermissionAtRealRoute(t *testing.T) {
 	t.Run("system-scope binding with the exact permission allows the request", func(t *testing.T) {
-		t.Skip("TODO(ptone/scion#2117): ProjectTargetApplicability[\"group.addMember\"] is currently false; unskip once pat/2117-a1-contracts corrects it to true.")
-
 		srv, s := testServer(t)
 		ctx := context.Background()
 		projectID := tid("uatp-groupaddmember-project")
@@ -1214,7 +1207,15 @@ func TestProjectUAT_GroupAddMemberExactSystemPermissionAtRealRoute(t *testing.T)
 			ID: targetID, Email: targetID + "@test.com", DisplayName: "Target", Role: "member", Status: "active",
 		}))
 		grantPermissionViaRoleBinding(t, s, userID, "group.addMember", store.RoleScopeSystem, "")
-		group := &store.Group{ID: tid("uatp-groupaddmember-group"), Slug: "uatp-groupaddmember-group", Name: "G", ProjectID: projectID}
+		// OwnerID is set to userID so this request also clears
+		// addGroupMember's separate group-ownership role-hierarchy guard
+		// (handlers_groups.go: "Only group owners or admins can add
+		// members"), which is unrelated to the project-access question this
+		// test is actually about.
+		group := &store.Group{
+			ID: tid("uatp-groupaddmember-group"), Slug: "uatp-groupaddmember-group", Name: "G",
+			ProjectID: projectID, OwnerID: userID,
+		}
 		require.NoError(t, s.CreateGroup(ctx, group))
 
 		uatKey := uatpInsertLegacyToken(t, s, userID, projectID, []string{"group:addMember"})
