@@ -203,6 +203,64 @@ func TestRelationshipRules_UntrustedAncestryRejected(t *testing.T) {
 	assert.Equal(t, "relationship grant: ancestor access", out.accepted.Reason)
 }
 
+// permissions.RelationshipPrincipalKind maps federated_agent to "agent".
+// Every candidate an agent-kind row can admit uses the hub-attested
+// ancestry stage, so a federated agent matches no agent row even when the
+// row, fact shape and scopes would otherwise hold.
+func TestRelationshipRules_FederatedAgentMatchesNoAgentRow(t *testing.T) {
+	f := newGoldenFixture(t)
+	ctx := context.Background()
+	require.Equal(t, "agent", permissions.RelationshipPrincipalKind(string(PrincipalKindFederatedAgent)))
+
+	fed := NewFederatedAgentIdentity("https://peer.example", tid("relrule-fedrow"), f.projectBeta.ID,
+		"fed", f.projectOwnerID, []string{f.projectOwnerID}, allRegisteredAgentScopes())
+	principal := principalContextForIdentity(fed)
+	require.Equal(t, PrincipalKindFederatedAgent, principal.Kind)
+
+	cases := map[string]struct {
+		rule     RelationshipRuleID
+		resource Resource
+		action   Action
+		perm     string
+	}{
+		"ancestor": {RelationshipRuleAncestor, agentResource(&store.Agent{
+			ID: tid("relrule-fedrow-desc"), ProjectID: f.projectBeta.ID,
+			Ancestry: []string{f.projectOwnerID, fed.ID()},
+		}), Action("notify"), "agent.notify"},
+		"creator_user_skill": {RelationshipRuleCreatorUserSkill, skillResource(&store.Skill{
+			ID: tid("relrule-fedrow-skill"), Scope: store.SkillScopeUser, ScopeID: f.projectOwnerID,
+		}), ActionRead, "skill.read"},
+		"progeny": {RelationshipRuleProgeny, Resource{Type: "secret", ID: f.secretID}, ActionRead, permissionProjectSecretRead},
+	}
+
+	// Every relationship with an agent-kind row has a case here.
+	for _, row := range permissions.RelationshipPolicies {
+		for _, kind := range row.PrincipalKinds {
+			if kind == "agent" {
+				_, ok := cases[row.Relationship]
+				assert.True(t, ok, "agent-kind row %q/%s needs a federated-agent case", row.Relationship, row.ResourceType)
+			}
+		}
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			out := f.authz.evaluateRelationshipCandidates(ctx, principal, tc.resource, tc.action, tc.perm, nil, false)
+			assert.Nil(t, out.accepted)
+			found := false
+			for _, r := range out.results {
+				if r.Rule == tc.rule {
+					found = true
+					assert.False(t, r.Accepted)
+					assert.Equal(t, RelationshipRejectUntrustedAncestry, r.RejectedBy)
+				}
+			}
+			assert.True(t, found, "candidate %q must be evaluated", tc.rule)
+			assert.False(t, decidePerm(f.authz, fed, tc.resource, tc.action, tc.perm, false).Allowed)
+		})
+	}
+}
+
 // A progeny read requires the sharing source's owner to be active.
 func TestRelationshipRules_ProgenySourceInactive(t *testing.T) {
 	f := newGoldenFixture(t)
