@@ -28,7 +28,11 @@ import (
 // OwnerID, the token's OriginUserID(), or scheduledCreatorIdentity: the
 // stored ancestry chain is the only source. An empty ancestry (scheduler
 // children and legacy rows) has no root and must be denied by the caller.
-func runtimeProvenanceRoot(ctx context.Context, rec *store.Agent) (ProvenanceRoot, bool) {
+//
+// ctx is unused by the F.2a rule above, but is part of the committed
+// signature: a later change resolves the root from recorded edge provenance
+// instead, which needs it.
+func runtimeProvenanceRoot(ctx context.Context, rec *store.Agent) (ProvenanceRoot, bool) { //nolint:unparam // ctx: see doc comment
 	if rec == nil || len(rec.Ancestry) == 0 {
 		return ProvenanceRoot{}, false
 	}

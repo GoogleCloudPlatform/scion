@@ -15,6 +15,8 @@
 package hub
 
 import (
+	"context"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -94,7 +96,7 @@ type ItemResult struct {
 }
 
 // Reason codes (F.2a subset). These are audit-only: never sent to the
-// caller, and never string-matched against B-owned decision text (v5, O-2).
+// caller, and never string-matched against the underlying decision text.
 const (
 	ReasonAllowed              = "allowed"
 	ReasonNotFound             = "not_found"
@@ -108,4 +110,59 @@ const (
 	ReasonMembershipRequired   = "membership_required"
 	ReasonCapabilityRequired   = "capability_required"
 	ReasonIdentityNotLocal     = "identity_not_local"
+	ReasonInvalidScope         = "invalid_scope"
 )
+
+// selectRuntimeMaterial composes checks 7-9 for one candidate key in one
+// scope ("project" or "user"): the per-item authorize step (check 7 project,
+// check 8 user) and, when it allows, the record-race fetch (check 9). It is
+// the single per-item composition that both the fetch endpoint (looped over
+// its key list) and the get endpoint (a single key) call, so the two do not
+// each hand-compose their own copy of "authorize, then fetch". The agent
+// secret list has no per-key fetch step and its own dual-scope aggregation
+// (§8.2), so it composes checks 1-7/8 on its own instead of through this
+// function.
+//
+// decisionCache must be created once per request and passed to every
+// project-scope call within that request, so the check-7 decision is
+// evaluated once per request rather than once per key; it is ignored for
+// scope == "user".
+//
+// Returns the final ItemResult (Selected set only when a value was read and
+// passed check 9), the fetched value (nil unless Selected), the permission
+// name for the audit item ("project.secret_read" for project scope, "" for
+// user scope — no permission is named for a user-scope item), and the
+// check-7 Detail string (Decision.Reason verbatim; "" for user scope, which
+// makes no such decision).
+func (s *Server) selectRuntimeMaterial(ctx context.Context, ident AgentIdentity, facts *TargetFacts, scope, key string, decisionCache *projectDecisionCache) (item ItemResult, value *secret.SecretWithValue, permission, detail string) {
+	switch scope {
+	case store.ScopeProject:
+		permission = "project.secret_read"
+		decision, decErr := s.projectReadDecision(ctx, ident, facts, decisionCache)
+		if decErr != nil {
+			item = ItemResult{
+				Candidate: Candidate{Kind: MaterialKindSecret, Key: key, Scope: store.ScopeProject, ScopeID: facts.ProjectID, Grant: GrantProjectSecretRead},
+				Reason:    ReasonBackendError,
+			}
+			return item, nil, permission, detail
+		}
+		item, detail = s.authorizeRuntimeProjectItem(ctx, key, facts, decision)
+	case store.ScopeUser:
+		item = s.authorizeRuntimeUserItem(ctx, facts, key)
+	default:
+		return ItemResult{}, nil, "", ""
+	}
+
+	if !item.Allowed {
+		return item, nil, permission, detail
+	}
+
+	sv, valReason := s.fetchAuthorizedValue(ctx, item)
+	if valReason != ReasonAllowed {
+		item.Reason = valReason
+		return item, nil, permission, detail
+	}
+
+	item.Selected = true
+	return item, sv, permission, detail
+}

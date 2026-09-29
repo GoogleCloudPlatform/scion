@@ -12,10 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package hub — F.2a runtime material selection: the single check sequence
-// that agent runtime secret reads (P7 fetch, P8 get, and the agent secret
-// list) go through before any value is read. See
-// F/design/f2-material-selection.md section 8.2 for the full specification.
+// Package hub — runtime material selection: the single check sequence that
+// agent runtime secret reads (fetch, get, and the agent secret list) go
+// through before any value is read.
 package hub
 
 import (
@@ -39,10 +38,10 @@ const actionProjectSecretRead Action = Action("secret_read")
 // caller should use: 403 for a policy/store-fact denial, 500 for an
 // infrastructure error. Both fail closed.
 //
-// The nil-identity case (check 1's status-per-endpoint exception, N-1) is
-// handled by each endpoint before calling this function; ident is never nil
-// here in production. It is accepted as a possibly-nil parameter only so
-// this function can be unit-tested directly.
+// The nil-identity case (check 1's status-per-endpoint exception) is handled
+// by each endpoint before calling this function; ident is never nil here in
+// production. It is accepted as a possibly-nil parameter only so this
+// function can be unit-tested directly.
 func (s *Server) materialRuntimePrecheck(ctx context.Context, ident AgentIdentity) (*TargetFacts, string, int) {
 	if ident == nil {
 		return nil, ReasonTargetUnresolved, http.StatusForbidden
@@ -94,7 +93,8 @@ func (s *Server) materialRuntimePrecheck(ctx context.Context, ident AgentIdentit
 	}
 
 	// Check 5: root human live authority. Interim: current membership only
-	// (system authority for the exact permission arrives in F.2b, OQ-16).
+	// (system authority for the exact permission is evaluated in a later
+	// change).
 	u, err := s.store.GetUser(ctx, root.ID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -126,8 +126,8 @@ func (s *Server) materialRuntimePrecheck(ctx context.Context, ident AgentIdentit
 // projectDecisionCache memoizes the check-7 project.secret_read decision for
 // a single request. The decision input does not depend on the key, so it is
 // computed once, lazily, at the first project item, and reused for the rest
-// of that request (O-3). A new cache must be created per request; it is
-// never reused across requests.
+// of that request. A new cache must be created per request; it is never
+// reused across requests.
 type projectDecisionCache struct {
 	computed bool
 	decision Decision
@@ -160,7 +160,7 @@ func (s *Server) projectReadDecision(ctx context.Context, ident AgentIdentity, f
 // decision denies, no GetMeta call is made
 // (TestAgentSecretFetch_DeniedRequestReadsNoMetadata) and the item is
 // not_found with audit reason denied_by_policy; the decision's Reason is
-// returned separately as the audit-only Detail string (v5, O-2).
+// returned separately as the audit-only Detail string.
 func (s *Server) authorizeRuntimeProjectItem(ctx context.Context, key string, facts *TargetFacts, decision Decision) (ItemResult, string) {
 	cand := Candidate{
 		Kind:    MaterialKindSecret,
@@ -180,6 +180,11 @@ func (s *Server) authorizeRuntimeProjectItem(ctx context.Context, key string, fa
 		}
 		return ItemResult{Candidate: cand, Reason: ReasonBackendError}, ""
 	}
+	if meta == nil {
+		// A real backend never returns (nil, nil); this is cheap insurance
+		// on an authorization path rather than a reachable production case.
+		return ItemResult{Candidate: cand, Reason: ReasonBackendError}, ""
+	}
 	if meta.SecretType == store.SecretTypeInternal {
 		return ItemResult{Candidate: cand, Reason: ReasonNotFound}, ""
 	}
@@ -189,8 +194,8 @@ func (s *Server) authorizeRuntimeProjectItem(ctx context.Context, key string, fa
 
 // authorizeRuntimeUserItem is check 8, the per-item user-scope check.
 // Progeny only; every user item carries Grant = GrantProgeny. No
-// Decide(project.secret_read) of any shape is made here (OQ-3), and there is
-// no owner shortcut.
+// Decide(project.secret_read) of any shape is made here, and there is no
+// owner shortcut.
 func (s *Server) authorizeRuntimeUserItem(ctx context.Context, facts *TargetFacts, key string) ItemResult {
 	cand := Candidate{
 		Kind:    MaterialKindSecret,
@@ -207,18 +212,24 @@ func (s *Server) authorizeRuntimeUserItem(ctx context.Context, facts *TargetFact
 		}
 		return ItemResult{Candidate: cand, Reason: ReasonBackendError}
 	}
+	if meta == nil {
+		// A real backend never returns (nil, nil); this is cheap insurance
+		// on an authorization path rather than a reachable production case.
+		return ItemResult{Candidate: cand, Reason: ReasonBackendError}
+	}
 	if meta.SecretType == store.SecretTypeInternal {
 		return ItemResult{Candidate: cand, Reason: ReasonNotFound}
 	}
 	cand.Meta = *meta
+	// SharingSource.ID is known as soon as metadata resolves; Kind is filled
+	// in once source liveness is resolved below, for the allowed and
+	// source-inactive outcomes.
+	cand.SharingSource = &SourceRef{ID: meta.CreatedBy}
 
-	live, kind, liveReason, liveErr := s.progenySourceLive(ctx, *meta)
-	if kind != "" {
-		cand.SharingSource = &SourceRef{Kind: kind, ID: meta.CreatedBy}
-	} else {
-		cand.SharingSource = &SourceRef{ID: meta.CreatedBy}
-	}
-
+	// Checks 8b (AllowProgeny) and 8c (CheckProgenyAccess) run before source
+	// liveness is resolved: an unshared row or a row outside the agent's
+	// lineage denies without the extra store lookups that resolving the
+	// source would cost.
 	if !meta.AllowProgeny {
 		return ItemResult{Candidate: cand, Reason: ReasonSharingDisabled}
 	}
@@ -236,6 +247,10 @@ func (s *Server) authorizeRuntimeUserItem(ctx context.Context, facts *TargetFact
 		return ItemResult{Candidate: cand, Reason: ReasonDeniedByPolicy}
 	}
 
+	live, kind, liveReason, liveErr := s.progenySourceLive(ctx, *meta)
+	if kind != "" {
+		cand.SharingSource = &SourceRef{Kind: kind, ID: meta.CreatedBy}
+	}
 	if liveErr != nil {
 		return ItemResult{Candidate: cand, Reason: ReasonBackendError}
 	}
@@ -252,6 +267,11 @@ func (s *Server) fetchAuthorizedValue(ctx context.Context, item ItemResult) (*se
 	sv, err := s.secretBackend.Get(ctx, item.Key, item.Scope, item.ScopeID)
 	if err != nil {
 		// An error is unavailable, never an empty value.
+		return nil, ReasonBackendError
+	}
+	if sv == nil {
+		// A real backend never returns (nil, nil); this is cheap insurance
+		// on an authorization path rather than a reachable production case.
 		return nil, ReasonBackendError
 	}
 	if sv.ID != item.Meta.ID ||

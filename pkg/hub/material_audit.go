@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -64,13 +65,13 @@ type materialSelectionAuditor interface {
 	LogMaterialSelectionEvent(ctx context.Context, e *MaterialSelectionEvent) error
 }
 
-// LogMaterialSelectionEvent logs a material selection audit event to the
-// standard logger. It never logs a secret value.
-func (l *LogAuditLogger) LogMaterialSelectionEvent(ctx context.Context, e *MaterialSelectionEvent) error {
-	if e == nil {
-		return nil
-	}
-
+// materialSelectionAttrs builds the slog attributes for e, shared between
+// the production logger and the slog fallback so both emit the same fields,
+// including the per-item reason, Detail and SharingSource. It never emits a
+// secret value: MaterialSelectionEventItem has no value field to begin
+// with. Each item is a separate slog.Group, keyed item_0, item_1, ... so a
+// structured log consumer can recover every field per item.
+func materialSelectionAttrs(e *MaterialSelectionEvent) []slog.Attr {
 	attrs := []slog.Attr{
 		slog.String("event_type", e.EventType),
 		slog.String("correlation_id", e.CorrelationID),
@@ -92,17 +93,48 @@ func (l *LogAuditLogger) LogMaterialSelectionEvent(ctx context.Context, e *Mater
 	if e.RequestReason != "" {
 		attrs = append(attrs, slog.String("request_reason", e.RequestReason))
 	}
+	for i, item := range e.Items {
+		itemAttrs := []any{
+			slog.String("kind", string(item.Kind)),
+			slog.String("key", item.Key),
+			slog.String("scope", item.Scope),
+			slog.String("scope_id", item.ScopeID),
+			slog.String("grant", string(item.Grant)),
+			slog.Bool("allowed", item.Allowed),
+			slog.Bool("selected", item.Selected),
+			slog.String("reason", item.Reason),
+			slog.String("permission", item.Permission),
+			slog.String("detail", item.Detail),
+		}
+		if item.SharingSource != nil {
+			itemAttrs = append(itemAttrs,
+				slog.String("sharing_source_kind", item.SharingSource.Kind),
+				slog.String("sharing_source_id", item.SharingSource.ID),
+			)
+		}
+		attrs = append(attrs, slog.Group(fmt.Sprintf("item_%d", i), itemAttrs...))
+	}
+	return attrs
+}
 
-	l.logger().LogAttrs(ctx, slog.LevelInfo, "material selection audit event", attrs...)
+// LogMaterialSelectionEvent logs a material selection audit event to the
+// standard logger. It never logs a secret value.
+func (l *LogAuditLogger) LogMaterialSelectionEvent(ctx context.Context, e *MaterialSelectionEvent) error {
+	if e == nil {
+		return nil
+	}
+
+	l.logger().LogAttrs(ctx, slog.LevelInfo, "material selection audit event", materialSelectionAttrs(e)...)
 
 	return nil
 }
 
 // logMaterialSelection emits e through the audit logger when it implements
-// materialSelectionAuditor, and falls back to slog otherwise. A nil
-// s.auditLogger is safe: the type assertion on a nil interface yields
-// ok == false, so this never dereferences the logger
-// (TestMaterialAudit_NilAuditLoggerSafe).
+// materialSelectionAuditor, and falls back to slog otherwise. Both paths
+// share materialSelectionAttrs, so the fallback carries the same per-item
+// fields as the production logger. A nil s.auditLogger is safe: the type
+// assertion on a nil interface yields ok == false, so this never
+// dereferences the logger (TestMaterialAudit_NilAuditLoggerSafe).
 func (s *Server) logMaterialSelection(ctx context.Context, e *MaterialSelectionEvent) {
 	if e == nil {
 		return
@@ -111,11 +143,7 @@ func (s *Server) logMaterialSelection(ctx context.Context, e *MaterialSelectionE
 		_ = a.LogMaterialSelectionEvent(ctx, e)
 		return
 	}
-	slog.Default().LogAttrs(ctx, slog.LevelInfo, "material selection audit event",
-		slog.String("event_type", e.EventType),
-		slog.String("correlation_id", e.CorrelationID),
-		slog.String("endpoint", e.Endpoint),
-	)
+	slog.Default().LogAttrs(ctx, slog.LevelInfo, "material selection audit event", materialSelectionAttrs(e)...)
 }
 
 // buildMaterialSelectionEvent assembles the one MaterialSelectionEvent
@@ -187,7 +215,7 @@ func newMaterialCorrelationID() string {
 // replaces the deleted package-level LogAgentSecretRead: Scope and ScopeID
 // are recorded separately instead of folding the scope ID into ProjectID.
 // Derived means "has a partner MaterialSelectionEvent with the same
-// CorrelationID" (v6, N-2). Nil-safe like LogAgentSecretRead was
+// CorrelationID". Nil-safe like LogAgentSecretRead was
 // (TestMaterialAudit_NilAuditLoggerSafe).
 func (s *Server) logAgentSecretReadCompat(ctx context.Context, agentID, projectID, scope, scopeID, key string, success bool, failReason string, derived bool, correlationID string) {
 	if s.auditLogger == nil {

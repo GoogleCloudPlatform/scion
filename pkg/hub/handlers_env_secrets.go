@@ -1302,19 +1302,18 @@ func (s *Server) validateAgentSecretAccess(w http.ResponseWriter, r *http.Reques
 // Returns the secret value (base64-encoded) along with type and target metadata.
 // Supports both project-scoped and user-scoped secrets via the ?scope= query parameter.
 //
-// The F.2a check sequence (material_runtime.go) runs after
-// validateAgentSecretAccess (D-owned, not modified): the whole-request
-// precheck (checks 1-6), then the per-item check for the requested scope
-// (check 7 project, check 8 user) and the record-race rule (check 9). See
-// F/design/f2-material-selection.md section 8.2.
+// The runtime material check sequence (material_runtime.go) runs after
+// validateAgentSecretAccess (not modified here): the whole-request precheck
+// (checks 1-6), then the per-item check for the requested scope (check 7
+// project, check 8 user) and the record-race rule (check 9).
 func (s *Server) agentGetSecret(w http.ResponseWriter, r *http.Request, agentID, key string) {
 	ctx := r.Context()
 
 	_, ok := s.validateAgentSecretAccess(w, r, agentID)
 	if !ok {
 		// This path runs before the precheck, so no TargetFacts exist and no
-		// MaterialSelectionEvent is emitted (v5, N-1): there is no partner
-		// event for the compat record to be derived from.
+		// MaterialSelectionEvent is emitted: there is no partner event for
+		// the compat record to be derived from.
 		s.logAgentSecretReadCompat(ctx, agentID, "", "", "", key, false, "auth failed", false, "")
 		return
 	}
@@ -1338,22 +1337,12 @@ func (s *Server) agentGetSecret(w http.ResponseWriter, r *http.Request, agentID,
 	if scope == "" {
 		scope = store.ScopeProject
 	}
-
-	var item ItemResult
-	var detail, permission string
 	switch scope {
-	case store.ScopeProject:
-		var cache projectDecisionCache
-		decision, decErr := s.projectReadDecision(ctx, ident, facts, &cache)
-		if decErr != nil {
-			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "secret unavailable", nil)
-			return
-		}
-		item, detail = s.authorizeRuntimeProjectItem(ctx, key, facts, decision)
-		permission = "project.secret_read"
-	case store.ScopeUser:
-		item = s.authorizeRuntimeUserItem(ctx, facts, key)
+	case store.ScopeProject, store.ScopeUser:
 	default:
+		// An invalid scope parameter still emits the request's
+		// MaterialSelectionEvent rather than exiting silently.
+		s.logMaterialSelection(ctx, s.buildMaterialSelectionEvent(ctx, "get", correlationID, facts, ReasonInvalidScope, nil))
 		ValidationError(w, "scope must be \"project\" or \"user\"", map[string]interface{}{
 			"field":   "scope",
 			"value":   scope,
@@ -1362,41 +1351,38 @@ func (s *Server) agentGetSecret(w http.ResponseWriter, r *http.Request, agentID,
 		return
 	}
 
-	emit := func(finalItem ItemResult) {
-		items := []MaterialSelectionEventItem{materialSelectionItem(finalItem, permission, detail)}
+	var decisionCache projectDecisionCache
+	item, sv, permission, detail := s.selectRuntimeMaterial(ctx, ident, facts, scope, key, &decisionCache)
+
+	emit := func() {
+		items := []MaterialSelectionEventItem{materialSelectionItem(item, permission, detail)}
 		s.logMaterialSelection(ctx, s.buildMaterialSelectionEvent(ctx, "get", correlationID, facts, "", items))
 	}
 
-	if !item.Allowed {
+	switch {
+	case item.Selected:
+		s.logAgentSecretReadCompat(ctx, agentID, facts.ProjectID, item.Scope, item.ScopeID, key, true, "", true, correlationID)
+		emit()
+		writeJSON(w, http.StatusOK, AgentGetSecretResponse{
+			Key:    sv.Name,
+			Value:  base64.StdEncoding.EncodeToString([]byte(sv.Value)),
+			Type:   sv.SecretType,
+			Target: sv.Target,
+		})
+	case !item.Allowed && item.Reason != ReasonBackendError:
+		// Check 7 or 8 denied the item for a reason other than an
+		// infrastructure fault: not_found, never a value.
 		s.logAgentSecretReadCompat(ctx, agentID, facts.ProjectID, item.Scope, item.ScopeID, key, false, item.Reason, true, correlationID)
-		emit(item)
-		if item.Reason == ReasonBackendError {
-			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "secret unavailable", nil)
-			return
-		}
+		emit()
 		writeError(w, http.StatusNotFound, ErrCodeNotFound, "secret not found", nil)
-		return
-	}
-
-	sv, valReason := s.fetchAuthorizedValue(ctx, item)
-	if valReason != ReasonAllowed {
-		item.Reason = valReason
-		s.logAgentSecretReadCompat(ctx, agentID, facts.ProjectID, item.Scope, item.ScopeID, key, false, valReason, true, correlationID)
-		emit(item)
+	default:
+		// Either checks 7/8 failed with a backend error, or they allowed the
+		// item but check 9 (the record-race rule) did not: both report
+		// unavailable, never a value.
+		s.logAgentSecretReadCompat(ctx, agentID, facts.ProjectID, item.Scope, item.ScopeID, key, false, item.Reason, true, correlationID)
+		emit()
 		writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "secret unavailable", nil)
-		return
 	}
-
-	item.Selected = true
-	s.logAgentSecretReadCompat(ctx, agentID, facts.ProjectID, item.Scope, item.ScopeID, key, true, "", true, correlationID)
-	emit(item)
-
-	writeJSON(w, http.StatusOK, AgentGetSecretResponse{
-		Key:    sv.Name,
-		Value:  base64.StdEncoding.EncodeToString([]byte(sv.Value)),
-		Type:   sv.SecretType,
-		Target: sv.Target,
-	})
 }
 
 // agentListSecrets handles GET /api/v1/agents/{agentID}/secrets (no key).
@@ -1450,11 +1436,19 @@ func (s *Server) agentListSecrets(w http.ResponseWriter, r *http.Request, agentI
 		var cache projectDecisionCache
 		decision, decErr := s.projectReadDecision(ctx, ident, facts, &cache)
 		if decErr != nil {
+			// A decision error still emits the request's
+			// MaterialSelectionEvent, with a request-level item recording
+			// the failure, rather than exiting silently.
+			errItem := materialSelectionItem(ItemResult{
+				Candidate: Candidate{Kind: MaterialKindSecret, Scope: store.ScopeProject, ScopeID: facts.ProjectID, Grant: GrantProjectSecretRead},
+				Reason:    ReasonBackendError,
+			}, "project.secret_read", "")
+			s.logMaterialSelection(ctx, s.buildMaterialSelectionEvent(ctx, "list", correlationID, facts, "", []MaterialSelectionEventItem{errItem}))
 			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "failed to list secrets", nil)
 			return
 		}
-		// Decision first, then metadata (N-2): a denial leaves the project
-		// part of the list empty and makes no GetMeta/List call.
+		// Decision first, then metadata: a denial leaves the project part
+		// of the list empty and makes no GetMeta/List call.
 		if decision.Allowed {
 			metas, err := s.secretBackend.List(ctx, secret.Filter{
 				Scope:   store.ScopeProject,
@@ -1475,6 +1469,14 @@ func (s *Server) agentListSecrets(w http.ResponseWriter, r *http.Request, agentI
 					Reason:    ReasonAllowed,
 				}, "project.secret_read", ""))
 			}
+		} else {
+			// The project part of the list is empty, but the denial and its
+			// Detail are still recorded as a request-level item, rather than
+			// leaving no trace of the project scope having been evaluated.
+			items = append(items, materialSelectionItem(ItemResult{
+				Candidate: Candidate{Kind: MaterialKindSecret, Scope: store.ScopeProject, ScopeID: facts.ProjectID, Grant: GrantProjectSecretRead},
+				Reason:    ReasonDeniedByPolicy,
+			}, "project.secret_read", decision.Reason))
 		}
 	}
 
