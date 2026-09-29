@@ -134,12 +134,6 @@ func TestResolveOrCreateConversationByKey_Participants(t *testing.T) {
 		}
 	})
 
-	// Note: WithParticipants(nil) given an untyped nil stores a nil
-	// interface, the same state as the no-option case directly above — it is
-	// not a distinct case, so there is no separate subtest for it here. The
-	// nil-pe guard itself is pinned directly by
-	// TestEnsureConversationParticipants_NilParticipantEnsurer_NoPanic below.
-
 	t.Run("first_ensure_fails_second_still_attempted", func(t *testing.T) {
 		// Kills m12: an early `return` after the first EnsureParticipant
 		// error would leave this at 1 call / 1 ensured participant. The
@@ -264,12 +258,8 @@ func TestResolveOrCreateThreadConversation_NonDMThread_NoThreadParticipants(t *t
 	}
 }
 
-// TestEnsureConversationParticipants_NilParticipantEnsurer_NoPanic is a
-// direct unit test of the unexported helper: a nil ParticipantEnsurer must
-// cause no panic and no work (no EnsureParticipant call, which is trivially
-// true here since there is no non-nil interface value to call a method on if
-// this doesn't panic). Existing callers already avoid passing a nil pe, so
-// this is the only test that exercises the helper's own guard directly.
+// TestEnsureConversationParticipants_NilParticipantEnsurer_NoPanic: a nil
+// ParticipantEnsurer must be a no-op, not a panic.
 func TestEnsureConversationParticipants_NilParticipantEnsurer_NoPanic(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 
