@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -33,15 +34,20 @@ import (
 // ---------------------------------------------------------------------------
 
 // gReservedFieldNames are the store-record Go struct field names E's writers
-// must never populate. G's migration commit adds more (ParentGrantID,
-// ExchangeAgentCredentialID, an actor-kind field, and the aggregated
-// record's kind/counts) and updates this list, and
-// gReservedFieldNameToLabelKey below, in the same commit.
+// must never populate: G's seven actor-identity fields plus the denial
+// fine-code AgentDelegationCode. ActorKind's exact field name is provisional
+// pending G's migration; if G lands a different name, this list and
+// gReservedFieldNameToLabelKey are updated in the same commit. The
+// aggregated list-filter record's kind/count fields are not reserved label
+// keys and are not listed here.
 var gReservedFieldNames = []string{
 	"ActorAgentID",
 	"AuthorizingUserID",
 	"SourceGrantID",
 	"DelegationEdgeID",
+	"ParentGrantID",
+	"ExchangeAgentCredentialID",
+	"ActorKind",
 	"AgentDelegationCode",
 }
 
@@ -51,35 +57,95 @@ var gReservedFieldNames = []string{
 // label-key set. AgentDelegationCode is a denial fine-code, not an actor
 // identity, and is deliberately absent: it is not a reserved label key.
 var gReservedFieldNameToLabelKey = map[string]string{
-	"ActorAgentID":      "actor_agent_id",
-	"AuthorizingUserID": "authorizing_user_id",
-	"SourceGrantID":     "source_grant_id",
-	"DelegationEdgeID":  "delegation_edge_id",
+	"ActorAgentID":              "actor_agent_id",
+	"AuthorizingUserID":         "authorizing_user_id",
+	"SourceGrantID":             "source_grant_id",
+	"DelegationEdgeID":          "delegation_edge_id",
+	"ParentGrantID":             "parent_grant_id",
+	"ExchangeAgentCredentialID": "exchange_agent_credential_id",
+	"ActorKind":                 "actor_kind",
+}
+
+// gReservedFieldNamesExcludedFromLabelKeys names the gReservedFieldNames
+// entries that are deliberately absent from gReservedFieldNameToLabelKey.
+var gReservedFieldNamesExcludedFromLabelKeys = map[string]bool{
+	"AgentDelegationCode": true,
+}
+
+// checkGReservedFieldNamesMatchCanonicalLabelKeys pins reservedFieldNames
+// against canonicalKeys through nameToKey, in both directions: every
+// reservedFieldNames entry not in excluded must map to a key present in
+// canonicalKeys, and every canonicalKeys entry must be the target of some
+// mapping. It returns one message per violation, or nil if fully consistent.
+// Split out from the test itself so a self-test can prove the check actually
+// fails on drift, rather than trusting an assertion that might be vacuous.
+func checkGReservedFieldNamesMatchCanonicalLabelKeys(reservedFieldNames []string, nameToKey map[string]string, excluded map[string]bool, canonicalKeys []string) []string {
+	var errs []string
+	canonical := make(map[string]bool, len(canonicalKeys))
+	for _, k := range canonicalKeys {
+		canonical[k] = true
+	}
+	mappedKeys := make(map[string]bool, len(nameToKey))
+	for _, fieldName := range reservedFieldNames {
+		labelKey, mapped := nameToKey[fieldName]
+		if excluded[fieldName] {
+			if mapped {
+				errs = append(errs, fmt.Sprintf("%q is excluded but still has a mapping to %q", fieldName, labelKey))
+			}
+			continue
+		}
+		if !mapped {
+			errs = append(errs, fmt.Sprintf("%q has no corresponding label key in nameToKey", fieldName))
+			continue
+		}
+		mappedKeys[labelKey] = true
+		if !canonical[labelKey] {
+			errs = append(errs, fmt.Sprintf("%q maps to label key %q, which is not in the canonical set", fieldName, labelKey))
+		}
+	}
+	for _, k := range canonicalKeys {
+		if !mappedKeys[k] {
+			errs = append(errs, fmt.Sprintf("canonical label key %q has no corresponding entry in reservedFieldNames", k))
+		}
+	}
+	return errs
 }
 
 // TestGReservedFieldNames_MatchCanonicalLabelKeys pins gReservedFieldNames
-// against gVerifiedActorFieldNames through gReservedFieldNameToLabelKey, so
-// the store-record field list and the label-key reservation list cannot
-// silently drift apart. AgentDelegationCode is explicitly excluded: it is a
-// denial fine-code, not an actor identity, and must not be a reserved label
-// key — TestValidateCredentialMetadata_AcceptsAgentDelegationCodeAsALabelKey,
-// below, proves the exclusion holds in the validator itself, not just in
-// this list.
+// against gVerifiedActorFieldNames in both directions, so the store-record
+// field list and the label-key reservation list cannot silently drift apart:
+// every reserved field (except AgentDelegationCode) must map to a canonical
+// key, and every canonical key must be mapped from some reserved field.
+// AgentDelegationCode is a denial fine-code, not an actor identity —
+// TestValidateCredentialMetadata_AcceptsAgentDelegationCodeAsALabelKey,
+// below, proves that exclusion holds in the validator itself, not just here.
 func TestGReservedFieldNames_MatchCanonicalLabelKeys(t *testing.T) {
-	canonical := make(map[string]bool, len(gVerifiedActorFieldNames))
-	for _, k := range gVerifiedActorFieldNames {
-		canonical[k] = true
-	}
-	for _, fieldName := range gReservedFieldNames {
-		labelKey, mapped := gReservedFieldNameToLabelKey[fieldName]
-		if fieldName == "AgentDelegationCode" {
-			require.False(t, mapped, "AgentDelegationCode must stay excluded from gReservedFieldNameToLabelKey")
-			continue
-		}
-		require.True(t, mapped, "gReservedFieldNames entry %q has no corresponding label key in gReservedFieldNameToLabelKey", fieldName)
-		require.True(t, canonical[labelKey], "gReservedFieldNames entry %q maps to label key %q, which is not in gVerifiedActorFieldNames (credential_decoration.go)", fieldName, labelKey)
+	for _, msg := range checkGReservedFieldNamesMatchCanonicalLabelKeys(
+		gReservedFieldNames, gReservedFieldNameToLabelKey, gReservedFieldNamesExcludedFromLabelKeys, gVerifiedActorFieldNames,
+	) {
+		t.Error(msg)
 	}
 	require.NotContains(t, gVerifiedActorFieldNames, "agent_delegation_code", "agent_delegation_code must not be a reserved label key")
+}
+
+// TestGReservedFieldNames_MatchCanonicalLabelKeys_DetectsDrift proves the
+// consistency check is not vacuous: dropping any one of the seven canonical
+// keys from the set it is pinned against makes the check report a failure.
+func TestGReservedFieldNames_MatchCanonicalLabelKeys_DetectsDrift(t *testing.T) {
+	for i, dropped := range gVerifiedActorFieldNames {
+		t.Run(dropped, func(t *testing.T) {
+			shortened := make([]string, 0, len(gVerifiedActorFieldNames)-1)
+			for j, k := range gVerifiedActorFieldNames {
+				if j != i {
+					shortened = append(shortened, k)
+				}
+			}
+			errs := checkGReservedFieldNamesMatchCanonicalLabelKeys(
+				gReservedFieldNames, gReservedFieldNameToLabelKey, gReservedFieldNamesExcludedFromLabelKeys, shortened,
+			)
+			require.NotEmpty(t, errs, "dropping %q from the canonical set must be caught", dropped)
+		})
+	}
 }
 
 // TestValidateCredentialMetadata_AcceptsAgentDelegationCodeAsALabelKey proves
