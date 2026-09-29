@@ -2047,6 +2047,27 @@ func (s *Server) handleProjectProviders(w http.ResponseWriter, r *http.Request, 
 	}
 }
 
+// ProjectProviderView decorates a project's provider record with read-only
+// broker capacity fields for the providers list response (ptone/scion#2161).
+// AgentLimit and AgentCount are computed at request time from the same
+// quota primitives checkAndReserveBrokerQuota uses to admit or reject agent
+// starts (pkg/hub/broker_quota.go) — they report that decision's inputs,
+// they do not make one: nothing here creates, modifies, or releases a
+// reservation.
+type ProjectProviderView struct {
+	store.ProjectProvider
+	// AgentLimit is the effective max_agents_per_broker ceiling for this
+	// broker. Left unset (nil) when the broker is unlimited, so that
+	// "unlimited" is distinguishable from a limit of zero, and so older
+	// clients that don't know this field are unaffected.
+	AgentLimit *int64 `json:"agentLimit,omitempty"`
+	// AgentCount is the number of active max_agents_per_broker reservations
+	// on this broker (agents in a counted phase; see
+	// isBrokerQuotaCountedPhase). Left unset (nil) only when it could not be
+	// computed — a zero count is reported as 0, not omitted.
+	AgentCount *int64 `json:"agentCount,omitempty"`
+}
+
 // listProjectProviders returns all providers for a project.
 func (s *Server) listProjectProviders(w http.ResponseWriter, r *http.Request, projectID string) {
 	ctx := r.Context()
@@ -2057,9 +2078,63 @@ func (s *Server) listProjectProviders(w http.ResponseWriter, r *http.Request, pr
 		return
 	}
 
+	views := make([]ProjectProviderView, len(providers))
+	for i, p := range providers {
+		views[i] = ProjectProviderView{ProjectProvider: p}
+		views[i].AgentLimit, views[i].AgentCount = s.resolveBrokerCapacity(ctx, p.BrokerID)
+	}
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"providers": providers,
+		"providers": views,
 	})
+}
+
+// resolveBrokerCapacity computes the effective max_agents_per_broker limit
+// and current active-reservation count for brokerID, mirroring exactly the
+// primitives checkAndReserveBrokerQuota uses to admit or reject an agent
+// start (pkg/hub/broker_quota.go): the same limit name, subject, and scope
+// (store.QuotaScopeBroker, scoped to the broker itself), and the same
+// "effectiveLimit <= 0 means unlimited" convention as
+// QuotaService.Reserve. This is a read: it never creates, updates, or
+// releases a reservation.
+//
+// Returns (nil, nil) whenever either value can't be determined — no quota
+// service configured, no limit definition, or a store error — so that a
+// failure for one provider never fails the whole providers listing (per
+// ptone/scion#2161). Failures other than "no limit configured" are logged.
+func (s *Server) resolveBrokerCapacity(ctx context.Context, brokerID string) (agentLimit, agentCount *int64) {
+	if s.quotaService == nil {
+		return nil, nil
+	}
+
+	limitDef, err := s.store.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			slog.Warn("providers: failed to look up max_agents_per_broker limit definition",
+				"broker_id", brokerID, "error", err)
+		}
+		return nil, nil
+	}
+
+	effectiveLimit, err := s.quotaService.ResolveEffectiveLimit(ctx, limitDef.ID, brokerID, store.QuotaScopeBroker, brokerID)
+	if err != nil {
+		slog.Warn("providers: failed to resolve effective agent limit",
+			"broker_id", brokerID, "error", err)
+		return nil, nil
+	}
+
+	count, err := s.store.CountActiveReservations(ctx, limitDef.ID, brokerID, store.QuotaScopeBroker, brokerID)
+	if err != nil {
+		slog.Warn("providers: failed to count active reservations",
+			"broker_id", brokerID, "error", err)
+		return nil, nil
+	}
+
+	agentCount = &count
+	if effectiveLimit > 0 {
+		agentLimit = &effectiveLimit
+	}
+	return agentLimit, agentCount
 }
 
 // addProjectProvider adds a broker as a provider to a project.

@@ -1372,10 +1372,11 @@ func runHubProjectsInfo(cmd *cobra.Command, args []string) error {
 			if p.BrokerID == project.DefaultRuntimeBrokerID {
 				defaultIndicator = " (default)"
 			}
+			capacityIndicator := fmt.Sprintf(" (%s)", formatProviderCapacity(p))
 			if p.LocalPath != "" {
-				fmt.Printf("  - %s %s%s\n    Path: %s\n", p.BrokerName, statusIndicator, defaultIndicator, p.LocalPath)
+				fmt.Printf("  - %s %s%s%s\n    Path: %s\n", p.BrokerName, statusIndicator, defaultIndicator, capacityIndicator, p.LocalPath)
 			} else {
-				fmt.Printf("  - %s %s%s\n", p.BrokerName, statusIndicator, defaultIndicator)
+				fmt.Printf("  - %s %s%s%s\n", p.BrokerName, statusIndicator, defaultIndicator, capacityIndicator)
 			}
 		}
 	} else {
@@ -1384,6 +1385,22 @@ func runHubProjectsInfo(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// formatProviderCapacity renders a provider's broker capacity as
+// "count/limit" (e.g. "12/12"), just the count when the broker is unlimited
+// (e.g. "5"), or "-" when the hub could not resolve capacity for this
+// provider (ptone/scion#2161). AgentCount nil means capacity resolution
+// failed or was unavailable; AgentLimit nil (with AgentCount set) means the
+// broker has no effective agent limit.
+func formatProviderCapacity(p hubclient.ProjectProvider) string {
+	if p.AgentCount == nil {
+		return "-"
+	}
+	if p.AgentLimit != nil {
+		return fmt.Sprintf("%d/%d", *p.AgentCount, *p.AgentLimit)
+	}
+	return fmt.Sprintf("%d", *p.AgentCount)
 }
 
 func runHubProjectsDelete(cmd *cobra.Command, args []string) error {

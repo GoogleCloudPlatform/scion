@@ -130,6 +130,14 @@ type ProjectProvider struct {
 	LocalPath  string    `json:"localPath,omitempty"`
 	LinkedBy   string    `json:"linkedBy,omitempty"` // User ID who performed the link
 	LinkedAt   time.Time `json:"linkedAt,omitempty"` // Timestamp when the link was created
+
+	// AgentLimit is the broker's effective max_agents_per_broker ceiling
+	// (ptone/scion#2161). Unset (nil) when the broker is unlimited.
+	AgentLimit *int64 `json:"agentLimit,omitempty"`
+	// AgentCount is the broker's current active agent reservation count
+	// (ptone/scion#2161). Unset (nil) only when the hub could not resolve
+	// it for this provider; a broker with no agents reports 0, not unset.
+	AgentCount *int64 `json:"agentCount,omitempty"`
 }
 
 // ProjectSettings represents project configuration settings.

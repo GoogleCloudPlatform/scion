@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -580,6 +581,46 @@ func TestHubBareInvocation_PrintsHelpOutsideProject(t *testing.T) {
 			err := rootCmd.Execute()
 			require.NoError(t, err)
 			assert.Contains(t, buf.String(), "Commands for interacting with a remote Scion Hub")
+		})
+	}
+}
+
+// TestFormatProviderCapacity covers the display rules for a provider's
+// broker capacity (ptone/scion#2161): "count/limit" when the broker has an
+// effective limit, just the count when it's unlimited, and a dash when the
+// hub could not resolve capacity for this provider at all.
+func TestFormatProviderCapacity(t *testing.T) {
+	i64 := func(v int64) *int64 { return &v }
+
+	cases := []struct {
+		name string
+		p    hubclient.ProjectProvider
+		want string
+	}{
+		{
+			name: "count and limit known",
+			p:    hubclient.ProjectProvider{AgentCount: i64(12), AgentLimit: i64(12)},
+			want: "12/12",
+		},
+		{
+			name: "count known, unlimited",
+			p:    hubclient.ProjectProvider{AgentCount: i64(5), AgentLimit: nil},
+			want: "5",
+		},
+		{
+			name: "count known and zero, unlimited",
+			p:    hubclient.ProjectProvider{AgentCount: i64(0), AgentLimit: nil},
+			want: "0",
+		},
+		{
+			name: "neither known: capacity could not be resolved",
+			p:    hubclient.ProjectProvider{AgentCount: nil, AgentLimit: nil},
+			want: "-",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, formatProviderCapacity(tc.p))
 		})
 	}
 }
