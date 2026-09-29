@@ -172,8 +172,12 @@ export interface Project {
   ownerId?: string;
   ownerName?: string;
   agentCount: number;
-  createdAt: string;
-  updatedAt: string;
+  /** Creation and last-update times, as the hub sends them. */
+  created?: string;
+  updated?: string;
+  /** Older names for created / updated; read as a fallback. */
+  createdAt?: string;
+  updatedAt?: string;
   _capabilities?: Capabilities;
   sharedDirs?: SharedDir[];
   githubInstallationId?: number | undefined;
