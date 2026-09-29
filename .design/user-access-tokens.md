@@ -437,3 +437,78 @@ delegation-edge attribution, and are not a substitute for the agent-bound
 delegation extension (area G) that will add a separately verified actor
 binding. See `pkg/hub/credential_decoration_authz_guard_test.go` for the
 mechanical enforcement of "never read by authorization code."
+
+## Credential Attribution in Logs and Audit (E.2a, ptone/scion#2127)
+
+E.2a threads E.1's decoration through request logs, decision audit, and
+mutation audit, so the same human using two different tokens is
+distinguishable end to end — including in denied and rejected requests.
+
+### Request log
+
+- `RequestLogMiddleware` now wraps `UnifiedAuthMiddleware` instead of being
+  wrapped by it, so a request auth rejects outright (invalid, revoked, or
+  expired UAT; suspended user) is still request-logged, not silently dropped.
+  Auth records the outcome via `logging.SetRequestAuth` on the shared,
+  mutable `*RequestMeta` this middleware installs; `auth_type` and any
+  `user_id`/`principal_kind`/`credential` attributes are read back after the
+  handler chain returns, not before.
+- A rejected UAT produces one `"credential rejected"` warning line with
+  `auth_type=uat` and `reason` ∈ `{invalid, revoked, expired, user_suspended,
+  reserved_identity}`. `credential.id` is included only when the presented
+  value matched a stored token row (revoked/expired/suspended) — an unknown
+  or malformed bearer value never yields an asserted identity, not even a
+  rejected one. The presented token string is never logged, in either case.
+
+### Decision and mutation audit
+
+- `AuthzService.Decide` is a thin wrapper around the kernel evaluation
+  (`decide`) that emits exactly one decision audit record per call,
+  regardless of which internal return path produced the result — including
+  the UAT project/credential-scope pre-kernel gate, which previously produced
+  no audit record at all for a denial.
+- Both decision and mutation audit records carry: a `permission_id` (the
+  exact canonical permission `Decide` evaluated, never re-derived downstream);
+  a snapshot of the credential's name/boundary/labels at decision time (audit
+  rows outlive tokens, which can be deleted); and a `correlation_id` equal to
+  the request's ID, so a decision audit row and the mutation audit row(s) it
+  authorized can be joined.
+- `executor_kind`/`executor_id` distinguish what is currently executing from
+  the initiating principal/credential above. They are empty for an ordinary
+  live request; deferred-execution entry points (scheduler, schedule
+  evaluator, broker dispatch — tracker E.2b) set them via
+  `hub.ContextWithExecutor`.
+- An explicit `AuthzRequest.AlwaysAudit` marker forces an allow decision to
+  be audited regardless of the configured allow-sampling rate, for callers
+  that must never have their decision sampled away (e.g. a delegated-agent
+  event).
+- `hub.BuildDecisionAuditRecord(ctx, request, decision)` is exported so a
+  non-`Decide` decision-audit path can build a schema-consistent record
+  through the same field mapping, instead of hand-assembling one.
+
+### Retention
+
+Decision and mutation audit records have **no retention sweep** as of E.2a.
+`CleanupAuditRecords` exists but has no production caller, and
+`ServerConfig.AuditRetentionDays` is read nowhere. E.2a does not change this;
+wiring a sweep is tracked as a separate follow-up issue (rulings Q6).
+
+### How this differs from a future verified agent actor (G)
+
+E's decoration and audit snapshot are an unverified, issuer-supplied label on
+an ordinary human bearer token — never a verified actor identity. A later
+delegated-agent extension (area G) records a *separately verified* actor
+through its own columns (`actor_agent_id`, `authorizing_user_id`,
+`source_grant_id`, `delegation_edge_id`) and its own `CredentialKind`
+(`delegated_agent`), never reusing E's `store.DecisionAuditRecord` or
+`store.MutationAuditRecord` fields for that purpose —
+`pkg/hub/e2a_no_g_column_test.go` asserts neither struct defines G's reserved
+field names. A decoration label such as `"nightly-cleanup-agent"` therefore
+always stays under `credential.labels.*` with `labels_source=issuer`, and
+cannot occupy where G's verified actor fields will live.
+
+`Decision.DeniedBy` (a typed denial-source string, owned by a parallel
+authorization-kernel change) is recorded verbatim in a `denied_by` audit
+column when set. G's aggregated per-list capability-filter record leaves
+`denied_by` empty by agreement, recording its own fine-grained code in its
+own audit block instead.
