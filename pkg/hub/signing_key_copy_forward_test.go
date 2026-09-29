@@ -281,7 +281,7 @@ func TestOIDCKeyManager_CopiesLegacyKeyForwardAndRepairsRef(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected an RSA public key in the JWKS, got %T", keys[0].Key)
 	}
-	if pub.N.Cmp(priv.PublicKey.N) != 0 || pub.E != priv.PublicKey.E {
+	if pub.N.Cmp(priv.N) != 0 || pub.E != priv.E {
 		t.Error("BUG: loaded OIDC key's public modulus/exponent does not match the seeded legacy key — a new key may have been generated instead of loading the legacy one")
 	}
 
