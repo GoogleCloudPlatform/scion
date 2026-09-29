@@ -17,7 +17,6 @@ package hub
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -46,18 +45,44 @@ const initiatorAttributionVersion = 1
 // InitiatorAttribution's smaller, committed domain
 // (session|uat|agent|legacy_unknown). Attribution never stores
 // hub.CredentialKind's full domain: a caller of scheduledInitiator only ever
-// sees one of these four values. Every hub.CredentialKind maps to one of
-// "uat" or "agent"; anything else authenticated an interactive-style
-// session (cookie session, dev token, federation, broker) and is recorded as
-// "session".
+// sees one of these four values.
+//
+// Only a genuine interactive session maps to "session". Everything else —
+// no ambient credential at all, federation, broker, or dev — maps to
+// legacy_unknown, never to session (review R5): plan correction (c) and
+// ruling Q2 ("a mutation without recordable provenance never falls back to
+// the creator's interactive authority") both forbid treating unknown or
+// absent provenance as an interactive-style credential.
 func initiatorCredentialKindFor(kind CredentialKind) string {
 	switch kind {
 	case CredentialKindUAT:
 		return store.InitiatorCredentialKindUAT
 	case CredentialKindAgentJWT:
 		return store.InitiatorCredentialKindAgent
-	default:
+	case CredentialKindInteractive:
 		return store.InitiatorCredentialKindSession
+	default:
+		return store.InitiatorCredentialKindLegacyUnknown
+	}
+}
+
+// hubCredentialKindForInitiator maps InitiatorAttribution's committed
+// session|uat|agent|legacy_unknown domain back to hub.CredentialKind's
+// vocabulary (interactive|uat|agent_jwt), for the one place — the
+// scheduled-dispatch success audit — that records a credential kind in a
+// column every other mutation-audit writer fills with hub.CredentialKind
+// (audit_actor.go:auditActorFromContext). Returns "" for legacy_unknown (or
+// any other value), meaning "leave this column unset" (review R4).
+func hubCredentialKindForInitiator(kind string) string {
+	switch kind {
+	case store.InitiatorCredentialKindUAT:
+		return string(CredentialKindUAT)
+	case store.InitiatorCredentialKindAgent:
+		return string(CredentialKindAgentJWT)
+	case store.InitiatorCredentialKindSession:
+		return string(CredentialKindInteractive)
+	default:
+		return ""
 	}
 }
 
@@ -181,11 +206,13 @@ func setBrokerDispatchInitiator(ctx context.Context, d *store.BrokerDispatch) {
 
 // ScheduledInitiator is the read-time view of a scheduled row's
 // InitiatorAttribution (plan §3.5's scheduledInitiator read helper). A row
-// written before E.2b (AttributionVersion NULL/0) always reads as
-// LegacyUnknown with every other field empty — never as an interactive
-// credential. E.2b's own tests assert this record; B.3's tests assert the
-// authority decision built on it (fire-time recheck, ceiling,
-// legacy_unknown handling) — this type carries no authority of its own.
+// written before E.2b (AttributionVersion NULL/0), or one whose credential
+// kind is legacy_unknown for any other reason (review R5: no recordable
+// provenance at capture time), always reads as LegacyUnknown with every
+// other field empty — never as an interactive credential. E.2b's own tests
+// assert this record; B.3's tests assert the authority decision built on it
+// (fire-time recheck, ceiling, legacy_unknown handling) — this type carries
+// no authority of its own.
 type ScheduledInitiator struct {
 	PrincipalKind      string
 	PrincipalID        string
@@ -195,39 +222,24 @@ type ScheduledInitiator struct {
 	LegacyUnknown      bool
 }
 
-// scheduledInitiator normalizes the InitiatorAttribution carried by a
-// store.Schedule or store.ScheduledEvent row (or a bare
-// store.InitiatorAttribution) for B.3's fire-time authority decision and for
-// E.2b's own audit/log attribution. ctx is accepted for signature symmetry
-// with future callers that may need it (e.g. B.3) but is not read today: the
-// normalization is a pure function of the stored attribution.
-func (s *Server) scheduledInitiator(ctx context.Context, row any) (ScheduledInitiator, error) {
-	_ = ctx
-
-	var attr store.InitiatorAttribution
-	switch v := row.(type) {
-	case store.Schedule:
-		attr = v.InitiatorAttribution
-	case *store.Schedule:
-		attr = v.InitiatorAttribution
-	case store.ScheduledEvent:
-		attr = v.InitiatorAttribution
-	case *store.ScheduledEvent:
-		attr = v.InitiatorAttribution
-	case store.InitiatorAttribution:
-		attr = v
-	default:
-		return ScheduledInitiator{}, fmt.Errorf("scheduledInitiator: unsupported row type %T", row)
-	}
-
-	if attr.AttributionVersion == 0 {
-		// Explicit legacy representation (design check (c)): never surface
-		// partial/stale field values from a row this attribution version
-		// doesn't vouch for.
+// scheduledInitiator normalizes a stored InitiatorAttribution (read directly
+// off a store.Schedule or store.ScheduledEvent row, both embedding the same
+// mixin) for B.3's fire-time authority decision and for E.2b's own
+// audit/log attribution. Typed and total (review O3): every
+// InitiatorAttribution value has a defined normalization, so there is
+// nothing left to error on.
+//
+// A row is legacy_unknown either because it predates E.2b
+// (AttributionVersion 0) or because its credential kind was itself recorded
+// as legacy_unknown at capture time (review R5) — both cases clear every
+// other field rather than surfacing partial/stale data (design check (c)).
+func (s *Server) scheduledInitiator(attr store.InitiatorAttribution) ScheduledInitiator {
+	if attr.AttributionVersion == 0 || attr.InitiatorCredentialKind == "" ||
+		attr.InitiatorCredentialKind == store.InitiatorCredentialKindLegacyUnknown {
 		return ScheduledInitiator{
 			CredentialKind: store.InitiatorCredentialKindLegacyUnknown,
 			LegacyUnknown:  true,
-		}, nil
+		}
 	}
 
 	return ScheduledInitiator{
@@ -236,5 +248,5 @@ func (s *Server) scheduledInitiator(ctx context.Context, row any) (ScheduledInit
 		CredentialKind:     attr.InitiatorCredentialKind,
 		CredentialID:       attr.InitiatorCredentialID,
 		CredentialSnapshot: attr.InitiatorCredentialSnapshot,
-	}, nil
+	}
 }
