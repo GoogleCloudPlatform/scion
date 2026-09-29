@@ -225,6 +225,48 @@ func (s *Server) resolveOutboundRouting(
 				fmt.Sprintf("user:%s is not a valid addressee. Address a user by exact email (user:name@example.com) or by id. Names are not unique and cannot be resolved.", identifier), nil)
 			return nil, err
 		}
+	} else if recipientID != "" && req.ConversationID == "" && req.ConversationRef == "" {
+		// A25.8 R1 (p2a-u2 review): a caller-supplied recipient_id is raw
+		// payload, never resolved by the UUID/email branch above (which only
+		// runs when recipientID starts empty). Left unvalidated, it flows
+		// straight into DeriveConversationKey as RecipientKind:"user" (Rules
+		// 2/3 below) and then into the new A25.6/A25.7 participant
+		// registration — an agent could supply another agent's UUID as
+		// recipient_id and the hub would write a "user:<that-agent's-uuid>"
+		// participant row for a principal that was never a user. Resolve it
+		// with GetUser before any key derivation or write, exactly like the
+		// UUID arm above.
+		//
+		// Scoped to skip when ConversationID/ConversationRef is set (DEF-138
+		// Rule 1): there, recipientID is never used to derive a new key — it
+		// is only compared against the ALREADY-RESOLVED conversation's own
+		// external_ref (in handleAgentOutboundMessage's "Case (b)", after
+		// this function returns) to detect an agent-to-agent DM on an
+		// existing, independently-authorized conversation. recipientID can
+		// legitimately be an agent's ID there (TestOutboundDMAuthz_
+		// ConversationID_Allowed_Persisted), and requiring it to be a user
+		// would break that path for no security benefit: the conversation's
+		// real identity, not recipientID, is what gates that route.
+		u, err := s.store.GetUser(ctx, recipientID)
+		if err == nil {
+			recipientID = u.ID
+			if recipient == "" {
+				name := u.Email
+				if name == "" {
+					name = u.ID
+				}
+				recipient = "user:" + name
+			}
+		} else if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusBadRequest, ErrCodeAddrUnknown,
+				fmt.Sprintf("recipient_id %s is not a valid addressee. No user exists with that ID.", recipientID), nil)
+			return nil, err
+		} else {
+			s.messageLog.Error("user lookup by recipient_id failed", "recipient_id", recipientID, "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"user lookup failed due to an internal error", nil)
+			return nil, err
+		}
 	}
 
 	// DEF-152: relax the guard so that a request carrying a conversation_ref
@@ -1540,23 +1582,11 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// the AUTHENTICATED identity (not the client-supplied SenderID, which can
 	// be spoofed).
 	//
-	// parseDMKeyIDs only recognizes the "dm:agent:<id>:user:<id>" shape — its
-	// second principal is always semantically a USER. R2 (A25.7, from p2a-u1
-	// FYI F1): the authenticated principal's KIND must also be "user", not
-	// just its ID. Without this, an agent sender authenticates with its own
-	// agent ID, and comparing IDs alone lets it pass a ThreadID such as
-	// "dm:agent:<target>:user:<itself>" — same UUID, wrong kind — because the
-	// numeric ID happens to match its own. That both passes this check AND
-	// gets registered verbatim as a phantom "user:<agent-uuid>" participant
-	// row by the new F1/F3 registration (A25.6), even though no third party
-	// gained anything (both slots already name the sender/recipient pair).
-	// The row is still semantically wrong: cross-project gates elsewhere
-	// match on PrincipalID alone, ignoring PrincipalKind. Requiring the
-	// authenticated principal to actually BE a user closes this — an agent
-	// sender has no legitimate reason to supply this ThreadID shape at all,
-	// since agent-to-agent DMs use a key shape parseDMKeyIDs doesn't even
-	// parse (it returns "", "" for "dm:agent:X:agent:Y", which already fails
-	// the dmAgentID/dmUserID comparison below).
+	// parseDMKeyIDs's second slot is always semantically a USER (A25.7 R2):
+	// the authenticated principal must actually be a user, not merely have a
+	// UUID that happens to equal that slot's value — otherwise an agent
+	// sender can name its own UUID there and pass. See the commit history
+	// for the phantom-participant-row rationale.
 	if structuredMsg != nil && structuredMsg.ThreadID != "" &&
 		strings.HasPrefix(structuredMsg.ThreadID, "dm:") {
 		dmAgentID, dmUserID := parseDMKeyIDs(structuredMsg.ThreadID)
