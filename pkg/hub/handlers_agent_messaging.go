@@ -864,7 +864,8 @@ func (s *Server) checkDirectRecipientMatchesDMKey(w http.ResponseWriter, convers
 		// conversation_id paths (see the doc comment above), so the body
 		// deliberately says "direct conversation" rather than "conversation
 		// reference" — it reads correctly no matter which way the caller
-		// named the conversation. Keep it identical on both call sites.
+		// named the conversation. Both call sites share this single body;
+		// do not fork it per path.
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
 			"a recipient may not be supplied with a direct conversation — "+
 				"the conversation is the address; remove the recipient and retry", nil)

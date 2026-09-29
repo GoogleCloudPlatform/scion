@@ -246,10 +246,9 @@ func TestDirectConversation_ThreadID_RecipientMismatch_SameOnBothPaths(t *testin
 
 // ---------------------------------------------------------------------------
 // Non-DM (group) conversations are unaffected: a raw conversation_id
-// pointing at a group conversation, with a caller-supplied recipient, still
-// gets the recipient silently discarded (DEF-161 group half) rather than
-// rejected — the new direct-conversation check must not apply to group
-// conversations on the raw path.
+// pointing at a group conversation, with a caller-supplied recipient, is
+// accepted as supplied (200), not rejected — the new direct-conversation
+// check must not apply to group conversations on the raw path.
 // ---------------------------------------------------------------------------
 
 func TestGroupRawConversationID_RecipientSupplied_Unaffected(t *testing.T) {
