@@ -77,6 +77,11 @@ func (s *Server) materialRuntimePrecheck(ctx context.Context, ident AgentIdentit
 		}
 		return nil, ReasonBackendError, http.StatusInternalServerError
 	}
+	if project == nil {
+		// A real store never returns (nil, nil); this is cheap insurance on
+		// an authorization path rather than a reachable production case.
+		return nil, ReasonBackendError, http.StatusInternalServerError
+	}
 	if ident.ProjectID() != rec.ProjectID {
 		return nil, ReasonTokenProjectMismatch, http.StatusForbidden
 	}
@@ -101,6 +106,11 @@ func (s *Server) materialRuntimePrecheck(ctx context.Context, ident AgentIdentit
 			// Includes Ancestry[0] being an agent ID.
 			return nil, ReasonTargetUnresolved, http.StatusForbidden
 		}
+		return nil, ReasonBackendError, http.StatusInternalServerError
+	}
+	if u == nil {
+		// A real store never returns (nil, nil); this is cheap insurance on
+		// an authorization path rather than a reachable production case.
 		return nil, ReasonBackendError, http.StatusInternalServerError
 	}
 	if u.Status != store.UserStatusActive {

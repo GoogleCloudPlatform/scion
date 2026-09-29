@@ -47,6 +47,12 @@ func runtimeProvenanceRoot(ctx context.Context, rec *store.Agent) (ProvenanceRoo
 func (s *Server) progenySourceLive(ctx context.Context, meta secret.SecretMeta) (live bool, kind string, reason string, err error) {
 	u, uerr := s.store.GetUser(ctx, meta.CreatedBy)
 	if uerr == nil {
+		if u == nil {
+			// A real store never returns (nil, nil); this is cheap insurance
+			// on an authorization path rather than a reachable production
+			// case.
+			return false, "", ReasonBackendError, nil
+		}
 		if u.Status != store.UserStatusActive {
 			return false, "user", ReasonSourceInactive, nil
 		}
@@ -65,6 +71,11 @@ func (s *Server) progenySourceLive(ctx context.Context, meta secret.SecretMeta) 
 		}
 		return false, "", ReasonBackendError, aerr
 	}
+	if ag == nil {
+		// A real store never returns (nil, nil); this is cheap insurance on
+		// an authorization path rather than a reachable production case.
+		return false, "", ReasonBackendError, nil
+	}
 	// GetAgent returns soft-deleted rows; the source agent must not be one.
 	if !ag.DeletedAt.IsZero() {
 		return false, "agent", ReasonSourceInactive, nil
@@ -78,6 +89,11 @@ func (s *Server) progenySourceLive(ctx context.Context, meta secret.SecretMeta) 
 			return false, "agent", ReasonSourceInactive, nil
 		}
 		return false, "agent", ReasonBackendError, ruErr
+	}
+	if rootUser == nil {
+		// A real store never returns (nil, nil); this is cheap insurance on
+		// an authorization path rather than a reachable production case.
+		return false, "agent", ReasonBackendError, nil
 	}
 	if rootUser.Status != store.UserStatusActive {
 		return false, "agent", ReasonSourceInactive, nil
