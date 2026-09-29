@@ -124,7 +124,7 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleHubMember,
 			Description: "Hub member with read access to directory resources and project creation",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    2,
+			Revision:    3, // R3: add broker.create (ptone/scion#2138) — explicit hub-member grant for broker registration
 			Permissions: hubMemberPermissionIDs(),
 		},
 		{
@@ -214,9 +214,12 @@ func hubMemberPermissionIDs() []string {
 		// Harness config catalog (read-only)
 		"harness_config.read",
 		"harness_config.list",
-		// Broker catalog (read-only)
+		// Broker catalog (read-only), plus registration (ptone/scion#2138):
+		// merely being an authenticated user is not enough to register a
+		// broker — it requires this explicit hub-member grant.
 		"broker.read",
 		"broker.list",
+		"broker.create",
 		// GCP service account catalog (read-only)
 		"gcp_service_account.read",
 		"gcp_service_account.list",
