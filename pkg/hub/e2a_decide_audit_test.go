@@ -130,6 +130,29 @@ func TestDecide_AlwaysAuditBypassesSampling(t *testing.T) {
 	require.Equal(t, before+1, len(emitter.records), "AlwaysAudit must bypass allow-sampling")
 }
 
+// TestDecide_DecisionAlwaysAuditBypassesSampling proves Decision.AlwaysAudit
+// (settable from inside decide's body, e.g. a delegated-agent branch that
+// only learns partway through evaluation that this decision must not be
+// sampled away) forces an audit record the same way AuthzRequest.AlwaysAudit
+// does, even when the request-level flag is false.
+func TestDecide_DecisionAlwaysAuditBypassesSampling(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	emitter := &recordingDecisionAuditEmitter{}
+	srv.authzService.SetDecisionAuditEmitter(emitter)
+	srv.authzService.DecisionAuditSampleRate = 0.0 // never sample allows
+
+	project := &store.Project{ID: tid("decisionalwaysaudit-project"), Name: "p", Slug: "decisionalwaysaudit-project", CreatedBy: DevUserID, OwnerID: DevUserID}
+	require.NoError(t, s.CreateProject(ctx, project))
+	identity := NewAuthenticatedUser(DevUserID, "dev@localhost", "Dev", "admin", "api")
+	req := AuthzRequestFromContext(contextWithIdentity(ctx, identity), Resource{Type: "project", ID: project.ID}, ActionRead)
+	require.False(t, req.AlwaysAudit)
+
+	before := len(emitter.records)
+	srv.authzService.emitDecisionAudit(ctx, req, Decision{Allowed: true, AlwaysAudit: true})
+	require.Equal(t, before+1, len(emitter.records), "Decision.AlwaysAudit must bypass allow-sampling on its own")
+}
+
 // TestBuildDecisionAuditRecord_MatchesEmittedShape proves the exported
 // builder produces the same field mapping Decide's own emit path uses, so a
 // non-Decide caller (e.g. G's aggregated list-filter record) gets
