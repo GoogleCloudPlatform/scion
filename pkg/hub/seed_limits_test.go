@@ -21,6 +21,7 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -50,7 +51,7 @@ func TestSeedLimitDefinitions_FreshDBSeedsMaxAgentsPerBrokerAt100(t *testing.T) 
 // (30), or anything else an operator has already set via the admin API.
 func TestSeedLimitDefinitions_ExistingRowUntouchedByReseed(t *testing.T) {
 	for _, existing := range []int64{12, 30} {
-		t.Run(intToName(existing), func(t *testing.T) {
+		t.Run(fmt.Sprintf("existing_%d", existing), func(t *testing.T) {
 			s, err := newTestStore(":memory:")
 			require.NoError(t, err)
 			defer func() { _ = s.Close() }()
@@ -77,16 +78,5 @@ func TestSeedLimitDefinitions_ExistingRowUntouchedByReseed(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, existing, def.DefaultValue)
 		})
-	}
-}
-
-func intToName(v int64) string {
-	switch v {
-	case 12:
-		return "existing_12"
-	case 30:
-		return "existing_30"
-	default:
-		return "existing_other"
 	}
 }

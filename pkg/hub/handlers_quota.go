@@ -369,17 +369,14 @@ func (s *Server) updateLimitDefinition(w http.ResponseWriter, r *http.Request, i
 			writeForbidden(w, "system limit definitions: only default_value and description can be changed")
 			return
 		}
-		existing.Description = req.Description
-		existing.DefaultValue = req.DefaultValue
-		existing.UpdatedAt = time.Now()
 	} else {
 		existing.Name = req.Name
 		existing.ResourceType = req.ResourceType
 		existing.Unit = req.Unit
-		existing.Description = req.Description
-		existing.DefaultValue = req.DefaultValue
-		existing.UpdatedAt = time.Now()
 	}
+	existing.Description = req.Description
+	existing.DefaultValue = req.DefaultValue
+	existing.UpdatedAt = time.Now()
 
 	updated, err := s.store.UpdateLimitDefinition(r.Context(), existing)
 	if err != nil {

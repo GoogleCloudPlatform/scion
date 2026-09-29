@@ -1150,6 +1150,7 @@ export class ScionPageAdminQuotas extends LitElement {
           >
             <sl-option value="agent">agent</sl-option>
             <sl-option value="project">project</sl-option>
+            <sl-option value="group">group</sl-option>
             <sl-option value="group_member">group_member</sl-option>
           </sl-select>
         </div>

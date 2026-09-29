@@ -365,15 +365,28 @@ single-node deployment. Right after deploying, lower it to about **16** — safe
 under the 4 CPU/8 GiB idle ceiling — from **Admin → Quotas** in the web UI, or with:
 
 ```bash
+# PUT replaces the whole limit definition, so fetch the current one first and
+# only change defaultValue — omitting name/resourceType/unit/description would
+# either be rejected (system limit, ptone/scion#2063) or erase the description.
+curl "$HUB_URL/api/v1/admin/limits/$LIMIT_ID" -H "Authorization: Bearer $TOKEN"
+
 curl -X PUT "$HUB_URL/api/v1/admin/limits/$LIMIT_ID" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"name":"max_agents_per_broker","resourceType":"agent","unit":"count","defaultValue":16}'
+  -d '{
+        "name": "max_agents_per_broker",
+        "resourceType": "agent",
+        "unit": "count",
+        "description": "Maximum concurrently live agents per runtime broker (crash-prevention ceiling, ptone/scion#1303)",
+        "defaultValue": 16
+      }'
 ```
 
-(`$LIMIT_ID` comes from `GET /api/v1/admin/limits`.) This is a single hub-wide value;
-there is no way yet to set a different cap for one broker (per-broker values are
-coming in `ptone/scion#2061` P2). If you deploy at 8 CPU/32 GiB instead, size the cap
+(`$LIMIT_ID` comes from `GET /api/v1/admin/limits`; the `description` above is
+the value the Hub seeds — check the `GET` response in case it has been edited.)
+This is a single hub-wide value; there is no way yet to set a different cap for
+one broker (per-broker values are coming in `ptone/scion#2061` P2). If you
+deploy at 8 CPU/32 GiB instead, size the cap
 closer to that tier's measured ceiling.
 
 To change the Instance size:
