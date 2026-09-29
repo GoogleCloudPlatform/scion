@@ -146,12 +146,13 @@ func (b *GCPBackend) Get(ctx context.Context, name, scope, scopeID string) (*Sec
 }
 
 // FetchValues returns values for exactly the given metadata records, matched
-// by ID and Version, keyed by each record's ID in the returned map. A
-// decrypt or backend-access failure is reported as a per-item error, never
-// as an empty value delivered in place of an error. A record whose current
-// SecretType is internal is refused with store.ErrNotFound, since internal
-// secrets are never candidates for delivery. The returned outer error
-// reports only a failure of the whole call, not a per-item failure.
+// by ID, Version, AllowProgeny, CreatedBy and SecretType, keyed by each
+// record's ID in the returned map. A decrypt or backend-access failure is
+// reported as a per-item error, never as an empty value delivered in place
+// of an error. A record whose current SecretType is internal is refused with
+// store.ErrNotFound, since internal secrets are never candidates for
+// delivery. The returned outer error reports only a failure of the whole
+// call, not a per-item failure.
 //
 // Unlike Get, it never falls back to a Secret Manager lookup by computed
 // name when the Hub database record is missing: a missing or mismatched
@@ -159,8 +160,13 @@ func (b *GCPBackend) Get(ctx context.Context, name, scope, scopeID string) (*Sec
 //
 // store.SecretStore has no primary-key lookup (see LocalBackend.FetchValues
 // for the reasoning this mirrors), so each record is located by its
-// Name/Scope/ScopeID triple and then verified against the recorded ID and
-// Version before its value is read from Secret Manager.
+// Name/Scope/ScopeID triple and then verified against the recorded metadata
+// (see recordGenerationChanged) before its value is read from Secret
+// Manager, and again immediately after: the DB record and the Secret
+// Manager value are two separate reads with no shared transaction, so a Set
+// or delete-and-recreate can land in between them. Re-checking after the
+// Secret Manager read narrows that window instead of returning a new
+// generation's value under the old generation's metadata.
 func (b *GCPBackend) FetchValues(ctx context.Context, metas []SecretMeta) (map[string]FetchResult, error) {
 	results := make(map[string]FetchResult, len(metas))
 	for _, meta := range metas {
@@ -174,7 +180,7 @@ func (b *GCPBackend) fetchValue(ctx context.Context, meta SecretMeta) FetchResul
 	if err != nil {
 		return FetchResult{Err: err}
 	}
-	if s.ID != meta.ID || s.Version != meta.Version || s.SecretType == store.SecretTypeInternal {
+	if recordGenerationChanged(s, meta) {
 		// The record has been replaced, rotated or reclassified since the
 		// caller's metadata was recorded; treat it the same as not found
 		// rather than accessing Secret Manager for a different generation
@@ -197,6 +203,19 @@ func (b *GCPBackend) fetchValue(ctx context.Context, meta SecretMeta) FetchResul
 			return FetchResult{Err: permErr}
 		}
 		return FetchResult{Err: err}
+	}
+
+	// Narrow the window between the DB record check above and the Secret
+	// Manager read above: re-read the DB record and repeat the same
+	// comparison. A Set or delete-and-recreate that lands in that window is
+	// caught here instead of silently returning its value under the old
+	// generation's metadata (N1).
+	after, err := b.store.GetSecret(ctx, meta.Name, meta.Scope, meta.ScopeID)
+	if err != nil {
+		return FetchResult{Err: err}
+	}
+	if recordGenerationChanged(after, meta) {
+		return FetchResult{Err: store.ErrNotFound}
 	}
 	return FetchResult{Value: value}
 }

@@ -248,6 +248,303 @@ func TestSecretFetch_MissingRecordNotResolvedByName(t *testing.T) {
 }
 
 // ============================================================================
+// FetchValues: record-generation check
+// ============================================================================
+
+// TestSecretFetch_RecordGenerationChecked verifies that FetchValues rejects a
+// meta whose recorded generation no longer matches the current record: a
+// secret deleted and recreated under the same name/scope, a rotated
+// version, a reclassified (internal) type, a meta whose ID doesn't match the
+// record found at its own triple, and a same-named record living in a
+// different scope. A positive control confirms the current meta still
+// resolves.
+//
+// This is the regression test for the check the review found untested
+// (R1): deleting the condition from either backend's fetchValue (for
+// example, replacing it with `if false`) turns every subtest but
+// "positive_control" red, because the only existing negative FetchValues
+// tests used a record that was never created (ErrNotFound from GetSecret,
+// before the condition is ever reached).
+func TestSecretFetch_RecordGenerationChecked(t *testing.T) {
+	run := func(t *testing.T, backend SecretBackend) {
+		ctx := context.Background()
+
+		checkNotFound := func(t *testing.T, meta SecretMeta) {
+			t.Helper()
+			results, err := backend.FetchValues(ctx, []SecretMeta{meta})
+			if err != nil {
+				t.Fatalf("FetchValues failed: %v", err)
+			}
+			res := results[meta.ID]
+			if res.Err != store.ErrNotFound {
+				t.Errorf("expected store.ErrNotFound, got value=%q err=%v", res.Value, res.Err)
+			}
+			if res.Value != "" {
+				t.Errorf("expected empty value, got %q", res.Value)
+			}
+		}
+
+		t.Run("recreated", func(t *testing.T) {
+			_, oldMeta, err := backend.Set(ctx, &SetSecretInput{
+				Name: "RECREATE_KEY", Value: "v1", SecretType: TypeEnvironment,
+				Scope: ScopeUser, ScopeID: "recreate-user",
+			})
+			if err != nil {
+				t.Fatalf("Set failed: %v", err)
+			}
+			if err := backend.Delete(ctx, "RECREATE_KEY", ScopeUser, "recreate-user"); err != nil {
+				t.Fatalf("Delete failed: %v", err)
+			}
+			if _, _, err := backend.Set(ctx, &SetSecretInput{
+				Name: "RECREATE_KEY", Value: "v2", SecretType: TypeEnvironment,
+				Scope: ScopeUser, ScopeID: "recreate-user",
+			}); err != nil {
+				t.Fatalf("Set (recreate) failed: %v", err)
+			}
+			// oldMeta's ID no longer identifies any record at this triple.
+			checkNotFound(t, *oldMeta)
+		})
+
+		t.Run("rotated", func(t *testing.T) {
+			_, meta1, err := backend.Set(ctx, &SetSecretInput{
+				Name: "ROTATE_KEY", Value: "v1", SecretType: TypeEnvironment,
+				Scope: ScopeUser, ScopeID: "rotate-user",
+			})
+			if err != nil {
+				t.Fatalf("Set failed: %v", err)
+			}
+			if _, _, err := backend.Set(ctx, &SetSecretInput{
+				Name: "ROTATE_KEY", Value: "v2", SecretType: TypeEnvironment,
+				Scope: ScopeUser, ScopeID: "rotate-user",
+			}); err != nil {
+				t.Fatalf("Set (rotate) failed: %v", err)
+			}
+			// meta1 is the pre-rotation Version; the record has since moved on.
+			checkNotFound(t, *meta1)
+		})
+
+		t.Run("reclassified", func(t *testing.T) {
+			if _, _, err := backend.Set(ctx, &SetSecretInput{
+				Name: "RECLASS_KEY", Value: "v1", SecretType: TypeEnvironment,
+				Scope: ScopeUser, ScopeID: "reclass-user",
+			}); err != nil {
+				t.Fatalf("Set failed: %v", err)
+			}
+			refreshed, err := backend.UpdateMeta(ctx, &UpdateMetaInput{
+				Name: "RECLASS_KEY", Scope: ScopeUser, ScopeID: "reclass-user",
+				SecretType: store.SecretTypeInternal, UpdatedBy: "tester",
+			})
+			if err != nil {
+				t.Fatalf("UpdateMeta failed: %v", err)
+			}
+			// refreshed already reflects the internal reclassification.
+			checkNotFound(t, *refreshed)
+		})
+
+		t.Run("id_mismatch", func(t *testing.T) {
+			_, meta, err := backend.Set(ctx, &SetSecretInput{
+				Name: "IDMISMATCH_KEY", Value: "v1", SecretType: TypeEnvironment,
+				Scope: ScopeUser, ScopeID: "idmismatch-user",
+			})
+			if err != nil {
+				t.Fatalf("Set failed: %v", err)
+			}
+			bad := *meta
+			bad.ID = tid("record-generation-wrong-id")
+			checkNotFound(t, bad)
+		})
+
+		t.Run("cross_scope", func(t *testing.T) {
+			_, metaA, err := backend.Set(ctx, &SetSecretInput{
+				Name: "SHARED_NAME", Value: "a", SecretType: TypeEnvironment,
+				Scope: ScopeUser, ScopeID: "cross-scope-a",
+			})
+			if err != nil {
+				t.Fatalf("Set (scope A) failed: %v", err)
+			}
+			_, metaB, err := backend.Set(ctx, &SetSecretInput{
+				Name: "SHARED_NAME", Value: "b", SecretType: TypeEnvironment,
+				Scope: ScopeUser, ScopeID: "cross-scope-b",
+			})
+			if err != nil {
+				t.Fatalf("Set (scope B) failed: %v", err)
+			}
+			// The caller's triple names scope B, but its ID is scope A's record.
+			mixed := *metaB
+			mixed.ID = metaA.ID
+			checkNotFound(t, mixed)
+		})
+
+		t.Run("positive_control", func(t *testing.T) {
+			_, meta, err := backend.Set(ctx, &SetSecretInput{
+				Name: "GOOD_KEY", Value: "good-value", SecretType: TypeEnvironment,
+				Scope: ScopeUser, ScopeID: "control-user",
+			})
+			if err != nil {
+				t.Fatalf("Set failed: %v", err)
+			}
+			results, err := backend.FetchValues(ctx, []SecretMeta{*meta})
+			if err != nil {
+				t.Fatalf("FetchValues failed: %v", err)
+			}
+			res := results[meta.ID]
+			if res.Err != nil || res.Value != "good-value" {
+				t.Errorf("expected value=%q err=nil, got value=%q err=%v", "good-value", res.Value, res.Err)
+			}
+		})
+	}
+
+	t.Run("local", func(t *testing.T) {
+		backend, _ := createTestBackend(t)
+		run(t, backend)
+	})
+	t.Run("gcp", func(t *testing.T) {
+		backend, _ := createTestGCPBackend(t)
+		run(t, backend)
+	})
+}
+
+// TestSecretFetch_MetaFieldChangedAtSameVersionNotDelivered verifies the R3
+// fix: FetchValues also compares AllowProgeny, CreatedBy and SecretType, not
+// just ID and Version. UpdateSecretMeta is a read-modify-write with no
+// version predicate, so two concurrent metadata updates can each bump
+// Version from the same baseline and land on the same new Version with
+// different field values (design F.2 §4.10, v5 O-3); Version alone would not
+// catch that. Each subtest simulates the caller having captured a meta whose
+// recorded field disagrees with the current record even though the Version
+// matches, by copying the live meta and changing exactly one field.
+func TestSecretFetch_MetaFieldChangedAtSameVersionNotDelivered(t *testing.T) {
+	run := func(t *testing.T, backend SecretBackend) {
+		ctx := context.Background()
+
+		checkNotFound := func(t *testing.T, meta SecretMeta) {
+			t.Helper()
+			results, err := backend.FetchValues(ctx, []SecretMeta{meta})
+			if err != nil {
+				t.Fatalf("FetchValues failed: %v", err)
+			}
+			res := results[meta.ID]
+			if res.Err != store.ErrNotFound {
+				t.Errorf("expected store.ErrNotFound, got value=%q err=%v", res.Value, res.Err)
+			}
+			if res.Value != "" {
+				t.Errorf("expected empty value, got %q", res.Value)
+			}
+		}
+
+		t.Run("allow_progeny_changed", func(t *testing.T) {
+			_, meta, err := backend.Set(ctx, &SetSecretInput{
+				Name: "AP_RACE_KEY", Value: "v1", SecretType: TypeEnvironment,
+				Scope: ScopeUser, ScopeID: "ap-race-user", AllowProgeny: true, CreatedBy: "ap-race-user",
+			})
+			if err != nil {
+				t.Fatalf("Set failed: %v", err)
+			}
+			stale := *meta
+			stale.AllowProgeny = false // disagrees with the live record, same Version
+			checkNotFound(t, stale)
+		})
+
+		t.Run("created_by_changed", func(t *testing.T) {
+			_, meta, err := backend.Set(ctx, &SetSecretInput{
+				Name: "CB_RACE_KEY", Value: "v1", SecretType: TypeEnvironment,
+				Scope: ScopeUser, ScopeID: "cb-race-user", CreatedBy: "original-creator",
+			})
+			if err != nil {
+				t.Fatalf("Set failed: %v", err)
+			}
+			stale := *meta
+			stale.CreatedBy = "different-creator" // disagrees with the live record, same Version
+			checkNotFound(t, stale)
+		})
+
+		t.Run("secret_type_changed", func(t *testing.T) {
+			_, meta, err := backend.Set(ctx, &SetSecretInput{
+				Name: "ST_RACE_KEY", Value: "v1", SecretType: TypeEnvironment,
+				Scope: ScopeUser, ScopeID: "st-race-user",
+			})
+			if err != nil {
+				t.Fatalf("Set failed: %v", err)
+			}
+			stale := *meta
+			stale.SecretType = TypeFile // disagrees with the live record, same Version
+			checkNotFound(t, stale)
+		})
+	}
+
+	t.Run("local", func(t *testing.T) {
+		backend, _ := createTestBackend(t)
+		run(t, backend)
+	})
+	t.Run("gcp", func(t *testing.T) {
+		backend, _ := createTestGCPBackend(t)
+		run(t, backend)
+	})
+}
+
+// ============================================================================
+// Resolve: decryptRawValue fail-closed (R2)
+// ============================================================================
+
+// TestResolve_DecryptErrorSkipsSecret verifies that decryptRawValue's
+// fail-closed behaviour reaches Resolve: a secret whose stored value fails
+// to decrypt is left out of the Resolve result entirely, not delivered with
+// an empty value. This exercises decryptRawValue through Resolve directly
+// (own-scope and progeny), which is a different path than
+// TestSecretFetch_DecryptErrorReportsUnavailable: that test goes through
+// FetchValues -> decryptStoreSecret, whose error path already existed at
+// base and would pass even if decryptRawValue's P13 fix were reverted.
+// Reverting localbackend.go's decryptRawValue to `return "", nil` on a
+// decrypt failure turns this test red: the corrupt secret would then be
+// merged into the Resolve result with Value == "" instead of being skipped.
+func TestResolve_DecryptErrorSkipsSecret(t *testing.T) {
+	backend, s := createTestBackend(t)
+	ctx := context.Background()
+
+	// enc:v1: prefixed, valid base64, but not a value EncryptValue ever
+	// produced for this key: it decodes but fails AES-GCM authentication.
+	corrupt := EncryptedPrefix + base64.StdEncoding.EncodeToString(make([]byte, 32))
+
+	seedSecret(t, s, &store.Secret{
+		ID:             tid("resolve-decrypt-fail-own"),
+		Key:            "CORRUPT_OWN_KEY",
+		EncryptedValue: corrupt,
+		SecretType:     store.SecretTypeEnvironment,
+		Target:         "CORRUPT_OWN_KEY",
+		Scope:          store.ScopeProject,
+		ScopeID:        "project-1",
+	})
+	seedSecret(t, s, &store.Secret{
+		ID:             tid("resolve-decrypt-fail-progeny"),
+		Key:            "CORRUPT_PROGENY_KEY",
+		EncryptedValue: corrupt,
+		SecretType:     store.SecretTypeEnvironment,
+		Target:         "CORRUPT_PROGENY_KEY",
+		Scope:          store.ScopeUser,
+		ScopeID:        "alice-123",
+		AllowProgeny:   true,
+		CreatedBy:      "alice-123",
+	})
+
+	opts := &ResolveOpts{
+		AgentAncestry: []string{"alice-123", "agent-a"},
+		AuthzCheck:    func(_ SecretMeta) bool { return true },
+	}
+	resolved, err := backend.Resolve(ctx, "", "project-1", "", opts)
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	for _, sv := range resolved {
+		if sv.Name == "CORRUPT_OWN_KEY" {
+			t.Error("own-scope secret that fails to decrypt should be absent from Resolve, not present with an empty value")
+		}
+		if sv.Name == "CORRUPT_PROGENY_KEY" {
+			t.Error("progeny secret that fails to decrypt should be absent from Resolve, not present with an empty value")
+		}
+	}
+}
+
+// ============================================================================
 // Backend parity
 // ============================================================================
 
@@ -364,7 +661,12 @@ func TestMaterialSelection_BackendParity(t *testing.T) {
 // receiver names used in this codebase for a secret.SecretBackend value:
 // secretBackend (the Hub server field), sb (a local secret.SecretBackend
 // variable) and Backend (an exported config field, including through a
-// selector such as cfg.Backend).
+// selector such as cfg.Backend). This is a name-based regex match, not a
+// type-aware one: a new caller written under a different local name (for
+// example backend.Get( or b.Get() would not be matched. Test files are
+// scanned separately from production files below (skipped entirely) so a
+// fake or mock's own Get method on an unrelated receiver can't produce a
+// false positive or mask a real new caller.
 var getCallerPattern = regexp.MustCompile(`\b(?:secretBackend|sb|Backend)\.Get\(`)
 
 // hubInternalGetCallers is the reviewed set of files outside this package
@@ -414,9 +716,19 @@ func repoRootFromWD(t *testing.T) string {
 // contract that SecretBackend.Get is reachable only from hub-internal code:
 // a fixed set of hub infrastructure loaders, hub-side clone credentials that
 // are never delivered to an agent, and the material paths that have not yet
-// switched to FetchValues. It scans pkg/, cmd/ and extras/ so a new caller
-// anywhere in the tree is caught, not silently accepted; a genuinely new or
-// changed caller requires a deliberate update to hubInternalGetCallers.
+// switched to FetchValues. It scans non-test .go files under pkg/, cmd/ and
+// extras/ so a new caller anywhere in the tree is caught, not silently
+// accepted; a genuinely new or changed caller requires a deliberate update to
+// hubInternalGetCallers.
+//
+// The match (getCallerPattern) is a regex over the receiver name, not a
+// type-aware scan of call sites: it recognizes secretBackend.Get(, sb.Get(
+// and Backend.Get(, the three receiver names currently in use for a
+// secret.SecretBackend value, and nothing else. _test.go files are excluded
+// from the scan, so a fake or mock's Get method never counts as a caller and
+// can't produce a false positive. A new caller under a different receiver
+// name would pass unnoticed; secret.go's Get doc comment tells authors to
+// use one of the recognized names or update this test deliberately.
 func TestSecretBackendGet_CallersAreHubInternal(t *testing.T) {
 	root := repoRootFromWD(t)
 	found := make(map[string]int)
@@ -430,7 +742,7 @@ func TestSecretBackendGet_CallersAreHubInternal(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			if info.IsDir() || !strings.HasSuffix(path, ".go") {
+			if info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 				return nil
 			}
 			rel, relErr := filepath.Rel(root, path)

@@ -162,19 +162,29 @@ type SecretBackend interface {
 	// fallback is exactly what FetchValues does not do. Anything selected
 	// for delivery to an agent should use FetchValues, which resolves a
 	// specific recorded metadata version and never falls back by name.
+	//
+	// A new caller must be written using one of the receiver names
+	// TestSecretBackendGet_CallersAreHubInternal (backend_test.go) matches —
+	// secretBackend, sb or Backend — or that drift guard must be updated to
+	// see it; it is a name-based regex scan, not a type-aware one.
 	Get(ctx context.Context, name, scope, scopeID string) (*SecretWithValue, error)
 
 	// FetchValues returns values for exactly the given metadata records,
-	// matched by ID and Version, keyed by each record's ID in the returned
-	// map. There is no name-based fallback: a record that is no longer in
-	// the store, or whose current ID or Version no longer matches the
-	// recorded metadata, is reported as store.ErrNotFound for that item. A
-	// decrypt or backend-access failure is also reported as a per-item
-	// error; a failed item's value is always empty, never delivered as an
-	// empty string in place of an error. Records whose current SecretType is
-	// internal are refused with store.ErrNotFound, since internal secrets
-	// are never candidates for delivery. The returned outer error reports
-	// only a failure of the whole call, not a per-item failure.
+	// matched by ID, Version, AllowProgeny, CreatedBy and SecretType, keyed
+	// by each record's ID in the returned map. There is no name-based
+	// fallback: a record that is no longer in the store, or whose current
+	// ID, Version, AllowProgeny, CreatedBy or SecretType no longer matches
+	// the recorded metadata, is reported as store.ErrNotFound for that item.
+	// The extra AllowProgeny/CreatedBy/SecretType comparison catches a
+	// same-Version metadata race that ID+Version alone would miss, since
+	// UpdateSecretMeta is a read-modify-write with no version predicate (see
+	// recordGenerationChanged in backend.go). A decrypt or backend-access
+	// failure is also reported as a per-item error; a failed item's value is
+	// always empty, never delivered as an empty string in place of an
+	// error. Records whose current SecretType is internal are refused with
+	// store.ErrNotFound, since internal secrets are never candidates for
+	// delivery. The returned outer error reports only a failure of the
+	// whole call, not a per-item failure.
 	FetchValues(ctx context.Context, metas []SecretMeta) (map[string]FetchResult, error)
 
 	// Set creates or updates a secret. Returns whether a new secret was created.

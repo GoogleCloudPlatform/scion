@@ -101,15 +101,13 @@ func (m *oidcMockSecretBackend) Resolve(_ context.Context, _, _, _ string, _ *se
 
 func (m *oidcMockSecretBackend) HubID() string { return "test-hub" }
 
+// FetchValues is not exercised by the OIDC key tests in this file; this stub
+// only satisfies secret.SecretBackend and reports every item not found, the
+// same as the other minimal fakes in this codebase.
 func (m *oidcMockSecretBackend) FetchValues(_ context.Context, metas []secret.SecretMeta) (map[string]secret.FetchResult, error) {
 	results := make(map[string]secret.FetchResult, len(metas))
 	for _, meta := range metas {
-		sv, ok := m.secrets[m.secretKey(meta.Name, meta.Scope, meta.ScopeID)]
-		if !ok {
-			results[meta.ID] = secret.FetchResult{Err: store.ErrNotFound}
-			continue
-		}
-		results[meta.ID] = secret.FetchResult{Value: sv.Value}
+		results[meta.ID] = secret.FetchResult{Err: store.ErrNotFound}
 	}
 	return results, nil
 }

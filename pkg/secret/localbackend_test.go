@@ -18,6 +18,7 @@ package secret
 
 import (
 	"context"
+	"encoding/base64"
 	"strings"
 	"testing"
 
@@ -1230,6 +1231,28 @@ func TestLocalBackend_DecryptRawValue_NilKeyEncryptedValue(t *testing.T) {
 		if sv.Name == "LEAKED_SECRET" {
 			t.Error("encrypted secret should not appear in resolved secrets when encryption key is nil")
 		}
+	}
+}
+
+// TestLocalBackend_DecryptRawValue_CorruptCiphertextReturnsError verifies
+// the P13 fix directly: decryptRawValue returns a non-nil error and an empty
+// string for ciphertext that fails AES-GCM authentication, rather than
+// silently returning ("", nil) as if the value were legitimately empty.
+// Reverting the fix at localbackend.go (restoring `return "", nil` on a
+// decrypt failure) turns this test red.
+func TestLocalBackend_DecryptRawValue_CorruptCiphertextReturnsError(t *testing.T) {
+	backend, _ := createTestBackend(t)
+
+	// enc:v1: prefixed, valid base64, but not a value EncryptValue ever
+	// produced: it decodes but fails AES-GCM authentication.
+	corrupt := EncryptedPrefix + base64.StdEncoding.EncodeToString(make([]byte, 32))
+
+	value, err := backend.decryptRawValue(corrupt)
+	if err == nil {
+		t.Fatal("expected a decrypt error for corrupt ciphertext, got nil")
+	}
+	if value != "" {
+		t.Errorf("expected empty value on decrypt failure, got %q", value)
 	}
 }
 

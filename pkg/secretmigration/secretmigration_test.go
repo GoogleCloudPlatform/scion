@@ -94,13 +94,12 @@ func (f *fakeBackend) Resolve(context.Context, string, string, string, *secret.R
 
 func (f *fakeBackend) HubID() string { return "test-hub" }
 
+// FetchValues is not exercised by the secretmigration tests in this file;
+// this stub only satisfies secret.SecretBackend and reports every item not
+// found, the same as the other minimal fakes in this codebase.
 func (f *fakeBackend) FetchValues(_ context.Context, metas []secret.SecretMeta) (map[string]secret.FetchResult, error) {
 	results := make(map[string]secret.FetchResult, len(metas))
 	for _, meta := range metas {
-		if sv, ok := f.values[meta.Name]; ok {
-			results[meta.ID] = secret.FetchResult{Value: sv.Value}
-			continue
-		}
 		results[meta.ID] = secret.FetchResult{Err: store.ErrNotFound}
 	}
 	return results, nil
