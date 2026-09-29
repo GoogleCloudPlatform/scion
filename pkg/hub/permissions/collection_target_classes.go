@@ -60,11 +60,7 @@ package permissions
 // — administering constraints is a hub-level permission, independent of
 // which scope a given constraint governs); `handlers_quota.go`'s
 // create/update/delete all authorize against `Resource{Type:"quota",
-// ID:"hub"}` (confirmed HubResource, as already reviewed). Conversely,
-// `gcp_service_account.assign` (`sa_assign_gate.go`, invoked from
-// `handlers_agents_core.go` during agent create/patch) authorizes in the
-// context of the agent being created/patched — a genuinely project-scoped
-// operation — confirming ProjectScoped despite CapabilityKind=Resource.
+// ID:"hub"}` (confirmed HubResource, as already reviewed).
 // CapabilityKind remains a useful STARTING heuristic for which permissions
 // are instance-only (single-resource) actions that can never be
 // collection-level at all (agent.attach/delete/token_refresh, etc. — no

@@ -79,10 +79,14 @@ var ProjectTargetApplicability = map[string]bool{
 	"broker.create": false, "broker.read": false, "broker.update": false,
 	"broker.delete": false, "broker.list": false, "broker.dispatch": false,
 
-	// gcp_service_account.* — hub/user resource; assign targets an agent
-	// inside an existing project, reviewed true as the one exception in
-	// this family (same pattern as project.create/skill.create_global: the
-	// resource family default does not decide every member).
+	// gcp_service_account.* — hub/user resource; assign authorizes against
+	// the EXISTING service account being assigned (gcpServiceAccountResource,
+	// capabilities.go:150-163), whose own ParentType/ParentID can be a
+	// project scope, so it is reviewed true as the one exception in this
+	// family (same pattern as project.create/skill.create_global: the
+	// resource family default does not decide every member) — it is never
+	// collection-level, since it always names that existing SA instance
+	// (see CollectionTargetClasses).
 	"gcp_service_account.create": false, "gcp_service_account.read": false,
 	"gcp_service_account.delete": false, "gcp_service_account.list": false,
 	"gcp_service_account.verify": false, "gcp_service_account.mint": false,
@@ -215,7 +219,7 @@ const (
 	// instance of the permission's resource type (skill/template/
 	// harness_config's own project scope-kind, or any other project-
 	// applicable resource type with no scope-kind split at all — agent,
-	// gcp_service_account.assign).
+	// gcp_service_account.assign's existing-SA project scope).
 	TargetClassKindProjectScoped TargetClassKind = "project_scoped"
 	// TargetClassKindGlobalCatalog represents the hub-wide (global/core)
 	// catalog instance space, for the resource types that have one
@@ -294,7 +298,8 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	"broker.read": {TargetClassKindHubResource}, "broker.list": {TargetClassKindHubResource},
 
 	// gcp_service_account.* — hub/user resource; assign is the mixed-class
-	// exception, targeting an agent inside an existing project.
+	// exception, since the existing SA it authorizes against can itself
+	// carry a project scope.
 	"gcp_service_account.read":   {TargetClassKindHubResource},
 	"gcp_service_account.list":   {TargetClassKindHubResource},
 	"gcp_service_account.verify": {TargetClassKindHubResource},
