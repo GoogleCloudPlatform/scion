@@ -222,7 +222,7 @@ func TestRunTokenCreate_ScopeViolationHint(t *testing.T) {
 }
 
 func TestRunTokenCreate_ScopeViolationWithoutDetails_NoEmptySelector(t *testing.T) {
-	// F7: an older hub's scope_violation body may carry no details. The
+	// An older hub's scope_violation body may carry no details. The
 	// "Denied scope" line must not print an empty selector/reason, but the
 	// hint to check eligibility is still useful.
 	state := saveHubTokenTestState()

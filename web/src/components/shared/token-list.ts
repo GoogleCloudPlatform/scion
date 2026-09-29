@@ -1411,9 +1411,8 @@ export class ScionTokenList extends LitElement {
             </div>
             ${this.scopesErrorProjectId && this.scopesErrorProjectId === this.createProjectId
               ? html`<div class="dialog-error">
-                  Could not check which scopes you can select for this project (no access, or it no
-                  longer exists). Showing the full catalog with no eligibility -- the server still
-                  enforces access when you submit.
+                  Could not check which scopes you can select for this project. Showing the full
+                  catalog with no eligibility -- the server still enforces access when you submit.
                 </div>`
               : nothing}
             <div class="scope-selector">
