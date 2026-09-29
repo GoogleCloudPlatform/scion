@@ -133,63 +133,115 @@ func (claudeUsageRule) MatchLog(scopeName, eventName string, record *logspb.LogR
 	}
 }
 
-// codexUsageScope is Codex's native OTel log instrumentation scope: the
-// *empty* string. Codex's Rust OTel provider installs the log-export bridge
-// with OpenTelemetryTracingBridge::new(logger_provider)
-// (codex-rs/otel/src/provider.rs, logger_export_layer), which uses the
-// bridge's default constructor. That constructor documents "the default
-// scope uses an empty scope name for the appender logger"
-// (opentelemetry-appender-tracing layer.rs, OpenTelemetryTracingBridge::new
-// / ::builder). Unlike Claude, which names its scope, Codex never sets one,
-// so this rule matches on event.name/event.kind alone (design §5's codex
-// row states no scope requirement, unlike Claude's).
-const codexUsageScope = ""
-
-// codexUsageEventName and codexUsageEventKind identify the one codex.*
-// event this rule derives from: a completed SSE response carrying the
-// turn's token usage (design §5).
+// codexUsageEventName and codexUsageEventKind identify the codex.* events
+// this rule derives from: SSE frames of a model response, one of which is a
+// completed response carrying the turn's token usage (design §5).
+//
+// This rule does not gate on instrumentation scope. A local capture (below)
+// shows codex's real log-export scope name is "codex_otel.log_only" --
+// notably *not* the empty string opentelemetry-appender-tracing's
+// OpenTelemetryTracingBridge::new/::builder documents as its default
+// ("the default scope uses an empty scope name for the appender logger"),
+// which is what reading codex-rs/otel/src/provider.rs's
+// logger_export_layer in isolation would suggest. Regardless of which of
+// the two is accurate for a given codex/appender release, the rule is
+// already filtered to SCION_HARNESS=codex at construction, and
+// "codex.sse_event" is a namespaced event name, so a scope check adds no
+// real safety and only risks dropping codex's usage silently if the scope
+// name changes again (design §5's codex row states no scope requirement,
+// unlike Claude's, which does name one).
 const (
 	codexUsageEventName = "codex.sse_event"
 	codexUsageEventKind = "response.completed"
 )
 
-// codexUsageRule implements the codex row of design §5: one completed SSE
-// response is one call with tokens. Verified against
-// codex-rs/otel/src/events/session_telemetry.rs, function
-// sse_event_completed, at tag rust-v0.158.0 (commit
+// codexUsageRule implements the codex row of design §5: one completed
+// response is one call with tokens, or one call with no tokens and
+// Status=error for a failed request whose source reports it (design §3.2).
+// Verified against codex-rs/otel/src/events/session_telemetry.rs and
+// core/src/client.rs at tag rust-v0.158.0 (commit
 // 54e1bd264b4122fe9471ee7d54c4d021a76bb8ff of github.com/openai/codex,
-// matching the @openai/codex 0.158.0 npm release that harnesses/codex
-// installs by default), which emits exactly:
+// which is what @openai/codex resolves to on npm as of this writing --
+// harnesses/codex/Dockerfile does not pin a version), and against a local
+// capture: @openai/codex@0.158.0 pointed at a local mock Responses-API
+// server and a local OTLP/HTTP+JSON log sink, no network calls and no real
+// API key. The capture confirmed the exact record shape this rule and its
+// fixture depend on -- the tracing-appender callsite EventName (C1), the
+// real "codex_otel.log_only" scope name, the per-frame duration_ms marker
+// (H1), and the value-type split between the %-formatted fields
+// (stringValue) and the bare i64 fields (intValue) -- for every
+// successful-response record in testdata/usage/codex-0.158.0.pb.json; see
+// loadCodexUsageFixture. The one record the capture could not reach is
+// see_event_completed_failed (H2): the mock forced an HTTP 500 at the
+// request level, which surfaces as a codex.api_request failure (captured
+// and real, just a different event), not a mid-stream SSE error, so that
+// one record stays source-derived, cited above.
 //
-//	event.name = "codex.sse_event", event.kind = "response.completed",
-//	input_token_count, output_token_count, cached_token_count,
-//	cache_write_token_count, reasoning_token_count, tool_token_count,
-//	ttft_ms, service_tier, model_reasoning_effort
+// Three distinct emitters share event.name=codex.sse_event and
+// event.kind=response.completed, and this rule must tell them apart
+// (getting this wrong either drops usage entirely or double-counts calls):
 //
-// plus the common fields every codex.* event carries (model, slug, and so
-// on; codex-rs/otel/src/events/shared.rs, log_event!). No live codex binary
-// was available in this environment to capture a payload from, so
-// testdata/usage/codex-0.158.0.pb.json is built from this source citation
-// rather than a capture; see loadCodexUsageFixture.
+//   - sse_event(), called from log_sse_event for *every* SSE frame
+//     (client.rs's ApiTelemetry::on_sse_poll calls this per frame,
+//     session_telemetry.rs:1028-1046). For a plain "response.completed"
+//     frame with a JSON body but no usage attached yet, this is the arm
+//     taken, emitting event.kind=response.completed, duration_ms, and no
+//     token fields. Matching this as a second, zero-token successful call
+//     would double-count: it always carries duration_ms.
+//   - sse_event_completed(), called once per response with the parsed
+//     TokenUsage (client.rs's Ok(ResponseEvent::Completed{..}) arm,
+//     session_telemetry.rs:1102-1117): the real, token-bearing event this
+//     rule derives calls and tokens from. Never carries duration_ms.
+//   - see_event_completed_failed(), called once per response on the
+//     stream's Err(..) arm after provider.map_api_error (client.rs's
+//     Err(err) arm calling session_telemetry.see_event_completed_failed(
+//     &mapped), session_telemetry.rs:1086-1100): a failed request (a
+//     transport or API error, not a parse failure), carrying error.message
+//     and no token fields, and -- like sse_event_completed -- no
+//     duration_ms.
 //
-// Token mapping (design §5, §3.2): input = input_token_count −
-// cached_token_count (Codex reports input_token_count inclusive of cache
-// hits, unlike Claude's exclusive counts); output = output_token_count;
-// cache_read = cached_token_count; reasoning = reasoning_token_count,
-// informational only. cache_write_token_count exists in the source but has
-// no mapping in design §5's codex row, so it is read from neither this rule
-// nor emitted as a token_type; tool_token_count (the turn total) is
-// likewise not part of the canonical contract and is ignored.
+// So duration_ms presence is the frame-vs-completion discriminator (H1),
+// and error.message presence (only ever set by the failed-request arm)
+// distinguishes a failed response from a successful, token-bearing one
+// (H2), mirroring the Claude rule's api_request/api_error split.
+//
+// Token mapping (design §5, §3.2), for the success case only: input =
+// input_token_count − cached_token_count (Codex reports input_token_count
+// inclusive of cache hits, unlike Claude's exclusive counts); output =
+// output_token_count; cache_read = cached_token_count; reasoning =
+// reasoning_token_count, informational only. cache_write_token_count exists
+// in the source but has no mapping in design §5's codex row, so it is read
+// from neither this rule nor emitted as a token_type; tool_token_count (the
+// turn total) is likewise not part of the canonical contract and is
+// ignored.
 type codexUsageRule struct{}
 
 func (codexUsageRule) Harness() string { return "codex" }
 
-func (codexUsageRule) MatchLog(scopeName, eventName string, record *logspb.LogRecord) (usageIncrement, bool, error) {
-	if scopeName != codexUsageScope || record == nil || eventName != codexUsageEventName {
+func (codexUsageRule) MatchLog(_, eventName string, record *logspb.LogRecord) (usageIncrement, bool, error) {
+	if record == nil || eventName != codexUsageEventName {
 		return usageIncrement{}, false, nil
 	}
 	if logAttrString(record.Attributes, "event.kind") != codexUsageEventKind {
 		return usageIncrement{}, false, nil
+	}
+	// The per-SSE-frame marker record (sse_event()): never a completion,
+	// never has tokens. Excluding it here, rather than requiring token
+	// fields to be present below, keeps a malformed *and* a legitimately
+	// zero-token completion both matching and countable as one call (H1).
+	if logAttrPresent(record.Attributes, "duration_ms") {
+		return usageIncrement{}, false, nil
+	}
+
+	// see_event_completed_failed: a failed request (H2). Mirrors the
+	// Claude rule's api_error arm -- Calls=1, Status=error, no tokens, and
+	// not malformed (a parse-able error is not a malformed event).
+	if logAttrPresent(record.Attributes, "error.message") {
+		return usageIncrement{
+			Model:  logAttrString(record.Attributes, "model"),
+			Status: telemetrycontract.StatusError,
+			Calls:  1,
+		}, true, nil
 	}
 
 	input, inputErr := logAttrInt(record.Attributes, "input_token_count")
@@ -533,6 +585,20 @@ func logAttrString(attrs []*commonpb.KeyValue, key string) string {
 		}
 	}
 	return ""
+}
+
+// logAttrPresent reports whether key is present in attrs at all, regardless
+// of its value's type. Unlike logAttrString, this correctly detects a
+// present non-string-typed attribute (for example an intValue or
+// doubleValue), which logAttrString cannot distinguish from "absent" since
+// GetStringValue() returns "" for either.
+func logAttrPresent(attrs []*commonpb.KeyValue, key string) bool {
+	for _, kv := range attrs {
+		if kv != nil && kv.Key == key {
+			return true
+		}
+	}
+	return false
 }
 
 // logAttrInt reads a token count attribute. Absence is not malformed (it

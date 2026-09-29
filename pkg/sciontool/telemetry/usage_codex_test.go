@@ -6,43 +6,67 @@ package telemetry
 
 import (
 	"context"
+	"net"
 	"os"
 	"testing"
+	"time"
 
+	"cloud.google.com/go/monitoring/apiv3/v2/monitoringpb"
+	mexporter "github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
+	"google.golang.org/api/option"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
 const codexUsageFixturePath = "testdata/usage/codex-0.158.0.pb.json"
 
-// loadCodexUsageFixture loads a codex 0.158.0 payload built from source,
-// not a capture: no codex binary was available in this environment to run
-// and capture from (design §5 "Fixture gate" prefers a capture; the task
-// brief for this rule allows deriving the exact shape from the codex-rs
-// source instead, citing the revision, when a capture isn't possible).
+// loadCodexUsageFixture loads a codex 0.158.0 payload. Three of its four
+// records (the delta frame, the per-frame response.completed marker, and
+// the token-bearing completion) are a scrubbed local capture: npm-installed
+// @openai/codex@0.158.0, run as `codex exec` against a local mock
+// Responses-API server (a tiny Python HTTP server streaming a fixed SSE
+// sequence) and a local OTLP/HTTP+JSON log sink -- no network calls, no
+// real API key, no Anthropic/OpenAI credentials. Scrubbed: conversation.id
+// and host.name are replaced with placeholders; model/slug are replaced
+// with a realistic value (the capture used a placeholder mock model name);
+// originator is normalized from the capture's "codex_exec" (the `codex
+// exec` subcommand) to "codex_cli_rs" (interactive mode, what
+// harnesses/codex's provision.py actually launches, per
+// harnesses/authoring-guide.md's "always configure interactive/REPL mode"
+// requirement) since the two subcommands' originator differs and
+// interactive is what production runs. Every other attribute key, value
+// type (stringValue vs intValue) and the scope name are exactly what the
+// capture produced.
 //
-// The shape is pinned to codex-rs/otel/src/events/session_telemetry.rs,
-// function sse_event_completed and sse_event/see_event_completed_failed, at
-// tag rust-v0.158.0 (github.com/openai/codex, commit
-// 54e1bd264b4122fe9471ee7d54c4d021a76bb8ff), which is also the exact
-// version harnesses/codex/Dockerfile installs by default
-// (CODEX_CLI_VERSION=latest resolves to @openai/codex@0.158.0 as of this
-// writing). The instrumentation scope name ("") matches
-// opentelemetry-appender-tracing's OpenTelemetryTracingBridge::new, which
-// codex-rs/otel/src/provider.rs's logger_export_layer uses unmodified ("the
-// default scope uses an empty scope name for the appender logger").
+// The fourth record (the failed-response event, see_event_completed_failed)
+// is not captured: the capture's induced failure (a mock HTTP 500) surfaces
+// as a codex.api_request failure, not a mid-stream SSE error, so it never
+// reached that code path within the time available. That record stays
+// source-derived, pinned to codex-rs/otel/src/events/session_telemetry.rs
+// and core/src/client.rs at tag rust-v0.158.0 (github.com/openai/codex,
+// commit 54e1bd264b4122fe9471ee7d54c4d021a76bb8ff), which is also what
+// @openai/codex resolves to on npm as of this writing (harnesses/codex's
+// Dockerfile does not pin a version); its error.message text is a real
+// string from a sibling SSE-error arm in the same source file
+// (sse_event_failed's idle-timeout case), used as a realistic placeholder
+// since see_event_completed_failed's own text depends on the runtime
+// CodexErr Display implementation, which the capture didn't exercise.
 //
-// One caveat this synthesis can't verify without a capture: whether
-// %-formatted numeric fields (input_token_count, output_token_count,
-// tool_token_count -- Display-wrapped in the Rust source) are exported as
-// OTLP stringValue, versus the bare i64 fields (cached_token_count,
-// cache_write_token_count, reasoning_token_count, ttft_ms) as intValue, as
-// modeled here. logAttrInt accepts either encoding for every field
-// regardless, so this doesn't affect correctness either way -- see
-// TestCodexUsageRuleTokenFieldTypeTolerance.
+// See codexUsageRule's doc comment for which emitter each record models
+// and why, and project-log/ut-dev-7.md's round 1 fixes section for the
+// full capture attempt. Every record's LogRecord.EventName is the literal
+// tracing-appender callsite string for its emitting
+// log_event!/log_and_trace_event! call ("event
+// otel/src/events/session_telemetry.rs:<line>"), confirmed by the capture
+// -- round 1 review found the original fixture omitted this, which is
+// exactly what let a real codex batch get rejected by
+// normalizedLogEventName (see the policy.go changes alongside this file
+// for the fix).
 func loadCodexUsageFixture(t *testing.T) []*logspb.ResourceLogs {
 	t.Helper()
 	data, err := os.ReadFile(codexUsageFixturePath)
@@ -59,50 +83,77 @@ func loadCodexUsageFixture(t *testing.T) []*logspb.ResourceLogs {
 	return req.ResourceLogs
 }
 
-// codexFixtureRecordsByKind returns every log record in the fixture whose
-// event.kind attribute equals kind. Every record in the codex fixture
-// shares event.name=codex.sse_event, so event.kind is the discriminator
-// (unlike the Claude fixture, whose events carry distinct event.name
-// values).
-func codexFixtureRecordsByKind(t *testing.T, kind string) []*logspb.LogRecord {
+// codexFixtureRecordByEventName returns the one fixture log record whose
+// LogRecord.EventName equals name, failing the test unless exactly one
+// matches. Use this only for an EventName unique to one record in the
+// fixture; sse_event()'s two records (the delta frame and the per-frame
+// response.completed marker) share one callsite EventName, so
+// codexFixtureRecordByEventNameAndKind disambiguates those by event.kind
+// instead.
+func codexFixtureRecordByEventName(t *testing.T, name string) *logspb.LogRecord {
 	t.Helper()
-	var out []*logspb.LogRecord
+	var out *logspb.LogRecord
+	count := 0
 	for _, rl := range loadCodexUsageFixture(t) {
 		for _, sl := range rl.ScopeLogs {
 			for _, record := range sl.LogRecords {
-				if logAttrString(record.Attributes, "event.kind") == kind {
-					out = append(out, record)
+				if record.GetEventName() == name {
+					out = record
+					count++
 				}
 			}
 		}
 	}
+	if count != 1 {
+		t.Fatalf("fixture records with EventName %q = %d, want 1", name, count)
+	}
 	return out
 }
 
-func TestCodexUsageRuleMatchesFixtureResponseCompleted(t *testing.T) {
-	records := codexFixtureRecordsByKind(t, "response.completed")
-	if len(records) != 2 {
-		t.Fatalf("fixture response.completed records = %d, want 2 (one usable, one parse-failure)", len(records))
-	}
-	// The usable record carries token fields; the parse-failure record
-	// carries error.message instead (see
-	// TestCodexUsageRuleCountsCallWithNoUsableTokensOnParseFailure).
-	var usable *logspb.LogRecord
-	for _, record := range records {
-		if logAttrString(record.Attributes, "input_token_count") != "" {
-			usable = record
+// codexFixtureRecordByEventNameAndKind is codexFixtureRecordByEventName
+// plus an event.kind match, for the two sse_event() records that share one
+// callsite EventName (see that function's doc comment).
+func codexFixtureRecordByEventNameAndKind(t *testing.T, name, kind string) *logspb.LogRecord {
+	t.Helper()
+	var out *logspb.LogRecord
+	count := 0
+	for _, rl := range loadCodexUsageFixture(t) {
+		for _, sl := range rl.ScopeLogs {
+			for _, record := range sl.LogRecords {
+				if record.GetEventName() == name && logAttrString(record.Attributes, "event.kind") == kind {
+					out = record
+					count++
+				}
+			}
 		}
 	}
-	if usable == nil {
-		t.Fatal("fixture missing the usable response.completed record")
+	if count != 1 {
+		t.Fatalf("fixture records with EventName %q kind %q = %d, want 1", name, kind, count)
 	}
+	return out
+}
 
-	increment, matched, err := codexUsageRule{}.MatchLog(codexUsageScope, mustEventName(t, usable, codexUsageScope), usable)
+// codexFixtureSseEventCallsite is the shared tracing-appender callsite
+// EventName for sse_event()'s two records: the plain delta frame and the
+// per-frame response.completed marker (H1). Real codex would emit this
+// identical EventName for both, since they come from the same source line;
+// event.kind is what distinguishes them.
+const codexFixtureSseEventCallsite = "event otel/src/events/session_telemetry.rs:1039"
+
+const (
+	codexFixtureCompletedEventName = "event otel/src/events/session_telemetry.rs:1103" // sse_event_completed(), the real usage event
+	codexFixtureFailedEventName    = "event otel/src/events/session_telemetry.rs:1090" // see_event_completed_failed(), H2
+)
+
+func TestCodexUsageRuleMatchesFixtureResponseCompleted(t *testing.T) {
+	record := codexFixtureRecordByEventName(t, codexFixtureCompletedEventName)
+
+	increment, matched, err := codexUsageRule{}.MatchLog("", mustEventName(t, record, ""), record)
 	if err != nil {
 		t.Fatalf("MatchLog error: %v", err)
 	}
 	if !matched {
-		t.Fatal("response.completed did not match codexUsageRule")
+		t.Fatal("sse_event_completed did not match codexUsageRule")
 	}
 	if increment.Calls != 1 || increment.Status != telemetrycontract.StatusSuccess || increment.Model != "gpt-5.1-codex" {
 		t.Fatalf("increment = %+v", increment)
@@ -133,55 +184,55 @@ func TestCodexUsageRuleMatchesFixtureResponseCompleted(t *testing.T) {
 	}
 }
 
-// TestCodexUsageRuleCountsCallWithNoUsableTokensOnParseFailure pins a real
-// codex-rs edge case found in source: see_event_completed_failed also emits
-// event.kind="response.completed" (so this event name/kind pair isn't
-// unique to a successful parse) but carries no token fields at all, only
-// error.message. Absent fields are not malformed (design §3.3,
-// logAttrInt's doc comment), so this still matches and still counts a call,
-// with no tokens -- consistent with the rule as specified, though it means
-// a response whose usage payload failed to parse is indistinguishable from
-// a zero-token success. Flagged to the project for follow-up.
-func TestCodexUsageRuleCountsCallWithNoUsableTokensOnParseFailure(t *testing.T) {
-	records := codexFixtureRecordsByKind(t, "response.completed")
-	var failure *logspb.LogRecord
-	for _, record := range records {
-		if logAttrString(record.Attributes, "error.message") != "" {
-			failure = record
-		}
+// TestCodexUsageRuleExcludesPerFrameMarker pins H1: sse_event() emits a
+// record with the same event.name/event.kind as sse_event_completed for
+// every SSE frame, including a plain "response.completed" frame with no
+// usage attached yet. Matching it as a second, zero-token call would
+// double-count one model response as two calls. The discriminator is
+// duration_ms, which only the per-frame emitter ever sets.
+func TestCodexUsageRuleExcludesPerFrameMarker(t *testing.T) {
+	record := codexFixtureRecordByEventNameAndKind(t, codexFixtureSseEventCallsite, codexUsageEventKind)
+	if _, matched, err := (codexUsageRule{}).MatchLog("", mustEventName(t, record, ""), record); matched || err != nil {
+		t.Errorf("per-frame response.completed marker: matched=%v err=%v, want matched=false err=nil", matched, err)
 	}
-	if failure == nil {
-		t.Fatal("fixture missing the parse-failure response.completed record")
-	}
-	increment, matched, err := codexUsageRule{}.MatchLog(codexUsageScope, mustEventName(t, failure, codexUsageScope), failure)
+}
+
+// TestCodexUsageRuleMapsFailedResponseToError pins H2:
+// see_event_completed_failed reports a failed request (a transport or API
+// error client.rs's map_api_error produced), mirroring the Claude rule's
+// api_error arm -- Calls=1, Status=error, no tokens, and not malformed (a
+// reported error is not a malformed event).
+func TestCodexUsageRuleMapsFailedResponseToError(t *testing.T) {
+	record := codexFixtureRecordByEventName(t, codexFixtureFailedEventName)
+	increment, matched, err := codexUsageRule{}.MatchLog("", mustEventName(t, record, ""), record)
 	if err != nil {
 		t.Fatalf("MatchLog error: %v", err)
 	}
 	if !matched {
-		t.Fatal("response.completed (parse failure) did not match codexUsageRule")
+		t.Fatal("see_event_completed_failed did not match codexUsageRule")
 	}
-	if increment.Calls != 1 || increment.Status != telemetrycontract.StatusSuccess {
-		t.Fatalf("increment = %+v, want Calls=1 Status=success", increment)
+	if increment.Calls != 1 || increment.Status != telemetrycontract.StatusError {
+		t.Fatalf("increment = %+v, want Calls=1 Status=error", increment)
 	}
 	if len(increment.Tokens) != 0 {
-		t.Fatalf("increment.Tokens = %+v, want none when every token field is absent", increment.Tokens)
+		t.Fatalf("increment.Tokens = %+v, want none for a failed response", increment.Tokens)
 	}
 }
 
 func TestCodexUsageRuleIgnoresUnrelatedEvents(t *testing.T) {
-	rule := codexUsageRule{}
-	records := codexFixtureRecordsByKind(t, "text_delta")
-	if len(records) == 0 {
-		t.Fatal("fixture missing text_delta records")
+	record := codexFixtureRecordByEventNameAndKind(t, codexFixtureSseEventCallsite, "response.output_text.delta")
+	if _, matched, err := (codexUsageRule{}).MatchLog("", mustEventName(t, record, ""), record); matched || err != nil {
+		t.Errorf("event.kind=response.output_text.delta: matched=%v err=%v, want matched=false err=nil", matched, err)
 	}
-	if _, matched, err := rule.MatchLog(codexUsageScope, mustEventName(t, records[0], codexUsageScope), records[0]); matched || err != nil {
-		t.Errorf("event.kind=text_delta: matched=%v err=%v, want matched=false err=nil", matched, err)
-	}
+}
 
-	// Wrong scope never matches, even for a real response.completed record.
-	completed := codexFixtureRecordsByKind(t, "response.completed")[0]
-	if _, matched, _ := rule.MatchLog("some.other.scope", mustEventName(t, completed, codexUsageScope), completed); matched {
-		t.Error("codexUsageRule matched outside its native (empty) scope")
+// TestCodexUsageRuleScopeIsNotReliedOn pins M1: the rule does not gate on
+// instrumentation scope (unlike Claude's, which does). An arbitrary,
+// non-empty scope name must not stop a real match.
+func TestCodexUsageRuleScopeIsNotReliedOn(t *testing.T) {
+	record := codexFixtureRecordByEventName(t, codexFixtureCompletedEventName)
+	if _, matched, err := (codexUsageRule{}).MatchLog("some.other.scope", mustEventName(t, record, "some.other.scope"), record); !matched || err != nil {
+		t.Errorf("matched=%v err=%v under an arbitrary scope, want matched=true err=nil (scope is not relied on)", matched, err)
 	}
 }
 
@@ -192,7 +243,7 @@ func TestCodexUsageRuleMalformedTokenField(t *testing.T) {
 		{Key: "model", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "gpt-5.1-codex"}}},
 		{Key: "input_token_count", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "not-a-number"}}},
 	}}
-	increment, matched, err := codexUsageRule{}.MatchLog(codexUsageScope, mustEventName(t, record, codexUsageScope), record)
+	increment, matched, err := codexUsageRule{}.MatchLog("", mustEventName(t, record, ""), record)
 	if !matched {
 		t.Fatal("expected the malformed response.completed to still match (so it counts as usage_malformed, not silently ignored)")
 	}
@@ -213,7 +264,7 @@ func TestCodexUsageRuleNegativeTokenField(t *testing.T) {
 		{Key: "event.kind", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: codexUsageEventKind}}},
 		{Key: "output_token_count", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_IntValue{IntValue: -1}}},
 	}}
-	increment, matched, err := codexUsageRule{}.MatchLog(codexUsageScope, mustEventName(t, record, codexUsageScope), record)
+	increment, matched, err := codexUsageRule{}.MatchLog("", mustEventName(t, record, ""), record)
 	if !matched || err == nil {
 		t.Fatalf("matched=%v err=%v, want matched=true err!=nil", matched, err)
 	}
@@ -223,9 +274,9 @@ func TestCodexUsageRuleNegativeTokenField(t *testing.T) {
 }
 
 // TestCodexUsageRuleCachedExceedsInputIsMalformed pins the codex-specific
-// malformed case the brief calls out: cached_token_count > input_token_count
-// would make input = input_token_count − cached_token_count negative, which
-// the design's ">=0" token invariant (§3.3) forbids.
+// malformed case: cached_token_count > input_token_count would make
+// input = input_token_count − cached_token_count negative, which the
+// design's ">=0" token invariant (§3.3) forbids.
 func TestCodexUsageRuleCachedExceedsInputIsMalformed(t *testing.T) {
 	record := &logspb.LogRecord{Attributes: []*commonpb.KeyValue{
 		{Key: "event.name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: codexUsageEventName}}},
@@ -233,7 +284,7 @@ func TestCodexUsageRuleCachedExceedsInputIsMalformed(t *testing.T) {
 		{Key: "input_token_count", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "10"}}},
 		{Key: "cached_token_count", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_IntValue{IntValue: 20}}},
 	}}
-	increment, matched, err := codexUsageRule{}.MatchLog(codexUsageScope, mustEventName(t, record, codexUsageScope), record)
+	increment, matched, err := codexUsageRule{}.MatchLog("", mustEventName(t, record, ""), record)
 	if !matched || err == nil {
 		t.Fatalf("matched=%v err=%v, want matched=true err!=nil when cached exceeds input", matched, err)
 	}
@@ -244,10 +295,7 @@ func TestCodexUsageRuleCachedExceedsInputIsMalformed(t *testing.T) {
 
 // TestCodexUsageRuleTokenFieldTypeTolerance pins the same type tolerance as
 // Claude's rule (design §3.3, logAttrInt): a string-encoded non-negative
-// integer and an integral double must both be accepted. This also covers
-// this fixture's central uncertainty (see loadCodexUsageFixture's doc
-// comment): whether a given field arrives as stringValue or intValue
-// doesn't change the derived increment.
+// integer and an integral double must both be accepted.
 func TestCodexUsageRuleTokenFieldTypeTolerance(t *testing.T) {
 	record := &logspb.LogRecord{Attributes: []*commonpb.KeyValue{
 		{Key: "event.name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: codexUsageEventName}}},
@@ -256,7 +304,7 @@ func TestCodexUsageRuleTokenFieldTypeTolerance(t *testing.T) {
 		{Key: "cached_token_count", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_DoubleValue{DoubleValue: 20}}},
 		{Key: "output_token_count", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_IntValue{IntValue: 7}}},
 	}}
-	increment, matched, err := codexUsageRule{}.MatchLog(codexUsageScope, mustEventName(t, record, codexUsageScope), record)
+	increment, matched, err := codexUsageRule{}.MatchLog("", mustEventName(t, record, ""), record)
 	if !matched || err != nil {
 		t.Fatalf("matched=%v err=%v, want matched=true err=nil", matched, err)
 	}
@@ -276,7 +324,7 @@ func TestCodexUsageRuleMatchesEventNameField(t *testing.T) {
 			{Key: "event.kind", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: codexUsageEventKind}}},
 		},
 	}
-	increment, matched, err := codexUsageRule{}.MatchLog(codexUsageScope, mustEventName(t, record, codexUsageScope), record)
+	increment, matched, err := codexUsageRule{}.MatchLog("", mustEventName(t, record, ""), record)
 	if !matched || err != nil {
 		t.Fatalf("matched=%v err=%v, want matched=true err=nil for a native EventName field", matched, err)
 	}
@@ -287,21 +335,12 @@ func TestCodexUsageRuleMatchesEventNameField(t *testing.T) {
 
 func TestUsageDeriverObserveDedupesReplayedCodexRequest(t *testing.T) {
 	d := bareUsageDeriver(codexUsageRule{})
-	records := codexFixtureRecordsByKind(t, "response.completed")
-	var usable *logspb.LogRecord
-	for _, record := range records {
-		if logAttrString(record.Attributes, "input_token_count") != "" {
-			usable = record
-		}
-	}
-	if usable == nil {
-		t.Fatal("fixture missing the usable response.completed record")
-	}
+	record := codexFixtureRecordByEventName(t, codexFixtureCompletedEventName)
 
-	if !d.observe(context.Background(), codexUsageScope, usable) {
+	if !d.observe(context.Background(), "", record) {
 		t.Fatal("first observation should record")
 	}
-	if d.observe(context.Background(), codexUsageScope, usable) {
+	if d.observe(context.Background(), "", record) {
 		t.Fatal("replayed observation should be deduped, not recorded again")
 	}
 	diag := d.Diagnostics()
@@ -328,5 +367,165 @@ func TestNewUsageDeriverBuildsCodexRuleForCodexHarness(t *testing.T) {
 	}
 	if _, ok := d.rules[0].(codexUsageRule); !ok {
 		t.Fatalf("codex deriver rule = %T, want codexUsageRule", d.rules[0])
+	}
+}
+
+// TestPipelineDerivesCodexUsageThroughValidation is round 1's C1/H1/H2/L1
+// regression test. On 624b7ff, every real codex record's LogRecord.EventName
+// (the tracing-appender callsite default) conflicted with its event.name
+// attribute, so validateLogs rejected the whole batch with "conflicting
+// event name representations" before the deriver ever ran (C1) -- this
+// fixture, with realistic EventName values, fails exactly that way without
+// the policy.go fix alongside this test. It also posts a full, realistic
+// response sequence (a delta frame, the per-frame response.completed
+// marker, and the token-bearing completion) plus one failed response, and
+// asserts the resulting canonical counters and point label keys end to end
+// (handleLogs -> validateLogs -> the deriver -> the loopback metrics path
+// -> metricStreams -> the GCP exporter), the same shape as
+// TestPipelineDerivesClaudeUsageEndToEnd but without that test's golden-file
+// and replay-dedup assertions, which are harness-agnostic and already
+// covered there.
+func TestPipelineDerivesCodexUsageThroughValidation(t *testing.T) {
+	t.Setenv("SCION_AGENT_ID", "agent-codex-pipeline-1")
+	t.Setenv("SCION_AGENT_SLUG", "codex-agent-slug")
+	t.Setenv("SCION_PROJECT_ID", "project-codex-pipeline-1")
+	t.Setenv("SCION_HARNESS", "codex")
+	t.Setenv("SCION_MODEL", "")
+	t.Setenv("SCION_BROKER_ID", "")
+	t.Setenv("SCION_BROKER_NAME", "")
+	t.Setenv("SCION_GCP_PROJECT_ID", "")
+	t.Setenv("SCION_USAGE_SOURCE", "native")
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listener.Close() }()
+	capture := &monitoringCapture{}
+	server := grpc.NewServer()
+	monitoringpb.RegisterMetricServiceServer(server, capture)
+	go func() { _ = server.Serve(listener) }()
+	defer server.Stop()
+	conn, err := grpc.NewClient(listener.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	sdkExporter, err := mexporter.New(mexporter.WithProjectID("test-project"), mexporter.WithMonitoringClientOptions(option.WithGRPCConn(conn)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sdkExporter.Shutdown(context.Background()) }()
+
+	cfg := &Config{
+		Enabled: true, CloudProvider: "gcp", GRPCPort: availableTCPPort(t), HTTPPort: 0,
+		// No real event name is included, so every raw codex log record is
+		// dropped by the filter and handleLogs returns before attempting a
+		// (here unconfigured) raw-log export. The derived usage metrics,
+		// which run before the filter (design §3.3, AC-1.4), must still
+		// appear -- this is also the pre-filter-derivation guarantee C1's
+		// fix must not break.
+		Filter: FilterConfig{Include: []string{"nonexistent_event"}},
+	}
+	p := NewWithConfig(cfg)
+	p.exporter = &CloudExporter{gcpExporter: &GCPExporter{metricExporter: sdkExporter}}
+	now := time.Date(2026, 9, 29, 0, 0, 0, 0, time.UTC)
+	p.metricNow = func() time.Time { return now }
+
+	receiver := NewReceiver(cfg, nil, WithLogHandler(p.handleLogs), WithMetricHandler(p.handleMetrics))
+	if err := receiver.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = receiver.Stop(context.Background()) }()
+
+	deriver, err := NewUsageDeriver(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deriver.rules) == 0 {
+		t.Fatal("expected the codex usage rule to be active")
+	}
+	p.usageDeriver.Store(deriver)
+	defer func() { _ = deriver.Shutdown(context.Background()) }()
+
+	// C1: on 624b7ff this returns the InvalidArgument "conflicting event
+	// name representations" policy-rejection error, and nothing below ever
+	// runs.
+	if err := p.handleLogs(context.Background(), loadCodexUsageFixture(t)); err != nil {
+		t.Fatalf("handleLogs rejected a realistic codex fixture: %v", err)
+	}
+	now = now.Add(10 * time.Millisecond)
+	if !p.flushMetricBuffer(context.Background(), true) {
+		t.Fatal("metric flush not confirmed")
+	}
+
+	diag := p.UsageDiagnostics()
+	// H1: the delta frame and the per-frame response.completed marker must
+	// not add a second call for the one successful response -- Derived
+	// counts one increment per matched record, so this is 2 (one success,
+	// one error), not 3 or 4.
+	if diag.Derived != 2 || diag.Malformed != 0 {
+		t.Fatalf("diagnostics = %+v, want Derived=2 Malformed=0 (H1: no per-frame double count)", diag)
+	}
+
+	series := allCapturedSeries(capture)
+	var calls, tokens []*monitoringpb.TimeSeries
+	for _, ts := range series {
+		switch ts.Metric.Type {
+		case "workload.googleapis.com/gen_ai.api.calls":
+			calls = append(calls, ts)
+		case "workload.googleapis.com/scion.usage.tokens":
+			tokens = append(tokens, ts)
+		}
+	}
+
+	// H1 (call count) and H2 (error status): exactly one success call and
+	// one error call, not two successes (which is what 624b7ff's
+	// double-count and mis-mapped-error bugs would have produced together).
+	if len(calls) != 2 {
+		t.Fatalf("gen_ai.api.calls series = %d, want 2 (success, error)", len(calls))
+	}
+	byStatus := map[string]int64{}
+	for _, ts := range calls {
+		assertLabelKeys(t, ts.Metric.Labels, "agent_id", "project_id", "harness", "model", "status",
+			"scion_metric_resource_id", "scion_metric_scope_id", "scion_metric_point_id",
+			"scion_agent_id", "scion_project_id", "scion_agent_slug",
+			"service_name", "service_instance_id")
+		byStatus[ts.Metric.Labels["status"]] = ts.Points[0].Value.GetInt64Value()
+	}
+	if byStatus["success"] != 1 || byStatus["error"] != 1 {
+		t.Fatalf("calls by status = %+v, want success=1 error=1", byStatus)
+	}
+
+	// L1: assert the exported scion.usage.tokens point label keys are
+	// exactly {harness, model, token_type} plus the exporter-stamped
+	// canonical identity labels -- nothing else (design §3.2).
+	wantTokens := map[string]int64{
+		telemetrycontract.TokenTypeInput:     3000,
+		telemetrycontract.TokenTypeOutput:    842,
+		telemetrycontract.TokenTypeCacheRead: 12000,
+		telemetrycontract.TokenTypeReasoning: 512,
+	}
+	if len(tokens) != len(wantTokens) {
+		t.Fatalf("scion.usage.tokens series = %d, want %d", len(tokens), len(wantTokens))
+	}
+	byType := map[string]int64{}
+	for _, ts := range tokens {
+		assertLabelKeys(t, ts.Metric.Labels, "harness", "model", "token_type",
+			"scion_metric_resource_id", "scion_metric_scope_id", "scion_metric_point_id",
+			"scion_agent_id", "scion_project_id", "scion_agent_slug",
+			"service_name", "service_instance_id")
+		if ts.Metric.Labels["harness"] != "codex" || ts.Metric.Labels["model"] != "gpt-5.1-codex" {
+			t.Errorf("unexpected tokens series labels: %+v", ts.Metric.Labels)
+		}
+		if ts.Metric.Labels["scion_agent_id"] != "agent-codex-pipeline-1" || ts.Metric.Labels["scion_project_id"] != "project-codex-pipeline-1" || ts.Metric.Labels["scion_agent_slug"] != "codex-agent-slug" {
+			t.Errorf("unexpected canonical identity labels: %+v", ts.Metric.Labels)
+		}
+		byType[ts.Metric.Labels["token_type"]] = ts.Points[0].Value.GetInt64Value()
+	}
+	for tokenType, want := range wantTokens {
+		if byType[tokenType] != want {
+			t.Errorf("tokens[%q] = %d, want %d", tokenType, byType[tokenType], want)
+		}
 	}
 }
