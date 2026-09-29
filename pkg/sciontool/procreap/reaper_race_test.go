@@ -41,9 +41,9 @@ func TestNaiveGlobalReaper_RacesCmdWait(t *testing.T) {
 	stop := make(chan struct{})
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGCHLD)
-	defer signal.Stop(sigs)
-
+	reaperDone := make(chan struct{})
 	go func() {
+		defer close(reaperDone)
 		for {
 			select {
 			case <-stop:
@@ -59,7 +59,20 @@ func TestNaiveGlobalReaper_RacesCmdWait(t *testing.T) {
 			}
 		}
 	}()
-	defer close(stop)
+	// Must join the goroutine, not just signal it to stop: sigs has a
+	// buffer of 1, so a SIGCHLD can still be sitting in it when the test
+	// returns, and select can pick that ready case over a concurrently
+	// closed stop. An unjoined goroutine could then run one more
+	// wait4(-1, WNOHANG) loop after this test has already returned —
+	// reaping whatever the *next* test's children happen to be at that
+	// moment and handing them ECHILD. Blocking on reaperDone (as
+	// TestRunManaged_SurvivesReaperRace below already does) is what
+	// actually prevents that: this naive reaper cannot outlive the test.
+	t.Cleanup(func() {
+		signal.Stop(sigs)
+		close(stop)
+		<-reaperDone
+	})
 
 	const iterations = 300
 	var echildCount int64

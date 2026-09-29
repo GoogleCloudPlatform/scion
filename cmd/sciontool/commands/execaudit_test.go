@@ -39,13 +39,12 @@ const moduleImportPrefix = "github.com/GoogleCloudPlatform/scion/"
 // callees" from "some other subcommand's callees" by anything short of a
 // real call-graph analysis (which a parse-only, stdlib-only test can't
 // justify) would mean re-deriving, and re-trusting, a hand-maintained list
-// again — exactly what made the previous version of this test
-// (execAuditDirs, a fixed list of 5 directories) miss reachable packages
-// silently. Instead, this over-approximates reachability — it will also
-// scan code that only some other subcommand (doctor, harness, metadata
-// status, provision, ...) uses — and relies on execAuditFileAllowlist to
-// name, and justify, each file confirmed to run in a different process
-// than runInit's PID 1.
+// of packages — which silently misses whatever a future change adds to that
+// list's blind spots. Instead, this over-approximates reachability — it
+// will also scan code that only some other subcommand (doctor, harness,
+// metadata status, provision, ...) uses — and relies on
+// execAuditFileAllowlist to name, and justify, each file confirmed to run
+// in a different process than runInit's PID 1.
 const execAuditRoot = "cmd/sciontool/commands"
 
 // execAuditFileAllowlist lists source files that are exempt from
@@ -112,16 +111,16 @@ var execAuditSymbolAllowlist = map[string]map[string]bool{
 // scanned at all.)
 const execAuditTrustedDir = "pkg/sciontool/procreap"
 
-// TestNoRawExecInPID1Path is a regression guard for a class of bug, not a
-// single line: fix/broker-waitid-echild routed every exec.Cmd call site
-// reachable from sciontool init's PID-1 process through
+// TestNoRawExecInPID1Path is a regression guard: every exec.Cmd call site
+// reachable from sciontool init's PID-1 process while
+// procreap.StartReaper's SIGCHLD reaper is active must go through
 // pkg/sciontool/procreap's managed helpers (RunManaged/CombinedOutputManaged/
 // OutputManaged, or the manual Gated+RegisterManagedPID/UnregisterManagedPID
 // pattern used by Supervisor.Run and services.managedService.start), because
 // a raw Run/Output/CombinedOutput call — or a raw Start() later Wait()ed —
-// races procreap's SIGCHLD reaper for the child's exit status. Nothing in
-// Go's type system stops a future change from adding a new raw call in this
-// path and silently reintroducing that race.
+// races that reaper for the child's exit status. Nothing in Go's type
+// system stops a future change from adding a new raw call in this path and
+// silently reintroducing that race.
 //
 // This test parses (does not build, vet, or run) every non-test .go file in
 // every package reachable, via in-module imports, from execAuditRoot (see
@@ -140,6 +139,7 @@ func TestNoRawExecInPID1Path(t *testing.T) {
 	repoRoot := repoRootForTest(t)
 	reachable := execAuditReachablePackages(t, repoRoot)
 	risky := execAuditRiskyPackageDirs()
+	riskyFuncs := execAuditRiskyFuncNames(t, repoRoot)
 
 	var dirs []string
 	for d := range reachable {
@@ -186,6 +186,14 @@ func TestNoRawExecInPID1Path(t *testing.T) {
 			for _, v := range vs {
 				violations = append(violations, relPath+": "+v)
 			}
+
+			vs, err = findRiskyFuncCallViolations(absPath, riskyFuncs[dir])
+			if err != nil {
+				t.Fatalf("parsing %s: %v", relPath, err)
+			}
+			for _, v := range vs {
+				violations = append(violations, relPath+": "+v)
+			}
 		}
 	}
 	sort.Strings(violations)
@@ -196,8 +204,9 @@ func TestNoRawExecInPID1Path(t *testing.T) {
 		}
 		t.Fatalf("%d violation(s) found in the PID-1 path outside pkg/sciontool/procreap; route "+
 			"raw exec.Cmd calls through procreap.RunManaged/CombinedOutputManaged/OutputManaged "+
-			"(or the Gated+RegisterManagedPID/UnregisterManagedPID pattern), and route calls into "+
-			"a risky package through execAuditSymbolAllowlist — or add an execAuditFileAllowlist "+
+			"(or the Gated+RegisterManagedPID/UnregisterManagedPID pattern); route calls into a "+
+			"risky package through execAuditSymbolAllowlist, or a same-package call to a risky "+
+			"allowlisted-file function by not calling it at all; or add an execAuditFileAllowlist "+
 			"entry with a citation if the file is genuinely unreachable from runInit", len(violations))
 	}
 }
@@ -263,6 +272,59 @@ func execAuditRiskyPackageDirs() map[string]bool {
 	return risky
 }
 
+// execAuditRiskyFuncNames is the same-package counterpart to
+// execAuditRiskyPackageDirs/execAuditSymbolAllowlist: for each
+// execAuditFileAllowlist file, it collects the names of that file's
+// top-level, non-method functions whose bodies reference the file's os/exec
+// import. A non-allowlisted file elsewhere in the *same directory* could
+// otherwise dodge this whole test by calling one of these unqualified
+// (Go's same-package call syntax) instead of calling exec.Command directly
+// — the same shape of backdoor execAuditSymbolAllowlist closes across
+// package boundaries, just within one. Keyed by directory, since an
+// unqualified call is only ever resolved within its own package: two
+// different directories reusing a function name isn't a collision here.
+func execAuditRiskyFuncNames(t *testing.T, repoRoot string) map[string]map[string]bool {
+	t.Helper()
+	byDir := map[string]map[string]bool{}
+	for relPath := range execAuditFileAllowlist {
+		absPath := filepath.Join(repoRoot, filepath.FromSlash(relPath))
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, absPath, nil, 0)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", relPath, err)
+		}
+		execAlias := importAlias(file, "os/exec", "exec")
+		if execAlias == "" {
+			continue // this allowlisted file doesn't itself use os/exec
+		}
+		dir := filepath.ToSlash(filepath.Dir(relPath))
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Recv != nil || fn.Body == nil {
+				continue // methods are excluded: an unqualified call can never reach one
+			}
+			references := false
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				sel, ok := n.(*ast.SelectorExpr)
+				if ok {
+					if id, ok := sel.X.(*ast.Ident); ok && id.Name == execAlias {
+						references = true
+					}
+				}
+				return true
+			})
+			if !references {
+				continue
+			}
+			if byDir[dir] == nil {
+				byDir[dir] = map[string]bool{}
+			}
+			byDir[dir][fn.Name.Name] = true
+		}
+	}
+	return byDir
+}
+
 // repoRootForTest returns the absolute path of the repo root, derived from
 // this test file's own location (cmd/sciontool/commands/execaudit_test.go
 // is exactly three directories below it) rather than the working directory,
@@ -312,13 +374,33 @@ func unwrapParen(e ast.Expr) ast.Expr {
 	}
 }
 
+// isExecCmdType reports whether t is the exec.Cmd type or a pointer to it
+// (e.g. the type in `var c exec.Cmd` or `var c *exec.Cmd`).
+func isExecCmdType(t ast.Expr, execAlias string) bool {
+	if star, ok := t.(*ast.StarExpr); ok {
+		t = star.X
+	}
+	sel, ok := t.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	id, ok := sel.X.(*ast.Ident)
+	return ok && id.Name == execAlias && sel.Sel.Name == "Cmd"
+}
+
 // isExecCmdValue reports whether e directly constructs an exec.Cmd: a call
-// to exec.Command/CommandContext, or an exec.Cmd{...} composite literal
-// (bare, or address-of as `&exec.Cmd{...}`, the only form Go allows calling
-// a method on inline).
+// to exec.Command/CommandContext, a call to new(exec.Cmd), or an
+// exec.Cmd{...} composite literal (bare, or address-of as
+// `&exec.Cmd{...}`, the only form Go allows calling a method on inline).
+// It does not cover a zero-value `var c exec.Cmd` with no initializer —
+// findRawExecViolations' pass 1 handles that case separately, since it
+// needs the declaration's type, not its (absent) value.
 func isExecCmdValue(e ast.Expr, execAlias string) bool {
 	switch v := unwrapParen(e).(type) {
 	case *ast.CallExpr:
+		if id, ok := v.Fun.(*ast.Ident); ok && id.Name == "new" && len(v.Args) == 1 {
+			return isExecCmdType(v.Args[0], execAlias)
+		}
 		sel, ok := v.Fun.(*ast.SelectorExpr)
 		if !ok {
 			return false
@@ -334,12 +416,7 @@ func isExecCmdValue(e ast.Expr, execAlias string) bool {
 		}
 		return isExecCmdValue(v.X, execAlias)
 	case *ast.CompositeLit:
-		sel, ok := v.Type.(*ast.SelectorExpr)
-		if !ok {
-			return false
-		}
-		id, ok := sel.X.(*ast.Ident)
-		return ok && id.Name == execAlias && sel.Sel.Name == "Cmd"
+		return isExecCmdType(v.Type, execAlias)
 	default:
 		return false
 	}
@@ -364,23 +441,31 @@ func pidArgKey(e ast.Expr) (string, bool) {
 // findRawExecViolations parses a single Go source file and returns one
 // human-readable description per raw-exec violation found: a bare
 // os/exec.Cmd Run/Output/CombinedOutput call (on a tracked variable/field,
-// or chained directly off a freshly-constructed exec.Cmd value), or a
-// tracked exec.Cmd's Start() call that is also Wait()ed (directly, or via
-// its embedded os.Process.Wait(), which reaps the child the same way)
-// somewhere in the file without a matching procreap.Gated +
+// or chained directly off a freshly-constructed exec.Cmd value — including
+// a zero-value `var c exec.Cmd`/`var c *exec.Cmd` or `new(exec.Cmd)`, not
+// just exec.Command(...) or an `exec.Cmd{...}` literal), or a tracked
+// exec.Cmd's Start() call that is also Wait()ed (directly, or via its
+// embedded os.Process.Wait(), which reaps the child the same way) somewhere
+// in the file without a matching procreap.Gated +
 // RegisterManagedPID(<key>.Process.Pid, ...) / UnregisterManagedPID(<same
 // key>.Process.Pid, ...) for that same key.
 //
-// Two known precision gaps, both accepted for a parse-only heuristic: (1)
+// Known precision gaps, all accepted for a parse-only heuristic: (1)
 // procreap.Gated's presence is checked file-wide, not tied to a specific
 // Start() call, because correlating it to one would require inspecting the
 // body of the closure passed to Gated; RegisterManagedPID/UnregisterManagedPID
 // are checked per-key so a second, ungated exec.Cmd added to an already-
 // gated file is still caught. (2) An exec.Cmd returned from a helper
 // function (same-file or cross-package) rather than constructed inline is
-// not tracked at all — findSymbolAllowlistViolations catches the
-// cross-package version of this for the specific packages it restricts, but
-// a same-file `func mkCmd() *exec.Cmd { ... }` helper is not caught here.
+// not tracked at all — findSymbolAllowlistViolations and
+// findRiskyFuncCallViolations catch the cross-package and same-package
+// versions of this for the specific packages/functions they restrict, but a
+// same-file `func mkCmd() *exec.Cmd { ... }` helper local to a scanned file
+// is not caught here. (3) Start()/Wait() correlation is by textual key
+// within one file only: a struct field Start()ed in one file and Wait()ed
+// in another, or reached via two methods with different receiver names
+// (`a.cmd.Start()` in one, `b.cmd.Wait()` in the other, same underlying
+// field), is not tracked as the same key and so isn't caught.
 func findRawExecViolations(path string) ([]string, error) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, path, nil, 0)
@@ -416,6 +501,17 @@ func findRawExecViolations(path string) ([]string, error) {
 		case *ast.AssignStmt:
 			trackAssign(v.Lhs, v.Rhs)
 		case *ast.ValueSpec:
+			if len(v.Values) == 0 {
+				// `var c exec.Cmd` (or `var c *exec.Cmd`): a zero-value/nil
+				// declaration with no initializer expression for
+				// trackAssign to inspect — track by declared type instead.
+				if v.Type != nil && isExecCmdType(v.Type, execAlias) {
+					for _, name := range v.Names {
+						tracked[name.Name] = true
+					}
+				}
+				return true
+			}
 			lhs := make([]ast.Expr, len(v.Names))
 			for i, name := range v.Names {
 				lhs[i] = name
@@ -524,7 +620,10 @@ func findRawExecViolations(path string) ([]string, error) {
 // because some other file in it is only exempt from findRawExecViolations
 // via execAuditFileAllowlist) that isn't in that package's
 // execAuditSymbolAllowlist entry. A risky package with no entry at all means
-// nothing from it is approved yet.
+// nothing from it is approved yet. A dot or blank import of a risky package
+// is flagged outright, since a dot import (`import . ".../pkg/util"`) would
+// make its calls unqualified identifiers this function's alias-matching
+// can't see at all, silently defeating the restriction.
 func findSymbolAllowlistViolations(path string, risky map[string]bool) ([]string, error) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, path, nil, 0)
@@ -540,6 +639,14 @@ func findSymbolAllowlistViolations(path string, risky map[string]bool) ([]string
 		}
 		relDir := strings.TrimPrefix(p, moduleImportPrefix)
 		if !risky[relDir] {
+			continue
+		}
+
+		if imp.Name != nil && (imp.Name.Name == "." || imp.Name.Name == "_") {
+			violations = append(violations, fmt.Sprintf(
+				"%s: %q import of risky package %q defeats execAuditSymbolAllowlist's alias-based "+
+					"check; import it normally (qualified) instead",
+				fset.Position(imp.Pos()), imp.Name.Name, relDir))
 			continue
 		}
 
@@ -571,6 +678,45 @@ func findSymbolAllowlistViolations(path string, risky map[string]bool) ([]string
 			return true
 		})
 	}
+	return violations, nil
+}
+
+// findRiskyFuncCallViolations parses a single Go source file and flags any
+// unqualified call to a function named in riskyFuncs — the same-package
+// counterpart to findSymbolAllowlistViolations's cross-package check. Go
+// only resolves an unqualified identifier within the same package, so a
+// hit here means this file (which the caller has already confirmed is not
+// itself in execAuditFileAllowlist) calls a function that a sibling,
+// allowlisted file in this same directory defines and that itself touches
+// os/exec — the same shape of backdoor as calling into a risky imported
+// package, just within one package instead of across two.
+func findRiskyFuncCallViolations(path string, riskyFuncs map[string]bool) ([]string, error) {
+	if len(riskyFuncs) == 0 {
+		return nil, nil
+	}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, nil, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	var violations []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		id, ok := call.Fun.(*ast.Ident)
+		if !ok || !riskyFuncs[id.Name] {
+			return true
+		}
+		violations = append(violations, fmt.Sprintf(
+			"%s: calls %s(...), a same-package function defined in an execAuditFileAllowlist file "+
+				"that itself references os/exec; route through pkg/sciontool/procreap instead, or "+
+				"justify this call explicitly (see execAuditRiskyFuncNames)",
+			fset.Position(call.Pos()), id.Name))
+		return true
+	})
 	return violations, nil
 }
 
