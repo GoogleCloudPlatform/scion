@@ -53,6 +53,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/reapermetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -159,6 +160,20 @@ type ServerConfig struct {
 	SoftDeleteRetention time.Duration
 	// SoftDeleteRetainFiles controls whether workspace files are preserved during soft-delete.
 	SoftDeleteRetainFiles bool
+	// AsyncAgentLaunch is the non-blocking agent create kill switch. Off by
+	// default; a launch is non-blocking only when this is on AND the request
+	// opts in.
+	AsyncAgentLaunch bool
+	// LaunchTimeout is the whole-launch budget for an opted-in launch
+	// (design §3.10). Default 5 minutes. Below minLaunchTimeout the broker's
+	// fixed 20s abort margin (§3.10) would leave no time for a launch to
+	// actually run, so New() rejects it and falls back to the default.
+	LaunchTimeout time.Duration
+	// LaunchKeepaliveSeconds is the broker keepalive interval, in seconds
+	// (design §3.7). Today it only sets the reaper's staleness window (8x
+	// this value); it will also be sent to the broker as
+	// launchKeepaliveSeconds once the async dispatch path lands. Default 15.
+	LaunchKeepaliveSeconds int
 	// AdminMode restricts access to admin users only (maintenance mode).
 	AdminMode bool
 	// MaintenanceMessage is the custom message shown during admin mode.
@@ -395,9 +410,11 @@ func DefaultServerConfig() ServerConfig {
 			"X-Scion-Broker-ID", "X-Scion-Timestamp", "X-Scion-Nonce",
 			"X-Scion-Signature", "X-Scion-Signed-Headers",
 		},
-		CORSMaxAge:       3600,
-		StalledThreshold: 5 * time.Minute,
-		BrokerAuthConfig: DefaultBrokerAuthConfig(),
+		CORSMaxAge:             3600,
+		StalledThreshold:       5 * time.Minute,
+		BrokerAuthConfig:       DefaultBrokerAuthConfig(),
+		LaunchTimeout:          5 * time.Minute,
+		LaunchKeepaliveSeconds: 15,
 	}
 }
 
@@ -1068,6 +1085,12 @@ type Server struct {
 	// recorder; SetDispatchMetrics wires a real exporter.
 	dispatchMetrics dispatchmetrics.Recorder
 
+	// Launch reaper metrics recorder (design §3.7): tick-outcome counter,
+	// row-error counter, disarmed-time gauge. Nil until SetReaperMetrics is
+	// called; the reaper tick handler nil-checks before recording, matching
+	// dbMetrics/dispatchMetrics.
+	reaperMetrics reapermetrics.Recorder
+
 	// stopPoolSampler stops the DB pool-stats sampling goroutine on shutdown.
 	stopPoolSampler func()
 
@@ -1222,6 +1245,17 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 				"configured", cfg.StalledThreshold, "default", defaults.StalledThreshold)
 		}
 		cfg.StalledThreshold = defaults.StalledThreshold
+	}
+	const minLaunchTimeout = 30 * time.Second
+	if cfg.LaunchTimeout < minLaunchTimeout {
+		if cfg.LaunchTimeout != 0 {
+			slog.Warn("launch_timeout below minimum 30s, using default",
+				"configured", cfg.LaunchTimeout, "default", defaults.LaunchTimeout)
+		}
+		cfg.LaunchTimeout = defaults.LaunchTimeout
+	}
+	if cfg.LaunchKeepaliveSeconds <= 0 {
+		cfg.LaunchKeepaliveSeconds = defaults.LaunchKeepaliveSeconds
 	}
 
 	srvCtx, srvCancel := context.WithCancel(context.Background())
@@ -2854,6 +2888,13 @@ func (s *Server) SetDispatchMetrics(rec dispatchmetrics.Recorder) {
 	s.dispatchMetrics = rec
 }
 
+// SetReaperMetrics wires the launch reaper's metrics recorder (design §3.7).
+func (s *Server) SetReaperMetrics(rec reapermetrics.Recorder) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reaperMetrics = rec
+}
+
 // SetGCPTokenMetrics wires the GCP token metrics recorder.
 func (s *Server) SetGCPTokenMetrics(m GCPTokenMetricsRecorder) {
 	s.mu.Lock()
@@ -4354,6 +4395,12 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 // scheduler, this eliminates the thundering-herd pattern that was causing
 // 9-54 s API latency spikes.
 func (s *Server) registerSchedulerHandlers() {
+	// Async-create launch reaper (design §3.7): its own dedicated ticker,
+	// registered unconditionally — see
+	// registerLaunchReaper's doc comment for its per-tick cost with the
+	// feature off.
+	s.registerLaunchReaper()
+
 	s.scheduler.RegisterRecurringSingleton("agent-heartbeat-timeout", 5, store.LockAgentHeartbeatTimeout, s.agentHeartbeatTimeoutHandler())
 	s.scheduler.RegisterRecurringSingleton("agent-stalled-detection", 5, store.LockAgentStalledDetection, s.agentStalledDetectionHandler())
 	if s.config.SoftDeleteRetention > 0 {

@@ -960,6 +960,15 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			if hub.CORS != nil {
 				keys = append(keys, "server.hub.cors")
 			}
+			if hub.AsyncAgentLaunch != nil {
+				keys = append(keys, "server.hub.async_agent_launch")
+			}
+			if hub.LaunchTimeout != "" {
+				keys = append(keys, "server.hub.launch_timeout")
+			}
+			if hub.LaunchKeepaliveSeconds != nil {
+				keys = append(keys, "server.hub.launch_keepalive_seconds")
+			}
 		}
 		if srv.Auth != nil {
 			auth := srv.Auth

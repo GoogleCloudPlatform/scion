@@ -180,6 +180,14 @@ type CreateAgentRequest struct {
 	// GCPIdentity specifies the GCP identity assignment for the agent.
 	// Controls metadata server behavior and optional service account binding.
 	GCPIdentity *GCPIdentityAssignment `json:"gcp_identity,omitempty"`
+	// AcceptAsyncLaunch is the client's non-blocking-launch opt-in (design
+	// §3.2). Persisted as store.Agent.LaunchAsyncOptIn because env finalize
+	// and workspace finalize launch in later requests. This field is only
+	// accepted and persisted here: it has no effect until hub.asyncAgentLaunch
+	// and the dispatch path that reads it both exist. Scheduled creates do
+	// not set it today; when they adopt async launch, the scheduler will set
+	// it server-side rather than from client input.
+	AcceptAsyncLaunch bool `json:"acceptAsyncLaunch,omitempty"`
 }
 
 // GCPIdentityAssignment specifies GCP identity configuration for agent creation.
@@ -1236,6 +1244,10 @@ func (s *Server) createAgentInProject(
 		CreatedBy:       createdBy,
 		OwnerID:         createdBy,
 		Ancestry:        ancestry,
+		// Async agent create (design §3.2): persisted so a later env/workspace
+		// finalize request can still see the client's opt-in. No dispatch path
+		// reads this yet; the async dispatch path will.
+		LaunchAsyncOptIn: req.AcceptAsyncLaunch,
 	}
 
 	// Store human-friendly slug instead of UUID for display
@@ -2106,7 +2118,10 @@ func (s *Server) enrichAgents(ctx context.Context, agents []store.Agent) {
 	}
 
 	// Enrich agents
+	now := time.Now()
 	for i := range agents {
+		// The client-facing `launch` view (design §3.2), computed fresh per response.
+		agents[i].Launch = store.ComputeAgentLaunch(&agents[i], now)
 		// Populate harness config from applied config
 		if agents[i].HarnessConfig == "" && agents[i].AppliedConfig != nil && agents[i].AppliedConfig.HarnessConfig != "" {
 			agents[i].HarnessConfig = agents[i].AppliedConfig.HarnessConfig
@@ -2141,6 +2156,11 @@ func (s *Server) enrichAgent(ctx context.Context, agent *store.Agent, project *s
 	if agent == nil {
 		return
 	}
+
+	// The client-facing `launch` view (design §3.2), computed fresh at
+	// response time so remainingSeconds reflects "now", not whenever the row
+	// was last written.
+	agent.Launch = store.ComputeAgentLaunch(agent, time.Now())
 
 	// Populate harness config and auth from applied config
 	if agent.AppliedConfig != nil {
@@ -2823,15 +2843,54 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 	s.cancelScheduledEventsForAgent(ctx, agent)
 
 	if softDelete {
-		// Soft delete: mark agent as deleted with timestamp
+		// alreadyDeleted is set when the version-conflict retry below finds a
+		// concurrent soft delete already won the race: PublishAgentDeleted
+		// must fire at most once per delete.
+		var alreadyDeleted bool
+
+		// Soft delete: mark agent as deleted with timestamp.
+		//
+		// Delete during an in-flight launch is expected: the conflict window
+		// is one terminal write (a report or the reaper ending the launch
+		// between this handler's read and its write). Retry once with a
+		// fresh read rather than surfacing a 409 to the caller for what is,
+		// from their perspective, an ordinary delete. This retry is not
+		// specific to launch conflicts: it fires on any concurrent version
+		// conflict on this row.
 		agent.Phase = string(state.PhaseStopped)
 		agent.DeletedAt = now
 		agent.Updated = now
 		if err := s.store.UpdateAgent(ctx, agent); err != nil {
-			writeErrorFromErr(w, err, "")
-			return
+			if !errors.Is(err, store.ErrVersionConflict) {
+				writeErrorFromErr(w, err, "")
+				return
+			}
+			fresh, getErr := s.store.GetAgent(ctx, agent.ID)
+			if getErr != nil {
+				writeErrorFromErr(w, getErr, "")
+				return
+			}
+			if !fresh.DeletedAt.IsZero() {
+				// Another concurrent soft delete already won: adopt its
+				// DeletedAt rather than overwriting it (which would shift the
+				// retention/purge window) and skip publishing a second
+				// AgentDeleted event for the same delete.
+				agent = fresh
+				alreadyDeleted = true
+			} else {
+				fresh.Phase = string(state.PhaseStopped)
+				fresh.DeletedAt = now
+				fresh.Updated = now
+				if err := s.store.UpdateAgent(ctx, fresh); err != nil {
+					writeErrorFromErr(w, err, "")
+					return
+				}
+				agent = fresh
+			}
 		}
-		s.events.PublishAgentDeleted(ctx, agent.ID, agent.ProjectID)
+		if !alreadyDeleted {
+			s.events.PublishAgentDeleted(ctx, agent.ID, agent.ProjectID)
+		}
 	} else {
 		// Hard delete: publish deletion event BEFORE removing the record so
 		// notification subscribers can be resolved while subscriptions still exist.

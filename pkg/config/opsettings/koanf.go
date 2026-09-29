@@ -68,6 +68,11 @@ var layer0Prefixes = []string{
 	"server.plugins",
 	// Native chat — routes are registered at startup, so toggling it needs a restart.
 	"server.native_chat",
+	// Async agent create (design §3.7) — the reaper's dedicated scheduler
+	// ticker and the clamp on LaunchTimeout are both established at startup.
+	"server.hub.async_agent_launch",
+	"server.hub.launch_timeout",
+	"server.hub.launch_keepalive_seconds",
 }
 
 // isLayer0Key reports whether the given koanf key belongs to the Layer-0

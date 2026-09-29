@@ -231,6 +231,27 @@ func (s *Server) handleRuntimeBrokerRoutes(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// The broker->Hub launch report (design §3.2), POST
+	// .../agents/{agentId}/launch.
+	if agentPath, ok := strings.CutPrefix(subPath, "agents/"); ok {
+		if agentID, ok := strings.CutSuffix(agentPath, "/launch"); ok {
+			// Matches the sibling path-segment routing: an id that is empty
+			// or itself contains a "/" (an extra path segment, e.g.
+			// .../agents/x/y/launch) is 404, not passed through to the
+			// handler to fail on some other validation.
+			if agentID == "" || strings.Contains(agentID, "/") {
+				NotFound(w, "Agent")
+				return
+			}
+			if r.Method != http.MethodPost {
+				MethodNotAllowed(w, http.MethodPost)
+				return
+			}
+			s.handleAgentLaunchReport(w, r, brokerID, agentID)
+			return
+		}
+	}
+
 	// Delegate to the original handler for other operations
 	s.handleRuntimeBrokerByIDInternal(w, r, brokerID, subPath)
 }
