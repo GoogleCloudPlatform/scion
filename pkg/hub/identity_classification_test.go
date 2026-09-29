@@ -47,9 +47,11 @@ func (m *unclassifiedMockIdentity) Type() string { return "unclassified_mock_typ
 
 // unattestedMockAgentIdentity implements AgentIdentity in full, including an
 // ancestry chain that names a real user, but deliberately does NOT implement
-// localAncestryProvenanceIdentity. It exists to prove that ancestry attestation
-// requires the explicit marker rather than following from Type() == "agent" or
-// from carrying a plausible-looking ancestry chain.
+// localAncestryProvenanceIdentity or explicitIdentityClassification. It
+// exists to prove that both ancestry attestation and principal/credential
+// classification require their explicit markers rather than following from
+// Type() == "agent", a plausible-looking ancestry chain, or satisfying the
+// AgentIdentity interface's method set.
 type unattestedMockAgentIdentity struct {
 	id        string
 	projectID string
@@ -70,18 +72,32 @@ func (m *unattestedMockAgentIdentity) OriginUserID() string {
 	return ""
 }
 
+// userShapedMockIdentity is an Identity with the minimal ID()/Type() method
+// set, returning Type() == "user", but it is not *AuthenticatedUser (or any
+// other concrete type principalContextForIdentity/credentialContextForIdentity
+// recognize) and does not implement explicitIdentityClassification. It exists
+// to prove classification keys on concrete type: a caller-controlled type
+// returning a familiar-looking Type() string must not be admitted as if it
+// were the reviewed type that string names.
+type userShapedMockIdentity struct {
+	id string
+}
+
+func (m *userShapedMockIdentity) ID() string   { return m.id }
+func (m *userShapedMockIdentity) Type() string { return "user" }
+
 // =============================================================================
-// T-ID-1: source-scan drift guard
+// Source-scan drift guard
 // =============================================================================
 
-// identityInventoryExpectation is the D.1 inventory of every non-test pkg/hub
-// concrete type that implements Identity (ruling
-// D/notes/ruling-identity-fail-closed.md), keyed by the type's declared name.
-// attested records AncestryIsHubAttested's planned outcome. A new identity
-// type added to non-test pkg/hub source without a row here — or without a
-// localAncestryProvenance() implementation matching its row — fails
-// TestIdentityClassification_EveryTypeHasExplicitOutcome/SourceScan. That is
-// the point: it forces classification to be a deliberate, reviewed edit.
+// identityInventoryExpectation is the reviewed inventory of every non-test
+// pkg/hub concrete type that implements Identity, keyed by the type's
+// declared name. attested records AncestryIsHubAttested's planned outcome. A
+// new identity type added to non-test pkg/hub source without a row here — or
+// without a localAncestryProvenance() implementation matching its row —
+// fails TestIdentityClassification_EveryTypeHasExplicitOutcome/SourceScan.
+// That is the point: it forces classification to be a deliberate, reviewed
+// edit. See the AST-scan limitations noted on scanIdentitySource below.
 var identityInventoryExpectation = map[string]bool{
 	"AuthenticatedUser":        true,
 	"ScopedUserIdentity":       true,
@@ -125,6 +141,21 @@ func exprTypeName(expr ast.Expr) string {
 // scanIdentitySource parses every non-test *.go file in the current
 // directory (package hub's own directory, since tests run with that as the
 // working directory) and extracts method and embedded-field information.
+//
+// This is an AST-level scan, not a go/types-based one: it never resolves
+// imports or type-checks, so it detects an Identity implementer only through
+// a directly declared ID()+Type() method pair, or by embedding a field named
+// literally "UserIdentity", "AgentIdentity", or "Identity" declared in this
+// package. It has two known blind spots as a result: (1) a type that
+// satisfies Identity only by embedding some other struct that itself embeds
+// one of those interfaces (double indirection) is not detected, since the
+// scan does not follow embedded structs transitively; and (2) a method
+// declared in a different package (or promoted from an interface type this
+// scan doesn't recognize by name) is invisible to it. Both are acceptable for
+// today's inventory, where every production Identity implementer declares
+// ID()+Type() directly or embeds one of the three interfaces above, but a
+// refactor that introduces either pattern would silently escape this guard —
+// it would not fail loudly, it would simply stop checking the new type.
 func scanIdentitySource(t *testing.T) identitySourceInventory {
 	t.Helper()
 
@@ -215,14 +246,16 @@ func (inv identitySourceInventory) isFederated(typeName string) bool {
 	return inv.methods[typeName]["IssuerURL"]
 }
 
-// TestIdentityClassification_EveryTypeHasExplicitOutcome is the D.1 T-ID-1/T-ID-2
-// pair: a source-level drift guard (subtest SourceScan) that fails if a new
-// non-test pkg/hub Identity type appears without a reviewed row in
+// TestIdentityClassification_EveryTypeHasExplicitOutcome pairs a
+// source-level drift guard (subtest SourceScan) that fails if a new non-test
+// pkg/hub Identity type appears without a reviewed row in
 // identityInventoryExpectation or without localAncestryProvenance matching
-// that row, plus a runtime table (subtest ClassifierOutcomes) that exercises
+// that row, with a runtime table (subtest ClassifierOutcomes) that exercises
 // principalContextForIdentity, credentialContextForIdentity and
 // AncestryIsHubAttested against a constructed instance of every inventory
-// row, plus nil and an unrecognized concrete type.
+// row, plus nil and two kinds of unrecognized identity: a concrete type this
+// package has never reviewed, and a type whose Type() string merely
+// resembles a recognized one without being the type that string names.
 func TestIdentityClassification_EveryTypeHasExplicitOutcome(t *testing.T) {
 	t.Run("SourceScan", func(t *testing.T) {
 		inv := scanIdentitySource(t)
@@ -237,8 +270,7 @@ func TestIdentityClassification_EveryTypeHasExplicitOutcome(t *testing.T) {
 			wantNames = append(wantNames, name)
 		}
 		assert.ElementsMatch(t, wantNames, foundNames,
-			"a new non-test pkg/hub Identity type (or a removed one) needs a reviewed "+
-				"row in identityInventoryExpectation, per D/notes/ruling-identity-fail-closed.md")
+			"a new non-test pkg/hub Identity type (or a removed one) needs a reviewed row in identityInventoryExpectation")
 
 		for name, wantAttested := range identityInventoryExpectation {
 			if !found[name] {
@@ -360,10 +392,27 @@ func TestIdentityClassification_EveryTypeHasExplicitOutcome(t *testing.T) {
 				wantAttested:       false,
 			},
 			{
-				name:               "agent-shaped type without the ancestry marker",
+				// A concrete type this package has never reviewed is
+				// unclassified — including principal/credential kind — even
+				// when it fully implements AgentIdentity and carries a
+				// plausible-looking ancestry chain naming a real user. Only
+				// the explicit marker (or the reviewed concrete type)
+				// classifies.
+				name:               "agent-shaped type without the ancestry or classification marker",
 				identity:           &unattestedMockAgentIdentity{id: tid("classify-unattested-agent"), projectID: tid("classify-project"), ancestry: []string{tid("classify-user")}},
-				wantPrincipalKind:  PrincipalKindAgent,
-				wantCredentialKind: CredentialKindAgentJWT,
+				wantPrincipalKind:  "",
+				wantCredentialKind: "",
+				wantAttested:       false,
+			},
+			{
+				// A minimal Identity returning Type() == "user" is not
+				// thereby treated as an AuthenticatedUser: classification is
+				// keyed on concrete type, not on a string a caller's type
+				// happens to return.
+				name:               "user-shaped type with only Type()==\"user\"",
+				identity:           &userShapedMockIdentity{id: tid("classify-user-shaped")},
+				wantPrincipalKind:  "",
+				wantCredentialKind: "",
 				wantAttested:       false,
 			},
 		}
@@ -383,7 +432,7 @@ func TestIdentityClassification_EveryTypeHasExplicitOutcome(t *testing.T) {
 }
 
 // =============================================================================
-// T-ID-4/T-ID-5: Decide fail-closed classification
+// Decide fail-closed classification
 // =============================================================================
 
 // countingAuditEmitter counts DecisionAuditEmitter calls without touching a
@@ -397,12 +446,13 @@ func (e *countingAuditEmitter) EmitDecisionAudit(context.Context, *store.Decisio
 	e.calls++
 }
 
-// TestDecide_UnrecognizedDerivedPrincipalKindDenied pins T-ID-4: Decide denies
-// a nil identity, an identity of an unrecognized concrete type, and an
-// agent-shaped identity that hasn't opted into ancestry attestation carries no
-// special exemption here — all deny with "unrecognized principal kind" because
-// classification, not attestation, gates entry. Exactly one audit record is
-// emitted per call.
+// TestDecide_UnrecognizedDerivedPrincipalKindDenied: Decide denies a nil
+// identity, an identity of an unrecognized concrete type, an agent-shaped
+// identity that hasn't opted into ancestry attestation or classification, and
+// a user-shaped identity whose only resemblance to AuthenticatedUser is its
+// Type() string — all deny with "unrecognized principal kind" because
+// classification, not attestation and not Type(), gates entry. Exactly one
+// audit record is emitted per call.
 func TestDecide_UnrecognizedDerivedPrincipalKindDenied(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -410,6 +460,8 @@ func TestDecide_UnrecognizedDerivedPrincipalKindDenied(t *testing.T) {
 	}{
 		{"nil identity", nil},
 		{"unrecognized concrete type", &unclassifiedMockIdentity{id: tid("decide-unknown")}},
+		{"agent-shaped type without the ancestry or classification marker", &unattestedMockAgentIdentity{id: tid("decide-unattested-agent"), projectID: tid("decide-project"), ancestry: []string{tid("decide-user")}}},
+		{"user-shaped type with only Type()==\"user\"", &userShapedMockIdentity{id: tid("decide-user-shaped")}},
 	}
 
 	for _, tc := range cases {
@@ -430,25 +482,31 @@ func TestDecide_UnrecognizedDerivedPrincipalKindDenied(t *testing.T) {
 	}
 }
 
-// TestDecide_SuppliedKindCannotReclassifyIdentity pins T-ID-5. A supplied
-// Principal.Kind that does not match the identity's own classification is
-// always denied: an unrecognized identity can never be upgraded into a
-// recognized one by supplied context. A supplied Credential.Kind is denied
-// only in the one direction that would discard the caveats it is supposed
-// to enforce: a *ScopedUserIdentity (whose own classification is UAT)
-// cannot be presented with a different supplied credential kind, because
-// both the step 1 UAT gate and the kernel's credential_scope restriction
-// apply their UAT-specific caveats only when Credential.Kind ==
-// CredentialKindUAT. Layering a narrower CredentialContext onto some other
-// recognized identity — as other pre-existing tests in this package do, to
-// drive the credential_scope restriction without constructing a full
-// ScopedUserIdentity — is not a mismatch this rule rejects, because it can
-// only narrow authority.
+// TestDecide_SuppliedKindCannotReclassifyIdentity covers rule B
+// (ruling-identity-fail-closed.md, 06:03Z): a supplied Principal.Kind that
+// does not match the identity's own classification always denies — an
+// unrecognized identity can never be upgraded into a recognized one by
+// supplied context. A supplied Credential.Kind is admitted only through the
+// explicit compatibility predicate (suppliedCredentialCompatible): equal
+// kinds, or a local user's own interactive classification narrowed to UAT.
+// Every other combination denies, including every non-user principal
+// presented with a kind other than its own, dev presented with UAT (dev is
+// deliberately not in the exception — a used UAT represents its local user
+// owner, not dev's token-issuing power), and a recognized identity presented
+// with a supplied credential kind that isn't one of the enum's recognized
+// values at all (distinct from a same-enum mismatch: see the "unrecognized
+// credential kind" cases below). Broker on-behalf-of is covered separately
+// in the broker OBO tests, since it depends on context provenance this table
+// does not set up.
 func TestDecide_SuppliedKindCannotReclassifyIdentity(t *testing.T) {
 	unknown := &unclassifiedMockIdentity{id: tid("mismatch-unknown")}
+	interactiveUser := NewAuthenticatedUser(tid("mismatch-interactive-user"), "u@example.com", "U", "member", "cli")
 	scopedUAT := NewScopedUserIdentity(
 		NewAuthenticatedUser(tid("mismatch-uat-user"), "u@example.com", "U", "member", "cli"),
 		tid("mismatch-project"), []string{"agent:read"})
+	devUser := NewDevUser(DevUserConfig{Username: "dev", DisplayName: "Dev", Email: "dev@localhost"})
+	agentJWT := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: "mismatch-agent"}}}
+	fedUser := NewFederatedUserIdentity("https://issuer.example", "mismatch-fed", "f@example.com", "F", "member", nil)
 
 	cases := []struct {
 		name     string
@@ -465,10 +523,11 @@ func TestDecide_SuppliedKindCannotReclassifyIdentity(t *testing.T) {
 			wantDeny: "principal kind does not match identity",
 		},
 		{
-			// The identity's own derived credential kind is empty (unrecognized),
-			// not UAT, so the credential-mismatch check does not apply here — this
-			// denies via the unrecognized-principal-kind rejection instead, which
-			// fires first and denies regardless of the supplied credential.
+			// The identity's own derived principal kind is empty
+			// (unrecognized), so the principal-mismatch check above never
+			// fires (no supplied Principal.Kind here) and the
+			// unrecognized-kind rejection denies first, regardless of the
+			// supplied credential.
 			name: "unknown identity with supplied interactive credential kind",
 			request: AuthzRequest{
 				Principal:  PrincipalContext{Identity: unknown},
@@ -488,6 +547,66 @@ func TestDecide_SuppliedKindCannotReclassifyIdentity(t *testing.T) {
 			},
 			wantDeny: "credential kind does not match identity",
 		},
+		{
+			name: "interactive user with an unrecognized supplied credential kind string",
+			request: AuthzRequest{
+				Principal:  PrincipalContext{Identity: interactiveUser},
+				Credential: CredentialContext{Kind: CredentialKind("bogus")},
+				Resource:   Resource{Type: "agent", ID: tid("mismatch-target")},
+				Action:     ActionRead,
+			},
+			wantDeny: "unrecognized credential kind",
+		},
+		{
+			name: "dev identity with supplied UAT credential kind (dev is not in the exception)",
+			request: AuthzRequest{
+				Principal:  PrincipalContext{Identity: devUser},
+				Credential: CredentialContext{Kind: CredentialKindUAT},
+				Resource:   Resource{Type: "agent", ID: tid("mismatch-target")},
+				Action:     ActionRead,
+			},
+			wantDeny: "credential kind does not match identity",
+		},
+		{
+			name: "agent identity with supplied UAT credential kind",
+			request: AuthzRequest{
+				Principal:  PrincipalContext{Identity: agentJWT},
+				Credential: CredentialContext{Kind: CredentialKindUAT},
+				Resource:   Resource{Type: "agent", ID: tid("mismatch-target")},
+				Action:     ActionRead,
+			},
+			wantDeny: "credential kind does not match identity",
+		},
+		{
+			name: "agent identity with supplied broker credential kind",
+			request: AuthzRequest{
+				Principal:  PrincipalContext{Identity: agentJWT},
+				Credential: CredentialContext{Kind: CredentialKindBroker, ID: agentJWT.ID(), Type: "broker"},
+				Resource:   Resource{Type: "agent", ID: tid("mismatch-target")},
+				Action:     ActionRead,
+			},
+			wantDeny: "credential kind does not match identity",
+		},
+		{
+			name: "federated user identity with supplied interactive credential kind",
+			request: AuthzRequest{
+				Principal:  PrincipalContext{Identity: fedUser},
+				Credential: CredentialContext{Kind: CredentialKindInteractive},
+				Resource:   Resource{Type: "agent", ID: tid("mismatch-target")},
+				Action:     ActionRead,
+			},
+			wantDeny: "credential kind does not match identity",
+		},
+		{
+			name: "interactive user with supplied broker credential kind but no OBO context",
+			request: AuthzRequest{
+				Principal:  PrincipalContext{Identity: interactiveUser},
+				Credential: CredentialContext{Kind: CredentialKindBroker, ID: "some-broker", Type: "broker"},
+				Resource:   Resource{Type: "agent", ID: tid("mismatch-target")},
+				Action:     ActionRead,
+			},
+			wantDeny: "credential kind does not match identity",
+		},
 	}
 
 	for _, tc := range cases {
@@ -500,11 +619,127 @@ func TestDecide_SuppliedKindCannotReclassifyIdentity(t *testing.T) {
 	}
 }
 
+// TestDecide_EntryDenyAuditsDerivedClassification pins R1.3/R3: every entry
+// deny decorates the Decision, and the emitted audit record, with the
+// DERIVED principal and credential classification — never the caller's
+// rejected supplied claim — and emits exactly one audit record.
+func TestDecide_EntryDenyAuditsDerivedClassification(t *testing.T) {
+	interactiveUser := NewAuthenticatedUser(tid("audit-derived-user"), "u@example.com", "U", "member", "cli")
+	scopedUAT := NewScopedUserIdentity(interactiveUser, tid("audit-derived-project"), []string{"agent:read"})
+
+	cases := []struct {
+		name              string
+		request           AuthzRequest
+		wantReason        string
+		wantPrincipalKind PrincipalKind
+		wantCredKind      string
+	}{
+		{
+			name: "principal kind mismatch decorates the derived kind, not the supplied one",
+			request: AuthzRequest{
+				Principal: PrincipalContext{Kind: PrincipalKindAgent, Identity: interactiveUser},
+				Resource:  Resource{Type: "agent", ID: tid("audit-target")},
+				Action:    ActionRead,
+			},
+			wantReason:        "principal kind does not match identity",
+			wantPrincipalKind: PrincipalKindUser,
+			wantCredKind:      string(CredentialKindInteractive),
+		},
+		{
+			name: "credential kind mismatch decorates the derived kind, not the supplied one",
+			request: AuthzRequest{
+				Principal:  PrincipalContext{Identity: scopedUAT},
+				Credential: CredentialContext{Kind: CredentialKindInteractive},
+				Resource:   Resource{Type: "agent", ID: tid("audit-target")},
+				Action:     ActionRead,
+			},
+			wantReason:        "credential kind does not match identity",
+			wantPrincipalKind: PrincipalKindUser,
+			wantCredKind:      string(CredentialKindUAT),
+		},
+		{
+			name: "unrecognized identity decorates the empty derived kind",
+			request: AuthzRequest{
+				Principal: PrincipalContext{Identity: &unclassifiedMockIdentity{id: tid("audit-unknown")}},
+				Resource:  Resource{Type: "agent", ID: tid("audit-target")},
+				Action:    ActionRead,
+			},
+			wantReason:        "unrecognized principal kind",
+			wantPrincipalKind: "",
+			wantCredKind:      "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			emitter := &countingAuditEmitter{}
+			authz := &AuthzService{decisionAuditEmitter: emitter}
+			decision := authz.Decide(context.Background(), tc.request)
+			assert.False(t, decision.Allowed)
+			assert.Equal(t, tc.wantReason, decision.Reason)
+			assert.Equal(t, tc.wantPrincipalKind, decision.PrincipalKind, "decision must carry the derived principal kind")
+			assert.Equal(t, tc.wantCredKind, decision.CredentialKind, "decision must carry the derived credential kind")
+			assert.Equal(t, 1, emitter.calls, "exactly one audit record must be emitted")
+		})
+	}
+}
+
+// TestSuppliedCredentialCompatible_PairMatrix is the full compatibility
+// matrix behind Decide's credential-mismatch check: every derived
+// (PrincipalKind, CredentialKind) pair the classifiers can produce, crossed
+// with every recognized CredentialKind plus one unrecognized string,
+// asserting exactly which supplied kind may stand in for the identity's own
+// derived classification (rule B, ruling-identity-fail-closed.md 06:03Z).
+// The broker on-behalf-of exception (08:04Z) is exercised separately in the
+// broker OBO tests, since it depends on ctx provenance this matrix's plain
+// context.Background() never sets: with no OBO markers, "user/interactive"
+// row's "broker" column below is (correctly) not admitted, matching "a
+// plain user + broker credential without the OBO marker denies".
+func TestSuppliedCredentialCompatible_PairMatrix(t *testing.T) {
+	suppliedKinds := []CredentialKind{
+		CredentialKindInteractive, CredentialKindUAT, CredentialKindAgentJWT,
+		CredentialKindFederation, CredentialKindBroker, CredentialKindDev,
+		CredentialKind("bogus"),
+	}
+
+	rows := []struct {
+		name      string
+		principal PrincipalKind
+		derived   CredentialKind
+		// admitted names every supplied kind that must be compatible IN
+		// ADDITION to the derived kind itself (always compatible via
+		// equality, asserted unconditionally below).
+		admitted map[CredentialKind]bool
+	}{
+		{"user/interactive (AuthenticatedUser): the narrowing overlay admits UAT only", PrincipalKindUser, CredentialKindInteractive, map[CredentialKind]bool{CredentialKindUAT: true}},
+		{"user/uat (ScopedUserIdentity): a real UAT follows equality only, not the exception", PrincipalKindUser, CredentialKindUAT, nil},
+		{"dev/dev (DevUser): dev is deliberately excluded from the UAT exception", PrincipalKindDev, CredentialKindDev, nil},
+		{"agent/agent_jwt", PrincipalKindAgent, CredentialKindAgentJWT, nil},
+		{"federated_user/federation", PrincipalKindFederatedUser, CredentialKindFederation, nil},
+		{"federated_agent/federation", PrincipalKindFederatedAgent, CredentialKindFederation, nil},
+		{"federated_service/federation", PrincipalKindFederatedService, CredentialKindFederation, nil},
+		{"broker/broker", PrincipalKindBroker, CredentialKindBroker, nil},
+		{"unknown (empty principal/empty credential): any supplied kind denies", PrincipalKind(""), CredentialKind(""), nil},
+	}
+
+	ctx := context.Background() // no broker/OBO markers set: see the broker OBO tests for that dimension.
+
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			for _, supplied := range suppliedKinds {
+				want := supplied == row.derived || row.admitted[supplied]
+				got := suppliedCredentialCompatible(ctx, row.principal, CredentialContext{Kind: row.derived}, CredentialContext{Kind: supplied})
+				assert.Equalf(t, want, got, "principal=%q derived=%q supplied=%q", row.principal, row.derived, supplied)
+			}
+		})
+	}
+}
+
 // =============================================================================
-// T-ID-6: session-only gates deny non-session credentials
+// Session-only gates deny non-session credentials
 // =============================================================================
 
-// TestSessionGates_DenyNonSessionCredentials pins T-ID-6: the token-management
+// TestSessionGates_DenyNonSessionCredentials: the token-management
 // and project-deletion session gates deny an unrecognized identity exactly as
 // they deny a UAT or agent JWT today, and keep admitting interactive/dev
 // sessions unchanged.
@@ -563,10 +798,80 @@ func TestSessionGates_DenyNonSessionCredentials(t *testing.T) {
 }
 
 // =============================================================================
-// T-ID-7: ancestry attestation requires local provenance
+// Ancestry attestation requires local provenance
 // =============================================================================
 
-// TestAncestryAttestation_RequiresLocalProvenance pins T-ID-7: an identity
+// federatedWithAncestryMarkerTestIdentity implements BOTH FederatedIdentity
+// (IssuerURL) and localAncestryProvenanceIdentity. It exists only to prove
+// AncestryIsHubAttested's ordering: the FederatedIdentity rejection must run
+// BEFORE the marker check, so this type — which would otherwise attest via
+// the marker — is still denied. Nothing in production or in the other test
+// fakes exercises this order (no existing fake is both federated and
+// marked), so a regression that reordered the two checks would pass
+// unnoticed without this type.
+type federatedWithAncestryMarkerTestIdentity struct {
+	id       string
+	ancestry []string
+}
+
+func (f *federatedWithAncestryMarkerTestIdentity) ID() string                    { return f.id }
+func (f *federatedWithAncestryMarkerTestIdentity) Type() string                  { return "federated_agent" }
+func (f *federatedWithAncestryMarkerTestIdentity) IssuerURL() string             { return "https://remote-hub.example.com" }
+func (f *federatedWithAncestryMarkerTestIdentity) ProjectID() string             { return "" }
+func (f *federatedWithAncestryMarkerTestIdentity) Scopes() []AgentTokenScope     { return nil }
+func (f *federatedWithAncestryMarkerTestIdentity) HasScope(AgentTokenScope) bool { return false }
+func (f *federatedWithAncestryMarkerTestIdentity) Ancestry() []string            { return f.ancestry }
+func (f *federatedWithAncestryMarkerTestIdentity) TokenID() string               { return "" }
+func (f *federatedWithAncestryMarkerTestIdentity) OriginUserID() string {
+	if len(f.ancestry) > 0 {
+		return f.ancestry[0]
+	}
+	return ""
+}
+
+// localAncestryProvenance is implemented deliberately, to prove the
+// FederatedIdentity check still wins even when a type also carries this
+// marker — which no real production or other test type ever does together.
+func (f *federatedWithAncestryMarkerTestIdentity) localAncestryProvenance() ancestryProvenance {
+	return ancestryProvenanceAgentJWT
+}
+
+// TestAncestryIsHubAttested_FederatedRejectionPrecedesMarkerCheck kills the
+// mutation where AncestryIsHubAttested's marker check runs before (or
+// instead of) the FederatedIdentity rejection: a type that is both federated
+// and carries the ancestry marker must still be denied.
+func TestAncestryIsHubAttested_FederatedRejectionPrecedesMarkerCheck(t *testing.T) {
+	creatorID := tid("marker-order-creator")
+	identity := &federatedWithAncestryMarkerTestIdentity{
+		id: tid("marker-order-agent"), ancestry: []string{creatorID},
+	}
+
+	require.False(t, AncestryIsHubAttested(identity),
+		"a federated identity must be rejected before its ancestry marker is ever consulted")
+
+	result := EvaluateProgenyGrant(identity, RelProgenySecretRead, "secret-123", "secret", creatorID, true)
+	assert.False(t, result.Allowed, "a federated identity's ancestry marker must not earn a progeny relationship grant")
+}
+
+// TestAncestryIsHubAttested_ScopedUserIdentityDelegatesToWrappedIdentity
+// pins O1: a *ScopedUserIdentity is not attested unconditionally — if the
+// UserIdentity it wraps is itself federated, AncestryIsHubAttested must
+// still deny it, even though IssuerURL is not promoted through the
+// UserIdentity interface and so the top-level FederatedIdentity check alone
+// cannot see it. Production never constructs this combination today
+// (useraccesstoken.go only wraps *AuthenticatedUser), but the predicate must
+// not depend on that being true forever.
+func TestAncestryIsHubAttested_ScopedUserIdentityDelegatesToWrappedIdentity(t *testing.T) {
+	wrappedLocal := NewAuthenticatedUser(tid("scoped-wraps-local"), "u@example.com", "U", "member", "cli")
+	scopedLocal := NewScopedUserIdentity(wrappedLocal, tid("scoped-wraps-project"), []string{"agent:read"})
+	assert.True(t, AncestryIsHubAttested(scopedLocal), "a UAT wrapping a local user stays attested")
+
+	wrappedFederated := NewFederatedUserIdentity("https://issuer.example", "scoped-wraps-federated", "f@example.com", "F", "member", nil)
+	scopedFederated := NewScopedUserIdentity(wrappedFederated, tid("scoped-wraps-project"), []string{"agent:read"})
+	assert.False(t, AncestryIsHubAttested(scopedFederated), "a UAT wrapping a federated identity must not be attested")
+}
+
+// TestAncestryAttestation_RequiresLocalProvenance: an identity
 // that merely returns Type() == "agent" and carries an ancestry chain naming
 // a real user is not attested without the explicit marker, and a relationship
 // grant consumer denies it exactly as it denies a federated agent — for a
@@ -608,4 +913,48 @@ func TestAncestryAttestation_RequiresLocalProvenance(t *testing.T) {
 	// lack of attestation, not for some unrelated reason.
 	allowed := EvaluateProgenyGrant(attested, RelProgenySecretRead, "secret-123", "secret", creatorID, true)
 	assert.True(t, allowed.Allowed, "an attested agent with matching ancestry should earn the progeny grant")
+}
+
+// TestDecide_UnmarkedAgentMockDeniesBeforeRelationshipOrDelegationChecks
+// closes the gap the review found: TestAncestryAttestation_RequiresLocalProvenance
+// exercised only EvaluateProgenyGrant directly, but after classification-by-
+// concrete-type (an agent-shaped mock without the explicit classification
+// marker) an unmarked mock now denies at Decide's entry rejection block —
+// before candidate gathering, before checkRelationshipGrants (the ancestor
+// secret/envvar/skill-injection progeny path) and before
+// checkDelegationCeiling (the agent-creates-agent depth-0 path) ever run.
+// Both call sites read a.store, so this bare-store AuthzService would panic,
+// not merely answer wrong, if classification let the identity reach them —
+// making this a meaningful proof that the deny happens at entry.
+func TestDecide_UnmarkedAgentMockDeniesBeforeRelationshipOrDelegationChecks(t *testing.T) {
+	unmarked := &unattestedMockAgentIdentity{
+		id: tid("t7-unmarked-agent"), projectID: tid("t7-project"),
+		ancestry: []string{tid("t7-creator")},
+	}
+	authz := &AuthzService{}
+
+	t.Run("relationship grant via Decide (ancestor secret read)", func(t *testing.T) {
+		decision := authz.Decide(context.Background(), AuthzRequest{
+			Principal: PrincipalContext{Identity: unmarked},
+			Resource: Resource{
+				Type:     "secret",
+				ID:       tid("t7-secret"),
+				OwnerID:  tid("t7-creator"),
+				Ancestry: []string{tid("t7-creator")},
+			},
+			Action: ActionRead,
+		})
+		assert.False(t, decision.Allowed)
+		assert.Equal(t, "unrecognized principal kind", decision.Reason)
+	})
+
+	t.Run("delegation ceiling (agent creates agent)", func(t *testing.T) {
+		decision := authz.Decide(context.Background(), AuthzRequest{
+			Principal: PrincipalContext{Identity: unmarked},
+			Resource:  Resource{Type: "agent", ParentType: "project", ParentID: tid("t7-project")},
+			Action:    ActionCreate,
+		})
+		assert.False(t, decision.Allowed)
+		assert.Equal(t, "unrecognized principal kind", decision.Reason)
+	})
 }

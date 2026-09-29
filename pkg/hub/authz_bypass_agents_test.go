@@ -1163,6 +1163,17 @@ type bypassAgentsDevIdentity struct {
 
 func (d *bypassAgentsDevIdentity) Type() string { return "dev" }
 
+// authzClassification opts this fake into principalContextForIdentity /
+// credentialContextForIdentity classification (reached through CheckAccess
+// inside canDispatchToBroker's own "user"/"dev" switch, which is unaffected
+// and still keys on Type()). Those two classifier functions key on concrete
+// type, not Type(), so a wrapper type distinct from the production DevUser
+// must opt in explicitly, matching what the Type()-keyed switch used to
+// produce for it.
+func (d *bypassAgentsDevIdentity) authzClassification() (PrincipalKind, CredentialKind) {
+	return PrincipalKindDev, CredentialKindDev
+}
+
 // TestBypassAgents_UnauthenticatedDenied is the floor. authorize() answers 401
 // rather than 403 for a caller with no identity at all, and no converted site
 // may be reachable without authentication.

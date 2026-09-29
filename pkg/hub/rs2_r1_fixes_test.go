@@ -659,6 +659,15 @@ func (a *testAgentIdentity) localAncestryProvenance() ancestryProvenance {
 	return ancestryProvenanceAgentJWT
 }
 
+// authzClassification opts this fake into principalContextForIdentity /
+// credentialContextForIdentity classification (reached indirectly here
+// through ComputeCapabilities/ComputeCapabilitiesBatch), the same way it
+// opts into ancestry attestation above: neither is inherited from
+// Type() == "agent".
+func (a *testAgentIdentity) authzClassification() (PrincipalKind, CredentialKind) {
+	return PrincipalKindAgent, CredentialKindAgentJWT
+}
+
 // TestRS2_AgentJWTMineShared verifies that an agent JWT identity gets empty
 // Mine (since agents can't hold project-owner bindings) and full-scope Shared.
 func TestRS2_AgentJWTMineShared(t *testing.T) {
