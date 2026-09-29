@@ -377,6 +377,36 @@ test('session.error is unmapped for both a child session and a top-level session
   assert.deepEqual(parentErrorEmissions, [], 'a top-level session error must not be routed either');
 });
 
+test('session.error emits nothing even while the session is armed, with no idle in between (context-overflow auto-compaction path)', () => {
+  // Labelled synthetic: OpenCode's context-overflow-with-auto-compaction
+  // path publishes session.error with NO session.idle following it (the
+  // run loop continues instead of stopping), unlike every other
+  // session.error case this bridge has been tested against, which are all
+  // followed by an idle. This is exactly the shape that would defeat a
+  // mapping that routed session.error through the same gate as
+  // session.idle: busy, then error (already armed, no idle to consume the
+  // arm), then busy again for the continuation, then one real idle. If
+  // session.error consumed or itself produced an agent-end here, the
+  // total would be 2 for this one turn; it must stay 1, and the error
+  // itself must produce no emission at all.
+  const sessionID = 'ses_synthetic_overflow';
+  const state = createBridgeState();
+
+  route(state, { type: 'session.created', properties: { info: { id: sessionID } } });
+  route(state, { type: 'session.status', properties: { sessionID, status: { type: 'busy' } } });
+
+  const errorEmissions = route(state, {
+    type: 'session.error',
+    properties: { sessionID, error: { data: { message: 'context overflow' } } },
+  });
+  assert.deepEqual(errorEmissions, [], 'session.error must emit nothing, even while its session is already armed');
+
+  route(state, { type: 'session.status', properties: { sessionID, status: { type: 'busy' } } });
+  const idleEmissions = route(state, { type: 'session.idle', properties: { sessionID } });
+
+  assert.equal(idleEmissions.length, 1, 'the one real idle at the end of this turn must give exactly one agent-end');
+});
+
 // These scenarios reproduce OpenCode v1.18.33's actual SessionProcessor
 // event order (process/halt/cleanup, read from source), not a guessed one.
 // A user abort or provider error publishes session.error, then

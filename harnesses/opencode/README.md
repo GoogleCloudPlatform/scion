@@ -51,10 +51,10 @@ generic `event` bus hook — not same-named keyed hooks, which never fire for
 session, permission or model-usage events — and emits one `model-end` per
 completed LLM step (a `step-finish` bus part), deduped on
 `(sessionID, messageID, part.id)` with fork replays excluded. `dialect.yaml`
-maps that event, plus `session.created`/`session.idle`/`session.error`/
-`permission.asked`/`permission.replied`, onto the normalized Scion event
-grammar. `tool.execute.before`/`tool.execute.after` remain real, directly
-subscribed keyed hooks.
+maps that event, plus `session.created`/`session.idle`/`permission.asked`/
+`permission.replied`, onto the normalized Scion event grammar.
+`tool.execute.before`/`tool.execute.after` remain real, directly subscribed
+keyed hooks.
 
 Known undercount: a model call that produces no `step-finish` part (a failed
 or retried attempt, an abort, title generation, or agent generation) is not

@@ -300,7 +300,6 @@ function routeMessagePartUpdated(state, event) {
   const output = numberOrZero(tokens.output) + reasoning;
   const cacheRead = numberOrZero(tokens.cache && tokens.cache.read);
   const cacheWrite = numberOrZero(tokens.cache && tokens.cache.write);
-  const hasKnownUsage = tokens.total !== undefined || input > 0 || output > 0 || cacheRead > 0 || cacheWrite > 0;
 
   const data = { session_id: sessionID };
 
@@ -317,18 +316,18 @@ function routeMessagePartUpdated(state, event) {
 
   // design §3.7: all-zero tokens with `total` undefined mean unknown usage —
   // count the call (the model-end event itself does that), but emit no
-  // token fields at all, rather than a misleading all-zero response. Only
-  // fields greater than zero are ever included below, matching the
-  // dialect's own token-field semantics (dialects/common.go's extractTokens
-  // and dialects/mapping.go's applyFieldPath both treat "present and > 0"
-  // as the only way a value is recorded).
-  if (hasKnownUsage) {
-    if (input > 0) data.input_tokens = input;
-    if (output > 0) data.output_tokens = output;
-    if (cacheRead > 0) data.cached_tokens = cacheRead;
-    if (cacheWrite > 0) data.cache_write_tokens = cacheWrite;
-    if (reasoning > 0) data.reasoning_tokens = reasoning;
-  }
+  // token fields at all, rather than a misleading all-zero response. This
+  // falls out of the guards below with no separate check: every field is
+  // included only when it's greater than zero, matching the dialect's own
+  // token-field semantics (dialects/common.go's extractTokens and
+  // dialects/mapping.go's applyFieldPath both treat "present and > 0" as
+  // the only way a value is recorded), so an all-zero step-finish already
+  // produces none of these fields regardless of `total`.
+  if (input > 0) data.input_tokens = input;
+  if (output > 0) data.output_tokens = output;
+  if (cacheRead > 0) data.cached_tokens = cacheRead;
+  if (cacheWrite > 0) data.cache_write_tokens = cacheWrite;
+  if (reasoning > 0) data.reasoning_tokens = reasoning;
 
   // "message.part.updated.step-finish" is a bridge-internal name, not an
   // OpenCode wire event: message.part.updated covers every part type, and
@@ -352,9 +351,9 @@ export function toolExecuteBeforeData(input, output) {
 // This hook fires only when the tool call succeeded (OpenCode never invokes
 // it on failure), and its output carries no error field. So success is
 // unconditionally true here; a failed tool call is visible only as the
-// *absence* of this event. Today's dialect.yaml exposed a fabricated
-// `success: !output?.error` that was always true anyway, since
-// `output.error` never exists on this hook's output.
+// *absence* of this event. The previous bridge computed
+// `success: !output?.error`, which was always true because this hook's
+// output never has `error`.
 export function toolExecuteAfterData(input) {
   return {
     tool_name: input?.tool || "unknown",

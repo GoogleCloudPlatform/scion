@@ -435,12 +435,11 @@ func TestOpencodeDialectCacheWriteMapsToNonZeroTokenType(t *testing.T) {
 // deliberate omission of a session.error mapping. scion-bridge.js's route()
 // never sends this event at all (a session's turn ends exactly once, on
 // session.idle, gated on a prior busy/retry -- see that file's
-// routeSessionIdle),
-// but this pins the dialect-level fallback: if a raw session.error payload
-// ever reached this dialect anyway, it must not resolve to agent-end (which
-// would double-count a turn on every error) or session-end (which would
-// mark the whole agent Stopped on a recoverable error). It stays an
-// unrecognized, inert event name instead.
+// routeSessionIdle), but this pins the dialect-level fallback: if a raw
+// session.error payload ever reached this dialect anyway, it must not
+// resolve to agent-end (which would double-count a turn on every error) or
+// session-end (which would mark the whole agent Stopped on a recoverable
+// error). It stays an unrecognized, inert event name instead.
 func TestOpencodeDialectHasNoSessionErrorMapping(t *testing.T) {
 	md := loadOpencodeDialect(t)
 
