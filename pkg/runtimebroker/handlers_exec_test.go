@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -280,6 +281,40 @@ func TestStopAgent_NoContainerIDIsNoOp(t *testing.T) {
 	}
 	if mgr.stopCalls != 0 {
 		t.Errorf("Stop was called %d time(s); a no-container agent has nothing to stop", mgr.stopCalls)
+	}
+}
+
+// TestExecCommand_ListUnavailableReturns503 is a regression test for
+// ptone/scion#2165: when the container runtime itself fails to answer the
+// agent lookup (LookupContainerID wraps that in ErrAgentListUnavailable),
+// execCommand must report a retryable 503 rather than a terminal 404 — the
+// two mean very different things to a caller deciding whether to retry.
+func TestExecCommand_ListUnavailableReturns503(t *testing.T) {
+	mgr := &filteringMockManager{}
+	mgr.listErr = fmt.Errorf("docker ps failed: exit status 1")
+	execCalled := false
+	rt := &runtime.MockRuntime{
+		NameFunc: func() string { return "docker" },
+		ExecFunc: func(_ context.Context, _ string, _ []string) (string, error) {
+			execCalled = true
+			return "", nil
+		},
+	}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	body, _ := json.Marshal(map[string]any{"command": []string{"echo", "hi"}})
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/exec?projectId=project-A", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.handleAgentByID(w, r)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 when the runtime listing is unavailable, got %d (%s)", w.Code, w.Body.String())
+	}
+	if execCalled {
+		t.Error("exec must not run when the agent lookup itself failed")
+	}
+	if strings.Contains(w.Body.String(), "docker ps failed") {
+		t.Errorf("response body must not leak the raw runtime error text: %s", w.Body.String())
 	}
 }
 

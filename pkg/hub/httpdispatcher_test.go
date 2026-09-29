@@ -530,6 +530,27 @@ func TestHTTPRuntimeBrokerClient_DeleteAgent(t *testing.T) {
 	}
 }
 
+// TestHTTPRuntimeBrokerClient_DeleteAgent503PropagatesAsError is a regression
+// test for ptone/scion#2165: DeleteAgent's 404-is-idempotent-success carve-out
+// (brokerHTTPTransport.DeleteAgent) must stay scoped to exactly 404. A 503
+// (the broker's container runtime is transiently unavailable) is a different
+// case entirely — the agent may well still exist — and must propagate as an
+// error so the hub does not proceed as if the delete succeeded.
+func TestHTTPRuntimeBrokerClient_DeleteAgent503PropagatesAsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":{"code":"runtime_unavailable","message":"the container runtime is temporarily unavailable"}}`))
+	}))
+	defer server.Close()
+
+	client := NewHTTPRuntimeBrokerClient()
+
+	err := client.DeleteAgent(context.Background(), tid("host-1"), server.URL, "test-agent", "", true, false, false, time.Time{})
+	if err == nil {
+		t.Fatal("expected a 503 from the broker to propagate as an error, not be treated as an idempotent success")
+	}
+}
+
 func TestHTTPRuntimeBrokerClient_MessageAgent(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

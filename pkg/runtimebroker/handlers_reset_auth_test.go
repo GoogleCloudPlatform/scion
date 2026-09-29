@@ -175,6 +175,37 @@ func TestResetAuth_TokenDeliveredViaStdinNotArgv(t *testing.T) {
 	}
 }
 
+// TestResetAuth_ListUnavailableReturns503 is a regression test for
+// ptone/scion#2165: when the container runtime itself fails to answer the
+// agent lookup (LookupContainerID wraps that in ErrAgentListUnavailable),
+// resetAuth must report a retryable 503 rather than a terminal 404.
+func TestResetAuth_ListUnavailableReturns503(t *testing.T) {
+	mgr := resetAuthAgents()
+	mgr.listErr = fmt.Errorf("docker ps failed: exit status 1")
+
+	execCalled := false
+	rt := &scionrt.MockRuntime{
+		NameFunc: func() string { return "docker" },
+		ExecFunc: func(_ context.Context, _ string, _ []string) (string, error) {
+			execCalled = true
+			return "", nil
+		},
+	}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	w := doResetAuth(t, srv, "fresh-token")
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 when the runtime listing is unavailable, got %d (%s)", w.Code, w.Body.String())
+	}
+	if execCalled {
+		t.Error("reset-auth must not exec when the agent lookup itself failed")
+	}
+	if strings.Contains(w.Body.String(), "docker ps failed") {
+		t.Errorf("response body must not leak the raw runtime error text: %s", w.Body.String())
+	}
+}
+
 // TestResetAuth_MissingTokenIsValidationError verifies an empty token is
 // rejected before any container interaction.
 func TestResetAuth_MissingTokenIsValidationError(t *testing.T) {
