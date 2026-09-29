@@ -20,6 +20,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -123,6 +124,55 @@ func (s *AgentTokenService) SetCredentialRecorder(cr CredentialRecorder) {
 func hashJTI(jti string) string {
 	h := sha256.Sum256([]byte(jti))
 	return hex.EncodeToString(h[:])
+}
+
+// errAgentCredentialRevoked is returned by evaluateAgentCredentialStatus when
+// the looked-up credential has been revoked.
+var errAgentCredentialRevoked = errors.New("agent credential has been revoked")
+
+// errAgentCredentialMissing is returned by evaluateAgentCredentialStatus when
+// the credential store reports success but returns no credential record.
+// Callers treat it like any other store failure (retryable, not
+// authenticated), since the credential's status could not be determined.
+var errAgentCredentialMissing = errors.New("credential store returned no credential and no error")
+
+// evaluateAgentCredentialStatus performs the credential-status lookup that
+// agent-token authentication requires: given the JTI carried by a validated
+// agent token, it looks up the corresponding credential record in credStore
+// and classifies the result. The result is one of four outcomes:
+//
+//   - Found and active: the credential is returned with isLegacy=false and a
+//     nil error.
+//   - Found and revoked: a nil credential and errAgentCredentialRevoked (test
+//     with errors.Is).
+//   - Not found (store.ErrNotFound): a nil credential, isLegacy=true, and a
+//     nil error. This is the legacy compatibility path for tokens issued
+//     before the credential table existed; it is retained pending a product
+//     decision and callers must not close or widen it here.
+//   - Any other store error: returned verbatim with isLegacy=false and a nil
+//     credential. Callers must treat that as a retryable failure — never as
+//     successful authentication — since a store error means the credential's
+//     status could not actually be determined.
+//
+// A nil credential with a nil store error is classified as a store failure
+// and reported as errAgentCredentialMissing, so it follows the same
+// retryable path as any other store error.
+func evaluateAgentCredentialStatus(ctx context.Context, credStore store.AgentCredentialStore, jti string) (cred *store.AgentCredential, isLegacy bool, err error) {
+	cred, err = credStore.GetAgentCredentialByJTIHash(ctx, hashJTI(jti))
+	switch {
+	case err == nil:
+		if cred == nil {
+			return nil, false, errAgentCredentialMissing
+		}
+		if cred.RevokedAt != nil {
+			return nil, false, errAgentCredentialRevoked
+		}
+		return cred, false, nil
+	case errors.Is(err, store.ErrNotFound):
+		return nil, true, nil
+	default:
+		return nil, false, err
+	}
 }
 
 // NewAgentTokenService creates a new agent token service.
