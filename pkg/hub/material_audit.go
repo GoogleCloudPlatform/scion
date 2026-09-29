@@ -118,9 +118,12 @@ func materialSelectionAttrs(e *MaterialSelectionEvent) []slog.Attr {
 }
 
 // LogMaterialSelectionEvent logs a material selection audit event to the
-// standard logger. It never logs a secret value.
+// standard logger. It never logs a secret value. A nil receiver is safe: l
+// is a typed nil whenever s.auditLogger is a nil *LogAuditLogger stored in
+// the materialSelectionAuditor interface, and l.logger() would otherwise
+// dereference it.
 func (l *LogAuditLogger) LogMaterialSelectionEvent(ctx context.Context, e *MaterialSelectionEvent) error {
-	if e == nil {
+	if l == nil || e == nil {
 		return nil
 	}
 

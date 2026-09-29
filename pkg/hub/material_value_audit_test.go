@@ -1038,6 +1038,23 @@ func TestMaterialAudit_NilAuditLoggerSafe(t *testing.T) {
 	}
 }
 
+// TestMaterialAudit_TypedNilAuditLoggerSafe pins that LogMaterialSelectionEvent
+// does not panic on a typed nil *LogAuditLogger receiver, both called
+// directly and reached through logMaterialSelection with s.auditLogger set
+// to a nil *LogAuditLogger. That shape is distinct from a nil AuditLogger
+// interface value (TestMaterialAudit_NilAuditLoggerSafe): the interface
+// value itself is non-nil here (it carries a type), so the
+// materialSelectionAuditor type assertion in logMaterialSelection succeeds
+// and the call reaches l with l == nil.
+func TestMaterialAudit_TypedNilAuditLoggerSafe(t *testing.T) {
+	var l *LogAuditLogger
+	require.NoError(t, l.LogMaterialSelectionEvent(context.Background(), &MaterialSelectionEvent{EventType: "material_selection"}))
+
+	f := newMaterialFixture(t, "typed-nil-audit-logger-safe")
+	f.Server.SetAuditLogger((*LogAuditLogger)(nil))
+	f.Server.logMaterialSelection(context.Background(), &MaterialSelectionEvent{EventType: "material_selection"})
+}
+
 // TestMaterialAudit_ProductionSinkPreservesPerItemFields points
 // LogAuditLogger directly at a buffer-backed slog.Handler and asserts that
 // the per-item reason, Detail, Grant and SharingSource all reach the
