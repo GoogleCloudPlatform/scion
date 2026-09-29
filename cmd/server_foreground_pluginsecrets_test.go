@@ -72,6 +72,18 @@ func (f *fakeSecretBackend) Resolve(context.Context, string, string, string, *se
 	return nil, nil
 }
 
+func (f *fakeSecretBackend) FetchValues(_ context.Context, metas []secret.SecretMeta) (map[string]secret.FetchResult, error) {
+	results := make(map[string]secret.FetchResult, len(metas))
+	for _, meta := range metas {
+		if v, ok := f.values[meta.Name]; ok {
+			results[meta.ID] = secret.FetchResult{Value: v}
+			continue
+		}
+		results[meta.ID] = secret.FetchResult{Err: store.ErrNotFound}
+	}
+	return results, nil
+}
+
 // captureLog collects everything written to the standard logger while fn runs.
 func captureLog(t *testing.T, fn func()) string {
 	t.Helper()

@@ -62,6 +62,51 @@ func (b *LocalBackend) Get(ctx context.Context, name, scope, scopeID string) (*S
 	return b.decryptStoreSecret(s)
 }
 
+// FetchValues returns values for exactly the given metadata records, matched
+// by ID and Version, keyed by each record's ID in the returned map. There is
+// no name-based fallback: a record that is no longer in the store, or whose
+// current ID or Version no longer matches the recorded metadata, is reported
+// as store.ErrNotFound for that item. A decrypt failure is also reported as
+// a per-item error, never as an empty value delivered in place of an error.
+// A record whose current SecretType is internal is refused with
+// store.ErrNotFound, since internal secrets are never candidates for
+// delivery. The returned outer error reports only a failure of the whole
+// call, not a per-item failure.
+//
+// store.SecretStore has no primary-key lookup, so each record is located by
+// its Name/Scope/ScopeID triple — the same composite key GetSecret uses —
+// and then verified against the recorded ID and Version before its value is
+// decrypted. Name/Scope/ScopeID are immutable for the life of a record
+// (UpdateSecretMeta never changes them); a secret that was deleted and
+// recreated under the same triple gets a new ID (toStoreSecret assigns
+// api.NewUUID() on every create), so this verification rejects the new
+// record exactly as a primary-key lookup would.
+func (b *LocalBackend) FetchValues(ctx context.Context, metas []SecretMeta) (map[string]FetchResult, error) {
+	results := make(map[string]FetchResult, len(metas))
+	for _, meta := range metas {
+		results[meta.ID] = b.fetchValue(ctx, meta)
+	}
+	return results, nil
+}
+
+func (b *LocalBackend) fetchValue(ctx context.Context, meta SecretMeta) FetchResult {
+	s, err := b.store.GetSecret(ctx, meta.Name, meta.Scope, meta.ScopeID)
+	if err != nil {
+		return FetchResult{Err: err}
+	}
+	if s.ID != meta.ID || s.Version != meta.Version || s.SecretType == store.SecretTypeInternal {
+		// The record has been replaced, rotated or reclassified since the
+		// caller's metadata was recorded; treat it the same as not found
+		// rather than returning a value for a different record generation.
+		return FetchResult{Err: store.ErrNotFound}
+	}
+	sv, err := b.decryptStoreSecret(s)
+	if err != nil {
+		return FetchResult{Err: err}
+	}
+	return FetchResult{Value: sv.Value}
+}
+
 func (b *LocalBackend) Set(ctx context.Context, input *SetSecretInput) (bool, *SecretMeta, error) {
 	s := toStoreSecret(input)
 

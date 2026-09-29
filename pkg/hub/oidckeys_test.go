@@ -101,6 +101,19 @@ func (m *oidcMockSecretBackend) Resolve(_ context.Context, _, _, _ string, _ *se
 
 func (m *oidcMockSecretBackend) HubID() string { return "test-hub" }
 
+func (m *oidcMockSecretBackend) FetchValues(_ context.Context, metas []secret.SecretMeta) (map[string]secret.FetchResult, error) {
+	results := make(map[string]secret.FetchResult, len(metas))
+	for _, meta := range metas {
+		sv, ok := m.secrets[m.secretKey(meta.Name, meta.Scope, meta.ScopeID)]
+		if !ok {
+			results[meta.ID] = secret.FetchResult{Err: store.ErrNotFound}
+			continue
+		}
+		results[meta.ID] = secret.FetchResult{Value: sv.Value}
+	}
+	return results, nil
+}
+
 // --- Tests ---
 
 func TestGenerateRSAKeyPair(t *testing.T) {

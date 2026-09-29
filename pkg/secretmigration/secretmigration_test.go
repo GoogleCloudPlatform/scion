@@ -94,6 +94,18 @@ func (f *fakeBackend) Resolve(context.Context, string, string, string, *secret.R
 
 func (f *fakeBackend) HubID() string { return "test-hub" }
 
+func (f *fakeBackend) FetchValues(_ context.Context, metas []secret.SecretMeta) (map[string]secret.FetchResult, error) {
+	results := make(map[string]secret.FetchResult, len(metas))
+	for _, meta := range metas {
+		if sv, ok := f.values[meta.Name]; ok {
+			results[meta.ID] = secret.FetchResult{Value: sv.Value}
+			continue
+		}
+		results[meta.ID] = secret.FetchResult{Err: store.ErrNotFound}
+	}
+	return results, nil
+}
+
 // writeConfigFile writes a per-plugin YAML config file and returns its path.
 func writeConfigFile(t *testing.T, name, contents string) string {
 	t.Helper()

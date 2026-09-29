@@ -79,6 +79,18 @@ func (m *migrationSecretBackend) Resolve(context.Context, string, string, string
 
 func (m *migrationSecretBackend) HubID() string { return "test-hub" }
 
+func (m *migrationSecretBackend) FetchValues(_ context.Context, metas []secret.SecretMeta) (map[string]secret.FetchResult, error) {
+	results := make(map[string]secret.FetchResult, len(metas))
+	for _, meta := range metas {
+		if v, ok := m.values[meta.Name]; ok {
+			results[meta.ID] = secret.FetchResult{Value: v}
+			continue
+		}
+		results[meta.ID] = secret.FetchResult{Err: store.ErrNotFound}
+	}
+	return results, nil
+}
+
 // newActivationServer returns a Server wired with a mock plugin manager and
 // the given secret backend, plus a temporary HOME so plugin dir resolution
 // stays inside the test sandbox.
