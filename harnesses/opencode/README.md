@@ -60,6 +60,16 @@ Known undercount: a model call that produces no `step-finish` part (a failed
 or retried attempt, an abort, title generation, or agent generation) is not
 counted.
 
+**Task-tool subagent sessions are excluded from session-start and
+agent-end.** OpenCode's `task` tool spawns a full child session with
+`info.parentID` set to the invoking session (confirmed against a real
+capture). The bridge tracks which session IDs are children from their
+`session.created` event and filters both that event and the child's later
+`session.idle` — a child going idle only means that subagent's turn ended,
+not the parent agent's, so it must not signal agent-end for the agent. A
+forked session (`Session.fork`) has no `parentID` at all and is unaffected by
+this filter; only task-tool children are.
+
 ## Build the Image
 
 ```sh

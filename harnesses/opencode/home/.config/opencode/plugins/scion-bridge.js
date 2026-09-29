@@ -68,6 +68,27 @@ function numberOrZero(v) {
   return typeof v === 'number' && Number.isFinite(v) ? v : 0;
 }
 
+// MAX_CACHE_ENTRIES bounds every per-session/per-message cache below. A
+// long-lived `opencode serve` process never gets a natural point to forget
+// old sessions or messages, so without a cap these grow for the life of the
+// process (roughly 150-250 bytes per step; unbounded, though harmless for a
+// normal-length session). Eviction is FIFO by insertion order (Map/Set
+// preserve it, and re-adding an existing key does not move it), not by
+// completion time: the capture shows a step-finish part can arrive some
+// time after its message's first `message.updated`, and a PATCH re-emit of
+// an already-handled part must still be deduped, so nothing here is safe to
+// evict "as soon as done".
+const MAX_CACHE_ENTRIES = 4096;
+
+// evictOldest trims a Map or Set (both expose .size, .keys(), .delete()) down
+// to maxEntries by removing entries in insertion order, oldest first.
+function evictOldest(collection, maxEntries) {
+  while (collection.size > maxEntries) {
+    const oldestKey = collection.keys().next().value;
+    collection.delete(oldestKey);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Pure event-routing core.
 //
@@ -80,12 +101,14 @@ function numberOrZero(v) {
 // createBridgeState returns the mutable, per-plugin-instance state route()
 // needs across calls: which assistant messages have been observed live (as
 // opposed to replayed by a fork), which model-end parts have already been
-// emitted, and the provider/model pair for each assistant message.
+// emitted, the provider/model pair for each assistant message, and which
+// session IDs are task-tool subagent children (see routeSessionCreated).
 export function createBridgeState() {
   return {
     liveMessageIds: new Set(),
     seenModelEnds: new Set(),
     modelByMessage: new Map(),
+    childSessionIds: new Set(),
   };
 }
 
@@ -101,9 +124,9 @@ export function route(state, event) {
     case 'message.part.updated':
       return routeMessagePartUpdated(state, event);
     case 'session.created':
-      return routeSessionCreated(event);
+      return routeSessionCreated(state, event);
     case 'session.idle':
-      return [{ name: 'session.idle', data: { session_id: event.properties?.sessionID } }];
+      return routeSessionIdle(state, event);
     case 'session.error':
       return [{
         name: 'session.error',
@@ -135,9 +158,37 @@ export function route(state, event) {
   }
 }
 
-function routeSessionCreated(event) {
+// routeSessionCreated excludes task-tool subagent child sessions from
+// session-start: OpenCode's `task` tool spawns a full child session with
+// `info.parentID` set to the invoking session, confirmed against a real
+// capture of a task-tool call (see the fixture's provenance). Counting a
+// child session as its own agent-level session would inflate session counts
+// relative to what the user sees; a fork has no `parentID` at all (it is a
+// sibling copy of history, not a child), so this filter never touches
+// fork-derived sessions.
+function routeSessionCreated(state, event) {
   const info = event.properties?.info;
-  return [{ name: 'session.created', data: { session_id: info?.id } }];
+  if (!info || !info.id) return [];
+  if (info.parentID) {
+    state.childSessionIds.add(info.id);
+    evictOldest(state.childSessionIds, MAX_CACHE_ENTRIES);
+    return [];
+  }
+  return [{ name: 'session.created', data: { session_id: info.id } }];
+}
+
+// routeSessionIdle excludes agent-end for a child session for the same
+// reason: `session.idle` carries only `{sessionID}`, no `parentID`, so the
+// child-ness has to be remembered from that session's own `session.created`
+// event. A child session going idle only means that subagent's turn ended,
+// not the parent agent's turn -- signalling agent-end for it would be wrong
+// while the parent may still be working (confirmed in the capture: the
+// child's session.idle fires before the parent's).
+function routeSessionIdle(state, event) {
+  const sessionID = event.properties?.sessionID;
+  if (!sessionID) return [];
+  if (state.childSessionIds.has(sessionID)) return [];
+  return [{ name: 'session.idle', data: { session_id: sessionID } }];
 }
 
 // routeMessageUpdated never emits a hook event by itself. It only updates
@@ -164,10 +215,12 @@ function routeMessageUpdated(state, event) {
 
   if (info.providerID && info.modelID) {
     state.modelByMessage.set(info.id, { providerID: info.providerID, modelID: info.modelID });
+    evictOldest(state.modelByMessage, MAX_CACHE_ENTRIES);
   }
 
   if (!info.time || !info.time.completed) {
     state.liveMessageIds.add(info.id);
+    evictOldest(state.liveMessageIds, MAX_CACHE_ENTRIES);
   }
 
   return [];
@@ -194,6 +247,7 @@ function routeMessagePartUpdated(state, event) {
   const dedupeKey = `${sessionID}:${messageID}:${partID}`;
   if (state.seenModelEnds.has(dedupeKey)) return [];
   state.seenModelEnds.add(dedupeKey);
+  evictOldest(state.seenModelEnds, MAX_CACHE_ENTRIES);
 
   const tokens = part.tokens || {};
   const input = numberOrZero(tokens.input);

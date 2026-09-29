@@ -20,6 +20,7 @@ import json
 import os
 import tempfile
 import unittest
+import unittest.mock
 from contextlib import contextmanager
 
 PROVISION_PATH = os.path.join(os.path.dirname(__file__), "provision.py")
@@ -79,16 +80,11 @@ class OpencodeProvisionTest(unittest.TestCase):
         # would have silently dropped SCION_USAGE_SOURCE for every vertex-ai
         # agent. Pin that the vertex path merges instead.
         with tempfile.TemporaryDirectory() as tmp:
-            with temporary_home(tmp):
-                with_env = dict(os.environ)
-                with_env["GOOGLE_CLOUD_PROJECT"] = "proj-1"
-                with_env["GOOGLE_CLOUD_REGION"] = "us-central1"
-                os.environ.update(with_env)
-            try:
+            with temporary_home(tmp), unittest.mock.patch.dict(
+                os.environ,
+                {"GOOGLE_CLOUD_PROJECT": "proj-1", "GOOGLE_CLOUD_REGION": "us-central1"},
+            ):
                 env = _invoke(tmp, env_vars=["GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_REGION"], explicit_type="vertex-ai")
-            finally:
-                os.environ.pop("GOOGLE_CLOUD_PROJECT", None)
-                os.environ.pop("GOOGLE_CLOUD_REGION", None)
         self.assertEqual(env["SCION_USAGE_SOURCE"], "hooks")
         self.assertIn("VERTEXAI_PROJECT", env)
 

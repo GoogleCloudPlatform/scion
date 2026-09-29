@@ -18,11 +18,13 @@
 //
 // Drives the real, shipped scion-bridge.js against
 // pkg/sciontool/hooks/dialects/testdata/opencode/bus-events-1.18.33.json --
-// a real capture (see that fixture's sibling README and provenance comments
-// in opencode_dialect_test.go for how it was captured and verified). This
-// is the "JS unit test for the bridge" design §9 phase 3b asks for,
-// exercising exactly the code this harness ships, not a reimplementation of
-// it.
+// a real capture. See pkg/sciontool/hooks/dialects/testdata/opencode/README.md
+// for the fixture's full provenance (opencode-ai version, the mock model
+// server, each run's scenario, every filter and scrub applied); the sibling
+// hook-payloads-1.18.33.jsonl fixture's own provenance is documented in
+// opencode_dialect_test.go. This is the "JS unit test for the bridge" design
+// §9 phase 3b asks for, exercising exactly the code this harness ships, not
+// a reimplementation of it.
 
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -128,13 +130,9 @@ test('run2: streaming deltas and repeated message.updated add nothing', () => {
 
 test('a repeated delivery of the same step-finish part is deduped', () => {
   const run2 = loadFixture().get('run2');
-  const state = createBridgeState();
-  const firstPass = emissionsFor(run2, 'message.part.updated.step-finish');
-  assert.equal(firstPass.length, 3);
 
-  // Re-run the exact same event sequence through a *fresh* state to get the
-  // event list, then feed the whole run2 sequence through ONE shared state
-  // twice, simulating a retried delivery.
+  // Feed the whole run2 sequence through ONE shared state twice, simulating
+  // a retried delivery.
   const sharedState = createBridgeState();
   const combined = [];
   for (const rec of run2) {
@@ -223,4 +221,82 @@ test('all-zero tokens with no total still count the call but emit no token field
   });
   assert.equal(emissions.length, 1, 'the call itself is still counted');
   assert.deepEqual(Object.keys(emissions[0].data).sort(), ['model', 'session_id'].sort(), 'no token fields when usage is unknown, only session_id and the joined model');
+});
+
+test('a synthetic non-zero cache_write step-finish maps through the bridge', () => {
+  // Synthetic (not from a capture): the real capture only ever has
+  // cache.write=0, because an OpenAI-compatible mock model has no
+  // cache-write concept. This pins the mapping path itself
+  // (tokens.cache.write -> data.cache_write_tokens) at a non-zero value, so
+  // a typo in either key would fail this test even though the real fixture
+  // alone could not catch it.
+  const state = createBridgeState();
+  const messageID = 'msg_synthetic_cache_write';
+  const sessionID = 'ses_synthetic_cache_write';
+  route(state, {
+    type: 'message.updated',
+    properties: { info: { id: messageID, role: 'assistant', providerID: 'p', modelID: 'm', time: { created: 1 } } },
+  });
+  const emissions = route(state, {
+    type: 'message.part.updated',
+    properties: {
+      part: {
+        id: 'prt_synthetic_cache_write', sessionID, messageID, type: 'step-finish', reason: 'stop',
+        tokens: { total: 107, input: 100, output: 0, reasoning: 0, cache: { read: 0, write: 7 } },
+      },
+    },
+  });
+  assert.equal(emissions.length, 1);
+  assert.equal(emissions[0].data.cache_write_tokens, 7);
+});
+
+test('bridge caches evict oldest entries once MAX_CACHE_ENTRIES is exceeded', () => {
+  const state = createBridgeState();
+  const cap = 4096;
+  for (let i = 0; i < cap + 10; i++) {
+    route(state, {
+      type: 'message.updated',
+      properties: { info: { id: `msg_${i}`, role: 'assistant', providerID: 'p', modelID: 'm', time: { created: i } } },
+    });
+  }
+  assert.ok(state.liveMessageIds.size <= cap, `liveMessageIds.size = ${state.liveMessageIds.size}, want <= ${cap}`);
+  assert.ok(state.modelByMessage.size <= cap, `modelByMessage.size = ${state.modelByMessage.size}, want <= ${cap}`);
+  // The oldest entries (msg_0, msg_1, ...) must be the ones evicted, not
+  // arbitrary ones -- FIFO by insertion order.
+  assert.equal(state.liveMessageIds.has('msg_0'), false);
+  assert.equal(state.liveMessageIds.has(`msg_${cap + 9}`), true);
+});
+
+test('run5: a task-tool subagent child session does not signal session-start or agent-end', () => {
+  const run5 = loadFixture().get('run5');
+  assert.ok(run5 && run5.length > 0, 'fixture must contain run5 records (a real task-tool subagent capture)');
+
+  const sessionCreatedRecords = run5.filter((r) => r.payload.type === 'session.created');
+  assert.equal(sessionCreatedRecords.length, 2, 'expected a parent session and its task-tool child');
+  const parentInfo = sessionCreatedRecords[0].payload.properties.info;
+  const childInfo = sessionCreatedRecords[1].payload.properties.info;
+  assert.equal(parentInfo.parentID, undefined, 'the parent session must have no parentID');
+  assert.equal(childInfo.parentID, parentInfo.id, 'the child session must be parented to the real parent session (real capture, not synthetic)');
+
+  const sessionStartEmissions = emissionsFor(run5, 'session.created');
+  assert.equal(sessionStartEmissions.length, 1, 'only the parent session fires session-start; the child is filtered');
+  assert.equal(sessionStartEmissions[0].data.session_id, parentInfo.id);
+
+  const idleEmissions = emissionsFor(run5, 'session.idle');
+  assert.equal(idleEmissions.length, 1, 'only the parent session fires agent-end; the child going idle must not signal it');
+  assert.equal(idleEmissions[0].data.session_id, parentInfo.id);
+});
+
+test('a session.created with no parentID (e.g. a fork) still fires session-start', () => {
+  // A fork has no parentID at all (confirmed by run2's fork session.created,
+  // see the earlier fork tests above) -- this pins that the child-session
+  // filter is keyed specifically on parentID, not on "any session that
+  // isn't the very first one".
+  const state = createBridgeState();
+  const emissions = route(state, {
+    type: 'session.created',
+    properties: { info: { id: 'ses_no_parent' } },
+  });
+  assert.equal(emissions.length, 1);
+  assert.equal(emissions[0].data.session_id, 'ses_no_parent');
 });

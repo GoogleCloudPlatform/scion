@@ -18,6 +18,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	"gopkg.in/yaml.v3"
 )
 
 // loadOpencodeHookPayloadFixture reads
@@ -291,8 +292,8 @@ func TestOpencodeDialectSuppressesUsageWhenSourceUnset(t *testing.T) {
 	}
 }
 
-// TestOpencodeDialectFixtureReplayIsDedupeStable re-parses and re-handles
-// the whole fixture a second time (simulating a retried export, e.g. a
+// TestOpencodeHandlerHasNoDedupeReplayDoubles re-parses and re-handles the
+// whole fixture a second time (simulating a retried export, e.g. a
 // hook-invocation retry after a transient sciontool error) and asserts the
 // canonical totals exactly double. The handler-level counters have no
 // dedupe of their own for hook-per-process delivery -- scion-bridge.js is
@@ -301,7 +302,7 @@ func TestOpencodeDialectSuppressesUsageWhenSourceUnset(t *testing.T) {
 // pins that the fixture, if replayed, produces a clean, predictable
 // doubling rather than some other inconsistency, documenting where the
 // dedupe responsibility actually lives.
-func TestOpencodeDialectFixtureReplayIsDedupeStable(t *testing.T) {
+func TestOpencodeHandlerHasNoDedupeReplayDoubles(t *testing.T) {
 	t.Setenv("SCION_USAGE_SOURCE", "hooks")
 	t.Setenv("SCION_HARNESS", "opencode")
 
@@ -333,5 +334,94 @@ func TestOpencodeDialectFixtureReplayIsDedupeStable(t *testing.T) {
 	}
 	if calls := apiCallTotal(rm); calls != 6 {
 		t.Errorf("gen_ai.api.calls total after replay = %d, want 6 (2x3; the dedupe boundary is scion-bridge.js, not the handler)", calls)
+	}
+}
+
+// TestOpencodeDialectStepFinishMappingOmitsExtractTokensFields guards the
+// extractTokens override pitfall directly: dialects/common.go's
+// extractTokens runs *after* a mapping entry's `fields:`, and reads
+// input_tokens/output_tokens/cached_tokens from the raw payload's top level
+// regardless of what `fields:` says -- so a `fields:` entry for any of
+// those three under message.part.updated.step-finish would be silently
+// overridden by extractTokens the moment it ran, which is exactly why
+// dialect.yaml has no such entries (the bridge already emits the final
+// summed values under those exact top-level keys). This test parses the raw
+// YAML directly (bypassing dialects.LoadMappingDialect, which does not
+// expose its parsed spec) so a future edit that reintroduces one of these
+// keys fails loudly instead of silently zeroing a token type.
+func TestOpencodeDialectStepFinishMappingOmitsExtractTokensFields(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	root := filepath.Clean(filepath.Join(filepath.Dir(file), "../../../.."))
+	specPath := filepath.Join(root, "harnesses", "opencode", "dialect.yaml")
+
+	data, err := os.ReadFile(specPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", specPath, err)
+	}
+	var spec dialects.MappingDialectSpec
+	if err := yaml.Unmarshal(data, &spec); err != nil {
+		t.Fatalf("yaml.Unmarshal: %v", err)
+	}
+
+	entry, ok := spec.Mappings["message.part.updated.step-finish"]
+	if !ok {
+		t.Fatal(`dialect.yaml has no "message.part.updated.step-finish" mapping`)
+	}
+	for _, forbidden := range []string{"input_tokens", "output_tokens", "cached_tokens"} {
+		if _, present := entry.Fields[forbidden]; present {
+			t.Errorf("mapping.fields contains %q; extractTokens (dialects/common.go) runs after `fields:` and reads this key from the top-level payload unconditionally, so this would silently override the bridge's already-correct value", forbidden)
+		}
+	}
+}
+
+// TestOpencodeDialectCacheWriteMapsToNonZeroTokenType covers the
+// cache_write mapping path at a non-zero value. The real capture only ever
+// has tokens.cache.write=0 (an OpenAI-compatible mock model has no
+// cache-write concept), so without this test a typo in either
+// dialect.yaml's `cache_write_tokens` field name or scion-bridge.js's
+// `cache.write` read would silently zero token_type=cache_write with
+// nothing failing. This is a labelled synthetic case: a model-end payload
+// shaped like what the bridge would emit for a step-finish with
+// tokens.cache.write=7 (see scion-bridge.test.mjs's matching synthetic case
+// for the bridge side of this same path).
+func TestOpencodeDialectCacheWriteMapsToNonZeroTokenType(t *testing.T) {
+	t.Setenv("SCION_USAGE_SOURCE", "hooks")
+	t.Setenv("SCION_HARNESS", "opencode")
+
+	md := loadOpencodeDialect(t)
+	payload := map[string]interface{}{
+		"hook_event_name":    "message.part.updated.step-finish",
+		"session_id":         "ses_synthetic_cache_write",
+		"cache_write_tokens": float64(7),
+	}
+	event, err := md.Parse(payload)
+	if err != nil {
+		t.Fatalf("Parse(%v): %v", payload, err)
+	}
+	if event.Name != hooks.EventModelEnd {
+		t.Fatalf("event.Name = %q, want %q", event.Name, hooks.EventModelEnd)
+	}
+	if event.Data.CacheWriteTokens != 7 {
+		t.Fatalf("event.Data.CacheWriteTokens = %d, want 7", event.Data.CacheWriteTokens)
+	}
+
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	defer func() { _ = mp.Shutdown(context.Background()) }()
+	h := NewTelemetryHandler(nil, nil, nil, mp)
+	if err := h.Handle(event); err != nil {
+		t.Fatalf("Handle(%v): %v", event, err)
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	totals := usageTokenTotals(rm)
+	if got := totals[telemetrycontract.TokenTypeCacheWrite]; got != 7 {
+		t.Errorf("token_type=cache_write total = %d, want 7", got)
 	}
 }

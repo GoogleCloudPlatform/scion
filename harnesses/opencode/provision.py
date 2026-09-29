@@ -36,9 +36,11 @@ This script's job is therefore minimal:
   2. Fail (exit 1) with an actionable message if no method is available.
   3. Write outputs/resolved-auth.json describing the choice (for diagnostics
      and resume-time consistency).
-  4. Write outputs/env.json — for api-key/auth-file this is empty (the
-     harness child already inherits the projected env); for vertex-ai it
-     contains ${VAR} placeholders so the host can expand at launch.
+  4. Write outputs/env.json — always carries SCION_USAGE_SOURCE=hooks (the
+     D10 opt-in for hook-sourced usage; see dialect.yaml); for vertex-ai it
+     additionally contains ${VAR} placeholders so the host can expand at
+     launch. For api-key/auth-file, that usage-source entry is the only one
+     (the harness child otherwise inherits the projected env as-is).
 
 The script is intentionally stdlib-only so it works on any container image
 that ships python3 (declared in config.yaml's required_image_tools).
@@ -303,9 +305,9 @@ def provision(ctx: sh.ProvisionContext) -> None:
     # step-finish-derived model-end events. Per design D10 (the vetting
     # gate), a harness publishes hook-sourced usage only once its mapping is
     # captured and tested against a real CLI version -- see dialect.yaml and
-    # the opencode fixture under pkg/sciontool/telemetry/testdata or the
-    # hooks test package. This is narrow to usage only (D4): tool, session
-    # and turn hook telemetry are unaffected by this variable either way.
+    # the fixtures under pkg/sciontool/hooks/dialects/testdata/opencode/.
+    # This is narrow to usage only (D4): tool, session and turn hook
+    # telemetry are unaffected by this variable either way.
     env: dict[str, str] = {"SCION_USAGE_SOURCE": "hooks"}
 
     if resolved.method == "auth-file":
