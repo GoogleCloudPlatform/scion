@@ -49,10 +49,10 @@ const initiatorAttributionVersion = 1
 //
 // Only a genuine interactive session maps to "session". Everything else —
 // no ambient credential at all, federation, broker, or dev — maps to
-// legacy_unknown, never to session (review R5): plan correction (c) and
-// ruling Q2 ("a mutation without recordable provenance never falls back to
-// the creator's interactive authority") both forbid treating unknown or
-// absent provenance as an interactive-style credential.
+// legacy_unknown, never to session: plan correction (c) and ruling Q2 ("a
+// mutation without recordable provenance never falls back to the creator's
+// interactive authority") both forbid treating unknown or absent provenance
+// as an interactive-style credential.
 func initiatorCredentialKindFor(kind CredentialKind) string {
 	switch kind {
 	case CredentialKindUAT:
@@ -72,7 +72,7 @@ func initiatorCredentialKindFor(kind CredentialKind) string {
 // scheduled-dispatch success audit — that records a credential kind in a
 // column every other mutation-audit writer fills with hub.CredentialKind
 // (audit_actor.go:auditActorFromContext). Returns "" for legacy_unknown (or
-// any other value), meaning "leave this column unset" (review R4).
+// any other value), meaning "leave this column unset".
 func hubCredentialKindForInitiator(kind string) string {
 	switch kind {
 	case store.InitiatorCredentialKindUAT:
@@ -145,13 +145,19 @@ func initiatorCredentialSnapshotJSON(cred CredentialContext) string {
 // value on the row being written.
 //
 // A context with no ambient identity (should not happen on an authenticated
-// path) yields a zero InitiatorAttribution, which reads back as
-// legacy_unknown — never as an interactive credential.
+// path) yields a bare InitiatorAttribution with only InitiatorCredentialKind
+// set to legacy_unknown — every other field stays empty, and
+// AttributionVersion stays 0. Callers that key legacy detection on
+// AttributionVersion (Schedule/ScheduledEvent, via scheduledInitiator) and
+// callers that don't (BrokerDispatch has no version field at all) both see
+// an explicit legacy_unknown, never an empty string that looks like "no
+// value recorded" rather than "no recordable provenance."
 func captureInitiatorAttribution(ctx context.Context) store.InitiatorAttribution {
 	var attr store.InitiatorAttribution
 
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
+		attr.InitiatorCredentialKind = store.InitiatorCredentialKindLegacyUnknown
 		return attr
 	}
 	attr.InitiatorPrincipalKind = identity.Type()
@@ -207,12 +213,12 @@ func setBrokerDispatchInitiator(ctx context.Context, d *store.BrokerDispatch) {
 // ScheduledInitiator is the read-time view of a scheduled row's
 // InitiatorAttribution (plan §3.5's scheduledInitiator read helper). A row
 // written before E.2b (AttributionVersion NULL/0), or one whose credential
-// kind is legacy_unknown for any other reason (review R5: no recordable
-// provenance at capture time), always reads as LegacyUnknown with every
-// other field empty — never as an interactive credential. E.2b's own tests
-// assert this record; B.3's tests assert the authority decision built on it
-// (fire-time recheck, ceiling, legacy_unknown handling) — this type carries
-// no authority of its own.
+// kind is legacy_unknown for any other reason (no recordable provenance at
+// capture time), always reads as LegacyUnknown with every other field empty
+// — never as an interactive credential. E.2b's own tests assert this
+// record; B.3's tests assert the authority decision built on it (fire-time
+// recheck, ceiling, legacy_unknown handling) — this type carries no
+// authority of its own.
 type ScheduledInitiator struct {
 	PrincipalKind      string
 	PrincipalID        string
@@ -225,14 +231,13 @@ type ScheduledInitiator struct {
 // scheduledInitiator normalizes a stored InitiatorAttribution (read directly
 // off a store.Schedule or store.ScheduledEvent row, both embedding the same
 // mixin) for B.3's fire-time authority decision and for E.2b's own
-// audit/log attribution. Typed and total (review O3): every
-// InitiatorAttribution value has a defined normalization, so there is
-// nothing left to error on.
+// audit/log attribution. Typed and total: every InitiatorAttribution value
+// has a defined normalization, so there is nothing left to error on.
 //
 // A row is legacy_unknown either because it predates E.2b
 // (AttributionVersion 0) or because its credential kind was itself recorded
-// as legacy_unknown at capture time (review R5) — both cases clear every
-// other field rather than surfacing partial/stale data (design check (c)).
+// as legacy_unknown at capture time — both cases clear every other field
+// rather than surfacing partial/stale data (design check (c)).
 func (s *Server) scheduledInitiator(attr store.InitiatorAttribution) ScheduledInitiator {
 	if attr.AttributionVersion == 0 || attr.InitiatorCredentialKind == "" ||
 		attr.InitiatorCredentialKind == store.InitiatorCredentialKindLegacyUnknown {
