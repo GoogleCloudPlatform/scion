@@ -150,7 +150,7 @@ func (s *Server) authorizeScheduledMessageAuthoring(
 	// At fire time the user is re-resolved without scope restrictions, so
 	// admitting a scoped UAT here would silently discard its caveats.
 	// Credential provenance that cannot be reconstructed fails closed.
-	if IsScopedUserIdentity(identity) {
+	if scopedUATDeniedForFutureDispatchAuthoring(identity) {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden,
 			"scoped access tokens cannot author scheduled messages: credential caveats cannot be preserved at fire time", nil)
 		return false

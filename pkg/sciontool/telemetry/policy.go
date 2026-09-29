@@ -354,14 +354,31 @@ func (p *receiverPolicy) processMetric(metric *metricpb.Metric) {
 	}
 }
 
+// tracingAppenderCallsiteEventNamePattern matches
+// opentelemetry-appender-tracing's default LogRecord.EventName for a Rust
+// tracing::event! invocation with no explicit name: field: the tracing
+// callsite string tracing-core's event! macro expands to, for example
+// "event otel/src/events/session_telemetry.rs:1103" (a "event " prefix and
+// a ":<digits>" suffix, matched narrowly on that shape alone). codex-rs's
+// OTel log bridge (OpenTelemetryTracingBridge::new,
+// codex-rs/otel/src/provider.rs's logger_export_layer) sets this
+// unconditionally on every record it exports
+// (opentelemetry-appender-tracing's layer.rs:
+// log_record.set_event_name(metadata.name())), in addition to carrying the
+// real event name as a separate string attribute (codex-rs's
+// log_event!/log_and_trace_event! macros set event.name explicitly). The
+// two are not a real conflict; see normalizedLogEventName.
+var tracingAppenderCallsiteEventNamePattern = regexp.MustCompile(`^event .*:[0-9]+$`)
+
+func isTracingAppenderCallsiteEventName(name string) bool {
+	return tracingAppenderCallsiteEventNamePattern.MatchString(name)
+}
+
 func normalizedLogEventName(record *logspb.LogRecord, scopeName string) (string, error) {
 	if record == nil {
 		return "", nil
 	}
-	values := make([]string, 0, 4)
-	if record.EventName != "" {
-		values = append(values, normalizeNativeEventName(record.EventName, scopeName))
-	}
+	var attrValues []string
 	for _, attr := range record.Attributes {
 		if attr == nil || !isEventNameAttribute(attr.Key) {
 			continue
@@ -374,9 +391,25 @@ func normalizedLogEventName(record *logspb.LogRecord, scopeName string) (string,
 			return "", fmt.Errorf("event name attribute must be a string")
 		}
 		if text.StringValue != "" {
-			values = append(values, normalizeNativeEventName(text.StringValue, scopeName))
+			attrValues = append(attrValues, normalizeNativeEventName(text.StringValue, scopeName))
 		}
 	}
+
+	values := make([]string, 0, 1+len(attrValues))
+	if record.EventName != "" {
+		// Treat a tracing-appender callsite default as absent only when an
+		// event-name attribute is also present to take precedence from: a
+		// native SDK that carries the real name only in EventName (no
+		// attribute at all) still needs it below, unchanged from before
+		// this case existed. Every other EventName value -- matching or
+		// conflicting -- still participates, so a genuine conflict is still
+		// rejected.
+		if len(attrValues) == 0 || !isTracingAppenderCallsiteEventName(record.EventName) {
+			values = append(values, normalizeNativeEventName(record.EventName, scopeName))
+		}
+	}
+	values = append(values, attrValues...)
+
 	if len(values) == 0 {
 		return "", nil
 	}

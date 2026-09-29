@@ -111,6 +111,8 @@ Connects to the interactive session of a running agent.
 
 When connecting to a Hub behind Google Identity-Aware Proxy (IAP), `scion attach` automatically attempts to resolve transport-layer authentication (Google OIDC ID tokens) *before* evaluating the application-level access token gate. If transport auth can be successfully established (e.g., using your local Google Cloud SDK identity or GKE Workload Identity), the application token check is bypassed, enabling seamless attachment in proxy-auth/IAP mode.
 
+If the agent is stopped, the attach ends immediately rather than waiting and retrying (see [PTY close codes](/scion/reference/api/#pty-close-codes)).
+
 **Usage:** `scion attach <agent-name>`
 
 - **Key Bindings:**
@@ -326,6 +328,13 @@ the new generation cannot be provisioned, the Hub restores the previous generati
 Run it with no argument inside an agent container to migrate the agent itself (self-migration).
 Self-migration requires `--handoff-file`, because there is no one else to describe the work in
 progress. When migrating another agent, the handoff is optional.
+
+Reincarnation works for agents in clone-per-agent, shared-workspace (shared-plain), and
+Hub-managed workspaces. For a shared-workspace agent, the agent record, identity, and shared
+checkout are preserved, and sibling agents sharing the checkout are not restarted. Agents in
+worktree-per-agent projects are not yet supported; the Hub rejects the request with
+`400 Bad Request`. Reincarnating another agent requires the `agent.lifecycle` permission (the same
+as stop, start, and restart); an agent can always reincarnate itself.
 
 **Usage:** `scion reincarnate [agent-name] [flags]`
 
