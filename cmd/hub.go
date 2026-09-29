@@ -1394,12 +1394,14 @@ func runHubProjectsInfo(cmd *cobra.Command, args []string) error {
 
 // formatProviderCapacity renders a provider's broker capacity as
 // "count/limit" (e.g. "12/12"), just the count when the broker is unlimited
-// (e.g. "5"), or "-" when the hub could not resolve capacity for this
-// provider (ptone/scion#2161). AgentCount nil means capacity resolution
-// failed or was unavailable; AgentLimit nil (with AgentCount set) means the
-// broker has no effective agent limit. AgentCount here is broker-wide (see
-// hubclient.ProjectProvider.AgentCount) and, on an unlimited broker, may lag
-// up to the reconcile interval — it is not the project's own agent count.
+// (e.g. "5"), or "-" when the hub reports no capacity for this provider (no
+// quota enforcement or limit definition, resolution failed, or an older hub
+// that does not send the fields) (ptone/scion#2161). AgentCount nil means
+// capacity resolution failed or was unavailable; AgentLimit nil (with
+// AgentCount set) means the broker has no effective agent limit. AgentCount
+// here is broker-wide (see hubclient.ProjectProvider.AgentCount) and, on an
+// unlimited broker, may lag up to the reconcile interval — it is not the
+// project's own agent count.
 func formatProviderCapacity(p hubclient.ProjectProvider) string {
 	if p.AgentCount == nil {
 		return "-"

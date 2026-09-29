@@ -613,7 +613,7 @@ func TestFormatProviderCapacity(t *testing.T) {
 			want: "0",
 		},
 		{
-			name: "neither known: capacity could not be resolved",
+			name: "neither known: no capacity reported",
 			p:    hubclient.ProjectProvider{AgentCount: nil, AgentLimit: nil},
 			want: "-",
 		},
@@ -648,7 +648,7 @@ func TestProviderCapacityIndicator(t *testing.T) {
 			want: " (agents: 5)",
 		},
 		{
-			name: "neither known: capacity could not be resolved",
+			name: "neither known: no capacity reported",
 			p:    hubclient.ProjectProvider{AgentCount: nil, AgentLimit: nil},
 			want: " (agents: -)",
 		},

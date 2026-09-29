@@ -2060,9 +2060,9 @@ type projectProviderView struct {
 	// AgentLimit is the effective max_agents_per_broker ceiling for this
 	// broker. Unset (nil) when the hub has no quota enforcement configured,
 	// no max_agents_per_broker definition exists, resolution failed for
-	// this provider, or the broker is unlimited — so that "unlimited" is
-	// distinguishable from a limit of zero, and so older clients that
-	// don't know this field are unaffected.
+	// this provider, or the broker is unlimited. The field is never 0: a
+	// non-positive effective limit means unlimited and is omitted. Older
+	// clients that don't know this field are unaffected.
 	AgentLimit *int64 `json:"agentLimit,omitempty"`
 	// AgentCount is the number of active max_agents_per_broker reservations
 	// held by agents in a counted phase (see isBrokerQuotaCountedPhase),
