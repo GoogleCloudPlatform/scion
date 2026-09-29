@@ -217,12 +217,11 @@ type Decision struct {
 	CredentialKind string
 	ExplainTrace   []DecisionStep `json:"explainTrace,omitempty"`
 
-	// PermissionID is the exact canonical permission ID decide evaluated
-	// (AuthzRequest.Permission after the request's own permission
-	// resolution) — decorateDecision's caller passes it in, and it is never
-	// independently re-derived from Resource/Action downstream (E.2a, plan
-	// §3.2, ruling Q7). Empty for decisions that fail before permission
-	// resolution.
+	// PermissionID is the caller-supplied AuthzRequest.Permission, recorded
+	// only when it is a canonical ID present in the permissions registry.
+	// It is never derived from Resource/Action, and never an unregistered
+	// string: an unset or unrecognized Permission leaves this empty. See
+	// auditPermissionID, the single function that computes it.
 	PermissionID string `json:"permissionId,omitempty"`
 
 	// AlwaysAudit forces Decide's single audit exit to emit a decision audit
@@ -301,16 +300,10 @@ func (a *AuthzService) CheckAccess(ctx context.Context, identity Identity, resou
 }
 
 // Decide evaluates an authorization request through the AK1 kernel and emits
-// exactly one decision audit record for the outcome, regardless of which
-// internal return path inside decide produced it.
-//
-// E.2a (plan §3.2): before this wrapper existed, decide's body emitted its
-// own audit record at two internal points (the broker-denied early return and
-// the final kernel-evaluated return), which meant five other early-return
-// denial paths — including the UAT project/scope gate — produced no decision
-// audit record at all. Splitting the single audit emit out to this thin
-// wrapper covers every return path in decide by construction: no future
-// early return inside decide can silently skip the audit again.
+// exactly one decision audit record for the outcome, whichever internal
+// return path inside decide produced it. This is a structural guarantee: no
+// return path inside decide can skip the audit, because decide itself never
+// emits — only this wrapper does, once, after decide returns.
 func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decision {
 	decision := a.decide(ctx, request)
 	if a.decisionAuditEmitter != nil {
@@ -325,11 +318,11 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decision {
 	principal := request.Principal
 	if principal.Identity == nil {
-		return decorateDecision(Decision{Allowed: false, Reason: "missing principal"}, principal, request.Credential, "")
+		return decorateDecision(Decision{Allowed: false, Reason: "missing principal"}, principal, request.Credential, auditPermissionID(request))
 	}
 	derivedPrincipal := principalContextForIdentity(principal.Identity)
 	if principal.Kind != "" && principal.Kind != derivedPrincipal.Kind {
-		return decorateDecision(Decision{Allowed: false, Reason: "principal kind does not match identity"}, derivedPrincipal, request.Credential, "")
+		return decorateDecision(Decision{Allowed: false, Reason: "principal kind does not match identity"}, derivedPrincipal, request.Credential, auditPermissionID(request))
 	}
 	principal.Kind = derivedPrincipal.Kind
 	if principal.ID == "" {
@@ -344,9 +337,9 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	// Unsupported principal kinds — fail closed.
 	switch principal.Kind {
 	case PrincipalKindFederatedService:
-		return decorateDecision(Decision{Allowed: false, Reason: "federated service identities are not supported"}, principal, credential, "")
+		return decorateDecision(Decision{Allowed: false, Reason: "federated service identities are not supported"}, principal, credential, auditPermissionID(request))
 	case PrincipalKindBroker:
-		return decorateDecision(Decision{Allowed: false, Reason: "broker identities are not supported by authorization"}, principal, credential, "")
+		return decorateDecision(Decision{Allowed: false, Reason: "broker identities are not supported by authorization"}, principal, credential, auditPermissionID(request))
 	}
 
 	// Resolve permission ID. When the caller provides an explicit permission,
@@ -364,7 +357,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 		if user, ok := principal.Identity.(UserIdentity); ok {
 			if scoped, ok := user.(*ScopedUserIdentity); ok {
 				if denied := a.enforceUATConstraints(scoped, request.Resource, request.Action); denied != nil {
-					return decorateDecision(*denied, principal, credential, permissionID)
+					return decorateDecision(*denied, principal, credential, auditPermissionID(request))
 				}
 			}
 		}
@@ -394,7 +387,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 				MembershipPaths: []MembershipPathDetail{},
 			}
 		}
-		return decorateDecision(d, principal, credential, permissionID)
+		return decorateDecision(d, principal, credential, auditPermissionID(request))
 	}
 
 	// Build typed principal closure map (O2: type:id composite keys).
@@ -437,7 +430,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 				MembershipPaths: []MembershipPathDetail{},
 			}
 		}
-		return decorateDecision(d, principal, credential, permissionID)
+		return decorateDecision(d, principal, credential, auditPermissionID(request))
 	}
 
 	// ── Step 4: Load role definitions ─────────────────────────────────
@@ -462,7 +455,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 				MembershipPaths: []MembershipPathDetail{},
 			}
 		}
-		return decorateDecision(d, principal, credential, permissionID)
+		return decorateDecision(d, principal, credential, auditPermissionID(request))
 	}
 
 	// ── Step 5: Convert to CandidateBindings ──────────────────────────
@@ -624,7 +617,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 		}
 	}
 
-	return decorateDecision(decision, principal, credential, permissionID)
+	return decorateDecision(decision, principal, credential, auditPermissionID(request))
 }
 
 // DecideFromContext evaluates a request using the authenticated principal and
@@ -1460,15 +1453,14 @@ func credentialContextForIdentity(identity Identity) CredentialContext {
 }
 
 // decorateDecision finalizes a Decision with principal/credential attribution
-// and the exact permission ID that was evaluated. permissionID is "" for
-// decisions that return before permission resolution (missing principal,
-// unsupported principal kind) — see decide's early-return call sites.
-func decorateDecision(decision Decision, principal PrincipalContext, credential CredentialContext, permissionID string) Decision {
+// and the audit-recorded permission ID. permID is a value from
+// auditPermissionID(request), never independently derived here.
+func decorateDecision(decision Decision, principal PrincipalContext, credential CredentialContext, permID string) Decision {
 	decision.PrincipalKind = principal.Kind
 	decision.CredentialID = credential.ID
 	decision.CredentialType = credential.Type
 	decision.CredentialKind = string(credential.Kind)
-	decision.PermissionID = permissionID
+	decision.PermissionID = permID
 	if decision.MatchedPolicy == "" {
 		decision.MatchedPolicy = decision.BindingID
 	}
@@ -1476,6 +1468,20 @@ func decorateDecision(decision Decision, principal PrincipalContext, credential 
 		decision.MatchedGrant = decision.RoleName
 	}
 	return decision
+}
+
+// auditPermissionID returns the permission ID decision audit records: the
+// exact caller-supplied AuthzRequest.Permission, and only when it is a
+// canonical ID in the permissions registry. It is never derived from
+// Resource/Action, and never an unregistered string — ruling Q7 forbids
+// certifying an ID that does not exist in the catalog. Empty when the
+// caller supplied no Permission, or supplied one the registry does not
+// recognize.
+func auditPermissionID(request AuthzRequest) string {
+	if request.Permission != "" && isKnownPermission(request.Permission) {
+		return request.Permission
+	}
+	return ""
 }
 
 // enforceUATConstraints checks the project and scope restrictions carried by a

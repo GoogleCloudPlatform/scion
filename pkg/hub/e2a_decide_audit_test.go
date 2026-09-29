@@ -25,17 +25,14 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// E.2a (ptone/scion#2127, plan §3.2): the single decision-audit exit. Before
-// this change, five early-return denial paths inside Decide (now decide)
-// skipped the audit emit entirely — most notably the UAT project/scope gate,
-// reproduced in the E investigation (plan Appendix A) as "0 audit records"
-// for both an out-of-project and an out-of-scope UAT request.
+// Decide emits exactly one decision audit record per call, whichever return
+// path decide takes internally — including the UAT project/credential-scope
+// gate, an out-of-project resource, and an out-of-scope action.
 // ---------------------------------------------------------------------------
 
-// TestDecide_UATProjectGateDenialIsAudited reproduces the E investigation's
-// Appendix A finding and proves it is fixed: a UAT request denied by the
-// project constraint (pre-kernel gate) now produces exactly one decision
-// audit record, where it previously produced zero.
+// TestDecide_UATProjectGateDenialIsAudited proves a UAT request denied by the
+// project constraint (pre-kernel gate) produces exactly one decision audit
+// record.
 func TestDecide_UATProjectGateDenialIsAudited(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -73,10 +70,11 @@ func TestDecide_UATProjectGateDenialIsAudited(t *testing.T) {
 	require.Equal(t, before+1, len(emitter.records), "the UAT scope-gate denial must also emit exactly one decision audit record")
 }
 
-// TestDecide_PermissionIDPopulated proves ruling Q7: the decision audit
-// record's PermissionID is the exact canonical permission Decide evaluated,
-// not independently re-derived, and is empty for a decision that fails
-// before permission resolution.
+// TestDecide_PermissionIDPopulated proves ruling Q7 as tightened by review-1
+// finding F1: the decision audit record's PermissionID is exactly the
+// caller-supplied AuthzRequest.Permission, recorded only when it is a
+// canonical ID in the permissions registry — never derived from
+// Resource/Action, and never an unregistered string.
 func TestDecide_PermissionIDPopulated(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -85,18 +83,43 @@ func TestDecide_PermissionIDPopulated(t *testing.T) {
 
 	project := &store.Project{ID: tid("permid-project"), Name: "p", Slug: "permid-project", CreatedBy: DevUserID, OwnerID: DevUserID}
 	require.NoError(t, s.CreateProject(ctx, project))
-
 	identity := NewAuthenticatedUser(DevUserID, "dev@localhost", "Dev", "admin", "api")
-	decision := srv.authzService.CheckAccess(ctx, identity, Resource{Type: "project", ID: project.ID}, ActionRead)
-	require.True(t, decision.Allowed)
-	require.NotEmpty(t, decision.PermissionID)
+	principal := contextWithIdentity(ctx, identity)
 
+	// Case 1: an explicit, registered Permission gives exactly that value.
+	req := AuthzRequestFromContext(principal, Resource{Type: "project", ID: project.ID}, ActionRead)
+	req.Permission = "project.read"
+	decision := srv.authzService.Decide(ctx, req)
+	require.True(t, decision.Allowed)
+	require.Equal(t, "project.read", decision.PermissionID)
 	last := emitter.records[len(emitter.records)-1]
-	require.Equal(t, decision.PermissionID, last.PermissionID)
+	require.Equal(t, "project.read", last.PermissionID)
+
+	// Case 2: no Permission supplied. Even though resource+action resolves to
+	// a real registry entry internally (for kernel evaluation), the audit
+	// value must stay empty: it is never derived from Resource/Action.
+	before := len(emitter.records)
+	noPermReq := AuthzRequestFromContext(principal, Resource{Type: "project", ID: project.ID}, ActionRead)
+	require.Empty(t, noPermReq.Permission)
+	decision2 := srv.authzService.Decide(ctx, noPermReq)
+	require.True(t, decision2.Allowed)
+	require.Empty(t, decision2.PermissionID)
+	require.Equal(t, before+1, len(emitter.records))
+	require.Empty(t, emitter.records[len(emitter.records)-1].PermissionID)
+
+	// Case 3: an explicit but unregistered Permission string gives "" — never
+	// certified as if it were a real permission.
+	before = len(emitter.records)
+	bogusReq := AuthzRequestFromContext(principal, Resource{Type: "project", ID: project.ID}, ActionRead)
+	bogusReq.Permission = "not.a.real.permission"
+	decision3 := srv.authzService.Decide(ctx, bogusReq)
+	require.Empty(t, decision3.PermissionID)
+	require.Equal(t, before+1, len(emitter.records))
+	require.Empty(t, emitter.records[len(emitter.records)-1].PermissionID)
 
 	// A decision that fails before permission resolution (missing principal)
 	// leaves PermissionID empty — never invented.
-	before := len(emitter.records)
+	before = len(emitter.records)
 	missing := srv.authzService.Decide(ctx, AuthzRequest{Resource: Resource{Type: "project", ID: project.ID}, Action: ActionRead})
 	require.False(t, missing.Allowed)
 	require.Empty(t, missing.PermissionID)
