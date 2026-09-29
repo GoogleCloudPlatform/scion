@@ -617,6 +617,142 @@ describe('scion-chat-message path links', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// GitHub shortform issue/PR reference links (owner/repo#N)
+// ---------------------------------------------------------------------------
+
+describe('scion-chat-message GitHub shortform refs', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  function ghRefLinks(el: ScionChatMessage): HTMLAnchorElement[] {
+    return Array.from(
+      el.shadowRoot?.querySelectorAll('.md-content .gh-ref-link') ?? []
+    ) as HTMLAnchorElement[];
+  }
+
+  it('renders owner/repo#N as a link to the GitHub issue page', async () => {
+    const el = await mount('see ptone/scion#2217 for details');
+    const links = ghRefLinks(el);
+
+    expect(links).toHaveLength(1);
+    expect(links[0].getAttribute('href')).toBe('https://github.com/ptone/scion/issues/2217');
+    expect(links[0].textContent).toBe('ptone/scion#2217');
+    expect(links[0].getAttribute('target')).toBe('_blank');
+    expect(links[0].getAttribute('rel')).toBe('noopener noreferrer');
+  });
+
+  it('excludes trailing sentence punctuation from the match', async () => {
+    const el = await mount('fixed in ptone/scion#2217. Thanks!');
+    const links = ghRefLinks(el);
+
+    expect(links).toHaveLength(1);
+    expect(links[0].textContent).toBe('ptone/scion#2217');
+    expect(links[0].getAttribute('href')).toBe('https://github.com/ptone/scion/issues/2217');
+  });
+
+  it('excludes surrounding parentheses from the match', async () => {
+    const el = await mount('see the fix (ptone/scion#2217) for context');
+    const links = ghRefLinks(el);
+
+    expect(links).toHaveLength(1);
+    expect(links[0].textContent).toBe('ptone/scion#2217');
+  });
+
+  it('does not double-link a ref already inside an existing link', async () => {
+    // The mocked renderer turns `[text](url)` into `<a href="url">text</a>`.
+    const el = await mount(
+      'see [ptone/scion#2217](https://github.com/ptone/scion/issues/2217) for details'
+    );
+    const links = ghRefLinks(el);
+
+    expect(links).toHaveLength(0);
+    const anchor = el.shadowRoot?.querySelector('.md-content a');
+    expect(anchor?.querySelector('a')).toBeNull();
+  });
+
+  it('does not link a ref embedded in a URL path (preceded by /)', async () => {
+    const el = await mount('see https://example.com/ptone/scion#2217 for details');
+    const links = ghRefLinks(el);
+
+    expect(links).toHaveLength(0);
+  });
+
+  it('does not link the tail of a longer slash-separated path', async () => {
+    // Neither the whole thing nor the `b/c#12` tail is a valid ref: a repo
+    // can never contain `/`, and `b`/`c` are each preceded by `/`.
+    const el = await mount('path is a/b/c#12 in the tree');
+    const links = ghRefLinks(el);
+
+    expect(links).toHaveLength(0);
+  });
+
+  it('leaves refs inside an inline code span as literal text', async () => {
+    const el = await mount('run `git log ptone/scion#2217` to check');
+    const links = ghRefLinks(el);
+
+    expect(links).toHaveLength(0);
+    expect(el.shadowRoot?.querySelector('.md-content code')?.textContent).toBe(
+      'git log ptone/scion#2217'
+    );
+  });
+
+  it('leaves refs inside a fenced code block as literal text', async () => {
+    const el = await mount('run:\n```\necho ptone/scion#2217\n```\nthen see ptone/scion#2218');
+    const links = ghRefLinks(el);
+
+    expect(links).toHaveLength(1);
+    expect(links[0].textContent).toBe('ptone/scion#2218');
+    const pre = el.shadowRoot?.querySelector('.md-content pre');
+    expect(pre?.querySelector('.gh-ref-link')).toBeNull();
+  });
+
+  it('does not link a bare #123 with no owner/repo', async () => {
+    const el = await mount('see #123 for details');
+    const links = ghRefLinks(el);
+
+    expect(links).toHaveLength(0);
+  });
+
+  it('links alongside an adjacent file path without interference', async () => {
+    const el = await mount('check /workspace/src/main.go and ptone/scion#2217');
+    const links = ghRefLinks(el);
+    const paths = Array.from(
+      el.shadowRoot?.querySelectorAll('.md-content .path-link') ?? []
+    ) as HTMLElement[];
+
+    expect(links).toHaveLength(1);
+    expect(links[0].textContent).toBe('ptone/scion#2217');
+    expect(paths).toHaveLength(1);
+    expect(paths[0].dataset.filePath).toBe('/workspace/src/main.go');
+  });
+
+  it('renders multiple refs in the same message', async () => {
+    const el = await mount('see ptone/scion#2217 and GoogleCloudPlatform/scion#2081');
+    const links = ghRefLinks(el);
+
+    expect(links).toHaveLength(2);
+    expect(links[0].getAttribute('href')).toBe('https://github.com/ptone/scion/issues/2217');
+    expect(links[1].getAttribute('href')).toBe(
+      'https://github.com/GoogleCloudPlatform/scion/issues/2081'
+    );
+  });
+
+  it('links a mixed-case owner', async () => {
+    const el = await mount('see PTone/Scion#42 for details');
+    const links = ghRefLinks(el);
+
+    expect(links).toHaveLength(1);
+    expect(links[0].getAttribute('href')).toBe('https://github.com/PTone/Scion/issues/42');
+    expect(links[0].textContent).toBe('PTone/Scion#42');
+  });
+});
+
 describe('scion-chat-message cross-project label', () => {
   beforeEach(() => {
     document.body.innerHTML = '';

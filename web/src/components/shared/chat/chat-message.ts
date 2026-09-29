@@ -266,6 +266,63 @@ function styleEntityLinks(htmlStr: string): string {
   return out + styleEntityLinksInText(htmlStr.slice(cursor));
 }
 
+// ---------------------------------------------------------------------------
+// GitHub shortform issue/PR references (owner/repo#N) — auto-link to the
+// GitHub issue page. GitHub redirects /issues/N to /pull/N for PRs, so the
+// issues URL is correct for both.
+// ---------------------------------------------------------------------------
+
+/**
+ * Matches `owner/repo#123` shortform GitHub references:
+ *   - Owner: a GitHub username/org, `[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})`.
+ *   - Repo: `[A-Za-z0-9._-]+`.
+ *   - Number: one or more digits after `#`.
+ * The leading negative lookbehind requires the owner not be preceded by a
+ * word character or `/`. That is what keeps `foo/bar#1` from double-linking
+ * inside a URL or file path, and keeps `a/b/c#12` from also matching the
+ * shorter `b/c#12` tail: a repo can never contain `/`, so a match starting at
+ * `a` fails structurally, and a match starting at `b` or `c` is blocked by
+ * the preceding `/`. The trailing negative lookahead excludes a following
+ * word character, so `#2217a` cannot be split into a ref plus stray text.
+ */
+const GITHUB_REF_REGEX =
+  /(?<![\w/])([A-Za-z0-9][A-Za-z0-9-]{0,38})\/([A-Za-z0-9._-]+)#(\d+)(?!\w)/g;
+
+/** Apply the GitHub-ref pattern to a text segment (outside code/HTML regions). */
+function styleGithubRefsInText(text: string): string {
+  return text.replace(GITHUB_REF_REGEX, (full, owner: string, repo: string, number: string) => {
+    const url = `https://github.com/${owner}/${repo}/issues/${number}`;
+    return `<a class="entity-link gh-ref-link" href="${url}" target="_blank" rel="noopener noreferrer" title="Open ${full} on GitHub">${full}</a>`;
+  });
+}
+
+/**
+ * Skip regions for GitHub-ref processing. Unlike ENTITY_SKIP_REGION, this
+ * also skips inline `<code>` spans in full — a shortform reference inside
+ * backticks is literal text, not a link. `<pre>` fences and existing `<a>`
+ * elements are also skipped in full, so a ref inside a fenced code block, an
+ * existing markdown link, or an already-autolinked URL is never re-linked.
+ */
+const GITHUB_REF_SKIP_REGION =
+  '<pre\\b[^>]*>[\\s\\S]*?</pre>|<a\\b[^>]*>[\\s\\S]*?</a>|<code\\b[^>]*>[\\s\\S]*?</code>|<[^>]+>';
+
+/**
+ * Post-process rendered markdown to turn `owner/repo#123` shortform
+ * references into links to the GitHub issue page, leaving code blocks,
+ * inline code, and existing links untouched.
+ */
+function styleGithubRefs(htmlStr: string): string {
+  const skip = new RegExp(GITHUB_REF_SKIP_REGION, 'gi');
+  let out = '';
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  while ((match = skip.exec(htmlStr)) !== null) {
+    out += styleGithubRefsInText(htmlStr.slice(cursor, match.index)) + match[0];
+    cursor = match.index + match[0].length;
+  }
+  return out + styleGithubRefsInText(htmlStr.slice(cursor));
+}
+
 /** True when the file is a Markdown document. */
 function isMarkdownFile(name: string): boolean {
   return isMarkdownFileName(name);
@@ -1747,6 +1804,7 @@ export class ScionChatMessage extends LitElement {
       let rendered = renderer.render(this.body);
       rendered = styleMentions(rendered);
       rendered = styleEntityLinks(rendered);
+      rendered = styleGithubRefs(rendered);
       this.renderedHtml = rendered;
     } catch {
       if (taskId !== this.renderTaskId) return;
