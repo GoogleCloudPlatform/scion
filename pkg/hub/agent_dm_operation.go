@@ -134,6 +134,26 @@ type AgentDMInput struct {
 	// before dispatching. Wake runs after all admission checks so that
 	// denied requests cannot resume an agent (#1691 AC-2).
 	Wake bool
+
+	// SkipPhaseGate bypasses the target-phase admission check (Phase 1b)
+	// that otherwise rejects delivery to a non-running target when Wake is
+	// false. It has effect ONLY when Type is messages.TypeMention and Wake
+	// is false — set it only from the agent mention fan-out path
+	// (agent_mention_fanout.go), never from a primary send. Every other
+	// admission check (rate budget, message length, authorization, foreign
+	// attachment/raw rejection, dispatch availability) and every side
+	// effect (persistence, SSE, audit, dispatch) is unaffected: a mention to
+	// a non-running agent — stopped, suspended, errored, or any other
+	// not-yet-running phase (created, provisioning, starting, etc.) — still
+	// gets its row and a buffered dispatch attempt, matching how
+	// processMentions and chat v2 secondaries have always treated
+	// unreachable mention recipients: they dispatch through the broker
+	// without ever checking phase at all, relying on the broker to buffer,
+	// for every non-running phase alike. There is no product reason to
+	// distinguish stopped/suspended/errored from any other non-running
+	// phase here — an agent that merely hasn't finished starting yet is
+	// exactly as unable to see the mention right now as a stopped one.
+	SkipPhaseGate bool
 }
 
 // AgentDMOutcome enumerates the possible delivery result states.
@@ -377,7 +397,10 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			if wakeErr != nil {
 				return nil, wakeErr
 			}
-		} else {
+		} else if !(input.SkipPhaseGate && input.Type == messages.TypeMention) {
+			// SkipPhaseGate applies only to mention deliveries — a non-mention
+			// send always gets the phase gate, regardless of the flag, so a
+			// caller cannot use it to bypass phase checks for a primary send.
 			if phaseErr := validateAgentDeliverable(input.TargetAgent); phaseErr != nil {
 				return nil, phaseErr
 			}
@@ -491,13 +514,17 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// 9. Publish SSE event.
 	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
 
-	// 10. Render delivery text envelope.
+	// 10. Render delivery text envelope. IsMention marks the envelope as a
+	// mention (not a message) for Type mention deliveries, matching how chat
+	// v2 and broker-inbound already render their secondary/fan-out
+	// recipients.
 	if s.writeDenyEnabled() {
 		structuredMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
 			MessageID:  storeMsg.ID,
 			ConvResult: input.ConvResult,
 			Msg:        structuredMsg,
 			CreatedAt:  storeMsg.CreatedAt,
+			IsMention:  input.Type == messages.TypeMention,
 		})
 	}
 
@@ -655,33 +682,36 @@ func WriteAgentDMError(w http.ResponseWriter, dmErr *AgentDMError) {
 // Ambiguous outcomes (dispatch succeeded but state tracking failed) use
 // HTTP 202 Accepted with status "ambiguous" and the stable message ID
 // for caller correlation. No blind retry guidance is returned (AC-4).
-func WriteAgentDMResult(w http.ResponseWriter, result *AgentDMResult) {
+// mentionResults is included in the response when non-empty; pass nil when
+// there are none to report.
+func WriteAgentDMResult(w http.ResponseWriter, result *AgentDMResult, mentionResults []messages.MentionResult) {
+	status := "dispatched"
+	httpStatus := http.StatusOK
+	var deferredNote string
 	switch result.Outcome {
 	case AgentDMAmbiguous:
-		writeJSON(w, http.StatusAccepted, map[string]interface{}{
-			"message_id":   result.MessageID,
-			"status":       "ambiguous",
-			"recipient":    result.Recipient,
-			"recipient_id": result.RecipientID,
-		})
+		status = "ambiguous"
+		httpStatus = http.StatusAccepted
 	case AgentDMDeferred:
 		// Design agent-reincarnate §3.7: the target is mid-migration. The
 		// literal "deferred" field is the contract callers key on; the
 		// envelope also carries message_id/recipient for correlation, same
 		// as every other outcome.
-		writeJSON(w, http.StatusAccepted, map[string]interface{}{
-			"message_id":   result.MessageID,
-			"status":       "deferred",
-			"deferred":     "agent is reincarnating",
-			"recipient":    result.Recipient,
-			"recipient_id": result.RecipientID,
-		})
-	default:
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"message_id":   result.MessageID,
-			"status":       "dispatched",
-			"recipient":    result.Recipient,
-			"recipient_id": result.RecipientID,
-		})
+		status = "deferred"
+		httpStatus = http.StatusAccepted
+		deferredNote = "agent is reincarnating"
 	}
+	body := map[string]interface{}{
+		"message_id":   result.MessageID,
+		"status":       status,
+		"recipient":    result.Recipient,
+		"recipient_id": result.RecipientID,
+	}
+	if deferredNote != "" {
+		body["deferred"] = deferredNote
+	}
+	if len(mentionResults) > 0 {
+		body["mention_results"] = mentionResults
+	}
+	writeJSON(w, httpStatus, body)
 }
