@@ -1008,3 +1008,90 @@ func TestMentionFanout_ExcludedTypeAtWiringLevelDoesNotFanOut(t *testing.T) {
 		})
 	}
 }
+
+// A mention rejected by the sender's own rate budget must not fail the
+// primary delivery it rode in on. The primary and every mention share one
+// token bucket, so with the bucket sized to fit exactly the primary plus one
+// mention, a second mention in the same body is rate-limited — and the
+// primary must still be reported as dispatched, with exactly one dispatch to
+// it, regardless. This exercises the outbound DM branch end to end (HTTP
+// response plus dispatcher), not just fanOutAgentMentions in isolation,
+// which never touches the primary at all and so cannot prove this on its
+// own.
+func TestMentionFanout_OutboundDM_RateLimitedMentionDoesNotFailPrimary(t *testing.T) {
+	srv, s, project, sender, target, bystander, dmConvID, dispatcher := mentionFanoutSetup(t)
+	ctx := context.Background()
+
+	second := &store.Agent{
+		ID: tid("mention-fanout-ratelimit-outbound-second"), Name: "second-mention", Slug: "second-mention",
+		ProjectID: project.ID, Phase: "running", RuntimeBrokerID: target.RuntimeBrokerID,
+		MessageMode: store.MessageModeProject,
+	}
+	require.NoError(t, s.CreateAgent(ctx, second))
+
+	// Exactly 2 agent-class sends per minute: the primary consumes one,
+	// leaving exactly one more for the first mention. The second mention
+	// finds the bucket empty.
+	fakeNow := time.Now()
+	srv.chatSendLimiter = newChatSendLimiterWithRates(map[chatSenderClass]float64{
+		chatSenderHuman:       chatSendHumanRatePerMinute,
+		chatSenderAgent:       2,
+		chatSenderAgentMirror: chatSendAgentMirrorRatePerMinute,
+	}, func() time.Time { return fakeNow })
+
+	rr := sendViaOutbound(t, srv, sender, dmConvID, "thanks @"+bystander.Slug+" and @"+second.Slug)
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+	var resp struct {
+		Status         string                   `json:"status"`
+		MentionResults []messages.MentionResult `json:"mention_results"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Equal(t, "dispatched", resp.Status, "the primary must be reported as dispatched, not failed by a mention's rate limit")
+	require.Len(t, resp.MentionResults, 2)
+	require.Equal(t, "delivered", resp.MentionResults[0].Status)
+	require.Equal(t, "rate_limited", resp.MentionResults[1].Status)
+
+	require.Len(t, dispatchesTo(dispatcher, target.ID), 1, "the primary must be dispatched exactly once")
+	require.Len(t, dispatchesTo(dispatcher, bystander.ID), 1)
+	require.Empty(t, dispatchesTo(dispatcher, second.ID))
+}
+
+// Same as above, through the /message agent fork instead of the outbound DM
+// branch: a mention rate-limited by the shared token bucket must not fail
+// the primary /message delivery.
+func TestMentionFanout_MessageFork_RateLimitedMentionDoesNotFailPrimary(t *testing.T) {
+	srv, s, project, sender, target, bystander, _, dispatcher := mentionFanoutSetup(t)
+	ctx := context.Background()
+
+	second := &store.Agent{
+		ID: tid("mention-fanout-ratelimit-message-second"), Name: "second-mention", Slug: "second-mention",
+		ProjectID: project.ID, Phase: "running", RuntimeBrokerID: target.RuntimeBrokerID,
+		MessageMode: store.MessageModeProject,
+	}
+	require.NoError(t, s.CreateAgent(ctx, second))
+
+	fakeNow := time.Now()
+	srv.chatSendLimiter = newChatSendLimiterWithRates(map[chatSenderClass]float64{
+		chatSenderHuman:       chatSendHumanRatePerMinute,
+		chatSenderAgent:       2,
+		chatSenderAgentMirror: chatSendAgentMirrorRatePerMinute,
+	}, func() time.Time { return fakeNow })
+
+	rr := sendViaStructured(t, srv, sender, target, "thanks @"+bystander.Slug+" and @"+second.Slug)
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+	var resp struct {
+		Status         string                   `json:"status"`
+		MentionResults []messages.MentionResult `json:"mention_results"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Equal(t, "dispatched", resp.Status, "the primary must be reported as dispatched, not failed by a mention's rate limit")
+	require.Len(t, resp.MentionResults, 2)
+	require.Equal(t, "delivered", resp.MentionResults[0].Status)
+	require.Equal(t, "rate_limited", resp.MentionResults[1].Status)
+
+	require.Len(t, dispatchesTo(dispatcher, target.ID), 1, "the primary must be dispatched exactly once")
+	require.Len(t, dispatchesTo(dispatcher, bystander.ID), 1)
+	require.Empty(t, dispatchesTo(dispatcher, second.ID))
+}
