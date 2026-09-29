@@ -194,18 +194,31 @@ func TestGoogleIdentityResolver_ExistingBinding_NoChange_ZeroUpdateUser(t *testi
 	}
 
 	counting := &countingUserStore{UserStore: h.store}
-	// No SetSignInPolicyDeps: liveSignInPolicyDeps defaults UpdateUser to
-	// r.users.UpdateUser, which is the counting wrapper here, so this
-	// measures exactly what a real request would write. A nil roleFor
-	// leaves role re-evaluation a no-op, which is fine — this test is about
-	// the write, not the role decision (covered elsewhere).
 	resolver := NewGoogleIdentityResolver(counting, h.extStore, h.srv.isUserAuthorized, nil, nil)
+
+	// Wire the real production role-evaluation and grant-sync callbacks
+	// (unlike a bare resolver, so a regression that makes production
+	// roleFor/syncGrants report a spurious change on every call is actually
+	// caught here), but keep persistence routed through the counting
+	// wrapper so both counters stay observable.
+	deps := h.srv.signInPolicyDeps()
+	deps.UpdateUser = counting.UpdateUser
+	syncGrantsCalls := 0
+	realSyncGrants := deps.syncGrants
+	deps.syncGrants = func(ctx context.Context, userID, role string) error {
+		syncGrantsCalls++
+		return realSyncGrants(ctx, userID, role)
+	}
+	resolver.SetSignInPolicyDeps(deps)
 
 	if _, err := resolver.Resolve(ctx, identity, ResolvePolicy{}); err != nil {
 		t.Fatalf("resolve failed: %v", err)
 	}
 	if counting.updateUserCalls != 0 {
 		t.Fatalf("expected zero UpdateUser calls when nothing changed, got %d", counting.updateUserCalls)
+	}
+	if syncGrantsCalls != 0 {
+		t.Fatalf("expected zero syncGrants calls when nothing changed, got %d", syncGrantsCalls)
 	}
 }
 
@@ -391,5 +404,52 @@ func TestGoogleIdentityResolver_CollisionWinner_InvitedActivatesConsistently(t *
 	}
 	if _, lookupErr := h.extStore.GetExternalIdentity(ctx, "google", googleCanonicalIssuer, identity.Subject); lookupErr != nil {
 		t.Errorf("expected a binding to be created for the collision winner: %v", lookupErr)
+	}
+}
+
+// TestGoogleIdentityResolver_CollisionWinner_ActiveWinner_GrantsRestored
+// covers the collision-winner handback's AlwaysPersist setting for an
+// already-active winner whose role does not change: with AlwaysPersist,
+// grants are synced on every handback, not only on activation or a role
+// change, so a winner whose hub-members membership is missing (for example,
+// from an earlier grant-sync failure) gets it restored on this call alone.
+func TestGoogleIdentityResolver_CollisionWinner_ActiveWinner_GrantsRestored(t *testing.T) {
+	identity := validGmailIdentity()
+	h := newSignInPolicyHarness(t, ServerConfig{}, &fakeGoogleValidator{idTokenResult: identity})
+
+	ctx := context.Background()
+	winnerID := uuid.New().String()
+	if err := h.store.CreateUser(ctx, &store.User{
+		ID:      winnerID,
+		Email:   identity.Email,
+		Role:    store.UserRoleMember,
+		Status:  store.UserStatusActive,
+		Created: time.Now(),
+	}); err != nil {
+		t.Fatalf("seed active winner: %v", err)
+	}
+	// Deliberately do not add the winner to hub-members: simulates a
+	// membership that was never synced (or was lost), which only an
+	// unconditional grant sync on this handback — not one gated on a role
+	// change — would repair.
+	if isHubMember(t, h.store, winnerID) {
+		t.Fatal("test setup: winner must not already be a hub member")
+	}
+
+	resolver := NewGoogleIdentityResolver(&collisionUserStore{UserStore: h.store}, h.extStore, h.srv.isUserAuthorized, nil, nil)
+	resolver.SetSignInPolicyDeps(h.srv.signInPolicyDeps())
+
+	user, err := resolver.Resolve(ctx, identity, ResolvePolicy{})
+	if err != nil {
+		t.Fatalf("resolve failed: %v", err)
+	}
+	if user.ID != winnerID {
+		t.Fatalf("expected the collision winner to be reused, got %q", user.ID)
+	}
+	if user.Role != store.UserRoleMember {
+		t.Fatalf("expected role to stay %q, got %q", store.UserRoleMember, user.Role)
+	}
+	if !isHubMember(t, h.store, winnerID) {
+		t.Error("expected the winner's missing hub-members grant to be restored on this handback")
 	}
 }
