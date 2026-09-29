@@ -484,9 +484,9 @@ func TestSecretFetch_MetaFieldChangedAtSameVersionNotDelivered(t *testing.T) {
 // ============================================================================
 
 // hookSMClient wraps mockSMClient so a test can run code at the exact point
-// GCPBackend.fetchValue reads Secret Manager, to place a database write
-// precisely between that read and fetchValue's own re-read of the database
-// record afterward. Each hook fires at most once and then clears itself.
+// GCPBackend.fetchValue reads Secret Manager: to place a write around that read,
+// or to fail if the read happens at all. Each hook fires at most once and then
+// clears itself.
 type hookSMClient struct {
 	*mockSMClient
 	beforeAccess, afterAccess func()
@@ -565,6 +565,48 @@ func TestSecretFetch_RecordChangedDuringSecretManagerReadNotDelivered(t *testing
 	}
 	if res.Value != "" {
 		t.Errorf("expected empty value, got %q", res.Value)
+	}
+}
+
+// TestSecretFetch_MismatchedRecordNotReadFromSecretManager verifies that
+// GCPBackend.fetchValue rejects a meta whose record no longer matches
+// before it reads Secret Manager, not only in the post-read re-check: a
+// stale meta never causes a Secret Manager access.
+func TestSecretFetch_MismatchedRecordNotReadFromSecretManager(t *testing.T) {
+	ctx := context.Background()
+	st, err := newTestStore(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatalf("failed to migrate test store: %v", err)
+	}
+	hook := &hookSMClient{mockSMClient: newMockSMClient()}
+	backend := NewGCPBackendWithClient(st, hook, "test-project", "test-hub-id")
+
+	_, oldMeta, err := backend.Set(ctx, &SetSecretInput{
+		Name: "PRECHECK_KEY", Value: "v1", SecretType: TypeEnvironment,
+		Scope: ScopeUser, ScopeID: "precheck-user",
+	})
+	if err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+	if _, _, err := backend.Set(ctx, &SetSecretInput{
+		Name: "PRECHECK_KEY", Value: "v2", SecretType: TypeEnvironment,
+		Scope: ScopeUser, ScopeID: "precheck-user",
+	}); err != nil {
+		t.Fatalf("Set (rotate) failed: %v", err)
+	}
+
+	hook.beforeAccess = func() {
+		t.Error("Secret Manager was read for a record that no longer matches the metadata")
+	}
+	results, err := backend.FetchValues(ctx, []SecretMeta{*oldMeta})
+	if err != nil {
+		t.Fatalf("FetchValues failed: %v", err)
+	}
+	if res := results[oldMeta.ID]; res.Err != store.ErrNotFound || res.Value != "" {
+		t.Errorf("expected store.ErrNotFound and empty value, got value=%q err=%v", res.Value, res.Err)
 	}
 }
 
