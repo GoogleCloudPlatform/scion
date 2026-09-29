@@ -157,7 +157,7 @@ func (f *materialFailingStore) GetDelegationEdgesForDelegate(ctx context.Context
 }
 
 // callCountingStore wraps a store.Store and counts calls to
-// GetDelegationEdgesForDelegate, for the O-3 "evaluated once per request"
+// GetDelegationEdgesForDelegate, for the "evaluated once per request"
 // regression.
 type callCountingStore struct {
 	store.Store
@@ -170,8 +170,8 @@ func (c *callCountingStore) GetDelegationEdgesForDelegate(ctx context.Context, d
 }
 
 // countingSecretBackend wraps a secret.SecretBackend and counts GetMeta and
-// Get calls, for the N-2 "denied request reads no metadata" regression and
-// the "no value access before authorization" runtime-subset regression.
+// Get calls, for the "denied request reads no metadata" regression and the
+// "no value access before authorization" runtime-subset regression.
 type countingSecretBackend struct {
 	secret.SecretBackend
 	getMetaCalls int
@@ -205,7 +205,7 @@ func (r *raceSecretBackend) Get(ctx context.Context, name, scope, scopeID string
 }
 
 // erroringMetaBackend wraps a secret.SecretBackend and returns a fixed error
-// from GetMeta, for the N-3 "backend error text stays neutral" regression.
+// from GetMeta, for the "backend error text stays neutral" regression.
 type erroringMetaBackend struct {
 	secret.SecretBackend
 	err error

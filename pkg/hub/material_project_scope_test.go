@@ -17,7 +17,7 @@
 // Package hub — F.2a tests for the project-scope per-item check (check 7):
 // the single per-request project.secret_read decision, the existing
 // delegation ceiling it inherits, and the neutrality/ordering regressions
-// pinned alongside it. See F/design/f2-material-selection.md section 8.2.
+// pinned alongside it.
 package hub
 
 import (
@@ -37,6 +37,58 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/stretchr/testify/require"
 )
+
+// assertProjectDenied issues both a fetch (multi-key POST) and a get
+// (by-key GET) for key against agentID/token and asserts the full check-7
+// deny contract: not_found with no value on both endpoints, no backend
+// value read, and an audited denied_by_policy reason with a non-empty
+// Detail.
+func assertProjectDenied(t *testing.T, f *materialFixture, agentID, token, key string) {
+	t.Helper()
+
+	counting := &countingSecretBackend{SecretBackend: f.Server.secretBackend}
+	f.Server.SetSecretBackend(counting)
+
+	rec := newRecordingMaterialAuditor()
+	f.Server.SetAuditLogger(rec)
+
+	fetchRec := doRequestWithAgentToken(t, f.Server, http.MethodPost, "/api/v1/agent/secrets",
+		secretFetchRequest{Keys: []string{key}}, token)
+	if fetchRec.Code != http.StatusOK {
+		t.Fatalf("fetch: expected 200 (per-item status, not a request-level error), got %d: %s", fetchRec.Code, fetchRec.Body.String())
+	}
+	var fetchResp secretFetchResponse
+	require.NoError(t, json.NewDecoder(fetchRec.Body).Decode(&fetchResp))
+	if len(fetchResp.Secrets) != 1 || fetchResp.Secrets[0].Status != "not_found" ||
+		fetchResp.Secrets[0].Value != "" || fetchResp.Secrets[0].Error != "secret not found" {
+		t.Fatalf("fetch: expected not_found/secret not found with no value, got %+v", fetchResp.Secrets)
+	}
+
+	getRec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+agentID+"/secrets/"+key, nil, token)
+	if getRec.Code != http.StatusNotFound {
+		t.Fatalf("get: expected 404, got %d: %s", getRec.Code, getRec.Body.String())
+	}
+
+	if counting.getCalls != 0 {
+		t.Fatalf("expected no value read (Get) on a denied item, got %d Get calls", counting.getCalls)
+	}
+
+	if len(rec.events) != 2 {
+		t.Fatalf("expected 2 material selection events (fetch and get), got %d", len(rec.events))
+	}
+	for _, e := range rec.events {
+		if len(e.Items) != 1 {
+			t.Fatalf("expected 1 item per event, got %d", len(e.Items))
+		}
+		item := e.Items[0]
+		if item.Reason != ReasonDeniedByPolicy {
+			t.Fatalf("expected reason %s, got %s", ReasonDeniedByPolicy, item.Reason)
+		}
+		if item.Detail == "" {
+			t.Fatalf("expected a non-empty Detail carrying Decision.Reason verbatim")
+		}
+	}
+}
 
 // TestAgentSecretFetch_OtherProjectKeyNotReturned covers a project-scope key
 // that exists only in a different project: not_found, never a value.
@@ -62,8 +114,8 @@ func TestAgentSecretFetch_OtherProjectKeyNotReturned(t *testing.T) {
 	}
 }
 
-// TestMaterialRuntime_ProjectSecretReadActionMatchesRegistry (R-3b) pins
-// that actionProjectSecretRead is named after the project.secret_read
+// TestMaterialRuntime_ProjectSecretReadActionMatchesRegistry pins that
+// actionProjectSecretRead is named after the project.secret_read
 // registry row, not after any effect, so a reader cannot mistake it for a
 // purpose-built action.
 func TestMaterialRuntime_ProjectSecretReadActionMatchesRegistry(t *testing.T) {
@@ -78,8 +130,8 @@ func TestMaterialRuntime_ProjectSecretReadActionMatchesRegistry(t *testing.T) {
 	t.Fatal("project.secret_read row not found in permissions.Registry")
 }
 
-// TestAgentSecretRead_ProjectScopeCeilingLookupFailureDenies (R-2) pins that
-// a failing delegation-edge store denies (fail-closed) rather than allowing.
+// TestAgentSecretRead_ProjectScopeCeilingLookupFailureDenies pins that a
+// failing delegation-edge store denies (fail-closed) rather than allowing.
 func TestAgentSecretRead_ProjectScopeCeilingLookupFailureDenies(t *testing.T) {
 	f := newMaterialFixture(t, "ceiling-lookup-fail")
 	setBackfillCompleted(t, f.Store)
@@ -90,28 +142,22 @@ func TestAgentSecretRead_ProjectScopeCeilingLookupFailureDenies(t *testing.T) {
 		getDelegationEdgesForDelegateErr: errors.New("injected edge lookup failure"),
 	}, logging.Subsystem("hub.auth"))
 
-	rec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+f.AgentID+"/secrets/CEILING_KEY", nil, f.Token)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("expected 404 (not_found; a failing edge store denies), got %d: %s", rec.Code, rec.Body.String())
-	}
+	assertProjectDenied(t, f, f.AgentID, f.Token, "CEILING_KEY")
 }
 
-// TestAgentSecretRead_ProjectScopeMissingEdgeAfterBackfillDenies (R-2) pins
-// that once the backfill marker is set, a hub-attested agent with no
+// TestAgentSecretRead_ProjectScopeMissingEdgeAfterBackfillDenies pins that
+// once the backfill marker is set, a hub-attested agent with no
 // recorded edge denies for secret_read (not read-only-classified).
 func TestAgentSecretRead_ProjectScopeMissingEdgeAfterBackfillDenies(t *testing.T) {
 	f := newMaterialFixture(t, "missing-edge-postbf")
 	setBackfillCompleted(t, f.Store)
 	seedSecret(t, f.Server.secretBackend, "POSTBF_KEY", "v", "", "", f.ProjectID)
 
-	rec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+f.AgentID+"/secrets/POSTBF_KEY", nil, f.Token)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("expected 404 (not_found; missing edge after backfill denies), got %d: %s", rec.Code, rec.Body.String())
-	}
+	assertProjectDenied(t, f, f.AgentID, f.Token, "POSTBF_KEY")
 }
 
-// TestAgentSecretRead_ProjectScopeDuplicateActiveEdgesDenies (R-2) pins the
-// application-level safety net (8e): the partial unique index on
+// TestAgentSecretRead_ProjectScopeDuplicateActiveEdgesDenies pins the
+// application-level safety net (check 7e): the partial unique index on
 // (delegate_type, delegate_id, scope_type, scope_id) WHERE active=true makes
 // a genuine duplicate unreachable through normal store writes (see
 // TestDelegationCeiling_DuplicateEdgesFailClosed), so this test injects the
@@ -134,10 +180,7 @@ func TestAgentSecretRead_ProjectScopeDuplicateActiveEdgesDenies(t *testing.T) {
 		},
 	}, logging.Subsystem("hub.auth"))
 
-	rec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+f.AgentID+"/secrets/DUP_KEY", nil, f.Token)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("expected 404 (not_found; duplicate active edges deny), got %d: %s", rec.Code, rec.Body.String())
-	}
+	assertProjectDenied(t, f, f.AgentID, f.Token, "DUP_KEY")
 }
 
 // TestAgentSecretRead_ProjectScopeRequiresDelegatorProjectSecretRead (BC-23)
@@ -162,10 +205,7 @@ func TestAgentSecretRead_ProjectScopeRequiresDelegatorProjectSecretRead(t *testi
 	plainToken, err := f.Server.agentTokenService.GenerateAgentToken(plainAgentID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{plainDelegator})
 	require.NoError(t, err)
 
-	rec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+plainAgentID+"/secrets/DELEGATOR_KEY", nil, plainToken)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("expected 404 for a delegator without project.secret_read, got %d: %s", rec.Code, rec.Body.String())
-	}
+	assertProjectDenied(t, f, plainAgentID, plainToken, "DELEGATOR_KEY")
 
 	ownerDelegator := tid("owner-delegator")
 	createDCUser(t, f.Store, ownerDelegator, "owner-delegator@test.com", f.ProjectID, store.ProjectRoleOwner)
@@ -186,7 +226,7 @@ func TestAgentSecretRead_ProjectScopeRequiresDelegatorProjectSecretRead(t *testi
 	}
 }
 
-// TestAgentSecretRead_ProjectScopeAgentDelegatorWithoutSecretReadDenies (R-1)
+// TestAgentSecretRead_ProjectScopeAgentDelegatorWithoutSecretReadDenies
 // pins that the parent agent's stored role must itself hold
 // project:secret:read.
 func TestAgentSecretRead_ProjectScopeAgentDelegatorWithoutSecretReadDenies(t *testing.T) {
@@ -211,14 +251,11 @@ func TestAgentSecretRead_ProjectScopeAgentDelegatorWithoutSecretReadDenies(t *te
 	childToken, err := f.Server.agentTokenService.GenerateAgentToken(childID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{f.UserID, parentID})
 	require.NoError(t, err)
 
-	rec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+childID+"/secrets/AGENT_DELEGATOR_KEY", nil, childToken)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("expected 404 (parent lacks project:secret:read), got %d: %s", rec.Code, rec.Body.String())
-	}
+	assertProjectDenied(t, f, childID, childToken, "AGENT_DELEGATOR_KEY")
 }
 
-// TestAgentSecretRead_ProjectScopeAgentDelegatorWithSecretReadAllowed (R-1)
-// pins the positive case: a full parent with an owner-delegated edge is ok.
+// TestAgentSecretRead_ProjectScopeAgentDelegatorWithSecretReadAllowed pins
+// the positive case: a full parent with an owner-delegated edge is ok.
 func TestAgentSecretRead_ProjectScopeAgentDelegatorWithSecretReadAllowed(t *testing.T) {
 	f := newMaterialFixture(t, "agent-delegator-full")
 	ctx := context.Background()
@@ -247,10 +284,10 @@ func TestAgentSecretRead_ProjectScopeAgentDelegatorWithSecretReadAllowed(t *test
 	}
 }
 
-// TestAgentSecretRead_ProjectScopeDeletedDelegatingUserDenies (22:39Z) has
-// two subtests, as ruled: the root-user-is-the-delegator case denies at
-// check 5, and the different-delegator case denies through the ceiling's
-// orphaned-delegation branch.
+// TestAgentSecretRead_ProjectScopeDeletedDelegatingUserDenies has two
+// subtests: the root-user-is-the-delegator case denies at check 5, and the
+// different-delegator case denies through the ceiling's orphaned-delegation
+// branch.
 func TestAgentSecretRead_ProjectScopeDeletedDelegatingUserDenies(t *testing.T) {
 	t.Run("root_delegator_deleted", func(t *testing.T) {
 		f := newMaterialFixture(t, "deleted-root-delegator")
@@ -270,8 +307,8 @@ func TestAgentSecretRead_ProjectScopeDeletedDelegatingUserDenies(t *testing.T) {
 		setBackfillCompleted(t, f.Store)
 		seedSecret(t, f.Server.secretBackend, "DEL_EDGE_KEY", "v", "", "", f.ProjectID)
 
-		// Fixture (v6, N-1): the delegator holds project.secret_read through
-		// a project owner binding and has no system role binding, so it
+		// Fixture: the delegator holds project.secret_read through a
+		// project owner binding and has no system role binding, so it
 		// cannot pass IsSystemAdmin before GetUser sees it is deleted.
 		uDeleg := tid("edge-delegator-to-delete")
 		createDCUser(t, f.Store, uDeleg, "edge-delegator-to-delete@test.com", f.ProjectID, store.ProjectRoleOwner)
@@ -280,16 +317,13 @@ func TestAgentSecretRead_ProjectScopeDeletedDelegatingUserDenies(t *testing.T) {
 
 		require.NoError(t, f.Store.DeleteUser(ctx, uDeleg))
 
-		rec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+f.AgentID+"/secrets/DEL_EDGE_KEY", nil, f.Token)
-		if rec.Code != http.StatusNotFound {
-			t.Fatalf("expected 404 (orphaned delegator denies), got %d: %s", rec.Code, rec.Body.String())
-		}
+		assertProjectDenied(t, f, f.AgentID, f.Token, "DEL_EDGE_KEY")
 	})
 }
 
-// TestAgentSecretRead_ProjectScopeDeletedParentAgentDenies (22:39Z) pins
-// that a hard-deleted (purged) parent agent denies, both before and after
-// B.2.
+// TestAgentSecretRead_ProjectScopeDeletedParentAgentDenies pins that a
+// hard-deleted (purged) parent agent denies, both before and after the
+// shared delegation-chain change.
 func TestAgentSecretRead_ProjectScopeDeletedParentAgentDenies(t *testing.T) {
 	f := newMaterialFixture(t, "deleted-parent-agent")
 	ctx := context.Background()
@@ -314,15 +348,12 @@ func TestAgentSecretRead_ProjectScopeDeletedParentAgentDenies(t *testing.T) {
 
 	require.NoError(t, f.Store.DeleteAgent(ctx, parentID))
 
-	rec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+childID+"/secrets/DEL_PARENT_KEY", nil, childToken)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("expected 404 (purged parent denies), got %d: %s", rec.Code, rec.Body.String())
-	}
+	assertProjectDenied(t, f, childID, childToken, "DEL_PARENT_KEY")
 }
 
-// TestAgentSecretRead_ProjectScopeUnresolvableMigrationDelegatorDenies
-// (22:39Z) pins that the synthetic system/migration principal never stands
-// in for a real delegator: there is no separate admission path for it.
+// TestAgentSecretRead_ProjectScopeUnresolvableMigrationDelegatorDenies pins
+// that the synthetic system/migration principal never stands in for a real
+// delegator: there is no separate admission path for it.
 func TestAgentSecretRead_ProjectScopeUnresolvableMigrationDelegatorDenies(t *testing.T) {
 	f := newMaterialFixture(t, "migration-delegator")
 	setBackfillCompleted(t, f.Store)
@@ -331,10 +362,7 @@ func TestAgentSecretRead_ProjectScopeUnresolvableMigrationDelegatorDenies(t *tes
 	createDCEdge(t, f.Store, store.DelegationPrincipalUser, "system/migration", store.DelegationPrincipalAgent, f.AgentID,
 		store.RoleScopeProject, f.ProjectID, string(AgentRoleFull))
 
-	rec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+f.AgentID+"/secrets/MIGRATION_KEY", nil, f.Token)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("expected 404 (unresolvable migration delegator denies), got %d: %s", rec.Code, rec.Body.String())
-	}
+	assertProjectDenied(t, f, f.AgentID, f.Token, "MIGRATION_KEY")
 }
 
 // TestAgentSecretRead_ProjectScopeStoppedParentRetainsAuthority pins that a
@@ -410,14 +438,11 @@ func TestAgentSecretRead_ProjectScopeDeletedGrandparentAgentDenies(t *testing.T)
 
 	require.NoError(t, f.Store.DeleteAgent(ctx, grandparentID))
 
-	rec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+childID+"/secrets/DEL_GRANDPARENT_KEY", nil, childToken)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("expected 404 (recursive walk reaches the orphaned grandparent), got %d: %s", rec.Code, rec.Body.String())
-	}
+	assertProjectDenied(t, f, childID, childToken, "DEL_GRANDPARENT_KEY")
 }
 
-// TestAgentSecretFetch_ProjectDecisionEvaluatedOncePerRequest (O-3) pins
-// that with 100 keys, the delegation edge store is consulted exactly once.
+// TestAgentSecretFetch_ProjectDecisionEvaluatedOncePerRequest pins that
+// with 100 keys, the delegation edge store is consulted exactly once.
 func TestAgentSecretFetch_ProjectDecisionEvaluatedOncePerRequest(t *testing.T) {
 	f := newMaterialFixture(t, "decision-once")
 
@@ -440,7 +465,7 @@ func TestAgentSecretFetch_ProjectDecisionEvaluatedOncePerRequest(t *testing.T) {
 	}
 }
 
-// TestAgentSecretFetch_DeniedRequestReadsNoMetadata (N-2) pins that a denied
+// TestAgentSecretFetch_DeniedRequestReadsNoMetadata pins that a denied
 // project decision makes no GetMeta call at all.
 func TestAgentSecretFetch_DeniedRequestReadsNoMetadata(t *testing.T) {
 	f := newMaterialFixture(t, "denied-no-metadata")
@@ -466,8 +491,8 @@ func TestAgentSecretFetch_DeniedRequestReadsNoMetadata(t *testing.T) {
 	}
 }
 
-// TestAgentSecretFetch_ErrorTextIsNeutral (N-3) pins that a backend error
-// string never reaches the response.
+// TestAgentSecretFetch_ErrorTextIsNeutral pins that a backend error string
+// never reaches the response.
 func TestAgentSecretFetch_ErrorTextIsNeutral(t *testing.T) {
 	f := newMaterialFixture(t, "neutral-error-text")
 
@@ -492,10 +517,10 @@ func TestAgentSecretFetch_ErrorTextIsNeutral(t *testing.T) {
 	}
 }
 
-// TestAgentSecretRead_ProjectScopeDenialRecordedAsPolicyDenial (v5, O-2)
-// pins that a ceiling denial records denied_by_policy with a non-empty
-// Detail carrying Decision.Reason verbatim, and that no code path inspects
-// Decision.Reason to decide the caller-visible outcome.
+// TestAgentSecretRead_ProjectScopeDenialRecordedAsPolicyDenial pins that a
+// ceiling denial records denied_by_policy with a non-empty Detail carrying
+// Decision.Reason verbatim, and that no code path inspects Decision.Reason
+// to decide the caller-visible outcome.
 func TestAgentSecretRead_ProjectScopeDenialRecordedAsPolicyDenial(t *testing.T) {
 	f := newMaterialFixture(t, "policy-denial-detail")
 	setBackfillCompleted(t, f.Store) // ceiling denial: no edge, post-backfill

@@ -15,13 +15,12 @@
 //go:build !no_sqlite
 
 // Package hub — the two F.2a delegating-agent-state characterizations that
-// the design (F/design/f2-material-selection.md section 8.2) pins to this
-// file by name, so that pat-b-lead's B.2 brief can reference them directly:
-// a retained soft-deleted parent or grandparent still resolves in the
-// delegation ceiling and is followed at its stored role. B.2 changes or
-// removes these characterizations when it lands the shared non-deleted-
-// source rule in the chain evaluation, and adds its own acceptance
-// regressions (which deny) in their place.
+// are pinned to this file by name, so a follow-up change can reference them
+// directly: a retained soft-deleted parent or grandparent still resolves in
+// the delegation ceiling and is followed at its stored role. A follow-up
+// change changes or removes these characterizations when it lands the
+// shared non-deleted-source rule in the chain evaluation, and adds its own
+// acceptance regressions (which deny) in their place.
 package hub
 
 import (
@@ -36,12 +35,12 @@ import (
 )
 
 // TestAgentSecretRead_ProjectScopeSoftDeletedParentFollowsStoredRole is a
-// characterization (F.2a; changed or removed by B.2, ruled 22:44Z): a
-// retained soft-deleted parent agent still resolves in the delegation
-// ceiling, because GetAgent returns soft-deleted rows and
-// checkAgentHoldsPermission checks neither DeletedAt nor status. F.2a does
-// not claim to enforce the non-deleted-source rule for delegation, and adds
-// no second, F-local delegation traversal. B.2 owns enforcing non-deleted
+// characterization, changed or removed by a follow-up change: a retained
+// soft-deleted parent agent still resolves in the delegation ceiling,
+// because GetAgent returns soft-deleted rows and checkAgentHoldsPermission
+// checks neither DeletedAt nor status. F.2a does not claim to enforce the
+// non-deleted-source rule for delegation, and adds no second, F-local
+// delegation traversal. A follow-up change owns enforcing non-deleted
 // agents in the shared chain evaluation. This test is separate from the
 // final acceptance regression and must be changed or removed when the
 // shared fix lands.
@@ -80,7 +79,7 @@ func TestAgentSecretRead_ProjectScopeSoftDeletedParentFollowsStoredRole(t *testi
 
 // TestAgentSecretRead_ProjectScopeSoftDeletedGrandparentFollowsStoredRole is
 // a characterization: the soft-deleted grandparent is still followed today.
-// Changed or removed by B.2.
+// Changed or removed by a follow-up change.
 func TestAgentSecretRead_ProjectScopeSoftDeletedGrandparentFollowsStoredRole(t *testing.T) {
 	f := newMaterialFixture(t, "soft-deleted-grandparent")
 	ctx := context.Background()

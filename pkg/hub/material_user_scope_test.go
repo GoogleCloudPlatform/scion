@@ -15,8 +15,7 @@
 //go:build !no_sqlite
 
 // Package hub — F.2a tests for the user-scope per-item check (check 8):
-// progeny sharing, lineage containment, and source liveness. See
-// F/design/f2-material-selection.md section 8.2.
+// progeny sharing, lineage containment, and source liveness.
 package hub
 
 import (
@@ -105,8 +104,8 @@ func TestAgentSecretRead_DirectChildRequiresSharingEnabled(t *testing.T) {
 	}
 }
 
-// TestAgentSecretRead_UserScopeRowAuthoredOutsideLineageDenied (O-4) pins
-// that a row in the root's scope written by an agent outside the
+// TestAgentSecretRead_UserScopeRowAuthoredOutsideLineageDenied pins that a
+// row in the root's scope written by an agent outside the
 // requesting agent's ancestry is denied, even with AllowProgeny set.
 func TestAgentSecretRead_UserScopeRowAuthoredOutsideLineageDenied(t *testing.T) {
 	f := newMaterialFixture(t, "outside-lineage")
@@ -131,8 +130,8 @@ func TestAgentSecretRead_UserScopeRowAuthoredOutsideLineageDenied(t *testing.T) 
 	}
 }
 
-// TestAgentSecretRead_SharingSourceMustBeActive (O-4) unit-tests
-// progenySourceLive directly: a suspended user source is inactive. (A
+// TestAgentSecretRead_SharingSourceMustBeActive unit-tests progenySourceLive
+// directly: a suspended user source is inactive. (A
 // suspended CreatedBy that is also the requesting agent's own root would be
 // caught earlier by check 5 — TestAgentSecretRead_SuspendedRootUserDenied —
 // so the source-liveness sub-check is exercised in isolation here.)
@@ -152,7 +151,7 @@ func TestAgentSecretRead_SharingSourceMustBeActive(t *testing.T) {
 	}
 }
 
-// TestAgentSecretRead_SharingSourceAgentDeletedDenied (O-4) pins that a
+// TestAgentSecretRead_SharingSourceAgentDeletedDenied pins that a
 // soft-deleted source agent is not live, even though GetAgent returns
 // soft-deleted rows.
 func TestAgentSecretRead_SharingSourceAgentDeletedDenied(t *testing.T) {
@@ -191,7 +190,7 @@ func TestAgentSecretRead_SharingSourceAgentDeletedDenied(t *testing.T) {
 	}
 }
 
-// TestAgentSecretRead_SharingSourceAgentRootSuspendedDenied (O-4) pins that
+// TestAgentSecretRead_SharingSourceAgentRootSuspendedDenied pins that
 // resolving a source agent's own root and finding it suspended denies.
 func TestAgentSecretRead_SharingSourceAgentRootSuspendedDenied(t *testing.T) {
 	f := newMaterialFixture(t, "source-agent-root-suspended")
@@ -228,7 +227,7 @@ func TestAgentSecretRead_SharingSourceAgentRootSuspendedDenied(t *testing.T) {
 	}
 }
 
-// TestAgentSecretRead_SharingSourceLookupErrorDenies (O-4) unit-tests that a
+// TestAgentSecretRead_SharingSourceLookupErrorDenies unit-tests that a
 // genuine store fault while resolving the sharing source denies with
 // backend_error, distinct from a definite not-found.
 func TestAgentSecretRead_SharingSourceLookupErrorDenies(t *testing.T) {
@@ -244,8 +243,8 @@ func TestAgentSecretRead_SharingSourceLookupErrorDenies(t *testing.T) {
 	}
 }
 
-// TestAgentSecretRead_UserScopeMakesNoProjectSecretDecision (OQ-3) pins
-// that a user-scope read never calls Decide(project.secret_read) — the
+// TestAgentSecretRead_UserScopeMakesNoProjectSecretDecision pins that a
+// user-scope read never calls Decide(project.secret_read) — the
 // delegation ceiling and its edge lookup are never consulted.
 func TestAgentSecretRead_UserScopeMakesNoProjectSecretDecision(t *testing.T) {
 	f := newMaterialFixture(t, "user-scope-no-project-decision")
@@ -270,7 +269,7 @@ func TestAgentSecretRead_UserScopeMakesNoProjectSecretDecision(t *testing.T) {
 }
 
 // TestAgentSecretRead_UserScopeCeilingApplied documents the known gap
-// (PARTIAL, closes with B.1 + F.2b): user-scoped reads have no
+// (partial coverage, closed by a later change): user-scoped reads have no
 // delegation-ceiling step at all yet, because there is no existing
 // permission to route check 8 through Decide.
 func TestAgentSecretRead_UserScopeCeilingApplied(t *testing.T) {

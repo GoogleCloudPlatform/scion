@@ -17,8 +17,7 @@
 // Package hub — F.2a tests for the whole-request precheck (checks 1-5) of
 // the runtime material selection check sequence: identity locality, the
 // store record, store facts (project, token/project match, provenance
-// root), credential capability, and root human live authority. See
-// F/design/f2-material-selection.md section 8.2.
+// root), credential capability, and root human live authority.
 package hub
 
 import (
@@ -77,30 +76,31 @@ func TestAgentGetSecret_ExpiredTokenRejected(t *testing.T) {
 	}
 }
 
-// TestAgentSecretFetch_MissingIdentityKeepsForbiddenStatus pins the N-1
-// exception: P7 keeps returning 403 "agent authentication required" when
-// the caller is authenticated but not as an agent (GetAgentFromContext nil),
-// rather than adopting F.2a's neutral whole-request-denial status.
+// TestAgentSecretFetch_MissingIdentityKeepsForbiddenStatus pins the
+// exception: the fetch endpoint keeps returning 403 "agent authentication
+// required" when the caller is authenticated but not as an agent
+// (GetAgentFromContext nil), rather than adopting the neutral
+// whole-request-denial status.
 func TestAgentSecretFetch_MissingIdentityKeepsForbiddenStatus(t *testing.T) {
 	srv, s := testServer(t)
 	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agent/secrets", secretFetchRequest{Keys: []string{"ANY_KEY"}})
 	if rec.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 (N-1: keeps today's status for a non-agent caller), got %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("expected 403 (keeps today's status for a non-agent caller), got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
-// TestAgentGetSecret_MissingIdentityKeepsUnauthorizedStatus pins the N-1
-// exception: P8 keeps returning 401 when the caller is not an agent
-// identity (validateAgentSecretAccess, D-owned, not modified by F.2a).
+// TestAgentGetSecret_MissingIdentityKeepsUnauthorizedStatus pins the
+// exception: the get endpoint keeps returning 401 when the caller is not an
+// agent identity (validateAgentSecretAccess, not modified here).
 func TestAgentGetSecret_MissingIdentityKeepsUnauthorizedStatus(t *testing.T) {
 	srv, s := testServer(t)
 	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 
 	rec := doRequest(t, srv, http.MethodGet, "/api/v1/agents/"+tid("missing-identity-agent")+"/secrets/ANY_KEY", nil)
 	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("expected 401 (N-1: keeps today's status for a non-agent caller), got %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("expected 401 (keeps today's status for a non-agent caller), got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -459,8 +459,8 @@ func TestAgentSecretRead_UnrelatedScheduledEventGrantDoesNotAdmit(t *testing.T) 
 
 // TestAgentSecretRead_SystemRoleWithoutMembershipDeniedInterim documents the
 // interim rule: a super-admin or hub-admin root without a project membership
-// row is denied. System authority for the exact permission arrives in F.2b
-// (OQ-16).
+// row is denied. System authority for the exact permission is evaluated in
+// a later change.
 func TestAgentSecretRead_SystemRoleWithoutMembershipDeniedInterim(t *testing.T) {
 	for _, roleName := range []string{store.SystemRoleSuperAdmin, store.SystemRoleHubAdmin} {
 		t.Run(roleName, func(t *testing.T) {
