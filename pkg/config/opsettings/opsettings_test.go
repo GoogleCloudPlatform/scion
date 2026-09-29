@@ -232,6 +232,8 @@ func TestValidateValidDoc(t *testing.T) {
 		{"federation", `{}`},
 		{"federation", `{"enabled":true,"trusted_issuers":[{"issuer_url":"https://accounts.google.com","issuer_type":"user","expected_audience":"client-id","allowed_gcp_projects":["my-project"]}]}`},
 		{"federation", `{"enabled":true,"trusted_issuers":[{"issuer_url":"https://accounts.google.com","issuer_type":"user","expected_audience":"client-id","allowed_domains":["example.com"]}]}`},
+		{"harness_configs", `{"claude":{"harness":"claude","image":"scion-claude:latest","image_pull_policy":"IfNotPresent"}}`},
+		{"profiles", `{"staging":{"runtime":"docker","harness_overrides":{"claude":{"image":"scion-claude:staging","image_pull_policy":"Always"}}}}`},
 	}
 	for _, tt := range tests {
 		errs := Validate(tt.section, json.RawMessage(tt.doc))
@@ -258,6 +260,8 @@ func TestValidateInvalidDoc(t *testing.T) {
 		{"federation", `{"algorithms":["INVALID"]}`, "invalid algorithm enum"},
 		{"federation", `{"trusted_issuers":[{"issuer_type":"unknown"}]}`, "invalid issuer_type enum"},
 		{"federation", `{"unknown_field": true}`, "additional property"},
+		{"harness_configs", `{"claude":{"harness":"claude","image_pull_policy":"always"}}`, "invalid image_pull_policy enum (case-sensitive)"},
+		{"profiles", `{"staging":{"runtime":"docker","harness_overrides":{"claude":{"image_pull_policy":"always"}}}}`, "invalid profile harness_overrides image_pull_policy enum"},
 	}
 	for _, tt := range tests {
 		errs := Validate(tt.section, json.RawMessage(tt.doc))
