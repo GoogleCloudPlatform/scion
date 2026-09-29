@@ -155,8 +155,14 @@ func (s SubjectSelector) MatchesPrincipalClosure(
 // through the same paths as their base types and must be treated identically
 // for constraint matching.
 //
-// This is the single canonical normalization — both Decide and ResolveListScopes
-// must call this before comparing against constraint subjects.
+// This is the canonical normalization for the flat/constraint paths — Decide,
+// ResolveListScopes, principalClosure and the flat mint-eligibility path
+// (getProjectScopedPermissions and friends, authz_boundary.go) all call this
+// before comparing against constraint subjects or scope-type strings.
+// permissions.RelationshipPrincipalKind is the relationship mint path's
+// separate implementation of the same mapping (permissions cannot import
+// hub, so it cannot call this function directly); TestNormalizePrincipalType_AgreesWithRelationshipPrincipalKind
+// (authz_boundary_test.go) pins that the two never diverge.
 func NormalizePrincipalType(t string) string {
 	switch t {
 	case "user", "dev", "federated_user":

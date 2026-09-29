@@ -52,9 +52,9 @@ type TokenBoundary struct {
 }
 
 // Valid rejects malformed boundary combinations. Calls permissions.ValidBoundary
-// so the same rule is reachable from pkg/store (F-2): pkg/store cannot
-// import pkg/hub, but D.1's store-layer validation needs this exact rule
-// too — a shared table test pins agreement.
+// so the same rule is reachable from pkg/store: pkg/store cannot import
+// pkg/hub, but store-layer validation needs this exact rule too — a shared
+// table test pins agreement.
 func (b TokenBoundary) Valid() bool {
 	return permissions.ValidBoundary(b.Kind, b.ProjectID)
 }
@@ -131,9 +131,9 @@ type TargetScopeEvidence struct {
 // the plain-resource and collection-evidence paths, so no fast path
 // (existing project, Hub singleton) can return before EVERY supplied fact —
 // parent type/ID and scope kind — has been checked together, including
-// against a resource type that has no parent/scope concept at all
-// (pat-refactor R1, 2026-09-28: contradictory recognized facts must be
-// rejected everywhere, not only in the examples first reviewed).
+// against a resource type that has no parent/scope concept at all:
+// contradictory recognized facts must be rejected everywhere, not only in a
+// subset of cases.
 //
 // Collection-level path (evidence.IsCollectionLevel): see resolveCollectionEvidence.
 // Plain-resource path:
@@ -186,7 +186,7 @@ func ResolveTargetScope(r Resource, evidence TargetScopeEvidence) TargetScope {
 // computeTargetFacts validates and computes every fact against THAT
 // effective type before any classification — so a bogus ScopeKind on an
 // empty-Type Resource cannot slip through before the effective type is
-// known to be, say, "skill" (pat-refactor R1 round 5, 2026-09-28).
+// known to be, say, "skill".
 func resolveCollectionEvidence(r Resource, evidence TargetScopeEvidence) TargetScope {
 	// Fact: a collection-level request must not also name an existing
 	// resource instance.
@@ -291,11 +291,12 @@ type targetFacts struct {
 //   - r.ParentType == "system" with a non-empty r.ParentID (malformed parent).
 //   - r.ParentType is set AT ALL on a resource type with NO parent concept —
 //     project and Hub are singleton/global types; a project cannot have
-//     a project OR system parent, and neither can the Hub singleton
-//     (pat-refactor round 5: "existing project A + project parent B still
-//     returns A", "hub + project parent returns Hub", "project ID with a
-//     malformed system parent reaches the fast path unchecked" are all
-//     instances of this same rule).
+//     a project OR system parent, and neither can the Hub singleton. A
+//     supplied parent on either must be rejected rather than ignored, so
+//     an existing project resource with a spurious project parent, a Hub
+//     resource with a spurious project parent, and a project ID paired
+//     with a malformed system parent are all rejected before any fast
+//     path can return.
 //   - r.ScopeKind is set on a resource type with NO scope-kind concept
 //     (only skill/template/harness_config have one).
 //   - r.ScopeKind is an unrecognized value for a resource type that DOES
@@ -465,6 +466,29 @@ func bindingActivationOK(b *store.RoleBinding, now time.Time) bool {
 // through a group. Shared by ProjectMembershipEvidence and the system-scope
 // queries below so principal/group resolution semantics cannot drift.
 func (a *AuthzService) principalClosure(ctx context.Context, principal PrincipalContext) (refs []store.PrincipalRef, directKey string, groupKeys map[string]bool, err error) {
+	if cache := mintEligibilityCacheFromContext(ctx); cache != nil && cache.principalMatches(principal) {
+		cache.mu.Lock()
+		if cache.closureLoaded {
+			refs, directKey, groupKeys, err = cache.closureRefs, cache.closureDirectKey, cache.closureGroupKeys, cache.closureErr
+			cache.mu.Unlock()
+			return refs, directKey, groupKeys, err
+		}
+		cache.mu.Unlock()
+
+		refs, directKey, groupKeys, err = a.loadPrincipalClosure(ctx, principal)
+
+		cache.mu.Lock()
+		cache.closureLoaded = true
+		cache.closureRefs, cache.closureDirectKey, cache.closureGroupKeys, cache.closureErr = refs, directKey, groupKeys, err
+		cache.mu.Unlock()
+		return refs, directKey, groupKeys, err
+	}
+	return a.loadPrincipalClosure(ctx, principal)
+}
+
+// loadPrincipalClosure is principalClosure's uncached body, split out so the
+// mint-eligibility cache wrapper above never duplicates this logic.
+func (a *AuthzService) loadPrincipalClosure(ctx context.Context, principal PrincipalContext) (refs []store.PrincipalRef, directKey string, groupKeys map[string]bool, err error) {
 	normalizedType := NormalizePrincipalType(string(principal.Kind))
 	refs = []store.PrincipalRef{{Type: normalizedType, ID: principal.ID}}
 	directKey = normalizedType + ":" + principal.ID
@@ -488,18 +512,16 @@ func (a *AuthzService) principalClosure(ctx context.Context, principal Principal
 	return refs, directKey, groupKeys, nil
 }
 
-// scopedRoleBindingPermissions is the shared building block behind both
-// getProjectScopedPermissions's project-scope query and the system-scope
-// queries below (design review #7): given a pre-fetched binding list, it
-// unions the permission IDs granted by every ACTIVE binding whose ScopeType
-// matches scopeType (and, for project scope, whose ScopeID matches
-// scopeID), then applies the same access-constraint reduction
+// scopedRoleBindingPermissions backs getProjectScopedPermissions's
+// project-scope query (its only caller): given a pre-fetched binding list,
+// it unions the permission IDs granted by every ACTIVE binding whose
+// ScopeType matches scopeType (and, for project scope, whose ScopeID
+// matches scopeID), then applies the same access-constraint reduction
 // (loadAccessConstraintRestrictions) already relied on elsewhere.
 // A role definition referenced by an active binding but missing/unloadable
 // is a data-integrity error, not a routine "skip and continue" case: this
 // function propagates that error to the caller (fail closed) rather than
-// silently omitting the binding's permissions, per this contract's error
-// policy (pat-refactor review, 2026-09-28).
+// silently omitting the binding's permissions.
 func (a *AuthzService) scopedRoleBindingPermissions(ctx context.Context, bindings []*store.RoleBinding, scopeType, scopeID string, closure map[string]struct{}, resourceCtx ResourceContext, now time.Time) ([]string, error) {
 	seen := make(map[string]bool)
 	var result []string
@@ -651,41 +673,14 @@ func ContemplatedProjectClass(permissionID string) ProjectTargetClass {
 // validateRealProjectClass rejects a class that cannot represent a REAL
 // project target for permissionID: an empty or mismatched ResourceType
 // (which would route around applyHubWideScopeFilters's curated-catalog
-// dispatch entirely), or — for the three resource types with a genuine
-// curated hub-wide-catalog carve-out (skill/template/harness_config) — any
-// ScopeKind other than that type's own "project" constant. This is an
-// ALLOWLIST, not a blocklist: an unrecognized ScopeKind value for one of
-// those three types is rejected just as surely as a known global/user
-// value (pat-refactor R4, 2026-09-28) — a real project-target proof is
-// never "the global catalog," and never a value the reviewer hasn't seen.
-// Every OTHER resource type (agent, project, scheduled_event,
-// gcp_service_account, and material-delivery types such as secret/env_var/
-// skill_injection) has no curated hub-wide/project ScopeKind concept at
-// all — applyHubWideScopeFilters passes it through unchanged regardless of
-// ScopeKind, so any caller-supplied value is accepted for those types; this
-// validator only restricts the three where ScopeKind is semantically load-
-// bearing.
-// validRealProjectScopeKinds is the explicit, reviewed ALLOWLIST of
-// ScopeKind values each resource type may carry for a REAL (not
-// contemplated) project-target class. A resource type absent from this map
-// has NO reviewed scope-kind semantics at all: its class.ScopeKind must be
-// exactly empty — never an arbitrary accepted string (pat-refactor R4,
-// 2026-09-28: replaces an earlier "every other resource type accepts ANY
-// ScopeKind" exemption, which was not a reviewed-class contract). Material-
-// delivery resource types are pre-registered here per pat-f2-arch-3's plan
-// (2026-09-28) — F.2 owns adding the corresponding Registry permission
-// rows; this table already has their reviewed allowed values so F needs no
-// separate exemption once those rows land, and the execution-project
-// projectID argument stays distinct from the material's own source class.
-var validRealProjectScopeKinds = map[string][]string{
-	permissions.ResourceSkill:         {store.SkillScopeProject},
-	permissions.ResourceTemplate:      {store.TemplateScopeProject},
-	permissions.ResourceHarnessConfig: {store.HarnessConfigScopeProject},
-	"secret":                          {"project", "hub", "user", "runtime_broker"},
-	"env_var":                         {"project", "hub", "user", "runtime_broker"},
-	"skill_injection":                 {"project", "hub", "user", "runtime_broker"},
-}
-
+// dispatch entirely), or an unrecognized ScopeKind for a resource type with
+// reviewed scope-kind semantics (see validRealProjectScopeKinds). This is an
+// ALLOWLIST, not a blocklist: for a resource type with reviewed semantics,
+// an unrecognized ScopeKind value is rejected just as surely as a known but
+// wrong one — a real project-target proof is never "the global catalog,"
+// and never a value the reviewer hasn't seen. A resource type with no entry
+// in validRealProjectScopeKinds at all has no reviewed ScopeKind concept,
+// so its class.ScopeKind must be exactly empty.
 func validateRealProjectClass(permissionID string, class ProjectTargetClass) error {
 	expected := registryResourceType(permissionID)
 	if class.ResourceType == "" || class.ResourceType != expected {
@@ -704,6 +699,26 @@ func validateRealProjectClass(permissionID string, class ProjectTargetClass) err
 		}
 	}
 	return fmt.Errorf("%w: class scope kind %q is not a registered valid value for resource type %q (valid: %v)", ErrProjectAccessDenied, class.ScopeKind, class.ResourceType, allowed)
+}
+
+// validRealProjectScopeKinds is the explicit, reviewed ALLOWLIST of
+// ScopeKind values each resource type may carry for a REAL (not
+// contemplated) project-target class. A resource type absent from this map
+// has NO reviewed scope-kind semantics at all: its class.ScopeKind must be
+// exactly empty — never an arbitrary accepted string. Material-delivery
+// resource types (secret/env_var/skill_injection) are pre-registered here
+// with their reviewed allowed values ahead of the Registry permission rows
+// that will use them: registryResourceType returns "" for a permission ID
+// that does not exist yet, so these three rows are inert (unreachable
+// through validateRealProjectClass) until those rows land — see
+// TestValidRealProjectScopeKinds_MaterialDeliveryRowsAreInertUntilRegistered.
+var validRealProjectScopeKinds = map[string][]string{
+	permissions.ResourceSkill:         {store.SkillScopeProject},
+	permissions.ResourceTemplate:      {store.TemplateScopeProject},
+	permissions.ResourceHarnessConfig: {store.HarnessConfigScopeProject},
+	"secret":                          {"project", "hub", "user", "runtime_broker"},
+	"env_var":                         {"project", "hub", "user", "runtime_broker"},
+	"skill_injection":                 {"project", "hub", "user", "runtime_broker"},
 }
 
 func registryResourceType(permissionID string) string {
@@ -736,11 +751,114 @@ func applyHubWideScopeFilters(candidates []CandidateBinding, roleDefs map[string
 	}
 }
 
+// mintEligibilityCacheKey is the context.Context key for an optional,
+// per-call mint-eligibility cache (see mintEligibilityCache).
+type mintEligibilityCacheKey struct{}
+
+// mintEligibilityCache memoizes the principal's active system-scope
+// candidate set and the full access-constraint table for the lifetime of
+// ONE CanMintSelector call. Evaluating a selector expansion or a *:manage
+// alias means calling SystemAuthorityProof/MintTimeSystemGrant/
+// hasAnyProjectBinding/hasRelevantProjectAdmission once per permission (and
+// permissionSurvivesProjectConstraints once per relevant project); without
+// this cache, each of those calls independently re-resolves the principal's
+// group/binding closure, reloads role definitions, and re-pages the entire
+// access-constraint table. Carried via context (not a new parameter) so it
+// requires no change to any exported function's signature: every reader
+// falls back to loading fresh when the cache is absent (e.g. every caller
+// outside CanMintSelector), so this is purely a performance optimization,
+// never a source of eligibility facts, and never a behavior difference.
+type mintEligibilityCache struct {
+	mu sync.Mutex
+
+	// principalSet/principalKind/principalID record the FIRST principal any
+	// caller populated the closure/system slots for. CanMintSelector installs
+	// a fresh cache per call for a single principal, so this is always the
+	// same principal on every read in practice; it exists so a future caller
+	// that reused one cache across two different principals is detected and
+	// falls back to an uncached load (principalMatches) instead of silently
+	// handing the second principal the first principal's closure/authority.
+	// Deliberately does not gate constraintsLoaded/constraints: the
+	// access-constraint table is global, not principal-scoped.
+	principalSet  bool
+	principalKind PrincipalKind
+	principalID   string
+
+	closureLoaded    bool
+	closureRefs      []store.PrincipalRef
+	closureDirectKey string
+	closureGroupKeys map[string]bool
+	closureErr       error
+
+	systemLoaded     bool
+	systemCandidates []CandidateBinding
+	systemRoleDefs   map[string]*RolePermissions
+	systemRefs       []store.PrincipalRef
+	systemErr        error
+
+	constraintsLoaded bool
+	constraints       []*store.AccessConstraint
+	constraintsErr    error
+}
+
+func withMintEligibilityCache(ctx context.Context, c *mintEligibilityCache) context.Context {
+	return context.WithValue(ctx, mintEligibilityCacheKey{}, c)
+}
+
+func mintEligibilityCacheFromContext(ctx context.Context) *mintEligibilityCache {
+	c, _ := ctx.Value(mintEligibilityCacheKey{}).(*mintEligibilityCache)
+	return c
+}
+
+// principalMatches reports whether c's closure/system-scope slots may be
+// used for principal: the first call records the principal, and every later
+// call must match it exactly (both Kind and ID). A mismatch returns false,
+// telling the caller to skip the cache (load uncached) rather than read or
+// overwrite state populated for a different principal.
+func (c *mintEligibilityCache) principalMatches(principal PrincipalContext) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.principalSet {
+		c.principalSet = true
+		c.principalKind = principal.Kind
+		c.principalID = principal.ID
+		return true
+	}
+	return c.principalKind == principal.Kind && c.principalID == principal.ID
+}
+
 // activeSystemScopeCandidates loads principal's active system-scope role
 // bindings as kernel CandidateBinding/RolePermissions structures, ready for
 // applyHubWideScopeFilters. Shared by SystemAuthorityProof and
 // MintTimeSystemGrant.
 func (a *AuthzService) activeSystemScopeCandidates(ctx context.Context, principal PrincipalContext) ([]CandidateBinding, map[string]*RolePermissions, []store.PrincipalRef, error) {
+	cache := mintEligibilityCacheFromContext(ctx)
+	usable := cache != nil && cache.principalMatches(principal)
+	if usable {
+		cache.mu.Lock()
+		if cache.systemLoaded {
+			candidates, roleDefs, refs, err := cache.systemCandidates, cache.systemRoleDefs, cache.systemRefs, cache.systemErr
+			cache.mu.Unlock()
+			return candidates, roleDefs, refs, err
+		}
+		cache.mu.Unlock()
+	}
+
+	candidates, roleDefs, refs, err := a.loadActiveSystemScopeCandidates(ctx, principal)
+
+	if usable {
+		cache.mu.Lock()
+		cache.systemLoaded = true
+		cache.systemCandidates, cache.systemRoleDefs, cache.systemRefs, cache.systemErr = candidates, roleDefs, refs, err
+		cache.mu.Unlock()
+	}
+	return candidates, roleDefs, refs, err
+}
+
+// loadActiveSystemScopeCandidates is activeSystemScopeCandidates's
+// uncached body, split out so the cache wrapper above never duplicates
+// this logic.
+func (a *AuthzService) loadActiveSystemScopeCandidates(ctx context.Context, principal PrincipalContext) ([]CandidateBinding, map[string]*RolePermissions, []store.PrincipalRef, error) {
 	refs, _, _, err := a.principalClosure(ctx, principal)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("%w: %v", ErrProjectAccessDenied, err)
@@ -890,9 +1008,9 @@ func (a *AuthzService) MintTimeSystemGrant(ctx context.Context, principal Princi
 			// An unrecognized TargetClassKind value (e.g. a future enum
 			// member this switch has not been updated for) must never
 			// silently fall through to an under-specified class and
-			// potentially grant on it — skip it explicitly (pat-refactor
-			// R5, 2026-09-28): fail closed on an unknown class, the same
-			// way an absent SupportedTargetClasses entry already does.
+			// potentially grant on it — skip it explicitly: fail closed on
+			// an unknown class, the same way an absent SupportedTargetClasses
+			// entry already does.
 			continue
 		}
 		filtered := applyHubWideScopeFilters(candidates, roleDefs, class)
@@ -960,9 +1078,9 @@ func (a *AuthzService) hasAnyProjectBinding(ctx context.Context, principal Princ
 	// access-constraint reduction (ResourceContext{ProjectID: thatProject})
 	// — a constraint governing one project must not be diluted by merging
 	// its bindings with an unconstrained second project's, and must not be
-	// evaluated as a system-wide constraint (ResourceContext{}) instead
-	// (pat-refactor R2, 2026-09-28). Succeeds only if at least one actual
-	// project's own constrained grant survives.
+	// evaluated as a system-wide constraint (ResourceContext{}) instead.
+	// Succeeds only if at least one actual project's own constrained grant
+	// survives.
 	for projectID, projBindings := range byProject {
 		if !candidateSetHasPermission(toCandidateBindings(projBindings), roleDefs, permissionID) {
 			continue
@@ -1002,9 +1120,9 @@ func (a *AuthzService) permissionSurvivesProjectConstraints(ctx context.Context,
 // "relevant project admission" evidence for a relationship-eligible
 // selector under a Hub boundary. This prevents a governing constraint that
 // excludes the permission for every project the principal belongs to from
-// being worked around via the relationship path (pat-refactor R3,
-// 2026-09-28): relationship mint candidacy is permission-agnostic about
-// WHICH role a project membership carries, but it must still respect a
+// being worked around via the relationship path: relationship mint
+// candidacy is permission-agnostic about WHICH role a project membership
+// carries, but it must still respect a
 // constraint that specifically strips the selected permission. Does not
 // enumerate any specific owned target — project-level only.
 func (a *AuthzService) hasRelevantProjectAdmission(ctx context.Context, principal PrincipalContext, permissionID string) (bool, error) {
@@ -1121,6 +1239,17 @@ func (a *AuthzService) ProjectTargetAdmission(ctx context.Context, principal Pri
 // (principal, projectID, permissionID, class); errors are NEVER memoized —
 // a failed lookup is recomputed on the next call, never remembered as a
 // denial or an allow.
+//
+// class.ScopeKind must be exactly empty for a resource type with no
+// reviewed scope-kind semantics, and one of validRealProjectScopeKinds's
+// registered values otherwise (skill/template/harness_config require their
+// own "project" constant, never empty) — validateRealProjectClass rejects
+// anything else, including an empty ScopeKind for one of those three types.
+// A caller building class by hand for a real skill/template/harness_config
+// target must set ScopeKind explicitly; callers with a full Resource should
+// use ProjectTargetAdmission with the canonical constructor for that
+// resource type (skillResource, templateResource, harnessConfigResource)
+// instead of assembling ProjectTargetClass directly.
 func (a *AuthzService) ProjectAdmissionForClass(ctx context.Context, principal PrincipalContext, projectID, permissionID string, class ProjectTargetClass, memo *ProjectAdmissionCache) (ProjectAdmissionResult, error) {
 	if err := requireLocalUserPrincipal(principal); err != nil {
 		return ProjectAdmissionResult{}, err
@@ -1128,8 +1257,8 @@ func (a *AuthzService) ProjectAdmissionForClass(ctx context.Context, principal P
 	if projectID == "" {
 		return ProjectAdmissionResult{}, fmt.Errorf("%w: empty project ID", ErrProjectAccessDenied)
 	}
-	// Validate class against permissionID BEFORE either branch (pat-refactor
-	// R4, 2026-09-28): a successful membership check must not skip
+	// Validate class against permissionID BEFORE either branch: a
+	// successful membership check must not skip
 	// class/permission coherence entirely — an unknown or mismatched class
 	// denies regardless of which admission path would otherwise have been
 	// tried.
@@ -1200,8 +1329,7 @@ func (a *AuthzService) hasProjectRoleFlatPermission(ctx context.Context, princip
 
 // ErrEmptySelectorList is returned by CanMintSelector for a nil/empty
 // selectors argument: an empty request is rejected explicitly, never
-// silently treated as a trivially successful validation (pat-refactor
-// review, 2026-09-28).
+// silently treated as a trivially successful validation.
 var ErrEmptySelectorList = errors.New("no selectors requested")
 
 // CanMintSelector answers, for every requested selector at once, whether
@@ -1247,6 +1375,11 @@ func (a *AuthzService) CanMintSelector(ctx context.Context, principal PrincipalC
 	if len(selectors) == 0 {
 		return nil, ErrEmptySelectorList
 	}
+
+	// Share one mint-eligibility cache across every selector/permission this
+	// call evaluates below (see mintEligibilityCache) — resolving it once
+	// per CanMintSelector call rather than once per permission.
+	ctx = withMintEligibilityCache(ctx, &mintEligibilityCache{})
 
 	var membershipOK bool
 	if boundary.Kind == BoundaryKindProject {
@@ -1355,7 +1488,7 @@ func (a *AuthzService) hubSelectorEligible(ctx context.Context, principal Princi
 //     reduction does not strip permID (hasRelevantProjectAdmission — no
 //     specific target enumerated, but NOT constraint-agnostic: a governing
 //     constraint excluding permID from every project the principal belongs
-//     to still denies, pat-refactor R3). This is what lets an ordinary
+//     to still denies. This is what lets an ordinary
 //     project member mint agent:attach under a hub boundary without any
 //     system role or blanket project permission grant, while still
 //     respecting a constraint that specifically strips that permission.
@@ -1385,7 +1518,7 @@ func (a *AuthzService) hubPermissionEligible(ctx context.Context, principal Prin
 			continue
 		}
 		for _, relType := range src.RelationshipTypes {
-			if !permissions.RelationshipPolicyMintEligible(relType, string(principal.Kind), resourceType, permID) {
+			if !permissions.RelationshipPolicyMintEligible(relType, permissions.RelationshipPrincipalKind(string(principal.Kind)), resourceType, permID) {
 				continue
 			}
 			hasAny, err := a.hasRelevantProjectAdmission(ctx, principal, permID)
@@ -1406,7 +1539,7 @@ func (a *AuthzService) hubPermissionEligible(ctx context.Context, principal Prin
 // eligibility is ALWAYS the project role's own flat permission subset
 // (hasProjectRoleFlatPermission) — regardless of how admission was
 // established. Flat mint eligibility remains project-binding-only by
-// design (pat-refactor R3, 2026-09-28): a super-admin's system-authority
+// design: a super-admin's system-authority
 // admission for a project they are not a member of lets them pass the
 // admission gate, but it does NOT widen what a flat (non-relationship)
 // selector can mint on a project-scoped token — that ceiling is always the
@@ -1434,8 +1567,9 @@ func (a *AuthzService) selectorMintEligible(ctx context.Context, principal Princ
 				// An explicit FlatRole source is still the project role's
 				// own flat permission subset — it must actually be proven,
 				// never assumed true just because the descriptor names this
-				// source (pat-refactor R3, 2026-09-28: this exact branch
-				// was previously `eligible = true` unconditionally).
+				// source: an explicit MintEligibilityFlatRole descriptor
+				// does not exempt a permission from the flat project-role
+				// check either.
 				ok, err := a.hasProjectRoleFlatPermission(ctx, principal, boundary.ProjectID, permID)
 				if err != nil {
 					return false, MintDenialNone, err
@@ -1448,19 +1582,19 @@ func (a *AuthzService) selectorMintEligible(ctx context.Context, principal Princ
 				for _, relType := range src.RelationshipTypes {
 					// MintEligible, not RelationshipPolicyAllows: a mint
 					// eligibility reference must resolve to a row explicitly
-					// marked mint-eligible (pat-b-lead correction), not
-					// merely a row that permits the action at runtime
-					// (RelationshipPolicyAllows also matches e.g. read-only
-					// progeny rows that are never mint-eligible). Checked
-					// against the actual principal kind, not any kind.
-					if !permissions.RelationshipPolicyMintEligible(relType, string(principal.Kind), resourceType, permID) {
+					// marked mint-eligible, not merely a row that permits the
+					// action at runtime (RelationshipPolicyAllows also
+					// matches e.g. read-only progeny rows that are never
+					// mint-eligible). Checked against the actual principal
+					// kind, not any kind.
+					if !permissions.RelationshipPolicyMintEligible(relType, permissions.RelationshipPrincipalKind(string(principal.Kind)), resourceType, permID) {
 						continue
 					}
 					// Relationship candidacy is permission-agnostic about
 					// WHICH role a project membership carries, but it must
 					// still respect a constraint that specifically strips
 					// this exact permission from the project boundary
-					// being minted against (pat-refactor R3): a governing
+					// being minted against: a governing
 					// constraint on boundary.ProjectID cannot be worked
 					// around via the relationship path.
 					constraintOK, err := a.permissionSurvivesProjectConstraints(ctx, principal, boundary.ProjectID, permID)

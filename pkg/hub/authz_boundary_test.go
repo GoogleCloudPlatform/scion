@@ -147,6 +147,53 @@ func TestResolveTargetScope_CollectionLevelEvidence(t *testing.T) {
 	}
 }
 
+// TestResolveTargetScope_TemplateAndHarnessConfigCreate_EveryScope_ViaRealConstructors
+// builds the Resource through the actual production constructors
+// (templateScopeResource/templateUserScopeResource/harnessConfigScopeResource)
+// rather than hand literals, covering every scope those constructors
+// produce for template.create/harness_config.create: unlike skill, a single
+// permission ID covers project, global and user scope for these two
+// resource types (there is no separate *_create_global permission), so all
+// three must resolve correctly through collection evidence.
+func TestResolveTargetScope_TemplateAndHarnessConfigCreate_EveryScope_ViaRealConstructors(t *testing.T) {
+	user := NewAuthenticatedUser(tid("ttc-user"), "ttc@test.com", "u", store.UserRoleMember, "api")
+
+	got := ResolveTargetScope(templateScopeResource(store.TemplateScopeGlobal, ""), TargetScopeEvidence{
+		IsCollectionLevel: true, CollectionScope: TargetScopeHub, PermissionID: "template.create",
+	})
+	if got.Kind != TargetScopeHub {
+		t.Errorf("template.create via templateScopeResource(global): got %+v, want Hub", got)
+	}
+
+	got = ResolveTargetScope(templateUserScopeResource(user), TargetScopeEvidence{
+		IsCollectionLevel: true, CollectionScope: TargetScopeHub, PermissionID: "template.create",
+	})
+	if got.Kind != TargetScopeHub {
+		t.Errorf("template.create via templateUserScopeResource: got %+v, want Hub", got)
+	}
+
+	got = ResolveTargetScope(templateScopeResource(store.TemplateScopeProject, "p1"), TargetScopeEvidence{
+		IsCollectionLevel: true, CollectionScope: TargetScopeProject, CollectionProjectID: "p1", PermissionID: "template.create",
+	})
+	if got.Kind != TargetScopeProject || got.ProjectID != "p1" {
+		t.Errorf("template.create via templateScopeResource(project): got %+v, want Project/p1", got)
+	}
+
+	got = ResolveTargetScope(harnessConfigScopeResource(store.HarnessConfigScopeGlobal, ""), TargetScopeEvidence{
+		IsCollectionLevel: true, CollectionScope: TargetScopeHub, PermissionID: "harness_config.create",
+	})
+	if got.Kind != TargetScopeHub {
+		t.Errorf("harness_config.create via harnessConfigScopeResource(global): got %+v, want Hub", got)
+	}
+
+	got = ResolveTargetScope(harnessConfigScopeResource(store.HarnessConfigScopeProject, "p1"), TargetScopeEvidence{
+		IsCollectionLevel: true, CollectionScope: TargetScopeProject, CollectionProjectID: "p1", PermissionID: "harness_config.create",
+	})
+	if got.Kind != TargetScopeProject || got.ProjectID != "p1" {
+		t.Errorf("harness_config.create via harnessConfigScopeResource(project): got %+v, want Project/p1", got)
+	}
+}
+
 func TestResolveTargetScope_CollectionEvidenceMisuseForProjectApplicablePermission(t *testing.T) {
 	// skill.create IS project-applicable (reviewed true); collection
 	// evidence naming it must resolve Unknown, not Hub, even though the
@@ -213,7 +260,7 @@ func TestResolveTargetScope_CollectionEvidenceUnreviewedPermissionDenies(t *test
 	}
 }
 
-// TestResolveTargetScope_SkillListSupportsBothCollectionClasses is the R1
+// TestResolveTargetScope_SkillListSupportsBothCollectionClasses is the
 // paired global/project regression: skill.list is reviewed
 // ProjectTargetApplicability=true AND separately, legitimately, resolves
 // Hub-scope collection evidence for the global catalog -- a single boolean
@@ -241,7 +288,7 @@ func TestResolveTargetScope_SkillListSupportsBothCollectionClasses(t *testing.T)
 }
 
 // TestResolveTargetScope_CollectionEvidenceRejectsMismatchedResourceParent
-// is the R1 exact contradiction case: a resource that already independently
+// is the exact contradiction case: a resource that already independently
 // names a project parent (project A) cannot be paired with collection
 // evidence naming a DIFFERENT project (B) -- the evidence does not win over
 // a contradictory resource fact.
@@ -272,7 +319,7 @@ func TestResolveTargetScope_CollectionEvidenceRejectsResourceHubMismatch(t *test
 	}
 }
 
-// TestResolveTargetScope_ArbitraryTypeWithUserScopeKindIsUnknown is the R1
+// TestResolveTargetScope_ArbitraryTypeWithUserScopeKindIsUnknown is the
 // "restrict scope-kind classification to reviewed resource types"
 // regression: an arbitrary/unexpected resource type that happens to carry
 // ScopeKind="user" (e.g. from an unrelated resource-building bug) must NOT
@@ -444,10 +491,12 @@ func TestProjectMembershipEvidence_ExpiredGroupAdminBinding_Denied(t *testing.T)
 }
 
 func TestProjectMembershipEvidence_NoBindingAtAll_Denied(t *testing.T) {
-	// Stands in for "revoked membership with retained ancestry": ancestry is
-	// not a parameter to ProjectMembershipEvidence at all, so a project with
-	// no active binding for this principal is denied regardless of any
-	// historical fact recorded elsewhere (e.g. Resource.Ancestry).
+	// ProjectMembershipEvidence takes no Resource argument at all, so it
+	// cannot consult Ancestry or any other historical fact: a project with
+	// no active binding for this principal is denied outright. The
+	// binding-removal and retained-ancestry cases are covered end to end
+	// through ProjectTargetAdmission by the TestProjectTargetAdmission_*
+	// RetainedAncestryStillDenies tests.
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()
 
@@ -521,7 +570,7 @@ func unwrapOnce(err error) error {
 	return nil
 }
 
-// --- SystemAuthorityProof / MintTimeSystemGrant (F-3 seeded-role regressions) ---
+// --- SystemAuthorityProof / MintTimeSystemGrant (seeded-role regressions) ---
 
 // systemRoleUserWithPermissions creates a user with a custom system-scoped
 // role definition carrying exactly permissionIDs, and returns the user ID.
@@ -641,10 +690,10 @@ func TestSystemAuthorityProof_EmptyProjectID_Rejected(t *testing.T) {
 	}
 }
 
-// TestSeededHubMember_CannotReadOrAttachProjectAgents is the F-3-ruling
-// seeded-role regression: a former member, retained in Resource.Ancestry,
-// whose only remaining role is the seeded hub-member/hub-viewer system
-// role, cannot attach to or read project agents through system authority.
+// TestSeededHubMember_CannotReadOrAttachProjectAgents is the seeded-role
+// regression: a user whose only role is the seeded hub-member system role
+// cannot attach to or read project agents through system authority — the
+// hub-member catalog grant does not extend to agent.read/agent.attach.
 func TestSeededHubMember_CannotReadOrAttachProjectAgents(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()
@@ -663,7 +712,117 @@ func TestSeededHubMember_CannotReadOrAttachProjectAgents(t *testing.T) {
 	}
 }
 
-// TestSeededHubAdmin_ScheduledEventDoesNotUnlockAgentAction is the F-3
+// TestProjectTargetAdmission_DirectBindingRemoved_RetainedAncestryStillDenies
+// is the AC3 regression: a direct project role binding admits access; once
+// that binding is deleted, the user is denied even though the target's
+// Ancestry chain still names them (ancestry alone is never evidence).
+func TestProjectTargetAdmission_DirectBindingRemoved_RetainedAncestryStillDenies(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+
+	projectID := tid("rm-proj-1")
+	userID := tid("rm-user-1")
+	createDelegateTestProject(t, s, projectID, "rm-proj-1", "test")
+	createTestUserWithProjectRole(t, s, userID, "rm1@test.com", projectID, store.ProjectRoleMember)
+
+	target := Resource{Type: "agent", ID: tid("rm-agent-1"), ParentType: "project", ParentID: projectID, Ancestry: []string{userID}}
+
+	result, err := authz.ProjectTargetAdmission(ctx, activeUserPrincipal(userID), projectID, "agent.read", target, nil)
+	require.NoError(t, err)
+	require.True(t, result.Admitted, "direct project membership must admit agent.read before removal")
+
+	n, err := s.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	require.NoError(t, err)
+	require.Equal(t, 1, n, "expected exactly the one direct project role binding to be removed")
+
+	result, err = authz.ProjectTargetAdmission(ctx, activeUserPrincipal(userID), projectID, "agent.read", target, nil)
+	require.NoError(t, err)
+	if result.Admitted {
+		t.Error("removing the direct role binding must deny agent.read even though Resource.Ancestry still names the user")
+	}
+}
+
+// TestProjectTargetAdmission_GroupMembershipRemoved_RetainedAncestryStillDenies
+// is the group-binding half of AC3: group membership admits access; once
+// the user is removed from the group, they are denied even though the
+// target's Ancestry chain still names them.
+func TestProjectTargetAdmission_GroupMembershipRemoved_RetainedAncestryStillDenies(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+
+	projectID := tid("rm-proj-2")
+	userID := tid("rm-user-2")
+	groupID := tid("rm-group-2")
+	createDelegateTestProject(t, s, projectID, "rm-proj-2", "test")
+	require.NoError(t, s.CreateUser(ctx, &store.User{ID: userID, Email: "rm2@test.com", DisplayName: "u", Role: "member", Status: store.UserStatusActive}))
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{ID: groupID, Slug: "rm-group-2", Name: "G"}))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{GroupID: groupID, MemberType: store.GroupMemberTypeUser, MemberID: userID, Role: "member"}))
+
+	rd, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalGroup, PrincipalID: groupID,
+		ScopeType: store.RoleScopeProject, ScopeID: projectID, CreatedBy: "test",
+	})
+	require.NoError(t, err)
+
+	target := Resource{Type: "agent", ID: tid("rm-agent-2"), ParentType: "project", ParentID: projectID, Ancestry: []string{userID}}
+
+	result, err := authz.ProjectTargetAdmission(ctx, activeUserPrincipal(userID), projectID, "agent.read", target, nil)
+	require.NoError(t, err)
+	require.True(t, result.Admitted, "group membership must admit agent.read before removal")
+
+	require.NoError(t, s.RemoveGroupMember(ctx, groupID, store.GroupMemberTypeUser, userID))
+
+	result, err = authz.ProjectTargetAdmission(ctx, activeUserPrincipal(userID), projectID, "agent.read", target, nil)
+	require.NoError(t, err)
+	if result.Admitted {
+		t.Error("removing group membership must deny agent.read even though Resource.Ancestry still names the user")
+	}
+}
+
+// TestProjectTargetAdmission_FormerMemberWithOnlyHubMemberRole_RetainedAncestryStillDenies
+// closes AC3's third case: a user who lost their direct project membership,
+// and whose only remaining role is the seeded hub-member system role, is
+// still denied agent.read/agent.attach on a target whose Ancestry chain
+// still names them.
+func TestProjectTargetAdmission_FormerMemberWithOnlyHubMemberRole_RetainedAncestryStillDenies(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+
+	projectID := tid("rm-proj-3")
+	userID := tid("rm-user-3")
+	createDelegateTestProject(t, s, projectID, "rm-proj-3", "test")
+	createTestUserWithProjectRole(t, s, userID, "rm3@test.com", projectID, store.ProjectRoleMember)
+
+	target := Resource{Type: "agent", ID: tid("rm-agent-3"), ParentType: "project", ParentID: projectID, Ancestry: []string{userID}}
+
+	result, err := authz.ProjectTargetAdmission(ctx, activeUserPrincipal(userID), projectID, "agent.read", target, nil)
+	require.NoError(t, err)
+	require.True(t, result.Admitted, "direct project membership must admit agent.read before removal")
+
+	n, err := s.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	require.NoError(t, err)
+	require.Equal(t, 1, n, "expected exactly the one direct project role binding to be removed")
+
+	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubMember, store.RoleScopeSystem)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: userID,
+		ScopeType: store.RoleScopeSystem, CreatedBy: "test",
+	})
+	require.NoError(t, err)
+
+	for _, permID := range []string{"agent.read", "agent.attach"} {
+		result, err := authz.ProjectTargetAdmission(ctx, activeUserPrincipal(userID), projectID, permID, target, nil)
+		require.NoError(t, err)
+		if result.Admitted {
+			t.Errorf("a former member holding only the seeded hub-member role must be denied %s, even though Resource.Ancestry still names them", permID)
+		}
+	}
+}
+
+// TestSeededHubAdmin_ScheduledEventDoesNotUnlockAgentAction is the
 // seeded-role regression: hub-admin's scheduled_event permission does not
 // unlock an unrelated agent action.
 func TestSeededHubAdmin_ScheduledEventDoesNotUnlockAgentAction(t *testing.T) {
@@ -675,20 +834,23 @@ func TestSeededHubAdmin_ScheduledEventDoesNotUnlockAgentAction(t *testing.T) {
 	createDelegateTestProject(t, s, projectID, "ha-proj", "test")
 	createTestUserWithRole(t, s, userID, "ha@test.com", "admin", store.SystemRoleHubAdmin)
 
-	// Confirm hub-admin DOES have scheduled_event authority (sanity), then
-	// confirm it does not extend to agent.delete.
+	// Confirm hub-admin DOES have scheduled_event authority (positive
+	// control — without this, the negative assertion below would also pass
+	// if SystemAuthorityProof denied everything), then confirm it does not
+	// extend to agent.delete.
 	schedOK, err := authz.SystemAuthorityProof(ctx, activeUserPrincipal(userID), projectID, "scheduled_event.read", ContemplatedProjectClass("scheduled_event.read"))
 	require.NoError(t, err)
+	require.True(t, schedOK, "sanity: hub-admin must hold scheduled_event.read for this test to prove exact-permission semantics")
+
 	agentOK, err := authz.SystemAuthorityProof(ctx, activeUserPrincipal(userID), projectID, "agent.delete", ContemplatedProjectClass("agent.delete"))
 	require.NoError(t, err)
 	if agentOK {
 		t.Error("hub-admin's scheduled_event authority must not unlock agent.delete")
 	}
-	_ = schedOK // informational; hub-admin's exact permission set is seed.go's to define, not asserted here
 }
 
-// TestSeededHubMember_CatalogOnlyGrant_PairedTest is the F-3/F-4 paired
-// regression pat-refactor required: a seeded hub-member's catalog-only
+// TestSeededHubMember_CatalogOnlyGrant_PairedTest is the paired
+// regression: a seeded hub-member's catalog-only
 // skill.read remains hub-boundary MINT-eligible for the global catalog
 // (MintTimeSystemGrant), while it is denied for an unrelated project-scoped
 // skill target at USE time (SystemAuthorityProof / ProjectTargetAdmission).
@@ -749,6 +911,10 @@ func TestProjectTargetAdmission_ProjectMismatch_Errors(t *testing.T) {
 	}
 }
 
+// TestProjectTargetAdmission_MemoReusesResult proves the memo actually
+// caches, rather than merely agreeing because nothing changed between calls:
+// the underlying role binding is removed between the two calls, so only a
+// real cache hit can explain the second call still returning Admitted.
 func TestProjectTargetAdmission_MemoReusesResult(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()
@@ -758,14 +924,52 @@ func TestProjectTargetAdmission_MemoReusesResult(t *testing.T) {
 	createDelegateTestProject(t, s, projectID, "pta-proj-3", "test")
 	createTestUserWithProjectRole(t, s, userID, "pta3@test.com", projectID, store.ProjectRoleMember)
 
-	memo := NewProjectAdmissionCache()
 	target := Resource{Type: "agent", ID: tid("pta3-agent"), ParentType: "project", ParentID: projectID}
+
+	memo := NewProjectAdmissionCache()
 	r1, err := authz.ProjectTargetAdmission(ctx, activeUserPrincipal(userID), projectID, "agent.read", target, memo)
 	require.NoError(t, err)
+	require.True(t, r1.Admitted, "sanity: direct project membership must admit before removal")
+
+	n, err := s.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+
+	// Same memo: the cached result from before removal is returned.
 	r2, err := authz.ProjectTargetAdmission(ctx, activeUserPrincipal(userID), projectID, "agent.read", target, memo)
 	require.NoError(t, err)
-	if r1 != r2 {
-		t.Errorf("memoized calls must agree: %+v vs %+v", r1, r2)
+	if !r2.Admitted {
+		t.Error("a memoized result must be returned even though the underlying binding was removed after the first call")
+	}
+
+	// Nil memo: no caching, so the removal is reflected immediately.
+	r3, err := authz.ProjectTargetAdmission(ctx, activeUserPrincipal(userID), projectID, "agent.read", target, nil)
+	require.NoError(t, err)
+	if r3.Admitted {
+		t.Error("without a memo, the removed binding must be reflected immediately (denied)")
+	}
+}
+
+// TestProjectAdmissionCache_KeyIncludesClass is a white-box test of the
+// cache's own keying: two classes that differ only in ScopeKind (for
+// example a real project-scoped skill vs the same permission contemplated
+// for the global catalog) must not collide in the cache.
+func TestProjectAdmissionCache_KeyIncludesClass(t *testing.T) {
+	memo := NewProjectAdmissionCache()
+	base := projectAdmissionCacheKey{
+		principalKind: PrincipalKindUser, principalID: "u1", projectID: "p1", permissionID: "skill.read",
+		class: ProjectTargetClass{ResourceType: permissions.ResourceSkill, ScopeKind: store.SkillScopeProject},
+	}
+	other := base
+	other.class = ProjectTargetClass{ResourceType: permissions.ResourceSkill, ScopeKind: store.SkillScopeGlobal}
+
+	memo.put(base, ProjectAdmissionResult{Admitted: true, Source: ProjectAccessSourceMembership})
+
+	if _, ok := memo.get(other); ok {
+		t.Error("a cache entry seeded for one class must not be visible under a different class")
+	}
+	if cached, ok := memo.get(base); !ok || !cached.Admitted {
+		t.Errorf("the exact key must still hit: got %+v, ok=%v", cached, ok)
 	}
 }
 
@@ -809,17 +1013,52 @@ func TestProjectAdmissionForClass_MaterialScopeDiffersFromExecutionProject(t *te
 	}
 }
 
-func TestProjectAdmissionForClass_ErrorsNeverMemoized(t *testing.T) {
-	authz, _ := authzTestSetup(t)
-	ctx := context.Background()
-	memo := NewProjectAdmissionCache()
-	class := ProjectTargetClass{ResourceType: "agent"}
+// onceFailingBindingsStore wraps a store.Store and fails the FIRST call to
+// ListRoleBindingsForPrincipals with failErr, then delegates to the real
+// store for every subsequent call.
+type onceFailingBindingsStore struct {
+	store.Store
+	failed  bool
+	failErr error
+}
 
-	// Empty projectID errors both times -- never cached as a denial.
-	_, err1 := authz.ProjectAdmissionForClass(ctx, activeUserPrincipal(tid("pafc-3")), "", "agent.read", class, memo)
-	_, err2 := authz.ProjectAdmissionForClass(ctx, activeUserPrincipal(tid("pafc-3")), "", "agent.read", class, memo)
-	if err1 == nil || err2 == nil {
-		t.Fatal("expected an error both times for an empty projectID")
+func (s *onceFailingBindingsStore) ListRoleBindingsForPrincipals(ctx context.Context, principals []store.PrincipalRef, scopeTypes []string, scopeIDs []string) ([]*store.RoleBinding, error) {
+	if !s.failed {
+		s.failed = true
+		return nil, s.failErr
+	}
+	return s.Store.ListRoleBindingsForPrincipals(ctx, principals, scopeTypes, scopeIDs)
+}
+
+// TestProjectAdmissionForClass_ErrorsNeverMemoized proves an error result is
+// never cached: the underlying store fails exactly once, so the first call
+// must error and the second call — using the SAME memo — must recompute
+// (via the now-succeeding store) rather than replay the first call's error
+// or a cached denial.
+func TestProjectAdmissionForClass_ErrorsNeverMemoized(t *testing.T) {
+	_, s := authzTestSetup(t)
+	ctx := context.Background()
+
+	projectID := tid("pafc-err-proj")
+	userID := tid("pafc-err-user")
+	createDelegateTestProject(t, s, projectID, "pafc-err-proj", "test")
+	createTestUserWithProjectRole(t, s, userID, "pafcerr@test.com", projectID, store.ProjectRoleMember)
+
+	failing := &onceFailingBindingsStore{Store: s, failErr: errors.New("injected transient binding-list failure")}
+	authz := NewAuthzService(failing, nil)
+
+	class := ProjectTargetClass{ResourceType: "agent"}
+	memo := NewProjectAdmissionCache()
+
+	_, err1 := authz.ProjectAdmissionForClass(ctx, activeUserPrincipal(userID), projectID, "agent.read", class, memo)
+	if err1 == nil {
+		t.Fatal("expected the first call to fail via the injected store error")
+	}
+
+	result2, err2 := authz.ProjectAdmissionForClass(ctx, activeUserPrincipal(userID), projectID, "agent.read", class, memo)
+	require.NoError(t, err2)
+	if !result2.Admitted {
+		t.Error("the second call must recompute and succeed, not return a cached denial from the first call's error")
 	}
 }
 
@@ -927,7 +1166,7 @@ func TestCanMintSelector_RelationshipEligibility_AgentAttach_NoExistingTargetReq
 }
 
 // TestCanMintSelector_ProjectBoundary_SuperAdminWithoutMembership_AdmittedButFlatIneligible
-// is the pat-refactor R3 correction: flat project mint eligibility remains
+// pins the rule: flat project mint eligibility remains
 // project-binding-only, even for a super-admin. System authority
 // establishes ADMISSION (the selector's per-permission SystemAuthorityProof
 // check passes -- confirmed indirectly by agent:attach succeeding below,
@@ -958,7 +1197,8 @@ func TestCanMintSelector_ProjectBoundary_SuperAdminWithoutMembership_AdmittedBut
 }
 
 // TestCanMintSelector_ProjectBoundary_SuperAdminWithoutMembership_RelationshipEligible
-// confirms the OTHER half of R3: a reviewed RELATIONSHIP-eligible selector
+// confirms the OTHER half of the flat/relationship split: a reviewed
+// RELATIONSHIP-eligible selector
 // (agent:attach) IS mintable for a super-admin with no project membership,
 // via system-authority admission plus RelationshipPolicyMintEligible --
 // which does not require a matching project role.
@@ -985,7 +1225,7 @@ func TestCanMintSelector_HubBoundary_CatalogOnlyGrantEligible(t *testing.T) {
 	createTestUserWithRole(t, s, userID, "cms6@test.com", "member", store.SystemRoleHubMember)
 
 	// hub-member's catalog-only skill.read must remain hub-boundary
-	// mint-eligible (F-4 catalog-read correction).
+	// mint-eligible.
 	results, err := authz.CanMintSelector(ctx, activeUserPrincipal(userID), TokenBoundary{Kind: BoundaryKindHub}, []string{"skill:read"})
 	require.NoError(t, err)
 	require.Len(t, results, 1)
@@ -1044,8 +1284,8 @@ func TestMintTimeSystemGrant_UnreviewedPermission_Denied(t *testing.T) {
 	}
 }
 
-// TestMintTimeSystemGrant_UnknownClassValue_Denied is the pat-refactor R5
-// regression: an actual UNKNOWN TargetClassKind enum value (not merely an
+// TestMintTimeSystemGrant_UnknownClassValue_Denied is the regression: an
+// actual UNKNOWN TargetClassKind enum value (not merely an
 // absent SupportedTargetClasses entry) must deny rather than silently fall
 // through to an under-specified class and potentially grant on it.
 func TestMintTimeSystemGrant_UnknownClassValue_Denied(t *testing.T) {
@@ -1065,8 +1305,8 @@ func TestMintTimeSystemGrant_UnknownClassValue_Denied(t *testing.T) {
 	}
 }
 
-// TestHasAnyProjectBinding_SoleProjectConstrained_Denied is the pat-refactor
-// R2 regression: a project-scoped access constraint governing the ONLY
+// TestHasAnyProjectBinding_SoleProjectConstrained_Denied is the
+// regression: a project-scoped access constraint governing the ONLY
 // project a permission is granted in must deny -- constraint reduction must
 // be evaluated per-project, not merged/diluted across projects or checked
 // against a system-wide ResourceContext{}.
@@ -1088,7 +1328,7 @@ func TestHasAnyProjectBinding_SoleProjectConstrained_Denied(t *testing.T) {
 		Name: "hapb-1-constraint", SubjectKind: store.ConstraintSubjectAllPrincipals,
 		ScopeType: store.RoleScopeProject, ScopeID: projectID,
 		MaximumPermissions: []string{"agent.list"}, // excludes agent.read
-		Purpose:            "R2 test: sole project constrained",
+		Purpose:            "test: sole project constrained",
 	})
 	require.NoError(t, err)
 
@@ -1100,7 +1340,7 @@ func TestHasAnyProjectBinding_SoleProjectConstrained_Denied(t *testing.T) {
 }
 
 // TestHasAnyProjectBinding_SecondUnconstrainedProject_Allowed confirms the
-// other half of R2: a second, unconstrained project's grant still succeeds
+// other half of the rule: a second, unconstrained project's grant still succeeds
 // even though a first project's grant is constrained away -- each project
 // is evaluated independently.
 func TestHasAnyProjectBinding_SecondUnconstrainedProject_Allowed(t *testing.T) {
@@ -1125,7 +1365,7 @@ func TestHasAnyProjectBinding_SecondUnconstrainedProject_Allowed(t *testing.T) {
 		Name: "hapb-2-constraint", SubjectKind: store.ConstraintSubjectAllPrincipals,
 		ScopeType: store.RoleScopeProject, ScopeID: constrainedProject,
 		MaximumPermissions: []string{"agent.list"}, // excludes agent.read, only for constrainedProject
-		Purpose:            "R2 test: second project unconstrained",
+		Purpose:            "test: second project unconstrained",
 	})
 	require.NoError(t, err)
 
@@ -1137,7 +1377,7 @@ func TestHasAnyProjectBinding_SecondUnconstrainedProject_Allowed(t *testing.T) {
 }
 
 // TestCanMintSelector_HubBoundary_RelationshipAlternative_OrdinaryMember is
-// the pat-refactor review-item-4 regression: an ordinary project member,
+// the regression: an ordinary project member,
 // with no system role and no blanket project permission grant for
 // agent.attach, must still be able to mint agent:attach under a HUB
 // boundary via the relationship alternative -- flat/system authority is not
@@ -1176,7 +1416,139 @@ func TestCanMintSelector_HubBoundary_RelationshipAlternative_NoProjectAtAll_Deni
 	}
 }
 
-// --- R1 full contradiction matrix (pat-refactor rereview-3dc99e7) -----------
+// TestCanMintSelector_HubBoundary_RelationshipAlternative_DevPrincipal pins
+// that a dev/local-user principal reaches the relationship mint-eligibility
+// path the same way an ordinary user principal does: RelationshipPolicies
+// rows are authored against the canonical "user" kind, so the raw runtime
+// kind ("dev") must be normalized through permissions.RelationshipPrincipalKind
+// before matching, or a dev principal would silently fail to match a row
+// scoped to "user" despite requireLocalUserPrincipal treating dev and user
+// as equally valid local-user principals everywhere else.
+func TestCanMintSelector_HubBoundary_RelationshipAlternative_DevPrincipal(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+	userID := tid("hpe-dev-1")
+	projectID := tid("hpe-dev-1-proj")
+	createDelegateTestProject(t, s, projectID, "hpe-dev-1-proj", "test")
+	createTestUserWithProjectRole(t, s, userID, "hpedev1@test.com", projectID, store.ProjectRoleMember)
+
+	devPrincipal := PrincipalContext{Kind: PrincipalKindDev, ID: userID}
+	results, err := authz.CanMintSelector(ctx, devPrincipal, TokenBoundary{Kind: BoundaryKindHub}, []string{"agent:attach"})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	if !results[0].OK {
+		t.Errorf("a dev principal with ordinary project membership should be relationship-eligible for agent:attach under a hub boundary, the same as a user principal: %+v", results[0])
+	}
+}
+
+// TestNormalizePrincipalType_AgreesWithRelationshipPrincipalKind pins that
+// hub.NormalizePrincipalType (the flat mint path and Decide's constraint
+// matching) and permissions.RelationshipPrincipalKind (the relationship
+// mint path) never diverge, even though they are two independent
+// implementations of the same mapping (permissions cannot import hub, so
+// there is no single shared function to call instead) — every PrincipalKind
+// constant, plus an unrecognized value, must map identically through both.
+func TestNormalizePrincipalType_AgreesWithRelationshipPrincipalKind(t *testing.T) {
+	kinds := []string{
+		string(PrincipalKindUser),
+		string(PrincipalKindAgent),
+		string(PrincipalKindFederatedUser),
+		string(PrincipalKindFederatedAgent),
+		string(PrincipalKindFederatedService),
+		string(PrincipalKindBroker),
+		string(PrincipalKindDev),
+		"totally-unrecognized-kind",
+	}
+	for _, k := range kinds {
+		got := NormalizePrincipalType(k)
+		want := permissions.RelationshipPrincipalKind(k)
+		if got != want {
+			t.Errorf("NormalizePrincipalType(%q) = %q but permissions.RelationshipPrincipalKind(%q) = %q -- the flat and relationship mint paths would diverge on this principal kind", k, got, k, want)
+		}
+	}
+}
+
+// TestMintEligibilityCache_PrincipalMismatchSkipsCache proves the
+// principal-key guard: a cache populated for one principal must not hand a
+// second, different principal the first principal's closure. CanMintSelector
+// never actually reuses one cache across two principals (it installs a
+// fresh cache per call), but a future caller that did must be safe.
+func TestMintEligibilityCache_PrincipalMismatchSkipsCache(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+	userA := tid("mec-user-a")
+	userB := tid("mec-user-b")
+	require.NoError(t, s.CreateUser(ctx, &store.User{ID: userA, Email: "meca@test.com", DisplayName: "a", Role: "member", Status: store.UserStatusActive}))
+	require.NoError(t, s.CreateUser(ctx, &store.User{ID: userB, Email: "mecb@test.com", DisplayName: "b", Role: "member", Status: store.UserStatusActive}))
+
+	cache := &mintEligibilityCache{}
+	cachedCtx := withMintEligibilityCache(ctx, cache)
+
+	refsA, _, _, err := authz.principalClosure(cachedCtx, activeUserPrincipal(userA))
+	require.NoError(t, err)
+	refsB, _, _, err := authz.principalClosure(cachedCtx, activeUserPrincipal(userB))
+	require.NoError(t, err)
+
+	if len(refsA) != 1 || refsA[0].ID != userA {
+		t.Fatalf("sanity: refsA must resolve to userA, got %+v", refsA)
+	}
+	if len(refsB) != 1 || refsB[0].ID != userB {
+		t.Errorf("a second principal sharing one cache must get its OWN closure, not the first principal's: got %+v, want ID %q", refsB, userB)
+	}
+}
+
+// countingConstraintStore wraps a store.Store and counts calls to
+// ListAccessConstraints, so a test can assert the mint-eligibility cache
+// actually prevents the access-constraint table from being reloaded once
+// per (permission, project) pair.
+type countingConstraintStore struct {
+	store.Store
+	listAccessConstraintCalls int
+}
+
+func (s *countingConstraintStore) ListAccessConstraints(ctx context.Context, limit, offset int) ([]*store.AccessConstraint, error) {
+	s.listAccessConstraintCalls++
+	return s.Store.ListAccessConstraints(ctx, limit, offset)
+}
+
+// TestCanMintSelector_HubBoundary_ConstraintTableLoadedOnceForBatch is the
+// regression: evaluating a relationship-eligible
+// selector across multiple permissions and multiple candidate projects must
+// load the access-constraint table once per CanMintSelector call, not once
+// per (permission, project) pair.
+func TestCanMintSelector_HubBoundary_ConstraintTableLoadedOnceForBatch(t *testing.T) {
+	_, s := authzTestSetup(t)
+	ctx := context.Background()
+	userID := tid("perf-user")
+	projectA := tid("perf-proj-a")
+	projectB := tid("perf-proj-b")
+	createDelegateTestProject(t, s, projectA, "perf-proj-a", "test")
+	createDelegateTestProject(t, s, projectB, "perf-proj-b", "test")
+	createTestUserWithProjectRole(t, s, userID, "perf@test.com", projectA, store.ProjectRoleMember)
+	createTestUserWithProjectRole(t, s, userID, "perf@test.com", projectB, store.ProjectRoleMember)
+
+	counting := &countingConstraintStore{Store: s}
+	authz := NewAuthzService(counting, nil)
+
+	// Two permissions (agent:attach, agent:port_access), each relationship-
+	// eligible via hasRelevantProjectAdmission, each of which would
+	// otherwise re-check both projects' constraint tables independently:
+	// without the cache this is 2 permissions x 2 projects = 4 reloads.
+	results, err := authz.CanMintSelector(ctx, activeUserPrincipal(userID), TokenBoundary{Kind: BoundaryKindHub}, []string{"agent:attach", "agent:port_access"})
+	require.NoError(t, err)
+	require.Len(t, results, 2)
+	for _, r := range results {
+		if !r.OK {
+			t.Errorf("expected relationship eligibility for %+v", r)
+		}
+	}
+
+	if counting.listAccessConstraintCalls > 1 {
+		t.Errorf("ListAccessConstraints called %d times for one CanMintSelector batch (2 permissions x 2 projects); want at most 1 (cached)", counting.listAccessConstraintCalls)
+	}
+}
+
+// --- Full contradiction matrix ----------------------------------------------
 
 func TestResolveTargetScope_InstanceOnlyPermission_CollectionEvidenceDenied(t *testing.T) {
 	// agent.attach is CapabilityResource (instance-only): its
@@ -1236,7 +1608,7 @@ func TestResolveTargetScope_ResourceTypeMismatchesPermission_Denied(t *testing.T
 	}
 }
 
-// --- R3: explicit FlatRole descriptor must call hasProjectRoleFlatPermission,
+// --- Explicit FlatRole descriptor must call hasProjectRoleFlatPermission,
 // and OR behavior when the relationship alternative legitimately succeeds ---
 
 // testFlatRoleOnlyPermissionID is an injected test-only MintEligibilityRegistry
@@ -1328,7 +1700,7 @@ func TestSelectorMintEligible_RelationshipDeniedByProjectConstraint(t *testing.T
 		Name: "smef-3-constraint", SubjectKind: store.ConstraintSubjectAllPrincipals,
 		ScopeType: store.RoleScopeProject, ScopeID: projectID,
 		MaximumPermissions: []string{"agent.read"}, // excludes agent.attach
-		Purpose:            "R3 test: relationship denied by project constraint",
+		Purpose:            "test: relationship denied by project constraint",
 	})
 	require.NoError(t, err)
 
@@ -1354,7 +1726,7 @@ func TestHubPermissionEligible_RelationshipDeniedWhenAllProjectsConstrained(t *t
 		Name: "smef-4-constraint", SubjectKind: store.ConstraintSubjectAllPrincipals,
 		ScopeType: store.RoleScopeProject, ScopeID: projectID,
 		MaximumPermissions: []string{"agent.read"}, // excludes agent.attach
-		Purpose:            "R3 test: hub relationship path respects constraints",
+		Purpose:            "test: hub relationship path respects constraints",
 	})
 	require.NoError(t, err)
 
@@ -1368,7 +1740,7 @@ func TestHubPermissionEligible_RelationshipDeniedWhenAllProjectsConstrained(t *t
 	}
 }
 
-// --- R4: explicit reviewed ScopeKind allowlist -------------------------------
+// --- Explicit reviewed ScopeKind allowlist -----------------------------------
 
 func TestValidateRealProjectClass_UncuratedTypeRejectsNonEmptyScopeKind(t *testing.T) {
 	authz, s := authzTestSetup(t)
@@ -1406,7 +1778,41 @@ func TestValidRealProjectScopeKinds_MaterialTypesRegistered(t *testing.T) {
 	}
 }
 
-// --- R1 round 4: real-route review corrections + supplied-unknown-metadata coherence ---
+// TestValidRealProjectScopeKinds_MatchesReviewedScopeKindResourceTypes ties
+// validRealProjectScopeKinds to isReviewedScopeKindResourceType: every
+// resource type computeTargetFacts treats as having reviewed ScopeKind
+// semantics (skill/template/harness_config) must have an entry here, so the
+// two functions cannot silently diverge on which types carry a ScopeKind
+// concept at all.
+func TestValidRealProjectScopeKinds_MatchesReviewedScopeKindResourceTypes(t *testing.T) {
+	for _, rt := range []string{permissions.ResourceSkill, permissions.ResourceTemplate, permissions.ResourceHarnessConfig} {
+		if !isReviewedScopeKindResourceType(rt) {
+			t.Fatalf("test assumption broken: %q is expected to be a reviewed-scope-kind resource type", rt)
+		}
+		if _, ok := validRealProjectScopeKinds[rt]; !ok {
+			t.Errorf("resource type %q is reviewed-scope-kind but has no validRealProjectScopeKinds entry", rt)
+		}
+	}
+}
+
+// TestValidRealProjectScopeKinds_MaterialDeliveryRowsAreInertUntilRegistered
+// pins the documented status of the three pre-registered material-delivery
+// rows: registryResourceType returns "" for a permission ID that does not
+// exist in Registry, so no permission today can produce a class whose
+// ResourceType equals "secret"/"env_var"/"skill_injection" — these rows
+// cannot be reached through validateRealProjectClass until F.2 adds the
+// corresponding Registry permission rows.
+func TestValidRealProjectScopeKinds_MaterialDeliveryRowsAreInertUntilRegistered(t *testing.T) {
+	for _, rt := range []string{"secret", "env_var", "skill_injection"} {
+		for _, p := range permissions.Registry {
+			if p.Resource == rt {
+				t.Errorf("resource type %q now has a live Registry permission (%q) — validRealProjectScopeKinds's comment describing it as inert is stale and must be updated", rt, p.ID)
+			}
+		}
+	}
+}
+
+// --- Real-route review corrections + supplied-unknown-metadata coherence ---
 
 func TestResolveTargetScope_RoleBindingReadIsHubOnly(t *testing.T) {
 	// handleAdminRoleBindings authorizes GET (list) against a hard-coded
@@ -1493,7 +1899,7 @@ func TestResolveTargetScope_CollectionEvidenceUnrecognizedParentTypeIsUnknown(t 
 	}
 }
 
-// --- R1 round 5: exhaustive fast-path contradiction matrix ------------------
+// --- Exhaustive fast-path contradiction matrix ------------------------------
 
 func TestResolveTargetScope_ExistingProjectWithProjectParent_Denied(t *testing.T) {
 	// A project resource has no "project parent" concept at all; claiming

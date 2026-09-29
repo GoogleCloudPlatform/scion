@@ -31,23 +31,22 @@ package permissions
 // instance-only: it always targets an already-existing resource and can
 // NEVER legitimately appear as evidence.PermissionID for a collection-level
 // request, regardless of whether its resource family can otherwise live in
-// a project (pat-refactor R1, 2026-09-28 — the exact bug this fixes:
-// agent.attach/delete/token_refresh etc. were previously assigned
-// non-empty sets merely because ProjectTargetApplicability["agent.*"] is
-// true, which would have let a malformed missing-instance request for one
-// of those permissions be accepted as a declared collection target).
-// CollectionTargetClassesFor returns reviewed=false for a permission ID
-// absent from this map entirely (unreviewed) — ResolveTargetScope denies in
-// both cases (unreviewed OR reviewed-empty), but the two are represented
-// distinctly here because they are reviewed differently: "not yet reviewed"
-// vs. "reviewed and confirmed never collection-level."
+// a project — a permission whose resource family can live in a project
+// (ProjectTargetApplicability=true) is not automatically collection-capable
+// itself (agent.attach/delete/token_refresh, for example, always target a
+// specific existing agent and must never be accepted as a declared
+// collection target). CollectionTargetClassesFor returns reviewed=false for
+// a permission ID absent from this map entirely (unreviewed) —
+// ResolveTargetScope denies in both cases (unreviewed OR reviewed-empty),
+// but the two are represented distinctly here because they are reviewed
+// differently: "not yet reviewed" vs. "reviewed and confirmed never
+// collection-level."
 //
 // Reviewed against ACTUAL live routes and handlers, not inferred from
-// Permission.CapabilityKind (pat-refactor correction, 2026-09-28):
-// CapabilityKind records whether a permission conceptually applies to an
-// individual resource or a collection/scope, but it is not a collection-route
-// inventory and cannot decide these rows by itself — concrete
-// counterexamples found during this review: `handlers_roles.go`'s GET
+// Permission.CapabilityKind: CapabilityKind records whether a permission
+// conceptually applies to an individual resource or a collection/scope, but
+// it is not a collection-route inventory and cannot decide these rows by
+// itself — concrete counterexamples: `handlers_roles.go`'s GET
 // role-bindings list and POST role-binding create both authorize against a
 // hard-coded `Resource{Type:"role_binding", ID:"hub"}` regardless of
 // whether the binding being listed/created is project- or system-scoped
@@ -84,8 +83,7 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	// project.* — create/list are CapabilityScope; register/clone are
 	// CapabilityResource (register/clone target an EXISTING project — the
 	// one being registered or cloned FROM — despite superficially sounding
-	// creation-like; reviewed down from an earlier, incorrect
-	// classification). read/update/delete/manage/set_messaging_policy are
+	// creation-like). read/update/delete/manage/set_messaging_policy are
 	// CapabilityResource.
 	"project.create": {TargetClassKindHubResource}, "project.read": {},
 	"project.update": {}, "project.delete": {}, "project.manage": {},
@@ -94,19 +92,30 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 
 	// skill.* — create/create_global/list/register are CapabilityScope;
 	// read/update/delete are CapabilityResource (always an existing skill).
-	"skill.create": {TargetClassKindProjectScoped},
+	"skill.create":        {TargetClassKindProjectScoped},
 	"skill.create_global": {TargetClassKindHubResource},
-	"skill.read": {}, "skill.update": {}, "skill.delete": {},
+	"skill.read":          {}, "skill.update": {}, "skill.delete": {},
 	"skill.list":     {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
 	"skill.register": {TargetClassKindHubResource},
 
-	// template.*, harness_config.* — same CapabilityKind shape as skill.
-	"template.create": {TargetClassKindProjectScoped},
-	"template.read": {}, "template.update": {}, "template.delete": {},
+	// template.*, harness_config.* — same CapabilityKind shape as skill,
+	// but unlike skill, there is no separate *_create_global permission ID:
+	// the single template.create/harness_config.create permission covers
+	// every scope. templateScopeResource(store.TemplateScopeGlobal, "")
+	// (template_handlers.go, global create) and templateUserScopeResource
+	// (template_handlers.go, user-scope create) both build a parentless
+	// Resource with ScopeKind global/user — computeTargetFacts maps both to
+	// the same hasGlobalScope fact, so both need TargetClassKindGlobalCatalog
+	// here alongside the project-scoped create path
+	// (templateScopeResource(store.TemplateScopeProject, projectID)).
+	// harnessConfigScopeResource (harness_config_handlers.go) is the same
+	// shape for harness_config.create.
+	"template.create": {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
+	"template.read":   {}, "template.update": {}, "template.delete": {},
 	"template.list": {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
 
-	"harness_config.create": {TargetClassKindProjectScoped},
-	"harness_config.read": {}, "harness_config.update": {}, "harness_config.delete": {},
+	"harness_config.create": {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
+	"harness_config.read":   {}, "harness_config.update": {}, "harness_config.delete": {},
 	"harness_config.list": {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
 
 	// group.* — create/list are CapabilityScope; everything else targets
@@ -141,13 +150,12 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	// (capabilities.go:150-163), whose ID is the EXISTING gcp_service_account
 	// being assigned and whose ParentType/ParentID (when set) is that SA's
 	// OWN scope — NOT the new agent being created/patched. assign always
-	// targets an existing SA instance and is correctly empty (never
-	// collection-level); an earlier revision of this table incorrectly
-	// reasoned from the call site's context (agent creation) rather than
-	// the actual Resource authorized, and was corrected back.
+	// targets an existing SA instance, so its entry is empty (never
+	// collection-level); classifying it from the call site's context (agent
+	// creation) rather than the actual Resource authorized would be wrong.
 	"gcp_service_account.create": {TargetClassKindHubResource},
-	"gcp_service_account.read": {}, "gcp_service_account.delete": {},
-	"gcp_service_account.list": {TargetClassKindHubResource},
+	"gcp_service_account.read":   {}, "gcp_service_account.delete": {},
+	"gcp_service_account.list":   {TargetClassKindHubResource},
 	"gcp_service_account.verify": {}, "gcp_service_account.assign": {},
 	"gcp_service_account.mint": {TargetClassKindHubResource},
 
