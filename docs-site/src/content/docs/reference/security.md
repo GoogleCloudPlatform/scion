@@ -180,10 +180,11 @@ For headless environments (CI/CD, automation), Scion supports **user access toke
 - Tokens are prefixed with `scion_pat_` (a legacy artifact of the older "personal access token" name).
 - Only the SHA-256 hash of the token is stored in the database; the original value is never persisted.
 - Tokens can be scoped to specific permissions and projects, and revoked instantly via the dashboard or CLI.
-- A token's selected scopes are a ceiling, not a grant: minting a token with a scope only records
-  that the holder *may* select that restriction. Every request the token later makes is
-  independently authorized against the holder's *current* authority on the specific target,
-  including active project access — this is re-checked on every request, not just at mint time.
+- A token's selected scopes are a ceiling, not a grant: minting a token with a scope records it as
+  a restriction on what the token may do, and grants no access by itself. Every request the token
+  later makes is independently authorized against the holder's *current* authority on the specific
+  target, including active project access — this is re-checked on every request, not just at mint
+  time.
 - `agent:attach` and `agent:port_access` are resource-relative: they may be selected for a project
   before the holder has created a single agent in it, but each later request against a specific
   agent is authorized separately, and succeeds only for the holder's own agents and their
