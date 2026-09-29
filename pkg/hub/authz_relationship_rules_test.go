@@ -419,12 +419,14 @@ func TestRegisterProgenyAdapter_BuiltinKindsRefused(t *testing.T) {
 	for kind := range progenyOptInKinds {
 		err := authz.RegisterProgenyAdapter(fakeProgenyAdapter{kind: kind, perms: []string{permissionProjectSecretRead}})
 		assert.ErrorIs(t, err, errProgenyAdapter, "kind %q", kind)
-		_, isStore := authz.progenyAdapter(kind).(storeProgenyAdapter)
+		adapter, _ := authz.progenyAdapter(kind)
+		_, isStore := adapter.(storeProgenyAdapter)
 		assert.True(t, isStore, "kind %q keeps the built-in store adapter", kind)
 	}
 	releaseBuiltinProgenyAdapter(t, authz, "secret")
 	require.NoError(t, authz.RegisterProgenyAdapter(fakeProgenyAdapter{kind: "secret", perms: []string{permissionProjectSecretRead}}))
-	_, isFake := authz.progenyAdapter("secret").(fakeProgenyAdapter)
+	adapter, _ := authz.progenyAdapter("secret")
+	_, isFake := adapter.(fakeProgenyAdapter)
 	assert.True(t, isFake)
 }
 
@@ -800,15 +802,111 @@ func TestProgeny_RegisteredKindListAndPointParity(t *testing.T) {
 	assert.False(t, other.authz.ProgenyListPredicate(ctx, principalContextForIdentity(otherAgent), "secret").Matches(secretSrc))
 }
 
+// changingPermsProgenyAdapter returns its perms slice itself, so a test
+// can change the set the adapter reports after registration.
+type changingPermsProgenyAdapter struct {
+	fakeProgenyAdapter
+}
+
+func (c *changingPermsProgenyAdapter) ReadPermissions() []string { return c.perms }
+
+// The read permissions validated at registration are the ones decisions
+// use. An adapter that reports a different set after registration does not
+// change the point or the list decision.
+func TestProgeny_ReadPermissionsFixedAtRegistration(t *testing.T) {
+	ctx := context.Background()
+	newAgent := func(f *goldenFixture, name string) *agentIdentityWrapper {
+		return &agentIdentityWrapper{&AgentTokenClaims{
+			Claims:    jwt.Claims{Subject: tid(name)},
+			ProjectID: f.projectBeta.ID,
+			Ancestry:  []string{f.projectOwnerID},
+			Scopes:    allRegisteredAgentScopes(),
+		}}
+	}
+
+	t.Run("registered set keeps serving", func(t *testing.T) {
+		f := newGoldenFixture(t)
+		agent := newAgent(f, "relrule-fixedperms-agent")
+		src := SharingSource{Kind: "secret", ID: "fixed-opted", OwnerID: f.projectOwnerID, Policy: SharingPolicyOptInRequired, OptedIn: true}
+		adapter := &changingPermsProgenyAdapter{fakeProgenyAdapter{
+			kind: "secret", perms: []string{permissionProjectSecretRead}, sources: []SharingSource{src},
+		}}
+		releaseBuiltinProgenyAdapter(t, f.authz, "secret")
+		require.NoError(t, f.authz.RegisterProgenyAdapter(adapter))
+		// Change the reported set in place and by replacement.
+		adapter.perms[0] = "skill.read"
+		adapter.perms = []string{"skill.read"}
+
+		d := decidePerm(f.authz, agent, Resource{Type: "secret", ID: src.ID}, ActionRead, permissionProjectSecretRead, true)
+		assert.True(t, d.Allowed, "point read uses the registered set; reason %q", d.Reason)
+		assert.True(t, f.authz.ProgenyListPredicate(ctx, principalContextForIdentity(agent), "secret").Matches(src),
+			"list predicate uses the registered set")
+	})
+
+	t.Run("later set is not served", func(t *testing.T) {
+		f := newGoldenFixture(t)
+		agent := newAgent(f, "relrule-fixedperms-agent-2")
+		src := SharingSource{Kind: "secret", ID: "fixed-opted-2", OwnerID: f.projectOwnerID, Policy: SharingPolicyOptInRequired, OptedIn: true}
+		adapter := &changingPermsProgenyAdapter{fakeProgenyAdapter{
+			kind: "secret", perms: []string{"skill.read"}, sources: []SharingSource{src},
+		}}
+		releaseBuiltinProgenyAdapter(t, f.authz, "secret")
+		require.NoError(t, f.authz.RegisterProgenyAdapter(adapter))
+		adapter.perms[0] = permissionProjectSecretRead
+		adapter.perms = []string{permissionProjectSecretRead}
+
+		d := decidePerm(f.authz, agent, Resource{Type: "secret", ID: src.ID}, ActionRead, permissionProjectSecretRead, true)
+		assert.False(t, d.Allowed, "reason %q", d.Reason)
+		r := relationshipResult(t, d, RelationshipRuleProgeny)
+		assert.Equal(t, RelationshipRejectFact, r.RejectedBy)
+		assert.Equal(t, "permission is not a read permission of the sharing-source adapter", r.Detail)
+		assert.False(t, f.authz.ProgenyListPredicate(ctx, principalContextForIdentity(agent), "secret").Matches(src))
+	})
+}
+
 // --- Actor and Purpose on every decision ---
 
-// Every Decide return path records Actor and Purpose on the decision:
-// a missing principal, an unresolvable permission, a token project
-// mismatch before the kernel, a kernel decision, and a relationship allow
-// with and without explain.
+// actorPathFailingStore fails the role-binding or role-definition lookup
+// used by Decide steps 3 and 4.
+type actorPathFailingStore struct {
+	store.Store
+	failBindings error
+	failRoleDefs error
+}
+
+func (s *actorPathFailingStore) ListRoleBindingsForPrincipals(ctx context.Context, principals []store.PrincipalRef, scopeTypes []string, scopeIDs []string) ([]*store.RoleBinding, error) {
+	if s.failBindings != nil {
+		return nil, s.failBindings
+	}
+	return s.Store.ListRoleBindingsForPrincipals(ctx, principals, scopeTypes, scopeIDs)
+}
+
+func (s *actorPathFailingStore) GetRoleDefinitionsByIDs(ctx context.Context, ids []string) (map[string]*store.RoleDefinition, error) {
+	if s.failRoleDefs != nil {
+		return nil, s.failRoleDefs
+	}
+	return s.Store.GetRoleDefinitionsByIDs(ctx, ids)
+}
+
+// Decide records Actor and Purpose on the decision for these return paths:
+// a missing principal, a principal kind that does not match the identity,
+// a federated service, a broker, an unresolvable permission (with and
+// without explain), a token project mismatch before the kernel, a
+// principal resolution error, a role-binding lookup error, a role
+// definition lookup error, a kernel role-binding allow, a relationship
+// allow with and without explain, and a deny with explain.
 func TestDecide_ActorAndPurposeOnEveryReturnPath(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	owner := createCharacterizationUser(t, s, tid("relrule-actor-path-owner"))
+	adminID := tid("relrule-actor-path-admin")
+	createTestUserWithRole(t, s, adminID, "actor-path-admin@relrule.test", "admin", store.SystemRoleSuperAdmin)
+	admin := NewAuthenticatedUser(adminID, "actor-path-admin@relrule.test", "Admin", "admin", "api")
+	federatedUser := NewFederatedUserIdentity("https://issuer.example", "actor-path-user", "u@relrule.test", "User", "member", nil)
+	federatedService := NewFederatedServiceIdentity("https://issuer.example", "actor-path-service", "svc@relrule.test", nil)
+	broker := NewBrokerIdentity(tid("relrule-actor-path-broker"))
+	lookupErr := errors.New("unavailable")
+	bindingsFail := NewAuthzService(&actorPathFailingStore{Store: s, failBindings: lookupErr}, authz.logger)
+	roleDefsFail := NewAuthzService(&actorPathFailingStore{Store: s, failRoleDefs: lookupErr}, authz.logger)
 	projectID := tid("relrule-actor-path-proj")
 	agent := agentResource(&store.Agent{ID: tid("relrule-actor-path-agent"), ProjectID: projectID, OwnerID: owner.ID()})
 	otherProjectToken := NewScopedUserIdentity(owner, tid("relrule-actor-path-other-proj"), []string{"agent:read"})
@@ -822,22 +920,36 @@ func TestDecide_ActorAndPurposeOnEveryReturnPath(t *testing.T) {
 		}
 		return req
 	}
+	kindMismatch := request(owner, agent, ActionRead, "agent.read", false)
+	kindMismatch.Principal.Kind = PrincipalKindBroker
 	for _, tc := range []struct {
 		name    string
+		authz   *AuthzService
 		req     AuthzRequest
 		allowed bool
 		reason  string
 	}{
-		{"missing principal", request(nil, agent, ActionRead, "agent.read", false), false, "missing principal"},
-		{"unresolvable permission", request(owner, Resource{Type: "no_such_type", ID: "x"}, ActionRead, "", false), false, unresolvablePermissionReason},
-		{"unresolvable permission explain", request(owner, Resource{Type: "no_such_type", ID: "x"}, ActionRead, "", true), false, unresolvablePermissionReason},
-		{"token project mismatch", request(otherProjectToken, agent, ActionRead, "agent.read", false), false, "token not scoped for this project"},
-		{"relationship allow", request(owner, agent, ActionRead, "agent.read", false), true, "relationship grant: resource owner"},
-		{"relationship allow explain", request(owner, agent, ActionRead, "agent.read", true), true, "relationship grant: resource owner"},
-		{"relationship deny explain", request(owner, agent, ActionUpdate, "hub.config.update", true), false, ""},
+		{"missing principal", nil, request(nil, agent, ActionRead, "agent.read", false), false, "missing principal"},
+		{"principal kind mismatch", nil, kindMismatch, false, "principal kind does not match identity"},
+		{"federated service", nil, request(federatedService, agent, ActionRead, "agent.read", false), false, "federated service identities are not supported"},
+		{"broker", nil, request(broker, agent, ActionRead, "agent.read", false), false, "broker identities are not supported by authorization"},
+		{"unresolvable permission", nil, request(owner, Resource{Type: "no_such_type", ID: "x"}, ActionRead, "", false), false, unresolvablePermissionReason},
+		{"unresolvable permission explain", nil, request(owner, Resource{Type: "no_such_type", ID: "x"}, ActionRead, "", true), false, unresolvablePermissionReason},
+		{"token project mismatch", nil, request(otherProjectToken, agent, ActionRead, "agent.read", false), false, "token not scoped for this project"},
+		{"principal resolution error", nil, request(federatedUser, agent, ActionRead, "agent.read", true), false, "principal resolution error (fail-closed)"},
+		{"role-binding lookup error", bindingsFail, request(admin, agent, ActionRead, "agent.read", true), false, "binding resolution error (fail-closed)"},
+		{"role definition lookup error", roleDefsFail, request(admin, agent, ActionRead, "agent.read", true), false, "role resolution error (fail-closed)"},
+		{"kernel role-binding allow", nil, request(admin, agent, ActionRead, "agent.read", false), true, "role binding grant"},
+		{"relationship allow", nil, request(owner, agent, ActionRead, "agent.read", false), true, "relationship grant: resource owner"},
+		{"relationship allow explain", nil, request(owner, agent, ActionRead, "agent.read", true), true, "relationship grant: resource owner"},
+		{"relationship deny explain", nil, request(owner, agent, ActionUpdate, "hub.config.update", true), false, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			d := authz.Decide(context.Background(), tc.req)
+			svc := authz
+			if tc.authz != nil {
+				svc = tc.authz
+			}
+			d := svc.Decide(context.Background(), tc.req)
 			assert.Equal(t, tc.allowed, d.Allowed, "reason %q", d.Reason)
 			if tc.reason != "" {
 				assert.Equal(t, tc.reason, d.Reason)

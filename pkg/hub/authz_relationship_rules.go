@@ -450,7 +450,9 @@ type ProgenyFactAdapter interface {
 	// Kind is the resource type the adapter serves (e.g. "secret").
 	Kind() string
 	// ReadPermissions lists the registered read-class permissions a
-	// progeny candidate of this kind may carry.
+	// progeny candidate of this kind may carry. RegisterProgenyAdapter
+	// reads the set once, validates it and stores a copy; decisions use
+	// that stored copy and do not call ReadPermissions again.
 	ReadPermissions() []string
 	// Sources returns the sharing sources visible to the ancestry chain.
 	Sources(ctx context.Context, q ProgenyQuery) ([]SharingSource, error)
@@ -480,11 +482,18 @@ var errProgenyAdapter = errors.New("invalid progeny adapter")
 // shared, whichever adapter supplies it.
 var progenyOptInKinds = map[string]bool{"secret": true, "envvar": true, "skill_injection": true}
 
+// registeredProgenyAdapter is an adapter together with the read
+// permissions validated at registration.
+type registeredProgenyAdapter struct {
+	adapter ProgenyFactAdapter
+	perms   []string
+}
+
 // progenyAdapterRegistry holds adapters registered through
 // RegisterProgenyAdapter, keyed by kind.
 type progenyAdapterRegistry struct {
 	mu       sync.RWMutex
-	adapters map[string]ProgenyFactAdapter
+	adapters map[string]registeredProgenyAdapter
 	// builtinReleased lists built-in kinds whose store adapter has been
 	// explicitly released so another adapter may register for the kind.
 	// Only test helpers set it.
@@ -494,12 +503,13 @@ type progenyAdapterRegistry struct {
 // RegisterProgenyAdapter registers an adapter for one sharing-source kind.
 // Every read permission must be a registered read-class permission; a kind
 // may be registered once. A kind served by the built-in store adapter
-// (progenyOptInKinds) is refused.
+// (progenyOptInKinds) is refused. The validated permission set is copied
+// and stored with the adapter; decisions read that copy.
 func (a *AuthzService) RegisterProgenyAdapter(adapter ProgenyFactAdapter) error {
 	if adapter == nil || adapter.Kind() == "" {
 		return fmt.Errorf("%w: adapter must name a kind", errProgenyAdapter)
 	}
-	perms := adapter.ReadPermissions()
+	perms := append([]string(nil), adapter.ReadPermissions()...)
 	if len(perms) == 0 {
 		return fmt.Errorf("%w: %s: no read permissions", errProgenyAdapter, adapter.Kind())
 	}
@@ -515,7 +525,7 @@ func (a *AuthzService) RegisterProgenyAdapter(adapter ProgenyFactAdapter) error 
 	a.progenyAdapters.mu.Lock()
 	defer a.progenyAdapters.mu.Unlock()
 	if a.progenyAdapters.adapters == nil {
-		a.progenyAdapters.adapters = map[string]ProgenyFactAdapter{}
+		a.progenyAdapters.adapters = map[string]registeredProgenyAdapter{}
 	}
 	if _, exists := a.progenyAdapters.adapters[adapter.Kind()]; exists {
 		return fmt.Errorf("%w: %s: already registered", errProgenyAdapter, adapter.Kind())
@@ -523,23 +533,26 @@ func (a *AuthzService) RegisterProgenyAdapter(adapter ProgenyFactAdapter) error 
 	if progenyOptInKinds[adapter.Kind()] && !a.progenyAdapters.builtinReleased[adapter.Kind()] {
 		return fmt.Errorf("%w: %s: served by the built-in store adapter", errProgenyAdapter, adapter.Kind())
 	}
-	a.progenyAdapters.adapters[adapter.Kind()] = adapter
+	a.progenyAdapters.adapters[adapter.Kind()] = registeredProgenyAdapter{adapter: adapter, perms: perms}
 	return nil
 }
 
-// progenyAdapter returns the adapter for a kind: a registered adapter, or
-// the built-in store adapter for secret, envvar and skill_injection.
-func (a *AuthzService) progenyAdapter(kind string) ProgenyFactAdapter {
+// progenyAdapter returns the adapter for a kind and its read permissions:
+// a registered adapter with the set stored at registration, or the
+// built-in store adapter for secret, envvar and skill_injection with its
+// fixed set. The returned slice is a copy.
+func (a *AuthzService) progenyAdapter(kind string) (ProgenyFactAdapter, []string) {
 	a.progenyAdapters.mu.RLock()
-	adapter := a.progenyAdapters.adapters[kind]
+	reg, ok := a.progenyAdapters.adapters[kind]
 	a.progenyAdapters.mu.RUnlock()
-	if adapter != nil {
-		return adapter
+	if ok && reg.adapter != nil {
+		return reg.adapter, append([]string(nil), reg.perms...)
 	}
 	if a.store == nil || !progenyOptInKinds[kind] {
-		return nil
+		return nil, nil
 	}
-	return storeProgenyAdapter{kind: kind, store: a.store}
+	builtin := storeProgenyAdapter{kind: kind, store: a.store}
+	return builtin, builtin.ReadPermissions()
 }
 
 // hasRegisteredProgenyAdapter reports whether an adapter was registered
@@ -547,7 +560,8 @@ func (a *AuthzService) progenyAdapter(kind string) ProgenyFactAdapter {
 func (a *AuthzService) hasRegisteredProgenyAdapter(kind string) bool {
 	a.progenyAdapters.mu.RLock()
 	defer a.progenyAdapters.mu.RUnlock()
-	return a.progenyAdapters.adapters[kind] != nil
+	_, ok := a.progenyAdapters.adapters[kind]
+	return ok
 }
 
 // progenyRelationshipType names the progeny relationship for a resource
@@ -564,10 +578,10 @@ func (a *AuthzService) progenyRelationshipType(kind string) RelationshipType {
 	return ""
 }
 
-// adapterServesPermission reports whether permissionID is one of the
-// adapter's read permissions.
-func adapterServesPermission(adapter ProgenyFactAdapter, permissionID string) bool {
-	for _, id := range adapter.ReadPermissions() {
+// adapterServesPermission reports whether permissionID is in perms, the
+// adapter's read permissions as returned by progenyAdapter.
+func adapterServesPermission(perms []string, permissionID string) bool {
+	for _, id := range perms {
 		if id == permissionID {
 			return true
 		}
@@ -683,12 +697,12 @@ func (a *AuthzService) ProgenyListPredicate(ctx context.Context, principal Princ
 	if !ok || len(agent.Ancestry()) == 0 {
 		return none
 	}
-	adapter := a.progenyAdapter(kind)
+	adapter, perms := a.progenyAdapter(kind)
 	if adapter == nil {
 		return none
 	}
 	allowed := false
-	for _, id := range adapter.ReadPermissions() {
+	for _, id := range perms {
 		if permissions.RelationshipPolicyAllows(string(RelationshipRuleProgeny), "agent", kind, id) {
 			allowed = true
 			break
@@ -722,11 +736,11 @@ func (a *AuthzService) progenySourceFor(ctx context.Context, agent AgentIdentity
 	if len(ancestry) == 0 {
 		return nil, false, "agent has no ancestry chain"
 	}
-	adapter := a.progenyAdapter(kind)
+	adapter, perms := a.progenyAdapter(kind)
 	if adapter == nil {
 		return nil, false, "no sharing-source adapter for " + kind
 	}
-	if !adapterServesPermission(adapter, permissionID) {
+	if !adapterServesPermission(perms, permissionID) {
 		return nil, false, "permission is not a read permission of the sharing-source adapter"
 	}
 	sources, err := adapter.Sources(ctx, ProgenyQuery{Kind: kind, ResourceID: resourceID, Ancestry: ancestry})
