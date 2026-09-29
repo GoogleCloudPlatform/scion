@@ -56,10 +56,22 @@ func doRequestWithBearer(srv *Server, bearer string) *httptest.ResponseRecorder 
 	return rr
 }
 
+// installRejectionLogging wires both the auth-rejection logger and the
+// request logger to the same capturingHandler, so a "credential rejected"
+// test can assert on request_id (which only exists once a request logger
+// installs *logging.RequestMeta — review-1 finding F7) alongside the
+// rejection reason.
+func installRejectionLogging(srv *Server) *capturingHandler {
+	capture := &capturingHandler{}
+	logger := slog.New(capture)
+	srv.authConfig.Logger = logger
+	srv.SetRequestLogger(logger)
+	return capture
+}
+
 func TestUATRejection_UnknownToken_NoIdentityAsserted(t *testing.T) {
 	srv, _ := testServer(t)
-	capture := &capturingHandler{}
-	srv.authConfig.Logger = slog.New(capture)
+	capture := installRejectionLogging(srv)
 
 	presented := "scion_pat_" + "unknown-value-not-in-store"
 	rr := doRequestWithBearer(srv, presented)
@@ -71,12 +83,27 @@ func TestUATRejection_UnknownToken_NoIdentityAsserted(t *testing.T) {
 	require.Equal(t, "invalid", attrs["reason"])
 	_, hasID := attrs["credential.id"]
 	require.False(t, hasID, "an unrecognized bearer value must not surface a credential.id: %v", attrs)
+	_, hasUserID := attrs["user_id"]
+	require.False(t, hasUserID, "an unrecognized bearer value must not surface a user_id: %v", attrs)
+	_, hasPrincipalKind := attrs["principal_kind"]
+	require.False(t, hasPrincipalKind, "an unrecognized bearer value must not surface a principal_kind: %v", attrs)
+
+	requestID, hasRequestID := attrs["request_id"]
+	require.True(t, hasRequestID, "the rejection line must carry request_id: %v", attrs)
+	require.Equal(t, rr.Header().Get("X-Request-ID"), requestID, "request_id must match the X-Request-ID response header")
+
+	// The response line itself (emitted by RequestLogMiddleware) must also
+	// carry no identity for this request.
+	last := recordAttrs(capture.all()[len(capture.all())-1])
+	_, hasUserIDOnResponse := last["user_id"]
+	require.False(t, hasUserIDOnResponse, "the response line must not surface a user_id for a rejected request: %v", last)
+	_, hasPrincipalKindOnResponse := last["principal_kind"]
+	require.False(t, hasPrincipalKindOnResponse, "the response line must not surface a principal_kind for a rejected request: %v", last)
 }
 
 func TestUATRejection_RevokedToken_IdentifiesMatchedRecordAsRejection(t *testing.T) {
 	srv, s := testServer(t)
-	capture := &capturingHandler{}
-	srv.authConfig.Logger = slog.New(capture)
+	capture := installRejectionLogging(srv)
 
 	projectID, ownerID := setupUATProjectAndOwner(t, s, "rej-revoked")
 	key, token, err := srv.uatService.CreateToken(rs4MintContext(ownerID), ownerID, "revoke-me", projectID, []string{"project:read"}, nil)
@@ -91,12 +118,12 @@ func TestUATRejection_RevokedToken_IdentifiesMatchedRecordAsRejection(t *testing
 	attrs := recordAttrs(rec)
 	require.Equal(t, "revoked", attrs["reason"])
 	require.Equal(t, token.ID, attrs["credential.id"], "a revoked token's rejection may identify the matched record")
+	require.Equal(t, rr.Header().Get("X-Request-ID"), attrs["request_id"])
 }
 
 func TestUATRejection_ExpiredToken(t *testing.T) {
 	srv, s := testServer(t)
-	capture := &capturingHandler{}
-	srv.authConfig.Logger = slog.New(capture)
+	capture := installRejectionLogging(srv)
 
 	projectID, ownerID := setupUATProjectAndOwner(t, s, "rej-expired")
 	past := time.Now().Add(-time.Hour)
@@ -118,12 +145,12 @@ func TestUATRejection_ExpiredToken(t *testing.T) {
 	attrs := recordAttrs(rec)
 	require.Equal(t, "expired", attrs["reason"])
 	require.Equal(t, tok.ID, attrs["credential.id"])
+	require.Equal(t, rr.Header().Get("X-Request-ID"), attrs["request_id"])
 }
 
 func TestUATRejection_SuspendedUser(t *testing.T) {
 	srv, s := testServer(t)
-	capture := &capturingHandler{}
-	srv.authConfig.Logger = slog.New(capture)
+	capture := installRejectionLogging(srv)
 
 	projectID, ownerID := setupUATProjectAndOwner(t, s, "rej-suspended")
 	key, token, err := srv.uatService.CreateToken(rs4MintContext(ownerID), ownerID, "will-suspend", projectID, []string{"project:read"}, nil)
@@ -142,6 +169,7 @@ func TestUATRejection_SuspendedUser(t *testing.T) {
 	attrs := recordAttrs(rec)
 	require.Equal(t, "user_suspended", attrs["reason"])
 	require.Equal(t, token.ID, attrs["credential.id"])
+	require.Equal(t, rr.Header().Get("X-Request-ID"), attrs["request_id"])
 }
 
 func TestUATRejection_NeverLogsPresentedToken(t *testing.T) {

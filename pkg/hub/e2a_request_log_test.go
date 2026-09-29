@@ -18,6 +18,8 @@ package hub
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -135,11 +137,8 @@ func TestRequestLogMiddleware_RegressionFieldsPreserved(t *testing.T) {
 	require.Equal(t, "hub", last["component"])
 }
 
-// TestRequestLogMiddleware_LogsAuthRejection proves the Q5 move actually
-// fixes the gap it exists for: a request an invalid UAT token gets rejected
-// by UnifiedAuthMiddleware (401, no call to next) is still request-logged.
-// Before the move, RequestLogMiddleware sat inside auth in the chain and
-// never ran for this case at all.
+// TestRequestLogMiddleware_LogsAuthRejection proves a request UnifiedAuthMiddleware
+// rejects outright (401, no call to next) is still request-logged.
 func TestRequestLogMiddleware_LogsAuthRejection(t *testing.T) {
 	srv, _ := testServer(t)
 	capture := &capturingHandler{}
@@ -193,8 +192,9 @@ func TestRequestLogMiddleware_TwoUATsDistinguishable(t *testing.T) {
 }
 
 // TestRequestLogMiddleware_NoPlaintextOrHash captures all request-log output
-// for a UAT request and asserts the plaintext token and its SHA-256 hash
-// never appear (plan §3.6, rulings Q3).
+// for both a successful and a rejected UAT request and asserts the plaintext
+// token, its SHA-256 hash, its stored prefix, and the raw Authorization
+// header value never appear (plan §3.6, rulings Q3).
 func TestRequestLogMiddleware_NoPlaintextOrHash(t *testing.T) {
 	srv, s := testServer(t)
 	capture := &capturingHandler{}
@@ -202,9 +202,29 @@ func TestRequestLogMiddleware_NoPlaintextOrHash(t *testing.T) {
 
 	projectID, ownerID := setupUATProjectAndOwner(t, s, "reqlog-nosecret")
 	uatKey := mintScopedUAT(t, srv, ownerID, projectID, []string{"project:read"})
+	hash := sha256.Sum256([]byte(uatKey))
+	hashHex := hex.EncodeToString(hash[:])
 
 	rec := doRequestWithUAT(t, srv, uatKey, http.MethodGet, "/api/v1/projects/"+projectID, nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// A rejected UAT must be just as clean: no plaintext, hash, or header
+	// value for a credential that never even matched a stored record.
+	rejected := "scion_pat_reqlog-nosecret-rejected-value"
+	rejHash := sha256.Sum256([]byte(rejected))
+	rejHashHex := hex.EncodeToString(rejHash[:])
+	rejRec := doRequestWithBearer(srv, rejected)
+	require.Equal(t, http.StatusUnauthorized, rejRec.Code)
+
+	forbidden := []string{
+		uatKey, hashHex, "Bearer " + uatKey,
+		rejected, rejHashHex, "Bearer " + rejected,
+	}
+	// The stored prefix is the first UATPrefixLength characters of the key
+	// body, which is itself a substring of uatKey — already covered by the
+	// uatKey check above, but asserted explicitly since it is a distinct
+	// field on the stored token record.
+	forbidden = append(forbidden, uatKey[:len(store.UATPrefix)+UATPrefixLength])
 
 	for _, r := range capture.all() {
 		var sb strings.Builder
@@ -216,8 +236,10 @@ func TestRequestLogMiddleware_NoPlaintextOrHash(t *testing.T) {
 			sb.WriteString(" ")
 		}
 		line := sb.String()
-		if strings.Contains(line, uatKey) {
-			t.Fatalf("request log line contains the plaintext UAT: %s", line)
+		for _, secret := range forbidden {
+			if strings.Contains(line, secret) {
+				t.Fatalf("request log line contains a forbidden secret value %q: %s", secret, line)
+			}
 		}
 	}
 }
