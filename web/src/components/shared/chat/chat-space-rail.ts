@@ -148,8 +148,10 @@ function loadCollapsedGroupIds(userId: string): Set<string> {
 
 /**
  * Persist the given set of collapsed group IDs, bounded to the most
- * recently touched entries. Failures (storage unavailable or full) are
- * swallowed for the same reason the read side falls back silently.
+ * recently added entries (`Set` preserves insertion order, so re-collapsing
+ * an ID that's already in the set doesn't move it — only a fresh add, after
+ * an expand or on first collapse, does). Failures (storage unavailable or
+ * full) are swallowed for the same reason the read side falls back silently.
  */
 function saveCollapsedGroupIds(userId: string, ids: Set<string>): void {
   try {
