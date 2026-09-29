@@ -143,6 +143,128 @@ func TestUpsertSecret(t *testing.T) {
 	assert.Equal(t, 2, got.Version)
 }
 
+// =============================================================================
+// UpdateSecretRefIfMatches (ptone/scion#2152 round-3 review finding 7)
+//
+// These test the CAS directly, independent of the GCPBackend resync logic
+// built on top of it, since the NULL-vs-empty-string handling below was
+// itself the source of a self-caught bug during development (see dev-notes):
+// secret_ref is field.String("secret_ref").Optional(), so a record that
+// never had a ref persists SQL NULL, not "". entsecret.SecretRefEQ("")
+// compiles to "secret_ref = ''", which never matches NULL, so a CAS keyed on
+// expectedRef="" needs SecretRefIsNil() or it silently never applies to
+// exactly the never-migrated records this method exists to fix.
+// =============================================================================
+
+func TestUpdateSecretRefIfMatches_NilRefMatchesEmptyExpected(t *testing.T) {
+	ss := newTestSecretStore(t)
+	ctx := context.Background()
+
+	scopeID := uuid.New().String()
+	sec := &store.Secret{ID: uuid.New().String(), Key: "CAS_NIL", EncryptedValue: "v", Scope: store.ScopeUser, ScopeID: scopeID}
+	require.NoError(t, ss.CreateSecret(ctx, sec))
+	require.Empty(t, sec.SecretRef, "a never-migrated secret has no ref")
+	require.Equal(t, 1, sec.Version)
+
+	applied, err := ss.UpdateSecretRefIfMatches(ctx, "CAS_NIL", store.ScopeUser, scopeID, "", "gcpsm:projects/p/secrets/new")
+	require.NoError(t, err)
+	assert.True(t, applied, "CAS with expectedRef=\"\" must match a SQL-NULL secret_ref")
+
+	got, err := ss.GetSecret(ctx, "CAS_NIL", store.ScopeUser, scopeID)
+	require.NoError(t, err)
+	assert.Equal(t, "gcpsm:projects/p/secrets/new", got.SecretRef)
+	assert.Equal(t, 2, got.Version, "a successful CAS increments Version")
+}
+
+func TestUpdateSecretRefIfMatches_EmptyExpectedDoesNotMatchNonEmptyRef(t *testing.T) {
+	ss := newTestSecretStore(t)
+	ctx := context.Background()
+
+	scopeID := uuid.New().String()
+	sec := &store.Secret{ID: uuid.New().String(), Key: "CAS_SET", EncryptedValue: "v", Scope: store.ScopeUser, ScopeID: scopeID, SecretRef: "gcpsm:projects/p/secrets/legacy"}
+	require.NoError(t, ss.CreateSecret(ctx, sec))
+
+	applied, err := ss.UpdateSecretRefIfMatches(ctx, "CAS_SET", store.ScopeUser, scopeID, "", "gcpsm:projects/p/secrets/new")
+	require.NoError(t, err)
+	assert.False(t, applied, "expectedRef=\"\" must not match a row whose secret_ref is already set")
+
+	got, err := ss.GetSecret(ctx, "CAS_SET", store.ScopeUser, scopeID)
+	require.NoError(t, err)
+	assert.Equal(t, "gcpsm:projects/p/secrets/legacy", got.SecretRef, "ref must be untouched")
+	assert.Equal(t, 1, got.Version, "Version must not bump on a CAS that doesn't apply")
+}
+
+func TestUpdateSecretRefIfMatches_MismatchFails(t *testing.T) {
+	ss := newTestSecretStore(t)
+	ctx := context.Background()
+
+	scopeID := uuid.New().String()
+	sec := &store.Secret{ID: uuid.New().String(), Key: "CAS_MISMATCH", EncryptedValue: "v", Scope: store.ScopeUser, ScopeID: scopeID, SecretRef: "gcpsm:projects/p/secrets/legacy"}
+	require.NoError(t, ss.CreateSecret(ctx, sec))
+
+	applied, err := ss.UpdateSecretRefIfMatches(ctx, "CAS_MISMATCH", store.ScopeUser, scopeID, "gcpsm:projects/p/secrets/stale-snapshot", "gcpsm:projects/p/secrets/new")
+	require.NoError(t, err)
+	assert.False(t, applied, "a stale expectedRef (a concurrent write already changed it) must not apply")
+
+	got, err := ss.GetSecret(ctx, "CAS_MISMATCH", store.ScopeUser, scopeID)
+	require.NoError(t, err)
+	assert.Equal(t, "gcpsm:projects/p/secrets/legacy", got.SecretRef)
+	assert.Equal(t, 1, got.Version)
+}
+
+func TestUpdateSecretRefIfMatches_MatchApplies(t *testing.T) {
+	ss := newTestSecretStore(t)
+	ctx := context.Background()
+
+	scopeID := uuid.New().String()
+	sec := &store.Secret{
+		ID: uuid.New().String(), Key: "CAS_MATCH", EncryptedValue: "v", Scope: store.ScopeUser, ScopeID: scopeID,
+		SecretRef: "gcpsm:projects/p/secrets/legacy", Description: "keep me", AllowProgeny: true,
+	}
+	require.NoError(t, ss.CreateSecret(ctx, sec))
+
+	applied, err := ss.UpdateSecretRefIfMatches(ctx, "CAS_MATCH", store.ScopeUser, scopeID, "gcpsm:projects/p/secrets/legacy", "gcpsm:projects/p/secrets/prefixed")
+	require.NoError(t, err)
+	assert.True(t, applied)
+
+	got, err := ss.GetSecret(ctx, "CAS_MATCH", store.ScopeUser, scopeID)
+	require.NoError(t, err)
+	assert.Equal(t, "gcpsm:projects/p/secrets/prefixed", got.SecretRef)
+	assert.Equal(t, 2, got.Version, "exactly one Version bump")
+	assert.Equal(t, "v", got.EncryptedValue, "the CAS must only touch secret_ref, not the value")
+	assert.Equal(t, "keep me", got.Description, "unrelated columns must be preserved")
+	assert.True(t, got.AllowProgeny, "unrelated columns must be preserved")
+}
+
+func TestUpdateSecretRefIfMatches_MissingRowReturnsNoError(t *testing.T) {
+	ss := newTestSecretStore(t)
+	ctx := context.Background()
+
+	applied, err := ss.UpdateSecretRefIfMatches(ctx, "ghost", store.ScopeUser, uuid.New().String(), "", "gcpsm:projects/p/secrets/new")
+	require.NoError(t, err, "a missing row is applied=false, not an error")
+	assert.False(t, applied)
+}
+
+func TestUpdateSecretRefIfMatches_ScopeIsolation(t *testing.T) {
+	ss := newTestSecretStore(t)
+	ctx := context.Background()
+
+	userScope := uuid.New().String()
+	projectScope := uuid.New().String()
+	require.NoError(t, ss.CreateSecret(ctx, &store.Secret{ID: uuid.New().String(), Key: "SAME_KEY", EncryptedValue: "u", Scope: store.ScopeUser, ScopeID: userScope}))
+	require.NoError(t, ss.CreateSecret(ctx, &store.Secret{ID: uuid.New().String(), Key: "SAME_KEY", EncryptedValue: "p", Scope: store.ScopeProject, ScopeID: projectScope}))
+
+	applied, err := ss.UpdateSecretRefIfMatches(ctx, "SAME_KEY", store.ScopeUser, userScope, "", "gcpsm:projects/p/secrets/user")
+	require.NoError(t, err)
+	assert.True(t, applied)
+
+	// The identically-keyed project-scope record must be untouched.
+	proj, err := ss.GetSecret(ctx, "SAME_KEY", store.ScopeProject, projectScope)
+	require.NoError(t, err)
+	assert.Empty(t, proj.SecretRef, "a same-key record in a different scope must not be affected")
+	assert.Equal(t, 1, proj.Version)
+}
+
 func TestDeleteSecret(t *testing.T) {
 	ss := newTestSecretStore(t)
 	ctx := context.Background()
