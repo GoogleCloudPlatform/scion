@@ -1813,12 +1813,10 @@ func (a *AuthzService) getProjectScopedPermissions(ctx context.Context, principa
 	}
 
 	// A2: project-scoped bindings for the target project, active-window
-	// filtered, permissions unioned, then access-constraint reduced.
-	// scopedRoleBindingPermissions (authz_boundary.go) is the shared
-	// building block behind this query and the system-scope queries in
-	// ProjectMembershipEvidence/SystemAuthorityProof/MintTimeSystemGrant, so
-	// the two cannot silently drift apart (design review for
-	// ptone/scion#2117).
+	// filtered, permissions unioned, then access-constraint reduced, via
+	// scopedRoleBindingPermissions (authz_boundary.go). A role definition
+	// referenced by an active binding but missing/unloadable fails this
+	// call closed rather than silently omitting the binding's permissions.
 	closure := make(map[string]struct{}, len(principals))
 	for _, p := range principals {
 		closure[p.Type+":"+p.ID] = struct{}{}
