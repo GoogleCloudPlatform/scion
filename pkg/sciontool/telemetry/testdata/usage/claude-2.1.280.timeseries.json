@@ -1,0 +1,394 @@
+{
+  "source": "TestPipelineDerivesClaudeUsageEndToEnd (pkg/sciontool/telemetry)",
+  "claude_cli_version": "2.1.280",
+  "flushes": [
+    [
+      {
+        "metric": {
+          "type": "workload.googleapis.com/scion.usage.tokens",
+          "labels": {
+            "harness": "claude",
+            "model": "claude-sonnet-5",
+            "scion_agent_id": "agent-usage-1",
+            "scion_agent_slug": "usage-agent-slug",
+            "scion_metric_point_id": "d394022fd0f4fde46ab1b2f2f3871392bee44be8dada87b8a3b39b4174403ffd",
+            "scion_metric_resource_id": "fda3ab8b2c09092c9011d238cadc0303fc3a08d8f6141966ba9ba3b0b99c0b93",
+            "scion_metric_scope_id": "0cf637ebd65ba01a08016e0652cb904f5ee11d6877463b05fc644a03363a3d1e",
+            "scion_project_id": "project-usage-1",
+            "service_instance_id": "agent-usage-1",
+            "service_name": "sciontool",
+            "token_type": "cache_write"
+          }
+        },
+        "resource": {
+          "type": "generic_task",
+          "labels": {
+            "job": "sciontool",
+            "location": "global",
+            "namespace": "",
+            "task_id": "agent-usage-1"
+          }
+        },
+        "metricKind": "CUMULATIVE",
+        "valueType": "INT64",
+        "points": [
+          {
+            "interval": {
+              "endTime": "2026-09-27T00:00:00.010Z",
+              "startTime": "2026-09-27T00:00:00Z"
+            },
+            "value": {
+              "int64Value": "26607"
+            }
+          }
+        ],
+        "unit": "{token}",
+        "description": "Tokens attributed to model requests, derived from native usage events"
+      },
+      {
+        "metric": {
+          "type": "workload.googleapis.com/scion.usage.tokens",
+          "labels": {
+            "harness": "claude",
+            "model": "claude-sonnet-5",
+            "scion_agent_id": "agent-usage-1",
+            "scion_agent_slug": "usage-agent-slug",
+            "scion_metric_point_id": "7e323974b1e66054fb038e750794e326b6dbe158a6071d42cf81c211a7f4b05f",
+            "scion_metric_resource_id": "fda3ab8b2c09092c9011d238cadc0303fc3a08d8f6141966ba9ba3b0b99c0b93",
+            "scion_metric_scope_id": "0cf637ebd65ba01a08016e0652cb904f5ee11d6877463b05fc644a03363a3d1e",
+            "scion_project_id": "project-usage-1",
+            "service_instance_id": "agent-usage-1",
+            "service_name": "sciontool",
+            "token_type": "output"
+          }
+        },
+        "resource": {
+          "type": "generic_task",
+          "labels": {
+            "job": "sciontool",
+            "location": "global",
+            "namespace": "",
+            "task_id": "agent-usage-1"
+          }
+        },
+        "metricKind": "CUMULATIVE",
+        "valueType": "INT64",
+        "points": [
+          {
+            "interval": {
+              "endTime": "2026-09-27T00:00:00.010Z",
+              "startTime": "2026-09-27T00:00:00Z"
+            },
+            "value": {
+              "int64Value": "41"
+            }
+          }
+        ],
+        "unit": "{token}",
+        "description": "Tokens attributed to model requests, derived from native usage events"
+      },
+      {
+        "metric": {
+          "type": "workload.googleapis.com/scion.usage.tokens",
+          "labels": {
+            "harness": "claude",
+            "model": "claude-sonnet-5",
+            "scion_agent_id": "agent-usage-1",
+            "scion_agent_slug": "usage-agent-slug",
+            "scion_metric_point_id": "e8174653a47bbc0154d6d167c7943c537f8197d197723f8f1a6b17763285e30e",
+            "scion_metric_resource_id": "fda3ab8b2c09092c9011d238cadc0303fc3a08d8f6141966ba9ba3b0b99c0b93",
+            "scion_metric_scope_id": "0cf637ebd65ba01a08016e0652cb904f5ee11d6877463b05fc644a03363a3d1e",
+            "scion_project_id": "project-usage-1",
+            "service_instance_id": "agent-usage-1",
+            "service_name": "sciontool",
+            "token_type": "input"
+          }
+        },
+        "resource": {
+          "type": "generic_task",
+          "labels": {
+            "job": "sciontool",
+            "location": "global",
+            "namespace": "",
+            "task_id": "agent-usage-1"
+          }
+        },
+        "metricKind": "CUMULATIVE",
+        "valueType": "INT64",
+        "points": [
+          {
+            "interval": {
+              "endTime": "2026-09-27T00:00:00.010Z",
+              "startTime": "2026-09-27T00:00:00Z"
+            },
+            "value": {
+              "int64Value": "2"
+            }
+          }
+        ],
+        "unit": "{token}",
+        "description": "Tokens attributed to model requests, derived from native usage events"
+      },
+      {
+        "metric": {
+          "type": "workload.googleapis.com/gen_ai.api.calls",
+          "labels": {
+            "agent_id": "agent-usage-1",
+            "harness": "claude",
+            "model": "claude-sonnet-5",
+            "project_id": "project-usage-1",
+            "scion_agent_id": "agent-usage-1",
+            "scion_agent_slug": "usage-agent-slug",
+            "scion_metric_point_id": "32218a0836e00d9677434d885fe1c1a184c0d37f4d4d24e06037bb1ce8172319",
+            "scion_metric_resource_id": "fda3ab8b2c09092c9011d238cadc0303fc3a08d8f6141966ba9ba3b0b99c0b93",
+            "scion_metric_scope_id": "0cf637ebd65ba01a08016e0652cb904f5ee11d6877463b05fc644a03363a3d1e",
+            "scion_project_id": "project-usage-1",
+            "service_instance_id": "agent-usage-1",
+            "service_name": "sciontool",
+            "status": "success"
+          }
+        },
+        "resource": {
+          "type": "generic_task",
+          "labels": {
+            "job": "sciontool",
+            "location": "global",
+            "namespace": "",
+            "task_id": "agent-usage-1"
+          }
+        },
+        "metricKind": "CUMULATIVE",
+        "valueType": "INT64",
+        "points": [
+          {
+            "interval": {
+              "endTime": "2026-09-27T00:00:00.010Z",
+              "startTime": "2026-09-27T00:00:00Z"
+            },
+            "value": {
+              "int64Value": "1"
+            }
+          }
+        ],
+        "unit": "{call}",
+        "description": "Number of LLM API calls, derived from native usage events"
+      },
+      {
+        "metric": {
+          "type": "workload.googleapis.com/gen_ai.api.calls",
+          "labels": {
+            "agent_id": "agent-usage-1",
+            "harness": "claude",
+            "model": "claude-sonnet-5",
+            "project_id": "project-usage-1",
+            "scion_agent_id": "agent-usage-1",
+            "scion_agent_slug": "usage-agent-slug",
+            "scion_metric_point_id": "4ec52b9cf98d14c40a2e68ed3fd529c154e54b7ed19cad8c1540b94a423ada2c",
+            "scion_metric_resource_id": "fda3ab8b2c09092c9011d238cadc0303fc3a08d8f6141966ba9ba3b0b99c0b93",
+            "scion_metric_scope_id": "0cf637ebd65ba01a08016e0652cb904f5ee11d6877463b05fc644a03363a3d1e",
+            "scion_project_id": "project-usage-1",
+            "service_instance_id": "agent-usage-1",
+            "service_name": "sciontool",
+            "status": "error"
+          }
+        },
+        "resource": {
+          "type": "generic_task",
+          "labels": {
+            "job": "sciontool",
+            "location": "global",
+            "namespace": "",
+            "task_id": "agent-usage-1"
+          }
+        },
+        "metricKind": "CUMULATIVE",
+        "valueType": "INT64",
+        "points": [
+          {
+            "interval": {
+              "endTime": "2026-09-27T00:00:00.010Z",
+              "startTime": "2026-09-27T00:00:00Z"
+            },
+            "value": {
+              "int64Value": "1"
+            }
+          }
+        ],
+        "unit": "{call}",
+        "description": "Number of LLM API calls, derived from native usage events"
+      }
+    ],
+    [
+      {
+        "metric": {
+          "type": "workload.googleapis.com/gen_ai.api.calls",
+          "labels": {
+            "agent_id": "agent-usage-1",
+            "harness": "claude",
+            "model": "claude-sonnet-5",
+            "project_id": "project-usage-1",
+            "scion_agent_id": "agent-usage-1",
+            "scion_agent_slug": "usage-agent-slug",
+            "scion_metric_point_id": "32218a0836e00d9677434d885fe1c1a184c0d37f4d4d24e06037bb1ce8172319",
+            "scion_metric_resource_id": "fda3ab8b2c09092c9011d238cadc0303fc3a08d8f6141966ba9ba3b0b99c0b93",
+            "scion_metric_scope_id": "0cf637ebd65ba01a08016e0652cb904f5ee11d6877463b05fc644a03363a3d1e",
+            "scion_project_id": "project-usage-1",
+            "service_instance_id": "agent-usage-1",
+            "service_name": "sciontool",
+            "status": "success"
+          }
+        },
+        "resource": {
+          "type": "generic_task",
+          "labels": {
+            "job": "sciontool",
+            "location": "global",
+            "namespace": "",
+            "task_id": "agent-usage-1"
+          }
+        },
+        "metricKind": "CUMULATIVE",
+        "valueType": "INT64",
+        "points": [
+          {
+            "interval": {
+              "endTime": "2026-09-27T00:00:05.130Z",
+              "startTime": "2026-09-27T00:00:00Z"
+            },
+            "value": {
+              "int64Value": "2"
+            }
+          }
+        ],
+        "unit": "{call}",
+        "description": "Number of LLM API calls, derived from native usage events"
+      },
+      {
+        "metric": {
+          "type": "workload.googleapis.com/scion.usage.tokens",
+          "labels": {
+            "harness": "claude",
+            "model": "claude-sonnet-5",
+            "scion_agent_id": "agent-usage-1",
+            "scion_agent_slug": "usage-agent-slug",
+            "scion_metric_point_id": "d394022fd0f4fde46ab1b2f2f3871392bee44be8dada87b8a3b39b4174403ffd",
+            "scion_metric_resource_id": "fda3ab8b2c09092c9011d238cadc0303fc3a08d8f6141966ba9ba3b0b99c0b93",
+            "scion_metric_scope_id": "0cf637ebd65ba01a08016e0652cb904f5ee11d6877463b05fc644a03363a3d1e",
+            "scion_project_id": "project-usage-1",
+            "service_instance_id": "agent-usage-1",
+            "service_name": "sciontool",
+            "token_type": "cache_write"
+          }
+        },
+        "resource": {
+          "type": "generic_task",
+          "labels": {
+            "job": "sciontool",
+            "location": "global",
+            "namespace": "",
+            "task_id": "agent-usage-1"
+          }
+        },
+        "metricKind": "CUMULATIVE",
+        "valueType": "INT64",
+        "points": [
+          {
+            "interval": {
+              "endTime": "2026-09-27T00:00:05.130Z",
+              "startTime": "2026-09-27T00:00:00Z"
+            },
+            "value": {
+              "int64Value": "53214"
+            }
+          }
+        ],
+        "unit": "{token}",
+        "description": "Tokens attributed to model requests, derived from native usage events"
+      },
+      {
+        "metric": {
+          "type": "workload.googleapis.com/scion.usage.tokens",
+          "labels": {
+            "harness": "claude",
+            "model": "claude-sonnet-5",
+            "scion_agent_id": "agent-usage-1",
+            "scion_agent_slug": "usage-agent-slug",
+            "scion_metric_point_id": "7e323974b1e66054fb038e750794e326b6dbe158a6071d42cf81c211a7f4b05f",
+            "scion_metric_resource_id": "fda3ab8b2c09092c9011d238cadc0303fc3a08d8f6141966ba9ba3b0b99c0b93",
+            "scion_metric_scope_id": "0cf637ebd65ba01a08016e0652cb904f5ee11d6877463b05fc644a03363a3d1e",
+            "scion_project_id": "project-usage-1",
+            "service_instance_id": "agent-usage-1",
+            "service_name": "sciontool",
+            "token_type": "output"
+          }
+        },
+        "resource": {
+          "type": "generic_task",
+          "labels": {
+            "job": "sciontool",
+            "location": "global",
+            "namespace": "",
+            "task_id": "agent-usage-1"
+          }
+        },
+        "metricKind": "CUMULATIVE",
+        "valueType": "INT64",
+        "points": [
+          {
+            "interval": {
+              "endTime": "2026-09-27T00:00:05.130Z",
+              "startTime": "2026-09-27T00:00:00Z"
+            },
+            "value": {
+              "int64Value": "82"
+            }
+          }
+        ],
+        "unit": "{token}",
+        "description": "Tokens attributed to model requests, derived from native usage events"
+      },
+      {
+        "metric": {
+          "type": "workload.googleapis.com/scion.usage.tokens",
+          "labels": {
+            "harness": "claude",
+            "model": "claude-sonnet-5",
+            "scion_agent_id": "agent-usage-1",
+            "scion_agent_slug": "usage-agent-slug",
+            "scion_metric_point_id": "e8174653a47bbc0154d6d167c7943c537f8197d197723f8f1a6b17763285e30e",
+            "scion_metric_resource_id": "fda3ab8b2c09092c9011d238cadc0303fc3a08d8f6141966ba9ba3b0b99c0b93",
+            "scion_metric_scope_id": "0cf637ebd65ba01a08016e0652cb904f5ee11d6877463b05fc644a03363a3d1e",
+            "scion_project_id": "project-usage-1",
+            "service_instance_id": "agent-usage-1",
+            "service_name": "sciontool",
+            "token_type": "input"
+          }
+        },
+        "resource": {
+          "type": "generic_task",
+          "labels": {
+            "job": "sciontool",
+            "location": "global",
+            "namespace": "",
+            "task_id": "agent-usage-1"
+          }
+        },
+        "metricKind": "CUMULATIVE",
+        "valueType": "INT64",
+        "points": [
+          {
+            "interval": {
+              "endTime": "2026-09-27T00:00:05.130Z",
+              "startTime": "2026-09-27T00:00:00Z"
+            },
+            "value": {
+              "int64Value": "4"
+            }
+          }
+        ],
+        "unit": "{token}",
+        "description": "Tokens attributed to model requests, derived from native usage events"
+      }
+    ]
+  ]
+}

@@ -4,6 +4,9 @@ Copyright 2025 The Scion Authors.
 
 // Package telemetry provides OTLP telemetry collection and forwarding for sciontool.
 // It enables agents to collect and forward traces to Google Cloud backend.
+//
+// Design references in this package (section N, Dn) are to
+// .design/hosted/usage-telemetry.md (ptone/scion#2053).
 package telemetry
 
 import (
