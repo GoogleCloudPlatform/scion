@@ -2852,10 +2852,9 @@ func TestSPREV6_RerunAfterConflictIsSilentNoOp(t *testing.T) {
 }
 
 // TestSPREV6_MetaEditDuringCopyIsFalsePositiveConflict pins a known,
-// documented limitation (round-6 review non-blocking finding 5, DEFERRED —
-// fixing it needs a code-behavior change out of scope for this docs-only
-// round; see dev-notes.md's "Round-6 review dispositions"): a metadata-only
-// edit (UpdateSecretMeta) racing with a copy/resync bumps Version without
+// documented limitation, tracked in ptone/scion#2254 (fixing it needs a
+// code-behavior change, deliberately not made here): a metadata-only edit
+// (UpdateSecretMeta) racing with a copy/resync bumps Version without
 // touching SecretRef, which the CAS can't distinguish from an
 // authority-relevant ref change. It is reported as ErrConflictingWrite even
 // though the ref never moved and a plain retry would have converged safely.
@@ -2966,5 +2965,143 @@ func TestSPREV6_DeleteLegacyTOCTOUWithOldBinaryWriter(t *testing.T) {
 	}
 	if _, gerr := backend.Get(ctx, "API_KEY", ScopeUser, "user-1"); gerr == nil {
 		t.Error("expected the concurrent old-binary write's only copy to have been destroyed by the TOCTOU race (Get should now fail) -- this is exactly the data loss the --delete-legacy precondition text exists to prevent")
+	}
+}
+
+// =============================================================================
+// Round 7 review regression tests (ptone/scion#2152 PR 2171, sp-rev-7.md)
+//
+// This round is text/lint-only (no behavior change). These three tests pin
+// the round-6 items 5 and 6 limitations that .design/secret-id-hub-refactor.md
+// and ptone/scion#2254 describe, so that committed text and committed
+// behavior stay tied together -- the same discipline round 7 itself applied
+// to round 6's claims.
+// =============================================================================
+
+// TestR7_Item6_NoStoredRefPermissionDenied pins round-6 item 6 (tracked in
+// ptone/scion#2254, not fixed here): a DB record with no stored ref at all
+// (ref=="", or a ref in some other scheme entirely) is classified
+// differently by the copy step than by --delete-legacy when the computed
+// legacy name is PermissionDenied. The copy step (via migrationCheck)
+// treats it as absent, matching the no-DB-record path; canDeleteLegacyName
+// treats the identical signal as fatal, since RefPointsAtPrefixed only
+// reports whether a DB row exists, not whether it has a stored ref. Both
+// fail closed -- nothing is written or deleted -- so this is a
+// classification disagreement, not a safety gap.
+func TestR7_Item6_NoStoredRefPermissionDenied(t *testing.T) {
+	for _, ref := range []string{"", "vault:somewhere/else"} {
+		t.Run(fmt.Sprintf("ref=%q", ref), func(t *testing.T) {
+			backend, mock := createTestGCPBackend(t)
+			ctx := context.Background()
+			legacyName := backend.legacyGCPSecretName("K", ScopeUser, "u1")
+			legacyFull := fmt.Sprintf("projects/%s/secrets/%s", backend.projectID, legacyName)
+			seedMockSecret(t, mock, backend.projectID, legacyName, "v")
+			if err := backend.store.CreateSecret(ctx, &store.Secret{ID: tid("r7-6"), Key: "K", Scope: ScopeUser, ScopeID: "u1", SecretRef: ref, EncryptedValue: "ev"}); err != nil {
+				t.Fatal(err)
+			}
+			deny := NewGCPBackendWithClient(backend.store, &denyAccessSMClient{mock, legacyFull}, backend.projectID, backend.hubID)
+
+			_, rerr := deny.RepairRefToPrefixed(ctx, "K", ScopeUser, "u1")
+			if rerr != store.ErrNotFound {
+				t.Errorf("copy step: expected store.ErrNotFound (skip, matching the no-DB-record path), got %v", rerr)
+			}
+
+			_, perr := deny.PlanLegacyDeletion(ctx, "K", ScopeUser, "u1")
+			derr := deny.DeleteLegacySecretName(ctx, "K", ScopeUser, "u1")
+			if perr == nil || derr == nil {
+				t.Errorf("delete step: expected fatal errors (the known classification mismatch), got plan=%v delete=%v", perr, derr)
+			}
+
+			// Fail-closed: nothing was written or deleted either way.
+			if v, err := backend.accessLatestVersion(ctx, legacyName); err != nil || v != "v" {
+				t.Errorf("fail-closed violated: legacy value %q err %v", v, err)
+			}
+			rec, err := backend.store.GetSecret(ctx, "K", ScopeUser, "u1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rec.SecretRef != ref || rec.EncryptedValue != "ev" {
+				t.Errorf("record mutated: %+v", rec)
+			}
+		})
+	}
+}
+
+// TestR7_Item5_OldBinaryRotationFalsePositive_RerunConverges pins round-6
+// item 5's old-binary-rotation variant (tracked in ptone/scion#2254): an
+// old-binary rotation through the legacy name during a copy attempt bumps
+// Version without moving SecretRef, causing a false-positive
+// ErrConflictingWrite. This test confirms it is data-safe (the correct,
+// rotated value is already served) and that a single re-run converges --
+// contrary to a blanket "a re-run reports nothing to do", which is only
+// true for a genuine conflict (see the CONFLICT guidance in --help).
+func TestR7_Item5_OldBinaryRotationFalsePositive_RerunConverges(t *testing.T) {
+	backend, mock := createTestGCPBackend(t)
+	ctx := context.Background()
+	legacyName := backend.legacyGCPSecretName("API_KEY", ScopeUser, "user-1")
+	legacyFull := fmt.Sprintf("projects/%s/secrets/%s", backend.projectID, legacyName)
+	prefixedName := backend.gcpSecretName("API_KEY", ScopeUser, "user-1")
+	seedMockSecret(t, mock, backend.projectID, legacyName, "v1")
+	if err := backend.store.CreateSecret(ctx, &store.Secret{ID: tid("r7-5"), Key: "API_KEY", Scope: ScopeUser, ScopeID: "user-1", SecretRef: "gcpsm:" + legacyFull}); err != nil {
+		t.Fatal(err)
+	}
+	hooked := &addHookSMClient{mockSMClient: mock, match: prefixedName}
+	hooked.hook = func() {
+		if _, err := mock.AddSecretVersion(ctx, &smpb.AddSecretVersionRequest{Parent: legacyFull, Payload: &smpb.SecretPayload{Data: []byte("v2-old")}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := backend.store.UpsertSecret(ctx, &store.Secret{Key: "API_KEY", Scope: ScopeUser, ScopeID: "user-1", SecretRef: "gcpsm:" + legacyFull}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hb := NewGCPBackendWithClient(backend.store, hooked, backend.projectID, backend.hubID)
+
+	if _, err := hb.RepairRefToPrefixed(ctx, "API_KEY", ScopeUser, "user-1"); !errors.Is(err, ErrConflictingWrite) {
+		t.Fatalf("expected the known false-positive CONFLICT, got %v", err)
+	}
+	sv, err := backend.Get(ctx, "API_KEY", ScopeUser, "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sv.Value != "v2-old" {
+		t.Errorf("data-unsafe: expected the rotated value to already be served, got %q", sv.Value)
+	}
+
+	action, err := backend.RepairRefToPrefixed(ctx, "API_KEY", ScopeUser, "user-1")
+	sv, gerr := backend.Get(ctx, "API_KEY", ScopeUser, "user-1")
+	if gerr != nil {
+		t.Fatal(gerr)
+	}
+	if action == "" || err != nil || sv.Value != "v2-old" {
+		t.Errorf("expected a single re-run to converge (unlike a true conflict), got action=%q err=%v served=%q", action, err, sv.Value)
+	}
+}
+
+// TestR7_Item5_MetaEdit_RerunConverges is the metadata-edit variant of the
+// item-5 false positive: after the false-positive CONFLICT, a re-run
+// converges (reports a real action, and the correct value is served) rather
+// than silently no-op'ing the way a true conflict's re-run does.
+func TestR7_Item5_MetaEdit_RerunConverges(t *testing.T) {
+	backend, mock, _, prefixedName, _ := sprev6Seed(t)
+	ctx := context.Background()
+	hooked := &addHookSMClient{mockSMClient: mock, match: prefixedName}
+	hooked.hook = func() {
+		d := "edited"
+		if _, err := backend.store.UpdateSecretMeta(ctx, "API_KEY", ScopeUser, "user-1", &store.SecretMetaUpdate{Description: &d}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hb := NewGCPBackendWithClient(backend.store, hooked, backend.projectID, backend.hubID)
+	if _, err := hb.RepairRefToPrefixed(ctx, "API_KEY", ScopeUser, "user-1"); !errors.Is(err, ErrConflictingWrite) {
+		t.Fatalf("expected the known false-positive CONFLICT, got %v", err)
+	}
+
+	action, err := backend.RepairRefToPrefixed(ctx, "API_KEY", ScopeUser, "user-1")
+	sv, gerr := backend.Get(ctx, "API_KEY", ScopeUser, "user-1")
+	if gerr != nil {
+		t.Fatal(gerr)
+	}
+	if action == "" || err != nil || sv.Value != "v1" {
+		t.Errorf("expected a single re-run to converge (unlike a true conflict), got action=%q err=%v served=%q", action, err, sv.Value)
 	}
 }

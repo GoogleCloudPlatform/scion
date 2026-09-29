@@ -149,7 +149,7 @@ func TestUpsertSecret(t *testing.T) {
 //
 // These test the CAS directly, independent of the GCPBackend resync logic
 // built on top of it, since the NULL-vs-empty-string handling below was
-// itself the source of a self-caught bug during development (see dev-notes):
+// itself the source of a self-caught bug during ptone/scion#2171's development:
 // secret_ref is field.String("secret_ref").Optional(), so a record that
 // never had a ref persists SQL NULL, not "". entsecret.SecretRefEQ("")
 // compiles to "secret_ref = ''", which never matches NULL, so a CAS keyed on
