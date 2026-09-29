@@ -78,7 +78,7 @@ func loadAntigravityFixture(t *testing.T) (*dialects.MappingDialect, []*hooks.Ev
 // TestAntigravityFixture_EventSequence pins the real, captured event
 // sequence and its normalized names -- in particular the granularity
 // finding (design §9 3d AC): a single turn with a tool call produces two
-// full PreInvocation/PostInvocation pairs (one per real model request, not
+// full PreInvocation/PostInvocation pairs (one per main-loop model request, not
 // one for the whole turn), and a second, separate turn resets back to one
 // pair. If agy ever changes this shape, this test is the first thing to
 // fail.
@@ -230,7 +230,7 @@ func TestAntigravityFixture_CallsPerInvocationNoDoubleCount(t *testing.T) {
 // unaffected either way (design D4, narrow): the one real tool call still
 // shows up.
 func TestAntigravityFixture_UsageSourceUnsetPublishesNothing(t *testing.T) {
-	// Explicitly unset, not just left alone: this PR's own provision.py sets
+	// Explicitly unset, not just left alone: the antigravity provision.py sets
 	// SCION_USAGE_SOURCE=hooks in every antigravity agent, so a bare `go
 	// test` run inside one would otherwise see it ambiently set and fail
 	// here -- exactly the environment this change creates. The existing
