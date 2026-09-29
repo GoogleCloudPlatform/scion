@@ -736,7 +736,9 @@ func (p ProgenyPredicate) Matches(src SharingSource) bool {
 // kind. A principal that is not a hub-attested agent, or a kind with no
 // adapter or no progeny policy row, gets a predicate that matches nothing.
 // The request's credential restrictions are applied by the per-record
-// Decide call, not by the predicate.
+// Decide call, not by the predicate. The source-delegation clause is
+// evaluated per kind, not per record, so the list can be narrower than a
+// point read (see the comment in SourceActive).
 func (a *AuthzService) ProgenyListPredicate(ctx context.Context, principal PrincipalContext, kind string) ProgenyPredicate {
 	none := ProgenyPredicate{Kind: kind}
 	if !isAgentPrincipal(principal.Kind) || !relationshipAncestryAttested(principal) {
@@ -777,6 +779,14 @@ func (a *AuthzService) ProgenyListPredicate(ctx context.Context, principal Princ
 			}
 			// An agent-owned source must hold at least one of the kind's
 			// progeny read permissions through its delegation chain.
+			//
+			// List/point divergence (narrower on list): the list has no
+			// resource record, so the chain is evaluated against the bare
+			// kind (no ID, owner, ancestry or parent). A user delegator's
+			// authority that exists only through a relationship to the
+			// specific resource (for example, owner of that record) is
+			// therefore absent here. A point read evaluates the full
+			// resource, so it can admit a source the list omits.
 			for _, id := range admittedPerms {
 				if holds, _ := a.relationshipSourceDelegationHolds(ctx, ownerID, Resource{Type: kind}, id); holds {
 					return true

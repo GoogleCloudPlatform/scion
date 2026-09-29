@@ -764,16 +764,16 @@ func TestDelegationCeiling_PostBackfillNoEdge_ReadAllowed_WriteBlocked(t *testin
 		json.RawMessage(`{"schema_version":1,"completed":true}`), "migration", 0, "seeded")
 	require.NoError(t, err, "should be able to set backfill marker")
 
-	// No delegation edge — post-backfill. Read-only operations should be
-	// allowed (fail-open for hub-attested local agents), while write
-	// operations remain ceiling-capped.
+	// No delegation edge, post-backfill. A hub-attested local agent keeps
+	// the registered non-sensitive read allowance; every other action is
+	// ceiling-capped.
 	// CO1: Use project resource — agent.read has no AgentScopes. With project
 	// resource the kernel allows, so the denial comes from the delegation
 	// ceiling (post-backfill, no edge), which is the intended test target.
 	agent := dcAgentIdentity(agentID, projectID, AgentRoleFull)
 	resource := Resource{Type: "project", ID: projectID}
 
-	// Read-only operations are allowed despite missing edge (fail-open).
+	// A registered non-sensitive read is allowed without an edge (read allowance).
 	decision := authz.CheckAccess(ctx, agent, resource, ActionRead)
 	assert.True(t, decision.Allowed, "post-backfill read-only should be allowed despite missing edge")
 
@@ -911,12 +911,13 @@ func TestDelegationEdge_CreateRevokeCreateRevoke(t *testing.T) {
 // --- R2-2: isReadOnlyOperation tests ---
 
 func TestIsReadOnlyOperation(t *testing.T) {
-	// Read-only operations (fail-open on store errors)
+	// Read-class operations (candidates for the registered non-sensitive
+	// read allowance; a store error denies every action)
 	assert.True(t, isReadOnlyOperation(ActionRead), "ActionRead is read-only")
 	assert.True(t, isReadOnlyOperation(ActionList), "ActionList is read-only")
 	assert.True(t, isReadOnlyOperation(ActionVerify), "ActionVerify is read-only")
 
-	// Non-read-only operations (fail-closed on store errors)
+	// Non-read-class operations (never qualify for the read allowance)
 	assert.False(t, isReadOnlyOperation(ActionCreate), "ActionCreate is NOT read-only")
 	assert.False(t, isReadOnlyOperation(ActionDelete), "ActionDelete is NOT read-only")
 	assert.False(t, isReadOnlyOperation(ActionUpdate), "ActionUpdate is NOT read-only")

@@ -171,25 +171,28 @@ func TestParentCeiling_MigrationSentinel(t *testing.T) {
 		action        Action
 		perm          string
 		allowed       bool
+		// ceiling marks rows the delegation ceiling denies. Other denied
+		// rows are denied by an earlier stage (kernel or scope).
+		ceiling bool
 	}{
 		{"registered non-sensitive read", store.DelegationPrincipalUser, "system/migration",
-			func(p string) Resource { return Resource{Type: "project", ID: p} }, ActionRead, "project.read", true},
+			func(p string) Resource { return Resource{Type: "project", ID: p} }, ActionRead, "project.read", true, false},
 		{"sensitive read", store.DelegationPrincipalUser, "system/migration",
-			func(p string) Resource { return Resource{Type: "project", ID: p} }, ActionRead, permissionProjectSecretRead, false},
+			func(p string) Resource { return Resource{Type: "project", ID: p} }, ActionRead, permissionProjectSecretRead, false, true},
 		{"attach", store.DelegationPrincipalUser, "system/migration",
 			func(p string) Resource {
 				return Resource{Type: "agent", ID: tid("pc-mig-target"), ParentType: "project", ParentID: p}
-			}, ActionAttach, "agent.attach", false},
+			}, ActionAttach, "agent.attach", false, true},
 		{"create", store.DelegationPrincipalUser, "system/migration",
-			func(p string) Resource { return Resource{Type: "agent", ParentType: "project", ParentID: p} }, ActionCreate, "agent.create", false},
+			func(p string) Resource { return Resource{Type: "agent", ParentType: "project", ParentID: p} }, ActionCreate, "agent.create", false, true},
 		{"unmapped permission", store.DelegationPrincipalUser, "system/migration",
-			func(p string) Resource { return Resource{Type: "project", ID: p} }, ActionRead, "project.unregistered_read", false},
+			func(p string) Resource { return Resource{Type: "project", ID: p} }, ActionRead, "project.unregistered_read", false, false},
 		{"near-match id case", store.DelegationPrincipalUser, "System/Migration",
-			func(p string) Resource { return Resource{Type: "project", ID: p} }, ActionRead, "project.read", false},
+			func(p string) Resource { return Resource{Type: "project", ID: p} }, ActionRead, "project.read", false, true},
 		{"near-match id suffix", store.DelegationPrincipalUser, "system/migration/",
-			func(p string) Resource { return Resource{Type: "project", ID: p} }, ActionRead, "project.read", false},
+			func(p string) Resource { return Resource{Type: "project", ID: p} }, ActionRead, "project.read", false, true},
 		{"near-match delegator type", store.DelegationPrincipalAgent, "system/migration",
-			func(p string) Resource { return Resource{Type: "project", ID: p} }, ActionRead, "project.read", false},
+			func(p string) Resource { return Resource{Type: "project", ID: p} }, ActionRead, "project.read", false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newParentCeilingFixture(t, "mig")
@@ -203,8 +206,8 @@ func TestParentCeiling_MigrationSentinel(t *testing.T) {
 			}))
 			d := decidePerm(f.authz, f.agent(child), tc.resource(f.projectID), tc.action, tc.perm, false)
 			assert.Equal(t, tc.allowed, d.Allowed, "reason %q", d.Reason)
-			if !tc.allowed && d.Reason != "" && d.DeniedBy != "" {
-				assert.Equal(t, DeniedByDelegationCeiling, d.DeniedBy)
+			if tc.ceiling {
+				assert.Equal(t, DeniedByDelegationCeiling, d.DeniedBy, "reason %q", d.Reason)
 			}
 		})
 	}

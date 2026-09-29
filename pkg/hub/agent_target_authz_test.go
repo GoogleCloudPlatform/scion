@@ -28,8 +28,10 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -280,6 +282,80 @@ func TestAgentPTY_ReauthorizesEachConnection(t *testing.T) {
 		rec = f.asAgent(t, http.MethodGet, path, nil, ScopeAgentLifecycle)
 		assertAgentTargetDenied(t, rec, true)
 	})
+}
+
+// connectLoopbackFixtureBroker attaches target to the fixture broker and
+// registers a control-channel connection backed by a loopback WebSocket, so
+// an authorized PTY upgrade can open its broker stream. It returns the
+// broker side of the loopback.
+func connectLoopbackFixtureBroker(t *testing.T, f *bypassAgentsFixture, target *store.Agent) *websocket.Conn {
+	t.Helper()
+	target.RuntimeBrokerID = f.broker.ID
+	require.NoError(t, f.store.UpdateAgent(context.Background(), target))
+	require.NotNil(t, f.srv.controlChannel)
+	hubSide, brokerSide := lifecycleWebSocketPair(t)
+	f.srv.controlChannel.mu.Lock()
+	f.srv.controlChannel.connections[f.broker.ID] = &BrokerConnection{
+		brokerID: f.broker.ID,
+		conn:     wsprotocol.NewConnection(hubSide, wsprotocol.ConnectionConfig{WriteWait: time.Second}),
+		streams:  map[string]*StreamProxy{},
+	}
+	f.srv.controlChannel.mu.Unlock()
+	t.Cleanup(func() {
+		f.srv.controlChannel.mu.Lock()
+		delete(f.srv.controlChannel.connections, f.broker.ID)
+		f.srv.controlChannel.mu.Unlock()
+	})
+	return brokerSide
+}
+
+// dialAgentPTY opens a PTY WebSocket to path on hub with the calling
+// agent's token and returns the connection (nil on a failed handshake) and
+// the handshake response status.
+func dialAgentPTY(t *testing.T, hub *httptest.Server, f *bypassAgentsFixture, path string, scopes ...AgentTokenScope) (*websocket.Conn, int) {
+	t.Helper()
+	header := http.Header{}
+	header.Set("X-Scion-Agent-Token", f.token(t, scopes...))
+	dialer := websocket.Dialer{HandshakeTimeout: 5 * time.Second}
+	conn, resp, err := dialer.Dial("ws"+strings.TrimPrefix(hub.URL, "http")+path, header)
+	require.NotNil(t, resp, "dial error: %v", err)
+	if resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	if err != nil {
+		require.ErrorIs(t, err, websocket.ErrBadHandshake)
+		return nil, resp.StatusCode
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return conn, resp.StatusCode
+}
+
+// TestAgentPTY_AgentAncestorUpgrade pins the WebSocket upgrade for an agent
+// caller: with a live delegation edge the ancestor's upgrade switches
+// protocols (101) and opens the broker stream; once the edge is deactivated
+// the next upgrade is refused with 403.
+func TestAgentPTY_AgentAncestorUpgrade(t *testing.T) {
+	f := bypassAgentsSetup(t)
+	markEdgeBackfillComplete(t, f.store)
+	broker := connectLoopbackFixtureBroker(t, f, f.child)
+	hub := httptest.NewServer(f.srv.Handler())
+	t.Cleanup(hub.Close)
+	path := "/api/v1/agents/" + f.child.ID + "/pty"
+	edgeID := addProjectEdge(t, f.store, store.DelegationPrincipalUser, f.owner.ID, f.caller.ID, f.proj.ID)
+
+	conn, status := dialAgentPTY(t, hub, f, path, ScopeAgentLifecycle)
+	require.Equal(t, http.StatusSwitchingProtocols, status)
+	require.NoError(t, broker.SetReadDeadline(time.Now().Add(5*time.Second)))
+	var open wsprotocol.StreamOpenMessage
+	require.NoError(t, broker.ReadJSON(&open))
+	assert.Equal(t, wsprotocol.TypeStreamOpen, open.Type)
+	assert.Equal(t, f.child.Slug, open.Slug)
+	require.NoError(t, conn.Close())
+
+	require.NoError(t, f.store.DeactivateDelegationEdge(context.Background(), edgeID))
+	conn, status = dialAgentPTY(t, hub, f, path, ScopeAgentLifecycle)
+	assert.Nil(t, conn)
+	assert.Equal(t, http.StatusForbidden, status)
 }
 
 // --- HTTP matrix -----------------------------------------------------------
