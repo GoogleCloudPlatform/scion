@@ -1257,3 +1257,72 @@ func TestResolveHubIDFromEnv_WorkstationFallback(t *testing.T) {
 		t.Errorf("ResolveHubIDFromEnv() = %q on workstation, want %q", id, expected)
 	}
 }
+
+// TestResolveHubIDFromEnvReadOnly covers ResolveHubIDFromEnvReadOnly
+// directly (ptone/scion#2152 round-5 review nit 5): previously it was only
+// exercised indirectly through cmd's migrate-names tests.
+func TestResolveHubIDFromEnvReadOnly(t *testing.T) {
+	cases := []struct {
+		name          string
+		explicitEnv   string
+		kService      string
+		persistedFile string // if non-empty, pre-create ~/.scion/hub-id with this content
+		wantOK        bool
+		wantID        string // only checked when wantOK
+	}{
+		{
+			name:        "explicit env var wins",
+			explicitEnv: "explicit-hub-id",
+			kService:    "my-cloud-run-service", // must be ignored
+			wantOK:      true,
+			wantID:      "explicit-hub-id",
+		},
+		{
+			name:     "K_SERVICE derives without persisting",
+			kService: "my-cloud-run-service",
+			wantOK:   true,
+		},
+		{
+			name:          "persisted file is read, not derived",
+			persistedFile: "persisted-hub-id",
+			wantOK:        true,
+			wantID:        "persisted-hub-id",
+		},
+		{
+			name:   "nothing available refuses rather than deriving and persisting",
+			wantOK: false,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			t.Setenv("HOME", tmpDir)
+			t.Setenv("SCION_SERVER_HUB_HUBID", c.explicitEnv)
+			t.Setenv("K_SERVICE", c.kService)
+
+			if c.persistedFile != "" {
+				scionDir := filepath.Join(tmpDir, ".scion")
+				if err := os.MkdirAll(scionDir, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(scionDir, "hub-id"), []byte(c.persistedFile+"\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			id, ok := ResolveHubIDFromEnvReadOnly()
+			if ok != c.wantOK {
+				t.Fatalf("ResolveHubIDFromEnvReadOnly() ok = %v, want %v (id=%q)", ok, c.wantOK, id)
+			}
+			if c.wantOK && c.wantID != "" && id != c.wantID {
+				t.Errorf("ResolveHubIDFromEnvReadOnly() id = %q, want %q", id, c.wantID)
+			}
+
+			// Never writes, regardless of outcome.
+			if _, statErr := os.Stat(filepath.Join(tmpDir, ".scion", "hub-id")); c.persistedFile == "" && !os.IsNotExist(statErr) {
+				t.Errorf("ResolveHubIDFromEnvReadOnly must not create ~/.scion/hub-id; stat error: %v", statErr)
+			}
+		})
+	}
+}
