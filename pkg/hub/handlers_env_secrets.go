@@ -1414,10 +1414,25 @@ func (s *Server) agentListSecrets(w http.ResponseWriter, r *http.Request, agentI
 		return
 	}
 
+	// emitListExitItem records the request's MaterialSelectionEvent with a
+	// single request-level item before a whole-request exit, so a backend
+	// fault is never a silent exit (R2-2): every exit from this handler
+	// leaves a trace, the same way the decision-error branch already did.
+	emitListExitItem := func(scope, scopeID string, grant GrantKind, permission string) {
+		item := materialSelectionItem(ItemResult{
+			Candidate: Candidate{Kind: MaterialKindSecret, Scope: scope, ScopeID: scopeID, Grant: grant},
+			Reason:    ReasonBackendError,
+		}, permission, "")
+		s.logMaterialSelection(ctx, s.buildMaterialSelectionEvent(ctx, "list", correlationID, facts, "", []MaterialSelectionEventItem{item}))
+	}
+
 	scope := r.URL.Query().Get("scope")
 	switch scope {
 	case "", store.ScopeProject, store.ScopeUser:
 	default:
+		// An invalid scope parameter still emits the request's
+		// MaterialSelectionEvent rather than exiting silently.
+		s.logMaterialSelection(ctx, s.buildMaterialSelectionEvent(ctx, "list", correlationID, facts, ReasonInvalidScope, nil))
 		ValidationError(w, "scope must be \"project\" or \"user\"", map[string]interface{}{
 			"field":   "scope",
 			"value":   scope,
@@ -1439,11 +1454,7 @@ func (s *Server) agentListSecrets(w http.ResponseWriter, r *http.Request, agentI
 			// A decision error still emits the request's
 			// MaterialSelectionEvent, with a request-level item recording
 			// the failure, rather than exiting silently.
-			errItem := materialSelectionItem(ItemResult{
-				Candidate: Candidate{Kind: MaterialKindSecret, Scope: store.ScopeProject, ScopeID: facts.ProjectID, Grant: GrantProjectSecretRead},
-				Reason:    ReasonBackendError,
-			}, "project.secret_read", "")
-			s.logMaterialSelection(ctx, s.buildMaterialSelectionEvent(ctx, "list", correlationID, facts, "", []MaterialSelectionEventItem{errItem}))
+			emitListExitItem(store.ScopeProject, facts.ProjectID, GrantProjectSecretRead, "project.secret_read")
 			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "failed to list secrets", nil)
 			return
 		}
@@ -1455,6 +1466,7 @@ func (s *Server) agentListSecrets(w http.ResponseWriter, r *http.Request, agentI
 				ScopeID: facts.ProjectID,
 			})
 			if err != nil {
+				emitListExitItem(store.ScopeProject, facts.ProjectID, GrantProjectSecretRead, "project.secret_read")
 				writeErrorFromErr(w, err, "")
 				return
 			}
@@ -1483,6 +1495,7 @@ func (s *Server) agentListSecrets(w http.ResponseWriter, r *http.Request, agentI
 	if includeUser {
 		eligible, err := s.progenyEligibleSecretIDs(ctx, facts.Agent)
 		if err != nil {
+			emitListExitItem(store.ScopeUser, facts.Root.ID, GrantProgeny, "")
 			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "failed to list secrets", nil)
 			return
 		}
@@ -1491,6 +1504,7 @@ func (s *Server) agentListSecrets(w http.ResponseWriter, r *http.Request, agentI
 			ScopeID: facts.Root.ID,
 		})
 		if err != nil {
+			emitListExitItem(store.ScopeUser, facts.Root.ID, GrantProgeny, "")
 			writeErrorFromErr(w, err, "")
 			return
 		}
@@ -1502,7 +1516,15 @@ func (s *Server) agentListSecrets(w http.ResponseWriter, r *http.Request, agentI
 				continue
 			}
 			live, kind, _, lerr := s.progenySourceLive(ctx, m)
-			if lerr != nil || !live {
+			if lerr != nil {
+				// A liveness-check error is not the same as "not shared":
+				// logged distinctly so an operator is not left to guess
+				// which one occurred (R2-2).
+				slog.Error("agent list secrets: progeny source liveness check failed",
+					"agent_id", agentID, "key", m.Name, "err", lerr)
+				continue
+			}
+			if !live {
 				continue
 			}
 			var src *SourceRef
