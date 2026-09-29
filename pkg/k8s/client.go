@@ -206,23 +206,39 @@ func (c *Client) Verify() error {
 	return fmt.Errorf("%s — underlying error: %w", hint, err)
 }
 
-// gceFallbackAuthScopes are the OAuth2 scopes requested when falling back to
-// GCE metadata-based auth. cloud-platform alone authenticates the caller to
-// GCP, but GKE authorizes RBAC subjects by identity: without
-// userinfo.email, tokens are presented to the cluster under the service
-// account's numeric unique ID rather than its email address, so
-// email-subject RoleBindings never match.
+// gceFallbackAuthScopes are the OAuth2 scopes requested from Application
+// Default Credentials (a service account key file, the gcloud ADC file, or
+// the GCE/GKE metadata server — whichever DefaultTokenSource resolves first)
+// when falling back from the exec credential plugin. cloud-platform alone
+// authenticates the caller to GCP, but GKE authorizes RBAC subjects by
+// identity: without userinfo.email, tokens are presented to the cluster
+// under the service account's numeric unique ID rather than its email
+// address, so email-subject RoleBindings never match.
+//
+// On a plain GCE VM (not GKE Workload Identity), the metadata server can
+// only mint scopes within the instance's (or node pool's) configured access
+// scopes; the VM must already include userinfo.email, or be granted it, for
+// this to take effect there. The GKE metadata server backing Workload
+// Identity honours the requested scopes directly. Either way this change
+// cannot regress the existing cloud-platform-only behavior — it only adds a
+// scope to the request.
 var gceFallbackAuthScopes = []string{
 	"https://www.googleapis.com/auth/cloud-platform",
 	"https://www.googleapis.com/auth/userinfo.email",
 }
 
-// fallbackToGCEAuth reconfigures the client to use GCE metadata-based
-// OAuth2 tokens instead of the exec-based credential plugin. This is the
+// defaultTokenSource resolves Application Default Credentials for the
+// requested scopes. A package var so tests can stub it and assert on the
+// scopes fallbackToGCEAuth actually passes, rather than only on the
+// gceFallbackAuthScopes literal.
+var defaultTokenSource = google.DefaultTokenSource
+
+// fallbackToGCEAuth reconfigures the client to use Application Default
+// Credentials instead of the exec-based credential plugin. This is the
 // standard auth method for services running on GCE/GKE infrastructure.
 func (c *Client) fallbackToGCEAuth() error {
 	ctx := context.Background()
-	ts, err := google.DefaultTokenSource(ctx, gceFallbackAuthScopes...)
+	ts, err := defaultTokenSource(ctx, gceFallbackAuthScopes...)
 	if err != nil {
 		return fmt.Errorf("failed to get default token source: %w", err)
 	}
