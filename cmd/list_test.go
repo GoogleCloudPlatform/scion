@@ -1683,6 +1683,12 @@ func TestListAgentsViaHub_DescendantsFlag(t *testing.T) {
 	listAll = true
 	filterDescendants = refID
 	outputFormat = "json"
+	// Explicit, not ambient: the --all/agent-mode/relationship-flag guard
+	// (review R2-4) reads SCION_CLI_MODE, and this test only cares about
+	// resolution mechanics, not mode. Do not rely on the ambient
+	// environment defaulting to human mode — inside an agent container it
+	// does not.
+	t.Setenv("SCION_CLI_MODE", "human")
 	defer func() {
 		listAll, filterDescendants, outputFormat = oldListAll, oldDescendants, oldOutputFormat
 	}()
@@ -1732,6 +1738,8 @@ func TestListAgentsViaHub_AncestorsFlag(t *testing.T) {
 	oldListAll, oldAncestors, oldOutputFormat := listAll, filterAncestors, outputFormat
 	listAll = true
 	outputFormat = "json"
+	// See TestListAgentsViaHub_DescendantsFlag: explicit, not ambient.
+	t.Setenv("SCION_CLI_MODE", "human")
 	defer func() {
 		listAll, filterAncestors, outputFormat = oldListAll, oldAncestors, oldOutputFormat
 	}()
@@ -1800,6 +1808,8 @@ func TestListAgentsViaHub_LineageFlag(t *testing.T) {
 	oldListAll, oldLineage, oldOutputFormat := listAll, filterLineage, outputFormat
 	listAll = true
 	outputFormat = "json"
+	// See TestListAgentsViaHub_DescendantsFlag: explicit, not ambient.
+	t.Setenv("SCION_CLI_MODE", "human")
 	defer func() {
 		listAll, filterLineage, outputFormat = oldListAll, oldLineage, oldOutputFormat
 	}()
@@ -1830,45 +1840,86 @@ func TestListAgentsViaHub_LineageFlag(t *testing.T) {
 	})
 }
 
-// TestListAgentsViaHub_AllMode_ReferenceResolutionUsesProjectScopedEndpoint is
-// the ptone/scion#2146 review R1-3 regression for `--all`: an agent identity
-// generally has no hub-wide list authority (only the project-scoped
-// endpoint's same-project carve-out — see
-// TestR1_3_ListEndpointResolvesAgentIdentityCantGetOnPeer,
-// pkg/hub/rs2_r1_fixes_test.go), so if reference-agent resolution used the
-// --all-selected global agentSvc, `--all --descendants` would silently find
-// nothing for an agent caller, even for itself. refAgentSvc must resolve the
-// reference through the project-scoped endpoint whenever a project is
-// resolvable, regardless of --all, while the final listing still spans every
-// project via the global endpoint.
-func TestListAgentsViaHub_AllMode_ReferenceResolutionUsesProjectScopedEndpoint(t *testing.T) {
-	const projectID = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
-	const selfID = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+// TestListAgentsViaHub_AllMode_AgentIdentityWithRelationshipFlag_Errors is
+// the ptone/scion#2146 review R2-4 fix: agent mode plus --all plus any
+// relationship flag must fail loudly, not silently print an empty list. An
+// agent identity has no hub-wide list authority at all — the real Hub
+// proves this directly (TestR1_3_ListEndpointResolvesAgentIdentityCantGetOnPeer,
+// pkg/hub/rs2_r1_fixes_test.go: the global endpoint returns nothing for a
+// bare agent token, even for id=<self>) — so the final --all listing could
+// never succeed for an agent caller regardless of how the reference itself
+// is resolved. The guard fires before any HTTP call at all (there is
+// nothing to fake here: the test server would fail the test if it received
+// any request), which is the point — no reference resolution, no listing,
+// no silent wrong answer.
+func TestListAgentsViaHub_AllMode_AgentIdentityWithRelationshipFlag_Errors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected HTTP request to %s — the --all/agent-mode/relationship-flag guard must fire before any network call", r.URL.Path)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
 
-	var globalAgentsCalled bool
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: "some-project-id"}
+
+	oldListAll := listAll
+	oldDescendants, oldAncestors, oldLineage := filterDescendants, filterAncestors, filterLineage
+	listAll = true
+	t.Setenv("SCION_CLI_MODE", "agent")
+	t.Setenv("SCION_AGENT_ID", "some-agent-id")
+	defer func() {
+		listAll = oldListAll
+		filterDescendants, filterAncestors, filterLineage = oldDescendants, oldAncestors, oldLineage
+	}()
+
+	for _, tt := range []struct {
+		name string
+		set  func()
+	}{
+		{"descendants", func() { filterDescendants = scopeInferSentinel }},
+		{"ancestors", func() { filterAncestors = scopeInferSentinel }},
+		{"lineage", func() { filterLineage = scopeInferSentinel }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			filterDescendants, filterAncestors, filterLineage = "", "", ""
+			tt.set()
+
+			err := listAgentsViaHub(hubCtx)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "--all")
+			assert.Contains(t, err.Error(), "agent")
+		})
+	}
+}
+
+// TestListAgentsViaHub_AllMode_HumanCrossProjectReference is the
+// ptone/scion#2146 review R2-3 regression: under --all, a HUMAN caller must
+// still be able to name a reference agent in a *different* project than the
+// one linked in the current directory — this worked before the (reverted)
+// R1-3 refAgentSvc rework forced reference resolution through the caller's
+// current project unconditionally under --all, which broke it. Reference
+// resolution for a human/assistant caller under --all now goes through the
+// same global endpoint the final listing uses, exactly like a11a271.
+func TestListAgentsViaHub_AllMode_HumanCrossProjectReference(t *testing.T) {
+	const currentProjectID = "11111111-2222-3333-4444-555555555555"
+	const crossProjectRefID = "66666666-7777-8888-9999-000000000000"
+
 	var gotAncestorID string
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.URL.Path == "/api/v1/projects/"+projectID+"/agents/"+selfID:
-			// Simulates the real Hub's denial of a single-resource GET for
-			// an agent identity on any agent, including itself.
-			w.WriteHeader(http.StatusForbidden)
-		case r.URL.Path == "/api/v1/projects/"+projectID+"/agents":
-			// The project-scoped list endpoint succeeds — this is what
-			// refAgentSvc must use for reference resolution.
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				"agents": []hubclient.Agent{{ID: selfID, Slug: "self", Name: "self"}},
-			})
+		case r.URL.Path == "/api/v1/agents/"+crossProjectRefID:
+			// The reference agent lives in a different project than
+			// currentProjectID, but the global endpoint can still resolve
+			// it directly by ID for a human caller.
+			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: crossProjectRefID, Slug: "cross-project-agent"})
 		case r.URL.Path == "/api/v1/agents":
-			// The global endpoint drives the final --all listing. If
-			// reference resolution incorrectly fell back to this endpoint,
-			// it would 404 here (not stubbed to resolve selfID) and the
-			// test would fail with an error instead of asserting on
-			// ancestorId.
-			globalAgentsCalled = true
 			gotAncestorID = r.URL.Query().Get("ancestorId")
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"agents": []hubclient.Agent{}})
+		case strings.HasPrefix(r.URL.Path, "/api/v1/projects/"):
+			t.Errorf("human caller under --all must not be routed through the project-scoped endpoint: %s", r.URL.Path)
+			w.WriteHeader(http.StatusInternalServerError)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -1877,16 +1928,16 @@ func TestListAgentsViaHub_AllMode_ReferenceResolutionUsesProjectScopedEndpoint(t
 
 	client, err := hubclient.New(server.URL)
 	require.NoError(t, err)
-	// ProjectID set directly on HubContext so GetProjectID resolves
-	// deterministically without touching git/settings in this test.
-	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID}
+	// ProjectID set to a DIFFERENT project than the reference agent lives
+	// in, so a test that incorrectly scopes resolution to "the current
+	// project" would fail to resolve crossProjectRefID at all.
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: currentProjectID}
 
 	oldListAll, oldDescendants, oldOutputFormat := listAll, filterDescendants, outputFormat
 	listAll = true
-	filterDescendants = scopeInferSentinel
+	filterDescendants = crossProjectRefID
 	outputFormat = "json"
-	t.Setenv("SCION_CLI_MODE", "agent")
-	t.Setenv("SCION_AGENT_ID", selfID)
+	t.Setenv("SCION_CLI_MODE", "human")
 	defer func() {
 		listAll, filterDescendants, outputFormat = oldListAll, oldDescendants, oldOutputFormat
 	}()
@@ -1899,9 +1950,8 @@ func TestListAgentsViaHub_AllMode_ReferenceResolutionUsesProjectScopedEndpoint(t
 	os.Stdout = oldStdout
 
 	require.NoError(t, err)
-	assert.True(t, globalAgentsCalled, "the final --all listing must still hit the global endpoint")
-	assert.Equal(t, selfID, gotAncestorID,
-		"reference resolution must succeed via the project-scoped endpoint even though the global one can't see this identity")
+	assert.Equal(t, crossProjectRefID, gotAncestorID,
+		"a human caller under --all must resolve a cross-project reference via the global endpoint")
 }
 
 // TestListAgentsViaHub_BareRelationshipFlag_ModeDefaults covers
@@ -1912,6 +1962,7 @@ func TestListAgentsViaHub_AllMode_ReferenceResolutionUsesProjectScopedEndpoint(t
 func TestListAgentsViaHub_BareRelationshipFlag_ModeDefaults(t *testing.T) {
 	const callingUserID = "cccccccc-cccc-cccc-cccc-cccccccccccc"
 	const callingAgentID = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+	const agentProjectID = "22222222-3333-4444-5555-666666666666"
 
 	var gotAncestorID, gotLineageRootID string
 	var agentsCalled bool
@@ -1922,6 +1973,14 @@ func TestListAgentsViaHub_BareRelationshipFlag_ModeDefaults(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(hubclient.User{ID: callingUserID, Email: "me@example.com"})
 		case r.URL.Path == "/api/v1/agents/"+callingAgentID:
 			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: callingAgentID, Slug: "self", Ancestry: []string{"user-id", "parent-id"}})
+		case r.URL.Path == "/api/v1/projects/"+agentProjectID+"/agents/"+callingAgentID:
+			// Agent mode's default (non-`--all`) path goes through the
+			// project-scoped endpoint — see review R2-3/R2-4.
+			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: callingAgentID, Slug: "self", Ancestry: []string{"user-id", "parent-id"}})
+		case r.URL.Path == "/api/v1/projects/"+agentProjectID+"/agents":
+			agentsCalled = true
+			gotAncestorID = r.URL.Query().Get("ancestorId")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"agents": []hubclient.Agent{}})
 		case r.URL.Path == "/api/v1/agents":
 			agentsCalled = true
 			gotAncestorID = r.URL.Query().Get("ancestorId")
@@ -1936,6 +1995,7 @@ func TestListAgentsViaHub_BareRelationshipFlag_ModeDefaults(t *testing.T) {
 	client, err := hubclient.New(server.URL)
 	require.NoError(t, err)
 	hubCtx := &HubContext{Client: client, Endpoint: server.URL}
+	agentHubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: agentProjectID}
 
 	oldListAll, oldOutputFormat := listAll, outputFormat
 	oldDescendants, oldAncestors, oldLineage := filterDescendants, filterAncestors, filterLineage
@@ -1946,12 +2006,12 @@ func TestListAgentsViaHub_BareRelationshipFlag_ModeDefaults(t *testing.T) {
 		filterDescendants, filterAncestors, filterLineage = oldDescendants, oldAncestors, oldLineage
 	}()
 
-	run := func() error {
+	run := func(ctx *HubContext) error {
 		t.Helper()
 		oldStdout := os.Stdout
 		_, w, _ := os.Pipe()
 		os.Stdout = w
-		err := listAgentsViaHub(hubCtx)
+		err := listAgentsViaHub(ctx)
 		_ = w.Close()
 		os.Stdout = oldStdout
 		return err
@@ -1964,20 +2024,27 @@ func TestListAgentsViaHub_BareRelationshipFlag_ModeDefaults(t *testing.T) {
 
 	t.Run("agent mode: bare --descendants resolves to the calling agent (unchanged)", func(t *testing.T) {
 		reset()
+		// Agent mode + a relationship flag is only ever exercised without
+		// --all (review R2-4: agent identities have no hub-wide list
+		// authority, so --all combined with a relationship flag is now a
+		// hard error — see TestListAgentsViaHub_AllMode_AgentIdentityWithRelationshipFlag_Errors).
+		oldListAllLocal := listAll
+		listAll = false
+		defer func() { listAll = oldListAllLocal }()
 		t.Setenv("SCION_CLI_MODE", "agent")
 		t.Setenv("SCION_AGENT_ID", callingAgentID)
 		filterDescendants = scopeInferSentinel
 
-		require.NoError(t, run())
+		require.NoError(t, run(agentHubCtx))
 		assert.Equal(t, callingAgentID, gotAncestorID)
 	})
 
 	t.Run("human mode: bare --descendants resolves to the calling user, not an error", func(t *testing.T) {
 		reset()
-		t.Setenv("SCION_CLI_MODE", "")
+		t.Setenv("SCION_CLI_MODE", "human")
 		filterDescendants = scopeInferSentinel
 
-		require.NoError(t, run())
+		require.NoError(t, run(hubCtx))
 		assert.Equal(t, callingUserID, gotAncestorID,
 			"Ancestry records the creator user directly, so ancestorId=<user> works unchanged")
 	})
@@ -1987,25 +2054,25 @@ func TestListAgentsViaHub_BareRelationshipFlag_ModeDefaults(t *testing.T) {
 		t.Setenv("SCION_CLI_MODE", "assistant")
 		filterDescendants = scopeInferSentinel
 
-		require.NoError(t, run())
+		require.NoError(t, run(hubCtx))
 		assert.Equal(t, callingUserID, gotAncestorID)
 	})
 
 	t.Run("human mode: bare --ancestors returns an empty list (a user has no ancestry), not an error", func(t *testing.T) {
 		reset()
-		t.Setenv("SCION_CLI_MODE", "")
+		t.Setenv("SCION_CLI_MODE", "human")
 		filterAncestors = scopeInferSentinel
 
-		require.NoError(t, run())
+		require.NoError(t, run(hubCtx))
 		assert.False(t, agentsCalled, "a user has no Ancestry chain — nothing to query")
 	})
 
 	t.Run("human mode: bare --lineage roots at the calling user (no parent to walk to)", func(t *testing.T) {
 		reset()
-		t.Setenv("SCION_CLI_MODE", "")
+		t.Setenv("SCION_CLI_MODE", "human")
 		filterLineage = scopeInferSentinel
 
-		require.NoError(t, run())
+		require.NoError(t, run(hubCtx))
 		assert.Equal(t, callingUserID, gotLineageRootID)
 	})
 }

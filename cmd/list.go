@@ -204,20 +204,6 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 		opts.Page.Limit = listCount
 	}
 	agentSvc := hubCtx.Client.Agents()
-	// refAgentSvc is used specifically to resolve a relationship flag's
-	// reference agent (see resolveReferenceAgent calls below) — it is kept
-	// separate from agentSvc, which drives the final listing and must follow
-	// --all. An agent identity generally has no hub-wide list authority; it
-	// only gets to list via the project-scoped endpoint's same-project
-	// carve-out (listProjectAgents, pkg/hub/handlers_projects_core.go). If
-	// reference resolution used the --all-selected agentSvc, `--all
-	// --descendants` (even bare, naming the caller itself) would silently
-	// find nothing for an agent caller — not because the reference doesn't
-	// exist, but because the global endpoint can't see it under that
-	// identity (ptone/scion#2146 review R1-3). Reference resolution is
-	// scoped to the caller's own current project whenever one is resolvable,
-	// regardless of --all; the final listing still spans every project.
-	refAgentSvc := agentSvc
 
 	if !listAll {
 		// Get the project ID for the current project
@@ -227,13 +213,28 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 		}
 		opts.ProjectID = projectID
 		agentSvc = hubCtx.Client.ProjectAgents(projectID)
-		refAgentSvc = agentSvc
-	} else if projectID, err := GetProjectID(hubCtx); err == nil {
-		refAgentSvc = hubCtx.Client.ProjectAgents(projectID)
+	} else if resolveMode() == ModeAgent && (filterDescendants != "" || filterAncestors != "" || filterLineage != "") {
+		// An agent identity has no hub-wide list authority at all: the
+		// global endpoint (what --all drives the final listing through)
+		// returns nothing for a bare agent token, even for the caller's own
+		// ID — only the project-scoped endpoint's same-project carve-out
+		// (listProjectAgents, pkg/hub/handlers_projects_core.go) lets an
+		// agent list anything. An earlier version of this code tried to
+		// route just the reference-agent *resolution* step through the
+		// project-scoped endpoint while leaving the final listing on the
+		// global one; that made resolution succeed but the final listing
+		// still came back empty — a silent wrong answer indistinguishable
+		// from "no descendants" (ptone/scion#2146 review R2-4), and it also
+		// broke `--all` for HUMAN callers naming a reference agent in a
+		// *different* project, since it forced resolution through the
+		// caller's own project unconditionally (review R2-3). Failing loudly
+		// here instead removes both defects: humans keep the pre-existing
+		// global-endpoint behavior for --all, and an agent caller gets a
+		// clear error instead of a wrong empty list.
+		return fmt.Errorf("--all cannot be combined with --descendants/--ancestors/--lineage for an agent caller: " +
+			"agent identities can only list agents within their own project, so the final result would always be empty; " +
+			"drop --all to resolve the reference and list within your project")
 	}
-	// else: no project resolvable at all (e.g. --all run from an unlinked
-	// directory) — refAgentSvc falls back to the global agentSvc, exactly
-	// the prior behavior.
 
 	if filterOwner != "" {
 		ownerID, err := resolveOwnerID(ctx, hubCtx.Client, filterOwner)
@@ -270,7 +271,7 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 			// that works for an agent reference works unchanged here.
 			opts.AncestorID = userID
 		} else {
-			refAgent, err := resolveReferenceAgent(ctx, refAgentSvc, agentRef)
+			refAgent, err := resolveReferenceAgent(ctx, agentSvc, agentRef)
 			if err != nil {
 				return wrapHubError(err)
 			}
@@ -286,7 +287,7 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 			// A user has no Ancestry chain of its own — nothing to list.
 			return displayAgents(nil, listAll, true)
 		}
-		refAgent, err := resolveReferenceAgent(ctx, refAgentSvc, agentRef)
+		refAgent, err := resolveReferenceAgent(ctx, agentSvc, agentRef)
 		if err != nil {
 			return wrapHubError(err)
 		}
@@ -315,7 +316,7 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 			// own lineage root — see resolveLineageRootID.
 			root = resolveLineageRootID(userID, nil)
 		} else {
-			refAgent, err := resolveReferenceAgent(ctx, refAgentSvc, agentRef)
+			refAgent, err := resolveReferenceAgent(ctx, agentSvc, agentRef)
 			if err != nil {
 				return wrapHubError(err)
 			}
@@ -469,10 +470,6 @@ func resolveLineageRootID(id string, ancestry []string) string {
 	return ancestry[len(ancestry)-1]
 }
 
-// resolveReferenceAgent resolves ref (an agent ID, slug, or name) to the full
-// agent record via agentSvc, which the caller has already scoped to the
-// right project (or left unscoped for --all). It tries ref as a direct ID
-// first, then falls back to a slug/name match within agentSvc's listing.
 // maxResolutionPages bounds how many pages resolveOwnerID and
 // resolveReferenceAgent will fetch while searching for an exact name/email
 // match, so a misbehaving or never-terminating cursor cannot hang the CLI

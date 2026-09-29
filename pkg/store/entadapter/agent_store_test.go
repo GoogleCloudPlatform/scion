@@ -19,6 +19,7 @@ package entadapter
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -1380,6 +1381,79 @@ func TestAgentStore_HarnessConfigFilter_TolerantOfCorruptRow(t *testing.T) {
 	assert.Equal(t, 2, all.TotalCount)
 }
 
+// TestAppliedConfigHarnessConfigEquals_PostgresSearchStringMatchesGoEncoding
+// is the "by reasoning" verification the ptone/scion#2146 review R2 asked
+// for on the Postgres branch of appliedConfigHarnessConfigEquals, which
+// cannot be exercised directly (no Postgres available in this sandbox). It
+// pins, in pure Go with no database at all, that the exact substring the
+// Postgres predicate searches for — `"harnessConfig":` followed by
+// to_json(value)'s output — is byte-identical to what marshalAppliedConfig
+// actually writes for a plain ASCII harness-config value (the only kind a
+// validated harness-config slug ever is). This is what makes the strpos
+// match correct rather than coincidental.
+func TestAppliedConfigHarnessConfigEquals_PostgresSearchStringMatchesGoEncoding(t *testing.T) {
+	for _, value := range []string{"claude", "gemini-2", "codex_v1"} {
+		encoded := marshalAppliedConfig(&store.AgentAppliedConfig{HarnessConfig: value})
+
+		// Postgres's to_json(value::text)::text produces exactly `"value"`
+		// for a plain ASCII string with no JSON-special characters — a
+		// double-quoted, unescaped copy, identical to what Go's
+		// encoding/json writes for the same input (both follow the JSON
+		// string-escaping grammar; they diverge only on '<', '>', '&',
+		// which Go additionally HTML-escapes and to_json does not — a
+		// known, narrow gap documented on appliedConfigHarnessConfigEquals,
+		// and not a shape a harness-config slug takes).
+		searchFor := `"harnessConfig":"` + value + `"`
+		assert.Contains(t, encoded, searchFor,
+			"the Postgres strpos search string must match what marshalAppliedConfig actually writes")
+	}
+}
+
+// TestAppliedConfigHarnessConfigEquals_EnvFalsePositiveReasoning is the other
+// half of the "by reasoning" verification: it demonstrates, in pure Go, why
+// the Postgres predicate's second condition (match must occur before any
+// "env": key) is necessary and sufficient. Env is the only later-declared,
+// user-controlled map field that could coincidentally contain the substring
+// "harnessConfig" as one of its own keys; every other field has a fixed,
+// unrelated JSON key name.
+func TestAppliedConfigHarnessConfigEquals_EnvFalsePositiveReasoning(t *testing.T) {
+	// An Env var literally named "harnessConfig" with a colliding value, and
+	// no real top-level HarnessConfig set: the naive (unanchored) substring
+	// search would incorrectly match "gemini" here.
+	encoded := marshalAppliedConfig(&store.AgentAppliedConfig{
+		Env: map[string]string{"harnessConfig": "gemini"},
+	})
+	naivePattern := `"harnessConfig":"gemini"`
+	require.Contains(t, encoded, naivePattern,
+		"sanity check: the collision must actually be present in the encoded document for this test to mean anything")
+
+	// The real top-level "harnessConfig" key is absent (HarnessConfig was
+	// never set, so omitempty drops it) — only the nested one under "env"
+	// exists. The anchor requires the match to occur before "env": starts;
+	// here it does not (the only occurrence IS inside "env"), so the
+	// predicate must not treat this as a match.
+	matchPos := strings.Index(encoded, naivePattern)
+	envPos := strings.Index(encoded, `"env":`)
+	require.NotEqual(t, -1, envPos, "the document must contain an env key for this scenario")
+	assert.Greater(t, matchPos, envPos,
+		"the only occurrence of the colliding pattern must be inside \"env\", after \"env\": starts — "+
+			"this is exactly the case appliedConfigHarnessConfigEquals's env-anchor excludes")
+
+	// By contrast, a real top-level HarnessConfig set alongside the same
+	// colliding Env key: the top-level match occurs before "env": starts,
+	// so the anchor correctly admits it.
+	encodedReal := marshalAppliedConfig(&store.AgentAppliedConfig{
+		HarnessConfig: "gemini",
+		Env:           map[string]string{"harnessConfig": "gemini"},
+	})
+	realMatchPos := strings.Index(encodedReal, naivePattern)
+	realEnvPos := strings.Index(encodedReal, `"env":`)
+	require.NotEqual(t, -1, realMatchPos)
+	require.NotEqual(t, -1, realEnvPos)
+	assert.Less(t, realMatchPos, realEnvPos,
+		"the top-level match must be found before \"env\": starts, regardless of an identically-named Env key")
+}
+
 // TestAgentStore_RequestedOwnerIDFilter verifies that RequestedOwnerID is a
 // plain AND filter, independent of the OwnerID/MemberOrOwnerProjectIDs
 // OR-based Mine/Shared classification (ptone/scion#2146). This is the
@@ -1466,8 +1540,24 @@ func TestAgentStore_IDsFilter(t *testing.T) {
 		assert.Equal(t, a1.ID, result.Items[0].ID)
 	})
 
-	t.Run("mix of agent ID and non-UUID user-like ID skips the latter", func(t *testing.T) {
-		result, err := s.ListAgents(ctx, store.AgentFilter{IDs: []string{a1.ID, "not-a-uuid-user-id"}}, store.ListOptions{})
+	t.Run("mix of agent ID and a real user ID (valid UUID, no agent row) skips the latter", func(t *testing.T) {
+		// This is the actual production path "skip entries that are users,
+		// not agents" takes: a user ID is a perfectly valid UUID, it just
+		// never matches any row in the agents table (ptone/scion#2146
+		// review R1-12/R2-7 — an earlier version of this case used a
+		// non-UUID string here, which exercises parseUUIDList's drop path
+		// below instead of this one).
+		result, err := s.ListAgents(ctx, store.AgentFilter{IDs: []string{a1.ID, uuid.NewString()}}, store.ListOptions{})
+		require.NoError(t, err)
+		require.Len(t, result.Items, 1)
+		assert.Equal(t, a1.ID, result.Items[0].ID)
+	})
+
+	t.Run("mix of agent ID and a genuinely malformed (non-UUID) entry skips the latter", func(t *testing.T) {
+		// Distinct from the case above: this exercises parseUUIDList's
+		// drop-on-parse-failure fallback for corrupt data, not the normal
+		// user-ID-in-Ancestry path.
+		result, err := s.ListAgents(ctx, store.AgentFilter{IDs: []string{a1.ID, "not-a-uuid-at-all"}}, store.ListOptions{})
 		require.NoError(t, err)
 		require.Len(t, result.Items, 1)
 		assert.Equal(t, a1.ID, result.Items[0].ID)

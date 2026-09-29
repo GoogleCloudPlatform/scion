@@ -615,7 +615,13 @@ func AgentDomain() Domain[store.Agent] {
 				// (Ancestry mixes user and agent principal IDs) is a
 				// perfectly valid UUID — it simply matches no row in the
 				// agents table, which is how "skip entries that are users"
-				// falls out without extra bookkeeping.
+				// falls out without extra bookkeeping. A separate,
+				// genuinely malformed (non-UUID) entry is included too, to
+				// confirm that path is dropped rather than erroring — a
+				// distinct code path (parseUUIDList) from the user-ID case
+				// (ptone/scion#2146 review R2-7: an earlier version of this
+				// case used a non-UUID string to stand in for a user ID,
+				// which tested the wrong path).
 				Name: "ByIDs",
 				Seed: func(t *testing.T, ctx context.Context, s store.Store) {
 					require.NoError(t, s.CreateAgent(ctx, newOracleAgent("ids-keep")))
@@ -634,7 +640,8 @@ func AgentDomain() Domain[store.Agent] {
 							keepID = a.ID
 						}
 					}
-					return s.ListAgents(ctx, store.AgentFilter{IDs: []string{keepID, "not-a-uuid-user-id"}}, store.ListOptions{})
+					userIDStandIn := uuid.NewString() // a valid UUID naming no agent
+					return s.ListAgents(ctx, store.AgentFilter{IDs: []string{keepID, userIDStandIn, "not-a-uuid-at-all"}}, store.ListOptions{})
 				},
 				WantCount: 1,
 			},

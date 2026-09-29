@@ -145,21 +145,52 @@ func projectLabelNotContains(key, value string) predicate.Project {
 // A naive `col::jsonb ->> 'harnessConfig'` (or SQLite's plain json_extract)
 // throws on the first malformed row it touches, turning one corrupt agent —
 // possibly in a project the caller can't even see — into a 500 for every
-// harnessConfig-filtered query. Both branches below guard the extraction
-// with a validity check first, via CASE, so an invalid document contributes
-// NULL (never matches, but never errors) instead of aborting the query:
+// harnessConfig-filtered query. The two dialects take different, but each
+// version-independent, guards:
 //
 //	SQLite:   col IS NOT NULL
 //	          AND CASE WHEN json_valid(col) THEN json_extract(col, '$.harnessConfig') END = ?
 //	Postgres: col IS NOT NULL
-//	          AND CASE WHEN pg_input_is_valid(col, 'jsonb') THEN (col::jsonb ->> 'harnessConfig') END = $n
+//	          AND strpos(col, '"harnessConfig":' || to_json($1::text)::text) > 0
+//	          AND (strpos(col, '"env":') = 0
+//	               OR strpos(col, '"harnessConfig":' || to_json($2::text)::text) < strpos(col, '"env":'))
 //
-// The Postgres guard requires pg_input_is_valid, added in PostgreSQL 16 —
-// there is no expression-level "try cast" available on earlier versions
-// without a custom PL/pgSQL helper (which would need its own migration).
-// This is a real version floor introduced by this predicate specifically;
-// flagged in dev-notes for the lead/ptone to confirm or veto, since the repo
-// does not otherwise document (or CI-test) a minimum Postgres version.
+// SQLite's json_valid/json_extract genuinely parses the document, so it has
+// no false-positive risk and no version dependency (json_valid has shipped
+// since SQLite 3.38, and this codebase already depends on JSON1 elsewhere).
+//
+// Postgres has no version-independent "try cast" expression before
+// pg_input_is_valid (added in PostgreSQL 16) — this repo documents no
+// minimum Postgres version, and evidence points at deployments as old as
+// PG15 (ptone/scion#2146 review R2), so an earlier draft that used
+// pg_input_is_valid was rejected as a hidden version floor. strpos/to_json
+// avoid that: both operate on plain text, never throw on malformed input
+// regardless of version, and to_json($n::text) produces the exact quoted,
+// escaped bytes Go's encoding/json would write for a plain string value
+// (matching what marshalAppliedConfig actually stores) — so a corrupt row
+// simply fails the substring match instead of erroring, on every supported
+// Postgres version, with no CASE/validity indirection needed at all.
+//
+// The second condition guards the one real false-positive source: applied
+// config has a single later-declared, user-controlled nested map field,
+// Env (`AgentAppliedConfig.Env map[string]string`), whose keys are
+// arbitrary — an env var literally named "harnessConfig" with a matching
+// value would otherwise also match the substring search. Every other field
+// has a fixed, non-"harnessConfig" JSON key name, so Env is the only
+// possible source of a false positive. Go's encoding/json marshals struct
+// fields in declaration order, and Env is declared after HarnessConfig, so
+// the *first* occurrence of the search string can only be the real
+// top-level key: if it occurs before "env": starts (or "env" is absent
+// entirely), it is the top-level field; if the only occurrence is at or
+// after "env": starts, it is nested inside Env and must not match. This
+// holds regardless of which earlier fields (e.g. Image) happen to be
+// present, unlike anchoring to a fixed byte offset.
+//
+// Known, accepted narrow gap: Go's encoding/json HTML-escapes '<', '>', and
+// '&' in string values by default; Postgres's to_json does not. A harness
+// config name containing one of those characters would not match. Harness
+// config names are validated slugs elsewhere in the system and never
+// contain them in practice.
 //
 // The whole fragment is parenthesized so it composes safely if a future
 // caller wraps it in Or/Not (it is only ever ANDed today).
@@ -171,13 +202,19 @@ func appliedConfigHarnessConfigEquals(value string) predicate.Agent {
 			s.Where(entsql.P(func(b *entsql.Builder) {
 				b.WriteString("(").
 					WriteString(col).
-					WriteString(" IS NOT NULL AND CASE WHEN pg_input_is_valid(").
+					WriteString(" IS NOT NULL AND strpos(").
 					WriteString(col).
-					WriteString(", 'jsonb') THEN (").
-					WriteString(col).
-					WriteString("::jsonb ->> 'harnessConfig') END = ").
+					WriteString(`, '"harnessConfig":' || to_json(`).
 					Arg(value).
-					WriteString(")")
+					WriteString("::text)::text) > 0 AND (strpos(").
+					WriteString(col).
+					WriteString(`, '"env":') = 0 OR strpos(`).
+					WriteString(col).
+					WriteString(`, '"harnessConfig":' || to_json(`).
+					Arg(value).
+					WriteString("::text)::text) < strpos(").
+					WriteString(col).
+					WriteString(`, '"env":')))`)
 			}))
 		default: // SQLite
 			s.Where(entsql.P(func(b *entsql.Builder) {
