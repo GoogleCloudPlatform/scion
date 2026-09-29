@@ -154,6 +154,14 @@ esac
 
 case "${1:-} ${2:-}" in
   "projects add-iam-policy-binding")
+    # Answers as for a project whose IAM policy already contains
+    # conditional bindings: gcloud refuses, in non-interactive mode, a
+    # binding that does not pass --condition, so every call here must
+    # carry --condition=None.
+    if [[ "$(get_flag condition "$@" || true)" != "None" ]]; then
+      echo "ERROR: (gcloud.projects.add-iam-policy-binding) Adding a binding without specifying a condition to a policy containing conditions is prohibited in non-interactive mode. Run the command again with \`--condition=None\`" >&2
+      exit 1
+    fi
     exit 0
     ;;
   "projects get-ancestors")
@@ -587,6 +595,12 @@ json.dump({'email': email, 'description': desc}, open(path, 'w', encoding='utf-8
     ;;
   "iam service-accounts add-iam-policy-binding")
     require_project "$@"
+    # Answers as for a service account whose IAM policy already contains
+    # conditional bindings: every call here must carry --condition=None.
+    if [[ "$(get_flag condition "$@" || true)" != "None" ]]; then
+      echo "ERROR: (gcloud.iam.service-accounts.add-iam-policy-binding) Adding a binding without specifying a condition to a policy containing conditions is prohibited in non-interactive mode. Run the command again with \`--condition=None\`" >&2
+      exit 1
+    fi
     sa_email="${4:-}"
     if [[ -f "${GCLOUD_STUB_STATE_DIR}/service-accounts/${sa_email}.json.grant-fail" ]]; then
       echo "gcloud-stub: simulated grant failure on service account ${sa_email}" >&2
@@ -611,6 +625,12 @@ json.dump({'email': email, 'description': desc}, open(path, 'w', encoding='utf-8
     # that's the point: a test on that path sees the process end on its
     # own instead.
     touch "${GCLOUD_STUB_STATE_DIR}/phase4-iap-hardening-done"
+    # Answers as for a resource whose IAM policy already contains
+    # conditional bindings: every call here must carry --condition=None.
+    if [[ "$(get_flag condition "$@" || true)" != "None" ]]; then
+      echo "ERROR: (gcloud.iap.web.add-iam-policy-binding) Adding a binding without specifying a condition to a policy containing conditions is prohibited in non-interactive mode. Run the command again with \`--condition=None\`" >&2
+      exit 1
+    fi
     if [[ -f "${GCLOUD_STUB_STATE_DIR}/iap-web-add-binding-should-fail" ]]; then
       echo "gcloud-stub: simulated IAP web binding failure" >&2
       exit 1
@@ -661,6 +681,12 @@ json.dump({'email': email, 'description': desc}, open(path, 'w', encoding='utf-8
   "run services add-iam-policy-binding")
     require_project "$@"
     require_flag region "$@"
+    # Answers as for a service whose IAM policy already contains
+    # conditional bindings: every call here must carry --condition=None.
+    if [[ "$(get_flag condition "$@" || true)" != "None" ]]; then
+      echo "ERROR: (gcloud.run.services.add-iam-policy-binding) Adding a binding without specifying a condition to a policy containing conditions is prohibited in non-interactive mode. Run the command again with \`--condition=None\`" >&2
+      exit 1
+    fi
     name="${4:-}"
     if [[ -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.add-binding-fail" ]]; then
       echo "gcloud-stub: simulated failure adding an IAM binding to service [${name}]" >&2
@@ -688,6 +714,12 @@ json.dump({'email': email, 'description': desc}, open(path, 'w', encoding='utf-8
   "run services remove-iam-policy-binding")
     require_project "$@"
     require_flag region "$@"
+    # Answers as for a service whose IAM policy already contains
+    # conditional bindings: every call here must carry --condition=None.
+    if [[ "$(get_flag condition "$@" || true)" != "None" ]]; then
+      echo "ERROR: (gcloud.run.services.remove-iam-policy-binding) Removing a binding without specifying a condition from a policy containing conditions is prohibited in non-interactive mode. Run the command again with \`--condition=None\` to remove a binding without condition or run command with \`--all\` to remove all bindings of the specified principal and role." >&2
+      exit 1
+    fi
     name="${4:-}"
     if [[ -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.remove-binding-fail" ]]; then
       echo "gcloud-stub: simulated failure removing an IAM binding from service [${name}]" >&2

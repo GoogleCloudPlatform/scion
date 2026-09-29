@@ -89,6 +89,15 @@ warn()    { echo -e "${YELLOW}WARNING:${RESET} $*" >&2; }
 err()     { echo -e "${RED}ERROR:${RESET} $*" >&2; }
 section() { echo ""; echo -e "${BOLD}--- $* ---${RESET}"; }
 
+# print_gcloud_error TEXT -- prints TEXT (gcloud's captured stderr) to
+# stderr, each line indented by two spaces. Prints nothing when TEXT is
+# empty.
+print_gcloud_error() {
+  if [[ -n "$1" ]]; then
+    printf '%s\n' "$1" | sed 's/^/  /' >&2
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Retry / timing budgets
 # ---------------------------------------------------------------------------
@@ -1164,10 +1173,15 @@ fi
 # image directly to Artifact Registry (see Phase 4).
 info "Binding IAM roles..."
 for ROLE in roles/logging.logWriter roles/monitoring.metricWriter roles/cloudtrace.agent roles/artifactregistry.writer roles/aiplatform.user; do
-  gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+  if ! BIND_ERR="$(gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member="serviceAccount:${SA_EMAIL}" \
     --role="${ROLE}" \
-    --quiet &>/dev/null
+    --condition=None \
+    --quiet 2>&1 >/dev/null)"; then
+    err "Failed to grant ${ROLE} to ${SA_EMAIL} on project ${PROJECT_ID}:"
+    print_gcloud_error "$BIND_ERR"
+    exit 1
+  fi
 done
 echo "  Roles bound: logging.logWriter, monitoring.metricWriter, cloudtrace.agent, artifactregistry.writer, aiplatform.user"
 
@@ -1210,13 +1224,15 @@ if [[ -n "$DEPLOYER_EMAIL" ]]; then
   else
     DEPLOYER_MEMBER="user:${DEPLOYER_EMAIL}"
   fi
-  if gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+  if TUNNEL_BIND_ERR="$(gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member="${DEPLOYER_MEMBER}" \
     --role="roles/iap.tunnelResourceAccessor" \
-    --quiet >/dev/null 2>&1; then
+    --condition=None \
+    --quiet 2>&1 >/dev/null)"; then
     echo "  IAP tunnel access granted to: ${DEPLOYER_EMAIL}"
   else
-    warn "Failed to grant roles/iap.tunnelResourceAccessor to ${DEPLOYER_EMAIL}."
+    warn "Failed to grant roles/iap.tunnelResourceAccessor to ${DEPLOYER_EMAIL}:"
+    print_gcloud_error "$TUNNEL_BIND_ERR"
     warn "SSH to the VM may fail if you do not have this role. Please ensure it is granted manually."
   fi
 else
@@ -2221,22 +2237,27 @@ else
   fi
   # Use gcloud iap web add-iam-policy-binding (supports --resource-type=cloud-run)
   # Note: this is distinct from "gcloud iap web enable" which does NOT support cloud-run.
-  if gcloud iap web add-iam-policy-binding \
+  if SERVICE_IAP_BIND_ERR="$(gcloud iap web add-iam-policy-binding \
       --resource-type=cloud-run --service="${PROXY_SERVICE}" \
       --region="${REGION}" --project="${PROJECT_ID}" \
       --member="${OPERATOR_MEMBER}" \
       --role=roles/iap.httpsResourceAccessor \
-      --quiet >/dev/null 2>&1; then
+      --condition=None \
+      --quiet 2>&1 >/dev/null)"; then
     echo "  IAP access granted to: ${OPERATOR_EMAIL} (service-level binding)"
   else
     warn "Service-level IAP binding failed; falling back to project-level binding."
-    if gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+    print_gcloud_error "$SERVICE_IAP_BIND_ERR"
+    if IAP_BIND_ERR="$(gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
       --member="${OPERATOR_MEMBER}" \
       --role=roles/iap.httpsResourceAccessor \
-      --quiet >/dev/null 2>&1; then
+      --condition=None \
+      --quiet 2>&1 >/dev/null)"; then
       echo "  IAP access granted to: ${OPERATOR_EMAIL} (project-level fallback)"
     else
       err "Failed to grant IAP access to ${OPERATOR_EMAIL} at both service and project levels."
+      err "Project-level binding error:"
+      print_gcloud_error "$IAP_BIND_ERR"
       err "You may not be able to access the Hub. Please grant roles/iap.httpsResourceAccessor manually."
     fi
   fi
