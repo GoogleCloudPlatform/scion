@@ -1763,6 +1763,11 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// See platformAuthSA above: shared by the GE exchange endpoint and the
 	// external-bearer path, both of which resolve through this instance.
 	googleResolver.SetPlatformAuthSA(cfg.PlatformAuthSA)
+	// Give the resolver's existing-record-by-email branch the same
+	// account-state handling (invited activation, role re-evaluation,
+	// super-admin binding, grant sync, audit) that provisionUser's
+	// existing-record branch uses — see signInPolicyDeps / SetSignInPolicyDeps.
+	googleResolver.SetSignInPolicyDeps(srv.signInPolicyDeps())
 	// The external-bearer path (unlike the exchange endpoint) re-validates on
 	// every request, so it gets a caching decorator in front of the shared
 	// base validator. The exchange endpoint below is
