@@ -336,44 +336,76 @@ use:
 resource.name.startsWith("projects/<PROJECT_NUMBER>/secrets/scion-<h12>-")
 ```
 
-Key decisions (superseding anything to the contrary above; see
-`/scion-volumes/scratchpad/projects/secret-prefix/formula-decision.md` for the
-full record agreed with tf-lead):
+Key decisions (superseding anything to the contrary above; formula agreed
+with the Terraform module owner so the IAM condition and the Go naming
+formula can never drift apart):
 - No prefix override or enable/disable setting — the prefix is on by default
   for every hub, computed the same way by Terraform (`substr(sha256(var.hub_id),
-  0, 12)`) and by the Go backend, so IAM conditions and secret names never
-  drift apart.
+  0, 12)`) and by the Go backend.
 - **Backward compatibility**: secrets with a stored DB `SecretRef` keep
   resolving through it unchanged (Section 5's "Interim Compatibility
   Strategy" continues to apply). A DB-less computed-name lookup tries the
-  prefixed name first, then the legacy pre-#2152 name, with a `WARN` log on a
-  legacy hit.
+  prefixed name first, then the legacy pre-ptone/scion#2152 name, with a
+  `WARN` log on a legacy hit.
 - **Migration**: `scion hub secret migrate-names [--dry-run] [--delete-legacy]`
   (a new, separate subcommand from the DB-value migration `scion hub secret
-  migrate`) copies each legacy-named secret's latest value forward to its
-  prefixed name and updates the DB `SecretRef`. It is idempotent and never
-  calls a GCP SM listing API — candidates come only from Hub DB records and a
-  short list of known hub-scope signing-key names. `--delete-legacy` only
-  deletes a legacy secret after verifying the prefixed copy is readable and
-  matches. This is a human-mode-only CLI command (`cmd/cli_mode.go`
-  `assistantDenied`) — not available to AI-assistant or in-container agent
-  callers.
-- **Hub-scope signing keys** (`agent_signing_key`, `user_signing_key`, and any
-  future key synced via `syncSigningKeyToBackend`) get an additional,
-  automatic copy-forward at hub startup (`GCPBackend.CopyHubSecretForward`,
-  called from `ensureSigningKey`) rather than waiting for an operator to run
-  `migrate-names` — losing a signing key invalidates every live session/agent
-  token, so this can't wait on an operator's schedule the way ordinary
-  secrets can.
-- **Rollback**: rolling back to a pre-#2152 binary continues to resolve
-  existing secrets via their stored `SecretRef` (unchanged by this feature
-  unless `migrate-names` has run and rewritten it to the prefixed name, in
-  which case the pre-#2152 binary still reads the ref value literally and
-  works). Legacy secrets are never deleted except by an explicit
+  migrate`) independently checks, per secret identity: whether it needs
+  copying forward, whether its DB `SecretRef` needs repairing to the
+  prefixed name (which can be true even without a copy this run — see the
+  signing-key bullet below), and — only if both of those are already
+  satisfied — whether `--delete-legacy` should remove the legacy copy. Doing
+  these as three separately-triggered checks rather than one early-exit
+  chain is what makes the documented two-step workflow (a plain run, then a
+  later `--delete-legacy` run) actually reach the delete step on the second
+  invocation. It is idempotent and never calls a GCP SM listing API —
+  candidates come only from Hub DB records and a fixed list of known
+  hub-scope signing-key names (`agent_signing_key`, `user_signing_key`,
+  `oidc_signing_key`, `download_signing_key`). `--delete-legacy` only deletes
+  a legacy secret after independently re-verifying the prefixed copy is
+  readable, matches, and the DB ref (if any) already points at it. This is a
+  human-mode-only CLI command (`cmd/cli_mode.go` `assistantDenied`) — not
+  available to AI-assistant or in-container agent callers.
+- **Hub-scope signing keys** (`agent_signing_key`, `user_signing_key`,
+  `oidc_signing_key`, `download_signing_key`, and any future key synced via
+  `syncSigningKeyToBackend`) get an additional, automatic copy-forward at hub
+  startup (`GCPBackend.CopyHubSecretForward`, called from `ensureSigningKey`
+  and `OIDCKeyManager.loadOrCreateKey`) rather than waiting for an operator
+  to run `migrate-names` — losing a signing key invalidates every live
+  session/agent token, so this can't wait on an operator's schedule the way
+  ordinary secrets can. `CopyHubSecretForward` also repairs the DB
+  `SecretRef` to the prefixed name (not just the GCP SM value), and does so
+  even when the prefixed copy already existed from an earlier boot or an
+  operator's `migrate-names` run — otherwise the hub keeps reading the
+  legacy copy through a stale ref indefinitely, silently defeating the
+  copy-forward's whole purpose.
+- **Deploy ordering**: grant the new hub-prefixed IAM condition to a hub's
+  service account *before* deploying a binary built from this change —
+  every `Set` (new secret, new version, signing-key rotation) targets the
+  prefixed name immediately, so writes get a permission error otherwise.
+  Keep the legacy grant in place until `--delete-legacy` has been run and
+  verified; only then remove it. `Delete` treats a denial on the legacy name
+  as non-fatal best-effort cleanup (logged, not returned as an error) so
+  deletes keep working once the legacy grant is gone, even for secrets that
+  were never explicitly migrated.
+- **Rollback**: rolling back to a pre-ptone/scion#2152 binary continues to
+  resolve existing secrets via their stored `SecretRef` (unchanged by this
+  feature unless `migrate-names` has run and rewritten it to the prefixed
+  name, in which case the older binary still reads the ref value literally
+  and works). Legacy secrets are never deleted except by an explicit
   `--delete-legacy` run, so a rollback window before that step is always
-  safe. The legacy fallback path itself is intended to be removed a release
-  after the migration tooling ships.
+  safe. Rolling back, writing through the old binary (which always targets
+  the legacy name and resets the ref to it), and then rolling forward again
+  leaves a *stale* prefixed copy that the new binary's DB-less fallback and
+  signing-key copy-forward will prefer over the newer legacy value, and that
+  `migrate-names` will treat as already migrated; there is currently no
+  value-freshness check to catch this. Avoid writing through an old binary
+  after any forward progress has been made, or re-run `migrate-names`
+  attentively (compare values) if a rollback-then-roll-forward happened.
+- **Removing the legacy fallback**: tracked in ptone/scion#2180, to be done
+  one release after `migrate-names` has shipped and been run in production,
+  once no known deployment still has secrets under legacy names.
 
 See `pkg/secret/gcpbackend.go` (`secretNamePrefix`, `gcpSecretName`,
-`legacyGCPSecretName`, `MigrateNameForward`, `CopyHubSecretForward`) and
+`legacyGCPSecretName`, `MigrateNameForward`, `CopyHubSecretForward`,
+`RefPointsAtPrefixed`, `LegacyStillPresent`) and
 `cmd/hub_secret_migrate_names.go` for the implementation.

@@ -391,7 +391,11 @@ condition: resource.name.startsWith("projects/<PROJECT_NUMBER>/secrets/scion-<h1
 
 Note that the condition uses the GCP **project number**, not the project ID. `<h12>` is stable for the life of the hub's instance ID; deployment tooling (e.g. Terraform) computes the same value from `hub_id` to keep the grant in sync.
 
-Secrets created before this hub-prefixed scheme existed keep resolving under their original (legacy) name — a hub's stored reference to a secret is unaffected by this scheme. An administrator can migrate legacy names forward with `scion hub secret migrate-names` (see `--help` for `--dry-run` and `--delete-legacy`); until that command's `--delete-legacy` step runs for a given secret, both the legacy and least-privilege-scoped IAM grants should remain in place.
+:::caution[Deploy ordering]
+Grant the new hub-prefixed IAM condition **before** deploying a Hub binary that writes hub-prefixed names — every secret write targets the prefixed name immediately, so writes fail with a permission error otherwise. Keep the legacy conditioned grant in place until `--delete-legacy` (below) has been run and verified; only then remove it.
+:::
+
+Secrets created before this hub-prefixed scheme existed keep resolving under their original (legacy) name — a hub's stored reference to a secret is unaffected by this scheme. An administrator can migrate legacy names forward with `scion hub secret migrate-names` (see `--help` for `--dry-run` and `--delete-legacy`); it is safe to run repeatedly, so a plain run followed later by a separate `--delete-legacy` run is the expected two-step workflow. Until that command's `--delete-legacy` step has run for a given secret, both the legacy and least-privilege-scoped IAM grants should remain in place.
 
 ---
 
