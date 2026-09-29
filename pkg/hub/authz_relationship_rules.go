@@ -243,7 +243,8 @@ func (a *AuthzService) relationshipCandidates(principal PrincipalContext, resour
 // queried on resource.ID and is always eligible (the fact stage itself
 // reports a missing adapter through the usual relationship_fact rejection).
 func (a *AuthzService) progenyFactResourceID(kind string, resource Resource) (string, bool) {
-	if fr, ok := a.progenyAdapter(kind).(ProgenyFactResourceIDer); ok {
+	adapter, _ := a.progenyAdapter(kind)
+	if fr, ok := adapter.(ProgenyFactResourceIDer); ok {
 		return fr.FactResourceID(resource)
 	}
 	return resource.ID, true
