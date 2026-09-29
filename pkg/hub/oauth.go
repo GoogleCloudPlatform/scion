@@ -505,9 +505,14 @@ func (s *OAuthService) getGoogleUserInfo(ctx context.Context, accessToken string
 		return nil, fmt.Errorf("failed to decode user info: %w", err)
 	}
 
+	email, err := requireVerifiedEmail(hubclient.OAuthProviderGoogle, userInfo.Email, userInfo.VerifiedEmail)
+	if err != nil {
+		return nil, err
+	}
+
 	return &OAuthUserInfo{
 		ID:          userInfo.ID,
-		Email:       userInfo.Email,
+		Email:       email,
 		DisplayName: userInfo.Name,
 		AvatarURL:   userInfo.Picture,
 		Provider:    "google",
@@ -604,26 +609,31 @@ func (s *OAuthService) getGitHubPrimaryEmail(ctx context.Context, accessToken st
 		return "", fmt.Errorf("failed to decode emails: %w", err)
 	}
 
-	// Find primary verified email
+	// Prefer the primary verified email, then any verified email. If
+	// neither exists, fall through with GitHub's first listed address only
+	// so requireVerifiedEmail below can report a clear, consistent error —
+	// it is the one place that decides whether any candidate is actually
+	// usable, and it never returns an unverified address.
+	var candidate githubEmail
 	for _, e := range emails {
 		if e.Primary && e.Verified {
-			return e.Email, nil
+			candidate = e
+			break
 		}
 	}
-
-	// Fall back to any verified email
-	for _, e := range emails {
-		if e.Verified {
-			return e.Email, nil
+	if candidate.Email == "" {
+		for _, e := range emails {
+			if e.Verified {
+				candidate = e
+				break
+			}
 		}
 	}
-
-	// Fall back to any email
-	if len(emails) > 0 {
-		return emails[0].Email, nil
+	if candidate.Email == "" && len(emails) > 0 {
+		candidate = emails[0]
 	}
 
-	return "", fmt.Errorf("no email found")
+	return requireVerifiedEmail(hubclient.OAuthProviderGitHub, candidate.Email, candidate.Verified)
 }
 
 // DeviceCodeResponse holds the response from a device authorization request.
