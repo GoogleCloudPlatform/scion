@@ -20,6 +20,7 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"testing"
 
@@ -86,6 +87,12 @@ var relationshipOwnerExcluded = map[relationshipAllowKey][]string{
 	{"creator_user_skill", "agent", "skill"}: {
 		"skill.create", "skill.create_global", "skill.update", "skill.delete", "skill.list", "skill.register",
 	},
+	// Progeny material pairs (ptone/scion#2129). Every secret and env_var
+	// permission is admitted; skill_injection.deliver is granted by
+	// skill_default, never by progeny.
+	{"progeny", "agent", "secret"}:          {},
+	{"progeny", "agent", "env_var"}:         {},
+	{"progeny", "agent", "skill_injection"}: {"skill_injection.deliver"},
 }
 
 func policyCellPermissions() map[relationshipAllowKey]map[string]bool {
@@ -163,8 +170,9 @@ func TestRelationshipPolicy_Consistency(t *testing.T) {
 	}
 
 	type rowCell struct {
-		key  relationshipAllowKey
-		mint bool
+		key      relationshipAllowKey
+		mint     bool
+		readOnly bool
 	}
 	seenCells := map[rowCell]bool{}
 	cellPerms := map[relationshipAllowKey]map[string]bool{}
@@ -180,10 +188,10 @@ func TestRelationshipPolicy_Consistency(t *testing.T) {
 			assert.True(t, relationshipPolicyPrincipalKinds[kind], "row %d: principal kind %q", i, kind)
 			key := relationshipAllowKey{row.Relationship, kind, row.ResourceType}
 
-			// At most one row per (cell, MintEligible), and rows sharing a
-			// cell name disjoint permissions.
-			rc := rowCell{key, row.MintEligible}
-			assert.False(t, seenCells[rc], "row %d: duplicate row for %v mint=%v", i, key, row.MintEligible)
+			// At most one row per (cell, MintEligible, ReadOnly), and rows
+			// sharing a cell name disjoint permissions.
+			rc := rowCell{key, row.MintEligible, row.ReadOnly}
+			assert.False(t, seenCells[rc], "row %d: duplicate row for %v mint=%v readOnly=%v", i, key, row.MintEligible, row.ReadOnly)
 			seenCells[rc] = true
 			if cellPerms[key] == nil {
 				cellPerms[key] = map[string]bool{}
@@ -228,12 +236,104 @@ func TestRelationshipPolicy_Consistency(t *testing.T) {
 		}
 	}
 
-	// Progeny and creator skill rows are read only.
+	// Creator skill rows are read only. Progeny rows are read only, or name
+	// only reviewed exact pairs (progenyExactPairRowViolations).
 	for _, row := range permissions.RelationshipPolicies {
-		if row.Relationship == "progeny" || row.Relationship == "creator_user_skill" {
+		if row.Relationship == "creator_user_skill" {
 			assert.True(t, row.ReadOnly, "%s/%s must be read only", row.Relationship, row.ResourceType)
 		}
 	}
+	assert.Empty(t, progenyExactPairRowViolations(permissions.RelationshipPolicies))
+}
+
+// reviewedProgenyExactPairs is the reviewed table of permissions a
+// non-read-only progeny row may name, per cell, with the action the
+// permission carries (F design f2-material-selection section 4.6 and 4.8;
+// ptone/scion#2129). It must equal the runtime gate progenyExactPairs, and
+// every entry must be used by a row (TestProgenyExactPairs_TableMatchesRowsAndGate).
+var reviewedProgenyExactPairs = map[relationshipAllowKey]map[string]Action{
+	{Relationship: "progeny", PrincipalKind: "agent", ResourceType: "secret"}: {
+		"secret.use":     ActionUse,
+		"secret.deliver": ActionDeliver,
+	},
+	{Relationship: "progeny", PrincipalKind: "agent", ResourceType: "env_var"}: {
+		"env_var.deliver": ActionDeliver,
+	},
+}
+
+// progenyExactPairRowViolations lists every permission in a non-read-only
+// progeny row that is not a reviewed exact pair for its cell, or whose
+// registry action or resource type differs from the reviewed entry.
+func progenyExactPairRowViolations(rows []permissions.RelationshipPolicy) []string {
+	var out []string
+	for i, row := range rows {
+		if row.Relationship != "progeny" || row.ReadOnly {
+			continue
+		}
+		for _, kind := range row.PrincipalKinds {
+			key := relationshipAllowKey{row.Relationship, kind, row.ResourceType}
+			for _, id := range row.PermissionIDs {
+				want, ok := reviewedProgenyExactPairs[key][id]
+				if !ok {
+					out = append(out, fmt.Sprintf("row %d: %s is not a reviewed progeny pair for %v", i, id, key))
+					continue
+				}
+				p, registered := registryPermission(id)
+				if !registered || Action(p.Action) != want || p.Resource != row.ResourceType {
+					out = append(out, fmt.Sprintf("row %d: %s does not match its registry entry (%s/%s)", i, id, p.Resource, p.Action))
+				}
+			}
+		}
+	}
+	return out
+}
+
+// TestProgenyExactPairs_TableMatchesRowsAndGate pins the reviewed table: it
+// equals the runtime gate progenyExactPairs, and every entry is named by a
+// non-read-only progeny row (no stale entries).
+func TestProgenyExactPairs_TableMatchesRowsAndGate(t *testing.T) {
+	flat := map[string]Action{}
+	for key, pairs := range reviewedProgenyExactPairs {
+		for id, action := range pairs {
+			flat[id] = action
+			used := false
+			for _, row := range permissions.RelationshipPolicies {
+				if row.Relationship != key.Relationship || row.ResourceType != key.ResourceType || row.ReadOnly {
+					continue
+				}
+				if containsTestString(row.PrincipalKinds, key.PrincipalKind) && containsTestString(row.PermissionIDs, id) {
+					used = true
+				}
+			}
+			assert.True(t, used, "stale reviewed progeny pair %v %s", key, id)
+		}
+	}
+	assert.Equal(t, flat, progenyExactPairs, "reviewed table and runtime gate differ")
+}
+
+// A non-read-only progeny row naming a permission outside the reviewed
+// table, or a reviewed permission in the wrong cell, is reported.
+func TestProgenyExactPairs_UnreviewedRowRejected(t *testing.T) {
+	rows := []permissions.RelationshipPolicy{
+		{Relationship: "progeny", PrincipalKinds: []string{"agent"}, ResourceType: "secret", PermissionIDs: []string{"secret.use"}},
+		{Relationship: "progeny", PrincipalKinds: []string{"agent"}, ResourceType: "skill_injection", PermissionIDs: []string{"skill_injection.deliver"}},
+		{Relationship: "progeny", PrincipalKinds: []string{"agent"}, ResourceType: "gcp_service_account", PermissionIDs: []string{"gcp_service_account.use"}},
+		{Relationship: "progeny", PrincipalKinds: []string{"agent"}, ResourceType: "env_var", PermissionIDs: []string{"secret.deliver"}},
+	}
+	got := progenyExactPairRowViolations(rows)
+	assert.Len(t, got, 3, "%v", got)
+	for _, v := range got {
+		assert.NotContains(t, v, "row 0:", "the reviewed pair is accepted")
+	}
+}
+
+func containsTestString(list []string, want string) bool {
+	for _, v := range list {
+		if v == want {
+			return true
+		}
+	}
+	return false
 }
 
 // TestRelationshipPolicy_MintEligibleUnchanged pins mint eligibility to the
@@ -242,7 +342,7 @@ func TestRelationshipPolicy_MintEligibleUnchanged(t *testing.T) {
 	for _, p := range permissions.Registry {
 		for _, rel := range []string{"owner", "ancestor", "progeny", "hub_member_sa_assign", "creator_user_skill"} {
 			for _, kind := range []string{"user", "agent"} {
-				for _, rt := range []string{"agent", "project", "template", "harness_config", "group", "broker", "gcp_service_account", "skill", "secret"} {
+				for _, rt := range []string{"agent", "project", "template", "harness_config", "group", "broker", "gcp_service_account", "skill", "secret", "env_var", "skill_injection"} {
 					want := false
 					for _, id := range relationshipMintEligibleCells[relationshipAllowKey{rel, kind, rt}] {
 						if id == p.ID {

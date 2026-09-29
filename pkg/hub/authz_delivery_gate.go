@@ -1,0 +1,70 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package hub
+
+import "github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+
+// Delivery credential gate (ptone/scion#2228).
+//
+// A request whose action is ActionDeliver, or whose permission is registered
+// with the deliver action, is admitted only when the credential kind is a
+// member of deliveryCredentialKinds. Decide applies the gate after resolving
+// the permission and before any grant stage (role bindings, agent synthetic
+// bindings, relationship candidates), so no grant path can admit a deliver
+// permission for a credential kind outside the set. This covers every
+// principal, including hub administrators holding a role binding.
+//
+// The set is empty: launch-time material delivery runs under a dedicated
+// delivery credential kind, and that kind is registered here when it is
+// introduced. Adding a kind to this map is the only change the gate needs.
+var deliveryCredentialKinds = map[CredentialKind]struct{}{}
+
+// deliveryGateReason is the deny reason recorded when the gate rejects a
+// request.
+const deliveryGateReason = "deliver permissions require a delivery credential"
+
+// deliverPermissionIDs lists the registered permissions whose action is
+// deliver. Derived from the registry so a new deliver permission is gated
+// without a separate list.
+var deliverPermissionIDs = func() map[string]struct{} {
+	ids := map[string]struct{}{}
+	for _, p := range permissions.Registry {
+		if Action(p.Action) == ActionDeliver {
+			ids[p.ID] = struct{}{}
+		}
+	}
+	return ids
+}()
+
+// isDeliverRequest reports whether the request action or the resolved
+// permission is a deliver operation.
+func isDeliverRequest(permissionID string, action Action) bool {
+	if action == ActionDeliver {
+		return true
+	}
+	_, ok := deliverPermissionIDs[permissionID]
+	return ok
+}
+
+// deliveryCredentialAdmitted reports whether a deliver request may proceed
+// to grant evaluation for the given credential kind. Non-deliver requests
+// are always admitted by this gate.
+func deliveryCredentialAdmitted(permissionID string, action Action, kind CredentialKind) bool {
+	if !isDeliverRequest(permissionID, action) {
+		return true
+	}
+	_, ok := deliveryCredentialKinds[kind]
+	return ok
+}

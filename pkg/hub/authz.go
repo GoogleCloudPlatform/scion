@@ -359,6 +359,29 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 		permissionID = resolved
 	}
 
+	// ── Step 0: Delivery credential gate (ptone/scion#2228) ───────────
+	// Deliver permissions are admitted only for a delivery credential kind.
+	// The gate precedes every grant stage, so a role binding, synthetic
+	// agent binding or relationship grant cannot admit deliver for any
+	// other credential kind. See authz_delivery_gate.go.
+	if !deliveryCredentialAdmitted(permissionID, request.Action, credential.Kind) {
+		d := Decision{Allowed: false, Reason: deliveryGateReason}
+		if request.Explain {
+			d.Provenance = &DecisionProvenance{
+				DenyReasons:     []string{deliveryGateReason},
+				Grants:          []GrantDetail{},
+				InactiveGrants:  []GrantDetail{},
+				Restrictions:    []RestrictionProvenance{},
+				MembershipPaths: []MembershipPathDetail{},
+			}
+		}
+		result := decorateDecision(d, request, principal, credential)
+		if a.decisionAuditEmitter != nil {
+			a.emitDecisionAudit(ctx, request, result)
+		}
+		return result
+	}
+
 	// ── Step 1: UAT project constraint (pre-kernel gate) ──────────────
 	// UAT tokens are project-scoped. Resources outside the token's project
 	// are denied before kernel evaluation. This is a credential constraint,
