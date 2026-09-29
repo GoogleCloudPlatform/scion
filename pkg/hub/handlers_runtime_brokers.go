@@ -1022,9 +1022,11 @@ func (s *Server) getBrokerProjects(w http.ResponseWriter, r *http.Request, broke
 
 	// Resolve project records up front: needed both for the response body
 	// and for the per-project read filter below. A project that no longer
-	// exists (its provider record not yet cleaned up) is skipped, not an
-	// error; any other store error — a connection failure, for example — is
-	// propagated instead of silently producing an incomplete list.
+	// exists (its provider record not yet cleaned up) is left unenriched —
+	// listed by ID and LocalPath only, still subject to the read filter
+	// below, with no name or git remote — rather than an error; any other
+	// store error — a connection failure, for example — is propagated
+	// instead of silently producing an incomplete list.
 	projectsByID := make(map[string]*store.Project, len(providers))
 	for _, p := range providers {
 		project, err := s.store.GetProject(ctx, p.ProjectID)

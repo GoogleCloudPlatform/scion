@@ -710,12 +710,14 @@ func (g *getProjectErrStore) GetProject(ctx context.Context, id string) (*store.
 	return g.Store.GetProject(ctx, id)
 }
 
-// TestBrokerAuthz_GetBrokerProjects_SkipsNotFoundProject proves that a
+// TestBrokerAuthz_GetBrokerProjects_ToleratesNotFoundProject proves that a
 // provider record whose project has since been deleted (GetProject returning
 // store.ErrNotFound — the row was removed but the provider record wasn't yet
-// cleaned up) does not fail the whole request: getBrokerProjects must skip
-// that one entry and still return the rest of the list successfully.
-func TestBrokerAuthz_GetBrokerProjects_SkipsNotFoundProject(t *testing.T) {
+// cleaned up) does not fail the whole request: getBrokerProjects must not
+// treat that lookup failure as an error. The provider entry itself is still
+// returned (to a caller who can read it) with no name or git remote, since
+// only the enrichment step — not the entry — is skipped.
+func TestBrokerAuthz_GetBrokerProjects_ToleratesNotFoundProject(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -740,7 +742,7 @@ func TestBrokerAuthz_GetBrokerProjects_SkipsNotFoundProject(t *testing.T) {
 		"/api/v1/runtime-brokers/"+brokerID+"/projects", nil)
 
 	require.Equal(t, http.StatusOK, rec.Code,
-		"a provider record whose project lookup returns not-found must be skipped, not fail the whole request: %s", rec.Body.String())
+		"a provider record whose project lookup returns not-found must not fail the whole request: %s", rec.Body.String())
 
 	// The owner's project-owner role binding is scoped to the project ID
 	// itself (created at registration), independent of the store.Project
