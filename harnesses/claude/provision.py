@@ -46,6 +46,9 @@ This script's job:
 
 The script is intentionally stdlib-only so it works on any container image
 that ships python3 (declared in config.yaml's required_image_tools).
+
+Design references below (section N, Dn) are to
+.design/hosted/usage-telemetry.md (ptone/scion#2053).
 """
 
 from __future__ import annotations
@@ -377,6 +380,13 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
         "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": f"http://127.0.0.1:{port}",
         "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
     })
+    if enabled:
+        # Claude's usage (gen_ai.api.calls / scion.usage.tokens) is derived by
+        # sciontool's receiver from the native api_request/api_error log
+        # events (ptone/scion#2053 phase 1). This is narrow to usage only
+        # (D4): tool, session and turn hook telemetry are unaffected, and
+        # unset here means no usage is published at all (D10).
+        env["SCION_USAGE_SOURCE"] = "native"
     model = _apply_model(ctx, env)
     extra: dict[str, Any] | None = None
     if auth.method == "vertex-ai":
