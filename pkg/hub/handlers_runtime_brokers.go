@@ -298,9 +298,13 @@ func (s *Server) getRuntimeBroker(w http.ResponseWriter, r *http.Request, id str
 		}
 	}
 
+	// writeStoreErr, not writeErrorFromErr: the CheckAccess denial below
+	// writes the same "RuntimeBroker not found" body via NotFound, and a
+	// nonexistent broker must be indistinguishable from a denied one on the
+	// wire, body included — see the comment on that branch below.
 	broker, err := s.store.GetRuntimeBroker(ctx, id)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		writeStoreErr(w, err, "RuntimeBroker")
 		return
 	}
 
@@ -310,10 +314,14 @@ func (s *Server) getRuntimeBroker(w http.ResponseWriter, r *http.Request, id str
 	// the same way it does for update/delete.
 	//
 	// This is a read surface, not a mutation, so a denial is reported as 404
-	// rather than 403 — matching getProject and getAgent (cross-project
-	// isolation) elsewhere in this package: a caller who cannot read the
-	// broker must not be able to distinguish "exists but denied" from
-	// "does not exist" by probing IDs.
+	// rather than 403 — matching getProject (handlers_projects_core.go) and
+	// the authorizeRead helper's read surfaces (template_handlers.go,
+	// harness_config_handlers.go) elsewhere in this package: a caller who
+	// cannot read the broker must not be able to distinguish "exists but
+	// denied" from "does not exist" by probing IDs. That only holds if both
+	// branches write the identical body, which is why the store lookup just
+	// above also uses writeStoreErr(..., "RuntimeBroker") instead of a bare
+	// writeErrorFromErr.
 	if !brokerSelf {
 		decision := s.authzService.CheckAccess(ctx, userIdent, brokerResource(broker), ActionRead)
 		if !decision.Allowed {
@@ -986,9 +994,11 @@ func (s *Server) getBrokerProjects(w http.ResponseWriter, r *http.Request, broke
 	}
 
 	// Verify broker exists (also gives us OwnerID for the ownership grant).
+	// writeStoreErr, not writeErrorFromErr — see getRuntimeBroker: the denial
+	// branch below must write the identical body a nonexistent broker gets.
 	broker, err := s.store.GetRuntimeBroker(ctx, brokerID)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		writeStoreErr(w, err, "RuntimeBroker")
 		return
 	}
 

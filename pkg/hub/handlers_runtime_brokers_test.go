@@ -347,6 +347,46 @@ func TestBrokerAuthGates(t *testing.T) {
 	}
 }
 
+// TestBrokerAuthGates_DeniedReadMatchesNotFound proves that a denied
+// broker.read is not just status-compatible with a nonexistent broker (that
+// alone is what TestBrokerAuthGates checks), but genuinely indistinguishable
+// on the wire: same status AND same JSON body, for both
+// GET /runtime-brokers/{id} and GET /runtime-brokers/{id}/projects. Before
+// getRuntimeBroker/getBrokerProjects's not-found branch used writeStoreErr
+// instead of a bare writeErrorFromErr, a denied read returned
+// {"message":"RuntimeBroker not found"} while a nonexistent ID returned the
+// generic {"message":"Resource not found"} -- same 404 status, different
+// body, so a caller could still tell "exists but denied" from "does not
+// exist" by probing IDs.
+func TestBrokerAuthGates_DeniedReadMatchesNotFound(t *testing.T) {
+	scenarios := []struct {
+		name   string
+		suffix string
+	}{
+		{"getRuntimeBroker", ""},
+		{"getBrokerProjects", "/projects"},
+	}
+
+	for _, sc := range scenarios {
+		t.Run(sc.name, func(t *testing.T) {
+			f := brokerAuthSetup(t)
+
+			deniedRec := doRequestAsUser(t, f.srv, f.deniedUser, http.MethodGet,
+				"/api/v1/runtime-brokers/"+f.broker.ID+sc.suffix, nil)
+			missingRec := doRequestAsUser(t, f.srv, f.deniedUser, http.MethodGet,
+				"/api/v1/runtime-brokers/does-not-exist-xyz"+sc.suffix, nil)
+
+			require.Equal(t, http.StatusNotFound, deniedRec.Code,
+				"a denied read must be reported as 404: %s", deniedRec.Body.String())
+			require.Equal(t, http.StatusNotFound, missingRec.Code,
+				"a lookup against a nonexistent broker ID must be reported as 404: %s", missingRec.Body.String())
+			assert.JSONEq(t, missingRec.Body.String(), deniedRec.Body.String(),
+				"a denied read and a lookup against a nonexistent ID must return the identical body, "+
+					"or the response still discloses that the broker exists")
+		})
+	}
+}
+
 // ============================================================================
 // Broker heartbeat request decoding.
 // ============================================================================
@@ -699,8 +739,26 @@ func TestBrokerAuthz_GetBrokerProjects_SkipsNotFoundProject(t *testing.T) {
 	rec := doRequestAsUser(t, srv, owner, http.MethodGet,
 		"/api/v1/runtime-brokers/"+brokerID+"/projects", nil)
 
-	assert.Equal(t, http.StatusOK, rec.Code,
+	require.Equal(t, http.StatusOK, rec.Code,
 		"a provider record whose project lookup returns not-found must be skipped, not fail the whole request: %s", rec.Body.String())
+
+	// The owner's project-owner role binding is scoped to the project ID
+	// itself (created at registration), independent of the store.Project
+	// record the read filter's authz check would otherwise attach as
+	// OwnerID -- so the entry stays in the list even though its project
+	// lookup failed. What the not-found skip actually buys is narrower:
+	// GetProject's failure never reaches the client as an error (asserted
+	// above via the 200), and the entry it could not enrich carries no name
+	// or git remote, rather than a stale or fabricated one.
+	var resp ListBrokerProjectsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Len(t, resp.Projects, 1)
+	assert.Equal(t, project.ID, resp.Projects[0].ProjectID,
+		"the provider entry itself must still be listed; only its project details are unavailable")
+	assert.Empty(t, resp.Projects[0].ProjectName,
+		"a project whose lookup returned not-found must not carry a stale or fabricated name")
+	assert.Empty(t, resp.Projects[0].GitRemote,
+		"a project whose lookup returned not-found must not carry a stale or fabricated git remote")
 }
 
 // TestBrokerAuthz_GetBrokerProjects_PropagatesOtherProjectErrors is the other
@@ -732,6 +790,6 @@ func TestBrokerAuthz_GetBrokerProjects_PropagatesOtherProjectErrors(t *testing.T
 	rec := doRequestAsUser(t, srv, owner, http.MethodGet,
 		"/api/v1/runtime-brokers/"+brokerID+"/projects", nil)
 
-	assert.NotEqual(t, http.StatusOK, rec.Code,
-		"a genuine store error from GetProject must not be silently swallowed into a 200 with an incomplete list: %s", rec.Body.String())
+	assert.Equal(t, http.StatusInternalServerError, rec.Code,
+		"a genuine store error from GetProject must not be silently swallowed into a 200 with an incomplete list, and must map through writeErrorFromErr's default (unrecognized-error) branch: %s", rec.Body.String())
 }
