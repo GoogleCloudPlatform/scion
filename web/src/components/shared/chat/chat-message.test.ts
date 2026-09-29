@@ -177,6 +177,37 @@ describe('scion-chat-message attachment previews', () => {
     apiFetchMock.mockResolvedValue({ ok: true, status: 200, text: () => Promise.resolve(text) });
   }
 
+  function respondWithImage(): void {
+    apiFetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      blob: () => Promise.resolve(new Blob(['fake-bytes'], { type: 'image/png' })),
+    });
+  }
+
+  /**
+   * The full-attachment overlay is the reusable `<scion-chat-file-preview>`
+   * — a nested shadow root, with its own async load. Drain both shadow
+   * roots' microtasks/renders.
+   */
+  async function previewDialog(el: ScionChatMessage): Promise<HTMLElement | null> {
+    for (let i = 0; i < 8; i++) {
+      const preview = el.shadowRoot?.querySelector('scion-chat-file-preview') as
+        | (HTMLElement & { updateComplete: Promise<boolean> })
+        | null;
+      if (!preview) {
+        await Promise.resolve();
+        continue;
+      }
+      await preview.updateComplete;
+      await Promise.resolve();
+    }
+    const preview = el.shadowRoot?.querySelector('scion-chat-file-preview');
+    return (
+      (preview?.shadowRoot?.querySelector('sl-dialog.file-preview-dialog') as HTMLElement) ?? null
+    );
+  }
+
   beforeEach(() => {
     document.body.innerHTML = '';
     apiFetchMock.mockReset();
@@ -230,20 +261,20 @@ describe('scion-chat-message attachment previews', () => {
       { id: 'att-expand', name: 'notes.txt', mime: 'text/plain', size: 600 },
     ]);
 
-    expect(el.shadowRoot?.querySelector('sl-dialog')).toBeNull();
+    expect(el.shadowRoot?.querySelector('scion-chat-file-preview')).toBeNull();
 
     const expand = el.shadowRoot?.querySelector(
       'sl-icon-button[name="arrows-angle-expand"]'
     ) as HTMLElement;
     expand.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
     await settle(el);
+    const dialog = await previewDialog(el);
 
-    const dialog = el.shadowRoot?.querySelector('sl-dialog.full-preview');
     expect(dialog?.getAttribute('label')).toBe('notes.txt');
     expect((editorIn(dialog) as unknown as { content: string }).content.split('\n')).toHaveLength(
       60
     );
-    expect(dialog?.querySelector('sl-button')?.getAttribute('href')).toBe(
+    expect(dialog?.querySelector('sl-button[href]')?.getAttribute('href')).toBe(
       '/api/v1/chat/attachments/att-expand'
     );
   });
@@ -274,13 +305,15 @@ describe('scion-chat-message attachment previews', () => {
   });
 
   it('expands an image into the overlay rather than a new tab', async () => {
+    respondWithImage();
     const el = await mountAttachments([
       { id: 'att-img', name: 'shot.png', mime: 'image/png', size: 2048 },
     ]);
+    apiFetchMock.mockClear();
 
     // No anchor around the thumbnail — the click stays in the page.
     expect(el.shadowRoot?.querySelector('.attachment-images a')).toBeNull();
-    expect(el.shadowRoot?.querySelector('sl-dialog')).toBeNull();
+    expect(el.shadowRoot?.querySelector('scion-chat-file-preview')).toBeNull();
 
     const button = el.shadowRoot?.querySelector('.image-expand') as HTMLElement;
     expect(button.querySelector('img.attachment-image')?.getAttribute('src')).toBe(
@@ -289,18 +322,23 @@ describe('scion-chat-message attachment previews', () => {
 
     button.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
     await settle(el);
+    const dialog = await previewDialog(el);
 
-    const dialog = el.shadowRoot?.querySelector('sl-dialog.full-preview');
     expect(dialog?.getAttribute('label')).toBe('shot.png');
-    expect(dialog?.querySelector('img.full-image')?.getAttribute('src')).toBe(
-      '/api/v1/chat/attachments/att-img'
+    // The overlay fetches the image itself (for uniform 403/404 handling)
+    // and renders it from an object URL, not the bare attachment URL.
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/v1/chat/attachments/att-img?view=true',
+      expect.anything()
     );
-    // Images are rendered by the browser; nothing is fetched as text.
+    const img = dialog?.querySelector('img.file-preview-image');
+    expect(img?.getAttribute('src')).toMatch(/^blob:/);
+    // Nothing is fetched as text for an image.
     expect(editorIn(dialog)).toBeNull();
-    expect(apiFetchMock).not.toHaveBeenCalled();
   });
 
   it('gives an image thumbnail an expand and a download action', async () => {
+    respondWithImage();
     const el = await mountAttachments([
       { id: 'att-img', name: 'shot.png', mime: 'image/png', size: 2048 },
     ]);
@@ -318,12 +356,10 @@ describe('scion-chat-message attachment previews', () => {
     ) as HTMLElement;
     expand.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
     await settle(el);
+    const dialog = await previewDialog(el);
 
-    const dialog = el.shadowRoot?.querySelector('sl-dialog.full-preview');
     expect(dialog?.getAttribute('label')).toBe('shot.png');
-    expect(dialog?.querySelector('img.full-image')?.getAttribute('src')).toBe(
-      '/api/v1/chat/attachments/att-img'
-    );
+    expect(dialog?.querySelector('img.file-preview-image')?.getAttribute('src')).toMatch(/^blob:/);
   });
 
   it('closes the overlay when it is dismissed, so a click outside ends it', async () => {
@@ -334,15 +370,78 @@ describe('scion-chat-message attachment previews', () => {
     const button = el.shadowRoot?.querySelector('.image-expand') as HTMLElement;
     button.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
     await settle(el);
-
-    const dialog = el.shadowRoot?.querySelector('sl-dialog.full-preview') as HTMLElement;
+    const dialog = await previewDialog(el);
     expect(dialog).not.toBeNull();
 
     // sl-dialog closes itself on an overlay click and reports sl-after-hide.
-    dialog.dispatchEvent(new CustomEvent('sl-after-hide', { bubbles: true, composed: true }));
+    dialog!.dispatchEvent(new CustomEvent('sl-after-hide', { bubbles: true, composed: true }));
     await settle(el);
 
-    expect(el.shadowRoot?.querySelector('sl-dialog')).toBeNull();
+    expect(el.shadowRoot?.querySelector('scion-chat-file-preview')).toBeNull();
+  });
+
+  it('does not refetch or reset the overlay on an unrelated chat-message re-render', async () => {
+    respondWith('package main\n\nfunc main() {}\n');
+    const el = await mountAttachments([
+      { id: 'att-stable', name: 'main.go', mime: 'text/plain', size: 42 },
+    ]);
+
+    const expand = el.shadowRoot?.querySelector(
+      'sl-icon-button[name="arrows-angle-expand"]'
+    ) as HTMLElement;
+    expand.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+    await settle(el);
+    await previewDialog(el);
+
+    apiFetchMock.mockClear();
+
+    // A re-render triggered by something unrelated to the overlay (a
+    // reaction, a read receipt, an SSE edit, the parent thread re-rendering)
+    // must not rebuild the preview target and refetch it.
+    el.requestUpdate();
+    await settle(el);
+
+    expect(apiFetchMock).not.toHaveBeenCalled();
+    expect(el.shadowRoot?.querySelector('scion-chat-file-preview')).not.toBeNull();
+  });
+
+  it('keeps the Source/Rendered toggle across an unrelated chat-message re-render', async () => {
+    respondWith('# Heading\n\nBody text.\n');
+    const el = await mountAttachments([
+      { id: 'att-md', name: 'notes.md', mime: 'text/markdown', size: 30 },
+    ]);
+
+    const expand = el.shadowRoot?.querySelector(
+      'sl-icon-button[name="arrows-angle-expand"]'
+    ) as HTMLElement;
+    expand.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+    await settle(el);
+    const dialog = await previewDialog(el);
+
+    const sourceButton = Array.from(dialog?.querySelectorAll('sl-button') ?? []).find((b) =>
+      b.textContent?.includes('Source')
+    ) as HTMLElement;
+    expect(sourceButton).toBeDefined();
+    sourceButton.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+    await settle(el);
+
+    const preview = el.shadowRoot?.querySelector('scion-chat-file-preview');
+    expect(
+      Array.from(preview?.shadowRoot?.querySelectorAll('sl-button') ?? []).some((b) =>
+        b.textContent?.includes('Preview')
+      )
+    ).toBe(true);
+
+    // An unrelated parent re-render must not reset the toggle back to the
+    // rendered view.
+    el.requestUpdate();
+    await settle(el);
+
+    expect(
+      Array.from(preview?.shadowRoot?.querySelectorAll('sl-button') ?? []).some((b) =>
+        b.textContent?.includes('Preview')
+      )
+    ).toBe(true);
   });
 
   it('reports a failed fetch inside the preview instead of an empty editor', async () => {
@@ -501,8 +600,9 @@ describe('scion-chat-message path links', () => {
   it('does not double-link paths already inside markdown links', async () => {
     // The mocked renderer turns `[text](url)` into `<a href="url">text</a>`.
     // Using the path as both the link text and the URL means the path
-    // string appears inside the anchor's text content, which is exactly
-    // the case that would previously produce a nested <a> tag.
+    // string appears inside the anchor's text content — exactly the case
+    // that would produce a nested <a> tag if path-linking ran unconditionally
+    // on that text.
     const el = await mount(
       'check [/scion-volumes/data/report.md](/scion-volumes/data/report.md) for details'
     );
