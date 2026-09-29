@@ -14,8 +14,8 @@
 
 //go:build !no_sqlite
 
-// Package hub — F.2a tests for check 9 (the record-race rule), the agent
-// secret list, and the material selection audit event.
+// Package hub — tests for check 9 (the record-race rule), the agent secret
+// list, and the material selection audit event.
 package hub
 
 import (
@@ -49,6 +49,24 @@ func assertRecordChangedAudited(t *testing.T, rec *recordingMaterialAuditor) {
 	}
 	if e.Items[0].Reason != ReasonRecordChanged {
 		t.Fatalf("expected reason %s, got %s", ReasonRecordChanged, e.Items[0].Reason)
+	}
+}
+
+// assertBackendErrorAudited asserts that the last MaterialSelectionEvent
+// recorded by rec carries exactly one item with Reason == ReasonBackendError:
+// the backend-fault tests assert the audited reason, not only the HTTP
+// status.
+func assertBackendErrorAudited(t *testing.T, rec *recordingMaterialAuditor) {
+	t.Helper()
+	if len(rec.events) == 0 {
+		t.Fatalf("expected at least 1 material selection event")
+	}
+	e := rec.events[len(rec.events)-1]
+	if len(e.Items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(e.Items))
+	}
+	if e.Items[0].Reason != ReasonBackendError {
+		t.Fatalf("expected reason %s, got %s", ReasonBackendError, e.Items[0].Reason)
 	}
 }
 
@@ -113,8 +131,72 @@ func TestAgentSecretRead_RecordReplacedBetweenMetaAndGetNotDelivered(t *testing.
 	})
 }
 
+// TestAgentGetSecret_ValueFetchErrorIsUnavailable covers check 9's Get call
+// on the by-key get endpoint: a backend error fetching the value of an
+// already-allowed item answers unavailable, not not found, with no backend
+// error text in the response, and is audited as backend_error.
+func TestAgentGetSecret_ValueFetchErrorIsUnavailable(t *testing.T) {
+	f := newMaterialFixture(t, "get-value-fetch-error")
+	seedSecret(t, f.Server.secretBackend, "GET_VALUE_FETCH_ERROR_KEY", "v", "", "", f.ProjectID)
+
+	race := &raceSecretBackend{SecretBackend: f.Server.secretBackend}
+	race.overrideGet = func(sv *secret.SecretWithValue, err error) (*secret.SecretWithValue, error) {
+		return nil, errors.New("backend detail: connection reset by peer")
+	}
+	f.Server.SetSecretBackend(race)
+
+	auditor := newRecordingMaterialAuditor()
+	f.Server.SetAuditLogger(auditor)
+
+	rec := doRequestWithAgentToken(t, f.Server, http.MethodGet,
+		"/api/v1/agents/"+f.AgentID+"/secrets/GET_VALUE_FETCH_ERROR_KEY", nil, f.Token)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "secret unavailable") {
+		t.Fatalf("expected the fixed error message, got: %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "connection reset by peer") {
+		t.Fatalf("backend error text leaked into response: %s", rec.Body.String())
+	}
+	assertBackendErrorAudited(t, auditor)
+}
+
+// TestAgentSecretFetch_ValueFetchErrorIsUnavailable covers check 9's Get call
+// on the bulk fetch endpoint: a backend error fetching the value of an
+// already-allowed item answers entitled_but_unavailable, not not_found, with
+// no backend error text in the response, and is audited as backend_error.
+func TestAgentSecretFetch_ValueFetchErrorIsUnavailable(t *testing.T) {
+	f := newMaterialFixture(t, "fetch-value-fetch-error")
+	seedSecret(t, f.Server.secretBackend, "FETCH_VALUE_FETCH_ERROR_KEY", "v", "", "", f.ProjectID)
+
+	race := &raceSecretBackend{SecretBackend: f.Server.secretBackend}
+	race.overrideGet = func(sv *secret.SecretWithValue, err error) (*secret.SecretWithValue, error) {
+		return nil, errors.New("backend detail: connection reset by peer")
+	}
+	f.Server.SetSecretBackend(race)
+
+	auditor := newRecordingMaterialAuditor()
+	f.Server.SetAuditLogger(auditor)
+
+	rec := doRequestWithAgentToken(t, f.Server, http.MethodPost, "/api/v1/agent/secrets",
+		secretFetchRequest{Keys: []string{"FETCH_VALUE_FETCH_ERROR_KEY"}}, f.Token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "connection reset by peer") {
+		t.Fatalf("backend error text leaked into response: %s", rec.Body.String())
+	}
+	var resp secretFetchResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	if len(resp.Secrets) != 1 || resp.Secrets[0].Status != "entitled_but_unavailable" || resp.Secrets[0].Error != "secret unavailable" {
+		t.Fatalf("expected entitled_but_unavailable/secret unavailable, got %+v", resp.Secrets)
+	}
+	assertBackendErrorAudited(t, auditor)
+}
+
 // TestAgentSecretFetch_RecordChangedIsUnavailable covers check 9's
-// record-race rule on the bulk fetch endpoint (P7): a project secret whose
+// record-race rule on the bulk fetch endpoint: a project secret whose
 // record changes between GetMeta and Get is entitled_but_unavailable, not
 // not_found, because the project-level decision already allowed it. Mirrors
 // TestAgentSecretRead_RecordReplacedBetweenMetaAndGetNotDelivered's two
@@ -540,9 +622,10 @@ func TestAgentListSecrets_ProgenyFilterMatchesPerItemCheck(t *testing.T) {
 	}
 }
 
-// TestAgentGetSecret_InvalidScopeEmitsAudit covers check 6 on P8: an invalid
-// scope query parameter still emits the request's MaterialSelectionEvent,
-// with RequestReason invalid_scope, rather than exiting silently (R2-3).
+// TestAgentGetSecret_InvalidScopeEmitsAudit covers check 6 on the by-key get
+// endpoint: an invalid scope query parameter still emits the request's
+// MaterialSelectionEvent, with RequestReason invalid_scope, rather than
+// exiting silently.
 func TestAgentGetSecret_InvalidScopeEmitsAudit(t *testing.T) {
 	f := newMaterialFixture(t, "get-invalid-scope")
 	seedSecret(t, f.Server.secretBackend, "INVALID_SCOPE_KEY", "v", "", "", f.ProjectID)
@@ -571,7 +654,7 @@ func TestAgentGetSecret_InvalidScopeEmitsAudit(t *testing.T) {
 // project-decision-error branch: a nil authz service makes the check-7
 // decision fail, and the exit still emits the request's
 // MaterialSelectionEvent with a request-level backend_error item, rather
-// than exiting silently (R2-3).
+// than exiting silently.
 func TestAgentListSecrets_DecisionErrorEmitsAudit(t *testing.T) {
 	f := newMaterialFixture(t, "list-decision-error")
 	seedSecret(t, f.Server.secretBackend, "LIST_DECISION_ERROR_KEY", "v", "", "", f.ProjectID)
@@ -603,7 +686,8 @@ func TestAgentListSecrets_DecisionErrorEmitsAudit(t *testing.T) {
 // TestAgentListSecrets_ProjectListErrorEmitsAudit covers the list's project
 // backend.List error exit: it still emits the request's
 // MaterialSelectionEvent with a request-level backend_error item, rather
-// than exiting silently (R2-2).
+// than exiting silently, and answers with the fixed message rather than the
+// backend error text.
 func TestAgentListSecrets_ProjectListErrorEmitsAudit(t *testing.T) {
 	f := newMaterialFixture(t, "list-project-list-error")
 	seedSecret(t, f.Server.secretBackend, "LIST_PROJECT_LIST_ERROR_KEY", "v", "", "", f.ProjectID)
@@ -617,8 +701,14 @@ func TestAgentListSecrets_ProjectListErrorEmitsAudit(t *testing.T) {
 	f.Server.SetAuditLogger(auditor)
 
 	rec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+f.AgentID+"/secrets?scope=project", nil, f.Token)
-	if rec.Code == http.StatusOK {
-		t.Fatalf("expected a non-200 status on a backend list failure, got 200: %s", rec.Body.String())
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "failed to list secrets") {
+		t.Fatalf("expected the fixed error message, got: %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "injected project list failure") {
+		t.Fatalf("backend error text leaked into the response body: %s", rec.Body.String())
 	}
 	if len(auditor.events) != 1 {
 		t.Fatalf("expected 1 material selection event, got %d", len(auditor.events))
@@ -636,7 +726,8 @@ func TestAgentListSecrets_ProjectListErrorEmitsAudit(t *testing.T) {
 // TestAgentListSecrets_ProgenyEligibleIDsErrorEmitsAudit covers the list's
 // progenyEligibleSecretIDs error exit: it still emits the request's
 // MaterialSelectionEvent with a request-level backend_error item, rather
-// than exiting silently (R2-2).
+// than exiting silently, and answers with the fixed message rather than the
+// backend error text.
 func TestAgentListSecrets_ProgenyEligibleIDsErrorEmitsAudit(t *testing.T) {
 	f := newMaterialFixture(t, "list-progeny-eligible-error")
 	seedSecret(t, f.Server.secretBackend, "LIST_PROGENY_ELIGIBLE_ERROR_KEY", "v", "", "", f.ProjectID)
@@ -649,8 +740,14 @@ func TestAgentListSecrets_ProgenyEligibleIDsErrorEmitsAudit(t *testing.T) {
 	f.Server.SetAuditLogger(auditor)
 
 	rec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+f.AgentID+"/secrets?scope=user", nil, f.Token)
-	if rec.Code == http.StatusOK {
-		t.Fatalf("expected a non-200 status on a progeny lookup failure, got 200: %s", rec.Body.String())
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "failed to list secrets") {
+		t.Fatalf("expected the fixed error message, got: %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "injected progeny list failure") {
+		t.Fatalf("backend error text leaked into the response body: %s", rec.Body.String())
 	}
 	if len(auditor.events) != 1 {
 		t.Fatalf("expected 1 material selection event, got %d", len(auditor.events))
@@ -668,7 +765,8 @@ func TestAgentListSecrets_ProgenyEligibleIDsErrorEmitsAudit(t *testing.T) {
 // TestAgentListSecrets_UserListErrorEmitsAudit covers the list's user
 // backend.List error exit: it still emits the request's
 // MaterialSelectionEvent with a request-level backend_error item, rather
-// than exiting silently (R2-2).
+// than exiting silently, and answers with the fixed message rather than the
+// backend error text.
 func TestAgentListSecrets_UserListErrorEmitsAudit(t *testing.T) {
 	f := newMaterialFixture(t, "list-user-list-error")
 	seedSecret(t, f.Server.secretBackend, "LIST_USER_LIST_ERROR_KEY", "v", "", "", f.ProjectID)
@@ -682,8 +780,14 @@ func TestAgentListSecrets_UserListErrorEmitsAudit(t *testing.T) {
 	f.Server.SetAuditLogger(auditor)
 
 	rec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+f.AgentID+"/secrets?scope=user", nil, f.Token)
-	if rec.Code == http.StatusOK {
-		t.Fatalf("expected a non-200 status on a backend list failure, got 200: %s", rec.Body.String())
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "failed to list secrets") {
+		t.Fatalf("expected the fixed error message, got: %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "injected user list failure") {
+		t.Fatalf("backend error text leaked into the response body: %s", rec.Body.String())
 	}
 	if len(auditor.events) != 1 {
 		t.Fatalf("expected 1 material selection event, got %d", len(auditor.events))
@@ -702,7 +806,7 @@ func TestAgentListSecrets_UserListErrorEmitsAudit(t *testing.T) {
 // branch when the check-7 decision denies: the project part of the list
 // stays empty, but the denial is still recorded as a request-level item
 // carrying a non-empty Detail, rather than leaving no trace of the project
-// scope having been evaluated (R2-3).
+// scope having been evaluated.
 func TestAgentListSecrets_ProjectDenialCarriesDetail(t *testing.T) {
 	f := newMaterialFixture(t, "list-project-denial")
 	setBackfillCompleted(t, f.Store) // ceiling denial: no edge, post-backfill

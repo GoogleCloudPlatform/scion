@@ -14,10 +14,10 @@
 
 //go:build !no_sqlite
 
-// Package hub — F.2a tests for the project-scope per-item check (check 7):
-// the single per-request project.secret_read decision, the existing
-// delegation ceiling it inherits, and the neutrality/ordering regressions
-// pinned alongside it.
+// Package hub — tests for the project-scope per-item check (check 7): the
+// single per-request project.secret_read decision, the existing delegation
+// ceiling it inherits, and the neutrality/ordering regressions pinned
+// alongside it.
 package hub
 
 import (
@@ -521,10 +521,42 @@ func TestAgentSecretFetch_ErrorTextIsNeutral(t *testing.T) {
 	}
 }
 
+// TestAgentGetSecret_ProjectMetaErrorIsUnavailable pins that a project-scope
+// GetMeta backend error on the by-key get endpoint answers unavailable, not
+// not found, with no backend error text in the response, and is audited as
+// backend_error. Mirrors TestAgentSecretFetch_ErrorTextIsNeutral on the
+// by-key get endpoint instead of the bulk fetch endpoint.
+func TestAgentGetSecret_ProjectMetaErrorIsUnavailable(t *testing.T) {
+	f := newMaterialFixture(t, "get-project-meta-error")
+	seedSecret(t, f.Server.secretBackend, "GET_PROJECT_META_ERROR_KEY", "v", "", "", f.ProjectID)
+
+	wrapped := &erroringMetaBackend{
+		SecretBackend: f.Server.secretBackend,
+		err:           errors.New("backend detail: disk quota exceeded on volume XYZ123"),
+	}
+	f.Server.SetSecretBackend(wrapped)
+
+	auditor := newRecordingMaterialAuditor()
+	f.Server.SetAuditLogger(auditor)
+
+	rec := doRequestWithAgentToken(t, f.Server, http.MethodGet,
+		"/api/v1/agents/"+f.AgentID+"/secrets/GET_PROJECT_META_ERROR_KEY", nil, f.Token)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "secret unavailable") {
+		t.Fatalf("expected the fixed error message, got: %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "XYZ123") {
+		t.Fatalf("backend error text leaked into response: %s", rec.Body.String())
+	}
+	assertBackendErrorAudited(t, auditor)
+}
+
 // TestAgentSecretFetch_NilAuthzServiceDenies covers the whole-request nil or
 // absent authz service guard: it fails the entire fetch request closed with
 // 500, audited as a request-level backend_error with no items, rather than
-// letting a per-item entitled_but_unavailable slip inside a 200 (R2-3).
+// letting a per-item entitled_but_unavailable slip inside a 200.
 func TestAgentSecretFetch_NilAuthzServiceDenies(t *testing.T) {
 	f := newMaterialFixture(t, "fetch-nil-authz")
 	seedSecret(t, f.Server.secretBackend, "NIL_AUTHZ_KEY", "v", "", "", f.ProjectID)

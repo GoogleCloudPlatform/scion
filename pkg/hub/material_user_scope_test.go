@@ -14,14 +14,15 @@
 
 //go:build !no_sqlite
 
-// Package hub — F.2a tests for the user-scope per-item check (check 8):
-// progeny sharing, lineage containment, and source liveness.
+// Package hub — tests for the user-scope per-item check (check 8): progeny
+// sharing, lineage containment, and source liveness.
 package hub
 
 import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -266,6 +267,46 @@ func TestAgentSecretRead_UserScopeMakesNoProjectSecretDecision(t *testing.T) {
 	if counting.getDelegationEdgesForDelegateCalls != 0 {
 		t.Fatalf("expected no project decision for a user-scope read, got %d edge lookups", counting.getDelegationEdgesForDelegateCalls)
 	}
+}
+
+// TestAgentGetSecret_UserMetaErrorIsUnavailable pins that a user-scope
+// GetMeta backend error on the by-key get endpoint answers unavailable, not
+// not found, with no backend error text in the response, and is audited as
+// backend_error. This is the user-scope counterpart of
+// TestAgentGetSecret_ProjectMetaErrorIsUnavailable; only
+// progenySourceLive's own errors (later in check 8) were previously covered
+// on this scope.
+func TestAgentGetSecret_UserMetaErrorIsUnavailable(t *testing.T) {
+	f := newMaterialFixture(t, "get-user-meta-error")
+	ctx := context.Background()
+
+	_, _, err := f.Server.secretBackend.Set(ctx, &secret.SetSecretInput{
+		Name: "GET_USER_META_ERROR_KEY", Value: "v", SecretType: store.SecretTypeEnvironment, Target: "GET_USER_META_ERROR_KEY",
+		Scope: store.ScopeUser, ScopeID: f.UserID, AllowProgeny: true, CreatedBy: f.UserID, UpdatedBy: f.UserID,
+	})
+	require.NoError(t, err)
+
+	wrapped := &erroringMetaBackend{
+		SecretBackend: f.Server.secretBackend,
+		err:           errors.New("backend detail: disk quota exceeded on volume XYZ123"),
+	}
+	f.Server.SetSecretBackend(wrapped)
+
+	auditor := newRecordingMaterialAuditor()
+	f.Server.SetAuditLogger(auditor)
+
+	rec := doRequestWithAgentToken(t, f.Server, http.MethodGet,
+		"/api/v1/agents/"+f.AgentID+"/secrets/GET_USER_META_ERROR_KEY?scope=user", nil, f.Token)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "secret unavailable") {
+		t.Fatalf("expected the fixed error message, got: %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "XYZ123") {
+		t.Fatalf("backend error text leaked into response: %s", rec.Body.String())
+	}
+	assertBackendErrorAudited(t, auditor)
 }
 
 // TestAgentSecretRead_UserScopeCeilingApplied documents the known gap
