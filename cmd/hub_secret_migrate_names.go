@@ -104,14 +104,19 @@ If step 1 or 2 writes a new version to the prefixed name and then detects
 that a concurrent write already changed the secret's ref, that secret is
 reported as CONFLICT with a non-zero exit instead of being silently treated
 as done: its prefixed name's latest version may now be stale relative to
-the concurrent write. Re-running migrate-names does NOT detect or repair
-this — by then the ref already matches whatever landed, so a re-run reports
-nothing to do and the CONFLICT will not reappear even though the value may
-still be stale. The only fix is to re-set the secret directly to its
-intended value through the normal secret-set path. (For a hub-scope signing
-key, a CONFLICT from two replicas of the same hub racing at boot is benign:
-both wrote identical key material, so nothing is actually lost — the WARN
-is noise in that specific case.)
+the concurrent write. Re-running migrate-names once is always safe and
+tells you which of two cases applies: if the re-run reports an action for
+that secret (MIGRATED/RESYNCED/REPAIRED REF), the CONFLICT was a false
+positive (something bumped the record's Version without moving its ref --
+e.g. a metadata edit, or a legacy-name rotation) and is now resolved. If
+the re-run instead reports nothing further to do for that secret, the ref
+itself was already moved by a concurrent write, and further re-runs will
+NOT detect or repair it -- you must re-set the secret directly to its
+intended value through the normal secret-set path. (For a hub-scope
+signing key, a CONFLICT caused by this command racing a hub replica's own
+boot-time copy-forward of the same key is benign -- both copy identical
+key material. Two replicas racing each other at boot show up only as a hub
+WARN log, never as a migrate-names CONFLICT line, and are likewise benign.)
 
 Hub ID: resolved the same way the running hub server resolves it at startup
 (--hub-id, then this command's --config file's server.hub.hub_id, then the
@@ -442,7 +447,7 @@ func runMigrateNames(ctx context.Context, backend *secret.GCPBackend, db store.S
 	})
 
 	if len(candidates) == 0 {
-		fmt.Fprintln(out, "No secrets found to check for name migration.")
+		_, _ = fmt.Fprintln(out, "No secrets found to check for name migration.")
 		return nil
 	}
 
@@ -451,7 +456,7 @@ func runMigrateNames(ctx context.Context, backend *secret.GCPBackend, db store.S
 		if dryRun {
 			acted, err := planMigrateNamesCandidate(ctx, backend, c, deleteLegacy, out)
 			if err != nil {
-				fmt.Fprintf(out, "  ERROR  %s (scope: %s/%s) - failed to check: %v\n", c.name, c.scope, c.scopeID, err)
+				_, _ = fmt.Fprintf(out, "  ERROR  %s (scope: %s/%s) - failed to check: %v\n", c.name, c.scope, c.scopeID, err)
 				failed++
 				continue
 			}
@@ -471,13 +476,20 @@ func runMigrateNames(ctx context.Context, backend *secret.GCPBackend, db store.S
 				// prefixed name, so the secret's current value can't be
 				// trusted without a human looking at it. Still counts
 				// toward a non-zero exit, since silently continuing would
-				// hide it. The guidance says re-set, not re-run: a re-run
-				// takes the "ref already matches" no-op path and the
+				// hide it. The guidance distinguishes a true conflict (the
+				// ref itself was repointed by a concurrent Set -- a re-run
+				// is then a no-op, since the ref already matches, so the
 				// CONFLICT would simply vanish from the report while the
-				// stale value remains (round-6 review finding 3).
-				fmt.Fprintf(out, "  CONFLICT  %s (scope: %s/%s) - a concurrent write was detected after this run already wrote a version to the prefixed name; re-set the secret directly to its intended value (re-running migrate-names will NOT detect or repair this)\n", c.name, c.scope, c.scopeID)
+				// stale value remains; round-6 review finding 3) from a
+				// false positive (a metadata edit or a legacy-name rotation
+				// bumped Version without moving the ref -- a re-run then
+				// converges normally; a known, deferred limitation, see the
+				// tracked follow-up issue -- round-7 review finding 2/item
+				// 5). Re-running once is always safe either way, and its
+				// result tells the two cases apart.
+				_, _ = fmt.Fprintf(out, "  CONFLICT  %s (scope: %s/%s) - a concurrent write was detected after this run already wrote a version to the prefixed name; re-run migrate-names once (safe either way) -- if it now reports an action for this secret, the CONFLICT was a false positive and is resolved; if it reports nothing further to do, the ref was already moved by a concurrent write and you must re-set the secret directly to its intended value\n", c.name, c.scope, c.scopeID)
 			} else {
-				fmt.Fprintf(out, "  ERROR  %s (scope: %s/%s) - %v\n", c.name, c.scope, c.scopeID, err)
+				_, _ = fmt.Fprintf(out, "  ERROR  %s (scope: %s/%s) - %v\n", c.name, c.scope, c.scopeID, err)
 			}
 			failed++
 			continue
@@ -493,7 +505,7 @@ func runMigrateNames(ctx context.Context, backend *secret.GCPBackend, db store.S
 	if dryRun {
 		status = "dry run complete"
 	}
-	fmt.Fprintf(out, "\nMigrate-names %s: %d migrated, %d skipped (already migrated or absent), %d failed, %d legacy secrets deleted\n",
+	_, _ = fmt.Fprintf(out, "\nMigrate-names %s: %d migrated, %d skipped (already migrated or absent), %d failed, %d legacy secrets deleted\n",
 		status, migrated, skipped, failed, deletedLegacy)
 
 	if failed > 0 {
@@ -559,7 +571,7 @@ func migrateOneCandidate(ctx context.Context, backend *secret.GCPBackend, c migr
 			switch {
 			case err == nil:
 				if action != "" {
-					fmt.Fprintf(out, "  %s  %s (scope: %s/%s)\n", migrateNamesActionLabel(action), c.name, c.scope, c.scopeID)
+					_, _ = fmt.Fprintf(out, "  %s  %s (scope: %s/%s)\n", migrateNamesActionLabel(action), c.name, c.scope, c.scopeID)
 					acted = true
 				}
 			case err == store.ErrNotFound:
@@ -572,7 +584,7 @@ func migrateOneCandidate(ctx context.Context, backend *secret.GCPBackend, c migr
 				// designates a value that's gone. Reported for operator
 				// awareness, but not a migrate-names failure — there is
 				// nothing for it to copy (round-3 review finding 4).
-				fmt.Fprintf(out, "  ORPHAN  %s (scope: %s/%s) - stored ref has no accessible value; nothing to migrate\n", c.name, c.scope, c.scopeID)
+				_, _ = fmt.Fprintf(out, "  ORPHAN  %s (scope: %s/%s) - stored ref has no accessible value; nothing to migrate\n", c.name, c.scope, c.scopeID)
 			case errors.Is(err, secret.ErrConflictingWrite):
 				// Propagated as-is; runMigrateNames reports this as a
 				// distinct CONFLICT outcome (round-5 review finding 2) rather
@@ -594,7 +606,7 @@ func migrateOneCandidate(ctx context.Context, backend *secret.GCPBackend, c migr
 			if _, err := backend.MigrateNameForward(ctx, c.name, c.scope, c.scopeID); err != nil {
 				return false, fmt.Errorf("failed to migrate: %w", err)
 			}
-			fmt.Fprintf(out, "  MIGRATED  %s (scope: %s/%s)\n", c.name, c.scope, c.scopeID)
+			_, _ = fmt.Fprintf(out, "  MIGRATED  %s (scope: %s/%s)\n", c.name, c.scope, c.scopeID)
 			acted = true
 		}
 	}
@@ -618,7 +630,7 @@ func migrateOneCandidate(ctx context.Context, backend *secret.GCPBackend, c migr
 			if err := backend.DeleteLegacySecretName(ctx, c.name, c.scope, c.scopeID); err != nil {
 				return acted, fmt.Errorf("failed to delete legacy secret: %w", err)
 			}
-			fmt.Fprintf(out, "  DELETED LEGACY  %s (scope: %s/%s)\n", c.name, c.scope, c.scopeID)
+			_, _ = fmt.Fprintf(out, "  DELETED LEGACY  %s (scope: %s/%s)\n", c.name, c.scope, c.scopeID)
 			*deletedLegacy++
 			acted = true
 		}
@@ -674,7 +686,7 @@ func planMigrateNamesCandidate(ctx context.Context, backend *secret.GCPBackend, 
 				// Nothing to migrate for this identity (round-3 review
 				// finding 4); leave actions empty rather than failing.
 			case errors.Is(err, secret.ErrOrphanedRef):
-				fmt.Fprintf(out, "  ORPHAN  %s (scope: %s/%s) - stored ref has no accessible value; nothing to migrate\n", c.name, c.scope, c.scopeID)
+				_, _ = fmt.Fprintf(out, "  ORPHAN  %s (scope: %s/%s) - stored ref has no accessible value; nothing to migrate\n", c.name, c.scope, c.scopeID)
 			default:
 				return false, fmt.Errorf("failed to check migrate/repair plan (check the hub's IAM grant on the legacy name): %w", err)
 			}
@@ -721,6 +733,6 @@ func planMigrateNamesCandidate(ctx context.Context, backend *secret.GCPBackend, 
 	if len(actions) == 0 {
 		return false, nil
 	}
-	fmt.Fprintf(out, "  WOULD %s  %s (scope: %s/%s)\n", strings.Join(actions, " AND "), c.name, c.scope, c.scopeID)
+	_, _ = fmt.Fprintf(out, "  WOULD %s  %s (scope: %s/%s)\n", strings.Join(actions, " AND "), c.name, c.scope, c.scopeID)
 	return true, nil
 }
