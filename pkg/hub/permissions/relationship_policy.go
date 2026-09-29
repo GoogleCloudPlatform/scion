@@ -72,7 +72,7 @@ var RelationshipPolicies = []RelationshipPolicy{
 	// TestRelationshipPolicy_MatchesCharacterization.
 	{
 		// owner/user/agent: the remaining agent permissions (not mint-eligible).
-		// agent.manage is a reviewed unregistered ID (relationshipUnregisteredPermissions).
+		// agent.manage is a reviewed unregistered ID (relationshipPolicyReviewedExceptions).
 		Relationship:   "owner",
 		PrincipalKinds: []string{"user"},
 		ResourceType:   ResourceAgent,

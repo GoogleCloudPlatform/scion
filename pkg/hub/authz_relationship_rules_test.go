@@ -299,9 +299,19 @@ func TestRelationshipPolicyPrincipalKind(t *testing.T) {
 	for kind, want := range map[PrincipalKind]string{
 		PrincipalKindUser: "user", PrincipalKindDev: "user", PrincipalKindFederatedUser: "user",
 		PrincipalKindAgent: "agent", PrincipalKindFederatedAgent: "agent",
-		PrincipalKind("service"): "", PrincipalKind(""): "",
 	} {
-		assert.Equal(t, want, relationshipPolicyPrincipalKind(kind), "kind %q", kind)
+		assert.Equal(t, want, permissions.RelationshipPrincipalKind(string(kind)), "kind %q", kind)
+	}
+	// Any other kind maps outside the row vocabulary and matches no row.
+	for _, kind := range []PrincipalKind{"service", ""} {
+		mapped := permissions.RelationshipPrincipalKind(string(kind))
+		assert.False(t, relationshipPolicyPrincipalKinds[mapped], "kind %q must not map into the row vocabulary", kind)
+		for _, row := range permissions.RelationshipPolicies {
+			for _, id := range row.PermissionIDs {
+				assert.False(t, permissions.RelationshipPolicyAllows(row.Relationship, mapped, row.ResourceType, id),
+					"kind %q must match no row (%s/%s/%s)", kind, row.Relationship, row.ResourceType, id)
+			}
+		}
 	}
 }
 
