@@ -843,11 +843,11 @@ func TestGetAgent_SelfRead(t *testing.T) {
 // Cross-route parity — the regression guard for the drift class itself
 // ============================================================================
 
-// TestAgentSelfRead_SameBodyOnBothRoutes asserts that a self-read returns an
+// TestBypassAgents_SelfReadRouteParity asserts that a self-read returns an
 // identical decoded JSON body whether it goes through the unscoped
 // GET /api/v1/agents/{id} route or the project-scoped
 // GET /api/v1/projects/{id}/agents/{id} route.
-func TestAgentSelfRead_SameBodyOnBothRoutes(t *testing.T) {
+func TestBypassAgents_SelfReadRouteParity(t *testing.T) {
 	f := bypassAgentsSetup(t)
 	unscoped := f.asAgent(t, http.MethodGet, "/api/v1/agents/"+f.caller.ID, nil)
 	scoped := f.asAgent(t, http.MethodGet, "/api/v1/projects/"+f.proj.ID+"/agents/"+f.caller.ID, nil)
