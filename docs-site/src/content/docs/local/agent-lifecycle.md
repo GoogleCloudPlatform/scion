@@ -142,7 +142,7 @@ In Hub-connected setups, the same recovery is available in the web UI as a **Res
 
 #### Reincarnating an Agent
 
-To move an existing agent onto the current template, image, and harness config without losing its identity, use [`scion reincarnate`](/scion/reference/cli/#scion-reincarnate). It keeps the agent ID and slug, starts a new generation with a freshly resolved config, and hands it the task you supply with `--handoff-file`. Use `--dry-run` to preview the changes first. Reincarnation requires a Hub.
+To move an existing agent onto the current template, image, and harness config without losing its identity, use [`scion reincarnate`](/scion/reference/cli/#scion-reincarnate). It keeps the agent ID and slug, starts a new generation with a freshly resolved config, and hands it the task you supply with `--handoff-file`. Use `--dry-run` to preview the changes first. Reincarnation requires a Hub, and works for clone-per-agent, shared-workspace, and Hub-managed agents; worktree-per-agent agents are not yet supported.
 
 ## Auto-Suspend of Stalled Agents
 

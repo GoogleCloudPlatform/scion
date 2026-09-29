@@ -327,6 +327,13 @@ Run it with no argument inside an agent container to migrate the agent itself (s
 Self-migration requires `--handoff-file`, because there is no one else to describe the work in
 progress. When migrating another agent, the handoff is optional.
 
+Reincarnation works for agents in clone-per-agent, shared-workspace (shared-plain), and
+Hub-managed workspaces. For a shared-workspace agent, the agent record, identity, and shared
+checkout are preserved, and sibling agents sharing the checkout are not restarted. Agents in
+worktree-per-agent projects are not yet supported; the Hub rejects the request with
+`400 Bad Request`. Reincarnating another agent requires the `agent.lifecycle` permission (the same
+as stop, start, and restart); an agent can always reincarnate itself.
+
 **Usage:** `scion reincarnate [agent-name] [flags]`
 
 - **Flags:**
