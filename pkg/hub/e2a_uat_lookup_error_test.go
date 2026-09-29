@@ -39,11 +39,10 @@ func (f *failingUATLookupStore) GetUserAccessTokenByHash(context.Context, string
 	return nil, f.err
 }
 
-// TestUATRejection_LookupFailureIsNotLoggedAsInvalid proves review-1 finding
-// F5: a store/database failure during token lookup must not be logged as
-// reason="invalid" (indistinguishable from a client presenting a bad
-// token) — an operator must be able to tell an outage from a wave of bad
-// tokens.
+// TestUATRejection_LookupFailureIsNotLoggedAsInvalid proves a store/database
+// failure during token lookup is never logged as reason="invalid"
+// (indistinguishable from a client presenting a bad token) — an operator
+// must be able to tell an outage from a wave of bad tokens.
 func TestUATRejection_LookupFailureIsNotLoggedAsInvalid(t *testing.T) {
 	srv, _ := testServer(t)
 	capture := &capturingHandler{}

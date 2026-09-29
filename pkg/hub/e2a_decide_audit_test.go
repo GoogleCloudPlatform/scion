@@ -70,11 +70,10 @@ func TestDecide_UATProjectGateDenialIsAudited(t *testing.T) {
 	require.Equal(t, before+1, len(emitter.records), "the UAT scope-gate denial must also emit exactly one decision audit record")
 }
 
-// TestDecide_PermissionIDPopulated proves ruling Q7 as tightened by review-1
-// finding F1: the decision audit record's PermissionID is exactly the
-// caller-supplied AuthzRequest.Permission, recorded only when it is a
-// canonical ID in the permissions registry — never derived from
-// Resource/Action, and never an unregistered string.
+// TestDecide_PermissionIDPopulated proves the decision audit record's
+// PermissionID is exactly the caller-supplied AuthzRequest.Permission,
+// recorded only when it is a canonical ID in the permissions registry —
+// never derived from Resource/Action, and never an unregistered string.
 func TestDecide_PermissionIDPopulated(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()

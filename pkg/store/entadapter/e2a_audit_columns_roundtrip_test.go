@@ -26,9 +26,9 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// E.2a (ptone/scion#2127) review-1 finding F8: a round-trip test for the new
-// decision/mutation audit columns and the mutation audit correlation_id
-// filter, plus backward compatibility for rows written without them.
+// A round-trip test for the decision/mutation audit columns and the
+// mutation audit correlation_id filter, plus backward compatibility for
+// rows written without them.
 // ---------------------------------------------------------------------------
 
 func TestDecisionAuditStore_NewFieldsRoundTrip(t *testing.T) {

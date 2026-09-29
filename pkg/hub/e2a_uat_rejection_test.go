@@ -59,8 +59,7 @@ func doRequestWithBearer(srv *Server, bearer string) *httptest.ResponseRecorder 
 // installRejectionLogging wires both the auth-rejection logger and the
 // request logger to the same capturingHandler, so a "credential rejected"
 // test can assert on request_id (which only exists once a request logger
-// installs *logging.RequestMeta — review-1 finding F7) alongside the
-// rejection reason.
+// installs *logging.RequestMeta) alongside the rejection reason.
 func installRejectionLogging(srv *Server) *capturingHandler {
 	capture := &capturingHandler{}
 	logger := slog.New(capture)
