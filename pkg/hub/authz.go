@@ -363,11 +363,14 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 	// Deliver permissions are admitted only for a delivery credential kind.
 	// The gate precedes every grant stage, so a role binding, synthetic
 	// agent binding or relationship grant cannot admit deliver for any
-	// other credential kind. See authz_delivery_gate.go.
+	// other credential kind. Passing the gate is necessary, not
+	// sufficient: see authz_delivery_gate.go for the contract a delivery
+	// credential kind must meet before it joins the set.
 	if !deliveryCredentialAdmitted(permissionID, request.Action, credential.Kind) {
 		d := Decision{Allowed: false, Reason: deliveryGateReason}
 		if request.Explain {
 			d.Provenance = &DecisionProvenance{
+				Permission:      permissionID,
 				DenyReasons:     []string{deliveryGateReason},
 				Grants:          []GrantDetail{},
 				InactiveGrants:  []GrantDetail{},

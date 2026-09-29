@@ -127,6 +127,7 @@ func assertDeliveryGateDenied(t *testing.T, d Decision, msg string) {
 	assert.Empty(t, d.Provenance.Grants, "%s: the gate precedes role binding evaluation", msg)
 	assert.Empty(t, d.Provenance.Relationships, "%s: the gate precedes relationship evaluation", msg)
 	assert.Equal(t, []string{deliveryGateReason}, d.Provenance.DenyReasons, msg)
+	assert.NotEmpty(t, d.Provenance.Permission, "%s: explain output names the gated permission", msg)
 }
 
 // A super-admin holding a hub-wide role binding is denied every deliver
@@ -146,6 +147,7 @@ func TestDeliveryGate_SuperAdminDenied(t *testing.T) {
 		Explain:    true,
 	})
 	assertDeliveryGateDenied(t, d, "super-admin secret.deliver")
+	assert.Equal(t, "secret.deliver", d.Provenance.Permission)
 	assert.Equal(t, string(CredentialKindInteractive), d.CredentialKind)
 
 	d = f.authz.Decide(context.Background(), AuthzRequest{
@@ -160,6 +162,21 @@ func TestDeliveryGate_SuperAdminDenied(t *testing.T) {
 		d = f.authz.Decide(context.Background(), deliveryGateRequest(admin, CredentialKindInteractive,
 			Resource{Type: permissionResource(t, perm), ID: tid("dg-" + perm)}, perm))
 		assertDeliveryGateDenied(t, d, "super-admin "+perm)
+		assert.Equal(t, perm, d.Provenance.Permission)
+	}
+
+	// An explicit deliver permission is gated whatever the request action:
+	// the gate reads the resolved permission, not only the action.
+	for _, perm := range []string{"secret.deliver", "env_var.deliver"} {
+		for _, action := range []Action{ActionRead, ActionUse} {
+			req := deliveryGateRequest(admin, CredentialKindInteractive,
+				Resource{Type: permissionResource(t, perm), ID: tid("dg-act-" + perm)}, perm)
+			req.Action = action
+			d = f.authz.Decide(context.Background(), req)
+			msg := "super-admin " + perm + " with action " + string(action)
+			assertDeliveryGateDenied(t, d, msg)
+			assert.Equal(t, perm, d.Provenance.Permission, msg)
+		}
 	}
 
 	d = decidePerm(f.authz, admin, secret, ActionUse, "secret.use", false)
@@ -210,8 +227,14 @@ func TestDeliveryGate_EveryNonDeliveryKindDenied(t *testing.T) {
 }
 
 // With a kind placed in the delivery set, the gate hands the request to
-// grant evaluation: the super-admin role binding admits secret.deliver.
-// Registering the delivery credential kind needs only the set entry.
+// grant evaluation. This test pins the hand-off only, not the outcome of
+// grant evaluation: the decision reason is not the gate's, and the
+// later stages ran (role grants for the super-admin, relationship
+// candidates for a progeny agent). It deliberately does not assert
+// Allowed. Under the ptone/scion#2228 contract a role holding a deliver
+// permission never substitutes for the item grant, so a super-admin role
+// binding is not a positive control for deliver; see
+// TestDeliveryGate_Part2RoleDoesNotSubstituteForItemGrant.
 func TestDeliveryGate_DeliveryKindReachesGrantEvaluation(t *testing.T) {
 	f := newGoldenFixture(t)
 	admin := NewAuthenticatedUser(f.superAdminID, "superadmin@golden.test", "Super Admin", "admin", "api")
@@ -222,8 +245,69 @@ func TestDeliveryGate_DeliveryKindReachesGrantEvaluation(t *testing.T) {
 
 	withDeliveryCredentialKinds(t, testKind)
 	d := f.authz.Decide(context.Background(), deliveryGateRequest(admin, testKind, secret, "secret.deliver"))
-	assert.True(t, d.Allowed, "reason %q", d.Reason)
 	assert.NotEqual(t, deliveryGateReason, d.Reason)
+	require.NotNil(t, d.Provenance)
+	assert.NotContains(t, d.Provenance.DenyReasons, deliveryGateReason)
+	assert.NotEmpty(t, d.Provenance.Grants, "role binding evaluation ran after the gate")
+
+	// A progeny agent reaches relationship evaluation for the same
+	// permission once its kind is in the set.
+	agent := progenyPairAgent(tid("dg-handoff-agent"), f.projectBeta.ID, []string{f.projectOwnerID}, allRegisteredAgentScopes())
+	withDeliveryCredentialKinds(t, testKind, CredentialKindAgentJWT)
+	d = decidePerm(f.authz, agent, secret, ActionDeliver, "secret.deliver", true)
+	assert.NotEqual(t, deliveryGateReason, d.Reason)
+	r := relationshipResult(t, d, RelationshipRuleProgeny)
+	assert.Equal(t, "secret.deliver", r.Permission)
 
 	assertDeliveryGateDenied(t, f.authz.Decide(context.Background(), deliveryGateRequest(admin, CredentialKindInteractive, secret, "secret.deliver")), "interactive")
+}
+
+// The tests below state the ptone/scion#2228 part 2 contract. They are
+// skipped because the internal delivery credential kind, its unexported
+// constructor and BoundAgentID do not exist in this change. Part 2
+// un-skips them together with adding the kind to deliveryCredentialKinds
+// and a delivery=true row to deliveryGateKindCases.
+
+// A role holding a deliver permission, presented with a valid delivery
+// credential, is denied without the association, progeny or skill-default
+// grant for the selected item.
+func TestDeliveryGate_Part2RoleDoesNotSubstituteForItemGrant(t *testing.T) {
+	t.Skip("depends on the internal delivery credential kind, ptone/scion#2228 part 2: " +
+		"assert a super-admin role holding secret.deliver, with a valid delivery credential bound to the agent, " +
+		"is denied secret.deliver on a secret with no item grant")
+}
+
+// A delivery credential whose BoundAgentID differs from the principal
+// agent ID is denied.
+func TestDeliveryGate_Part2WrongBoundAgentDenied(t *testing.T) {
+	t.Skip("depends on the internal delivery credential kind and BoundAgentID, ptone/scion#2228 part 2: " +
+		"assert a delivery credential bound to agent A is denied secret.deliver and env_var.deliver for principal agent B, " +
+		"even with a valid progeny grant for B")
+}
+
+// A valid internal delivery credential, bound to the principal agent, with
+// a valid item grant, is admitted; the same request without the grant is
+// denied.
+func TestDeliveryGate_Part2ValidInternalDeliveryAdmitted(t *testing.T) {
+	t.Skip("depends on the internal delivery credential kind, ptone/scion#2228 part 2: " +
+		"assert a delivery credential bound to the principal agent, with a progeny grant on the secret and the " +
+		"section 4.6 deliver ceiling met, is admitted for secret.deliver; the credential is not a source of attested facts")
+}
+
+// The gated kind is bound to the credential type: a request whose supplied
+// Credential.Kind names the delivery kind while the identity is not a
+// delivery credential is denied.
+func TestDeliveryGate_Part2KindBoundToCredentialType(t *testing.T) {
+	t.Skip("depends on the internal delivery credential kind, ptone/scion#2228 part 2: " +
+		"assert an interactive, UAT, agent JWT or federated identity with Credential.Kind set to the delivery kind " +
+		"is denied every deliver permission; the kind comes from the credential type, not the request field")
+}
+
+// A progeny deliver pair admitted by the gate is bounded by the F design
+// section 4.6 deliver effect ceiling, not by the generic delegation
+// ceiling.
+func TestDeliveryGate_Part2DeliverEffectCeilingRequired(t *testing.T) {
+	t.Skip("depends on the section 4.6 deliver effect ceiling, a precondition of ptone/scion#2228 part 2: " +
+		"assert secret.deliver via progeny is denied when the EffectCeiling lacks the exact deliver permission, " +
+		"or when the source authority is not live, even though the delegator holds secret.deliver")
 }
