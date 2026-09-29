@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -1045,7 +1046,7 @@ func TestProjectAdmissionForClass_ErrorsNeverMemoized(t *testing.T) {
 	createTestUserWithProjectRole(t, s, userID, "pafcerr@test.com", projectID, store.ProjectRoleMember)
 
 	failing := &onceFailingBindingsStore{Store: s, failErr: errors.New("injected transient binding-list failure")}
-	authz := NewAuthzService(failing, nil)
+	authz := NewAuthzService(failing, slog.Default())
 
 	class := ProjectTargetClass{ResourceType: "agent"}
 	memo := NewProjectAdmissionCache()
@@ -1099,7 +1100,7 @@ func TestProjectAdmissionForClass_ConstraintLoadErrorNotMemoized(t *testing.T) {
 	systemRoleUserWithPermissions(t, s, userID, []string{"skill.read"})
 
 	failing := &onceFailingConstraintStore{Store: s, failErr: errors.New("injected transient constraint-list failure")}
-	authz := NewAuthzService(failing, nil)
+	authz := NewAuthzService(failing, slog.Default())
 
 	class := ProjectTargetClass{ResourceType: "skill", ScopeKind: store.SkillScopeProject}
 	memo := NewProjectAdmissionCache()
@@ -1108,6 +1109,7 @@ func TestProjectAdmissionForClass_ConstraintLoadErrorNotMemoized(t *testing.T) {
 	if err1 == nil {
 		t.Fatal("expected the first call to fail via the injected constraint-table load error")
 	}
+	require.ErrorIs(t, err1, ErrProjectAccessDenied)
 
 	result2, err2 := authz.ProjectAdmissionForClass(ctx, activeUserPrincipal(userID), projectID, "skill.read", class, memo)
 	require.NoError(t, err2)
@@ -1626,6 +1628,53 @@ func TestCanMintSelector_HubBoundary_ConstraintTableLoadedOnceForBatch(t *testin
 	if counting.listAccessConstraintCalls > 1 {
 		t.Errorf("ListAccessConstraints called %d times for one CanMintSelector batch (2 permissions x 2 projects); want at most 1 (cached)", counting.listAccessConstraintCalls)
 	}
+}
+
+// TestCanMintSelector_ConstraintLoadErrorReturnsError proves a transient
+// access-constraint-table load failure surfaces as an error from
+// CanMintSelector on every path that reaches it, not just some — covering
+// both the Hub-boundary path (hubPermissionEligible -> MintTimeSystemGrant)
+// and the Project-boundary path (selectorMintEligible ->
+// permissionSurvivesProjectConstraints, for a relationship-eligible
+// selector). Neither case should return a SelectorEligibility slice.
+func TestCanMintSelector_ConstraintLoadErrorReturnsError(t *testing.T) {
+	t.Run("hub_boundary", func(t *testing.T) {
+		_, s := authzTestSetup(t)
+		ctx := context.Background()
+		userID := tid("cms-cle-hub")
+		createTestUserWithRole(t, s, userID, "cmsclehub@test.com", "member", store.SystemRoleHubMember)
+
+		failing := &r2FailingStore{Store: s, failListConstraints: errors.New("injected: constraint load failure")}
+		authz := NewAuthzService(failing, slog.Default())
+
+		// Mirrors TestCanMintSelector_HubBoundary_CatalogOnlyGrantEligible:
+		// a hub-member's catalog-only skill:read reaches MintTimeSystemGrant,
+		// which now loads the constraint table via the error-returning form.
+		results, err := authz.CanMintSelector(ctx, activeUserPrincipal(userID), TokenBoundary{Kind: BoundaryKindHub}, []string{"skill:read"})
+		require.Error(t, err)
+		require.ErrorIs(t, err, ErrProjectAccessDenied)
+		require.Nil(t, results)
+	})
+
+	t.Run("project_boundary_relationship_selector", func(t *testing.T) {
+		_, s := authzTestSetup(t)
+		ctx := context.Background()
+		userID := tid("cms-cle-proj")
+		projectID := tid("cms-cle-proj-p")
+		createDelegateTestProject(t, s, projectID, "cms-cle-proj-p", "test")
+		createTestUserWithProjectRole(t, s, userID, "cmscleproj@test.com", projectID, store.ProjectRoleMember)
+
+		failing := &r2FailingStore{Store: s, failListConstraints: errors.New("injected: constraint load failure")}
+		authz := NewAuthzService(failing, slog.Default())
+
+		// Mirrors TestCanMintSelector_RelationshipEligibility_AgentAttach_NoExistingTargetRequired:
+		// an ordinary member's agent:attach under a Project boundary reaches
+		// permissionSurvivesProjectConstraints directly via selectorMintEligible.
+		results, err := authz.CanMintSelector(ctx, activeUserPrincipal(userID), TokenBoundary{Kind: BoundaryKindProject, ProjectID: projectID}, []string{"agent:attach"})
+		require.Error(t, err)
+		require.ErrorIs(t, err, ErrProjectAccessDenied)
+		require.Nil(t, results)
+	})
 }
 
 // --- Full contradiction matrix ----------------------------------------------

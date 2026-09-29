@@ -763,8 +763,16 @@ type mintEligibilityCacheKey struct{}
 // access-constraint table. Carried via context (not a new parameter) so it
 // requires no change to any exported function's signature: every reader
 // falls back to loading fresh when the cache is absent (e.g. every caller
-// outside CanMintSelector), so this is purely a performance optimization,
-// never a source of eligibility facts, and never a behavior difference.
+// outside CanMintSelector), so this is purely a performance optimization and
+// never a source of eligibility facts: every reader that surfaces an error
+// (closureErr/systemErr/constraintsErr) does so because the SAME load would
+// have failed uncached too. The one externally visible difference is scope,
+// not existence: a single failed page is shared by every permission in the
+// batch that reaches it, where an uncached run could have retried the load
+// per permission and possibly succeeded on a later attempt. It never turns a
+// real failure into a fabricated denial or an allow — every caller listed
+// above propagates the cached error as an error, on every path, not just
+// some of them.
 type mintEligibilityCache struct {
 	mu sync.Mutex
 
@@ -986,7 +994,16 @@ func (a *AuthzService) MintTimeSystemGrant(ctx context.Context, principal Princi
 	for _, p := range refs {
 		closure[p.Type+":"+p.ID] = struct{}{}
 	}
-	restrictions := a.loadAccessConstraintRestrictions(ctx, closure, ResourceContext{})
+	// Uses the error-returning accessConstraintRestrictions rather than
+	// loadAccessConstraintRestrictions: MintTimeSystemGrant has its own error
+	// return, and CanMintSelector (its only production caller) already fails
+	// the whole batch closed on an error, so a transient load failure should
+	// surface as an error rather than be silently absorbed into a
+	// stable-looking denial reason.
+	restrictions, err := a.accessConstraintRestrictions(ctx, closure, ResourceContext{})
+	if err != nil {
+		return false, fmt.Errorf("%w: access constraint load failed: %v", ErrProjectAccessDenied, err)
+	}
 
 	resourceType := registryResourceType(permissionID)
 	for _, ck := range classes {
@@ -1088,7 +1105,15 @@ func (a *AuthzService) hasAnyProjectBinding(ctx context.Context, principal Princ
 		if !candidateSetHasPermission(toCandidateBindings(projBindings), roleDefs, permissionID) {
 			continue
 		}
-		restrictions := a.loadAccessConstraintRestrictions(ctx, closure, ResourceContext{ProjectID: projectID})
+		// Error-returning form: hasAnyProjectBinding already propagates every
+		// other internal failure (closure, binding-list, role-definition
+		// resolution) as an error rather than a silent deny-all, so a
+		// transient constraint-table load failure must do the same instead
+		// of masquerading as an ordinary denial.
+		restrictions, err := a.accessConstraintRestrictions(ctx, closure, ResourceContext{ProjectID: projectID})
+		if err != nil {
+			return false, fmt.Errorf("%w: access constraint load failed: %v", ErrProjectAccessDenied, err)
+		}
 		if survivors := applyRestrictions([]string{permissionID}, restrictions); len(survivors) == 1 {
 			return true, nil
 		}
@@ -1112,7 +1137,14 @@ func (a *AuthzService) permissionSurvivesProjectConstraints(ctx context.Context,
 	for _, p := range refs {
 		closure[p.Type+":"+p.ID] = struct{}{}
 	}
-	restrictions := a.loadAccessConstraintRestrictions(ctx, closure, ResourceContext{ProjectID: projectID})
+	// Error-returning form, matching principalClosure's error propagation
+	// just above: a transient constraint-table load failure must surface as
+	// an error here too, not as an indistinguishable "constraint stripped
+	// it" denial.
+	restrictions, err := a.accessConstraintRestrictions(ctx, closure, ResourceContext{ProjectID: projectID})
+	if err != nil {
+		return false, fmt.Errorf("%w: access constraint load failed: %v", ErrProjectAccessDenied, err)
+	}
 	survivors := applyRestrictions([]string{permissionID}, restrictions)
 	return len(survivors) == 1, nil
 }
