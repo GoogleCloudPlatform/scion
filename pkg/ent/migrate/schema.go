@@ -541,6 +541,14 @@ var (
 		{Name: "policy_id", Type: field.TypeString, Nullable: true},
 		{Name: "correlation_id", Type: field.TypeString, Nullable: true},
 		{Name: "sampled", Type: field.TypeBool, Default: false},
+		{Name: "permission_id", Type: field.TypeString, Nullable: true},
+		{Name: "credential_name", Type: field.TypeString, Nullable: true},
+		{Name: "credential_boundary_kind", Type: field.TypeString, Nullable: true},
+		{Name: "credential_boundary_project_id", Type: field.TypeString, Nullable: true},
+		{Name: "credential_labels", Type: field.TypeString, Nullable: true},
+		{Name: "executor_kind", Type: field.TypeString, Nullable: true},
+		{Name: "executor_id", Type: field.TypeString, Nullable: true},
+		{Name: "denied_by", Type: field.TypeString, Nullable: true},
 	}
 	// DecisionAuditsTable holds the schema information for the "decision_audits" table.
 	DecisionAuditsTable = &schema.Table{
@@ -582,6 +590,11 @@ var (
 				Name:    "decisionaudit_correlation_id",
 				Unique:  false,
 				Columns: []*schema.Column{DecisionAuditsColumns[15]},
+			},
+			{
+				Name:    "decisionaudit_denied_by",
+				Unique:  false,
+				Columns: []*schema.Column{DecisionAuditsColumns[24]},
 			},
 		},
 	}
@@ -1283,6 +1296,13 @@ var (
 		{Name: "after_summary", Type: field.TypeString, Nullable: true},
 		{Name: "can_delegate_result", Type: field.TypeString, Nullable: true},
 		{Name: "can_delegate_reason", Type: field.TypeString, Nullable: true},
+		{Name: "credential_name", Type: field.TypeString, Nullable: true},
+		{Name: "credential_boundary_kind", Type: field.TypeString, Nullable: true},
+		{Name: "credential_boundary_project_id", Type: field.TypeString, Nullable: true},
+		{Name: "credential_labels", Type: field.TypeString, Nullable: true},
+		{Name: "correlation_id", Type: field.TypeString, Nullable: true},
+		{Name: "executor_kind", Type: field.TypeString, Nullable: true},
+		{Name: "executor_id", Type: field.TypeString, Nullable: true},
 	}
 	// MutationAuditsTable holds the schema information for the "mutation_audits" table.
 	MutationAuditsTable = &schema.Table{
@@ -1314,6 +1334,11 @@ var (
 				Name:    "mutationaudit_target_type_target_id",
 				Unique:  false,
 				Columns: []*schema.Column{MutationAuditsColumns[7], MutationAuditsColumns[8]},
+			},
+			{
+				Name:    "mutationaudit_correlation_id",
+				Unique:  false,
+				Columns: []*schema.Column{MutationAuditsColumns[17]},
 			},
 		},
 	}

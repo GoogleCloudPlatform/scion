@@ -16638,29 +16638,37 @@ func (m *ConversationParticipantMutation) ResetEdge(name string) error {
 // DecisionAuditMutation represents an operation that mutates the DecisionAudit nodes in the graph.
 type DecisionAuditMutation struct {
 	config
-	op              Op
-	typ             string
-	id              *uuid.UUID
-	timestamp       *time.Time
-	principal_kind  *string
-	principal_id    *string
-	credential_id   *string
-	credential_type *string
-	route           *string
-	resource_type   *string
-	resource_id     *string
-	permission      *string
-	result          *string
-	reason          *string
-	matched_policy  *string
-	matched_grant   *string
-	policy_id       *string
-	correlation_id  *string
-	sampled         *bool
-	clearedFields   map[string]struct{}
-	done            bool
-	oldValue        func(context.Context) (*DecisionAudit, error)
-	predicates      []predicate.DecisionAudit
+	op                             Op
+	typ                            string
+	id                             *uuid.UUID
+	timestamp                      *time.Time
+	principal_kind                 *string
+	principal_id                   *string
+	credential_id                  *string
+	credential_type                *string
+	route                          *string
+	resource_type                  *string
+	resource_id                    *string
+	permission                     *string
+	result                         *string
+	reason                         *string
+	matched_policy                 *string
+	matched_grant                  *string
+	policy_id                      *string
+	correlation_id                 *string
+	sampled                        *bool
+	permission_id                  *string
+	credential_name                *string
+	credential_boundary_kind       *string
+	credential_boundary_project_id *string
+	credential_labels              *string
+	executor_kind                  *string
+	executor_id                    *string
+	denied_by                      *string
+	clearedFields                  map[string]struct{}
+	done                           bool
+	oldValue                       func(context.Context) (*DecisionAudit, error)
+	predicates                     []predicate.DecisionAudit
 }
 
 var _ ent.Mutation = (*DecisionAuditMutation)(nil)
@@ -17447,6 +17455,398 @@ func (m *DecisionAuditMutation) ResetSampled() {
 	m.sampled = nil
 }
 
+// SetPermissionID sets the "permission_id" field.
+func (m *DecisionAuditMutation) SetPermissionID(s string) {
+	m.permission_id = &s
+}
+
+// PermissionID returns the value of the "permission_id" field in the mutation.
+func (m *DecisionAuditMutation) PermissionID() (r string, exists bool) {
+	v := m.permission_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPermissionID returns the old "permission_id" field's value of the DecisionAudit entity.
+// If the DecisionAudit object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DecisionAuditMutation) OldPermissionID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPermissionID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPermissionID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPermissionID: %w", err)
+	}
+	return oldValue.PermissionID, nil
+}
+
+// ClearPermissionID clears the value of the "permission_id" field.
+func (m *DecisionAuditMutation) ClearPermissionID() {
+	m.permission_id = nil
+	m.clearedFields[decisionaudit.FieldPermissionID] = struct{}{}
+}
+
+// PermissionIDCleared returns if the "permission_id" field was cleared in this mutation.
+func (m *DecisionAuditMutation) PermissionIDCleared() bool {
+	_, ok := m.clearedFields[decisionaudit.FieldPermissionID]
+	return ok
+}
+
+// ResetPermissionID resets all changes to the "permission_id" field.
+func (m *DecisionAuditMutation) ResetPermissionID() {
+	m.permission_id = nil
+	delete(m.clearedFields, decisionaudit.FieldPermissionID)
+}
+
+// SetCredentialName sets the "credential_name" field.
+func (m *DecisionAuditMutation) SetCredentialName(s string) {
+	m.credential_name = &s
+}
+
+// CredentialName returns the value of the "credential_name" field in the mutation.
+func (m *DecisionAuditMutation) CredentialName() (r string, exists bool) {
+	v := m.credential_name
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCredentialName returns the old "credential_name" field's value of the DecisionAudit entity.
+// If the DecisionAudit object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DecisionAuditMutation) OldCredentialName(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCredentialName is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCredentialName requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCredentialName: %w", err)
+	}
+	return oldValue.CredentialName, nil
+}
+
+// ClearCredentialName clears the value of the "credential_name" field.
+func (m *DecisionAuditMutation) ClearCredentialName() {
+	m.credential_name = nil
+	m.clearedFields[decisionaudit.FieldCredentialName] = struct{}{}
+}
+
+// CredentialNameCleared returns if the "credential_name" field was cleared in this mutation.
+func (m *DecisionAuditMutation) CredentialNameCleared() bool {
+	_, ok := m.clearedFields[decisionaudit.FieldCredentialName]
+	return ok
+}
+
+// ResetCredentialName resets all changes to the "credential_name" field.
+func (m *DecisionAuditMutation) ResetCredentialName() {
+	m.credential_name = nil
+	delete(m.clearedFields, decisionaudit.FieldCredentialName)
+}
+
+// SetCredentialBoundaryKind sets the "credential_boundary_kind" field.
+func (m *DecisionAuditMutation) SetCredentialBoundaryKind(s string) {
+	m.credential_boundary_kind = &s
+}
+
+// CredentialBoundaryKind returns the value of the "credential_boundary_kind" field in the mutation.
+func (m *DecisionAuditMutation) CredentialBoundaryKind() (r string, exists bool) {
+	v := m.credential_boundary_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCredentialBoundaryKind returns the old "credential_boundary_kind" field's value of the DecisionAudit entity.
+// If the DecisionAudit object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DecisionAuditMutation) OldCredentialBoundaryKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCredentialBoundaryKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCredentialBoundaryKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCredentialBoundaryKind: %w", err)
+	}
+	return oldValue.CredentialBoundaryKind, nil
+}
+
+// ClearCredentialBoundaryKind clears the value of the "credential_boundary_kind" field.
+func (m *DecisionAuditMutation) ClearCredentialBoundaryKind() {
+	m.credential_boundary_kind = nil
+	m.clearedFields[decisionaudit.FieldCredentialBoundaryKind] = struct{}{}
+}
+
+// CredentialBoundaryKindCleared returns if the "credential_boundary_kind" field was cleared in this mutation.
+func (m *DecisionAuditMutation) CredentialBoundaryKindCleared() bool {
+	_, ok := m.clearedFields[decisionaudit.FieldCredentialBoundaryKind]
+	return ok
+}
+
+// ResetCredentialBoundaryKind resets all changes to the "credential_boundary_kind" field.
+func (m *DecisionAuditMutation) ResetCredentialBoundaryKind() {
+	m.credential_boundary_kind = nil
+	delete(m.clearedFields, decisionaudit.FieldCredentialBoundaryKind)
+}
+
+// SetCredentialBoundaryProjectID sets the "credential_boundary_project_id" field.
+func (m *DecisionAuditMutation) SetCredentialBoundaryProjectID(s string) {
+	m.credential_boundary_project_id = &s
+}
+
+// CredentialBoundaryProjectID returns the value of the "credential_boundary_project_id" field in the mutation.
+func (m *DecisionAuditMutation) CredentialBoundaryProjectID() (r string, exists bool) {
+	v := m.credential_boundary_project_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCredentialBoundaryProjectID returns the old "credential_boundary_project_id" field's value of the DecisionAudit entity.
+// If the DecisionAudit object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DecisionAuditMutation) OldCredentialBoundaryProjectID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCredentialBoundaryProjectID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCredentialBoundaryProjectID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCredentialBoundaryProjectID: %w", err)
+	}
+	return oldValue.CredentialBoundaryProjectID, nil
+}
+
+// ClearCredentialBoundaryProjectID clears the value of the "credential_boundary_project_id" field.
+func (m *DecisionAuditMutation) ClearCredentialBoundaryProjectID() {
+	m.credential_boundary_project_id = nil
+	m.clearedFields[decisionaudit.FieldCredentialBoundaryProjectID] = struct{}{}
+}
+
+// CredentialBoundaryProjectIDCleared returns if the "credential_boundary_project_id" field was cleared in this mutation.
+func (m *DecisionAuditMutation) CredentialBoundaryProjectIDCleared() bool {
+	_, ok := m.clearedFields[decisionaudit.FieldCredentialBoundaryProjectID]
+	return ok
+}
+
+// ResetCredentialBoundaryProjectID resets all changes to the "credential_boundary_project_id" field.
+func (m *DecisionAuditMutation) ResetCredentialBoundaryProjectID() {
+	m.credential_boundary_project_id = nil
+	delete(m.clearedFields, decisionaudit.FieldCredentialBoundaryProjectID)
+}
+
+// SetCredentialLabels sets the "credential_labels" field.
+func (m *DecisionAuditMutation) SetCredentialLabels(s string) {
+	m.credential_labels = &s
+}
+
+// CredentialLabels returns the value of the "credential_labels" field in the mutation.
+func (m *DecisionAuditMutation) CredentialLabels() (r string, exists bool) {
+	v := m.credential_labels
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCredentialLabels returns the old "credential_labels" field's value of the DecisionAudit entity.
+// If the DecisionAudit object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DecisionAuditMutation) OldCredentialLabels(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCredentialLabels is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCredentialLabels requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCredentialLabels: %w", err)
+	}
+	return oldValue.CredentialLabels, nil
+}
+
+// ClearCredentialLabels clears the value of the "credential_labels" field.
+func (m *DecisionAuditMutation) ClearCredentialLabels() {
+	m.credential_labels = nil
+	m.clearedFields[decisionaudit.FieldCredentialLabels] = struct{}{}
+}
+
+// CredentialLabelsCleared returns if the "credential_labels" field was cleared in this mutation.
+func (m *DecisionAuditMutation) CredentialLabelsCleared() bool {
+	_, ok := m.clearedFields[decisionaudit.FieldCredentialLabels]
+	return ok
+}
+
+// ResetCredentialLabels resets all changes to the "credential_labels" field.
+func (m *DecisionAuditMutation) ResetCredentialLabels() {
+	m.credential_labels = nil
+	delete(m.clearedFields, decisionaudit.FieldCredentialLabels)
+}
+
+// SetExecutorKind sets the "executor_kind" field.
+func (m *DecisionAuditMutation) SetExecutorKind(s string) {
+	m.executor_kind = &s
+}
+
+// ExecutorKind returns the value of the "executor_kind" field in the mutation.
+func (m *DecisionAuditMutation) ExecutorKind() (r string, exists bool) {
+	v := m.executor_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldExecutorKind returns the old "executor_kind" field's value of the DecisionAudit entity.
+// If the DecisionAudit object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DecisionAuditMutation) OldExecutorKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldExecutorKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldExecutorKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldExecutorKind: %w", err)
+	}
+	return oldValue.ExecutorKind, nil
+}
+
+// ClearExecutorKind clears the value of the "executor_kind" field.
+func (m *DecisionAuditMutation) ClearExecutorKind() {
+	m.executor_kind = nil
+	m.clearedFields[decisionaudit.FieldExecutorKind] = struct{}{}
+}
+
+// ExecutorKindCleared returns if the "executor_kind" field was cleared in this mutation.
+func (m *DecisionAuditMutation) ExecutorKindCleared() bool {
+	_, ok := m.clearedFields[decisionaudit.FieldExecutorKind]
+	return ok
+}
+
+// ResetExecutorKind resets all changes to the "executor_kind" field.
+func (m *DecisionAuditMutation) ResetExecutorKind() {
+	m.executor_kind = nil
+	delete(m.clearedFields, decisionaudit.FieldExecutorKind)
+}
+
+// SetExecutorID sets the "executor_id" field.
+func (m *DecisionAuditMutation) SetExecutorID(s string) {
+	m.executor_id = &s
+}
+
+// ExecutorID returns the value of the "executor_id" field in the mutation.
+func (m *DecisionAuditMutation) ExecutorID() (r string, exists bool) {
+	v := m.executor_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldExecutorID returns the old "executor_id" field's value of the DecisionAudit entity.
+// If the DecisionAudit object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DecisionAuditMutation) OldExecutorID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldExecutorID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldExecutorID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldExecutorID: %w", err)
+	}
+	return oldValue.ExecutorID, nil
+}
+
+// ClearExecutorID clears the value of the "executor_id" field.
+func (m *DecisionAuditMutation) ClearExecutorID() {
+	m.executor_id = nil
+	m.clearedFields[decisionaudit.FieldExecutorID] = struct{}{}
+}
+
+// ExecutorIDCleared returns if the "executor_id" field was cleared in this mutation.
+func (m *DecisionAuditMutation) ExecutorIDCleared() bool {
+	_, ok := m.clearedFields[decisionaudit.FieldExecutorID]
+	return ok
+}
+
+// ResetExecutorID resets all changes to the "executor_id" field.
+func (m *DecisionAuditMutation) ResetExecutorID() {
+	m.executor_id = nil
+	delete(m.clearedFields, decisionaudit.FieldExecutorID)
+}
+
+// SetDeniedBy sets the "denied_by" field.
+func (m *DecisionAuditMutation) SetDeniedBy(s string) {
+	m.denied_by = &s
+}
+
+// DeniedBy returns the value of the "denied_by" field in the mutation.
+func (m *DecisionAuditMutation) DeniedBy() (r string, exists bool) {
+	v := m.denied_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeniedBy returns the old "denied_by" field's value of the DecisionAudit entity.
+// If the DecisionAudit object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DecisionAuditMutation) OldDeniedBy(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeniedBy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeniedBy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeniedBy: %w", err)
+	}
+	return oldValue.DeniedBy, nil
+}
+
+// ClearDeniedBy clears the value of the "denied_by" field.
+func (m *DecisionAuditMutation) ClearDeniedBy() {
+	m.denied_by = nil
+	m.clearedFields[decisionaudit.FieldDeniedBy] = struct{}{}
+}
+
+// DeniedByCleared returns if the "denied_by" field was cleared in this mutation.
+func (m *DecisionAuditMutation) DeniedByCleared() bool {
+	_, ok := m.clearedFields[decisionaudit.FieldDeniedBy]
+	return ok
+}
+
+// ResetDeniedBy resets all changes to the "denied_by" field.
+func (m *DecisionAuditMutation) ResetDeniedBy() {
+	m.denied_by = nil
+	delete(m.clearedFields, decisionaudit.FieldDeniedBy)
+}
+
 // Where appends a list predicates to the DecisionAuditMutation builder.
 func (m *DecisionAuditMutation) Where(ps ...predicate.DecisionAudit) {
 	m.predicates = append(m.predicates, ps...)
@@ -17481,7 +17881,7 @@ func (m *DecisionAuditMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *DecisionAuditMutation) Fields() []string {
-	fields := make([]string, 0, 16)
+	fields := make([]string, 0, 24)
 	if m.timestamp != nil {
 		fields = append(fields, decisionaudit.FieldTimestamp)
 	}
@@ -17530,6 +17930,30 @@ func (m *DecisionAuditMutation) Fields() []string {
 	if m.sampled != nil {
 		fields = append(fields, decisionaudit.FieldSampled)
 	}
+	if m.permission_id != nil {
+		fields = append(fields, decisionaudit.FieldPermissionID)
+	}
+	if m.credential_name != nil {
+		fields = append(fields, decisionaudit.FieldCredentialName)
+	}
+	if m.credential_boundary_kind != nil {
+		fields = append(fields, decisionaudit.FieldCredentialBoundaryKind)
+	}
+	if m.credential_boundary_project_id != nil {
+		fields = append(fields, decisionaudit.FieldCredentialBoundaryProjectID)
+	}
+	if m.credential_labels != nil {
+		fields = append(fields, decisionaudit.FieldCredentialLabels)
+	}
+	if m.executor_kind != nil {
+		fields = append(fields, decisionaudit.FieldExecutorKind)
+	}
+	if m.executor_id != nil {
+		fields = append(fields, decisionaudit.FieldExecutorID)
+	}
+	if m.denied_by != nil {
+		fields = append(fields, decisionaudit.FieldDeniedBy)
+	}
 	return fields
 }
 
@@ -17570,6 +17994,22 @@ func (m *DecisionAuditMutation) Field(name string) (ent.Value, bool) {
 		return m.CorrelationID()
 	case decisionaudit.FieldSampled:
 		return m.Sampled()
+	case decisionaudit.FieldPermissionID:
+		return m.PermissionID()
+	case decisionaudit.FieldCredentialName:
+		return m.CredentialName()
+	case decisionaudit.FieldCredentialBoundaryKind:
+		return m.CredentialBoundaryKind()
+	case decisionaudit.FieldCredentialBoundaryProjectID:
+		return m.CredentialBoundaryProjectID()
+	case decisionaudit.FieldCredentialLabels:
+		return m.CredentialLabels()
+	case decisionaudit.FieldExecutorKind:
+		return m.ExecutorKind()
+	case decisionaudit.FieldExecutorID:
+		return m.ExecutorID()
+	case decisionaudit.FieldDeniedBy:
+		return m.DeniedBy()
 	}
 	return nil, false
 }
@@ -17611,6 +18051,22 @@ func (m *DecisionAuditMutation) OldField(ctx context.Context, name string) (ent.
 		return m.OldCorrelationID(ctx)
 	case decisionaudit.FieldSampled:
 		return m.OldSampled(ctx)
+	case decisionaudit.FieldPermissionID:
+		return m.OldPermissionID(ctx)
+	case decisionaudit.FieldCredentialName:
+		return m.OldCredentialName(ctx)
+	case decisionaudit.FieldCredentialBoundaryKind:
+		return m.OldCredentialBoundaryKind(ctx)
+	case decisionaudit.FieldCredentialBoundaryProjectID:
+		return m.OldCredentialBoundaryProjectID(ctx)
+	case decisionaudit.FieldCredentialLabels:
+		return m.OldCredentialLabels(ctx)
+	case decisionaudit.FieldExecutorKind:
+		return m.OldExecutorKind(ctx)
+	case decisionaudit.FieldExecutorID:
+		return m.OldExecutorID(ctx)
+	case decisionaudit.FieldDeniedBy:
+		return m.OldDeniedBy(ctx)
 	}
 	return nil, fmt.Errorf("unknown DecisionAudit field %s", name)
 }
@@ -17732,6 +18188,62 @@ func (m *DecisionAuditMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetSampled(v)
 		return nil
+	case decisionaudit.FieldPermissionID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPermissionID(v)
+		return nil
+	case decisionaudit.FieldCredentialName:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCredentialName(v)
+		return nil
+	case decisionaudit.FieldCredentialBoundaryKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCredentialBoundaryKind(v)
+		return nil
+	case decisionaudit.FieldCredentialBoundaryProjectID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCredentialBoundaryProjectID(v)
+		return nil
+	case decisionaudit.FieldCredentialLabels:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCredentialLabels(v)
+		return nil
+	case decisionaudit.FieldExecutorKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetExecutorKind(v)
+		return nil
+	case decisionaudit.FieldExecutorID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetExecutorID(v)
+		return nil
+	case decisionaudit.FieldDeniedBy:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeniedBy(v)
+		return nil
 	}
 	return fmt.Errorf("unknown DecisionAudit field %s", name)
 }
@@ -17786,6 +18298,30 @@ func (m *DecisionAuditMutation) ClearedFields() []string {
 	if m.FieldCleared(decisionaudit.FieldCorrelationID) {
 		fields = append(fields, decisionaudit.FieldCorrelationID)
 	}
+	if m.FieldCleared(decisionaudit.FieldPermissionID) {
+		fields = append(fields, decisionaudit.FieldPermissionID)
+	}
+	if m.FieldCleared(decisionaudit.FieldCredentialName) {
+		fields = append(fields, decisionaudit.FieldCredentialName)
+	}
+	if m.FieldCleared(decisionaudit.FieldCredentialBoundaryKind) {
+		fields = append(fields, decisionaudit.FieldCredentialBoundaryKind)
+	}
+	if m.FieldCleared(decisionaudit.FieldCredentialBoundaryProjectID) {
+		fields = append(fields, decisionaudit.FieldCredentialBoundaryProjectID)
+	}
+	if m.FieldCleared(decisionaudit.FieldCredentialLabels) {
+		fields = append(fields, decisionaudit.FieldCredentialLabels)
+	}
+	if m.FieldCleared(decisionaudit.FieldExecutorKind) {
+		fields = append(fields, decisionaudit.FieldExecutorKind)
+	}
+	if m.FieldCleared(decisionaudit.FieldExecutorID) {
+		fields = append(fields, decisionaudit.FieldExecutorID)
+	}
+	if m.FieldCleared(decisionaudit.FieldDeniedBy) {
+		fields = append(fields, decisionaudit.FieldDeniedBy)
+	}
 	return fields
 }
 
@@ -17823,6 +18359,30 @@ func (m *DecisionAuditMutation) ClearField(name string) error {
 		return nil
 	case decisionaudit.FieldCorrelationID:
 		m.ClearCorrelationID()
+		return nil
+	case decisionaudit.FieldPermissionID:
+		m.ClearPermissionID()
+		return nil
+	case decisionaudit.FieldCredentialName:
+		m.ClearCredentialName()
+		return nil
+	case decisionaudit.FieldCredentialBoundaryKind:
+		m.ClearCredentialBoundaryKind()
+		return nil
+	case decisionaudit.FieldCredentialBoundaryProjectID:
+		m.ClearCredentialBoundaryProjectID()
+		return nil
+	case decisionaudit.FieldCredentialLabels:
+		m.ClearCredentialLabels()
+		return nil
+	case decisionaudit.FieldExecutorKind:
+		m.ClearExecutorKind()
+		return nil
+	case decisionaudit.FieldExecutorID:
+		m.ClearExecutorID()
+		return nil
+	case decisionaudit.FieldDeniedBy:
+		m.ClearDeniedBy()
 		return nil
 	}
 	return fmt.Errorf("unknown DecisionAudit nullable field %s", name)
@@ -17879,6 +18439,30 @@ func (m *DecisionAuditMutation) ResetField(name string) error {
 		return nil
 	case decisionaudit.FieldSampled:
 		m.ResetSampled()
+		return nil
+	case decisionaudit.FieldPermissionID:
+		m.ResetPermissionID()
+		return nil
+	case decisionaudit.FieldCredentialName:
+		m.ResetCredentialName()
+		return nil
+	case decisionaudit.FieldCredentialBoundaryKind:
+		m.ResetCredentialBoundaryKind()
+		return nil
+	case decisionaudit.FieldCredentialBoundaryProjectID:
+		m.ResetCredentialBoundaryProjectID()
+		return nil
+	case decisionaudit.FieldCredentialLabels:
+		m.ResetCredentialLabels()
+		return nil
+	case decisionaudit.FieldExecutorKind:
+		m.ResetExecutorKind()
+		return nil
+	case decisionaudit.FieldExecutorID:
+		m.ResetExecutorID()
+		return nil
+	case decisionaudit.FieldDeniedBy:
+		m.ResetDeniedBy()
 		return nil
 	}
 	return fmt.Errorf("unknown DecisionAudit field %s", name)
@@ -36886,25 +37470,32 @@ func (m *MessageAddresseeMutation) ResetEdge(name string) error {
 // MutationAuditMutation represents an operation that mutates the MutationAudit nodes in the graph.
 type MutationAuditMutation struct {
 	config
-	op                    Op
-	typ                   string
-	id                    *uuid.UUID
-	timestamp             *time.Time
-	mutation_type         *string
-	actor_principal_kind  *string
-	actor_principal_id    *string
-	actor_credential_id   *string
-	actor_credential_type *string
-	target_type           *string
-	target_id             *string
-	before_summary        *string
-	after_summary         *string
-	can_delegate_result   *string
-	can_delegate_reason   *string
-	clearedFields         map[string]struct{}
-	done                  bool
-	oldValue              func(context.Context) (*MutationAudit, error)
-	predicates            []predicate.MutationAudit
+	op                             Op
+	typ                            string
+	id                             *uuid.UUID
+	timestamp                      *time.Time
+	mutation_type                  *string
+	actor_principal_kind           *string
+	actor_principal_id             *string
+	actor_credential_id            *string
+	actor_credential_type          *string
+	target_type                    *string
+	target_id                      *string
+	before_summary                 *string
+	after_summary                  *string
+	can_delegate_result            *string
+	can_delegate_reason            *string
+	credential_name                *string
+	credential_boundary_kind       *string
+	credential_boundary_project_id *string
+	credential_labels              *string
+	correlation_id                 *string
+	executor_kind                  *string
+	executor_id                    *string
+	clearedFields                  map[string]struct{}
+	done                           bool
+	oldValue                       func(context.Context) (*MutationAudit, error)
+	predicates                     []predicate.MutationAudit
 }
 
 var _ ent.Mutation = (*MutationAuditMutation)(nil)
@@ -37521,6 +38112,349 @@ func (m *MutationAuditMutation) ResetCanDelegateReason() {
 	delete(m.clearedFields, mutationaudit.FieldCanDelegateReason)
 }
 
+// SetCredentialName sets the "credential_name" field.
+func (m *MutationAuditMutation) SetCredentialName(s string) {
+	m.credential_name = &s
+}
+
+// CredentialName returns the value of the "credential_name" field in the mutation.
+func (m *MutationAuditMutation) CredentialName() (r string, exists bool) {
+	v := m.credential_name
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCredentialName returns the old "credential_name" field's value of the MutationAudit entity.
+// If the MutationAudit object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MutationAuditMutation) OldCredentialName(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCredentialName is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCredentialName requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCredentialName: %w", err)
+	}
+	return oldValue.CredentialName, nil
+}
+
+// ClearCredentialName clears the value of the "credential_name" field.
+func (m *MutationAuditMutation) ClearCredentialName() {
+	m.credential_name = nil
+	m.clearedFields[mutationaudit.FieldCredentialName] = struct{}{}
+}
+
+// CredentialNameCleared returns if the "credential_name" field was cleared in this mutation.
+func (m *MutationAuditMutation) CredentialNameCleared() bool {
+	_, ok := m.clearedFields[mutationaudit.FieldCredentialName]
+	return ok
+}
+
+// ResetCredentialName resets all changes to the "credential_name" field.
+func (m *MutationAuditMutation) ResetCredentialName() {
+	m.credential_name = nil
+	delete(m.clearedFields, mutationaudit.FieldCredentialName)
+}
+
+// SetCredentialBoundaryKind sets the "credential_boundary_kind" field.
+func (m *MutationAuditMutation) SetCredentialBoundaryKind(s string) {
+	m.credential_boundary_kind = &s
+}
+
+// CredentialBoundaryKind returns the value of the "credential_boundary_kind" field in the mutation.
+func (m *MutationAuditMutation) CredentialBoundaryKind() (r string, exists bool) {
+	v := m.credential_boundary_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCredentialBoundaryKind returns the old "credential_boundary_kind" field's value of the MutationAudit entity.
+// If the MutationAudit object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MutationAuditMutation) OldCredentialBoundaryKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCredentialBoundaryKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCredentialBoundaryKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCredentialBoundaryKind: %w", err)
+	}
+	return oldValue.CredentialBoundaryKind, nil
+}
+
+// ClearCredentialBoundaryKind clears the value of the "credential_boundary_kind" field.
+func (m *MutationAuditMutation) ClearCredentialBoundaryKind() {
+	m.credential_boundary_kind = nil
+	m.clearedFields[mutationaudit.FieldCredentialBoundaryKind] = struct{}{}
+}
+
+// CredentialBoundaryKindCleared returns if the "credential_boundary_kind" field was cleared in this mutation.
+func (m *MutationAuditMutation) CredentialBoundaryKindCleared() bool {
+	_, ok := m.clearedFields[mutationaudit.FieldCredentialBoundaryKind]
+	return ok
+}
+
+// ResetCredentialBoundaryKind resets all changes to the "credential_boundary_kind" field.
+func (m *MutationAuditMutation) ResetCredentialBoundaryKind() {
+	m.credential_boundary_kind = nil
+	delete(m.clearedFields, mutationaudit.FieldCredentialBoundaryKind)
+}
+
+// SetCredentialBoundaryProjectID sets the "credential_boundary_project_id" field.
+func (m *MutationAuditMutation) SetCredentialBoundaryProjectID(s string) {
+	m.credential_boundary_project_id = &s
+}
+
+// CredentialBoundaryProjectID returns the value of the "credential_boundary_project_id" field in the mutation.
+func (m *MutationAuditMutation) CredentialBoundaryProjectID() (r string, exists bool) {
+	v := m.credential_boundary_project_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCredentialBoundaryProjectID returns the old "credential_boundary_project_id" field's value of the MutationAudit entity.
+// If the MutationAudit object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MutationAuditMutation) OldCredentialBoundaryProjectID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCredentialBoundaryProjectID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCredentialBoundaryProjectID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCredentialBoundaryProjectID: %w", err)
+	}
+	return oldValue.CredentialBoundaryProjectID, nil
+}
+
+// ClearCredentialBoundaryProjectID clears the value of the "credential_boundary_project_id" field.
+func (m *MutationAuditMutation) ClearCredentialBoundaryProjectID() {
+	m.credential_boundary_project_id = nil
+	m.clearedFields[mutationaudit.FieldCredentialBoundaryProjectID] = struct{}{}
+}
+
+// CredentialBoundaryProjectIDCleared returns if the "credential_boundary_project_id" field was cleared in this mutation.
+func (m *MutationAuditMutation) CredentialBoundaryProjectIDCleared() bool {
+	_, ok := m.clearedFields[mutationaudit.FieldCredentialBoundaryProjectID]
+	return ok
+}
+
+// ResetCredentialBoundaryProjectID resets all changes to the "credential_boundary_project_id" field.
+func (m *MutationAuditMutation) ResetCredentialBoundaryProjectID() {
+	m.credential_boundary_project_id = nil
+	delete(m.clearedFields, mutationaudit.FieldCredentialBoundaryProjectID)
+}
+
+// SetCredentialLabels sets the "credential_labels" field.
+func (m *MutationAuditMutation) SetCredentialLabels(s string) {
+	m.credential_labels = &s
+}
+
+// CredentialLabels returns the value of the "credential_labels" field in the mutation.
+func (m *MutationAuditMutation) CredentialLabels() (r string, exists bool) {
+	v := m.credential_labels
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCredentialLabels returns the old "credential_labels" field's value of the MutationAudit entity.
+// If the MutationAudit object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MutationAuditMutation) OldCredentialLabels(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCredentialLabels is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCredentialLabels requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCredentialLabels: %w", err)
+	}
+	return oldValue.CredentialLabels, nil
+}
+
+// ClearCredentialLabels clears the value of the "credential_labels" field.
+func (m *MutationAuditMutation) ClearCredentialLabels() {
+	m.credential_labels = nil
+	m.clearedFields[mutationaudit.FieldCredentialLabels] = struct{}{}
+}
+
+// CredentialLabelsCleared returns if the "credential_labels" field was cleared in this mutation.
+func (m *MutationAuditMutation) CredentialLabelsCleared() bool {
+	_, ok := m.clearedFields[mutationaudit.FieldCredentialLabels]
+	return ok
+}
+
+// ResetCredentialLabels resets all changes to the "credential_labels" field.
+func (m *MutationAuditMutation) ResetCredentialLabels() {
+	m.credential_labels = nil
+	delete(m.clearedFields, mutationaudit.FieldCredentialLabels)
+}
+
+// SetCorrelationID sets the "correlation_id" field.
+func (m *MutationAuditMutation) SetCorrelationID(s string) {
+	m.correlation_id = &s
+}
+
+// CorrelationID returns the value of the "correlation_id" field in the mutation.
+func (m *MutationAuditMutation) CorrelationID() (r string, exists bool) {
+	v := m.correlation_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCorrelationID returns the old "correlation_id" field's value of the MutationAudit entity.
+// If the MutationAudit object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MutationAuditMutation) OldCorrelationID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCorrelationID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCorrelationID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCorrelationID: %w", err)
+	}
+	return oldValue.CorrelationID, nil
+}
+
+// ClearCorrelationID clears the value of the "correlation_id" field.
+func (m *MutationAuditMutation) ClearCorrelationID() {
+	m.correlation_id = nil
+	m.clearedFields[mutationaudit.FieldCorrelationID] = struct{}{}
+}
+
+// CorrelationIDCleared returns if the "correlation_id" field was cleared in this mutation.
+func (m *MutationAuditMutation) CorrelationIDCleared() bool {
+	_, ok := m.clearedFields[mutationaudit.FieldCorrelationID]
+	return ok
+}
+
+// ResetCorrelationID resets all changes to the "correlation_id" field.
+func (m *MutationAuditMutation) ResetCorrelationID() {
+	m.correlation_id = nil
+	delete(m.clearedFields, mutationaudit.FieldCorrelationID)
+}
+
+// SetExecutorKind sets the "executor_kind" field.
+func (m *MutationAuditMutation) SetExecutorKind(s string) {
+	m.executor_kind = &s
+}
+
+// ExecutorKind returns the value of the "executor_kind" field in the mutation.
+func (m *MutationAuditMutation) ExecutorKind() (r string, exists bool) {
+	v := m.executor_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldExecutorKind returns the old "executor_kind" field's value of the MutationAudit entity.
+// If the MutationAudit object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MutationAuditMutation) OldExecutorKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldExecutorKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldExecutorKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldExecutorKind: %w", err)
+	}
+	return oldValue.ExecutorKind, nil
+}
+
+// ClearExecutorKind clears the value of the "executor_kind" field.
+func (m *MutationAuditMutation) ClearExecutorKind() {
+	m.executor_kind = nil
+	m.clearedFields[mutationaudit.FieldExecutorKind] = struct{}{}
+}
+
+// ExecutorKindCleared returns if the "executor_kind" field was cleared in this mutation.
+func (m *MutationAuditMutation) ExecutorKindCleared() bool {
+	_, ok := m.clearedFields[mutationaudit.FieldExecutorKind]
+	return ok
+}
+
+// ResetExecutorKind resets all changes to the "executor_kind" field.
+func (m *MutationAuditMutation) ResetExecutorKind() {
+	m.executor_kind = nil
+	delete(m.clearedFields, mutationaudit.FieldExecutorKind)
+}
+
+// SetExecutorID sets the "executor_id" field.
+func (m *MutationAuditMutation) SetExecutorID(s string) {
+	m.executor_id = &s
+}
+
+// ExecutorID returns the value of the "executor_id" field in the mutation.
+func (m *MutationAuditMutation) ExecutorID() (r string, exists bool) {
+	v := m.executor_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldExecutorID returns the old "executor_id" field's value of the MutationAudit entity.
+// If the MutationAudit object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MutationAuditMutation) OldExecutorID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldExecutorID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldExecutorID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldExecutorID: %w", err)
+	}
+	return oldValue.ExecutorID, nil
+}
+
+// ClearExecutorID clears the value of the "executor_id" field.
+func (m *MutationAuditMutation) ClearExecutorID() {
+	m.executor_id = nil
+	m.clearedFields[mutationaudit.FieldExecutorID] = struct{}{}
+}
+
+// ExecutorIDCleared returns if the "executor_id" field was cleared in this mutation.
+func (m *MutationAuditMutation) ExecutorIDCleared() bool {
+	_, ok := m.clearedFields[mutationaudit.FieldExecutorID]
+	return ok
+}
+
+// ResetExecutorID resets all changes to the "executor_id" field.
+func (m *MutationAuditMutation) ResetExecutorID() {
+	m.executor_id = nil
+	delete(m.clearedFields, mutationaudit.FieldExecutorID)
+}
+
 // Where appends a list predicates to the MutationAuditMutation builder.
 func (m *MutationAuditMutation) Where(ps ...predicate.MutationAudit) {
 	m.predicates = append(m.predicates, ps...)
@@ -37555,7 +38489,7 @@ func (m *MutationAuditMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *MutationAuditMutation) Fields() []string {
-	fields := make([]string, 0, 12)
+	fields := make([]string, 0, 19)
 	if m.timestamp != nil {
 		fields = append(fields, mutationaudit.FieldTimestamp)
 	}
@@ -37592,6 +38526,27 @@ func (m *MutationAuditMutation) Fields() []string {
 	if m.can_delegate_reason != nil {
 		fields = append(fields, mutationaudit.FieldCanDelegateReason)
 	}
+	if m.credential_name != nil {
+		fields = append(fields, mutationaudit.FieldCredentialName)
+	}
+	if m.credential_boundary_kind != nil {
+		fields = append(fields, mutationaudit.FieldCredentialBoundaryKind)
+	}
+	if m.credential_boundary_project_id != nil {
+		fields = append(fields, mutationaudit.FieldCredentialBoundaryProjectID)
+	}
+	if m.credential_labels != nil {
+		fields = append(fields, mutationaudit.FieldCredentialLabels)
+	}
+	if m.correlation_id != nil {
+		fields = append(fields, mutationaudit.FieldCorrelationID)
+	}
+	if m.executor_kind != nil {
+		fields = append(fields, mutationaudit.FieldExecutorKind)
+	}
+	if m.executor_id != nil {
+		fields = append(fields, mutationaudit.FieldExecutorID)
+	}
 	return fields
 }
 
@@ -37624,6 +38579,20 @@ func (m *MutationAuditMutation) Field(name string) (ent.Value, bool) {
 		return m.CanDelegateResult()
 	case mutationaudit.FieldCanDelegateReason:
 		return m.CanDelegateReason()
+	case mutationaudit.FieldCredentialName:
+		return m.CredentialName()
+	case mutationaudit.FieldCredentialBoundaryKind:
+		return m.CredentialBoundaryKind()
+	case mutationaudit.FieldCredentialBoundaryProjectID:
+		return m.CredentialBoundaryProjectID()
+	case mutationaudit.FieldCredentialLabels:
+		return m.CredentialLabels()
+	case mutationaudit.FieldCorrelationID:
+		return m.CorrelationID()
+	case mutationaudit.FieldExecutorKind:
+		return m.ExecutorKind()
+	case mutationaudit.FieldExecutorID:
+		return m.ExecutorID()
 	}
 	return nil, false
 }
@@ -37657,6 +38626,20 @@ func (m *MutationAuditMutation) OldField(ctx context.Context, name string) (ent.
 		return m.OldCanDelegateResult(ctx)
 	case mutationaudit.FieldCanDelegateReason:
 		return m.OldCanDelegateReason(ctx)
+	case mutationaudit.FieldCredentialName:
+		return m.OldCredentialName(ctx)
+	case mutationaudit.FieldCredentialBoundaryKind:
+		return m.OldCredentialBoundaryKind(ctx)
+	case mutationaudit.FieldCredentialBoundaryProjectID:
+		return m.OldCredentialBoundaryProjectID(ctx)
+	case mutationaudit.FieldCredentialLabels:
+		return m.OldCredentialLabels(ctx)
+	case mutationaudit.FieldCorrelationID:
+		return m.OldCorrelationID(ctx)
+	case mutationaudit.FieldExecutorKind:
+		return m.OldExecutorKind(ctx)
+	case mutationaudit.FieldExecutorID:
+		return m.OldExecutorID(ctx)
 	}
 	return nil, fmt.Errorf("unknown MutationAudit field %s", name)
 }
@@ -37750,6 +38733,55 @@ func (m *MutationAuditMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetCanDelegateReason(v)
 		return nil
+	case mutationaudit.FieldCredentialName:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCredentialName(v)
+		return nil
+	case mutationaudit.FieldCredentialBoundaryKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCredentialBoundaryKind(v)
+		return nil
+	case mutationaudit.FieldCredentialBoundaryProjectID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCredentialBoundaryProjectID(v)
+		return nil
+	case mutationaudit.FieldCredentialLabels:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCredentialLabels(v)
+		return nil
+	case mutationaudit.FieldCorrelationID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCorrelationID(v)
+		return nil
+	case mutationaudit.FieldExecutorKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetExecutorKind(v)
+		return nil
+	case mutationaudit.FieldExecutorID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetExecutorID(v)
+		return nil
 	}
 	return fmt.Errorf("unknown MutationAudit field %s", name)
 }
@@ -37798,6 +38830,27 @@ func (m *MutationAuditMutation) ClearedFields() []string {
 	if m.FieldCleared(mutationaudit.FieldCanDelegateReason) {
 		fields = append(fields, mutationaudit.FieldCanDelegateReason)
 	}
+	if m.FieldCleared(mutationaudit.FieldCredentialName) {
+		fields = append(fields, mutationaudit.FieldCredentialName)
+	}
+	if m.FieldCleared(mutationaudit.FieldCredentialBoundaryKind) {
+		fields = append(fields, mutationaudit.FieldCredentialBoundaryKind)
+	}
+	if m.FieldCleared(mutationaudit.FieldCredentialBoundaryProjectID) {
+		fields = append(fields, mutationaudit.FieldCredentialBoundaryProjectID)
+	}
+	if m.FieldCleared(mutationaudit.FieldCredentialLabels) {
+		fields = append(fields, mutationaudit.FieldCredentialLabels)
+	}
+	if m.FieldCleared(mutationaudit.FieldCorrelationID) {
+		fields = append(fields, mutationaudit.FieldCorrelationID)
+	}
+	if m.FieldCleared(mutationaudit.FieldExecutorKind) {
+		fields = append(fields, mutationaudit.FieldExecutorKind)
+	}
+	if m.FieldCleared(mutationaudit.FieldExecutorID) {
+		fields = append(fields, mutationaudit.FieldExecutorID)
+	}
 	return fields
 }
 
@@ -37829,6 +38882,27 @@ func (m *MutationAuditMutation) ClearField(name string) error {
 		return nil
 	case mutationaudit.FieldCanDelegateReason:
 		m.ClearCanDelegateReason()
+		return nil
+	case mutationaudit.FieldCredentialName:
+		m.ClearCredentialName()
+		return nil
+	case mutationaudit.FieldCredentialBoundaryKind:
+		m.ClearCredentialBoundaryKind()
+		return nil
+	case mutationaudit.FieldCredentialBoundaryProjectID:
+		m.ClearCredentialBoundaryProjectID()
+		return nil
+	case mutationaudit.FieldCredentialLabels:
+		m.ClearCredentialLabels()
+		return nil
+	case mutationaudit.FieldCorrelationID:
+		m.ClearCorrelationID()
+		return nil
+	case mutationaudit.FieldExecutorKind:
+		m.ClearExecutorKind()
+		return nil
+	case mutationaudit.FieldExecutorID:
+		m.ClearExecutorID()
 		return nil
 	}
 	return fmt.Errorf("unknown MutationAudit nullable field %s", name)
@@ -37873,6 +38947,27 @@ func (m *MutationAuditMutation) ResetField(name string) error {
 		return nil
 	case mutationaudit.FieldCanDelegateReason:
 		m.ResetCanDelegateReason()
+		return nil
+	case mutationaudit.FieldCredentialName:
+		m.ResetCredentialName()
+		return nil
+	case mutationaudit.FieldCredentialBoundaryKind:
+		m.ResetCredentialBoundaryKind()
+		return nil
+	case mutationaudit.FieldCredentialBoundaryProjectID:
+		m.ResetCredentialBoundaryProjectID()
+		return nil
+	case mutationaudit.FieldCredentialLabels:
+		m.ResetCredentialLabels()
+		return nil
+	case mutationaudit.FieldCorrelationID:
+		m.ResetCorrelationID()
+		return nil
+	case mutationaudit.FieldExecutorKind:
+		m.ResetExecutorKind()
+		return nil
+	case mutationaudit.FieldExecutorID:
+		m.ResetExecutorID()
 		return nil
 	}
 	return fmt.Errorf("unknown MutationAudit field %s", name)

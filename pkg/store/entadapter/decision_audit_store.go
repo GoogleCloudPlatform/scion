@@ -53,6 +53,16 @@ func entDecisionAuditToStore(da *ent.DecisionAudit) *store.DecisionAuditRecord {
 		PolicyID:       da.PolicyID,
 		CorrelationID:  da.CorrelationID,
 		Sampled:        da.Sampled,
+
+		// E.2a additive fields.
+		PermissionID:                da.PermissionID,
+		CredentialName:              da.CredentialName,
+		CredentialBoundaryKind:      da.CredentialBoundaryKind,
+		CredentialBoundaryProjectID: da.CredentialBoundaryProjectID,
+		CredentialLabels:            da.CredentialLabels,
+		ExecutorKind:                da.ExecutorKind,
+		ExecutorID:                  da.ExecutorID,
+		DeniedBy:                    da.DeniedBy,
 	}
 }
 
@@ -100,6 +110,30 @@ func (s *DecisionAuditStore) CreateDecisionAudit(ctx context.Context, record *st
 	}
 	if record.CorrelationID != "" {
 		builder.SetCorrelationID(record.CorrelationID)
+	}
+	if record.PermissionID != "" {
+		builder.SetPermissionID(record.PermissionID)
+	}
+	if record.CredentialName != "" {
+		builder.SetCredentialName(record.CredentialName)
+	}
+	if record.CredentialBoundaryKind != "" {
+		builder.SetCredentialBoundaryKind(record.CredentialBoundaryKind)
+	}
+	if record.CredentialBoundaryProjectID != "" {
+		builder.SetCredentialBoundaryProjectID(record.CredentialBoundaryProjectID)
+	}
+	if record.CredentialLabels != "" {
+		builder.SetCredentialLabels(record.CredentialLabels)
+	}
+	if record.ExecutorKind != "" {
+		builder.SetExecutorKind(record.ExecutorKind)
+	}
+	if record.ExecutorID != "" {
+		builder.SetExecutorID(record.ExecutorID)
+	}
+	if record.DeniedBy != "" {
+		builder.SetDeniedBy(record.DeniedBy)
 	}
 
 	created, err := builder.Save(ctx)
