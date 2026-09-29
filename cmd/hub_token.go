@@ -345,10 +345,12 @@ func runTokenDelete(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// parseLabelFlags parses repeated --label key=value flags into a map. It does
-// not itself enforce the bounded label schema; the hub validates and rejects
-// out-of-schema labels server-side (E.1), so the CLI reports the server's
-// error rather than duplicating the rule set.
+// parseLabelFlags parses repeated --label key=value flags into a map,
+// rejecting a repeated key rather than silently keeping the last value
+// (review finding F12). It does not otherwise enforce the bounded label
+// schema; the hub validates and rejects out-of-schema labels server-side
+// (E.1), so the CLI reports the server's error rather than duplicating the
+// rule set.
 func parseLabelFlags(labels []string) (map[string]string, error) {
 	if len(labels) == 0 {
 		return nil, nil
@@ -358,6 +360,9 @@ func parseLabelFlags(labels []string) (map[string]string, error) {
 		key, value, ok := strings.Cut(l, "=")
 		if !ok {
 			return nil, fmt.Errorf("invalid --label %q: expected key=value", l)
+		}
+		if _, exists := result[key]; exists {
+			return nil, fmt.Errorf("duplicate --label key %q", key)
 		}
 		result[key] = value
 	}
