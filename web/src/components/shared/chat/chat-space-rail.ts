@@ -117,14 +117,26 @@ const GROUP_COLLAPSE_STORAGE_KEY = 'scion-chat-group-collapse';
 const GROUP_COLLAPSE_STORAGE_LIMIT = 500;
 
 /**
+ * The storage key, scoped to a user when one is known. `currentUserId` comes
+ * from the page's session data (see `ScionChatSpaceRail.currentUserId`) and
+ * is normally available by the time this is first read — but the fallback to
+ * the unscoped key (rather than, say, refusing to persist) means a moment
+ * without a known user degrades to "shared across whoever's signed in",
+ * not to losing the feature.
+ */
+function collapseStorageKey(userId: string): string {
+  return userId ? `${GROUP_COLLAPSE_STORAGE_KEY}:${userId}` : GROUP_COLLAPSE_STORAGE_KEY;
+}
+
+/**
  * Read the persisted set of collapsed thread-group IDs. Missing storage,
  * unavailable storage (private browsing), a JSON parse error, or an
  * unexpected shape all fall back to an empty set silently — collapse state
  * is a nicety, not something that should ever block the rail from loading.
  */
-function loadCollapsedGroupIds(): Set<string> {
+function loadCollapsedGroupIds(userId: string): Set<string> {
   try {
-    const raw = localStorage.getItem(GROUP_COLLAPSE_STORAGE_KEY);
+    const raw = localStorage.getItem(collapseStorageKey(userId));
     if (!raw) return new Set();
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return new Set();
@@ -139,13 +151,13 @@ function loadCollapsedGroupIds(): Set<string> {
  * recently touched entries. Failures (storage unavailable or full) are
  * swallowed for the same reason the read side falls back silently.
  */
-function saveCollapsedGroupIds(ids: Set<string>): void {
+function saveCollapsedGroupIds(userId: string, ids: Set<string>): void {
   try {
     let list = [...ids];
     if (list.length > GROUP_COLLAPSE_STORAGE_LIMIT) {
       list = list.slice(list.length - GROUP_COLLAPSE_STORAGE_LIMIT);
     }
-    localStorage.setItem(GROUP_COLLAPSE_STORAGE_KEY, JSON.stringify(list));
+    localStorage.setItem(collapseStorageKey(userId), JSON.stringify(list));
   } catch {
     // Storage unavailable (private browsing) or full — collapse state just
     // won't survive a reload this time.
@@ -248,6 +260,15 @@ export class ScionChatSpaceRail extends LitElement {
   /** Currently selected conversation key. */
   @property()
   selectedKey = '';
+
+  /**
+   * The signed-in user's ID, passed down by the chat page from its session
+   * data. Used only to scope the thread-group collapse localStorage key so
+   * switching accounts in the same browser doesn't prune one account's
+   * collapse state because it looks stale to the other's.
+   */
+  @property()
+  currentUserId = '';
 
   @state() private spaces: ChatSpace[] = [];
   @state() private threadsBySpace = new Map<string, ChatSpaceThread[]>();
@@ -764,7 +785,7 @@ export class ScionChatSpaceRail extends LitElement {
     if (savedFilter === 'unread') this.spaceFilter = 'unread';
     // Restore collapsed thread-groups before the first render so there is no
     // expand-then-collapse flash.
-    this.collapsedGroups = loadCollapsedGroupIds();
+    this.collapsedGroups = loadCollapsedGroupIds(this.currentUserId);
     void this.loadData();
     // Close context menu on outside click
     this._outsideClickHandler = this.handleOutsideClick.bind(this);
@@ -772,9 +793,11 @@ export class ScionChatSpaceRail extends LitElement {
   }
 
   override updated(changedProperties: Map<string, unknown>): void {
-    // Auto-expand the space containing the selected thread (deep-link support)
+    // Auto-expand the space and group containing the selected thread
+    // (deep-link support).
     if (changedProperties.has('selectedKey') && this.selectedKey) {
       this.expandSpaceForSelectedKey();
+      this.expandGroupForSelectedKey();
     }
   }
 
@@ -799,6 +822,28 @@ export class ScionChatSpaceRail extends LitElement {
         newSet.delete(space.projectId);
         this.collapsedSpaces = newSet;
         break;
+      }
+    }
+  }
+
+  /**
+   * Expand, in memory only, the thread group containing the currently
+   * selected thread (deep-link support). Before persisted collapse existed,
+   * a group could never hide the active thread — it always started
+   * expanded. Now a reload can land on a thread inside a group the user
+   * left collapsed, so the group is opened for this view without touching
+   * the user's stored preference: navigate away and it is still collapsed
+   * next time, exactly as they left it.
+   */
+  private expandGroupForSelectedKey(): void {
+    if (!this.selectedKey || this.collapsedGroups.size === 0) return;
+    const allGroups = Object.values(this.prefs.threadGroups ?? {}).flat();
+    for (const group of allGroups) {
+      if (group.threadIds.includes(this.selectedKey) && this.collapsedGroups.has(group.id)) {
+        const next = new Set(this.collapsedGroups);
+        next.delete(group.id);
+        this.collapsedGroups = next;
+        return;
       }
     }
   }
@@ -843,8 +888,17 @@ export class ScionChatSpaceRail extends LitElement {
       this.loading = true;
     }
     try {
-      await Promise.all([this.loadSpaces(), this.loadPrefs()]);
-      this.pruneCollapsedGroups();
+      const [spacesOk, prefsOk] = await Promise.all([this.loadSpaces(), this.loadPrefs()]);
+      // Pruning reads both this.spaces and this.prefs.threadGroups to decide
+      // what's stale, so it must not run unless both loaded cleanly in this
+      // pass — see pruneCollapsedGroups' doc comment for what goes wrong
+      // otherwise.
+      if (spacesOk && prefsOk) {
+        this.pruneCollapsedGroups();
+      }
+      if (this.selectedKey) {
+        this.expandGroupForSelectedKey();
+      }
     } finally {
       this.loading = false;
       // Notify parent that rail data is ready (for SSE scope setup)
@@ -874,7 +928,8 @@ export class ScionChatSpaceRail extends LitElement {
   /** Track known space IDs so we can collapse only truly new spaces on reload. */
   private _knownSpaceIds = new Set<string>();
 
-  private async loadSpaces(): Promise<void> {
+  /** Loads spaces; returns whether the load succeeded (used to gate pruning). */
+  private async loadSpaces(): Promise<boolean> {
     try {
       const res = await apiFetch('/api/v1/chat/spaces');
       if (res.ok) {
@@ -904,9 +959,12 @@ export class ScionChatSpaceRail extends LitElement {
         if (this.selectedKey) {
           this.expandSpaceForSelectedKey();
         }
+        return true;
       }
+      return false;
     } catch {
       // Silently fail
+      return false;
     }
   }
 
@@ -924,14 +982,18 @@ export class ScionChatSpaceRail extends LitElement {
     }
   }
 
-  private async loadPrefs(): Promise<void> {
+  /** Loads prefs; returns whether the load succeeded (used to gate pruning). */
+  private async loadPrefs(): Promise<boolean> {
     try {
       const res = await apiFetch('/api/v1/chat/user-prefs');
       if (res.ok) {
         this.prefs = parseRailPrefs(await res.json());
+        return true;
       }
+      return false;
     } catch {
       // Use defaults
+      return false;
     }
   }
 
@@ -1282,15 +1344,21 @@ export class ScionChatSpaceRail extends LitElement {
       next.add(groupId);
     }
     this.collapsedGroups = next;
-    saveCollapsedGroupIds(next);
+    saveCollapsedGroupIds(this.currentUserId, next);
   }
 
   /**
    * Drop stored collapse entries for groups that no longer exist (deleted,
-   * or belonging to a space the user lost access to). Only runs once spaces
-   * have actually loaded — on a failed or empty load `this.spaces` would be
-   * `[]` and every entry would look stale, wiping collapse state for a
-   * merely transient failure rather than a real deletion.
+   * or belonging to a space the user lost access to).
+   *
+   * The caller (`loadData`) only invokes this after both `loadSpaces` and
+   * `loadPrefs` have succeeded in the same pass — `this.spaces` and
+   * `this.prefs.threadGroups` only reflect the *server's* current groups
+   * when both loaded cleanly. A failed `loadPrefs` in particular leaves
+   * `this.prefs` at its old (possibly still-default, all-undefined) value,
+   * which would make every stored ID look stale and wipe it permanently on
+   * the very first page load. The `this.spaces.length === 0` check here is
+   * an extra guard for the same failure mode, kept as defense in depth.
    */
   private pruneCollapsedGroups(): void {
     if (this.spaces.length === 0 || this.collapsedGroups.size === 0) return;
@@ -1303,7 +1371,7 @@ export class ScionChatSpaceRail extends LitElement {
     const next = new Set([...this.collapsedGroups].filter((id) => validIds.has(id)));
     if (next.size === this.collapsedGroups.size) return;
     this.collapsedGroups = next;
-    saveCollapsedGroupIds(next);
+    saveCollapsedGroupIds(this.currentUserId, next);
   }
 
   /** Generate a simple unique id for a new group. */
