@@ -2378,3 +2378,123 @@ func TestGCPBackend_RepairRefToPrefixed_OldBinaryRotationABAIsDetected(t *testin
 		t.Errorf("BUG: prefixed copy holds the stale pre-rotation value %q instead of the rotated %q", value, "v2-rotated-by-old-binary")
 	}
 }
+
+// =============================================================================
+// Round 4 review regression tests (ptone/scion#2152 PR 2171, sp-rev-4.md)
+// =============================================================================
+
+// TestSPREV4_RepairedPathABARevertsOldBinaryRotation reproduces round-4
+// review finding 1(a): the prefixed copy already equals the legacy value
+// (e.g. created by startup copy-forward or a prior partial run), so
+// planOrRepairRefAttempt takes the RefRepairRepaired branch. Before the
+// fix, that branch skipped the (SecretRef, Version) recheck entirely and
+// went straight to a ref-only CAS, so an old binary rotating through the
+// legacy name (same ref string, Version bumped) between the reads and the
+// CAS was not detected.
+func TestSPREV4_RepairedPathABARevertsOldBinaryRotation(t *testing.T) {
+	backend, mock := createTestGCPBackend(t)
+	ctx := context.Background()
+
+	legacyName := backend.legacyGCPSecretName("API_KEY", ScopeUser, "user-1")
+	legacyFull := fmt.Sprintf("projects/%s/secrets/%s", backend.projectID, legacyName)
+	legacyRef := "gcpsm:" + legacyFull
+	prefixedName := backend.gcpSecretName("API_KEY", ScopeUser, "user-1")
+	seedMockSecret(t, mock, backend.projectID, legacyName, "v1")
+	seedMockSecret(t, mock, backend.projectID, prefixedName, "v1") // same value -> "repaired" branch
+	if err := backend.store.CreateSecret(ctx, &store.Secret{
+		ID: tid("sprev4-repaired-aba"), Key: "API_KEY", Scope: ScopeUser, ScopeID: "user-1", SecretRef: legacyRef,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fire before the 2nd AccessSecretVersion (the prefixed read): the
+	// authoritative value "v1" has already been captured.
+	race := &onceAtCallAccessSMClient{mockSMClient: mock, call: 2}
+	race.hook = func() {
+		if _, err := mock.AddSecretVersion(ctx, &smpb.AddSecretVersionRequest{
+			Parent: legacyFull, Payload: &smpb.SecretPayload{Data: []byte("v2-old-binary")},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := backend.store.UpsertSecret(ctx, &store.Secret{
+			Key: "API_KEY", Scope: ScopeUser, ScopeID: "user-1", SecretRef: legacyRef,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raceBackend := NewGCPBackendWithClient(backend.store, race, backend.projectID, backend.hubID)
+	action, err := raceBackend.RepairRefToPrefixed(ctx, "API_KEY", ScopeUser, "user-1")
+	t.Logf("action=%q err=%v", action, err)
+
+	sv, err := backend.Get(ctx, "API_KEY", ScopeUser, "user-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if sv.Value != "v2-old-binary" {
+		t.Errorf("BUG: old-binary rotation silently reverted via the repaired (no-recheck) path: hub now serves %q, want %q", sv.Value, "v2-old-binary")
+	}
+}
+
+// addHookSMClient fires hook once, immediately AFTER the first
+// AddSecretVersion whose parent contains match has been applied.
+type addHookSMClient struct {
+	*mockSMClient
+	match string
+	once  sync.Once
+	hook  func()
+}
+
+func (c *addHookSMClient) AddSecretVersion(ctx context.Context, req *smpb.AddSecretVersionRequest) (*smpb.SecretVersion, error) {
+	v, err := c.mockSMClient.AddSecretVersion(ctx, req)
+	if strings.Contains(req.Parent, c.match) {
+		c.once.Do(c.hook)
+	}
+	return v, err
+}
+
+// TestSPREV4_ABABetweenGCPWriteAndCASRevertsOldBinaryRotation reproduces
+// round-4 review finding 1(b): the doc comment claimed the ref CAS
+// "clos[ed] the remaining gap between the recheck and the CAS call". It did
+// not for the same-ref ABA case: before the fix, the CAS was keyed on
+// SecretRef only, so an old-binary rotation landing after the prefixed write
+// (but before the CAS) was not detected.
+func TestSPREV4_ABABetweenGCPWriteAndCASRevertsOldBinaryRotation(t *testing.T) {
+	backend, mock := createTestGCPBackend(t)
+	ctx := context.Background()
+
+	legacyName := backend.legacyGCPSecretName("API_KEY", ScopeUser, "user-1")
+	legacyFull := fmt.Sprintf("projects/%s/secrets/%s", backend.projectID, legacyName)
+	legacyRef := "gcpsm:" + legacyFull
+	prefixedName := backend.gcpSecretName("API_KEY", ScopeUser, "user-1")
+	seedMockSecret(t, mock, backend.projectID, legacyName, "v1")
+	if err := backend.store.CreateSecret(ctx, &store.Secret{
+		ID: tid("sprev4-cas-aba"), Key: "API_KEY", Scope: ScopeUser, ScopeID: "user-1", SecretRef: legacyRef,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	race := &addHookSMClient{mockSMClient: mock, match: prefixedName}
+	race.hook = func() {
+		if _, err := mock.AddSecretVersion(ctx, &smpb.AddSecretVersionRequest{
+			Parent: legacyFull, Payload: &smpb.SecretPayload{Data: []byte("v2-old-binary")},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := backend.store.UpsertSecret(ctx, &store.Secret{
+			Key: "API_KEY", Scope: ScopeUser, ScopeID: "user-1", SecretRef: legacyRef,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raceBackend := NewGCPBackendWithClient(backend.store, race, backend.projectID, backend.hubID)
+	action, err := raceBackend.RepairRefToPrefixed(ctx, "API_KEY", ScopeUser, "user-1")
+	t.Logf("action=%q err=%v", action, err)
+
+	sv, err := backend.Get(ctx, "API_KEY", ScopeUser, "user-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if sv.Value != "v2-old-binary" {
+		t.Errorf("BUG: ref-only CAS applied after a same-ref Version bump; hub now serves %q, want %q", sv.Value, "v2-old-binary")
+	}
+}

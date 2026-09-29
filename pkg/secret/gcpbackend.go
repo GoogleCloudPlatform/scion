@@ -784,12 +784,47 @@ func (b *GCPBackend) hasAccessibleVersion(ctx context.Context, smName string) (b
 	}
 }
 
+// legacyReadErrIsFatal classifies an error from reading/checking the legacy
+// GCP SM name into "nothing there, safe to treat as absent" (false) or a
+// genuine failure that must be surfaced (true), given whether a DB record's
+// ref still makes a live claim on the legacy name specifically
+// (hasRecord && !refIsPrefixed — round-2 review finding 3: that one case must
+// keep surfacing an unreadable legacy name as a real problem, since ref
+// repair genuinely depends on reading it). Shared by migrationCheck,
+// canDeleteLegacyName, and LegacyStillPresent so the three can't
+// independently drift on how each GCP error code is interpreted
+// (ptone/scion#2152 round-4 review finding 2): before this, canDeleteLegacyName
+// treated a PermissionDenied/FailedPrecondition legacy read as fatal even for
+// a no-DB-record candidate or one already fully migrated by ref, which left
+// `migrate-names --delete-legacy` permanently failing for the known
+// hub-scope signing keys once an operator narrowed IAM as ptone/scion#2180's
+// rollout describes doing — while `--dry-run` (via migrationCheck) already
+// treated the identical signal as "absent". Both now agree: NotFound and
+// FailedPrecondition (an existing container with no enabled version) are
+// never fatal, since nothing accessible exists under the name either way.
+// PermissionDenied is fatal only when hasRecord && !refIsPrefixed; once a
+// stored ref already designates the prefixed name (already migrated), or
+// there's no ref making any claim about the legacy name at all, an
+// unreadable legacy name is simply nothing further to do.
+func legacyReadErrIsFatal(err error, hasRecord, refIsPrefixed bool) bool {
+	switch status.Code(err) {
+	case codes.NotFound, codes.FailedPrecondition:
+		return false
+	case codes.PermissionDenied:
+		return hasRecord && !refIsPrefixed
+	default:
+		return true
+	}
+}
+
 // migrationCheck classifies a secret identity's name-migration state in a
 // single pass over GCP SM: whether the prefixed name is already accessible,
 // and — only if it is not — whether the legacy name is accessible and, if so,
 // its current value. NeedsNameMigration and MigrateNameForward both build on
 // this so the legacy name is read at most once per call instead of twice
-// (ptone/scion#2152 review nit 19).
+// (ptone/scion#2152 review nit 19). Both callers only ever run on the
+// no-DB-record path, so legacyReadErrIsFatal is consulted with
+// hasRecord=false.
 //
 // A PermissionDenied on the legacy name (distinct from NotFound: GCP
 // evaluates IAM before existence) is treated the same as "legacy absent" —
@@ -810,16 +845,14 @@ func (b *GCPBackend) migrationCheck(ctx context.Context, name, scope, scopeID st
 	legacyName := b.legacyGCPSecretName(name, scope, scopeID)
 	value, accessErr := b.accessLatestVersion(ctx, legacyName)
 	if accessErr != nil {
-		switch status.Code(accessErr) {
-		case codes.NotFound, codes.FailedPrecondition:
-			return false, "", false, nil
-		case codes.PermissionDenied:
-			slog.Debug("legacy GCP SM secret not accessible (permission denied); treating as absent",
-				"name", name, "scope", scope, "legacy_name", fmt.Sprintf("projects/%s/secrets/%s", b.projectID, legacyName))
-			return false, "", false, nil
-		default:
+		if legacyReadErrIsFatal(accessErr, false, false) {
 			return false, "", false, fmt.Errorf("failed to check legacy secret %s: %w", legacyName, accessErr)
 		}
+		if status.Code(accessErr) == codes.PermissionDenied {
+			slog.Debug("legacy GCP SM secret not accessible (permission denied); treating as absent",
+				"name", name, "scope", scope, "legacy_name", fmt.Sprintf("projects/%s/secrets/%s", b.projectID, legacyName))
+		}
+		return false, "", false, nil
 	}
 	return false, value, true, nil
 }
@@ -894,16 +927,28 @@ func (b *GCPBackend) legacyLabels(ctx context.Context, legacyFull string) (map[s
 }
 
 // LegacyStillPresent reports whether a secret identity's legacy (pre-prefix)
-// GCP SM name still has an accessible version. Used by migrate-names to
-// decide whether a --delete-legacy pass has anything to do for this
-// identity, without attempting (and reporting) a no-op delete.
+// GCP SM name still has an accessible version. Used by migrate-names's
+// --dry-run to simulate presence *after* a MIGRATE/RESYNC/REPAIR REF action
+// that would already have run by this point in a real invocation (see
+// planMigrateNamesCandidate's actionPlanned handling) — a purely
+// presence-only question that never needs the ref-authority nuance
+// canDeleteLegacyName applies, since the hypothetical action it's simulating
+// would already have made the ref authoritative by then. legacyReadErrIsFatal
+// is consulted with hasRecord=false so NotFound, FailedPrecondition, and
+// PermissionDenied are all "nothing here" (ptone/scion#2152 round-4 review
+// finding 2 — this used to surface PermissionDenied as a hard error via
+// hasAccessibleVersion, inconsistently with canDeleteLegacyName's post-fix
+// treatment of the same signal).
 func (b *GCPBackend) LegacyStillPresent(ctx context.Context, name, scope, scopeID string) (bool, error) {
 	legacyName := b.legacyGCPSecretName(name, scope, scopeID)
-	ok, err := b.hasAccessibleVersion(ctx, legacyName)
-	if err != nil {
+	_, err := b.accessLatestVersion(ctx, legacyName)
+	if err == nil {
+		return true, nil
+	}
+	if legacyReadErrIsFatal(err, false, false) {
 		return false, fmt.Errorf("failed to check legacy secret %s: %w", legacyName, err)
 	}
-	return ok, nil
+	return false, nil
 }
 
 // RefPointsAtPrefixed reports whether a DB record exists for the given secret
@@ -973,20 +1018,21 @@ func (b *GCPBackend) PlanLegacyDeletion(ctx context.Context, name, scope, scopeI
 // and PlanLegacyDeletion (ptone/scion#2152 round-3 review finding 2). It
 // returns (true, nil) when the legacy secret exists and is safe to delete,
 // (false, nil) when there is nothing to delete (the legacy secret is already
-// gone), and a non-nil error when deletion would be unsafe or the checks
-// themselves failed.
+// gone, or unreadable in a way legacyReadErrIsFatal says isn't a genuine
+// problem for this record), and a non-nil error when deletion would be
+// unsafe or a check failed for a reason that must be surfaced.
+//
+// The DB-ref check runs *before* interpreting the legacy read, because
+// whether a PermissionDenied/FailedPrecondition on the legacy name is fatal
+// depends on it (ptone/scion#2152 round-4 review finding 2 — see
+// legacyReadErrIsFatal): a record whose ref already designates the prefixed
+// name, or one with no DB record at all, has nothing further riding on being
+// able to read the legacy name, so an unreadable legacy name there is
+// "nothing to delete", not a failure. Only a record whose ref is not yet the
+// prefixed name keeps that unconditionally fatal (round-2 finding 3).
 func (b *GCPBackend) canDeleteLegacyName(ctx context.Context, name, scope, scopeID string) (bool, error) {
 	legacyName := b.legacyGCPSecretName(name, scope, scopeID)
 	legacyFull := fmt.Sprintf("projects/%s/secrets/%s", b.projectID, legacyName)
-
-	legacyValue, err := b.accessLatestVersion(ctx, legacyName)
-	if err != nil {
-		if status.Code(err) == codes.NotFound {
-			return false, nil
-		}
-		return false, fmt.Errorf("failed to read legacy secret %s: %w", legacyFull, err)
-	}
-
 	prefixedName := b.gcpSecretName(name, scope, scopeID)
 
 	hasRecord, refIsPrefixed, err := b.RefPointsAtPrefixed(ctx, name, scope, scopeID)
@@ -995,6 +1041,14 @@ func (b *GCPBackend) canDeleteLegacyName(ctx context.Context, name, scope, scope
 	}
 	if hasRecord && !refIsPrefixed {
 		return false, fmt.Errorf("refusing to delete legacy secret %s: its DB record's SecretRef is not yet repaired to the prefixed name %s — call RepairRefToPrefixed first", legacyFull, prefixedName)
+	}
+
+	legacyValue, err := b.accessLatestVersion(ctx, legacyName)
+	if err != nil {
+		if legacyReadErrIsFatal(err, hasRecord, refIsPrefixed) {
+			return false, fmt.Errorf("failed to read legacy secret %s: %w", legacyFull, err)
+		}
+		return false, nil
 	}
 
 	if hasRecord && refIsPrefixed {
@@ -1022,8 +1076,10 @@ func (b *GCPBackend) canDeleteLegacyName(ctx context.Context, name, scope, scope
 }
 
 // ErrOrphanedRef indicates a secret's DB record has a stored SecretRef, but
-// neither the value it designates nor the prefixed name has an accessible
-// version (ptone/scion#2152 round-3 review finding 4). This is distinct from
+// the value it designates has no accessible version (ptone/scion#2152
+// round-3 review finding 4; wording corrected in round-4 nit 9 — this is
+// returned based on the ref-designated path alone, without also checking the
+// prefixed name). This is distinct from
 // store.ErrNotFound (no DB record and no computed-legacy-name value either —
 // truly nothing to migrate): here the record itself exists and makes a
 // specific authority claim about where its value lives, and that claim can no
@@ -1072,24 +1128,35 @@ const (
 // new replica already created a prefixed copy, or a rollback-then-
 // roll-forward window — not just the first-ever migration.
 //
-// Concurrency (ptone/scion#2152 round-3 review finding 3): GCP Secret Manager
-// has no conditional AddSecretVersion, so a write racing between this reading
-// the authoritative value and writing it to the prefixed name cannot be
-// prevented by the GCP SM API alone. Immediately before writing, this
-// re-reads the DB record and compares (SecretRef, Version) against what it
-// read at the start of the attempt; if either changed, something else — a
-// concurrent Set(), or an old-binary rotation that re-upserts the exact same
-// ref string but still bumps Version — has already moved the authoritative
-// value out from under this attempt, and writing the stale value now would
-// silently revert that change. Rather than write, the whole attempt is
-// discarded and retried with fresh reads, up to maxPlanOrRepairRefAttempts
-// times, then fails loudly for that secret rather than clobbering silently.
-// The ref update itself is still a compare-and-swap
-// (store.UpdateSecretRefIfMatches) on top of that recheck, closing the
-// remaining gap between the recheck and the CAS call. A residual window
-// remains between the final recheck and the GCP SM write itself — a true
-// cross-system transaction isn't possible here — documented rather than
-// masked; see .design/secret-id-hub-refactor.md #7.
+// Concurrency (ptone/scion#2152 round-3 review finding 3; hardened further by
+// round-4 finding 1): GCP Secret Manager has no conditional AddSecretVersion,
+// so a write racing between this reading the authoritative value and writing
+// it to the prefixed name cannot be prevented by the GCP SM API alone.
+// Immediately before acting — including on the RefRepairRepaired path, which
+// performs no GCP write at all — this re-reads the DB record and compares
+// (SecretRef, Version) against what it read at the start of the attempt; if
+// either changed, something else — a concurrent Set(), or an old-binary
+// rotation that re-upserts the exact same ref string but still bumps Version
+// — has already moved the authoritative value out from under this attempt.
+// The ref-update CAS (store.UpdateSecretRefIfMatches) is ALSO keyed on that
+// same (SecretRef, Version) pair, not the ref alone, so a rotation landing
+// during the labels/AddSecretVersion RPCs between the recheck and the CAS is
+// caught too: the version predicate fails to match and the CAS reports
+// applied=false. Either detection discards the whole attempt and retries
+// with fresh reads, up to maxPlanOrRepairRefAttempts times, then fails loudly
+// for that secret rather than clobbering silently.
+//
+// What this does and does not guarantee, precisely: any concurrent write
+// that is visible in the DB row (a changed SecretRef, or a changed Version
+// from any UpsertSecret — including a same-ref old-binary rotation) by the
+// time of the recheck or the CAS is detected and never silently overwritten.
+// The residual window is narrower, not zero: a concurrent writer whose own
+// AddSecretVersion lands on the *prefixed* name itself between our final
+// recheck and our own AddSecretVersion call can still leave our (already
+// stale) version as latest for a moment, even though the version-aware CAS
+// then correctly refuses to move the ref onto it. In this codebase only a
+// new-binary Set() writes the prefixed name directly, so this window is
+// narrow; see .design/secret-id-hub-refactor.md #7 for the full statement.
 //
 // Returns:
 //   - ("", nil) if there is nothing to do: no DB record, the ref already
@@ -1191,22 +1258,27 @@ func (b *GCPBackend) planOrRepairRefAttempt(ctx context.Context, name, scope, sc
 		return action, false, nil
 	}
 
-	if action != RefRepairRepaired {
-		// Recheck immediately before writing: if the record's ref or Version
-		// has moved since the read above, a concurrent Set() or an
-		// old-binary rotation already changed the authoritative value (or
-		// re-asserted the same ref with a new value — Version still bumps on
-		// every UpsertSecret, so this catches that ABA case too). Writing the
-		// value captured above would silently revert that change, so
-		// discard this attempt and retry with fresh reads instead.
-		current, err := b.store.GetSecret(ctx, name, scope, scopeID)
-		if err != nil {
-			return "", false, err
-		}
-		if current.SecretRef != rec.SecretRef || current.Version != rec.Version {
-			return "", true, nil
-		}
+	// Recheck immediately before the ref update: if the record's ref or
+	// Version has moved since the read above, a concurrent Set() or an
+	// old-binary rotation already changed the authoritative value (or
+	// re-asserted the same ref with a new value — Version still bumps on
+	// every UpsertSecret, so this catches that ABA case too). This applies
+	// even when action is RefRepairRepaired and no GCP write happens this
+	// attempt at all: repointing the ref past a rotation this attempt never
+	// saw would silently make the rotation invisible just the same as
+	// writing a stale value would (ptone/scion#2152 round-4 review finding
+	// 1(a) — the repaired path previously skipped this check entirely).
+	// Discard the attempt and retry with fresh reads rather than act on
+	// stale information.
+	current, err := b.store.GetSecret(ctx, name, scope, scopeID)
+	if err != nil {
+		return "", false, err
+	}
+	if current.SecretRef != rec.SecretRef || current.Version != rec.Version {
+		return "", true, nil
+	}
 
+	if action != RefRepairRepaired {
 		labels, err := b.legacyLabels(ctx, refPath)
 		if err != nil {
 			return "", false, fmt.Errorf("failed to sync %s to prefixed GCP SM name: %w", name, err)
@@ -1216,14 +1288,23 @@ func (b *GCPBackend) planOrRepairRefAttempt(ctx context.Context, name, scope, sc
 		}
 	}
 
-	applied, err := b.store.UpdateSecretRefIfMatches(ctx, name, scope, scopeID, rec.SecretRef, prefixedRef)
+	// The CAS itself is also version-aware (matching both SecretRef and the
+	// Version captured at the start of THIS attempt, not just the recheck
+	// above): any write that lands between the recheck and this call —
+	// including during the legacyLabels/ensureSecretAndAddVersion RPCs above
+	// — bumps Version and makes the predicate fail to match, so applied=false
+	// and this attempt is retried rather than repointing the ref past a
+	// change it never accounted for (ptone/scion#2152 round-4 review finding
+	// 1(b)).
+	applied, err := b.store.UpdateSecretRefIfMatches(ctx, name, scope, scopeID, rec.SecretRef, rec.Version, prefixedRef)
 	if err != nil {
 		return "", false, fmt.Errorf("failed to update DB ref: %w", err)
 	}
 	if !applied {
-		// The record's ref changed concurrently between our recheck above
-		// and this CAS call: retry with fresh reads rather than claiming an
-		// action that may already be stale.
+		// The record's ref or Version changed concurrently between our
+		// recheck above and this CAS call (or, for a same-ref rotation, the
+		// version predicate alone caught it): retry with fresh reads rather
+		// than claiming an action that may already be stale.
 		return "", true, nil
 	}
 	return action, false, nil
