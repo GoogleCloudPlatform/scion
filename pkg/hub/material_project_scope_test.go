@@ -183,8 +183,8 @@ func TestAgentSecretRead_ProjectScopeDuplicateActiveEdgesDenies(t *testing.T) {
 	assertProjectDenied(t, f, f.AgentID, f.Token, "DUP_KEY")
 }
 
-// TestAgentSecretRead_ProjectScopeRequiresDelegatorProjectSecretRead (BC-23)
-// pins that a user delegator without project.secret_read denies, while an
+// TestAgentSecretRead_ProjectScopeRequiresDelegatorProjectSecretRead pins
+// that a user delegator without project.secret_read denies, while an
 // owner/admin delegator is ok.
 func TestAgentSecretRead_ProjectScopeRequiresDelegatorProjectSecretRead(t *testing.T) {
 	f := newMaterialFixture(t, "delegator-permission")
@@ -367,7 +367,9 @@ func TestAgentSecretRead_ProjectScopeUnresolvableMigrationDelegatorDenies(t *tes
 
 // TestAgentSecretRead_ProjectScopeStoppedParentRetainsAuthority pins that a
 // stopped-but-not-deleted parent is allowed at its stored role: stopping a
-// source is not revocation. Stays green after B.2.
+// source is not revocation. This stays green after a follow-up change lands
+// the shared non-deleted-source rule, since the parent here is never
+// deleted.
 func TestAgentSecretRead_ProjectScopeStoppedParentRetainsAuthority(t *testing.T) {
 	f := newMaterialFixture(t, "stopped-parent")
 	ctx := context.Background()
@@ -403,7 +405,9 @@ func TestAgentSecretRead_ProjectScopeStoppedParentRetainsAuthority(t *testing.T)
 
 // TestAgentSecretRead_ProjectScopeDeletedGrandparentAgentDenies pins that
 // the recursive chain walk reaches a hard-deleted (purged) deeper ancestor
-// and denies. Stays green after B.2.
+// and denies. This stays green after a follow-up change lands the shared
+// non-deleted-source rule, since the grandparent here is hard-deleted, not
+// soft-deleted.
 func TestAgentSecretRead_ProjectScopeDeletedGrandparentAgentDenies(t *testing.T) {
 	f := newMaterialFixture(t, "deleted-grandparent")
 	ctx := context.Background()

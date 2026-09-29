@@ -195,7 +195,7 @@ func materialSelectionItem(item ItemResult, permission, detail string) MaterialS
 
 // materialAuditActorFromContext fills the actor fields from the presented
 // agent identity. It is unexported, one function, and is deleted in favour
-// of E.2a's helper when E.2a merges.
+// of a shared actor-resolution helper once the audit package grows one.
 func materialAuditActorFromContext(ctx context.Context) (actorKind, actorID, credentialKind, credentialID string) {
 	ident := GetAgentIdentityFromContext(ctx)
 	if ident == nil {

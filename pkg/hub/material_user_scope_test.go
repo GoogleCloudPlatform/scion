@@ -73,7 +73,7 @@ func TestAgentSecretRead_UserSecretRequiresSharingEnabled(t *testing.T) {
 	}
 }
 
-// TestAgentSecretRead_DirectChildRequiresSharingEnabled pins R7: direct
+// TestAgentSecretRead_DirectChildRequiresSharingEnabled pins that direct
 // children are included in the AllowProgeny requirement — there is no
 // automatic owner shortcut for the immediate agent. Once sharing is
 // enabled, the same direct child is allowed.

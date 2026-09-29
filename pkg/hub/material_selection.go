@@ -30,8 +30,8 @@ type MaterialPurpose string
 const PurposeRuntimeRead MaterialPurpose = "runtime_read"
 
 // MaterialKind identifies the kind of material a candidate represents.
-// Declared here because later slices (F.2b-h) add further kinds; F.2a only
-// ever produces MaterialKindSecret.
+// Declared here because later changes add further kinds; runtime material
+// selection only ever produces MaterialKindSecret.
 type MaterialKind string
 
 // MaterialKindSecret is the only material kind F.2a selects.
@@ -42,9 +42,9 @@ type GrantKind string
 
 const (
 	// GrantProjectSecretRead is the runtime project read via the token's
-	// project binding (check 7). It is not a delivery grant, and a runtime
-	// read is never labelled with a delivery grant such as
-	// GrantProjectAssociation (declared by F.2d, not by F.2a).
+	// project binding (check 7). It is not a delivery grant: a runtime read
+	// is never labelled with a delivery grant such as GrantProjectAssociation,
+	// which delivery paths declare and use separately.
 	GrantProjectSecretRead GrantKind = "project_secret_read"
 	// GrantProgeny is the runtime user read grant (check 8).
 	GrantProgeny GrantKind = "progeny"
@@ -52,7 +52,7 @@ const (
 
 // ProvenanceRoot identifies the human ancestor a runtime read is evaluated
 // against. F.2a fills Kind and ID only; Edge and Revision are populated once
-// B.3's ResolveProvenanceRoot lands.
+// a later change resolves them from recorded delegation provenance.
 type ProvenanceRoot struct {
 	Kind     string                // F.2a: always "user"
 	ID       string                // F.2a: Ancestry[0], confirmed an active user by check 5
@@ -119,9 +119,8 @@ const (
 // the single per-item composition that both the fetch endpoint (looped over
 // its key list) and the get endpoint (a single key) call, so the two do not
 // each hand-compose their own copy of "authorize, then fetch". The agent
-// secret list has no per-key fetch step and its own dual-scope aggregation
-// (§8.2), so it composes checks 1-7/8 on its own instead of through this
-// function.
+// secret list has no per-key fetch step and its own dual-scope aggregation,
+// so it composes checks 1-7/8 on its own instead of through this function.
 //
 // decisionCache must be created once per request and passed to every
 // project-scope call within that request, so the check-7 decision is

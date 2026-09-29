@@ -36,9 +36,8 @@ import (
 )
 
 // assertRecordChangedAudited asserts that the last MaterialSelectionEvent
-// recorded by rec carries exactly one item with Reason == ReasonRecordChanged
-// (F4: the record-race tests assert the audited reason, not only the HTTP
-// status).
+// recorded by rec carries exactly one item with Reason == ReasonRecordChanged:
+// the record-race tests assert the audited reason, not only the HTTP status.
 func assertRecordChangedAudited(t *testing.T, rec *recordingMaterialAuditor) {
 	t.Helper()
 	if len(rec.events) == 0 {
