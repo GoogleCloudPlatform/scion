@@ -56,6 +56,7 @@ var relationshipUnregisteredPermissions = map[string][]string{
 	// handlers_messages.go (message list and stream) and handlers_logs.go
 	// (agent log read) check (agent, manage) to decide whether the caller
 	// sees every entry or only the entries it participates in.
+	// TODO(ptone/scion#2120): drop this entry once agent.manage is registered.
 	"agent.manage": {"handlers_messages.go", "handlers_logs.go"},
 }
 

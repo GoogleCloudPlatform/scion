@@ -389,7 +389,8 @@ func TestGolden_ProjectOwnerFullAccess(t *testing.T) {
 	}
 
 	// Owner should be able to do everything on project resources
-	for _, action := range []Action{ActionRead, ActionUpdate, ActionDelete, ActionStart, ActionStop, ActionMessage} {
+	// Agent start/stop are authorized as ActionLifecycle (agent.lifecycle).
+	for _, action := range []Action{ActionRead, ActionUpdate, ActionDelete, ActionLifecycle, ActionMessage} {
 		decision := f.authz.CheckAccess(ctx, owner, alphaAgentRes, action)
 		assert.True(t, decision.Allowed,
 			"project owner should have %s access on project agents", action)
@@ -540,8 +541,16 @@ func TestGolden_SuperAdminFullAccess(t *testing.T) {
 	assert.True(t, decision.Allowed, "super-admin should access any project")
 
 	// Hub-level resources too
+	// Hub-type requests name their permission: (hub, update) is shared by
+	// several registry permissions.
 	hubRes := Resource{Type: "hub", ID: "settings"}
-	decision = f.authz.CheckAccess(ctx, admin, hubRes, ActionUpdate)
+	decision = f.authz.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(admin),
+		Credential: credentialContextForIdentity(admin),
+		Resource:   hubRes,
+		Action:     ActionUpdate,
+		Permission: "hub.settings.update",
+	})
 	assert.True(t, decision.Allowed, "super-admin should access hub settings")
 }
 
@@ -888,12 +897,17 @@ func TestGolden_AgentProgenySecretAccess(t *testing.T) {
 		Type: "secret",
 		ID:   f.secretID,
 	}
-	// Agent scope restriction blocks progeny grants through CheckAccess because
-	// "secret.read" has no AgentScopes mapping in the permissions registry.
-	// The nil-scope agent gets fail-closed restriction which blocks the
-	// relationship grant, and the final decision falls through to the kernel
-	// denial ("no candidate bindings").
-	decision := f.authz.CheckAccess(ctx, agentIdentity, secretRes, ActionRead)
+	// Progeny secret reads name project.secret_read, as the production
+	// callers do. The nil-scope agent gets the fail-closed credential scope
+	// restriction, which also applies to the relationship grant, and the
+	// final decision keeps the kernel denial ("no candidate bindings").
+	decision := f.authz.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(agentIdentity),
+		Credential: credentialContextForIdentity(agentIdentity),
+		Resource:   secretRes,
+		Action:     ActionRead,
+		Permission: permissionProjectSecretRead,
+	})
 	assert.False(t, decision.Allowed,
 		"progeny grant is restricted by agent credential scope in CheckAccess path")
 	assert.Equal(t, "no candidate bindings", decision.Reason)
@@ -911,10 +925,9 @@ func TestGolden_AgentProgenySecretAccess(t *testing.T) {
 
 // TestGolden_AgentProgenyEnvVarAccess verifies progeny access to env vars.
 //
-// Post-cutover: Same as secrets (item 11). The relationship resolver identifies
-// progeny access, but the agent scope restriction blocks it through CheckAccess
-// because "envvar.read" has no AgentScopes mapping. Production agent env var
-// reads use direct handler checks, not CheckAccess.
+// Post-cutover: No registry permission covers (envvar, read), so CheckAccess
+// cannot resolve a permission and denies. Production agent env var reads use
+// direct handler checks, not CheckAccess.
 //
 // Reference: design.md §6.
 func TestGolden_AgentProgenyEnvVarAccess(t *testing.T) {
@@ -931,13 +944,12 @@ func TestGolden_AgentProgenyEnvVarAccess(t *testing.T) {
 		Type: "envvar",
 		ID:   f.envVarID,
 	}
-	// Agent scope restriction blocks progeny grants through CheckAccess.
-	// The nil-scope agent gets fail-closed restriction, and the final decision
-	// falls through to the kernel denial.
+	// No registry permission covers this resource type, so a request that
+	// names no permission cannot be resolved and is denied.
 	decision := f.authz.CheckAccess(ctx, agentIdentity, envVarRes, ActionRead)
 	assert.False(t, decision.Allowed,
-		"progeny grant is restricted by agent credential scope in CheckAccess path")
-	assert.Equal(t, "no candidate bindings", decision.Reason)
+		"a request with no resolvable permission is denied")
+	assert.Equal(t, unresolvablePermissionReason, decision.Reason)
 
 	// Negative case: an agent NOT in the ancestry should also be denied
 	outsiderAgent := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: tid("golden-outsider-envvar")}, ProjectID: f.projectBeta.ID}}
@@ -953,9 +965,8 @@ func TestGolden_AgentProgenyEnvVarAccess(t *testing.T) {
 // TestGolden_AgentProgenySkillInjectionAccess verifies progeny access to skill
 // injections.
 //
-// Post-cutover: Same as secrets (item 11). The relationship resolver identifies
-// progeny access, but the agent scope restriction blocks it through CheckAccess
-// because "skill_injection.read" has no AgentScopes mapping.
+// Post-cutover: No registry permission covers (skill_injection, read), so
+// CheckAccess cannot resolve a permission and denies.
 //
 // Reference: design.md §6.
 func TestGolden_AgentProgenySkillInjectionAccess(t *testing.T) {
@@ -972,13 +983,12 @@ func TestGolden_AgentProgenySkillInjectionAccess(t *testing.T) {
 		Type: "skill_injection",
 		ID:   f.skillInjectionID,
 	}
-	// Agent scope restriction blocks progeny grants through CheckAccess.
-	// The nil-scope agent gets fail-closed restriction, and the final decision
-	// falls through to the kernel denial.
+	// No registry permission covers this resource type, so a request that
+	// names no permission cannot be resolved and is denied.
 	decision := f.authz.CheckAccess(ctx, agentIdentity, skillRes, ActionRead)
 	assert.False(t, decision.Allowed,
-		"progeny grant is restricted by agent credential scope in CheckAccess path")
-	assert.Equal(t, "no candidate bindings", decision.Reason)
+		"a request with no resolvable permission is denied")
+	assert.Equal(t, unresolvablePermissionReason, decision.Reason)
 
 	// Negative case: an agent NOT in the ancestry should also be denied
 	outsiderAgent := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: tid("golden-outsider-skill")}, ProjectID: f.projectBeta.ID}}

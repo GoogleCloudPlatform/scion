@@ -301,10 +301,32 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 	}
 
 	// Resolve permission ID. When the caller provides an explicit permission,
-	// use it; otherwise derive from resource type + action.
+	// use it; otherwise resolve it from resource type + action. A pair that
+	// does not name exactly one permission is denied.
 	permissionID := request.Permission
 	if permissionID == "" {
-		permissionID = derivePermissionID(request.Resource.Type, request.Action)
+		resolved, err := resolveResourcePermission(request.Resource.Type, request.Action)
+		if err != nil {
+			a.logger.Warn("authorization request has no resolvable permission",
+				"resource_type", request.Resource.Type, "action", string(request.Action), "error", err)
+			d := Decision{Allowed: false, Reason: unresolvablePermissionReason}
+			if request.Explain {
+				d.Provenance = &DecisionProvenance{
+					Errors:          []string{err.Error()},
+					DenyReasons:     []string{unresolvablePermissionReason},
+					Grants:          []GrantDetail{},
+					InactiveGrants:  []GrantDetail{},
+					Restrictions:    []RestrictionProvenance{},
+					MembershipPaths: []MembershipPathDetail{},
+				}
+			}
+			result := decorateDecision(d, principal, credential)
+			if a.decisionAuditEmitter != nil {
+				a.emitDecisionAudit(ctx, request, result)
+			}
+			return result
+		}
+		permissionID = resolved
 	}
 
 	// ── Step 1: UAT project constraint (pre-kernel gate) ──────────────
@@ -1308,20 +1330,8 @@ func normalizeClosureTypes(closure map[string]struct{}) map[string]struct{} {
 // Permission resolution
 // =============================================================================
 
-// derivePermissionID derives a canonical permission ID from a resource type
-// and action string. Falls back to "resourceType.action" format when no
-// registry match exists.
-func derivePermissionID(resourceType string, action Action) string {
-	actionStr := string(action)
-	// Look for an exact match in the permissions registry.
-	for _, p := range permissions.Registry {
-		if p.Resource == resourceType && p.Action == actionStr {
-			return p.ID
-		}
-	}
-	// Fallback: construct from resource type and action.
-	return resourceType + "." + actionStr
-}
+// Permission resolution for requests without an explicit permission lives
+// in authz_permission_resolver.go (resolveResourcePermission).
 
 // =============================================================================
 // Helper functions
