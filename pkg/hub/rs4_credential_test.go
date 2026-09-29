@@ -195,7 +195,7 @@ func TestRS4_IssuerAuthority(t *testing.T) {
 		// the dangling binding and resolve authority from whatever bindings
 		// remain. The store's own integrity checks refuse to delete a role
 		// definition that still has an active binding (by design), so this
-		// injects the failure at the exact point scopedRoleBindingPermissions
+		// injects the failure at the exact point unionScopedRoleBindingPermissions
 		// reads it (store.GetRoleDefinition), rather than trying to force an
 		// inconsistent state the store is specifically built to prevent.
 		srv, s := testServer(t)

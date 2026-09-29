@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -1045,7 +1046,7 @@ func TestProjectAdmissionForClass_ErrorsNeverMemoized(t *testing.T) {
 	createTestUserWithProjectRole(t, s, userID, "pafcerr@test.com", projectID, store.ProjectRoleMember)
 
 	failing := &onceFailingBindingsStore{Store: s, failErr: errors.New("injected transient binding-list failure")}
-	authz := NewAuthzService(failing, nil)
+	authz := NewAuthzService(failing, slog.Default())
 
 	class := ProjectTargetClass{ResourceType: "agent"}
 	memo := NewProjectAdmissionCache()
@@ -1059,6 +1060,61 @@ func TestProjectAdmissionForClass_ErrorsNeverMemoized(t *testing.T) {
 	require.NoError(t, err2)
 	if !result2.Admitted {
 		t.Error("the second call must recompute and succeed, not return a cached denial from the first call's error")
+	}
+}
+
+// onceFailingConstraintStore wraps a store.Store and fails the FIRST call to
+// ListAccessConstraints with failErr, then delegates to the real store for
+// every subsequent call.
+type onceFailingConstraintStore struct {
+	store.Store
+	failed  bool
+	failErr error
+}
+
+func (s *onceFailingConstraintStore) ListAccessConstraints(ctx context.Context, limit, offset int) ([]*store.AccessConstraint, error) {
+	if !s.failed {
+		s.failed = true
+		return nil, s.failErr
+	}
+	return s.Store.ListAccessConstraints(ctx, limit, offset)
+}
+
+// TestProjectAdmissionForClass_ConstraintLoadErrorNotMemoized proves that a
+// transient access-constraint-table load error on the SYSTEM-AUTHORITY path
+// (SystemAuthorityProof, which loads the constraint table for its
+// project-scoped reduction) denies without being memoized: the first call
+// must error, and a second call on the SAME memo must recompute via the
+// now-succeeding store and admit, rather than replay a cached deny-all
+// restriction from the first call's load failure.
+func TestProjectAdmissionForClass_ConstraintLoadErrorNotMemoized(t *testing.T) {
+	_, s := authzTestSetup(t)
+	ctx := context.Background()
+
+	projectID := tid("pafc-cle-proj")
+	userID := tid("pafc-cle-user")
+	createDelegateTestProject(t, s, projectID, "pafc-cle-proj", "test")
+	// A non-member with a target-applicable SYSTEM grant only, so
+	// ProjectMembershipEvidence denies and SystemAuthorityProof — the path
+	// that loads the access-constraint table — is the one exercised.
+	systemRoleUserWithPermissions(t, s, userID, []string{"skill.read"})
+
+	failing := &onceFailingConstraintStore{Store: s, failErr: errors.New("injected transient constraint-list failure")}
+	authz := NewAuthzService(failing, slog.Default())
+
+	class := ProjectTargetClass{ResourceType: "skill", ScopeKind: store.SkillScopeProject}
+	memo := NewProjectAdmissionCache()
+
+	_, err1 := authz.ProjectAdmissionForClass(ctx, activeUserPrincipal(userID), projectID, "skill.read", class, memo)
+	if err1 == nil {
+		t.Fatal("expected the first call to fail via the injected constraint-table load error")
+	}
+	require.ErrorIs(t, err1, ErrProjectAccessDenied)
+
+	result2, err2 := authz.ProjectAdmissionForClass(ctx, activeUserPrincipal(userID), projectID, "skill.read", class, memo)
+	require.NoError(t, err2)
+	if !result2.Admitted {
+		t.Error("the second call must recompute and succeed, not return a cached denial from the first call's constraint-load error")
 	}
 }
 
@@ -1339,6 +1395,65 @@ func TestHasAnyProjectBinding_SoleProjectConstrained_Denied(t *testing.T) {
 	}
 }
 
+// TestHasAnyProjectBinding_ConstraintLoadErrorReturnsError proves a
+// transient access-constraint-table load failure surfaces as an error from
+// hasAnyProjectBinding, wrapping ErrProjectAccessDenied, rather than a
+// deny-all-derived false. This path is not reachable through CanMintSelector
+// under a persistently failing store: MintTimeSystemGrant's own unconditional
+// constraint load runs first and errors, and the per-call cache then replays
+// that same error for every later helper in the batch, so this test calls
+// hasAnyProjectBinding directly.
+func TestHasAnyProjectBinding_ConstraintLoadErrorReturnsError(t *testing.T) {
+	_, s := authzTestSetup(t)
+	ctx := context.Background()
+	userID := tid("hapb-cle")
+	projectID := tid("hapb-cle-proj")
+	createDelegateTestProject(t, s, projectID, "hapb-cle-proj", "test")
+	require.NoError(t, s.CreateUser(ctx, &store.User{ID: userID, Email: "hapbcle@test.com", DisplayName: "u", Role: "member", Status: store.UserStatusActive}))
+
+	rd := createTestRoleDefinition(t, s, "hapb-cle-role", store.RoleScopeProject, []string{"agent.read"})
+	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: userID,
+		ScopeType: store.RoleScopeProject, ScopeID: projectID, CreatedBy: "test",
+	})
+	require.NoError(t, err)
+
+	failing := &r2FailingStore{Store: s, failListConstraints: errors.New("injected: constraint load failure")}
+	authz := NewAuthzService(failing, slog.Default())
+
+	ok, err := authz.hasAnyProjectBinding(ctx, activeUserPrincipal(userID), "agent.read")
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrProjectAccessDenied)
+	if ok {
+		t.Error("a constraint-table load failure must deny, not admit")
+	}
+}
+
+// TestHasRelevantProjectAdmission_ConstraintLoadErrorReturnsError is
+// hasAnyProjectBinding's counterpart for the Hub-boundary relationship
+// alternative: hasRelevantProjectAdmission calls
+// permissionSurvivesProjectConstraints per project, so this pins that a
+// transient constraint-table load failure surfaces as an error there too,
+// called directly for the same reason as the test above.
+func TestHasRelevantProjectAdmission_ConstraintLoadErrorReturnsError(t *testing.T) {
+	_, s := authzTestSetup(t)
+	ctx := context.Background()
+	userID := tid("hrpa-cle")
+	projectID := tid("hrpa-cle-proj")
+	createDelegateTestProject(t, s, projectID, "hrpa-cle-proj", "test")
+	createTestUserWithProjectRole(t, s, userID, "hrpacle@test.com", projectID, store.ProjectRoleMember)
+
+	failing := &r2FailingStore{Store: s, failListConstraints: errors.New("injected: constraint load failure")}
+	authz := NewAuthzService(failing, slog.Default())
+
+	ok, err := authz.hasRelevantProjectAdmission(ctx, activeUserPrincipal(userID), "agent.attach")
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrProjectAccessDenied)
+	if ok {
+		t.Error("a constraint-table load failure must deny, not admit")
+	}
+}
+
 // TestHasAnyProjectBinding_SecondUnconstrainedProject_Allowed confirms the
 // other half of the rule: a second, unconstrained project's grant still succeeds
 // even though a first project's grant is constrained away -- each project
@@ -1571,6 +1686,135 @@ func TestCanMintSelector_HubBoundary_ConstraintTableLoadedOnceForBatch(t *testin
 
 	if counting.listAccessConstraintCalls > 1 {
 		t.Errorf("ListAccessConstraints called %d times for one CanMintSelector batch (2 permissions x 2 projects); want at most 1 (cached)", counting.listAccessConstraintCalls)
+	}
+}
+
+// TestCanMintSelector_ConstraintLoadErrorReturnsError proves a transient
+// access-constraint-table load failure surfaces as an error from
+// CanMintSelector on three of its paths: the Hub-boundary flat/system path
+// (hubPermissionEligible -> MintTimeSystemGrant), the Project-boundary
+// relationship path (selectorMintEligible -> permissionSurvivesProjectConstraints),
+// and the Project-boundary flat-role path (selectorMintEligible ->
+// hasProjectRoleFlatPermission -> projectScopedPermissionsStrict). See
+// TestHasAnyProjectBinding_ConstraintLoadErrorReturnsError and
+// TestHasRelevantProjectAdmission_ConstraintLoadErrorReturnsError for the two
+// remaining CanMintSelector paths, exercised via a direct call to each
+// helper: through CanMintSelector itself, MintTimeSystemGrant's unconditional
+// constraint load and the per-call cache both return before either path is
+// tried. None of the three subtests below should return a SelectorEligibility
+// slice.
+func TestCanMintSelector_ConstraintLoadErrorReturnsError(t *testing.T) {
+	t.Run("hub_boundary", func(t *testing.T) {
+		_, s := authzTestSetup(t)
+		ctx := context.Background()
+		userID := tid("cms-cle-hub")
+		createTestUserWithRole(t, s, userID, "cmsclehub@test.com", "member", store.SystemRoleHubMember)
+
+		failing := &r2FailingStore{Store: s, failListConstraints: errors.New("injected: constraint load failure")}
+		authz := NewAuthzService(failing, slog.Default())
+
+		// Mirrors TestCanMintSelector_HubBoundary_CatalogOnlyGrantEligible:
+		// a hub-member's catalog-only skill:read reaches MintTimeSystemGrant,
+		// which loads the constraint table via the error-returning form.
+		results, err := authz.CanMintSelector(ctx, activeUserPrincipal(userID), TokenBoundary{Kind: BoundaryKindHub}, []string{"skill:read"})
+		require.Error(t, err)
+		require.ErrorIs(t, err, ErrProjectAccessDenied)
+		require.Nil(t, results)
+	})
+
+	t.Run("project_boundary_relationship_selector", func(t *testing.T) {
+		_, s := authzTestSetup(t)
+		ctx := context.Background()
+		userID := tid("cms-cle-proj")
+		projectID := tid("cms-cle-proj-p")
+		createDelegateTestProject(t, s, projectID, "cms-cle-proj-p", "test")
+		createTestUserWithProjectRole(t, s, userID, "cmscleproj@test.com", projectID, store.ProjectRoleMember)
+
+		failing := &r2FailingStore{Store: s, failListConstraints: errors.New("injected: constraint load failure")}
+		authz := NewAuthzService(failing, slog.Default())
+
+		// Mirrors TestCanMintSelector_RelationshipEligibility_AgentAttach_NoExistingTargetRequired:
+		// an ordinary member's agent:attach under a Project boundary reaches
+		// permissionSurvivesProjectConstraints directly via selectorMintEligible.
+		results, err := authz.CanMintSelector(ctx, activeUserPrincipal(userID), TokenBoundary{Kind: BoundaryKindProject, ProjectID: projectID}, []string{"agent:attach"})
+		require.Error(t, err)
+		require.ErrorIs(t, err, ErrProjectAccessDenied)
+		require.Nil(t, results)
+	})
+
+	t.Run("project_boundary_flat_role_descriptor", func(t *testing.T) {
+		_, s := authzTestSetup(t)
+		ctx := context.Background()
+		userID := tid("cms-cle-flat")
+		projectID := tid("cms-cle-flat-p")
+		createDelegateTestProject(t, s, projectID, "cms-cle-flat-p", "test")
+		// project-admin carries agent.delete, a permission with no
+		// MintEligibilityRegistry descriptor (flat-role default).
+		createTestUserWithProjectRole(t, s, userID, "cmscleflat@test.com", projectID, store.ProjectRoleAdmin)
+
+		failing := &r2FailingStore{Store: s, failListConstraints: errors.New("injected: constraint load failure")}
+		authz := NewAuthzService(failing, slog.Default())
+
+		// Mirrors TestCanMintSelector_ProjectBoundary_SuperAdminWithoutMembership_AdmittedButFlatIneligible's
+		// flat-descriptor selector: agent:delete has no MintEligibilityRegistry
+		// entry, so selectorMintEligible's default branch reaches
+		// hasProjectRoleFlatPermission -> projectScopedPermissionsStrict.
+		results, err := authz.CanMintSelector(ctx, activeUserPrincipal(userID), TokenBoundary{Kind: BoundaryKindProject, ProjectID: projectID}, []string{"agent:delete"})
+		require.Error(t, err)
+		require.ErrorIs(t, err, ErrProjectAccessDenied)
+		require.Nil(t, results)
+	})
+}
+
+// TestHasProjectRoleFlatPermission_BindingListErrorWrapsSentinel proves that
+// a store failure on the flat mint path's OWN group/binding resolution
+// (projectScopedGrants) is classified with ErrProjectAccessDenied, the same
+// as a constraint-table load failure on this path — matching every other
+// CanMintSelector path's error classification. getProjectScopedPermissions's
+// non-strict form keeps its unwrapped error, for useraccesstoken.go.
+func TestHasProjectRoleFlatPermission_BindingListErrorWrapsSentinel(t *testing.T) {
+	_, s := authzTestSetup(t)
+	ctx := context.Background()
+	userID := tid("hprfp-ble")
+	projectID := tid("hprfp-ble-proj")
+	createDelegateTestProject(t, s, projectID, "hprfp-ble-proj", "test")
+	createTestUserWithProjectRole(t, s, userID, "hprfpble@test.com", projectID, store.ProjectRoleAdmin)
+
+	failing := &r2FailingStore{Store: s, failListBindings: errors.New("injected: binding list failure")}
+	authz := NewAuthzService(failing, slog.Default())
+
+	ok, err := authz.hasProjectRoleFlatPermission(ctx, activeUserPrincipal(userID), projectID, "agent.delete")
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrProjectAccessDenied)
+	if ok {
+		t.Error("a binding-list failure must deny, not admit")
+	}
+}
+
+// TestGetProjectScopedPermissions_GroupResolutionFailureLogsAndErrors proves
+// getProjectScopedPermissions's own behavior on a group-resolution failure is
+// independent of projectScopedPermissionsStrict, despite both sharing
+// projectScopedGrants: it emits a Warn log and returns an unwrapped error,
+// not ErrProjectAccessDenied -- useraccesstoken.go's caller does not expect
+// that sentinel.
+func TestGetProjectScopedPermissions_GroupResolutionFailureLogsAndErrors(t *testing.T) {
+	_, s := authzTestSetup(t)
+	ctx := context.Background()
+	userID := tid("gpsp-grf")
+	projectID := tid("gpsp-grf-proj")
+	createDelegateTestProject(t, s, projectID, "gpsp-grf-proj", "test")
+
+	failing := &r2FailingStore{Store: s, failGetEffectiveGroups: errors.New("injected: group resolution failure")}
+	logger, buf := federationAuthCaptureBuffer()
+	authz := NewAuthzService(failing, logger)
+
+	_, err := authz.getProjectScopedPermissions(ctx, store.RoleBindingPrincipalUser, userID, projectID)
+	require.Error(t, err)
+	if errors.Is(err, ErrProjectAccessDenied) {
+		t.Error("getProjectScopedPermissions must keep its unwrapped group-resolution error, not ErrProjectAccessDenied")
+	}
+	if got := countWarnLines(t, buf, "failed to get effective groups for project-scoped permission resolution (fail-closed)"); got != 1 {
+		t.Errorf("expected exactly 1 Warn log line for the group-resolution failure, got %d", got)
 	}
 }
 

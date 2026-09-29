@@ -1154,14 +1154,19 @@ func agentScopeRestriction(agent AgentIdentity) Restriction {
 }
 
 // loadAccessConstraintRestrictions loads active access constraints from the
-// store and converts them to kernel restrictions.
+// store and converts them to kernel restrictions. On a load error it fails
+// closed by returning a deny-all restriction. Decide (no error return),
+// getEffectivePermissions and getProjectScopedPermissions call this form and
+// keep that behaviour. A caller with its own error return that needs a load
+// failure to surface as an error instead should call
+// accessConstraintRestrictions directly; see SystemAuthorityProof and
+// CanMintSelector's mint-time helpers.
 func (a *AuthzService) loadAccessConstraintRestrictions(
 	ctx context.Context,
 	closure map[string]struct{},
 	resource ResourceContext,
 ) []Restriction {
-	// R-1 fix: page through all constraints instead of capping at 200.
-	constraints, err := a.loadAllAccessConstraints(ctx)
+	restrictions, err := a.accessConstraintRestrictions(ctx, closure, resource)
 	if err != nil {
 		// R-1 fix: deny (fail closed) when constraint loading errors.
 		// The design is explicit: "Store or group resolution errors fail
@@ -1173,8 +1178,29 @@ func (a *AuthzService) loadAccessConstraintRestrictions(
 			// nil Check denies everything.
 		}}
 	}
+	return restrictions
+}
+
+// accessConstraintRestrictions is loadAccessConstraintRestrictions's
+// error-returning form: it loads active access constraints from the store
+// and converts them to kernel restrictions, but returns a load error to the
+// caller instead of converting it into a deny-all restriction. Use when the
+// caller has its own error return and a load failure must surface as an
+// error rather than an ordinary denial, as on the ProjectAdmissionForClass
+// and CanMintSelector paths. Every other caller should use
+// loadAccessConstraintRestrictions.
+func (a *AuthzService) accessConstraintRestrictions(
+	ctx context.Context,
+	closure map[string]struct{},
+	resource ResourceContext,
+) ([]Restriction, error) {
+	// R-1 fix: page through all constraints instead of capping at 200.
+	constraints, err := a.loadAllAccessConstraints(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if len(constraints) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	// Convert store constraints to hub AccessConstraint and filter.
@@ -1233,7 +1259,7 @@ func (a *AuthzService) loadAccessConstraintRestrictions(
 		ri++
 	}
 
-	return restrictions
+	return restrictions, nil
 }
 
 // loadAllAccessConstraints loads all access constraints by paging through
@@ -1799,46 +1825,18 @@ func (a *AuthzService) getEffectivePermissions(ctx context.Context, principalTyp
 // The method retains group-expanded principals, activation-window filtering,
 // and AccessConstraint reduction — exactly as getEffectivePermissions does —
 // but only considers bindings where ScopeType == "project" && ScopeID == projectID.
+// Shares its group/binding resolution (projectScopedGrants, authz_boundary.go)
+// with projectScopedPermissionsStrict, CanMintSelector's flat-role mint path's
+// error-returning counterpart; this function keeps a deny-all restriction on
+// a constraint-table load failure rather than returning an error.
 func (a *AuthzService) getProjectScopedPermissions(ctx context.Context, principalType, principalID, projectID string) ([]string, error) {
-	normalizedType := NormalizePrincipalType(principalType)
-
-	// Build principals: direct + group-expanded.
-	principals := []store.PrincipalRef{{Type: normalizedType, ID: principalID}}
-	var groupIDs []string
-	var err error
-	switch normalizedType {
-	case store.RoleBindingPrincipalUser:
-		groupIDs, err = a.store.GetEffectiveGroups(ctx, principalID)
-	case store.RoleBindingPrincipalAgent:
-		groupIDs, err = a.store.GetEffectiveGroupsForAgent(ctx, principalID)
-	}
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		a.logger.Warn("failed to get effective groups for project-scoped permission resolution (fail-closed)",
-			"principalType", principalType, "principalID", principalID, "error", err)
-		return nil, fmt.Errorf("group resolution failed (fail-closed): %w", err)
-	}
-	for _, gid := range groupIDs {
-		principals = append(principals, store.PrincipalRef{Type: "group", ID: gid})
-	}
-
-	bindings, err := a.store.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
+	perms, closure, err := a.projectScopedGrants(ctx, principalType, principalID, projectID)
 	if err != nil {
 		return nil, err
 	}
-
-	// A2: project-scoped bindings for the target project, active-window
-	// filtered, permissions unioned, then access-constraint reduced, via
-	// scopedRoleBindingPermissions (authz_boundary.go). A role definition
-	// referenced by an active binding but missing/unloadable fails this
-	// call closed rather than silently omitting the binding's permissions.
-	closure := make(map[string]struct{}, len(principals))
-	for _, p := range principals {
-		closure[p.Type+":"+p.ID] = struct{}{}
+	if len(perms) == 0 {
+		return perms, nil
 	}
-	result, err := a.scopedRoleBindingPermissions(ctx, bindings, store.RoleScopeProject, projectID, closure, ResourceContext{ProjectID: projectID}, time.Now())
-	if err != nil {
-		return nil, err
-	}
-
-	return result, nil
+	restrictions := a.loadAccessConstraintRestrictions(ctx, closure, ResourceContext{ProjectID: projectID})
+	return applyRestrictions(perms, restrictions), nil
 }
