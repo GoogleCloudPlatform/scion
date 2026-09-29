@@ -424,8 +424,13 @@ type AgentFilter struct {
 	// related). The root ID this field is set to is computed client-side
 	// (see resolveLineageRootID in cmd/list.go): the reference's direct
 	// parent, or the reference itself when it has no parent at all (an
-	// empty Ancestry) or when its parent is a user rather than an agent.
-	// "Parent is a user" is NOT simply "Ancestry has fewer than 2 entries"
+	// empty Ancestry), when its parent is a user rather than an agent, or
+	// when its only recorded parent is an agent the caller cannot list
+	// (ptone/scion#2146 review R6-5 — this third case is not the same as
+	// "parent is a user": both fall back to rooting at self, since the
+	// caller can't tell them apart, but only the first two mean there is
+	// no agent parent at all). "Parent is a user" is NOT simply "Ancestry
+	// has fewer than 2 entries"
 	// — an earlier version of this doc and of resolveLineageRootID asserted
 	// that equivalence, and it is false: a child can inherit a length-1,
 	// agent-only Ancestry from a creator whose own Ancestry was itself

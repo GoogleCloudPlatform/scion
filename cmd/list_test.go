@@ -1353,6 +1353,15 @@ func TestResolveRelationshipReference(t *testing.T) {
 // the bug this round fixes).
 func TestResolveLineageRootID(t *testing.T) {
 	const ancestryLessCreatorID = "11111111-1111-1111-1111-111111111111"
+	// ptone/scion#2146 review R6-6: a queried ID that gets back an agent
+	// whose ID does NOT match (e.g. a pre-#2146 Hub that ignores `id` and
+	// returns an arbitrary agent, R4-11).
+	const mismatchedIDEntry = "22222222-2222-2222-2222-222222222222"
+	const unexpectedAgentID = "33333333-3333-3333-3333-333333333333"
+	// A queried ID that gets back two elements both claiming that exact ID
+	// — should never happen against a real Hub (IDs is a single-element
+	// set), but the code must fail loud rather than guess.
+	const duplicateMatchEntry = "44444444-4444-4444-4444-444444444444"
 
 	var requestCount int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1362,7 +1371,8 @@ func TestResolveLineageRootID(t *testing.T) {
 			return
 		}
 		ids := r.URL.Query()["id"]
-		if len(ids) == 1 && ids[0] == ancestryLessCreatorID {
+		switch {
+		case len(ids) == 1 && ids[0] == ancestryLessCreatorID:
 			// ancestryLessCreatorID names a real, visible agent — the R4-3
 			// edge case: a length-1 Ancestry entry that is an AGENT, not a
 			// user, because its own Ancestry was itself empty when it
@@ -1370,10 +1380,21 @@ func TestResolveLineageRootID(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents": []hubclient.Agent{{ID: ancestryLessCreatorID, Slug: "ancestry-less-creator"}},
 			})
-			return
+		case len(ids) == 1 && ids[0] == mismatchedIDEntry:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"agents": []hubclient.Agent{{ID: unexpectedAgentID, Slug: "unexpected-agent"}},
+			})
+		case len(ids) == 1 && ids[0] == duplicateMatchEntry:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"agents": []hubclient.Agent{
+					{ID: duplicateMatchEntry, Slug: "dup-1"},
+					{ID: duplicateMatchEntry, Slug: "dup-2"},
+				},
+			})
+		default:
+			// Any other queried ID (e.g. a plain user ID) names no agent.
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"agents": []hubclient.Agent{}})
 		}
-		// Any other queried ID (e.g. a plain user ID) names no agent.
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{"agents": []hubclient.Agent{}})
 	}))
 	defer server.Close()
 
@@ -1413,6 +1434,17 @@ func TestResolveLineageRootID(t *testing.T) {
 			want:        "immediate-parent-id",
 			wantNoCalls: true,
 		},
+		{
+			// ptone/scion#2146 review R6-6: the R5-7 exact-ID-match
+			// hardening in isAncestryEntryAnAgent, tested directly.
+			// Mutation-verified: replacing the ID-equality check with
+			// `true` made this case return unexpectedAgentID instead of
+			// self, failing.
+			name:     "single ancestry entry whose lookup returns a DIFFERENT ID (R5-7/R6-6): must not trust it — root at self, not the mismatched agent",
+			id:       "child-with-mismatched-lookup",
+			ancestry: []string{mismatchedIDEntry},
+			want:     "child-with-mismatched-lookup",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1428,6 +1460,16 @@ func TestResolveLineageRootID(t *testing.T) {
 			}
 		})
 	}
+
+	// ptone/scion#2146 review R6-6: the R5-7 >1-exact-match hardening,
+	// tested directly. Mutation-verified: replacing the ID-equality check
+	// with `true` made this case return the first duplicate instead of
+	// erroring, failing.
+	t.Run("single ancestry entry whose lookup returns TWO exact-ID matches (R5-7/R6-6): must fail loud, not guess", func(t *testing.T) {
+		requestCount = 0
+		_, err := resolveLineageRootID(context.Background(), agentSvc, "child-id", []string{duplicateMatchEntry})
+		require.Error(t, err)
+	})
 }
 
 // TestResolveLineageRootID_LookupError is the ptone/scion#2146 review R5-6(a)

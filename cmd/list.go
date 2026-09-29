@@ -234,8 +234,12 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 		// list.
 		//
 		// This keys on hubCtx.CredentialKind — which credential
-		// getHubClient/hubsync.createHubClient actually selected — not on
-		// CLI mode (ptone/scion#2146 review R4-6, replacing the R3-2
+		// hubsync.createHubClient actually selected (this is the only
+		// function that sets it; getHubClient, cmd/hub.go's independent
+		// implementation of the same auth-priority logic, never does, and
+		// scion list never calls it — see ptone/scion#2213 for the
+		// duplication itself) — not on CLI mode (ptone/scion#2146 review
+		// R4-6, replacing the R3-2
 		// mode-keyed version of this guard). The mode-keyed version had two
 		// real gaps: (1) inside an agent container, the CLI can still
 		// authenticate as a user (OAuth credentials, or dev auth on a
@@ -635,16 +639,27 @@ func resolveReferenceAgent(ctx context.Context, agentSvc hubclient.AgentService,
 		if err != nil {
 			return nil, fmt.Errorf("failed to resolve agent %q: %w", ref, err)
 		}
-		switch len(resp.Agents) {
-		case 0:
-			return nil, fmt.Errorf("agent %q not found", ref)
-		case 1:
-			return &resp.Agents[0], nil
-		default:
-			// IDs is a single-element set; the server should never return
-			// more than one match. Fail loud rather than guess which one.
-			return nil, fmt.Errorf("agent %q unexpectedly matched more than one record", ref)
+		// Only trust a result whose ID actually equals ref (ptone/scion#2146
+		// review R6-7, mirroring isAncestryEntryAnAgent's own R5-7
+		// hardening in the other direction): a Hub that predates this
+		// change and silently ignores the `id` query param (R4-11) would
+		// otherwise hand back an arbitrary agent — in a project with
+		// exactly one visible agent, that agent, for ANY UUID reference.
+		// The final list query is still authz-bounded regardless, so this
+		// is a correctness fix, not a leak fix.
+		var match *hubclient.Agent
+		for i := range resp.Agents {
+			if resp.Agents[i].ID == ref {
+				if match != nil {
+					return nil, fmt.Errorf("agent %q unexpectedly matched more than one record", ref)
+				}
+				match = &resp.Agents[i]
+			}
 		}
+		if match == nil {
+			return nil, fmt.Errorf("agent %q not found", ref)
+		}
+		return match, nil
 	}
 
 	// Not a UUID: page through the full authorized list, matching by slug or
@@ -1251,7 +1266,7 @@ func init() {
 	listCmd.Flags().Lookup("descendants").NoOptDefVal = scopeInferSentinel
 	listCmd.Flags().StringVar(&filterAncestors, "ancestors", "", "List the agents in the reference's ancestry chain (default: self)")
 	listCmd.Flags().Lookup("ancestors").NoOptDefVal = scopeInferSentinel
-	listCmd.Flags().StringVar(&filterLineage, "lineage", "", "List the reference's creation-tree neighborhood: its direct parent agent plus all of that parent's descendants, bounded to the reference's project. A reference with no parent agent you can see (e.g. one created directly by a user) is its own root (default: self)")
+	listCmd.Flags().StringVar(&filterLineage, "lineage", "", "List the reference's creation-tree neighborhood: its direct parent agent plus all of that parent's descendants, bounded to the reference's project. A reference whose parent is a user, or whose only recorded parent is an agent you cannot see, is its own root (default: self)")
 	listCmd.Flags().Lookup("lineage").NoOptDefVal = scopeInferSentinel
 	listCmd.MarkFlagsMutuallyExclusive("descendants", "ancestors", "lineage")
 }
