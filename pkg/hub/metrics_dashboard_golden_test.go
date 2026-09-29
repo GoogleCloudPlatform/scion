@@ -133,7 +133,7 @@ func canonicalSeriesLabelKey(ts *monitoringpb.TimeSeries) string {
 }
 
 // mergeUsageGoldenFlushes merges every flush's points into one TimeSeries
-// per identity (design §7.6): each captured flush is its own
+// per identity: each captured flush is its own
 // CreateTimeSeries wire call — one point each — mirroring what sciontool
 // sends, but a dashboard query reads back one ListTimeSeries response per
 // identity carrying every point across the queried window. Without this
@@ -206,7 +206,7 @@ func lastPointValue(t *testing.T, ts *monitoringpb.TimeSeries) int64 {
 // go stale.
 func TestDashboardGoldenClaudeUsagePoints(t *testing.T) {
 	flushes := loadUsageGoldenFlushes(t)
-	require.GreaterOrEqual(t, len(flushes), 2, "golden fixture must carry at least two flushes to pin the cumulative shape (design §7.6)")
+	require.GreaterOrEqual(t, len(flushes), 2, "golden fixture must carry at least two flushes to pin the cumulative shape")
 	series := mergeUsageGoldenFlushes(flushes)
 
 	var callsSeries, tokenSeries []*monitoringpb.TimeSeries

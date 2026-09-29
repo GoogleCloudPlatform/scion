@@ -108,7 +108,7 @@ func TestClaudeUsageRuleMatchesFixtureAPIRequest(t *testing.T) {
 		}
 	}
 	// cache_read_tokens was 0 in the capture: a zero-valued type must not
-	// appear (design §3.2 "Tokens map[string]int64 // token_type -> n (>=0)").
+	// appear (design §3.3 "Tokens map[string]int64 // token_type -> n (>=0)").
 	if _, ok := increment.Tokens["cache_read"]; ok {
 		t.Error("zero-valued cache_read token_type must be omitted")
 	}
@@ -163,7 +163,7 @@ func TestClaudeUsageRuleMalformedTokenField(t *testing.T) {
 		t.Fatal("expected a malformed-field error")
 	}
 	// The call itself is still counted, with no tokens at all (not a
-	// partial total) for this event (design §3.3).
+	// partial total) for this event.
 	if increment.Calls != 1 || increment.Status != telemetrycontract.StatusSuccess {
 		t.Fatalf("increment = %+v, want Calls=1 Status=success even when malformed", increment)
 	}
@@ -418,8 +418,8 @@ func TestUsageDeriverObserveDedupesReplayedRequest(t *testing.T) {
 }
 
 // TestUsageDeriverObserveCountsMalformed pins that a call is a completed
-// response (design §3.3), so it is still counted even when one of its token
-// fields could not be parsed. Only the tokens for that event are dropped.
+// response, so it is still counted even when one of its token fields could
+// not be parsed. Only the tokens for that event are dropped.
 func TestUsageDeriverObserveCountsMalformed(t *testing.T) {
 	d := bareUsageDeriver(claudeUsageRule{})
 	record := &logspb.LogRecord{Attributes: []*commonpb.KeyValue{

@@ -125,7 +125,7 @@ func checkTokenTypeField(kv *commonpb.KeyValue) error {
 }
 
 // checkUsageTokenTypeField enforces the same closed token_type enum (design
-// §3.2: "any other value is an admission error") on the generic OTLP
+// §3.2: "Any other value is an admission error") on the generic OTLP
 // admission path: the generic path has no per-metric label allowlist to
 // route token_type's validation through the way cloudPointFieldsFor does
 // for GCP, so this checks it directly, scoped to scion.usage.tokens the

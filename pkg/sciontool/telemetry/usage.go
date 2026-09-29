@@ -59,7 +59,8 @@ type usageIncrement struct {
 // eventName is normalizedLogEventName's result for record, computed once by
 // the caller (observe) rather than a second time inside MatchLog: the
 // fingerprint needs it too, and it isn't free (it walks record's attributes
-// and, per the design, must also honor a native LogRecord.EventName field).
+// and must also honor a native LogRecord.EventName field, since a native SDK
+// may carry the event name there instead of a bare attribute).
 type usageRule interface {
 	// Harness is the SCION_HARNESS value this rule applies to.
 	Harness() string
@@ -102,7 +103,7 @@ func (claudeUsageRule) MatchLog(scopeName, eventName string, record *logspb.LogR
 			if err != nil {
 				// Keep checking the remaining fields (for a call still worth
 				// counting), but drop every token for this event rather than
-				// reporting a partial, misleading total (design §3.3).
+				// reporting a partial, misleading total.
 				if malformed == nil {
 					malformed = fmt.Errorf("claude api_request %s: %w", attrKey, err)
 				}
@@ -279,7 +280,7 @@ func (d *UsageDeriver) ProcessResourceLogs(ctx context.Context, resourceLogs []*
 //
 // The event name comes from normalizedLogEventName, not a bare "event.name"
 // attribute read: a native SDK may carry the event name in LogRecord's own
-// EventName field instead (design §3.3), and this must recognize either.
+// EventName field instead, and this must recognize either.
 func (d *UsageDeriver) observe(ctx context.Context, scopeName string, record *logspb.LogRecord) bool {
 	eventName, err := normalizedLogEventName(record, scopeName)
 	if err != nil || eventName == "" {
