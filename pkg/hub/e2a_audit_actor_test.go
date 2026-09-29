@@ -66,11 +66,11 @@ func TestApplyActor_DoesNotOverwriteExplicitFields(t *testing.T) {
 	require.Equal(t, "explicit-agent-id", record.ActorPrincipalID)
 }
 
-// TestApplyActor_PresetPrincipalDoesNotInheritAmbientCredential proves
-// review-1 finding F4: a caller that presets the principal to someone other
-// than ctx's own principal must not have that record's credential fields
-// filled from ctx's credential — that would name principal A (the preset)
-// with principal B's (ctx's) credential ID, name, boundary, and labels.
+// TestApplyActor_PresetPrincipalDoesNotInheritAmbientCredential proves a
+// caller that presets the principal to someone other than ctx's own
+// principal must not have that record's credential fields filled from ctx's
+// credential — that would name principal A (the preset) with principal B's
+// (ctx's) credential ID, name, boundary, and labels.
 func TestApplyActor_PresetPrincipalDoesNotInheritAmbientCredential(t *testing.T) {
 	projectID := tid("f4-project")
 	decoration := &CredentialDecoration{
@@ -121,11 +121,10 @@ func TestApplyActor_FillsEmptyFields(t *testing.T) {
 // TestDecisionAndMutationAudit_AgreeOnCorrelation proves the E.2 acceptance
 // criterion that decision and mutation audit produced within the same
 // request context carry the same principal, credential, boundary, and
-// correlation ID. Review-1 finding F6: this uses a decorated scoped UAT (not
-// a dev session, which carries no decoration), and exercises two real
-// production writers sharing the same context — UserAccessTokenService's
-// in-transaction createAuditRecord, and the fire-and-forget emitMutationAudit
-// — not a bare ApplyActor call.
+// correlation ID. Uses a decorated scoped UAT (a dev session carries no
+// decoration), and exercises two real production writers sharing the same
+// context — UserAccessTokenService's in-transaction createAuditRecord, and
+// the fire-and-forget emitMutationAudit.
 func TestDecisionAndMutationAudit_AgreeOnCorrelation(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -188,42 +187,98 @@ func TestDecisionAndMutationAudit_AgreeOnCorrelation(t *testing.T) {
 	require.Equal(t, decisionRecord.CorrelationID, persisted[0].CorrelationID)
 }
 
-// TestBoundedLabelsJSON_SanitizesAndBoundsALegacyRow proves review-1 finding
-// F2: a labels map that never went through ValidateCredentialMetadata (the
-// shape of a row written directly to the store, outside the issuance-time
-// validation path) still renders as bounded, sanitized, valid JSON — never
-// raw control characters, and never over the 1 KiB cap — in both the
-// decision-audit and mutation-audit snapshot.
-func TestBoundedLabelsJSON_SanitizesAndBoundsALegacyRow(t *testing.T) {
-	labels := make(map[string]string, 22)
-	// Two entries with a "00" prefix so they sort first among all keys
-	// below (every filler key below is prefixed "zz"), guaranteeing the
-	// uatMaxLabelCount cap cannot drop them before the sanitization/bound
-	// logic is exercised.
-	//
-	// A key containing a control character (never possible through the
-	// validator, but not impossible in a row written directly to the store).
-	labels["00bad\x00key"] = "v"
-	// A value far larger than the per-field cap.
-	labels["00oversize"] = strings.Repeat("x", 5*1024)
-	// 20 filler labels, sorted after the two above, to prove the overall
-	// count cap and byte bound hold even with many more labels than
-	// uatMaxLabelCount allows through.
-	for i := 0; i < 20; i++ {
-		labels["zzfiller"+string(rune('a'+i))] = "v"
+// TestBoundedLabelsJSON_SanitizesControlCharacterKey proves a labels map that
+// never went through ValidateCredentialMetadata (the shape of a row written
+// directly to the store, outside the issuance-time validation path) still
+// renders its key sanitized. The assertion runs against the *unmarshalled*
+// key, not the raw JSON string: json.Marshal always escapes a raw control
+// byte to "\u0000", so checking the raw string for "\x00" would pass even if
+// sanitizeForLog were never called. Decoding first and checking for the
+// actual NUL byte, and for the U+FFFD replacement sanitizeForLog inserts,
+// tests the real behavior.
+func TestBoundedLabelsJSON_SanitizesControlCharacterKey(t *testing.T) {
+	labels := map[string]string{"bad\x00key": "v"}
+
+	out := boundedLabelsJSON(labels)
+	var parsed map[string]string
+	require.NoError(t, json.Unmarshal([]byte(out), &parsed), "snapshot must always be valid JSON")
+
+	require.Len(t, parsed, 1)
+	for k := range parsed {
+		require.NotContains(t, k, "\x00", "the rendered key must not contain a raw control character")
+		require.Contains(t, k, "�", "the rendered key must contain the sanitizer's replacement character")
+	}
+}
+
+// TestBoundedLabelsJSON_TruncatesOnByteBoundAfterEscaping proves the byte
+// cap is a reachable path, not dead code. Per-field sanitization caps each
+// value at uatMaxLabelValueBytes raw bytes, but JSON escapes characters like
+// "<" to six bytes ("<"), which can multiply a sanitized value's
+// encoded size well past what the raw per-field caps alone would suggest.
+// Eight labels of uatMaxLabelValueBytes "<" characters each drive the
+// marshalled size over maxAuditLabelsBytes, forcing entries to be dropped.
+func TestBoundedLabelsJSON_TruncatesOnByteBoundAfterEscaping(t *testing.T) {
+	labels := make(map[string]string, uatMaxLabelCount)
+	for i := 0; i < uatMaxLabelCount; i++ {
+		labels["k"+string(rune('a'+i))] = strings.Repeat("<", uatMaxLabelValueBytes)
 	}
 
 	out := boundedLabelsJSON(labels)
 	require.LessOrEqual(t, len(out), maxAuditLabelsBytes, "snapshot must stay within the 1 KiB bound")
-	require.NotContains(t, out, "\x00", "snapshot must never contain a raw control character")
 
 	var parsed map[string]string
-	require.NoError(t, json.Unmarshal([]byte(out), &parsed), "snapshot must always be valid JSON")
+	require.NoError(t, json.Unmarshal([]byte(out), &parsed))
 
-	// The oversized value must have been truncated, not dropped or emitted raw.
-	for k, v := range parsed {
-		require.LessOrEqual(t, len(v), uatMaxLabelValueBytes+len("…"), "value for key %q exceeds the per-field bound: %q", k, v)
+	marker, ok := parsed[auditLabelsTruncatedMarker]
+	require.True(t, ok, "expected the truncation marker once escaping forces entries to be dropped")
+	require.Equal(t, "true", marker)
+	require.Less(t, len(parsed)-1, uatMaxLabelCount, "expected at least one label to have been dropped")
+}
+
+// TestBoundedLabelsJSON_MarksCountCapTruncationToo proves the truncation
+// marker is set when entries are dropped by the count cap alone, not only by
+// the byte cap: more than uatMaxLabelCount small labels never approach the
+// byte bound, so the marker's presence is the only signal that any were
+// dropped.
+func TestBoundedLabelsJSON_MarksCountCapTruncationToo(t *testing.T) {
+	labels := make(map[string]string, uatMaxLabelCount+4)
+	for i := 0; i < uatMaxLabelCount+4; i++ {
+		labels["k"+string(rune('a'+i))] = "v"
 	}
+
+	out := boundedLabelsJSON(labels)
+	var parsed map[string]string
+	require.NoError(t, json.Unmarshal([]byte(out), &parsed))
+
+	marker, ok := parsed[auditLabelsTruncatedMarker]
+	require.True(t, ok, "expected the truncation marker when the count cap drops entries")
+	require.Equal(t, "true", marker)
+	require.Len(t, parsed, uatMaxLabelCount+1, "expected exactly uatMaxLabelCount surviving labels plus the marker")
+}
+
+// TestBoundedLabelsJSON_MarkerCannotBeSpoofedByALegacyKey proves a source
+// label literally named "_truncated" cannot be mistaken for the real
+// truncation marker: it is renamed on render, regardless of whether any
+// actual truncation occurred, so a reader checking for the marker key never
+// sees issuer-supplied content there.
+func TestBoundedLabelsJSON_MarkerCannotBeSpoofedByALegacyKey(t *testing.T) {
+	labels := map[string]string{auditLabelsTruncatedMarker: "true"}
+
+	out := boundedLabelsJSON(labels)
+	var parsed map[string]string
+	require.NoError(t, json.Unmarshal([]byte(out), &parsed))
+
+	_, hasRealMarkerKey := parsed[auditLabelsTruncatedMarker]
+	require.False(t, hasRealMarkerKey, "no truncation occurred, so the marker key must not be present")
+
+	found := false
+	for k, v := range parsed {
+		if v == "true" {
+			found = true
+			require.NotEqual(t, auditLabelsTruncatedMarker, k, "the legacy key must have been renamed away from the marker key")
+		}
+	}
+	require.True(t, found, "the legacy label's value must still survive under a renamed key")
 }
 
 // TestBoundedLabelsJSON_AppliesToBothDecisionAndMutationAudit proves the same
@@ -256,14 +311,18 @@ func TestBoundedLabelsJSON_AppliesToBothDecisionAndMutationAudit(t *testing.T) {
 	decision := srv.authzService.Decide(reqCtx, req)
 	decisionRecord := BuildDecisionAuditRecord(reqCtx, req, decision)
 	require.LessOrEqual(t, len(decisionRecord.CredentialLabels), maxAuditLabelsBytes)
-	require.NotContains(t, decisionRecord.CredentialLabels, "\x00")
 	var decisionParsed map[string]string
 	require.NoError(t, json.Unmarshal([]byte(decisionRecord.CredentialLabels), &decisionParsed))
+	for k := range decisionParsed {
+		require.NotContains(t, k, "\x00", "decision audit: rendered key must not contain a raw control character")
+	}
 
 	mutationRecord := &store.MutationAuditRecord{MutationType: "test_mutation", TargetType: "project", TargetID: project.ID}
 	auditActorFromContext(reqCtx).ApplyActor(mutationRecord)
 	require.LessOrEqual(t, len(mutationRecord.CredentialLabels), maxAuditLabelsBytes)
-	require.NotContains(t, mutationRecord.CredentialLabels, "\x00")
 	var mutationParsed map[string]string
 	require.NoError(t, json.Unmarshal([]byte(mutationRecord.CredentialLabels), &mutationParsed))
+	for k := range mutationParsed {
+		require.NotContains(t, k, "\x00", "mutation audit: rendered key must not contain a raw control character")
+	}
 }

@@ -24,18 +24,10 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// E.2a: consolidated mutation-audit actor helper (plan §3.3).
-//
-// Before this file, four independent copies of "actor from context"
-// extraction existed: Server.emitMutationAudit (audit_authz.go),
-// UserAccessTokenService.createAuditRecord (useraccesstoken.go),
-// ProjectMembershipService.createAuditRecord (project_membership_service.go),
-// ProjectDeletionService.createAuditRecord (project_deletion_service.go), and
-// Server.buildAuditActorFromContext (handlers_users_core.go), each
-// hand-rolling the same principal/credential extraction and each missing the
-// E.2a credential snapshot, correlation ID, and executor fields. All five now
-// build an AuditActor through auditActorFromContext and apply it with
-// ApplyActor.
+// Every mutation-audit writer builds its actor/credential/correlation
+// snapshot through auditActorFromContext and applies it with ApplyActor, so
+// the extraction logic and the fields it populates exist in exactly one
+// place.
 // ---------------------------------------------------------------------------
 
 // AuditActor is the consolidated actor/credential/correlation snapshot
@@ -181,10 +173,11 @@ func (a AuditActor) ApplyActor(record *store.MutationAuditRecord) {
 // audit snapshot (plan §3.2/§3.3/§3.6: "credential_labels JSON ≤ 1 KiB").
 const maxAuditLabelsBytes = 1024
 
-// auditLabelsTruncatedMarker is the fixed key added when a labels map still
-// exceeds maxAuditLabelsBytes after per-field sanitization, so a truncated
+// auditLabelsTruncatedMarker is the fixed key added whenever any source
+// entry was dropped — by the count cap or the byte cap — so a truncated
 // snapshot is distinguishable from a complete one that merely happens to be
-// small.
+// small. A source key that would render as this exact string is renamed so
+// it can never be mistaken for the marker.
 const auditLabelsTruncatedMarker = "_truncated"
 
 // boundedLabelsJSON renders a credential decoration's labels as a bounded,
@@ -195,9 +188,11 @@ const auditLabelsTruncatedMarker = "_truncated"
 // CredentialDecoration.LogValue uses: a key that fails the bounded shape is
 // sanitized like a value, and every value is sanitized and length-capped.
 // The result is capped at uatMaxLabelCount entries (sorted by key, so the
-// selection is deterministic) and at maxAuditLabelsBytes total; if it still
-// does not fit, entries are dropped from the end until it does, and a fixed
-// truncation marker is added, so the output is always valid, bounded JSON.
+// selection is deterministic) and at maxAuditLabelsBytes total — JSON
+// escaping (e.g. "<" to "<") can widen sanitized content past the
+// per-field caps' sum, so the byte cap is a real path, not a defensive
+// no-op. If entries are dropped by either cap, auditLabelsTruncatedMarker is
+// set, so the output is always valid, bounded, unambiguously-marked JSON.
 func boundedLabelsJSON(labels map[string]string) string {
 	if len(labels) == 0 {
 		return ""
@@ -207,7 +202,8 @@ func boundedLabelsJSON(labels map[string]string) string {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	if len(keys) > uatMaxLabelCount {
+	countTruncated := len(keys) > uatMaxLabelCount
+	if countTruncated {
 		keys = keys[:uatMaxLabelCount]
 	}
 
@@ -217,6 +213,12 @@ func boundedLabelsJSON(labels map[string]string) string {
 			renderKey := k
 			if !isValidLabelKeyShape(k) {
 				renderKey = sanitizeForLog(k, uatMaxLabelKeyBytes)
+			}
+			// A source key must never be able to render as the marker key:
+			// that would let issuer-supplied content spoof a truncation
+			// state that did not occur.
+			if renderKey == auditLabelsTruncatedMarker {
+				renderKey = renderKey + "_key"
 			}
 			out[renderKey] = sanitizeForLog(labels[k], uatMaxLabelValueBytes)
 		}
@@ -230,13 +232,9 @@ func boundedLabelsJSON(labels map[string]string) string {
 		return string(b), len(b) <= maxAuditLabelsBytes
 	}
 
-	if out, ok := build(keys, false); ok {
+	if out, ok := build(keys, countTruncated); ok {
 		return out
 	}
-	// Defence in depth: per-field caps already keep uatMaxLabelCount entries
-	// well under maxAuditLabelsBytes in the common case (see
-	// credential_decoration.go's equivalent note), so this loop is expected
-	// to be unreachable in practice, not a normal code path.
 	for len(keys) > 0 {
 		keys = keys[:len(keys)-1]
 		if out, ok := build(keys, true); ok {
