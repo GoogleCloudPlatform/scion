@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // =============================================================================
@@ -67,19 +68,34 @@ func (e *StoreDecisionAuditEmitter) EmitDecisionAudit(ctx context.Context, recor
 
 // emitDecisionAudit builds and emits a decision audit record from a Decide call.
 func (a *AuthzService) emitDecisionAudit(ctx context.Context, request AuthzRequest, decision Decision) {
-	// Sampling: always audit deny decisions; sample allow decisions.
-	if decision.Allowed && a.DecisionAuditSampleRate < 1.0 {
+	// Sampling: always audit deny decisions; sample allow decisions, unless
+	// the request carries the always-audit marker (e.g. G's delegated-agent
+	// events), which forces an allow decision to be audited too.
+	if decision.Allowed && !request.AlwaysAudit && a.DecisionAuditSampleRate < 1.0 {
 		if rand.Float64() >= a.DecisionAuditSampleRate {
 			return
 		}
 	}
 
+	record := BuildDecisionAuditRecord(ctx, request, decision)
+	record.Sampled = a.DecisionAuditSampleRate < 1.0
+
+	a.decisionAuditEmitter.EmitDecisionAudit(ctx, record)
+}
+
+// BuildDecisionAuditRecord builds a *store.DecisionAuditRecord from an
+// AuthzRequest/Decision pair, without emitting it or applying sampling. It is
+// exported so non-Decide decision-audit paths (e.g. G's aggregated
+// list-filter record) can produce schema-consistent records through the same
+// field mapping Decide uses, instead of hand-assembling
+// store.DecisionAuditRecord themselves. Sampled defaults to false; callers
+// that go through Decide's sampling policy should set it explicitly, as
+// emitDecisionAudit does.
+func BuildDecisionAuditRecord(ctx context.Context, request AuthzRequest, decision Decision) *store.DecisionAuditRecord {
 	result := "deny"
 	if decision.Allowed {
 		result = "allow"
 	}
-
-	sampled := a.DecisionAuditSampleRate < 1.0
 
 	record := &store.DecisionAuditRecord{
 		Timestamp:      time.Now(),
@@ -90,20 +106,32 @@ func (a *AuthzService) emitDecisionAudit(ctx context.Context, request AuthzReque
 		ResourceType:   request.Resource.Type,
 		ResourceID:     request.Resource.ID,
 		Permission:     string(request.Action),
+		PermissionID:   decision.PermissionID,
 		Result:         result,
 		Reason:         decision.Reason,
 		MatchedPolicy:  decision.MatchedPolicy,
 		MatchedGrant:   decision.MatchedGrant,
 		PolicyID:       decision.BindingID,
-		Sampled:        sampled,
+		CorrelationID:  logging.RequestIDFromContext(ctx),
 	}
 
-	// Try to extract route from context
 	if route := routeFromContext(ctx); route != "" {
 		record.Route = route
 	}
 
-	a.decisionAuditEmitter.EmitDecisionAudit(ctx, record)
+	if decoration, ok := CredentialDecorationFromContext(ctx); ok {
+		record.CredentialName = sanitizeForLog(decoration.TokenName, uatMaxNameBytes)
+		record.CredentialBoundaryKind = decoration.Boundary.Kind
+		record.CredentialBoundaryProjectID = decoration.Boundary.ProjectID
+		record.CredentialLabels = boundedLabelsJSON(decoration.Labels)
+	}
+
+	if ec, ok := ExecutorContextFromContext(ctx); ok {
+		record.ExecutorKind = ec.Kind
+		record.ExecutorID = ec.ID
+	}
+
+	return record
 }
 
 // routeContextKey is the context key for the current HTTP route.
@@ -130,21 +158,10 @@ func routeFromContext(ctx context.Context) string {
 // It extracts actor identity from the context and stores the record.
 // Errors are logged but do not fail the request (best-effort).
 func (s *Server) emitMutationAudit(ctx context.Context, record *store.MutationAuditRecord) {
-	// Extract actor identity from context if not already populated.
-	if record.ActorPrincipalKind == "" || record.ActorPrincipalID == "" {
-		identity := GetIdentityFromContext(ctx)
-		if identity != nil {
-			record.ActorPrincipalKind = identity.Type()
-			record.ActorPrincipalID = identity.ID()
-
-			// Extract credential info
-			credential := GetCredentialContextFromContext(ctx)
-			if credential.Kind != "" {
-				record.ActorCredentialID = credential.ID
-				record.ActorCredentialType = string(credential.Kind)
-			}
-		}
-	}
+	// E.2a: consolidated actor/credential-snapshot/correlation helper (plan
+	// §3.3), replacing this function's own copy of the extraction logic.
+	// ApplyActor only fills fields the caller has not already set explicitly.
+	auditActorFromContext(ctx).ApplyActor(record)
 
 	if record.Timestamp.IsZero() {
 		record.Timestamp = time.Now()

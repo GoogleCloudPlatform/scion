@@ -167,6 +167,14 @@ type AuthzRequest struct {
 	Action     Action
 	Permission string // Canonical permission ID (e.g., "hub.settings.read"); when set, role binding evaluation uses this instead of Resource+Action.
 	Explain    bool   // When true, collect step-by-step trace in Decision
+
+	// AlwaysAudit forces Decide's single audit exit to emit a decision audit
+	// record for this request regardless of the allow-sampling rate
+	// (AuthzService.DecisionAuditSampleRate). Deny decisions are always
+	// audited already; this exists for callers that need an allow decision
+	// audited unconditionally too — for example G's delegated-agent events.
+	// It never changes the authorization result.
+	AlwaysAudit bool
 }
 
 // AuthzRequestFromContext builds a request from authentication middleware
@@ -206,6 +214,14 @@ type Decision struct {
 	CredentialType string
 	CredentialKind string
 	ExplainTrace   []DecisionStep `json:"explainTrace,omitempty"`
+
+	// PermissionID is the exact canonical permission ID decide evaluated
+	// (AuthzRequest.Permission after the request's own permission
+	// resolution) — decorateDecision's caller passes it in, and it is never
+	// independently re-derived from Resource/Action downstream (E.2a, plan
+	// §3.2, ruling Q7). Empty for decisions that fail before permission
+	// resolution.
+	PermissionID string `json:"permissionId,omitempty"`
 
 	// Provenance contains the full decision provenance when Explain=true.
 	// For non-explain requests, this is populated with minimal data
@@ -271,17 +287,36 @@ func (a *AuthzService) CheckAccess(ctx context.Context, identity Identity, resou
 	})
 }
 
-// Decide evaluates an authorization request through the AK1 kernel.
+// Decide evaluates an authorization request through the AK1 kernel and emits
+// exactly one decision audit record for the outcome, regardless of which
+// internal return path inside decide produced it.
+//
+// E.2a (plan §3.2): before this wrapper existed, decide's body emitted its
+// own audit record at two internal points (the broker-denied early return and
+// the final kernel-evaluated return), which meant five other early-return
+// denial paths — including the UAT project/scope gate — produced no decision
+// audit record at all. Splitting the single audit emit out to this thin
+// wrapper covers every return path in decide by construction: no future
+// early return inside decide can silently skip the audit again.
+func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decision {
+	decision := a.decide(ctx, request)
+	if a.decisionAuditEmitter != nil {
+		a.emitDecisionAudit(ctx, request, decision)
+	}
+	return decision
+}
+
+// decide is Decide's body: the AK1 kernel evaluation itself.
 // All grants are traced to either a RoleBinding or a named relationship grant.
 // All reductions are traced to a named restriction. No undocumented bypasses.
-func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decision {
+func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decision {
 	principal := request.Principal
 	if principal.Identity == nil {
-		return decorateDecision(Decision{Allowed: false, Reason: "missing principal"}, principal, request.Credential)
+		return decorateDecision(Decision{Allowed: false, Reason: "missing principal"}, principal, request.Credential, "")
 	}
 	derivedPrincipal := principalContextForIdentity(principal.Identity)
 	if principal.Kind != "" && principal.Kind != derivedPrincipal.Kind {
-		return decorateDecision(Decision{Allowed: false, Reason: "principal kind does not match identity"}, derivedPrincipal, request.Credential)
+		return decorateDecision(Decision{Allowed: false, Reason: "principal kind does not match identity"}, derivedPrincipal, request.Credential, "")
 	}
 	principal.Kind = derivedPrincipal.Kind
 	if principal.ID == "" {
@@ -296,14 +331,9 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 	// Unsupported principal kinds — fail closed.
 	switch principal.Kind {
 	case PrincipalKindFederatedService:
-		return decorateDecision(Decision{Allowed: false, Reason: "federated service identities are not supported"}, principal, credential)
+		return decorateDecision(Decision{Allowed: false, Reason: "federated service identities are not supported"}, principal, credential, "")
 	case PrincipalKindBroker:
-		result := decorateDecision(Decision{Allowed: false, Reason: "broker identities are not supported by authorization"}, principal, credential)
-		// Emit the audit before returning so broker denies are diagnosable.
-		if a.decisionAuditEmitter != nil {
-			a.emitDecisionAudit(ctx, request, result)
-		}
-		return result
+		return decorateDecision(Decision{Allowed: false, Reason: "broker identities are not supported by authorization"}, principal, credential, "")
 	}
 
 	// Resolve permission ID. When the caller provides an explicit permission,
@@ -321,7 +351,7 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 		if user, ok := principal.Identity.(UserIdentity); ok {
 			if scoped, ok := user.(*ScopedUserIdentity); ok {
 				if denied := a.enforceUATConstraints(scoped, request.Resource, request.Action); denied != nil {
-					return decorateDecision(*denied, principal, credential)
+					return decorateDecision(*denied, principal, credential, permissionID)
 				}
 			}
 		}
@@ -351,7 +381,7 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 				MembershipPaths: []MembershipPathDetail{},
 			}
 		}
-		return decorateDecision(d, principal, credential)
+		return decorateDecision(d, principal, credential, permissionID)
 	}
 
 	// Build typed principal closure map (O2: type:id composite keys).
@@ -394,7 +424,7 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 				MembershipPaths: []MembershipPathDetail{},
 			}
 		}
-		return decorateDecision(d, principal, credential)
+		return decorateDecision(d, principal, credential, permissionID)
 	}
 
 	// ── Step 4: Load role definitions ─────────────────────────────────
@@ -419,7 +449,7 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 				MembershipPaths: []MembershipPathDetail{},
 			}
 		}
-		return decorateDecision(d, principal, credential)
+		return decorateDecision(d, principal, credential, permissionID)
 	}
 
 	// ── Step 5: Convert to CandidateBindings ──────────────────────────
@@ -581,14 +611,7 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 		}
 	}
 
-	result := decorateDecision(decision, principal, credential)
-
-	// Emit decision audit if emitter is configured.
-	if a.decisionAuditEmitter != nil {
-		a.emitDecisionAudit(ctx, request, result)
-	}
-
-	return result
+	return decorateDecision(decision, principal, credential, permissionID)
 }
 
 // DecideFromContext evaluates a request using the authenticated principal and
@@ -1423,11 +1446,16 @@ func credentialContextForIdentity(identity Identity) CredentialContext {
 	}
 }
 
-func decorateDecision(decision Decision, principal PrincipalContext, credential CredentialContext) Decision {
+// decorateDecision finalizes a Decision with principal/credential attribution
+// and the exact permission ID that was evaluated. permissionID is "" for
+// decisions that return before permission resolution (missing principal,
+// unsupported principal kind) — see decide's early-return call sites.
+func decorateDecision(decision Decision, principal PrincipalContext, credential CredentialContext, permissionID string) Decision {
 	decision.PrincipalKind = principal.Kind
 	decision.CredentialID = credential.ID
 	decision.CredentialType = credential.Type
 	decision.CredentialKind = string(credential.Kind)
+	decision.PermissionID = permissionID
 	if decision.MatchedPolicy == "" {
 		decision.MatchedPolicy = decision.BindingID
 	}
