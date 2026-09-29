@@ -297,6 +297,186 @@ func TestExpireStuckPendingMessages(t *testing.T) {
 	assert.Equal(t, 0, expired, "already-expired message not counted again")
 }
 
+// TestCountStuckPendingMessages_ExcludesUserRecipients is a regression test
+// for nc-promote-busy round 2 (R1): only a message addressed to an agent is
+// ever actually dispatched through the broker/runtime, so only that row can
+// be genuinely "stuck". A "user:" recipient row landing in dispatch_state
+// "pending" is always a writer bug (e.g. the deliverToUser omission fixed by
+// nc-promote-busy), not a stalled dispatch, and must not be counted here —
+// counting it would let the sweep "heal" the bug into a silent data loss
+// instead of surfacing it.
+func TestCountStuckPendingMessages_ExcludesUserRecipients(t *testing.T) {
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	ctx := context.Background()
+
+	proj := &store.Project{
+		ID: uuid.NewString(), Name: "p", Slug: "p-" + uuid.NewString()[:8],
+		OwnerID: uuid.NewString(),
+	}
+	require.NoError(t, cs.CreateProject(ctx, proj))
+
+	// An old pending row addressed to a user — must never be counted stuck.
+	userMsg := &store.Message{
+		ID: uuid.NewString(), ProjectID: proj.ID,
+		Sender: "agent:a", Recipient: "user:alice", Msg: "old",
+		CreatedAt: time.Now().Add(-10 * time.Minute),
+	}
+	require.NoError(t, cs.CreateMessage(ctx, userMsg))
+
+	// An old pending row addressed to an agent — still counted stuck.
+	agentMsg := &store.Message{
+		ID: uuid.NewString(), ProjectID: proj.ID,
+		Sender: "user:x", Recipient: "agent:b", Msg: "old",
+		CreatedAt: time.Now().Add(-10 * time.Minute),
+	}
+	require.NoError(t, cs.CreateMessage(ctx, agentMsg))
+
+	cutoff := time.Now().Add(-5 * time.Minute)
+	count, err := cs.CountStuckPendingMessages(ctx, cutoff)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count, "only the agent-recipient row is counted stuck")
+}
+
+// TestExpireStuckPendingMessages_SkipsUserRecipients is the ExpireStuck
+// counterpart of TestCountStuckPendingMessages_ExcludesUserRecipients: a
+// user-recipient pending row past the TTL must survive untouched (not be
+// flipped to failed, which would put it on the PurgeFailedMessages clock).
+func TestExpireStuckPendingMessages_SkipsUserRecipients(t *testing.T) {
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	ctx := context.Background()
+
+	proj := &store.Project{
+		ID: uuid.NewString(), Name: "p", Slug: "p-" + uuid.NewString()[:8],
+		OwnerID: uuid.NewString(),
+	}
+	require.NoError(t, cs.CreateProject(ctx, proj))
+
+	userMsg := &store.Message{
+		ID: uuid.NewString(), ProjectID: proj.ID,
+		Sender: "agent:a", Recipient: "user:alice", Msg: "old",
+		CreatedAt: time.Now().Add(-25 * time.Hour),
+	}
+	require.NoError(t, cs.CreateMessage(ctx, userMsg))
+
+	agentMsg := &store.Message{
+		ID: uuid.NewString(), ProjectID: proj.ID,
+		Sender: "user:x", Recipient: "agent:b", Msg: "old",
+		CreatedAt: time.Now().Add(-25 * time.Hour),
+	}
+	require.NoError(t, cs.CreateMessage(ctx, agentMsg))
+
+	ttlCutoff := time.Now().Add(-24 * time.Hour)
+	reason := "expired: stuck in pending state beyond TTL"
+	expired, err := cs.ExpireStuckPendingMessages(ctx, ttlCutoff, reason)
+	require.NoError(t, err)
+	assert.Equal(t, 1, expired, "only the agent-recipient row is expired")
+
+	gotUser, err := cs.GetMessage(ctx, userMsg.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchPending, gotUser.DispatchState,
+		"user-recipient row must survive untouched, not be flipped to failed")
+
+	gotAgent, err := cs.GetMessage(ctx, agentMsg.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchFailed, gotAgent.DispatchState,
+		"agent-recipient row is still expired")
+}
+
+// TestBackfillUserRecipientDispatchState is the regression test for
+// nc-promote-busy round 2 (R3): it seeds one row of each shape the pre-fix
+// bug (and the sweep that later "healed" it) could have left behind, plus a
+// genuine agent-recipient dispatch failure that must never be touched, and
+// asserts only the two nc-promote-busy shapes change.
+func TestBackfillUserRecipientDispatchState(t *testing.T) {
+	const expiredReason = "expired: stuck in pending state beyond TTL"
+
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	ctx := context.Background()
+
+	proj := &store.Project{
+		ID: uuid.NewString(), Name: "p", Slug: "p-" + uuid.NewString()[:8],
+		OwnerID: uuid.NewString(),
+	}
+	require.NoError(t, cs.CreateProject(ctx, proj))
+
+	// Shape 1: a user-recipient row still exactly as the bug left it —
+	// dispatch_state defaults to "pending" because nothing stamped it.
+	userPending := &store.Message{
+		ID: uuid.NewString(), ProjectID: proj.ID,
+		Sender: "agent:a", Recipient: "user:alice", Msg: "reply 1",
+		CreatedAt: time.Now().Add(-2 * time.Hour),
+	}
+	require.NoError(t, cs.CreateMessage(ctx, userPending))
+
+	// Shape 2: the same bug, but the stuck-message sweep has since flipped
+	// it to "failed" with the exact TTL-expiry reason.
+	userExpiredFailed := &store.Message{
+		ID: uuid.NewString(), ProjectID: proj.ID,
+		Sender: "agent:a", Recipient: "user:bob", Msg: "reply 2",
+		CreatedAt: time.Now().Add(-30 * time.Hour),
+	}
+	require.NoError(t, cs.CreateMessage(ctx, userExpiredFailed))
+	require.NoError(t, cs.MarkMessageFailed(ctx, userExpiredFailed.ID, expiredReason))
+
+	// Negative control 1: a user-recipient row that failed for a genuine,
+	// unrelated reason. Must stay failed with its own reason untouched —
+	// only the exact TTL-expiry string is eligible.
+	userOtherFailed := &store.Message{
+		ID: uuid.NewString(), ProjectID: proj.ID,
+		Sender: "agent:a", Recipient: "user:carol", Msg: "reply 3",
+		CreatedAt: time.Now().Add(-30 * time.Hour),
+	}
+	require.NoError(t, cs.CreateMessage(ctx, userOtherFailed))
+	require.NoError(t, cs.MarkMessageFailed(ctx, userOtherFailed.ID, "some unrelated delivery failure"))
+
+	// Negative control 2: an agent-recipient row, genuinely pending. Only a
+	// "user:" recipient is ever eligible for this backfill.
+	agentPending := &store.Message{
+		ID: uuid.NewString(), ProjectID: proj.ID,
+		Sender: "user:x", Recipient: "agent:b", Msg: "instruction",
+		CreatedAt: time.Now().Add(-2 * time.Hour),
+	}
+	require.NoError(t, cs.CreateMessage(ctx, agentPending))
+
+	repaired, err := cs.BackfillUserRecipientDispatchState(ctx, expiredReason)
+	require.NoError(t, err)
+	assert.Equal(t, 2, repaired, "only the two nc-promote-busy shapes are repaired")
+
+	gotPending, err := cs.GetMessage(ctx, userPending.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchDispatched, gotPending.DispatchState)
+	assert.Nil(t, gotPending.DispatchFailureReason)
+	require.NotNil(t, gotPending.DispatchedAt)
+	assert.WithinDuration(t, userPending.CreatedAt, *gotPending.DispatchedAt, time.Second,
+		"dispatched_at is backdated to the row's own created time")
+
+	gotExpiredFailed, err := cs.GetMessage(ctx, userExpiredFailed.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchDispatched, gotExpiredFailed.DispatchState)
+	assert.Nil(t, gotExpiredFailed.DispatchFailureReason)
+	require.NotNil(t, gotExpiredFailed.DispatchedAt)
+
+	gotOtherFailed, err := cs.GetMessage(ctx, userOtherFailed.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchFailed, gotOtherFailed.DispatchState,
+		"a genuine, differently-reasoned failure must never be repaired")
+	require.NotNil(t, gotOtherFailed.DispatchFailureReason)
+	assert.Equal(t, "some unrelated delivery failure", *gotOtherFailed.DispatchFailureReason)
+
+	gotAgentPending, err := cs.GetMessage(ctx, agentPending.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchPending, gotAgentPending.DispatchState,
+		"an agent-recipient row is never touched by this backfill")
+
+	// Idempotent: running again repairs nothing further.
+	repairedAgain, err := cs.BackfillUserRecipientDispatchState(ctx, expiredReason)
+	require.NoError(t, err)
+	assert.Equal(t, 0, repairedAgain, "a second pass finds nothing left to repair")
+}
+
 func TestFailPendingMessagesWithMissingRecipient(t *testing.T) {
 	client := enttest.NewClient(t)
 	cs := NewCompositeStore(client)

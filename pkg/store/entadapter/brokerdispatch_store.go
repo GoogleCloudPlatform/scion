@@ -270,10 +270,20 @@ func (s *BrokerDispatchStore) MarkMessageFailed(ctx context.Context, id string, 
 }
 
 // CountStuckPendingMessages returns the number of messages still in
-// dispatch_state='pending' whose created timestamp is before the given cutoff.
+// dispatch_state='pending' whose created timestamp is before the given
+// cutoff. Scoped to agent recipients only (message.RecipientHasPrefix
+// "agent:") — only a message addressed to an agent is actually dispatched
+// through the broker/runtime, so only that row can be genuinely "stuck".
+// A "user:" recipient row reaching this state is always a bug in the writer
+// (e.g. nc-promote-busy), not a stalled dispatch, and must not be counted or
+// expired here.
 func (s *BrokerDispatchStore) CountStuckPendingMessages(ctx context.Context, before time.Time) (int, error) {
 	n, err := s.client.Message.Query().
-		Where(message.DispatchStateEQ(store.MessageDispatchPending), message.CreatedLT(before)).
+		Where(
+			message.DispatchStateEQ(store.MessageDispatchPending),
+			message.CreatedLT(before),
+			message.RecipientHasPrefix("agent:"),
+		).
 		Count(ctx)
 	if err != nil {
 		return 0, mapError(err)
@@ -282,10 +292,15 @@ func (s *BrokerDispatchStore) CountStuckPendingMessages(ctx context.Context, bef
 }
 
 // ExpireStuckPendingMessages transitions messages stuck in pending state past
-// the given cutoff to failed, recording the reason. Returns the number expired.
+// the given cutoff to failed, recording the reason. Returns the number
+// expired. Scoped to agent recipients only — see CountStuckPendingMessages.
 func (s *BrokerDispatchStore) ExpireStuckPendingMessages(ctx context.Context, before time.Time, reason string) (int, error) {
 	affected, err := s.client.Message.Update().
-		Where(message.DispatchStateEQ(store.MessageDispatchPending), message.CreatedLT(before)).
+		Where(
+			message.DispatchStateEQ(store.MessageDispatchPending),
+			message.CreatedLT(before),
+			message.RecipientHasPrefix("agent:"),
+		).
 		SetDispatchState(store.MessageDispatchFailed).
 		SetNillableDispatchFailureReason(&reason).
 		Save(ctx)
@@ -358,6 +373,70 @@ func (s *BrokerDispatchStore) FailPendingMessagesWithMissingRecipient(ctx contex
 		return 0, mapError(err)
 	}
 	return affected, nil
+}
+
+// BackfillUserRecipientDispatchState repairs "user:"-recipient rows left by
+// the pre-fix nc-promote-busy bug (deliverToUser, deliveryUserDirect,
+// createInboxMessage, and the group-set-to-user path all once persisted a
+// storeMsg without stamping DispatchState, which the Ent schema silently
+// defaults to "pending"). Two shapes are eligible:
+//   - dispatch_state = "pending": the row as originally written by the bug.
+//   - dispatch_state = "failed" with dispatch_failure_reason exactly equal
+//     to expiredReason: the same row after ExpireStuckPendingMessages swept
+//     it (the sweep's TTL predicate does not distinguish a genuinely stuck
+//     agent dispatch from this writer bug).
+//
+// Both are safe to repair unconditionally: no code path legitimately writes
+// a "user:" recipient row to "pending" (only a message addressed to an agent
+// is ever actually dispatched through the broker/runtime — see
+// FailPendingMessagesWithMissingRecipient's same agent-only scoping). The
+// exact expiredReason string match ensures a genuine, unrelated delivery
+// failure — recorded by handlers_chat_v2.go's unreachable-agent path or by
+// message_delivery_failures.go's buffered-flush-failure path, both under a
+// different reason string — is never touched and stays "failed".
+//
+// Sets dispatch_state="dispatched" and clears dispatch_failure_reason on
+// every eligible row. Also stamps dispatched_at from the row's own created
+// time, but only when dispatched_at is not already set — a per-row value,
+// so Ent's typed bulk Update (a single static SET clause for every matched
+// row) cannot express it; a row's own creation time is the closest available
+// proxy for when the reply was actually made, since the real dispatch instant
+// was never recorded. Returns the number of rows repaired.
+func (s *BrokerDispatchStore) BackfillUserRecipientDispatchState(ctx context.Context, expiredReason string) (int, error) {
+	rows, err := s.client.Message.Query().
+		Where(
+			message.RecipientHasPrefix("user:"),
+			message.Or(
+				message.DispatchStateEQ(store.MessageDispatchPending),
+				message.And(
+					message.DispatchStateEQ(store.MessageDispatchFailed),
+					message.DispatchFailureReasonEQ(expiredReason),
+				),
+			),
+		).
+		Select(message.FieldID, message.FieldCreated, message.FieldDispatchedAt).
+		All(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	if len(rows) == 0 {
+		return 0, nil
+	}
+
+	repaired := 0
+	for _, m := range rows {
+		upd := s.client.Message.UpdateOneID(m.ID).
+			SetDispatchState(store.MessageDispatchDispatched).
+			ClearDispatchFailureReason()
+		if m.DispatchedAt == nil {
+			upd = upd.SetDispatchedAt(m.Created)
+		}
+		if err := upd.Exec(ctx); err != nil {
+			return repaired, mapError(err)
+		}
+		repaired++
+	}
+	return repaired, nil
 }
 
 // ListPendingMessages returns messages still pending delivery whose target agent
