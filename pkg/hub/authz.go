@@ -161,6 +161,20 @@ type AuthzRequest struct {
 	Action     Action
 	Permission string // Canonical permission ID (e.g., "hub.settings.read"); when set, role binding evaluation uses this instead of Resource+Action.
 	Explain    bool   // When true, collect step-by-step trace in Decision
+
+	// Actor and Purpose describe who initiated the operation and why, when
+	// that differs from Principal (for example a delivery performed for a
+	// target agent). They are recorded on every decision (and in its
+	// provenance when present) for audit and never contribute to the
+	// decision.
+	Actor   *DecisionActor
+	Purpose string
+}
+
+// DecisionActor identifies the initiator of an operation. Audit-only.
+type DecisionActor struct {
+	Kind PrincipalKind `json:"kind,omitempty"`
+	ID   string        `json:"id"`
 }
 
 // AuthzRequestFromContext builds a request from authentication middleware
@@ -201,6 +215,11 @@ type Decision struct {
 	CredentialKind string
 	ExplainTrace   []DecisionStep `json:"explainTrace,omitempty"`
 
+	// Actor and Purpose echo AuthzRequest.Actor/Purpose on every decision.
+	// Audit-only: they never contribute to Allowed.
+	Actor   *DecisionActor `json:"actor,omitempty"`
+	Purpose string         `json:"purpose,omitempty"`
+
 	// Provenance contains the full decision provenance when Explain=true.
 	// For non-explain requests, this is populated with minimal data
 	// (matched grant and deny reason).
@@ -236,6 +255,10 @@ type AuthzService struct {
 	// relationshipResolver handles progeny relationship grants. Lazily
 	// initialized on first use.
 	relationshipResolver *RelationshipGrantResolver
+
+	// progenyAdapters holds progeny sharing-source adapters registered
+	// through RegisterProgenyAdapter.
+	progenyAdapters progenyAdapterRegistry
 }
 
 // NewAuthzService creates a new AuthzService.
@@ -271,11 +294,11 @@ func (a *AuthzService) CheckAccess(ctx context.Context, identity Identity, resou
 func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decision {
 	principal := request.Principal
 	if principal.Identity == nil {
-		return decorateDecision(Decision{Allowed: false, Reason: "missing principal"}, principal, request.Credential)
+		return decorateDecision(Decision{Allowed: false, Reason: "missing principal"}, request, principal, request.Credential)
 	}
 	derivedPrincipal := principalContextForIdentity(principal.Identity)
 	if principal.Kind != "" && principal.Kind != derivedPrincipal.Kind {
-		return decorateDecision(Decision{Allowed: false, Reason: "principal kind does not match identity"}, derivedPrincipal, request.Credential)
+		return decorateDecision(Decision{Allowed: false, Reason: "principal kind does not match identity"}, request, derivedPrincipal, request.Credential)
 	}
 	principal.Kind = derivedPrincipal.Kind
 	if principal.ID == "" {
@@ -290,9 +313,9 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 	// Unsupported principal kinds — fail closed.
 	switch principal.Kind {
 	case PrincipalKindFederatedService:
-		return decorateDecision(Decision{Allowed: false, Reason: "federated service identities are not supported"}, principal, credential)
+		return decorateDecision(Decision{Allowed: false, Reason: "federated service identities are not supported"}, request, principal, credential)
 	case PrincipalKindBroker:
-		result := decorateDecision(Decision{Allowed: false, Reason: "broker identities are not supported by authorization"}, principal, credential)
+		result := decorateDecision(Decision{Allowed: false, Reason: "broker identities are not supported by authorization"}, request, principal, credential)
 		// Emit the audit before returning so broker denies are diagnosable.
 		if a.decisionAuditEmitter != nil {
 			a.emitDecisionAudit(ctx, request, result)
@@ -301,10 +324,32 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 	}
 
 	// Resolve permission ID. When the caller provides an explicit permission,
-	// use it; otherwise derive from resource type + action.
+	// use it; otherwise resolve it from resource type + action. A pair that
+	// does not name exactly one permission is denied.
 	permissionID := request.Permission
 	if permissionID == "" {
-		permissionID = derivePermissionID(request.Resource.Type, request.Action)
+		resolved, err := resolveResourcePermission(request.Resource.Type, request.Action)
+		if err != nil {
+			a.logger.Warn("authorization request has no resolvable permission",
+				"resource_type", request.Resource.Type, "action", string(request.Action), "error", err)
+			d := Decision{Allowed: false, Reason: unresolvablePermissionReason}
+			if request.Explain {
+				d.Provenance = &DecisionProvenance{
+					Errors:          []string{err.Error()},
+					DenyReasons:     []string{unresolvablePermissionReason},
+					Grants:          []GrantDetail{},
+					InactiveGrants:  []GrantDetail{},
+					Restrictions:    []RestrictionProvenance{},
+					MembershipPaths: []MembershipPathDetail{},
+				}
+			}
+			result := decorateDecision(d, request, principal, credential)
+			if a.decisionAuditEmitter != nil {
+				a.emitDecisionAudit(ctx, request, result)
+			}
+			return result
+		}
+		permissionID = resolved
 	}
 
 	// ── Step 1: UAT project constraint (pre-kernel gate) ──────────────
@@ -315,7 +360,7 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 		if user, ok := principal.Identity.(UserIdentity); ok {
 			if scoped, ok := user.(*ScopedUserIdentity); ok {
 				if denied := a.enforceUATConstraints(scoped, request.Resource, request.Action); denied != nil {
-					return decorateDecision(*denied, principal, credential)
+					return decorateDecision(*denied, request, principal, credential)
 				}
 			}
 		}
@@ -345,7 +390,7 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 				MembershipPaths: []MembershipPathDetail{},
 			}
 		}
-		return decorateDecision(d, principal, credential)
+		return decorateDecision(d, request, principal, credential)
 	}
 
 	// Build typed principal closure map (O2: type:id composite keys).
@@ -388,7 +433,7 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 				MembershipPaths: []MembershipPathDetail{},
 			}
 		}
-		return decorateDecision(d, principal, credential)
+		return decorateDecision(d, request, principal, credential)
 	}
 
 	// ── Step 4: Load role definitions ─────────────────────────────────
@@ -413,7 +458,7 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 				MembershipPaths: []MembershipPathDetail{},
 			}
 		}
-		return decorateDecision(d, principal, credential)
+		return decorateDecision(d, request, principal, credential)
 	}
 
 	// ── Step 5: Convert to CandidateBindings ──────────────────────────
@@ -460,29 +505,16 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 		}
 	}
 
-	// ── Step 5c: Skill scope containment (ptone/scion#1901) ───────────
-	// The curated hub-member/hub-viewer roles carry skill.read/skill.list at
-	// system scope purely so every hub member can browse the hub-wide
-	// (global/core) skill catalog. That grant must not leak into user- or
-	// project-scoped skills; see filterHubWideSkillGrants.
-	if request.Resource.Type == "skill" {
-		candidates = filterHubWideSkillGrants(candidates, roleDefs, request.Resource.ScopeKind)
-	}
-
-	// ── Step 5d/5e: Template and harness-config scope containment
-	// (ptone/scion#1916) ────────────────────────────────────────────────
-	// Same shape as step 5c: the curated hub-member/hub-viewer roles also
-	// carry template.read/list and harness_config.read/list at system
-	// scope, purely so every hub member can browse the hub-wide (global)
-	// catalog. That grant must not leak into user- or project-scoped
-	// records; see filterHubWideTemplateGrants and
-	// filterHubWideHarnessConfigGrants.
-	if request.Resource.Type == "template" {
-		candidates = filterHubWideTemplateGrants(candidates, roleDefs, request.Resource.ScopeKind)
-	}
-	if request.Resource.Type == "harness_config" {
-		candidates = filterHubWideHarnessConfigGrants(candidates, roleDefs, request.Resource.ScopeKind)
-	}
+	// ── Step 5c/5d/5e: Hub-wide catalog scope containment (ptone/scion#1901,
+	// #1916) ───────────────────────────────────────────────────────────
+	// The curated hub-member/hub-viewer roles carry skill/template/
+	// harness_config read/list at system scope purely so every hub member
+	// can browse the hub-wide (global/core) catalog. That grant must not
+	// leak into user- or project-scoped records. applyHubWideScopeFilters
+	// (authz_boundary.go) is the single shared dispatcher for this rule —
+	// ptone/scion#2117's SystemAuthorityProof/MintTimeSystemGrant call the
+	// exact same function, so the two paths cannot drift apart.
+	candidates = applyHubWideScopeFilters(candidates, roleDefs, ProjectTargetClass{ResourceType: request.Resource.Type, ScopeKind: request.Resource.ScopeKind})
 
 	// ── Step 6: Build resource context ────────────────────────────────
 	resourceCtx := ResourceContext{
@@ -525,24 +557,34 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 	}
 	kernelResult := Evaluate(kernelReq)
 
-	// ── Step 9: Relationship grants (checked alongside kernel) ────────
-	// If the kernel denied, check named relationship grants. These
-	// replace the legacy bypasses (owner, ancestor, progeny) with
-	// documented, traceable grant paths.
+	// ── Step 9: Relationship candidates ───────────────────────────────
+	// On a kernel deny, named relationships (owner, ancestor, progeny,
+	// hub-member assign, creator user skill) are evaluated as typed
+	// candidates through the common stages in authz_relationship_rules.go:
+	// relationship policy, hub-attested ancestry, relationship fact, source
+	// activity, and the same restrictions the kernel applied (7a/7b/7c).
+	// With Explain, candidates are also evaluated on a kernel allow so the
+	// provenance lists them.
 	decision := kernelDecisionToDecision(kernelResult, permissionID)
-	if !kernelResult.Allowed {
-		if relDecision, ok := a.checkRelationshipGrants(ctx, principal, request.Resource, request.Action, permissionID, credential); ok {
-			// Apply credential restrictions to relationship grants too.
-			for _, r := range restrictions {
-				if r.Check == nil || !r.Check(permissionID) {
-					relDecision.Allowed = false
-					relDecision.Reason = "relationship grant restricted by " + r.Kind
-					break
+	if !kernelResult.Allowed || request.Explain {
+		rel := a.evaluateRelationshipCandidates(ctx, principal, request.Resource, request.Action, permissionID, restrictions, !request.Explain)
+		if !kernelResult.Allowed {
+			if rel.accepted != nil {
+				kernelProvenance := decision.Provenance
+				decision = *rel.accepted
+				if request.Explain && kernelProvenance != nil {
+					kernelProvenance.DenyReasons = nil
+					decision.Provenance = kernelProvenance
+				}
+			} else if rel.restrictedBy != "" {
+				decision.Reason = "relationship grant restricted by " + rel.restrictedBy
+				if decision.Provenance != nil {
+					decision.Provenance.DenyReasons = append([]string{decision.Reason}, decision.Provenance.DenyReasons...)
 				}
 			}
-			if relDecision.Allowed {
-				decision = relDecision
-			}
+		}
+		if request.Explain && decision.Provenance != nil {
+			decision.Provenance.Relationships = rel.results
 		}
 	}
 
@@ -588,7 +630,7 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 		}
 	}
 
-	result := decorateDecision(decision, principal, credential)
+	result := decorateDecision(decision, request, principal, credential)
 
 	// Emit decision audit if emitter is configured.
 	if a.decisionAuditEmitter != nil {
@@ -962,102 +1004,8 @@ func formatBoundaryScope(scopeType, scopeID string) string {
 // Relationship grants (replacing legacy bypasses)
 // =============================================================================
 
-// checkRelationshipGrants evaluates named relationship grants. These replace
-// the legacy owner, ancestor, and progeny bypasses with documented, traceable
-// grant paths. Returns (decision, true) if a relationship grant applied,
-// (zero, false) otherwise.
-func (a *AuthzService) checkRelationshipGrants(
-	ctx context.Context,
-	principal PrincipalContext,
-	resource Resource,
-	action Action,
-	permissionID string,
-	credential CredentialContext,
-) (Decision, bool) {
-	// 1. Ancestry-based transitive access.
-	// Any principal (user or agent) in the resource's creation chain has
-	// access. This replaces the old canAccessAsAncestor bypass with a named
-	// relationship grant. Hub-attested ancestry is enforced for agents.
-	if canAccessAsAncestor(principal.ID, resource) {
-		// For agents, verify ancestry is hub-attested.
-		if isAgentPrincipal(principal.Kind) {
-			if !AncestryIsHubAttested(principal.Identity) {
-				return Decision{}, false
-			}
-		}
-		return Decision{
-			Allowed:      true,
-			Reason:       "relationship grant: ancestor access",
-			Scope:        ScopeTypeRelationship,
-			MatchedGrant: "ancestor",
-		}, true
-	}
-
-	// 2. Resource owner access.
-	// The resource creator retains access to their own resources. This
-	// replaces the old owner bypass. Exception: ActionAssign on hub-scoped
-	// gcp_service_account requires current hub membership (D7 constraint).
-	if isUserPrincipal(principal.Kind) && resource.OwnerID != "" && resource.OwnerID == principal.ID {
-		if action == ActionAssign && resource.Type == "gcp_service_account" &&
-			resource.ParentType == "" && resource.ParentID == "" {
-			// Hub-scoped SA assign: owner bypass suppressed, fall through to
-			// hub membership check below.
-		} else {
-			return Decision{
-				Allowed:      true,
-				Reason:       "relationship grant: resource owner",
-				Scope:        ScopeTypeRelationship,
-				MatchedGrant: "owner",
-			}, true
-		}
-	}
-
-	// 3. Hub-scoped service-account assign for current hub members.
-	// Current hub members may assign hub-scoped SAs. This is a narrow
-	// code-defined grant that replaces the old hub-member baseline.
-	if isUserPrincipal(principal.Kind) &&
-		action == ActionAssign && resource.Type == "gcp_service_account" &&
-		resource.ParentType == "" && resource.ParentID == "" {
-		if a.isCurrentHubMember(ctx, principal.ID) {
-			return Decision{
-				Allowed:      true,
-				Reason:       "relationship grant: hub member hub-scoped assign",
-				Scope:        "hub",
-				MatchedGrant: "hub-member-assign",
-			}, true
-		}
-	}
-
-	// 4. Creator user-skill read (agents only).
-	// An agent may read its creator's own user-scoped skills; see
-	// agentCreatorUserSkillGrant. The origin user must also still exist and
-	// be active. The agent JWT restriction and access constraints (applied
-	// by the caller) and the delegation ceiling still apply on top.
-	if d, ok := agentCreatorUserSkillGrant(principal, resource, action); ok && a.originUserActive(ctx, principal) {
-		return d, true
-	}
-
-	// 5. Progeny relationship grants (agents only).
-	// Agent reads on secrets, env vars, and skill injections via the
-	// creator-progeny ancestry chain. Replaces the old DelegatedFrom
-	// policy pattern.
-	if isAgentPrincipal(principal.Kind) {
-		if agent, ok := principal.Identity.(AgentIdentity); ok {
-			result := a.relationshipResolver.CheckProgenyAccess(ctx, agent, resource, action)
-			if result.Allowed {
-				return Decision{
-					Allowed:      true,
-					Reason:       "relationship grant: " + string(result.RelationshipType),
-					Scope:        ScopeTypeRelationship,
-					MatchedGrant: result.Provenance.RoleName,
-					BindingID:    result.Provenance.BindingID,
-				}, true
-			}
-		}
-	}
-
-	return Decision{}, false
-}
+// Relationship grants are evaluated by evaluateRelationshipCandidates
+// (authz_relationship_rules.go).
 
 // =============================================================================
 // Agent synthetic binding construction
@@ -1193,14 +1141,19 @@ func agentScopeRestriction(agent AgentIdentity) Restriction {
 }
 
 // loadAccessConstraintRestrictions loads active access constraints from the
-// store and converts them to kernel restrictions.
+// store and converts them to kernel restrictions. On a load error it fails
+// closed by returning a deny-all restriction. Decide (no error return),
+// getEffectivePermissions and getProjectScopedPermissions call this form and
+// keep that behaviour. A caller with its own error return that needs a load
+// failure to surface as an error instead should call
+// accessConstraintRestrictions directly; see SystemAuthorityProof and
+// CanMintSelector's mint-time helpers.
 func (a *AuthzService) loadAccessConstraintRestrictions(
 	ctx context.Context,
 	closure map[string]struct{},
 	resource ResourceContext,
 ) []Restriction {
-	// R-1 fix: page through all constraints instead of capping at 200.
-	constraints, err := a.loadAllAccessConstraints(ctx)
+	restrictions, err := a.accessConstraintRestrictions(ctx, closure, resource)
 	if err != nil {
 		// R-1 fix: deny (fail closed) when constraint loading errors.
 		// The design is explicit: "Store or group resolution errors fail
@@ -1212,8 +1165,29 @@ func (a *AuthzService) loadAccessConstraintRestrictions(
 			// nil Check denies everything.
 		}}
 	}
+	return restrictions
+}
+
+// accessConstraintRestrictions is loadAccessConstraintRestrictions's
+// error-returning form: it loads active access constraints from the store
+// and converts them to kernel restrictions, but returns a load error to the
+// caller instead of converting it into a deny-all restriction. Use when the
+// caller has its own error return and a load failure must surface as an
+// error rather than an ordinary denial, as on the ProjectAdmissionForClass
+// and CanMintSelector paths. Every other caller should use
+// loadAccessConstraintRestrictions.
+func (a *AuthzService) accessConstraintRestrictions(
+	ctx context.Context,
+	closure map[string]struct{},
+	resource ResourceContext,
+) ([]Restriction, error) {
+	// R-1 fix: page through all constraints instead of capping at 200.
+	constraints, err := a.loadAllAccessConstraints(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if len(constraints) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	// Convert store constraints to hub AccessConstraint and filter.
@@ -1272,13 +1246,39 @@ func (a *AuthzService) loadAccessConstraintRestrictions(
 		ri++
 	}
 
-	return restrictions
+	return restrictions, nil
 }
 
 // loadAllAccessConstraints loads all access constraints by paging through
 // the store. R-1 fix: the previous call used a fixed limit of 200 which
 // silently truncated constraints beyond that threshold.
 func (a *AuthzService) loadAllAccessConstraints(ctx context.Context) ([]*store.AccessConstraint, error) {
+	if cache := mintEligibilityCacheFromContext(ctx); cache != nil {
+		cache.mu.Lock()
+		if cache.constraintsLoaded {
+			all, err := cache.constraints, cache.constraintsErr
+			cache.mu.Unlock()
+			return all, err
+		}
+		cache.mu.Unlock()
+
+		all, err := a.loadAllAccessConstraintsUncached(ctx)
+
+		cache.mu.Lock()
+		cache.constraintsLoaded = true
+		cache.constraints, cache.constraintsErr = all, err
+		cache.mu.Unlock()
+		return all, err
+	}
+	return a.loadAllAccessConstraintsUncached(ctx)
+}
+
+// loadAllAccessConstraintsUncached is loadAllAccessConstraints's body, split
+// out so the mint-eligibility cache wrapper above never duplicates this
+// logic. Every caller outside a CanMintSelector call (e.g. the ordinary
+// Decide path) reaches this directly, with no cache in context, and behaves
+// exactly as before.
+func (a *AuthzService) loadAllAccessConstraintsUncached(ctx context.Context) ([]*store.AccessConstraint, error) {
 	const pageSize = 500
 	var all []*store.AccessConstraint
 	offset := 0
@@ -1321,20 +1321,8 @@ func normalizeClosureTypes(closure map[string]struct{}) map[string]struct{} {
 // Permission resolution
 // =============================================================================
 
-// derivePermissionID derives a canonical permission ID from a resource type
-// and action string. Falls back to "resourceType.action" format when no
-// registry match exists.
-func derivePermissionID(resourceType string, action Action) string {
-	actionStr := string(action)
-	// Look for an exact match in the permissions registry.
-	for _, p := range permissions.Registry {
-		if p.Resource == resourceType && p.Action == actionStr {
-			return p.ID
-		}
-	}
-	// Fallback: construct from resource type and action.
-	return resourceType + "." + actionStr
-}
+// Permission resolution for requests without an explicit permission lives
+// in authz_permission_resolver.go (resolveResourcePermission).
 
 // =============================================================================
 // Helper functions
@@ -1397,7 +1385,16 @@ func credentialContextForIdentity(identity Identity) CredentialContext {
 	}
 }
 
-func decorateDecision(decision Decision, principal PrincipalContext, credential CredentialContext) Decision {
+// decorateDecision fills the principal, credential and audit fields of a
+// decision. Every Decide return path goes through it, so Actor and Purpose
+// are recorded on every decision (and on its provenance when present).
+func decorateDecision(decision Decision, request AuthzRequest, principal PrincipalContext, credential CredentialContext) Decision {
+	decision.Actor = request.Actor
+	decision.Purpose = request.Purpose
+	if decision.Provenance != nil {
+		decision.Provenance.Actor = request.Actor
+		decision.Provenance.Purpose = request.Purpose
+	}
 	decision.PrincipalKind = principal.Kind
 	decision.CredentialID = credential.ID
 	decision.CredentialType = credential.Type
@@ -1815,98 +1812,18 @@ func (a *AuthzService) getEffectivePermissions(ctx context.Context, principalTyp
 // The method retains group-expanded principals, activation-window filtering,
 // and AccessConstraint reduction — exactly as getEffectivePermissions does —
 // but only considers bindings where ScopeType == "project" && ScopeID == projectID.
+// Shares its group/binding resolution (projectScopedGrants, authz_boundary.go)
+// with projectScopedPermissionsStrict, CanMintSelector's flat-role mint path's
+// error-returning counterpart; this function keeps a deny-all restriction on
+// a constraint-table load failure rather than returning an error.
 func (a *AuthzService) getProjectScopedPermissions(ctx context.Context, principalType, principalID, projectID string) ([]string, error) {
-	normalizedType := NormalizePrincipalType(principalType)
-
-	// Build principals: direct + group-expanded.
-	principals := []store.PrincipalRef{{Type: normalizedType, ID: principalID}}
-	var groupIDs []string
-	var err error
-	switch normalizedType {
-	case store.RoleBindingPrincipalUser:
-		groupIDs, err = a.store.GetEffectiveGroups(ctx, principalID)
-	case store.RoleBindingPrincipalAgent:
-		groupIDs, err = a.store.GetEffectiveGroupsForAgent(ctx, principalID)
-	}
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		a.logger.Warn("failed to get effective groups for project-scoped permission resolution (fail-closed)",
-			"principalType", principalType, "principalID", principalID, "error", err)
-		return nil, fmt.Errorf("group resolution failed (fail-closed): %w", err)
-	}
-	for _, gid := range groupIDs {
-		principals = append(principals, store.PrincipalRef{Type: "group", ID: gid})
-	}
-
-	bindings, err := a.store.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
+	perms, closure, err := a.projectScopedGrants(ctx, principalType, principalID, projectID)
 	if err != nil {
 		return nil, err
 	}
-
-	now := time.Now()
-	seen := make(map[string]bool)
-	var result []string
-	for _, b := range bindings {
-		// A2: Only project-scoped bindings for the target project.
-		if b.ScopeType != store.RoleScopeProject || b.ScopeID != projectID {
-			continue
-		}
-
-		// Activation window filtering (R-2 pattern).
-		cb := &CandidateBinding{BindingID: b.ID}
-		if b.NotBefore != nil {
-			cb.NotBefore = *b.NotBefore
-		}
-		if b.ExpiresAt != nil {
-			cb.ExpiresAt = *b.ExpiresAt
-		}
-		if activation := evaluateActivation(cb, now); !activation.Active {
-			continue
-		}
-
-		rd, rdErr := a.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
-		if rdErr != nil {
-			a.logger.Warn("failed to resolve role definition for project-scoped binding",
-				"binding_id", b.ID, "role_definition_id", b.RoleDefinitionID, "error", rdErr)
-			continue
-		}
-		if rd == nil {
-			a.logger.Warn("role definition not found for project-scoped binding",
-				"binding_id", b.ID, "role_definition_id", b.RoleDefinitionID)
-			continue
-		}
-		for _, permID := range rd.Permissions {
-			if !seen[permID] {
-				seen[permID] = true
-				result = append(result, permID)
-			}
-		}
+	if len(perms) == 0 {
+		return perms, nil
 	}
-
-	// Apply AccessConstraint intersection (same pattern as getEffectivePermissions).
-	if len(result) > 0 {
-		closure := make(map[string]struct{}, len(principals))
-		for _, p := range principals {
-			closure[p.Type+":"+p.ID] = struct{}{}
-		}
-		resourceCtx := ResourceContext{ProjectID: projectID}
-		restrictions := a.loadAccessConstraintRestrictions(ctx, closure, resourceCtx)
-		if len(restrictions) > 0 {
-			var filtered []string
-			for _, permID := range result {
-				blocked := false
-				for _, r := range restrictions {
-					if r.Check == nil || !r.Check(permID) {
-						blocked = true
-						break
-					}
-				}
-				if !blocked {
-					filtered = append(filtered, permID)
-				}
-			}
-			result = filtered
-		}
-	}
-
-	return result, nil
+	restrictions := a.loadAccessConstraintRestrictions(ctx, closure, ResourceContext{ProjectID: projectID})
+	return applyRestrictions(perms, restrictions), nil
 }

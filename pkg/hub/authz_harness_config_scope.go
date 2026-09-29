@@ -45,7 +45,7 @@ var curatedHarnessConfigDirectoryRoles = map[string]struct{}{
 //     ScopeID matches the resource's project.
 //   - Elevated system-scoped roles (hub-admin, super-admin): unaffected —
 //     not in curatedHarnessConfigDirectoryRoles.
-//   - The resource-owner relationship grant (checkRelationshipGrants),
+//   - The resource-owner relationship grant (evaluateRelationshipCandidates),
 //     evaluated separately after the kernel: an owner keeps access to their
 //     own user-scoped harness config even once the hub-member grant no
 //     longer applies to it here.

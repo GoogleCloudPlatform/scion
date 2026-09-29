@@ -30,62 +30,67 @@ import (
 )
 
 // =============================================================================
-// Unit tests: derivePermissionID (production enforcement — base behavior)
+// Unit tests: resolveResourcePermission (production enforcement)
 // =============================================================================
 
-// TestDerivePermissionID_BaseUnchanged verifies that the production
-// derivePermissionID function retains its original behavior: exact
-// (Resource, Action) match or string-concatenation fallback.
-// This is intentionally NOT enhanced with canonicalization — the
-// production enforcement path must remain exactly as-is.
-func TestDerivePermissionID_BaseUnchanged(t *testing.T) {
+// TestResolveResourcePermission_Contract pins the production resolver used
+// when a request carries no explicit permission: an unambiguous registry
+// (Resource, Action) pair resolves to its ID, and every other pair returns
+// errUnresolvablePermission.
+func TestResolveResourcePermission_Contract(t *testing.T) {
 	tests := []struct {
 		name     string
 		resource string
 		action   Action
 		wantID   string
 	}{
-		// Primary lookup: exact (Resource, Action) match.
 		{"canonical user.read", "user", ActionRead, "user.read"},
 		{"canonical user.list", "user", ActionList, "user.list"},
 		{"canonical agent.create", "agent", ActionCreate, "agent.create"},
 		{"canonical project.read", "project", ActionRead, "project.read"},
+		{"reviewed unregistered agent.manage", "agent", ActionManage, "agent.manage"},
 
-		// Fallback: non-canonical combinations produce concatenated IDs.
-		// This is the expected base behavior — production code never hits
-		// these paths because route middleware supplies correct inputs.
-		{"hub+user.read fallback", "hub", "user.read", "hub.user.read"},
-		{"hub.user+read fallback", "hub.user", ActionRead, "hub.user.read"},
-		{"unknown+unknown fallback", "widget", "frobnicate", "widget.frobnicate"},
+		// Non-canonical and unknown pairs are not resolvable.
+		{"hub+user.read", "hub", "user.read", ""},
+		{"hub.user+read", "hub.user", ActionRead, ""},
+		{"unknown+unknown", "widget", "frobnicate", ""},
+		// Ambiguous pairs are not resolvable.
+		{"ambiguous hub+read", "hub", ActionRead, ""},
+		{"ambiguous hub+update", "hub", ActionUpdate, ""},
+		{"ambiguous hub+execute", "hub", "execute", ""},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := derivePermissionID(tt.resource, tt.action)
+			got, err := resolveResourcePermission(tt.resource, tt.action)
+			if tt.wantID == "" {
+				require.ErrorIs(t, err, errUnresolvablePermission)
+				assert.Empty(t, got)
+				return
+			}
+			require.NoError(t, err)
 			assert.Equal(t, tt.wantID, got)
 		})
 	}
 }
 
-// TestDerivePermissionID_AllRegistryPermissions verifies that every canonical
-// permission in the registry can be derived from its own (Resource, Action).
-func TestDerivePermissionID_AllRegistryPermissions(t *testing.T) {
-	// Some Resource+Action pairs appear multiple times (e.g. hub+read maps to
-	// multiple hub.X.read permissions). Track which ones are ambiguous.
-	seen := make(map[string]string) // "resource.action" → first ID
+// TestResolveResourcePermission_AllRegistryPermissions verifies that every
+// registry permission with a unique (Resource, Action) resolves to its own
+// ID, and that every shared pair is reported as ambiguous.
+func TestResolveResourcePermission_AllRegistryPermissions(t *testing.T) {
+	count := make(map[string]int)
 	for _, p := range permissions.Registry {
-		key := p.Resource + "." + p.Action
-		if first, ok := seen[key]; ok {
-			// Ambiguous: skip — derivePermissionID returns the first match.
-			t.Logf("skipping ambiguous (%s, %s): first=%s, also=%s", p.Resource, p.Action, first, p.ID)
-			continue
-		}
-		seen[key] = p.ID
-
+		count[p.Resource+"\x00"+p.Action]++
+	}
+	for _, p := range permissions.Registry {
 		t.Run(p.ID, func(t *testing.T) {
-			got := derivePermissionID(p.Resource, Action(p.Action))
-			assert.Equal(t, p.ID, got,
-				"derivePermissionID(%q, %q) should return canonical ID %q", p.Resource, p.Action, p.ID)
+			got, err := resolveResourcePermission(p.Resource, Action(p.Action))
+			if count[p.Resource+"\x00"+p.Action] > 1 {
+				require.ErrorIs(t, err, errUnresolvablePermission)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, p.ID, got)
 		})
 	}
 }
@@ -97,7 +102,7 @@ func TestDerivePermissionID_AllRegistryPermissions(t *testing.T) {
 // TestCanonicalizeExplainPermission verifies the explain-specific
 // canonicalization helper that normalizes non-canonical resource.type + action
 // pairs to canonical permission IDs. This helper is ONLY called from the
-// explain handler — production enforcement uses derivePermissionID unmodified.
+// explain handler — production enforcement uses resolveResourcePermission.
 func TestCanonicalizeExplainPermission(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -696,8 +701,7 @@ func TestExplainAPI_RedactionWithCanonicalization(t *testing.T) {
 //   - resource.type="hub",  action="user.read"  (non-canonical)
 //   - resource.type="hub.user", action="read"   (non-canonical)
 //
-// Before the fix, the latter two produced "hub.user.read" via derivePermissionID
-// fallback concatenation, which didn't match any granted permission.
+// The explain helper canonicalizes the latter two to "user.read".
 func TestExplainAPI_HubUserReadRegression(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
