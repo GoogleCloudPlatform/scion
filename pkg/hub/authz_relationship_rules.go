@@ -54,7 +54,6 @@ const (
 	RelationshipRuleAncestor          RelationshipRuleID = "ancestor"
 	RelationshipRuleProgeny           RelationshipRuleID = "progeny"
 	RelationshipRuleHubMemberSAAssign RelationshipRuleID = "hub_member_sa_assign"
-	RelationshipRuleCreatorUserSkill  RelationshipRuleID = "creator_user_skill"
 
 	// Association relationships are typed so delivery rules can name them.
 	// They have no policy rows until their permissions are registered, so
@@ -214,66 +213,55 @@ func (a *AuthzService) relationshipCandidates(principal PrincipalContext, resour
 		})
 	}
 
-	// Creator user skill: an agent reads its origin user's user-scoped
-	// skills. The origin user is the root of the ancestry chain.
-	if isAgentPrincipal(principal.Kind) && resource.Type == "skill" &&
-		resource.ScopeKind == store.SkillScopeUser && resource.ScopeUserID != "" {
-		if agent, ok := principal.Identity.(AgentIdentity); ok && agent.OriginUserID() != "" &&
-			agent.OriginUserID() == resource.ScopeUserID {
-			src := &SharingSource{
-				Kind:    "user_skill",
-				ID:      resource.ID,
-				OwnerID: agent.OriginUserID(),
-				Policy:  SharingPolicyOriginDescendants,
-			}
-			out = append(out, relationshipCandidate{
-				rule:         RelationshipRuleCreatorUserSkill,
-				usesAncestry: true,
-				// agentCreatorUserSkillGrant (authz_skill_scope.go) remains
-				// the definition of the rule's shape.
-				fact: func(context.Context) (*SharingSource, bool, string) {
-					if _, ok := agentCreatorUserSkillGrant(principal, resource, action); !ok {
-						return src, false, "creator user-skill shape does not hold"
-					}
-					return src, true, ""
-				},
-				decision: Decision{
-					Allowed:      true,
-					Reason:       "relationship grant: creator user skill",
-					Scope:        ScopeTypeRelationship,
-					MatchedGrant: "creator-user-skill",
-				},
-			})
-		}
-	}
-
-	// Progeny: an agent reads a sharing source opted in by a member of its
-	// ancestry chain. Only read actions match.
+	// Progeny: an agent reads a sharing source opted in by (or, for a
+	// resource kind with a bucket-keyed adapter such as personal skills,
+	// available by default to descendants of) a member of its ancestry
+	// chain. Only read actions match. ptone/scion#2128 consolidated the
+	// former dedicated creator-user-skill grant into this common path: the
+	// registered "skill" adapter (skillProgenyAdapter, authz_skill_progeny.go)
+	// supplies the per-kind fact-resource-ID and shape refusal that used to
+	// live here.
 	if isAgentPrincipal(principal.Kind) && action == ActionRead {
 		if relType := relationshipTypeForResource(resource.Type); relType != "" {
 			if agent, ok := principal.Identity.(AgentIdentity); ok {
-				resourceID := resource.ID
 				resourceType := resource.Type
-				granted := allowRelationship(relType, resource.Type, resource.ID, agent.ID())
-				out = append(out, relationshipCandidate{
-					rule:         RelationshipRuleProgeny,
-					usesAncestry: true,
-					fact: func(ctx context.Context) (*SharingSource, bool, string) {
-						return a.progenySourceFor(ctx, agent, resourceType, resourceID)
-					},
-					decision: Decision{
-						Allowed:      true,
-						Reason:       "relationship grant: " + string(relType),
-						Scope:        ScopeTypeRelationship,
-						MatchedGrant: granted.Provenance.RoleName,
-						BindingID:    granted.Provenance.BindingID,
-					},
-				})
+				resourceID, eligible := a.progenyFactResourceID(resourceType, resource)
+				if eligible {
+					granted := allowRelationship(relType, resource.Type, resource.ID, agent.ID())
+					out = append(out, relationshipCandidate{
+						rule:         RelationshipRuleProgeny,
+						usesAncestry: true,
+						fact: func(ctx context.Context) (*SharingSource, bool, string) {
+							return a.progenySourceFor(ctx, agent, resourceType, resourceID)
+						},
+						decision: Decision{
+							Allowed:      true,
+							Reason:       "relationship grant: " + string(relType),
+							Scope:        ScopeTypeRelationship,
+							MatchedGrant: granted.Provenance.RoleName,
+							BindingID:    granted.Provenance.BindingID,
+						},
+					})
+				}
 			}
 		}
 	}
 
 	return out
+}
+
+// progenyFactResourceID resolves the ID a progeny candidate's fact should
+// query the kind's registered adapter with, and whether resource is
+// eligible for a progeny candidate of this kind at all. An adapter that
+// implements ProgenyFactResourceIDer (for example skillProgenyAdapter)
+// decides both; every other adapter, and a kind with none registered, is
+// queried on resource.ID and is always eligible (the fact stage itself
+// reports a missing adapter through the usual relationship_fact rejection).
+func (a *AuthzService) progenyFactResourceID(kind string, resource Resource) (string, bool) {
+	if fr, ok := a.progenyAdapter(kind).(ProgenyFactResourceIDer); ok {
+		return fr.FactResourceID(resource)
+	}
+	return resource.ID, true
 }
 
 // evaluateRelationshipCandidates runs every structural candidate through
@@ -469,6 +457,24 @@ type ProgenyFactAdapter interface {
 	ReadPermissions() []string
 	// Sources returns the sharing sources visible to the ancestry chain.
 	Sources(ctx context.Context, q ProgenyQuery) ([]SharingSource, error)
+}
+
+// ProgenyFactResourceIDer is an optional interface a ProgenyFactAdapter may
+// implement when its sharing-source fact is not keyed by Resource.ID. For
+// example, a personal skill's sharing source is its owning-user bucket
+// (Resource.ScopeUserID), not a per-skill record ID, so the same fact
+// evaluation serves both a concrete skill (Resource.ID set) and the
+// ID-less bucket probe agentSkillAccessScope uses (Resource.ID empty,
+// Resource.ScopeUserID set).
+//
+// FactResourceID reports the ID to query the adapter's Sources with for
+// resource, and whether resource is eligible for a progeny candidate of
+// this adapter's kind at all — an adapter also decides per-resource
+// shape refusals here (for example a skill Resource with no ScopeKind).
+// An adapter that does not implement this interface is queried on
+// Resource.ID directly, unconditionally eligible.
+type ProgenyFactResourceIDer interface {
+	FactResourceID(resource Resource) (id string, eligible bool)
 }
 
 // relationshipReadClassActions are the registry actions a read-only

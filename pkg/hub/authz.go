@@ -102,9 +102,9 @@ type Resource struct {
 
 	// ScopeUserID is the owning user of a user-scoped skill
 	// (store.Skill.ScopeID when ScopeKind is store.SkillScopeUser), set only
-	// by skillScopeResource/skillResource. It lets the agent creator
-	// user-skill relationship grant (agentCreatorUserSkillGrant) match the
-	// same column the skill list predicate filters on. Empty otherwise.
+	// by skillScopeResource/skillResource. It lets the personal-skill progeny
+	// grant (skillProgenyAdapter, authz_skill_progeny.go) match the same
+	// column the skill list predicate filters on. Empty otherwise.
 	ScopeUserID string
 }
 
@@ -257,12 +257,24 @@ type AuthzService struct {
 
 // NewAuthzService creates a new AuthzService.
 func NewAuthzService(s store.Store, logger *slog.Logger) *AuthzService {
-	return &AuthzService{
+	svc := &AuthzService{
 		store:                   s,
 		logger:                  logger,
 		DecisionAuditSampleRate: 1.0,
 		relationshipResolver:    NewRelationshipGrantResolver(s),
 	}
+	// ptone/scion#2128: personal (user-scoped) skills are a progeny sharing
+	// source keyed on the owning user's bucket (see authz_skill_progeny.go).
+	// Registration only fails for a programming error (an unregistered or
+	// non-read-class permission), so a failure here is logged, not fatal;
+	// progenyAdapter falls back to the built-in store adapter, which denies
+	// "skill" (an unsupported kind for it) — fail closed, never open.
+	if err := svc.RegisterProgenyAdapter(skillProgenyAdapter{}); err != nil {
+		if logger != nil {
+			logger.Error("failed to register skill progeny adapter", "error", err)
+		}
+	}
+	return svc
 }
 
 // SetDecisionAuditEmitter configures the decision audit emitter.

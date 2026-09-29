@@ -197,8 +197,10 @@ var RelationshipPolicies = []RelationshipPolicy{
 		PermissionIDs:  []string{"gcp_service_account.assign"},
 	},
 	{
-		// creator_user_skill/agent/skill (TestRelationshipCharacterization_CreatorUserSkill).
-		Relationship:   "creator_user_skill",
+		// progeny/agent/skill: an agent reads its origin user's personal
+		// skills, keyed on the skill's owning bucket rather than a per-record
+		// creator field (TestRelationshipCharacterization_ProgenySkillRead).
+		Relationship:   "progeny",
 		PrincipalKinds: []string{"agent"},
 		ResourceType:   ResourceSkill,
 		PermissionIDs:  []string{"skill.read"},
