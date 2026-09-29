@@ -28,6 +28,34 @@ import (
 // never returns this.
 var ErrLogsNotSupported = errors.New("agent logs are not available on this runtime")
 
+// RecordlessActor identifies one actor a RecordlessActorProber found running
+// with no in-memory record of which request created it — for example, after
+// the runtime's own process restarted. UID should be a globally unique,
+// backend-assigned identifier (not derived from Name alone), so a caller
+// checking more than one runtime instance can dedupe by actor identity
+// rather than by a name that can collide across instances.
+type RecordlessActor struct {
+	Name string
+	UID  string
+}
+
+// RecordlessActorProber is an optional capability a Runtime may implement
+// when it cannot always tell a project-scoped caller "not found" apart from
+// "this process lost the record that would prove it" — a runtime whose
+// actors carry no labels the broker can query after a restart is one
+// example. RecordlessActors reports the runtime's own scope
+// for projectID (for example, a namespace) and the names of any actor in it
+// with no such record, so a caller can turn a would-be not-found into an
+// explicit, distinguishable error instead of an idempotent success that
+// would silently orphan the actor.
+//
+// A runtime that always keeps an authoritative record of what it is running
+// does not need to implement this interface; the type assertion simply
+// fails for it, and its callers' behavior is unchanged.
+type RecordlessActorProber interface {
+	RecordlessActors(ctx context.Context, projectID string) (scope string, actors []RecordlessActor, err error)
+}
+
 // PerProfileInstancesRuntime is an optional capability a Runtime may
 // implement to say that its instances are bound to a specific profile's
 // configuration, so a request naming a different profile of the same

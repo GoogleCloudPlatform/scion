@@ -46,7 +46,7 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 			util.Debugf("GetRuntime: ResolveRuntime failed: %v", err)
 			// If profile resolution fails, we might be passed a direct runtime type
 			// Fallback to legacy behavior for now if profileName matches a known type
-			if profileName == "docker" || profileName == "podman" || profileName == "kubernetes" || profileName == "k8s" || profileName == "container" || profileName == "remote" || profileName == "local" || profileName == "cloudrun" || profileName == "cloudrun-instances" || profileName == "cloudrun-sandbox" {
+			if profileName == "docker" || profileName == "podman" || profileName == "kubernetes" || profileName == "k8s" || profileName == "container" || profileName == "remote" || profileName == "local" || profileName == "cloudrun" || profileName == "cloudrun-instances" || profileName == "cloudrun-sandbox" || profileName == "substrate" {
 				runtimeType = profileName
 				util.Debugf("GetRuntime: using profileName as runtimeType: %s", runtimeType)
 			} else {
@@ -235,6 +235,16 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 		return rt
 	case "cloudrun-sandbox":
 		rt := NewCloudRunSandboxRuntime(rtConfig.CloudRunSandbox)
+		return rt
+	case "substrate":
+		// No auto-detect branch: substrate is only ever selected explicitly
+		// by profile (substrate-runtime.md §2), so this case is unreachable via
+		// the "local"/"auto" detection above.
+		rt, err := NewSubstrateRuntime(rtConfig.Substrate)
+		if err != nil {
+			util.Debugf("GetRuntime: failed to create substrate runtime: %v", err)
+			return &ErrorRuntime{Err: err}
+		}
 		return rt
 	}
 
