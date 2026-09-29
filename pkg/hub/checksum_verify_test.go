@@ -46,7 +46,9 @@ func TestFetchExpectedChecksum(t *testing.T) {
 
 	t.Run("matching entry returns its hash", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			fmt.Fprintf(w, "%s  %s\n", correctHash, assetName)
+			if _, err := fmt.Fprintf(w, "%s  %s\n", correctHash, assetName); err != nil {
+				t.Errorf("write response: %v", err)
+			}
 		}))
 		defer server.Close()
 
@@ -86,7 +88,9 @@ func TestFetchExpectedChecksum(t *testing.T) {
 
 	t.Run("no matching entry fails closed", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			fmt.Fprintf(w, "%s  some-other-asset.tar.gz\n", correctHash)
+			if _, err := fmt.Fprintf(w, "%s  some-other-asset.tar.gz\n", correctHash); err != nil {
+				t.Errorf("write response: %v", err)
+			}
 		}))
 		defer server.Close()
 
@@ -101,7 +105,9 @@ func TestFetchExpectedChecksum(t *testing.T) {
 
 	t.Run("binary-mode asterisk-prefixed filename is still matched", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			fmt.Fprintf(w, "%s *%s\n", correctHash, assetName)
+			if _, err := fmt.Fprintf(w, "%s *%s\n", correctHash, assetName); err != nil {
+				t.Errorf("write response: %v", err)
+			}
 		}))
 		defer server.Close()
 
