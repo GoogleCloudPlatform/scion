@@ -238,8 +238,11 @@ func (b *LocalBackend) Resolve(ctx context.Context, userID, projectID, brokerID 
 
 			meta := fromStoreSecretMeta(&s)
 
-			// Verify access via policy engine if checker is provided
-			if opts.AuthzCheck != nil && !opts.AuthzCheck(*meta) {
+			// Verify access via the policy engine. With no checker configured,
+			// a progeny secret is excluded rather than included by default:
+			// the caller must supply an explicit policy decision before any
+			// progeny value is read.
+			if opts.AuthzCheck == nil || !opts.AuthzCheck(*meta) {
 				continue
 			}
 
@@ -380,11 +383,11 @@ func (b *LocalBackend) decryptStoreSecret(s *store.Secret) (*SecretWithValue, er
 }
 
 // decryptRawValue decrypts a raw encrypted value string. If decryption fails
-// (e.g. corrupted ciphertext or key mismatch after rotation), an empty string
-// is returned and a warning is logged. Returning "" ensures agents never
-// receive an encrypted blob as a secret value; a missing value is safer than
-// indistinguishable garbage. This is used in Resolve where individual
-// decryption failures should not abort the entire resolution.
+// (e.g. corrupted ciphertext or key mismatch after rotation), an error is
+// returned and the value is always empty: a failure is reported to the
+// caller instead of being delivered as an indistinguishable empty value.
+// This is used in Resolve, where the caller skips the affected secret on a
+// non-nil error rather than aborting the entire resolution.
 func (b *LocalBackend) decryptRawValue(raw string) (string, error) {
 	if b.encryptionKey == nil {
 		if strings.HasPrefix(raw, EncryptedPrefix) {
@@ -396,9 +399,7 @@ func (b *LocalBackend) decryptRawValue(raw string) (string, error) {
 	}
 	plaintext, _, err := DecryptValue(raw, b.encryptionKey)
 	if err != nil {
-		slog.Warn("failed to decrypt secret value, returning empty",
-			"error", err)
-		return "", nil
+		return "", fmt.Errorf("decrypting secret value: %w", err)
 	}
 	return plaintext, nil
 }

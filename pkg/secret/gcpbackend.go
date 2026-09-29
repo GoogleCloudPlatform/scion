@@ -422,7 +422,11 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID st
 
 			meta := fromStoreSecretMeta(&s)
 
-			if opts.AuthzCheck != nil && !opts.AuthzCheck(*meta) {
+			// Verify access via the policy engine. With no checker configured,
+			// a progeny secret is excluded rather than included by default:
+			// the caller must supply an explicit policy decision before any
+			// progeny value is read.
+			if opts.AuthzCheck == nil || !opts.AuthzCheck(*meta) {
 				continue
 			}
 

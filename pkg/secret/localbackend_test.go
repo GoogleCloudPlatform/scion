@@ -924,46 +924,6 @@ func TestLocalBackend_ResolveProgeny_DeniedByPolicyCheck(t *testing.T) {
 	}
 }
 
-// TestLocalBackend_ResolveProgeny_NilAuthzCheckIncludesAll verifies that
-// when no AuthzCheck is provided, progeny secrets with matching ancestry
-// are included (the policy check is optional).
-func TestLocalBackend_ResolveProgeny_NilAuthzCheckIncludesAll(t *testing.T) {
-	backend, s := createTestBackend(t)
-	ctx := context.Background()
-
-	seedSecret(t, s, &store.Secret{
-		ID:             tid("sec-no-authz"),
-		Key:            "NO_AUTHZ_KEY",
-		EncryptedValue: "no-authz-value",
-		SecretType:     store.SecretTypeEnvironment,
-		Target:         "NO_AUTHZ_KEY",
-		Scope:          store.ScopeUser,
-		ScopeID:        "alice-123",
-		AllowProgeny:   true,
-		CreatedBy:      "alice-123",
-	})
-
-	opts := &ResolveOpts{
-		AgentAncestry: []string{"alice-123", "agent-a"},
-		AuthzCheck:    nil, // no policy checker — secrets are included by default
-	}
-
-	resolved, err := backend.Resolve(ctx, "", "", "", opts)
-	if err != nil {
-		t.Fatalf("Resolve failed: %v", err)
-	}
-
-	found := false
-	for _, sv := range resolved {
-		if sv.Name == "NO_AUTHZ_KEY" {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("progeny secret should be included when AuthzCheck is nil (no policy gating)")
-	}
-}
-
 // TestLocalBackend_ResolveProgeny_NilOptsNoProgeny verifies that passing
 // nil opts preserves the original behavior (no progeny resolution).
 func TestLocalBackend_ResolveProgeny_NilOptsNoProgeny(t *testing.T) {
