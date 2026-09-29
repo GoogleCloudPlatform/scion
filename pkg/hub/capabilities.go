@@ -199,6 +199,10 @@ func (a *AuthzService) ComputeCapabilities(ctx context.Context, identity Identit
 }
 
 // ComputeScopeCapabilities evaluates scope-level actions (e.g., create, list) for a resource type.
+// Each action is decided without an explicit permission, so an action whose
+// (resource type, action) pair does not resolve to exactly one registered
+// permission is reported as not allowed. Every "hub" scope action is such a
+// pair; hub-level checks pass an explicit Permission to Decide instead.
 func (a *AuthzService) ComputeScopeCapabilities(ctx context.Context, identity Identity, scopeType, scopeID, resourceType string) *Capabilities {
 	actions, ok := ScopeActions[resourceType]
 	if !ok {
