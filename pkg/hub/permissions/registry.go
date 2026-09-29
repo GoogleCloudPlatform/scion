@@ -16,8 +16,10 @@ package permissions
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
+	"sync"
 )
 
 const (
@@ -392,6 +394,307 @@ func uatScopesForResource(resource string) []string {
 // through agent.attach, and agent:manage expanded (at mint time) to include
 // agent:attach. Tokens holding agent:attach therefore keep lifecycle authority
 // so that existing CI tokens continue to work (miller79/scion#88).
+//
+// NOTE: this map is NOT honored on the Decide path today
+// (enforceUATConstraints uses exact HasScope) — only inconsistently through
+// CanDelegate's intersectCredentialCaveats. Decide enforces exact scopes:
+// attach does not imply lifecycle. Any future alignment must narrow
+// CanDelegate to match Decide's exact-scope behavior, never widen Decide to
+// match CanDelegate.
 var LegacyUATScopeImplications = map[string][]string{
 	"agent:attach": {"agent:lifecycle"},
+}
+
+// BoundaryKind identifies the credential-side boundary a UAT is issued
+// under: confined to one project, or spanning the hub (including
+// cross-project use, subject to the holder's live authority on each
+// resolved target — see pkg/hub/authz_boundary.go). Canonical here so that
+// permissions data (SelectorMapping, PermissionAllowedBoundaries in
+// project_applicability.go) can reference it without pkg/hub/permissions
+// depending on pkg/hub. pkg/hub aliases this type rather than redeclaring it.
+type BoundaryKind string
+
+const (
+	BoundaryKindProject BoundaryKind = "project"
+	BoundaryKindHub     BoundaryKind = "hub"
+)
+
+// ValidBoundary is defined in project_applicability.go (shared with
+// pkg/store, which cannot import pkg/hub).
+
+// SelectorMapping is the resolved, explicit mapping from one published
+// token selector (an ordinary UAT scope or a manage alias such as
+// "agent:manage") to the canonical permission ID(s) it carries and the
+// boundary kinds it may be issued under. PermissionIDs has exactly one
+// entry for an ordinary selector and one entry per expanded scope for a
+// manage alias. AllowedBoundaries is the intersection of
+// SelectorAllowedBoundaries (project_applicability.go) across every ID in
+// PermissionIDs — a separate, independently hand-reviewed table, not
+// derived from Permission.Resource/Action.
+//
+// This table is derived from the existing Permission.UATScope field and
+// UATManageAliases/UATManageScopesFor, not a second hand-maintained
+// selector vocabulary: it is the replacement for useraccesstoken.go's
+// scopeToPermissionIDs, which reconstructs "resource:action" and would
+// silently collapse two permissions sharing a resource/action pair (e.g.
+// hub.settings.read and hub.config.read, both {hub, read}) into one
+// selector once either becomes UAT-selectable. A.2 owns wiring the
+// mint/runtime call sites to this table; A.1 owns the table and its
+// build/validate logic.
+type SelectorMapping struct {
+	Selector          string
+	PermissionIDs     []string
+	AllowedBoundaries []BoundaryKind
+}
+
+var (
+	selectorRegistry     map[string]SelectorMapping
+	selectorRegistryOnce sync.Once
+)
+
+// buildSelectorRegistry constructs the selector table from Registry and
+// UATManageAliases. A selector is only added to the table when every
+// expanded permission ID has a reviewed SelectorAllowedBoundaries entry and
+// the intersection of those boundary sets is non-empty; a selector missing
+// that review, or whose reviewed boundaries never agree, is simply absent
+// from the map (ResolveSelector then reports ok=false) rather than silently
+// getting an empty or partially-reviewed AllowedBoundaries. It is
+// deterministic and side-effect free; callers must not mutate the returned
+// map (ResolveSelector caches it).
+func buildSelectorRegistry() map[string]SelectorMapping {
+	type pending struct {
+		selector string
+		ids      []string
+	}
+	var candidates []pending
+
+	for _, p := range Registry {
+		if p.UATScope == "" {
+			continue
+		}
+		candidates = append(candidates, pending{selector: p.UATScope, ids: []string{p.ID}})
+	}
+
+	// Manage aliases expand to their concrete scopes via the existing
+	// UATManageScopesFor, which already excludes ExcludeFromManageAlias
+	// scopes (e.g. agent:attach, agent:port_access stay outside
+	// agent:manage).
+	byScope := make(map[string][]string, len(candidates))
+	for _, c := range candidates {
+		byScope[c.selector] = c.ids
+	}
+	aliases := make([]string, 0, len(UATManageAliases))
+	for alias := range UATManageAliases {
+		aliases = append(aliases, alias)
+	}
+	sort.Strings(aliases)
+	for _, alias := range aliases {
+		resource := UATManageAliases[alias]
+		var ids []string
+		for _, scope := range UATManageScopesFor(resource) {
+			ids = append(ids, byScope[scope]...)
+		}
+		if len(ids) == 0 {
+			continue
+		}
+		candidates = append(candidates, pending{selector: alias, ids: ids})
+	}
+
+	out := make(map[string]SelectorMapping, len(candidates))
+	for _, c := range candidates {
+		boundaries, ok := intersectAllowedBoundaries(c.ids)
+		if !ok || len(boundaries) == 0 {
+			// Unreviewed permission ID, or the reviewed boundary sets for
+			// this alias's members never agree: fail closed by omitting
+			// the selector entirely rather than guessing.
+			continue
+		}
+		out[c.selector] = SelectorMapping{
+			Selector:          c.selector,
+			PermissionIDs:     c.ids,
+			AllowedBoundaries: boundaries,
+		}
+	}
+	return out
+}
+
+// intersectAllowedBoundaries returns the intersection of
+// SelectorAllowedBoundaries across every ID in ids. ok is false if any ID
+// lacks a reviewed entry. An empty ids yields no boundaries and ok=false:
+// there is nothing to intersect, so the function has no basis for allowing
+// any boundary.
+func intersectAllowedBoundaries(ids []string) (boundaries []BoundaryKind, ok bool) {
+	if len(ids) == 0 {
+		return nil, false
+	}
+	counts := make(map[BoundaryKind]int)
+	for _, id := range ids {
+		kinds, reviewed := SelectorAllowedBoundaries(id)
+		if !reviewed {
+			return nil, false
+		}
+		for _, k := range kinds {
+			counts[k]++
+		}
+	}
+	for _, k := range []BoundaryKind{BoundaryKindProject, BoundaryKindHub} {
+		if counts[k] == len(ids) {
+			boundaries = append(boundaries, k)
+		}
+	}
+	return boundaries, true
+}
+
+// ResolveSelector is the single lookup point from a published token selector
+// to its canonical permission ID(s) and allowed boundaries. Unknown,
+// unmapped, unreviewed, or (defensively) empty-after-expansion selectors
+// return ok=false — callers must fail closed rather than reconstruct a
+// selector from resource/action.
+//
+// ResolveSelector returns a COPY of the derived mapping: PermissionIDs and
+// AllowedBoundaries are cloned so a caller mutating the returned slices
+// cannot corrupt the process-wide cached selectorRegistry.
+func ResolveSelector(selector string) (SelectorMapping, bool) {
+	selectorRegistryOnce.Do(func() {
+		selectorRegistry = buildSelectorRegistry()
+	})
+	m, ok := selectorRegistry[selector]
+	if !ok || len(m.PermissionIDs) == 0 {
+		return SelectorMapping{}, false
+	}
+	m.PermissionIDs = slices.Clone(m.PermissionIDs)
+	m.AllowedBoundaries = slices.Clone(m.AllowedBoundaries)
+	return m, true
+}
+
+// ValidateSelectorRegistry compares the live, derived selector table against
+// a caller-supplied pinned expected snapshot (selector -> sorted permission
+// IDs). This is the actual "every selector maps explicitly" enforcement:
+// pure derivation from Permission.UATScope is safe only because UATScope
+// itself is a hand-authored literal per Registry entry (never derived from
+// Resource/Action), and this pin forces a human to update the test's
+// expected table — an explicit review act — whenever a Registry change
+// adds, removes, or retargets a UATScope or alias member. It also re-checks
+// the no-duplicate-UATScope invariant directly against Registry, independent
+// of the pinned snapshot.
+func ValidateSelectorRegistry(expected map[string][]string) error {
+	seenScopes := make(map[string]string) // UATScope -> Permission.ID
+	for _, p := range Registry {
+		if p.UATScope == "" {
+			continue
+		}
+		if owner, dup := seenScopes[p.UATScope]; dup {
+			return fmt.Errorf("duplicate UATScope %q claimed by both %q and %q", p.UATScope, owner, p.ID)
+		}
+		seenScopes[p.UATScope] = p.ID
+	}
+
+	selectorRegistryOnce.Do(func() {
+		selectorRegistry = buildSelectorRegistry()
+	})
+
+	if len(selectorRegistry) != len(expected) {
+		return fmt.Errorf("selector registry has %d entries, expected snapshot has %d", len(selectorRegistry), len(expected))
+	}
+	for selector, wantIDs := range expected {
+		m, ok := selectorRegistry[selector]
+		if !ok {
+			return fmt.Errorf("expected selector %q not present in derived registry", selector)
+		}
+		gotIDs := append([]string(nil), m.PermissionIDs...)
+		sort.Strings(gotIDs)
+		wantSorted := append([]string(nil), wantIDs...)
+		sort.Strings(wantSorted)
+		if len(gotIDs) != len(wantSorted) {
+			return fmt.Errorf("selector %q resolved to %v, want %v", selector, gotIDs, wantSorted)
+		}
+		for i := range gotIDs {
+			if gotIDs[i] != wantSorted[i] {
+				return fmt.Errorf("selector %q resolved to %v, want %v", selector, gotIDs, wantSorted)
+			}
+		}
+	}
+	for selector := range selectorRegistry {
+		if _, ok := expected[selector]; !ok {
+			return fmt.Errorf("derived registry has unexpected selector %q not present in pinned snapshot", selector)
+		}
+	}
+	return nil
+}
+
+// MintEligibilityKind names one way a permission can become eligible for
+// selection when minting a UAT restriction.
+type MintEligibilityKind string
+
+const (
+	// MintEligibilityFlatRole is the existing rule: the principal's current
+	// role grant includes this permission as a flat subset. Unchanged by
+	// A.1.
+	MintEligibilityFlatRole MintEligibilityKind = "flat_role"
+	// MintEligibilityRelationship means a relationship rule of a declared
+	// type (see MintEligibilitySource.RelationshipTypes) could justify this
+	// permission for this principal kind — not that a specific target
+	// already exists or has been checked.
+	MintEligibilityRelationship MintEligibilityKind = "relationship"
+)
+
+// MintEligibilitySource is one way a selector can become mintable. A
+// permission may declare more than one source; Sources are OR'd — any one
+// satisfied source makes the selector eligible for selection.
+type MintEligibilitySource struct {
+	Kind MintEligibilityKind
+	// RelationshipTypes names candidate relationship rule types (e.g.
+	// "owner", "ancestor"), matching the RelationshipType values B.1's
+	// resolver evaluates. Set only when Kind == MintEligibilityRelationship.
+	RelationshipTypes []string
+}
+
+// MintEligibilityDescriptor is what a UAT mint path and CLI/UI eligibility
+// display consume for one permission. It answers "may this authenticated
+// user select this restriction for this boundary," never "does a target
+// already exist" and never "is this a grant" — every later request against
+// a specific target still goes through full request-time authorization.
+//
+// It does NOT carry its own AllowedBoundaries or ActionAllowlist: those
+// would duplicate PermissionAllowedBoundaries/RelationshipPolicy — callers
+// derive boundaries via SelectorAllowedBoundaries(PermissionID) and derive
+// the action limit for a
+// MintEligibilityRelationship source via RelationshipPolicyAllows against
+// RelationshipPolicies (relationship_policy.go), the ONE shared authoring
+// surface B.1's runtime relationship-grant evaluator also reads — so there
+// is never a second, drifting allowlist.
+type MintEligibilityDescriptor struct {
+	PermissionID string
+	Sources      []MintEligibilitySource
+	// RequiresExistingTarget is false for resource-relative permissions
+	// such as agent.attach/agent.port_access: a member may mint the
+	// restriction before creating their first agent. The token gains no
+	// grant either way — every later request is independently authorized.
+	RequiresExistingTarget bool
+}
+
+// MintEligibilityRegistry declares mint eligibility for resource-relative
+// permissions reviewed for #2092 (creator/ancestor attach and port access).
+// Scope-wide/durable-authority permissions are not listed here; they keep
+// the existing flat role-permission-subset mint rule by default (callers
+// treat a PermissionID absent from this map as MintEligibilityFlatRole
+// only). Every MintEligibilityRelationship source's RelationshipTypes must
+// resolve to at least one MintEligible==true RelationshipPolicies row with a
+// matching ResourceType/PermissionID (consistency test in
+// relationship_policy_test.go).
+var MintEligibilityRegistry = map[string]MintEligibilityDescriptor{
+	"agent.attach": {
+		PermissionID: "agent.attach",
+		Sources: []MintEligibilitySource{
+			{Kind: MintEligibilityRelationship, RelationshipTypes: []string{"owner", "ancestor"}},
+		},
+		RequiresExistingTarget: false,
+	},
+	"agent.port_access": {
+		PermissionID: "agent.port_access",
+		Sources: []MintEligibilitySource{
+			{Kind: MintEligibilityRelationship, RelationshipTypes: []string{"owner", "ancestor"}},
+		},
+		RequiresExistingTarget: false,
+	},
 }

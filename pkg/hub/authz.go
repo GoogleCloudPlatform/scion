@@ -494,29 +494,16 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 		}
 	}
 
-	// ── Step 5c: Skill scope containment (ptone/scion#1901) ───────────
-	// The curated hub-member/hub-viewer roles carry skill.read/skill.list at
-	// system scope purely so every hub member can browse the hub-wide
-	// (global/core) skill catalog. That grant must not leak into user- or
-	// project-scoped skills; see filterHubWideSkillGrants.
-	if request.Resource.Type == "skill" {
-		candidates = filterHubWideSkillGrants(candidates, roleDefs, request.Resource.ScopeKind)
-	}
-
-	// ── Step 5d/5e: Template and harness-config scope containment
-	// (ptone/scion#1916) ────────────────────────────────────────────────
-	// Same shape as step 5c: the curated hub-member/hub-viewer roles also
-	// carry template.read/list and harness_config.read/list at system
-	// scope, purely so every hub member can browse the hub-wide (global)
-	// catalog. That grant must not leak into user- or project-scoped
-	// records; see filterHubWideTemplateGrants and
-	// filterHubWideHarnessConfigGrants.
-	if request.Resource.Type == "template" {
-		candidates = filterHubWideTemplateGrants(candidates, roleDefs, request.Resource.ScopeKind)
-	}
-	if request.Resource.Type == "harness_config" {
-		candidates = filterHubWideHarnessConfigGrants(candidates, roleDefs, request.Resource.ScopeKind)
-	}
+	// ── Step 5c/5d/5e: Hub-wide catalog scope containment (ptone/scion#1901,
+	// #1916) ───────────────────────────────────────────────────────────
+	// The curated hub-member/hub-viewer roles carry skill/template/
+	// harness_config read/list at system scope purely so every hub member
+	// can browse the hub-wide (global/core) catalog. That grant must not
+	// leak into user- or project-scoped records. applyHubWideScopeFilters
+	// (authz_boundary.go) is the single shared dispatcher for this rule —
+	// ptone/scion#2117's SystemAuthorityProof/MintTimeSystemGrant call the
+	// exact same function, so the two paths cannot drift apart.
+	candidates = applyHubWideScopeFilters(candidates, roleDefs, ProjectTargetClass{ResourceType: request.Resource.Type, ScopeKind: request.Resource.ScopeKind})
 
 	// ── Step 6: Build resource context ────────────────────────────────
 	resourceCtx := ResourceContext{
@@ -1230,14 +1217,19 @@ func agentScopeRestriction(agent AgentIdentity) Restriction {
 }
 
 // loadAccessConstraintRestrictions loads active access constraints from the
-// store and converts them to kernel restrictions.
+// store and converts them to kernel restrictions. On a load error it fails
+// closed by returning a deny-all restriction. Decide (no error return),
+// getEffectivePermissions and getProjectScopedPermissions call this form and
+// keep that behaviour. A caller with its own error return that needs a load
+// failure to surface as an error instead should call
+// accessConstraintRestrictions directly; see SystemAuthorityProof and
+// CanMintSelector's mint-time helpers.
 func (a *AuthzService) loadAccessConstraintRestrictions(
 	ctx context.Context,
 	closure map[string]struct{},
 	resource ResourceContext,
 ) []Restriction {
-	// R-1 fix: page through all constraints instead of capping at 200.
-	constraints, err := a.loadAllAccessConstraints(ctx)
+	restrictions, err := a.accessConstraintRestrictions(ctx, closure, resource)
 	if err != nil {
 		// R-1 fix: deny (fail closed) when constraint loading errors.
 		// The design is explicit: "Store or group resolution errors fail
@@ -1249,8 +1241,29 @@ func (a *AuthzService) loadAccessConstraintRestrictions(
 			// nil Check denies everything.
 		}}
 	}
+	return restrictions
+}
+
+// accessConstraintRestrictions is loadAccessConstraintRestrictions's
+// error-returning form: it loads active access constraints from the store
+// and converts them to kernel restrictions, but returns a load error to the
+// caller instead of converting it into a deny-all restriction. Use when the
+// caller has its own error return and a load failure must surface as an
+// error rather than an ordinary denial, as on the ProjectAdmissionForClass
+// and CanMintSelector paths. Every other caller should use
+// loadAccessConstraintRestrictions.
+func (a *AuthzService) accessConstraintRestrictions(
+	ctx context.Context,
+	closure map[string]struct{},
+	resource ResourceContext,
+) ([]Restriction, error) {
+	// R-1 fix: page through all constraints instead of capping at 200.
+	constraints, err := a.loadAllAccessConstraints(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if len(constraints) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	// Convert store constraints to hub AccessConstraint and filter.
@@ -1309,13 +1322,39 @@ func (a *AuthzService) loadAccessConstraintRestrictions(
 		ri++
 	}
 
-	return restrictions
+	return restrictions, nil
 }
 
 // loadAllAccessConstraints loads all access constraints by paging through
 // the store. R-1 fix: the previous call used a fixed limit of 200 which
 // silently truncated constraints beyond that threshold.
 func (a *AuthzService) loadAllAccessConstraints(ctx context.Context) ([]*store.AccessConstraint, error) {
+	if cache := mintEligibilityCacheFromContext(ctx); cache != nil {
+		cache.mu.Lock()
+		if cache.constraintsLoaded {
+			all, err := cache.constraints, cache.constraintsErr
+			cache.mu.Unlock()
+			return all, err
+		}
+		cache.mu.Unlock()
+
+		all, err := a.loadAllAccessConstraintsUncached(ctx)
+
+		cache.mu.Lock()
+		cache.constraintsLoaded = true
+		cache.constraints, cache.constraintsErr = all, err
+		cache.mu.Unlock()
+		return all, err
+	}
+	return a.loadAllAccessConstraintsUncached(ctx)
+}
+
+// loadAllAccessConstraintsUncached is loadAllAccessConstraints's body, split
+// out so the mint-eligibility cache wrapper above never duplicates this
+// logic. Every caller outside a CanMintSelector call (e.g. the ordinary
+// Decide path) reaches this directly, with no cache in context, and behaves
+// exactly as before.
+func (a *AuthzService) loadAllAccessConstraintsUncached(ctx context.Context) ([]*store.AccessConstraint, error) {
 	const pageSize = 500
 	var all []*store.AccessConstraint
 	offset := 0
@@ -1852,98 +1891,18 @@ func (a *AuthzService) getEffectivePermissions(ctx context.Context, principalTyp
 // The method retains group-expanded principals, activation-window filtering,
 // and AccessConstraint reduction — exactly as getEffectivePermissions does —
 // but only considers bindings where ScopeType == "project" && ScopeID == projectID.
+// Shares its group/binding resolution (projectScopedGrants, authz_boundary.go)
+// with projectScopedPermissionsStrict, CanMintSelector's flat-role mint path's
+// error-returning counterpart; this function keeps a deny-all restriction on
+// a constraint-table load failure rather than returning an error.
 func (a *AuthzService) getProjectScopedPermissions(ctx context.Context, principalType, principalID, projectID string) ([]string, error) {
-	normalizedType := NormalizePrincipalType(principalType)
-
-	// Build principals: direct + group-expanded.
-	principals := []store.PrincipalRef{{Type: normalizedType, ID: principalID}}
-	var groupIDs []string
-	var err error
-	switch normalizedType {
-	case store.RoleBindingPrincipalUser:
-		groupIDs, err = a.store.GetEffectiveGroups(ctx, principalID)
-	case store.RoleBindingPrincipalAgent:
-		groupIDs, err = a.store.GetEffectiveGroupsForAgent(ctx, principalID)
-	}
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		a.logger.Warn("failed to get effective groups for project-scoped permission resolution (fail-closed)",
-			"principalType", principalType, "principalID", principalID, "error", err)
-		return nil, fmt.Errorf("group resolution failed (fail-closed): %w", err)
-	}
-	for _, gid := range groupIDs {
-		principals = append(principals, store.PrincipalRef{Type: "group", ID: gid})
-	}
-
-	bindings, err := a.store.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
+	perms, closure, err := a.projectScopedGrants(ctx, principalType, principalID, projectID)
 	if err != nil {
 		return nil, err
 	}
-
-	now := time.Now()
-	seen := make(map[string]bool)
-	var result []string
-	for _, b := range bindings {
-		// A2: Only project-scoped bindings for the target project.
-		if b.ScopeType != store.RoleScopeProject || b.ScopeID != projectID {
-			continue
-		}
-
-		// Activation window filtering (R-2 pattern).
-		cb := &CandidateBinding{BindingID: b.ID}
-		if b.NotBefore != nil {
-			cb.NotBefore = *b.NotBefore
-		}
-		if b.ExpiresAt != nil {
-			cb.ExpiresAt = *b.ExpiresAt
-		}
-		if activation := evaluateActivation(cb, now); !activation.Active {
-			continue
-		}
-
-		rd, rdErr := a.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
-		if rdErr != nil {
-			a.logger.Warn("failed to resolve role definition for project-scoped binding",
-				"binding_id", b.ID, "role_definition_id", b.RoleDefinitionID, "error", rdErr)
-			continue
-		}
-		if rd == nil {
-			a.logger.Warn("role definition not found for project-scoped binding",
-				"binding_id", b.ID, "role_definition_id", b.RoleDefinitionID)
-			continue
-		}
-		for _, permID := range rd.Permissions {
-			if !seen[permID] {
-				seen[permID] = true
-				result = append(result, permID)
-			}
-		}
+	if len(perms) == 0 {
+		return perms, nil
 	}
-
-	// Apply AccessConstraint intersection (same pattern as getEffectivePermissions).
-	if len(result) > 0 {
-		closure := make(map[string]struct{}, len(principals))
-		for _, p := range principals {
-			closure[p.Type+":"+p.ID] = struct{}{}
-		}
-		resourceCtx := ResourceContext{ProjectID: projectID}
-		restrictions := a.loadAccessConstraintRestrictions(ctx, closure, resourceCtx)
-		if len(restrictions) > 0 {
-			var filtered []string
-			for _, permID := range result {
-				blocked := false
-				for _, r := range restrictions {
-					if r.Check == nil || !r.Check(permID) {
-						blocked = true
-						break
-					}
-				}
-				if !blocked {
-					filtered = append(filtered, permID)
-				}
-			}
-			result = filtered
-		}
-	}
-
-	return result, nil
+	restrictions := a.loadAccessConstraintRestrictions(ctx, closure, ResourceContext{ProjectID: projectID})
+	return applyRestrictions(perms, restrictions), nil
 }
