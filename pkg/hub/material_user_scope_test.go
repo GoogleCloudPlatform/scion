@@ -153,11 +153,11 @@ func TestAgentSecretRead_SharingSourceMustBeActive(t *testing.T) {
 }
 
 // TestAgentSecretRead_SharingSourceEmptyCreatedByDenies pins that an empty
-// meta.CreatedBy denies with source_inactive and no error, without a store
-// call: both store.GetUser and store.GetAgent would themselves resolve an
-// empty ID to store.ErrNotFound before ever querying the backend
-// (entadapter's parseGetID), so progenySourceLive short-circuits to the same
-// outcome those lookups would otherwise reach.
+// meta.CreatedBy denies with source_inactive, no kind and no error. The
+// early return in progenySourceLive keeps the outcome the user and agent
+// lookups already reached (entadapter's parseGetID resolves an empty ID to
+// store.ErrNotFound), so this test pins the outcome, not the skipped
+// lookups.
 func TestAgentSecretRead_SharingSourceEmptyCreatedByDenies(t *testing.T) {
 	f := newMaterialFixture(t, "source-empty-created-by")
 
@@ -337,7 +337,8 @@ func TestAgentSecretRead_UserScopeCeilingApplied(t *testing.T) {
 // progenyEligibleSecretIDs returns an empty, non-nil set with no error for a
 // nil rec, rather than panicking when building the storedAgentIdentity.
 // facts.Agent is always non-nil at the one call site (materialRuntimePrecheck
-// denies before the agent record resolves), so this is a defensive guard
+// denies before building facts when the agent record does not resolve), so
+// this is a defensive guard
 // rather than a reachable production case.
 func TestAgentSecretRead_ProgenyEligibleSecretIDsNilRecDenies(t *testing.T) {
 	f := newMaterialFixture(t, "progeny-eligible-nil-rec")
