@@ -463,25 +463,27 @@ distinguishable end to end — including in denied and rejected requests.
 ### Decision and mutation audit
 
 - `AuthzService.Decide` is a thin wrapper around the kernel evaluation
-  (`decide`) that emits exactly one decision audit record per call,
-  regardless of which internal return path produced the result — including
-  the UAT project/credential-scope pre-kernel gate, which previously produced
-  no audit record at all for a denial.
-- Both decision and mutation audit records carry: a `permission_id` (the
-  exact canonical permission `Decide` evaluated, never re-derived downstream);
-  a snapshot of the credential's name/boundary/labels at decision time (audit
-  rows outlive tokens, which can be deleted); and a `correlation_id` equal to
-  the request's ID, so a decision audit row and the mutation audit row(s) it
-  authorized can be joined.
+  (`decide`) that emits exactly one decision audit record per call, whichever
+  internal return path produced the result — including the UAT
+  project/credential-scope pre-kernel gate.
+- Decision audit records carry a `permission_id`: exactly the caller-supplied
+  `AuthzRequest.Permission`, and only when it is a canonical ID present in
+  the permissions registry — never derived from resource/action, and never
+  an unregistered string. Both decision and mutation audit records carry: a
+  bounded, sanitized snapshot of the credential's name/boundary/labels at
+  decision time (audit rows outlive tokens, which can be deleted); and a
+  `correlation_id` equal to the request's ID, so a decision audit row and the
+  mutation audit row(s) it authorized can be joined.
 - `executor_kind`/`executor_id` distinguish what is currently executing from
   the initiating principal/credential above. They are empty for an ordinary
   live request; deferred-execution entry points (scheduler, schedule
   evaluator, broker dispatch — tracker E.2b) set them via
   `hub.ContextWithExecutor`.
-- An explicit `AuthzRequest.AlwaysAudit` marker forces an allow decision to
-  be audited regardless of the configured allow-sampling rate, for callers
-  that must never have their decision sampled away (e.g. a delegated-agent
-  event).
+- `AuthzRequest.AlwaysAudit` and its counterpart `Decision.AlwaysAudit`
+  (settable from inside `decide`'s body, for a branch that only learns
+  partway through evaluation that this decision must not be sampled away)
+  force an allow decision to be audited regardless of the configured
+  allow-sampling rate.
 - `hub.BuildDecisionAuditRecord(ctx, request, decision)` is exported so a
   non-`Decide` decision-audit path can build a schema-consistent record
   through the same field mapping, instead of hand-assembling one.
@@ -500,12 +502,17 @@ an ordinary human bearer token — never a verified actor identity. A later
 delegated-agent extension (area G) records a *separately verified* actor
 through its own columns (`actor_agent_id`, `authorizing_user_id`,
 `source_grant_id`, `delegation_edge_id`) and its own `CredentialKind`
-(`delegated_agent`), never reusing E's `store.DecisionAuditRecord` or
-`store.MutationAuditRecord` fields for that purpose —
-`pkg/hub/e2a_no_g_column_test.go` asserts neither struct defines G's reserved
-field names. A decoration label such as `"nightly-cleanup-agent"` therefore
-always stays under `credential.labels.*` with `labels_source=issuer`, and
-cannot occupy where G's verified actor fields will live.
+(`delegated_agent`), added to the same `store.DecisionAuditRecord` /
+`store.MutationAuditRecord` types in G's own migration, in G's own field
+block. G's fields are written only by G's code paths; E's writers leave them
+zero — `pkg/hub/e2a_no_g_column_test.go` runs E's decision- and
+mutation-audit writers with a decoration carrying G-reserved-looking label
+keys and asserts those fields stay zero (once they exist) and that the label
+values surface only inside the bounded `credential_labels` snapshot, never in
+a principal or credential ID field. A decoration label such as
+`"nightly-cleanup-agent"` therefore always stays under `credential.labels.*`
+with `labels_source=issuer`, and cannot occupy where G's verified actor
+fields will live.
 
 `Decision.DeniedBy` (a typed denial-source string, owned by a parallel
 authorization-kernel change) is recorded verbatim in a `denied_by` audit
