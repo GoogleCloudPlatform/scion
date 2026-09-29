@@ -266,9 +266,13 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
 	if cfg := marshalAppliedConfig(a.AppliedConfig); cfg != "" {
 		create.SetAppliedConfig(cfg)
 	}
-	if hc := harnessConfigOf(a.AppliedConfig); hc != "" {
-		create.SetHarnessConfig(hc)
-	}
+	// Always set, never leave NULL, even when harnessConfigOf returns "" (no
+	// harness configured). NULL is reserved to mean "never written by a
+	// binary that knows this column exists" — see
+	// CompositeStore.ReconcileHarnessConfigColumn's doc for why that
+	// distinction is what makes the reconcile query converge
+	// (ptone/scion#2146 review R5-1).
+	create.SetHarnessConfig(harnessConfigOf(a.AppliedConfig))
 	if !a.LastSeen.IsZero() {
 		create.SetLastSeen(a.LastSeen)
 	}
@@ -438,11 +442,11 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 	} else {
 		update.ClearAppliedConfig()
 	}
-	if hc := harnessConfigOf(a.AppliedConfig); hc != "" {
-		update.SetHarnessConfig(hc)
-	} else {
-		update.ClearHarnessConfig()
-	}
+	// Always set, never clear to NULL — see CreateAgent's identical comment
+	// and ReconcileHarnessConfigColumn's doc (ptone/scion#2146 review R5-1).
+	// AppliedConfig=nil (cleared above) still yields "" here, which is
+	// exactly the sentinel this row should carry, not NULL.
+	update.SetHarnessConfig(harnessConfigOf(a.AppliedConfig))
 	if a.LastSeen.IsZero() {
 		update.ClearLastSeen()
 	} else {
@@ -1079,6 +1083,10 @@ func marshalAppliedConfig(cfg *store.AgentAppliedConfig) string {
 // UpdateAgent write into the harness_config shadow column (see its doc in
 // pkg/ent/schema/agent.go) — kept as its own function so both call sites
 // derive it identically and cannot drift (ptone/scion#2146 review R3-1).
+// Both call sites write this value UNCONDITIONALLY, including "", rather
+// than skipping the write or clearing the column to NULL when it's empty —
+// NULL is reserved to mean "never written by a binary that knows this
+// column exists" (ptone/scion#2146 review R5-1).
 func harnessConfigOf(cfg *store.AgentAppliedConfig) string {
 	if cfg == nil {
 		return ""

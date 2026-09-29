@@ -48,6 +48,31 @@ const adoptionReviewRequiredAnnotation = "scion.io/adoption-review-required"
 const githubTokenInjectionModeMarkerSection = "migration_github_token_injection_mode_always"
 const agentIdentityKeyBackfillMarkerSection = "migration_agent_identity_keys_backfilled"
 
+// harnessConfigReconcilePageSize is a package variable, not a const, purely
+// so tests can lower it (save/restore) to construct a cheap multi-page
+// scenario for ReconcileHarnessConfigColumn without seeding hundreds of rows
+// (ptone/scion#2146 review R5-2). Production code never changes it.
+var harnessConfigReconcilePageSize = 500
+
+// harnessConfigReconcileTestStuckIDs, when non-nil, is a set of agent IDs
+// that ReconcileHarnessConfigColumn will skip updating this call, leaving
+// them pending (still harness_config IS NULL) — a test-only seam with no
+// production use (always nil outside a test). Its purpose: under the R5-1
+// sentinel design, every row a real run visits leaves the pending set on
+// that same visit, which means the WHERE clause alone (harness_config IS
+// NULL) shrinks the result set correctly even if the lastID/IDGT keyset
+// cursor is broken — the two mechanisms are behaviorally redundant for any
+// scenario where nothing legitimately stays pending across a call. That
+// makes the cursor otherwise untestable by black-box means (confirmed by
+// directly mutating lastID's advancement into a no-op and observing every
+// other test in this file still pass). This seam constructs the one
+// scenario where the two mechanisms diverge — some rows deliberately stay
+// pending within a call, so a correct cursor must still reach and reconcile
+// the OTHER rows that sort after them, while a broken cursor re-fetches the
+// same stuck rows forever and never makes progress on the rest
+// (ptone/scion#2146 review R5-2).
+var harnessConfigReconcileTestStuckIDs map[uuid.UUID]bool
+
 // CompositeStore is a fully Ent-backed implementation of store.Store. Every
 // domain is served by a dedicated Ent sub-store; CompositeStore embeds them so
 // their methods are promoted to satisfy the store.Store interface, while the
@@ -470,8 +495,8 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 	if err := c.BackfillAgentIdentityKeys(ctx); err != nil {
 		return fmt.Errorf("agent identity key backfill: %w", err)
 	}
-	if err := c.BackfillHarnessConfigColumn(ctx); err != nil {
-		return fmt.Errorf("harness_config column backfill: %w", err)
+	if err := c.ReconcileHarnessConfigColumn(ctx); err != nil {
+		return fmt.Errorf("harness_config column reconcile: %w", err)
 	}
 
 	// Migrate AllowListEntry records to User(status=invited) records.
@@ -662,48 +687,73 @@ func (c *CompositeStore) BackfillDelegationEdges(ctx context.Context) error {
 	return err
 }
 
-// BackfillHarnessConfigColumn populates the harness_config shadow column
+// ReconcileHarnessConfigColumn populates the harness_config shadow column
 // (pkg/ent/schema/agent.go) for agents whose column hasn't caught up with
 // their applied_config yet, by extracting it from each row's applied_config
 // JSON document. New rows never need this: CreateAgent/UpdateAgent keep the
 // column in sync going forward (agent_store.go's harnessConfigOf).
 //
-// Despite the name (kept for continuity — this was a one-shot migration
-// through round 3), this now runs on **every boot**, not once behind a
-// marker (ptone/scion#2146 review R4-5, option (b)). The one-shot version
-// left a gap during a mixed-version rollout: an old-binary replica can still
-// create or update agents with a NULL harness_config after a new-binary
-// replica has already run the backfill and set the marker, and those rows
-// would then never be reconciled. Running on every boot closes that gap for
-// the common case (a new-binary boot eventually reconciles what an
-// old-binary replica left behind) at negligible cost, because the query is
-// now scoped to exactly the rows that still need it
-// (`harness_config IS NULL AND applied_config IS NOT NULL`, R4-4) rather
-// than every agent row — on a Hub where the backfill has already caught up,
-// this is a single empty-result query, not a full table scan. See
-// "Release notes" in dev-notes.md for the one residual case this still
-// doesn't cover (a row whose harness_config was set to a stale value by an
-// old-binary replica and is not NULL).
+// This runs on **every boot**, not once behind a marker (ptone/scion#2146
+// review R4-5, option (b); named Backfill* through round 4, renamed here per
+// review R5-11 since "backfill" no longer describes an every-boot
+// operation). The one-shot version left a gap during a mixed-version
+// rollout: an old-binary replica can still create or update agents with a
+// NULL harness_config after a new-binary replica has already run the
+// backfill and set the marker, and those rows would then never be
+// reconciled. Running on every boot closes that gap for the common case (a
+// new-binary boot eventually reconciles what an old-binary replica left
+// behind). See "Release notes" in dev-notes.md for the residual case this
+// still doesn't cover (a row whose harness_config a *new*-binary boot wrote
+// is `""`, exactly like a row with no harness — see below for why that
+// matters — while `applied_config` was later changed by an *old*-binary
+// replica that doesn't know the column exists at all).
 //
-// A row whose applied_config fails to parse as JSON at all is skipped, not
-// failed — matching entAgentToStore's own tolerance for corrupt
-// applied_config (log and continue), not BackfillEmptyAgentRoles' stricter
-// fail-the-whole-migration behavior above. A single historically corrupt row
-// blocking every future Hub boot would be a far worse outcome than that one
-// row simply never matching a --harness filter, which is the same "corrupt
-// row means no match" behavior the HarnessConfig filter already guarantees
-// elsewhere (ptone/scion#2146 review R3-1).
+// NULL means exactly one thing: "never reconciled or synced by any binary
+// that knows this column exists." Every write path other than a raw,
+// pre-column INSERT/legacy row writes a real, non-NULL value:
+// CreateAgent/UpdateAgent call SetHarnessConfig(harnessConfigOf(cfg))
+// UNCONDITIONALLY (agent_store.go) — including "" when there's no harness —
+// and this function does the same for every row it visits, including a row
+// whose applied_config has no harness, doesn't parse as JSON at all, or
+// uses the legacy pre-0be8382 "harness" key (R4-10) instead of
+// "harnessConfig". "" is not ambiguous with "not yet reconciled" (NULL) and
+// never matches a --harness filter: agentFilterPredicates only emits
+// agent.HarnessConfigEQ when the filter value is itself non-empty
+// (agent_store.go's agentFilterPredicates), so a filter can never be set to
+// "" to begin with. This is the fix for review R5-1's finding that an
+// earlier version of this function (and its doc, and dev-notes) wrongly
+// claimed "a caught-up Hub does one empty-result query per boot" while
+// actually leaving every no-harness, invalid-JSON, and legacy-key row NULL
+// forever — re-selected, re-fetched, and (for invalid JSON) re-logged on
+// every single boot, with the reconcile set only ever growing. Writing ""
+// instead means every row this function ever touches leaves the
+// `harness_config IS NULL` set permanently, so a caught-up Hub really does
+// reach a stable, empty result.
+//
+// A row whose applied_config fails to parse as JSON at all does not fail
+// the whole migration — matching entAgentToStore's own tolerance for
+// corrupt applied_config (log and continue), not BackfillEmptyAgentRoles'
+// stricter fail-the-whole-migration behavior above — but, per the sentinel
+// rule just above, it still gets "" written rather than being left NULL
+// (ptone/scion#2146 review R3-1, R5-1).
 //
 // A row that parses but needed sanitizing (parseAppliedConfig returns a
 // non-nil cfg AND a non-nil error — e.g. an invalid GCP metadata mode) is
-// NOT skipped: its HarnessConfig is still backfilled. entAgentToStore
-// applies the identical tolerance to build the response-facing
-// store.Agent.HarnessConfig, so treating "sanitized" the same as "corrupt"
-// here silently dropped agents from every future --harness match, forever
-// (they'd never be revisited once the old one-shot marker was set)
-// (ptone/scion#2146 review R4-1).
-func (c *CompositeStore) BackfillHarnessConfigColumn(ctx context.Context) error {
-	const pageSize = 500
+// NOT treated as invalid: its HarnessConfig is used exactly like a clean
+// row. entAgentToStore applies the identical tolerance to build the
+// response-facing store.Agent.HarnessConfig, so treating "sanitized" the
+// same as "corrupt" here would silently and permanently diverge from what
+// the API actually reports for that agent (ptone/scion#2146 review R4-1).
+//
+// A row that no longer exists by the time its update runs (ent.IsNotFound —
+// e.g. a concurrent hard delete by another replica between this replica's
+// page read and its write) is logged and skipped, not treated as a boot
+// failure: every replica now runs this on every boot, so this race is
+// reachable in normal multi-replica operation, not just a rare edge case
+// (ptone/scion#2146 review R5-5). Any other update error still aborts
+// startup, same as before.
+func (c *CompositeStore) ReconcileHarnessConfigColumn(ctx context.Context) error {
+	pageSize := harnessConfigReconcilePageSize
 	var (
 		lastID                         uuid.UUID
 		totalUpdated, totalInvalidJSON int
@@ -719,7 +769,7 @@ func (c *CompositeStore) BackfillHarnessConfigColumn(ctx context.Context) error 
 		}
 		agents, err := query.Select(agent.FieldID, agent.FieldAppliedConfig).All(ctx)
 		if err != nil {
-			return fmt.Errorf("query agents for harness_config backfill: %w", err)
+			return fmt.Errorf("query agents for harness_config reconcile: %w", err)
 		}
 		if len(agents) == 0 {
 			break
@@ -727,32 +777,54 @@ func (c *CompositeStore) BackfillHarnessConfigColumn(ctx context.Context) error 
 
 		for _, a := range agents {
 			lastID = a.ID
-			if a.AppliedConfig == "" {
-				continue
-			}
+
+			// harnessValue defaults to "" — the sentinel for "reconciled,
+			// nothing usable found" (R5-1). It's overwritten below only when
+			// applied_config both parses and has a non-empty HarnessConfig.
+			harnessValue := ""
 			parsed, perr := parseAppliedConfig(a.AppliedConfig)
-			if parsed == nil {
-				// Not valid JSON at all — nothing usable to extract.
-				slog.Warn("harness_config backfill: applied_config is not valid JSON, skipping agent",
+			switch {
+			case parsed == nil:
+				// Not valid JSON at all (this also covers an empty
+				// applied_config string, which fails the same way) —
+				// nothing usable to extract, but still gets "" rather than
+				// being left NULL forever (R5-1).
+				slog.Warn("harness_config reconcile: applied_config is not valid JSON; recording no harness",
 					"agent_id", a.ID, "error", perr)
 				totalInvalidJSON++
-				continue
-			}
-			if perr != nil {
+			case perr != nil:
 				// Parsed, but needed sanitizing (e.g. an invalid GCP
 				// metadata mode). The rest of the document, including
 				// HarnessConfig, is still used — see the doc comment above
 				// (R4-1).
-				slog.Warn("harness_config backfill: applied_config needed sanitizing; harness_config is still used",
+				slog.Warn("harness_config reconcile: applied_config needed sanitizing; harness_config is still used",
 					"agent_id", a.ID, "error", perr)
+				harnessValue = parsed.HarnessConfig
+			default:
+				harnessValue = parsed.HarnessConfig
 			}
-			if parsed.HarnessConfig == "" {
+
+			if harnessConfigReconcileTestStuckIDs[a.ID] {
+				// Test-only seam (R5-2): simulate a row that legitimately
+				// stays pending across this call. lastID has already
+				// advanced past it above, so pagination still proceeds to
+				// later rows within this call; the row itself is revisited
+				// on the next call, same as any real row this run couldn't
+				// fix.
 				continue
 			}
+
 			if err := c.client.Agent.UpdateOneID(a.ID).
-				SetHarnessConfig(parsed.HarnessConfig).
+				SetHarnessConfig(harnessValue).
 				Exec(ctx); err != nil {
-				return fmt.Errorf("harness_config backfill: failed to update agent %s: %w", a.ID, err)
+				if ent.IsNotFound(err) {
+					// Concurrently deleted by another replica between our
+					// page read and this write — not a boot failure (R5-5).
+					slog.Debug("harness_config reconcile: agent no longer exists, skipping",
+						"agent_id", a.ID)
+					continue
+				}
+				return fmt.Errorf("harness_config reconcile: failed to update agent %s: %w", a.ID, err)
 			}
 			totalUpdated++
 		}
@@ -763,8 +835,8 @@ func (c *CompositeStore) BackfillHarnessConfigColumn(ctx context.Context) error 
 	}
 
 	if totalUpdated > 0 || totalInvalidJSON > 0 {
-		slog.Info("backfilled harness_config column for existing agents",
-			"rows_updated", totalUpdated, "rows_skipped_invalid_json", totalInvalidJSON)
+		slog.Info("reconciled harness_config column for existing agents",
+			"rows_updated", totalUpdated, "rows_invalid_json", totalInvalidJSON)
 	}
 
 	return nil

@@ -131,19 +131,36 @@ func (Agent) Fields() []ent.Field {
 		// harness_config is a queryable shadow of applied_config's
 		// "harnessConfig" key, kept in sync by every write to applied_config
 		// (CreateAgent/UpdateAgent — see agent_store.go's harnessConfigOf
-		// helper) and backfilled once for existing rows (BackfillHarnessConfigColumn).
-		// It exists solely so the CLI --harness filter (AgentFilter.HarnessConfig)
-		// can use a plain, dialect-independent equality predicate instead of
-		// parsing/pattern-matching the applied_config JSON document at query
-		// time — two prior attempts at the latter (a CASE+validity-checked
-		// JSON extract, then a strpos/to_json substring search) each had a
-		// real correctness bug (a Postgres version floor, then false
-		// positives from a same-named nested key) that a real column
-		// eliminates by construction (ptone/scion#2146 review R3-1). It is
-		// not part of store.Agent — nothing outside the HarnessConfig filter
-		// predicate reads it; the enriched, response-facing
-		// store.Agent.HarnessConfig field is unrelated and still derived
-		// from applied_config at response time, unchanged.
+		// helper) and reconciled at every startup for any row that hasn't
+		// caught up (CompositeStore.ReconcileHarnessConfigColumn — an
+		// every-boot operation, not a one-shot backfill, since round 4's
+		// R4-5). It exists solely so the CLI --harness filter
+		// (AgentFilter.HarnessConfig) can use a plain, dialect-independent
+		// equality predicate instead of parsing/pattern-matching the
+		// applied_config JSON document at query time — two prior attempts at
+		// the latter (a CASE+validity-checked JSON extract, then a
+		// strpos/to_json substring search) each had a real correctness bug
+		// (a Postgres version floor, then false positives from a same-named
+		// nested key) that a real column eliminates by construction
+		// (ptone/scion#2146 review R3-1). It is not part of store.Agent —
+		// nothing outside the HarnessConfig filter predicate reads it; the
+		// enriched, response-facing store.Agent.HarnessConfig field is
+		// unrelated and still derived from applied_config at response time,
+		// unchanged.
+		//
+		// NULL vs "": NULL means "never written by a binary that knows this
+		// column exists" — the reconcile's job is to find and fix exactly
+		// those rows. Every write that DOES know about the column
+		// (CreateAgent, UpdateAgent, the reconcile itself) always writes a
+		// real value, including "" for "no harness configured, or nothing
+		// usable could be extracted" — never NULL. "" can never match a
+		// --harness filter (the filter predicate is only emitted for a
+		// non-empty requested value), so this distinction is invisible to
+		// callers; it exists purely so the reconcile query
+		// (`harness_config IS NULL`) actually converges to empty once every
+		// row has been visited by a column-aware binary, instead of
+		// re-selecting and re-parsing every no-harness/invalid/legacy-key
+		// row on every single boot forever (ptone/scion#2146 review R5-1).
 		field.String("harness_config").
 			Optional(),
 
