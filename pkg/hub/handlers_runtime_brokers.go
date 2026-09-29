@@ -308,11 +308,17 @@ func (s *Server) getRuntimeBroker(w http.ResponseWriter, r *http.Request, id str
 	// Using brokerResource(broker) — rather than a hand-typed literal —
 	// carries OwnerID, so the creator's ownership relationship grant applies
 	// the same way it does for update/delete.
+	//
+	// This is a read surface, not a mutation, so a denial is reported as 404
+	// rather than 403 — matching getProject and getAgent (cross-project
+	// isolation) elsewhere in this package: a caller who cannot read the
+	// broker must not be able to distinguish "exists but denied" from
+	// "does not exist" by probing IDs.
 	if !brokerSelf {
 		decision := s.authzService.CheckAccess(ctx, userIdent, brokerResource(broker), ActionRead)
 		if !decision.Allowed {
 			logAuthzDenial(r, userIdent, brokerResource(broker), ActionRead, decision.Reason)
-			Forbidden(w)
+			NotFound(w, "RuntimeBroker")
 			return
 		}
 	}
@@ -986,11 +992,13 @@ func (s *Server) getBrokerProjects(w http.ResponseWriter, r *http.Request, broke
 		return
 	}
 
+	// This is a read surface, not a mutation, so a denial is reported as 404
+	// rather than 403 — see getRuntimeBroker for the full explanation.
 	if !brokerSelf {
 		decision := s.authzService.CheckAccess(ctx, userIdent, brokerResource(broker), ActionRead)
 		if !decision.Allowed {
 			logAuthzDenial(r, userIdent, brokerResource(broker), ActionRead, decision.Reason)
-			Forbidden(w)
+			NotFound(w, "RuntimeBroker")
 			return
 		}
 	}
@@ -1003,12 +1011,21 @@ func (s *Server) getBrokerProjects(w http.ResponseWriter, r *http.Request, broke
 	}
 
 	// Resolve project records up front: needed both for the response body
-	// and for the per-project read filter below.
+	// and for the per-project read filter below. A project that no longer
+	// exists (its provider record not yet cleaned up) is skipped, not an
+	// error; any other store error — a connection failure, for example — is
+	// propagated instead of silently producing an incomplete list.
 	projectsByID := make(map[string]*store.Project, len(providers))
 	for _, p := range providers {
-		if project, err := s.store.GetProject(ctx, p.ProjectID); err == nil {
-			projectsByID[p.ProjectID] = project
+		project, err := s.store.GetProject(ctx, p.ProjectID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			writeErrorFromErr(w, err, "")
+			return
 		}
+		projectsByID[p.ProjectID] = project
 	}
 
 	// Cross-project disclosure guard: broker.read authorizes reading the

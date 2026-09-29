@@ -23,6 +23,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -42,8 +43,15 @@ import (
 // These tests cover the four identity scenarios per handler:
 //   1. Broker self-access (matching BrokerID) → 200
 //   2. No identity → 401
-//   3. User with denied CheckAccess → 403
-//   4. Non-user, non-broker identity (agent) → 403
+//   3. User with denied CheckAccess →
+//        404 for the read handlers (getRuntimeBroker, getBrokerProjects),
+//        matching getProject/getAgent elsewhere in this package: a caller
+//        who may not read the resource must not be able to tell "exists but
+//        denied" from "does not exist" by probing IDs.
+//        403 for handleBrokerHeartbeat, a mutation, where that concern
+//        doesn't apply.
+//   4. Non-user, non-broker identity (agent) → 403 (unchanged; this gate
+//      runs before the broker is even fetched, so it can't leak existence)
 // ============================================================================
 
 // brokerAuthFixture holds the test world for broker auth gate tests.
@@ -176,18 +184,35 @@ func (f *brokerAuthFixture) asAgent(t *testing.T, method, path string, body inte
 
 // TestBrokerAuthGates is the regression suite for the authorization gates on
 // the three runtime broker handlers. Each handler is tested with 4 scenarios:
-// broker-self (200), no-identity (401), denied-user (403), agent (403).
+// broker-self (200), no-identity (401), denied-user (404 for the two read
+// handlers, 403 for the heartbeat mutation), agent (403).
 func TestBrokerAuthGates(t *testing.T) {
 	type testCase struct {
-		name       string
-		wantStatus int
+		name string
+		// wantStatus maps a handler name to its expected status for this
+		// scenario. Every scenario used below applies uniformly across
+		// handlers except "denied-user", which splits by read vs write.
+		wantStatus map[string]int
 		request    func(t *testing.T, f *brokerAuthFixture, handler string) *httptest.ResponseRecorder
+	}
+
+	readHandlers := []string{"getRuntimeBroker", "getBrokerProjects"}
+	allHandlers := []string{"getRuntimeBroker", "handleBrokerHeartbeat", "getBrokerProjects"}
+
+	// uniformStatus builds a wantStatus map assigning the same status to
+	// every handler in allHandlers.
+	uniformStatus := func(status int) map[string]int {
+		m := make(map[string]int, len(allHandlers))
+		for _, h := range allHandlers {
+			m[h] = status
+		}
+		return m
 	}
 
 	scenarios := []testCase{
 		{
 			name:       "broker-self=200",
-			wantStatus: http.StatusOK,
+			wantStatus: uniformStatus(http.StatusOK),
 			request: func(t *testing.T, f *brokerAuthFixture, handler string) *httptest.ResponseRecorder {
 				t.Helper()
 				switch handler {
@@ -211,7 +236,7 @@ func TestBrokerAuthGates(t *testing.T) {
 		},
 		{
 			name:       "no-identity=401",
-			wantStatus: http.StatusUnauthorized,
+			wantStatus: uniformStatus(http.StatusUnauthorized),
 			request: func(t *testing.T, f *brokerAuthFixture, handler string) *httptest.ResponseRecorder {
 				t.Helper()
 				switch handler {
@@ -232,8 +257,17 @@ func TestBrokerAuthGates(t *testing.T) {
 			},
 		},
 		{
-			name:       "denied-user=403",
-			wantStatus: http.StatusForbidden,
+			// The read handlers report a CheckAccess denial as 404, so it is
+			// indistinguishable from the broker not existing; the heartbeat
+			// mutation keeps reporting 403.
+			name: "denied-user",
+			wantStatus: func() map[string]int {
+				m := uniformStatus(http.StatusForbidden)
+				for _, h := range readHandlers {
+					m[h] = http.StatusNotFound
+				}
+				return m
+			}(),
 			request: func(t *testing.T, f *brokerAuthFixture, handler string) *httptest.ResponseRecorder {
 				t.Helper()
 				switch handler {
@@ -255,7 +289,7 @@ func TestBrokerAuthGates(t *testing.T) {
 		},
 		{
 			name:       "agent=403",
-			wantStatus: http.StatusForbidden,
+			wantStatus: uniformStatus(http.StatusForbidden),
 			request: func(t *testing.T, f *brokerAuthFixture, handler string) *httptest.ResponseRecorder {
 				t.Helper()
 				switch handler {
@@ -292,17 +326,20 @@ func TestBrokerAuthGates(t *testing.T) {
 				t.Run(sc.name, func(t *testing.T) {
 					f := brokerAuthSetup(t)
 					rec := sc.request(t, f, h.name)
+					want := sc.wantStatus[h.name]
 
-					if sc.wantStatus == http.StatusOK {
+					if want == http.StatusOK {
 						// For the broker-self happy path, the auth gate must
-						// pass — any non-401/403 proves the gate allowed it.
+						// pass — any non-401/403/404 proves the gate allowed it.
 						assert.NotEqual(t, http.StatusUnauthorized, rec.Code,
 							"broker self-access must not be rejected as 401; got: %s", rec.Body.String())
 						assert.NotEqual(t, http.StatusForbidden, rec.Code,
 							"broker self-access must not be rejected as 403; got: %s", rec.Body.String())
+						assert.NotEqual(t, http.StatusNotFound, rec.Code,
+							"broker self-access must not be rejected as 404; got: %s", rec.Body.String())
 					} else {
-						assert.Equal(t, sc.wantStatus, rec.Code,
-							"expected %d; got %d: %s", sc.wantStatus, rec.Code, rec.Body.String())
+						assert.Equal(t, want, rec.Code,
+							"expected %d; got %d: %s", want, rec.Code, rec.Body.String())
 					}
 				})
 			}
@@ -613,4 +650,88 @@ func TestBrokerAuthz_GetBrokerProjects_AdminSeesAll(t *testing.T) {
 	require.NoError(t, json.NewDecoder(adminRec.Body).Decode(&adminResp))
 	require.Len(t, adminResp.Projects, 1, "a super-admin must keep the usual bypass and see every project")
 	assert.Equal(t, project.ID, adminResp.Projects[0].ProjectID)
+}
+
+// getProjectErrStore wraps a store and forces GetProject to fail for one
+// specific project ID with a caller-supplied error, leaving every other
+// method (including GetProject for any other ID) untouched. Used to exercise
+// getBrokerProjects' handling of a provider record whose project lookup
+// fails, without needing a real deleted-row or connection-failure fixture.
+type getProjectErrStore struct {
+	store.Store
+	projectID string
+	err       error
+}
+
+func (g *getProjectErrStore) GetProject(ctx context.Context, id string) (*store.Project, error) {
+	if id == g.projectID {
+		return nil, g.err
+	}
+	return g.Store.GetProject(ctx, id)
+}
+
+// TestBrokerAuthz_GetBrokerProjects_SkipsNotFoundProject proves that a
+// provider record whose project has since been deleted (GetProject returning
+// store.ErrNotFound — the row was removed but the provider record wasn't yet
+// cleaned up) does not fail the whole request: getBrokerProjects must skip
+// that one entry and still return the rest of the list successfully.
+func TestBrokerAuthz_GetBrokerProjects_SkipsNotFoundProject(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	owner := &store.User{
+		ID:          tid("user-getproject-notfound-owner"),
+		Email:       "getproject-notfound-owner@test.com",
+		DisplayName: "Owner",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, owner))
+	ensureHubMembership(ctx, s, owner.ID)
+
+	brokerID, project := autoProvideBrokerWithProject(t, srv, owner,
+		"notfound-project-broker", "StaleProj", "https://github.com/acme/stale-repo.git")
+
+	srv.store = &getProjectErrStore{Store: s, projectID: project.ID, err: store.ErrNotFound}
+	defer func() { srv.store = s }()
+
+	rec := doRequestAsUser(t, srv, owner, http.MethodGet,
+		"/api/v1/runtime-brokers/"+brokerID+"/projects", nil)
+
+	assert.Equal(t, http.StatusOK, rec.Code,
+		"a provider record whose project lookup returns not-found must be skipped, not fail the whole request: %s", rec.Body.String())
+}
+
+// TestBrokerAuthz_GetBrokerProjects_PropagatesOtherProjectErrors is the other
+// side of the same fix: a GetProject failure that is NOT store.ErrNotFound
+// (a genuine store error, e.g. a connection failure) must be reported as an
+// error rather than silently treated the same as a not-found and dropped
+// from the list.
+func TestBrokerAuthz_GetBrokerProjects_PropagatesOtherProjectErrors(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	owner := &store.User{
+		ID:          tid("user-getproject-error-owner"),
+		Email:       "getproject-error-owner@test.com",
+		DisplayName: "Owner",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, owner))
+	ensureHubMembership(ctx, s, owner.ID)
+
+	brokerID, project := autoProvideBrokerWithProject(t, srv, owner,
+		"getproject-error-broker", "ErrProj", "https://github.com/acme/err-repo.git")
+
+	srv.store = &getProjectErrStore{Store: s, projectID: project.ID, err: errors.New("connection reset by peer")}
+	defer func() { srv.store = s }()
+
+	rec := doRequestAsUser(t, srv, owner, http.MethodGet,
+		"/api/v1/runtime-brokers/"+brokerID+"/projects", nil)
+
+	assert.NotEqual(t, http.StatusOK, rec.Code,
+		"a genuine store error from GetProject must not be silently swallowed into a 200 with an incomplete list: %s", rec.Body.String())
 }
