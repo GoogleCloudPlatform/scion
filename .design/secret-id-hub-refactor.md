@@ -347,24 +347,55 @@ formula can never drift apart):
   Strategy" continues to apply). A DB-less computed-name lookup tries the
   prefixed name first, then the legacy pre-ptone/scion#2152 name, with a
   `WARN` log on a legacy hit.
-- **Migration**: `scion hub secret migrate-names [--dry-run] [--delete-legacy]`
-  (a new, separate subcommand from the DB-value migration `scion hub secret
-  migrate`) independently checks, per secret identity: whether it needs
-  copying forward, whether its DB `SecretRef` needs repairing to the
-  prefixed name (which can be true even without a copy this run — see the
-  signing-key bullet below), and — only if both of those are already
-  satisfied — whether `--delete-legacy` should remove the legacy copy. Doing
-  these as three separately-triggered checks rather than one early-exit
-  chain is what makes the documented two-step workflow (a plain run, then a
-  later `--delete-legacy` run) actually reach the delete step on the second
-  invocation. It is idempotent and never calls a GCP SM listing API —
-  candidates come only from Hub DB records and a fixed list of known
+- **Migration**: `scion hub secret migrate-names [--dry-run] [--delete-legacy]
+  [--hub-id] [--timeout]` (a new, separate subcommand from the DB-value
+  migration `scion hub secret migrate`) independently checks, per secret
+  identity: whether it needs copying forward, whether its DB `SecretRef`
+  needs repairing to the prefixed name (which can be true even without a
+  copy this run — see the signing-key bullet below, and see "Resync and
+  concurrency" below for what "needs repairing" actually means once a
+  prefixed copy already exists), and — only once the ref already designates
+  the prefixed name — whether `--delete-legacy` should remove the legacy
+  copy. Doing these as three separately-triggered checks rather than one
+  early-exit chain is what makes the documented two-step workflow (a plain
+  run, then a later `--delete-legacy` run) actually reach the delete step on
+  the second invocation. It is idempotent and never calls a GCP SM listing
+  API — candidates come only from Hub DB records and a fixed list of known
   hub-scope signing-key names (`agent_signing_key`, `user_signing_key`,
-  `oidc_signing_key`, `download_signing_key`). `--delete-legacy` only deletes
-  a legacy secret after independently re-verifying the prefixed copy is
-  readable, matches, and the DB ref (if any) already points at it. This is a
-  human-mode-only CLI command (`cmd/cli_mode.go` `assistantDenied`) — not
-  available to AI-assistant or in-container agent callers.
+  `oidc_signing_key`, `download_signing_key`).
+  - **Hub ID resolution**: `migrate-names` resolves its hub ID exactly the
+    way the running hub server does at startup (`--hub-id`, then settings
+    `server.hub.hub_id`, then the server's own environment/hostname fallback
+    `HubServerConfig.ResolveHubID()`) — never a parallel resolution path —
+    and prints the resolved ID and the prefix it produces before acting. It
+    also refuses to proceed if the resolved ID disagrees with an existing
+    hub-scope secret record's `ScopeID`, unless `--hub-id` was passed
+    explicitly. Under `--dry-run`, the environment/hostname fallback is
+    followed only when it can be without writing `~/.scion/hub-id` for the
+    first time (`config.ResolveHubIDFromEnvReadOnly`); otherwise `--dry-run`
+    fails closed and asks for `--hub-id` rather than derive a value that
+    might not match what a real run would persist.
+  - **Outcomes**: a candidate with a DB record whose ref isn't yet the
+    prefixed name is classified as MIGRATE (prefixed copy created),
+    RESYNC (prefixed copy existed but was stale — see below), REPAIR REF
+    (prefixed copy already correct, only the ref moved), a skip with no
+    output (no ref, and no value under the legacy name either — truly
+    nothing to migrate), or a visible ORPHAN (a *stored* ref whose
+    designated value is gone — reported for operator awareness, but not a
+    failure: there is nothing to copy). Only an unreadable *stored* ref
+    (e.g. `PermissionDenied` on a legacy name a record's ref still depends
+    on) is a real, counted failure.
+  - `--delete-legacy` deletes a legacy secret once the DB ref (if any)
+    already designates the prefixed name and that prefixed copy is
+    confirmed readable — it does **not** additionally require the legacy
+    and prefixed values to match once a ref-based authority determination
+    has been made; see "Resync and concurrency" for why. Value equality is
+    used only for the no-DB-record path, where there is no ref to establish
+    authority from. `--dry-run` shares this exact decision function, so it
+    reports precisely what a real `--delete-legacy` run would do.
+  - This is a human-mode-only CLI command (`cmd/cli_mode.go`
+    `assistantDenied`) — not available to AI-assistant or in-container agent
+    callers.
 - **Hub-scope signing keys** (`agent_signing_key`, `user_signing_key`,
   `oidc_signing_key`, `download_signing_key`, and any future key synced via
   `syncSigningKeyToBackend`) get an additional, automatic copy-forward at hub
@@ -378,15 +409,62 @@ formula can never drift apart):
   operator's `migrate-names` run — otherwise the hub keeps reading the
   legacy copy through a stale ref indefinitely, silently defeating the
   copy-forward's whole purpose.
+- **Resync and concurrency**: a DB record's `SecretRef` is the source of
+  truth for which GCP SM copy is currently authoritative. Whenever the ref
+  isn't yet the prefixed name, `planOrRepairRef` (behind
+  `RepairRefToPrefixed`/`PlanRefRepair`) reads the value the ref actually
+  designates and makes the prefixed name carry it *exactly* — creating it if
+  missing, or overwriting it if it already exists with a different value —
+  before ever repointing the ref. This is what makes it safe to call
+  unconditionally at any point, including a mixed-version rolling deploy
+  (an old replica still writing through the legacy name after a new replica
+  already created a prefixed copy) or a rollback-then-roll-forward window:
+  the stale prefixed copy gets resynced to the ref-designated value, not
+  silently served or silently treated as "already migrated".
+  - GCP Secret Manager has no conditional `AddSecretVersion`, so a
+    concurrent write racing between the read of the authoritative value and
+    the write to the prefixed name can't be prevented by the GCP SM API
+    alone. Immediately before writing, `planOrRepairRef` re-reads the DB
+    record and compares `(SecretRef, Version)` against what it read at the
+    start of the attempt; if either changed — a concurrent `Set()`, or an
+    old binary re-asserting the *same* ref string with a new value (`Version`
+    still bumps on every write, which is what catches this ABA case even
+    though the ref text didn't change) — the attempt is discarded and
+    retried with fresh reads (bounded, currently 3 attempts), rather than
+    writing a value that's already known to be stale. The ref update itself
+    is additionally a compare-and-swap (`store.UpdateSecretRefIfMatches`,
+    keyed on the exact ref string read at the start of the attempt) as a
+    second layer on top of that recheck.
+  - **What this guarantees, precisely**: a stale value read before a
+    concurrent write started is not written over that concurrent write's
+    result, because the recheck (or the CAS on the ref) will have observed
+    the change and aborted. It does **not** eliminate every race — there is
+    a residual window between the final recheck and the actual GCP SM write
+    where a *third* write could still land in between; two cross-system
+    operations (GCP SM and the DB) can't be made a single transaction. In
+    practice this window is narrow and the retry bound turns "stuck racing
+    forever" into a loud, re-runnable failure rather than a silent
+    clobber — but it is not a "never clobber, under any interleaving"
+    guarantee.
+  - A record with a *stored* ref whose designated value is gone (`NotFound`)
+    is reported as `ErrOrphanedRef`, distinct from `store.ErrNotFound` (no
+    ref and no legacy-name value either — genuinely nothing to migrate).
+    `migrate-names` treats both as non-failures, but reports the former as a
+    visible ORPHAN line since it reflects a record making a claim that no
+    longer holds.
 - **Deploy ordering**: grant the new hub-prefixed IAM condition to a hub's
   service account *before* deploying a binary built from this change —
   every `Set` (new secret, new version, signing-key rotation) targets the
   prefixed name immediately, so writes get a permission error otherwise.
   Keep the legacy grant in place until `--delete-legacy` has been run and
-  verified; only then remove it. `Delete` treats a denial on the legacy name
-  as non-fatal best-effort cleanup (logged, not returned as an error) so
-  deletes keep working once the legacy grant is gone, even for secrets that
-  were never explicitly migrated.
+  verified; only then remove it. `Delete` deletes the prefixed (in-use) name
+  first (always fatal on failure), then treats a `PermissionDenied` on the
+  legacy name as non-fatal best-effort cleanup only once the prefixed copy
+  is confirmed authoritative (a DB record's ref, if any, already designates
+  it) — for a secret that was never migrated, or whose ref still depends on
+  the legacy name, any legacy-delete failure (including `PermissionDenied`)
+  is fatal, so a delete can never silently drop a DB row while the secret's
+  only copy survives untracked in GCP SM.
 - **Rollback**: rolling back to a pre-ptone/scion#2152 binary continues to
   resolve existing secrets via their stored `SecretRef` (unchanged by this
   feature unless `migrate-names` has run and rewritten it to the prefixed
@@ -395,17 +473,18 @@ formula can never drift apart):
   `--delete-legacy` run, so a rollback window before that step is always
   safe. Rolling back, writing through the old binary (which always targets
   the legacy name and resets the ref to it), and then rolling forward again
-  leaves a *stale* prefixed copy that the new binary's DB-less fallback and
-  signing-key copy-forward will prefer over the newer legacy value, and that
-  `migrate-names` will treat as already migrated; there is currently no
-  value-freshness check to catch this. Avoid writing through an old binary
-  after any forward progress has been made, or re-run `migrate-names`
-  attentively (compare values) if a rollback-then-roll-forward happened.
+  leaves a *stale* prefixed copy relative to the ref — this is exactly what
+  the resync logic above corrects on the next `migrate-names` run or hub
+  boot, not a manual "compare values" step for an operator to perform.
 - **Removing the legacy fallback**: tracked in ptone/scion#2180, to be done
   one release after `migrate-names` has shipped and been run in production,
-  once no known deployment still has secrets under legacy names.
+  once a fleet-wide `--dry-run` reports zero failures and zero pending
+  migrate/repair/resync plan lines.
 
-See `pkg/secret/gcpbackend.go` (`secretNamePrefix`, `gcpSecretName`,
-`legacyGCPSecretName`, `MigrateNameForward`, `CopyHubSecretForward`,
-`RefPointsAtPrefixed`, `LegacyStillPresent`) and
+See `pkg/secret/gcpbackend.go` (`secretNamePrefix`/`SecretNamePrefixForHubID`,
+`gcpSecretName`, `legacyGCPSecretName`, `MigrateNameForward`,
+`CopyHubSecretForward`, `RefPointsAtPrefixed`, `LegacyStillPresent`,
+`RepairRefToPrefixed`, `PlanRefRepair`, `DeleteLegacySecretName`,
+`PlanLegacyDeletion`, `ErrOrphanedRef`), `pkg/store/store.go` /
+`pkg/store/entadapter/secret_store.go` (`UpdateSecretRefIfMatches`), and
 `cmd/hub_secret_migrate_names.go` for the implementation.
