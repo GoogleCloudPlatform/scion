@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -31,6 +32,29 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// captureListStdout redirects os.Stdout to a pipe for the duration of fn and
+// discards everything written to it, draining concurrently so fn can never
+// block on a full pipe buffer. Earlier versions of these tests used
+// `_, w, _ := os.Pipe()` and threw away the read end entirely — a leaked fd
+// on every call, and a hang waiting to happen the first time a command under
+// test wrote more than the pipe buffer (~64 KiB) before this helper existed
+// (ptone/scion#2146 review R3-6).
+func captureListStdout(fn func()) {
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	done := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(io.Discard, r)
+		close(done)
+	}()
+	fn()
+	_ = w.Close()
+	os.Stdout = oldStdout
+	<-done
+	_ = r.Close()
+}
 
 func TestFormatLastSeen(t *testing.T) {
 	tests := []struct {
@@ -1329,10 +1353,10 @@ func TestResolveLineageRootID(t *testing.T) {
 			want: "self-id",
 		},
 		{
-			name:     "single ancestry entry (a top-level, user-created agent): the user is the direct parent",
+			name:     "single ancestry entry (a top-level, user-created agent): parent is a user, so self is root, not the user (ptone/scion#2146 --lineage option (i))",
 			id:       "child-id",
 			ancestry: []string{"user-id"},
-			want:     "user-id",
+			want:     "child-id",
 		},
 		{
 			name:     "multi-entry ancestry: the LAST entry is the direct parent, not the topmost ancestor",
@@ -1640,12 +1664,9 @@ func TestListAgentsViaHub_AttributeFilterQueryParams(t *testing.T) {
 			oldListAll, oldOwner, oldBroker, oldHarness, oldPhase, oldOutputFormat
 	}()
 
-	oldStdout := os.Stdout
-	_, w, _ := os.Pipe()
-	os.Stdout = w
-	err = listAgentsViaHub(hubCtx)
-	_ = w.Close()
-	os.Stdout = oldStdout
+	captureListStdout(func() {
+		err = listAgentsViaHub(hubCtx)
+	})
 
 	require.NoError(t, err)
 	require.NotNil(t, gotQuery, "the /api/v1/agents request should have been made")
@@ -1693,12 +1714,9 @@ func TestListAgentsViaHub_DescendantsFlag(t *testing.T) {
 		listAll, filterDescendants, outputFormat = oldListAll, oldDescendants, oldOutputFormat
 	}()
 
-	oldStdout := os.Stdout
-	_, w, _ := os.Pipe()
-	os.Stdout = w
-	err = listAgentsViaHub(hubCtx)
-	_ = w.Close()
-	os.Stdout = oldStdout
+	captureListStdout(func() {
+		err = listAgentsViaHub(hubCtx)
+	})
 
 	require.NoError(t, err)
 	assert.Equal(t, refID, gotAncestorID)
@@ -1748,12 +1766,10 @@ func TestListAgentsViaHub_AncestorsFlag(t *testing.T) {
 		agentsCalled, gotIDs = false, nil
 		filterAncestors = refID
 
-		oldStdout := os.Stdout
-		_, w, _ := os.Pipe()
-		os.Stdout = w
-		err := listAgentsViaHub(hubCtx)
-		_ = w.Close()
-		os.Stdout = oldStdout
+		var err error
+		captureListStdout(func() {
+			err = listAgentsViaHub(hubCtx)
+		})
 
 		require.NoError(t, err)
 		assert.True(t, agentsCalled)
@@ -1764,12 +1780,10 @@ func TestListAgentsViaHub_AncestorsFlag(t *testing.T) {
 		agentsCalled, gotIDs = false, nil
 		filterAncestors = emptyRefID
 
-		oldStdout := os.Stdout
-		_, w, _ := os.Pipe()
-		os.Stdout = w
-		err := listAgentsViaHub(hubCtx)
-		_ = w.Close()
-		os.Stdout = oldStdout
+		var err error
+		captureListStdout(func() {
+			err = listAgentsViaHub(hubCtx)
+		})
 
 		require.NoError(t, err)
 		assert.False(t, agentsCalled, "an empty ancestry must not fall through to an unrestricted /api/v1/agents query")
@@ -1783,8 +1797,10 @@ func TestListAgentsViaHub_AncestorsFlag(t *testing.T) {
 func TestListAgentsViaHub_LineageFlag(t *testing.T) {
 	const refID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 	const rootlessRefID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+	const topLevelRefID = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+	const topLevelRefProjectID = "dddddddd-dddd-dddd-dddd-dddddddddddd"
 
-	var gotLineageRootID string
+	var gotLineageRootID, gotProjectID string
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -1792,8 +1808,14 @@ func TestListAgentsViaHub_LineageFlag(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: refID, Slug: "ref-agent", Ancestry: []string{"user-id", "parent-id"}})
 		case r.URL.Path == "/api/v1/agents/"+rootlessRefID:
 			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: rootlessRefID, Slug: "rootless-ref-agent"})
+		case r.URL.Path == "/api/v1/agents/"+topLevelRefID:
+			// A top-level, user-created agent: Ancestry has exactly one
+			// entry (the user that created it), so its direct parent is a
+			// user, not an agent.
+			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: topLevelRefID, Slug: "top-level-ref-agent", ProjectID: topLevelRefProjectID, Ancestry: []string{"user-id"}})
 		case r.URL.Path == "/api/v1/agents":
 			gotLineageRootID = r.URL.Query().Get("lineageRootId")
+			gotProjectID = r.URL.Query().Get("projectId")
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"agents": []hubclient.Agent{}})
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -1816,12 +1838,10 @@ func TestListAgentsViaHub_LineageFlag(t *testing.T) {
 
 	run := func() {
 		t.Helper()
-		oldStdout := os.Stdout
-		_, w, _ := os.Pipe()
-		os.Stdout = w
-		err := listAgentsViaHub(hubCtx)
-		_ = w.Close()
-		os.Stdout = oldStdout
+		var err error
+		captureListStdout(func() {
+			err = listAgentsViaHub(hubCtx)
+		})
 		require.NoError(t, err)
 	}
 
@@ -1837,6 +1857,21 @@ func TestListAgentsViaHub_LineageFlag(t *testing.T) {
 		filterLineage = rootlessRefID
 		run()
 		assert.Equal(t, rootlessRefID, gotLineageRootID)
+	})
+
+	// ptone/scion#2146 review round 3: --lineage option (i) explicitly
+	// roots at the reference itself when its direct parent is a user (a
+	// top-level agent) rather than another agent — this is the CLI-level
+	// case (through the full listAgentsViaHub path, not just the
+	// resolveLineageRootID unit test above) that exercises exactly that,
+	// and also confirms the query is bounded to the reference's own
+	// project (R2-8).
+	t.Run("top-level agent (direct parent is a user) is its own root, project-bounded", func(t *testing.T) {
+		gotLineageRootID, gotProjectID = "", ""
+		filterLineage = topLevelRefID
+		run()
+		assert.Equal(t, topLevelRefID, gotLineageRootID)
+		assert.Equal(t, topLevelRefProjectID, gotProjectID)
 	})
 }
 
@@ -1877,9 +1912,14 @@ func TestListAgentsViaHub_AllMode_AgentIdentityWithRelationshipFlag_Errors(t *te
 		name string
 		set  func()
 	}{
-		{"descendants", func() { filterDescendants = scopeInferSentinel }},
-		{"ancestors", func() { filterAncestors = scopeInferSentinel }},
-		{"lineage", func() { filterLineage = scopeInferSentinel }},
+		{"descendants (bare)", func() { filterDescendants = scopeInferSentinel }},
+		{"ancestors (bare)", func() { filterAncestors = scopeInferSentinel }},
+		{"lineage (bare)", func() { filterLineage = scopeInferSentinel }},
+		// ptone/scion#2146 review R3-5: the guard must also fire for an
+		// explicit reference value, not only the bare (self-inferring)
+		// form — the final --all listing is what fails regardless of how
+		// the reference was named.
+		{"descendants (explicit value)", func() { filterDescendants = "some-other-agent" }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			filterDescendants, filterAncestors, filterLineage = "", "", ""
@@ -1891,6 +1931,50 @@ func TestListAgentsViaHub_AllMode_AgentIdentityWithRelationshipFlag_Errors(t *te
 			assert.Contains(t, err.Error(), "agent")
 		})
 	}
+}
+
+// TestListAgentsViaHub_AllMode_AssistantModeWithRelationshipFlag_NotBlocked
+// is the ptone/scion#2146 review R3-5 negative-coverage gap: the agent-mode
+// --all guard must NOT fire in assistant mode. Human mode is already covered
+// by TestListAgentsViaHub_AllMode_HumanCrossProjectReference; this covers
+// the other non-agent CLI mode explicitly, since the guard's condition
+// checks `resolveMode() == ModeAgent` specifically, not "not human".
+func TestListAgentsViaHub_AllMode_AssistantModeWithRelationshipFlag_NotBlocked(t *testing.T) {
+	const refID = "77777777-8888-9999-aaaa-bbbbbbbbbbbb"
+	var listCalled bool
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/agents/"+refID:
+			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: refID, Slug: "ref-agent"})
+		case r.URL.Path == "/api/v1/agents":
+			listCalled = true
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"agents": []hubclient.Agent{}})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL}
+
+	oldListAll, oldDescendants, oldOutputFormat := listAll, filterDescendants, outputFormat
+	listAll = true
+	filterDescendants = refID
+	outputFormat = "json"
+	t.Setenv("SCION_CLI_MODE", "assistant")
+	defer func() {
+		listAll, filterDescendants, outputFormat = oldListAll, oldDescendants, oldOutputFormat
+	}()
+
+	captureListStdout(func() {
+		err = listAgentsViaHub(hubCtx)
+	})
+
+	require.NoError(t, err, "assistant mode must not trip the agent-mode --all guard")
+	assert.True(t, listCalled)
 }
 
 // TestListAgentsViaHub_AllMode_HumanCrossProjectReference is the
@@ -1942,12 +2026,9 @@ func TestListAgentsViaHub_AllMode_HumanCrossProjectReference(t *testing.T) {
 		listAll, filterDescendants, outputFormat = oldListAll, oldDescendants, oldOutputFormat
 	}()
 
-	oldStdout := os.Stdout
-	_, w, _ := os.Pipe()
-	os.Stdout = w
-	err = listAgentsViaHub(hubCtx)
-	_ = w.Close()
-	os.Stdout = oldStdout
+	captureListStdout(func() {
+		err = listAgentsViaHub(hubCtx)
+	})
 
 	require.NoError(t, err)
 	assert.Equal(t, crossProjectRefID, gotAncestorID,
@@ -2008,12 +2089,10 @@ func TestListAgentsViaHub_BareRelationshipFlag_ModeDefaults(t *testing.T) {
 
 	run := func(ctx *HubContext) error {
 		t.Helper()
-		oldStdout := os.Stdout
-		_, w, _ := os.Pipe()
-		os.Stdout = w
-		err := listAgentsViaHub(ctx)
-		_ = w.Close()
-		os.Stdout = oldStdout
+		var err error
+		captureListStdout(func() {
+			err = listAgentsViaHub(ctx)
+		})
 		return err
 	}
 

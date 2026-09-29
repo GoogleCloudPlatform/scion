@@ -2177,11 +2177,12 @@ func TestR1_3_ListEndpointResolvesAgentIdentityCantGetOnPeer(t *testing.T) {
 	require.Equal(t, http.StatusForbidden, getRec.Code,
 		"baseline: GET on a project peer is denied for an agent identity")
 
-	// The PROJECT-scoped list endpoint is what cmd/list.go's refAgentSvc
-	// actually uses (it resolves the reference through the caller's own
-	// project regardless of --all — see listAgentsViaHub): it carves out
-	// same-project agent tokens (listProjectAgents,
-	// pkg/hub/handlers_projects_core.go), independent of role bindings.
+	// The PROJECT-scoped list endpoint is what cmd/list.go's
+	// resolveReferenceAgent actually resolves through outside --all (see
+	// listAgentsViaHub, which uses the project-scoped agentSvc whenever
+	// --all is not set): it carves out same-project agent tokens
+	// (listProjectAgents, pkg/hub/handlers_projects_core.go), independent
+	// of role bindings.
 	projPath := "/api/v1/projects/" + f.proj.ID + "/agents"
 
 	listByIDRec := f.asAgent(t, http.MethodGet, projPath+"?id="+f.sibling.ID, nil)
@@ -2210,12 +2211,12 @@ func TestR1_3_ListEndpointResolvesAgentIdentityCantGetOnPeer(t *testing.T) {
 	// carries no role-binding-derived hub-wide list authority (only the
 	// project-scoped route's same-project carve-out applies), so it finds
 	// nothing here — even the caller's own ID. This is exactly why
-	// cmd/list.go's refAgentSvc always prefers the project-scoped service
-	// for reference resolution when a project is resolvable, never the
-	// --all-selected global agentSvc: using the global endpoint for
-	// resolution would make `--all --descendants` (even bare, self) find
-	// nothing for an agent caller, not because the reference doesn't exist
-	// but because this endpoint can't see it under this identity.
+	// listAgentsViaHub fails loudly instead of silently for `--all` combined
+	// with a relationship flag in agent mode (ptone/scion#2146 review R2-4):
+	// the final --all listing always goes through this global endpoint,
+	// which can't see this identity's own agents at all, so resolving the
+	// reference successfully (e.g. via the project-scoped endpoint) would
+	// not have made the overall command work end to end.
 	globalRec := f.asAgent(t, http.MethodGet, "/api/v1/agents?id="+f.sibling.ID, nil)
 	require.Equal(t, http.StatusOK, globalRec.Code, "body: %s", globalRec.Body.String())
 	var globalResp ListAgentsResponse

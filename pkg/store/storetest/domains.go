@@ -571,8 +571,12 @@ func AgentDomain() Domain[store.Agent] {
 				WantCount: 2,
 			},
 			{
-				// HarnessConfig: matches the harnessConfig key embedded in
-				// AppliedConfig, not a dedicated column (ptone/scion#2146).
+				// HarnessConfig: matches the dedicated harness_config shadow
+				// column, kept in sync with AppliedConfig.HarnessConfig at
+				// write time (ptone/scion#2146 review R3-1). See
+				// pkg/store/entadapter/agent_store_test.go for the
+				// predicate-level tests (no-env, CreateInputs divergence,
+				// corrupt-row tolerance) that exercise the column directly.
 				Name: "ByHarnessConfig",
 				Seed: func(t *testing.T, ctx context.Context, s store.Store) {
 					claude := newOracleAgent("harness-claude")
@@ -609,20 +613,16 @@ func AgentDomain() Domain[store.Agent] {
 				WantCount: 1,
 			},
 			{
-				// IDs: narrowing restriction to a specific agent ID set,
-				// backing relationship queries like CLI --ancestors
-				// (ptone/scion#2146). A user ID mixed into the candidate set
+				// IDs / user-ID path: a user ID mixed into the candidate set
 				// (Ancestry mixes user and agent principal IDs) is a
 				// perfectly valid UUID — it simply matches no row in the
 				// agents table, which is how "skip entries that are users"
-				// falls out without extra bookkeeping. A separate,
-				// genuinely malformed (non-UUID) entry is included too, to
-				// confirm that path is dropped rather than erroring — a
-				// distinct code path (parseUUIDList) from the user-ID case
-				// (ptone/scion#2146 review R2-7: an earlier version of this
-				// case used a non-UUID string to stand in for a user ID,
-				// which tested the wrong path).
-				Name: "ByIDs",
+				// falls out without extra bookkeeping for relationship
+				// queries like CLI --ancestors (ptone/scion#2146). Split from
+				// the malformed-entry case below (review R3-7) so a
+				// regression in either path is diagnosed by name, not just
+				// an opaque count mismatch in one shared case.
+				Name: "ByIDs_UserIDStandIn",
 				Seed: func(t *testing.T, ctx context.Context, s store.Store) {
 					require.NoError(t, s.CreateAgent(ctx, newOracleAgent("ids-keep")))
 					require.NoError(t, s.CreateAgent(ctx, newOracleAgent("ids-drop")))
@@ -641,7 +641,32 @@ func AgentDomain() Domain[store.Agent] {
 						}
 					}
 					userIDStandIn := uuid.NewString() // a valid UUID naming no agent
-					return s.ListAgents(ctx, store.AgentFilter{IDs: []string{keepID, userIDStandIn, "not-a-uuid-at-all"}}, store.ListOptions{})
+					return s.ListAgents(ctx, store.AgentFilter{IDs: []string{keepID, userIDStandIn}}, store.ListOptions{})
+				},
+				WantCount: 1,
+			},
+			{
+				// IDs / malformed-entry path: a genuinely non-UUID entry is a
+				// distinct code path (parseUUIDList's parse-failure drop)
+				// from the user-ID case above — ptone/scion#2146 review R2-7
+				// found an earlier version of this test conflated the two by
+				// using a non-UUID string to stand in for a user ID.
+				Name: "ByIDs_MalformedEntryDropped",
+				Seed: func(t *testing.T, ctx context.Context, s store.Store) {
+					require.NoError(t, s.CreateAgent(ctx, newOracleAgent("ids-malformed-keep")))
+				},
+				List: func(ctx context.Context, s store.Store) (*store.ListResult[store.Agent], error) {
+					all, err := s.ListAgents(ctx, store.AgentFilter{}, store.ListOptions{})
+					if err != nil {
+						return nil, err
+					}
+					var keepID string
+					for _, a := range all.Items {
+						if a.Name == "ids-malformed-keep" {
+							keepID = a.ID
+						}
+					}
+					return s.ListAgents(ctx, store.AgentFilter{IDs: []string{keepID, "not-a-uuid-at-all"}}, store.ListOptions{})
 				},
 				WantCount: 1,
 			},

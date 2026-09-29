@@ -214,26 +214,49 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 		opts.ProjectID = projectID
 		agentSvc = hubCtx.Client.ProjectAgents(projectID)
 	} else if resolveMode() == ModeAgent && (filterDescendants != "" || filterAncestors != "" || filterLineage != "") {
-		// An agent identity has no hub-wide list authority at all: the
+		// An agent TOKEN has no hub-wide list authority by default: the
 		// global endpoint (what --all drives the final listing through)
 		// returns nothing for a bare agent token, even for the caller's own
 		// ID — only the project-scoped endpoint's same-project carve-out
 		// (listProjectAgents, pkg/hub/handlers_projects_core.go) lets an
-		// agent list anything. An earlier version of this code tried to
-		// route just the reference-agent *resolution* step through the
-		// project-scoped endpoint while leaving the final listing on the
-		// global one; that made resolution succeed but the final listing
-		// still came back empty — a silent wrong answer indistinguishable
-		// from "no descendants" (ptone/scion#2146 review R2-4), and it also
-		// broke `--all` for HUMAN callers naming a reference agent in a
-		// *different* project, since it forced resolution through the
-		// caller's own project unconditionally (review R2-3). Failing loudly
-		// here instead removes both defects: humans keep the pre-existing
-		// global-endpoint behavior for --all, and an agent caller gets a
-		// clear error instead of a wrong empty list.
-		return fmt.Errorf("--all cannot be combined with --descendants/--ancestors/--lineage for an agent caller: " +
-			"agent identities can only list agents within their own project, so the final result would always be empty; " +
-			"drop --all to resolve the reference and list within your project")
+		// agent list anything without extra grants. An earlier version of
+		// this code tried to route just the reference-agent *resolution*
+		// step through the project-scoped endpoint while leaving the final
+		// listing on the global one; that made resolution succeed but the
+		// final listing still came back empty — a silent wrong answer
+		// indistinguishable from "no descendants" (ptone/scion#2146 review
+		// R2-4), and it also broke `--all` for HUMAN callers naming a
+		// reference agent in a *different* project, since it forced
+		// resolution through the caller's own project unconditionally
+		// (review R2-3). Failing loudly here instead removes both defects:
+		// humans keep the pre-existing global-endpoint behavior for --all,
+		// and an agent caller gets a clear error instead of a wrong empty
+		// list.
+		//
+		// Known limitation, accepted per review R3-2: this keys on CLI
+		// *mode* (SCION_CLI_MODE / settings.cli.mode), not on which
+		// credential is actually in use. Two real cases it does not
+		// distinguish, both narrow: (1) inside an agent container, the CLI
+		// may still authenticate as a user — OAuth credentials, or dev auth
+		// on a localhost hub for a non-hub-managed agent (see cmd/hub.go's
+		// auth priority order) — in which case --all would actually work
+		// but this still blocks it; (2) an agent whose token carries a
+		// group-derived agent.list grant gets a non-empty (if
+		// project-limited) global result, so "would always be empty" is not
+		// a universal guarantee. Distinguishing on the credential actually
+		// selected would require either a new method on the hubclient.Client
+		// interface (which has several independent implementers outside
+		// this change — two in extras/scion-a2a-bridge, one in
+		// pkg/templatecache — so adding to it here is a larger, cross-cutting
+		// change than this fix warrants) or an extra Auth().Me() round trip
+		// before the guard, which would give up the "no HTTP call before the
+		// guard fires" property the current test suite relies on and
+		// verifies. Kept as a mode check with a message that states the
+		// actual rule rather than overclaiming; a future change wiring
+		// credential introspection through hubclient.Client can replace this
+		// without touching the guard's call site.
+		return fmt.Errorf("--all cannot be combined with --descendants/--ancestors/--lineage in agent mode: " +
+			"an agent token can only list agents in its own project; drop --all")
 	}
 
 	if filterOwner != "" {
@@ -310,19 +333,28 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 		if err != nil {
 			return err
 		}
-		var root string
 		if userID != "" {
-			// A user has no Ancestry (no parent to walk to), so it is its
-			// own lineage root — see resolveLineageRootID.
-			root = resolveLineageRootID(userID, nil)
+			// A user has no Ancestry (no parent to walk to) and no single
+			// project of its own — a user reference roots at itself and is
+			// intentionally NOT project-bounded, same as --descendants for
+			// that user: every agent the user has created, at any depth,
+			// across every project the caller can see (--all) or the
+			// current project (default).
+			opts.LineageRootID = resolveLineageRootID(userID, nil)
 		} else {
 			refAgent, err := resolveReferenceAgent(ctx, agentSvc, agentRef)
 			if err != nil {
 				return wrapHubError(err)
 			}
-			root = resolveLineageRootID(refAgent.ID, refAgent.Ancestry)
+			opts.LineageRootID = resolveLineageRootID(refAgent.ID, refAgent.Ancestry)
+			// Project-bound the query to the reference's own project,
+			// matching cascadeMessageMode's scoping (ptone/scion#2146
+			// review R2-8) — a creation-tree neighborhood does not cross
+			// project boundaries. Without --all this is already implied by
+			// opts.ProjectID (set above); under --all it is the only thing
+			// that keeps --lineage from searching every project.
+			opts.ProjectID = refAgent.ProjectID
 		}
-		opts.LineageRootID = root
 	}
 
 	resp, err := agentSvc.List(ctx, opts)
@@ -447,24 +479,36 @@ func resolveRelationshipReference(ctx context.Context, client hubclient.Client, 
 	return "", self.ID, nil
 }
 
-// resolveLineageRootID computes the --lineage root: the reference's direct
-// parent (the last entry in its Ancestry chain — the same definition
-// isDirectParentChild uses in pkg/hub/authorize_message.go for branch-mode
-// messaging), or the reference itself when it has no recorded ancestry at
-// all (a user reference, which has no Ancestry chain of its own, or an
-// ancestry-less agent).
+// resolveLineageRootID computes the --lineage root under the decided
+// semantics (ptone/scion#2146, option (i) — a creation-tree neighborhood,
+// NOT a messaging-permission query; see the flag help and cli.md, and
+// store.AgentFilter.LineageRootID's doc for what the resulting predicate
+// actually computes):
 //
-// This is a pure, local, structural computation — no network call — kept
-// deliberately small and isolated (ptone flagged the semantics as still
-// possibly subject to change) and so that it can never leak whether an
-// unauthorized ancestor exists: it never asks the Hub "is this ID an
-// agent". Whatever ID it returns — agent or user principal — is handed to
+//   - If the reference has fewer than 2 Ancestry entries, its direct parent
+//     is a USER (a length-1 Ancestry is exactly and only what a top-level,
+//     user-created agent has — see createAgentInProject/handlers_agents_core.go;
+//     every agent-created agent inherits its parent's Ancestry plus the
+//     parent's own ID, so it always has length >= 2, and Ancestry[len-1] is
+//     then guaranteed to be that parent AGENT's ID, never a user's). A user
+//     is never listed as a lineage root, so the reference roots at itself.
+//     This also covers a user reference directly (Ancestry is always empty
+//     for a user) and a legacy, ancestry-less agent.
+//   - Otherwise, the root is the direct parent: Ancestry[len(ancestry)-1]
+//     (the same definition isDirectParentChild uses in
+//     pkg/hub/authorize_message.go for branch-mode messaging — reused here
+//     only as "the direct creator", not for any messaging implication).
+//
+// This is a pure, local, structural computation — no network call — so it
+// can never leak whether an unauthorized ancestor exists: it never asks the
+// Hub "is this ID an agent" (the len<2 rule above answers that structurally,
+// without a lookup). Whatever ID it returns is handed to
 // store.AgentFilter.LineageRootID (via ListAgentsOptions.LineageRootID),
 // which is itself ANDed with the caller's authorized scope, so an
 // unauthorized or nonexistent root simply yields no matches rather than an
-// error or a disclosure (ptone/scion#2146).
+// error or a disclosure.
 func resolveLineageRootID(id string, ancestry []string) string {
-	if len(ancestry) == 0 {
+	if len(ancestry) < 2 {
 		return id
 	}
 	return ancestry[len(ancestry)-1]
@@ -1121,7 +1165,7 @@ func init() {
 	listCmd.Flags().Lookup("descendants").NoOptDefVal = scopeInferSentinel
 	listCmd.Flags().StringVar(&filterAncestors, "ancestors", "", "List the agents in the reference's ancestry chain (default: self)")
 	listCmd.Flags().Lookup("ancestors").NoOptDefVal = scopeInferSentinel
-	listCmd.Flags().StringVar(&filterLineage, "lineage", "", "List the reference's direct parent plus all of the parent's descendants (default: self)")
+	listCmd.Flags().StringVar(&filterLineage, "lineage", "", "List the reference's creation-tree neighborhood: its direct parent plus all of the parent's descendants, bounded to the reference's project (default: self)")
 	listCmd.Flags().Lookup("lineage").NoOptDefVal = scopeInferSentinel
 	listCmd.MarkFlagsMutuallyExclusive("descendants", "ancestors", "lineage")
 }

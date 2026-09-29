@@ -407,21 +407,30 @@ type AgentFilter struct {
 
 	// LineageRootID, when non-empty, restricts results to the agent whose ID
 	// equals this value OR whose Ancestry chain contains it — i.e. the root
-	// agent plus all of its descendants. It is an internal OR of two
-	// sub-conditions, but that OR is itself ANDed with every other filter
-	// (including AuthorizedProjectIDs), the same composition pattern already
-	// used for MemberOrOwnerProjectIDs above: the OR only decides which rows
-	// count as "in the root's lineage", it never widens past the
-	// authorization predicate.
+	// principal plus every agent descended from it, at any depth. It is an
+	// internal OR of two sub-conditions, but that OR is itself ANDed with
+	// every other filter (including AuthorizedProjectIDs), the same
+	// composition pattern already used for MemberOrOwnerProjectIDs above:
+	// the OR only decides which rows count as "in the root's lineage", it
+	// never widens past the authorization predicate. A root the caller is
+	// not authorized to see simply yields no matches, not an error or a
+	// disclosure.
 	//
-	// Backs CLI `--lineage`. The root is resolved client-side (see
-	// resolveLineageRootID in cmd/list.go) as the topmost AGENT in the
-	// reference agent's Ancestry chain — never a user, which only marks the
-	// boundary — or the reference agent itself when its Ancestry contains no
-	// agents. Root resolution is deliberately done through the same
-	// authorized list query this field also drives, not a direct per-ID
-	// fetch, so an agent the caller cannot list is never confirmed to be an
-	// agent at all, let alone used as a lineage root (ptone/scion#2146).
+	// Backs CLI `--lineage`, which is a CREATION-TREE query, not a
+	// messaging-permission query — it says nothing about who the reference
+	// agent may message under any message mode (scion set-message-mode),
+	// which can be a different, smaller set (ptone/scion#2146 review R2-1,
+	// R2-2; an earlier version of this doc incorrectly implied the two were
+	// related). The root ID this field is set to is computed client-side,
+	// as a pure local function of data the caller already has (see
+	// resolveLineageRootID in cmd/list.go): the reference's direct parent
+	// (the last entry in its Ancestry chain), or the reference itself when
+	// that parent would be a user rather than an agent (Ancestry has fewer
+	// than 2 entries) or when Ancestry is empty. The root ID handed to this
+	// field may therefore be a USER principal ID, not only an agent ID — the
+	// OR predicate treats either the same way, since IDEQ simply never
+	// matches a user ID and ancestryContains still finds that user's
+	// descendants.
 	LineageRootID string
 }
 
