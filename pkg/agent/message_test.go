@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -65,8 +66,8 @@ func TestMessage(t *testing.T) {
 
 	expectedCmds := []string{
 		"tmux send-keys -t scion:0 C-c",
-		"tmux set-buffer -- hello world",
-		"tmux paste-buffer -t scion:0 -p",
+		"tmux load-buffer -b scion-msg -",
+		"tmux paste-buffer -t scion:0 -p -d -b scion-msg",
 		"tmux send-keys -t scion:0 Enter",
 		"tmux send-keys -t scion:0 Enter",
 		"tmux send-keys -t scion:0 Enter",
@@ -154,13 +155,13 @@ func TestBroadcast(t *testing.T) {
 	defer mu.Unlock()
 
 	expectedCalls := []string{
-		"agent-1: tmux set-buffer -- hello",
-		"agent-1: tmux paste-buffer -t scion:0 -p",
+		"agent-1: tmux load-buffer -b scion-msg -",
+		"agent-1: tmux paste-buffer -t scion:0 -p -d -b scion-msg",
 		"agent-1: tmux send-keys -t scion:0 Enter",
 		"agent-1: tmux send-keys -t scion:0 Enter",
 		"agent-1: tmux send-keys -t scion:0 Enter",
-		"agent-2: tmux set-buffer -- hello",
-		"agent-2: tmux paste-buffer -t scion:0 -p",
+		"agent-2: tmux load-buffer -b scion-msg -",
+		"agent-2: tmux paste-buffer -t scion:0 -p -d -b scion-msg",
 		"agent-2: tmux send-keys -t scion:0 Enter",
 		"agent-2: tmux send-keys -t scion:0 Enter",
 		"agent-2: tmux send-keys -t scion:0 Enter",
@@ -178,10 +179,10 @@ func TestBroadcast(t *testing.T) {
 	if len(agent1Calls) != 5 || len(agent2Calls) != 5 {
 		t.Fatalf("Expected 5 calls per agent, got agent-1=%d agent-2=%d", len(agent1Calls), len(agent2Calls))
 	}
-	if agent1Calls[0] != "agent-1: tmux set-buffer -- hello" {
+	if agent1Calls[0] != "agent-1: tmux load-buffer -b scion-msg -" {
 		t.Errorf("Unexpected agent-1 call[0]: %s", agent1Calls[0])
 	}
-	if agent2Calls[0] != "agent-2: tmux set-buffer -- hello" {
+	if agent2Calls[0] != "agent-2: tmux load-buffer -b scion-msg -" {
 		t.Errorf("Unexpected agent-2 call[0]: %s", agent2Calls[0])
 	}
 }
@@ -269,7 +270,7 @@ func TestDeliverImmediate_PartialDeliveryAfterPaste(t *testing.T) {
 }
 
 // TestDeliverImmediate_RetryableBeforePaste covers #1866: a failure before
-// any content reaches the terminal (e.g. the initial "tmux set-buffer") is
+// any content reaches the terminal (e.g. the initial "tmux load-buffer") is
 // safe to retry and must not be wrapped as a PartialDeliveryError.
 func TestDeliverImmediate_RetryableBeforePaste(t *testing.T) {
 	mockRT := &runtime.MockRuntime{
@@ -280,7 +281,7 @@ func TestDeliverImmediate_RetryableBeforePaste(t *testing.T) {
 		},
 	}
 	mockRT.ExecFunc = func(ctx context.Context, id string, cmd []string) (string, error) {
-		if len(cmd) >= 2 && cmd[1] == "set-buffer" {
+		if len(cmd) >= 2 && cmd[1] == "load-buffer" {
 			return "", fmt.Errorf("exec failed")
 		}
 		return "", nil
@@ -343,6 +344,186 @@ func TestDeliverImmediate_ContextCanceledDuringEnterWait(t *testing.T) {
 	// the two confirmation Enters that follow.
 	if enterCalls != 1 {
 		t.Fatalf("expected exactly 1 Enter (the paste's closing keypress) before cancellation stopped further Enters, got %d", enterCalls)
+	}
+}
+
+// TestDeliverImmediate_LargeMessageOverStdin covers ptone/scion#2256: tmux's
+// client-server protocol caps a single command's argv around 16 KB, so
+// "tmux set-buffer -- <message>" silently dropped larger (often coalesced)
+// messages. The message body must instead be streamed via ExecWithStdin into
+// a named buffer, never carried in any argv element. This sends a payload
+// well over 16 KB containing newlines, quotes and angle brackets, and
+// verifies it reaches ExecWithStdin byte-for-byte and that the named buffer
+// used by load-buffer is the same one paste-buffer deletes on use (-d).
+func TestDeliverImmediate_LargeMessageOverStdin(t *testing.T) {
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{
+				{ContainerID: "agent-1", Name: "test-agent", Labels: map[string]string{"scion.name": "test-agent"}},
+			}, nil
+		},
+	}
+
+	var b strings.Builder
+	const line = "line with \"quotes\", <angle> brackets & an ampersand\n"
+	for b.Len() < 20000 {
+		b.WriteString(line)
+	}
+	payload := b.String()
+	if len(payload) <= 16*1024 {
+		t.Fatalf("test payload must exceed 16 KiB, got %d bytes", len(payload))
+	}
+
+	var argvCmds [][]string
+	var stdinBody []byte
+	mockRT.ExecFunc = func(ctx context.Context, id string, cmd []string) (string, error) {
+		argvCmds = append(argvCmds, cmd)
+		return "", nil
+	}
+	mockRT.ExecWithStdinFunc = func(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
+		argvCmds = append(argvCmds, cmd)
+		data, err := io.ReadAll(stdin)
+		if err != nil {
+			t.Fatalf("reading stdin: %v", err)
+		}
+		stdinBody = data
+		return "", nil
+	}
+
+	mgr := &AgentManager{Runtime: mockRT}
+	if err := mgr.deliverImmediate(context.Background(), "test-agent", "", payload, false); err != nil {
+		t.Fatalf("deliverImmediate failed: %v", err)
+	}
+
+	if string(stdinBody) != payload {
+		t.Fatalf("stdin payload mismatch: got %d bytes, want %d bytes", len(stdinBody), len(payload))
+	}
+
+	// No argv element of any executed command may carry the message body.
+	for _, cmd := range argvCmds {
+		for _, arg := range cmd {
+			if strings.Contains(arg, "quotes") {
+				t.Fatalf("message body leaked into argv: %q (full cmd %v)", arg, cmd)
+			}
+		}
+	}
+
+	if len(argvCmds) < 2 {
+		t.Fatalf("expected at least a load-buffer and a paste-buffer command, got %v", argvCmds)
+	}
+	loadCmd := argvCmds[0]
+	if len(loadCmd) != 5 || loadCmd[0] != "tmux" || loadCmd[1] != "load-buffer" || loadCmd[2] != "-b" || loadCmd[4] != "-" {
+		t.Fatalf("unexpected load-buffer command: %v", loadCmd)
+	}
+	bufName := loadCmd[3]
+	if bufName == "" {
+		t.Fatal("expected a named buffer, got an empty name")
+	}
+
+	pasteCmd := argvCmds[1]
+	if pasteCmd[0] != "tmux" || pasteCmd[1] != "paste-buffer" {
+		t.Fatalf("expected the second command to be paste-buffer, got %v", pasteCmd)
+	}
+	var hasP, hasD, pastesNamedBuf bool
+	for i, arg := range pasteCmd {
+		switch arg {
+		case "-p":
+			hasP = true
+		case "-d":
+			hasD = true
+		case "-b":
+			if i+1 < len(pasteCmd) && pasteCmd[i+1] == bufName {
+				pastesNamedBuf = true
+			}
+		}
+	}
+	if !hasP {
+		t.Errorf("expected paste-buffer to keep -p (bracketed paste): %v", pasteCmd)
+	}
+	if !hasD {
+		t.Errorf("expected paste-buffer to use -d (delete buffer after paste): %v", pasteCmd)
+	}
+	if !pastesNamedBuf {
+		t.Errorf("expected paste-buffer to reference the same named buffer %q loaded above: %v", bufName, pasteCmd)
+	}
+}
+
+// TestMessageBuffer_CoalescedLargeMessagesDeliveredViaStdin covers
+// ptone/scion#2256: several messages coalesced by the debounce buffer into
+// one flush must still be delivered as a single ExecWithStdin call carrying
+// the full joined payload, even when that combined payload is well over the
+// 16 KB tmux argv cap that broke "tmux set-buffer -- <message>".
+func TestMessageBuffer_CoalescedLargeMessagesDeliveredViaStdin(t *testing.T) {
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{
+				{ContainerID: "agent-1", Name: "test-agent", Labels: map[string]string{"scion.name": "test-agent"}},
+			}, nil
+		},
+	}
+
+	var mu sync.Mutex
+	var stdinPayloads [][]byte
+	mockRT.ExecFunc = func(ctx context.Context, id string, cmd []string) (string, error) {
+		return "", nil
+	}
+	mockRT.ExecWithStdinFunc = func(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
+		data, err := io.ReadAll(stdin)
+		if err != nil {
+			return "", err
+		}
+		mu.Lock()
+		stdinPayloads = append(stdinPayloads, data)
+		mu.Unlock()
+		return "", nil
+	}
+
+	mgr := &AgentManager{Runtime: mockRT}
+	mgr.msgBuffer = NewMessageBuffer(100*time.Millisecond, func(agentID, projectID, message string, interrupt bool) error {
+		return mgr.deliverImmediate(context.Background(), agentID, projectID, message, interrupt)
+	})
+	defer mgr.msgBuffer.Close()
+
+	const chunkSize = 6 * 1024
+	const numChunks = 4
+	var want []string
+	for i := 0; i < numChunks; i++ {
+		chunk := strings.Repeat(fmt.Sprintf("chunk-%d-", i), chunkSize/8)
+		want = append(want, chunk)
+		if err := mgr.Message(context.Background(), "test-agent", "", chunk, false); err != nil {
+			t.Fatalf("Message %d failed: %v", i, err)
+		}
+	}
+	expected := strings.Join(want, "\n\n")
+	if len(expected) <= 16*1024 {
+		t.Fatalf("test setup error: combined payload must exceed 16 KiB, got %d bytes", len(expected))
+	}
+
+	deadline := time.After(2 * time.Second)
+	for {
+		mu.Lock()
+		n := len(stdinPayloads)
+		mu.Unlock()
+		if n >= 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for the coalesced delivery")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	// Give any unexpected extra deliveries a moment to arrive before asserting.
+	time.Sleep(150 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(stdinPayloads) != 1 {
+		t.Fatalf("expected exactly one delivery for the coalesced batch, got %d", len(stdinPayloads))
+	}
+	if string(stdinPayloads[0]) != expected {
+		t.Fatalf("stdin payload mismatch: got %d bytes, want %d bytes", len(stdinPayloads[0]), len(expected))
 	}
 }
 

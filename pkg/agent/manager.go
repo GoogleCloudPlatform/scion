@@ -88,6 +88,12 @@ type AgentManager struct {
 // Messages arriving within this window are coalesced into a single delivery.
 const defaultBufferDelay = 2 * time.Second
 
+// msgBufferName is the named tmux buffer used to load message text via
+// stdin before pasting it into an agent's session. Using a named buffer
+// (rather than the default buffer) avoids clobbering unrelated tmux buffer
+// usage and lets paste-buffer delete it immediately after use (-d).
+const msgBufferName = "scion-msg"
+
 func NewManager(rt runtime.Runtime) Manager {
 	mgr := &AgentManager{
 		Runtime: rt,
@@ -406,8 +412,16 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 		// CLI treats '!' as a shell-mode toggle). Bracketed paste wraps the
 		// content in escape sequences (\e[200~...\e[201~) that signal the
 		// application to treat all characters as literal pasted text.
-		cmds = append(cmds, []string{"tmux", "set-buffer", "--", message})
-		cmds = append(cmds, []string{"tmux", "paste-buffer", "-t", "scion:0", "-p"})
+		//
+		// The message is loaded into a named buffer via stdin rather than
+		// passed as a "tmux set-buffer" argv element: tmux's client-server
+		// protocol caps a single command's argv at 16 KB, and a coalesced
+		// batch of debounced messages can exceed that (ptone/scion#2256).
+		// Streaming it over stdin has no such limit. The buffer is deleted
+		// on paste (-d) so a later failure can't cause a stale buffer to be
+		// pasted by a subsequent delivery.
+		cmds = append(cmds, []string{"tmux", "load-buffer", "-b", msgBufferName, "-"})
+		cmds = append(cmds, []string{"tmux", "paste-buffer", "-t", "scion:0", "-p", "-d", "-b", msgBufferName})
 		cmds = append(cmds, []string{"tmux", "send-keys", "-t", "scion:0", "Enter"})
 	}
 
@@ -420,7 +434,12 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 	// buffer's bounded retry knows not to retry them.
 	delivered := false
 	for _, cmd := range cmds {
-		_, err := m.Runtime.Exec(ctx, agent.ContainerID, cmd)
+		var err error
+		if len(cmd) >= 2 && cmd[1] == "load-buffer" {
+			_, err = m.Runtime.ExecWithStdin(ctx, agent.ContainerID, cmd, strings.NewReader(message))
+		} else {
+			_, err = m.Runtime.Exec(ctx, agent.ContainerID, cmd)
+		}
 		if err != nil {
 			wrapped := fmt.Errorf("failed to send message to agent '%s': %w", agent.Name, err)
 			if delivered {
