@@ -49,6 +49,25 @@ const (
 	ErrCodeRuntimeUnavailable = "runtime_unavailable"
 	ErrCodeHubUnreachable     = "hub_unreachable"
 	ErrCodeTemplateError      = "template_error"
+
+	// ErrCodeRuntimeLogsUnsupported marks a logs request that a runtime
+	// declines to serve at all, rather than one that failed. The broker uses
+	// this for pkg/runtime.ErrLogsNotSupported (pkg/runtime/capabilities.go),
+	// which a runtime returns when serving logs at all would be unsafe or
+	// impossible (for example, when reading them would expose another
+	// tenant's output), so the runtime never makes the underlying call and
+	// this code is the client-visible signal that the feature, not the
+	// request, is the reason.
+	ErrCodeRuntimeLogsUnsupported = "runtime_logs_unsupported"
+
+	// ErrCodeRuntimeAttachUnsupported marks an attach request rejected
+	// before the WebSocket upgrade because the target runtime declines
+	// interactive attach outright (pkg/runtime.AttachCapableRuntime,
+	// pkg/runtime/capabilities.go), rather than one that failed. Rejecting
+	// here — instead of upgrading and only failing once the runtime's own
+	// PTY dial rejects the stream — gives the caller a clean, pre-upgrade
+	// error instead of an abnormal WebSocket close.
+	ErrCodeRuntimeAttachUnsupported = "runtime_attach_unsupported"
 )
 
 // writeError writes a JSON error response.
@@ -107,6 +126,25 @@ func MethodNotAllowed(w http.ResponseWriter) {
 // Conflict writes a 409 Conflict response.
 func Conflict(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusConflict, ErrCodeConflict, message, nil)
+}
+
+// RuntimeLogsUnsupported writes a 501 Not Implemented response with the
+// stable ErrCodeRuntimeLogsUnsupported code for a runtime that declines to
+// serve logs at all (pkg/runtime.ErrLogsNotSupported). message must not
+// name any runtime-specific scope, worker, pod, namespace, actor or
+// agent — see pkg/runtime.ErrLogsNotSupported for the fixed text this is
+// meant to carry.
+func RuntimeLogsUnsupported(w http.ResponseWriter, message string) {
+	writeError(w, http.StatusNotImplemented, ErrCodeRuntimeLogsUnsupported, message, nil)
+}
+
+// RuntimeAttachUnsupported writes a 501 Not Implemented response with the
+// stable ErrCodeRuntimeAttachUnsupported code for a runtime that declines
+// interactive attach at all (pkg/runtime.AttachCapableRuntime). message must
+// not name any runtime-specific scope, worker, pod, namespace, actor or
+// agent, mirroring RuntimeLogsUnsupported.
+func RuntimeAttachUnsupported(w http.ResponseWriter, message string) {
+	writeError(w, http.StatusNotImplemented, ErrCodeRuntimeAttachUnsupported, message, nil)
 }
 
 // InternalError writes a 500 Internal Server Error response.

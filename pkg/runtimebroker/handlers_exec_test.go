@@ -194,6 +194,12 @@ func TestStopAgent_NotFoundInProjectIsNoOp(t *testing.T) {
 // must surface a 5xx rather than reporting the idempotent-no-op 202 that a
 // real "not found" gets. Before the fix, projectScopedTarget mapped every
 // lookup failure to "" and stopAgent treated "" as success.
+//
+// A runtime listing failure is specifically an ErrAgentListUnavailable case:
+// the response is 503 (matching the PTY attach handler's precedent for the
+// same error), and the raw listing error's own text — which can carry a
+// runtime's connection target, namespace, or identity — must never reach the
+// body, only the server's log.
 func TestStopAgent_LookupErrorReturns5xx(t *testing.T) {
 	mgr := &filteringMockManager{}
 	mgr.agents = []api.AgentInfo{
@@ -203,7 +209,7 @@ func TestStopAgent_LookupErrorReturns5xx(t *testing.T) {
 			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
 		},
 	}
-	mgr.listErr = fmt.Errorf("docker ps failed: exit status 1")
+	mgr.listErr = fmt.Errorf("docker ps failed against https://10.0.0.5:2376 (namespace scion-prod)")
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(DefaultServerConfig(), mgr, rt)
 
@@ -214,8 +220,14 @@ func TestStopAgent_LookupErrorReturns5xx(t *testing.T) {
 	if w.Code < 500 {
 		t.Fatalf("expected a 5xx status when the lookup fails, got %d (%s)", w.Code, w.Body.String())
 	}
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected %d for a runtime-listing failure, got %d (%s)", http.StatusServiceUnavailable, w.Code, w.Body.String())
+	}
 	if mgr.stopCalls != 0 {
 		t.Errorf("Stop was called %d time(s); a lookup failure must not be treated as a successful stop", mgr.stopCalls)
+	}
+	if strings.Contains(w.Body.String(), "10.0.0.5") || strings.Contains(w.Body.String(), "scion-prod") {
+		t.Errorf("response body leaked the raw runtime-listing error: %s", w.Body.String())
 	}
 }
 
@@ -265,6 +277,9 @@ func TestStopAgent_AmbiguousMatchAbortsWithoutStop(t *testing.T) {
 	}
 	if mgr.stopCalls != 0 {
 		t.Errorf("Stop was called %d time(s); an ambiguous match must abort before stopping", mgr.stopCalls)
+	}
+	if strings.Contains(w.Body.String(), "ambiguous") || strings.Contains(w.Body.String(), "container-A2") {
+		t.Errorf("response body leaked the raw lookup error: %s", w.Body.String())
 	}
 }
 
@@ -471,6 +486,15 @@ func TestExecCommand_AmbiguousMatchReturns500(t *testing.T) {
 	if resp.Error.Code != ErrCodeRuntimeError {
 		t.Errorf("expected error code %q, got %q", ErrCodeRuntimeError, resp.Error.Code)
 	}
+	// The body must carry a fixed, generic message — never the underlying
+	// lookup error's own text (which can name container IDs or a match
+	// count): that detail is logged server-side only (see execCommand's
+	// agentLifecycleLog.Warn call), consistent with AgentLookupUnavailable's
+	// same no-error-text-in-body contract for the 503 path.
+	const wantMessage = "Failed to execute command"
+	if resp.Error.Message != wantMessage {
+		t.Errorf("expected generic body message %q, got %q (leaking the lookup error's own text)", wantMessage, resp.Error.Message)
+	}
 	if execCalled {
 		t.Error("exec must not run when the lookup found an ambiguous match")
 	}
@@ -479,7 +503,7 @@ func TestExecCommand_AmbiguousMatchReturns500(t *testing.T) {
 // TestRestartAgent_LookupErrorAbortsWithoutStart is a regression test for
 // #1985: when resolving the project-scoped stop target during a restart
 // fails for a reason other than genuine "not found" (here, the runtime
-// listing itself errors, which LookupContainerID wraps as
+// listing itself errors, which lookupAgentTarget wraps as
 // ErrAgentListUnavailable), restartAgent must abort with the exact 503
 // runtime_unavailable response and must NOT call Start — otherwise a runtime
 // hiccup during the lookup would leave a second container running alongside
@@ -496,7 +520,7 @@ func TestRestartAgent_LookupErrorAbortsWithoutStart(t *testing.T) {
 			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
 		},
 	}
-	mgr.listErr = fmt.Errorf("docker ps failed: exit status 1")
+	mgr.listErr = fmt.Errorf("docker ps failed against https://10.0.0.5:2376 (namespace scion-prod)")
 	srv := newTestServerWithManager(t, mgr)
 
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/restart?projectId=project-A", nil)
@@ -516,11 +540,17 @@ func TestRestartAgent_LookupErrorAbortsWithoutStart(t *testing.T) {
 	if want := agentLookupUnavailableMessage("coordinator", ""); resp.Error.Message != want {
 		t.Errorf("expected message %q, got %q", want, resp.Error.Message)
 	}
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected %d for a runtime-listing failure, got %d (%s)", http.StatusServiceUnavailable, w.Code, w.Body.String())
+	}
 	if mgr.startCalls != 0 {
 		t.Errorf("Start was called %d time(s); a lookup failure during restart must not start a second container", mgr.startCalls)
 	}
 	if mgr.stopCalls != 0 {
 		t.Errorf("Stop was called %d time(s); a lookup failure must abort before stopping", mgr.stopCalls)
+	}
+	if strings.Contains(w.Body.String(), "10.0.0.5") || strings.Contains(w.Body.String(), "scion-prod") {
+		t.Errorf("response body leaked the raw runtime-listing error: %s", w.Body.String())
 	}
 }
 
@@ -650,6 +680,9 @@ func TestRestartAgent_AmbiguousMatchAbortsWithoutStart(t *testing.T) {
 	}
 	if mgr.stopCalls != 0 {
 		t.Errorf("Stop was called %d time(s); an ambiguous match must abort before stopping", mgr.stopCalls)
+	}
+	if strings.Contains(w.Body.String(), "ambiguous") || strings.Contains(w.Body.String(), "container-A2") {
+		t.Errorf("response body leaked the raw lookup error: %s", w.Body.String())
 	}
 }
 

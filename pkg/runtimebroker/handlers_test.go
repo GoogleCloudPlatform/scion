@@ -955,6 +955,104 @@ runtimes:
 	}
 }
 
+// TestAgentLogsRuntimeNotSupported verifies that a runtime declining logs
+// outright (runtime.ErrLogsNotSupported — a runtime's contract) maps to an
+// explicit 501 with the runtime_logs_unsupported code and the
+// sentinel's own fixed message body, even when the runtime wraps the
+// sentinel with extra identifying text: errors.Is matches through a wrap,
+// so the response must use the sentinel's own Error() text, never the
+// wrapped error's, or a wrapper could leak an id through this path.
+func TestAgentLogsRuntimeNotSupported(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpDir := t.TempDir()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origWd) })
+
+	dotScion := filepath.Join(tmpDir, ".scion")
+	if err := os.Mkdir(dotScion, 0755); err != nil {
+		t.Fatal(err)
+	}
+	settingsYAML := `schema_version: "1"
+active_profile: local
+profiles:
+    local:
+        runtime: mock
+runtimes:
+    mock:
+        type: mock
+`
+	if err := os.WriteFile(filepath.Join(dotScion, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tmpl := range []string{"default", "claude"} {
+		if err := os.MkdirAll(filepath.Join(dotScion, "templates", tmpl), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// No agent.log on disk — forces fallback to the runtime's GetLogs, the
+	// logs-declined path this fixture stands in for. The wrap carries text
+	// that must never reach the response body.
+	const wrappedIdentifier = "scion-hostile-namespace/leaked-actor-name"
+	rt := &runtime.MockRuntime{
+		NameFunc: func() string { return "noattach" },
+		GetLogsFunc: func(_ context.Context, _ string) (string, error) {
+			return "", fmt.Errorf("noattach: get actor %s: %w", wrappedIdentifier, runtime.ErrLogsNotSupported)
+		},
+	}
+
+	mgr := &mockManager{
+		agents: []api.AgentInfo{
+			{
+				ID:    "noattach-actor",
+				Name:  "noattach-actor",
+				Slug:  "",
+				Phase: "running",
+			},
+		},
+	}
+
+	cfg := DefaultServerConfig()
+	cfg.BrokerID = "test-broker-id"
+	cfg.BrokerName = "test-host"
+	cfg.ForceRuntime = "mock"
+	srv := New(cfg, mgr, rt)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/noattach-actor/logs", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotImplemented {
+		t.Fatalf("expected status %d, got %d; body: %s", http.StatusNotImplemented, w.Code, w.Body.String())
+	}
+
+	var resp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v; body: %s", err, w.Body.String())
+	}
+	if resp.Error.Code != ErrCodeRuntimeLogsUnsupported {
+		t.Errorf("expected code %q, got %q", ErrCodeRuntimeLogsUnsupported, resp.Error.Code)
+	}
+	if resp.Error.Message != runtime.ErrLogsNotSupported.Error() {
+		t.Errorf("expected message %q, got %q", runtime.ErrLogsNotSupported.Error(), resp.Error.Message)
+	}
+
+	body := w.Body.String()
+	if strings.Contains(body, "noattach-actor") {
+		t.Errorf("response body leaks the agent/actor name: %s", body)
+	}
+	if strings.Contains(body, wrappedIdentifier) {
+		t.Errorf("response body leaks the wrapped identifier: %s", body)
+	}
+}
+
 // envCapturingManager captures the environment variables passed to Start().
 // Used for testing that Hub credentials are properly set.
 type envCapturingManager struct {
